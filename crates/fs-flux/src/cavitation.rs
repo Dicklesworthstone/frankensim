@@ -45,8 +45,9 @@ pub use cluster::{
 pub use keller_miksis::{BubblePressureSample, KellerMiksisBubble, KellerMiksisLimits};
 pub use population::{
     BubblePopulation, BubblePopulationClass, BubblePopulationError, EvolvingBubblePopulation,
-    PopulationAdvance, PopulationEvolutionError, PopulationEvolutionLimits,
-    PopulationEvolutionNumerics, PopulationEvolutionStep, PopulationObservation,
+    PopulationAdvance, PopulationEquilibrium, PopulationEquilibriumReport,
+    PopulationEvolutionError, PopulationEvolutionLimits, PopulationEvolutionNumerics,
+    PopulationEvolutionStep, PopulationObservation,
 };
 
 /// Invalid input, an explicit model boundary, or an unsuccessful integration.
@@ -308,10 +309,10 @@ pub struct BubbleStep {
     pub maximum_normalized_local_error: f64,
 }
 
-/// Linearization at the gas reference radius and its corresponding equilibrium.
+/// Linearization at a specified equilibrium of the original gas inventory.
 ///
-/// For fractional radius perturbation `eta = (R-R0)/R0`,
-/// `a eta'' + b eta' + omega0_squared eta = -(dp + tau dp')/(rho R0^2)`.
+/// For fractional radius perturbation `eta = (R-Re)/Re`,
+/// `a eta'' + b eta' + omega0_squared eta = -(dp + tau dp')/(rho Re^2)`.
 /// The coefficients include only the selected radial model's actual losses.
 /// No thermal relaxation or effective gas exponent is inferred.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -413,6 +414,22 @@ impl RayleighPlessetBubble {
     /// Stable linear response of this same polytropic/viscous equation at R0.
     pub fn linearization(&self) -> Result<BubbleLinearization, CavitationError> {
         reference_linearization(self.liquid, self.gas, self.limits)
+    }
+
+    /// Stable tangent at another equilibrium radius of the SAME gas inventory.
+    /// The returned pressure supports that radius at rest. No gas reference,
+    /// polytropic exponent, or material coefficient is changed.
+    pub fn linearization_at_radius(
+        &self,
+        equilibrium_radius_m: f64,
+    ) -> Result<BubbleLinearization, CavitationError> {
+        equilibrium_linearization(
+            self.liquid,
+            self.gas,
+            self.limits,
+            equilibrium_radius_m,
+            true,
+        )
     }
 
     /// Evaluate the physical acceleration and source without advancing state.
@@ -599,19 +616,42 @@ fn reference_linearization(
     gas: BubbleGas,
     limits: BubbleLimits,
 ) -> Result<BubbleLinearization, CavitationError> {
-    let radius = gas.reference_radius_m;
+    equilibrium_linearization(liquid, gas, limits, gas.reference_radius_m, false)
+}
+
+fn equilibrium_linearization(
+    liquid: CavitationState,
+    gas: BubbleGas,
+    limits: BubbleLimits,
+    radius: f64,
+    resolve_stability: bool,
+) -> Result<BubbleLinearization, CavitationError> {
     validate_state(&BubbleState::try_new(0.0, radius, 0.0)?, liquid, limits)?;
+    // Preserve the reference path's exact arithmetic, including its original
+    // pressure. Away from it, retain the inventory and evaluate its own law.
+    let gas_pressure = if radius == gas.reference_radius_m {
+        gas.reference_pressure_pa
+    } else {
+        gas.pressure(radius)?
+    };
     let density = liquid.liquid_density_kg_m3();
     let capillary_pressure = 2.0 * liquid.surface_tension_n_m() / radius;
     let pressure = finite(
-        gas.reference_pressure_pa + liquid.saturation_pressure_pa() - capillary_pressure,
+        gas_pressure + liquid.saturation_pressure_pa() - capillary_pressure,
         "reference equilibrium pressure",
     )?;
     let inertia = density * radius * radius;
-    let restoring_pressure =
-        3.0 * gas.polytropic_exponent * gas.reference_pressure_pa - capillary_pressure;
+    let restoring_pressure = 3.0 * gas.polytropic_exponent * gas_pressure - capillary_pressure;
     let stiffness = restoring_pressure / inertia;
-    if !positive(inertia) || !positive(stiffness) {
+    // A computed fold radius can leave a tiny positive subtraction residual.
+    // New continuation tangents must not turn that marginal state into an
+    // enormous compliance. Preserve the legacy reference admission unchanged.
+    let stability_floor = if resolve_stability {
+        64.0 * f64::EPSILON * (3.0 * gas.polytropic_exponent * gas_pressure).max(capillary_pressure)
+    } else {
+        0.0
+    };
+    if !positive(inertia) || !positive(stiffness) || restoring_pressure <= stability_floor {
         return Err(CavitationError::InvalidInput(
             "linear bubble response requires positive finite equilibrium stiffness",
         ));

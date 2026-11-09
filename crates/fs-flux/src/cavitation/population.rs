@@ -9,11 +9,19 @@
 //! This represents a specified equilibrium distribution, not a population-
 //! balance model for nucleation, breakup, coalescence, diffusion or transport.
 //! Independent consumers must still admit dilution and bubble interactions.
+//! Pressure continuation retains the original gas inventories and number
+//! densities while updating each equilibrium radius and native linearization.
+//! It describes a fixed representative mixture volume with externally imposed
+//! liquid pressure, not closed-system compression or liquid transport.
 //! Commander and Prosperetti (1989), equations 13--14, use this same fixed
 //! number distribution and a separate radial equation for each equilibrium size:
 //! <https://pages.jh.edu/aprospe1/publications/PapersPublished/BubblyLiquids/Commander.pdf>.
 
 use super::{BubbleLinearization, CavitationError, CavitationState, KellerMiksisBubble};
+
+#[path = "population/equilibrium.rs"]
+mod equilibrium;
+pub use equilibrium::{PopulationEquilibrium, PopulationEquilibriumReport};
 
 #[path = "population/evolution.rs"]
 mod evolution;
@@ -39,6 +47,11 @@ pub enum BubblePopulationError {
         class_index: usize,
         reference_pressure_pa: f64,
         class_pressure_pa: f64,
+    },
+    /// A named occupied class has no admitted stable pressure equilibrium.
+    Equilibrium {
+        class_index: usize,
+        cause: super::inception::InceptionError,
     },
 }
 impl core::fmt::Display for BubblePopulationError {

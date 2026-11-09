@@ -301,3 +301,120 @@ fn linearization_refuses_unstable_or_out_of_domain_reference_equilibria() {
         Err(CavitationError::RadiusOutsideDomain { .. })
     ));
 }
+
+// G1: linearize the ORIGINAL nonlinear equations at a changed equilibrium;
+// finite differences independently measure restoring, damping and drive terms.
+#[test]
+fn continued_equilibrium_tangents_match_native_dynamics_and_retain_inventory() {
+    let compressible = model(0.003, 1500.0);
+    let rp = RayleighPlessetBubble::try_new(
+        compressible.liquid(),
+        compressible.gas(),
+        compressible.limits(),
+    )
+    .unwrap();
+    let inventory = compressible.gas();
+    assert_eq!(
+        rp.linearization().unwrap(),
+        rp.linearization_at_radius(RADIUS).unwrap()
+    );
+    assert_eq!(
+        compressible.linearization().unwrap(),
+        compressible.linearization_at_radius(RADIUS).unwrap()
+    );
+    for radius in [0.75 * RADIUS, 1.5 * RADIUS] {
+        let pg = inventory.reference_pressure_pa() * (RADIUS / radius).powf(4.2);
+        let pressure = pg + 2_338.0 - 2.0 * 0.072 / radius;
+        let stiffness = (4.2 * pg - 2.0 * 0.072 / radius) / (1000.0 * radius * radius);
+        let viscous = 4.0 * 0.003 / (1000.0 * radius * radius);
+        for compressible_case in [false, true] {
+            let tangent = if compressible_case {
+                compressible.linearization_at_radius(radius).unwrap()
+            } else {
+                rp.linearization_at_radius(radius).unwrap()
+            };
+            let tau = if compressible_case {
+                radius / 1500.0
+            } else {
+                0.0
+            };
+            let inertia = 1.0 + viscous * tau;
+            let damping = viscous + stiffness * tau;
+            assert_eq!(tangent.equilibrium_radius_m, radius);
+            assert!((tangent.equilibrium_absolute_pressure_pa - pressure).abs() < 1e-9);
+            assert!((tangent.stiffness_coefficient_per_s2 / stiffness - 1.0).abs() < 2e-15);
+            assert!((tangent.inertia_multiplier / inertia - 1.0).abs() < 2e-15);
+            assert!((tangent.damping_coefficient_per_s / damping - 1.0).abs() < 2e-15);
+            assert_eq!(tangent.pressure_derivative_time_s, tau);
+            let acceleration = |r, u, p, p_rate| {
+                let state = BubbleState::try_new(0.0, r, u).unwrap();
+                if compressible_case {
+                    compressible
+                        .observe(&state, BubblePressureSample::try_new(p, p_rate).unwrap())
+                        .unwrap()
+                        .wall_acceleration_m_s2
+                } else {
+                    rp.observe(&state, p).unwrap().wall_acceleration_m_s2
+                }
+            };
+            let dr = radius * 1e-5;
+            let measured_stiffness = -(acceleration(radius + dr, 0.0, pressure, 0.0)
+                - acceleration(radius - dr, 0.0, pressure, 0.0))
+                / (2.0 * dr);
+            assert!((measured_stiffness / (stiffness / inertia) - 1.0).abs() < 5e-9);
+            let du = 1e-5;
+            let measured_damping = -(acceleration(radius, du, pressure, 0.0)
+                - acceleration(radius, -du, pressure, 0.0))
+                / (2.0 * du);
+            assert!((measured_damping / (damping / inertia) - 1.0).abs() < 5e-9);
+            let measured_force = -(acceleration(radius, 0.0, pressure + 1.0, 0.0)
+                - acceleration(radius, 0.0, pressure - 1.0, 0.0))
+                / 2.0;
+            assert!((measured_force * (1000.0 * radius * inertia) - 1.0).abs() < 1e-10);
+            if compressible_case {
+                let measured_rate = -(acceleration(radius, 0.0, pressure, 1e6)
+                    - acceleration(radius, 0.0, pressure, -1e6))
+                    / 2e6;
+                assert!((measured_rate * (1000.0 * radius * inertia) / tau - 1.0).abs() < 1e-12);
+            }
+        }
+    }
+    assert_eq!(compressible.gas(), inventory);
+    assert_eq!(rp.gas(), inventory);
+}
+
+#[test]
+fn continued_tangents_refuse_unstable_marginal_and_native_domain_boundaries() {
+    let model = model(0.001, 1500.0);
+    let rp = RayleighPlessetBubble::try_new(model.liquid(), model.gas(), model.limits()).unwrap();
+    for radius in [0.0, f64::NAN, RADIUS * 0.0001, RADIUS * 11.0] {
+        assert!(rp.linearization_at_radius(radius).is_err());
+        assert!(model.linearization_at_radius(radius).is_err());
+    }
+    let threshold = inception::blake_threshold(&rp).unwrap();
+    for radius in [
+        threshold.critical_radius_m,
+        1.01 * threshold.critical_radius_m,
+    ] {
+        assert!(matches!(
+            rp.linearization_at_radius(radius),
+            Err(CavitationError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            model.linearization_at_radius(radius),
+            Err(CavitationError::InvalidInput(_))
+        ));
+    }
+    // Native weak-compressibility admission still applies to the represented
+    // equilibrium pressure; the new tangent cannot bypass the ODE's refusal.
+    let mut strict_limits = limits();
+    strict_limits.maximum_pressure_ratio = 1e-30;
+    let strict = KellerMiksisBubble::try_new(model.liquid(), model.gas(), strict_limits).unwrap();
+    let radius = RADIUS * 1.3;
+    let equilibrium = rp.linearization_at_radius(radius).unwrap();
+    let native = strict.observe(
+        &BubbleState::try_new(0.0, radius, 0.0).unwrap(),
+        constant(equilibrium.equilibrium_absolute_pressure_pa),
+    );
+    assert_eq!(strict.linearization_at_radius(radius).err(), native.err());
+}

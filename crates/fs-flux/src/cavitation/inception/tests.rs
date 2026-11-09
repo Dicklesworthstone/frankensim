@@ -406,3 +406,114 @@ fn coordinated_length_surface_tension_scaling_preserves_pressures() {
         );
     }
 }
+
+// G1: these authored limits have no finite Blake minimum, but retain ordinary
+// mechanical equilibria. Independent closed forms verify both strict branches.
+#[test]
+fn gas_only_and_vapor_only_equilibria_do_not_require_a_blake_fold() {
+    let radius = 10.0e-6;
+    for (sigma, gas_pressure, kappa, branch, expected_ratio) in [
+        (0.0, 7_200.0, 1.4, EquilibriumBranch::Stable, 1.5_f64),
+        (0.072, 0.0, 1.0, EquilibriumBranch::Unstable, 1.7_f64),
+    ] {
+        let model = nucleus(radius, sigma, gas_pressure, kappa);
+        let original_gas = model.gas();
+        let pressure = 2_338.0 + gas_pressure / expected_ratio.powf(3.0 * kappa)
+            - 2.0 * sigma / (radius * expected_ratio);
+        let found = equilibrium_at_pressure(&model, pressure, branch, &controls()).unwrap();
+        assert!((found.response.radius_m / radius - expected_ratio).abs() < 1e-10);
+        assert_eq!(model.gas(), original_gas);
+        assert_eq!(
+            found.response.restoring_pressure_pa > 0.0,
+            branch == EquilibriumBranch::Stable
+        );
+        assert_eq!(
+            blake_threshold(&model),
+            Err(InceptionError::NoFiniteBlakeMinimum)
+        );
+        let other = match branch {
+            EquilibriumBranch::Stable => EquilibriumBranch::Unstable,
+            EquilibriumBranch::Unstable => EquilibriumBranch::Stable,
+        };
+        for (pressure, branch) in [(pressure, other), (2_338.0, branch)] {
+            assert!(matches!(
+                equilibrium_at_pressure(&model, pressure, branch, &controls()),
+                Err(InceptionError::EquilibriumOutsideDomain { .. })
+            ));
+        }
+        let sample = BubbleState::try_new(0.0, found.response.radius_m, 0.0).unwrap();
+        assert!(
+            model
+                .observe(&sample, pressure)
+                .unwrap()
+                .wall_acceleration_m_s2
+                .abs()
+                < 1e-5
+        );
+        assert_eq!(
+            equilibrium_at_pressure_controlled(&model, pressure, branch, &controls(), &mut || true),
+            Err(InceptionError::Input(CavitationError::Cancelled))
+        );
+        let outside = 20.0 * radius;
+        let outside_pressure =
+            2_338.0 + gas_pressure * (radius / outside).powf(3.0 * kappa) - 2.0 * sigma / outside;
+        assert!(matches!(
+            equilibrium_at_pressure(&model, outside_pressure, branch, &controls()),
+            Err(InceptionError::EquilibriumOutsideDomain { .. })
+        ));
+    }
+}
+
+#[test]
+fn equal_gas_and_capillary_exponents_use_the_monotone_restoring_sign() {
+    let radius = 10.0e-6;
+    for (gas_pressure, branch) in [
+        (7_200.0, EquilibriumBranch::Unstable),
+        (28_800.0, EquilibriumBranch::Stable),
+    ] {
+        let model = nucleus(radius, 0.072, gas_pressure, 1.0 / 3.0);
+        let pressure = 2_338.0 + (gas_pressure - 2.0 * 0.072 / radius) / 1.4;
+        let found = equilibrium_at_pressure(&model, pressure, branch, &controls()).unwrap();
+        assert!((found.response.radius_m / radius - 1.4).abs() < 1e-10);
+    }
+    // Both an empty zero-surface-tension bubble and exact cancellation of
+    // gas/capillary stress are marginal at all radii, not either strict branch.
+    for model in [
+        nucleus(radius, 0.0, 0.0, 1.0),
+        nucleus(radius, 0.072, 2.0 * (0.072 / radius), 1.0 / 3.0),
+    ] {
+        for branch in [EquilibriumBranch::Stable, EquilibriumBranch::Unstable] {
+            assert!(matches!(
+                equilibrium_at_pressure(&model, 2_338.0, branch, &controls()),
+                Err(InceptionError::EquilibriumOutsideDomain { .. })
+            ));
+        }
+    }
+}
+
+// With m=3*kappa=1/2, writing y=sqrt(R0/R) gives p-pv=14400*(y-y²).
+// At p-pv=3200, y=2/3 and 1/3: the stable root has the LARGER radius.
+#[test]
+fn sublinear_gas_exponent_has_a_pressure_maximum_and_reversed_branches() {
+    let radius = 10.0e-6;
+    let model = nucleus(radius, 0.072, 14_400.0, 1.0 / 6.0);
+    assert_eq!(
+        blake_threshold(&model),
+        Err(InceptionError::NoFiniteBlakeMinimum)
+    );
+    for (branch, expected_ratio) in [
+        (EquilibriumBranch::Unstable, 2.25),
+        (EquilibriumBranch::Stable, 9.0),
+    ] {
+        let found = equilibrium_at_pressure(&model, 5_538.0, branch, &controls()).unwrap();
+        assert!((found.response.radius_m / radius - expected_ratio).abs() < 1e-9);
+        assert_eq!(
+            found.response.restoring_pressure_pa > 0.0,
+            branch == EquilibriumBranch::Stable
+        );
+        assert!(matches!(
+            equilibrium_at_pressure(&model, 2_338.0 + 3_601.0, branch, &controls()),
+            Err(InceptionError::EquilibriumOutsideDomain { .. })
+        ));
+    }
+}

@@ -5,6 +5,9 @@
 //! distinguishes the mechanically stable and unstable equilibrium branches.
 //! For positive gas, positive surface tension and `3 kappa > 1`, their fold
 //! is the Blake threshold. Below it the nucleus has no static equilibrium.
+//! Continuation also admits monotone gas-only and vapor-only limits. For
+//! `3 kappa < 1`, the fold is a maximum and the stable branch has larger radii;
+//! it is not a Blake minimum. A flat, marginal curve has neither strict branch.
 //!
 //! These operations retain the admitted liquid and polytropic gas law; they
 //! never reconstruct gas with `BubbleGas::equilibrium` at a changed pressure.
@@ -54,6 +57,20 @@ pub struct EquilibriumControls {
     pub absolute_radius_tolerance_m: f64,
     pub absolute_pressure_tolerance_pa: f64,
     pub maximum_iterations: usize,
+}
+
+impl EquilibriumControls {
+    pub(super) fn validate(&self) -> Result<(), CavitationError> {
+        if !nonnegative(self.relative_radius_tolerance)
+            || self.relative_radius_tolerance > 1.0
+            || !positive(self.absolute_radius_tolerance_m)
+            || !nonnegative(self.absolute_pressure_tolerance_pa)
+            || self.maximum_iterations == 0
+        {
+            return Err(CavitationError::InvalidInput("static equilibrium controls"));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -163,6 +180,24 @@ fn analytic_blake_threshold(
     if gas.reference_pressure_pa() == 0.0 || sigma == 0.0 || exponent <= 1.0 {
         return Err(InceptionError::NoFiniteBlakeMinimum);
     }
+    let (critical_radius_m, critical_absolute_pressure_pa, gas_partial_pressure_pa) =
+        analytic_turning_point(model)?;
+    Ok(BlakeThreshold {
+        critical_radius_m,
+        critical_absolute_pressure_pa,
+        gas_partial_pressure_pa,
+    })
+}
+
+// Positive gas and surface tension, with 3 kappa != 1. The same stationary
+// radius is a minimum for 3 kappa > 1 and a maximum for 3 kappa < 1.
+// Return (radius, imposed pressure, gas pressure); only the minimum is Blake.
+fn analytic_turning_point(
+    model: &impl SphericalBubbleModel,
+) -> Result<(f64, f64, f64), CavitationError> {
+    let gas = model.gas();
+    let sigma = model.liquid().surface_tension_n_m();
+    let exponent = 3.0 * gas.polytropic_exponent();
     // Rc/R0 = [3 kappa pg0 R0 / (2 sigma)]^(1/(3 kappa - 1)).
     // Log coordinates avoid forming a potentially overflowing inventory R0^m.
     let log_reference_radius = gas.reference_radius_m().ln();
@@ -173,21 +208,24 @@ fn analytic_blake_threshold(
             / (exponent - 1.0);
     let critical_radius = log_radius.exp();
     if !positive(critical_radius) {
-        return Err(CavitationError::NonFiniteDerived("Blake critical radius").into());
+        return Err(CavitationError::NonFiniteDerived("static turning radius"));
     }
-    let capillary = finite(2.0 * (sigma / critical_radius), "Blake capillary pressure")?;
+    let capillary = finite(
+        2.0 * (sigma / critical_radius),
+        "turning capillary pressure",
+    )?;
     let gas_pressure = capillary / exponent;
     if !positive(gas_pressure) {
-        return Err(CavitationError::NonFiniteDerived("Blake gas pressure").into());
+        return Err(CavitationError::NonFiniteDerived("turning gas pressure"));
     }
-    Ok(BlakeThreshold {
-        critical_radius_m: critical_radius,
-        critical_absolute_pressure_pa: finite(
+    Ok((
+        critical_radius,
+        finite(
             model.liquid().saturation_pressure_pa() - capillary * (1.0 - 1.0 / exponent),
-            "Blake critical pressure",
+            "static turning pressure",
         )?,
-        gas_partial_pressure_pa: gas_pressure,
-    })
+        gas_pressure,
+    ))
 }
 
 /// Follow either equilibrium branch at a new imposed pressure while preserving
@@ -211,51 +249,83 @@ pub fn equilibrium_at_pressure_controlled(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<BubbleEquilibrium, InceptionError> {
     poll(cancelled)?;
-    if !absolute_pressure_pa.is_finite()
-        || !nonnegative(controls.relative_radius_tolerance)
-        || controls.relative_radius_tolerance > 1.0
-        || !positive(controls.absolute_radius_tolerance_m)
-        || !nonnegative(controls.absolute_pressure_tolerance_pa)
-        || controls.maximum_iterations == 0
-    {
-        return Err(
-            CavitationError::InvalidInput("static equilibrium controls or pressure").into(),
-        );
+    controls.validate()?;
+    if !absolute_pressure_pa.is_finite() {
+        return Err(CavitationError::InvalidInput("static equilibrium pressure").into());
     }
     let limits = model.limits();
     limits.validate()?;
-    let threshold = analytic_blake_threshold(model)?;
-    let critical_radius = threshold.critical_radius_m;
+    let gas = model.gas();
+    let sigma = model.liquid().surface_tension_n_m();
+    let exponent = 3.0 * gas.polytropic_exponent();
+    let turning = if gas.reference_pressure_pa() > 0.0 && sigma > 0.0 && exponent != 1.0 {
+        Some(analytic_turning_point(model)?)
+    } else {
+        None
+    };
     let mut left = limits.minimum_radius_m;
     let mut right = limits.maximum_radius_m;
-    let branch_missing = match branch {
-        EquilibriumBranch::Stable => critical_radius < left,
-        EquilibriumBranch::Unstable => critical_radius > right,
-    };
-    if !branch_missing {
-        match branch {
-            EquilibriumBranch::Stable => right = right.min(critical_radius),
-            EquilibriumBranch::Unstable => left = left.max(critical_radius),
+    let branch_missing = if let Some((critical_radius, _, _)) = turning {
+        // A minimum has the stable branch on its left; a maximum reverses it.
+        let lower_radii = (branch == EquilibriumBranch::Stable) == (exponent > 1.0);
+        if lower_radii {
+            let missing = critical_radius < left;
+            if !missing {
+                right = right.min(critical_radius);
+            }
+            missing
+        } else {
+            let missing = critical_radius > right;
+            if !missing {
+                left = left.max(critical_radius);
+            }
+            missing
         }
-    }
+    } else {
+        // With zero sigma, zero gas or exponent one there is no finite fold.
+        // The restoring sign is constant. At exponent one compare at R0;
+        // avoiding a newly authored equilibrium retains the original inventory.
+        let restoring = if sigma == 0.0 {
+            gas.reference_pressure_pa()
+        } else if gas.reference_pressure_pa() == 0.0 {
+            -1.0
+        } else {
+            finite(
+                gas.reference_pressure_pa() - 2.0 * (sigma / gas.reference_radius_m()),
+                "monotone restoring pressure",
+            )?
+        };
+        match branch {
+            EquilibriumBranch::Stable => restoring <= 0.0,
+            EquilibriumBranch::Unstable => restoring >= 0.0,
+        }
+    };
     let unavailable = InceptionError::EquilibriumOutsideDomain {
         absolute_pressure_pa,
         branch,
         radius_bracket_m: [left, right],
     };
+    let tail_branch =
+        turning.is_none() || (branch == EquilibriumBranch::Stable) == (exponent < 1.0);
     if branch_missing
-        || absolute_pressure_pa < threshold.critical_absolute_pressure_pa
-        || (branch == EquilibriumBranch::Unstable
-            && absolute_pressure_pa >= model.liquid().saturation_pressure_pa())
+        || (tail_branch
+            && match branch {
+                EquilibriumBranch::Stable => {
+                    absolute_pressure_pa <= model.liquid().saturation_pressure_pa()
+                }
+                EquilibriumBranch::Unstable => {
+                    absolute_pressure_pa >= model.liquid().saturation_pressure_pa()
+                }
+            })
     {
         return Err(unavailable);
     }
 
     let left_response = static_response(model, left)?;
     let right_response = static_response(model, right)?;
-    let at_fold = absolute_pressure_pa == threshold.critical_absolute_pressure_pa
-        && critical_radius >= left
-        && critical_radius <= right;
+    let at_fold = turning.is_some_and(|(radius, pressure, _)| {
+        absolute_pressure_pa == pressure && radius >= left && radius <= right
+    });
     let (minimum_pressure, maximum_pressure) = match branch {
         EquilibriumBranch::Stable => (
             right_response.equilibrium_absolute_pressure_pa,
@@ -275,10 +345,13 @@ pub fn equilibrium_at_pressure_controlled(
         return Err(unavailable);
     }
     let exact_response = if at_fold {
-        Some(match branch {
-            EquilibriumBranch::Stable => right_response,
-            EquilibriumBranch::Unstable => left_response,
-        })
+        Some(
+            if (branch == EquilibriumBranch::Stable) == (exponent > 1.0) {
+                right_response
+            } else {
+                left_response
+            },
+        )
     } else if absolute_pressure_pa == left_response.equilibrium_absolute_pressure_pa {
         Some(left_response)
     } else if absolute_pressure_pa == right_response.equilibrium_absolute_pressure_pa {

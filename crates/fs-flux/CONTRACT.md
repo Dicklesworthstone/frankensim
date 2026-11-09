@@ -8860,3 +8860,47 @@ were completed; runtime execution of these new regressions remains
 unverified in the disk-constrained implementation environment. This closure
 retains the existing exploratory SGS and engineering-bound qualifications;
 it adds no experimental-validation, positivity or entropy theorem.
+
+## Pressure-continuous cavitation populations
+
+Both original radial owners expose `linearization_at_radius`: gas pressure,
+restoring stiffness, viscous damping and the Keller--Miksis inertia/radiation/
+drive-derivative terms are evaluated at the specified equilibrium of the SAME
+retained gas inventory. The established reference `linearization()` arithmetic
+is unchanged. New tangents refuse unstable or numerically unresolved marginal
+stiffness, including a roundoff residual at the Blake fold.
+
+Static continuation also handles the explicitly authored gas-only and vapor-only
+limits. For `3 kappa = 1`, the restoring sign selects the monotone branch;
+a flat marginal curve refuses. For `3 kappa < 1`, the finite turning point is
+a maximum and the stable branch lies at larger radii. This does not relabel a
+maximum as a Blake minimum.
+
+`BubblePopulationClass::at_equilibrium_pressure` and
+`BubblePopulation::at_equilibrium_pressure` prepare stable equilibria while
+retaining original models, gas references, class order and absolute number
+densities. Each actual radius supplies its new occupied volume and cached native
+tangent. Root brackets, pressure residuals and iterations remain visible.
+Work is bounded by the existing class and root budgets, with cancellation before
+publication. Empty bins require no fictitious equilibrium. Failed roots,
+overfilled volume, unstable tangents and cancellation return no new population.
+The ambient shift from the ORIGINAL reference equilibrium is additionally bounded
+by the native pressure/bulk-modulus ratio so repeated queries cannot walk frozen
+liquid coefficients through an unbounded pressure excursion.
+
+`PopulationEquilibrium::into_evolving` starts the original nonlinear models at
+these prepared radii and zero wall velocity, then applies the native whole-radius
+dilution-envelope admission. It does not reset an existing trajectory. This is
+held-volume equilibrium preparation with frozen liquid properties and an authored
+polytropic exponent, not closed-parcel compression, transport, nucleation,
+thermal relaxation or diffusion. Frequency-domain consumers still admit their
+own dilution, amplitude and interaction bounds.
+
+Focused G0/G1/G3/G4 regressions compare native tangents with independently
+differenced nonlinear accelerations, closed-form pressure equilibria, retained
+gas/number inventories, histogram splitting, pressure-cycle repeatability,
+stationary nonlinear initialization and transactional refusals. All 65 native
+cavitation tests passed, including the original-reference pressure-excursion
+guard, with the original numerical source and restricted dependency facades.
+Full Cargo/DSR remains unavailable because the seven constellation siblings
+and DSR/RCH are absent.

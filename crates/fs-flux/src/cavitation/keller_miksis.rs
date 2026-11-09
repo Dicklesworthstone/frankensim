@@ -24,8 +24,8 @@
 use super::{
     BubbleGas, BubbleLimits, BubbleLinearization, BubbleNumerics, BubbleObservation, BubbleState,
     BubbleStep, CavitationError, CavitationState, RadialDynamics, RayleighPlessetBubble,
-    SphericalBubbleModel, finite, observation, positive, reference_linearization, stepper,
-    validate_state,
+    SphericalBubbleModel, equilibrium_linearization, finite, observation, positive,
+    reference_linearization, stepper, validate_state,
 };
 
 /// A smooth imposed absolute pressure and its analytic time derivative.
@@ -118,7 +118,37 @@ impl KellerMiksisBubble {
     /// equilibrium. It includes viscous inertia, radiation damping AND the
     /// pressure-derivative forcing; it adds no thermal damping surrogate.
     pub fn linearization(&self) -> Result<BubbleLinearization, CavitationError> {
-        let mut response = reference_linearization(self.liquid, self.gas, self.limits.bubble)?;
+        self.compressible_linearization(reference_linearization(
+            self.liquid,
+            self.gas,
+            self.limits.bubble,
+        )?)
+    }
+
+    /// Stable tangent about a continued equilibrium, preserving the original
+    /// gas inventory and all native radius and weak-compressibility limits.
+    pub fn linearization_at_radius(
+        &self,
+        equilibrium_radius_m: f64,
+    ) -> Result<BubbleLinearization, CavitationError> {
+        let response = equilibrium_linearization(
+            self.liquid,
+            self.gas,
+            self.limits.bubble,
+            equilibrium_radius_m,
+            true,
+        )?;
+        self.dynamics(
+            &BubbleState::try_new(0.0, equilibrium_radius_m, 0.0)?,
+            BubblePressureSample::try_new(response.equilibrium_absolute_pressure_pa, 0.0)?,
+        )?;
+        self.compressible_linearization(response)
+    }
+
+    fn compressible_linearization(
+        &self,
+        mut response: BubbleLinearization,
+    ) -> Result<BubbleLinearization, CavitationError> {
         let tau = response.equilibrium_radius_m / self.liquid.liquid_sound_speed_m_s();
         if !positive(tau) {
             return Err(CavitationError::NonFiniteDerived(
