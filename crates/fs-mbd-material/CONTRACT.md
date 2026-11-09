@@ -2469,3 +2469,79 @@ separately exercise physical source-timescale refusal and a Reynolds violation
 visible only with the actual final ambient velocity. Rust execution remains
 a separate verification requirement; synthetic source fixtures do not establish
 experimental material accuracy.
+
+## Rotor memory and finite thermal feedback
+
+`rotor_thermal::advance_candidate` advances original q/v/stress and the
+existing finite caloric timeline as one immutable candidate. The input binds
+one explicit `CellId` to every original Maxwell branch: that cell supplies
+the branch's accepted start temperature and receives ALL its independently
+integrated native heat. Multiple branches may share a cell; each contribution
+is streamed separately through native compensated source accumulation.
+No inferred temperature averaging, heat partition or duplicate thermal solver
+is introduced.
+
+Existing WLF/Arrhenius calibrations determine original-reference clocks held
+during each thermal-selected interval. The native open rotor interval preserves
+the physical drive frequencies and global phase across timestep, event and
+continuation cuts. Full mass, gyroscopic coupling, signed spin, C/K, branch
+stiffness/strain and every stress identity remain the original fixed model.
+Only Maxwell branch heat becomes thermal source work; signed bearing and
+circulatory-stiffness work remains a separate mechanical port account.
+
+The original thermal owner requests interval heat only after conduction/CFL,
+user and event restrictions, then accepts the mechanical endpoint after its
+thermal step. A private pending state prevents duplicate advancement. The
+coupling balances the last two intervals before a target or native event when
+a full step would leave a short remainder: neither step exceeds the admitted
+bound, no time or heat is discarded, and no residual tolerance is relaxed.
+Original final timestamps must match before accepting either state.
+
+Endpoint temperatures and effective times/rates must remain supported. This
+also covers zero-duration advances and final-time thermal events. The forcing
+owner admits complete shape/frequency inputs without a dummy step. Cancellation,
+unsupported receivers/calibrations, exhausted interval work, failed native
+motion/thermal gates or late endpoint refusal discard both candidates.
+
+`RotorThermalReport` retains the raw native `EnergyAudit`, original mechanical
+work/storage, each branch heat, represented deposited heat and handoff defects.
+Branch heat is an INTERNAL transfer and is subtracted from the reported
+external thermal heat; incoming thermal inventory remains distinct. Compensated
+whole-call accounting uses
+`mechanical_residual + thermal.residual + (deposited_heat - branch_heat)`.
+Absolute per-step mechanical and per-branch handoff defects are accumulated
+separately so opposing errors cannot conceal one another. Large absolute
+caloric reference energies are not subtracted to invent a stronger audit.
+Separate thermal and combined joule allowances remain explicit.
+
+The native rotor work/payload budget applies per interval; the explicit
+`maximum_intervals` and original thermal budget bound complete-call work.
+Only current/pending mechanics and aggregate branch totals are retained, not
+an unbounded trajectory history. All sources, caloric laws, geometry,
+conductances and material calibration associations remain caller declarations.
+
+This is first-order coupling with temperature held at each interval's start.
+Exact held-coefficient mechanics and energy closure do not establish exact
+continuously varying thermal feedback or passivity. Independent max_dt
+refinement, thermal cell-uniformity/conductance validity and material support
+remain required. There is no inferred Kelvin scaling, thermoelastic expansion,
+temperature-dependent modulus or rotor inertia update.
+
+All five new native groups pass: nonlinear self-heating against an independent
+original physical ODE with the original nonbinary timestep refinement;
+individual/shared-cell heat routing with native conduction and birth-energy
+accounting; physical harmonic phase across event/timestep/continuation cuts;
+unsupported endpoints, empty-duration source admission, work exhaustion,
+early/late cancellation and atomic retry; and driven self-heating resonance
+against an independent seven-coordinate q/v/stress/T/work/heat RK4 reference.
+The driven fixture resolves a real coupled branch near reference resonance,
+checks every quantity under max_dt 0.08/0.04/0.02 refinement over 3.7 seconds,
+and distinguishes the resulting motion and heating from frozen-reference clocks. The original four prescribed-material
+kinetics groups also pass. Together with the open-interval increment, this
+continuation passes 54 focused native tests (9 new, 45 existing).
+
+The local Cargo fallback executes the original finite timeline, interval-source
+observer, conduction/boundary admission, material temperature law and numerical
+rotor/pHS/math owners. Only unrelated runtime/assembly and unused thermal entry
+adapters are omitted. DSR/RCH are unavailable; no full-workspace or DSR gate,
+measured-material validation or coupled passivity certificate is claimed.
