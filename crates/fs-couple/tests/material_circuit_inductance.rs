@@ -1,5 +1,8 @@
 //! G1/G3 source-to-terminal magnetic work, declared gap/leakage and native RL.
 //! Manufactured H(B) sources are implementation oracles, not measured devices.
+#[path = "material_circuit_inductance/shared.rs"]
+mod shared;
+
 use fs_couple::material_circuit::inductance::{
     MaterialReversibleInductor, ReversibleInductorCircuit, ReversibleInductorGeometry,
 };
@@ -35,7 +38,12 @@ fn material(points: &[(f64, f64)]) -> ReversibleMagneticMaterial {
                 knots: points.to_vec(),
                 dims: FIELD_STRENGTH_DIMS,
             },
-            validity: ValidityDomain::unconstrained(),
+            validity: ValidityDomain::unconstrained().with_quantity(
+                "B",
+                QuantitySpec::dimensional(FLUX_DENSITY_DIMS),
+                0.0,
+                points.last().unwrap().0,
+            ),
             uncertainty: UncertaintyModel::Unstated,
             interpolation: InterpolationPolicy::LinearInside,
             observations: vec![],

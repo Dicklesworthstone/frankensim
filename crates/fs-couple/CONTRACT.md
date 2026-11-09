@@ -2920,8 +2920,41 @@ Focused regressions cover every source knot and polarity, independent
 core/gap/leakage work, turns scaling, leakage-dominated observations, a native
 saturating RL trajectory and physical/source refusals. Independent arithmetic
 checks over 10,000 varied geometries agree with the source potential within
-1.5e-15 relative error. Rustfmt parsed the implementation and tests; complete
-source-to-native circuit tests remain unexecuted in the dependency environment.
+1.5e-15 relative error. The five scalar source-to-native regressions and four
+shared-core regressions pass in a focused build of their actual source and
+numerical owners. This does not establish the complete Cargo/DSR gate.
+
+
+### Shared-core nonlinear mutual inductance
+
+`material_circuit::inductance::MaterialSharedCoreInductor` binds multiple
+original winding branches to one reversible material path. Signed turns and
+positive explicit leakage obey lambda_i=N_i*Phi+L_leak_i*I_i, with
+sum(N_i*I_i)=l*H(Phi/A)+R_gap*Phi. The existing one-turn source mapper supplies
+the exact signed Phi/MMF knots and field-only source admission; the native
+`fs-phs::circuit::inductance::SharedCoreInductance` owns their coupled potential.
+Saturation from any winding changes every self/mutual differential coefficient.
+Opposed ampere-turns can cancel common-core magnetization while retaining both
+windings' leakage energy. Source support limits the common flux, not individual
+total linkages carrying differential leakage current.
+
+`ReversibleInductorCircuit::with_shared_cores` keeps the original branch
+identities, conserved flux states, source ports, Kirchhoff constraints and
+native time stepper. Scalar inductor/capacitor curves, reciprocal capacitance
+blocks and disjoint linear mutual groups retain their existing owners.
+Common-core observations expose B/H, simultaneous currents, the reciprocal
+differential inductance matrix, one core/gap energy and per-winding leakage
+energies. These partition the native Hamiltonian rather than add stores to it.
+
+All winding ownership must be disjoint. Zero leakage, source-domain exit,
+unsupported source dependence, overlapping blocks, external mutual links on
+bound windings and nonrepresentable constitutive arithmetic refuse explicitly.
+The reduction is fixed-geometry and reversible; it does not infer iron loss,
+hysteresis, remanence, fringing, thermal magnetic entropy or a full field model.
+Existing moving-gap and hysteretic owners remain separate physical models.
+Focused regressions cover source-to-core energy partition, the one-winding
+limit, a loaded transformer crossing saturation with native source/heat balance,
+and source/ownership/cancellation refusals.
 
 
 ### Prepared source-bound piezoelectric circuits

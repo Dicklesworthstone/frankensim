@@ -14,6 +14,12 @@
 //! Energy/flux conventions follow MIT 6.685 Class Notes 1:
 //! <https://web.mit.edu/6.685/www/chapter1.pdf>.
 
+/// Source-bound multiwinding saturation on one common magnetic path.
+pub mod shared;
+pub use shared::{
+    MaterialSharedCoreInductor, ReversibleCoreGeometry, SharedCoreOperatingPoint, SharedCoreWinding,
+};
+
 use fs_material::field_storage::{
     nonlinear::{REVERSIBLE_FIELD_STRENGTH_PROPERTY, ReversibleMagneticMaterial},
     permanent::FLUX_DENSITY_DIMS,
@@ -22,7 +28,7 @@ use fs_phs::circuit::{
     Branch, CircuitDae, CircuitGraph, MutualInductance,
     capacitance::{CapacitanceBlock, CapacitorCurve},
     inductance::{
-        InductorCurve, InductorFluxCurve, MAX_INDUCTOR_KNOTS, assemble_circuit_with_storage_curves,
+        InductorCurve, InductorFluxCurve, MAX_INDUCTOR_KNOTS, assemble_circuit_with_storage_blocks,
     },
 };
 use std::sync::Arc;
@@ -263,6 +269,8 @@ pub struct ReversibleInductorCircuit {
     dae: CircuitDae,
     sources: Vec<MaterialReversibleInductor>,
     flux_indices: Vec<usize>,
+    shared_cores: Vec<MaterialSharedCoreInductor>,
+    shared_flux_indices: Vec<Vec<usize>>,
 }
 
 impl ReversibleInductorCircuit {
@@ -275,8 +283,37 @@ impl ReversibleInductorCircuit {
     /// duplicate branch ownership and any mutual link touching a scalar
     /// nonlinear inductor. Cancellation refuses before publishing the assembly.
     pub fn new(
+        graph: CircuitGraph,
+        sources: Vec<MaterialReversibleInductor>,
+        capacitance_blocks: &[CapacitanceBlock],
+        capacitor_curves: &[CapacitorCurve],
+        authored_inductor_curves: &[InductorCurve],
+        mutual: &[MutualInductance],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, MaterialCircuitError> {
+        Self::with_shared_cores(
+            graph,
+            sources,
+            vec![],
+            capacitance_blocks,
+            capacitor_curves,
+            authored_inductor_curves,
+            mutual,
+            cancelled,
+        )
+    }
+
+    /// Compose source-bound shared cores with the same scalar storage and
+    /// circuit topology. Each shared core owns ALL self and mutual storage of
+    /// its declared windings, including their explicit physical leakage.
+    /// Branch ownership must be disjoint from other cores, scalar laws and
+    /// authored linear mutual links. Original flux states and native solver
+    /// remain authoritative; no private winding ports or outer solve are used.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_shared_cores(
         mut graph: CircuitGraph,
         mut sources: Vec<MaterialReversibleInductor>,
+        mut shared_cores: Vec<MaterialSharedCoreInductor>,
         capacitance_blocks: &[CapacitanceBlock],
         capacitor_curves: &[CapacitorCurve],
         authored_inductor_curves: &[InductorCurve],
@@ -289,6 +326,11 @@ impl ReversibleInductorCircuit {
             || sources
                 .len()
                 .checked_add(authored_inductor_curves.len())
+                .and_then(|count| {
+                    shared_cores
+                        .iter()
+                        .try_fold(count, |n, core| n.checked_add(core.windings().len()))
+                })
                 .is_none_or(|count| count > graph.branches.len())
             || capacitor_curves.len() > graph.branches.len()
             || capacitance_blocks
@@ -333,12 +375,35 @@ impl ReversibleInductorCircuit {
             curves.push(source.binding());
         }
         curves.extend_from_slice(authored_inductor_curves);
+        // Canonical core order does not change the signed winding order within
+        // a core, which belongs to its authored magnetic geometry.
+        shared_cores.sort_by_key(|core| core.windings().iter().map(|winding| winding.branch).min());
+        let mut magnetic_blocks = Vec::with_capacity(shared_cores.len());
+        for core in &shared_cores {
+            poll(cancelled)?;
+            let count = core.windings().len();
+            let tangent = core.law().differential_inductance_h(&vec![0.0; count])?;
+            for (i, winding) in core.windings().iter().enumerate() {
+                let branch = graph
+                    .branches
+                    .get_mut(winding.branch)
+                    .ok_or_else(|| invalid("shared-core winding branch is absent"))?;
+                if !matches!(branch.2, Branch::Inductor { .. }) {
+                    return Err(invalid("shared core requires original inductor branches"));
+                }
+                branch.2 = Branch::Inductor {
+                    henries: tangent[i * count + i],
+                };
+            }
+            magnetic_blocks.push(core.binding());
+        }
         admit_graph(&graph)?;
-        let dae = assemble_circuit_with_storage_curves(
+        let dae = assemble_circuit_with_storage_blocks(
             &graph,
             capacitance_blocks,
             capacitor_curves,
             &curves,
+            &magnetic_blocks,
             mutual,
         )?;
         let mut flux_indices = Vec::with_capacity(sources.len());
@@ -350,12 +415,30 @@ impl ReversibleInductorCircuit {
                 .count();
             flux_indices.push(dae.flux_index[slot]);
         }
+        let mut shared_flux_indices = Vec::with_capacity(shared_cores.len());
+        for core in &shared_cores {
+            poll(cancelled)?;
+            shared_flux_indices.push(
+                core.windings()
+                    .iter()
+                    .map(|winding| {
+                        let slot = graph.branches[..winding.branch]
+                            .iter()
+                            .filter(|branch| matches!(branch.2, Branch::Inductor { .. }))
+                            .count();
+                        dae.flux_index[slot]
+                    })
+                    .collect(),
+            );
+        }
         poll(cancelled)?;
         Ok(Self {
             graph,
             dae,
             sources,
             flux_indices,
+            shared_cores,
+            shared_flux_indices,
         })
     }
 
@@ -369,6 +452,11 @@ impl ReversibleInductorCircuit {
     }
     pub fn sources(&self) -> &[MaterialReversibleInductor] {
         &self.sources
+    }
+
+    /// Common material/geometry owners, ordered by their lowest branch index.
+    pub fn shared_cores(&self) -> &[MaterialSharedCoreInductor] {
+        &self.shared_cores
     }
 
     /// Initialize original branch-ordered fluxes and charges without changing
@@ -395,6 +483,25 @@ impl ReversibleInductorCircuit {
             .iter()
             .zip(&self.flux_indices)
             .map(|(source, &index)| source.operating_point(state[index]))
+            .collect()
+    }
+
+    /// One observation per common core; its core/gap energy is counted once,
+    /// with separate leakage energy for every signed winding.
+    pub fn shared_operating_points(
+        &self,
+        state: &[f64],
+    ) -> Result<Vec<SharedCoreOperatingPoint>, MaterialCircuitError> {
+        if state.len() != self.dae.system.state_dim() || state.iter().any(|v| !v.is_finite()) {
+            return Err(invalid("complete finite native circuit state required"));
+        }
+        self.shared_cores
+            .iter()
+            .zip(&self.shared_flux_indices)
+            .map(|(core, indices)| {
+                let fluxes: Vec<_> = indices.iter().map(|&index| state[index]).collect();
+                core.operating_point(&fluxes)
+            })
             .collect()
     }
 }

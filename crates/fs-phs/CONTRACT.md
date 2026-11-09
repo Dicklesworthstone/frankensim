@@ -3403,3 +3403,42 @@ transactional unsupported-demand/exhaustion/cancellation recovery.
 `AffineOutputCurrent` and `PreparedBatteryFedBuckBoost::step_affine_output_current_controlled` admit `I_into_bus = constant_a + slope_a_per_v * V_discrete` in the original six-state nonlinear equation. Positive current supplies the electrical subsystem. The held term uses the existing linear port; the voltage-dependent term supplies its exact analytic tangent and signed conjugate work through the native supplied-port owner. The existing held-current method shares this implementation with zero slope. Canonical battery/OCV, lead, converter and optional regulated-load accounts and eight heat owners are unchanged.
 
 This terminal can carry an analytically condensed dynamic load or regeneration. It is an external energy exchange, not an added resistor heat channel; its caller owns the coupled component's storage, operating-limit and work admission before publishing either state. Nonfinite coefficients/evaluation, solve/account refusal or cancellation leave output unchanged. It adds no second integrator, lagged terminal current, nonlinear stability/uniqueness guarantee or source protection.
+
+## Shared-core nonlinear inductance on the original circuit descriptor
+
+`circuit::inductance::SharedCoreInductance` admits 1–64 signed nonzero winding
+turns, explicit positive leakage inductances and one bounded piecewise-affine
+common-flux/MMF source containing both polarities and `(0,0)`. The original
+constitutive equations are `lambda_i=L_leak_i*i_i+N_i*Phi` and
+`F(Phi)=sum(N_i*i_i)`. The shared core therefore saturates under the combined
+signed winding excitation. Core energy is `integral F dPhi`; total storage adds
+each positive leakage energy once. Differential inductance is the reciprocal
+matrix `diag(L_leak)+N*N^T/F'(Phi)`, with source-sided slopes at knots. The
+perfect-coupling zero-leakage limit is not an independent-flux model and refuses.
+
+Preparation inverts the original piecewise-affine scalar constraint
+`F(Phi)+sum(N_i^2/L_leak_i)*Phi=sum(N_i*lambda_i/L_leak_i)` once. Queries use
+this same immutable inverse and original energy, with compensated winding sums
+and leakage arithmetic. A normalized unresolved common-flux pivot refuses.
+`MagneticStorageBlock` binds the complete law to original graph branch indices;
+`assemble_circuit_with_storage_blocks` retains all Kirchhoff stamps, ports,
+resistances, transformers, charge/flux ordering, unrelated scalar storage and
+disjoint reciprocal C/L blocks. Duplicate ownership or an external mutual link
+touching a bound branch refuses. Placeholder graph self-inductances are removed
+from bound energy and are never added to leakage a second time.
+
+The native discrete gradient integrates the inverse core law across every
+crossed source segment, with an analytic endpoint Jacobian action. It supplies
+reciprocal winding currents to the same descriptor solve; no additional current
+integrator or energy projection is introduced. Continuous tangent actions
+refuse nonsmooth source knots and finite support edges. Native callbacks borrow
+the original state, allocate no scratch, and have work bounded by winding and
+source-knot counts. Scalar and matrix observation methods may allocate their
+explicit result vectors. Immutable tables share across clones.
+
+This is a frozen-geometry, reversible uniform-path reduction, not a measured
+transformer model, field solve, current-dependent leakage, hysteresis, eddy
+loss, thermal law or moving core. Native resistor heat uses discrete-effort
+quadrature, not an exact continuous RMS-current integral. Source support and
+native nonlinear-step refusals publish no accepted state. Time refinement and
+source interpolation error remain separate from finite-step work closure.
