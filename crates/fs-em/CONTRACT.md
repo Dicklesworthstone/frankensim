@@ -8292,3 +8292,34 @@ quadrature, fourth-order dark leakage, DD epochs, physical dynamic range,
 original depth/area weights and bounded cancellation. Original math, harmonic,
 rectangle and volume kernels were compiled; the complete source-owner,
 material and FFT adapter graph was inspected but not built or executed.
+
+## Coherent exterior stress and field-momentum modes
+
+Existing deterministic and ensemble stress, momentum and joint observations
+select the shared positive temporal field factor independently for each admitted
+uniform bank. Six original E/H components are projected before stress and
+field-momentum products; momentum storage also projects their derivatives.
+Joint observations share those projections and one original field reconstruction
+and FFT synthesis per frequency. Proper derivatives remove only an irrelevant
+common carrier; actual real fields retain full carrier and sum-frequency terms.
+Signed stress, momentum density and its weighted instantaneous rate are never
+clipped. Wider bands and shaped shutters retain the original pair fallback.
+
+Continuous cell integration preserves signed opposite modes and unpaired
+Nyquist modes. Nonzero real carriers retain the original separable spatial
+Gram law, with source/cosine and i-source/i-sine temporal representations;
+sampled quadratic products do not replace physical cell integration. Exterior
+material admission and final constitutive scaling are unchanged. Mechanical
+force still requires the consumer's complete surface/volume balance and any
+material momentum or striction law.
+
+Temporal work is O(N*F*M), M<=17, on admitted banks; existing field and carrier
+spatial work remains. The helper adds no heap beyond original field planes.
+Individual query workspace includes 67,840 bytes of conservative fixed scratch;
+the joint composition conservatively counts that allowance twice. Seven
+actual-source regressions pass with warnings denied: proper fourth-order and
+real cubic dark residuals, carrier shifts, signed time/ensemble tensor oracles,
+odd/Nyquist cells, carrier-aware time/space quadrature, cancellation and precise
+DD epochs. The real 1ps null retains its documented DD cancellation limit;
+no null-relative certificate is asserted. Formatting and a bounded adapter
+signature probe passed; full material/reconstruction/FFT execution remains unrun.

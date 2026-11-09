@@ -19,6 +19,12 @@ pub(super) struct Coefficient {
     sine: Parts,
 }
 impl Coefficient {
+    // Original negative-time representations for field-preserving temporal
+    // projection. Their spatial Gram meaning remains owned by this module.
+    pub(super) fn parts(self) -> [[Dd; 2]; 3] {
+        [self.source, self.cosine, self.sine]
+    }
+
     const ZERO: Self = Self {
         source: [Dd::ZERO; 2],
         cosine: [Dd::ZERO; 2],
@@ -40,6 +46,27 @@ pub(super) struct CarrierFields {
 impl CarrierFields {
     pub(super) fn at(&self, frequency: usize, point: usize) -> [Coefficient; 6] {
         self.fields[frequency][point]
+    }
+
+    #[cfg(test)]
+    pub(super) fn from_temporal_test_parts(fields: Vec<Vec<[[[Dd; 2]; 3]; 6]>>) -> Self {
+        Self {
+            fields: fields
+                .into_iter()
+                .map(|plane| {
+                    plane
+                        .into_iter()
+                        .map(|field| {
+                            field.map(|[source, cosine, sine]| Coefficient {
+                                source,
+                                cosine,
+                                sine,
+                            })
+                        })
+                        .collect()
+                })
+                .collect(),
+        }
     }
 }
 

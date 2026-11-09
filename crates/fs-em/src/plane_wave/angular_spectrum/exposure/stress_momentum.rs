@@ -68,12 +68,16 @@ impl AngularSpectrumExposure<'_, '_, '_> {
     /// original incoming/reflected/total/transmitted field. The observed side
     /// supplies its own original scalar, nondispersive lossless material.
     ///
-    /// One frequency reconstruction, one temporal-kernel cache and one FFT
-    /// synthesis per frequency serve all observables. The original N*F^2 work
-    /// admission remains authoritative: each real pair uses thirty local
+    /// One frequency reconstruction and one FFT synthesis per frequency serve
+    /// all observables. Admitted short bands share six field and six derivative
+    /// projections, then thirty contractions per mode (sixty for carrier-cell
+    /// representations), with at most 17 modes. Other bands share one temporal
+    /// pair cache. The original N*F^2 work admission bounds that fallback:
+    /// each real pair uses thirty local
     /// products and at most sixty modal products; a proper pair uses at most
     /// twenty-four local and forty-eight modal products. Work remains
-    /// O(L*N + F*N*log N + F^2*N), with no new film or constitutive solve.
+    /// O(L*N + F*N*log N + F^2*N); admitted bands replace temporal pairs with
+    /// O(F*M*N), M <= 17. No new film or constitutive solve is performed.
     pub fn stress_momentum_field(
         &self,
         side: AngularSpectrumSide,
@@ -217,6 +221,24 @@ where
     let mut momentum_integrated = [Dd::ZERO; 6];
     for (bank, proper) in banks {
         poll(cancelled)?;
+        if let Some((stress, momentum)) = stress::temporal::try_accumulate(
+            bank,
+            side,
+            distance,
+            window,
+            proper,
+            epsilon,
+            mu,
+            Some(&mut stress_sums),
+            Some(&mut momentum_sums),
+            cancelled,
+        )? {
+            for c in 0..6 {
+                stress_integrated[c] = stress_integrated[c] + stress[c];
+                momentum_integrated[c] = momentum_integrated[c] + momentum[c];
+            }
+            continue;
+        }
         let (stress, momentum) = if proper {
             accumulate_joint_bank(
                 bank,

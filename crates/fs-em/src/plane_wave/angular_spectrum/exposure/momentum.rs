@@ -18,13 +18,17 @@ use super::*;
 
 /// Complete query storage, including original reconstruction/FFT workspace,
 /// cached pair kernels, compensated accumulation and the returned plane.
-/// Existing line/pair/FFT work admissions remain authoritative. A real pair
+/// Existing line/pair/FFT work admissions remain authoritative. A fallback real pair
 /// uses eighteen scalar temporal contractions; a proper pair uses at most
 /// twelve. Each query contracts both N point samples and Q native spatial
 /// quadratures, with Q <= 2*N, for the original sparse O(N*F²) contraction.
 /// A nonzero real carrier adds its admitted F*N*(width+height) spatial pass
 /// and retained DD coefficient planes. No additional FFT is needed. Fixed modal
-/// contraction scratch is included. Earlier outputs, borrowed owners and
+/// contraction scratch is included. Admitted short bands project six fields
+/// and six derivatives, then contract eighteen products per temporal mode.
+/// Carrier cells use four projected representations and thirty-six products;
+/// at most 17 modes are retained. Their fixed scratch is also included.
+/// Earlier outputs, borrowed owners and
 /// allocator overhead are excluded.
 #[derive(Clone, Copy, Debug)]
 pub struct AngularSpectrumExposureMomentumLimits {
@@ -91,7 +95,8 @@ impl AngularSpectrumExposure<'_, '_, '_> {
     /// a lossy/dispersive exit; left queries retain their own valid law.
     /// Complete Cartesian fields interfere before products; no cycle average
     /// or phase independence is assumed. No new film solve or constitutive sampling per frequency is
-    /// performed. Work is O(L*N + F*N*log N + F^2*N).
+    /// performed. The pair fallback is O(L*N + F*N*log N + F^2*N);
+    /// admitted short bands replace temporal pairs with O(F*M*N), M <= 17.
     pub fn momentum_field(
         &self,
         side: AngularSpectrumSide,
@@ -219,15 +224,20 @@ pub(super) fn momentum_workspace(
         )
         .and_then(|v| v.checked_add(original))
         .and_then(|v| {
-            v.checked_add(frequencies.checked_mul(frequencies)?
-                .checked_mul(2 * core::mem::size_of::<Dd>())?)
+            v.checked_add(
+                frequencies
+                    .checked_mul(frequencies)?
+                    .checked_mul(2 * core::mem::size_of::<Dd>())?,
+            )
         })
         // Retained and transient cosine/sine DD vectors, plus the cell,
         // per-mode and accumulated-bank six-component integrals.
-        .and_then(|v| v.checked_add(
-            4 * core::mem::size_of::<[[[Dd; 2]; 2]; 6]>()
-                + 3 * core::mem::size_of::<[Dd; 6]>(),
-        ))
+        .and_then(|v| {
+            v.checked_add(
+                4 * core::mem::size_of::<[[[Dd; 2]; 2]; 6]>() + 3 * core::mem::size_of::<[Dd; 6]>(),
+            )
+        })
+        .and_then(|v| v.checked_add(stress::temporal::WORKSPACE_BYTES))
         .ok_or_else(|| bad("exposure momentum workspace overflow"))
 }
 
@@ -271,6 +281,23 @@ where
     let mut integrated = [Dd::ZERO; 6];
     for (bank, proper) in banks {
         poll(cancelled)?;
+        if let Some((_, cell)) = stress::temporal::try_accumulate(
+            bank,
+            side,
+            distance,
+            window,
+            proper,
+            epsilon,
+            mu,
+            None,
+            Some(&mut sums),
+            cancelled,
+        )? {
+            for c in 0..6 {
+                integrated[c] = integrated[c] + cell[c];
+            }
+            continue;
+        }
         let cell = if proper {
             accumulate_bank(
                 bank,

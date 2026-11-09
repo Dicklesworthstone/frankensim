@@ -11,13 +11,18 @@
 
 use super::*;
 
+pub(super) mod temporal;
+
 /// Additional admission for a stress query. Original exposure preparation
 /// bounds spatial/frequency work, line reconstruction and FFT work. Stress
-/// performs twelve local and at most twenty-four modal scalar products per
-/// admitted temporal pair unit. Nonzero real carriers also use the bank's
+/// fallback performs twelve local and at most twenty-four modal scalar products
+/// per admitted temporal pair unit. Admitted short bands instead project six
+/// original fields and contract twelve products per temporal mode, with at
+/// most 17 modes. Carrier cell integrals use four projected representations
+/// and twenty-four products per mode. Nonzero real carriers also use the bank's
 /// F*N*(width+height) separable spatial pass; proper banks retain sparse work.
 /// This cap includes the original workspace, six compensated sums per point,
-/// the complete stress output and fixed modal quadrature scratch/accumulators.
+/// the complete stress output and fixed modal/temporal scratch/accumulators.
 /// Borrowed owners, earlier outputs and allocator overhead are excluded.
 #[derive(Clone, Copy, Debug)]
 pub struct AngularSpectrumExposureStressLimits {
@@ -105,8 +110,9 @@ impl AngularSpectrumExposure<'_, '_, '_> {
     /// each field uses its own permittivity and permeability. A left query
     /// remains valid with a lossy/dispersive exit; right queries then refuse.
     ///
-    /// At zero carrier, O(L*N + F*N*log N + F²*N). Each admitted N*F² pair unit entails
-    /// twelve local and at most twenty-four modal temporal contractions.
+    /// The pair fallback is O(L*N + F*N*log N + F²*N). Admitted uniform
+    /// bands replace its temporal pair cache and reductions with O(F*M*N)
+    /// projections, M <= 17, without changing the source's spatial admission.
     /// Continuous-cell products are integrated before one in-place synthesis
     /// of each original frequency field; no extra FFT, constitutive or film
     /// solve is performed. A nonzero carrier uses the shared exact separable
@@ -286,6 +292,7 @@ pub(super) fn stress_workspace(
         // dyads cover the streamed bank, cell integral and contraction.
         .and_then(|v| v.checked_add(2 * core::mem::size_of::<[[[Dd; 2]; 6]; 2]>()))
         .and_then(|v| v.checked_add(3 * core::mem::size_of::<[Dd; 6]>()))
+        .and_then(|v| v.checked_add(temporal::WORKSPACE_BYTES))
         .ok_or_else(|| bad("exposure stress workspace overflow"))
 }
 
@@ -327,6 +334,23 @@ where
     let mut integrated_dyad = [Dd::ZERO; 6];
     for (bank, proper) in banks {
         poll(cancelled)?;
+        if let Some((cell, _)) = temporal::try_accumulate(
+            bank,
+            side,
+            distance,
+            window,
+            proper,
+            epsilon,
+            mu,
+            Some(&mut sums),
+            None,
+            cancelled,
+        )? {
+            for (sum, value) in integrated_dyad.iter_mut().zip(cell) {
+                *sum = *sum + value;
+            }
+            continue;
+        }
         if proper {
             accumulate_stress_bank(
                 bank,
