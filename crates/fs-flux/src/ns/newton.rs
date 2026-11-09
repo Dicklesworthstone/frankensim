@@ -6,8 +6,8 @@
 
 use std::cell::RefCell;
 
-use super::boundary::{StokesBoundary, StokesBoundaryError};
-use super::linearization::{FluxLinearizationError, FluxViscosityTangent, sample};
+use super::boundary::{AdmittedBoundary, StokesBoundary, StokesBoundaryError};
+use super::linearization::{FluxLinearizationError, FluxViscosityTangent, rheology_residual, sample};
 use super::{FluxParams, FluxSolution, FluxSystem};
 
 mod sdirk2;
@@ -381,6 +381,39 @@ impl FluxSystem<'_> {
         controls: FluxNewtonControls,
         source_is_valid: &dyn Fn() -> bool,
     ) -> Result<FluxNewtonStep, FluxNewtonError> {
+        self.rheology_newton_solve_admitted_checked(
+            params,
+            law,
+            force,
+            boundary,
+            initial_velocity,
+            convection,
+            inverse_timestep,
+            previous_velocity,
+            controls,
+            source_is_valid,
+            None,
+        )
+    }
+
+    // One bounded Newton/line-search owner for the original velocity-boundary
+    // problem and admitted mixed Stokes flow. Mixed boundaries are sampled
+    // once by their caller and reused by every Jacobian and trial residual.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(super) fn rheology_newton_solve_admitted_checked(
+        &self,
+        params: FluxParams,
+        law: &dyn Fn(usize, [f64; 2], f64) -> FluxViscosityTangent,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundary: &dyn Fn([f64; 2]) -> [f64; 2],
+        initial_velocity: &[f64],
+        convection: bool,
+        inverse_timestep: f64,
+        previous_velocity: Option<&[f64]>,
+        controls: FluxNewtonControls,
+        source_is_valid: &dyn Fn() -> bool,
+        admitted: Option<&AdmittedBoundary>,
+    ) -> Result<FluxNewtonStep, FluxNewtonError> {
         if self.mesh.tris.is_empty()
             || initial_velocity.len() != self.n_u
             || initial_velocity.iter().any(|v| !v.is_finite())
@@ -398,26 +431,28 @@ impl FluxSystem<'_> {
                 "finite initial velocity, positive tolerances/penalty, nonzero solve budgets and 0..=52 backtracks required",
             ));
         }
-        let boundaries: Vec<_> = self
-            .mesh
-            .edges
-            .iter()
-            .enumerate()
-            .filter(|(_, edge)| edge.tris.1 == usize::MAX)
-            .map(|(edge, _)| StokesBoundary::Velocity {
-                edge,
-                value: boundary,
-            })
-            .collect();
-        self.admit_stokes_boundaries(&boundaries)
-            .map_err(FluxNewtonError::Boundary)?;
+        if admitted.is_none() {
+            let boundaries: Vec<_> = self
+                .mesh
+                .edges
+                .iter()
+                .enumerate()
+                .filter(|(_, edge)| edge.tris.1 == usize::MAX)
+                .map(|(edge, _)| StokesBoundary::Velocity {
+                    edge,
+                    value: boundary,
+                })
+                .collect();
+            self.admit_stokes_boundaries(&boundaries)
+                .map_err(FluxNewtonError::Boundary)?;
+        }
         let mut state = vec![0.0; self.n];
         state[..self.n_u].copy_from_slice(initial_velocity);
         let mut backtracks = 0;
         let mut last_update = 0.0;
         let mut last_linear_iterations = 0;
         for iteration in 0..=controls.maximum_iterations {
-            let linearization = self.linearize_rheology(
+            let linearization = self.linearize_rheology_admitted(
                 params,
                 law,
                 force,
@@ -426,6 +461,7 @@ impl FluxSystem<'_> {
                 convection,
                 inverse_timestep,
                 previous_velocity,
+                admitted,
             );
             if !source_is_valid() {
                 return Err(FluxNewtonError::Invalid("constitutive source refused"));
@@ -505,6 +541,7 @@ impl FluxSystem<'_> {
                     convection,
                     inverse_timestep,
                     previous_velocity,
+                    admitted,
                 );
                 if !source_is_valid() {
                     return Err(FluxNewtonError::Invalid("constitutive source refused"));
@@ -554,6 +591,7 @@ impl FluxSystem<'_> {
         convection: bool,
         inverse_timestep: f64,
         previous: Option<&[f64]>,
+        admitted: Option<&AdmittedBoundary>,
     ) -> Result<Trial, FluxLinearizationError> {
         if state.iter().any(|v| !v.is_finite()) {
             return Err(FluxLinearizationError::Invalid("nonfinite Newton trial"));
@@ -575,23 +613,24 @@ impl FluxSystem<'_> {
                 }
             }
         };
-        let (operator, rhs) = self.assemble_viscous_transient(
+        let (operator, rhs) = self.assemble_operator(
             params,
-            &field,
+            Some(&field),
             force,
             boundary,
             convection.then_some(&state[..self.n_u]),
             inverse_timestep,
             previous,
+            None,
+            admitted,
+            None,
+            None,
         );
         if let Some(error) = failure.into_inner() {
             return Err(error);
         }
-        let mut residual = vec![0.0; self.n];
-        let (original, scaled) = super::sparse::residuals(&operator, &rhs, state, &mut residual);
-        for (value, load) in residual.iter_mut().zip(rhs) {
-            *value -= load;
-        }
+        let (residual, original, scaled) =
+            rheology_residual(self, &operator, &rhs, state, admitted.is_some());
         if residual.iter().any(|v| !v.is_finite()) {
             return Err(FluxLinearizationError::Invalid("nonfinite trial residual"));
         }

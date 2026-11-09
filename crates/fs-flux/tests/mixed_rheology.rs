@@ -812,3 +812,273 @@ fn flow_control_refuses_source_and_nonlinear_failures_without_partial_state() {
     assert_eq!(queries, 0);
     assert_eq!(initial, vec![0.0; sys.n_u]);
 }
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn g1_mixed_newton_resolves_pressure_driven_thickening_and_datum_shifts() {
+    use fs_flux::{FluxNewtonControls, FluxViscosityTangent};
+
+    // Exact affine extension between two pressure-loaded faces. The other
+    // faces are stationary symmetry walls, not imposed tangential velocities.
+    // u=(x,-y), gamma=2, nu=0.2*(1+gamma^2)=1, p=P.
+    // Right/top reservoir pressures are P-2 and P+2. Their net work is 4,
+    // exactly the bulk strain dissipation nu*gamma^2 on the unit square.
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
+    let sys = FluxSystem::new(&mesh);
+    let initial = vec![0.0; sys.n_u];
+    let params = FluxParams {
+        nu: f64::NAN,
+        tol: 1e-12,
+        ..FluxParams::default()
+    };
+    let controls = FluxNewtonControls {
+        residual_tolerance: 2e-8,
+        ..FluxNewtonControls::default()
+    };
+    let law = |_: usize, _: [f64; 2], rate: f64| FluxViscosityTangent {
+        nu: 0.2 * (1.0 + rate * rate),
+        derivative: 0.4 * rate,
+    };
+    let wall = |_: [f64; 2]| [0.0; 2];
+    for pressure in [7.0, 100_007.0] {
+        let traction = |_: [f64; 2], normal: [f64; 2]| {
+            let reservoir = pressure + if normal[0] > 0.5 { -2.0 } else { 2.0 };
+            [-reservoir * normal[0], -reservoir * normal[1]]
+        };
+        let boundaries: Vec<_> = mesh
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(edge, _)| mesh.is_boundary(*edge))
+            .map(|(edge, geometry)| {
+                if geometry.normal[0] > 0.5 || geometry.normal[1] > 0.5 {
+                    StokesBoundary::TotalTraction {
+                        edge,
+                        value: &traction,
+                    }
+                } else {
+                    StokesBoundary::NavierSlip {
+                        edge,
+                        value: &wall,
+                        tangential_resistance_m_s: 0.0,
+                    }
+                }
+            })
+            .collect();
+        if pressure == 7.0 {
+            // With uniform strain, undamped Picard has the scalar map
+            // a_next=5/(1+4*a^2), whose derivative at a=1 is -8/5.
+            let picard = sys.solve_stokes_mixed_rheology(
+                params,
+                &|cell, point, rate| law(cell, point, rate).nu,
+                &|_| [0.0; 2],
+                &boundaries,
+                &initial,
+                StokesRheologyControls {
+                    maximum_iterations: 12,
+                    relative_tolerance: controls.residual_tolerance,
+                    relaxation: 1.0,
+                },
+            );
+            assert!(matches!(
+                picard,
+                Err(StokesBoundaryError::Rheology(
+                    FluxRheologyError::NonlinearConvergence { .. }
+                ))
+            ));
+        }
+        let solved = sys
+            .solve_stokes_mixed_rheology_newton(
+                params,
+                &law,
+                &|_| [0.0; 2],
+                &boundaries,
+                &initial,
+                controls,
+            )
+            .unwrap();
+        assert!(solved.iterations > 1 && solved.iterations <= controls.maximum_iterations);
+        assert!(solved.nonlinear_residual <= controls.residual_tolerance);
+        assert!(solved.solution.field.converged(controls.residual_tolerance));
+        assert_eq!(
+            solved.solution.pressure_reference,
+            StokesPressureReference::TractionDatum
+        );
+        let (error, divergence) =
+            sys.velocity_error(&solved.solution.field.x, &|x| [x[0], -x[1]]);
+        assert!(
+            error < 2e-7 && divergence < 2e-7,
+            "{error:e}, {divergence:e}"
+        );
+        for p in &solved.solution.pressure {
+            assert!(
+                (p - pressure).abs() < 2e-6,
+                "pressure datum {p} versus {pressure}"
+            );
+        }
+        let mut right_flux = 0.0;
+        let mut top_flux = 0.0;
+        for (edge, geometry) in mesh.edges.iter().enumerate() {
+            if mesh.is_boundary(edge) {
+                let flux = geometry.len * solved.solution.field.x[2 * edge];
+                if geometry.normal[0] > 0.5 {
+                    right_flux += flux;
+                } else if geometry.normal[1] > 0.5 {
+                    top_flux += flux;
+                } else {
+                    assert!(flux.abs() < 1e-8);
+                }
+            }
+        }
+        assert!((right_flux - 1.0).abs() < 2e-7);
+        assert!((top_flux + 1.0).abs() < 2e-7);
+        assert!((right_flux + top_flux).abs() < 1e-9);
+        let rates = sys.shear_rates(&solved.solution.field.x);
+        let bulk: f64 = rates
+            .iter()
+            .zip(&mesh.areas)
+            .map(|(rate, area)| 0.2 * (1.0 + rate * rate) * rate * rate * area)
+            .sum();
+        let pressure_work = -(pressure - 2.0) * right_flux - (pressure + 2.0) * top_flux;
+        assert!((bulk - 4.0).abs() < 3e-6);
+        assert!((pressure_work - bulk).abs() < 3e-6);
+        assert_eq!(initial, vec![0.0; sys.n_u]);
+    }
+}
+
+#[test]
+fn g1_mixed_newton_preserves_layer_stress_and_physical_navier_slip() {
+    use fs_flux::{FluxNewtonControls, FluxViscosityTangent};
+
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
+    let sys = FluxSystem::new(&mesh);
+    // nu=K*(1+gamma^2): gamma=3 below and gamma=1 above y=1/2
+    // both give shear stress 3. A bottom resistance beta=12 gives slip=1/4.
+    // The top shear work 3*(1/4+3/2+1/2)=6.75 splits into bulk=6 and slip=.75.
+    let coefficients: Vec<f64> = mesh
+        .tris
+        .iter()
+        .map(|tri| {
+            let y = tri.iter().map(|&node| mesh.verts[node][1]).sum::<f64>() / 3.0;
+            if y < 0.5 {
+                0.1
+            } else {
+                1.5
+            }
+        })
+        .collect();
+    let law = |cell: usize, _: [f64; 2], rate: f64| FluxViscosityTangent {
+        nu: coefficients[cell] * (1.0 + rate * rate),
+        derivative: 2.0 * coefficients[cell] * rate,
+    };
+    let wall = |_: [f64; 2]| [0.0; 2];
+    let traction =
+        |_: [f64; 2], n: [f64; 2]| [-7.0 * n[0] + 3.0 * n[1], 3.0 * n[0] - 7.0 * n[1]];
+    let boundaries: Vec<_> = mesh
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(edge, _)| mesh.is_boundary(*edge))
+        .map(|(edge, geometry)| {
+            if geometry.normal[1] < -0.5 {
+                StokesBoundary::NavierSlip {
+                    edge,
+                    value: &wall,
+                    tangential_resistance_m_s: 12.0,
+                }
+            } else {
+                StokesBoundary::TotalTraction {
+                    edge,
+                    value: &traction,
+                }
+            }
+        })
+        .collect();
+    let solved = sys
+        .solve_stokes_mixed_rheology_newton(
+            FluxParams {
+                nu: f64::NAN,
+                tol: 1e-12,
+                ..FluxParams::default()
+            },
+            &law,
+            &|_| [0.0; 2],
+            &boundaries,
+            &vec![0.0; sys.n_u],
+            FluxNewtonControls::default(),
+        )
+        .unwrap();
+    let exact = |point: [f64; 2]| {
+        [
+            0.25 + 3.0 * point[1].min(0.5) + (point[1] - 0.5).max(0.0),
+            0.0,
+        ]
+    };
+    let (error, divergence) = sys.velocity_error(&solved.solution.field.x, &exact);
+    assert!(error < 2e-7 && divergence < 2e-7, "{error:e}, {divergence:e}");
+    let rates = sys.shear_rates(&solved.solution.field.x);
+    let mut bulk = 0.0;
+    for (cell, &rate) in rates.iter().enumerate() {
+        let expected = if coefficients[cell] == 0.1 { 3.0 } else { 1.0 };
+        assert!((rate - expected).abs() < 3e-7);
+        let nu = law(cell, [0.0; 2], rate).nu;
+        assert!((nu * rate - 3.0).abs() < 2e-6);
+        bulk += mesh.areas[cell] * nu * rate * rate;
+    }
+    let slip: f64 = solved
+        .solution
+        .reactions
+        .edges()
+        .iter()
+        .map(|edge| edge.load([0.0; 2], None).unwrap().slip_dissipation)
+        .sum();
+    assert!((bulk - 6.0).abs() < 4e-6);
+    assert!((slip - 0.75).abs() < 4e-7);
+    assert!((bulk + slip - 6.75).abs() < 4e-6);
+}
+
+#[test]
+fn mixed_newton_refuses_invalid_tangents_and_preserves_the_initial_state() {
+    use fs_flux::ns::linearization::FluxLinearizationError;
+    use fs_flux::{FluxNewtonControls, FluxNewtonError, FluxViscosityTangent};
+
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 1, 1));
+    let sys = FluxSystem::new(&mesh);
+    let wall = |_: [f64; 2]| [0.0; 2];
+    let traction = |_: [f64; 2], n: [f64; 2]| [-n[0], -n[1]];
+    let boundaries: Vec<_> = mesh
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(edge, _)| mesh.is_boundary(*edge))
+        .map(|(edge, geometry)| {
+            if geometry.normal[1] < -0.5 {
+                StokesBoundary::Velocity { edge, value: &wall }
+            } else {
+                StokesBoundary::TotalTraction {
+                    edge,
+                    value: &traction,
+                }
+            }
+        })
+        .collect();
+    let initial = vec![0.0; sys.n_u];
+    let refused = sys.solve_stokes_mixed_rheology_newton(
+        FluxParams::default(),
+        &|_, _, _| FluxViscosityTangent {
+            nu: 1.0,
+            derivative: f64::NAN,
+        },
+        &|_| [0.0; 2],
+        &boundaries,
+        &initial,
+        FluxNewtonControls::default(),
+    );
+    assert!(matches!(
+        refused,
+        Err(FluxNewtonError::Linearization(
+            FluxLinearizationError::Constitutive { .. }
+        ))
+    ));
+    assert_eq!(initial, vec![0.0; sys.n_u]);
+}

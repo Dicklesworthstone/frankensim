@@ -503,3 +503,110 @@ fn invalid_states_and_constitutive_tangents_are_refused_without_result() {
             .is_err()
     );
 }
+
+#[test]
+fn mixed_traction_and_slip_jacobian_matches_independent_primal_differences() {
+    use fs_flux::StokesBoundary;
+
+    let mesh = mesh(2);
+    let system = FluxSystem::new(&mesh);
+    let params = FluxParams {
+        nu: f64::NAN,
+        sigma: 20.0,
+        ..FluxParams::default()
+    };
+    let mut state = moments(&mesh, &|x| [0.8 + 0.3 * x[1], 0.2 + 0.1 * x[0]]);
+    for (i, value) in state.iter_mut().enumerate() {
+        *value += 0.007 * ((i * 17 % 29) as f64 - 14.0);
+    }
+    state.extend((0..mesh.tris.len()).map(|cell| 0.3 * cell as f64));
+    let direction: Vec<_> = (0..system.n)
+        .map(|i| ((i * 13 % 43) as f64 - 21.0) / 23.0)
+        .collect();
+    let wall = |x: [f64; 2]| [0.2 + 0.1 * x[0], 0.0];
+    let traction = |_: [f64; 2], n: [f64; 2]| [-3.0 * n[0] + n[1], n[0] - 3.0 * n[1]];
+    let force = |x: [f64; 2]| [0.1 + x[1], -0.2 * x[0]];
+    let law = |cell: usize, point: [f64; 2], rate: f64| {
+        let scale = (0.5 + point[0]) * if cell % 3 == 0 { 30.0 } else { 1.0 };
+        FluxViscosityTangent {
+            nu: scale * (1.0 + 0.3 * rate * rate),
+            derivative: 0.6 * scale * rate,
+        }
+    };
+    for resistance in [0.0, 0.7] {
+        let boundaries: Vec<_> = mesh
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(edge, _)| mesh.is_boundary(*edge))
+            .map(|(edge, geometry)| {
+                if geometry.normal[0].abs() > 0.5 {
+                    StokesBoundary::TotalTraction {
+                        edge,
+                        value: &traction,
+                    }
+                } else if geometry.normal[1] < 0.0 {
+                    StokesBoundary::NavierSlip {
+                        edge,
+                        value: &wall,
+                        tangential_resistance_m_s: resistance,
+                    }
+                } else {
+                    StokesBoundary::Velocity { edge, value: &wall }
+                }
+            })
+            .collect();
+        let linear = system
+            .linearize_stokes_mixed_rheology(params, &law, &force, &boundaries, &state)
+            .unwrap();
+        let mut applied = vec![0.0; system.n];
+        linear.jacobian.spmv(&direction, &mut applied);
+        let residual = |x: &[f64]| {
+            let rates = system.shear_rates(x);
+            let assembled = system
+                .assemble_stokes_mixed_variable_viscosity(
+                    params,
+                    &|cell, point| law(cell, point, rates[cell]).nu,
+                    &force,
+                    &boundaries,
+                )
+                .unwrap();
+            let mut result = vec![0.0; system.n];
+            assembled.matrix().spmv(x, &mut result);
+            for (value, load) in result.iter_mut().zip(assembled.rhs()) {
+                *value -= load;
+            }
+            result
+        };
+        let primal = residual(&state);
+        let roundoff: Vec<_> = primal
+            .iter()
+            .zip(&linear.residual)
+            .map(|(a, b)| a - b)
+            .collect();
+        assert!(norm(&roundoff) <= 2e-12 * norm(&primal).max(1.0));
+        for h in [2e-5, 1e-5] {
+            let plus: Vec<_> = state
+                .iter()
+                .zip(&direction)
+                .map(|(x, d)| x + h * d)
+                .collect();
+            let minus: Vec<_> = state
+                .iter()
+                .zip(&direction)
+                .map(|(x, d)| x - h * d)
+                .collect();
+            let error: Vec<_> = residual(&plus)
+                .iter()
+                .zip(residual(&minus))
+                .zip(&applied)
+                .map(|((p, m), exact)| (p - m) / (2.0 * h) - exact)
+                .collect();
+            assert!(
+                norm(&error) / norm(&applied) < 2e-7,
+                "mixed Jacobian, resistance={resistance}, h={h}: {}",
+                norm(&error) / norm(&applied)
+            );
+        }
+    }
+}

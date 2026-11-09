@@ -2497,6 +2497,41 @@ remain green. These establish the numerical fixed-mesh BDF1 capability, not
 experimental fluid calibration, mixed/open-boundary Newton flow, evolving
 thermal fields, variable density or a time-history adjoint.
 
+## Mixed-boundary Newton flow for stiff viscosity
+
+`FluxSystem::solve_stokes_mixed_rheology_newton` resolves steady
+generalized-Newtonian Stokes flow under velocity, total-traction and finite or
+perfect Navier-slip boundaries. It reuses the existing sparse constitutive
+Jacobian and bounded Newton/Armijo owner. The supplied positive finite
+`nu(gamma)` and analytic `dnu/dgamma` are evaluated at the same physical rate;
+a smooth radial law has zero derivative at zero strain. No fitted viscosity,
+rate floor, artificial timestep or altered boundary law is introduced.
+
+Boundary data is sampled once. Natural faces retain their normal unknowns,
+continuity equations and pressure datum. Prescribed total traction and fixed
+Navier resistance have no bulk-viscosity derivative; only velocity-Dirichlet
+faces add constitutive boundary-load terms. All cell and harmonic interface
+terms retain the original derivatives. `linearize_stokes_mixed_rheology`
+exposes this same steady Jacobian for the existing checked transpose solve.
+
+The original, row-scaled and component-pressure-translated residuals must all
+pass before publication. The translation reuses the linear solver's origin
+arithmetic so a large common traction pressure cannot hide weak unconverged
+flow. Final pressure interpretation and boundary reactions are rebuilt at the
+accepted viscosity and velocity. Initial state remains unchanged on refusal.
+Temperatures, composition and reference density stay fixed; this adds no
+convective mixed Newton solve, thermal evolution, viscoelastic memory,
+unregularized yield stress or material-bound mixed Newton adapter.
+
+Focused tests in `mixed_rheology.rs` use exactly representable pressure-driven
+extension and layered Couette flow to check nonlinear stress, pressure-datum
+shifts, bulk dissipation, Navier-slip loss and undamped Picard failure.
+`rheology_linearization.rs` compares mixed Jacobian actions with independent
+primal differences at finite/perfect slip and spatial viscosity contrast.
+Invalid tangent refusal preserves the input state. These new tests are authored
+but **not executed**: the session's executor became unavailable before native
+compilation. Their presence is not a convergence, performance or validation claim.
+
 ## Generalized-Newtonian mixed velocity/traction Stokes flow
 
 `FluxSystem::solve_stokes_mixed_rheology` closes steady Stokes viscosity on the

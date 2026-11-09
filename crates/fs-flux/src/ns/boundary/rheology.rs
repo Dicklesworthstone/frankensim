@@ -6,6 +6,10 @@ use super::{
     StokesFlowControlSolution, StokesSolution,
 };
 use crate::ns::FluxRheologyError;
+use crate::ns::linearization::{
+    FluxRheologyLinearization, FluxViscosityTangent, rheology_residual,
+};
+use crate::ns::newton::{FluxNewtonControls, FluxNewtonError};
 
 /// Controls for frozen-load mixed constitutive or convective Picard solves.
 #[derive(Clone, Copy, Debug)]
@@ -46,7 +50,154 @@ pub struct StokesRheologySolution {
     pub nonlinear_residual: f64,
 }
 
+/// Accepted mixed-boundary creeping flow from the consistent Newton solver.
+pub struct StokesRheologyNewtonSolution {
+    /// Original pressure datum, velocity and boundary stress reactions.
+    /// Residual fields belong to the reassembled nonlinear endpoint.
+    pub solution: StokesSolution,
+    /// Completed sparse-Jacobian correction solves.
+    pub iterations: usize,
+    /// Total rejected line-search candidates.
+    pub backtracks: usize,
+    /// Last accepted relative velocity correction; zero for an exact initial state.
+    pub relative_update: f64,
+    /// Larger of the original, row-scaled and pressure-translated defects.
+    pub nonlinear_residual: f64,
+}
+
 impl<'m> FluxSystem<'m> {
+    /// Differentiate the actual shear-dependent mixed Stokes residual.
+    ///
+    /// The constitutive callback supplies positive finite kinematic viscosity
+    /// and its analytic shear-rate derivative, with the same smooth radial-law
+    /// requirements as [`Self::linearize_rheology`]. State contains all velocity
+    /// and pressure dofs. Volume stress, one-sided harmonic SIP weights and
+    /// velocity-boundary loads share that original linearization. Prescribed
+    /// total traction and a supplied Navier resistance stay fixed; neither is
+    /// multiplied by apparent viscosity or replaced with no-slip data.
+    ///
+    /// Boundary samples are admitted once. Natural edges retain their normal
+    /// unknowns and continuity rows, and sealed components retain their own
+    /// pressure pins. The resulting Jacobian can feed `solve_adjoint_checked`
+    /// for steady implicit sensitivities, including separately supplied load
+    /// parameter derivatives. This is creeping flow, without convection,
+    /// viscoelastic memory or a time-history adjoint.
+    ///
+    /// # Errors
+    /// Preserves boundary admission and constitutive-linearization refusals.
+    pub fn linearize_stokes_mixed_rheology(
+        &self,
+        params: FluxParams,
+        law: &dyn Fn(usize, [f64; 2], f64) -> FluxViscosityTangent,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[StokesBoundary<'_>],
+        state: &[f64],
+    ) -> Result<FluxRheologyLinearization, FluxNewtonError> {
+        let admitted = self
+            .admit_stokes_problem(params, boundaries)
+            .map_err(FluxNewtonError::Boundary)?;
+        self.linearize_rheology_admitted(
+            params,
+            law,
+            force,
+            &|_| [0.0; 2],
+            state,
+            false,
+            0.0,
+            None,
+            Some(&admitted),
+        )
+        .map_err(FluxNewtonError::Linearization)
+    }
+
+    /// Resolve pressure-driven or wall-driven generalized-Newtonian creeping
+    /// flow with the existing bounded Newton solve and residual line search.
+    ///
+    /// The law supplies `nu(gamma)` [m²/s] and `dnu/dgamma` [m²] at the SAME
+    /// physical cell/point; `gamma=sqrt(2 D:D)` [1/s]. Its smooth radial
+    /// extension must have derivative zero at zero shear. Initial velocity is
+    /// an immutable guess, not a history or artificial transient. Boundary,
+    /// force and captured temperature/composition fields remain fixed and pure.
+    /// The scalar `params.nu` is unused.
+    ///
+    /// Each correction differentiates the full original symmetric stress,
+    /// harmonic interface stabilization and weak velocity data. Total traction
+    /// and Navier-slip resistance retain their original owners and signs.
+    /// Every line-search trial evaluates the actual constitutive residual;
+    /// damping changes only the iteration, never the supplied viscosity law.
+    /// Pressure-origin checks keep a large ambient traction from hiding a
+    /// small unconverged flow. The final boundary reactions use that same
+    /// accepted viscosity and field.
+    ///
+    /// This supports finite positive smooth generalized-Newtonian laws, not
+    /// unregularized yield stress, viscoelastic memory or coupled heat evolution.
+    /// Newton convergence is conditional; exhausted budgets refuse the solve.
+    ///
+    /// # Errors
+    /// Refuses invalid inputs/boundaries, constitutive tangents, failed linear
+    /// corrections, line searches or endpoint convergence, without changing the
+    /// initial velocity or publishing a fallback-viscosity solution.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_stokes_mixed_rheology_newton(
+        &self,
+        params: FluxParams,
+        law: &dyn Fn(usize, [f64; 2], f64) -> FluxViscosityTangent,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[StokesBoundary<'_>],
+        initial_velocity: &[f64],
+        controls: FluxNewtonControls,
+    ) -> Result<StokesRheologyNewtonSolution, FluxNewtonError> {
+        let admitted = self
+            .admit_stokes_problem(params, boundaries)
+            .map_err(FluxNewtonError::Boundary)?;
+        let mut step = self.rheology_newton_solve_admitted_checked(
+            params,
+            law,
+            force,
+            &|_| [0.0; 2],
+            initial_velocity,
+            false,
+            0.0,
+            None,
+            controls,
+            &|| true,
+            Some(&admitted),
+        )?;
+        let rates = self.shear_rates(&step.solution.x);
+        let endpoint = self
+            .assemble_stokes_admitted_viscosity(
+                params,
+                &|cell, point| law(cell, point, rates[cell]).nu,
+                force,
+                &admitted,
+            )
+            .map_err(FluxNewtonError::Boundary)?;
+        let (_, original, scaled) = rheology_residual(
+            self,
+            &endpoint.matrix,
+            &endpoint.rhs,
+            &step.solution.x,
+            true,
+        );
+        step.solution.rel_residual = original;
+        step.solution.scaled_rel_residual = scaled;
+        if !step.solution.converged(controls.residual_tolerance) {
+            return Err(FluxNewtonError::NonConvergence {
+                iterations: step.iterations,
+                residual: original.max(scaled),
+            });
+        }
+        Ok(StokesRheologyNewtonSolution {
+            solution: endpoint
+                .report_solution(step.solution)
+                .map_err(FluxNewtonError::Boundary)?,
+            iterations: step.iterations,
+            backtracks: step.backtracks,
+            relative_update: step.relative_update,
+            nonlinear_residual: original.max(scaled),
+        })
+    }
+
     /// Solve -div(2 nu(gamma) D(u)) + grad(p) = f with mixed velocity and
     /// TOTAL-traction boundaries, where gamma = sqrt(2 D:D).
     ///

@@ -6,6 +6,7 @@
 
 use std::cell::RefCell;
 
+use super::boundary::AdmittedBoundary;
 use super::{
     FluxParams, FluxSystem, convection_boundary_trace, convection_edge_quadrature, viscous_normal,
 };
@@ -30,6 +31,8 @@ pub struct FluxRheologyLinearization {
     /// Euclidean residual relative to the actual endpoint load.
     pub relative_residual: f64,
     /// Relative residual after equilibration by the frozen primal row maxima.
+    /// Mixed traction boundaries also retain both pressure-translated defects,
+    /// so a large common traction pressure cannot hide unconverged flow.
     pub scaled_relative_residual: f64,
     /// Quadrature sites with zero advecting normal flux and unequal upwind
     /// traces. There the returned `>= 0` active-branch derivative is semismooth,
@@ -101,6 +104,47 @@ fn dot(a: [f64; 2], b: [f64; 2]) -> f64 {
     a[0] * b[0] + a[1] * b[1]
 }
 
+// The original linear solves already remove a component-local pressure origin.
+// Use that same affine translation for mixed nonlinear residuals and their
+// normalization. It changes neither the equations nor their Jacobian, but
+// prevents an ambient pressure from becoming the tolerance for a weak flow.
+pub(super) fn rheology_residual(
+    system: &FluxSystem<'_>,
+    matrix: &Csr,
+    rhs: &[f64],
+    state: &[f64],
+    translate_pressure: bool,
+) -> (Vec<f64>, f64, f64) {
+    let mut residual = vec![0.0; system.n];
+    let (original, mut scaled) = super::sparse::residuals(matrix, rhs, state, &mut residual);
+    if translate_pressure {
+        let (shifted_rhs, offsets) = super::sparse::pressure_origin(system, matrix, rhs);
+        let mut shifted_state = vec![0.0; system.n];
+        let (shifted, shifted_scaled) = super::sparse::returned_pressure_residuals(
+            system,
+            matrix,
+            &shifted_rhs,
+            &offsets,
+            state,
+            &mut shifted_state,
+            &mut residual,
+        );
+        scaled = if scaled.is_finite() && shifted.is_finite() && shifted_scaled.is_finite() {
+            scaled.max(shifted).max(shifted_scaled)
+        } else {
+            f64::INFINITY
+        };
+        for (value, load) in residual.iter_mut().zip(shifted_rhs) {
+            *value -= load;
+        }
+    } else {
+        for (value, load) in residual.iter_mut().zip(rhs) {
+            *value -= load;
+        }
+    }
+    (residual, original, scaled)
+}
+
 impl FluxSystem<'_> {
     /// Linearize steady or BDF1 generalized-Newtonian flow with velocity data
     /// on every boundary edge. `state` contains ALL velocity and pressure dofs.
@@ -144,6 +188,35 @@ impl FluxSystem<'_> {
         inverse_timestep: f64,
         previous_velocity: Option<&[f64]>,
     ) -> Result<FluxRheologyLinearization, FluxLinearizationError> {
+        self.linearize_rheology_admitted(
+            params,
+            law,
+            force,
+            boundary,
+            state,
+            convection,
+            inverse_timestep,
+            previous_velocity,
+            None,
+        )
+    }
+
+    // Mixed Stokes boundaries share every volume/interface derivative. Their
+    // prescribed total traction and Navier resistance do not depend on the
+    // bulk viscosity, so only velocity-Dirichlet faces add constitutive terms.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(super) fn linearize_rheology_admitted(
+        &self,
+        params: FluxParams,
+        law: &dyn Fn(usize, [f64; 2], f64) -> FluxViscosityTangent,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundary: &dyn Fn([f64; 2]) -> [f64; 2],
+        state: &[f64],
+        convection: bool,
+        inverse_timestep: f64,
+        previous_velocity: Option<&[f64]>,
+        admitted: Option<&AdmittedBoundary>,
+    ) -> Result<FluxRheologyLinearization, FluxLinearizationError> {
         if self.mesh.tris.is_empty()
             || state.len() != self.n
             || state.iter().any(|v| !v.is_finite())
@@ -154,6 +227,7 @@ impl FluxSystem<'_> {
             || (inverse_timestep > 0.0 && previous_velocity.is_none())
             || previous_velocity
                 .is_some_and(|u| u.len() != self.n_u || u.iter().any(|v| !v.is_finite()))
+            || (admitted.is_some() && convection)
         {
             return Err(FluxLinearizationError::Invalid(
                 "finite full state, positive penalty and valid steady/BDF1 history required",
@@ -191,24 +265,24 @@ impl FluxSystem<'_> {
                 value
             }
         };
-        let (frozen, rhs) = self.assemble_viscous_transient(
+        let (frozen, rhs) = self.assemble_operator(
             params,
-            &viscosity,
+            Some(&viscosity),
             &|point| checked_vector(force, point),
             &|point| checked_vector(boundary, point),
             convection.then_some(&state[..self.n_u]),
             inverse_timestep,
             previous_velocity,
+            None,
+            admitted,
+            None,
+            None,
         );
         if let Some(error) = failure.into_inner() {
             return Err(error);
         }
-        let mut residual = vec![0.0; self.n];
-        let (relative_residual, scaled_relative_residual) =
-            super::sparse::residuals(&frozen, &rhs, state, &mut residual);
-        for (value, load) in residual.iter_mut().zip(rhs) {
-            *value -= load;
-        }
+        let (residual, relative_residual, scaled_relative_residual) =
+            rheology_residual(self, &frozen, &rhs, state, admitted.is_some());
         let mut jacobian = Coo::new(self.n, self.n);
         for row in 0..self.n {
             let (columns, values) = frozen.row(row);
@@ -218,7 +292,9 @@ impl FluxSystem<'_> {
         }
         let mut constrained = vec![false; self.n_u];
         for (edge, geometry) in mesh.edges.iter().enumerate() {
-            if geometry.tris.1 == usize::MAX {
+            if geometry.tris.1 == usize::MAX
+                && admitted.is_none_or(|data| !data.is_traction(edge))
+            {
                 constrained[2 * edge] = true;
                 constrained[2 * edge + 1] = true;
             }
@@ -279,19 +355,28 @@ impl FluxSystem<'_> {
                 }
             }
         }
-        for edge in &mesh.edges {
+        for (edge_index, edge) in mesh.edges.iter().enumerate() {
             let (a, b) = (mesh.verts[edge.verts.0], mesh.verts[edge.verts.1]);
             let (c0, c1) = edge.tris;
+            if c1 == usize::MAX
+                && admitted.is_some_and(|data| {
+                    data.is_traction(edge_index)
+                        || data.tangential_resistance(edge_index).is_some()
+                })
+            {
+                continue;
+            }
             let h0 = 2.0 * mesh.areas[c0] / edge.len;
             let tau0 = viscous_normal(gradients[c0], edge.normal, true);
-            for (point, weight) in edge_gauss_pub(a, b) {
+            for (q, (point, weight)) in edge_gauss_pub(a, b).into_iter().enumerate() {
                 let first = sample(law, c0, point, rates[c0])?;
                 let u0 = self.linearization_velocity(state, c0, point);
                 if c1 == usize::MAX {
                     if first.derivative == 0.0 {
                         continue;
                     }
-                    let prescribed = boundary(point);
+                    let prescribed =
+                        admitted.map_or_else(|| boundary(point), |data| data.velocity(edge_index, q));
                     if prescribed.iter().any(|v| !v.is_finite()) {
                         return Err(FluxLinearizationError::Invalid(
                             "nonfinite boundary velocity",

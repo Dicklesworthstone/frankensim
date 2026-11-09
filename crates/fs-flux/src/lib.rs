@@ -98,7 +98,8 @@ pub use ns::boundary::{
     DiscreteBoundaryReaction, NavierStokesBoundary, NavierStokesControls, NavierStokesStep,
     OpenBoundaryPolicy, PreparedStokesFlowControl, StokesAssembly, StokesBoundary,
     StokesBoundaryError, StokesFlowControlSolution, StokesPressureReference, StokesResistancePort,
-    StokesResistanceSolution, StokesRheologyControls, StokesRheologySolution, StokesSolution,
+    StokesResistanceSolution, StokesRheologyControls, StokesRheologyNewtonSolution,
+    StokesRheologySolution, StokesSolution,
     StokesWindkesselBalance, StokesWindkesselHistory, StokesWindkesselPort,
     StokesWindkesselSolution,
 };

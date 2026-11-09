@@ -23,7 +23,7 @@ pub use transport::BoundaryTransport;
 
 #[path = "boundary/rheology.rs"]
 mod rheology;
-pub use rheology::{StokesRheologyControls, StokesRheologySolution};
+pub use rheology::{StokesRheologyControls, StokesRheologyNewtonSolution, StokesRheologySolution};
 #[path = "boundary/bdf.rs"]
 pub(crate) mod bdf;
 /// Conservative changing-density transport and native BDM momentum.
