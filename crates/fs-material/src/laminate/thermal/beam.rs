@@ -18,6 +18,9 @@ use super::{LaminateThermalError, LayerThermalStress, PreparedLaminateThermal};
 use fs_math::det;
 use std::sync::Arc;
 
+/// Reversible source-bound potential with the same free-sided relaxation.
+pub mod thermoelastic;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct LayerReduction {
     axial_pa: f64,
