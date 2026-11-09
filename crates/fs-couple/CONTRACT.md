@@ -4007,6 +4007,19 @@ material defaults or fitted coefficients are supplied. The focused tests in
 momentum and work, the fixed-gap scalar limit, closure/reopening and the
 zero-recovery trajectory; the scalar-law tests check condensation and refusals.
 
+The DG-valve file's typed lumped `reed` now accepts the existing
+`slit_length LENGTH_M` record. A positive streamwise length in metres selects
+this fully developed laminar channel law, with viscosity and density from the
+complete actual DG inlet gas, including an authored temperature/composition
+field. It can compose with the reed's explicit `staple_recovery`; independent
+`contraction` remains refused. `slit_length none` retains the original inviscid
+reed. The existing finite-gas transaction refreshes the same source-bound
+channel together with the acoustic gas; it preserves the authored length and
+recovery and introduces no new thermal storage. This DG selection does not
+select the separate reed-performance route's separated-jet entrance model.
+The focused DG reed/card tests exercise source-gas binding, changed flow,
+callback invariance, geometry/contraction refusals and finite-gas refresh.
+
 Two optional reed-card records change how a massive reed's opening passes its flow. Both are off unless declared; absent, or at their identity value (`C_P` 0, `C_c` 1), the voice is the original one, bit for bit.
 
 **`staple_recovery C_P S_C_M2`** (Almeida, Vergez and Caussé 2007, J. Acoust. Soc. Am. 121(1) 536-546, arXiv physics/0607011v1 pp. 8-9, eqs. 14-17), right after `slit_length`, or right after the `reed` row on a card without one, selects `ReedBoreVoice::set_staple_recovery`. A double reed's channel widens from the constriction of area `S_c` into the conical staple, and a fraction `C_P` of the dynamic head at the constriction comes back as pressure. The flow through the opening follows the slit law on the constriction drop `(dp)_c = p_m - p_c`: the viscous slit law with `slit_length`, the inviscid Bernoulli law without it (Almeida's own model neglects the viscous loss along the reed). The blade is driven by `(dp)_c` (eq. 16), not by the total mouth-to-bore drop (`JunctionPressure::blade_drop_pa` in `reed_bore::contact`), and the bore input is `p_r = p_m - (dp)_c + C_P (1/2) rho (q/S_c)^2` (eq. 17), `q` being the flow through the opening. `ViscousSlit::characteristic_junction_with_recovery` and `moving::characteristic_junction_with_recovery` solve the same-sample characteristic junction on the two laws (the inviscid one is the viscous one with a negligible slit, to 1e-9): for forward flow the quadratic term takes the factor `1 - C_P (S/S_c)^2`. Recovery acts on forward flow only (in reverse the staple is upstream of the jet) and on the JET flow: the moving blade's swept flow and any body flow are not carried through the staple. The law is singular where `C_P (S/S_c)^2 >= 1`, where it would cancel the whole jet loss; there it refuses (`STAPLE_RECOVERY_DOMAIN`), and `set_staple_recovery` refuses a reed whose rest opening already is there. The only printed numbers are one measured reed's, `C_P` 0.8 (Fig. 15) and `S_c` 4e-6 m^2 (Fig. 14): a ready-to-play natural-cane oboe reed, humid air, masses added, no lips. A card that uses them borrows them for another reed, and says so. Inside the domain the element dissipates `(dp)_total q`, never negative; because the blade feels `p_c` while its swept flow enters the bore at `p_r`, the step's energy account carries one exchange term, `-(C_P (1/2) rho (q/S_c)^2)` times the swept flow, of either sign.

@@ -10,12 +10,16 @@
 //! pressure area is A = (k / P_c) H exactly as the live reed derives its face, and the damping is
 //! c = 2 zeta sqrt(k m). Nothing is inferred that the row does not state: the reed-performance file's
 //! zero-means-derived mass and stiffness are refused here, HEIGHT must equal the `valve` REST_GAP, the
-//! contact is the file's own `contact` row (the lay of a lumped reed is the writer's to state), and no
-//! viscous slit is selected. An optional `staple_recovery C_P S_C_M2` row directly after `reed` gives the double reed's
+//! contact is the file's own `contact` row (the lay of a lumped reed is the writer's to state). The host's
+//! `slit_length none` keeps inviscid flow; a positive streamwise length [m] selects the fully developed
+//! laminar channel law using the actual local inlet gas, including its viscosity. This is the same law as the
+//! material-modal plate, not the reed-performance route's separated-jet entrance law. Source-bound viscosity
+//! follows the host's finite-gas refresh. An optional `staple_recovery C_P S_C_M2` row directly after `reed` gives the double reed's
 //! staple pressure recovery (the blade is driven by the drop across the opening, the bore input raised by C_P (1/2) rho
 //! (q / S_c)^2). An optional `contraction C_C` row after that gives the jet's vena
 //! contracta (the flow width becomes C_c times the physical width, `ModalAperture::set_jet_contraction`),
-//! as the reed-performance file's row of that name does; absent, nothing changes bit for bit. An optional
+//! as the reed-performance file's row of that name does; contraction with a viscous slit is refused.
+//! Absent, nothing changes bit for bit. An optional
 //! `tongue_contact AREA EFFECTIVE_AREA FORCE RELEASE_START RELEASE` row after those gives the tongue's closing force on
 //! the reed: the same five numbers, the same cantilever-tip modal factor and the same force history as the
 //! reed-performance row of that name (`render::schedule::reed::TongueContactInput` admits and compiles it for both

@@ -106,6 +106,49 @@ fn heat_changes_modal_motion_flow_and_pressure_on_the_same_material_clock() {
 }
 
 #[test]
+fn heat_refreshes_the_typed_reeds_source_bound_viscous_channel_and_recovery() {
+    let a = gas_support::packs("A", 0.028, 3.5, 200.0);
+    let b = gas_support::packs("B", 0.044, 4.5, 200.0);
+    let bindings = [a.binding(), b.binding()];
+    let sources = ThermochemicalSources { species: &bindings, water_species: None,
+        phase: ThermochemicalPhase::FrozenGas };
+    let plate = input().replace("contact 100000000 2 0.5", "contact 56000 2 8.82");
+    let (head, rest) = plate.split_once("loss tensor").unwrap();
+    let (_, tail) = rest.split_once("compile_limits").unwrap();
+    let text = format!("{head}reed 0.0004 0.0056 17720 2.2e-05 3464 0.114 test:heated-viscous-reed\n\
+staple_recovery 0.8 0.000004\ncompile_limits{tail}");
+    let source = build(&text, 7, Some(&sources)).unwrap();
+    assert!(source.material_records().is_empty());
+    let initial = *valve(&source).viscous_slit().unwrap().gas().unwrap();
+    let original_modes = valve(&source).spec().modes.clone();
+    let (pressure, heated) = render(source);
+    let LoadedAperture::Modal(reed) = heated.system().aperture() else {
+        panic!("thermal playback must retain the original typed reed");
+    };
+    let inlet = heated.system().load().duct().inlet_gas();
+    let law = reed.viscous_slit().unwrap();
+    assert!(inlet.temperature > initial.temperature + 0.1);
+    assert_eq!(law.gas(), Some(inlet));
+    assert_eq!(reed.gas(), Some(inlet));
+    assert_eq!(law.length_m(), 0.001);
+    assert!(!law.is_separated_jet());
+    // This synthetic source declares constant mu; refreshing must preserve its
+    // constitutive value while temperature, density and caloric state evolve.
+    assert_eq!(law.dynamic_viscosity_pa_s().to_bits(), inlet.dynamic_viscosity.to_bits());
+    assert_eq!(reed.spec().density_kg_m3.to_bits(), inlet.density.to_bits());
+    assert_eq!(reed.spec().modes, original_modes);
+    assert!(reed.staple_recovery().is_some());
+    assert!(heated.last_finite_gas_step().unwrap().gas.gas_energy_residual_j.abs() <= 1e-11);
+    assert!(pressure.iter().all(|p| p.is_finite()));
+    for block in [1, 64] {
+        let (other, renderer) = render(build(&text, block, Some(&sources)).unwrap());
+        assert_eq!(pressure, other);
+        assert_eq!(heated.finite_gas(), renderer.finite_gas());
+        assert_eq!(heated.system().load().state(), renderer.system().load().state());
+    }
+}
+
+#[test]
 fn rejected_heat_keeps_the_original_material_inventory_wave_and_controls() {
     let a = gas_support::packs("A", 0.028, 3.5, 200.0);
     let b = gas_support::packs("B", 0.044, 4.5, 200.0);

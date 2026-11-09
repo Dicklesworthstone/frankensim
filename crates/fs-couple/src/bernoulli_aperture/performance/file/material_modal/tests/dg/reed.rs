@@ -1,6 +1,10 @@
 //! The typed, sourced lumped reed of the DG-valve file (`reed` record).
 use super::{pack, render, valve, BladePropagator, CancelGate, LoadedAperture,
     MaterialModalDgValvePerformance, PlateValveInputError, PressureRenderer};
+use fs_material::gas_species::input::{ThermochemicalPhase, ThermochemicalSources};
+
+#[path = "../../../../../../render/schedule/reed/field_input/tests/support.rs"]
+mod gas_support;
 
 const REED: &str = "reed 0.000357 0.0056 17720 2.2e-05 3464 0.114 test:oboe-description-reed-rows";
 // The lay the reed-performance file gives a massive reed: 1e7 x width, exponent 2, loss
@@ -90,9 +94,10 @@ fn every_unstated_or_contradictory_reed_field_is_refused_for_its_own_reason() {
 }
 
 #[test]
-fn a_typed_reed_selects_no_slit_and_owns_no_plate_record() {
-    let slit = card(REED).replace("slit_length none", "slit_length 0.001");
-    assert_eq!(refused(&slit).1, "a typed reed carries no viscous slit: declare slit_length none");
+fn a_typed_reed_without_a_slit_keeps_its_inviscid_owner_and_has_no_plate_record() {
+    let source = super::build(&card(REED), 37);
+    assert!(valve(&source).viscous_slit().is_none());
+    assert!(valve(&source).gas().is_none());
     let plate = "a typed reed has no plate: wetted surfaces, pressure shapes, closure, source forces and source pressures are plate records";
     for record in ["wetted_surfaces 0", "pressure_shapes 0", "closure", "source_forces 0", "source_pressures 0"] {
         let text = card(REED).replace("\ncompile_limits", &format!("\n{record}\ncompile_limits"));
@@ -144,6 +149,70 @@ fn bits(pressure: &[f64]) -> Vec<u64> { pressure.iter().map(|p| p.to_bits()).col
 
 fn with_row(row: &str) -> String {
     card(REED).replace("\ncompile_limits", &format!("\n{row}\ncompile_limits"))
+}
+
+#[test]
+fn the_typed_reed_slit_uses_local_source_gas_and_composes_pressure_recovery() {
+    let a = gas_support::packs("slita", 0.028, 3.5, 200.0);
+    let b = gas_support::packs("slitb", 0.044, 4.5, 200.0);
+    let bindings = [a.binding(), b.binding()];
+    let sources = ThermochemicalSources { species: &bindings, water_species: None,
+        phase: ThermochemicalPhase::FrozenGas };
+    let build = |text: &str, block| MaterialModalDgValvePerformance::from_bytes_with_sources(
+        text.as_bytes(), block, &CancelGate::new_clock_free(), Some(&sources),
+        |_| Ok(pack(900.0, false)),
+    ).unwrap();
+    // Deliberately give the DG inlet a different temperature and composition
+    // from ambient: its complete local state must supply viscosity and density.
+    let text = with_row(STAPLE)
+        .replace("slit_length none", "slit_length 0.001")
+        .replace("dg_tube 0.05 0.001 open 1 2 8 50 2000 0.01 1e-11 256\n", concat!(
+            "dg_bore 1 open 1 2 12 50 2000 0.01 1e-11 256 4 gas_field 2 mole 2 slita slitb\n",
+            "dg_segment cylinder 0.001 0.05\n",
+            "gas_station 0 313.15 0.7 0.3\n",
+            "gas_station 0.05 323.15 0.8 0.2\n",
+        ));
+    let source = build(&text, 37);
+    let inlet = source.renderer().system().load().duct().inlet_gas();
+    assert_ne!(inlet, source.ambient_gas());
+    let aperture = valve(&source);
+    let law = aperture.viscous_slit().expect("the authored streamwise length selects viscosity");
+    assert_eq!(law.length_m(), 0.001);
+    assert!(!law.is_separated_jet());
+    assert_eq!(law.gas(), Some(inlet));
+    assert_eq!(aperture.gas(), Some(inlet));
+    assert_eq!(law.dynamic_viscosity_pa_s().to_bits(), inlet.dynamic_viscosity.to_bits());
+    assert_ne!(law.dynamic_viscosity_pa_s().to_bits(),
+        source.ambient_gas().dynamic_viscosity.to_bits());
+    assert!(aperture.staple_recovery().is_some());
+    let (reference, _) = render(source);
+    assert!(reference.iter().all(|p| p.is_finite()));
+    assert_ne!(bits(&reference), bits(&render(build(
+        &text.replace("slit_length 0.001", "slit_length none"), 37,
+    )).0));
+    assert_ne!(bits(&reference), bits(&render(build(
+        &text.replace(&format!("{STAPLE}\n"), ""), 37,
+    )).0));
+    for block in [1, 512] {
+        assert_eq!(bits(&reference), bits(&render(build(&text, block)).0));
+    }
+}
+
+#[test]
+fn the_typed_reed_slit_preserves_length_and_contraction_refusals() {
+    for length in ["0", "-0.001", "NaN", "inf"] {
+        let text = card(REED).replace("slit_length none", &format!("slit_length {length}"));
+        assert_eq!(refused(&text).1, "slit length must be positive finite metres");
+    }
+    for row in ["contraction 0.611".to_owned(), format!("{STAPLE}\ncontraction 0.611")] {
+        let text = with_row(&row).replace("slit_length none", "slit_length 0.001");
+        let error = MaterialModalDgValvePerformance::from_bytes_with_sources(
+            text.as_bytes(), 37, &CancelGate::new_clock_free(), None,
+            |_| Ok(pack(900.0, false)),
+        ).err().expect("vena contraction remains an inviscid-only choice");
+        assert!(matches!(&error, PlateValveInputError::Physics(_)));
+        assert!(error.to_string().contains("not with a viscous slit"), "{error}");
+    }
 }
 
 #[test]

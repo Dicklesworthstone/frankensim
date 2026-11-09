@@ -41,9 +41,11 @@
 //! Or `reed HEIGHT WIDTH CLOSING_PA MASS STIFFNESS ZETA SOURCE_TOKEN` replaces `loss`/`blades` and every
 //! plate record with ONE typed, sourced lumped reed (the six numbers of a reed-performance `reed` row), so a
 //! DG bore plays the reed a modal-bore page plays. See `reed`; it has no mesh, material, closure or plate force
-//! port, requires `slit_length none` and HEIGHT equal to the `valve` REST_GAP. An optional `staple_recovery C_P S_C_M2`
+//! port and requires HEIGHT equal to the `valve` REST_GAP. A positive `slit_length` selects the fully developed
+//! channel law on the actual DG inlet gas; `none` keeps the inviscid slit. An optional `staple_recovery C_P S_C_M2`
 //! row directly after it gives the double reed's staple pressure recovery, an optional `contraction C_C` row after
-//! that gives the reed jet's vena contracta, an optional `tongue_contact AREA EFFECTIVE_AREA FORCE RELEASE_START RELEASE`
+//! that gives the inviscid reed jet's vena contracta (refused with a viscous slit), an optional
+//! `tongue_contact AREA EFFECTIVE_AREA FORCE RELEASE_START RELEASE`
 //! row after that gives the tongue's closing force on the reed (the reed's only force port), and an optional
 //! `constriction_noise SEED
 //! DUCT_RADIUS_M` row after those adds Oldham and Ukpoho's duct-constriction noise as a seeded series pressure.
@@ -60,6 +62,7 @@ use crate::bernoulli_aperture::dg::LoadedApertureDg;
 use crate::bernoulli_aperture::dg::loaded::performance::LoadedDgPerformance;
 use crate::bernoulli_aperture::performance::{ApertureObservation, AperturePerformanceConfig};
 use crate::bernoulli_aperture::performance::file::finite_gas::FiniteGasInput;
+use crate::bernoulli_aperture::viscous::ViscousSlit;
 use crate::dg_port::input::DgSourceInput;
 use crate::dg_port::input::wall::DgMaterialWallRecord;
 use crate::dg_port::input::wall::regions::{DgMaterialWallLayout, DgMaterialWallLayoutInput};
@@ -280,10 +283,6 @@ impl MaterialModalDgValvePerformance {
         let reed = if rows.lines.clone().next().and_then(|line|
             line.split_ascii_whitespace().next()) == Some("reed")
         {
-            if slit.is_some() {
-                return Err(bad(rows.line + 1,
-                    "a typed reed carries no viscous slit: declare slit_length none"));
-            }
             Some(reed::read(&mut rows, rest_opening)?)
         } else { None };
         // `constriction_noise SEED DUCT_RADIUS_M` after the reed (and its `contraction`), as the reed-performance
@@ -423,7 +422,15 @@ impl MaterialModalDgValvePerformance {
             valve = valve.with_plate_closure(closure).map_err(PlateValveInputError::Physics)?;
         }
         if let Some(length) = slit {
-            valve.set_material_viscous_slit(length).map_err(PlateValveInputError::Physics)?;
+            if reed.is_some() {
+                // The lumped reed has no plate-material gas; its channel uses
+                // the complete local gas already shared by the DG junction.
+                let law = ViscousSlit::from_gas(&inlet, length)
+                    .map_err(PlateValveInputError::Physics)?;
+                valve.set_viscous_slit(law).map_err(PlateValveInputError::Physics)?;
+            } else {
+                valve.set_material_viscous_slit(length).map_err(PlateValveInputError::Physics)?;
+            }
         }
         let (system, upstream_wall) = if let Some(channel) = supply {
             let (tract, walls) = match upstream {
