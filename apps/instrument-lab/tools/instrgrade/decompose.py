@@ -7,6 +7,9 @@ against how far REAL recordings differ from one another.
   pair     one render against the library's recording of the same note: the same, plus ours and the difference
   batch    pair for each candidate in a CANDIDATES.json (list of the pair arguments)
   listen   a render with no recording to compare it with: audio, maps and the reason, no gaps
+  pair --unvoiced   one render against an UNVOICED library entry (a fricative, a flow rig's noise: no pitch), chosen by its
+           file (--ref-file): only the measures that need no pitch are computed; the pitch measures are written
+           not_applicable and never counted
   report   print every graded pair as a table, the worst gap against its real-vs-real ruler first
   diff     for every re-graded note, what moved against the ruler since the grading kept in superseded/
 
@@ -41,7 +44,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 from descriptors import GraderRefusalError, fit_stiff_string_law, modal_lines, track_partials  # noqa: E402
-from instrgrade import GRADER_VERSION, SR, describe, distance, highpass, hz_of, load, midi_of, name_of, write_wav  # noqa: E402
+from instrgrade import (GRADER_VERSION, SR, describe, distance, highpass, hz_of, load, midi_of, name_of, rms_gap, spectrum,  # noqa: E402
+                        third_octave_bands, write_wav)
 
 DECOMPOSE_VERSION = "decompose-4"
 PREROLL_S = 0.010  # both signals are cut this long before the detected onset
@@ -591,6 +595,64 @@ def _decay_db_s(t, lvl):
     return float(np.polyfit(t[sel], lvl[sel], 1)[0]) if len(sel) >= 6 else float("nan")
 
 
+# The high-pass of an unvoiced pair: the corner highpass() gives every note of 100 Hz and up (f1 = min(50, f0 / 2) = 50 Hz, f0 = 0.6 f1),
+# fixed, since a noise has no pitch to set it by.
+UNVOICED_HP_HZ = (30.0, 50.0)
+
+
+def unvoiced_highpass(x):
+    return highpass(x, f0=UNVOICED_HP_HZ[0], f1=UNVOICED_HP_HZ[1])
+
+
+def spl_db(level_db, full_scale_pa):
+    """dB re 20 uPa of a mean power `level_db` [dB re full scale], given the pressure of full scale; None without a declared scale."""
+    return None if full_scale_pa is None else level_db + 20 * math.log10(float(full_scale_pa) / 20e-6)
+
+
+class UnvoicedNote(Note):
+    """What an unvoiced pair compares, from one high-passed, cut signal with no pitch: no f0, no partials, no onset.
+
+    The maps, the centroid and flux curves and the band envelope are the voiced Note's own code; the STFT is the 4096-point one
+    every note of 80 Hz and up gets. Read over the whole segment, which is steady (a noise cut from inside a blow): the level is
+    the mean power over all of it, the third-octave bands come from one spectrum of all of it, and the cepstral envelope is
+    liftered at cepstral_envelope's own floor (0.6 / 20 Hz = 30 ms), since there is no period to lifter below."""
+
+    def __init__(self, y, label="", full_scale_pa=None, band_hz=None):
+        if full_scale_pa is not None and not (real_number(full_scale_pa) and full_scale_pa > 0):
+            raise GraderRefusalError(f"IRPDECOMP_UNVOICED_SCALE: {label or 'signal'}: full_scale_pa must be finite positive pascals, not {full_scale_pa!r}")
+        if band_hz:
+            y = band_limit(y, band_hz)
+        self.y, self.kind, self.inharmonic, self.label, self.info = y, "unvoiced", False, label, {}
+        self.band_hz, self.f0_hint, self.f0, self.desc = band_hz, None, None, None
+        self.dur = len(y) / SR
+        self.match_window = [0.0, self.dur]
+        self.level_db = float(10 * np.log10(np.mean(y * y) + 1e-18)) if len(y) else float("nan")
+        self.full_scale_pa = full_scale_pa
+        self.spl_db = spl_db(self.level_db, full_scale_pa)
+        n = 4096
+        self.S, self.sf = stft_db(y, n)
+        self.C, self.cf = cwt_db(y)
+        self.frames = min(self.S.shape[1], self.C.shape[1], max(1, (len(y) - n // 2) // HOP))
+        self.S, self.C = self.S[:, : self.frames], self.C[:, : self.frames]
+        self.t = np.arange(self.frames) * HOP / SR
+        self._curves()
+        if not self.sound.any() or not np.isfinite(self.level_db) or self.level_db < -120.0:
+            raise GraderRefusalError(f"IRPDECOMP_NO_SIGNAL: {label or 'signal'} is silent")
+        f, s = spectrum(y, 0.0, self.dur)
+        self.bands_db = third_octave_bands(f, s, s[(f > 25) & (f < 16000)].sum() + 1e-30)
+        grid = 100 * 2 ** (np.arange(0, int(6 * math.log2(12000 / 100)) + 1) / 6)
+        ok = self.rms_db[: self.S.shape[1]] > self.rms_db.max() - 30
+        mean_db = 10 * np.log10(np.mean(10 ** (self.S[:, : len(ok)][:, ok] / 10), axis=1) + 1e-20)
+        self.env_grid, self.env_db = grid, cepstral_envelope(mean_db, self.sf, 0.0, grid)  # f0 0: the lifter falls to the function's 20 Hz floor
+        self.mean_db = mean_db
+        self.pk, self.pf, self.pmean, self.strong, self.decay = np.zeros(0, int), np.zeros(0), np.zeros(0), np.zeros(0, bool), None
+
+    def scalars(self):
+        return dict(level_db=self.level_db, spl_db=self.spl_db, duration_s=self.dur,
+                    mean_centroid_hz=float(np.nanmean(self.centroid_hz)) if self.sound.any() else None,
+                    mean_flux_db=float(np.mean(self.flux_db[self.sound])) if self.sound.any() else None)
+
+
 # --------------------------------------------------------------------------------------- the gaps
 ALL_CATS = ("other_dynamic", "other_take", "neighbour")
 B_RESOLUTION = 0.2  # B x 1e-4: smaller differences are inside the stiff-string fit's own scatter
@@ -721,6 +783,78 @@ def compare(a: Note, b: Note):
     return {k: ((v[0] if v[0] is not None and math.isfinite(v[0]) else None), v[1]) for k, v in g.items()}
 
 
+# The measures an unvoiced pair does not compute, and why. Those that need a pitch read "unvoiced". spec_db is one: it is the RMS of
+# the band-envelope gap and the harmonic-level gap, and with no harmonics distance() returns env_db x sqrt(2), the band envelope
+# counted a second time. The attack is timed from an onset, and an unvoiced segment is cut from inside a steady blow and has none.
+UNVOICED_NA = OrderedDict([(k, "unvoiced") for k in ("spec_db", "harm_db", "partial_traj_db", "partial_freq_cents", "f0_cents", "inharmonicity_B",
+                                                     "odd_even_db", "hnr_db")] + [("attack_log2", "no onset")])
+UNVOICED_NOTES = {
+    "env_db": "RMS gap of the mean spectrum in third-octave bands, relative to the total, read from one spectrum of the whole segment.",
+    "cepstral_env_db": "RMS dB gap of the cepstrally smoothed mean spectra, 100 Hz to 12 kHz (to the band a render is valid up to, if it has one). "
+                       "With no pitch the lifter is cepstral_envelope's own floor, 0.6 / 20 Hz = 30 ms, where a voiced note's is 0.6 / f0.",
+}
+# Only an unvoiced pair compares absolute level, and only when both sides declare their full scale in pascals: a pitched pair is
+# loudness-matched and holds no scale. A level ruler is another take at the same dynamic only: another dynamic differs in level by design.
+LEVEL = ("level_db", _m("Sound pressure level", "dB re 20 uPa", "dB", "Mean power over the analysed segment after the 50 Hz high-pass, in dB re 20 uPa "
+                        "from each side's declared full scale (the library entry's full_scale_pa, the render's --full-scale-pa).", ("other_take",), "spl_db"))
+
+
+def compare_unvoiced(a: UnvoicedNote, b: UnvoicedNote):
+    """Gaps between unvoiced candidate `a` and reference `b` over the measures that need no pitch, each computed as compare()
+    computes it: {id: (gap >= 0 | None, signed a - b | None)}. a's levels are moved to b's by the difference of their mean powers."""
+    off = b.level_db - a.level_db
+    g = {"env_db": (rms_gap(a.bands_db, b.bands_db), None),
+         "stft_lsd_db": _map_gap(a.S, b.S, a.sf, b.sf, off), "cwt_lsd_db": _map_gap(a.C, b.C, a.cf, b.cf, off)}
+    de = a.env_db + off - b.env_db
+    bands = [x for x in (a.band_hz, b.band_hz) if x]
+    if bands:
+        inb = a.env_grid <= min(bands)
+        if inb.any():
+            de = de[inb]
+    g["cepstral_env_db"] = (float(np.sqrt(np.mean(de * de))), float(np.mean(de)))
+    nf = min(a.frames, b.frames)
+    both = a.sound[:nf] & b.sound[:nf]
+    if both.sum() >= 5:
+        cs = 12 * np.log2(a.centroid_hz[:nf][both] / b.centroid_hz[:nf][both])
+        fl = a.flux_db[:nf][both] - b.flux_db[:nf][both]
+        g["centroid_st"] = (float(np.sqrt(np.mean(cs * cs))), float(np.mean(cs)))
+        g["flux_db"] = (float(np.sqrt(np.mean(fl * fl))), float(np.mean(fl)))
+    else:
+        g["centroid_st"] = g["flux_db"] = (None, None)
+    if a.spl_db is not None and b.spl_db is not None:
+        g["level_db"] = (abs(a.spl_db - b.spl_db), a.spl_db - b.spl_db)
+    return {k: ((v[0] if v[0] is not None and math.isfinite(v[0]) else None), v[1]) for k, v in g.items()}
+
+
+def unvoiced_metric_rows(gaps, real: UnvoicedNote, ours: UnvoicedNote, ruler):
+    """metric_rows for an unvoiced pair: METRICS in order, a not_applicable row (no gap, no ruler, counted nowhere) for each
+    measure in UNVOICED_NA, no decay row (a steady segment, as for any sustained note), and the level row when both sides declare
+    a full scale. The loose ruler and the strict one are the same rows: an unvoiced ruler holds no neighbouring note."""
+    rs, rv = real.scalars(), ours.scalars()
+    rows = []
+    for mid, spec in list(METRICS.items()) + ([LEVEL] if "level_db" in gaps else []):
+        if mid == "decay_db_s":
+            continue
+        base = dict(id=mid, label=spec["label"], unit=spec["unit"], gap_unit=spec["gap_unit"])
+        if mid in UNVOICED_NA:
+            why = "this measure needs a pitch and the recording has none" if UNVOICED_NA[mid] == "unvoiced" else "the segment is cut from inside a steady blow and has no onset to time"
+            if mid == "spec_db":
+                why = "with no harmonic levels the grader's spectral distance is the band envelope gap times sqrt(2), which would count the band envelope twice"
+            rows.append(dict(base, real=None, ours=None, gap=None, signed_gap=None, ruler=[], ruler_strict=[], inside_loose=None, inside_strict=None,
+                             other_instruments_and_articulations=[], not_applicable=UNVOICED_NA[mid], note=f'{spec["note"]} Not applicable: {why}.'))
+            continue
+        key, k = spec["value"], spec["scale"]
+        sc = lambda v: None if v is None else v * k  # noqa: E731
+        ruler_rows = [dict(label=r["label"], value=r["gaps"][mid] * k) for c in spec["cats"] for r in ruler.get(c, []) if r["gaps"].get(mid) is not None]
+        strict_rows = [dict(label=r["label"], value=r["gaps"][mid] * k) for c in spec["cats"] if c in SAME_NOTE for r in ruler.get(c, [])
+                       if r["gaps"].get(mid) is not None]
+        gap = sc(gaps[mid][0])
+        rows.append(dict(base, real=sc(rs.get(key)) if key else None, ours=sc(rv.get(key)) if key else None, gap=gap, signed_gap=sc(gaps[mid][1]),
+                         ruler=ruler_rows, ruler_strict=strict_rows, inside_loose=_inside(gap, ruler_rows), inside_strict=_inside(gap, strict_rows),
+                         other_instruments_and_articulations=[], note=UNVOICED_NOTES.get(mid, spec["note"])))
+    return rows
+
+
 # ------------------------------------------------------------------------------- reference access
 FAMILY = {"clarinet": "clarinet", "altosax": "saxophone", "tenortrombone": "trombone", "doublebass": "double-bass"}
 INST = {v: k for k, v in FAMILY.items()}
@@ -738,11 +872,51 @@ def canon_art(arts):
     return sorted(arts)[0]
 
 
+def real_number(v):
+    """True for a finite int or float that is not a bool (JSON's true is not a number of pascals or seconds)."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def unvoiced_entry_problem(e, lib_path):
+    """The typed reason unvoiced library entry `e` cannot be graded, or None: no MIDI note; a file name; a segment of real
+    seconds, 0 <= start < end; and the text labels the ruler and the pair read (name, inst, art, dyn)."""
+    f = e.get("file")
+    if e.get("note") is not None:
+        return f"IRPDECOMP_UNVOICED_NOTE: {lib_path}: {f!r}: an entry marked unvoiced carries no MIDI note, and this one carries {e['note']!r}"
+    if not (isinstance(f, str) and f):
+        return f"IRPDECOMP_UNVOICED_ENTRY: {lib_path}: an unvoiced entry has no file name (file {f!r})"
+    if not (real_number(e.get("start")) and real_number(e.get("end")) and 0 <= e["start"] < e["end"]):
+        return (f"IRPDECOMP_UNVOICED_ENTRY: {lib_path}: {f}: its segment must be real seconds with 0 <= start < end, "
+                f"not start {e.get('start')!r} and end {e.get('end')!r}")
+    bad = [k for k in ("name", "inst", "art", "dyn") if not isinstance(e.get(k), str)]
+    if bad:
+        return f"IRPDECOMP_UNVOICED_ENTRY: {lib_path}: {f}: {', '.join(bad)} must be text (the ruler and the pair read them)"
+    return None
+
+
 class Refs:
     """Library entries and their audio: raw files cached, notes analysed on demand."""
 
     def __init__(self, lib_path, wav_dir, refs_json=None):
-        self.lib = json.loads(Path(lib_path).read_text())
+        try:
+            self.lib = json.loads(Path(lib_path).read_text())
+        except ValueError as e:  # text that is not JSON; a file that cannot be read stays an OSError, the run's own trouble
+            raise ValueError(f"IRPDECOMP_LIBRARY_SHAPE: {lib_path} is not JSON ({e})") from None
+        if not isinstance(self.lib, list) or not all(isinstance(e, dict) for e in self.lib):
+            raise ValueError(f"IRPDECOMP_LIBRARY_SHAPE: {lib_path} is not a list of entry objects")
+        # An entry marked unvoiced has no MIDI note (a fricative, a flow rig's noise). It is graded only by pair --unvoiced,
+        # chosen by its file, and is kept out of `lib`, so no pitched note's lookup or ruler ever reads it. An unvoiced entry
+        # that cannot be graded (it carries a note, or its file, segment or labels are unusable) is set aside with its typed
+        # reason in `unvoiced_refused`: a pair that names it is refused with that reason, and the rest of the library serves.
+        self.unvoiced, self.unvoiced_refused = [], []
+        for e in self.lib:
+            if e.get("unvoiced"):
+                why = unvoiced_entry_problem(e, lib_path)
+                if why:
+                    self.unvoiced_refused.append((e["file"] if isinstance(e.get("file"), str) else None, why))
+                else:
+                    self.unvoiced.append(e)
+        self.lib = [e for e in self.lib if not e.get("unvoiced")]
         self.wav_dir = Path(wav_dir)
         self.refs_json = refs_json  # the manifest: also where a recording chain finds its session (session_chain)
         self.meta, self.external = {}, None
@@ -758,6 +932,7 @@ class Refs:
             for e in manifest["files"]:
                 self.meta[Path(e["path"]).stem.replace(" ", "")] = dict(page=e["page"], chain=e["chain"], id=e["id"], name=Path(e["path"]).name)
         self._raw, self._floor, self._notes = OrderedDict(), {}, OrderedDict()
+        self._unvoiced_notes = OrderedDict()
         self.band_hz = None  # set per pair by run_pair: every signal read through this Refs is low-passed there
 
     def info_of(self, e):
@@ -847,6 +1022,43 @@ class Refs:
                 except (OnsetMisaligned, GraderRefusalError, ValueError, IndexError, KeyError):
                     continue
                 rows.append(dict(label=self.label(cat, e, t), with_=f'{e["file"]}@{e["name"]}.{e["dyn"]}', gaps={k: v[0] for k, v in gp.items()}))
+            out[cat] = rows
+        return out
+
+    def unvoiced_segment(self, e):
+        """The samples of unvoiced entry `e`: the whole file high-passed at the fixed unvoiced corner, then its library segment
+        [start, end] (at most MAX_S). A noise has no onset to align on and no pitch to set a corner by, so nothing is detected."""
+        x = self.raw(e["file"])
+        a, b = int(round(e["start"] * SR)), int(round(e["end"] * SR))
+        if not 0 <= a < b <= len(x):
+            raise GraderRefusalError(f"IRPDECOMP_SEGMENT_OUTSIDE: {e['file']} lasts {len(x) / SR:.3f} s; its library segment is {e['start']}-{e['end']} s")
+        return unvoiced_highpass(x)[a:min(b, a + int(MAX_S * SR))]
+
+    def unvoiced_note(self, e):
+        key = (e["file"], e["start"], e["end"], self.band_hz)
+        if key not in self._unvoiced_notes:
+            self._unvoiced_notes[key] = UnvoicedNote(self.unvoiced_segment(e), f'{e["file"]}@{e["name"]}.{e["dyn"]}', e.get("full_scale_pa"), self.band_hz)
+            while len(self._unvoiced_notes) > 16:
+                self._unvoiced_notes.popitem(last=False)
+        return self._unvoiced_notes[key]
+
+    def unvoiced_ruler(self, t, max_each=4):
+        """{category: [{label, with_, gaps}]} for unvoiced entry `t`: the other unvoiced recordings of the same sound (instrument,
+        articulation and name), real against real. A noise has no neighbouring note, so the loose ruler is the strict one."""
+        tn = self.unvoiced_note(t)
+        same = [e for e in self.unvoiced if e["inst"] == t["inst"] and e["art"] == t["art"] and e["name"] == t["name"] and e is not t]
+        cats = OrderedDict(other_dynamic=[e for e in same if e["dyn"] != t["dyn"]][:max_each],
+                           other_take=[e for e in same if e["dyn"] == t["dyn"] and e["file"] != t["file"]][:max_each])
+        labels = dict(other_dynamic=lambda e: f'{e["dyn"]} against {t["dyn"]}, the same sound', other_take=lambda e: f'another recording of {t["name"]} {t["dyn"]} ({Path(e["file"]).stem})')
+        out = OrderedDict()
+        for cat, es in cats.items():
+            rows = []
+            for e in es:
+                try:
+                    gp = compare_unvoiced(self.unvoiced_note(e), tn)
+                except (GraderRefusalError, ValueError, IndexError, KeyError):
+                    continue
+                rows.append(dict(label=labels[cat](e), with_=f'{e["file"]}@{e["name"]}.{e["dyn"]}', gaps={k: v[0] for k, v in gp.items()}))
             out[cat] = rows
         return out
 
@@ -1304,6 +1516,93 @@ def run_pair(refs, c, root):
                       cand_meta, receipt)
 
 
+def pick_unvoiced(refs, ref_file):
+    """The one unvoiced library entry whose file is `ref_file` (its name with or without the extension, or its path): no MIDI note is read.
+    An entry the library set aside (Refs.unvoiced_refused) is refused with its own typed reason."""
+    if not (isinstance(ref_file, str) and ref_file):
+        raise GraderRefusalError(f"IRPDECOMP_USAGE: an unvoiced pair names its recording by ref_file (it has no note to look one up by), not {ref_file!r}")
+    for f, why in refs.unvoiced_refused:
+        if f is not None and ref_file in (f, Path(f).name, Path(f).stem):
+            raise GraderRefusalError(why)
+    hits = [e for e in refs.unvoiced if ref_file in (e["file"], Path(e["file"]).name, Path(e["file"]).stem)]
+    if not hits:
+        raise SystemExit(f"IRPDECOMP_REFERENCE_MISSING: no unvoiced library entry has the file {ref_file!r}")
+    if len(hits) > 1:
+        raise SystemExit(f"IRPDECOMP_REFERENCE_AMBIGUOUS: {len(hits)} unvoiced library entries have the file {ref_file!r}")
+    return hits[0]
+
+
+def run_unvoiced(refs, c, root):
+    """One render against an unvoiced library entry. The recording is its entry's segment, the render its own last span of the same
+    length (both high-passed at the fixed unvoiced corner first, the whole file at once); no onset is detected on either."""
+    refs.band_hz = c.get("band_hz")
+    ref_e = c.get("ref_entry") or pick_unvoiced(refs, c.get("ref_file"))
+    try:
+        raw = load(Path(c["wav"]))
+    except OSError as e:
+        raise GraderRefusalError(f"IRPDECOMP_RENDER_UNREADABLE: {c['wav']}: {e}") from None
+    if refs.band_hz:
+        raw = lowpass(raw, refs.band_hz)
+    ref_y = refs.unvoiced_segment(ref_e)
+    if len(raw) < len(ref_y):
+        raise GraderRefusalError(f"IRPDECOMP_RENDER_SHORT: the render lasts {len(raw) / SR:.3f} s and the recording's segment {len(ref_y) / SR:.3f} s; "
+                                 "an unvoiced pair compares the render's last span of the segment's length")
+    start = len(raw) - len(ref_y)
+    cand_y = unvoiced_highpass(raw)[start:]
+    ours_meta = dict(wav=c["wav"], git_sha=c["git_sha"], observer=c["observer"], recipe=c["recipe"], sample_rate=wav_sample_rate(c["wav"]),
+                     full_scale_pa=c.get("full_scale_pa"))
+    cand_meta = dict(note=c["note"], slot=c.get("slot"), unvoiced=True, ref_file=Path(ref_e["file"]).name, dyn=ref_e["dyn"], band_hz=c.get("band_hz"),
+                     full_scale_pa=c.get("full_scale_pa"))  # what a regrade needs to rebuild the same candidate
+    final = Path(root) / c["family"] / (c.get("slot") or c["note"])
+    return staged(final, lambda stage: _write_unvoiced_staged(stage, c["family"], c.get("slot") or c["note"], ref_e, refs, ref_y, cand_y, start / SR,
+                                                              ours_meta, cand_meta))
+
+
+def _write_unvoiced_staged(stage, family, slot, ref_e, refs, ref_y, cand_y, ours_start_s, ours_meta, cand_meta):
+    real = UnvoicedNote(ref_y, "real", ref_e.get("full_scale_pa"), refs.band_hz)
+    ours = UnvoicedNote(cand_y, "ours", ours_meta.get("full_scale_pa"), refs.band_hz)
+    nf = min(real.frames, ours.frames)
+    dur = nf * HOP / SR
+    off = real.level_db - ours.level_db
+    ns = int(round(dur * SR))
+    yr, yo = ref_y[:ns], cand_y[:ns] * 10 ** (off / 20)
+    g = 0.7 / max(np.abs(yr).max(), np.abs(yo).max())
+    write_wav(stage / "real.wav", yr * g)
+    write_wav(stage / "ours.wav", yo * g)
+    gaps = compare_unvoiced(ours, real)
+    ruler = refs.unvoiced_ruler(ref_e)
+    metrics = unvoiced_metric_rows(gaps, real, ours, ruler)
+    top_hz = float(refs.band_hz) if refs.band_hz else F_HI
+    figs = dict(spectrogram=map_images("spectrogram", real, ours, off, stage, F_LO, top_hz),
+                scalogram=map_images("scalogram", real, ours, off, stage, 60.0, top_hz))
+    info = refs.info_of(ref_e)
+    level = ("" if "level_db" in gaps else
+             " No level row: " + " and ".join(w for w, s in (("the library entry declares no full_scale_pa", real.full_scale_pa), ("the render no --full-scale-pa", ours.full_scale_pa)) if s is None) + ".")
+    pj = dict(
+        schema="frankensim.instrument-pair.v1", family=family, note=slot, dynamic=ref_e["dyn"], duration_s=round(dur, 4),
+        real=dict(reference_id=info.get("id"), file=info.get("name"), segment_s=[round(ref_e["start"], 4), round(ref_e["start"] + dur, 4)],
+                  **({"source": dict(refs.external, id=info.get("id"))} if refs.external else {})),
+        ours=dict(wav=str(ours_meta["wav"]), git_sha=ours_meta["git_sha"], observer=ours_meta["observer"], sample_rate=ours_meta["sample_rate"],
+                  recipe=ours_meta["recipe"], **({"full_scale_pa": ours_meta["full_scale_pa"]} if ours_meta.get("full_scale_pa") is not None else {})),
+        audio=dict(real="real.wav", ours="ours.wav",
+                   level_match=((f"Both clips are low-passed at {refs.band_hz:.0f} Hz (the render is valid only below it). " if refs.band_hz else "")
+                                + f"Both clips are high-passed at {UNVOICED_HP_HZ[1]:.0f} Hz. One shared gain of {20 * math.log10(g):+.1f} dB puts the louder clip "
+                                f"at 0.70 of full scale; ours was set {off:+.1f} dB beforehand so its mean power over the whole clip equals the recording's.")),
+        alignment=dict(onset_real_s=None, onset_ours_s=None, highpass_hz=UNVOICED_HP_HZ[1], level_offset_db=off, band_hz=refs.band_hz,
+                       segment_ours_s=[round(ours_start_s, 4), round(ours_start_s + dur, 4)],
+                       method="unvoiced: no onset is detected; the recording is its library segment, the render its last span of the same length"),
+        figures=figs, partials=None, metrics=metrics, verdicts=verdict_counts(metrics),
+        ruler_with={cat: [r["with_"] for r in rs] for cat, rs in ruler.items()},
+        decompose=dict(version=DECOMPOSE_VERSION, grader=GRADER_VERSION, library_note=f'{ref_e["file"]}@{ref_e["name"]}.{ref_e["dyn"]}', candidate=cand_meta,
+                       mode="unvoiced", not_applicable=dict(UNVOICED_NA),
+                       method="The measures that need no pitch, each as a voiced pair computes it, on the whole segment: no onset alignment, the "
+                              f"{UNVOICED_HP_HZ[1]:.0f} Hz high-pass a note of 100 Hz and up gets, the 4096-point STFT, the cepstral lifter at its 20 Hz floor (30 ms)."
+                              + level),
+    )
+    (stage / "pair.json").write_text(json.dumps(clean(pj), indent=1, allow_nan=False))
+    return pj
+
+
 _REFS = None
 
 
@@ -1395,10 +1694,29 @@ def _ref_job(args):
     return dict(family=c["family"], art=c["art"], ok=False, refused=refused)
 
 
+def _say_set_aside(refs):
+    for _, why in refs.unvoiced_refused:
+        print(f"set aside: {why}", file=sys.stderr)
+
+
+def _library(a):
+    """The command's library, or a typed exit with no Traceback: a library that cannot be read or used stops the command before
+    any note is graded, and nothing is recorded (the reason is the library's, not a note's). Unvoiced entries it set aside are
+    printed; the rest of the library serves."""
+    try:
+        refs = Refs(a.lib, a.wav_dir, a.refs_json)
+    except OSError as e:  # the run's own trouble, as everywhere: reported, never recorded as a refusal
+        raise SystemExit(f"IRPDECOMP_LIBRARY_UNREADABLE: {e}") from None
+    except REFUSALS as e:
+        raise SystemExit(f"{e}\n(the library cannot be used: nothing was graded or recorded)") from None
+    _say_set_aside(refs)
+    return refs
+
+
 def cmd_refs(a):
     """Reference-only pairs (ours null): four spread notes per family, mf, canonical articulation. A note whose
     onset or pitch does not verify emits nothing and the next-nearest note stands in; the refusal is printed."""
-    refs = Refs(a.lib, a.wav_dir, a.refs_json)
+    refs = _library(a)
     jobs = []
     for inst in sorted({e["inst"] for e in refs.lib}):
         fam = family_of(inst)
@@ -1431,26 +1749,39 @@ def cmd_refs(a):
 
 
 def cmd_pair(a):
-    refs = Refs(a.lib, a.wav_dir, a.refs_json)
     c = dict(family=a.family, note=a.note, dyn=a.dyn, art=a.art, ref_contains=a.ref_contains, band_hz=a.band_hz, wav=a.render, git_sha=a.git_sha, observer=a.observer, recipe=a.recipe, review=a.review,
              chain_refdir=a.chain_refdir)
     if not all((a.render, a.git_sha, a.observer, a.recipe)):
         raise SystemExit("IRPDECOMP_USAGE: a render needs --git-sha, --observer and --recipe (the page shows them)")
+    if a.unvoiced:
+        if not a.ref_file:
+            raise SystemExit("IRPDECOMP_USAGE: an unvoiced pair names its recording by --ref-file (it has no note to look one up by)")
+        unused = [f for f, v in (("--art", a.art), ("--ref-contains", a.ref_contains), ("--chain-refdir", a.chain_refdir), ("--review", a.review)) if v]
+        if unused:
+            raise SystemExit(f"IRPDECOMP_USAGE: an unvoiced pair does not take {', '.join(unused)}")
+        c = dict(family=a.family, note=a.note, slot=a.slot, ref_file=a.ref_file, band_hz=a.band_hz, wav=a.render, git_sha=a.git_sha, observer=a.observer,
+                 recipe=a.recipe, full_scale_pa=a.full_scale_pa)
+    elif a.ref_file or a.full_scale_pa is not None:
+        raise SystemExit("IRPDECOMP_USAGE: --ref-file and --full-scale-pa belong to --unvoiced")
+    elif a.slot:
+        c["slot"] = a.slot
+    name = a.slot or a.note
+    refs = _library(a)  # after the usage checks; a library fault is not the note's: typed, and the live pair is left as it is
     try:
-        pj = run_pair(refs, c, a.out)
+        pj = run_unvoiced(refs, c, a.out) if a.unvoiced else run_pair(refs, c, a.out)
     except REFUSALS as e:
-        refuse_pair(a.out, a.family, a.note, e, a.git_sha, a.render, a.dyn)
-        raise SystemExit(f"{e}\n(recorded as a refusal in {a.out}/{a.family}/{a.note}/pair.json)")
+        refuse_pair(a.out, a.family, name, e, a.git_sha, a.render, None if a.unvoiced else a.dyn)
+        raise SystemExit(f"{e}\n(recorded as a refusal in {a.out}/{a.family}/{name}/pair.json)")
     for m in pj["metrics"]:
         top = max((r["value"] for r in m["ruler"]), default=None)
-        verdict = "no ruler" if top is None else ("inside" if m["gap"] is not None and m["gap"] <= top else "outside")
+        verdict = f'not applicable: {m["not_applicable"]}' if m.get("not_applicable") else "no ruler" if top is None else ("inside" if m["gap"] is not None and m["gap"] <= top else "outside")
         print(f'{m["id"]:20s} gap {m["gap"] if m["gap"] is None else round(m["gap"], 3)!s:>9} {m["gap_unit"]:16s} real-vs-real max {top if top is None else round(top, 3)!s:>9}  {verdict}')
 
 
 def _batch_job(args):
     c, root = args
     try:
-        pj = run_listening(c, root) if c.get("listening_only") else run_pair(_REFS, c, root)
+        pj = run_listening(c, root) if c.get("listening_only") else run_unvoiced(_REFS, c, root) if c.get("unvoiced") else run_pair(_REFS, c, root)
         return dict(family=c["family"], note=c.get("slot") or c["note"], wav=c["wav"], ok=True, metrics=len(pj["metrics"]))
     except REFUSALS as e:
         refuse_pair(root, c["family"], c.get("slot") or c["note"], e, c.get("git_sha"), c.get("wav"), c.get("dyn"))
@@ -1472,6 +1803,7 @@ def cmd_listen(a):
 
 def cmd_batch(a):
     """Pair for every candidate in a JSON list of {family, note, wav, git_sha, observer, recipe, [dyn, art, ref_contains]}."""
+    _library(a)  # a library that cannot be used stops the batch here, typed, before any worker starts
     jobs = [(dict(c, dyn=c.get("dyn", "mf"), **({"chain_refdir": a.chain_refdir} if a.chain_refdir else {})), a.out)
             for c in json.loads(Path(a.candidates).read_text())]
     if a.jobs > 1:
@@ -1494,14 +1826,18 @@ def pair_report(pj):
         ratio = None if m["gap"] is None or not top else m["gap"] / top
         rows.append((ratio, m, top))
     rows.sort(key=lambda r: (r[0] is None, -(r[0] or 0)))
-    o = pj["ours"]
+    o, al = pj["ours"], pj["alignment"]
+    # an unvoiced pair has no onset (both null) and its measures that need a pitch are not applicable: shown as n/a, never formatted as numbers
+    level = "level n/a" if al.get("level_offset_db") is None else f'ours set {al["level_offset_db"]:+.1f} dB'
+    onset = ("onset n/a" if al.get("onset_ours_s") is None or al.get("onset_real_s") is None
+             else f'onset {al["onset_ours_s"]:.3f} s / {al["onset_real_s"]:.3f} s')
     out = [f'{pj["family"]} {pj["note"]} {pj["dynamic"]}  ours {Path(o["wav"]).name} @{o["git_sha"]}  vs {pj["real"]["file"]}  '
-           f'(ours set {pj["alignment"]["level_offset_db"]:+.1f} dB; onset {pj["alignment"]["onset_ours_s"]:.3f} s / {pj["alignment"]["onset_real_s"]:.3f} s)',
+           f'({level}; {onset})',
            f'  {"metric":34s} {"real":>10s} {"ours":>10s} {"gap":>9s}  {"ruler max":>9s} {"gap/max":>7s}']
     for ratio, m, top in rows:
         f = lambda v: "-" if v is None else f"{v:.4g}"  # noqa: E731
         out.append(f'  {m["label"] + " [" + m["gap_unit"] + "]":34.34s} {f(m["real"]):>10s} {f(m["ours"]):>10s} {f(m["gap"]):>9s}  {f(top):>9s} '
-                   f'{("x" + format(ratio, ".2f")) if ratio is not None else "no ruler":>7s}')
+                   f'{("x" + format(ratio, ".2f")) if ratio is not None else "n/a" if m.get("not_applicable") else "no ruler":>7s}')
     return "\n".join(out)
 
 
@@ -1584,6 +1920,11 @@ def main():
     p.add_argument("--recipe")
     p.add_argument("--chain-refdir", help="put the render through its reference session's recording chain (chain.py), reading the session's "
                                            "fetched files here (FRANKENSIM_REFERENCE_DIR); there is no default chain")
+    p.add_argument("--slot", help="directory and note id of the pair when it differs from --note (a vowel at C3: C3-a; a fricative: s1-11-s-rig)")
+    p.add_argument("--unvoiced", action="store_true", help="grade against an UNVOICED library entry (no pitch) named by --ref-file: only the measures "
+                                                           "that need no pitch; --note is then a label, never read as a pitch")
+    p.add_argument("--ref-file", help="with --unvoiced: the library entry's file (name, stem or path)")
+    p.add_argument("--full-scale-pa", type=float, help="with --unvoiced: the pressure [Pa] of the render's full scale, for the level row")
     p.set_defaults(fn=cmd_pair)
     p = sub.add_parser("listen", help="a render with no recording to compare it with: audio, maps and the reason, no gaps")
     p.add_argument("--render", required=True)

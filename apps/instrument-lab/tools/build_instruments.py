@@ -42,7 +42,8 @@ A reference-only pair (no render yet) has "ours": null and no ours/diff files.
                   Aligned at the onset, trimmed to duration_s, and already loudness-matched: the page applies no
                   gain. The generator refuses a clip whose peak reaches full scale, or whose length is not
                   duration_s.
-  alignment       {onset_real_s, onset_ours_s | null, highpass_hz, level_offset_db | null}   (shown, not used)
+  alignment       {onset_real_s | null, onset_ours_s | null, highpass_hz, level_offset_db | null}   (shown, not used)
+                  Both onsets are null on an unvoiced pair (below), which adds segment_ours_s: [t0, t1] of the render.
   figures         {spectrogram: F, scalogram: F} with F = {real, ours | null, diff | null,   (png | webp | jpg)
                                                           f_lo_hz, f_hi_hz, span_db, diff_range_db}
                   Bare maps: no axes, titles or colour bar. x = time 0..duration_s linear, y = frequency
@@ -78,6 +79,13 @@ figures {spectrogram: F, scalogram: F} with F = {real: null, ours, diff: null, f
 alignment null, partials null, metrics []. Anything else on such a pair is refused. The card shows our audio and our
 spectrogram and scalogram, no metrics and no recording credit, and a family with only such notes reads "Rendered, no
 reference to grade against". Next to graded notes they do not change the family's badge.
+
+An UNVOICED pair (decompose.py pair --unvoiced: a recording with no pitch, a fricative or a flow rig's noise) is a
+pair with a render whose real.segment_s is the library entry's segment and whose partials are null. Its alignment has
+both onsets null and segment_ours_s, the render's last span of the same length. A measure that needs a pitch or an onset
+is a row with gap null, ruler [] and inside_loose / inside_strict null, plus "not_applicable": a short reason, and its
+note says why. This generator does not read not_applicable: such a row has no gap, so verdicts.measures and the badge
+never count it.
 
 --only FAMILY=NOTE,NOTE shows just those notes of a family (the review build's file limit). The others get no files, are
 listed on the card as card.withheld, and are in no badge: the badge covers exactly the notes the page shows.

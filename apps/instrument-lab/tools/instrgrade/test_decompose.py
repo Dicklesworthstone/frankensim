@@ -1317,5 +1317,359 @@ class FileFloorOrderTests(unittest.TestCase):
             self.assertFalse(np.array_equal(dc.highpass(x, f0), ref), f"highpass is the same at {f0} Hz")
 
 
+def shaped_noise(dur, peak_hz=6000.0, seed=1, rms=0.05):
+    """Stationary noise with one broad spectral peak (a fricative's shape, roughly): white noise weighted by a Gaussian in log2 f."""
+    n = int(round(dur * SR))
+    X = np.fft.rfft(np.random.default_rng(seed).standard_normal(n))
+    f = np.fft.rfftfreq(n, 1 / SR)
+    X *= np.exp(-0.5 * (np.log2(np.maximum(f, 1.0) / peak_hz) / 0.5) ** 2) + 0.01
+    y = np.fft.irfft(X, n)
+    return y * rms / np.sqrt(np.mean(y * y))
+
+
+UNVOICED_COMPUTED = ("env_db", "stft_lsd_db", "cwt_lsd_db", "cepstral_env_db", "centroid_st", "flux_db")
+
+
+class UnvoicedTests(unittest.TestCase):
+    """pair --unvoiced: a recording with no pitch (a fricative, a flow rig's noise), chosen by its file, graded only on the measures
+    that need no pitch, its pitch measures written not_applicable and counted nowhere; and the voiced path beside it unchanged."""
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        from instrgrade import write_wav
+        cls.tmp = Path(tempfile.mkdtemp())
+        wav = cls.tmp / "wav"
+        wav.mkdir()
+        write_wav(wav / "noise-a.wav", shaped_noise(4.0, seed=1))
+        write_wav(wav / "noise-b.wav", shaped_noise(4.0, seed=2))  # another take of the same sound: the ruler
+        cls.seg = shaped_noise(2.0, seed=4)
+        write_wav(wav / "noise-seg.wav", cls.seg)  # a file that is exactly its segment, for the planted level
+        write_wav(wav / "Syn.mf.A3.wav", np.concatenate([np.zeros(SR), tone(f0=F0, dur=2.0, lead=0.0, attack=0.04), np.zeros(SR)]))
+        entry = dict(name="s", kind="sustained", inst="rig", art="", dyn="mf", sul="", mallet="", range="", desc={}, note=None, unvoiced=True, full_scale_pa=12.62)
+        lib = [dict(entry, file="noise-a.wav", start=1.0, end=3.0), dict(entry, file="noise-b.wav", start=1.0, end=3.0),
+               dict(entry, file="noise-seg.wav", name="z", start=0.0, end=2.0),
+               dict(file="Syn.mf.A3.wav", start=0.995, end=3.2, note=57, name="A3", kind="sustained", inst="syn", art="", dyn="mf", sul="", mallet="", range="A3", desc={})]
+        (cls.tmp / "lib.json").write_text(json.dumps(lib))
+        (cls.tmp / "refs.json").write_text(json.dumps({
+            "external": dict(name="A synthetic rig", url="https://example.org/rig", licence="CC0 1.0", licence_url="https://creativecommons.org/publicdomain/zero/1.0/",
+                             credit="synthetic noise for the tests"),
+            "files": [dict(path=f"x/{s}.wav", page="p.html", chain="c", id=s, licence="test-cc0") for s in ("noise-a", "noise-b", "noise-seg")]
+                     + [dict(path="x/Syn.mf.A3.aiff", page="p.html", chain="c", id="syn-mf", licence="uiowa-mis")]}))
+        cls.refs = dc.Refs(cls.tmp / "lib.json", wav, cls.tmp / "refs.json")
+        cls.render = cls.tmp / "render.wav"
+        write_wav(cls.render, shaped_noise(3.0, seed=3, rms=0.02))
+        cls.shifted = cls.tmp / "shifted.wav"
+        write_wav(cls.shifted, shaped_noise(3.0, peak_hz=2500.0, seed=3, rms=0.02))
+
+    def c(self, **kw):
+        c = dict(family="rig", note="s", slot="s-test", ref_file="noise-a.wav", wav=str(self.render), git_sha="abc", observer="rig mic", recipe="r.sh", full_scale_pa=1.0)
+        c.update(kw)
+        return c
+
+    def validate(self, root, family, note):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        import build_instruments as bi
+        import json
+        base = Path(root) / family / note
+        pj = json.loads((base / "pair.json").read_text())
+        self.assertEqual(bi.validate_pair(pj, family, note, base, REFERENCE_ENTRIES) + bi.check_audio(base, pj), [])
+        return pj
+
+    def test_planted_noise_pitch_measures_are_not_applicable_and_the_others_finite(self):
+        root = self.tmp / "u1"
+        dc.run_unvoiced(self.refs, self.c(), root)
+        pj = self.validate(root, "rig", "s-test")
+        by = {m["id"]: m for m in pj["metrics"]}
+        for mid, why in dc.UNVOICED_NA.items():
+            m = by[mid]
+            self.assertEqual(m["not_applicable"], why)
+            self.assertEqual((m["gap"], m["real"], m["ours"], m["ruler"], m["ruler_strict"], m["inside_loose"], m["inside_strict"]), (None, None, None, [], [], None, None))
+        self.assertEqual({"spec_db", "harm_db", "partial_traj_db", "partial_freq_cents", "f0_cents", "inharmonicity_B", "odd_even_db", "hnr_db"},
+                         {k for k, v in dc.UNVOICED_NA.items() if v == "unvoiced"})
+        for mid in UNVOICED_COMPUTED + ("level_db",):
+            m = by[mid]
+            self.assertNotIn("not_applicable", m)
+            self.assertTrue(math.isfinite(m["gap"]) and m["gap"] >= 0, (mid, m["gap"]))
+            self.assertEqual(len(m["ruler"]), 1, mid)  # noise-b, the other take; noise-seg is another sound ("z")
+            self.assertIn("another recording", m["ruler"][0]["label"])
+            self.assertEqual(m["ruler"], m["ruler_strict"])  # no neighbouring note: the loose ruler is the strict one
+        self.assertNotIn("decay_db_s", by)
+        self.assertEqual(set(by), set(dc.UNVOICED_NA) | set(UNVOICED_COMPUTED) | {"level_db"})
+        self.assertEqual(pj["verdicts"]["measures"], 7)
+        self.assertEqual(sum(pj["verdicts"]["loose"].values()), 7)
+        self.assertIsNone(pj["partials"])
+        self.assertEqual(pj["decompose"]["mode"], "unvoiced")
+        self.assertEqual(pj["dynamic"], "mf")
+        self.assertEqual(pj["real"]["segment_s"][0], 1.0)
+        self.assertEqual(pj["alignment"]["segment_ours_s"][0], 1.0)  # the 3 s render's last 2 s
+        self.assertEqual(pj["alignment"]["highpass_hz"], 50.0)
+        self.assertEqual(pj["real"]["source"]["id"], "noise-a")
+        self.assertEqual(pj["decompose"]["candidate"]["ref_file"], "noise-a.wav")
+
+    def test_a_different_shape_is_further_than_another_take_of_the_same_one(self):
+        root = self.tmp / "u2"
+        pj = dc.run_unvoiced(self.refs, self.c(wav=str(self.shifted)), root)
+        env = next(m for m in pj["metrics"] if m["id"] == "env_db")
+        cen = next(m for m in pj["metrics"] if m["id"] == "centroid_st")
+        self.assertGreater(env["gap"], 3 * env["ruler"][0]["value"])
+        self.assertFalse(env["inside_loose"])
+        self.assertLess(cen["signed_gap"], -3.0)  # the peak moved down by more than an octave: the centroid falls
+
+    def test_the_level_row_reads_the_planted_pressure_and_nothing_else_moves(self):
+        from instrgrade import write_wav
+        root = self.tmp / "u3"
+        wav = self.tmp / "half.wav"
+        write_wav(wav, self.seg * (12.62 / 2.0) * 0.5)  # the recording's own samples at half its pressure, on a 2 Pa full scale
+        pj = dc.run_unvoiced(self.refs, self.c(ref_file="noise-seg", wav=str(wav), full_scale_pa=2.0, slot="z-half"), root)
+        by = {m["id"]: m for m in pj["metrics"]}
+        self.assertAlmostEqual(by["level_db"]["signed_gap"], -20 * math.log10(2.0), delta=1e-3)
+        self.assertAlmostEqual(by["level_db"]["real"] - by["level_db"]["ours"], 20 * math.log10(2.0), delta=2e-3)
+        for mid in UNVOICED_COMPUTED:
+            self.assertLess(by[mid]["gap"], 0.05, mid)
+        self.assertEqual(by["level_db"]["ruler"], [])  # noise-seg's sound "z" has no other take
+        self.assertIsNone(by["level_db"]["inside_loose"])
+
+    def test_without_a_declared_scale_there_is_no_level_row_and_the_pair_says_why(self):
+        root = self.tmp / "u4"
+        pj = dc.run_unvoiced(self.refs, self.c(full_scale_pa=None), root)
+        self.assertNotIn("level_db", {m["id"] for m in pj["metrics"]})
+        self.assertIn("No level row: the render no --full-scale-pa.", pj["decompose"]["method"])
+        self.assertNotIn("full_scale_pa", pj["ours"])
+        self.assertEqual(pj["verdicts"]["measures"], 6)
+
+    def test_a_slot_name_is_a_typed_refusal_not_a_crash(self):
+        import json
+        with self.assertRaisesRegex(dc.GraderRefusalError, "IRPDECOMP_NO_PITCH: 's1-11-s-rig' is not a note name"):
+            dc.midi_of("s1-11-s-rig")
+        self.assertTrue(issubclass(dc.GraderRefusalError, dc.REFUSALS))
+        root = self.tmp / "u5"
+        dc._REFS = self.refs
+        res = dc._batch_job((dict(family="rig", note="s1-11-s-rig", dyn="mf", wav=str(self.render), git_sha="abc", observer="o", recipe="r"), root))
+        dc._REFS = None
+        self.assertFalse(res["ok"])
+        self.assertIn("IRPDECOMP_NO_PITCH", json.loads((root / "rig" / "s1-11-s-rig" / "pair.json").read_text())["refused"]["reason"])
+
+    def test_a_voiced_tone_grades_through_the_old_path_beside_unvoiced_entries(self):
+        from instrgrade import write_wav
+        self.assertEqual([e["file"] for e in self.refs.lib], ["Syn.mf.A3.wav"])
+        self.assertEqual(len(self.refs.unvoiced), 3)
+        render = self.tmp / "tone.wav"
+        write_wav(render, 0.3 * tone(f0=F0, dur=2.4, lead=0.2, noise_db=-85, cents=8))
+        root = self.tmp / "u6"
+        pj = dc.run_pair(self.refs, dict(family="syn", note="A3", dyn="mf", wav=str(render), git_sha="abc", observer="test", recipe="r.sh"), root)
+        self.validate(root, "syn", "A3")
+        by = {m["id"]: m for m in pj["metrics"]}
+        self.assertAlmostEqual(by["f0_cents"]["gap"], 8.0, delta=1.5)
+        self.assertFalse(any("not_applicable" in m for m in pj["metrics"]))
+        self.assertFalse(any("noise" in w for ws in pj["ruler_with"].values() for w in ws))
+        self.assertNotIn("mode", pj["decompose"])
+
+    def test_the_library_and_the_command_refuse_what_they_cannot_grade(self):
+        import json
+        bad = self.tmp / "bad-lib.json"
+        bad.write_text(json.dumps([dict(file="noise-a.wav", start=1.0, end=3.0, note=60, name="s", kind="sustained", inst="rig", art="", dyn="mf", unvoiced=True)]))
+        refs = dc.Refs(bad, self.tmp / "wav")  # the entry is set aside with its reason; the library itself still serves
+        self.assertEqual((refs.lib, refs.unvoiced, [f for f, _ in refs.unvoiced_refused]), ([], [], ["noise-a.wav"]))
+        self.assertIn("IRPDECOMP_UNVOICED_NOTE", refs.unvoiced_refused[0][1])
+        with self.assertRaisesRegex(dc.GraderRefusalError, "IRPDECOMP_UNVOICED_NOTE"):
+            dc.run_unvoiced(refs, self.c(), self.tmp / "u7")
+        with self.assertRaisesRegex(SystemExit, "IRPDECOMP_REFERENCE_MISSING"):
+            dc.run_unvoiced(self.refs, self.c(ref_file="no-such.wav"), self.tmp / "u7")
+        from instrgrade import write_wav
+        short = self.tmp / "short.wav"
+        write_wav(short, shaped_noise(1.0, seed=5))
+        with self.assertRaisesRegex(dc.GraderRefusalError, "IRPDECOMP_RENDER_SHORT"):
+            dc.run_unvoiced(self.refs, self.c(wav=str(short)), self.tmp / "u7")
+        with self.assertRaisesRegex(dc.GraderRefusalError, "IRPDECOMP_UNVOICED_SCALE"):
+            dc.run_unvoiced(self.refs, self.c(full_scale_pa=-1.0), self.tmp / "u7")
+
+    def test_an_unusable_entry_is_set_aside_with_its_typed_reason_and_the_rest_serves(self):
+        import json
+        import re
+        s = dict(name="s", kind="sustained", inst="rig", art="", dyn="mf", unvoiced=True)
+        lib = [dict(s, file="noise-a.wav", start=1.0, end=3.0, full_scale_pa=12.62),
+               dict(s, file="start-text.wav", start="1.0", end=3.0), dict(s, file="start-missing.wav", end=3.0),
+               dict(s, file="start-bool.wav", start=True, end=3.0), dict(s, file="start-nan.wav", start=float("nan"), end=3.0),
+               dict(s, file="end-first.wav", start=2.0, end=1.0), dict(s, file="name-number.wav", name=5, start=1.0, end=3.0),
+               dict(s, start=1.0, end=3.0)]  # the last has no file: set aside, and no pair can name it
+        p = self.tmp / "set-aside-lib.json"
+        p.write_text(json.dumps(lib))
+        refs = dc.Refs(p, self.tmp / "wav", self.tmp / "refs.json")
+        self.assertEqual([e["file"] for e in refs.unvoiced], ["noise-a.wav"])
+        self.assertEqual([f for f, _ in refs.unvoiced_refused], [e.get("file") for e in lib[1:]])
+        self.assertTrue(all(why.startswith("IRPDECOMP_UNVOICED_ENTRY: ") for _, why in refs.unvoiced_refused))
+        for e in lib[1:-1]:
+            with self.assertRaisesRegex(dc.GraderRefusalError, "IRPDECOMP_UNVOICED_ENTRY: .*" + re.escape(e["file"])):
+                dc.run_unvoiced(refs, self.c(ref_file=e["file"]), self.tmp / "u10")
+        for rf in (None, "", 5):  # a candidate that names no recording (a batch entry without ref_file)
+            with self.assertRaisesRegex(dc.GraderRefusalError, "IRPDECOMP_USAGE: an unvoiced pair names its recording by ref_file"):
+                dc.run_unvoiced(refs, self.c(ref_file=rf), self.tmp / "u10")
+        self.assertEqual(dc.run_unvoiced(refs, self.c(), self.tmp / "u10")["verdicts"]["measures"], 7)  # the good entry still grades
+
+    def test_a_scale_that_is_not_a_real_number_of_pascals_is_refused_on_either_side(self):
+        import json
+        for v in (True, False, "12.62", "abc", float("nan"), float("inf"), 0.0, -1.0, [1.0]):
+            with self.assertRaisesRegex(dc.GraderRefusalError, "IRPDECOMP_UNVOICED_SCALE: ours"):
+                dc.run_unvoiced(self.refs, self.c(full_scale_pa=v), self.tmp / "u11")
+        e = dict(name="s", kind="sustained", inst="rig", art="", dyn="mf", unvoiced=True, file="noise-a.wav", start=1.0, end=3.0)
+        p = self.tmp / "scale-lib.json"
+        for v in (True, "12.62", "abc"):
+            p.write_text(json.dumps([dict(e, full_scale_pa=v)]))
+            with self.assertRaisesRegex(dc.GraderRefusalError, "IRPDECOMP_UNVOICED_SCALE: real"):
+                dc.run_unvoiced(dc.Refs(p, self.tmp / "wav", self.tmp / "refs.json"), self.c(), self.tmp / "u11")
+
+    def test_the_commands_turn_a_bad_library_into_typed_refusals_with_no_traceback(self):
+        import json
+        import subprocess
+        from instrgrade import write_wav
+        root = self.tmp / "u12"
+
+        def run(cmd, lib, *a):
+            return subprocess.run([sys.executable, "-I", str(Path(dc.__file__)), cmd, "--lib", str(lib), "--wav-dir", str(self.tmp / "wav"),
+                                   "--refs-json", str(self.tmp / "refs.json"), "--out", str(root), *a], capture_output=True, text=True)
+
+        def typed(p, code):
+            self.assertEqual(p.returncode, 1, p.stderr)
+            self.assertNotIn("Traceback", p.stderr)
+            self.assertIn(code, p.stderr)
+
+        lib = json.loads((self.tmp / "lib.json").read_text())
+        planted = self.tmp / "planted-lib.json"  # noise-a now carries a MIDI note; noise-b, noise-seg and the voiced A3 are as before
+        planted.write_text(json.dumps([dict(lib[0], note=60)] + lib[1:]))
+        pair = ("--render", str(self.render), "--family", "rig", "--note", "s", "--git-sha", "abc", "--observer", "o", "--recipe", "r")
+        p = run("pair", planted, "--unvoiced", "--ref-file", "noise-a.wav", "--slot", "s-planted", *pair)
+        typed(p, "IRPDECOMP_UNVOICED_NOTE")
+        self.assertIn("set aside: IRPDECOMP_UNVOICED_NOTE", p.stderr)
+        self.assertIn("IRPDECOMP_UNVOICED_NOTE", json.loads((root / "rig" / "s-planted" / "pair.json").read_text())["refused"]["reason"])
+        p = run("pair", planted, "--unvoiced", "--ref-file", "noise-b.wav", "--slot", "s-other", "--full-scale-pa", "1.0", *pair)
+        self.assertEqual(p.returncode, 0, p.stderr)  # the library's other entries still serve, the voiced one too
+        tone_wav = self.tmp / "tone-cli.wav"
+        write_wav(tone_wav, 0.3 * tone(f0=F0, dur=2.4, lead=0.2, noise_db=-85, cents=8))
+        p = run("pair", planted, "--render", str(tone_wav), "--family", "syn", "--note", "A3", "--git-sha", "abc", "--observer", "o", "--recipe", "r")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        w = dict(family="rig", note="s", unvoiced=True, wav=str(self.render), git_sha="abc", observer="o", recipe="r", full_scale_pa=1.0)
+        cands = self.tmp / "cands.json"
+        cands.write_text(json.dumps([dict(w, slot="b-planted", ref_file="noise-a.wav"), dict(w, slot="b-noref"), dict(w, slot="b-ok", ref_file="noise-b.wav")]))
+        p = run("batch", planted, str(cands))
+        self.assertEqual(p.returncode, 1, p.stderr)
+        self.assertNotIn("Traceback", p.stderr)
+        res = [json.loads(line) for line in p.stdout.splitlines()]
+        self.assertEqual([r["ok"] for r in res], [False, False, True])
+        self.assertIn("IRPDECOMP_UNVOICED_NOTE", res[0]["error"])
+        self.assertIn("IRPDECOMP_USAGE", res[1]["error"])
+        for cmd, args in (("pair", ("--unvoiced", "--ref-file", "noise-b.wav", "--slot", "s-nolib", *pair)), ("batch", (str(cands),)), ("refs", ())):
+            typed(run(cmd, self.tmp / "no-such-lib.json", *args), "IRPDECOMP_LIBRARY_UNREADABLE")
+        self.assertFalse((root / "rig" / "s-nolib").exists())  # the run's own trouble: nothing is recorded
+        (self.tmp / "shape-lib.json").write_text(json.dumps({"entries": []}))
+        (self.tmp / "text-lib.json").write_text("not json")
+        for name in ("shape-lib.json", "text-lib.json"):
+            for cmd, args in (("pair", ("--unvoiced", "--ref-file", "noise-b.wav", "--slot", "s-shape", *pair)), ("batch", (str(cands),)), ("refs", ())):
+                p = run(cmd, self.tmp / name, *args)
+                typed(p, "IRPDECOMP_LIBRARY_SHAPE")
+                self.assertIn("nothing was graded or recorded", p.stderr)
+        self.assertFalse((root / "rig" / "s-shape").exists())  # a library fault is not the note's: nothing is recorded
+
+    def test_a_library_fault_leaves_the_live_pair_untouched(self):
+        """MB 18275: a good pair, rerun against a library that cannot be used, stops typed with no Traceback; its pair.json stays
+        byte-identical and no superseded/ is written. Voiced and unvoiced alike, for text that is not JSON, JSON that is not a
+        list, and a library file that is missing."""
+        import json
+        import subprocess
+        from instrgrade import write_wav
+        root = self.tmp / "u14"
+
+        def run(lib, *a):
+            return subprocess.run([sys.executable, "-I", str(Path(dc.__file__)), "pair", "--lib", str(lib), "--wav-dir", str(self.tmp / "wav"),
+                                   "--refs-json", str(self.tmp / "refs.json"), "--out", str(root), "--git-sha", "abc", "--observer", "o",
+                                   "--recipe", "r", *a], capture_output=True, text=True)
+
+        tone_wav = self.tmp / "tone-fault.wav"
+        write_wav(tone_wav, 0.3 * tone(f0=F0, dur=2.4, lead=0.2, noise_db=-85, cents=8))
+        pairs = {("rig", "s-fault"): ("--unvoiced", "--ref-file", "noise-b.wav", "--slot", "s-fault", "--full-scale-pa", "1.0", "--render",
+                                      str(self.render), "--family", "rig", "--note", "s"),
+                 ("syn", "A3"): ("--render", str(tone_wav), "--family", "syn", "--note", "A3")}
+        bad = {"not JSON": self.tmp / "fault-text-lib.json", "not a list": self.tmp / "fault-shape-lib.json", "missing": self.tmp / "no-such-fault-lib.json"}
+        bad["not JSON"].write_text("not json")
+        bad["not a list"].write_text(json.dumps({"entries": []}))
+        for (family, note), args in pairs.items():
+            p = run(self.tmp / "lib.json", *args)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            d = root / family / note
+            live = (d / "pair.json").read_bytes()
+            self.assertFalse((d / "superseded").exists())
+            for why, lib in bad.items():
+                p = run(lib, *args)
+                self.assertEqual(p.returncode, 1, (why, p.stderr))
+                self.assertNotIn("Traceback", p.stderr)
+                self.assertIn("IRPDECOMP_LIBRARY_UNREADABLE" if why == "missing" else "IRPDECOMP_LIBRARY_SHAPE", p.stderr)
+                self.assertEqual((d / "pair.json").read_bytes(), live, f"{family}/{note}, library {why}: the live pair is untouched")
+                self.assertFalse((d / "superseded").exists(), f"{family}/{note}, library {why}: nothing is superseded")
+
+    def test_the_report_of_an_unvoiced_pair_says_onset_n_a_and_a_voiced_report_is_unchanged(self):
+        import subprocess
+        from instrgrade import write_wav
+        root = self.tmp / "u13"
+        pj = dc.run_unvoiced(self.refs, self.c(slot="s-report"), root)
+        lines = dc.pair_report(pj).splitlines()
+        self.assertTrue(lines[0].endswith(f'(ours set {pj["alignment"]["level_offset_db"]:+.1f} dB; onset n/a)'), lines[0])
+        self.assertEqual(sum(line.endswith(" n/a") for line in lines[2:]), len(dc.UNVOICED_NA))
+        self.assertEqual(len(lines) - 2, len(pj["metrics"]))
+        no_level = dict(pj, alignment=dict(pj["alignment"], level_offset_db=None))
+        self.assertTrue(dc.pair_report(no_level).splitlines()[0].endswith("(level n/a; onset n/a)"))
+        render = self.tmp / "tone-report.wav"
+        write_wav(render, 0.3 * tone(f0=F0, dur=2.4, lead=0.2, noise_db=-85, cents=8))
+        vj = dc.run_pair(self.refs, dict(family="syn", note="A3", dyn="mf", wav=str(render), git_sha="abc", observer="test", recipe="r.sh"), root)
+        al = vj["alignment"]
+        head = dc.pair_report(vj).splitlines()[0]
+        self.assertTrue(head.endswith(f'(ours set {al["level_offset_db"]:+.1f} dB; onset {al["onset_ours_s"]:.3f} s / {al["onset_real_s"]:.3f} s)'), head)
+        self.assertNotIn(" n/a", dc.pair_report(vj))
+        p = subprocess.run([sys.executable, "-I", str(Path(dc.__file__)), "report", "--out", str(root)], capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("onset n/a)", p.stdout)
+
+    def test_the_command_line_writes_the_pair_and_prints_the_not_applicable_rows(self):
+        import json
+        import subprocess
+        root = self.tmp / "u8"
+        common = ["--lib", str(self.tmp / "lib.json"), "--wav-dir", str(self.tmp / "wav"), "--refs-json", str(self.tmp / "refs.json"), "--out", str(root)]
+        run = lambda *a: subprocess.run([sys.executable, "-I", str(Path(dc.__file__)), "pair", *common, *a], capture_output=True, text=True)  # noqa: E731
+        p = run("--unvoiced", "--ref-file", "noise-a.wav", "--render", str(self.render), "--family", "rig", "--note", "s", "--slot", "s-cli",
+                "--git-sha", "abc", "--observer", "o", "--recipe", "r", "--full-scale-pa", "1.0")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("not applicable: unvoiced", p.stdout)
+        self.assertIn("not applicable: no onset", p.stdout)
+        self.validate(root, "rig", "s-cli")
+        p = run("--unvoiced", "--render", str(self.render), "--family", "rig", "--note", "s", "--git-sha", "abc", "--observer", "o", "--recipe", "r")
+        self.assertIn("IRPDECOMP_USAGE", p.stderr)
+        p = run("--ref-file", "noise-a.wav", "--render", str(self.render), "--family", "rig", "--note", "A3", "--git-sha", "abc", "--observer", "o", "--recipe", "r")
+        self.assertIn("IRPDECOMP_USAGE: --ref-file and --full-scale-pa belong to --unvoiced", p.stderr)
+        p = run("--render", str(self.render), "--family", "rig", "--note", "s1-11-s-rig", "--git-sha", "abc", "--observer", "o", "--recipe", "r")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("IRPDECOMP_NO_PITCH", p.stderr)
+        self.assertNotIn("Traceback", p.stderr)
+        self.assertIn("IRPDECOMP_NO_PITCH", json.loads((root / "rig" / "s1-11-s-rig" / "pair.json").read_text())["refused"]["reason"])
+
+    def test_the_unvoiced_high_pass_is_the_corner_of_every_note_of_100_hz_and_up(self):
+        x = np.random.default_rng(6).standard_normal(SR)
+        self.assertTrue(np.array_equal(dc.unvoiced_highpass(x), dc.highpass(x, 220.0)))
+
+    def test_the_explorer_shows_not_applicable_rows_and_counts_none_of_them(self):
+        import importlib.util
+        path = Path(__file__).resolve().parents[3] / "instrument-explorer" / "tools" / "build.py"
+        spec = importlib.util.spec_from_file_location("explorer_build", path)
+        eb = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(eb)
+        root = self.tmp / "u9"
+        pj = dc.run_unvoiced(self.refs, self.c(), root)
+        self.assertEqual(eb.pair_kind(pj), "graded")
+        views = [eb.metric_view(m, True) for m in pj["metrics"]]
+        na = [v for v in views if v.get("not_applicable")]
+        self.assertEqual({v["id"] for v in na}, set(dc.UNVOICED_NA))
+        self.assertTrue(all(v["gap"] is None and v["inside"] is None for v in na))
+        self.assertEqual(eb.tally(views)["measures"], 7)
+        self.assertNotIn("not_applicable", eb.metric_view(dict(id="f0_cents", label="f0", gap=1.0, ruler=[]), True))  # a voiced row is unchanged
+
+
 if __name__ == "__main__":
     unittest.main()

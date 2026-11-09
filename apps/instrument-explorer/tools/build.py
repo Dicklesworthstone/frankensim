@@ -279,7 +279,7 @@ def metric_view(m: dict, has_ours: bool) -> dict:
     raw = m["gap"] if gap is not None else None  # the verdict compares unrounded values, as the grader does
     loose = [e["value"] for e in (m.get("ruler") or []) if r(e.get("value")) is not None]
     strict = None if m.get("ruler_strict") is None else [e["value"] for e in m["ruler_strict"] if r(e.get("value")) is not None]
-    return {
+    view = {
         "id": m["id"], "label": m.get("label", m["id"]), "unit": m.get("gap_unit") or m.get("unit", ""),
         "gap": gap, "note": m.get("note", ""),
         "ruler": [{"label": e["label"], "value": r(e["value"])} for e in (m.get("ruler") or []) if r(e.get("value")) is not None],
@@ -288,6 +288,9 @@ def metric_view(m: dict, has_ours: bool) -> dict:
         "inside": inside(raw, loose),
         "inside_strict": None if strict is None else inside(raw, strict),
     }
+    if m.get("not_applicable"):  # an unvoiced pair's pitch measures (decompose.py pair --unvoiced): shown as such, no verdict, counted nowhere
+        view["not_applicable"] = str(m["not_applicable"])
+    return view
 
 
 def tally(views: list[dict]) -> dict:

@@ -454,6 +454,7 @@ function grades(doc) {
       ids.map(id => {
         const m = p.metrics.find(x => x.id === id);
         if (!m) return h('td.na');
+        if (m.not_applicable) return h('td.na', { title: `${m.label}: not applicable (${m.not_applicable})` }, 'n/a');
         const q = Number.isFinite(m.ruler_max) && m.ruler_max > 0 ? Math.abs(m.gap) / m.ruler_max : null;
         return h(`td.${ratioClass(m)}`, { title: `${m.label}: ours ${fmt.num(m.gap, 3)} ${m.unit}, real spread up to ${fmt.num(m.ruler_max, 3)}` }, q === null ? '·' : q.toFixed(1));
       })))))),
@@ -470,7 +471,10 @@ function grades(doc) {
       fold ? h('summary', null, head) : head,
       stack(h('table.metrics.grade', null,
         h('thead', null, h('tr', null, ['Measure', 'Simulation vs recording', 'Largest real vs real', '', 'Verdict'].map(t => h('th', null, t)))),
-        h('tbody', null, p.metrics.map(m => h('tr', null,
+        h('tbody', null, p.metrics.map(m => m.not_applicable ? h('tr', null,
+          // an unvoiced pair's pitch measures: no gap, no ruler, no verdict, and the counts above leave them out
+          h('td', { title: m.note }, m.label), h('td.num', null, 'n/a'), h('td.num', null, '–'), h('td', null),
+          h('td', null, chip(`not applicable: ${m.not_applicable}`, 'na'))) : h('tr', null,
           h('td', { title: m.note }, m.label),
           h('td.num', null, `${fmt.num(m.gap, 2)} ${m.unit}`),
           h('td.num', null, Number.isFinite(m.ruler_max) ? fmt.num(m.ruler_max, 2) : 'no ruler'),

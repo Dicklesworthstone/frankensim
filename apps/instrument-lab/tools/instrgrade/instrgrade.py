@@ -60,7 +60,12 @@ NAMES = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
 
 
 def midi_of(name: str) -> int:
-    m = re.fullmatch(r"([A-G]b?)(-?\d)", name)
+    """The MIDI number of a note name such as "C3" or "Eb4". A name that is not a note (a fricative's slot "s1-11-s-rig", say)
+    has no pitch: it is refused, typed, never read as one (an unvoiced pair is chosen by its file, decompose.py pair --unvoiced)."""
+    m = re.fullmatch(r"([A-G]b?)(-?\d)", name) if isinstance(name, str) else None
+    if m is None:
+        raise GraderRefusalError(f"IRPDECOMP_NO_PITCH: {name!r} is not a note name, so it has no pitch to grade against "
+                                 "(an unvoiced recording is graded with decompose.py pair --unvoiced --ref-file)")
     return 12 * (int(m.group(2)) + 1) + NOTE[m.group(1)]
 
 
@@ -421,6 +426,19 @@ def spectrum(x, t0, t1, nfft=1 << 18):
     return np.fft.rfftfreq(nfft, 1 / SR), s
 
 
+def third_octave_bands(f, s, tot):
+    """Smooth third-octave envelope [dB re the total `tot`] of power spectrum `s` on bins `f`: Gaussian weights in log2(f)
+    (FWHM = 1/3 octave) at the THIRD_OCT centres. It needs no pitch: describe() reads it for a note, and decompose.py's
+    unvoiced pair reads the same envelope of a noise."""
+    bands = []
+    lf = np.log2(np.maximum(f, 1.0))
+    sig = (1 / 3) / 2.3548
+    for fc in THIRD_OCT:
+        w = np.exp(-0.5 * ((lf - math.log2(fc)) / sig) ** 2)
+        bands.append(10 * np.log10((s * w).sum() / (tot * 1.0645 * sig * 3) + 1e-30))
+    return np.array(bands)
+
+
 def f0_spectral(f, s, lo, hi, nh=8):
     """Subharmonic summation on the log power spectrum, 1-cent grid in [lo, hi]."""
     lp = np.log10(s + 1e-30)
@@ -519,14 +537,7 @@ def describe(
         f0r, b_fit = float(f0), 0.0
         harm = np.array([], dtype=np.float64)
 
-    # Smooth third-octave envelope: Gaussian weights in log2(f) (FWHM = 1/3 octave)
-    bands = []
-    lf = np.log2(np.maximum(f, 1.0))
-    sig = (1 / 3) / 2.3548
-    for fc in THIRD_OCT:
-        w = np.exp(-0.5 * ((lf - math.log2(fc)) / sig) ** 2)
-        bands.append(10 * np.log10((s * w).sum() / (tot * 1.0645 * sig * 3) + 1e-30))
-    bands = np.array(bands)
+    bands = third_octave_bands(f, s, tot)
 
     # Tracked-partial HNR (±3 bin widths around tracked partials, including stiff partials)
     seg_sustain = x[int(t0 * SR):int(t1 * SR)]
