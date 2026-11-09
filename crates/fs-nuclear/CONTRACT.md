@@ -3715,10 +3715,77 @@ ownership. It does not infer aggregate ENDF-family funding or permission to
 also retain the same radioactive fragments; the evaluated source adapter owns
 those additional admissions.
 
-Thirteen focused regressions were added for analytical family birth/release,
-continuous feeds, capture competition/refinement, precursor and parent
-transport/outflow, source and energy refusal, histories, cancellation/retry,
-and original material temperature/energy. Source review completed. The runtime
-became unavailable after the preceding analytic-spectrum validation, before
-these new native tests or formatting could run; their validation remains
-pending. The prior 200-test and 30-test results do not validate this extension.
+Thirteen focused native regressions passed after runtime recovery, covering
+analytical family birth/release, continuous feeds, capture competition and
+physical refinement, precursor and parent transport/outflow, source and energy
+refusal, histories, cancellation/retry, and original material temperature and
+energy. The multi-interval capture regression composes the actual accepted
+numerical defects for its complete-history balance; per-step and independent
+reference-refinement checks remain unchanged. Production source matched the
+committed precursor foundation. This selected original-source validation does
+not establish a full Cargo/constellation or DSR gate.
+
+## Evaluated delayed SF families on the finite material trajectory
+
+`EvaluatedSpontaneousFissionDelayedNeutrons` prepares ordered MF1/MT455
+lifetimes and multiplicity with the original MF5/MT455 component laws. Each
+component creates nu*p*A precursors per fission, where A is its unmodified
+integrated density. Dividing the projected component by A defines the
+conditional native emission spectrum; it does not repair the original
+multiplicity, component probabilities, or normalization discrepancies.
+Original records, family order, integrals, projected moments and source energy
+remain available. A tighter attachment allowance rechecks all original
+normalizations. The existing analytical LF1/LF5/LF7/LF9 integrators and
+conservative moment projection own preparation.
+
+`with_delayed_spontaneous_fission` attaches those prepared families to unique
+exact native family indices. Original nuclide/MAT/mass, group identity,
+representative energies and all family metadata must match. The previously
+admitted prompt source supplies the same B_SF/B_all coefficient, applied once
+to convert per-fission births into native parent-decay births. Preparation
+allocations and work are bounded; cancellation remains active through final
+publication.
+
+`DelayedSpontaneousFissionFunding::ParentHeavyRadiation` is an explicit caller
+declaration of the maximum future-neutron energy per SF event. Both the
+original spectral moment and the actual native family reserve must fit it.
+Immediate emission plus delayed storage must also fit the original parent's
+routed heavy-particle radiation. No local heat, electromagnetic radiation,
+future fragment decay or additional Q supplies missing energy.
+
+A positive aggregate delayed source is admitted only when every positive
+independent SF product lies outside the retained nuclide cohort. The immutable
+assembly already requires those omitted products to be explicitly exported.
+Even a retained stable fragment refuses this aggregate boundary: ownership is
+declared for the whole fission-product cohort, not inferred by selectively
+disabling its neutron channels. Explicit fragment decay remains the alternative
+for a represented cohort; the two histories cannot be superposed.
+
+Binding returns the original native radioactive emission owner with both
+immediate and family birth coefficients. The same accepted joint propagator
+depletes the parent, ages each family, emits neutrons, captures them and reserves
+or releases energy. Material heating receives only deposited energy at the
+actual accepted capture time. Restart retains the original inventory,
+precursor reserve and prior released energy without replaying its heat.
+
+The focused native consumer suite passed 20 tests, zero failures, with
+`thermal` enabled: five new adapter regressions, the new full material history,
+11 existing prompt/LF5/LF7/LF9 binding regressions and three existing material
+regressions. Exact changed-source hashes matched the compiled snapshot. The
+new cases check original component discrepancies, family ordering and mapping,
+exclusive product ownership, explicit energy funding, preparation bounds,
+late cancellation, finite source residence times and split continuation. The
+material case checks independent closed-form populations, both neutron groups,
+reserved energy, deposited heat, radiation, temperature, mass and restart.
+
+The actual ENDF/B-VIII.0 Cf-252 six-family LF5 fixture also passed preparation
+through the new adapter. Independent high-precision decimal moments check its
+original yields and energy; its small published normalization discrepancies
+remain visible and a tighter allowance refuses them. That preparation-only
+case does not infer an MF8 energy budget or a fission-product cohort.
+
+The corrected 13-test native foundation and this 20-test consumer run use
+selected original-source modules and the existing native numerical owners.
+Unused test-helper/import warnings arise from the narrowed selection. These
+runs are not full Cargo/constellation, DSR, empirical calibration, or performance
+benchmarks.

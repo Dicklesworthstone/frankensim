@@ -1,6 +1,9 @@
 //! Manufactured ENDF sources and independent finite-history solutions. The
 //! source values exercise dimensional accounting, not isotope calibration.
 
+#[path = "delayed_tests.rs"]
+pub(crate) mod delayed;
+
 use super::*;
 use crate::EnergyChannels;
 use crate::burnup::{

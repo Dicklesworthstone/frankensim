@@ -5,8 +5,9 @@
 //! decay events include all supplied parent branches, so the effective source
 //! uses B_SF/B_all without changing either original branch sum. Ordinary MF8
 //! neutron spectra are already per parent transformation and receive no second
-//! branching factor. Explicit radioactive products provide delayed emission;
-//! aggregate delayed-family yields are not added to those products again.
+//! branching factor. Delayed emission follows either explicit radioactive
+//! products or explicitly funded aggregate families whose independent fragments
+//! are all exported. The same product cohort cannot supply both histories.
 //!
 //! All moments use the original analytical emission integrator and conservative
 //! representative-energy projection. Neutron energy must be funded by the
@@ -37,7 +38,16 @@ use crate::fusion_neutrons::NeutronKineticModel;
 use crate::irradiation::NuclideId;
 use crate::{Accumulator, FissionError, nonnegative, sum};
 
+mod delayed;
 mod spectra;
+
+pub use delayed::{
+    DelayedSpontaneousFissionBinding, DelayedSpontaneousFissionFunding,
+    EvaluatedSpontaneousFissionDelayedNeutrons,
+};
+
+#[cfg(test)]
+pub(crate) use delayed::material_delayed_sf_fixture;
 
 /// Matched original prompt multiplicity and outgoing spectrum for one SF parent.
 #[derive(Clone, Debug)]
@@ -83,6 +93,9 @@ pub struct EvaluatedBurnupNeutrons {
     confirmed_nonemitting_parents: Arc<[usize]>,
     projection: Arc<[DecayNeutronProjection]>,
     neutron_yields: Arc<[Vec<f64>]>,
+    delayed_sources: Arc<[DelayedSpontaneousFissionBinding]>,
+    precursor_yields: Arc<[Vec<f64>]>,
+    delayed_energy_j_per_decay: Arc<[f64]>,
 }
 
 impl EvaluatedBurnupNeutrons {
@@ -134,6 +147,33 @@ impl EvaluatedBurnupNeutrons {
         &self.neutron_yields
     }
 
+    /// Retained explicitly funded aggregate SF sources and native family maps.
+    pub fn delayed_sources(&self) -> &[DelayedSpontaneousFissionBinding] {
+        &self.delayed_sources
+    }
+
+    /// Family births in original parent order and the exact native family order.
+    pub fn precursor_yields(&self) -> &[Vec<f64>] {
+        &self.precursor_yields
+    }
+
+    /// Future-neutron energy reserved per native parent decay [J].
+    pub fn delayed_energy_j_per_decay(&self) -> &[f64] {
+        &self.delayed_energy_j_per_decay
+    }
+
+    /// Attach explicitly funded aggregate families to unrepresented SF fragments.
+    /// Preparation preserves source integrals and applies the original SF branch
+    /// once; retained fragment cohorts refuse overlapping aggregate emission.
+    pub fn with_delayed_spontaneous_fission(
+        self,
+        sources: Vec<DelayedSpontaneousFissionBinding>,
+        budget: EvaluatedBurnupNeutronBudget,
+        mut checkpoint: impl FnMut() -> Result<(), FissionError>,
+    ) -> Result<Self, EvaluatedBurnupNeutronError> {
+        delayed::attach(self, sources, budget, &mut checkpoint)
+    }
+
     /// Retain the exact evaluated decay mapping while admitting reordered native
     /// channels and appended neutron reactions. The resulting emission targets
     /// that same finite inventory; no stock or history is recreated.
@@ -147,11 +187,17 @@ impl EvaluatedBurnupNeutrons {
         let binding = self
             .assembly
             .bind_burnup(Arc::clone(&model), &mut checkpoint)?;
-        let emission = Arc::new(BurnupDecayNeutronEmission::new(
-            data_id,
-            model,
-            self.neutron_yields.to_vec(),
-        )?);
+        let emission = Arc::new(if self.delayed_sources.is_empty() {
+            BurnupDecayNeutronEmission::new(data_id, model, self.neutron_yields.to_vec())?
+        } else {
+            BurnupDecayNeutronEmission::new_with_precursors(
+                data_id,
+                model,
+                self.neutron_yields.to_vec(),
+                self.kinetic_model.diffusion().delayed_groups().to_vec(),
+                self.precursor_yields.to_vec(),
+            )?
+        });
         checkpoint()?;
         Ok(BoundEvaluatedBurnupNeutrons {
             source: Arc::clone(self),
@@ -256,7 +302,7 @@ fn prepare(
         n.checked_add(source.spectrum.components().len())
     });
     let values = groups
-        .checked_add(4)
+        .checked_add(8)
         .and_then(|n| n.checked_mul(parents))
         .and_then(|n| n.checked_add(groups.checked_mul(4)?))
         .and_then(|n| n.checked_add(components?))
@@ -463,6 +509,9 @@ fn prepare(
         confirmed_nonemitting_parents: confirmed_nonemitting_parents.into(),
         projection: projection.into(),
         neutron_yields: neutron_yields.into(),
+        delayed_sources: Vec::new().into(),
+        precursor_yields: vec![vec![]; parents].into(),
+        delayed_energy_j_per_decay: vec![0.0; parents].into(),
     })
 }
 

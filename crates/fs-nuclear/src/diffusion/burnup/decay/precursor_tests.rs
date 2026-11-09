@@ -140,6 +140,7 @@ fn g3_capture_consumes_the_same_parent_without_creating_precursors() {
     for steps in [32, 64] {
         let mut state = fixture(Some((0, 0.02)), 0.3, 10.0);
         let mut leakage = 0.0;
+        let mut history_allowance = 0.0;
         for _ in 0..steps {
             let (next, step) = state.trial(1.0 / steps as f64, &[300.0], budget(), || Ok(())).unwrap();
             let decays = step.burnup[0].reaction_counts[0];
@@ -147,13 +148,17 @@ fn g3_capture_consumes_the_same_parent_without_creating_precursors() {
             close(step.decay_neutron_counts.as_ref().unwrap()[0][0], 0.25 * decays, 1e-9);
             close(step.neutrons.captures, step.burnup[0].reaction_counts[1], 1e-8);
             leakage += step.neutrons.leaked_neutrons;
+            history_allowance += step.reaction_defect + step.neutrons.population_roundoff
+                + step.burnup[0].population_roundoff_nuclei;
             state = next;
         }
         let p = state.inventories()[0].populations();
         assert!(p[2] > 1.0);
         let got = [p[0], state.neutrons().precursor_counts()[0], state.neutrons().neutron_counts()[0], p[1], p[2], leakage];
         close(p.iter().sum(), 100.0, 1e-8);
-        close(got[1] + got[2] + p[2] + leakage, 10.0 + 0.75 * p[1], 1e-8);
+        // The complete history composes actual accepted defects from every
+        // interval; the small final margin covers this assertion's arithmetic.
+        close(got[1] + got[2] + p[2] + leakage, 10.0 + 0.75 * p[1], history_allowance + 1e-11);
         errors.push(got.into_iter().zip(expected).map(|(a, b)| (a - b).abs()).sum::<f64>());
     }
     assert!(errors[1] < 0.4 * errors[0], "physical-refinement errors {errors:?}");
