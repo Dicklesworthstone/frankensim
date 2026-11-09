@@ -12863,3 +12863,30 @@ full native scene regressions are authored but unrun; the absent sibling
 workspace graph prevents full Cargo, resolved geometry/GRIN, raster, clippy,
 material-state or remote-runner validation. These are numerical-model checks,
 not experimental validation of arbitrary measured rough glass.
+
+## Original optical finishes across accepted material states
+
+`MaterialOpticalBinding::with_surface_finish` binds an explicitly authored native
+finish while retaining the exact accepted bulk optical law and original source
+receipts. Visible and spectral accepted-state refreshes retain the full
+dielectric tangent, anisotropic GGX law and compact coherent coating, or the
+conductor's isotropic finish and transparent, absorbing or periodic coating.
+Fresh bulk coefficients continue to come from the original pinned material
+claims at the complete accepted state.
+
+Independently authored coating laws and thicknesses stay fixed until explicitly
+replaced; bulk temperature changes do not infer surface evolution. Original
+per-query wavelength support, tangent-frame admission, scalar reflection and
+polarized transport remain authoritative, including zero-thickness coating
+support. The existing material content identity covers the complete finish.
+Bulk-law, optical-family, source and zero-surface-identity substitutions refuse
+without changing either the original binding or accepted physical state. The
+Euler scene bridge preserves this refusal through its existing material-state
+error.
+
+Focused native fixtures cover visible and spectral endpoint continuation,
+coated anisotropic dielectric scalar/polarized reflection, all three original
+conductor coating families, retained source and interpolation policy, and
+independent narrower coating support. They do not establish measured finish
+calibration, bulk birefringence, inter-facet multiple scattering, or inferred
+thermal evolution of the coatings.

@@ -228,6 +228,9 @@ impl MaterialOpticalBinding {
             _ => return Err(MaterialOpticalRefreshError::SourceMismatch),
         }
         .map_err(MaterialOpticalRefreshError::Binding)?;
+        let binding = self
+            .retain_surface_finish(binding)
+            .map_err(MaterialOpticalRefreshError::Binding)?;
         Ok((binding, refreshed))
     }
 }

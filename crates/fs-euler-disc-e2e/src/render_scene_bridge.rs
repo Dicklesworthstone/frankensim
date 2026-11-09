@@ -1920,6 +1920,9 @@ impl From<MaterialOpticalError> for EulerSceneError {
             MaterialOpticalError::StateMismatch => Self::MaterialStateMismatch(
                 "mechanical and optical properties must resolve from one card and state point",
             ),
+            MaterialOpticalError::BulkOpticsMismatch => Self::MaterialStateMismatch(
+                "surface finish must retain the bound bulk optical law and source",
+            ),
             MaterialOpticalError::MissingSurfaceIdentity => {
                 Self::MaterialStateMismatch("surface-state identity must not be zero")
             }

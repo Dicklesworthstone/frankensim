@@ -17,6 +17,8 @@ mod bulk_optics;
 #[cfg(feature = "volumes")]
 pub mod absorption;
 mod spectral_optics;
+#[cfg(test)]
+mod finish_tests;
 pub use spectral_optics::MaterialSlabEmissionError;
 /// Thermal lensing from original absolute dispersion and a frozen temperature field.
 pub mod thermo_optic;
@@ -224,6 +226,77 @@ pub struct MaterialOpticalBinding {
 }
 
 impl MaterialOpticalBinding {
+    /// Bind an independently authored native surface finish to this exact bulk
+    /// material. Start from [`Self::appearance`], retain its glass or conductor
+    /// table, and supply the desired native surface and optional coating.
+    ///
+    /// Dielectrics retain smooth, isotropic or anisotropic GGX and compact
+    /// coherent coatings. Conductors retain smooth or isotropic GGX with the
+    /// native transparent, absorbing or periodic coating. Bulk phase index,
+    /// absorption, interpolation support and source provenance cannot change
+    /// through this operation; use the original material-state refresh for that.
+    ///
+    /// The finish keeps its own nonzero source identity. Its coating laws and
+    /// physical thicknesses stay fixed during bulk refresh until explicitly
+    /// replaced here. Native wavelength support and tangent-frame admission
+    /// still apply to every optical query, including zero-thickness films.
+    /// This adds no inferred surface evolution or evidence authority.
+    pub fn with_surface_finish(
+        self,
+        appearance: OpticalAppearance,
+        surface_state_identity: ContentHash,
+    ) -> Result<Self, MaterialOpticalError> {
+        if surface_state_identity == ContentHash([0; 32]) {
+            return Err(MaterialOpticalError::MissingSurfaceIdentity);
+        }
+        let same_bulk = match (self.appearance, appearance) {
+            (
+                OpticalAppearance::Dielectric { glass: original, .. },
+                OpticalAppearance::Dielectric { glass, .. },
+            ) => glass == original,
+            (
+                OpticalAppearance::Conductor { optics: original, .. },
+                OpticalAppearance::Conductor { optics, .. },
+            ) => {
+                optics.samples() == original.samples()
+                    && optics.max_knot_span_nm() == original.max_knot_span_nm()
+                    && optics.source() == original.source()
+                    && optics.provenance() == original.provenance()
+            }
+            _ => false,
+        };
+        if !same_bulk {
+            return Err(MaterialOpticalError::BulkOpticsMismatch);
+        }
+        Ok(Self { appearance, surface_state_identity, ..self })
+    }
+
+    // The refreshed owner supplies all new bulk coefficients and identities.
+    // Only the independently authored native finish crosses the endpoint.
+    fn retain_surface_finish(&self, refreshed: Self) -> Result<Self, MaterialOpticalError> {
+        let appearance = match (self.appearance, refreshed.appearance) {
+            (
+                OpticalAppearance::Dielectric { surface, .. },
+                OpticalAppearance::Dielectric { glass, .. },
+            ) => OpticalAppearance::Dielectric { glass, surface },
+            (
+                OpticalAppearance::Conductor { optics: original, surface },
+                OpticalAppearance::Conductor { mut optics, .. },
+            ) => {
+                if let Some(coating) = original.coating() {
+                    optics = optics.with_coating(coating);
+                } else if let Some(coating) = original.absorbing_coating() {
+                    optics = optics.with_absorbing_coating(coating);
+                } else if let Some(coating) = original.periodic_coating() {
+                    optics = optics.with_periodic_coating(coating);
+                }
+                OpticalAppearance::Conductor { optics, surface }
+            }
+            _ => return Err(MaterialOpticalError::BulkOpticsMismatch),
+        };
+        refreshed.with_surface_finish(appearance, self.surface_state_identity)
+    }
+
     /// Bind the family already selected by the material resolver, with an
     /// explicit positive isotropic GGX roughness for either family. Exactly
     /// zero additionally selects a smooth mirror for a conductor; smooth
@@ -397,6 +470,9 @@ impl MaterialOpticalBinding {
             _ => return Err(MaterialOpticalRefreshError::SourceMismatch),
         }
         .map_err(MaterialOpticalRefreshError::Binding)?;
+        let binding = self
+            .retain_surface_finish(binding)
+            .map_err(MaterialOpticalRefreshError::Binding)?;
         Ok((binding, refreshed))
     }
 
@@ -563,6 +639,8 @@ impl core::error::Error for MaterialOpticalRefreshError {
 pub enum MaterialOpticalError {
     /// Bulk mechanics and optics refer to different material cards or states.
     StateMismatch,
+    /// A proposed finish substituted the bound bulk law, family or source.
+    BulkOpticsMismatch,
     /// Surface finish has no nonzero caller identity.
     MissingSurfaceIdentity,
     /// The existing conductor model refused its parameters.
@@ -577,6 +655,10 @@ impl core::fmt::Display for MaterialOpticalError {
             Self::StateMismatch => write!(
                 f,
                 "mechanics and optics require the same card, query point and quantities"
+            ),
+            Self::BulkOpticsMismatch => write!(
+                f,
+                "surface finish must retain the exact bound bulk optical law and source"
             ),
             Self::MissingSurfaceIdentity => write!(f, "surface-state identity must not be zero"),
             Self::Conductor(error) => error.fmt(f),
