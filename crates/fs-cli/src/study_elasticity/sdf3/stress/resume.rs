@@ -43,6 +43,8 @@ fn work(value: &JsonValue) -> Result<ProjectedAlWork> {
 pub(super) fn encode(spec: &Spec, state: &State, producer: ContentHash,
     design: &str, iterations: &str) -> Option<String> {
     let c = state.checkpoint.as_ref()?;
+    // This cold v1 codec cannot retain a held free-strain field or its policy.
+    if c.eigenstrain_policy.is_some() { return None; }
     let a = &c.optimizer;
     let previous = a.previous_violation.map_or_else(|| "null".into(), |v| format!("{v:.17e}"));
     let best = c.best_feasible_density.as_ref().map_or_else(|| "null".into(), |v| format!("{v:?}"));
@@ -168,6 +170,7 @@ fn recover(spec: &Spec, ledger: &Ledger, old: &Loaded, producer: ContentHash) ->
     }).collect::<Result<Vec<_>>>()?;
     let checkpoint = StressDesignCheckpoint3 {
         optimizer, history, restoration_evaluations: integer(&data, "restoration_evaluations")?,
+        eigenstrain_policy: None,
         material_body_load_fingerprint: material_body_fingerprint(&data,
             spec.material_acceleration.is_some())?,
         best_feasible_density: match field(&data, "best_feasible_density")? {

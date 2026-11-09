@@ -6,6 +6,7 @@
 //! separate optimizer implementation. Geometry and material model remain fixed.
 
 use super::stress::{self, StressError3, StressEvaluation3, StressMeasure3, StressOptions3, StressMotions3};
+use super::eigenstrain::{CutEigenstrainCase3, CutEigenstrainPolicy3, EigenstrainFamily3};
 use super::{CutDensityStudy3, PhysicalRegion3, Sdf3Elasticity};
 use crate::pipeline::LoadCase;
 use crate::{SimpParams, SolveControl, SolveWork};
@@ -13,7 +14,7 @@ use fs_ascent::projected_al::{
     ProjectedAlCheckpoint, ProjectedAlError, ProjectedAlOptions, ProjectedAlReport, ProjectedAlSample, ProjectedAlState,
     ProjectedAlStop, ProjectedAlWork,
 };
-use std::{cell::RefCell, ops::ControlFlow};
+use std::{borrow::Cow, cell::RefCell, ops::ControlFlow};
 
 #[derive(Debug, Clone, Copy)]
 pub struct StressDesignOptions3 {
@@ -61,6 +62,10 @@ pub struct StressDesignIteration3 {
 #[derive(Debug, Clone)]
 pub struct StressDesignCheckpoint3 {
     pub optimizer: ProjectedAlCheckpoint,
+    /// Held-field problem kind and physical admission policy, or None for a
+    /// force/motion-only problem. This is NOT field identity: consumers retain
+    /// the original independent free-strain fields and forces externally.
+    pub eigenstrain_policy: Option<CutEigenstrainPolicy3>,
     /// Complete prepared body map and native source attribution, when attached.
     pub material_body_load_fingerprint: Option<fs_blake3::ContentHash>,
     pub best_feasible_density: Option<Vec<f64>>,
@@ -109,15 +114,13 @@ fn sample<O: Sdf3Elasticity>(
     options: StressDesignOptions3,
     measure: StressMeasure3,
     motions: Option<&StressMotions3<'_>>,
+    eigenstrain: Option<EigenstrainFamily3<'_, '_>>,
     last: &mut Option<StressEvaluation3>,
     control: &mut SolveControl<'_>,
 ) -> Result<Option<ProjectedAlSample>, StressError3> {
     control.checkpoint("sdf3-stress-design-evaluate")?;
-    let evaluated = match motions {
-        Some(motions) => study.evaluate_stress_with_prescribed_motion(rho, loads, motions,
-            options.stress, measure, control)?,
-        None => study.evaluate_stress_with_measure(rho, loads, options.stress, measure, control)?,
-    };
+    let evaluated = study.evaluate_stress_family(rho, loads, motions, eigenstrain,
+        options.stress, measure, control)?;
     // The graph filter's exact maximum principle preserves the raw box. Check
     // the actually solved/projection values too, rather than assume numerical
     // filter error cannot cross the strength-model boundary. An authored
@@ -162,8 +165,9 @@ fn sample<O: Sdf3Elasticity>(
 /// continuum stress safety, manufacturability, or a certified geometric boundary.
 pub struct StressDesignStudy3<'a, 'callback, O: Sdf3Elasticity> {
     study: &'a mut CutDensityStudy3<O>,
-    loads: &'a [LoadCase<'a>],
+    loads: Cow<'a, [LoadCase<'a>]>,
     motions: Option<&'a StressMotions3<'a>>,
+    eigenstrain: Option<EigenstrainFamily3<'a, 'a>>,
     control: &'a mut SolveControl<'callback>,
     options: StressDesignOptions3,
     measure: StressMeasure3,
@@ -195,7 +199,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
         measure: StressMeasure3,
         control: &'a mut SolveControl<'callback>,
     ) -> Result<Self, ProjectedAlError<StressError3>> {
-        Self::new_family(study, loads, None, rho, options, measure, control)
+        Self::new_family(study, Cow::Borrowed(loads), None, None, rho, options, measure, control)
     }
 
     /// Minimize material under a stress cap with independent actuator motions
@@ -209,12 +213,37 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
         loads: &'a [LoadCase<'a>], motions: &'a StressMotions3<'a>, rho: &[f64],
         options: StressDesignOptions3, measure: StressMeasure3,
         control: &'a mut SolveControl<'callback>) -> Result<Self, ProjectedAlError<StressError3>> {
-        Self::new_family(study, loads, Some(motions), rho, options, measure, control)
+        Self::new_family(study, Cow::Borrowed(loads), Some(motions), None, rho, options, measure, control)
+    }
+
+    /// Minimize projected material volume under the declared stress cap for
+    /// independent held thermal/transformation fields and external forces.
+    /// Uses the original relaxed REFERENCE stress C_ref (strain - free_strain),
+    /// its exact thermal-load adjoint and the same projected AL owner. Mixed-sign
+    /// constraint gradients are supported; removing material can reduce thermal
+    /// stress, so this is not a stiffness or minimum load-carrying requirement.
+    /// The existing force-controlled ersatz-turnover density floor is retained.
+    ///
+    /// Fields, source material tensors and physical policy remain fixed during
+    /// this session. Every trial checks total and elastic strain separately.
+    /// Accepted `case_compliances` remain EXTERNAL-force work, not complete
+    /// equivalent-load work; neither is the volume objective. The stress
+    /// owner's refusal of an exactly zero aggregate under nonzero load remains.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_eigenstrain(study: &'a mut CutDensityStudy3<O>,
+        cases: &'a [CutEigenstrainCase3<'a>], policy: CutEigenstrainPolicy3, rho: &[f64],
+        options: StressDesignOptions3, measure: StressMeasure3,
+        control: &'a mut SolveControl<'callback>) -> Result<Self, ProjectedAlError<StressError3>> {
+        let family = EigenstrainFamily3::admit(&study.operator, cases, policy, control)
+            .map_err(|error| ProjectedAlError::Evaluation(error.into()))?;
+        Self::new_family(study, Cow::Owned(family.loads()), None, Some(family), rho,
+            options, measure, control)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn new_family(study: &'a mut CutDensityStudy3<O>, loads: &'a [LoadCase<'a>],
-        motions: Option<&'a StressMotions3<'a>>, rho: &[f64], options: StressDesignOptions3,
+    fn new_family(study: &'a mut CutDensityStudy3<O>, loads: Cow<'a, [LoadCase<'a>]>,
+        motions: Option<&'a StressMotions3<'a>>, eigenstrain: Option<EigenstrainFamily3<'a, 'a>>,
+        rho: &[f64], options: StressDesignOptions3,
         measure: StressMeasure3, control: &'a mut SolveControl<'callback>)
         -> Result<Self, ProjectedAlError<StressError3>> {
         let n = study.cells();
@@ -233,8 +262,16 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
                 "invalid stress design cap, bounds or initial density",
             ));
         }
-        stress::admit(study, rho, loads, options.stress).map_err(ProjectedAlError::Evaluation)?;
-        stress::admit_motions(study, loads, motions).map_err(ProjectedAlError::Evaluation)?;
+        stress::admit(study, rho, &loads, options.stress).map_err(ProjectedAlError::Evaluation)?;
+        stress::admit_motions(study, &loads, motions).map_err(ProjectedAlError::Evaluation)?;
+        if let Some(family) = eigenstrain {
+            let points = family.cases.iter().try_fold(0usize, |sum, case|
+                sum.checked_add(case.eigenstrain.bulk_points()))
+                .ok_or(ProjectedAlError::Evaluation(StressError3::PointBudget))?;
+            if points > options.stress.max_points {
+                return Err(ProjectedAlError::Evaluation(StressError3::PointBudget));
+            }
+        }
         let params = study.params();
         let projected_floor =
             crate::filter::heaviside(options.density_floor, params.beta, params.eta);
@@ -254,11 +291,12 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
                 &mut |rho| {
                     sample(
                         study,
-                        loads,
+                        &loads,
                         rho,
                         options,
                         measure,
                         motions,
+                        eigenstrain,
                         &mut last,
                         &mut **ledger.borrow_mut(),
                     )
@@ -290,6 +328,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
             study,
             loads,
             motions,
+            eigenstrain,
             control,
             options,
             measure,
@@ -328,7 +367,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
         measure: StressMeasure3,
         control: &'a mut SolveControl<'callback>,
     ) -> Result<Self, ProjectedAlError<StressError3>> {
-        Self::restore_family(study, loads, None, checkpoint, options, measure, control)
+        Self::restore_family(study, Cow::Borrowed(loads), None, None, checkpoint, options, measure, control)
     }
 
     /// Restore with the original reference actuator laws as well as loads,
@@ -343,14 +382,43 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
         checkpoint: StressDesignCheckpoint3, options: StressDesignOptions3,
         measure: StressMeasure3, control: &'a mut SolveControl<'callback>)
         -> Result<Self, ProjectedAlError<StressError3>> {
-        Self::restore_family(study, loads, Some(motions), checkpoint, options, measure, control)
+        Self::restore_family(study, Cow::Borrowed(loads), Some(motions), None, checkpoint, options, measure, control)
+    }
+
+    /// Restore with the original held free-strain fields, external forces and
+    /// physical policy. A cold checkpoint or changed policy refuses before any
+    /// physics or work is spent. Original native field ownership is then checked
+    /// and accepted/incumbent endpoints are rebuilt with their exact gradients.
+    ///
+    /// The checkpoint's policy marker is not field identity. Consumers must
+    /// retain and supply the SAME physical fields and source problem; matching
+    /// endpoint responses does not prove equivalence away from those endpoints.
+    /// Prepared fields are not serialized here, and cold CLI checkpoint codecs
+    /// cannot persist this thermal context.
+    #[allow(clippy::too_many_arguments)]
+    pub fn restore_with_eigenstrain(study: &'a mut CutDensityStudy3<O>,
+        cases: &'a [CutEigenstrainCase3<'a>], policy: CutEigenstrainPolicy3,
+        checkpoint: StressDesignCheckpoint3, options: StressDesignOptions3,
+        measure: StressMeasure3, control: &'a mut SolveControl<'callback>)
+        -> Result<Self, ProjectedAlError<StressError3>> {
+        if checkpoint.eigenstrain_policy != Some(policy) {
+            return Err(ProjectedAlError::Invalid("stress restart changed its held-field problem or policy"));
+        }
+        let family = EigenstrainFamily3::admit(&study.operator, cases, policy, control)
+            .map_err(|error| ProjectedAlError::Evaluation(error.into()))?;
+        Self::restore_family(study, Cow::Owned(family.loads()), None, Some(family),
+            checkpoint, options, measure, control)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn restore_family(study: &'a mut CutDensityStudy3<O>, loads: &'a [LoadCase<'a>],
-        motions: Option<&'a StressMotions3<'a>>, checkpoint: StressDesignCheckpoint3,
+    fn restore_family(study: &'a mut CutDensityStudy3<O>, loads: Cow<'a, [LoadCase<'a>]>,
+        motions: Option<&'a StressMotions3<'a>>, eigenstrain: Option<EigenstrainFamily3<'a, 'a>>,
+        checkpoint: StressDesignCheckpoint3,
         options: StressDesignOptions3, measure: StressMeasure3,
         control: &'a mut SolveControl<'callback>) -> Result<Self, ProjectedAlError<StressError3>> {
+        if checkpoint.eigenstrain_policy != eigenstrain.map(|family| family.policy) {
+            return Err(ProjectedAlError::Invalid("stress restart changed its held-field problem or policy"));
+        }
         if checkpoint.material_body_load_fingerprint != study.material_body_load_fingerprint() {
             return Err(ProjectedAlError::Invalid("stress restart changed its material body load"));
         }
@@ -387,7 +455,8 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
             return Err(ProjectedAlError::Invalid("stress checkpoint lost its feasible incumbent"));
         }
         let previous_scales = study.operator.scales().to_vec();
-        let mut result = Self::new_family(study, loads, motions, restored.point(), options, measure, control)?;
+        let mut result = Self::new_family(study, loads, motions, eigenstrain,
+            restored.point(), options, measure, control)?;
         let rebuilt = (|| {
             if result.state.sample() != restored.sample()
                 || history.last() != Some(&row(&result.accepted, restored.work().iterations, options))
@@ -403,7 +472,8 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
                         return Err(ProjectedAlError::Invalid("invalid retained feasible density"));
                     }
                     let mut evaluated = None;
-                    sample(result.study, loads, &rho, options, measure, motions, &mut evaluated, result.control)
+                    sample(result.study, &result.loads, &rho, options, measure, motions,
+                        eigenstrain, &mut evaluated, result.control)
                         .map_err(ProjectedAlError::Evaluation)?;
                     evaluated
                 }
@@ -433,6 +503,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
     pub fn checkpoint(&self) -> StressDesignCheckpoint3 {
         StressDesignCheckpoint3 {
             optimizer: self.state.checkpoint(),
+            eigenstrain_policy: self.eigenstrain.map(|family| family.policy),
             material_body_load_fingerprint: self.study.material_body_load_fingerprint(),
             best_feasible_density: self.best_feasible.as_ref().map(|e| e.rho.clone()),
             history: self.history.clone(),
@@ -497,10 +568,11 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
             let result = {
                 let ledger = RefCell::new(&mut *self.control);
                 let study = &mut *self.study;
-                let loads = self.loads;
+                let loads = self.loads.as_ref();
                 let options = self.options;
                 let measure = self.measure;
                 let motions = self.motions;
+                let eigenstrain = self.eigenstrain;
                 self.state.try_run(
                     remaining.min(1),
                     &mut |rho| {
@@ -511,6 +583,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
                             options,
                             measure,
                             motions,
+                            eigenstrain,
                             &mut last,
                             &mut **ledger.borrow_mut(),
                         ) {

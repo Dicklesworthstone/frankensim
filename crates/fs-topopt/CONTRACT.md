@@ -1183,3 +1183,23 @@ fields remain paired with their evaluated design. `eigenstrain_sdf3/{stress,desi
 adds derivative, positive-gradient optimization and cancellation regressions.
 No source-temperature derivative, field-transfer recipe or continuum stress bound
 is inferred from this fixed-field optimization path.
+
+
+### Thermal stress-constrained minimum volume
+
+`StressDesignStudy3::new_with_eigenstrain` minimizes projected material volume
+under the original normalized-average or sampled-peak stress cap for held thermal
+cases. It reuses the same projected AL, exact thermal stress derivatives, bounds,
+material-domain backtracking and best feasible archive. Positive thermal stress
+sensitivities are admissible; this constraint alone is not a minimum stiffness or
+load-carrying requirement. Per-case work observations remain external-force work.
+
+`restore_with_eigenstrain` requires the original caller-retained fields and forces.
+An optional checkpoint policy distinguishes cold/thermal problems and rejects
+changed kinds or policies before work. It is not field identity: native ownership
+and exact accepted/incumbent response/gradient reevaluation remain mandatory, and
+consumers retain responsibility for the original physical experiment. The cold CLI
+v1 codec refuses thermal checkpoints instead of discarding their context.
+`eigenstrain_stress_design_sdf3` adds five regression sources for actual volume
+updates, positive thermal gradients, segmented restart, changed physical inputs,
+and interrupted trials preserving the accepted design and matching fields.
