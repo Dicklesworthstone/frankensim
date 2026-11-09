@@ -834,7 +834,10 @@ impl Hyperelastic {
     }
 
     /// The consistent material tangent `A = ∂²W/∂F∂F` (9×9, symmetric),
-    /// exact via nested duals — one inner-gradient sweep per column.
+    /// Exact via one nested-dual sweep carrying all nine gradient directions.
+    /// The primal potential and shared inner gradient are evaluated once,
+    /// including any spectral preparation; each outer lane retains the same
+    /// derivative arithmetic as a separate single-direction sweep.
     ///
     /// # Errors
     /// [`MaterialError::State`] when det F ≤ 0, F is nonfinite, or a
@@ -842,26 +845,13 @@ impl Hyperelastic {
     /// `stretch_limit` returns [`MaterialError::Parameters`].
     pub fn tangent(&self, f: &[f64; 9]) -> Result<[[f64; 9]; 9], MaterialError> {
         self.check_state(f)?;
-        let mut a = [[0.0f64; 9]; 9];
-        for col in 0..9 {
-            // Inner duals carry the full gradient; the outer single lane
-            // differentiates it along e_col.
-            let mut vars = [Dual::<Dual64<9>, 1>::constant(Dual64::constant(0.0)); 9];
-            for (i, v) in vars.iter_mut().enumerate() {
-                *v = Dual {
-                    re: Dual64::variable(f[i], i),
-                    eps: [if i == col {
-                        Dual64::constant(1.0)
-                    } else {
-                        Dual64::constant(0.0)
-                    }],
-                };
-            }
-            let w = self.energy(&vars);
-            for (row, out) in a.iter_mut().enumerate() {
-                out[col] = w.eps[0].eps[row];
-            }
-        }
+        let vars: [Dual<Dual64<9>, 9>; 9] = core::array::from_fn(|i| Dual {
+            re: Dual64::variable(f[i], i),
+            eps: core::array::from_fn(|col| Dual64::constant(if i == col { 1.0 } else { 0.0 })),
+        });
+        let w = self.energy(&vars);
+        let a: [[f64; 9]; 9] =
+            core::array::from_fn(|row| core::array::from_fn(|col| w.eps[col].eps[row]));
         if a.iter().flatten().all(|x| x.is_finite()) {
             Ok(a)
         } else {

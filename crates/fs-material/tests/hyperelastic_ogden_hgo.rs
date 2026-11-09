@@ -139,6 +139,156 @@ fn fd_tangent(law: &Hyperelastic, f: [f64; 9]) -> f64 {
     worst
 }
 
+// Retain the former single-direction evaluation as an independent scheduling
+// reference. The optimized Hessian must preserve every coefficient, including
+// signed zero, without changing the generic stored-energy implementation.
+fn single_direction_tangent(law: &Hyperelastic, f: &[f64; 9]) -> [[f64; 9]; 9] {
+    use fs_ad::{Dual, Dual64};
+
+    law.check_state(f).unwrap();
+    let mut tangent = [[0.0; 9]; 9];
+    for column in 0..9 {
+        let variables: [Dual<Dual64<9>, 1>; 9] = core::array::from_fn(|i| Dual {
+            re: Dual64::variable(f[i], i),
+            eps: [Dual64::constant(if i == column { 1.0 } else { 0.0 })],
+        });
+        let energy = law.energy(&variables);
+        for (row, values) in tangent.iter_mut().enumerate() {
+            values[column] = energy.eps[0].eps[row];
+        }
+    }
+    assert!(tangent.iter().flatten().all(|value| value.is_finite()));
+    tangent
+}
+
+#[test]
+fn g0_batched_hessian_preserves_every_single_direction_coefficient() {
+    let bulk = Volumetric::SimoTaylor { kappa: 1e6 };
+    let mut laws = vec![
+        Hyperelastic::new(
+            HyperelasticModel::NeoHookean {
+                mu: 1e5,
+                lambda: 9e5,
+            },
+            8.0,
+        )
+        .unwrap(),
+        Hyperelastic::new(
+            HyperelasticModel::NeoHookean {
+                mu: 1e5,
+                lambda: -5e4,
+            },
+            8.0,
+        )
+        .unwrap(),
+        Hyperelastic::new(
+            HyperelasticModel::MooneyRivlin {
+                c10: 3e4,
+                c01: 2e4,
+                kappa: 1e6,
+            },
+            8.0,
+        )
+        .unwrap(),
+        Hyperelastic::new(
+            HyperelasticModel::Gent {
+                mu: 1e5,
+                locking_invariant: 3.0,
+                volumetric: bulk,
+            },
+            8.0,
+        )
+        .unwrap(),
+        ogden(100.0),
+    ];
+    for invariants in [FibreInvariants::Isochoric, FibreInvariants::Full] {
+        laws.push(hgo(
+            vec![
+                [1.0, 0.0, 0.0],
+                [
+                    0.0,
+                    core::f64::consts::FRAC_1_SQRT_2,
+                    core::f64::consts::FRAC_1_SQRT_2,
+                ],
+            ],
+            0.1,
+            invariants,
+            100.0,
+        ));
+    }
+    let q = rotation([0.0, 0.0, 1.0], 0.7);
+    for law in laws {
+        for f in [
+            I,
+            [1.0, 1e-10, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            diag([1.08, 1.08, 1.08]), // repeated stretches in the spectral branch
+            diag([1.08, 1.08 + 1e-12, 0.94]),
+            [1.2, 0.1, 0.0, 0.0, 0.85, 0.05, 0.03, 0.0, 1.05],
+        ] {
+            for state in [f, flat(matmul3(&q, &matrix(&f)))] {
+                let expected = single_direction_tangent(&law, &state);
+                let actual = law.tangent(&state).unwrap();
+                for row in 0..9 {
+                    for column in 0..9 {
+                        assert_eq!(
+                            actual[row][column].to_bits(),
+                            expected[row][column].to_bits(),
+                            "model {:?}, F {state:?}, Hessian ({row}, {column})",
+                            law.model,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Bounded timing comparison; timing is reported, never used as a flaky test
+/// gate. Run with `--release --ignored --exact --nocapture` and retain the
+/// compiler and host details alongside the output when making a speed claim.
+#[test]
+#[ignore = "opt-in native hyperelastic tangent timing"]
+fn benchmark_batched_hessian_against_single_direction_sweeps() {
+    use std::hint::black_box;
+
+    let f = [1.2, 0.1, 0.0, 0.0, 0.85, 0.05, 0.03, 0.0, 1.05];
+    let nh = Hyperelastic::new(
+        HyperelasticModel::NeoHookean {
+            mu: 1e5,
+            lambda: 9e5,
+        },
+        8.0,
+    )
+    .unwrap();
+    for (name, law) in [("neo-hookean", nh), ("ogden", ogden(100.0))] {
+        let mut elapsed = [std::time::Duration::ZERO; 2];
+        // Alternate order and warm both paths before recording; 320 calls per
+        // path keep the probe bounded while amortizing timer granularity.
+        for sample in 0..6 {
+            for lane in [sample % 2, 1 - sample % 2] {
+                let start = Instant::now();
+                for _ in 0..64 {
+                    let tangent = if lane == 0 {
+                        single_direction_tangent(black_box(&law), black_box(&f))
+                    } else {
+                        black_box(&law).tangent(black_box(&f)).unwrap()
+                    };
+                    black_box(tangent);
+                }
+                if sample > 0 {
+                    elapsed[lane] += start.elapsed();
+                }
+            }
+        }
+        println!(
+            "{name}: single-direction {:.1} ns/call; batched {:.1} ns/call; ratio {:.3}",
+            elapsed[0].as_secs_f64() * 1e9 / 320.0,
+            elapsed[1].as_secs_f64() * 1e9 / 320.0,
+            elapsed[0].as_secs_f64() / elapsed[1].as_secs_f64(),
+        );
+    }
+}
+
 #[test]
 fn g0_ogden_one_term_alpha_two_is_decoupled_neo_hookean() {
     let (mu, kappa) = (2e5, 5e6);
