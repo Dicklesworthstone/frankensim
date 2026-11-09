@@ -164,6 +164,7 @@ pub enum ConductionThermalError {
     Field(ConductionError),
     SpatialField(fs_em::spatial::conduction::SpatialConductionError),
     SpatialResponse(fs_em::spatial::conduction::response::SpatialConductionResponseError),
+    SpatialResponseMechanical(spatial::mechanical::response::SpatialConductionResponseKickError),
     Response(fs_em::conduction::response::ConductionResponseError),
     Storage(super::field_storage::FieldThermalError),
     Dielectric(fs_em::electrostatic::relaxation::DielectricRelaxationError),

@@ -14864,3 +14864,51 @@ second time. All six changed coupled Rust sources passed the pinned parser,
 formatter and rustfmt --check. Native FEM/thermal compilation and these
 integration test executions remain unverified; no numerical runtime pass is
 inferred from formatting or static review.
+
+
+### Nonlinear conduction, native rigid momentum and finite heat
+
+conduction::spatial::mechanical::response closes the original scalar E'/J
+material laws and all six rigid midpoint velocities through the existing
+bounded Newton-Krylov and fallible finite-difference services. Every trial uses
+the same initial native mechanical state and supplied external material
+context. Final current is freshly solved; original-cell J cross B loads use the
+shared P1 force/wrench integration and native free-floating impulse owners.
+Independent midpoint, Lorentz/kinetic and authored-source/heat/storage gates
+precede acceptance. Native voltage/current-density traces and direct grouped
+voltage/current/floating/mixed electrodes retain their actual controls. All
+numerical probes, constitutive trials and final admission consume one native
+field-work cap; no nonlinear field is replaced by an affine drag response.
+
+The original exact tetrahedral mass geometry, material card and density claim
+pins remain bound. The original density bundle is refreshed at the supplied
+external T/phase context and must retain its exact inertial values. Density
+response or applicability depending on owned electrical coordinates refuses.
+Continuation may therefore update electrical source coordinates while retaining
+the original inertia without admitting an unowned field-dependent mass law.
+
+conduction::spatial::response::mechanical additionally closes that native
+momentum/current candidate inside the original finite-enthalpy endpoint for any
+complete HeatAssembly. Every thermal proposal refreshes the original electrical
+sources and restarts from the same mechanical and thermal histories. Original
+local Joule heat is deposited once, original finite links/contact/radiation
+providers remain in the shared heat residual, and all nested electrical work
+consumes the existing thermal circuit-trial allowance. The complete source and
+heat samples, candidate source owner and native mechanical result are retained.
+
+The final full energy defect is delta_H + delta_K - terminal_work -
+external_mechanical_work - other_external_heat. It is formed by adding the
+independent native kinetic-minus-external-minus-Lorentz defect to the existing
+thermal defect, so Lorentz transfer cancels once and is not deposited as heat.
+The final global and closed-enclosure heat gates are reapplied. Original
+caloric, constant-density, routing, typed-source-error and atomic acceptance
+requirements remain binding. Refusal or cancellation accepts no input owner.
+
+This is a contact-free electrical whole-body force substep at fixed pose,
+geometry and inertia with prescribed B. Thermal contacts are still supported
+by their existing heat owners. It adds no pose/advection transport, induction,
+gyroscopic evolution or sliding electrical-interface law. Independent nonlinear
+bar, full rigid and two-body heat/momentum arithmetic checks passed, as did
+pinned formatting and bounded exact-production typechecks with dependency
+stubs. Six native and two complete-heat integration regressions were authored;
+the full dependency-backed repository tests remain unexecuted.

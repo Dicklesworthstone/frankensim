@@ -152,7 +152,7 @@ pub fn step_spatial_moving_conduction_response_candidate<'t, 'd, A: HeatAssembly
 // One complete-assembly source/axis admission and closed-balance owner for
 // both native field frames. The callback only selects the electrical adapter.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-fn step_with_heat<'t, A: HeatAssembly + ?Sized, F>(
+pub(super) fn step_with_heat<'t, A: HeatAssembly + ?Sized, F>(
     heat: &A,
     cx: &Cx<'_>,
     thermal: &DepositionSimulation<'t>,

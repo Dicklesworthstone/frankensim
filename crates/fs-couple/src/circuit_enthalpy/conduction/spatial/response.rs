@@ -6,6 +6,8 @@
 //! trials neither advance thermal time nor deposit numerical defects.
 
 mod heat;
+/// Nonlinear current, rigid momentum and finite heat at one endpoint.
+pub mod mechanical;
 /// Nonlinear conductor-frame response under prescribed motion and magnetic field.
 pub mod motion;
 pub use heat::{

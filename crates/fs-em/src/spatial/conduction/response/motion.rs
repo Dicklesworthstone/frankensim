@@ -43,6 +43,54 @@ pub type SpatialMovingConductionResponseReport =
 pub type SpatialMovingConductionResponseCandidate =
     SpatialConductionResponseCandidate<SpatialMovingConductionSnapshot>;
 
+impl SpatialMovingConductionResponseCandidate {
+    /// Integrate the Lorentz force from this accepted nonlinear current field
+    /// on its own original mesh. No new electrical solve or source query occurs.
+    /// Shared vertices accumulate once through the native P1 load integrator.
+    /// These loads have not yet advanced a mechanical history.
+    pub fn lorentz_loads(
+        &self,
+        selected_cells: &[usize],
+        limits: crate::spatial::conduction::motion::SpatialLorentzLoadLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> core::result::Result<
+        crate::spatial::conduction::motion::SpatialLorentzLoads,
+        crate::spatial::conduction::motion::SpatialLorentzLoadError,
+    > {
+        self.problem.native.moving_snapshot_lorentz_loads(
+            &self.report.field,
+            selected_cells,
+            None,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Require the receiving P1 nodal velocity to reproduce the original
+    /// conductor-frame solve's prescribed mean velocity in every selected cell.
+    /// The local tolerance and virtual-work semantics are the native moving
+    /// field's; an unrelated mesh or reconstructed force is never substituted.
+    pub fn lorentz_loads_for_velocity(
+        &self,
+        selected_cells: &[usize],
+        nodal_velocity_m_s: &[[f64; 3]],
+        velocity_tolerance_m_s: f64,
+        limits: crate::spatial::conduction::motion::SpatialLorentzLoadLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> core::result::Result<
+        crate::spatial::conduction::motion::SpatialLorentzLoads,
+        crate::spatial::conduction::motion::SpatialLorentzLoadError,
+    > {
+        self.problem.native.moving_snapshot_lorentz_loads(
+            &self.report.field,
+            selected_cells,
+            Some((nodal_velocity_m_s, velocity_tolerance_m_s)),
+            limits,
+            cancelled,
+        )
+    }
+}
+
 impl SpatialConductionResponse {
     /// Close the original scalar conductivity/resistivity at the actual
     /// conductor-frame field and current under prescribed motion and B.

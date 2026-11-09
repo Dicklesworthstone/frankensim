@@ -9133,3 +9133,17 @@ cover terminal modes, floating transfer, signed work, source coordinates and
 transactional refusals. Pinned formatting, bounded exact-production type checks
 with dependency stubs and independent reference arithmetic passed; full crate
 integration execution remains outstanding.
+
+
+### Original nonlinear moving-current loads for native mechanics
+
+SpatialMovingConductionResponseCandidate exposes lorentz_loads and
+lorentz_loads_for_velocity using its retained original mesh and accepted native
+moving snapshot. The same cell P1 integration, compensated scatter, canonical
+frame/origin wrench map and local nodal-mean velocity check as the borrowed
+fixed-source field remain authoritative. Extraction performs no electrical
+solve or material/force re-evaluation and adds no overlapping Maxwell load.
+Selection, geometry, cancellation and workspace bounds remain active. The
+candidate owns the source/field pairing; an arbitrary external snapshot cannot
+be substituted into this handoff. Physical mechanical feedback belongs to the
+coupling owner, and heat remains the original conductor-frame dissipation.
