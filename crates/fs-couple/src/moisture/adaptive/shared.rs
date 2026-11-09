@@ -44,13 +44,14 @@ impl<B, F, R, T, const N: usize> SharedMoistureAdvanceCandidate<B, F, R, T, N> {
     }
 }
 
-pub type SharedAtmosphereMoistureAdvanceCandidate = SharedMoistureAdvanceCandidate<
-    FiniteMoistureAtmosphere,
-    MoistureSlab,
-    MoistureStepReport,
-    SharedAtmosphereMoistureStep,
-    2,
->;
+pub type SharedAtmosphereMoistureAdvanceCandidate<Transport = MoistureStepReport> =
+    SharedMoistureAdvanceCandidate<
+        FiniteMoistureAtmosphere,
+        MoistureSlab,
+        Transport,
+        SharedAtmosphereMoistureStep,
+        2,
+    >;
 pub type SharedCartesianAtmosphereMoistureAdvanceCandidate<Transport = MoistureCartesianReport> =
     SharedMoistureAdvanceCandidate<
         FiniteMoistureAtmosphere,
@@ -334,6 +335,75 @@ impl FiniteMoistureAtmosphere {
             |air, fields, dt| {
                 air.advance_fields(fields, dt, maximum_total_cells, physical, cx)
                     .map(|c| c.into_parts())
+            },
+            cx,
+        )?;
+        finite::check_vapor(
+            self,
+            &candidate.reservoir,
+            candidate.report.summary.water_change_kg,
+            time.water_balance_tolerance_kg,
+            &mut candidate.report.summary,
+            cx,
+        )?;
+        Ok(candidate)
+    }
+
+    /// Complete second-order diffusion for the original slabs and ONE finite
+    /// atmosphere with independent error control for every specimen.
+    ///
+    /// Opposed uptake and drying cannot hide local errors behind an unchanged
+    /// RH or net vapor inventory. The same second-order comparison also checks
+    /// those two reservoir coordinates. Both native implicit stages are charged
+    /// for every probe; accepted half intervals alone supply the stable-ID face
+    /// accounts. Original integration modes and source identities are retained.
+    ///
+    /// One fixed whole-window water, carrier and total-mass budget admits all
+    /// endpoints together. Failure after a successful private prefix returns
+    /// neither the partial atmosphere nor any partial specimen.
+    pub fn advance_shared_sdirk2_adaptive_to(
+        &self,
+        participants: &[MoistureParticipant<'_>],
+        target_s: f64,
+        maximum_total_cells: usize,
+        nonlinear: MoistureNonlinearConfig,
+        physical: AtmosphereMoistureSolve,
+        time: MoistureTimeControls,
+        cx: &Cx<'_>,
+    ) -> Result<
+        SharedAtmosphereMoistureAdvanceCandidate<MoistureSdirk2Report>,
+        MoistureAdvanceError<AtmosphereMoistureError>,
+    > {
+        let fields = slabs(participants, maximum_total_cells, cx)?;
+        let mut candidate = evolve_shared(
+            self,
+            fields,
+            target_s,
+            maximum_total_cells,
+            self.gas().state().state().temperature,
+            time,
+            TimeMethod::Sdirk2,
+            observe_vapor,
+            |_, _, _| Ok(0.0),
+            |air, fields, dt| {
+                let participants: Vec<_> = fields
+                    .iter()
+                    .map(|field| MoistureParticipant {
+                        id: field.id,
+                        slab: field.field,
+                        faces: field.faces,
+                        transport: field.transport,
+                    })
+                    .collect();
+                air.advance_shared_sdirk2(
+                    &participants,
+                    dt,
+                    maximum_total_cells,
+                    nonlinear,
+                    physical,
+                    cx,
+                )
+                .map(|c| c.into_parts())
             },
             cx,
         )?;

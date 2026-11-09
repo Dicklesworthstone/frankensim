@@ -5,7 +5,7 @@ use crate::moisture::{
     atmosphere::{
         AtmosphereMoistureError, AtmosphereMoistureSolve, AtmosphereMoistureStep,
         CartesianAtmosphereMoistureStep, CartesianAtmosphereSdirk2Step, DryBasisSorption,
-        FiniteMoistureAtmosphere,
+        FiniteMoistureAtmosphere, SlabAtmosphereSdirk2Step,
     },
     solution::{
         CartesianSolutionMoistureStep, CartesianSolutionSdirk2Step, FiniteMoistureSolution,
@@ -129,6 +129,68 @@ impl FiniteMoistureAtmosphere {
             vapor_snapshot::<MoistureSlab, 2>,
             cx,
         )?;
+        check_vapor(
+            self,
+            &atmosphere,
+            report.water_change_kg,
+            time.water_balance_tolerance_kg,
+            &mut report,
+            cx,
+        )?;
+        Ok((atmosphere, field, report))
+    }
+
+    /// Complete a duration with the native slab's second-order diffusion and
+    /// actual finite vapor inventory at every implicit stage.
+    ///
+    /// The existing temporal controller compares one full interval with two
+    /// physical half intervals, uses the second-order error factor (one third
+    /// for equal halves) and the cubic growth rule. Moisture in every cell, RH
+    /// and vapor mass have independent error scales; only accepted half-step transfers
+    /// enter the fixed whole-duration water/carrier/total-mass checks.
+    ///
+    /// Both implicit stages are charged for every attempted native call.
+    /// A retry never publishes its coarse state or diagnostic first-stage gas.
+    /// Source refusal, cancellation or a late work limit discards the complete
+    /// proposed duration. This local asymptotic estimate is not a global error
+    /// bound; source support and the isothermal physical scope are unchanged.
+    pub fn advance_sdirk2_adaptive_to(
+        &self,
+        moisture: &MoistureSlab,
+        target_s: f64,
+        faces: &[Option<DryBasisSorption>; 2],
+        transport: MoistureStepConfig,
+        nonlinear: MoistureNonlinearConfig,
+        physical: AtmosphereMoistureSolve,
+        time: MoistureTimeControls,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (
+            Self,
+            MoistureSlab,
+            MoistureAdvanceReport<SlabAtmosphereSdirk2Step, 2>,
+        ),
+        MoistureAdvanceError<AtmosphereMoistureError>,
+    > {
+        checkpoint(cx)?;
+        let initial = (self.clone(), moisture.clone());
+        let ((atmosphere, field), report) = evolve_fields_with_method(
+            &initial,
+            target_s,
+            time,
+            TimeMethod::Sdirk2,
+            |state, dt| {
+                let (air, field, step) = state
+                    .0
+                    .advance_sdirk2(&state.1, dt, faces, transport, nonlinear, physical, cx)?
+                    .into_parts();
+                Ok(((air, field), OneReport(step)))
+            },
+            vapor_snapshot::<MoistureSlab, 2>,
+            |_, _, _| Ok(0.0),
+            cx,
+        )?;
+        let mut report = report.summary.map_step(|step| step.0);
         check_vapor(
             self,
             &atmosphere,

@@ -2909,6 +2909,25 @@ or a first-order fallback. The returned slab keeps its original ordinary
 integration mode. Temperature, gas volume and reference skeleton remain fixed;
 sorption heat, condensation and a global temporal-error certificate are absent.
 
+`advance_shared_sdirk2` applies the same native slab stages to multiple
+specimens and one common RH, retaining each original geometry, source, signed
+face transfer and ordinary integration mode. Common nonlinear controls apply
+to every specimen; aggregate cell limits are checked before cloning.
+Only first-stage rates and receipts remain during the second scalar search;
+diagnostic first-stage fields are released.
+
+`advance_sdirk2_adaptive_to` and `advance_shared_sdirk2_adaptive_to` use the
+existing second-order temporal controller. Every cell, RH and vapor mass has
+an independent local error scale, so opposed uptake and drying cannot hide
+behind an unchanged atmosphere. Only accepted physical half intervals enter
+the cumulative signed face accounts. Both implicit stages are charged on
+every probe; one fixed whole-duration water, carrier and total-mass budget
+admits all endpoints together. A late work limit or refusal discards the
+entire proposed duration. The error estimate remains local and asymptotic.
+G1/G3/G4 authored fixtures additionally specify heterogeneous shared slabs,
+coupled mean/difference modes, stationary-vapor exchange and late refusal in
+`tests/moisture/atmosphere/shared.rs` and `tests/moisture/adaptive/slab_sdirk.rs`.
+
 Added regressions in `tests/moisture/atmosphere.rs` specify exact coupled
 two-store uptake/drying, second-order refinement, weighted face/vapor accounts,
 Kirchhoff bracket support, replay and transactional refusal. These authored

@@ -279,3 +279,202 @@ fn late_specimen_refusal_clock_budget_and_cancellation_publish_no_partial_exchan
         assert_eq!(b.moisture(), &[0.03; 2]);
     });
 }
+
+#[test]
+fn g1_shared_slab_sdirk_keeps_heterogeneous_stores_and_weighted_face_fluxes() {
+    with_cx(|cx| {
+        let air = atmosphere(0.5, 1.0);
+        let original_air = air.clone();
+        let a = slab(card([0.01; 2], 0.3), 1.0, vec![0.02], cx);
+        let b = slab(card([0.03; 2], 0.3), 0.7, vec![0.2], cx)
+            .with_kirchhoff_diffusivity(nonlinear())
+            .unwrap();
+        let faces_a = [Some(sorption(0.2)), Some(sorption(0.2))];
+        let faces_b = [Some(sorption(0.3)), Some(sorption(0.3))];
+        let fields = [participant(7, &a, &faces_a), participant(3, &b, &faces_b)];
+        let dt = 0.25;
+        let gamma = 1.0 - core::f64::consts::FRAC_1_SQRT_2;
+        let capacity = saturation_pressure() * WATER_MOLAR_MASS / (R * TEMPERATURE);
+        let mass = [a.dry_mass_kg(), b.dry_mass_kg()];
+        let before = [a.moisture()[0], b.moisture()[0]];
+        let rate = [4.0 * 0.01, 4.0 * 0.03 / 0.7_f64.powi(2)];
+        let slope = [0.2, 0.3];
+        let alpha = rate.map(|rate| gamma * dt * rate);
+        // Eliminate the two native one-cell equations from ONE vapor balance.
+        // Distinct thickness, diffusivity, sorption and dry masses are retained.
+        let stage = |known: [f64; 2]| {
+            let numerator = capacity * 0.5
+                + (0..2)
+                    .map(|i| mass[i] * (alpha[i] * before[i] - known[i]) / (1.0 + alpha[i]))
+                    .sum::<f64>();
+            let denominator = capacity
+                + (0..2)
+                    .map(|i| mass[i] * alpha[i] * slope[i] / (1.0 + alpha[i]))
+                    .sum::<f64>();
+            let rh = numerator / denominator;
+            let moisture: [f64; 2] = std::array::from_fn(|i| {
+                (before[i] + known[i] + alpha[i] * slope[i] * rh) / (1.0 + alpha[i])
+            });
+            (rh, moisture)
+        };
+        let (first_rh, first) = stage([0.0; 2]);
+        let known = std::array::from_fn(|i| {
+            (1.0 - gamma) * dt * rate[i] * (slope[i] * first_rh - first[i])
+        });
+        let (expected_rh, expected) = stage(known);
+        let accepted = air
+            .advance_shared_sdirk2(&fields, dt, 2, nonlinear(), controls(), cx)
+            .unwrap();
+        let replay = air
+            .advance_shared_sdirk2(
+                &[participant(3, &b, &faces_b), participant(7, &a, &faces_a)],
+                dt,
+                2,
+                nonlinear(),
+                controls(),
+                cx,
+            )
+            .unwrap();
+        assert_eq!(accepted.atmosphere(), replay.atmosphere());
+        assert_eq!(
+            accepted.solids().iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![3, 7]
+        );
+        near(
+            accepted.atmosphere().relative_humidity().unwrap(),
+            expected_rh,
+            3e-11,
+        );
+        let mut water = 0.0;
+        for (field, repeated) in accepted.solids().iter().zip(replay.solids()) {
+            let i = if field.id == 7 { 0 } else { 1 };
+            assert_eq!(field.moisture.moisture(), repeated.moisture.moisture());
+            near(field.moisture.moisture()[0], expected[i], 3e-12);
+            near(
+                field.transport.first_stage.stored_water_kg[1] / mass[i],
+                first[i],
+                3e-12,
+            );
+            assert_eq!(field.transport.first_stage.interval_s, [0.0, gamma * dt]);
+            assert_eq!(field.transport.endpoint.interval_s, [0.0, dt]);
+            near(
+                field.transport.first_stage.reservoir_moisture[0].unwrap(),
+                slope[i] * first_rh,
+                3e-11,
+            );
+            near(
+                field.transport.endpoint.reservoir_moisture[0].unwrap(),
+                slope[i] * expected_rh,
+                3e-11,
+            );
+            let change = mass[i] * (expected[i] - before[i]);
+            assert_eq!(change.is_sign_positive(), i == 0);
+            for face in field.transport.endpoint.boundary_water_kg {
+                near(face, change / 2.0, 1e-13);
+            }
+            water += change;
+            assert_eq!(field.transport.endpoint.kirchhoff_source.is_some(), i == 1);
+            // Shared SDIRK must not install its private numerical mode on the
+            // returned specimen's ordinary endpoint owner.
+            let faces = if i == 0 { &faces_a } else { &faces_b };
+            let ordinary = accepted
+                .atmosphere()
+                .advance(&field.moisture, dt, faces, config(), controls(), cx)
+                .unwrap();
+            assert_eq!(ordinary.step().transport.nonlinear.is_some(), i == 1);
+        }
+        near(accepted.step().water_to_solids_kg, water, 1e-13);
+        near(
+            accepted.step().vapor_mass_kg[0] - accepted.step().vapor_mass_kg[1],
+            water,
+            1e-13,
+        );
+        near(
+            accepted.atmosphere().vapor_mass_kg().unwrap()
+                + accepted
+                    .solids()
+                    .iter()
+                    .map(|s| s.moisture.water_mass_kg())
+                    .sum::<f64>(),
+            air.vapor_mass_kg().unwrap() + a.water_mass_kg() + b.water_mass_kg(),
+            1e-13,
+        );
+        near(
+            carrier_mass(accepted.atmosphere()),
+            carrier_mass(&air),
+            2e-14,
+        );
+        assert_eq!(air, original_air);
+        assert_eq!(a.moisture(), &[0.02]);
+        assert_eq!(b.moisture(), &[0.2]);
+        assert_eq!(a.time_s(), 0.0);
+        assert_eq!(b.time_s(), 0.0);
+    });
+}
+
+#[test]
+fn g4_shared_slab_sdirk_refuses_late_specimens_limits_and_cancellation_atomically() {
+    with_cx(|cx| {
+        let air = atmosphere(0.5, 1.0);
+        let original_air = air.clone();
+        let a = slab(card([0.01; 2], 0.3), 1.0, vec![0.02], cx);
+        let b = slab(card([0.03; 2], 0.3), 0.7, vec![0.2], cx);
+        let faces = [Some(sorption(0.25)), Some(sorption(0.25))];
+        let fields = [participant(1, &a, &faces), participant(9, &b, &faces)];
+        assert!(matches!(
+            air.advance_shared_sdirk2(&fields, 0.1, 1, nonlinear(), controls(), cx),
+            Err(AtmosphereMoistureError::Invalid(_))
+        ));
+        assert!(matches!(
+            air.advance_shared_sdirk2(
+                &[participant(1, &a, &faces), participant(1, &b, &faces)],
+                0.1,
+                2,
+                nonlinear(),
+                controls(),
+                cx,
+            ),
+            Err(AtmosphereMoistureError::Invalid(_))
+        ));
+        let mut limited = participant(9, &b, &faces);
+        limited.transport.maximum_content_increment = 1e-15;
+        assert!(matches!(
+            air.advance_shared_sdirk2(
+                &[participant(1, &a, &faces), limited],
+                0.1,
+                2,
+                nonlinear(),
+                controls(),
+                cx,
+            ),
+            Err(AtmosphereMoistureError::Moisture(
+                MoistureError::ContentIncrement { .. }
+            ))
+        ));
+        let gate = CancelGate::new();
+        gate.request();
+        ArenaPool::new(ArenaConfig::default()).scope(|arena| {
+            let cancelled = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 3,
+                    kernel_id: 17,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            assert!(matches!(
+                air.advance_shared_sdirk2(&fields, 0.1, 2, nonlinear(), controls(), &cancelled),
+                Err(AtmosphereMoistureError::Moisture(MoistureError::Cancelled))
+            ));
+        });
+        assert_eq!(air, original_air);
+        assert_eq!(a.moisture(), &[0.02]);
+        assert_eq!(b.moisture(), &[0.2]);
+        assert_eq!(a.time_s(), 0.0);
+        assert_eq!(b.time_s(), 0.0);
+    });
+}

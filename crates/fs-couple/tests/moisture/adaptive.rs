@@ -8,6 +8,8 @@ use fs_couple::moisture::{adaptive::*, cartesian::*};
 mod sdirk;
 #[path = "adaptive/finite_sdirk.rs"]
 mod finite_sdirk;
+#[path = "adaptive/slab_sdirk.rs"]
+mod slab_sdirk;
 #[path = "adaptive/shared.rs"]
 mod shared;
 
