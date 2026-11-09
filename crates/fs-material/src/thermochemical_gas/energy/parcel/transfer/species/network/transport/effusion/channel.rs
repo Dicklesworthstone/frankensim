@@ -10,6 +10,8 @@
 
 /// Finite material walls sharing the original fixed-volume caloric owner.
 pub mod thermal;
+/// Exact-vacuum receiver initialization and subsequent finite-wall exchange.
+pub mod filling;
 /// Adaptive held-wall channels with original-source and window conservation audits.
 pub mod trajectory;
 /// True-vacuum outlets with returned molecules and explicit escaped energy.

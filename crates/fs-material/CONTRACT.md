@@ -23125,3 +23125,12 @@ The spectrum tests check independent real-field biased energy, unchanged heat,
 pure relaxed static storage, a positive 1e-20-second storage/work increment
 below endpoint-energy resolution, original DC applicability, duplicate-tone
 cancellation, complete strain admission and dispersive plane-stress recovery.
+
+
+## Exactly evacuated receivers behind finite thermal molecular channels
+
+`species::network::transport::effusion::channel::filling` composes the original evacuated-volume, finite-wall vacuum and reciprocal gas/wall owners. The first stage captures the accepted transmitted species and their wall-adjusted molecular energy inside the authored receiver volume. Its original caloric inversion determines temperature and pressure without seed gas or an assigned vacuum temperature. The source-relative energy coordinate adds only transmitted wall heat to the aperture's RT/(2M) excess; reflected mass and returned heat stay with the original donor. Zero capture preserves the evacuated owner. Subsequent stages use the actual filled receiver's return beam through the ordinary reciprocal finite-wall transaction.
+
+Donor, receiver and material wall are immutable until one candidate passes the original gross-withdrawal, caloric, transport and active species wall-support gates. Common and species-specific accommodation use the same channel helper. Actual source-relative gas storage plus finite material storage must close under the fixed species/mass/energy budgets. Original gas entropy, including newly occupied volume and mixing, plus the material's authored sensible entropy must satisfy the complete closed-system entropy budget. No entropy or thermal state is assigned to the initial vacuum.
+
+This is an explicitly first-order quasistatic step for well-mixed ideal gases in fixed rigid vessels, a stationary diffuse channel and negligible flight time. Fixed vessel supports absorb momentum without boundary work; moving/rotating receivers, spatial filling transients and additional heat paths require their own owners. Six focused tests cover wall-controlled first-fill temperature and pressure, reciprocal continuation, closed/elastic limits, species fractionation and accommodation, caloric reference invariance, and atomic late source/inventory/cancellation refusal. Full material-owner test execution remains pending the complete dependency build.

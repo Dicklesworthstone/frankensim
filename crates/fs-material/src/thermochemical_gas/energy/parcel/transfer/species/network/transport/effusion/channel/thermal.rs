@@ -492,4 +492,4 @@ fn check(cancelled: &mut impl FnMut() -> bool) -> Result<(), FiniteChannelError>
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
