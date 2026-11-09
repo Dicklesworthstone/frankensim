@@ -321,12 +321,16 @@ impl PreparedCapacitiveBatteryMotorCycle<charge::ChargeCommutationParameters> {
     }
 }
 /// Retained gate/Miller charge in the same finite battery and two-shaft drive.
-pub type PreparedGateBatteryMotorCycle =
-    PreparedCapacitiveBatteryMotorCycle<gate::GateCommutationParameters, 9, 15>;
-impl PreparedCapacitiveBatteryMotorCycle<gate::GateCommutationParameters, 9, 15> {
+/// The default gate-only conductance and complete signed I(Vds,Vgs) channel
+/// responses use the same fifteen-state workspace and original heat accounts.
+pub type PreparedGateBatteryMotorCycle<C = GateConductanceCurve> =
+    PreparedCapacitiveBatteryMotorCycle<gate::GateCommutationParameters<C>, 9, 15>;
+impl<C: GateChannelResponse + Clone + 'static>
+    PreparedCapacitiveBatteryMotorCycle<gate::GateCommutationParameters<C>, 9, 15>
+{
     pub fn new_gate_controlled(
         model: BatteryMotorDrive,
-        parameters: gate::GateCommutationParameters,
+        parameters: gate::GateCommutationParameters<C>,
         intervals: &[CommutationInterval],
         substeps_per_interval: usize,
         electrical: PowerLoadControls,

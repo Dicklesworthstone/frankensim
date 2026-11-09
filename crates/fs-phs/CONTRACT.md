@@ -4063,12 +4063,15 @@ decomposition and actual gate voltages. Gate-clamped Coss is not silently
 reinterpreted as intrinsic Qds and augmented with another Cgd.
 
 `commutation::gate::GateConductanceCurve` retains a bounded positive G(Vgs)
-table and analytic segment derivative. `GateDriver` retains explicit on/off
+table and analytic segment derivative. The immutable `GateChannelResponse`
+interface also accepts complete original channel-only I(Vds,Vgs) laws, with
+analytic drain/gate partials and explicit source support. `GateDriver` retains explicit on/off
 source voltages, finite branch resistances and current support. The same
 represented gate current supplies signed source work, gate-terminal work and
 positive driver-resistor heat. The driver refuses unsupported current rather
-than clipping it. These laws do not infer saturation, carrier recovery,
-temperature-dependent reversible storage or a finite-energy gate-rail reservoir.
+than clipping it. Saturation or cutoff comes only from the authored current
+response; carrier recovery, temperature-dependent reversible storage and a
+finite-energy gate-rail reservoir are not inferred.
 
 ## Finite gate-controlled converter and battery-motor trajectories
 
@@ -4080,11 +4083,27 @@ the same bounded interval program, native solve workspace, endpoint admission,
 cancellation and physical-account accumulators.
 
 A gate command selects its authored finite-impedance voltage-source branch.
-Actual source-referenced Vgs determines the complete original G(Vgs) channel
-law and its analytic derivative. Four gate charges continue through commands
-and cycle boundaries. The floating high-side driver injects only its gate
+Actual source-referenced Vgs and drain-source voltage evaluate the retained
+channel-only response. `GateCommutationParameters<C>` and both prepared gate
+aliases default to the original G(Vgs)*Vds law; C may instead retain an immutable
+`GateChannelResponse` with full signed I(Vds,Vgs), original support and analytic
+drain/gate partials. A zero drain derivative can represent authored current
+saturation. The historical `channel_conductance` field names the retained C;
+no current surface is converted into a conductance grid. Four gate charges
+continue through commands and cycle boundaries. The floating high-side driver injects only its gate
 coordinate because the grouped node coordinate already includes the equal
 source-electrode reaction. Intrinsic Qds, Cgs and Cgd remain reversible storage.
+
+The accepted channel current enters electrical flow directly, and the same
+represented current supplies Vds*I heat. Runtime queries must be finite and
+passive, with zero channel current at zero Vds; unsupported or active current
+and unrepresentable power refuse the step. The original body-diode law and
+operating limits are reused once. Both drain signs require authored source
+support. Negative differential slope may remain passive; no I/V division,
+reverse symmetry, threshold, clipping or derivative regularization is inferred.
+Runtime point checks alone do not establish global passivity for arbitrary
+callbacks; a source adapter owns any full-cell admission proof. Immutable
+responses are erased once at cold preparation and shared across intervals.
 
 The native nonlinear port includes four signed gate-source works and four
 nonnegative driver-resistor heats. Converter `all_heat_joules()` returns thirteen
@@ -4100,8 +4119,8 @@ initial, accepted discrete-effort and endpoint states. They do not certify
 unresolved inter-step peaks. Temporal refinement remains explicit for small
 gate RC and switching time scales. Failed support, work budgets or final
 cancellation leave caller state and outputs unchanged. Gate supplies have
-finite resistance and audited work; no finite-energy rail inventory, channel
-saturation law, carrier recovery or avalanche law is inferred.
+finite resistance and audited work; no finite-energy rail inventory, carrier
+recovery or avalanche law is inferred.
 
 ## Finite battery and motor shafts with device capacitor charge
 

@@ -1,6 +1,9 @@
 //! Original source support, finite driver power, and reciprocal Miller storage.
 
 use super::*;
+
+#[path = "gate/current.rs"]
+mod current;
 use fs_phs::circuit::converter::commutation::capacitance::gate::{
     GateCommutationParameters, GateCommutationStorage,
 };

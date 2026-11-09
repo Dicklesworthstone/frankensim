@@ -106,12 +106,16 @@ impl PreparedCapacitiveCommutatedSwitchCycle<charge::ChargeCommutationParameters
         )
     }
 }
-/// Four physical gate charges share the original converter trajectory.
-pub type PreparedGateCommutatedSwitchCycle =
-    PreparedCapacitiveCommutatedSwitchCycle<gate::GateCommutationParameters, 9>;
-impl PreparedCapacitiveCommutatedSwitchCycle<gate::GateCommutationParameters, 9> {
+/// Four physical gate charges share the original converter trajectory. The
+/// default channel is G(Vgs)*Vds; an immutable GateChannelResponse may instead
+/// retain a full signed I(Vds,Vgs) source law with its analytic tangent.
+pub type PreparedGateCommutatedSwitchCycle<C = GateConductanceCurve> =
+    PreparedCapacitiveCommutatedSwitchCycle<gate::GateCommutationParameters<C>, 9>;
+impl<C: GateChannelResponse + Clone + 'static>
+    PreparedCapacitiveCommutatedSwitchCycle<gate::GateCommutationParameters<C>, 9>
+{
     pub fn new_gate_controlled(
-        parameters: gate::GateCommutationParameters,
+        parameters: gate::GateCommutationParameters<C>,
         terminal_resistance_ohm: [f64; 2],
         intervals: &[CommutationInterval],
         substeps_per_interval: usize,

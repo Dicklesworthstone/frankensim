@@ -257,12 +257,30 @@ impl HalfBridgeConduction {
         index: usize,
         voltage: Dd,
     ) -> Result<(DeviceConductionPoint, Dd, f64, Dd), PhsError> {
-        let device = self.devices[index];
         let v = number(voltage)?;
         let channel = voltage * Dd::from_f64(self.conductance_s[index]);
         let channel_current_a = number(channel)?;
         if v != 0.0 && channel_current_a == 0.0 {
             return Err(invalid("nonzero channel current is unrepresentable"));
+        }
+        self.device_point_with_channel(index, voltage, channel, self.conductance_s[index])
+    }
+
+    /// One diode/terminal/loss owner serves both the original linear channel and
+    /// an actual nonlinear channel current. The latter enters as its represented
+    /// state-flow current, so its power uses exactly the same physical current.
+    fn device_point_with_channel(
+        &self,
+        index: usize,
+        voltage: Dd,
+        channel: Dd,
+        channel_derivative_s: f64,
+    ) -> Result<(DeviceConductionPoint, Dd, f64, Dd), PhsError> {
+        let device = self.devices[index];
+        let v = number(voltage)?;
+        let channel_current_a = number(channel)?;
+        if !channel_derivative_s.is_finite() {
+            return Err(invalid("finite original channel drain derivative required"));
         }
         let overdrive = -voltage - Dd::from_f64(device.body_diode.forward_voltage_v);
         let forward = number(overdrive)? > 0.0;
@@ -287,12 +305,14 @@ impl HalfBridgeConduction {
             return Err(invalid("positive physical device power is unrepresentable"));
         }
         let current = channel - diode;
-        let slope = self.conductance_s[index]
-            + if forward {
-                1.0 / device.body_diode.differential_resistance_ohm
-            } else {
-                0.0
-            };
+        let slope = number(
+            Dd::from_f64(channel_derivative_s)
+                + Dd::from_f64(if forward {
+                    1.0 / device.body_diode.differential_resistance_ohm
+                } else {
+                    0.0
+                }),
+        )?;
         Ok((
             DeviceConductionPoint {
                 drain_source_voltage_v: v,
@@ -341,6 +361,42 @@ impl HalfBridgeConduction {
         )
     }
 
+    /// Evaluate two original channel-only current responses at a stored node.
+    /// Diode response, terminal support and physical heat are the same owners
+    /// used by prescribed-conductance commutation. A saturation plateau may have
+    /// zero drain derivative; no channel current is divided by drain voltage.
+    pub(super) fn evaluate_at_node_with_channels(
+        &self,
+        bus_voltage_v: f64,
+        switch_node_voltage_v: f64,
+        channels: [gate::GateChannelPoint; 2],
+    ) -> Result<HalfBridgeNodePoint, PhsError> {
+        if !bus_voltage_v.is_finite() || !switch_node_voltage_v.is_finite() {
+            return Err(invalid(
+                "finite half-bridge bus and stored node voltages required",
+            ));
+        }
+        let node = Dd::from_f64(switch_node_voltage_v);
+        let high_voltage = Dd::from_f64(bus_voltage_v) - node;
+        let high = channels[0].admit(number(high_voltage)?)?;
+        let low = channels[1].admit(switch_node_voltage_v)?;
+        self.node_point_from_devices(
+            switch_node_voltage_v,
+            self.device_point_with_channel(
+                0,
+                high_voltage,
+                Dd::from_f64(high.current_a),
+                high.drain_derivative_s,
+            )?,
+            self.device_point_with_channel(
+                1,
+                node,
+                Dd::from_f64(low.current_a),
+                low.drain_derivative_s,
+            )?,
+        )
+    }
+
     fn evaluate_at_node_dd(
         &self,
         bus_voltage_v: Dd,
@@ -348,10 +404,21 @@ impl HalfBridgeConduction {
     ) -> Result<HalfBridgeNodePoint, PhsError> {
         number(bus_voltage_v)?;
         let node = number(switch_node_voltage_v)?;
-        let (high, high_current, high_slope, high_loss) =
-            self.device_point(0, bus_voltage_v - switch_node_voltage_v)?;
-        let (low, low_current, low_slope, low_loss) =
-            self.device_point(1, switch_node_voltage_v)?;
+        self.node_point_from_devices(
+            node,
+            self.device_point(0, bus_voltage_v - switch_node_voltage_v)?,
+            self.device_point(1, switch_node_voltage_v)?,
+        )
+    }
+
+    fn node_point_from_devices(
+        &self,
+        node: f64,
+        high: (DeviceConductionPoint, Dd, f64, Dd),
+        low: (DeviceConductionPoint, Dd, f64, Dd),
+    ) -> Result<HalfBridgeNodePoint, PhsError> {
+        let (high, high_current, high_slope, high_loss) = high;
+        let (low, low_current, low_slope, low_loss) = low;
         self.support(0, high)?;
         self.support(1, low)?;
         Ok(HalfBridgeNodePoint {
