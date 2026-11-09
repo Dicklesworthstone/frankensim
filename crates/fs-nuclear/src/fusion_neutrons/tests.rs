@@ -12,6 +12,9 @@ use fs_thermochem::electron_collision::AVOGADRO_PER_MOL;
 #[path = "tests/secondary.rs"]
 mod secondary;
 
+#[path = "tests/fission.rs"]
+mod fission;
+
 const MEV: f64 = 1.602_176_634e-13;
 
 fn data(energies_mev: &[f64], cells: usize) -> DiffusionData {

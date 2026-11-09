@@ -1,16 +1,20 @@
-//! Fusion-neutron energy on the existing multigroup reaction operator.
+//! Neutron kinetic and prompt-reaction energy on the multigroup reaction operator.
 //!
 //! The original diffusion owner advances neutron populations, continuous births,
 //! reaction counts and face histories. This companion attaches an explicitly
 //! authored representative energy to each group. Downscattering removes the
 //! group-energy difference; capture removes the incident kinetic energy.
-//! Nonfission neutron production retains its distinct authored multiplicities.
-//! Optional signed prompt Q and threshold declarations give the energy available
+//! Prompt fission and other neutron production retain their distinct authored
+//! multiplicities and event counters. Explicit signed prompt Q and threshold
+//! declarations give the energy available
 //! to heat/radiation as incident energy + Q - outgoing neutron energy. Nuclear
 //! conversion is retained separately, including endothermic consumption; leakage
 //! retains its outgoing neutron energy. [`activation`] binds finite target and
 //! product inventories to the same accepted history. No Q, threshold, secondary
 //! spectrum, stopping law or photon transport is inferred.
+//! Fission Q includes only prompt conversion; radioactive product decays retain
+//! their own event energies. Abstract delayed-precursor groups have no admitted
+//! energy storage here and remain unsupported.
 //!
 //! A fusion interval retains separate D-T and D-D-neutron counts and energies.
 //! `FusionNeutronSource::project_interval_mean` explicitly replaces each channel
@@ -44,8 +48,9 @@ pub mod activation;
 /// Authored prompt nuclear mass-energy conversion for one neutron reaction.
 ///
 /// Positive Q releases rest energy; negative Q consumes incident kinetic energy.
-/// Q excludes the incoming neutron, outgoing neutron kinetic energy and later
-/// product decays. The laboratory threshold is an independent physical input:
+/// Q is the prompt nuclear conversion before subtracting outgoing neutron
+/// kinetic energy. Incident kinetic energy and later product decays are separate
+/// accounts. The laboratory threshold is an independent physical input:
 /// `-Q` alone does not include target recoil or determine a reaction threshold.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct NeutronReactionEnergy {
@@ -109,7 +114,7 @@ impl NeutronKineticModel {
         Ok(model)
     }
 
-    /// Admit explicit nonfission neutron production and prompt nuclear energy.
+    /// Admit explicit prompt fission, other neutron production and nuclear energy.
     ///
     /// Every original reaction supplies signed Q, a nonnegative laboratory
     /// threshold, and an independent local heat fraction. Secondary yields are
@@ -119,6 +124,9 @@ impl NeutronKineticModel {
     /// temperature-driven rebinding must still pass these checks before use.
     /// These are representative-energy checks, not within-group kinematics;
     /// source data must be consistently collapsed and thresholds resolved.
+    /// Fission Q excludes later radioactive-product release. Only prompt fission
+    /// yields are admitted: abstract delayed-precursor energy storage is not
+    /// inferred. Explicit radioactive products use the original activation owner.
     pub fn new_with_reaction_energies(
         data_id: String,
         diffusion: Arc<DiffusionModel>,
@@ -171,10 +179,16 @@ impl NeutronKineticModel {
                 DiffusionReactionKind::NeutronProduction { neutron_yields } => {
                     weighted_sum(neutron_yields, &energies_j)?
                 }
-                DiffusionReactionKind::Fission { .. } => {
-                    return Err(NeutronKineticError::Invalid(
-                        "fusion neutron-energy owner excludes fission and delayed neutron production",
-                    ));
+                DiffusionReactionKind::Fission {
+                    prompt_yields,
+                    delayed_yields,
+                } => {
+                    if !delayed_yields.is_empty() {
+                        return Err(NeutronKineticError::Invalid(
+                            "prompt fission energy requires no abstract delayed precursors",
+                        ));
+                    }
+                    weighted_sum(prompt_yields, &energies_j)?
                 }
             };
             available_energy_j.push(checked(sum(&[

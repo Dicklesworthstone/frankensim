@@ -8,7 +8,8 @@
 //!
 //! Every `BurnupReaction::energy_per_event` supplied here must exclude incident
 //! neutron kinetic energy. A reaction with Q in the neutron energy model must
-//! have zero prompt energy in burnup, as must every neutron-producing reaction;
+//! have zero prompt energy in burnup, as must every neutron-producing reaction,
+//! including prompt fission;
 //! double ownership refuses. Capture entries also exclude subsequent product
 //! decay energy; the product's actual decay events release that energy later. No ENDF
 //! Q, product yield, charged-particle stopping or gamma deposition is inferred.
@@ -162,6 +163,7 @@ impl FusionNeutronActivationState {
                 || matches!(
                     neutron.kind,
                     crate::diffusion::DiffusionReactionKind::NeutronProduction { .. }
+                        | crate::diffusion::DiffusionReactionKind::Fission { .. }
                 ))
                 && inventory_q != 0.0
             {

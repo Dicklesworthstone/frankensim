@@ -192,10 +192,10 @@ mandatory. Only the local deposited channel becomes material heat.
 
 The original zero-Q `NeutronKineticModel::new` is a bounded nonmultiplying
 kinetic-energy interpretation with fixed authored group data. Explicit
-nonfission production, signed Q and thresholds use the constructor described
-above; none is inferred. `NeutronKineticState` alone supplies no finite
+prompt fission and other production, signed Q and thresholds use the constructor
+described above; none is inferred. `NeutronKineticState` alone supplies no finite
 activation/depletion, changes of material mass/composition, temperature feedback
-to cross sections, fission, delayed-neutron production or photon transport. Effective
+to cross sections, abstract delayed-precursor energy or photon transport. Effective
 speeds/cross sections and representative energies must have compatible physical
 averaging. The original diffusion approximation does not resolve angular or
 near-void streaming; see the primary
@@ -3257,8 +3257,8 @@ The joint system retains the existing 64-node bound. Sources are stationary
 closed radioactive chains; incident neutrons do not deplete these source
 inventories, and target coefficients remain the prescribed diffusion background.
 The original diffusion approximation and frozen-coefficient assumptions apply.
-The kinetic energy layer retains its existing exclusion of fission and abstract
-delayed-precursor energy models. Parent-wide expected spectra do not infer
+The kinetic energy layer admits explicitly funded prompt fission as described
+below; abstract delayed-precursor energy models remain excluded. Parent-wide expected spectra do not infer
 sampled branch/energy correlations, angular transport or nuclear-data uncertainty.
 
 ## Evaluated radioactive neutron emission
@@ -3429,3 +3429,42 @@ Three manufactured regressions cover data retention, cross-sublibrary and
 cumulative/ambiguous/energy-dependent source refusal, explicit bounds and late
 cancellation. Source review and rustfmt were completed; execution of these new
 regressions remains unconfirmed after the native workspace disconnected.
+
+## Prompt fission, finite products and decay energy on one trajectory
+
+`NeutronKineticModel::new_with_reaction_energies` admits the original diffusion
+owner's prompt fission channels. Supplied prompt yields retain their original
+multiplicity and group distribution. The available immediate non-neutron energy
+is E_in + Q - sum(yield * E_out); Q is prompt nuclear conversion before that
+subtraction, not total delayed product energy. Active reactions must satisfy
+the original threshold and nonnegative available-energy checks, including after
+finite-composition or temperature rebinding. The convenience kinetic-only
+constructor still requires explicit energy inputs for every neutron producer.
+
+`FusionNeutronActivationState` uses the same accepted reaction trajectory and
+original finite fuel/product inventories. Bound fission channels must carry
+zero prompt event energy in burnup, even when explicitly declared Q is zero,
+so prompt release cannot be credited twice. Actual radioactive products retain
+their own half-lives, branches and later event energies. Declared product decay
+neutrons can re-enter that same finite neutron/inventory block and consume only
+the original radioactive radiation allowance. No abstract precursor energy,
+missing neutron spectrum, fission Q or evaluated isotope property is inferred.
+
+Original material-cell heating consumes disjoint prompt and decay deposition
+through the existing shared thermal transaction. Nuclear identities, material
+mass and calorics retain their owners; source-free continuation, restart and
+late refusal preserve the established atomic state/history semantics. The
+original diffusion approximation, representative group energies, fixed supplied
+prompt Q and frozen-mean nonlinear closure still require physical refinement.
+
+Four new kinetic/activation regressions cover analytic multiplication and
+continuous feed, signed conversion with distinct outgoing groups, finite fuel
+and product aging against an independent nonlinear ODE with step refinement,
+and energy/precursor/cancellation refusal. One material regression follows an
+initially empty neutron field through radioactive emission, prompt fission,
+beta and delayed-neutron product decay, local heat, radiation and leakage.
+It checks original material temperature/mass, restart and late rollback.
+These new tests received source/API review; native execution remains unavailable
+after the workspace disconnected. Independent numerical evaluation of the
+material fixture confirms its particle balance and stays inside its caloric
+domain; it does not substitute for execution of the Rust tests.
