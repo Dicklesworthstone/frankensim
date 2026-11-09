@@ -228,11 +228,7 @@ fn spectrum<const C: usize>(
     let source_knots = match detector.source.source() {
         DiffuseThermalSurface::Gray(_) => &[][..],
         DiffuseThermalSurface::Spectral(source) => source.emissivity_knots(),
-        DiffuseThermalSurface::Rough(_) => {
-            return Err(ThermalExposureError::Detector(
-                ThermalSurfaceError::DirectionRequired.into(),
-            ));
-        }
+        DiffuseThermalSurface::Rough(source) => source.facet_albedo().knots(),
     };
     let shifted = |index: usize| {
         detector

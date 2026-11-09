@@ -10501,6 +10501,11 @@ solid-angle ratio is D^-2 and must not be applied to radiance a second time.
 
 With `tracer`, `thermal_surface::doppler::ObservedThermalSurface` borrows the
 original spectral thermal surface or retains the original gray source value.
+Its explicit `try_new_directional` also borrows the original rough EON source,
+using its actual source-rest-frame outgoing cosine and facet absorptance at the
+mapped source wavelength. The direction-free constructor still refuses rough
+sources. Zero shift delegates to the unchanged directional source law, preserving
+its radiance bits. No hemispherical average or extra projected cosine is used.
 Its emissivity is evaluated at the mapped SOURCE wavelength. Actual temperature,
 source identity and finite-band law remain unchanged. The equivalent Planck
 evaluation `epsilon(D lambda) B_lambda(lambda,D T)` avoids prematurely
@@ -10628,8 +10633,8 @@ calls the original source-history callback once at the admitted emission
 proper time. Invalid geometry and expired history do not access that callback.
 `ThermalEmissionState` carries the original diffuse thermal source and a normal
 in its material rest frame. The aberrated source-frame photon direction checks
-the emitting hemisphere. The returned cosine does not multiply diffuse
-radiance again. `RetardedThermalDetector` retains that ray and delegates directly
+the emitting hemisphere and selects the original rough source's directional
+emissivity. The returned cosine does not multiply radiance again. `RetardedThermalDetector` retains that ray and delegates directly
 to the existing observed surface and `QuantumEfficiencySensor`, preserving
 source identity, finite wavelength support, receiver-frame proposals and
 receiver photon-energy conversion. No shifted source table is allocated.
@@ -10738,9 +10743,11 @@ and smooth-panel refinement still require caller control.
 that owner to the original thermal history and `QuantumEfficiencySensor`.
 At each temporal node it resolves the original emitting side and source state,
 then checks the complete receiver sensor band against shifted source support.
-It merges original QE knots and Doppler-shifted emissivity knots with a bounded
-streaming cursor, splitting at narrow spectral features without a resampled
-table or heap allocation. Explicit wavelength subdivisions refine Gauss4
+It merges original QE knots and Doppler-shifted emissivity or rough-facet albedo
+knots with a bounded streaming cursor, splitting at narrow spectral features
+without a resampled table or heap allocation. Rough-source absorptance uses the
+same retarded material-frame angle at every wavelength; the source law remains
+nonlinear in facet albedo rather than interpolating transformed emissivities. Explicit wavelength subdivisions refine Gauss4
 integration inside these smooth intervals without changing physical QE data.
 Every spectral point consumes the caller's total Planck/QE-evaluation budget
 and checks cancellation. Fixed-size DD channel sums retain expected collected
@@ -11531,9 +11538,13 @@ remain unchanged. Smooth, black and nonemitting sources retain the earlier
 uniform-source fast path. Existing refractive-host refusals remain binding.
 
 Direction-free borrowed-source radiance and reflectance queries refuse rough
-sources explicitly. Existing direction-free Doppler/exposure and Lambertian
-visible-observable entry points also refuse them rather than silently using an
-angular average. Scalar thermal BDPT light subpaths and calibrated-fixture
+sources explicitly. Direction-free Doppler and Lambertian visible-observable
+entry points also refuse them rather than silently using an angular average.
+The explicit directional Doppler view, retarded thermal observations and finite
+receiver-proper-time exposures retain the original rough-source angle and
+shifted facet spectrum. Focused G1/G3 regressions cover rest-frame aberration,
+D^5 radiance, receiver-photon conversion, exact zero-shift source parity, narrow
+shifted facet features, source-band admission and spectral-work refusal. Scalar thermal BDPT light subpaths and calibrated-fixture
 thermal emission remain outside their existing supported contracts. This does
 not claim measured rough-material authority, thermal polarization, resolved
 surface microgeometry, nonisothermal rough cavities or a bolometric heat debit.

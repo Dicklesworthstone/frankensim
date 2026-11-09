@@ -3,8 +3,9 @@
 //! The callback is called once, at the admitted emission PROPER time. It
 //! supplies the original thermal surface and the outward normal in that
 //! source's rotation-free rest frame. The already-aberrated source direction
-//! decides whether this side emits toward the receiver. Diffuse radiance gets
-//! no additional cosine or clock multiplier here: projected area, visibility,
+//! decides whether this side emits toward the receiver and selects the original
+//! rough source's directional emissivity. Radiance gets no additional cosine or
+//! clock multiplier here: projected area, visibility,
 //! etendue remain the caller's separate geometry responsibilities. [`exposure`]
 //! integrates finite receiver-proper-time exposures with supplied etendue.
 
@@ -127,8 +128,12 @@ impl<'source> RetardedThermalSurface<'source> {
         let source =
             at_proper_time(ray.emission_proper_time_s()).map_err(RetardedThermalError::Source)?;
         let emission_cosine = cosine(source.outward_normal, ray.doppler().source_direction())?;
-        let observed = ObservedThermalSurface::try_new(source.surface, ray.doppler())
-            .map_err(RetardedThermalError::Observation)?;
+        let observed = ObservedThermalSurface::try_new_directional(
+            source.surface,
+            ray.doppler(),
+            emission_cosine,
+        )
+        .map_err(RetardedThermalError::Observation)?;
         Ok(Self {
             ray,
             observed,

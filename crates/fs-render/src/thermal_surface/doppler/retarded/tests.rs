@@ -353,3 +353,57 @@ fn g3_piecewise_detector_clock_and_history_use_the_original_thermal_qe_route() {
     );
     assert_eq!(calls, 1);
 }
+
+#[test]
+fn g1_retarded_rough_thermal_uses_aberrated_material_angle_and_receiver_photons() {
+    use crate::rough_diffuse::RoughDiffuseSurface;
+    use crate::spectral::SpectralReflectance;
+    use crate::thermal_surface::RoughDiffuseThermalSurface;
+
+    let source = RoughDiffuseThermalSurface::try_new(
+        3000.0,
+        SpectralReflectance::table_in_band(&[(400.0, 0.2), (750.0, 0.8), (2000.0, 0.4)])
+            .unwrap(),
+        RoughDiffuseSurface::try_new(0.8).unwrap(),
+        ContentHash([13; 32]),
+    )
+    .unwrap();
+    let mut calls = 0;
+    let event = RetardedThermalSurface::observe(
+        &motion(0.6, [-10.0, 10.0]),
+        receiver([0.0, C, 0.0]),
+        1e-6,
+        |proper| {
+            calls += 1;
+            close(proper.to_f64(), -1.0);
+            Ok(ThermalEmissionState {
+                surface: (&source).into(),
+                outward_normal: [1.0, 1.0, 0.0],
+            })
+        },
+    )
+    .unwrap();
+    assert_eq!(calls, 1);
+    let cosine = 1.0 / 2.0_f64.sqrt();
+    close(event.emission_cosine(), cosine);
+    close(event.ray().proper_time_rate(), 1.25);
+    assert_eq!(event.observed().source().identity(), source.identity());
+    let sensor = QuantumEfficiencySensor::try_new(vec![(500.0, [1.0]), (700.0, [1.0])]).unwrap();
+    let sample = event.with_sensor(&sensor).unwrap().sample(0.5).unwrap();
+    close(sample.source_wavelength_nm, 750.0);
+    let native = source.directional_radiance_w_m2_sr_nm(750.0, cosine).unwrap();
+    let expected = 1.25_f64.powi(5) * native;
+    close(sample.spectral_radiance_w_m2_sr_nm, expected);
+    close(
+        sample.electron_rate_per_m2_sr[0],
+        expected * 200.0 * 600e-9 / (6.626_070_15e-34 * C),
+    );
+    // The world ray is (.6,.8,0), while the material ray is (0,1,0).
+    // Using the world angle or a hemispherical mean changes this physical law.
+    let wrong_angle = source
+        .directional_radiance_w_m2_sr_nm(750.0, 1.4 * cosine)
+        .unwrap();
+    let angular_mean = source.hemispherical_mean_radiance_w_m2_sr_nm(750.0).unwrap();
+    assert!((native - wrong_angle).abs() > 1e-5 * native);
+    assert!((native - angular_mean).abs() > 1e-5 * native);
+}

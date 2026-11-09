@@ -344,3 +344,99 @@ fn g4_spectral_work_dark_etendue_and_cancellation_keep_original_admission() {
         ))
     );
 }
+
+#[test]
+fn g1_rough_exposure_retains_shifted_facet_features_and_directional_photon_energy() {
+    use crate::rough_diffuse::RoughDiffuseSurface;
+    use crate::spectral::SpectralReflectance;
+    use crate::thermal_surface::RoughDiffuseThermalSurface;
+
+    let source = RoughDiffuseThermalSurface::try_new(
+        3000.0,
+        SpectralReflectance::table_in_band(&[
+            (800.0, 1.0),
+            (1001.0, 1.0),
+            (1001.002, 0.0),
+            (1001.004, 1.0),
+            (1600.0, 1.0),
+        ])
+        .unwrap(),
+        RoughDiffuseSurface::try_new(0.8).unwrap(),
+        ContentHash([34; 32]),
+    )
+    .unwrap();
+    let sensor = QuantumEfficiencySensor::try_new(vec![(450.0, [1.0]), (750.0, [1.0])]).unwrap();
+    let result = RetardedThermalExposure::uniform(
+        &motion(0.0, 0.6),
+        &motion(3.0, 0.0),
+        &sensor,
+        &[dd(0.0), dd(0.2)],
+        settings(8),
+        |_| {
+            Ok(ThermalEmissionState {
+                surface: (&source).into(),
+                outward_normal: [0.6, 0.8, 0.0],
+            })
+        },
+        || false,
+    )
+    .unwrap();
+    let doppler = VacuumDoppler::try_new([1.0, 0.0, 0.0], [0.6 * LIGHT, 0.0, 0.0], [0.0; 3])
+        .unwrap();
+    let d = doppler.frequency_ratio();
+    // Independent Simpson quadrature on the ORIGINAL source wavelength law.
+    // The receiver wavelength measure is d(lambda_source)/D and its photon
+    // energy uses lambda_source/D. Both exterior white regions are dark.
+    let mut expected = [0.0; 2];
+    let n = 1024;
+    for (low, high) in [(1001.0, 1001.002), (1001.002, 1001.004)] {
+        let step = (high - low) / f64::from(n);
+        let mut sum = [0.0; 2];
+        for i in 0..=n {
+            let source_nm = low + f64::from(i) * step;
+            let receiver_nm = source_nm / d;
+            let weight = if i == 0 || i == n {
+                1.0
+            } else if i % 2 == 0 {
+                2.0
+            } else {
+                4.0
+            };
+            let radiance = d.powi(5)
+                * source.directional_radiance_w_m2_sr_nm(source_nm, 0.6).unwrap();
+            sum[0] += weight * radiance;
+            sum[1] += weight * radiance * receiver_nm * PHOTONS_PER_JOULE_PER_NM;
+        }
+        for channel in 0..2 {
+            expected[channel] += sum[channel] * (step / (3.0 * d)) * 0.2 * 1e-8;
+        }
+    }
+    assert!(expected[0] > 0.0 && expected[1] > 0.0);
+    close(result.qe_weighted_energy_j[0], expected[0], 3e-8);
+    close(result.expected_electrons[0], expected[1], 3e-8);
+    assert_eq!(result.ray_queries, 6);
+    assert_eq!(result.spectral_evaluations, 512);
+
+    let mut limited = settings(8);
+    limited.max_spectral_evaluations = 511;
+    let refused = RetardedThermalExposure::uniform(
+        &motion(0.0, 0.6),
+        &motion(3.0, 0.0),
+        &sensor,
+        &[dd(0.0), dd(0.2)],
+        limited,
+        |_| {
+            Ok(ThermalEmissionState {
+                surface: (&source).into(),
+                outward_normal: [0.6, 0.8, 0.0],
+            })
+        },
+        || false,
+    );
+    assert_eq!(
+        refused,
+        Err(RetardedExposureError::Observable(
+            ThermalExposureError::SpectralBudget
+        ))
+    );
+}

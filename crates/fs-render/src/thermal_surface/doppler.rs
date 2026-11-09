@@ -66,23 +66,58 @@ pub struct ObservedThermalSurface<'source> {
     doppler: VacuumDoppler,
     receiver_band_nm: Option<(f64, f64)>,
     apparent_temperature_k: f64,
+    source_outgoing_cosine: Option<f64>,
 }
 
 impl<'source> ObservedThermalSurface<'source> {
     /// The original gray and spectral sources are direction independent in
-    /// their rest frame. A rough thermal surface additionally needs a physical
-    /// rest-frame surface normal, which this Doppler-only view does not own.
+    /// their rest frame. Rough sources require `try_new_directional` instead.
     pub fn try_new(
         source: DiffuseThermalSurface<'source>,
         doppler: VacuumDoppler,
     ) -> Result<Self, ThermalDopplerError> {
-        let receiver_band_nm = match source {
+        Self::prepare(source, doppler, None)
+    }
+
+    /// Observe the original source at its actual material-frame outgoing angle.
+    ///
+    /// The cosine is between the physical outward normal in the source rest
+    /// frame and `doppler.source_direction()`, not the world or receiver ray.
+    /// It must be finite and in [0,1]. For rough sources it selects the original
+    /// EON directional absorptance at the shifted source wavelength. It never
+    /// multiplies radiance as a projected-area factor; collection geometry is
+    /// still owned by the caller. Gray/spectral diffuse laws remain unchanged.
+    pub fn try_new_directional(
+        source: DiffuseThermalSurface<'source>,
+        doppler: VacuumDoppler,
+        source_outgoing_cosine: f64,
+    ) -> Result<Self, ThermalDopplerError> {
+        if !source_outgoing_cosine.is_finite() || !(0.0..=1.0).contains(&source_outgoing_cosine) {
+            return Err(ThermalSurfaceError::Direction.into());
+        }
+        Self::prepare(source, doppler, Some(source_outgoing_cosine))
+    }
+
+    fn prepare(
+        source: DiffuseThermalSurface<'source>,
+        doppler: VacuumDoppler,
+        source_outgoing_cosine: Option<f64>,
+    ) -> Result<Self, ThermalDopplerError> {
+        let source_band_nm = match source {
             DiffuseThermalSurface::Gray(_) => None,
-            DiffuseThermalSurface::Rough(_) => {
-                return Err(ThermalSurfaceError::DirectionRequired.into());
-            }
             DiffuseThermalSurface::Spectral(surface) => {
-                let (low, high) = surface.emissivity().wavelength_bounds_nm();
+                Some(surface.emissivity().wavelength_bounds_nm())
+            }
+            DiffuseThermalSurface::Rough(surface) => {
+                if source_outgoing_cosine.is_none() {
+                    return Err(ThermalSurfaceError::DirectionRequired.into());
+                }
+                Some(surface.wavelength_bounds_nm())
+            }
+        };
+        let receiver_band_nm = match source_band_nm {
+            None => None,
+            Some((low, high)) => {
                 let band = (
                     doppler.receiver_wavelength_nm(low)?,
                     doppler.receiver_wavelength_nm(high)?,
@@ -102,6 +137,10 @@ impl<'source> ObservedThermalSurface<'source> {
             doppler,
             receiver_band_nm,
             apparent_temperature_k,
+            source_outgoing_cosine: match source {
+                DiffuseThermalSurface::Rough(_) => source_outgoing_cosine,
+                _ => None,
+            },
         })
     }
 
@@ -126,13 +165,17 @@ impl<'source> ObservedThermalSurface<'source> {
             if !(low..=high).contains(&receiver_nm) {
                 return Err(ThermalDopplerError::SourceBand);
             }
-            if let DiffuseThermalSurface::Spectral(surface) = self.source {
-                let (source_low, source_high) = surface.emissivity().wavelength_bounds_nm();
-                // The query was admitted in the transformed closed source
-                // band. Retain its endpoints through divide/multiply roundoff;
-                // no wavelength outside that band reaches this clamp.
-                return Ok(source_nm.clamp(source_low, source_high));
-            }
+            let (source_low, source_high) = match self.source {
+                DiffuseThermalSurface::Spectral(surface) => {
+                    surface.emissivity().wavelength_bounds_nm()
+                }
+                DiffuseThermalSurface::Rough(surface) => surface.wavelength_bounds_nm(),
+                DiffuseThermalSurface::Gray(_) => return Ok(source_nm),
+            };
+            // The query was admitted in the transformed closed source band.
+            // Retain its endpoints through divide/multiply roundoff; no
+            // wavelength outside that band reaches this clamp.
+            return Ok(source_nm.clamp(source_low, source_high));
         }
         Ok(source_nm)
     }
@@ -155,14 +198,19 @@ impl<'source> ObservedThermalSurface<'source> {
         source_nm: f64,
     ) -> Result<f64, ThermalDopplerError> {
         if self.doppler.frequency_ratio() == 1.0 {
-            return Ok(self.source.radiance_w_m2_sr_nm(source_nm)?);
+            return Ok(match self.source_outgoing_cosine {
+                Some(cosine) => self.source.directional_radiance_w_m2_sr_nm(source_nm, cosine)?,
+                None => self.source.radiance_w_m2_sr_nm(source_nm)?,
+            });
         }
         let emissivity = match self.source {
             DiffuseThermalSurface::Gray(surface) => surface.emissivity(),
             DiffuseThermalSurface::Spectral(surface) => surface.emissivity().at(source_nm)?,
-            DiffuseThermalSurface::Rough(_) => {
-                return Err(ThermalSurfaceError::DirectionRequired.into());
-            }
+            DiffuseThermalSurface::Rough(surface) => surface.directional_emissivity(
+                source_nm,
+                self.source_outgoing_cosine
+                    .ok_or(ThermalSurfaceError::DirectionRequired)?,
+            )?,
         };
         if emissivity == 0.0 {
             return Ok(0.0);

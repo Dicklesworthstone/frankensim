@@ -1,7 +1,10 @@
 use super::*;
 use crate::spectral::doppler::VACUUM_LIGHT_SPEED_M_S;
+use crate::rough_diffuse::RoughDiffuseSurface;
+use crate::spectral::SpectralReflectance;
 use crate::thermal_surface::{
-    GrayDiffuseThermalSurface, SpectralDiffuseThermalSurface, SpectralEmissivity,
+    GrayDiffuseThermalSurface, RoughDiffuseThermalSurface, SpectralDiffuseThermalSurface,
+    SpectralEmissivity,
 };
 use fs_blake3::ContentHash;
 
@@ -178,4 +181,87 @@ fn g3_amplified_wien_tail_is_evaluated_before_rest_frame_underflow() {
         .radiance_w_m2_sr_nm(shift.receiver_wavelength_nm(source_nm).unwrap())
         .unwrap();
     assert!(radiance.is_finite() && radiance > 0.0);
+}
+
+fn rough() -> RoughDiffuseThermalSurface {
+    RoughDiffuseThermalSurface::try_new(
+        3000.0,
+        SpectralReflectance::table_in_band(&[(800.0, 0.2), (1200.0, 0.8), (1600.0, 0.4)])
+            .unwrap(),
+        RoughDiffuseSurface::try_new(0.7).unwrap(),
+        ContentHash([4; 32]),
+    )
+    .unwrap()
+}
+
+#[test]
+fn g1_rough_doppler_uses_original_directional_absorptance_at_shifted_wavelength() {
+    let source = rough();
+    for cosine in [0.0, 0.2, 1.0] {
+        let observed =
+            ObservedThermalSurface::try_new_directional((&source).into(), approaching(0.6), cosine)
+                .unwrap();
+        let radiance = observed.radiance_w_m2_sr_nm(600.0).unwrap();
+        close(
+            radiance,
+            source.directional_emissivity(1200.0, cosine).unwrap() * planck(6000.0, 600.0),
+            2e-13,
+        );
+        // Independent D^5 route through the unchanged rest-frame source law.
+        close(
+            radiance,
+            32.0 * source.directional_radiance_w_m2_sr_nm(1200.0, cosine).unwrap(),
+            2e-13,
+        );
+        assert_eq!(observed.source().identity(), source.identity());
+        assert_eq!(observed.source().temperature_k(), 3000.0);
+
+        let stationary =
+            ObservedThermalSurface::try_new_directional((&source).into(), approaching(0.0), cosine)
+                .unwrap();
+        assert_eq!(
+            stationary.radiance_w_m2_sr_nm(1200.0).unwrap().to_bits(),
+            source.directional_radiance_w_m2_sr_nm(1200.0, cosine).unwrap().to_bits()
+        );
+    }
+    let gray = gray(3000.0, 0.7);
+    assert_eq!(
+        ObservedThermalSurface::try_new(gray.into(), approaching(0.6)).unwrap(),
+        ObservedThermalSurface::try_new_directional(gray.into(), approaching(0.6), 0.2).unwrap()
+    );
+}
+
+#[test]
+fn g3_rough_doppler_keeps_closed_source_support_and_direction_admission() {
+    let source = rough();
+    assert_eq!(
+        ObservedThermalSurface::try_new((&source).into(), approaching(0.6)),
+        Err(ThermalSurfaceError::DirectionRequired.into())
+    );
+    for cosine in [-1.0, f64::NAN, f64::INFINITY, 1.0 + f64::EPSILON] {
+        assert_eq!(
+            ObservedThermalSurface::try_new_directional((&source).into(), approaching(0.6), cosine),
+            Err(ThermalSurfaceError::Direction.into())
+        );
+    }
+    let observed =
+        ObservedThermalSurface::try_new_directional((&source).into(), approaching(0.6), 0.2)
+            .unwrap();
+    let (low, high) = observed.receiver_wavelength_bounds_nm().unwrap();
+    close(low, 400.0, 2e-15);
+    close(high, 800.0, 2e-15);
+    assert!(observed.radiance_w_m2_sr_nm(low).is_ok());
+    assert!(observed.radiance_w_m2_sr_nm(high).is_ok());
+    for outside in [f64::from_bits(low.to_bits() - 1), f64::from_bits(high.to_bits() + 1)] {
+        assert_eq!(
+            observed.radiance_w_m2_sr_nm(outside),
+            Err(ThermalDopplerError::SourceBand)
+        );
+    }
+    let unsupported =
+        QuantumEfficiencySensor::try_new(vec![(390.0, [1.0]), (700.0, [1.0])]).unwrap();
+    assert!(matches!(
+        observed.with_sensor(&unsupported),
+        Err(ThermalDopplerError::SourceBand)
+    ));
 }
