@@ -111,7 +111,10 @@
 //! section `m` instead of `k`, `k <= m` and a section after `m`: the obstacle the card names (the incisors, measured on
 //! the tract's own surface), with the law's level still read from the flow and `A_k` and the Borda-Carnot drop still at
 //! `k`; without it `m = k`, bit-identical. An obstacle section is refused with `tract_move`: a moving shape's obstacle has
-//! no correspondence built. `receiver free_field_monopole` observes
+//! no correspondence built. The printed source is the source in Shadle's 5.067 cm^2 tube; the law carries Shadle's eq. 3.3
+//! duct-area factor (MB 18252; [`crate::turbulence_noise::shadle_duct_area_factor`]): at the junction after section `m`
+//! the source is the printed one times `A_tube / A_m`, `A_m` the area of section `m` (on a moving tract, where `m = k`,
+//! each shape's own `A_k`). `receiver free_field_monopole` observes
 //! the mouth flow as a point monopole in free space, `rho dQ/dt / (4 pi R)` at the microphone's distance, through the
 //! baffled receiver's own differentiator and travel-time kernel (half a point source on the rigid baffle, whose image
 //! doubles it); the microphone row's rings and points are not read by it, the mouth's size and the directivity of its
@@ -1705,6 +1708,7 @@ impl VoiceDescription {
                 let mut shapes = vec![FricativeShape {
                     section: card.constriction,
                     area_k_m2: area_k,
+                    area_m_m2: self.sections[card.obstacle].area_m2,
                     open_area_ratio: area_k / area_j,
                     duct_radius_m: noise.card().duct_radius_m,
                 }];
@@ -1713,6 +1717,7 @@ impl VoiceDescription {
                     shapes.extend(further.iter().map(|f| FricativeShape {
                         section: f.section,
                         area_k_m2: f.area_k_m2,
+                        area_m_m2: f.area_k_m2, // a moving tract's obstacle is its constriction (m = k, refused otherwise)
                         open_area_ratio: f.area_k_m2 / f.area_j_m2,
                         duct_radius_m: (f.area_j_m2 / core::f64::consts::PI).sqrt(),
                     }));
@@ -2338,6 +2343,9 @@ struct FricativeShape {
     #[cfg_attr(not(test), allow(dead_code))]
     section: usize,
     area_k_m2: f64,
+    /// The area of the duct the source sits in, section `m` (the card's obstacle; a moving shape's own `A_k`): the Stevens
+    /// form's duct-area factor reads it (MB 18252).
+    area_m_m2: f64,
     open_area_ratio: f64,
     duct_radius_m: f64,
 }
@@ -2537,11 +2545,16 @@ impl VoicePerformance {
                             let dp = 0.5 * self.gas_density * jet_speed * jet_speed * open * open;
                             source.noise.pressure_pa_jet_in(dp, jet_speed, shape.open_area_ratio, shape.duct_radius_m)
                         }
-                        // Stevens' law reads the flow and `A_k` alone; on a shape with no constriction (`sigma >= 1`) it
-                        // is silent as the printed law is, every stream still advancing.
+                        // Stevens' law reads the flow and `A_k`, and its duct-area factor the obstacle section's `A_m`; on
+                        // a shape with no constriction (`sigma >= 1`) it is silent as the printed law is, every stream
+                        // still advancing.
                         FricativeLaw::StevensShadle => {
                             let constricted = shape.open_area_ratio < 1.0;
-                            source.noise.pressure_pa_stevens(if constricted { flow } else { 0.0 }, shape.area_k_m2)
+                            source.noise.pressure_pa_stevens(
+                                if constricted { flow } else { 0.0 },
+                                shape.area_k_m2,
+                                shape.area_m_m2,
+                            )
                         }
                     }
                 }

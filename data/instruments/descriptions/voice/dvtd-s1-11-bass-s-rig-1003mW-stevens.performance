@@ -18,6 +18,9 @@
 #   at the obstacle m = 90, the junction after section 90, 12.1 mm downstream of k along the cut: the incisors'
 #   gap, measured on the same surface as the waist between the cavity behind the teeth and the cavity behind
 #   the lips on 9 midsagittal slices (its edges lie in sections 89 to 91, their median in section 90). The
+#   printed curve is the source in Shadle's tube (2.54 cm across, 5.067 cm^2; RLE TR 506, p. 27); Shadle's eq. 3.3
+#   (p. 67) makes the same dipole a pressure source inversely proportional to its duct's area: the law multiplies
+#   it by A_tube / A_m, A_m section 90's 9.633136e-05 m^2, +14.42 dB (MB 18252). The
 #   figure's rig had one 0.0804 cm^2 constriction, its obstacle 3 cm downstream, a 5.0 cm^2 tube and flows of
 #   160 and 420 cm^3/s; this rig's 562 to 959 cm^3/s through 0.134 cm^2 lie above those flows, and its
 #   obstacle sits 12.1 mm from the constriction: both gaps are stated on the page.

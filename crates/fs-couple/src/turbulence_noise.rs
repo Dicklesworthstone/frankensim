@@ -1030,6 +1030,22 @@ const STEVENS_SHADLE_BAND_HZ: f64 = 300.0;
 /// One dyne per square centimetre [Pa], the reference of the printed ordinate.
 const DYNE_PER_CM2_PA: f64 = 0.1;
 
+/// The cross-section [m^2] of the tube the printed source was measured in: Shadle's Tygon tube of 2.54 cm inside diameter
+/// (C. H. Shadle, *The acoustics of fricative consonants*, MIT RLE Technical Report 506, 1985, p. 27), printed in Stevens'
+/// Fig. 2.33 caption as "the tube 5.0 cm^2" (MB 18252: the tube's own area, 5.067 cm^2, is the one used).
+pub const SHADLE_TUBE_AREA_M2: f64 = core::f64::consts::PI * 0.0127 * 0.0127;
+
+/// Shadle's duct-area factor in pressure for a source in a duct of cross-section `area_m_m2` [m^2] (MB 18252). Shadle's eq. 3.3
+/// (RLE TR 506, p. 67) makes the obstacle's flow dipole `S = U d` the plane-wave pressure source `p_s = j omega rho S / A` of a
+/// duct of area `A`, and the printed source spectra are that conversion in the tube (p. 109: the measured spectra inverse
+/// filtered by Eqn. 3.3 and multiplied by omega rho / A are the predicted pressure source spectra). The same dipole
+/// in a duct of area `A_m` is the printed source times `A_tube / A_m` ([`SHADLE_TUBE_AREA_M2`]): exactly 1 in the tube itself.
+/// `None` unless the area is positive and finite.
+#[must_use]
+pub fn shadle_duct_area_factor(area_m_m2: f64) -> Option<f64> {
+    (area_m_m2 > 0.0 && area_m_m2.is_finite()).then(|| SHADLE_TUBE_AREA_M2 / area_m_m2)
+}
+
 /// Stevens' source level `L(f)` [dB re 1 dyn/cm^2 in a 300-Hz band] at the flow `u_m3_s` [m^3/s] through a constriction of area
 /// `area_m2` [m^2]: the printed upper curve at `f` ([`STEVENS_SHADLE_UPPER`] interpolated linearly in `(ln f, dB)`) scaled by
 /// the caption's rule, `+ 20 log10(U^3 A^-2.5) - 212` with `U` in cm^3/s and `A` in cm^2. `None` off the printed curve
@@ -1233,10 +1249,13 @@ struct ConstrictionBand {
 /// THE STEVENS FORM ([`Self::pressure_pa_stevens`]; MB 17504, 17645). The supraglottal source by another printed law, through
 /// the same bank and streams: Stevens' sound pressure source at an obstacle, measured by Shadle ([`stevens_shadle_level_db`]),
 /// each designed third octave carrying the root of [`stevens_shadle_band_power_pa2`] over its edges at the held flow `U` and
-/// the constriction's area `A_k`. The law has no `K`, no Strouhal number, no duct `j` and no cutoff of its own: the printed
-/// curve's span (0.55 to 10 kHz) is the source's, and a band partly on it carries only that part. The overlap solve is the
-/// lip's. WHAT IT DOES NOT CLAIM: the figure is one constriction (0.0804 cm^2), two flows (160 and 420 cm^3/s, jets of 19.9
-/// and 52.2 m/s), one obstacle 3 cm downstream, one 5.0 cm^2 tube; the area exponent is untested by it, and its own two curves
+/// the constriction's area `A_k`, times Shadle's duct-area factor `A_tube / A_m` for the duct `A_m` the source sits in
+/// ([`shadle_duct_area_factor`]; MB 18252): the printed curve is the source in Shadle's 5.067 cm^2 tube; Shadle's eq. 3.3 makes
+/// the same dipole a pressure source inversely proportional to its duct's area. The law has no `K`, no Strouhal number, no
+/// duct `j` and no cutoff of its own: the printed curve's span (0.55 to 10 kHz) is the source's, and a band partly on it
+/// carries only that part. The overlap solve is the lip's. WHAT IT DOES NOT CLAIM: the figure is one constriction
+/// (0.0804 cm^2), two flows (160 and 420 cm^3/s, jets of 19.9 and 52.2 m/s), one obstacle 3 cm downstream, one 5.0 cm^2
+/// tube; the area exponent is untested by it, and its own two curves
 /// sit 15.9 to 23.3 dB apart where the caption's `U^3` rule gives 25.15 dB (`p_s` as `U^1.89` to `U^2.78` between them). The
 /// rule is used as printed and nothing is refitted; a page that shows a render says so. The series pressure sits where the
 /// caller puts it: on the voice, the junction after the card's obstacle section `m` (MB 17712), after the constriction
@@ -1468,12 +1487,16 @@ impl ConstrictionNoise {
         self.sum_bands()
     }
 
-    /// The bands the Stevens form drives (type doc) at the flow `u_m3_s` through the constriction of area `area_k_m2`, as
-    /// `(band index, centre_hz, 0, target rms Pa)`: every designed band with part of its edges on the printed curve, its
-    /// target the root of [`stevens_shadle_band_power_pa2`] over those edges. The law has no `K`; the third field is zero.
-    /// Empty unless the flow and area are positive and finite.
+    /// The bands the Stevens form drives (type doc) at the flow `u_m3_s` through the constriction of area `area_k_m2`, with the
+    /// source in the duct of area `area_m_m2`, as `(band index, centre_hz, 0, target rms Pa)`: every designed band with part of
+    /// its edges on the printed curve, its target the root of [`stevens_shadle_band_power_pa2`] over those edges times
+    /// [`shadle_duct_area_factor`] of `area_m_m2`. The law has no `K`; the third field is zero. Empty unless the flow and both
+    /// areas are positive and finite.
     #[must_use]
-    pub fn driven_bands_stevens(&self, u_m3_s: f64, area_k_m2: f64) -> Vec<(usize, f64, f64, f64)> {
+    pub fn driven_bands_stevens(&self, u_m3_s: f64, area_k_m2: f64, area_m_m2: f64) -> Vec<(usize, f64, f64, f64)> {
+        let Some(factor) = shadle_duct_area_factor(area_m_m2) else {
+            return Vec::new();
+        };
         let edge = det::pow(10.0, 0.05);
         let mut driven = Vec::new();
         for (index, band) in self.bands.iter().enumerate() {
@@ -1482,29 +1505,32 @@ impl ConstrictionNoise {
             }
             let power = stevens_shadle_band_power_pa2(band.centre_hz / edge, band.centre_hz * edge, u_m3_s, area_k_m2);
             if power > 0.0 {
-                driven.push((index, band.centre_hz, 0.0, det::sqrt(power)));
+                driven.push((index, band.centre_hz, 0.0, factor * det::sqrt(power)));
             }
         }
         driven
     }
 
     /// The Stevens form's series pressure [Pa] of this sample (type doc) at the held flow `u_m3_s` the caller states through
-    /// the constriction of area `area_k_m2`. Silent, every stream still advancing by one sample, while the recorded flow is not
-    /// forward or the flow and area are not positive and finite.
-    pub fn pressure_pa_stevens(&mut self, u_m3_s: f64, area_k_m2: f64) -> f64 {
+    /// the constriction of area `area_k_m2`, the source in the duct of area `area_m_m2` (Shadle's duct-area factor,
+    /// [`shadle_duct_area_factor`]). Silent, every stream still advancing by one sample, while the recorded flow is not forward
+    /// or the flow and areas are not positive and finite.
+    pub fn pressure_pa_stevens(&mut self, u_m3_s: f64, area_k_m2: f64, area_m_m2: f64) -> f64 {
         if !(self.last_flow_m3_s > 0.0
             && u_m3_s > 0.0
             && u_m3_s.is_finite()
             && area_k_m2 > 0.0
-            && area_k_m2.is_finite())
+            && area_k_m2.is_finite()
+            && area_m_m2 > 0.0
+            && area_m_m2.is_finite())
         {
             self.skip_all();
             return 0.0;
         }
-        let key = [2, u_m3_s.to_bits(), area_k_m2.to_bits(), 0, 0];
+        let key = [2, u_m3_s.to_bits(), area_k_m2.to_bits(), area_m_m2.to_bits(), 0];
         if self.cached_for != Some(key) {
             self.cached_for = Some(key);
-            let driven = self.driven_bands_stevens(u_m3_s, area_k_m2);
+            let driven = self.driven_bands_stevens(u_m3_s, area_k_m2, area_m_m2);
             self.solve_amplitudes(&driven);
         }
         self.sum_bands()
@@ -2811,25 +2837,76 @@ mod tests {
         assert!(part > 0.0 && (part - on_curve).abs() <= 1.0e-12 * part, "only the part on the curve: {part} vs {on_curve}");
         let card = ConstrictionNoiseCard { seed: 5, duct_radius_m: (3.0602e-4 / core::f64::consts::PI).sqrt() };
         let source = ConstrictionNoise::new_fricative(card, 1.0 / 40_000.0).unwrap();
-        let driven = source.driven_bands_stevens(u, a);
+        let tube = SHADLE_TUBE_AREA_M2; // the source in the printed tube: the duct-area factor is 1 (MB 18252)
+        let driven = source.driven_bands_stevens(u, a, tube);
         assert!(!driven.is_empty(), "the rig's flow drives the printed span");
         assert!(driven.iter().all(|d| d.1 > 400.0 && d.1 < 12_000.0 && d.2 == 0.0 && d.3 > 0.0), "{driven:?}");
-        assert!(source.driven_bands_stevens(0.0, a).is_empty() && source.driven_bands_stevens(u, f64::NAN).is_empty());
+        assert!(source.driven_bands_stevens(0.0, a, tube).is_empty() && source.driven_bands_stevens(u, f64::NAN, tube).is_empty());
         let (mut open, mut shut, mut unusable) = (source.clone(), source.clone(), source);
         open.record(u);
         shut.record(0.0);
         unusable.record(u);
         let mut spoke = false;
         for _ in 0..256 {
-            spoke |= open.pressure_pa_stevens(u, a) != 0.0;
-            assert_eq!(shut.pressure_pa_stevens(u, a), 0.0, "no forward flow, no source");
-            assert_eq!(unusable.pressure_pa_stevens(0.0, a), 0.0, "no usable flow, no source");
+            spoke |= open.pressure_pa_stevens(u, a, tube) != 0.0;
+            assert_eq!(shut.pressure_pa_stevens(u, a, tube), 0.0, "no forward flow, no source");
+            assert_eq!(unusable.pressure_pa_stevens(0.0, a, tube), 0.0, "no usable flow, no source");
         }
         assert!(spoke, "forward flow speaks");
         for ((x, y), z) in open.bands.iter().zip(&shut.bands).zip(&unusable.bands) {
             assert_eq!(x.filter.white.index(), z.filter.white.index(), "one white sample per call, source speaking or not");
             assert_eq!(x.filter.white.index(), y.filter.white.index(), "one white sample per call, source speaking or not");
             assert!(x.filter.white.index() > 0);
+        }
+    }
+
+    /// The Stevens form's duct-area factor (MB 18252; Shadle 1985, eq. 3.3, p. 67, and p. 109): exactly 1 in the printed tube
+    /// (2.54 cm across, 5.067 cm^2), so a source there is the printed source bit for bit; inversely proportional to the duct's
+    /// area elsewhere: +14.420 dB at the s1-11 rig's obstacle section m = 90 (9.633136027e-05 m^2, the card's section row;
+    /// Stevens' rounded 5.0 cm^2 would give 14.30 dB), twice the pressure at half the tube's area; none for an unusable area.
+    #[test]
+    fn stevens_form_carries_shadles_duct_area_factor() {
+        assert_eq!(shadle_duct_area_factor(SHADLE_TUBE_AREA_M2), Some(1.0));
+        let tube_cm2 = SHADLE_TUBE_AREA_M2 * 1.0e4;
+        assert!((tube_cm2 - 5.067).abs() < 1.0e-3, "the 2.54 cm tube: {tube_cm2} cm^2");
+        let at_teeth = 20.0 * shadle_duct_area_factor(9.633_136_027e-5).expect("a usable area").log10();
+        assert!((at_teeth - 14.420).abs() < 5.0e-4, "s1-11's obstacle section m = 90: {at_teeth} dB");
+        for bad in [0.0, -1.0e-4, f64::NAN, f64::INFINITY] {
+            assert_eq!(shadle_duct_area_factor(bad), None, "area {bad}");
+        }
+        let (u, a) = (5.622e-4, 1.340_011e-5);
+        let card = ConstrictionNoiseCard { seed: 5, duct_radius_m: (3.0602e-4 / core::f64::consts::PI).sqrt() };
+        let source = ConstrictionNoise::new_fricative(card, 1.0 / 40_000.0).unwrap();
+        let in_tube = source.driven_bands_stevens(u, a, SHADLE_TUBE_AREA_M2);
+        let edge = det::pow(10.0, 0.05);
+        assert!(!in_tube.is_empty());
+        for d in &in_tube {
+            let printed = det::sqrt(stevens_shadle_band_power_pa2(d.1 / edge, d.1 * edge, u, a));
+            assert_eq!(d.3.to_bits(), printed.to_bits(), "in the tube, the printed source bit for bit at {} Hz", d.1);
+        }
+        let half = source.driven_bands_stevens(u, a, 0.5 * SHADLE_TUBE_AREA_M2);
+        assert_eq!(half.len(), in_tube.len());
+        for (t, h) in in_tube.iter().zip(&half) {
+            assert_eq!((t.0, t.1.to_bits()), (h.0, h.1.to_bits()));
+            assert!((h.3 / t.3 - 2.0).abs() < 1.0e-12, "half the tube's area: {} times the pressure at {} Hz", h.3 / t.3, t.1);
+        }
+        assert!(source.driven_bands_stevens(u, a, 0.0).is_empty() && source.driven_bands_stevens(u, a, f64::NAN).is_empty());
+        let (mut wide, mut narrow, mut unusable) = (source.clone(), source.clone(), source);
+        wide.record(u);
+        narrow.record(u);
+        unusable.record(u);
+        let _ = wide.pressure_pa_stevens(u, a, SHADLE_TUBE_AREA_M2);
+        let _ = narrow.pressure_pa_stevens(u, a, 0.5 * SHADLE_TUBE_AREA_M2);
+        assert!(wide.amplitude_pa.iter().any(|&x| x > 0.0));
+        for (w, n) in wide.amplitude_pa.iter().zip(&narrow.amplitude_pa) {
+            assert!((n - 2.0 * w).abs() <= 1.0e-12 * n.abs(), "the series pressure's band amplitudes: {n} against twice {w}");
+        }
+        for _ in 0..256 {
+            assert_eq!(unusable.pressure_pa_stevens(u, a, f64::NAN), 0.0, "no usable duct area, no source");
+        }
+        for ((x, y), z) in wide.bands.iter().zip(&narrow.bands).zip(&unusable.bands) {
+            assert_eq!(x.filter.white.index(), y.filter.white.index(), "the same streams, one white sample per call");
+            assert!(z.filter.white.index() > x.filter.white.index(), "an unusable area still advances every stream");
         }
     }
 }
