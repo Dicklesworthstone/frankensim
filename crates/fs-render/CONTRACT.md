@@ -10535,6 +10535,40 @@ The adapter borrows exactly the same prepared camera as the area-source owner an
 
 Four focused regression groups cover unity/native-sample and work parity, dispersive group clocks at a large epoch, triangular shutter integration on both MIS strategies, distinct refracted-image clocks, and complete refusal for missing connection group delay or source failures. They were authored and formatter/parser checked; native numerical execution was unavailable in the editing environment.
 
+### Retarded finite-area sources through complete Smith glass
+
+`TransientCurvedAreaLightCameraScene::with_smith_dielectric` prepares a
+borrowed `TransientSmithDielectricAreaLightCameraScene` over the exact original
+histories and full opaque/two-sided dielectric Smith finite-area estimator.
+Instantaneous and finite-shutter observations retain every original source
+point, polarization channel, direct-source endpoint partition, facet walk,
+refractive/Beer response, medium conversion, six RNG domains, cancellation
+boundary and source-work budget.
+
+A camera emitter hit uses its original accumulated group path. A finite-area
+connection uses the original camera-prefix and connection group paths, summed
+in DD by the existing temporal owner before division by c. Its source-history
+query is shared by its original physical polarization channels and admitted
+before a stochastic fixed-direction response can vanish. The history changes
+only its original source radiance; logarithmic range recovery retains the
+native weighting, and thermal emission keeps its existing owner.
+
+Qualified sequential beams contribute their original DD lens delay exactly
+once to each source clock. Raw sequential observations refuse a separately
+configured analyzer, which must precede lens propagation. Finite shutters
+request each source's interval mean on the same frozen transport and return
+mean radiance and its physical time integral. No temporal sampling, extra
+transport, query allocation or inferred group law is introduced by the adapter.
+
+The native direct finite-area proposal and equal-index mixed-measure policy
+remain unchanged. The Smith response is local: statistical height is not a
+physical flight length, and no interface residence time, pulse reshaping,
+moving optics, molecular connection or new refractive-image proposal is
+claimed. Two focused native regression groups cover both source sides,
+wavelength and lens group clocks, steady path/work parity, pulse energy and
+complete source or lens admission failures. These renderer fixtures were
+parsed and source/API reviewed; they were not executed in this environment.
+
 ## Retarded point-fixture connections
 
 `camera::transient::point_lights::TransientCurvedPointLightCameraScene` binds

@@ -152,7 +152,33 @@ impl<'v, 'a, 's, 'm, 'l> SmithDielectricAreaLightCameraScene<'v, 'a, 's, 'm, 'l>
         seed: u64,
         path_id: u64,
     ) -> Result<AreaLightCameraSample, AreaLightCameraError> {
-        self.sample_launched_with_samples(
+        self.sample_launched_with_modulation(
+            cx,
+            beam,
+            initial_medium,
+            settings,
+            workspace,
+            seed,
+            path_id,
+            |_| Ok(1.0),
+        )
+    }
+
+    /// Retarded observers change only original source radiance. All six native
+    /// source/continuation counter domains remain owned by this steady sampler.
+    #[allow(clippy::too_many_arguments)]
+    pub(in super::super::super::super) fn sample_launched_with_modulation(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: AreaLightCameraSettings,
+        workspace: &mut AreaLightCameraWorkspace,
+        seed: u64,
+        path_id: u64,
+        source_scale: impl FnMut(AreaSourcePath<'_>) -> Result<f64, AreaLightCameraError>,
+    ) -> Result<AreaLightCameraSample, AreaLightCameraError> {
+        self.sample_launched_with_samples_modulated(
             cx,
             beam,
             initial_medium,
@@ -208,6 +234,7 @@ impl<'v, 'a, 's, 'm, 'l> SmithDielectricAreaLightCameraScene<'v, 'a, 's, 'm, 'l>
                 );
                 core::array::from_fn(|i| (f64::from(block[i]) + 0.5) / 4_294_967_296.0)
             },
+            source_scale,
         )
     }
 
@@ -338,10 +365,42 @@ impl<'v, 'a, 's, 'm, 'l> SmithDielectricAreaLightCameraScene<'v, 'a, 's, 'm, 'l>
         workspace: &mut AreaLightCameraWorkspace,
         surfaces: impl FnMut(u32) -> [f64; 3],
         opaque: impl FnMut(u32, u32) -> [f64; 3],
+        dielectric: impl FnMut(u32, u32) -> [f64; 4],
+        area: impl FnMut(u32, usize) -> [f64; 2],
+        opaque_connections: impl FnMut(u32, usize, usize, u32) -> [f64; 3],
+        dielectric_connections: impl FnMut(u32, usize, usize, u32) -> [f64; 4],
+    ) -> Result<AreaLightCameraSample, AreaLightCameraError> {
+        self.sample_launched_with_samples_modulated(
+            cx,
+            beam,
+            initial_medium,
+            settings,
+            workspace,
+            surfaces,
+            opaque,
+            dielectric,
+            area,
+            opaque_connections,
+            dielectric_connections,
+            |_| Ok(1.0),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sample_launched_with_samples_modulated(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: AreaLightCameraSettings,
+        workspace: &mut AreaLightCameraWorkspace,
+        surfaces: impl FnMut(u32) -> [f64; 3],
+        opaque: impl FnMut(u32, u32) -> [f64; 3],
         mut dielectric: impl FnMut(u32, u32) -> [f64; 4],
         area: impl FnMut(u32, usize) -> [f64; 2],
         opaque_connections: impl FnMut(u32, usize, usize, u32) -> [f64; 3],
         mut dielectric_connections: impl FnMut(u32, usize, usize, u32) -> [f64; 4],
+        source_scale: impl FnMut(AreaSourcePath<'_>) -> Result<f64, AreaLightCameraError>,
     ) -> Result<AreaLightCameraSample, AreaLightCameraError> {
         self.shared.sample_launched_with_microsurfaces(
             cx,
@@ -355,6 +414,7 @@ impl<'v, 'a, 's, 'm, 'l> SmithDielectricAreaLightCameraScene<'v, 'a, 's, 'm, 'l>
             opaque_connections,
             Some(&mut dielectric),
             Some(&mut dielectric_connections),
+            source_scale,
         )
     }
 }

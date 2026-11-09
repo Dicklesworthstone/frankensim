@@ -3,6 +3,7 @@
 use super::*;
 
 mod sequential;
+mod smith_dielectric;
 use crate::gradient_index::bundle::{IndexHessian, IndexJet, SecondOrderIndexField};
 use crate::gradient_index::{GradientIndexError, GradientIndexField, GradientIndexSample};
 use crate::polarization::dielectric::scene::curved::camera::transient::area_lights::{

@@ -7,7 +7,7 @@ use crate::camera::{
 };
 use crate::polarization::dielectric::scene::curved::camera::CameraAnalyzer;
 
-fn physical_camera() -> PhysicalCamera {
+pub(super) fn physical_camera() -> PhysicalCamera {
     let material = DielectricGlass::new(
         CauchyIor::try_new(1.48, 0.006, 0.0).unwrap(),
         BeerLambertAbsorption::try_constant(2.0).unwrap(),
@@ -36,7 +36,7 @@ fn physical_camera() -> PhysicalCamera {
     .unwrap()
 }
 
-fn optical(camera: &PhysicalCamera, cx: &Cx<'_>, wavelength: f64) -> SequentialCameraBeam {
+pub(super) fn optical(camera: &PhysicalCamera, cx: &Cx<'_>, wavelength: f64) -> SequentialCameraBeam {
     camera
         .generate_sequential_spectral_timed_beams_from_tangent_offsets(
             cx,

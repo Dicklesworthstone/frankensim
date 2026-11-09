@@ -28,6 +28,9 @@ use fs_exec::Cx;
 use fs_math::dd::Dd;
 
 mod sequential;
+/// Retarded finite-area sources on complete two-sided Smith glass paths.
+pub mod smith_dielectric;
+pub use smith_dielectric::TransientSmithDielectricAreaLightCameraScene;
 
 /// Original molecular area-source transport observed at retarded source times.
 #[cfg(feature = "volumes")]

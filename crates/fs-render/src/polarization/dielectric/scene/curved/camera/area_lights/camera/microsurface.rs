@@ -257,6 +257,7 @@ impl<'v, 'a, 's, 'm, 'l> SmithAreaLightCameraScene<'v, 'a, 's, 'm, 'l> {
             connection_samples,
             None,
             None,
+            |_| Ok(1.0),
         )
     }
 
@@ -274,6 +275,7 @@ impl<'v, 'a, 's, 'm, 'l> SmithAreaLightCameraScene<'v, 'a, 's, 'm, 'l> {
         mut connection_samples: impl FnMut(u32, usize, usize, u32) -> [f64; 3],
         mut dielectric_samples: Option<&mut dyn FnMut(u32, u32) -> [f64; 4]>,
         mut dielectric_connections: Option<&mut dyn FnMut(u32, usize, usize, u32) -> [f64; 4]>,
+        mut source_scale: impl FnMut(AreaSourcePath<'_>) -> Result<f64, AreaLightCameraError>,
     ) -> Result<AreaLightCameraSample, AreaLightCameraError> {
         cx.checkpoint()?;
         let full_dielectric = dielectric_connections.is_some();
@@ -309,7 +311,14 @@ impl<'v, 'a, 's, 'm, 'l> SmithAreaLightCameraScene<'v, 'a, 's, 'm, 'l> {
                                     return Err(CurvedSceneError::NumericalRange);
                                 }
                             };
-                            emission.observe_weighted(path, weight)?;
+                            let scale = match source_scale(AreaSourcePath::Surface(path)) {
+                                Ok(scale) => scale,
+                                Err(error) => {
+                                    source_error = Some(error);
+                                    return Err(CurvedSceneError::NumericalRange);
+                                }
+                            };
+                            emission.observe_weighted_modulated(path, weight, scale)?;
                             let anchor = match self.direct_anchor(path, full_dielectric) {
                                 Ok(anchor) => anchor,
                                 Err(error) => {
@@ -332,6 +341,7 @@ impl<'v, 'a, 's, 'm, 'l> SmithAreaLightCameraScene<'v, 'a, 's, 'm, 'l> {
                                 &mut area_samples,
                                 &mut connection_samples,
                                 &mut dielectric_connections,
+                                &mut source_scale,
                             )
                         }
                         CurvedTransportEvent::Surface(CurvedTraceEvent::Departure {
@@ -427,6 +437,7 @@ impl<'v, 'a, 's, 'm, 'l> SmithAreaLightCameraScene<'v, 'a, 's, 'm, 'l> {
         area_samples: &mut impl FnMut(u32, usize) -> [f64; 2],
         connection_samples: &mut impl FnMut(u32, usize, usize, u32) -> [f64; 3],
         dielectric_connections: &mut Option<&mut dyn FnMut(u32, usize, usize, u32) -> [f64; 4]>,
+        source_scale: &mut impl FnMut(AreaSourcePath<'_>) -> Result<f64, AreaLightCameraError>,
     ) -> Result<(), AreaLightCameraError> {
         let contact = path
             .last_contact()
@@ -550,6 +561,24 @@ impl<'v, 'a, 's, 'm, 'l> SmithAreaLightCameraScene<'v, 'a, 's, 'm, 'l> {
                     .dot(connection.path().bundle().propagation().initial_ray().dir)
                     .abs()
                     .min(1.0);
+                // This original endpoint has one shared clock for its physical
+                // polarization channels. Admit its history before any stochastic
+                // Smith response can vanish; history failures are not dark draws.
+                let scale = source_scale(AreaSourcePath::Connected {
+                    object_id: binding.source.emitter.object_id(),
+                    position_m: sample.position_m(),
+                    wavelength_nm: wavelength,
+                    camera_group_m: path.group_optical_path_length_m(),
+                    connection_group_m: connection
+                        .path()
+                        .bundle()
+                        .propagation()
+                        .propagation()
+                        .group_optical_path_length_m,
+                })?;
+                if !scale.is_finite() || scale < 0.0 {
+                    return Err(AreaLightCameraError::NumericalRange);
+                }
                 let remaining = image_options
                     .max_trace_evaluations
                     .checked_sub(work.traces - proposal_start)
@@ -614,7 +643,7 @@ impl<'v, 'a, 's, 'm, 'l> SmithAreaLightCameraScene<'v, 'a, 's, 'm, 'l> {
                         sample.pdf_area_per_m2(),
                         0.0,
                         false,
-                        1.0,
+                        scale,
                     )
                     .map_err(|error| AreaLightCameraError::Source {
                         binding: index,
