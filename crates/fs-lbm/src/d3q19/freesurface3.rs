@@ -78,7 +78,7 @@ mod motion;
 mod solid_loads;
 pub use solid_loads::{SubmergedSolid3, SubmergedSolidLoadControls3, SubmergedSolidLoads3};
 pub use motion::{
-    PlanarPistonRemapReport3, PlanarRigidWallMotion3, PlanarRigidWallReport3,
+    PlanarPistonRemapReport3, PlanarRigidWallMotion3, PlanarRigidWallPairReport3, PlanarRigidWallReport3,
     PlanarWallFaceExchange3, PlanarWallFieldControls3, PlanarWallFieldReport3,
     PlanarWallMotionReport3, PlanarWallVelocityField3,
 };
@@ -1308,7 +1308,14 @@ impl FreeSurface3 {
         gas_pressure: Option<&pressure::GasPressure3<'_>>,
         moving_wall: Option<&mut motion::PlanarWallStep3>,
     ) -> Result<(), FreeSurfaceError3> {
-        self.step_inner_with_boundaries(gate, transport, local_tau, gas_pressure, moving_wall, None)
+        self.step_inner_with_boundaries(
+            gate,
+            transport,
+            local_tau,
+            gas_pressure,
+            moving_wall.map(core::slice::from_mut),
+            None,
+        )
     }
 
     fn step_inner_with_boundaries(
@@ -1317,7 +1324,7 @@ impl FreeSurface3 {
         mut transport: Option<&mut MassTransport3>,
         local_tau: Option<&BTreeMap<(u64, usize), f64>>,
         gas_pressure: Option<&pressure::GasPressure3<'_>>,
-        mut moving_wall: Option<&mut motion::PlanarWallStep3>,
+        mut moving_walls: Option<&mut [motion::PlanarWallStep3]>,
         mut solid_loads: Option<&mut solid_loads::SolidLoadStep3<'_>>,
     ) -> Result<(), FreeSurfaceError3> {
         check_cancel(gate)?;
@@ -1497,10 +1504,15 @@ impl FreeSurface3 {
                         match self.grid.resolve_source(sx, sy, sz) {
                         None => {
                             let outgoing = post[&key][lane][OPP3[q]];
-                            let incoming = match moving_wall.as_deref_mut() {
-                                Some(wall) => wall.reflect([sx, sy, sz], q, rho_pre, outgoing)?,
-                                None => outgoing,
-                            };
+                            let mut incoming = outgoing;
+                            if let Some(walls) = moving_walls.as_deref_mut() {
+                                // The pair owner admits opposite planes, so at
+                                // most ONE original reflection owns this link.
+                                // A single wall retains its original arithmetic.
+                                for wall in walls {
+                                    incoming = wall.reflect([sx, sy, sz], q, rho_pre, incoming)?;
+                                }
+                            }
                             if let Some(loads) = solid_loads.as_deref_mut() {
                                 loads.record([cx, cy, cz], [sx, sy, sz], q, incoming, outgoing)?;
                             }

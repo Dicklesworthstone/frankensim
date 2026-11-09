@@ -4364,3 +4364,26 @@ the unused tensor carrier/shape interface with the thermal-owner error type;
 no tensor was constructed. Full Cargo and public Boussinesq integration remain
 unexecuted; these local balances do not establish spatial convergence or the
 developing-channel Nusselt benchmark.
+
+## Opposing rigid planes on one native liquid tick
+
+`FreeSurface3::planar_rigid_wall_pair_candidate` and
+`step_with_planar_rigid_wall_pair` admit two distinct opposing, fully flooded
+domain planes on one Cartesian axis, preserving caller order and each wall's
+motion and moment origin. Both original rigid-wall reflections share one
+collision/streaming/VOF-conversion tick and one liquid candidate. Disjoint
+plane ownership prevents a link from receiving both wall corrections.
+
+Each original 3-by-3 affine wrench response describes the same accepted
+incoming liquid. Its instantaneous cross-wall derivative is zero; subsequent
+native fluid evolution carries interaction between the planes.
+`PlanarRigidWallPairReport3` counts the liquid inventory once and sums actual
+reflected-link impulse and mechanical work with exact wall reciprocals. Its
+checked common-origin angular-impulse methods include orbital contributions,
+`(wall_origin - requested_origin) cross impulse`, using double-double sums.
+
+Existing local/relative Mach limits, endpoint flooding, mass admission and
+cancellation remain authoritative. Fixed planes support tangent translation
+and normal-axis spin. Normal displacement, tilt, remapping, partial wetting,
+finite plate edges, solid dynamics and thermal feedback are outside this
+operator. Boundary work does not certify liquid total-energy conservation.

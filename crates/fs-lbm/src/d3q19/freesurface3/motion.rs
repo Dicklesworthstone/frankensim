@@ -10,7 +10,7 @@ use crate::MACH_LIMIT;
 use crate::d3q19::W3;
 
 mod rigid;
-pub use rigid::{PlanarRigidWallMotion3, PlanarRigidWallReport3};
+pub use rigid::{PlanarRigidWallMotion3, PlanarRigidWallPairReport3, PlanarRigidWallReport3};
 mod field;
 pub use field::{
     PlanarWallFaceExchange3, PlanarWallFieldControls3, PlanarWallFieldReport3,

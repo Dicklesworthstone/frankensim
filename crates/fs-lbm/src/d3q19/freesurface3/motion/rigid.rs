@@ -4,6 +4,9 @@ use super::super::transport::MassTransport3;
 use super::*;
 use fs_math::dd::Dd;
 
+mod pair;
+pub use pair::PlanarRigidWallPairReport3;
+
 /// Prescribed rigid material motion of a fixed, completely flooded domain plane.
 ///
 /// Coordinates use cell centers at `index + 0.5`; domain planes are at zero or
