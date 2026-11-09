@@ -17,6 +17,7 @@ use crate::thermal::open::{
     ThermalOpenBalance3, ThermalOpenBoundaries3, ThermalOpenError3, ThermalOpenFace3,
     ThermalOpenField3, ThermalOpenLimits3,
 };
+use crate::thermal::tensor::DiffusivityField;
 use fs_exec::Cx;
 
 #[derive(Debug, Clone)]
@@ -111,6 +112,64 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         thermal_relaxation: Option<&[f64]>,
         origin: [f64; 3],
     ) -> Result<OpenThermalStep3, OpenThermalError3<L::Error>> {
+        self.step_serial_with_thermal_impl(
+            thermal,
+            cx,
+            collisions,
+            heat_per_step,
+            thermal_relaxation,
+            None,
+            origin,
+        )
+    }
+
+    /// Advance native flow and heat with a full SPD thermal diffusivity tensor.
+    ///
+    /// Uniform or per-cell tensors use the original D3Q7 flux-relaxation block
+    /// in the fixed Cartesian grid axes. Off-diagonal entries retain oblique
+    /// heat transport. Supply `alpha_lattice = K/(rho*Cp) * dt/dx^2` for the
+    /// carrier's common reference volumetric heat capacity on a cubic grid;
+    /// variable storage and material interface resistance are not inferred.
+    /// Per-cell fields cover every grid cell, including unused solid entries.
+    ///
+    /// The field is borrowed for this step only. The carrier's original tau
+    /// still relaxes even kinetic moments. Sources, advective-flux correction,
+    /// reservoir/wall heat, finite-wall storage and atomic publication use the
+    /// same owner as [`Self::step_serial_with_thermal`]. A later scalar step
+    /// retains its original coefficients. SPD alone guarantees neither
+    /// population positivity nor coupled stability; refinement remains required.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_serial_with_thermal_tensor_diffusion(
+        &mut self,
+        thermal: &mut ThermalOpenField3,
+        cx: &Cx<'_>,
+        collisions: Option<&[L::Collision]>,
+        heat_per_step: &[f64],
+        diffusion: DiffusivityField<'_, 3>,
+        origin: [f64; 3],
+    ) -> Result<OpenThermalStep3, OpenThermalError3<L::Error>> {
+        self.step_serial_with_thermal_impl(
+            thermal,
+            cx,
+            collisions,
+            heat_per_step,
+            None,
+            Some(diffusion),
+            origin,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_serial_with_thermal_impl(
+        &mut self,
+        thermal: &mut ThermalOpenField3,
+        cx: &Cx<'_>,
+        collisions: Option<&[L::Collision]>,
+        heat_per_step: &[f64],
+        thermal_relaxation: Option<&[f64]>,
+        diffusion: Option<DiffusivityField<'_, 3>>,
+        origin: [f64; 3],
+    ) -> Result<OpenThermalStep3, OpenThermalError3<L::Error>> {
         let poll = || -> Result<(), OpenThermalError3<L::Error>> {
             cx.checkpoint()
                 .map_err(|_| OpenThermalError3::Flow(GridError3::Cancelled))
@@ -136,7 +195,11 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
                 self.macroscopic(cell)?.1
             };
         }
-        let thermal_candidate = thermal.begin_step(heat_per_step, thermal_relaxation, poll)?;
+        let thermal_candidate = if let Some(diffusion) = diffusion {
+            thermal.begin_step_tensor(heat_per_step, diffusion, poll)?
+        } else {
+            thermal.begin_step(heat_per_step, thermal_relaxation, poll)?
+        };
         let (momentum, step) = self.stage_serial_with_plan(cx, self.plan, collisions, origin)?;
         for cell in 0..self.grid.next.len() {
             if cell % 64 == 0 {

@@ -724,6 +724,35 @@ Rejected state and heat never enter retained physical records. Final stored ener
 
 Five tests of the actual production embedded-error and heat-account arithmetic passed under the pinned Rust compiler. Five added native integration definitions cover diffusion refinement, latent energy and datum shifts, transition left limits and thermostat changes, bounded attempts and minimum dt, and fatal source/mask/cancellation outcomes. These integration definitions and public exports were parsed; full native integration execution was unavailable in the dependency-constrained workspace.
 
+### Full-tensor diffusion on native open 3D flow
+
+`OpenBoundaryGrid3::step_serial_with_thermal_tensor_diffusion` transports heat
+with the original prepared `DiffusivityTensor<3>` and borrowed uniform or
+per-cell `DiffusivityField`. It uses the existing D3Q7 flux block
+`S = (I/2 + alpha_lattice/(1/4))^-1`, retaining off-diagonal transport in all
+three Cartesian planes. Physical input scales as `K/(rho*Cp) * dt/dx^2`
+with the carrier's fixed, common reference volumetric heat capacity. The
+carrier's scalar tau continues to relax even kinetic moments. No tensor is
+installed persistently or substituted into later scalar calls.
+
+The original source half-kicks, advective-flux history, native force-corrected
+velocities, actual wall/reservoir heat, finite-wall storage and final joint
+publication remain shared with scalar transport. Solid grid cells carry no
+thermal inventory; their declared wall links retain the original boundary
+law. Per-cell field dimensions are admitted before any candidate staging.
+Refused or cancelled attempts publish no heat, momentum, wall state or time.
+The original scalar collision path retains its arithmetic. G0 tests compare
+the isotropic limit for D3Q19/D3Q27 flow with reversed reservoirs and sources,
+and exercise late rejection/cancellation plus unchanged scalar retry. G1 tests
+resolve signed oblique Fourier decay and spatial refinement in each Cartesian
+plane against `exp(-t k^T alpha k)`.
+
+This is anisotropic temperature diffusion, not variable-capacity conjugate
+enthalpy or an inferred contact-resistance law. SPD alone establishes neither
+population positivity nor full coupled-flow stability. Native wall and outlet
+approximations retain their original scope; spatial/time refinement remains
+the caller's responsibility.
+
 ### Native open 3D local SGS momentum and heat
 
 `lattice3::open_boundaries::sgs` prepares Smagorinsky, WALE or Vreman

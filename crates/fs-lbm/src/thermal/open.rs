@@ -18,11 +18,12 @@ use super::boundary::conduction::{WallConduction, WallConductionError};
 use super::boundary::{
     FiniteThermalWallExchange, ThermalWall, ThermalWallError, ThermalWallExchange, WallReflection,
 };
+use super::tensor::DiffusivityField;
 
-/// Implicit conduction between existing finite walls of the native open grid.
-pub mod conduction;
 /// Explicit small-density-departure law for native buoyancy feedback.
 pub mod buoyancy;
+/// Implicit conduction between existing finite walls of the native open grid.
+pub mod conduction;
 
 /// Heat ownership on one native face, in XMin/XMax/YMin/YMax/ZMin/ZMax order.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -442,11 +443,35 @@ impl ThermalOpenField3 {
         &mut self,
         heat: &[f64],
         thermal_tau: Option<&[f64]>,
+        poll: impl FnMut() -> Result<(), E>,
+    ) -> Result<ThermalOpenBalance3, E> {
+        self.begin_step_impl(heat, thermal_tau, None, poll)
+    }
+
+    pub(crate) fn begin_step_tensor<E: From<ThermalOpenError3>>(
+        &mut self,
+        heat: &[f64],
+        diffusion: DiffusivityField<'_, 3>,
+        poll: impl FnMut() -> Result<(), E>,
+    ) -> Result<ThermalOpenBalance3, E> {
+        self.begin_step_impl(heat, None, Some(diffusion), poll)
+    }
+
+    fn begin_step_impl<E: From<ThermalOpenError3>>(
+        &mut self,
+        heat: &[f64],
+        thermal_tau: Option<&[f64]>,
+        diffusion: Option<DiffusivityField<'_, 3>>,
         mut poll: impl FnMut() -> Result<(), E>,
     ) -> Result<ThermalOpenBalance3, E> {
         let cells = self.populations.len();
         if heat.len() != cells || thermal_tau.is_some_and(|tau| tau.len() != cells) {
             return Err(invalid("thermal source or relaxation field shape mismatch").into());
+        }
+        if let Some(diffusion) = diffusion {
+            diffusion
+                .admit(cells)
+                .map_err(|_| E::from(invalid("thermal tensor field shape mismatch")))?;
         }
         let mut source = Sum::default();
         for cell in 0..cells {
@@ -486,15 +511,27 @@ impl ThermalOpenField3 {
         );
         self.check_candidate(&mut poll)?;
         poll()?;
-        D3Q7.collide(
-            &self.trial,
-            &mut self.post,
-            0..cells,
-            self.tau,
-            thermal_tau,
-            &mut self.trial_history,
-            |cell| velocities[cell],
-        );
+        if let Some(diffusion) = diffusion {
+            D3Q7.collide_tensor(
+                &self.trial,
+                &mut self.post,
+                0..cells,
+                self.tau,
+                diffusion,
+                &mut self.trial_history,
+                |cell| velocities[cell],
+            );
+        } else {
+            D3Q7.collide(
+                &self.trial,
+                &mut self.post,
+                0..cells,
+                self.tau,
+                thermal_tau,
+                &mut self.trial_history,
+                |cell| velocities[cell],
+            );
+        }
         poll()?;
         self.prepare_wall_conduction()?;
         poll()?;
@@ -557,8 +594,10 @@ impl ThermalOpenField3 {
                                     reservoir.min_temperature = trace;
                                     reservoir.max_temperature = trace;
                                 } else {
-                                    reservoir.min_temperature = reservoir.min_temperature.min(trace);
-                                    reservoir.max_temperature = reservoir.max_temperature.max(trace);
+                                    reservoir.min_temperature =
+                                        reservoir.min_temperature.min(trace);
+                                    reservoir.max_temperature =
+                                        reservoir.max_temperature.max(trace);
                                 }
                                 let heat = incoming - outgoing;
                                 reservoir_heat[face].add(heat);

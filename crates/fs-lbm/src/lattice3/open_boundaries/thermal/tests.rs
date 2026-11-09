@@ -5,6 +5,8 @@ use crate::lattice3::{D3q19, Grid3, GridBudget3};
 use crate::thermal::boundary::ThermalWall;
 use fs_exec::CancelGate;
 
+mod tensor;
+
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new_clock_free();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
