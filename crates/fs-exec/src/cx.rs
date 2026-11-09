@@ -672,8 +672,12 @@ impl<'s> Cx<'s> {
         }
     }
 
-    /// Crate-internal authority binding for invocation-scoped accounting.
-    pub(crate) const fn cancel_gate(&self) -> &'s CancelGate {
+    /// Borrow this context's original invocation cancellation gate.
+    ///
+    /// Nested native solvers must share this gate so cancellation and publication
+    /// remain bound to the same invocation. No replacement gate is created.
+    #[must_use]
+    pub const fn cancel_gate(&self) -> &'s CancelGate {
         self.gate
     }
 

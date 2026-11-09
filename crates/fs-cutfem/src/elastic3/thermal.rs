@@ -23,6 +23,8 @@ mod jacobian;
 mod linear_response;
 mod sensitivity;
 mod stress;
+pub(in crate::elastic3) mod state;
+pub use state::{ThermoelasticState3, ThermoelasticStateSettings3};
 
 pub use exchange::{ThermoelasticCellExchange3, ThermoelasticExchangeLimits3};
 pub use equilibrium::{ThermoelasticEquilibrium3, ThermoelasticEquilibriumSettings3};
