@@ -3,14 +3,19 @@
 //! The sphere's reference material inventory, source strain and native momentum
 //! remap determine its current radius and inertia. The original creeping-flow
 //! owner supplies all drag, selected rotational lift, rotary resistance,
-//! buoyancy, regime admission and
-//! midpoint dynamics. There is no parallel heat or motion integrator here.
+//! buoyancy and regime admission. The ordinary entry uses native midpoint
+//! dynamics; the explicit exact entry uses native analytic frozen-radius drag.
+//! Both retain the same thermal timeline and momentum-preserving expansion.
 
 /// Source-bound heat exchange with the same surrounding fluid.
 pub mod heat_exchange;
 
+mod exact;
+pub use exact::HeatedExactCreepingControls;
+
 use super::*;
-use crate::creeping_flow::{CreepingLoad, CreepingSphere, CreepingStepControls};
+use crate::creeping_flow::exact::ExactCreepingStepControls;
+use crate::creeping_flow::{CreepingFlowError, CreepingLoad, CreepingSphere, CreepingStepControls};
 use fs_material::fluid_transport::FluidTransport;
 
 /// Controls of the original fluid-loaded step on each actual thermal interval.
@@ -144,20 +149,25 @@ impl<'a> HeatedRigidBody<'a> {
         controls: HeatedCreepingControls,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<CreepingExpansion<'a, 'm, 'f, F>, HeatedMotionError> {
+        self.creeping_observer_with_stepper(sphere, CreepingStepper::Midpoint(controls), checkpoint)
+    }
+
+    fn creeping_observer_with_stepper<'m, 'f, F: FluidTransport + ?Sized>(
+        &self,
+        sphere: &'m CreepingSphere<'f, F>,
+        stepper: CreepingStepper,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<CreepingExpansion<'a, 'm, 'f, F>, HeatedMotionError> {
         checkpoint()?;
         if sphere.gravity() != self.motion.integrator.gravity() {
             return Err(HeatedMotionError::Invalid(
                 "fluid and mechanical gravity must agree",
             ));
         }
-        if !controls.maximum_relaxation_fraction.is_finite()
-            || controls.maximum_relaxation_fraction <= 0.0
-            || controls.maximum_relaxation_fraction > 1.0
-            || !controls.maximum_step_energy_defect_j.is_finite()
-            || controls.maximum_step_energy_defect_j <= 0.0
-        {
+        stepper.validate()?;
+        if matches!(stepper, CreepingStepper::Exact(_)) && sphere.rotational_lift_enabled() {
             return Err(HeatedMotionError::Invalid(
-                "creeping motion needs a relaxation fraction in (0,1] and a positive step work tolerance",
+                "exact creeping motion does not admit selected rotational lift",
             ));
         }
         if self.reference().regions().len() != 1 {
@@ -169,7 +179,7 @@ impl<'a> HeatedRigidBody<'a> {
         Ok(CreepingExpansion {
             motion: self.motion.clone(),
             sphere,
-            controls,
+            stepper,
             viscous_heat_j: 0.0,
             background_work_j: 0.0,
             displacement_work_j: 0.0,
@@ -246,7 +256,7 @@ struct CreepingSnapshot {
 struct CreepingExpansion<'a, 'm, 'f, F: FluidTransport + ?Sized> {
     motion: RigidExpansion<'a>,
     sphere: &'m CreepingSphere<'f, F>,
-    controls: HeatedCreepingControls,
+    stepper: CreepingStepper,
     viscous_heat_j: f64,
     background_work_j: f64,
     displacement_work_j: f64,
@@ -257,7 +267,7 @@ impl<F: FluidTransport + ?Sized> Clone for CreepingExpansion<'_, '_, '_, F> {
         Self {
             motion: self.motion.clone(),
             sphere: self.sphere,
-            controls: self.controls,
+            stepper: self.stepper,
             viscous_heat_j: self.viscous_heat_j,
             background_work_j: self.background_work_j,
             displacement_work_j: self.displacement_work_j,
@@ -332,24 +342,21 @@ impl<F: FluidTransport + ?Sized> DepositionObserver for CreepingExpansion<'_, '_
         }
         let sphere = self.current_sphere()?;
         let step = checked(checkpoint, |cancelled| {
-            sphere.step_frame(
+            self.stepper.step(
+                &sphere,
                 &self.motion.principal,
                 self.motion.state,
-                CreepingStepControls {
-                    duration_s: dt_s,
-                    maximum_relaxation_fraction: self.controls.maximum_relaxation_fraction,
-                    maximum_energy_defect_j: self.controls.maximum_step_energy_defect_j,
-                },
+                dt_s,
                 cancelled,
             )
         })?;
-        let potential_before_remap = sphere.buoyancy_potential_j(step.dynamics.state_after)?;
+        let potential_before_remap = sphere.buoyancy_potential_j(step.state_after)?;
         self.motion.finish_step(
             start_s,
             dt_s,
             old,
             thermal,
-            step.dynamics.state_after,
+            step.state_after,
             step.energy_defect_j,
             checkpoint,
         )?;
@@ -374,5 +381,95 @@ impl<F: FluidTransport + ?Sized> DepositionObserver for CreepingExpansion<'_, '_
             .max(after.diffusion_ratio);
         checkpoint()?;
         Ok(())
+    }
+}
+
+// Both methods pass their actual native state and independent fluid accounts
+// through the same expansion, momentum transfer and thermal publication path.
+#[derive(Clone, Copy)]
+enum CreepingStepper {
+    Midpoint(HeatedCreepingControls),
+    Exact(HeatedExactCreepingControls),
+}
+
+struct CreepingInterval {
+    state_after: RigidBodyState,
+    energy_defect_j: f64,
+    viscous_heat_j: f64,
+    background_work_j: f64,
+    diffusion_ratio: f64,
+}
+
+impl CreepingStepper {
+    fn validate(self) -> Result<(), HeatedMotionError> {
+        let budget = match self {
+            Self::Midpoint(controls) => {
+                if !controls.maximum_relaxation_fraction.is_finite()
+                    || controls.maximum_relaxation_fraction <= 0.0
+                    || controls.maximum_relaxation_fraction > 1.0
+                {
+                    return Err(HeatedMotionError::Invalid(
+                        "creeping motion needs a relaxation fraction in (0,1] and a positive step work tolerance",
+                    ));
+                }
+                controls.maximum_step_energy_defect_j
+            }
+            Self::Exact(controls) => controls.maximum_step_energy_defect_j,
+        };
+        if !budget.is_finite() || budget <= 0.0 {
+            return Err(HeatedMotionError::Invalid(
+                "creeping motion needs a positive finite step work tolerance",
+            ));
+        }
+        Ok(())
+    }
+
+    fn step<F: FluidTransport + ?Sized>(
+        self,
+        sphere: &CreepingSphere<'_, F>,
+        frame: &PrincipalFrame,
+        state: RigidBodyState,
+        duration_s: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<CreepingInterval, CreepingFlowError> {
+        match self {
+            Self::Midpoint(controls) => {
+                let step = sphere.step_frame(
+                    frame,
+                    state,
+                    CreepingStepControls {
+                        duration_s,
+                        maximum_relaxation_fraction: controls.maximum_relaxation_fraction,
+                        maximum_energy_defect_j: controls.maximum_step_energy_defect_j,
+                    },
+                    cancelled,
+                )?;
+                Ok(CreepingInterval {
+                    state_after: step.dynamics.state_after,
+                    energy_defect_j: step.energy_defect_j,
+                    viscous_heat_j: step.viscous_heat_j,
+                    background_work_j: step.background_work_j,
+                    diffusion_ratio: step.diffusion_ratio,
+                })
+            }
+            Self::Exact(controls) => {
+                let step = sphere.step_exact_frame(
+                    frame,
+                    state,
+                    ExactCreepingStepControls {
+                        duration_s,
+                        maximum_energy_defect_j: controls.maximum_step_energy_defect_j,
+                    },
+                    cancelled,
+                )?;
+                Ok(CreepingInterval {
+                    state_after: step.dynamics.state_after,
+                    energy_defect_j: step.energy_defect_j,
+                    viscous_heat_j: step.viscous_heat_j,
+                    background_work_j: step.background_work_j,
+                    diffusion_ratio: step.diffusion_ratio,
+                })
+            }
+        }
     }
 }

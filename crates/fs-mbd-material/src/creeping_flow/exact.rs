@@ -6,7 +6,7 @@
 //! numerical improvement into a broader hydrodynamic applicability claim.
 
 use super::{CreepingLoad, CreepingSphere, Error, SphereLift, finite, poll, vector};
-use crate::principal::PrincipalBody;
+use crate::principal::{PrincipalBody, PrincipalFrame};
 use fs_material::fluid_transport::FluidTransport;
 use fs_math::dd::Dd;
 use fs_mbd::linear_drag::{IsotropicLinearDrag, LinearDragError, LinearDragStep};
@@ -87,6 +87,30 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
     ) -> Result<ExactCreepingStep, Error> {
         poll(&mut cancelled)?;
         self.admit_body(body)?;
+        self.step_exact_frame_with_wrench(body.frame(), state, applied, controls, cancelled)
+    }
+
+    /// Same native flow for a current, already admitted spherical configuration.
+    /// Thermal adapters retain source/geometry admission and the momentum map.
+    pub(crate) fn step_exact_frame(
+        &self,
+        frame: &PrincipalFrame,
+        state: RigidBodyState,
+        controls: ExactCreepingStepControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ExactCreepingStep, Error> {
+        self.step_exact_frame_with_wrench(frame, state, Wrench::ZERO, controls, cancelled)
+    }
+
+    fn step_exact_frame_with_wrench(
+        &self,
+        frame: &PrincipalFrame,
+        state: RigidBodyState,
+        applied: Wrench,
+        controls: ExactCreepingStepControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ExactCreepingStep, Error> {
+        poll(&mut cancelled)?;
         if self.selected_lift != SphereLift::None || applied.torque_body != Vec3::ZERO {
             return Err(Error::Invalid(
                 "exact Stokes relaxation requires no selected lift and zero applied torque",
@@ -101,7 +125,6 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
                 "positive finite exact-step duration and work budget required",
             ));
         }
-        let frame = body.frame();
         let properties = frame.properties();
         let (_, diffusion_ratio) = self.timescales_frame(frame)?;
         let load_before = self.load_frame(frame, state, &mut cancelled)?;

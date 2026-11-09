@@ -1638,6 +1638,28 @@ restart, shared generated-heat substeps, updated-radius regime refusal, late
 rollback and retained fluid snapshots. Synthetic coefficients establish only
 implementation checks; execution and physical validation are reported separately.
 
+### Exact velocity relaxation on the same thermal timeline
+
+`advance_creeping_sphere_exact` and `advance_creeping_sphere_exact_with` select
+the existing exact source-bound Stokes owner on each actual thermal interval.
+`HeatedExactCreepingControls` bounds the fixed-configuration numerical work
+defect without a midpoint relaxation-fraction ceiling. They reuse the original
+`CreepingExpansion` observer, current-radius source preparation and
+`RigidExpansion::finish_step` momentum-preserving configuration transfer.
+Midpoint entries retain their selection and public signatures. The common
+thermal maximum step, source temperature support, Navier interface identity,
+updated endpoint Reynolds/diffusion admission, parameter-work budgets and
+atomic observer publication still apply. Selected rotational lift refuses.
+
+Analytic velocity, displacement and spin concern each held-radius interval;
+the source-thermal/geometry split remains first order and requires refinement.
+Drag dissipation is still an exterior-fluid transfer, never additional heat
+in the finite solid's caloric storage. The existing audit keeps that heat,
+maintained-flow work, inertia/buoyancy configuration work and represented-state
+numerical defects separate. `tests/heated_creeping_motion/exact.rs` supplies
+independent stiff settling/spin oracles, current-radius Navier motion and work,
+restart, generated-heat composition and late-refusal rollback checks.
+
 ## Material-fluid heat exchange on the continuing sphere trajectory
 
 `advance_creeping_sphere_in_thermal_fluid` and its `_with` composition use the
@@ -1663,6 +1685,15 @@ The additional explicit relaxation limit composes with the original timeline
 and any generated-heat observer, whose history publishes atomically with heat
 and motion. Source/regime/boundary-event/cancellation failure discards all of
 those proposed histories.
+
+`advance_creeping_sphere_in_thermal_fluid_exact` and its `_with` composition
+select analytic frozen-radius drag inside this same conduction observer.
+They change no caloric or heat-transfer law, and retain the thermal timestep
+and Pe/Ra/Bi/diffusion restrictions. Viscous relaxation may be much faster than
+thermal relaxation without forcing a midpoint mechanical step. The two
+regressions in `tests/heated_creeping_heat/exact.rs` check exact stiff spin with
+the original finite-cell conduction update, separate exterior viscous heat,
+source-driven expansion and atomic rollback of an independent heater.
 
 Seven focused integration definitions cover independent exponential heating
 and cooling with refinement, k/Cp/expansion substitutions, shared heater work,

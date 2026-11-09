@@ -4,6 +4,8 @@
 mod common;
 #[path = "creeping_flow/navier_slip_source.rs"]
 mod navier_slip_source;
+#[path = "heated_creeping_motion/exact.rs"]
+mod exact;
 use common::{budget, caloric, card, config, point, region};
 use fs_ga::{Se3, So3, Twist, Vec3};
 use fs_matdb::MaterialCard;

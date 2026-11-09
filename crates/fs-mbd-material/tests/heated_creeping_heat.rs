@@ -1,6 +1,8 @@
 //! Independent cooling oracle, material substitution and atomic physical refusals.
 #[path = "heated_creeping_heat/common.rs"]
 mod common;
+#[path = "heated_creeping_heat/exact.rs"]
+mod exact;
 use common::*;
 use fs_material::MaterialError;
 use fs_material::fluid_transport::{

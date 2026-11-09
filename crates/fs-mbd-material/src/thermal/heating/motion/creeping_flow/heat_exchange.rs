@@ -157,6 +157,78 @@ impl<'a> HeatedRigidBody<'a> {
         Ok((next, observer, audit))
     }
 
+    /// Use analytic frozen-radius drag while the same fluid heats or cools the
+    /// original finite solid cell. Heat conduction and expansion retain their
+    /// original substeps, source snapshots, Pe/Ra/Bi and diffusion restrictions.
+    ///
+    /// Removing the viscous relaxation ceiling does not make the thermal or
+    /// geometry split exact. Conduction remains the existing source law and
+    /// thermal integrator; viscous heat is still an external-fluid transfer.
+    /// All motion, heat and work accounts commit together on acceptance.
+    pub fn advance_creeping_sphere_in_thermal_fluid_exact<F: ThermalFluidTransport + ?Sized>(
+        &self,
+        sphere: &CreepingSphere<'_, F>,
+        exchange: SphereHeatExchange<'_>,
+        controls: HeatedExactCreepingControls,
+        target_s: f64,
+        config: StepConfig,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, HeatedCreepingThermalAudit), HeatedMotionError> {
+        let observer = self.thermal_creeping_observer_with_stepper(
+            sphere,
+            exchange,
+            CreepingStepper::Exact(controls),
+            &mut checkpoint,
+        )?;
+        let before = observer.creeping.snapshot(&mut checkpoint)?;
+        let (thermal, observer, audit) =
+            self.thermal
+                .advance_observed(&observer, target_s, config, &mut checkpoint)?;
+        self.accept_thermal_creeping(before, thermal, observer, audit, &mut checkpoint)
+    }
+
+    /// Compose an original heat/field owner on the same conduction and exact
+    /// frozen-radius drag intervals. This retains the common atomic publication
+    /// and does not apply a second law to the occupied exterior surface.
+    pub fn advance_creeping_sphere_in_thermal_fluid_exact_with<
+        O: DepositionObserver,
+        F: ThermalFluidTransport + ?Sized,
+    >(
+        &self,
+        observer: &O,
+        sphere: &CreepingSphere<'_, F>,
+        exchange: SphereHeatExchange<'_>,
+        controls: HeatedExactCreepingControls,
+        target_s: f64,
+        config: StepConfig,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<
+        (Self, O, HeatedCreepingThermalAudit),
+        ObserverCouplingError<O::Error, HeatedMotionError>,
+    > {
+        let motion = self
+            .thermal_creeping_observer_with_stepper(
+                sphere,
+                exchange,
+                CreepingStepper::Exact(controls),
+                &mut checkpoint,
+            )
+            .map_err(ObserverCouplingError::Second)?;
+        let before = motion
+            .creeping
+            .snapshot(&mut checkpoint)
+            .map_err(ObserverCouplingError::Second)?;
+        let pair = CoupledObservers::new(observer.clone(), motion);
+        let (thermal, pair, audit) =
+            self.thermal
+                .advance_observed(&pair, target_s, config, &mut checkpoint)?;
+        let (observer, motion) = pair.into_parts();
+        let (next, audit) = self
+            .accept_thermal_creeping(before, thermal, motion, audit, &mut checkpoint)
+            .map_err(ObserverCouplingError::Second)?;
+        Ok((next, observer, audit))
+    }
+
     fn thermal_creeping_observer<'m, 'f, 'k, F: ThermalFluidTransport + ?Sized>(
         &self,
         sphere: &'m CreepingSphere<'f, F>,
@@ -164,7 +236,22 @@ impl<'a> HeatedRigidBody<'a> {
         controls: HeatedCreepingControls,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<ThermalCreepingExpansion<'a, 'm, 'f, 'k, F>, HeatedMotionError> {
-        let creeping = self.creeping_observer(sphere, controls, checkpoint)?;
+        self.thermal_creeping_observer_with_stepper(
+            sphere,
+            exchange,
+            CreepingStepper::Midpoint(controls),
+            checkpoint,
+        )
+    }
+
+    fn thermal_creeping_observer_with_stepper<'m, 'f, 'k, F: ThermalFluidTransport + ?Sized>(
+        &self,
+        sphere: &'m CreepingSphere<'f, F>,
+        exchange: SphereHeatExchange<'k>,
+        stepper: CreepingStepper,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<ThermalCreepingExpansion<'a, 'm, 'f, 'k, F>, HeatedMotionError> {
+        let creeping = self.creeping_observer_with_stepper(sphere, stepper, checkpoint)?;
         admit_solid(&creeping, exchange, checkpoint)?;
         let fluid = sphere
             .source()
