@@ -12,6 +12,12 @@ use super::{
 };
 use fs_math::{c64::C64, dd::Dd};
 
+mod survey;
+pub use survey::{
+    TransferParameterSurvey, survey_transfer_extrema_with_parameter_derivative,
+    survey_transfer_extrema_with_parameter_derivative_with_cancel,
+};
+
 /// One original observation and its partial derivatives at fixed parameter/frequency.
 /// All entries use the same source, receiver, coordinates, and exp(-i*w*t) convention.
 /// Frequency-dependent source/receiver/load laws must include every chain-rule term.
@@ -54,6 +60,7 @@ pub struct TransferExtremumParameterResponse {
     /// squaring the original response. It is not an exact stationarity claim.
     pub normalized_stationarity_residual: f64,
     /// Original first-derivative search calls plus the one final jet call.
+    /// In surveys, shared cached-grid calls belong to the survey total.
     pub evaluations: usize,
 }
 

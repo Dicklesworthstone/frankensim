@@ -33,9 +33,11 @@ pub use query::{
 mod sensitivity;
 pub use sensitivity::{
     HalfPowerBandwidthParameterResponse, HarmonicTransferParameterJet,
-    TransferExtremumParameterResponse,
+    TransferExtremumParameterResponse, TransferParameterSurvey,
     refine_half_power_bandwidth_with_parameter_derivative_with_cancel,
     refine_transfer_extremum_with_parameter_derivative_with_cancel,
+    survey_transfer_extrema_with_parameter_derivative,
+    survey_transfer_extrema_with_parameter_derivative_with_cancel,
 };
 mod native_parameter_projection;
 mod parameter_projection;

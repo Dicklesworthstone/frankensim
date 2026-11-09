@@ -530,6 +530,48 @@ boundary: these surveys do not certify global spectral completeness, assign
 free modes, or differentiate peak switching. Net boundary work keeps its
 authored physical interpretation.
 
+### `harmonic::resonance`: complete observed-transfer sensitivity surveys
+
+`survey_transfer_extrema_with_parameter_derivative` returns every simple
+complex-response peak/notch resolved by an authored increasing frequency grid,
+together with its complete local physical design derivative. It retains the
+same source, receiver, material and attachment parameter across both callbacks.
+The shared grid owner caches original H/H_omega observations once, identifies
+strict sign reversals and retains stationary grid samples between oriented
+neighbors. It reserves one final complete parameter jet per candidate before
+refinement, within one ceiling covering the grid, all refinements and all jets.
+
+Each candidate uses the original transfer refinement and parameter resolver.
+Finite maxima retain their existing pole-resolution guard, and every final
+jet reproduces the original observation and passes signed-curvature and
+representability checks. A simple exact transfer zero retains its finite
+notch-frequency and total complex derivatives; log-amplitude and phase
+derivatives remain explicitly absent there. Full jets are evaluated only at
+resolved extrema, never at every search trial.
+
+`TransferParameterSurvey` reports frequency-ordered original extrema with
+their frequency, total complex, log-amplitude and phase derivatives and existing
+conditioning diagnostics. Each entry counts newly performed local first calls
+plus its one final jet; shared grid calls belong to the survey total. Storage
+is O(grid+extrema), with no dense jet cache, additional physical factor,
+perturbed models or second numerical root engine. Extremum/evaluation caps,
+original source errors and cancellation publish no partial list.
+
+Native regressions compare both peaks and an exact omega=2 antiresonance of
+a coupled two-mass pencil against independent original-quotient and polynomial
+derivatives. Physical spring changes, complete frequency dilation and coherent
+source gain/phase directions retain each feature's correct continuation.
+Exact cancellation has zero observed amplitude and absent log/phase tangents,
+while its notch-frequency derivative remains available. Cached grid reuse,
+extreme coherent units, global evaluation reservations and atomic refusal
+exercise the complete survey boundary.
+
+The grid must separate every feature the caller needs: equal-sign endpoints
+can hide a peak/notch pair, and endpoints lack two-sided evidence. These are
+local derivatives of the selected observed features, not modal matching,
+finite-parameter-step prediction, continuation through degeneracy or a global
+spectral completeness certificate.
+
 ### `harmonic::resonance`: physical peak, notch and linewidth sensitivity
 
 `refine_transfer_extremum_with_parameter_derivative` and its callback entry retain the original observed response and first-derivative sign search, then request one complete H/H_omega/H_omegaomega/H_theta/H_omega_theta jet at the resolved frequency. The implicit derivative of `Re(conj(H)*H_omega)=0` differentiates either a strict peak or a strict notch, including a simple exact transfer zero. Total complex response, log-magnitude and phase derivatives follow the moving extremum; log-magnitude and phase are explicitly absent at an exact zero. Signed curvature and stationarity diagnostics expose the remaining local conditioning and search resolution. Zero or wrongly oriented curvature refuses without an arbitrary curvature floor.
