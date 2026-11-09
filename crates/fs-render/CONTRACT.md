@@ -3822,6 +3822,18 @@ it shares the existing bounded temperature interpolation with
 Spectral laws are sampled once at the fixed source wavelengths, while the
 native caloric laws supply actual kelvin values at every thermal substep.
 
+The immutable trajectory can select `AbsorptionEstimator::Continuous` through
+`try_new_with_estimator` or `from_field_with_estimator`. It samples scattering
+free flights and scores conservative Beer absorption on every traversed native
+cell, so a weakly absorbing path contributes heat even without a collision.
+The original constructors retain collision capture. Both choices share the same
+compiled physical source tables, temperature preparation, thermal admission,
+cancellation and aggregate work bounds; estimator identity stays explicit on
+each original deposition report. Replica clones, changed history counts and
+whole-trajectory refinement retain the chosen estimator. Continuous absorption
+does not universally reduce variance, alter the admitted material laws or
+remove the separate time/sampling/unresolved-energy accuracy gates.
+
 The original cell transport kernel follows all scattering continuations through
 that prepared local field. True absorption supplies the original thermal cells,
 including off-beam receivers; ballistic escape, diffuse escape and unresolved

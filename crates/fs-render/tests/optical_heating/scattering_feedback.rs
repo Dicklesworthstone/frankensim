@@ -6,10 +6,13 @@ use fs_render::volumes::heating::feedback::{
 };
 use fs_render::volumes::heating::scattering::ScatteringHeatingTolerance;
 use fs_render::volumes::heating::scattering_feedback::{
-    IncidentScatteringBeam, ScatteringFeedbackBudget, TemperatureScatteringHeating,
-    TemperatureScatteringTable, ThermalScatteringCell,
+    IncidentScatteringBeam, ScatteringEnsembleTolerance, ScatteringFeedbackBudget,
+    ScatteringFeedbackRefinement, TemperatureScatteringHeating, TemperatureScatteringTable,
+    ThermalScatteringCell,
 };
-use fs_render::volumes::transport::scattering::deposition::ScatteringDepositionConfig;
+use fs_render::volumes::transport::scattering::deposition::{
+    AbsorptionEstimator, ScatteringDepositionConfig,
+};
 
 fn absorption(rows: &[(f64, f64)]) -> TemperatureAbsorptionTable {
     let rows: Vec<_> = rows
@@ -93,7 +96,36 @@ fn observer<'g>(
     config: ScatteringDepositionConfig,
     tolerance: ScatteringHeatingTolerance,
 ) -> Result<TemperatureScatteringHeating<'g, 1>, OpticalFeedbackError> {
-    TemperatureScatteringHeating::try_new(
+    observer_with_estimator(
+        cx,
+        density,
+        dims,
+        thermal,
+        power,
+        absorption,
+        scattering,
+        bindings,
+        config,
+        AbsorptionEstimator::Collision,
+        tolerance,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn observer_with_estimator<'g>(
+    cx: &Cx<'_>,
+    density: &'g [f64],
+    dims: [usize; 3],
+    thermal: &DepositionSimulation<'_>,
+    power: f64,
+    absorption: &[TemperatureAbsorptionTable],
+    scattering: &[TemperatureScatteringTable],
+    bindings: &[ThermalScatteringCell],
+    config: ScatteringDepositionConfig,
+    estimator: AbsorptionEstimator,
+    tolerance: ScatteringHeatingTolerance,
+) -> Result<TemperatureScatteringHeating<'g, 1>, OpticalFeedbackError> {
+    TemperatureScatteringHeating::try_new_with_estimator(
         geometry(cx, density, dims),
         IncidentScatteringBeam {
             origin: Point3::new(-1.0, 0.5, 0.5),
@@ -108,6 +140,7 @@ fn observer<'g>(
         thermal,
         budget(),
         config,
+        estimator,
         tolerance,
         || Ok(()),
     )
@@ -638,5 +671,318 @@ fn changing_history_count_preserves_source_stream_prefix_and_replicas_are_distin
             first.deposition().unwrap().medium_identity,
             replica.deposition().unwrap().medium_identity
         );
+    });
+}
+
+#[test]
+fn continuous_temperature_feedback_scores_weak_absorption_on_every_native_substep() {
+    with_cx(|cx| {
+        let density = [1.0];
+        let original = thermal(vec![cell(11, 1.0, 1.0, 0.0)], &SENSIBLE, vec![]);
+        // A prescribed test law, not a measured or extrapolated material spectrum.
+        let changing = absorption(&[(300.0, 0.02), (320.0, 0.10)]);
+        let mut expected_h: f64 = 0.0;
+        for _ in 0..8 {
+            let temperature = 300.0 + expected_h / 4.0;
+            let coefficient = 0.02 + 0.004 * (temperature - 300.0);
+            expected_h += 0.125 * 16.0 * -(-coefficient).exp_m1();
+        }
+        for scattering_coefficient in [0.0, 1e-12] {
+            let heating = observer_with_estimator(
+                cx,
+                &density,
+                [1, 1, 1],
+                &original,
+                16.0,
+                std::slice::from_ref(&changing),
+                &[s(scattering_coefficient)],
+                &[binding(0, 11, 0)],
+                photon_config(32),
+                AbsorptionEstimator::Continuous,
+                tolerance(),
+            )
+            .unwrap();
+            let (heated, accepted, audit) = original
+                .advance_observed(&heating, 1.0, config(0.125), || Ok(()))
+                .unwrap();
+            close(heated.cells()[&CellId(11)].specific_h_j_kg, expected_h);
+            close(
+                heated.temperature_k(CellId(11)).unwrap(),
+                300.0 + expected_h / 4.0,
+            );
+            close(accepted.energy().absorbed_j[0], expected_h);
+            close(audit.external_heat_j, expected_h);
+            assert_eq!(accepted.source_evaluations(), 8);
+            assert_eq!(
+                accepted.absorption_estimator(),
+                AbsorptionEstimator::Continuous
+            );
+            let report = accepted.deposition().unwrap();
+            assert_eq!(report.absorption_estimator, AbsorptionEstimator::Continuous);
+            assert_eq!(
+                report.sampled_histories,
+                [if scattering_coefficient == 0.0 { 0 } else { 32 }]
+            );
+            assert_eq!(report.absorbed.standard_error_w, [0.0]);
+            assert_eq!(report.diffuse_escape.mean_w, [0.0]);
+            assert_eq!(report.unresolved.mean_w, [0.0]);
+            close(
+                accepted.energy().incident_j[0],
+                accepted.energy().absorbed_j[0] + accepted.energy().ballistic_escape_j[0],
+            );
+
+            let (middle, first, _) = original
+                .advance_observed(&heating, 0.5, config(0.125), || Ok(()))
+                .unwrap();
+            let (split, second, _) = middle
+                .advance_observed(&first, 1.0, config(0.125), || Ok(()))
+                .unwrap();
+            assert_eq!(split.cells(), heated.cells());
+            assert_eq!(second.energy(), accepted.energy());
+            assert_ne!(
+                first.deposition().unwrap().medium_identity,
+                report.medium_identity
+            );
+            assert_eq!(second.deposition().unwrap().config.seed, report.config.seed);
+            assert_eq!(original.temperature_k(CellId(11)).unwrap(), 300.0);
+        }
+    });
+}
+
+#[test]
+fn continuous_shared_field_heats_off_beam_cells_without_recompiling_source_data() {
+    with_cx(|cx| {
+        let density = [1.0; 4];
+        let original = thermal(
+            (11..15).map(|id| cell(id, 1.0, 1.0, 0.0)).collect(),
+            &SENSIBLE,
+            vec![],
+        );
+        let bindings: Vec<_> = (0..4).map(|i| binding(i, 11 + i as u64, 0)).collect();
+        let collision = observer(
+            cx,
+            &density,
+            [2, 2, 1],
+            &original,
+            20.0,
+            &[a(0.1)],
+            &[s(3.0)],
+            &bindings,
+            photon_config(1024),
+            tolerance(),
+        )
+        .unwrap();
+        assert_eq!(
+            collision.absorption_estimator(),
+            AbsorptionEstimator::Collision
+        );
+        let continuous = TemperatureScatteringHeating::from_field_with_estimator(
+            std::sync::Arc::clone(collision.optical_field()),
+            IncidentScatteringBeam {
+                origin: Point3::new(-1.0, 0.5, 0.5),
+                unit_direction: Vec3::new(1.0, 0.0, 0.0),
+                wavelengths_nm: [550.0],
+                incident_power_w: [20.0],
+            },
+            &original,
+            budget(),
+            photon_config(1024),
+            AbsorptionEstimator::Continuous,
+            tolerance(),
+            || Ok(()),
+        )
+        .unwrap();
+        assert!(std::sync::Arc::ptr_eq(
+            collision.optical_field(),
+            continuous.optical_field()
+        ));
+        assert_eq!(
+            continuous
+                .with_replica_seed(17)
+                .with_histories_per_lane(2048)
+                .unwrap()
+                .absorption_estimator(),
+            AbsorptionEstimator::Continuous,
+        );
+        let (heated, accepted, audit) = original
+            .advance_observed(&continuous, 0.25, config(0.25), || Ok(()))
+            .unwrap();
+        for id in [CellId(13), CellId(14)] {
+            assert!(heated.temperature_k(id).unwrap() > 300.0);
+            assert!(accepted.sources_w().unwrap()[&id] > 0.0);
+        }
+        close(audit.external_heat_j, accepted.energy().absorbed_j[0]);
+        close(accepted.energy().thermal_input_j, audit.external_heat_j);
+        let energy = accepted.energy();
+        close(
+            energy.incident_j[0],
+            energy.absorbed_j[0]
+                + energy.ballistic_escape_j[0]
+                + energy.diffuse_escape_j[0]
+                + energy.unresolved_j[0]
+                + energy.residual_j[0],
+        );
+        assert_eq!(accepted.deposition().unwrap().sampled_histories, [1024]);
+    });
+}
+
+#[test]
+fn continuous_temperature_estimator_survives_native_trajectory_refinement() {
+    with_cx(|cx| {
+        let density = [1.0];
+        let original = thermal(vec![cell(11, 1.0, 1.0, 0.0)], &SENSIBLE, vec![]);
+        let heating = observer_with_estimator(
+            cx,
+            &density,
+            [1, 1, 1],
+            &original,
+            4.0,
+            &[absorption(&[(300.0, 0.1), (400.0, 1.1)])],
+            &[s(1e-12)],
+            &[binding(0, 11, 0)],
+            photon_config(8),
+            AbsorptionEstimator::Continuous,
+            tolerance(),
+        )
+        .unwrap();
+        let accuracy = ScatteringEnsembleTolerance {
+            enthalpy_absolute_j_kg: 0.1,
+            temperature_absolute_k: 0.1,
+            optical_energy_absolute_j: 0.1,
+            relative: 0.0,
+        };
+        let controls = ScatteringFeedbackRefinement {
+            initial_max_dt_s: 0.5,
+            minimum_max_dt_s: 0.0625,
+            maximum_halvings: 3,
+            replicas: 2,
+            ensemble_seed: 173,
+            maximum_photon_doublings: 1,
+            standard_error_multiplier: 3.0,
+            temporal: accuracy,
+            sampling: accuracy,
+            photon_sensitivity: accuracy,
+            conservation_tolerance_j: 1e-9,
+            maximum_total_substeps: 1000,
+            maximum_total_source_evaluations: 1000,
+            maximum_total_traced_segments: 100_000,
+            maximum_retained_trajectories: 4,
+            maximum_observable_cells: 1,
+        };
+        let result = heating
+            .advance_ensemble_refined(&original, 1.0, controls, || Ok(()))
+            .unwrap();
+        assert!(result.diagnostics.temporal_refinement_observed);
+        assert!(result.diagnostics.photon_sensitivity.is_some());
+        assert_eq!(result.diagnostics.histories_per_lane, 16);
+        assert_eq!(result.optical_energy.absorbed_j[0].standard_error, 0.0);
+        for trajectory in &result.trajectories {
+            assert_eq!(
+                trajectory.optical.absorption_estimator(),
+                AbsorptionEstimator::Continuous
+            );
+            let report = trajectory.optical.deposition().unwrap();
+            assert_eq!(report.absorption_estimator, AbsorptionEstimator::Continuous);
+            assert_eq!(report.sampled_histories, [16]);
+            close(
+                trajectory.audit.external_heat_j,
+                trajectory.optical.energy().absorbed_j[0],
+            );
+            close(
+                trajectory.thermal.cells()[&CellId(11)].specific_h_j_kg,
+                trajectory.optical.energy().thermal_input_j,
+            );
+        }
+        assert_ne!(
+            result.trajectories[0]
+                .optical
+                .deposition()
+                .unwrap()
+                .config
+                .seed,
+            result.trajectories[1]
+                .optical
+                .deposition()
+                .unwrap()
+                .config
+                .seed,
+        );
+        assert_eq!(heating.time_s(), 0.0);
+        assert!(heating.deposition().is_none());
+    });
+}
+
+#[test]
+fn continuous_feedback_refusals_leave_native_and_optical_inputs_unchanged() {
+    with_cx(|cx| {
+        let density = [1.0];
+        let original = thermal(vec![cell(11, 1.0, 1.0, 0.0)], &SENSIBLE, vec![]);
+        let heating = observer_with_estimator(
+            cx,
+            &density,
+            [1, 1, 1],
+            &original,
+            8.0,
+            &[a(1.0)],
+            &[s(1.0)],
+            &[binding(0, 11, 0)],
+            photon_config(64),
+            AbsorptionEstimator::Continuous,
+            tolerance(),
+        )
+        .unwrap();
+        assert!(matches!(
+            original.advance_observed(
+                &heating.with_work_limits(1, 20_000_000),
+                0.5,
+                config(0.25),
+                || Ok(())
+            ),
+            Err(OpticalFeedbackError::Budget),
+        ));
+        let mut checkpoints = 0;
+        let cancelled = original.advance_observed(&heating, 0.5, config(0.25), || {
+            checkpoints += 1;
+            if checkpoints == 50 {
+                Err(DepositionError::Cancelled)
+            } else {
+                Ok(())
+            }
+        });
+        assert!(matches!(
+            cancelled,
+            Err(OpticalFeedbackError::Thermal(DepositionError::Cancelled))
+        ));
+        assert_eq!(checkpoints, 50);
+        let strict = TemperatureScatteringHeating::from_field_with_estimator(
+            std::sync::Arc::clone(heating.optical_field()),
+            IncidentScatteringBeam {
+                origin: Point3::new(-1.0, 0.5, 0.5),
+                unit_direction: Vec3::new(1.0, 0.0, 0.0),
+                wavelengths_nm: [550.0],
+                incident_power_w: [8.0],
+            },
+            &original,
+            budget(),
+            photon_config(64),
+            AbsorptionEstimator::Continuous,
+            ScatteringHeatingTolerance {
+                max_total_standard_error_w: 0.0,
+                ..tolerance()
+            },
+            || Ok(()),
+        )
+        .unwrap();
+        assert!(matches!(
+            original.advance_observed(&strict, 0.1, config(0.1), || Ok(())),
+            Err(OpticalFeedbackError::Heating(OpticalHeatingError::Invalid(
+                _
+            ))),
+        ));
+        assert_eq!(original.time_s(), 0.0);
+        assert_eq!(original.temperature_k(CellId(11)).unwrap(), 300.0);
+        assert_eq!(heating.time_s(), 0.0);
+        assert_eq!(heating.energy().thermal_input_j, 0.0);
+        assert!(heating.deposition().is_none());
     });
 }

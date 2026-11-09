@@ -11,6 +11,11 @@
 //! state; it is not an error bar on the final nonlinear thermal state. Cumulative
 //! energies below account for the actual sampled heat, without incorrectly
 //! applying a frozen-field standard-error formula to changing optical fields.
+//!
+//! Absorption estimation is an immutable trajectory choice. Collision capture
+//! remains the default; continuous absorption scores every travelled segment
+//! while sampling scattering alone. Both choices use these same native thermal
+//! substeps, material tables, work bounds, and heat-admission policy.
 
 use super::feedback::{OpticalFeedbackError, TemperatureAbsorptionTable};
 use super::scattering::{ScatteringEnergyBudget, ScatteringHeating, ScatteringHeatingTolerance};
@@ -21,7 +26,7 @@ use super::temperature_field::{
 use super::{CheckedSum, OpticalHeatingError, nonnegative};
 use crate::volumes::transport::scattering::PhaseFunction;
 use crate::volumes::transport::scattering::deposition::{
-    ScatteringDepositionConfig, ScatteringPowerDeposition,
+    AbsorptionEstimator, ScatteringDepositionConfig, ScatteringPowerDeposition,
 };
 use crate::volumes::transport::{AbsorbingGrid, VolumeTransportError};
 use fs_blake3::DomainHasher;
@@ -95,6 +100,7 @@ struct FeedbackModel<'g, const N: usize> {
     field: Arc<TemperatureOpticalField<'g, N>>,
     beam: IncidentScatteringBeam<N>,
     config: ScatteringDepositionConfig,
+    absorption_estimator: AbsorptionEstimator,
     tolerance: ScatteringHeatingTolerance,
 }
 
@@ -123,6 +129,7 @@ impl<const N: usize> core::fmt::Debug for TemperatureScatteringHeating<'_, N> {
             .field("model_identity", &self.model.field.identity())
             .field("time_s", &self.time_s)
             .field("histories_per_lane", &self.histories)
+            .field("absorption_estimator", &self.model.absorption_estimator)
             .field("source_evaluations", &self.evaluations)
             .field("traced_segments", &self.segments)
             .field("energy", &self.energy)
@@ -146,6 +153,42 @@ impl<'g, const N: usize> TemperatureScatteringHeating<'g, N> {
         thermal: &DepositionSimulation<'_>,
         budget: ScatteringFeedbackBudget,
         config: ScatteringDepositionConfig,
+        tolerance: ScatteringHeatingTolerance,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, OpticalFeedbackError> {
+        Self::try_new_with_estimator(
+            geometry,
+            beam,
+            absorption,
+            scattering,
+            phases,
+            bindings,
+            thermal,
+            budget,
+            config,
+            AbsorptionEstimator::Collision,
+            tolerance,
+            checkpoint,
+        )
+    }
+
+    /// Compile the native temperature feedback with an explicit absorption
+    /// estimator. Continuous absorption retains Beer heat on each traversed cell,
+    /// including histories without a scattering event. It can reduce variance
+    /// for weak absorption; neither choice promises lower variance in all media.
+    /// The choice is retained by clones, replica streams and trajectory refinement.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_with_estimator(
+        geometry: AbsorbingGrid<'g>,
+        beam: IncidentScatteringBeam<N>,
+        absorption: &[TemperatureAbsorptionTable],
+        scattering: &[TemperatureScatteringTable],
+        phases: &[PhaseFunction],
+        bindings: &[ThermalScatteringCell],
+        thermal: &DepositionSimulation<'_>,
+        budget: ScatteringFeedbackBudget,
+        config: ScatteringDepositionConfig,
+        absorption_estimator: AbsorptionEstimator,
         tolerance: ScatteringHeatingTolerance,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, OpticalFeedbackError> {
@@ -201,6 +244,7 @@ impl<'g, const N: usize> TemperatureScatteringHeating<'g, N> {
             thermal,
             budget,
             config,
+            absorption_estimator,
             tolerance,
         )
     }
@@ -215,6 +259,32 @@ impl<'g, const N: usize> TemperatureScatteringHeating<'g, N> {
         thermal: &DepositionSimulation<'_>,
         budget: ScatteringFeedbackBudget,
         config: ScatteringDepositionConfig,
+        tolerance: ScatteringHeatingTolerance,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, OpticalFeedbackError> {
+        Self::from_field_with_estimator(
+            field,
+            beam,
+            thermal,
+            budget,
+            config,
+            AbsorptionEstimator::Collision,
+            tolerance,
+            checkpoint,
+        )
+    }
+
+    /// Share an admitted constitutive field while choosing the immutable
+    /// trajectory estimator. The field identity continues to describe physical
+    /// source data; the deposition report separately records this estimator.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_field_with_estimator(
+        field: Arc<TemperatureOpticalField<'g, N>>,
+        beam: IncidentScatteringBeam<N>,
+        thermal: &DepositionSimulation<'_>,
+        budget: ScatteringFeedbackBudget,
+        config: ScatteringDepositionConfig,
+        absorption_estimator: AbsorptionEstimator,
         tolerance: ScatteringHeatingTolerance,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, OpticalFeedbackError> {
@@ -242,6 +312,7 @@ impl<'g, const N: usize> TemperatureScatteringHeating<'g, N> {
             thermal,
             budget,
             config,
+            absorption_estimator,
             tolerance,
         )
     }
@@ -254,6 +325,7 @@ impl<'g, const N: usize> TemperatureScatteringHeating<'g, N> {
         thermal: &DepositionSimulation<'_>,
         budget: ScatteringFeedbackBudget,
         config: ScatteringDepositionConfig,
+        absorption_estimator: AbsorptionEstimator,
         tolerance: ScatteringHeatingTolerance,
     ) -> Result<Self, OpticalFeedbackError> {
         let sums = EnergySums::default();
@@ -263,6 +335,7 @@ impl<'g, const N: usize> TemperatureScatteringHeating<'g, N> {
                 field,
                 beam,
                 config,
+                absorption_estimator,
                 tolerance,
             }),
             coefficients,
@@ -314,6 +387,10 @@ impl<'g, const N: usize> TemperatureScatteringHeating<'g, N> {
     }
     pub fn histories_per_lane(&self) -> u32 {
         self.histories
+    }
+    /// Estimator selected for every source draw in this thermal trajectory.
+    pub fn absorption_estimator(&self) -> AbsorptionEstimator {
+        self.model.absorption_estimator
     }
     /// Conservative over all admitted temperatures; an initially transparent
     /// scattering law may become active later along the thermal trajectory.
@@ -414,13 +491,24 @@ impl<const N: usize> DepositionObserver for TemperatureScatteringHeating<'_, N> 
         let config = self.step_config();
         let report = transport_checkpoint(checkpoint, |check| {
             let field = self.model.field.field(&self.coefficients, check)?;
-            field.deposit_multiple_scattering_power_with_checkpoint(
-                &mut || check(),
-                self.model.beam.origin,
-                self.model.beam.unit_direction,
-                &self.model.beam.incident_power_w,
-                config,
-            )
+            match self.model.absorption_estimator {
+                AbsorptionEstimator::Collision => field
+                    .deposit_multiple_scattering_power_with_checkpoint(
+                        &mut || check(),
+                        self.model.beam.origin,
+                        self.model.beam.unit_direction,
+                        &self.model.beam.incident_power_w,
+                        config,
+                    ),
+                AbsorptionEstimator::Continuous => field
+                    .deposit_continuous_absorption_power_with_checkpoint(
+                        &mut || check(),
+                        self.model.beam.origin,
+                        self.model.beam.unit_direction,
+                        &self.model.beam.incident_power_w,
+                        config,
+                    ),
+            }
         })?;
         let segments = self
             .segments
