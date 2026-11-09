@@ -1385,6 +1385,42 @@ advection scheme remain with their respective future/material owners.
 
 ## Resolved transient Carreau films
 
+`set_face_temperatures` admits an explicitly supplied wall-normal temperature
+field at all N+1 original shear faces. Every face retains the SAME thermal
+Carreau source and physical rate ceiling, with its own prepared temperature
+shift. Interior stresses/tangents and the free-surface stress inverse use those
+actual local preparations; no mean temperature or fitted apparent viscosity is
+substituted. Uniform fields retain the original compact path. Spatial updates
+reuse two prepared buffers after first use and publish only after complete
+source/scaling admission and the final cancellation check. Updating temperature
+never replaces velocity history, changes density/thickness, or advances time.
+
+The Newtonian, original-source-bound Newtonian and Carreau `step_with_heat`
+entries share one shear-segment partition. Each exports a nonnegative
+viscous-energy increment per original
+wall-normal cell, in J/m² of wetted wall area. Interior shear-segment work is
+split equally between its two adjacent cells; the wall and surface half-segment
+losses enter only their adjacent cells. The sum is the original momentum work
+account's viscous heat, within summation roundoff. The surface contribution uses
+the imposed traction and retains the separate constitutive-inverse defect.
+The caller supplies its actual represented wall area and original caloric
+owner; neither a heat capacity nor a temperature rise is inferred. These
+increments already exclude kinetic storage, so body, wall and surface work
+must not be deposited again. Heat output, velocity and time publish together;
+shape, source, solve, speed and cancellation refusals retain every accepted
+value. Reusable O(N) scratch avoids momentum-step workspace allocation.
+
+G1/G3/G4 spatial-field tests compare against independent original-law stress
+bisection and continuum integration under a linear temperature gradient and
+opposing surface traction; they check spatial refinement, uniform-path parity,
+local heat partition and global work, original face/source retention, thermal
+rebind refusal, and cancellation/retry including the caller's heat buffer.
+Native Newtonian checks also recover exact signed Couette cell heating and
+bit-identical momentum/report behavior with and without heat export.
+The temperature field is prescribed over each momentum interval. These APIs
+provide spatial source feedback and conservative heat transfers, not a second
+thermal inventory, conductivity closure or automatic thermal time integrator.
+
 `film::transient::TransientCarreauFilm` retains the full wall-normal velocity
 history under signed body acceleration, translating-wall velocity and imposed
 surface traction. Each implicit-midpoint face evaluates the original thermal

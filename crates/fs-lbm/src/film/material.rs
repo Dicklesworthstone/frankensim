@@ -39,6 +39,22 @@ impl<'a> MaterialTransientFilm<'a> {
     ) -> Result<FilmStep, TransientFilmError> {
         self.flow.step(duration_s, drive, limits, cancelled)
     }
+
+    /// Export the original interval's local viscous losses for an explicitly
+    /// selected thermal owner, retaining this same source-bound momentum.
+    /// Cell heat is J/m² of wetted wall area; no heat capacity, source lookup or
+    /// thermal inventory is inferred. Flow and output publish together.
+    pub fn step_with_heat(
+        &mut self,
+        duration_s: f64,
+        drive: FilmDrive,
+        limits: FilmStepLimits,
+        cell_heat_j_m2: &mut [f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<FilmStep, TransientFilmError> {
+        self.flow
+            .step_with_heat(duration_s, drive, limits, cell_heat_j_m2, cancelled)
+    }
 }
 
 /// A frozen Newtonian liquid binding for repeated local film evaluations.

@@ -5,6 +5,9 @@ use super::*;
 use fs_material::fluid_transport::rheology::{CarreauYasuda, ViscosityShiftMode};
 use fs_material::visco::temperature::{TemperatureShift, TemperatureShiftModel};
 
+#[path = "tests/thermal.rs"]
+mod thermal;
+
 const SPEC: TransientCarreauFilmSpec = TransientCarreauFilmSpec {
     density_kg_m3: 1.0,
     thickness_m: 1.0,

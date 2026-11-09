@@ -260,3 +260,81 @@ fn initial_and_drive_domains_refuse_without_clipping() {
     assert_eq!(rest.viscous_heat_j_m2, 0.0);
     assert_eq!(rest.final_flow_per_width_m2_s, 0.0);
 }
+
+#[test]
+fn resolved_cell_heat_recovers_exact_signed_couette_heating_and_native_step() {
+    let n = 16;
+    let dt = 0.02;
+    let mu = MATERIAL.density_kg_m3 * MATERIAL.kinematic_viscosity_m2_s;
+    for rate in [-0.4, 0.4] {
+        let drive = FilmDrive {
+            wall_velocity_m_s: -0.2,
+            surface_shear_pa: mu * rate,
+            ..FilmDrive::default()
+        };
+        let profile: Vec<_> = (0..n)
+            .map(|i| drive.wall_velocity_m_s + rate * (i as f64 + 0.5) / n as f64)
+            .collect();
+        let mut plain = TransientFilm::from_profile(MATERIAL, 1.0, profile.clone(), 0.0).unwrap();
+        let mut thermal = TransientFilm::from_profile(MATERIAL, 1.0, profile, 0.0).unwrap();
+        let reference = plain.step(dt, drive, LIMITS, || false).unwrap();
+        let mut heat = vec![f64::NAN; n];
+        let report = thermal
+            .step_with_heat(dt, drive, LIMITS, &mut heat, || false)
+            .unwrap();
+        assert_eq!(report, reference);
+        assert_eq!(thermal.velocities_m_s(), plain.velocities_m_s());
+        for value in &heat {
+            near(*value, dt * mu * rate * rate / n as f64, 2e-16);
+        }
+        near(heat.iter().sum(), report.viscous_heat_j_m2, 2e-16);
+        near(report.kinetic_energy_change_j_m2, 0.0, 1e-13);
+        near(report.work_residual_j_m2, 0.0, 1e-13);
+    }
+}
+
+#[test]
+fn heat_output_and_flow_refuse_and_retry_as_one_transaction() {
+    let n = 257;
+    let drive = FilmDrive {
+        acceleration_m_s2: 0.3,
+        wall_velocity_m_s: 0.01,
+        surface_shear_pa: -0.02,
+    };
+    let mut film = TransientFilm::new(MATERIAL, 1.0, n).unwrap();
+    let mut reference = TransientFilm::new(MATERIAL, 1.0, n).unwrap();
+    film.step(0.01, drive, LIMITS, || false).unwrap();
+    reference.step(0.01, drive, LIMITS, || false).unwrap();
+    let original = film.velocities_m_s().to_vec();
+    let original_time = film.accepted_time_s();
+    let mut expected_heat = vec![0.0; n];
+    let mut polls = 0;
+    let expected = reference
+        .step_with_heat(0.01, drive, LIMITS, &mut expected_heat, || {
+            polls += 1;
+            false
+        })
+        .unwrap();
+    let mut heat = vec![-17.0; n];
+    assert!(
+        film.step_with_heat(0.01, drive, LIMITS, &mut heat[..n - 1], || false)
+            .is_err()
+    );
+    let mut seen = 0;
+    assert_eq!(
+        film.step_with_heat(0.01, drive, LIMITS, &mut heat, || {
+            seen += 1;
+            seen == polls
+        }),
+        Err(TransientFilmError::Cancelled)
+    );
+    assert_eq!(film.velocities_m_s(), original);
+    assert_eq!(film.accepted_time_s(), original_time);
+    assert!(heat.iter().all(|&q| q == -17.0));
+    let accepted = film
+        .step_with_heat(0.01, drive, LIMITS, &mut heat, || false)
+        .unwrap();
+    assert_eq!(accepted, expected);
+    assert_eq!(heat, expected_heat);
+    assert_eq!(film.velocities_m_s(), reference.velocities_m_s());
+}

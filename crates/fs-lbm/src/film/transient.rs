@@ -147,6 +147,7 @@ pub struct TransientFilm {
     rhs: Vec<f64>,
     diagonal: Vec<f64>,
     adjacent: Vec<f64>,
+    heat: Vec<f64>,
     linear: TridiagonalWorkspace,
     factored_duration: Option<f64>,
 }
@@ -179,6 +180,43 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), TransientFilmError> 
     } else {
         Ok(())
     }
+}
+
+// The dual shear segments tile the film. Each interior segment supplies equal
+// halves to its neighbours; a boundary half-segment heats only its adjacent
+// cell. Use the exact stresses from the accepted momentum work account.
+fn stage_cell_heat(
+    midpoint: &[f64],
+    duration_s: f64,
+    drive: FilmDrive,
+    surface_offset: f64,
+    stress: impl Fn(usize) -> f64,
+    heat: &mut [f64],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), TransientFilmError> {
+    let n = midpoint.len();
+    let segment = |traction: f64, difference: f64| -> Result<f64, TransientFilmError> {
+        let value = finite(duration_s * traction * difference)?;
+        if value < 0.0 {
+            Err(TransientFilmError::NonRepresentable)
+        } else {
+            Ok(value)
+        }
+    };
+    let mut left = segment(stress(0), midpoint[0] - drive.wall_velocity_m_s)?;
+    for i in 0..n {
+        if i % 128 == 0 {
+            poll(cancelled)?;
+        }
+        let right = if i + 1 == n {
+            segment(drive.surface_shear_pa, surface_offset)?
+        } else {
+            0.5 * segment(stress(i + 1), midpoint[i + 1] - midpoint[i])?
+        };
+        heat[i] = finite(left + right)?;
+        left = right;
+    }
+    Ok(())
 }
 
 impl TransientFilm {
@@ -233,6 +271,7 @@ impl TransientFilm {
             rhs: filled(n)?,
             diagonal: filled(n)?,
             adjacent: filled(n - 1)?,
+            heat: filled(n)?,
             linear: TridiagonalWorkspace::new(n)?,
             factored_duration: None,
         })
@@ -271,9 +310,46 @@ impl TransientFilm {
         duration_s: f64,
         drive: FilmDrive,
         limits: FilmStepLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<FilmStep, TransientFilmError> {
+        self.step_inner(duration_s, drive, limits, None, cancelled)
+    }
+
+    /// Advance and export this SAME interval's viscous heat into N original
+    /// wall-normal cells [J/m² of wetted wall area]. Interior shear-segment work
+    /// is split equally between adjacent cells; boundary half-segments heat
+    /// only their adjacent cells. Its sum is the native work account's loss,
+    /// within summation roundoff. Supply the actual wall area when depositing
+    /// into a caloric owner's joule inventory. Do not add mechanical work again.
+    /// Failed/cancelled steps leave both accepted flow and output unchanged.
+    pub fn step_with_heat(
+        &mut self,
+        duration_s: f64,
+        drive: FilmDrive,
+        limits: FilmStepLimits,
+        cell_heat_j_m2: &mut [f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<FilmStep, TransientFilmError> {
+        self.step_inner(duration_s, drive, limits, Some(cell_heat_j_m2), cancelled)
+    }
+
+    fn step_inner(
+        &mut self,
+        duration_s: f64,
+        drive: FilmDrive,
+        limits: FilmStepLimits,
+        cell_heat_j_m2: Option<&mut [f64]>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<FilmStep, TransientFilmError> {
         poll(&mut cancelled)?;
+        if cell_heat_j_m2
+            .as_ref()
+            .is_some_and(|heat| heat.len() != self.velocity.len())
+        {
+            return Err(TransientFilmError::Invalid(
+                "film needs N heat output cells",
+            ));
+        }
         if !duration_s.is_finite()
             || duration_s <= 0.0
             || !limits.maximum_speed_m_s.is_finite()
@@ -376,7 +452,29 @@ impl TransientFilm {
             },
             &mut cancelled,
         )?;
+        if cell_heat_j_m2.is_some() {
+            let conductance = self.shear_conductance;
+            let midpoint = &self.midpoint;
+            stage_cell_heat(
+                midpoint,
+                duration_s,
+                drive,
+                surface_offset,
+                |face| {
+                    if face == 0 {
+                        2.0 * conductance * (midpoint[0] - drive.wall_velocity_m_s)
+                    } else {
+                        conductance * (midpoint[face] - midpoint[face - 1])
+                    }
+                },
+                &mut self.heat,
+                &mut cancelled,
+            )?;
+        }
         poll(&mut cancelled)?;
+        if let Some(heat) = cell_heat_j_m2 {
+            heat.copy_from_slice(&self.heat);
+        }
         core::mem::swap(&mut self.velocity, &mut self.candidate);
         self.time = end_time;
         Ok(receipt)

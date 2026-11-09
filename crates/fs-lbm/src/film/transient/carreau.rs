@@ -5,7 +5,8 @@
 //! it neither freezes an apparent viscosity nor adds steady flow profiles.
 //! Newton steps use the original tridiagonal solver and a bounded line search.
 //! The Newtonian owner supplies the same geometry, reusable storage and exact
-//! discrete work account. Temperature is prescribed, density/thickness fixed.
+//! discrete work account. Temperature may vary across the original shear faces;
+//! the prescribed field, density and thickness are held during each interval.
 //! This is a locally parallel generalized-Newtonian model: no elastic memory,
 //! free-surface evolution, heat deposition or turbulent-transition prediction.
 
@@ -15,7 +16,7 @@ use fs_material::fluid_transport::rheology::pipe::{CarreauPipeControls, Prepared
 
 use super::{
     FilmDrive, FilmMaterial, FilmStep, FilmStepLimits, MAX_FILM_CELLS, TransientFilm,
-    TransientFilmError, filled, finite, poll, positive,
+    TransientFilmError, filled, finite, poll, positive, stage_cell_heat,
 };
 
 /// Fixed SI geometry/inertia and a physical source-supported shear ceiling.
@@ -102,7 +103,11 @@ pub struct TransientCarreauStep {
 /// All numerical arrays are prepared once; warm steps allocate no workspace.
 #[derive(Debug)]
 pub struct TransientCarreauFilm {
+    // The wall-face preparation also retains the common original law and rate
+    // ceiling. Empty face_materials selects the allocation-free uniform lane.
     material: PreparedCarreau,
+    face_materials: Vec<PreparedCarreau>,
+    candidate_materials: Vec<PreparedCarreau>,
     flow: TransientFilm,
     trial: Vec<f64>,
     stress: Vec<f64>,
@@ -181,6 +186,8 @@ impl TransientCarreauFilm {
         let n = flow.velocity.len();
         Ok(Self {
             material,
+            face_materials: Vec::new(),
+            candidate_materials: Vec::new(),
             flow,
             trial: filled(n)?,
             stress: filled(n + 1)?,
@@ -188,8 +195,29 @@ impl TransientCarreauFilm {
         })
     }
 
+    /// Original wall-face material. For a spatial temperature field, use
+    /// [`Self::material_at_face`] to query each face's actual preparation.
     pub const fn material(&self) -> &PreparedCarreau {
         &self.material
+    }
+
+    /// Original source at shear face 0..=N, located at y = face * spacing.
+    /// Face zero is the wall and face N is the free surface. No cell-averaged
+    /// apparent viscosity replaces these face-local constitutive evaluations.
+    pub fn material_at_face(&self, face: usize) -> Option<&PreparedCarreau> {
+        if face > self.flow.velocity.len() {
+            None
+        } else if self.face_materials.is_empty() {
+            Some(&self.material)
+        } else {
+            self.face_materials.get(face)
+        }
+    }
+
+    /// Whether one temperature covers every face. Spatial updates whose values
+    /// are all equal retain the same compact uniform representation.
+    pub fn is_isothermal(&self) -> bool {
+        self.face_materials.is_empty()
     }
     pub const fn density_kg_m3(&self) -> f64 {
         self.flow.material.density_kg_m3
@@ -206,8 +234,8 @@ impl TransientCarreauFilm {
     pub fn velocities_m_s(&self) -> &[f64] {
         &self.flow.velocity
     }
-    /// Cell-scale time at the source's zero-shear viscosity. Actual nonlinear
-    /// diffusion and forcing bandwidth still require time/space refinement.
+    /// Shortest cell-scale time over the faces' zero-shear viscosities. Actual
+    /// nonlinear diffusion and forcing still require time/space refinement.
     pub const fn zero_shear_diffusion_time_s(&self) -> f64 {
         self.flow.diffusion_time
     }
@@ -232,6 +260,80 @@ impl TransientCarreauFilm {
         let diffusion_time = positive(self.flow.mass_per_cell_area / conductance)?;
         poll(&mut cancelled)?;
         self.material = material;
+        self.face_materials.clear();
+        self.flow.material.kinematic_viscosity_m2_s = nu;
+        self.flow.shear_conductance = conductance;
+        self.flow.diffusion_time = diffusion_time;
+        self.flow.factored_duration = None;
+        Ok(())
+    }
+
+    /// Bind N+1 prescribed face temperatures to the SAME original material.
+    ///
+    /// The caller supplies actual wall/surface temperatures and interior face
+    /// traces from its thermal owner; no conductivity, interpolation rule,
+    /// caloric inventory or boundary temperature is inferred. The entire field
+    /// is admitted before publication. Velocity, clock, density, thickness and
+    /// the physical shear-rate ceiling remain unchanged. Spatial preparation
+    /// and its staging buffer are allocated on first use and reused thereafter;
+    /// ordinary momentum steps do not re-evaluate the temperature shift.
+    pub fn set_face_temperatures(
+        &mut self,
+        temperatures_k: &[f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), TransientCarreauError> {
+        poll(&mut cancelled)?;
+        let faces = self.flow.velocity.len() + 1;
+        if temperatures_k.len() != faces {
+            return Err(TransientFilmError::Invalid("film needs N+1 face temperatures").into());
+        }
+        let mut uniform = true;
+        let mut unchanged = true;
+        for (i, &temperature) in temperatures_k.iter().enumerate() {
+            if i % 128 == 0 {
+                poll(&mut cancelled)?;
+            }
+            uniform &= temperature == temperatures_k[0];
+            unchanged &= temperature == self.material_at_face(i).unwrap().temperature_k();
+        }
+        if unchanged {
+            poll(&mut cancelled)?;
+            return Ok(());
+        }
+        if uniform {
+            return self.set_temperature(temperatures_k[0], cancelled);
+        }
+        self.candidate_materials.clear();
+        self.candidate_materials
+            .try_reserve_exact(faces)
+            .map_err(|_| TransientFilmError::Capacity)?;
+        // Reserve both sides now, so a later successful rebind can reuse its
+        // swapped staging buffer without allocating.
+        if self.face_materials.capacity() < faces {
+            self.face_materials
+                .try_reserve_exact(faces - self.face_materials.len())
+                .map_err(|_| TransientFilmError::Capacity)?;
+        }
+        let mut maximum_viscosity = 0.0_f64;
+        for (i, &temperature) in temperatures_k.iter().enumerate() {
+            if i % 128 == 0 {
+                poll(&mut cancelled)?;
+            }
+            let material = PreparedCarreau::new(
+                *self.material.law(),
+                temperature,
+                self.material.maximum_shear_rate_per_s(),
+            )?;
+            maximum_viscosity = maximum_viscosity.max(material.zero_shear_viscosity_pa_s());
+            self.candidate_materials.push(material);
+        }
+        let nu = positive(maximum_viscosity / self.density_kg_m3())?;
+        let conductance = positive(maximum_viscosity / self.flow.spacing)?;
+        positive(2.0 * conductance)?;
+        let diffusion_time = positive(self.flow.mass_per_cell_area / conductance)?;
+        poll(&mut cancelled)?;
+        core::mem::swap(&mut self.face_materials, &mut self.candidate_materials);
+        self.material = self.face_materials[0];
         self.flow.material.kinematic_viscosity_m2_s = nu;
         self.flow.shear_conductance = conductance;
         self.flow.diffusion_time = diffusion_time;
@@ -305,7 +407,12 @@ impl TransientCarreauFilm {
             };
             let rate = finite((flow.midpoint[i] - previous) / distance)?;
             admit_rate(rate, self.material.maximum_shear_rate_per_s())?;
-            let [mu, tangent] = query(&self.material, rate, evaluations, budget)?;
+            let material = if self.face_materials.is_empty() {
+                &self.material
+            } else {
+                &self.face_materials[i]
+            };
+            let [mu, tangent] = query(material, rate, evaluations, budget)?;
             self.stress[i] = finite(mu * rate)?;
             if rate != 0.0 && self.stress[i] == 0.0 {
                 return Err(TransientFilmError::NonRepresentable.into());
@@ -342,9 +449,57 @@ impl TransientCarreauFilm {
         drive: FilmDrive,
         limits: FilmStepLimits,
         controls: TransientCarreauControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<TransientCarreauStep, TransientCarreauError> {
+        self.step_inner(duration_s, drive, limits, controls, None, cancelled)
+    }
+
+    /// Advance and export the SAME interval's resolved viscous heat into N
+    /// caller-owned cells, in J per square metre of wetted wall area.
+    ///
+    /// Each interior shear segment contributes half its nonnegative work to
+    /// each adjacent cell; boundary half-segments heat the adjacent cell only.
+    /// Their sum is the flow report's viscous heat up to accumulation roundoff.
+    /// Multiply by the explicitly represented wall area before depositing into
+    /// a thermal owner's joule inventory. Never deposit body/wall/traction work
+    /// again: kinetic storage has already been removed from these viscous losses.
+    /// Heat, velocity and time publish together, after the final cancellation
+    /// check. Any refusal leaves the caller's output and accepted history intact.
+    pub fn step_with_heat(
+        &mut self,
+        duration_s: f64,
+        drive: FilmDrive,
+        limits: FilmStepLimits,
+        controls: TransientCarreauControls,
+        cell_heat_j_m2: &mut [f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<TransientCarreauStep, TransientCarreauError> {
+        self.step_inner(
+            duration_s,
+            drive,
+            limits,
+            controls,
+            Some(cell_heat_j_m2),
+            cancelled,
+        )
+    }
+
+    fn step_inner(
+        &mut self,
+        duration_s: f64,
+        drive: FilmDrive,
+        limits: FilmStepLimits,
+        controls: TransientCarreauControls,
+        cell_heat_j_m2: Option<&mut [f64]>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<TransientCarreauStep, TransientCarreauError> {
         poll(&mut cancelled)?;
+        if cell_heat_j_m2
+            .as_ref()
+            .is_some_and(|heat| heat.len() != self.flow.velocity.len())
+        {
+            return Err(TransientFilmError::Invalid("film needs N heat output cells").into());
+        }
         if !duration_s.is_finite()
             || duration_s <= 0.0
             || !limits.maximum_speed_m_s.is_finite()
@@ -375,7 +530,8 @@ impl TransientCarreauFilm {
         if drive.wall_velocity_m_s.abs() > limits.maximum_speed_m_s {
             return Err(TransientFilmError::SpeedLimit.into());
         }
-        let (surface_rate, inverse_iterations) = self.material.signed_shear_rate_at_stress(
+        let surface_material = *self.material_at_face(self.flow.velocity.len()).unwrap();
+        let (surface_rate, inverse_iterations) = surface_material.signed_shear_rate_at_stress(
             drive.surface_shear_pa,
             CarreauPipeControls {
                 relative_constitutive_tolerance: controls.relative_surface_stress_tolerance,
@@ -390,7 +546,7 @@ impl TransientCarreauFilm {
         let mut evaluations = u64::from(inverse_iterations);
         poll(&mut cancelled)?;
         let [surface_mu, _] = query(
-            &self.material,
+            &surface_material,
             surface_rate,
             &mut evaluations,
             controls.maximum_material_evaluations,
@@ -507,7 +663,21 @@ impl TransientCarreauFilm {
             material_evaluations: evaluations,
             surface_stress_residual_pa: surface_residual,
         };
+        if cell_heat_j_m2.is_some() {
+            stage_cell_heat(
+                &self.flow.midpoint,
+                duration_s,
+                drive,
+                surface_offset,
+                |face| self.stress[face],
+                &mut self.flow.heat,
+                &mut cancelled,
+            )?;
+        }
         poll(&mut cancelled)?;
+        if let Some(heat) = cell_heat_j_m2 {
+            heat.copy_from_slice(&self.flow.heat);
+        }
         core::mem::swap(&mut self.flow.velocity, &mut self.flow.candidate);
         self.flow.time = end_time;
         Ok(step)
