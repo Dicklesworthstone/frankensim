@@ -1,5 +1,6 @@
 //! Synthetic G1/G3 coupled-flow fixtures, not calibrated material data.
 
+mod head_laws;
 mod heads;
 mod sealed;
 
@@ -127,7 +128,8 @@ fn balance(step: &TransientCarreauStep) {
     near(
         step.physical_work_residual_j,
         step.radial_work_residual_j + step.storage_midpoint_work_residual_j
-            - step.node_residual_work_j,
+            - step.node_residual_work_j
+            - step.head_residual_work_j,
         1e-6,
         step.accounting_tolerance_j + 1e-22,
     );
@@ -877,11 +879,13 @@ fn g3_nonlinear_pressure_and_storage_schur_tangent_matches_directional_differenc
         let direction = [0.0, 1.2, -0.7];
         let dt = 0.01;
         let mut count = 0;
+        let mut head_count = 0;
         model
             .evaluate(
                 &state,
                 &p,
                 &layout,
+                None,
                 None,
                 dt,
                 controls(),
@@ -889,6 +893,7 @@ fn g3_nonlinear_pressure_and_storage_schur_tangent_matches_directional_differenc
                 &mut work.outputs,
                 &mut work.current,
                 &mut count,
+                &mut head_count,
                 cx,
             )
             .unwrap();
@@ -901,12 +906,14 @@ fn g3_nonlinear_pressure_and_storage_schur_tangent_matches_directional_differenc
                 &plus,
                 &layout,
                 None,
+                None,
                 dt,
                 controls(),
                 &mut work.radial,
                 &mut work.outputs,
                 &mut work.trial,
                 &mut count,
+                &mut head_count,
                 cx,
             )
             .unwrap();
@@ -918,12 +925,14 @@ fn g3_nonlinear_pressure_and_storage_schur_tangent_matches_directional_differenc
                 &minus,
                 &layout,
                 None,
+                None,
                 dt,
                 controls(),
                 &mut work.radial,
                 &mut work.outputs,
                 &mut work.trial,
                 &mut count,
+                &mut head_count,
                 cx,
             )
             .unwrap();
