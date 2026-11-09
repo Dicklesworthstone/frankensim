@@ -39,7 +39,7 @@ pub use super::moment::RigidAdhesiveMomentControls as RigidAdhesiveRollingContro
 /// Prescribed attached-area continuation and native recoil with retained memory.
 pub mod normal;
 
-/// Original attachment/separation events and unforced native rolling recoil.
+/// Original attachment/separation events and native rolling under applied loads.
 pub mod events;
 
 /// Physical pair and coincident reaction markers; longitudinal is the rolling axis.

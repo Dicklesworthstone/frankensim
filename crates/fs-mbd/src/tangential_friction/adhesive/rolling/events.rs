@@ -1,10 +1,12 @@
-//! Attachment, loaded separation and recontact of an unforced native rolling pair.
+//! Attachment, loaded separation and recontact of a native rolling pair.
 //!
 //! One prescribed monotone indentation stage precedes the original held-axis
 //! midpoint rolling phase. A snap releases the source-owned normal energy and
 //! any spring energy remaining at the actual normal fold; it supplies no body
-//! impulse. Detached bodies retain their actual momenta, and their free angular
-//! travel cannot preload a subsequently formed junction. Poses and the frame
+//! impulse. Held COM forces and body-frame torques can drive attached rolling
+//! or detached acceleration through the original native momentum owners. Their
+//! actual work is separate from prescribed normal work and contact loss. Free
+//! angular travel cannot preload a subsequently formed junction. Poses and the frame
 //! remain held. This split does not infer normal motion, finite rotation,
 //! rolling-induced area relaxation or a destination for the released energy.
 
@@ -12,9 +14,11 @@ use super::{
     HeldGeometry, RigidAdhesiveRollingControls, RigidAdhesiveRollingError,
     RigidAdhesiveRollingReport, SourceJkrRollingContact, moment, poll, vector,
 };
-use crate::tangential_friction::RigidContactBinding;
 use crate::tangential_friction::hertz::{points, relative_spin};
-use crate::{MassProperties, RigidBodyState, Wrench};
+use crate::tangential_friction::{
+    RigidContactBinding, add_components, magnitude, rounded_components,
+};
+use crate::{MassProperties, MomentumImpulseReceipt, RigidBodyState, Vec3, Wrench};
 use fs_contact::normal_patch::adhesive::rolling::events::{
     JkrRollingEventReport, JkrRollingEventState, SourceJkrRollingEvents,
 };
@@ -48,11 +52,24 @@ pub struct RigidAdhesiveRollingEventReport {
     pub normal: JkrRollingEventReport,
     /// None means no junction exists during the mechanical phase.
     pub mechanical: Option<RigidAdhesiveRollingReport>,
+    /// Original native resultant-impulse receipts when no junction exists.
+    /// COM forces add no body-frame lever-arm torque.
+    pub detached_impulses: Option<[MomentumImpulseReceipt; 2]>,
+    /// Held loads in the original binding's A/B order.
+    pub external_wrenches: [Wrench; 2],
+    /// Actual native kinetic change, including detached acceleration [J].
+    pub kinetic_energy_change_j: f64,
+    /// Body force/torque work at actual midpoint velocities [J].
+    pub external_work_j: f64,
+    /// Actual pair increment minus the applied external impulse [N s].
+    pub linear_momentum_residual_ns: Vec3,
+    /// Orbital-plus-spin increment minus the external moment impulse [N m s].
+    pub angular_momentum_residual_nms: Vec3,
     /// Actual midpoint rolling travel, or free travel while detached [rad].
     pub angle_increment_rad: f64,
     /// Native kinetic plus contact storage increment [J].
     pub represented_storage_change_j: f64,
-    /// Prescribed normal work plus signed rolling stiffness work [J].
+    /// Prescribed normal, signed stiffness and applied body-load work [J].
     pub applied_work_j: f64,
     /// Original normal snap plus remaining rolling spring release [J].
     pub released_energy_j: f64,
@@ -132,13 +149,43 @@ impl RigidAdhesiveRollingEventContact<'_> {
 /// Normal-stage motion has its own work supply and is not reconstructed from
 /// body positions. All source, event, geometry, inertia, momentum and work
 /// checks finish before any accepted state can change.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub fn prepare_rigid_adhesive_rolling_events(
     bodies: &[RigidBodyState],
     properties: &[MassProperties],
     state: &RigidAdhesiveRollingEventState,
     contact: RigidAdhesiveRollingEventContact<'_>,
     indentation_m: f64,
+    dt_s: f64,
+    controls: RigidAdhesiveRollingControls,
+    gate: &CancelGate,
+) -> Result<RigidAdhesiveRollingEventCandidate, RigidAdhesiveRollingError> {
+    prepare_rigid_adhesive_rolling_events_with_wrenches(
+        bodies,
+        properties,
+        state,
+        contact,
+        indentation_m,
+        [Wrench::ZERO; 2],
+        dt_s,
+        controls,
+        gate,
+    )
+}
+
+/// Prescribe normal loading, then apply held COM forces and body-frame torques
+/// to the actual attached or detached body pair. All loads are in A/B order.
+/// Attachment uses the original rolling solver; detached motion uses original
+/// native resultant impulses and carries no spring preload into recontact.
+/// Poses remain held and a driven attached reversal requires time refinement.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn prepare_rigid_adhesive_rolling_events_with_wrenches(
+    bodies: &[RigidBodyState],
+    properties: &[MassProperties],
+    state: &RigidAdhesiveRollingEventState,
+    contact: RigidAdhesiveRollingEventContact<'_>,
+    indentation_m: f64,
+    wrenches: [Wrench; 2],
     dt_s: f64,
     controls: RigidAdhesiveRollingControls,
     gate: &CancelGate,
@@ -192,6 +239,8 @@ pub fn prepare_rigid_adhesive_rolling_events(
         bodies[contact.binding.body_a],
         bodies[contact.binding.body_b],
     ];
+    let mut detached_impulses = None;
+    let (external_work, linear_residual, angular_residual);
     let (source_after, mechanical, angle, kinetic, rolling_storage, loss, mechanical_defect) =
         if let Some((source, memory)) = normal_state.attached() {
             let candidate = moment::prepare(
@@ -199,7 +248,7 @@ pub fn prepare_rigid_adhesive_rolling_events(
                 state.geometry,
                 source,
                 &memory,
-                [Wrench::ZERO; 2],
+                wrenches,
                 dt_s,
                 controls,
                 gate,
@@ -224,6 +273,9 @@ pub fn prepare_rigid_adhesive_rolling_events(
             let storage = report.contact.rolling().storage_change_j;
             let loss = report.contact.rolling().irreversible_loss_j;
             let defect = report.total_energy_residual_j.abs();
+            external_work = report.external_work_j;
+            linear_residual = report.linear_momentum_residual_ns;
+            angular_residual = report.angular_momentum_residual_nms;
             let (successor, _) = replay.into_parts();
             (
                 successor,
@@ -235,35 +287,47 @@ pub fn prepare_rigid_adhesive_rolling_events(
                 defect,
             )
         } else {
-            // In the absence of an attached junction and external wrenches,
-            // actual momenta are constant. Record free travel, but do not
-            // carry it into the elastic memory of a future contact.
-            let kinematics = points(
+            let detached = prepare_detached(
                 after,
                 [
                     properties[contact.binding.body_a],
                     properties[contact.binding.body_b],
                 ],
                 [contact.binding.arm_a_body, contact.binding.arm_b_body],
+                vector(contact.frame.longitudinal()),
+                wrenches,
+                dt_s,
+                controls,
+                gate,
             )?;
-            let rate = relative_spin(kinematics).dot(vector(contact.frame.longitudinal()));
-            let angle = (Dd::from_f64(dt_s) * Dd::from_f64(rate)).to_f64();
-            if !angle.is_finite() || angle.abs() > controls.maximum_angle_increment_rad {
-                return Err(RigidAdhesiveRollingError::StepLimit);
-            }
+            after = detached.impulses.map(|r| r.state_after);
+            let angle = detached.angle;
+            detached_impulses = Some(detached.impulses);
+            external_work = detached.work;
+            linear_residual = detached.linear_residual;
+            angular_residual = detached.angular_residual;
             let (successor, _) = contact
                 .source
                 .advance_rolling(&normal_state, angle)?
                 .into_parts();
-            (successor, None, angle, 0.0, 0.0, 0.0, 0.0)
+            (
+                successor,
+                None,
+                angle,
+                detached.kinetic,
+                0.0,
+                0.0,
+                detached.defect,
+            )
         };
     // Keep original incremental channels separate until the final rounding.
     // In particular, weak spring release must survive a large normal snap.
-    let supplied = Dd::from_f64(normal_report.normal_contact_work_j)
+    let prescribed = Dd::from_f64(normal_report.normal_contact_work_j)
         + Dd::from_f64(normal_report.rolling_parameter_work_j);
+    let supplied = prescribed + Dd::from_f64(external_work);
     let released = Dd::from_f64(normal_report.normal_released_energy_j)
         + Dd::from_f64(normal_report.rolling_released_energy_j);
-    let storage = supplied - released + Dd::from_f64(kinetic) + Dd::from_f64(rolling_storage);
+    let storage = prescribed - released + Dd::from_f64(kinetic) + Dd::from_f64(rolling_storage);
     let residual = (storage + released + Dd::from_f64(loss) - supplied).to_f64();
     let absolute_stages = (observation_defect
         + Dd::from_f64(normal_report.energy_residual_j.abs())
@@ -296,6 +360,12 @@ pub fn prepare_rigid_adhesive_rolling_events(
         report: RigidAdhesiveRollingEventReport {
             normal: normal_report,
             mechanical,
+            detached_impulses,
+            external_wrenches: wrenches,
+            kinetic_energy_change_j: kinetic,
+            external_work_j: external_work,
+            linear_momentum_residual_ns: linear_residual,
+            angular_momentum_residual_nms: angular_residual,
             angle_increment_rad: angle,
             represented_storage_change_j: storage.to_f64(),
             applied_work_j: supplied.to_f64(),
@@ -305,6 +375,120 @@ pub fn prepare_rigid_adhesive_rolling_events(
             absolute_stage_residual_j: absolute_stages,
             storage_observation_roundoff_j: observation_roundoff,
         },
+    })
+}
+
+struct DetachedPhase {
+    impulses: [MomentumImpulseReceipt; 2],
+    angle: f64,
+    kinetic: f64,
+    work: f64,
+    defect: f64,
+    linear_residual: Vec3,
+    angular_residual: Vec3,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_detached(
+    before: [RigidBodyState; 2],
+    properties: [MassProperties; 2],
+    arms: [Vec3; 2],
+    axis: Vec3,
+    wrenches: [Wrench; 2],
+    dt_s: f64,
+    controls: RigidAdhesiveRollingControls,
+    gate: &CancelGate,
+) -> Result<DetachedPhase, RigidAdhesiveRollingError> {
+    let apply = |i: usize| -> Result<_, RigidAdhesiveRollingError> {
+        poll(gate)?;
+        wrenches[i].validate()?;
+        Ok(before[i].apply_momentum_impulse(
+            properties[i],
+            wrenches[i].force_world.scale(dt_s),
+            wrenches[i].torque_body.scale(dt_s),
+        )?)
+    };
+    // Each original native receipt independently retains actual momentum and
+    // kinetic change, commanded midpoint work and their compensated defect.
+    let impulses = [apply(0)?, apply(1)?];
+    let mut kinetic = Dd::ZERO;
+    let mut work = Dd::ZERO;
+    let mut defect = Dd::ZERO;
+    let mut linear = [Dd::ZERO; 3];
+    let mut angular = [Dd::ZERO; 3];
+    for receipt in impulses {
+        if magnitude(receipt.linear_residual_world) > controls.linear_momentum_tolerance_ns
+            || magnitude(receipt.angular_residual_body) > controls.angular_momentum_tolerance_nms
+        {
+            return Err(RigidAdhesiveRollingError::Invalid(
+                "detached applied impulse exceeds native momentum tolerance",
+            ));
+        }
+        kinetic = kinetic + Dd::from_f64(receipt.work.kinetic_energy_change_j);
+        work = work + Dd::from_f64(receipt.work.impulse_work_j);
+        defect = defect + Dd::from_f64(receipt.work.work_energy_residual_j.abs());
+        add_components(&mut linear, receipt.linear_residual_world);
+        let pose = receipt.state_before.pose();
+        add_components(
+            &mut angular,
+            pose.position_world().cross(receipt.linear_residual_world),
+        );
+        add_components(
+            &mut angular,
+            pose.orientation()
+                .rotate_body_to_world(receipt.angular_residual_body),
+        );
+    }
+    let linear_residual = rounded_components(linear);
+    let angular_residual = rounded_components(angular);
+    // Keep independently recovered per-body work defects as well as the summed
+    // reported work balance; neither opposite body defects nor large totals can
+    // hide a rejected impulse. The original owner computes all kinetic work.
+    defect = defect + (kinetic - work).abs();
+    if [kinetic.to_f64(), work.to_f64(), defect.to_f64()]
+        .iter()
+        .any(|v| !v.is_finite())
+        || defect.to_f64() > controls.energy_tolerance_j
+        || !linear_residual.is_finite()
+        || !angular_residual.is_finite()
+        || magnitude(linear_residual) > controls.linear_momentum_tolerance_ns
+        || magnitude(angular_residual) > controls.angular_momentum_tolerance_nms
+    {
+        return Err(RigidAdhesiveRollingError::Invalid(
+            "detached applied-load work or momentum balance exceeds tolerance",
+        ));
+    }
+    let initial = points(before, properties, arms)?;
+    let final_points = points(impulses.map(|r| r.state_after), properties, arms)?;
+    let rate_before = relative_spin(initial).dot(axis);
+    let rate_after = relative_spin(final_points).dot(axis);
+    let angle = ((Dd::from_f64(rate_before) + Dd::from_f64(rate_after)) * Dd::from_f64(0.5 * dt_s))
+        .to_f64();
+    if !angle.is_finite() || angle.abs() > controls.maximum_angle_increment_rad {
+        return Err(RigidAdhesiveRollingError::StepLimit);
+    }
+    if (rate_before > 0.0 && rate_after < 0.0) || (rate_before < 0.0 && rate_after > 0.0) {
+        // Constant held acceleration can turn between equal-angle endpoints.
+        // Admit the actual quadratic turning excursion, not just net travel.
+        let scale = rate_before.abs().max(rate_after.abs());
+        let first = rate_before.abs() / scale;
+        let fraction = first / (first + rate_after.abs() / scale);
+        let excursion =
+            (Dd::from_f64(rate_before) * Dd::from_f64(0.5 * dt_s) * Dd::from_f64(fraction))
+                .to_f64();
+        if !excursion.is_finite() || excursion.abs() > controls.maximum_angle_increment_rad {
+            return Err(RigidAdhesiveRollingError::StepLimit);
+        }
+    }
+    poll(gate)?;
+    Ok(DetachedPhase {
+        impulses,
+        angle,
+        kinetic: kinetic.to_f64(),
+        work: work.to_f64(),
+        defect: defect.to_f64(),
+        linear_residual,
+        angular_residual,
     })
 }
 
@@ -320,12 +504,39 @@ pub fn apply_rigid_adhesive_rolling_events(
     controls: RigidAdhesiveRollingControls,
     gate: &CancelGate,
 ) -> Result<RigidAdhesiveRollingEventReport, RigidAdhesiveRollingError> {
-    let candidate = prepare_rigid_adhesive_rolling_events(
+    apply_rigid_adhesive_rolling_events_with_wrenches(
         bodies,
         properties,
         state,
         contact,
         indentation_m,
+        [Wrench::ZERO; 2],
+        dt_s,
+        controls,
+        gate,
+    )
+}
+
+/// Publish driven body momenta and the original lifecycle only after admission.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_rigid_adhesive_rolling_events_with_wrenches(
+    bodies: &mut [RigidBodyState],
+    properties: &[MassProperties],
+    state: &mut RigidAdhesiveRollingEventState,
+    contact: RigidAdhesiveRollingEventContact<'_>,
+    indentation_m: f64,
+    wrenches: [Wrench; 2],
+    dt_s: f64,
+    controls: RigidAdhesiveRollingControls,
+    gate: &CancelGate,
+) -> Result<RigidAdhesiveRollingEventReport, RigidAdhesiveRollingError> {
+    let candidate = prepare_rigid_adhesive_rolling_events_with_wrenches(
+        bodies,
+        properties,
+        state,
+        contact,
+        indentation_m,
+        wrenches,
         dt_s,
         controls,
         gate,
