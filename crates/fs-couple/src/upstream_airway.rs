@@ -32,8 +32,14 @@
 //!
 //! Reflection, input impedance and source transfer use the native bounded
 //! [`fs_duct::compose::TwoPort`] wave blocks and Redheffer composition. The
-//! source boundary is `a_R + b_R = P_s`, so `R = S11 - S12 S21/(1+S22)` and
-//! `G = S12/(1+S22)`. No growing exponential or input-impedance pole enters
+//! default source boundary is `a_R + b_R = P_s`, so `R = S11 - S12 S21/(1+S22)` and
+//! `G = S12/(1+S22)`. A finite passive source impedance `Z_L(w)` instead imposes
+//! `p_R + Z_L U_source = P_s`, with `U_source` INTO the airway, just as
+//! [`fs_duct::network::PortExcitation::Pressure`] does. With
+//! `r_L = (Z_L-Z_s)/(Z_L+Z_s)` and `g_L = Z_s/(Z_L+Z_s)`, its waves obey
+//! `a_R = r_L b_R + g_L P_s`. Thus `R = S11 + S12 r_L S21/(1-r_L S22)` and
+//! `G = S12 g_L/(1-r_L S22)`: changing the source changes both the returning
+//! reflection and the pressure delivered to the valve. No growing exponential or input-impedance pole enters
 //! those wave observables. [`AirwayChain::chain_matrix`] is an explicit ABCD
 //! diagnostic only and may refuse when a strongly attenuating line's matrix
 //! cannot be represented, even though its reflected waves remain finite.
@@ -48,6 +54,14 @@
 //! (1 - r_0)`: the same-sample tap `r_0` is folded into the junction, not delayed. [`UpstreamAirway::commit`] takes the
 //! flow the valve solved for, sends `b = (A - Z_s U_v) / (1 - r_0)` down the airway and returns the port pressure `p =
 //! (1 + r_0) b + A`.
+//!
+//! [`UpstreamAirway::realize_with_source_impedance`] realizes an explicitly supplied
+//! causal source law, caching each frequency's paired `(R,G)` so both FIRs use the
+//! identical admitted boundary. Its supplied finite DC resistance adds to the
+//! airway's Poiseuille resistance in both exact DC bins. Source impedance is
+//! evaluated only during the bounded, fallible preprocessing; the sample loop
+//! is unchanged. Nonnegative resistance at the sampled frequencies and the
+//! realized reflection's passivity check do not certify an arbitrary law's causality.
 //!
 //! **Weibel's tree.** [`WEIBEL_SAAB_2021_TABLE_1_B_MM`] is the symmetric model printed by Saab, Issa, Zeineddine,
 //! Tartakovsky and Lakkis (2021), "Impact of airways geometry on transport of gases to blood", arXiv:2111.07627v1,
@@ -68,7 +82,10 @@
 //! wall is carried here); a symmetric tree (the real bronchial tree is not); plane waves in every tube, with no junction
 //! mass or branching loss, and no end correction or separation loss where the area steps between two sections; a
 //! stationary gas (no mean flow and no lung-volume change over a note), so an open glottis ahead of the tree carries no
-//! jet loss; and the far end an ideal pressure source (no alveolar compliance).
+//! jet loss. The default far end is an ideal pressure source. An explicitly supplied source impedance may include
+//! resistance, inertance or compliant relaxation, but its causal law and finite DC resistance belong to the caller;
+//! no alveolar parameters are inferred. A pure sealed compliance has an infinite DC impedance and needs an explicit
+//! storage state rather than this finite-DC source realization.
 
 use crate::driving_point::{
     DrivingPointError, LineDc, LineLadder, LineRealization, PoleState, realize_characteristic_response,
@@ -80,6 +97,7 @@ use fs_material::gas::GasState;
 use fs_math::c64::C64;
 use fs_math::det;
 use fs_phs::{WallPin, wall_admittance_per_metre};
+use std::collections::BTreeMap;
 
 /// Weibel's symmetric airway tree as Saab et al. (2021) print it in Table 1 column B (module doc): `(length,
 /// diameter)` in mm for generations 1 (the trachea) to 24, with `2^(n-1)` tubes in generation `n`.
@@ -177,6 +195,44 @@ fn mat_mul(a: [[C64; 2]; 2], b: [[C64; 2]; 2]) -> [[C64; 2]; 2] {
         [a[0][0] * b[0][0] + a[0][1] * b[1][0], a[0][0] * b[0][1] + a[0][1] * b[1][1]],
         [a[1][0] * b[0][0] + a[1][1] * b[1][0], a[1][0] * b[0][1] + a[1][1] * b[1][1]],
     ]
+}
+
+/// Admit a finite passive Thevenin source in the native pressure/volume-flow convention.
+fn admit_source_impedance(impedance: C64) -> Result<(), DrivingPointError> {
+    if !impedance.re.is_finite() || !impedance.im.is_finite() || impedance.re < 0.0 {
+        return Err(DrivingPointError::Invalid {
+            what: "airway source impedance must be finite and passive (Re Z >= 0)",
+        });
+    }
+    Ok(())
+}
+
+/// Right-port reflection and incident pressure wave per unit open-circuit source pressure.
+/// Scale before adding: finite source impedances near f64::MAX still have bounded waves.
+fn source_boundary(impedance: C64, reference: f64) -> Result<(C64, C64), DrivingPointError> {
+    admit_source_impedance(impedance)?;
+    if !reference.is_finite() || reference <= 0.0 {
+        return Err(DrivingPointError::Invalid { what: "airway source needs a finite positive wave reference" });
+    }
+    let scale = impedance.re.max(impedance.im.abs()).max(reference);
+    let z = C64::new(impedance.re / scale, impedance.im / scale);
+    let r = C64::from_re(reference / scale);
+    let denominator = z + r;
+    Ok(((z - r) / denominator, r / denominator))
+}
+
+fn loaded_source_transfer(scattering: TwoPort, impedance: C64) -> Result<C64, DrivingPointError> {
+    let (reflection, drive) = source_boundary(impedance, scattering.reference_impedance)?;
+    let product = reflection * scattering.scattering[3];
+    let denominator = C64::ONE - product;
+    let condition = (1.0 + product.abs()) / denominator.abs();
+    let gain = scattering.scattering[1] * drive / denominator;
+    if !condition.is_finite() || condition > ComposeOptions::default().maximum_condition
+        || !gain.re.is_finite() || !gain.im.is_finite()
+    {
+        return Err(fs_duct::DuctError::Singular.into());
+    }
+    Ok(gain)
 }
 
 impl AirwayChain {
@@ -353,8 +409,20 @@ impl AirwayChain {
     /// A gas-wave/wall or native scattering-conditioning refusal, or a lossless
     /// input-impedance pole. ABCD growth alone does not refuse this observable.
     pub fn input_impedance(&self, gas: &GasState, omega: f64) -> Result<C64, DrivingPointError> {
+        self.input_impedance_with_source_impedance(gas, omega, C64::ZERO)
+    }
+
+    /// Valve-side impedance with the source's open-circuit pressure set to zero and its finite
+    /// impedance still connected. `source_impedance` is in Pa s/m^3 at this `omega`, in `exp(-iwt)`.
+    ///
+    /// # Errors
+    /// As [`Self::input_impedance`], or a non-finite/negative-real source impedance.
+    pub fn input_impedance_with_source_impedance(
+        &self, gas: &GasState, omega: f64, source_impedance: C64,
+    ) -> Result<C64, DrivingPointError> {
+        admit_source_impedance(source_impedance)?;
         let scattering = self.scattering_chain(gas, omega)?;
-        Ok(compose_chain(&[scattering], Some(C64::ZERO), ComposeOptions::default())?.z_in)
+        Ok(compose_chain(&[scattering], Some(source_impedance), ComposeOptions::default())?.z_in)
     }
 
     /// `R = (M12 - Z_s M22) / (M12 + Z_s M22)`, which is `(Z_in - Z_s) / (Z_in + Z_s)` without forming `Z_in`.
@@ -363,8 +431,20 @@ impl AirwayChain {
     /// A gas-wave/wall or native scattering-conditioning refusal. Neither
     /// ABCD growth nor an input-impedance pole refuses a finite reflection.
     pub fn reflectance(&self, gas: &GasState, omega: f64) -> Result<C64, DrivingPointError> {
+        self.reflectance_with_source_impedance(gas, omega, C64::ZERO)
+    }
+
+    /// Reflected pressure wave per incident valve wave with the far source's impedance connected.
+    /// Setting the source pressure to zero does not remove its resistance or reactance.
+    ///
+    /// # Errors
+    /// As [`Self::reflectance`], or a non-finite/negative-real source impedance.
+    pub fn reflectance_with_source_impedance(
+        &self, gas: &GasState, omega: f64, source_impedance: C64,
+    ) -> Result<C64, DrivingPointError> {
+        admit_source_impedance(source_impedance)?;
         let scattering = self.scattering_chain(gas, omega)?;
-        Ok(compose_chain_reflection(&[scattering], Some(C64::ZERO), ComposeOptions::default())?.reflection)
+        Ok(compose_chain_reflection(&[scattering], Some(source_impedance), ComposeOptions::default())?.reflection)
     }
 
     /// `G = Z_s / (Z_s M22 + M12)`, the wave the valve receives per unit source pressure.
@@ -373,16 +453,31 @@ impl AirwayChain {
     /// A gas-wave/wall or native scattering-conditioning refusal, or an
     /// unrepresentable source transfer. An opaque line transmits zero.
     pub fn source_transfer(&self, gas: &GasState, omega: f64) -> Result<C64, DrivingPointError> {
-        let scattering = self.scattering_chain(gas, omega)?.scattering;
-        let denominator = C64::ONE + scattering[3];
-        let condition = (1.0 + scattering[3].abs()) / denominator.abs();
-        let gain = scattering[1] / denominator;
-        if !condition.is_finite() || condition > ComposeOptions::default().maximum_condition
-            || !gain.re.is_finite() || !gain.im.is_finite()
-        {
-            return Err(fs_duct::DuctError::Singular.into());
-        }
-        Ok(gain)
+        self.source_transfer_with_source_impedance(gas, omega, C64::ZERO)
+    }
+
+    /// Wave received at the valve per unit open-circuit far-source pressure, including loading by
+    /// its finite passive impedance. A source matched to a uniform lossless line launches half
+    /// its open-circuit pressure; an ideal source (`Z_L = 0`) launches the whole pressure.
+    ///
+    /// # Errors
+    /// As [`Self::source_transfer`], or a non-finite/negative-real source impedance.
+    pub fn source_transfer_with_source_impedance(
+        &self, gas: &GasState, omega: f64, source_impedance: C64,
+    ) -> Result<C64, DrivingPointError> {
+        admit_source_impedance(source_impedance)?;
+        loaded_source_transfer(self.scattering_chain(gas, omega)?, source_impedance)
+    }
+
+    /// Both observables from one physical block and the same source boundary sample.
+    fn waves_with_source_impedance(
+        &self, gas: &GasState, omega: f64, source_impedance: C64,
+    ) -> Result<(C64, C64), DrivingPointError> {
+        admit_source_impedance(source_impedance)?;
+        let scattering = self.scattering_chain(gas, omega)?;
+        let reflection =
+            compose_chain_reflection(&[scattering], Some(source_impedance), ComposeOptions::default())?.reflection;
+        Ok((reflection, loaded_source_transfer(scattering, source_impedance)?))
     }
 }
 
@@ -488,8 +583,11 @@ pub struct AirwayReceipt {
     pub sections: usize,
     /// `Z_s` [Pa s/m^3].
     pub port_impedance: f64,
-    /// `R_dc` [Pa s/m^3].
+    /// Airway-only Poiseuille `R_dc` [Pa s/m^3].
     pub dc_resistance: f64,
+    /// Supplied source's exact finite DC resistance [Pa s/m^3], zero for an ideal source.
+    /// The steady valve law is `p = P_s - (dc_resistance + source_dc_resistance) U_v`.
+    pub source_dc_resistance: f64,
     /// The reflectance's same-sample tap `r_0`.
     pub same_sample_reflection: f64,
     /// The series impedance of every sample's port, `Z_s (1 + r_0) / (1 - r_0)` [Pa s/m^3].
@@ -533,12 +631,11 @@ fn check_ladder(ladder: &LineLadder) -> Result<usize, DrivingPointError> {
 
 /// The source-transfer FIR, on the mouth-flow line's ladder with an exact DC bin.
 fn realize_source_transfer(
-    chain: &AirwayChain,
-    gas: &GasState,
     sample_rate_hz: u32,
     transit: f64,
     dc: f64,
     ladder: &LineLadder,
+    mut transfer_at: impl FnMut(f64) -> Result<C64, DrivingPointError>,
 ) -> Result<(Vec<f64>, Vec<TransferRung>), DrivingPointError> {
     let max_taps = check_ladder(ladder)?;
     let dt = 1.0 / f64::from(sample_rate_hz);
@@ -559,7 +656,7 @@ fn realize_source_transfer(
         let mut next = vec![C64::ZERO; half + 1];
         if t_pos.is_empty() {
             for (k, slot) in next.iter_mut().enumerate().skip(1) {
-                *slot = chain.source_transfer(gas, core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt))?;
+                *slot = transfer_at(core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt))?;
             }
         } else {
             // Even bins of this rung are the bins of the previous one.
@@ -567,7 +664,7 @@ fn realize_source_transfer(
                 next[2 * k_prev] = value;
             }
             for k in (1..half).step_by(2) {
-                next[k] = chain.source_transfer(gas, core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt))?;
+                next[k] = transfer_at(core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt))?;
             }
         }
         next[0] = C64::from_re(dc);
@@ -613,34 +710,90 @@ impl UpstreamAirway {
         sample_rate_hz: u32,
         ladder: &LineLadder,
     ) -> Result<Self, DrivingPointError> {
+        Self::realize_with_source_impedance(chain, gas, sample_rate_hz, ladder, 0.0, |_| Ok(C64::ZERO))
+    }
+
+    /// Realize an airway driven through an explicitly supplied passive source impedance.
+    ///
+    /// The boundary is `p_R + Z_L U_source = P_s`, with flow INTO the airway. The callback
+    /// returns `Z_L(omega)` [Pa s/m^3] on the `exp(-iwt)` clock, at positive frequencies through
+    /// Nyquist. `source_dc_resistance` is its exact, finite, nonnegative DC limit; no table is
+    /// extrapolated and no stiffness pole is discarded. The supplied law must be causal:
+    /// `Re Z_L >= 0` at finitely many samples does not establish causality or broadband passivity.
+    ///
+    /// Each distinct dyadic-grid frequency is sampled once, and both FIRs reuse its paired
+    /// reflected-wave and source-pressure responses. Storage and calls are bounded by
+    /// `ladder.max_taps / 2`; callback errors, including a source owner's cancellation, propagate.
+    /// After realization neither the callback nor any frequency solve runs in `port`/`commit`.
+    /// The existing convergence and 4x-oversampled reflection-passivity gates still apply;
+    /// source work is supplied by the open-circuit pressure signal, not clipped to unit gain.
+    ///
+    /// # Errors
+    /// As [`Self::realize`], an invalid DC limit, or a non-finite/negative-real source sample.
+    /// A source with infinite DC impedance requires a separate storage-state realization.
+    pub fn realize_with_source_impedance(
+        chain: &AirwayChain,
+        gas: &GasState,
+        sample_rate_hz: u32,
+        ladder: &LineLadder,
+        source_dc_resistance: f64,
+        mut source_impedance_at: impl FnMut(f64) -> Result<C64, DrivingPointError>,
+    ) -> Result<Self, DrivingPointError> {
         if sample_rate_hz == 0 {
             return Err(DrivingPointError::Invalid { what: "an airway needs a positive sample rate" });
         }
+        let max_samples = check_ladder(ladder)? / 2;
         let zs = chain.port_impedance(gas);
         let r_dc = chain.dc_resistance(gas);
-        if !(zs.is_finite() && zs > 0.0 && r_dc.is_finite() && r_dc >= 0.0) {
-            return Err(DrivingPointError::Invalid { what: "airway port impedance and DC resistance must be finite" });
+        if !(zs.is_finite() && zs > 0.0 && r_dc.is_finite() && r_dc >= 0.0
+            && source_dc_resistance.is_finite() && source_dc_resistance >= 0.0)
+        {
+            return Err(DrivingPointError::Invalid {
+                what: "airway port impedance and airway/source DC resistances must be finite and passive",
+            });
         }
+        // Normalize before adding the two physical DC resistances.
+        let scale = zs.max(r_dc).max(source_dc_resistance);
+        let resistance = r_dc / scale + source_dc_resistance / scale;
+        let reference = zs / scale;
+        let dc_reflection = (resistance - reference) / (resistance + reference);
+        let dc_source = reference / (resistance + reference);
+        let mut responses = BTreeMap::new();
+        let mut response_at = |omega: f64| -> Result<(C64, C64), DrivingPointError> {
+            let key = omega.to_bits();
+            if let Some(&response) = responses.get(&key) {
+                return Ok(response);
+            }
+            if responses.len() >= max_samples {
+                return Err(DrivingPointError::Invalid { what: "airway source sampling exceeded the declared ladder" });
+            }
+            let impedance = source_impedance_at(omega)?;
+            let response = chain.waves_with_source_impedance(gas, omega, impedance)?;
+            responses.insert(key, response);
+            Ok(response)
+        };
         let transit = chain.path_length_m() / gas.sound_speed * f64::from(sample_rate_hz);
         let round_trip = 2.0 * transit;
         let samples = round_trip.floor().max(0.0) as usize;
         let frac = (round_trip - samples as f64).clamp(0.0, 1.0 - f64::EPSILON);
         let (line, reflectance) = realize_characteristic_response(
             round_trip,
-            LineDc::Explicit((r_dc - zs) / (r_dc + zs)),
+            LineDc::Explicit(dc_reflection),
             sample_rate_hz,
             zs,
             vec![PoleState::BulkDelay { samples, frac }],
             ladder,
-            |omega| chain.reflectance(gas, omega),
+            |omega| response_at(omega).map(|response| response.0),
         )?;
         let r_taps = line
             .quiescent_fir()
             .ok_or(DrivingPointError::Invalid { what: "the airway reflectance line is not a plain FIR" })?
             .1
             .to_vec();
-        let (g_taps, source_rungs) =
-            realize_source_transfer(chain, gas, sample_rate_hz, transit, zs / (zs + r_dc), ladder)?;
+        let (g_taps, source_rungs) = realize_source_transfer(
+            sample_rate_hz, transit, dc_source, ladder,
+            |omega| response_at(omega).map(|response| response.1),
+        )?;
         let (r0, g0) = (r_taps[0], g_taps[0]);
         if !(r0.abs() < 1.0) {
             return Err(DrivingPointError::Invalid { what: "the airway reflects its same-sample wave whole" });
@@ -650,6 +803,7 @@ impl UpstreamAirway {
             sections: chain.sections().len(),
             port_impedance: zs,
             dc_resistance: r_dc,
+            source_dc_resistance,
             same_sample_reflection: r0,
             series_impedance,
             reflectance,
@@ -669,7 +823,8 @@ impl UpstreamAirway {
         })
     }
 
-    /// The Thevenin source the valve sees this sample with the source pressure `source_pa` at the far end (module doc).
+    /// The Thevenin source the valve sees this sample with the open-circuit source pressure `source_pa` at the far end.
+    /// A supplied source impedance remains connected when this pressure is zero.
     /// Nothing moves until [`Self::commit`]; a second call before it replaces the first.
     ///
     /// # Errors
@@ -859,6 +1014,148 @@ mod tests {
         assert!(chain.source_transfer(&inconsistent, quarter_wave).is_err());
         assert!(chain.reflectance(&gas, f64::NAN).is_err());
         assert!(chain.source_transfer(&gas, 0.0).is_err());
+    }
+
+    /// A finite generator is still a load when its open-circuit pressure is zero.
+    /// The independent ABCD boundary uses p_R = P_s + Z_L U_R with U_R away from the valve.
+    #[test]
+    fn ua_011_finite_source_matches_the_loaded_abcd_boundary() {
+        let gas = air();
+        for loss in [LossModel::Lossless, LossModel::Bessel] {
+            let chain = AirwayChain::new(vec![
+                tube(0.009, 0.12, 1, Some(wall())),
+                tube(0.004, 0.07, 3, None),
+                tube(0.002, 0.03, 7, Some(wall())),
+            ], loss).unwrap();
+            let zs = C64::from_re(chain.port_impedance(&gas));
+            for hz in [0.01, 51.0, 713.0, 2901.0, 13007.0] {
+                let omega = core::f64::consts::TAU * hz;
+                let m = chain.chain_matrix(&gas, omega).unwrap();
+                for load in [C64::ZERO, zs, zs.scale(3.0), C64::new(0.4, -0.9) * zs, C64::new(0.2, 2.0) * zs] {
+                    let numerator = m[0][0] * load + m[0][1];
+                    let flow_denominator = m[1][0] * load + m[1][1];
+                    let denominator = numerator + zs * flow_denominator;
+                    let expected_r = (numerator - zs * flow_denominator) / denominator;
+                    let expected_g = zs / denominator;
+                    let reflection = chain.reflectance_with_source_impedance(&gas, omega, load).unwrap();
+                    let source = chain.source_transfer_with_source_impedance(&gas, omega, load).unwrap();
+                    let impedance = chain.input_impedance_with_source_impedance(&gas, omega, load).unwrap();
+                    assert!((reflection - expected_r).abs() < 2e-11);
+                    assert!(rel(source, expected_g) < 2e-10);
+                    assert!(rel(impedance, numerator / flow_denominator) < 2e-9);
+                    assert!(reflection.abs() <= 1.0 + 2e-12);
+                }
+            }
+        }
+    }
+
+    /// Match, reactive storage and the rigid limit pin phase, source normalization and absorbed power.
+    #[test]
+    fn ua_012_finite_source_preserves_wave_power_and_matched_launch() {
+        let gas = air();
+        let length = 0.13;
+        let chain = AirwayChain::new(vec![tube(0.007, length, 3, None)], LossModel::Lossless).unwrap();
+        let zs = chain.port_impedance(&gas);
+        for phase in [0.1, core::f64::consts::FRAC_PI_2, core::f64::consts::PI, 5.0] {
+            let omega = phase * gas.sound_speed / length;
+            let travel = C64::new(phase.cos(), phase.sin());
+            for load in [C64::ZERO, C64::from_re(zs), C64::new(0.3 * zs, -0.7 * zs), C64::new(0.0, 2.0 * zs)] {
+                let denominator = load + C64::from_re(zs);
+                let local_r = (load - C64::from_re(zs)) / denominator;
+                let local_g = C64::from_re(zs) / denominator;
+                let reflection = chain.reflectance_with_source_impedance(&gas, omega, load).unwrap();
+                let source = chain.source_transfer_with_source_impedance(&gas, omega, load).unwrap();
+                assert!((reflection - local_r * travel * travel).abs() < 2e-14);
+                assert!((source - local_g * travel).abs() < 2e-14);
+                let absorbed = 4.0 * zs * load.re / denominator.norm_sq();
+                assert!((1.0 - reflection.norm_sq() - absorbed).abs() < 3e-14);
+            }
+            let rigid = C64::new(f64::MAX, 0.5 * f64::MAX);
+            let reflection = chain.reflectance_with_source_impedance(&gas, omega, rigid).unwrap();
+            let source = chain.source_transfer_with_source_impedance(&gas, omega, rigid).unwrap();
+            assert!((reflection - travel * travel).abs() < 2e-14);
+            assert!(source.re.is_finite() && source.im.is_finite() && source.abs() < 1e-300);
+        }
+    }
+
+    /// A caller-authored R_s + (R_p || C) source changes both FIRs. The identical sampled
+    /// boundary is reused across the two adaptive ladders; the sample loop sees its DC drop.
+    #[test]
+    fn ua_013_reactive_source_reaches_both_firs_and_the_realtime_port() {
+        let gas = air();
+        let length = 32.0 * gas.sound_speed / f64::from(RATE);
+        let chain = AirwayChain::new(vec![tube(0.007, length, 1, None)], LossModel::Lossless).unwrap();
+        let zs = chain.port_impedance(&gas);
+        let source_dc = 1.5 * zs;
+        let relaxation_s = 4.0 / f64::from(RATE);
+        let source_z = |omega: f64| C64::from_re(0.5 * zs)
+            + C64::from_re(zs) / C64::new(1.0, -omega * relaxation_s);
+        let mut frequencies = std::collections::BTreeSet::new();
+        let settings = ladder();
+        let mut airway = UpstreamAirway::realize_with_source_impedance(
+            &chain, &gas, RATE, &settings, source_dc,
+            |omega| {
+                assert!(frequencies.insert(omega.to_bits()), "a boundary sample was queried twice");
+                Ok(source_z(omega))
+            },
+        ).unwrap();
+        assert_eq!(frequencies.len(), airway.reflectance_taps().len().max(airway.source_taps().len()) / 2);
+        assert_eq!(airway.receipt().source_dc_resistance, source_dc);
+        assert_eq!(airway.receipt().dc_resistance, 0.0);
+        for hz in [7.0, 310.0, 1013.0, 2207.0, 5119.0] {
+            let omega = core::f64::consts::TAU * hz;
+            let load = source_z(omega);
+            let expected_r = chain.reflectance_with_source_impedance(&gas, omega, load).unwrap();
+            let expected_g = chain.source_transfer_with_source_impedance(&gas, omega, load).unwrap();
+            assert!((dtft(airway.reflectance_taps(), omega) - expected_r).abs() < 1e-3);
+            assert!((dtft(airway.source_taps(), omega) - expected_g).abs() < 1e-3);
+        }
+        let dc_r: f64 = airway.reflectance_taps().iter().sum();
+        let dc_g: f64 = airway.source_taps().iter().sum();
+        assert!((2.0 * dc_g / (1.0 - dc_r) - 1.0).abs() < 1e-10);
+        assert!((zs * (1.0 + dc_r) / (1.0 - dc_r) / source_dc - 1.0).abs() < 1e-10);
+        let mut silent_source = airway.clone();
+        // Include the FIR's numerical tail in the valve feedback's settling time.
+        let settle = 3 * airway.reflectance_taps().len() + 8;
+        let source_pressure = 800.0;
+        let flow = 2.0e-4;
+        let (port, pressure) = hold(&mut airway, source_pressure, flow, settle);
+        assert!((pressure - (source_pressure - source_dc * flow)).abs() < 1e-6);
+        assert!((port.pressure_pa(flow) - pressure).abs() < 1e-10);
+        // Source zero leaves the finite source resistance connected.
+        let (_, pressure) = hold(&mut silent_source, 0.0, flow, settle);
+        assert!((pressure + source_dc * flow).abs() < 1e-6,
+            "residual {}, reflection taps {}, source taps {}", pressure + source_dc * flow,
+            airway.reflectance_taps().len(), airway.source_taps().len());
+    }
+
+    /// Unphysical source samples, inconsistent finite DC admission and cancellation never produce an audio owner.
+    #[test]
+    fn ua_014_source_admission_and_cancellation_are_explicit() {
+        let gas = air();
+        let chain = AirwayChain::new(vec![tube(0.007, 0.13, 1, None)], LossModel::Lossless).unwrap();
+        let omega = core::f64::consts::TAU * 713.0;
+        for impedance in [C64::new(-1.0, 0.0), C64::new(f64::NAN, 0.0), C64::new(0.0, f64::INFINITY)] {
+            assert!(chain.reflectance_with_source_impedance(&gas, omega, impedance).is_err());
+            assert!(chain.source_transfer_with_source_impedance(&gas, omega, impedance).is_err());
+            assert!(chain.input_impedance_with_source_impedance(&gas, omega, impedance).is_err());
+        }
+        for dc in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(UpstreamAirway::realize_with_source_impedance(
+                &chain, &gas, RATE, &ladder(), dc,
+                |_| panic!("invalid DC must refuse before querying the source"),
+            ).is_err());
+        }
+        let mut calls = 0;
+        let stopped = UpstreamAirway::realize_with_source_impedance(
+            &chain, &gas, RATE, &ladder(), 0.0,
+            |_| {
+                calls += 1;
+                Err(fs_duct::DuctError::Cancelled { completed_steps: calls }.into())
+            },
+        );
+        assert!(matches!(stopped, Err(DrivingPointError::Duct(fs_duct::DuctError::Cancelled { completed_steps: 1 }))));
+        assert_eq!(calls, 1);
     }
 
     /// The DTFT `sum h_n e^{+i w n dt}` of a realized FIR (`e^{-iwt}` convention).
