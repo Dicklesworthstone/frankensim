@@ -14159,14 +14159,69 @@ remain in the preparation memory estimate. Native membrane transport uses this
 boundary and evolves the original kinetic owner on its adaptive timeline.
 
 The basic `advance` operation is isothermal and infers no thermostat heat,
-particle breakup/agglomeration, nonideal chemistry or spontaneous nucleation. The
-coupled thermal operation below explicitly accounts for heat and temperature.
+particle breakup/agglomeration or spontaneous nucleation. Nonideal phase
+exchange requires the explicit original thermodynamic binding below. The
+coupled thermal operation separately accounts for heat and temperature.
 Focused cases verify opposed phase transfers, actual osmotic response,
 finite-rate dilution/heating lag, retained crystals through transport,
 original source sharing, buffer reuse, layout refusal and cancellation.
 Particle regressions check drying-induced growth followed by analytical
 redissolution after dilution, evolving conductance, unchanged reference geometry
 through dissolved transport and refusal of incompatible geometry checkpoints.
+
+### Activity-consistent neutral crystallization
+
+`KineticSolubilitySolution::with_nonideal_thermodynamics` binds the original
+`VirialSolutionModel` to the SAME retained kinetic owner. Temperature, solvent
+molar volume and ordered species count must match, and every original pure-pair
+saturation must lie inside that model's declared convex concentration box.
+The original kinetic laws, particle reference stocks and precipitation policies
+remain unchanged. A different source cannot replace an existing binding.
+
+The aqueous-minus-pure-solid chemical potential is
+`RT*[ln(c_i/csat_i) + (B*c)_i - B_ii*csat_i]`. Thus each original binary
+saturation remains exact, while other dissolved species shift conditional
+saturation through their explicitly supplied cross interactions. No measured
+mixture calibration, association or concentrated-solution applicability is
+inferred from the pure-pair source. This neutral model retains separate pure
+crystals; it does not supply ionic or mixed-solid equilibria.
+
+Each declared-order coordinate stage holds the other current concentrations
+fixed, solves the monotone conditional saturation inside the original box and
+passes that concentration to the original thermochemical `advance_at_saturation`.
+The same finite-bath and changing-particle-area trajectories perform all phase
+movement. The root is analytic for zero diagonal interaction; otherwise a
+safeguarded Newton/bisection solve permits at most 128 iterations. Unsupported
+or unrepresentable roots refuse without a concentration floor or extrapolation.
+After preparation, advancement uses existing buffers and bounded stack storage
+without heap allocation. This sequential phase split is first order; an outer
+full/two-half controller must control cross-component temporal error. Receipts
+retain each coordinate stage's actual target, transfer and exhaustion event,
+not a simultaneous equilibrium claim after later coordinates move.
+
+`solid_relative_chemical_potentials_into` and
+`solid_relative_inventory_free_energy_change_j` use that same calibration. The
+work combines the original stable ideal primitive, the symmetric virial excess
+difference and the pure-solid reference term, including changing solvent volume.
+The calibration is linear in component moles and contributes no pressure at
+fixed amounts, so the original virial osmotic pressure remains consistent.
+Complete dissolved-plus-solid component and solvent conservation must be checked
+separately before cancelling common reference terms across a closed network.
+
+Cloning, compatible copying, transported inventories and dilution retain the
+bound model and actual phase stocks. A fixed-temperature virial source supplies
+neither temperature-dependent interactions nor excess calorics: temperature
+changes and the ideal `advance_with_heat` adapter explicitly refuse for bound
+nonideal phases. Numerical source applicability remains separate from measured
+material authority.
+
+Focused native tests check unchanged binary particle trajectories, positive and
+negative cosolute shifts, two-solute refinement against independent continuous
+RK4 trajectories for both surface laws, chemical-work and pressure derivatives,
+reference invariance, trace roots, domain refusal and atomic rollback.
+`cargo run -p fs-material --example cosolute_crystallization` demonstrates
+cosolute-induced growth followed by complete redissolution after prescribed
+dilution. Its coefficients are explicitly authored demonstration data.
 
 ### Finite-rate thermal material evolution
 

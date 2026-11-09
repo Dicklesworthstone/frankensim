@@ -1,6 +1,6 @@
 //! Actual dissolved and solid inventories under finite-rate phase exchange.
 //!
-//! The original thermochemical law advances each independent neutral solute;
+//! The original thermochemical law advances each ordered neutral component;
 //! only the actual dissolved amount enters shared aqueous thermodynamics. A
 //! change of temperature or solvent volume preserves both phase stocks until a
 //! kinetic step is taken. It does not silently impose instantaneous saturation.
@@ -11,11 +11,14 @@
 //! amounts never reset that law's reference particle stock.
 //! `advance` is isothermal during each step. [`caloric`] instead couples these
 //! actual phases to the original finite thermal bath and prescribed heat input.
-//! Neither operation supplies simultaneous spatial transport, nonideal chemistry,
-//! particle breakup/agglomeration, or a nucleation law.
+//! Explicitly binding [`KineticSolubilitySolution::with_nonideal_thermodynamics`] adds
+//! activity-consistent conditional phase exchange on the original virial model.
+//! Neither operation supplies particle breakup/agglomeration or a nucleation law.
 
 /// Coupled finite-rate phase exchange and the original shared-bath heat balance.
 pub mod caloric;
+
+mod nonideal;
 
 use super::{FiniteSolubilityError, FiniteSolubilitySolution};
 use crate::osmosis::{
@@ -68,6 +71,7 @@ pub struct KineticSolubilitySolution {
     solution: AqueousSolution,
     models: Arc<[SolubilityKineticsV1]>,
     steps: Box<[SolubilityKineticStepV1]>,
+    calibration: Option<Arc<nonideal::Calibration>>,
 }
 impl KineticSolubilitySolution {
     /// Prepare 1..=64 distinct neutral solutes sharing one original solvent.
@@ -165,6 +169,7 @@ impl KineticSolubilitySolution {
             solution,
             models,
             steps: steps.into_boxed_slice(),
+            calibration: None,
         })
     }
 
@@ -189,7 +194,12 @@ impl KineticSolubilitySolution {
                 .saturating_add(core::mem::size_of_val(self.models.as_ref()))
                 .saturating_add(core::mem::size_of_val(self.steps.as_ref()))
                 .saturating_add(2 * core::mem::size_of::<usize>())
-                .saturating_add(core::mem::align_of::<SolubilityKineticsV1>()),
+                .saturating_add(core::mem::align_of::<SolubilityKineticsV1>())
+                .saturating_add(
+                    self.calibration
+                        .as_ref()
+                        .map_or(0, |data| data.heap_bytes()),
+                ),
             |bytes, model| bytes.saturating_add(model.law().heap_bytes()),
         )
     }
@@ -209,6 +219,8 @@ impl KineticSolubilitySolution {
         }
         let mut candidate = [None; MAX_OSMOTIC_SOLUTES];
         let temperature = Temperature::new(self.solution.temperature_k());
+        self.validate_aqueous(volume_m3, dissolved_moles)?;
+        let concentrations = self.phase_concentrations(volume_m3, dissolved_moles)?;
         for (index, ((model, old), &dissolved)) in self
             .models
             .iter()
@@ -218,10 +230,18 @@ impl KineticSolubilitySolution {
         {
             let phase =
                 SolubilityKineticStateV1::from_phases(Amount::new(dissolved), old.state().solid())?;
-            candidate[index] =
-                Some(model.advance(temperature, Volume::new(volume_m3), &phase, Time::new(0.0))?);
+            candidate[index] = Some(if self.calibration.is_some() {
+                model.advance_at_saturation(
+                    temperature,
+                    Volume::new(volume_m3),
+                    &phase,
+                    Time::new(0.0),
+                    self.conditional_saturation_unchecked(index, &concentrations)?,
+                )?
+            } else {
+                model.advance(temperature, Volume::new(volume_m3), &phase, Time::new(0.0))?
+            });
         }
-        self.validate_aqueous(volume_m3, dissolved_moles)?;
         self.publish_prepared(volume_m3, dissolved_moles, &candidate)
     }
 
@@ -234,6 +254,8 @@ impl KineticSolubilitySolution {
             || self.solution.temperature_k() != source.solution.temperature_k()
             || self.solution.solvent_molar_volume_m3_mol()
                 != source.solution.solvent_molar_volume_m3_mol()
+            || self.solution.nonideal_model() != source.solution.nonideal_model()
+            || self.calibration != source.calibration
         {
             return Err(invalid("incompatible kinetic source or thermal state"));
         }
@@ -245,7 +267,10 @@ impl KineticSolubilitySolution {
         Ok(())
     }
     /// Original species order; each receipt retains current total/dissolved/solid
-    /// stocks, signed last transfer, target and any exhaustion event.
+    /// stocks, signed last transfer, target and any exhaustion event. With
+    /// interacting solutes the target holds the other concentrations at that
+    /// coordinate stage; later stages can move it. It is not a simultaneous
+    /// coupled equilibrium prediction.
     pub fn last_steps(&self) -> &[SolubilityKineticStepV1] {
         &self.steps
     }
@@ -254,7 +279,9 @@ impl KineticSolubilitySolution {
     /// Uses only prepared buffers and bounded stack storage; no heap allocation
     /// occurs. Particle surfaces use the original bounded scalar phase solve.
     /// Cancellation is polled before work, between components and before
-    /// publishing any accepted state.
+    /// publishing any accepted state. A bound nonideal model uses a first-order
+    /// sequential phase split in the declared species order. External adaptive
+    /// full/two-half stepping must control its cross-component time error.
     pub fn advance(
         &mut self,
         duration: Time,
@@ -263,12 +290,26 @@ impl KineticSolubilitySolution {
         poll(&mut cancelled)?;
         let mut candidate = [None; MAX_OSMOTIC_SOLUTES];
         let mut dissolved = [0.0; MAX_OSMOTIC_SOLUTES];
+        dissolved[..self.models.len()].copy_from_slice(self.solution.solute_moles());
         let temperature = Temperature::new(self.solution.temperature_k());
         let volume = Volume::new(self.solution.solvent_volume_m3());
+        let mut concentrations =
+            self.phase_concentrations(volume.value(), self.solution.solute_moles())?;
         for (index, (model, old)) in self.models.iter().zip(self.steps.iter()).enumerate() {
             poll(&mut cancelled)?;
-            let step = model.advance(temperature, volume, old.state(), duration)?;
+            let step = if self.calibration.is_some() {
+                model.advance_at_saturation(
+                    temperature,
+                    volume,
+                    old.state(),
+                    duration,
+                    self.conditional_saturation_unchecked(index, &concentrations)?,
+                )?
+            } else {
+                model.advance(temperature, volume, old.state(), duration)?
+            };
             dissolved[index] = step.state().dissolved().value();
+            concentrations[index] = dissolved[index] / volume.value();
             candidate[index] = Some(step);
         }
         let count = self.models.len();
@@ -304,6 +345,12 @@ impl KineticSolubilitySolution {
     /// Prescribe pure-solvent dilution/concentration without re-equilibrating.
     /// Both actual phase stocks are unchanged; target capacities are refreshed.
     pub fn with_solvent_volume_m3(&self, volume_m3: f64) -> Result<Self> {
+        if self.calibration.is_some() {
+            let mut next = self.clone();
+            next.solution = self.solution.with_solvent_volume_m3(volume_m3)?;
+            next.advance(Time::new(0.0), || false)?;
+            return Ok(next);
+        }
         Self::prepare(
             Temperature::new(self.solution.temperature_k()),
             self.solution.solvent_molar_volume_m3_mol(),
@@ -317,7 +364,17 @@ impl KineticSolubilitySolution {
     /// Actual stocks remain unchanged. The caller owns heat/thermostat accounting
     /// and must ensure each declared film coefficient applies at the new
     /// temperature. Particle reference stocks and their area response are retained.
+    /// An explicitly bound virial model admits only its original temperature;
+    /// changing that fixed source requires new thermodynamic data.
     pub fn with_temperature(&self, temperature: Temperature) -> Result<Self> {
+        if self.calibration.is_some() {
+            if temperature.value().to_bits() != self.solution.temperature_k().to_bits() {
+                return Err(invalid(
+                    "a fixed-temperature virial source cannot be extrapolated to a new temperature",
+                ));
+            }
+            return Ok(self.clone());
+        }
         Self::prepare(
             temperature,
             self.solution.solvent_molar_volume_m3_mol(),

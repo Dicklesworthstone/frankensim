@@ -69,6 +69,8 @@ impl KineticSolubilitySolution {
     /// Every original law, conductance, surface geometry, growth policy and
     /// solvent convention must match. Refusal or cancellation leaves this
     /// material untouched.
+    /// Explicitly bound virial phases refuse: the ideal caloric owner supplies
+    /// neither their excess heat nor temperature-dependent interactions.
     /// The returned aqueous view uses the accepted dissolved amounts at the
     /// solved temperature, without equilibrium projection. Its zero-time phase
     /// receipts refresh target diagnostics; the window's heat and temporal
@@ -83,6 +85,11 @@ impl KineticSolubilitySolution {
     ) -> Result<KineticSolubilityHeatStep, KineticSolubilityHeatError> {
         if cancelled() {
             return Err(SolubilityCaloricErrorV1::Cancelled.into());
+        }
+        if self.solution().nonideal_model().is_some() {
+            return Err(KineticSolubilityHeatError::Material(super::invalid(
+                "nonideal heat evolution requires original excess calorics and temperature-dependent interactions",
+            )));
         }
         if model.kinetics() != self.models()
             || model.caloric().solvent_molar_volume_m3_mol()

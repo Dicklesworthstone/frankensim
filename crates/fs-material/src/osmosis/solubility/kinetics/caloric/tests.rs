@@ -21,6 +21,27 @@ const DISSOLUTION_ENTHALPY: f64 = 20_000.0;
 const SOLVENT_CP: f64 = 50.0;
 const SOLUTE_CP: f64 = 30.0;
 
+#[test]
+fn virial_phase_binding_cannot_silently_drop_excess_calorics() {
+    let thermal = model(1e-4, PrecipitationPolicyV1::ExistingSolidOnly, MOLAR_VOLUME);
+    let original = material(&thermal, 0.15, 1.5)
+        .with_nonideal_thermodynamics(Arc::new(
+            crate::osmosis::nonideal::VirialSolutionModel::new(
+                300.0,
+                MOLAR_VOLUME,
+                1.0,
+                vec![2000.0],
+                vec![0.001],
+            )
+            .unwrap(),
+        ))
+        .unwrap();
+    assert!(matches!(
+        original.advance_with_heat(&thermal, Time::new(1.0), 0.0, controls(), || false),
+        Err(KineticSolubilityHeatError::Material(_))
+    ));
+}
+
 fn knots(capacity: f64) -> Vec<(Temperature, MolarThermalQuantityV1)> {
     [280.0, 340.0]
         .map(|t| (Temperature::new(t), MolarThermalQuantityV1::new(capacity)))
