@@ -459,6 +459,7 @@ impl ReactingEuler1d {
             budget,
             entropy,
             forcing,
+            None,
             cancelled,
         )?;
         Ok(StabilizedReactiveStepReport {

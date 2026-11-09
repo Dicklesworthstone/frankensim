@@ -23,6 +23,8 @@ pub use fs_thermochem::kinetics::IdealGasKineticsV1;
 
 mod cell;
 mod forcing;
+mod gravity;
+pub use gravity::ReactiveGravityStep;
 pub use cell::CellChemistry;
 mod entropy;
 pub use entropy::{
@@ -414,6 +416,7 @@ impl ReactingEuler1d {
             None,
             None,
             Some((force, force_controls)),
+            None,
             cancelled,
         ).map(|(report, _)| report)
     }
@@ -446,6 +449,7 @@ impl ReactingEuler1d {
             None,
             None,
             Some((force, force_controls)),
+            None,
             cancelled,
         ).map(|(report, _)| report)
     }
@@ -487,7 +491,7 @@ impl ReactingEuler1d {
     ) -> Result<(ReactiveStepReport, Option<SplitStabilizedDissipationReport>), ReactiveError> {
         self.step_inner_forced(
             maximum_duration, controls, operator, molecular, reservoirs,
-            interval_budget, entropy, None, cancelled,
+            interval_budget, entropy, None, None, cancelled,
         )
     }
 
@@ -502,6 +506,7 @@ impl ReactingEuler1d {
         mut interval_budget: Option<&mut stabilized::CouplingBudget>,
         mut entropy: Option<&mut entropy::CoupledEntropy>,
         mut forcing: Option<(BodyForce<'_>, ForceControl)>,
+        mut gravity: Option<&mut gravity::GravityAccount<'_>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(ReactiveStepReport, Option<SplitStabilizedDissipationReport>), ReactiveError> {
         poll(&mut cancelled)?;
@@ -520,6 +525,14 @@ impl ReactingEuler1d {
         if forcing.is_some() && entropy.is_some() {
             return Err(ReactiveError::Invalid(
                 "reacting body forcing does not compose entropy accounting",
+            ));
+        }
+        if gravity.is_some()
+            && (forcing.is_some() || entropy.is_some() || operator.is_some()
+                || reservoirs.iter().any(Option::is_some))
+        {
+            return Err(ReactiveError::Invalid(
+                "reacting gravity requires closed inviscid transport without additional forcing or entropy accounting",
             ));
         }
         if entropy.as_ref().is_some_and(|account| account.has_exterior_states()) {
@@ -565,6 +578,9 @@ impl ReactingEuler1d {
             if let Some(account) = entropy.as_deref_mut() {
                 account.begin_attempt();
             }
+            if let Some(account) = gravity.as_deref_mut() {
+                account.begin_attempt();
+            }
             let mut report = ChemistryReport::default();
             let attempt = (|| {
                 let first = match operator.as_deref_mut() {
@@ -595,6 +611,16 @@ impl ReactingEuler1d {
                             force,
                             force_controls,
                             reservoirs,
+                            &mut cancelled,
+                        )?,
+                        None,
+                    )
+                } else if let Some(account) = gravity.as_deref_mut() {
+                    (
+                        account.advance_transport(
+                            &mut self.trial,
+                            Time::new(duration),
+                            controls.transport,
                             &mut cancelled,
                         )?,
                         None,
@@ -641,7 +667,9 @@ impl ReactingEuler1d {
                     )?),
                     None => None,
                 };
-                if (second.is_some() || forcing.is_some()) && entropy.is_none() {
+                if (second.is_some() || forcing.is_some() || gravity.is_some())
+                    && entropy.is_none()
+                {
                     // The molecular source bank can admit a wider temperature
                     // path than the reactor. In particular, viscous heating
                     // after the last chemistry solve can leave that path.
@@ -714,6 +742,9 @@ impl ReactingEuler1d {
                     let after = self.trial.totals();
                     let complete = coupled_report(&self.trial.gas, before, after,
                         transport, report, dissipation, retry)?;
+                    if let Some(account) = gravity.as_deref_mut() {
+                        account.finish(&self.accepted, &self.trial, complete, &mut cancelled)?;
+                    }
                     poll(&mut cancelled)?;
                     core::mem::swap(&mut self.accepted, &mut self.trial);
                     return Ok((complete, stabilized));

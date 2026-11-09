@@ -408,6 +408,22 @@ impl IsothermalMixtureGravity {
         self.potential(&flow.states, &mut cancelled)
     }
 
+    /// Change of the same discrete potential from local species-mass changes.
+    ///
+    /// Both fields must retain this reference's source, mesh and reflecting
+    /// ends. Reducing local changes avoids subtracting large potential totals
+    /// when a coupled source or a short transport step moves little mass.
+    pub fn potential_energy_change(
+        &self,
+        before: &MixtureEuler1d,
+        after: &MixtureEuler1d,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<f64, Error> {
+        self.admit(before, &mut cancelled)?;
+        self.admit(after, &mut cancelled)?;
+        self.potential_change(&before.states, &after.states, &mut cancelled)
+    }
+
     fn admit(
         &self,
         flow: &MixtureEuler1d,
@@ -663,9 +679,31 @@ impl IsothermalMixtureGravity {
         pending: Balance,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Balance, Error> {
-        let n = self.gas.species_count();
         let before = self.potential(initial, cancelled)?;
         let after = self.potential(candidate, cancelled)?;
+        let change = self.potential_change(initial, candidate, cancelled)?;
+        let residual = sum([gas_residual, source.work, change]);
+        if !residual.is_finite() {
+            return Err(Error::Invalid(
+                "unrepresentable gas plus gravitational energy balance",
+            ));
+        }
+        Ok(Balance {
+            before,
+            after,
+            change,
+            residual,
+            ..pending
+        })
+    }
+
+    fn potential_change(
+        &self,
+        initial: &[f64],
+        candidate: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64, Error> {
+        let n = self.gas.species_count();
         let mut change = Exchange::default();
         for (i, (old, new)) in initial
             .chunks_exact(n + 2)
@@ -682,20 +720,7 @@ impl IsothermalMixtureGravity {
                 0.0,
             ])?;
         }
-        let change = change.values[0];
-        let residual = sum([gas_residual, source.work, change]);
-        if !residual.is_finite() {
-            return Err(Error::Invalid(
-                "unrepresentable gas plus gravitational energy balance",
-            ));
-        }
-        Ok(Balance {
-            before,
-            after,
-            change,
-            residual,
-            ..pending
-        })
+        Ok(change.values[0])
     }
 }
 

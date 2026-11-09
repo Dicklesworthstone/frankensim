@@ -53,6 +53,7 @@ impl ReactingEuler1d {
             None,
             None,
             Some((force, force_controls)),
+            None,
             cancelled,
         )
         .map(|(report, _)| report)
@@ -86,6 +87,7 @@ impl ReactingEuler1d {
             None,
             None,
             Some((force, force_controls)),
+            None,
             cancelled,
         )
         .map(|(report, _)| report)

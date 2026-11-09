@@ -4,6 +4,7 @@ mod cell;
 mod entropy;
 mod entropy_stabilized;
 mod forcing;
+mod gravity;
 mod molecular;
 mod piston;
 mod spatial_cell;

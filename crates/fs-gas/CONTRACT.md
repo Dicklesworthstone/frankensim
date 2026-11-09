@@ -9195,3 +9195,39 @@ extension retains no per-step force trace or extra integration kernel.
 reaction-diffusion Fourier transport and refinement, complete source impulse
 and work, original zero-source identity, no-op admission, and whole-window
 rollback/retry with stationary baths and a global work refusal.
+
+
+## Reacting transport in a prescribed gravitational potential
+
+`ReactingEuler1d::step_with_isothermal_gravity` composes the original finite-rate
+chemistry half steps around `MixtureEuler1d::step_with_isothermal_gravity`.
+The prepared atmosphere retains its original gas, spatial reconstruction and
+constant-area reflecting geometry. Actual evolving species supply density and
+calorics; reaction-induced pressure changes drive the same native momentum
+update. The original Riemann species mass flux supplies gravitational work and
+potential transfer. No separate rho*u work source or second gravity kick is added.
+
+`ReactiveGravityStep` retains the native reacting report and a complete-step
+potential-energy account, including both chemical halves. The gas first-law
+residual includes mechanical work once; the gas-plus-potential residual restores
+that work and adds the locally reduced potential change. Physical gravity
+impulse and the reference-traction representation correction remain separate.
+`IsothermalMixtureGravity::potential_energy_change` exposes the same compensated
+local-mass-change reduction used by native transport, avoiding subtraction of
+large absolute potential totals. Numerical chemical mass/energy discrepancies
+remain visible; they are never repaired by adding heat.
+
+A shortened acoustic step repeats the whole composition from accepted state.
+Final caloric admission, potential representability and cancellation checks
+precede publication of state, clock and report. This adds only stack accounting;
+existing trial fields, reactor storage and transport scratch are reused. Zero
+gravity follows the original unforced numerical path. The immutable atmosphere
+is a reconstruction reference, not a constraint that suppresses reaction-driven
+motion or forces chemical equilibrium. This entry does not compose molecular
+gravitational diffusion, external reservoirs, moving walls, extra body forcing
+or the entropy-audited lane.
+
+Focused G0/G1/G3/G4 regressions cover hydrostatic isomer relaxation with both
+gravity signs, heat-release-driven motion and native C/A/C replay, physical
+formation-reference invariance, complete gas-plus-potential balance, zero-gravity
+parity, source mismatch and cancellation during final gravitational accounting.
