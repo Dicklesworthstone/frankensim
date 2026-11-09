@@ -10191,3 +10191,33 @@ nonzero pending travel/chronology, exact round-trip retention, and transactional
 foreign/wrong-source/stale-body/stale-geometry/cancellation refusal. Pinned
 formatting, recursive parsing and source review passed. These cross-crate tests
 were not compiled or run under the session's memory/disk constraint.
+
+## Exact simultaneous affine force and uniform bath velocity
+
+`IsotropicLinearDrag::step_affine_force_and_flow` integrates
+`m dv/dt = F(t) + m g - c(v-U(t))` with both force and uniform bath velocity
+prescribed by their interval endpoints. Mass, isotropic resistance, gravity
+and the free-spin owner remain fixed. The prepared bath supplies the starting
+velocity; continuation must prepare the next owner at the accepted ending
+velocity. This is the native moving-damper law, not a constitutive assertion
+about accelerating-fluid pressure, added mass or Basset history.
+
+The original compensated small-exposure and stiff exponential bases now also
+integrate the relative forcing `F/m+g-dU/dt`. Positive-square slip moments
+supply heat independently of storage. Applied work integrates `F(t) dot v(t)`;
+signed bath work integrates `-c(v-U(t)) dot U(t)` with the actual velocity
+history. Pairing drag impulse with the endpoint-mean bath is not substituted
+for that source integral. Momentum, represented kinetic/gravity storage,
+free-spin decay and the work residual keep their original owners.
+
+The accompanying whole-path bound uses the endpoint norm envelope of
+`F/m+g-dU/dt` in the original positive exponential convolution. It covers
+interior slip peaks even when both endpoint slips vanish. It is a conservative
+upper bound, not a reported peak or a physical bandwidth certificate. A held
+bath delegates to the original affine-force entry; zero drag delegates before
+forming a bath difference, preserving exact ballistic independence.
+
+Focused regression fixtures compare both analytic bases with an independent
+absolute-velocity ODE and power quadrature, compose actual force/bath
+endpoints, check Galilean heat/impulse/work transformations, resolve tiny-drag
+heat, retain exact forced co-acceleration, and exercise interior-slip admission.

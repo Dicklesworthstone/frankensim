@@ -8,8 +8,9 @@
 //!
 //! This is a native mechanics owner, not a fluid/material constitutive law.
 //! Its caller supplies admitted resistances and the physical regime. The force
-//! may be held or explicitly affine in time; ambient velocity, properties and
-//! resistances stay fixed over the interval.
+//! and uniform bath velocity may be held or explicitly affine in time;
+//! properties and resistances stay fixed over the interval. An accelerating
+//! fluid's pressure-gradient, added-mass and history forces are not inferred.
 //! Anisotropic inertia, applied couples, rotating baths, lift, contact and
 //! changing sources require their existing more general owners.
 
@@ -45,7 +46,8 @@ impl From<DynamicsError> for LinearDragError {
     }
 }
 
-/// A held uniform bath acting on one body with exactly isotropic inertia.
+/// A uniform damping bath acting on one body with exactly isotropic inertia.
+/// Its prepared velocity is the starting endpoint for an affine-flow step.
 ///
 /// Preparation is allocation-free and performs no eigensolve. Nonnegative
 /// coefficients include the zero-drag limit; no small positive drag is erased.
@@ -86,7 +88,8 @@ pub struct LinearDragStep {
     pub rotation_heat_j: f64,
     /// Total nonnegative physical dissipation [J]; no thermal destination assumed.
     pub dissipated_energy_j: f64,
-    /// Signed work of the actuator maintaining U: `drag_impulse . U` [J].
+    /// Signed work of the actuator maintaining the bath: integral of
+    /// `F_drag . U(t)` [J]. For held U this is `drag_impulse . U`.
     pub background_work_j: f64,
     /// Integral of the prescribed applied force paired with COM velocity [J].
     pub applied_work_j: f64,
@@ -231,13 +234,25 @@ impl IsotropicLinearDrag {
         )
     }
 
-    // Both prescribed force histories use the original native free-spin flow,
+    // All prescribed source histories use the original native free-spin flow,
     // represented-state storage and retained impulse/work accounting below.
     fn finish(
         self,
         state: RigidBodyState,
         duration_s: f64,
         path: TranslationPath,
+    ) -> Result<LinearDragStep, LinearDragError> {
+        let ambient = components(self.ambient_velocity_world).map(dd);
+        let background_work = dot(path.drag_impulse, ambient);
+        self.finish_with_background_work(state, duration_s, path, background_work)
+    }
+
+    fn finish_with_background_work(
+        self,
+        state: RigidBodyState,
+        duration_s: f64,
+        path: TranslationPath,
+        background_work: Dd,
     ) -> Result<LinearDragStep, LinearDragError> {
         let TranslationPath {
             after_p,
@@ -253,7 +268,6 @@ impl IsotropicLinearDrag {
         let before_p = components(state.linear_momentum_world()).map(dd);
         let before_l = components(state.angular_momentum_body()).map(dd);
         let weight = components(self.gravity.acceleration_world()).map(|g| mass * dd(g));
-        let ambient = components(self.ambient_velocity_world).map(dd);
         let after_l = before_l.map(|value| attenuated(value, rotation.exposure));
         let rotation_vector_body =
             vector(before_l.map(|value| value / inertia * rotation.integral_s))?;
@@ -278,7 +292,6 @@ impl IsotropicLinearDrag {
         if scalar(translation_heat)? < 0.0 || scalar(rotation_heat)? < 0.0 {
             return Err(LinearDragError::Invalid("negative integrated drag heat"));
         }
-        let background_work = dot(drag_impulse, ambient);
         let gravity_work = dot(weight, displacement);
         let represented_displacement = core::array::from_fn(|i| {
             dd(components(state_after.pose().position_world())[i]) - position[i]
@@ -394,7 +407,11 @@ impl Moments {
     }
 }
 
-fn relaxation_exposure(resistance: f64, inertia: f64, duration: f64) -> Result<f64, LinearDragError> {
+fn relaxation_exposure(
+    resistance: f64,
+    inertia: f64,
+    duration: f64,
+) -> Result<f64, LinearDragError> {
     let rate = resistance / inertia;
     let exposure = rate * duration;
     if !rate.is_finite()

@@ -1,6 +1,8 @@
 //! Independent held-ODE, integrated-work and composition checks for native drag.
 #[path = "linear_drag/affine.rs"]
 mod affine;
+#[path = "linear_drag/flow.rs"]
+mod flow;
 
 use fs_mbd::linear_drag::{IsotropicLinearDrag, LinearDragError};
 use fs_mbd::{Gravity, MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3, Wrench};

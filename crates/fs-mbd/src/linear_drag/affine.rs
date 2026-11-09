@@ -2,6 +2,8 @@
 
 use super::*;
 
+mod flow;
+
 impl IsotropicLinearDrag {
     /// Conservative relative-speed bound over one prescribed affine-force path.
     ///
@@ -31,28 +33,16 @@ impl IsotropicLinearDrag {
         let gravity = components(self.gravity.acceleration_world()).map(dd);
         let first = components(wrench_before.force_world).map(dd);
         let last = components(force_after_world).map(dd);
-        let norm = |value: [Dd; 3]| -> Result<f64, LinearDragError> {
-            let value = vector(value)?;
-            scalar(dd(value.x.hypot(value.y).hypot(value.z)))
-        };
-        let initial = norm(core::array::from_fn(|i| {
-            (momentum[i] - mass * ambient[i]) / mass
-        }))?;
-        let acceleration = norm(core::array::from_fn(|i| {
-            (first[i] + mass * gravity[i]) / mass
-        }))?
-        .max(norm(core::array::from_fn(|i| {
-            (last[i] + mass * gravity[i]) / mass
-        }))?);
-        let moments = Moments::new(
-            self.translation_resistance_kg_s,
-            self.properties.mass(),
-            duration_s,
-        )?;
-        let endpoint = scalar(
-            attenuated(dd(initial), moments.exposure) + dd(acceleration) * moments.integral_s,
-        )?;
-        Ok(initial.max(endpoint))
+        relative_speed_bound(
+            core::array::from_fn(|i| (momentum[i] - mass * ambient[i]) / mass),
+            core::array::from_fn(|i| (first[i] + mass * gravity[i]) / mass),
+            core::array::from_fn(|i| (last[i] + mass * gravity[i]) / mass),
+            Moments::new(
+                self.translation_resistance_kg_s,
+                self.properties.mass(),
+                duration_s,
+            )?,
+        )
     }
 
     /// Advance a world force prescribed by its two endpoints over this interval.
@@ -193,6 +183,24 @@ impl IsotropicLinearDrag {
         }
         self.finish(state, duration_s, path)
     }
+}
+
+fn relative_speed_bound(
+    initial: [Dd; 3],
+    acceleration_before: [Dd; 3],
+    acceleration_after: [Dd; 3],
+    moments: Moments,
+) -> Result<f64, LinearDragError> {
+    let norm = |value: [Dd; 3]| -> Result<f64, LinearDragError> {
+        let value = vector(value)?;
+        scalar(dd(value.x.hypot(value.y).hypot(value.z)))
+    };
+    let initial = norm(initial)?;
+    let acceleration = norm(acceleration_before)?.max(norm(acceleration_after)?);
+    let endpoint = scalar(
+        attenuated(dd(initial), moments.exposure) + dd(acceleration) * moments.integral_s,
+    )?;
+    Ok(initial.max(endpoint))
 }
 
 fn validate_affine_inputs(
