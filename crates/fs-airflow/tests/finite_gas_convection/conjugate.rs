@@ -1,4 +1,6 @@
 //! G1/G3/G4: original conducting surfaces and finite gas/body heat ownership.
+#[path = "conjugate/specialized.rs"]
+mod specialized;
 use super::*;
 use fs_airflow::graph::thermal::medium::convection::finite_gas::{
     conjugate::ConjugateGasError,

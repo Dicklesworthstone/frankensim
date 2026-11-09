@@ -4,6 +4,7 @@
 //! original source supplies fluid viscosity at the trial body temperature;
 //! this second property query has no mass or energy of its own.
 
+use super::conjugate::{ConjugateGasFilm, sealed as conducting_sealed};
 use super::film::FilmGasSource;
 use super::mass_flow::MassFlowInput;
 use super::*;
@@ -347,5 +348,46 @@ impl<M: FilmGasSource> PrescribedMassFlowSphereGasSurface<'_, M> {
         ConvectionError<WallConvectionError<MaterialConvectionError>>,
     > {
         self.surface.isochoric_body_candidate_with(Some(self.flow), cx, environment, body, wall)
+    }
+}
+
+impl<M: FilmGasSource> conducting_sealed::Film for ForcedSphereGasSurface<'_, M> {}
+impl<M: FilmGasSource> ConjugateGasFilm for ForcedSphereGasSurface<'_, M> {
+    type State = M::State;
+    type Sample = SphereGasConvectionSample<M::State, Temperature>;
+
+    fn admitted_area_m2(&self, _gas: &Self::State) -> Result<f64, MaterialConvectionError> {
+        self.validate()?;
+        Ok(self.area_m2)
+    }
+
+    fn resolve_film_at_surface(
+        &self,
+        gas: &Self::State,
+        surface: Temperature,
+    ) -> Result<ConductanceSample<Self::Sample>, MaterialConvectionError> {
+        self.resolve_at_temperature(None, gas, surface.value(), surface)
+    }
+}
+
+impl<M: FilmGasSource> conducting_sealed::Film for PrescribedMassFlowSphereGasSurface<'_, M> {}
+impl<M: FilmGasSource> ConjugateGasFilm for PrescribedMassFlowSphereGasSurface<'_, M> {
+    type State = M::State;
+    type Sample = SphereGasConvectionSample<M::State, Temperature>;
+
+    fn admitted_area_m2(&self, gas: &Self::State) -> Result<f64, MaterialConvectionError> {
+        let mut surface = self.surface;
+        surface.bind_flow(Some(self.flow), gas)?;
+        surface.validate()?;
+        Ok(surface.area_m2)
+    }
+
+    fn resolve_film_at_surface(
+        &self,
+        gas: &Self::State,
+        surface: Temperature,
+    ) -> Result<ConductanceSample<Self::Sample>, MaterialConvectionError> {
+        self.surface
+            .resolve_at_temperature(Some(self.flow), gas, surface.value(), surface)
     }
 }

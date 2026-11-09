@@ -4,6 +4,7 @@
 //! original source supplies fluid viscosity at the trial body temperature;
 //! this second property query has no mass or energy of its own.
 
+use super::conjugate::{ConjugateGasFilm, sealed as conducting_sealed};
 use super::film::FilmGasSource;
 use super::mass_flow::MassFlowInput;
 use super::*;
@@ -577,6 +578,72 @@ impl<M: FilmGasSource> PrescribedMassFlowTubeGasSurface<'_, M> {
             environment,
             body,
             wall,
+        )
+    }
+}
+
+impl<M: FilmGasSource> conducting_sealed::Film for ForcedTubeGasSurface<'_, M> {}
+impl<M: FilmGasSource> ConjugateGasFilm for ForcedTubeGasSurface<'_, M> {
+    type State = M::State;
+    type Sample = TubeGasConvectionSample<M::State, Temperature>;
+
+    fn admitted_area_m2(&self, _gas: &Self::State) -> Result<f64, MaterialConvectionError> {
+        self.validate_for(TubeLaw::Turbulent)?;
+        Ok(self.area_m2)
+    }
+
+    fn resolve_film_at_surface(
+        &self,
+        gas: &Self::State,
+        surface: Temperature,
+    ) -> Result<ConductanceSample<Self::Sample>, MaterialConvectionError> {
+        self.resolve_at_temperature(TubeLaw::Turbulent, None, gas, surface.value(), surface)
+    }
+}
+
+impl<M: FilmGasSource> conducting_sealed::Film for LaminarTubeGasSurface<'_, M> {}
+impl<M: FilmGasSource> ConjugateGasFilm for LaminarTubeGasSurface<'_, M> {
+    type State = M::State;
+    type Sample = TubeGasConvectionSample<M::State, Temperature>;
+
+    fn admitted_area_m2(&self, _gas: &Self::State) -> Result<f64, MaterialConvectionError> {
+        self.surface.validate_for(TubeLaw::Laminar)?;
+        Ok(self.surface.area_m2)
+    }
+
+    fn resolve_film_at_surface(
+        &self,
+        gas: &Self::State,
+        surface: Temperature,
+    ) -> Result<ConductanceSample<Self::Sample>, MaterialConvectionError> {
+        self.surface
+            .resolve_at_temperature(TubeLaw::Laminar, None, gas, surface.value(), surface)
+    }
+}
+
+impl<M: FilmGasSource> conducting_sealed::Film for PrescribedMassFlowTubeGasSurface<'_, M> {}
+impl<M: FilmGasSource> ConjugateGasFilm for PrescribedMassFlowTubeGasSurface<'_, M> {
+    type State = M::State;
+    type Sample = TubeGasConvectionSample<M::State, Temperature>;
+
+    fn admitted_area_m2(&self, gas: &Self::State) -> Result<f64, MaterialConvectionError> {
+        let mut surface = self.surface;
+        surface.bind_flow(Some(self.flow), gas)?;
+        surface.validate_for(self.law)?;
+        Ok(surface.area_m2)
+    }
+
+    fn resolve_film_at_surface(
+        &self,
+        gas: &Self::State,
+        surface: Temperature,
+    ) -> Result<ConductanceSample<Self::Sample>, MaterialConvectionError> {
+        self.surface.resolve_at_temperature(
+            self.law,
+            Some(self.flow),
+            gas,
+            surface.value(),
+            surface,
         )
     }
 }

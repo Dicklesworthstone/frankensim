@@ -70,6 +70,81 @@ pub struct ConjugateGasConvectionSample<F, W = EquilibriumPhaseState> {
 pub type ConjugateFilmGasSample<S = ResolvedThermochemicalGasState, W = EquilibriumPhaseState> =
     ConjugateGasConvectionSample<FilmGasConvectionSample<S, Temperature>, W>;
 
+pub(super) mod sealed {
+    pub trait Film {}
+}
+
+/// Original source film admitted at its actual fluid-facing temperature.
+///
+/// Implemented only by the existing source-pinned film, Sieder--Tate tube and
+/// Whitaker sphere owners. Their exact property convention, geometry, selected
+/// regime and prescribed-flow inputs remain authoritative. This seam supplies
+/// a coefficient and original source payload, never storage or another heat solve.
+pub trait ConjugateGasFilm: sealed::Film + Copy {
+    type State: PistonGasState + ThermalFluidTransport;
+    type Sample;
+
+    /// Admit original geometry and flow; zero explicitly insulates the patch.
+    fn admitted_area_m2(&self, gas: &Self::State) -> Result<f64, MaterialConvectionError>;
+
+    /// Resolve only the original film at the material owner's actual surface.
+    fn resolve_film_at_surface(
+        &self,
+        gas: &Self::State,
+        surface: Temperature,
+    ) -> Result<ConductanceSample<Self::Sample>, MaterialConvectionError>;
+
+    /// Add the original source-integrated conducting path and shared native
+    /// finite-body transactions without replacing this film or its flow law.
+    fn with_conducting_layer<'a, 'm>(
+        self,
+        layer: &'a ResolvedConductionLayer<'m>,
+        geometry: ReservoirLayerGeometry,
+        config: LayerConductionConfig,
+    ) -> Result<ConjugateGasSurface<'a, 'm, Self>, ConjugateGasError> {
+        ConjugateGasSurface::new(self, layer, geometry, config)
+    }
+}
+
+/// Opaque fixed-speed or prescribed-flow selection behind the original alias.
+/// Its fields stay private; construction remains with the original film API.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct ConjugateFilmSelection<'g, M: FilmGasSource = ThermochemicalGasModel> {
+    film: FilmGasSurface<'g, M>,
+    flow: Option<MassFlowInput>,
+}
+impl<M: FilmGasSource> Copy for ConjugateFilmSelection<'_, M> {}
+impl<M: FilmGasSource> Clone for ConjugateFilmSelection<'_, M> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<M: FilmGasSource> sealed::Film for ConjugateFilmSelection<'_, M> {}
+impl<M: FilmGasSource> ConjugateGasFilm for ConjugateFilmSelection<'_, M> {
+    type State = M::State;
+    type Sample = FilmGasConvectionSample<M::State, Temperature>;
+
+    fn admitted_area_m2(&self, gas: &Self::State) -> Result<f64, MaterialConvectionError> {
+        let (law, _) = self.film.bind_flow(self.flow, gas)?;
+        law.area()
+    }
+
+    fn resolve_film_at_surface(
+        &self,
+        gas: &Self::State,
+        surface: Temperature,
+    ) -> Result<ConductanceSample<Self::Sample>, MaterialConvectionError> {
+        self.film
+            .resolve_at_temperature(self.flow, gas, surface.value(), surface)
+    }
+}
+
+/// Original type name shared by BOTH fixed-speed and prescribed-film constructors.
+/// The same typed film payload is retained by the generic conducting owner.
+pub type ConjugateFilmGasSurface<'g, 'a, 'm, M = ThermochemicalGasModel> =
+    ConjugateGasSurface<'a, 'm, ConjugateFilmSelection<'g, M>>;
+
 #[derive(Clone, Copy, Debug)]
 struct ConductingPath<'a, 'm> {
     layer: &'a ResolvedConductionLayer<'m>,
@@ -106,8 +181,8 @@ impl ConductingPath<'_, '_> {
         self.admit_state(body.initial)
     }
 
-    // Local composition seam: the source callback owns its law and concrete
-    // payload. Future tube/sphere consumers can reuse this SAME material solve.
+    // The original source callback owns its law and concrete payload. Every
+    // supported film reuses this SAME material solve and native heat transaction.
     #[allow(clippy::too_many_arguments)]
     fn resolve_with<F, W>(
         &self,
@@ -212,8 +287,8 @@ impl<F, W> ConjugateGasConvectionSample<F, W> {
 
 /// Source-integrated pure-phase path from the stored body trace to its film.
 ///
-/// Construct from FilmGasSurface::with_conducting_layer or its prescribed-flow
-/// selection. The path uses the SAME original body caloric curve and supported
+/// Construct from an original source film's with_conducting_layer selection.
+/// The path uses the SAME original body caloric curve and supported
 /// conductivity source. Its physical area must equal the positive film area.
 /// Zero film area retains prepared geometry/caloric bindings and participating
 /// body-state admission, but skips conductivity integration and film properties.
@@ -229,22 +304,21 @@ impl<F, W> ConjugateGasConvectionSample<F, W> {
 /// Its native Biot check still acts on combined G/area and its original body
 /// conductivity; the material path is not a waiver of uniform-core admission.
 #[derive(Debug)]
-pub struct ConjugateFilmGasSurface<'g, 'a, 'm, M: FilmGasSource = ThermochemicalGasModel> {
-    film: FilmGasSurface<'g, M>,
-    flow: Option<MassFlowInput>,
+pub struct ConjugateGasSurface<'a, 'm, F: ConjugateGasFilm> {
+    film: F,
     path: ConductingPath<'a, 'm>,
 }
-impl<M: FilmGasSource> Copy for ConjugateFilmGasSurface<'_, '_, '_, M> {}
-impl<M: FilmGasSource> Clone for ConjugateFilmGasSurface<'_, '_, '_, M> {
+impl<F: ConjugateGasFilm> Copy for ConjugateGasSurface<'_, '_, F> {}
+impl<F: ConjugateGasFilm> Clone for ConjugateGasSurface<'_, '_, F> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<'g, 'a, 'm, M: FilmGasSource> ConjugateFilmGasSurface<'g, 'a, 'm, M> {
-    pub(super) fn new(
-        film: FilmGasSurface<'g, M>,
-        flow: Option<MassFlowInput>,
+impl<'a, 'm, F: ConjugateGasFilm> ConjugateGasSurface<'a, 'm, F> {
+    /// Bind an original admitted source film to the same material path.
+    pub fn new(
+        film: F,
         layer: &'a ResolvedConductionLayer<'m>,
         geometry: ReservoirLayerGeometry,
         config: LayerConductionConfig,
@@ -261,7 +335,6 @@ impl<'g, 'a, 'm, M: FilmGasSource> ConjugateFilmGasSurface<'g, 'a, 'm, M> {
         }
         Ok(Self {
             film,
-            flow,
             path: ConductingPath {
                 layer,
                 geometry,
@@ -270,9 +343,8 @@ impl<'g, 'a, 'm, M: FilmGasSource> ConjugateFilmGasSurface<'g, 'a, 'm, M> {
         })
     }
 
-    fn area(&self, gas: &M::State) -> Result<f64, ConjugateGasError> {
-        let (law, _) = self.film.bind_flow(self.flow, gas)?;
-        let area = law.area()?;
+    fn area(&self, gas: &F::State) -> Result<f64, ConjugateGasError> {
+        let area = self.film.admitted_area_m2(gas)?;
         if area != 0.0 && area != self.path.geometry.surface_area_m2() {
             return Err(ConjugateGasError::Invalid(
                 "positive film and physical conducting face areas must match",
@@ -283,21 +355,19 @@ impl<'g, 'a, 'm, M: FilmGasSource> ConjugateFilmGasSurface<'g, 'a, 'm, M> {
 
     fn resolve_at_temperature<W>(
         &self,
-        gas: &M::State,
+        gas: &F::State,
         temperature_k: f64,
         body: W,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
-    ) -> Result<ConductanceSample<ConjugateFilmGasSample<M::State, W>>, ConjugateGasError> {
+    ) -> Result<ConductanceSample<ConjugateGasConvectionSample<F::Sample, W>>, ConjugateGasError>
+    {
         let area = self.area(gas)?;
         self.path.resolve_with(
             temperature_k,
             gas.temperature_k(),
             area,
             body,
-            |surface| {
-                self.film
-                    .resolve_at_temperature(self.flow, gas, surface.value(), surface)
-            },
+            |surface| self.film.resolve_film_at_surface(gas, surface),
             checkpoint,
         )
     }
@@ -306,10 +376,10 @@ impl<'g, 'a, 'm, M: FilmGasSource> ConjugateFilmGasSurface<'g, 'a, 'm, M> {
     /// The actual body state must remain on the prepared original pure phase.
     pub fn resolve(
         &self,
-        gas: &M::State,
+        gas: &F::State,
         body: EquilibriumPhaseState,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
-    ) -> Result<ConductanceSample<ConjugateFilmGasSample<M::State>>, ConjugateGasError> {
+    ) -> Result<ConductanceSample<ConjugateGasConvectionSample<F::Sample>>, ConjugateGasError> {
         self.path.admit_state(body)?;
         self.resolve_at_temperature(gas, body.temperature_k(), body, checkpoint)
     }
@@ -317,7 +387,7 @@ impl<'g, 'a, 'm, M: FilmGasSource> ConjugateFilmGasSurface<'g, 'a, 'm, M> {
     /// Use the original midpoint gas/body/piston transaction and one reciprocal Q.
     /// Layer residual watts must also fit the enclosing source budget in joules.
     #[allow(clippy::too_many_arguments)]
-    pub fn finite_body_candidate<G: PistonGas<State = M::State>>(
+    pub fn finite_body_candidate<G: PistonGas<State = F::State>>(
         &self,
         piston: &GasPiston<G>,
         input: PistonInput,
@@ -326,7 +396,7 @@ impl<'g, 'a, 'm, M: FilmGasSource> ConjugateFilmGasSurface<'g, 'a, 'm, M> {
         exchange: HeatExchangeSolve,
         cancelled: impl FnMut() -> bool,
     ) -> Result<
-        ThermalPistonCandidate<ConjugateFilmGasSample<M::State>, G>,
+        ThermalPistonCandidate<ConjugateGasConvectionSample<F::Sample>, G>,
         ThermalPistonError<ConjugateGasError>,
     > {
         let cancelled = RefCell::new(cancelled);
@@ -386,7 +456,7 @@ impl<'g, 'a, 'm, M: FilmGasSource> ConjugateFilmGasSurface<'g, 'a, 'm, M> {
     /// Use the original fixed-volume gas/body endpoint and wall-feedback owner.
     /// Its wall variable remains the BODY trace; each callback eliminates a
     /// separate physical surface through the original k(T)/film kernel.
-    pub fn isochoric_body_candidate<G: IsochoricGasStorage<State = M::State>>(
+    pub fn isochoric_body_candidate<G: IsochoricGasStorage<State = F::State>>(
         &self,
         cx: &Cx<'_>,
         environment: &FiniteGasThermalEnvironment<'_, G>,
@@ -395,7 +465,7 @@ impl<'g, 'a, 'm, M: FilmGasSource> ConjugateFilmGasSurface<'g, 'a, 'm, M> {
     ) -> Result<
         UniformEnthalpyStep<
             FiniteGasThermalReport<
-                WallConvectionSample<ConjugateFilmGasSample<M::State, Temperature>>,
+                WallConvectionSample<ConjugateGasConvectionSample<F::Sample, Temperature>>,
                 G,
             >,
         >,
@@ -452,6 +522,23 @@ impl<'g, 'a, 'm, M: FilmGasSource> ConjugateFilmGasSurface<'g, 'a, 'm, M> {
     }
 }
 
+impl<'g, 'a, 'm, M: FilmGasSource> ConjugateGasSurface<'a, 'm, ConjugateFilmSelection<'g, M>> {
+    pub(super) fn from_film(
+        film: FilmGasSurface<'g, M>,
+        flow: Option<MassFlowInput>,
+        layer: &'a ResolvedConductionLayer<'m>,
+        geometry: ReservoirLayerGeometry,
+        config: LayerConductionConfig,
+    ) -> Result<Self, ConjugateGasError> {
+        Self::new(
+            ConjugateFilmSelection { film, flow },
+            layer,
+            geometry,
+            config,
+        )
+    }
+}
+
 impl<'g, M: FilmGasSource> FilmGasSurface<'g, M> {
     /// Bind the original pure-phase conducting path to this source film.
     /// The positive film area is checked against the physical face at each
@@ -462,6 +549,6 @@ impl<'g, M: FilmGasSource> FilmGasSurface<'g, M> {
         geometry: ReservoirLayerGeometry,
         config: LayerConductionConfig,
     ) -> Result<ConjugateFilmGasSurface<'g, 'a, 'm, M>, ConjugateGasError> {
-        ConjugateFilmGasSurface::new(self, None, layer, geometry, config)
+        ConjugateFilmGasSurface::from_film(self, None, layer, geometry, config)
     }
 }

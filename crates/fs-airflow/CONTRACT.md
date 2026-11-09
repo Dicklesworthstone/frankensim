@@ -6450,3 +6450,20 @@ re-evaluated inside every native nonlinear trial and final acceptance.
 The original finite wall/fluid caloric stores supply the energy unknowns;
 bare-film hA remains diagnostic. Correlation validity, quasi-steady layer
 assumptions and temporal/source refinement obligations remain unchanged.
+
+
+### Specialized source films on conducting gas surfaces
+
+Source-pinned finite-gas conducting surfaces accept the original turbulent
+Sieder–Tate tube, explicit laminar whole-tube Sieder–Tate mean, and Whitaker
+sphere selections through the sealed `ConjugateGasFilm` interface. Their
+fixed-speed and prescribed-mass-flow forms reuse one `ConjugateGasSurface`
+material elimination and the original piston/body or isochoric heat
+transaction. Original bulk properties and source identities remain
+authoritative; only the original wall-viscosity query moves to the eliminated
+fluid-facing temperature. Whole heated length, laminar full-area admission,
+sphere viscosity-ratio limits, and actual bulk-density velocity remain
+unchanged. The existing `ConjugateFilmGasSurface` type and film sample payload
+remain compatible for both legacy constructors. All shared original-caloric,
+native-temperature conductivity support, pure-phase, radiation, Biot,
+cancellation, insulation, and source-work admissions continue to apply.

@@ -190,7 +190,7 @@ impl<'g, M: FilmGasSource> PrescribedMassFlowGasSurface<'g, M> {
         super::super::conjugate::ConjugateFilmGasSurface<'g, 'a, 'm, M>,
         super::super::conjugate::ConjugateGasError,
     > {
-        super::super::conjugate::ConjugateFilmGasSurface::new(
+        super::super::conjugate::ConjugateFilmGasSurface::from_film(
             self.surface, Some(self.flow), layer, geometry, config,
         )
     }
