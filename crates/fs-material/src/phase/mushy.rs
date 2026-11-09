@@ -14,7 +14,10 @@ use crate::MaterialError;
 /// Phase volumes per unit mixture mass, converted with constituent densities.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PhaseVolumeFractions {
+    /// Retained from the solid's own specific volume, not `1 - liquid`.
     pub solid: f64,
+    /// Retained from the liquid's own specific volume. At large contrasts a
+    /// fraction may round to one while the other phase remains representable.
     pub liquid: f64,
     pub bulk_density_kg_m3: f64,
 }
@@ -51,24 +54,21 @@ impl PhaseVolumeFractions {
                 "constituent volumes disagree with the original enthalpy chart density",
             ));
         }
-        let liquid = if solid_density_kg_m3.to_bits() == liquid_density_kg_m3.to_bits() {
-            state.liquid_mass_fraction()
-        } else if state.liquid_mass_fraction() == 0.0 {
-            0.0
-        } else if state.liquid_mass_fraction() == 1.0 {
-            1.0
+        let (solid, liquid) = if solid_density_kg_m3.to_bits() == liquid_density_kg_m3.to_bits() {
+            (state.solid_mass_fraction(), state.liquid_mass_fraction())
         } else {
-            liquid / volume
+            (solid / volume, liquid / volume)
         };
-        if !liquid.is_finite()
-            || !(0.0..=1.0).contains(&liquid)
+        if ![solid, liquid]
+            .into_iter()
+            .all(|fraction| fraction.is_finite() && (0.0..=1.0).contains(&fraction))
             || (state.liquid_mass_fraction() > 0.0 && liquid == 0.0)
-            || (state.solid_mass_fraction() > 0.0 && liquid == 1.0)
+            || (state.solid_mass_fraction() > 0.0 && solid == 0.0)
         {
             return Err(invalid("mixture volume fraction is not representable"));
         }
         Ok(Self {
-            solid: 1.0 - liquid,
+            solid,
             liquid,
             bulk_density_kg_m3: rho,
         })
@@ -319,7 +319,10 @@ impl<'a> MushyPhaseLaw<'a> {
             identity: hash.finalize(),
         };
         if minimum_liquid_volume_fraction > 0.0 {
-            law.inverse_permeability(minimum_liquid_volume_fraction)?;
+            law.inverse_permeability(
+                1.0 - minimum_liquid_volume_fraction,
+                minimum_liquid_volume_fraction,
+            )?;
         }
         Ok(law)
     }
@@ -393,17 +396,20 @@ impl<'a> MushyPhaseLaw<'a> {
         Ok(PhaseMobility::Mobile(MushyPhaseState {
             phase,
             volumes,
-            inverse_permeability_per_m2: self.inverse_permeability(volumes.liquid)?,
+            inverse_permeability_per_m2: self
+                .inverse_permeability(volumes.solid, volumes.liquid)?,
             law_identity: self.identity,
         }))
     }
 
-    fn inverse_permeability(&self, phi: f64) -> Result<f64, MaterialError> {
-        if phi == 1.0 {
+    fn inverse_permeability(&self, solid: f64, liquid: f64) -> Result<f64, MaterialError> {
+        // A rounded liquid fraction of one is not evidence that the solid
+        // inventory vanished. Use both independently retained phase volumes.
+        if solid == 0.0 {
             return Ok(0.0);
         }
-        let ratio = (1.0 - phi) / phi;
-        let direct = (ratio * ratio / phi) / self.permeability_scale_m2;
+        let ratio = solid / liquid;
+        let direct = (ratio * ratio / liquid) / self.permeability_scale_m2;
         let inverse = if direct.is_finite() && direct > 0.0 {
             direct
         } else {
@@ -411,8 +417,8 @@ impl<'a> MushyPhaseLaw<'a> {
             // first avoids intermediate overflow when a large K0 compensates
             // a small positive fraction. An unrepresentable final resistance
             // still refuses; no fraction floor or drag cap is introduced.
-            let scaled = (1.0 - phi) / (fs_math::det::sqrt(self.permeability_scale_m2) * phi);
-            (scaled * scaled) / phi
+            let scaled = solid / (fs_math::det::sqrt(self.permeability_scale_m2) * liquid);
+            (scaled * scaled) / liquid
         };
         if !inverse.is_finite() || inverse <= 0.0 {
             return Err(invalid("mushy inverse permeability is not representable"));
@@ -499,6 +505,66 @@ mod tests {
             PhaseVolumeFractions::try_new(curve.state_at_specific_enthalpy(0.0).unwrap(), 2.0, 1.0)
                 .unwrap();
         assert_eq!(solid.solid, 1.0);
+    }
+
+    /// G1/G3: phase inventories and Darcy resistance remain accurate as a
+    /// positive residual solid approaches the representable liquid endpoint.
+    #[test]
+    fn unequal_density_retains_small_solid_volume_and_its_resistance() {
+        for [rho_s, rho_l] in [[2700.0, 2400.0], [7800.0, 7000.0], [1000.0, 1.0]] {
+            let curve = curve([rho_s, rho_l]);
+            let scale = 1e-8;
+            let law =
+                MushyPhaseLaw::try_new_with_immobile_solid(&curve, rho_s, rho_l, scale).unwrap();
+            for h in [99.0, 99.999999, 100.0_f64.next_down()] {
+                let state = law.at_specific_enthalpy(h).unwrap();
+                let phase = curve.state_at_specific_enthalpy(h).unwrap();
+                assert_eq!(state.phase, phase);
+
+                // An independent one-kilogram inventory supplies its actual
+                // occupied volumes and the dimensional Carman--Kozeny law.
+                let solid_mass = phase.solid_mass_fraction();
+                let liquid_mass = phase.liquid_mass_fraction();
+                let solid_volume = solid_mass / rho_s;
+                let liquid_volume = liquid_mass / rho_l;
+                let total_volume = solid_volume + liquid_volume;
+                let close = |actual: f64, expected: f64| {
+                    assert!(
+                        (actual / expected - 1.0).abs() < 8e-15,
+                        "{actual:.17e} != {expected:.17e}, rho={rho_s}/{rho_l}, h={h:.17e}"
+                    );
+                };
+                close(state.volumes.solid * total_volume * rho_s, solid_mass);
+                close(state.volumes.liquid * total_volume * rho_l, liquid_mass);
+                close(state.volumes.bulk_density_kg_m3, total_volume.recip());
+                close(
+                    state.inverse_permeability_per_m2,
+                    solid_volume.powi(2) * total_volume / (scale * liquid_volume.powi(3)),
+                );
+                assert!(state.volumes.solid > 0.0);
+                assert!(state.inverse_permeability_per_m2 > 0.0);
+            }
+            let pure_liquid = law.at_specific_enthalpy(100.0).unwrap();
+            assert_eq!(pure_liquid.volumes.solid, 0.0);
+            assert_eq!(pure_liquid.volumes.liquid, 1.0);
+            assert_eq!(pure_liquid.inverse_permeability_per_m2, 0.0);
+            assert!(matches!(
+                law.classify_at_specific_enthalpy(0.0).unwrap(),
+                PhaseMobility::ImmobileSolid { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn rounded_majority_volume_does_not_erase_a_present_constituent() {
+        let curve = curve([1000.0, 1.0]);
+        let law = MushyPhaseLaw::try_new(&curve, 1000.0, 1.0, 1e-8, 0.01).unwrap();
+        let state = law.at_specific_enthalpy(100.0_f64.next_down()).unwrap();
+        assert_eq!(state.volumes.liquid, 1.0);
+        assert!(state.volumes.solid > 0.0);
+        assert!(state.phase.solid_mass_fraction() > 0.0);
+        assert!(state.inverse_permeability_per_m2 > 0.0);
+        assert_ne!(state, law.at_specific_enthalpy(100.0).unwrap());
     }
 
     #[test]

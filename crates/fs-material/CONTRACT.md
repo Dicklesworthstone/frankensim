@@ -7494,6 +7494,14 @@ fixed-volume consumers. Separate constituent velocities, elastic skeleton
 response, pressure/composition evolution and moving boundaries remain outside
 this closure.
 
+Both phase-volume fractions are retained from their own constituent volumes.
+Density contrast and nearly complete melting must not reconstruct a small solid
+inventory by subtracting the liquid fraction from one. The resistance uses that
+retained solid fraction even when the majority liquid fraction rounds to one;
+only an actually absent solid has zero extra drag. Focused G1/G3 regressions
+check independent one-kilogram phase inventories and dimensional resistance near
+the liquid endpoint, including unequal-density rounding and exact pure phases.
+
 `MushyPhaseLaw::try_from_melting_curve` consumes the original source-backed
 sharp-melting chart without freezing its pure-phase densities at the fusion
 temperature. Solid and liquid sensible states retain the chart's actual density;
