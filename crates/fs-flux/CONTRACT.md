@@ -11337,3 +11337,56 @@ These source receipts qualify completed endpoints, not each internal/rejected
 adaptive trial. Full pair diffusivities and kappa remain explicitly authored
 numerical inputs; endpoint source refresh does not imply dynamically sourced
 transport coefficients or two-way variable-density momentum coupling.
+
+## Local-temperature multicomponent phase separation
+
+The experimental multicomponent phase-field owner can bind the original
+multicomponent liquid caloric law and evolve all independent species together
+with local cell temperatures. The original A+B/T mixing law and pure-liquid
+Cp curves supply source-conjugate chemical efforts, divided partial-enthalpy
+carriage and bounded caloric inversion. Authored heat-of-transport contrasts
+remain reciprocal in species and energy transport; no Soret coefficient is
+inferred from the interaction law.
+
+Constant energetic interfaces retain exactly the existing species-symmetric
+edge law E_e=kappa*A/(4*d)*sum_s(delta x_s)^2 and carry no interface entropy.
+Each cell stores U_i=H_i+half the sum of its incident edge energies. The
+interface entropy-conjugate species potential is
+sum_j K_ij*(1/T_i+1/T_j)*(x_i,s-x_j,s)/N_i, with K_ij=kappa*A/(4*d).
+Actual admitted published molar totals supply N_i. A canonical graph pass
+assembles these potentials before the original coupled Maxwell--Stefan sweep.
+The inverse-temperature weight uses (1+T_min/T_max)/T_min rather than a
+potentially overflowing reciprocal sum or temperature product.
+
+All species and paired total-local-energy transfers are simultaneous. After
+the independent inventories determine their original fractions, each changed
+edge deducts half its energy increment from BOTH endpoint bulk-enthalpy targets.
+The same original caloric inverse then recovers each affected temperature,
+including spectators whose published composition did not change. Bulk enthalpy,
+interface energy and total-energy residual remain separate receipt quantities.
+
+The original thermal inventory and caloric-resolution checks are shared, not
+reimplemented. Publication requires complete all-species/cell-capacity closure,
+actual homogeneous enthalpy PLUS interface energy conservation, and nondecreasing
+original homogeneous entropy within the offered numerical allowances. Positive
+initial constitutive entropy production does not replace that finite-step audit.
+
+Only the private positive-interface owner may retain the original caloric
+closure's explicit nonconvex-bracket result. Both original endpoint domains and
+curvature evaluations still run; source, stability, arithmetic and cancellation
+failures propagate. Public homogeneous thermal binding keeps its full-bracket
+convexity requirement. Neither a raw homogeneous field nor a nonconvex
+zero-gradient network escapes from the new public owner.
+
+The model retains rigid geometry, equal fixed partial molar volumes, static
+pressure, common positive support and constant energetic kappa. Its explicit
+time update has no unconditional stability claim. Phase-field advection and
+hydrodynamic capillary work remain separate unimplemented couplings.
+
+Focused regression sources compare variable-Cp/B/T spinodal heating, unchanged-
+composition spectator heating and cooling, unequal-temperature/unequal-pair
+friction with reciprocal heat, an independent total-entropy directional
+derivative, binary normalization, and species/energy conservation through the
+supported species limit. Additional cases retain ordinary convexity admission,
+workspace boundaries and transactional cancellation. These are numerical
+oracles, not material calibration or spatial-convergence certificates.

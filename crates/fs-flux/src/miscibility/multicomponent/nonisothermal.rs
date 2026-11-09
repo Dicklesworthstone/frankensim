@@ -35,7 +35,7 @@ use fs_thermochem::transport::maxwell_stefan::MaxwellStefanMolarSolveV1;
 use std::sync::Arc;
 
 mod precision;
-mod solve;
+pub(super) mod solve;
 
 /// Coupled composition and local-temperature accuracy over a physical interval.
 pub mod adaptive;
@@ -220,6 +220,33 @@ impl MulticomponentMiscibilityNetwork {
         faces: Vec<MulticomponentNonisothermalFace>,
         temperature_bracket: [Temperature; 2],
         maximum_workspace_bytes: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MulticomponentNonisothermalField> {
+        self.prepare_nonisothermal_field(
+            initial,
+            caloric,
+            temperatures,
+            faces,
+            temperature_bracket,
+            maximum_workspace_bytes,
+            true,
+            cancelled,
+        )
+    }
+
+    /// Shared original-source initialization. Only the explicit positive
+    /// interface-energy owner may retain a nonconvex bulk branch; that owner
+    /// never exposes this raw homogeneous thermal field.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn prepare_nonisothermal_field(
+        &self,
+        initial: &MulticomponentMiscibilityField,
+        caloric: MulticomponentLiquidCaloricModelV1,
+        temperatures: Vec<Temperature>,
+        faces: Vec<MulticomponentNonisothermalFace>,
+        temperature_bracket: [Temperature; 2],
+        maximum_workspace_bytes: usize,
+        require_convexity: bool,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MulticomponentNonisothermalField> {
         poll(&mut cancelled)?;
@@ -238,8 +265,21 @@ impl MulticomponentMiscibilityNetwork {
                 "same original network/caloric law, one local temperature per cell and canonical finite thermal face data required",
             ));
         }
-        let convexity_lower_bound =
-            caloric.admit_transport_temperature_interval(temperature_bracket, &mut cancelled)?;
+        // The original closure first validates both source endpoints and
+        // evaluates both curvature bounds. Only its explicit convexity refusal
+        // may be retained by the interfacial owner; no source, arithmetic,
+        // stability or cancellation error is suppressed.
+        let convexity_lower_bound = match caloric
+            .admit_transport_temperature_interval(temperature_bracket, &mut cancelled)
+        {
+            Ok(bound) => bound,
+            Err(MulticomponentCaloricErrorV1::TransportConvexity { lower_bound })
+                if !require_convexity =>
+            {
+                lower_bound
+            }
+            Err(error) => return Err(error.into()),
+        };
         // Covers simultaneous coarse/fine fields, original caloric states,
         // face rates/receipts, shared friction workspace and vector headers.
         // Original material-card storage remains outside the numerical budget.
@@ -402,6 +442,20 @@ impl MulticomponentNonisothermalField {
         controls: MulticomponentNonisothermalSolve,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(Vec<f64>, f64, f64, f64)> {
+        let balances = self.caloric_balances(next, controls, cancelled)?;
+        admit_energy_entropy(balances.2, balances.3, controls)?;
+        Ok(balances)
+    }
+
+    /// Original inventory and caloric increments, including the carried-amount
+    /// energy-resolution guard. The caller applies its complete storage law:
+    /// bulk enthalpy here, bulk plus interface energy in the phase-field owner.
+    pub(super) fn caloric_balances(
+        &self,
+        next: &Self,
+        controls: MulticomponentNonisothermalSolve,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Vec<f64>, f64, f64, f64)> {
         let (species, capacity) = self.state.inventory_balances(
             &next.state,
             controls.amount_balance_tolerance_mol,
@@ -430,25 +484,32 @@ impl MulticomponentNonisothermalField {
             energy.add(change.enthalpy_change_j)?;
             entropy.add(change.entropy_change_j_per_k)?;
         }
-        let energy = energy.value()?;
-        if energy.abs() > controls.energy_tolerance_j {
-            return Err(MulticomponentNonisothermalError::Energy {
-                residual_j: energy,
-                tolerance_j: controls.energy_tolerance_j,
-            });
-        }
-        let entropy = entropy.value()?;
-        if entropy < -controls.entropy_tolerance_j_per_k {
-            return Err(MulticomponentNonisothermalError::Entropy {
-                change_j_per_k: entropy,
-                tolerance_j_per_k: controls.entropy_tolerance_j_per_k,
-            });
-        }
-        Ok((species, capacity, energy, entropy))
+        Ok((species, capacity, energy.value()?, entropy.value()?))
     }
 }
 
-fn admit_controls(c: MulticomponentNonisothermalSolve) -> Result<()> {
+/// Apply the closed-window laws to the caller's complete stored energy.
+pub(super) fn admit_energy_entropy(
+    energy: f64,
+    entropy: f64,
+    controls: MulticomponentNonisothermalSolve,
+) -> Result<()> {
+    if energy.abs() > controls.energy_tolerance_j {
+        return Err(MulticomponentNonisothermalError::Energy {
+            residual_j: energy,
+            tolerance_j: controls.energy_tolerance_j,
+        });
+    }
+    if entropy < -controls.entropy_tolerance_j_per_k {
+        return Err(MulticomponentNonisothermalError::Entropy {
+            change_j_per_k: entropy,
+            tolerance_j_per_k: controls.entropy_tolerance_j_per_k,
+        });
+    }
+    Ok(())
+}
+
+pub(super) fn admit_controls(c: MulticomponentNonisothermalSolve) -> Result<()> {
     super::admit_controls(MulticomponentMiscibilitySolve {
         maxwell_stefan: c.maxwell_stefan,
         amount_balance_tolerance_mol: c.amount_balance_tolerance_mol,
@@ -465,7 +526,7 @@ fn admit_controls(c: MulticomponentNonisothermalSolve) -> Result<()> {
     }
     Ok(())
 }
-fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<()> {
+pub(super) fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<()> {
     if cancelled() {
         Err(MulticomponentNonisothermalError::Cancelled)
     } else {

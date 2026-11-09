@@ -30,6 +30,9 @@ mod solve;
 /// Bounded complete-window composition and interfacial-energy accuracy.
 pub mod adaptive;
 
+/// Local-temperature demixing with original calorics and interface-energy storage.
+pub mod nonisothermal;
+
 /// Original liquid properties retained through accepted demixing endpoints.
 #[cfg(any(feature = "continuum", feature = "experimental-miscibility-material"))]
 pub mod material;
