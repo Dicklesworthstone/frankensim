@@ -401,6 +401,16 @@ retain full mass so their volume agrees with the native gas-pressure face.
 This explicit constructor does not change the generic classifier's half-filled
 interface convention. Observations and mass remain per unit out-of-plane depth.
 
+`FreeSurface::new_hydrostatic_column` applies that same profile to a fresh
+native D2Q9 grid with an existing wall/weir mask. Complete occupied columns
+run from the floor to one declared upper gas face; vertical/submerged gas
+exposure refuses. The input is closed and nonperiodic, with downward held
+gravity, zero external force and raw unit-density BGK rest populations.
+The constructor retains the mask, initializes the original physical rest
+frame and full interface mass, and introduces no per-step work. Its masked
+weir regressions share the dense integration seam below. Historical generic
+initialization and its half-filled inventory remain unchanged.
+
 For lattice acceleration magnitude `a`, set `h = a/(2*cs^2)`. The nearest wet
 layer has `rho = 1/(1-h)`; successive deeper layers multiply by
 `(1+h)/(1-h)`. This surface factor follows the native missing-gas-link rule.

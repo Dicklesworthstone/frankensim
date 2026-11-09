@@ -16,13 +16,13 @@
 pub mod rheology;
 
 use fs_exec::CancelGate;
-use fs_lbm::Cell;
 use fs_lbm::film::{FilmError, material::MaterialFilmLiquid};
-use fs_lbm::freesurface::{ContactModel, FreeSurface};
+use fs_lbm::freesurface::{ContactModel, FreeSurface, FreeSurfacePressureError2};
 use fs_lbm::material::MaterialLbmError;
 use fs_lbm::material::free_surface::rheology::FreeSurfaceRheologyError;
 use fs_lbm::material::free_surface::{MaterialFreeSurfaceScaling, plan_free_surface_from_material};
 use fs_lbm::rheology::{Rheology, TAU_CAP, TAU_FLOOR};
+use fs_lbm::{Cell, Grid};
 use fs_material::liquid::surface::ResolvedLiquidSurfaceState;
 
 use super::{PourError, PourOutcome, PourRig, advance_pour_liquid, run_pour_motion_integrated};
@@ -286,10 +286,95 @@ impl<'a> MaterialPour<'a> {
         })
     }
 
+    /// Start the original weir pour with its liquid pressure balancing gravity.
+    ///
+    /// The existing below-crest liquid mask occupies `lip[1] - 1` complete
+    /// layers. Its flat free surface lies halfway between the top wet and first
+    /// gas cell centres. Interface cells start fully filled, unlike the
+    /// half-filled boundary row in [`Self::run`]. The reported initial mass
+    /// includes this full-layer geometry and the bounded numerical density
+    /// increase with depth; this is not a mass-preserving pressure projection.
+    ///
+    /// The positive `free_surface_pressure_pa` is the gas pressure datum and is
+    /// retained in the accepted outcome's scaling. Neutral contact is implicit
+    /// and surface tension must be zero. The native rest profile balances
+    /// collision, streaming and gas reconstruction under the actual `rho * g`
+    /// force. After initialization, the same rotating-frame schedule and source
+    /// viscosity advance the original solver; no relaxation steps are inserted.
+    ///
+    /// Density variation remains weakly compressible numerical pressure, not
+    /// a liquid equation of state. The existing speed and density-excursion
+    /// limits apply at initialization and every completed step. Physical
+    /// absolute pressure must also remain positive and representable.
+    ///
+    /// # Errors
+    /// Refuses nonzero capillarity, an invalid pressure datum, an unresolved
+    /// hydrostatic profile, cancellation, or any original pour/trajectory limit.
+    /// No existing source or prepared pour is changed by a failed run.
+    pub fn run_hydrostatic(
+        &self,
+        free_surface_pressure_pa: f64,
+        gate: &CancelGate,
+    ) -> Result<MaterialPourOutcome<'a>, MaterialPourError> {
+        checkpoint(gate)?;
+        if self.rig.surface_tension != 0.0 {
+            return Err(MaterialPourError::Invalid(
+                "hydrostatic pour initialization requires zero surface tension",
+            ));
+        }
+        let scaling = self
+            .scaling
+            .with_pressure_reference(free_surface_pressure_pa)?;
+        self.run_initialized_with(
+            scaling,
+            gate,
+            |mut grid| {
+                // This is a fresh raw-equilibrium grid, not an accepted flow.
+                // The native initializer supplies the physical-rest Guo frame.
+                grid.g = [0.0, -self.rig.g0];
+                FreeSurface::new_hydrostatic_column(
+                    grid,
+                    self.rig.lip_h - 1,
+                    self.spec.maximum_density_excursion,
+                    gate,
+                )
+                .map_err(|error| match error {
+                    FreeSurfacePressureError2::Cancelled => MaterialPourError::Cancelled,
+                    error => MaterialPourError::Scaling(error.into()),
+                })
+            },
+            |sim, step| {
+                advance_pour_liquid(
+                    sim,
+                    Rheology::Newtonian {
+                        nu: self.scaling.flow().viscosity,
+                    },
+                    step,
+                )
+                .map_err(Into::into)
+            },
+        )
+    }
+
     fn run_with(
         &self,
         contact: ContactModel,
         gate: &CancelGate,
+        advance: impl FnMut(&mut FreeSurface, u32) -> Result<(), MaterialPourError>,
+    ) -> Result<MaterialPourOutcome<'a>, MaterialPourError> {
+        self.run_initialized_with(
+            self.scaling,
+            gate,
+            |grid| Ok(FreeSurface::new(grid, self.rig.surface_tension, contact)),
+            advance,
+        )
+    }
+
+    fn run_initialized_with(
+        &self,
+        scaling: MaterialFreeSurfaceScaling<'a>,
+        gate: &CancelGate,
+        initialize: impl FnOnce(Grid) -> Result<FreeSurface, MaterialPourError>,
         advance: impl FnMut(&mut FreeSurface, u32) -> Result<(), MaterialPourError>,
     ) -> Result<MaterialPourOutcome<'a>, MaterialPourError> {
         checkpoint(gate)?;
@@ -303,12 +388,12 @@ impl<'a> MaterialPour<'a> {
         };
         let native = run_pour_motion_integrated(
             &self.rig,
-            contact,
             Some(self.pivot),
+            initialize,
             advance,
             |sim, step| {
                 checkpoint(gate)?;
-                self.observe(sim, step, &mut report)?;
+                self.observe(sim, step, &scaling, &mut report)?;
                 Ok::<(), MaterialPourError>(())
             },
         )?;
@@ -318,7 +403,7 @@ impl<'a> MaterialPour<'a> {
         }
         checkpoint(gate)?;
         Ok(MaterialPourOutcome {
-            scaling: self.scaling,
+            scaling,
             native,
             report,
             mass_per_depth_unit_kg_m: self.mass_per_depth_unit_kg_m,
@@ -329,6 +414,7 @@ impl<'a> MaterialPour<'a> {
         &self,
         sim: &FreeSurface,
         step: u32,
+        scaling: &MaterialFreeSurfaceScaling<'_>,
         report: &mut MaterialPourReport,
     ) -> Result<(), MaterialPourError> {
         for (cell, flag) in sim.grid.flags.iter().enumerate() {
@@ -342,6 +428,9 @@ impl<'a> MaterialPour<'a> {
                     cell,
                     reason: "wet-cell density is not positive and finite",
                 });
+            }
+            if scaling.reference_pressure_pa().is_some() {
+                scaling.absolute_pressure_si(rho)?;
             }
             let moments = sim.grid.moments(cell);
             let speed =

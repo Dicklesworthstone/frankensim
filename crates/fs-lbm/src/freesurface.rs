@@ -14,6 +14,7 @@
 //! its numerical contact-line estimate does not claim measured calibration.
 
 mod curvature;
+pub(crate) mod hydrostatic;
 mod impulse;
 mod momentum;
 pub use momentum::{

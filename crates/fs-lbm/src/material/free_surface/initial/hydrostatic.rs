@@ -15,39 +15,16 @@ pub(in crate::material::free_surface) fn hydrostatic_density_layers(
     acceleration_lattice: f64,
     depth: usize,
     maximum_density_excursion: f64,
-    mut checkpoint: impl FnMut() -> Result<(), MaterialLbmError>,
+    checkpoint: impl FnMut() -> Result<(), MaterialLbmError>,
 ) -> Result<Vec<f64>, MaterialLbmError> {
-    // For u=0, the original collision maps w*rho-S/2 to w*rho+S/2.
-    // Streaming one cell downwards therefore requires
-    // rho_next*(1-h) = rho_previous*(1+h). At a missing gas link,
-    // f_in = 2*w*rho_boundary - f_out instead gives
-    // rho_nearest*(1-h) = rho_boundary = 1. This is not sqrt(ratio).
-    let half_head = acceleration_lattice / (2.0 * CS2);
-    if !half_head.is_finite() || half_head >= 1.0 {
-        return Err(MaterialLbmError::Invalid(
-            "hydrostatic lattice acceleration cannot retain positive rest populations",
-        ));
-    }
-    let ratio = (1.0 + half_head) / (1.0 - half_head);
-    let mut density = 1.0 / (1.0 - half_head);
-    let mut layers = Vec::new();
-    layers.try_reserve_exact(depth).map_err(|_| {
-        MaterialLbmError::Invalid("hydrostatic density-profile allocation failed")
-    })?;
-    for layer in 0..depth {
-        checkpoint()?;
-        if !density.is_finite() || (density - 1.0).abs() > maximum_density_excursion {
-            return Err(MaterialLbmError::Invalid(
-                "hydrostatic profile exceeds its declared density-excursion bound",
-            ));
-        }
-        scaling.absolute_pressure_si(density)?;
-        layers.push(density);
-        if layer + 1 < depth {
-            density *= ratio;
-        }
-    }
-    Ok(layers)
+    crate::freesurface::hydrostatic::density_layers(
+        acceleration_lattice,
+        depth,
+        maximum_density_excursion,
+        checkpoint,
+        |density| scaling.absolute_pressure_si(density).map(|_| ()),
+        MaterialLbmError::Invalid,
+    )
 }
 
 impl<'a> MaterialFreeSurfaceScaling<'a> {

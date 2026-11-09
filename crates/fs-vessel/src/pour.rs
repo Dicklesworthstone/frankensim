@@ -920,19 +920,19 @@ fn run_pour_motion_observed<E: From<PourError>>(
 ) -> Result<PourOutcome, E> {
     run_pour_motion_integrated(
         rig,
-        contact,
         pivot,
+        |grid| Ok(FreeSurface::new(grid, rig.surface_tension, contact)),
         |sim, step| advance_pour_liquid(sim, law, step).map_err(E::from),
         observe,
     )
 }
 
-// Constitutive bindings provide one native advance; geometry, frame motion,
-// endpoint observation and outcome construction remain shared by every pour.
+// Bindings provide initial populations and one native advance; geometry, frame
+// motion, endpoint observation and outcome construction stay shared by every pour.
 fn run_pour_motion_integrated<E: From<PourError>>(
     rig: &PourRig,
-    contact: ContactModel,
     pivot: Option<[f64; 2]>,
+    initialize: impl FnOnce(Grid) -> Result<FreeSurface, E>,
     mut advance: impl FnMut(&mut FreeSurface, u32) -> Result<(), E>,
     mut observe: impl FnMut(&FreeSurface, u32) -> Result<(), E>,
 ) -> Result<PourOutcome, E> {
@@ -976,7 +976,7 @@ fn run_pour_motion_integrated<E: From<PourError>>(
             grid.flags[i] = Cell::Fluid;
         }
     }
-    let mut sim = FreeSurface::new(grid, rig.surface_tension, contact);
+    let mut sim = initialize(grid)?;
     let m0 = sim.ledger_mass();
     let mut mass_drift = 0.0f64;
     observe(&sim, 0)?;

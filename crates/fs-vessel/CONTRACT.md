@@ -514,6 +514,22 @@ simulation does not infer a vessel depth or report kilograms. The original
 mass field remains the rendering field; physical mass values are available
 through a lazy iterator without a second field allocation.
 
+`MaterialPour::run_hydrostatic` explicitly selects a gravity-balanced start for
+the same below-crest weir mask. It requires zero surface tension, uses neutral
+contact, and retains the caller's positive free-surface pressure datum in the
+outcome scaling. Complete liquid layers, including the interface row, carry the
+native discrete hydrostatic density profile under the actual rho*g force. The
+reported initial mass includes this full-layer volume and bounded numerical
+compression; it is not the historical half-filled-interface inventory or a
+mass-preserving pressure projection. No relaxation steps precede the prescribed
+motion. Absolute pressure must remain positive and representable, while the
+same source, Mach, speed and density-excursion admissions remain authoritative.
+This is weakly compressible numerical pressure, not a physical liquid EOS.
+Existing `run` and legacy/browser initializations retain their original behavior.
+Focused tests retain the weir mask and static rest under physical gravity,
+recover the SI pressure head, check full-layer mass and source-density scaling,
+and exercise pressure-datum invariance and incompatible-state refusals.
+
 This binding holds one Newtonian source at its resolved conditions and refuses
 sources requiring evolving rheology. It does not solve thermal or composition
 evolution, certify laminar transition or substep extrema, calibrate the contact

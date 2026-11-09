@@ -1,8 +1,8 @@
 //! G1/G3 physical pressure, gauge and density substitution in the dense owner.
 use super::*;
 use fs_exec::CancelGate;
-use fs_lbm::core2::Cell;
-use fs_lbm::freesurface::{ContactModel, FreeSurfacePressureError2, PlanarWall2};
+use fs_lbm::core2::{Cell, Grid};
+use fs_lbm::freesurface::{ContactModel, FreeSurface, FreeSurfacePressureError2, PlanarWall2};
 use fs_lbm::material::MaterialLbmError;
 use fs_lbm::material::free_surface::{MaterialFreeSurface2, MaterialFreeSurfaceDomain2};
 
@@ -108,6 +108,116 @@ fn pressure_domain(gravity_m_s2: [f64; 2]) -> MaterialFreeSurfaceDomain2 {
         contact: ContactModel::Neutral,
         max_cells: 144,
     }
+}
+
+fn hydrostatic_weir(depth: usize, acceleration: f64) -> Grid {
+    let (nx, ny, lip_x) = (18, 16, 9);
+    let mut grid = Grid::uniform(nx, ny, 0.55);
+    grid.periodic_x = false;
+    grid.periodic_y = false;
+    grid.g = [0.0, -acceleration];
+    for y in 0..ny {
+        for x in 0..nx {
+            let i = grid.idx(x, y);
+            grid.flags[i] = if x == 0 || y == 0 || x + 1 == nx || y + 1 == ny
+                || (x == lip_x && y <= depth + 1)
+            {
+                Cell::Wall
+            } else if x < lip_x && y <= depth {
+                Cell::Fluid
+            } else {
+                Cell::Gas
+            };
+        }
+    }
+    grid
+}
+
+#[test]
+fn g1_masked_weir_retains_its_geometry_full_mass_and_native_rest() {
+    let gate = CancelGate::new_clock_free();
+    for depth in [1, 9] {
+        for acceleration in [0.0, 6e-4] {
+            let grid = hydrostatic_weir(depth, acceleration);
+            let flags = grid.flags.clone();
+            let h = acceleration / (2.0 * CS2);
+            let density = |layer: usize| {
+                (1.0 + h).powi(layer as i32) / (1.0 - h).powi(layer as i32 + 1)
+            };
+            let expected_mass = 8.0 * (0..depth).map(density).sum::<f64>();
+            let mut flow = FreeSurface::new_hydrostatic_column(grid, depth, 0.05, &gate).unwrap();
+            for _ in 0..32 {
+                assert!((flow.ledger_mass() - expected_mass).abs() < 2e-11 * expected_mass);
+                assert_eq!(flow.carry, 0.0);
+                for y in 0..flow.grid.ny {
+                    for x in 0..flow.grid.nx {
+                        let i = flow.grid.idx(x, y);
+                        if flags[i] != Cell::Fluid {
+                            assert_eq!(flow.grid.flags[i], flags[i]);
+                            continue;
+                        }
+                        assert_eq!(flow.grid.flags[i], if y == depth { Cell::Interface } else { Cell::Fluid });
+                        assert!((flow.fill(i) - 1.0).abs() < 2e-11);
+                        let moments = flow.grid.moments(i);
+                        assert!((moments.rho - density(depth - y)).abs() < 2e-11);
+                        assert!(moments.u.iter().all(|u| u.abs() < 5e-12));
+                    }
+                }
+                assert_eq!(flow.step_with_momentum(&gate).unwrap().routes, 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn g0_masked_hydrostatic_refuses_incompatible_topology_force_and_old_state() {
+    let gate = CancelGate::new_clock_free();
+    let check = |grid| assert!(FreeSurface::new_hydrostatic_column(grid, 9, 0.05, &gate).is_err());
+    let mut grid = hydrostatic_weir(9, 6e-4);
+    grid.periodic_x = true;
+    check(grid);
+    let mut grid = hydrostatic_weir(9, 6e-4);
+    grid.flags[0] = Cell::Gas;
+    check(grid);
+    let mut grid = hydrostatic_weir(9, 6e-4);
+    let exposed = grid.idx(9, 8);
+    grid.flags[exposed] = Cell::Gas;
+    check(grid);
+    let mut grid = hydrostatic_weir(9, 6e-4);
+    let occupied = grid.idx(1, 1);
+    grid.flags[occupied] = Cell::Interface;
+    check(grid);
+    for gravity in [[1e-4, -6e-4], [0.0, 6e-4], [0.0, f64::NAN], [0.0, -1.0]] {
+        let mut grid = hydrostatic_weir(9, 6e-4);
+        grid.g = gravity;
+        check(grid);
+    }
+    let mut grid = hydrostatic_weir(9, 6e-4);
+    grid.fext[occupied] = [1e-5, 0.0];
+    check(grid);
+    let mut grid = hydrostatic_weir(9, 6e-4);
+    grid.f[occupied] = fs_lbm::equilibrium(1.0, 1e-4, 0.0);
+    check(grid);
+    let mut grid = hydrostatic_weir(9, 6e-4);
+    grid.tau[occupied] = 0.5;
+    check(grid);
+    for bound in [0.0, -0.1, 1.0, f64::NAN, 0.001] {
+        assert!(FreeSurface::new_hydrostatic_column(hydrostatic_weir(9, 6e-4), 9, bound, &gate).is_err());
+    }
+    for top in [0, 8, 14, usize::MAX] {
+        assert!(FreeSurface::new_hydrostatic_column(hydrostatic_weir(9, 6e-4), top, 0.05, &gate).is_err());
+    }
+    let mut empty = hydrostatic_weir(9, 6e-4);
+    for flag in &mut empty.flags {
+        if *flag == Cell::Fluid { *flag = Cell::Gas; }
+    }
+    check(empty);
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    assert!(matches!(
+        FreeSurface::new_hydrostatic_column(hydrostatic_weir(9, 6e-4), 9, 0.05, &cancelled),
+        Err(FreeSurfacePressureError2::Cancelled)
+    ));
 }
 
 #[test]
