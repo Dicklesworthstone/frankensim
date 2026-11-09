@@ -1,10 +1,13 @@
 //! Authored terminal currents retain motional voltage and finite thermal feedback.
 use super::*;
+use fs_em::conduction::response::terminals::{
+    ConductionTerminalControl, ConductionTerminalDrive, ConductionTerminalLimits,
+};
 
 #[test]
 fn terminal_controls_follow_motion_and_refreshed_resistance_on_one_thermal_clock() {
     for (current, speed) in [(2.0, 3.0), (2.0, -10.0), (-2.0, 3.0), (0.0, 3.0)] {
-        for mode in 0..3 {
+        for mode in 0..5 {
             let (a, ca) = material(1.0, 1.0, 0.002);
             let (b, cb) = material(3.0, 2.0, 0.0);
             let cards = [a, b];
@@ -41,7 +44,7 @@ fn terminal_controls_follow_motion_and_refreshed_resistance_on_one_thermal_clock
                     currents_a: &currents,
                     response,
                 },
-                _ => SpatialConductionDrive::MixedTerminals {
+                2 => SpatialConductionDrive::MixedTerminals {
                     terminals: &terminals,
                     current_terminals: &controlled,
                     voltages_v: &voltage,
@@ -53,6 +56,23 @@ fn terminal_controls_follow_motion_and_refreshed_resistance_on_one_thermal_clock
                         maximum_dense_work: 100,
                     },
                 },
+                _ => ConductionTerminalDrive {
+                    terminals: &terminals,
+                    control: if mode == 3 {
+                        ConductionTerminalControl::Currents(&currents)
+                    } else {
+                        ConductionTerminalControl::Mixed {
+                            current_terminals: &controlled,
+                            voltages_v: &[1e250],
+                            currents_a: &current_only,
+                        }
+                    },
+                    limits: ConductionTerminalLimits {
+                        maximum_terminals: 2,
+                        maximum_workspace_values: 20_000,
+                    },
+                }
+                .into(),
             };
             let velocities = vec![[0.0, speed, 0.0]; regions.len()];
             let fields = vec![[0.0, 0.0, 1.0]; regions.len()];
@@ -102,10 +122,27 @@ fn terminal_controls_follow_motion_and_refreshed_resistance_on_one_thermal_clock
                 let potential =
                     |faces: &[usize]| field.voltage_v()[problem.mesh().faces[faces[0]][0] as usize];
                 let terminal_voltage = current * (rho[0] + rho[1]) + 2.0 * speed;
-                near(
-                    potential(&positive) - potential(&negative),
-                    terminal_voltage,
-                );
+                if let Some(actual) = &report.electrical.terminals {
+                    near(actual.voltage_v[0], 0.0);
+                    near(actual.voltage_v[1], -terminal_voltage);
+                    near(actual.current_a[0], current);
+                    near(actual.current_a[1], -current);
+                    near(
+                        dt * actual.supplied_power_w,
+                        report.electrical.terminal_work_j,
+                    );
+                    near(actual.power_residual_w, 0.0);
+                }
+                if mode == 4 {
+                    // Physical voltage and source work survive even though all
+                    // absolute observations round to the held common bias.
+                    assert!(field.voltage_v().iter().all(|&v| v == 1e250));
+                } else {
+                    near(
+                        potential(&positive) - potential(&negative),
+                        terminal_voltage,
+                    );
+                }
                 if mode == 2 {
                     // The native response removes common bias and reports
                     // voltage relative to original terminal zero.
@@ -131,9 +168,16 @@ fn terminal_controls_follow_motion_and_refreshed_resistance_on_one_thermal_clock
                 near(report.electrical.net_supplied_work_j, heat);
                 near(next.thermal().energy_j() - before, heat);
                 near(report.total_energy_residual_j, 0.0);
-                // Both the stationary response and actual motional solve count.
-                assert!(report.circuit_trials >= 2);
-                assert_eq!(report.circuit_trials % 2, 0);
+                if mode < 3 {
+                    // Prepared response and actual motional source both count.
+                    assert!(report.circuit_trials >= 2);
+                    assert_eq!(report.circuit_trials % 2, 0);
+                    assert!(report.electrical.terminals.is_none());
+                } else {
+                    // Direct controls consume one actual-state solve per trial.
+                    assert!(report.circuit_trials >= 1);
+                    assert!(report.electrical.terminals.is_some());
+                }
                 if current == 2.0 && speed < 0.0 {
                     assert!(report.electrical.terminal_work_j < 0.0);
                 }
@@ -146,7 +190,7 @@ fn terminal_controls_follow_motion_and_refreshed_resistance_on_one_thermal_clock
 }
 
 #[test]
-fn moving_terminal_work_budget_and_late_cancellation_preserve_both_accepted_owners() {
+fn direct_moving_terminal_work_budget_and_late_cancellation_preserve_both_accepted_owners() {
     let (a, ca) = material(1.0, 1.0, 0.002);
     let (b, cb) = material(3.0, 2.0, 0.0);
     let cards = [a, b];
@@ -163,7 +207,19 @@ fn moving_terminal_work_budget_and_late_cancellation_preserve_both_accepted_owne
         volume_tolerance_m3: 1e-12,
     };
     let [positive, negative] = electrodes(&problem, 2.0);
-    let drive = SpatialConductionDrive::total_current(&positive, &negative, 2.0);
+    let terminals = [positive.as_slice(), negative.as_slice()];
+    let drive = ConductionTerminalDrive {
+        terminals: &terminals,
+        control: ConductionTerminalControl::Mixed {
+            current_terminals: &[0],
+            voltages_v: &[1e250],
+            currents_a: &[2.0],
+        },
+        limits: ConductionTerminalLimits {
+            maximum_terminals: 2,
+            maximum_workspace_values: 20_000,
+        },
+    };
     let velocities = vec![[0.0, 3.0, 0.0]; regions.len()];
     let fields = vec![[0.0, 0.0, 1.0]; regions.len()];
     let motion = SpatialConductionMotion {
@@ -237,6 +293,22 @@ fn moving_terminal_work_budget_and_late_cancellation_preserve_both_accepted_owne
         .unwrap();
     assert!(accepted.thermal().energy_j() > thermal.energy_j());
     let last = calls.get();
+    bounded.maximum_circuit_trials = accepted.report().circuit_trials - 1;
+    assert!(matches!(
+        network.step_moving_candidate(
+            &thermal,
+            0.5,
+            &problem,
+            drive,
+            motion,
+            limits(),
+            field_controls(),
+            bounded,
+            &[0.0; 2],
+            || false,
+        ),
+        Err(CircuitEnthalpyError::CircuitBudget)
+    ));
     calls.set(0);
     assert!(matches!(
         network.step_moving_candidate(

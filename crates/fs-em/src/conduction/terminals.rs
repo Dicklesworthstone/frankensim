@@ -31,7 +31,8 @@ pub enum ConductionTerminalControl<'a> {
 pub struct ConductionTerminalLimits {
     pub maximum_terminals: usize,
     /// Conservative scalar/index count: 32*vertices + 8*original_nonzeros
-    /// + 8*terminals. This is not an allocator byte-peak guarantee.
+    /// + 8*terminals. Prescribed-motion methods also charge their documented
+    /// preparation buffers. This is not an allocator byte-peak guarantee.
     pub maximum_workspace_values: usize,
 }
 
@@ -47,7 +48,8 @@ pub struct ConductionTerminalReport {
     /// reactions times held differences, with each electrode counted once [W].
     pub supplied_power_w: f64,
     pub maximum_current_residual_a: f64,
-    /// Native bulk/contact dissipation minus independent supplied power [W].
+    /// Native bulk/contact heat minus independent supplied power [W]. With
+    /// prescribed motion, include signed mechanical output alongside heat.
     pub power_residual_w: f64,
 }
 

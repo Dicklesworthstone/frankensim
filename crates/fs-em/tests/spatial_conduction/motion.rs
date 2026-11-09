@@ -3,6 +3,8 @@ use super::*;
 use fs_em::spatial::conduction::motion::{SpatialConductionMotion, SpatialMovingConductionField};
 use std::collections::BTreeSet;
 
+#[path = "motion/direct_terminals.rs"]
+mod direct_terminals;
 #[path = "motion/mechanical.rs"]
 mod mechanical;
 #[path = "motion/contacts.rs"]

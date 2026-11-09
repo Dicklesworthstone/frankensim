@@ -11892,15 +11892,26 @@ authored source work, including under large common bias; work is never rebuilt
 from rounded absolute potentials or inferred from heat. Native volume/contact
 work is deposited once through original receivers and contact partitions.
 Existing caloric/thermal field-independence gates, phase/history ownership, late
-cancellation and transactional publication remain binding. Direct sparse
-electrodes with prescribed motional EMF are explicitly refused; existing
-matrix/motional paths remain available.
+cancellation and transactional publication remain binding.
+
+Direct electrodes also compose with prescribed motional EMF through
+`step_moving_candidate` and `step_moving_contact_candidate`. Each trial closes
+original charge continuity and electrode-total constraints together in one
+native sparse solve. The retained report supplies signed authored electrical
+input; separate Lorentz output is subtracted before the finite-heat balance.
+Only conductor-frame Joule loss and admitted stationary interface loss enter
+thermal cells. Open circuits may retain a nonzero motional voltage at zero
+current/heat, and generation may return negative terminal work. Original
+fixed-occupancy motion limits and refusal of moving/sliding resistive interfaces
+remain binding.
 
 Focused regressions extend the analytic current/thermal and nonlinear
 finite-contact oracles and add bounded-current material support, floating
 electrodes, large common bias, two-step continuation, exact field-solve
-accounting and rejection paths. They are manufactured numerical checks, not
-measured material validation or mesh/time convergence claims.
+accounting and rejection paths. The moving-terminal oracle also covers both
+current directions, changing R(T), open circuits, generation, huge bias and exact
+work-budget/late-cancellation behavior. These are manufactured numerical checks,
+not measured material validation or mesh/time convergence claims.
 
 ## Driven native torsion and heat on one accepted clock
 

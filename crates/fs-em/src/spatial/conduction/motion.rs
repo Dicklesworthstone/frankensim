@@ -11,6 +11,9 @@
 
 use super::terminals::{terminal_current, voltage_boundary};
 use super::*;
+use crate::conduction::terminals::{
+    ConductionTerminalControl, ConductionTerminalLimits, ConductionTerminalReport,
+};
 
 mod mechanical;
 pub use crate::spatial::vector_potential::induction::mechanical::{
@@ -77,7 +80,61 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
         self.recover_moving_field(relative, traces, &prepared, controls, report, cancelled)
     }
 
-    fn prepare_motion<'v>(
+    /// Solve simultaneous voltage/total-current/floating electrodes with the
+    /// original prescribed motional weak load in one grouped sparse solve.
+    ///
+    /// All electrode and sparse-workspace admission is shared with
+    /// `solve_terminals`. In addition to its stationary workspace, motion
+    /// requires at most `3*vertices + 3*tetrahedra` scalar values for its native
+    /// load, per-cell field and compensated group reduction. This bound is
+    /// checked before preparing those arrays.
+    ///
+    /// The report retains voltage differences from terminal zero independently
+    /// of absolute displayed voltages. Its signed supplied work uses authored
+    /// current controls and native voltage-source reactions, and must equal
+    /// conductor-frame Joule heat plus signed Lorentz output work. Generation
+    /// may have negative terminal work; an open circuit may have nonzero
+    /// voltage with zero current and heat. Stationary-contact admission,
+    /// scalar/tensor source ownership and all native local work gates remain
+    /// those of `solve_with_motion`; no moving-interface law is inferred.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_terminals_with_motion(
+        &self,
+        terminals: &[&[usize]],
+        control: ConductionTerminalControl<'_>,
+        limits: ConductionTerminalLimits,
+        motion: SpatialConductionMotion<'_>,
+        controls: ConductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(
+        SpatialMovingConductionField<'_, C>,
+        ConductionTerminalReport,
+    )> {
+        let (field, power, terminals) = self.solve_terminals_core(
+            terminals,
+            control,
+            limits,
+            Some(motion),
+            controls,
+            cancelled,
+        )?;
+        let power = power.ok_or(SpatialConductionError::Invalid(
+            "missing original motional power recovery",
+        ))?;
+        check(cancelled)?;
+        Ok((
+            SpatialMovingConductionField {
+                problem: self,
+                velocity_m_s: motion.velocity_m_s.to_vec(),
+                flux_density_t: motion.flux_density_t.to_vec(),
+                field,
+                power,
+            },
+            terminals,
+        ))
+    }
+
+    pub(super) fn prepare_motion<'v>(
         &self,
         motion: SpatialConductionMotion<'v>,
         cancelled: &mut impl FnMut() -> bool,

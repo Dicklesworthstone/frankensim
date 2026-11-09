@@ -16,6 +16,9 @@ pub struct SpatialMovingConductionThermalStep {
     pub start_s: f64,
     pub end_s: f64,
     pub field: SpatialMovingConductionSnapshot,
+    /// Direct sparse electrode observations retain physical voltage differences
+    /// and signed authored source work independently of absolute voltage bias.
+    pub terminals: Option<ConductionTerminalReport>,
     /// Stationary interface losses and their explicit receiving-cell partition.
     /// This surface heat is included in `heat_j` and deposited exactly once.
     pub contacts: Vec<SpatialConductionContactHeat>,
@@ -108,8 +111,10 @@ impl SpatialConductionThermalNetwork<'_> {
     /// Voltage and distributed-current boundary traces retain their native
     /// meaning; current-only open components retain their charge-neutral gauge.
     /// [`SpatialConductionDrive`] also admits total-current and mixed-terminal
-    /// controls. Each endpoint rebuilds the original conductance response and
-    /// adds its actual motional current before solving the authored controls.
+    /// controls. Direct `Terminals` drives identify the original electrodes and
+    /// their motional load in one sparse solve at each actual endpoint. Matrix
+    /// drives rebuild their conductance response and add the motional current
+    /// before solving the authored controls.
     /// An open-circuit electrode therefore develops its motional voltage; zero
     /// authored current does not mean zero electric field. Held terminal power
     /// is not admitted in this moving path.
@@ -243,16 +248,11 @@ impl SpatialConductionThermalNetwork<'_> {
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<SpatialMovingConductionEnthalpyCandidate<'t, C, S>, CircuitEnthalpyError<E>> {
         let drive = drive.into();
-        // Prepared terminal responses need N-1 stationary basis solves and
-        // one motional-source solve. Charge all of them on every thermal trial,
-        // including the zero-current case; the latter still has a real field.
+        // Direct electrodes close their motional load in one actual-state solve.
+        // Prepared responses need N-1 basis solves and one motional-source solve.
+        // Charge every solve, including a zero-current open-circuit field.
         let field_solves = match drive {
-            SpatialConductionDrive::Terminals(_) => {
-                return Err(map_conduction_error(invalid(
-                    "direct sparse electrodes with prescribed motional EMF are not admitted",
-                )));
-            }
-            SpatialConductionDrive::Boundary(_) => 1,
+            SpatialConductionDrive::Terminals(_) | SpatialConductionDrive::Boundary(_) => 1,
             SpatialConductionDrive::TotalCurrent { .. } => 2,
             SpatialConductionDrive::TerminalCurrents { terminals, .. }
             | SpatialConductionDrive::MixedTerminals { terminals, .. } => {
@@ -299,12 +299,21 @@ impl SpatialConductionThermalNetwork<'_> {
                 if field_solves > remaining {
                     return Err(CircuitEnthalpyError::CircuitBudget);
                 }
+                let mut terminal_report = None;
                 let field = match drive {
-                    SpatialConductionDrive::Terminals(_) => {
-                        return Err(map_conduction_error(invalid(
-                            "direct sparse electrodes with prescribed motional EMF are not admitted",
-                        )));
-                    }
+                    SpatialConductionDrive::Terminals(drive) => next
+                        .solve_terminals_with_motion(
+                            drive.terminals,
+                            drive.control,
+                            drive.limits,
+                            motion,
+                            field_controls,
+                            &mut || (*cancel.borrow_mut())(),
+                        )
+                        .map(|(field, report)| {
+                            terminal_report = Some(report);
+                            field
+                        }),
                     SpatialConductionDrive::Boundary(boundary) => {
                         next.solve_with_motion(boundary, motion, field_controls, &mut || {
                             (*cancel.borrow_mut())()
@@ -388,8 +397,9 @@ impl SpatialConductionThermalNetwork<'_> {
                 .map_err(field_error)
                 .map_err(map_conduction_error)?;
                 let heat_j = finite(dt * field.joule_power_w())?;
-                let terminal_work_j = finite(
-                    dt * drive
+                let terminal_power_w = match &terminal_report {
+                    Some(report) => report.supplied_power_w,
+                    None => drive
                         .supplied_power_from_terminals_w(
                             next.mesh(),
                             field.voltage_v(),
@@ -398,7 +408,8 @@ impl SpatialConductionThermalNetwork<'_> {
                             cancel,
                         )
                         .map_err(map_conduction_error)?,
-                )?;
+                };
+                let terminal_work_j = finite(dt * terminal_power_w)?;
                 let mechanical_work_j = finite(dt * field.mechanical_power_w())?;
                 let net_supplied_work_j = finite(terminal_work_j - mechanical_work_j)?;
                 if (field.joule_power_w() > 0.0 && heat_j == 0.0)
@@ -423,6 +434,7 @@ impl SpatialConductionThermalNetwork<'_> {
                             start_s: thermal.time_s(),
                             end_s: target_s,
                             field,
+                            terminals: terminal_report,
                             contacts,
                             heat_j,
                             terminal_work_j,

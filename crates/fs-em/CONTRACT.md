@@ -8646,3 +8646,23 @@ The observer describes settled prescribed harmonics. Switch-on transients,
 thermal energy, parameter work, volume integration, mechanical force and a
 complete enclosure balance are not inferred. Original source/material/spatial
 uncertainty and arbitrary-null relative accuracy remain unresolved.
+
+## Direct sparse electrodes with prescribed three-dimensional motion
+
+`SpatialConduction::solve_terminals_with_motion` adds the original motional
+weak load to the same grouped sparse electrode equations. One actual-amplitude
+field solve closes voltage, conserved total-current or mixed/floating controls;
+the original conductor-frame current, contact and Lorentz recovery is reused.
+Workspace admission also charges the native load, per-cell motional field and
+compensated group reduction before preparation.
+
+Retained terminal voltage differences pair with authored current controls and
+native voltage-source reactions. Independent terminal work must agree with both
+native boundary work and bulk/contact Joule heat plus signed mechanical output.
+Open circuits may have nonzero motional voltage and zero heat; generation may
+return negative electrical power. Nonzero authored current still requires
+representable irreversible heat. Original fixed-occupancy quasistatic limits
+and refusal of moving/sliding resistive interfaces remain binding. Three
+regression groups in `tests/spatial_conduction/motion/direct_terminals.rs`
+cover open/short/generating/motoring states, floating shared electrodes,
+stationary contacts with remote motion, huge bias, bounds and cancellation.
