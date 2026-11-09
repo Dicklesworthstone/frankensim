@@ -87,7 +87,8 @@ pub use material::{
     MaterialNavierStokesStep, MaterialStokesBoundary, MaterialStokesCell, MaterialStokesField,
     MaterialStokesFieldSolution, MaterialStokesFlowControlSolution, MaterialStokesResistancePort,
     MaterialStokesResistanceSolution, MaterialStokesRheologySolution, MaterialStokesSolution,
-    MaterialViscousDissipation,
+    MaterialStokesWindkesselBalance, MaterialStokesWindkesselHistory, MaterialStokesWindkesselPort,
+    MaterialStokesWindkesselSolution, MaterialViscousDissipation,
 };
 #[cfg(feature = "continuum")]
 pub use ns::adjoint::{FluxAdjointError, FluxAdjointSolution};

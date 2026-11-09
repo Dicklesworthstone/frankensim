@@ -22,6 +22,12 @@ pub(super) use flow_control::physical_control;
 #[path = "mixed/resistance.rs"]
 mod resistance;
 pub use resistance::{MaterialStokesResistancePort, MaterialStokesResistanceSolution};
+#[path = "mixed/windkessel.rs"]
+mod windkessel;
+pub use windkessel::{
+    MaterialStokesWindkesselBalance, MaterialStokesWindkesselHistory, MaterialStokesWindkesselPort,
+    MaterialStokesWindkesselSolution,
+};
 
 /// Conservative evolving density and native IMEX momentum on one fixed mesh.
 pub mod density_transport;

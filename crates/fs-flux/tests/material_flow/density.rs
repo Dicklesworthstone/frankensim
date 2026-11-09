@@ -3,6 +3,9 @@
 use super::*;
 use fs_flux::MaterialStokesResistancePort;
 
+#[path = "density/windkessel.rs"]
+mod windkessel;
+
 /// G1/G3: a constant-stress two-layer Couette field has an independent integral
 /// flow, source-viscosity heat and external-resistor power. The pressure drop
 /// cancels an authored body force, so its exact piecewise-affine velocity is

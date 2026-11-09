@@ -7,6 +7,10 @@ use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use super::super::{
     MaterialFluxError, MaterialFluxSystem, MaterialViscousDissipation, physical_viscous_dissipation,
 };
+use super::windkessel::{
+    MaterialStokesWindkesselHistory, MaterialStokesWindkesselPort,
+    MaterialStokesWindkesselSolution, solve_material_windkessel_assembly,
+};
 use super::{
     MaterialBoundaryLoad, MaterialStokesBoundary, MaterialStokesFlowControlSolution,
     MaterialStokesResistancePort, MaterialStokesResistanceSolution, flow_control::physical_control,
@@ -133,6 +137,59 @@ impl<'s, 'm, G> MaterialStokesField<'s, 'm, G> {
     #[must_use]
     pub const fn reference_density_kg_m3(&self) -> f64 {
         self.reference_density_kg_m3
+    }
+
+    /// Advance frozen source-material layers and external RCR/inertance loads.
+    ///
+    /// Every cell retains its original rho/rho_reference mass and
+    /// mu/rho_reference stress; the SAME reference normalizes all port pressures,
+    /// R,L and compliance. Fluid and storage share BDF1 startup or the supplied
+    /// paired BDF2 histories and interval. Inertance Q histories come directly
+    /// from those native velocities. No source is re-queried during the solve.
+    ///
+    /// External storage, resistor heat and signed numerical BDF defect remain
+    /// separate from bulk fluid heating. External coefficients and compliance
+    /// reference stay fixed through the histories; reservoirs are held per
+    /// interval. This fixed-layer model does not advect density or material
+    /// interfaces, update temperature, or infer compliance from transport data.
+    /// Each controlled component retains an uncontrolled traction datum.
+    ///
+    /// # Errors
+    /// Preserves source snapshots and immutable histories on every refusal;
+    /// checks original continuum and both dynamic port laws before publication.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bdf2_stokes_mixed_variable_step_windkessel_ports(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialStokesBoundary<'_>],
+        ports: &[&[usize]],
+        loads: &[MaterialStokesWindkesselPort],
+        previous: MaterialStokesWindkesselHistory<'_>,
+        older_history: Option<(MaterialStokesWindkesselHistory<'_>, f64)>,
+        timestep_s: f64,
+        absolute_pressure_tolerance_pa: f64,
+        absolute_flow_tolerance_m2_s: f64,
+    ) -> Result<MaterialStokesWindkesselSolution<MaterialStokesFieldSolution<G>>, MaterialFluxError>
+    {
+        let assembly = self.assemble_material_stokes_bdf2(
+            force_density,
+            boundaries,
+            previous.velocity,
+            older_history.map(|(history, dt)| (history.velocity, dt)),
+            timestep_s,
+        )?;
+        solve_material_windkessel_assembly(
+            assembly,
+            self.reference_density_kg_m3,
+            ports,
+            loads,
+            previous,
+            older_history,
+            timestep_s,
+            absolute_pressure_tolerance_pa,
+            absolute_flow_tolerance_m2_s,
+            |flow, energy| self.recover_solution(flow, energy),
+        )
     }
 
     /// Resolve steady laminar port resistances through frozen material layers.

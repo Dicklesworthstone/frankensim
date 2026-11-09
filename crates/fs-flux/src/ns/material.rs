@@ -47,6 +47,8 @@ pub use mixed::{
     MaterialStokesBoundary, MaterialStokesCell, MaterialStokesField, MaterialStokesFieldSolution,
     MaterialStokesFlowControlSolution, MaterialStokesResistancePort,
     MaterialStokesResistanceSolution, MaterialStokesRheologySolution, MaterialStokesSolution,
+    MaterialStokesWindkesselBalance, MaterialStokesWindkesselHistory, MaterialStokesWindkesselPort,
+    MaterialStokesWindkesselSolution,
 };
 pub(crate) use navier_stokes::with_kinematic_boundaries;
 pub use navier_stokes::{

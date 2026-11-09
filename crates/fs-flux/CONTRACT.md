@@ -9495,3 +9495,36 @@ This locally one-dimensional, smooth-wave outlet does not establish exact
 nonreflection for oblique waves, shocks or vortical boundary interactions. It
 does not fix instantaneous outlet pressure, supply backflow thermodynamics,
 resolve a finite exterior gas inventory or certify discrete entropy stability.
+
+## Source-normalized physical RCR and inertance coupling
+
+The homogeneous `MaterialFluxSystem` and frozen-cell `MaterialStokesField`
+both expose the dynamic Windkessel BDF entry. The original material owns fluid
+density and viscosity; external resistance, compliance and inertance are
+explicit device data. No bulk modulus or gas compressibility is invented from
+transport properties. With Q in m²/s per unit depth, physical resistances are
+Pa s/m², series inertance is Pa s²/m² and compliance is m²/Pa. A 3-D network's
+resistance/inertance multiply by modeled depth; its compliance divides by depth.
+
+One fixed reference density normalizes the entire system: pressure, both
+resistances and series inertance divide by rho_reference; compliance multiplies
+by rho_reference. Native velocity and all Q histories are unchanged. Each
+spatial material cell retains its original rho/rho_reference mass and
+mu/rho_reference stress; reference viscosity never replaces those sources.
+The original source snapshots, weighted kinetic energy and boundary reactions
+survive without re-query. Positive quantities or signed pressure histories that
+underflow away during conversion are refused before publication.
+
+All reported external energies/powers and pressure-law residuals return to SI
+with that same reference density; flow residuals remain m²/s. Compliance and
+inertance storage, both resistor losses and the signed BDF defect remain
+separate from resolved-fluid viscous heating. No automatic temperature, EOS
+pressure, material-interface transport or cavitation update is implied.
+
+Two focused native material regressions are authored for physical density swaps,
+arbitrary reference-density invariance, BDF1/BDF2 histories, energy units,
+source retention, normalization refusal, and layered Couette flow while its
+external compliance charges. Their full FEM/material runtime execution remains
+pending at the pinned-asupersync build gate; the six shared exact-source scalar
+BDF/RCR tests passed. These checks support the stated numerical model, not
+experimental qualification of an authored external compliance.
