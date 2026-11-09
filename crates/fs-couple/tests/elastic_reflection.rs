@@ -7,6 +7,8 @@ use fs_material::elastic::acoustic::interface::ElasticMode;
 use fs_math::c64::C64;
 use fs_phs::{WallPin, wall_specific_impedance};
 
+#[path = "elastic_reflection/coating.rs"]
+mod coating;
 #[path = "elastic_reflection/oriented.rs"]
 mod oriented;
 

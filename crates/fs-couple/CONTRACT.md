@@ -6900,6 +6900,33 @@ definitions cover the original diagonal limit, analytic rotated shear and
 tilted longitudinal/shear conversion, coherent work and storage, and source
 domains/cancellation. Native execution status is reported separately.
 
+### Resolved elastic coatings on original oscillator supports
+
+`elastic_reflection::OscillatorBackedElasticCoating` joins an original incident
+solid and an original finite elastic coating to the same three principal
+`WallPin` laws and checked `So3` rotation. `fs-material` owns the complete
+coating propagation, P/SV/SH conversion, internal interference, critical and
+evanescent fields, and both original strain domains. The coupling layer passes
+the original support tensor to that native boundary, without fitting a scalar
+coating impedance or discarding internal modes. Frequency is authored in Hz;
+both the coating propagator and wall law use the same `TAU * frequency_hz`.
+
+The actual rear support velocity feeds the same principal-coordinate motion
+and storage evaluator used by the direct oriented surface. A front-face field
+is never substituted for rear motion. Returned kinetic/spring energies belong
+only to the original pins; coating bulk storage is not counted as pin storage.
+The native positive support work is the sole dissipative account. Both original
+solids remain lossless, isotropic and perfectly bonded, and no transient clock
+or nonlocal support response is inferred. Exactly zero thickness recovers the
+direct supported surface and has no interior coating field. Prepared drives
+and native interior field queries allocate nothing and reuse their factorizations.
+
+Five focused G1/G3/G4 regression definitions cover exact absence, homogeneous
+propagation with polarization conversion, quarter-wave matching and rear
+storage, a full rotated-support fixture against an independent 70-digit
+continuum transfer exponential, and source-domain/cancellation refusals.
+Native compilation and execution status are reported separately.
+
 ## Compact outlet reaction from an impedance wall
 
 `compact_wall_radiation::PreparedCompactWallRadiation` closes original finite-pressure or prescribed-flow network sources against the complete exterior impedance of one or more unflanged compact circular outlets. Each diagonal retains `fs-duct`'s native unflanged radiation impedance, every off-diagonal retains the original 3D monopole mutual impedance, and every pair, including the finite diagonal self return, receives the original spherical impedance-wall response. These use the same fluid, frequency, peak phasor and physical volume-flow units. Reciprocal pairs are evaluated once; all reflected preparations share one aggregate work allowance and retain their native error diagnostics. Cancellation or refusal publishes no partial matrix.

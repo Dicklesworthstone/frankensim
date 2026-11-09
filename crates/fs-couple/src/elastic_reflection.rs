@@ -9,9 +9,13 @@
 //! These are stationary, locally reacting, linear boundaries. The two-pin
 //! owner has isotropic tangential response; the oriented owner retains three
 //! independent principal supports and their original rotation. A pin is an
-//! explicitly authored reduced support, not a
-//! measured material claim, resolved layer, finite shell or transient history.
+//! explicitly authored reduced support. The coating owner resolves an original
+//! finite elastic layer in front of that support, including its full interior
+//! fields; the pins themselves do not imply a measured material, finite shell
+//! or transient history.
 
+mod coating;
+pub use coating::{OscillatorBackedElasticCoating, SupportedElasticCoatingResponse};
 mod oriented;
 pub use oriented::{
     OrientedOscillatorSupport, OrientedOscillatorSupportedSurface, OrientedSupportedElasticResponse,

@@ -1,6 +1,6 @@
 //! Principal mechanical supports rotated into the original elastic surface frame.
 
-use super::{ElasticSupportError, displacement, support_storage};
+use super::{ElasticSupportError, SupportStorage, displacement, support_storage};
 use fs_ga::So3;
 use fs_material::elastic::acoustic::ElasticAcousticState;
 use fs_material::elastic::acoustic::interface::ElasticMode;
@@ -179,37 +179,57 @@ impl<'a> OrientedOscillatorSupportedSurface<'a> {
         incoming_velocity_m_s: [C64; 3],
     ) -> Result<OrientedSupportedElasticResponse, ElasticSupportError> {
         let reflection = self.reflection.drive(incoming_velocity_m_s)?;
-        let principal_velocity_m_s = core::array::from_fn(|axis| {
-            let mut real = Dd::ZERO;
-            let mut imaginary = Dd::ZERO;
-            for row in 0..3 {
-                let weight = Dd::from_f64(self.rotation[row * 3 + axis]);
-                let velocity = reflection.boundary_velocity_m_s[row];
-                real = real + weight * Dd::from_f64(velocity.re);
-                imaginary = imaginary + weight * Dd::from_f64(velocity.im);
-            }
-            C64::new(real.to_f64(), imaginary.to_f64())
-        });
-        let storage = support_storage(
+        let motion = support_motion(
             self.support.principal,
-            principal_velocity_m_s,
+            self.rotation,
+            reflection.boundary_velocity_m_s,
             self.omega_rad_s,
         )?;
-        let mut support_displacement_m = [C64::ZERO; 3];
-        for (value, velocity) in support_displacement_m
-            .iter_mut()
-            .zip(reflection.boundary_velocity_m_s)
-        {
-            *value = displacement(velocity, self.omega_rad_s)?;
-        }
         Ok(OrientedSupportedElasticResponse {
             reflection,
-            principal_velocity_m_s,
-            principal_displacement_m: storage.displacement,
-            support_displacement_m,
-            mean_kinetic_energy_j_m2: storage.kinetic,
-            mean_elastic_energy_j_m2: storage.elastic,
-            mean_stored_energy_j_m2: storage.total,
+            principal_velocity_m_s: motion.principal_velocity,
+            principal_displacement_m: motion.storage.displacement,
+            support_displacement_m: motion.surface_displacement,
+            mean_kinetic_energy_j_m2: motion.storage.kinetic,
+            mean_elastic_energy_j_m2: motion.storage.elastic,
+            mean_stored_energy_j_m2: motion.storage.total,
         })
     }
+}
+
+pub(super) struct SupportMotion {
+    pub principal_velocity: [C64; 3],
+    pub surface_displacement: [C64; 3],
+    pub storage: SupportStorage,
+}
+
+// Direct and coated supports use exactly the same original pin coordinates and
+// potentials. The caller supplies the actual SUPPORT velocity, which differs
+// from the incident face velocity when a finite coating intervenes.
+pub(super) fn support_motion(
+    principal: [WallPin; 3],
+    rotation: [f64; 9],
+    velocity: [C64; 3],
+    omega: f64,
+) -> Result<SupportMotion, ElasticSupportError> {
+    let principal_velocity = core::array::from_fn(|axis| {
+        let mut real = Dd::ZERO;
+        let mut imaginary = Dd::ZERO;
+        for row in 0..3 {
+            let weight = Dd::from_f64(rotation[row * 3 + axis]);
+            real = real + weight * Dd::from_f64(velocity[row].re);
+            imaginary = imaginary + weight * Dd::from_f64(velocity[row].im);
+        }
+        C64::new(real.to_f64(), imaginary.to_f64())
+    });
+    let storage = support_storage(principal, principal_velocity, omega)?;
+    let mut surface_displacement = [C64::ZERO; 3];
+    for (value, velocity) in surface_displacement.iter_mut().zip(velocity) {
+        *value = displacement(velocity, omega)?;
+    }
+    Ok(SupportMotion {
+        principal_velocity,
+        surface_displacement,
+        storage,
+    })
 }
