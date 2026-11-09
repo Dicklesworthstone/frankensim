@@ -41,6 +41,9 @@ mod absorption;
 pub use absorption::AngularSpectrumAbsorptionField;
 pub(in crate::plane_wave) mod modes;
 
+mod aplanatic;
+pub use aplanatic::{AplanaticPupil, AplanaticPupilSample};
+
 mod aperture;
 pub use aperture::{
     AngularSpectrumAperture, AngularSpectrumApertureLimits, AngularSpectrumApertureReading,
@@ -270,6 +273,47 @@ pub struct PlanarAngularSpectrum<'s, 'm> {
 }
 
 impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
+    /// Focus an arbitrary complex Jones pupil with the vectorial Richards–Wolf
+    /// sine-condition map. The callback supplies a dimensionless pupil shape;
+    /// its overall magnitude is normalized to the pupil's incident watts.
+    /// It is called once per angular-grid point inside the declared pupil.
+    ///
+    /// The pupil samples live in direction-cosine space, not on the output
+    /// spatial grid. Their Cartesian quadrature includes the aplanatic
+    /// `1/sqrt(cos(theta))` weight and the full polarization rotation. The
+    /// original exact Maxwell/film propagator supplies every subsequent field,
+    /// interference, absorption, force and detector query. The focus is the
+    /// geometric focus in the homogeneous incident medium; the films may shift
+    /// or aberrate its transmitted image. Grid and periodic-image convergence
+    /// remain explicit caller choices; this is not a material lens solve.
+    pub fn prepare_aplanatic_pupil(
+        source: &'s PlanarDielectricLayers<'m>,
+        grid: AngularSpectrumGrid,
+        pupil: AplanaticPupil,
+        pupil_jones: impl FnMut(AplanaticPupilSample) -> [C64; 2],
+        limits: AngularSpectrumLimits,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, AngularSpectrumError> {
+        poll(&mut cancelled)?;
+        let (n, area, workspace_bytes, _) = admit(grid, limits)?;
+        n.checked_mul(core::mem::size_of::<[C64; 2]>())
+            .and_then(|bytes| bytes.checked_add(workspace_bytes))
+            .filter(|&bytes| bytes <= limits.maximum_workspace_bytes)
+            .ok_or_else(|| bad("aplanatic pupil exceeds its source workspace budget"))?;
+        let epsilon_root = det::sqrt(source.incident_permittivity_f_m());
+        let mu_root = det::sqrt(source.incident_permeability_h_m());
+        let k = source.angular_frequency_rad_s() * epsilon_root * mu_root;
+        let input = pupil.sample_modes(
+            grid,
+            area,
+            k,
+            epsilon_root / mu_root,
+            pupil_jones,
+            &mut cancelled,
+        )?;
+        Self::prepare_modes(source, grid, &input, limits, cancelled)
+    }
+
     /// Analyze physical samples on the declared periodic grid. Nonzero
     /// coefficients outside the incident light cone refuse, including small
     /// FFT residuals; use `prepare_modes` for an authored band-limited source.

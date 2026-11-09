@@ -10,6 +10,7 @@ use fs_em::plane_wave::{
 use fs_math::det;
 
 mod carrier;
+mod aplanatic;
 mod carrier_correlation;
 mod oversampled;
 mod probes;

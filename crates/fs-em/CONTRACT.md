@@ -3977,6 +3977,45 @@ index or normal-incidence transmission cannot replace their vector response.
 For the existing exp(+i omega t) convention, normalized inverse FFTs analyze
 the field and unnormalized forward FFTs reconstruct exp(-i k.r) modes.
 
+`PlanarAngularSpectrum::prepare_aplanatic_pupil` adds the vectorial
+Richards–Wolf sine-condition source. `AplanaticPupil` declares a strictly
+sub-grazing sine aperture `sin(theta_max)=NA/n`, the geometric focus in the
+homogeneous incident medium, and positive cycle-mean incident watts. The
+once-per-admitted-point callback receives direction cosines and radius-one
+pupil coordinates, and returns a dimensionless complex x/y Jones shape.
+Spatial polarization, apodization, stops and authored aberration phases are
+retained. The requested watts refer to the beam after that authored shape;
+they do not infer the upstream power or transmission of a physical stop.
+
+The lens map rotates radial polarization into the ray's meridional plane and
+keeps its azimuthal component. The reference-sphere `sqrt(cos(theta))` factor
+and Cartesian solid-angle Jacobian `1/cos(theta)` combine to
+`1/sqrt(cos(theta))` in each Fourier coefficient. Modal longitudinal E/H then
+come from the original Maxwell owner; no scalar or paraxial substitution is
+made. Shape magnitudes are scaled before squaring, with a double-double power
+reduction and exact modal Poynting normalization. A compensated phase aligns
+the original wavevectors at the requested focus. The common lens-to-focus
+phase is explicitly zero; authored Jones phase remains coherent with other
+beams. Subsequent film scattering can move or aberrate the transmitted focus.
+
+The complete circular angular support must fit strictly inside both grid
+Nyquist limits, and grazing, dark positive-power pupils and unrepresentable
+amplitudes refuse. Preparation takes three bounded linear passes, with at
+most 32 pupil samples/rotations or 256 final scalings between cancellation
+polls. The original workspace budget additionally includes N complex-pair
+source samples during construction. The returned original beam needs no new
+field-query workspace or lens evaluation. This is a Cartesian quadrature of
+an ideal aplanatic focal model: physical-cell/angular-resolution and output
+sample-spacing convergence remain caller-owned. No material lens, arbitrary
+finite-screen Maxwell solution or subwavelength metasurface is claimed.
+Reference: Liu et al., <https://arxiv.org/html/2502.03170v1>, equations (14),
+(24). G1/G2/G3 kernel tests compare the high-NA on-axis peak against an
+independent continuous Richards–Wolf integral over three angular-grid rungs,
+and check radial/azimuthal longitudinal fields, translation, coherent phase,
+six-component power/transversality and extreme Jones scaling. Native
+`tests/plane_wave/angular_spectrum/aplanatic.rs` exercises the source-bound
+constructor, original magnetic impedance, films, field queries and budgets.
+
 Each subsequent plane reuses the cached modes and plans, applies exact kz
 propagation, enforces k.E=0, and obtains H=(k cross E)/(omega mu). It returns
 all six complex field components and physical cycle-mean Poynting flux.
