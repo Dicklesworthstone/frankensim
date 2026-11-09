@@ -116,6 +116,8 @@ pub mod brass_loop;
 /// Sample-indexed pressure, pre-stress and valve controls on the original voice.
 pub mod brass_sequence;
 pub mod broadband_radiation;
+/// Bulk acoustic viscous heat on original fixed-volume internal-energy cells.
+pub mod bulk_viscous_heating;
 pub mod cavity_phs;
 /// Shared material-bound cavitating films and opt-in bubble acoustic histories.
 pub mod cavitation;
