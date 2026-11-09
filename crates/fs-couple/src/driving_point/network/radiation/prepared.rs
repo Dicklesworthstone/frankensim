@@ -3,7 +3,7 @@
 
 use super::*;
 use fs_bem::near_field::FirstOrder;
-use fs_bem::observation_transfers::molecular::PreparedMolecularResponse;
+use fs_bem::observation_transfers::PreparedMolecularResponse;
 use fs_bem::observation_transfers::{
     BemObservation, HarmonicField, HarmonicFieldStatistics, HarmonicWorkBudget,
     PreparedHarmonicObservation, PreparedMicrophoneArray, PreparedRadiationObservation,

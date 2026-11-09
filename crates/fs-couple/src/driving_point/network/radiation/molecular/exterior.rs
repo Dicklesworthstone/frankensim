@@ -2,7 +2,7 @@
 
 use super::*;
 use fs_bem::helmholtz::laplace::complex::ComplexOptions;
-use fs_bem::observation_transfers::molecular::{
+use fs_bem::observation_transfers::{
     MolecularBemObservation, MolecularObservationFormulation, MolecularResponseLimits,
     PreparedMolecularResponse,
 };

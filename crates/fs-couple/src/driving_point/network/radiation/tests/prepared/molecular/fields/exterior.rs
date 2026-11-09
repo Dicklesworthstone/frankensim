@@ -3,7 +3,7 @@
 use super::*;
 use fs_bem::helmholtz::laplace::complex::ComplexOptions;
 use fs_bem::helmholtz::molecular::MolecularExterior;
-use fs_bem::observation_transfers::molecular::{
+use fs_bem::observation_transfers::{
     MolecularObservationFormulation, MolecularResponseLimits,
 };
 use fs_fft::welch::{WelchBudget, WelchConfig, WelchCrossSpectrum, WelchDetrend, WelchWindow};

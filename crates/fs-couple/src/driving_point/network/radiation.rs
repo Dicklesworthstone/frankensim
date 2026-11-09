@@ -73,7 +73,7 @@ pub enum ExteriorNetworkError {
     /// Original harmonic field or microphone-observation refusal.
     Observation(fs_bem::observation_transfers::TransferError),
     /// Original relaxing exterior material, boundary or observation refusal.
-    MolecularExterior(fs_bem::observation_transfers::molecular::MolecularObservationError),
+    MolecularExterior(fs_bem::observation_transfers::MolecularObservationError),
     /// Requested cancellation, without a partial response.
     Cancelled,
 }
@@ -88,10 +88,10 @@ impl From<fs_bem::observation_transfers::TransferError> for ExteriorNetworkError
         else { Self::Observation(e) }
     }
 }
-impl From<fs_bem::observation_transfers::molecular::MolecularObservationError>
+impl From<fs_bem::observation_transfers::MolecularObservationError>
     for ExteriorNetworkError
 {
-    fn from(error: fs_bem::observation_transfers::molecular::MolecularObservationError) -> Self {
+    fn from(error: fs_bem::observation_transfers::MolecularObservationError) -> Self {
         Self::MolecularExterior(error)
     }
 }
