@@ -11,14 +11,42 @@ use std::path::Path;
 
 const INPUT_HASH_DOMAIN: &str = "org.frankensim.fs-couple.voice-performance.v1";
 
-/// A nasal card's `model_scope`, in place of the series sentence. The parser refuses the head, torso and tract-gas rows
-/// with a nasal row, so a nasal card always reaches the plain-baffle arm.
+/// A nasal card's `model_scope` without the `head_sphere` row, in place of the series sentence; with it, see
+/// [`nasal_head_scope`].
 const NASAL_SCOPE: &str = "lumped fold pHS on a branched plane-wave tract (the oral tract; from the velopharyngeal port \
     the nasal passage and the two passages to the nostrils; each declared maxillary sinus a lumped cavity through its \
     ostium) with TMM viscothermal loss and the declared radiation load at the lips and at each nostril; the mouth's and \
     both nostrils' flows radiated through infinite-baffle circular openings on one plane (no nostril in front of the \
     mouth's plane, no loading of one opening by another), no head diffraction; the supraglottal pressure is never the \
     output";
+
+/// A nasal card's `model_scope` with the `head_sphere` row (N3b): each opening is a cap on its own ray from the head's
+/// centre, the three pressures summed after their FIRs; `head_load` and `torso_sphere` as in the series sentences.
+fn nasal_head_scope(head_load: bool, torso: bool) -> String {
+    let body = if torso { "a rigid sphere with a rigid torso sphere under it" } else { "a rigid sphere" };
+    let fir = if torso {
+        "the two spheres' causal FIR, the torso's change below 1.25 times the resolved band"
+    } else {
+        "the sphere's causal FIR"
+    };
+    let load = match (head_load, torso) {
+        (true, true) => "the radiation load at the lips and at each nostril is the declared flanged load plus that \
+            opening's cap change on the same head and torso",
+        (true, false) => "the radiation load at the lips and at each nostril is the declared flanged load plus that \
+            opening's cap change on the same sphere",
+        (false, _) => "the radiation load at the lips and at each nostril is still the declared one",
+    };
+    let absent = if torso { "no neck" } else { "no torso" };
+    format!(
+        "lumped fold pHS on a branched plane-wave tract (the oral tract; from the velopharyngeal port the nasal passage \
+         and the two passages to the nostrils; each declared maxillary sinus a lumped cavity through its ostium) with \
+         TMM viscothermal loss; the mouth's and each nostril's flow observed as a cap of that opening's area on {body}, \
+         each cap centred on the ray from the sphere's centre through the opening's baffle centre (a modelling choice), \
+         each opening's baffled pressure through {fir}, the baffle's image kept above the resolved band; the three \
+         pressures summed after the FIRs (no loading of one opening by another, no scattering off another opening's \
+         cap); {load}; {absent}; the supraglottal pressure is never the output"
+    )
+}
 
 fn options(args: &[String]) -> Result<(&str, &str, usize), String> {
     let mut paths = Vec::new();
@@ -130,11 +158,20 @@ pub(super) fn run_with_gas_sources(
             t.torso.radius_m, t.torso.neck_gap_m, json_string(&t.source)
         )
     });
+    // A nasal card (N3b) names its three caps inside the block as well; the lips' load form is each opening's.
+    let openings = match (&description.nasal, description.head_load) {
+        (None, _) => "",
+        (Some(_), true) => ",\"openings\":\"the lips and both nostrils, each a cap of its own area on the ray from the \
+            sphere's centre through its baffle centre (a modelling choice), each loaded in the lips_load form on its own \
+            cap; the three pressures summed after the FIRs\"",
+        (Some(_), false) => ",\"openings\":\"the lips and both nostrils, each a cap of its own area on the ray from the \
+            sphere's centre through its baffle centre (a modelling choice); the three pressures summed after the FIRs\"",
+    };
     let (head, scope) = match &description.head_sphere {
         Some(card) if description.head_load => (
             format!(
                 "\"head_sphere\":{{\"radius_m\":{:e},\"source\":{},\"filter_delay_samples\":{:e},\
-                 \"lips_load\":\"{}\"{torso}}},",
+                 \"lips_load\":\"{}\"{openings}{torso}}},",
                 card.radius_m, json_string(&card.source), performance.filter_delay_samples(),
                 if snow.is_some() {
                     "flanged + (cap on this sphere and torso - baffled piston), the torso's part below 1.25 times the resolved band"
@@ -150,7 +187,7 @@ pub(super) fn run_with_gas_sources(
         ),
         Some(card) => (
             format!(
-                "\"head_sphere\":{{\"radius_m\":{:e},\"source\":{},\"filter_delay_samples\":{:e}{torso}}},",
+                "\"head_sphere\":{{\"radius_m\":{:e},\"source\":{},\"filter_delay_samples\":{:e}{openings}{torso}}},",
                 card.radius_m, json_string(&card.source), performance.filter_delay_samples()
             ),
             if snow.is_some() {
@@ -165,9 +202,13 @@ pub(super) fn run_with_gas_sources(
         ),
     };
     // Only a performance with the nasal rows writes this block and the nasal scope; without them the sidecar is byte for
-    // byte what it was.
+    // byte what it was, and a nasal card without `head_sphere` keeps N3's scope byte for byte.
     let nasal = nasal_json(&description, info);
-    let scope = if description.nasal.is_some() { NASAL_SCOPE } else { scope };
+    let scope: std::borrow::Cow<'_, str> = match (&description.nasal, &description.head_sphere) {
+        (None, _) => scope.into(),
+        (Some(_), None) => NASAL_SCOPE.into(),
+        (Some(_), Some(_)) => nasal_head_scope(description.head_load, snow.is_some()).into(),
+    };
     let provenance = format!(
         "{{\"schema\":\"frankensim-music-render-provenance-v1\",\"fixture\":\"voice-input\",\
          \"sample_rate_hz\":{RATE},\"samples\":{samples},\"block\":{block},\
@@ -334,5 +375,16 @@ mod tests {
         assert!(options(&args(&["input"])).is_err());
         let a = args(&["input", "output", "--block", "37"]);
         assert_eq!(options(&a).unwrap(), ("input", "output", 37));
+    }
+    #[test]
+    fn a_nasal_card_on_a_head_names_each_cap_its_placement_and_the_sum() {
+        for (load, torso) in [(false, false), (false, true), (true, false), (true, true)] {
+            let s = nasal_head_scope(load, torso);
+            assert!(s.contains("(a modelling choice)") && s.contains("summed after the FIRs"), "{s}");
+            assert!(s.contains("no loading of one opening by another, no scattering off another opening's cap"), "{s}");
+            assert!(!s.contains("infinite-baffle") && !s.contains(['"', '\\']), "{s}");
+            assert_eq!(s.contains("torso sphere under it"), torso, "{s}");
+            assert_eq!(s.contains("plus that opening's cap change"), load, "{s}");
+        }
     }
 }

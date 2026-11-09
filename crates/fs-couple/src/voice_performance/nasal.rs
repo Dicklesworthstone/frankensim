@@ -34,10 +34,19 @@
 //! `(-x, y)`, the baffle's `x` the subject's left. It is one plane: a nostril in front of the mouth's plane (the
 //! nostrils row's source states by how much) is not modeled in front of it, and the openings do not load one another.
 //!
-//! Refused with a nasal row, by name: `tract_move` (the moving tract's lines are the series duct's), `head_sphere`,
-//! `head_load` and `torso_sphere` (that load and that sphere are one mouth's), `tract_gas` (its table is one mouth's),
-//! `fricative_noise` (its junction lines are the series duct's) and `receiver free_field_monopole` (one mouth's
-//! monopole).
+//! The head rows (N3b; owner order MB 15368, design 18805 and 18806, rulings MB 18809 and 18822). `tract_gas`: every
+//! edge holds the tract's gas and the network's exterior is the ambient, so each port's load is evaluated in the
+//! exterior, as the series lips' is. `head_load` (with `head_sphere`, and the torso's change with `torso_sphere`): each
+//! radiating port's load is its own opening's cap on the head (`head_opening_load`; the head module doc, "Openings off
+//! the pole"), the lips' cap at the pole and each nostril's on the ray from the head's centre through its place on the
+//! baffle, a modelling choice; each table holds the flow lines' finest bins, so every line reads its own rows, and below
+//! its first row it answers its static limit, 0 (fs-duct's network, as the series lines' DC probe). `head_sphere`: each
+//! opening has its own receiver (the joint receiver's quadrature, alone) and its own head FIR `G_i = S_i / B_i`, and the
+//! three pressures are summed after the FIRs; the openings neither load one another nor scatter off one another's caps.
+//! Without `head_sphere` the three openings keep the one joint receiver.
+//!
+//! Refused with a nasal row, by name: `tract_move` (the moving tract's lines are the series duct's), `fricative_noise`
+//! (its junction lines are the series duct's) and `receiver free_field_monopole` (one mouth's monopole).
 
 use super::*;
 use crate::driving_point::network::NetworkDrivingPoint;
@@ -379,6 +388,23 @@ fn nasal_graph(
     (DuctNetwork { nodes, edges }, terminations, nostril_radius)
 }
 
+/// What the openings radiate into (module doc): the exterior gas, the card's declared `termination` (the loads without
+/// `head_load`), and with `head_load` the head whose caps load the openings.
+#[derive(Clone, Copy)]
+pub(super) struct Exterior<'a> {
+    pub(super) gas: &'a GasState,
+    pub(super) termination: Termination,
+    pub(super) head: Option<NasalHead>,
+}
+
+/// The head behind the openings' loads (`head_sphere` with `head_load`): its radius and, with `torso_sphere`, the torso
+/// and the microphone's resolved band, the band the torso's change is weighted over.
+#[derive(Clone, Copy)]
+pub(super) struct NasalHead {
+    pub(super) radius_m: f64,
+    pub(super) torso: Option<(TorsoSphere, f64)>,
+}
+
 /// The nasal card's lines (module doc): the island's line, and the lips' and the nostrils' flow lines with their
 /// receipts. With [`Velum::Shut`] the nostril lines are absent.
 pub(super) struct NasalLines {
@@ -392,22 +418,68 @@ pub(super) struct NasalLines {
     pub(super) round_trip_samples: f64,
 }
 
-/// Realize [`NasalLines`] for `oral` and `card` in `gas`, every edge on `wall`, on the mechanics clock.
+/// With `head_load` (N3b): each radiating port's load is its opening's cap on the head ([`head_opening_load`]), the lips
+/// at the origin and the nostrils at `(x, y)` and `(-x, y)`, at each port's own radius; each table on the flow lines'
+/// finest bins ([`NASAL_FLOW_MAX_TAPS`]), so every rung of every line reads its own row, bound to the port's plane (its
+/// path's length from the glottis), radius and the exterior gas, and checked against them.
+fn head_loads(
+    oral: &[TractSection],
+    card: &NasalCard,
+    terminations: Vec<PortTermination>,
+    head: NasalHead,
+    exterior: &GasState,
+    sample_rate_hz: u32,
+) -> Result<Vec<PortTermination>, String> {
+    let length = |sections: &[TractSection]| sections.iter().map(|s| s.length_m).sum::<f64>();
+    let lips_m = length(oral);
+    let nostril_m = length(&oral[..=card.after_section])
+        + length(&card.sections)
+        + card.pairs.iter().map(|p| p.length_m).sum::<f64>();
+    terminations
+        .into_iter()
+        .map(|port| {
+            let NetworkLoad::Radiation { radius, .. } = port.load else {
+                return Err(format!("nasal port {} has no radiating opening for the head", port.label));
+            };
+            let (center_m, axial_m) = match port.label.as_str() {
+                "lips" => ([0.0, 0.0], lips_m),
+                "nostril-left" => ([card.nostril_x_m, card.nostril_y_m], nostril_m),
+                "nostril-right" => ([-card.nostril_x_m, card.nostril_y_m], nostril_m),
+                other => return Err(format!("nasal port {other} has no opening on the head")),
+            };
+            let opening = CircularOpening { center_m, radius_m: radius };
+            let table = head_opening_load(head.radius_m, opening, head.torso, axial_m, exterior, sample_rate_hz,
+                NASAL_FLOW_MAX_TAPS)
+                .map_err(|e| format!("nasal {} head load refused: {e}", port.label))?;
+            table
+                .validate_mouth(axial_m, radius, exterior)
+                .map_err(|e| format!("nasal {} head load refused: {e:?}", port.label))?;
+            Ok(PortTermination { label: port.label, load: NetworkLoad::Tabulated(table) })
+        })
+        .collect()
+}
+
+/// Realize [`NasalLines`] for `oral` and `card`: every edge in the tract's `gas` on `wall`, the openings radiating into
+/// `exterior`, on the mechanics clock.
 ///
 /// # Errors
-/// The network owner's or the ladder's refusal, by name.
+/// The network owner's, a head load's or the ladder's refusal, by name.
 pub(super) fn nasal_lines(
     oral: &[TractSection],
     card: &NasalCard,
     gas: &GasState,
     wall: Option<&WallPin>,
-    termination: Termination,
+    exterior: Exterior<'_>,
     sample_rate_hz: u32,
     velum: Velum,
 ) -> Result<NasalLines, String> {
-    let (network, terminations, nostril_radius_m) = nasal_graph(oral, card, termination, velum);
+    let (network, terminations, nostril_radius_m) = nasal_graph(oral, card, exterior.termination, velum);
+    let terminations = match exterior.head {
+        None => terminations,
+        Some(head) => head_loads(oral, card, terminations, head, exterior.gas, sample_rate_hz)?,
+    };
     let gases = network.edges.iter().map(|e| (e.id.clone(), GasRecord::Legacy(*gas))).collect();
-    let media = NetworkMedia::new(&network, gases, GasRecord::Legacy(*gas))
+    let media = NetworkMedia::new(&network, gases, GasRecord::Legacy(*exterior.gas))
         .map_err(|e| format!("nasal network gas refused: {e:?}"))?;
     let media = match wall {
         Some(pin) => media
@@ -446,6 +518,79 @@ pub(super) fn nasal_lines(
         Velum::Shut => None,
     };
     Ok(NasalLines { line, inlet_radius_m, lips, nostrils, nostril_radius_m, round_trip_samples })
+}
+
+/// With `head_sphere` (N3b; module doc): each opening's own receiver and head FIR, the mouth's first. The pressures are
+/// summed after the FIRs, so every receiver reports the same filter delay (checked here) and every FIR the same latency.
+pub(super) struct OpeningHeads {
+    pub(super) mouth: (BaffledPressure, HeadSphere),
+    pub(super) nostrils: [(BaffledPressure, HeadSphere); 2],
+    /// Under `observer_law`: the three receivers' reports in opening order, their filter indices offset, with the one
+    /// padding they were aligned to.
+    pub(super) observer_paths: Option<GasPropagationReport>,
+}
+
+/// [`OpeningHeads`] for the mouth and the two nostrils, observed by `microphone` in `exterior`: each receiver is the
+/// joint receiver's construction for its one opening (the gas form under `observer`, each padded to the largest padding
+/// so the summed pressures keep their relative travel), and each head is [`HeadSphere::for_opening`] on a head of
+/// `radius_m`, with `torso` under it when given.
+///
+/// # Errors
+/// A receiver's, the alignment's or a head's refusal, or receivers whose filter delays differ.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn opening_heads(
+    openings: &[CircularOpening],
+    radius_m: f64,
+    torso: Option<TorsoSphere>,
+    mechanics_rate: u32,
+    output_rate: u32,
+    microphone: CircularOutletReceiver,
+    exterior: &GasState,
+    observer: Option<&GasPropagation>,
+) -> Result<OpeningHeads, String> {
+    let medium = RayleighMedium { density: exterior.density, sound_speed: exterior.sound_speed };
+    let mut receivers = Vec::with_capacity(openings.len());
+    let mut reports = Vec::new();
+    for opening in openings {
+        let one = core::slice::from_ref(opening);
+        match observer {
+            Some(propagation) => {
+                let (receiver, report) = BaffledPressure::circular_openings_multirate_gas_differentiating(
+                    one, mechanics_rate, output_rate, microphone, exterior, propagation, &mut || false,
+                )
+                .map_err(|error| format!("voice observer paths refused: {error}"))?;
+                receivers.push(receiver);
+                reports.push(report);
+            }
+            None => receivers.push(BaffledPressure::circular_openings_multirate_differentiating(
+                one, mechanics_rate, output_rate, microphone, medium,
+            )?),
+        }
+    }
+    let padding = reports.iter().map(|r| r.additional_latency_samples).max().unwrap_or(0);
+    for (receiver, report) in receivers.iter_mut().zip(&mut reports) {
+        receiver.align_gas_latency(report, padding).map_err(|error| format!("voice observer paths refused: {error}"))?;
+    }
+    let delay = receivers[0].filter_delay_samples();
+    if receivers.iter().any(|r| r.filter_delay_samples().to_bits() != delay.to_bits()) {
+        return Err("the openings' receivers report different filter delays: their pressures cannot be summed".into());
+    }
+    let observer_paths = reports.into_iter().reduce(|mut merged, report| {
+        let offset = merged.filters.len();
+        merged.surface_filter_indices.extend(report.surface_filter_indices.iter().map(|i| i + offset));
+        merged.filters.extend(report.filters);
+        merged.kernel_terms += report.kernel_terms;
+        merged
+    });
+    let mut pairs = Vec::with_capacity(openings.len());
+    for (receiver, opening) in receivers.into_iter().zip(openings) {
+        let head = HeadSphere::for_opening(radius_m, *opening, microphone, medium, output_rate, torso)
+            .map_err(|e| format!("head sphere refused: {e}"))?;
+        pairs.push((receiver, head));
+    }
+    let [mouth, left, right]: [(BaffledPressure, HeadSphere); 3] =
+        pairs.try_into().map_err(|_| "the nasal receiver takes the mouth and two nostrils".to_string())?;
+    Ok(OpeningHeads { mouth, nostrils: [left, right], observer_paths })
 }
 
 #[cfg(test)]

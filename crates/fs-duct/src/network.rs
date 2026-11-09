@@ -82,6 +82,10 @@ pub enum NetworkLoad {
         termination: Termination,
     },
     /// A measured/baked load; its own support and passivity admission apply.
+    /// Below its first row a table bound to its mouth
+    /// ([`TabulatedLoad::with_mouth`]) answers the binding's explicit static
+    /// limit `dc_impedance`; an unbound table refuses there. The network does
+    /// not check the binding against the port: its consumer does.
     Tabulated(TabulatedLoad),
     /// Fluid-filled rigid-frame absorber over a uniform-pressure boundary.
     /// The solve's actual fluid refreshes drag, inertia and thermal relaxation.
@@ -932,7 +936,16 @@ fn load_impedance(
                 bad("network radiation load has no impedance")
             })?)?))
         }
-        NetworkLoad::Tabulated(table) => Ok(Some(finite_impedance(table.z_at(omega)?)?)),
+        // Below its first row a table bound to its mouth answers the binding's explicit static limit on the whole gap;
+        // the series lines read the same value at their one DC probe point, 1e-3 rad/s (driving_point/baked.rs in
+        // fs-couple). An unbound table, and any point above the support, refuse.
+        NetworkLoad::Tabulated(table) => {
+            let z = match table.mouth() {
+                Some(mouth) if omega < table.support().0 => C64::from_re(mouth.dc_impedance),
+                _ => table.z_at(omega)?,
+            };
+            Ok(Some(finite_impedance(z)?))
+        }
         NetworkLoad::PorousRigid {
             material,
             thickness_m,

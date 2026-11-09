@@ -320,7 +320,9 @@ use crate::glottis::{
     constriction_span, glottal_tract_line_taps,
 };
 use crate::keyframe_line::ShapeLine;
-use crate::pcm_wav::baffled::head::{HeadSphere, TorsoSphere, head_mouth_load, head_torso_mouth_load};
+use crate::pcm_wav::baffled::head::{
+    HeadSphere, TorsoSphere, head_mouth_load, head_opening_load, head_torso_mouth_load,
+};
 use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium, SurfaceSample};
 use crate::air_path::input::{ObserverLawInput, resolve_observer_law};
 use crate::pcm_wav::baffled::gas::{GasPropagation, GasPropagationLimits, GasPropagationReport};
@@ -1355,15 +1357,12 @@ impl VoiceDescription {
             return Err("receiver free_field_monopole is refused with head_sphere and observer_law: both observe the baffle".into());
         }
         // The nasal rows (the `nasal` child module): admitted against the oral sections, then refused by name with each
-        // row whose lines or load are one series mouth's.
+        // row whose lines or load are one series mouth's. `head_sphere`, `head_load`, `torso_sphere` and `tract_gas` are
+        // taken per opening (N3b; the `nasal` module doc).
         let nasal = nasal_draft.admit(&sections)?;
         if nasal.is_some() {
             let series_rows = [
                 ("tract_move", !tract_moves.is_empty()),
-                ("head_sphere", head_sphere.is_some()),
-                ("head_load", head_load.is_some()),
-                ("torso_sphere", torso_sphere.is_some()),
-                ("tract_gas", tract_gas.is_some()),
                 ("fricative_noise", fricative_noise.is_some()),
                 ("receiver free_field_monopole", free_field_receiver.is_some()),
             ];
@@ -1490,6 +1489,8 @@ impl VoiceDescription {
             (true, Some(_)) if !matches!(self.termination, Termination::FlangedOpen) => {
                 return Err(HEAD_LOAD_NEEDS_FLANGED.into());
             }
+            // The nasal rows: each opening's own table is made with the network's lines (the `nasal` child module).
+            (true, Some(_)) if self.nasal.is_some() => None,
             (true, Some(card)) => Some(
                 match &self.torso_sphere {
                     None => head_mouth_load(card.radius_m, &duct, exterior, mechanics_rate, GLOTTAL_LINE_MAX_TAPS),
@@ -1504,6 +1505,8 @@ impl VoiceDescription {
         let split = match (&self.tract_gas, head_load.as_ref()) {
             (None, _) => None,
             (Some(_), Some(table)) => Some(table),
+            // The nasal rows with `head_load`: the network's ports read their own tables in the exterior.
+            (Some(_), None) if self.head_load && self.nasal.is_some() => None,
             (Some(_), None) => return Err(TRACT_GAS_NEEDS_HEAD_LOAD.into()),
         };
         // `subglottal_airway`: Weibel's tree below the folds in the tract's gas, every tube carrying the card's
@@ -1541,16 +1544,24 @@ impl VoiceDescription {
             None => None,
         };
         // The nasal rows: the network's island line and lip flow replace the series duct's, and the nostrils' flow lines
-        // join them (the `nasal` child module; `tract_gas` and `head_load` are refused with the rows, so `split` is
-        // `None` there). Without the rows every match below takes the arm it always took.
+        // join them (the `nasal` child module; every edge in the tract's gas, the exterior the ambient, and with
+        // `head_load` each opening's own table, so `split` is `None` there). Without the rows every match below takes
+        // the arm it always took.
         let (nasal_line, nasal_lips, nasal_nostrils) = match &self.nasal {
             Some(card) => {
+                let head = match (self.head_load, &self.head_sphere) {
+                    (true, Some(sphere)) => Some(nasal::NasalHead {
+                        radius_m: sphere.radius_m,
+                        torso: self.torso_sphere.as_ref().map(|t| (t.torso, self.microphone.maximum_frequency_hz)),
+                    }),
+                    _ => None,
+                };
                 let lines = nasal::nasal_lines(
                     &self.sections,
                     card,
                     gas,
                     self.wall.as_ref(),
-                    self.termination,
+                    nasal::Exterior { gas: exterior, termination: self.termination, head },
                     mechanics_rate,
                     nasal::Velum::Open,
                 )?;
@@ -1681,44 +1692,66 @@ impl VoiceDescription {
             openings.push(CircularOpening { center_m: [card.nostril_x_m, card.nostril_y_m], radius_m: radius[0] });
             openings.push(CircularOpening { center_m: [-card.nostril_x_m, card.nostril_y_m], radius_m: radius[1] });
         }
-        let (receiver, observer_paths) = match observer.as_ref() {
-            Some(propagation) => {
-                let (receiver, report) = BaffledPressure::circular_openings_multirate_gas_differentiating(
-                    &openings, mechanics_rate, self.output_rate_hz, self.microphone,
-                    exterior, propagation, &mut || false,
-                ).map_err(|error| format!("voice observer paths refused: {error}"))?;
-                (receiver, Some(report))
+        // The nasal rows with `head_sphere` (N3b): each opening's own receiver and head FIR, summed after the FIRs (the
+        // `nasal` module doc); the mouth's pair takes the fields every card has. Otherwise each arm is the one it was.
+        let (receiver, observer_paths, head, nostril_heads) = match (&self.head_sphere, openings.len() > 1) {
+            (Some(card), true) => {
+                let heads = nasal::opening_heads(
+                    &openings,
+                    card.radius_m,
+                    self.torso_sphere.as_ref().map(|t| t.torso),
+                    mechanics_rate,
+                    self.output_rate_hz,
+                    self.microphone,
+                    exterior,
+                    observer.as_ref(),
+                )?;
+                let (receiver, head) = heads.mouth;
+                (receiver, heads.observer_paths, Some(head), Some(heads.nostrils))
             }
-            // `receiver free_field_monopole` (refused with observer_law at parse).
-            None if self.free_field_receiver => (
-                free_field_monopole(mouth_area, mechanics_rate, self.output_rate_hz, self.microphone, medium)?,
-                None,
-            ),
-            None if openings.len() > 1 => (
-                BaffledPressure::circular_openings_multirate_differentiating(
-                    &openings, mechanics_rate, self.output_rate_hz,
-                    self.microphone, medium,
-                )?,
-                None,
-            ),
-            None => (
-                BaffledPressure::circular_outlet_multirate_differentiating(
-                    mouth_radius_m, mechanics_rate, self.output_rate_hz,
-                    self.microphone, medium,
-                )?,
-                None,
-            ),
-        };
-        let head = match &self.head_sphere {
-            Some(card) => Some(
-                match &self.torso_sphere {
-                    None => HeadSphere::new(card.radius_m, mouth_radius_m, self.microphone, medium, self.output_rate_hz),
-                    Some(t) => HeadSphere::with_torso(card.radius_m, mouth_radius_m, self.microphone, medium,
-                        self.output_rate_hz, t.torso),
-                }
-                .map_err(|e| format!("head sphere refused: {e}"))?,
-            ),
-            None => None,
+            _ => {
+                let (receiver, observer_paths) = match observer.as_ref() {
+                    Some(propagation) => {
+                        let (receiver, report) = BaffledPressure::circular_openings_multirate_gas_differentiating(
+                            &openings, mechanics_rate, self.output_rate_hz, self.microphone,
+                            exterior, propagation, &mut || false,
+                        ).map_err(|error| format!("voice observer paths refused: {error}"))?;
+                        (receiver, Some(report))
+                    }
+                    // `receiver free_field_monopole` (refused with observer_law at parse).
+                    None if self.free_field_receiver => (
+                        free_field_monopole(mouth_area, mechanics_rate, self.output_rate_hz, self.microphone, medium)?,
+                        None,
+                    ),
+                    None if openings.len() > 1 => (
+                        BaffledPressure::circular_openings_multirate_differentiating(
+                            &openings, mechanics_rate, self.output_rate_hz,
+                            self.microphone, medium,
+                        )?,
+                        None,
+                    ),
+                    None => (
+                        BaffledPressure::circular_outlet_multirate_differentiating(
+                            mouth_radius_m, mechanics_rate, self.output_rate_hz,
+                            self.microphone, medium,
+                        )?,
+                        None,
+                    ),
+                };
+                let head = match &self.head_sphere {
+                    Some(card) => Some(
+                        match &self.torso_sphere {
+                            None => HeadSphere::new(card.radius_m, mouth_radius_m, self.microphone, medium,
+                                self.output_rate_hz),
+                            Some(t) => HeadSphere::with_torso(card.radius_m, mouth_radius_m, self.microphone, medium,
+                                self.output_rate_hz, t.torso),
+                        }
+                        .map_err(|e| format!("head sphere refused: {e}"))?,
+                    ),
+                    None => None,
+                };
+                (receiver, observer_paths, head, None)
+            }
         };
         let passive_formants_hz = if self.nasal.is_some() {
             Err("the passive formants are the series tract's: a nasal card does not read them".to_string())
@@ -1872,6 +1905,7 @@ impl VoiceDescription {
                 .map(|card| TensionFlutter::on_tile(card, self.output_rate_hz, 1)),
             trace: vec![0.0; self.mechanics_per_output as usize * openings.len()],
             nostrils: nasal_nostrils.map(|([(left, _), (right, _)], _)| [left, right]),
+            nostril_heads,
             ratio: self.mechanics_per_output as usize,
             mechanics_rate,
             info,
@@ -2419,6 +2453,10 @@ pub struct VoicePerformance {
     /// With the nasal rows, the left and right nostrils' flow lines, driven by the island's wave as the mouth's is; the
     /// trace then carries three flows per substep, time-major (mouth, left, right). `None` keeps the one opening.
     nostrils: Option<[DelayedFilter; 2]>,
+    /// With the nasal rows and `head_sphere` (N3b): the left and right nostrils' own receivers and head FIRs (the mouth's
+    /// are `receiver` and `head`); the trace is then opening-major (the mouth's substeps, the left's, the right's) and
+    /// the three FIRs' outputs are summed. `None` keeps the one receiver.
+    nostril_heads: Option<[(BaffledPressure, HeadSphere); 2]>,
 }
 
 fn refusal(what: String) -> RenderError {
@@ -2722,9 +2760,17 @@ impl VoicePerformance {
                 Some([left, right]) => {
                     let left_flow = left.push(wave).map_err(|e| format!("nostril flow line refused: {e:?}"))?;
                     let right_flow = right.push(wave).map_err(|e| format!("nostril flow line refused: {e:?}"))?;
-                    self.trace[3 * j] = flow;
-                    self.trace[3 * j + 1] = left_flow;
-                    self.trace[3 * j + 2] = right_flow;
+                    if self.nostril_heads.is_some() {
+                        // One receiver per opening: each takes its own substeps (opening-major).
+                        let r = self.ratio;
+                        self.trace[j] = flow;
+                        self.trace[r + j] = left_flow;
+                        self.trace[2 * r + j] = right_flow;
+                    } else {
+                        self.trace[3 * j] = flow;
+                        self.trace[3 * j + 1] = left_flow;
+                        self.trace[3 * j + 2] = right_flow;
+                    }
                 }
             }
             self.peak_flow_m3_s = self.peak_flow_m3_s.max(frame.flow_m3_s);
@@ -2740,11 +2786,24 @@ impl VoicePerformance {
             }
             self.steps += 1;
         }
-        let pressure = self.receiver.step_trace(&self.trace)?;
-        // The head filters the baffle's pressure into the sphere's; without the row the pressure is what it was.
-        let pressure = match self.head.as_mut() {
-            Some(head) => head.step(pressure),
-            None => pressure,
+        let pressure = match self.nostril_heads.as_mut() {
+            None => {
+                let pressure = self.receiver.step_trace(&self.trace)?;
+                // The head filters the baffle's pressure into the sphere's; without the row the pressure is what it was.
+                match self.head.as_mut() {
+                    Some(head) => head.step(pressure),
+                    None => pressure,
+                }
+            }
+            // The nasal rows with `head_sphere` (N3b): each opening's pressure through its own head FIR, then the sum.
+            Some([left, right]) => {
+                let r = self.ratio;
+                let head = self.head.as_mut().ok_or("the nasal head has no mouth FIR")?;
+                let mouth = head.step(self.receiver.step_trace(&self.trace[..r])?);
+                let left = left.1.step(left.0.step_trace(&self.trace[r..2 * r])?);
+                let right = right.1.step(right.0.step_trace(&self.trace[2 * r..3 * r])?);
+                mouth + left + right
+            }
         };
         self.completed += 1;
         Ok(pressure)
@@ -4580,7 +4639,8 @@ mod tests {
     /// `fixed_build_s + ceil(n / shape_workers) * further_shapes_wall_s`. Test shapes of 90 sections, not data; nothing
     /// is rendered. The keyframe's
     /// mouth stays at 3.0e-4 m^2 (9.8 mm), inside the live cards' 8.6-14.0 mm: a 1.0e-4 m^2 mouth (5.6 mm) on the
-    /// 8.7 cm head needs more than the head load's 65536 orders, and the build refuses it by name.
+    /// 8.7 cm head needs about 76,000-78,000 of the head load's orders at 192 kHz, which the old cap of 65536 refused by
+    /// name and `LOAD_MAX_ORDER` (2^17 since N3b) admits.
     #[test]
     #[ignore = "timing probe for the build host: run with --ignored --nocapture"]
     fn moving_tract_build_time_per_shape_at_the_live_clock() {

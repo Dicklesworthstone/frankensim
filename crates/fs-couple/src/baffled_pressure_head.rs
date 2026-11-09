@@ -76,7 +76,23 @@
 //! are exactly the bins of the finest line rung (`w_k = 2 pi k / (N_max dt)`, `k = 1..=N_max / 2`), so every rung of a
 //! characteristic or mouth-flow line reads its own bin and nothing is interpolated there; the DC limit is 0, as for any
 //! exterior load.
+//!
+//! Openings off the pole ([`HeadSphere::for_opening`], [`head_opening_load`]; the nasal rows' nostrils, N3b). An
+//! opening of radius `b_i` at `(x_i, y_i)` on the baffle becomes the cap of the disk's area `pi b_i^2` centred on the ray
+//! from the head's centre `(0, 0, -a)` through `(x_i, y_i, 0)`: the cap's centre is `a e_i` from the head's centre,
+//! `e_i = (x_i, y_i, a) / |(x_i, y_i, a)|`. That placement is a modelling choice (no print places a nostril on a
+//! sphere), as the lips' cap at the pole is: the cap's centre is `|(x_i, y_i, a)| - a` from the opening's place along
+//! the ray and `a (1 - e_z)` behind the mouth's plane; for the C3-a card's nostrils at `(+-7.07, 27.63)` mm on an 8.7 cm
+//! head, 17.56 degrees up, 4.65 degrees aside and 4.33 mm behind the plane. `S_i` is the series
+//! above with `cos theta` measured from `e_i`; `B_i` is the baffled disk on the opening's own quadrature, the points and
+//! areas the opening's receiver uses ([`BaffledPressure::resolved_circular_grids`]), moved to its centre; `G_i = S_i /
+//! B_i` is designed exactly as `G`, with the same band, blend, latency and length. The openings' pressures are summed
+//! after their FIRs: the openings do not load one another, and no cap scatters another's field. With a torso the cap's
+//! change takes `P_n^m(cos theta_c)` (the `torso` child module). The cap's own load `Z_cap(b_i)` does not depend on where
+//! the cap sits (the sphere is the same in every direction); only the torso's change does. An opening at `(0, 0)` is
+//! the lips' cap at the pole, and every path above is taken unchanged.
 
+use super::openings::CircularOpening;
 use super::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
 use fs_duct::{Duct, Segment, TabulatedLoad, TabulatedMouth, Termination};
 use fs_material::gas::GasState;
@@ -91,14 +107,29 @@ pub use torso::{TORSO_MAX_ORDER, TorsoSphere};
 pub const MAX_ORDER: usize = 4096;
 /// Largest order of the cap's self-impedance series ([`head_mouth_load`]): its terms fall only as `n^-3`, so it needs
 /// `2 max(1000 a / b, 1000 sqrt(2 k a a / (pi b)))` of them at the table's top; a mouth so small against the head, or a
-/// table so high, that it needs more is refused, never truncated.
-pub const LOAD_MAX_ORDER: usize = 1 << 16;
+/// table so high, that it needs more is refused, never truncated. It is `2^17` so that a nostril's cap (`b` about 5 mm on
+/// an 8.7 cm head) is admitted on the 262144-tap bins at 192 kHz (about 80,500 and 86,100 orders for Dang's subject 2);
+/// the convergence rule is unchanged.
+pub const LOAD_MAX_ORDER: usize = 1 << 17;
 /// Largest admitted change of the cap's self-impedance between `N` and `2 N` terms, relative.
 const LOAD_SERIES_TOL: f64 = 1.0e-6;
 /// Head FIR latency `ceil(rate / LATENCY_DIVISOR)` output samples (1.33 ms).
 const LATENCY_DIVISOR: u32 = 750;
 /// Largest admitted `|S / B|` inside the blended band; above it the baffle's directivity null is in the band.
 const MAX_RATIO: f64 = 4.0;
+/// The lips' cap axis: from the head's centre through the mouth's centre, `+z`.
+const POLE: [f64; 3] = [0.0, 0.0, 1.0];
+
+/// The cap axis of an opening centred at `center_m` on the baffle of a head of radius `a` (module doc, "Openings off the
+/// pole"): exactly [`POLE`] at the origin.
+fn cap_axis(a: f64, center_m: [f64; 2]) -> [f64; 3] {
+    if center_m == [0.0, 0.0] {
+        return POLE;
+    }
+    let [x, y] = center_m;
+    let n = det::sqrt(x * x + y * y + a * a);
+    [x / n, y / n, a / n]
+}
 
 /// Minimal complex arithmetic in plain IEEE operations (no fused multiply-add), so every build rounds the same way.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -157,14 +188,21 @@ struct Series {
 }
 
 impl Series {
-    fn new(a: f64, b: f64, mic: [f64; 3], medium: RayleighMedium, top_hz: f64, margin: usize) -> Result<Self, String> {
+    /// The series for a cap of radius `b` centred on `axis` (a unit vector from the head's centre; [`POLE`] for the lips).
+    fn new(a: f64, b: f64, axis: [f64; 3], mic: [f64; 3], medium: RayleighMedium, top_hz: f64, margin: usize)
+        -> Result<Self, String> {
         let rel = [mic[0], mic[1], mic[2] + a];
         let r = det::sqrt(rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2]);
         if !(r > a) {
             return Err("the microphone must stand outside the head sphere".into());
         }
         let orders = Self::orders(a, r, top_hz, medium, margin)?;
-        let cos_theta = rel[2] / r;
+        // The microphone's angle from the cap's centre; the lips' exactly as before.
+        let cos_theta = if axis == POLE {
+            rel[2] / r
+        } else {
+            (rel[0] * axis[0] + rel[1] * axis[1] + rel[2] * axis[2]) / r
+        };
         let one_minus_cos_al = b * b / (2.0 * a * a);
         let cos_al = 1.0 - one_minus_cos_al;
         let p_mic = legendre(cos_theta, orders + 1);
@@ -288,24 +326,60 @@ impl HeadSphere {
         Self::with_margin(radius_m, mouth_radius_m, receiver, medium, output_rate, 30, Some(torso))
     }
 
+    /// The head for one opening of the baffle (module doc, "Openings off the pole"): its cap on the ray from the head's
+    /// centre through `opening`'s centre, `B` on the opening's own quadrature, the torso's change at that cap when
+    /// `torso` is given. An opening at `(0, 0)` whose declared grid resolves the band is [`HeadSphere::new`] (or
+    /// [`HeadSphere::with_torso`]) bit for bit.
+    ///
+    /// # Errors
+    /// Every refusal of [`HeadSphere::new`] and [`HeadSphere::with_torso`], or an opening array refusal.
+    pub fn for_opening(radius_m: f64, opening: CircularOpening, receiver: CircularOutletReceiver, medium: RayleighMedium,
+        output_rate: u32, torso: Option<TorsoSphere>) -> Result<Self, String> {
+        Self::admit(radius_m, opening.radius_m, receiver, output_rate)?;
+        let (rings, points) = BaffledPressure::resolved_circular_grids(&[opening], receiver, medium)?[0];
+        let local = CircularOutletReceiver { radial_rings: rings, angular_points: points, ..receiver };
+        let mut surface = BaffledPressure::circular_surface(opening.radius_m, local, medium)?;
+        for sample in &mut surface {
+            sample.position_m[0] += opening.center_m[0];
+            sample.position_m[1] += opening.center_m[1];
+        }
+        let axis = cap_axis(radius_m, opening.center_m);
+        Self::on_surface(radius_m, opening.radius_m, axis, surface, receiver, medium, output_rate, 30, torso)
+    }
+
     fn with_margin(radius_m: f64, mouth_radius_m: f64, receiver: CircularOutletReceiver, medium: RayleighMedium,
         output_rate: u32, margin: usize, torso: Option<TorsoSphere>) -> Result<Self, String> {
+        // The head's own refusals come before the receiver's, as they always have.
+        Self::admit(radius_m, mouth_radius_m, receiver, output_rate)?;
+        let surface = BaffledPressure::circular_surface(mouth_radius_m, receiver, medium)?;
+        Self::on_surface(radius_m, mouth_radius_m, POLE, surface, receiver, medium, output_rate, margin, torso)
+    }
+
+    fn admit(radius_m: f64, cap_radius_m: f64, receiver: CircularOutletReceiver, output_rate: u32) -> Result<(), String> {
         if !radius_m.is_finite() || radius_m <= 0.0 {
             return Err("the head radius must be finite and positive".into());
         }
-        if !(mouth_radius_m < radius_m) {
+        if !(cap_radius_m < radius_m) {
             return Err("the mouth must be smaller than the head".into());
         }
-        let rate = f64::from(output_rate);
-        let band_hz = receiver.maximum_frequency_hz;
-        if !(1.25 * band_hz < 0.5 * rate) {
+        if !(1.25 * receiver.maximum_frequency_hz < 0.5 * f64::from(output_rate)) {
             return Err("the head's blend band [band, 1.25 band] must lie below Nyquist".into());
         }
-        let surface = BaffledPressure::circular_surface(mouth_radius_m, receiver, medium)?;
-        let series = Series::new(radius_m, mouth_radius_m, receiver.position_m, medium, 1.25 * band_hz, margin)?;
+        Ok(())
+    }
+
+    /// The head for a cap of radius `cap_radius_m` on `axis`, against the baffled disk sampled at `surface`.
+    #[allow(clippy::too_many_arguments)]
+    fn on_surface(radius_m: f64, cap_radius_m: f64, axis: [f64; 3], surface: Vec<super::SurfaceSample>,
+        receiver: CircularOutletReceiver, medium: RayleighMedium, output_rate: u32, margin: usize,
+        torso: Option<TorsoSphere>) -> Result<Self, String> {
+        Self::admit(radius_m, cap_radius_m, receiver, output_rate)?;
+        let rate = f64::from(output_rate);
+        let band_hz = receiver.maximum_frequency_hz;
+        let series = Series::new(radius_m, cap_radius_m, axis, receiver.position_m, medium, 1.25 * band_hz, margin)?;
         let torso = match torso {
-            Some(t) => Some(torso::Snowman::new(radius_m, mouth_radius_m, t, Some(receiver.position_m), medium.density,
-                medium.sound_speed, 1.25 * band_hz)?),
+            Some(t) => Some(torso::Snowman::at_cap(radius_m, cap_radius_m, axis, t, Some(receiver.position_m),
+                medium.density, medium.sound_speed, 1.25 * band_hz)?),
             None => None,
         };
         let mut head = Self {
@@ -546,19 +620,47 @@ pub fn head_torso_mouth_load(radius_m: f64, torso: TorsoSphere, band_hz: f64, du
     mouth_load(radius_m, Some((torso, band_hz)), duct, gas, sample_rate_hz, max_taps)
 }
 
+/// The radiation load of one opening of the baffle with the head (module doc, "Openings off the pole"): the
+/// [`head_mouth_load`] law for a cap of the opening's area centred on the ray from the head's centre through the
+/// opening's centre, with the torso's change at that cap (weighted as [`head_torso_mouth_load`] weights it) when `torso`
+/// is given as `(torso, band_hz)`; on the same bins, bound to `axial_position_m` (the opening's plane, from the inlet of
+/// the path that reads it), the opening's radius and `gas` with DC 0. An opening at `(0, 0)` of a duct's mouth radius,
+/// bound to that duct's length, is [`head_mouth_load`] (or [`head_torso_mouth_load`]) bit for bit.
+///
+/// # Errors
+/// Every refusal of [`head_mouth_load`] and [`head_torso_mouth_load`], or a binding the table refuses.
+pub fn head_opening_load(radius_m: f64, opening: CircularOpening, torso: Option<(TorsoSphere, f64)>,
+    axial_position_m: f64, gas: &GasState, sample_rate_hz: u32, max_taps: usize) -> Result<TabulatedLoad, String> {
+    if !radius_m.is_finite() || radius_m <= 0.0 {
+        return Err("the head radius must be finite and positive".into());
+    }
+    if !opening.center_m.iter().all(|x| x.is_finite()) {
+        return Err("the opening's centre must be finite".into());
+    }
+    let axis = cap_axis(radius_m, opening.center_m);
+    cap_load(radius_m, opening.radius_m, axis, torso, axial_position_m, gas, sample_rate_hz, max_taps)
+}
+
 fn mouth_load(radius_m: f64, torso: Option<(TorsoSphere, f64)>, duct: &Duct, gas: &GasState, sample_rate_hz: u32,
     max_taps: usize) -> Result<TabulatedLoad, String> {
     if !radius_m.is_finite() || radius_m <= 0.0 {
         return Err("the head radius must be finite and positive".into());
     }
     let mouth = duct.segments.last().ok_or("the head's load needs a duct with segments")?.outlet_radius();
+    let length: f64 = duct.segments.iter().map(Segment::axial_length).sum();
+    cap_load(radius_m, mouth, POLE, torso, length, gas, sample_rate_hz, max_taps)
+}
+
+/// The table of a cap of radius `mouth` on `axis` (module doc, "The lips' load" and "Openings off the pole").
+#[allow(clippy::too_many_arguments)]
+fn cap_load(radius_m: f64, mouth: f64, axis: [f64; 3], torso: Option<(TorsoSphere, f64)>, length: f64, gas: &GasState,
+    sample_rate_hz: u32, max_taps: usize) -> Result<TabulatedLoad, String> {
     if !(mouth > 0.0 && mouth < radius_m) {
         return Err("the mouth must be smaller than the head".into());
     }
     if sample_rate_hz == 0 || max_taps < 2 || !max_taps.is_power_of_two() {
         return Err("the head's load needs a positive rate and a power-of-two tap count of at least 2".into());
     }
-    let length: f64 = duct.segments.iter().map(Segment::axial_length).sum();
     let dt = 1.0 / f64::from(sample_rate_hz);
     // The lines' own bin expression, so each rung's query lands on its row bit for bit.
     let omegas: Vec<f64> =
@@ -572,7 +674,7 @@ fn mouth_load(radius_m: f64, torso: Option<(TorsoSphere, f64)>, duct: &Duct, gas
                 return Err("the torso's band must be finite and positive".into());
             }
             let top_hz = 1.25 * band;
-            let snow = torso::Snowman::new(radius_m, mouth, t, None, gas.density, gas.sound_speed, top_hz)?;
+            let snow = torso::Snowman::at_cap(radius_m, mouth, axis, t, None, gas.density, gas.sound_speed, top_hz)?;
             let n = omegas.iter().take_while(|&&w| w / core::f64::consts::TAU < top_hz).count();
             let dz = torso::par_map(n, |i| Ok(snow.change(omegas[i] / core::f64::consts::TAU)?.1))?;
             let weights = omegas[..n]
@@ -586,8 +688,9 @@ fn mouth_load(radius_m: f64, torso: Option<(TorsoSphere, f64)>, duct: &Duct, gas
         }
         None => (Vec::new(), Vec::new()),
     };
-    let mut z = Vec::with_capacity(omegas.len());
-    for (i, &omega) in omegas.iter().enumerate() {
+    // Each row is solved alone (the first refusal in row order is returned), so the table is the same on any thread count.
+    let rows = torso::par_map(omegas.len(), |i| {
+        let omega = omegas[i];
         let flanged = fs_duct::compact_radiation_impedance(Termination::FlangedOpen, gas, mouth, omega)
             .map_err(|e| format!("the flanged load refused at {omega} rad/s: {e:?}"))?;
         let (r_piston, x_piston) = fs_phs::baffled_piston_impedance(gas.density, gas.sound_speed, mouth, omega)
@@ -598,13 +701,21 @@ fn mouth_load(radius_m: f64, torso: Option<(TorsoSphere, f64)>, duct: &Duct, gas
             _ => c,
         };
         // conj(Z_cap) carries the series' e^{+j w t} over to fs-duct's e^{-i w t}.
-        z.push(fs_math::c64::C64::new(flanged.re + (c.re - r_piston), flanged.im + (-c.im - x_piston)));
-    }
+        Ok(Cx::new(flanged.re + (c.re - r_piston), flanged.im + (-c.im - x_piston)))
+    })?;
+    let z: Vec<fs_math::c64::C64> = rows.iter().map(|r| fs_math::c64::C64::new(r.re, r.im)).collect();
+    let cap_place = if axis == POLE {
+        String::new()
+    } else {
+        format!(" cap on e=({:e},{:e},{:e}) (central projection, a modelling choice)", axis[0], axis[1], axis[2])
+    };
     let source = match torso {
-        None => format!("head-cap-on-sphere a={radius_m:e} b={mouth:e} (morse-ingard-1968-7.2) + flanged - baffled piston"),
+        None => format!(
+            "head-cap-on-sphere a={radius_m:e} b={mouth:e}{cap_place} (morse-ingard-1968-7.2) + flanged - baffled piston"
+        ),
         Some((t, band)) => format!(
-            "head-cap-on-sphere a={radius_m:e} b={mouth:e} (morse-ingard-1968-7.2) + torso sphere b={:e} h={:e} below {band:e} Hz \
-             (algazi-duda-thompson-2002, multipole) + flanged - baffled piston",
+            "head-cap-on-sphere a={radius_m:e} b={mouth:e}{cap_place} (morse-ingard-1968-7.2) + torso sphere b={:e} h={:e} \
+             below {band:e} Hz (algazi-duda-thompson-2002, multipole) + flanged - baffled piston",
             t.radius_m, t.neck_gap_m
         ),
     };
@@ -680,7 +791,7 @@ mod tests {
     /// same series at the C3 card's geometry.
     #[test]
     fn the_series_matches_an_independent_evaluation() {
-        let s = Series::new(0.0875, 0.013_548, MIC, AIR, 10_000.0, 30).unwrap();
+        let s = Series::new(0.0875, 0.013_548, POLE, MIC, AIR, 10_000.0, 30).unwrap();
         for (f, re, im) in GOLDEN {
             let p = s.pressure(f, 30).unwrap();
             let want = Cx::new(re, im);
@@ -811,7 +922,7 @@ mod tests {
             assert!(err.contains(why), "{err}");
         }
         // Every microphone in front of the mouth plane is outside the sphere; one behind it, inside, is refused.
-        let err = Series::new(0.1, 0.01, [0.0, 0.0, -0.05], AIR, 8000.0, 30).unwrap_err();
+        let err = Series::new(0.1, 0.01, POLE, [0.0, 0.0, -0.05], AIR, 8000.0, 30).unwrap_err();
         assert!(err.contains("outside the head"), "{err}");
     }
 
@@ -910,8 +1021,122 @@ mod tests {
     /// A mouth so small against the head that the series would need more than `LOAD_MAX_ORDER` terms is refused.
     #[test]
     fn a_load_series_too_long_is_refused() {
-        let err = CapLoad::new(0.0875, 0.002, AIR.density, AIR.sound_speed, TAU * 1000.0).unwrap_err();
+        // 2 * 1000 a / b = 175,000 orders, past 2^17 (a 2 mm mouth's 87,500 was past the old 2^16).
+        let err = CapLoad::new(0.0875, 0.001, AIR.density, AIR.sound_speed, TAU * 1000.0).unwrap_err();
         assert!(err.contains("more than"), "{err}");
+    }
+
+    /// The C3-a card's left nostril on the baffle (MB 18119) and Dang's subject 2 nostril radii (0.81 and 0.62 cm^2).
+    const NOSTRIL: [f64; 2] = [0.007_07, 0.027_63];
+    const NOSTRIL_RADII: [f64; 2] = [5.078e-3, 4.442e-3];
+
+    /// Every row of a table on the bins of `taps` at `rate`, as bits (the rows' own expression, so each query hits its row).
+    fn bits(table: &TabulatedLoad, rate: u32, taps: usize) -> Vec<(u64, u64)> {
+        let dt = 1.0 / f64::from(rate);
+        (1..=taps / 2)
+            .map(|k| table.z_at(TAU * k as f64 / (taps as f64 * dt)).unwrap())
+            .map(|z| (z.re.to_bits(), z.im.to_bits()))
+            .collect()
+    }
+
+    /// N3b test (2) in the head's own terms: an opening at the mouth's point and radius is the mouth, bit for bit, for
+    /// the FIR (head alone and with the torso, NavyTower 18811 point b) and for the load table (alone and with the torso).
+    #[test]
+    fn an_opening_at_the_pole_is_the_mouth_bit_for_bit() {
+        let (a, b, band) = (0.087, 0.013_548, 4000.0);
+        let rx = mic(16, 64, band);
+        let pole = CircularOpening { center_m: [0.0, 0.0], radius_m: b };
+        let taps = |h: &HeadSphere| h.taps().iter().map(|t| t.to_bits()).collect::<Vec<_>>();
+        let head = HeadSphere::new(a, b, rx, AIR, 48_000).unwrap();
+        let opening = HeadSphere::for_opening(a, pole, rx, AIR, 48_000, None).unwrap();
+        assert_eq!(taps(&head), taps(&opening));
+        assert_eq!(head.latency_samples(), opening.latency_samples());
+        let head = HeadSphere::with_torso(a, b, rx, AIR, 48_000, KEMAR).unwrap();
+        let opening = HeadSphere::for_opening(a, pole, rx, AIR, 48_000, Some(KEMAR)).unwrap();
+        assert_eq!(taps(&head), taps(&opening));
+        let gas = air_state();
+        let mouth = head_mouth_load(a, &tube(b), &gas, 48_000, 4096).unwrap();
+        let cap = head_opening_load(a, pole, None, 0.17, &gas, 48_000, 4096).unwrap();
+        assert_eq!(bits(&mouth, 48_000, 4096), bits(&cap, 48_000, 4096));
+        assert_eq!((mouth.mouth(), mouth.source_id()), (cap.mouth(), cap.source_id()));
+        let mouth = head_torso_mouth_load(a, KEMAR, band, &tube(b), &gas, 48_000, 4096).unwrap();
+        let cap = head_opening_load(a, pole, Some((KEMAR, band)), 0.17, &gas, 48_000, 4096).unwrap();
+        assert_eq!(bits(&mouth, 48_000, 4096), bits(&cap, 48_000, 4096));
+        assert_eq!((mouth.mouth(), mouth.source_id()), (cap.mouth(), cap.source_id()));
+    }
+
+    /// An opening off the pole (module doc, "Openings off the pole"): its cap sits on the ray through its place, 4.33 mm
+    /// behind the mouth's plane for the C3-a nostril; the cap's own load does not depend on where the cap sits, so
+    /// without a torso the nostril's table is the pole cap's of the same radius bit for bit, while the torso's change does
+    /// depend on it and the table stays passive; and a head far larger than the openings reads each opening's own
+    /// baffle (G near 1).
+    #[test]
+    fn an_opening_off_the_pole_is_a_cap_on_its_ray() {
+        let a = 0.087;
+        let e = cap_axis(a, NOSTRIL);
+        let behind = a * (1.0 - e[2]);
+        assert!((behind - 4.33e-3).abs() < 0.01e-3, "{behind}");
+        assert!((f64::asin(e[1]).to_degrees() - 17.56).abs() < 0.01, "{e:?}");
+        assert!((f64::atan2(e[0], e[2]).to_degrees() - 4.65).abs() < 0.01, "{e:?}");
+        let gas = air_state();
+        let nostril = CircularOpening { center_m: NOSTRIL, radius_m: NOSTRIL_RADII[0] };
+        let pole = CircularOpening { center_m: [0.0, 0.0], ..nostril };
+        let alone = head_opening_load(a, nostril, None, 0.2, &gas, 48_000, 4096).unwrap();
+        let alone_pole = head_opening_load(a, pole, None, 0.2, &gas, 48_000, 4096).unwrap();
+        assert_eq!(bits(&alone, 48_000, 4096), bits(&alone_pole, 48_000, 4096));
+        let snow = head_opening_load(a, nostril, Some((KEMAR, 4000.0)), 0.2, &gas, 48_000, 4096).unwrap();
+        let snow_pole = head_opening_load(a, pole, Some((KEMAR, 4000.0)), 0.2, &gas, 48_000, 4096).unwrap();
+        let (off, on) = (bits(&snow, 48_000, 4096), bits(&snow_pole, 48_000, 4096));
+        assert_ne!(off, on, "the torso's change depends on where the cap sits");
+        snow.validate_mouth(0.2, NOSTRIL_RADII[0], &gas).unwrap();
+        // As `a_large_head_reads_the_baffle` for the mouth: G -> 1 like 1 / a as the head grows, each doubling scaling
+        // |G - 1| by 0.3 to 0.7 (declared before the first run). scipy on the same quadrature, with the cap on its ray
+        // (NavyTower's golden method; the mouth's values reproduced as its control): |G - 1| at 8 kHz is 1.21e-1,
+        // 5.85e-2, 2.86e-2 and 1.408e-2 for 0.25, 0.5, 1 and 2 m, its cap tilted and recessed by amounts that fall as
+        // 1 / a. The bound 1.6e-2 is that value plus 14%, near the mouth test's margin (6e-3 over 5.2e-3, 15%). The
+        // first run's bound, 1e-2, set without an estimate, was wrong: that run read 0.01408 (MB 19228).
+        let off = |a: f64| -> f64 {
+            let head = HeadSphere::for_opening(a, nostril, mic(16, 64, 8000.0), AIR, 48_000, None).unwrap();
+            g(&head, 8000.0).sub(Cx::ONE).abs()
+        };
+        let devs: Vec<f64> = [0.25, 0.5, 1.0, 2.0].into_iter().map(off).collect();
+        assert!(devs.windows(2).all(|w| (0.3..0.7).contains(&(w[1] / w[0]))), "{devs:?}");
+        assert!(devs[3] < 1.6e-2, "2 m head at 8 kHz: |G - 1| = {}", devs[3]);
+    }
+
+    /// The nostrils' caps on the 262144-tap bins at 192 kHz need more orders than the old 2^16 and fit 2^17 (MB 18809).
+    #[test]
+    fn a_nostrils_cap_fits_the_load_order_cap() {
+        let top = core::f64::consts::PI * 192_000.0;
+        for b in NOSTRIL_RADII {
+            let cap = CapLoad::new(0.087, b, 1.1336, 353.0, top).unwrap();
+            assert!(cap.w.len() - 1 > 1 << 16 && cap.w.len() - 1 <= LOAD_MAX_ORDER, "{b}: {}", cap.w.len() - 1);
+        }
+    }
+
+    /// The timing probe MB 18809 asked for: one nostril's table with the torso on the 262144-tap bins at 192 kHz, as the
+    /// nasal card's build makes it; wall time and peak RSS (Linux `VmHWM`) as one JSON line.
+    #[test]
+    #[ignore = "timing probe for the build host (N3b): run by name with --ignored --nocapture"]
+    fn a_nostril_table_build_time_at_the_live_clock() {
+        let gas = air_state();
+        let nostril = CircularOpening { center_m: NOSTRIL, radius_m: NOSTRIL_RADII[0] };
+        let started = std::time::Instant::now();
+        let table = head_opening_load(0.087, nostril, Some((KEMAR, 8000.0)), 0.2, &gas, 192_000, 262_144).unwrap();
+        let wall = started.elapsed().as_secs_f64();
+        let hwm = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|s| {
+                let line = s.lines().find(|l| l.starts_with("VmHWM:"))?;
+                Some(line.split_whitespace().nth(1).unwrap_or("").to_string())
+            })
+            .unwrap_or_else(|| "n/a".into());
+        println!(
+            "{{\"suite\":\"fs-couple\",\"case\":\"head-nostril-table-build-time\",\"rows\":{},\"wall_s\":{wall:.2},\
+             \"peak_rss_kib\":\"{hwm}\",\"workers\":{}}}",
+            bits(&table, 192_000, 262_144).len(),
+            std::thread::available_parallelism().map_or(1, |p| p.get()).min(8)
+        );
     }
 
     /// The table: rows on the finest rung's bins, bound to the duct's mouth, passive; at 200 Hz less mass and less
@@ -953,7 +1178,8 @@ mod tests {
             (0.01, 0.01, 48_000, 256, "smaller than the head"),
             (0.0875, 0.01, 0, 256, "power-of-two"),
             (0.0875, 0.01, 48_000, 300, "power-of-two"),
-            (0.0875, 0.002, 48_000, 256, "more than"),
+            // 2N = 175,000 orders at 48 kHz, over LOAD_MAX_ORDER (2^17 since N3b; 2 mm needs 87,500 and is admitted).
+            (0.0875, 0.001, 48_000, 256, "more than"),
         ] {
             let err = head_mouth_load(a, &tube(r), &gas, rate, taps).unwrap_err();
             assert!(err.contains(why), "{err}");

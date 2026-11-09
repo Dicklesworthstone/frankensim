@@ -591,6 +591,29 @@ fn network_explicit_port_loads_and_exact_ls_owner() {
     ));
 }
 
+// A table bound to its mouth answers the binding's static limit below its first row (the series lines' DC rule); the
+// same table unbound refuses there. Inside the support both read their rows, and above it both refuse.
+#[test]
+fn network_bound_table_answers_its_static_limit_below_its_first_row() {
+    let gas = gas();
+    let w = 1731.0;
+    let rows = vec![C64::new(2.0e5, -3.0e5), C64::new(4.0e5, -1.0e5)];
+    let unbound = TabulatedLoad::try_new(vec![w, 2.0 * w], rows.clone(), "test rows, not data", 0.0).unwrap();
+    let mouth = crate::TabulatedMouth { axial_position_m: 0.17, radius_m: 0.01, gas, dc_impedance: 7.5e4 };
+    let bound = unbound.clone().with_mouth(mouth).unwrap();
+    let (bound, unbound) = (NetworkLoad::Tabulated(bound), NetworkLoad::Tabulated(unbound));
+    for omega in [1.0e-3, 0.5 * w, w * (1.0 - 1.0e-12)] {
+        let z = load_impedance(&bound, Some(&gas), &gas, omega).unwrap().unwrap();
+        assert_eq!((z.re.to_bits(), z.im.to_bits()), (7.5e4_f64.to_bits(), 0.0_f64.to_bits()), "{omega}");
+        assert!(matches!(load_impedance(&unbound, Some(&gas), &gas, omega), Err(DuctError::OutOfTable { .. })));
+    }
+    for load in [&bound, &unbound] {
+        let z = load_impedance(load, Some(&gas), &gas, w).unwrap().unwrap();
+        assert_eq!((z.re.to_bits(), z.im.to_bits()), (rows[0].re.to_bits(), rows[0].im.to_bits()));
+        assert!(matches!(load_impedance(load, Some(&gas), &gas, 3.0 * w), Err(DuctError::OutOfTable { .. })));
+    }
+}
+
 #[test]
 fn network_supplied_junction_multiport() {
     let gas = gas();

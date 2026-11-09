@@ -13,6 +13,14 @@
 //! and `T = (0, -D, -a)`. The snowman frame puts its polar axis up (card `+y`) and azimuth 0 at the front (card `+z`):
 //! about `H`, `x_s = z + a`, `y_s = x`, `z_s = y`. The cap's centre is at polar angle `pi / 2`, azimuth 0.
 //!
+//! An opening off the mouth's pole (the nostrils; the head module doc, "Openings off the pole") puts its cap on the ray
+//! from `H` through the opening's centre on the baffle, a modelling choice. With that ray's unit vector `e` (card frame),
+//! the cap's centre is at `cos theta_c = e_y` and azimuth `phi_c` with `(cos phi_c, sin phi_c) = (e_z, e_x) / hypot(e_z,
+//! e_x)`. The torso is coaxial with the polar axis, so the field is even in `phi - phi_c`: the addition theorem below
+//! carries `P_n^m(cos theta_c)` in place of `P_n^m(0)` (in `V_n^m` and in `dZ`), and the microphone's azimuth is
+//! measured from `phi_c`. The lips' cap passes `e = (0, 0, 1)`: `cos theta_c = 0.0` and `(1.0, 0.0)` exactly, so every
+//! product is the one it was.
+//!
 //! Law (time factor `e^{+j w t}`, outgoing `h_n = h_n^(2)`, as the head's own series). The exterior field is the head's
 //! outgoing multipoles about `H` plus the torso's about `T`:
 //!
@@ -112,7 +120,7 @@ struct Tables {
     /// Head orders at the torso's nodes: `P_n^m(cos th_H)` and `d/dth_H`.
     head_at_torso: Vec<Vec<f64>>,
     head_at_torso_d: Vec<Vec<f64>>,
-    /// `P_n^m(0)`, `n = m..=nh` (the cap's centre).
+    /// `P_n^m(cos theta_c)`, `n = m..=nh` (the cap's centre; `P_n^m(0)` for the lips).
     at_cap: Vec<f64>,
 }
 
@@ -158,16 +166,37 @@ impl Snowman {
     /// and positive, or orders past [`TORSO_MAX_ORDER`].
     pub(super) fn new(a: f64, mouth_m: f64, torso: TorsoSphere, mic: Option<[f64; 3]>, density: f64, sound_speed: f64,
         top_hz: f64) -> Result<Self, String> {
-        Self::with_margins(a, mouth_m, torso, mic, density, sound_speed, top_hz, [HEAD_MARGIN, TORSO_MARGIN, NODE_MARGIN])
+        Self::at_cap(a, mouth_m, super::POLE, torso, mic, density, sound_speed, top_hz)
+    }
+
+    /// [`Self::new`] for a cap centred on the unit vector `cap_axis` from the head's centre (card frame; module doc):
+    /// [`super::POLE`] is the lips' cap of [`Self::new`].
+    ///
+    /// # Errors
+    /// Every refusal of [`Self::new`], or an axis that is not a unit vector facing front (`e_z > 0`).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn at_cap(a: f64, cap_m: f64, cap_axis: [f64; 3], torso: TorsoSphere, mic: Option<[f64; 3]>,
+        density: f64, sound_speed: f64, top_hz: f64) -> Result<Self, String> {
+        Self::with_margins(a, cap_m, cap_axis, torso, mic, density, sound_speed, top_hz,
+            [HEAD_MARGIN, TORSO_MARGIN, NODE_MARGIN])
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn with_margins(a: f64, mouth_m: f64, torso: TorsoSphere, mic: Option<[f64; 3]>, density: f64, sound_speed: f64,
-        top_hz: f64, margins: [usize; 3]) -> Result<Self, String> {
+    fn with_margins(a: f64, mouth_m: f64, cap_axis: [f64; 3], torso: TorsoSphere, mic: Option<[f64; 3]>, density: f64,
+        sound_speed: f64, top_hz: f64, margins: [usize; 3]) -> Result<Self, String> {
         torso.validate()?;
         if !(a.is_finite() && a > 0.0 && mouth_m > 0.0 && mouth_m < a) {
             return Err("the snowman needs a positive head and a mouth smaller than it".into());
         }
+        let [ex, ey, ez] = cap_axis;
+        let norm = ex * ex + ey * ey + ez * ez;
+        if !(ez > 0.0 && (norm - 1.0).abs() <= 1.0e-12) {
+            return Err("the snowman's cap axis must be a unit vector facing front".into());
+        }
+        // The cap's centre (module doc): cos theta_c and the azimuth's (cos, sin), exactly (0, 1, 0) for the lips.
+        let cos_cap = ey;
+        let h = det::hypot(ez, ex);
+        let (cos_az, sin_az) = (ez / h, ex / h);
         if !(top_hz.is_finite() && top_hz > 0.0 && density > 0.0 && sound_speed > 0.0) {
             return Err("the snowman's band, density and sound speed must be positive".into());
         }
@@ -233,7 +262,7 @@ impl Snowman {
                 (Vec::new(), Vec::new(), Vec::new())
             };
             let (head_at_torso, head_at_torso_d) = columns(&cos_h_at_torso, m, nh);
-            let at_cap = pbar(0.0, m, nh).0;
+            let at_cap = pbar(cos_cap, m, nh).0;
             tables.push(Tables { head_at_head, torso_at_head, torso_at_head_d, torso_at_torso, head_at_torso,
                 head_at_torso_d, at_cap });
         }
@@ -258,7 +287,8 @@ impl Snowman {
                     return Err("the microphone must stand outside the head and the torso".into());
                 }
                 let rho = det::hypot(xs, ys);
-                let c1 = if rho > 0.0 { xs / rho } else { 1.0 };
+                // cos(phi - phi_c): the microphone's azimuth from the cap's (xs / rho exactly for the lips).
+                let c1 = if rho > 0.0 { (xs * cos_az + ys * sin_az) / rho } else { 1.0 };
                 let mut cos_m = vec![1.0, c1];
                 for m in 2..=nh {
                     cos_m.push(2.0 * c1 * cos_m[m - 1] - cos_m[m - 2]);
@@ -627,7 +657,8 @@ mod tests {
 
     /// The head alone at the microphone (the head's own series, at the snowman's head).
     fn head_alone(f: f64) -> Cx {
-        super::super::Series::new(0.087, MOUTH, MIC, super::super::RayleighMedium { density: RHO, sound_speed: C }, f, 30)
+        let medium = super::super::RayleighMedium { density: RHO, sound_speed: C };
+        super::super::Series::new(0.087, MOUTH, super::super::POLE, MIC, medium, f, 30)
             .unwrap()
             .pressure(f, 30)
             .unwrap()
@@ -676,7 +707,9 @@ mod tests {
     #[test]
     fn the_snowman_is_converged() {
         let base = snowman(KEMAR, 10_000.0);
-        let more = Snowman::with_margins(0.087, MOUTH, KEMAR, Some(MIC), RHO, C, 10_000.0, [40, 70, 30]).unwrap();
+        let more =
+            Snowman::with_margins(0.087, MOUTH, super::super::POLE, KEMAR, Some(MIC), RHO, C, 10_000.0, [40, 70, 30])
+                .unwrap();
         for f in [50.0, 1000.0, 4000.0, 9900.0] {
             let (a, b) = (base.change(f).unwrap(), more.change(f).unwrap());
             let p = head_alone(f).add(b.0).abs();
@@ -735,8 +768,8 @@ mod tests {
         let mic = [0.0, r * uz, r * ux];
         let s = Snowman::new(a, 0.003, KEMAR, Some(mic), rho, c, 4000.0).unwrap();
         let mic_r = ((a + r * ux).powi(2) + (r * uz).powi(2)).sqrt();
-        let series = super::super::Series::new(a, 0.003, mic, super::super::RayleighMedium { density: rho, sound_speed: c },
-            4000.0, 30).unwrap();
+        let series = super::super::Series::new(a, 0.003, super::super::POLE, mic,
+            super::super::RayleighMedium { density: rho, sound_speed: c }, 4000.0, 30).unwrap();
         assert!((mic_r - series.r).abs() < 1e-12);
         let mut freqs = Vec::new();
         let mut phase = Vec::new();
@@ -794,6 +827,20 @@ mod tests {
     /// coarse (5.2 panels per wavelength). Above 2400 Hz the torso's change rests on the tests above.
     #[test]
     fn the_snowman_matches_a_boundary_element_solve() {
+        against_boundary_elements(0.0, &[250.0, 600.0, 1200.0, 2400.0]);
+    }
+
+    /// The same check with the cap tilted up off the equator (N3b: a nostril's cap on the ray through its place on the
+    /// baffle, `cos theta_c = 0.3`, about 17.5 degrees up), so `P_n^m(cos theta_c)` carries the cap: the mesh's cap patch
+    /// stays at its icosahedron vertex and the snowman's up turns toward it, the torso with it. The bound is the
+    /// equator's 3 %, declared before any run.
+    #[test]
+    fn a_tilted_cap_matches_a_boundary_element_solve() {
+        against_boundary_elements(0.3, &[600.0, 1200.0]);
+    }
+
+    /// The snowman against fs-bem for a cap at `cos theta_c = cos_cap` (azimuth 0), at `freqs` (the doc above).
+    fn against_boundary_elements(cos_cap: f64, freqs: &[f64]) {
         use fs_bem::helmholtz::{Formulation, Medium, PanelRule, solve_radiation_with_rule, with_dense_workers};
         use fs_bem::near_field::{Geometry, Options};
         use fs_bem::panel3d::SpherePanels;
@@ -807,14 +854,20 @@ mod tests {
         };
         let dot = |u: [f64; 3], v: [f64; 3]| u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
         let phi = 0.5 * (1.0 + 5.0_f64.sqrt());
-        // Snowman frame in the mesh's coordinates: front = an icosahedron vertex of fs-rep-mesh's icosphere (the cap's
-        // centre), up perpendicular to it, side = up x front.
-        let front = unit([phi, 0.0, 1.0]);
-        let up = unit([-1.0, 0.0, phi]);
+        // Snowman frame in the mesh's coordinates: the cap's centre = an icosahedron vertex of fs-rep-mesh's icosphere,
+        // up at cos_cap to it (perpendicular at 0), front = the cap's centre's horizontal part (the cap's centre itself at
+        // 0), side = up x front. At cos_cap 0 every vector is the equator test's, bit for bit.
+        let centre = unit([phi, 0.0, 1.0]);
+        let up0 = unit([-1.0, 0.0, phi]);
+        let sin_cap = (1.0 - cos_cap * cos_cap).sqrt();
+        let up = [0, 1, 2].map(|i| cos_cap * centre[i] + sin_cap * up0[i]);
+        let front = [0, 1, 2].map(|i| (centre[i] - cos_cap * up[i]) / sin_cap);
         let side = [up[1] * front[2] - up[2] * front[1], up[2] * front[0] - up[0] * front[2], up[0] * front[1] - up[1] * front[0]];
         let world = |s: [f64; 3]| -> [f64; 3] {
             [0, 1, 2].map(|i| s[0] * front[i] + s[1] * side[i] + s[2] * up[i])
         };
+        // The cap's axis in the card frame (card z = front, x = side, y = up): POLE at cos_cap 0.
+        let axis = [0.0, cos_cap, sin_cap];
         let head = SpherePanels::icosphere(a, 3).unwrap();
         let head_tris = head.triangles().unwrap().to_vec();
         let torso_at = world([0.0, 0.0, -d]);
@@ -826,7 +879,7 @@ mod tests {
         let cap: Vec<usize> = (0..head_tris.len())
             .filter(|&i| {
                 let c = unit(head.centroids()[i]);
-                dot(c, front).clamp(-1.0, 1.0).acos() < 0.3
+                dot(c, centre).clamp(-1.0, 1.0).acos() < 0.3
             })
             .collect();
         assert!(!cap.is_empty() && cap.len() % 5 == 0, "the cap patch should be 5-fold symmetric: {} panels", cap.len());
@@ -841,8 +894,8 @@ mod tests {
         let mic_s = [MIC[2] + a, MIC[0], MIC[1]];
         let mic = world(mic_s);
         let mouth = (area / core::f64::consts::PI).sqrt();
-        let ours = Snowman::new(a, mouth, KEMAR, Some(MIC), RHO, C, 2400.0).unwrap();
-        for f in [250.0, 600.0, 1200.0, 2400.0] {
+        let ours = Snowman::at_cap(a, mouth, axis, KEMAR, Some(MIC), RHO, C, 2400.0).unwrap();
+        for &f in freqs {
             let k = core::f64::consts::TAU * f / C;
             let read = |surface: &SpherePanels, v: &[C64]| -> (C64, C64) {
                 let n = surface.areas().len();
@@ -866,13 +919,61 @@ mod tests {
             let (dp, dz) = ours.change(f).unwrap();
             let e_mic = dp.sub(Cx::new(dp_bem.re, dp_bem.im)).abs() / dp.abs();
             let e_cap = dz.sub(Cx::new(dz_bem.re, dz_bem.im)).abs() / dz.abs();
-            let series = super::super::Series::new(a, mouth, MIC, super::super::RayleighMedium { density: RHO, sound_speed: C },
-                f, 30).unwrap().pressure(f, 30).unwrap();
+            let series = super::super::Series::new(a, mouth, axis, MIC,
+                super::super::RayleighMedium { density: RHO, sound_speed: C }, f, 30).unwrap().pressure(f, 30).unwrap();
             let e_head = series.sub(Cx::new(p_head.re, -p_head.im)).abs() / series.abs();
-            eprintln!("BEM {f} Hz ({} cap panels, mouth {mouth:.6} m): torso change at the mic {e_mic:.3e}, on the cap {e_cap:.3e}; \
-                head alone at the mic {e_head:.3e}", cap.len());
+            eprintln!("BEM cos_cap {cos_cap} {f} Hz ({} cap panels, mouth {mouth:.6} m): torso change at the mic {e_mic:.3e}, \
+                on the cap {e_cap:.3e}; head alone at the mic {e_head:.3e}", cap.len());
             assert!(e_mic < TOL && e_cap < TOL, "{f} Hz: mic {e_mic:.3e} ({dp:?} vs {dp_bem:?}), cap {e_cap:.3e} ({dz:?} vs {dz_bem:?})");
         }
+    }
+
+    /// The addition theorem the cap's velocity rests on, off the equator (N3b): `P_n(cos gamma) = sum_m eps_m 2 / (2n+1)
+    /// P_n^m(cos th) P_n^m(cos th_c) cos(m (phi - phi_c))` with these tables, for caps at and above the equator.
+    #[test]
+    fn the_addition_theorem_holds_for_a_cap_off_the_equator() {
+        let half_pi = core::f64::consts::FRAC_PI_2;
+        for (th, phi, th_c, phi_c) in [(0.7, 0.3, 1.2662, 0.0816), (2.2, -1.1, half_pi, 0.0), (1.9, 2.5, 0.5, -0.4)] {
+            let (x, x_c) = (f64::cos(th), f64::cos(th_c));
+            let cos_gamma = x * x_c + f64::sin(th) * f64::sin(th_c) * f64::cos(phi - phi_c);
+            let top = 40;
+            let want = legendre(cos_gamma, top);
+            let mut got = vec![0.0; top + 1];
+            for m in 0..=top {
+                let (p, p_c) = (pbar(x, m, top).0, pbar(x_c, m, top).0);
+                let eps = if m == 0 { 1.0 } else { 2.0 };
+                for n in m..=top {
+                    got[n] += eps * 2.0 / (2 * n + 1) as f64 * p[n - m] * p_c[n - m] * f64::cos(m as f64 * (phi - phi_c));
+                }
+            }
+            for n in 0..=top {
+                let (g, w) = (got[n], want[n]);
+                assert!((g - w).abs() < 1e-12, "n {n} at {th} {phi} / {th_c} {phi_c}: {g} vs {w}");
+            }
+        }
+    }
+
+    /// The torso is coaxial with the polar axis, so a cap turned in azimuth (on the equator) with the microphone turned
+    /// the same way about that axis is the lips' cap: the microphone's change agrees within rounding, and the cap's own
+    /// change (which reads no microphone) is the lips' bit for bit. A cap facing back is refused.
+    #[test]
+    fn a_cap_turned_about_the_torso_is_the_lips_cap_turned() {
+        let base = snowman(KEMAR, 4000.0);
+        for turn in [0.0816_f64, -0.3, 0.9] {
+            let axis = [turn.sin(), 0.0, turn.cos()];
+            // The microphone about the head's centre in the snowman frame (x_s = z + a, y_s = x), turned by `turn`.
+            let (xs, ys) = (MIC[2] + 0.087, MIC[0]);
+            let (xt, yt) = (xs * turn.cos() - ys * turn.sin(), xs * turn.sin() + ys * turn.cos());
+            let mic = [yt, MIC[1], xt - 0.087];
+            let turned = Snowman::at_cap(0.087, MOUTH, axis, KEMAR, Some(mic), RHO, C, 4000.0).unwrap();
+            for f in [300.0, 1500.0, 4000.0] {
+                let ((dp0, dz0), (dp, dz)) = (base.change(f).unwrap(), turned.change(f).unwrap());
+                assert!(dp.sub(dp0).abs() < 1e-11 * dp0.abs(), "turn {turn} {f} Hz: {dp:?} vs {dp0:?}");
+                assert_eq!((dz.re.to_bits(), dz.im.to_bits()), (dz0.re.to_bits(), dz0.im.to_bits()), "turn {turn} {f} Hz");
+            }
+        }
+        let err = Snowman::at_cap(0.087, MOUTH, [0.0, 0.0, -1.0], KEMAR, Some(MIC), RHO, C, 1000.0).unwrap_err();
+        assert!(err.contains("facing front"), "{err}");
     }
 
     #[test]

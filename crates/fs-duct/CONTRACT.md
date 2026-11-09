@@ -2651,6 +2651,17 @@ the shared-fluid chain against the same impedance supplied directly. It holds
 below the cavity's first internal mode and adds no wall loss. It is not a
 distributed cavity, a moving wall or a measured sinus.
 
+`NetworkLoad::Tabulated` plays inside its own support, linearly interpolated,
+and refuses above it. Below its first row, a table bound to its mouth
+(`TabulatedLoad::with_mouth`) answers that binding's explicit static limit
+`dc_impedance` (0 for an exterior radiation load) on the whole gap below that
+row; the series lines read the same value at their one DC probe point,
+1e-3 rad/s. An unbound table refuses there as before.
+The network does not check the binding's plane, radius or gas against the
+port: the consumer that binds a table to a port does
+(`TabulatedLoad::validate_mouth`). A test in `network/tests.rs` checks both
+cases, inside and above the support as well.
+
 `NetworkResponse::drive_coupled` also takes one `CoupledTermination`: a
 row-major acoustic impedance matrix [Pa s/m³] over named external ports, with
 `p = -Z U` for currents into the network. It carries the response's exact
