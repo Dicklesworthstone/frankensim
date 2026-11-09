@@ -82,12 +82,89 @@ pub(super) struct HarmonicSource {
     pub(super) maximum_mass_residual: f64,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum SourceClock {
+    Periodic(usize),
+    Physical(f64),
+}
+
+impl SourceClock {
+    pub(super) fn phase(
+        self,
+        start: Dd,
+        duration: f64,
+        period: f64,
+    ) -> Result<(f64, [f64; 2]), RotorError> {
+        let (angle, phase) = match self {
+            Self::Periodic(order) => {
+                let angle = finite((core::f64::consts::TAU * order as f64) * (duration / period))?;
+                let turns = (start * Dd::from_f64(order as f64) / Dd::from_f64(period)).to_f64();
+                (angle, core::f64::consts::TAU * (turns - turns.floor()))
+            }
+            Self::Physical(omega) => {
+                // Treat omega and t as the original binary inputs. Split 2*pi
+                // retains fractional turns before reducing the DD product;
+                // converting omega*t to f64 first would silently lose phase.
+                let product = Dd::from_f64(omega) * start;
+                let angle = finite((Dd::from_f64(omega) * Dd::from_f64(duration)).to_f64())?;
+                if !omega.is_finite()
+                    || omega <= 0.0
+                    || !start.to_f64().is_finite()
+                    || !product.to_f64().is_finite()
+                    || (start != Dd::ZERO && product.to_f64() == 0.0)
+                    || product.to_f64().abs() > 1_099_511_627_776.0
+                    || angle > core::f64::consts::TAU * MAX_ROTOR_FORCE_HARMONIC as f64
+                {
+                    return Err(RotorError::Invalid(
+                        "bounded representable physical source frequency and global phase required",
+                    ));
+                }
+                let tau = Dd::from_f64(core::f64::consts::TAU)
+                    + Dd::from_f64(2.449_293_598_294_706_4e-16);
+                let turns = (product / tau).to_f64().floor();
+                (
+                    angle,
+                    finite((product - Dd::from_f64(turns) * tau).to_f64())?,
+                )
+            }
+        };
+        if angle == 0.0 {
+            return Err(RotorError::Invalid("harmonic segment phase underflow"));
+        }
+        let (sin, cos) = det::sin_cos(phase);
+        Ok((angle, [cos, sin]))
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // original physical source, time and mass admission
 pub(super) fn prepare_source(
     mass: &MassSolve<'_>,
     force: RotorHarmonicForce<'_>,
     order: usize,
     start: f64,
+    duration: f64,
+    period: f64,
+    tolerance: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<HarmonicSource, RotorError> {
+    prepare_source_with_clock(
+        mass,
+        force,
+        SourceClock::Periodic(order),
+        Dd::from_f64(start),
+        duration,
+        period,
+        tolerance,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn prepare_source_with_clock(
+    mass: &MassSolve<'_>,
+    force: RotorHarmonicForce<'_>,
+    clock: SourceClock,
+    start: Dd,
     duration: f64,
     period: f64,
     tolerance: f64,
@@ -122,21 +199,12 @@ pub(super) fn prepare_source(
             *value = normalized;
         }
     }
-    // Local normalized time advances the SAME globally phased physical source.
-    let angle = finite((core::f64::consts::TAU * order as f64) * (duration / period))?;
-    if angle == 0.0 {
-        return Err(RotorError::Invalid("harmonic segment phase underflow"));
-    }
-    // Reduce complete turns before converting to radians. This is shared by
-    // native motion and power, including coefficient and amplitude switches.
-    let turns = (Dd::from_f64(start) * Dd::from_f64(order as f64) / Dd::from_f64(period)).to_f64();
-    let phase = core::f64::consts::TAU * (turns - turns.floor());
-    let (sin, cos) = det::sin_cos(phase);
+    let (angle, phase) = clock.phase(start, duration, period)?;
     Ok(HarmonicSource {
         columns,
         scale,
         angle,
-        phase: [cos, sin],
+        phase,
         maximum_mass_residual,
     })
 }
@@ -186,13 +254,42 @@ pub(super) fn segment_flow_for_states(
     budget: DenseExponentialBudget,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(AffineSegmentMap, f64), RotorError> {
+    segment_flow_for_states_with_clock(
+        mass,
+        generator,
+        d,
+        force,
+        SourceClock::Periodic(order),
+        Dd::from_f64(start),
+        duration,
+        period,
+        tolerance,
+        budget,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn segment_flow_for_states_with_clock(
+    mass: &MassSolve<'_>,
+    generator: &[f64],
+    d: usize,
+    force: RotorHarmonicForce<'_>,
+    clock: SourceClock,
+    start: Dd,
+    duration: f64,
+    period: f64,
+    tolerance: f64,
+    budget: DenseExponentialBudget,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(AffineSegmentMap, f64), RotorError> {
     if d < 2 * mass.model.dofs() || d.checked_mul(d) != Some(generator.len()) {
         return Err(RotorError::Invalid(
             "complete periodic state generator and original mechanical prefix required",
         ));
     }
-    let mut source = prepare_source(
-        mass, force, order, start, duration, period, tolerance, cancelled,
+    let mut source = prepare_source_with_clock(
+        mass, force, clock, start, duration, period, tolerance, cancelled,
     )?;
     for column in &mut source.columns {
         column.resize(d, 0.0);

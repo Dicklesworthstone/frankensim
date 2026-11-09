@@ -22,7 +22,9 @@ use crate::{
     induction_rotor::{RotorBalance, RotorControls},
     spatial_induction::{SpatialInductionRotor, SpatialRotorCandidate, SpatialRotorError},
 };
-use fs_em::spatial::vector_potential::induction::SpatialInductionControls;
+use fs_em::spatial::vector_potential::{
+    VectorMagneticBoundary, induction::SpatialInductionControls,
+};
 use fs_exec::Cx;
 use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_math::dd::Dd;
@@ -107,6 +109,7 @@ impl<'m> ThermalDriver for RotorDriver<'m> {
                 + Dd::from_f64(self.0.mechanics.kinetic_energy_change))
             .to_f64(),
             supplied_j: (Dd::from_f64(field.impressed_work_j)
+                + Dd::from_f64(field.magnetic_boundary_work_j)
                 + Dd::from_f64(self.0.balance.shaft_work_j))
             .to_f64(),
         }
@@ -185,6 +188,80 @@ impl SpatialMagneticThermalNetwork<'_> {
         initial_energy_increments_j: &[f64],
         cancelled: impl FnMut() -> bool,
     ) -> Result<SpatialRotorThermalCandidate<'t, 'm>, SpatialRotorEnthalpyError> {
+        self.step_rotor_boundary_candidate(
+            thermal,
+            target_s,
+            rotor,
+            endpoint_current_a_m2,
+            None,
+            shaft_torque_nm,
+            bindings,
+            controls,
+            field_controls,
+            rotor_controls,
+            assembly,
+            initial_energy_increments_j,
+            cancelled,
+        )
+    }
+
+    /// Apply an affine magnetic boundary history to the same jointly solved
+    /// field, finite rotor momentum and finite enthalpy. Each thermal/speed
+    /// trial reuses the accepted initial trace and the supplied endpoint.
+    /// Magnetic boundary reaction work enters external supply once; Lorentz
+    /// work remains an internal field/rotor transfer, and only original Joule
+    /// and reversible material heat enter caloric storage.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_rotor_with_boundary_candidate<'t, 'm>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        rotor: &SpatialInductionRotor<'m>,
+        endpoint_current_a_m2: &[[f64; 3]],
+        endpoint_boundary: &VectorMagneticBoundary,
+        shaft_torque_nm: f64,
+        bindings: &[SpatialMagneticThermalLaw],
+        controls: CircuitEnthalpySolve,
+        field_controls: SpatialInductionControls,
+        rotor_controls: RotorControls,
+        assembly: WeightedAssemblyLimits,
+        initial_energy_increments_j: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SpatialRotorThermalCandidate<'t, 'm>, SpatialRotorEnthalpyError> {
+        self.step_rotor_boundary_candidate(
+            thermal,
+            target_s,
+            rotor,
+            endpoint_current_a_m2,
+            Some(endpoint_boundary),
+            shaft_torque_nm,
+            bindings,
+            controls,
+            field_controls,
+            rotor_controls,
+            assembly,
+            initial_energy_increments_j,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_rotor_boundary_candidate<'t, 'm>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        rotor: &SpatialInductionRotor<'m>,
+        endpoint_current_a_m2: &[[f64; 3]],
+        endpoint_boundary: Option<&VectorMagneticBoundary>,
+        shaft_torque_nm: f64,
+        bindings: &[SpatialMagneticThermalLaw],
+        controls: CircuitEnthalpySolve,
+        field_controls: SpatialInductionControls,
+        rotor_controls: RotorControls,
+        assembly: WeightedAssemblyLimits,
+        initial_energy_increments_j: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SpatialRotorThermalCandidate<'t, 'm>, SpatialRotorEnthalpyError> {
         let cancel = RefCell::new(cancelled);
         check(&cancel).map_err(native_error)?;
         let network = MaterialNetwork {
@@ -201,6 +278,7 @@ impl SpatialMagneticThermalNetwork<'_> {
             target_s,
             rotor,
             endpoint_current_a_m2,
+            endpoint_boundary,
             shaft_torque_nm,
             bindings,
             controls,
@@ -226,6 +304,7 @@ impl SpatialMagneticThermalNetwork<'_> {
         target_s: f64,
         rotor: &SpatialInductionRotor<'m>,
         endpoint_current_a_m2: &[[f64; 3]],
+        endpoint_boundary: Option<&VectorMagneticBoundary>,
         shaft_torque_nm: f64,
         bindings: &[SpatialMagneticThermalLaw],
         controls: CircuitEnthalpySolve,
@@ -261,8 +340,20 @@ impl SpatialMagneticThermalNetwork<'_> {
                 }
                 let mut bounded = rotor_controls;
                 bounded.maximum_iterations = bounded.maximum_iterations.min(remaining);
-                rotor
-                    .step_with_materials_candidate(
+                match endpoint_boundary {
+                    Some(boundary) => rotor.step_with_materials_and_boundary_candidate(
+                        target_s,
+                        endpoint_current_a_m2,
+                        boundary,
+                        shaft_torque_nm,
+                        materials,
+                        conductors,
+                        assembly,
+                        field_controls,
+                        bounded,
+                        &mut || (*cancel.borrow_mut())(),
+                    ),
+                    None => rotor.step_with_materials_candidate(
                         target_s,
                         endpoint_current_a_m2,
                         shaft_torque_nm,
@@ -272,17 +363,18 @@ impl SpatialMagneticThermalNetwork<'_> {
                         field_controls,
                         bounded,
                         &mut || (*cancel.borrow_mut())(),
-                    )
-                    .map(RotorDriver)
-                    .map_err(|error| match error {
-                        SpatialRotorError::Nonconvergence { iterations, .. }
-                            if iterations == remaining
-                                && remaining < rotor_controls.maximum_iterations =>
-                        {
-                            CircuitEnthalpyError::CircuitBudget
-                        }
-                        other => rotor_error(other),
-                    })
+                    ),
+                }
+                .map(RotorDriver)
+                .map_err(|error| match error {
+                    SpatialRotorError::Nonconvergence { iterations, .. }
+                        if iterations == remaining
+                            && remaining < rotor_controls.maximum_iterations =>
+                    {
+                        CircuitEnthalpyError::CircuitBudget
+                    }
+                    other => rotor_error(other),
+                })
             },
             |_, _, _, _| Ok(()),
             cancel,
@@ -318,6 +410,88 @@ pub fn heat_assembly_candidate<'t, 'm, A: HeatAssembly + ?Sized>(
     assembly: WeightedAssemblyLimits,
     initial_energy_increments_j: &[f64],
 ) -> Result<SpatialRotorThermalCandidate<'t, 'm, A::Sample>, SpatialRotorEnthalpyError<A::Error>> {
+    heat_assembly_boundary_candidate(
+        provider,
+        cx,
+        thermal,
+        target_s,
+        rotor,
+        endpoint_current_a_m2,
+        None,
+        shaft_torque_nm,
+        regions,
+        volume_tolerance_m3,
+        bindings,
+        controls,
+        field_controls,
+        rotor_controls,
+        assembly,
+        initial_energy_increments_j,
+    )
+}
+
+/// Drive the original rotor with an external magnetic boundary history while
+/// the same complete heat assembly resolves all finite thermal transport.
+/// The original sources, geometry, complete trace support and jointly accepted
+/// field/rotor/caloric histories remain owned by the existing coupled residual.
+#[allow(clippy::too_many_arguments)]
+pub fn heat_assembly_with_boundary_candidate<'t, 'm, A: HeatAssembly + ?Sized>(
+    provider: &A,
+    cx: &Cx<'_>,
+    thermal: &DepositionSimulation<'t>,
+    target_s: f64,
+    rotor: &SpatialInductionRotor<'m>,
+    endpoint_current_a_m2: &[[f64; 3]],
+    endpoint_boundary: &VectorMagneticBoundary,
+    shaft_torque_nm: f64,
+    regions: &[SpatialMagneticRegion],
+    volume_tolerance_m3: f64,
+    bindings: &[SpatialMagneticThermalLaw],
+    controls: CircuitEnthalpySolve,
+    field_controls: SpatialInductionControls,
+    rotor_controls: RotorControls,
+    assembly: WeightedAssemblyLimits,
+    initial_energy_increments_j: &[f64],
+) -> Result<SpatialRotorThermalCandidate<'t, 'm, A::Sample>, SpatialRotorEnthalpyError<A::Error>> {
+    heat_assembly_boundary_candidate(
+        provider,
+        cx,
+        thermal,
+        target_s,
+        rotor,
+        endpoint_current_a_m2,
+        Some(endpoint_boundary),
+        shaft_torque_nm,
+        regions,
+        volume_tolerance_m3,
+        bindings,
+        controls,
+        field_controls,
+        rotor_controls,
+        assembly,
+        initial_energy_increments_j,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn heat_assembly_boundary_candidate<'t, 'm, A: HeatAssembly + ?Sized>(
+    provider: &A,
+    cx: &Cx<'_>,
+    thermal: &DepositionSimulation<'t>,
+    target_s: f64,
+    rotor: &SpatialInductionRotor<'m>,
+    endpoint_current_a_m2: &[[f64; 3]],
+    endpoint_boundary: Option<&VectorMagneticBoundary>,
+    shaft_torque_nm: f64,
+    regions: &[SpatialMagneticRegion],
+    volume_tolerance_m3: f64,
+    bindings: &[SpatialMagneticThermalLaw],
+    controls: CircuitEnthalpySolve,
+    field_controls: SpatialInductionControls,
+    rotor_controls: RotorControls,
+    assembly: WeightedAssemblyLimits,
+    initial_energy_increments_j: &[f64],
+) -> Result<SpatialRotorThermalCandidate<'t, 'm, A::Sample>, SpatialRotorEnthalpyError<A::Error>> {
     let cancel = RefCell::new(|| cx.checkpoint().is_err());
     check(&cancel).map_err(native_error)?;
     let prepared = provider.prepared_heat_network();
@@ -336,6 +510,7 @@ pub fn heat_assembly_candidate<'t, 'm, A: HeatAssembly + ?Sized>(
         target_s,
         rotor,
         endpoint_current_a_m2,
+        endpoint_boundary,
         shaft_torque_nm,
         bindings,
         controls,

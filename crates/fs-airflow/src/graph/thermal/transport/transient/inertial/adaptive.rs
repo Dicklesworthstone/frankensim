@@ -353,6 +353,7 @@ fn native_step<'m, P, T, E>(
         cx,
         &local,
         inventory,
+        super::InertialAdvectionRule::SignedMean,
         thermal,
         target_s,
         step,

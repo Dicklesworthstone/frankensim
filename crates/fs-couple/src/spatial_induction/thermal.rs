@@ -4,7 +4,8 @@ use super::{
     Result, RotorControls, SpatialInductionRotor, SpatialRotorCandidate, SpatialRotorError,
 };
 use fs_em::spatial::{
-    SpatialMagneticMaterial, vector_potential::induction::SpatialInductionControls,
+    SpatialMagneticMaterial,
+    vector_potential::{VectorMagneticBoundary, induction::SpatialInductionControls},
 };
 use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_material::{conductor::ResolvedConductorState, field_storage::spatial::SpatialMagneticLaw};
@@ -27,6 +28,66 @@ impl<'m> SpatialInductionRotor<'m> {
         &self,
         target_s: f64,
         endpoint_current_a_m2: &[[f64; 3]],
+        shaft_torque_nm: f64,
+        materials: Vec<SpatialMagneticMaterial>,
+        conductors: Vec<Option<ResolvedConductorState>>,
+        assembly: WeightedAssemblyLimits,
+        field_controls: SpatialInductionControls,
+        controls: RotorControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialRotorCandidate<'m>> {
+        self.step_materials_boundary_candidate(
+            target_s,
+            endpoint_current_a_m2,
+            None,
+            shaft_torque_nm,
+            materials,
+            conductors,
+            assembly,
+            field_controls,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Refresh the original material sources while an applied magnetic trace
+    /// drives the finite-inertia rotor. The one endpoint operator preparation
+    /// serves every speed trial; boundary supply and magnetic parameter work
+    /// remain separate in the original native report.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_materials_and_boundary_candidate(
+        &self,
+        target_s: f64,
+        endpoint_current_a_m2: &[[f64; 3]],
+        endpoint_boundary: &VectorMagneticBoundary,
+        shaft_torque_nm: f64,
+        materials: Vec<SpatialMagneticMaterial>,
+        conductors: Vec<Option<ResolvedConductorState>>,
+        assembly: WeightedAssemblyLimits,
+        field_controls: SpatialInductionControls,
+        controls: RotorControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialRotorCandidate<'m>> {
+        self.step_materials_boundary_candidate(
+            target_s,
+            endpoint_current_a_m2,
+            Some(endpoint_boundary),
+            shaft_torque_nm,
+            materials,
+            conductors,
+            assembly,
+            field_controls,
+            controls,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_materials_boundary_candidate(
+        &self,
+        target_s: f64,
+        endpoint_current_a_m2: &[[f64; 3]],
+        endpoint_boundary: Option<&VectorMagneticBoundary>,
         shaft_torque_nm: f64,
         materials: Vec<SpatialMagneticMaterial>,
         conductors: Vec<Option<ResolvedConductorState>>,
@@ -77,15 +138,24 @@ impl<'m> SpatialInductionRotor<'m> {
             shaft_torque_nm,
             controls,
             |velocity, checkpoint| {
-                prepared
-                    .step_candidate(
+                match endpoint_boundary {
+                    Some(boundary) => prepared.step_with_boundary_candidate(
+                        endpoint_current_a_m2,
+                        velocity,
+                        boundary,
+                        target_s - self.field.time_s(),
+                        field_controls,
+                        &mut || checkpoint(),
+                    ),
+                    None => prepared.step_candidate(
                         endpoint_current_a_m2,
                         velocity,
                         target_s - self.field.time_s(),
                         field_controls,
                         &mut || checkpoint(),
-                    )
-                    .map_err(Into::into)
+                    ),
+                }
+                .map_err(Into::into)
             },
             cancelled,
         )

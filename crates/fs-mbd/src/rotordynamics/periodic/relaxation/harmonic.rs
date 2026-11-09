@@ -7,9 +7,6 @@ use super::super::{
 use super::{PreparedRotorMaxwellCycle, prepare};
 use crate::rotordynamics::relaxation::MaxwellDampingBranch;
 
-pub(super) use super::super::fourier::segment_flow_for_states as fourier_segment_flow;
-pub(super) use super::super::harmonic::segment_flow_for_states as segment_flow;
-
 /// Prepare a complete hereditary rotor cycle under continuous sinusoidal loads.
 ///
 /// Each segment supplies original generalized force/torque cosine and sine

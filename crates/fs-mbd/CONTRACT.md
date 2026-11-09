@@ -9996,6 +9996,58 @@ lossless-Fourier and notch/peak sensitivity regressions. DSR and RCH are
 unavailable in this environment; these local Cargo runs are a bounded native
 fallback, not a full-workspace or DSR gate.
 
+## Open physical-time Maxwell rotor intervals
+
+`periodic::{prepare_maxwell_interval, prepare_maxwell_power_interval}` advance
+an authored open window at absolute time. `RotorIntervalForcing` supports
+homogeneous, held, harmonic and finite multi-tone forcing with explicit
+positive angular frequencies [rad/s], independent of the window length or
+shaft spin. Noncommensurate tones are admitted in strictly increasing order.
+Global source phase survives coefficient, amplitude, clock and window cuts;
+changing a thermal timestep does not change the excitation frequency.
+
+The existing Maxwell generator, source insertion, affine propagation and
+quadratic-work owners are shared through one retained flow. Cycles alone add
+their genuine QR spectrum and periodic-orbit operation. The distinct interval
+types expose advancement and original physical transition/residual reports,
+without a Floquet or attraction claim. Interval admission skips QR sweep
+requirements and iteration work while retaining mass/assembly, exponential,
+composition, trajectory and work-form bounds. Strongly decayed directions do
+not require a representable Floquet multiplier merely to advance a state.
+
+Motion and heat use the same DD absolute start-plus-elapsed source clock.
+Physical phase uses the original binary frequency/time inputs and split-2*pi
+reduction, with |omega*t| <= 2^40 radians and at most 1024 rotations per segment.
+Rounded public boundaries must be distinct; their rounding relative to the
+authored adjacent duration, and the induced phase error in radians, must fit
+the caller's generator tolerance. Underresolved time handoffs refuse rather
+than silently resetting source phase. Existing cycle phase arithmetic is
+unchanged. The allocation-free forcing `validate` reuses the original bounded
+shape admission and also supports composing owners' zero-duration checks.
+
+The shared trajectory has absolute boundary times for intervals. Its power
+account uses the actual first/last storage charts and only INTERNAL relaxed-K
+switch work, with no final-to-first seam. If a caller changes K between separate
+windows, that external parameter switch needs its own work account. Fixed M/G,
+signed spin, original branch stiffness/strain and complete stress identity
+remain required; optional held kinetics derive from original reference times.
+Every original branch heat, signed C/circulatory work and force interference
+remains present. Smooth coefficients and changing-temperature feedback still
+require their own time refinement; numerical residuals are not error enclosures.
+
+Four new native groups pass: motion, work and branch heat against independent original-coordinate
+RK4 integration under switched clocks and noncommensurate tones;
+open endpoint storage and internal switch work; unequal-window phase/work
+equivalence and the 90-digit original-binary omega=1.3, t0=1e9, h=0.5 free-motion
+oracle; complete dark-memory decay without QR; and shape, clock-resolution,
+phase, resource and cancellation refusals. All 41 affected original periodic
+unit and harmonic/Fourier/Maxwell regressions also pass (45/45 total).
+The prior strict unresolved-force and increment-corruption refusals remain.
+
+These are focused native Cargo checks using the actual numerical sources.
+DSR/RCH are unavailable; no full-workspace or DSR gate, trajectory enclosure
+or continuously coupled thermal accuracy is claimed by this interval layer.
+
 ## Held Maxwell clocks throughout rotor cycles
 
 `periodic::RotorMaxwellKinetics` supplies one positive relaxation-time ratio

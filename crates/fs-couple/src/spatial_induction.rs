@@ -21,6 +21,7 @@ use crate::induction_rotor::{self, RotorStageError};
 pub use crate::induction_rotor::{RotorBalance, RotorControls};
 use fs_em::spatial::{
     SpatialMagneticError, SpatialMagneticMaterial,
+    vector_potential::VectorMagneticBoundary,
     vector_potential::induction::{
         SpatialInduction, SpatialInductionCandidate, SpatialInductionControls,
         SpatialInductionStep,
@@ -287,6 +288,48 @@ impl<'m> SpatialInductionRotor<'m> {
                     .step_candidate(
                         endpoint_current_a_m2,
                         velocity,
+                        target_s - self.field.time_s(),
+                        field_controls,
+                        &mut || checkpoint(),
+                    )
+                    .map_err(Into::into)
+            },
+            cancelled,
+        )
+    }
+
+    /// Drive the same finite-inertia rotor with an applied magnetic history.
+    ///
+    /// The complete original tangential A trace is prescribed at the endpoint
+    /// and varies affinely from the retained trace. Every speed trial includes
+    /// the same boundary Faraday field and restarts the accepted history.
+    /// The trace uses the original fixed WORLD mesh coordinates; body rotation
+    /// enters through the native motional v cross B term at the solved speed.
+    /// Boundary reaction work is external electromagnetic supply; it is not
+    /// shaft work, Lorentz work, or an additional heat deposit. Native support,
+    /// gauge and charge-continuity admission remain in force.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_boundary_candidate(
+        &self,
+        target_s: f64,
+        endpoint_current_a_m2: &[[f64; 3]],
+        endpoint_boundary: &VectorMagneticBoundary,
+        shaft_torque_nm: f64,
+        field_controls: SpatialInductionControls,
+        controls: RotorControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialRotorCandidate<'m>> {
+        self.step_with(
+            target_s,
+            endpoint_current_a_m2,
+            shaft_torque_nm,
+            controls,
+            |velocity, checkpoint| {
+                self.field
+                    .step_with_boundary_candidate(
+                        endpoint_current_a_m2,
+                        velocity,
+                        endpoint_boundary,
                         target_s - self.field.time_s(),
                         field_controls,
                         &mut || checkpoint(),

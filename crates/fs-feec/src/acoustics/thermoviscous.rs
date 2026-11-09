@@ -62,6 +62,8 @@ pub mod time;
 pub mod stress;
 /// Complete velocity/temperature continuity between original resolved regions.
 pub mod interface;
+/// Original physical triangles for admitted unit planar traction ports.
+pub mod port_geometry;
 /// Element-resolved viscous heat and distinct thermal availability losses.
 pub mod dissipation;
 pub use dissipation::ThermoviscousElementPower;

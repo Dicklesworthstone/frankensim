@@ -17,8 +17,9 @@ use super::super::{
     RotorFourierForce, RotorHarmonicForce, RotorPeriodicSegment, harmonic, poll, restore_entry,
 };
 use super::{
-    MaxwellGenerator, PreparedRotorMaxwellCycle, RotorMaxwellKinetics, RotorMaxwellPeriodicOrbit,
-    RotorMaxwellPeriodicTrajectory, RotorMaxwellState, kinetics, prepare,
+    MaxwellFlow, MaxwellGenerator, PreparedRotorMaxwellCycle, PreparedRotorMaxwellInterval,
+    RotorIntervalForcing, RotorMaxwellKinetics, RotorMaxwellPeriodicOrbit,
+    RotorMaxwellPeriodicTrajectory, RotorMaxwellState, interval::Forcing, kinetics, prepare_flow,
 };
 use crate::rotordynamics::relaxation::{MAX_ROTOR_MAXWELL_BRANCHES, MaxwellDampingBranch};
 use fs_math::dd::Dd;
@@ -45,7 +46,7 @@ pub struct RotorMaxwellSegmentWork {
     pub balance_residual_j: f64,
 }
 
-/// Complete original work/heat account over one coefficient/source period.
+/// Complete original work/heat account over one declared time window.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RotorMaxwellCyclePower {
     pub segments: Vec<RotorMaxwellSegmentWork>,
@@ -53,7 +54,8 @@ pub struct RotorMaxwellCyclePower {
     pub velocity_force_work_j: f64,
     pub nonconservative_stiffness_work_j: f64,
     pub stiffness_switch_work_j: f64,
-    /// Endpoint changes use the FIRST segment's coefficients on both sides.
+    /// Cycles use the first model on both endpoints, including their seam work.
+    /// Open intervals use the first/last models and only internal switch work.
     pub kinetic_energy_change_j: f64,
     pub relaxed_elastic_energy_change_j: f64,
     pub branch_elastic_energy_change_j: Vec<f64>,
@@ -80,8 +82,54 @@ struct SegmentIntegrals<'a> {
 /// Borrowed source laws cannot change while this immutable plan is in use.
 pub struct PreparedRotorMaxwellPowerCycle<'a> {
     motion: PreparedRotorMaxwellCycle,
+    accounting: MaxwellPowerIntegrals<'a>,
+}
+
+struct MaxwellPowerIntegrals<'a> {
     branches: &'a [MaxwellDampingBranch],
     integrals: Vec<SegmentIntegrals<'a>>,
+}
+
+/// Open-window work/heat, with storage evaluated at its actual endpoint models.
+pub type RotorMaxwellIntervalPower = RotorMaxwellCyclePower;
+
+/// Cached physical-time motion and all original power channels, without a
+/// periodic seam, Floquet spectrum or periodic-orbit operation.
+pub struct PreparedRotorMaxwellPowerInterval<'a> {
+    motion: PreparedRotorMaxwellInterval,
+    accounting: MaxwellPowerIntegrals<'a>,
+}
+
+/// Prepare actual source work and branch heat on an arbitrary physical window.
+/// Frequencies/global phase follow prepare_maxwell_interval. Internal K switches
+/// retain their work; the last model remains in effect at the end. Composing
+/// separate windows with a changed boundary K requires that external switch's
+/// explicit storage-work accounting. Pure clock changes have no switch work.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_maxwell_power_interval<'a>(
+    spin_rad_s: f64,
+    start_seconds: f64,
+    segments: &[RotorPeriodicSegment<'a>],
+    branches: &'a [MaxwellDampingBranch],
+    kinetics: Option<RotorMaxwellKinetics<'_>>,
+    forcing: RotorIntervalForcing<'_>,
+    relative_generator_residual_tolerance: f64,
+    budget: RotorFloquetBudget,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<PreparedRotorMaxwellPowerInterval<'a>, RotorError> {
+    let (motion, accounting) = prepare_power_window(
+        spin_rad_s,
+        start_seconds,
+        segments,
+        branches,
+        kinetics,
+        Forcing::interval(forcing)?,
+        relative_generator_residual_tolerance,
+        budget,
+        false,
+        &mut cancelled,
+    )?;
+    Ok(PreparedRotorMaxwellPowerInterval { motion, accounting })
 }
 
 /// Prepare held physical loads with full hereditary storage and heat accounting.
@@ -191,6 +239,37 @@ pub(super) fn prepare_power_cycle<'a>(
     budget: RotorFloquetBudget,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<PreparedRotorMaxwellPowerCycle<'a>, RotorError> {
+    let (motion, accounting) = prepare_power_window(
+        spin_rad_s,
+        0.0,
+        segments,
+        branches,
+        kinetics,
+        Forcing::periodic(forces),
+        tolerance,
+        budget,
+        true,
+        &mut cancelled,
+    )?;
+    Ok(PreparedRotorMaxwellPowerCycle {
+        motion: motion.into_cycle(budget, true, &mut cancelled)?,
+        accounting,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_power_window<'a>(
+    spin_rad_s: f64,
+    start_seconds: f64,
+    segments: &[RotorPeriodicSegment<'a>],
+    branches: &'a [MaxwellDampingBranch],
+    kinetics: Option<RotorMaxwellKinetics<'_>>,
+    forces: Forcing<'_>,
+    tolerance: f64,
+    budget: RotorFloquetBudget,
+    spectrum: bool,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<(PreparedRotorMaxwellInterval, MaxwellPowerIntegrals<'a>), RotorError> {
     poll(&mut cancelled)?;
     let Some(first) = segments.first() else {
         return Err(RotorError::Invalid("nonempty Maxwell power cycle required"));
@@ -201,11 +280,11 @@ pub(super) fn prepare_power_cycle<'a>(
         ));
     }
     let n = first.model.dofs();
-    forces.admit(n, segments.len())?;
+    forces.shape.admit(n, segments.len())?;
     if let Some(kinetics) = kinetics {
         kinetics.validate(segments.len(), branches, &mut cancelled)?;
     }
-    let sources = match forces {
+    let sources = match forces.shape {
         CycleForcing::Held(_) => 1,
         CycleForcing::Harmonic { .. } => 2,
         CycleForcing::Fourier { orders, .. } => 1 + 2 * orders.len(),
@@ -235,8 +314,9 @@ pub(super) fn prepare_power_cycle<'a>(
             .ok_or(RotorError::PeriodicBudget("Maxwell power integral work"))?,
         ..budget
     };
-    let motion = prepare(
+    let motion = prepare_flow(
         spin_rad_s,
+        start_seconds,
         segments,
         branches,
         kinetics,
@@ -244,16 +324,17 @@ pub(super) fn prepare_power_cycle<'a>(
         tolerance,
         native_budget,
         true,
+        spectrum,
         &mut cancelled,
     )?;
-    let period = motion.report.period_seconds;
+    let period = motion.report.duration_seconds;
     let assembly = MaxwellGenerator::new(first.model, branches, period, tolerance, &mut cancelled)?;
     let gramian_budget = DenseExponentialBudget {
         max_dimension: e,
         max_dense_bytes: 24 * e * e * 8,
         max_multiply_terms: (e as u64).pow(3) * 256,
     };
-    let single_order = match forces {
+    let single_order = match forces.shape {
         CycleForcing::Harmonic { order, .. } => [order],
         _ => [0],
     };
@@ -271,7 +352,7 @@ pub(super) fn prepare_power_cycle<'a>(
         let mut scales = vec![0.0; sources];
         let mut phases = vec![0.0; sources];
         let (steady, tones, orders): (Option<&[f64]>, &[RotorHarmonicForce<'_>], &[usize]) =
-            match forces {
+            match forces.shape {
                 CycleForcing::Held(rows) => (Some(rows[index]), &[], &[]),
                 CycleForcing::Harmonic { rows, .. } => {
                     (None, core::slice::from_ref(&rows[index]), &single_order)
@@ -299,7 +380,7 @@ pub(super) fn prepare_power_cycle<'a>(
                 &mut augmented,
                 &mut forms[0],
                 e,
-                &motion.state_scale,
+                &motion.flow.state_scale,
                 d,
                 &column,
                 force,
@@ -310,13 +391,13 @@ pub(super) fn prepare_power_cycle<'a>(
             phases[0] = 1.0;
             slot = 1;
         }
-        for (&order, &force) in orders.iter().zip(tones) {
+        for (tone, (&order, &force)) in orders.iter().zip(tones).enumerate() {
             poll(&mut cancelled)?;
-            let source = harmonic::prepare_source(
+            let source = harmonic::prepare_source_with_clock(
                 &assembly.mass,
                 force,
-                order,
-                motion.boundary_times[index],
+                forces.clock(tone, order),
+                motion.flow.phase_times[index],
                 segment.duration_seconds,
                 period,
                 tolerance,
@@ -332,7 +413,7 @@ pub(super) fn prepare_power_cycle<'a>(
                     &mut augmented,
                     &mut forms[0],
                     e,
-                    &motion.state_scale,
+                    &motion.flow.state_scale,
                     d + slot + j,
                     &source.columns[j],
                     amplitude,
@@ -350,16 +431,16 @@ pub(super) fn prepare_power_cycle<'a>(
         let half = Dd::from_f64(0.5);
         for i in 0..n {
             poll(&mut cancelled)?;
-            let vi = Dd::from_f64(motion.state_scale[n + i]);
+            let vi = Dd::from_f64(motion.flow.state_scale[n + i]);
             for j in 0..n {
-                let vj = Dd::from_f64(motion.state_scale[n + j]);
+                let vj = Dd::from_f64(motion.flow.state_scale[n + j]);
                 forms[1][(n + i) * e + n + j] =
                     represented(h * Dd::from_f64(segment.model.damping()[i * n + j]) / vi / vj)?;
                 let skew = half
                     * (Dd::from_f64(segment.model.stiffness()[i * n + j])
                         - Dd::from_f64(segment.model.stiffness()[j * n + i]));
                 let entry =
-                    represented(half * h * skew / vi / Dd::from_f64(motion.state_scale[j]))?;
+                    represented(half * h * skew / vi / Dd::from_f64(motion.flow.state_scale[j]))?;
                 forms[2][(n + i) * e + j] = entry;
                 forms[2][j * e + n + i] = entry;
             }
@@ -367,7 +448,7 @@ pub(super) fn prepare_power_cycle<'a>(
         for (j, branch) in branches.iter().enumerate() {
             poll(&mut cancelled)?;
             let row = 2 * n + j;
-            let scale = Dd::from_f64(motion.state_scale[row]);
+            let scale = Dd::from_f64(motion.flow.state_scale[row]);
             let time =
                 kinetics::relaxation_time(branch.relaxation_time_s, time_scales.map(|row| row[j]))?;
             forms[3 + j][row * e + row] = represented(
@@ -405,11 +486,13 @@ pub(super) fn prepare_power_cycle<'a>(
         });
     }
     poll(&mut cancelled)?;
-    Ok(PreparedRotorMaxwellPowerCycle {
+    Ok((
         motion,
-        branches,
-        integrals,
-    })
+        MaxwellPowerIntegrals {
+            branches,
+            integrals,
+        },
+    ))
 }
 
 impl PreparedRotorMaxwellPowerCycle<'_> {
@@ -432,7 +515,14 @@ impl PreparedRotorMaxwellPowerCycle<'_> {
         let trajectory =
             self.motion
                 .advance(initial, relative_residual_tolerance, &mut cancelled)?;
-        let power = self.account(&trajectory, energy_tolerance_j, &mut cancelled)?;
+        let power = self.accounting.account(
+            &self.motion.flow,
+            self.motion.report.period_seconds,
+            &trajectory,
+            true,
+            energy_tolerance_j,
+            &mut cancelled,
+        )?;
         Ok((trajectory, power))
     }
 
@@ -452,17 +542,58 @@ impl PreparedRotorMaxwellPowerCycle<'_> {
             maximum_resolvent_gain,
             &mut cancelled,
         )?;
-        let power = self.account(&orbit.trajectory, energy_tolerance_j, &mut cancelled)?;
+        let power = self.accounting.account(
+            &self.motion.flow,
+            self.motion.report.period_seconds,
+            &orbit.trajectory,
+            true,
+            energy_tolerance_j,
+            &mut cancelled,
+        )?;
         Ok((orbit, power))
     }
+}
 
+impl PreparedRotorMaxwellPowerInterval<'_> {
+    pub fn motion_interval(&self) -> &PreparedRotorMaxwellInterval {
+        &self.motion
+    }
+
+    pub fn advance(
+        &self,
+        initial: &RotorMaxwellState,
+        relative_residual_tolerance: f64,
+        energy_tolerance_j: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(RotorMaxwellPeriodicTrajectory, RotorMaxwellIntervalPower), RotorCyclePowerError>
+    {
+        admit_energy_tolerance(energy_tolerance_j)?;
+        let trajectory =
+            self.motion
+                .advance(initial, relative_residual_tolerance, &mut cancelled)?;
+        let power = self.accounting.account(
+            &self.motion.flow,
+            self.motion.report.duration_seconds,
+            &trajectory,
+            false,
+            energy_tolerance_j,
+            &mut cancelled,
+        )?;
+        Ok((trajectory, power))
+    }
+}
+
+impl MaxwellPowerIntegrals<'_> {
     fn account(
         &self,
+        motion: &MaxwellFlow,
+        duration: f64,
         trajectory: &RotorMaxwellPeriodicTrajectory,
+        closed: bool,
         tolerance: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<RotorMaxwellCyclePower, RotorCyclePowerError> {
-        let d = self.motion.state_scale.len();
+        let d = motion.state_scale.len();
         let w = d + 1;
         let mut totals = vec![Dd::ZERO; 3 + self.branches.len()];
         let mut total_switch = Dd::ZERO;
@@ -478,7 +609,7 @@ impl PreparedRotorMaxwellPowerCycle<'_> {
                 .iter()
                 .chain(&before.velocity)
                 .chain(&before.branch_stress)
-                .zip(&self.motion.state_scale)
+                .zip(&motion.state_scale)
                 .enumerate()
             {
                 z[i] = restore_entry(value, 1.0, scale)?;
@@ -522,7 +653,13 @@ impl PreparedRotorMaxwellPowerCycle<'_> {
                 memory_change = memory_change + change;
                 memory_heat = memory_heat + work[3 + j];
             }
-            let next = self.integrals[(index + 1) % self.integrals.len()].model;
+            let next = if index + 1 < self.integrals.len() {
+                self.integrals[index + 1].model
+            } else if closed {
+                self.integrals[0].model
+            } else {
+                cached.model
+            };
             let switch = switch_work(
                 cached.model.stiffness(),
                 next.stiffness(),
@@ -553,13 +690,22 @@ impl PreparedRotorMaxwellPowerCycle<'_> {
         let last = &trajectory.boundary_states[trajectory.boundary_states.len() - 1];
         let model = self.integrals[0].model;
         let kinetic = storage_change(model.mass(), &first.velocity, &last.velocity);
-        let elastic = storage_change(model.stiffness(), &first.displacement, &last.displacement);
+        let mut elastic =
+            storage_change(model.stiffness(), &first.displacement, &last.displacement);
+        if !closed {
+            elastic = elastic
+                + switch_work(
+                    model.stiffness(),
+                    self.integrals[self.integrals.len() - 1].model.stiffness(),
+                    &last.displacement,
+                );
+        }
         let mut branch_changes = Vec::with_capacity(self.branches.len());
         let mut branch_heat = Vec::with_capacity(self.branches.len());
         let mut average_branch_heat = Vec::with_capacity(self.branches.len());
         let mut memory_change = Dd::ZERO;
         let mut memory_heat = Dd::ZERO;
-        let period = Dd::from_f64(self.motion.report.period_seconds);
+        let period = Dd::from_f64(duration);
         for (j, branch) in self.branches.iter().enumerate() {
             poll(cancelled)?;
             let change =
