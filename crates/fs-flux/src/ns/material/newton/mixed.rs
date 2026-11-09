@@ -13,6 +13,9 @@ use crate::ns::newton::{FluxSdirk2Error, FluxSdirk2Stage};
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use std::cell::RefCell;
 
+/// Adaptive physical-time advancement on the original mixed SDIRK2 owner.
+pub mod adaptive;
+
 /// Accepted mixed Navier--Stokes Newton endpoint and original material owners.
 pub struct MaterialNavierStokesNewtonStep<G> {
     /// Physical flow, endpoint sources, pressure datums, reactions and bulk heat.

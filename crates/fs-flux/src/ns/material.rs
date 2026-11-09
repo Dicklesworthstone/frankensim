@@ -54,6 +54,7 @@ pub(crate) use navier_stokes::with_kinematic_boundaries;
 pub use navier_stokes::{
     MaterialNavierStokesBoundary, MaterialNavierStokesRheologyStep, MaterialNavierStokesStep,
 };
+pub use newton::adaptive;
 pub use newton::{
     MaterialFluxNewtonStep, MaterialFluxSdirk2Step, MaterialFluxViscosityTangent,
     MaterialNavierStokesNewtonStep, MaterialNavierStokesSdirk2Step,

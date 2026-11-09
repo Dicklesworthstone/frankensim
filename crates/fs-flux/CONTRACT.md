@@ -2665,6 +2665,64 @@ compilation and these new regressions remain **unexecuted** in the current
 workspace because constellation dependencies and persistent storage capacity
 are unavailable; the scalar oracle is not native PDE validation.
 
+## Adaptive physical time for original mixed material SDIRK2
+
+`MaterialFluxSystem::advance_navier_stokes_mixed_rheology_sdirk2` advances a
+positive-duration forward interval using the SAME original mixed material
+SDIRK2 and Newton owners. `material::adaptive` exposes its controls, physical
+time boundary data, stage-aware errors and accepted result. Every comparison
+runs one coarse interval and two half intervals from the same accepted history.
+Only the fine endpoint advances history, without Richardson extrapolation.
+The result retains the last accepted fine pair and its exact source owners;
+coarse and rejected candidates never become accepted material states.
+
+Force density, original material and borrowed velocity/traction/reservoir/slip
+laws receive actual absolute stage times, including every retry. The original
+boundary policies, source density, rate tangents, sparse Jacobian, line search
+and physical reaction conversion remain authoritative. Topology stays fixed;
+wall resistance and other physical data may vary with time. Callbacks must be
+pure in their declared time, position and state inputs. Initial histories,
+controller bounds and representable interior stage times are admitted before
+stage callbacks. The exact requested final time is retained.
+
+The error indicator is
+`RMS((u_fine-u_coarse)/3)/(atol + rtol*max(RMS(u_old),RMS(u_fine)))`.
+RMS uses the existing finite-element kinetic-energy quadrature divided by mesh
+area, preserving physical velocity units independently of edge-moment count,
+orientation and domain area. One difference vector is reused, and the accepted
+history norm is cached across rejected trials. The shared `fs-time::PiController`
+settings use order-three local-error gains; its RK45 integrator is not reused
+as a different flow solver. Proposal and previous accepted error are returned
+for continuation. Clipped final steps do not replace the untrimmed proposal.
+
+The global attempt limit includes every accepted and rejected comparison,
+with at most six native Newton stages per attempt. Each retains the original
+Newton, backtracking and Krylov limits. Only numerical correction-solve,
+line-search and nonlinear-convergence failures may shorten a step. Original
+material, boundary, input and representability refusals are terminal, preserving
+the comparison, failing stage and physical time. Exhausted attempts, a blocked
+step floor or cancellation return no partial advancement. Cancellation is
+checked before each native two-stage solve and before publication; synchronous
+Newton is not interrupted inside that pair. Caller history remains immutable.
+
+This controls local velocity time error under smooth data and resolved
+spatial/nonlinear errors. It does not certify pressure or stress, global error,
+adaptive derivatives, positivity, passivity or thermal evolution. Two strongly
+damped endpoints can agree while underresolving fast-mode dissipation history.
+Retained bulk heat, Navier loss and transport remain instantaneous original
+stage rates, not an integrated heat balance or heat-accuracy certificate.
+
+Three focused regression groups cover absolute stage times and retained
+thermal Carreau sources; tolerance refinement and physical RMS invariance
+under changes in mesh and domain area; time-varying layered Carreau slip,
+traction and reservoir data; and work/source/boundary/cancellation/time-
+representability refusal with clean retry. All six changed Rust files pass
+pinned rustfmt parsing. Native compilation and these regressions remain
+**unexecuted** because the current workspace lacks constellation dependencies
+and persistent storage capacity. An independent scalar cubic-translation
+calculation gives accumulated errors 1.43913e-4 and 5.94509e-6 for absolute
+tolerances 1e-4 and 1e-6; this is not native PDE validation.
+
 ## Generalized-Newtonian mixed velocity/traction Stokes flow
 
 `FluxSystem::solve_stokes_mixed_rheology` closes steady Stokes viscosity on the

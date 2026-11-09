@@ -4,6 +4,9 @@ use super::*;
 use fs_flux::ns::newton::{FluxSdirk2Error, FluxSdirk2Stage};
 use fs_flux::{MaterialNavierStokesBoundary, OpenBoundaryPolicy};
 
+#[path = "mixed_sdirk2/adaptive.rs"]
+mod adaptive;
+
 fn moments(mesh: &TriMesh, velocity: &dyn Fn([f64; 2]) -> [f64; 2]) -> Vec<f64> {
     mesh.edges
         .iter()
