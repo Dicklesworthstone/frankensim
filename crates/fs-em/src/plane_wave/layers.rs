@@ -48,6 +48,9 @@ pub use fields::{
 /// Coherent films with explicit real transverse wave number and absorbing incidence.
 pub mod absorbing_incidence;
 
+/// Source-bound photoelectron emission from an exposed, calibrated finite film.
+pub mod photoelectric;
+
 /// Preparation storage and allocation-free angle work are bounded by this cap.
 pub const MAX_LAYERS: usize = 64;
 

@@ -28,6 +28,9 @@
 //! The latter distinguishes emission thresholds from electron energy statistics;
 //! its particular distribution model is not silently assumed here.
 
+/// Source-bound finite-band yields and the calibrated emitting film.
+pub mod source;
+
 /// Exact SI Planck constant, in joule seconds.
 pub const PLANCK_J_S: f64 = 6.626_070_15e-34;
 /// Exact SI speed of light in vacuum, in metres per second.
