@@ -2,7 +2,7 @@ use super::*;
 use crate::fluid_acoustics::{FluidAcousticState, thermoviscous::ThermoviscousFluidState};
 use crate::fluid_transport::{FluidTransportState, ThermalFluidTransportState};
 
-fn medium(expansion: f64, viscosity: f64, bulk: f64) -> BulkThermoviscousEquilibrium {
+pub(super) fn medium(expansion: f64, viscosity: f64, bulk: f64) -> BulkThermoviscousEquilibrium {
     // rho=2, c=10, Cp=8, T0=12.5. Expansion is independently specified;
     // Cv follows the thermodynamic identity, not an ideal-gas assumption.
     let transport = FluidTransportState::try_new(2.0, 8.0, 0.6, viscosity).unwrap();
@@ -21,13 +21,13 @@ fn medium(expansion: f64, viscosity: f64, bulk: f64) -> BulkThermoviscousEquilib
     .unwrap()
 }
 
-fn near(actual: f64, expected: f64, tolerance: f64) {
+pub(super) fn near(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() <= tolerance * expected.abs().max(1e-300),
         "actual={actual:e}, expected={expected:e}"
     );
 }
-fn near_complex(actual: C64, expected: C64, tolerance: f64) {
+pub(super) fn near_complex(actual: C64, expected: C64, tolerance: f64) {
     assert!(
         (actual - expected).abs() <= tolerance * expected.abs().max(1e-300),
         "actual={actual:?}, expected={expected:?}"
@@ -90,7 +90,16 @@ fn g1_bulk_fields_and_absorption_close_the_original_nsf_equations() {
             near(field.conductive_entropy_w_m3_k, entropy, 3e-12);
             near(field.thermal_availability_loss_w_m3, 12.5 * entropy, 3e-12);
             near(field.mechanical_power_flux_w_m2, mechanical_flux, 3e-12);
-            near(field.thermal_availability_flux_w_m2, thermal_flux, 3e-12);
+            // At weak loss the independent rounded phasors are almost in
+            // quadrature: Re(T q*) is ill-conditioned even though both fields
+            // and the physical flux are resolved. Bound that reference's
+            // absolute roundoff; constitutive and energy checks stay tight.
+            let flux_roundoff =
+                16.0 * f64::EPSILON * temperature.abs() * heat_flux.abs() / (2.0 * 12.5);
+            assert!(
+                (field.thermal_availability_flux_w_m2 - thermal_flux).abs()
+                    <= 3e-12 * thermal_flux.abs() + flux_roundoff
+            );
             near(
                 2.0 * k.im * field.acoustic_power_flux_w_m2(),
                 viscous + 12.5 * entropy,
@@ -114,7 +123,10 @@ fn g3_signed_expansion_and_zero_thermal_coupling_remain_physical() {
     assert_eq!(a.temperature_perturbation_k, -b.temperature_perturbation_k);
     assert_eq!(a.conductive_heat_flux_w_m2, -b.conductive_heat_flux_w_m2);
     assert_eq!(a.conductive_entropy_w_m3_k, b.conductive_entropy_w_m3_k);
-    assert_eq!(a.thermal_availability_flux_w_m2, b.thermal_availability_flux_w_m2);
+    assert_eq!(
+        a.thermal_availability_flux_w_m2,
+        b.thermal_availability_flux_w_m2
+    );
     let zero = medium(0.0, 0.003, 0.002)
         .prepare_wave_absorption(400.0)
         .unwrap();
@@ -195,19 +207,34 @@ fn g1_cell_integrals_retain_weak_loss_opaque_limits_and_partition_additivity() {
         3e-15,
     );
     assert!(full.balance_residual_w.abs() < 3e-14 * full.incoming_acoustic_power_w);
-    near(full.thermal_availability_loss_w, 12.5 * full.conductive_entropy_w_k, 3e-15);
+    near(
+        full.thermal_availability_loss_w,
+        12.5 * full.conductive_entropy_w_k,
+        3e-15,
+    );
     let thin = prepared
         .absorption_between(origin, 0.0, 1e-19 / alpha, area)
         .unwrap();
-    assert_eq!(thin.incoming_acoustic_power_w, thin.outgoing_acoustic_power_w);
+    assert_eq!(
+        thin.incoming_acoustic_power_w,
+        thin.outgoing_acoustic_power_w
+    );
     assert!(thin.viscous_heat_w > 0.0 && thin.conductive_entropy_w_k > 0.0);
-    near(thin.acoustic_power_loss_w, 2e-19 * thin.incoming_acoustic_power_w, 3e-14);
+    near(
+        thin.acoustic_power_loss_w,
+        2e-19 * thin.incoming_acoustic_power_w,
+        3e-14,
+    );
     assert_eq!(thin.balance_residual_w, -thin.acoustic_power_loss_w);
     let opaque = prepared
         .absorption_between(origin, 0.0, 1000.0 / alpha, area)
         .unwrap();
     assert_eq!(opaque.outgoing_acoustic_power_w, 0.0);
-    near(opaque.acoustic_power_loss_w, opaque.incoming_acoustic_power_w, 3e-14);
+    near(
+        opaque.acoustic_power_loss_w,
+        opaque.incoming_acoustic_power_w,
+        3e-14,
+    );
 }
 
 #[test]
@@ -220,7 +247,9 @@ fn g3_thermal_acoustic_flux_is_not_pressure_work_or_an_extra_heat_source() {
     assert!(field.acoustic_power_flux_w_m2() > 10.0 * pressure_work);
     assert!(field.thermal_availability_loss_w_m3 > 100.0 * field.viscous_heating_w_m3);
     assert_ne!(pressure_work, field.mechanical_power_flux_w_m2);
-    let cell = prepared.absorption_between(C64::ONE, 0.0, 0.01, 0.7).unwrap();
+    let cell = prepared
+        .absorption_between(C64::ONE, 0.0, 0.01, 0.7)
+        .unwrap();
     near(
         cell.acoustic_power_loss_w,
         cell.viscous_heat_w + 12.5 * cell.conductive_entropy_w_k,
@@ -248,18 +277,30 @@ fn g0_original_domain_refusals_and_zero_drives_do_not_manufacture_loss() {
         (0.0, 1.0, 0.0),
         (0.0, 1.0, f64::INFINITY),
     ] {
-        assert!(prepared.absorption_between(C64::ONE, start, end, area).is_err());
+        assert!(
+            prepared
+                .absorption_between(C64::ONE, start, end, area)
+                .is_err()
+        );
     }
     let zero = prepared
         .absorption_between(C64::ZERO, 0.0, f64::MAX, 1.0)
         .unwrap();
     assert_eq!(zero.acoustic_power_loss_w, 0.0);
     assert_eq!(zero.balance_residual_w, 0.0);
-    let empty = prepared.absorption_between(C64::ONE, 0.1, 0.1, 1.0).unwrap();
+    let empty = prepared
+        .absorption_between(C64::ONE, 0.1, 0.1, 1.0)
+        .unwrap();
     assert_eq!(empty.acoustic_power_loss_w, 0.0);
-    assert_eq!(empty.incoming_acoustic_power_w, empty.outgoing_acoustic_power_w);
     assert_eq!(
-        prepared.at_distance(C64::ONE, f64::MAX).unwrap().velocity_m_s,
-        C64::ZERO,
+        empty.incoming_acoustic_power_w,
+        empty.outgoing_acoustic_power_w
+    );
+    assert_eq!(
+        prepared
+            .at_distance(C64::ONE, f64::MAX)
+            .unwrap()
+            .velocity_m_s,
+        C64::ZERO
     );
 }

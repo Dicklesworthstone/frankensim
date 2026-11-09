@@ -13,6 +13,9 @@ use crate::MaterialError;
 use crate::fluid_acoustics::thermoviscous::absorption::BulkThermoviscousEquilibrium;
 use fs_math::{c64::C64, dd::Dd, det};
 
+mod coherent;
+pub use coherent::{BulkCoherentCellAbsorption, BulkCoherentWaveSegment};
+
 /// Prepared one-way bulk-wave fields and absorption at ONE original equilibrium.
 /// Peak phasors use exp(i k x - i omega t), with x >= 0. No material is queried
 /// during observation; constant-work field and cell queries allocate nothing.
@@ -30,6 +33,7 @@ pub struct BulkWaveAbsorption {
 /// Local physical phasors and cycle-mean work per physical cross-sectional area.
 /// Thermal availability flux is part of acoustic energy flux; the complex
 /// conductive heat flux is a first-order oscillation, not mean deposited heat.
+/// Both power fluxes are signed along +x; physical dissipation is nonnegative.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BulkWaveField {
     pub velocity_m_s: C64,
@@ -80,7 +84,9 @@ impl BulkThermoviscousEquilibrium {
         omega_rad_s: f64,
     ) -> Result<BulkWaveAbsorption, MaterialError> {
         if !omega_rad_s.is_finite() || omega_rad_s <= 0.0 {
-            return Err(invalid("bulk wave absorption needs positive finite frequency"));
+            return Err(invalid(
+                "bulk wave absorption needs positive finite frequency",
+            ));
         }
         let absorption = self.absorption();
         let state = absorption.state();
@@ -98,11 +104,12 @@ impl BulkThermoviscousEquilibrium {
                     / state.acoustic().density_kg_m3(),
             )
         };
-        let longitudinal_viscosity =
-            (4.0 / 3.0) * state.transport().dynamic_viscosity_pa_s()
-                + absorption.bulk_viscosity_pa_s();
+        let longitudinal_viscosity = (4.0 / 3.0) * state.transport().dynamic_viscosity_pa_s()
+            + absorption.bulk_viscosity_pa_s();
         if !finite(temperature_over_velocity) || !longitudinal_viscosity.is_finite() {
-            return Err(invalid("bulk thermal wave coefficients are unrepresentable"));
+            return Err(invalid(
+                "bulk thermal wave coefficients are unrepresentable",
+            ));
         }
         Ok(BulkWaveAbsorption {
             equilibrium: *self,
@@ -135,18 +142,11 @@ impl BulkWaveAbsorption {
         distance_m: f64,
     ) -> Result<BulkWaveField, MaterialError> {
         admit(origin_velocity_m_s, distance_m)?;
-        let k = self.wave.wavenumber_rad_m();
-        let amplitude = det::exp(-k.im * distance_m);
-        let velocity = if amplitude == 0.0 || origin_velocity_m_s == C64::ZERO {
-            C64::ZERO
-        } else {
-            let angle = k.re * distance_m;
-            if !angle.is_finite() {
-                return Err(invalid("surviving bulk wave phase is unrepresentable"));
-            }
-            let (sin, cos) = det::sin_cos(angle);
-            origin_velocity_m_s * C64::new(cos, sin).scale(amplitude)
-        };
+        let velocity = propagate(
+            origin_velocity_m_s,
+            self.wave.wavenumber_rad_m(),
+            distance_m,
+        )?;
         self.field(velocity)
     }
 
@@ -182,11 +182,20 @@ impl BulkWaveAbsorption {
         if ![velocity, pressure, traction, temperature, heat_flux]
             .into_iter()
             .all(finite)
-            || ![viscous, conductive, entropy, mechanical, thermal, mechanical + thermal]
-                .into_iter()
-                .all(f64::is_finite)
+            || ![
+                viscous,
+                conductive,
+                entropy,
+                mechanical,
+                thermal,
+                mechanical + thermal,
+            ]
+            .into_iter()
+            .all(f64::is_finite)
         {
-            return Err(invalid("bulk wave field or physical work is unrepresentable"));
+            return Err(invalid(
+                "bulk wave field or physical work is unrepresentable",
+            ));
         }
         Ok(BulkWaveField {
             velocity_m_s: velocity,
@@ -240,13 +249,13 @@ impl BulkWaveAbsorption {
         let absorbed = viscous + conductive;
         let incoming = left.acoustic_power_flux_w_m2() * area_m2;
         let outgoing = right.acoustic_power_flux_w_m2() * area_m2;
-        let residual = (Dd::from_f64(incoming)
-            - Dd::from_f64(outgoing)
-            - Dd::from_f64(absorbed))
-        .to_f64();
-        if ![viscous, conductive, entropy, absorbed, incoming, outgoing, residual]
-            .into_iter()
-            .all(f64::is_finite)
+        let residual =
+            (Dd::from_f64(incoming) - Dd::from_f64(outgoing) - Dd::from_f64(absorbed)).to_f64();
+        if ![
+            viscous, conductive, entropy, absorbed, incoming, outgoing, residual,
+        ]
+        .into_iter()
+        .all(f64::is_finite)
         {
             return Err(invalid("bulk wave cell absorption is unrepresentable"));
         }
@@ -260,6 +269,19 @@ impl BulkWaveAbsorption {
             balance_residual_w: residual,
         })
     }
+}
+
+fn propagate(origin: C64, k: C64, distance: f64) -> Result<C64, MaterialError> {
+    let amplitude = det::exp(-k.im * distance);
+    if amplitude == 0.0 || origin == C64::ZERO {
+        return Ok(C64::ZERO);
+    }
+    let angle = k.re * distance;
+    if !angle.is_finite() {
+        return Err(invalid("surviving bulk wave phase is unrepresentable"));
+    }
+    let (sin, cos) = det::sin_cos(angle);
+    Ok(origin * C64::new(cos, sin).scale(amplitude))
 }
 
 fn finite(value: C64) -> bool {

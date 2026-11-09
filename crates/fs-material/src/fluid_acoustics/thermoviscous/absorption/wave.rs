@@ -3,7 +3,10 @@ use crate::MaterialError;
 use fs_math::c64::C64;
 
 mod energy;
-pub use energy::{BulkWaveAbsorption, BulkWaveCellAbsorption, BulkWaveField};
+pub use energy::{
+    BulkCoherentCellAbsorption, BulkCoherentWaveSegment, BulkWaveAbsorption,
+    BulkWaveCellAbsorption, BulkWaveField,
+};
 
 /// One forward homogeneous Navier--Stokes--Fourier acoustic mode, using
 /// `exp(i k x - i omega t)`. This excludes the independent thermal mode and
