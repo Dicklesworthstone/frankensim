@@ -19,6 +19,8 @@ pub mod impulse;
 pub mod multiple;
 /// Continuous slip/spin on invariant directions, including finite arrest.
 pub mod relaxation;
+/// Curved slip/spin trajectories with bounded numerical error and finite arrest.
+pub mod transient;
 
 type Vector = [f64; 3];
 type Matrix = [[f64; 3]; 3];

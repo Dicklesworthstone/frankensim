@@ -17,6 +17,7 @@ impl Metric {
     pub fn new(
         matrix: [[f64; 3]; 3],
         capacity: f64,
+        power_norm_bounds: [f64; 2],
         config: AdhesiveWrenchConfig,
     ) -> Result<Self, Error> {
         if (0..3).any(|i| (0..i).any(|j| matrix[i][j] != matrix[j][i])) {
@@ -70,9 +71,8 @@ impl Metric {
         let root_scale = det::sqrt(scale);
         let root_lower = finite(root_scale * det::sqrt(lower_eigenvalue))?;
         let root_upper = finite(root_scale * det::sqrt(upper * (1.0 + 64.0 * f64::EPSILON)))?;
-        let root_thirteen = det::sqrt(13.0);
-        let minimum_decay = finite((2.0 / root_thirteen) * capacity * root_lower)?;
-        let maximum_speed = finite((root_thirteen / 3.0) * capacity * root_upper)?;
+        let minimum_decay = finite(power_norm_bounds[0] * capacity * root_lower)?;
+        let maximum_speed = finite(power_norm_bounds[1] * capacity * root_upper)?;
         if minimum_decay <= 0.0 || maximum_speed <= 0.0 {
             return Err(Error::Invalid("unrepresentable positive extinction bounds"));
         }

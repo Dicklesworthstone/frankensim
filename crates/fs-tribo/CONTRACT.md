@@ -1,5 +1,31 @@
 # CONTRACT: fs-tribo
 
+## Curved Hertz sliding and spin through finite extinction
+
+`HertzWrenchContact::advance_transient` integrates changing-direction slip/spin
+under the full positive-definite mobility and original Hertz pressure integral.
+Exact invariant directions retain their analytic one-evaluation path. The shared
+circular transient core supplies positive-stage Bogacki–Shampine 3(2) integration
+of actual wrench, travel and physical power, with separate dimensional error
+estimates, cancellation, effort limits and bounded attempts/evaluations.
+
+For C = mu*N, q = [ux, uy, a*omega] and k = 3*pi/16, symmetry/convexity and the
+triangle inequality give C*k/sqrt(1+k*k)*|q| <= H(q) <= C*sqrt(1+k*k)*|q|.
+These Hertz-specific bounds and the original matrix bound the stopping tail.
+A tail closes only when its entire stop bracket precedes the requested horizon
+and its unresolved time/travel fit the requested tolerances. Its eventual-rest
+impulse and remaining relative kinetic heat are retained; unknown travel stays
+an explicit bound. Independent prefix and total work checks never turn a
+numerical residual into heat.
+
+Prefix errors remain numerical estimates, not validated-flow enclosures.
+Geometry, normal load, coefficients and mobility remain fixed without drive or
+pose evolution. `hertz_transient` tests cover independent curved RK4, analytical
+anisotropic-mobility stopping/travel, full-matrix extinction, stationary dwell,
+splitting/refinement, frame/reversal, pressure bounds and budget/cancellation
+replay. Existing adhesive transient tests retain their original constitutive law
+and norm constants.
+
 ## Hertz slip/spin transition accuracy
 
 The closed-form Hertz traction uses the same factored complement

@@ -24,6 +24,7 @@ use super::contact::{AdhesiveWrenchConfig, AdhesiveWrenchContact, AdhesiveWrench
 use super::relaxation::{
     AdhesiveRelaxationError, AdhesiveRelaxationInput, AdhesiveRelaxationReport,
 };
+use crate::sliding_patch::contact::relaxation::CircularRelaxationInput;
 use fs_math::det;
 use metric::Metric;
 
@@ -107,9 +108,9 @@ pub struct AdhesiveTransientReport {
 
 /// Numerical and physical refusals preserve the complete original input.
 #[derive(Clone, Debug, PartialEq)]
-pub enum AdhesiveTransientError {
+pub enum CircularTransientError<E> {
     /// Original exact-ray/law admission; curved motion alone uses this integrator.
-    Exact(AdhesiveRelaxationError),
+    Exact(E),
     /// Original matrix, material or effort-control admission.
     Contact(AdhesiveWrenchError),
     /// Invalid controls or unrepresentable finite mechanics.
@@ -129,19 +130,56 @@ pub enum AdhesiveTransientError {
     /// Cooperative cancellation observed before publication.
     Cancelled,
 }
-impl From<AdhesiveWrenchError> for AdhesiveTransientError {
+impl<E> From<AdhesiveWrenchError> for CircularTransientError<E> {
     fn from(error: AdhesiveWrenchError) -> Self {
         Self::Contact(error)
     }
 }
-impl core::fmt::Display for AdhesiveTransientError {
+impl<E: core::fmt::Debug> core::fmt::Display for CircularTransientError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "adhesive transient: {self:?}")
+        write!(f, "circular-contact transient: {self:?}")
     }
 }
-impl std::error::Error for AdhesiveTransientError {}
-type Error = AdhesiveTransientError;
+impl<E: core::fmt::Debug> std::error::Error for CircularTransientError<E> {}
+/// Adhesive exact-ray admission and the common curved-trajectory refusals.
+pub type AdhesiveTransientError = CircularTransientError<AdhesiveRelaxationError>;
+pub(crate) type TransientError = CircularTransientError<core::convert::Infallible>;
+type Error = TransientError;
 type Vector = [f64; 3];
+
+impl Error {
+    pub(crate) fn with_exact<E>(self) -> CircularTransientError<E> {
+        match self {
+            Self::Exact(never) => match never {},
+            Self::Contact(error) => CircularTransientError::Contact(error),
+            Self::Invalid(reason) => CircularTransientError::Invalid(reason),
+            Self::EffortBudget => CircularTransientError::EffortBudget,
+            Self::TailEffortBudget => CircularTransientError::TailEffortBudget,
+            Self::AttemptBudget => CircularTransientError::AttemptBudget,
+            Self::EvaluationBudget => CircularTransientError::EvaluationBudget,
+            Self::StepUnderflow => CircularTransientError::StepUnderflow,
+            Self::UnresolvedWork => CircularTransientError::UnresolvedWork,
+            Self::Cancelled => CircularTransientError::Cancelled,
+        }
+    }
+}
+
+/// The numerical owner receives an original constitutive evaluation and its
+/// proved norm bounds. It never substitutes one pressure profile for another.
+pub(crate) struct CircularTransientLaw<F> {
+    pub radius: f64,
+    pub sliding_capacity_n: f64,
+    pub spinning_capacity_nm: f64,
+    /// `C * bounds[0] * |q| <= H(q) <= C * bounds[1] * |q|`.
+    pub power_norm_bounds: [f64; 2],
+    pub evaluate: F,
+}
+pub(crate) struct CircularTransientTraction {
+    pub force_n: [f64; 2],
+    pub spin_moment_nm: f64,
+    pub dissipated_power_w: f64,
+    pub at_rest: bool,
+}
 
 impl AdhesiveWrenchContact {
     /// Integrate curved passive slip/spin, retaining the existing exact-ray fast path.
@@ -154,205 +192,256 @@ impl AdhesiveWrenchContact {
         config: AdhesiveWrenchConfig,
         controls: AdhesiveTransientControls,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<AdhesiveTransientReport, Error> {
-        poll(&mut cancelled)?;
-        controls.validate()?;
+    ) -> Result<AdhesiveTransientReport, AdhesiveTransientError> {
+        poll(&mut cancelled).map_err(Error::with_exact)?;
+        controls.validate().map_err(Error::with_exact)?;
         match self.relax_velocity(input, config, &mut cancelled) {
             Ok(exact) => {
                 let residual = norm(exact.scaled_velocity_residual_m_s);
                 if !residual.is_finite() || residual > controls.scaled_rate_tolerance_m_s {
-                    return Err(Error::UnresolvedWork);
+                    return Err(AdhesiveTransientError::UnresolvedWork);
                 }
-                poll(&mut cancelled)?;
+                poll(&mut cancelled).map_err(Error::with_exact)?;
                 return Ok(from_exact(exact, input.dt_s));
             }
             Err(AdhesiveRelaxationError::CurvedTrajectory { .. }) => {}
-            Err(AdhesiveRelaxationError::Cancelled) => return Err(Error::Cancelled),
-            Err(error) => return Err(Error::Exact(error)),
+            Err(AdhesiveRelaxationError::Cancelled) => {
+                return Err(AdhesiveTransientError::Cancelled);
+            }
+            Err(error) => return Err(AdhesiveTransientError::Exact(error)),
         }
-        let radius = self.parameters().contact_radius_m;
-        let matrix = input.scaled_mobility_per_kg;
-        let initial = [
-            input.velocity_m_s[0],
-            input.velocity_m_s[1],
-            radius * input.spin_rate_rad_s,
-        ];
-        let metric = Metric::new(matrix, self.kinetic_patch().sliding_capacity_n(), config)?;
-        let horizon = input.dt_s.min(metric.tail(initial)?.0[1]);
-        let mut work = Work {
-            law: self,
-            radius,
+        let root_thirteen = det::sqrt(13.0);
+        advance_circular_transient(
+            &CircularRelaxationInput {
+                velocity_m_s: input.velocity_m_s,
+                spin_rate_rad_s: input.spin_rate_rad_s,
+                scaled_mobility_per_kg: input.scaled_mobility_per_kg,
+                dt_s: input.dt_s,
+            },
             config,
             controls,
-            evaluations: 1,
-            cancelled: &mut cancelled,
-        };
-        let mut impulse = [0.0; 3];
-        let mut travel = [0.0; 3];
-        let mut heat = 0.0;
-        let mut errors = [0.0; 4];
-        let mut elapsed = 0.0;
-        let mut next_step = controls.maximum_step_s;
-        let mut accepted = 0;
-        let mut rejected = 0;
-        let mut cached = None;
-        for _ in 0..controls.maximum_attempts {
-            poll(work.cancelled)?;
-            let q = add(initial, multiply(matrix, impulse));
-            let remaining = input.dt_s - elapsed;
-            let (stop, tail_travel) = metric.tail(q)?;
-            if remaining == 0.0 {
-                let candidate = finish(
-                    input,
-                    config,
-                    controls,
-                    radius,
-                    impulse,
-                    travel,
-                    heat,
-                    0.0,
-                    errors,
-                    [0.0; 3],
-                    None,
-                    elapsed,
-                    accepted,
-                    rejected,
-                    work.evaluations,
-                )?;
-                poll(work.cancelled)?;
-                return Ok(candidate);
-            }
-            if stop[1] <= remaining
-                && stop[1] - stop[0] <= controls.stopping_time_tolerance_s
-                && errors[2] + norm(tail_travel) <= controls.scaled_travel_tolerance_m
-            {
-                if self.kinetic_patch().sliding_capacity_n() > config.maximum_force_n
-                    || self.kinetic_patch().spinning_capacity_nm() > config.maximum_spin_moment_nm
-                {
-                    return Err(Error::TailEffortBudget);
-                }
-                let prefix_work = absorbed(initial, matrix, impulse);
-                if !prefix_work.is_finite()
-                    || (heat - prefix_work).abs() > config.energy_tolerance_j
-                {
-                    return Err(Error::UnresolvedWork);
-                }
-                let tail_impulse = metric.stop_impulse(q)?;
-                let tail_heat = finite(-0.5 * dot(q, tail_impulse))?;
-                if tail_heat < 0.0 {
-                    return Err(Error::UnresolvedWork);
-                }
-                let candidate = finish(
-                    input,
-                    config,
-                    controls,
-                    radius,
-                    add(impulse, tail_impulse),
-                    travel,
-                    heat,
-                    tail_heat,
-                    errors,
-                    tail_travel,
-                    Some([elapsed + stop[0], elapsed + stop[1]]),
-                    elapsed,
-                    accepted,
-                    rejected,
-                    work.evaluations,
-                )?;
-                poll(work.cancelled)?;
-                return Ok(AdhesiveTransientReport {
-                    prefix_work_residual_j: heat - prefix_work,
-                    ..candidate
-                });
-            }
-            // Every positive embedded stage stays within h*beta of its initial
-            // mass-metric state, strictly before any possible zero crossing.
-            let safe_step = 0.25 * metric.radius(q)?.0 / metric.maximum_speed;
-            let h = next_step.min(safe_step).min(remaining);
-            if !h.is_finite()
-                || h <= 0.0
-                || elapsed + h == elapsed
-                || (h < controls.minimum_step_s && h != remaining)
-            {
-                return Err(Error::StepUnderflow);
-            }
-            let first = match cached {
-                Some(value) => value,
-                None => work.sample(q)?,
-            };
-            let step = step(&mut work, matrix, q, first, h)?;
-            let local_errors = [
-                metric.rate_error(step.impulse_error)?,
-                norm(step.impulse_error),
-                norm(step.travel_error),
-                step.heat_error.abs(),
-            ];
-            let limits = [
-                controls.scaled_rate_tolerance_m_s,
-                controls.scaled_impulse_tolerance_ns,
-                controls.scaled_travel_tolerance_m,
-                controls.heat_tolerance_j,
-            ];
-            let fraction = h / horizon;
-            let ratio = local_errors
-                .into_iter()
-                .zip(limits)
-                .map(|(e, t)| ratio(e, t * fraction))
-                .fold(0.0, f64::max)
-                .max(ratio(
-                    (step.heat - absorbed(q, matrix, step.impulse)).abs(),
-                    config.energy_tolerance_j * fraction,
-                ));
-            if !ratio.is_finite() || ratio > 1.0 || step.heat < 0.0 {
-                rejected += 1;
-                next_step = 0.5 * h;
-                cached = Some(first);
-                continue;
-            }
-            impulse = add(impulse, step.impulse);
-            travel = add(travel, step.travel);
-            heat = finite(heat + step.heat)?;
-            for i in 0..4 {
-                errors[i] = finite(errors[i] + local_errors[i])?;
-            }
-            elapsed = if h == remaining {
-                input.dt_s
-            } else {
-                elapsed + h
-            };
-            accepted += 1;
-            if elapsed == input.dt_s {
-                let candidate = finish(
-                    input,
-                    config,
-                    controls,
-                    radius,
-                    impulse,
-                    travel,
-                    heat,
-                    0.0,
-                    errors,
-                    [0.0; 3],
-                    None,
-                    elapsed,
-                    accepted,
-                    rejected,
-                    work.evaluations,
-                )?;
-                poll(work.cancelled)?;
-                return Ok(candidate);
-            }
-            // Recompute at the actual accumulated-impulse endpoint. Reusing a
-            // different rounded stage endpoint would obscure native work closure.
-            cached = None;
-            next_step = if ratio < 0.125 {
-                (2.0 * h).min(controls.maximum_step_s)
-            } else {
-                h
-            };
-        }
-        Err(Error::AttemptBudget)
+            CircularTransientLaw {
+                radius: self.parameters().contact_radius_m,
+                sliding_capacity_n: self.kinetic_patch().sliding_capacity_n(),
+                spinning_capacity_nm: self.kinetic_patch().spinning_capacity_nm(),
+                power_norm_bounds: [2.0 / root_thirteen, root_thirteen / 3.0],
+                evaluate: |velocity, spin| {
+                    let native = self
+                        .kinetic_patch()
+                        .evaluate(velocity, spin)
+                        .map_err(AdhesiveWrenchError::Law)?;
+                    Ok(CircularTransientTraction {
+                        force_n: native.force_n,
+                        spin_moment_nm: native.spin_moment_nm,
+                        dissipated_power_w: native.dissipated_power_w,
+                        at_rest: native.at_rest,
+                    })
+                },
+            },
+            cancelled,
+        )
+        .map_err(Error::with_exact)
     }
+}
+
+/// Shared original-traction integration after each law's exact-ray admission.
+/// The caller has already consumed one constitutive evaluation for that probe.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn advance_circular_transient<F>(
+    input: &CircularRelaxationInput,
+    config: AdhesiveWrenchConfig,
+    controls: AdhesiveTransientControls,
+    law: CircularTransientLaw<F>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<AdhesiveTransientReport, Error>
+where
+    F: FnMut([f64; 2], f64) -> Result<CircularTransientTraction, AdhesiveWrenchError>,
+{
+    let radius = law.radius;
+    let matrix = input.scaled_mobility_per_kg;
+    let initial = [
+        input.velocity_m_s[0],
+        input.velocity_m_s[1],
+        radius * input.spin_rate_rad_s,
+    ];
+    let metric = Metric::new(
+        matrix,
+        law.sliding_capacity_n,
+        law.power_norm_bounds,
+        config,
+    )?;
+    let horizon = input.dt_s.min(metric.tail(initial)?.0[1]);
+    let mut work = Work {
+        law,
+        radius,
+        config,
+        controls,
+        evaluations: 1,
+        cancelled: &mut cancelled,
+    };
+    let mut impulse = [0.0; 3];
+    let mut travel = [0.0; 3];
+    let mut heat = 0.0;
+    let mut errors = [0.0; 4];
+    let mut elapsed = 0.0;
+    let mut next_step = controls.maximum_step_s;
+    let mut accepted = 0;
+    let mut rejected = 0;
+    let mut cached = None;
+    for _ in 0..controls.maximum_attempts {
+        poll(work.cancelled)?;
+        let q = add(initial, multiply(matrix, impulse));
+        let remaining = input.dt_s - elapsed;
+        let (stop, tail_travel) = metric.tail(q)?;
+        if remaining == 0.0 {
+            let candidate = finish(
+                input,
+                config,
+                controls,
+                radius,
+                impulse,
+                travel,
+                heat,
+                0.0,
+                errors,
+                [0.0; 3],
+                None,
+                elapsed,
+                accepted,
+                rejected,
+                work.evaluations,
+            )?;
+            poll(work.cancelled)?;
+            return Ok(candidate);
+        }
+        if stop[1] <= remaining
+            && stop[1] - stop[0] <= controls.stopping_time_tolerance_s
+            && errors[2] + norm(tail_travel) <= controls.scaled_travel_tolerance_m
+        {
+            if work.law.sliding_capacity_n > config.maximum_force_n
+                || work.law.spinning_capacity_nm > config.maximum_spin_moment_nm
+            {
+                return Err(Error::TailEffortBudget);
+            }
+            let prefix_work = absorbed(initial, matrix, impulse);
+            if !prefix_work.is_finite() || (heat - prefix_work).abs() > config.energy_tolerance_j {
+                return Err(Error::UnresolvedWork);
+            }
+            let tail_impulse = metric.stop_impulse(q)?;
+            let tail_heat = finite(-0.5 * dot(q, tail_impulse))?;
+            if tail_heat < 0.0 {
+                return Err(Error::UnresolvedWork);
+            }
+            let candidate = finish(
+                input,
+                config,
+                controls,
+                radius,
+                add(impulse, tail_impulse),
+                travel,
+                heat,
+                tail_heat,
+                errors,
+                tail_travel,
+                Some([elapsed + stop[0], elapsed + stop[1]]),
+                elapsed,
+                accepted,
+                rejected,
+                work.evaluations,
+            )?;
+            poll(work.cancelled)?;
+            return Ok(AdhesiveTransientReport {
+                prefix_work_residual_j: heat - prefix_work,
+                ..candidate
+            });
+        }
+        // Every positive embedded stage stays within h*beta of its initial
+        // mass-metric state, strictly before any possible zero crossing.
+        let safe_step = 0.25 * metric.radius(q)?.0 / metric.maximum_speed;
+        let h = next_step.min(safe_step).min(remaining);
+        if !h.is_finite()
+            || h <= 0.0
+            || elapsed + h == elapsed
+            || (h < controls.minimum_step_s && h != remaining)
+        {
+            return Err(Error::StepUnderflow);
+        }
+        let first = match cached {
+            Some(value) => value,
+            None => work.sample(q)?,
+        };
+        let step = step(&mut work, matrix, q, first, h)?;
+        let local_errors = [
+            metric.rate_error(step.impulse_error)?,
+            norm(step.impulse_error),
+            norm(step.travel_error),
+            step.heat_error.abs(),
+        ];
+        let limits = [
+            controls.scaled_rate_tolerance_m_s,
+            controls.scaled_impulse_tolerance_ns,
+            controls.scaled_travel_tolerance_m,
+            controls.heat_tolerance_j,
+        ];
+        let fraction = h / horizon;
+        let ratio = local_errors
+            .into_iter()
+            .zip(limits)
+            .map(|(e, t)| ratio(e, t * fraction))
+            .fold(0.0, f64::max)
+            .max(ratio(
+                (step.heat - absorbed(q, matrix, step.impulse)).abs(),
+                config.energy_tolerance_j * fraction,
+            ));
+        if !ratio.is_finite() || ratio > 1.0 || step.heat < 0.0 {
+            rejected += 1;
+            next_step = 0.5 * h;
+            cached = Some(first);
+            continue;
+        }
+        impulse = add(impulse, step.impulse);
+        travel = add(travel, step.travel);
+        heat = finite(heat + step.heat)?;
+        for i in 0..4 {
+            errors[i] = finite(errors[i] + local_errors[i])?;
+        }
+        elapsed = if h == remaining {
+            input.dt_s
+        } else {
+            elapsed + h
+        };
+        accepted += 1;
+        if elapsed == input.dt_s {
+            let candidate = finish(
+                input,
+                config,
+                controls,
+                radius,
+                impulse,
+                travel,
+                heat,
+                0.0,
+                errors,
+                [0.0; 3],
+                None,
+                elapsed,
+                accepted,
+                rejected,
+                work.evaluations,
+            )?;
+            poll(work.cancelled)?;
+            return Ok(candidate);
+        }
+        // Recompute at the actual accumulated-impulse endpoint. Reusing a
+        // different rounded stage endpoint would obscure native work closure.
+        cached = None;
+        next_step = if ratio < 0.125 {
+            (2.0 * h).min(controls.maximum_step_s)
+        } else {
+            h
+        };
+    }
+    Err(Error::AttemptBudget)
 }
 
 #[derive(Clone, Copy)]
@@ -361,26 +450,26 @@ struct Sample {
     velocity: Vector,
     power: f64,
 }
-struct Work<'a, C> {
-    law: &'a AdhesiveWrenchContact,
+struct Work<'a, F, C> {
+    law: CircularTransientLaw<F>,
     radius: f64,
     config: AdhesiveWrenchConfig,
     controls: AdhesiveTransientControls,
     evaluations: usize,
     cancelled: &'a mut C,
 }
-impl<C: FnMut() -> bool> Work<'_, C> {
+impl<F, C> Work<'_, F, C>
+where
+    F: FnMut([f64; 2], f64) -> Result<CircularTransientTraction, AdhesiveWrenchError>,
+    C: FnMut() -> bool,
+{
     fn sample(&mut self, q: Vector) -> Result<Sample, Error> {
         poll(self.cancelled)?;
         if self.evaluations >= self.controls.maximum_evaluations {
             return Err(Error::EvaluationBudget);
         }
         self.evaluations += 1;
-        let response = self
-            .law
-            .kinetic_patch()
-            .evaluate([q[0], q[1]], finite(q[2] / self.radius)?)
-            .map_err(AdhesiveWrenchError::Law)?;
+        let response = (self.law.evaluate)([q[0], q[1]], finite(q[2] / self.radius)?)?;
         if det::hypot(response.force_n[0], response.force_n[1]) > self.config.maximum_force_n
             || response.spin_moment_nm.abs() > self.config.maximum_spin_moment_nm
         {
@@ -408,13 +497,17 @@ struct Step {
     heat: f64,
     heat_error: f64,
 }
-fn step<C: FnMut() -> bool>(
-    work: &mut Work<'_, C>,
+fn step<F, C>(
+    work: &mut Work<'_, F, C>,
     matrix: [[f64; 3]; 3],
     q: Vector,
     a: Sample,
     h: f64,
-) -> Result<Step, Error> {
+) -> Result<Step, Error>
+where
+    F: FnMut([f64; 2], f64) -> Result<CircularTransientTraction, AdhesiveWrenchError>,
+    C: FnMut() -> bool,
+{
     let b = work.sample(add(q, multiply(matrix, a.wrench.map(|v| 0.5 * h * v))))?;
     let c = work.sample(add(q, multiply(matrix, b.wrench.map(|v| 0.75 * h * v))))?;
     let combine =
@@ -441,7 +534,7 @@ fn step<C: FnMut() -> bool>(
 
 #[allow(clippy::too_many_arguments)]
 fn finish(
-    input: &AdhesiveRelaxationInput,
+    input: &CircularRelaxationInput,
     config: AdhesiveWrenchConfig,
     controls: AdhesiveTransientControls,
     radius: f64,
@@ -535,7 +628,7 @@ fn from_exact(r: AdhesiveRelaxationReport, dt: f64) -> AdhesiveTransientReport {
     }
 }
 impl AdhesiveTransientControls {
-    fn validate(self) -> Result<(), Error> {
+    pub(crate) fn validate(self) -> Result<(), Error> {
         if !self.maximum_step_s.is_finite()
             || !self.minimum_step_s.is_finite()
             || self.minimum_step_s <= 0.0
@@ -581,7 +674,7 @@ fn finite(value: f64) -> Result<f64, Error> {
     if value.is_finite() {
         Ok(value)
     } else {
-        Err(Error::Invalid("unrepresentable adhesive transient"))
+        Err(Error::Invalid("unrepresentable circular-contact transient"))
     }
 }
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), Error> {
