@@ -10034,8 +10034,8 @@ This is frozen-geometry, frozen-medium, incoherent spectral envelope transport
 with a narrow-band group-delay approximation. It supplies no carrier phase,
 within-bin pulse reshaping, moving-medium frequency shift, fluorescence,
 unmodeled lens transit, interface/coating residence time, or temporal environment,
-volume, point-source-connection or molecular-connection history. The finite-area
-adapter below supports timed clear-medium connections. Unbound sources remain
+volume or point-source-connection history. The finite-area adapters below
+support timed clear-medium and molecular connections. Unbound sources remain
 explicitly steady.
 
 Seven G1/G3/G4 tests cover native static/RNG parity, distinct per-source delays,
@@ -10384,6 +10384,35 @@ The adapter borrows exactly the same prepared camera as the area-source owner an
 `sample_ray_with_samples_at_time` returns the complete native radiance and per-image work at a DD observation clock. `sample_ray_with_samples_during_exposure` requests each source's mean over its individually retarded shutter interval on that same frozen transport, then returns mean radiance and integrated radiance [J/(m² sr nm)]. No temporal path sampling, extra image tracing, midpoint source substitution, or additional geometric delay is introduced. Geometry/optical coefficients stay frozen; moving media, pulse reshaping, interface residence time, point-source connections, and molecular-scattering connections are outside this adapter.
 
 Four focused regression groups cover unity/native-sample and work parity, dispersive group clocks at a large epoch, triangular shutter integration on both MIS strategies, distinct refracted-image clocks, and complete refusal for missing connection group delay or source failures. They were authored and formatter/parser checked; native numerical execution was unavailable in the editing environment.
+
+## Retarded molecular finite-area source connections
+
+With `volumes`, `camera::transient::area_lights::participating::TransientCurvedRayleighAreaLightCameraScene`
+borrows the original finite-source histories and molecular area-light owner.
+Instantaneous and shutter observations retain native surface and molecular
+NEE, complementary emitter hits, refracted image discovery, Rayleigh Mueller
+transport and independent source-survival tracking. The existing source-clock
+calculation observes each image's actual camera-prefix and connection group
+paths; null collisions and optical images do not acquire surrogate delays.
+All five original random streams, work limits and per-sample accounts remain
+with the molecular estimator. Contributing bound sources without original
+group data refuse; exact survival zeros need no history query.
+
+Steady raw sequential beams now enter that native molecular area owner without
+a group-timing requirement. Timed sequential observations add their qualified
+lens DD prefix once and retain the original sensor clock, full Stokes state,
+lens absorption and optical normalization. Raw-beam temporal calls require any
+analyzer to be installed at the sensor before the lens. Finite shutters use
+each source's interval mean on one frozen camera/collision/source realization.
+Spatial volume/LTE and unbound emission remain steady. Frozen media and
+instantaneous molecular events do not imply fluorescence, moving-medium
+frequency shifts, interface residence time or coherent pulse reshaping.
+
+Focused G0/G1 source regressions cover null candidates and independent source
+survival, distinct image clocks through an analyzed dispersive lens, complete
+pulse shutters, untimed/analyzer admission and original group/history errors.
+
+
 
 ## Retarded area-light raster and QE exposure observations
 

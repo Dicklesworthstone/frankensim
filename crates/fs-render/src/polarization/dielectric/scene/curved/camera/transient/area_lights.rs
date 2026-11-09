@@ -29,6 +29,10 @@ use fs_math::dd::Dd;
 
 mod sequential;
 
+/// Original molecular area-source transport observed at retarded source times.
+#[cfg(feature = "volumes")]
+pub mod participating;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum TransientAreaLightCameraError {
     /// Both prepared owners must borrow the same original camera instance.

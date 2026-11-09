@@ -1,6 +1,7 @@
 //! Native molecular NEE, matched emitter hits and independent source survival.
 
 mod sphere;
+mod transient;
 
 use super::*;
 use crate::charts::TriMesh;

@@ -22,10 +22,10 @@
 //! images retain full emission. Ambiguous correspondence and exhausted work
 //! refuse the complete sample instead of silently dropping light.
 
-use super::{AreaEmitterError, CurvedAreaEmitter, Sum, weighted_irradiance};
+use super::{AreaEmitterError, CurvedAreaEmitter, Sum, weighted_irradiance_modulated};
 use super::camera::{
     AreaLightCameraError, AreaLightCameraSample, AreaLightCameraSettings,
-    AreaLightCameraWorkspace, ContinuationAnchor, CurvedAreaLightCameraScene,
+    AreaLightCameraWorkspace, AreaSourcePath, ContinuationAnchor, CurvedAreaLightCameraScene,
     MAX_AREA_LIGHT_BINDINGS, MolecularAnchor, MolecularPhase, PathState,
     SourceBinding, SurfaceReceiver, Work, directional_contribution, emitter_weight_for_source,
     nonnegative, validate_source_binding,
@@ -48,7 +48,7 @@ use crate::polarization::dielectric::scene::curved::participating::{
 };
 use crate::polarization::dielectric::scene::curved::participating::transmittance::CurvedTransmittanceOptions;
 use crate::polarization::dielectric::scene::curved::participating::transmittance::images::CurvedTransmittanceImageWorkspace;
-use crate::polarization::dielectric::transport::PolarizationFrame;
+use crate::polarization::dielectric::transport::{PolarizationFrame, PolarizedBeam};
 use crate::volumes::transport::scattering::PhaseFunction;
 use fs_exec::Cx;
 use fs_geom::Vec3;
@@ -217,9 +217,59 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
         workspace: &mut RayleighAreaLightCameraWorkspace,
         surface_samples: impl FnMut(u32) -> [f64; 3],
         flight_samples: impl FnMut(u32) -> [f64; 4],
+        surface_area_samples: impl FnMut(u32, usize) -> [f64; 2],
+        volume_area_samples: impl FnMut(u32, usize) -> [f64; 2],
+        source_samples: impl FnMut(u32, u32, u32) -> f64,
+    ) -> Result<RayleighAreaLightCameraSample, AreaLightCameraError> {
+        self.sample_with_modulation(
+            cx, || self.surface_camera().launch(ray, wavelength_nm, initial_medium),
+            initial_medium, settings, workspace, surface_samples, flight_samples,
+            surface_area_samples, volume_area_samples, source_samples, |_| Ok(1.0),
+        )
+    }
+
+    /// Continue the complete reciprocal lens response through the original
+    /// molecular and area-source estimator. The beam owns any sensor analyzer;
+    /// its separate geometric sampling weight remains the caller's measure.
+    /// Steady observations require no lens group-delay qualification.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sample_sequential_ray_with_tracking_samples(
+        &self,
+        cx: &Cx<'_>,
+        optical: &crate::camera::SequentialCameraBeam,
+        initial_medium: usize,
+        settings: RayleighAreaLightCameraSettings,
+        workspace: &mut RayleighAreaLightCameraWorkspace,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
+        flight_samples: impl FnMut(u32) -> [f64; 4],
+        surface_area_samples: impl FnMut(u32, usize) -> [f64; 2],
+        volume_area_samples: impl FnMut(u32, usize) -> [f64; 2],
+        source_samples: impl FnMut(u32, u32, u32) -> f64,
+    ) -> Result<RayleighAreaLightCameraSample, AreaLightCameraError> {
+        self.sample_with_modulation(
+            cx, || self.surface_camera().launch_sequential(optical, initial_medium),
+            initial_medium, settings, workspace, surface_samples, flight_samples,
+            surface_area_samples, volume_area_samples, source_samples, |_| Ok(1.0),
+        )
+    }
+
+    /// One original molecular walker. A history changes only source radiance;
+    /// collision/survival estimators, Mueller transport, MIS and all independent
+    /// proposal streams remain owned here.
+    #[allow(clippy::too_many_arguments)]
+    pub(in super::super) fn sample_with_modulation(
+        &self,
+        cx: &Cx<'_>,
+        launch: impl FnOnce() -> Result<PolarizedBeam, CameraRadianceError>,
+        initial_medium: usize,
+        settings: RayleighAreaLightCameraSettings,
+        workspace: &mut RayleighAreaLightCameraWorkspace,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
+        flight_samples: impl FnMut(u32) -> [f64; 4],
         mut surface_area_samples: impl FnMut(u32, usize) -> [f64; 2],
         mut volume_area_samples: impl FnMut(u32, usize) -> [f64; 2],
         mut source_samples: impl FnMut(u32, u32, u32) -> f64,
+        mut source_scale: impl FnMut(AreaSourcePath<'_>) -> Result<f64, AreaLightCameraError>,
     ) -> Result<RayleighAreaLightCameraSample, AreaLightCameraError> {
         cx.checkpoint()?;
         if settings.area_lights.max_area_samples == 0 || settings.area_lights.max_trace_evaluations == 0 {
@@ -227,8 +277,8 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
         }
         workspace.camera.history.clear();
         workspace.camera.reverse_events.clear();
-        let beam = self.surface_camera().launch(ray, wavelength_nm, initial_medium)?;
-        let initial_index = phase_index(beam.medium(), wavelength_nm)?;
+        let beam = launch()?;
+        let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
         let mut emission = SurfaceEmission::new(self.surface_camera(), initial_index);
         let mut state = PathState::default();
         let mut work = Work::default();
@@ -257,10 +307,17 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
                                     return Err(CurvedSceneError::NumericalRange);
                                 }
                             };
-                            emission.observe_weighted(path, weight)?;
+                            let scale = match source_scale(AreaSourcePath::Surface(path)) {
+                                Ok(scale) => scale,
+                                Err(error) => {
+                                    source_error = Some(error);
+                                    return Err(CurvedSceneError::NumericalRange);
+                                }
+                            };
+                            emission.observe_weighted_modulated(path, weight, scale)?;
                             self.add_surface(cx, path, settings, initial_index, &mut work,
                                 &mut tracking_work, &mut radiance, &mut workspace.sources,
-                                &mut surface_area_samples, &mut source_samples)
+                                &mut surface_area_samples, &mut source_samples, &mut source_scale)
                         }
                         CurvedRayleighEvent::Surface(CurvedTraceEvent::Departure {
                             path, incoming_beam, event, pdf, delta,
@@ -285,7 +342,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
                             };
                             self.add_volume(cx, path, phase, ordinal, settings, initial_index,
                                 &mut work, &mut tracking_work, &mut radiance, &mut workspace.sources,
-                                &mut volume_area_samples, &mut source_samples)
+                                &mut volume_area_samples, &mut source_samples, &mut source_scale)
                         }
                         CurvedRayleighEvent::VolumeDeparture { path, incoming_beam, phase, pdf } => {
                             emission.depart(path);
@@ -317,6 +374,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
         workspace: &mut CurvedTransmittanceImageWorkspace,
         area_samples: &mut impl FnMut(u32, usize) -> [f64; 2],
         source_samples: &mut impl FnMut(u32, u32, u32) -> f64,
+        source_scale: &mut impl FnMut(AreaSourcePath<'_>) -> Result<f64, AreaLightCameraError>,
     ) -> Result<(), AreaLightCameraError> {
         let Some(surface) = SurfaceReceiver::at_arrival(self.surface_camera(), path)?
             else { return Ok(()); };
@@ -325,7 +383,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
         for (index, binding) in self.area_lights.bindings.iter().enumerate() {
             if binding.receiver_object_id != surface.contact.object_id { continue; }
             self.add_source(cx, path, receiver, binding.source_binding(), index, ordinal,
-                settings, initial_index, work, tracking, radiance, workspace, area_samples, source_samples)?;
+                settings, initial_index, work, tracking, radiance, workspace, area_samples, source_samples, source_scale)?;
         }
         Ok(())
     }
@@ -337,13 +395,14 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
         tracking: &mut TrackingWork, radiance: &mut Sum, workspace: &mut CurvedTransmittanceImageWorkspace,
         area_samples: &mut impl FnMut(u32, usize) -> [f64; 2],
         source_samples: &mut impl FnMut(u32, u32, u32) -> f64,
+        source_scale: &mut impl FnMut(AreaSourcePath<'_>) -> Result<f64, AreaLightCameraError>,
     ) -> Result<(), AreaLightCameraError> {
         for (slot, binding) in self.volume_bindings.iter().enumerate() {
             if binding.receiver_medium != path.medium_index() { continue; }
             let index = self.area_lights.bindings.len() + slot;
             self.add_source(cx, path, Receiver::Molecular { phase }, binding.source_binding(), index,
                 ordinal, settings, initial_index, work, tracking, radiance, workspace,
-                area_samples, source_samples)?;
+                area_samples, source_samples, source_scale)?;
         }
         Ok(())
     }
@@ -356,6 +415,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
         tracking: &mut TrackingWork, radiance: &mut Sum, workspace: &mut CurvedTransmittanceImageWorkspace,
         area_samples: &mut impl FnMut(u32, usize) -> [f64; 2],
         source_samples: &mut impl FnMut(u32, u32, u32) -> f64,
+        source_scale: &mut impl FnMut(AreaSourcePath<'_>) -> Result<f64, AreaLightCameraError>,
     ) -> Result<(), AreaLightCameraError> {
         let beam = *path.beam();
         let wavelength = beam.wavelength_nm();
@@ -467,9 +527,24 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
                         }
                     }
                 };
-                let irradiance = weighted_irradiance(bundle, normal, settings.area_lights.connection.projection,
+                // Observe the actual original channel path. Exact survival
+                // zeros and noncontributing channels need no source query.
+                let scale = if radiance_value == 0.0 || cosine == 0.0 || factor == 0.0
+                    || weights.light_weight() == 0.0 || bundle.interface_log_power() == f64::NEG_INFINITY
+                    || tracked.ratio_tracking_zero() || tracked.log_source_survival() == f64::NEG_INFINITY {
+                    1.0
+                } else {
+                    source_scale(AreaSourcePath::Connected {
+                        object_id: binding.source.emitter.object_id(),
+                        position_m: sample.position_m(),
+                        wavelength_nm: wavelength,
+                        camera_group_m: path.group_optical_path_length_m(),
+                        connection_group_m: bundle.propagation().propagation().group_optical_path_length_m,
+                    })?
+                };
+                let irradiance = weighted_irradiance_modulated(bundle, normal, settings.area_lights.connection.projection,
                     radiance_value, cosine, sample.pdf_area_per_m2(), tracked.log_source_survival(),
-                    tracked.ratio_tracking_zero())
+                    tracked.ratio_tracking_zero(), scale)
                     .map_err(|error| AreaLightCameraError::Source { binding: index, error })?;
                 if irradiance == 0.0 || factor == 0.0 || weights.light_weight() == 0.0 { continue; }
                 if beam.power().i == 0.0 {
