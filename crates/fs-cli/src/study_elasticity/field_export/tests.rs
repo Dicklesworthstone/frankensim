@@ -54,6 +54,20 @@ fn incumbent(load_space: bool) -> String {
     )
 }
 
+fn affine_strength_design() -> String {
+    let selected = format!(
+        "{{{},\"offset_displacement_m\":{:?},\"strength\":{{\"schema\":\"sdf3-affine-strength-fields.v1\",\"cell_physical_envelope_pa\":[120.5],\"cell_relaxed_envelope_pa\":[180.5],\"cell_sample_count\":[8]}}}}",
+        fields(true),
+        displacement(-0.1),
+    );
+    let accepted = selected
+        .replace("[120.5]", "[999.0]")
+        .replace("[180.5]", "[1999.0]");
+    format!(
+        "{{\"schema\":\"sdf3-affine-load-space-design.v1\",\"strength_constrained\":true,\"selected_design\":\"least-material-feasible\",\"selected_feasible\":true,\"selected\":{selected},\"last_accepted\":{accepted}}}"
+    )
+}
+
 fn grid(driver: &str, design: &str) -> UnstructuredGrid {
     let Projection::Available(xml) = render(driver, design.as_bytes()).unwrap() else {
         panic!("a solved feasible design must have a field projection");
@@ -102,18 +116,84 @@ fn stress_export_uses_selected_incumbent_and_sampled_stress() {
 #[test]
 fn affine_export_keeps_common_self_weight_separate_from_uncertain_basis_fields() {
     let affine = incumbent(true)
-        .replace("sdf3-load-space-design.v1", "sdf3-affine-load-space-design.v1")
-        .replace("\"worst_displacement_m\":", &format!(
-            "\"offset_displacement_m\":{:?},\"worst_displacement_m\":", displacement(-0.1)));
+        .replace(
+            "sdf3-load-space-design.v1",
+            "sdf3-affine-load-space-design.v1",
+        )
+        .replace(
+            "\"worst_displacement_m\":",
+            &format!(
+                "\"offset_displacement_m\":{:?},\"worst_displacement_m\":",
+                displacement(-0.1)
+            ),
+        );
     let grid = grid(AFFINE_LOAD_SPACE3_DRIVER, &affine);
     assert_eq!(values(&grid, "offset_displacement"), displacement(-0.1));
     assert_eq!(values(&grid, "basis_displacement_0"), displacement(0.0));
     assert_eq!(values(&grid, "worst_displacement"), displacement(0.2));
     assert_eq!(grid.arrays.len(), 9);
-    let missing = incumbent(true)
-        .replace("sdf3-load-space-design.v1", "sdf3-affine-load-space-design.v1");
+    let missing = incumbent(true).replace(
+        "sdf3-load-space-design.v1",
+        "sdf3-affine-load-space-design.v1",
+    );
     assert!(render(AFFINE_LOAD_SPACE3_DRIVER, missing.as_bytes()).is_err());
     assert!(render(LOAD_SPACE3_DRIVER, affine.as_bytes()).is_err());
+}
+
+#[test]
+fn affine_strength_export_preserves_selected_pointwise_envelopes_and_sample_counts() {
+    let design = affine_strength_design();
+    let grid = grid(AFFINE_LOAD_SPACE3_DRIVER, &design);
+    assert_eq!(values(&grid, "sampled_physical_stress_envelope"), [120.5]);
+    assert_eq!(values(&grid, "sampled_relaxed_stress_envelope"), [180.5]);
+    assert_eq!(values(&grid, "worst_displacement"), displacement(0.2));
+    assert_eq!(values(&grid, "offset_displacement"), displacement(-0.1));
+    assert_eq!(grid.arrays.len(), 12);
+    let counts = grid
+        .arrays
+        .iter()
+        .find(|a| a.name == "stress_sample_count")
+        .unwrap();
+    assert_eq!(counts.association, DataAssociation::CellData);
+    assert_eq!(counts.values, DataValues::Int64(vec![8]));
+    for name in [
+        "sampled_physical_stress_envelope",
+        "sampled_relaxed_stress_envelope",
+    ] {
+        let stress = grid.arrays.iter().find(|a| a.name == name).unwrap();
+        assert_eq!(stress.unit.as_deref(), Some("Pa"));
+        assert_eq!(stress.association, DataAssociation::CellData);
+    }
+}
+
+#[test]
+fn affine_strength_export_refuses_missing_or_invalid_sampled_evidence() {
+    let original = affine_strength_design();
+    for malformed in [
+        original.replace(
+            "\"strength_constrained\":true",
+            "\"strength_constrained\":false",
+        ),
+        original.replace("\"strength\":", "\"discarded_strength\":"),
+        original.replace(
+            "sdf3-affine-strength-fields.v1",
+            "unsupported-strength-fields",
+        ),
+        original.replace(
+            "\"cell_physical_envelope_pa\":[120.5]",
+            "\"cell_physical_envelope_pa\":[]",
+        ),
+        original.replace("[120.5]", "[-1.0]"),
+        original.replace("[180.5]", "[1e999]"),
+        original.replace("\"cell_sample_count\":[8]", "\"cell_sample_count\":[-1]"),
+        original.replace("\"cell_sample_count\":[8]", "\"cell_sample_count\":[8.5]"),
+        original.replace("\"cell_sample_count\":[8]", "\"cell_sample_count\":[0]"),
+    ] {
+        assert!(
+            render(AFFINE_LOAD_SPACE3_DRIVER, malformed.as_bytes()).is_err(),
+            "accepted malformed affine strength fields: {malformed}"
+        );
+    }
 }
 
 #[test]

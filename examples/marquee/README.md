@@ -162,6 +162,14 @@ counts the common offset plus all uncertainty columns at every sampled point;
 it is not a geometric point count. The density floor must remain above the
 native stress foldback threshold after eroded projection.
 
+For a selected feasible design, report export also writes cell-associated
+`sampled_physical_stress_envelope` and `sampled_relaxed_stress_envelope` arrays
+in Pa, with integer `stress_sample_count`. These are maxima over retained
+quadrature-point envelopes in each background cell. They may use different
+load directions within one cell; the existing `worst_displacement` field is
+the compliance witness. Export reads the sealed design without another solve,
+and refuses incomplete declared stress evidence.
+
 These are fixed-grid sampled strength estimates. They do not bound the
 continuum stress maximum or certify safety, fatigue, buckling or manufacturing
 tolerance. The example's geometry, stiffness and allowable are demonstration

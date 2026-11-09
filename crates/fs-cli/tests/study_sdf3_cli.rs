@@ -391,3 +391,6 @@ mod field_export;
 
 #[path = "study_sdf3_cli/affine.rs"]
 mod affine;
+
+#[path = "study_sdf3_cli/strength.rs"]
+mod strength;

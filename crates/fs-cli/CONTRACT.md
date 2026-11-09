@@ -2079,7 +2079,16 @@ displacement fields. Stress exports retain sampled relaxed stress; load-space
 exports retain all robust density realizations, basis displacements and the
 worst-combination displacement. Affine studies also retain the common
 `offset_displacement`, so the complete worst field can be reconstructed from
-the retained basis and coefficients. The source artifact hash and explicit export
+the retained basis and coefficients. Strength-constrained affine studies add
+cell arrays `sampled_physical_stress_envelope` and
+`sampled_relaxed_stress_envelope`, in Pa, plus integer `stress_sample_count`.
+Each envelope is the maximum over that cell's retained quadrature witnesses;
+different points can use different adverse loads. The compliance displacement
+is not a simultaneous displacement witness for all exported stress maxima.
+Counts distinguish unsampled cells, whose retained envelope entries are zero.
+Missing or inconsistent declared strength evidence refuses export rather than
+silently dropping the constraint. Older affine designs without strength retain
+their existing field layout. The source artifact hash and explicit export
 status accompany the path in text and JSON output. No field is invented when
 there is no solved baseline or no feasible selected design.
 

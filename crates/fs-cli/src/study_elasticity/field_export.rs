@@ -4,13 +4,13 @@
 use fs_viz::vtu::{CellType, DataArray, DataAssociation, DataValues, UnstructuredGrid, VtuWriter};
 
 use super::{
-    AFFINE_LOAD_SPACE3_DRIVER, JsonValue as J, LOAD_SPACE3_DRIVER, MAX_ARTIFACT_BYTES,
-    Result, SDF3_DRIVER, STRESS3_DRIVER, fail,
+    AFFINE_LOAD_SPACE3_DRIVER, JsonValue as J, LOAD_SPACE3_DRIVER, MAX_ARTIFACT_BYTES, Result,
+    SDF3_DRIVER, STRESS3_DRIVER, fail,
 };
 
 const MAX_SCALARS: usize = 1_048_576;
 const MAX_VTU_BYTES: usize = 64 * 1024 * 1024;
-pub(super) const SCOPE: &str = "Estimated fields on the retained selected design's active octree background in metres. Cells show their full background boxes; cut_volume_m3 is the retained integrated material-domain measure, not a clipped surface. Density thresholds and displaced views are visualization choices, not manufactured geometry or continuum certificates. Load-space displacement fields use the retained eroded material.";
+pub(super) const SCOPE: &str = "Estimated fields on the retained selected design's active octree background in metres. Cells show their full background boxes; cut_volume_m3 is the retained integrated material-domain measure, not a clipped surface. Density thresholds and displaced views are visualization choices, not manufactured geometry or continuum certificates. Load-space displacement fields use the retained eroded material. Affine stress arrays combine independently adverse load directions at retained quadrature points; worst_displacement is the compliance witness. Stress sample counts identify cells with retained stress evidence.";
 
 pub(super) enum Projection {
     Available(String),
@@ -70,6 +70,90 @@ fn vectors(
         components: 3,
         unit: Some("m".into()),
         values: DataValues::Float64(values),
+    });
+    Ok(())
+}
+
+fn affine_strength(
+    design: &J,
+    fields: &J,
+    grid: &mut UnstructuredGrid,
+    remaining: &mut usize,
+) -> Result<()> {
+    let declared = match design.get("strength_constrained") {
+        None | Some(J::Bool(false)) => false,
+        Some(J::Bool(true)) => true,
+        _ => return Err(bad("invalid retained strength constraint flag")),
+    };
+    let stress = match (declared, fields.get("strength")) {
+        (false, None) => return Ok(()),
+        (true, Some(stress)) if stress.as_object().is_some() => stress,
+        _ => {
+            return Err(bad(
+                "retained affine strength fields disagree with their declaration",
+            ));
+        }
+    };
+    if stress.str_field("schema") != Some("sdf3-affine-strength-fields.v1") {
+        return Err(bad("unrecognized retained affine strength fields"));
+    }
+    let cells = grid.cells_types.len();
+    let rows = array(stress, "cell_sample_count")?;
+    if rows.len() != cells {
+        return Err(bad("retained stress sample counts do not cover every cell"));
+    }
+    charge(remaining, cells)?;
+    let counts = rows
+        .iter()
+        .map(|value| {
+            value
+                .number_raw()
+                .and_then(|raw| raw.parse::<i64>().ok())
+                .filter(|count| *count >= 0)
+                .ok_or_else(|| bad("invalid retained cell stress sample count"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if counts.iter().all(|count| *count == 0) {
+        return Err(bad(
+            "retained affine strength has no sampled stress evidence",
+        ));
+    }
+    for (key, name) in [
+        (
+            "cell_physical_envelope_pa",
+            "sampled_physical_stress_envelope",
+        ),
+        (
+            "cell_relaxed_envelope_pa",
+            "sampled_relaxed_stress_envelope",
+        ),
+    ] {
+        let rows = array(stress, key)?;
+        if rows.len() != cells {
+            return Err(bad("retained stress envelope does not cover every cell"));
+        }
+        charge(remaining, cells)?;
+        let values = rows
+            .iter()
+            .zip(&counts)
+            .map(|(value, count)| {
+                let value = finite(value)?;
+                if value < 0.0 || (*count == 0 && value != 0.0) {
+                    return Err(bad(
+                        "retained stress envelope is negative or lacks sampled evidence",
+                    ));
+                }
+                Ok(value)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        grid.add_array(DataArray::new_cell_scalar(name, values).with_unit("Pa"));
+    }
+    grid.add_array(DataArray {
+        name: "stress_sample_count".into(),
+        association: DataAssociation::CellData,
+        components: 1,
+        unit: Some("1".into()),
+        values: DataValues::Int64(counts),
     });
     Ok(())
 }
@@ -277,6 +361,7 @@ pub(super) fn render(driver: &str, bytes: &[u8]) -> Result<Projection> {
                 array(fields, "offset_displacement_m")?,
                 &mut remaining,
             )?;
+            affine_strength(&design, fields, &mut grid, &mut remaining)?;
         }
     } else if driver == STRESS3_DRIVER {
         let stress = array(fields, "cell_relaxed_max_pa")?;
