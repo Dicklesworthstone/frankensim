@@ -624,10 +624,11 @@ Outputs retain original node/member order, with None for removed-member
 activation derivatives. Free/support covectors retain their physical zero
 components. Load variations must retain solvable compatible equilibrium when
 unloaded axial mechanisms exist. The caller composes source-temperature,
-self-weight/body-load, density/area, geometry or other design chain rules;
-material state, geometry, support flags and topology are frozen here. These
-are derivatives of the declared initial-stress approximation, not finite
-deformation, follower forces, catalog snapping or nonlinear collapse.
+self-weight/body-load, density/area and geometry-dependent load or support-motion
+chain rules. Material states, global force/motion components, support flags and
+topology are held fixed in the reported partials. These are derivatives of the
+declared initial-stress approximation, not finite deformation, follower forces,
+catalog snapping or nonlinear collapse.
 
 A separate explicit sensitivity payload allowance covers gradient arrays and
 the original compatible-adjoint workspace/history; native WindowPlan admission
@@ -641,3 +642,39 @@ joint-mass derivatives, rotated thermally stressed and settled redundant members
 against independent input differences, off-diagonal consistent mass, actual
 original-pencil residuals and signed unstable eigenvalues. G4 cases refuse
 nonisolated windows, insufficient payload/iterations and cancellation.
+
+
+### Original node-coordinate derivatives
+
+The same `ModalSensitivity` now returns `node_coordinate_gradient` in original
+node/x-y order [s^-2/m]. Member directions and reference lengths vary together.
+Areas, moduli, free engineering strains, reference densities, explicit joint
+masses and GLOBAL load/prescribed-displacement components stay fixed. A support
+node's reference position remains a geometry variable; its derivative is not
+masked by its displacement constraints. Only variations preserving connectivity,
+axial-equilibrium rank and solvability are admissible. No topology activation,
+support-frame rotation, deformed-geometry update or self-weight chain is inferred.
+
+For an original member, write `r=x_b-x_a=L*n`, perpendicular unit direction `t`,
+`a=n.dot(phi_b-phi_a)`, `b=t.dot(phi_b-phi_a)`, `c=b²/L`,
+`d=n.dot(z_b-z_a)`, `k=EA/L`, actual force `N`, and total strain `e_total`.
+With `u_t=t.dot(u_b-u_a)`, `z_t=t.dot(z_b-z_a)`, the derivative with respect
+to r is `n*radial + t*angular/L`, where
+
+- `radial=-k*a²/L-(c-d)*k*e_total-N*c/L-lambda*rho*A*inertia_work/3`;
+- `angular=2*(k-N/L)*a*b+(c-d)*k*u_t-N*z_t`;
+- `inertia_work=sum_axis(phi_a²+phi_a*phi_b+phi_b²)`.
+
+Opposite endpoint contributions assemble the original node covectors in one
+member pass. This differentiates axial stiffness, both direction and magnitude
+of geometric stiffness, compatible force redistribution, and full consistent
+reference mass. It reuses the existing single elastic adjoint and forms no
+geometry-derivative matrix. The additional payload admission includes the
+16-byte gradient per original node.
+
+The existing `elastic_modal` target adds G1/G3 coordinate finite differences on
+a redundant thermally strained and settled truss, rigid translation and rotation
+covariance, full homothety chain rules, and a serial-member exact 2-by-2 pencil
+with off-diagonal mass. Existing analytic bar tests also check joint-mass length
+derivatives and the signed compressed-mode branch. These are local discrete
+gradient checks, not physical calibration or global shape-optimality claims.

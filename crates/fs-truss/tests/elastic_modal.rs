@@ -495,6 +495,11 @@ fn g1_axial_mode_design_derivatives_include_member_and_joint_mass() {
         assert_eq!(member.stress_free_strain_derivative, 0.0);
         near(result.joint_mass_derivative[1], -1.0 / 3.0);
         assert_eq!(result.joint_mass_derivative[0], 0.0);
+        // lambda = (EA/L)/(rho*A*L/3 + m_joint): both length factors vary.
+        near(result.node_coordinate_gradient[0][0], 2.0 / 3.0);
+        near(result.node_coordinate_gradient[1][0], -2.0 / 3.0);
+        assert_eq!(result.node_coordinate_gradient[0][1], 0.0);
+        assert_eq!(result.node_coordinate_gradient[1][1], 0.0);
         assert_eq!(result.load_gradient, vec![[0.0; 2]; 2]);
         assert_eq!(result.adjoint_iterations, 0);
         // Reusing the same prepared design repeats no physical equilibrium.
@@ -884,11 +889,262 @@ fn g4_signed_mode_derivatives_refuse_nonisolated_windows_budgets_and_cancellatio
         near(response.members[0].unwrap().area_derivative, 0.02);
         near(response.members[0].unwrap().density_derivative, 0.01 / 3.0);
         near(response.load_gradient[1][0], 0.5);
+        // Fixed axial compression gives lambda proportional to L^-2,
+        // preserving the derivative's sign on the negative spectral branch.
+        near(response.node_coordinate_gradient[0][0], -0.01);
+        near(response.node_coordinate_gradient[1][0], 0.01);
         gate.request();
         assert!(
             design
                 .solve_window(&plan, &options, ModalSensitivityControls::default(), cx)
                 .is_err()
         );
+    });
+}
+
+// Lowest root of det(K-lambda M)=0 for the native two-coordinate pencil.
+// This bypasses the spectral derivative path and retains off-diagonal mass.
+fn lower_two_coordinate_eigenvalue(pencil: &TrussModalPencil) -> f64 {
+    assert_eq!(pencil.mass().nrows(), 2);
+    let k00 = entry(pencil.tangent(), 0, 0);
+    let k01 = entry(pencil.tangent(), 0, 1);
+    let k11 = entry(pencil.tangent(), 1, 1);
+    let m00 = entry(pencil.mass(), 0, 0);
+    let m01 = entry(pencil.mass(), 0, 1);
+    let m11 = entry(pencil.mass(), 1, 1);
+    let a = m00 * m11 - m01 * m01;
+    let b = k00 * m11 + k11 * m00 - 2.0 * k01 * m01;
+    let c = k00 * k11 - k01 * k01;
+    2.0 * c / (b + (b * b - 4.0 * a * c).sqrt())
+}
+
+fn coordinate_ground(
+    nodes: &[[f64; 2]],
+    members: &[(usize, usize)],
+    cx: &Cx<'_>,
+) -> GroundStructure {
+    let lengths: Vec<_> = members
+        .iter()
+        .map(|&(a, b)| (nodes[b][0] - nodes[a][0]).hypot(nodes[b][1] - nodes[a][1]))
+        .collect();
+    GroundStructure::try_from_parts(nodes, members, &lengths, GroundLimits::default(), cx).unwrap()
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn g3_coordinate_adjoints_include_heated_settled_geometry_and_transform_covariantly() {
+    use fs_truss::elastic::modal::sensitivity::{ModalSensitivityControls, PreparedModalDesign};
+    with_cx(|cx, _| {
+        let reference_nodes = [[-1.7, -0.3], [0.15, 0.22], [1.4, 0.4], [-0.35, -1.25]];
+        let members = [(0, 1), (1, 2), (1, 3)];
+        let areas = [1.1, 0.9, 1.3];
+        let young = [2e6, 1e6, 0.7e6];
+        let strain = [1e-4, 3e-5, -2e-5];
+        let reference_motion = [[-2e-5, 1e-5], [0.0; 2], [3e-5, -1e-5], [-1e-5, 4e-5]];
+        let density = [3.0, 6.0, 9.0];
+        let joints = [0.2, 0.7, 0.3, 0.5];
+        let mut reference_gradient: Option<Vec<[f64; 2]>> = None;
+        let mut reference_eigenvalue = None;
+        for angle in [0.0_f64, 0.43] {
+            let (sn, cs) = angle.sin_cos();
+            let rotate = |p: [f64; 2]| [cs * p[0] - sn * p[1], sn * p[0] + cs * p[1]];
+            let nodes = reference_nodes.map(rotate);
+            let motion = reference_motion.map(rotate);
+            let ground = coordinate_ground(&nodes, &members, cx);
+            let case = LayoutCase::try_new(
+                vec![[true; 2], [false; 2], [true; 2], [true; 2]],
+                vec![[0.0; 2], rotate([40.0, -25.0]), [0.0; 2], [0.0; 2]],
+                nodes.len(),
+            )
+            .unwrap();
+            let imposed = ElasticImposedState {
+                member_stress_free_strain: Some(&strain),
+                prescribed_displacements_m: Some(&motion),
+            };
+            let inertia = ModalInertia {
+                member_density_kg_m3: &density,
+                joint_mass_kg: Some(&joints),
+            };
+            let design = PreparedModalDesign::try_new(
+                &ground,
+                &case,
+                &areas,
+                &young,
+                imposed,
+                inertia,
+                ModalAssemblyControls::default(),
+                cx,
+            )
+            .unwrap();
+            let expected = lower_two_coordinate_eigenvalue(design.pencil());
+            let (plan, options) = window_plan(vec![(0.8 * expected, 1.2 * expected)]);
+            let result = design
+                .solve_window(&plan, &options, ModalSensitivityControls::default(), cx)
+                .unwrap();
+            near(result.eigenvalue_s2, expected);
+            assert!(result.adjoint_iterations > 0);
+            assert!(result.adjoint_relative_equilibrium_residual < 1e-9);
+            assert!(
+                design
+                    .pencil()
+                    .equilibrium()
+                    .member_force_n
+                    .iter()
+                    .any(|n| n.abs() > 1.0)
+            );
+            let eigenvalue = |points: &[[f64; 2]]| {
+                let geometry = coordinate_ground(points, &members, cx);
+                let pencil = assemble(
+                    &geometry,
+                    &case,
+                    &areas,
+                    &young,
+                    imposed,
+                    inertia,
+                    ModalAssemblyControls::default(),
+                    cx,
+                )
+                .unwrap();
+                lower_two_coordinate_eigenvalue(&pencil)
+            };
+            for node in 0..nodes.len() {
+                for axis in 0..2 {
+                    let h = 2e-5;
+                    let mut plus = nodes;
+                    let mut minus = nodes;
+                    plus[node][axis] += h;
+                    minus[node][axis] -= h;
+                    derivative_near(
+                        result.node_coordinate_gradient[node][axis],
+                        (eigenvalue(&plus) - eigenvalue(&minus)) / (2.0 * h),
+                    );
+                }
+            }
+            // Reference position changes of strong supports are not masked.
+            assert!(
+                result.node_coordinate_gradient[0]
+                    .iter()
+                    .any(|v| v.abs() > 1.0)
+            );
+            // Rigid translation changes no member and gives a zero covector sum.
+            for axis in 0..2 {
+                let sum: f64 = result
+                    .node_coordinate_gradient
+                    .iter()
+                    .map(|g| g[axis])
+                    .sum();
+                assert!(sum.abs() < 1e-10 * expected);
+            }
+            let shifted = nodes.map(|p| [p[0] + 0.73, p[1] - 1.31]);
+            near(eigenvalue(&shifted), expected);
+            // Scaling reference coordinates AND prescribed displacements while
+            // scaling point masses like member mass gives lambda(s)=lambda/s².
+            let mut homothety = 0.0;
+            let mut rotation = 0.0;
+            for node in 0..nodes.len() {
+                for axis in 0..2 {
+                    homothety += result.node_coordinate_gradient[node][axis] * nodes[node][axis]
+                        + result.prescribed_displacement_gradient[node][axis] * motion[node][axis];
+                }
+                homothety += result.joint_mass_derivative[node] * joints[node];
+                let turn = |v: [f64; 2]| [-v[1], v[0]];
+                let dx = turn(nodes[node]);
+                let df = turn(case.loads()[node]);
+                let du = turn(motion[node]);
+                for axis in 0..2 {
+                    rotation += result.node_coordinate_gradient[node][axis] * dx[axis]
+                        + result.load_gradient[node][axis] * df[axis]
+                        + result.prescribed_displacement_gradient[node][axis] * du[axis];
+                }
+            }
+            near(homothety, -2.0 * expected);
+            assert!(rotation.abs() < 2e-8 * expected);
+            if let Some(reference) = &reference_gradient {
+                for (g, original) in result.node_coordinate_gradient.iter().zip(reference) {
+                    let rotated = rotate(*original);
+                    derivative_near(g[0], rotated[0]);
+                    derivative_near(g[1], rotated[1]);
+                }
+                near(expected, reference_eigenvalue.unwrap());
+            } else {
+                reference_gradient = Some(result.node_coordinate_gradient.clone());
+                reference_eigenvalue = Some(expected);
+            }
+        }
+    });
+}
+
+#[test]
+fn g1_coordinate_adjoints_retain_the_serial_consistent_mass_coupling() {
+    use fs_truss::elastic::modal::sensitivity::{ModalSensitivityControls, PreparedModalDesign};
+    with_cx(|cx, _| {
+        let nodes = [[0.0, 0.0], [0.8, 0.0], [2.1, 0.0]];
+        let members = [(0, 1), (1, 2)];
+        let ground = coordinate_ground(&nodes, &members, cx);
+        let case = LayoutCase::try_new(
+            vec![[true; 2], [false, true], [false, true]],
+            vec![[0.0; 2]; 3],
+            3,
+        )
+        .unwrap();
+        let areas = [0.5, 0.8];
+        let young = [12.0, 19.0];
+        let density = [3.0, 5.0];
+        let inertia = ModalInertia {
+            member_density_kg_m3: &density,
+            joint_mass_kg: None,
+        };
+        let design = PreparedModalDesign::try_new(
+            &ground,
+            &case,
+            &areas,
+            &young,
+            ElasticImposedState::default(),
+            inertia,
+            ModalAssemblyControls::default(),
+            cx,
+        )
+        .unwrap();
+        assert!(entry(design.pencil().mass(), 0, 1) > 0.0);
+        let expected = lower_two_coordinate_eigenvalue(design.pencil());
+        let (plan, options) = window_plan(vec![(0.8 * expected, 1.2 * expected)]);
+        let result = design
+            .solve_window(&plan, &options, ModalSensitivityControls::default(), cx)
+            .unwrap();
+        near(result.eigenvalue_s2, expected);
+        assert_eq!(result.adjoint_iterations, 0);
+        for node in 0..nodes.len() {
+            let mut values = [0.0; 2];
+            let h = 1e-5;
+            for (value, sign) in values.iter_mut().zip([1.0, -1.0]) {
+                let mut changed = nodes;
+                changed[node][0] += sign * h;
+                let geometry = coordinate_ground(&changed, &members, cx);
+                let pencil = assemble(
+                    &geometry,
+                    &case,
+                    &areas,
+                    &young,
+                    ElasticImposedState::default(),
+                    inertia,
+                    ModalAssemblyControls::default(),
+                    cx,
+                )
+                .unwrap();
+                *value = lower_two_coordinate_eigenvalue(&pencil);
+            }
+            derivative_near(
+                result.node_coordinate_gradient[node][0],
+                (values[0] - values[1]) / (2.0 * h),
+            );
+            assert_eq!(result.node_coordinate_gradient[node][1], 0.0);
+        }
+        let derivative: f64 = result
+            .node_coordinate_gradient
+            .iter()
+            .zip(nodes)
+            .map(|(g, x)| g[0] * x[0])
+            .sum();
+        near(derivative, -2.0 * expected);
     });
 }

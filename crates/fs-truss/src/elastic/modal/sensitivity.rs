@@ -6,8 +6,9 @@
 //! Its displacement covector is B diag(EA/L) c, c_i = (T_i^T phi)^2/L_i.
 //! One native elastic adjoint accounts for this preload redistribution.
 //!
-//! Geometry, topology, support flags and material states remain fixed. These
-//! partial derivatives do not differentiate eigeniterations, source resolution,
+//! Reference node coordinates may vary with fixed member connectivity, global
+//! support flags, force/motion components and material states. These partials
+//! do not differentiate eigeniterations, source resolution, topology selection,
 //! catalog snapping, density-dependent loads or a self-weight fixed point.
 
 use super::{ModalAssemblyControls, ModalInertia, TrussModalError, TrussModalPencil, assemble};
@@ -67,6 +68,13 @@ pub struct ModalSensitivity {
     pub load_gradient: Vec<[f64; 2]>,
     /// d(lambda)/du_prescribed [s^-2/m]; zero on free coordinates.
     pub prescribed_displacement_gradient: Vec<[f64; 2]>,
+    /// d(lambda)/d(reference node coordinate) [s^-2/m], in original x-y order.
+    /// Both member direction and length vary; A, E, free strain, reference
+    /// density, joint masses and GLOBAL force/prescribed-motion components stay
+    /// fixed. Supported nodes are geometric variables too; entries are not
+    /// masked by mechanical support flags. Only topology/rank-preserving
+    /// variations retaining compatible axial equilibrium are admissible.
+    pub node_coordinate_gradient: Vec<[f64; 2]>,
     /// d(lambda)/d(isotropic joint mass) [s^-2/kg] in original node order.
     /// Zero-mass joints admit only nonnegative mass perturbations.
     pub joint_mass_derivative: Vec<f64>,
@@ -141,6 +149,13 @@ impl<'a> PreparedModalDesign<'a> {
     /// Thus direct stiffness, preload redistribution and consistent mass all
     /// contribute. No global derivative matrix or mode-shape derivative forms.
     ///
+    /// Node-coordinate derivatives also differentiate the original member
+    /// lengths/directions, compatible preload and full consistent mass. They
+    /// hold global load/support-motion components and support flags fixed.
+    /// The same adjoint accounts for geometric changes of equilibrium; no
+    /// second solve or assembled geometry derivative is needed. Moving a node
+    /// changes its reference position, not its prescribed displacement value.
+    ///
     /// Loads and support motion may depend on the design: the caller composes
     /// the returned covectors with their own derivatives, including self-weight.
     /// The result is a local derivative of the frozen-reference initial-stress
@@ -182,7 +197,7 @@ impl<'a> PreparedModalDesign<'a> {
         let count = self.ground.members().len();
         // Includes native matrix-free member storage, CG/defect-correction
         // vectors and history, recovery arrays, copied case and final gradients.
-        let bytes = 512_u128 * nodes as u128
+        let bytes = 528_u128 * nodes as u128
             + 192_u128 * count as u128
             + 16_u128 * controls.elastic.maximum_iterations as u128
             + 4096;
@@ -268,6 +283,7 @@ impl<'a> PreparedModalDesign<'a> {
         )?;
         let lambda = mode.lambda;
         let mut members = Vec::with_capacity(count);
+        let mut node_coordinate_gradient = vec![[0.0; 2]; nodes];
         for index in 0..count {
             if index % 256 == 0 {
                 checkpoint(cx)?;
@@ -308,6 +324,46 @@ impl<'a> PreparedModalDesign<'a> {
                 return Err(invalid("truss modal design derivatives", "must remain finite").into());
             }
             members.push(Some(derivative));
+
+            // With r = x_b-x_a = L n and t perpendicular to n, write
+            // dr = n dL + L t dtheta. At fixed u, dN = k(u_t dtheta
+            // - epsilon_total dL). The adjoint subtracts
+            // z^T d(BN) = d*dN + N*z_t*dtheta, so total strain, not
+            // elastic strain, enters the length derivative. The final term
+            // is the length derivative of the original consistent mass.
+            let (start, end) = self.ground.members()[index];
+            let transverse_extension = |field: &[[f64; 2]]| {
+                member.transverse[2] * (field[end][0] - field[start][0])
+                    + member.transverse[3] * (field[end][1] - field[start][1])
+            };
+            let u_t = transverse_extension(&self.pencil.equilibrium.displacements_m);
+            let z_t = transverse_extension(&adjoint.displacements_m);
+            let k = young * (area / length);
+            let force = self.pencil.equilibrium.member_force_n[index];
+            let radial = -k * (axial * axial / length)
+                - redistribution * k * self.pencil.equilibrium.member_strain[index]
+                - force * (c / length)
+                - lambda * density * area * (inertia_work / 3.0);
+            let angular = (2.0 * (k - force / length) * axial * transverse
+                + redistribution * k * u_t
+                - force * z_t)
+                / length;
+            for axis in 0..2 {
+                let contribution =
+                    radial * member.axial[axis + 2] + angular * member.transverse[axis + 2];
+                node_coordinate_gradient[start][axis] -= contribution;
+                node_coordinate_gradient[end][axis] += contribution;
+                if !contribution.is_finite()
+                    || !node_coordinate_gradient[start][axis].is_finite()
+                    || !node_coordinate_gradient[end][axis].is_finite()
+                {
+                    return Err(invalid(
+                        "truss modal coordinate derivatives",
+                        "must remain finite",
+                    )
+                    .into());
+                }
+            }
         }
         let mut support_gradient = adjoint.support_reactions_n;
         let mut joint_mass_derivative = Vec::with_capacity(nodes);
@@ -335,6 +391,7 @@ impl<'a> PreparedModalDesign<'a> {
             members,
             load_gradient: adjoint.displacements_m,
             prescribed_displacement_gradient: support_gradient,
+            node_coordinate_gradient,
             joint_mass_derivative,
             adjoint_relative_equilibrium_residual: adjoint.relative_equilibrium_residual,
             adjoint_iterations: adjoint.iterations,
