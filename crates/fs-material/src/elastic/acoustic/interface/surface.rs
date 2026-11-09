@@ -5,12 +5,13 @@
 //! A free surface sets all three tractions to zero; a stationary clamp sets
 //! all three velocities to zero. P and SV generally convert into each other,
 //! including an evanescent P field for supercritical SV incidence. SH remains
-//! independent. A passive local support imposes `traction = -Z velocity`,
-//! with independent normal and tangential specific mechanical impedances.
-//! Its real parts absorb work; its reactances preserve coherent reflection phase.
+//! independent for axisymmetric boundaries. A passive local support imposes
+//! `traction = -Z velocity`; a reciprocal tensor can couple all three modes.
+//! Its resistance absorbs work; its reactance preserves coherent reflection phase.
 //!
-//! The same original tensor supplies every wave trace. One 2x2 boundary solve
-//! is prepared per tangential slowness, then coherent drives allocate nothing.
+//! The same original tensor supplies every wave trace. A 2x2 boundary solve
+//! prepares axisymmetric reflection; a 6x6 solve handles a full support tensor.
+//! Both are cached per tangential slowness, then coherent drives allocate nothing.
 //! This is a bulk plane-wave boundary, not a finite plate, flexural edge,
 //! Rayleigh-wave source, nonlocal support or surface-roughness model. Supplied
 //! impedances belong to the same frequency as the drive. No causal time-domain
@@ -19,6 +20,9 @@
 //! <https://doi.org/10.1186/s40623-023-01780-0>.
 
 use super::*;
+
+mod tensor;
+pub use tensor::ElasticSurfaceImpedanceTensor;
 
 /// Passive locally reacting support in the original `exp(-i omega t)` convention.
 ///
@@ -79,6 +83,7 @@ impl ElasticSurfaceImpedance {
 
 /// Explicit stationary mechanical boundary condition.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)] // Fixed storage keeps prepared drives allocation-free.
 pub enum ElasticSurfaceCondition {
     /// Vacuum/free boundary: `sigma.e_z = 0`, with unconstrained velocity.
     TractionFree,
@@ -86,6 +91,8 @@ pub enum ElasticSurfaceCondition {
     Clamped,
     /// Passive support with `traction = -Z velocity` on the outward normal.
     Impedance(ElasticSurfaceImpedance),
+    /// Reciprocal passive tensor support, including normal/tangential coupling.
+    TensorImpedance(ElasticSurfaceImpedanceTensor),
 }
 
 /// Original isotropic material and its cached P/shear speeds and impedances.
@@ -107,6 +114,9 @@ pub struct PreparedElasticSurface<'a> {
     reflected: [ElasticWaveTrace; 3],
     scattering: [[C64; 3]; 3],
     impedance_reference_pa_s_m: f64,
+    // A coupled support solves wall motion directly, retaining weak motion
+    // beside stiff axes without subtracting nearly opposite modal velocities.
+    tensor_boundary_velocity: Option<[[C64; 3]; 3]>,
 }
 
 /// Coherent physical fields and independently reconstructed surface work.
@@ -120,11 +130,12 @@ pub struct ElasticSurfaceResponse {
     pub reflected_normal_power_w_m2: [f64; 3],
     pub total_incoming_power_w_m2: f64,
     pub total_reflected_power_w_m2: f64,
-    /// Positive local support work `sum Re(Z_i) |v_i|²/2` [W/m²], not a
-    /// reflected-power deficit. Reactive supports have exactly zero loss.
+    /// Positive local support work `Re(v* . Z v)/2` [W/m²], evaluated through
+    /// the admitted resistance factor for a tensor rather than a power deficit.
+    /// Reactive supports have exactly zero loss.
     pub absorbed_normal_power_w_m2: f64,
-    /// Coherent boundary velocity, reconstructed from both traction/velocity
-    /// coordinates for a finite support to preserve weak wall motion.
+    /// Coherent boundary velocity, retained through both traction/velocity
+    /// coordinates or a coupled support solve to preserve weak wall motion.
     pub boundary_velocity_m_s: [C64; 3],
     /// Traction `sigma.e_z` on the outward normal, in Pa.
     pub boundary_traction_pa: [C64; 3],
@@ -203,6 +214,7 @@ impl<'a> IsotropicElasticSurface<'a> {
             reflected: [empty_trace(); 3],
             scattering: [[C64::ZERO; 3]; 3],
             impedance_reference_pa_s_m: self.impedances[0].max(self.impedances[1]),
+            tensor_boundary_velocity: None,
         };
         for kind in 0..3 {
             poll(cancelled)?;
@@ -232,6 +244,11 @@ impl<'a> IsotropicElasticSurface<'a> {
                 )?;
             }
         }
+        if let ElasticSurfaceCondition::TensorImpedance(support) = self.condition {
+            result.prepare_tensor(support, cancelled)?;
+            poll(cancelled)?;
+            return Ok(result);
+        }
         result.prepare_psv(cancelled)?;
         if result.incoming[2].normal_power_factor_pa_s_m > 0.0 {
             result.scattering[2][2] = match self.condition {
@@ -245,6 +262,9 @@ impl<'a> IsotropicElasticSurface<'a> {
                         return Err(invalid("elastic SH support reflection is unrepresentable"));
                     }
                     coefficient
+                }
+                ElasticSurfaceCondition::TensorImpedance(_) => {
+                    unreachable!("tensor reflection uses the coupled preparation")
                 }
             };
         }
@@ -366,6 +386,17 @@ impl PreparedElasticSurface<'_> {
             }
             absorbed = real_sum(losses);
         }
+        if let ElasticSurfaceCondition::TensorImpedance(support) = self.condition {
+            let map = self
+                .tensor_boundary_velocity
+                .as_ref()
+                .expect("tensor boundary was prepared together with reflection");
+            velocity = core::array::from_fn(|axis| {
+                tensor::complex_dot((0..3).map(|mode| (map[axis][mode], incoming[mode])))
+            });
+            traction = support.traction(velocity);
+            absorbed = support.absorbed_power(velocity)?;
+        }
         if velocity.iter().chain(&traction).any(|&x| !finite(x))
             || [total_incoming, total_reflected, flux, absorbed]
                 .into_iter()
@@ -405,6 +436,9 @@ impl PreparedElasticSurface<'_> {
                 )
                 .scale(a)
                     + b * wave.velocity[component]
+            }
+            ElasticSurfaceCondition::TensorImpedance(_) => {
+                unreachable!("tensor support retains coupled velocity coordinates")
             }
         }
     }

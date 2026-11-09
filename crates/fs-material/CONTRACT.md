@@ -19439,7 +19439,26 @@ G0/G1/G3 cases cover matched normal termination, oblique SH coefficients,
 coherent supercritical reflection, purely reactive supports, weak resistance,
 stiff-support absorption below reflection roundoff and invalid active loads.
 This extension supplies no causal time-domain realization, spatially nonlocal
-support, anisotropic boundary tensor or measured support-law qualification.
+support or measured support-law qualification.
+
+`ElasticSurfaceCondition::TensorImpedance` admits a finite complex-symmetric
+3x3 specific impedance in the same Cartesian surface frame. Its original real
+resistance uses the shared passive-work Gram admission, including zero and
+rank-deficient loss without a positive floor; resistance and reactance need
+not share principal axes. `from_resistance_gram` instead retains three original
+dissipative channels directly, preserving their null directions and weak loss
+below Cartesian coefficient roundoff; it only forms their traction matrix.
+Normal/tangential coupling converts all P/SV/SH
+polarizations while retaining the same original isotropic bulk material. One
+row-scaled native 6x6 solve prepares reflected amplitudes and actual wall
+velocities together, preserving stiff-support motion without cancellation or
+normal equations. Coherent drives reuse fixed-size maps and evaluate positive
+loss as `sum |L^T v|²/2`, separately from the original wave-flux check. The
+axisymmetric path keeps its smaller solve. Analytical rotated shear and
+normal/shear conversion, noncommuting resistance/reactance, evanescence,
+weak/rank-deficient loss, stiff motion and bounded cancellation cover the
+tensor path. This remains a linear local reciprocal boundary law at one
+frequency; it adds neither bulk anisotropy nor nonreciprocal support physics.
 
 ## Nonideal passive plant residence
 

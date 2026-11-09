@@ -110,7 +110,9 @@ fn analytic(condition: ElasticSurfaceCondition, cp: f64, cs: f64, p: f64) -> [[C
                 ],
             ]
         }
-        ElasticSurfaceCondition::Impedance(_) => unreachable!("ideal boundary fixture"),
+        ElasticSurfaceCondition::Impedance(_) | ElasticSurfaceCondition::TensorImpedance(_) => {
+            unreachable!("ideal boundary fixture")
+        }
     }
 }
 
@@ -161,14 +163,20 @@ fn g0_coherent_reflection_is_power_unitary_and_satisfies_the_boundary() {
                 let constrained = match condition {
                     ElasticSurfaceCondition::TractionFree => response.boundary_traction_pa,
                     ElasticSurfaceCondition::Clamped => response.boundary_velocity_m_s,
-                    ElasticSurfaceCondition::Impedance(_) => unreachable!("ideal boundary fixture"),
+                    ElasticSurfaceCondition::Impedance(_)
+                    | ElasticSurfaceCondition::TensorImpedance(_) => {
+                        unreachable!("ideal boundary fixture")
+                    }
                 };
                 let scale = match condition {
                     ElasticSurfaceCondition::TractionFree => {
                         state.density_kg_m3() * owner.speeds[0]
                     }
                     ElasticSurfaceCondition::Clamped => 1.0,
-                    ElasticSurfaceCondition::Impedance(_) => unreachable!("ideal boundary fixture"),
+                    ElasticSurfaceCondition::Impedance(_)
+                    | ElasticSurfaceCondition::TensorImpedance(_) => {
+                        unreachable!("ideal boundary fixture")
+                    }
                 };
                 assert!(constrained.iter().all(|x| x.abs() < 2e-14 * scale));
                 // Independent weighted inner products of the retained columns.
@@ -470,3 +478,5 @@ fn g0_support_admission_rejects_active_and_nonfinite_values() {
     assert_eq!(impedance.normal_pa_s_m(), normal);
     assert_eq!(impedance.tangential_pa_s_m(), tangent);
 }
+
+mod tensor_support;
