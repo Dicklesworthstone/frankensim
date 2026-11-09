@@ -83,6 +83,36 @@ impl<'s, 'm> MaterialRheologyPour<'s, 'm> {
         })?;
         Ok(MaterialRheologyPourOutcome { pour, rheology })
     }
+
+    /// Balance initial liquid pressure against gravity, then evolve source viscosity.
+    ///
+    /// Uses [`MaterialPour::run_hydrostatic`]'s complete below-crest layers,
+    /// neutral contact and zero surface tension. The returned `pour()` retains
+    /// the positive free-surface pressure datum and reports the actual initial
+    /// mass, including bounded numerical compression. This changes neither
+    /// the source's fixed density nor its original query coordinates.
+    ///
+    /// Every collision still closes physical shear against the original law;
+    /// no Newtonian approximation or frozen apparent viscosity is introduced.
+    /// `last_collision()` retains the same source receipts as [`Self::run`].
+    /// The pressure datum does not add pressure-dependent rheology, and all
+    /// original source, root, speed, density and cancellation refusals apply.
+    pub fn run_hydrostatic(
+        &self,
+        free_surface_pressure_pa: f64,
+        gate: &CancelGate,
+    ) -> Result<MaterialRheologyPourOutcome<'s, 'm>, MaterialPourError> {
+        let mut rheology = self.rheology.clone();
+        let pour = self.physical.run_hydrostatic_with(
+            free_surface_pressure_pa,
+            gate,
+            |liquid, _step| {
+                rheology.step(liquid, gate)?;
+                Ok(())
+            },
+        )?;
+        Ok(MaterialRheologyPourOutcome { pour, rheology })
+    }
 }
 
 impl<'s, 'm> MaterialRheologyPourOutcome<'s, 'm> {

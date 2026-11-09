@@ -581,6 +581,14 @@ A read-only preparation can be retried; cancellation or source/native refusal
 returns no partial pour. Frozen `MaterialPour` retains its existing rejection
 of evolving sources.
 
+`MaterialRheologyPour::run_hydrostatic` shares the explicit neutral, zero-tension,
+full-layer initialization and pressure datum of `MaterialPour::run_hydrostatic`.
+Its original source law still resolves physical shear before every collision;
+hydrostatic startup does not freeze viscosity. The accepted `pour()` reports
+the actual initial mass, including bounded numerical compression, and retains
+the pressure datum without changing fixed source-query coordinates. Source
+receipts, root/refusal behavior and the historical `run` path remain intact.
+
 The accepted result exposes `pour()` and `last_collision()`. Complete
 material receipts and physical rates describe the last collision input,
 before streaming and conversion, not a second source sweep of the final field.

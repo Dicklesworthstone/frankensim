@@ -316,6 +316,24 @@ impl<'a> MaterialPour<'a> {
         free_surface_pressure_pa: f64,
         gate: &CancelGate,
     ) -> Result<MaterialPourOutcome<'a>, MaterialPourError> {
+        self.run_hydrostatic_with(free_surface_pressure_pa, gate, |sim, step| {
+            advance_pour_liquid(
+                sim,
+                Rheology::Newtonian {
+                    nu: self.scaling.flow().viscosity,
+                },
+                step,
+            )
+            .map_err(Into::into)
+        })
+    }
+
+    fn run_hydrostatic_with(
+        &self,
+        free_surface_pressure_pa: f64,
+        gate: &CancelGate,
+        advance: impl FnMut(&mut FreeSurface, u32) -> Result<(), MaterialPourError>,
+    ) -> Result<MaterialPourOutcome<'a>, MaterialPourError> {
         checkpoint(gate)?;
         if self.rig.surface_tension != 0.0 {
             return Err(MaterialPourError::Invalid(
@@ -343,16 +361,7 @@ impl<'a> MaterialPour<'a> {
                     error => MaterialPourError::Scaling(error.into()),
                 })
             },
-            |sim, step| {
-                advance_pour_liquid(
-                    sim,
-                    Rheology::Newtonian {
-                        nu: self.scaling.flow().viscosity,
-                    },
-                    step,
-                )
-                .map_err(Into::into)
-            },
+            advance,
         )
     }
 
