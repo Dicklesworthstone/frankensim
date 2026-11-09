@@ -3910,6 +3910,33 @@ viscothermal residue to the differentiated original scalar telegraph law,
 with every original material memory retained. Forged pole reports, capacity
 limits and mid-computation cancellation are also refused (G0/G1/G3/G4).
 
+### Physical axial-length sensitivity of a DG resonance
+
+`PreparedDgPoles::log_length_sensitivity` differentiates one simple original
+pole under uniform axial dilation `x -> exp(theta)*x`, at fixed cross-sections,
+local material laws and end loads. Spatial material profiles and side ports
+move with their original relative positions. The pressure/flow propagation
+and physical end-boundary operators scale as `exp(-theta)`; local viscothermal,
+molecular, porous and compliant-wall memories retain their own rates and
+couplings. Their dispersive contribution therefore remains in the computed
+complex `ds/dtheta`; it is not replaced by the lossless shortcut `-s`.
+
+One shared `fs_la::pole_response::PreparedPole` factor and one derivative solve
+return the pole/decay slope and every energy-coordinate mode tangent in an
+explicit fixed-pivot gauge. Nodal pressure, volume flow and port-pressure
+tangents include the `-1/2` logarithmic derivative of the native mass/port
+maps. They apply at corresponding moving nodes/ports; a fixed spatial observer
+requires an additional transport term. Existing original-mode residuals and
+material bands are rechecked; physical/action payload and work are reserved
+before allocation. Refusal/cancellation changes no source state. This local
+simple-mode sensitivity is neither continuum accuracy nor finite-change mode
+tracking, a forced-response peak derivative, or a physical time-varying stretch.
+
+`tests/dg_resonance_sensitivities.rs` checks lossless frequency and physical
+field scaling, a three-rung dispersive telegraph derivative and independently
+rebuilt-geometry mode tangents, resistive-end decay, a length-independent local
+gas-loaded wall resonance, mode-gauge invariance and refusal paths (G0/G1/G3/G4).
+
 ### Original molecular relaxation in the complete multimodal duct
 
 `ModalGalerkin::with_molecular_relaxation` attaches an evaluated original `RelaxationState` to every retained axial/radial pressure coordinate. It preserves the full spatial stiffness, geometry, original gas state and physical face maps. The canonical acoustic prefix remains `[q; p]`, with `p=M_inf*P` using the original frozen bulk modulus; source mass and inverse-mass accessors report this actual map. One unit-storage thermal coordinate per spatial coordinate and every positive original reservoir follow the acoustic prefix. Equal relaxation times remain separate, zero-capacity processes remain identifiable in the borrowed-law metadata, and an empty law leaves all original matrices bitwise intact.

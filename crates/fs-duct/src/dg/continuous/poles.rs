@@ -18,6 +18,8 @@ use fs_math::{c64::C64, det};
 
 mod residue;
 pub use residue::DgPoleResidue;
+mod sensitivity;
+pub use sensitivity::DgPoleLengthSensitivity;
 
 pub use fs_la::nonlinear_eig::PoleOptions;
 pub use fs_la::nonlinear_eig::beyn::{BeynOptions, Ellipse as ResonanceRegion};
