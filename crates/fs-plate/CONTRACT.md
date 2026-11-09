@@ -2658,3 +2658,32 @@ The focused regression fixtures cover rotated offset layers, independent
 real-field and alternative spatial integration, interval additivity, one-tone
 mean parity, static storage, coherent cancellation, face-domain admission and
 resource/cancellation behavior.
+
+
+## Material-aware prescribed motion of original shell supports
+
+`TensorPronyShell::prepare_supported_harmonic_response` retains prescribed
+translations and physical axial rotations in the original full CST/DKT field.
+Support inputs use strictly increasing original global labels `6*node+component`;
+already eliminated homogeneous coordinates remain fixed. The original dispersive
+operator, signed laminate inertia moments and lossless drilling term assemble
+before the shared support solver factors only the free principal block. Dense
+payload is bounded by `344*n*n + 544*n + section_bytes`, with the original
+material/facet allowance and separately bounded native sparse assembly.
+
+The physical-port variant retains complete `-i omega B Z B^T` loading before
+support elimination, including every moving support row in `B^T v`. Original
+self/mutual, reactive and nonreciprocal load terms participate in reactions;
+signed actuator work, intrinsic tensor-Prony/Kelvin heat and boundary absorption
+remain separate. The port owner retains passivity and work/payload admission.
+All original layers admit their complete strain cycle at every facet vertex and
+layer face before publication. Repeated cases reuse the prepared free factor;
+refusal and cancellation preserve it. Complete returned motion can enter the
+same source's coherent material observer directly. Empty and all-prescribed
+maps are admitted. No startup transient, actuator dynamics, geometric prestress
+or extra drilling heat is inferred.
+
+Four focused regression groups exercise moving translations/rotations on an
+offset rotated laminate, original-quadrature material heat and independent port
+work, original-label/empty/all-support limits, source/material/load refusals,
+repeatability and original cancellation behavior.

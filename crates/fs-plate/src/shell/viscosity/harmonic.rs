@@ -44,6 +44,8 @@ pub use material::{
     TensorShellMaterialPoint, TensorShellMaterialSpectrumField, TensorShellMaterialSpectrumObserver,
     TensorShellMaterialSpectrumPoint,
 };
+mod supports;
+pub use supports::PreparedSupportedTensorPronyShell;
 
 /// The original material, spatial or shared harmonic refusal.
 #[derive(Debug)]

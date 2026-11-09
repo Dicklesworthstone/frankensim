@@ -2,6 +2,8 @@
 
 #[path = "shell_prony_laminate_harmonic/spectrum.rs"]
 mod spectrum;
+#[path = "shell_prony_laminate_harmonic/supports.rs"]
+mod supports;
 
 use fs_exec::{CancelGate, Cx};
 use fs_material::elastic::OrthotropicElastic;
