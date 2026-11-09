@@ -9029,6 +9029,34 @@ continuous Newton-Euler RK4 dynamics, native zero-law equivalence, common
 boost/world-translation covariance, original rotating material-point work,
 gravity/heat separation, and late cancellation with exact retry.
 
+## Finite motion with simultaneous internal actuation and spatial damping
+
+`spatial_loads::internal_motion::viscous::driven` advances the original pair
+through simultaneous driven/damped half sources around one native loaded
+rigid-body step. The complete passive matrix and full finite-body mobility act
+on the same source trajectory as the actuator. The endpoint source is prepared
+from the actual evolved poses, material axes and attachment transport.
+`HeldInternalEffort` explicitly distinguishes world-held force/free-couple
+components from components following body A's material axes; world components
+are re-expressed at each actual source geometry.
+
+Each source independently integrates signed actuator work and nonnegative
+viscous heat. Native COM/body-couple, gravity and rotating material-point loads
+retain their original pose, work and impulse owners. Every source and native
+body drift passes its own gate before the original-to-final momentum and
+mechanical-energy account. Numerical drift defects remain separate from heat;
+actuator energy recovery is signed work. Cancellation or refusal publishes no
+partial endpoint, and no thermal destination is inferred.
+
+Two bounded six-coordinate preparations are released in sequence around the
+native body steps. This smooth composition is second order under temporal
+refinement; local exact stiff-source propagation does not certify coarse
+moving-geometry accuracy. G1/G3 regressions in
+`tests/internal_viscous_motion/driven.rs` cover analytic terminal slip,
+independent work and heat, refining axial positions, both actuator frames against
+continuous full-spatial Newton-Euler integration, passive/zero-law limits,
+native external-load work, gravity separation and cancellation with exact retry.
+
 ## Sparse full-spatial viscous connector networks
 
 `spatial_loads::internal_impulse::viscous::network::PreparedViscousNetwork`

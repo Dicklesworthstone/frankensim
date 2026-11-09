@@ -22,6 +22,10 @@ use fs_math::dd::Dd;
 #[path = "viscous/network.rs"]
 pub mod network;
 
+/// Finite motion with simultaneous held actuation and full spatial damping.
+#[path = "viscous/driven.rs"]
+pub mod driven;
+
 /// One passive spatial law attached to the original material frames.
 ///
 /// The full SI damping matrix acts on the transported relative twist at B,

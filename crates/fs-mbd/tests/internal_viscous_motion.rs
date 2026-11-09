@@ -668,3 +668,6 @@ fn rotating_point_forces_and_world_couples_keep_original_external_work() {
     near(result.work_heat_residual_j, 0.0, 2e-11);
     assert!(result.dissipated_energy_j > 0.0);
 }
+
+#[path = "internal_viscous_motion/driven.rs"]
+mod driven;
