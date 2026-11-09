@@ -36,7 +36,46 @@ fn reduced_duration(physical: f64, scale: f64) -> Result<f64> {
     Ok(reduced)
 }
 
-fn physical_endpoint_rate(response: &mut TensorKelvinStressRampStep, scale: f64) -> Result<()> {
+fn physical_endpoint_rate(
+    controller: &PreparedTensorKelvinStressControl,
+    history: &TensorPronyHistory,
+    response: &mut TensorKelvinStressRampStep,
+    scale: f64,
+    stress_delta: &Voigt,
+    duration: f64,
+) -> Result<()> {
+    if let Some(constraint) = &controller.constrained {
+        // Algebraic compliance responds to PHYSICAL stress slope, independent
+        // of temperature. Only the hold/relaxation rate scales with kinetics;
+        // dividing a midpoint's entire rate would incorrectly scale J sigma'.
+        let elastic = constraint.compliance(stress_delta)?;
+        let elastic_rate = if duration > 0.0 {
+            elastic.map(|v| v / duration)
+        } else {
+            [0.0; 6]
+        };
+        let (loss, _) = controller.original_loss(&history.strain, &history.q, &history.stress)?;
+        let hold_rate = controller.endpoint_rate(
+            &loss,
+            &history.strain,
+            &history.q,
+            &history.stress,
+            [0.0; 6],
+            8192.0 * f64::EPSILON * controller.state_coordinates() as f64,
+        )?;
+        let mut physical = [0.0; 6];
+        for axis in 0..6 {
+            let viscous = hold_rate[axis] / scale;
+            physical[axis] = (Dd::from_f64(elastic_rate[axis]) + Dd::from_f64(viscous)).to_f64();
+            if !physical[axis].is_finite() || (hold_rate[axis] != 0.0 && viscous == 0.0) {
+                return Err(invalid(
+                    "unrepresentable physical constrained Kelvin endpoint rate",
+                ));
+            }
+        }
+        response.strain_rate = tensor(&physical);
+        return Ok(());
+    }
     for rate in &mut response.strain_rate {
         let physical = *rate / scale;
         if !physical.is_finite() || (*rate != 0.0 && physical == 0.0) {
@@ -63,7 +102,9 @@ impl PreparedTensorKelvinStressControl {
     /// shift, including when the final midpoint differs substantially from it.
     /// Constant reference temperature retains the original response bits.
     ///
-    /// The original fixed moduli, branch tensors, strain bound and SPD Kelvin
+    /// Elastic null-direction rates retain the physical stress slope; only
+    /// their relaxation part scales with the final shift. The original fixed
+    /// moduli, branch tensors, strain bound and passive Kelvin
     /// admission remain binding. This is a second-order coefficient-frozen
     /// approximation to a prescribed thermal path, with the existing explicit
     /// variation and work limits. Refine these limits and the loading history;
@@ -93,6 +134,12 @@ impl PreparedTensorKelvinStressControl {
         }
         let schedule =
             TemperatureSchedule::new(&self.model, ramp, calibration, controls, &mut cancelled)?;
+        let initial = history.stress;
+        let target = mandel(&stress);
+        let delta = core::array::from_fn::<_, 6, _>(|i| target[i] - initial[i]);
+        if !finite(&target) || !finite(&delta) {
+            return Err(invalid("unrepresentable physical Kelvin stress ramp"));
+        }
         let mut candidate = history.clone();
         if ramp.start_k == ramp.end_k {
             let mut response = self.advance(
@@ -101,7 +148,16 @@ impl PreparedTensorKelvinStressControl {
                 reduced_duration(ramp.duration_s, schedule.start.factor())?,
                 &mut cancelled,
             )?;
-            physical_endpoint_rate(&mut response, schedule.end.factor())?;
+            if schedule.end.factor() != 1.0 {
+                physical_endpoint_rate(
+                    self,
+                    &candidate,
+                    &mut response,
+                    schedule.end.factor(),
+                    &delta,
+                    ramp.duration_s,
+                )?;
+            }
             poll(&mut cancelled)?;
             *history = candidate;
             return Ok(TensorKelvinStressTemperatureStep {
@@ -111,12 +167,6 @@ impl PreparedTensorKelvinStressControl {
                 substeps: 1,
                 maximum_log_shift_change: 0.0,
             });
-        }
-        let initial = history.stress;
-        let target = mandel(&stress);
-        let delta = core::array::from_fn::<_, 6, _>(|i| target[i] - initial[i]);
-        if !finite(&target) || !finite(&delta) {
-            return Err(invalid("unrepresentable physical Kelvin stress ramp"));
         }
         let mut work = Dd::ZERO;
         let mut heat = Dd::ZERO;
@@ -159,7 +209,14 @@ impl PreparedTensorKelvinStressControl {
         response.dissipated = heat.to_f64();
         response.balance_residual = (work - storage_change - heat).to_f64();
         response.strain_bounds = bounds;
-        physical_endpoint_rate(&mut response, schedule.end.factor())?;
+        physical_endpoint_rate(
+            self,
+            &candidate,
+            &mut response,
+            schedule.end.factor(),
+            &delta,
+            ramp.duration_s,
+        )?;
         let total_work = history.work + response.work;
         let total_heat = history.heat + response.dissipated;
         if !finite(&response.strain_increment)

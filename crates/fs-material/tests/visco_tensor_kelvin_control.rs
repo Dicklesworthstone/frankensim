@@ -5,6 +5,8 @@ use fs_material::visco_tensor::kelvin_control::{
 use fs_material::visco_tensor::{TensorProny, TensorPronyBranch, TensorPronyError};
 use fs_material::{Tangent6, Voigt};
 
+#[path = "visco_tensor_kelvin_control/semidefinite.rs"]
+mod semidefinite;
 #[path = "visco_tensor_kelvin_control/temperature.rs"]
 mod temperature;
 
@@ -490,17 +492,17 @@ fn g1_weak_and_saturated_damping_retain_physical_heat_and_unrounded_increments()
 }
 
 #[test]
-fn g4_spd_budgets_binding_domain_and_cancellation_refuse_atomically() {
+fn g4_zero_viscosity_budgets_binding_domain_and_cancellation_refuse_atomically() {
     let elastic = TensorProny::new_mandel(diagonal([100.0; 6]), vec![], 0.1).unwrap();
     assert!(Controller::new(&elastic.history(), Budget::default(), || false).is_err());
-    let singular = elastic
-        .with_kelvin_viscosity_mandel(diagonal([1.0, 2.0, 0.0, 0.0, 0.0, 0.0]))
+    let zero = elastic
+        .with_kelvin_viscosity_mandel(diagonal([0.0; 6]))
         .unwrap();
-    assert!(Controller::new(&singular.history(), Budget::default(), || false).is_err());
+    assert!(Controller::new(&zero.history(), Budget::default(), || false).is_err());
     let rotation = [[0.6, -0.8, 0.0], [0.8, 0.6, 0.0], [0.0, 0.0, 1.0]];
     assert!(
         Controller::new(
-            &singular.rotated(rotation).unwrap().history(),
+            &zero.rotated(rotation).unwrap().history(),
             Budget::default(),
             || false
         )

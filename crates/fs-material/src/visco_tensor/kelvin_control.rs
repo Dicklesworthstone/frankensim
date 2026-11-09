@@ -1,6 +1,7 @@
-//! Stress ramps with the original full Maxwell memory and SPD Kelvin viscosity.
+//! Stress ramps with the original Maxwell memory and passive Kelvin viscosity.
 //!
-//! In energy coordinates z = [G_eq strain, q], let C = [G_eq; B] and
+//! In the positive-definite case, use energy coordinates z = [G_eq strain, q],
+//! let C = [G_eq; B] and
 //! D = R_D^T R_D be the Kelvin tensor. The positive factor
 //! F = [R_D^-T C^T; 0 sqrt(R)] satisfies z' = -F^T F z + C D^-1 stress.
 //! Native QR/SVD prepares F = U sqrt(Lambda) V^T. Its loss coordinates
@@ -8,8 +9,9 @@
 //! ramps, with strain' = -sum k_i g_i and k_i = R_D^-1 U_i[0..6].
 //! Heat is the independent positive integral sum integral(g_i^2).
 //!
-//! This retains the original history and full noncommuting tensors. Singular
-//! Kelvin tensors require differential/algebraic constraints and refuse here.
+//! This retains the original history and full noncommuting tensors. A nonzero
+//! semidefinite Kelvin tensor retains its algebraic elastic directions: their
+//! instantaneous compliance adds to the same exact loss-coordinate evolution.
 //! Fixed-temperature ramps are exact. Prescribed temperature ramps reuse this
 //! controller in reduced time with bounded midpoint kinetics; elastic moduli
 //! remain fixed. No thermal-state evolution, mixed loading, derivative or
@@ -25,6 +27,7 @@ use fs_math::dd::Dd;
 use std::sync::Arc;
 
 mod prepare;
+mod semidefinite;
 mod temperature;
 pub use temperature::TensorKelvinStressTemperatureStep;
 
@@ -77,19 +80,20 @@ pub struct TensorKelvinStressRampStep {
     pub strain_bounds: [Voigt; 2],
 }
 
-/// Exact piecewise-linear stress loading of a history with SPD Kelvin viscosity.
+/// Exact stress loading with nonzero positive-semidefinite Kelvin viscosity.
 ///
 /// Preparation retains all original equilibrium and branch coordinates, including
 /// null branch directions, and uses O(n³) work and O(n²) storage, n=6+6*branches.
-/// Each ramp uses O(n²) arithmetic and n scalar Prony preparations; it performs
+/// Each ramp uses O(n²) arithmetic and at most n scalar Prony preparations; it performs
 /// no dense factorization. Histories can alternate between this controller and
 /// original strain ramps without resetting their memory. Independently created
 /// histories refuse even if their public coefficients compare equal.
 #[derive(Clone, Debug)]
 pub struct PreparedTensorKelvinStressControl {
     model: Arc<TensorProny>,
-    viscosity_qr: Qr,
+    viscosity_qr: Option<Qr>,
     viscosity_scale: f64,
+    constrained: Option<semidefinite::ConstrainedKelvin>,
     branch_rate_roots: Vec<f64>,
     rates: Vec<f64>,
     left_modes: Vec<f64>,
@@ -177,25 +181,35 @@ impl PreparedTensorKelvinStressControl {
     /// Number of retained equilibrium and original branch energy coordinates.
     #[must_use]
     pub fn state_coordinates(&self) -> usize {
-        self.rates.len()
+        6 + 6 * self.model.branches().len()
+    }
+
+    /// Original nonzero Kelvin loss directions, without a positive loss floor.
+    #[must_use]
+    pub fn viscosity_rank(&self) -> usize {
+        self.constrained.as_ref().map_or(6, |c| c.range.len())
     }
 
     fn solve_viscosity_root(&self, rhs: Voigt, transpose: bool) -> Result<Voigt> {
+        let qr = self
+            .viscosity_qr
+            .as_ref()
+            .ok_or_else(|| invalid("a constrained Kelvin tensor has no full viscosity inverse"))?;
         let mut answer = [0.0; 6];
         for index in 0..6 {
             let i = if transpose { index } else { 5 - index };
             let mut value = Dd::from_f64(rhs[i] / self.viscosity_scale);
             if transpose {
                 for (j, &v) in answer.iter().take(i).enumerate() {
-                    value = value - Dd::from_f64(self.viscosity_qr.r(j, i)) * Dd::from_f64(v);
+                    value = value - Dd::from_f64(qr.r(j, i)) * Dd::from_f64(v);
                 }
             } else {
                 for (j, &v) in answer.iter().enumerate().skip(i + 1) {
-                    value = value - Dd::from_f64(self.viscosity_qr.r(i, j)) * Dd::from_f64(v);
+                    value = value - Dd::from_f64(qr.r(i, j)) * Dd::from_f64(v);
                 }
             }
             answer[i] = checked(
-                value.to_f64() / self.viscosity_qr.r(i, i),
+                value.to_f64() / qr.r(i, i),
                 "unrepresentable Kelvin compliance response",
             )?;
         }
@@ -229,19 +243,34 @@ impl PreparedTensorKelvinStressControl {
                 }
             }
         }
-        let physical = self.solve_viscosity_root(residual.map(Dd::to_f64), true)?;
         let mut values = zeros(self.rates.len())?;
         let mut scale = zeros(self.rates.len())?;
-        values[..6].copy_from_slice(&physical);
-        for i in 0..6 {
-            let mut bound = magnitude[i] / self.viscosity_scale;
-            for (j, &previous) in scale.iter().take(i).enumerate() {
-                bound += self.viscosity_qr.r(j, i).abs() * previous;
+        let rank = self.viscosity_rank();
+        if let Some(constraint) = &self.constrained {
+            constraint.admit_residual(&residual, &magnitude)?;
+            for (i, direction) in constraint.range.iter().enumerate() {
+                let mut value = Dd::ZERO;
+                for axis in 0..6 {
+                    value = value + Dd::from_f64(direction[axis]) * residual[axis];
+                    scale[i] += direction[axis].abs() * magnitude[axis];
+                }
+                values[i] = checked(value.to_f64(), "unrepresentable constrained Kelvin loss")?;
+                checked(scale[i], "unrepresentable constrained Kelvin source scale")?;
             }
-            scale[i] = checked(
-                bound / self.viscosity_qr.r(i, i).abs(),
-                "unrepresentable Kelvin source scale",
-            )?;
+        } else {
+            let physical = self.solve_viscosity_root(residual.map(Dd::to_f64), true)?;
+            values[..6].copy_from_slice(&physical);
+            let qr = self.viscosity_qr.as_ref().expect("definite Kelvin factor");
+            for i in 0..6 {
+                let mut bound = magnitude[i] / self.viscosity_scale;
+                for (j, &previous) in scale.iter().take(i).enumerate() {
+                    bound += qr.r(j, i).abs() * previous;
+                }
+                scale[i] = checked(
+                    bound / qr.r(i, i).abs(),
+                    "unrepresentable Kelvin source scale",
+                )?;
+            }
         }
         for (j, memory) in q.iter().enumerate() {
             for axis in 0..6 {
@@ -249,8 +278,8 @@ impl PreparedTensorKelvinStressControl {
                     self.branch_rate_roots[j] * memory[axis],
                     "unrepresentable Maxwell heat coordinate",
                 )?;
-                values[6 + 6 * j + axis] = value;
-                scale[6 + 6 * j + axis] = value.abs();
+                values[rank + 6 * j + axis] = value;
+                scale[rank + 6 * j + axis] = value.abs();
             }
         }
         Ok((values, scale))
@@ -262,10 +291,25 @@ impl PreparedTensorKelvinStressControl {
         strain: &Voigt,
         q: &[Voigt],
         stress: &Voigt,
+        elastic_rate: Voigt,
         tolerance: f64,
     ) -> Result<Voigt> {
-        let rhs = core::array::from_fn(|i| -loss[i]);
-        let rate = self.solve_viscosity_root(rhs, false)?;
+        let rate = if let Some(constraint) = &self.constrained {
+            let mut rate = elastic_rate.map(Dd::from_f64);
+            for (direction, &value) in constraint.strain_loss.iter().zip(loss) {
+                for axis in 0..6 {
+                    rate[axis] = rate[axis] - Dd::from_f64(direction[axis]) * Dd::from_f64(value);
+                }
+            }
+            let rate = rate.map(Dd::to_f64);
+            if !finite(&rate) {
+                return Err(invalid("unrepresentable constrained Kelvin strain rate"));
+            }
+            rate
+        } else {
+            let rhs = core::array::from_fn(|i| -loss[i]);
+            self.solve_viscosity_root(rhs, false)?
+        };
         let kelvin = self
             .model
             .kv_pa_s()
@@ -303,9 +347,11 @@ impl PreparedTensorKelvinStressControl {
 
     /// Advance an exact stress ramp, hold, unloading or recovery interval.
     ///
-    /// SPD Kelvin viscosity makes strain continuous: a zero-duration stress
-    /// jump changes only stress and its compatible strain rate, with zero work
-    /// or heat. Positive-duration ramps integrate continuous work and total
+    /// Positive-definite viscosity makes strain continuous. With semidefinite
+    /// viscosity, a stress jump also moves its elastic null directions, retaining
+    /// every branch's viscous strain; its work equals the storage change, with
+    /// zero heat. The reported jump rate is the compatible subsequent hold rate.
+    /// Positive-duration ramps integrate continuous work and total
     /// Kelvin/Maxwell heat independently. Conservative whole-path strain bounds
     /// can refuse a path whose exact maximum would fit the material limit.
     ///
@@ -337,10 +383,16 @@ impl PreparedTensorKelvinStressControl {
         }
         let n = self.rates.len();
         let tolerance = 8192.0 * f64::EPSILON * n as f64;
-        if duration_s == 0.0 {
+        if duration_s == 0.0 && self.constrained.is_none() {
             let (loss, _) = self.original_loss(&history.strain, &history.q, &target)?;
-            let rate =
-                self.endpoint_rate(&loss, &history.strain, &history.q, &target, tolerance)?;
+            let rate = self.endpoint_rate(
+                &loss,
+                &history.strain,
+                &history.q,
+                &target,
+                [0.0; 6],
+                tolerance,
+            )?;
             poll(&mut cancelled)?;
             history.stress = target;
             return Ok(TensorKelvinStressRampStep {
@@ -362,10 +414,14 @@ impl PreparedTensorKelvinStressControl {
         responses
             .try_reserve_exact(n)
             .map_err(|_| invalid("Kelvin ramp allocation refused"))?;
-        let mut increment = [Dd::ZERO; 6];
-        let mut first_increment = [Dd::ZERO; 6];
-        let mut lower = [0.0; 6];
-        let mut upper = [0.0; 6];
+        let elastic = match &self.constrained {
+            Some(constraint) => constraint.compliance(&delta)?,
+            None => [0.0; 6],
+        };
+        let mut increment = elastic.map(Dd::from_f64);
+        let mut first_increment = elastic.map(|v| Dd::from_f64(0.5 * v));
+        let mut lower = elastic.map(|v| v.min(0.0));
+        let mut upper = elastic.map(|v| v.max(0.0));
         let mut heat = Dd::ZERO;
         for mode in 0..n {
             poll(&mut cancelled)?;
@@ -422,12 +478,17 @@ impl PreparedTensorKelvinStressControl {
         let de = increment.map(Dd::to_f64);
         let strain = core::array::from_fn(|i| history.strain[i] + de[i]);
         let mut dq = vec![[0.0; 6]; history.q.len()];
+        if self.constrained.is_some() {
+            for (j, branch) in self.model.branches().iter().enumerate() {
+                dq[j] = apply(&branch.resolved_gram_rows(&self.model.factors[j]), &elastic);
+            }
+        }
         let mut q = history.q.clone();
-        for row in 0..n - 6 {
+        for row in 0..6 * history.q.len() {
             if row % 6 == 0 {
                 poll(&mut cancelled)?;
             }
-            let mut change = Dd::ZERO;
+            let mut change = Dd::from_f64(dq[row / 6][row % 6]);
             for (mode, response) in responses.iter().enumerate() {
                 change = change
                     + Dd::from_f64(
@@ -517,7 +578,13 @@ impl PreparedTensorKelvinStressControl {
                 ));
             }
         }
-        let rate = self.endpoint_rate(&actual_loss, &strain, &q, &target, tolerance)?;
+        let elastic_rate = if duration_s > 0.0 {
+            elastic.map(|v| v / duration_s)
+        } else {
+            [0.0; 6]
+        };
+        let rate =
+            self.endpoint_rate(&actual_loss, &strain, &q, &target, elastic_rate, tolerance)?;
         poll(&mut cancelled)?;
         let report = TensorKelvinStressRampStep {
             stress,

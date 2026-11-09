@@ -9,7 +9,7 @@ impl PreparedTensorKelvinStressControl {
     /// constitutive operator once. Preparation does not advance the history.
     ///
     /// # Errors
-    /// Missing or singular Kelvin viscosity, exceeded dimension/storage/work
+    /// Missing or zero Kelvin viscosity, exceeded dimension/storage/work
     /// budgets, unresolved original factors, unrepresentable rates, cancellation.
     #[allow(clippy::too_many_lines)] // One bounded preparation of the original full operator.
     pub fn new(
@@ -41,14 +41,20 @@ impl PreparedTensorKelvinStressControl {
         let kelvin_factor = model
             .kv_factor
             .as_ref()
-            .ok_or_else(|| invalid("stress control requires an SPD Kelvin viscosity tensor"))?;
+            .ok_or_else(|| invalid("stress control requires a nonzero Kelvin viscosity tensor"))?;
         // The original PSD owner leaves zero columns for missing dissipative
         // directions. Rotation preserves those columns; do not promote a
         // numerically tiny QR pivot of a rank-deficient tensor to viscosity.
-        if (0..6).any(|j| kelvin_factor.iter().all(|row| row[j] == 0.0)) {
+        let columns: Vec<_> = (0..6)
+            .filter(|&j| kelvin_factor.iter().any(|row| row[j] != 0.0))
+            .collect();
+        if columns.is_empty() {
             return Err(invalid(
-                "singular Kelvin viscosity requires a constrained stress controller",
+                "zero Kelvin viscosity uses the Maxwell stress controller",
             ));
+        }
+        if columns.len() < 6 {
+            return Self::prepare_semidefinite(history, &columns, &mut cancelled);
         }
         let viscosity_scale = kelvin_factor
             .iter()
@@ -70,8 +76,9 @@ impl PreparedTensorKelvinStressControl {
         }
         let mut prepared = Self {
             model: Arc::clone(model),
-            viscosity_qr,
+            viscosity_qr: Some(viscosity_qr),
             viscosity_scale,
+            constrained: None,
             branch_rate_roots: Vec::new(),
             rates: Vec::new(),
             left_modes: Vec::new(),
@@ -106,6 +113,22 @@ impl PreparedTensorKelvinStressControl {
                 factor[column * n + column] = root;
             }
         }
+        prepared.prepare_modes(factor, n, None, &mut cancelled)?;
+        Ok(prepared)
+    }
+
+    // The same native loss factor and exact scalar ramps serve both viscosity
+    // ranks. `energy_basis` embeds constrained dynamic coordinates into the
+    // complete original equilibrium/Maxwell state; definite viscosity is the
+    // identity case and keeps its established arithmetic.
+    #[allow(clippy::too_many_lines)] // One native factor preparation and original-source checks.
+    pub(super) fn prepare_modes(
+        &mut self,
+        mut factor: Vec<f64>,
+        n: usize,
+        energy_basis: Option<&[f64]>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<()> {
         let scale = factor.iter().fold(0.0_f64, |s, v| s.max(v.abs()));
         if !scale.is_finite() || scale <= 0.0 {
             return Err(invalid("unrepresentable Kelvin relaxation scale"));
@@ -113,13 +136,14 @@ impl PreparedTensorKelvinStressControl {
         for value in &mut factor {
             *value /= scale;
         }
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         let decomposition = svd_jacobi(&factor, n, n);
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         let tolerance = 8192.0 * f64::EPSILON * n as f64;
-        prepared.memory_modes = zeros((n - 6) * n)?;
+        let memory = 6 * self.model.branches().len();
+        self.memory_modes = zeros(memory * n)?;
         for mode in 0..n {
-            poll(&mut cancelled)?;
+            poll(cancelled)?;
             let singular = decomposition.sigma[mode];
             if !singular.is_finite() || singular <= 0.0 {
                 return Err(invalid("Kelvin relaxation singular value is unresolved"));
@@ -160,22 +184,52 @@ impl PreparedTensorKelvinStressControl {
             if rate <= 0.0 {
                 return Err(invalid("Kelvin modal relaxation rate underflowed"));
             }
-            prepared.rates.push(rate);
+            self.rates.push(rate);
             // F^T U_i = sqrt(lambda_i) V_i makes this equal to
             // sqrt(lambda_i) G_eq^-1 V_i[0..6], without inverting G_eq.
-            prepared.strain_modes.push(prepared.solve_viscosity_root(
-                core::array::from_fn(|i| decomposition.u[i * n + mode]),
-                false,
-            )?);
-            for row in 0..n - 6 {
-                prepared.memory_modes[row * n + mode] = checked(
-                    rate_root * decomposition.v[(row + 6) * n + mode],
+            let strain_mode = if let Some(constraint) = &self.constrained {
+                let mut direction = [Dd::ZERO; 6];
+                for (row, loss) in constraint.strain_loss.iter().enumerate() {
+                    for axis in 0..6 {
+                        direction[axis] = direction[axis]
+                            + Dd::from_f64(loss[axis])
+                                * Dd::from_f64(decomposition.u[row * n + mode]);
+                    }
+                }
+                let result = direction.map(Dd::to_f64);
+                if !finite(&result) {
+                    return Err(invalid(
+                        "unrepresentable constrained Kelvin modal direction",
+                    ));
+                }
+                result
+            } else {
+                self.solve_viscosity_root(
+                    core::array::from_fn(|i| decomposition.u[i * n + mode]),
+                    false,
+                )?
+            };
+            self.strain_modes.push(strain_mode);
+            for row in 0..memory {
+                let direction = if let Some(basis) = energy_basis {
+                    let mut value = Dd::ZERO;
+                    for column in 0..n {
+                        value = value
+                            + Dd::from_f64(basis[(row + 6) * n + column])
+                                * Dd::from_f64(decomposition.v[column * n + mode]);
+                    }
+                    value.to_f64()
+                } else {
+                    decomposition.v[(row + 6) * n + mode]
+                };
+                self.memory_modes[row * n + mode] = checked(
+                    rate_root * direction,
                     "unrepresentable Maxwell modal rate direction",
                 )?;
             }
         }
-        prepared.left_modes = decomposition.u;
-        poll(&mut cancelled)?;
-        Ok(prepared)
+        self.left_modes = decomposition.u;
+        poll(cancelled)?;
+        Ok(())
     }
 }

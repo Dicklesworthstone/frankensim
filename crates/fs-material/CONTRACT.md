@@ -6066,22 +6066,35 @@ adjoint; a finite load still requires the primal domain and balance admission.
 
 `visco_tensor::kelvin_control::PreparedTensorKelvinStressControl` advances
 original tensor histories under stress ramps when the Kelvin viscosity is
-positive definite. Its complete passive operator includes all equilibrium and
+nonzero and positive semidefinite. Its complete passive operator includes all equilibrium and
 Maxwell energy coordinates; the existing QR/SVD owners prepare coupled loss
 coordinates without subtracting a large relaxed-equilibrium state. Exact Prony
 responses integrate strain, original memory, stress work and independent total
 Kelvin/Maxwell heat. Amplitudes are weighted before unresolved primitive
 integrals so representable physical increments survive weak and stiff limits.
-Stress jumps keep strain and memory continuous and do zero work; endpoint strain
-rate is reconstructed from the original constitutive equation. Original source,
+With positive-definite viscosity, stress jumps keep strain and memory continuous
+and do zero work. With directional viscosity, the exact original zero columns
+identify its elastic nullspace. Native orthogonal factors eliminate its algebraic
+stress constraints before preparing the same loss modes, with no positive
+viscosity floor or removal of weak positive directions. The original state retains
+six equilibrium coordinates plus every branch coordinate; its dynamic loss
+dimension is `rank(V) + 6*branches`. A stress jump moves only the elastic null
+directions and corresponding original branch spring strains, retains viscous
+memory, and does reversible storage work with exactly zero heat. Endpoint strain
+rate is reconstructed from the original constitutive equation, including the
+physical stress slope in elastic null directions; a jump reports its subsequent
+hold rate. Original source,
 local work/storage/heat and whole-path strain checks precede the atomic update.
 Preparation has explicit dimension/storage/work ceilings, with no dense
 factorization during a ramp. Six focused checks cover Kelvin and combined
 Maxwell/Kelvin closed forms, a noncommuting original-equation ODE ladder,
 rotation and loading switches, extreme rates and transactional refusals.
-Singular Kelvin tensors require a constrained differential/algebraic evolution
-and refuse; this API does not infer mixed control, derivatives or certified
-error bounds.
+Additional directional/shear-only checks cover exact jump and ramp work, weak
+positive directions beside strong directions, noncommuting original-equation
+DAE refinement, rotation, subdivision, history continuation and atomic refusals.
+Zero Kelvin viscosity remains with the existing Maxwell controller. Unresolved
+rank, factors or source balances refuse; this API does not infer mixed control,
+derivatives or certified error bounds.
 
 `PreparedTensorKelvinStressControl::advance_temperature_ramp` consumes the
 existing calibrated temperature schedule for physical-time stress loading.
@@ -6090,8 +6103,9 @@ same `a_T`; fixed equilibrium/branch stiffness and original memory remain
 unchanged. Each midpoint-frozen subinterval reuses the reference controller for
 `h/a_T`, with no factorization or fit. Stress interpolates in physical time;
 local work, storage changes and independent Kelvin/Maxwell heat accumulate
-without rescaling. The reported endpoint strain rate divides the reference
-rate by the actual final shift, rather than the last midpoint shift.
+without rescaling. The reported endpoint relaxation rate divides the reference
+hold rate by the actual final shift, rather than the last midpoint shift. The
+elastic-nullspace contribution retains the physical stress slope without scaling.
 The whole history publishes only after final-rate representability and final
 cancellation admission, including constant-temperature and zero-duration calls.
 Constant reference temperature retains the original response bits.
@@ -6103,7 +6117,9 @@ caloric feedback or thermal-state evolution is inferred. Focused regressions
 cover shifted-law/reference parity, endpoint-rate physics, noncommuting thermal
 reversals against an independent physical-coordinate ODE and refinement,
 original-memory continuation into strain control, and atomic late cancellation,
-applicability, budget, binding and physical-rate overflow refusals.
+applicability, budget, binding and physical-rate overflow refusals. Semidefinite
+checks also cover separately shifted-law parity, the independent elastic
+endpoint slope, noncommuting thermal DAE refinement and atomic jump-rate overflow.
 
 `TensorProny::step_with_mean` exposes that same Mandel update's endpoint
 stress, exact interval-mean stress, signed step work and independently integrated
