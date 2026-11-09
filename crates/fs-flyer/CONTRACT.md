@@ -2932,3 +2932,55 @@ under the same turbulent history, adaptive near/far replay, uncached affine
 stage observations, and joint work/spatial/boundary/cancellation refusal.
 This connection adds prescribed rigid wake motion in turbulence, not a bound
 circulation solver, a new turbulence closure, or aircraft force/energy claims.
+
+### Circulatory loads from actual articulated surface motion
+
+`partitioned::articulated::aerodynamics::LinkedLiftingSurfaces` binds existing
+`fs-wing::Panel` and `StripSpec` geometry to original native link indices.
+Each strip and all its chordwise rows are rigid in one link; the constructor
+checks complete panel ownership and prepares the original section frames.
+Panel/link counts retain the existing caps. Actual joint motion comes from
+the supplied `GeneralizedKinematics`, including inherited serial-joint motion;
+it is not represented by a change to a section polar alone.
+
+At each evaluation the native link poses transform bound endpoints, control
+points, normals and section axes into one common world Cartesian frame.
+The world fluid callback is sampled once at each front bound-row midpoint.
+Its incident velocity is the actual material-point velocity minus fluid
+velocity. In link coordinates this is `v_link - R^-1 U_world + omega_link × r`;
+the complete result is then rotated into world axes. Translational subtraction
+precedes the rotational contribution so common drift does not erase a small
+resolved rotational slip.
+
+The existing nonlinear normal-section owner solves all surfaces together.
+The caller supplies the common relative-air reference used by its original
+straight trailing legs and linear row split; actual local section velocities
+remain distinct from that reference. A fresh influence operator belongs to
+the current transformed geometry, and optional accepted circulation uses the
+same panel ownership. Positive local chordwise flow, original conditioning
+and nonlinear iteration limits remain authoritative.
+
+The native `CirculatoryWrenchAccumulator` applies every accepted panel force
+at its actual transformed bound midpoint and retains its moment about the
+owning link origin. The returned world wrenches go directly into
+`ArticulatedLoads::world_wrenches`; the original generalized map supplies joint
+efforts by virtual work. No additional hinge effort should be added for these
+same forces. The original nonlinear receipt, actual sample points and relative
+velocities are returned together. The receipt's `total_lift_n` remains its
+negative world-z projection, not a separately inferred wind-axis lift.
+
+This is a quasi-steady circulatory connection. It retains the native single
+incident vector per strip, including for multiple chordwise rows; it does not
+claim chord-resolved rotational aerodynamics. Profile or induced-drag closures,
+unsteady pressure, free-wake roll-up and fluid inertia are separate owners.
+Compose appropriate existing added-mass blocks and other external loads at the
+same stage and with the same physical ambient-flow interpretation. There is no
+new motion integrator, aerodynamic solver or exact energy-conservation claim.
+The callback is usable directly in the original articulated midpoint owner.
+Refusal/cancellation returns no partial load receipt and changes no input state;
+caller callback side effects remain caller-owned.
+
+`tests/articulated_circulation.rs` covers frozen native-solver/wrench parity,
+analytic material-point slip and generalized virtual work, world-frame and
+common-boost covariance, actual coupled midpoint joint-velocity feedback with
+the original linked fluid inertia, and geometry/flow/cancellation refusal.

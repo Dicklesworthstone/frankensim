@@ -36,6 +36,10 @@ pub mod contact;
 #[path = "articulated/actuation.rs"]
 pub mod actuation;
 
+/// Native lifting-surface circulation driven by the same moving link geometry.
+#[path = "articulated/aerodynamics.rs"]
+pub mod aerodynamics;
+
 /// Link cap for the compact aircraft coupling lane, including fixed links.
 pub const MAX_ARTICULATED_LINKS: usize = 256;
 
