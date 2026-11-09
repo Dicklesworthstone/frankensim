@@ -53,12 +53,12 @@ mod radial;
 mod shared;
 
 pub use exchange::SolutionMoistureExchange;
-pub(super) use pair::advance_pair;
 pub use pair::{
     MoistureSolutionPort, PairedCartesianSolutionMoistureCandidate,
     PairedRadialSolutionMoistureCandidate, PairedSolutionMoistureCandidate,
     PairedSolutionMoistureSolve, PairedSolutionMoistureStep, SolutionMoistureFace,
 };
+pub(super) use pair::{advance_baths, advance_pair};
 
 // These are views of the original physical fields and their native receipts;
 // they carry no vapor inventory or atmospheric solver state.

@@ -25,6 +25,8 @@ use crate::moisture::{
 pub use deforming::{
     MoistureSpatialAtmosphereCandidate, MoistureSpatialAtmosphereControls,
     MoistureSpatialAtmosphereReport, MoistureSpatialDiffusionReport,
+    MoistureSpatialPairedSolutionCandidate, MoistureSpatialPairedSolutionControls,
+    MoistureSpatialPairedSolutionReport,
 };
 
 /// Mechanical source choices for exactly one layer in original stack order.

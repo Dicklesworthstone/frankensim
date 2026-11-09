@@ -7147,6 +7147,49 @@ exchange, sealed internal diffusion with kinetic dissolution, and source/budget
 refusals. Rust parsing and formatting were checked; these new integration
 regressions have not been executed in the full dependency build.
 
+### Finite solution baths with compatible swelling feedback
+
+`MoistureLayeredSolid::advance_spatial_diffusion_paired_solutions` couples two
+independently finite aqueous inventories to the original nonlinear spatial
+moisture/solid transaction. Each exterior face explicitly selects one bath or
+is sealed; a sealed physical transfer law cannot be opened by an assignment.
+The original layered constructor supplies common temperature and material
+activity support. Bath temperature, solvent molar mass and exposed source
+context are admitted before native transport, and each bath retains its own
+solute totals, nonideal activity law and optional equilibrium/kinetic phases.
+
+The original paired solvent roots now share one private callback transaction
+with ordinary slab/Cartesian/radial paired transport. The first-bath inner and
+second-bath outer order is unchanged. Every activity pair restarts the original
+field and phase stocks. Native compatible mechanics evaluates source swelling,
+elasticity, reference wet inertia and the signed prestressed vibration pencil.
+The same candidate's actual inverse axial stretch squared enters bulk flux;
+its actual current area enters finite surface/contact conductance. The dry
+skeleton and water capacity stay on their original reference inventory. Neither
+independent cell expansion nor a refitted diffusivity replaces these owners.
+
+Only each bath's assigned signed face transfers enter its solvent balance.
+Separate bath checks, field/face conservation, whole-system water increments
+and a compensated direct sum of represented cell/bath endpoint/start inventories
+must pass before either solution, the field or its actual solid state returns.
+One explicit transport-proposal cap covers all nested bath trials; a separate
+cumulative native-solid cap includes rejected geometric and bath proposals and
+is reserved before each solve. Source, geometry, work and cancellation failures
+publish no partial state.
+
+This remains first-order isothermal exchange through the equal-pressure
+vapor-equilibrium bridge, with current-frame scalar diffusivity and the existing
+small-strain separable-prism reduction. Shear, bending or taper beyond the
+specified geometry tolerance refuses. No immersed-liquid permeability, osmotic
+traction, chemical-potential stress feedback, displaced bath-vessel volume or
+thermal feedback is inferred; reservoir chemical work is outside the mechanical
+energy account. Seven authored G1/G3/G4 groups specify independent length/area
+flux balances, native source-driven shape/modal scaling, heterogeneous contact
+through-flow with finite crystals, zero-swelling compatibility, retained wet/dry
+histories, sealed kinetics and cumulative-work/source/cancellation refusals.
+All eight changed Rust files passed the pinned formatter/parser check; the
+integration groups remain unexecuted because dependencies block fs-couple.
+
 ### Adaptive heterogeneous slab and radial diffusion
 
 `MoistureLayeredSlab::advance_sdirk2_adaptive_to` and the backward-Euler and
