@@ -6,7 +6,8 @@ use crate::network::field::absorption::{CylinderLossOperator, admit_cells, obser
 use fs_math::c64::C64;
 use fs_math::dd::Dd;
 
-/// Cycle-mean physical losses integrated over one original cylindrical cell.
+/// Cycle-mean physical losses integrated over one original finite-volume cell.
+/// The historical carrier name is shared by cylinder and spherical-cone observers.
 /// Coherent peak p/U amplitudes are combined before the shared positive forms.
 /// Mechanical wall work is separate from gas losses; no signed residual is heat.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -154,21 +155,22 @@ impl<'fields, 'network> PreparedMolecularNetworkCylinderAbsorption<'fields, 'net
             mean,
             factors,
             cancelled,
-            |watts, total| MolecularNetworkCylinderAbsorption {
-                viscous_power_w: watts[0],
-                thermal_power_w: watts[1],
-                molecular_power_w: watts[2],
-                absorbed_power_w: if watts[3] == 0.0 {
-                    // Preserve the original gas total when the wall does no work.
-                    total
-                } else {
-                    (Dd::from_f64(watts[0])
-                        + Dd::from_f64(watts[1])
-                        + Dd::from_f64(watts[2]))
-                    .to_f64()
-                },
-                wall_work_w: watts[3],
-            },
+            physical_channels,
         )
+    }
+}
+
+pub(super) fn physical_channels(watts: [f64; 4], total: f64) -> MolecularNetworkCylinderAbsorption {
+    MolecularNetworkCylinderAbsorption {
+        viscous_power_w: watts[0],
+        thermal_power_w: watts[1],
+        molecular_power_w: watts[2],
+        absorbed_power_w: if watts[3] == 0.0 {
+            // Preserve the original gas total when the wall does no work.
+            total
+        } else {
+            (Dd::from_f64(watts[0]) + Dd::from_f64(watts[1]) + Dd::from_f64(watts[2])).to_f64()
+        },
+        wall_work_w: watts[3],
     }
 }

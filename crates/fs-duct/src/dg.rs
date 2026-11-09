@@ -437,7 +437,7 @@ impl LglRule {
 
 /// Compute an $n$-point Gauss–Legendre rule on $[-1, 1]$ (for exact variable-area mass matrices
 /// and continuous $L^2$ error norms).
-fn gauss_legendre_rule(n: usize) -> (Vec<f64>, Vec<f64>) {
+pub(crate) fn gauss_legendre_rule(n: usize) -> (Vec<f64>, Vec<f64>) {
     let mut nodes = vec![0.0; n];
     let mut weights = vec![0.0; n];
     let half = n.div_ceil(2);

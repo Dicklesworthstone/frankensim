@@ -13,6 +13,7 @@ use fs_math::c64::C64;
 use fs_thermochem::SpeciesId;
 
 mod absorption;
+mod cone_absorption;
 mod fields;
 mod mechanical_wall;
 

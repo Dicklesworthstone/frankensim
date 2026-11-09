@@ -13,7 +13,7 @@
 use super::*;
 use fs_math::dd::Dd;
 
-/// One original cylindrical material point, retained at field preparation.
+/// One original circular constitutive sample, retained at field preparation.
 /// The material, wall measure, Cp and wave are from the same native query.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MolecularCylinder<'source> {
@@ -27,6 +27,17 @@ pub(crate) struct MolecularCylinder<'source> {
     // Same queried mechanical surface law used in the retained composed wave.
     // Positive real part is wall work, not an additional gas heat mechanism.
     pub(crate) mechanical_admittance_per_metre: C64,
+}
+
+/// Geometry and the same frozen radial sample of one native spherical slice.
+/// The acoustic specific coefficients are constant on this slice; their
+/// volume-flow normalization follows its actual varying cross-section.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MolecularCone<'source> {
+    pub(crate) inlet_radius_m: f64,
+    pub(crate) outlet_radius_m: f64,
+    pub(crate) length_m: f64,
+    pub(crate) original: MolecularCylinder<'source>,
 }
 
 impl MolecularCylinder<'_> {

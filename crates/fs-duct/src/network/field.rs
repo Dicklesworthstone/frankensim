@@ -775,7 +775,11 @@ impl PreparedNetworkFields {
         Ok(())
     }
 
-    fn parts(&self, row: usize, excitation: &[C64]) -> Result<[[Dd; 2]; 2], DuctError> {
+    pub(in crate::network) fn parts(
+        &self,
+        row: usize,
+        excitation: &[C64],
+    ) -> Result<[[Dd; 2]; 2], DuctError> {
         let count = excitation.len();
         let p = dot_parts(&self.pressure[row * count..(row + 1) * count], excitation);
         let q = dot_parts(&self.flow[row * count..(row + 1) * count], excitation);

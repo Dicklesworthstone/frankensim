@@ -1,5 +1,6 @@
 //! Original molecular branch fields from the same loaded graph inverse.
 
+use super::cone_absorption::ConeSlice;
 use super::*;
 use crate::molecular::local::absorption::MolecularCylinder;
 use crate::molecular::spatial::PreparedMolecularSpatial;
@@ -34,6 +35,8 @@ pub struct PreparedMolecularNetworkFields<'network> {
     // Only cylinders with retained probes, bounded by MAX_FIELD_PROBES. The
     // exact Cp/wave are cached; material and radial spectra remain borrowed.
     cylinders: BTreeMap<String, BTreeMap<usize, MolecularCylinder<'network>>>,
+    // Each probe retains at most its two adjacent ORIGINAL spherical slices.
+    pub(super) cones: BTreeMap<String, BTreeMap<(usize, usize), ConeSlice<'network>>>,
 }
 
 impl PreparedMolecularNetworkFields<'_> {
@@ -194,12 +197,14 @@ impl MolecularNetwork {
             .expect("loaded frequency preparation completed");
         let mut cylinders: BTreeMap<String, BTreeMap<usize, MolecularCylinder<'_>>> =
             BTreeMap::new();
+        let mut cones: BTreeMap<String, BTreeMap<(usize, usize), ConeSlice<'_>>> = BTreeMap::new();
         for (index, location) in fields.locations().iter().enumerate() {
             poll(&mut cancelled, index)?;
             let segment = match location.probe.section {
                 crate::network::field::NetworkFieldSection::Inlet { segment }
                 | crate::network::field::NetworkFieldSection::Outlet { segment }
-                | crate::network::field::NetworkFieldSection::Cylinder { segment, .. } => segment,
+                | crate::network::field::NetworkFieldSection::Cylinder { segment, .. }
+                | crate::network::field::NetworkFieldSection::Cone { segment, .. } => segment,
                 _ => continue,
             };
             if let Some(cylinder) = cached[&location.probe.edge_id].cylinder(segment) {
@@ -209,12 +214,60 @@ impl MolecularNetwork {
                     .entry(segment)
                     .or_insert(cylinder);
             }
+            let edge = self
+                .network
+                .edges
+                .iter()
+                .find(|edge| edge.id == location.probe.edge_id)
+                .expect("original probe edge was admitted");
+            if let Segment::Cone { length, .. } = edge.duct.segments[segment] {
+                let x = match location.probe.section {
+                    crate::network::field::NetworkFieldSection::Inlet { .. } => 0.0,
+                    crate::network::field::NetworkFieldSection::Outlet { .. } => length,
+                    crate::network::field::NetworkFieldSection::Cone { offset_m, .. } => offset_m,
+                    _ => unreachable!("only original cone probes reach cone retention"),
+                };
+                let original = &cached[&location.probe.edge_id];
+                let before = original.segment_boundaries[segment];
+                let count = original.segment_boundaries[segment + 1] - before;
+                // Same physical cuts as the native field owner, including
+                // both sides of a cut without an epsilon-based identity test.
+                let (mut lo, mut hi) = (0, count);
+                while lo + 1 < hi {
+                    let mid = lo + (hi - lo) / 2;
+                    if length * (mid as f64 / count as f64) <= x {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                for slice in [lo.checked_sub(1), Some(lo)].into_iter().flatten() {
+                    let start_m = length * (slice as f64 / count as f64);
+                    let end_m = length * ((slice + 1) as f64 / count as f64);
+                    if x < start_m || x > end_m {
+                        continue;
+                    }
+                    let native = original
+                        .cone(before + slice)
+                        .expect("original cone is a spherical wave block");
+                    cones
+                        .entry(edge.id.clone())
+                        .or_default()
+                        .entry((segment, slice))
+                        .or_insert(ConeSlice {
+                            start_m,
+                            end_m,
+                            native,
+                        });
+                }
+            }
         }
         poll(&mut cancelled, fields.locations().len())?;
         Ok(PreparedMolecularNetworkFields {
             network: self,
             fields,
             cylinders,
+            cones,
         })
     }
 }

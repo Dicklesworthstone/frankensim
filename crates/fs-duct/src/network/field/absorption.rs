@@ -319,7 +319,29 @@ pub(in crate::network) fn observe_channels<const N: usize, T>(
     operators: &[CylinderLossOperator<N>],
     mean: Option<&[C64]>,
     factors: &[&[C64]],
+    cancelled: impl FnMut() -> bool,
+    output: impl FnMut([f64; N], f64) -> T,
+) -> Result<Vec<T>, DuctError> {
+    observe_loss_forms(
+        fields,
+        cells.len(),
+        mean,
+        factors,
+        cancelled,
+        |index, values| operators[index].channels(fields, &cells[index], values),
+        output,
+    )
+}
+
+/// Same canonical-source contractions and positive factor sum for native
+/// cylinder and spherical-cone forms. The supplied form owns its geometry.
+pub(in crate::network) fn observe_loss_forms<const N: usize, T>(
+    fields: &PreparedNetworkFields,
+    count: usize,
+    mean: Option<&[C64]>,
+    factors: &[&[C64]],
     mut cancelled: impl FnMut() -> bool,
+    mut channels: impl FnMut(usize, &[C64]) -> Result<[Dd; N], DuctError>,
     mut output: impl FnMut([f64; N], f64) -> T,
 ) -> Result<Vec<T>, DuctError> {
     poll(&mut cancelled, 0)?;
@@ -332,16 +354,16 @@ pub(in crate::network) fn observe_channels<const N: usize, T>(
     for values in factors {
         fields.validate_excitation(values)?;
     }
-    let mut result = Vec::with_capacity(cells.len());
-    for (index, (cell, operator)) in cells.iter().zip(operators).enumerate() {
+    let mut result = Vec::with_capacity(count);
+    for index in 0..count {
         poll(&mut cancelled, index)?;
         let mut watts = [Dd::ZERO; N];
         if let Some(values) = mean {
-            watts = operator.channels(fields, cell, values)?;
+            watts = channels(index, values)?;
         }
         for (factor, values) in factors.iter().enumerate() {
             poll(&mut cancelled, factor)?;
-            let extra = operator.channels(fields, cell, values)?;
+            let extra = channels(index, values)?;
             for channel in 0..N {
                 watts[channel] = watts[channel] + extra[channel];
             }
@@ -362,7 +384,7 @@ pub(in crate::network) fn observe_channels<const N: usize, T>(
 }
 
 impl<const N: usize> CylinderLossOperator<N> {
-    fn channels(
+    pub(in crate::network) fn channels(
         &self,
         fields: &PreparedNetworkFields,
         cell: &NetworkCylinderAbsorptionCell,
@@ -413,13 +435,13 @@ impl<const N: usize> CylinderLossOperator<N> {
     }
 }
 
-fn multiply(z: [Dd; 2], w: C64) -> [Dd; 2] {
+pub(in crate::network) fn multiply(z: [Dd; 2], w: C64) -> [Dd; 2] {
     let re = Dd::from_f64(w.re);
     let im = Dd::from_f64(w.im);
     [z[0] * re - z[1] * im, z[0] * im + z[1] * re]
 }
 
-fn divide(z: [Dd; 2], w: C64) -> [Dd; 2] {
+pub(in crate::network) fn divide(z: [Dd; 2], w: C64) -> [Dd; 2] {
     let scale = w.re.abs().max(w.im.abs());
     let re = Dd::from_f64(w.re / scale);
     let im = Dd::from_f64(w.im / scale);
@@ -431,6 +453,6 @@ fn divide(z: [Dd; 2], w: C64) -> [Dd; 2] {
     ]
 }
 
-fn norm_squared(z: [Dd; 2]) -> Dd {
+pub(in crate::network) fn norm_squared(z: [Dd; 2]) -> Dd {
     z[0] * z[0] + z[1] * z[1]
 }

@@ -2458,8 +2458,10 @@ mean caloric deposition or transport between gas and walls. The existing `absorb
 independently positive gas sum. `wall_work_w` separately records mechanical
 work delivered to a bound wall; `total_removed_power_w()` adds gas and wall
 work. End loads and numerical loss are excluded from both physical channels.
-Cone/profile cells, probe pairs from different cylinders, reversed or invalid pairs,
-unsupported coefficients, excessive cell/factor work and cancellation refuse.
+This cylinder method refuses cone/profile cells, probe pairs from different
+cylinders, reversed or invalid pairs, unsupported coefficients, excessive
+cell/factor work and cancellation. Spherical-cone cells have the separate
+source-retaining method below.
 An optional absorption refusal leaves the admitted pressure/flow field usable.
 
 `src/network/molecular/tests/absorption.rs` checks the original series/shunt
@@ -2470,6 +2472,67 @@ limits, geometry/source/budget refusals and cancellation. These are synthetic
 implementation fixtures, not empirical gas validation. Rust formatting/parser
 and whitespace checks passed; native execution remains pending because the
 host cannot build the actual pinned dependency graph within its resources.
+
+#### Positive spatial losses in original molecular spherical cones
+
+`PreparedMolecularNetworkFields::prepare_cone_absorption` binds pairs of
+existing probes contained in one original spherical-wave slice. A whole
+native cone is covered by cells at its original slice cuts; crossing an
+unprobed cut refuses. Each probe retains at most its two adjacent original
+slice records. The source network, exact Cp, diffusion spectra, composed wave,
+mechanical wall admittance and original midpoint radius remain the owners.
+There is no new graph factorization, material query or radial eigensolve.
+The returned cells retain authored coordinates, slice identity, actual endpoint
+radii and frustum volume; equal endpoints give exact zero. Overlap is explicit
+and neither powers nor cells are automatically summed or thermally deposited.
+
+For the native exp(-i omega t) spherical solution, define
+`q=r*p/r_ref`, `Z_ref=z_specific/A_ref` and `alpha=s/(i*k*r)`.
+The normalized flow is
+`U*r_ref/r=[(1-alpha)*F*exp(i*k*x)-(1+alpha)*B*exp(i*k*(L-x))]/Z_ref`.
+Both wave amplitudes are anchored at their respective cell endpoints, so no
+growing reverse propagation is evaluated. The existing positive analytic
+pressure-wave integral supplies Fourier, molecular and mechanical-wall forms
+exactly for this native slice. Viscosity includes the spherical induction
+term; replacing it by a uniform-cylinder velocity form is not valid.
+Specific constitutive coefficients remain frozen at the ORIGINAL slice radius.
+Their area scaling, including the effective mechanical shunt, is the scaling
+of that original spherical approximation, not a newly evaluated pointwise
+wall law. Refining observation quadrature does not refine the native radial
+model, cone slices, reservoir law or locally reacting wall approximation.
+
+The viscous Gram form reuses the native Gauss-Legendre rule with positive
+four-node panels. The initial panel count resolves `|k|h<=1` and relative
+radius change at most one half; successive panel doubling must meet the
+caller tolerance. `ConeAbsorptionControls` caps cells, panels per cell and
+all node evaluations, including discarded coarse rules. Exhaustion, unresolved
+quadrature, cancellation or an unrepresentable positive factor refuses without
+publishing partial output. The accepted DD positive factor has constant-size
+warm work. Zero viscosity bypasses quadrature exactly; the native uniform-cone
+limit uses the existing analytic cylinder form.
+
+`ConeAbsorptionQuadrature::operator_change_m` is twice the maximum change of
+a diagonal or COMPLEX off-diagonal Gram entry. Multiplying it by
+`|F/Z_ref|^2+|B/Z_ref|^2` bounds the change between the last two integrated
+velocity forms. This is a matrix-scale refinement estimate, not a certified
+error enclosure or a relative accuracy promise for a nearly cancelling
+excitation. The report retains panel/evaluation counts and relative change.
+
+The existing coherent source/factor contraction and historical
+`MolecularNetworkCylinderAbsorption` channel carrier are shared. Only viscous
+loss is direct caloric heat; Fourier/molecular availability and mechanical
+wall work remain separate. Pressure/flow work differences are independent
+checks, never the source of a positive loss channel. Magnus profiles still
+require their own native within-panel fields and spatial forms.
+
+Three tests in `src/network/molecular/tests/cone_absorption.rs` cover independent
+widening/narrowing spherical fields and positive spatial work with induction,
+native slice partitions and coherent factors with retained material identity,
+and exact-zero/opaque limits plus work/domain/cancellation refusal and retry.
+They are manufactured implementation fixtures, not empirical validation.
+Rust formatting/parser and whitespace checks passed; native Cargo execution
+was unavailable because the original dependency graph lacks required sibling
+manifests. Source review is not a native runtime result.
 
 #### Reciprocal material-wall loading on original molecular networks
 

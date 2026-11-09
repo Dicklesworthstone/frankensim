@@ -37,6 +37,11 @@ mod absorption;
 pub use absorption::{
     MolecularNetworkCylinderAbsorption, PreparedMolecularNetworkCylinderAbsorption,
 };
+mod cone_absorption;
+pub use cone_absorption::{
+    ConeAbsorptionControls, ConeAbsorptionQuadrature, MolecularNetworkConeAbsorptionCell,
+    PreparedMolecularNetworkConeAbsorption,
+};
 
 /// Original molecular law and explicit diffusion/geometry resolution for one
 /// authored graph edge. The state's gas must equal that edge's original media
@@ -173,7 +178,9 @@ impl MolecularNetwork {
                 return Err(bad("molecular network wall names an unknown edge").into());
             }
             if media.edge_wall(&id).is_some() {
-                return Err(bad("molecular network custom wall overlaps an original media pin").into());
+                return Err(
+                    bad("molecular network custom wall overlaps an original media pin").into(),
+                );
             }
             if mechanical.insert(id, wall).is_some() {
                 return Err(bad("molecular network mechanical wall identity is duplicated").into());
