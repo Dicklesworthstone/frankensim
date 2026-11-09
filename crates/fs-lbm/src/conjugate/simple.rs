@@ -101,6 +101,7 @@ use super::{ChtError, finite, finite_positive, poll};
 use crate::d3q19::Face3;
 
 mod momentum_reconstruction;
+mod species;
 pub mod sgs;
 pub mod viscous_heat;
 pub use momentum_reconstruction::MomentumReconstruction;

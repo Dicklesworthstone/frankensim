@@ -932,6 +932,50 @@ refinement. The original donor advection followed by diffusion remains an
 operator split with first-order overall accuracy; second order refers only
 to the frozen diffusion sweep composition.
 
+### Conservative multicomponent turbulent mixing
+
+`MaterialAdvectionStep::diffuse_species::<N>` extends the same accepted-carrier
+diffusion owner to 1..=128 constituents sharing a common diffusivity. Each
+original constituent inventory evolves independently under
+`j_k = -rho D grad(Y_k)`. One prepared face conductance and exponential factor
+serve every constituent. The original binary entry and trace-safe complementary
+arithmetic remain available. All components retain separate mass-defect budgets;
+the sum is audited against the immutable accepted carrier, with no clipping,
+normalization or reconstructed remainder species.
+
+`FvFlow::diffuse_turbulent_species` consumes the actual momentum eddy viscosity
+from the original LVEL or transient SGS flow, using an explicit positive
+turbulent Schmidt number: `D_t = nu_t / Sc_t`. This is the gradient-diffusion
+mass-flux closure in NASA/TM-2022-0008776, equation (46). The thermal Prandtl
+number and LVEL heat-wall secant do not select species transport. Source-resolved
+molecular viscosity remains with the momentum owner. The original accepted
+mass divided by native cell volume supplies density, including graded grids and
+spatial density jumps. Coefficients are frozen for the requested mixing interval.
+
+The common face map preserves each species' global mass and the cell carrier
+partition to the caller's declared budgets. Uniform mass fractions are
+stationary at variable density; zero eddy viscosity is an exact identity.
+Exterior and solid faces are impermeable to this diffusion component, while
+advective inlet/backflow composition remains with `advect_species`. Work is
+`O(N * (cells + faces * substeps))`, storage `O(N * cells + faces)`;
+the checked component-work count and temporary diffusivity buffer are included
+in the work/storage account. Cancellation or failed admission publishes no
+partial inventory and does not modify the carrier or flow.
+
+G0/G1/G3 regressions cover a four-species analytic pair on graded unequal-density
+cells, trace transport and species permutation, the common-diffusivity Neumann
+mode's second-order temporal refinement, null controls and resource refusals.
+The native transient Smagorinsky-to-three-species test exercises the actual
+momentum closure and accepted material flow. Separate coupling checks establish
+Schmidt scaling, independence from the heat-wall policy and refusal atomicity.
+
+This is an isothermal common-diffusivity mixing component. It does not supply
+unequal molecular diffusion, partial-enthalpy transport, reaction-rate closure,
+scalar variance or a species wall function. Matching original physical grid
+widths, flow mask and the flow epoch remains the caller's responsibility. The
+original turbulence model's applicability and resolution limits remain in force.
+
+
 ### Native open 3D local SGS momentum and heat
 
 `lattice3::open_boundaries::sgs` prepares Smagorinsky, WALE or Vreman
