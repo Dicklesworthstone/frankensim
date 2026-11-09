@@ -14,6 +14,9 @@
 /// Finite dissolved-gas exchange with an original gas inventory and calorics.
 pub mod dissolved_gas;
 
+/// Original saturated-water calorics and analytic tangents for phase exchange.
+pub mod vapor;
+
 use crate::MaterialError;
 use crate::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use crate::fluid_transport::{
