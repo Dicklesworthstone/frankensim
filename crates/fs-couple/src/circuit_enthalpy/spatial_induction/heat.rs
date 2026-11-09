@@ -203,6 +203,63 @@ pub fn heat_assembly_candidate<'t, 'm, A: HeatAssembly + ?Sized, C: SpatialCondu
     assembly: WeightedAssemblyLimits,
     initial_energy_increments_j: &[f64],
 ) -> Result<SpatialInductionThermalCandidate<'t, 'm, A::Sample, C>, HeatError<A::Error>> {
+    heat_assembly_boundary_candidate(
+        provider, cx, thermal, target_s, field, endpoint_current_a_m2, velocity_m_s, None,
+        regions, volume_tolerance_m3, bindings, controls, field_controls, assembly,
+        initial_energy_increments_j,
+    )
+}
+
+/// Drive an external tangential A history while the same complete heat assembly
+/// resolves conductivity, magnetic storage and all thermal transport. Boundary
+/// reaction work is an external electromagnetic supply, not deposited heat.
+/// The original fixed-geometry, source-support and common-history admissions
+/// of [`heat_assembly_candidate`] remain in force.
+#[allow(clippy::too_many_arguments)]
+pub fn heat_assembly_with_boundary_candidate<
+    't, 'm, A: HeatAssembly + ?Sized, C: SpatialConductorMaterial,
+>(
+    provider: &A,
+    cx: &Cx<'_>,
+    thermal: &DepositionSimulation<'t>,
+    target_s: f64,
+    field: &SpatialInduction<'m, C>,
+    endpoint_current_a_m2: &[[f64; 3]],
+    velocity_m_s: &[[f64; 3]],
+    endpoint_boundary: &VectorMagneticBoundary,
+    regions: &[SpatialMagneticRegion],
+    volume_tolerance_m3: f64,
+    bindings: &[SpatialMagneticThermalLaw],
+    controls: CircuitEnthalpySolve,
+    field_controls: SpatialInductionControls,
+    assembly: WeightedAssemblyLimits,
+    initial_energy_increments_j: &[f64],
+) -> Result<SpatialInductionThermalCandidate<'t, 'm, A::Sample, C>, HeatError<A::Error>> {
+    heat_assembly_boundary_candidate(
+        provider, cx, thermal, target_s, field, endpoint_current_a_m2, velocity_m_s,
+        Some(endpoint_boundary), regions, volume_tolerance_m3, bindings, controls,
+        field_controls, assembly, initial_energy_increments_j,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn heat_assembly_boundary_candidate<'t, 'm, A: HeatAssembly + ?Sized, C: SpatialConductorMaterial>(
+    provider: &A,
+    cx: &Cx<'_>,
+    thermal: &DepositionSimulation<'t>,
+    target_s: f64,
+    field: &SpatialInduction<'m, C>,
+    endpoint_current_a_m2: &[[f64; 3]],
+    velocity_m_s: &[[f64; 3]],
+    endpoint_boundary: Option<&VectorMagneticBoundary>,
+    regions: &[SpatialMagneticRegion],
+    volume_tolerance_m3: f64,
+    bindings: &[SpatialMagneticThermalLaw],
+    controls: CircuitEnthalpySolve,
+    field_controls: SpatialInductionControls,
+    assembly: WeightedAssemblyLimits,
+    initial_energy_increments_j: &[f64],
+) -> Result<SpatialInductionThermalCandidate<'t, 'm, A::Sample, C>, HeatError<A::Error>> {
     let cancel = RefCell::new(|| cx.checkpoint().is_err());
     check(&cancel).map_err(native_error)?;
     let prepared = provider.prepared_heat_network();
@@ -222,6 +279,7 @@ pub fn heat_assembly_candidate<'t, 'm, A: HeatAssembly + ?Sized, C: SpatialCondu
         field,
         endpoint_current_a_m2,
         velocity_m_s,
+        endpoint_boundary,
         bindings,
         controls,
         field_controls,

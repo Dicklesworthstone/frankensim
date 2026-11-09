@@ -7,13 +7,16 @@
 //! once through the existing circuit/enthalpy residual. No torque or electrical
 //! loss is fitted from the thermal balance, and no history advances in a trial.
 //!
-//! Magnetic inductances, shaft inertias, pole pairs, bearing drag and geometry
-//! remain fixed. Only resistance changes, introducing no magnetic parameter
+//! Magnetic storage, shaft inertias, pole pairs, bearing drag and geometry
+//! remain fixed. An optional bounded magnetizing curve retains reversible core
+//! saturation through every thermal trial. Only resistance changes with
+//! temperature, introducing no magnetic parameter
 //! work. Material and thermal rates use the endpoint, so the coupled method is
 //! generally first order even though the native frozen-coefficient machine
 //! step is symmetric. Original source domains, thermal events and time-error
 //! refinement remain the caller's responsibility. This adds no skin effect,
-//! saturation, cage geometry, insulation failure or experimental validation.
+//! hysteresis, temperature-dependent magnetization, cage geometry, insulation
+//! failure or experimental validation.
 
 /// Complete source-owned contact, radiation, layer and coolant heat transfer.
 pub mod heat;
@@ -31,6 +34,7 @@ use super::{
 };
 use fs_material::conductor::ResolvedConductor;
 use fs_math::dd::Dd;
+use fs_phs::circuit::inductance::InductorFluxCurve;
 use fs_phs::circuit::induction::{
     InductionMotor, InductionMotorParameters, InductionOperatingPoint, InductionStep,
 };
@@ -72,6 +76,7 @@ pub struct MaterialInductionMotor {
     time_s: f64,
     state: [f64; 7],
     parameters: InductionMotorParameters,
+    magnetizing_curve: Option<InductorFluxCurve>,
     operating_point: InductionOperatingPoint,
     windings: [Arc<ResolvedConductor>; 2],
     winding_cells: [CellId; 2],
@@ -87,6 +92,11 @@ impl MaterialInductionMotor {
     }
     pub const fn parameters(&self) -> InductionMotorParameters {
         self.parameters
+    }
+    /// Original reversible magnetizing law, shared unchanged across thermal
+    /// trials and accepted steps. Its fixed source support is never extrapolated.
+    pub fn magnetizing_curve(&self) -> Option<&InductorFluxCurve> {
+        self.magnetizing_curve.as_ref()
     }
     pub const fn operating_point(&self) -> &InductionOperatingPoint {
         &self.operating_point
@@ -192,6 +202,15 @@ fn native(error: PreparedStepError) -> Error {
 }
 fn phs(error: PhsError) -> Error {
     native(error.into())
+}
+fn native_motor(
+    parameters: InductionMotorParameters,
+    curve: Option<&InductorFluxCurve>,
+) -> Result<InductionMotor, PhsError> {
+    match curve {
+        Some(curve) => InductionMotor::with_magnetizing_curve(parameters, curve.clone()),
+        None => InductionMotor::new(parameters),
+    }
 }
 fn material(error: MaterialNetworkError) -> Error {
     super::material(error).map_source(InductionThermalError::Material)
@@ -349,6 +368,33 @@ impl InductionThermalNetwork<'_> {
         parameters: InductionMotorParameters,
         cancelled: impl FnMut() -> bool,
     ) -> Result<MaterialInductionMotor, Error> {
+        self.bind_model(thermal, state, parameters, None, cancelled)
+    }
+
+    /// Bind the native reversible saturation law and both winding sources to
+    /// the same accepted flux/shaft state. The curve describes magnetizing
+    /// current versus magnetizing linkage, in the native power-invariant basis;
+    /// it is not a terminal self-inductance or a B-H curve without geometry.
+    /// Its constitutive energy remains magnetic storage, never a heat source.
+    pub fn bind_with_magnetizing_curve(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        state: [f64; 7],
+        parameters: InductionMotorParameters,
+        curve: InductorFluxCurve,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MaterialInductionMotor, Error> {
+        self.bind_model(thermal, state, parameters, Some(curve), cancelled)
+    }
+
+    fn bind_model(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        state: [f64; 7],
+        parameters: InductionMotorParameters,
+        curve: Option<InductorFluxCurve>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MaterialInductionMotor, Error> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
         self.admit(thermal)?;
@@ -360,6 +406,7 @@ impl InductionThermalNetwork<'_> {
             thermal,
             state,
             parameters,
+            curve,
             || {
                 let coefficients = prepared
                     .resolve(thermal, || (*cancel.borrow_mut())())
@@ -370,11 +417,13 @@ impl InductionThermalNetwork<'_> {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn bind_resolved<E: From<InductionThermalError>>(
         &self,
         thermal: &DepositionSimulation<'_>,
         state: [f64; 7],
         mut parameters: InductionMotorParameters,
+        magnetizing_curve: Option<InductorFluxCurve>,
         resolve: impl FnOnce() -> Result<[ResolvedConductor; 2], CircuitEnthalpyError<E>>,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<MaterialInductionMotor, CircuitEnthalpyError<E>> {
@@ -384,9 +433,10 @@ impl InductionThermalNetwork<'_> {
         let resistance = self.resistances(&windings).map_err(induction_error::<E>)?;
         parameters.stator_resistance_ohm = resistance[0];
         parameters.rotor_resistance_ohm = resistance[1];
-        let machine = InductionMotor::new(parameters)
+        let machine = native_motor(parameters, magnetizing_curve.as_ref())
             .map_err(phs)
             .map_err(induction_error::<E>)?;
+        parameters = machine.parameters();
         let operating_point = machine
             .operating_point(&state)
             .map_err(phs)
@@ -397,6 +447,7 @@ impl InductionThermalNetwork<'_> {
             time_s: thermal.time_s(),
             state,
             parameters,
+            magnetizing_curve,
             operating_point,
             windings: windings.map(Arc::new),
             winding_cells: self.winding_cells(),
@@ -416,8 +467,9 @@ impl InductionThermalNetwork<'_> {
     /// every thermal/Newton probe by rebinding only its four winding loss rows.
     /// Source selections, path geometry and resistance conversions stay pinned.
     /// Source/domain, event, energy, budget and cancellation refusals publish
-    /// neither machine nor caloric history. L, inertias, pole pairs and bearing
-    /// drag remain fixed; source-temperature dependence is not inferred for them.
+    /// neither machine nor caloric history. Leakage inductances, magnetizing
+    /// law, inertias, pole pairs and bearing drag remain fixed; source-temperature
+    /// dependence is not inferred for them.
     #[allow(clippy::too_many_arguments)]
     pub fn step_candidate<'t>(
         &self,
@@ -508,7 +560,7 @@ impl InductionThermalNetwork<'_> {
             )));
         }
         let machine = RefCell::new(
-            InductionMotor::new(motor.parameters)
+            native_motor(motor.parameters, motor.magnetizing_curve.as_ref())
                 .map_err(phs)
                 .map_err(induction_error::<E>)?
                 .prepare_controlled(controls.machine, controls.backtracking_halvings, || {
@@ -551,6 +603,7 @@ impl InductionThermalNetwork<'_> {
                     time_s: target_s,
                     state,
                     parameters,
+                    magnetizing_curve: motor.magnetizing_curve.clone(),
                     operating_point,
                     windings: windings.clone(),
                     winding_cells: motor.winding_cells,

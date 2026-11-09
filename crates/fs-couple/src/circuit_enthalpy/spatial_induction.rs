@@ -27,7 +27,8 @@ mod heat;
 #[cfg(feature = "magnetic-hysteresis")]
 pub use heat::hysteretic_heat_assembly_candidate;
 pub use heat::{
-    SpatialInductionHeatError, heat_assembly_candidate, nonlinear_heat_assembly_candidate,
+    SpatialInductionHeatError, heat_assembly_candidate, heat_assembly_with_boundary_candidate,
+    nonlinear_heat_assembly_candidate,
     nonlinear_thermal_heat_assembly_candidate,
 };
 
@@ -44,7 +45,7 @@ use super::{
 use fs_em::spatial::{
     SpatialMagneticError, SpatialMagneticMaterial,
     vector_potential::{
-        SpatialVectorMagnetostatics,
+        SpatialVectorMagnetostatics, VectorMagneticBoundary,
         induction::{
             SpatialInduction, SpatialInductionCandidate, SpatialInductionCell,
             SpatialInductionControls, SpatialInductionStep,
@@ -174,7 +175,7 @@ impl<'m, C: SpatialConductorMaterial> ThermalDriver for SpatialInductionCandidat
             heat_j: s.heat_j,
             numerical_dissipation_j: 0.0,
             stored_change_j: s.stored_after_j - s.stored_before_j - s.parameter_work_j,
-            supplied_j: s.impressed_work_j - s.mechanical_work_j,
+            supplied_j: s.impressed_work_j + s.magnetic_boundary_work_j - s.mechanical_work_j,
         }
     }
     fn into_parts(self) -> (Self::Model, Self::Step) {
@@ -306,6 +307,57 @@ impl SpatialMagneticThermalNetwork<'_> {
         initial_energy_increments_j: &[f64],
         cancelled: impl FnMut() -> bool,
     ) -> Result<SpatialInductionThermalCandidate<'t, 'm, MaterialNetworkSample, C>, Error> {
+        self.step_boundary_candidate(
+            thermal, target_s, field, endpoint_current_a_m2, velocity_m_s, None,
+            bindings, controls, field_controls, assembly, initial_energy_increments_j, cancelled,
+        )
+    }
+
+    /// Drive the original conductor by an external magnetic boundary history
+    /// while jointly solving its finite temperature and source coefficients.
+    /// The complete original tangential A support is prescribed at the endpoint
+    /// and interpolated linearly in physical time. Boundary reaction work is
+    /// external electromagnetic supply; only conductor-frame Ohmic and the
+    /// separately owned reversible material transfers reach caloric cells.
+    /// Successful publication retains both boundary and thermal history.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_boundary_candidate<'t, 'm, C: SpatialConductorMaterial>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        field: &SpatialInduction<'m, C>,
+        endpoint_current_a_m2: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        endpoint_boundary: &VectorMagneticBoundary,
+        bindings: &[SpatialMagneticThermalLaw],
+        controls: CircuitEnthalpySolve,
+        field_controls: SpatialInductionControls,
+        assembly: WeightedAssemblyLimits,
+        initial_energy_increments_j: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SpatialInductionThermalCandidate<'t, 'm, MaterialNetworkSample, C>, Error> {
+        self.step_boundary_candidate(
+            thermal, target_s, field, endpoint_current_a_m2, velocity_m_s, Some(endpoint_boundary),
+            bindings, controls, field_controls, assembly, initial_energy_increments_j, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_boundary_candidate<'t, 'm, C: SpatialConductorMaterial>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        field: &SpatialInduction<'m, C>,
+        endpoint_current_a_m2: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        endpoint_boundary: Option<&VectorMagneticBoundary>,
+        bindings: &[SpatialMagneticThermalLaw],
+        controls: CircuitEnthalpySolve,
+        field_controls: SpatialInductionControls,
+        assembly: WeightedAssemblyLimits,
+        initial_energy_increments_j: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SpatialInductionThermalCandidate<'t, 'm, MaterialNetworkSample, C>, Error> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
         let material_network = MaterialNetwork {
@@ -322,6 +374,7 @@ impl SpatialMagneticThermalNetwork<'_> {
             field,
             endpoint_current_a_m2,
             velocity_m_s,
+            endpoint_boundary,
             bindings,
             controls,
             field_controls,
@@ -353,6 +406,7 @@ impl SpatialMagneticThermalNetwork<'_> {
         field: &SpatialInduction<'m, C>,
         endpoint_current_a_m2: &[[f64; 3]],
         velocity_m_s: &[[f64; 3]],
+        endpoint_boundary: Option<&VectorMagneticBoundary>,
         bindings: &[SpatialMagneticThermalLaw],
         controls: CircuitEnthalpySolve,
         field_controls: SpatialInductionControls,
@@ -375,8 +429,19 @@ impl SpatialMagneticThermalNetwork<'_> {
             resolve_sources,
             sample,
             |_, _, materials, conductors, _| {
-                field
-                    .step_with_materials_candidate(
+                match endpoint_boundary {
+                    Some(boundary) => field.step_with_materials_and_boundary_candidate(
+                        endpoint_current_a_m2,
+                        velocity_m_s,
+                        boundary,
+                        target_s - thermal.time_s(),
+                        materials,
+                        conductors,
+                        assembly,
+                        field_controls,
+                        &mut || (*cancel.borrow_mut())(),
+                    ),
+                    None => field.step_with_materials_candidate(
                         endpoint_current_a_m2,
                         velocity_m_s,
                         target_s - thermal.time_s(),
@@ -385,9 +450,10 @@ impl SpatialMagneticThermalNetwork<'_> {
                         assembly,
                         field_controls,
                         &mut || (*cancel.borrow_mut())(),
-                    )
-                    .map_err(induction)
-                    .map_err(native_error)
+                    ),
+                }
+                .map_err(induction)
+                .map_err(native_error)
             },
             |_, _, _, _| Ok(()),
             cancel,
@@ -645,6 +711,7 @@ impl SpatialMagneticThermalNetwork<'_> {
                 + electrical.mechanical_work_j
                 - D::internal_mechanical_work_j(&report.electrical)
                 - electrical.impressed_work_j
+                - electrical.magnetic_boundary_work_j
                 + D::additional_stored_change_j(&report.electrical)
                 - D::additional_supplied_j(&report.electrical)
                 - external_heat_j,

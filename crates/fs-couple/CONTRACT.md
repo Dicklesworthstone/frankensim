@@ -676,17 +676,26 @@ participate in the shared enthalpy endpoint solve.
 
 Source identity, path geometry, winding conversions, receiver correspondence
 and clocks remain pinned. Source/domain, event, budget, energy and cancellation
-refusals publish neither machine nor caloric history. Inductances, inertias,
+refusals publish neither machine nor caloric history. Magnetic storage, inertias,
 pole pairs and bearing drag are fixed, so resistance feedback introduces no
 magnetic parameter work. Endpoint thermal coefficients make this generally
-first order. Saturation, skin effects, resolved bar networks, finite power
-converters and experimental calibration are outside this reduced adapter.
+first order. `bind_with_magnetizing_curve` retains the original native bounded,
+odd-symmetric magnetizing current/linkage source through every thermal probe
+and accepted interval. Reversible saturation changes current and stored energy
+together; only native copper and bearing losses are deposited as heat. The
+curve is in the power-invariant referred winding basis, not an unconverted B-H
+dataset or a terminal inductance. Temperature-dependent magnetic curves,
+hysteresis, skin effects, resolved bar networks, finite power converters and
+experimental calibration are outside this reduced adapter.
 
 `tests/induction_motor_enthalpy.rs` compares both winding temperatures and native
 currents with an independent coupled two-coil/caloric solution, including
 conduction and cooling; it exercises generating electrical return, finite shaft
 work, bearing heat and complete rollback/retry. These authored regressions do
 not establish the full induction-motor flagship or measured-machine accuracy.
+The saturation regression also checks the original physical leakage/core
+energy integral, the linkage law, Faraday-derived mean copper currents, both
+temperature-dependent resistances, source-support refusal and unchanged inputs.
 ## Complete heat assemblies on current and voltage motors
 
 Current- and finite-inductance voltage-driven material motors accept
@@ -828,6 +837,22 @@ the same charge again. This is an instantaneous load snapshot, with no implicit
 charge transport or field/mechanical time integration. Cancellation and mesh
 refusal leave the field reusable. Synthetic nonlinear charged-tetrahedron
 regressions specify force, torque, affine work and transactional refusals.
+
+## Applied magnetic boundary histories with finite induction heat
+
+`SpatialMagneticThermalNetwork::step_with_boundary_candidate` and
+`spatial_induction::heat_assembly_with_boundary_candidate` drive the complete
+original tangential A boundary through the same retained three-dimensional
+A–phi and enthalpy histories. Each temperature trial refreshes the original
+conductivity/permeability sources and includes the prescribed boundary -dA/dt
+in charge continuity and conductor-frame Joule heat. Signed magnetic reaction
+work remains external electromagnetic supply; only physical Ohmic loss and
+the existing reversible magnetic entropy exchange reach caloric cells.
+Both native and physical total-energy gates include that supply once.
+Accepted candidates retain the new trace for subsequent ordinary hold steps.
+Geometry, boundary support and gauge stay fixed, and refused trials publish
+neither field nor thermal state. The bulk and complete heat-provider paths
+share the same residual and source-temperature feedback.
 
 ## Finite-temperature feedback on the three-dimensional induction rotor
 
@@ -7678,10 +7703,13 @@ Cancellation, source refusal and exhausted work budgets publish neither
 thermal nor machine history.
 
 The original `InductionThermalNetwork` remains available through defaulted
-sample/candidate source types. This composition does not add saturation,
-cage-bar skin effect, changed geometry or variable magnetic inductance; it
-retains the reduced machine's generally first-order electrothermal feedback.
-Three regressions in `tests/induction_motor_enthalpy/heat.rs` compare an
+sample/candidate source types. Both routes retain an optional original
+magnetizing saturation curve through `bind_with_magnetizing_curve`, including
+complete-assembly/bare-network equivalence over repeated thermal intervals.
+This composition does not add cage-bar skin effect, changed geometry or
+temperature-dependent magnetic storage. It retains the reduced machine's
+generally first-order electrothermal feedback.
+Regressions in `tests/induction_motor_enthalpy/heat.rs` compare an
 independent two-coil/caloric/contact-resistance solution over two intervals,
 check equivalence with the bare network when no extra paths are attached,
 and exercise typed failure, cancellation, budgets and retry. Synthetic

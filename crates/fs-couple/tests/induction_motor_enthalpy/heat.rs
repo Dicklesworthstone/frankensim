@@ -177,6 +177,45 @@ fn empty_extra_heat_paths_recover_the_original_induction_driver() {
     })
 }
 
+#[test]
+fn saturation_survives_complete_heat_assembly_binding_and_repeated_steps() {
+    with_case(None, |cx, _, assembly, mut thermal| {
+        let prepared = assembly.prepare(cx, &thermal).unwrap();
+        let network = InductionHeatNetwork {
+            assembly: &prepared, stator: winding(0), rotor: winding(1), bearing_cell: STATOR,
+        };
+        let bare = InductionThermalNetwork {
+            cells: assembly.electrical.bulk.cells, links: assembly.electrical.bulk.links,
+            stator: winding(0), rotor: winding(1), bearing_cell: STATOR,
+        };
+        let curve = magnetizing_curve();
+        let mut motor = network.bind_with_magnetizing_curve(
+            cx, &thermal, [0.0; 7], parameters(), curve.clone(),
+        ).unwrap();
+        let bare_motor = bare.bind_with_magnetizing_curve(
+            &thermal, [0.0; 7], parameters(), curve.clone(), || false,
+        ).unwrap();
+        assert_eq!(motor.state(), bare_motor.state());
+        assert_eq!(motor.magnetizing_curve(), bare_motor.magnetizing_curve());
+        for interval in 1..=3 {
+            let target = interval as f64 * DT;
+            let expected = bare.step_candidate(
+                &thermal, target, &motor, &INPUTS, controls(), &[0.0; 2], || false,
+            ).unwrap();
+            let actual = network.step_candidate(
+                cx, &thermal, target, &motor, &INPUTS, controls(), &[0.0; 2],
+            ).unwrap();
+            assert_eq!(actual.motor().state(), expected.motor().state());
+            assert_eq!(actual.motor().magnetizing_curve(), Some(&curve));
+            assert_eq!(actual.thermal().cells(), expected.thermal().cells());
+            assert_eq!(actual.report().electrical, expected.report().electrical);
+            (thermal, motor, _) = actual.into_parts();
+        }
+        let point = motor.operating_point();
+        assert!((point.stator_current_alpha_beta_a[0] + point.rotor_current_dq_a[0]).abs() > 2.0);
+    })
+}
+
 struct TaggedSample<S> { heat: S, resolution: usize }
 impl<S: AsRef<HeatNetworkSample>> AsRef<HeatNetworkSample> for TaggedSample<S> {
     fn as_ref(&self) -> &HeatNetworkSample { self.heat.as_ref() }

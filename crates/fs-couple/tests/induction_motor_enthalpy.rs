@@ -18,6 +18,7 @@ use fs_material::{
 };
 use fs_phs::{
     SolveBudget,
+    circuit::inductance::InductorFluxCurve,
     circuit::induction::{InductionMotor, InductionMotorParameters},
 };
 use fs_thermal::enthalpy::*;
@@ -49,6 +50,49 @@ fn parameters() -> InductionMotorParameters {
         stator_inertia_kg_m2: 0.2,
         bearing_drag_nm_s_per_rad: 0.0,
     }
+}
+
+// Authored reversible magnetization with a twenty-six-fold reduction in
+// differential inductance above the knee. This is a numerical fixture, not
+// material calibration. Both polarities belong to the same isotropic source.
+fn magnetizing_curve() -> InductorFluxCurve {
+    InductorFluxCurve::try_new(vec![
+        (-0.3, -54.0),
+        (-0.1, -2.0),
+        (0.0, 0.0),
+        (0.1, 2.0),
+        (0.3, 54.0),
+    ])
+    .unwrap()
+}
+
+fn core_flux(current: f64) -> f64 {
+    let magnitude = current.abs();
+    current.signum()
+        * if magnitude <= 2.0 {
+            0.05 * magnitude
+        } else {
+            0.1 + (magnitude - 2.0) / 260.0
+        }
+}
+
+// Independent energy in the original physical leakage/core coordinates.
+// It never evaluates the production eliminated flux energy or its gradient.
+fn saturated_energy(motor: &MaterialInductionMotor) -> f64 {
+    let p = motor.parameters();
+    let point = motor.operating_point();
+    let stator = point.stator_current_alpha_beta_a[0];
+    let rotor = point.rotor_current_dq_a[0];
+    let psi = core_flux(stator + rotor).abs();
+    let core = if psi <= 0.1 {
+        10.0 * psi * psi
+    } else {
+        let increment = psi - 0.1;
+        0.1 + 2.0 * increment + 130.0 * increment * increment
+    };
+    0.5 * (p.stator_leakage_inductance_h * stator * stator
+        + p.rotor_leakage_inductance_h * rotor * rotor)
+        + core
 }
 fn controls() -> InductionEnthalpySolve {
     let mut thermal = common::config();
@@ -384,6 +428,102 @@ fn energy(p: InductionMotorParameters, x: &[f64; 7]) -> f64 {
         / (ls * lr - lm * lm)
         + x[5] * x[5] / p.rotor_inertia_kg_m2
         + x[6] * x[6] / p.stator_inertia_kg_m2)
+}
+
+#[test]
+fn saturation_retains_native_flux_energy_while_both_winding_temperatures_evolve() {
+    let (cards, curves) = sources();
+    let context = common::point(300.0);
+    let cells = bindings(&cards, &curves, &context, None);
+    let network = InductionThermalNetwork {
+        cells: &cells,
+        links: &[],
+        stator: winding(0),
+        rotor: winding(1),
+        bearing_cell: STATOR,
+    };
+    let p = parameters();
+    let curve = magnetizing_curve();
+    let mut thermal = body(&curves, false, 0.0);
+    // Direct physical linkage law, already above the saturation knee.
+    let initial_current = [8.0, -0.8];
+    let psi = core_flux(initial_current[0] + initial_current[1]);
+    let state = [
+        p.stator_leakage_inductance_h * initial_current[0] + psi,
+        0.0,
+        p.rotor_leakage_inductance_h * initial_current[1] + psi,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    ];
+    let mut motor = network
+        .bind_with_magnetizing_curve(&thermal, state, p, curve.clone(), || false)
+        .unwrap();
+    near(motor.operating_point().stator_current_alpha_beta_a[0], initial_current[0]);
+    near(motor.operating_point().rotor_current_dq_a[0], initial_current[1]);
+    let dt = 0.01;
+    let voltage = 4.0;
+    for interval in 1..=3 {
+        let before = saturated_energy(&motor) + thermal.energy_j();
+        let old_state = *motor.state();
+        let old_cells = thermal.cells().clone();
+        let next = network
+            .step_candidate(
+                &thermal,
+                interval as f64 * dt,
+                &motor,
+                &[voltage, 0.0, 0.0, 0.0],
+                controls(),
+                &[0.0; 2],
+                || false,
+            )
+            .unwrap();
+        let machine = next.motor();
+        let point = machine.operating_point();
+        let currents = [point.stator_current_alpha_beta_a[0], point.rotor_current_dq_a[0]];
+        let psi = core_flux(currents[0] + currents[1]);
+        assert!(psi.abs() > 0.1, "trajectory must exercise saturation");
+        near(machine.state()[0], p.stator_leakage_inductance_h * currents[0] + psi);
+        near(machine.state()[2], p.rotor_leakage_inductance_h * currents[1] + psi);
+        assert_eq!(machine.magnetizing_curve(), Some(&curve));
+        assert_eq!(machine.state()[4..], [0.0; 3]);
+        let step = &next.report().electrical;
+        let heat = [step.stator_copper_heat_j, step.rotor_copper_heat_j];
+        for i in 0..2 {
+            let id = [STATOR, ROTOR][i];
+            let temperature = next.thermal().temperature_k(id).unwrap();
+            let resistance = R0[i] * (1.0 + ALPHA[i] * (temperature - 300.0));
+            near(next.report().source.resistance_ohm[i], resistance);
+            let applied = if i == 0 { voltage } else { 0.0 };
+            let mean_current = (applied - (machine.state()[2 * i] - old_state[2 * i]) / dt)
+                / resistance;
+            near(heat[i], dt * resistance * mean_current * mean_current);
+            near(
+                CP[i] * (temperature - thermal.temperature_k(id).unwrap()),
+                heat[i],
+            );
+            assert!(heat[i] > 0.0 && temperature > 300.0);
+        }
+        let work: f64 = step.electrical_work_j.iter().sum();
+        near(saturated_energy(machine) + next.thermal().energy_j() - before, work);
+        near(next.report().deposited_joule_j, heat[0] + heat[1]);
+        near(next.report().total_energy_residual_j, 0.0);
+        assert_eq!(motor.state(), &old_state);
+        assert_eq!(thermal.cells(), &old_cells);
+        (thermal, motor, _) = next.into_parts();
+    }
+
+    let old_state = *motor.state();
+    let old_cells = thermal.cells().clone();
+    // Every nonlinear probe stays in the original source support. An extreme
+    // excitation must refuse transactionally rather than extrapolating a core.
+    assert!(network.step_candidate(
+        &thermal, thermal.time_s() + dt, &motor, &[1e6, 0.0, 0.0, 0.0],
+        controls(), &[0.0; 2], || false,
+    ).is_err());
+    assert_eq!(motor.state(), &old_state);
+    assert_eq!(thermal.cells(), &old_cells);
 }
 
 #[test]

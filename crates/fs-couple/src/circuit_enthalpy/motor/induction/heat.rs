@@ -98,12 +98,38 @@ impl<A: HeatAssembly + ?Sized> InductionHeatNetwork<'_, A> {
         state: [f64; 7],
         parameters: InductionMotorParameters,
     ) -> Result<MaterialInductionMotor, Error<A::Error>> {
+        self.bind_model(cx, thermal, state, parameters, None)
+    }
+
+    /// Retain one bounded reversible magnetizing law through the original
+    /// induction/heat solve, including contacts, radiation and coolant transport.
+    /// The source is held fixed as temperature changes winding resistance.
+    pub fn bind_with_magnetizing_curve(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        state: [f64; 7],
+        parameters: InductionMotorParameters,
+        curve: InductorFluxCurve,
+    ) -> Result<MaterialInductionMotor, Error<A::Error>> {
+        self.bind_model(cx, thermal, state, parameters, Some(curve))
+    }
+
+    fn bind_model(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        state: [f64; 7],
+        parameters: InductionMotorParameters,
+        curve: Option<InductorFluxCurve>,
+    ) -> Result<MaterialInductionMotor, Error<A::Error>> {
         let network = self.network(cx)?;
         let cancel = RefCell::new(|| cx.checkpoint().is_err());
         network.bind_resolved(
             thermal,
             state,
             parameters,
+            curve,
             || self.resolve(cx, &network, thermal, None, &cancel).map(|(_, windings)| windings),
             &cancel,
         )
@@ -123,9 +149,10 @@ impl<A: HeatAssembly + ?Sized> InductionHeatNetwork<'_, A> {
     /// or depositing another source. Cancellation or any source, work-budget
     /// or solve refusal publishes neither machine nor thermal history.
     ///
-    /// Magnetic inductances, geometry, inertia and bearing drag remain fixed.
+    /// Magnetic storage, geometry, inertia and bearing drag remain fixed.
     /// This preserves the native reduced machine's generally first-order
-    /// thermal feedback; it adds no saturation, skin effect or moving geometry.
+    /// thermal feedback, including an originally bound saturation curve;
+    /// it adds no magnetic temperature law, skin effect or moving geometry.
     #[allow(clippy::too_many_arguments)]
     pub fn step_candidate<'t>(
         &self,

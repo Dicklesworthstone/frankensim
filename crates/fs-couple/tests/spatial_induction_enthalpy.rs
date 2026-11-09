@@ -19,6 +19,9 @@ mod circuit;
 #[path = "spatial_induction_enthalpy/harmonic.rs"]
 mod harmonic;
 
+#[path = "spatial_induction_enthalpy/boundary.rs"]
+mod boundary;
+
 use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyError, CircuitEnthalpySolve,
     material::MaterialCell,
