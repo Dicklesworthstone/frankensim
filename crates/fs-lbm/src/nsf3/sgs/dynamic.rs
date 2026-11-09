@@ -18,6 +18,8 @@ use crate::sgs3::dynamic::{
 use std::sync::{Arc, Mutex};
 
 mod lagrangian;
+mod reservoir;
+use reservoir::ReservoirWorkspace;
 use crate::sgs3::dynamic::lagrangian::scalar::LagrangianDynamicScalar;
 pub use lagrangian::NsfLagrangianThermalSgsConfig;
 
@@ -72,6 +74,11 @@ enum DynamicState {
         normal_axis: usize,
         workspace: Arc<Mutex<ChannelWorkspace>>,
     },
+    Reservoir {
+        config: NsfDynamicThermalSgsConfig,
+        normal_axis: usize,
+        workspace: Arc<Mutex<ReservoirWorkspace>>,
+    },
     Lagrangian {
         config: NsfLagrangianThermalSgsConfig,
         normal_axis: Option<usize>,
@@ -107,6 +114,9 @@ impl DynamicTransport {
             }
             DynamicState::Channel { workspace, .. } if workspace.is_poisoned() => {
                 return Err(NsfError::Input("channel NSF workspace lock poisoned"));
+            }
+            DynamicState::Reservoir { workspace, .. } if workspace.is_poisoned() => {
+                return Err(NsfError::Input("reservoir NSF workspace lock poisoned"));
             }
             DynamicState::Lagrangian {
                 config,
@@ -424,7 +434,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     pub fn dynamic_thermal_sgs_config(&self) -> Option<NsfDynamicThermalSgsConfig> {
         match &self.dynamic_sgs.as_ref()?.state {
             DynamicState::Periodic { config, .. } => Some(*config),
-            DynamicState::Channel { .. } | DynamicState::Lagrangian { .. } => None,
+            DynamicState::Channel { .. }
+            | DynamicState::Reservoir { .. }
+            | DynamicState::Lagrangian { .. } => None,
         }
     }
 
@@ -432,7 +444,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     pub fn channel_dynamic_thermal_sgs_config(&self) -> Option<NsfChannelDynamicThermalSgsConfig> {
         match &self.dynamic_sgs.as_ref()?.state {
             DynamicState::Channel { config, .. } => Some(*config),
-            DynamicState::Periodic { .. } | DynamicState::Lagrangian { .. } => None,
+            DynamicState::Periodic { .. }
+            | DynamicState::Reservoir { .. }
+            | DynamicState::Lagrangian { .. } => None,
         }
     }
 
@@ -527,6 +541,13 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     config.momentum.maximum_eddy_to_molecular,
                 )
             }
+            DynamicState::Reservoir {
+                config,
+                normal_axis,
+                workspace,
+            } => self.reservoir_dynamic_sgs_field(
+                *config, *normal_axis, workspace, rho, velocity, theta, material,
+            ),
             DynamicState::Lagrangian {
                 config,
                 normal_axis,
@@ -698,6 +719,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let maximum = match &dynamic.state {
             DynamicState::Periodic { config, .. } => config.heat.maximum_diffusivity_to_molecular,
             DynamicState::Channel { config, .. } => config.heat.maximum_diffusivity_to_molecular,
+            DynamicState::Reservoir { config, .. } => config.heat.maximum_diffusivity_to_molecular,
             DynamicState::Lagrangian { config, .. } => config.heat.maximum_diffusivity_to_molecular,
         };
         if !ratio.is_finite() || ratio > maximum {

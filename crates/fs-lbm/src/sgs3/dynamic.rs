@@ -37,6 +37,10 @@ pub mod scalar;
 #[path = "dynamic/channel.rs"]
 pub mod channel;
 
+/// Transverse test filtering with complete prescribed inlet/outlet reservoirs.
+#[path = "dynamic/reservoir.rs"]
+pub mod reservoir;
+
 /// Pathline averaging of the same Germano contractions with explicit memory.
 #[path = "dynamic/lagrangian.rs"]
 pub mod lagrangian;
@@ -51,9 +55,11 @@ pub use wale::DynamicWaleConfig;
 /// Numerator and denominator are averaged separately, never their ratio.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DynamicAveraging {
-    /// One coefficient for an explicitly homogeneous periodic domain.
+    /// One coefficient for an explicitly homogeneous periodic domain, or
+    /// each transverse plane of a prescribed-reservoir workspace.
     Domain,
     /// A spatially varying coefficient, stabilized over the same test box.
+    /// Reservoir test boxes contain only the two periodic transverse axes.
     LocalBox,
 }
 
@@ -134,6 +140,9 @@ pub struct PeriodicDynamicSgs {
     filter_width: f64,
     derivative_metric: [f64; 3],
     geometry: FilterGeometry,
+    // Reservoirs reuse the transverse filter topology, but prescribe actual
+    // full-spacing ghosts instead of impermeable halfway-wall values.
+    normal_ghosts: bool,
     wall_velocity: [[f64; 3]; 2],
     velocity: Vec<[f64; 3]>,
     filtered: Vec<[f64; 4]>,
@@ -225,7 +234,7 @@ fn strain<const N: usize>(
     cell: usize,
     u: &[[f64; N]],
 ) -> Result<(f64, [f64; 6]), DynamicSgsError> {
-    strain_and_gradient(shape, metric, geometry, walls, cell, u)
+    strain_and_gradient(shape, metric, geometry, walls, false, cell, u)
         .map(|(rate, strain, _)| (rate, strain))
 }
 
@@ -234,6 +243,7 @@ fn strain_and_gradient<const N: usize>(
     metric: [f64; 3],
     geometry: FilterGeometry,
     walls: [[f64; 3]; 2],
+    normal_ghosts: bool,
     cell: usize,
     u: &[[f64; N]],
 ) -> Result<(f64, [f64; 6], [[f64; 3]; 3]), DynamicSgsError> {
@@ -242,10 +252,12 @@ fn strain_and_gradient<const N: usize>(
     for axis in 0..3 {
         let stencil = geometry.stencil(shape, metric, cell, at, axis);
         for component in 0..3 {
-            g[component][axis] = stencil.derivative(
-                |j| u[j][component],
-                walls.map(|wall| ScalarWall::Value(wall[component])),
-            )?;
+            let values = walls.map(|wall| ScalarWall::Value(wall[component]));
+            g[component][axis] = if normal_ghosts {
+                stencil.ghost_derivative(|j| u[j][component], values)?
+            } else {
+                stencil.derivative(|j| u[j][component], values)?
+            };
         }
     }
     let s = [
@@ -355,6 +367,7 @@ impl PeriodicDynamicSgs {
             filter_width: spacing,
             derivative_metric: [1.0; 3],
             geometry,
+            normal_ghosts: false,
             wall_velocity: [[0.0; 3]; 2],
             velocity: allocated(n, [0.0; 3])?,
             filtered: allocated(n, [0.0; 4])?,
@@ -465,6 +478,22 @@ impl PeriodicDynamicSgs {
         self.basis.iter().map(|basis| basis[0])
     }
 
+    fn averaging_samples(&self) -> f64 {
+        if self.normal_ghosts {
+            self.geometry.samples()
+        } else {
+            27.0
+        }
+    }
+
+    fn each_averaging_box(&self, cell: usize, visit: impl FnMut(usize)) {
+        if self.normal_ghosts {
+            self.geometry.each_box(self.shape, cell, visit);
+        } else {
+            each_box(self.shape, cell, visit);
+        }
+    }
+
     /// Evaluate on the same-time physical density and velocity fields.
     /// Normalizing by density and velocity scales keeps the fourth-degree
     /// least-squares contractions representable. Subtracting a reference
@@ -571,7 +600,7 @@ impl PeriodicDynamicSgs {
         }
         if let FilterGeometry::Channel(normal) = self.geometry {
             for (side, wall) in walls.iter().enumerate() {
-                if wall[normal] != 0.0 {
+                if !self.normal_ghosts && wall[normal] != 0.0 {
                     return Err(DynamicSgsError::Invalid(
                         "channel walls must be impermeable",
                     ));
@@ -632,6 +661,7 @@ impl PeriodicDynamicSgs {
                 self.derivative_metric,
                 self.geometry,
                 self.wall_velocity,
+                self.normal_ghosts,
                 cell,
                 &self.velocity,
             )?;
@@ -706,6 +736,7 @@ impl PeriodicDynamicSgs {
                 self.derivative_metric,
                 self.geometry,
                 self.wall_velocity,
+                self.normal_ghosts,
                 cell,
                 &self.filtered,
             )?;
@@ -745,8 +776,10 @@ impl PeriodicDynamicSgs {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<DynamicSgsReport, DynamicSgsError> {
         let n = self.viscosity.len();
-        self.geometry
-            .average_planes(self.shape, &mut self.contraction, &mut cancelled)?;
+        if !self.normal_ghosts || config.averaging == DynamicAveraging::Domain {
+            self.geometry
+                .average_planes(self.shape, &mut self.contraction, &mut cancelled)?;
+        }
         let mut report = DynamicSgsReport {
             minimum_raw_coefficient_squared: f64::INFINITY,
             ..DynamicSgsReport::default()
@@ -761,10 +794,11 @@ impl PeriodicDynamicSgs {
                 DynamicAveraging::LocalBox => {
                     let mut pair = [0.0; 2];
                     let mut determined = false;
-                    each_box(self.shape, cell, |j| {
+                    let samples = self.averaging_samples();
+                    self.each_averaging_box(cell, |j| {
                         determined |= self.contraction[j][1] != 0.0;
                         for k in 0..2 {
-                            pair[k] += self.contraction[j][k] / 27.0;
+                            pair[k] += self.contraction[j][k] / samples;
                         }
                     });
                     if determined && pair[1] == 0.0 {

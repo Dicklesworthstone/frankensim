@@ -4162,3 +4162,50 @@ ownership, cancellation and exact retry. Pinned Rust 2024 formatting/parsing
 passed; native integration compilation and runtime execution remain unverified.
 No new temporal order, variable mass, moving-solid storage or calibrated
 heat-transfer accuracy is claimed.
+
+## Dynamic turbulence at prescribed reservoir faces
+
+`NsfGrid3::with_reservoir_dynamic_thermal_sgs` attaches exploratory
+instantaneous Smagorinsky momentum and independently fitted heat transport to
+an all-fluid NSF grid with exactly one nonperiodic axis, two complete
+prescribed reservoir faces, periodic transverse axes, and at least three
+cells per axis. The shared owner retains the original nine-cell transverse
+Favre/Germano filter, explicit squared volume-width ratio `9^(2/3)`, and
+200 nominal numerical workspace bytes per cell. Domain averaging fits each
+transverse plane; LocalBox averaging stays within the transverse neighborhood.
+No test-filter or averaging sample crosses an opening.
+
+`sgs3::dynamic::reservoir::{ReservoirDynamicSgs, ReservoirDynamicScalar}`
+exposes the same bounded numerical fit independently of the NSF owner.
+Velocity and scalar normal derivatives use the current primitive ghosts
+one full cell spacing beyond the boundary centers, including normal
+throughflow. Boundary replacements refresh the closures through the original
+force-rebase and conservative energy-flux transaction. Topology removal
+refuses. Cell, shared-face, and prescribed-reservoir heat-ratio admissions use
+their original molecular material state; the reservoir check occurs before
+extrapolated adjacent turbulent conductivity is added. Original mass,
+pressure, energy, trial, and rollback owners remain authoritative.
+
+This scope excludes localized apertures, characteristic boundaries, imposed
+unresolved inflow spectra, SGS-energy storage, and qualification as a general
+three-dimensional open-boundary LES model. It retains the original passive
+eddy-transport restrictions and explicit coefficient/material limits.
+
+Native verification passed five new reservoir groups and twenty existing
+channel/scalar groups using unchanged production numerical code and real
+`fs_math`. Unrelated test registrations were disabled only in a temporary
+snapshot. The initial complete shared-test-tree compilation was killed with
+signal 9 under the environment memory limit; the smaller 25-test build
+compiled and ran successfully. Two native NSF integration groups specify
+current-ghost coupling, force-chart preservation, native-step replay,
+cancellation, actual reservoir-face heat-ratio refusal and boundary-update
+rollback, but remain uncompiled/unrun here. The full NSF runtime and Cargo
+workspace were not rebuilt.
+
+Equation and filter-convention reference: Cabot (1991), CTR Annual Research
+Briefs, section 2.1,
+https://web.stanford.edu/group/ctr/ResBriefs/1991/18_CABOT.pdf .
+The homogeneous-direction filtering and independent momentum/scalar
+contractions follow this framework; the nine-cell box and volume-width
+ratio are explicit discretization choices, not a reproduction of its
+spectral filter or empirical validation results.

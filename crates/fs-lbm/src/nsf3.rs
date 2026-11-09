@@ -1453,6 +1453,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 // The original full-cell temperature difference and one shared
                 // face flux still own both storage change and open energy.
                 if let Some(local) = transport.get(i) {
+                    self.admit_dynamic_heat_ratio(i, local.turbulent_conductivity_lu, k)?;
                     k += local.turbulent_conductivity_lu;
                 }
                 return Ok(WallEnergyFlux::open(

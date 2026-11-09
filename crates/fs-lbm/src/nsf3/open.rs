@@ -601,8 +601,12 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         high: bool,
         state: Option<NsfOpenState>,
     ) -> Result<(), NsfError> {
-        if self.dynamic_sgs.is_some() {
-            return Err(NsfError::Input("dynamic SGS requires its original closed topology"));
+        if self.dynamic_sgs.is_some()
+            && !self.dynamic_reservoir_face_update_allowed(axis, state.is_some())
+        {
+            return Err(NsfError::Input(
+                "dynamic SGS requires its originally admitted boundary topology",
+            ));
         }
         if self.open.is_some() {
             return Err(NsfError::Input(

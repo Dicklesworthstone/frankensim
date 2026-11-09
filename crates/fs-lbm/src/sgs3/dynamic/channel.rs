@@ -354,6 +354,31 @@ enum StencilSpan {
 }
 
 impl AxisStencil {
+    // Complete prescribed reservoirs store a ghost at one FULL spacing from
+    // the boundary cell. Both physical and transversely Favre-filtered
+    // primitive values retain that same uniform exterior value.
+    pub(super) fn ghost_derivative(
+        self,
+        value: impl Fn(usize) -> f64,
+        ghosts: [ScalarWall; 2],
+    ) -> Result<f64, DynamicSgsError> {
+        if let StencilSpan::Wall { near, side, .. } = self.span {
+            let ScalarWall::Value(ghost) = ghosts[side] else {
+                return Err(DynamicSgsError::Invalid(
+                    "reservoir derivatives require prescribed ghost values",
+                ));
+            };
+            let difference = if side == 0 {
+                value(near) - ghost
+            } else {
+                ghost - value(near)
+            };
+            self.checked(difference, 0.5 * difference * self.metric)
+        } else {
+            self.derivative(value, ghosts)
+        }
+    }
+
     fn checked(self, unscaled: f64, derivative: f64) -> Result<f64, DynamicSgsError> {
         if !derivative.is_finite() || (derivative == 0.0 && unscaled != 0.0) {
             return Err(DynamicSgsError::Cell {

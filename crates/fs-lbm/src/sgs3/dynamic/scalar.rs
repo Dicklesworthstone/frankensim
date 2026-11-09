@@ -74,7 +74,7 @@ pub struct DynamicScalarReport {
 pub struct PeriodicDynamicScalar {
     pub(super) shape: [usize; 3],
     walls: [ScalarWall; 2],
-    boundary_gradient: ScalarBoundaryGradient,
+    pub(super) boundary_gradient: ScalarBoundaryGradient,
     scalar: Vec<f64>,
     filtered: Vec<f64>,
     pub(super) basis: Vec<[f64; 3]>,
@@ -88,6 +88,8 @@ pub struct PeriodicDynamicScalar {
 pub(super) enum ScalarBoundaryGradient {
     Declared,
     Interior,
+    /// Uniform primitive values at full-spacing exterior reservoir ghosts.
+    Reservoir,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -105,7 +107,9 @@ fn gradient(
     let mut gradient = [0.0; 3];
     for axis in 0..3 {
         let stencil = geometry.stencil(shape, metric, cell, at, axis);
-        gradient[axis] = if matches!(boundary_gradient, ScalarBoundaryGradient::Interior) {
+        gradient[axis] = if matches!(boundary_gradient, ScalarBoundaryGradient::Reservoir) {
+            stencil.ghost_derivative(|j| field[j], walls)?
+        } else if matches!(boundary_gradient, ScalarBoundaryGradient::Interior) {
             stencil.interior_scalar_derivative(field)?
         } else if filtered {
             stencil.filtered_scalar_derivative(field, walls)?
@@ -275,8 +279,10 @@ impl PeriodicDynamicScalar {
             });
         }
         let domain = self.prepare_contractions(flow, density, scales, cancelled)?;
-        flow.geometry
-            .average_planes(self.shape, &mut self.contraction, cancelled)?;
+        if !flow.normal_ghosts || config.averaging == DynamicAveraging::Domain {
+            flow.geometry
+                .average_planes(self.shape, &mut self.contraction, cancelled)?;
+        }
         self.fit_from(flow, config, scales, domain, cancelled)
     }
 
@@ -337,14 +343,27 @@ impl PeriodicDynamicScalar {
                     a[axis] += self.basis[j][axis] / samples;
                 }
             });
-            let (rate, _) = strain(
-                self.shape,
-                flow.derivative_metric,
-                flow.geometry,
-                flow.wall_velocity,
-                cell,
-                &flow.filtered,
-            )?;
+            let (rate, _) = if flow.normal_ghosts {
+                strain_and_gradient(
+                    self.shape,
+                    flow.derivative_metric,
+                    flow.geometry,
+                    flow.wall_velocity,
+                    true,
+                    cell,
+                    &flow.filtered,
+                )
+                .map(|(rate, strain, _)| (rate, strain))
+            } else {
+                strain(
+                    self.shape,
+                    flow.derivative_metric,
+                    flow.geometry,
+                    flow.wall_velocity,
+                    cell,
+                    &flow.filtered,
+                )
+            }?;
             let g = gradient(
                 self.shape,
                 flow.derivative_metric,
@@ -399,10 +418,11 @@ impl PeriodicDynamicScalar {
                 DynamicAveraging::LocalBox => {
                     let mut pair = [0.0; 2];
                     let mut determined = false;
-                    each_box(self.shape, cell, |j| {
+                    let samples = flow.averaging_samples();
+                    flow.each_averaging_box(cell, |j| {
                         determined |= self.contraction[j][1] != 0.0;
                         for k in 0..2 {
-                            pair[k] += self.contraction[j][k] / 27.0;
+                            pair[k] += self.contraction[j][k] / samples;
                         }
                     });
                     if determined && pair[1] == 0.0 {
