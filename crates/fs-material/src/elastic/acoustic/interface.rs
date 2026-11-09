@@ -28,7 +28,7 @@ pub mod fluid;
 /// Coherent scattering and interior fields of a finite bonded elastic slab.
 pub mod layer;
 
-/// Reflection and P/S conversion at a free or immovably clamped solid surface.
+/// Reflection and P/S conversion at free, clamped or passive-impedance surfaces.
 pub mod surface;
 
 /// Physical side of the interface. The common normal points first to second.

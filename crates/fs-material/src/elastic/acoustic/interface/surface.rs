@@ -1,28 +1,91 @@
-//! Coherent reflection by an infinite free or clamped isotropic solid surface.
+//! Coherent reflection by an infinite isotropic solid surface and passive support.
 //!
 //! The original solid occupies z < 0; +z points out of it. The wave, traction,
 //! phase and modal velocity conventions are those of the bonded interface.
 //! A free surface sets all three tractions to zero; a stationary clamp sets
 //! all three velocities to zero. P and SV generally convert into each other,
 //! including an evanescent P field for supercritical SV incidence. SH remains
-//! independent. Neither boundary absorbs energy or introduces a second medium.
+//! independent. A passive local support imposes `traction = -Z velocity`,
+//! with independent normal and tangential specific mechanical impedances.
+//! Its real parts absorb work; its reactances preserve coherent reflection phase.
 //!
 //! The same original tensor supplies every wave trace. One 2x2 boundary solve
 //! is prepared per tangential slowness, then coherent drives allocate nothing.
 //! This is a bulk plane-wave boundary, not a finite plate, flexural edge,
-//! Rayleigh-wave source, compliant support or surface-roughness model.
+//! Rayleigh-wave source, nonlocal support or surface-roughness model. Supplied
+//! impedances belong to the same frequency as the drive. No causal time-domain
+//! realization or experimental qualification is inferred from one frequency.
 //! Free-surface analytical coefficients: Sánchez-Sesma et al. (2023), Appendix 2,
 //! <https://doi.org/10.1186/s40623-023-01780-0>.
 
 use super::*;
 
-/// Explicit stationary, lossless mechanical boundary condition.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Passive locally reacting support in the original `exp(-i omega t)` convention.
+///
+/// Each impedance is traction opposing motion divided by velocity [Pa s/m].
+/// Tangential response is isotropic in the surface plane. Nonnegative real
+/// parts dissipate mechanical work; either sign of reactance is admitted.
+/// The caller evaluates any dispersive material/support law at the drive's
+/// original frequency. Zero values recover a free surface exactly.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ElasticSurfaceImpedance {
+    normal_pa_s_m: C64,
+    tangential_pa_s_m: C64,
+}
+
+impl ElasticSurfaceImpedance {
+    /// Admit finite normal/tangential impedances with nonnegative resistance.
+    pub fn new(normal_pa_s_m: C64, tangential_pa_s_m: C64) -> Result<Self, MaterialError> {
+        if [normal_pa_s_m, tangential_pa_s_m]
+            .into_iter()
+            .any(|z| !finite(z) || z.re < 0.0)
+        {
+            return Err(invalid(
+                "elastic surface impedance must be finite and passive",
+            ));
+        }
+        Ok(Self {
+            normal_pa_s_m,
+            tangential_pa_s_m,
+        })
+    }
+
+    /// Specific impedance opposing normal motion [Pa s/m].
+    pub const fn normal_pa_s_m(self) -> C64 {
+        self.normal_pa_s_m
+    }
+
+    /// Specific impedance opposing either tangential component [Pa s/m].
+    pub const fn tangential_pa_s_m(self) -> C64 {
+        self.tangential_pa_s_m
+    }
+
+    fn component(self, axis: usize) -> C64 {
+        if axis == 2 {
+            self.normal_pa_s_m
+        } else {
+            self.tangential_pa_s_m
+        }
+    }
+
+    // Bounded coefficients of a*t/Zref + b*v=0. They retain the exact zero
+    // and stiff limits without constructing a huge complex norm or inverse.
+    fn coordinates(self, axis: usize, reference: f64) -> (f64, C64) {
+        let z = self.component(axis);
+        let scale = reference.max(z.re).max(z.im.abs());
+        (reference / scale, divided(z, scale))
+    }
+}
+
+/// Explicit stationary mechanical boundary condition.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ElasticSurfaceCondition {
     /// Vacuum/free boundary: `sigma.e_z = 0`, with unconstrained velocity.
     TractionFree,
     /// Ideal immovable support: `v = 0`, with unconstrained reaction traction.
     Clamped,
+    /// Passive support with `traction = -Z velocity` on the outward normal.
+    Impedance(ElasticSurfaceImpedance),
 }
 
 /// Original isotropic material and its cached P/shear speeds and impedances.
@@ -43,6 +106,7 @@ pub struct PreparedElasticSurface<'a> {
     incoming: [ElasticWaveTrace; 3],
     reflected: [ElasticWaveTrace; 3],
     scattering: [[C64; 3]; 3],
+    impedance_reference_pa_s_m: f64,
 }
 
 /// Coherent physical fields and independently reconstructed surface work.
@@ -56,10 +120,16 @@ pub struct ElasticSurfaceResponse {
     pub reflected_normal_power_w_m2: [f64; 3],
     pub total_incoming_power_w_m2: f64,
     pub total_reflected_power_w_m2: f64,
+    /// Positive local support work `sum Re(Z_i) |v_i|²/2` [W/m²], not a
+    /// reflected-power deficit. Reactive supports have exactly zero loss.
+    pub absorbed_normal_power_w_m2: f64,
+    /// Coherent boundary velocity, reconstructed from both traction/velocity
+    /// coordinates for a finite support to preserve weak wall motion.
     pub boundary_velocity_m_s: [C64; 3],
     /// Traction `sigma.e_z` on the outward normal, in Pa.
     pub boundary_traction_pa: [C64; 3],
-    /// Independently evaluated `-Re(v*.traction)/2`; zero for either condition.
+    /// Independently evaluated coherent `-Re(v*.traction)/2` before boundary
+    /// reconstruction; zero for ideal or purely reactive conditions.
     pub boundary_normal_flux_w_m2: f64,
     /// Conservative Mandel-strain norm bound throughout the solid half-space.
     pub strain_norm_bound: f64,
@@ -132,6 +202,7 @@ impl<'a> IsotropicElasticSurface<'a> {
             incoming: [empty_trace(); 3],
             reflected: [empty_trace(); 3],
             scattering: [[C64::ZERO; 3]; 3],
+            impedance_reference_pa_s_m: self.impedances[0].max(self.impedances[1]),
         };
         for kind in 0..3 {
             poll(cancelled)?;
@@ -166,6 +237,15 @@ impl<'a> IsotropicElasticSurface<'a> {
             result.scattering[2][2] = match self.condition {
                 ElasticSurfaceCondition::TractionFree => C64::ONE,
                 ElasticSurfaceCondition::Clamped => -C64::ONE,
+                ElasticSurfaceCondition::Impedance(_) => {
+                    let incoming = result.boundary_entry(result.incoming[2], 1);
+                    let reflected = result.boundary_entry(result.reflected[2], 1);
+                    let coefficient = -incoming / reflected;
+                    if !finite(coefficient) {
+                        return Err(invalid("elastic SH support reflection is unrepresentable"));
+                    }
+                    coefficient
+                }
             };
         }
         poll(cancelled)?;
@@ -242,7 +322,7 @@ impl PreparedElasticSurface<'_> {
                 "elastic surface drive exceeds original strain domain",
             ));
         }
-        let velocity: [C64; 3] = core::array::from_fn(|component| {
+        let mut velocity: [C64; 3] = core::array::from_fn(|component| {
             complex_sum((0..3).flat_map(|m| {
                 [
                     self.incoming[m].velocity[component] * incoming[m],
@@ -250,7 +330,7 @@ impl PreparedElasticSurface<'_> {
                 ]
             }))
         });
-        let traction: [C64; 3] = core::array::from_fn(|component| {
+        let mut traction: [C64; 3] = core::array::from_fn(|component| {
             complex_sum((0..3).flat_map(|m| {
                 [
                     self.incoming[m].traction_pa_s_m[component] * incoming[m],
@@ -261,12 +341,37 @@ impl PreparedElasticSurface<'_> {
         let total_incoming = real_sum(input_power);
         let total_reflected = real_sum(reflected_power);
         let flux = -0.5 * real_sum((0..3).map(|i| (velocity[i].conj() * traction[i]).re));
+        let mut absorbed = 0.0;
+        if let ElasticSurfaceCondition::Impedance(support) = self.condition {
+            let reference = self.impedance_reference_pa_s_m;
+            let mut losses = [0.0; 3];
+            for axis in 0..3 {
+                let (a, b) = support.coordinates(axis, reference);
+                // Project both independently summed traces onto their original
+                // constitutive coordinates. At a stiff support the traction
+                // retains the small wall velocity that v_in+v_ref would lose;
+                // a weak support instead retains the well-resolved velocity.
+                let amplitude = (velocity[axis].scale(a)
+                    - b.conj() * divided(traction[axis], reference))
+                    / C64::from_re(a * a + b.norm_sq());
+                velocity[axis] = amplitude.scale(a);
+                traction[axis] = -(b * amplitude).scale(reference);
+                let resistance = support.component(axis).re;
+                let root =
+                    det::sqrt(resistance) * core::f64::consts::FRAC_1_SQRT_2 * velocity[axis].abs();
+                losses[axis] = root * root;
+                if resistance > 0.0 && velocity[axis] != C64::ZERO && losses[axis] == 0.0 {
+                    return Err(invalid("elastic support absorption is unrepresentable"));
+                }
+            }
+            absorbed = real_sum(losses);
+        }
         if velocity.iter().chain(&traction).any(|&x| !finite(x))
-            || [total_incoming, total_reflected, flux]
+            || [total_incoming, total_reflected, flux, absorbed]
                 .into_iter()
                 .any(|x| !x.is_finite())
-            || !balanced(total_incoming, total_reflected, total_incoming)
-            || !balanced(flux, 0.0, total_incoming)
+            || !balanced(total_incoming, total_reflected + absorbed, total_incoming)
+            || !balanced(flux, absorbed, total_incoming)
         {
             return Err(invalid(
                 "elastic surface power is unrepresentable or does not close",
@@ -280,6 +385,7 @@ impl PreparedElasticSurface<'_> {
             reflected_normal_power_w_m2: reflected_power,
             total_incoming_power_w_m2: total_incoming,
             total_reflected_power_w_m2: total_reflected,
+            absorbed_normal_power_w_m2: absorbed,
             boundary_velocity_m_s: velocity,
             boundary_traction_pa: traction,
             boundary_normal_flux_w_m2: flux,
@@ -287,11 +393,19 @@ impl PreparedElasticSurface<'_> {
         })
     }
 
-    fn boundary_entry(&self, wave: ElasticWaveTrace, row: usize) -> C64 {
-        let component = 2 * row;
+    fn boundary_entry(&self, wave: ElasticWaveTrace, component: usize) -> C64 {
         match self.condition {
             ElasticSurfaceCondition::TractionFree => wave.traction_pa_s_m[component],
             ElasticSurfaceCondition::Clamped => wave.velocity[component],
+            ElasticSurfaceCondition::Impedance(support) => {
+                let (a, b) = support.coordinates(component, self.impedance_reference_pa_s_m);
+                divided(
+                    wave.traction_pa_s_m[component],
+                    self.impedance_reference_pa_s_m,
+                )
+                .scale(a)
+                    + b * wave.velocity[component]
+            }
         }
     }
 
@@ -300,7 +414,7 @@ impl PreparedElasticSurface<'_> {
         let mut scales = [0.0_f64; 2];
         for row in 0..2 {
             for column in 0..2 {
-                let entry = self.boundary_entry(self.reflected[column], row);
+                let entry = self.boundary_entry(self.reflected[column], 2 * row);
                 matrix[2 * row + column] = entry;
                 scales[row] = scales[row].max(entry.abs());
             }
@@ -320,7 +434,7 @@ impl PreparedElasticSurface<'_> {
             }
             let rhs: [C64; 2] = core::array::from_fn(|row| {
                 -divided(
-                    self.boundary_entry(self.incoming[incident], row),
+                    self.boundary_entry(self.incoming[incident], 2 * row),
                     scales[row],
                 )
             });
