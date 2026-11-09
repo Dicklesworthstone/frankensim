@@ -1050,7 +1050,7 @@ offline examples' card route keeps none of them (ruling 7486):
   beater with a 3 cm felt face (k 1e8 N/m^2.5, alpha 2.5, mu 0.3 s/m) and muffle dashpot 25 N s/m^3
   (no pillow is modelled);
   the ride's 3.0 s 10 kHz T60; every cymbal's shape (bell radius, rises and the bow's taper, with
-  the crash and ride thicknesses scaled to printed weights, below); flat hi-hat rims and a 5 mm stick
+  the crash, ride and hi-hat thicknesses scaled to printed weights, below); flat hi-hat rims and a 5 mm stick
   tip; the open hat's 8 mm rim opening (`drum_cards::OPEN_HAT_OPENING_M`; the recording's pedal
   position is unknown, and the presets' 2 mm was picked by grade, bb1e5abf3).
 - **The kick's microphone** (presets and card route alike, ruling 8318) is a declared overhead
@@ -1126,7 +1126,7 @@ is printed by neither, so B20's declared 0.33 is kept. The alloy alone raises ev
 mode 3.5 % above B20 (E/ρ +7.0 %). The hi-hat (a Stagg 14" SH, cast B20), the splash and every preset
 keep `kit::BRONZE`.
 
-Their crash and ride thicknesses come from printed weights (MB 14574). `kit::shell_mass` integrates
+Their crash, ride and hi-hat thicknesses come from printed weights (MB 14574, 14839). `kit::shell_mass` integrates
 the declared shape over its curved surface (a uniform bell blended over 2 cm into a bow that thins
 from 1.15 times the edge thickness to it at the rim), and one scale per shell makes it weigh the
 printed weight; the bell radius and rises stay declared:
@@ -1135,10 +1135,19 @@ printed weight; the bell radius and rises stay declared:
   (3133 g) become 1.213 mm and 1.668 mm, a scale of 0.758;
 - the crash, 1472 g: one listing's 18" Innovations Medium Crash, one source and one specimen. The
   preset's 0.95 mm bow and 1.60 mm bell (1568 g) become 0.892 mm and 1.502 mm, a scale of 0.939.
+- the hi-hat (`kit::card_hihat_spec()`), 1100 g top and 1300 g bottom: the weights one retailer
+  (timmermuziek.nl, method unstated) prints for a Stagg 14" SH Regular Medium pair, SH-HM14R, one
+  source. The recorded pair is named only "Stagg 14" SH hihat", so that model is assumed; Stagg's
+  own page for it prints B20 (80 % copper, 20 % tin) and the weight class Medium, but no weight. The
+  preset pair's 0.85 mm / 1.40 mm top (820 g) and 1.10 mm / 1.40 mm bottom (1012 g) become
+  1.141 mm / 1.879 mm and 1.413 mm / 1.798 mm, scales of 1.342 and 1.284. The rim contact keeps its
+  law, opening and pedal: the bottom shell sits at the rims' half-thicknesses below the top, so the
+  face-to-face opening at the rim is unchanged, and inside the contact annulus the local gap follows
+  the thicker shells. The presets keep `kit::hihat_spec()`.
 
-Pure bending modes scale with thickness, by 0.758 on the ride and 0.939 on the crash; modes the
-shell's curvature stiffens fall less, because that membrane stiffness does not shrink with thickness
-relative to the mass.
+Pure bending modes scale with thickness, by 0.758 on the ride, 0.939 on the crash and 1.342 and
+1.284 on the hi-hat's top and bottom; modes the shell's curvature stiffens move less, because that
+membrane stiffness scales with thickness as the mass does.
 
 `--shell-loss` (`shell_loss`) offers each row only on a shell of the row's own alloy:
 - `b20`, `b20-low` and `b20-high` on the hi-hats;

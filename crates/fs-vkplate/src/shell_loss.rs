@@ -341,7 +341,7 @@ pub fn with_printed_shell_loss(c: &CymbalSpec, loss: &PrintedShellLoss) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kit::{BRONZE, CUSN8, card_crash, card_ride, crash, hihat_spec};
+    use crate::kit::{BRONZE, CUSN8, card_crash, card_hihat_spec, card_ride, crash};
     use fs_material::visco::slab_ted::slab_relaxation_shape;
 
     fn row(label: &str) -> PrintedShellLoss {
@@ -389,9 +389,11 @@ mod tests {
     fn the_pairs_are_the_plan_lines_and_the_band_holds_the_row() {
         // plan lines 12547 and 12922 (weak coupling): crash (10.68 s, 1.19 s), ride (16.92 s, 1.24 s at 88cccbb78's
         // 1.60 mm; 13.65 s, 1.22 s at the card ride's 1.213 mm since MB 14574, the same formulas), hi-hat top
-        // (9.39 s, 1.17 s) and bottom (12.45 s, 1.21 s), each at its own free edge; the coupled law moves them a little
-        let (hat_top, hat_bottom) = hihat_spec();
-        let shells = [(crash(), [10.68, 1.19]), (card_ride(), [13.65, 1.22]), (hat_top, [9.39, 1.17]), (hat_bottom, [12.45, 1.21])];
+        // (9.39 s, 1.17 s at 0.85 mm; 12.90 s, 1.21 s at the card top's 1.141 mm) and bottom (12.45 s, 1.21 s at
+        // 1.10 mm; 15.50 s, 1.23 s at the card bottom's 1.413 mm) since MB 14839, each at its own free edge; the
+        // coupled law moves them a little
+        let (hat_top, hat_bottom) = card_hihat_spec();
+        let shells = [(crash(), [10.68, 1.19]), (card_ride(), [13.65, 1.22]), (hat_top, [12.90, 1.21]), (hat_bottom, [15.50, 1.23])];
         for (spec, plan) in shells {
             let pair = printed_shell_t60(&spec, BRONZE, &row("b20")).unwrap();
             let low = printed_shell_t60(&spec, BRONZE, &row("b20-low")).unwrap();
@@ -455,7 +457,7 @@ mod tests {
 
     #[test]
     fn a_row_refuses_a_shell_of_another_alloy() {
-        let (hat_top, _) = hihat_spec();
+        let (hat_top, _) = card_hihat_spec();
         let refused = with_printed_shell_loss(&card_crash(), &row("b20")).err().expect("b20 refused on the CuSn8 crash");
         assert!(refused.contains("holds B20's thermal data") && refused.contains("crash 18"), "{refused}");
         assert!(with_printed_shell_loss(&card_ride(), &row("b20-low")).is_err());

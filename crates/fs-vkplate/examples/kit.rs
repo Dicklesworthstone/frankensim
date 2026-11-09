@@ -227,10 +227,10 @@ fn main() {
     let (crash_shell, crash_line) = shell(drum_cards::crash(preset_heads), played == "crash");
     let (ride_shell, ride_line) = shell(drum_cards::ride(preset_heads), played == "ride");
     let hihat = |gap: f64, pedal_n: f64, v: f64| drum_cards::hihat(gap, pedal_n, &[(0.005, v)], preset_heads);
-    // --shell-loss on a hi-hat: each of its two shells takes the loss at its own free edge, with its own receipt
+    // --shell-loss on a hi-hat: each of its two card shells takes the loss at its own free edge, with its own receipt
     let (hat_shells, hat_lines) = {
         let on = matches!(played, "hihat-closed" | "hihat-open");
-        let (top, bottom) = kit::hihat_spec();
+        let (top, bottom) = kit::card_hihat_spec();
         let (top, top_line) = shell(top, on);
         let (bottom, bottom_line) = shell(bottom, on);
         ((top, bottom), top_line.into_iter().chain(bottom_line).collect::<Vec<String>>())

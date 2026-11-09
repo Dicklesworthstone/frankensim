@@ -1663,6 +1663,31 @@ fn card_crash_and_ride_weigh_their_printed_weights() {
 }
 
 #[test]
+fn card_hats_weigh_their_printed_weights() {
+    // MB 14574, 14839: one retailer's printed weights for a Stagg 14" SH Regular Medium pair, 1100 g top and
+    // 1300 g bottom, set each card shell's thickness scale; the shapes stay the preset pair's, in B20.
+    let ((top, bottom), (preset_top, preset_bottom)) = (kit::card_hihat_spec(), kit::hihat_spec());
+    let (top_kg, bottom_kg) = (kit::shell_mass(&top), kit::shell_mass(&bottom));
+    assert!((top_kg / 1.100 - 1.0).abs() < 1.0e-3, "top {top_kg} kg");
+    assert!((bottom_kg / 1.300 - 1.0).abs() < 1.0e-3, "bottom {bottom_kg} kg");
+    // origin's 0.85 mm / 1.40 mm top and 1.10 mm / 1.40 mm bottom weighed 820 g and 1012 g: scales of 1.342 and 1.284
+    let (old_top, old_bottom) = (kit::shell_mass(&preset_top), kit::shell_mass(&preset_bottom));
+    assert!((old_top / 0.820 - 1.0).abs() < 1.0e-3 && (old_bottom / 1.012 - 1.0).abs() < 1.0e-3, "{old_top} {old_bottom}");
+    for (card, preset, scale) in [(&top, &preset_top, 1.342), (&bottom, &preset_bottom, 1.284)] {
+        assert!((card.bow_thickness / preset.bow_thickness - scale).abs() < 1.0e-3, "{}", card.name);
+        assert!((card.bell_thickness / preset.bell_thickness - scale).abs() < 1.0e-3, "{}", card.name);
+        // only the two thicknesses move
+        assert_eq!((card.name, card.radius, card.bell_radius, card.bow_rise, card.bell_rise, card.grid, card.t60, card.elastic),
+                   (preset.name, preset.radius, preset.bell_radius, preset.bow_rise, preset.bell_rise, preset.grid, preset.t60, preset.elastic));
+        assert_eq!(card.provenance, Some(kit::CARD_HIHAT_RECEIPT));
+    }
+    assert_eq!(top.elastic, kit::BRONZE);
+    for s in ["1100 g", "1300 g", "timmermuziek.nl", "one source", "SH-HM14R is assumed", "B20", "rim contact"] {
+        assert!(kit::CARD_HIHAT_RECEIPT.contains(s), "{s}");
+    }
+}
+
+#[test]
 fn g2_card_cymbals_and_hats_take_the_declared_interface_and_presets_say_theirs_was_fitted() {
     let coarse = |c: kit::CymbalSpec| kit::CymbalSpec { grid: c.grid * 3.0, ..c };
     let stick_mu = |p: &kit::Piece| {
@@ -1690,8 +1715,10 @@ fn g2_card_cymbals_and_hats_take_the_declared_interface_and_presets_say_theirs_w
     let fitted = kit::hihat(0.002, 0.0, &[(0.0, 1.0)]).unwrap();
     assert!(fitted.notes.iter().any(|n| n == kit::FITTED_CYMBAL_INTERFACE.hat_receipt));
     assert_eq!(stick_mu(&fitted), 0.05);
-    let card = kit::hihat_with_interface(0.002, 0.0, &[(0.0, 1.0)], kit::DECLARED_HIHAT_RIM_LAW, &kit::DECLARED_CYMBAL_INTERFACE).unwrap();
+    // the card route's build (drum_cards::hihat): the declared interface on the card shells
+    let card = kit::hihat_with_interface_and_specs(0.002, 0.0, &[(0.0, 1.0)], kit::DECLARED_HIHAT_RIM_LAW, &kit::DECLARED_CYMBAL_INTERFACE, kit::card_hihat_spec()).unwrap();
     assert!(card.notes.iter().any(|n| n == kit::DECLARED_CYMBAL_INTERFACE.hat_receipt));
+    assert_eq!(card.notes.iter().filter(|n| n.as_str() == kit::CARD_HIHAT_RECEIPT).count(), 1, "the shells' one receipt, once");
     assert_eq!(stick_mu(&card), kit::DECLARED_STICK_LOSS_S_M);
     let (fitted_gaps, card_gaps) = (rim_gaps(&fitted), rim_gaps(&card));
     assert!(!card_gaps.is_empty() && card_gaps.len() == fitted_gaps.len());

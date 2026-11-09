@@ -1165,6 +1165,27 @@ pub fn hihat_spec() -> (CymbalSpec, CymbalSpec) {
     (top, bottom)
 }
 
+/// The card route's hi-hat (MB 14574, 14839): [`hihat_spec`]'s shapes with each shell's two
+/// thicknesses scaled to a retailer's printed weights for the recorded pair's model, in B20, which
+/// the maker prints for it: see [`CARD_HIHAT_RECEIPT`]. The rim law, opening and pedal stay.
+pub fn card_hihat_spec() -> (CymbalSpec, CymbalSpec) {
+    let (top, bottom) = hihat_spec();
+    (CymbalSpec { bow_thickness: 1.141e-3, bell_thickness: 1.879e-3, provenance: Some(CARD_HIHAT_RECEIPT), ..top },
+     CymbalSpec { bow_thickness: 1.413e-3, bell_thickness: 1.798e-3, provenance: Some(CARD_HIHAT_RECEIPT), ..bottom })
+}
+
+/// The card hats' receipt: their thicknesses from one retail copy's two printed weights, the model
+/// assumed, the alloy, and what the thicker shells do at the rim contact.
+pub const CARD_HIHAT_RECEIPT: &str = "hi-hat (MB 14574, 14839): top bow 1.141 mm and bell 1.879 mm, bottom bow 1.413 mm and \
+bell 1.798 mm, the preset pair's 0.85 mm / 1.40 mm and 1.10 mm / 1.40 mm scaled by 1.342 and 1.284 so that the declared shapes \
+weigh 1100 g and 1300 g in B20 (kit::shell_mass), the top and bottom weights one retailer prints for a Stagg 14-inch SH Regular \
+Medium pair, SH-HM14R (timmermuziek.nl, method unstated: one source); the recorded pair is named only 'Stagg 14-inch SH hihat', so \
+the SH-HM14R is assumed; Stagg prints B20 (80 % copper, 20 % tin) and the weight class Medium for it, and no weight; the shapes \
+stay declared: a uniform bell 55 mm in radius blended over 2 cm into a bow that thins from 1.15 times the edge thickness to it at \
+the rim, 15 mm bow and 10 mm bell rises; the 500 Hz and 10 kHz T60s, 8 s and 1.5 s, stay declared; the rim contact keeps its \
+law, opening and pedal: the face-to-face opening at the rim is unchanged, and inside the contact annulus the local gap follows \
+the thicker shells";
+
 /// Reference-cell normal contact estimate for bronze hi-hat rims, shared by
 /// offline and live construction. Grid assembly scales K with cell area;
 /// Hunt-Crossley loss mu [s/m] and the Hertz exponent remain unchanged.

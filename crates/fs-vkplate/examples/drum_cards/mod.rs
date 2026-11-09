@@ -167,18 +167,21 @@ pub fn cymbal(
 }
 
 /// The hi-hat with 88cccbb78's declared rim law, flat rims and 5 mm stick tip
-/// (kit::DECLARED_HIHAT_RIM_LAW, DECLARED_CYMBAL_INTERFACE), or with `preset`
-/// the presets' fitted ones.
+/// (kit::DECLARED_HIHAT_RIM_LAW, DECLARED_CYMBAL_INTERFACE) on the card shells,
+/// `kit::card_hihat_spec()`: the preset pair's shapes at one retailer's printed
+/// weights for the recorded pair's model (MB 14574, 14839). With `preset`, the
+/// presets' fitted interface on the preset shells.
 pub fn hihat(gap: f64, pedal_n: f64, hits: &[(f64, f64)], preset: bool) -> Result<Piece, String> {
     if preset {
         kit::hihat(gap, pedal_n, hits)
     } else {
-        kit::hihat_with_interface(
+        kit::hihat_with_interface_and_specs(
             gap,
             pedal_n,
             hits,
             kit::DECLARED_HIHAT_RIM_LAW,
             &kit::DECLARED_CYMBAL_INTERFACE,
+            kit::card_hihat_spec(),
         )
     }
 }
