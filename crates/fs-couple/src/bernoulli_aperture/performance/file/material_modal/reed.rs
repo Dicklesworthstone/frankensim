@@ -26,7 +26,10 @@
 //! routes). It gives the reed's one mode a force projection of -1.0 on blade 0 (positive newtons close the reed, as the
 //! reed-performance route's closing force does), so the closing force enters as the positive force series of
 //! `TongueContactInput` through the shared source force scheduler; absent, the projection stays zero and nothing
-//! changes bit for bit. The row replaces `solid` or `loss`/`blades` and every plate record; it
+//! changes bit for bit. A card that states the row also starts the reed HELD: the DG file passes the static
+//! equilibrium under the tongue's first load (the constant net closing load over the reed stiffness) as the cold
+//! displacement, so the card does not begin with the reed being pressed shut from its rest opening, which radiates
+//! before the blow; a held load that reaches the lay is refused. The row replaces `solid` or `loss`/`blades` and every plate record; it
 //! carries no mesh, section, material memory, traction or closure, and no force port except that tongue.
 
 use super::{PlateValveInputError, Reader, bad};
@@ -62,6 +65,9 @@ pub(super) struct ReedHost {
     pub(super) time_step_s: f64,
     pub(super) max_steps: u64,
     pub(super) limits: PairedApertureLimits,
+    /// The reed's displacement [m] along its opening coordinate at the first sample, at rest (velocity 0): 0 unless the card
+    /// states a `tongue_contact` row, in which case the DG file passes the static equilibrium under the tongue's first load.
+    pub(super) start_displacement_m: f64,
 }
 
 impl ReedRecord {
@@ -117,7 +123,7 @@ impl ReedRecord {
                 max_steps: host.max_steps,
                 limits: host.limits,
             },
-            vec![BladeState { displacement_m: 0.0, velocity_m_s: 0.0 }],
+            vec![BladeState { displacement_m: host.start_displacement_m, velocity_m_s: 0.0 }],
             contact,
             propagator,
         )?;

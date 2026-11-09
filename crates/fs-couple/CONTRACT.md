@@ -7922,6 +7922,18 @@ the absence of a force port, and a render of a card without the row was compared
 before this change, on one host before landing). The attachment is refused on a plate or solid source and after the first
 accepted sample.
 
+## Held start of the DG typed reed under a tongue
+
+A DG-valve card that states `tongue_contact` starts its typed reed HELD: the reed's cold displacement is the static
+equilibrium under the tongue's first load, minus the constant net closing load that the tongue holds (its force at the
+first control tick plus the blowing pressure's push on the reed's face, `TongueContactInput::start_load_n`) over the
+reed's stiffness, with velocity zero. The file passes it to the aperture constructor as `ReedHost::start_displacement_m`;
+no parameter is added, and the card without the row starts at rest, bit for bit as before. Without this a tongue's first
+load, applied at the first sample to a reed at its rest opening, presses the reed toward its lay and the reed's swept
+volume radiates before the blow (read on the oboe D4 card: 0.114 Pa rms in the first 10 ms, nothing by 70 ms). A held
+load that reaches the lay (the start displacement at or beyond minus the rest opening) is refused for its own reason,
+not clamped: the contact would need its own law there.
+
 ## Broadband molecular absorption on finite gas storage
 
 `molecular_heating::spectrum::MolecularGasSpectrumHeating` binds distinct original

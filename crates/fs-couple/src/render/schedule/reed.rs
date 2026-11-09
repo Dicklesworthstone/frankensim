@@ -1717,6 +1717,22 @@ impl TongueContactInput {
         Ok(series)
     }
 
+    /// The net closing load [N] on the reed at the first control tick: the tongue's force at tick 0 plus the blowing
+    /// pressure's push `face p(0)`. While the tongue holds, this load is constant (see `force_series`); the DG route starts
+    /// its reed at the static equilibrium under it, so a held tongue is already holding when the card starts.
+    pub(crate) fn start_load_n(
+        &self,
+        schedule: &GestureSchedule,
+        track_id: &str,
+        face: f64,
+        last_tick: u64,
+    ) -> Result<f64, fs_scenario::gesture::GestureError> {
+        let series = self.force_series(schedule, track_id, face, last_tick)?;
+        let p0 = schedule.sample(track_id, 0)?;
+        // The series always carries tick 0 (nothing precedes it), so its first element is the force there.
+        Ok(series[0].1 + face * p0)
+    }
+
     fn append_controls(
         &self,
         controls: &mut Vec<ScheduledControl>,

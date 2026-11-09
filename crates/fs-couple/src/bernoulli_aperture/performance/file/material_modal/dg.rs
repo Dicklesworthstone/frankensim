@@ -391,6 +391,29 @@ impl MaterialModalDgValvePerformance {
             } else { None };
             prepared_plates.push((source, options, tensor));
         }
+        // A card that states a tongue starts its reed HELD: at the static equilibrium under the tongue's first load (the net
+        // closing load is constant while the tongue holds), not at its rest opening, so the card does not begin with the reed
+        // being pressed shut and radiating before the blow. Without the row the start state is the rest one, bit for bit.
+        let start_displacement_m = match reed.as_ref().and_then(|r| r.tongue_contact().map(|t| (r, t))) {
+            Some((record, tongue)) => {
+                let [track] = schedule.tracks() else {
+                    return Err(bad(rows.line, "one explicitly typed blowing-pressure track is required"));
+                };
+                let last_tick = (u128::from(samples.saturating_sub(1)) * u128::from(schedule.control_rate_hz)
+                    / u128::from(mechanics)) as u64;
+                let load_n = tongue
+                    .start_load_n(&schedule, &track.id, record.pressure_area_m2(), last_tick)
+                    .map_err(|e| PlateValveInputError::Gesture(
+                        crate::render::schedule::GestureCompileError::Gesture(e)))?;
+                let held_m = -load_n / record.stiffness_n_m();
+                if !(held_m.is_finite() && held_m > -record.rest_opening_m()) {
+                    return Err(bad(rows.line,
+                        "tongue_contact's held load closes the reed onto its lay at the start"));
+                }
+                held_m
+            }
+            None => 0.0,
+        };
         let (mut valve, solid) = if let Some(source) = solid {
             let (valve, record) = source.into_aperture(inlet,
                 crate::bernoulli_aperture::modal::solid::MaterialSolidOptions {
@@ -403,7 +426,7 @@ impl MaterialModalDgValvePerformance {
             let valve = record.into_aperture(
                 reed::ReedHost {
                     density_kg_m3: inlet.density, impedance_pa_s_m3: impedance,
-                    time_step_s: dt, max_steps: samples, limits,
+                    time_step_s: dt, max_steps: samples, limits, start_displacement_m,
                 },
                 contact, propagator,
             ).map_err(PlateValveInputError::Physics)?;

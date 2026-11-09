@@ -644,3 +644,56 @@ fn the_dg_tongue_force_events_are_the_shared_series_on_the_same_numbers() {
         assert_eq!(event.force_n.to_bits(), force_n.to_bits());
     }
 }
+
+/// The long card with the blow starting at 8 ms (a 10 ms ramp to 7.4 kPa) instead of at 0, so the first 8 ms are before the blow.
+fn late_blow(text: String) -> String {
+    let text = long(text).replace("event\t0e0\t2e-2\tpressure-pa\t7.4e3", "event\t8e-3\t1e-2\tpressure-pa\t7.4e3");
+    assert!(text.contains("event\t8e-3\t1e-2\tpressure-pa\t7.4e3"), "the late-blow gesture was not set");
+    text
+}
+
+/// A tongue held until 18 ms and let go over 4 ms, inside the 25 ms card.
+const HELD: &str = "tongue_contact 1.12e-5 6.979e-5 0.2 0.018 0.004";
+
+#[test]
+fn a_held_tongue_starts_the_reed_at_its_equilibrium_and_radiates_nothing_before_the_blow() {
+    use crate::render::schedule::reed::TongueContactInput;
+    use fs_scenario::gesture::GestureSchedule;
+    let held = late_blow(with_row(HELD));
+    let plain = late_blow(card(REED));
+    let schedule = GestureSchedule::from_canonical_bytes(
+        "frankensim-gesture-schedule-v1\ncontrol_rate_hz\t48000\ntracks\t1\ntrack\tmouth\tblowing-pressure\n\
+         initial\tpressure-pa\t0e0\nevents\t1\nevent\t8e-3\t1e-2\tpressure-pa\t7.4e3\n"
+            .as_bytes(),
+    )
+    .expect("the late-blow gesture suffix");
+    let source = super::build(&held, 37);
+    let record = source.reed_record().unwrap();
+    let tongue: TongueContactInput = *record.tongue_contact().unwrap();
+    // The net closing load the tongue holds on the reed at tick 0, over the reed's stiffness: the static equilibrium.
+    let load_n = tongue.start_load_n(&schedule, "mouth", record.pressure_area_m2(), 1199).unwrap();
+    let equilibrium_m = -load_n / record.stiffness_n_m();
+    assert!(equilibrium_m < -1e-4 && equilibrium_m > -record.rest_opening_m(), "{equilibrium_m}");
+    // The reed is AT the equilibrium after one sample and still there at 6.25 ms, before the blow (8 ms starts the ramp).
+    let first = displacement_after(&held, 1);
+    let before_blow = displacement_after(&held, 600);
+    assert!((first - equilibrium_m).abs() < 1e-9, "{first} against {equilibrium_m}");
+    assert!((before_blow - equilibrium_m).abs() < 1e-9, "{before_blow} against {equilibrium_m}");
+    // The row-less reed starts at its rest opening and stays there before the blow.
+    assert!(displacement_after(&plain, 600).abs() < 1e-12);
+    // Nothing is radiated before the blow: the held card's first 700 samples (7.3 ms) are silent, as the row-less card's.
+    let (quiet, _) = render(super::build(&held, 64));
+    let (control, _) = render(super::build(&plain, 64));
+    assert!(control[..700].iter().all(|p| *p == 0.0));
+    assert!(quiet[..700].iter().all(|p| p.abs() < 1e-9), "{:?}", quiet[..700].iter().fold(0.0_f64, |m, p| m.max(p.abs())));
+    // After the blow the held tongue still changes the sound, so the row is not silenced.
+    assert_ne!(bits(&quiet), bits(&control));
+}
+
+#[test]
+fn a_tongue_whose_held_load_reaches_the_lay_is_refused_for_its_own_reason() {
+    // 2 N times the modal factor plus the push of 7.4 kPa on the reed's face is about 2.3 N, 0.66 mm at 3464 N/m: past the
+    // 0.357 mm rest opening, so the reed would start on its lay and that needs the contact law, not a clamp.
+    let late = late_blow(with_row("tongue_contact 1.12e-5 6.979e-5 2.0 0.018 0.004"));
+    assert_eq!(refused(&late).1, "tongue_contact's held load closes the reed onto its lay at the start");
+}
