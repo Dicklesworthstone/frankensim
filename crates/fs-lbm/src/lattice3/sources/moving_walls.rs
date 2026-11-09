@@ -131,7 +131,7 @@ fn serial<L: ForcedLattice3<Q>, const Q: usize>(
     super::serial_with_wall_motion(
         grid,
         start,
-        end,
+        super::EndpointForcing::Density(end),
         collisions,
         cx,
         moving.then_some(&motion),
@@ -162,7 +162,7 @@ fn pooled<L: ForcedLattice3<Q>, const Q: usize, P: KernelRunner>(
     super::pooled_with_wall_motion(
         grid,
         start,
-        end,
+        super::EndpointForcing::Density(end),
         collisions,
         pool,
         gate,

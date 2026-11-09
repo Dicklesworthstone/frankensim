@@ -713,12 +713,27 @@ impl<L: Lattice3<Q>, const Q: usize> StepData<'_, L, Q> {
         base: usize,
         stream: bool,
     ) -> Result<(), GridError3<L::Error>> {
+        self.process_with_endpoint_admission::<true>(src, dst, base, stream)
+    }
+
+    // A density-dependent source owner admits the completed stream once its
+    // endpoint force is known. The original native pull remains unchanged.
+    fn process_with_endpoint_admission<const ADMIT: bool>(
+        &self,
+        src: &[[f64; Q]],
+        dst: &mut [[f64; Q]],
+        base: usize,
+        stream: bool,
+    ) -> Result<(), GridError3<L::Error>> {
         if stream {
             return self.process_stream_with_endpoint::<false>(
                 src,
                 dst,
                 base,
                 |cell, output, _| {
+                    if !ADMIT {
+                        return Ok(());
+                    }
                     let force = self.forces.map_or(self.force, |field| field[cell]);
                     macro_cell::<L, Q>(output, force, cell, self.budget.maximum_mach).map(|_| ())
                 },
@@ -757,6 +772,38 @@ impl<L: Lattice3<Q>, const Q: usize> StepData<'_, L, Q> {
             base,
             |cell, output, transport| endpoint(cell, output, transport),
         )
+    }
+
+    // Runs in the original stream tile after all native wall corrections.
+    // The supplied endpoint vector becomes force storage in place. No extra
+    // grid buffer, transport pass or serial whole-grid moment sweep is needed.
+    fn resolve_acceleration(
+        &self,
+        populations: &[[f64; Q]],
+        acceleration: &mut [[f64; 3]],
+        base: usize,
+        maximum_mach: fn(L::Collision) -> f64,
+    ) -> Result<(), GridError3<L::Error>> {
+        for (offset, (pop, value)) in populations.iter().zip(acceleration).enumerate() {
+            let cell = base + offset;
+            if self.solid[cell] {
+                continue;
+            }
+            let (rho, momentum) = raw_moments_cell::<L, Q>(pop, cell)?;
+            *value = value.map(|a| rho * a);
+            let velocity: [f64; 3] = core::array::from_fn(|a| (momentum[a] + 0.5 * value[a]) / rho);
+            let collision = self.collisions.map_or(self.collision, |field| field[cell]);
+            let maximum = self.budget.maximum_mach.min(maximum_mach(collision));
+            let mach = (velocity.iter().map(|v| v * v).sum::<f64>() / L::CS2).sqrt();
+            if !mach.is_finite() || mach > maximum {
+                return Err(GridError3::Mach {
+                    cell,
+                    observed: mach,
+                    maximum,
+                });
+            }
+        }
+        Ok(())
     }
 
     // A boundary owner completes the same native pull before final physical
@@ -857,9 +904,10 @@ impl<E: Send> Reduce for FirstError<E> {
 struct StepKernel<'a, 'b, L: Lattice3<Q>, const Q: usize> {
     data: &'a StepData<'b, L, Q>,
     src: &'a [[f64; Q]],
-    chunks: Vec<Mutex<&'a mut [[f64; Q]]>>,
+    chunks: Vec<Mutex<(&'a mut [[f64; Q]], Option<&'a mut [[f64; 3]]>)>>,
     stream: bool,
     motion: Option<&'a moving_walls::WallMotion3<'a, L, Q>>,
+    acceleration_maximum_mach: Option<fn(L::Collision) -> f64>,
 }
 impl<L: Lattice3<Q>, const Q: usize> TileKernel for StepKernel<'_, '_, L, Q> {
     type Out = FirstError<L::Error>;
@@ -878,15 +926,43 @@ impl<L: Lattice3<Q>, const Q: usize> TileKernel for StepKernel<'_, '_, L, Q> {
             return ControlFlow::Break(Cancelled);
         }
         let outcome = match self.chunks[tile as usize].lock() {
-            Ok(mut chunk) => match self.motion {
-                Some(walls) => {
-                    self.data
-                        .process_moving_walls(self.src, &mut chunk, tile as usize * 64, walls)
-                }
-                None => self
-                    .data
-                    .process(self.src, &mut chunk, tile as usize * 64, self.stream),
-            },
+            Ok(mut chunk) => {
+                let (chunk, acceleration) = &mut *chunk;
+                let outcome = match (self.acceleration_maximum_mach.is_none(), self.motion) {
+                    (true, Some(walls)) => {
+                        self.data
+                            .process_moving_walls(self.src, chunk, tile as usize * 64, walls)
+                    }
+                    (false, Some(walls)) => self
+                        .data
+                        .process_moving_walls_with_endpoint_admission::<false>(
+                            self.src,
+                            chunk,
+                            tile as usize * 64,
+                            walls,
+                        ),
+                    (false, None) => self.data.process_with_endpoint_admission::<false>(
+                        self.src,
+                        chunk,
+                        tile as usize * 64,
+                        self.stream,
+                    ),
+                    (true, None) => {
+                        self.data
+                            .process(self.src, chunk, tile as usize * 64, self.stream)
+                    }
+                };
+                outcome.and_then(|()| {
+                    if let (Some(values), Some(maximum)) =
+                        (acceleration, self.acceleration_maximum_mach)
+                    {
+                        self.data
+                            .resolve_acceleration(chunk, values, tile as usize * 64, maximum)
+                    } else {
+                        Ok(())
+                    }
+                })
+            }
             Err(_) => Err(GridError3::Poisoned),
         };
         ControlFlow::Continue(FirstError(outcome.err()))
@@ -911,12 +987,42 @@ fn run_pass_with_wall_motion<L: Lattice3<Q>, const Q: usize, P: KernelRunner>(
     gate: &CancelGate,
     motion: Option<&moving_walls::WallMotion3<'_, L, Q>>,
 ) -> Result<(), GridError3<L::Error>> {
+    run_pass_with_endpoint_acceleration(data, src, dst, stream, pool, gate, motion, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_pass_with_endpoint_acceleration<L: Lattice3<Q>, const Q: usize, P: KernelRunner>(
+    data: &StepData<'_, L, Q>,
+    src: &[[f64; Q]],
+    dst: &mut [[f64; Q]],
+    stream: bool,
+    pool: &P,
+    gate: &CancelGate,
+    motion: Option<&moving_walls::WallMotion3<'_, L, Q>>,
+    acceleration: Option<(&mut [[f64; 3]], fn(L::Collision) -> f64)>,
+) -> Result<(), GridError3<L::Error>> {
+    let (chunks, acceleration_maximum_mach) = match acceleration {
+        Some((values, maximum)) => (
+            dst.chunks_mut(64)
+                .zip(values.chunks_mut(64))
+                .map(|(pop, a)| Mutex::new((pop, Some(a))))
+                .collect(),
+            Some(maximum),
+        ),
+        None => (
+            dst.chunks_mut(64)
+                .map(|pop| Mutex::new((pop, None)))
+                .collect(),
+            None,
+        ),
+    };
     let kernel = StepKernel {
         data,
         src,
-        chunks: dst.chunks_mut(64).map(Mutex::new).collect(),
+        chunks,
         stream,
         motion,
+        acceleration_maximum_mach,
     };
     match pool.run_with_gate(&kernel, gate).0 {
         Ok(FirstError(None)) => Ok(()),

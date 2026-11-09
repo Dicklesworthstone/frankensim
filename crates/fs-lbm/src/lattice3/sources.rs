@@ -10,13 +10,16 @@
 
 use super::moving_walls::WallMotion3;
 use super::{
-    Grid3, GridError3, Lattice3, StepData, macro_cell, run_pass, run_pass_with_wall_motion,
+    Grid3, GridError3, Lattice3, StepData, macro_cell, run_pass,
+    run_pass_with_endpoint_acceleration,
 };
 use core::marker::PhantomData;
 use fs_exec::{CancelGate, Cx, KernelRunner};
 
+mod acceleration;
 /// Source-preserving material viscosity and density-driven buoyancy.
 pub mod material;
+use acceleration::EndpointForcing;
 mod moving_walls;
 /// Implicit anisotropic Darcy–Forchheimer sources with native momentum exchange.
 pub mod resistance;
@@ -27,6 +30,10 @@ pub mod resistance;
 /// physical-population forcing for the D3Q19 moment families.
 pub trait ForcedLattice3<const Q: usize>: Lattice3<Q> {
     fn supports_body_force(collision: Self::Collision) -> bool;
+    /// Collision-specific physical speed limit at a source-bearing endpoint.
+    fn forcing_maximum_mach(_collision: Self::Collision) -> f64 {
+        crate::MACH_LIMIT
+    }
 }
 impl ForcedLattice3<19> for super::D3q19 {
     fn supports_body_force(collision: Self::Collision) -> bool {
@@ -36,6 +43,9 @@ impl ForcedLattice3<19> for super::D3q19 {
 impl ForcedLattice3<27> for crate::d3q27::D3q27 {
     fn supports_body_force(_collision: Self::Collision) -> bool {
         true
+    }
+    fn forcing_maximum_mach(collision: Self::Collision) -> f64 {
+        collision.maximum_mach
     }
 }
 
@@ -310,7 +320,15 @@ fn serial<L: ForcedLattice3<Q>, const Q: usize>(
     collisions: &[L::Collision],
     cx: &Cx<'_>,
 ) -> Result<(), GridError3<L::Error>> {
-    serial_with_wall_motion(grid, start, end, collisions, cx, None, |_| Ok(()))
+    serial_with_wall_motion(
+        grid,
+        start,
+        EndpointForcing::Density(end),
+        collisions,
+        cx,
+        None,
+        |_| Ok(()),
+    )
 }
 
 // Source endpoints and optional wall corrections share the ORIGINAL native
@@ -318,7 +336,7 @@ fn serial<L: ForcedLattice3<Q>, const Q: usize>(
 fn serial_with_wall_motion<L: ForcedLattice3<Q>, const Q: usize, R>(
     grid: &mut Grid3<L, Q>,
     start: &[[f64; 3]],
-    end: &[[f64; 3]],
+    end: EndpointForcing<'_>,
     collisions: &[L::Collision],
     cx: &Cx<'_>,
     motion: Option<&WallMotion3<'_, L, Q>>,
@@ -326,7 +344,7 @@ fn serial_with_wall_motion<L: ForcedLattice3<Q>, const Q: usize, R>(
 ) -> Result<R, GridError3<L::Error>> {
     let mut poll = || cx.checkpoint().map_err(|_| GridError3::Cancelled);
     grid.admit_collisions(collisions, &mut poll)?;
-    admit_forces(grid, end, Some(collisions), &mut poll)?;
+    admit_forces(grid, end.values(), Some(collisions), &mut poll)?;
     let step = grid
         .completed_steps
         .checked_add(1)
@@ -346,16 +364,33 @@ fn serial_with_wall_motion<L: ForcedLattice3<Q>, const Q: usize, R>(
         poll()?;
         data.process(&grid.f, chunk, tile * 64, false)?;
     }
-    let data = StepData {
-        forces: Some(end),
-        ..data
-    };
+    let (forces, mut acceleration) = end.split();
+    let admit_endpoint = acceleration.is_none();
+    let data = StepData { forces, ..data };
     for (tile, chunk) in grid.next.chunks_mut(64).enumerate() {
         poll()?;
-        if let Some(motion) = motion {
-            data.process_moving_walls(&grid.post, chunk, tile * 64, motion)?;
-        } else {
-            data.process(&grid.post, chunk, tile * 64, true)?;
+        match (admit_endpoint, motion) {
+            (true, Some(motion)) => {
+                data.process_moving_walls(&grid.post, chunk, tile * 64, motion)?
+            }
+            (true, None) => data.process(&grid.post, chunk, tile * 64, true)?,
+            (false, Some(motion)) => data.process_moving_walls_with_endpoint_admission::<false>(
+                &grid.post,
+                chunk,
+                tile * 64,
+                motion,
+            )?,
+            (false, None) => {
+                data.process_with_endpoint_admission::<false>(&grid.post, chunk, tile * 64, true)?
+            }
+        }
+        if let Some(values) = acceleration.as_deref_mut() {
+            data.resolve_acceleration(
+                chunk,
+                &mut values[tile * 64..tile * 64 + chunk.len()],
+                tile * 64,
+                L::forcing_maximum_mach,
+            )?;
         }
     }
     poll()?;
@@ -374,14 +409,23 @@ fn pooled<L: ForcedLattice3<Q>, const Q: usize, P: KernelRunner>(
     pool: &P,
     gate: &CancelGate,
 ) -> Result<(), GridError3<L::Error>> {
-    pooled_with_wall_motion(grid, start, end, collisions, pool, gate, None, |_| Ok(()))
+    pooled_with_wall_motion(
+        grid,
+        start,
+        EndpointForcing::Density(end),
+        collisions,
+        pool,
+        gate,
+        None,
+        |_| Ok(()),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
 fn pooled_with_wall_motion<L: ForcedLattice3<Q>, const Q: usize, P: KernelRunner, R>(
     grid: &mut Grid3<L, Q>,
     start: &[[f64; 3]],
-    end: &[[f64; 3]],
+    end: EndpointForcing<'_>,
     collisions: &[L::Collision],
     pool: &P,
     gate: &CancelGate,
@@ -396,7 +440,7 @@ fn pooled_with_wall_motion<L: ForcedLattice3<Q>, const Q: usize, P: KernelRunner
         }
     };
     grid.admit_collisions(collisions, &mut poll)?;
-    admit_forces(grid, end, Some(collisions), &mut poll)?;
+    admit_forces(grid, end.values(), Some(collisions), &mut poll)?;
     let step = grid
         .completed_steps
         .checked_add(1)
@@ -413,11 +457,18 @@ fn pooled_with_wall_motion<L: ForcedLattice3<Q>, const Q: usize, P: KernelRunner
         marker: PhantomData,
     };
     run_pass(&data, &grid.f, &mut grid.post, false, pool, gate)?;
-    let data = StepData {
-        forces: Some(end),
-        ..data
-    };
-    run_pass_with_wall_motion(&data, &grid.post, &mut grid.next, true, pool, gate, motion)?;
+    let (forces, acceleration) = end.split();
+    let data = StepData { forces, ..data };
+    run_pass_with_endpoint_acceleration(
+        &data,
+        &grid.post,
+        &mut grid.next,
+        true,
+        pool,
+        gate,
+        motion,
+        acceleration.map(|values| (values, L::forcing_maximum_mach as fn(L::Collision) -> f64)),
+    )?;
     poll()?;
     let result = observe(grid)?;
     poll()?;
@@ -554,6 +605,270 @@ mod tests {
         }
     }
     #[test]
+    fn native_acceleration_uses_transported_density_and_preserves_impulse() {
+        fn exercise<L: super::super::EquilibriumLattice3<Q>, const Q: usize>(law: L::Collision) {
+            let start: Vec<_> = (0..N)
+                .map(|i| [1e-5 * (i as f64).cos(), 0.0, 0.0])
+                .collect();
+            let end: Vec<_> = (0..N)
+                .map(|i| [2e-5, 1e-5 * (i as f64).sin(), 0.0])
+                .collect();
+            let make = || {
+                with_cx(|cx| {
+                    ForcedGrid3::try_new_with_body_acceleration_preserving_velocity(
+                        Grid3::<L, Q>::try_new_equilibrium(
+                            [N, 1, 1],
+                            law,
+                            [0.0; 3],
+                            [true; 3],
+                            GridBudget3 {
+                                maximum_cells: N,
+                                maximum_mach: 0.2,
+                            },
+                            |_| false,
+                            |p| {
+                                (
+                                    1.0 + 0.1
+                                        * (core::f64::consts::TAU * p[0] as f64 / N as f64).cos(),
+                                    [0.01, 0.0, 0.0],
+                                )
+                            },
+                        )
+                        .unwrap(),
+                        cx,
+                        start.clone(),
+                    )
+                    .unwrap()
+                })
+            };
+            let mut actual = make();
+            assert!((actual.macroscopic(7).unwrap().1[0] - 0.01).abs() < 1e-14);
+            let momentum = |flow: &ForcedGrid3<L, Q>| -> [f64; 3] {
+                core::array::from_fn(|a| {
+                    (0..N)
+                        .map(|i| {
+                            let (rho, u) = flow.macroscopic(i).unwrap();
+                            rho * u[a]
+                        })
+                        .sum()
+                })
+            };
+            let before = momentum(&actual);
+            let old_forces = actual.forces().to_vec();
+            let old_rho = actual.macroscopic(7).unwrap().0;
+            let mut expected = vec![[0.0; Q]; N];
+            for i in 0..N {
+                let post = L::collide(actual.populations()[i], law, old_forces[i]).unwrap();
+                for q in 0..Q {
+                    let target = (i as i32 + L::E[q][0]).rem_euclid(N as i32) as usize;
+                    expected[target][q] = post[q];
+                }
+            }
+            let forces: Vec<_> = expected
+                .iter()
+                .zip(&end)
+                .map(|(f, a)| a.map(|v| v * f.iter().sum::<f64>()))
+                .collect();
+            let laws = vec![law; N];
+            with_cx(|cx| {
+                actual
+                    .advance_serial_with_body_acceleration(cx, &laws, end.clone())
+                    .unwrap()
+            });
+            assert_eq!(bits::<L, Q>(actual.populations()), bits::<L, Q>(&expected));
+            assert_eq!(actual.forces(), forces);
+            assert!((actual.macroscopic(7).unwrap().0 - old_rho).abs() > 1e-6);
+            for a in 0..3 {
+                let impulse: f64 = old_forces
+                    .iter()
+                    .zip(&forces)
+                    .map(|(f0, f1)| 0.5 * (f0[a] + f1[a]))
+                    .sum();
+                assert!((momentum(&actual)[a] - before[a] - impulse).abs() < 2e-12);
+            }
+            for workers in [1, 3] {
+                let mut parallel = make();
+                parallel
+                    .advance_pooled_with_body_acceleration(
+                        &TilePool::for_host(workers, SEED),
+                        &CancelGate::new_clock_free(),
+                        &laws,
+                        end.clone(),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    bits::<L, Q>(parallel.populations()),
+                    bits::<L, Q>(&expected)
+                );
+                assert_eq!(parallel.forces(), forces);
+            }
+        }
+        exercise::<D3q19, 19>(CollisionModel3::Bgk { tau: 0.8 });
+        exercise::<D3q19, 19>(CollisionModel3::ReducedCumulant {
+            second_order_rate: 1.25,
+            third_order_rate: 1.35,
+            fourth_order_rate: 1.72,
+        });
+        exercise::<D3q27, 27>(bgk());
+        exercise::<D3q27, 27>(CollisionConfig27 {
+            model: CollisionModel27::Cumulant {
+                rates: Rates27 { omega: [1.25; 10] },
+            },
+            maximum_mach: 0.2,
+        });
+    }
+
+    #[test]
+    fn acceleration_and_moving_walls_share_native_impulse_and_work() {
+        let make = || {
+            with_cx(|cx| {
+                ForcedGrid3::try_new_with_body_acceleration_preserving_velocity(
+                    Grid3::<D3q27, 27>::try_new_equilibrium(
+                        [4, 4, 2],
+                        bgk(),
+                        [0.0; 3],
+                        [true, false, true],
+                        GridBudget3 {
+                            maximum_cells: 32,
+                            maximum_mach: 0.2,
+                        },
+                        |_| false,
+                        |p| (1.0 + 0.03 * p[0] as f64, [0.01, 0.0, 0.0]),
+                    )
+                    .unwrap(),
+                    cx,
+                    vec![[1e-5, 0.0, 0.0]; 32],
+                )
+                .unwrap()
+            })
+        };
+        let mut actual = make();
+        let mut reference = make();
+        let probe = with_cx(|cx| actual.wall_momentum_probe(cx, [0.0; 3], |_| true).unwrap());
+        let velocities: Vec<_> = probe
+            .wall_links()
+            .map(|link| {
+                [
+                    if link.exterior_faces[3] {
+                        0.015
+                    } else {
+                        -0.005
+                    },
+                    0.0,
+                    0.0,
+                ]
+            })
+            .collect();
+        let momentum = |flow: &ForcedGrid3<D3q27, 27>| -> [f64; 3] {
+            core::array::from_fn(|a| {
+                (0..32)
+                    .map(|i| {
+                        let (rho, u) = flow.macroscopic(i).unwrap();
+                        rho * u[a]
+                    })
+                    .sum()
+            })
+        };
+        let before = momentum(&actual);
+        let old_forces = actual.forces().to_vec();
+        let end: Vec<_> = (0..32)
+            .map(|i| [2e-5 * (i as f64).cos(), 0.0, 0.0])
+            .collect();
+        let receipt = with_cx(|cx| {
+            actual
+                .advance_serial_with_body_acceleration_and_moving_wall_momentum(
+                    cx,
+                    &probe,
+                    &velocities,
+                    &vec![bgk(); 32],
+                    end.clone(),
+                )
+                .unwrap()
+        });
+        let expected_receipt = with_cx(|cx| {
+            reference
+                .advance_serial_with_moving_wall_momentum(
+                    cx,
+                    &probe,
+                    &velocities,
+                    &vec![bgk(); 32],
+                    actual.forces().to_vec(),
+                )
+                .unwrap()
+        });
+        assert_eq!(receipt, expected_receipt);
+        assert_ne!(receipt.wall_work, 0.0);
+        assert_eq!(
+            bits::<D3q27, 27>(actual.populations()),
+            bits::<D3q27, 27>(reference.populations())
+        );
+        for a in 0..3 {
+            let impulse: f64 = old_forces
+                .iter()
+                .zip(actual.forces())
+                .map(|(f0, f1)| 0.5 * (f0[a] + f1[a]))
+                .sum();
+            assert!(
+                (momentum(&actual)[a] - before[a] - impulse - receipt.fluid_population_impulse[a])
+                    .abs()
+                    < 2e-13
+            );
+        }
+        let mut parallel = make();
+        let pooled = parallel
+            .advance_pooled_with_body_acceleration_and_moving_wall_momentum(
+                &TilePool::for_host(3, SEED),
+                &CancelGate::new_clock_free(),
+                &probe,
+                &velocities,
+                &vec![bgk(); 32],
+                end,
+            )
+            .unwrap();
+        assert_eq!(pooled, receipt);
+        assert_eq!(
+            bits::<D3q27, 27>(parallel.populations()),
+            bits::<D3q27, 27>(actual.populations())
+        );
+        assert_eq!(parallel.forces(), actual.forces());
+    }
+
+    #[test]
+    fn acceleration_admits_actual_endpoint_mach_and_retries_zero_exactly() {
+        let law = CollisionConfig27 {
+            maximum_mach: 0.03,
+            ..bgk()
+        };
+        let make = || {
+            with_cx(|cx| {
+                ForcedGrid3::try_new(grid::<D3q27, 27>(law, [0.0; 3]), cx, vec![[0.0; 3]; N])
+                    .unwrap()
+            })
+        };
+        let mut actual = make();
+        let mut expected = make();
+        let before = bits::<D3q27, 27>(actual.populations());
+        let mut end = vec![[0.0; 3]; N];
+        end[N - 1][0] = 0.1; // Below grid Mach 0.2, above this collision's 0.03.
+        with_cx(|cx| {
+            assert!(
+                matches!(actual.advance_serial_with_body_acceleration(cx, &vec![law; N], end), Err(GridError3::Mach { cell, maximum: 0.03, .. }) if cell == N - 1)
+            );
+            assert_eq!(bits::<D3q27, 27>(actual.populations()), before);
+            assert_eq!(actual.forces(), vec![[0.0; 3]; N]);
+            assert_eq!(actual.completed_steps(), 0);
+            actual
+                .advance_serial_with_body_acceleration(cx, &vec![law; N], vec![[0.0; 3]; N])
+                .unwrap();
+            expected.step_serial(cx, &vec![law; N]).unwrap();
+        });
+        assert_eq!(
+            bits::<D3q27, 27>(actual.populations()),
+            bits::<D3q27, 27>(expected.populations())
+        );
+        assert_eq!(actual.forces(), expected.forces());
+    }
+    #[test]
     fn spatial_forces_match_independent_push_streaming() {
         let forces: Vec<_> = (0..N).map(|i| [1e-7 * i as f64, -2e-6, 0.0]).collect();
         let mut local = with_cx(|cx| {
@@ -640,37 +955,54 @@ mod tests {
         };
         let laws = vec![bgk(); N];
         let end = vec![[1e-6, 0.0, 0.0]; N];
-        let mut expected = make();
-        with_cx(|cx| expected.advance_serial(cx, &laws, end.clone()).unwrap());
-        for after in [0, 1] {
-            let runner = CancelPass {
-                pool: TilePool::for_host(2, SEED),
-                calls: AtomicUsize::new(0),
-                after,
+        for acceleration in [false, true] {
+            let advance_serial = if acceleration {
+                ForcedGrid3::<D3q27, 27>::advance_serial_with_body_acceleration
+            } else {
+                ForcedGrid3::<D3q27, 27>::advance_serial
             };
-            let mut actual = make();
-            let before = bits::<D3q27, 27>(actual.populations());
-            let gate = CancelGate::new_clock_free();
-            assert!(matches!(
-                actual.advance_pooled(&runner, &gate, &laws, end.clone()),
-                Err(GridError3::Cancelled)
-            ));
-            assert_eq!(bits::<D3q27, 27>(actual.populations()), before);
-            assert_eq!(actual.forces(), vec![[0.0; 3]; N]);
-            assert_eq!(actual.completed_steps(), 0);
-            actual
-                .advance_pooled(
+            let advance_pooled = if acceleration {
+                ForcedGrid3::<D3q27, 27>::advance_pooled_with_body_acceleration::<CancelPass>
+            } else {
+                ForcedGrid3::<D3q27, 27>::advance_pooled::<CancelPass>
+            };
+            let retry = if acceleration {
+                ForcedGrid3::<D3q27, 27>::advance_pooled_with_body_acceleration::<TilePool>
+            } else {
+                ForcedGrid3::<D3q27, 27>::advance_pooled::<TilePool>
+            };
+            let mut expected = make();
+            with_cx(|cx| advance_serial(&mut expected, cx, &laws, end.clone()).unwrap());
+            for after in [0, 1] {
+                let runner = CancelPass {
+                    pool: TilePool::for_host(2, SEED),
+                    calls: AtomicUsize::new(0),
+                    after,
+                };
+                let mut actual = make();
+                let before = bits::<D3q27, 27>(actual.populations());
+                let gate = CancelGate::new_clock_free();
+                assert!(matches!(
+                    advance_pooled(&mut actual, &runner, &gate, &laws, end.clone()),
+                    Err(GridError3::Cancelled)
+                ));
+                assert_eq!(bits::<D3q27, 27>(actual.populations()), before);
+                assert_eq!(actual.forces(), vec![[0.0; 3]; N]);
+                assert_eq!(actual.completed_steps(), 0);
+                retry(
+                    &mut actual,
                     &runner.pool,
                     &CancelGate::new_clock_free(),
                     &laws,
                     end.clone(),
                 )
                 .unwrap();
-            assert_eq!(
-                bits::<D3q27, 27>(actual.populations()),
-                bits::<D3q27, 27>(expected.populations())
-            );
-            assert_eq!(actual.forces(), expected.forces());
+                assert_eq!(
+                    bits::<D3q27, 27>(actual.populations()),
+                    bits::<D3q27, 27>(expected.populations())
+                );
+                assert_eq!(actual.forces(), expected.forces());
+            }
         }
     }
     #[test]

@@ -240,6 +240,16 @@ impl<L: Lattice3<Q>, const Q: usize> StepData<'_, L, Q> {
         base: usize,
         motion: &WallMotion3<'_, L, Q>,
     ) -> Result<(), GridError3<L::Error>> {
+        self.process_moving_walls_with_endpoint_admission::<true>(src, dst, base, motion)
+    }
+
+    pub(super) fn process_moving_walls_with_endpoint_admission<const ADMIT: bool>(
+        &self,
+        src: &[[f64; Q]],
+        dst: &mut [[f64; Q]],
+        base: usize,
+        motion: &WallMotion3<'_, L, Q>,
+    ) -> Result<(), GridError3<L::Error>> {
         let links = &motion.probe.links;
         let mut selected = links.partition_point(|link| link.cell < base);
         for (offset, output) in dst.iter_mut().enumerate() {
@@ -262,8 +272,10 @@ impl<L: Lattice3<Q>, const Q: usize> StepData<'_, L, Q> {
                     selected += 1;
                 }
             }
-            let force = self.forces.map_or(self.force, |field| field[cell]);
-            macro_cell::<L, Q>(output, force, cell, self.budget.maximum_mach)?;
+            if ADMIT {
+                let force = self.forces.map_or(self.force, |field| field[cell]);
+                macro_cell::<L, Q>(output, force, cell, self.budget.maximum_mach)?;
+            }
         }
         Ok(())
     }

@@ -39,6 +39,26 @@ on graded cells, formation-reference invariance, native Smagorinsky coupling,
 Schmidt/heat-policy separation, introduction from exact species absence,
 impermeable solids, exact null controls and immutable refusal.
 
+## Spatial acceleration on shared D3Q19/D3Q27 transport
+
+`ForcedGrid3::try_new_with_body_acceleration_preserving_velocity` initializes
+`F = rho*a` in the native half-source frame without changing physical velocity
+or stress. `advance_serial_with_body_acceleration` and its pooled/moving-wall
+counterparts accept the next spatial acceleration in lattice units (`a_SI*dt²/dx`).
+Collision uses the accepted force; each completed native stream tile resolves
+`F_(n+1) = rho_(n+1)*a_(n+1)` using its actual transported, wall-corrected density.
+Both the grid and native collision Mach limits apply to that physical endpoint.
+
+The caller's vector becomes force storage in place. The original collision and
+stream remain the only executor passes; workers perform endpoint admission and
+retain canonical error ordering. Native wall receipts measure the same corrected
+populations and retain their impulse/work meaning. Failure or cancellation
+publishes neither populations, force history nor step count. Existing force-density
+steps retain their meaning; a held acceleration requires explicit next endpoints.
+The selected molecular/SGS collision field, fixed wall topology and low-Mach
+isothermal scope remain native. These APIs do not add open or moving-geometry
+boundary physics, implicit velocity-dependent loads, or a fluid energy equation.
+
 ## Plane-wall Mann turbulence at native D3Q19 inlets
 
 With `turbulent-inflow`, `BoundaryMannInflow3::new_with_plane_wall` binds the
