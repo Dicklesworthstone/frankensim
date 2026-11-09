@@ -13,6 +13,7 @@ use super::*;
 use crate::near_field::FirstOrder;
 
 mod band;
+mod readout;
 
 /// Maximum processed pressure channels in one prepared bank.
 pub const MAX_PRESSURE_ARRAY_CHANNELS: usize = 64;
@@ -53,6 +54,8 @@ pub struct HarmonicPressureArrayLimits {
     /// Linear real contractions, temporal field products and averaged-channel
     /// covariance terms. Each bank admits the larger of its original pair work
     /// and a 17-mode projection bound; counts include both matrix triangles.
+    /// Linear readouts admit their original work or a coherent high-carrier
+    /// envelope projection, including its bounded preparation, whichever is larger.
     pub maximum_query_products: usize,
     /// Logical retained payload plus preparation temporaries, query accumulators
     /// and one returned observation. Borrowed original fields and allocator
@@ -331,6 +334,7 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
         let bank_count = source.factors.len() + 1;
         let mut lines = 0usize;
         let mut temporal_products = 0usize;
+        let mut readout_products = 0usize;
         let mut band_scratch = 0usize;
         for bank in source.banks() {
             lines = lines.checked_add(bank.lines.len()).ok_or_else(overflow)?;
@@ -338,6 +342,9 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
             temporal_products = temporal_products
                 .checked_add(products)
                 .ok_or_else(overflow)?;
+            band_scratch = band_scratch.max(scratch);
+            let (products, scratch) = readout::admission(bank.lines.len(), n)?;
+            readout_products = readout_products.checked_add(products).ok_or_else(overflow)?;
             band_scratch = band_scratch.max(scratch);
         }
         // The number of unique frequencies is at most the retained line count.
@@ -360,10 +367,8 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
             .and_then(|p| p.checked_add(lines.checked_mul(bank_count)?))
             .and_then(|p| p.checked_add(microphone_products))
             .ok_or_else(overflow)?;
-        let query_products = lines
-            .checked_mul(n)
-            .and_then(|p| p.checked_mul(2))
-            .and_then(|p| p.checked_add(temporal_products))
+        let query_products = readout_products
+            .checked_add(temporal_products)
             .and_then(|p| p.checked_add(n.checked_mul(n)?.checked_mul(source.factors.len())?))
             .ok_or_else(overflow)?;
         admit(prepare_products, MAX_PRODUCTS)?;
@@ -662,7 +667,9 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
             // A proper temporal factor removes a common carrier only for
             // second moments. Its mode zero cannot replace the original-clock
             // field average used in the readout covariance.
-            if !projected || bank.statistics == HarmonicExposureFactorStatistics::ProperComplex {
+            let mean_projected = (projected && bank.statistics == HarmonicExposureFactorStatistics::Real)
+                || readout::accumulate(bank, window, &mut integrated, &mut cancelled)?;
+            if !mean_projected {
                 for line in &bank.lines {
                     poll(&mut cancelled)?;
                     let dc = window
@@ -799,3 +806,7 @@ mod tests;
 
 #[cfg(test)]
 mod band_tests;
+
+#[cfg(test)]
+mod readout_tests;
+

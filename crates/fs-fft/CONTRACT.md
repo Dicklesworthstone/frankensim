@@ -1428,3 +1428,37 @@ Consumers that delegate admission directly, including coherent diffraction,
 inherit the new source-count eligibility and its corresponding projection-work
 preflight. This does not enlarge the accepted phase span or provide arbitrary
 null-relative roundoff certification.
+
+### Coherent original-carrier linear readouts
+
+`HarmonicWindow::prepare_high_carrier_readout_rad_s_in` prepares an allocation-free
+linear analytic-field readout on the original angular-frequency/DD clock. Its
+fixed workspace retains source rotations, at most 36 envelope Taylor rows and
+analytic uniform/triangular carrier moments. Fields interfere in the envelope
+coefficients before carrier integration; the final common-carrier rotation is
+applied once. Frequency high/low parts, clock high/low parts and interval phase
+remain separate through the existing `rotation_parts` path. The returned mean
+has no proper-peak half factor: real measurements use its real component;
+proper averaged-readout covariance uses both complex components under its
+existing one-half law. This API does not compute field power.
+
+The bounded lane admits 2..64 original rad/s tones, envelope half-width <=0.5
+and absolute carrier half-phase in [64,2^500]. Other counts/bands/carriers return
+None for the caller's original kernels; nonfinite inputs or unrepresentable
+phase products remain errors. Integration by parts gives stable upward moment
+recurrences with n/|C|<=35/64. Adaptive Taylor order bounds the exact-arithmetic
+omitted amplitude by 1e-51 times the sum of input amplitude magnitudes; this
+truncation bound excludes floating arithmetic, phase/model uncertainty and
+relative error at arbitrary nulls. The workspace numerical payload is 39,488
+bytes, with 2,048 bytes of fixed centered-field query scratch, excluding scalar
+locals, reference metadata, compiler temporaries and call-stack overhead.
+
+Seven focused tests pass against the actual harmonic-window source graph and
+DD math, including independent 100-digit original-frequency sinc/sinc² oracles,
+signed carriers, complex-field time integration, normalization, source/shape
+admission, scratch reuse, the upper carrier boundary, sub-binary64 clock shifts,
+and the retained low-frequency*low-clock phase. For three consecutive binary64
+frequencies starting at 128 rad/s with coefficients [1,-2,1] on [-0.5,0.5], the
+original-carrier mean is -2.940312874907295e-30 (uniform) or
+3.3057850987980426e-32 (triangular), both retained by this factor. The complete
+workspace/native solver graph was not built; no unrelated FFT tests are claimed.

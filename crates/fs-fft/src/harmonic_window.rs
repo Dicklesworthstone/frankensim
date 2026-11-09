@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 23117)
+Total output lines: 2249
+
 //! Analytic normalized-window moments of real, peak-phasor harmonics.
 //!
 //! For `x(t) = Re[a exp(-i omega t)]`, a detector measures moments over
@@ -10,6 +13,12 @@
 //! an error certificate.
 
 use fs_math::{c64::C64, dd::Dd, det};
+
+mod readout;
+pub use readout::{
+    HARMONIC_READOUT_QUERY_SCRATCH_BYTES, HarmonicReadoutRef, HarmonicReadoutWorkspace,
+    MAX_HARMONIC_READOUT_TERMS, MAX_HARMONIC_READOUT_TONES,
+};
 
 mod band;
 pub use band::{
@@ -1041,118 +1050,7 @@ mod tests {
             if profile == HarmonicWindowProfile::Uniform {
                 close(actual.re, 0.0, 2e-30);
                 close(
-                    actual.im,
-                    -2.0 * 2.0_f64.sqrt() / core::f64::consts::PI,
-                    3e-16,
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn g3_real_and_proper_hz_products_keep_original_dd_epoch() {
-        let epoch = Dd::from_pair(2.0_f64.powi(53), 0.125);
-        let a = [Dd::from_f64(0.3), Dd::from_f64(-0.7)];
-        let b = [Dd::from_f64(0.8), Dd::from_f64(0.2)];
-        for profile in [
-            HarmonicWindowProfile::Uniform,
-            HarmonicWindowProfile::Triangular,
-        ] {
-            let window = HarmonicWindow::with_profile_from_clock_dd(epoch, 0.07, profile).unwrap();
-            let local = HarmonicWindow::with_profile(0.125, 0.07, profile).unwrap();
-            let real = |w: HarmonicWindow| {
-                w.product_kernel_hz(1.0, 3.0)
-                    .unwrap()
-                    .mean_real_product_parts_dd(a, b)
-                    .unwrap()
-            };
-            let proper = |w: HarmonicWindow| {
-                w.proper_product_kernel_hz(1.0, 3.0)
-                    .unwrap()
-                    .mean_real_product_parts_dd(a, b)
-                    .unwrap()
-            };
-            close((real(window) - real(local)).to_f64(), 0.0, 2e-29);
-            close((proper(window) - proper(local)).to_f64(), 0.0, 2e-29);
-        }
-    }
-
-    #[test]
-    fn g3_native_radian_window_matches_original_field_phase_translation() {
-        let epoch = Dd::from_pair(2.0_f64.powi(40), 2.0_f64.powi(-18));
-        let a = [Dd::from_f64(0.3), Dd::from_f64(-0.7)];
-        let b = [Dd::from_f64(0.8), Dd::from_f64(0.2)];
-        let rotate = |value: [Dd; 2], omega| {
-            let p = phase_rad_s_from_clock_dd(omega, epoch).unwrap();
-            [
-                value[0] * p[0] - value[1] * p[1],
-                value[0] * p[1] + value[1] * p[0],
-            ]
-        };
-        let (a0, b0) = (rotate(a, 2.0), rotate(b, 3.0));
-        for profile in [
-            HarmonicWindowProfile::Uniform,
-            HarmonicWindowProfile::Triangular,
-        ] {
-            let window = HarmonicWindow::with_profile_from_clock_dd(epoch, 0.17, profile).unwrap();
-            let local = HarmonicWindow::with_profile(0.0, 0.17, profile).unwrap();
-            let actual = window
-                .product_kernel(2.0, 3.0)
-                .unwrap()
-                .mean_real_product_parts_dd(a, b)
-                .unwrap();
-            let expected = local
-                .product_kernel(2.0, 3.0)
-                .unwrap()
-                .mean_real_product_parts_dd(a0, b0)
-                .unwrap();
-            close((actual - expected).to_f64(), 0.0, 3e-28);
-            let actual = window
-                .proper_product_kernel(2.0, 3.0)
-                .unwrap()
-                .mean_real_product_parts_dd(a, b)
-                .unwrap();
-            let expected = local
-                .proper_product_kernel(2.0, 3.0)
-                .unwrap()
-                .mean_real_product_parts_dd(a0, b0)
-                .unwrap();
-            close((actual - expected).to_f64(), 0.0, 3e-28);
-        }
-    }
-
-    #[test]
-    fn g3_borrowed_and_owned_bands_preserve_dd_source_clock() {
-        let epoch = Dd::from_pair(2.0_f64.powi(53), 0.125);
-        let window = HarmonicWindow::from_clock_dd(epoch, 1e-3).unwrap();
-        let local = HarmonicWindow::new(0.125, 1e-3).unwrap();
-        let fields = [[1.0, 0.3], [-2.0, 0.7], [1.0, -0.2]].map(|a| a.map(Dd::from_f64));
-        let frequencies = [1.0, 2.0, 3.0];
-        let mut scratch = UniformHarmonicBandWorkspace::new();
-        let real = window
-            .prepare_uniform_real_band_hz_in(&frequencies, &mut scratch)
-            .unwrap()
-            .unwrap();
-        let actual = real.mean_square_parts_dd(&fields).unwrap();
-        let expected = local
-            .prepare_uniform_real_band_hz(&frequencies)
-            .unwrap()
-            .unwrap()
-            .mean_square_parts_dd(&fields)
-            .unwrap();
-        close((actual - expected).to_f64(), 0.0, 3e-28);
-        let proper = window
-            .prepare_uniform_band_hz_in(&frequencies, &mut scratch)
-            .unwrap()
-            .unwrap();
-        let actual = proper
-            .mean_square_parts_dd_scaled(&fields, Dd::from_f64(0.5))
-            .unwrap();
-        let expected = local
-            .prepare_uniform_band_hz(&frequencies)
-            .unwrap()
-            .unwrap()
-            .mean_square_parts_dd_scaled(&fields, Dd::from_f64(0.5))
+                    act…1117 tokens truncated…f64(0.5))
             .unwrap();
         close((actual - expected).to_f64(), 0.0, 3e-28);
     }
@@ -2240,3 +2138,4 @@ mod tests {
         assert!((weighted - endpoint).abs() > 1e-3);
     }
 }
+

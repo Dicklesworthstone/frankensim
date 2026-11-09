@@ -4556,3 +4556,40 @@ boundaries and cancellation/replay. The old correlation observer returns
 product; the physical leading value and repaired result are 2.8125e-50 Pa².
 The focused carrier uses narrow outer metadata adapters; a native BEM solve,
 complete array-construction pipeline and full workspace build were not run.
+
+### Pressure-array and selected-correlation absolute-carrier readouts
+
+For admitted high-carrier windows, pressure arrays and selected signed-lag
+correlations now use the shared coherent linear readout instead of independently
+subtracting per-frequency original-carrier sinc terms. This extends the earlier
+selected-correlation second-moment change: averaged-readout covariance retains
+the physical carrier while resolving a small coherent envelope. Unsupported
+windows keep the original linear kernels; actual-real positive-factor mode zero
+is still used when it already equals the physical mean. Deterministic means,
+real-factor covariance and proper-factor covariance keep their existing laws.
+
+Signed-lag preparation also shares one carrier phase per bank/request and
+composes DD relative-frequency phases before rotating each original channel
+amplitude. This preserves close-frequency phase differences that independent
+fast lag rotations can erase. Preparation bounds include one common lag phase
+per nonempty bank/request plus three operations per retained line/request.
+Original line-major payload, authored request order, channel provenance and the
+source clock remain unchanged; no new query heap allocation is introduced.
+
+Readout work is admitted separately from second-moment work. Fixed power and
+linear-readout helpers run sequentially, so their scratch peak is the maximum,
+not their sum: linear payload is 44,096 bytes for the array and 46,208 bytes for
+selected correlations, including the cached requested-first-channel means.
+Existing query/result accumulators remain included in the owner's base bound.
+Each readout factor serves one whole bank; repeated first channels share means.
+
+Eight focused consumer tests pass (five correlation, three array), executing
+complete selected-correlation preparation/query methods, verbatim array query
+methods and the new helpers with actual fs-fft/fs-math implementations. They
+cover the independently integrated signed-lag 2^49 rad/s, 1 ps proper readout,
+three-adjacent-tone original-carrier covariance, real/proper distinctions,
+signed cross products, wide/one-tone fallback, exact preparation/query/workspace
+boundaries, cancellation and replay. Seven shared-core tests pass separately.
+Outer observation metadata/prepared-array declarations are narrow adapters;
+a native BEM solve and complete native array-construction pipeline were not run.
+The bounded numerical evidence is not an arbitrary-null relative certificate.

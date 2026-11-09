@@ -175,10 +175,7 @@ fn quadrature_weight(step: usize, steps: usize, profile: HarmonicWindowProfile) 
 #[test]
 fn proper_signed_lag_keeps_original_carrier_and_averaged_readout_clock() {
     let reference = owner();
-    for (carrier, duration, check_readout) in [
-        (2.0_f64.powi(49), 1e-12_f64, false),
-        (2.0_f64.powi(29), 1e-6_f64, true),
-    ] {
+    for (carrier, duration) in [(2.0_f64.powi(49), 1e-12_f64), (2.0_f64.powi(29), 1e-6_f64)] {
         let array = array(
             &reference,
             vec![
@@ -219,14 +216,9 @@ fn proper_signed_lag_keeps_original_carrier_and_averaged_readout_clock() {
                     };
                 close(actual.mean_product_pa2, expected, 1e-9);
                 close(actual.mean_covariance_pa2, expected, 1e-9);
-                // Proper averaged-readout covariance deliberately retains the
-                // original absolute-carrier linear kernels. Their conditioning
-                // at a deeply cancelled readout is separate from the new stable
-                // second moment; this test does not assert a relative certificate
-                // for that legacy linear reduction in the 1ps case.
-                if !check_readout {
-                    continue;
-                }
+                // The linear readout keeps the fast physical carrier while
+                // coherent envelope projection resolves both the 1ps mean
+                // and its covariance. It is distinct from relative mode zero.
                 let mut means = [C64::ZERO; 2];
                 let steps = 32_768;
                 for step in 0..=steps {
@@ -246,10 +238,13 @@ fn proper_signed_lag_keeps_original_carrier_and_averaged_readout_clock() {
                             + C64::new(s * envelope, c * envelope) * C64::from_re(weight);
                     }
                 }
-                close(
-                    actual.averaged_covariance_pa2,
-                    0.5 * (means[0].re * means[1].re + means[0].im * means[1].im),
-                    5e-8,
+                let expected_readout =
+                    0.5 * (means[0].re * means[1].re + means[0].im * means[1].im);
+                assert!(
+                    (actual.averaged_covariance_pa2 - expected_readout).abs()
+                        <= expected_readout.abs() * 5e-8,
+                    "{profile:?}, carrier={carrier:e}, pair={request:?}: actual={:e}, expected={expected_readout:e}",
+                    actual.averaged_covariance_pa2
                 );
                 assert!(
                     actual.averaged_covariance_pa2.abs() < 0.01 * actual.mean_covariance_pa2.abs()
@@ -399,11 +394,12 @@ fn correlation_projection_admits_cache_work_scratch_and_cancellation_transaction
     let observer = PreparedHarmonicPressureCorrelations::new(&array, &pairs, limits()).unwrap();
     let cached = band::admission(2, 4, 1, HarmonicExposureFactorStatistics::Real).unwrap();
     let uncached = band::admission(2, 4, 4, HarmonicExposureFactorStatistics::Real).unwrap();
-    assert_eq!(observer.query_products(), 4 * 2 * pairs.len() + cached.0);
+    let linear = readout::admission(2, pairs.len(), 1).unwrap();
+    assert_eq!(observer.query_products(), linear.0 + cached.0);
     assert!(cached.0 < uncached.0);
     assert!(cached.1 > 34_816);
     let exact = HarmonicPressureCorrelationLimits {
-        maximum_prepare_products: 16,
+        maximum_prepare_products: 28,
         maximum_query_products: observer.query_products(),
         maximum_workspace_bytes: observer.workspace_bytes(),
         ..limits()

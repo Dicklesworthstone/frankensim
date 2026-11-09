@@ -5,8 +5,10 @@
 //! second signal; under exp(-i omega t) its multiplier is exp(-i omega tau).
 
 use super::*;
+use fs_fft::harmonic_window::phase_rad_s_dd_from_clock_dd;
 
 mod band;
+mod readout;
 
 /// Ceiling on authored channel/lag requests, including repeats.
 pub const MAX_PRESSURE_CORRELATION_PAIRS: usize = 65_536;
@@ -26,12 +28,16 @@ pub struct HarmonicPressureCorrelationPair {
 #[derive(Clone, Copy, Debug)]
 pub struct HarmonicPressureCorrelationLimits {
     pub maximum_channel_pairs: usize,
-    /// One delay phasor and one complex contraction per pair/retained line.
+    /// One common carrier lag phase per pair/nonempty bank, then one relative
+    /// phase and two complex contractions per pair/retained line. Sharing the
+    /// carrier phase preserves close-frequency interference after a signed lag.
     pub maximum_prepare_products: usize,
     /// Four linear real contractions per pair/line, one readout term per
     /// factor, and the larger of the original ordered-pair contraction and
     /// bounded field projection. Requested first channels share projected
     /// modes; signed-lag second channels retain their own field projections.
+    /// Linear readouts reserve the larger of their original contractions and
+    /// bounded absolute-carrier projection, including factor preparation.
     pub maximum_query_products: usize,
     /// Logical retained pair/lag payload, bank headers, query accumulators
     /// and one returned observation. Eligible banks also reserve the fixed
@@ -160,9 +166,12 @@ impl<'array, 'field> PreparedHarmonicPressureCorrelations<'array, 'field> {
         }
         let first_count = first_channels.iter().filter(|&&used| used).count();
         let mut lines = 0usize;
+        let mut nonempty_banks = 0usize;
         let mut temporal_products = 0usize;
+        let mut readout_products = 0usize;
         let mut band_scratch = 0usize;
         for bank in &array.banks {
+            nonempty_banks += usize::from(!bank.lines.is_empty());
             lines = lines.checked_add(bank.lines.len()).ok_or_else(overflow)?;
             let (products, scratch) =
                 band::admission(bank.lines.len(), pairs.len(), first_count, bank.statistics)?;
@@ -170,13 +179,21 @@ impl<'array, 'field> PreparedHarmonicPressureCorrelations<'array, 'field> {
                 .checked_add(products)
                 .ok_or_else(overflow)?;
             band_scratch = band_scratch.max(scratch);
+            let (products, scratch) =
+                readout::admission(bank.lines.len(), pairs.len(), first_count)?;
+            readout_products = readout_products
+                .checked_add(products)
+                .ok_or_else(overflow)?;
+            band_scratch = band_scratch.max(scratch);
         }
         let shifted_count = pairs.len().checked_mul(lines).ok_or_else(overflow)?;
-        let prepare_products = shifted_count.checked_mul(2).ok_or_else(overflow)?;
-        let query_products = lines
-            .checked_mul(4)
-            .and_then(|p| p.checked_add(array.banks.len() - 1))
-            .and_then(|p| p.checked_mul(pairs.len()))
+        let prepare_products = shifted_count
+            .checked_mul(3)
+            .and_then(|p| p.checked_add(nonempty_banks.checked_mul(pairs.len())?))
+            .ok_or_else(overflow)?;
+        let query_products = (array.banks.len() - 1)
+            .checked_mul(pairs.len())
+            .and_then(|p| p.checked_add(readout_products))
             .and_then(|p| p.checked_add(temporal_products))
             .ok_or_else(overflow)?;
         admit(prepare_products, MAX_PRODUCTS)?;
@@ -219,19 +236,36 @@ impl<'array, 'field> PreparedHarmonicPressureCorrelations<'array, 'field> {
                 .checked_mul(bank.lines.len())
                 .ok_or_else(overflow)?;
             let mut shifted = storage(count)?;
-            for line in &bank.lines {
+            // Large selected-pair banks must remain cancellable while their
+            // retained line-major storage is initialized, before phase work.
+            while shifted.len() < count {
                 poll(&mut cancelled)?;
-                for (i, pair) in pairs.iter().enumerate() {
-                    if i % 64 == 0 {
+                let next = count.min(shifted.len().saturating_add(256));
+                shifted.resize(next, [Dd::ZERO; 2]);
+            }
+            let Some(reference) = bank.lines.first() else {
+                banks.push(CorrelationBank { shifted });
+                continue;
+            };
+            for (pair_index, pair) in pairs.iter().enumerate() {
+                poll(&mut cancelled)?;
+                let lag = Dd::from_f64(pair.lag_s);
+                let [cr, ci] = phase_rad_s_dd_from_clock_dd(Dd::from_f64(reference.omega), lag)
+                    .map_err(window_error)?;
+                for (line_index, line) in bank.lines.iter().enumerate() {
+                    if line_index % 64 == 0 {
                         poll(&mut cancelled)?;
                     }
-                    let [pr, pi] = delayed_weight(line.omega, 1.0, -pair.lag_s)?;
+                    let offset = Dd::from_f64(line.omega) - Dd::from_f64(reference.omega);
+                    let [dr, di] =
+                        phase_rad_s_dd_from_clock_dd(offset, lag).map_err(window_error)?;
+                    let [pr, pi] = [cr * dr - ci * di, cr * di + ci * dr];
                     let [ar, ai] = line.amplitudes[pair.second];
                     let signal = [ar * pr - ai * pi, ar * pi + ai * pr];
                     if signal.iter().any(|&v| !finite(v)) {
                         return Err(bad("pressure correlation lagged signal is unrepresentable"));
                     }
-                    shifted.push(signal);
+                    shifted[line_index * pairs.len() + pair_index] = signal;
                 }
             }
             banks.push(CorrelationBank { shifted });
@@ -305,7 +339,17 @@ impl<'array, 'field> PreparedHarmonicPressureCorrelations<'array, 'field> {
             // A proper field factor removes only a common carrier from its
             // second moments. Its mode zero is not the absolute-clock mean
             // used for covariance of the two averaged readouts.
-            if !projected || bank.statistics == HarmonicExposureFactorStatistics::ProperComplex {
+            let mean_projected = (projected
+                && bank.statistics == HarmonicExposureFactorStatistics::Real)
+                || readout::accumulate(
+                    bank,
+                    lagged,
+                    &self.pairs,
+                    window,
+                    &mut integrated,
+                    &mut cancelled,
+                )?;
+            if !mean_projected {
                 for (line_index, line) in bank.lines.iter().enumerate() {
                     poll(&mut cancelled)?;
                     let dc = window
