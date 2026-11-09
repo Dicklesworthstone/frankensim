@@ -9,8 +9,10 @@
 //!
 //! The base lane retains only the original inductor flux and two bus charges.
 //! [`capacitance`] adds explicit device charge and stored switch-node voltages.
-//! Gate charge, reverse recovery, avalanche and finite gate transitions are
-//! absent. Refine steps to resolve diode branches and the actual RC dynamics.
+//! [`gate`] supplies original gate laws and finite driver branches;
+//! [`capacitance::gate`] retains reciprocal gate/Miller storage and transitions.
+//! Reverse recovery and avalanche are absent. Refine steps to resolve diode
+//! branches and the actual RC dynamics.
 //! No default device data, efficiency factor or unobserved switching loss is used.
 
 use super::power_load::{
@@ -25,6 +27,9 @@ pub mod battery_motor;
 
 /// Finite output-capacitor charge and energy through physical commutation.
 pub mod capacitance;
+
+/// Source-owned gate-voltage channel laws and finite-impedance driver branches.
+pub mod gate;
 
 mod cycle;
 pub use cycle::PreparedCommutatedSwitchCycle;
@@ -211,8 +216,6 @@ fn total(values: impl IntoIterator<Item = f64>) -> f64 {
 
 impl HalfBridgeConduction {
     pub fn new(high: SwitchDevice, low: SwitchDevice, on: [bool; 2]) -> Result<Self, PhsError> {
-        high.validate()?;
-        low.validate()?;
         let devices = [high, low];
         let conductance_s = core::array::from_fn(|i| {
             1.0 / if on[i] {
@@ -221,6 +224,28 @@ impl HalfBridgeConduction {
                 devices[i].off_resistance_ohm
             }
         });
+        Self::with_conductance(high, low, conductance_s)
+    }
+
+    /// Reuse the original physical diode law and operating support with an
+    /// independently admitted actual channel conductance. Driven channels use
+    /// their complete G(Vgs) law; the command bit does not select Ron/Roff.
+    pub(super) fn with_conductance(
+        high: SwitchDevice,
+        low: SwitchDevice,
+        conductance_s: [f64; 2],
+    ) -> Result<Self, PhsError> {
+        high.validate()?;
+        low.validate()?;
+        let devices = [high, low];
+        if conductance_s.iter().enumerate().any(|(i, &g)| {
+            !positive(g)
+                || !(g + 1.0 / devices[i].body_diode.differential_resistance_ohm).is_finite()
+        }) {
+            return Err(invalid(
+                "positive representable original channel conductances required",
+            ));
+        }
         Ok(Self {
             devices,
             conductance_s,

@@ -4037,6 +4037,39 @@ work is checked for representability. Small capacitance and rapid conduction
 still require explicit time refinement; no gate-drive or reverse-recovery state
 is inferred.
 
+## Reciprocal gate and Miller storage with finite driver work
+
+`commutation::capacitance::gate::GateCommutationStorage` retains intrinsic
+drain-source charge, four authored positive gate-source capacitances and
+nonnegative gate-drain capacitances. Its nine coordinates are flux, two bus
+charges, two node charges grouped with their high-side gate electrodes, then
+four gate charges. The conjugate gate efforts are source-referenced Vgs.
+
+With `S=Cgs+Cgd`, `alpha=Cgd/S` and `Ceq=Cgs*Cgd/S`, the reciprocal storage
+uses the original nonlinear two-electrode owner at
+`y_bus=q_bus+alpha_high*q_gate_high` and
+`y_node=q_node_group-alpha_high*q_gate_high+alpha_low*q_gate_low`, plus
+`sum(q_gate²/(2*S))`. The analytically composed law
+`Qeff(V)=Qds(V)+Ceq*V` retains every original voltage knot. Shared double-double
+helpers carry the coordinate transform, original inverse, AVF, endpoint
+Jacobian, energy remainder and analytically known shifted source boundaries.
+Original support and cell budgets remain authoritative. A positive Miller
+augmentation below charge-knot resolution refuses; explicit Cgd=0 is the
+exact no-Miller limit.
+
+Intrinsic drain-source, gate-source and gate-drain energies remain independent
+physical constituents. Initialization requires the original terminal
+decomposition and actual gate voltages. Gate-clamped Coss is not silently
+reinterpreted as intrinsic Qds and augmented with another Cgd.
+
+`commutation::gate::GateConductanceCurve` retains a bounded positive G(Vgs)
+table and analytic segment derivative. `GateDriver` retains explicit on/off
+source voltages, finite branch resistances and current support. The same
+represented gate current supplies signed source work, gate-terminal work and
+positive driver-resistor heat. The driver refuses unsupported current rather
+than clipping it. These laws do not infer saturation, carrier recovery,
+temperature-dependent reversible storage or a finite-energy gate-rail reservoir.
+
 ## Finite battery and motor shafts with device capacitor charge
 
 `commutation::capacitance::battery_motor::PreparedCapacitiveBatteryMotorCycle`

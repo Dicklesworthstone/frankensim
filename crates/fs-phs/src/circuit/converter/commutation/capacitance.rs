@@ -37,6 +37,8 @@ use fs_math::dd::Dd;
 pub mod battery_motor;
 /// Original bounded device charge curves and exact coupled electrode storage.
 pub mod charge;
+/// Reciprocal intrinsic drain, gate/source and Miller charge.
+pub mod gate;
 mod plan;
 mod standalone;
 use plan::{GatePlan, GateStep};
