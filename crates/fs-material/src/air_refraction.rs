@@ -13,6 +13,8 @@
 //! Water fraction is a mole fraction, NOT relative humidity. Composition stays
 //! fixed during pressure/temperature differentiation. The empirical density
 //! closure is part of this named optical model; it never replaces a fluid EOS.
+//! `PreparedCiddorAirSpectrum` additionally supplies the complete state gradient
+//! and Hessian for spatially varying humidity and dry-air CO2 concentration.
 //! No absorption, scattering, moving-medium correction or uncertainty reduction
 //! is inferred. Preparation and queries use fixed storage without allocation.
 
@@ -33,6 +35,40 @@ const D: f64 = 1.83e-11;
 const E: f64 = -0.765e-8;
 const DRY_SCALE: f64 = 0.9995922115 * 288.15 / 101_325.0;
 const VAPOR_SCALE: f64 = 0.018015 / (0.00985938 * 8.314472);
+
+/// Original formulation, coefficient bits and admitted domains, without a state.
+pub fn ciddor_model_identity() -> ContentHash {
+    let mut hash = DomainHasher::new("fs-material:nist-ciddor-air-model:v1");
+    hash_model(&mut hash);
+    hash.finalize()
+}
+
+fn hash_model(hash: &mut DomainHasher) {
+    hash.update(SOURCE_URL.as_bytes());
+    for value in DRY
+        .into_iter()
+        .chain(VAPOR)
+        .chain(A)
+        .chain(B)
+        .chain(C)
+        .chain([
+            D,
+            E,
+            DRY_SCALE,
+            VAPOR_SCALE,
+            1.022e-8,
+            5.34e-7,
+            450.0,
+            273.15,
+        ])
+        .chain(WAVELENGTH_RANGE_NM)
+        .chain(TEMPERATURE_RANGE_K)
+        .chain(PRESSURE_RANGE_PA)
+        .chain([0.2, 2000.0])
+    {
+        hash.update(&value.to_bits().to_le_bytes());
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AirRefractionError {
@@ -80,39 +116,29 @@ impl CiddorAir {
     /// Original equations, coefficient bits, admitted domains and composition.
     pub fn identity(self) -> ContentHash {
         let mut hash = DomainHasher::new("fs-material:nist-ciddor-air:v1");
-        hash.update(SOURCE_URL.as_bytes());
-        for value in DRY
-            .into_iter()
-            .chain(VAPOR)
-            .chain(A)
-            .chain(B)
-            .chain(C)
-            .chain([
-                D,
-                E,
-                DRY_SCALE,
-                VAPOR_SCALE,
-                1.022e-8,
-                5.34e-7,
-                450.0,
-                273.15,
-            ])
-            .chain(WAVELENGTH_RANGE_NM)
-            .chain(TEMPERATURE_RANGE_K)
-            .chain(PRESSURE_RANGE_PA)
-            .chain([
-                0.2,
-                2000.0,
-                self.water_mole_fraction,
-                self.dry_air_co2_micromol_per_mol,
-            ])
-        {
+        hash_model(&mut hash);
+        for value in [self.water_mole_fraction, self.dry_air_co2_micromol_per_mol] {
             hash.update(&value.to_bits().to_le_bytes());
         }
         hash.finalize()
     }
     /// Prepare exact phase, group and curvature coefficients once per vacuum wavelength.
     pub fn prepare(self, wavelength_nm: f64) -> Result<PreparedCiddorAir, AirRefractionError> {
+        PreparedCiddorAirSpectrum::try_new(wavelength_nm).map(|spectrum| spectrum.bind(self))
+    }
+}
+
+/// Composition-independent spectral coefficients from the original Ciddor law.
+/// One preparation supports repeated local states without reevaluating its poles.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreparedCiddorAirSpectrum {
+    wavelength_nm: f64,
+    dry: [f64; 3],
+    vapor: [f64; 3],
+}
+
+impl PreparedCiddorAirSpectrum {
+    pub fn try_new(wavelength_nm: f64) -> Result<Self, AirRefractionError> {
         if !in_range(wavelength_nm, WAVELENGTH_RANGE_NM) {
             return Err(AirRefractionError::WavelengthOutsideRange);
         }
@@ -129,19 +155,32 @@ impl CiddorAir {
             -2.0 * s * (VAPOR[1] + s * (2.0 * VAPOR[2] + 3.0 * s * VAPOR[3])),
             6.0 * s * VAPOR[1] + 20.0 * s * s * VAPOR[2] + 42.0 * s * s * s * VAPOR[3],
         ];
-        let x = self.water_mole_fraction;
+        Ok(Self {
+            wavelength_nm,
+            dry,
+            vapor,
+        })
+    }
+
+    pub const fn wavelength_nm(self) -> f64 {
+        self.wavelength_nm
+    }
+
+    /// Retain the original fixed-composition preparation and arithmetic order.
+    pub fn bind(self, composition: CiddorAir) -> PreparedCiddorAir {
+        let x = composition.water_mole_fraction;
         let dry_weight = DRY_SCALE
             * (1.0 - x)
-            * (1.0 + 5.34e-7 * (self.dry_air_co2_micromol_per_mol - 450.0))
+            * (1.0 + 5.34e-7 * (composition.dry_air_co2_micromol_per_mol - 450.0))
             * 1e-8;
         let vapor_weight = VAPOR_SCALE * x * 1.022e-8;
         let spectral: [f64; 3] =
-            core::array::from_fn(|i| dry_weight.mul_add(dry[i], vapor_weight * vapor[i]));
-        Ok(PreparedCiddorAir {
-            composition: self,
-            wavelength_nm,
+            core::array::from_fn(|i| dry_weight.mul_add(self.dry[i], vapor_weight * self.vapor[i]));
+        PreparedCiddorAir {
+            composition,
+            wavelength_nm: self.wavelength_nm,
             spectral,
-        })
+        }
     }
 }
 
@@ -169,6 +208,86 @@ pub struct AirRefractiveSample {
     pub temperature_pressure_derivative_per_k_pa: f64,
 }
 
+/// Phase-index state derivatives in the order `[T, P, xw, CO2]`.
+/// Coordinates are kelvin, absolute pascals, water mole fraction and dry-air
+/// CO2 in micromol/mol. Thus the last gradient entry is per micromol/mol,
+/// not per unit CO2 mole fraction; Hessians divide by both coordinate units.
+/// These partials hold the other three coordinates fixed. Spatial state
+/// providers supply their own gradients/Hessians for the multivariable chain rule.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AirRefractiveStateJet {
+    pub sample: AirRefractiveSample,
+    pub phase_gradient: [f64; 4],
+    pub phase_hessian_diagonal: [f64; 4],
+    /// `(TP, Txw, TCO2, Pxw, PCO2, xwCO2)` in that order.
+    pub phase_hessian_off_diagonal: [f64; 6],
+}
+
+// Original compressibility response, shared by frozen and varying composition.
+#[derive(Clone, Copy)]
+struct DensityResponse {
+    temperature_k: f64,
+    pressure_pa: f64,
+    water_mole_fraction: f64,
+    d: f64,
+    dt: f64,
+    dp: f64,
+    dtt: f64,
+    dpp: f64,
+    dpt: f64,
+}
+
+impl DensityResponse {
+    fn try_new(temperature_k: f64, pressure_pa: f64, x: f64) -> Result<Self, AirRefractionError> {
+        if !in_range(temperature_k, TEMPERATURE_RANGE_K) {
+            return Err(AirRefractionError::TemperatureOutsideRange);
+        }
+        if !in_range(pressure_pa, PRESSURE_RANGE_PA) {
+            return Err(AirRefractionError::PressureOutsideRange);
+        }
+        let t = temperature_k - 273.15;
+        let p = pressure_pa;
+        let inv_t = temperature_k.recip();
+        let c = A[0] + t * (A[1] + t * A[2]) + x * (B[0] + B[1] * t + x * (C[0] + C[1] * t));
+        let c_t = A[1] + 2.0 * A[2] * t + x * (B[1] + x * C[1]);
+        let b = D + E * x * x;
+        // d = T Z. Keep the original scalar operation order for frozen states.
+        let d = temperature_k - p * c + p * p * b * inv_t;
+        let dp = -c + 2.0 * p * b * inv_t;
+        let dt = 1.0 - p * c_t - p * p * b * inv_t * inv_t;
+        let dpp = 2.0 * b * inv_t;
+        let dtt = -2.0 * p * A[2] + 2.0 * p * p * b * inv_t.powi(3);
+        let dpt = -c_t - 2.0 * p * b * inv_t * inv_t;
+        Ok(Self {
+            temperature_k,
+            pressure_pa,
+            water_mole_fraction: x,
+            d,
+            dt,
+            dp,
+            dtt,
+            dpp,
+            dpt,
+        })
+    }
+
+    // (d_xw, d_xw_xw, d_T_xw, d_P_xw); evaluated only by the full-state owner.
+    fn composition_partials(self) -> [f64; 4] {
+        let t = self.temperature_k - 273.15;
+        let p = self.pressure_pa;
+        let x = self.water_mole_fraction;
+        let inv_t = self.temperature_k.recip();
+        let cx = B[0] + B[1] * t + 2.0 * x * (C[0] + C[1] * t);
+        let bx = 2.0 * E * x;
+        [
+            -p * cx + p * p * bx * inv_t,
+            -2.0 * p * (C[0] + C[1] * t) + 2.0 * p * p * E * inv_t,
+            -p * (B[1] + 2.0 * x * C[1]) - p * p * bx * inv_t * inv_t,
+            -cx + 2.0 * p * bx * inv_t,
+        ]
+    }
+}
+
 impl PreparedCiddorAir {
     pub const fn wavelength_nm(self) -> f64 {
         self.wavelength_nm
@@ -183,27 +302,27 @@ impl PreparedCiddorAir {
         temperature_k: f64,
         pressure_pa: f64,
     ) -> Result<AirRefractiveSample, AirRefractionError> {
-        if !in_range(temperature_k, TEMPERATURE_RANGE_K) {
-            return Err(AirRefractionError::TemperatureOutsideRange);
-        }
-        if !in_range(pressure_pa, PRESSURE_RANGE_PA) {
-            return Err(AirRefractionError::PressureOutsideRange);
-        }
-        let t = temperature_k - 273.15;
-        let p = pressure_pa;
-        let inv_t = temperature_k.recip();
-        let x = self.composition.water_mole_fraction;
-        let c = A[0] + t * (A[1] + t * A[2]) + x * (B[0] + B[1] * t + x * (C[0] + C[1] * t));
-        let c_t = A[1] + 2.0 * A[2] * t + x * (B[1] + x * C[1]);
-        let b = D + E * x * x;
-        // d = T Z. Differentiating this rational form retains compressibility
-        // and all mixed pressure/temperature terms without an ideal-gas shortcut.
-        let d = temperature_k - p * c + p * p * b * inv_t;
-        let dp = -c + 2.0 * p * b * inv_t;
-        let dt = 1.0 - p * c_t - p * p * b * inv_t * inv_t;
-        let dpp = 2.0 * b * inv_t;
-        let dtt = -2.0 * p * A[2] + 2.0 * p * p * b * inv_t.powi(3);
-        let dpt = -c_t - 2.0 * p * b * inv_t * inv_t;
+        self.sample_with_density(DensityResponse::try_new(
+            temperature_k,
+            pressure_pa,
+            self.composition.water_mole_fraction,
+        )?)
+    }
+
+    fn sample_with_density(
+        self,
+        density: DensityResponse,
+    ) -> Result<AirRefractiveSample, AirRefractionError> {
+        let DensityResponse {
+            pressure_pa: p,
+            d,
+            dt,
+            dp,
+            dtt,
+            dpp,
+            dpt,
+            ..
+        } = density;
         let ap = dp / d;
         let at = dt / d;
         let density_factor = p / d;
@@ -240,6 +359,72 @@ impl PreparedCiddorAir {
             return Err(AirRefractionError::NumericalRange);
         }
         Ok(sample)
+    }
+}
+
+impl PreparedCiddorAirSpectrum {
+    /// Analytic full state jet from the same admitted scalar law. Water fraction
+    /// is not RH; the caller still owns gas-phase validity and source uncertainty.
+    pub fn sample_jet(
+        self,
+        temperature_k: f64,
+        pressure_pa: f64,
+        composition: CiddorAir,
+    ) -> Result<AirRefractiveStateJet, AirRefractionError> {
+        let density =
+            DensityResponse::try_new(temperature_k, pressure_pa, composition.water_mole_fraction)?;
+        let sample = self.bind(composition).sample_with_density(density)?;
+        let x = composition.water_mole_fraction;
+        let co2 = composition.dry_air_co2_micromol_per_mol;
+        // n-1 = K(xw,CO2) P/d. K is affine in each composition coordinate;
+        // its sole nonzero second partial is K_xw_CO2. d does not depend on CO2.
+        let kx = (-DRY_SCALE * (1.0 + 5.34e-7 * (co2 - 450.0)) * 1e-8)
+            .mul_add(self.dry[0], VAPOR_SCALE * 1.022e-8 * self.vapor[0]);
+        let kc = DRY_SCALE * (1.0 - x) * 5.34e-7 * 1e-8 * self.dry[0];
+        let kxc = -DRY_SCALE * 5.34e-7 * 1e-8 * self.dry[0];
+        let [dx, dxx, dtx, dpx] = density.composition_partials();
+        let (at, ap, ax) = (
+            density.dt / density.d,
+            density.dp / density.d,
+            dx / density.d,
+        );
+        let f = pressure_pa / density.d;
+        let r = sample.phase_index_minus_one;
+        let phase_gradient = [
+            sample.temperature_derivative_per_k,
+            sample.pressure_derivative_per_pa,
+            f * kx - r * ax,
+            f * kc,
+        ];
+        let phase_hessian_diagonal = [
+            sample.temperature_second_derivative_per_k2,
+            sample.pressure_second_derivative_per_pa2,
+            r * (2.0 * ax * ax - dxx / density.d) - 2.0 * f * kx * ax,
+            0.0,
+        ];
+        let phase_hessian_off_diagonal = [
+            sample.temperature_pressure_derivative_per_k_pa,
+            r * (2.0 * at * ax - dtx / density.d) - f * kx * at,
+            -f * kc * at,
+            r * (2.0 * ap * ax - dpx / density.d - ax / pressure_pa)
+                + f * kx * (pressure_pa.recip() - ap),
+            f * kc * (pressure_pa.recip() - ap),
+            f * (kxc - kc * ax),
+        ];
+        if !phase_gradient
+            .into_iter()
+            .chain(phase_hessian_diagonal)
+            .chain(phase_hessian_off_diagonal)
+            .all(f64::is_finite)
+        {
+            return Err(AirRefractionError::NumericalRange);
+        }
+        Ok(AirRefractiveStateJet {
+            sample,
+            phase_gradient,
+            phase_hessian_diagonal,
+            phase_hessian_off_diagonal,
+        })
     }
 }
 

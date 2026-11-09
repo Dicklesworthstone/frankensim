@@ -18664,6 +18664,22 @@ independent spectral/state differences, source-domain corners and the relative
 index conversion. These validate this implementation of the named formulation,
 not a new experimental accuracy claim.
 
+`PreparedCiddorAirSpectrum` prepares the original dry-air/vapor spectral poles
+once independently of composition. Its `sample_jet` supplies the complete phase
+gradient and Hessian in [temperature K, absolute pressure Pa, water mole fraction,
+dry-air CO2 micromol/mol], including all six mixed partials. The original
+compressibility closure and fixed-composition arithmetic remain shared.
+`ciddor_model_identity` identifies the formulation independently of a particular
+atmospheric snapshot. Production derivatives are analytic and allocate nothing;
+the scalar/frozen owner does not evaluate the added composition derivatives.
+
+Focused controls differentiate independent NIST density-ratio equations across
+three states and three wavelengths, check all state-jet entries and source-domain
+corners, and retain all ten frozen output bit patterns at three captured states.
+Spatial providers still own their gradients, Hessians and phase validity;
+humidity is a mole fraction, and no fluid EOS or phase-equilibrium closure is
+introduced.
+
 ## Coherent fluid-coupled elastic plate stacks
 
 `ElasticPlateStack` composes up to 64 ordered original isotropic elastic plates
