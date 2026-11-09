@@ -1,5 +1,6 @@
 //! Rigid tangential motion through the original halfway reflection.
 
+use super::super::pressure::{GasPressure3, GasPressureField3};
 use super::super::transport::MassTransport3;
 use super::*;
 use fs_math::dd::Dd;
@@ -334,6 +335,8 @@ impl FreeSurface3 {
 
     /// The thermal owner supplies its one private candidate. The same native
     /// rigid reflection records the actual collision/conversion mass routes.
+    /// Gas traction, when supplied, acts on its own missing populations in the
+    /// same tick and does not become a solid-wall impulse or heat source.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn step_with_planar_rigid_wall_transport(
         &mut self,
@@ -342,9 +345,13 @@ impl FreeSurface3 {
         tau: &BTreeMap<(u64, usize), f64>,
         forces: Option<BTreeMap<(u64, usize), [f64; 3]>>,
         maximum_routes: usize,
+        gas_pressure: Option<(f64, GasPressureField3<'_>)>,
         gate: &CancelGate,
     ) -> Result<(MassTransport3, PlanarRigidWallReport3), FreeSurfaceError3> {
         check_cancel(gate)?;
+        let pressure = gas_pressure
+            .map(|(bound, field)| GasPressure3::new(bound, field))
+            .transpose()?;
         if let Some(forces) = forces {
             self.rebind_force_field(forces, gate)?;
         }
@@ -355,7 +362,7 @@ impl FreeSurface3 {
             gate,
             Some(&mut trace),
             Some(tau),
-            None,
+            pressure.as_ref(),
             Some(&mut prepared.exchange),
         )?;
         trace.after = self.mass_snapshot();

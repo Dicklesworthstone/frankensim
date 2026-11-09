@@ -146,6 +146,7 @@ impl FreeSurface3 {
             prepared,
             None,
             None,
+            None,
             gate,
         )?;
         Ok((candidate, report))
@@ -180,11 +181,19 @@ impl FreeSurface3 {
         prepared: [PreparedRigidWall3; 2],
         transport: Option<&mut MassTransport3>,
         tau: Option<&BTreeMap<(u64, usize), f64>>,
+        gas_pressure: Option<&GasPressure3<'_>>,
         gate: &CancelGate,
     ) -> Result<PlanarRigidWallPairReport3, FreeSurfaceError3> {
         let [mut first, mut second] = prepared;
         let mut exchanges = [first.exchange, second.exchange];
-        self.step_inner_with_boundaries(gate, transport, tau, None, Some(&mut exchanges), None)?;
+        self.step_inner_with_boundaries(
+            gate,
+            transport,
+            tau,
+            gas_pressure,
+            Some(&mut exchanges),
+            None,
+        )?;
         [first.exchange, second.exchange] = exchanges;
         let walls = [
             self.finish_planar_rigid_wall_motion(
@@ -208,6 +217,8 @@ impl FreeSurface3 {
     /// The thermal owner supplies its sole private liquid candidate. Both
     /// rigid reflections and the cellwise relaxation/force field act during
     /// one original native tick, whose actual mass routes transport enthalpy.
+    /// Optional gas loading uses that tick's original pressure reconstruction,
+    /// separately from either wall's measured reflection impulse and work.
     /// No population clone, second collision or substitute mass flux is made.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn step_with_planar_rigid_wall_pair_transport(
@@ -217,9 +228,13 @@ impl FreeSurface3 {
         tau: &BTreeMap<(u64, usize), f64>,
         forces: Option<BTreeMap<(u64, usize), [f64; 3]>>,
         maximum_routes: usize,
+        gas_pressure: Option<(f64, GasPressureField3<'_>)>,
         gate: &CancelGate,
     ) -> Result<(MassTransport3, PlanarRigidWallPairReport3), FreeSurfaceError3> {
         check_cancel(gate)?;
+        let pressure = gas_pressure
+            .map(|(bound, field)| GasPressure3::new(bound, field))
+            .transpose()?;
         if let Some(forces) = forces {
             self.rebind_force_field(forces, gate)?;
         }
@@ -232,6 +247,7 @@ impl FreeSurface3 {
             prepared,
             Some(&mut trace),
             Some(tau),
+            pressure.as_ref(),
             gate,
         )?;
         trace.after = self.mass_snapshot();

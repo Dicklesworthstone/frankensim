@@ -83,6 +83,7 @@ pub use motion::{
     FreeSurfacePlanarWallEnthalpyReport, FreeSurfacePlanarWallViscousReport,
     FreeSurfaceRigidWallEnthalpyReport, FreeSurfaceRigidWallPairEnthalpyReport,
     FreeSurfaceRigidWallPairViscousReport, FreeSurfaceRigidWallViscousReport,
+    FreeSurfaceWallGasPressure, FreeSurfaceWallSources,
 };
 
 /// Original T/shear source tables on actual native collision and molecular heat.
@@ -1048,9 +1049,6 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         gate: &CancelGate,
     ) -> Result<PreparedEnthalpyTick<'m>, Error> {
         poll(gate)?;
-        if wall.is_some() && gas_pressure.is_some() {
-            return Err(Error::Invalid("thermal wall field does not own prescribed gas pressure"));
-        }
         let next_step = self.accepted_steps.checked_add(1)
             .filter(|count| *count <= (1_u64 << 53))
             .ok_or(Error::Invalid("native liquid clock exhausted"))?;
@@ -1134,7 +1132,7 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
             Some(boundary) => {
                 let (trace, exchange) = boundary.step(
                     &mut lattice, &resolved.tau, resolved.forces,
-                    self.controls.max_mass_routes, gate,
+                    self.controls.max_mass_routes, gas_pressure, gate,
                 )?;
                 (trace, Some(exchange))
             }

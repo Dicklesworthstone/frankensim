@@ -4784,3 +4784,39 @@ MIR optimization disabled. Actual execution of those four targets was blocked
 by SIGKILL during asupersync code generation under the 8 GiB memory limit,
 before any test binary ran. Native type checking and the 24 numerical-leaf
 passes are not a claim that those integration tests executed.
+
+## Prescribed pressure with the original thermal moving walls
+
+`FreeSurfaceWallSources` composes authored cell heat, optional original held
+molecular stress-power heating, and a borrowed cell- or link-based absolute
+gas-pressure field. The field, single rigid-wall and opposing rigid-wall-pair
+entries all advance those sources through one original collision, gas
+reconstruction, wall reflection, conversion and extensive enthalpy transport.
+The existing heat-only and molecular-heating methods use the same dispatch.
+
+The original SI coordinate/pressure converters, explicit fixed pressure
+reference, gas-plus-capillary density-excursion admission and material source
+limits remain authoritative. Gas callbacks are sampled only at actual exposed
+native gas links; they must return the same values for the same geometry
+throughout a finite-body pilot and final replay. `Fn` does not enforce that
+physical input contract. No sampled pressure map or additional fluid clone is
+introduced. Endpoint source, force-frame, wetting, speed, mass, transport and
+cancellation checks complete before the thermal candidate can escape.
+
+The reported solid-wall wrench and work come only from its original reflected
+links. Gas loading reaches a remote wall through subsequent fluid evolution.
+Prescribed gas pressure and wall work are mechanical loading, not added caloric
+heat. This remains the original constant-reference-density single-liquid lane;
+it supplies no evolved gas reservoir, compressive heating or pressure-volume
+energy closure. Fixed flooded planes, tangential motion and normal-axis spin,
+first-order thermal source splitting and all prepared-operator ownership
+refusals retain their previous limits.
+
+G0/G1/G3/G4 focused original-source execution passes all eleven lower thermal
+wall tests: four new pressure cases plus the seven existing field/pair cases,
+including the formerly failing partial-fill case. The new cases exercise real
+gas interfaces, reference-pressure identity for all three wall shapes,
+cell/link equality under nonzero loading, one molecular heat inventory, and
+late pressure/source/cancellation refusal with retry. The focused build uses
+fs-lbm without optional features; the full Cargo feature graph remains outside
+this executed proof.

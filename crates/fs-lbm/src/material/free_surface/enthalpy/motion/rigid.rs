@@ -14,10 +14,11 @@ pub struct FreeSurfaceRigidWallEnthalpyReport {
     pub wall: MaterialPlanarRigidWallReport3,
 }
 
-/// The same tick with the original initial-state molecular heat samples.
+/// The same tick with the optionally selected initial-state molecular heat samples.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FreeSurfaceRigidWallViscousReport {
     pub flow: FreeSurfaceRigidWallEnthalpyReport,
+    /// Empty when the source descriptor disables molecular heating.
     pub applied: Vec<viscous::FreeSurfaceViscousCell>,
 }
 
@@ -49,22 +50,16 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         heat: &[FreeSurfaceCellHeat],
         gate: &CancelGate,
     ) -> Result<(Self, FreeSurfaceRigidWallEnthalpyReport), Error> {
-        let native = self
-            .flow
-            .prepare_planar_rigid_wall_motion_si(motion, gate)?;
-        let (heated, external, absolute_heat) = self.prepare_heat(heat, gate)?;
-        self.rigid_wall_enthalpy_candidate(
-            ThermalWallBoundary::Rigid {
-                native,
-                motion_si: motion,
-                maximum_relative_mass_defect,
+        let (candidate, report) = self.planar_rigid_wall_motion_candidate_with_sources_si(
+            motion,
+            maximum_relative_mass_defect,
+            FreeSurfaceWallSources {
+                heat,
+                ..FreeSurfaceWallSources::default()
             },
-            heated,
-            external,
-            0.0,
-            absolute_heat,
             gate,
-        )
+        )?;
+        Ok((candidate, report.flow))
     }
 
     /// Use the original force-corrected strain and sourced molecular viscosity.
@@ -80,22 +75,53 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         heat: &[FreeSurfaceCellHeat],
         gate: &CancelGate,
     ) -> Result<(Self, FreeSurfaceRigidWallViscousReport), Error> {
+        self.planar_rigid_wall_motion_candidate_with_sources_si(
+            motion,
+            maximum_relative_mass_defect,
+            FreeSurfaceWallSources {
+                heat,
+                molecular_heating: true,
+                gas_pressure: None,
+            },
+            gate,
+        )
+    }
+
+    /// Propose one thermal rigid-wall tick with all selected sources.
+    ///
+    /// The immutable pressure field and authored heat are reused unchanged for
+    /// any finite-body pilot and replay. Each candidate samples molecular heat
+    /// from the same accepted initial state when selected, then advances one
+    /// original collision and extensive enthalpy transport. Gas pressure and
+    /// wall work remain mechanical loading; neither is added to heat. The
+    /// returned molecular sample list is empty when that source is disabled.
+    pub fn planar_rigid_wall_motion_candidate_with_sources_si(
+        &self,
+        motion: MaterialPlanarRigidWallMotion3,
+        maximum_relative_mass_defect: f64,
+        sources: FreeSurfaceWallSources<'_>,
+        gate: &CancelGate,
+    ) -> Result<(Self, FreeSurfaceRigidWallViscousReport), Error> {
         let native = self
             .flow
             .prepare_planar_rigid_wall_motion_si(motion, gate)?;
-        let prepared = self.prepare_viscous_heat(heat, gate)?;
-        let (candidate, flow) = self.rigid_wall_enthalpy_candidate(
-            ThermalWallBoundary::Rigid {
-                native,
-                motion_si: motion,
-                maximum_relative_mass_defect,
-            },
-            prepared.heated,
-            prepared.external,
-            prepared.viscous,
-            prepared.absolute_heat,
-            gate,
-        )?;
+        let prepared = self.prepare_wall_sources(sources, gate)?;
+        let (candidate, flow) =
+            sources.with_lattice_gas_pressure(self.flow.scaling, |gas_pressure| {
+                self.rigid_wall_enthalpy_candidate(
+                    ThermalWallBoundary::Rigid {
+                        native,
+                        motion_si: motion,
+                        maximum_relative_mass_defect,
+                    },
+                    prepared.heated,
+                    prepared.external,
+                    prepared.viscous,
+                    prepared.absolute_heat,
+                    gas_pressure,
+                    gate,
+                )
+            })?;
         Ok((
             candidate,
             FreeSurfaceRigidWallViscousReport {
@@ -112,10 +138,18 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         external: f64,
         viscous: f64,
         absolute_heat: f64,
+        gas_pressure: Option<(f64, GasPressureField<'_>)>,
         gate: &CancelGate,
     ) -> Result<(Self, FreeSurfaceRigidWallEnthalpyReport), Error> {
-        let (candidate, flow, wall) =
-            self.wall_enthalpy_candidate(boundary, heated, external, viscous, absolute_heat, gate)?;
+        let (candidate, flow, wall) = self.wall_enthalpy_candidate(
+            boundary,
+            heated,
+            external,
+            viscous,
+            absolute_heat,
+            gas_pressure,
+            gate,
+        )?;
         let wall = match wall {
             ThermalWallReport::Rigid(report) => report,
             _ => unreachable!("rigid boundary retains its original wall receipt"),
@@ -133,6 +167,7 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         external: f64,
         viscous: f64,
         absolute_heat: f64,
+        gas_pressure: Option<(f64, GasPressureField<'_>)>,
         gate: &CancelGate,
     ) -> Result<(Self, FreeSurfaceEnthalpyReport, ThermalWallReport), Error> {
         // Both entry points use prepare_heat, whose original electrical
@@ -146,7 +181,7 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
             None,
             None,
             None,
-            None,
+            gas_pressure,
             Some(boundary),
             gate,
         )?;

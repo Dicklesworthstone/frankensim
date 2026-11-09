@@ -1,5 +1,6 @@
 //! Nonuniform face-quadrature motion through the original wall reflection.
 
+use super::super::pressure::{GasPressure3, GasPressureField3};
 use super::super::transport::MassTransport3;
 use super::*;
 use fs_math::dd::Dd;
@@ -505,6 +506,8 @@ impl FreeSurface3 {
 
     /// Thermal owner supplies the one private candidate and records the exact
     /// same collision/streaming/conversion routes as its stationary-wall path.
+    /// Prescribed gas traction reconstructs only actual gas links during this
+    /// same tick; it is never included in the reflected solid-wall wrench.
     /// No second flow solve or velocity-reconstructed companion flux occurs.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn step_with_planar_wall_field_transport(
@@ -514,16 +517,26 @@ impl FreeSurface3 {
         tau: &BTreeMap<(u64, usize), f64>,
         forces: Option<BTreeMap<(u64, usize), [f64; 3]>>,
         maximum_routes: usize,
+        gas_pressure: Option<(f64, GasPressureField3<'_>)>,
         gate: &CancelGate,
     ) -> Result<(MassTransport3, PlanarWallFieldReport3), FreeSurfaceError3> {
         check_cancel(gate)?;
+        let pressure = gas_pressure
+            .map(|(bound, field)| GasPressure3::new(bound, field))
+            .transpose()?;
         if let Some(forces) = forces {
             self.rebind_force_field(forces, gate)?;
         }
         let (mut exchange, mass_before, before_speed) =
             self.prepare_planar_wall_velocity_field(motion, controls, gate)?;
         let mut trace = MassTransport3::new(self.mass_snapshot(), maximum_routes);
-        self.step_inner_with_wall(gate, Some(&mut trace), Some(tau), None, Some(&mut exchange))?;
+        self.step_inner_with_wall(
+            gate,
+            Some(&mut trace),
+            Some(tau),
+            pressure.as_ref(),
+            Some(&mut exchange),
+        )?;
         trace.after = self.mass_snapshot();
         let report = self.finish_planar_wall_velocity_field(
             motion,

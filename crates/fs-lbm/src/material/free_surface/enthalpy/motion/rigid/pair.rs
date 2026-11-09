@@ -12,11 +12,12 @@ pub struct FreeSurfaceRigidWallPairEnthalpyReport {
     pub walls: MaterialPlanarRigidWallPairReport3,
 }
 
-/// The same shared tick with explicitly selected original molecular heating.
+/// The same shared tick with optionally selected original molecular heating.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FreeSurfaceRigidWallPairViscousReport {
     pub flow: FreeSurfaceRigidWallPairEnthalpyReport,
     /// Held initial-state source viscosity and force-corrected strain samples.
+    /// Empty when the source descriptor disables molecular heating.
     pub applied: Vec<viscous::FreeSurfaceViscousCell>,
 }
 
@@ -47,16 +48,16 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         heat: &[FreeSurfaceCellHeat],
         gate: &CancelGate,
     ) -> Result<(Self, FreeSurfaceRigidWallPairEnthalpyReport), Error> {
-        let boundary = self.thermal_rigid_wall_pair(motions, maximum_relative_mass_defect, gate)?;
-        let (heated, external, absolute_heat) = self.prepare_heat(heat, gate)?;
-        self.rigid_wall_pair_enthalpy_candidate(
-            boundary,
-            heated,
-            external,
-            0.0,
-            absolute_heat,
+        let (candidate, report) = self.planar_rigid_wall_pair_candidate_with_sources_si(
+            motions,
+            maximum_relative_mass_defect,
+            FreeSurfaceWallSources {
+                heat,
+                ..FreeSurfaceWallSources::default()
+            },
             gate,
-        )
+        )?;
+        Ok((candidate, report.flow))
     }
 
     /// Include the original held initial-state molecular stress-power source.
@@ -73,16 +74,48 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         heat: &[FreeSurfaceCellHeat],
         gate: &CancelGate,
     ) -> Result<(Self, FreeSurfaceRigidWallPairViscousReport), Error> {
-        let boundary = self.thermal_rigid_wall_pair(motions, maximum_relative_mass_defect, gate)?;
-        let prepared = self.prepare_viscous_heat(heat, gate)?;
-        let (candidate, flow) = self.rigid_wall_pair_enthalpy_candidate(
-            boundary,
-            prepared.heated,
-            prepared.external,
-            prepared.viscous,
-            prepared.absolute_heat,
+        self.planar_rigid_wall_pair_candidate_with_sources_si(
+            motions,
+            maximum_relative_mass_defect,
+            FreeSurfaceWallSources {
+                heat,
+                molecular_heating: true,
+                gas_pressure: None,
+            },
             gate,
-        )?;
+        )
+    }
+
+    /// Propose both rigid walls, prescribed gas load and heat on one thermal tick.
+    ///
+    /// One frozen source descriptor drives the original collision and the
+    /// resulting mass/enthalpy trace. Each gas link and each of the disjoint
+    /// flooded walls retains its original native population owner. Finite-body
+    /// pilots and final replay must reuse the same pressure field and heat;
+    /// only the accepted candidate advances the liquid clock. Molecular samples
+    /// are empty when disabled. Pressure and both wall works remain mechanical
+    /// exchange, without inferred compressive or numerical-dissipation heat.
+    pub fn planar_rigid_wall_pair_candidate_with_sources_si(
+        &self,
+        motions: [MaterialPlanarRigidWallMotion3; 2],
+        maximum_relative_mass_defect: f64,
+        sources: FreeSurfaceWallSources<'_>,
+        gate: &CancelGate,
+    ) -> Result<(Self, FreeSurfaceRigidWallPairViscousReport), Error> {
+        let boundary = self.thermal_rigid_wall_pair(motions, maximum_relative_mass_defect, gate)?;
+        let prepared = self.prepare_wall_sources(sources, gate)?;
+        let (candidate, flow) =
+            sources.with_lattice_gas_pressure(self.flow.scaling, |gas_pressure| {
+                self.rigid_wall_pair_enthalpy_candidate(
+                    boundary,
+                    prepared.heated,
+                    prepared.external,
+                    prepared.viscous,
+                    prepared.absolute_heat,
+                    gas_pressure,
+                    gate,
+                )
+            })?;
         Ok((
             candidate,
             FreeSurfaceRigidWallPairViscousReport {
@@ -118,10 +151,18 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         external: f64,
         viscous: f64,
         absolute_heat: f64,
+        gas_pressure: Option<(f64, GasPressureField<'_>)>,
         gate: &CancelGate,
     ) -> Result<(Self, FreeSurfaceRigidWallPairEnthalpyReport), Error> {
-        let (candidate, flow, walls) =
-            self.wall_enthalpy_candidate(boundary, heated, external, viscous, absolute_heat, gate)?;
+        let (candidate, flow, walls) = self.wall_enthalpy_candidate(
+            boundary,
+            heated,
+            external,
+            viscous,
+            absolute_heat,
+            gas_pressure,
+            gate,
+        )?;
         let walls = match walls {
             ThermalWallReport::RigidPair(report) => report,
             _ => unreachable!("rigid pair retains both original wall receipts"),

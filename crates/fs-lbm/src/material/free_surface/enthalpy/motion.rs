@@ -13,10 +13,12 @@ use crate::material::free_surface::{
 };
 
 mod rigid;
+mod sources;
 pub use rigid::{
     FreeSurfaceRigidWallEnthalpyReport, FreeSurfaceRigidWallPairEnthalpyReport,
     FreeSurfaceRigidWallPairViscousReport, FreeSurfaceRigidWallViscousReport,
 };
+pub use sources::{FreeSurfaceWallGasPressure, FreeSurfaceWallSources};
 
 /// One accepted thermal flow tick and its actual distributed wall exchange.
 #[derive(Clone, Debug, PartialEq)]
@@ -28,11 +30,12 @@ pub struct FreeSurfacePlanarWallEnthalpyReport {
     pub wall: MaterialPlanarWallFieldReport3,
 }
 
-/// The same wall-driven tick with explicitly selected molecular stress heating.
+/// The same wall-driven tick with optionally selected molecular stress heating.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FreeSurfacePlanarWallViscousReport {
     pub flow: FreeSurfacePlanarWallEnthalpyReport,
     /// Held initial-state molecular power from the original viscosity/strain owner.
+    /// Empty when the source descriptor disables molecular heating.
     pub applied: Vec<viscous::FreeSurfaceViscousCell>,
 }
 
@@ -74,6 +77,7 @@ impl ThermalWallBoundary<'_> {
         tau: &BTreeMap<(u64, usize), f64>,
         forces: Option<BTreeMap<(u64, usize), [f64; 3]>>,
         maximum_routes: usize,
+        gas_pressure: Option<(f64, GasPressureField<'_>)>,
         gate: &CancelGate,
     ) -> Result<(MassTransport3, NativeThermalWallReport), Error> {
         match self {
@@ -86,6 +90,7 @@ impl ThermalWallBoundary<'_> {
                     tau,
                     forces,
                     maximum_routes,
+                    gas_pressure,
                     gate,
                 )?;
                 Ok((trace, NativeThermalWallReport::Field(report)))
@@ -101,6 +106,7 @@ impl ThermalWallBoundary<'_> {
                     tau,
                     forces,
                     maximum_routes,
+                    gas_pressure,
                     gate,
                 )?;
                 Ok((trace, NativeThermalWallReport::Rigid(report)))
@@ -116,6 +122,7 @@ impl ThermalWallBoundary<'_> {
                     tau,
                     forces,
                     maximum_routes,
+                    gas_pressure,
                     gate,
                 )?;
                 Ok((trace, NativeThermalWallReport::RigidPair(report)))
@@ -217,26 +224,17 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         heat: &[FreeSurfaceCellHeat],
         gate: &CancelGate,
     ) -> Result<FreeSurfacePlanarWallEnthalpyReport, Error> {
-        let (velocities, origin) = self
-            .flow
-            .prepare_planar_wall_velocity_field_si(motion, controls, gate)?;
-        let (heated, external, absolute_heat) = self.prepare_heat(heat, gate)?;
-        self.advance_wall_enthalpy(
-            ThermalWallBoundary::Field {
-                native: PlanarWallVelocityField3 {
-                    wall: motion.wall,
-                    moment_origin: origin,
-                    tangential_velocity: &velocities,
-                },
+        Ok(self
+            .step_with_planar_wall_velocity_field_and_sources_si(
+                motion,
                 controls,
-                moment_origin_m: motion.moment_origin_m,
-            },
-            heated,
-            external,
-            0.0,
-            absolute_heat,
-            gate,
-        )
+                FreeSurfaceWallSources {
+                    heat,
+                    ..FreeSurfaceWallSources::default()
+                },
+                gate,
+            )?
+            .flow)
     }
 
     /// Drive the thermal liquid and retain its existing molecular heat source.
@@ -257,26 +255,56 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         heat: &[FreeSurfaceCellHeat],
         gate: &CancelGate,
     ) -> Result<FreeSurfacePlanarWallViscousReport, Error> {
+        self.step_with_planar_wall_velocity_field_and_sources_si(
+            motion,
+            controls,
+            FreeSurfaceWallSources {
+                heat,
+                molecular_heating: true,
+                gas_pressure: None,
+            },
+            gate,
+        )
+    }
+
+    /// Advance wall motion, selected heat and prescribed gas loading together.
+    ///
+    /// All sources act on the same original collision and mass-route trace.
+    /// Pressure retains its original exposed-link reconstruction and capillary
+    /// bound; the flooded wall retains its original link-resolved exchange.
+    /// The source descriptor is held for this tick. Molecular samples are empty
+    /// when that source is disabled. Pressure and wall work supply no caloric
+    /// heat, and all existing source/endpoint ownership gates remain atomic.
+    pub fn step_with_planar_wall_velocity_field_and_sources_si(
+        &mut self,
+        motion: MaterialPlanarWallVelocityField3<'_>,
+        controls: PlanarWallFieldControls3,
+        sources: FreeSurfaceWallSources<'_>,
+        gate: &CancelGate,
+    ) -> Result<FreeSurfacePlanarWallViscousReport, Error> {
         let (velocities, origin) = self
             .flow
             .prepare_planar_wall_velocity_field_si(motion, controls, gate)?;
-        let prepared = self.prepare_viscous_heat(heat, gate)?;
-        let flow = self.advance_wall_enthalpy(
-            ThermalWallBoundary::Field {
-                native: PlanarWallVelocityField3 {
-                    wall: motion.wall,
-                    moment_origin: origin,
-                    tangential_velocity: &velocities,
+        let prepared = self.prepare_wall_sources(sources, gate)?;
+        let flow = sources.with_lattice_gas_pressure(self.flow.scaling, |gas_pressure| {
+            self.advance_wall_enthalpy(
+                ThermalWallBoundary::Field {
+                    native: PlanarWallVelocityField3 {
+                        wall: motion.wall,
+                        moment_origin: origin,
+                        tangential_velocity: &velocities,
+                    },
+                    controls,
+                    moment_origin_m: motion.moment_origin_m,
                 },
-                controls,
-                moment_origin_m: motion.moment_origin_m,
-            },
-            prepared.heated,
-            prepared.external,
-            prepared.viscous,
-            prepared.absolute_heat,
-            gate,
-        )?;
+                prepared.heated,
+                prepared.external,
+                prepared.viscous,
+                prepared.absolute_heat,
+                gas_pressure,
+                gate,
+            )
+        })?;
         Ok(FreeSurfacePlanarWallViscousReport {
             flow,
             applied: prepared.applied,
@@ -290,6 +318,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         external: f64,
         viscous: f64,
         absolute_heat: f64,
+        gas_pressure: Option<(f64, GasPressureField<'_>)>,
         gate: &CancelGate,
     ) -> Result<FreeSurfacePlanarWallEnthalpyReport, Error> {
         let (flow, wall) = self.advance_prepared_enthalpy_with_wall(
@@ -301,7 +330,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             None,
             None,
             None,
-            None,
+            gas_pressure,
             Some(boundary),
             gate,
         )?;

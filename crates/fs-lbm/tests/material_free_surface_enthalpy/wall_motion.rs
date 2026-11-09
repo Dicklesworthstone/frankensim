@@ -9,6 +9,9 @@ use fs_lbm::material::transport::boussinesq::BoussinesqConfig;
 #[path = "wall_motion/pair.rs"]
 mod pair;
 
+#[path = "wall_motion/pressure.rs"]
+mod pressure;
+
 fn controls() -> PlanarWallFieldControls3 {
     PlanarWallFieldControls3 {
         maximum_domain_cells: 512,
