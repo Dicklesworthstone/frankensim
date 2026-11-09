@@ -44,12 +44,15 @@ pub struct SlabThermalCellBand {
 /// responses stay prepared; current emission is cached once per layer and band.
 /// The observer is an explicit/lagged source; `endpoint_transport` instead feeds
 /// the existing backward-Euler residual at its actual candidate temperatures.
+/// Attached prescribed beams use exact interval means in either path; the BE
+/// path then requires `endpoint_transport_over_interval`.
 #[derive(Clone)]
 pub struct SpectralSlabThermal<'a> {
     bands: Arc<[SlabThermalBand]>,
     drivers: Arc<[GraySlabThermal<'a>]>,
     pairs: Arc<[(usize, usize)]>,
     derivative_bounds_w_k: Arc<BTreeMap<CellId, f64>>,
+    beams: Option<SlabBeamIllumination>,
 }
 
 impl<'a> SpectralSlabThermal<'a> {
@@ -186,6 +189,7 @@ impl<'a> SpectralSlabThermal<'a> {
             drivers: drivers.into(),
             pairs: pairs.into(),
             derivative_bounds_w_k: Arc::new(derivative_bounds_w_k),
+            beams: None,
         })
     }
 
@@ -200,12 +204,71 @@ impl<'a> SpectralSlabThermal<'a> {
         self.drivers.get(band)?.cell_response()
     }
 
+    /// Attach independently directed spectral sources on the original cells.
+    /// Each beam selects its original finite band; no omitted wavelength is
+    /// filled or converted to gray heat. Angular polarization/entry and thermal
+    /// hemispherical emission retain their respective original responses.
+    pub fn with_beams(
+        mut self,
+        beams: Vec<SlabThermalBeam>,
+        maximum_schedule_knots: usize,
+        thermal: &DepositionSimulation<'_>,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
+        self.validate(thermal, &mut checkpoint)?;
+        self.beams = Some(SlabBeamIllumination::prepare(
+            beams,
+            maximum_schedule_knots,
+            &self.drivers,
+            thermal.time_s(),
+            &mut checkpoint,
+        )?);
+        Ok(self)
+    }
+
+    pub fn beam_illumination(&self) -> Option<&SlabBeamIllumination> {
+        self.beams.as_ref()
+    }
+
     pub fn endpoint_transport(
         &self,
         thermal: &DepositionSimulation<'_>,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<TransportStepCoefficients<()>, DepositionError> {
+        if self.beams.is_some() {
+            return Err(DepositionError::InvalidInput(
+                "scheduled slab beams require endpoint_transport_over_interval",
+            ));
+        }
         self.evaluate(thermal, true, true, &mut checkpoint)
+    }
+
+    /// Candidate-endpoint Planck emission/internal exchange plus exact beam
+    /// mean powers over the native BE interval. Original per-band heat sums
+    /// and one debit/credit per internal pair remain unchanged.
+    pub fn endpoint_transport_over_interval(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        start_s: f64,
+        duration_s: f64,
+        end_s: f64,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<TransportStepCoefficients<()>, DepositionError> {
+        if thermal.time_s() != end_s {
+            return Err(DepositionError::InvalidInput(
+                "slab BE candidate must have the actual endpoint time",
+            ));
+        }
+        let mut result = self.evaluate(thermal, true, true, &mut checkpoint)?;
+        add_beam_interval(
+            self.beams.as_ref(),
+            &mut result.heat.bulk.sources_w,
+            start_s,
+            duration_s,
+            end_s,
+            &mut checkpoint,
+        )?;
+        Ok(result)
     }
 
     fn evaluate(
@@ -216,6 +279,9 @@ impl<'a> SpectralSlabThermal<'a> {
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<TransportStepCoefficients<()>, DepositionError> {
         checkpoint()?;
+        if let Some(beams) = &self.beams {
+            beams.admit_time(thermal.time_s())?;
+        }
         if self.pairs.len() > thermal.budget().max_links {
             return Err(DepositionError::Budget(
                 "spectral slab physical transfer pairs",
@@ -299,12 +365,59 @@ impl<'a> SpectralSlabThermal<'a> {
         for driver in self.drivers.iter() {
             driver.temperatures(thermal, checkpoint)?;
         }
+        if let Some(beams) = &self.beams {
+            beams.admit_time(thermal.time_s())?;
+        }
         Ok(())
     }
 }
 
 impl DepositionObserver for SpectralSlabThermal<'_> {
     type Error = DepositionError;
+    fn requires_step_interval(&self) -> bool {
+        self.beams.is_some()
+    }
+    fn next_transition_time_s(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<f64>, DepositionError> {
+        checkpoint()?;
+        if let Some(beams) = &self.beams {
+            beams.admit_time(thermal.time_s())?;
+            Ok(beams.next_transition(thermal.time_s()))
+        } else {
+            Ok(None)
+        }
+    }
+    fn step_sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        start_s: f64,
+        duration_s: f64,
+        end_s: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, DepositionError> {
+        if self.beams.is_none() {
+            return Ok(BTreeMap::new());
+        }
+        self.validate(thermal, checkpoint)?;
+        if thermal.time_s() != start_s {
+            return Err(DepositionError::InvalidInput(
+                "slab beam interval must start at native time",
+            ));
+        }
+        let mut sources = BTreeMap::new();
+        add_beam_interval(
+            self.beams.as_ref(),
+            &mut sources,
+            start_s,
+            duration_s,
+            end_s,
+            checkpoint,
+        )?;
+        Ok(sources)
+    }
     fn sources(
         &mut self,
         thermal: &DepositionSimulation<'_>,

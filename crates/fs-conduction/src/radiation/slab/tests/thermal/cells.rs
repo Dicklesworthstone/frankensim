@@ -2,6 +2,8 @@ use super::super::cells::partition;
 use super::*;
 use crate::radiation::spectral::planck::BlackbodyBand;
 
+mod irradiation;
+
 fn cell_state<'a>(
     law: &'a Caloric,
     response: &SlabCellResponse,

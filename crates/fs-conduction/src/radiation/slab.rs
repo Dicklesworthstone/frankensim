@@ -48,8 +48,8 @@ pub use cells::{MAX_SLAB_CELLS, SlabCell, SlabCellResponse};
 pub use depth::{SlabDepthReport, SlabDepthResponse};
 pub use diffuse::{SlabDiffuseDepthReport, SlabDiffuseDepthResponse};
 pub use thermal::{
-    GraySlabThermal, MAX_SLAB_SPECTRAL_BANDS, SlabThermalBand, SlabThermalCellBand,
-    SpectralSlabThermal,
+    GraySlabThermal, MAX_SLAB_SPECTRAL_BANDS, MAX_SLAB_THERMAL_BEAMS, SlabBeamIllumination,
+    SlabBeamInterval, SlabThermalBand, SlabThermalBeam, SlabThermalCellBand, SpectralSlabThermal,
 };
 
 /// Maximum physical layers in one prepared slab.
