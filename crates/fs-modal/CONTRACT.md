@@ -2315,3 +2315,24 @@ Malformed, nonfinite, unrepresentable or cancelled observations return no
 partial result. Focused tests cover complex physical curvature, tiny symmetric
 work beside huge gyroscopic entries, subnormal/large coefficient products and
 coefficient remainders surviving leading quadratic cancellation.
+
+### Complete physical quadratic-work parameter jets
+
+`harmonic_quadratic_power_parameter_jet_with_cancel` observes
+`Re(v^H*sym(C)*v)/2` through value, first/second frequency, parameter and mixed
+frequency/parameter order. Its complete original field jet and optional C_theta
+retain every product-rule term, including direct matrix changes and both mixed
+field/matrix contributions. C and C_theta are frequency independent; signed
+directions are observations, not newly admitted positive constitutive laws.
+
+The same upper-triangle coefficient and normalized contraction primitives serve
+the curvature-only API. Exact skew pairs cancel before physical accumulation;
+coefficient low words, subnormal factors and overflowing same-sign sums retain
+the earlier range guarantees. A skew base matrix can have a nonzero symmetric
+direction, which contributes physical work. No C*v array, heap allocation,
+factorization or unused parameter computation is added to curvature-only calls.
+Work remains O(n^2), with constant scratch, input admission and row cancellation.
+
+Focused native regressions compare a complex moving-field/matrix polynomial,
+extreme coefficient and gyroscopic scales, direct and mixed loss directions,
+malformed inputs and cancellation/replay; the existing curvature tests remain.

@@ -206,7 +206,6 @@ pub fn harmonic_quadratic_power_curvature_with_cancel(
     matrix: &[f64],
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<super::super::resonance::HarmonicPowerCurvatureSample, HarmonicResponseError> {
-    use super::super::resonance::{HarmonicPowerCurvatureSample, HarmonicPowerSample};
     if cancelled() {
         return Err(HarmonicResponseError::Cancelled);
     }
@@ -226,62 +225,194 @@ pub fn harmonic_quadratic_power_curvature_with_cancel(
             "complete finite quadratic-work fields and matrix required",
         ));
     }
-    let (mut value, mut first, mut second) = (
-        PowerSum::default(),
-        PowerSum::default(),
-        PowerSum::default(),
-    );
+    let mut total = QuadraticCurvatureSum::default();
     for i in 0..n {
         if cancelled() {
             return Err(HarmonicResponseError::Cancelled);
         }
         for j in i..n {
-            let coefficients = if i == j {
-                [matrix[i * n + i], 0.0]
-            } else {
-                let (a, b) = (matrix[i * n + j], matrix[j * n + i]);
-                if a == -b {
-                    // Cancel exact gyroscopic pairs before they reach a
-                    // shared accumulator containing much weaker dissipation.
-                    continue;
-                }
-                if (a + b).is_finite() {
-                    // One upper-triangle term replaces both original entries:
-                    // Re(v_i^* v_j)*(a+b)/2. Keep the sum's low word and leave
-                    // the half inside PowerSum, even below min subnormal.
-                    let sum = Dd::from_f64(a) + Dd::from_f64(b);
-                    [sum.hi, sum.lo]
-                } else {
-                    // Same-sign coefficient overflow is harmless when the
-                    // fields are small: normalize each original product.
-                    [a, b]
-                }
-            };
-            for c in coefficients {
-                if c == 0.0 {
-                    continue;
-                }
-                value.half_inner(velocity[i], velocity[j], c)?;
-                first.half_inner(derivative[i], velocity[j], c)?;
-                first.half_inner(velocity[i], derivative[j], c)?;
-                second.half_inner(second_derivative[i], velocity[j], c)?;
-                // Two normalized contractions avoid constructing 2*c.
-                second.half_inner(derivative[i], derivative[j], c)?;
-                second.half_inner(derivative[i], derivative[j], c)?;
-                second.half_inner(velocity[i], second_derivative[j], c)?;
+            for coefficient in symmetric_work_coefficients(matrix, n, i, j) {
+                total.add(
+                    [velocity[i], derivative[i], second_derivative[i]],
+                    [velocity[j], derivative[j], second_derivative[j]],
+                    coefficient,
+                )?;
             }
         }
     }
     if cancelled() {
         return Err(HarmonicResponseError::Cancelled);
     }
-    Ok(HarmonicPowerCurvatureSample {
-        sample: HarmonicPowerSample {
-            average_power_w: value.value()?,
-            angular_derivative: first.value()?,
-        },
-        angular_second_derivative: second.value()?,
+    total.value()
+}
+
+/// Complete original quadratic-work frequency/parameter jet.
+///
+/// Evaluates P=Re(v^H D v)/2 with D=(C+C^T)/2, using the full field jet
+/// and the independently authored D_theta=(C_theta+C_theta^T)/2. Matrices
+/// are real, row-major, and frequency independent. None holds C fixed.
+/// The real parameter direction is signed; it does not admit a constitutive
+/// model or infer material, geometry, or operating-point chain-rule terms.
+///
+/// Theta work includes both changing fields and coefficients. Mixed work
+/// includes all four field products and both C_theta frequency products.
+/// A dispersive constitutive coefficient needs its explicit memory states or
+/// a different owner that accepts its frequency law; no C_omega is inferred.
+/// Heat, signed incremental work, and spring storage retain the caller's
+/// physical meaning and units of the supplied coefficient and field.
+///
+/// The same upper-triangle normalized contraction serves the curvature-only
+/// owner. Original coefficient pairs and their low words remain inside
+/// factored products; gyro pairs cancel before weaker symmetric work, with no
+/// C*v or prematurely halved subnormal. Multiplicities do not require an
+/// overflowing coefficient in a work product. No allocation is performed:
+/// work is O(n^2), scratch is constant, and cancellation is checked
+/// before and after contraction and at every original row. Invalid or
+/// unrepresentable values publish no partial result.
+pub fn harmonic_quadratic_power_parameter_jet_with_cancel(
+    field: super::super::resonance::HarmonicTransferFieldParameterJet<'_>,
+    matrix: &[f64],
+    matrix_parameter_derivative: Option<&[f64]>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<super::super::resonance::HarmonicPowerParameterJet, HarmonicResponseError> {
+    use super::super::resonance::HarmonicPowerParameterJet;
+
+    if cancelled() {
+        return Err(HarmonicResponseError::Cancelled);
+    }
+    let orders = [
+        field.values,
+        field.angular_derivative,
+        field.angular_second_derivative,
+        field.parameter_derivative,
+        field.angular_parameter_derivative,
+    ];
+    let n = orders[0].len();
+    if n == 0
+        || n.checked_mul(n) != Some(matrix.len())
+        || orders
+            .iter()
+            .any(|values| values.len() != n || values.iter().any(|&value| !finite(value)))
+        || matrix.iter().any(|coefficient| !coefficient.is_finite())
+        || matrix_parameter_derivative.is_some_and(|direction| {
+            direction.len() != matrix.len() || direction.iter().any(|value| !value.is_finite())
+        })
+    {
+        return Err(invalid(
+            "complete finite quadratic-work parameter fields and matrix direction required",
+        ));
+    }
+    let mut frequency = QuadraticCurvatureSum::default();
+    let (mut parameter, mut mixed) = (PowerSum::default(), PowerSum::default());
+    for i in 0..n {
+        if cancelled() {
+            return Err(HarmonicResponseError::Cancelled);
+        }
+        for j in i..n {
+            for coefficient in symmetric_work_coefficients(matrix, n, i, j) {
+                if coefficient == 0.0 {
+                    continue;
+                }
+                frequency.add(
+                    [orders[0][i], orders[1][i], orders[2][i]],
+                    [orders[0][j], orders[1][j], orders[2][j]],
+                    coefficient,
+                )?;
+                parameter.half_inner(orders[3][i], orders[0][j], coefficient)?;
+                parameter.half_inner(orders[0][i], orders[3][j], coefficient)?;
+                mixed.half_inner(orders[4][i], orders[0][j], coefficient)?;
+                mixed.half_inner(orders[1][i], orders[3][j], coefficient)?;
+                mixed.half_inner(orders[3][i], orders[1][j], coefficient)?;
+                mixed.half_inner(orders[0][i], orders[4][j], coefficient)?;
+            }
+            if let Some(direction) = matrix_parameter_derivative {
+                // A zero/gyro primal coefficient does not suppress its
+                // independently authored symmetric physical direction.
+                for coefficient in symmetric_work_coefficients(direction, n, i, j) {
+                    if coefficient == 0.0 {
+                        continue;
+                    }
+                    parameter.half_inner(orders[0][i], orders[0][j], coefficient)?;
+                    mixed.half_inner(orders[1][i], orders[0][j], coefficient)?;
+                    mixed.half_inner(orders[0][i], orders[1][j], coefficient)?;
+                }
+            }
+        }
+    }
+    if cancelled() {
+        return Err(HarmonicResponseError::Cancelled);
+    }
+    let frequency = frequency.value()?;
+    Ok(HarmonicPowerParameterJet {
+        sample: frequency.sample,
+        angular_second_derivative: frequency.angular_second_derivative,
+        parameter_derivative: parameter.value()?,
+        angular_parameter_derivative: mixed.value()?,
     })
+}
+
+/// The upper triangle contributes one diagonal coefficient or both original
+/// off-diagonal entries. Its factor of one half stays inside PowerSum.
+fn symmetric_work_coefficients(matrix: &[f64], n: usize, i: usize, j: usize) -> [f64; 2] {
+    if i == j {
+        return [matrix[i * n + i], 0.0];
+    }
+    let (a, b) = (matrix[i * n + j], matrix[j * n + i]);
+    if a == -b {
+        // Exact gyro exchange must not enter a shared weak-work accumulator.
+        [0.0, 0.0]
+    } else if (a + b).is_finite() {
+        let sum = Dd::from_f64(a) + Dd::from_f64(b);
+        [sum.hi, sum.lo]
+    } else {
+        // Small fields can make the work finite even when a+b overflows.
+        [a, b]
+    }
+}
+
+#[derive(Default)]
+struct QuadraticCurvatureSum {
+    value: PowerSum,
+    frequency: PowerSum,
+    second_frequency: PowerSum,
+}
+
+impl QuadraticCurvatureSum {
+    fn add(
+        &mut self,
+        left: [C64; 3],
+        right: [C64; 3],
+        coefficient: f64,
+    ) -> Result<(), HarmonicResponseError> {
+        if coefficient == 0.0 {
+            return Ok(());
+        }
+        self.value.half_inner(left[0], right[0], coefficient)?;
+        self.frequency.half_inner(left[1], right[0], coefficient)?;
+        self.frequency.half_inner(left[0], right[1], coefficient)?;
+        self.second_frequency
+            .half_inner(left[2], right[0], coefficient)?;
+        // Two normalized products avoid constructing 2*coefficient.
+        self.second_frequency
+            .half_inner(left[1], right[1], coefficient)?;
+        self.second_frequency
+            .half_inner(left[1], right[1], coefficient)?;
+        self.second_frequency
+            .half_inner(left[0], right[2], coefficient)
+    }
+
+    fn value(
+        self,
+    ) -> Result<super::super::resonance::HarmonicPowerCurvatureSample, HarmonicResponseError> {
+        use super::super::resonance::{HarmonicPowerCurvatureSample, HarmonicPowerSample};
+        Ok(HarmonicPowerCurvatureSample {
+            sample: HarmonicPowerSample {
+                average_power_w: self.value.value()?,
+                angular_derivative: self.frequency.value()?,
+            },
+            angular_second_derivative: self.second_frequency.value()?,
+        })
+    }
 }
 
 #[cfg(test)]
