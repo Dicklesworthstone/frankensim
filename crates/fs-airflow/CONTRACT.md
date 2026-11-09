@@ -613,6 +613,58 @@ The executor became unavailable before this extension's compile/runtime check
 could complete. These new regression sources are unexecuted; the earlier
 54-test result above applies to the preceding quasi-steady regional delivery.
 
+## Original-law Carreau network design derivatives
+
+`CarreauPipeGraph::solve_linearized` and
+`solve_with_injections_linearized` retain a successful original radial solve
+inside an immutable `CarreauGraphLinearization`. No external or mutable
+`CarreauGraphSolution` can admit cached conductances. Forward directions and
+scalar-objective adjoints cover each pipe's log radius, log length and prescribed
+temperature, plus original-order pressure boundaries and signed flow injections.
+
+With accepted signed flow Q, constitutive pressure drop p and original positive
+conductance G=dQ/dp, radial momentum gives dQ/dln(R)=3Q+pG and dQ/dln(L)=-pG.
+For the source's original logarithmic shift slope s=dln(a_T)/dT, the Vertical
+calibration gives dQ/dT=-s pG; VerticalAndRate gives dQ/dT=-s Q. These distinct
+responses retain the authored temperature convention. No fitted apparent
+viscosity, radial finite difference or derivative of Newton iteration history
+is substituted. Source-law and physical rate ceilings must contain an open
+neighborhood, including the complete prepared rate envelope under a horizontal
+temperature shift; a boundary state refuses a two-sided derivative.
+
+The same grounded conductance Laplacian and checked CG used by the primal solve
+each direction or adjoint. Original profiles, parameter responses, Jacobi
+diagonals and component references are retained and reused. The coefficient
+storage and each operator application are O(nodes+pipes); one adjoint handles
+all exposed parameter gradients. Rest uses the true finite conductance.
+Pressure directions are centered on one retained boundary per component before
+the linear solve, keeping large uniform datum changes out of the shear-flow
+accuracy scale. Pressures are then restored and flows retain the centered
+calculation.
+
+Differentiated continuity is actual pipe outflow minus authored injection.
+Repeated inputs share their node derivative while retaining input order;
+injection at prescribed pressure changes net reservoir exchange without changing
+the hydraulic state. Each tangent reports the physical continuity residual and
+the checked linear residual. Adjoint weights act on node pressures and branch
+flows; direct objective dependence on geometry, temperature or ports remains
+the caller's chain rule.
+
+Focused regression sources cover independently differentiated
+Arrhenius/Poiseuille flow, original solved-network differences for radius,
+length and temperature under both shift modes, forward/adjoint dot products,
+repeated and fixed-node injections, stagnation, component gauges, material
+support boundaries, exhausted work and cancellation/retry. The changed Rust
+files were parsed/formatted; native Cargo compilation and tests were not run
+in the unavailable constellation workspace. Independent numerical algebra
+checks are not a native-runtime or performance campaign.
+
+These are local nominal-model derivatives. The primal constitutive/quadrature
+error and source uncertainty remain, and a checked linear residual is not a
+gradient-error certificate. No finite perturbation, changed laminar regime,
+transient momentum, self-heating evolution or coupled thermal adjoint is
+admitted by this derivative owner.
+
 ## Steady shear-thinning hydraulic networks
 
 `graph::rheology::CarreauPipeGraph` connects original `LaminarCarreauPipe`

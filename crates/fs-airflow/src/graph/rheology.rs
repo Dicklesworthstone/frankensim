@@ -29,6 +29,8 @@ use fs_sparse::precond::Precond;
 
 use super::{FixedPressure, GraphError, Sum, checkpoint, finite, periodic_checkpoint};
 
+/// Original-law geometry, temperature and prescribed-port tangents/adjoints.
+pub mod sensitivity;
 /// Original-law self-heating of an explicit recirculating thermal inventory.
 pub mod thermal;
 pub mod transient;
@@ -768,7 +770,7 @@ impl CarreauPipeGraph {
             layout,
             conductance,
             storage_slope,
-            inverse_diagonal,
+            inverse_diagonal: &inverse_diagonal,
             cx,
             failure: RefCell::new(None),
         };
@@ -887,6 +889,7 @@ impl CarreauPipeGraph {
     }
 }
 
+#[derive(Debug)]
 struct BoundaryLayout {
     fixed: Vec<bool>,
     free_nodes: Vec<usize>,
@@ -921,7 +924,7 @@ struct ConductanceLaplacian<'a, 'cx> {
     layout: &'a BoundaryLayout,
     conductance: &'a [f64],
     storage_slope: Option<&'a [f64]>,
-    inverse_diagonal: Vec<f64>,
+    inverse_diagonal: &'a [f64],
     cx: &'a Cx<'cx>,
     failure: RefCell<Option<CarreauGraphError>>,
 }
