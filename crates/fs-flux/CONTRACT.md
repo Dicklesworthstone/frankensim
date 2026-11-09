@@ -8559,10 +8559,47 @@ accuracy certificate. Six focused regressions cover independent thermal and
 composition modes, CFL aliasing, accepted-path balances, work/minimum-step
 refusal, continuation and cancellation/replay.
 
-The preceding 70-test core miscibility run passed on the pinned Rust toolchain.
+The core snapshot fbf0992 passed 70 miscibility tests on the pinned Rust toolchain.
 These six additional adaptive regressions and the changed shared estimator
 were source-reviewed but could not be compiled or executed after the execution
 environment became unavailable.
+
+
+### Original materials for locally nonisothermal miscibility
+
+`miscibility::material::nonisothermal` binds an existing source-resolved spatial
+field to its exact original `BinaryLiquidCaloricLaw` and one temperature per
+cell. Pointer identity of the original liquid law is checked before numerical
+binding. The field retains the original liquid/caloric bindings, independently
+represented component inventories, elapsed time, resolved-cell budget and the
+source's existing equal-fixed-volume allowance.
+
+All five evolution paths are exposed: one molecular/heat sweep, adaptive
+diffusion, parcel advection, coupled transport and adaptive coupled transport.
+Each completes its numerical transaction and then refreshes density, viscosity,
+transport Cp, conductivity and original material receipts at the actual final
+temperature/composition of EVERY cell. The existing homogeneous source resolver
+and volume-consistency check are reused. Unsupported source temperatures,
+incompatible density/volume, late source errors and cancellation publish neither
+the numerical field nor a partial material report. Source-domain checks for
+calorics and any bound molecular diffusivity remain within the numerical stages.
+
+This additional material qualification applies to the complete endpoint;
+independently sourced transport properties are not certified for every discarded
+or intermediate numerical trial. Mixture transport Cp does not replace original
+pure-liquid calorics, and local conductivity receipts do not silently supply a
+face interpolation law. Conductivity and reciprocal Soret heat remain explicitly
+authored face data. No cell is flashed to equilibrium. Actual cell temperatures
+come from `field().temperatures()` or `cells()`; the network/source reference
+temperature is not a local observation.
+
+Three focused material regression groups cover temperature-dependent source
+properties, retained card/pressure/caloric identity, independent parcel-enthalpy
+temperatures, all five evolution paths, exact-law mismatch, late source and
+density refusal, cancellation and replay. These regressions were source-reviewed
+but not compiled or executed: the attempted material build first encountered
+disk exhaustion in a registry dependency, and the execution environment became
+unavailable after the temporary build output was relocated without deletion.
 
 ### Compatible molecular stress with variable viscosity
 

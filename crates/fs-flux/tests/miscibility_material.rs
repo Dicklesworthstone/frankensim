@@ -3,6 +3,8 @@
 
 #[path = "miscibility_material/diffusivity.rs"]
 mod diffusivity;
+#[path = "miscibility_material/nonisothermal.rs"]
+mod nonisothermal;
 #[path = "miscibility_material/thermal.rs"]
 mod thermal;
 

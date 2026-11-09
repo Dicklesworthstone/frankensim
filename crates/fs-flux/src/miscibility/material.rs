@@ -10,7 +10,9 @@
 //! an explicit cell-count budget bounds queries and retained material results.
 //! Density, viscosity and thermal properties are exposed through the existing
 //! liquid consumers. The `thermal` adapter adds a closed, uniform-temperature
-//! energy balance with original pure-liquid calorics; momentum remains external.
+//! energy balance with original pure-liquid calorics. The `nonisothermal`
+//! adapter resolves each evolving local temperature/composition after heat,
+//! species and prescribed-flow transport; momentum remains external.
 
 use super::advection::{BinaryMiscibilityAdvection, BinaryMiscibilityAdvectionControls};
 use super::temperature::BinaryMiscibilityTemperatureChange;
@@ -25,6 +27,9 @@ use fs_material::liquid::solution::gradient::{
 };
 use fs_qty::Temperature;
 use std::sync::Arc;
+
+/// Original material sources at each evolving local temperature/composition.
+pub mod nonisothermal;
 
 /// Original pure-liquid calorics for uniform-temperature adiabatic diffusion.
 pub mod thermal;
