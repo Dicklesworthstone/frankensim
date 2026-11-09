@@ -855,6 +855,11 @@ pub(crate) fn boundary_from_state(
             let surface = material.surface_impedance_rigid_fluid(state, omega, *thickness_m)?;
             Some(crate::network::porous_volume_impedance(surface, *area_m2)?)
         }
+        NetworkLoad::Cavity { volume_m3 } => Some(crate::network::cavity_impedance(
+            acoustic.adiabatic_bulk_modulus_pa(),
+            *volume_m3,
+            omega,
+        )?),
         NetworkLoad::Radiation {
             radius,
             termination,

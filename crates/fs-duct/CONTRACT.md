@@ -2575,6 +2575,19 @@ both routes, lossless and Bessel duct walls, and data-only gas/pore changes.
 This uniform-pressure termination does not establish distributed lining,
 moving porous frames, liquid saturation or transient thermal deposition.
 
+`NetworkLoad::Cavity { volume_m3 }` is a closed cavity's lumped compliance
+`C = V / K`, with `K` the adiabatic bulk modulus of the fluid that reaches it:
+`rho c^2` of the node's one incident gas in a graph, or the chain's own
+`FluidAcousticState`. The load is `Z = i / (omega C)` in the network's
+`exp(-i omega t)` convention, purely reactive and shapeless. Both routes share
+`network::cavity_impedance`. A node joining unlike gases, a non-positive volume
+and a non-positive frequency refuse. Tests in `network/tests/cavity.rs` check
+it against `V / (rho c^2)` behind a lossless and a Bessel neck, against an
+equal-volume closed tube at low `ka` (within that tube's own `(kL)^2`), and on
+the shared-fluid chain against the same impedance supplied directly. It holds
+below the cavity's first internal mode and adds no wall loss. It is not a
+distributed cavity, a moving wall or a measured sinus.
+
 `NetworkResponse::drive_coupled` also takes one `CoupledTermination`: a
 row-major acoustic impedance matrix [Pa s/m³] over named external ports, with
 `p = -Z U` for currents into the network. It carries the response's exact

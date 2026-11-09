@@ -96,6 +96,16 @@ pub enum NetworkLoad {
         /// Exposed area carrying the boundary's volume flow [m2].
         area_m2: f64,
     },
+    /// A closed cavity of a measured volume behind the node, as its lumped
+    /// compliance `C = V / (rho c^2)` in the fluid that reaches it:
+    /// `Z = i / (omega C)` (exp(-i omega t)), lossless, with no shape. It holds
+    /// while the cavity is small against the wavelength, below its first
+    /// internal mode, as for a paranasal sinus behind its ostium. A gas node
+    /// that joins unlike gases refuses, as a flanged mouth does.
+    Cavity {
+        /// Enclosed volume [m3].
+        volume_m3: f64,
+    },
 }
 
 /// Nodal boundary condition. A bare junction has common pressure and zero net
@@ -936,7 +946,24 @@ fn load_impedance(
                 .map_err(|_| bad("porous boundary gas, geometry or material support refused"))?;
             Ok(Some(porous_volume_impedance(surface, *area_m2)?))
         }
+        NetworkLoad::Cavity { volume_m3 } => {
+            let gas = interior.ok_or_else(|| bad("network cavity needs one unambiguous incident gas"))?;
+            Ok(Some(cavity_impedance(gas.density * gas.sound_speed * gas.sound_speed, *volume_m3, omega)?))
+        }
     }
+}
+
+/// `Z = i K / (omega V)` of a closed cavity of volume `V` in a fluid of
+/// adiabatic bulk modulus `K` (exp(-i omega t)): its lumped compliance
+/// `V / K`. Gas graphs and generic-fluid chains share this one law.
+pub(crate) fn cavity_impedance(bulk_modulus_pa: f64, volume_m3: f64, omega: f64) -> Result<C64, DuctError> {
+    if !volume_m3.is_finite() || volume_m3 <= 0.0 {
+        return Err(bad("network cavity volume must be positive and finite"));
+    }
+    if !omega.is_finite() || omega <= 0.0 || !bulk_modulus_pa.is_finite() || bulk_modulus_pa <= 0.0 {
+        return Err(bad("network cavity needs a positive frequency and bulk modulus"));
+    }
+    finite_impedance(C64::new(0.0, bulk_modulus_pa / (omega * volume_m3)))
 }
 
 /// The material owner uses exp(+i wt); all duct consumers use exp(-i wt).

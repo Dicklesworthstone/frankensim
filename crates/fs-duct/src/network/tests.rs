@@ -3,6 +3,7 @@ use fs_material::gas::GasSpec;
 use fs_math::det;
 use std::time::Instant;
 
+mod cavity;
 mod coherent;
 mod field;
 mod loaded;
