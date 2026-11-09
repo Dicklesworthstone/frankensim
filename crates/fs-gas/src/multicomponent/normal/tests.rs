@@ -238,3 +238,169 @@ fn g0_g4_original_wall_pressure_primitive_parity_and_refusals() {
     // An error does not mutate either borrowed source trace.
     assert_eq!(l, state(&g, d, 0.2, 0.3, 1.0));
 }
+
+fn moving_face(g: &MixtureGas, l: &[f64; 5], r: &[f64; 5], velocity: f64) -> ([f64; 5], FaceFlux) {
+    let mut out = [0.0; 5];
+    let report = g
+        .moving_hllc_normal_flux(
+            from_slice(l, 2),
+            from_slice(r, 2),
+            velocity,
+            &mut out,
+            || false,
+        )
+        .unwrap();
+    (out, report)
+}
+
+#[test]
+fn g0_g1_moving_planar_reduces_to_axial_and_obeys_uniform_reynolds_transport() {
+    let g = mixture(1e17);
+    for (ld, lu, lp, rd, ru, rp) in [
+        ([1.0, 0.0], 0.0, 1.0, [0.0, 4.0], 0.0, 1.0),
+        ([0.8, 0.2], 0.0, 1.0, [0.03, 0.095], 0.0, 0.1),
+        ([1.0, 0.0], -2.0, 0.4, [0.0, 1.0], 2.0, 0.4),
+    ] {
+        let l = g.conserved(&ld, lu, lp).unwrap();
+        let r = g.conserved(&rd, ru, rp).unwrap();
+        let lc = l.as_cell();
+        let rc = r.as_cell();
+        let pl = g.primitive(lc, || false).unwrap();
+        let pr = g.primitive(rc, || false).unwrap();
+        for velocity in [-0.5, 0.0, 0.75] {
+            let mut axial = [0.0; 4];
+            let expected = g
+                .moving_interface(
+                    &[ld[0], ld[1], lc.momentum, lc.energy],
+                    pl,
+                    &[rd[0], rd[1], rc.momentum, rc.energy],
+                    pr,
+                    velocity,
+                    &mut axial,
+                    &mut || false,
+                )
+                .unwrap();
+            let mut actual = [0.0; 5];
+            let report = g
+                .moving_hllc_normal_flux(lc.into(), rc.into(), velocity, &mut actual, || false)
+                .unwrap();
+            assert_eq!(report, expected);
+            assert_eq!(&actual[..3], &axial[..3]);
+            assert_eq!(actual[3], 0.0);
+            assert_eq!(actual[4], axial[3]);
+            if velocity == 0.0 {
+                let mut stationary = [0.0; 5];
+                let original = g
+                    .hllc_normal_flux(lc.into(), rc.into(), &mut stationary, || false)
+                    .unwrap();
+                assert_eq!((actual, report), (stationary, original));
+            }
+        }
+    }
+
+    let variable = gas(vec![
+        source("A", R, 3.5, 0.01, 1e17),
+        source("B", 2.0 * R, 4.0, 0.05, -2e17),
+    ]);
+    for d in [[0.25, 0.5], [1.0, 0.0], [0.0, 1.0]] {
+        let primitive = NormalPrimitive {
+            partial_densities: &d,
+            normal_velocity: 1.25,
+            transverse_velocity: -0.75,
+            pressure: 2.0,
+        };
+        let q = state(&variable, d, 1.25, -0.75, 2.0);
+        let thermo = variable
+            .normal_primitive(from_slice(&q, 2), || false)
+            .unwrap();
+        for velocity in [-1.5, 0.0, 1.25, 3.0] {
+            let (f, report) = moving_face(&variable, &q, &q, velocity);
+            let relative = 1.25 - velocity;
+            close(f[0], d[0] * relative);
+            close(f[1], d[1] * relative);
+            close(f[2], q[2] * relative + 2.0);
+            close(f[3], q[3] * relative);
+            close(f[4], q[4] * relative + 2.0 * 1.25);
+            close(report.signal_speed, relative.abs() + thermo.sound_speed);
+            assert!(!report.used_hll_fallback);
+            let mut traced = [0.0; 5];
+            let trace_report = variable
+                .moving_hllc_normal_flux_from_primitive(
+                    primitive,
+                    primitive,
+                    velocity,
+                    &mut traced,
+                    || false,
+                )
+                .unwrap();
+            for k in 0..5 {
+                close(traced[k], f[k]);
+            }
+            close(trace_report.signal_speed, report.signal_speed);
+            if velocity == 0.0 {
+                assert_eq!((f, report), face(&variable, &q, &q));
+                let mut stationary = [0.0; 5];
+                let original = variable
+                    .hllc_normal_flux_from_primitive(primitive, primitive, &mut stationary, || {
+                        false
+                    })
+                    .unwrap();
+                assert_eq!((traced, trace_report), (stationary, original));
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_g3_moving_planar_contact_and_full_boost_preserve_species_and_pressure_work() {
+    let g = mixture(0.0);
+    for velocity in [-2.0, 0.0, 0.75] {
+        let l = state(&g, [1.0, 0.0], velocity, 3.0, 1.0);
+        let r = state(&g, [0.125, 0.25], velocity, -4.0, 1.0);
+        let (f, report) = moving_face(&g, &l, &r, velocity);
+        assert!(!report.used_hll_fallback);
+        for k in [0, 1, 3] {
+            close(f[k], 0.0);
+        }
+        close(f[2], 1.0);
+        close(f[4], velocity); // A comoving material contact still transmits p*u work.
+    }
+    let velocity = 0.5;
+    for (l, r, fallback) in [
+        (
+            state(&g, [0.8, 0.1], 0.4, 1.5, 2.0),
+            state(&g, [0.1, 0.25], 0.7, -2.0, 0.2),
+            false,
+        ),
+        (
+            state(&g, [1.0, 0.0], -1.5, 0.5, 0.4),
+            state(&g, [0.0, 1.0], 2.5, -0.7, 0.4),
+            true,
+        ),
+    ] {
+        let (f, report) = moving_face(&g, &l, &r, velocity);
+        assert_eq!(report.used_hll_fallback, fallback);
+        assert_eq!((f, report), moving_face(&mixture(1e17), &l, &r, velocity));
+        for b in [[-3.0, 2.0], [0.75, -1.25]] {
+            let boost = |mut q: [f64; 5]| {
+                let rho = q[0] + q[1];
+                q[4] += b[0] * q[2] + b[1] * q[3] + 0.5 * (b[0] * b[0] + b[1] * b[1]) * rho;
+                q[2] += b[0] * rho;
+                q[3] += b[1] * rho;
+                q
+            };
+            let (shifted, actual) = moving_face(&g, &boost(l), &boost(r), velocity + b[0]);
+            assert_eq!(actual.used_hll_fallback, fallback);
+            close(actual.signal_speed, report.signal_speed);
+            close(shifted[0], f[0]);
+            close(shifted[1], f[1]);
+            let mass = f[0] + f[1];
+            close(shifted[2], f[2] + b[0] * mass);
+            close(shifted[3], f[3] + b[1] * mass);
+            close(
+                shifted[4],
+                f[4] + b[0] * f[2] + b[1] * f[3] + 0.5 * (b[0] * b[0] + b[1] * b[1]) * mass,
+            );
+        }
+    }
+}

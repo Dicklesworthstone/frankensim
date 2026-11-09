@@ -10,7 +10,7 @@ pub(in crate::multicomponent) use entropy::ExteriorEntropyEffort;
 /// Wave-speed receipt accompanying an allocation-free species/energy face flux.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FaceFlux {
-    /// Wave-speed bound [m/s], relative to the face for moving-wall APIs and
+    /// Wave-speed bound [m/s], relative to the face for moving-face APIs and
     /// in the laboratory frame for stationary-face APIs.
     pub signal_speed: f64,
     /// Whether an inadmissible HLLC contact fell back to an admitted HLL state.
@@ -79,37 +79,88 @@ impl MixtureGas {
         out: &mut [f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Face, Error> {
-        if velocity == 0.0 {
-            return self.interface(left, pl, right, pr, out, cancelled);
-        }
+        self.moving_interface_components::<0>(left, pl, right, pr, velocity, out, cancelled)
+    }
+
+    /// One face-frame transformation for every species and momentum component.
+    /// Original source calorics reconstruct heat before the existing HLLC/HLL
+    /// solve. Laboratory energy includes pressure work after transformation.
+    /// See Springel (2010), section 3.4, arXiv:0901.4107.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn moving_interface_components<const TANGENTS: usize>(
+        &self,
+        left: &[f64],
+        pl: Primitive,
+        right: &[f64],
+        pr: Primitive,
+        velocity: f64,
+        out: &mut [f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Face, Error> {
         let n = self.species_count();
-        let m = n + 2;
-        if !velocity.is_finite() || left.len() != m || right.len() != m || out.len() != m {
+        let m = n + 2 + TANGENTS;
+        if TANGENTS > 2
+            || !velocity.is_finite()
+            || left.len() != m
+            || right.len() != m
+            || out.len() != m
+        {
             return Err(Error::Invalid("moving mixture face speed or dimensions"));
         }
-        let mut ql = [0.0; MAX_COMPONENTS];
-        let mut qr = [0.0; MAX_COMPONENTS];
+        if velocity == 0.0 {
+            return self.interface_components::<TANGENTS>(left, pl, right, pr, out, cancelled);
+        }
+        let shift = |state: &[f64], primitive: Primitive, target: &mut [f64]| {
+            let primitive = self.state_at(
+                &state[..n],
+                primitive.velocity - velocity,
+                primitive.pressure,
+                &mut target[..n + 2],
+            )?;
+            let mut energy = target[n + 1];
+            let mut has_shear = false;
+            for k in n + 1..m - 1 {
+                // A normal frame change leaves tangential momentum intact.
+                // Rebuild full storage from source heat and kinetic terms.
+                target[k] = state[k];
+                has_shear |= state[k] != 0.0;
+                energy += 0.5 * state[k] * (state[k] / primitive.density);
+            }
+            target[m - 1] = energy;
+            if has_shear {
+                let mut recovered = energy;
+                for k in n + 1..m - 1 {
+                    recovered -= 0.5 * target[k] * (target[k] / primitive.density);
+                }
+                recovered -= 0.5 * target[n] * (target[n] / primitive.density);
+                let (thermal, _) = self.caloric(&target[..n], primitive.temperature)?;
+                let tolerance = primitive.density * self.domain().absolute_energy_tolerance
+                    + self.domain().relative_energy_tolerance * thermal.abs();
+                if !self.admissible_face::<TANGENTS>(target)
+                    || !recovered.is_finite()
+                    || (recovered - thermal).abs() > tolerance
+                {
+                    return Err(Error::Invalid(
+                        "moving mixture state loses declared caloric precision",
+                    ));
+                }
+            }
+            Ok(primitive)
+        };
+        let mut ql = [0.0; MAX_SPATIAL_COMPONENTS];
+        let mut qr = [0.0; MAX_SPATIAL_COMPONENTS];
         poll(cancelled)?;
-        let pl = self.state_at(
-            &left[..n],
-            pl.velocity - velocity,
-            pl.pressure,
-            &mut ql[..m],
-        )?;
+        let pl = shift(left, pl, &mut ql[..m])?;
         poll(cancelled)?;
-        let pr = self.state_at(
-            &right[..n],
-            pr.velocity - velocity,
-            pr.pressure,
-            &mut qr[..m],
-        )?;
-        let face = self.interface(&ql[..m], pl, &qr[..m], pr, out, cancelled)?;
+        let pr = shift(right, pr, &mut qr[..m])?;
+        let face =
+            self.interface_components::<TANGENTS>(&ql[..m], pl, &qr[..m], pr, out, cancelled)?;
         // Total mass has no independently evolved field. Use the same ordered
         // species-flux sum in both Galilean momentum and energy transformations.
         let mass_flux = sum(out[..n].iter().copied());
         let relative_momentum = out[n];
         out[n] = relative_momentum + velocity * mass_flux;
-        out[n + 1] += velocity * relative_momentum + (0.5 * velocity * velocity) * mass_flux;
+        out[m - 1] += velocity * relative_momentum + (0.5 * velocity * velocity) * mass_flux;
         if out.iter().any(|value| !value.is_finite()) {
             return Err(Error::Invalid("moving mixture laboratory flux overflow"));
         }

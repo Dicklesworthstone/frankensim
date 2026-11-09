@@ -147,6 +147,83 @@ impl MixtureGas {
         self.interface_components::<1>(&l[..n + 3], pl, &r[..n + 3], pr, out, &mut cancelled)
     }
 
+    /// Conservative laboratory flux through a translating planar face.
+    ///
+    /// Every species, normal and tangential momentum, and referenced energy
+    /// use the original mixture HLLC/HLL problem in the face's rest frame.
+    /// The returned flux is F - face_velocity * U; its signal bound is relative
+    /// to that face. The energy includes laboratory pressure work. Tangential
+    /// face translation does not alter normal inviscid transport.
+    ///
+    /// Output has exactly species_count()+3 entries and is scratch until
+    /// success. Zero face velocity retains the stationary path. The consuming
+    /// spatial owner supplies consistent moving volumes, opposite shared-face
+    /// updates, geometric conservation and time integration.
+    pub fn moving_hllc_normal_flux(
+        &self,
+        left: NormalCell<'_>,
+        right: NormalCell<'_>,
+        face_velocity: f64,
+        out: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<FaceFlux, Error> {
+        let n = self.species_count();
+        if !face_velocity.is_finite() || out.len() != n + 3 {
+            return Err(Error::Invalid(
+                "moving planar mixture face speed or output axis",
+            ));
+        }
+        let pl = self.normal_primitive(left, &mut cancelled)?;
+        let pr = self.normal_primitive(right, &mut cancelled)?;
+        let mut l = [0.0; MAX_NORMAL_COMPONENTS];
+        let mut r = [0.0; MAX_NORMAL_COMPONENTS];
+        write_cell(left, &mut l[..n + 3]);
+        write_cell(right, &mut r[..n + 3]);
+        self.moving_interface_components::<1>(
+            &l[..n + 3],
+            pl,
+            &r[..n + 3],
+            pr,
+            face_velocity,
+            out,
+            &mut cancelled,
+        )
+    }
+
+    /// Reconstructed-trace path to [Self::moving_hllc_normal_flux]. Original
+    /// species calorics admit both laboratory and face-frame kinetic storage;
+    /// no frozen-composition surrogate or independent species advection is used.
+    pub fn moving_hllc_normal_flux_from_primitive(
+        &self,
+        left: NormalPrimitive<'_>,
+        right: NormalPrimitive<'_>,
+        face_velocity: f64,
+        out: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<FaceFlux, Error> {
+        poll(&mut cancelled)?;
+        let n = self.species_count();
+        if !face_velocity.is_finite() || out.len() != n + 3 {
+            return Err(Error::Invalid(
+                "moving planar mixture face speed or output axis",
+            ));
+        }
+        let mut l = [0.0; MAX_NORMAL_COMPONENTS];
+        let mut r = [0.0; MAX_NORMAL_COMPONENTS];
+        let pl = self.normal_conserved_into(left, &mut l[..n + 3])?;
+        poll(&mut cancelled)?;
+        let pr = self.normal_conserved_into(right, &mut r[..n + 3])?;
+        self.moving_interface_components::<1>(
+            &l[..n + 3],
+            pl,
+            &r[..n + 3],
+            pr,
+            face_velocity,
+            out,
+            &mut cancelled,
+        )
+    }
+
     /// Original caloric shock/rarefaction wall pressure at a stationary slip
     /// wall. Outward normal is -1 or +1; species, tangential momentum and energy
     /// fluxes are exactly zero. Source composition is the incident cell's.

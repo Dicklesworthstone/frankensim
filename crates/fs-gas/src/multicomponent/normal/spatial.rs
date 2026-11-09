@@ -161,6 +161,80 @@ impl MixtureGas {
         self.interface_components::<2>(&l[..n + 4], pl, &r[..n + 4], pr, out, &mut cancelled)
     }
 
+    /// Conservative species/three-momentum/energy transport through a moving
+    /// face, in its orthonormal normal/tangent basis. The laboratory flux is
+    /// F - face_velocity * U, including pressure work, and the signal bound is
+    /// relative to the face. All components share the original HLLC/HLL waves.
+    ///
+    /// Output has exactly species_count()+4 entries and is scratch until
+    /// success. A zero normal speed preserves the stationary path. Moving
+    /// volumes, shared-face signs, geometric conservation and time integration
+    /// remain the spatial owner's responsibility.
+    pub fn moving_hllc_spatial_flux(
+        &self,
+        left: SpatialCell<'_>,
+        right: SpatialCell<'_>,
+        face_velocity: f64,
+        out: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<FaceFlux, Error> {
+        let n = self.species_count();
+        if !face_velocity.is_finite() || out.len() != n + 4 {
+            return Err(Error::Invalid(
+                "moving spatial mixture face speed or output axis",
+            ));
+        }
+        let pl = self.spatial_primitive(left, &mut cancelled)?;
+        let pr = self.spatial_primitive(right, &mut cancelled)?;
+        let mut l = [0.0; MAX_SPATIAL_COMPONENTS];
+        let mut r = [0.0; MAX_SPATIAL_COMPONENTS];
+        write_cell(left, &mut l[..n + 4]);
+        write_cell(right, &mut r[..n + 4]);
+        self.moving_interface_components::<2>(
+            &l[..n + 4],
+            pl,
+            &r[..n + 4],
+            pr,
+            face_velocity,
+            out,
+            &mut cancelled,
+        )
+    }
+
+    /// Reconstructed-trace entry to [Self::moving_hllc_spatial_flux]. Both
+    /// tangential kinetic energies and the current species calorics participate
+    /// in laboratory/face-frame precision admission and the HLL fallback.
+    pub fn moving_hllc_spatial_flux_from_primitive(
+        &self,
+        left: SpatialPrimitive<'_>,
+        right: SpatialPrimitive<'_>,
+        face_velocity: f64,
+        out: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<FaceFlux, Error> {
+        poll(&mut cancelled)?;
+        let n = self.species_count();
+        if !face_velocity.is_finite() || out.len() != n + 4 {
+            return Err(Error::Invalid(
+                "moving spatial mixture face speed or output axis",
+            ));
+        }
+        let mut l = [0.0; MAX_SPATIAL_COMPONENTS];
+        let mut r = [0.0; MAX_SPATIAL_COMPONENTS];
+        let pl = self.spatial_conserved_into(left, &mut l[..n + 4])?;
+        poll(&mut cancelled)?;
+        let pr = self.spatial_conserved_into(right, &mut r[..n + 4])?;
+        self.moving_interface_components::<2>(
+            &l[..n + 4],
+            pl,
+            &r[..n + 4],
+            pr,
+            face_velocity,
+            out,
+            &mut cancelled,
+        )
+    }
+
     /// Original composition-local shock/rarefaction pressure at a stationary
     /// adiabatic slip wall. The outward normal is -1 or +1. All species, both
     /// transverse momenta and total energy have exactly zero wall flux.

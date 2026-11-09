@@ -360,3 +360,300 @@ fn g0_spatial_face_retains_the_complete_bounded_species_axis() {
     out.push(0.0);
     assert!(g.spatial_conserved_into(input, &mut out).is_err());
 }
+
+fn moving_face(g: &MixtureGas, l: &[f64; 6], r: &[f64; 6], velocity: f64) -> ([f64; 6], FaceFlux) {
+    let mut out = [0.0; 6];
+    let report = g
+        .moving_hllc_spatial_flux(
+            from_slice(l, 2),
+            from_slice(r, 2),
+            velocity,
+            &mut out,
+            || false,
+        )
+        .unwrap();
+    (out, report)
+}
+
+#[test]
+fn g0_g1_moving_spatial_reduces_to_planar_and_retains_uniform_pressure_work() {
+    let g = mixture(1e17);
+    for (ld, lu, lv, lp, rd, ru, rv, rp) in [
+        ([1.0, 0.0], 0.0, 3.0, 1.0, [0.0, 4.0], 0.0, -4.0, 1.0),
+        ([0.8, 0.2], 0.0, 0.2, 1.0, [0.03, 0.095], 0.0, -0.7, 0.1),
+        ([1.0, 0.0], -2.0, 0.5, 0.4, [0.0, 1.0], 2.0, -0.7, 0.4),
+    ] {
+        let mut l = [0.0; 5];
+        let mut r = [0.0; 5];
+        for (d, u, v, p, out) in [(&ld, lu, lv, lp, &mut l), (&rd, ru, rv, rp, &mut r)] {
+            g.normal_conserved_into(
+                NormalPrimitive {
+                    partial_densities: d,
+                    normal_velocity: u,
+                    transverse_velocity: v,
+                    pressure: p,
+                },
+                out,
+            )
+            .unwrap();
+        }
+        let sl = [l[0], l[1], l[2], l[3], 0.0, l[4]];
+        let sr = [r[0], r[1], r[2], r[3], 0.0, r[4]];
+        for velocity in [-0.5, 0.0, 0.75] {
+            let mut planar = [0.0; 5];
+            let expected = g
+                .moving_hllc_normal_flux(
+                    super::super::from_slice(&l, 2),
+                    super::super::from_slice(&r, 2),
+                    velocity,
+                    &mut planar,
+                    || false,
+                )
+                .unwrap();
+            let (actual, report) = moving_face(&g, &sl, &sr, velocity);
+            assert_eq!(report, expected);
+            assert_eq!(&actual[..4], &planar[..4]);
+            assert_eq!(actual[4], 0.0);
+            assert_eq!(actual[5], planar[4]);
+            if velocity == 0.0 {
+                assert_eq!((actual, report), face(&g, &sl, &sr));
+            }
+        }
+    }
+    let d = [0.25, 0.75];
+    let primitive = SpatialPrimitive {
+        partial_densities: &d,
+        normal_velocity: 0.5,
+        transverse_velocity: [1.25, -0.75],
+        pressure: 2.0,
+    };
+    let q = state(&g, d, 0.5, [1.25, -0.75], 2.0);
+    let thermo = g.spatial_primitive(from_slice(&q, 2), || false).unwrap();
+    for velocity in [-1.0, 0.0, 0.5, 2.0] {
+        let (f, report) = moving_face(&g, &q, &q, velocity);
+        let relative = 0.5 - velocity;
+        for k in [0, 1, 3, 4] {
+            close(f[k], q[k] * relative);
+        }
+        close(f[2], q[2] * relative + 2.0);
+        close(f[5], q[5] * relative + 2.0 * 0.5);
+        close(report.signal_speed, relative.abs() + thermo.sound_speed);
+        let mut traced = [0.0; 6];
+        let trace_report = g
+            .moving_hllc_spatial_flux_from_primitive(
+                primitive,
+                primitive,
+                velocity,
+                &mut traced,
+                || false,
+            )
+            .unwrap();
+        for k in 0..6 {
+            close(traced[k], f[k]);
+        }
+        close(trace_report.signal_speed, report.signal_speed);
+        if velocity == 0.0 {
+            let mut stationary = [0.0; 6];
+            let original = g
+                .hllc_spatial_flux_from_primitive(primitive, primitive, &mut stationary, || false)
+                .unwrap();
+            assert_eq!((traced, trace_report), (stationary, original));
+        }
+    }
+}
+
+#[test]
+fn g1_g3_moving_spatial_shear_contact_and_vector_boost_keep_one_species_wave_solution() {
+    let g = mixture(0.0);
+    for velocity in [-2.0, 0.75] {
+        let l = state(&g, [1.0, 0.0], velocity, [3.0, -1.0], 1.0);
+        let r = state(&g, [0.125, 0.25], velocity, [-4.0, 2.0], 1.0);
+        let (f, report) = moving_face(&g, &l, &r, velocity);
+        assert!(!report.used_hll_fallback);
+        for k in [0, 1, 3, 4] {
+            close(f[k], 0.0);
+        }
+        close(f[2], 1.0);
+        close(f[5], velocity);
+    }
+    let velocity = 0.5;
+    for (l, r, fallback) in [
+        (
+            state(&g, [0.8, 0.1], 0.4, [1.5, -0.7], 2.0),
+            state(&g, [0.1, 0.25], 0.7, [-2.0, 1.3], 0.2),
+            false,
+        ),
+        (
+            state(&g, [1.0, 0.0], -1.5, [0.5, -0.1], 0.4),
+            state(&g, [0.0, 1.0], 2.5, [-0.7, 0.2], 0.4),
+            true,
+        ),
+    ] {
+        let (f, report) = moving_face(&g, &l, &r, velocity);
+        assert_eq!(report.used_hll_fallback, fallback);
+        assert_eq!((f, report), moving_face(&mixture(1e17), &l, &r, velocity));
+        for b in [[-3.0, 2.0, -1.0], [0.75, -1.25, 0.5]] {
+            let boost = |mut q: [f64; 6]| {
+                let rho = q[0] + q[1];
+                q[5] += b[0] * q[2]
+                    + b[1] * q[3]
+                    + b[2] * q[4]
+                    + 0.5 * b.iter().map(|v| v * v).sum::<f64>() * rho;
+                for k in 0..3 {
+                    q[2 + k] += b[k] * rho;
+                }
+                q
+            };
+            let (shifted, actual) = moving_face(&g, &boost(l), &boost(r), velocity + b[0]);
+            assert_eq!(actual.used_hll_fallback, fallback);
+            close(actual.signal_speed, report.signal_speed);
+            close(shifted[0], f[0]);
+            close(shifted[1], f[1]);
+            let mass = f[0] + f[1];
+            for k in 0..3 {
+                close(shifted[2 + k], f[2 + k] + b[k] * mass);
+            }
+            close(
+                shifted[5],
+                f[5] + b[0] * f[2]
+                    + b[1] * f[3]
+                    + b[2] * f[4]
+                    + 0.5 * b.iter().map(|v| v * v).sum::<f64>() * mass,
+            );
+        }
+        let reverse = |mut q: [f64; 6]| {
+            q[2] = -q[2];
+            q
+        };
+        let (reversed, actual) = moving_face(&g, &reverse(r), &reverse(l), -velocity);
+        assert_eq!(actual.used_hll_fallback, fallback);
+        close(actual.signal_speed, report.signal_speed);
+        for k in 0..6 {
+            close(reversed[k], if k == 2 { f[k] } else { -f[k] });
+        }
+    }
+}
+
+#[test]
+fn g0_g4_moving_faces_preserve_source_domain_dimension_and_cancellation_refusals() {
+    let g = mixture(0.0);
+    let d = [0.2, 1.0];
+    let planar = NormalPrimitive {
+        partial_densities: &d,
+        normal_velocity: 0.2,
+        transverse_velocity: 0.3,
+        pressure: 1.0,
+    };
+    let spatial = SpatialPrimitive {
+        partial_densities: &d,
+        normal_velocity: 0.2,
+        transverse_velocity: [0.3, 0.4],
+        pressure: 1.0,
+    };
+    let mut l = [0.0; 5];
+    g.normal_conserved_into(planar, &mut l).unwrap();
+    let q = super::super::from_slice(&l, 2);
+    let s = state(&g, d, 0.2, [0.3, 0.4], 1.0);
+    let qs = from_slice(&s, 2);
+    let mut out = [0.0; 5];
+    let mut sout = [0.0; 6];
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1e12] {
+        assert!(
+            g.moving_hllc_normal_flux(q, q, bad, &mut out, || false)
+                .is_err()
+        );
+        assert!(
+            g.moving_hllc_spatial_flux(qs, qs, bad, &mut sout, || false)
+                .is_err()
+        );
+        assert!(
+            g.moving_hllc_normal_flux_from_primitive(planar, planar, bad, &mut out, || false,)
+                .is_err()
+        );
+        assert!(
+            g.moving_hllc_spatial_flux_from_primitive(spatial, spatial, bad, &mut sout, || false,)
+                .is_err()
+        );
+    }
+    assert!(
+        g.moving_hllc_normal_flux(q, q, 0.5, &mut out[..4], || false)
+            .is_err()
+    );
+    assert!(
+        g.moving_hllc_spatial_flux(qs, qs, 0.5, &mut sout[..5], || false)
+            .is_err()
+    );
+    for bad in [[-0.1, 1.0], [0.0, 0.0]] {
+        assert!(
+            g.moving_hllc_normal_flux_from_primitive(
+                NormalPrimitive {
+                    partial_densities: &bad,
+                    ..planar
+                },
+                planar,
+                0.5,
+                &mut out,
+                || false,
+            )
+            .is_err()
+        );
+        assert!(
+            g.moving_hllc_spatial_flux_from_primitive(
+                SpatialPrimitive {
+                    partial_densities: &bad,
+                    ..spatial
+                },
+                spatial,
+                0.5,
+                &mut sout,
+                || false,
+            )
+            .is_err()
+        );
+    }
+    assert_eq!(
+        g.moving_hllc_normal_flux(q, q, 0.5, &mut out, || true),
+        Err(Error::Cancelled)
+    );
+    assert_eq!(
+        g.moving_hllc_spatial_flux(qs, qs, 0.5, &mut sout, || true),
+        Err(Error::Cancelled)
+    );
+    assert_eq!(
+        g.moving_hllc_normal_flux_from_primitive(planar, planar, 0.5, &mut out, || true,),
+        Err(Error::Cancelled)
+    );
+    assert_eq!(
+        g.moving_hllc_spatial_flux_from_primitive(spatial, spatial, 0.5, &mut sout, || true,),
+        Err(Error::Cancelled)
+    );
+    let mut polls = 0;
+    assert_eq!(
+        g.moving_hllc_spatial_flux_from_primitive(spatial, spatial, 0.5, &mut sout, || {
+            polls += 1;
+            polls == 3
+        },),
+        Err(Error::Cancelled)
+    );
+
+    // Relative-frame conversion must not bypass source-limited HLL shear heating.
+    let left = state(&g, [1.0, 0.0], -1.5, [12.0, 12.0], 0.4);
+    let right = state(&g, [0.0, 1.0], 2.5, [-12.0, -12.0], 0.4);
+    assert_eq!(
+        g.moving_hllc_spatial_flux(
+            from_slice(&left, 2),
+            from_slice(&right, 2),
+            0.5,
+            &mut sout,
+            || false,
+        ),
+        Err(Error::Invalid(
+            "mixture HLL intermediate state outside source domain"
+        ))
+    );
+    for v in [[12.0, 0.0], [0.0, 12.0]] {
+        let left = state(&g, [1.0, 0.0], -1.5, v, 0.4);
+        let right = state(&g, [0.0, 1.0], 2.5, [-v[0], -v[1]], 0.4);
+        assert!(moving_face(&g, &left, &right, 0.5).1.used_hll_fallback);
+    }
+}

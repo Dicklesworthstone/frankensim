@@ -4436,6 +4436,33 @@ unequal-caloric interface pressure-equilibrium property, fully discrete
 entropy/invariant-domain theorem, chemistry, spatial convergence or molecular
 shock-thickness validation follows from a successful face evaluation.
 
+### Conservative moving faces with evolving composition
+
+`MixtureGas::moving_hllc_normal_flux`, `moving_hllc_spatial_flux` and their
+reconstructed-primitive entries provide laboratory ALE transport through
+translating internal faces. Every original species, all momentum components
+and species-referenced total energy use the same face-relative HLLC/HLL
+solution. The source reconstructs face-frame heat from each current
+composition; both tangential kinetic terms participate in precision and
+intermediate-state admission. No temporary frozen mixture or independent
+passive-species flux replaces that owner.
+
+The returned flux is `F - w_n U`. Its momentum and energy transformation uses
+the actual ordered sum of species mass fluxes, preserving the original
+per-species energy references and laboratory pressure work. A comoving
+composition/shear contact transfers no species or tangential momentum, but
+still transmits pressure traction and `p*w_n` work. Zero speed preserves the
+stationary path; zero shear reduces to the existing axial moving-volume
+kernel, which now shares this transformation. Successful calls allocate no
+heap storage and retain the existing bounded species axis.
+
+G0/G1/G3/G4 regressions exercise dimensional reductions, Reynolds transport,
+comoving material contacts, vector Galilean covariance on HLLC/HLL, normal
+reversal, source-reference invariance and caloric/cancellation refusals.
+The spatial owner still supplies moving volumes, shared-face signs, discrete
+geometric conservation and temporal integration. These fluxes do not add a
+chemistry step or establish a pressure-equilibrium or entropy theorem.
+
 ## Complete methane chemistry with trace-preserving local extents
 
 The existing prepared reactor now admits the complete 53-species, 325-channel
