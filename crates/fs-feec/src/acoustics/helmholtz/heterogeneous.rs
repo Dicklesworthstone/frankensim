@@ -43,6 +43,8 @@ pub use harmonic::{
     EquivalentFluidCoefficients, EquivalentFluidControls, EquivalentFluidElementPower,
     EquivalentFluidPressureField, PreparedEquivalentFluid,
     MechanicalPoleError, MechanicalPoleLimits, MechanicalPoleOptions, MechanicalPoleWall,
+    MechanicalPoleResponseOptions, MechanicalResonanceResidue, MechanicalResonanceResponseError,
+    MechanicalWallResidue, PreparedMechanicalResonance,
     MechanicalResonancePole, MechanicalResonanceRegion, MechanicalResonanceSpectrum,
     MechanicalSpectrumOptions,
     BoundaryAdmittance, BoundaryAdmittanceFrequencySample, HarmonicLimits,

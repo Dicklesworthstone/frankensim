@@ -22,6 +22,8 @@ mod frequency;
 mod mechanical;
 pub use mechanical::{
     MechanicalPoleError, MechanicalPoleLimits, MechanicalPoleOptions, MechanicalPoleWall,
+    MechanicalPoleResponseOptions, MechanicalResonanceResidue, MechanicalResonanceResponseError,
+    MechanicalWallResidue, PreparedMechanicalResonance,
     MechanicalResonancePole, MechanicalResonanceRegion, MechanicalResonanceSpectrum,
     MechanicalSpectrumOptions,
     MechanicalHarmonicField, MechanicalHarmonicFrequencyResponse, MechanicalHarmonicLimits,

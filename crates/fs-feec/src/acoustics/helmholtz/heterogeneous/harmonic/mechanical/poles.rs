@@ -2,6 +2,12 @@
 
 use super::PreparedMechanicalHarmonic;
 use fs_math::c64::C64;
+
+mod response;
+pub use response::{
+    MechanicalPoleResponseOptions, MechanicalResonanceResidue,
+    MechanicalResonanceResponseError, MechanicalWallResidue, PreparedMechanicalResonance,
+};
 pub use super::frequency::coupled::poles::{
     MechanicalPoleError, MechanicalPoleLimits, MechanicalPoleOptions, MechanicalPoleWall,
     MechanicalResonancePole, MechanicalResonanceRegion, MechanicalResonanceSpectrum,

@@ -9,6 +9,12 @@ pub use fs_la::nonlinear_eig::beyn::{
     BeynOptions as MechanicalSpectrumOptions, Ellipse as MechanicalResonanceRegion,
 };
 
+mod residues;
+pub use residues::{
+    MechanicalPoleResponseOptions, MechanicalResonanceResidue, MechanicalWallResidue,
+};
+pub(crate) use residues::PreparedCoupledResonance;
+
 /// Additional resources for original sparse callback evaluation and observation.
 /// The shared solver separately owns its dimension, work and numerical payload.
 #[derive(Clone, Copy, Debug)]
@@ -70,6 +76,7 @@ pub enum MechanicalPoleError {
     Invalid(&'static str),
     Budget { what: &'static str, requested: u128, maximum: u128 },
     Pole(NonlinearEigError),
+    Response(fs_la::pole_response::PoleResponseError),
     Contour(BeynError),
     Residual { row: usize, observed: f64, maximum: f64 },
     Cancelled,
@@ -206,34 +213,45 @@ impl<'a> Query<'a> {
             }
             physical_residual = physical_residual.max(residual);
         }
-        let mut walls = Vec::with_capacity(source.walls.len());
-        for (wall, &offset) in source.walls.iter().zip(&source.offsets) {
-            poll(cancelled)?;
-            let n = wall.dofs.len();
-            let displacement = &full[offset..offset+n];
-            let mut relaxation_memory = Vec::with_capacity(wall.arms.len());
-            let mut relaxation_extension = Vec::with_capacity(wall.arms.len());
-            for (arm, &(coupling, rate)) in wall.arms.iter().enumerate() {
-                let start = offset+(2+arm)*n;
-                let extension = &full[start..start+n];
-                let memory: Vec<C64> = if s.abs() > rate {
-                    extension.iter().map(|&e| (e / s).scale(rate)).collect()
-                } else { original_memory(displacement, extension, coupling) };
-                if memory.iter().any(|&z| !finite(z)) {
-                    return Err(MechanicalPoleError::Invalid("unrepresentable original wall memory"));
-                }
-                relaxation_memory.push(memory);
-                relaxation_extension.push(extension.to_vec());
-            }
-            walls.push(MechanicalPoleWall { displacement_m: displacement.to_vec(),
-                normal_velocity_m_s: full[offset+n..offset+2*n].to_vec(),
-                relaxation_memory, relaxation_extension });
-        }
+        let walls = wall_fields(source, s, &full, cancelled)?;
         poll(cancelled)?;
         Ok(MechanicalResonancePole { rate_per_s: s, coordinates,
             pressure_pa: full[..source.fluid_dofs].to_vec(), walls, physical_residual,
             relative_step: pole.relative_step, iterations: pole.iterations })
     }
+}
+
+fn wall_fields(
+    source: &CoupledPencil,
+    s: C64,
+    full: &[C64],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<MechanicalPoleWall>, MechanicalPoleError> {
+    let mut walls = Vec::with_capacity(source.walls.len());
+    for (wall, &offset) in source.walls.iter().zip(&source.offsets) {
+        poll(cancelled)?;
+        let n = wall.dofs.len();
+        let displacement = &full[offset..offset+n];
+        let mut relaxation_memory = Vec::with_capacity(wall.arms.len());
+        let mut relaxation_extension = Vec::with_capacity(wall.arms.len());
+        for (arm, &(coupling, rate)) in wall.arms.iter().enumerate() {
+            let start = offset+(2+arm)*n;
+            let extension = &full[start..start+n];
+            let memory: Vec<C64> = if s.abs() > rate {
+                extension.iter().map(|&e| (e / s).scale(rate)).collect()
+            } else { original_memory(displacement, extension, coupling) };
+            if memory.iter().any(|&z| !finite(z)) {
+                return Err(MechanicalPoleError::Invalid("unrepresentable original wall memory"));
+            }
+            relaxation_memory.push(memory);
+            relaxation_extension.push(extension.to_vec());
+        }
+        walls.push(MechanicalPoleWall { displacement_m: displacement.to_vec(),
+            normal_velocity_m_s: full[offset+n..offset+2*n].to_vec(),
+            relaxation_memory, relaxation_extension });
+    }
+    poll(cancelled)?;
+    Ok(walls)
 }
 
 impl CoupledPencil {

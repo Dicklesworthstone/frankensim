@@ -2877,3 +2877,29 @@ reference-frequency invariance, an exact unobservable equal-time memory pole,
 source-independent contour discovery, budgets and cancellation. The public FE
 adapter is checked against independent P1 tetrahedron volume and surface
 integrals with pressure-release constraints and material-dependent Robin decay.
+
+### Complete cavity source participation
+
+`PreparedMechanicalHarmonic::prepare_resonance_response` binds a reusable
+simple-pole factor to the original pressure, mechanical-wall and Maxwell
+realization. It rechecks the supplied physical coordinates, original row
+residuals and pole correction; an unrelated pole report cannot bypass those
+checks. The shared `fs-la::pole_response` owner supplies the nonsymmetric
+bordered factor and cancellable triangular solves.
+
+`PreparedMechanicalResonance::forcing_residue` projects the original coherent
+inward velocity, boundary injection, volume injection and applied wall traction
+sources. Amplitudes are their analytic values at the complex Laplace pole:
+fluid forcing is `s*b`, mechanical forcing is the consistent `W*traction`.
+The original source/traction binding and pressure-release rules remain active.
+Numerical congruence scales only the solve; returned pressure, wall motion and
+every Maxwell memory/extension residue use original coordinates and units.
+Repeated queries reuse the factor at quadratic cost.
+
+The returned Laurent residue is one pole's contribution, not a driven field,
+source power or linewidth. With the native `exp(+i*omega*t)` convention its
+angular-frequency residue is `-i` times the Laplace residue. Coherent source
+cancellation and dark material modes can have zero participation. Repeated or
+defective poles can refuse; no local wall impedance is inverted, no modal
+damping is inferred, and no real-frequency-only source is analytically
+continued without caller-supplied data.
