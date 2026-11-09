@@ -1538,6 +1538,38 @@ and binding/budget/cancellation/true-pole refusal. The same fixed-bias planar MQ
 and source-domain limits apply; native test execution is a separate requirement
 where the workspace dependency repositories are available.
 
+## Nonlinear mixed-terminal conduction
+
+`conduction::response::terminals::ConductionTerminalDrive` closes complete
+original scalar bulk and explicit interface laws under simultaneous terminal
+voltage, conserved total-current or mixed controls. Both planar and axisymmetric
+response owners use the original constitutive iteration with one native grouped
+field solve at the actual operating state per trial. Floating equipotential
+electrodes retain zero net current while transferring current between faces.
+
+Accepted candidates pair the continuing source owner, actual native field and
+terminal report. Terminal voltages are physical differences from terminal zero;
+source work uses authored current controls and native voltage-source reactions.
+Swept geometry, local bulk/contact heat and the native algebraic, constitutive,
+current and work gates remain binding. No artificial basis probe, scalable
+nonlinear resistance or separate nonlinear solver is introduced.
+
+Every field solve, including discarded constitutive trials, consumes the
+explicit total field-solve cap. `ConductionResponseError::FieldBudget` reports
+completed work and the next required solve before starting it. Source/domain
+refusal, budget exhaustion and cancellation leave the input owner reusable.
+The existing scalar memoryless, fixed-geometry and uniform electrically
+nonlinear contact boundaries remain.
+
+Focused G1/G3/G4 regression definitions cover simultaneous control modes,
+floating-face transfer, actual E/J source samples, new-amplitude continuation,
+terminal permutation, common references, swept sector/local heat, nonlinear
+surface losses, and exact budget/cancellation retry. A narrow-domain fixture
+admits the physical solution while excluding artificial unit-voltage probes.
+Pinned syntax checks and independent analytical/bisection references were
+performed; these new full native integration regressions remain unexecuted
+in the current dependency environment.
+
 ## Direct sparse multi-terminal conduction
 
 `PlanarConduction::solve_terminals` and its axisymmetric counterpart solve

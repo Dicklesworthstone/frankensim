@@ -16,6 +16,8 @@ use std::sync::Arc;
 /// Original local contact source laws and uniform-trace response gates.
 pub mod contact;
 mod power;
+/// Simultaneous original terminal controls inside the nonlinear source closure.
+pub mod terminals;
 use contact::{
     ContactResponseControls, ContactResponseError, ContactResponseSample, ContactResponseSources,
 };
@@ -81,6 +83,12 @@ pub enum ConductionResponseError {
     Material(ConductorError),
     Contact(ContactResponseError),
     Invalid(&'static str),
+    /// A native terminal solve would exceed the explicit total work cap.
+    FieldBudget {
+        completed: usize,
+        required: usize,
+        maximum: usize,
+    },
     NotConverged {
         iterations: usize,
         maximum_conductivity_defect_s_m: f64,

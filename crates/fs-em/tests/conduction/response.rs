@@ -11,6 +11,8 @@ mod contacts;
 mod current;
 #[path = "response/power.rs"]
 mod power;
+#[path = "response/terminals.rs"]
+mod terminals;
 use fs_em::conduction::response::{
     AdaptiveConductionRelaxation, ConductionResponseControls, ConductionResponseError,
     PlanarConductionResponse,

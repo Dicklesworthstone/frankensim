@@ -24,6 +24,7 @@ use crate::conduction::{
         AdaptiveConductionRelaxation, ConductionResponseCandidate, ConductionResponseControls,
         ConductionResponseError, ConductionResponseReport, PlanarConductionResponse,
         contact::{ContactResponseControls, ContactResponseSources},
+        terminals::{ConductionTerminalDrive, ConductionTerminalReport},
     },
 };
 use fs_feec::weighted::WeightedAssemblyLimits;
@@ -283,6 +284,84 @@ impl AxisymmetricConductionResponse {
                 cancelled,
             )
             .map(AxisymmetricConductionResponseCandidate::from_core)
+    }
+
+    /// Close scalar bulk/interface response at simultaneous physical terminal
+    /// voltages, conserved total currents or mixed controls. Floating electrodes
+    /// retain zero total current while transferring current between their faces.
+    ///
+    /// Each constitutive trial uses one actual-amplitude grouped solve and the
+    /// native swept measures. Every terminal independently requires its own
+    /// positive-area trace; the symmetry axis cannot supply an electrode.
+    /// The same hard total field-solve cap and source gates apply as in the
+    /// planar response. The private planar implementation never escapes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_terminals_candidate(
+        &self,
+        drive: ConductionTerminalDrive<'_>,
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: ConductionResponseControls,
+        maximum_field_solves: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<
+        (
+            AxisymmetricConductionResponseCandidate,
+            ConductionTerminalReport,
+        ),
+        ConductionResponseError,
+    > {
+        self.solve_terminals_with_materials_and_contacts_candidate(
+            self.conductors().to_vec(),
+            self.contacts().to_vec(),
+            drive,
+            assembly,
+            field_controls,
+            controls,
+            maximum_field_solves,
+            cancelled,
+        )
+    }
+
+    /// Retain every original terminal and material/interface source while an
+    /// outer owner refreshes its thermal/phase seeds. Terminal voltages in the
+    /// report are physical differences from terminal zero; total watts and
+    /// inward amperes refer to the authored sector.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_terminals_with_materials_and_contacts_candidate(
+        &self,
+        seeds: Vec<ResolvedConductorState>,
+        contacts: Vec<ConductionContact>,
+        drive: ConductionTerminalDrive<'_>,
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: ConductionResponseControls,
+        maximum_field_solves: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<
+        (
+            AxisymmetricConductionResponseCandidate,
+            ConductionTerminalReport,
+        ),
+        ConductionResponseError,
+    > {
+        self.core
+            .solve_terminals_with_materials_and_contacts_candidate(
+                seeds,
+                contacts,
+                drive,
+                assembly,
+                field_controls,
+                controls,
+                maximum_field_solves,
+                cancelled,
+            )
+            .map(|(candidate, terminals)| {
+                (
+                    AxisymmetricConductionResponseCandidate::from_core(candidate),
+                    terminals,
+                )
+            })
     }
 
     /// Hold an equipotential terminal's signed TOTAL current. Each frozen
