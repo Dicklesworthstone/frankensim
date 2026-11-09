@@ -66,6 +66,29 @@ pub(super) struct ResistanceResponse<'a, T> {
     pub(super) sources: T,
 }
 
+/// One caloric preparation from ORIGINAL inventory. A molecular owner may
+/// return its prepared cell momentum for this exact heat trial. It carries no
+/// new mass or inertia: the same original M/V still owns every reconstruction.
+pub(in crate::conjugate::flow) struct ResistanceHeatTrial<H> {
+    pub(in crate::conjugate::flow) increment_j: Vec<f64>,
+    pub(in crate::conjugate::flow) absolute_enthalpy_defect_j: f64,
+    pub(in crate::conjugate::flow) momentum_kg_m_s: Option<Vec<[f64; 3]>>,
+    pub(in crate::conjugate::flow) receipt: H,
+}
+
+impl<H> ResistanceHeatTrial<H> {
+    pub(in crate::conjugate::flow) fn without_momentum(
+        (increment_j, absolute_enthalpy_defect_j, receipt): (Vec<f64>, f64, H),
+    ) -> Self {
+        Self {
+            increment_j,
+            absolute_enthalpy_defect_j,
+            momentum_kg_m_s: None,
+            receipt,
+        }
+    }
+}
+
 impl FlowField {
     /// Couple physical drag heating to phase density, continuity and momentum.
     ///
@@ -181,7 +204,7 @@ impl FlowField {
             controls,
             gate,
             resolve,
-            |heat| Ok((heat, 0.0, ())),
+            |heat| Ok(ResistanceHeatTrial::without_momentum((heat, 0.0, ()))),
         )
         .map(|(step, sources, _, ())| (step, sources))
     }
@@ -206,7 +229,7 @@ impl FlowField {
         mut resolve: impl FnMut(
             &[Option<EquilibriumPhaseState>],
         ) -> Result<ResistanceResponse<'a, T>, ChtError>,
-        mut transform_heat: impl FnMut(Vec<f64>) -> Result<(Vec<f64>, f64, H), ChtError>,
+        mut transform_heat: impl FnMut(Vec<f64>) -> Result<ResistanceHeatTrial<H>, ChtError>,
     ) -> Result<(ResistiveThermalVolumeMomentumStep, T, Vec<f64>, H), ChtError> {
         poll(gate)?;
         let mechanical = controls.thermal.mechanics;
@@ -244,7 +267,7 @@ impl FlowField {
         for value in input.boundary_velocity_m_s.into_iter().flatten().flatten() {
             finite("flow.resistance_thermal_incoming_velocity", value)?;
         }
-        let reconstructed = self.reconstruct_material_momentum(
+        let original_reconstructed = self.reconstruct_material_momentum(
             domain,
             faces,
             input.volume.mass_kg,
@@ -277,8 +300,34 @@ impl FlowField {
                 .to_f64()
                 .abs();
             }
-            let (transformed, transformed_heat_defect, heat_receipt) =
-                transform_heat(total_increment)?;
+            let ResistanceHeatTrial {
+                increment_j: transformed,
+                absolute_enthalpy_defect_j: transformed_heat_defect,
+                momentum_kg_m_s: prepared_momentum,
+                receipt: heat_receipt,
+            } = transform_heat(total_increment)?;
+            // Keep the original no-feedback reconstruction exactly unchanged.
+            // A coupled molecular trial owns a different prepared P, but the
+            // original cell mass and face inertia are identical in both paths.
+            let trial_reconstructed = prepared_momentum
+                .as_ref()
+                .map(|momentum| {
+                    self.reconstruct_material_momentum(
+                        domain,
+                        faces,
+                        input.volume.mass_kg,
+                        momentum,
+                        mechanical.reconstruction,
+                        gate,
+                    )
+                })
+                .transpose()?;
+            let reconstructed = trial_reconstructed
+                .as_ref()
+                .unwrap_or(&original_reconstructed);
+            let momentum_kg_m_s = prepared_momentum
+                .as_deref()
+                .unwrap_or(input.momentum_kg_m_s);
             finite(
                 "flow.resistance_thermal_transformed_heat_defect",
                 transformed_heat_defect,
@@ -365,13 +414,13 @@ impl FlowField {
                     &pressure_readback,
                     MaterialDensityMomentumInput {
                         mass_kg: input.volume.mass_kg,
-                        momentum_kg_m_s: input.momentum_kg_m_s,
+                        momentum_kg_m_s,
                         acceleration_m_s2: input.acceleration_m_s2,
                         force_density_n_m3: input.force_density_n_m3,
                         target_outflow_m3_s: &thermal.volume.volume_source_m3_s,
                     },
                     mechanical,
-                    &reconstructed,
+                    reconstructed,
                     projection,
                     &native,
                     &response.resistance_pa_s_m2,
@@ -394,7 +443,10 @@ impl FlowField {
                     ResistiveThermalVolumeMomentumStep {
                         thermal,
                         momentum,
-                        reconstruction: reconstructed.report,
+                        reconstruction: match trial_reconstructed {
+                            Some(reconstructed) => reconstructed.report,
+                            None => original_reconstructed.report,
+                        },
                         resistance: native,
                         feedback,
                         resistance_pa_s_m2: response.resistance_pa_s_m2.into_owned(),

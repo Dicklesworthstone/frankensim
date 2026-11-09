@@ -14,6 +14,7 @@ use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState};
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThermalViscosityFeedbackControls {
     /// Maximum native heat trials, all starting from the original inventory.
+    /// This spans all outer Darcy trials when composed with phase resistance.
     pub maximum_trials: usize,
     /// Convex relaxation of each physical heat guess, strictly in (0, 1].
     pub relaxation: f64,
@@ -44,6 +45,7 @@ pub struct ThermalViscosityFeedbackReport {
     pub heat_nonlinear_iterations: usize,
     pub heat_linear_iterations: usize,
     pub heat_residual_evaluations: usize,
+    /// All source-resolver calls, including Darcy endpoint queries when composed.
     pub source_evaluations: usize,
     /// Signed sum Q_used - Q_actual [J], before material advection.
     pub heat_coupling_defect_j: f64,
@@ -70,16 +72,28 @@ pub struct ImplicitThermoviscousThermalVolumeMomentumStep {
     pub feedback: ThermalViscosityFeedbackReport,
 }
 
-struct ThermalViscositySources {
-    original: Vec<Option<ResolvedPhaseTransportState>>,
-    shear_pa_s: Vec<f64>,
-    bulk_pa_s: Vec<f64>,
+pub(in super::super) struct ThermalViscositySources {
+    pub(in super::super) original: Vec<Option<ResolvedPhaseTransportState>>,
+    pub(in super::super) shear_pa_s: Vec<f64>,
+    pub(in super::super) bulk_pa_s: Vec<f64>,
 }
 
 /// The heat driver owns the molecular state and an opaque constitutive receipt.
-struct PreparedThermalFeedback<S> {
-    viscosity: PreparedMaterialViscosity,
-    sources: S,
+pub(in super::super) struct PreparedThermalFeedback<S> {
+    pub(in super::super) viscosity: PreparedMaterialViscosity,
+    pub(in super::super) sources: S,
+}
+
+/// Converged native heat and original-inertia molecular momentum, before any
+/// pressure, Darcy or material advance. The accepted source phase belongs to
+/// this thermal endpoint; it never replaces the original M/V inertia.
+pub(in super::super) struct ConvergedThermalFeedback<S> {
+    pub(in super::super) mechanical: PreparedThermalFeedback<S>,
+    pub(in super::super) heat: PreparedImplicitHeat,
+    pub(in super::super) used_molecular_heat_j: Vec<f64>,
+    pub(in super::super) assembly: Dd,
+    pub(in super::super) coupling_defect_j: f64,
+    pub(in super::super) heat_budget_j: f64,
 }
 
 struct AcceptedThermalFeedback<S> {
@@ -170,6 +184,7 @@ impl FlowField {
                 let sources = resolve_thermal_sources(
                     domain,
                     curve,
+                    None,
                     |cell| feedback_phase_at(curve, input, heat, cell),
                     &mut resolve,
                     work,
@@ -235,20 +250,6 @@ impl FlowField {
             &mut ThermalViscosityFeedbackReport,
         ) -> Result<PreparedThermalFeedback<S>, ChtError>,
     ) -> Result<AcceptedThermalFeedback<S>, ChtError> {
-        let heat_budget = admit_viscous_thermal_input(domain, input, controls.evolution, gate)?;
-        if feedback.maximum_trials == 0
-            || !feedback.relaxation.is_finite()
-            || feedback.relaxation <= 0.0
-            || feedback.relaxation > 1.0
-            || !feedback.maximum_heat_defect_j.is_finite()
-            || feedback.maximum_heat_defect_j < 0.0
-            || domain.cell_count() > viscosity_controls.max_cells
-            || domain.cell_count() > controls.evolution.mechanics.reconstruction.max_cells
-        {
-            return Err(refuse(
-                "invalid bounded thermal-viscosity feedback controls",
-            ));
-        }
         let curve = conductivity.caloric_curve();
         for phase in input.volume.boundary_inflow.iter().flatten() {
             admit_liquid_phase(curve, *phase)?;
@@ -266,9 +267,129 @@ impl FlowField {
             None => ([FlowFace::Wall; 6], None, None),
         };
         let mut work = ThermalViscosityFeedbackReport::default();
-        let mut mechanical = prepare(faces, mouth, None, None, &mut work)?;
+        let accepted = self.prepare_implicit_thermal_feedback(
+            domain,
+            faces,
+            mouth,
+            conductivity,
+            baths,
+            solids,
+            contacts,
+            input,
+            controls,
+            viscosity_controls,
+            solve,
+            feedback,
+            workspace,
+            gate,
+            &mut work,
+            &mut prepare,
+        )?;
+        // The conservative heat representation may differ from the native
+        // endpoint by its admitted residual. It too must stay liquid before
+        // advection can mix or conceal that departure.
+        for cell in 0..domain.cell_count() {
+            poll_every(gate, cell)?;
+            if domain.is_fluid(cell) {
+                let original = input.volume.phase_states[cell]
+                    .ok_or_else(|| refuse("missing original liquid phase"))?;
+                let represented = curve
+                    .advance_specific_energy(
+                        original,
+                        accepted.heat.combined[cell] / input.volume.mass_kg[cell],
+                    )
+                    .map_err(|error| refuse(error.to_string()))?;
+                admit_liquid_phase(curve, represented)?;
+            }
+        }
+        let PreparedThermalFeedback { viscosity, sources } = accepted.mechanical;
+        let evolution = self.finish_implicit_viscous_thermal_volume(
+            domain,
+            faces,
+            profile,
+            conductivity,
+            input,
+            controls,
+            accepted.heat,
+            viscosity,
+            accepted.assembly,
+            accepted.coupling_defect_j,
+            accepted.heat_budget_j,
+            gate,
+        )?;
+        for (cell, phase) in evolution
+            .evolution
+            .evolution
+            .thermal
+            .volume
+            .phase_states
+            .iter()
+            .enumerate()
+        {
+            poll_every(gate, cell)?;
+            if let Some(phase) = phase {
+                admit_liquid_phase(curve, *phase)?;
+            }
+        }
+        work.absolute_enthalpy_defect_j = evolution.report.conduction.absolute_enthalpy_defect_j;
+        poll(gate)?;
+        Ok(AcceptedThermalFeedback {
+            evolution,
+            sources,
+            used_molecular_heat_j: accepted.used_molecular_heat_j,
+            feedback: work,
+        })
+    }
+
+    /// Shared native thermal/molecular preparation, retaining original M/P/h.
+    /// Callers own phase-support admission and the subsequent mechanical split.
+    /// The supplied work ledger spans every nested heat and molecular trial.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(in super::super) fn prepare_implicit_thermal_feedback<S>(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        mouth: Option<usize>,
+        conductivity: &PreparedPhaseConductivity<'_>,
+        baths: ThermalVolumeBoundaries<'_>,
+        solids: &[ThermalVolumeSolidCell<'_, '_>],
+        contacts: &[ThermalVolumeContact<'_>],
+        input: ThermalVolumeMomentumInput<'_>,
+        controls: ConductiveThermalVolumeMomentumControls,
+        viscosity_controls: MaterialViscosityControls,
+        solve: ImplicitThermalVolumeSolveControls,
+        feedback: ThermalViscosityFeedbackControls,
+        workspace: &mut ImplicitThermalVolumeWorkspace,
+        gate: &CancelGate,
+        work: &mut ThermalViscosityFeedbackReport,
+        mut prepare: impl FnMut(
+            [FlowFace; 6],
+            Option<usize>,
+            Option<&PreparedImplicitHeat>,
+            Option<PreparedThermalFeedback<S>>,
+            &mut ThermalViscosityFeedbackReport,
+        ) -> Result<PreparedThermalFeedback<S>, ChtError>,
+    ) -> Result<ConvergedThermalFeedback<S>, ChtError> {
+        let heat_budget = admit_viscous_thermal_input(domain, input, controls.evolution, gate)?;
+        if feedback.maximum_trials == 0
+            || !feedback.relaxation.is_finite()
+            || feedback.relaxation <= 0.0
+            || feedback.relaxation > 1.0
+            || !feedback.maximum_heat_defect_j.is_finite()
+            || feedback.maximum_heat_defect_j < 0.0
+            || domain.cell_count() > viscosity_controls.max_cells
+            || domain.cell_count() > controls.evolution.mechanics.reconstruction.max_cells
+        {
+            return Err(refuse(
+                "invalid bounded thermal-viscosity feedback controls",
+            ));
+        }
+        if work.trials >= feedback.maximum_trials {
+            return Err(refuse("thermal viscosity whole-call trial work exhausted"));
+        }
+        let mut mechanical = prepare(faces, mouth, None, None, work)?;
         let mut used_heat = mechanical.viscosity.report.cell_molecular_heat_j.clone();
-        for _ in 0..feedback.maximum_trials {
+        while work.trials < feedback.maximum_trials {
             poll(gate)?;
             let mut remaining = solve;
             remaining.maximum_residual_evaluations = solve
@@ -318,7 +439,7 @@ impl FlowField {
             ] {
                 add_work(count, added)?;
             }
-            mechanical = prepare(faces, mouth, Some(&prepared), Some(mechanical), &mut work)?;
+            mechanical = prepare(faces, mouth, Some(&prepared), Some(mechanical), work)?;
             let (signed, absolute) = physical_heat_mismatch(
                 &used_heat,
                 &mechanical.viscosity.report.cell_molecular_heat_j,
@@ -338,62 +459,16 @@ impl FlowField {
                 && shared <= heat_budget
                 && molecular <= viscosity_controls.maximum_energy_defect_j
             {
-                // The conservative heat representation may differ from the
-                // native endpoint by its admitted residual. It too must stay
-                // liquid before advection can mix or conceal that departure.
-                for cell in 0..domain.cell_count() {
-                    poll_every(gate, cell)?;
-                    if domain.is_fluid(cell) {
-                        let original = input.volume.phase_states[cell]
-                            .ok_or_else(|| refuse("missing original liquid phase"))?;
-                        let represented = curve
-                            .advance_specific_energy(
-                                original,
-                                prepared.combined[cell] / input.volume.mass_kg[cell],
-                            )
-                            .map_err(|error| refuse(error.to_string()))?;
-                        admit_liquid_phase(curve, represented)?;
-                    }
-                }
-                let PreparedThermalFeedback { viscosity, sources } = mechanical;
-                let evolution = self.finish_implicit_viscous_thermal_volume(
-                    domain,
-                    faces,
-                    profile,
-                    conductivity,
-                    input,
-                    controls,
-                    prepared,
-                    viscosity,
-                    assembly,
-                    absolute,
-                    heat_budget,
-                    gate,
-                )?;
-                for (cell, phase) in evolution
-                    .evolution
-                    .evolution
-                    .thermal
-                    .volume
-                    .phase_states
-                    .iter()
-                    .enumerate()
-                {
-                    poll_every(gate, cell)?;
-                    if let Some(phase) = phase {
-                        admit_liquid_phase(curve, *phase)?;
-                    }
-                }
                 work.heat_coupling_defect_j = signed;
                 work.absolute_heat_coupling_defect_j = absolute;
-                work.absolute_enthalpy_defect_j =
-                    evolution.report.conduction.absolute_enthalpy_defect_j;
                 poll(gate)?;
-                return Ok(AcceptedThermalFeedback {
-                    evolution,
-                    sources,
+                return Ok(ConvergedThermalFeedback {
+                    mechanical,
+                    heat: prepared,
                     used_molecular_heat_j: used_heat,
-                    feedback: work,
+                    assembly,
+                    coupling_defect_j: absolute,
+                    heat_budget_j: heat_budget,
                 });
             }
             if work.trials < feedback.maximum_trials {
@@ -423,7 +498,7 @@ impl FlowField {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn prepare_thermoviscous_momentum(
+    pub(in super::super) fn prepare_thermoviscous_momentum(
         &self,
         domain: &VoxelDomain,
         faces: [FlowFace; 6],
@@ -456,7 +531,7 @@ impl FlowField {
     }
 }
 
-fn feedback_phase_at(
+pub(in super::super) fn feedback_phase_at(
     curve: &EquilibriumEnthalpyPhaseCurve,
     input: ThermalVolumeMomentumInput<'_>,
     heat: Option<&PreparedImplicitHeat>,
@@ -519,9 +594,10 @@ fn admit_liquid_phase(
     Ok(())
 }
 
-fn resolve_thermal_sources(
+pub(in super::super) fn resolve_thermal_sources(
     domain: &VoxelDomain,
     curve: &EquilibriumEnthalpyPhaseCurve,
+    mobile_law: Option<&fs_material::phase::mushy::MushyPhaseLaw<'_>>,
     phase_at: impl Fn(usize) -> Result<EquilibriumPhaseState, ChtError>,
     resolve: &mut impl FnMut(
         usize,
@@ -541,7 +617,15 @@ fn resolve_thermal_sources(
             continue;
         }
         let phase = phase_at(cell)?;
-        admit_liquid_phase(curve, phase)?;
+        let mobile = match mobile_law {
+            Some(law) => Some(
+                crate::conjugate::flow::phase_volume::momentum::admit_mobile_phase(law, &phase)?,
+            ),
+            None => {
+                admit_liquid_phase(curve, phase)?;
+                None
+            }
+        };
         poll(gate)?;
         add_work(&mut work.source_evaluations, 1)?;
         let resolved = resolve(cell, &phase);
@@ -554,7 +638,9 @@ fn resolve_thermal_sources(
                 "thermal viscosity source must match the exact endpoint phase and density",
             ));
         }
-        if source.mobility().mobile().is_none_or(|state| {
+        if let Some(mobile) = mobile {
+            crate::conjugate::flow::phase_volume::momentum::source_resistance(mobile, &source)?;
+        } else if source.mobility().mobile().is_none_or(|state| {
             state.inverse_permeability_per_m2 != 0.0 || state.volumes.liquid != 1.0
         }) {
             return Err(refuse(

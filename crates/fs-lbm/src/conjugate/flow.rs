@@ -97,6 +97,7 @@ pub use phase_volume::{
     ImplicitConjugateThermalVolumeMomentumStep, ImplicitConjugateThermalVolumeReport,
     ImplicitConjugateThermalVolumeStep, ImplicitConjugateViscousThermalVolumeMomentumStep,
     ImplicitThermorheologicalThermalVolumeMomentumStep,
+    ImplicitThermoviscousResistiveThermalVolumeMomentumStep,
     ImplicitThermoviscousThermalVolumeMomentumStep, ThermalViscosityFeedbackControls,
     ThermalViscosityFeedbackReport,
     ImplicitResistanceHeatWork, ImplicitThermalVolumeLinearControls,

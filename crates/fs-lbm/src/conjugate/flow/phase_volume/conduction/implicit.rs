@@ -41,8 +41,9 @@ pub use solid::{
 mod resistance;
 pub use resistance::{
     ImplicitConductiveResistiveThermalVolumeMomentumStep,
-    ImplicitConjugateResistiveThermalVolumeMomentumStep, ImplicitResistanceHeatWork,
-    ImplicitConjugateViscousResistiveThermalVolumeMomentumStep,
+    ImplicitConjugateResistiveThermalVolumeMomentumStep,
+    ImplicitConjugateViscousResistiveThermalVolumeMomentumStep, ImplicitResistanceHeatWork,
+    ImplicitThermoviscousResistiveThermalVolumeMomentumStep,
 };
 
 /// Bounded native analytic Newton/Krylov work for ONE backward-Euler interval.
@@ -251,7 +252,13 @@ impl FlowField {
             gate,
         )?;
         self.finish_implicit_conjugate_heat(
-            prepared, conductivity, input, controls, gate, advance, thermal,
+            prepared,
+            conductivity,
+            input,
+            controls,
+            gate,
+            advance,
+            thermal,
         )
     }
 
@@ -857,4 +864,3 @@ fn native_error(gate: &CancelGate, error: impl core::fmt::Display) -> ChtError {
         refuse(error.to_string())
     }
 }
-

@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::conjugate::flow::density_projection::BoundaryPressure;
+use crate::conjugate::flow::phase_volume::momentum::ResistanceHeatTrial;
 use crate::conjugate::flow::{
     ResolvedResistiveThermalVolumeMomentumStep, StaggeredBoundaryPressure,
     ThermalVolumeMomentumInput,
@@ -11,7 +12,10 @@ use fs_material::phase::mushy::MushyPhaseLaw;
 use fs_material::phase::transport::ResolvedPhaseTransportState;
 
 mod viscous;
-pub use viscous::ImplicitConjugateViscousResistiveThermalVolumeMomentumStep;
+pub use viscous::{
+    ImplicitConjugateViscousResistiveThermalVolumeMomentumStep,
+    ImplicitThermoviscousResistiveThermalVolumeMomentumStep,
+};
 
 type ImplicitResistanceHeatReceipt = (
     Vec<f64>,
@@ -194,6 +198,7 @@ impl FlowField {
                         workspace,
                         gate,
                     )
+                    .map(ResistanceHeatTrial::without_momentum)
                 },
             )?;
         let native = &evolution.evolution;

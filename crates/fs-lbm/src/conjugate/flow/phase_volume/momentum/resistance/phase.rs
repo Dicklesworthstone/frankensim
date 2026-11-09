@@ -3,7 +3,8 @@
 use super::super::super::refuse;
 use super::super::ThermalVolumeMomentumInput;
 use super::{
-    ResistanceResponse, ResistiveThermalVolumeMomentumControls, ResistiveThermalVolumeMomentumStep,
+    ResistanceHeatTrial, ResistanceResponse, ResistiveThermalVolumeMomentumControls,
+    ResistiveThermalVolumeMomentumStep,
 };
 use crate::conjugate::flow::density_projection::BoundaryPressure;
 use crate::conjugate::flow::{FlowFace, FlowField, StaggeredBoundaryPressure, poll_every};
@@ -137,7 +138,7 @@ impl FlowField {
             controls,
             gate,
             resolve,
-            |heat| Ok((heat, 0.0, ())),
+            |heat| Ok(ResistanceHeatTrial::without_momentum((heat, 0.0, ()))),
         )
         .map(|(step, ())| step)
     }
@@ -158,53 +159,57 @@ impl FlowField {
             usize,
             &EquilibriumPhaseState,
         ) -> Result<ResolvedPhaseTransportState, ChtError>,
-        transform_heat: impl FnMut(Vec<f64>) -> Result<(Vec<f64>, f64, H), ChtError>,
+        transform_heat: impl FnMut(Vec<f64>) -> Result<ResistanceHeatTrial<H>, ChtError>,
     ) -> Result<(ResolvedResistiveThermalVolumeMomentumStep, H), ChtError> {
         poll(gate)?;
         for phase in input.volume.boundary_inflow.into_iter().flatten() {
             admit_mobile_phase(law, &phase)?;
         }
-        let (evolution, endpoint_sources, accepted_heat, heat_receipt) = self.advance_thermal_volume_resistance_with_response_and_heat(
-            domain,
-            faces,
-            boundary_pressure,
-            law.curve(),
-            input,
-            controls,
-            gate,
-            |phases| {
-                let n = domain.cell_count();
-                if phases.len() != n {
-                    return Err(refuse(
-                        "phase resistance requires one state per original cell",
-                    ));
-                }
-                let mut beta = vec![0.0; n];
-                let mut sources = Vec::with_capacity(n);
-                for cell in 0..n {
-                    poll_every(gate, cell)?;
-                    if !domain.is_fluid(cell) {
-                        if phases[cell].is_some() {
-                            return Err(refuse("fixed grid solids cannot contain phase inventory"));
-                        }
-                        sources.push(None);
-                        continue;
+        let (evolution, endpoint_sources, accepted_heat, heat_receipt) = self
+            .advance_thermal_volume_resistance_with_response_and_heat(
+                domain,
+                faces,
+                boundary_pressure,
+                law.curve(),
+                input,
+                controls,
+                gate,
+                |phases| {
+                    let n = domain.cell_count();
+                    if phases.len() != n {
+                        return Err(refuse(
+                            "phase resistance requires one state per original cell",
+                        ));
                     }
-                    let phase = phases[cell]
-                        .ok_or_else(|| refuse("fluid resistance needs an original chart state"))?;
-                    let mobile = admit_mobile_phase(law, &phase)?;
-                    let source = resolve(cell, &phase)?;
-                    poll(gate)?;
-                    beta[cell] = source_resistance(mobile, &source)?;
-                    sources.push(Some(source));
-                }
-                Ok(ResistanceResponse {
-                    resistance_pa_s_m2: Cow::Owned(beta),
-                    sources,
-                })
-            },
-            transform_heat,
-        )?;
+                    let mut beta = vec![0.0; n];
+                    let mut sources = Vec::with_capacity(n);
+                    for cell in 0..n {
+                        poll_every(gate, cell)?;
+                        if !domain.is_fluid(cell) {
+                            if phases[cell].is_some() {
+                                return Err(refuse(
+                                    "fixed grid solids cannot contain phase inventory",
+                                ));
+                            }
+                            sources.push(None);
+                            continue;
+                        }
+                        let phase = phases[cell].ok_or_else(|| {
+                            refuse("fluid resistance needs an original chart state")
+                        })?;
+                        let mobile = admit_mobile_phase(law, &phase)?;
+                        let source = resolve(cell, &phase)?;
+                        poll(gate)?;
+                        beta[cell] = source_resistance(mobile, &source)?;
+                        sources.push(Some(source));
+                    }
+                    Ok(ResistanceResponse {
+                        resistance_pa_s_m2: Cow::Owned(beta),
+                        sources,
+                    })
+                },
+                transform_heat,
+            )?;
         // The accepted caloric split can differ from its transported endpoint.
         // Admit that state too, without spending another source query or
         // treating incoming mobile material as a hidden solid-release owner.

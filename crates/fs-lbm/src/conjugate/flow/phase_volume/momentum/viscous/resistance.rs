@@ -17,8 +17,10 @@ use fs_material::phase::transport::ResolvedPhaseTransportState;
 pub struct ViscousResistiveThermalVolumeMomentumStep {
     /// Accepted phase-dependent resistance, volume flow and conservative M/Mh/P.
     pub evolution: ResolvedResistiveThermalVolumeMomentumStep,
-    /// Original source snapshots that supplied frozen molecular shear viscosity.
-    /// The resistance endpoint sources remain in `evolution`; they may differ.
+    /// Exact source snapshots supplying molecular shear viscosity: original
+    /// phases for the frozen split, native pretransport caloric phases for the
+    /// thermal-feedback opt-in. Original M/V still supplies molecular inertia.
+    /// The transported resistance endpoint sources remain in `evolution`.
     pub viscosity_sources: Vec<Option<ResolvedPhaseTransportState>>,
     pub viscosity_reconstruction: DensityMomentumReconstructionReport,
     /// Physical molecular heat and separate numerical time/scatter losses.
@@ -212,9 +214,42 @@ impl FlowField {
                 &mut source_at,
                 |heat| {
                     let (combined, defect, receipt) = transform_heat(heat)?;
-                    Ok((combined, defect, (defect, receipt)))
+                    Ok(
+                        super::super::resistance::ResistanceHeatTrial::without_momentum((
+                            combined,
+                            defect,
+                            (defect, receipt),
+                        )),
+                    )
                 },
             )?;
+        let evolution = Self::finish_viscous_phase_resistance_thermal_volume(
+            evolution,
+            original_sources,
+            viscous,
+            assembly,
+            transformed_heat_defect_j,
+            controls,
+            viscosity_controls,
+            heat_budget,
+            gate,
+        )?;
+        Ok((evolution, receipt))
+    }
+
+    /// Keep one shared molecular/Darcy caloric and mechanical acceptance owner.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::conjugate::flow) fn finish_viscous_phase_resistance_thermal_volume(
+        evolution: ResolvedResistiveThermalVolumeMomentumStep,
+        original_sources: Vec<Option<ResolvedPhaseTransportState>>,
+        viscous: crate::conjugate::flow::material_momentum::PreparedMaterialViscosity,
+        assembly: Dd,
+        transformed_heat_defect_j: f64,
+        controls: ResistiveThermalVolumeMomentumControls,
+        viscosity_controls: MaterialViscosityControls,
+        heat_budget: f64,
+        gate: &CancelGate,
+    ) -> Result<ViscousResistiveThermalVolumeMomentumStep, ChtError> {
         let native = &evolution.evolution;
         let caloric = assembly
             + Dd::from_f64(transformed_heat_defect_j)
@@ -243,17 +278,14 @@ impl FlowField {
             ));
         }
         poll(gate)?;
-        Ok((
-            ViscousResistiveThermalVolumeMomentumStep {
-                evolution,
-                viscosity_sources: original_sources,
-                viscosity_reconstruction: viscous.reconstruction,
-                viscosity: viscous.report,
-                absolute_heat_assembly_defect_j: assembly.to_f64(),
-                absolute_enthalpy_defect_j,
-                absolute_energy_defect_j,
-            },
-            receipt,
-        ))
+        Ok(ViscousResistiveThermalVolumeMomentumStep {
+            evolution,
+            viscosity_sources: original_sources,
+            viscosity_reconstruction: viscous.reconstruction,
+            viscosity: viscous.report,
+            absolute_heat_assembly_defect_j: assembly.to_f64(),
+            absolute_enthalpy_defect_j,
+            absolute_energy_defect_j,
+        })
     }
 }

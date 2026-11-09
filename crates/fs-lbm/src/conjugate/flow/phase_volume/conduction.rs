@@ -20,16 +20,16 @@ pub use implicit::{
     ImplicitConductiveThermalVolumeMomentumStep, ImplicitConductiveThermalVolumeReport,
     ImplicitConductiveThermalVolumeStep, ImplicitConductiveViscousThermalVolumeMomentumStep,
     ImplicitConjugateResistiveThermalVolumeMomentumStep,
-    ImplicitConjugateViscousResistiveThermalVolumeMomentumStep,
     ImplicitConjugateThermalVolumeMomentumStep, ImplicitConjugateThermalVolumeReport,
-    ImplicitConjugateThermalVolumeStep, ImplicitConjugateViscousThermalVolumeMomentumStep,
-    ImplicitThermorheologicalThermalVolumeMomentumStep,
+    ImplicitConjugateThermalVolumeStep, ImplicitConjugateViscousResistiveThermalVolumeMomentumStep,
+    ImplicitConjugateViscousThermalVolumeMomentumStep, ImplicitResistanceHeatWork,
+    ImplicitThermalVolumeLinearControls, ImplicitThermalVolumeSolveControls,
+    ImplicitThermalVolumeWorkspace, ImplicitThermorheologicalThermalVolumeMomentumStep,
+    ImplicitThermoviscousResistiveThermalVolumeMomentumStep,
     ImplicitThermoviscousThermalVolumeMomentumStep, ThermalViscosityFeedbackControls,
-    ThermalViscosityFeedbackReport,
-    ImplicitResistanceHeatWork, ImplicitThermalVolumeLinearControls,
-    ImplicitThermalVolumeSolveControls, ImplicitThermalVolumeWorkspace, ThermalVolumeBathExchange,
-    ThermalVolumeBoundaries, ThermalVolumeBoundaryFace, ThermalVolumeContact,
-    ThermalVolumeSolidCell, ThermalVolumeSolidEndpoint,
+    ThermalViscosityFeedbackReport, ThermalVolumeBathExchange, ThermalVolumeBoundaries,
+    ThermalVolumeBoundaryFace, ThermalVolumeContact, ThermalVolumeSolidCell,
+    ThermalVolumeSolidEndpoint,
 };
 pub use momentum::{
     ConductiveResistiveThermalVolumeMomentumControls, ConductiveResistiveThermalVolumeMomentumStep,
@@ -503,4 +503,3 @@ fn refuse(reason: impl Into<String>) -> ChtError {
 
 #[cfg(test)]
 mod tests;
-

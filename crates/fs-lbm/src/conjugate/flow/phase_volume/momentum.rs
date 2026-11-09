@@ -1,15 +1,19 @@
 //! Original-chart volume change, pressure impulse and conservative cell momentum.
 
 mod viscous;
-#[cfg(feature = "implicit-enthalpy-coupling")]
-pub(in crate::conjugate::flow) use viscous::{
-    admit_viscous_thermal_input, resolve_endpoint_rheology_sources,
-};
 pub use viscous::{
     EndpointRheologyThermalVolumeMomentumStep, ResolvedViscousThermalVolumeMomentumStep,
     ViscousResistiveThermalVolumeMomentumStep, ViscousThermalVolumeMomentumStep,
 };
+#[cfg(feature = "implicit-enthalpy-coupling")]
+pub(in crate::conjugate::flow) use viscous::{
+    admit_viscous_thermal_input, resolve_endpoint_rheology_sources,
+};
 mod resistance;
+#[cfg(feature = "implicit-enthalpy-coupling")]
+pub(in crate::conjugate::flow) use resistance::{
+    ResistanceHeatTrial, admit_mobile_phase, source_resistance,
+};
 pub use resistance::{
     ResistiveThermalVolumeMomentumControls, ResistiveThermalVolumeMomentumStep,
     ResolvedResistiveThermalVolumeMomentumStep, ThermalResistanceCouplingReport,

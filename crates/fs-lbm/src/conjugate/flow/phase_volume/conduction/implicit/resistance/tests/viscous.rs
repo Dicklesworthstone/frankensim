@@ -1,5 +1,7 @@
 //! Both physical heat owners feed actual spatial conduction and phase density.
 
+mod feedback;
+
 use super::*;
 use crate::conjugate::{FaceContactResistance, FvBoundary, MaterialViscosityControls, Voxel};
 

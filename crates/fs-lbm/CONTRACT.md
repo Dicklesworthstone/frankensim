@@ -2597,6 +2597,59 @@ requires refinement; it does not infer simultaneous endpoint shear feedback.
 Fluid phases must remain mobile. Exact solid locking, moving skeletons and
 free surfaces remain outside this owner.
 
+## Thermal viscosity feedback inside evolving mushy flow
+
+`FlowField::advance_isotropic_implicit_conjugate_thermoviscous_phase_resistance_thermal_volume_momentum_with_baths`
+returns `ImplicitThermoviscousResistiveThermalVolumeMomentumStep` and closes thermal
+shear and independent bulk viscosity inside the original combined molecular,
+implicit heat, phase-density and Darcy timeline. Each Darcy heat trial reuses
+the native thermal-viscosity fixed point on ORIGINAL fluid M/P/h and held-solid
+inventories. Exact native pretransport caloric samples resolve molecular source
+receipts; original M/V supplies inertia even when the heated chart density has
+changed. In particular, converting a source kinematic viscosity with the heated
+source density must not replace original mass in the molecular kick.
+
+The existing mobile phase and source-resistance admission checks remain mandatory:
+chart and material identity, exact phase, exact source density, and the original
+mushy volume/permeability evidence must all agree. The native coefficient-only
+stress seam consumes the admitted shear and independent bulk response with
+`2 mu dev(D) + zeta div(u) I`. The converged original-inertia molecular momentum
+then enters the SAME Darcy pressure, volume-source and conservative M/Mh/P owner.
+Darcy resolves at the transported endpoint, while molecular viscosity and
+conductivity resolve at the pretransport thermal endpoint. This is a first-order
+mechanical split requiring refinement, not a simultaneous unsplit flow endpoint.
+Rate-dependent constitutive feedback is outside this opt-in.
+
+Both physical heat sources enter the same native implicit interval once. The
+reported used molecular heat retains its non-cancelling difference from actual
+physical molecular heat. Heat assembly, that mismatch, implicit heat, caloric
+transport and Darcy heat/constitutive defects consume the shared caloric and
+both mechanical energy gates once. Pressure/source and boundary work, molecular
+and Darcy heat, and numerical time/scatter/transport losses stay separate.
+Accepted source, heat, momentum and finite-wall receipts belong to one trial;
+rejected trials never advance physical inventory.
+
+`ThermalViscosityFeedbackControls::maximum_trials`, the heat residual and Krylov
+limits, and molecular `max_sweeps` bound the WHOLE call, including all nested
+rejected Darcy trials. The report counts every source callback, including Darcy
+endpoint queries. The original frozen-coefficient path retains its cached
+reconstruction. Liquid-only thermal and thermal/rate entries retain their own
+phase-support rules through the shared preparation loop. Exact immobile phases,
+moving solid skeletons and free surfaces still require their existing owners.
+
+G1/G3 native tests exercise unequal phase densities, source-density-dependent
+molecular viscosity, independent bulk response, finite-wall/contact conduction,
+physical molecular and Darcy heat, latent volume source, and conservative
+fluid/wall/advection mass and enthalpy balance. An independent native kick at the
+accepted source reproduces the original-M result and discriminates against
+substituting hot source density into inertia. G4 checks stale source evidence,
+cancellation after an actual heat solve, exhausted whole-call heat, molecular
+and trial budgets, and exact retry from unchanged finite-wall history. Existing
+frozen combined, liquid thermal-feedback and joint thermal/rate regressions pass
+with the same factored preparation. Focused execution uses original physical
+kernels; full workspace Cargo/execution-context integration remains a separate
+verification gate.
+
 ## Actual-material-density SGS momentum and separated energy transfer
 
 `FlowField::advance_material_momentum_with_viscosity_and_sgs` composes the

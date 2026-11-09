@@ -1,6 +1,6 @@
 //! One original molecular kick supplies the same implicit caloric endpoint.
 
-mod feedback;
+pub(super) mod feedback;
 pub use feedback::{
     ImplicitThermorheologicalThermalVolumeMomentumStep,
     ImplicitThermoviscousThermalVolumeMomentumStep, ThermalViscosityFeedbackControls,
@@ -384,8 +384,8 @@ impl FlowField {
                     .absolute_enthalpy_defect_j,
             ))
         .to_f64();
-        let total = (heat_defect + Dd::from_f64(accepted.report.absolute_enthalpy_defect_j))
-            .to_f64();
+        let total =
+            (heat_defect + Dd::from_f64(accepted.report.absolute_enthalpy_defect_j)).to_f64();
         finite("flow.implicit_viscous_enthalpy_defect", viscous_defect)?;
         finite("flow.implicit_viscous_total_enthalpy_defect", total)?;
         if total > heat_budget || viscous_defect > heat_budget {
