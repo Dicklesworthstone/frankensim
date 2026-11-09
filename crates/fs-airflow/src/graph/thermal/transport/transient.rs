@@ -35,6 +35,9 @@ use super::recirculation::{MAX_RECIRCULATION_SUPPLIES, solve_feedback};
 use super::{TransportError, poll};
 use crate::graph::{GraphSolution, LossGraph};
 
+/// Direction-resolved swept transport on an authored affine flow interval.
+pub mod affine;
+
 /// Existing thermal, linear-solve or explicit binding refusal. No partial
 /// timeline is returned on failure or cancellation.
 #[derive(Debug)]

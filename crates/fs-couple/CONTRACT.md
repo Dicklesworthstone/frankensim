@@ -78,6 +78,11 @@ event-hook semantics. Storage is linear in the admitted sensor state dimension,
 with no growing history log. This is a passive observation of finite-cell heat,
 not thermal sensor back-reaction, continuum sampling accuracy, stochastic noise,
 calibration validation or a transient assimilation of uncertain sensor memory.
+`observe_endpoint_candidate` also consumes an original implicit or multiphysics
+thermal candidate without rerunning heat. It shares the same response owner and
+requires the matching accepted start state and original duration. The caller
+accepts both candidates together and explicitly assumes an affine temperature
+path across that one interval; hidden substeps or events are not reconstructed.
 `tests/scenario_sensor.rs` exercises real heating, mount bias, lag, patch probes,
 source-event timing, native-clock rounding, restart, phase plateaus and rollback.
 
@@ -113,14 +118,25 @@ boundaries can also feed the original induction owner. Focused native
 regressions cover rotated pure gauges, exact nonzero uniform B/H and energy
 from affine line averages, shared-edge conflict and interior-face refusal.
 
-`scenario_magnetic::induction::step_induction3` continues the original
-accepted A-phi state from canonical histories. The state clock owns both
-sample times. Authored start traces must match retained edges within the
+`scenario_magnetic::induction::induction_boundary3` resolves canonical
+histories from the original accepted A-phi clock to an absolute endpoint;
+`step_induction3` reuses that admission for the native field step. Authored
+start traces must match retained edges within the
 explicit positive Wb allowance; the native candidate owns full fixed support,
 charge/current compatibility and magnetic-boundary reaction work. Fixed-frame,
 nonperiodic affine segments and held steps are admitted. Interior knots,
 clamp transitions, endpoint jumps and dynamic frame ancestry refuse rather
 than being smeared into another physical forcing law.
+
+`step_rotor3` feeds that same admitted boundary into the original finite-inertia
+rotor closure. Source/frame/trace errors and native field/mechanical errors
+remain separate structured variants. The public boundary resolver also feeds
+the existing joint finite-temperature and complete heat-provider methods, so
+thermal drivers need not publish a standalone field or rotor step first.
+The resolver itself advances no history; native receivers still admit complete
+fixed support, gauge and shared-edge compatibility. A canonical rotating-field
+regression compares original cochains, speed, Joule heat and boundary supply
+with the direct native rotor candidate.
 
 The adapter returns the original unpublished induction candidate and its
 Joule heat, Lorentz work, magnetic storage and boundary-work account. It adds
@@ -1828,8 +1844,9 @@ share the same residual and source-temperature feedback.
 
 ## Finite-temperature feedback on the three-dimensional induction rotor
 
-`SpatialMagneticThermalNetwork::step_rotor_candidate` advances the original
-spatial field, native finite-inertia rotor and finite enthalpy together. The
+`SpatialMagneticThermalNetwork::step_rotor_candidate` and its
+`step_rotor_with_boundary_candidate` variant advance the original spatial
+field, native finite-inertia rotor and finite enthalpy together. The
 linear material/entropy residual is shared with standalone induction and
 physical electrode circuits. Every temperature proposal resolves original
 conductivity and magnetic sources, then restarts the same accepted field and
@@ -1837,12 +1854,13 @@ mechanical histories for the bounded speed closure. Source-weighted operators
 are prepared once per temperature proposal and shared across its field trials.
 
 The joint driver includes magnetic free-energy change minus original parameter
-work, native kinetic-energy change, impressed supply and external shaft work.
+work, native kinetic-energy change, impressed supply, magnetic-boundary supply
+and external shaft work.
 The original magnetic-caloric owner deposits reversible field exchange and
 recovers magnetic internal energy. Actual conductor-frame Joule heat enters
 the original finite body once; Lorentz work cancels internally against rotor
 motion. Final admission independently closes magnetic internal energy, kinetic
-energy and finite caloric storage against external electrical/shaft work and
+energy and finite caloric storage against external electrical/magnetic/shaft work and
 external heat. Bearing reactions retain the native full impulse account.
 
 All inner speed/field trials consume the original thermal work budget. Invalid
@@ -1851,15 +1869,21 @@ source refusal and exhausted solves publish no field, angle, speed or thermal
 state. Complete heat-assembly entry points retain contact/layer/radiation and
 finite-coolant source payloads and typed errors; closed-radiation roundoff is
 not external supply, and unowned electrical contact/resistor work refuses.
+The boundary-driven bulk and complete-provider variants retain the same
+initial trace for every temperature/speed trial and prescribe the complete
+original trace at the endpoint. Subsequent ordinary steps hold that accepted
+trace. Boundary reaction work enters supply once and is never relabeled as
+Joule heat or added to the internal Lorentz transfer.
 
 The rotor remains a homogeneous isotropic cylinder/tube with uniform scalar
 permeability throughout the field domain. A whole-body finite caloric cell
 provides its uniform temperature; a nonuniform rotating material source refuses.
 Endpoint thermal coefficients make the combined method generally first order.
 Moving interfaces, transported magnetic memory, phase transitions and thermal
-expansion remain outside this model. One focused source-bound regression
-definition covers heating-dependent braking through two retained intervals,
-independent current/field/kinetic/enthalpy balance and trial-budget rollback.
+expansion remain outside this model. Focused source-bound regression
+definitions cover heating-dependent braking and applied-field forcing through
+two retained intervals, independent current/field/kinetic/enthalpy balance,
+agreement with the complete heat assembly and trial-budget rollback.
 Native execution remains unverified while constellation dependencies are absent.
 
 ## Native three-dimensional induction with finite rotor inertia
@@ -1870,6 +1894,15 @@ implicit iteration uses the same accepted field and momentum on every trial;
 its converged speed supplies `v = omega cross (x - axis)` and its original
 current supplies both conductor-frame Joule heat and the full Lorentz wrench.
 Three-dimensional charge continuity and end effects remain in the native field.
+
+`step_with_boundary_candidate` also carries an applied affine tangential A
+history through the same speed closure. Every trial starts at the accepted
+field and prescribed trace; native Faraday charge balance and boundary
+reaction work are retained. `step_with_materials_and_boundary_candidate`
+shares the original endpoint source preparation across those speed trials.
+Complete original boundary support, relative gauge and source identities are
+unchanged. An applied rotating field can therefore induce both finite rotor
+motion and conductor-frame Joule heat without an invented torque law.
 
 The `induction_rotor` stage is shared with the original planar rotor. It calls
 the original articulated forward kinematics and constrained inverse-inertia
@@ -1890,9 +1923,10 @@ not certify arbitrary intersections or field convergence. Noncircular moving
 interfaces, anisotropic rotating material, hysteretic-memory transport and
 magnetization-interface loads require additional owners.
 
-Three focused G0/G3/G4 regression definitions cover transverse braking in both
+Focused G0/G3/G4 regression definitions cover transverse braking in both
 directions, independently integrated P1 force/torque/Joule and magnetic energy,
-shaft drive followed by coasting, bearing reactions and transactional refusal.
+shaft drive followed by coasting, applied-field startup, direct native replay,
+retained boundary holds, bearing reactions and transactional refusal.
 The fixture uses real material-resolved spatial fields and native inertia;
 synthetic coefficients do not establish experimental machine validation.
 Pinned formatting/syntax and whitespace checks pass. Native compilation and
@@ -9885,6 +9919,14 @@ The same source must remain unchanged, and harmonic order needs independent
 refinement. Tests cover phased multiharmonic force/stiffness mechanics and a
 nonlinear original storage with an explicit relaxing strain, including its
 material derivative, native/declared Hessian agreement and bandwidth refusals.
+
+## Resolved thermoviscous interior with full aperture reaction
+
+`cavity_modal::interior::thermoviscous::exterior::RadiatingThermoviscousInterior` connects the original source-bound P2/P1/P2 velocity/pressure/temperature owner to the native BEM self/mutual aperture matrix. One original loaded fluid LU and one small port factor serve coherent feed flow, original structural force, body force and heat-release excitation. Molecular Cp, shear/bulk viscosity, fluid and finite-solid conduction, structural damping and Maxwell memory remain on their original operators. No pressure-only replacement or added attenuation changes the fluid equations.
+
+Radiators must pass the native unit, planar, exclusive traction-port admission. `plane_wave_port_triangles` exposes only those original physical triangles and outward normals; no second fluid mesh is assembled. The BEM applies the explicitly declared constant-velocity lift U/A on the same triangles, with U=-Q. This scalar work pairing does not establish a uniform resolved opening velocity: transverse opening motion outside that lift remains a port-model approximation. Signed/scaled/overlapping traction modes require a dual map and refuse. The caller supplies the independent homogeneous lossless exterior `Medium`; interior molecular loss does not imply an exterior absorption law. The exterior stays rigid outside selected openings, including moving structural walls.
+
+The native outgoing BEM matrix is conjugated once for exp(+i omega t), with both geometric area factors retained. Original physical interface residuals are checked in power coordinates. Driven-port work, original body/heat/structural source work, exterior boundary work and native loss channels are accounted once. Conductive/caloric availability and numerical residuals are not deposited as additional heat. The three focused tests compare complete fields against independent native traction-admittance/BEM equations, vary numerical references, retain coherent Maxwell/body/heat source work, and exercise physical geometry, owner, budget, band and cancellation refusals. These are numerical regression definitions, not mesh-convergence or measured-validation claims.
 
 ## Full material damping in the resolved thermoviscous interior
 

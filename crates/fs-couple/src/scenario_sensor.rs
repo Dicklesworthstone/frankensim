@@ -170,6 +170,78 @@ impl<'a> TemperatureSensorObserver<'a> {
         thermal.advance_observed(self, target_s, config, checkpoint)
     }
 
+    /// Observe an already solved native thermal candidate without solving heat
+    /// again. This connects implicit and multiphysics candidates to the same
+    /// instrument response used by the explicit substep observer.
+    ///
+    /// Both thermal states remain borrowed and unpublished. Accept the returned
+    /// sensor together with the physical candidate only after this succeeds.
+    /// The caller declares an affine temperature reconstruction across this
+    /// single native interval and supplies the duration used by that solver.
+    /// Unresolved events or strongly curved temperatures require smaller
+    /// physical intervals; endpoint observation does not recover hidden steps.
+    pub fn observe_endpoint_candidate(
+        &self,
+        accepted_thermal: &DepositionSimulation<'_>,
+        endpoint_thermal: &DepositionSimulation<'_>,
+        duration_s: f64,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, ThermalSensorError> {
+        self.check_accepted(accepted_thermal, &mut checkpoint)?;
+        let (state, temperatures) =
+            self.response_candidate(duration_s, endpoint_thermal, &mut checkpoint)?;
+        let mut cells = Vec::new();
+        cells
+            .try_reserve_exact(self.cells.len())
+            .map_err(|_| ThermalSensorError::Invalid("sensor cell-map allocation refused"))?;
+        cells.extend_from_slice(&self.cells);
+        checkpoint()?;
+        Ok(Self {
+            cells,
+            accepted_temperatures_k: temperatures,
+            state,
+        })
+    }
+
+    fn response_candidate(
+        &self,
+        duration_s: f64,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(SensorState<'a>, Vec<f64>), ThermalSensorError> {
+        checkpoint()?;
+        let start_s = self.state.time_s();
+        if !duration_s.is_finite()
+            || duration_s <= 0.0
+            || !(start_s + duration_s == thermal.time_s()
+                || thermal.time_s() - start_s == duration_s)
+        {
+            return Err(ThermalSensorError::Invalid(
+                "sensor interval differs from accepted thermal interval",
+            ));
+        }
+        let temperatures = sample_cells(&self.cells, thermal, checkpoint)?;
+        let mut failure = None;
+        let candidate = self.state.step_affine_interval_candidate(
+            thermal.time_s(),
+            duration_s,
+            &temperatures,
+            &mut || match checkpoint() {
+                Ok(()) => false,
+                Err(error) => {
+                    failure = Some(error);
+                    true
+                }
+            },
+        );
+        if let Some(error) = failure {
+            return Err(error.into());
+        }
+        let candidate = candidate.map_err(ThermalSensorError::Sensor)?;
+        checkpoint()?;
+        Ok((candidate, temperatures))
+    }
+
     fn check_accepted(
         &self,
         thermal: &DepositionSimulation<'_>,
@@ -228,12 +300,7 @@ impl DepositionObserver for TemperatureSensorObserver<'_> {
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), Self::Error> {
         checkpoint()?;
-        if self.state.time_s() != start_s
-            || !duration_s.is_finite()
-            || duration_s <= 0.0
-            || !(start_s + duration_s == thermal.time_s()
-                || thermal.time_s() - start_s == duration_s)
-        {
+        if self.state.time_s() != start_s {
             return Err(ThermalSensorError::Invalid(
                 "sensor interval differs from accepted thermal interval",
             ));
@@ -253,24 +320,7 @@ impl DepositionObserver for TemperatureSensorObserver<'_> {
                 ));
             }
         }
-        let temperatures = sample_cells(&self.cells, thermal, checkpoint)?;
-        let mut failure = None;
-        let candidate = self.state.step_affine_interval_candidate(
-            thermal.time_s(),
-            duration_s,
-            &temperatures,
-            &mut || match checkpoint() {
-                Ok(()) => false,
-                Err(error) => {
-                    failure = Some(error);
-                    true
-                }
-            },
-        );
-        if let Some(error) = failure {
-            return Err(error.into());
-        }
-        let candidate = candidate.map_err(ThermalSensorError::Sensor)?;
+        let (candidate, temperatures) = self.response_candidate(duration_s, thermal, checkpoint)?;
         checkpoint()?;
         self.state = candidate;
         self.accepted_temperatures_k = temperatures;

@@ -1,6 +1,6 @@
 //! G1/G3/G4: canonical A histories produce native Faraday heat and boundary work.
 use super::*;
-use fs_couple::scenario_magnetic::induction::step_induction3;
+use fs_couple::scenario_magnetic::induction::{induction_boundary3, step_induction3};
 use fs_em::spatial::vector_potential::induction::{
     SpatialInduction, SpatialInductionControls, SpatialInductionLimits,
 };
@@ -211,8 +211,22 @@ fn scenario_ramp_drives_analytical_faraday_current_heat_and_signed_boundary_work
             near(step.cells[0].current_density_a_m2[local][axis], 5.0 * value);
         }
     }
-    let endpoint =
+    let sampled =
         vector_potential_boundary_at(&problem, &rows, &frames, 0.1, &mut || false).unwrap();
+    let endpoint = induction_boundary3(
+        &state,
+        &rows,
+        &frames,
+        0.1,
+        induction_controls().flux_tolerance_wb,
+        &mut || false,
+    )
+    .unwrap();
+    assert_eq!(endpoint.potential.len(), sampled.potential.len());
+    for (resolved, sampled) in endpoint.potential.iter().zip(&sampled.potential) {
+        assert_eq!(resolved.face, sampled.face);
+        assert_eq!(resolved.edge_integrals_wb, sampled.edge_integrals_wb);
+    }
     let native = state
         .step_with_boundary_candidate(
             &current,
@@ -337,6 +351,12 @@ fn incompatible_history_intervals_and_late_cancellation_do_not_advance_state() {
             )
             .is_err()
         );
+    }
+    for tolerance in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(matches!(
+            induction_boundary3(&state, &rows, &frames, 0.1, tolerance, &mut || false),
+            Err(ScenarioMagneticError::Invalid(_))
+        ));
     }
     assert!(matches!(
         step_induction3(

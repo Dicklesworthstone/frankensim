@@ -43,6 +43,9 @@ pub mod wall;
 /// Original distributed force and heat mechanisms in fields and duct networks.
 pub mod volume_source;
 
+/// Full resolved fields with original self/mutual BEM aperture reaction.
+pub mod exterior;
+
 mod viscosity;
 
 /// Original material shell modes on a conforming resolved fluid boundary.
