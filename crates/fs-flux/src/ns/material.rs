@@ -56,7 +56,7 @@ pub use navier_stokes::{
 };
 pub use newton::{
     MaterialFluxNewtonStep, MaterialFluxSdirk2Step, MaterialFluxViscosityTangent,
-    MaterialStokesRheologyNewtonSolution,
+    MaterialNavierStokesNewtonStep, MaterialStokesRheologyNewtonSolution,
 };
 pub use porous::{
     MaterialBrinkmanDragExchange, MaterialBrinkmanSolution, MaterialForchheimerSolution,

@@ -11,6 +11,8 @@ use fs_material::visco::temperature::{TemperatureShift, TemperatureShiftModel};
 
 #[path = "newton/mixed.rs"]
 mod mixed;
+#[path = "newton/mixed_transient.rs"]
+mod mixed_transient;
 #[path = "newton/sdirk2.rs"]
 mod sdirk2;
 

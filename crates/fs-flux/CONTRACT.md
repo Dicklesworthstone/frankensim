@@ -2573,6 +2573,52 @@ Rust sources pass the pinned rustfmt parser. These new tests are authored but
 **not executed** in this environment; parser acceptance is not compilation,
 convergence, performance or physical validation evidence.
 
+## Original material Newton flow with mixed transient transport
+
+`MaterialFluxSystem::solve_navier_stokes_mixed_rheology_newton`,
+`bdf1_navier_stokes_mixed_rheology_newton_step` and
+`bdf2_navier_stokes_mixed_rheology_newton_variable_step` bind the original
+material response and analytic `dmu/dgamma` to the existing mixed convective
+Newton owner. They reuse the same sparse constitutive/advection Jacobian,
+bounded Armijo search, history normalizer, boundary admission and reaction
+assembly. No additional nonlinear solver or fitted viscosity is introduced.
+
+One fixed reference density scales dynamic viscosity, its derivative, force
+density, mass, convection, total traction, Navier resistance and recovered
+pressure. Original reservoir inflow, literal traction and declared dissipative
+backflow retain their distinct momentum laws. Finite BDF mass anchors all-open
+components without an artificial velocity constraint. Unequal BDF2 retains
+both original histories and the native step-ratio limit; only the mass load is
+combined, while actual previous velocity initializes the constitutive solve.
+
+`MaterialNavierStokesNewtonStep` retains physical flow, exact endpoint source
+owners and derivatives, Newton/backtrack counts, pressure datums, bulk heating
+and boundary reactions. Unchanged cell/rate queries use the existing cache;
+reporting neither resolves nor reads original material transport again.
+Bulk `mu*gamma²`, Navier-slip loss, advected kinetic energy and numerical
+upwind dissipation remain separate. These are endpoint rates, not integrated
+thermal deposition or an asserted BDF2 energy identity.
+
+Source failures remain terminal during Newton trials and final reaction
+assembly; original typed errors precede numerical refusals. Invalid histories
+are rejected before source/load callbacks. No fallback material, changed
+history, clipped timestep or partial endpoint is returned. Density and captured
+temperature/composition stay fixed. Existing synchronous solver/cancellation
+limits, semismooth upwind qualifications and conditional Newton convergence
+remain; no thermal evolution, variable-density flow or viscoelastic memory is
+added.
+
+Four focused regressions in `material_flow/newton/mixed_transient.rs` cover
+unequal BDF2 and BDF1 layered shear with live transverse convection, original
+source/history identity, physical pressure/density/heat, finite slip, reservoir
+transport, independent BDF1 work/kinetic balance, an actual thermal Carreau
+all-open acceleration, steady natural/dissipative boundary policies and
+refusal/retry. A private native test isolates source loss in final reactions.
+The changed Rust sources pass the pinned rustfmt parser. Native compilation
+and these regressions remain **unexecuted** because the current workspace lacks
+its constellation dependencies and persistent storage capacity; parsing and
+independent manufactured algebra are not native numerical validation.
+
 ## Generalized-Newtonian mixed velocity/traction Stokes flow
 
 `FluxSystem::solve_stokes_mixed_rheology` closes steady Stokes viscosity on the
