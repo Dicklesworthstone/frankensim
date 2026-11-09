@@ -20,6 +20,9 @@ use fs_sparse::Csr;
 mod frequency;
 pub use frequency::{ViscoHarmonicFrequencyOperator, ViscoHarmonicFrequencyResponse};
 
+mod supports;
+pub use supports::{ViscoSupportedHarmonicOperator, ViscoSupportedHarmonicResponse};
+
 /// A source-material refusal or a failure of the shared harmonic solve.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ViscoHarmonicError {
@@ -198,19 +201,7 @@ impl ViscoElements {
             }
             .into());
         }
-        let stiffness = self.complex_stiffness(omega_rad_s, cx)?;
-        let mass = dense(&self.equilibrium.mass, n, cx)?;
-        let storage = dense(&stiffness.real, n, cx)?;
-        let mut damping = dense(&stiffness.imag, n, cx)?;
-        for value in &mut damping {
-            let loss = *value;
-            *value /= omega_rad_s;
-            if !value.is_finite() || loss != 0.0 && *value == 0.0 {
-                return Err(invalid(
-                    "effective harmonic material loss is not representable",
-                ));
-            }
-        }
+        let [mass, damping, storage] = self.harmonic_pencil(omega_rad_s, cx)?;
         let solve_controls = HarmonicResponseControls {
             maximum_payload_bytes: controls.maximum_payload_bytes - source_bytes,
             ..controls
@@ -246,6 +237,32 @@ impl ViscoElements {
             omega_rad_s,
             response,
         })
+    }
+
+    // Both force-driven and support-driven solves retain precisely the same
+    // original positive-frequency material pencil. Callers admit all dense
+    // source and solver payload before entering this assembly.
+    fn harmonic_pencil(
+        &self,
+        omega_rad_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<[Vec<f64>; 3], ViscoHarmonicError> {
+        let n = self.equilibrium.free_dofs.len();
+        let stiffness = self.complex_stiffness(omega_rad_s, cx)?;
+        let mass = dense(&self.equilibrium.mass, n, cx)?;
+        let storage = dense(&stiffness.real, n, cx)?;
+        let mut damping = dense(&stiffness.imag, n, cx)?;
+        for value in &mut damping {
+            let loss = *value;
+            *value /= omega_rad_s;
+            if !value.is_finite() || loss != 0.0 && *value == 0.0 {
+                return Err(HarmonicResponseError::Invalid(
+                    "effective harmonic material loss is not representable",
+                )
+                .into());
+            }
+        }
+        Ok([mass, damping, storage])
     }
 }
 
@@ -309,7 +326,9 @@ impl ViscoElements {
             checkpoint(cx)?;
             local.clear();
             local.extend(element.dofs.iter().map(|dof| {
-                self.equilibrium.free_dofs.binary_search(dof)
+                self.equilibrium
+                    .free_dofs
+                    .binary_search(dof)
                     .map_or(C64::ZERO, |row| displacement[row])
             }));
             for point in &element.points {

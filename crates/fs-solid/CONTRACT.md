@@ -13667,3 +13667,37 @@ expansion. It does not supply a heat equation, reciprocal thermal exchange,
 radial expansion, cross-section thermal-gradient bending or a material yield
 calibration. Existing linear harmonic/viscosity routes retain their explicit
 section admission limits.
+
+
+## Material-admitted harmonic support excitation
+
+`ViscoElements::prepare_supported_harmonic_response` prepares prescribed
+vibration on original global coordinates that remain represented in the source.
+It shares the force-driven owner's original frequency-dependent pencil:
+`A = K'(omega) - omega^2 M - i K''(omega)`. The native supported solver
+retains the full consistent cross inertia and every Kelvin/Maxwell cross term,
+factors only the free principal block, and independently computes reactions,
+applied-force power, support-actuator power and intrinsic material heat.
+Applied loads on supported coordinates are subtracted once from reactions.
+
+Every returned displacement includes the prescribed coordinates and passes
+whole-cycle constitutive and compatible B-bar strain admission at every original
+quadrature point. Those same vectors enter the existing single-tone and coherent
+multitone material observers without another solve or projection. All native
+TET4/TET10/HEX8/HEX20/HEX27 assemblies use this one path. The source is immutable;
+cancelled or refused cases publish no partial response and do not poison reuse.
+
+Moving supports must be retained during source construction. Coordinates already
+eliminated remain homogeneous stationary supports, and a request to move them
+refuses. Empty/all-represented support maps are admitted. Frequencies must be
+positive and admitted by every original source. Dense payload admission before
+assembly is `344*n*n + 544*n` bytes; sparse/material temporaries retain native
+source limits. No penalty, artificial damping, modal truncation or additional
+constitutive fit is introduced.
+
+`tests/visco_harmonic_supports.rs` contains independent P1 complex-pencil and
+real-time Maxwell/Kelvin integral references, applied/support work closure,
+empty/all-support limits, close-tone beat heating, source/strain/budget refusal,
+cancellation and reuse cases. This is a particular periodic response at fixed
+material conditions; startup, actuator dynamics, evolving material state,
+spatial convergence and measured physical validation are separate concerns.

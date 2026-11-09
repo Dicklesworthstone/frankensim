@@ -63,7 +63,8 @@ pub use dynamics::{
 mod harmonic;
 pub use harmonic::{
     ViscoHarmonicError, ViscoHarmonicFrequencyOperator, ViscoHarmonicFrequencyResponse,
-    ViscoHarmonicOperator, ViscoHarmonicResponse,
+    ViscoHarmonicOperator, ViscoHarmonicResponse, ViscoSupportedHarmonicOperator,
+    ViscoSupportedHarmonicResponse,
 };
 mod harmonic_material;
 pub use harmonic_material::{
