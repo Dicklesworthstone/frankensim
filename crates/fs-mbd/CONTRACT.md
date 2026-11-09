@@ -1539,6 +1539,64 @@ physical losses separate, final damping that spins up the rotor beyond an
 otherwise accepted middle drive's speed/voltage/draw/return limits, both
 zero-source reductions, and late cancellation/whole-energy refusal.
 
+`DampedEccentricRotor::voltage_spin_motor` supplies finite-inductance voltage
+actuation on that same actual eccentric body. `EccentricRotorWindingState`
+carries the sole native body and signed winding current across both electrical
+half sources and into the next complete step. Magnetic storage derives from
+`L I^2 / 2`; current is never reconstructed from a resistive equilibrium,
+clipped after limiting, or reset between mechanical stages. Explicit shaft-axis
+actuation and strictly positive native winding inductance remain required.
+
+The parent's original full-tensor shaft-mobility source is reused unchanged.
+The existing `RotorVoltageMotor` solves its coupled midpoint winding and
+mechanical equations and selects the feasible held terminal voltage under
+original voltage, current and bidirectional source-power limits. It prepares
+one cached coupling per complete step and reuses it for both half sources.
+The trajectory is `D(h/2), E_L(h/2), elastic(h), E_L(h/2), D(h/2)`;
+purely mechanical stages leave the actual current unchanged, and only the
+original full-body elastic stage advances pose. No extra rotor, replacement
+inertia, winding solver or iteration is introduced.
+
+Each accepted midpoint torque is applied once through the original body
+momentum-impulse owner. Actual angular transfer, actual body-z rate and
+complete tensor kinetic work must agree with the source within explicit
+allowances. The winding equation is then independently re-evaluated using
+actual returned body midpoint speed and actual current endpoints, so a scalar
+prediction tolerance cannot waive the original electrical voltage balance.
+
+Actual terminal voltage is the source's accepted V, and terminal power is
+`V I`. The zero-inductance equation `V = Kt omega + R I` is not a voltage
+compliance condition here: `L dI/dt` supplies the remaining voltage. A shorted
+spinning rotor can therefore develop braking current and magnetic storage with
+zero terminal voltage and zero source draw. Outer speed/current/terminal/source
+admission uses the actual complete endpoints after bearing damping, while the
+current and accepted V retain their original meanings. Source curtailment
+that leaves no current-feasible operating point refuses atomically rather
+than erasing current or its stored magnetic energy.
+
+The complete ledger recomputes original full-body endpoint kinetic change and
+the polarized endpoint magnetic increment `L I_mid_total (I_after-I_before)`.
+It retains original gravity and elastic storage, bearing heat, winding
+midpoint Joule quadrature, bridge heat, electrical return/draw and external
+shaft work separately. Electrical shaft work is internal transfer and is not
+counted twice. Native `R I_mid^2 dt` remains midpoint heat quadrature, not an
+exact RMS-current integral. No balance residual becomes physical heat.
+
+For smooth fixed coefficients and uncurtailed held voltage, the symmetric
+composition is second order with resolved winding, bearing and free-rotation
+timescales. Midpoint is not L-stable; stiff transients and active controller
+limits require refinement. Endpoint admission does not certify continuous
+electrical peaks. Battery storage, bridge switching, thermal feedback,
+saturation and changing material coefficients remain separate owners.
+
+Six regressions in `tests/rigid_rotor_voltage_drive.rs` cover independent
+short-circuit electromechanical equations and current continuation across
+complete steps, full-tensor source mobility/work, finite-current startup and
+powered damped planar ODE/energy refinement, source curtailment/regeneration
+with back-EMF above terminal voltage, final damping speed-domain refusal and
+late cancellation, and a source-cutback/current incompatibility that must
+preserve existing magnetic state for deterministic retry.
+
 Focused regressions use independent Jeffcott amplitude/phase, gyroscopic circular
 mode splitting, dense coordinate congruence, cross-coupled/active work and
 original force residuals. A manufactured nonsymmetric rotor has an exact

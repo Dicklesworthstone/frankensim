@@ -49,8 +49,11 @@ pub use eccentric::{
 };
 mod eccentric_drive;
 pub use eccentric_drive::{
-    EccentricRotorCurrentCommand, EccentricRotorCurrentStep, EccentricRotorDriveControl,
-    EccentricRotorDriveError, EccentricRotorElectricalSource, ElasticEccentricCurrentMotor,
+    DampedEccentricVoltageMotor, EccentricRotorCurrentCommand, EccentricRotorCurrentStep,
+    EccentricRotorDriveControl, EccentricRotorDriveError, EccentricRotorElectricalSource,
+    EccentricRotorVoltageCommand, EccentricRotorVoltageControl, EccentricRotorVoltageError,
+    EccentricRotorVoltageSource, EccentricRotorVoltageStep, EccentricRotorWindingState,
+    ElasticEccentricCurrentMotor,
 };
 
 /// Bound on supplied bearing and unbalance stations per rigid rotor query.

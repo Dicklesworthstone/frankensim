@@ -15,6 +15,13 @@ use crate::{
 };
 use fs_math::dd::Dd;
 
+mod voltage;
+pub use voltage::{
+    DampedEccentricVoltageMotor, EccentricRotorVoltageCommand, EccentricRotorVoltageControl,
+    EccentricRotorVoltageError, EccentricRotorVoltageSource, EccentricRotorVoltageStep,
+    EccentricRotorWindingState,
+};
+
 /// Held current request and an independently supplied mechanical shaft load.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EccentricRotorCurrentCommand {
