@@ -89,7 +89,7 @@ pub(super) fn evaluate<'a>(
 /// d_i=x_i g_i-Y_i sum(x_j g_j). Remove one mass-proportional gauge before
 /// reduction; subtracting a common scalar force would select the molar frame.
 /// The same original positive x supplies both drag and entropy conjugacy.
-fn project_with_gauge(
+pub(super) fn project_with_gauge(
     x: &[f64],
     mass: &[f64],
     g: &[f64],

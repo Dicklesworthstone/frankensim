@@ -22359,6 +22359,44 @@ unexecuted while the full dependency graph remains blocked before fs-material.
 All six changed Rust sources passed pinned-toolchain format/syntax checks;
 this is not a full crate type-check.
 
+### Nonisothermal real-gas molecular and reciprocal heat transport
+
+`nonideal::energy::parcel::transfer::species::diffusion::thermal` adds
+source-bound Soret/Dufour and Fourier transport on actual PR states. Original
+NASA increments and actual ln(x_i p phi_i) form Delta(mu_i/T); no ideal density,
+held-temperature surrogate or new PT root enters. The chosen h*_i is the
+existing NASA divided caloric plus symmetric actual PR partial residual
+enthalpy. That residual term is a finite-face approximation, not an exact
+Gibbs–Helmholtz integral across a temperature jump.
+
+The mass-frame effort is [Delta(mu_i/T)−h*_i Delta(1/T)−M_i H_i Delta(1/T)]/R.
+The same h* converts original donor enthalpy carriage through additional heat
+q_Fourier + sum(H_i M_i N_i) + sum(N_i(h*_i−h_i,donor)). Formation references
+and the common H datum cancel before arithmetic; mechanical gauge removal
+reuses the original double-double projection. Independent actual donor-energy/
+chemical power must match original MS pair friction plus Fourier entropy.
+At equal T and H=k=0, species transport matches the original PR diffusion law;
+centered residual enthalpy can still differ from its upwind energy carriage.
+
+Every binary coefficient, signed H_i and zero-species-flux conductivity is an
+explicit pinned T/p-only source claim qualified over the intended mixtures.
+PR thermodynamics supplies no missing kinetic data. The unchanged positive
+common-support, original-source and homogeneous PR admission boundaries apply.
+Local PSD/reciprocity does not establish phase stability or finite-step safety.
+
+One shared real-gas network owner combines species and additional heat before
+its original native endpoint reconstruction and actual species/U/S audit.
+The original temporal controller also checks each thermal face's signed and
+both gross-sign mass/heat integrals. Rejected probes spend actual cumulative
+face work but no inventory; fixed whole-window budgets and cancellation remain.
+
+Six new native constitutive tests passed with genuine original NASA/PR/MS
+owners, including independent source power, equal-T parity, Onsager cross
+response, temperature-only refinement and large-reference invariance.
+Three material/network integration groups are authored but unexecuted because
+the full graph remains blocked before fs-material. All ten changed Rust files
+parsed/formatted; no full material crate type-check is claimed.
+
 ### Source-conjugate gas thermodiffusion
 
 `thermochemical_gas::energy::parcel::transfer::species::diffusion::thermal` prepares an original NASA species catalog and complete pinned binary-diffusivity, mass-specific heat-of-transport and zero-diffusive-flux conductivity sources. Actual traces and the central face requery those same claims. Only owned canonical temperature/pressure dependence is admitted. A reusable Maxwell–Stefan workspace supplies the mass-average molecular flux; centered heat-of-transport coefficients couple Soret forcing to reciprocal heat. Original NASA enthalpy/entropy increments form divided caloric enthalpies, so heat added to existing donor-enthalpy transport includes the finite-distance caloric correction without subtracting arbitrary formation references. Common exact zeros stay absent, positive trace species are retained, and one-sided logarithmic zeros refuse.

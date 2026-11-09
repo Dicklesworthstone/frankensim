@@ -9,12 +9,13 @@
 pub mod adaptive;
 
 use super::super::network::{
-    self as exchange, RealGasSpeciesNetworkStep, SpeciesNetworkError, SpeciesNetworkSolve,
-    SpeciesNetworkTransfer,
+    self as exchange, RealGasSpeciesNetworkStep, SpeciesNetworkError, SpeciesNetworkHeatTransfer,
+    SpeciesNetworkSolve, SpeciesNetworkTransfer,
 };
 use super::super::{GasEnergyError, GasEnergySolve, IsochoricRealGasParcel, positive};
 use super::{
     RealGasDiffusionFlux, RealGasDiffusionModel, RealGasDiffusionSolve, RealGasDiffusionWorkspace,
+    SpeciesDiffusionFlux, SpeciesId,
 };
 use crate::thermochemical_gas::energy::parcel::transfer::{
     snapshot::{MAX_SNAPSHOT_PARCELS, MAX_SNAPSHOT_TRANSFERS},
@@ -25,14 +26,80 @@ use crate::thermochemical_gas::energy::parcel::transfer::{
 use fs_math::dd::Dd;
 use std::collections::BTreeMap;
 
-#[derive(Clone, Copy, Debug)]
-pub struct RealGasDiffusionNetworkLink<'a> {
+#[derive(Debug)]
+pub struct RealGasDiffusionNetworkLink<'a, Model = RealGasDiffusionModel<'a>> {
     pub id: u64,
     pub parcels: [u64; 2],
-    pub model: &'a RealGasDiffusionModel<'a>,
+    pub model: &'a Model,
     /// A zero area closes this path without querying inactive material data.
     pub geometry: GasDiffusionGeometry,
     pub solve: RealGasDiffusionSolve,
+}
+impl<Model> Copy for RealGasDiffusionNetworkLink<'_, Model> {}
+impl<Model> Clone for RealGasDiffusionNetworkLink<'_, Model> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+// Both constitutive laws lower to the SAME simultaneous species/heat owner.
+// The interface carries no state or source substitutions into its transactions.
+pub(super) trait MolecularFace {
+    type Flux;
+    fn species(&self) -> &[SpeciesId];
+    fn workspace(&self) -> Result<RealGasDiffusionWorkspace, GasEnergyError>;
+    fn sample(
+        &self,
+        left: &IsochoricRealGasParcel,
+        right: &IsochoricRealGasParcel,
+        geometry: GasDiffusionGeometry,
+        controls: RealGasDiffusionSolve,
+        work: &mut RealGasDiffusionWorkspace,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self::Flux, GasEnergyError>;
+    fn admit(
+        &self,
+        left: &IsochoricRealGasParcel,
+        right: &IsochoricRealGasParcel,
+        controls: RealGasDiffusionSolve,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), GasEnergyError>;
+    fn species_flux(flux: &Self::Flux) -> &[SpeciesDiffusionFlux];
+    fn heat_rate(_flux: &Self::Flux) -> f64 {
+        0.0
+    }
+}
+impl MolecularFace for RealGasDiffusionModel<'_> {
+    type Flux = RealGasDiffusionFlux;
+    fn species(&self) -> &[SpeciesId] {
+        RealGasDiffusionModel::species(self)
+    }
+    fn workspace(&self) -> Result<RealGasDiffusionWorkspace, GasEnergyError> {
+        RealGasDiffusionModel::workspace(self)
+    }
+    fn sample(
+        &self,
+        left: &IsochoricRealGasParcel,
+        right: &IsochoricRealGasParcel,
+        geometry: GasDiffusionGeometry,
+        controls: RealGasDiffusionSolve,
+        work: &mut RealGasDiffusionWorkspace,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self::Flux, GasEnergyError> {
+        self.face_flux(left, right, geometry, controls, work, cancelled)
+    }
+    fn admit(
+        &self,
+        left: &IsochoricRealGasParcel,
+        right: &IsochoricRealGasParcel,
+        controls: RealGasDiffusionSolve,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), GasEnergyError> {
+        self.admit_pair(left, right, controls, cancelled)
+    }
+    fn species_flux(flux: &Self::Flux) -> &[SpeciesDiffusionFlux] {
+        &flux.species
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -43,17 +110,17 @@ pub struct RealGasDiffusionNetworkSolve {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct RealGasDiffusionNetworkLinkStep {
+pub struct RealGasDiffusionNetworkLinkStep<Flux = RealGasDiffusionFlux> {
     pub id: u64,
     pub parcels: [u64; 2],
     /// None for a geometrically closed face.
-    pub flux: Option<RealGasDiffusionFlux>,
+    pub flux: Option<Flux>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct RealGasDiffusionNetworkStep {
+pub struct RealGasDiffusionNetworkStep<Flux = RealGasDiffusionFlux> {
     pub duration_s: f64,
-    pub links: Vec<RealGasDiffusionNetworkLinkStep>,
+    pub links: Vec<RealGasDiffusionNetworkLinkStep<Flux>>,
     pub exchange: RealGasSpeciesNetworkStep,
     /// Independent actual original-to-final U change with species references
     /// removed before arithmetic, including the original PR departures.
@@ -63,22 +130,22 @@ pub struct RealGasDiffusionNetworkStep {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct RealGasDiffusionNetworkCandidate {
+pub struct RealGasDiffusionNetworkCandidate<Flux = RealGasDiffusionFlux> {
     parcels: BTreeMap<u64, IsochoricRealGasParcel>,
-    step: RealGasDiffusionNetworkStep,
+    step: RealGasDiffusionNetworkStep<Flux>,
 }
-impl RealGasDiffusionNetworkCandidate {
+impl<Flux> RealGasDiffusionNetworkCandidate<Flux> {
     pub fn parcels(&self) -> &BTreeMap<u64, IsochoricRealGasParcel> {
         &self.parcels
     }
-    pub const fn step(&self) -> &RealGasDiffusionNetworkStep {
+    pub const fn step(&self) -> &RealGasDiffusionNetworkStep<Flux> {
         &self.step
     }
     pub fn into_parts(
         self,
     ) -> (
         BTreeMap<u64, IsochoricRealGasParcel>,
-        RealGasDiffusionNetworkStep,
+        RealGasDiffusionNetworkStep<Flux>,
     ) {
         (self.parcels, self.step)
     }
@@ -163,9 +230,9 @@ pub fn step_candidate(
 // spent immediately before every actual constitutive call, including failures.
 // Scratch survives coarse/fine/rejected probes, never their physical states.
 #[allow(clippy::too_many_arguments)]
-fn step_counted_candidate(
+pub(super) fn step_counted_candidate<Model: MolecularFace>(
     parcels: &BTreeMap<u64, IsochoricRealGasParcel>,
-    links: &[RealGasDiffusionNetworkLink<'_>],
+    links: &[RealGasDiffusionNetworkLink<'_, Model>],
     duration_s: f64,
     endpoints: &BTreeMap<u64, GasEnergySolve>,
     controls: RealGasDiffusionNetworkSolve,
@@ -173,7 +240,7 @@ fn step_counted_candidate(
     face_evaluations: &mut usize,
     maximum_face_evaluations: usize,
     mut cancelled: impl FnMut() -> bool,
-) -> Result<RealGasDiffusionNetworkCandidate, Error> {
+) -> Result<RealGasDiffusionNetworkCandidate<Model::Flux>, Error> {
     poll(&mut cancelled)?;
     if !positive(duration_s)
         || !positive(controls.entropy_tolerance_j_k)
@@ -215,6 +282,7 @@ fn step_counted_candidate(
             .map_err(|error| face_error(link.id, error))?;
     }
     let mut transfers = Vec::new();
+    let mut heat = Vec::new();
     let mut steps = Vec::with_capacity(links.len());
     for (&id, link) in &ordered {
         poll(&mut cancelled)?;
@@ -239,7 +307,7 @@ fn step_counted_candidate(
             *face_evaluations += 1;
             let flux = link
                 .model
-                .face_flux(
+                .sample(
                     &parcels[&left],
                     &parcels[&right],
                     link.geometry,
@@ -248,7 +316,7 @@ fn step_counted_candidate(
                     &mut cancelled,
                 )
                 .map_err(|error| face_error(id, error))?;
-            for species in &flux.species {
+            for species in Model::species_flux(&flux) {
                 poll(&mut cancelled)?;
                 let rate = species.mass_rate_left_to_right_kg_s;
                 let mass = rate * duration_s;
@@ -260,7 +328,7 @@ fn step_counted_candidate(
                 if mass == 0.0 {
                     continue;
                 }
-                if transfers.len() == MAX_SNAPSHOT_TRANSFERS {
+                if transfers.len() + heat.len() == MAX_SNAPSHOT_TRANSFERS {
                     return Err(Error::Invalid(
                         "real-gas diffusion exceeds the shared species-transfer bound",
                     ));
@@ -277,6 +345,24 @@ fn step_counted_candidate(
                     mass_kg: mass.abs(),
                 });
             }
+            let rate = Model::heat_rate(&flux);
+            let energy = rate * duration_s;
+            if !energy.is_finite() || (rate != 0.0 && energy == 0.0) {
+                return Err(Error::Invalid(
+                    "integrated real-gas molecular heat is unrepresentable",
+                ));
+            }
+            if energy != 0.0 {
+                if transfers.len() + heat.len() == MAX_SNAPSHOT_TRANSFERS {
+                    return Err(Error::Invalid(
+                        "real-gas species/heat exceed their shared work bound",
+                    ));
+                }
+                heat.push(SpeciesNetworkHeatTransfer {
+                    parcels: link.parcels,
+                    heat_left_to_right_j: energy,
+                });
+            }
             Some(flux)
         };
         steps.push(RealGasDiffusionNetworkLinkStep {
@@ -285,9 +371,10 @@ fn step_counted_candidate(
             flux,
         });
     }
-    let candidate = exchange::exchange_candidate(
+    let candidate = exchange::exchange_candidate_with_heat(
         parcels,
         &transfers,
+        &heat,
         endpoints,
         controls.exchange,
         &mut cancelled,
@@ -303,7 +390,7 @@ fn step_counted_candidate(
         poll(&mut cancelled)?;
         if link.geometry.area_m2 > 0.0 {
             link.model
-                .admit_pair(
+                .admit(
                     &candidate.parcels()[&link.parcels[0]],
                     &candidate.parcels()[&link.parcels[1]],
                     link.solve,

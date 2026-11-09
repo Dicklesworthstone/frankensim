@@ -1,5 +1,6 @@
 //! G1/G3 source-bound real-gas diffusion and finite original-owner balances.
 mod adaptive;
+mod thermal;
 
 use super::super::tests::{at, close, energy, real_model, source, species_mass};
 use super::*;

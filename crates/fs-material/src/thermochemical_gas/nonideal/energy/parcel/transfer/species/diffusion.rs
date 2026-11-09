@@ -24,6 +24,8 @@
 mod force;
 /// Conservative simultaneous diffusion on finite real-gas networks.
 pub mod network;
+/// Source-conjugate nonisothermal diffusion and reciprocal heat on PR states.
+pub mod thermal;
 
 use super::{GasEnergyError, IsochoricRealGasParcel, invalid, poll, positive};
 use crate::state_point::ScalarAdmissibility;

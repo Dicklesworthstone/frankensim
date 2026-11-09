@@ -199,7 +199,7 @@ pub(crate) fn advance_candidate(
 
 // Largest signed, gross-forward and gross-reverse coarse/fine discrepancy.
 // The local method is first order, so the step-doubling divisor is one.
-fn integral_error(coarse: f64, fine: [f64; 2]) -> Option<f64> {
+pub(in crate::thermochemical_gas) fn integral_error(coarse: f64, fine: [f64; 2]) -> Option<f64> {
     if ![coarse, fine[0], fine[1]].into_iter().all(f64::is_finite) {
         return None;
     }
