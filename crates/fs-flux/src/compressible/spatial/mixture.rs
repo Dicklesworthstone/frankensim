@@ -5,7 +5,8 @@
 //! limiter, conservative divergence and boundary quadrature are shared with
 //! the frozen 3-D field. The default update conserves energy; the explicit
 //! contact-equilibrium option accounts for each admitted caloric energy change.
-//! This Estimated stationary Cartesian lane does not assert a fully discrete
+//! [`moving`] advances the same field on translating and piston-driven grids.
+//! This Estimated Cartesian lane does not assert a fully discrete
 //! entropy/invariant-domain theorem or general contact preservation near shocks.
 
 pub use super::super::mixture::MAX_MIXTURE_WORKSPACE_BYTES;
@@ -17,7 +18,7 @@ use super::forcing::{BodyForce3d, ForceChange3d, ForceControl3d};
 use super::{
     Boundaries3d, BoundaryCondition, BoundarySide, CartesianGrid, Primitive, cartesian, tangents,
 };
-pub use super::{Reconstruction, StepControl};
+pub use super::{MeshMotion, Reconstruction, StepControl};
 pub use fs_gas::multicomponent::pressure_equilibrium::{
     ContactEquilibriumControl, ContactEquilibriumStepReport, ContactWorkspace,
 };
@@ -31,6 +32,8 @@ const WIDTH_LIMIT: usize = MAX_SPECIES + 4;
 pub mod forcing;
 /// Original species diffusion, Fourier heat and full three-dimensional stress.
 pub mod molecular;
+/// Conservative original-species transport on moving Cartesian volumes.
+pub mod moving;
 /// Original finite-rate chemistry coupled atomically to this volumetric field.
 pub mod reactive;
 /// Native vorticity and production using the evolving composition's calorics.
@@ -210,7 +213,7 @@ struct Workspace {
     boundary_trial: Vec<f64>,
 }
 
-/// Evolving original species on a fixed physical three-dimensional grid.
+/// Evolving original species on a physical three-dimensional Cartesian grid.
 ///
 /// Flat prepared buffers avoid heap allocation per cell or accepted step.
 /// Density, gas constant, heat capacity and sound speed follow each evolving
@@ -576,7 +579,10 @@ impl MixtureEuler3d {
             }
         }
         Ok(rate.max(self.reservoirs.stagnation_rate(
-            &self.gas, &self.grid, &self.states, cancelled,
+            &self.gas,
+            &self.grid,
+            &self.states,
+            cancelled,
         )?))
     }
 
@@ -1003,7 +1009,44 @@ fn spatial_with_contact(
     metadata: &mut [Vec<FaceFlux>; 3],
     reconstruction: Reconstruction,
     force_control: Option<ForceControl3d>,
+    contact: Option<(&mut ContactWorkspace, bool)>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<stepping::StageStats, Error> {
+    spatial_with_motion(
+        gas,
+        grid,
+        boundaries,
+        reservoirs,
+        trial_profiles,
+        states,
+        primitive,
+        slopes,
+        fluxes,
+        metadata,
+        reconstruction,
+        force_control,
+        contact,
+        None,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spatial_with_motion(
+    gas: &MixtureGas,
+    grid: &CartesianGrid,
+    boundaries: Boundaries3d,
+    reservoirs: &reservoir::Reservoirs,
+    trial_profiles: bool,
+    states: &[f64],
+    primitive: &mut [Primitive],
+    slopes: &mut [f64],
+    fluxes: &mut [Vec<f64>; 3],
+    metadata: &mut [Vec<FaceFlux>; 3],
+    reconstruction: Reconstruction,
+    force_control: Option<ForceControl3d>,
     mut contact: Option<(&mut ContactWorkspace, bool)>,
+    motion: Option<MeshMotion>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<stepping::StageStats, Error> {
     let n = gas.species_count();
@@ -1046,12 +1089,16 @@ fn spatial_with_contact(
     };
     let mut trace = [0.0; WIDTH_LIMIT];
     let mut check = [0.0; WIDTH_LIMIT];
-    let limited = cartesian::slopes::<Error>(
+    let wall_velocity = motion.map_or([[0.0; 2]; 3], |m| {
+        std::array::from_fn(|axis| [m.lower_velocity[axis], m.upper_velocity[axis]])
+    });
+    let limited = cartesian::slopes_with_wall_velocity::<Error>(
         grid,
         boundaries,
         slope_width,
         [n + 1, n + 2, n + 3],
         reconstruction,
+        wall_velocity,
         value,
         |k, lo, hi, slope| {
             slope[0] = stepping::mc(value(k, 0) - value(lo, 0), value(hi, 0) - value(k, 0));
@@ -1098,163 +1145,236 @@ fn spatial_with_contact(
         };
         let q = |k: usize| cell(&states[k * width..(k + 1) * width], n).normal(axis);
         let first_order = reconstruction == Reconstruction::FirstOrder;
-        let receipt = match face.kind {
-            cartesian::FaceKind::Interior { left: l, right: r } => {
-                if first_order {
-                    gas.hllc_spatial_flux(q(l), q(r), &mut result[..width], &mut *cancelled)?
-                } else {
-                    face_trace(l, 0.5, &mut left[..width]);
-                    face_trace(r, -0.5, &mut right[..width]);
-                    gas.hllc_spatial_flux_from_primitive(
-                        normal_primitive(&left[..width], n, axis),
-                        normal_primitive(&right[..width], n, axis),
-                        &mut result[..width],
-                        &mut *cancelled,
-                    )?
-                }
-            }
-            cartesian::FaceKind::Boundary {
-                cell: k,
-                sign,
-                condition,
-            } => {
-                let c = grid.coordinates(k);
-                let [a, b] = tangents(axis);
-                let boundary_face = c[a] + grid.shape[a] * c[b];
-                if let Some(reservoir) = reservoirs.stagnation_cell(axis, sign, n) {
+        let receipt = if let Some(motion) = motion {
+            let speed = motion.face_velocity(grid, axis, face.index);
+            match face.kind {
+                cartesian::FaceKind::Interior { left: l, right: r } => {
                     if first_order {
-                        gas.reservoir_spatial_flux(
-                            q(k),
-                            reservoir,
-                            sign,
+                        gas.moving_hllc_spatial_flux(
+                            q(l),
+                            q(r),
+                            speed,
                             &mut result[..width],
                             &mut *cancelled,
                         )?
                     } else {
-                        face_trace(k, 0.5 * sign, &mut left[..width]);
-                        gas.reservoir_spatial_flux_from_primitive(
+                        face_trace(l, 0.5, &mut left[..width]);
+                        face_trace(r, -0.5, &mut right[..width]);
+                        gas.moving_hllc_spatial_flux_from_primitive(
                             normal_primitive(&left[..width], n, axis),
-                            reservoir,
-                            sign,
+                            normal_primitive(&right[..width], n, axis),
+                            speed,
                             &mut result[..width],
                             &mut *cancelled,
                         )?
                     }
-                } else if let Some(exterior) =
-                    reservoirs.normal_face_at(axis, sign, boundary_face, n, trial_profiles)
-                {
-                    let interior = if first_order {
-                        let [a, b] = tangents(axis);
-                        SpatialPrimitive {
-                            partial_densities: &states[k * width..k * width + n],
-                            normal_velocity: primitive[k].velocity[axis],
-                            transverse_velocity: [
-                                primitive[k].velocity[a],
-                                primitive[k].velocity[b],
-                            ],
-                            pressure: primitive[k].pressure,
-                        }
-                    } else {
+                }
+                cartesian::FaceKind::Boundary {
+                    cell: k,
+                    sign,
+                    condition,
+                } => {
+                    if !first_order {
                         face_trace(k, 0.5 * sign, &mut left[..width]);
-                        normal_primitive(&left[..width], n, axis)
-                    };
-                    let (left, right) = if sign < 0.0 {
-                        (exterior, interior)
-                    } else {
-                        (interior, exterior)
-                    };
-                    gas.hllc_spatial_flux_from_primitive(
-                        left,
-                        right,
-                        &mut result[..width],
-                        &mut *cancelled,
-                    )?
-                } else {
+                    }
                     match (first_order, condition) {
-                        (true, BoundaryCondition::Reflecting) => gas.stationary_wall_spatial_flux(
+                        (true, BoundaryCondition::Reflecting) => gas.moving_wall_spatial_flux(
                             q(k),
                             sign,
+                            speed,
                             &mut result[..width],
                             &mut *cancelled,
                         )?,
-                        (true, BoundaryCondition::Transmissive) => gas.hllc_spatial_flux(
+                        (true, BoundaryCondition::Transmissive) => gas.moving_hllc_spatial_flux(
                             q(k),
                             q(k),
+                            speed,
                             &mut result[..width],
                             &mut *cancelled,
                         )?,
-                        (true, BoundaryCondition::PressureOutlet { pressure_pa }) => gas
-                            .pressure_outlet_spatial_flux(
-                                q(k),
+                        (false, BoundaryCondition::Reflecting) => gas
+                            .moving_wall_spatial_flux_from_primitive(
+                                normal_primitive(&left[..width], n, axis),
                                 sign,
-                                pressure_pa,
+                                speed,
                                 &mut result[..width],
                                 &mut *cancelled,
                             )?,
-                        (
-                            true,
-                            BoundaryCondition::CharacteristicOutlet {
-                                reference_pressure_pa,
-                                reference_velocity_m_s,
-                            },
-                        ) => gas.characteristic_outlet_spatial_flux(
-                            q(k),
-                            sign,
-                            reference_pressure_pa,
-                            reference_velocity_m_s,
+                        (false, BoundaryCondition::Transmissive) => {
+                            let p = normal_primitive(&left[..width], n, axis);
+                            gas.moving_hllc_spatial_flux_from_primitive(
+                                p,
+                                p,
+                                speed,
+                                &mut result[..width],
+                                &mut *cancelled,
+                            )?
+                        }
+                        _ => unreachable!("moving mixture topology admitted before the trial"),
+                    }
+                }
+                cartesian::FaceKind::PeriodicCopy { .. } => unreachable!(),
+            }
+        } else {
+            match face.kind {
+                cartesian::FaceKind::Interior { left: l, right: r } => {
+                    if first_order {
+                        gas.hllc_spatial_flux(q(l), q(r), &mut result[..width], &mut *cancelled)?
+                    } else {
+                        face_trace(l, 0.5, &mut left[..width]);
+                        face_trace(r, -0.5, &mut right[..width]);
+                        gas.hllc_spatial_flux_from_primitive(
+                            normal_primitive(&left[..width], n, axis),
+                            normal_primitive(&right[..width], n, axis),
                             &mut result[..width],
                             &mut *cancelled,
-                        )?,
-                        (false, BoundaryCondition::Reflecting) => {
+                        )?
+                    }
+                }
+                cartesian::FaceKind::Boundary {
+                    cell: k,
+                    sign,
+                    condition,
+                } => {
+                    let c = grid.coordinates(k);
+                    let [a, b] = tangents(axis);
+                    let boundary_face = c[a] + grid.shape[a] * c[b];
+                    if let Some(reservoir) = reservoirs.stagnation_cell(axis, sign, n) {
+                        if first_order {
+                            gas.reservoir_spatial_flux(
+                                q(k),
+                                reservoir,
+                                sign,
+                                &mut result[..width],
+                                &mut *cancelled,
+                            )?
+                        } else {
                             face_trace(k, 0.5 * sign, &mut left[..width]);
-                            gas.stationary_wall_spatial_flux_from_primitive(
+                            gas.reservoir_spatial_flux_from_primitive(
                                 normal_primitive(&left[..width], n, axis),
+                                reservoir,
                                 sign,
                                 &mut result[..width],
                                 &mut *cancelled,
                             )?
                         }
-                        (false, BoundaryCondition::Transmissive) => {
+                    } else if let Some(exterior) =
+                        reservoirs.normal_face_at(axis, sign, boundary_face, n, trial_profiles)
+                    {
+                        let interior = if first_order {
+                            let [a, b] = tangents(axis);
+                            SpatialPrimitive {
+                                partial_densities: &states[k * width..k * width + n],
+                                normal_velocity: primitive[k].velocity[axis],
+                                transverse_velocity: [
+                                    primitive[k].velocity[a],
+                                    primitive[k].velocity[b],
+                                ],
+                                pressure: primitive[k].pressure,
+                            }
+                        } else {
                             face_trace(k, 0.5 * sign, &mut left[..width]);
-                            let p = normal_primitive(&left[..width], n, axis);
-                            gas.hllc_spatial_flux_from_primitive(
-                                p,
-                                p,
+                            normal_primitive(&left[..width], n, axis)
+                        };
+                        let (left, right) = if sign < 0.0 {
+                            (exterior, interior)
+                        } else {
+                            (interior, exterior)
+                        };
+                        gas.hllc_spatial_flux_from_primitive(
+                            left,
+                            right,
+                            &mut result[..width],
+                            &mut *cancelled,
+                        )?
+                    } else {
+                        match (first_order, condition) {
+                            (true, BoundaryCondition::Reflecting) => gas
+                                .stationary_wall_spatial_flux(
+                                    q(k),
+                                    sign,
+                                    &mut result[..width],
+                                    &mut *cancelled,
+                                )?,
+                            (true, BoundaryCondition::Transmissive) => gas.hllc_spatial_flux(
+                                q(k),
+                                q(k),
                                 &mut result[..width],
                                 &mut *cancelled,
-                            )?
-                        }
-                        (false, BoundaryCondition::PressureOutlet { pressure_pa }) => {
-                            face_trace(k, 0.5 * sign, &mut left[..width]);
-                            gas.pressure_outlet_spatial_flux_from_primitive(
-                                normal_primitive(&left[..width], n, axis),
+                            )?,
+                            (true, BoundaryCondition::PressureOutlet { pressure_pa }) => gas
+                                .pressure_outlet_spatial_flux(
+                                    q(k),
+                                    sign,
+                                    pressure_pa,
+                                    &mut result[..width],
+                                    &mut *cancelled,
+                                )?,
+                            (
+                                true,
+                                BoundaryCondition::CharacteristicOutlet {
+                                    reference_pressure_pa,
+                                    reference_velocity_m_s,
+                                },
+                            ) => gas.characteristic_outlet_spatial_flux(
+                                q(k),
                                 sign,
-                                pressure_pa,
-                                &mut result[..width],
-                                &mut *cancelled,
-                            )?
-                        }
-                        (
-                            false,
-                            BoundaryCondition::CharacteristicOutlet {
                                 reference_pressure_pa,
                                 reference_velocity_m_s,
-                            },
-                        ) => {
-                            face_trace(k, 0.5 * sign, &mut left[..width]);
-                            gas.characteristic_outlet_spatial_flux_from_primitive(
-                                normal_primitive(&left[..width], n, axis),
-                                sign,
-                                reference_pressure_pa,
-                                reference_velocity_m_s,
                                 &mut result[..width],
                                 &mut *cancelled,
-                            )?
+                            )?,
+                            (false, BoundaryCondition::Reflecting) => {
+                                face_trace(k, 0.5 * sign, &mut left[..width]);
+                                gas.stationary_wall_spatial_flux_from_primitive(
+                                    normal_primitive(&left[..width], n, axis),
+                                    sign,
+                                    &mut result[..width],
+                                    &mut *cancelled,
+                                )?
+                            }
+                            (false, BoundaryCondition::Transmissive) => {
+                                face_trace(k, 0.5 * sign, &mut left[..width]);
+                                let p = normal_primitive(&left[..width], n, axis);
+                                gas.hllc_spatial_flux_from_primitive(
+                                    p,
+                                    p,
+                                    &mut result[..width],
+                                    &mut *cancelled,
+                                )?
+                            }
+                            (false, BoundaryCondition::PressureOutlet { pressure_pa }) => {
+                                face_trace(k, 0.5 * sign, &mut left[..width]);
+                                gas.pressure_outlet_spatial_flux_from_primitive(
+                                    normal_primitive(&left[..width], n, axis),
+                                    sign,
+                                    pressure_pa,
+                                    &mut result[..width],
+                                    &mut *cancelled,
+                                )?
+                            }
+                            (
+                                false,
+                                BoundaryCondition::CharacteristicOutlet {
+                                    reference_pressure_pa,
+                                    reference_velocity_m_s,
+                                },
+                            ) => {
+                                face_trace(k, 0.5 * sign, &mut left[..width]);
+                                gas.characteristic_outlet_spatial_flux_from_primitive(
+                                    normal_primitive(&left[..width], n, axis),
+                                    sign,
+                                    reference_pressure_pa,
+                                    reference_velocity_m_s,
+                                    &mut result[..width],
+                                    &mut *cancelled,
+                                )?
+                            }
                         }
                     }
                 }
+                cartesian::FaceKind::PeriodicCopy { .. } => unreachable!(),
             }
-            cartesian::FaceKind::PeriodicCopy { .. } => unreachable!(),
         };
         if let Some((workspace, _)) = contact.as_mut() {
             match face.kind {

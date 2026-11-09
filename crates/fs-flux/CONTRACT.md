@@ -3972,6 +3972,35 @@ not itself integrate chemistry or molecular species diffusion, preserve
 pressure exactly at moving unequal-caloric contacts, move the geometry, or
 establish an entropy/invariant-domain or experimental combustion claim.
 
+### Moving volumes with evolving species
+
+`MixtureEuler3d::step_moving` advances the original canonical species, all three
+momenta and referenced energy with the shared `MeshMotion` geometry. Translation
+is admitted on every axis and expansion/contraction on one axis. The original
+composition reconstruction, source-owned moving HLLC/HLL flux and nonlinear
+wall closure remain coupled; no nominal frozen mixture or independent passive
+species advection replaces them.
+
+The same extensive SSP RK2 update uses actual stage volumes and face areas,
+satisfying the supported affine-volume GCL. Periodic faces share flux bits;
+moving walls transfer zero species mass and pair pressure impulse with wall
+speed for work. MUSCL wall ghosts reflect about the actual plane speed.
+Prepared cell, face and boundary buffers are reused. Cells, geometry, time,
+loads and report publish together; cancellation/refusal retains all accepted
+owners. Exactly zero motion follows the ordinary step and polling sequence.
+
+Ten native G0/G1/G3/G4 regressions cover zero-motion parity, all-axis GCL,
+comoving unequal-caloric composition/shear contacts, piston species/impulse/work,
+adiabatic and relative-advection refinement, velocity boosts, source-reference
+shifts, and rollback/replay. The smooth translating-grid advection fixture
+reduces L1 error from 0.0046171329 on 8³ cells to 0.0012048216 on 16³ cells,
+an observed order of 1.938. This is numerical evidence for that fixture.
+
+This entry excludes moving-domain chemistry, molecular transport, contact-energy
+projection, prescribed exterior states/profiles and pressure outlets. Existing
+source precision, unequal-caloric advecting-contact and engineering-authority
+limits remain; no general entropy, positivity or FSI-stability theorem follows.
+
 ### Exploratory turbulent mixing on evolving-species three-dimensional gas
 
 The mixture transport owner also exposes `with_dynamic_thermal_sgs` with

@@ -25,21 +25,8 @@ pub struct MeshMotion {
 }
 
 impl MeshMotion {
-    fn admit(self, flow: &Euler3d) -> Result<(), Error> {
-        let rates =
-            std::array::from_fn::<_, 3, _>(|a| self.upper_velocity[a] - self.lower_velocity[a]);
-        if !self
-            .lower_velocity
-            .into_iter()
-            .chain(self.upper_velocity)
-            .chain(rates)
-            .all(f64::is_finite)
-            || rates.into_iter().filter(|x| *x != 0.0).count() > 1
-        {
-            return Err(Error::Invalid(
-                "moving box needs finite translation and at most one deforming axis",
-            ));
-        }
+    pub(super) fn admit(self, flow: &Euler3d) -> Result<(), Error> {
+        self.admit_boundaries::<Error>(flow.boundaries)?;
         if flow.hydrostatic.is_some()
             || flow
                 .prepared_reservoir_profile_sides()
@@ -53,10 +40,33 @@ impl MeshMotion {
                 "moving box does not admit retained gravity or prescribed exterior profiles",
             ));
         }
+        Ok(())
+    }
+
+    /// Shared kinematic and topological admission; each field owner separately
+    /// admits its retained source and exterior data.
+    pub(super) fn admit_boundaries<E: super::super::cartesian::Failure>(
+        self,
+        boundaries: Boundaries3d,
+    ) -> Result<(), E> {
+        let rates =
+            std::array::from_fn::<_, 3, _>(|a| self.upper_velocity[a] - self.lower_velocity[a]);
+        if !self
+            .lower_velocity
+            .into_iter()
+            .chain(self.upper_velocity)
+            .chain(rates)
+            .all(f64::is_finite)
+            || rates.into_iter().filter(|x| *x != 0.0).count() > 1
+        {
+            return Err(E::invalid(
+                "moving box needs finite translation and at most one deforming axis",
+            ));
+        }
         for (axis, rate) in rates.into_iter().enumerate() {
-            match flow.boundaries.axis(axis) {
+            match boundaries.axis(axis) {
                 AxisBoundaries::Periodic if rate != 0.0 => {
-                    return Err(Error::Invalid(
+                    return Err(E::invalid(
                         "periodic moving planes must have identical velocity",
                     ));
                 }
@@ -67,7 +77,7 @@ impl MeshMotion {
                             BoundaryCondition::Reflecting | BoundaryCondition::Transmissive
                         )
                     }) {
-                        return Err(Error::Invalid(
+                        return Err(E::invalid(
                             "moving box requires wall or zero-gradient boundary traces",
                         ));
                     }
@@ -78,7 +88,7 @@ impl MeshMotion {
         Ok(())
     }
 
-    fn velocity(self, grid: &CartesianGrid, axis: usize, plane: usize) -> f64 {
+    pub(super) fn velocity(self, grid: &CartesianGrid, axis: usize, plane: usize) -> f64 {
         if plane == 0 {
             self.lower_velocity[axis]
         } else if plane == grid.shape[axis] {
@@ -90,7 +100,7 @@ impl MeshMotion {
         }
     }
 
-    fn face_velocity(self, grid: &CartesianGrid, axis: usize, index: usize) -> f64 {
+    pub(super) fn face_velocity(self, grid: &CartesianGrid, axis: usize, index: usize) -> f64 {
         let mut shape = grid.shape;
         shape[axis] += 1;
         let plane = match axis {
@@ -101,7 +111,7 @@ impl MeshMotion {
         self.velocity(grid, axis, plane)
     }
 
-    fn grid_after(self, grid: &CartesianGrid, dt: f64) -> Result<CartesianGrid, Error> {
+    pub(super) fn grid_after(self, grid: &CartesianGrid, dt: f64) -> Result<CartesianGrid, Error> {
         let spacing = std::array::from_fn::<_, 3, _>(|a| {
             grid.spacing[a]
                 + dt * ((self.upper_velocity[a] - self.lower_velocity[a]) / grid.shape[a] as f64)
@@ -223,39 +233,16 @@ impl Euler3d {
             next_grid.cell_volume(),
             &mut cancelled,
         )?;
-        let outward = sum_arrays(
-            self.work.boundary_trial.iter().map(|x| x.array()),
-            &mut cancelled,
-        )?;
-        let boundary_change = Totals::from_array(outward.map(|x| -x));
-        let a = after.array();
-        let b = before.array();
-        let c = boundary_change.array();
-        let residual = std::array::from_fn(|k| a[k] - b[k] - c[k]);
-        if !a
-            .into_iter()
-            .chain(b)
-            .chain(c)
-            .chain(residual)
-            .all(f64::is_finite)
-        {
-            return Err(Error::Invalid(
-                "unrepresentable moving-volume extensive balance",
-            ));
-        }
-        let report = StepReport {
-            elapsed: Time::new(accepted.dt),
-            maximum_cfl: accepted.stats.rate * accepted.dt,
-            halvings: accepted.halvings,
-            hll_fallback_faces: accepted.stats.fallback,
-            limited_cells: accepted.stats.limited,
-            first_order_retry: accepted.reconstruction != controls.reconstruction,
+        let report = reported_step(
             before,
             after,
-            boundary_change,
-            source_change: ForceChange3d::default(),
-            conservation_residual: Totals::from_array(residual),
-        };
+            &self.work.boundary_trial,
+            accepted.dt,
+            accepted.stats,
+            accepted.halvings,
+            accepted.reconstruction != controls.reconstruction,
+            &mut cancelled,
+        )?;
         poll(&mut cancelled)?;
         std::mem::swap(&mut self.states, &mut self.work.candidate);
         self.boundary_impulses
@@ -268,7 +255,50 @@ impl Euler3d {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn attempt(
+pub(super) fn reported_step(
+    before: Totals,
+    after: Totals,
+    boundary_trial: &[BoundaryImpulse],
+    dt: f64,
+    stats: StageStats,
+    halvings: usize,
+    first_order_retry: bool,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<StepReport, Error> {
+    let outward = sum_arrays(boundary_trial.iter().map(|x| x.array()), cancelled)?;
+    let boundary_change = Totals::from_array(outward.map(|x| -x));
+    let a = after.array();
+    let b = before.array();
+    let c = boundary_change.array();
+    let residual = std::array::from_fn(|k| a[k] - b[k] - c[k]);
+    if !a
+        .into_iter()
+        .chain(b)
+        .chain(c)
+        .chain(residual)
+        .all(f64::is_finite)
+    {
+        return Err(Error::Invalid(
+            "unrepresentable moving-volume extensive balance",
+        ));
+    }
+    Ok(StepReport {
+        elapsed: Time::new(dt),
+        maximum_cfl: stats.rate * dt,
+        halvings,
+        hll_fallback_faces: stats.fallback,
+        limited_cells: stats.limited,
+        first_order_retry,
+        before,
+        after,
+        boundary_change,
+        source_change: ForceChange3d::default(),
+        conservation_residual: Totals::from_array(residual),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn attempt(
     gas: &FrozenGas,
     original_grid: &CartesianGrid,
     next_grid: &CartesianGrid,
