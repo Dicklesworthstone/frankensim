@@ -12366,3 +12366,33 @@ fixed scratch, no allocation, and bounded cancellation; no carrier-time raster
 is introduced. Regression fixtures retain positive fourth-order three-tone
 nulls through the original chromatic pupil, source-column identity, full Stokes,
 passive port closure, finite-pixel energy and exact work-budget boundaries.
+
+## Anisotropic Smith reflection in native brushed scenes
+
+The opt-in Smith forward and reciprocal camera paths now apply the complete
+anisotropic height walk to `BrushedConductor`, including its original body-locked
+radial/circular axes and roughness mark. The finish is evaluated once per
+geometric encounter; the existing Smith kernel and original complex
+Fresnel/Mueller owner handle every hidden facet. Zero detail and the undefined
+radial pole reuse the isotropic Smith path exactly. Microscopic heights do not
+move the geometric endpoint or add path length, delay, absorption or a coating.
+
+For coincident shading/geometric normals the anisotropic walk is passive.
+Authored normal tilt remains the original empirical shading approximation:
+geometric clipping applies only after complete escape, and forward power
+receives the single endpoint adjoint
+`(ns.wo/ng.wo)*(ng.wi/ns.wi)`. Reciprocal camera continuation uses the native
+radiance weight. Internal facets receive no extra G factor, horizon clipping
+or adjoint. Clipped escape contributes zero without retries; cancellation,
+invalid data and facet exhaustion refuse. This is not a resolved-groove heat
+model or an outgoing marginal PDF suitable for MIS.
+
+Six focused Rust tests (three existing and three new) pass with the actual Smith
+kernel, native mirror/frame and conductor/transparent-film/absorbing-film
+Mueller math, original finish/rigid-transform math and `fs-math`. They cover
+facet replay, spectra/media, body rotation, mark and exact fallback, endpoint
+adjoint, final clipping, cancellation and budgets. The focused executable
+uses minimal execution/hash and homogeneous-medium wiring; it is not a full
+workspace build. A native camera regression additionally covers analyzer,
+Beer attenuation, source-before-scatter ordering and anisotropic scene dispatch;
+execution of that full scene test remains pending dependency availability.

@@ -1044,27 +1044,44 @@ impl<'a> CurvedPolarizedScene<'a> {
                         .inverse()
                         .map_err(SceneError::from)?
                         .transform_point(witness.surface_point);
-                    let draw = samples(event);
                     // The surface representative defines the procedural finish.
                     // The physical beam stays at its integrated endpoint.
-                    let Some(next) = result
-                        .beam
-                        .sample_instanced_brushed_conductor_for_transport(
-                            &self.conductors[optics],
-                            &detail,
-                            transform,
-                            local_point,
-                            witness.normal,
-                            [draw[0], draw[1]],
-                            radiance_brushing,
-                        )
-                        .map_err(SceneError::from)?
-                    else {
-                        result.termination = PathTermination::RejectedMicrofacet;
-                        break;
-                    };
-                    result.beam = next.beam;
-                    Some((next.event, next.pdf, next.delta))
+                    if let Some(smith) = &mut microsurface {
+                        let Some(next) = result.beam
+                            .sample_instanced_smith_brushed_conductor_for_transport(
+                                cx, &self.conductors[optics], &detail, transform,
+                                local_point, witness.normal, smith.settings,
+                                |facet| (smith.samples)(event, facet), radiance_brushing,
+                            )
+                            .map_err(SceneError::from)?
+                        else {
+                            result.termination = PathTermination::RejectedMicrofacet;
+                            break;
+                        };
+                        result.beam = next.beam();
+                        // The completed hidden path carries no marginal PDF.
+                        None
+                    } else {
+                        let draw = samples(event);
+                        let Some(next) = result
+                            .beam
+                            .sample_instanced_brushed_conductor_for_transport(
+                                &self.conductors[optics],
+                                &detail,
+                                transform,
+                                local_point,
+                                witness.normal,
+                                [draw[0], draw[1]],
+                                radiance_brushing,
+                            )
+                            .map_err(SceneError::from)?
+                        else {
+                            result.termination = PathTermination::RejectedMicrofacet;
+                            break;
+                        };
+                        result.beam = next.beam;
+                        Some((next.event, next.pdf, next.delta))
+                    }
                 }
                 interaction @ (Interaction::Dielectric {
                     outside, inside, ..

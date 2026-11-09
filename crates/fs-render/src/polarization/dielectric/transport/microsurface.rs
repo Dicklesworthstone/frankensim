@@ -75,7 +75,7 @@ impl core::error::Error for SmithBeamError {}
 /// a hidden-path density cannot serve as an outgoing marginal BSDF PDF in MIS.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SmithBeamSample {
-    beam: PolarizedBeam,
+    pub(crate) beam: PolarizedBeam,
     facet_events: u32,
     log_path_density: f64,
     delta: bool,
@@ -119,7 +119,7 @@ impl PolarizedBeam {
         optics: &ConductorOptics,
         surface: ConductorSurface,
         settings: SmithWalkSettings,
-        mut samples: impl FnMut(u32) -> [f64; 3],
+        samples: impl FnMut(u32) -> [f64; 3],
     ) -> Result<SmithBeamSample, SmithBeamError> {
         cx.checkpoint()?;
         let mut normal = unit(normal)?;
@@ -147,8 +147,29 @@ impl PolarizedBeam {
             Vec3::new(0.0, 1.0, 0.0)
         };
         let basis = PolarizationFrame::try_new(normal, reference)?;
-        let tangent = basis.horizontal();
-        let bitangent = basis.vertical();
+        self.sample_smith_conductor_in_frame(
+            cx,
+            optics,
+            model,
+            [basis.horizontal(), basis.vertical(), normal],
+            settings,
+            samples,
+        )
+    }
+
+    // Both the isotropic adapter and the original body-locked brushed owner
+    // admit this right-handed orthonormal frame before entering the same walk.
+    // There is no frame reconstruction, allocation, or finish lookup per facet.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn sample_smith_conductor_in_frame(
+        self,
+        cx: &Cx<'_>,
+        optics: &ConductorOptics,
+        model: SmithGgx,
+        [tangent, bitangent, normal]: [Vec3; 3],
+        settings: SmithWalkSettings,
+        mut samples: impl FnMut(u32) -> [f64; 3],
+    ) -> Result<SmithBeamSample, SmithBeamError> {
         let mut beam = self;
         let mut depth = 0.0;
         let mut log_path_density = 0.0;

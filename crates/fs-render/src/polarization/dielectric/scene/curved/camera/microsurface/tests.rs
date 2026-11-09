@@ -354,3 +354,87 @@ fn g3_g5_smooth_limit_matches_native_camera_and_spectral_raster_exactly() {
         }
     });
 }
+
+#[test]
+fn g1_brushed_camera_preserves_the_complete_anisotropic_radiance_path() {
+    use crate::surface_detail::{BrushingPattern, SurfaceDetail};
+    with_cx(|cx, _| {
+        let geometry = InstanceScene::try_new(vec![plane(1, 0.0), plane(9, 2.0)]).unwrap();
+        let material = glass(1.33, 0.2);
+        let media = [SceneMedium::Homogeneous(&material)];
+        let optics = [metal()];
+        let sources = sources();
+        let analyzer = CameraAnalyzer::try_linear(Vec3::new(1.0, 0.0, 0.0), 0.31).unwrap();
+        let ray = Ray {
+            origin: Point3::new(1.0, 0.0, 1.0),
+            ..ray()
+        };
+        let limits = SmithWalkSettings::try_new(64).unwrap();
+        let draws = |event| match event {
+            0 => [0.5, 0.95, 0.125],
+            1 => [0.5, 0.1, 0.375],
+            _ => [0.01, 0.05, 0.25],
+        };
+        for tilt in [0.0, 0.2] {
+            let detail =
+                SurfaceDetail::try_new(0.25, 4.0, BrushingPattern::Radial, tilt, None).unwrap();
+            let mut bound = bindings(ConductorSurface::try_rough(0.25).unwrap());
+            bound[0].interaction = Interaction::BrushedConductor {
+                optics: 0,
+                medium: 0,
+                detail,
+            };
+            let native = CurvedPolarizedScene::try_new_with_conductors(
+                cx, &geometry, &media, &optics, bound, 100_000,
+            )
+            .unwrap();
+            let camera = CurvedCameraScene::try_new(cx, &native, &sources, None).unwrap();
+            let smith = SmithCameraScene::new(&camera, limits);
+            let incoming = analyzer.launch(&camera, ray, 550.0, 0).unwrap();
+            let expected = incoming
+                .sample_instanced_smith_brushed_conductor_for_transport(
+                    cx,
+                    &optics[0],
+                    &detail,
+                    RigidTransform::identity(),
+                    Point3::new(1.0, 0.0, 0.0),
+                    Vec3::new(0.0, 0.0, 1.0),
+                    limits,
+                    draws,
+                    true,
+                )
+                .unwrap()
+                .unwrap();
+            assert!(expected.facet_events() > 1);
+            let distance = 1.0 + 2.0 / expected.beam().ray().dir.z;
+            let mut called = Vec::new();
+            let actual = smith
+                .sample_ray_analyzed_with_samples(
+                    cx,
+                    ray,
+                    550.0,
+                    0,
+                    analyzer,
+                    settings(),
+                    |_| panic!("brushed Smith path used a single-facet draw"),
+                    |surface, facet| {
+                        called.push((surface, facet));
+                        draws(facet)
+                    },
+                )
+                .unwrap();
+            assert_eq!(called.len(), expected.facet_events() as usize + 1);
+            assert!(called.iter().all(|(surface, _)| *surface == 0));
+            assert_eq!(
+                actual.endpoint(),
+                RadianceEndpoint::Surface { object_id: 9 }
+            );
+            assert_eq!(actual.path().surface_events(), 2);
+            near(actual.path().traveled_m(), distance, 3e-6);
+            near(actual.path().optical_path_length_m(), 1.33 * distance, 4e-6);
+            let expected_radiance = 1.25 * analyzer.row().i * (-0.2_f64).exp()
+                + 4.0 * expected.beam().power().i * (-0.2 * distance).exp();
+            near(actual.radiance_w_m2_sr_nm(), expected_radiance, 3e-6);
+        }
+    });
+}

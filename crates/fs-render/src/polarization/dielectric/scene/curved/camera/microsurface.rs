@@ -8,16 +8,18 @@
 //! local radiance n² conversion exactly once. No marginal directional PDF is
 //! needed and the joint hidden-path density is NEVER used in MIS.
 //!
-//! Only `Interaction::RoughConductor` selects this law. Smooth mirrors,
-//! dielectrics, body-locked brushing and diffuse surfaces keep their original
-//! laws. The borrowed camera retains its source admission, physical geometry,
+//! `RoughConductor` and `BrushedConductor` select this law. Brushing retains
+//! the original body-locked anisotropic frame, mark and geometric-horizon clip;
+//! authored normal tilt remains an empirical shading approximation. Smooth
+//! mirrors, dielectrics and diffuse surfaces keep their original laws.
+//! The borrowed camera retains its source admission, physical geometry,
 //! GRIN/Beer propagation, optical lengths, thermal emission and cancellation.
 //! Microscopic statistical heights add no invented metric path or delay.
 //!
 //! Each geometric encounter has a finite facet budget. Exhaustion refuses the
 //! complete sample, rather than returning black or accepting a truncated path.
 //! This does not supply area-light/environment NEE, BDPT, molecular scattering,
-//! anisotropic brushed multiple scattering, or an unbiased early-stopping rule.
+//! or an unbiased early-stopping rule.
 //! Small-source convergence remains that of a path-only estimator.
 //!
 //! Smith model and reciprocity: Heitz et al. (2016),

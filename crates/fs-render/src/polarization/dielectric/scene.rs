@@ -320,9 +320,10 @@ impl<'a> PolarizedScene<'a> {
     }
 
     /// Forward polarized transport with full Smith/GGX internal reflections at
-    /// every `RoughConductor` hit. Each geometric hit has an independent facet
-    /// budget and random stream. Existing smooth, brushed, dielectric and volume
-    /// laws are unchanged; this entry point uses homogeneous straight segments.
+    /// every `RoughConductor` and `BrushedConductor` hit. Each geometric hit has
+    /// an independent facet budget and random stream. The native body-locked
+    /// anisotropic frame, mark and endpoint shading-normal adjoint are retained.
+    /// This entry point uses homogeneous straight segments.
     ///
     /// Microscopic reflections retain local complex Fresnel phase and coatings.
     /// They do not add metric distance or claim resolved groove geometry. A
@@ -565,15 +566,27 @@ impl<'a> PolarizedScene<'a> {
                     }
                     let normal = hit.hit.normal.ok_or(SceneError::InvalidHit)?;
                     let instance = &self.geometry.instances()[index];
-                    let draw = samples(event);
-                    let Some(next) = result.beam.sample_instanced_brushed_conductor(
-                        &self.conductors[optics], &detail, instance.transform(),
-                        hit.local_hit.point, normal, [draw[0], draw[1]],
-                    )? else {
-                        result.termination = PathTermination::RejectedMicrofacet;
-                        return finish(cx, result);
+                    result.beam = if let Some((limits, seed, path_id)) = microsurface {
+                        let Some(next) = result.beam.sample_instanced_smith_brushed_conductor(
+                            cx, &self.conductors[optics], &detail, instance.transform(),
+                            hit.local_hit.point, normal, limits,
+                            |facet| smith_draw(seed, path_id, event, facet),
+                        )? else {
+                            result.termination = PathTermination::RejectedMicrofacet;
+                            return finish(cx, result);
+                        };
+                        next.beam()
+                    } else {
+                        let draw = samples(event);
+                        let Some(next) = result.beam.sample_instanced_brushed_conductor(
+                            &self.conductors[optics], &detail, instance.transform(),
+                            hit.local_hit.point, normal, [draw[0], draw[1]],
+                        )? else {
+                            result.termination = PathTermination::RejectedMicrofacet;
+                            return finish(cx, result);
+                        };
+                        next.beam
                     };
-                    result.beam = next.beam;
                     offset = settings.query_offset_m;
                 }
                 interaction @ (Interaction::Dielectric { outside, inside, .. }

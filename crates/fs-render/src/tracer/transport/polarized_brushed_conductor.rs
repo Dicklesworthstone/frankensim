@@ -7,13 +7,18 @@
 //! This is the same shading approximation, not resolved groove geometry or an
 //! energy-conservation guarantee for an arbitrarily normal-mapped surface.
 
+use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
 use crate::conductor::{ConductorError, ConductorOptics, ConductorSurface};
+use crate::conductor::microsurface::SmithGgx;
 use crate::dielectric::DielectricEvent;
 use crate::instances::RigidTransform;
 use crate::polarization::Stokes;
+use crate::polarization::dielectric::transport::microsurface::{
+    SmithBeamError, SmithBeamSample, SmithWalkSettings,
+};
 use crate::polarization::dielectric::mirrors::ConductorBeamError;
 use crate::polarization::dielectric::transport::{
     BeamError, BeamSample, PolarizationFrame, PolarizedBeam,
@@ -25,6 +30,198 @@ use crate::tracer::{
 };
 
 impl PolarizedBeam {
+    /// Follow every Smith/GGX reflection in the supplied anisotropic finish.
+    ///
+    /// The same native shading frame and roughness mark select the heightfield
+    /// once. Internal rays may cross either macro horizon; only the completed
+    /// escape is clipped to the physical geometric hemisphere. A clipped path
+    /// contributes zero without retries, as in the original brushed law.
+    ///
+    /// Every facet retains the actual complex Fresnel/Mueller response. With
+    /// coincident geometric and shading normals this is a passive anisotropic
+    /// microsurface. A tilted shading normal retains the original empirical
+    /// approximation: apply its forward-power adjoint ONCE at the endpoints,
+    /// not at microscopic facets. It is not resolved grooves or a heat law,
+    /// and its importance weight can exceed one. No marginal PDF is supplied.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sample_smith_brushed_conductor(
+        self,
+        cx: &Cx<'_>,
+        optics: &ConductorOptics,
+        detail: &SurfaceDetail,
+        frame: &ShadingFrame,
+        settings: SmithWalkSettings,
+        samples: impl FnMut(u32) -> [f64; 3],
+    ) -> Result<Option<SmithBeamSample>, SmithBeamError> {
+        self.sample_smith_brushed_conductor_for_transport(
+            cx, optics, detail, frame, settings, samples, false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn sample_smith_brushed_conductor_for_transport(
+        self,
+        cx: &Cx<'_>,
+        optics: &ConductorOptics,
+        detail: &SurfaceDetail,
+        frame: &ShadingFrame,
+        settings: SmithWalkSettings,
+        samples: impl FnMut(u32) -> [f64; 3],
+        radiance: bool,
+    ) -> Result<Option<SmithBeamSample>, SmithBeamError> {
+        cx.checkpoint()?;
+        admit_detail(detail)?;
+        admit_frame(frame)?;
+        let wo = self.frame().direction().scale(-1.0);
+        if frame.geometric_normal.dot(wo) <= 0.0 {
+            return Err(BeamError::InvalidFrame.into());
+        }
+        if frame.shading_normal.dot(wo) <= 0.0 {
+            return Ok(None);
+        }
+        let (alpha_x, alpha_y) = detail.alpha_pair_for_mark(frame.mark_covered);
+        let model = SmithGgx::try_new(alpha_x, alpha_y)?;
+        let mut result = self.sample_smith_conductor_in_frame(
+            cx,
+            optics,
+            model,
+            [frame.tangent, frame.bitangent, frame.shading_normal],
+            settings,
+            samples,
+        )?;
+        let Some(weight) =
+            self.smith_brushed_endpoint_weight(frame, result.beam().frame().direction(), radiance)?
+        else {
+            return Ok(None);
+        };
+        if weight != 1.0 {
+            let reflected = result.beam();
+            let s = reflected.power();
+            let power = Stokes {
+                i: s.i * weight,
+                q: s.q * weight,
+                u: s.u * weight,
+                v: s.v * weight,
+            };
+            if ![power.i, power.q, power.u, power.v]
+                .iter()
+                .all(|v| v.is_finite())
+            {
+                return Err(BeamError::NumericalRange.into());
+            }
+            result.beam = Self::try_new(
+                reflected.ray().origin,
+                reflected.frame(),
+                reflected.wavelength_nm(),
+                reflected.medium(),
+                power,
+            )?;
+        }
+        cx.checkpoint()?;
+        Ok(Some(result))
+    }
+
+    /// Full anisotropic Smith reflection in the original instance-local chart.
+    /// Zero detail and the chart's undefined radial pole reuse the isotropic
+    /// Smith walk exactly. Procedural tilt/mark/axes are evaluated once at the
+    /// supplied geometric representative, without moving the beam origin.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sample_instanced_smith_brushed_conductor(
+        self,
+        cx: &Cx<'_>,
+        optics: &ConductorOptics,
+        detail: &SurfaceDetail,
+        transform: RigidTransform,
+        local_point: Point3,
+        world_normal: Vec3,
+        settings: SmithWalkSettings,
+        samples: impl FnMut(u32) -> [f64; 3],
+    ) -> Result<Option<SmithBeamSample>, SmithBeamError> {
+        self.sample_instanced_smith_brushed_conductor_for_transport(
+            cx,
+            optics,
+            detail,
+            transform,
+            local_point,
+            world_normal,
+            settings,
+            samples,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn sample_instanced_smith_brushed_conductor_for_transport(
+        self,
+        cx: &Cx<'_>,
+        optics: &ConductorOptics,
+        detail: &SurfaceDetail,
+        transform: RigidTransform,
+        local_point: Point3,
+        world_normal: Vec3,
+        settings: SmithWalkSettings,
+        samples: impl FnMut(u32) -> [f64; 3],
+        radiance: bool,
+    ) -> Result<Option<SmithBeamSample>, SmithBeamError> {
+        cx.checkpoint()?;
+        let Some(frame) =
+            self.smith_instanced_brushed_frame(detail, transform, local_point, world_normal)?
+        else {
+            let surface = ConductorSurface::try_rough(detail.alpha_pair().0)
+                .map_err(ConductorBeamError::from)?;
+            return self
+                .sample_smith_conductor(cx, world_normal, optics, surface, settings, samples)
+                .map(Some);
+        };
+        self.sample_smith_brushed_conductor_for_transport(
+            cx, optics, detail, &frame, settings, samples, radiance,
+        )
+    }
+
+    // Shared with fixed-direction Smith responses. Keep the original native
+    // placement, face-forwarding, mark and pole/zero-detail semantics.
+    pub(crate) fn smith_instanced_brushed_frame(
+        self,
+        detail: &SurfaceDetail,
+        transform: RigidTransform,
+        local_point: Point3,
+        world_normal: Vec3,
+    ) -> Result<Option<ShadingFrame>, ConductorBeamError> {
+        instanced_frame(self, detail, transform, local_point, world_normal)
+    }
+
+    // The adjoint of the native effective radiance law depends only on the
+    // complete path endpoints. Microscopic masking is already in the walk.
+    pub(crate) fn smith_brushed_endpoint_weight(
+        self,
+        frame: &ShadingFrame,
+        outgoing: Vec3,
+        radiance: bool,
+    ) -> Result<Option<f64>, BeamError> {
+        admit_frame(frame)?;
+        let outgoing = unit(outgoing)?;
+        let wo = self.frame().direction().scale(-1.0);
+        let geometric_out = frame.geometric_normal.dot(wo);
+        if geometric_out <= 0.0 {
+            return Err(BeamError::InvalidFrame);
+        }
+        let shading_out = frame.shading_normal.dot(wo);
+        let geometric_in = frame.geometric_normal.dot(outgoing);
+        let shading_in = frame.shading_normal.dot(outgoing);
+        if shading_out <= 0.0 || geometric_in <= 0.0 || shading_in <= 0.0 {
+            return Ok(None);
+        }
+        let weight = if radiance || frame.geometric_normal == frame.shading_normal {
+            1.0
+        } else {
+            (shading_out / geometric_out) * (geometric_in / shading_in)
+        };
+        if !weight.is_finite() || weight < 0.0 {
+            return Err(BeamError::NumericalRange);
+        }
+        Ok(Some(weight))
+    }
+
     /// Scatter in an explicitly supplied world-space brushed frame.
     ///
     /// The complete orthonormal frame must face the incoming ray according to
