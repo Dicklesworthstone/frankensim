@@ -14,6 +14,7 @@ use fs_thermochem::SpeciesId;
 
 mod absorption;
 mod fields;
+mod mechanical_wall;
 
 fn gas(temperature: f64) -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), temperature, 101325.0).unwrap()

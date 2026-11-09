@@ -1,7 +1,8 @@
 //! Original molecular storage, absorption and wall diffusion in a duct graph.
 //!
 //! Each exact edge identity retains its own evaluated molecular reservoirs and
-//! optional circular thermal/shear spectra. Frequency queries use those original
+//! optional circular thermal/shear spectra and mechanical material wall.
+//! Frequency queries use those original
 //! two-ports in the existing fully loaded network solve. No equilibrium sound
 //! speed, fitted attenuation or separately added thermal shunt replaces them.
 //! The returned prepared source operator feeds the existing coherent-drive,
@@ -22,10 +23,13 @@ use super::{
     PortSource, PortTermination, PreparedNetworkSources, bad, loaded,
 };
 use crate::compose::{ComposeOptions, MAX_COMPOSITION_BLOCKS, compose_scattering};
-use crate::molecular::{MolecularDuct, MolecularDuctError, MolecularWallResolution};
+use crate::molecular::{
+    MolecularCompliantWall, MolecularDuct, MolecularDuctError, MolecularWallResolution,
+};
 use crate::{ConeSlices, DuctError, Segment};
 use fs_material::relaxation::RelaxationState;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 mod field;
 pub use field::{MolecularNetworkFieldRequest, PreparedMolecularNetworkFields};
@@ -74,8 +78,8 @@ impl MolecularNetwork {
     /// Bind every edge exactly once, retaining the complete original media.
     /// `maximum_blocks` caps the SUM of all actual edge propagation blocks.
     /// It never reduces the caller's cone, profile or diffusion resolution.
-    /// Mechanical pins on `NetworkMedia` refuse: this graph binding does not
-    /// implement their coupled molecular wall response and never drops them.
+    /// Original mechanical pins on `NetworkMedia` enter the same molecular
+    /// propagation through their native locally reacting surface law.
     pub fn new(
         network: DuctNetwork,
         media: NetworkMedia,
@@ -94,6 +98,58 @@ impl MolecularNetwork {
         maximum_blocks: usize,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, MolecularDuctError> {
+        Self::new_with_compliant_walls_controlled(
+            network,
+            media,
+            edges,
+            Vec::new(),
+            maximum_blocks,
+            cancelled,
+        )
+    }
+
+    /// Bind source-owned local mechanical walls by exact edge identity.
+    /// Unlisted edges use their original media pin, or remain rigid if absent.
+    /// Gas reservoirs, gas/wall diffusion and geometry keep their native owner;
+    /// no independent attenuation or extra equilibrium thermal shunt is added.
+    ///
+    /// A wall retains its original Arc, material state, memory response and
+    /// frequency/radius admission. Its mechanical work may include structural
+    /// loss or radiation and is never automatically classified as gas heat.
+    /// The boundary is locally reacting: axial shell dynamics, mutual wall
+    /// coupling, large motion and thermoelastic feedback are outside this image.
+    ///
+    /// # Errors
+    /// Duplicate or unknown wall identity, a custom wall overlapping an
+    /// existing media pin, and all original gas/geometry/work refusals.
+    pub fn new_with_compliant_walls(
+        network: DuctNetwork,
+        media: NetworkMedia,
+        edges: Vec<MolecularEdge>,
+        walls: Vec<(String, MolecularCompliantWall)>,
+        maximum_blocks: usize,
+    ) -> Result<Self, MolecularDuctError> {
+        Self::new_with_compliant_walls_controlled(
+            network,
+            media,
+            edges,
+            walls,
+            maximum_blocks,
+            &mut || false,
+        )
+    }
+
+    /// Cancellable binding of the same original gas and mechanical owners.
+    /// All edge identities and conflicting declarations are admitted before
+    /// preparing radial spectra. Frequency-dependent walls admit at querying.
+    pub fn new_with_compliant_walls_controlled(
+        network: DuctNetwork,
+        media: NetworkMedia,
+        edges: Vec<MolecularEdge>,
+        walls: Vec<(String, MolecularCompliantWall)>,
+        maximum_blocks: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, MolecularDuctError> {
         poll(cancelled, 0)?;
         media.validate_for(&network)?;
         if maximum_blocks == 0 || maximum_blocks > MAX_COMPOSITION_BLOCKS {
@@ -108,13 +164,27 @@ impl MolecularNetwork {
                 return Err(bad("molecular network edge identity is duplicated").into());
             }
         }
+        if walls.len() > network.edges.len() {
+            return Err(bad("molecular network mechanical wall count exceeds edge count").into());
+        }
+        let mut mechanical: BTreeMap<String, MolecularCompliantWall> = BTreeMap::new();
+        for (id, wall) in walls {
+            if !network.edges.iter().any(|edge| edge.id == id) {
+                return Err(bad("molecular network wall names an unknown edge").into());
+            }
+            if media.edge_wall(&id).is_some() {
+                return Err(bad("molecular network custom wall overlaps an original media pin").into());
+            }
+            if mechanical.insert(id, wall).is_some() {
+                return Err(bad("molecular network mechanical wall identity is duplicated").into());
+            }
+        }
         // Admit identity and gas before preparing ANY expensive wall spectra.
         for edge in &network.edges {
-            if media.edge_wall(&edge.id).is_some() {
-                return Err(bad(
-                    "molecular network mechanical wall pins require their original coupled owner",
-                )
-                .into());
+            if let Some(pin) = media.edge_wall(&edge.id) {
+                // WallPin's WallLaw implementation delegates to its original
+                // fs-phs response. The complete media still retains the pin.
+                mechanical.insert(edge.id.clone(), Arc::new(*pin));
             }
             let binding = bindings
                 .get(&edge.id)
@@ -146,14 +216,25 @@ impl MolecularNetwork {
                 .iter()
                 .find(|edge| edge.id == id)
                 .expect("complete exact edge identities admitted");
-            let duct = MolecularDuct::new_controlled(
-                &edge.duct,
-                binding.state,
-                binding.wall,
-                binding.cones,
-                maximum_blocks - blocks,
-                cancelled,
-            )?;
+            let duct = match mechanical.remove(&id) {
+                Some(wall) => MolecularDuct::new_with_compliant_wall_controlled(
+                    &edge.duct,
+                    binding.state,
+                    binding.wall,
+                    wall,
+                    binding.cones,
+                    maximum_blocks - blocks,
+                    cancelled,
+                )?,
+                None => MolecularDuct::new_controlled(
+                    &edge.duct,
+                    binding.state,
+                    binding.wall,
+                    binding.cones,
+                    maximum_blocks - blocks,
+                    cancelled,
+                )?,
+            };
             blocks += duct.blocks();
             prepared.insert(id, duct);
         }

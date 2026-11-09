@@ -42,6 +42,21 @@ pub trait WallLaw {
     }
 }
 
+/// Use the original mechanical pin without replacing its constitutive owner.
+/// Radius only admits the actual duct section; the pin itself is a local law.
+impl WallLaw for WallPin {
+    fn specific_impedance(&self, radius_m: f64, omega: f64) -> Result<C64, DuctError> {
+        if !radius_m.is_finite() || radius_m <= 0.0 {
+            return Err(DuctError::BadParameter {
+                what: "wall radius must be positive and finite",
+            });
+        }
+        fs_phs::wall_specific_impedance(self, omega).map_err(|_| DuctError::BadParameter {
+            what: "wall pin surface density, stiffness, and resistance",
+        })
+    }
+}
+
 /// Explicit wall binding without changing the historical constant-pin API.
 #[derive(Clone, Copy)]
 pub enum WallModel<'a> {
@@ -88,28 +103,47 @@ impl<'a> WallModel<'a> {
             Self::Rigid => Ok(wave),
             Self::Pin(pin) => crate::apply_wall_to_wave(wave, radius, omega, pin, slant),
             Self::Law(law) => {
-                if !radius.is_finite() || radius <= 0.0 || !omega.is_finite() || omega <= 0.0 {
-                    return Err(DuctError::BadParameter {
-                        what: "wall law needs positive finite radius and frequency",
-                    });
-                }
-                let specific = law.specific_admittance(radius, omega)?;
-                if !specific.re.is_finite() || !specific.im.is_finite() || specific.re < 0.0 {
-                    return Err(DuctError::BadParameter {
-                        what: "wall law admittance must be passive and finite",
-                    });
-                }
-                if specific == C64::ZERO {
-                    if !slant.is_finite() || slant <= 0.0 {
-                        return Err(DuctError::BadParameter {
-                            what: "wall admittance and surface slope must be finite",
-                        });
-                    }
-                    return Ok(wave);
-                }
-                let y = specific.scale(core::f64::consts::TAU * radius);
-                crate::apply_wall_admittance_to_wave(wave, radius, y, slant)
+                Self::law_response(law, wave, radius, omega, slant).map(|response| response.0)
             }
         }
+    }
+
+    /// The same checked source query supplies propagation and wall work.
+    /// The returned admittance is per axial metre, including surface slope.
+    pub(crate) fn law_response(
+        law: &dyn WallLaw,
+        wave: SegmentWave,
+        radius: f64,
+        omega: f64,
+        slant: f64,
+    ) -> Result<(SegmentWave, C64), DuctError> {
+        if !radius.is_finite() || radius <= 0.0 || !omega.is_finite() || omega <= 0.0 {
+            return Err(DuctError::BadParameter {
+                what: "wall law needs positive finite radius and frequency",
+            });
+        }
+        let specific = law.specific_admittance(radius, omega)?;
+        if !specific.re.is_finite() || !specific.im.is_finite() || specific.re < 0.0 {
+            return Err(DuctError::BadParameter {
+                what: "wall law admittance must be passive and finite",
+            });
+        }
+        if specific == C64::ZERO {
+            if !slant.is_finite() || slant <= 0.0 {
+                return Err(DuctError::BadParameter {
+                    what: "wall admittance and surface slope must be finite",
+                });
+            }
+            return Ok((wave, C64::ZERO));
+        }
+        let y = specific.scale(core::f64::consts::TAU * radius);
+        let composed = crate::apply_wall_admittance_to_wave(wave, radius, y, slant)?;
+        let axial = y.scale(slant);
+        if !axial.re.is_finite() || !axial.im.is_finite() {
+            return Err(DuctError::BadParameter {
+                what: "wall admittance and surface slope must be finite",
+            });
+        }
+        Ok((composed, axial))
     }
 }

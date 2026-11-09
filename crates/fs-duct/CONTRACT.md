@@ -2364,9 +2364,9 @@ does not admit a different material. Gas heat and internal boundary work are
 not separately attributed by the graph's net work balance.
 
 This path admits frozen cylinders, cones, profiles, branches and loops with one
-state per edge, common static pressure and mechanically rigid walls. Chimneys
-must be explicit graph branches with declared mouth boundaries; embedded
-compact tone holes refuse. The aggregate propagation-block cap, original wall
+gas state per edge, common static pressure and an optional original locally
+reacting mechanical wall per edge. Chimneys must be explicit graph branches
+with declared mouth boundaries; embedded compact tone holes refuse. The aggregate propagation-block cap, original wall
 frequency support, graph condition/capacity bounds and cancellation are
 preserved without resolution reduction. The focused tests in
 `src/network/molecular/tests.rs` compare independent complex line equations and
@@ -2403,8 +2403,9 @@ No independent `LossModel` overrides this path. In particular, the equilibrium
 reporting zero loss or assigning Bessel heat to the coupled molecular law.
 The molecular wrapper supplies the source-bound cylinder absorption below.
 Signed internal power is transported work, not a caloric-deposition partition.
-The existing mechanically rigid network scope now explicitly rejects supplied
-`NetworkMedia` wall pins instead of silently discarding their response.
+Original `NetworkMedia` wall pins and source-owned mechanical walls now enter
+the same composed molecular waves, as described below. Their gas diffusion
+and mechanical displacement remain separate constitutive contributions.
 The original aggregate block cap, probe/transfer bounds, frequency support,
 loaded conditioning and cancellation remain; no numerical axis is reduced.
 The dense loaded solve is bounded and polled immediately before/after.
@@ -2413,11 +2414,10 @@ The dense loaded solve is bounded and polled immediately before/after.
 waves at loaded half-wave poles and opaque lengths, regional branch fields
 and coherence with a full coupled source bank, original joint wall/molecular
 fields across cylinder/cone/profile segment cuts, and independent converging
-and diverging spherical-wave fields. It also checks unsupported heat and wall
-bindings, original frequency support, budgets, probe bounds, cancellation and
-deterministic replay. Rust formatting/parser checks have passed; native test
-execution remains pending because the constrained host cannot build the real
-pinned dependency graph. Source review is not a native runtime result.
+and diverging spherical-wave fields. It also checks unsupported equilibrium heat, retained native mechanical pins,
+original frequency support, budgets, probe bounds, cancellation and
+deterministic replay. Native execution requires the actual pinned dependency
+graph; source review is not a native runtime result.
 
 #### Positive volume absorption of original molecular cylinders
 
@@ -2454,8 +2454,10 @@ loss. Overlapping cells are not automatically summed or deposited.
 
 Only `viscous_power_w` is declared direct caloric heat. `thermal_power_w` and
 `molecular_power_w` are availability losses and do not themselves specify local
-mean caloric deposition or transport between gas and walls. The total is their
-independently positive sum, separate from end loads and numerical loss.
+mean caloric deposition or transport between gas and walls. The existing `absorbed_power_w` is their
+independently positive gas sum. `wall_work_w` separately records mechanical
+work delivered to a bound wall; `total_removed_power_w()` adds gas and wall
+work. End loads and numerical loss are excluded from both physical channels.
 Cone/profile cells, probe pairs from different cylinders, reversed or invalid pairs,
 unsupported coefficients, excessive cell/factor work and cancellation refuse.
 An optional absorption refusal leaves the admitted pressure/flow field usable.
@@ -2468,6 +2470,60 @@ limits, geometry/source/budget refusals and cancellation. These are synthetic
 implementation fixtures, not empirical gas validation. Rust formatting/parser
 and whitespace checks passed; native execution remains pending because the
 host cannot build the actual pinned dependency graph within its resources.
+
+#### Reciprocal material-wall loading on original molecular networks
+
+`MolecularNetwork::new_with_compliant_walls[_controlled]` binds exact edge ids
+to the original `MolecularCompliantWall` Arc owners. The complete resolved
+material, membrane reduction, retained relaxation response and radius/frequency
+support stay in that law; the existing `LocalMaterialWall` implementation
+can pass through this seam without a new constitutive model. Existing network
+constructors also consume original `NetworkMedia` pins through the native
+`fs_phs::wall_specific_impedance` owner. An absent binding remains rigid.
+Duplicate/unknown wall ids and overlapping media-pin/custom-wall declarations
+refuse before radial spectra are prepared. Edge gas and exterior records are
+retained independently.
+
+Each edge uses the original `MolecularDuct` compliant-wall composition:
+`Y_mechanical = 2*pi*r*sqrt(1+(dr/dx)^2)/Z_surface` per axial metre in
+exp(-i omega t). The original gas series response and joint molecular/Fourier
+pressure law remain intact. Wall compliance changes the loaded pressure/flow
+solution itself. It does not add another gas thermal shunt or fit attenuation.
+Cylinders, cone slices and profile quadrature use their actual source-bound
+radius and surface slope. Graph branches and loops use the same reciprocal
+pressure/volume-flow continuity and complete loaded source bank.
+
+A single native frequency preparation caches the composed propagation wave
+AND the checked mechanical admittance at each original material-point/slope
+key. The existing chain, local field splits and cylinder work all consume
+that cache. A probe neither reevaluates the wall nor changes cone material
+normalization. Original block/probe/source budgets, loaded conditioning,
+source-domain refusals and cancellation remain live.
+
+For an authored cylinder, the existing positive coherent interval kernel
+integrates `Re(Y_mechanical)*|p|^2/2` as `wall_work_w`. The three original gas
+loss channels and the meaning of `absorbed_power_w` are preserved.
+`total_removed_power_w()` includes gas absorption and mechanical wall work
+without subtracting endpoint powers. Coherent source phases and covariance
+factors retain their original contractions; repeated observations query no
+new material. Wall work may contain structural dissipation or radiation.
+It is not automatically a gas or wall caloric-deposition source.
+
+This is a frozen small-signal, locally reacting harmonic boundary. It does not
+supply axial shell propagation, mutual structural coupling, moving geometry,
+mean flow, thermoelastic transport or thermal feedback. Cone/profile fields
+are admitted, while their finite-cell loss integration remains outside the
+current cylinder API. The native explicit rigid-admittance limit leaves the
+cylindrical gas propagation and loss observations unchanged.
+
+`src/network/molecular/tests/mechanical_wall.rs` compares independent complex
+telegraph equations, original gas diffusion and a manufactured Maxwell wall's
+physical work; unlike branch reciprocity and coherent source factors; tapered
+fields against independent variable-area RK4 integration; and rigid/pin limits,
+original source identity/domain, binding conflicts and cancellation. These are
+implementation fixtures, not measured material validation. This extension's
+native tests and Rust parser/formatter checks were not executed because the
+workspace was unavailable; the source received a bounded independent review.
 
 `NetworkMedia` binds a complete original `GasRecord` to every exact edge id,
 plus one independently specified homogeneous exterior. Mixture composition,

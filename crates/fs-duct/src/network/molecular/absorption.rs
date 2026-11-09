@@ -4,10 +4,11 @@ use super::*;
 use crate::network::field::NetworkCylinderAbsorptionCell;
 use crate::network::field::absorption::{CylinderLossOperator, admit_cells, observe_channels};
 use fs_math::c64::C64;
+use fs_math::dd::Dd;
 
 /// Cycle-mean physical losses integrated over one original cylindrical cell.
 /// Coherent peak p/U amplitudes are combined before the shared positive forms.
-/// No surface load, numerical stabilization or signed power residual is heat.
+/// Mechanical wall work is separate from gas losses; no signed residual is heat.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MolecularNetworkCylinderAbsorption {
     /// Original wall-shear dissipation [W]; a direct caloric heat source.
@@ -17,8 +18,21 @@ pub struct MolecularNetworkCylinderAbsorption {
     /// Original molecular-reservoir availability loss [W]. It does not itself
     /// assign mean caloric deposition or transport between gas and walls.
     pub molecular_power_w: f64,
-    /// Sum of the three independently positive channels [W].
+    /// Sum of the three independently positive GAS channels [W].
+    /// Mechanical wall work remains separate from this existing quantity.
     pub absorbed_power_w: f64,
+    /// Cycle-mean work delivered to the original mechanical wall [W].
+    /// The wall may dissipate or radiate; this is not declared caloric heat.
+    pub wall_work_w: f64,
+}
+
+impl MolecularNetworkCylinderAbsorption {
+    /// Physical acoustic power removed by the gas and mechanical wall [W].
+    /// No exterior end load or numerical stabilization enters this quantity.
+    #[must_use]
+    pub fn total_removed_power_w(&self) -> f64 {
+        (Dd::from_f64(self.absorbed_power_w) + Dd::from_f64(self.wall_work_w)).to_f64()
+    }
 }
 
 /// Bound to the same source-bearing network, frequency, geometry probes and
@@ -29,7 +43,7 @@ pub struct MolecularNetworkCylinderAbsorption {
 pub struct PreparedMolecularNetworkCylinderAbsorption<'fields, 'network> {
     fields: &'fields PreparedMolecularNetworkFields<'network>,
     cells: Vec<NetworkCylinderAbsorptionCell>,
-    operators: Vec<CylinderLossOperator<3>>,
+    operators: Vec<CylinderLossOperator<4>>,
 }
 
 impl<'network> PreparedMolecularNetworkFields<'network> {
@@ -46,9 +60,10 @@ impl<'network> PreparedMolecularNetworkFields<'network> {
     ///
     /// # Errors
     /// Original-cylinder identity/order, nonfinite volume or positive loss
-    /// forms, work/cell bounds and cancellation. Cone, profile, wall-mechanical
-    /// and exterior heat need their own volume laws and refuse here. Optional
-    /// absorption refusal does not invalidate an otherwise admitted p/U field.
+    /// forms, work/cell bounds and cancellation. Cone/profile cells and exterior
+    /// end loads need their own spatial forms and refuse here. Mechanical wall
+    /// work uses the original retained admittance, separate from gas channels.
+    /// Optional absorption refusal does not invalidate an admitted p/U field.
     pub fn prepare_cylinder_absorption(
         &self,
         probe_pairs: &[[usize; 2]],
@@ -78,7 +93,14 @@ impl<'network> PreparedMolecularNetworkFields<'network> {
                         let area = core::f64::consts::PI * original.radius_m * original.radius_m;
                         // Match the actual-area normalization in TwoPort exactly.
                         let impedance = original.wave.specific_impedance / C64::from_re(area);
-                        let value = (original.wave, impedance, original.loss_weights()?);
+                        let gas = original.loss_weights()?;
+                        let weights = [
+                            gas[0],
+                            gas[1],
+                            gas[2],
+                            original.mechanical_admittance_per_metre.re,
+                        ];
+                        let value = (original.wave, impedance, weights);
                         coefficients.insert((id, cell.segment), value);
                         value
                     };
@@ -136,7 +158,16 @@ impl<'fields, 'network> PreparedMolecularNetworkCylinderAbsorption<'fields, 'net
                 viscous_power_w: watts[0],
                 thermal_power_w: watts[1],
                 molecular_power_w: watts[2],
-                absorbed_power_w: total,
+                absorbed_power_w: if watts[3] == 0.0 {
+                    // Preserve the original gas total when the wall does no work.
+                    total
+                } else {
+                    (Dd::from_f64(watts[0])
+                        + Dd::from_f64(watts[1])
+                        + Dd::from_f64(watts[2]))
+                    .to_f64()
+                },
+                wall_work_w: watts[3],
             },
         )
     }

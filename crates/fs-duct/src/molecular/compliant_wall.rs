@@ -23,6 +23,14 @@ use std::sync::Arc;
 /// Thread-safe ownership lets cloned duct/runtime bindings retain one law.
 pub type MolecularCompliantWall = Arc<dyn WallLaw + Send + Sync>;
 
+/// One original source query, shared by propagation and local wall work.
+/// Geometry supplies the axial surface-area factor exactly once.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PreparedCompliantWave {
+    pub(super) wave: SegmentWave,
+    pub(super) admittance_per_metre: C64,
+}
+
 impl core::fmt::Debug for MolecularDuct {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MolecularDuct")
@@ -146,6 +154,21 @@ impl MolecularDuct {
         self.compliant_wall.as_deref()
     }
 
+    /// Physical surface slope shared by chain preparation and field splits.
+    pub(super) fn wave_slant(&self, geometry: &Segment) -> f64 {
+        match geometry {
+            Segment::Cone {
+                inlet_radius,
+                outlet_radius,
+                length,
+            } if self.compliant_wall.is_some() => {
+                let slope = (outlet_radius - inlet_radius) / length;
+                det::sqrt(1.0 + slope * slope)
+            }
+            _ => 1.0,
+        }
+    }
+
     /// Cache the *composed* response for identical material/radius/slope
     /// samples within one frequency preparation. A radius shared by two
     /// different surface slopes never aliases the physical wall area.
@@ -155,23 +178,45 @@ impl MolecularDuct {
         slant: f64,
         omega: f64,
         waves: &[SegmentWave],
-        cache: &mut BTreeMap<(usize, u64), SegmentWave>,
+        cache: &mut BTreeMap<(usize, u64), PreparedCompliantWave>,
     ) -> Result<SegmentWave, MolecularDuctError> {
+        Ok(self.wall_response(point, slant, omega, waves, cache)?.wave)
+    }
+
+    /// Retain the exact mechanical admittance used in that same wave.
+    /// A later observation neither re-queries the source nor subtracts gas
+    /// admittance from a rounded composed wave to infer wall work.
+    pub(super) fn wall_response(
+        &self,
+        point: usize,
+        slant: f64,
+        omega: f64,
+        waves: &[SegmentWave],
+        cache: &mut BTreeMap<(usize, u64), PreparedCompliantWave>,
+    ) -> Result<PreparedCompliantWave, MolecularDuctError> {
         let Some(wall) = &self.compliant_wall else {
-            return Ok(waves[point]);
+            return Ok(PreparedCompliantWave {
+                wave: waves[point],
+                admittance_per_metre: C64::ZERO,
+            });
         };
         let key = (point, slant.to_bits());
-        if let Some(&wave) = cache.get(&key) {
-            return Ok(wave);
+        if let Some(&response) = cache.get(&key) {
+            return Ok(response);
         }
-        let wave = WallModel::Law(wall.as_ref()).apply(
+        let (wave, admittance_per_metre) = WallModel::law_response(
+            wall.as_ref(),
             waves[point],
             self.points[point].radius,
             omega,
             slant,
         )?;
-        cache.insert(key, wave);
-        Ok(wave)
+        let response = PreparedCompliantWave {
+            wave,
+            admittance_per_metre,
+        };
+        cache.insert(key, response);
+        Ok(response)
     }
 }
 

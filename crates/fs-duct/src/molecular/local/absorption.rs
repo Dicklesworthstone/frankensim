@@ -24,6 +24,9 @@ pub(crate) struct MolecularCylinder<'source> {
     pub(crate) omega: f64,
     pub(crate) cp: C64,
     pub(crate) wave: SegmentWave,
+    // Same queried mechanical surface law used in the retained composed wave.
+    // Positive real part is wall work, not an additional gas heat mechanism.
+    pub(crate) mechanical_admittance_per_metre: C64,
 }
 
 impl MolecularCylinder<'_> {

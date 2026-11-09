@@ -41,11 +41,9 @@ impl MolecularDuct {
         let boundaries = self.segment_boundaries.as_ref().ok_or_else(|| {
             bad("molecular graph observations require an original homogeneous edge")
         })?;
-        if self.compliant_wall.is_some()
-            || self.pieces.iter().any(|p| matches!(p, Piece::ToneHole(_)))
-        {
+        if self.pieces.iter().any(|p| matches!(p, Piece::ToneHole(_))) {
             return Err(bad(
-                "molecular graph observations require rigid walls and explicit chimney branches",
+                "molecular graph observations require explicit chimney branches",
             )
             .into());
         }
@@ -54,31 +52,47 @@ impl MolecularDuct {
             self.waves_observed_controlled(omega, cancelled, &mut |_index, cp| {
                 capacities.push(cp)
             })?;
-        let (chain, _) = self.chain_from_waves_controlled(
+        let mut wall_waves = BTreeMap::new();
+        let (chain, _) = self.chain_from_waves_cached_controlled(
             omega,
             &[],
             ComposeOptions::default(),
             &waves,
             min_shear,
+            &mut wall_waves,
             cancelled,
         )?;
-        let block_waves = self
-            .pieces
-            .iter()
-            .map(|piece| match piece {
-                Piece::Wave { point, .. } => Some(waves[*point]),
+        let mut block_waves = Vec::with_capacity(self.pieces.len());
+        for (index, piece) in self.pieces.iter().enumerate() {
+            poll(cancelled, index)?;
+            block_waves.push(match piece {
+                Piece::Wave { geometry, point } => Some(self.wall_wave(
+                    *point,
+                    self.wave_slant(geometry),
+                    omega,
+                    &waves,
+                    &mut wall_waves,
+                )?),
                 Piece::Magnus { .. } => None,
                 Piece::ToneHole(_) => unreachable!("compact holes refused before wave preparation"),
-            })
-            .collect();
-        let cylinders = boundaries
-            .windows(2)
-            .map(|cut| match &self.pieces[cut[0]] {
+            });
+        }
+        let mut cylinders = Vec::with_capacity(boundaries.len().saturating_sub(1));
+        for (index, cut) in boundaries.windows(2).enumerate() {
+            poll(cancelled, index)?;
+            cylinders.push(match &self.pieces[cut[0]] {
                 Piece::Wave {
                     geometry: Segment::Cylinder { radius, .. },
                     point,
                 } if cut[1] == cut[0] + 1 => {
                     let original = &self.points[*point];
+                    let response = self.wall_response(
+                        *point,
+                        1.0,
+                        omega,
+                        &waves,
+                        &mut wall_waves,
+                    )?;
                     Some(MolecularCylinder {
                         state: self.state_at_point(*point),
                         wall: original.wall.as_ref(),
@@ -86,12 +100,13 @@ impl MolecularDuct {
                         x_m: original.x_m,
                         omega,
                         cp: capacities[*point],
-                        wave: waves[*point],
+                        wave: response.wave,
+                        mechanical_admittance_per_metre: response.admittance_per_metre,
                     })
                 }
                 _ => None,
-            })
-            .collect();
+            });
+        }
         poll(cancelled, chain.blocks.len())?;
         Ok(PreparedMolecularSpatial {
             chain,

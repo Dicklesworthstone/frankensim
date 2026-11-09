@@ -424,7 +424,7 @@ fn molecular_cone_fields_match_independent_spherical_pressure_and_flow() {
 }
 
 #[test]
-fn molecular_fields_refuse_budget_geometry_cancellation_and_ignored_mechanical_wall() {
+fn molecular_fields_refuse_budget_geometry_cancellation_and_retain_mechanical_wall() {
     let state = law(gas(293.15), 2, 1.0);
     let net = DuctNetwork {
         nodes: vec![port("drive"), port("load")],
@@ -478,10 +478,12 @@ fn molecular_fields_refuse_budget_geometry_cancellation_and_ignored_mechanical_w
             )],
         )
         .unwrap();
-    assert!(matches!(
-        MolecularNetwork::new(net.clone(), media, bindings(&net, &[state], None), 16),
-        Err(MolecularDuctError::Duct(DuctError::BadParameter {
-            what: "molecular network mechanical wall pins require their original coupled owner"
-        }))
-    ));
+    let walled =
+        MolecularNetwork::new(net.clone(), media, bindings(&net, &[state], None), 16).unwrap();
+    assert!(walled.edge("tube").unwrap().compliant_wall().is_some());
+    let with_wall = walled.prepare_fields(&request, || false).unwrap();
+    assert_ne!(
+        with_wall.fields().pressure_transfer(),
+        first.fields().pressure_transfer()
+    );
 }

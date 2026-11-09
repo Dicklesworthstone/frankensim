@@ -486,7 +486,29 @@ impl MolecularDuct {
         min_shear: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(PreparedChain, Vec<holes::PreparedHole>), MolecularDuctError> {
-        let mut wall_waves = BTreeMap::new();
+        self.chain_from_waves_cached_controlled(
+            omega,
+            mouth_loads,
+            options,
+            waves,
+            min_shear,
+            &mut BTreeMap::new(),
+            cancelled,
+        )
+    }
+
+    /// Spatial preparation retains this same original composed-wave cache.
+    #[allow(clippy::too_many_arguments)]
+    fn chain_from_waves_cached_controlled(
+        &self,
+        omega: f64,
+        mouth_loads: &[C64],
+        options: ComposeOptions,
+        waves: &[SegmentWave],
+        min_shear: f64,
+        wall_waves: &mut BTreeMap<(usize, u64), compliant_wall::PreparedCompliantWave>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(PreparedChain, Vec<holes::PreparedHole>), MolecularDuctError> {
         let reference = self.reference_impedance;
         let mut blocks = Vec::with_capacity(self.blocks());
         let mut observations = Vec::new();
@@ -501,7 +523,7 @@ impl MolecularDuct {
                         None
                     };
                     let (local, observation) = hole.prepare(
-                        &self.wall_wave(hole.point, 1.0, omega, waves, &mut wall_waves)?,
+                        &self.wall_wave(hole.point, 1.0, omega, waves, wall_waves)?,
                         self.state_at_point(hole.point).gas().density,
                         omega,
                         load,
@@ -513,7 +535,7 @@ impl MolecularDuct {
                     observations.push(observation);
                     continue;
                 }
-                _ => self.piece_wave_block(piece, waves, omega, &mut wall_waves)?,
+                _ => self.piece_wave_block(piece, waves, omega, wall_waves)?,
             };
             blocks.push(block);
         }
@@ -583,22 +605,12 @@ impl MolecularDuct {
         piece: &Piece,
         waves: &[SegmentWave],
         omega: f64,
-        wall_waves: &mut BTreeMap<(usize, u64), SegmentWave>,
+        wall_waves: &mut BTreeMap<(usize, u64), compliant_wall::PreparedCompliantWave>,
     ) -> Result<TwoPort, MolecularDuctError> {
         let reference = self.reference_impedance;
         Ok(match piece {
             Piece::Wave { geometry, point } => {
-                let slant = match geometry {
-                    Segment::Cone {
-                        inlet_radius,
-                        outlet_radius,
-                        length,
-                    } if self.compliant_wall.is_some() => {
-                        let slope = (outlet_radius - inlet_radius) / length;
-                        det::sqrt(1.0 + slope * slope)
-                    }
-                    _ => 1.0,
-                };
+                let slant = self.wave_slant(geometry);
                 let wave = self.wall_wave(*point, slant, omega, waves, wall_waves)?;
                 TwoPort::from_wave(geometry, &wave, reference)?
             }
