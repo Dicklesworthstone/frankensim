@@ -148,9 +148,17 @@ fn isotropic_stress(youngs: f64, poisson: f64, strain: &Voigt) -> Voigt {
     isotropic_stress_from_moduli(bulk, twice_shear, strain)
 }
 
-// The same spherical/deviatoric arithmetic serves tensor-Voigt and Mandel
-// coordinates: only the shear inputs' normalization changes, not 2G.
-pub(crate) fn isotropic_stress_from_moduli(
+/// Compensated isotropic algebraic action from independent spherical/shear modes.
+///
+/// Strain and returned stress use the SAME tensor-Voigt or Mandel shear
+/// normalization; engineering shear is not accepted by this convention.
+/// `twice_shear` is 2G. Signed or zero coefficients are allowed for constitutive
+/// derivatives: this operation does not admit an elastic material or physical
+/// strain, attach source identity, or enforce a calibration domain. Callers own
+/// those checks and finite-result admission. The original compensated mode
+/// split preserves weak responses without reconstructing K from Lame terms.
+#[inline]
+pub fn isotropic_stress_from_moduli(
     bulk: f64,
     twice_shear: f64,
     strain: &Voigt,

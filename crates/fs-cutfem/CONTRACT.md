@@ -910,3 +910,13 @@ absolute-value/max-row stabilization branches refuse a derivative. Homogeneous
 supports are covered; nonzero displacement lifting, temperature-dependent
 external loads and the heat-equation adjoint require their additional terms.
 The caller owns the equilibrium-adjoint sign and explicit objective partials.
+
+
+Explicit-isotropic free-strain and signed temperature-stress actions share the
+material owner's compensated bulk/deviator split. The same original native K/G
+and their derivatives now drive the source thermal potential, including
+independently oriented anisotropic expansion. This avoids recovering a weak
+mode through cancellation between rounded dense tensor entries or a rounded
+mean. Stored C(T) matrices are retained, generic orthotropy is not fitted, and
+source domains remain mandatory. This improves numerical mode recovery; it does
+not establish conditioning or convergence for arbitrary cut-grid solves.

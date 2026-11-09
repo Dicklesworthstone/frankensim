@@ -10,7 +10,7 @@
 //! remain authoritative; this is not a new mechanical or thermal integrator.
 
 use super::IsotropicElastic;
-use crate::{MaterialError, SmallStrainLaw};
+use crate::MaterialError;
 use crate::field_storage::{FieldStorageError, admit_source_temperature_refresh,
     thermal::affine_source_path};
 use crate::state_point::{ResolvedMaterialStatePoint, MaterialStatePointError,
@@ -390,43 +390,16 @@ impl ResolvedThermoelastic {
         if elastic_strain_mandel.iter().any(|e|e.abs()>self.maximum_absolute_mandel_strain) {
             return Err(ThermoelasticError::Invalid("elastic strain leaves the admitted small-strain envelope"));
         }
-        // The existing material law uses tensor-shear Voigt coordinates.
-        // Convert both strain and stress explicitly; the work dot product is Mandel.
-        let root_two=fs_math::det::sqrt(2.0);
-        let mut voigt=elastic_strain_mandel;
-        for e in &mut voigt[3..] {*e/=root_two;}
-        let mut stress_mandel_pa=response.material.stress(&voigt,&());
-        for s in &mut stress_mandel_pa[3..] {*s*=root_two;}
-        let free_energy_j=finite(0.5*volume_m3*elastic_strain_mandel.iter()
-            .zip(stress_mandel_pa).map(|(e,s)|e*s).sum::<f64>())?;
-        let trace=finite(elastic_strain_mandel[..3].iter().sum())?;
-        let mean=trace/3.0;
-        let deviator_squared=finite(elastic_strain_mandel.iter().enumerate()
-            .map(|(k,e)|if k<3 {(e-mean).powi(2)}else{e*e}).sum())?;
-        let IsotropicThermalModuli {bulk,bulk_first,shear_first,bulk_second,shear_second,..} =
-            isotropic_thermal_moduli(response.material.youngs,response.material.poisson,
-                response.youngs_slope_pa_k,response.poisson_slope_per_k)?;
-        let alpha=response.expansion_per_k;
-        let stress_temperature_derivative_mandel_pa_k=core::array::from_fn(|k| {
-            if k<3 {
-                bulk_first*trace-3.0*bulk*alpha
-                    +2.0*shear_first*(elastic_strain_mandel[k]-mean)
-            } else {2.0*shear_first*elastic_strain_mandel[k]}
-        });
-        let entropy_j_k=finite(volume_m3*(3.0*bulk*alpha*trace
-            -0.5*bulk_first*trace*trace-shear_first*deviator_squared))?;
-        let internal_energy_j=finite(self.temperature_k.mul_add(entropy_j_k,free_energy_j))?;
-        let heat_capacity_j_k=finite(self.temperature_k*volume_m3
-            *((6.0*bulk_first*alpha+3.0*bulk*response.expansion_slope_per_k2)*trace
-                -9.0*bulk*alpha*alpha-0.5*bulk_second*trace*trace
-                -shear_second*deviator_squared))?;
-        if stress_mandel_pa.iter().chain(stress_temperature_derivative_mandel_pa_k.iter())
-            .any(|v|!v.is_finite()) || free_energy_j<0.0 {
-            return Err(ThermoelasticError::Invalid("native thermoelastic response is unrepresentable"));
-        }
-        Ok(ThermoelasticState {elastic_strain_mandel,stress_mandel_pa,
-            stress_temperature_derivative_mandel_pa_k,free_energy_j,
-            entropy_j_k,internal_energy_j,heat_capacity_j_k})
+        let moduli = isotropic_thermal_moduli(
+            response.material.youngs, response.material.poisson,
+            response.youngs_slope_pa_k, response.poisson_slope_per_k,
+        )?;
+        let expansion = [response.expansion_per_k, response.expansion_per_k,
+            response.expansion_per_k, 0.0, 0.0, 0.0];
+        let expansion_derivative = [response.expansion_slope_per_k2,
+            response.expansion_slope_per_k2, response.expansion_slope_per_k2, 0.0, 0.0, 0.0];
+        tensor::isotropic_state(self.temperature_k, elastic_strain_mandel, volume_m3,
+            moduli, expansion, expansion_derivative)
     }
 }
 

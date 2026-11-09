@@ -54,16 +54,11 @@ impl<'a> TemperatureTangent3<'a> {
                 matrix[i].iter().zip(strain).map(|(c, e)| c * e).sum()
             })),
             Self::Isotropic { bulk, shear } => {
-                let trace = strain[..3].iter().sum::<f64>();
-                let mean = trace / 3.0;
-                let pressure = bulk * trace;
-                std::array::from_fn(|i| {
-                    if i < 3 {
-                        (2.0 * shear).mul_add(strain[i] - mean, pressure)
-                    } else {
-                        core::f64::consts::SQRT_2 * shear * strain[i]
-                    }
-                })
+                from_mandel(&fs_material::elastic::isotropic_stress_from_moduli(
+                    bulk,
+                    2.0 * shear,
+                    &strain,
+                ))
             }
         }
     }

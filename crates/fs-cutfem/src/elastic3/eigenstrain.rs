@@ -159,16 +159,11 @@ pub(in crate::elastic3) fn material_stress(cell: &Cell3, strain: [f64; 6]) -> [f
             ReferenceMaterial3::Source(_) => None,
         });
     if let Some((bulk, shear)) = isotropic {
-        let trace = strain[..3].iter().sum::<f64>();
-        let mean = trace / 3.0;
-        let pressure = bulk * trace;
-        return std::array::from_fn(|i| {
-            if i < 3 {
-                (2.0 * shear).mul_add(strain[i] - mean, pressure)
-            } else {
-                core::f64::consts::SQRT_2 * shear * strain[i]
-            }
-        });
+        return from_mandel(&fs_material::elastic::isotropic_stress_from_moduli(
+            bulk,
+            2.0 * shear,
+            &strain,
+        ));
     }
     let c = cell
         .material

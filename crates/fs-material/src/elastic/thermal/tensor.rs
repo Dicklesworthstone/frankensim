@@ -572,6 +572,62 @@ fn bound_product(a:&[[f64;3];3],b:&[[f64;3];3])->Result<[[f64;3];3],Thermoelasti
     Ok(result)
 }
 
+
+/// Evaluate the original source-declared isotropic potential without recovering
+/// either mode from rounded tensor rows. Expansion retains its independently
+/// declared orientation and can have a nonzero deviatoric part.
+pub(super) fn isotropic_state(
+    t: f64,
+    elastic: [f64; 6],
+    volume: f64,
+    moduli: IsotropicThermalModuli,
+    expansion: [f64; 6],
+    expansion_derivative: [f64; 6],
+) -> Result<ThermoelasticState, ThermoelasticError> {
+    // Reuse the mechanical owner's compensated spherical/deviatoric split.
+    // A rounded mean can create a false O(G) response in the weak bulk mode.
+    let modes = crate::elastic::isotropic_strain_modes;
+    let dot = |a: [f64; 6], b: [f64; 6]| {
+        a.into_iter().zip(b).map(|(x, y)| x * y).sum::<f64>()
+    };
+    let (trace, dev) = modes(&elastic);
+    let (expansion_trace, expansion_dev) = modes(&expansion);
+    let (expansion_derivative_trace, expansion_derivative_dev) =
+        modes(&expansion_derivative);
+    let IsotropicThermalModuli {
+        bulk, shear, bulk_first, shear_first, bulk_second, shear_second,
+    } = moduli;
+    let dev_squared = dot(dev, dev);
+    let dev_expansion = dot(dev, expansion_dev);
+    let stress = crate::elastic::isotropic_stress_from_moduli(bulk, 2.0 * shear, &elastic);
+    let beta = core::array::from_fn(|i| {
+        2.0 * shear_first * dev[i] - 2.0 * shear * expansion_dev[i]
+            + if i < 3 { bulk_first * trace - bulk * expansion_trace } else { 0.0 }
+    });
+    let free_energy_j = finite(volume * (0.5 * bulk * trace * trace + shear * dev_squared))?;
+    let entropy_j_k = finite(volume * (
+        bulk * trace * expansion_trace + 2.0 * shear * dev_expansion
+            - 0.5 * bulk_first * trace * trace - shear_first * dev_squared
+    ))?;
+    let internal_energy_j = finite(t.mul_add(entropy_j_k, free_energy_j))?;
+    let curvature = 0.5 * bulk_second * trace * trace + shear_second * dev_squared
+        - 2.0 * bulk_first * trace * expansion_trace - 4.0 * shear_first * dev_expansion
+        + bulk * expansion_trace * expansion_trace
+        + 2.0 * shear * dot(expansion_dev, expansion_dev)
+        - bulk * trace * expansion_derivative_trace
+        - 2.0 * shear * dot(dev, expansion_derivative_dev);
+    let heat_capacity_j_k = finite(-t * volume * curvature)?;
+    if free_energy_j < 0.0 || stress.iter().chain(beta.iter()).any(|x| !x.is_finite()) {
+        return Err(ThermoelasticError::Invalid("native isotropic thermoelastic response is unrepresentable"));
+    }
+    Ok(ThermoelasticState {
+        elastic_strain_mandel: elastic,
+        stress_mandel_pa: stress,
+        stress_temperature_derivative_mandel_pa_k: beta,
+        free_energy_j, entropy_j_k, internal_energy_j, heat_capacity_j_k,
+    })
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct TensorThermalResponse {
     pub(super) stiffness_mandel_pa: Tangent6,
@@ -601,6 +657,10 @@ impl TensorThermalResponse {
         let e: [f64; 6] = core::array::from_fn(|i| total[i] - self.free_strain_mandel[i]);
         if e.iter().any(|x| !x.is_finite() || x.abs() > limit) {
             return Err(ThermoelasticError::Invalid("elastic strain leaves the admitted tensor small-strain envelope"));
+        }
+        if let Some(moduli) = self.isotropic_moduli {
+            return isotropic_state(t, e, volume, moduli,
+                self.expansion_mandel_per_k, self.expansion_derivative_mandel_per_k2);
         }
         let apply = |c: &Tangent6, x: [f64; 6]| -> [f64; 6] {
             core::array::from_fn(|i| (0..6).fold(0.0, |sum,j| c[i][j].mul_add(x[j],sum)))
@@ -632,3 +692,6 @@ mod tests;
 
 #[cfg(test)]
 mod bulk_shear_tests;
+
+#[cfg(test)]
+mod isothermal_stability_tests;
