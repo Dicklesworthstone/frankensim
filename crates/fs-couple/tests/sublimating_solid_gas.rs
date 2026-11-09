@@ -1,6 +1,8 @@
 //! Source-backed G0/G1/G3 checks for finite molecular phase/recoil exchange.
 #[path = "sublimating_solid_gas/fixture.rs"]
 mod fixture;
+#[path = "sublimating_solid_gas/adaptive.rs"]
+mod adaptive;
 use fixture::*;
 use fs_couple::solid_gas::kinetic::{
     KineticSublimationError, MovingSolidSurface, advance_solid_with_moving_gas,

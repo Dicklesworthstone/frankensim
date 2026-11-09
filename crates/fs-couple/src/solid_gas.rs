@@ -13,3 +13,6 @@
 
 /// One inventory-bounded, energy-conserving molecular source transaction.
 pub mod kinetic;
+
+/// Error-controlled repeated exchange on the same original physical owners.
+pub mod trajectory;
