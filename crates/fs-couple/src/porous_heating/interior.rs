@@ -26,6 +26,8 @@ use fs_thermal::enthalpy::{
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// Original molecular cylinder/cone viscous losses on finite gas heat cells.
+pub mod duct;
 /// Quasisteady full-volume acoustics refreshed from accepted thermal states.
 pub mod feedback;
 mod heat;
@@ -36,7 +38,7 @@ use heat::{InteriorHeatAccount, InteriorHeatState};
 /// Hard storage/work ceiling; a caller may request a smaller cell budget.
 pub const MAX_INTERIOR_HEATING_CELLS: usize = 4096;
 
-/// Existing thermal destination, in the original acoustic tetrahedron order.
+/// Existing thermal destination, in the acoustic owner's declared cell order.
 #[derive(Clone, Copy)]
 pub struct InteriorHeatCell<'t> {
     /// Stable native thermal control-volume identity.

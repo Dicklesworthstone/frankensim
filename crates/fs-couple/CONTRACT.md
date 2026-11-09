@@ -463,6 +463,67 @@ composition, separate availability accounting, original bindings and rollback.
 Formatting and bounded source review do not establish native runtime success;
 native execution remains pending in the current pinned-dependency environment.
 
+### Molecular duct viscous heat on native fixed-volume gas cells
+
+`porous_heating::interior::duct::MolecularDuctViscousHeating` connects original
+molecular cylinder and spherical-cone loss forms to `DepositionSimulation`.
+Both optional forms must borrow the exact same `PreparedMolecularNetworkFields`
+object; numerical equality of different prepared source banks is insufficient.
+The original network, material/diffusion/wall sources, frequency, clock and
+coherent mean/covariance factors remain borrowed. Each native loss bank evaluates
+coherence once at construction. Independent factors add powers after coherent
+interference within each factor; no default excitation replaces an absent mean
+and empty factor list. No cross-frequency or finite-shutter heat is inferred.
+
+Destinations follow cylinder cells then cone cells in original input order,
+independent of CellId sorting. Every selected interval must have positive axial
+length and volume, and its native receiver must have the same length, physical
+volume and original gas density times volume. Zero cells, repeated destinations
+and overlapping intervals on the same original edge/authored segment refuse.
+Cone slice identities do not permit overlapping physical intervals to be counted
+twice. A selected subset of the graph is supported; uncovered regions are not
+silently credited. Absolute world placement/orientation remain caller-owned,
+and the native exposed convection area is never replaced by acoustic wall area.
+
+The same original `CellBinding` retains geometry, mass, material, body/segment,
+exact caloric object, storage basis and caloric identity. Construction requires
+source equilibrium temperature and an identified InternalEnergy law. The caller
+must supply that gas's original Cv, datum and caloric correspondence; matching
+rho/T or a supplied identity is not proof of shared material provenance. An
+enthalpy/Cp law cannot stand in for fixed-volume internal-energy storage.
+No caloric law or gas equation of state is fabricated by this adapter.
+
+Only native `viscous_power_w` enters thermal sources, with no second volume,
+half or absorption factor. Fourier and molecular availability destruction and
+mechanical-wall work are retained as separate accepted-duration observations;
+none is deposited as gas heat. The source map is prepared once. Native thermal
+sources, contact conduction, reservoirs, events, material domains and timestep
+admission retain their existing owner. These same viscous watts must not also
+be authored as separate thermal sources.
+
+`DuctHeatingObserver` shares the immutable source and bindings while cloning
+only bounded energy accounts. Sources, events and accepted steps revalidate
+original bindings and the caller's finite positive temperature-excursion limit
+from each frozen gas state. Each accepted duration is charged once; there is
+no final-duration reintegration. Native candidate state and observer history
+publish together. Cancellation, material/binding or excursion refusal preserves
+the supplied accepted state and work account. Continuation uses the accepted
+observer and requires no acoustic solve, material refresh or loss quadrature.
+The convenience `advance_to` starts a fresh account for that requested advance.
+
+This is a held cycle-mean, frozen-material, fixed-volume coupling. Temperature
+excursion is an admission limit, not a certificate for unchanged material/phase
+or a model of pressure work, acoustic startup, streaming, thermal expansion or
+feedback. Magnus-profile interiors still require their original spatial law.
+The three focused native tests in `porous_heating/interior/duct/tests.rs` cover
+mixed coherent cylinder/cone heat with original caloric/event accounting,
+native contact/reservoir transport and split/composed observer history with
+late-cancellation rollback, and source/caloric identity, geometry/mass/overlap
+and strict-temperature refusal/retry. They use synthetic original-source
+fixtures, not empirical validation. Original Rust formatting/parser and
+whitespace checks passed. Native tests were not executed; source review and
+formatting do not establish compile or runtime success.
+
 ### Accepted-temperature feedback through the full interior pressure field
 
 `porous_heating::interior::feedback::TemperatureInteriorHeating` connects the
