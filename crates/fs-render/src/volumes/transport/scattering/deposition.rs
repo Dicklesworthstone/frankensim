@@ -18,7 +18,7 @@
 
 use super::super::{cells::validate_ray, checkpoint, deposition::removed_power};
 use super::prepared::{self, Monochromatic, PaletteOptics, PreparedOptics, UniformOptics};
-use super::{ScatteringGrid, VolumeTransportError};
+use super::{PhaseFunction, ScatteringGrid, VolumeTransportError};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
@@ -33,6 +33,39 @@ pub use momentum::{
     ScatteringWrenchDeposition,
 };
 use momentum::{HistoryMomentum, MomentumTallies};
+
+#[cfg(feature = "tracer")]
+mod polarized;
+#[cfg(feature = "tracer")]
+pub use polarized::PolarizedDepositionConfig;
+
+// Only the angular continuation varies: free flight, implicit capture, cell
+// ownership and all energy/momentum accounts remain in one history owner.
+trait DepositionPhase: Clone {
+    fn sample(
+        &mut self,
+        phase: &PhaseFunction,
+        wavelength_nm: f64,
+        direction: Vec3,
+        check: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
+        random: &mut impl FnMut() -> f64,
+    ) -> Result<Vec3, VolumeTransportError>;
+}
+
+#[derive(Clone, Copy)]
+struct ScalarPhase;
+impl DepositionPhase for ScalarPhase {
+    fn sample(
+        &mut self,
+        phase: &PhaseFunction,
+        wavelength_nm: f64,
+        direction: Vec3,
+        _: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
+        random: &mut impl FnMut() -> f64,
+    ) -> Result<Vec3, VolumeTransportError> {
+        Ok(phase.sample_packet(&[wavelength_nm], direction, random(), random())?.direction)
+    }
+}
 
 /// Caller-owned sampling, work and retained spatial-output limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -213,7 +246,24 @@ fn deposit_prepared_observed<const N: usize>(
     unit_direction: Vec3,
     incident_power_w: &[f64; N],
     config: ScatteringDepositionConfig,
+    momentum: Option<&mut MomentumTallies<N>>,
+) -> Result<ScatteringPowerDeposition<N>, VolumeTransportError> {
+    deposit_prepared_sampled(
+        medium, check, origin, unit_direction, incident_power_w, config,
+        momentum, &[ScalarPhase; N],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn deposit_prepared_sampled<const N: usize>(
+    medium: &impl PreparedOptics<N>,
+    check: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
+    origin: Point3,
+    unit_direction: Vec3,
+    incident_power_w: &[f64; N],
+    config: ScatteringDepositionConfig,
     mut momentum: Option<&mut MomentumTallies<N>>,
+    phases: &[impl DepositionPhase; N],
 ) -> Result<ScatteringPowerDeposition<N>, VolumeTransportError> {
     let wavelengths_nm = medium.wavelengths();
     check()?;
@@ -300,7 +350,7 @@ fn deposit_prepared_observed<const N: usize>(
             let mut history_momentum = momentum
                 .as_deref_mut()
                 .map(|tallies| HistoryMomentum::new(tallies, lane, history));
-            let history_result = trace_history_observed(
+            let history_result = trace_history_sampled(
                 &monochromatic,
                 check,
                 (origin, unit_direction, source_w),
@@ -309,6 +359,7 @@ fn deposit_prepared_observed<const N: usize>(
                 &mut || random.next_f64(),
                 &mut |cell, heat| spatial.cell(cell)?.lanes[lane][0].capture(history, heat),
                 history_momentum.as_mut(),
+                &mut phases[lane].clone(),
             )?;
             if let Some(tally) = history_momentum {
                 tally.finish()?;
@@ -375,7 +426,25 @@ fn trace_history_observed<const N: usize>(
     traced_segments: &mut u64,
     random: &mut impl FnMut() -> f64,
     capture: &mut impl FnMut(usize, f64) -> Result<(), VolumeTransportError>,
+    momentum: Option<&mut HistoryMomentum<'_, N>>,
+) -> Result<HistoryOutcome, VolumeTransportError> {
+    trace_history_sampled(
+        medium, check, source, limits, traced_segments, random, capture,
+        momentum, &mut ScalarPhase,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn trace_history_sampled<const N: usize>(
+    medium: &impl PreparedOptics<1>,
+    check: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
+    source: (Point3, Vec3, f64),
+    limits: (u32, u64),
+    traced_segments: &mut u64,
+    random: &mut impl FnMut() -> f64,
+    capture: &mut impl FnMut(usize, f64) -> Result<(), VolumeTransportError>,
     mut momentum: Option<&mut HistoryMomentum<'_, N>>,
+    phase: &mut impl DepositionPhase,
 ) -> Result<HistoryOutcome, VolumeTransportError> {
     let mut precision_limited = false;
     let (mut position, mut direction, source_w) = source;
@@ -449,10 +518,9 @@ fn trace_history_observed<const N: usize>(
         }
         // A monochromatic matched phase sample has physical/PDF
         // weight one, including interpolated spectral phase tables.
-        let outgoing = medium
-            .phase(event.cell_index)
-            .sample_packet(medium.wavelengths(), direction, random(), random())?
-            .direction;
+        let outgoing = phase.sample(
+            medium.phase(event.cell_index), medium.wavelengths()[0], direction, check, random,
+        )?;
         if let Some(tally) = momentum.as_deref_mut() {
             tally.capture(
                 event.cell_index,

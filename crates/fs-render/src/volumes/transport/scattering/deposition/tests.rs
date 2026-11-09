@@ -11,7 +11,7 @@ use crate::volumes::transport::{
 use fs_exec::{Budget, CancelGate, ExecMode};
 use std::sync::Arc;
 
-fn with_cx<R>(f: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
+pub(super) fn with_cx<R>(f: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
     let gate = CancelGate::new_clock_free();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     pool.scope(|arena| {
@@ -33,7 +33,7 @@ fn with_cx<R>(f: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
     })
 }
 
-fn medium<'a>(
+pub(super) fn medium<'a>(
     cx: &Cx<'_>,
     density: &'a [f64],
     a: f64,
@@ -60,7 +60,7 @@ fn medium<'a>(
     .unwrap()
 }
 
-fn palette<T>(cx: &Cx<'_>, values: Vec<T>, cells: &[u32]) -> CellPalette<T> {
+pub(super) fn palette<T>(cx: &Cx<'_>, values: Vec<T>, cells: &[u32]) -> CellPalette<T> {
     let budget = CellPaletteBudget {
         max_models: values.len(),
         max_cells: cells.len(),
@@ -88,7 +88,7 @@ fn indexed_medium<'a>(
     ScatteringGrid::try_new_indexed(cx, absorption, scattering).unwrap()
 }
 
-fn config(samples: u32, depth: u32) -> ScatteringDepositionConfig {
+pub(super) fn config(samples: u32, depth: u32) -> ScatteringDepositionConfig {
     ScatteringDepositionConfig {
         histories_per_lane: samples,
         max_collisions_per_history: depth,
@@ -118,7 +118,7 @@ fn trace<const N: usize>(
         .unwrap()
 }
 
-fn balance<const N: usize>(report: &ScatteringPowerDeposition<N>) {
+pub(super) fn balance<const N: usize>(report: &ScatteringPowerDeposition<N>) {
     for lane in 0..N {
         let total = report.ballistic_escape.mean_w[lane]
             + report.diffuse_escape.mean_w[lane]

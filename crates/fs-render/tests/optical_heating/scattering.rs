@@ -212,3 +212,82 @@ fn malformed_reports_and_failed_native_advances_leave_heat_and_radiation_unpubli
         close(accepted.energy().thermal_input_j, audit.external_heat_j);
     });
 }
+
+#[test]
+fn g1_polarized_scattering_deposits_only_absorbed_watts_in_original_thermal_cells() {
+    use fs_render::polarization::Stokes;
+    use fs_render::polarization::dielectric::transport::PolarizationFrame;
+    use fs_render::volumes::transport::scattering::deposition::PolarizedDepositionConfig;
+
+    with_cx(|cx| {
+        let medium = ScatteringGrid::try_new(
+            cx,
+            grid(
+                cx,
+                &[1.0, 2.0],
+                MassAbsorptionSpectrum::constant(0.7).unwrap(),
+            ),
+            MassScatteringSpectrum::constant(2.0).unwrap(),
+            PhaseFunction::Rayleigh,
+        )
+        .unwrap();
+        let frame =
+            PolarizationFrame::try_new(Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0)).unwrap();
+        let settings = PolarizedDepositionConfig {
+            transport: ScatteringDepositionConfig {
+                histories_per_lane: 2_000,
+                max_collisions_per_history: 64,
+                max_total_segments: 200_000,
+                max_deposition_cells: 2,
+                seed: 125,
+                source_id: 7,
+            },
+            max_phase_proposals: 128,
+        };
+        for input in [
+            Stokes::try_new(100.0, 100.0, 0.0, 0.0).unwrap(),
+            Stokes::try_new(100.0, 30.0, -40.0, 50.0).unwrap(),
+        ] {
+            let report = medium
+                .deposit_polarized_multiple_scattering_power(
+                    cx,
+                    Point3::new(-1.0, 0.5, 0.5),
+                    frame,
+                    &[550.0],
+                    &[input],
+                    settings,
+                )
+                .unwrap();
+            let absorbed = report.absorbed.mean_w[0];
+            assert!(absorbed > 0.0 && absorbed < input.i);
+            assert!(report.diffuse_escape.mean_w[0] > 0.0);
+            let expected_cells: Vec<_> = report
+                .cells
+                .iter()
+                .map(|cell| (cell.cell_index, cell.absorbed.mean_w[0]))
+                .collect();
+            let original = thermal(
+                vec![cell(11, 2.0, 1.0, 0.0), cell(12, 3.0, 1.0, 0.0)],
+                &SENSIBLE,
+                vec![],
+            );
+            let bindings = [(0, CellId(11)), (1, CellId(12))];
+            let heating =
+                ScatteringHeating::try_new(report, &bindings, &original, allowance(), || Ok(()))
+                    .unwrap();
+            let duration = 1.75;
+            let (after, observed, audit) = original
+                .advance_observed(&heating, duration, config(0.125), || Ok(()))
+                .unwrap();
+            for (index, watts) in expected_cells {
+                let state = &after.cells()[&bindings[index].1];
+                close(state.mass_kg * state.specific_h_j_kg, duration * watts);
+            }
+            close(audit.external_heat_j, duration * absorbed);
+            close(observed.energy().thermal_input_j, duration * absorbed);
+            close(observed.energy().incident_j[0], duration * input.i);
+            assert_eq!(original.time_s(), 0.0);
+            assert_eq!(heating.energy().thermal_input_j, 0.0);
+        }
+    });
+}

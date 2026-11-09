@@ -182,7 +182,7 @@ pub(super) struct MomentumTallies<const N: usize> {
     orbital: Option<OrbitalTallies<N>>,
 }
 impl<const N: usize> MomentumTallies<N> {
-    fn new(limit: usize) -> Self {
+    pub(super) fn new(limit: usize) -> Self {
         Self {
             force: [[Moments::default(); 3]; N],
             escape: [[[Moments::default(); 3]; N]; 3],
@@ -211,7 +211,7 @@ impl<const N: usize> MomentumTallies<N> {
         history.leave(0, power.transmitted_power_w[0], origin, direction)?;
         history.finish()
     }
-    fn finish(
+    pub(super) fn finish(
         self,
         check: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
         power: &ScatteringPowerDeposition<N>,

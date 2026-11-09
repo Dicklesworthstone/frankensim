@@ -109,6 +109,79 @@ impl PhaseFunction {
         )?;
         Ok(PolarizedPhaseSample { beam, pdf: sample.pdf })
     }
+
+    /// Sample the physical polarized angular density without changing packet
+    /// power. This is the matched continuation needed by conservative heating
+    /// and momentum histories; `sample_polarized` instead returns importance
+    /// weights that can exceed the incoming power.
+    ///
+    /// Rejection reuses the original scalar CDF and full Stokes response.
+    /// Its envelope is `1 + degree_of_linear_polarization`: the differential
+    /// intensity is M00 I + M01 Q in the scattering frame, and |M01| <= M00.
+    /// Thus at most two proposals are needed on average. Circular/unpolarized
+    /// inputs need one proposal and no acceptance draw. Every trial polls the
+    /// caller's checkpoint; exhausting the explicit cap refuses the operation.
+    /// The returned PDF is the actual polarized density, not the scalar proposal.
+    pub fn sample_polarized_power_with_checkpoint(
+        &self,
+        check: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
+        beam: PolarizedBeam,
+        max_proposals: u32,
+        random: &mut impl FnMut() -> f64,
+    ) -> Result<PolarizedPhaseSample, PolarizedScatteringError> {
+        check()?;
+        self.admit_polarized()?;
+        if max_proposals == 0 {
+            return Err(VolumeTransportError::Budget.into());
+        }
+        let input = beam.power();
+        if input.i <= 0.0 {
+            return Err(BeamError::InvalidStokes.into());
+        }
+        // Unit intensity avoids overflowing a large physical packet while
+        // evaluating the at-most-two proposal weight.
+        let normalized = Stokes::try_new(
+            1.0, input.q / input.i, input.u / input.i, input.v / input.i,
+        ).ok_or(BeamError::InvalidStokes)?;
+        let unit_beam = PolarizedBeam::try_new(
+            beam.ray().origin, beam.frame(), beam.wavelength_nm(), beam.medium(), normalized,
+        )?;
+        let linear = det::hypot(normalized.q, normalized.u).min(1.0);
+        let envelope = 1.0 + linear;
+        for _ in 0..max_proposals {
+            check()?;
+            let proposal = self.sample_polarized(unit_beam, [random(), random()])?;
+            let response = proposal.beam.power();
+            let weight = response.i;
+            if !weight.is_finite() || weight > envelope * (1.0 + 128.0*f64::EPSILON) {
+                return Err(BeamError::NumericalRange.into());
+            }
+            if linear != 0.0 {
+                let accept = random();
+                if !unit_variate(accept) { return Err(VolumeTransportError::Sample.into()); }
+                if accept * envelope >= weight { continue; }
+            }
+            if weight <= 0.0 {
+                return Err(BeamError::NumericalRange.into());
+            }
+            let pdf = proposal.pdf * weight;
+            if !pdf.is_finite() || pdf <= 0.0 {
+                return Err(VolumeTransportError::Unrepresentable.into());
+            }
+            let power = Stokes::try_new(
+                input.i,
+                (response.q / weight) * input.i,
+                (response.u / weight) * input.i,
+                (response.v / weight) * input.i,
+            ).ok_or(BeamError::NumericalRange)?;
+            let beam = PolarizedBeam::try_new(
+                beam.ray().origin, proposal.beam.frame(), beam.wavelength_nm(), beam.medium(), power,
+            )?;
+            check()?;
+            return Ok(PolarizedPhaseSample { beam, pdf });
+        }
+        Err(VolumeTransportError::Budget.into())
+    }
 }
 
 /// Sampled phase continuation; PDF is a solid-angle density, never a delta.

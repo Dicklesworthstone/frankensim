@@ -3576,6 +3576,33 @@ absorption, elastic isotropy, forward/backward scattering, individual-history
 momentum closure, local spectral phases, diffuse escape, repeatability and
 transactional refusal.
 
+### Polarized multiple-scattering heat and force
+
+With `tracer`, `ScatteringGrid::deposit_polarized_multiple_scattering_power`
+and `deposit_polarized_multiple_scattering_momentum` accept a common physical
+reference frame and quadrature-weighted full-Stokes watts at each wavelength.
+Every history retains its actual polarization through the native Rayleigh,
+depolarized-Rayleigh, retained spherical-Mueller, spectral and mixture phase
+owners. Angular proposals use the existing scalar density and reject against
+the full Mueller intensity with envelope `1 + hypot(Q,U)/I`; accepted packets
+retain their original power and carry the normalized outgoing Stokes state.
+Circular and unpolarized inputs need no rejection draw. The original native
+free flights, implicit capture, original-cell heat identities, force transfer,
+compensated statistics and directed unresolved accounts remain the owners.
+The common power report feeds `ScatteringHeating` without another heat debit.
+
+`PolarizedDepositionConfig::max_phase_proposals` bounds each angular draw.
+Cancellation, invalid/nonphysical states, unsupported scattering laws and
+proposal exhaustion return no partial heat or force report. Absorption-only
+lanes retain exact Beer deposition, including scalar-only phase declarations
+that are never used. Scope is stationary, index-one transport with isotropic
+extinction and randomly oriented molecular/spherical scatterers; aligned or
+dichroic media, refractive-host stress, optical spin torque and moving-medium
+work remain outside these APIs. Focused regressions specify analytic dipole
+angular moments/PDFs, dark-proposal rejection, exact absorption, spectral
+multicollision heat/momentum closure, orthogonal-polarization spatial heating,
+transactional refusal and transfer to original thermal enthalpy cells.
+
 ### Orbital torque on native volume histories
 
 `deposit_multiple_scattering_wrench` on both `ScatteringGrid` and

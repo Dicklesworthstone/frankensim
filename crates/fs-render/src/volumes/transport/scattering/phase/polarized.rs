@@ -1,7 +1,7 @@
 //! Full-Stokes dispatch using the original scalar spectral mixture weights.
 
 use super::PhaseFunction;
-use crate::polarization::dielectric::transport::BeamError;
+use crate::polarization::dielectric::transport::{BeamError, physical_roundoff};
 use crate::polarization::{Mueller, Stokes};
 use crate::volumes::transport::VolumeTransportError;
 use crate::volumes::transport::scattering::polarized::PolarizedScatteringError;
@@ -125,7 +125,13 @@ impl PhaseFunction {
                 {
                     return Err(BeamError::NumericalRange.into());
                 }
-                admit(out)
+                // Near a dipole null, frame-rotation roundoff in I+Q is
+                // magnified relative to the weak outgoing intensity. Bound
+                // the coherency correction by the original differential
+                // scale, preserving I and the explicit positive-channel
+                // underflow guard above. Spectral/mixture endpoints must not
+                // reject a physical ray before their responses are combined.
+                admit(physical_roundoff(out, scale * input.i)?)
             }
             Self::SphericalTable(table) => Ok(table.evaluate(cosine)?.apply(input)?),
             Self::SpectralTable(table) => {
