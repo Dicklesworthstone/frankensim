@@ -8,10 +8,15 @@
 //! One first-order segregated step solves momentum, k and modified epsilon
 //! with implicit diffusion/destruction and lagged constitutive coefficients.
 //! Face eddy work from the accepted momentum trial supplies exactly the same
-//! integrated production to k. This is a resolved-wall mechanical channel;
-//! it supplies no thermal, porous, buoyancy, transition or 3D flow model.
+//! integrated production to k. The optional thermal step transports passive
+//! sensible heat with the prepared endpoint eddy viscosity and accepts all
+//! fields together. Neither path supplies porous, buoyancy, transition or
+//! three-dimensional flow physics.
 
 use super::{RansChannelGrid, RansFieldState, RansSolver};
+
+mod thermal;
+pub use thermal::{RansHeatLoad, RansThermalTransportReport};
 
 /// A refused step leaves every accepted field untouched.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -104,6 +109,13 @@ impl RansTransportWorkspace {
         self.velocity.len() * 9 * core::mem::size_of::<f64>()
     }
 
+    fn publish_mechanics(&self, state: &mut RansFieldState) {
+        state.u.copy_from_slice(&self.velocity);
+        state.k.copy_from_slice(&self.kinetic);
+        state.eps.copy_from_slice(&self.dissipation);
+        state.nu_t.copy_from_slice(&self.viscosity);
+    }
+
     fn solve(
         &mut self,
         equation: &'static str,
@@ -193,6 +205,30 @@ impl RansSolver {
         &self,
         grid: &RansChannelGrid,
         state: &mut RansFieldState,
+        pressure_gradient_pa_m: f64,
+        time_step_s: f64,
+        work: &mut RansTransportWorkspace,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<RansTransportReport, RansTransportError> {
+        let report = self.prepare_launder_sharma(
+            grid,
+            state,
+            pressure_gradient_pa_m,
+            time_step_s,
+            work,
+            &mut cancelled,
+        )?;
+        work.publish_mechanics(state);
+        Ok(report)
+    }
+
+    // Retain the original numerical path and cancellation order, but defer
+    // publication so a passive scalar can share the same acceptance boundary.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_launder_sharma(
+        &self,
+        grid: &RansChannelGrid,
+        state: &RansFieldState,
         pressure_gradient_pa_m: f64,
         time_step_s: f64,
         work: &mut RansTransportWorkspace,
@@ -484,10 +520,6 @@ impl RansSolver {
             work.viscosity[i] = eddy_viscosity(self, work.kinetic[i], work.dissipation[i], i)?;
         }
         checkpoint(0, &mut cancelled)?;
-        state.u.copy_from_slice(&work.velocity);
-        state.k.copy_from_slice(&work.kinetic);
-        state.eps.copy_from_slice(&work.dissipation);
-        state.nu_t.copy_from_slice(&work.viscosity);
         Ok(report)
     }
 }

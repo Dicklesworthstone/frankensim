@@ -1585,3 +1585,50 @@ with retry. With the original card and BLAKE3 owner, all 19 module tests and
 8 existing RANS integration tests passed on pinned nightly-2026-07-06.
 This is native validation of these source modules, not a full-workspace test
 or an empirical turbulent-channel calibration.
+
+## Conservative transient heat with transported channel turbulence
+
+`RansSolver::advance_launder_sharma_with_heat` advances the same momentum,
+k and modified-epsilon equations, then prepares passive sensible heat before
+jointly accepting all five fields. Its thermal diffusivity is
+`k_thermal/(rho*cp) + nu_t/Pr_t`, using the newly prepared mechanical
+endpoint's eddy viscosity and the admitted turbulent Prandtl number.
+`RansHeatLoad` supplies a signed wall heat flux [W/m²], positive into the
+channel, and optional per-node volumetric heating [W/m³] held over the
+physical interval. Both wall and centerline half-cells retain thermal
+storage; the centerline exterior is insulated.
+
+One symmetric face conductance supplies equal/opposite neighbor fluxes on
+the stretched grid. Backward Euler solves temperature increments, preserving
+a uniform unforced temperature exactly and avoiding a large-background
+temperature right-hand side. The existing tridiagonal arrays are reused:
+the coupled step still needs only the original nine f64 fields and makes no
+per-step numerical allocation. The endpoint report retains the mechanical
+budget and adds thermal inventories/change per unit wall area [J/m²], wall
+and integrated volume heat inputs [W/m²], and a thermal balance defect.
+Compensated local accepted-temperature increments measure the actual
+representable inventory change, including endpoint rounding.
+
+Positive finite thermal material parameters, finite correctly sized heat
+loads and positive finite temperature endpoints are required. Cancellation,
+late thermal failure or an unrepresentable operator/inventory leaves
+accepted momentum, turbulence, eddy viscosity and temperature unchanged;
+the same workspace supports retry. Mechanical-only stepping retains its
+previous numerical path and publication semantics.
+
+Temperature does not change material properties or create buoyancy; modeled
+mechanical dissipation is not deposited as heat. This is a constant-property
+passive thermal channel, not a variable-density total-energy model. No axial
+heat removal is inferred: nonzero net input changes thermal inventory rather
+than defining a thermal steady state.
+
+Seven new native thermal regression groups compare the endpoint against an
+independent dense physical-unit solve; verify wall/volumetric heating and
+rho-cp storage scaling; distinguish updated versus frozen eddy diffusivity
+and authored Prandtl numbers; check the no-source maximum principle and
+exact uniform-temperature invariant; admit signed cooling until the
+temperature bound; refuse invalid inputs and late arithmetic without partial
+state; and cancel at every observed poll before exact retry. All 26 module
+tests and 8 existing RANS integration tests passed in the focused pinned
+nightly build with the original card and BLAKE3 owner. Full-workspace and
+empirical turbulent heat-transfer validation remain outside that evidence.
