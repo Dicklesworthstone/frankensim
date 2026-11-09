@@ -4754,3 +4754,33 @@ refusal with retry. Those four integration groups remain uncompiled and
 unexecuted because the full dependency build is resource-blocked. Pinned
 formatting, recursive parsing and scoped whitespace checks pass. The narrow
 kernel execution does not establish whole-crate or native integration success.
+
+
+## Temperature continuation of combined adhesive loading and failure
+
+`mixed_mode::combined::loading::temperature` continues the original proportional
+shear/twist loading owner through an authenticated held-indentation normal-source
+refresh. Approach, both shear coordinates, twist, load factor, directions, solve
+controls, accepted step count and accumulated released energy remain fixed.
+Original ordered material claims, independent bulk/interface temperatures,
+geometry and applicability envelopes retain their authority.
+
+Attached continuation recomputes the first fold/opening boundary and the actual
+common-radius endpoint under one shared evaluation budget, including the old
+normal witness, preparation probes and endpoint. Lost equilibrium or a newly
+exceeded boundary refuses without clamping, detaching or publishing partial
+history. Exact no-op refresh preserves the cached fold response and state.
+Changed-source detached continuation needs no hypothetical attached preload;
+it remains usable when heating destroys every attached equilibrium, and cooling
+cannot rebond it or erase prior release.
+
+The four signed normal, shear, twist and surface storage changes sum to explicit
+external coefficient work and are checked independently against total storage
+change. This endpoint update supplies no caloric heat, mechanical impulse,
+thermal expansion, dissipation or stability claim along an unspecified thermal
+path. Cancellation and source, history or budget refusal return no candidate.
+Five focused source integration groups cover independent potential reconstruction,
+new failure limits, no-op/round-trip history, detached branch loss, source and
+control refusals, and a shared evaluation-budget boundary. Formatting/parser and
+whitespace checks passed; these groups were not compiled or executed because the
+required constellation sibling checkouts and remote build runners were absent.

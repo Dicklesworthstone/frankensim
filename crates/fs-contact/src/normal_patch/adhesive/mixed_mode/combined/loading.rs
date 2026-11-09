@@ -24,6 +24,9 @@
 
 mod radius;
 
+/// Original-source thermal changes with retained loading and release history.
+pub mod temperature;
+
 use super::{JkrCombinedBoundary, JkrCombinedError, JkrCombinedResponse, SourceJkrMixedMode};
 use core::f64::consts::PI;
 use fs_blake3::{ContentHash, DomainHasher};
@@ -167,7 +170,8 @@ pub struct JkrCombinedLoading<'a> {
     direction: [f64; 3],
     controls: JkrCombinedLoadingControls,
     identity: ContentHash,
-    zero: JkrCombinedResponse,
+    // A detached thermal successor needs no hypothetical attached preload.
+    zero: Option<JkrCombinedResponse>,
     limit: Option<JkrCombinedLoadingLimit>,
     preparation_evaluations: usize,
 }
@@ -191,9 +195,22 @@ impl<'a> JkrCombinedLoading<'a> {
             shear_direction_m[1],
             twist_direction_rad,
         ];
+        let mut loading = Self::unprepared(source, indentation_m, direction, controls)?;
+        let mut work = Work::new(controls.maximum_evaluations, gate);
+        loading.prepare(&mut work)?;
+        poll(gate)?;
+        Ok(loading)
+    }
+
+    fn unprepared(
+        source: &'a SourceJkrMixedMode,
+        indentation_m: f64,
+        direction: [f64; 3],
+        controls: JkrCombinedLoadingControls,
+    ) -> Result<Self, JkrCombinedLoadingError> {
         if direction.iter().any(|x| !x.is_finite())
             || direction.iter().all(|x| *x == 0.0)
-            || !shear_direction_m[0].hypot(shear_direction_m[1]).is_finite()
+            || !direction[0].hypot(direction[1]).is_finite()
             || !indentation_m.is_finite()
             || controls.maximum_iterations == 0
             || controls.maximum_evaluations == 0
@@ -208,10 +225,6 @@ impl<'a> JkrCombinedLoading<'a> {
                 "finite proportional loading controls",
             ));
         }
-        let mut work = Work::new(controls.maximum_evaluations, gate);
-        work.charge()?;
-        let zero =
-            source.evaluate_combined_displacement_controlled([indentation_m, 0.0, 0.0, 0.0])?;
         let mut hash = DomainHasher::new("org.frankensim.fs-contact.jkr-combined-loading.v1");
         hash.update(source.identity().as_bytes());
         for value in direction.into_iter().chain([
@@ -224,25 +237,38 @@ impl<'a> JkrCombinedLoading<'a> {
         for value in [controls.maximum_iterations, controls.maximum_evaluations] {
             hash.update(&(value as u64).to_le_bytes());
         }
-        let mut loading = Self {
+        Ok(Self {
             source,
             indentation_m,
             direction,
             controls,
             identity: hash.finalize(),
-            zero,
+            zero: None,
             limit: None,
             preparation_evaluations: 0,
-        };
-        loading.limit = loading.locate_limit(&mut work)?;
-        loading.preparation_evaluations = work.evaluations;
-        poll(gate)?;
-        Ok(loading)
+        })
+    }
+
+    fn prepare(&mut self, work: &mut Work<'_>) -> Result<(), JkrCombinedLoadingError> {
+        let start = work.evaluations;
+        work.charge()?;
+        self.zero = Some(self.source.evaluate_combined_displacement_controlled([
+            self.indentation_m,
+            0.0,
+            0.0,
+            0.0,
+        ])?);
+        self.limit = self.locate_limit(work)?;
+        self.preparation_evaluations = work.evaluations - start;
+        Ok(())
     }
 
     pub const fn source(&self) -> &'a SourceJkrMixedMode {
         self.source
     }
+    /// Prepared first boundary. `None` also applies to a detached thermal
+    /// successor, which makes no attached-family claim and cannot initialize
+    /// an attached state.
     pub const fn limit(&self) -> Option<JkrCombinedLoadingLimit> {
         self.limit
     }
@@ -253,6 +279,8 @@ impl<'a> JkrCombinedLoading<'a> {
         self.preparation_evaluations
     }
 
+    /// Initialize an independently prescribed attached preload. An owner
+    /// continued only as detached history has no such prepared family.
     pub fn initial_state(
         &self,
         load_factor: f64,
@@ -301,7 +329,7 @@ impl<'a> JkrCombinedLoading<'a> {
                 before.contact_radius_m.max(after.contact_radius_m),
             ];
             if previous.load_factor.is_sign_negative() != accepted.is_sign_negative() {
-                radii[1] = radii[1].max(self.zero.contact_radius_m);
+                radii[1] = radii[1].max(self.prepared_zero()?.contact_radius_m);
             }
             radii = [radii[0].next_down(), radii[1].next_up()];
             for a in radii {
@@ -422,6 +450,7 @@ impl<'a> JkrCombinedLoading<'a> {
         work: &mut Work<'_>,
     ) -> Result<JkrCombinedResponse, JkrCombinedLoadingError> {
         poll(work.gate)?;
+        let zero = self.prepared_zero()?;
         let q = self.coordinates(load)?;
         if let Some(limit) = self.limit {
             if load.abs() > limit.load_factor {
@@ -443,7 +472,7 @@ impl<'a> JkrCombinedLoading<'a> {
             }
         }
         if load == 0.0 {
-            return Ok(self.zero);
+            return Ok(zero);
         }
         work.charge()?;
         Ok(self.source.evaluate_combined_displacement_controlled(q)?)
@@ -453,13 +482,14 @@ impl<'a> JkrCombinedLoading<'a> {
         &self,
         work: &mut Work<'_>,
     ) -> Result<Option<JkrCombinedLoadingLimit>, JkrCombinedLoadingError> {
-        if self.zero.boundary == Some(JkrCombinedBoundary::RadialFold) {
+        let zero = self.prepared_zero()?;
+        if zero.boundary == Some(JkrCombinedBoundary::RadialFold) {
             return self
                 .make_limit(
                     JkrCombinedBoundary::RadialFold,
                     0.0,
-                    self.zero.contact_radius_m,
-                    [self.zero.contact_radius_m; 2],
+                    zero.contact_radius_m,
+                    [zero.contact_radius_m; 2],
                 )
                 .map(Some);
         }
@@ -487,7 +517,7 @@ impl<'a> JkrCombinedLoading<'a> {
             b,
             t,
             ell,
-            self.zero.contact_radius_m / normal.spinodal_radius_m,
+            zero.contact_radius_m / normal.spinodal_radius_m,
             self.controls.maximum_iterations,
             || work.charge(),
         )
@@ -525,6 +555,12 @@ impl<'a> JkrCombinedLoading<'a> {
                 .next_up(),
         ];
         self.make_limit(kind, load, a, bracket).map(Some)
+    }
+
+    fn prepared_zero(&self) -> Result<JkrCombinedResponse, JkrCombinedLoadingError> {
+        self.zero.ok_or(JkrCombinedLoadingError::Invalid(
+            "detached continuation has no prepared attached loading family",
+        ))
     }
 
     fn make_limit(

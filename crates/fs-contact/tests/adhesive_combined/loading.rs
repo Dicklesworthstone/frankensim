@@ -1,4 +1,7 @@
 //! Combined first-boundary physics, reversible work and explicit release.
+#[path = "loading/temperature.rs"]
+mod temperature;
+
 use super::{close, source};
 use core::f64::consts::PI;
 use fs_contact::normal_patch::adhesive::mixed_mode::{
