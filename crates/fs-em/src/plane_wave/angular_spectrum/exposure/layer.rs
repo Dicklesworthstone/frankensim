@@ -8,9 +8,10 @@
 //! heat through shared orthogonal temporal modes. Native angular frequencies
 //! and the distinction between real fields and proper factors are retained;
 //! a real band admits its full carrier, not just its slow beat. Wider/shaped
-//! windows keep the original pair law. Signed flux and storage keep their
-//! original contractions; the positive factor is not a null-relative error
-//! certificate and adds no material or switch-on approximation.
+//! windows keep the original pair law. Signed flux and reversible storage
+//! use cross products of the same temporal modes, without a positivity clamp.
+//! The factor is not a null-relative error certificate and adds no material
+//! or switch-on approximation.
 
 use super::*;
 use crate::plane_wave::layers::FIELD_PREPARATION_WORKSPACE_BYTES;
@@ -21,6 +22,8 @@ use fs_fft::harmonic_window::{
 
 mod reservoir;
 use reservoir::{LossLaw, PoleTransfer};
+
+mod temporal_moments;
 
 mod integrated_heat;
 pub use integrated_heat::{
@@ -46,9 +49,10 @@ pub struct AngularSpectrumExposureLayerLimits {
     /// N * sum(F_r²) * (3 + D + 2*L), with D Debye and L Lorentz poles, plus
     /// sum_real F_r*N*(width+height) for a nonzero common carrier. The three
     /// base channels cover the vector field and its instantaneous E/H stores.
-    /// Eligible short-band banks additionally reserve N*(2+D+L)*(F_r+1)*17.
+    /// Eligible short-band banks reserve N*(6+3*D+5*L)*(F_r+1)*17 for
+    /// vector value/derivative projections and signed cross contractions.
     /// At most 64 proper or 32 real tones use this bounded factor. This bounds
-    /// positive temporal projections before the query's shutter is known.
+    /// temporal projections before the query's shutter is known.
     pub maximum_point_reservoir_frequency_pairs: usize,
     pub maximum_workspace_bytes: usize,
     pub maximum_fft_work: u64,
@@ -186,6 +190,7 @@ struct PositiveLayerMoments<'w> {
     factor: UniformHarmonicBandRef<'w>,
     frequencies: usize,
     proper: bool,
+    derivative_frequencies: [Dd; MAX_UNIFORM_HARMONIC_BAND_TONES],
 }
 
 impl<'w> PositiveLayerMoments<'w> {
@@ -207,10 +212,25 @@ impl<'w> PositiveLayerMoments<'w> {
         }
         .map_err(|_| bad("film exposure positive temporal factor is unrepresentable"))?;
         poll(cancelled)?;
-        Ok(factor.map(|factor| Self {
-            factor,
-            frequencies: frequencies.len(),
-            proper,
+        Ok(factor.map(|factor| {
+            // A common proper carrier contributes only an imaginary multiple
+            // of each self product, hence exactly zero real storage rate.
+            // Remove it before differentiation, never after large products.
+            let reference = if proper {
+                Dd::from_f64(frequencies[0])
+            } else {
+                Dd::ZERO
+            };
+            let mut derivative_frequencies = [Dd::ZERO; MAX_UNIFORM_HARMONIC_BAND_TONES];
+            for (target, &frequency) in derivative_frequencies.iter_mut().zip(frequencies) {
+                *target = Dd::from_f64(frequency) - reference;
+            }
+            Self {
+                factor,
+                frequencies: frequencies.len(),
+                proper,
+                derivative_frequencies,
+            }
         }))
     }
 
@@ -336,7 +356,7 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
             let band_tones = positive_band_tones(f, proper);
             if let Some(tones) = band_tones {
                 positive_pairs = n
-                    .checked_mul(law.pole_count() + 2)
+                    .checked_mul(6 + law.pole_count() + 2 * law.reservoir_pair_channels())
                     .and_then(|v| v.checked_mul(tones + 1))
                     .and_then(|v| v.checked_mul(MAX_UNIFORM_HARMONIC_BAND_MODES))
                     .and_then(|v| v.checked_add(positive_pairs))
@@ -714,13 +734,15 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         fields
             .try_reserve_exact(f)
             .map_err(|_| bad("film exposure field allocation failed"))?;
-        filtered
-            .try_reserve_exact(f)
-            .map_err(|_| bad("film exposure reservoir field allocation failed"))?;
-        if self.law.has_inertial_storage() {
-            kinetic
+        if positive.is_none() {
+            filtered
                 .try_reserve_exact(f)
-                .map_err(|_| bad("film exposure inertial field allocation failed"))?;
+                .map_err(|_| bad("film exposure reservoir field allocation failed"))?;
+            if self.law.has_inertial_storage() {
+                kinetic
+                    .try_reserve_exact(f)
+                    .map_err(|_| bad("film exposure inertial field allocation failed"))?;
+            }
         }
         for group in 0..f {
             poll(cancelled)?;
@@ -735,9 +757,11 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
                 })?,
             );
             mapping.push(index);
-            filtered.push([C64::ZERO; 6]);
-            if self.law.has_inertial_storage() {
-                kinetic.push([C64::ZERO; 3]);
+            if positive.is_none() {
+                filtered.push([C64::ZERO; 6]);
+                if self.law.has_inertial_storage() {
+                    kinetic.push([C64::ZERO; 3]);
+                }
             }
         }
         let normal_power = {
@@ -756,72 +780,89 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         }
         for (point, sum) in sums.iter_mut().enumerate() {
             poll(cancelled)?;
-            let moments = layer_point_moments(
-                f,
-                &kernels,
-                |i| fields[i][point],
-                |k, a, b| product(k.product, a, b),
-                positive.as_ref(),
-                cancelled,
-            )
-            .map_err(moment_error)?;
-            let mut storage = instantaneous_storage_rate(
-                &kernels,
-                f,
-                |i| fields[i][point],
-                &product,
-                self.law.epsilon_infinity,
-                self.law.permeability,
-                cancelled,
-            )
-            .map_err(moment_error)?;
+            let projected = positive
+                .as_ref()
+                .map(|positive| positive.project_field(|i| fields[i][point], cancelled))
+                .transpose()
+                .map_err(moment_error)?;
+            let moments = if let (Some(positive), Some(projected)) = (&positive, &projected) {
+                projected
+                    .moments(positive, cancelled)
+                    .map_err(moment_error)?
+            } else {
+                layer_point_moments(
+                    f,
+                    &kernels,
+                    |i| fields[i][point],
+                    |k, a, b| product(k.product, a, b),
+                    None,
+                    cancelled,
+                )
+                .map_err(moment_error)?
+            };
+            let mut storage = if let (Some(positive), Some(projected)) = (&positive, &projected) {
+                projected
+                    .storage_rate(
+                        positive,
+                        self.law.epsilon_infinity,
+                        self.law.permeability,
+                        cancelled,
+                    )
+                    .map_err(moment_error)?
+            } else {
+                instantaneous_storage_rate(
+                    &kernels,
+                    f,
+                    |i| fields[i][point],
+                    &product,
+                    self.law.epsilon_infinity,
+                    self.law.permeability,
+                    cancelled,
+                )
+                .map_err(moment_error)?
+            };
             let mut polarization_heat = Dd::ZERO;
             for pole in 0..self.law.pole_count() {
                 poll(cancelled)?;
-                for i in 0..f {
-                    if i % 64 == 0 {
-                        poll(cancelled)?;
-                    }
-                    let transfer = self.frequencies[mapping[i]].poles[pole];
-                    for c in 0..3 {
-                        if positive.is_none() {
-                            filtered[i][c] = fields[i][point][c] * transfer.heat;
-                        }
-                        filtered[i][c + 3] = fields[i][point][c] * transfer.storage;
-                        if !kinetic.is_empty() {
-                            kinetic[i][c] = fields[i][point][c] * transfer.kinetic_storage;
-                        }
-                    }
-                }
-                let positive_heat = if let Some(positive) = &positive {
-                    let mut heat = Dd::ZERO;
-                    for c in 0..3 {
-                        heat = heat
-                            + positive
-                                .square(
-                                    |i| {
-                                        filtered_parts(
-                                            fields[i][point][c],
-                                            self.frequencies[mapping[i]].poles[pole].heat,
-                                        )
-                                    },
-                                    cancelled,
-                                )
-                                .map_err(moment_error)?;
-                    }
-                    Some(heat)
+                let (heat, rate) = if let Some(positive) = &positive {
+                    positive
+                        .reservoir_moments(
+                            |i| {
+                                [
+                                    fields[i][point][0],
+                                    fields[i][point][1],
+                                    fields[i][point][2],
+                                ]
+                            },
+                            |i| self.frequencies[mapping[i]].poles[pole],
+                            pole >= self.law.debye_poles.len(),
+                            cancelled,
+                        )
+                        .map_err(moment_error)?
                 } else {
-                    None
+                    for i in 0..f {
+                        if i % 64 == 0 {
+                            poll(cancelled)?;
+                        }
+                        let transfer = self.frequencies[mapping[i]].poles[pole];
+                        for c in 0..3 {
+                            filtered[i][c] = fields[i][point][c] * transfer.heat;
+                            filtered[i][c + 3] = fields[i][point][c] * transfer.storage;
+                            if !kinetic.is_empty() {
+                                kinetic[i][c] = fields[i][point][c] * transfer.kinetic_storage;
+                            }
+                        }
+                    }
+                    pole_moments_with_heat(
+                        &kernels,
+                        &filtered,
+                        (!kinetic.is_empty()).then_some(kinetic.as_slice()),
+                        None,
+                        &product,
+                        cancelled,
+                    )
+                    .map_err(moment_error)?
                 };
-                let (heat, rate) = pole_moments_with_heat(
-                    &kernels,
-                    &filtered,
-                    (!kinetic.is_empty()).then_some(kinetic.as_slice()),
-                    positive_heat,
-                    &product,
-                    cancelled,
-                )
-                .map_err(moment_error)?;
                 polarization_heat = polarization_heat + heat;
                 storage = storage + rate;
             }
@@ -850,9 +891,8 @@ fn rotate_i(z: C64) -> C64 {
     C64::new(-z.im, z.re)
 }
 
-// Positive field populations do not make a signed Poynting component positive.
-// Keep its original ordered cross products and source clock, including genuine
-// transient backflow; only the six diagonal moments use squared temporal modes.
+// The same projected field supplies both its diagonal populations and signed
+// Poynting components. A cross moment can be negative, including real backflow.
 fn layer_point_moments<P: Copy>(
     frequencies: usize,
     kernels: &[P],
@@ -864,35 +904,9 @@ fn layer_point_moments<P: Copy>(
     let Some(positive) = positive else {
         return integrate_point_dd(frequencies, kernels, field_at, product, cancelled);
     };
-    let mut sum = [Dd::ZERO; 9];
-    for c in 0..6 {
-        sum[c] = positive.square(
-            |i| {
-                let value = field_at(i)[c];
-                [Dd::from_f64(value.re), Dd::from_f64(value.im)]
-            },
-            cancelled,
-        )?;
-    }
-    for i in 0..frequencies {
-        let a = field_at(i);
-        for j in 0..frequencies {
-            if j % 64 == 0 && cancelled() {
-                return Err(MomentError::Cancelled);
-            }
-            let b = field_at(j);
-            let kernel = kernels[i * frequencies + j];
-            for c in 0..3 {
-                let (u, v) = ((c + 1) % 3, (c + 2) % 3);
-                sum[c + 6] = sum[c + 6] + product(kernel, a[u], b[v + 3])?;
-                sum[c + 6] = sum[c + 6] - product(kernel, a[v], b[u + 3])?;
-            }
-        }
-    }
-    if sum.iter().any(|value| !value.to_f64().is_finite()) {
-        return Err(MomentError::Unrepresentable);
-    }
-    Ok(sum)
+    positive
+        .project_field(field_at, cancelled)?
+        .moments(positive, cancelled)
 }
 
 fn instantaneous_storage_rate<P: Copy>(
@@ -983,6 +997,9 @@ mod lorentz_tests;
 
 #[cfg(test)]
 mod short_window_tests;
+
+#[cfg(test)]
+mod temporal_moments_tests;
 
 #[cfg(test)]
 mod tests {

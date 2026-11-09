@@ -189,7 +189,9 @@ fn positive_populations_preserve_signed_flux_and_reversible_storage() {
         &mut || false,
     )
     .unwrap();
-    assert_eq!(actual[6..], original[6..]);
+    for c in 6..9 {
+        assert!((actual[c] - original[c]).to_f64().abs() < 2e-14);
+    }
     assert!(actual[8].to_f64() < 0.0);
     relative(actual[0].to_f64(), original[0].to_f64());
     let old = pole_moments(&kernels, &fields, None, product, &mut || false).unwrap();
