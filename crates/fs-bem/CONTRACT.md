@@ -4306,3 +4306,47 @@ surface owners and current shared harmonic/math graph, with narrow carriers
 for unrelated BEM dependencies. It is not a complete BEM solver or workspace
 Cargo run. Original solver/spatial uncertainty and arbitrary-null relative
 accuracy remain uncertified.
+
+## Original-field acoustic volume energy and momentum storage
+
+`PreparedHarmonicExposure::volume_field_storage_from_clock_dd` evaluates
+instantaneous ensemble-mean compression-plus-kinetic energy [J] and linear/
+angular wave momentum [N s, N m s] on original `HarmonicVolumeQuadrature`
+receivers. `volume_field_change_from_clock_dd` returns signed end-minus-start
+storage over a finite nonnegative duration. The DD epoch and duration remain
+independently represented; zero duration is exactly zero after admission.
+
+Original pressure and all three velocity components interfere before products.
+The homogeneous inviscid nondispersive rest-medium laws are
+`e=(p^2/(rho*c^2)+rho*u.u)/2` and `g=p*u/c^2`.
+Every original frequency owner, including silent lines, must authorize these
+laws. Original source statistics, physical receivers, nonnegative volume
+weights and moment origin remain authoritative.
+
+Field increments use the analytic exponential half-angle identity. Quadratic
+changes use the polarized identity before spatial reduction, avoiding subtraction
+of large endpoint energies. Proper moments remove only their irrelevant common
+carrier; real fields retain its full source-clock rotation. Physical volume,
+statistical and material weights precede potentially overflowing products.
+Unrepresentable storage scales or contractions are refused. Nonzero phase
+increments lost in angular multiplication, half-angle formation or the squared
+real exponential increment also refuse; finite physical changes beyond that
+intermediate phase range are not silently reported as zero.
+
+Queries allocate no heap and perform no new BEM solve or product-spectrum
+compilation. `HarmonicVolumeFieldLimits` admits original quadrature entries and
+`sum_b F_b*(1+4*Q)` field terms. One cached phase/increment pair per frequency
+serves every receiver; the existing 4096-line cap bounds fixed phase scratch
+to 256 KiB. Cancellation or refusal publishes no partial storage result.
+
+Five new production-source regression groups pass with warnings denied,
+together with six existing field-surface groups. They cover deep real/proper
+nulls, independent mixed-factor ensembles, sub-clock interval changes, finite
+large products, geometry/admission, and matched plane-wave energy/momentum
+balance under spatial refinement. The bounded execution uses original exposure
+preparation and numerical observers with actual math/harmonic code, isolating
+unrelated BEM dependencies. It does not establish a full BEM solver/workspace
+build. Solver/cubature uncertainty and arbitrary-null relative accuracy remain
+unresolved. These are wave-pseudomomentum quantities; enclosure, matching
+surfaces, interior sources, total fluid momentum and body reaction are not
+inferred.

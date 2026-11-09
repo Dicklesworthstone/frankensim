@@ -63,6 +63,11 @@ pub use volume::{
     HarmonicVolumeQuadrature, HarmonicWaveMomentumStorage, PreparedHarmonicVolumeWaveMomentum,
 };
 
+mod field_volume;
+pub use field_volume::{
+    HarmonicVolumeFieldChange, HarmonicVolumeFieldLimits, HarmonicVolumeFieldStorage,
+};
+
 /// Bounds the deterministic in-place sort used for frequency grouping.
 pub const MAX_EXPOSURE_LINES: usize = 4096;
 /// Empty factors count too: an authored factor bank must be bounded.
