@@ -7,6 +7,14 @@
 //! includes electron transport and escape losses. No escape depth or external
 //! quantum efficiency is inferred from a bulk material name.
 //!
+//! The scalar yield and mean excess-energy fraction are treated as independent
+//! of absorption depth. This is an effective uniform-escape approximation:
+//! coherent interference changes integrated optical absorption, but no electron
+//! escape kernel weights its spatial profile. A measured whole-film yield can
+//! be transferred between illumination patterns only when the source supports
+//! that approximation. Source/thickness/face matching alone cannot establish
+//! it; otherwise the caller must stay within calibrated illumination conditions.
+//!
 //! [`EscapeFace`] declares a vacuum escape boundary. The electromagnetic owner
 //! proves only that the corresponding optical exterior is lossless and supports
 //! its propagating mode; refractive index alone cannot identify a vacuum.
@@ -15,6 +23,9 @@
 //! dynamic charging and feedback on the optical field remain outside this law.
 //! The returned residual heat replaces this film's total optical deposition;
 //! a consumer must not also deposit the original absorbed power as heat.
+//! This is a whole-film balance, not a spatial heat-deposition law. The caller
+//! must supply any thermal-cell distribution and evolution of stored charge or
+//! removal work; this observation advances none of those physical histories.
 
 use super::{IlluminationBudget, PreparedLayerDepthInterval, PreparedLayerIllumination};
 use crate::plane_wave::ReflectionError;
@@ -94,6 +105,9 @@ pub struct LayerPhotoelectricResponse<'p, 's, 'm, 'd> {
 impl<'p, 's, 'm, 'd> PreparedLayerPhotoelectric<'p, 's, 'm, 'd> {
     /// Attach the calibrated emitting film to its original complete optical
     /// material snapshot. Buried films cannot emit through another material.
+    /// Admission checks source identity, thickness and spectral support; the
+    /// caller must separately establish the uniform-escape or illumination
+    /// calibration conditions described in this module.
     /// `area_m2` is physical film area, so no further incidence cosine applies
     /// to the original normal Poynting power density.
     pub fn try_new(

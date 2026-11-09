@@ -7,6 +7,14 @@
 //! escape losses through that entire film. It is electrons emitted into vacuum
 //! per photon absorbed in that film, not external collected-electron QE.
 //!
+//! Applying this scalar yield to an entire film assumes the escape probability
+//! and mean excess-energy fraction do not depend on absorption depth. A measured
+//! effective yield otherwise depends on the illumination's absorption profile.
+//! Matching thickness and material state alone does not justify transferring
+//! that yield to a different standing-wave pattern. The source must support the
+//! uniform-escape approximation or the particular illumination conditions used;
+//! this table supplies neither a depth-dependent escape kernel nor that proof.
+//!
 //! Each wavelength explicitly selects two original scalar claims: internal
 //! yield and the mean fraction of the available excess energy carried away by
 //! emitted electrons. Neither quantity is inferred from optical extinction or
