@@ -861,6 +861,41 @@ impl Hyperelastic {
         }
     }
 
+    /// Apply the consistent tangent to a row-major deformation increment.
+    ///
+    /// Returns `delta P = (∂²W/∂F∂F) : delta F` through one nested-dual
+    /// directional sweep of the original potential. Only nine action entries
+    /// are evaluated; no 9×9 Hessian or finite-difference step is formed.
+    /// The deformation is admitted even when the increment is zero.
+    ///
+    /// # Errors
+    /// The same material-domain errors as [`Self::tangent`], or
+    /// [`MaterialError::State`] for a nonfinite increment or action.
+    pub fn tangent_action(
+        &self,
+        f: &[f64; 9],
+        increment: &[f64; 9],
+    ) -> Result<[f64; 9], MaterialError> {
+        self.check_state(f)?;
+        if increment.iter().any(|value| !value.is_finite()) {
+            return Err(MaterialError::State {
+                what: "nonfinite deformation increment".into(),
+            });
+        }
+        let vars: [Dual<Dual64<9>, 1>; 9] = core::array::from_fn(|i| Dual {
+            re: Dual64::variable(f[i], i),
+            eps: [Dual64::constant(increment[i])],
+        });
+        let action = self.energy(&vars).eps[0].eps;
+        if action.iter().all(|value| value.is_finite()) {
+            Ok(action)
+        } else {
+            Err(MaterialError::State {
+                what: "nonfinite material tangent action".into(),
+            })
+        }
+    }
+
     /// Thermodynamic declarations.
     #[must_use]
     pub fn admissibility(&self) -> MaterialAdmissibility {

@@ -7,6 +7,7 @@
 //! Constitutive evaluation and assembly remain owned by the parent hyper3
 //! kernel, with the same deterministic element order and cancellation points.
 
+mod diagonal;
 mod energy_momentum;
 /// Source-bound tensile assessment of original finite-strain Cauchy stresses.
 pub mod tensile;
@@ -454,7 +455,7 @@ impl<L: FiniteStrainPotential> PreparedHyperTetProblem<'_, L> {
 
     /// Apply the exact current material tangent without assembling a matrix.
     ///
-    /// Streams the original constitutive Hessian once per cell, computes
+    /// Streams the original constitutive tangent action once per cell, computes
     /// `delta F = sum_a delta u_a tensor grad N_a`, then scatters
     /// `V (A : delta F) grad N_a`. Relative nodal increments remove rigid
     /// translation before multiplication; no stiffness, bulk law or material
@@ -488,14 +489,36 @@ impl<L: FiniteStrainPotential> PreparedHyperTetProblem<'_, L> {
         )?;
         for (index, element) in self.elements.iter().enumerate() {
             checkpoint(cx)?;
-            let tangent = self
-                .problem
-                .element_tangent(index, element, displacement_m)
-                .map_err(|what| HyperTetError::MaterialRefused {
+            let f = HyperTetProblem::<L>::deformation_gradient(element, displacement_m);
+            HyperTetProblem::<L>::deformation_jacobian(&f).map_err(|what| {
+                HyperTetError::MaterialRefused {
                     element: index,
                     what,
+                }
+            })?;
+            let delta_f = element_deformation_increment(element, increment_m);
+            if delta_f.iter().any(|value| !value.is_finite()) {
+                return Err(HyperTetError::MaterialRefused {
+                    element: index,
+                    what: "deformation increment is not finite".into(),
+                });
+            }
+            let delta_p = self
+                .problem
+                .material
+                .at(index)
+                .consistent_tangent_action(&f, &delta_f)
+                .map_err(|error| HyperTetError::MaterialRefused {
+                    element: index,
+                    what: error.to_string(),
                 })?;
-            element_action::<false>(element, &tangent, increment_m, scratch_n);
+            if delta_p.iter().any(|value| !value.is_finite()) {
+                return Err(HyperTetError::MaterialRefused {
+                    element: index,
+                    what: "original material tangent action is not finite".into(),
+                });
+            }
+            scatter_piola_increment(element, &delta_p, scratch_n);
         }
         finish_action(force_increment_n, scratch_n, cx)
     }
@@ -819,12 +842,7 @@ fn finish_action(output: &mut [f64], scratch: &[f64], cx: &Cx<'_>) -> Result<(),
     Ok(())
 }
 
-fn element_action<const TRANSPOSE: bool>(
-    element: &Element,
-    tangent: &[[f64; 9]; 9],
-    increment: &[f64],
-    output: &mut [f64],
-) {
+fn element_deformation_increment(element: &Element, increment: &[f64]) -> [f64; 9] {
     // Start at zero, not deformation_gradient(increment)-I: the latter loses
     // increments smaller than the identity's ULP. Relative motion also makes
     // a constant increment an EXACT null vector before constitutive work.
@@ -837,6 +855,16 @@ fn element_action<const TRANSPOSE: bool>(
             }
         }
     }
+    delta_f
+}
+
+fn element_action<const TRANSPOSE: bool>(
+    element: &Element,
+    tangent: &[[f64; 9]; 9],
+    increment: &[f64],
+    output: &mut [f64],
+) {
+    let delta_f = element_deformation_increment(element, increment);
     let delta_p: [f64; 9] = core::array::from_fn(|ij| {
         (0..9).fold(0.0, |sum, kl| {
             let a = if TRANSPOSE {
@@ -847,6 +875,10 @@ fn element_action<const TRANSPOSE: bool>(
             a.mul_add(delta_f[kl], sum)
         })
     });
+    scatter_piola_increment(element, &delta_p, output);
+}
+
+fn scatter_piola_increment(element: &Element, delta_p: &[f64; 9], output: &mut [f64]) {
     for (a, &node) in element.nodes.iter().enumerate() {
         for i in 0..3 {
             let force = (0..3).fold(0.0, |sum, j| {

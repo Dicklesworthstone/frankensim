@@ -161,8 +161,7 @@ fn single_direction_tangent(law: &Hyperelastic, f: &[f64; 9]) -> [[f64; 9]; 9] {
     tangent
 }
 
-#[test]
-fn g0_batched_hessian_preserves_every_single_direction_coefficient() {
+fn tangent_laws() -> Vec<Hyperelastic> {
     let bulk = Volumetric::SimoTaylor { kappa: 1e6 };
     let mut laws = vec![
         Hyperelastic::new(
@@ -216,8 +215,13 @@ fn g0_batched_hessian_preserves_every_single_direction_coefficient() {
             100.0,
         ));
     }
+    laws
+}
+
+#[test]
+fn g0_batched_hessian_preserves_every_single_direction_coefficient() {
     let q = rotation([0.0, 0.0, 1.0], 0.7);
-    for law in laws {
+    for law in tangent_laws() {
         for f in [
             I,
             [1.0, 1e-10, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
@@ -241,6 +245,87 @@ fn g0_batched_hessian_preserves_every_single_direction_coefficient() {
             }
         }
     }
+}
+
+#[test]
+fn g0_directional_tangents_match_full_hessians_and_stress_derivatives() {
+    let direction = [0.2, -0.3, 0.1, 0.04, -0.17, 0.08, -0.06, 0.11, 0.14];
+    let q = rotation([0.0, 0.0, 1.0], 0.7);
+    let finite = [1.2, 0.1, 0.0, 0.0, 0.85, 0.05, 0.03, 0.0, 1.05];
+    for law in tangent_laws() {
+        for f in [
+            I,
+            [1.0, 1e-10, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            diag([1.08, 1.08, 1.08]),
+            diag([1.08, 1.08 + 1e-12, 0.94]),
+            finite,
+        ] {
+            let tangent = law.tangent(&f).unwrap();
+            let rotated_f = flat(matmul3(&q, &matrix(&f)));
+            let rotated_tangent = law.tangent(&rotated_f).unwrap();
+            assert_eq!(law.tangent_action(&f, &[0.0; 9]).unwrap(), [0.0; 9]);
+            for factor in [1e-24, 1.0, -4.0] {
+                let increment = direction.map(|value| factor * value);
+                let expected: [f64; 9] =
+                    tangent.map(|row| (0..9).fold(0.0, |sum, j| row[j].mul_add(increment[j], sum)));
+                let actual = law.tangent_action(&f, &increment).unwrap();
+                let scale = expected.iter().map(|x| x.abs()).fold(0.0, f64::max);
+                for i in 0..9 {
+                    close(actual[i], expected[i], scale, 3e-13);
+                }
+                let rotated_increment = flat(matmul3(&q, &matrix(&increment)));
+                let rotated = law.tangent_action(&rotated_f, &rotated_increment).unwrap();
+                let rotated_expected: [f64; 9] = rotated_tangent.map(|row| {
+                    (0..9).fold(0.0, |sum, j| row[j].mul_add(rotated_increment[j], sum))
+                });
+                for i in 0..9 {
+                    close(rotated[i], rotated_expected[i], scale, 3e-13);
+                }
+                // HGO's declared inactive-side Hessian at exactly zero fibre
+                // strain is discontinuous. Compare frames at an interior state.
+                if f == finite {
+                    let objective = flat(matmul3(&q, &matrix(&actual)));
+                    for i in 0..9 {
+                        close(rotated[i], objective[i], scale, 3e-12);
+                    }
+                }
+            }
+        }
+        // Independent stress differences at an interior state, away from the
+        // tension-only fibres' activation boundary and the Gent chain limit.
+        let h = 2e-6;
+        let plus = core::array::from_fn(|i| finite[i] + h * direction[i]);
+        let minus = core::array::from_fn(|i| finite[i] - h * direction[i]);
+        let pp = law.piola(&plus).unwrap();
+        let pm = law.piola(&minus).unwrap();
+        let action = law.tangent_action(&finite, &direction).unwrap();
+        let scale = action.iter().map(|x| x.abs()).fold(0.0, f64::max);
+        for i in 0..9 {
+            close(action[i], (pp[i] - pm[i]) / (2.0 * h), scale, 2e-8);
+        }
+        assert!(law.tangent_action(&I, &[f64::NAN; 9]).is_err());
+        assert!(law.tangent_action(&I, &[f64::INFINITY; 9]).is_err());
+        assert!(
+            law.tangent_action(&diag([-1.0, 1.0, 1.0]), &[0.0; 9])
+                .is_err()
+        );
+        assert!(
+            law.tangent_action(&diag([2.0 * law.stretch_limit, 1.0, 1.0]), &[0.0; 9])
+                .is_err()
+        );
+    }
+    let gent = Hyperelastic::new(
+        HyperelasticModel::Gent {
+            mu: 1e5,
+            locking_invariant: 3.0,
+            volumetric: Volumetric::Quadratic { kappa: 1e6 },
+        },
+        8.0,
+    )
+    .unwrap();
+    let mut locked = I;
+    locked[1] = 2.0;
+    assert!(gent.tangent_action(&locked, &[0.0; 9]).is_err());
 }
 
 /// Bounded timing comparison; timing is reported, never used as a flaky test

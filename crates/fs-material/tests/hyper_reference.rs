@@ -501,7 +501,7 @@ fn reference_energy_changes_preserve_original_volume_and_weak_work() {
 }
 
 #[test]
-fn default_energy_change_keeps_an_adapters_own_potential() {
+fn default_energy_change_and_tangent_action_keep_an_adapters_own_potential() {
     struct AffineEnergy<'a>(&'a Hyperelastic);
     impl HyperelasticMaterial for AffineEnergy<'_> {
         fn hyperelastic(&self) -> &Hyperelastic {
@@ -533,6 +533,22 @@ fn default_energy_change_keeps_an_adapters_own_potential() {
         expected
     );
     assert!((expected - law.energy_increment(&I, &FE)).abs() > 1.0);
+    let direction = [0.3, -0.1, 0.2, 0.04, 0.17, -0.12, 0.07, -0.08, 0.11];
+    let expected_action = material
+        .consistent_tangent(&FE)
+        .unwrap()
+        .map(|row| (0..9).fold(0.0, |sum, j| row[j].mul_add(direction[j], sum)));
+    assert_eq!(
+        material.consistent_tangent_action(&FE, &direction).unwrap(),
+        expected_action
+    );
+    assert_eq!(
+        fs_material::hyper::cards::FiniteStrainPotential::consistent_tangent_action(
+            &material, &FE, &direction
+        )
+        .unwrap(),
+        expected_action
+    );
     let reference = ReferenceDeformation::try_new(G).unwrap();
     let held = ReferencedHyperelastic::new(&material, reference);
     let before = multiply(&I, &G);
@@ -544,6 +560,14 @@ fn default_energy_change_keeps_an_adapters_own_potential() {
         original.abs(),
         2e-13,
     );
+    let expected_action = held
+        .consistent_tangent(&after)
+        .unwrap()
+        .map(|row| (0..9).fold(0.0, |sum, j| row[j].mul_add(direction[j], sum)));
+    let action = held.consistent_tangent_action(&after, &direction).unwrap();
+    for i in 0..9 {
+        near(action[i], expected_action[i], 1e6, 3e-13);
+    }
 }
 
 fn multiply(a: &[f64; 9], b: &[f64; 9]) -> [f64; 9] {
@@ -605,6 +629,51 @@ fn reference_energy_gradient_and_tangent_obey_original_volume_chain_rule() {
             near(tangent[i][j], (pp[i] - pm[i]) / (2.0 * h), 1e6, 2e-8);
             near(tangent[i][j], tangent[j][i], 1e6, 2e-14);
         }
+    }
+}
+
+#[test]
+fn reference_directional_tangent_preserves_shear_and_sub_ulp_increments() {
+    let law = law();
+    let direction = [0.3, -0.1, 0.2, 0.04, 0.17, -0.12, 0.07, -0.08, 0.11];
+    for g in [I, G, I.map(|value| 1.25 * value)] {
+        let reference = ReferenceDeformation::try_new(g).unwrap();
+        let material = ReferencedHyperelastic::new(&law, reference);
+        let f = multiply(&FE, &g);
+        let tangent = material.consistent_tangent(&f).unwrap();
+        for factor in [1e-24, 1.0, -4.0] {
+            let increment = direction.map(|value| factor * value);
+            let elastic_increment = reference.elastic_deformation_increment(&increment);
+            for (actual, expected) in multiply(&elastic_increment, &g).into_iter().zip(increment) {
+                near(actual, expected, factor.abs(), 1e-15);
+            }
+            let action = material.consistent_tangent_action(&f, &increment).unwrap();
+            let expected: [f64; 9] =
+                tangent.map(|row| (0..9).fold(0.0, |sum, j| row[j].mul_add(increment[j], sum)));
+            let scale = expected.iter().map(|x| x.abs()).fold(0.0, f64::max);
+            for i in 0..9 {
+                near(action[i], expected[i], scale, 3e-13);
+            }
+        }
+        let h = 2e-6;
+        let plus = core::array::from_fn(|i| f[i] + h * direction[i]);
+        let minus = core::array::from_fn(|i| f[i] - h * direction[i]);
+        let pp = material.first_piola(&plus).unwrap();
+        let pm = material.first_piola(&minus).unwrap();
+        let action = material.consistent_tangent_action(&f, &direction).unwrap();
+        for i in 0..9 {
+            near(action[i], (pp[i] - pm[i]) / (2.0 * h), 1e6, 2e-8);
+        }
+        assert!(
+            material
+                .consistent_tangent_action(&f, &[f64::NAN; 9])
+                .is_err()
+        );
+        assert!(
+            material
+                .consistent_tangent_action(&[0.0; 9], &[0.0; 9])
+                .is_err()
+        );
     }
 }
 

@@ -1,5 +1,23 @@
 # fs-solid CONTRACT
 
+## Native directional material tangents and local diagonals
+
+Prepared finite-strain tetrahedral tangent actions call each original law's
+`consistent_tangent_action`. Native hyperelastic laws evaluate a directional
+nested-dual derivative without forming a full Hessian. Adapter defaults retain
+the same owner's complete consistent tangent and held history. Reference
+changes transform increments linearly before the original-volume Piola
+pullback, retaining directions below the identity's ULP.
+
+Retained local Hessians expose a signed diagonal without global or element
+stiffness assembly or further constitutive calls. Supports remain present;
+caller-owned scratch is reusable and output publishes only after complete
+finite-value and cancellation checks. The diagonal includes the original
+finite-strain geometric contribution already present in the Piola Hessian.
+This changes evaluation/storage, not the material law or integration scheme.
+Focused tangent-action/reference and native diagonal regressions cover these
+contracts; no whole-solver speedup or cross-ISA timing claim follows.
+
 ## Progressive ductility in native fiber-frame equilibrium
 
 `FiberLaw::DuctileJ2` and its owned history dispatch the original progressive

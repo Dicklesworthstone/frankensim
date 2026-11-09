@@ -56,6 +56,19 @@ pub trait HyperelasticMaterial {
     fn consistent_tangent(&self, deformation: &[f64; 9]) -> Result<[[f64; 9]; 9], MaterialError> {
         self.hyperelastic().tangent(deformation)
     }
+
+    /// Apply the derivative of this owner's Piola stress to `increment`.
+    ///
+    /// The default contracts this owner's full tangent, preserving adapters
+    /// that change reference or storage. Native owners override it with an
+    /// exact directional derivative without forming the full Hessian.
+    fn consistent_tangent_action(
+        &self,
+        deformation: &[f64; 9],
+        increment: &[f64; 9],
+    ) -> Result<[f64; 9], MaterialError> {
+        apply_tangent(&self.consistent_tangent(deformation)?, increment)
+    }
 }
 
 impl HyperelasticMaterial for Hyperelastic {
@@ -65,6 +78,14 @@ impl HyperelasticMaterial for Hyperelastic {
 
     fn energy_density_increment(&self, before: &[f64; 9], after: &[f64; 9]) -> f64 {
         self.energy_increment(before, after)
+    }
+
+    fn consistent_tangent_action(
+        &self,
+        deformation: &[f64; 9],
+        increment: &[f64; 9],
+    ) -> Result<[f64; 9], MaterialError> {
+        self.tangent_action(deformation, increment)
     }
 }
 
@@ -93,6 +114,19 @@ pub trait FiniteStrainPotential {
 
     /// Derivative of first Piola stress with respect to the same gradient.
     fn consistent_tangent(&self, deformation: &[f64; 9]) -> Result<[[f64; 9]; 9], MaterialError>;
+
+    /// Apply the same fixed-history tangent to a deformation increment.
+    ///
+    /// Existing inelastic owners retain their complete consistent tangent and
+    /// held history through this default. An override must differentiate the
+    /// same Piola stress without advancing any constitutive history.
+    fn consistent_tangent_action(
+        &self,
+        deformation: &[f64; 9],
+        increment: &[f64; 9],
+    ) -> Result<[f64; 9], MaterialError> {
+        apply_tangent(&self.consistent_tangent(deformation)?, increment)
+    }
 
     /// Evaluate stress and potential together without duplicating a return map.
     ///
@@ -125,6 +159,33 @@ impl<T: HyperelasticMaterial + ?Sized> FiniteStrainPotential for T {
     fn consistent_tangent(&self, deformation: &[f64; 9]) -> Result<[[f64; 9]; 9], MaterialError> {
         HyperelasticMaterial::consistent_tangent(self, deformation)
     }
+
+    fn consistent_tangent_action(
+        &self,
+        deformation: &[f64; 9],
+        increment: &[f64; 9],
+    ) -> Result<[f64; 9], MaterialError> {
+        HyperelasticMaterial::consistent_tangent_action(self, deformation, increment)
+    }
+}
+
+fn apply_tangent(tangent: &[[f64; 9]; 9], increment: &[f64; 9]) -> Result<[f64; 9], MaterialError> {
+    if increment.iter().any(|value| !value.is_finite()) {
+        return Err(MaterialError::State {
+            what: "nonfinite deformation increment".into(),
+        });
+    }
+    let action = tangent.map(|row| {
+        (0..9).fold(0.0, |sum, column| {
+            row[column].mul_add(increment[column], sum)
+        })
+    });
+    if action.iter().any(|value| !value.is_finite()) {
+        return Err(MaterialError::State {
+            what: "nonfinite material tangent action".into(),
+        });
+    }
+    Ok(action)
 }
 
 /// A native hyperelastic law retaining the exact admitted model card.
@@ -210,6 +271,14 @@ impl HyperelasticMaterial for ResolvedHyperelastic {
 
     fn energy_density_increment(&self, before: &[f64; 9], after: &[f64; 9]) -> f64 {
         self.law.energy_increment(before, after)
+    }
+
+    fn consistent_tangent_action(
+        &self,
+        deformation: &[f64; 9],
+        increment: &[f64; 9],
+    ) -> Result<[f64; 9], MaterialError> {
+        self.law.tangent_action(deformation, increment)
     }
 }
 

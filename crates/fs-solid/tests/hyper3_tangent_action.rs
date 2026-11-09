@@ -128,7 +128,9 @@ fn heterogeneous_actions_match_native_matrix_and_independent_force_derivative() 
             tangent
                 .apply(&increment, &mut cached, &mut scratch, cx)
                 .unwrap();
-            assert_eq!(actual, cached);
+            // A directional AD sweep and a full-Hessian contraction use
+            // different floating-point schedules for the same derivative.
+            close(&actual, &cached, 2e-13);
             matrix.spmv(&increment, &mut expected);
             close(&actual, &expected, 2e-13);
             for i in 0..3 {
@@ -154,6 +156,64 @@ fn heterogeneous_actions_match_native_matrix_and_independent_force_derivative() 
         // The material-only operator retains constrained rows and is independent
         // of prescribed dead forces, which have no displacement derivative.
         assert!(actual[0].abs() > 1e-3);
+    });
+}
+
+struct DirectionalProbe {
+    law: Hyperelastic,
+    actions: Cell<usize>,
+}
+
+impl FiniteStrainPotential for DirectionalProbe {
+    fn energy_density(&self, f: &[f64; 9]) -> f64 {
+        self.law.energy(f)
+    }
+
+    fn first_piola(&self, f: &[f64; 9]) -> Result<[f64; 9], MaterialError> {
+        self.law.piola(f)
+    }
+
+    fn consistent_tangent(&self, _: &[f64; 9]) -> Result<[[f64; 9]; 9], MaterialError> {
+        panic!("a streaming action must use the original directional owner")
+    }
+
+    fn consistent_tangent_action(
+        &self,
+        f: &[f64; 9],
+        increment: &[f64; 9],
+    ) -> Result<[f64; 9], MaterialError> {
+        self.actions.set(self.actions.get() + 1);
+        self.law.tangent_action(f, increment)
+    }
+}
+
+#[test]
+fn streaming_action_uses_directional_owner_without_forming_point_hessians() {
+    with_cx(|_, cx| {
+        let laws = materials().map(|law| DirectionalProbe {
+            law,
+            actions: Cell::new(0),
+        });
+        let prepared = problem(&laws).prepare(cx).unwrap();
+        let u = displacement();
+        let increment = direction();
+        let mut output = [0.0; 15];
+        let mut scratch = [0.0; 15];
+        prepared
+            .tangent_apply(&u, &increment, &mut output, &mut scratch, cx)
+            .unwrap();
+        assert_eq!(laws.each_ref().map(|law| law.actions.get()), [1, 1]);
+        let h = 2e-6;
+        let plus = core::array::from_fn::<_, 15, _>(|i| u[i] + h * increment[i]);
+        let minus = core::array::from_fn::<_, 15, _>(|i| u[i] - h * increment[i]);
+        let pp = prepared.internal_force(&plus, cx).unwrap();
+        let pm = prepared.internal_force(&minus, cx).unwrap();
+        let derivative: Vec<_> = pp
+            .iter()
+            .zip(pm)
+            .map(|(a, b)| (a - b) / (2.0 * h))
+            .collect();
+        close(&output, &derivative, 2e-8);
     });
 }
 
@@ -201,6 +261,10 @@ fn gent_chain_stiffening_drives_original_solid_force_and_tangent() {
             let tangent = prepared.linearized_tangent(&u, TANGENT_BYTES, cx).unwrap();
             tangent
                 .apply(&shear_direction, &mut action, &mut scratch, cx)
+                .unwrap();
+            assert!((action[6] - stiffness).abs() <= 4e-11 * stiffness.abs());
+            prepared
+                .tangent_apply(&u, &shear_direction, &mut action, &mut scratch, cx)
                 .unwrap();
             assert!((action[6] - stiffness).abs() <= 4e-11 * stiffness.abs());
             let mut assembled = [0.0; 15];
@@ -466,6 +530,11 @@ fn input_domain_overflow_and_cancellation_never_publish_partial_actions() {
         assert!(
             operator
                 .apply(&overflow, &mut output, &mut scratch, cx)
+                .is_err()
+        );
+        assert!(
+            prepared
+                .tangent_apply(&u, &overflow, &mut output, &mut scratch, cx)
                 .is_err()
         );
         assert_eq!(output, [17.0; 15]);

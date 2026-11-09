@@ -295,6 +295,26 @@ impl ReferenceDeformation {
         })
     }
 
+    /// Linear elastic-gradient increment `delta Fe = delta F G^-1`.
+    ///
+    /// Unlike the absolute deformation, an increment must not be formed by
+    /// adding and subtracting the identity: that loses sub-ULP directions.
+    pub fn elastic_deformation_increment(&self, increment: &[f64; 9]) -> [f64; 9] {
+        if let Some(s) = self.isotropic_stretch {
+            return if s == 1.0 {
+                *increment
+            } else {
+                increment.map(|x| x / s)
+            };
+        }
+        core::array::from_fn(|ij| {
+            let (i, j) = (ij / 3, ij % 3);
+            (0..3)
+                .map(|a| increment[3 * i + a] * self.inverse[3 * a + j])
+                .sum()
+        })
+    }
+
     /// Original-volume first Piola stress, `det(G) Pe G^-T`.
     pub fn pullback_piola(&self, elastic: &[f64; 9]) -> [f64; 9] {
         if let Some(s) = self.isotropic_stretch {
@@ -490,6 +510,22 @@ impl<L: HyperelasticMaterial + ?Sized> HyperelasticMaterial for ReferencedHypere
         let result = self.reference.pullback_tangent(&elastic);
         if result.iter().flatten().any(|x| !x.is_finite()) {
             return Err(state_error("tangent pullback is unrepresentable"));
+        }
+        Ok(result)
+    }
+
+    fn consistent_tangent_action(
+        &self,
+        total: &[f64; 9],
+        increment: &[f64; 9],
+    ) -> Result<[f64; 9], MaterialError> {
+        let elastic = self.material.consistent_tangent_action(
+            &self.reference.elastic_deformation(total),
+            &self.reference.elastic_deformation_increment(increment),
+        )?;
+        let result = self.reference.pullback_piola(&elastic);
+        if result.iter().any(|x| !x.is_finite()) {
+            return Err(state_error("tangent action pullback is unrepresentable"));
         }
         Ok(result)
     }
