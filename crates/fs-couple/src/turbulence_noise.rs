@@ -990,6 +990,109 @@ pub fn constriction_k(strouhal: f64) -> Option<f64> {
     None
 }
 
+/// Stevens' fricative source at an obstacle: the upper curve of Fig. 2.33(a) of Stevens, *Acoustic Phonetics* (MIT Press),
+/// "Spectrum of sound pressure source p_s for a configuration similar to that in figure 2.30b" (an obstacle in the airstream
+/// downstream of the constriction), "Curves are based on experimental data of Shadle (1985a)"; read on MIT OpenCourseWare
+/// 6.541J, handout 03/02/04, p. 6. The caption: the constriction is circular, 0.32 cm across; the obstacle 3 cm downstream;
+/// the tube 5.0 cm^2; "the spectra are in 300-Hz bands"; the ordinate "the absolute level of the sound pressure source, in
+/// decibels re 1 dyne/cm^2"; for the upper curve (420 cm^3/s) "20 log U^3 A^-2.5 = 212 dB", U in cm^3/s and A in cm^2, and
+/// "when 20 log U^3 A^-2.5 is different from 212 dB, the upper curve should be scaled up by 20 log U^3 A^-2.5 - 212 dB".
+/// The pairs are `(f [Hz], dB re 1 dyn/cm^2 in a 300-Hz band)` READ FROM THE PRINTED UPPER CURVE by OliveDove's digitize.py:
+/// calibrated on the frame's own tick marks (0.5 to 10 kHz on the log axis, -10 to 40 dB), the worst tick residual is 0.60 %
+/// of a decade across and 0.18 dB up; an independent reading of the same figure agrees within 0.2 dB. The printed curve
+/// spans 0.55 to 10 kHz; outside it there is no data and no source.
+const STEVENS_SHADLE_UPPER: [(f64, f64); 16] = [
+    (550.0, 32.98),
+    (600.0, 33.30),
+    (800.0, 33.41),
+    (1000.0, 33.19),
+    (1250.0, 32.53),
+    (1500.0, 31.88),
+    (2000.0, 29.99),
+    (2500.0, 27.92),
+    (3000.0, 26.11),
+    (4000.0, 22.66),
+    (5000.0, 19.38),
+    (6000.0, 16.54),
+    (7000.0, 14.18),
+    (8000.0, 11.89),
+    (9000.0, 9.84),
+    (10_000.0, 7.96),
+];
+
+/// The caption's anchor of the upper curve, `20 log10(U^3 A^-2.5)` in its cgs units, as printed (the curve's own 420 cm^3/s
+/// through a 0.32 cm circle gives 212.13 dB; the printed 212 is used).
+const STEVENS_SHADLE_ANCHOR_DB: f64 = 212.0;
+
+/// The caption's analysis band: the printed levels are in 300-Hz bands.
+const STEVENS_SHADLE_BAND_HZ: f64 = 300.0;
+
+/// One dyne per square centimetre [Pa], the reference of the printed ordinate.
+const DYNE_PER_CM2_PA: f64 = 0.1;
+
+/// Stevens' source level `L(f)` [dB re 1 dyn/cm^2 in a 300-Hz band] at the flow `u_m3_s` [m^3/s] through a constriction of area
+/// `area_m2` [m^2]: the printed upper curve at `f` ([`STEVENS_SHADLE_UPPER`] interpolated linearly in `(ln f, dB)`) scaled by
+/// the caption's rule, `+ 20 log10(U^3 A^-2.5) - 212` with `U` in cm^3/s and `A` in cm^2. `None` off the printed curve
+/// (`f < 550` or `f > 10 000` Hz) and unless the flow and area are positive and finite.
+#[must_use]
+pub fn stevens_shadle_level_db(f_hz: f64, u_m3_s: f64, area_m2: f64) -> Option<f64> {
+    if !(u_m3_s > 0.0 && u_m3_s.is_finite() && area_m2 > 0.0 && area_m2.is_finite()) {
+        return None;
+    }
+    let (first, last) = (STEVENS_SHADLE_UPPER[0], STEVENS_SHADLE_UPPER[STEVENS_SHADLE_UPPER.len() - 1]);
+    if !(f_hz >= first.0 && f_hz <= last.0) {
+        return None;
+    }
+    let x = det::ln(f_hz);
+    let (u_cgs, a_cgs) = (u_m3_s * 1.0e6, area_m2 * 1.0e4);
+    let scale = 20.0 * (3.0 * det::ln(u_cgs) - 2.5 * det::ln(a_cgs)) / core::f64::consts::LN_10 - STEVENS_SHADLE_ANCHOR_DB;
+    for pair in STEVENS_SHADLE_UPPER.windows(2) {
+        if f_hz <= pair[1].0 {
+            let (x0, x1) = (det::ln(pair[0].0), det::ln(pair[1].0));
+            return Some(pair[0].1 + (pair[1].1 - pair[0].1) * (x - x0) / (x1 - x0) + scale);
+        }
+    }
+    None
+}
+
+/// The mean square [Pa^2] of Stevens' source between `lo_hz` and `hi_hz`: the integral of its spectral density
+/// `(0.1 Pa)^2 10^(L(f) / 10) / 300 Hz` ([`stevens_shadle_level_db`]; the caption's levels are per 300-Hz band) over the part of
+/// the band on the printed curve, by 16-point Gauss-Legendre in `ln f` on each piece between the table's points (on a piece the
+/// density is a power of `f`, so the rule is exact to rounding). Zero off the curve, for an empty or non-finite band, and
+/// unless the flow and area are usable.
+#[must_use]
+pub fn stevens_shadle_band_power_pa2(lo_hz: f64, hi_hz: f64, u_m3_s: f64, area_m2: f64) -> f64 {
+    let (first, last) = (STEVENS_SHADLE_UPPER[0].0, STEVENS_SHADLE_UPPER[STEVENS_SHADLE_UPPER.len() - 1].0);
+    if !(lo_hz.is_finite() && hi_hz.is_finite()) || stevens_shadle_level_db(first, u_m3_s, area_m2).is_none() {
+        return 0.0;
+    }
+    let (lo, hi) = (lo_hz.max(first), hi_hz.min(last));
+    if !(lo < hi) {
+        return 0.0;
+    }
+    let mut cuts = vec![lo];
+    cuts.extend(STEVENS_SHADLE_UPPER.iter().map(|p| p.0).filter(|&f| f > lo && f < hi));
+    cuts.push(hi);
+    let mut total = 0.0;
+    for piece in cuts.windows(2) {
+        let (a, b) = (det::ln(piece[0]), det::ln(piece[1]));
+        let (half, mid) = (0.5 * (b - a), 0.5 * (b + a));
+        let mut sum = 0.0;
+        for &(node, weight) in &GAUSS_LEGENDRE_16 {
+            for x in [-node, node] {
+                let f = det::exp(mid + half * x);
+                if let Some(level) = stevens_shadle_level_db(f, u_m3_s, area_m2) {
+                    let density = DYNE_PER_CM2_PA * DYNE_PER_CM2_PA * det::exp(level * (core::f64::consts::LN_10 / 10.0))
+                        / STEVENS_SHADLE_BAND_HZ;
+                    sum += weight * density * f;
+                }
+            }
+        }
+        total += sum * half;
+    }
+    total
+}
+
 /// The lip's opt-in constriction-noise card: `constriction_noise <seed> <duct_radius_m>`. Two fields, no gain and no gate: the
 /// law below has no free number, so the card has nowhere to tune one.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1126,6 +1229,18 @@ struct ConstrictionBand {
 /// `sigma`-`C_L` relation gives, `rho U_c^2 (1 - sigma)^2 / 2` (the Borda-Carnot loss). The caller supplies the three; the
 /// bands, the trend line, the cutoff `100 / r` and the bank are the lip's, on the streams of [`FRICATIVE_NOISE_KERNEL`].
 /// The lip's entry ([`Self::pressure_pa`]) keeps its own arithmetic, bit for bit.
+///
+/// THE STEVENS FORM ([`Self::pressure_pa_stevens`]; MB 17504, 17645). The supraglottal source by another printed law, through
+/// the same bank and streams: Stevens' sound pressure source at an obstacle, measured by Shadle ([`stevens_shadle_level_db`]),
+/// each designed third octave carrying the root of [`stevens_shadle_band_power_pa2`] over its edges at the held flow `U` and
+/// the constriction's area `A_k`. The law has no `K`, no Strouhal number, no duct `j` and no cutoff of its own: the printed
+/// curve's span (0.55 to 10 kHz) is the source's, and a band partly on it carries only that part. The overlap solve is the
+/// lip's. WHAT IT DOES NOT CLAIM: the figure is one constriction (0.0804 cm^2), two flows (160 and 420 cm^3/s, jets of 19.9
+/// and 52.2 m/s), one obstacle 3 cm downstream, one 5.0 cm^2 tube; the area exponent is untested by it, and its own two curves
+/// sit 15.9 to 23.3 dB apart where the caption's `U^3` rule gives 25.15 dB (`p_s` as `U^1.89` to `U^2.78` between them). The
+/// rule is used as printed and nothing is refitted; a page that shows a render says so. The series pressure sits where the
+/// caller puts it: on the voice, the junction after the card's obstacle section `m` (MB 17712), after the constriction
+/// itself unless the card names one.
 #[derive(Clone, Debug)]
 pub struct ConstrictionNoise {
     card: ConstrictionNoiseCard,
@@ -1350,6 +1465,48 @@ impl ConstrictionNoise {
             return 0.0;
         }
         self.refresh_jet(dp_pa, jet_speed_m_s, open_area_ratio, duct_radius_m);
+        self.sum_bands()
+    }
+
+    /// The bands the Stevens form drives (type doc) at the flow `u_m3_s` through the constriction of area `area_k_m2`, as
+    /// `(band index, centre_hz, 0, target rms Pa)`: every designed band with part of its edges on the printed curve, its
+    /// target the root of [`stevens_shadle_band_power_pa2`] over those edges. The law has no `K`; the third field is zero.
+    /// Empty unless the flow and area are positive and finite.
+    #[must_use]
+    pub fn driven_bands_stevens(&self, u_m3_s: f64, area_k_m2: f64) -> Vec<(usize, f64, f64, f64)> {
+        let edge = det::pow(10.0, 0.05);
+        let mut driven = Vec::new();
+        for (index, band) in self.bands.iter().enumerate() {
+            if band.design.is_none() {
+                continue;
+            }
+            let power = stevens_shadle_band_power_pa2(band.centre_hz / edge, band.centre_hz * edge, u_m3_s, area_k_m2);
+            if power > 0.0 {
+                driven.push((index, band.centre_hz, 0.0, det::sqrt(power)));
+            }
+        }
+        driven
+    }
+
+    /// The Stevens form's series pressure [Pa] of this sample (type doc) at the held flow `u_m3_s` the caller states through
+    /// the constriction of area `area_k_m2`. Silent, every stream still advancing by one sample, while the recorded flow is not
+    /// forward or the flow and area are not positive and finite.
+    pub fn pressure_pa_stevens(&mut self, u_m3_s: f64, area_k_m2: f64) -> f64 {
+        if !(self.last_flow_m3_s > 0.0
+            && u_m3_s > 0.0
+            && u_m3_s.is_finite()
+            && area_k_m2 > 0.0
+            && area_k_m2.is_finite())
+        {
+            self.skip_all();
+            return 0.0;
+        }
+        let key = [2, u_m3_s.to_bits(), area_k_m2.to_bits(), 0, 0];
+        if self.cached_for != Some(key) {
+            self.cached_for = Some(key);
+            let driven = self.driven_bands_stevens(u_m3_s, area_k_m2);
+            self.solve_amplitudes(&driven);
+        }
         self.sum_bands()
     }
 
@@ -2592,6 +2749,87 @@ mod tests {
         for radius in [0.0, -r, f64::NAN, f64::INFINITY] {
             assert!(bad.driven_bands_jet_in(dp, u_c, sigma, radius).is_empty(), "radius {radius}");
             assert_eq!(bad.pressure_pa_jet_in(dp, u_c, sigma, radius), 0.0, "radius {radius}");
+        }
+    }
+
+    /// The Stevens form (MB 17504, 17645), test 1 of 4: at the caption's own anchor, 420 cm^3/s through a 0.32 cm circle, the
+    /// level is the printed table point plus the anchor's own excess over the printed 212 dB (`20 log10(420^3 A^-2.5) - 212`,
+    /// 0.13 dB), at every table point and on the `(ln f, dB)` line between two; and a 300-Hz band at the table's 1 kHz carries
+    /// the printed band level, within the curve's own slope across it.
+    #[test]
+    fn stevens_form_reproduces_the_printed_curve_at_its_anchor() {
+        let (u, a) = (420.0e-6, core::f64::consts::PI * 0.16e-2 * 0.16e-2);
+        let excess = 20.0 * (3.0 * 420.0f64.log10() - 2.5 * (a * 1.0e4).log10()) - 212.0;
+        assert!((excess - 0.13).abs() < 0.01, "the anchor's own excess over the printed 212 dB: {excess}");
+        for &(f, db) in &STEVENS_SHADLE_UPPER {
+            let level = stevens_shadle_level_db(f, u, a).expect("on the printed curve");
+            assert!((level - db - excess).abs() < 1.0e-9, "{f} Hz: {level} against {db} + {excess}");
+        }
+        let (p0, p1) = (STEVENS_SHADLE_UPPER[6], STEVENS_SHADLE_UPPER[7]);
+        let mid = (p0.0 * p1.0).sqrt();
+        let level = stevens_shadle_level_db(mid, u, a).expect("on the printed curve");
+        assert!((level - (0.5 * (p0.1 + p1.1) + excess)).abs() < 1.0e-9, "the (ln f, dB) line between two table points");
+        let band = stevens_shadle_band_power_pa2(850.0, 1150.0, u, a);
+        let printed = 0.01 * 10f64.powf((33.19 + excess) / 10.0);
+        let off_db = 10.0 * (band / printed).log10();
+        assert!(off_db.abs() < 0.2, "a 300-Hz band at 1 kHz carries the printed band level: {off_db} dB off");
+    }
+
+    /// The Stevens form, test 2 of 4: the caption's rule as printed, `U^3` and `A^-2.5`: twice the flow raises every level by
+    /// `60 log10 2` dB and a band's power 64 times; twice the area lowers every level by `50 log10 2` dB.
+    #[test]
+    fn stevens_form_scales_as_u_cubed_and_a_to_the_minus_two_and_a_half() {
+        let (u, a) = (5.622e-4, 1.340_011e-5);
+        for f in [550.0, 777.0, 1000.0, 3333.0, 6310.0, 10_000.0] {
+            let base = stevens_shadle_level_db(f, u, a).expect("on the printed curve");
+            let du = stevens_shadle_level_db(f, 2.0 * u, a).expect("on the printed curve") - base;
+            let da = stevens_shadle_level_db(f, u, 2.0 * a).expect("on the printed curve") - base;
+            assert!((du - 60.0 * 2f64.log10()).abs() < 1.0e-9, "{f} Hz: twice the flow gives {du} dB");
+            assert!((da + 50.0 * 2f64.log10()).abs() < 1.0e-9, "{f} Hz: twice the area gives {da} dB");
+        }
+        let ratio = stevens_shadle_band_power_pa2(4467.0, 5623.0, 2.0 * u, a) / stevens_shadle_band_power_pa2(4467.0, 5623.0, u, a);
+        assert!((ratio - 64.0).abs() < 64.0e-9, "a band's power at twice the flow: {ratio}");
+    }
+
+    /// The Stevens form, test 3 of 4: no source off the printed curve (below 550 Hz, above 10 kHz), none without a usable flow
+    /// or area, none while the recorded flow is not forward; a band partly on the curve carries only that part; and every
+    /// band's stream advances one white sample per call whether the source speaks or not.
+    #[test]
+    fn stevens_form_is_silent_off_the_curve_and_without_flow() {
+        let (u, a) = (5.622e-4, 1.340_011e-5);
+        for f in [10.0, 549.9, 10_000.1, 20_000.0, f64::NAN] {
+            assert!(stevens_shadle_level_db(f, u, a).is_none(), "{f} Hz is off the printed curve");
+        }
+        for (uu, aa) in [(0.0, a), (-u, a), (f64::NAN, a), (u, 0.0), (u, f64::INFINITY)] {
+            assert!(stevens_shadle_level_db(1000.0, uu, aa).is_none(), "flow {uu}, area {aa}");
+            assert_eq!(stevens_shadle_band_power_pa2(900.0, 1100.0, uu, aa), 0.0, "flow {uu}, area {aa}");
+        }
+        assert_eq!(stevens_shadle_band_power_pa2(100.0, 549.0, u, a), 0.0, "below the printed curve");
+        assert_eq!(stevens_shadle_band_power_pa2(10_001.0, 20_000.0, u, a), 0.0, "above the printed curve");
+        let part = stevens_shadle_band_power_pa2(447.0, 562.0, u, a);
+        let on_curve = stevens_shadle_band_power_pa2(550.0, 562.0, u, a);
+        assert!(part > 0.0 && (part - on_curve).abs() <= 1.0e-12 * part, "only the part on the curve: {part} vs {on_curve}");
+        let card = ConstrictionNoiseCard { seed: 5, duct_radius_m: (3.0602e-4 / core::f64::consts::PI).sqrt() };
+        let source = ConstrictionNoise::new_fricative(card, 1.0 / 40_000.0).unwrap();
+        let driven = source.driven_bands_stevens(u, a);
+        assert!(!driven.is_empty(), "the rig's flow drives the printed span");
+        assert!(driven.iter().all(|d| d.1 > 400.0 && d.1 < 12_000.0 && d.2 == 0.0 && d.3 > 0.0), "{driven:?}");
+        assert!(source.driven_bands_stevens(0.0, a).is_empty() && source.driven_bands_stevens(u, f64::NAN).is_empty());
+        let (mut open, mut shut, mut unusable) = (source.clone(), source.clone(), source);
+        open.record(u);
+        shut.record(0.0);
+        unusable.record(u);
+        let mut spoke = false;
+        for _ in 0..256 {
+            spoke |= open.pressure_pa_stevens(u, a) != 0.0;
+            assert_eq!(shut.pressure_pa_stevens(u, a), 0.0, "no forward flow, no source");
+            assert_eq!(unusable.pressure_pa_stevens(0.0, a), 0.0, "no usable flow, no source");
+        }
+        assert!(spoke, "forward flow speaks");
+        for ((x, y), z) in open.bands.iter().zip(&shut.bands).zip(&unusable.bands) {
+            assert_eq!(x.filter.white.index(), z.filter.white.index(), "one white sample per call, source speaking or not");
+            assert_eq!(x.filter.white.index(), y.filter.white.index(), "one white sample per call, source speaking or not");
+            assert!(x.filter.white.index() > 0);
         }
     }
 }

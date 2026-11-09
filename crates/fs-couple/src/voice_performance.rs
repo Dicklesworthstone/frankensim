@@ -62,7 +62,7 @@
 //! tract_move <start_s> <end_s> <name|card> <steps>        (repeat, in time order; the tract moves to that shape)
 //! glottal_orifice <area_m2>                               (optional; a fixed hole in place of the folds: a flow rig)
 //! subglottal_tube <area_m2> <length_m>                    (repeat, optional; a tube below the glottis, glottis end first)
-//! fricative_noise <seed> <k> <j>                          (optional; turbulence after section k)
+//! fricative_noise <seed> <k> <j> [stevens [<m>]]          (optional; turbulence after section k, or the obstacle m)
 //! receiver free_field_monopole                            (optional; the mouth flow as a monopole in free space)
 //! rest_gap <time_s> <gap_m>                               (repeat, optional, two_mass only; the fold's rest gap over time)
 //! ```
@@ -102,7 +102,16 @@
 //! card's own included (a word's card is its vowel), has `sigma >= 1`, where the printed law drives no band, and the
 //! island takes no constriction on it: the source forms and turns off through the law as the tract closes and opens,
 //! with no fade added. With `tract_move` the card's `j` must be the card shape's largest section after `k`; without it
-//! the card's one shape must be an expansion. `receiver free_field_monopole` observes
+//! the card's one shape must be an expansion. A fourth field `stevens` (MB 17504, 17645) takes Stevens' printed source at
+//! an obstacle from Shadle's measurements in place of Oldham and Ukpoho's
+//! ([`crate::turbulence_noise::ConstrictionNoise::pressure_pa_stevens`]): the same junction, lines, bank, streams, held flow
+//! and shapes, its level read from the flow and `A_k` alone, silent on a shape with `sigma >= 1` as the printed law is
+//! there; without the field a card is bit-identical to one written before it existed. Stevens' `p_s` is defined at the
+//! obstacle (Shadle's source placement), so after `stevens` a fifth field `m` (MB 17712) puts the junction lines after
+//! section `m` instead of `k`, `k <= m` and a section after `m`: the obstacle the card names (the incisors, measured on
+//! the tract's own surface), with the law's level still read from the flow and `A_k` and the Borda-Carnot drop still at
+//! `k`; without it `m = k`, bit-identical. An obstacle section is refused with `tract_move`: a moving shape's obstacle has
+//! no correspondence built. `receiver free_field_monopole` observes
 //! the mouth flow as a point monopole in free space, `rho dQ/dt / (4 pi R)` at the microphone's distance, through the
 //! baffled receiver's own differentiator and travel-time kernel (half a point source on the rigid baffle, whose image
 //! doubles it); the microphone row's rings and points are not read by it, the mouth's size and the directivity of its
@@ -423,8 +432,9 @@ pub struct VoiceDescription {
     pub rest_gap: Vec<(f64, f64)>,
 }
 
-/// The `fricative_noise <seed> <k> <j>` row: the supraglottal constriction `k` (0-based section index) opening into the
-/// section `j > k`. The card names both; this code chooses neither.
+/// The `fricative_noise <seed> <k> <j> [stevens [<m>]]` row: the supraglottal constriction `k` (0-based section index)
+/// opening into the section `j > k`, the printed law, and with `stevens` the obstacle section `m >= k`. The card names all
+/// four; this code chooses none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FricativeNoiseCard {
     /// Declared seed of the noise streams.
@@ -433,6 +443,19 @@ pub struct FricativeNoiseCard {
     pub constriction: usize,
     /// The section it opens into.
     pub expansion: usize,
+    /// The printed source law; a row without the fourth field is Oldham and Ukpoho's.
+    pub law: FricativeLaw,
+    /// The section after which the source's junction lines sit: the fifth field, else `constriction`.
+    pub obstacle: usize,
+}
+
+/// The printed law of the `fricative_noise` source (module doc).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FricativeLaw {
+    /// Oldham and Ukpoho (1990), the duct-constriction law in its supraglottal form: no fourth field.
+    OldhamUkpoho,
+    /// Stevens, *Acoustic Phonetics*, Fig. 2.33, on Shadle's (1985a) data: the fourth field `stevens`.
+    StevensShadle,
 }
 
 /// A further measured shape of a moving tract: the `keyframe` and `keyframe_section` rows of one name.
@@ -874,16 +897,29 @@ impl VoiceDescription {
                     subglottal_tube.push(section);
                 }
                 "fricative_noise" => {
-                    // The card names the constriction and the section it opens into; no gain, no gate.
-                    arity(&rest, 3, key)?;
+                    // The card names the constriction, the section it opens into and, optionally, the printed law and
+                    // its obstacle; no gain, no gate.
+                    let law = match rest.len() {
+                        3 => FricativeLaw::OldhamUkpoho,
+                        4 | 5 if rest[3] == "stevens" => FricativeLaw::StevensShadle,
+                        4 | 5 => return Err(format!("fricative_noise law must be `stevens`, got `{}`", rest[3])),
+                        n => {
+                            return Err(format!(
+                                "`{key}` takes 3 fields, or 4 with the law `stevens`, or 5 with its obstacle section m, got {n}"
+                            ))
+                        }
+                    };
                     let seed = whole(&rest, 0, "fricative_noise seed")?;
                     let index = |i: usize, what: &str| -> Result<usize, String> {
                         usize::try_from(whole(&rest, i, what)?).map_err(|_| format!("{what} out of range"))
                     };
+                    let constriction = index(1, "fricative_noise k")?;
                     let card = FricativeNoiseCard {
                         seed,
-                        constriction: index(1, "fricative_noise k")?,
+                        constriction,
                         expansion: index(2, "fricative_noise j")?,
+                        law,
+                        obstacle: if rest.len() == 5 { index(4, "fricative_noise m")? } else { constriction },
                     };
                     once(&mut fricative_noise, card, key)?;
                 }
@@ -1265,6 +1301,20 @@ impl VoiceDescription {
                             every shape takes its own"
                     .into());
             }
+            // The obstacle (`stevens m`, MB 17712): at or after the constriction, with a section after it for the
+            // junction; on a fixed tract only.
+            let m = card.obstacle;
+            if !(k <= m && m + 1 < sections.len()) {
+                return Err(format!(
+                    "fricative_noise needs k <= m < the last section {}: got k {k}, m {m}",
+                    sections.len() - 1
+                ));
+            }
+            if m != k && !tract_moves.is_empty() {
+                return Err("fricative_noise obstacle section m is refused with tract_move: a moving shape's obstacle has \
+                            no correspondence built"
+                    .into());
+            }
         }
         if free_field_receiver.is_some() && (head_sphere.is_some() || observer_law.is_some()) {
             return Err("receiver free_field_monopole is refused with head_sphere and observer_law: both observe the baffle".into());
@@ -1625,10 +1675,11 @@ impl VoiceDescription {
                     1.0 / f64::from(mechanics_rate),
                 )
                 .map_err(str::to_string)?;
+                // The junction lines after the obstacle section, `k` itself unless `stevens m` names another.
                 let lines = match split {
                     None => junction_source_lines(
                         &duct,
-                        card.constriction,
+                        card.obstacle,
                         gas,
                         mouth_load,
                         mechanics_rate,
@@ -1638,7 +1689,7 @@ impl VoiceDescription {
                     ),
                     Some(table) => junction_source_lines_exterior(
                         &duct,
-                        card.constriction,
+                        card.obstacle,
                         gas,
                         exterior,
                         table,
@@ -1681,6 +1732,7 @@ impl VoiceDescription {
                     shapes,
                     shape: 0,
                     rig: self.glottal_orifice.is_some(),
+                    law: card.law,
                     last_flow_m3_s: 0.0,
                 })
             }
@@ -2271,6 +2323,8 @@ struct FricativeSource {
     shape: usize,
     /// The card has `glottal_orifice`: the source reads the held flow, not [`Self::last_flow_m3_s`].
     rig: bool,
+    /// The card's printed law.
+    law: FricativeLaw,
     /// On the folds: the island's flow [m^3/s] of the step before, the flow the source reads (module doc).
     last_flow_m3_s: f64,
 }
@@ -2279,7 +2333,8 @@ struct FricativeSource {
 /// `A_j` (`sigma >= 1` on a shape with no expansion after `k`, where the law drives no band).
 #[derive(Debug, Clone, Copy)]
 struct FricativeShape {
-    /// The (c) rule's section, read by the tests; the junction lines were built at it, and the step reads the rest.
+    /// The (c) rule's section, read by the tests; the junction lines were built at it (on a fixed tract at the card's
+    /// obstacle section, which is it unless `stevens m` names another), and the step reads the rest.
     #[cfg_attr(not(test), allow(dead_code))]
     section: usize,
     area_k_m2: f64,
@@ -2475,10 +2530,20 @@ impl VoicePerformance {
                     // The present shape's constriction: past `sigma = 1` (section k as wide as every section after it)
                     // the printed law drives no band, so the source turns off through the law as the tract opens.
                     let shape = source.shapes[source.shape];
-                    let jet_speed = flow / shape.area_k_m2;
-                    let open = 1.0 - shape.open_area_ratio;
-                    let dp = 0.5 * self.gas_density * jet_speed * jet_speed * open * open;
-                    source.noise.pressure_pa_jet_in(dp, jet_speed, shape.open_area_ratio, shape.duct_radius_m)
+                    match source.law {
+                        FricativeLaw::OldhamUkpoho => {
+                            let jet_speed = flow / shape.area_k_m2;
+                            let open = 1.0 - shape.open_area_ratio;
+                            let dp = 0.5 * self.gas_density * jet_speed * jet_speed * open * open;
+                            source.noise.pressure_pa_jet_in(dp, jet_speed, shape.open_area_ratio, shape.duct_radius_m)
+                        }
+                        // Stevens' law reads the flow and `A_k` alone; on a shape with no constriction (`sigma >= 1`) it
+                        // is silent as the printed law is, every stream still advancing.
+                        FricativeLaw::StevensShadle => {
+                            let constricted = shape.open_area_ratio < 1.0;
+                            source.noise.pressure_pa_stevens(if constricted { flow } else { 0.0 }, shape.area_k_m2)
+                        }
+                    }
                 }
                 None => 0.0,
             };
@@ -4470,7 +4535,16 @@ mod tests {
         let ok = VoiceDescription::from_bytes(fixture(rig).as_bytes()).expect("the rig parses");
         assert_eq!(ok.glottal_orifice, Some(7.854e-5));
         assert_eq!(ok.subglottal_tube.len(), 2);
-        assert_eq!(ok.fricative_noise, Some(FricativeNoiseCard { seed: 5, constriction: 1, expansion: 4 }));
+        assert_eq!(
+            ok.fricative_noise,
+            Some(FricativeNoiseCard {
+                seed: 5,
+                constriction: 1,
+                expansion: 4,
+                law: FricativeLaw::OldhamUkpoho,
+                obstacle: 1,
+            })
+        );
         assert!(ok.free_field_receiver);
         let plain = VoiceDescription::from_bytes(fixture("").as_bytes()).expect("parses");
         assert!(plain.glottal_orifice.is_none() && plain.subglottal_tube.is_empty() && plain.fricative_noise.is_none());
@@ -4525,7 +4599,16 @@ mod tests {
         assert!(error.contains("wider than section k"), "a fixed card's one shape must be an expansion: {error}");
         let folds = VoiceDescription::from_bytes(fixture("fricative_noise 5 1 4\n").as_bytes()).expect("folds parse");
         assert!(folds.glottal_orifice.is_none());
-        assert_eq!(folds.fricative_noise, Some(FricativeNoiseCard { seed: 5, constriction: 1, expansion: 4 }));
+        assert_eq!(
+            folds.fricative_noise,
+            Some(FricativeNoiseCard {
+                seed: 5,
+                constriction: 1,
+                expansion: 4,
+                law: FricativeLaw::OldhamUkpoho,
+                obstacle: 1,
+            })
+        );
         for nodes in ["8", "4096", "x"] {
             let text = fixture("").replace("termination flanged", &format!("termination unflanged_thin_wall {nodes}"));
             let error = VoiceDescription::from_bytes(text.as_bytes()).unwrap_err();
@@ -4565,6 +4648,66 @@ mod tests {
         assert!(mean > 0.0 && mean <= stats.peak_glottal_flow_m3_s, "rig mean flow {mean} against the peak {}", stats.peak_glottal_flow_m3_s);
         let plain = VoiceDescription::from_bytes(fixture("").as_bytes()).expect("parses").build().expect("builds");
         assert!(plain.stats().rig_mean_glottal_flow_m3_s.is_none(), "a fold card has no rig window");
+    }
+
+    /// The Stevens form (MB 17504, 17645, 17712), test 4 of 4: the row's fourth field names the printed law and nothing
+    /// else is read as one; a row without it is Oldham and Ukpoho's, so a card written before the field renders as it did
+    /// (the rendered byte controls of the change carry that across the whole engine). The fifth field is the obstacle
+    /// section `m`: without it `m = k`, and `m = k` written out renders bit for bit the same; `m < k`, `m` on the last
+    /// section, an unreadable `m` and an `m` other than `k` on a moving tract are refused by name. On the rig the named law
+    /// reaches the radiated pressure, renders finite, one seed gives one noise, it is not the other law's noise, and the
+    /// source at an obstacle downstream is not the source at `k`.
+    #[test]
+    fn fricative_noise_names_its_printed_law_and_keeps_oldham_ukpoho_without_it() {
+        let parse = |row: &str| VoiceDescription::from_bytes(fixture(row).as_bytes());
+        let card = |row: &str| parse(row).expect("parses").fricative_noise.expect("the row");
+        assert_eq!(card("fricative_noise 5 1 4\n").law, FricativeLaw::OldhamUkpoho);
+        assert_eq!(card("fricative_noise 5 1 4\n").obstacle, 1);
+        assert_eq!(card("fricative_noise 5 1 4 stevens\n").law, FricativeLaw::StevensShadle);
+        assert_eq!(card("fricative_noise 5 1 4 stevens\n").obstacle, 1, "no fifth field: m = k");
+        assert_eq!(card("fricative_noise 5 1 4 stevens 3\n").obstacle, 3);
+        assert_eq!(card("fricative_noise 5 1 4 stevens 6\n").obstacle, 6, "the section before the last");
+        for (row, word) in [
+            ("fricative_noise 5 1 4 shadle\n", "law must be `stevens`"),
+            ("fricative_noise 5 1 4 Stevens\n", "law must be `stevens`"),
+            ("fricative_noise 5 1 4 shadle 3\n", "law must be `stevens`"),
+            ("fricative_noise 5 1 4 stevens 3 1\n", "takes 3 fields, or 4"),
+            ("fricative_noise 5 1\n", "takes 3 fields"),
+            ("fricative_noise 5 1 4 stevens x\n", "fricative_noise m"),
+            ("fricative_noise 5 1 4 stevens 0\n", "k <= m < the last section 7"),
+            ("fricative_noise 5 1 4 stevens 7\n", "k <= m < the last section 7"),
+        ] {
+            let error = parse(row).unwrap_err();
+            assert!(error.contains(word), "{row:?}: {error}");
+        }
+        let keyframes = [0.5e-4, 0.7e-4, 1.5e-4, 2.5e-4, 3.0e-4, 3.0e-4, 2.5e-4, 2.0e-4]
+            .iter()
+            .map(|a| format!("keyframe_section b {a:e} 0.02\n"))
+            .collect::<String>();
+        let moving = |tail: &str| {
+            fixture(&format!(
+                "glottal_orifice 7.854e-5\nfricative_noise 5 1 4{tail}\nkeyframe b source src\nkeyframe b licence test\n\
+                 {keyframes}tract_move 0.01 0.02 b 2\n"
+            ))
+        };
+        VoiceDescription::from_bytes(moving(" stevens").as_bytes()).expect("the law on a moving tract parses");
+        VoiceDescription::from_bytes(moving(" stevens 1").as_bytes()).expect("m = k on a moving tract parses");
+        let error = VoiceDescription::from_bytes(moving(" stevens 3").as_bytes()).unwrap_err();
+        assert!(error.contains("refused with tract_move"), "{error}");
+        let base = "glottal_orifice 4.0e-5\nsubglottal_tube 2.5e-4 0.08\nreceiver free_field_monopole\n";
+        let quiet = render(&fixture(base));
+        let oldham = render(&fixture(&format!("{base}fricative_noise 5 1 4\n")));
+        let stevens = render(&fixture(&format!("{base}fricative_noise 5 1 4 stevens\n")));
+        assert!(stevens.iter().all(|x| x.is_finite()));
+        assert!(quiet.iter().zip(&stevens).any(|(a, b)| a.to_bits() != b.to_bits()), "the named law must reach the pressure");
+        assert_ne!(stevens, oldham, "the named law is not the other law's noise");
+        assert_eq!(stevens, render(&fixture(&format!("{base}fricative_noise 5 1 4 stevens\n"))), "one seed, one noise");
+        let bits = |xs: &[f64]| xs.iter().map(|x| x.to_bits()).collect::<Vec<u64>>();
+        let at_k = render(&fixture(&format!("{base}fricative_noise 5 1 4 stevens 1\n")));
+        assert_eq!(bits(&stevens), bits(&at_k), "m = k written out is the row without m, bit for bit");
+        let downstream = render(&fixture(&format!("{base}fricative_noise 5 1 4 stevens 3\n")));
+        assert!(downstream.iter().all(|x| x.is_finite()));
+        assert_ne!(bits(&downstream), bits(&stevens), "the source at an obstacle downstream is not the source at k");
     }
 
     /// The fricative source on the folds (MB 16735 piece 1): it renders finite, reaches the radiated pressure, one seed
