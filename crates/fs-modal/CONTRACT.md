@@ -423,6 +423,39 @@ changing coherent receiver weights preserve physical force, velocity and
 resonance under a mere port-coordinate change. Complex receiver phase tangents,
 missing jets, invalid weights and extreme coherent cancellations are covered.
 
+### `harmonic::resonance`: signed physical-power extrema and sensitivities
+
+`refine_power_extremum` and its complete parameter-derivative entry root the
+actual signed P_omega through the existing numerical query owner. Native
+frequency, curvature and mixed response adapters expose original input power,
+structural viscous power and net load-port boundary work. Units and signs are
+preserved; absent or incomplete load-port observations refuse.
+
+Refinement evaluates only P and P_omega. One final curvature or mixed jet is
+reserved inside the same evaluation cap, reproduces both sampled values within
+32 machine epsilons without a unity floor, and supplies nonzero P_omegaomega
+with the strict maximum/minimum orientation. This rejects a divergent
+positive/negative power pole's reversed derivative without fabricating a finite
+extremum. Exact stationary samples remain cached by the shared query owner.
+Zero and negative stationary powers are admissible; the query never squares
+power or constructs an artificial amplitude.
+
+The local frequency derivative is `-P_omega_theta/P_omegaomega`. Total observed
+power sensitivity retains `P_theta+P_omega*omega_theta` at the actual returned
+frequency, using the existing normalized signed-work accumulator before
+physical recovery. All source, attachment and constitutive directions belong
+to the same authored jet. No new factor, perturbed solve, dense derivative
+operator or numerical root engine is introduced.
+
+Native regressions independently verify loaded mass/damper/spring source,
+viscous and absorbed-power peak frequencies, heights and their complete physical
+sensitivities. Signed/zero extrema, power units spanning 2^+/-700, exact stationary
+sample reuse, finite-resolution total derivatives, sampled/unsampled pole
+refusals, degenerate curvature, inconsistent jets, total budgets and final-call
+cancellation are checked. These APIs resolve individual simple extrema of one
+continuous physical branch; they do not infer power linewidths, global feature
+completeness, evaluator forward-error bounds or constitutive heat/storage splits.
+
 ### `harmonic::resonance`: physical peak, notch and linewidth sensitivity
 
 `refine_transfer_extremum_with_parameter_derivative` and its callback entry retain the original observed response and first-derivative sign search, then request one complete H/H_omega/H_omegaomega/H_theta/H_omega_theta jet at the resolved frequency. The implicit derivative of `Re(conj(H)*H_omega)=0` differentiates either a strict peak or a strict notch, including a simple exact transfer zero. Total complex response, log-magnitude and phase derivatives follow the moving extremum; log-magnitude and phase are explicitly absent at an exact zero. Signed curvature and stationarity diagnostics expose the remaining local conditioning and search resolution. Zero or wrongly oriented curvature refuses without an arbitrary curvature floor.

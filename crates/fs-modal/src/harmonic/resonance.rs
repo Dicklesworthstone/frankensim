@@ -1,9 +1,13 @@
-//! Resolve peaks and notches of an actual complex forced transfer.
+//! Resolve physical response extrema and resonance sensitivities.
 //!
-//! The stationary condition is `Re(conj(H) * dH/domega) = 0`. It retains
+//! Complex-transfer queries use `Re(conj(H) * dH/domega) = 0`. It retains
 //! interference between modes, source phase, nonproportional damping and any
 //! dispersive load already present in the evaluator. It is not a pole search:
 //! displacement, velocity and pressure can peak at different frequencies.
+//!
+//! Signed physical-power queries root `dP/domega = 0` directly and require an
+//! original curvature or complete parameter jet. They preserve power signs and
+//! units without interpreting net boundary work as constitutive heat/storage.
 //!
 //! The caller supplies a continuous differentiable transfer and either brackets
 //! ONE isolated extremum/crossing or supplies a grid resolving multiple peaks
@@ -36,8 +40,15 @@ pub use sensitivity::{
 mod native_parameter_projection;
 mod parameter_projection;
 mod ports;
+mod power;
 mod projection;
 pub use parameter_projection::{HarmonicReceiverParameterJet, HarmonicTransferFieldParameterJet};
+pub use power::{
+    HarmonicPowerCurvatureSample, HarmonicPowerParameterJet, HarmonicPowerSample, PowerExtremum,
+    PowerExtremumKind, PowerExtremumParameterResponse, refine_power_extremum,
+    refine_power_extremum_with_cancel, refine_power_extremum_with_parameter_derivative,
+    refine_power_extremum_with_parameter_derivative_with_cancel,
+};
 
 impl HarmonicTransferSample {
     /// Observe any fixed real linear receiver from a complete physical field

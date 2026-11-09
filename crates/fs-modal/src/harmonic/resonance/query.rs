@@ -397,7 +397,7 @@ fn component_scale(z: C64) -> f64 {
     z.re.abs().max(z.im.abs())
 }
 
-fn valid_interval<E>((lower, upper): (f64, f64)) -> Result<(), ResonanceError<E>> {
+pub(super) fn valid_interval<E>((lower, upper): (f64, f64)) -> Result<(), ResonanceError<E>> {
     if !lower.is_finite() || !upper.is_finite() || lower < 0.0 || upper <= lower {
         return Err(ResonanceError::Invalid(
             "finite increasing nonnegative frequency interval required",
@@ -406,30 +406,55 @@ fn valid_interval<E>((lower, upper): (f64, f64)) -> Result<(), ResonanceError<E>
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-struct Point {
-    frequency: f64,
-    sample: HarmonicTransferSample,
-    level: f64,
+// The refinement engine operates on original physical samples. Transfer
+// magnitudes retain their finite-maximum guard; scalar observables can perform
+// their own required curvature validation before publishing a result.
+pub(super) trait QuerySample: Copy {
+    const NONFINITE_MESSAGE: &'static str;
+    fn finite(self) -> bool;
+    fn finite_maximum_resolved(self, _width: f64) -> bool {
+        true
+    }
 }
 
-struct Query<F, C> {
+impl QuerySample for HarmonicTransferSample {
+    const NONFINITE_MESSAGE: &'static str =
+        "finite physical transfer and frequency derivative required";
+
+    fn finite(self) -> bool {
+        finite(self.amplitude) && finite(self.angular_derivative)
+    }
+
+    fn finite_maximum_resolved(self, width: f64) -> bool {
+        HarmonicTransferSample::finite_maximum_resolved(self, width)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct Point<S> {
+    pub(super) frequency: f64,
+    pub(super) sample: S,
+    pub(super) level: f64,
+}
+
+pub(super) struct Query<F, C, S> {
     controls: ResonanceControls,
     cancelled: C,
     evaluate: F,
-    evaluations: usize,
+    pub(super) evaluations: usize,
     // Only survey input samples are cached. Ordinary local refinement stays
     // allocation-free; survey memory is O(grid points + returned extrema),
     // independent of the number of source evaluations during refinement.
-    grid: Vec<Point>,
+    grid: Vec<Point<S>>,
 }
 
-impl<F, C, E> Query<F, C>
+impl<F, C, S, E> Query<F, C, S>
 where
-    F: FnMut(f64) -> Result<HarmonicTransferSample, E>,
+    F: FnMut(f64) -> Result<S, E>,
     C: FnMut() -> bool,
+    S: QuerySample,
 {
-    fn new(
+    pub(super) fn new(
         controls: ResonanceControls,
         cancelled: C,
         evaluate: F,
@@ -457,7 +482,7 @@ where
         Ok(query)
     }
 
-    fn poll(&mut self) -> Result<(), ResonanceError<E>> {
+    pub(super) fn poll(&mut self) -> Result<(), ResonanceError<E>> {
         if (self.cancelled)() {
             Err(ResonanceError::Cancelled)
         } else {
@@ -465,11 +490,11 @@ where
         }
     }
 
-    fn sample(
+    pub(super) fn sample(
         &mut self,
         frequency: f64,
-        level: impl Fn(HarmonicTransferSample) -> f64,
-    ) -> Result<Point, ResonanceError<E>> {
+        level: impl Fn(S) -> f64,
+    ) -> Result<Point<S>, ResonanceError<E>> {
         self.poll()?;
         if let Ok(index) = self
             .grid
@@ -487,10 +512,8 @@ where
         self.evaluations += 1;
         let sample = (self.evaluate)(frequency).map_err(ResonanceError::Evaluation)?;
         self.poll()?;
-        if !finite(sample.amplitude) || !finite(sample.angular_derivative) {
-            return Err(ResonanceError::Invalid(
-                "finite physical transfer and frequency derivative required",
-            ));
+        if !sample.finite() {
+            return Err(ResonanceError::Invalid(S::NONFINITE_MESSAGE));
         }
         Ok(Point {
             frequency,
@@ -499,18 +522,18 @@ where
         })
     }
 
-    fn refine(
+    pub(super) fn refine(
         &mut self,
-        mut left: Point,
-        mut right: Point,
-        level: impl Fn(HarmonicTransferSample) -> f64 + Copy,
+        mut left: Point<S>,
+        mut right: Point<S>,
+        level: impl Fn(S) -> f64 + Copy,
         finite_maximum: bool,
-    ) -> Result<(Point, (f64, f64)), ResonanceError<E>> {
+    ) -> Result<(Point<S>, (f64, f64)), ResonanceError<E>> {
         // An exactly stationary response stays between two shrinking sign
         // endpoints. Its original physical solve is still valid there; keep
         // just that sample instead of refactoring the same frequency on every
         // iteration. The cache is local to this level/transfer and O(1).
-        let mut stationary: Option<Point> = None;
+        let mut stationary: Option<Point<S>> = None;
         loop {
             self.poll()?;
             let width = right.frequency - left.frequency;
