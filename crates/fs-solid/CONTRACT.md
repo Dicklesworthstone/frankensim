@@ -13916,8 +13916,33 @@ iteration, cancellation and accepted-state publication remain the sole time owne
 `cutfem_eigenstrain_dynamics` adds hot equilibrium, consistent acceleration,
 translated trajectory, affine tangent/adjoint and rollback regression sources.
 The field, geometry, tensor and scales stay fixed during the trajectory; evolving
-temperature, moving supports and geometric-prestress dynamics require their own
-explicit integration and are not silently approximated here.
+temperature or prestress and moving supports require their own explicit
+integration and are not silently approximated here.
+
+### Frozen CutFEM prestress dynamics
+
+`CutSecondOrderProblem3::with_reference_prestress` prepares signed native G from
+the adapter's held eigenstrain and an admitted full reference displacement q_0.
+Its resistance is `K q - b_free + G(q-q_0)` and its tangent/state-force transpose
+is K+G. The geometric displacement difference is formed before multiplication,
+and the thermal offset is removed before adding the geometric force. Thus a
+nonzero heated reference gains no spurious Gq_0 force. Actual stage and endpoint
+displacements retain the original total/elastic strain admission. Strong support
+rows must be exactly zero; adaptive constraints and selected Nitsche geometric
+flux stay with the native preparation owner. Physical consistent mass and cell
+occupancy are unchanged; signed compression is never clipped.
+
+Preparation bounds bulk plus selected support points and scalar geometric
+entries, with two additional native-sized vectors for the reference and action
+scratch. The immutable source borrow preserves material/scales identity, and
+read-only `reference_prestress` allows modal queries to reuse that exact G.
+Reference equilibrium remains caller-owned. This is a frozen initial-stress
+approximation, not a finite-deformation/follower-load tangent, evolving thermal
+coupling or stability certificate. State/force adjoints hold G and q_0 fixed.
+The focused prestress child of `cutfem_eigenstrain_dynamics` defines Cartesian
+and hanging-node signed-work, reference-balance, mass and transpose regressions,
+an independent dense midpoint trajectory, and physical refusal/cancellation
+rollback checks.
 
 
 ## Material-aware support vibration with physical port loading

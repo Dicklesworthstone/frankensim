@@ -3,13 +3,16 @@
 //! The retained native stiffness and consistent mass provide M a + K q = f.
 //! A held eigenstrain changes resistance to K q - b_free using its original
 //! native equivalent force; caller-supplied forcing remains external only.
+//! Optional frozen initial stress adds G(q-q_0), prepared from that same held
+//! eigenstrain and an admitted reference displacement. Its signed tangent is
+//! K+G; the geometric force vanishes at q_0 without changing physical inertia.
 //! Strong homogeneous supports are removed once from every action and load;
 //! adaptive hanging constraints remain inside the original native operators.
 //! No mass lumping, stabilization inertia, constitutive fit or new time scheme
 //! is introduced. Geometry, material, occupancy and stiffness scales are fixed
 //! during a trajectory. Free strain is also fixed when supplied. Evolving
-//! temperature, nonzero/moving supports, geometric prestress and physical
-//! damping are outside this elastic adapter.
+//! temperature or prestress, nonzero/moving supports, follower loads and
+//! physical damping are outside this elastic adapter.
 //!
 //! Native mass and strain callbacks poll cancellation within their kernels.
 //! The original stiffness action remains indivisible; cancellation is checked
@@ -29,6 +32,9 @@ use fs_time::galpha::{
     ImplicitStepTelemetry, OperatorGeneralizedAlpha, SecondOrderOperatorWeights,
     SecondOrderProblem, SecondOrderState, TimeSolveError,
 };
+
+mod prestress;
+use prestress::HeldPrestress3;
 
 /// The original fixed-geometry elasticity owner; this view creates no mesh.
 #[derive(Clone, Copy)]
@@ -132,6 +138,16 @@ fn invalid(message: &'static str) -> ElasticityError3 {
 struct Scratch {
     input: Vec<f64>,
     output: Vec<f64>,
+    /// Allocated only when a frozen reference prestress is selected.
+    geometric: Vec<f64>,
+}
+
+#[derive(Clone, Copy)]
+enum Action {
+    Mass,
+    Tangent,
+    TangentTranspose,
+    Resistance,
 }
 
 struct HeldEigenstrain3<'a> {
@@ -161,6 +177,7 @@ pub struct CutSecondOrderProblem3<'a> {
     free: Vec<usize>,
     mass_diagonal: Vec<f64>,
     eigenstrain: Option<HeldEigenstrain3<'a>>,
+    prestress: Option<HeldPrestress3>,
     scratch: RefCell<Scratch>,
 }
 
@@ -211,9 +228,11 @@ impl<'a> CutSecondOrderProblem3<'a> {
             free,
             mass_diagonal,
             eigenstrain: None,
+            prestress: None,
             scratch: RefCell::new(Scratch {
                 input: vec![0.0; n],
                 output: vec![0.0; n],
+                geometric: Vec::new(),
             }),
         })
     }
@@ -351,8 +370,7 @@ impl<'a> CutSecondOrderProblem3<'a> {
         &self,
         input: &[f64],
         output: &mut [f64],
-        mass: bool,
-        transpose: bool,
+        action: Action,
     ) -> Result<(), ElasticityError3> {
         self.admit_vector(input, self.free.len())?;
         if output.len() != self.free.len() {
@@ -362,15 +380,37 @@ impl<'a> CutSecondOrderProblem3<'a> {
         let Scratch {
             input: full,
             output: result,
+            geometric,
         } = &mut *scratch;
         self.scatter(input, full)?;
-        if mass {
-            self.mass
-                .apply_into(self.occupancy, full, result, || checkpoint(self.gate))?;
-        } else if transpose {
-            self.source.operator().apply_transpose(full, result);
+        match action {
+            Action::Mass => self
+                .mass
+                .apply_into(self.occupancy, full, result, || checkpoint(self.gate))?,
+            Action::TangentTranspose => self.source.operator().apply_transpose(full, result),
+            Action::Tangent | Action::Resistance => self.source.operator().apply(full, result),
+        }
+        let resistance = matches!(action, Action::Resistance);
+        let prestress = if matches!(action, Action::Mass) {
+            None
         } else {
-            self.source.operator().apply(full, result);
+            self.prestress.as_ref()
+        };
+        if let Some(held) = prestress {
+            if resistance {
+                // Center before multiplication: G(q-q_0), never Gq-Gq_0.
+                // Strong rows stay zero because the reference was admitted.
+                for (i, (value, reference)) in full.iter_mut().zip(&held.reference).enumerate() {
+                    if i % 192 == 0 {
+                        poll(self.gate)?;
+                    }
+                    *value -= reference;
+                }
+            }
+            // The native initial-stress operator is symmetric, including its
+            // selected Nitsche flux and exact adaptive constraint transpose.
+            held.prepared
+                .apply_into(full, geometric, || checkpoint(self.gate))?;
         }
         poll(self.gate)?;
         for (i, (&dof, value)) in self.free.iter().zip(output.iter_mut()).enumerate() {
@@ -378,11 +418,18 @@ impl<'a> CutSecondOrderProblem3<'a> {
                 poll(self.gate)?;
             }
             *value = result[dof];
+            // Resolve the thermal offset before adding a weak geometric force.
+            if resistance && let Some(held) = &self.eigenstrain {
+                *value -= held.force[i];
+            }
+            if prestress.is_some() {
+                *value += geometric[dof];
+            }
             if !value.is_finite() {
                 return Err(invalid("CutFEM dynamics operator overflow"));
             }
         }
-        Ok(())
+        poll(self.gate)
     }
 }
 
@@ -408,7 +455,7 @@ impl SecondOrderProblem for CutSecondOrderProblem3<'_> {
     }
 
     fn mass_apply(&self, input: &[f64], output: &mut [f64]) {
-        if self.action(input, output, true, false).is_err() {
+        if self.action(input, output, Action::Mass).is_err() {
             output.fill(f64::NAN);
         }
     }
@@ -422,29 +469,14 @@ impl SecondOrderProblem for CutSecondOrderProblem3<'_> {
     }
 
     fn internal_force(&self, q: &[f64], output: &mut [f64]) {
-        let result = (|| -> Result<(), ElasticityError3> {
-            self.action(q, output, false, false)?;
-            if let Some(held) = &self.eigenstrain {
-                for (i, (value, force)) in output.iter_mut().zip(&held.force).enumerate() {
-                    if i % 192 == 0 {
-                        poll(self.gate)?;
-                    }
-                    *value -= force;
-                    if !value.is_finite() {
-                        return Err(invalid("CutFEM dynamics eigenstrain force overflow"));
-                    }
-                }
-            }
-            poll(self.gate)
-        })();
-        if result.is_err() {
+        if self.action(q, output, Action::Resistance).is_err() {
             output.fill(f64::NAN);
         }
     }
 
     fn tangent_apply(&self, _: &[f64], direction: &[f64], output: &mut [f64]) {
-        // The held free-strain force is an affine offset, not a tangent action.
-        if self.action(direction, output, false, false).is_err() {
+        // Both held free strain and the geometric reference are affine offsets.
+        if self.action(direction, output, Action::Tangent).is_err() {
             output.fill(f64::NAN);
         }
     }
@@ -481,14 +513,15 @@ impl SecondOrderProblem for CutSecondOrderProblem3<'_> {
 }
 
 /// State/force pullbacks at this fixed physical configuration. No design,
-/// geometry, occupancy, free-strain or material parameter derivative is claimed.
+/// geometry, occupancy, free-strain, reference-prestress or material parameter
+/// derivative is claimed. A selected geometric tangent remains frozen.
 impl SecondOrderVjp for CutSecondOrderProblem3<'_> {
     fn parameter_count(&self) -> usize {
         0
     }
 
     fn mass_transpose_apply(&self, seed: &[f64], output: &mut [f64]) -> Result<(), String> {
-        self.action(seed, output, true, true)
+        self.action(seed, output, Action::Mass)
             .map_err(|error| error.to_string())
     }
 
@@ -508,7 +541,7 @@ impl SecondOrderVjp for CutSecondOrderProblem3<'_> {
         seed: &[f64],
         output: &mut [f64],
     ) -> Result<(), String> {
-        self.action(seed, output, false, true)
+        self.action(seed, output, Action::TangentTranspose)
             .map_err(|error| error.to_string())
     }
 

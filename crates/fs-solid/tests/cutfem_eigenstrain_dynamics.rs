@@ -24,6 +24,9 @@ use fs_time::galpha::{
 const EXPANSION: f64 = 0.004;
 const POINTS: usize = 100_000;
 
+#[path = "cutfem_eigenstrain_dynamics/prestress.rs"]
+mod prestress;
+
 struct Top;
 impl CutSdf3 for Top {
     fn value(&self, p: [f64; 3]) -> f64 {
