@@ -5,14 +5,14 @@ use super::{BackboneContinuationError, OrbitError, Result, invalid};
 use fs_la::factor::{Qr, qr};
 use fs_math::det;
 
-pub(super) struct Admitted {
+pub(crate) struct Admitted {
     factor: Qr,
     maxima: Vec<f64>,
     norms: Vec<f64>,
-    pub(super) condition: f64,
+    pub(crate) condition: f64,
 }
 impl Admitted {
-    pub(super) fn solve(&self, residual: &[f64]) -> Result<Vec<f64>> {
+    pub(crate) fn solve(&self, residual: &[f64]) -> Result<Vec<f64>> {
         let mut delta = self.factor.solve_ls(residual);
         for ((value, &norm), &maximum) in delta.iter_mut().zip(&self.norms).zip(&self.maxima) {
             // The product maximum*norm may overflow despite a finite correction.
@@ -25,7 +25,7 @@ impl Admitted {
     }
 }
 
-pub(super) fn admit(
+pub(crate) fn admit(
     matrix: &mut [f64],
     rows: usize,
     cols: usize,

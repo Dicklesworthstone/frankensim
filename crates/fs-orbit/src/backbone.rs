@@ -5,7 +5,7 @@
 //! Family continuation retains the conservation-dependent balance row and
 //! uses a rectangular phase/arclength corrector over all states and frequency.
 
-mod continuation;
+pub(crate) mod continuation;
 pub use continuation::{
     BackboneBranch, BackboneContinuationBudget, BackboneContinuationError,
     BackboneContinuationPoint, continue_backbone_branch,

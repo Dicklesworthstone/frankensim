@@ -2,7 +2,7 @@
 //! Adding phase and arclength to ALL balance rows produces a rectangular
 //! corrector, solved by the original Householder QR owner without regularization.
 
-mod linear;
+pub(crate) mod linear;
 
 use crate::{
     AftSum, AftWorkspace, HbAnchor, HbBudget, HbOrbit, HbScales, IslandStateJacobian,

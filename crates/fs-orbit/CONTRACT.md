@@ -979,3 +979,56 @@ derivatives, physical unit conversions and factor reuse after refusal. All seven
 existing forced-sensitivity regressions also pass through the modified shared
 owner. This local fixed-order derivative establishes no existence, primitive
 period, infinite-tail, uniqueness or Floquet-stability guarantee.
+
+## Conservative backbone frequency and waveform derivatives
+
+`sensitivity::PreparedBackboneSensitivity` differentiates a conservative family
+at an authored physical first-harmonic amplitude of any original coordinate.
+It shares the exact AFT Jacobians, physical scales, complete frequency-column
+declaration, two-grid base/tangent checks and original residual projection of
+the forced/autonomous sensitivity owner. Every original balance row remains;
+a fixed full-waveform phase row and an amplitude row close the coefficients and
+unknown frequency. The rectangular system reuses the original backbone
+continuation's column-equilibrated Householder QR, without normal equations,
+deleted balance rows, artificial damping or regularization of a neutral cycle.
+
+`BackboneSensitivityDirection` independently states the parameter scale and
+physical amplitude derivative. Zero amplitude derivative gives material,
+geometry or source sensitivities at fixed first-harmonic peak; a zero original
+source partial and unit amplitude derivative gives the backbone slope and all
+harmonic waveform changes with amplitude. The complete residual callback holds
+both coefficients and frequency fixed. The island-only entry requires the
+original frequency port to remain fixed. All DC, higher-harmonic and material
+states retain their original ordering and units; output uses the existing
+`AutonomousOrbitSensitivity` waveform/frequency result.
+
+One prepared factor serves every direction. Payload/work admission includes the
+extra row and QR scratch before source callbacks. Existing square LU paths keep
+their componentwise backward-error metric and arithmetic. The rectangular path
+uses maximum row defect relative to maximum row action, avoiding division by
+quadrature noise in analytically zero harmonic rows. Independently of that
+relative diagnostic, BOTH original physical grids and both closure rows must
+meet their absolute normalized tolerances using the rounded published derivative.
+An incompatible dissipative direction therefore cannot be accepted merely
+because its rectangular least-squares problem has a minimizer. Invalid anchors,
+incomplete exact declarations, unresolved residuals, excessive conditioning,
+resource exhaustion and cancellation publish no partial result.
+
+The focused G1/G3 tests compare complete derivatives against independently
+resolved neighboring nonlinear Duffing backbones and differentiated continuous
+energy-period quadrature. They retain a static first state, dense coupled
+mass/time ports, arbitrary phase, physical unit/parameter changes and higher
+harmonics, and check incompatible damping, declared refusals and factor reuse.
+These are local fixed-order numerical derivatives, not a proof that an arbitrary
+source is conservative, a harmonic-tail bound, a primitive-period or stability
+certificate. The selected first-harmonic peak is not the turning-point amplitude;
+an amplitude fold or additional neutral family can make this chart refuse.
+
+All four new regressions and all 22 original forced/autonomous sensitivity and
+backbone coordinate/continuation regressions pass in a bounded native build.
+It compiles the complete original `fs-orbit` crate, full `fs-math`, observability,
+substrate and SIMD crates, and unchanged fs-la factor/eigen/complex-LU/SVD/GEMM
+and fs-fft transform owners. Unrelated executor/provenance dependency surfaces
+are excluded, with no substituted numerical methods. This scoped execution
+does not replace a full Cargo/DSR workspace gate; the full dependency build was
+stopped when resource pressure made the execution environment unavailable.

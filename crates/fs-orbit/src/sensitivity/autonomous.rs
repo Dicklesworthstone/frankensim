@@ -29,7 +29,10 @@ pub struct AutonomousOrbitSensitivity {
     /// These are Fourier half-amplitudes, including every DC and memory state.
     /// For absolute-time derivatives add the phase drift `t*omega_p*dx/dphase`.
     pub coeffs: Vec<Vec<C64>>,
-    /// Componentwise backward error of the complete bordered linear solve.
+    /// Componentwise backward error of the complete square bordered solve.
+    /// Conservative-backbone results use the maximum row defect relative to
+    /// maximum row action of their rectangular system; physical defects below
+    /// independently gate every original equation and both closure rows.
     pub relative_residual: f64,
     /// Maximum two-grid physical differentiated-balance norm, combined with
     /// the normalized fixed-phase defect per declared parameter-scale increment.
@@ -96,6 +99,7 @@ impl PreparedAutonomousSensitivity {
                 controls,
                 scales,
                 Some(phase_reference),
+                None,
                 Some(&mut frequency_column),
                 cancelled,
             )?,

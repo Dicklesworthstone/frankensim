@@ -1,4 +1,4 @@
-//! Derivatives of complete forced and autonomous harmonic-balance waveforms.
+//! Derivatives of complete forced, autonomous and conservative HB waveforms.
 //!
 //! At fixed retained order, implicit differentiation gives `R_X X_p = -R_p`.
 //! The original real AFT Jacobian and fs-la LU are the numerical owners. One
@@ -21,6 +21,11 @@ mod autonomous;
 pub use autonomous::{
     AutonomousOrbitSensitivity, AutonomousSensitivityPoint, PreparedAutonomousSensitivity,
 };
+mod backbone;
+use backbone::{AmplitudeClosure, SensitivityFactor};
+pub use backbone::{
+    BackboneSensitivityAnchor, BackboneSensitivityDirection, PreparedBackboneSensitivity,
+};
 
 /// Explicit resources and independently authored numerical acceptance limits.
 #[derive(Clone, Copy, Debug)]
@@ -38,21 +43,24 @@ pub struct ForcedSensitivityControls {
     /// each reused direction has this same allowance. Callback work is excluded.
     pub maximum_work: u64,
     /// Maximum normalized Parseval norm of the original retained base balance
-    /// on EITHER grid, including the autonomous phase row when present.
+    /// on EITHER grid, including phase/amplitude rows when present.
     /// Previous convergence fields are never trusted.
     pub maximum_base_residual: f64,
     /// Frobenius norm of the difference of the two row/column-scaled exact
-    /// coefficient Jacobians, including an autonomous frequency/phase border.
+    /// coefficient Jacobians, including frequency/phase/amplitude borders.
     /// Agreement is measured, not an aliasing proof.
     pub maximum_tangent_sampling_defect: f64,
     /// Maximum fs-la Hager/Higham 1-norm condition ESTIMATE of the scaled
     /// Jacobian. This is not a certified upper bound on forward sensitivity.
     pub maximum_condition_estimate: f64,
-    /// Maximum componentwise backward error of the solved differentiated rows.
+    /// Maximum componentwise backward error of square differentiated systems.
+    /// For the rectangular conservative system, maximum absolute row defect
+    /// divided by maximum absolute row action; independent physical residuals
+    /// below still bound every row, including weak/zero harmonic equations.
     pub maximum_relative_residual: f64,
     /// Maximum Parseval norm of the differentiated equations on BOTH grids,
     /// in equation-scale units per declared parameter-scale increment,
-    /// combined with the normalized autonomous phase defect when present.
+    /// combined with normalized phase/amplitude defects when present.
     pub maximum_derivative_residual: f64,
 }
 
@@ -154,9 +162,10 @@ pub struct PreparedForcedSensitivity {
     coarse_jacobian: Vec<f64>,
     fine_jacobian: Vec<f64>,
     normalized: Vec<f64>,
-    factor: Lu,
+    factor: SensitivityFactor,
     scales: AdmittedScales,
     phase: Option<PhaseCondition>,
+    amplitude: Option<AmplitudeClosure>,
     controls: ForcedSensitivityControls,
     /// Maximum recomputed normalized original retained base balance.
     pub base_residual: f64,
@@ -182,26 +191,39 @@ impl PreparedForcedSensitivity {
         scales: &HbScales,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self> {
-        Self::prepare(problem, orbit, controls, scales, None, None, cancelled)
+        Self::prepare(
+            problem, orbit, controls, scales, None, None, None, cancelled,
+        )
     }
 
-    // Forced and autonomous sensitivities share this exact original AFT and
-    // factor owner. Only the independent frequency column and phase border
-    // differ; neither a neutral mode nor an original balance row is removed.
+    // Forced, isolated-cycle and conservative-family sensitivities share this
+    // original AFT owner. An independent frequency column and phase/amplitude
+    // closures change the factor shape, never remove original balance rows.
+    #[allow(clippy::too_many_arguments)] // complete source and optional physical chart closures
     fn prepare<P: OrbitProblem>(
         problem: &P,
         orbit: &HbOrbit,
         controls: ForcedSensitivityControls,
         scales: &HbScales,
         phase_reference: Option<&[f64]>,
+        amplitude_anchor: Option<BackboneSensitivityAnchor>,
         mut frequency_column: Option<
             &mut dyn FnMut(AutonomousSensitivityPoint<'_>, &mut [f64]) -> bool,
         >,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self> {
         poll(&mut cancelled)?;
-        let (pack, coefficients, admitted) =
-            admit(problem, orbit, controls, scales, phase_reference.is_some())?;
+        let (pack, coefficients, admitted) = admit(
+            problem,
+            orbit,
+            controls,
+            scales,
+            phase_reference.is_some(),
+            amplitude_anchor.is_some(),
+        )?;
+        let amplitude = amplitude_anchor
+            .map(|anchor| AmplitudeClosure::new(anchor, &pack, &coefficients, &admitted))
+            .transpose()?;
         let phase = phase_reference
             .map(|reference| {
                 PhaseCondition::new(
@@ -218,9 +240,12 @@ impl PreparedForcedSensitivity {
             })
             .transpose()?;
         let phase_defect = phase.as_ref().map_or(0.0, |p| p.value(&coefficients));
-        if !phase_defect.is_finite() || phase_defect.abs() > controls.maximum_base_residual {
+        let closure_defect = amplitude.as_ref().map_or(phase_defect.abs(), |a| {
+            det::hypot(phase_defect, a.base_defect)
+        });
+        if !closure_defect.is_finite() || closure_defect > controls.maximum_base_residual {
             return Err(ForcedSensitivityError::BaseUnresolved {
-                residual: phase_defect.abs(),
+                residual: closure_defect,
                 limit: controls.maximum_base_residual,
             });
         }
@@ -253,7 +278,7 @@ impl PreparedForcedSensitivity {
             if residual.iter().any(|v| !v.is_finite()) {
                 return Err(invalid("original base equations refused"));
             }
-            let base = det::hypot(admitted.row_norm(&residual), phase_defect);
+            let base = det::hypot(admitted.row_norm(&residual), closure_defect);
             if !base.is_finite() || base > controls.maximum_base_residual {
                 return Err(ForcedSensitivityError::BaseUnresolved {
                     residual: base,
@@ -264,8 +289,9 @@ impl PreparedForcedSensitivity {
             tangent.prepare(problem, callback, &pack, orbit.omega, &aft)?;
             let nc = pack.coeff_len();
             let n = admitted.columns.len();
-            let mut original = vec![0.0; n * n];
-            let mut normalized = vec![0.0; n * n];
+            let rows = n + usize::from(amplitude.is_some());
+            let mut original = vec![0.0; rows * n];
+            let mut normalized = vec![0.0; rows * n];
             for row in 0..nc {
                 poll(&mut cancelled)?;
                 for col in 0..nc {
@@ -300,6 +326,9 @@ impl PreparedForcedSensitivity {
                     normalized[nc * n + row] = phase.scaled_derivative(row, admitted.columns[row]);
                 }
             }
+            if let Some(amplitude) = &amplitude {
+                amplitude.write_row(&mut normalized[n * n..]);
+            }
             Ok((aft, original, normalized, base))
         };
         let (coarse, coarse_jacobian, coarse_normalized, coarse_base) =
@@ -321,9 +350,12 @@ impl PreparedForcedSensitivity {
             });
         }
         poll(&mut cancelled)?;
-        let factor = lu(&normalized, admitted.columns.len())
-            .map_err(|_| ForcedSensitivityError::Singular)?;
-        let condition_estimate = factor.condition_1(&normalized);
+        let (factor, condition_estimate) = SensitivityFactor::new(
+            &normalized,
+            admitted.columns.len(),
+            controls.maximum_condition_estimate,
+            amplitude.is_some(),
+        )?;
         if !condition_estimate.is_finite()
             || condition_estimate > controls.maximum_condition_estimate
         {
@@ -345,6 +377,7 @@ impl PreparedForcedSensitivity {
             factor,
             scales: admitted,
             phase,
+            amplitude,
             controls,
             base_residual: coarse_base.max(fine_base),
             tangent_sampling_defect,
@@ -376,6 +409,16 @@ impl PreparedForcedSensitivity {
     pub fn solve(
         &self,
         direction: ForcedSensitivityDirection,
+        residual_direction: impl FnMut(ForcedParameterPoint<'_>, &mut [f64]) -> bool,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ForcedOrbitSensitivity> {
+        self.solve_with_amplitude(direction, 0.0, residual_direction, cancelled)
+    }
+
+    fn solve_with_amplitude(
+        &self,
+        direction: ForcedSensitivityDirection,
+        amplitude_derivative: f64,
         mut residual_direction: impl FnMut(ForcedParameterPoint<'_>, &mut [f64]) -> bool,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ForcedOrbitSensitivity> {
@@ -396,7 +439,13 @@ impl PreparedForcedSensitivity {
             }
             columns.push(column);
         }
-        self.solve_columns(direction, &columns[0], &columns[1], &mut cancelled)
+        self.solve_columns(
+            direction,
+            amplitude_derivative,
+            &columns[0],
+            &columns[1],
+            &mut cancelled,
+        )
     }
 
     /// Differentiate ONLY the original time-local island at a FIXED clock and
@@ -410,6 +459,16 @@ impl PreparedForcedSensitivity {
     pub fn solve_island_direction(
         &mut self,
         direction: ForcedSensitivityDirection,
+        island_direction: impl FnMut(f64, &[f64], &mut [f64]) -> bool,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ForcedOrbitSensitivity> {
+        self.solve_island_with_amplitude(direction, 0.0, island_direction, cancelled)
+    }
+
+    fn solve_island_with_amplitude(
+        &mut self,
+        direction: ForcedSensitivityDirection,
+        amplitude_derivative: f64,
         mut island_direction: impl FnMut(f64, &[f64], &mut [f64]) -> bool,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ForcedOrbitSensitivity> {
@@ -433,12 +492,19 @@ impl PreparedForcedSensitivity {
             &mut island_direction,
             &mut cancelled,
         )?;
-        self.solve_columns(direction, &coarse, &fine, &mut cancelled)
+        self.solve_columns(
+            direction,
+            amplitude_derivative,
+            &coarse,
+            &fine,
+            &mut cancelled,
+        )
     }
 
     fn solve_columns(
         &self,
         direction: ForcedSensitivityDirection,
+        amplitude_derivative: f64,
         coarse: &[f64],
         fine: &[f64],
         cancelled: &mut impl FnMut() -> bool,
@@ -446,13 +512,16 @@ impl PreparedForcedSensitivity {
         poll(cancelled)?;
         let nc = self.pack.coeff_len();
         let n = self.scales.columns.len();
-        let mut rhs = vec![0.0; n];
+        let rows = n + usize::from(self.amplitude.is_some());
+        let mut rhs = vec![0.0; rows];
         for row in 0..nc {
             rhs[row] = scaled(-fine[row], direction.parameter_scale, self.scales.rows[row])?;
         }
-        let mut solution = rhs.clone();
-        self.factor.solve(&mut solution);
-        let mut correction = vec![0.0; n];
+        if let Some(amplitude) = &self.amplitude {
+            rhs[n] = amplitude.rhs(amplitude_derivative, direction.parameter_scale)?;
+        }
+        let mut solution = self.factor.solve(&rhs)?;
+        let mut correction = vec![0.0; rows];
         let mut relative_residual = f64::INFINITY;
         // Reuse the same original factor for bounded residual correction.
         for iteration in 0..=3 {
@@ -464,8 +533,8 @@ impl PreparedForcedSensitivity {
             if relative_residual <= self.controls.maximum_relative_residual || iteration == 3 {
                 break;
             }
-            self.factor.solve(&mut correction);
-            for (value, change) in solution.iter_mut().zip(&correction) {
+            let change = self.factor.solve(&correction)?;
+            for (value, change) in solution.iter_mut().zip(&change) {
                 *value += change;
             }
         }
@@ -511,6 +580,17 @@ impl PreparedForcedSensitivity {
                         * Dd::from_f64(value);
             }
             derivative_residual = det::hypot(derivative_residual, defect.to_f64());
+        }
+        if let Some(amplitude) = &self.amplitude {
+            derivative_residual = det::hypot(
+                derivative_residual,
+                amplitude.derivative_defect(
+                    &physical,
+                    &self.scales.columns,
+                    amplitude_derivative,
+                    direction.parameter_scale,
+                )?,
+            );
         }
         if !relative_residual.is_finite()
             || !derivative_residual.is_finite()
@@ -596,10 +676,12 @@ fn admit<P: OrbitProblem>(
     controls: ForcedSensitivityControls,
     scales: &HbScales,
     autonomous: bool,
+    backbone: bool,
 ) -> Result<(Packing, Vec<f64>, AdmittedScales)> {
     let d = problem.dim();
     let width = orbit.coeffs.first().map_or(0, Vec::len);
-    if problem.autonomous() != autonomous
+    if (backbone && !autonomous)
+        || problem.autonomous() != autonomous
         || d == 0
         || orbit.coeffs.len() != d
         || width < 2
@@ -661,9 +743,15 @@ fn admit<P: OrbitProblem>(
     // GEMM's current fixed panels occupy (128+512)*256 f64 values.
     let transform_payload = crate::transform::payload(m as usize, h as usize, d as usize)? as u128
         + crate::transform::payload((2 * m + 1) as usize, h as usize, d as usize)? as u128;
+    let rows = n + u128::from(backbone);
     let payload = transform_payload
-        + 8 * (8 * n * n + 16 * n + 16 * d * d * (2 * h + 1) + 8 * (3 * m + 1) * (d + 1) + 163_840);
-    let work = 16 * n * n * n + 128 * n * n + 128 * (3 * m + 1) * (d * d + d) * (2 * h + 1);
+        + 8 * (8 * rows * n
+            + 16 * n
+            + 4 * n * u128::from(backbone)
+            + 16 * d * d * (2 * h + 1)
+            + 8 * (3 * m + 1) * (d + 1)
+            + 163_840);
+    let work = 16 * rows * n * n + 128 * rows * n + 128 * (3 * m + 1) * (d * d + d) * (2 * h + 1);
     for (quantity, requested, cap) in [
         (
             "numerical payload bytes",
@@ -757,7 +845,9 @@ fn project_direction(
 fn linear_residual(matrix: &[f64], solution: &[f64], rhs: &[f64], correction: &mut [f64]) -> f64 {
     let n = solution.len();
     let mut maximum: f64 = 0.0;
-    for row in 0..n {
+    let mut maximum_defect: f64 = 0.0;
+    let mut maximum_action: f64 = 0.0;
+    for row in 0..rhs.len() {
         let mut sum = Dd::from_f64(-rhs[row]);
         let mut scale = Dd::from_f64(rhs[row].abs());
         for col in 0..n {
@@ -771,6 +861,8 @@ fn linear_residual(matrix: &[f64], solution: &[f64], rhs: &[f64], correction: &m
             return f64::INFINITY;
         }
         correction[row] = -remainder;
+        maximum_defect = maximum_defect.max(remainder.abs());
+        maximum_action = maximum_action.max(scale);
         let relative = if scale == 0.0 && remainder == 0.0 {
             0.0
         } else {
@@ -781,5 +873,16 @@ fn linear_residual(matrix: &[f64], solution: &[f64], rhs: &[f64], correction: &m
         }
         maximum = maximum.max(relative);
     }
-    maximum
+    if rhs.len() == n {
+        maximum
+    } else if maximum_action == 0.0 {
+        0.0
+    } else {
+        // A conservative rectangular system has a redundant balance row.
+        // Analytically zero harmonic actions can carry only quadrature noise;
+        // dividing that row's defect by that same noise is not a useful solve
+        // diagnostic. Its absolute physical equation defect remains separately
+        // enforced on BOTH grids, including the rounded published derivative.
+        maximum_defect / maximum_action
+    }
 }
