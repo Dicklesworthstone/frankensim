@@ -1,5 +1,49 @@
 # fs-gas contract
 
+## Conservative finite-plenum exchange candidates
+
+The existing frozen and evolving-composition network `Plenum` types now expose
+`exchange_candidate` for composing their finite storage with other native gas
+owners. Positive mass/species masses [kg] and total energy [J] enter a rigid
+volume. The update advances extensive inventories, then recovers density and
+internal-energy density at that same volume. Both endpoints pass the exact
+original `FrozenGas` / `MixtureGas` caloric admission. Pressure and temperature
+therefore respond to filling, blowdown and transported energy; no pressure
+source, fixed gamma or second EOS is introduced.
+
+The energy transfer is the port's complete referenced total-energy exchange.
+It already includes flow pressure work. Incoming kinetic energy becomes
+internal storage because compact bulk momentum remains zero; the composing
+owner must account for the opposite Cartesian/axial impulse at its support.
+Species retain canonical order and their original formation-energy gauges.
+There is no extra enthalpy, reaction, heat or moving-volume-work term.
+
+Frozen plenums are `Copy` stage values and allocate no storage.
+Mixture `exchange_candidate_into` prepares a bounded stack candidate and
+publishes into an existing species vector only after the final cancellation
+poll; successful repeated calls allocate no stepping storage. The convenience
+mixture return-value method allocates one bounded species vector. Exact zero
+transfers preserve the original state. Species may reach exact zero, but
+exhausted total mass, negative inventories, unsupported caloric states,
+nonfinite exchanges and unrepresentable extensive storage refuse without
+clipping or partial output.
+
+These are shared algebraic stage operations, not independent time integrators.
+A coupled owner supplies its common-stage fluxes, compact-volume CFL, retries
+and joint publication. The existing 1-D network integration arithmetic is
+unchanged. This does not resolve internal tank waves, mixing gradients, neck
+inertia or molecular/thermal interfaces, and does not duplicate the distinct
+material-parcel/NSF-DG coupling.
+
+Five focused native tests passed using these actual production leaves,
+the original Plenum definitions and original EOS/characteristic dependency
+closure. They cover variable-Cp filling and incoming kinetic energy, large
+formation-gauge invariance, source-port blowdown cooling and pressure feedback
+with independent adiabatic/RK2 refinement checks, canonical species mixing and
+depletion, and transactional source/shape/exhaustion/late-cancellation refusal.
+Unrelated network/thermal/chemistry wrappers were outside that bounded source
+build; this is not a full-crate or workspace Cargo/DSR gate.
+
 ## Compact stagnation reservoirs on planar and volumetric gas traces
 
 Frozen and evolving-mixture gas owners expose conserved and reconstructed

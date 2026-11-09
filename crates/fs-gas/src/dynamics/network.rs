@@ -24,6 +24,7 @@ use fs_qty::Time;
 // Frozen and evolving-composition chambers report the same physical exchange.
 pub use crate::multicomponent::network::PlenumBoundaryWork;
 
+mod exchange;
 mod gravity;
 mod step;
 mod thermal;
@@ -83,7 +84,7 @@ pub struct PlenumConnection {
 /// Its momentum is exactly zero; `state.energy` is referenced internal-energy
 /// density. This model assumes that the plenum is acoustically compact on the
 /// time and length scales of interest. It does not resolve its internal waves.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Plenum {
     volume_m3: f64,
     state: Conserved,

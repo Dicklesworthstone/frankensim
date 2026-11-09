@@ -29,6 +29,7 @@ use crate::dynamics::{Boundaries, MAX_EULER_CELLS};
 use fs_qty::Time;
 
 mod coupled;
+mod exchange;
 mod entropy;
 mod step;
 
