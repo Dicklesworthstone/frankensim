@@ -41,9 +41,11 @@ mod depth;
 mod diffuse;
 mod layered;
 mod refraction;
+mod thermal;
 pub use beam::{SlabBeamExchange, SlabBeamResponse};
 pub use depth::{SlabDepthReport, SlabDepthResponse};
 pub use diffuse::{SlabDiffuseDepthReport, SlabDiffuseDepthResponse};
+pub use thermal::GraySlabThermal;
 
 /// Maximum physical layers in one prepared slab.
 pub const MAX_SLAB_LAYERS: usize = 64;
