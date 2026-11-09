@@ -170,44 +170,13 @@ impl PreparedRotorCycle {
     ) -> Result<RotorPeriodicOrbit, RotorError> {
         poll(&mut cancelled)?;
         admit_tolerance(relative_residual_tolerance)?;
-        if !maximum_resolvent_gain.is_finite() || maximum_resolvent_gain < 1.0 {
-            return Err(RotorError::Invalid(
-                "finite periodic resolvent limit >=1 required",
-            ));
-        }
         let d = self.state_scale.len();
-        let mut equation = vec![0.0; d * d];
-        for i in 0..d {
-            poll(&mut cancelled)?;
-            for j in 0..d {
-                let identity = if i == j { 1.0 } else { 0.0 };
-                equation[i * d + j] = finite(identity - self.monodromy[i * d + j])?;
-            }
-        }
-        poll(&mut cancelled)?;
-        let factor = lu(&equation, d).map_err(RotorError::PeriodicLinear)?;
-        finite(factor.growth)?;
-        poll(&mut cancelled)?;
-        let condition = finite(factor.condition_1(&equation))?;
-        poll(&mut cancelled)?;
-        let norm_equation = norm_one(&equation, d)?;
-        let norm_period = norm_one(&self.monodromy, d)?;
-        let resolvent_gain_estimate =
-            finite((condition / norm_equation) * finite(1.0 + norm_period)?)?;
-        if condition <= 0.0 || resolvent_gain_estimate <= 0.0 {
-            return Err(RotorError::Invalid(
-                "periodic resolvent estimate is unrepresentable",
-            ));
-        }
-        if resolvent_gain_estimate > maximum_resolvent_gain {
-            return Err(RotorError::PeriodicOrbitUnresolved {
-                estimated_gain: resolvent_gain_estimate,
-                limit: maximum_resolvent_gain,
-            });
-        }
-        let mut balanced = self.offset.clone();
-        factor.solve(&mut balanced);
-        poll(&mut cancelled)?;
+        let (balanced, resolvent_gain_estimate) = solve_periodic_initial(
+            &self.monodromy,
+            &self.offset,
+            maximum_resolvent_gain,
+            &mut cancelled,
+        )?;
         let initial = decode(&balanced, &self.state_scale, &mut cancelled)?;
         let original = state_values(&initial, self.report.dofs)?;
         let relative_fixed_point_residual = affine_residual(
@@ -399,4 +368,55 @@ fn norm_one(matrix: &[f64], d: usize) -> Result<f64, RotorError> {
         maximum = maximum.max(finite(sum.to_f64())?);
     }
     Ok(maximum)
+}
+
+// The same complete affine fixed-point solve serves mechanical and hereditary
+// cycles. State order and physical coordinates belong to their caller; no
+// phase condition, material-state elimination or stability assumption is added.
+pub(super) fn solve_periodic_initial(
+    monodromy: &[f64],
+    offset: &[f64],
+    maximum_resolvent_gain: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Vec<f64>, f64), RotorError> {
+    poll(cancelled)?;
+    if !maximum_resolvent_gain.is_finite() || maximum_resolvent_gain < 1.0 {
+        return Err(RotorError::Invalid(
+            "finite periodic resolvent limit >=1 required",
+        ));
+    }
+    let d = offset.len();
+    let mut equation = vec![0.0; d * d];
+    for i in 0..d {
+        poll(cancelled)?;
+        for j in 0..d {
+            let identity = if i == j { 1.0 } else { 0.0 };
+            equation[i * d + j] = finite(identity - monodromy[i * d + j])?;
+        }
+    }
+    poll(cancelled)?;
+    let factor = lu(&equation, d).map_err(RotorError::PeriodicLinear)?;
+    finite(factor.growth)?;
+    poll(cancelled)?;
+    let condition = finite(factor.condition_1(&equation))?;
+    poll(cancelled)?;
+    let norm_equation = norm_one(&equation, d)?;
+    let norm_period = norm_one(monodromy, d)?;
+    let resolvent_gain_estimate =
+        finite((condition / norm_equation) * finite(1.0 + norm_period)?)?;
+    if condition <= 0.0 || resolvent_gain_estimate <= 0.0 {
+        return Err(RotorError::Invalid(
+            "periodic resolvent estimate is unrepresentable",
+        ));
+    }
+    if resolvent_gain_estimate > maximum_resolvent_gain {
+        return Err(RotorError::PeriodicOrbitUnresolved {
+            estimated_gain: resolvent_gain_estimate,
+            limit: maximum_resolvent_gain,
+        });
+    }
+    let mut balanced = offset.to_vec();
+    factor.solve(&mut balanced);
+    poll(cancelled)?;
+    Ok((balanced, resolvent_gain_estimate))
 }

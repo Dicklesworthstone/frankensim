@@ -92,10 +92,46 @@ pub(super) fn segment_flow(
     budget: DenseExponentialBudget,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(AffineSegmentMap, f64), RotorError> {
+    segment_flow_for_states(
+        mass,
+        generator,
+        2 * mass.model.dofs(),
+        force,
+        orders,
+        start,
+        duration,
+        period,
+        tolerance,
+        budget,
+        cancelled,
+    )
+}
+
+// One compensated source sum and homogeneous transition serve mechanical and
+// hereditary cycles alike; only the admitted physical state count differs.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn segment_flow_for_states(
+    mass: &MassSolve<'_>,
+    generator: &[f64],
+    d: usize,
+    force: RotorFourierForce<'_>,
+    orders: &[usize],
+    start: f64,
+    duration: f64,
+    period: f64,
+    tolerance: f64,
+    budget: DenseExponentialBudget,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(AffineSegmentMap, f64), RotorError> {
     poll(cancelled)?;
-    let d = 2 * mass.model.dofs();
-    let (steady, mut residual) =
+    if d < 2 * mass.model.dofs() || d.checked_mul(d) != Some(generator.len()) {
+        return Err(RotorError::Invalid(
+            "complete periodic state generator and original mechanical prefix required",
+        ));
+    }
+    let (mut steady, mut residual) =
         mass.force_column(force.steady, duration, period, tolerance, cancelled)?;
+    steady.resize(d, 0.0);
     let mut flow = affine_segment_flow(generator, &steady, d, budget, cancelled)?;
     let mut total: Vec<_> = flow
         .offset
@@ -114,8 +150,8 @@ pub(super) fn segment_flow(
         {
             continue;
         }
-        let (contribution, checked) = harmonic::segment_flow(
-            mass, generator, tone, order, start, duration, period, tolerance, budget, cancelled,
+        let (contribution, checked) = harmonic::segment_flow_for_states(
+            mass, generator, d, tone, order, start, duration, period, tolerance, budget, cancelled,
         )?;
         residual = residual.max(checked);
         for (sum, value) in total.iter_mut().zip(contribution.offset) {

@@ -1072,8 +1072,8 @@ rows. Full-state byte/work admission precedes dense allocation; cancellation
 publishes no partial result. Prepared warm advances carry each returned physical
 boundary into the next cached segment and audit original cycle increments.
 Zero/unrepresentable multipliers refuse; near-unit rounding is not classified.
-No forced orbit, heat/work ledger, eigenvalue enclosure, smooth-modulation error
-bound or nonlinear bearing stability claim is implied by this homogeneous path.
+No heat/work ledger, eigenvalue enclosure, smooth-modulation error bound or
+nonlinear bearing stability claim is implied by this motion path.
 
 Six focused native tests cover exact full-state eigenmotions, independently
 refined original-ODE RK4 modulation, parametric growth despite stable frozen
@@ -9771,3 +9771,46 @@ complete tangents. Five analytical native integration regressions are authored
 but unexecuted here; shared subspace arithmetic passed eight original-source
 checks. Reconstructed integration bytes received source review after executor
 loss and do not claim a completed full-crate build or stability certificate.
+
+## Forced periodic rotors with complete bearing memory
+
+`periodic::{prepare_maxwell_forced_cycle, prepare_maxwell_harmonic_cycle,
+prepare_maxwell_fourier_cycle}` extend the same complete original
+`[q, q_dot, sigma]` cycle with held, harmonic, or simultaneous DC/Fourier
+generalized force/torque. Loads enter mechanical momentum rows only; every
+original stress responds through the complete reciprocal generator. Full M/G,
+signed spin, branch strain/stiffness/time and relaxed-K conventions are unchanged.
+Source phase, displacement, velocity and all stresses remain continuous through
+declared coefficient and load-amplitude switches. A load step is not an impulse.
+
+The existing normalized affine/harmonic exponential and Fourier superposition
+owners now accept the admitted full physical state dimension. Their original
+mechanical callers still use 2n; hereditary callers use 2n+b. A harmonic source
+adds two auxiliary coordinates (at most 130 total) and held forcing adds one;
+none enter the original physical Floquet spectrum. Fourier offsets accumulate
+in double-double arithmetic while retaining one homogeneous period map. One
+mass factor and one original augmented generator per segment serve all tones.
+Budgets count every declared source and full state before dense assembly;
+retained maps and warm advance/orbit costs are independent of tone count.
+
+`PreparedRotorMaxwellCycle::forcing_offset` exposes the original physical
+affine offset and `periodic_orbit` returns `RotorMaxwellPeriodicOrbit` with
+every boundary stress, original fixed-point residual, independently advanced
+closure residual and balanced resolvent-gain estimate. Mechanical and hereditary
+orbits share the existing native LU/condition-admission owner. Singular families
+and unresolved slow directions refuse even when their loads vanish; no state is
+removed or phase pinned. A unique unstable particular orbit retains its actual
+positive Floquet growth and does not imply attraction.
+
+Eleven focused regression groups are authored for exact three-exponential held
+response and asymmetric load cycles, relaxed static equilibrium, dark/slow
+memories, full inertia and signed gyroscopic congruence, original complex
+Maxwell phases/stresses, DC plus tones, independent original-ODE transients,
+secular lossless forcing and cancellation/admission. Independent source and
+physical-oracle review found no defect. These NEW groups are not yet compiled
+or executed because the execution environment is unavailable; previous native
+results cover the earlier homogeneous and ordinary-source owners only.
+
+The declared piecewise coefficients and finite source spectrum carry no smooth
+modulation or waveform-truncation error bound. This motion/orbit extension does
+not add a physical work/heat ledger, nonlinear bearing law or eigenvalue enclosure.

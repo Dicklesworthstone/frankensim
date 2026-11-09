@@ -36,8 +36,10 @@ pub use fourier::{MAX_ROTOR_FORCE_TONES, RotorFourierForce, prepare_fourier_cycl
 pub mod power;
 mod relaxation;
 pub use relaxation::{
-    PreparedRotorMaxwellCycle, RotorMaxwellFloquetResponse, RotorMaxwellPeriodicTrajectory,
-    RotorMaxwellState, periodic_maxwell_floquet, prepare_maxwell_cycle,
+    PreparedRotorMaxwellCycle, RotorMaxwellFloquetResponse, RotorMaxwellPeriodicOrbit,
+    RotorMaxwellPeriodicTrajectory, RotorMaxwellState, periodic_maxwell_floquet,
+    prepare_maxwell_cycle, prepare_maxwell_forced_cycle, prepare_maxwell_fourier_cycle,
+    prepare_maxwell_harmonic_cycle,
 };
 
 #[derive(Clone, Copy)]

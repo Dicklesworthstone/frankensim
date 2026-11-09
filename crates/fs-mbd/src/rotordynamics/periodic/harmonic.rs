@@ -154,10 +154,49 @@ pub(super) fn segment_flow(
     budget: DenseExponentialBudget,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(AffineSegmentMap, f64), RotorError> {
-    let source = prepare_source(
+    segment_flow_for_states(
+        mass,
+        generator,
+        2 * mass.model.dofs(),
+        force,
+        order,
+        start,
+        duration,
+        period,
+        tolerance,
+        budget,
+        cancelled,
+    )
+}
+
+// The same original force/phase owner advances every admitted physical state.
+// Hereditary callers retain their full generator and append zero DIRECT source
+// entries for memory; the generator still transfers motion into every stress.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn segment_flow_for_states(
+    mass: &MassSolve<'_>,
+    generator: &[f64],
+    d: usize,
+    force: RotorHarmonicForce<'_>,
+    order: usize,
+    start: f64,
+    duration: f64,
+    period: f64,
+    tolerance: f64,
+    budget: DenseExponentialBudget,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(AffineSegmentMap, f64), RotorError> {
+    if d < 2 * mass.model.dofs() || d.checked_mul(d) != Some(generator.len()) {
+        return Err(RotorError::Invalid(
+            "complete periodic state generator and original mechanical prefix required",
+        ));
+    }
+    let mut source = prepare_source(
         mass, force, order, start, duration, period, tolerance, cancelled,
     )?;
-    let d = 2 * mass.model.dofs();
+    for column in &mut source.columns {
+        column.resize(d, 0.0);
+    }
     if source.scale == 0.0 {
         return Ok((
             affine_segment_flow(generator, &source.columns[0], d, budget, cancelled)?,

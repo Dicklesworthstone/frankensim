@@ -1,22 +1,27 @@
 //! Complete hereditary rotor period maps, without material-state elimination.
 //!
-//! M q'' + (C + Omega G) q' + K_relaxed q + sum(b_j sigma_j) = 0,
+//! M q'' + (C + Omega G) q' + K_relaxed q + sum(b_j sigma_j) = f,
 //! sigma_j' + sigma_j/tau_j = k_j b_j^T q'.
 //!
 //! All original [q, q', sigma] states remain continuous at C/K switches.
 //! Branch definitions, mass, gyroscopic matrix and signed spin stay fixed.
 //! No equivalent viscous damping, material-pole cancellation or state reset
 //! replaces the hereditary law. Changing K can exchange modulation work;
-//! this homogeneous map does not label that exchange as material heat.
+//! these affine maps do not label that exchange as material heat.
 
 use super::{
-    AffineSegmentMap, MAX_ROTOR_PERIODIC_SEGMENTS, MassSolve, RotorError, RotorFloquetBudget,
-    RotorPeriodicSegment, affine_segment_flow, finite, forcing, multiply, poll, product_three,
-    restore_entry,
+    AffineSegmentMap, CycleForcing, MAX_ROTOR_PERIODIC_SEGMENTS, MassSolve, RotorError,
+    RotorFloquetBudget, RotorPeriodicSegment, affine_segment_flow, finite, forcing as affine,
+    multiply, poll, product_three, restore_entry,
 };
 use crate::rotordynamics::relaxation::{MAX_ROTOR_MAXWELL_BRANCHES, MaxwellDampingBranch};
 use fs_la::eigen_complex::{EigError, eig_with_cancel};
 use fs_math::{c64::C64, dd::Dd, det};
+
+mod forcing;
+pub use forcing::{RotorMaxwellPeriodicOrbit, prepare_maxwell_forced_cycle};
+mod harmonic;
+pub use harmonic::{prepare_maxwell_fourier_cycle, prepare_maxwell_harmonic_cycle};
 
 #[cfg(test)]
 mod tests;
@@ -44,7 +49,7 @@ pub struct RotorMaxwellFloquetResponse {
     /// ln(spectral_radius) / period [1/s], retaining positive growth.
     pub growth_rate_per_s: f64,
     /// Maximum independent original full-mass solve residual, including
-    /// every original branch force column. Not a trajectory error bound.
+    /// every original branch and applied-force column. Not a trajectory error bound.
     pub maximum_mass_residual: f64,
     /// Maximum independent original memory-force/constitutive generator
     /// residual after coordinate/time scaling. Not an exponential bound.
@@ -72,7 +77,7 @@ pub struct RotorMaxwellPeriodicTrajectory {
     /// Continuous [q, q_dot, sigma] values; a switch does not reset stresses.
     pub boundary_states: Vec<RotorMaxwellState>,
     /// Independently checked original increment equation
-    /// (x_end-x_start) - (P-I)x_start = 0, normalized row by row.
+    /// (x_end-x_start) - (P-I)x_start - b = 0, normalized row by row.
     pub relative_map_residual: f64,
 }
 
@@ -85,6 +90,9 @@ pub struct RotorMaxwellPeriodicTrajectory {
 pub struct PreparedRotorMaxwellCycle {
     report: RotorMaxwellFloquetResponse,
     state_scale: Vec<f64>,
+    monodromy: Vec<f64>,
+    offset: Vec<f64>,
+    physical_offset: Vec<f64>,
     segment_maps: Vec<AffineSegmentMap>,
     boundary_times: Vec<f64>,
 }
@@ -120,6 +128,7 @@ pub fn periodic_maxwell_floquet(
         spin_rad_s,
         segments,
         branches,
+        CycleForcing::Homogeneous,
         relative_generator_residual_tolerance,
         budget,
         false,
@@ -145,6 +154,7 @@ pub fn prepare_maxwell_cycle(
         spin_rad_s,
         segments,
         branches,
+        CycleForcing::Homogeneous,
         relative_generator_residual_tolerance,
         budget,
         true,
@@ -157,6 +167,7 @@ fn prepare(
     spin_rad_s: f64,
     segments: &[RotorPeriodicSegment<'_>],
     branches: &[MaxwellDampingBranch],
+    forces: CycleForcing<'_>,
     tolerance: f64,
     budget: RotorFloquetBudget,
     retain_segments: bool,
@@ -178,7 +189,15 @@ fn prepare(
     let reference = segments[0].model;
     let n = reference.dofs();
     let d = 2 * n + branches.len();
-    let dense_budget = budget.admit_states(d, segments.len(), 0, 1, retain_segments)?;
+    forces.admit(n, segments.len())?;
+    let forced = forces.source_coordinates() != 0;
+    let dense_budget = budget.admit_states(
+        d,
+        segments.len(),
+        forces.source_coordinates(),
+        forces.exponentials_per_segment(),
+        retain_segments,
+    )?;
     // Reuse the fixed-speed owner's physical branch admission. This does not
     // eliminate or merge any branch and performs no spectral computation.
     reference.at_speed_with_maxwell_memory(spin_rad_s, branches, &mut cancelled)?;
@@ -239,9 +258,10 @@ fn prepare(
         monodromy[i * d + i] = 1.0;
     }
     let zero = vec![0.0; d];
+    let mut offset = vec![0.0; d];
     let mut maximum_memory_residual = 0.0_f64;
     let mut segment_maps = Vec::with_capacity(if retain_segments { segments.len() } else { 0 });
-    for segment in segments {
+    for (index, segment) in segments.iter().enumerate() {
         poll(&mut cancelled)?;
         let (mechanical, residual) = mass.segment_generator(
             segment,
@@ -279,7 +299,40 @@ fn prepare(
             tolerance,
             &mut cancelled,
         )?);
-        let flow = affine_segment_flow(&generator, &zero, d, dense_budget, &mut cancelled)?;
+        let (flow, force_residual) = match forces {
+            CycleForcing::Homogeneous => (
+                affine_segment_flow(&generator, &zero, d, dense_budget, &mut cancelled)?,
+                0.0,
+            ),
+            CycleForcing::Held(rows) => {
+                let (mut column, residual) = mass.force_column(
+                    rows[index], h, period_seconds, tolerance, &mut cancelled,
+                )?;
+                // Applied generalized force acts on the original momentum
+                // rows. Memory responds through the complete coupled flow.
+                column.resize(d, 0.0);
+                (
+                    affine_segment_flow(&generator, &column, d, dense_budget, &mut cancelled)?,
+                    residual,
+                )
+            }
+            CycleForcing::Harmonic { rows, order } => harmonic::segment_flow(
+                &mass, &generator, d, rows[index], order, boundary_times[index],
+                h, period_seconds, tolerance, dense_budget, &mut cancelled,
+            )?,
+            CycleForcing::Fourier { rows, orders } => harmonic::fourier_segment_flow(
+                &mass, &generator, d, rows[index], orders, boundary_times[index],
+                h, period_seconds, tolerance, dense_budget, &mut cancelled,
+            )?,
+        };
+        maximum_mass_residual = maximum_mass_residual.max(force_residual);
+        // Chronological affine composition preserves all original stresses:
+        // b_next = E_segment b + b_segment, P_next = E_segment P.
+        if forced {
+            offset = affine::apply_affine(
+                &flow.transition, &flow.offset, &offset, d, &mut cancelled,
+            )?;
+        }
         monodromy = multiply(&flow.transition, &monodromy, d, &mut cancelled)?;
         if retain_segments {
             segment_maps.push(flow);
@@ -307,6 +360,12 @@ fn prepare(
         spectral_radius = spectral_radius.max(magnitude);
     }
     let growth_rate_per_s = finite(det::ln(spectral_radius) / period_seconds)?;
+    let balanced_monodromy = if retain_segments { monodromy.clone() } else { Vec::new() };
+    let mut physical_offset = Vec::with_capacity(d);
+    for i in 0..d {
+        poll(&mut cancelled)?;
+        physical_offset.push(restore_entry(offset[i], state_scale[i], 1.0)?);
+    }
     for i in 0..d {
         poll(&mut cancelled)?;
         for j in 0..d {
@@ -329,6 +388,9 @@ fn prepare(
             maximum_memory_residual,
         },
         state_scale,
+        monodromy: balanced_monodromy,
+        offset,
+        physical_offset,
         segment_maps,
         boundary_times,
     })
@@ -468,7 +530,7 @@ impl PreparedRotorMaxwellCycle {
         let mut states = Vec::with_capacity(self.segment_maps.len() + 1);
         states.push(initial.clone());
         for segment in &self.segment_maps {
-            let candidate = forcing::apply_affine(
+            let candidate = affine::apply_affine(
                 &segment.transition,
                 &segment.offset,
                 &balanced,
@@ -493,9 +555,9 @@ impl PreparedRotorMaxwellCycle {
             self.report.dofs,
             self.report.memory_states,
         )?;
-        let relative_map_residual = forcing::affine_residual(
+        let relative_map_residual = affine::affine_residual(
             &self.report.monodromy,
-            &vec![0.0; d],
+            &self.physical_offset,
             &values,
             &final_values,
             relative_residual_tolerance,
