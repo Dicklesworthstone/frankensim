@@ -265,6 +265,30 @@ compression and storage, physical-cut B-bar averages, full coupled tensors,
 Nitsche boundary signs, unchanged material inventory, distinct strain domains,
 hanging-node reconstruction and independent finite-difference adjoints.
 
+### Thermal embedded-support forces and moments
+
+Cartesian and adaptive `eigenstrain_embedded_reaction` extend the original
+Nitsche reaction by subtracting the retained `C epsilon_free n` traction on
+exactly the selected embedded support points. Constant modes select forces;
+rotational modes select moments about the caller's origin. This includes the
+original scaled penalty and prescribed-motion terms. Additional strong box
+supports remain outside this embedded reaction functional.
+
+The exact displacement derivative is the existing reaction derivative; the
+thermal correction changes the value and direct material-scale derivative.
+Adaptive restriction is applied exactly once. Equilibrium gradients must also
+include thermal-load and prescribed-motion derivatives before subtracting the
+stiffness contraction. Physical thermal strain admission belongs to
+`eigenstrain_response`; this reaction API evaluates a numerical functional.
+
+Preparation retains surface eigenstress alongside bulk strains and load
+columns, within the same original point budget. Repeated reaction queries
+consume that cache without reevaluating the prescribed free-strain field.
+Ownership, point alignment, finite arithmetic and point-level cancellation are
+checked. `eigenstrain3_reaction` covers free-expansion force/moment cancellation,
+analytic confined axial compression, adaptive partial and equilibrium
+derivatives, source retention, invalid input and cancellation.
+
 ## Consistent native material inertia in three dimensions
 
 `CutElasticity3::prepare_material_mass` and the adaptive equivalent prepare

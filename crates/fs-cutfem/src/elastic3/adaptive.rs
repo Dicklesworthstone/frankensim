@@ -26,7 +26,7 @@ pub struct AdaptiveElasticity3 {
     // As with the SDF, patch equivalence remains a caller obligation.
     reference: [f64; 2],
     master_lattice: Vec<OctreeNode3>,
-    raw: CutElasticity3,
+    pub(super) raw: CutElasticity3,
     rows: Vec<Vec<(usize, f64)>>,
     nodes: Vec<[f64; 3]>,
     fixed: Vec<bool>,

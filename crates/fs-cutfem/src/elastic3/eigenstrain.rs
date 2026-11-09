@@ -27,6 +27,7 @@ use super::material::{ReferenceMaterial3, engineering_strain};
 use super::strain_domain::FrobeniusStrainBall;
 use super::{Cell3, CutElasticity3, ElasticityError3, q1};
 
+mod reaction;
 mod sensitivity;
 
 pub(super) struct CellEigenstrain3 {
@@ -34,6 +35,8 @@ pub(super) struct CellEigenstrain3 {
     pub(super) force: [f64; 24],
     /// Original tensor-shear samples, in exactly the retained bulk-rule order.
     pub(super) bulk_strains: Vec<[f64; 6]>,
+    /// Unscaled eigenstress in exactly the selected Nitsche surface order.
+    pub(super) surface_stresses: Vec<[f64; 6]>,
     /// Physical-volume average of the original free dilatation.
     pub(super) mean_trace: f64,
 }
@@ -265,7 +268,9 @@ impl CutElasticity3 {
             for component in 0..3 {
                 force[component] = -(1..8).map(|a| force[3 * a + component]).sum::<f64>();
             }
+            let mut surface_stresses = Vec::new();
             if let Some(data) = &self.embedded {
+                surface_stresses = Vec::with_capacity(data.selected_points(id).len());
                 let surface = cell.rules.surface().expect("retained Nitsche surface");
                 for &index in data.selected_points(id) {
                     poll(&mut checkpoint)?;
@@ -274,6 +279,7 @@ impl CutElasticity3 {
                     poll(&mut checkpoint)?;
                     let stress =
                         material_stress(cell, project_free(cell, to_mandel(&strain), mean_trace));
+                    surface_stresses.push(stress);
                     let n = point.normal;
                     let traction = [
                         stress[0] * n[0] + stress[3] * n[1] + stress[5] * n[2],
@@ -294,6 +300,7 @@ impl CutElasticity3 {
             cells.push(CellEigenstrain3 {
                 force,
                 bulk_strains,
+                surface_stresses,
                 mean_trace,
             });
         }
