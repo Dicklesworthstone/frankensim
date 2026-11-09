@@ -64,3 +64,16 @@ original-material regressions cover UV responses, sealed heating/cooling,
 implicit derivatives and entropy, large formation references, and
 source/phase/work/cancellation refusal. They are authored but uncompiled and
 unexecuted during the development environment outage.
+
+### Shared finite outflow accounts for receiving-volume consumers
+
+The original reacting reservoir's `step_at_mass` is the single scalar owner of
+finite fixed-volume `U=m*h-p*V` export. Both ordinary endpoint publication and
+`EquilibriumReservoirDepletion::sample_withdrawal` consume that same account;
+scalar coupling trials allocate no product receipts and cannot rebase the
+reservoir's immutable birth source or policy. `with_conserved_mass` consumes an
+EOS-reconstructed reservoir and admits a prescribed conserved inventory only
+within an explicit absolute `rho*V-m` allowance, leaving its T,p and original
+source state unchanged. A receiving consumer remains responsible for admitting
+the actual returned energy/entropy balances. These operations introduce no
+alternative EOS, finite-energy law, species source or material transport model.

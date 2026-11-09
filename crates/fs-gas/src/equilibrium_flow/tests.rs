@@ -18,6 +18,8 @@ mod nozzle_pair_anchor;
 mod nozzle_material;
 #[cfg(feature = "material")]
 mod nozzle_blowdown;
+#[cfg(feature = "material")]
+mod nozzle_pair;
 
 const R: f64 = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
 const T0: f64 = 1000.0;

@@ -173,6 +173,31 @@ impl EquilibriumGasReservoir {
         check_cancel(&mut cancelled)?;
         Ok(reservoir)
     }
+    /// Retain an independently conserved mass after an EOS-based reconstruction.
+    ///
+    /// The accepted T,p, source and entropy reference are unchanged. This only
+    /// admits the represented mass/volume discrepancy already allowed by the
+    /// caller's absolute EOS budget; it cannot hide a finite density mismatch.
+    /// Receiving-volume consumers use it after solving their actual UV balance.
+    pub fn with_conserved_mass(
+        mut self, mass_kg: f64, mass_tolerance_kg: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, EquilibriumBlowdownError> {
+        check_cancel(&mut cancelled)?;
+        if !positive(mass_kg) || !positive(mass_tolerance_kg) {
+            return Err(EquilibriumBlowdownError::Invalid(
+                "positive finite conserved mass and EOS allowance required"));
+        }
+        let residual = self.sample.response.density_kg_m3 * self.volume_m3 - mass_kg;
+        if !residual.is_finite() || residual.abs() > mass_tolerance_kg {
+            return Err(EquilibriumBlowdownError::DensityBalance { residual_kg: residual });
+        }
+        self.mass_kg = mass_kg;
+        self.validate_inventory()?;
+        check_cancel(&mut cancelled)?;
+        Ok(self)
+    }
+
     /// Scalar state on the immutable birth reference and original feed basis.
     pub const fn isentropic_sample(&self) -> EquilibriumIsentropeSampleV1 {
         self.sample
@@ -247,9 +272,9 @@ impl EquilibriumGasReservoir {
         }
         Ok(query)
     }
-    pub(super) fn candidate_at_mass(&self, path: &mut EquilibriumIsentropeV1<'_>, mass: f64,
+    pub(super) fn step_at_mass(&self, path: &mut EquilibriumIsentropeV1<'_>, mass: f64,
         c: EquilibriumBlowdownSolve, cancelled: &mut impl FnMut() -> bool)
-        -> Result<EquilibriumBlowdownCandidate, EquilibriumBlowdownError> {
+        -> Result<EquilibriumBlowdownStep, EquilibriumBlowdownError> {
         if !positive(mass) || mass >= self.mass_kg {
             return Err(EquilibriumBlowdownError::Invalid("withdrawal must leave a distinct positive mass"));
         }
@@ -273,20 +298,30 @@ impl EquilibriumGasReservoir {
         if !defect.is_finite() || defect > c.energy_tolerance_j {
             return Err(EquilibriumBlowdownError::EnergyBalance { residual_j: defect });
         }
-        let caloric = path.caloric_anchor(&mut *cancelled)?;
-        let state = path.publish_current(&mut *cancelled)?;
-        let endpoint = Self { source: self.source.clone(), volume_m3: self.volume_m3,
-            mass_kg: mass, state, sample, caloric };
-        endpoint.validate_inventory()?;
         check_cancel(cancelled)?;
-        Ok(EquilibriumBlowdownCandidate { endpoint, step: EquilibriumBlowdownStep {
+        Ok(EquilibriumBlowdownStep {
             expelled_mass_kg: dm, exhausted_enthalpy_j: exhausted,
             mean_stagnation_enthalpy_j_kg: Some(mean), enthalpy_correction_j: correction,
             energy_arithmetic_residual_j: arithmetic,
             density_mass_residual_kg: sample.response.density_kg_m3 * self.volume_m3 - mass,
             specific_entropy_residual_j_kg_k: sample.entropy_change_j_k / self.source.basis_mass_kg,
             pressure_queries: query.pressure_queries,
-        } })
+        })
+    }
+
+    pub(super) fn candidate_at_mass(&self, path: &mut EquilibriumIsentropeV1<'_>, mass: f64,
+        c: EquilibriumBlowdownSolve, cancelled: &mut impl FnMut() -> bool)
+        -> Result<EquilibriumBlowdownCandidate, EquilibriumBlowdownError> {
+        let step = self.step_at_mass(path, mass, c, cancelled)?;
+        let sample = path.current_sample().ok_or(EquilibriumBlowdownError::Invalid(
+            "finite withdrawal lost its accepted density sample"))?;
+        let caloric = path.caloric_anchor(&mut *cancelled)?;
+        let state = path.publish_current(&mut *cancelled)?;
+        let endpoint = Self { source: self.source.clone(), volume_m3: self.volume_m3,
+            mass_kg: mass, state, sample, caloric };
+        endpoint.validate_inventory()?;
+        check_cancel(cancelled)?;
+        Ok(EquilibriumBlowdownCandidate { endpoint, step })
     }
 
     /// Prescribed finite withdrawal with actual chemical re-equilibration.

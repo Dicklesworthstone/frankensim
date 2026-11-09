@@ -47,7 +47,8 @@ impl EquilibriumEnergyVolumePathV1<'_> {
                 "positive finite volume and finite anchored energy increment required",
             ));
         }
-        let reference = anchor.reference_for(self.owner, &self.work)?;
+        let reference = anchor.reference_for(self.owner, &self.work,
+            self.controls.minimum_temperature_k, self.controls.maximum_temperature_k)?;
         let preferred = previous.map(|sample| sample.temperature.value());
         let owner = self.owner;
         let (temperature, counts, iterations, volume_residual) =

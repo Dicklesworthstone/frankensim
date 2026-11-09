@@ -30,6 +30,10 @@ pub mod material;
 #[cfg(feature = "material")]
 pub mod blowdown;
 
+/// Bidirectional conservative exchange between two finite reacting volumes.
+#[cfg(feature = "material")]
+pub mod pair;
+
 /// Whole-call pressure work ceiling, including preparation and re-publication.
 pub const MAX_NOZZLE_PRESSURE_EVALUATIONS: usize = crate::nozzle::MAX_PRESSURE_EVALUATIONS;
 

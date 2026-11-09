@@ -116,3 +116,72 @@ fn g4_uv_anchor_source_inventory_and_cancellation_refuse_stale_publication() {
     assert!(path.publish_current(|| false).is_err());
     assert_eq!(path.reference_state(), &birth);
 }
+
+#[test]
+fn g4_anchor_bridge_requires_original_source_continuity_across_separate_ranges() {
+    let split = |gap: f64| {
+        let original = model("A", 0.01, 4.0, 0.0, 0.0);
+        let mut lower = original.regions()[0].card().clone();
+        lower.validity = ValidityDomain::unconstrained().with("T", 200.0, 1000.0);
+        let mut upper = lower.clone();
+        upper.validity = ValidityDomain::unconstrained().with("T", 1000.0 + gap, 6000.0);
+        upper.parameters.get_mut("a7").unwrap().value += 10000.0 / R;
+        Nasa9StandardStateModelV1::new(
+            id("A"), MolarMass::new(0.01), original.convention().clone(),
+            vec![Nasa9RegionV1::from_card(lower).unwrap(),
+                Nasa9RegionV1::from_card(upper).unwrap()],
+        ).unwrap()
+    };
+    let feed = [(id("A"), Amount::new(1.0))];
+    let mut low = controls().isentropic;
+    low.minimum_temperature_k = 300.0;
+    low.maximum_temperature_k = 900.0;
+    let mut high = controls().isentropic;
+    high.minimum_temperature_k = 1200.0;
+    high.maximum_temperature_k = 2000.0;
+    let mut uv = uv_controls();
+    uv.minimum_temperature_k = high.minimum_temperature_k;
+    uv.maximum_temperature_k = high.maximum_temperature_k;
+    let volume = Volume::new(R * 1500.0 / P0);
+    for gap in [0.0, 100.0] {
+        let chemistry = owner(vec![split(gap)], vec![1]);
+        let source = EquilibriumIsentropeV1::new(
+            &chemistry, Temperature::new(800.0), Pressure::new(P0),
+            &feed, low, || false,
+        ).unwrap();
+        let anchor = source.caloric_anchor(|| false).unwrap();
+        let target = EquilibriumIsentropeV1::new(
+            &chemistry, Temperature::new(1500.0), Pressure::new(P0),
+            &feed, high, || false,
+        ).unwrap();
+        assert!(matches!(target.specific_enthalpy_change_from(&anchor, || false),
+            Err(EquilibriumExpansionErrorV1::Invalid(_))));
+        assert!(matches!(target.specific_entropy_change_from(&anchor, || false),
+            Err(EquilibriumExpansionErrorV1::Invalid(_))));
+        let mut path = EquilibriumEnergyVolumePathV1::new(
+            &chemistry, Temperature::new(1500.0), volume, &feed, uv, || false,
+        ).unwrap();
+        assert!(matches!(path.sample_from_caloric_anchor(
+            &anchor, volume, Energy::new(3.0 * R * 700.0), || false,
+        ), Err(fs_thermochem::equilibrium::composition::volume::EquilibriumVolumeErrorV1::Response(
+            EquilibriumExpansionErrorV1::Invalid(_)))));
+        assert!(path.publish_current(|| false).is_err());
+    }
+    let corrected = split(0.0).with_caloric_continuity(
+        Temperature::new(500.0),
+        fs_thermochem::MolarEnergyQuantityV1::new(10001.0),
+        fs_thermochem::MolarThermalQuantityV1::new(1.0),
+    ).unwrap();
+    let chemistry = owner(vec![corrected], vec![1]);
+    let source = EquilibriumIsentropeV1::new(
+        &chemistry, Temperature::new(800.0), Pressure::new(P0), &feed, low, || false,
+    ).unwrap();
+    let mut path = EquilibriumEnergyVolumePathV1::new(
+        &chemistry, Temperature::new(1500.0), volume, &feed, uv, || false,
+    ).unwrap();
+    let result = path.sample_from_caloric_anchor(
+        &source.caloric_anchor(|| false).unwrap(), volume,
+        Energy::new(3.0 * R * 700.0), || false,
+    ).unwrap();
+    close(result.sample.temperature.value(), 1500.0, 1e-7);
+}

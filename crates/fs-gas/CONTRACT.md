@@ -9838,3 +9838,60 @@ refusal. The bounded build retains the original caloric and scalar wall
 algorithms; unrelated material/shared-wall/chemistry/network orchestration and
 their error payload dependencies are outside that slice. This is not a full
 workspace Cargo/DSR gate or an experimental heat-transfer validation claim.
+
+### Conservative finite receiving volumes with reacting nozzle flow
+
+The material-feature `equilibrium_flow::nozzle::pair::EquilibriumGasPair` owns
+two original `EquilibriumGasReservoir` values and one immutable chemistry/feed
+binding. It advances an effective-area restriction in either pressure direction.
+Both volumes may have different temperature, pressure, entropy and equilibrium
+molecular composition, but must share the same original elemental ratios and
+feed normalization. Mass follows the initial source EOS. This is an ideal rigid,
+well-mixed, adiabatic, infinitely fast chemical-equilibrium model; it does not
+mix different elemental feeds, resolve port momentum, conduct heat at equal
+pressure, infer valve losses, or supply reaction rates.
+
+The original shared midpoint mass owner solves
+`dm = dt * mdot(m_d-old - dm/2, m_r-old + dm/2)`. Every trial reconstructs the
+donor on its original depletion isentrope and solves the receiving volume through
+the original UV owner. The nozzle therefore sees actual evolving receiver back
+pressure and chemical-equilibrium sound speed. The original source-bearing
+midpoint nozzle is published once. Safeguarded Newton proposals include the
+receiving-pressure derivative from the same native Cv, compressibility,
+expansion coefficient and sound speed; the actual mass-rate residual alone
+accepts the result, with bounded bisection available.
+
+Finite exported energy is the original donor `U_before-U_after`, including flow
+work. It is never replaced by `dm*h_midpoint`. If the original reservoir reports
+`C = exported_H - dm*h_d,before`, the receiver solves
+`m_r,new * (u_r,new-u_r,old) = dm*(h_d-h_r+p_r*V_r/m_r) + C`, with explicit
+represented-mass roundoff and its source-reference contribution retained.
+Direct source-bound enthalpy differences cancel arbitrary formation datums before
+arithmetic. The receiving UV target is anchored to its accepted original SP
+state; the returned physical SP reservoir is independently rechecked for EOS,
+energy and entropy. Receiving gas establishes a new accepted birth entropy;
+a prior outflow isentrope is not imposed on it. Jet kinetic energy thermalizes
+within the single carried total-enthalpy account.
+
+Both endpoints and their one report publish atomically. An endpoint pressure
+crossing, nonrepresentable positive transfer, source gap, inventory/work limit,
+failed element/energy/entropy balance or cancellation refuses without clipping.
+Zero area or equal pressure returns both accepted states unchanged. The physical
+outgoing-fraction bound is at most one half and is not a time-error estimate.
+Smooth midpoint time convergence is second order; physical time refinement
+remains the caller's responsibility.
+
+Each accepted interval also recomputes total mass, elemental inventory, energy
+and entropy against the immutable initial pair using original source anchors.
+The energy allowance does not grow with the number of updates. Small negative
+entropy production is bounded only by the explicit numerical allowance and is
+reported without clipping. The reports distinguish time quadrature from physical
+energy, mass and entropy residuals.
+
+Focused source regressions in `equilibrium_flow::tests::nozzle_pair` cover
+analytic frozen receiving/cooling and swapped direction, choked time refinement,
+reacting mass action and element/energy closure, formation-reference sensitivity,
+exact rest, pressure crossing, work exhaustion, final cancellation, and fresh
+receiving entropy plus prepared-path replacement refusal.
+
+Six pair regressions and four native caloric-anchor regressions were authored and source-reviewed. They had not been compiled or executed at publication; focused native validation follows executor recovery.

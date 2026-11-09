@@ -4584,3 +4584,10 @@ are in `fs-gas::equilibrium_flow::tests::nozzle_pair_anchor`.
 
 Three focused native integration regressions are authored but uncompiled and
 unexecuted while the development executor is disconnected.
+
+The SP/UV caloric-anchor bridge additionally admits the continuous original
+source interval between separately prepared references. An anchor outside the
+current path's already-admitted temperature range triggers the existing source
+admission over their union. Uncorrected caloric jumps or temperature gaps refuse;
+the original explicit caloric-continuity correction remains the only accepting
+bridge. Same-range queries reuse their existing admission.

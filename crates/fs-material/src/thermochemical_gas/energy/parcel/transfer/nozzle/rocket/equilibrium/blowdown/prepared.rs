@@ -1,6 +1,7 @@
 //! One original birth-isentrope workspace for external finite-outflow consumers.
 
 use super::{EquilibriumBlowdownCandidate, EquilibriumBlowdownError, EquilibriumBlowdownSolve,
+    EquilibriumBlowdownStep,
     EquilibriumGasReservoir, reservoir::{check_cancel, positive}};
 use fs_thermochem::equilibrium::composition::isentrope::{
     EquilibriumIsentropeV1, density::EquilibriumDensityQueryV1,
@@ -55,6 +56,21 @@ impl<'a> EquilibriumReservoirDepletion<'a> {
             return Err(EquilibriumBlowdownError::Invalid("depletion sample must retain a positive original tank inventory"));
         }
         self.reservoir.density_at_mass(&mut self.path, mass_kg, self.controls, &mut cancelled)
+    }
+
+    /// Evaluate the original finite U-loss account without allocating source receipts.
+    /// The accepted native current sample is the remaining tank, allowing a
+    /// pressure-driven consumer to reuse it for the following nozzle query.
+    pub fn sample_withdrawal(
+        &mut self,
+        mass_kg: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<EquilibriumBlowdownStep, EquilibriumBlowdownError> {
+        check_cancel(&mut cancelled)?;
+        self.reservoir.admit_prepared_path(&self.path)?;
+        self.reservoir.step_at_mass(
+            &mut self.path, mass_kg, self.controls, &mut cancelled,
+        )
     }
 
     /// Admit the finite endpoint and its integrated stagnation enthalpy once.

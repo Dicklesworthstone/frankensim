@@ -208,11 +208,19 @@ impl EquilibriumCaloricAnchorV1 {
 
     pub(in crate::equilibrium::composition::solve) fn reference_for(
         &self, owner: &IdealGasEquilibriumV1, work: &Workspace,
+        minimum_temperature_k: f64, maximum_temperature_k: f64,
     ) -> Result<&Reference, EquilibriumExpansionErrorV1> {
         if self.owner != *owner || self.inventory != work.inventory
             || self.scale != work.scale || self.normalized_mass != work.initial_mass {
             return Err(EquilibriumExpansionErrorV1::Invalid(
                 "caloric anchor must retain the same source, inventory and normalization"));
+        }
+        let temperature = self.sample.temperature.value();
+        if temperature < minimum_temperature_k || temperature > maximum_temperature_k {
+            // Two separately admitted ranges need not have a continuous source
+            // bridge. Reuse the original caloric-domain owner for that union.
+            work.admit_temperature_range(owner, temperature.min(minimum_temperature_k),
+                temperature.max(maximum_temperature_k))?;
         }
         Ok(&self.reference)
     }
@@ -284,7 +292,8 @@ impl<'a> EquilibriumIsentropeV1<'a> {
         poll(&mut cancelled)?;
         let sample = self.current.ok_or(EquilibriumExpansionErrorV1::Invalid(
             "no accepted isentrope query for a direct caloric difference"))?;
-        let reference = anchor.reference_for(self.owner, &self.work)?;
+        let reference = anchor.reference_for(self.owner, &self.work,
+            self.controls.minimum_temperature_k, self.controls.maximum_temperature_k)?;
         let change = (reference.normalized_enthalpy_change(
             self.owner, &self.work, sample.temperature, &mut cancelled)?
             / Dd::from_f64(self.work.initial_mass)).to_f64();
@@ -306,7 +315,8 @@ impl<'a> EquilibriumIsentropeV1<'a> {
         poll(&mut cancelled)?;
         let sample = self.current.ok_or(EquilibriumExpansionErrorV1::Invalid(
             "no accepted isentrope query for a direct entropy difference"))?;
-        let reference = anchor.reference_for(self.owner, &self.work)?;
+        let reference = anchor.reference_for(self.owner, &self.work,
+            self.controls.minimum_temperature_k, self.controls.maximum_temperature_k)?;
         let change = reference.entropy_change(
             self.owner, &self.work, sample.temperature, &mut cancelled)? / self.feed_mass_kg();
         if !change.is_finite() {
