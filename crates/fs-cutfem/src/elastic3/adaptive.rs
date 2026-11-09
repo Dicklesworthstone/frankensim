@@ -16,6 +16,7 @@ mod eigenstrain;
 pub mod enrichment;
 mod equilibrium;
 mod mass;
+mod refresh;
 pub mod stress;
 
 /// A reduced operator on independent master nodes of a balanced octree.
@@ -649,10 +650,10 @@ fn patch_ghosts(
                 *jump.entry(l.nodes[i]).or_insert(0.0) += gl[i][axis];
                 *jump.entry(r.nodes[i]).or_insert(0.0) -= gr[i][axis];
             }
-            let weights = [left, right].map(|side| {
-                let coefficient = gamma * cells[side].ghost_modulus();
-                coefficient * h * 0.25 * (hi[a] - lo[a]) * (hi[b] - lo[b]) * wu * wv
-            });
+            let geometry = GhostWeightGeometry3 {
+                gamma, h, spans: [hi[a] - lo[a], hi[b] - lo[b]], gauss: [wu, wv],
+            };
+            let weights = [left, right].map(|side| geometry.weight(cells[side].ghost_modulus()));
             if weights.iter().any(|w| !w.is_finite() || *w <= 0.0)
                 || !jump.values().all(|j: &f64| j.is_finite())
             {
@@ -664,6 +665,7 @@ fn patch_ghosts(
                 nodes,
                 jump,
                 weights,
+                geometry,
             });
         }
     }

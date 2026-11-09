@@ -53,8 +53,33 @@ pub(super) struct DirichletData3 {
     area: f64,
 }
 impl DirichletData3 {
+    pub(super) fn beta(&self) -> f64 { self.beta }
+
     pub(super) fn selected_points(&self, cell: usize) -> &[usize] {
         &self.points[cell]
+    }
+
+    /// Replay the original selected support over the original surface rule.
+    /// No patch callback or geometric integration is repeated during refresh.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn reassemble_cell_stiffness(
+        &self,
+        index: usize,
+        cell: &Cell3,
+        material: &ReferenceMaterial3,
+        kinematics: CellKinematics3,
+        stiffness: &mut [[f64; 24]; 24],
+        checkpoint: &mut impl FnMut() -> Result<(), ElasticityError3>,
+    ) -> Result<(), ElasticityError3> {
+        let gamma = material_penalty(cell.bounds, material, self.beta)?;
+        let rule = cell.rules.surface().ok_or(ElasticityError3::Invalid(
+            "embedded support requires retained surface rules",
+        ))?;
+        for &index in self.selected_points(index) {
+            checkpoint()?;
+            add_point_stiffness(cell.bounds, material, kinematics, &rule.points()[index], gamma, stiffness);
+        }
+        finish_stiffness(stiffness)
     }
 }
 fn poll(checkpoint: &mut impl FnMut() -> ControlFlow<()>) -> Result<(), ElasticityError3> {
@@ -65,10 +90,13 @@ fn poll(checkpoint: &mut impl FnMut() -> ControlFlow<()>) -> Result<(), Elastici
     }
 }
 fn penalty(cell: &Cell3, beta: f64) -> Result<f64, ElasticityError3> {
+    material_penalty(cell.bounds, &cell.material, beta)
+}
+fn material_penalty(bounds: HexCell, material: &ReferenceMaterial3, beta: f64) -> Result<f64, ElasticityError3> {
     let h = (0..3)
-        .map(|a| cell.bounds.hi()[a] - cell.bounds.lo()[a])
+        .map(|a| bounds.hi()[a] - bounds.lo()[a])
         .fold(f64::INFINITY, f64::min);
-    let gamma = beta * (cell.material.nitsche_modulus() / h);
+    let gamma = beta * (material.nitsche_modulus() / h);
     if !gamma.is_finite() || gamma <= 0.0 {
         return Err(ElasticityError3::Invalid("Nitsche penalty overflow"));
     }
@@ -76,12 +104,41 @@ fn penalty(cell: &Cell3, beta: f64) -> Result<f64, ElasticityError3> {
 }
 // Stress of N_a e_c, contracted with the numerical outward unit normal.
 fn traces(cell: &Cell3, point: &SurfacePoint3) -> ([f64; 8], [[f64; 3]; 24]) {
-    let (n, gradient) = q1(cell.bounds, point.position);
+    material_traces(cell.bounds, &cell.material, cell.kinematics, point)
+}
+fn material_traces(bounds: HexCell, material: &ReferenceMaterial3,
+    kinematics: CellKinematics3, point: &SurfacePoint3) -> ([f64; 8], [[f64; 3]; 24]) {
+    let (n, gradient) = q1(bounds, point.position);
     let traction = std::array::from_fn(|i| {
         let (a, c) = (i / 3, i % 3);
-        cell.basis_traction(gradient[a], a, c, point.normal)
+        kinematics.basis_traction(material, gradient[a], a, c, point.normal)
     });
     (n, traction)
+}
+
+fn add_point_stiffness(bounds: HexCell, material: &ReferenceMaterial3,
+    kinematics: CellKinematics3, point: &SurfacePoint3, gamma: f64,
+    stiffness: &mut [[f64; 24]; 24]) {
+    let (n, t) = material_traces(bounds, material, kinematics, point);
+    for i in 0..24 {
+        for j in i..24 {
+            let value = -n[i / 3] * t[j][i % 3] - n[j / 3] * t[i][j % 3]
+                + if i % 3 == j % 3 { gamma * n[i / 3] * n[j / 3] } else { 0.0 };
+            stiffness[i][j] += point.weight * value;
+        }
+    }
+}
+
+fn finish_stiffness(stiffness: &mut [[f64; 24]; 24]) -> Result<(), ElasticityError3> {
+    for i in 0..24 {
+        for j in i..24 {
+            if !stiffness[i][j].is_finite() {
+                return Err(ElasticityError3::Invalid("Nitsche stiffness overflow"));
+            }
+            stiffness[j][i] = stiffness[i][j];
+        }
+    }
+    Ok(())
 }
 
 impl CutElasticity3 {
@@ -182,27 +239,10 @@ impl CutElasticity3 {
                 }
                 selected.push(index);
                 data.area += point.weight;
-                let (n, t) = traces(cell, point);
-                for i in 0..24 {
-                    for j in i..24 {
-                        let value = -n[i / 3] * t[j][i % 3] - n[j / 3] * t[i][j % 3]
-                            + if i % 3 == j % 3 {
-                                gamma * n[i / 3] * n[j / 3]
-                            } else {
-                                0.0
-                            };
-                        cell.stiffness[i][j] += point.weight * value;
-                    }
-                }
+                add_point_stiffness(cell.bounds, &cell.material, cell.kinematics, point,
+                    gamma, &mut cell.stiffness);
             }
-            for i in 0..24 {
-                for j in i..24 {
-                    if !cell.stiffness[i][j].is_finite() {
-                        return Err(ElasticityError3::Invalid("Nitsche stiffness overflow"));
-                    }
-                    cell.stiffness[j][i] = cell.stiffness[i][j];
-                }
-            }
+            finish_stiffness(&mut cell.stiffness)?;
             data.points.push(selected);
         }
         if !data.area.is_finite() || data.area <= 0.0 {

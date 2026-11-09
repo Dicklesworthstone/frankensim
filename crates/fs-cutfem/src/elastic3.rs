@@ -32,6 +32,8 @@ use material::{MaterialProvider3, ReferenceMaterial3, engineering_strain};
 
 mod kinematics;
 use kinematics::CellKinematics3;
+mod refresh;
+pub use refresh::MaterialRefreshLimits3;
 mod strain_domain;
 
 /// Small-strain formulation used by bulk, embedded tractions and observations.
@@ -120,6 +122,23 @@ struct GhostPoint3 {
     jump: Vec<f64>,
     // Full reference coefficients on each side; interpolation halves each one.
     weights: [f64; 2],
+    geometry: GhostWeightGeometry3,
+}
+// Keep the original integration factors, rather than dividing a material-scaled
+// weight or first multiplying a geometric scalar that could under/overflow.
+// Refresh reuses the exact construction operation order without face queries.
+#[derive(Clone, Copy)]
+struct GhostWeightGeometry3 {
+    gamma: f64,
+    h: f64,
+    spans: [f64; 2],
+    gauss: [f64; 2],
+}
+impl GhostWeightGeometry3 {
+    fn weight(self, modulus: f64) -> f64 {
+        self.gamma * modulus * self.h * 0.25 * self.spans[0] * self.spans[1]
+            * self.gauss[0] * self.gauss[1]
+    }
 }
 impl GhostPoint3 {
     fn scaled_weight(&self, scales: &[f64]) -> f64 {
@@ -889,9 +908,20 @@ fn assemble_cell_stiffness(
     kinematics: CellKinematics3,
     control: &mut QuadratureControl3<'_>,
 ) -> Result<[[f64; 24]; 24], ElasticityError3> {
+    assemble_cell_stiffness_controlled(bounds, rules, material, kinematics,
+        &mut || control.poll().map_err(ElasticityError3::from))
+}
+
+fn assemble_cell_stiffness_controlled(
+    bounds: HexCell,
+    rules: &CutRules3,
+    material: &ReferenceMaterial3,
+    kinematics: CellKinematics3,
+    checkpoint: &mut impl FnMut() -> Result<(), ElasticityError3>,
+) -> Result<[[f64; 24]; 24], ElasticityError3> {
     let mut stiffness = [[0.0; 24]; 24];
     for &(p, w) in rules.bulk() {
-        control.poll()?;
+        checkpoint()?;
         let (_, g) = q1(bounds, p);
         if let Some((_, shear, _)) = kinematics.projected_moduli() {
             // Separate positive volumetric and deviatoric energies. Subtracting
@@ -943,7 +973,7 @@ fn assemble_cell_stiffness(
         // once, instead of repeating the same constant term at every cut point.
         let volume = rules.volume();
         for i in 0..24 {
-            control.poll()?;
+            checkpoint()?;
             for j in i..24 {
                 stiffness[i][j] +=
                     (bulk * mean_gradients[i / 3][i % 3]) * (volume * mean_gradients[j / 3][j % 3]);
@@ -1028,16 +1058,10 @@ fn add_ghosts(
                 *jump.entry(l.nodes[i]).or_insert(0.0) += gl[i][axis];
                 *jump.entry(r.nodes[i]).or_insert(0.0) -= gr[i][axis];
             }
-            let weights = [l, r].map(|cell| {
-                gamma
-                    * cell.ghost_modulus()
-                    * h
-                    * 0.25
-                    * (hi[a] - lo[a])
-                    * (hi[b] - lo[b])
-                    * wu
-                    * wv
-            });
+            let geometry = GhostWeightGeometry3 {
+                gamma, h, spans: [hi[a] - lo[a], hi[b] - lo[b]], gauss: [wu, wv],
+            };
+            let weights = [l, r].map(|cell| geometry.weight(cell.ghost_modulus()));
             if weights.iter().any(|w| !w.is_finite() || *w <= 0.0)
                 || !jump.values().all(|j: &f64| j.is_finite())
             {
@@ -1051,6 +1075,7 @@ fn add_ghosts(
                 nodes,
                 jump,
                 weights,
+                geometry,
             });
         }
     }

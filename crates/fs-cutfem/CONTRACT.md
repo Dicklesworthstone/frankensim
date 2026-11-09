@@ -842,3 +842,22 @@ owner. Adaptive condensation and strong-row removal are already included. Sparse
 consumers multiply physical occupancy, replicate xyz and sum/mirror pairs; they
 must retain native source validation. No stiffness scale or mass lumping enters
 this handoff. The signed CutFEM modal adapter uses it to factor only physical M.
+
+
+## Retained-geometry native material refresh
+
+Cartesian and adaptive 3-D elasticity can replace their complete native material
+field using `refresh_material_field`. Bulk matrices, original B-bar modes,
+selected symmetric Nitsche consistency/penalty terms, and both ghost sides are
+staged using retained quadrature, support selections and face factors. Geometry
+and adaptive constraint maps are borrowed; no SDF, patch or clamp is resampled.
+Reference-density bits and physical reference inventory remain fixed, as do
+current stiffness-design scales. Legacy states without native density refuse.
+
+Explicit cell, retained-point and fixed native staging-payload limits precede
+material callbacks. Dynamic source receipts, query allocations, allocator
+overhead and kernel stack are outside the staging-payload bound. Returned errors
+and cancellation preserve the original operator and its preparations. Success
+rotates the common owner token: mass, body-load, eigenstrain and prestress caches
+must be prepared again. This operation commits an operator refresh only; a later
+equilibrium or thermal step has its own failure/commit semantics.

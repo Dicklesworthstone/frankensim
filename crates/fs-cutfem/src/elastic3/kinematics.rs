@@ -19,6 +19,29 @@ pub(super) enum CellKinematics3 {
 }
 
 impl CellKinematics3 {
+    fn isotropic_moduli(material: &ReferenceMaterial3) -> Result<(f64, f64), ElasticityError3> {
+        let (bulk, shear) = material.isotropic_bulk_shear().ok_or(ElasticityError3::Invalid(
+            "B-bar requires an explicitly isotropic material",
+        ))?;
+        if !bulk.is_finite() || !shear.is_finite() || bulk <= 0.0 || shear <= 0.0 {
+            return Err(ElasticityError3::Invalid(
+                "B-bar requires representable positive bulk and shear moduli",
+            ));
+        }
+        Ok((bulk, shear))
+    }
+
+    /// Retain the original physical-volume projection; only material changes.
+    pub(super) fn with_material(self, material: &ReferenceMaterial3) -> Result<Self, ElasticityError3> {
+        match self {
+            Self::Displacement => Ok(Self::Displacement),
+            Self::BBar { mean_gradients, .. } => {
+                let (bulk, shear) = Self::isotropic_moduli(material)?;
+                Ok(Self::BBar { mean_gradients, bulk, shear })
+            }
+        }
+    }
+
     pub(super) fn prepare(
         formulation: ElasticityFormulation3,
         bounds: HexCell,
@@ -29,16 +52,7 @@ impl CellKinematics3 {
         if formulation == ElasticityFormulation3::Displacement {
             return Ok(Self::Displacement);
         }
-        let (bulk, shear) = material
-            .isotropic_bulk_shear()
-            .ok_or(ElasticityError3::Invalid(
-                "B-bar requires an explicitly isotropic material",
-            ))?;
-        if !bulk.is_finite() || !shear.is_finite() || bulk <= 0.0 || shear <= 0.0 {
-            return Err(ElasticityError3::Invalid(
-                "B-bar requires representable positive bulk and shear moduli",
-            ));
-        }
+        let (bulk, shear) = Self::isotropic_moduli(material)?;
         let volume = rules.volume();
         if !volume.is_finite() || volume <= 0.0 {
             return Err(ElasticityError3::Invalid(
@@ -86,12 +100,10 @@ impl CellKinematics3 {
             } => Some((bulk, shear, mean_gradients)),
         }
     }
-}
-
-impl Cell3 {
     /// Work-conjugate constitutive basis used by both recovery and surface terms.
     pub(super) fn basis_stress(
-        &self,
+        self,
+        material: &ReferenceMaterial3,
         gradient: [f64; 3],
         corner: usize,
         component: usize,
@@ -100,9 +112,9 @@ impl Cell3 {
             mean_gradients,
             bulk,
             shear,
-        } = self.kinematics
+        } = self
         else {
-            return self.material.basis_stress(gradient, component);
+            return material.basis_stress(gradient, component);
         };
         let strain = engineering_strain(gradient, component);
         let pressure = bulk * mean_gradients[corner][component];
@@ -117,21 +129,41 @@ impl Cell3 {
     }
 
     pub(super) fn basis_traction(
-        &self,
+        self,
+        material: &ReferenceMaterial3,
         gradient: [f64; 3],
         corner: usize,
         component: usize,
         normal: [f64; 3],
     ) -> [f64; 3] {
-        if !self.kinematics.is_projected() {
-            return self.material.traction(gradient, component, normal);
+        if !self.is_projected() {
+            return material.traction(gradient, component, normal);
         }
-        let stress = self.basis_stress(gradient, corner, component);
+        let stress = self.basis_stress(material, gradient, corner, component);
         [
             stress[0] * normal[0] + stress[3] * normal[1] + stress[5] * normal[2],
             stress[3] * normal[0] + stress[1] * normal[1] + stress[4] * normal[2],
             stress[5] * normal[0] + stress[4] * normal[1] + stress[2] * normal[2],
         ]
+    }
+
+    // Stabilization must not reintroduce the projected-out bulk constraint.
+    pub(super) fn ghost_modulus(self, material: &ReferenceMaterial3) -> f64 {
+        match self {
+            Self::Displacement => material.ghost_modulus(),
+            Self::BBar { shear, .. } => shear,
+        }
+    }
+}
+
+impl Cell3 {
+    pub(super) fn basis_stress(&self, gradient: [f64; 3], corner: usize, component: usize) -> [f64; 6] {
+        self.kinematics.basis_stress(&self.material, gradient, corner, component)
+    }
+
+    pub(super) fn basis_traction(&self, gradient: [f64; 3], corner: usize,
+        component: usize, normal: [f64; 3]) -> [f64; 3] {
+        self.kinematics.basis_traction(&self.material, gradient, corner, component, normal)
     }
 
     pub(super) fn projected_mandel_strain(
@@ -166,9 +198,6 @@ impl Cell3 {
     // A shear-scale derivative jump controls the vector extension. Adequacy for
     // an arbitrary cut/support configuration still requires a convergence study.
     pub(super) fn ghost_modulus(&self) -> f64 {
-        match self.kinematics {
-            CellKinematics3::Displacement => self.material.ghost_modulus(),
-            CellKinematics3::BBar { shear, .. } => shear,
-        }
+        self.kinematics.ghost_modulus(&self.material)
     }
 }
