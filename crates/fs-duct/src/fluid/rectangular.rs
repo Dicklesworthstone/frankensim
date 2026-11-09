@@ -24,6 +24,10 @@ use fs_math::{c64::C64, dd::Dd, det};
 
 /// Molecular reservoirs and wall heat diffusion in the same energy equation.
 pub mod molecular;
+mod field;
+pub use field::{
+    PreparedRectangularFields, RectangularDissipationPerLength, RectangularField,
+};
 
 /// Hard bound on the one-dimensional Fourier work and cached geometry.
 pub const MAX_RECTANGULAR_TERMS: usize = 4096;
@@ -76,6 +80,50 @@ impl RectangularWave {
 struct Mode {
     eigenvalue: f64,
     weight: f64,
+}
+
+/// One analytically summed long-direction solution, shared by the mean wave
+/// and its resolved transverse field. All quantities use +i omega time.
+struct ModeResponse {
+    q: C64,
+    decay: C64,
+    factor: C64,
+    tanh: C64,
+    mean: C64,
+}
+
+fn mode_response(mode: &Mode, long_m: f64, argument: C64) -> Result<ModeResponse, DuctError> {
+    let denominator = C64::new(mode.eigenvalue + argument.re, argument.im);
+    let q = denominator.sqrt();
+    let z = q.scale(0.5 * long_m);
+    if !finite(z) {
+        return Err(bad(
+            "rectangular transverse diffusion argument is unrepresentable",
+        ));
+    }
+    // Re(z)>=pi/2 because the shorter side owns the Fourier series.
+    // Only a decaying exponential is formed, including for opaque layers.
+    let decay = det::exp(-2.0 * z.re);
+    let decay = if decay == 0.0 {
+        C64::ZERO
+    } else {
+        let (sine, cosine) = det::sin_cos(-2.0 * z.im);
+        C64::new(cosine, sine).scale(decay)
+    };
+    let tanh = if decay == C64::ZERO {
+        C64::ONE
+    } else {
+        (C64::ONE - decay) / (C64::ONE + decay)
+    };
+    let factor = argument / denominator;
+    let mean = (C64::ONE - tanh / z) * factor;
+    Ok(ModeResponse {
+        q,
+        decay,
+        factor,
+        tanh,
+        mean,
+    })
 }
 
 /// Prepared geometry of a uniform duct; width/height exchange is identical.
@@ -258,24 +306,7 @@ impl RectangularSection {
             if index % 32 == 0 {
                 poll(cancelled, index)?;
             }
-            let denominator = C64::new(mode.eigenvalue + argument.re, argument.im);
-            let z = denominator.sqrt().scale(0.5 * self.long_m);
-            if !finite(z) {
-                return Err(bad(
-                    "rectangular transverse diffusion argument is unrepresentable",
-                ));
-            }
-            // Re(z)>=pi/2 because the shorter side owns the Fourier series.
-            // exp(-2z) is bounded; no growing cosh/sinh or small tanh subtraction.
-            let decay = det::exp(-2.0 * z.re);
-            let tanh = if decay == 0.0 {
-                C64::ONE
-            } else {
-                let (sine, cosine) = det::sin_cos(-2.0 * z.im);
-                let e = C64::new(cosine, sine).scale(decay);
-                (C64::ONE - e) / (C64::ONE + e)
-            };
-            let value = (C64::ONE - tanh / z) * (argument / denominator);
+            let value = mode_response(mode, self.long_m, argument)?.mean;
             re = re + Dd::from_f64(value.re) * Dd::from_f64(mode.weight);
             im = im + Dd::from_f64(value.im) * Dd::from_f64(mode.weight);
         }

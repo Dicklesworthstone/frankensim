@@ -246,6 +246,48 @@ matched propagation; unchanged cylindrical scattering; and material,
 resolution, phase-envelope and cancellation refusals. These are numerical
 checks of the declared model, not measured-material qualification.
 
+### Resolved rectangular and slit fields with physical dissipation
+
+`RectangularSection::prepare_fields` retains the same original Fourier modes
+and coherent material snapshot as the mean wave. The separated long-direction
+diffusion solution supplies actual axial velocity, both transverse velocity
+gradients, the pressure-normalized thermal field, and both thermal gradients.
+All four no-slip/isothermal wall values are exactly zero. Coordinates follow
+the canonical short and long sides, so interchanging the constructor's side
+arguments preserves the same physical query.
+
+Preparation shares the mean-response modal owner and uses only decaying
+exponentials. An expm1/half-angle wall factor retains fields arbitrarily close
+to a wall without subtracting nearly equal cosh values. The material is queried
+once; warm point queries allocate nothing and cost O(N), while whole-section
+work costs O(1). Storage is bounded by two arrays of the original at-most-4096
+terms, with fallible allocation and cancellation polling every 32 modes.
+
+Positive cycle-mean shear work is `mu |grad u|²/2`; thermal-conduction work is
+`(Cp/Cv-1) D_t |p grad h_t|²/(2 K_s)`. Orthogonality and analytic integrals
+of each retained mode's two gradients provide their cross-sectional W/m
+channels independently of axial boundary-power subtraction. Cp=Cv removes
+thermal coupling exactly. `gas_temperature_at` uses the original ideal gas's
+`1/(rho Cp)`; no general fluid expansion sign or reference temperature is
+invented. Local pressure and volume flow remain coherent peak phasors in
+exp(-i omega t), supplied by the caller's original axial solution.
+
+The mean-wave Fourier-tail and transverse-phase admissions are unchanged.
+They do not bound pointwise fields or gradients: local accuracy, especially
+near corners, needs refinement of the authored Fourier count. These are
+frozen-background, fully developed, uniform-pressure fields, with no entrance
+flow, transverse velocity, axial-gradient/bulk/molecular dissipation, thermal
+deposition or inferred wall/fluid heat partition. The existing molecular
+mean-wave route is not silently reinterpreted as this equilibrium field model.
+
+The `rectangular_fields` regression target specifies the slit Poiseuille and
+thermal Poisson limits, exact wall values, independent two-dimensional sine
+series refinement, volume-flow recovery and gradient-power quadrature,
+coherent counterwave power balance, liquid Cp=Cv, source retention, native-wave
+parity, and cancellation/domain refusals. These are numerical model checks,
+not experimental material qualification. The governing transverse equations
+are Stinson (1991), equations 55–69, <https://doi.org/10.1121/1.400379>.
+
 ### Molecular heat storage in rectangular and slit passages
 
 `RectangularSection::evaluate_molecular` binds the original `RelaxationState`
