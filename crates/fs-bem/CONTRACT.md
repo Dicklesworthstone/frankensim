@@ -2949,6 +2949,97 @@ declared synthetic relaxation fixture bypassed text parsing/species ownership;
 its original caloric and porous response laws remained intact. The complete
 workspace Cargo graph and unrelated transmission integrations were not run.
 
+### Mutually interacting finite porous and fluid bodies
+
+`helmholtz::transmission::porous::multiple::PorousFluidBodies` binds original
+closed surfaces and borrowed `BodyMaterial::{Porous, Fluid, RelaxingGas}`
+sources in one original lossless `FluidAcoustics` exterior at a common positive
+frequency. A porous body retains its original `PorousFluidLaw` and
+`PoreFluid::{Fluid, RelaxingGas}` filling. The existing JCA/JCAL owner supplies
+complex density and bulk modulus, including coupled molecular/pore thermal
+physics when requested; its response is conjugated once from its original
+positive-time convention. A free molecular gas uses its original
+`RelaxationState` bulk law and outgoing wavenumber, already in the negative-time
+convention, with real inertia. No independent damping law, duplicate porous
+formula, or free-gas attenuation added on top of a porous response is introduced.
+The original sources, sampled porous responses and frequency remain available.
+
+Each local contrast block comes from the original two-trace transmission
+assembly. The original shared multiple-body engine solves
+`(I+C_i)s_i + sum(j!=i) C_i E_ij s_j = -C_i inc_i` in one cached dense
+factorization, retaining every mutual reflection. It is reused for different
+coherent plane, volume, force and stress-source illumination. The lossless
+fluid branch preserves the original real-density assembly and the exterior
+transfer preserves the original real-wavenumber arithmetic. Identical-fluid
+bodies have exactly zero local outgoing coefficients, including beside active
+porous neighbors. This is a mixed-material extension of the existing coupled
+engine, not a second scattering architecture or a sum of isolated bodies.
+
+The original total-panel, peak numerical payload, wavelength and separated
+vertex-box admission remains in force. Prepared-body descriptor storage is
+included in the inherited payload estimate; no redundant local LU is retained.
+Every original body must be one outward closed component, and the original
+conservative box checks exclude touching, overlapping and nested bodies.
+The caller supplies a stationary mean equilibrium; a generic acoustic-fluid
+view does not expose mean pressure. Finite incident sources must be outside
+every body. Porous source-band and coherent-state refusals propagate from the
+original material owner. P0/centroid coupling still requires refinement of
+complex wavelength, physical thickness and inter-body gap. Neither a
+wavelength gate nor a bounding-box clearance certifies close-interaction
+accuracy. Biot/frame motion, mean flow and arbitrary intersecting geometry
+remain outside this API.
+
+Adaptive exterior pressure/Cartesian velocity integrate LOCAL outgoing traces
+over the complete original geometry. Complete scattered boundary traces
+already include neighbors and must not be reintegrated as local sources.
+Active-body interior receivers integrate that body's TOTAL physical traces
+with its original interior Green sign and complex momentum
+`q=i*omega*rho*u`, `u=grad(p)/(i*omega*rho)`. Porous velocity is superficial
+velocity per gross face area, matching the exterior volume velocity; porosity
+is not multiplied twice. A transparent body's interior instead receives the
+original incident field plus all active neighbors through the global outgoing
+bank. Its budget counts all panels, and geometry first identifies the selected
+containing body before checking the complete collection. Wrong-body, exterior,
+source-inside-body and insufficient-work queries are refused.
+
+`interior_absorption_adaptive_at` reuses the original single-body direct work
+contraction: `omega/2 * Im(rho) * |u|^2` and
+`omega/2 * Im(1/K) * |p|^2`, with all three velocity components and coherent
+amplitudes. The results are macroscopic W/m^3 per total body volume, including
+gross solid-plus-pore volume for porous bodies. Lossless fluid gives zero;
+free molecular gas gives bulk-compression loss with zero viscous channel.
+Porous compression already contains its coupled pore thermal and molecular
+loss. No gas/solid or individual-reservoir heat partition is inferred.
+Per-body signed outward interface work and complete scattered work retain
+mutual interference independently. Inward work approaches volume loss in the
+continuum; it is not used to manufacture either heat channel. Panel defects
+remain signed, and work intervals cover dot-product roundoff only. Receiver
+discrepancies cover quadrature, not coupled solve/material/mesh error.
+
+Five focused regressions cover single-porous-body trace/receiver/heat parity,
+original real assembly bits, exact transparent neighbors and their observable
+interiors, correct receiver/source regions, mixed relaxing-pore/free-gas source
+binding, coherent heating, body permutation, complete mutual work, and an
+independent two-sphere reference. Its axial addition theorem is checked against
+independent Gauss-Legendre projection; a separate small pivoted solve sums
+partial-wave interactions. Retained orders 13 and 15 differ by about
+2.11e-10 in the selected exterior pressure. For two 0.05 m melamine spheres
+at 500 Hz, centers separated by 0.15 m, the 20/80/320-panel-per-body ladder
+gives maximum selected p/u relative errors of 9.47%/3.17%/0.86% and maximum
+per-body inward-work errors of 31.90%/10.36%/3.05%. The continuum reference's
+positive viscous plus compression volume integrals close each body's inward
+surface work within 3e-10 relative. These fixtures require decreasing errors
+and final errors below 8% for selected fields and 15% for work; they are not
+general accuracy certificates.
+
+Native source-slice verification passed all 12 checks with the pinned July 6
+Rust compiler: five new checks, four retained single-body checks, two original
+complex receiver checks, and the original real-assembly bit audit. It compiled
+the new production owners, original shared coupled engine and numerical
+dependencies. The focused slice excludes unrelated workspace/public owners and
+the relaxation input/species parser, using the same explicitly declared
+synthetic reservoir fixture with original caloric/porous calculations.
+The full Cargo workspace and its external sibling graph were not built.
 ## Mutually reflecting penetrable fluid bodies
 
 `helmholtz::transmission::multiple::FluidBodies` extends the original fluid

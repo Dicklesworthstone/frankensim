@@ -4,7 +4,8 @@ use crate::helmholtz::molecular::MolecularNearFieldOptions;
 use crate::near_field::{Geometry, VectorObservation, complex::Prepared};
 
 /// Local heating from the same coherent interior field. These are macroscopic
-/// rates per TOTAL porous volume, not pore-fluid velocity or a gas/solid heat
+/// rates per total body volume (gross volume for a porous body), not intrinsic
+/// pore-fluid velocity or a gas/solid heat
 /// partition. Quadrature discrepancies are retained on the paired fields;
 /// they do not certify the spatial solve or relative accuracy near a null.
 pub struct PorousAbsorptionObservation {
@@ -126,38 +127,13 @@ impl PorousTransmissionField<'_, '_> {
             options,
             gate,
         )?;
-        let owner = self.interface;
-        // Apply the positive loss coefficient BEFORE squaring amplitudes.
-        // This retains weak loss when an unweighted |p|² or |u|² would overflow.
-        let common = det::sqrt(owner.omega) * core::f64::consts::FRAC_1_SQRT_2;
-        let viscous_root = common * det::sqrt(owner.density.im);
-        let compression_root = common * det::sqrt(owner.bulk.recip().im);
-        let mut viscous_loss_w_m3 = Vec::with_capacity(points.len());
-        let mut compression_loss_w_m3 = Vec::with_capacity(points.len());
-        for (&pressure, velocity) in fields
-            .scalar
-            .pressure
-            .iter()
-            .zip(&fields.particle_velocity_m_s)
-        {
-            poll(gate)?;
-            let viscous = velocity
-                .iter()
-                .map(|value| value.scale(viscous_root).norm_sq())
-                .sum();
-            let compression = pressure.scale(compression_root).norm_sq();
-            if !f64::is_finite(viscous) || !compression.is_finite() {
-                return Err(bad("unrepresentable local porous absorption"));
-            }
-            viscous_loss_w_m3.push(viscous);
-            compression_loss_w_m3.push(compression);
-        }
-        poll(gate)?;
-        Ok(PorousAbsorptionObservation {
+        absorption(
             fields,
-            viscous_loss_w_m3,
-            compression_loss_w_m3,
-        })
+            self.interface.density,
+            self.interface.bulk,
+            self.interface.omega,
+            gate,
+        )
     }
 
     fn observe_adaptive(
@@ -219,4 +195,45 @@ impl PorousTransmissionField<'_, '_> {
         poll(gate)?;
         Ok(result)
     }
+}
+
+// Shared direct work contraction for single and mutually coupled interiors.
+pub(super) fn absorption(
+    fields: VectorObservation,
+    density: C64,
+    bulk: C64,
+    omega: f64,
+    gate: &CancelGate,
+) -> Result<PorousAbsorptionObservation, HelmholtzError> {
+    // Apply the positive loss coefficient BEFORE squaring amplitudes.
+    // This retains weak loss when an unweighted |p|² or |u|² would overflow.
+    let common = det::sqrt(omega) * core::f64::consts::FRAC_1_SQRT_2;
+    let viscous_root = common * det::sqrt(density.im);
+    let compression_root = common * det::sqrt(bulk.recip().im);
+    let mut viscous_loss_w_m3 = Vec::with_capacity(fields.scalar.pressure.len());
+    let mut compression_loss_w_m3 = Vec::with_capacity(fields.scalar.pressure.len());
+    for (&pressure, velocity) in fields
+        .scalar
+        .pressure
+        .iter()
+        .zip(&fields.particle_velocity_m_s)
+    {
+        poll(gate)?;
+        let viscous = velocity
+            .iter()
+            .map(|value| value.scale(viscous_root).norm_sq())
+            .sum();
+        let compression = pressure.scale(compression_root).norm_sq();
+        if !f64::is_finite(viscous) || !compression.is_finite() {
+            return Err(bad("unrepresentable local porous absorption"));
+        }
+        viscous_loss_w_m3.push(viscous);
+        compression_loss_w_m3.push(compression);
+    }
+    poll(gate)?;
+    Ok(PorousAbsorptionObservation {
+        fields,
+        viscous_loss_w_m3,
+        compression_loss_w_m3,
+    })
 }

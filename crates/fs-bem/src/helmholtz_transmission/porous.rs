@@ -13,9 +13,10 @@
 //! from a molecular gas's real inertial density. Adaptive receivers use this
 //! same momentum factor for both Green traces and the pressure gradient.
 //!
-//! One homogeneous isotropic, stationary, rigid-frame inclusion is admitted.
-//! No Biot/frame displacement, disconnected bodies, mean flow, pore-resolved
-//! field, or thin-layer accuracy is implied. Refinement must resolve BOTH the
+//! The single-interface owner admits one homogeneous isotropic, stationary,
+//! rigid-frame inclusion; `multiple` couples distinct bodies using the existing
+//! multiple-scattering engine. No Biot/frame displacement, mean flow, pore-
+//! resolved field, or thin-layer accuracy is implied. Refinement must resolve BOTH the
 //! physical thickness and complex wavelength; the wavelength gate alone does
 //! not certify close-panel or thickness accuracy. Source validity remains
 //! with the original material owner. Equivalent-fluid model reference:
@@ -30,6 +31,10 @@ use fs_material::relaxation::RelaxationState;
 #[path = "porous/receivers.rs"]
 mod receivers;
 pub use receivers::PorousAbsorptionObservation;
+
+/// Mutually interacting finite porous, lossless-fluid and molecular-gas bodies.
+#[path = "porous/multiple.rs"]
+pub mod multiple;
 
 /// Original saturating-fluid owner, retained for the lifetime of the solve.
 /// A relaxing gas uses the porous owner's coupled thermal equation; its free
