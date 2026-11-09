@@ -1,5 +1,6 @@
 use super::*;
 use crate::enthalpy::*;
+use crate::enthalpy::conduction::implicit;
 
 #[derive(Clone, Debug, PartialEq)]
 struct Producer {
@@ -496,6 +497,159 @@ fn g1_g3_implicit_sources_share_the_compensated_start_interval_balance() {
     assert_eq!(unchanged.cells(), thermal.cells());
     assert_eq!(zero.energy.external_heat_j, 0.0);
     assert!(zero.entropy.has_unclassified_sources);
+}
+
+fn implicit_source_cell(authored_w: f64) -> DepositionSimulation<'static> {
+    let (active, _) = initial(false).advance_to(0.0, config(), || Ok(())).unwrap();
+    let mut cell = active.cells()[&CellId(1)].clone();
+    cell.boundary.source_w = authored_w;
+    DepositionSimulation::new(vec![TimedEvent { time_s: 0.0, event: Event::Birth(cell) }],
+        &[(MaterialId(1), &A)], DepositionBudget {
+            max_cells: 1, max_links: 2, max_events: 1, max_substeps: 100,
+        }).unwrap().advance_to(0.0, config(), || Ok(())).unwrap().0
+}
+
+fn implicit_source_chain<'a>(thermal: &DepositionSimulation<'_>) -> implicit::ImplicitConductionChain<'a> {
+    let conduction = crate::enthalpy::conduction::ConductionObserver::new(
+        thermal, &[(MaterialId(1), &A)], &[], &[], || Ok(())).unwrap();
+    implicit::ImplicitConductionChain::new(thermal, &conduction,
+        &[(MaterialId(1), &A)], || Ok(())).unwrap()
+}
+
+fn implicit_source_controls() -> implicit::ImplicitConductionControls {
+    implicit::ImplicitConductionControls { maximum_dt_s: 1.0,
+        cell_tolerance_j: 1e-10, total_tolerance_j: 1e-9,
+        ..implicit::ImplicitConductionControls::default() }
+}
+
+struct EndpointPower(f64);
+impl implicit::source::ImplicitHeatSourceLaw for EndpointPower {
+    fn caloric_law(&self) -> &dyn ThermalLaw { &A }
+    fn state_at_specific_enthalpy(&self, h: f64,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<implicit::source::ImplicitHeatSourceState, DepositionError> {
+        check()?;
+        A.temperature_k(h)?;
+        Ok(implicit::source::ImplicitHeatSourceState { power_w: self.0,
+            power_enthalpy_derivative_w_kg_j: 0.0 })
+    }
+}
+
+struct CoupledPower {
+    watts: f64,
+    calorics: [&'static dyn ThermalLaw; 1],
+}
+impl implicit::coupled_source::ImplicitCoupledHeatSourceLaw for CoupledPower {
+    fn caloric_laws(&self) -> &[&dyn ThermalLaw] { &self.calorics }
+    fn power_dependencies(&self) -> &[(usize, usize)] { &[] }
+    fn state_at_specific_enthalpies_and_time(&self, h: &[f64], _: f64,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<implicit::coupled_source::ImplicitCoupledHeatSourceState, DepositionError> {
+        check()?;
+        assert_eq!(h.len(), 1);
+        self.calorics[0].temperature_k(h[0])?;
+        Ok(implicit::coupled_source::ImplicitCoupledHeatSourceState {
+            powers_w: vec![self.watts], power_enthalpy_derivatives_w_kg_j: vec![],
+        })
+    }
+}
+
+#[test]
+fn g1_implicit_authored_observed_endpoint_and_flow_heat_share_one_balance() {
+    use crate::enthalpy::advection::{Advected, MassBoundary};
+    let large = 2.0_f64.powi(80);
+    let thermal = implicit_source_cell(-large);
+    let reference = implicit_source_cell(0.0);
+    let heating = EndpointPower(1.0);
+    let flow = Advected::new((), vec![], 2).unwrap().with_boundaries(vec![
+        MassBoundary::Inlet { id: 1, cell: CellId(1), kg_s: 1.0,
+            material_id: MaterialId(1), specific_h_j_kg: 0.0 },
+        MassBoundary::Outlet { id: 2, cell: CellId(1), kg_s: 1.0 },
+    ], 2).unwrap();
+    let build = |state| implicit_source_chain(state)
+        .with_heat_sources(state, &[(CellId(1), &heating)], || Ok(())).unwrap()
+        .with_implicit_advection(state, &flow, || Ok(())).unwrap()
+        .with_implicit_advection_entropy(state, || Ok(())).unwrap();
+    let controls = implicit_source_controls();
+    let mut workspace = implicit::ImplicitConductionWorkspace::new(1).unwrap();
+    let (expected, expected_report) = build(&reference).advance_to(
+        &reference, 1.0, controls, &mut workspace, || Ok(())).unwrap();
+    let source = IntervalProducer::new(large, 0.0);
+    let chain = build(&thermal);
+    let mut polls = 0;
+    let (next, accepted, report) = chain.advance_observed_to(&thermal, &source,
+        1.0, controls, &mut workspace, || { polls += 1; Ok(()) }).unwrap();
+    // The one-kilogram inlet/outlet cell obeys h_new = 1 - h_new.
+    near(next.cells()[&CellId(1)].specific_h_j_kg, 0.5);
+    near(next.temperature_k(CellId(1)).unwrap(), 300.25);
+    near(next.cells()[&CellId(1)].specific_h_j_kg, expected.cells()[&CellId(1)].specific_h_j_kg);
+    assert_eq!(report.energy, expected_report.energy);
+    assert_eq!(report.entropy, expected_report.entropy);
+    near(report.energy.external_heat_j, 0.5);
+    near(report.entropy.unclassified_source_at_cell_j_k, 1.0/300.25);
+    assert!(report.entropy.advection.is_some());
+    assert_eq!(accepted.prepared.len(), report.energy.substeps);
+    assert_eq!(accepted.accepted, report.energy.substeps);
+    assert_eq!(next.cells()[&CellId(1)].boundary.source_w, -large);
+    let mut seen = 0;
+    assert!(chain.advance_observed_to(&thermal, &source, 1.0, controls,
+        &mut workspace, || { seen += 1;
+            if seen == polls { Err(DepositionError::Cancelled) } else { Ok(()) }
+        }).is_err());
+    assert_eq!(thermal.cells()[&CellId(1)].specific_h_j_kg, 0.0);
+    assert_eq!(thermal.time_s(), 0.0);
+    assert!(source.prepared.is_empty());
+    assert_eq!(flow.audit(), Default::default());
+}
+
+#[test]
+fn g1_observed_low_component_reaches_the_actual_implicit_endpoint_sink() {
+    let large = 2.0_f64.powi(80);
+    let thermal = implicit_source_cell(0.0);
+    let cooling = EndpointPower(-large);
+    let chain = implicit_source_chain(&thermal)
+        .with_heat_sources(&thermal, &[(CellId(1), &cooling)], || Ok(())).unwrap();
+    let source = CoupledObservers::new(Producer::new(1, large), Producer::new(1, 1.0));
+    let mut workspace = implicit::ImplicitConductionWorkspace::new(1).unwrap();
+    let (next, accepted, report) = chain.advance_observed_to(&thermal, &source,
+        1.0, implicit_source_controls(), &mut workspace, || Ok(())).unwrap();
+    assert_eq!(next.cells()[&CellId(1)].specific_h_j_kg, 1.0);
+    assert_eq!(report.energy.external_heat_j, 1.0);
+    assert_eq!(report.energy.residual_j, 0.0);
+    near(report.entropy.unclassified_source_at_cell_j_k, 1.0/300.5);
+    assert_eq!(accepted.first.grid.len(), 1);
+    assert_eq!(accepted.first.grid, accepted.second.grid);
+    assert!(source.first.grid.is_empty());
+}
+
+#[test]
+fn g1_local_and_coupled_endpoint_sources_survive_be_and_both_sdirk_stages() {
+    let large = 2.0_f64.powi(80);
+    let thermal = implicit_source_cell(-large);
+    for (local_w, coupled_w) in [(large, 1.0), (1.0, large)] {
+        let local = EndpointPower(local_w);
+        let coupled = CoupledPower { watts: coupled_w, calorics: [&A] };
+        let chain = implicit_source_chain(&thermal)
+            .with_heat_sources(&thermal, &[(CellId(1), &local)], || Ok(())).unwrap()
+            .with_coupled_heat_source(&thermal, &[CellId(1)], &coupled, 0, || Ok(())).unwrap();
+        let mut workspace = implicit::ImplicitConductionWorkspace::new(1).unwrap();
+        let (backward, be) = chain.advance_to(&thermal, 1.0, implicit_source_controls(),
+            &mut workspace, || Ok(())).unwrap();
+        let (sdirk, sd) = chain.advance_sdirk2_to(&thermal, 1.0, implicit_source_controls(),
+            &mut workspace, || Ok(())).unwrap();
+        for (state, report) in [(&backward, &be), (&sdirk, &sd)] {
+            near(state.cells()[&CellId(1)].specific_h_j_kg, 1.0);
+            near(report.energy.external_heat_j, 1.0);
+            near(report.energy.residual_j, 0.0);
+            assert!(report.entropy.has_unclassified_sources);
+            assert_eq!(state.cells()[&CellId(1)].boundary.source_w, -large);
+        }
+        near(be.entropy.unclassified_source_at_cell_j_k, 1.0/300.5);
+        let gamma = 1.0-core::f64::consts::FRAC_1_SQRT_2;
+        near(sd.entropy.unclassified_source_at_cell_j_k,
+            (1.0-gamma)/(300.0+gamma/2.0) + gamma/300.5);
+        assert_eq!(thermal.cells()[&CellId(1)].specific_h_j_kg, 0.0);
+    }
 }
 
 #[test]

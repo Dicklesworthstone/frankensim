@@ -138,9 +138,33 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
         quadrature: Option<StageQuadrature<'_>>,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<BackwardEulerTrial<'m, T>, E> {
+        self.evaluate_exchange_source_option(
+            energy_increments_j,
+            |state| resolve(state).map(|value| (value, SourcePowers::default())),
+            with_entropy,
+            quadrature,
+            checkpoint,
+        )
+    }
+
+    /// Keep independent physical sources compensated until they meet authored
+    /// heat, transport and boundary exchanges in the original rate owner.
+    /// Public scalar coefficient maps remain an additive compatibility ingress.
+    pub(in crate::enthalpy) fn evaluate_exchange_source_option<T, E: From<DepositionError>>(
+        &self,
+        energy_increments_j: &[f64],
+        resolve: impl FnOnce(
+            &DepositionSimulation<'m>,
+        ) -> Result<(BoundaryExchangeStepCoefficients<T>, SourcePowers), E>,
+        with_entropy: bool,
+        quadrature: Option<StageQuadrature<'_>>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BackwardEulerTrial<'m, T>, E> {
         self.evaluate_endpoint_option(
             energy_increments_j,
-            |state| resolve(state).map(|value| (value.transport, None, value.exchanges)),
+            |state| resolve(state).map(|(value, sources)| {
+                (value.transport, None, value.exchanges, sources)
+            }),
             false,
             with_entropy,
             quadrature,

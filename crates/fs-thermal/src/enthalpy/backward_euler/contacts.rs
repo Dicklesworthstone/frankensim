@@ -98,6 +98,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
                         TransportStepCoefficients::from(BoundaryStepCoefficients::from(heat)),
                         None,
                         BoundaryExchanges::default(),
+                        SourcePowers::default(),
                     )
                 })
             },

@@ -93,12 +93,12 @@ impl ImplicitConductionChain<'_> {
         if !positive(implicit_dt_s) || stage_time_s <= thermal.time_s || stage_time_s >= target_s {
             return Err(DepositionError::Arithmetic.into());
         }
-        // An empty override map preserves each cell's authored, constant power.
+        // No generated contributions replace each cell's authored power.
         // Native StageHeat carries it and any attached endpoint advection with
         // the same quadrature as conduction, including external stream energy
         // and unclassified at-cell entropy. Reconstructed faces and their
         // tangents are evaluated at each trial, never frozen at the first stage.
-        let sources = BTreeMap::new();
+        let sources = SourcePowers::default();
         let first = self.solve_stage(
             thermal,
             stage_time_s,

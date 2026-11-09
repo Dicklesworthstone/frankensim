@@ -732,21 +732,6 @@ impl SourcePowers {
         }
         Ok(())
     }
-    // A scalar-only endpoint solver must charge its final source rounding
-    // against the same cell/whole-window energy allowances as its residuals.
-    pub(in crate::enthalpy) fn rounding_energy(&self, duration_s: f64)
-        -> Result<(f64, f64), DepositionError> {
-        let mut maximum: f64 = 0.0;
-        let mut total = 0.0;
-        for power in self.powers.values() {
-            let lost_w = power.roundoff()?;
-            if lost_w == 0.0 { continue; }
-            let lost_j = finite((lost_w.abs() * duration_s).next_up())?;
-            maximum = maximum.max(lost_j);
-            total = finite((total + lost_j).next_up())?;
-        }
-        Ok((maximum, total))
-    }
     pub(in crate::enthalpy) fn capture<O: DepositionObserver>(
         thermal: &DepositionSimulation<'_>, observer: &mut O,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,

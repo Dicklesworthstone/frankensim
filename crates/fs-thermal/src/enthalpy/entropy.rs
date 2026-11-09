@@ -165,13 +165,28 @@ impl DepositionSimulation<'_> {
         self.entropy_source_contributions(&generated_terms, &interval_terms, transfers, checkpoint)
     }
 
-    fn entropy_source_contributions(
+    pub(super) fn entropy_source_contributions(
         &self,
         generated: &SourcePowers,
         interval: &SourcePowers,
         transfers: &[HeatTransfer],
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(BTreeMap<CellId, observe::EnergySum>, bool), DepositionError> {
+        // Endpoint classification can run before the native rate owner admits
+        // transfers. Reject malformed physical endpoints before indexing them.
+        if transfers.len() > self.budget.max_links {
+            return Err(DepositionError::Budget("internal heat transfers"));
+        }
+        for (i, transfer) in transfers.iter().enumerate() {
+            if i % 256 == 0 { checkpoint()?; }
+            if transfer.a == transfer.b
+                || !self.cells.contains_key(&transfer.a)
+                || !self.cells.contains_key(&transfer.b)
+            {
+                return Err(DepositionError::InvalidInput("invalid internal heat-transfer endpoints"));
+            }
+            finite(transfer.power_w)?;
+        }
         let mut sources = BTreeMap::new();
         let mut has_unclassified = generated.has_nonzero || interval.has_nonzero;
         for (i, (&id, cell)) in self.cells.iter().enumerate() {

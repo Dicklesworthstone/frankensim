@@ -97,10 +97,10 @@ impl ImplicitConductionChain<'_> {
     /// audits count external heat once and cancel internal transfers. Transfer
     /// entropy remains unclassified unless its owner supplies its own account.
     /// This is not the adaptive step-doubling path or a moving-mass model.
-    /// Independent source contributions remain compensated through the joint
-    /// start/interval reduction. Final scalar-source rounding spends the same
-    /// cell and whole-call joule allowances as the nonlinear residual; it is
-    /// never silently reclassified as external heat or physical dissipation.
+    /// Independent start/interval contributions remain compensated alongside
+    /// authored and endpoint sources through the original heat, residual and
+    /// entropy owners. The native local and whole-call energy gates account
+    /// for the actual stored heat without a scalar source handoff.
     pub fn advance_observed_to<'m, O: DepositionObserver>(
         &self,
         thermal: &DepositionSimulation<'m>,
@@ -131,7 +131,6 @@ impl ImplicitConductionChain<'_> {
         observers.source.begin().map_err(Observer)?;
         let mut report = empty_report();
         let mut supplied = Sum::default();
-        let mut source_rounding_j = 0.0;
         loop {
             checkpoint()?;
             let (with_events, observed, events) = next.advance_observed(
@@ -240,36 +239,17 @@ impl ImplicitConductionChain<'_> {
                     visited += 1;
                     combined.add(&next, id, watts)
                 })?;
-                let (cell_rounding_j, interval_rounding_j) = combined.rounding_energy(duration)?;
-                let next_rounding_j = if interval_rounding_j == 0.0 { source_rounding_j } else {
-                    finite((source_rounding_j + interval_rounding_j).next_up())?
-                };
-                if cell_rounding_j > controls.cell_tolerance_j
-                    || next_rounding_j > controls.total_tolerance_j {
-                    return Err(DepositionError::EnergyBalance(
-                        cell_rounding_j.max(next_rounding_j),
-                    ).into());
-                }
-                let mut remaining = controls;
-                remaining.cell_tolerance_j -= cell_rounding_j;
-                remaining.total_tolerance_j -= next_rounding_j;
-                let has_unclassified_sources = combined.has_nonzero;
-                let combined = combined.rounded()?;
                 match self.solve_step_with_sources(
                     &next,
                     end,
                     &combined,
                     &transfers,
-                    remaining,
+                    controls,
                     workspace,
                     &mut report,
                     &mut checkpoint,
                 ) {
-                    Ok((accepted, energy, mut entropy, maximum)) => {
-                        source_rounding_j = next_rounding_j;
-                        // Opposing source powers do not determine their source
-                        // temperatures or prove zero entropy exchange.
-                        entropy.has_unclassified_sources |= has_unclassified_sources;
+                    Ok((accepted, energy, entropy, maximum)) => {
                         source
                             .step(
                                 start,
@@ -282,7 +262,7 @@ impl ImplicitConductionChain<'_> {
                         supplied.add(energy.external_heat_j)?;
                         accumulate_entropy(&mut report.entropy, entropy)?;
                         report.maximum_cell_residual_j =
-                            report.maximum_cell_residual_j.max(maximum + cell_rounding_j);
+                            report.maximum_cell_residual_j.max(maximum);
                         report.energy.substeps += 1;
                         next = accepted;
                         break;
@@ -318,7 +298,7 @@ impl ImplicitConductionChain<'_> {
         report.energy.stored_energy_change_j = storage.total()?;
         report.energy.residual_j =
             finite(report.energy.stored_energy_change_j - report.energy.external_heat_j)?;
-        if finite(report.energy.residual_j.abs() + source_rounding_j)? > controls.total_tolerance_j {
+        if report.energy.residual_j.abs() > controls.total_tolerance_j {
             return Err(DepositionError::EnergyBalance(report.energy.residual_j).into());
         }
         checkpoint()?;

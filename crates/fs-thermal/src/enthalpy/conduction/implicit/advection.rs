@@ -17,14 +17,16 @@ pub(super) struct ClassifiedAdvectionEntropy {
 impl ClassifiedAdvectionEntropy {
     pub(super) fn sample(
         thermal: &DepositionSimulation<'_>,
-        sources_w: &BTreeMap<CellId, f64>,
+        sources: &SourcePowers,
         transfers: &[HeatTransfer],
         endpoint: EndpointAdvectionEntropy,
         duration_s: f64,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, DepositionError> {
-        let mut source = Sum::default();
-        let mut has_unclassified_sources = false;
+        let mut source = crate::enthalpy::observe::EnergySum::default();
+        let (powers, has_unclassified_sources) = thermal.entropy_source_contributions(
+            sources, &SourcePowers::default(), transfers, checkpoint,
+        )?;
         let temperature = |id| -> Result<f64, DepositionError> {
             let t = *endpoint.temperatures.get(&id).ok_or(DepositionError::InvalidInput(
                 "inactive entropy source cell",
@@ -33,20 +35,15 @@ impl ClassifiedAdvectionEntropy {
         };
         for (i, (&id, cell)) in thermal.cells.iter().enumerate() {
             if i % 256 == 0 { checkpoint()?; }
-            let authored = cell.boundary.source_w;
-            let generated = sources_w.get(&id).copied().unwrap_or(0.0);
-            has_unclassified_sources |= authored != 0.0 || generated != 0.0;
-            source.add(finite(finite(authored + generated)? / temperature(id)?)?)?;
-        }
-        for (i, transfer) in transfers.iter().enumerate() {
-            if i % 256 == 0 { checkpoint()?; }
-            has_unclassified_sources |= transfer.power_w != 0.0;
-            source.add(finite(-transfer.power_w / temperature(transfer.a)?)?)?;
-            source.add(finite(transfer.power_w / temperature(transfer.b)?)?)?;
+            if let Some(power) = powers.get(&id) {
+                source.add_divided(power, temperature(id)?)?;
+            } else {
+                source.add(finite(cell.boundary.source_w / temperature(id)?)?)?;
+            }
         }
         Ok(Self {
             advection: endpoint.rates.integrated(duration_s)?,
-            source_entropy_j_k: finite(duration_s * source.total()?)?,
+            source_entropy_j_k: finite(duration_s * source.value()?)?,
             has_unclassified_sources,
         })
     }

@@ -38,6 +38,7 @@ use crate::enthalpy::backward_euler::{
     TransportStepCoefficients, resolvable_increment_j,
 };
 use crate::enthalpy::entropy::EntropyAudit;
+use crate::enthalpy::SourcePowers;
 use fs_la::tridiagonal::{TridiagonalError, TridiagonalWorkspace};
 
 /// Continuous small-signal thermal impedance at an admitted equilibrium.
@@ -949,11 +950,17 @@ impl<'a> ImplicitConductionChain<'a> {
         report: &mut ImplicitConductionReport,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<BackwardEulerTrial<'m, Endpoint>, ImplicitConductionError> {
+        let mut sources = SourcePowers::default();
+        for (&id, &power) in sources_w {
+            checkpoint()?;
+            sources.powers.entry(id).or_default().add(power)?;
+            sources.has_nonzero |= power != 0.0;
+        }
         let advection_stage = self.advection.as_ref()
             .map(|advection| advection.stage(step.target_s(), checkpoint))
             .transpose()?;
         self.evaluate_stage(
-            step, energy, sources_w, transfers, entropy, None,
+            step, energy, &sources, transfers, entropy, None,
             advection_stage.as_ref(), controls, report, checkpoint,
         )
     }
@@ -962,7 +969,7 @@ impl<'a> ImplicitConductionChain<'a> {
         &self,
         step: &BackwardEulerStep<'_, 'm>,
         energy: &[f64],
-        sources_w: &BTreeMap<CellId, f64>,
+        sources: &SourcePowers,
         transfers: &[HeatTransfer],
         entropy: bool,
         quadrature: Option<StageQuadrature<'_>>,
@@ -984,18 +991,17 @@ impl<'a> ImplicitConductionChain<'a> {
             // The residual owner consumes the bath powers; the analytic
             // Jacobian retains only the already prepared exchange states.
             let exchanges = std::mem::take(&mut endpoint.exchange_values);
-            let mut sources_w = sources_w.clone();
+            let mut sources = sources.clone();
             for (&id, state) in &endpoint.heat_source_states {
-                let value = sources_w.entry(id).or_default();
-                *value = finite(*value + state.power_w)?;
+                (checkpoint.borrow_mut())()?;
+                sources.add(thermal, id, state.power_w)?;
             }
             if let (Some(source), Some(state)) =
                 (&self.coupled_heat_source, &endpoint.coupled_heat_source_state)
             {
                 for (&id, &power) in source.cells.iter().zip(&state.powers_w) {
                     (checkpoint.borrow_mut())()?;
-                    let value = sources_w.entry(id).or_default();
-                    *value = finite(*value + power)?;
+                    sources.add(thermal, id, power)?;
                 }
             }
             let mut transfers = transfers.to_vec();
@@ -1009,7 +1015,7 @@ impl<'a> ImplicitConductionChain<'a> {
                 endpoint.transport_tangent = tangent;
                 if let Some(flow_entropy) = flow_entropy {
                     let mut classified = ClassifiedAdvectionEntropy::sample(
-                        thermal, &sources_w, &transfers, flow_entropy,
+                        thermal, &sources, &transfers, flow_entropy,
                         quadrature.map_or(step.duration_s(), |stage| stage.implicit_dt_s),
                         &mut || (checkpoint.borrow_mut())(),
                     )?;
@@ -1022,16 +1028,16 @@ impl<'a> ImplicitConductionChain<'a> {
                     endpoint.advection_entropy = Some(classified);
                 }
                 for (id, watts) in transport.heat.bulk.sources_w {
-                    let value = sources_w.entry(id).or_default();
-                    *value = finite(*value + watts)?;
+                    (checkpoint.borrow_mut())()?;
+                    sources.add(thermal, id, watts)?;
                 }
                 transfers.extend(transport.transfers);
             }
-            Ok::<_, ImplicitConductionError>(BoundaryExchangeStepCoefficients {
+            Ok::<_, ImplicitConductionError>((BoundaryExchangeStepCoefficients {
                 transport: TransportStepCoefficients {
                     heat: BoundaryStepCoefficients {
                         bulk: StepCoefficients {
-                            sources_w,
+                            sources_w: BTreeMap::new(),
                             conductances_w_k: endpoint.link_values.clone(),
                             payload: endpoint,
                         },
@@ -1043,14 +1049,11 @@ impl<'a> ImplicitConductionChain<'a> {
                     transfers,
                 },
                 exchanges,
-            })
+            }, sources))
         };
-        let mut trial = if let Some(stage) = quadrature {
-            step.evaluate_stage(energy, resolve, stage, entropy, || (checkpoint.borrow_mut())())
-        } else {
-            step.evaluate_exchange_option(energy, resolve, entropy, None,
-                || (checkpoint.borrow_mut())())
-        }?;
+        let mut trial = step.evaluate_exchange_source_option(
+            energy, resolve, entropy, quadrature, || (checkpoint.borrow_mut())(),
+        )?;
         if let Some(classified) = trial.payload().advection_entropy {
             trial.classify_endpoint_advection(
                 classified.advection, classified.source_entropy_j_k,
@@ -1289,7 +1292,7 @@ impl<'a> ImplicitConductionChain<'a> {
         self.solve_step_with_sources(
             thermal,
             target_s,
-            &BTreeMap::new(),
+            &SourcePowers::default(),
             &[],
             controls,
             workspace,
@@ -1332,7 +1335,7 @@ impl<'a> ImplicitConductionChain<'a> {
         &self,
         thermal: &DepositionSimulation<'m>,
         target_s: f64,
-        sources_w: &BTreeMap<CellId, f64>,
+        sources: &SourcePowers,
         transfers: &[HeatTransfer],
         controls: ImplicitConductionControls,
         workspace: &mut ImplicitConductionWorkspace,
@@ -1341,7 +1344,7 @@ impl<'a> ImplicitConductionChain<'a> {
     ) -> Result<(DepositionSimulation<'m>, EnergyAudit, EntropyAudit, f64), ImplicitConductionError>
     {
         let trial = self.solve_stage(
-            thermal, target_s, sources_w, transfers, None, controls, workspace, report, checkpoint,
+            thermal, target_s, sources, transfers, None, controls, workspace, report, checkpoint,
         )?;
         accept_trial(trial, controls, checkpoint)
     }
@@ -1353,7 +1356,7 @@ impl<'a> ImplicitConductionChain<'a> {
         &self,
         thermal: &DepositionSimulation<'m>,
         target_s: f64,
-        sources_w: &BTreeMap<CellId, f64>,
+        sources: &SourcePowers,
         transfers: &[HeatTransfer],
         quadrature: Option<StageQuadrature<'_>>,
         controls: ImplicitConductionControls,
@@ -1370,7 +1373,7 @@ impl<'a> ImplicitConductionChain<'a> {
         let mut trial = self.evaluate_stage(
             &step,
             &workspace.energy,
-            sources_w,
+            sources,
             transfers,
             false,
             quadrature,
@@ -1388,7 +1391,7 @@ impl<'a> ImplicitConductionChain<'a> {
                 return self.evaluate_stage(
                     &step,
                     &workspace.energy,
-                    sources_w,
+                    sources,
                     transfers,
                     true,
                     quadrature,
@@ -1441,7 +1444,7 @@ impl<'a> ImplicitConductionChain<'a> {
                     match self.evaluate_stage(
                         &step,
                         &workspace.proposal,
-                        sources_w,
+                        sources,
                         transfers,
                         false,
                         quadrature,

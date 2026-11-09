@@ -389,7 +389,9 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
     ) -> Result<BackwardEulerTrial<'m, T>, E> {
         self.evaluate_endpoint_option(
             energy_increments_j,
-            |state| resolve(state).map(|transport| (transport, None, BoundaryExchanges::default())),
+            |state| resolve(state).map(|transport| {
+                (transport, None, BoundaryExchanges::default(), SourcePowers::default())
+            }),
             false,
             with_entropy,
             None,
@@ -418,8 +420,10 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
         self.evaluate_endpoint_option(
             energy_increments_j,
             |state| {
-                resolve(state)
-                    .map(|(calorics, heat)| (TransportStepCoefficients::from(heat), Some(calorics), BoundaryExchanges::default()))
+                resolve(state).map(|(calorics, heat)| {
+                    (TransportStepCoefficients::from(heat), Some(calorics),
+                        BoundaryExchanges::default(), SourcePowers::default())
+                })
             },
             true,
             false,
@@ -438,6 +442,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
                 TransportStepCoefficients<T>,
                 Option<BTreeMap<CellId, (f64, f64)>>,
                 BoundaryExchanges,
+                SourcePowers,
             ),
             E,
         >,
@@ -506,6 +511,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
             },
             calorics,
             exchanges,
+            mut source_contributions,
         ) = resolve(&mut next)?;
         checkpoint()?;
         let links = next.set_step_conductances(&conductances_w_k, &mut checkpoint)?;
@@ -536,6 +542,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
             next.heat_rates_with_boundary_exchanges(f64::MAX, &boundaries, &exchanges, &mut checkpoint)?
         };
         next.add_rate_sources(&mut rates, &sources_w, &mut checkpoint)?;
+        next.add_rate_source_powers(&mut rates, &source_contributions, &mut checkpoint)?;
         if !transfers.is_empty() {
             next.add_step_transfers(&mut rates, &transfers, &mut checkpoint)?;
         }
@@ -543,11 +550,16 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
             // The same signed at-cell convention as the explicit entropy
             // observer. These are NOT heat sources for the energy residual:
             // the native transfer kernel above already applied them once.
-            let (source_powers, has_sources) = next.entropy_source_powers(
-                &sources_w, &BTreeMap::new(), &transfers, &mut checkpoint,
+            for (i, (&id, &watts)) in sources_w.iter().enumerate() {
+                if i % 256 == 0 { checkpoint()?; }
+                source_contributions.add(&next, id, watts)?;
+            }
+            let (source_powers, has_sources) = next.entropy_source_contributions(
+                &source_contributions, &SourcePowers::default(), &transfers, &mut checkpoint,
             )?;
             let mut audit = if transfers.is_empty()
                 && sources_w.is_empty()
+                && source_contributions.powers.is_empty()
                 && boundaries.ambient_w_k.is_empty()
                 && boundaries.reservoir_w_k.is_empty()
                 && exchanges.is_empty()
