@@ -40,6 +40,10 @@ use crate::enthalpy::backward_euler::{
 use crate::enthalpy::entropy::EntropyAudit;
 use fs_la::tridiagonal::{TridiagonalError, TridiagonalWorkspace};
 
+/// Continuous small-signal thermal impedance at an admitted equilibrium.
+#[path = "implicit/harmonic.rs"]
+pub mod harmonic;
+
 /// Accuracy-controlled comparisons of the same original implicit intervals.
 #[path = "implicit/adaptive.rs"]
 pub mod adaptive;
@@ -1052,7 +1056,22 @@ impl<'a> ImplicitConductionChain<'a> {
         workspace: &mut ImplicitConductionWorkspace,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), ImplicitConductionError> {
-        workspace.diagonal.fill(1.0);
+        self.assemble_tangent(thermal, endpoint, dt, 1.0, workspace, checkpoint)
+    }
+
+    // Shared exact heat-rate tangent. Harmonic analysis requests zero identity
+    // shift directly; subtracting I from a time-step Jacobian would erase slow
+    // physical relaxation rates through cancellation.
+    fn assemble_tangent(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        endpoint: &Endpoint,
+        dt: f64,
+        identity: f64,
+        workspace: &mut ImplicitConductionWorkspace,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), ImplicitConductionError> {
+        workspace.diagonal.fill(identity);
         workspace.lower.fill(0.0);
         workspace.upper.fill(0.0);
         match self.topology {

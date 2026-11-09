@@ -3683,3 +3683,35 @@ conductive production or a temporal defect from premature source rounding.
 Manufactured regressions cover weak latent heating and entropy between opposing
 large channels, reordered link IDs and transfers, generated heat, unequal-mass
 inventories, and heat retained across a heating/cooling history.
+
+### Continuous thermal impedance on the native enthalpy graph
+
+`ImplicitConductionChain::prepare_thermal_impedance` and the graph delegate
+admit an original per-cell steady heat balance, then retain its complete native
+conductive/contact/boundary/source tangent. With peak `exp(-i omega t)` phasors,
+the reusable frequency factor solves `(K-i*omega*I) delta E = delta P`, where
+`K=-d(net inward watts)/dE` and `E=m*h`. Original caloric derivatives recover
+temperature and driving/mutual impedances in K/W. Nonlinear conductivity,
+source feedback, integrated surface laws and their existing geometry/contact
+derivatives remain in the same Jacobian. No timestep, fitted thermal capacity,
+diagonal-only transfer or second material model is introduced.
+
+An interior latent plateau retains its energy perturbation with zero temperature
+perturbation; no infinite apparent capacity is formed. DC analysis refuses
+unanchored energy-conserving components and singular tangents instead of adding
+artificial leakage or selecting an arbitrary temperature reference. Dense work
+and numerical payload are explicitly bounded; each frequency shares one native
+complex LU across drives, checks original-row residuals and polls cancellation.
+Preparation queries original rates without cloning the future event schedule.
+No result advances accepted heat, geometry, material state or physical time.
+
+The scope is an equilibrium conduction linearization with external clocks,
+baths and prescribed geometry frozen. Advection is not admitted. The caller
+must supply locally differentiable constitutive branches and perturbations
+that remain within them; a one-sided corner tangent is not a two-sided material
+response. Nonlinear stability, positive-realness with active source feedback,
+experimental accuracy and continuum error are not certified. The quadratic
+temperature/heat-rate pairing is in K W, not a second physical heat account.
+Focused G1/G3/G4 regressions compare scalar RC and two-cell mutual impedances,
+the passive quadratic identity, native time-domain refinement, nonlinear
+source/conductivity feedback, latent storage, DC refusal and cancellation.

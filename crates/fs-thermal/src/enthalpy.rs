@@ -708,9 +708,25 @@ impl<'a> DepositionSimulation<'a> {
     fn heat_rates_with_calorics_and_boundary_exchanges(
         &self,
         maximum_explicit_dt: f64,
+        calorics: impl FnMut(CellId, &DepositedCell) -> Result<(f64, f64), DepositionError>,
+        boundaries: &backward_euler::BoundaryConductances,
+        exchanges: &backward_euler::BoundaryExchanges,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<HeatRates, DepositionError> {
+        self.heat_rates_with_coefficients(
+            maximum_explicit_dt, calorics, boundaries, exchanges, None, checkpoint,
+        )
+    }
+
+    // A read-only constitutive snapshot can replace link conductances without
+    // cloning the accepted timeline and its complete future event schedule.
+    fn heat_rates_with_coefficients(
+        &self,
+        maximum_explicit_dt: f64,
         mut calorics: impl FnMut(CellId, &DepositedCell) -> Result<(f64, f64), DepositionError>,
         boundaries: &backward_euler::BoundaryConductances,
         exchanges: &backward_euler::BoundaryExchanges,
+        link_values: Option<&BTreeMap<u64, f64>>,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<HeatRates, DepositionError> {
         boundaries.admit(self, checkpoint)?;
@@ -742,14 +758,19 @@ impl<'a> DepositionSimulation<'a> {
             if i % 256 == 0 {
                 checkpoint()?;
             }
-            let power =
-                finite(link.conductance_w_k * (temperatures[&link.b] - temperatures[&link.a]))?;
+            let conductance = link_values
+                .and_then(|values| values.get(&link.id).copied())
+                .unwrap_or(link.conductance_w_k);
+            if !nonnegative(conductance) {
+                return Err(DepositionError::MaterialDomain);
+            }
+            let power = finite(conductance * (temperatures[&link.b] - temperatures[&link.a]))?;
             let coverage = self.contact_areas(link);
             for (id, sign, side_area) in [(link.a, 1.0, coverage[0]), (link.b, -1.0, coverage[1])] {
                 let rate = rates.get_mut(&id).ok_or(DepositionError::Arithmetic)?;
                 rate.add(sign * power)?;
                 let g = outgoing.get_mut(&id).ok_or(DepositionError::Arithmetic)?;
-                g.0 = finite(g.0 + link.conductance_w_k)?;
+                g.0 = finite(g.0 + conductance)?;
                 let area = covered.get_mut(&id).ok_or(DepositionError::Arithmetic)?;
                 *area = finite(*area + side_area)?;
             }

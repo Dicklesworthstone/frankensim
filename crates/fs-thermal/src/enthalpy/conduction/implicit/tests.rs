@@ -1508,3 +1508,6 @@ mod bath_history;
 
 #[path = "tests/current_geometry.rs"]
 mod current_geometry;
+
+#[path = "tests/impedance.rs"]
+mod impedance;

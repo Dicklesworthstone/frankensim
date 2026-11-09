@@ -300,6 +300,17 @@ impl<'a> ImplicitConductionGraph<'a> {
         self.inner.cell_ids()
     }
 
+    /// Prepare the same original heat-rate tangent for continuous thermal
+    /// impedance. See the chain method for equilibrium and frozen-clock scope.
+    pub fn prepare_thermal_impedance(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        budget: super::harmonic::ThermalImpedanceBudget,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<super::harmonic::ThermalImpedanceModel, super::harmonic::ThermalImpedanceError> {
+        self.inner.prepare_thermal_impedance(thermal, budget, checkpoint)
+    }
+
     /// Advance to absolute seconds using the original nonlinear endpoint solve.
     /// Time accuracy remains caller-controlled; failure returns no candidate.
     pub fn advance_to<'m>(
