@@ -62,6 +62,9 @@ use fs_ports::{PortKind, StableId};
 
 use crate::ledger::Sum;
 
+mod resistance;
+pub use resistance::Resistance;
+
 /// Why an element was not built or refused a step.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ElementError {
@@ -87,6 +90,21 @@ pub enum ElementError {
         /// The rejected value.
         value: f64,
     },
+    /// A matrix entry differs from its mirror entry (a signed zero equals its mirror).
+    Asymmetric {
+        /// Row of the entry below the diagonal.
+        row: usize,
+        /// Its column.
+        column: usize,
+    },
+    /// A matrix whose Cholesky factorization met a pivot that is not positive: it is not positive
+    /// definite, so some flow would make the element absorb no power or deliver it.
+    NotPositiveDefinite {
+        /// The row of the failed pivot.
+        pivot: usize,
+        /// The pivot's value.
+        value: f64,
+    },
     /// Cancellation was requested.
     Cancelled,
 }
@@ -100,6 +118,13 @@ impl fmt::Display for ElementError {
                 write!(f, "temperature {kelvin} K is not positive and finite")
             }
             Self::Input { value } => write!(f, "input {value} is not finite"),
+            Self::Asymmetric { row, column } => {
+                write!(f, "matrix entry ({row}, {column}) differs from its mirror")
+            }
+            Self::NotPositiveDefinite { pivot, value } => write!(
+                f,
+                "matrix is not positive definite: Cholesky pivot {pivot} is {value}"
+            ),
             Self::Cancelled => write!(f, "cancelled"),
         }
     }

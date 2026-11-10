@@ -5840,3 +5840,67 @@ uniform-port arithmetic. Complete native `fs-math`, `fs-sparse`, `fs-qty`,
 does not claim a full Cargo/workspace test, lint or dependency closure.
 Material cards and reservoir parameters in these tests are explicitly
 synthetic constitutive fixtures, not measured source authority.
+
+## Closed-open column law, copied from bar_strike, and its Component
+
+`closed_open` is the resonator-tube law of fs-couple's `bar_strike` example
+(`examples/bar_strike/tube.rs`), copied operation for operation; the example
+keeps its own copy (AGENTS.md rule 5). The example's test
+`the_fs_duct_copy_of_the_tube_law_gives_the_same_bits` compares the two on
+every card under `data/instruments/descriptions` with a tube (each must
+load), on La Favre's A3, on a two-cylinder bore and on the builder's C4 tube
+with its joint ring: every field of every mode and every acoustic mass bit for
+bit, equal cylinders, and the refusal words past the open-end law (the refused
+`ka` as printed, to 3 decimals).
+
+- `ClosedOpenColumn::new(radius_m, air_length_m, modes, bore)`: closed at the
+  floor face, open at the mouth; refuses what the card parser refuses (radius
+  not positive, column not longer than its diameter, no mode asked for, a
+  drawn bore of fewer than 2 points or that does not run from height 0 to the
+  mouth at the mouth's radius, heights that fall, radii not positive) and
+  values that are not finite.
+- `isolated_modes(column, gas)`: Doutaut, Matignon and Chaigne, JASA 104
+  (1998), Eq. 7 for the viscothermal wall and Eq. 12 (Levine and Schwinger,
+  unflanged) for the open end; each mode's frequency is a fixed point. A drawn
+  bore is walked cylinder by cylinder with pressure and volume velocity
+  continuous at each change of radius; the mode's mass, wall loss and open-end
+  loss come from its energy along the bore. Refuses a gas that cannot carry the
+  law, a mode at or above `ka` 1.5, and a drawn-bore mode with no fixed point in
+  64 iterations.
+- `acoustic_mass`: `rho L / (2 S)` per unit mouth volume velocity, with the
+  mode's own acoustic length.
+- `TubeResonator::new(column, gas)` holds the modes and their masses, the data
+  a joint modal basis takes, and refuses a mode whose total decay rate is not
+  positive and below its angular frequency, or whose acoustic mass is not
+  positive and finite. `structure(sample_rate_hz,
+  budget)` is the column alone as fs-nlmodal's `ModalStructure`: one
+  mass-normalized mode per plane-wave mode, damping ratio (wall plus open end)
+  over angular frequency; mode `k`'s coordinate is its volume displacement
+  into the column times `sqrt(M_k)`. Ports: `mouth`
+  (`FluidPressureFlux`, width 1: the pressure at the mouth pushing into the
+  column in, the step's mean volume flux into the column out, weights
+  `1 / sqrt(M_k)`) and `heat`. The column already carries its own free,
+  unflanged open end (Eq. 12's end correction and loss), so a load on `mouth`
+  must be the part scattered back by what stands near the mouth only (as
+  bar_strike's bar reflection is), or the open end is counted twice.
+
+Invariants: the copy gives the law copied bit for bit (tested in the example);
+a drawn bore of one cylinder gives the uniform law bit for bit; the structure
+carries the law's frequencies, damping ratios and masses unchanged. All
+functions are pure and deterministic.
+
+Conformance tests (`closed_open::tests`): one cylinder drawn against the
+uniform law; La Favre's A3 against the printed laws summed by hand (Eq. 12's
+low-ka limit, the odd-mode ratios from Eq. 7 and Eq. 12, mode 3's ratio worked
+apart from the code); a two-cylinder bore against its own condition (root and
+mass length solved apart from the walk); ascending modes and the open-end
+refusal, with the refused mode pinned; geometry and gas refusals; the
+structure's modes, damping ratios, masses (against `rho L / (2 pi a^2)` by
+hand) and ports; one step under a held mouth pressure against the damped
+oscillator's closed form through `1 / sqrt(M_k)`.
+
+No claim: at a change of radius only the plane wave is carried (the step's
+evanescent inertance and annular-face loss are left out) and sloped pieces are
+cylinders 0.01 mm long; the uniform law keeps its last iterate after 64
+passes, as the law copied does; the column alone books its open end's radiated
+power as heat through `heat` and computes no radiated field.

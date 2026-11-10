@@ -8,7 +8,11 @@ and Kirchhoff-Carrier strings as port-Hamiltonian systems with a
 quartic SUM-OF-SQUARES potential
 `H = 1/2 sum (p^2 + w^2 q^2) + 1/4 sum_j c_j (q^T E_j q)^2` — the
 Airy-stress-eliminated modal form. Pitch glide, mode coupling, and
-the crash cascade with structurally exact energy accounting.
+the crash cascade with structurally exact energy accounting. The linear
+case is also a composition-kernel Component (`component`), with a joint
+loaded basis for modes coupled through shared air (`loaded`), for which the
+crate depends on fs-modal (the exact damped-mode step and the dense pencil
+solve), fs-ports and fs-exec.
 
 ## Public types and semantics
 
@@ -430,6 +434,91 @@ the crash cascade with structurally exact energy accounting.
   beside the offset. `SavState` contains the entire auxiliary checkpoint;
   reinitializing r from q during restart would change the method.
 
+### `component`: the linear modal structure on the composition kernel
+
+`component::ModalStructure` is the linear case of the modal structures above (no quartic term)
+as an `fs_ports::component::Component` of contract v0. It wraps an admitted
+`fs_modal::time::ModalAcousticTimeModel` and takes that owner's exact held-force step,
+`step_duration_into`, for every proposal: nothing is integrated here. `from_modes` admits the
+owner's model from `(angular frequency, viscous damping ratio)` pairs with no observer
+transfer; `new` takes an admitted model and refuses one that carries an observer transfer,
+because an observer is a probe of its own.
+
+- Ports, in order: one power port per `ModalAttachment`, receiving effort, then `heat`, a heat
+  port receiving temperature. Row `r` of an attachment has one weight `s_rk` per mode: the
+  generalized force on mode `k` is `sum_r s_rk e_r` and the port returns
+  `sum_k s_rk (q1_k - q0_k) / dt`, the mean flow of the step. Point forces on a structure are
+  rows of mode shapes at the points, a mouth pressure on an air column is a row of `1/sqrt(M_k)`
+  (`M_k` the mode's acoustic mass per unit volume flow [kg/m^4]), and identity weights are the
+  modal port. The heat port returns
+  `-D / dt`, where `D` is the owner's viscous heat of the step.
+- State: `Vec<ModalAcousticState>`, one entry per mode, owned by the system.
+  `stored_energy_j` is `ModalAcousticTimeModel::energy_j`, the owner's per-mode law and
+  compensated sum.
+- Receipt: stored change `E1 - E0` by that function; dissipation `D`; numerical loss
+  `W - D - (E1 - E0)`, the owner's work-heat residual, which the owner itself refuses above its
+  allowance; entropy `D / T`. The energy tolerance covers the kernel's port products against
+  the owner's work (sums reordered, endpoint differences rounding at the size of the endpoints),
+  the heat port's division and multiplication by `dt`, and the subtractions, at
+  `4 (rows + modes + 16)` units in the last place of their sizes. The owner's heat allowance
+  is not in it: the same `D` enters the audit through the heat port and the numerical loss, so
+  its error cancels.
+- Class `Smooth`: the mechanical rows are affine in the efforts, the heat row is quadratic. No
+  tangent tier.
+- `ModalStructureRefusal`: the owner's error unchanged, an observer transfer, weights of the
+  wrong count or not finite, a refused identifier or port list, a state of the wrong length, a
+  temperature that is not positive and finite, cancellation.
+
+### `loaded`: the joint loaded modal basis
+
+`loaded::LoadedModalBasis::new(w, M_a)` takes `n` modes, each in its own
+mass-normalized coordinates (unit modal mass, so `K = diag(w_k^2)` and `M = I`),
+and the symmetric added mass `M_a` of the air they share, in the same
+coordinates. It solves them as one pencil `(K, M + M_a)` with fs-modal's dense
+solve (`eigh_gen_dense`: Cholesky reduction, then Jacobi) and refuses
+(`LoadedMass`) unless `M + M_a` is positive definite. It returns:
+- the loaded angular frequencies, ascending;
+- fs-modal's certified residual of each `w'^2`;
+- the basis `Phi`, with `Phi^T (M + M_a) Phi = I` and
+  `Phi^T K Phi = diag(w'^2)`; the unloaded coordinates are `x = Phi y`.
+
+Methods:
+- `congruent(A)` is `Phi^T A Phi` for a symmetric `A`, symmetric bit for bit.
+  The loss `C` is one such matrix: each mode's own loss on the diagonal, the
+  radiation resistance between modes off it.
+- `loaded_attachment` carries an attachment written in the unloaded
+  coordinates to the loaded ones (`s' = s Phi`) and keeps each row's flow;
+  `unloaded(y)` is `Phi y`.
+- `structure(rate, budget, modal, kind, attachments)` builds the loaded modes
+  as one undamped `ModalStructure`. Its ports are the modal port first (width
+  `n`, identity weights), then the carried attachments, then `heat`.
+  fs-system's `elements::Resistance` with `Phi^T C Phi` joins the modal port by
+  a common-flow junction, so the definiteness of the whole loss is checked on
+  the sum.
+- `held_loss_factors(dt)` is `sinc^2(w'_j dt / 2)` for each loaded mode. The
+  structure steps exactly under a force held over the step, and the resistor
+  answers the step's mean velocity. So for one underdamped mode with loss `c`
+  the step's determinant is `(1 - e) / (1 + e)`, with
+  `e = (c dt / 2) sinc^2(w dt / 2)`: the energy envelope decays by that factor
+  per step, while within one step the energy ratio depends on the phase,
+  between its square and 1. The envelope decays at the factor times `c` to
+  first order in `e`. The factor is stated with a render, not corrected; it is
+  NaN for a step that is not positive and finite.
+
+Refusals, all on `ModalStructureRefusal`:
+- no mode;
+- a frequency that is not positive and finite (unloaded, or a loaded square);
+- more modes than fs-la's dense symmetric eigensolver admits within its work
+  cap, refused before the matrices are read;
+- a matrix that is not `n x n`, finite and symmetric (a signed zero equals its
+  mirror);
+- a loaded mass that is not positive definite;
+- the refusals of the carried attachments (each with its index in the list
+  given, a weight that overflows when carried included) and of `from_modes`.
+
+No claim: `M_a` and `C` are constants, so a frequency-dependent loading enters
+at the frequency it was sampled at. The basis is dense, `O(n^3)`.
+
 ## Invariants
 
 1. Quadrature certificate: two independent Gauss orders agree to
@@ -583,8 +672,49 @@ trajectory diverges); amplitude-scaling covariance; parametric
 coupling + RK4 cross-check; plate cascade casebook (JSON lines with
 modal energies, leaked fractions, tensor size); typed refusals.
 
+`tests/modal_structure.rs` refuses a model that carries an observer transfer and admits the
+same model without it (an integration test: the crate's lib test target does not compile at
+origin, where `fd_probe` imports `fd_coupling`, removed in ca7b47dbf8). The composition-kernel slice of `ModalStructure` is
+`crates/fs-system/tests/modal_structure_slice.rs` (`--features modal-slices`); see the
+fs-system contract.
+
+`tests/loaded_basis.rs` checks `LoadedModalBasis` against cases solved by hand:
+- one mode under added mass `mu` sounds at `w0 / sqrt(1 + mu)` to 4 eps, for four
+  `(f0, mu)`;
+- two equal modes split by a mutual mass `m` sound at `w0^2 / (1 + mu + m)` and
+  `w0^2 / (1 + mu - m)`, with in-phase and out-of-phase vectors;
+- two unequal modes sit at the roots of their pencil's quadratic (its
+  discriminant formed free of cancellation), within fs-modal's certificate
+  widened by the roundoff of the residual itself;
+- a three-mode basis is normalized in `M + M_a` and diagonalizes `K`, within
+  bounds derived from fs-modal's own mass normalization and, off the diagonal,
+  from its certified residuals over the gap between modes (the identity
+  `(lambda_i - lambda_j) phi_i^T M phi_j = phi_i^T r_j - phi_j^T r_i`), each
+  widened by the rounding of the products that form it;
+- `held_loss_factors` is `sinc^2(w' dt / 2)` bit for bit and NaN for a step
+  that is not positive and finite;
+- a carried attachment keeps its rows' flows, within the rounding of two nested
+  inner products on each side;
+- the structure has its ports and runs the loaded modes undamped; one step
+  from rest shows the modal port moving each loaded mode alone, and the strike
+  row pushing and reading each through its carried weight;
+- the refusals, among them a signed zero admitted as its own mirror, a basis
+  beyond fs-la's work cap, and a weight that overflows when carried.
+
+Its composition-kernel slice is `crates/fs-system/tests/loaded_modal_slice.rs`
+(`--features modal-slices`).
+
 ## No-claim boundaries
 
+- `ModalStructure` offers no port tangent, clones the owner's model and allocates its
+  workspace in every proposal, and claims nothing the owner's step does not: exact for a held
+  force, modes admitted below the Nyquist guard of the model's nominal clock, the owner's
+  budgets. It adds no observer, radiation or contact law.
+- Its port flows are endpoint differences `q1 - q0`; the owner books work on the increment it
+  added and does not publish it, so the energy tolerance carries `|f| (|q0| + |q1|)` per mode.
+  Under a statically held load or a free coordinate drifting under a constant force that
+  tolerance is wide against the step's work, and a leak below it shows only in the ledger's
+  accepted-defect account.
 - The opt-in SAV API does not migrate existing render consumers or close the
   full M1.1-W3/M5.2-W1 work items. Conserving auxiliary energy alone certifies
   neither physical nonlinear energy nor accurate harmonics. The caller must

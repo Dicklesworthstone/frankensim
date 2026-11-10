@@ -50,6 +50,8 @@ mod membrane;
 pub use membrane::{VkSampledPlateParams, von_karman_sampled_plate_with_membrane};
 
 pub mod backbone;
+pub mod component;
+pub mod loaded;
 pub mod longitudinal;
 pub mod parameter;
 pub mod preload;

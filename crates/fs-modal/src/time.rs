@@ -717,6 +717,27 @@ impl ModalAcousticTimeModel {
         &self.states
     }
 
+    /// Total modal mechanical energy [J] of `states` in this model's modes, by the per-mode law and
+    /// the compensated sum a step uses for its own before and after totals, so the value after a
+    /// step equals that step's `total_modal_energy_j` bit for bit. The states are not admitted
+    /// against the budgets and the model is not changed.
+    ///
+    /// # Errors
+    /// [`ModalAcousticTimeError::StateCountMismatch`] when `states` does not hold one entry per mode.
+    pub fn energy_j(&self, states: &[ModalAcousticState]) -> Result<f64, ModalAcousticTimeError> {
+        if states.len() != self.modes.len() {
+            return Err(ModalAcousticTimeError::StateCountMismatch {
+                expected: self.modes.len(),
+                found: states.len(),
+            });
+        }
+        let mut total = Sum::default();
+        for (mode, state) in self.modes.iter().zip(states) {
+            total.add(modal_energy(*mode, *state));
+        }
+        Ok(total.value())
+    }
+
     /// Replace the complete modal state from an accepted external checkpoint.
     ///
     /// This is the transactional restart seam used when another coupled
@@ -2036,6 +2057,37 @@ mod tests {
         assert!(
             actual.is_finite() && (actual - expected).abs() <= 64.0 * f64::EPSILON,
             "pressure={actual:.17e} Pa, expected={expected:.17e} Pa"
+        );
+    }
+
+    #[test]
+    fn energy_of_states_is_the_step_total_and_refuses_a_wrong_count() {
+        let mode = |hz: f64| ModalAcousticMode {
+            angular_frequency_rad_s: core::f64::consts::TAU * hz,
+            damping_ratio: 4.0e-5,
+            pressure_per_modal_velocity: C64::ZERO,
+        };
+        let mut model =
+            ModalAcousticTimeModel::try_new(48_000, vec![mode(331.0), mode(1324.0)], budget())
+                .expect("model");
+        let state = |q: f64, v: f64| ModalAcousticState {
+            displacement_m_sqrt_kg: q,
+            velocity_m_sqrt_kg_per_s: v,
+        };
+        model
+            .restore_states(&[state(1.0e-6, 2.0e-3), state(-3.0e-7, 1.0e-3)])
+            .expect("restore");
+        let frame = model.step(&[0.3, -0.1]).expect("step");
+        assert_eq!(
+            model.energy_j(model.states()).expect("energy").to_bits(),
+            frame.total_modal_energy_j.to_bits()
+        );
+        assert_eq!(
+            model.energy_j(&model.states()[..1]).unwrap_err(),
+            ModalAcousticTimeError::StateCountMismatch {
+                expected: 2,
+                found: 1
+            }
         );
     }
 

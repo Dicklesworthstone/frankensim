@@ -16,10 +16,14 @@ layer = "L3"
 slices = ["dep:fs-mbd", "dep:fs-thermal"]
 # Source-owned nonlinear electrical storage; keeps the default kernel small.
 constitutive = ["dep:fs-phs"]
+# Owner slice for the linear modal structure of fs-nlmodal, kept apart from `slices` so that
+# neither build pulls in the other's owners.
+modal-slices = ["dep:fs-nlmodal"]
 
 [dependencies]
 fs-exec = { path = "../fs-exec" }
 fs-mbd = { path = "../fs-mbd", optional = true }
+fs-nlmodal = { path = "../fs-nlmodal", optional = true }
 fs-phs = { path = "../fs-phs", optional = true }
 fs-ports = { path = "../fs-ports" }
 fs-thermal = { path = "../fs-thermal", optional = true }
@@ -38,6 +42,14 @@ required-features = ["slices"]
 [[test]]
 name = "thermal_timeline_slice"
 required-features = ["slices"]
+
+[[test]]
+name = "modal_structure_slice"
+required-features = ["modal-slices"]
+
+[[test]]
+name = "loaded_modal_slice"
+required-features = ["modal-slices"]
 
 [[test]]
 name = "constitutive"

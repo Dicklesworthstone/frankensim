@@ -988,6 +988,14 @@ linear ramps, harmonic forces, simultaneous tones and affine tone envelopes
 all use that same admitted law and the existing independent positive heat
 owners. No artificial frequency, fitted decay floor or duplicate loss is added.
 
+`energy_j(states)` is the total modal mechanical energy of any state vector in
+the model's modes, by the per-mode law and compensated sum a step uses for its
+own totals, so after a step it equals that step's `total_modal_energy_j` bit
+for bit. It admits nothing against the budgets and changes nothing; a wrong
+state count is `StateCountMismatch`. It lets an owner outside this crate
+(the composition-kernel Component in fs-nlmodal) measure stored energy from a
+state alone.
+
 For an explicit-rate bank, `modes().damping_ratio` is diagnostic metadata:
 `c/(2*omega)` when positive and representable, exact zero only when `c=0`, and
 positive infinity when a positive ratio is undefined or would overflow or

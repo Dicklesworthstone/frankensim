@@ -98,6 +98,9 @@ pub mod resonance;
 /// Exact thin-wall unflanged radiation load below the axisymmetric cutoff.
 pub mod levine_schwinger;
 pub use levine_schwinger::{LsQuadrature, LsSolution, LS_MAX_KA, levine_schwinger_impedance};
+/// A closed-open air column's plane-wave modes (the resonator-tube law of fs-couple's `bar_strike`, copied) and the
+/// column alone as a composition-kernel Component.
+pub mod closed_open;
 /// Multimodal flanged circular-pipe radiation load, continuous in `ka`.
 pub mod flanged;
 pub use flanged::{FLANGED_MAX_KA, FLANGED_MAX_MODES, FLANGED_MODES, flanged_pipe_impedance,

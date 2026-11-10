@@ -1744,3 +1744,117 @@ fn shorter_diagonal_keeps_the_surface_and_never_lengthens_an_edge() {
         radiation::boundary_along_ac(&prism)
     );
 }
+/// The tube law is copied into fs-duct (`fs_duct::closed_open`), operation for operation, so that the column can be
+/// a composition-kernel Component there while this example keeps its own copy (AGENTS.md rule 5). Every card under
+/// data/instruments/descriptions with a tube must load, and gives the same bits from both copies, every field of
+/// every mode and every mode's acoustic mass, and equal cylinders; La Favre's A3, the two-cylinder bore of
+/// `a_two_cylinder_bore_meets_its_own_condition` and the joint ring of the builder's C4 tube drawn in nine chords do
+/// too; past the open-end law both refuse with the same words (the refused `ka` compared as printed, to 3 decimals).
+#[test]
+fn the_fs_duct_copy_of_the_tube_law_gives_the_same_bits() {
+    use fs_duct::closed_open as copy;
+    fn bars(dir: &Path, out: &mut Vec<PathBuf>) {
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+            .expect("descriptions directory")
+            .map(|e| e.expect("directory entry").path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                bars(&path, out);
+            } else if path.extension().is_some_and(|x| x == "bar") {
+                out.push(path);
+            }
+        }
+    }
+    let mut paths = Vec::new();
+    bars(&root().join("data/instruments/descriptions"), &mut paths);
+    let g = gas(&blank());
+    let mut cases: Vec<(String, Tube, fs_material::gas::GasState)> = Vec::new();
+    for path in &paths {
+        let text = std::fs::read_to_string(path).expect("card text");
+        let tube_row = text.lines().any(|line| {
+            line.split_whitespace()
+                .next()
+                .is_some_and(|key| key.starts_with("tube"))
+        });
+        match Card::load(path, &root()) {
+            Ok(card) => {
+                if let Some(t) = card.tube.clone() {
+                    cases.push((path.display().to_string(), t, gas(&card)));
+                }
+            }
+            Err(e) => assert!(
+                !tube_row,
+                "{}: a tube card does not load: {e}",
+                path.display()
+            ),
+        }
+    }
+    let cards = cases.len();
+    assert!(cards >= 3, "only {cards} tube cards load");
+    let (l1, r1, l2, r2) = (0.125, 0.020, 0.25, 0.030);
+    cases.push(("La Favre A3".into(), a3_tube(), g));
+    cases.push((
+        "two cylinders".into(),
+        Tube {
+            radius_m: r2,
+            air_length_m: l1 + l2,
+            gap_m: 0.0127,
+            modes: 3,
+            bore: Some(vec![[0.0, r1], [l1, r1], [l1, r2], [l1 + l2, r2]]),
+        },
+        g,
+    ));
+    cases.push((
+        "C4 joint ring, nine chords".into(),
+        Tube {
+            radius_m: 0.030,
+            air_length_m: 0.304,
+            gap_m: 0.0127,
+            modes: 5,
+            bore: Some(drawn_ring(0.030, 0.048, 0.304, 9)),
+        },
+        g,
+    ));
+    let mut many = a3_tube();
+    many.modes = 12;
+    cases.push(("La Favre A3, 12 modes".into(), many, g));
+    let bits = |v: [f64; 6]| v.map(f64::to_bits);
+    for (name, t, g) in &cases {
+        let c = copy::ClosedOpenColumn::new(t.radius_m, t.air_length_m, t.modes, t.bore.clone())
+            .unwrap_or_else(|e| panic!("{name}: the copy refuses the column: {e}"));
+        assert_eq!(tube::cylinders(t), copy::cylinders(&c), "{name}: cylinders");
+        match (tube::isolated_modes(t, g), copy::isolated_modes(&c, g)) {
+            (Ok(here), Ok(there)) => {
+                assert_eq!(here.len(), there.len(), "{name}");
+                for (m, (x, y)) in here.iter().zip(&there).enumerate() {
+                    let ours = [
+                        x.omega_rad_s,
+                        x.wall_per_s,
+                        x.radiation_per_s,
+                        x.ka,
+                        x.acoustic_length_m,
+                        tube::acoustic_mass(g, t, x),
+                    ];
+                    let theirs = [
+                        y.omega_rad_s,
+                        y.wall_per_s,
+                        y.radiation_per_s,
+                        y.ka,
+                        y.acoustic_length_m,
+                        copy::acoustic_mass(g, &c, y),
+                    ];
+                    assert_eq!(
+                        bits(ours),
+                        bits(theirs),
+                        "{name} mode {m}: {ours:?} against {theirs:?}"
+                    );
+                }
+            }
+            (Err(here), Err(there)) => assert_eq!(here, there.to_string(), "{name}: refusal"),
+            (here, there) => panic!("{name}: {here:?} against {there:?}"),
+        }
+    }
+    println!("tube law copy: {cards} tube cards and 4 columns of the tests, bit for bit");
+}

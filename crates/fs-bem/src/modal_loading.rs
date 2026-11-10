@@ -18,6 +18,8 @@ use fs_math::c64::C64;
 use std::ops::Range;
 use std::time::Instant;
 
+mod pair_mean;
+pub use pair_mean::{BandChange, PairMeanLaw, PairMeanLoading};
 mod reciprocal;
 pub use reciprocal::{ReciprocalLoadingBake, ReciprocalLoadingDiagnostics,
     modal_radiation_loading_reciprocal, reciprocal_loading_declaration};

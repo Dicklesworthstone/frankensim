@@ -2,8 +2,9 @@
 
 > Status: version 0. The Component contract in fs-ports is v0 until five kernel
 > slices pass on it (epic `frankensim-rc-1109-root-3gc12`, beads `.6.1` to
-> `.6.7`), and this driver changes with it. Two physics owners implement the
-> contract so far, both in fs-mbd: the rigid body and the damped rigid-body
+> `.6.7`), and this driver changes with it. Physics owners that implement the
+> contract so far: the gas cavity in fs-gas, the linear modal structure in fs-nlmodal, and, in
+> fs-mbd, the rigid body and the damped rigid-body
 > network. The crate's own `elements` are ideal lumped elements, and
 > `frankensim system <scene.json>` runs devices made of them from a data file.
 
@@ -162,6 +163,26 @@ physics owners below fs-couple can be composed without it.
   Each supplies analytic port JVPs and VJPs. `Storage` and `FlowSource`
   are exact-linear; `Admittance` is smooth because its heat output is
   quadratic. The `new` constructors use the mechanical translation domain.
+  - `Resistance::new(kind, matrix)` is the memoryless resistor N-port: one
+    flow-input port `u` of width `n` and a temperature-input `heat` port. It
+    returns the efforts `R u` and releases the absorbed power as heat, with
+    entropy `dissipation / temperature`. `R` is row-major `n x n`, every entry
+    finite, symmetric (a signed zero equals its mirror), and positive definite:
+    the constructor
+    refuses `ElementError::Asymmetric` or `ElementError::NotPositiveDefinite`
+    (the first Cholesky pivot that is not positive and finite). The power is
+    computed as `|L^T u|^2` from the factor `R = L L^T`, so it is never
+    negative; the
+    work in, `dt u . R u`, equals it within `(n + 2)` roundoff units of the
+    balance scale `sum |R_ij u_i u_j| + (sum sqrt(R_ii) |u_i|)^2`. A diagonal
+    `R` returns each row the `Damper` effort `r u` exactly. Smooth, with
+    analytic JVP and VJP. `tests/resistance.rs` checks conformance and
+    tangents over a sweep, the efforts against a sum by hand, the heat against
+    `u^T R u`, the diagonal case against `Damper`, the refusals, and a mass
+    on a common-flow junction with it, whose velocity falls by the trapezoidal
+    factor `(1 - r dt / 2m) / (1 + r dt / 2m)` per step while the heat it books
+    equals the kinetic energy lost and warms the body on its heat port. The
+    kernel test has one row.
   `tests/parallel_elements.rs` checks component conformance and tangents,
   floating capacitor nodes with parallel resistor branches, lossless LC
   oscillation, and a driven parallel RLC circuit including source work,
@@ -267,6 +288,11 @@ None. The crate denies `unsafe_code`.
 enables the owner slice tests, which compose real physics owners on the
 kernel. The library itself uses neither. Without the feature the crate and its
 tests build only fs-ports and fs-exec.
+
+`modal-slices` (off by default) adds fs-nlmodal as a dependency for the owner
+slices of its linear modal structure and its joint loaded basis, apart from
+`slices` so that neither build pulls in the other's owners. The library
+itself does not use fs-nlmodal.
 
 ## Conformance tests
 
@@ -408,6 +434,51 @@ Five planted defects were each caught: half of a connector's heat leaving,
 velocities written to the wrong body, entropy at the other connector's
 temperature, a later route replacing an earlier delivery, and routes that
 share a receiver audited alone.
+
+Owner slice, `tests/modal_structure_slice.rs` (`--features modal-slices`):
+the linear modal structure of fs-nlmodal (`fs_nlmodal::component::ModalStructure`,
+fs-modal's exact held-force step behind the contract), three modes with one
+loss factor, a one-row strike attachment of mode shapes and a three-row
+identity (modal) attachment.
+- At a full sample, a half sample and an uncached duration it passes the
+  conformance check; the energy the kernel books equals the owner's work minus
+  its viscous heat to 1e-12 of the exchanged magnitudes; the heat output,
+  dissipation and entropy `D / T` are the owner's numbers; the numerical loss
+  is below 1e-12 of the exchanged magnitudes plus the stored change.
+- A propose returns the owner's own states bit for bit and the mean flows of
+  their displacements, and the stored energy is the owner's step total bit
+  for bit.
+- A free decay of 4,410 samples with the heat routed to a sink: the states
+  equal the owner marched alone, bit for bit; the sink, the structure's
+  dissipation and its energy loss match the owner's summed heat; the ledger
+  closes; each mode's energy follows `exp(-2 zeta omega t)` within the
+  within-cycle ripple bound `2 zeta / (1 - zeta)` of a damped oscillator.
+- A half-sine strike through a boundary: states bit for bit, boundary work
+  equal to the owner's summed work to 1e-11, work equal to heat plus stored
+  energy, the ledger closed.
+- Refusals: weights of the wrong count or not finite, a port named `heat`, a
+  temperature that is not positive, a state of the wrong length, cancellation.
+
+Owner slice, `tests/loaded_modal_slice.rs` (`--features modal-slices`): the
+joint loaded modal basis of fs-nlmodal (`fs_nlmodal::loaded::LoadedModalBasis`)
+run as one undamped `ModalStructure`, with the loss of the set, `Phi^T C Phi`,
+an `elements::Resistance` joined to its modal port by a common-flow junction
+and both heats routed to sinks.
+- One mode under added mass 0.012 and loss 6.9 1/s: both columns of the
+  kernel's step matrix equal the held scheme worked by hand (each loaded mode
+  stepped exactly under a held force, the force the resistance's answer to the
+  step's mean velocity) to the solve tolerance. The step's determinant is
+  `(1 - e) / (1 + e)` with `e = (c' dt / 2) sinc^2(w' dt / 2)`: the energy
+  envelope decays by that factor per step (within one step the ratio depends
+  on the phase, between its square and 1: both ends are checked as the
+  eigenvalues of the kernel step matrix's Gram matrix). The decay rate it gives
+  exceeds `held_loss_factors` times `c'` by the factor `atanh(e) / e`, so by
+  at most `e^2 / (3 (1 - e^2))`.
+- Two coupled modes near a bar's first mode and its tube's, with a mutual
+  added mass and a mutual loss: a free decay of 4,410 samples equals the held
+  scheme summed by hand to the solve tolerance per step; the resistance's heat
+  equals the modes' energy loss to 1e-10 of the start, the sink takes it, the
+  undamped modes book none, and the ledger closes.
 
 Owner slice, `tests/thermal_timeline_slice.rs` (`--features slices`): the
 fs-thermal explicit enthalpy timeline

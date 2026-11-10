@@ -1199,6 +1199,83 @@ bar's 0.1-cent frequency/2% decay requirement. Full M2.5-W4a remains open for
 these numerical and composition gates. No piano example or panel-bits golden
 was changed.
 
+### Pair-mean frequency sampling of the multi-port radiation law
+
+`modal_loading::PairMeanLaw` turns a bake into the constant matrices a modal
+time step needs. Entry `(r, s)` is taken at the pair's mean frequency
+`w_rs = (w_r + w_s) / 2`, a mode's own entry at its own frequency. The mean
+lies inside mode `r`'s half-power band only when `|w_r - w_s| <= 2 b_r`: for a
+bar's mode and its tube's mode 1.9 Hz above it, inside the fast tube mode's
+band and outside the slow bar mode's; `BandChange` states the error either way.
+The law takes the reciprocal part `(Z_rs + Z_sr) / 2`, so `added_mass`
+(`-Im Z / w`) and `resistance` (`Re Z`) are symmetric bit for bit; what it drops
+is the bake's reciprocity defect, which the bake certified below its bound.
+- Modes whose radiation one owner already carries (`Some(owner)`, such as the
+  modes of one air column, whose law loads its own open end) have their shared
+  block set to zero, so that radiation is not counted twice.
+- `frequencies()` lists what the bake must declare: every pair mean and every
+  mode's half-power band edges `w_r - b_r` and `w_r + b_r`, ascending, each
+  once. The law never interpolates.
+- `BandChange`, one per mode, states the sampling error: the largest change of
+  `-Im Z_rs / w` and of `Re Z_rs` over the mode's kept row, between the
+  pair-mean sample and the two band edges, with the row's largest entries as
+  its scale. It reads the two edges only, which is the largest change over the
+  band when each entry is monotone on each half of the band; the law does not
+  check that.
+- Refusals (`ModalLoadingError::Invalid`): no mode; lists of different lengths;
+  a frequency that is not positive and finite; a half-width that is negative,
+  not finite, or reaches zero frequency; a bake of another mode count; a
+  frequency the bake did not declare.
+- No claim: a causal realization of `Z(w)`; a band recomputed from the loading;
+  definiteness of the sampled resistance (entries taken at different
+  frequencies need not form a semidefinite matrix, and the resistor that takes
+  the sum checks it).
+
+`tests/pair_mean_loading.rs` runs on a planar baffled Rayleigh bake of three
+modes: a bar's first mode, a tube mode 1.9 Hz above it, and a mode two octaves
+up. It checks that every entry is the reciprocal part of the row at its pair's
+mean, read by hand; that the piston's own added mass and resistance are
+positive; that an owner's block is zero and the rest unchanged; that each band
+statement equals the largest change by hand; that equal pair means are declared
+once; and the refusals.
+
+`tests/two_sphere_loading.rs` is the oracle of the multi-port law on quantities
+that are not inputs: the self impedance of a pulsating sphere in the presence of
+a second one, the mutual impedance between them (radius 1 m, centres 3 m apart,
+ka 0.5, 0.75 and 1), and the pair-mean law's matrices sampled from the bake.
+The reference is an independent series: outgoing partial waves about each
+centre, the normal derivative on each sphere projected onto Legendre
+polynomials by Gauss-Legendre quadrature, with no addition theorem and no BEM
+code. It is checked for its own convergence (12 against 16 waves and 48 against
+64 nodes, to 1e-11 of the self impedance) and by its power balance: the power
+the same partial waves carry to the far field must equal `Re(v^T Z v) / 2` for
+three velocity pairs, to 2e-11. With equal spheres the mirror between them
+makes `Z_12 = Z_21` and `Z_11 = Z_22` hold for any projection formula, so those
+equalities are not a check; a dropped term or a flipped sign in the projections
+breaks the balance by 5e-5 to 38 percent.
+- The bake runs on the geometry-policy route (plain CBIE at these ka) on three
+  meshes at refinement ratio 4/3: 18, 24 and 32 latitude rings, 2448 to 7936
+  panels, all dense. Each of the four impedance entries must converge
+  monotonically toward the reference with an observed order within `[1, 3]`
+  around the formal order 2, and the finest must lie within its grid
+  convergence index of it (factor of safety 1.25, with the order observed on
+  the ladder). The tolerance therefore comes from refinement, not from the
+  result.
+- A `PairMeanLaw` of two modes, sphere 1 at ka 0.5 and sphere 2 at ka 1, asks
+  the bake for its frequencies; its added mass and resistance from the finest
+  bake must equal `-Im Z / w` and `Re Z` of the series at the pair means,
+  within the GCI of the entries they come from, and the own entries must be
+  positive. This pins the law's sign convention and frequency choice against a
+  solution it never saw.
+- Sphere 2's mesh is an exact half-turn of sphere 1's about the x axis, so
+  exchanging the spheres maps the discrete operator onto itself and a row can
+  meet the dense reciprocity bound. Collocation does not make a matrix
+  reciprocal by itself.
+- The ladder is ignored by default (minutes in release, about 3 GB at 7936
+  panels): `cargo test --release -p fs-bem --test two_sphere_loading -- --ignored`.
+  The series test runs with the crate's tests.
+- No claim: unequal bodies, ka above 1, or the iterative route.
+
 `modal_radiation_loading_routed` is the M2.5-W5 route past the dense cap.
 - At or below `MAX_DENSE_PANELS` it is the dense bake under the options'
   declared panel rule; the other options are unused. Under the centroid rule
