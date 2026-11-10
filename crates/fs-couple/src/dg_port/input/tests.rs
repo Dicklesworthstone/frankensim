@@ -396,3 +396,101 @@ fn g0_branched_steady_gas_refuses_unbalanced_unlocated_or_unrepresented_paths() 
         if what.contains("thermal side junction")));
 }
 
+// The gas field's printed length against the bore (`bore_length_mismatch`).
+fn cylinders(lengths_m: &[f64]) -> Vec<Segment> {
+    lengths_m.iter().map(|&length| Segment::Cylinder { radius: 0.001, length }).collect()
+}
+
+#[test]
+fn the_printed_total_of_forty_one_segments_is_the_bore_length_and_a_slip_is_not() {
+    // The oboe tract block: forty sections of 3.9 mm and a 2.5 mm glottis, printed total 0.1585 m.
+    let mut lengths = vec![0.0039; 40];
+    lengths.push(0.0025);
+    let segments = cylinders(&lengths);
+    let sum = segments.iter().map(Segment::axial_length).sum::<f64>();
+    assert_eq!(sum, 0.15849999999999992);
+    assert_ne!(sum, 0.1585, "the exact compare this replaces refuses the printed length");
+    assert_eq!(bore_length_mismatch(0.1585, &segments), None);
+    assert_eq!(bore_length_mismatch(sum, &segments), None);
+    // The printed length is off by 0.058 of the bound; a bore length wrong by 1e-9 m is not.
+    let bound = 41.0 * f64::EPSILON * sum;
+    assert!((0.1585 - sum).abs() < 0.06 * bound);
+    assert_eq!(bore_length_mismatch(sum + 0.5 * bound, &segments), None);
+    for slip in [sum + 1e-9, sum - 1e-9, sum + 2.0 * bound, sum * 1.0001, sum + 0.0039, f64::NAN] {
+        let (reported, difference, reported_bound) = bore_length_mismatch(slip, &segments)
+            .unwrap_or_else(|| panic!("admitted a gas field of {slip:e} m"));
+        assert_eq!(reported, sum);
+        assert_eq!(reported_bound, bound);
+        assert!(!(difference <= bound));
+    }
+}
+
+#[test]
+fn the_rounding_bound_holds_for_every_decimal_bore_of_a_deterministic_sweep() {
+    // Each bore is printed in units of 1e-5 m: k / 1e5 is the correctly rounded double of the
+    // decimal, as the parser makes it, and so is the printed total.
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut next = move || {
+        state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        (state >> 33) as u32
+    };
+    let (mut unequal, mut worst) = (0_u32, 0.0_f64);
+    for _ in 0..20_000 {
+        let count = 1 + (next() % 200) as usize;
+        let units: Vec<u64> = (0..count).map(|_| 1 + u64::from(next() % 5000)).collect();
+        let lengths: Vec<f64> = units.iter().map(|&k| k as f64 / 1e5).collect();
+        let total = units.iter().sum::<u64>() as f64 / 1e5;
+        let segments = cylinders(&lengths);
+        let sum = segments.iter().map(Segment::axial_length).sum::<f64>();
+        assert_eq!(bore_length_mismatch(total, &segments), None, "{count} segments: {total} against {sum}");
+        unequal += u32::from(total != sum);
+        worst = worst.max((total - sum).abs() / (count as f64 * f64::EPSILON * sum));
+    }
+    // The sweep is not vacuous: the exact compare would have refused 14426 of the 20000 bores
+    // (replayed in Python before this test was compiled), and the largest ratio of the error to
+    // the bound is 0.486, at two segments, where the first-order bound is (n + 1) / (2 n) = 0.75.
+    assert!(unequal > 5_000, "{unequal}");
+    assert!(worst <= 1.0, "{worst}");
+}
+
+#[test]
+fn a_printed_gas_field_length_is_set_to_the_bore_sum_and_a_slip_refuses_naming_both_lengths() {
+    use fs_material::gas_species::input::ThermochemicalPhase;
+    let a = radiation_gas_support::packs("dga", 0.028, 3.5, 200.0);
+    let b = radiation_gas_support::packs("dgb", 0.044, 4.5, 200.0);
+    let bindings = [a.binding(), b.binding()];
+    let sources = ThermochemicalSources {
+        species: &bindings, water_species: None, phase: ThermochemicalPhase::FrozenGas,
+    };
+    let header = "dg_bore 3 open 3 2 12 50 2000 0.01 1e-11 320 4 gas_field 2 mole 2 dgb dga";
+    let geometry = "dg_segment cylinder 0.001 0.005\ndg_segment cylinder 0.001 0.005\n\
+                    dg_segment cylinder 0.001 0.011";
+    let text = |last: &str| format!(
+        "{header}\n{geometry}\ngas_station 0 293.15 0.25 0.75\ngas_station {last} 303.15 0.5 0.5");
+    let sum: f64 = 0.005 + 0.005 + 0.011;
+    assert_ne!(sum, 0.021, "the printed total is not the left-to-right sum");
+    for last in ["0.021", "0.020999999999999998"] {
+        let (source, records) = read_receipted(&text(last), Some(&sources)).unwrap();
+        let field = source.field.as_ref().unwrap();
+        // fs-duct's `new_with_gas_field` compares this length with the same sum by `!=`.
+        assert_eq!(field.length_m().to_bits(), sum.to_bits(), "{last}");
+        assert_eq!(field.length_m().to_bits(),
+            source.geometry.segments.iter().map(Segment::axial_length).sum::<f64>().to_bits());
+        assert_eq!(field.stations_m().len(), 2);
+        assert_eq!(records.len(), 2);
+    }
+    for (last, what) in [("0.021000001", "1e-9 m off"), ("0.21", "a unit slip"),
+        ("0.0125", "a missing segment")]
+    {
+        let error = read_receipted(&text(last), Some(&sources)).err()
+            .unwrap_or_else(|| panic!("admitted {what}"));
+        let DgSourceError::Physics(AcousticRealizeError::Nonlinear(message)) = &error
+            else { panic!("{what}: {error}") };
+        let printed = last.parse::<f64>().unwrap();
+        assert!(message.contains(&format!("{printed:.17e}")), "{message}");
+        assert!(message.contains(&format!("{sum:.17e}")), "{message}");
+        assert!(message.contains("3 bore segments") && message.contains("rounding bound"), "{message}");
+        assert!(message.contains("line 1:"), "{message}");
+    }
+}
+

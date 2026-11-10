@@ -96,6 +96,34 @@ fn bad(line: usize, what: &'static str) -> DgSourceError {
 fn checkpoint(gate: &CancelGate, line: usize) -> Result<(), DgSourceError> {
     if gate.is_requested() { Err(bad(line, "DG source preparation cancelled")) } else { Ok(()) }
 }
+/// Whether a gas field's printed length is the bore's length to the rounding
+/// of printing it: `|field - sum| <= n_segments * f64::EPSILON * sum`, where
+/// `sum` is the left-to-right sum of the segments' axial lengths in bore
+/// order (the sum every downstream length check recomputes).
+///
+/// Derivation of the bound, with u = EPSILON / 2 the unit roundoff and l_i the
+/// printed (decimal) segment lengths, S = their decimal sum, n their number:
+///  - each segment is parsed to the nearest double: relative error <= u, so
+///    the parsed lengths differ from the decimal ones by <= u * S in total;
+///  - the left-to-right sum of n doubles adds n - 1 roundings, each <= u of
+///    a partial sum that is <= S: error <= (n - 1) * u * S;
+///  - the printed field length is the decimal S parsed to the nearest double:
+///    error <= u * S.
+/// Adding the three, to first order, gives (n + 1) * u * S = (n + 1) / 2 *
+/// EPSILON * S <= n * EPSILON * S for n >= 1. The factor 2n / (n + 1) >= 1
+/// also absorbs the second-order terms (1 / (1 - n * u)) while n * u < 0.25;
+/// n is capped by MAX_DG_ELEMENTS, far below that. A length that is wrong by
+/// a physical amount (a segment missing, a unit slip, a total printed to fewer
+/// digits than the segments carry) is many orders of magnitude above this
+/// bound and is still refused.
+/// Returns `(sum, difference, bound)` when the length is NOT admitted.
+fn bore_length_mismatch(field_m: f64, segments: &[Segment]) -> Option<(f64, f64, f64)> {
+    let sum = segments.iter().map(Segment::axial_length).sum::<f64>();
+    let bound = segments.len() as f64 * f64::EPSILON * sum;
+    let difference = (field_m - sum).abs();
+    // A NaN length or sum fails the comparison and is refused.
+    if difference <= bound { None } else { Some((sum, difference, bound)) }
+}
 fn gas_error(line: usize, error: GasInputError) -> DgSourceError {
     match error {
         GasInputError::Input(what) => bad(line, what),
@@ -436,11 +464,27 @@ impl DgSourceInput {
                 lines.push(station_line);
             }
             let (model, phase) = columns.into_parts();
+            // The printed last station is the bore length to the rounding of printing it
+            // (`bore_length_mismatch`); it is then SET to the bore's own left-to-right sum, so
+            // every later exact length check (fs-duct's `new_with_gas_field` compares the field
+            // length with the same sum by `!=`) sees one value. An exact print is unchanged.
+            if let Some(last) = positions.last_mut()
+                && bore_length_mismatch(*last, &source.geometry.segments).is_none()
+            {
+                *last = source.geometry.segments.iter().map(Segment::axial_length).sum::<f64>();
+            }
             let field = AxialGasField::new(
                 positions, ambient.pressure, states, model, QueryPoint::new(), phase,
             ).map_err(|source| DgSourceError::Gas { line, source })?;
-            if field.length_m() != source.geometry.segments.iter().map(Segment::axial_length).sum::<f64>() {
-                return Err(bad(line, "gas field must cover the exact complete DG bore length").into());
+            if let Some((sum, difference, bound)) =
+                bore_length_mismatch(field.length_m(), &source.geometry.segments)
+            {
+                return Err(DgSourceError::Physics(AcousticRealizeError::Nonlinear(format!(
+                    "DG source line {line}: gas field must cover the complete DG bore length: \
+                     the last gas_station is at {:.17e} m, the {} bore segments sum to {sum:.17e} m, \
+                     difference {difference:.3e} m, rounding bound {bound:.3e} m \
+                     (segments x machine epsilon x length)",
+                    field.length_m(), source.geometry.segments.len()))).into());
             }
             // The shared observation surface retains each original knot receipt.
             for (&position, &station_line) in field.stations_m().iter().zip(&lines) {
