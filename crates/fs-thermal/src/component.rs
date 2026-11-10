@@ -19,6 +19,13 @@
 //!   sources), which the owner integrates itself. The timeline does not use
 //!   the temperature the port receives; the kernel needs it positive for its
 //!   own account of the wire.
+//! - `temperature<id>`, one per cell named to
+//!   [`ThermalTimeline::publishing`], a signal output: that cell's
+//!   temperature at the start of the kernel's step [K]. It does not depend
+//!   on the heat the step delivers, so a consumer reads a lagged
+//!   temperature. A hand-written coupling that refreshes its feedback at
+//!   every thermal substep is reproduced when the kernel takes one substep
+//!   per step.
 //!
 //! Boundary heat is on that wire or it does not exist: without the port, a
 //! timeline in which any active cell has a film coefficient, a reservoir or
@@ -75,6 +82,7 @@
 //! [`EnergyAudit`]: crate::enthalpy::EnergyAudit
 
 use core::fmt;
+use core::num::NonZeroUsize;
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
@@ -373,6 +381,7 @@ impl DepositionObserver for Held {
 pub struct ThermalTimeline<'a> {
     cells: Vec<CellId>,
     environment: bool,
+    published: Vec<CellId>,
     config: StepConfig,
     ports: Vec<PortSpec>,
     laws: PhantomData<&'a ()>,
@@ -409,10 +418,31 @@ impl<'a> ThermalTimeline<'a> {
         Ok(Self {
             cells,
             environment,
+            published: Vec::new(),
             config,
             ports,
             laws: PhantomData,
         })
+    }
+
+    /// Also publish the temperature of each of `cells` at the start of the
+    /// step, as signal outputs `temperature<id>` [K] after the ports already
+    /// declared. A published cell needs no heat port of its own; the
+    /// timeline still needs a heat or an environment port.
+    ///
+    /// # Errors
+    /// [`TimelineBuildError::Duplicate`] for a cell published twice.
+    pub fn publishing(mut self, cells: Vec<CellId>) -> Result<Self, TimelineBuildError> {
+        for cell in cells {
+            if self.published.contains(&cell) {
+                return Err(TimelineBuildError::Duplicate { cell: cell.0 });
+            }
+            let id = StableId::new(format!("temperature{}", cell.0))
+                .map_err(TimelineBuildError::Identifier)?;
+            self.ports.push(PortSpec::signal_out(id, NonZeroUsize::MIN));
+            self.published.push(cell);
+        }
+        Ok(self)
     }
 
     /// The state to hand to the kernel: `simulation` with the events
@@ -420,8 +450,9 @@ impl<'a> ThermalTimeline<'a> {
     /// with).
     ///
     /// # Errors
-    /// The owner's refusal; a cell with a port that is not active; without
-    /// an `environment` port, a cell whose boundary exchanges heat.
+    /// The owner's refusal; a cell with a port or a published temperature
+    /// that is not active; without an `environment` port, a cell whose
+    /// boundary exchanges heat.
     pub fn start(
         &self,
         simulation: &DepositionSimulation<'a>,
@@ -430,6 +461,7 @@ impl<'a> ThermalTimeline<'a> {
         if let Some(cell) = self
             .cells
             .iter()
+            .chain(&self.published)
             .find(|cell| !started.cells().contains_key(cell))
         {
             return Err(TimelineRefusal::InactiveCell { cell: cell.0 });
@@ -575,6 +607,10 @@ impl<'a> Component for ThermalTimeline<'a> {
             let before_k = old.simulation.temperature_k(*cell)?;
             let after_k = next.temperature_k(*cell)?;
             outputs[port] = 0.5 * (before_k + after_k);
+        }
+        let signals = self.cells.len() + usize::from(self.environment);
+        for (port, cell) in self.published.iter().enumerate() {
+            outputs[signals + port] = old.simulation.temperature_k(*cell)?;
         }
         // The owner's external heat is the port heat it was handed plus what
         // its own boundaries exchanged. The second part is on the

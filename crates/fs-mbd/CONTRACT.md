@@ -76,6 +76,22 @@ unchanged, or names a state of the wrong length, a temperature that is not
 positive, or cancellation. `ViscousNetworkBuildError` refuses no bodies and a
 connector that does not join two different bodies of the network.
 
+`ViscousNetwork::temperature_dependent` builds the same network with a
+`DampingLaw` and one more port per connector after the others,
+`temperature<e>`, a signal input. Each connector's form for a step is the
+law's at the temperature the signal carries, always from the form the network
+was built with, and is held over the step; where a connector's heat goes (its
+heat port) and what sets its damping (its signal) are authored separately.
+The law must be a function of its arguments with no history of its own.
+`ViscousNetworkRefusal::Law` carries the law's reason when it has no form at
+that temperature, and `DampingTemperature` names a signal that is not a
+positive finite temperature. A kernel solves the signal with the rest of its
+block: it needs a first guess for it inside the law's range, it hands the law
+the temperature to its solve tolerance and not to the bit, and one that
+differences the port map also asks the law for a form about 1.5e-8 of the
+temperature above it, so the law has to be defined that far past any
+temperature the system reaches.
+
 G0, in `crates/fs-system/tests/viscous_network_slice.rs` (run with
 `cargo test -p fs-system --features slices`): conformance under forces and
 gravity at three step sizes with the kernel's booked energy equal to the
@@ -85,7 +101,14 @@ routed by fraction to two thermal bodies and a named sink (one body shared by
 both connectors), bit-identical to the owner marched alone over 400 steps;
 held forces under gravity booked as boundary work. Three planted defects in
 this module were each caught (half the heat leaving, velocities on the wrong
-body, entropy at the wrong temperature).
+body, entropy at the wrong temperature). For the law: under held forces and
+gravity the step conforms and equals the owner's step with each connector's
+form taken from the law at its signal's temperature, bit for bit; entropy is
+generated at the heat ports' temperatures, not the damping ones; the network
+without the law moves differently; a temperature outside the law and signals
+of 0, -5, infinity and NaN are refused. Compared with the hand-written
+temperature feedback of fs-couple in
+`crates/fs-couple/tests/rigid_damping_heat/graph.rs`.
 
 No claim: no torque port, because the owner reports couple work as one total
 and not per body, so a couple cannot be attached to a body through the kernel

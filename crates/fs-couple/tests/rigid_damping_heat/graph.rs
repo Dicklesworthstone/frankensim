@@ -7,14 +7,18 @@
 //! (`fs_mbd::component::network::ViscousNetwork` and
 //! `fs_thermal::component::ThermalTimeline`), the authored heat fractions are
 //! heat routes, and the kernel in `fs-system` steps them. No code is written
-//! for the combination. The two must agree: the bodies bit for bit, the
-//! cells to the rounding of handing heat over as energy instead of as a
-//! rate, and the report's accounts with the kernel's ledger.
+//! for the combination. Where the module succeeds the two must agree: the
+//! bodies bit for bit (to the kernel's solve tolerance when a temperature
+//! signal feeds the damping), the cells to the rounding of handing heat over
+//! as energy instead of as a rate, and the report's accounts with the
+//! kernel's ledger. Not compared: the module refuses a whole advance when
+//! its law has no form at the final temperature, where the graph takes that
+//! step and refuses the next.
 
 use super::*;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
-use fs_mbd::component::network::ViscousNetwork;
+use fs_mbd::component::network::{DampingLaw, ViscousNetwork};
 use fs_system::{Ledger, NodeId, RouteTemperature, System, SystemBuilder, heat_sink};
 use fs_thermal::component::{ThermalTimeline, TimelineState};
 
@@ -214,5 +218,182 @@ fn the_declared_graph_reproduces_the_explicit_candidate() {
         } else {
             close(report.external_thermal_heat_j, 0.0, "no boundary heat");
         }
+    }
+}
+
+/// The module's own synthetic temperature law, offered to the network
+/// Component through that Component's law interface.
+#[derive(Debug)]
+struct ModuleLaw {
+    beta_per_k: f64,
+    maximum_k: f64,
+}
+
+impl ModuleLaw {
+    fn source(&self) -> LinearTemperatureDamping {
+        LinearTemperatureDamping {
+            beta_per_k: self.beta_per_k,
+            maximum_k: self.maximum_k,
+        }
+    }
+}
+
+impl DampingLaw for ModuleLaw {
+    fn at_temperature(
+        &self,
+        connector: usize,
+        reference: &PassiveBushingMatrix,
+        temperature_k: f64,
+    ) -> Result<PassiveBushingMatrix, String> {
+        self.source()
+            .at_temperature(connector, reference, temperature_k)
+            .map_err(str::to_owned)
+    }
+}
+
+/// The feedback graph: one connector, all of its heat into cell 0, whose
+/// start-of-step temperature the timeline publishes and the network's law
+/// reads. Returns the system and its two nodes, the network and the cells.
+fn feedback_graph(
+    bodies: &Bodies,
+    heat: &DepositionSimulation<'static>,
+    controls: RigidDampingThermalConfig,
+    law: &ModuleLaw,
+) -> (System, NodeId, NodeId) {
+    let network = ViscousNetwork::temperature_dependent(
+        bodies.properties.to_vec(),
+        bodies.links[..1].to_vec(),
+        bodies.gravity,
+        controls.mechanical,
+        std::rc::Rc::new(ModuleLaw {
+            beta_per_k: law.beta_per_k,
+            maximum_k: law.maximum_k,
+        }),
+    )
+    .unwrap();
+    let timeline = ThermalTimeline::new(vec![CellId(0)], true, controls.thermal)
+        .unwrap()
+        .publishing(vec![CellId(0)])
+        .unwrap();
+    let start = timeline.start(heat).unwrap();
+    let mut builder = SystemBuilder::new();
+    let moving = builder.add("network", network, bodies.states.to_vec()).unwrap();
+    let cells = builder.add("cells", timeline, start).unwrap();
+    for body in 0..bodies.loads.len() {
+        let force = builder.port(moving, &format!("force{body}")).unwrap();
+        builder
+            .boundary(force, Box::new(|_, _, out: &mut [f64]| out.fill(0.0)))
+            .unwrap();
+    }
+    builder
+        .heat_route(
+            builder.port(moving, "heat0").unwrap(),
+            &[(builder.port(cells, "cell0").unwrap(), 1.0)],
+            None,
+            RouteTemperature::SinkEquivalent,
+        )
+        .unwrap();
+    builder
+        .heat_route(
+            builder.port(cells, "environment").unwrap(),
+            &[],
+            Some(heat_sink("environment", 300.0).unwrap()),
+            RouteTemperature::Fixed(300.0),
+        )
+        .unwrap();
+    builder
+        .signal(
+            builder.port(cells, "temperature0").unwrap(),
+            builder.port(moving, "temperature0").unwrap(),
+        )
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    // The kernel solves the two inputs with the rest of the block and
+    // starts from these.
+    for name in ["heat0", "temperature0"] {
+        let port = system.port(moving, name).unwrap();
+        assert!(system.guess(port, &[300.0]));
+    }
+    (system, moving, cells)
+}
+
+#[test]
+fn the_declared_graph_reproduces_the_temperature_feedback_candidate() {
+    // The fixture of the module's own feedback tests: one connector between
+    // two 2 kg bodies, all of its heat into cell 0 (1 J/K), whose
+    // temperature sets the connector's damping: c = 0.7 (1 + 2 (T - 300)).
+    let laws: &'static [Caloric; 2] = Box::leak(Box::new(linear_calorics()));
+    let bodies = Bodies::new([0.7, 0.0]);
+    let routes = [BTreeMap::from([(CellId(0), 1.0)])];
+    let heat = thermal(laws, false, true);
+    let law = ModuleLaw {
+        beta_per_k: 2.0,
+        maximum_k: 303.0,
+    };
+    let mut controls = config();
+    controls.thermal.max_dt_s = 0.03125;
+    for target_s in [0.5, 0.2] {
+        let mut input = bodies.input(&routes);
+        input.links = &bodies.links[..1];
+        let candidate = advance_temperature(
+            input,
+            &heat,
+            &(),
+            &law.source(),
+            &[CellId(0)],
+            target_s,
+            controls,
+            || false,
+        )
+        .unwrap();
+        let report = candidate.report();
+
+        let (mut system, moving, cells) = feedback_graph(&bodies, &heat, controls, &law);
+        let intervals = run(&mut system, target_s);
+        let case = format!("target {target_s}");
+
+        assert_eq!(report.thermal.substeps, intervals.len(), "{case}: {intervals:?}");
+        // The feedback is real: the cell warmed by more than half a kelvin,
+        // so the damping more than doubled on the way.
+        let timeline = system.state::<TimelineState<'static>>(cells).unwrap();
+        let kernel_k = timeline.simulation().temperature_k(CellId(0)).unwrap();
+        let module_k = candidate.thermal().temperature_k(CellId(0)).unwrap();
+        assert!(module_k > 300.5, "{case}: {module_k}");
+        assert!((kernel_k - module_k).abs() <= 1e-11, "{case}: {kernel_k} vs {module_k}");
+        // The kernel solves the temperature signal with the heat in one
+        // block, to a relative tolerance of 1e-12 (3e-10 K here), so the law
+        // sees the module's temperature to that and the bodies agree to a
+        // like tolerance. (In this fixture they come out equal bit for bit;
+        // the kernel does not promise that.)
+        let reached = system.state::<Vec<RigidBodyState>>(moving).unwrap();
+        for (body, (ours, theirs)) in reached.iter().zip(candidate.states()).enumerate() {
+            let (ours, theirs) = (
+                ours.center_of_mass_velocity_world(bodies.properties[body]).unwrap(),
+                theirs.center_of_mass_velocity_world(bodies.properties[body]).unwrap(),
+            );
+            assert!((ours.x - theirs.x).abs() <= 1e-9, "{case}: body {body}: {ours:?} vs {theirs:?}");
+        }
+        // The first body started at 1 m/s.
+        let slowed = reached[0]
+            .center_of_mass_velocity_world(bodies.properties[0])
+            .unwrap();
+        assert!(slowed.x < 0.9, "{case}: the first body lost speed, {slowed:?}");
+        let ledger = system.ledger();
+        let dissipated = report.dissipated_energy_j;
+        assert!(dissipated > 0.5, "{case}: {dissipated} J");
+        let close = |ours: f64, theirs: f64, what: &str| {
+            assert!(
+                (ours - theirs).abs() <= 1e-11 * dissipated,
+                "{case}: {what}: ledger {ours:e}, report {theirs:e}"
+            );
+        };
+        close(node(ledger, "network").dissipated_j.value(), dissipated, "dissipated");
+        close(node(ledger, "cells").stored_change_j.value(), report.deposited_heat_j, "stored");
+        close(
+            node(ledger, "network").stored_change_j.value(),
+            report.mechanical_energy_change_j,
+            "mechanical energy",
+        );
+        close(ledger.energy_residual_j(), 0.0, "the ledger closes");
     }
 }

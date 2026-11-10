@@ -398,6 +398,12 @@ bodies and two connectors, one with off-centre arms and rotational damping.
 - With gravity and a held force on every body, the boundary work the kernel
   books equals the owner's applied force work to 1e-11, and work in equals
   mechanical change plus heat.
+- Built with a damping law (`ViscousNetwork::temperature_dependent`), under
+  held forces and gravity: the step conforms and equals the owner's step with
+  each connector's form taken from the law at its signal's temperature, bit
+  for bit; entropy is generated at the heat ports' temperatures, not the
+  damping ones; the network without the law moves differently; a temperature
+  outside the law and signals of 0, -5, infinity and NaN are refused.
 Five planted defects were each caught: half of a connector's heat leaving,
 velocities written to the wrong body, entropy at the other connector's
 temperature, a later route replacing an earlier delivery, and routes that
@@ -430,6 +436,11 @@ behind the contract), two linked cells with a law each.
   port, a film, a reservoir, authored sources that cancel, a film at ambient
   temperature, an event that adds a film, and a state admitted by a timeline
   that has the port.
+- Published temperatures are those at the start of the step whatever heat
+  the step delivers, also over three owner substeps and after an environment
+  port; after a step they are the temperatures that step ended on; a cell
+  published twice (in one call or two) and a published cell that is not
+  active are refused.
 - With the environment port the returned rate is the film's and the authored
   source's by hand, also on a timeline with that port alone, and exactly
   zero while nothing exchanges. In a kernel run with fan changes at 0.4 s
@@ -458,9 +469,24 @@ clocks are equal, the cells agree to 1e-11 K, and the module's report
 (dissipation, unallocated loss, boundary heat, heat stored in the cells,
 mechanical energy change) equals the kernel's ledger to 1e-11 of the
 dissipated energy. Five planted defects in the graph side were each caught.
-This covers the module's explicit, memoryless, temperature-independent
-entry point only: its implicit, driven, relaxation and temperature-dependent
-entry points have no Component yet, and nothing in the module is deleted.
+
+The same file compares the module's temperature feedback
+(`rigid_damping_heat::temperature::advance_candidate`) with a graph in which
+the timeline publishes cell 0's start-of-step temperature as a signal and the
+network built by `ViscousNetwork::temperature_dependent` reads it through the
+module's own synthetic law (`c = 0.7 (1 + 2 (T - 300 K))`, the cell warming by
+0.7 K and 1.7 K). For targets of 0.5 s and 0.2 s at a 1/32 s thermal step: as
+many kernel steps as thermal substeps, the cell to 1e-11 K, the bodies'
+velocities to 1e-9 m/s, and dissipation, stored heat and mechanical energy to
+1e-11 of the dissipated energy. The kernel solves the signal to its relative
+tolerance of 1e-12, so the law sees the module's temperature to that; in this
+fixture the bodies come out equal bit for bit, which the kernel does not
+promise. Not compared: the module refuses a whole advance when its law has no
+form at the final temperature, where the graph takes that step and refuses
+the next; a run with thermal events; two connectors reading one cell.
+
+Still without a Component: the module's implicit, driven and relaxation
+entry points. Nothing in the module is deleted.
 
 Other domains, `tests/elements.rs`: the gyrator and one element of each law
 in the rotational and electrical domains pass the conformance and tangent

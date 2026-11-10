@@ -439,6 +439,81 @@ fn the_step_limit_is_the_owners_explicit_bound_and_a_longer_step_is_its_substeps
 }
 
 #[test]
+fn published_temperatures_are_those_at_the_start_of_the_step() {
+    let gate = CancelGate::new_clock_free();
+    let simulation = Scene::default().timeline();
+    // One heat port, on cell A; both temperatures published, B first.
+    let component = ThermalTimeline::new(vec![A], false, config(0.05))
+        .expect("component")
+        .publishing(vec![B, A])
+        .expect("signals");
+    let names: Vec<&str> = component.ports().iter().map(|port| port.id().as_str()).collect();
+    assert_eq!(names, ["cell10", "temperature20", "temperature10"]);
+    let start = component.start(&simulation).expect("start");
+    let stale = later(&component, &simulation, 1.0);
+    // Whatever heat the step delivers, the signals are the start
+    // temperatures; the heat port's output is the mean over the step.
+    for rate_w in [0.0, 40.0, -250.0] {
+        let (_, _, outputs) = conforms(&component, &start, &stale, 0.01, &[rate_w]);
+        assert_eq!(&outputs[1..], [295.0, 310.0]);
+        let through = LINK_W_K * (310.0 - 295.0);
+        let after_a = 310.0 + 0.01 * (rate_w - through) / CAPACITY;
+        assert!((outputs[0] - 0.5 * (310.0 + after_a)).abs() <= 1.0e-12, "{}", outputs[0]);
+    }
+    // A step of three owner substeps publishes the temperatures it started
+    // from, and an environment port before the signals does not move them.
+    let film = Boundary {
+        htc_w_m2_k: 25.0,
+        ..insulated()
+    };
+    let exposed = Scene {
+        boundaries: [film, insulated()],
+        ..Scene::default()
+    };
+    let fine = ThermalTimeline::new(vec![A], true, config(0.004))
+        .expect("component")
+        .publishing(vec![B, A])
+        .expect("signals");
+    let state = fine.start(&exposed.timeline()).expect("start");
+    let (next, _, outputs) = propose(&fine, &state, 0.01, &[40.0, 293.15], &gate).expect("step");
+    assert_eq!(&outputs[2..], [295.0, 310.0]);
+    assert!(outputs[1] < 0.0, "the film takes heat: {} W", outputs[1]);
+    assert!(temperature(&next, B) > 295.0);
+
+    // After a step they are the temperatures that step ended on.
+    let (next, _, first) = propose(&component, &start, 0.01, &[40.0], &gate).expect("step");
+    let (_, _, second) = propose(&component, &next, 0.01, &[40.0], &gate).expect("step");
+    assert_eq!(second[1], temperature(&next, B));
+    assert_eq!(second[2], temperature(&next, A));
+    assert!(second[2] > first[2] && second[1] > first[1], "both cells warmed");
+
+    assert_eq!(
+        ThermalTimeline::new(vec![A], false, config(0.05))
+            .expect("component")
+            .publishing(vec![B, B])
+            .unwrap_err(),
+        TimelineBuildError::Duplicate { cell: 20 }
+    );
+    assert_eq!(
+        ThermalTimeline::new(vec![A], false, config(0.05))
+            .expect("component")
+            .publishing(vec![B])
+            .expect("signals")
+            .publishing(vec![A, B])
+            .unwrap_err(),
+        TimelineBuildError::Duplicate { cell: 20 }
+    );
+    let absent = ThermalTimeline::new(vec![A], false, config(0.05))
+        .expect("component")
+        .publishing(vec![CellId(77)])
+        .expect("signals");
+    assert_eq!(
+        absent.start(&simulation).unwrap_err(),
+        TimelineRefusal::InactiveCell { cell: 77 }
+    );
+}
+
+#[test]
 fn a_state_is_what_it_holds() {
     let gate = CancelGate::new_clock_free();
     let component = ThermalTimeline::new(vec![A, B], false, config(0.05)).expect("component");

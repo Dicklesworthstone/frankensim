@@ -14,7 +14,12 @@ the heat rate into that cell and returns the mean of its temperatures at the
 two ends of the step), and `environment` if declared (returns the mean rate at
 which heat entered through the timeline's own authored boundaries: ambient
 films, reservoirs, authored sources; the temperature it receives is not used
-by the timeline).
+by the timeline), and `temperature<id>` per cell named to
+`ThermalTimeline::publishing` (a signal output: that cell's temperature at the
+start of the kernel's step, which does not depend on the heat the step
+delivers, so a consumer reads a lagged temperature; a hand-written coupling
+that refreshes its feedback at every thermal substep is reproduced when the
+kernel takes one substep per step).
 
 Boundary heat is on that wire or it does not exist. Without the port, a
 timeline in which any active cell has a film coefficient, a reservoir or an

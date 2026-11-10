@@ -14,7 +14,7 @@
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_mbd::component::network::{
-    ViscousNetwork, ViscousNetworkBuildError, ViscousNetworkRefusal,
+    DampingLaw, ViscousNetwork, ViscousNetworkBuildError, ViscousNetworkRefusal,
 };
 use fs_mbd::spatial_loads::internal_impulse::{
     InternalWrenchImpulseControls,
@@ -290,6 +290,158 @@ fn the_wrapper_adds_nothing_to_the_owners_step() {
         assert_eq!(outputs[3 * index + 1], (b.y - a.y) / dt_s);
         assert_eq!(outputs[3 * index + 2], (b.z - a.z) / dt_s);
     }
+}
+
+/// A synthetic memoryless law: every coefficient of the reference form
+/// scaled by `1 + beta (T - 300 K)`, defined from 250 K to 400 K. Not a
+/// material.
+#[derive(Debug)]
+struct Thinning {
+    beta_per_k: f64,
+}
+
+impl DampingLaw for Thinning {
+    fn at_temperature(
+        &self,
+        connector: usize,
+        reference: &PassiveBushingMatrix,
+        temperature_k: f64,
+    ) -> Result<PassiveBushingMatrix, String> {
+        if !(250.0..=400.0).contains(&temperature_k) {
+            return Err(format!("connector {connector} has no form at {temperature_k} K"));
+        }
+        let scale = 1.0 + self.beta_per_k * (temperature_k - 300.0);
+        let source = reference.native_coefficients();
+        let mut c = [[0.0; 6]; 6];
+        for (row, source_row) in c.iter_mut().zip(source.iter()) {
+            for (value, source_value) in row.iter_mut().zip(source_row.iter()) {
+                *value = scale * source_value;
+            }
+        }
+        PassiveBushingMatrix::try_new(
+            c,
+            BushingCoordinateScales {
+                translation_m: 1.0,
+                rotation_rad: 1.0,
+            },
+        )
+        .map_err(|error| format!("{error:?}"))
+    }
+}
+
+#[test]
+fn damping_that_follows_temperature_is_the_owners_step_with_the_laws_forms() {
+    let gate = CancelGate::new_clock_free();
+    let (properties, links, start) = fixture();
+    let gravity = Gravity::new(Vec3::new(0.0, -1.0, -9.81)).expect("gravity");
+    let law = std::rc::Rc::new(Thinning { beta_per_k: -0.004 });
+    let component = ViscousNetwork::temperature_dependent(
+        properties.clone(),
+        links.clone(),
+        gravity,
+        controls(),
+        law.clone(),
+    )
+    .expect("network");
+    // Three force ports, two heat ports, two temperature signals.
+    let names: Vec<&str> = component.ports().iter().map(|port| port.id().as_str()).collect();
+    assert_eq!(&names[5..], ["temperature0", "temperature1"]);
+    // Held forces on two bodies; heat released at 300 K and 310 K; damping
+    // asked for at 340 K and 265 K.
+    let wrenches = [force(0.3, 0.0, -0.1), force(0.0, 0.0, 0.0), force(-0.2, 0.4, 0.0)];
+    let (heat_k, damping_k) = ([300.0, 310.0], [340.0, 265.0]);
+    let mut inputs = vec![0.3, 0.0, -0.1, 0.0, 0.0, 0.0, -0.2, 0.4, 0.0];
+    inputs.extend(heat_k);
+    inputs.extend(damping_k);
+    let dt_s = 4.0e-3;
+    let stale = owner_step(&start, &wrenches, gravity, 0.1).states_after().to_vec();
+    let case = Case {
+        state: &start,
+        stale: &stale,
+        dt_s,
+        inputs: &inputs,
+    };
+    let observed = with_cx(&gate, |cx| check_component(&component, &case, cx)).expect("conforms");
+    let Observed::Stepped { receipt, .. } = observed else {
+        panic!("the network takes the step");
+    };
+
+    // The step is the owner's with each connector's form taken from the law
+    // at its signal's temperature: bit for bit.
+    let shifted: Vec<ViscousNetworkLink> = links
+        .iter()
+        .enumerate()
+        .map(|(connector, link)| ViscousNetworkLink {
+            damping: law
+                .at_temperature(connector, &link.damping, damping_k[connector])
+                .expect("form"),
+            ..link.clone()
+        })
+        .collect();
+    let native = step_viscous_network_with_loads(
+        &start,
+        &properties,
+        &shifted,
+        HeldExternalLoads {
+            wrenches: &wrenches,
+            gravity,
+        },
+        dt_s,
+        controls(),
+        || false,
+    )
+    .expect("the owner takes the step");
+    let step = |component: &ViscousNetwork, inputs: &[f64]| {
+        let mut next = Vec::new();
+        let mut outputs = vec![f64::NAN; 11];
+        with_cx(&gate, |cx| component.propose(&start, dt_s, inputs, &mut next, &mut outputs, cx))
+            .map(|_| (next, outputs))
+    };
+    let (next, outputs) = step(&component, &inputs).expect("step");
+    assert_eq!(next.as_slice(), native.states_after());
+    let heat = &native.connector_dissipation_j;
+    for connector in 0..2 {
+        assert_eq!(outputs[9 + connector], -heat[connector] / dt_s);
+    }
+    // Entropy is generated where the heat is released, at the heat ports'
+    // temperatures, not at the temperatures that set the damping.
+    let released = heat[0] / heat_k[0] + heat[1] / heat_k[1];
+    let at_damping = heat[0] / damping_k[0] + heat[1] / damping_k[1];
+    assert!((receipt.entropy_generated_j_per_k - released).abs() <= 1.0e-14 * released);
+    assert!((released - at_damping).abs() > 1.0e-3 * released, "the two differ");
+    // The law matters: the network built with the same forms and no law
+    // moves differently and releases other heat.
+    let frozen = ViscousNetwork::new(properties, links, gravity, controls()).expect("network");
+    let (plain, plain_outputs) = step(&frozen, &inputs[..11]).expect("step");
+    assert_ne!(plain, next);
+    // 340 K thins the first connector to 0.84 of its form and 265 K
+    // thickens the second to 1.14: less heat from one, more from the other.
+    assert!(outputs[9] > plain_outputs[9] && outputs[10] < plain_outputs[10]);
+
+    // A temperature outside the law, and values that are no temperature.
+    inputs[12] = 500.0;
+    assert_eq!(
+        step(&component, &inputs).unwrap_err(),
+        ViscousNetworkRefusal::Law {
+            connector: 1,
+            reason: "connector 1 has no form at 500 K".into(),
+        }
+    );
+    for kelvin in [0.0, -5.0, f64::INFINITY] {
+        inputs[12] = kelvin;
+        assert_eq!(
+            step(&component, &inputs).unwrap_err(),
+            ViscousNetworkRefusal::DampingTemperature {
+                connector: 1,
+                kelvin
+            }
+        );
+    }
+    inputs[11] = f64::NAN;
+    assert!(matches!(
+        step(&component, &inputs),
+        Err(ViscousNetworkRefusal::DampingTemperature { connector: 0, kelvin }) if kelvin.is_nan()
+    ));
 }
 
 #[test]

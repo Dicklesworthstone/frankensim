@@ -18,6 +18,18 @@
 //!   temperature at which that connector's heat is released [K]. It returns
 //!   minus the connector's mean dissipation rate, `-D_e / dt` [W]: heat
 //!   leaves the network there, to wherever the system routes it.
+//! - `temperature<e>`, one per connector and only for a network built by
+//!   [`ViscousNetwork::temperature_dependent`], a signal input: the
+//!   temperature [K] at which that connector's [`DampingLaw`] gives its
+//!   passive form for the step, from the form the network was built with.
+//!   The form is held over the step. The signal is separate from the heat
+//!   port's temperature: where a connector's heat goes and what sets its
+//!   damping are authored independently. A kernel solves the signal with
+//!   the rest of its block: it needs a first guess for it inside the law's
+//!   range, it hands the law the temperature to its solve tolerance and not
+//!   to the bit, and one that differences the port map also asks the law
+//!   for a form about 1.5e-8 of the temperature above it, so the law has to
+//!   be defined that far past any temperature the system reaches.
 //!
 //! Receipt: the stored change is kinetic plus uniform-gravity potential
 //! energy as the owner reduces them; the dissipation is the owner's total
@@ -32,6 +44,7 @@
 //! unresolved moving geometry) are unchanged by the wrapping.
 
 use core::num::NonZeroUsize;
+use std::rc::Rc;
 
 use fs_exec::Cx;
 use fs_ports::component::{
@@ -39,6 +52,7 @@ use fs_ports::component::{
 };
 use fs_ports::{PortKind, StableId};
 
+use crate::spatial_loads::internal_impulse::viscous::PassiveBushingMatrix;
 use crate::spatial_loads::internal_impulse::viscous::network::ViscousNetworkLink;
 use crate::spatial_loads::internal_motion::HeldExternalLoads;
 use crate::spatial_loads::internal_motion::viscous::network::{
@@ -101,8 +115,44 @@ pub enum ViscousNetworkRefusal {
         /// The value received [K].
         kelvin: f64,
     },
+    /// A temperature signal that is not positive and finite.
+    DampingTemperature {
+        /// Index of the connector in the supplied order.
+        connector: usize,
+        /// The value received [K].
+        kelvin: f64,
+    },
+    /// The damping law has no form for a connector at its temperature.
+    Law {
+        /// Index of the connector in the supplied order.
+        connector: usize,
+        /// The law's own reason.
+        reason: String,
+    },
     /// Cancellation was requested.
     Cancelled,
+}
+
+/// How a connector's passive form depends on temperature: a memoryless
+/// viscous law. Rate- or history-dependent materials, elastic storage and
+/// thermal expansion need their own owners.
+///
+/// The law must be a function: the same arguments, the same form, with no
+/// history of its own, because a kernel proposes one step several times.
+/// The network declares itself `Smooth`, which holds only as far as the law
+/// is differentiable in temperature.
+pub trait DampingLaw: core::fmt::Debug {
+    /// The passive form of `connector` at `temperature_k`, from `reference`,
+    /// the form the network was built with (never an already shifted one).
+    ///
+    /// # Errors
+    /// The law's reason, when it has no form at that temperature.
+    fn at_temperature(
+        &self,
+        connector: usize,
+        reference: &PassiveBushingMatrix,
+        temperature_k: f64,
+    ) -> Result<PassiveBushingMatrix, String>;
 }
 
 impl core::fmt::Display for ViscousNetworkRefusal {
@@ -118,6 +168,14 @@ impl core::fmt::Display for ViscousNetworkRefusal {
                 f,
                 "connector {connector} releases heat at {kelvin} K, which is not a temperature"
             ),
+            Self::DampingTemperature { connector, kelvin } => write!(
+                f,
+                "connector {connector}'s damping is asked for at {kelvin} K, which is not a \
+                 temperature"
+            ),
+            Self::Law { connector, reason } => {
+                write!(f, "connector {connector}'s damping law refused: {reason}")
+            }
             Self::Cancelled => write!(f, "cancelled during the network step"),
         }
     }
@@ -147,6 +205,7 @@ pub struct ViscousNetwork {
     links: Vec<ViscousNetworkLink>,
     gravity: Gravity,
     controls: ViscousNetworkMotionControls,
+    law: Option<Rc<dyn DampingLaw>>,
     ports: Vec<PortSpec>,
 }
 
@@ -200,8 +259,34 @@ impl ViscousNetwork {
             links,
             gravity,
             controls,
+            law: None,
             ports,
         })
+    }
+
+    /// The same network with damping that follows temperature: each
+    /// connector's form for a step is `law` at the temperature its
+    /// `temperature<e>` signal input receives, from the form in `links`.
+    ///
+    /// # Errors
+    /// As [`ViscousNetwork::new`].
+    pub fn temperature_dependent(
+        properties: Vec<MassProperties>,
+        links: Vec<ViscousNetworkLink>,
+        gravity: Gravity,
+        controls: ViscousNetworkMotionControls,
+        law: Rc<dyn DampingLaw>,
+    ) -> Result<Self, ViscousNetworkBuildError> {
+        let mut network = Self::new(properties, links, gravity, controls)?;
+        for connector in 0..network.links.len() {
+            let id = StableId::new(format!("temperature{connector}"))
+                .map_err(ViscousNetworkBuildError::Identifier)?;
+            network
+                .ports
+                .push(PortSpec::signal_in(id, NonZeroUsize::MIN));
+        }
+        network.law = Some(law);
+        Ok(network)
     }
 
     /// Number of bodies; ports `0..bodies()` are their force ports.
@@ -268,12 +353,34 @@ impl Component for ViscousNetwork {
             .map_err(|_| ViscousNetworkRefusal::Cancelled)?;
         let bodies = self.properties.len();
         let (_, terms_before_j) = self.energy(old)?;
-        let heat_inputs = &inputs[3 * bodies..];
+        let connectors = self.links.len();
+        let heat_inputs = &inputs[3 * bodies..3 * bodies + connectors];
         for (connector, &kelvin) in heat_inputs.iter().enumerate() {
             if !(kelvin.is_finite() && kelvin > 0.0) {
                 return Err(ViscousNetworkRefusal::Temperature { connector, kelvin });
             }
         }
+        // The forms of the step: the built ones, or the law's at the
+        // temperatures the signals carry.
+        let mut shifted = Vec::new();
+        if let Some(law) = &self.law {
+            let signals = &inputs[3 * bodies + connectors..];
+            for (connector, link) in self.links.iter().enumerate() {
+                let kelvin = signals[connector];
+                if !(kelvin.is_finite() && kelvin > 0.0) {
+                    return Err(ViscousNetworkRefusal::DampingTemperature { connector, kelvin });
+                }
+                let damping = law
+                    .at_temperature(connector, &link.damping, kelvin)
+                    .map_err(|reason| ViscousNetworkRefusal::Law { connector, reason })?;
+                shifted.push(ViscousNetworkLink { damping, ..*link });
+            }
+        }
+        let links = if self.law.is_some() {
+            &shifted
+        } else {
+            &self.links
+        };
         let wrenches: Vec<Wrench> = (0..bodies)
             .map(|body| Wrench {
                 force_world: Vec3::new(
@@ -287,7 +394,7 @@ impl Component for ViscousNetwork {
         let step = step_viscous_network_with_loads(
             old,
             &self.properties,
-            &self.links,
+            links,
             HeldExternalLoads {
                 wrenches: &wrenches,
                 gravity: self.gravity,
