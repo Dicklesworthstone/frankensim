@@ -1615,7 +1615,7 @@ changes of units.
 `linear_exact::exponential_with_budget` exposes the same dense Taylor/scaling
 algorithm to explicit cold preparation callers. `DenseExponentialBudget`
 declares matrix-dimension, simultaneous dense-byte and multiply-term ceilings;
-the opt-in dimension limit is 6144. Checked preflight reserves five square
+the opt-in dimension limit is 12288. Checked preflight reserves five square
 matrices including the supplied input, plus 32 Taylor products and 48 squarings
 before workspace allocation. Overflow, insufficient budgets, nonfinite input,
 unconverged series and unrepresentable output refuse. The ordinary

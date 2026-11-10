@@ -30,7 +30,7 @@ impl MemoryInput {
             terms: count(values[1], 1, 32)?,
             storage_relative_tolerance: scalar(values[2])?,
             loss_relative_tolerance: scalar(values[3])?,
-            max_memory_coordinates: count(values[4], 1, 3072)?,
+            max_memory_coordinates: count(values[4], 1, 8192)?,
         };
         if !(0.0..1.0).contains(&options.storage_relative_tolerance)
             || options.storage_relative_tolerance == 0.0

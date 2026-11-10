@@ -231,6 +231,25 @@ fn the_prepared_mode_ceiling_admits_its_van_loan_dimension_and_refuses_one_more_
     assert!(wide.admit(MAX_PREPARED_MODAL_MODES + 1, 1, 1, 0, None).is_err());
 }
 
+/// The wound E2 string at 96 modes per polarization with the four-interval string-air row, on the 128-mode body with its
+/// cavity, is 128 + 1 + 96 x 2 x (1 + 4) = 1089 coordinates: past the former 1024 ceiling, inside this one. The admission
+/// hands the exponential its Van Loan dimension, 6 x coordinates, and one coordinate past the ceiling refuses.
+#[test]
+fn the_prepared_admission_takes_the_wound_e2_string_with_the_string_air_row() {
+    const E2_WITH_STRING_AIR: usize = 128 + 1 + 96 * 2 * (1 + 4);
+    assert_eq!(E2_WITH_STRING_AIR, 1089);
+    assert!(E2_WITH_STRING_AIR > 1024 && E2_WITH_STRING_AIR <= MAX_PREPARED_MODAL_MODES);
+    let wide = PreparedModalBudget {
+        max_modes: MAX_PREPARED_MODAL_MODES,
+        max_dense_bytes: usize::MAX,
+        max_multiply_terms: u64::MAX,
+    };
+    let exponential = wide.admit(E2_WITH_STRING_AIR, 1, 1, 0, None).unwrap();
+    assert_eq!(exponential.max_dimension, 6 * E2_WITH_STRING_AIR);
+    assert!(exponential.max_dimension <= fs_phs::linear_exact::MAX_PREPARED_EXPONENTIAL_DIM);
+    assert!(wide.admit(MAX_PREPARED_MODAL_MODES + 1, 1, 1, 0, None).is_err());
+}
+
 /// A refused admission prints the bytes (or multiply terms) it asked for and the limit it was held to, not only that
 /// the limit was exceeded: the card's author needs the figure to set the limit.
 #[test]

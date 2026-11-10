@@ -2371,7 +2371,7 @@ An optional record after `cylinder-gas-loading` (when present) and before
 prepared-linear MAX_MODES MAX_DENSE_BYTES MAX_MULTIPLY_TERMS
 ```
 
-All three values must be positive. The shared owner accepts at most 1024 modes,
+All three values must be positive. The shared owner accepts at most 1536 modes,
 and so does this executable's complete-coordinate limit.
 `MAX_DENSE_BYTES` bounds additional dense preparation/cache storage, and
 `MAX_MULTIPLY_TERMS` bounds cold scalar multiply-add work. Both are explicit
@@ -2383,7 +2383,7 @@ uniform and regional plate bodies with common or spatial bridge footprints.
 Original Prony bending, torsional memory, explicit layered bending, regional
 scalar/tensor body memory and axial memory retain their complete histories.
 For `N` mechanical modes and `M` linear internal strains, preparation uses
-`d = 3*N + M` coordinates including held forces, with the original `2*d <= 6144`
+`d = 3*N + M` coordinates including held forces, with the `2*d <= 12288`
 exponential ceiling and explicit mode, byte and multiply-work budgets.
 
 The owner caches the complete fixed-period transition and separate physical

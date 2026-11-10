@@ -28,28 +28,35 @@ pub const MAX_TOTAL_PACK_BYTES: usize = 64 * 1_048_576;
 pub const MAX_MODES: usize = 128;
 /// Bending modes a `string` record may retain per polarization plane. Only that one field is wider than [`MAX_MODES`]:
 /// the twist-mode field and the fibre rows' axial and normal fields keep [`MAX_MODES`]. The complete instrument
-/// (strings on every plane, cavity, body) still has to fit [`MAX_TOTAL_MODES`], so a card at this bound has 1024 minus
-/// its other coordinates left for the rest: one string on two planes at 256 bending modes, a 256-mode body and one
-/// cavity mode make 769.
+/// (strings on every plane, cavity, body) still has to fit [`MAX_TOTAL_MODES`], so a card at this bound has the total
+/// minus its other coordinates left for the rest: one string on two planes at 256 bending modes, a 256-mode body and one
+/// cavity mode make 769 of them.
 pub const MAX_STRING_BENDING_MODES: usize = 256;
 const _: () = assert!(MAX_STRING_BENDING_MODES >= MAX_MODES);
 /// Retained body modes a `body` record may request: the shell owner's own ceiling, `MAX_SHELL_MODES`. Flat plate
 /// bodies keep [`MAX_PLATE_BODY_MODES`]. The complete instrument (strings, cavity, body) still has to fit
-/// [`MAX_TOTAL_MODES`], so the body count that a card can use is what remains of 1024 after its other coordinates.
+/// [`MAX_TOTAL_MODES`] and the setup work [`MAX_WORK`], so the body count that a card can use is what both leave after its
+/// other coordinates, up to this ceiling.
 pub const MAX_BODY_MODES: usize = 1024;
 pub const MAX_PLATE_BODY_MODES: usize = 16;
 /// Modal coordinates of one complete instrument (strings, twist, body, cavity, gas memory). The shared exact
 /// propagation holds at most 42 of them as one dense block; a larger network needs the explicit
-/// `prepared-linear` record, whose own library ceiling is `MAX_PREPARED_MODAL_MODES` (1024). The network
-/// setup work `modes * (links + 1)^2` still has to fit [`MAX_WORK`].
-pub const MAX_TOTAL_MODES: usize = 1024;
+/// `prepared-linear` record, whose own library ceiling is `MAX_PREPARED_MODAL_MODES` (1536). The network
+/// setup work `modes * (links + 1)^2` still has to fit [`MAX_WORK`]. A string with the string-air row costs five coordinates per
+/// transverse mode at four intervals, so a wound string of 96 modes per polarization on the 128-mode body with its cavity is
+/// 128 + 1 + 96 x 2 x 5 = 1089 of them.
+pub const MAX_TOTAL_MODES: usize = 1536;
 const _: () = assert!(MAX_TOTAL_MODES <= fs_couple::render::schedule::force::coupled::MAX_PREPARED_MODAL_MODES);
 pub const MAX_EVENTS: usize = 16_384;
 pub const MAX_CONTROLS: usize = 262_144;
-/// The complete network's setup work `modes * (links + 1)^2` at the ceilings: every mode of the total ceiling with one
+/// The coordinate count at which the setup-work ceiling is stated. It stays 1024 when the total ceiling rises: the raised
+/// ceiling admits cards whose setup work is far under it, and the exact owner's check of the skin load's poles is calibrated to it.
+pub const MAX_WORK_MODES: usize = 1024;
+const _: () = assert!(MAX_WORK_MODES <= MAX_TOTAL_MODES);
+/// The complete network's setup work `modes * (links + 1)^2` at the ceilings: [`MAX_WORK_MODES`] modes with one
 /// link per body mode at the body ceiling. It also bounds plate and relaxation projection terms; each performance's
 /// declared budgets bound the real work, and this ceiling only refuses impossible declarations.
-pub const MAX_WORK: u64 = (MAX_TOTAL_MODES * (MAX_BODY_MODES + 1) * (MAX_BODY_MODES + 1)) as u64;
+pub const MAX_WORK: u64 = (MAX_WORK_MODES * (MAX_BODY_MODES + 1) * (MAX_BODY_MODES + 1)) as u64;
 
 #[derive(Clone, Debug)]
 pub struct Wire {

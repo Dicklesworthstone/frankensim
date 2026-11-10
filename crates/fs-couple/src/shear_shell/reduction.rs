@@ -16,8 +16,9 @@ use fs_plate::shell::{modes_shell, mitc::{assemble_mitc3p, MitcBudget, NodalDire
 /// the caller's `max_projection_terms`, which is the cost governor, and the mesh must actually hold
 /// that many modes inside its eigenvalue window.
 ///
-/// 1024 is the complete-instrument ceiling of the prepared modal network (`MAX_PREPARED_MODAL_MODES`): a body cannot
-/// retain more modes than the whole instrument may hold, and the instrument's strings and cavity share that total.
+/// 1024 is the body's own ceiling, within the complete-instrument ceiling of the prepared modal network
+/// (`MAX_PREPARED_MODAL_MODES`, 1536): a body cannot retain more modes than the whole instrument may hold, and the
+/// instrument's strings and cavity share that total.
 /// The eigenvalue window itself is sliced whole whatever this ceiling is (`modes_shell` certifies every mode in the
 /// window, then the lowest `n_modes` are kept), so raising the ceiling adds projection work and the dense modal
 /// network, not eigensolve work.

@@ -724,7 +724,7 @@ resulting body profile as written, never snapped.
 ### Shell resource bounds
 
 The file admits at most 9216 nodes and 18432 triangles per component, 16 regions, eight string
-attachments and 1024 retained shell modes (the complete instrument's strings and cavity share the 1024 modal coordinates of the prepared network, so a card retains what remains), within 8 MiB (flat plate profiles keep 64 KiB and 16 modes). `mass` explicitly selects
+attachments and 1024 retained shell modes (the complete instrument's strings and cavity share the 1536 modal coordinates of the prepared network and its setup work stays under its own ceiling, so a card retains what both leave, at most 1024), within 8 MiB (flat plate profiles keep 64 KiB and 16 modes). `mass` explicitly selects
 `consistent` or `lumped` inertia. `drilling` supplies positive numerical
 drilling stabilization; `director-min-dot` declares the incident-facet alignment
 floor in `(0,1]`. The spectral window contains squared angular frequencies.

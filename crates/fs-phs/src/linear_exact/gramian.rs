@@ -122,8 +122,8 @@ pub(crate) fn flow_integral(
 /// (frankensim-in05v) the measured balance defect grew as 2^s eps and sat
 /// 67-232x under this bound. Double-double rounds at O(u^2) per operation, so
 /// the compensated chain's own amplified rounding, about 2^s n u^2, stays far
-/// below the gate for every admitted s <= 48 and n <= 6144, the hard
-/// `MAX_PREPARED_EXPONENTIAL_DIM` (2^49 6144 u^2 is about 4e-14).
+/// below the gate for every admitted s <= 48 and n <= 12288, the hard
+/// `MAX_PREPARED_EXPONENTIAL_DIM` (2^49 12288 u^2 is about 8.5e-14, 12 times under the 1e-12 gate).
 fn doubling_rounding_bound(scale: f64, n: usize) -> f64 {
     let nu = n as f64 * (0.5 * f64::EPSILON);
     2.0 * (1.0 / scale - 1.0) * (nu / (1.0 - nu))

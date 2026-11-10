@@ -180,6 +180,46 @@ fn fluid_count_is_a_live_axis_and_complete_dimensions_preserve_explicit_work_lim
     });
 }
 
+/// The wound E2 card's shape: a measured wound string with 96 modes per polarization, the four-interval string-air row and the
+/// 128-mode body is 128 + 10 x 96 = 1088 coordinates (the real card's cavity adds one: 1089), past the former ceiling of 1024
+/// and inside the present one. A string's bending field holds up to `MAX_STRING_BENDING_MODES` (256) modes per plane. Six fluid
+/// intervals cost 14 coordinates and 12 connections per string mode; the first count the complete budget refuses is derived from
+/// its ceilings, not typed in, and the count below it is admitted.
+#[test]
+fn a_wound_string_with_the_string_air_row_reaches_96_modes_and_the_complete_budget_refuses_the_first_count_past_the_ceiling() {
+    let ceiling = fs_couple::render::schedule::force::coupled::MAX_PREPARED_MODAL_MODES;
+    let card = |modes: usize, intervals: usize| -> String {
+        include_str!("../measured-cello-g.material-strings")
+            .replace("body body.fsmatpk 0.4 0.3 0.001 2 1", "body body.fsmatpk 0.4 0.3 0.001 128 1")
+            .replace("116.3 4 0 0.8", &format!("116.3 {modes} 0 0.8"))
+            .replace("prepared-linear 64 67108864 200000000000",
+                &format!("cylinder-gas-loading 0.3 30 {intervals}\nprepared-linear {ceiling} 4294967296 1000000000000000"))
+    };
+    let dims = |modes: usize, intervals: usize|
+        input::Spec::parse(card(modes, intervals).as_bytes()).unwrap().network_dimensions(false).unwrap();
+    let ((m4, l4, _), (m5, l5, _)) = (dims(4, 4), dims(5, 4));
+    // Per string mode: two polarizations, each with four intervals of fluid memory, and the same count of connections.
+    assert_eq!((m5 - m4, l5 - l4), (10, 8));
+    assert_eq!(m4 - 40, 128, "the 128-mode body is all that the fixture adds");
+    let (at96, _, terms96) = dims(96, 4);
+    assert_eq!(at96, 128 + 10 * 96);
+    assert!(at96 > 1024 && at96 <= input::MAX_TOTAL_MODES && terms96 as u64 <= input::MAX_WORK);
+    let ((a, al, _), (b, bl, _)) = (dims(4, 6), dims(5, 6));
+    let (per_m, per_l) = (b - a, bl - al);
+    assert_eq!((per_m, per_l), (14, 12));
+    let (m0, l0) = (a - 4 * per_m, al - 4 * per_l);
+    let fits = |n: usize| m0 + n * per_m <= input::MAX_TOTAL_MODES.min(ceiling)
+        && l0 + n * per_l <= fs_couple::render::schedule::force::coupled::MAX_MODAL_CONNECTIONS
+        && (m0 + n * per_m) as u128 * ((l0 + n * per_l + 1) as u128).pow(2) <= input::MAX_WORK as u128;
+    let first = (5..=128).find(|&n| !fits(n)).expect("128 string modes at six intervals must reach the complete budget");
+    assert!(first > 5);
+    assert_eq!(dims(first - 1, 6).0, m0 + (first - 1) * per_m);
+    match input::Spec::parse(card(first, 6).as_bytes()) {
+        Ok(_) => panic!("accepted {first} string modes past the complete budget"),
+        Err(error) => assert!(error.to_string().contains("complete instrument"), "{error}"),
+    }
+}
+
 #[test]
 fn optional_flow_record_is_strict_ordered_and_never_truncates_declared_memory() {
     let bytes = text();

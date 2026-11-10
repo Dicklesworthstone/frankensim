@@ -34,8 +34,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Explicit upper bound on complete mechanical modes in the cold dense path.
-/// Each mode retains displacement, velocity and its independent held input.
-pub const MAX_PREPARED_MODAL_MODES: usize = 1024;
+/// Each mode retains displacement, velocity and its independent held input. 1536 admits the wound E2 string at 96 modes per
+/// polarization with the four-interval string-air row (1089 coordinates), which 1024 refused.
+pub const MAX_PREPARED_MODAL_MODES: usize = 1536;
 // Each loss integral exponentiates Van Loan's 2d operator, d = 3 coordinates per mode; at the ceiling it must fit the
 // budgeted exponential.
 const _: () = assert!(6 * MAX_PREPARED_MODAL_MODES <= fs_phs::linear_exact::MAX_PREPARED_EXPONENTIAL_DIM);
@@ -44,9 +45,9 @@ const _: () = assert!(6 * MAX_PREPARED_MODAL_MODES <= fs_phs::linear_exact::MAX_
 /// physical/energy admissions remain binding. There is deliberately no default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PreparedModalBudget {
-    /// Maximum TOTAL original mechanical modes, up to 1024; none are dropped.
+    /// Maximum TOTAL original mechanical modes, up to 1536; none are dropped.
     /// With M material memories and N modes, the independent exponential ceiling
-    /// still requires 2*(3*N+M) <= 6144 before allocation.
+    /// still requires 2*(3*N+M) <= 12288 before allocation.
     pub max_modes: usize,
     /// Conservative peak bytes of additional dense preparation/cache storage.
     /// Includes up to 48 scale levels (kept for the per-link integrals), the component and total connection loss matrices

@@ -1213,7 +1213,7 @@ and exact exponential representability and work limits still apply. Separate
 nonlinear midpoint consumers retain their own constitutive clock admission.
 The existing prepared backend also advances material histories, in either
 binding order. Its input-augmented dimension is `d = 3*N + M` for N mechanical
-coordinates and M histories; the original Van Loan ceiling `2*d <= 6144`
+coordinates and M histories; the Van Loan ceiling `2*d <= 12288`
 and the explicit mode, byte and multiply-work limits remain binding. The same
 scaled exponential and integral Gramians retain separate mechanical loss,
 connection loss, material heat and external work. Instantaneous stiffness

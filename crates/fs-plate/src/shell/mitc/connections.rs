@@ -12,8 +12,8 @@ use fs_sparse::Coo;
 /// Largest number of physical modes one connection projection admits. It bounds the dense per-connection
 /// rows; the caller's `max_work` still governs cost. Callers that retain more modes than this must refuse
 /// before they reach it (fs-couple ties its own shell ceiling to this constant at compile time).
-/// 1024 is the complete-instrument ceiling of the prepared modal network (`MAX_PREPARED_MODAL_MODES`): a body
-/// cannot retain more modes than the whole instrument may hold.
+/// 1024 is the body's own ceiling, within the complete-instrument ceiling of the prepared modal network
+/// (`MAX_PREPARED_MODAL_MODES`, 1536): a body cannot retain more modes than the whole instrument may hold.
 pub const MAX_CONNECTION_MODES: usize = 1024;
 
 /// Whether `n` supplied physical modes fit one projection: at least one, at most [`MAX_CONNECTION_MODES`].

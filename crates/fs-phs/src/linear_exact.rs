@@ -215,7 +215,7 @@ pub fn exponential(a: &[f64], n: usize) -> Result<Vec<f64>, PhsError> {
 /// workspace; the term count reserves 32 Taylor products and 48 squarings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DenseExponentialBudget {
-    /// Matrix dimension ceiling, at most MAX_PREPARED_EXPONENTIAL_DIM (6144).
+    /// Matrix dimension ceiling, at most MAX_PREPARED_EXPONENTIAL_DIM (12288).
     pub max_dimension: usize,
     /// Maximum simultaneous dense matrix bytes, including the supplied input.
     pub max_dense_bytes: usize,
@@ -262,9 +262,11 @@ pub fn quadratic_flow_integral_with_budget(
     Ok(QuadraticFlowIntegral { transition: flow.transition, integral: flow.loss_integral })
 }
 
-/// Hard capacity of the explicit budgeted cold path; defaults remain 256. 6144 is the 2d x 2d Van Loan operator of a
-/// 3072-dimensional generator (fs-couple's 1024 prepared modes, three coordinates each).
-pub const MAX_PREPARED_EXPONENTIAL_DIM: usize = 6144;
+/// Hard capacity of the explicit budgeted cold path; defaults remain 256. 12288 is the 2d x 2d Van Loan operator of a
+/// 6144-dimensional generator: three coordinates for each of fs-couple's 1536 prepared modes and 1536 coordinates of material memory. The bound follows the complete
+/// instruments the cards need, not a timing: a wound string of 96 modes per polarization with the four-interval string-air
+/// row on the 128-mode body with its cavity is 1089 coordinates.
+pub const MAX_PREPARED_EXPONENTIAL_DIM: usize = 12288;
 
 /// The same deterministic Taylor/scaling exponential under an explicit larger
 /// cold work/byte budget. No approximate backend, state removal, stability

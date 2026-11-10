@@ -295,7 +295,7 @@ fn axial_gas_memory_is_declared_so_both_rows_are_admitted_and_one_over_is_refuse
         .expect("one under the true count")
         .to_string();
     assert!(refused.contains("explicit prepared mode budget"), "{refused}");
-    // So does the shared ceiling: 18 + 10 N modes, which without the branches would be 1020 at N = 101.
+    // So does the card's own mode budget, which this card sets to 1024: 18 + 10 N modes, which without the branches would be 1020 at N = 101.
     let sized = |n: usize| {
         original
             .replace("tension 20 1 1 ", &format!("tension 20 {n} 1 "))

@@ -736,16 +736,18 @@ fn shell_profile_admits_exactly_the_triangle_ceiling_and_refuses_one_more() {
 fn shell_profile_admits_exactly_the_mode_ceiling_and_refuses_one_more() {
     let profile = shell_profile();
     let mut spec = shell_spec();
-    // The shell owner's ceiling is the complete instrument's (1024 modal coordinates), and the card's strings and cavity
-    // share them: the body count a card reaches is what remains of MAX_MODES after its other coordinates.
-    assert_eq!(MAX_MODES, input::MAX_TOTAL_MODES);
+    // The shell owner's ceiling is the body's own (1024 retained modes), within the complete instrument's total. The body a
+    // card reaches is what remains of MAX_WORK_MODES after its other coordinates: the tensor body adds one connection per
+    // retained mode, so the setup work modes x (links + 1)^2 meets MAX_WORK before the total ceiling does (that ceiling
+    // has its own test, below).
+    assert!(MAX_MODES <= input::MAX_TOTAL_MODES);
     let others = spec.network_dimensions(true).unwrap().0 - spec.body.modes;
-    let fits = MAX_MODES - others;
+    let fits = input::MAX_WORK_MODES - others;
     spec.body.modes = fits;
     assert!(profile.preflight(&spec).is_ok());
     spec.body.modes = fits + 1;
     let refusal = profile.preflight(&spec).unwrap_err().to_string();
-    assert!(refusal.contains("exceeds 1024 modes"), "{refusal}");
+    assert!(refusal.contains("setup work budget"), "{refusal}");
     spec.body.modes = MAX_MODES;
     assert!(profile.preflight(&spec).is_err());
     spec.body.modes = MAX_MODES + 1;
@@ -761,8 +763,8 @@ fn shell_profile_admits_exactly_the_mode_ceiling_and_refuses_one_more() {
     assert!(plate.preflight(&spec).is_err());
 }
 
-/// A complete instrument admits exactly `MAX_TOTAL_MODES` modal coordinates (1024, the prepared owner's ceiling) and
-/// refuses one more; at that ceiling it admits exactly `MAX_WORK` setup terms, one link per body mode at the body
+/// A complete instrument admits exactly `MAX_TOTAL_MODES` modal coordinates (1536, the prepared owner's ceiling) and
+/// refuses one more; at `MAX_WORK_MODES` coordinates it admits exactly `MAX_WORK` setup terms, one link per body mode at the body
 /// ceiling, and refuses one more link. A `prepared-linear` record admits the library ceiling and refuses one more mode.
 #[test]
 fn the_complete_instrument_admits_exactly_the_mode_and_work_ceilings_and_refuses_one_more() {
@@ -772,12 +774,12 @@ fn the_complete_instrument_admits_exactly_the_mode_and_work_ceilings_and_refuses
     let (at, _, _) = dimensions(0, input::MAX_TOTAL_MODES - base).unwrap();
     assert_eq!(at, input::MAX_TOTAL_MODES);
     let over = dimensions(0, input::MAX_TOTAL_MODES - base + 1).unwrap_err();
-    assert!(over.to_string().contains("exceeds 1024 modes"), "{over}");
+    assert!(over.to_string().contains(&format!("exceeds {} modes", input::MAX_TOTAL_MODES)), "{over}");
     let extra = input::MAX_BODY_MODES - base_links;
-    let (_, links, terms) = dimensions(extra, input::MAX_TOTAL_MODES - base).unwrap();
+    let (_, links, terms) = dimensions(extra, input::MAX_WORK_MODES - base).unwrap();
     assert_eq!(links, input::MAX_BODY_MODES);
     assert_eq!(terms as u64, input::MAX_WORK);
-    let over = dimensions(extra + 1, input::MAX_TOTAL_MODES - base).unwrap_err();
+    let over = dimensions(extra + 1, input::MAX_WORK_MODES - base).unwrap_err();
     assert!(over.to_string().contains("setup work budget"), "{over}");
     let body = "body body.fsmatpk 0.4 0.3 0.001 2 1";
     let cavity = "cavity neck 0.003 0.01 0.02 100 1";
@@ -1187,10 +1189,12 @@ fn shell_coating_memory_requires_the_explicit_continuation_and_complete_budget()
         ("0.001 0.001 64", "0.001 1 64"),
         ("0.001 0.001 64", "0.001 NaN 64"),
         ("0.001 0.001 64", "0.001 0.001 0"),
-        ("0.001 0.001 64", "0.001 0.001 3073"),
+        ("0.001 0.001 64", "0.001 0.001 8193"),
     ] {
         assert!(Profile::parse(text.replace(old, new).as_bytes()).is_err(), "accepted {new}");
     }
+    // The parser's allowance follows the owner's own range, 1..=8192 (the viola body at 279 modes needs 13 x 279 = 3627).
+    assert!(Profile::parse(text.replace("0.001 0.001 64", "0.001 0.001 8192").as_bytes()).is_ok());
     assert!(Profile::parse(text.replace(row, "").as_bytes()).is_err());
     assert!(Profile::parse(text.replace("regions 1\n",
         "coating-memory prony-continuation 16 0.001 0.001 64\nregions 1\n").as_bytes()).is_err());
@@ -1953,8 +1957,8 @@ fn drilling_alpha_leaves_no_undamped_mode_in_the_band_and_moves_physical_modes_l
             Profile::parse(text.as_bytes()).unwrap()
                 .project_shell(&spec, &mut Catalog::new(), &mut |name| Ok(esteso_pack(name).into()), gate)
         };
-        // The shell ceiling is the complete instrument's and the card's strings and cavity share it, so the largest
-        // request the instrument admits is what remains of MAX_MODES; the fixture window holds far fewer.
+        // The shell ceiling is the body's own, within the complete instrument's total, so the largest request this test makes is
+        // what remains of MAX_MODES after the card's other coordinates; the fixture window holds far fewer.
         let fits = { let s = shell_spec(); MAX_MODES - (s.network_dimensions(true).unwrap().0 - s.body.modes) };
         let basis = |alpha: f64| {
             let refusal = match solve(alpha, fits) {
