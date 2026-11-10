@@ -289,6 +289,16 @@ pub struct ReedBoreVoice {
     /// Opt-in vena contracta of the reed jet (`set_jet_contraction`): the coefficient `C_c` in `(0, 1]` on the flow area of the
     /// inviscid Bernoulli junction. `None` is the original voice, bit for bit (`C_c = 1` installs nothing).
     jet_contraction: Option<f64>,
+    /// The reed step's rigid closure stop at zero opening (`reed_bore::contact`, commit a857c6f17), ON by default. `false`
+    /// (`set_closure_stop`, the card row `closure_stop off`) takes the same implicit midpoint step without it.
+    closure_stop: bool,
+    /// Opt-in residual flow area of a reed that cannot be shut (`set_residual_flow_area`, the card row `residual_flow`): the
+    /// effective JET area [m^2] (discharge coefficient 1) of the narrow channels between the blades that stay open when the reed lies on its lay (Almeida,
+    /// Vergez and Causse 2007, Sec. III.1 and Fig. 9). `None` is the original voice, bit for bit.
+    residual_flow_area_m2: Option<f64>,
+    /// Opt-in tap of the reed blade's opening and velocity at the end of every solver sample (`record_reed_opening`, the CLI's `--aperture-flows FILE` on a reed
+    /// file): one text line `y v` [m, m/s] per sample. It only reads the state; it changes no audio.
+    opening_tap: Option<Box<dyn std::io::Write + Send>>,
     /// Opt-in duct-constriction noise on the reed channel (`set_constriction_noise`): a series pressure source on the
     /// mouth side, the brass lip's law carried to the reed slit. `None` is the original voice, bit for bit.
     constriction_noise: Option<crate::turbulence_noise::ConstrictionNoise>,
@@ -717,6 +727,9 @@ impl ReedBoreVoice {
             viscous_slit: None,
             staple_recovery: None,
             jet_contraction: None,
+            closure_stop: true,
+            residual_flow_area_m2: None,
+            opening_tap: None,
             constriction_noise: None,
             player_tract: None,
             rho: gas.density,
@@ -882,6 +895,105 @@ impl ReedBoreVoice {
     #[must_use]
     pub const fn jet_contraction(&self) -> Option<f64> {
         self.jet_contraction
+    }
+
+    /// Switch the reed step's rigid closure stop (commit a857c6f17). It is ON by default: a reed that the free implicit
+    /// midpoint solve would carry below zero opening ends the step at exactly zero with end velocity 0 (rigid, inelastic;
+    /// no restitution is printed for a reed on its lay). `false` takes the same implicit midpoint step without it
+    /// (`OpeningPropagator::MidpointFree`), so a reed that goes below zero keeps that opening and the lay contact alone
+    /// does the closing. A step whose free solution stays at or above zero is the same step either way, bit for bit, so a
+    /// voice that never closes renders the same bytes with the stop on or off. This is an A/B selection, not a physical
+    /// claim: a reed passing through its mouthpiece is not a measured behaviour. It needs a massive reed and a voice that
+    /// has not advanced. The default step is untouched, so every card without the row renders as before.
+    ///
+    /// # Errors
+    /// A massless reed or an advanced voice.
+    pub fn set_closure_stop(&mut self, on: bool) -> Result<(), AcousticRealizeError> {
+        if self.reed.mass_kg <= 0.0 || self.sample_index != 0 {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "the closure stop needs a massive reed and a voice that has not advanced",
+            });
+        }
+        self.closure_stop = on;
+        Ok(())
+    }
+
+    /// Whether the reed step's rigid closure stop is on (the default).
+    #[must_use]
+    pub const fn closure_stop(&self) -> bool {
+        self.closure_stop
+    }
+
+    /// Give the reed a residual flow area: the narrow channels between the two blades that stay open when the reed is pressed
+    /// on its lay. Almeida, Vergez and Causse 2007 (JASA 121(1) 536-546), Sec. III.1 and Fig. 9, measure a natural cane oboe
+    /// reed on an artificial mouth: the flow "first stabilises at a certain minimum value" instead of vanishing at the
+    /// beating pressure, "indicating that it is very hard to completely close the reed", through "narrow channels remaining
+    /// between the two blades ... behaving like rigid capillary ducts", and Fig. 10 shows a 1/2 power dependence of that
+    /// residual flow (a Bernoulli law). The jet area becomes `C_c w max(h, 0) + S`, so the flow through the channel is
+    /// `q = (C_c w max(h, 0) + S) sqrt(2 (dp)_c / rho)` and never falls to zero: the voice hands the junction the opening
+    /// `max(h, 0) + S / (C_c w)` (`C_c` is the jet contraction when one is set, else 1). `S` is an effective JET area
+    /// (discharge coefficient 1: a shut reed passes `S sqrt(2 dp / rho)`) as measured, and one reed's: read off Fig. 9 at 450 dpi it is 0.094 to 0.100 mm^2 (mean 0.097) for that reed, 22 to
+    /// 27 ml/s at 32 to 47 kPa. The blade's own mechanics, its lay contact and its closure stop keep using the blade opening
+    /// `h` alone: only the flow sees the floor. A voice with no residual flow is the original voice, bit for bit. A shut reed with no residual flow takes the junction's exact closed-valve branch (`a == 0`) and any positive `S` the
+    /// general one, so a vanishing `S` agrees with it to rounding (about 1e-16 relative), not bit for bit. It is
+    /// defined on the inviscid Bernoulli law the oboe cards use, with or without a jet contraction, and refused with a
+    /// viscous reed channel (that law carries its own channel) and with a staple pressure recovery (not defined in this
+    /// version). It needs a massive reed and a voice that has not advanced.
+    ///
+    /// # Errors
+    /// An area that is not finite and positive or that reaches the reed's rest jet area, a massless reed, an advanced voice, a
+    /// viscous reed channel, or a staple recovery.
+    pub fn set_residual_flow_area(&mut self, area_m2: f64) -> Result<(), AcousticRealizeError> {
+        if !(area_m2.is_finite() && area_m2 > 0.0) {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "the residual flow area must be finite and positive",
+            });
+        }
+        if self.reed.mass_kg <= 0.0 || self.sample_index != 0 {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "the residual flow needs a massive reed and a voice that has not advanced",
+            });
+        }
+        if self.viscous_slit.is_some() {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "a residual flow is defined on the inviscid reed law only, not with a viscous reed channel",
+            });
+        }
+        if self.staple_recovery.is_some() {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "a residual flow is not defined with a staple pressure recovery",
+            });
+        }
+        let rest_jet_area = self.jet_contraction.unwrap_or(1.0) * self.reed.width_m * self.reed.rest_opening_m;
+        if area_m2 >= rest_jet_area {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "the residual flow area must be smaller than the reed's rest jet area",
+            });
+        }
+        self.residual_flow_area_m2 = Some(area_m2);
+        Ok(())
+    }
+
+    /// The residual flow area [m^2] of the reed's channels that never close, if one is set.
+    #[must_use]
+    pub const fn residual_flow_area_m2(&self) -> Option<f64> {
+        self.residual_flow_area_m2
+    }
+
+    /// Write the blade's opening `y` [m] and velocity `v` [m/s] at the end of every solver sample, one text line `y v` each, to `tap` (opt-in; the CLI hands it
+    /// the `--aperture-flows` file of a reed card). The tap reads the state after the step and changes no sample of the audio. `y` is the blade coordinate the
+    /// closure stop and the lay act on: with the stop on it never goes below zero; with `closure_stop off` it can.
+    ///
+    /// # Errors
+    /// A massless reed (it has no blade state) or a voice that has advanced.
+    pub fn record_reed_opening(&mut self, tap: Box<dyn std::io::Write + Send>) -> Result<(), AcousticRealizeError> {
+        if self.reed.mass_kg <= 0.0 || self.sample_index != 0 {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "the reed opening tap needs a massive reed and a voice that has not advanced",
+            });
+        }
+        self.opening_tap = Some(tap);
+        Ok(())
     }
 
     /// The selected staple pressure recovery, if any (`C_P = 0` selects none).
@@ -1197,6 +1309,11 @@ impl ReedBoreVoice {
             *slot = p_obs;
             self.last_parts = ReedObserverParts { internal_pa: p_bore, radiated_pa: plate_pa + jet_pa };
             self.sample_index += 1;
+            if let Some(tap) = self.opening_tap.as_mut() {
+                std::io::Write::write_fmt(tap, format_args!("{:e} {:e}\n", self.reed_y, self.reed_v)).map_err(|_| AcousticRealizeError::Reed {
+                    what: "reed opening tap write failed",
+                })?;
+            }
             // Current accepted incoming wave, matching the affine boundary used
             // by the source up to convolution summation roundoff. This is port
             // work, not an inferred line storage or filter-dissipation account.

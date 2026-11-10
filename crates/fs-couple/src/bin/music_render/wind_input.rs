@@ -117,7 +117,7 @@ fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolic
         return Err("--labium adds the labium jet displacement to --aperture-flows".into());
     }
     let [input, output] = paths.as_slice() else {
-        return Err("usage: music_render wind INPUT.performance OUT.wav [--block N] [--decimate] [--acceptance] [--compensate-outlet-latency] [--aperture-flows FLOWS [--labium]] [--self-contained [--attached-source RELATIVE_PATH]...]".into());
+        return Err("usage: music_render wind INPUT.performance OUT.wav [--block N] [--decimate] [--acceptance] [--compensate-outlet-latency] [--aperture-flows FLOWS [--labium]]  (on a reed file FLOWS gets the blade opening and velocity per solver sample, no --labium) [--self-contained [--attached-source RELATIVE_PATH]...]".into());
     };
     Ok((*input, *output, block.unwrap_or(512), decimate, policy, flows.map(|f| (f, labium)), self_contained, attached_sources, outlet_latency))
 }
@@ -1380,8 +1380,12 @@ fn load_with_all_sources(
     flow_tap: Option<(Box<dyn Write + Send>, bool)>,
     outlet_latency: OutletLatency,
 ) -> Result<Loaded, String> {
-    if flow_tap.is_some() && !bytes.starts_with(b"frankensim-flue-performance-v1\n") {
-        return Err("--aperture-flows observes flue files only".into());
+    let reed_file = bytes.strip_prefix(REED_PERFORMANCE_SCHEMA.as_bytes()).is_some_and(|rest| rest.starts_with(b"\n"));
+    if flow_tap.is_some() && !reed_file && !bytes.starts_with(b"frankensim-flue-performance-v1\n") {
+        return Err("--aperture-flows observes flue files (the aperture flows) and reed files (the blade opening and velocity per solver sample) only".into());
+    }
+    if reed_file && matches!(flow_tap, Some((_, true))) {
+        return Err("--labium adds the labium jet displacement to the flue aperture flows; a reed file has no labium".into());
     }
     if bytes.starts_with(b"frankensim-resolved-dg-performance-v1\n") {
         if policy == ObservationPolicy::Acceptance {
@@ -1528,7 +1532,8 @@ fn load_with_all_sources(
         Ok(Loaded{source:Box::new(p.into_renderer()),rate:i.sample_rate_hz,samples:i.samples,
             full_scale_pa:i.full_scale_pa,hash:i.input_hash,fixture:"plate-valve-input",source_json,observation_json:None,airway:None})
     } else {
-        let p=ReedPerformance::from_bytes_with_sources_and_outlet_latency(bytes,block,policy,sources,load_material,outlet_latency).map_err(|e|e.to_string())?;
+        let mut p=ReedPerformance::from_bytes_with_sources_and_outlet_latency(bytes,block,policy,sources,load_material,outlet_latency).map_err(|e|e.to_string())?;
+        if let Some((tap, _)) = flow_tap { p.record_reed_opening(tap).map_err(|e| e.to_string())?; }
         let i=p.info();
         let observer_receipt=super::duct_metadata::reed_observer_json(&p).map_err(|e|e.to_string())?;
         let observer_json=format!("{}{}",super::duct_metadata::reed_provenance(&p),super::thermochemical::provenance(p.gas_records()));

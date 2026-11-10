@@ -44,6 +44,23 @@
 //! for a double reed: a caller names `C_c` and the page says where it came from (the clarinet's 0.6 or the 2-D free-streamline
 //! bound pi/(pi+2) = 0.611 are not double-reed values). `C_c` 1 is the original law and changes nothing. The channel's
 //! unsteady inertance is not part of this row. See `ReedBoreVoice::set_jet_contraction`.
+//! Optional `closure_stop on|off` right after `contraction` (or after `staple_recovery`, `slit_length`, or the reed row; before
+//! `tongue_contact`), with a massive reed, switches the reed step's rigid closure stop at zero opening (commit a857c6f17,
+//! unconditional until this row). `on` is the default and a card without the row renders as before, bit for bit; `off` takes the
+//! same implicit midpoint step without the stop, so the lay contact alone closes the reed. It is an A/B selection with no value:
+//! no restitution is printed for a reed on its lay. See `ReedBoreVoice::set_closure_stop`.
+//! Optional `residual_flow AREA_M2` right after `closure_stop` (or after `contraction`, `staple_recovery`, `slit_length`, or the reed
+//! row; before `tongue_contact`), on a card without `slit_length` or `staple_recovery` and with a massive reed, gives the reed a
+//! residual flow: the effective JET area, in m^2 (discharge coefficient 1: a shut reed passes `AREA sqrt(2 dp / rho)`), of the narrow channels between the blades that stay open when the reed lies on its
+//! lay (Almeida, Vergez and Causse 2007, Sec. III.1 and Fig. 9: the flow of a natural cane oboe reed "first stabilises at a
+//! certain minimum value" instead of vanishing). The jet area becomes `C_c w max(h, 0) + AREA` (`C_c` the `contraction` value, else
+//! 1); the junction sees the opening `max(h, 0) + AREA / (C_c w)`, a 27.3 um floor for 9.33e-8 m^2 on a 5.6 mm reed with `C_c` 0.611 (not the 16.7 um of
+//! `AREA / w`). The blade's mechanics, lay contact and closure stop keep the blade opening and only the flow sees the floor. No default:
+//! the caller names the area and where it was read (that one reed's Fig. 9 gives 0.094 to 0.100 mm^2, about 0.097e-6 m^2, read
+//! off the figure, one reed). A card without the row renders as before, bit for bit. A shut reed with no row takes the junction's exact closed-valve branch and any positive AREA the general one,
+//! so a vanishing AREA agrees with no row to rounding (about 1e-16 relative), not bit for bit. On the Bb4 oboe card (rest jet area 1.22 mm^2, blow 7.4 kPa) 9.33e-8 m^2 is 7.6 % of the
+//! rest jet area, 11 to 12 % of the mean flow and cancels 30 % of the reed's quasi-static negative slope: it raises the oscillation threshold (the CONTRACT section lists the sweeps).
+//! See `ReedBoreVoice::set_residual_flow_area`.
 //! Optional `open_hole_interaction tmmi EPSILON` before `compile_limits`, on a
 //! `gas_field continuous` binding, couples the radiation of the open holes and the
 //! bell through the TMMI mutual impedance (EPSILON 2 as the paper prints it).
@@ -60,6 +77,9 @@
 //! see `ReedBoreVoice::set_constriction_noise`). It is an extrapolation in size, speed and shape, from dampers and
 //! plates in a 300 mm duct to a reed slit; the printed law fixes neither the jet speed nor the pressure drop to use
 //! for a viscous slit (they span 40 dB here), and the row takes the Bernoulli speed of the total drop as the brass row does.
+//! Measured on a held passive reed in an 8 m cylinder: over the twelve third octaves from 630 to 8000 Hz the wave the row launches is 9.3 dB below the one-sided print law K dp / 2
+//! (bands 6.0 to 13.5 dB below; 6.3 dB if the printed power is the total over both sides, not settled), most likely because a series pressure source drives a slit whose small-signal
+//! impedance is a few times the bore's (not measured separately); see the CONTRACT section.
 //! Optional `line_ladder TAIL_TOL MAX_TAPS` after those rows, before `compile_limits`, declares the convergence ladder of the characteristic line (the reed's
 //! reflectance as a finite impulse response): `TAIL_TOL` the relative tail energy in the last quarter of the window, positive and below 1 (default 1e-10), `MAX_TAPS` the ceiling,
 //! a power of two in [256, 131072] (default 65536). A bore that rings longer than the ceiling refuses by name with the measured tail energy and peak shift of
@@ -779,6 +799,46 @@ impl ReedPerformance {
             }
             Some(contraction)
         } else { None };
+        // `closure_stop on|off`, right after `contraction` (or `staple_recovery`, `slit_length`, the reed row): the reed step's
+        // rigid closure stop at zero opening. `on` is the default; `off` is an A/B selection and carries no value.
+        let closure_stop = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("closure_stop") {
+            let mut row = r.row("closure_stop")?;
+            let line = row.line;
+            let word = row.word()?;
+            row.finish()?;
+            if reed.mass_kg <= 0.0 {
+                return Err(bad(line, "closure_stop requires a massive reed"));
+            }
+            match word {
+                "on" => true,
+                "off" => false,
+                _ => return Err(bad(line, "closure_stop takes on or off")),
+            }
+        } else { true };
+        // `residual_flow AREA_M2`, right after `closure_stop` (or `contraction`, `staple_recovery`, `slit_length`, the reed row):
+        // the effective area of the channels between the blades that stay open on the lay, on the inviscid law without a staple
+        // recovery. No default; the caller names the area and its source.
+        let residual_flow_area_m2 = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("residual_flow") {
+            let mut row = r.row("residual_flow")?;
+            let line = row.line;
+            let area = row.scalar()?;
+            row.finish()?;
+            if reed.mass_kg <= 0.0 {
+                return Err(bad(line, "residual_flow requires a massive reed"));
+            }
+            if slit_length_m.is_some() {
+                return Err(bad(line, "residual_flow is defined on the inviscid reed law only, not with slit_length"));
+            }
+            if staple_recovery.is_some() {
+                return Err(bad(line, "residual_flow is not defined with staple_recovery"));
+            }
+            if !(area.is_finite() && area > 0.0) {
+                return Err(bad(line, "residual_flow needs a finite positive area in m^2"));
+            }
+            Some(area)
+        } else { None };
         let tongue_contact = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("tongue_contact") {
             let mut row = r.row("tongue_contact")?;
@@ -1373,6 +1433,13 @@ impl ReedPerformance {
         if let Some(recovery) = staple_recovery {
             voice.set_staple_recovery(recovery).map_err(ReedPerformanceError::Model)?;
         }
+        if !closure_stop {
+            voice.set_closure_stop(false).map_err(ReedPerformanceError::Model)?;
+        }
+        // After the contraction: the residual area is checked against the rest jet area `C_c w h0`.
+        if let Some(area_m2) = residual_flow_area_m2 {
+            voice.set_residual_flow_area(area_m2).map_err(ReedPerformanceError::Model)?;
+        }
         if let Some(card) = constriction_noise {
             voice.set_constriction_noise(card).map_err(ReedPerformanceError::Model)?;
         }
@@ -1491,6 +1558,17 @@ impl ReedPerformance {
     #[must_use]
     pub const fn renderer(&self) -> &ScheduledRenderer {
         &self.renderer
+    }
+    /// Tap the reed blade's opening and velocity per solver sample (see `ReedBoreVoice::record_reed_opening`): the CLI's `--aperture-flows FILE` on a reed file.
+    /// No audio changes. Call before the first block.
+    ///
+    /// # Errors
+    /// A massless reed, an advanced voice, or a performance with no reed voice.
+    pub fn record_reed_opening(&mut self, tap: Box<dyn std::io::Write + Send>) -> Result<(), ReedPerformanceError> {
+        let Some(RenderVoice::ReedBore(voice)) = self.renderer.context.voices.get_mut(0) else {
+            return Err(bad(0, "the performance has no reed voice to tap"));
+        };
+        voice.record_reed_opening(tap).map_err(ReedPerformanceError::Model)
     }
     /// Actual selected channel, retaining source-gas viscosity and density.
     /// The field inlet can differ from the first propagation cell's midpoint.
@@ -1949,6 +2027,15 @@ mod segment_cap_tests;
 
 #[cfg(test)]
 mod lay_tests;
+
+#[cfg(test)]
+mod closure_stop_tests;
+
+#[cfg(test)]
+mod residual_flow_tests;
+
+#[cfg(test)]
+mod reed_trace_tests;
 
 #[cfg(test)]
 mod viscous_tests;

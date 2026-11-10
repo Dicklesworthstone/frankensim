@@ -45,12 +45,18 @@ impl ReedBoreVoice {
             } else {
                 None
             };
+        // The midpoint step with its rigid closure stop at zero opening (the default) or without it (`closure_stop off`).
+        let midpoint = if self.closure_stop {
+            crate::reed_bore::OpeningPropagator::Midpoint
+        } else {
+            crate::reed_bore::OpeningPropagator::MidpointFree
+        };
         let (outgoing, opening, velocity) = if let Some(slit) = self.viscous_slit {
             let lay = self.lay.as_ref().expect("massive voices retain their physical lay");
             let result = if let Some(recovery) = self.staple_recovery {
                 // Almeida, Vergez and Caussé 2007: the flow follows the slit law on the constriction drop (dp)_c, the
                 // blade is driven by (dp)_c (eq. 16), and the bore input is raised by the recovered head (eq. 17).
-                crate::reed_bore::OpeningPropagator::Midpoint.step_with_junction(
+                midpoint.step_with_junction(
                     self.reed, self.rho, impedance, incoming, mouth_pressure_pa,
                     self.reed_y, self.reed_v, self.dt, body_flow_m3_s, lay,
                     |opening| Ok(opening.max(0.0)), material_force,
@@ -66,7 +72,7 @@ impl ReedBoreVoice {
                     },
                 )?
             } else {
-                crate::reed_bore::OpeningPropagator::Midpoint.step_with_junction(
+                midpoint.step_with_junction(
                     self.reed, self.rho, impedance, incoming, mouth_pressure_pa,
                     self.reed_y, self.reed_v, self.dt, body_flow_m3_s, lay,
                     |opening| Ok(opening.max(0.0)), material_force,
@@ -80,7 +86,10 @@ impl ReedBoreVoice {
                 self.fast_stats.fallback_samples += 1;
             }
             result
-        } else if self.staple_recovery.is_some() || self.jet_contraction.is_some() {
+        } else if self.staple_recovery.is_some()
+            || self.jet_contraction.is_some()
+            || self.residual_flow_area_m2.is_some()
+        {
             // The same staple law on the inviscid Bernoulli junction, for the cards without `slit_length`: Almeida's own
             // model neglects the viscous loss along the reed. Same midpoint step, lay and tongue force as the branches below.
             // A jet contraction `C_c` (alone, or with the staple) narrows the jet to `C_c w h`; without a staple the recovery
@@ -90,11 +99,19 @@ impl ReedBoreVoice {
                 None => crate::bernoulli_aperture::viscous::StapleRecovery::new(0.0, 1.0)?,
             };
             let contraction = self.jet_contraction.unwrap_or(1.0);
+            // The residual flow (`residual_flow`, Almeida, Vergez and Caussé 2007 Fig. 9): the junction sees the opening
+            // `max(h, 0) + S / (C_c w)`, so its jet area is `C_c w max(h, 0) + S` and the flow never falls to zero. The blade's
+            // own mechanics, lay contact and stop keep the blade opening. With no row there is no floor: the original closure.
+            let residual_opening = self.residual_flow_area_m2.map(|area| area / (contraction * self.reed.width_m));
             let lay = self.lay.as_ref().expect("massive voices retain their physical lay");
-            let result = crate::reed_bore::OpeningPropagator::Midpoint.step_with_junction(
+            let result = midpoint.step_with_junction(
                 self.reed, self.rho, impedance, incoming, mouth_pressure_pa,
                 self.reed_y, self.reed_v, self.dt, body_flow_m3_s, lay,
-                |opening| Ok(opening.max(0.0)), material_force,
+                |opening| Ok(match residual_opening {
+                    Some(floor) => opening.max(0.0) + floor,
+                    None => opening.max(0.0),
+                }),
+                material_force,
                 |opening, moving| {
                     let junction = crate::bernoulli_aperture::moving::characteristic_junction_with_recovery(
                         recovery, contraction, self.reed.width_m, opening, self.rho, impedance,
@@ -116,7 +133,21 @@ impl ReedBoreVoice {
                 self.reed, self.rho, impedance, incoming, mouth_pressure_pa,
                 self.reed_y, self.reed_v, self.dt, body_flow_m3_s, lay,
                 |opening| Ok(opening.max(0.0)), material_force,
-                crate::reed_bore::OpeningPropagator::Midpoint,
+                midpoint,
+            )?;
+            if self.solver_mode == ReedSolverMode::FastNewton {
+                self.fast_stats.fallback_samples += 1;
+            }
+            result
+        } else if !self.closure_stop {
+            // `step_massive_reed` with the lay is `contact::step`, the midpoint step with the stop; with `closure_stop off` the
+            // same arithmetic runs through the profiled-aperture entry with the stop-free propagator.
+            let lay = self.lay.as_ref().expect("massive voices retain their physical lay");
+            let result = crate::reed_bore::step_profiled_aperture(
+                self.reed, self.rho, impedance, incoming, mouth_pressure_pa,
+                self.reed_y, self.reed_v, self.dt, body_flow_m3_s, lay,
+                |opening| Ok(opening.max(0.0)), None,
+                midpoint,
             )?;
             if self.solver_mode == ReedSolverMode::FastNewton {
                 self.fast_stats.fallback_samples += 1;

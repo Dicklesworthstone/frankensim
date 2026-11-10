@@ -19,6 +19,10 @@ use crate::bernoulli_aperture::paired::{BladeState, ExactBlade};
 pub(crate) enum OpeningPropagator<'a> {
     /// The original midpoint mechanics, unchanged.
     Midpoint,
+    /// The midpoint mechanics WITHOUT the rigid closure stop (`closure_stop off` on a card): a reed that the free
+    /// solve carries below zero opening keeps that opening, and the lay contact alone does the closing. Every other
+    /// number is `Midpoint`'s, bit for bit; a step whose free solution stays at or above zero is `Midpoint`'s step.
+    MidpointFree,
     /// Exact zero-order hold of the mass/damping/stiffness block, with the
     /// contact, pressure and this external force held over the step.
     Exact {
@@ -258,7 +262,7 @@ pub(super) fn step_with_contact_response_and_stop<J: Into<JunctionPressure>>(
     // midpoint's coefficients, or the exact map's mean velocity free + mobility*F
     // rewritten with mass_mid = h/mobility and rhs = mass_mid*free.
     let (mass_mid, rhs, predicted) = match propagator {
-        OpeningPropagator::Midpoint => {
+        OpeningPropagator::Midpoint | OpeningPropagator::MidpointFree => {
             // The held-aperture solve is a predictor only. Even free flight must
             // solve again: changing opening changes jet flow and the pressure load.
             let free = super::massive_reed_predictor(
@@ -309,7 +313,7 @@ pub(super) fn step_with_contact_response_and_stop<J: Into<JunctionPressure>>(
             floor += 8.0 * f64::EPSILON * impulse.abs();
         }
         let next_v = match propagator {
-            OpeningPropagator::Midpoint => 2.0 * velocity - v,
+            OpeningPropagator::Midpoint | OpeningPropagator::MidpointFree => 2.0 * velocity - v,
             OpeningPropagator::Exact { blade, external_n, memory } => {
                 blade.end_velocity(start, external_n + force - face * blade_drop, memory)
             }
@@ -426,7 +430,7 @@ pub(super) fn step_with_contact_response_and_stop<J: Into<JunctionPressure>>(
     })
     };
     let free = solve()?;
-    if !closure_stop || y < 0.0 || free.opening >= 0.0 {
+    if !closure_stop || matches!(propagator, OpeningPropagator::MidpointFree) || y < 0.0 || free.opening >= 0.0 {
         return Ok(free);
     }
     let landing = -y / dt;

@@ -17,6 +17,46 @@
 
 ## New sections (newest first)
 
+### Reed opening tap
+
+`ReedBoreVoice::record_reed_opening` and `ReedPerformance::record_reed_opening` give a massive reed an opt-in tap: at the end of every solver sample one text line `y v` (the blade's opening in metres and velocity in m/s, as the closure stop and the lay see them) goes to a caller-supplied writer. It reads state after the step and changes no audio sample (test `reed_trace_tests`: the pressure bits with and without the tap are equal, and with the stop on `y` never goes below zero, with `closure_stop off` it can). The `music_render wind` command routes the existing `--aperture-flows FILE` to it on a `frankensim-reed-performance-v1` file (`--labium` stays flue-only); on any other file type the flag keeps its earlier meaning and refusals.
+
+### The reed-noise row against the print's power (measured)
+
+A held, passive reed (damping ratio 30, it cannot oscillate) on an 8 m cylinder (radius 6.935 mm; the characteristic-line ladder refuses this card at 9, 10, 15 and 25 m) with the blow held at 1800 Pa was run with `constriction_noise` on and off, and the outgoing wave p+ read in the window of samples 800 to 2200 (the first reflection returns at 2239), where the bore carries only the wave the slit launches. The print gives, per direction, W = K(St)^2 A dp^2 / (4 rho c) (Oldham and Ukpoho as printed in Guedel, AIVC CR02 eq. 3), an outgoing wave of rms K dp / 2 with dp the static drop across the slit (1368 Pa here). Measured per third octave from 630 to 8000 Hz (12 bands) the row's wave is below that by 6.0, 13.5, 8.2, 9.1, 7.4, 10.9, 7.9, 9.0, 11.4, 9.3, 8.9 and 9.7 dB, band mean 9.29 dB (6.3 dB if the printed power is the total over both sides of the duct, which is not settled). The likely reason is that the row is a series pressure source on a slit whose small-signal impedance is a few times the bore's, so the launched wave is only part of the source (not measured separately). The test that measured it (`noise_power_tests`, band mean within 1.5 dB) fails by that amount and is not part of this change; it returns when the print's definition (one- or two-sided power, a dipole force or a monopole volume source) is settled. No row, value or engine path changes.
+
+### Reed residual flow as a card row
+
+Almeida, Vergez and Causse 2007 (JASA 121(1) 536-546), Sec. III.1 and Fig. 9, measure a natural cane oboe reed on an
+artificial mouth: the flow "first stabilises at a certain minimum value" instead of vanishing at the beating pressure
+("very hard to completely close the reed"; "narrow channels remaining between the two blades ... behaving like rigid
+capillary ducts"), and Fig. 10 shows a 1/2 power dependence of that residual flow. The engine's reed flow went to exactly zero
+at zero opening. The reed card now accepts `residual_flow AREA_M2` right after `closure_stop` (or `contraction`,
+`staple_recovery`, `slit_length`, the reed row), before `tongue_contact`, for a massive reed on the inviscid law (refused with
+`slit_length` and with `staple_recovery`). The jet area becomes `C_c w max(h, 0) + AREA` (`C_c` the `contraction` value, else 1): the
+voice hands the junction the opening `max(h, 0) + AREA / (C_c w)` through the existing flow-opening argument of
+`step_with_junction`, so no kernel and no function signature changes; the blade's mechanics, lay contact and closure stop keep
+the blade opening `h` alone. The row has no default and carries a measured quantity: one reed's Fig. 9 read at 450 dpi gives
+0.094 to 0.100 mm^2 (mean 0.097e-6 m^2, 22 to 27 ml/s at 32 to 47 kPa), about 3 % of that reed's fitted rest area, and it is
+one reed's. A card without the row renders as before, bit for bit (the flow-opening argument is unchanged when the voice has no
+residual). `ReedBoreVoice::set_residual_flow_area` and `residual_flow_area_m2` are the voice-level switch. Tests (G0 to G2):
+`render::schedule::reed::residual_flow_tests`.
+
+`AREA` is the contracted JET area, with discharge coefficient 1: a shut reed passes `AREA sqrt(2 dp / rho)` and the junction sees the floor opening `AREA / (C_c w)`, 27.3 um for 9.33e-8 m^2 on a 5.6 mm reed with `C_c` 0.611 (`AREA / w` would be 16.7 um). A shut reed with no row takes the junction's exact closed-valve branch (`characteristic_junction_with_recovery`, `a == 0`); any positive `AREA`, however small, takes the general branch, which reproduces it to rounding (about 1e-16 relative). So a vanishing area agrees with no row to rounding and not bit for bit: `g1` pins it at 1e-20 (the pressure within 1e-9 of the peak), and on the Bb4 oboe card `residual_flow 1e-300` moves the first closure by 1.5e-21 m and leaves the clip level equal to five digits (3185.7 LSB, rms of 1 to 2 s). Measured on that card (rest jet area 1.222 mm^2, blow 7.4 kPa, rho 1.2 assumed): 9.33e-8 m^2 is 7.64 % of the rest jet area, 11 to 12 % of the mean flow, and cancels 30 % of the reed's quasi-static negative slope (reed -2.317e-9, leak +7.0e-10 m^3/s/Pa). It raises the oscillation threshold. Clip level (rms of 1 to 2 s) in dB against AREA 0: heavy-reed Bb4 at 7.4 kPa 0, -0.25, -0.76, -1.57, -2.45 for AREA 0, 1e-8, 3e-8, 6e-8, 9.33e-8; F4 heavy reed at 6.865 kPa 0, -0.20, -0.56 and silent at 9.33e-8; light reed (7.69e-6 kg, damping ratio 0.32) Bb4 at 7.4 kPa 0, -0.21, -0.66, -1.03 (4.5e-8) and silent at 6e-8, where the same card sounds at blows of 8.5, 9.5 and 10.5 kPa (-0.36, -0.14, -0.97 dB): the leak raises the blowing pressure the reed needs to start, and a card that holds a leak the print names says so.
+
+### Reed closure stop as a card row
+
+Commit a857c6f17 made the reed step's rigid closure stop at zero opening unconditional (a reed that the free implicit
+midpoint solve would carry below zero opening ends the step at exactly zero with end velocity 0; no restitution is printed
+for a reed on its lay). The reed card now accepts `closure_stop on|off` right after `contraction` (or `staple_recovery`,
+`slit_length`, the reed row), before `tongue_contact`, for a massive reed. `on` is the default and a card without the row
+renders as before, bit for bit (`step_with_contact_response` still passes the stop). `off` selects
+`OpeningPropagator::MidpointFree`, the same implicit midpoint step without the stop, so a reed that goes below zero keeps that
+opening and the lay contact alone closes it; a step whose free solution stays at or above zero is the same step either way.
+The row carries no value: it is an A/B selection, not a physical claim. `ReedBoreVoice::set_closure_stop` and `closure_stop`
+are the voice-level switch (massive reed, voice not advanced). The loaded finite-gas path keeps passing `false` as before.
+Tests (G0, G1): `render::schedule::reed::closure_stop_tests`.
+
 ### A prescribed-flow step of the DG port load
 
 `DgPortLoad::step(volume_flow_m3_s)` advances the load alone by one sample
