@@ -49,6 +49,46 @@ No claim: no contact, constraint or collision; no analytic tangent of the port
 map (a kernel loop differences it); the split variants of the integrator are
 not wrapped; fs-mbd now depends on fs-ports for this module only.
 
+## A damped rigid-body network as a composition-kernel Component
+
+`component::network::ViscousNetwork` wraps
+`step_viscous_network_with_loads` behind the same contract: any number of
+bodies and passive viscous connectors, advanced by the owner's splitting (half
+a connector source at fixed geometry, the native rigid motion of every body,
+half a source). The wrapper integrates nothing.
+
+Ports, in this order: `force<i>` per body (receives the world force on the
+centre of mass, three components; returns the mean centre-of-mass velocity
+`(x1 - x0) / dt`, the displacement the owner pairs with a held force, since
+the sources act at fixed geometry) and `heat<e>` per connector (a heat port
+that receives the temperature at which the connector's heat is released and
+returns minus its mean dissipation rate, `-D_e / dt`). The state is the bank
+of `RigidBodyState`. Stored energy is kinetic plus uniform-gravity potential.
+The receipt's stored change, dissipation and connector heats are the owner's
+numbers; the owner's work-heat residual is booked as numerical loss; entropy
+is `sum(D_e / T_e)`. `ViscousNetworkRefusal` carries the owner's error
+unchanged, or names a state of the wrong length, a temperature that is not
+positive, or cancellation. `ViscousNetworkBuildError` refuses no bodies and a
+connector that does not join two different bodies of the network.
+
+G0, in `crates/fs-system/tests/viscous_network_slice.rs` (run with
+`cargo test -p fs-system --features slices`): conformance under forces and
+gravity at three step sizes with the kernel's booked energy equal to the
+owner's work minus heat; a propose returns the owner's states bit for bit;
+the refusals above; the damping-heat pairing as a declared graph with heat
+routed by fraction to two thermal bodies and a named sink (one body shared by
+both connectors), bit-identical to the owner marched alone over 400 steps;
+held forces under gravity booked as boundary work. Three planted defects in
+this module were each caught (half the heat leaving, velocities on the wrong
+body, entropy at the wrong temperature).
+
+No claim: no torque port, because the owner reports couple work as one total
+and not per body, so a couple cannot be attached to a body through the kernel
+yet; no analytic tangent; one propose allocates the load and state banks; the
+owner's accuracy statements are unchanged by the wrapping; the thermal side
+in the test is the kernel's ideal `HeatCapacity`, not the fs-thermal
+deposition timeline that `fs-couple::rigid_damping_heat` drives.
+
 ## Affine friction stopping and reversal on finite bodies
 
 The original rate-driven Hertz adapter retains the law's `exact_invariant`

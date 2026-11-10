@@ -27,5 +27,9 @@ fs-alloc = { path = "../fs-alloc" }
 name = "rigid_body_slice"
 required-features = ["slices"]
 
+[[test]]
+name = "viscous_network_slice"
+required-features = ["slices"]
+
 [lints]
 workspace = true

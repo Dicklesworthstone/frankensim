@@ -54,7 +54,9 @@ pub struct NodeAccount {
 pub struct ConnectionAccount {
     /// Sum of the energies that entered the members, plus heat sent to the
     /// connection's sink [J]. Zero for an exact connection; it is the
-    /// interface residual of an iterative solve otherwise.
+    /// interface residual of an iterative solve otherwise. Heat routes that
+    /// share a receiver are summed in the row of the first of them, and the
+    /// rows of the others stay zero.
     pub energy_defect_j: Sum,
     /// Entropy generated in the connection [J/K].
     pub entropy_generated_j_per_k: Sum,

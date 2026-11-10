@@ -231,6 +231,9 @@ pub struct SystemBuilder {
     accepted: Vec<Box<dyn Any>>,
     candidate: Vec<Box<dyn Any>>,
     used: Vec<Vec<bool>>,
+    /// Ports that receive heat from a heat route; another route may add to
+    /// them.
+    route_receiver: Vec<Vec<bool>>,
     connections: Vec<Connection>,
     boundaries: Vec<(PortRef, BoundaryFn)>,
     sinks: Vec<HeatSink>,
@@ -260,6 +263,7 @@ impl SystemBuilder {
             violation,
         })?;
         self.used.push(vec![false; node.ports().len()]);
+        self.route_receiver.push(vec![false; node.ports().len()]);
         self.names.push(name.to_owned());
         self.layouts.push(layout);
         self.nodes.push(node);
@@ -482,9 +486,14 @@ impl SystemBuilder {
     /// Deliver the heat leaving `source` to `sinks` by fraction. Fractions
     /// below one in total need `remainder`, a named sink outside the system.
     ///
+    /// A receiver may be named by several routes: it receives the sum of
+    /// their shares, and those routes are audited together. A source belongs
+    /// to one route, and a receiver of a route takes no other connection.
+    ///
     /// # Errors
     /// Wrong roles or carriers, bad fractions, a missing sink, a bad
-    /// temperature, or a port already connected.
+    /// temperature, a port named twice, or a port already connected to
+    /// anything but another route's delivery.
     pub fn heat_route(
         &mut self,
         source: PortRef,
@@ -540,9 +549,19 @@ impl SystemBuilder {
         let mut all = Vec::with_capacity(sinks.len() + 1);
         all.push(source);
         all.extend(sinks.iter().map(|(sink, _)| *sink));
-        self.check_free(&all)?;
+        for (index, &port) in all.iter().enumerate() {
+            let shared = index > 0 && self.route_receiver[port.node][port.port];
+            if (self.used[port.node][port.port] && !shared) || all[..index].contains(&port) {
+                return Err(AdmissionError::AlreadyConnected {
+                    port: self.label(port),
+                });
+            }
+        }
         // Every check has passed: only now does the builder change.
         self.take(&all);
+        for &(sink, _) in sinks {
+            self.route_receiver[sink.node][sink.port] = true;
+        }
         let remainder = remainder.map(|sink| {
             let temperature_k = sink.temperature_k;
             self.sinks.push(sink);
@@ -670,8 +689,12 @@ impl SystemBuilder {
                 } => {
                     let source_out = output_of(*source).start;
                     for (sink, fraction) in sinks {
-                        drivers[input_of(*sink).start] =
-                            Driver::Linear(vec![(source_out, -*fraction)]);
+                        let share = (source_out, -*fraction);
+                        match &mut drivers[input_of(*sink).start] {
+                            // Another route already delivers here.
+                            Driver::Linear(shares) => shares.push(share),
+                            slot => *slot = Driver::Linear(vec![share]),
+                        }
                     }
                     drivers[input_of(*source).start] = match temperature {
                         RouteTemperature::Fixed(kelvin) => Driver::Fixed(*kelvin),
@@ -847,6 +870,40 @@ impl SystemBuilder {
             .map(PortLayout::input_len)
             .max()
             .unwrap_or(0);
+        // Heat routes that share a receiver are audited together: that
+        // port's energy is the sum of what each of them delivered. The group
+        // is kept under its first connection; the others keep an empty list.
+        let mut audit_groups: Vec<Vec<usize>> = (0..self.connections.len())
+            .map(|index| vec![index])
+            .collect();
+        let mut leader: Vec<usize> = (0..self.connections.len()).collect();
+        for later in 0..self.connections.len() {
+            let Connection::HeatRoute { sinks: mine, .. } = &self.connections[later] else {
+                continue;
+            };
+            for earlier in 0..later {
+                let Connection::HeatRoute { sinks: theirs, .. } = &self.connections[earlier]
+                else {
+                    continue;
+                };
+                let shares = mine
+                    .iter()
+                    .any(|(port, _)| theirs.iter().any(|(other, _)| other == port));
+                let (keep, merge) = (
+                    leader[earlier].min(leader[later]),
+                    leader[earlier].max(leader[later]),
+                );
+                if shares && keep != merge {
+                    let moved = core::mem::take(&mut audit_groups[merge]);
+                    for &index in &moved {
+                        leader[index] = keep;
+                    }
+                    audit_groups[keep].extend(moved);
+                    audit_groups[keep].sort_unstable();
+                }
+            }
+        }
+
         Ok(System {
             names: self.names,
             nodes: self.nodes,
@@ -854,6 +911,7 @@ impl SystemBuilder {
             accepted: self.accepted,
             candidate: self.candidate,
             connections: self.connections,
+            audit_groups,
             boundaries: self.boundaries,
             boundary_values,
             drivers,
@@ -901,6 +959,10 @@ pub struct System {
     accepted: Vec<Box<dyn Any>>,
     candidate: Vec<Box<dyn Any>>,
     connections: Vec<Connection>,
+    /// Per connection, the connections audited in its row (itself, plus the
+    /// heat routes that share a receiver with it); empty if an earlier
+    /// connection's row holds it.
+    audit_groups: Vec<Vec<usize>>,
     boundaries: Vec<(PortRef, BoundaryFn)>,
     boundary_values: Vec<Vec<f64>>,
     drivers: Vec<Driver>,
@@ -1407,8 +1469,23 @@ impl System {
             generated += receipt.entropy_generated_j_per_k;
             entropy_scale += receipt.entropy_generated_j_per_k;
         }
-        for (index, connection) in self.connections.iter().enumerate() {
-            connection.energy_members(&mut members);
+        let mut group_members = Vec::new();
+        for (index, group) in self.audit_groups.iter().enumerate() {
+            // A heat route that shares a receiver with an earlier one is
+            // audited in that one's row.
+            if group.is_empty() {
+                connection_rows.push((0.0, 0.0));
+                continue;
+            }
+            members.clear();
+            for &connection in group {
+                self.connections[connection].energy_members(&mut group_members);
+                for port in &group_members {
+                    if !members.contains(port) {
+                        members.push(*port);
+                    }
+                }
+            }
             let (mut energy, mut magnitude, mut entropy) = (0.0_f64, 0.0_f64, 0.0_f64);
             for port in &members {
                 let global = self.port_start[port.node] + port.port;
@@ -1417,19 +1494,21 @@ impl System {
                 entropy += self.port_entropy[global];
                 entropy_scale += self.port_entropy[global].abs();
             }
-            if let Connection::HeatRoute {
-                source,
-                remainder: Some((sink, fraction, kelvin)),
-                ..
-            } = connection
-            {
-                let emitted = -self.port_energy[self.port_start[source.node] + source.port];
-                let heat = fraction * emitted;
-                sink_heat[*sink] += heat;
-                energy += heat;
-                magnitude += heat.abs();
-                entropy += heat / kelvin;
-                entropy_scale += (heat / kelvin).abs();
+            for &connection in group {
+                if let Connection::HeatRoute {
+                    source,
+                    remainder: Some((sink, fraction, kelvin)),
+                    ..
+                } = &self.connections[connection]
+                {
+                    let emitted = -self.port_energy[self.port_start[source.node] + source.port];
+                    let heat = fraction * emitted;
+                    sink_heat[*sink] += heat;
+                    energy += heat;
+                    magnitude += heat.abs();
+                    entropy += heat / kelvin;
+                    entropy_scale += (heat / kelvin).abs();
+                }
             }
             let tolerance_j =
                 self.config.interface_energy_tolerance * magnitude + f64::MIN_POSITIVE;

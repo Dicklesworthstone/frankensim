@@ -35,7 +35,11 @@ physics owners below fs-couple can be composed without it.
     `HeatSink` outside the system. `RouteTemperature::SinkEquivalent` gives the
     source `sum(f) / sum(f / T)` of its receivers, so the route generates no
     entropy; `RouteTemperature::Fixed` is for a source whose law ignores
-    temperature and makes the route one-way.
+    temperature and makes the route one-way. A receiver may be named by
+    several routes: it receives the sum of their shares. Routes that share a
+    receiver are audited together, in the ledger row of the first of them;
+    the others' rows stay zero. A source belongs to one route, and a
+    receiver of a route takes no other connection.
   - `signal(from, to)`: one-way copy.
 - `boundary(port, f)`: the input side of a port prescribed as `f(t0, dt)`.
 - `System::step(dt_max, cx) -> StepReport`, `state`, `last_input`,
@@ -227,6 +231,40 @@ the kernel.
   energy.
 - A tumbling body bonded to a three-axis spring follows the monolithic
   midpoint rule for translation over 4,000 steps with a closed ledger.
+
+Owner slice, `tests/viscous_network_slice.rs` (`--features slices`): the
+fs-mbd damped rigid-body network (`fs_mbd::component::network::ViscousNetwork`,
+the owner's `step_viscous_network_with_loads` behind the contract), three
+bodies and two connectors, one with off-centre arms and rotational damping.
+- Under forces and gravity at three step sizes it passes the conformance
+  check; the energy the kernel books equals the owner's applied force work
+  minus its connector heat to 1e-12 of the paired magnitudes; heat outputs,
+  stored change and numerical loss are the owner's numbers bit for bit; the
+  entropy is `sum(D_e / T_e)`.
+- A propose returns the owner's own states, bit for bit, and the mean
+  velocities of its displacements.
+- Refusals: no bodies, a connector to a missing body or to one body twice, a
+  temperature that is not positive, a state of the wrong length, cancellation.
+- The damping-heat pairing as a declared graph: connector 0's heat goes 60 %
+  to one `HeatCapacity`, 30 % to another and the rest to a named sink,
+  connector 1's heat all to the second (a shared receiver). Over 400 steps the
+  network's states equal the owner marched alone, bit for bit; each cell's
+  account, the sink and the network's dissipation match the fractions of the
+  owner's summed connector heat to 1e-11; the ledger closes.
+- With gravity and a held force on every body, the boundary work the kernel
+  books equals the owner's applied force work to 1e-11, and work in equals
+  mechanical change plus heat.
+Five planted defects were each caught: half of a connector's heat leaving,
+velocities written to the wrong body, entropy at the other connector's
+temperature, a later route replacing an earlier delivery, and routes that
+share a receiver audited alone.
+
+Shared receivers, `tests/elements.rs`: two heaters routed into one body (one
+of them also into a second body and a named sink) deliver the sum of their
+shares, the pair is audited in the first route's row, and the ledger closes;
+a receiver named twice in one call, a source used by two routes, and a
+receiver that is also in a junction (either order) are refused by name, and
+the refused calls change nothing.
 
 ## No-claim boundaries
 

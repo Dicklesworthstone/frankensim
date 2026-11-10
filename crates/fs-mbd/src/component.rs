@@ -23,6 +23,12 @@
 //! No claim: no contact, constraint or collision is handled here; the port
 //! map has no analytic tangent, so a kernel loop differences it; the split
 //! (kick-drift, Verlet) variants of the integrator are not wrapped.
+//!
+//! [`network::ViscousNetwork`] is the second owner here: several bodies and
+//! their viscous connectors as one Component, with a heat port per connector.
+
+/// A damped rigid-body network behind the Component contract.
+pub mod network;
 
 use core::num::NonZeroUsize;
 

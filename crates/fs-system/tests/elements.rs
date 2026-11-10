@@ -15,7 +15,9 @@ use fs_system::elements::{
     Conductance, Damper, ElementError, Force, HeatCapacity, Heater, Mass, Motion, SourceAccount,
     Spring, Waveform,
 };
-use fs_system::{NodeId, System, SystemBuilder};
+use fs_system::{
+    AdmissionError, NodeId, RouteTemperature, System, SystemBuilder, heat_sink,
+};
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new_clock_free();
@@ -539,4 +541,138 @@ fn a_heated_body_cooling_to_a_fixed_ambient_approaches_its_steady_temperature_by
     let left = -ledger.boundary_energy_in_j();
     assert!((kept + left - given).abs() <= 1.0e-9 * given, "{kept} + {left} vs {given}");
     assert!(ledger.energy_residual_j().abs() <= 1.0e-10 * given);
+}
+
+fn heater(builder: &mut SystemBuilder, name: &str, power_w: f64) -> NodeId {
+    builder
+        .add_with_tangent(
+            name,
+            Heater::new(Waveform::constant(power_w).unwrap()).unwrap(),
+            SourceAccount::default(),
+        )
+        .unwrap()
+}
+
+#[test]
+fn two_heat_routes_into_one_body_deliver_the_sum_of_their_shares() {
+    let (strong, weak) = (30.0_f64, 12.0_f64);
+    let (c_body, c_other) = (40.0_f64, 25.0_f64);
+    let mut builder = SystemBuilder::new();
+    let body = builder
+        .add_with_tangent("body", HeatCapacity::new(c_body).unwrap(), 300.0)
+        .unwrap();
+    let other = builder
+        .add_with_tangent("other", HeatCapacity::new(c_other).unwrap(), 320.0)
+        .unwrap();
+    let lamp = heater(&mut builder, "lamp", strong);
+    let coil = heater(&mut builder, "coil", weak);
+    let port = |builder: &SystemBuilder, node, name| builder.port(node, name).unwrap();
+    let (lamp_heat, coil_heat) = (port(&builder, lamp, "heat"), port(&builder, coil, "heat"));
+    let (body_heat, other_heat) = (port(&builder, body, "heat"), port(&builder, other, "heat"));
+    // All of the lamp's heat, and half of the coil's, reach the same body.
+    builder
+        .heat_route(lamp_heat, &[(body_heat, 1.0)], None, RouteTemperature::SinkEquivalent)
+        .unwrap();
+    builder
+        .heat_route(
+            coil_heat,
+            &[(body_heat, 0.5), (other_heat, 0.25)],
+            Some(heat_sink("ambient", 293.15).unwrap()),
+            RouteTemperature::SinkEquivalent,
+        )
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    assert!(system.guess(lamp_heat, &[300.0]));
+    assert!(system.guess(coil_heat, &[300.0]));
+
+    let (dt, steps) = (0.5, 200_u32);
+    step(&mut system, dt, steps);
+    let elapsed = dt * f64::from(steps);
+    let given = (strong + weak) * elapsed;
+
+    let ledger = system.ledger();
+    let stored = |name: &str| {
+        ledger
+            .nodes
+            .iter()
+            .find(|node| node.name == name)
+            .unwrap()
+            .stored_change_j
+            .value()
+    };
+    let close = |actual: f64, expected: f64| {
+        assert!((actual - expected).abs() <= 1.0e-12 * given, "{actual} vs {expected}");
+    };
+    close(stored("body"), (strong + 0.5 * weak) * elapsed);
+    close(stored("other"), 0.25 * weak * elapsed);
+    close(ledger.sink_heat_j(), 0.25 * weak * elapsed);
+    let reached = *system.state::<f64>(body).unwrap();
+    let expected = 300.0 + (strong + 0.5 * weak) * elapsed / c_body;
+    assert!((reached - expected).abs() <= 1.0e-10 * expected, "{reached} vs {expected}");
+
+    // The two routes share a receiver, so they are audited in one row: the
+    // first holds the pair's defect, the second holds nothing.
+    assert_eq!(ledger.connections.len(), 2);
+    assert!(ledger.connections[0].energy_defect_j.value().abs() <= 1.0e-12 * given);
+    assert_eq!(ledger.connections[1].energy_defect_j.value(), 0.0);
+    assert_eq!(ledger.connections[1].entropy_generated_j_per_k.value(), 0.0);
+    assert!(ledger.energy_residual_j().abs() <= 1.0e-12 * given);
+    assert!(ledger.entropy_generated_j_per_k() > 0.0);
+}
+
+#[test]
+fn a_shared_receiver_takes_route_deliveries_and_nothing_else() {
+    let mut builder = SystemBuilder::new();
+    let body = builder
+        .add_with_tangent("body", HeatCapacity::new(40.0).unwrap(), 300.0)
+        .unwrap();
+    let other = builder
+        .add_with_tangent("other", HeatCapacity::new(25.0).unwrap(), 300.0)
+        .unwrap();
+    let lamp = heater(&mut builder, "lamp", 30.0);
+    let coil = heater(&mut builder, "coil", 12.0);
+    let third = heater(&mut builder, "third", 5.0);
+    let port = |builder: &SystemBuilder, node, name| builder.port(node, name).unwrap();
+    let (lamp_heat, coil_heat, third_heat) = (
+        port(&builder, lamp, "heat"),
+        port(&builder, coil, "heat"),
+        port(&builder, third, "heat"),
+    );
+    let (body_heat, other_heat) = (port(&builder, body, "heat"), port(&builder, other, "heat"));
+    let whole = RouteTemperature::SinkEquivalent;
+    builder.heat_route(lamp_heat, &[(body_heat, 1.0)], None, whole).unwrap();
+
+    let refused = |result: Result<(), AdmissionError>, port: &str| match result {
+        Err(AdmissionError::AlreadyConnected { port: named }) => assert_eq!(named, port),
+        other => panic!("expected {port} to be refused, got {other:?}"),
+    };
+    // The same receiver twice in one call.
+    refused(
+        builder.heat_route(coil_heat, &[(body_heat, 0.5), (body_heat, 0.5)], None, whole),
+        "body.heat",
+    );
+    // A source belongs to one route.
+    refused(
+        builder.heat_route(lamp_heat, &[(other_heat, 1.0)], None, whole),
+        "lamp.heat",
+    );
+    // A receiver of a route takes no junction.
+    refused(builder.common_effort(body_heat, &[third_heat]), "body.heat");
+    // A port of a junction is not a route's receiver.
+    builder.common_effort(other_heat, &[third_heat]).unwrap();
+    refused(
+        builder.heat_route(coil_heat, &[(other_heat, 1.0)], None, whole),
+        "other.heat",
+    );
+
+    // The refused calls changed nothing: the coil is still free to join the
+    // lamp at the body, and the description seals and steps.
+    builder.heat_route(coil_heat, &[(body_heat, 1.0)], None, whole).unwrap();
+    let mut system = builder.seal().unwrap();
+    for heat in [lamp_heat, coil_heat, third_heat] {
+        assert!(system.guess(heat, &[300.0]));
+    }
+    step(&mut system, 0.5, 10);
+    let warmed = *system.state::<f64>(body).unwrap() - 300.0;
+    assert!((warmed - 42.0 * 5.0 / 40.0).abs() <= 1.0e-12 * 300.0, "{warmed}");
 }
