@@ -24,7 +24,7 @@
     "The closed body is heard, not felt: the observer is outside the loop, so each head's radiation load is still its own baffled table, with no shell diffraction and no exterior coupling between the heads",
     "Strand-end supports: each strand is pinned at the end plates with no strand-end or cord damping",
     "The wires' count, spacing, length, tension and preload are declared estimates, not sourced",
-    "Wire torsion loss is unmeasured and omitted, and the air drag is the linear law, so the wires' loss is a lower bound",
+    "Wire torsion loss is omitted, and the air drag is the linear law, so the wires' loss is a lower bound. No print found measures the torsional loss of music wire in the audio band. Kim and Johnson (2007) measured a shear-to-Young internal-friction ratio of 1.104 for SAE 1050 steel by resonant ultrasound; times the music wire's excess bending loss of 1.4e-4 (Heptonstall, Waller and Robertson, by ringdown) it gives a torsion loss of 1.546e-4, which on the coil's 24 % torsion share would shorten the coil's T60 at most from 53.83 to 49.35 s at 100 Hz and from 7.61 to 6.74 s at 1 kHz, inside 8-3000 Hz only; that derived value is not in the model. A torsion pendulum on hot-rolled AISI 1095 steel at 7-15 Hz (Visnapuu, Nash and Turner, U.S. Bureau of Mines RI 9068, 1987) gives a loss factor of 4.77e-4 at its lowest stress, 17 MPa: an upper bound for that steel, not a value for the wire",
     "Grid convergence: the snare isn't yet converged in grid spacing",
     "The snare is simulated alone, so it doesn't buzz when another drum is struck",
     "On the preset and live routes the strands are plain strings fitted to a recording (96ccf8f1b), not physics"
