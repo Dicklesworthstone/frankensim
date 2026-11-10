@@ -39,6 +39,7 @@ fs-matdb = { path = "../fs-matdb" }
 fs-matdb-store = { path = "../fs-matdb-store" }
 fs-material = { path = "../fs-material" }
 fs-math = { path = "../fs-math" }
+fs-mbd = { path = "../fs-mbd" }
 fs-mesh = { path = "../fs-mesh" }
 fs-opt = { path = "../fs-opt" }
 fs-package = { path = "../fs-package" }
@@ -64,9 +65,6 @@ cooling-design = ["dep:fs-ascent"]
 thermal-verification = ["fs-conduction/thermal-verification"]
 # The numerical 3-D CutFEM study retains the underlying frontier feature gate.
 sdf3-study = ["dep:fs-ascent", "dep:fs-cutfem", "dep:fs-ivl", "dep:fs-topopt"]
-
-[dev-dependencies]
-fs-mbd = { path = "../fs-mbd" }
 
 [lints]
 workspace = true

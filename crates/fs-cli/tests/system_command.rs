@@ -824,3 +824,145 @@ fn scenes_that_cannot_run_are_refused_with_the_reason() {
     assert_eq!(code, 3);
     assert!(stderr.contains("steps"), "{stderr}");
 }
+
+#[test]
+fn the_damped_pair_scene_runs_the_rigid_body_owner_and_matches_the_closed_form() {
+    let (code, json, stderr) = run_binary(&["--json", "system", &example("damped_pair.json")]);
+    assert_eq!(code, 0, "{stderr}");
+    // Two 2 kg bodies closing at 2 m/s on an axial connector of 0.7 N s/m:
+    // the reduced mass is 1 kg, so the relative speed decays as exp(-0.7 t)
+    // and each body keeps its share of it; the heat is the relative kinetic
+    // energy that has gone, 2 (1 - exp(-1.4 t)) J.
+    let t = 0.5_f64;
+    let decay = (-0.7 * t).exp();
+    let heat = 2.0 * -(-1.4 * t).exp_m1();
+    let pair = element("pair");
+    assert!((value(&json, &pair, "body0.velocity_x_m_s") - decay).abs() <= 1.0e-13);
+    assert!((value(&json, &pair, "body1.velocity_x_m_s") + decay).abs() <= 1.0e-13);
+    // The centre of mass of the pair does not move. The owner moves a body
+    // at the velocity it has after half a step's damping, so body 0 has
+    // travelled the sum of those four drifts; that is second order in the
+    // step and 1.3e-4 m short of the integral of the velocity.
+    let dt = 0.125_f64;
+    let drifted: f64 = (0..4).map(|n| dt * (-0.7 * (f64::from(n) + 0.5) * dt).exp()).sum();
+    let position = value(&json, &pair, "body0.position_x_m");
+    assert!((position - drifted).abs() <= 1.0e-13, "{position} vs {drifted}");
+    let travelled = -(-0.7 * t).exp_m1() / 0.7;
+    assert!((1.0e-4..2.0e-4).contains(&(travelled - position)), "{}", travelled - position);
+    let apart = value(&json, &pair, "body1.position_x_m") + value(&json, &pair, "body0.position_x_m");
+    assert!((apart - 1.0).abs() <= 1.0e-13, "{apart}");
+    // Nothing leaves the line or turns: exactly.
+    for quiet in ["body0.velocity_y_m_s", "body0.angular_velocity_z_rad_s", "body1.position_z_m"] {
+        assert!(value(&json, &pair, quiet).abs() <= 0.0, "{quiet}");
+    }
+    assert!((value(&json, &pair, "body0.orientation_w") - 1.0).abs() <= 0.0);
+    assert!((value(&json, &pair, "dissipated_j") - heat).abs() <= 1.0e-13, "{heat}");
+    // A quarter of the heat to the shell (5 J/K), half to the oil (8 J/K),
+    // the rest to the air.
+    let shell = value(&json, &element("shell"), "temperature_k");
+    let oil = value(&json, &element("oil"), "temperature_k");
+    assert!((shell - 300.0 - 0.25 * heat / 5.0).abs() <= 1.0e-12, "{shell}");
+    assert!((oil - 300.0 - 0.5 * heat / 8.0).abs() <= 1.0e-12, "{oil}");
+    assert!((value(&json, "\"name\":\"air\"", "heat_j") - 0.25 * heat).abs() <= 1.0e-13);
+    assert!(value(&json, "\"totals\"", "energy_residual_j").abs() <= 1.0e-12);
+    assert!(value(&json, "\"totals\"", "boundary_energy_in_j").abs() <= 0.0);
+    // The last step's mean heat rate of the connector is reported.
+    let last = 2.0 * ((-1.4 * (t - 0.125)).exp() - (-1.4 * t).exp()) / 0.125;
+    assert!((value(&json, &pair, "connector0.heat_w") - last).abs() <= 1.0e-12);
+    assert!(json.contains("rigid_network elements stepped by the fs-mbd damped rigid-body owner"));
+    let (code, text, _) = run_binary(&["system", &example("damped_pair.json")]);
+    assert_eq!(code, 0);
+    assert!(text.contains("rigid_network"), "{text}");
+}
+
+const ROTOR: &str = r#"{
+  "schema": "frankensim.system.v0", "duration_s": 0.5, "step_s": 0.0125,
+  "elements": {
+    "rotor": {
+      "kind": "rigid_network",
+      "gravity_m_s2": [0, 0, -9.81],
+      "bodies": [{"mass_kg": 2.0, "principal_inertia_kg_m2": [2.0, 3.0, 4.0],
+                  "position_m": [0, 0, 10.0]}],
+      "connectors": [],
+      "torque_ports": [0]
+    }
+  },
+  "connections": [
+    {"prescribe": "rotor.force0", "force_n": [0, 0, 0]},
+    {"prescribe": "rotor.torque0", "torque_n_m": [0, 0, 0.5]}
+  ]
+}"#;
+
+#[test]
+fn a_falling_body_spun_by_a_prescribed_torque_follows_its_two_equations() {
+    let path = scratch("rotor.json", ROTOR);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    // Free fall from rest: v = -g t and z = 10 - g t^2 / 2. A torque of
+    // 0.5 N m about the principal axis of 4 kg m^2: omega = tau t / I, and
+    // the torque's work is tau^2 t^2 / (2 I), all of it rotation.
+    let (t, g) = (0.5_f64, 9.81_f64);
+    let rotor = element("rotor");
+    assert!((value(&json, &rotor, "body0.velocity_z_m_s") + g * t).abs() <= 1.0e-12);
+    assert!((value(&json, &rotor, "body0.position_z_m") - (10.0 - 0.5 * g * t * t)).abs() <= 1.0e-12);
+    assert!((value(&json, &rotor, "body0.angular_velocity_z_rad_s") - 0.5 * t / 4.0).abs() <= 1.0e-14);
+    assert!(value(&json, &rotor, "body0.angular_velocity_x_rad_s").abs() <= 0.0);
+    let work = 0.5 * 0.5 * t * t / (2.0 * 4.0);
+    assert!((value(&json, "rotor.torque0", "energy_in_j") - work).abs() <= 1.0e-14);
+    assert!(value(&json, "rotor.force0", "energy_in_j").abs() <= 0.0);
+    // Kinetic energy of the fall is paid by the potential: the stored
+    // change is the torque's work alone.
+    assert!((value(&json, &rotor, "stored_change_j") - work).abs() <= 1.0e-11);
+    assert!(value(&json, "\"totals\"", "energy_residual_j").abs() <= 1.0e-11);
+}
+
+#[test]
+fn rigid_network_scenes_that_cannot_run_are_refused_with_the_reason() {
+    let pair = std::fs::read_to_string(example("damped_pair.json")).unwrap();
+    // A force port carries three components.
+    let scalar = pair.replace("\"pair.force0\", \"force_n\": [0, 0, 0]", "\"pair.force0\", \"force_n\": 0");
+    assert_ne!(scalar, pair);
+    let (code, stderr) = refused("scalar.json", &scalar);
+    assert_eq!(code, 3);
+    assert!(stderr.contains("force_n for this port is an array of 3 waveforms"), "{stderr}");
+    // A force port left unconnected is refused by the kernel, by name.
+    let loose = pair.replace("{\"prescribe\": \"pair.force1\", \"force_n\": [0, 0, 0]},", "");
+    assert_ne!(loose, pair);
+    let (code, stderr) = refused("free.json", &loose);
+    assert_eq!(code, 4);
+    assert!(stderr.contains("pair.force1"), "{stderr}");
+    // A connector joins two different bodies of the network.
+    for ends in ["[0, 0]", "[0, 2]", "[0.5, 1]"] {
+        let bad = pair.replace("\"bodies\": [0, 1]", &format!("\"bodies\": {ends}"));
+        assert_ne!(bad, pair);
+        let (code, stderr) = refused("ends.json", &bad);
+        assert_eq!(code, 3);
+        assert!(stderr.contains("connectors[0]: bodies is two different indices"), "{stderr}");
+    }
+    // Damping that is not passive, a field that does not exist, a mass
+    // that is not one.
+    let (code, stderr) = refused("negative.json", &pair.replace("[0.7, 0.0, 0.0]", "[-0.7, 0.0, 0.0]"));
+    assert_eq!(code, 3);
+    assert!(stderr.contains("connectors[0]: damping is not a passive form"), "{stderr}");
+    let (code, stderr) = refused("field.json", &pair.replace("\"damping_n_s_m\"", "\"damping\""));
+    assert_eq!(code, 3);
+    assert!(stderr.contains("unsupported field \"damping\""), "{stderr}");
+    let (code, stderr) = refused("mass.json", &pair.replacen("\"mass_kg\": 2.0", "\"mass_kg\": 0", 1));
+    assert_eq!(code, 3);
+    assert!(stderr.contains("bodies[0]: mass_kg must be positive"), "{stderr}");
+    // A torque port on a body the network does not have, and one asked twice.
+    for (ports, said) in [("[1]", "torque_ports is an array of body indices"), ("[0, 0]", "torque_ports")] {
+        let bad = ROTOR.replace("\"torque_ports\": [0]", &format!("\"torque_ports\": {ports}"));
+        let (code, stderr) = refused("torque.json", &bad);
+        assert_eq!(code, 3);
+        assert!(stderr.contains(said), "{stderr}");
+    }
+    // Error-controlled stepping has no account for the bodies.
+    let adaptive = ROTOR.replace(
+        "\"elements\"",
+        "\"adaptive\": {\"tolerances\": {}},\n  \"elements\"",
+    );
+    let (code, stderr) = refused("adaptive.json", &adaptive);
+    assert_eq!(code, 3);
+    assert!(stderr.contains("rotor is a rigid_network"), "{stderr}");
+}

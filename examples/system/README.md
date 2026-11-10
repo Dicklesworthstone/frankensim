@@ -21,7 +21,23 @@ is the kernel's state and its energy and entropy ledger.
 | `parallel_rlc.json` | a current source drives a capacitor, inductor and resistor in parallel; all Joule heat warms the case | independent coupled voltage/current equations, source work, electrical storage and heat |
 | `nonlinear_rlc.json` | the same topology with voltage-dependent capacitance and flux-dependent inductance, crossing both curves' knees | independent charge/flux differential equations, original constitutive energies and Joule heat |
 | `geared_oscillator.json` | an ideal 2.5:1 transformer couples a mass to an anchored spring | reflected stiffness `ratio² × stiffness`, the midpoint oscillation phase and conserved energy |
+| `damped_pair.json` | two rigid bodies in three dimensions closing at 2 m/s on a viscous connector, stepped by the fs-mbd network owner (`rigid_network`); a quarter of the connector's heat warms a shell, half an oil bath, the rest goes to the air | the closed form: each momentum decays as `exp(-0.7 t)`, the heat is `2 (1 - exp(-1.4 t))` J, split 25 / 50 / 25 |
 | `quarter_car.json` | a car body and wheel on a suspension spring and shock absorber, a tyre spring driven over a 30 mm bump; 70 % of the shock's heat warms it, the rest goes to the air | the ledger: road work = mechanical energy + heat, and the 70/30 split |
+
+## Rigid bodies from a physics owner
+
+`damped_pair.json` is the first scene whose element is not a lumped law of
+`fs_system::elements` but a physics owner behind the Component contract: a
+`rigid_network` lowers to `fs_mbd::component::network::ViscousNetwork`, which
+steps rigid bodies in three dimensions and their viscous connectors with the
+fs-mbd owner's own splitting. Its ports carry three components: `force<i>`
+takes the world force on body `i` and `torque<i>` (for the bodies named in
+`torque_ports`) the torque in that body's axes, each prescribed with an array
+of three waveforms; `heat<e>` is routed like a damper's heat. The report
+gives every body's position, velocity, orientation and angular velocity and
+every connector's mean heat rate over the last step. Error-controlled
+stepping does not cover a `rigid_network`; a scene with one runs at a fixed
+`step_s`.
 
 ## Error-controlled stepping
 

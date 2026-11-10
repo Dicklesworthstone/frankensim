@@ -13,8 +13,18 @@ use std::io::Read as _;
 use std::path::Path;
 
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_mbd::component::network::ViscousNetwork;
+use fs_mbd::spatial_loads::internal_impulse::InternalWrenchImpulseControls;
+use fs_mbd::spatial_loads::internal_impulse::viscous::network::{
+    ViscousNetworkLimits, ViscousNetworkLink,
+};
+use fs_mbd::spatial_loads::internal_impulse::viscous::{
+    BushingCoordinateScales, PassiveBushingMatrix, ViscousConnectorControls,
+};
+use fs_mbd::spatial_loads::internal_motion::viscous::network::ViscousNetworkMotionControls;
+use fs_mbd::{Gravity, MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 use fs_ports::PortKind;
-use fs_ports::component::{Carrier, PortRole, PortSpec, PortTangent};
+use fs_ports::component::{Carrier, Component, PortRole, PortSpec, PortTangent};
 use fs_system::constitutive::{
     CapacitorChargeCurve, InductorFluxCurve, MAX_CAPACITOR_KNOTS, MAX_INDUCTOR_KNOTS,
     NonlinearCapacitor, NonlinearInductor,
@@ -41,6 +51,11 @@ const MAX_ELEMENTS: usize = 2_000;
 const MAX_STEPS: f64 = 10_000_000.0;
 const MAX_SAMPLES: usize = 100_000;
 const NO_CLAIM: &str = "lumped elements with constant parameters or authored nonlinear electrical storage curves, using work-conjugate discrete-gradient stepping; no material-card resolution, contact, friction, phase change or step-size error control; the ledger states what the discrete system did, not what a physical device would do";
+const NETWORK_NO_CLAIM: &str = "lumped elements with constant parameters or authored nonlinear electrical storage curves, using work-conjugate discrete-gradient stepping, and rigid_network elements stepped by the fs-mbd damped rigid-body owner (its connector sources are exact at fixed geometry and its composition is second order for moving geometry); bodies have their principal axes along their own axes and their centre of mass at their origin, and connector damping is constant and diagonal; no material-card resolution, contact, friction, phase change or step-size error control; the ledger states what the discrete system did, not what a physical device would do";
+/// Bodies and connectors one `rigid_network` may hold: its owner sweeps the
+/// connectors of the whole bank on every step.
+const MAX_NETWORK_BODIES: usize = 64;
+const MAX_NETWORK_CONNECTORS: usize = 256;
 const ADAPTIVE_NO_CLAIM: &str = "step-doubling estimates control the declared state coordinates and source-work increments under the selected order assumption; they are local numerical estimates, not global error bounds or physical validation; dissipated heat and interface balances retain the kernel's separate ledger audits; no material-card resolution, contact, friction or phase change";
 
 const HELP: &str = "Usage: frankensim [--json] system <scene.json>
@@ -108,6 +123,25 @@ Between two domains, without loss (an ideal DC machine with a = electrical,
 b = rotation and ratio in N m/A: torque ratio * i on the rotor, back-EMF
 ratio * w against the loop):
   gyrator        ratio, a, b (translation | rotation | electrical)    [a, b]
+Rigid bodies in three dimensions joined by viscous connectors, stepped by the
+fs-mbd network owner. Vectors are [x, y, z] in world axes unless said
+otherwise; a body's principal axes are its own axes and its centre of mass
+is its origin:
+  rigid_network  bodies = [{mass_kg, principal_inertia_kg_m2, position_m,
+                   orientation = [1, 0, 0, 0] (w, x, y, z), velocity_m_s = 0,
+                   angular_velocity_rad_s = 0 (in the body's axes)}, ...]
+                 connectors = [{bodies = [i, j], attachments_m = [point on i,
+                   point on j] (each in its body's axes; default the centres
+                   of mass), damping_n_s_m = 0, rotary_damping_n_m_s_rad = 0
+                   (three each, along body i's axes)}, ...]
+                 gravity_m_s2 = 0, torque_ports = [] (body indices),
+                 balance_tolerance = 1e-9 (the owner's allowance on a step's
+                   momentum, work and speed balances, in SI units)
+                 [force<i> per body, heat<e> per connector, torque<i> for
+                  each body named in torque_ports]
+  At most 64 bodies and 256 connectors. force<i> takes the world force on the
+  centre of mass and torque<i> the torque in the body's axes; prescribe both
+  with three waveforms. heat<e> is routed like a damper's heat.
 A waveform is a number, {\"sine\": {amplitude, frequency_hz, phase_rad = 0,
 offset = 0}} or {\"table\": [[time_s, value], ...]} (linear, ends held).
 
@@ -137,7 +171,9 @@ Connections, ports written element.port:
                           grounds a resistor_branch end; current_a into a
                           node_capacitor or nonlinear_capacitor increases its charge;
                           temperature_k for a damper, resistor, conductance or
-                          heater, heat_rate_w for a heat capacity
+                          heater, heat_rate_w for a heat capacity; for a
+                          rigid_network, force_n or torque_n_m as an array of
+                          three waveforms ([0, 0, 0] leaves a body free)
 
 Each element's port a is the end at mass A and b the end at mass B; the
 extension of a spring is x_B - x_A less its unloaded length; a series
@@ -347,13 +383,15 @@ enum Kind {
     /// Flux storage governed by a source-owned I(flux) curve.
     NonlinearInductor,
     Gyrator,
+    /// Rigid bodies and viscous connectors, stepped by their fs-mbd owner.
+    RigidNetwork,
     HeatCapacity,
     Conductance,
     Heater,
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 21] = [
+    const TABLE: [(&'static str, Self); 22] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
@@ -372,6 +410,7 @@ impl Kind {
         ("nonlinear_capacitor", Self::NonlinearCapacitor),
         ("nonlinear_inductor", Self::NonlinearInductor),
         ("gyrator", Self::Gyrator),
+        ("rigid_network", Self::RigidNetwork),
         ("heat_capacity", Self::HeatCapacity),
         ("conductance", Self::Conductance),
         ("heater", Self::Heater),
@@ -405,6 +444,10 @@ struct Element {
     /// Original laws for endpoint probes; prepared data are shared on clone.
     charge_voltage_curve: Option<CapacitorChargeCurve>,
     flux_current_curve: Option<InductorFluxCurve>,
+    /// The bodies of a rigid network, for reading velocities from momenta,
+    /// and the number of its connectors.
+    bodies: Vec<MassProperties>,
+    connectors: usize,
 }
 
 struct Device {
@@ -669,6 +712,233 @@ fn gyrator(
     add(builder, name, gyrator, ())
 }
 
+/// Three finite numbers.
+fn point(value: &J, what: &str) -> Result<[f64; 3], String> {
+    let numbers = match value.as_array() {
+        Some([x, y, z]) => x.as_f64().zip(y.as_f64()).zip(z.as_f64()),
+        _ => None,
+    };
+    match numbers {
+        Some(((x, y), z)) if x.is_finite() && y.is_finite() && z.is_finite() => Ok([x, y, z]),
+        _ => Err(format!("{what}: expected three finite numbers")),
+    }
+}
+
+/// The three numbers of field `key`, or `default` where the field is absent.
+fn triple(
+    value: &J,
+    key: &str,
+    default: Option<[f64; 3]>,
+    what: &str,
+) -> Result<[f64; 3], String> {
+    match value.get(key) {
+        Some(field) => point(field, &format!("{what}.{key}")),
+        None => default.ok_or_else(|| format!("{what}: missing {key}")),
+    }
+}
+
+fn vec3(v: [f64; 3]) -> Vec3 {
+    Vec3::new(v[0], v[1], v[2])
+}
+
+/// A whole number from 0 to `count - 1`.
+fn index_below(value: &J, count: usize) -> Option<usize> {
+    value
+        .as_f64()
+        .filter(|v| v.fract() == 0.0 && *v >= 0.0 && *v < count as f64)
+        .map(|v| v as usize)
+}
+
+/// One body of a rigid network: its mass properties and its starting state.
+fn network_body(row: &J, what: &str) -> Result<(MassProperties, RigidBodyState), Refusal> {
+    fields(
+        row,
+        &[
+            "mass_kg",
+            "principal_inertia_kg_m2",
+            "position_m",
+            "orientation",
+            "velocity_m_s",
+            "angular_velocity_rad_s",
+        ],
+        what,
+    )?;
+    let refused = |e: fs_mbd::DynamicsError| Refusal::Input(format!("{what}: {e}"));
+    let properties = MassProperties::new(
+        positive(row, "mass_kg", what)?,
+        Vec3::ZERO,
+        vec3(triple(row, "principal_inertia_kg_m2", None, what)?),
+    )
+    .map_err(refused)?;
+    let orientation = match row.get("orientation") {
+        None => UnitQuaternion::IDENTITY,
+        Some(field) => {
+            let numbers = match field.as_array() {
+                Some([w, x, y, z]) => w.as_f64().zip(x.as_f64()).zip(y.as_f64().zip(z.as_f64())),
+                _ => None,
+            };
+            let ((w, x), (y, z)) = numbers
+                .ok_or_else(|| format!("{what}: orientation is a quaternion [w, x, y, z]"))?;
+            UnitQuaternion::new(w, x, y, z).map_err(refused)?
+        }
+    };
+    let pose =
+        Pose::new(vec3(triple(row, "position_m", None, what)?), orientation).map_err(refused)?;
+    let velocity = triple(row, "velocity_m_s", Some([0.0; 3]), what)?;
+    let mass = properties.mass();
+    let momentum = Vec3::new(mass * velocity[0], mass * velocity[1], mass * velocity[2]);
+    let spin = properties
+        .angular_momentum_body_checked(vec3(triple(
+            row,
+            "angular_velocity_rad_s",
+            Some([0.0; 3]),
+            what,
+        )?))
+        .map_err(refused)?;
+    let state = RigidBodyState::new(pose, momentum, spin).map_err(refused)?;
+    Ok((properties, state))
+}
+
+/// One viscous connector of a rigid network of `bodies` bodies.
+fn network_connector(row: &J, bodies: usize, what: &str) -> Result<ViscousNetworkLink, Refusal> {
+    fields(
+        row,
+        &["bodies", "attachments_m", "damping_n_s_m", "rotary_damping_n_m_s_rad"],
+        what,
+    )?;
+    let ends = match row.get("bodies").and_then(J::as_array) {
+        Some([a, b]) => index_below(a, bodies).zip(index_below(b, bodies)),
+        _ => None,
+    };
+    let (first, second) = ends
+        .filter(|(a, b)| a != b)
+        .ok_or_else(|| format!("{what}: bodies is two different indices into bodies"))?;
+    let arms_body_m = match row.get("attachments_m") {
+        None => [Vec3::ZERO; 2],
+        Some(field) => match field.as_array() {
+            Some([a, b]) => {
+                let inner = format!("{what}.attachments_m");
+                [vec3(point(a, &inner)?), vec3(point(b, &inner)?)]
+            }
+            _ => return Err(format!("{what}: attachments_m is two points").into()),
+        },
+    };
+    let linear = triple(row, "damping_n_s_m", Some([0.0; 3]), what)?;
+    let rotary = triple(row, "rotary_damping_n_m_s_rad", Some([0.0; 3]), what)?;
+    let mut coefficients = [[0.0; 6]; 6];
+    for axis in 0..3 {
+        coefficients[axis][axis] = linear[axis];
+        coefficients[3 + axis][3 + axis] = rotary[axis];
+    }
+    let damping = PassiveBushingMatrix::try_new(
+        coefficients,
+        BushingCoordinateScales {
+            translation_m: 1.0,
+            rotation_rad: 1.0,
+        },
+    )
+    .map_err(|e| format!("{what}: damping is not a passive form: {e:?}"))?;
+    Ok(ViscousNetworkLink {
+        bodies: [first, second],
+        arms_body_m,
+        damping,
+    })
+}
+
+/// A `rigid_network`: rigid bodies joined by viscous connectors, lowered to
+/// the fs-mbd network Component. Returns the node, its ports, the bodies and
+/// the number of connectors.
+fn rigid_network(
+    builder: &mut SystemBuilder,
+    name: &str,
+    definition: &J,
+    what: &str,
+) -> Result<(NodeId, Vec<PortSpec>, Vec<MassProperties>, usize), Refusal> {
+    fields(
+        definition,
+        &[
+            "kind",
+            "bodies",
+            "connectors",
+            "gravity_m_s2",
+            "torque_ports",
+            "balance_tolerance",
+        ],
+        what,
+    )?;
+    let gravity = Gravity::new(vec3(triple(definition, "gravity_m_s2", Some([0.0; 3]), what)?))
+        .map_err(|e| format!("{what}.gravity_m_s2: {e}"))?;
+    let rows = definition
+        .get("bodies")
+        .and_then(J::as_array)
+        .filter(|rows| (1..=MAX_NETWORK_BODIES).contains(&rows.len()))
+        .ok_or_else(|| format!("{what}: bodies is an array of 1 to {MAX_NETWORK_BODIES} bodies"))?;
+    let mut properties = Vec::with_capacity(rows.len());
+    let mut states = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        let (body, state) = network_body(row, &format!("{what}.bodies[{index}]"))?;
+        properties.push(body);
+        states.push(state);
+    }
+    let rows = definition
+        .get("connectors")
+        .and_then(J::as_array)
+        .filter(|rows| rows.len() <= MAX_NETWORK_CONNECTORS)
+        .ok_or_else(|| {
+            format!("{what}: connectors is an array of at most {MAX_NETWORK_CONNECTORS} connectors")
+        })?;
+    let links = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            network_connector(row, properties.len(), &format!("{what}.connectors[{index}]"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let connectors = links.len();
+    let tolerance = match definition.get("balance_tolerance") {
+        None => 1.0e-9,
+        Some(_) => positive(definition, "balance_tolerance", what)?,
+    };
+    let controls = ViscousNetworkMotionControls {
+        source: ViscousConnectorControls {
+            impulse: InternalWrenchImpulseControls {
+                angular_origin_world_m: Vec3::ZERO,
+                linear_tolerance_ns: tolerance,
+                angular_tolerance_nms: tolerance,
+                work_tolerance_j: tolerance,
+            },
+            linear_speed_tolerance_m_s: tolerance,
+            angular_speed_tolerance_rad_s: tolerance,
+        },
+        source_substeps: 1,
+        limits: ViscousNetworkLimits {
+            maximum_bodies: properties.len(),
+            maximum_connectors: connectors,
+            maximum_pair_relaxations: 1_000_000,
+            maximum_live_bytes: 64 << 20,
+        },
+    };
+    let mut network = ViscousNetwork::new(properties.clone(), links, gravity, controls)
+        .map_err(|e| Refusal::Input(format!("{what}: {e}")))?;
+    if let Some(list) = definition.get("torque_ports") {
+        let rows = list
+            .as_array()
+            .ok_or_else(|| format!("{what}: torque_ports is an array of body indices"))?;
+        for row in rows {
+            let body = index_below(row, properties.len())
+                .ok_or_else(|| format!("{what}: torque_ports is an array of body indices"))?;
+            network = network
+                .torqued(body)
+                .map_err(|e| Refusal::Input(format!("{what}.torque_ports: {e}")))?;
+        }
+    }
+    let ports = network.ports().to_vec();
+    let node = builder
+        .add(name, network, states)
+        .map_err(|e| Refusal::Admission(e.to_string()))?;
+    Ok((node, ports, properties, connectors))
+}
+
 fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<Element, Refusal> {
     let what = format!("elements.{name}");
     let kind_name = definition
@@ -680,6 +950,8 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
     let mut capacitance_f = None;
     let mut charge_voltage_curve = None;
     let mut flux_current_curve = None;
+    let mut bodies = Vec::new();
+    let mut connectors = 0;
     let (node, ports) = match kind {
         Kind::Inertance(domain) => {
             let names = domain.names();
@@ -781,6 +1053,12 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
             add(builder, name, NonlinearInductor::new(curve), flux)?
         }
         Kind::Gyrator => gyrator(builder, name, definition, &what)?,
+        Kind::RigidNetwork => {
+            let (node, ports, properties, links) = rigid_network(builder, name, definition, &what)?;
+            bodies = properties;
+            connectors = links;
+            (node, ports)
+        }
         Kind::HeatCapacity => {
             fields(definition, &["kind", "capacity_j_k", "temperature_k"], &what)?;
             let start = positive(definition, "temperature_k", &what)?;
@@ -812,6 +1090,8 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
         capacitance_f,
         charge_voltage_curve,
         flux_current_curve,
+        bodies,
+        connectors,
     })
 }
 
@@ -822,6 +1102,8 @@ struct Resolved {
     port: PortRef,
     carrier: Carrier,
     role: PortRole,
+    /// Coefficients the port carries each way.
+    width: usize,
 }
 
 fn resolve(
@@ -860,6 +1142,7 @@ fn resolve(
         port,
         carrier: spec.carrier(),
         role: spec.role(),
+        width: spec.width(),
     })
 }
 
@@ -1045,13 +1328,29 @@ fn prescribe(
     };
     fields(connection, &["prescribe", quantity], what)
         .map_err(|_| format!("{what}: this port takes exactly one quantity, {quantity}"))?;
-    let wave = waveform(
-        connection
-            .get(quantity)
-            .ok_or_else(|| format!("{what}: missing {quantity}"))?,
-        &format!("{what}.{quantity}"),
-    )?;
-    if quantity == "temperature_k" && !(wave.lowest() > 0.0) {
+    let given = connection
+        .get(quantity)
+        .ok_or_else(|| format!("{what}: missing {quantity}"))?;
+    // A scalar port takes one waveform; a port of several components (a
+    // rigid network's force or torque) takes one per component.
+    let waves = if target.width == 1 {
+        vec![waveform(given, &format!("{what}.{quantity}"))?]
+    } else {
+        given
+            .as_array()
+            .filter(|rows| rows.len() == target.width)
+            .ok_or_else(|| {
+                format!(
+                    "{what}: {quantity} for this port is an array of {} waveforms",
+                    target.width
+                )
+            })?
+            .iter()
+            .enumerate()
+            .map(|(index, row)| waveform(row, &format!("{what}.{quantity}[{index}]")))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    if quantity == "temperature_k" && !waves.iter().all(|wave| wave.lowest() > 0.0) {
         return Err(format!("{what}: temperature_k must stay positive").into());
     }
     // A series element end carried by a node receives minus the node's
@@ -1064,7 +1363,11 @@ fn prescribe(
     builder
         .boundary(
             target.port,
-            Box::new(move |t0, dt, values| values[0] = sign * wave.mean(t0, dt)),
+            Box::new(move |t0, dt, values| {
+                for (value, wave) in values.iter_mut().zip(&waves) {
+                    *value = sign * wave.mean(t0, dt);
+                }
+            }),
         )
         .map_err(|e| Refusal::Admission(format!("{what}: {e}")))?;
     Ok(())
@@ -1129,6 +1432,13 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             Kind::HeatCapacity => vec![("temperature_k", Coordinate::Scalar)],
             Kind::Source(_) | Kind::CurrentSource | Kind::Heater => vec![("energy_in_j", Coordinate::SourceWork)],
             Kind::Resistance(_) | Kind::ResistorBranch | Kind::Gyrator | Kind::Conductance => Vec::new(),
+            Kind::RigidNetwork => {
+                return Err(format!(
+                    "adaptive: {} is a rigid_network, whose bodies have no error account here; \
+                     run it with a fixed step_s",
+                    element.name
+                ));
+            }
         };
         for (field, coordinate) in coordinates {
             expected.push((format!("{}.{field}", element.name), element.node, coordinate));
@@ -1273,7 +1583,13 @@ fn load(path: &Path) -> Result<Device, Refusal> {
 
 impl Device {
     fn no_claim(&self) -> &'static str {
-        if self.adaptive.is_some() { ADAPTIVE_NO_CLAIM } else { NO_CLAIM }
+        if self.adaptive.is_some() {
+            ADAPTIVE_NO_CLAIM
+        } else if self.elements.iter().any(|element| element.kind == Kind::RigidNetwork) {
+            NETWORK_NO_CLAIM
+        } else {
+            NO_CLAIM
+        }
     }
 
     fn run(&mut self) -> Result<(), RunError> {
@@ -1353,7 +1669,64 @@ impl Device {
 
     /// The state of an element, and for stateless ones the step-mean values
     /// of the last step.
-    fn values(&self, element: &Element) -> Vec<(&'static str, f64)> {
+    fn values(&self, element: &Element) -> Vec<(String, f64)> {
+        if element.kind == Kind::RigidNetwork {
+            return self.network_values(element);
+        }
+        self.lumped_values(element)
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect()
+    }
+
+    /// Every body of a rigid network (position and velocity of its centre of
+    /// mass in world axes, orientation, angular velocity in its own axes)
+    /// and the mean heat rate of every connector over the last step.
+    fn network_values(&self, element: &Element) -> Vec<(String, f64)> {
+        let system = &self.system;
+        let states = system.state::<Vec<RigidBodyState>>(element.node);
+        let unknown = Vec3::new(f64::NAN, f64::NAN, f64::NAN);
+        let mut values = Vec::with_capacity(13 * element.bodies.len() + element.connectors);
+        for (index, properties) in element.bodies.iter().enumerate() {
+            let state = states.and_then(|states| states.get(index));
+            let position = state.map_or(unknown, |state| state.pose().position_world());
+            let velocity = state
+                .and_then(|state| state.center_of_mass_velocity_world(*properties).ok())
+                .unwrap_or(unknown);
+            let spin = state
+                .and_then(|state| {
+                    properties
+                        .angular_velocity_body_checked(state.angular_momentum_body())
+                        .ok()
+                })
+                .unwrap_or(unknown);
+            for (field, unit, vector) in [
+                ("position", "m", position),
+                ("velocity", "m_s", velocity),
+                ("angular_velocity", "rad_s", spin),
+            ] {
+                for (axis, component) in [("x", vector.x), ("y", vector.y), ("z", vector.z)] {
+                    values.push((format!("body{index}.{field}_{axis}_{unit}"), component));
+                }
+            }
+            let orientation = state.map_or([f64::NAN; 4], |state| {
+                state.pose().orientation().components()
+            });
+            for (axis, component) in ["w", "x", "y", "z"].into_iter().zip(orientation) {
+                values.push((format!("body{index}.orientation_{axis}"), component));
+            }
+        }
+        for connector in 0..element.connectors {
+            let heat_w = match system.port(element.node, &format!("heat{connector}")) {
+                Some(port) if system.steps() > 0 => -system.last_output(port)[0],
+                _ => f64::NAN,
+            };
+            values.push((format!("connector{connector}.heat_w"), heat_w));
+        }
+        values
+    }
+
+    fn lumped_values(&self, element: &Element) -> Vec<(&'static str, f64)> {
         let system = &self.system;
         // Before the first step there is no last step: those values are null.
         let output = |port: &str| match system.port(element.node, port) {
@@ -1410,6 +1783,8 @@ impl Device {
             }
             Kind::Gyrator => vec![("effort_a", output("a")), ("effort_b", output("b"))],
             Kind::Conductance => vec![("heat_rate_w", output("a"))],
+            // Read by `network_values`.
+            Kind::RigidNetwork => Vec::new(),
         }
     }
 
@@ -1526,7 +1901,7 @@ impl Device {
                 "{{\"name\":{},\"kind\":{},\"state\":{},\"ledger\":{{\"port_energy_in_j\":{},\"stored_change_j\":{},\"dissipated_j\":{},\"numerical_loss_j\":{},\"entropy_generated_j_per_k\":{},\"balance_defect_j\":{}}}}}",
                 quote(&element.name),
                 quote(element.kind.name()),
-                object(self.values(element).iter().map(|(k, v)| ((*k).to_owned(), *v))),
+                object(self.values(element).into_iter()),
                 num(account.port_energy_in_j.value()),
                 num(account.stored_change_j.value()),
                 num(account.dissipated_j.value()),

@@ -797,6 +797,37 @@ prescribed `current_a` is positive into its stored charge. Its reported
 readings are step means. The legacy `capacitor`, `resistor` and `join` retain
 their series-loop conventions.
 
+A `rigid_network` is the first scene element that is a physics owner behind
+the Component contract and not a lumped law: it lowers to
+`fs_mbd::component::network::ViscousNetwork` (rigid bodies in three
+dimensions and viscous connectors, stepped by the fs-mbd owner). It takes
+`bodies` (1 to 64, each `mass_kg`, `principal_inertia_kg_m2`, `position_m`,
+optional `orientation` `[w, x, y, z]`, `velocity_m_s` and
+`angular_velocity_rad_s` in the body's axes), `connectors` (at most 256, each
+`bodies = [i, j]`, optional `attachments_m` in each body's axes, and
+`damping_n_s_m` and `rotary_damping_n_m_s_rad`, three each along body `i`'s
+axes), optional `gravity_m_s2`, `torque_ports` (body indices) and
+`balance_tolerance` (default 1e-9: the owner's allowance on a step's
+momentum, work and speed balances, one number for the five). Ports:
+`force<i>` per body, `heat<e>` per connector, `torque<i>` for the bodies
+named. A port of three components is prescribed with an array of three
+waveforms (`force_n` in world axes, `torque_n_m` in the body's axes); a
+scalar there is refused. The state reported is every body's
+`body<i>.position_{x,y,z}_m`, `velocity_{x,y,z}_m_s`,
+`angular_velocity_{x,y,z}_rad_s` and `orientation_{w,x,y,z}`, and every
+connector's `connector<e>.heat_w` as the mean of the last step. G1, in
+`crates/fs-cli/tests/system_command.rs`: `examples/system/damped_pair.json`
+against the closed form (velocities and heat to 1e-13, the heat split
+25 / 50 / 25 among two heat capacities and a sink, positions against the
+owner's own splitting, which differs from the continuous integral by 1.3e-4 m
+at that step); a falling body spun by a prescribed torque against `v = -g t`,
+`z = z0 - g t^2 / 2`, `omega = tau t / I` and the torque's work; refusals. No
+claim: a body's principal axes are its own axes and its centre of mass its
+origin; damping is constant and diagonal; no Maxwell branches, actuators or
+temperature-dependent damping from a scene (the fs-mbd Components have them);
+a force port cannot be joined to a lumped element; `adaptive` refuses a scene
+that holds a `rigid_network`.
+
 `nonlinear_capacitor` takes `charge_voltage_curve` as `[charge_c, voltage_v]`
 knots and an optional initial `charge_c`; `nonlinear_inductor` takes
 `flux_current_curve` as `[flux_wb, current_a]` knots and optional `flux_wb`.
