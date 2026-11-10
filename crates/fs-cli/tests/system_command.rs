@@ -246,6 +246,130 @@ fn the_dc_motor_scene_matches_the_monolithic_midpoint_rule_across_three_domains(
 }
 
 #[test]
+fn the_parallel_rlc_scene_matches_node_equations_source_work_and_joule_heat() {
+    let (code, json, stderr) = run_binary(&["--json", "system", &example("parallel_rlc.json")]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.is_empty());
+
+    // C V' = J(t) - G V - I, L I' = V. The source waveform is -J:
+    // positive flow enters each owner, including the prescribed source.
+    let (c, l, g, v0, i0) = (0.01_f64, 0.2_f64, 0.05_f64, 2.0_f64, -0.1_f64);
+    let (dt, steps) = (0.001_f64, 2_000_u32);
+    let (mut voltage, mut current) = (v0, i0);
+    let (mut supplied_j, mut heat_j) = (0.0_f64, 0.0_f64);
+    for step in 0..steps {
+        let omega = 6.0 * std::f64::consts::PI;
+        let phase = omega * f64::from(step) * dt + 0.3;
+        // Integrate the sine independently of the library's waveform helper.
+        let supplied = 0.4 + 0.2 * (phase.cos() - (phase + omega * dt).cos()) / (omega * dt);
+        let half = 0.5 * dt;
+        let mean_v = (voltage + half / c * (supplied - current))
+            / (1.0 + half * g / c + half * half / (c * l));
+        voltage = 2.0 * mean_v - voltage;
+        current += dt / l * mean_v;
+        supplied_j += dt * supplied * mean_v;
+        heat_j += dt * g * mean_v * mean_v;
+    }
+    let capacitor = element("capacitor");
+    let reached_v = value(&json, &capacitor, "voltage_v");
+    let reached_q = value(&json, &capacitor, "charge_c");
+    let reached_i = value(&json, &element("coil"), "current_a");
+    assert!((reached_v - voltage).abs() <= 1.0e-9, "{reached_v} vs {voltage}");
+    assert!((reached_q - c * voltage).abs() <= 1.0e-11, "{reached_q} vs {}", c * voltage);
+    assert!((reached_i - current).abs() <= 1.0e-10, "{reached_i} vs {current}");
+    // The reported voltage is the endpoint q/C, not the last step's mean.
+    assert!((reached_v - reached_q / c).abs() <= 1.0e-13);
+
+    let delivered = -value(&json, &element("source"), "energy_in_j");
+    let dissipated = value(&json, &element("load"), "dissipated_j");
+    let warmed = value(&json, &element("case"), "stored_change_j");
+    let temperature = value(&json, &element("case"), "temperature_k");
+    assert!((delivered - supplied_j).abs() <= 1.0e-10, "{delivered} vs {supplied_j}");
+    assert!((dissipated - heat_j).abs() <= 1.0e-10, "{dissipated} vs {heat_j}");
+    assert!((warmed - heat_j).abs() <= 1.0e-10, "{warmed} vs {heat_j}");
+    assert!((10.0 * (temperature - 293.15) - heat_j).abs() <= 2.0e-9);
+    let stored_change = 0.5 * (c * (reached_v * reached_v - v0 * v0)
+        + l * (reached_i * reached_i - i0 * i0));
+    assert!((delivered - stored_change - warmed).abs() <= 1.0e-10);
+    assert!(value(&json, "\"totals\"", "energy_residual_j").abs() <= 1.0e-10);
+    assert!(value(&json, "\"totals\"", "entropy_generated_j_per_k") > 0.0);
+    assert_eq!(json.matches("{\"time_s\":").count(), 101);
+
+    let scene = std::fs::read_to_string(example("parallel_rlc.json")).unwrap();
+    for (file, original, replacement) in [
+        ("parallel_bad_capacitance.json", "\"capacitance_f\": 0.01", "\"capacitance_f\": 0"),
+        ("parallel_bad_resistance.json", "\"resistance_ohm\": 20.0", "\"resistance_ohm\": 0"),
+    ] {
+        let changed = scene.replace(original, replacement);
+        assert_ne!(changed, scene);
+        let (code, stderr) = refused(file, &changed);
+        assert_eq!(code, 3, "{stderr}");
+        assert!(stderr.contains("positive"), "{stderr}");
+    }
+    let wrong_ground = scene.replace("\"voltage_v\": 0", "\"current_a\": 0");
+    let (code, stderr) = refused("parallel_ground_quantity.json", &wrong_ground);
+    assert_eq!(code, 3, "{stderr}");
+    assert!(stderr.contains("exactly one quantity, voltage_v"), "{stderr}");
+}
+
+#[test]
+fn a_prescribed_current_enters_the_node_capacitor() {
+    let scene = r#"{
+  "schema": "frankensim.system.v0", "duration_s": 0.1, "step_s": 0.001,
+  "elements": {
+    "cap": {"kind": "node_capacitor", "capacitance_f": 0.2, "charge_c": 0.03}
+  },
+  "connections": [{"prescribe": "cap.p", "current_a": 0.4}]
+}"#;
+    let path = scratch("charged_node.json", scene);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    let charge = value(&json, &element("cap"), "charge_c");
+    let voltage = value(&json, &element("cap"), "voltage_v");
+    assert!((charge - 0.07).abs() <= 1.0e-12, "{charge}");
+    assert!((voltage - 0.35).abs() <= 1.0e-12, "{voltage}");
+    let entered = value(&json, "\"port\":\"cap.p\"", "energy_in_j");
+    let expected = (0.07_f64.powi(2) - 0.03_f64.powi(2)) / (2.0 * 0.2);
+    assert!((entered - expected).abs() <= 1.0e-12, "{entered} vs {expected}");
+    assert!(value(&json, "\"totals\"", "energy_residual_j").abs() <= 1.0e-12);
+}
+
+#[test]
+fn the_transformer_scene_has_reflected_stiffness_with_either_signed_ratio() {
+    let scene = std::fs::read_to_string(example("geared_oscillator.json")).unwrap();
+    for ratio in [2.5_f64, -2.5] {
+        let changed = if ratio < 0.0 {
+            scene.replace("\"ratio\": 2.5", "\"ratio\": -2.5")
+                .replace("\"extension_m\": -0.25", "\"extension_m\": 0.25")
+        } else {
+            scene.clone()
+        };
+        let path = scratch(if ratio > 0.0 { "gear_forward.json" } else { "gear_reverse.json" }, &changed);
+        let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+        assert_eq!(code, 0, "{stderr}");
+        let (m, k, x0, v0, dt, steps) = (2.0_f64, 80.0_f64, 0.1_f64, -0.4_f64, 0.002_f64, 1_500_u32);
+        let omega = (k * ratio * ratio / m).sqrt();
+        let angle = f64::from(steps) * 2.0 * (0.5 * omega * dt).atan();
+        let expected_x = x0 * angle.cos() + v0 / omega * angle.sin();
+        let expected_v = v0 * angle.cos() - omega * x0 * angle.sin();
+        let reached_x = value(&json, &element("mass"), "position_m");
+        let reached_v = value(&json, &element("mass"), "velocity_m_s");
+        let extension = value(&json, &element("spring"), "extension_m");
+        assert!((reached_x - expected_x).abs() <= 1.0e-10, "{reached_x} vs {expected_x}");
+        assert!((reached_v - expected_v).abs() <= 1.0e-9, "{reached_v} vs {expected_v}");
+        assert!((extension + ratio * reached_x).abs() <= 1.0e-12);
+        let initial = 0.5 * (m * v0 * v0 + k * (ratio * x0).powi(2));
+        let final_energy = 0.5 * (m * reached_v * reached_v + k * extension * extension);
+        assert!((final_energy - initial).abs() <= 1.0e-10 * initial);
+        assert!(value(&json, "\"totals\"", "energy_residual_j").abs() <= 1.0e-11);
+    }
+    let zero_ratio = scene.replace("\"ratio\": 2.5", "\"ratio\": 0");
+    let (code, stderr) = refused("gear_zero_ratio.json", &zero_ratio);
+    assert_eq!(code, 4, "{stderr}");
+    assert!(stderr.contains("ratio"), "{stderr}");
+}
+
+#[test]
 fn library_and_binary_give_the_same_bytes_and_text_mode_reports_the_ledger() {
     let scene = example("quarter_car.json");
     let library = fs_cli::run(["--json", "system", &scene].map(str::to_owned));

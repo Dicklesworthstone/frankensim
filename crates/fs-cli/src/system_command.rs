@@ -16,8 +16,8 @@ use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_ports::PortKind;
 use fs_ports::component::{Carrier, PortRole, PortSpec, PortTangent};
 use fs_system::elements::{
-    Conductance, Damper, Force, Gyrator, HeatCapacity, Heater, Mass, Motion, SourceAccount,
-    Spring, Waveform,
+    Admittance, Conductance, Damper, FlowSource, Force, Gyrator, HeatCapacity, Heater, Mass,
+    Motion, SourceAccount, Spring, Storage, Waveform,
 };
 use fs_system::{
     NodeId, PortRef, RouteTemperature, SolveConfig, System, SystemBuilder, SystemError, heat_sink,
@@ -71,6 +71,11 @@ loop's node; a capacitor and a resistor sit in series in it):
   capacitor      capacitance_f, charge_c = 0                          [a, b]
   resistor       resistance_ohm                                       [a, b, heat]
   voltage        voltage_v (waveform)                                 [p]
+For a parallel circuit, the capacitor sets the node voltage and the branches
+share that voltage (current is positive into each component):
+  node_capacitor capacitance_f, charge_c = 0                          [p]
+  resistor_branch resistance_ohm                                      [a, b, heat]
+  current_source current_a (waveform; negative supplies the node)     [p]
 Between two domains, without loss (an ideal DC machine with a = electrical,
 b = rotation and ratio in N m/A: torque ratio * i on the rotor, back-EMF
 ratio * w against the loop):
@@ -83,6 +88,13 @@ Connections, ports written element.port:
                           inductor) and the ends that share its velocity
                           (angular velocity, current), or a heat capacity and
                           the elements at its temperature
+  {\"common_effort\": [ports]}
+                          one effort-setting port (node_capacitor or voltage)
+                          and branches sharing its voltage (inductor,
+                          resistor_branch, current_source)
+  {\"transformer\": [effort_in_port, flow_in_port], \"ratio\": r}
+                          lossless signed flow ratio r; effort returns with
+                          the same factor; endpoints may be in different domains
   {\"route\": port, \"to\": [[port, fraction], ...],
    \"rest\": {\"sink\": name, \"temperature_k\": T},
    \"temperature\": \"sink-equivalent\" | {\"fixed_k\": T}}
@@ -92,14 +104,16 @@ Connections, ports written element.port:
                           spring, damper or force end (0 anchors it), force_n
                           for a mass; angular_velocity_rad_s and torque_n_m
                           about a shaft; current_a and voltage_v in a loop (0
-                          current grounds a series element's far end);
+                          current grounds a series element's far end); voltage_v
+                          grounds a resistor_branch end; current_a into a
+                          node_capacitor increases its charge;
                           temperature_k for a damper, resistor, conductance or
                           heater, heat_rate_w for a heat capacity
 
 Each element's port a is the end at mass A and b the end at mass B; the
-extension of a spring is x_B - x_A less its unloaded length; a capacitor's
-charge_c is the same difference, so one charged by a current entering at a
-reads negative. Every port must be connected. See examples/system/.
+extension of a spring is x_B - x_A less its unloaded length; a series
+capacitor's charge_c is the same difference, so one charged by a current
+entering at a reads negative. A node_capacitor instead stores entering charge. Every port must be connected. See examples/system/.
 ";
 
 pub fn run(args: &[OsString], json: bool) -> CommandOutput {
@@ -268,8 +282,7 @@ impl Domain {
     }
 }
 
-/// What an element is: one of four laws in a power domain, a gyrator
-/// between two, or a thermal element.
+/// A lumped power or thermal element, or a lossless domain converter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     /// The node of a domain: momentum over flow (mass, inertia, inductor).
@@ -280,6 +293,12 @@ enum Kind {
     Resistance(Domain),
     /// A prescribed effort (force, torque, voltage).
     Source(Domain),
+    /// Charge storage setting the voltage of a parallel electrical node.
+    NodeCapacitor,
+    /// Current from a voltage difference, with a heat port.
+    ResistorBranch,
+    /// A prescribed current, positive into the source.
+    CurrentSource,
     Gyrator,
     HeatCapacity,
     Conductance,
@@ -287,7 +306,7 @@ enum Kind {
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 16] = [
+    const TABLE: [(&'static str, Self); 19] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
@@ -300,6 +319,9 @@ impl Kind {
         ("capacitor", Self::Compliance(Domain::Electrical)),
         ("resistor", Self::Resistance(Domain::Electrical)),
         ("voltage", Self::Source(Domain::Electrical)),
+        ("node_capacitor", Self::NodeCapacitor),
+        ("resistor_branch", Self::ResistorBranch),
+        ("current_source", Self::CurrentSource),
         ("gyrator", Self::Gyrator),
         ("heat_capacity", Self::HeatCapacity),
         ("conductance", Self::Conductance),
@@ -329,6 +351,8 @@ struct Element {
     /// Initial temperature of a heat capacity, used as the starting value of
     /// the temperature inputs joined to it.
     temperature_k: Option<f64>,
+    /// Convert a node capacitor's endpoint charge to its endpoint voltage.
+    capacitance_f: Option<f64>,
 }
 
 struct Device {
@@ -514,6 +538,7 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
     let kind = Kind::parse(kind_name).ok_or_else(|| format!("{what}: unknown kind {kind_name:?}"))?;
     let invalid = |e: fs_system::elements::ElementError| Refusal::Input(format!("{what}: {e}"));
     let mut temperature_k = None;
+    let mut capacitance_f = None;
     let (node, ports) = match kind {
         Kind::Inertance(domain) => {
             let names = domain.names();
@@ -555,6 +580,39 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
             );
             add(builder, name, source, SourceAccount::default())?
         }
+        Kind::NodeCapacitor => {
+            fields(definition, &["kind", "capacitance_f", "charge_c"], &what)?;
+            let capacity = positive(definition, "capacitance_f", &what)?;
+            let charge = number_or(definition, "charge_c", 0.0, &what)?;
+            if !charge.is_finite() {
+                return Err(format!("{what}: charge_c must be finite").into());
+            }
+            let storage = Storage::in_domain(Domain::Electrical.port_kind(), capacity)
+                .map_err(invalid)?;
+            capacitance_f = Some(capacity);
+            add(builder, name, storage, charge)?
+        }
+        Kind::ResistorBranch => {
+            fields(definition, &["kind", "resistance_ohm"], &what)?;
+            let resistance = positive(definition, "resistance_ohm", &what)?;
+            let branch = Admittance::in_domain(
+                Domain::Electrical.port_kind(),
+                1.0 / resistance,
+            )
+            .map_err(invalid)?;
+            add(builder, name, branch, ())?
+        }
+        Kind::CurrentSource => {
+            fields(definition, &["kind", "current_a"], &what)?;
+            let wave = definition
+                .get("current_a")
+                .ok_or_else(|| format!("{what}: missing current_a"))?;
+            let source = FlowSource::in_domain(
+                Domain::Electrical.port_kind(),
+                waveform(wave, &format!("{what}.current_a"))?,
+            );
+            add(builder, name, source, SourceAccount::default())?
+        }
         Kind::Gyrator => gyrator(builder, name, definition, &what)?,
         Kind::HeatCapacity => {
             fields(definition, &["kind", "capacity_j_k", "temperature_k"], &what)?;
@@ -584,6 +642,7 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
         node,
         ports,
         temperature_k,
+        capacitance_f,
     })
 }
 
@@ -650,22 +709,36 @@ fn join(
     elements: &[Element],
     ports: &[Resolved],
     guesses: &mut Guesses,
+    common_effort: bool,
     what: &str,
 ) -> Result<(), Refusal> {
     if ports.len() < 2 {
         return Err(format!("{what}: a join needs at least two ports").into());
     }
-    // The node is the one mass or heat capacity in the join: the mass sets
-    // the velocity the ends it carries move with, the heat capacity the
-    // temperature of the elements that sit at it.
+    // A legacy join uses a flow-setting power node or a temperature-setting
+    // heat node. The explicit common_effort form also admits a power node
+    // that sets effort, such as a capacitor setting the voltage of branches.
     let is_node = |port: &Resolved| {
-        matches!(
-            (port.carrier, port.role),
-            (Carrier::Power(_), PortRole::EffortIn) | (Carrier::Heat, PortRole::FlowIn)
-        )
+        if common_effort {
+            port.role == PortRole::FlowIn
+                && matches!(port.carrier, Carrier::Power(_) | Carrier::Heat)
+        } else {
+            matches!(
+                (port.carrier, port.role),
+                (Carrier::Power(_), PortRole::EffortIn) | (Carrier::Heat, PortRole::FlowIn)
+            )
+        }
     };
     let nodes = ports.iter().filter(|port| is_node(port)).count();
     if nodes != 1 {
+        if common_effort {
+            return Err(format!(
+                "{what}: common_effort has exactly one effort-setting port \
+                 (such as node_capacitor.p) and the branches sharing its effort; \
+                 this one has {nodes}"
+            )
+            .into());
+        }
         return Err(format!(
             "{what}: a join has exactly one node port (a mass, inertia, inductor or heat \
              capacity) and the ports that meet at it; this one has {nodes}"
@@ -692,6 +765,23 @@ fn join(
         guesses.extend(members.iter().map(|&member| (member, kelvin)));
     }
     Ok(())
+}
+
+fn transformer(
+    builder: &mut SystemBuilder,
+    elements: &[Element],
+    connection: &J,
+    what: &str,
+) -> Result<(), Refusal> {
+    fields(connection, &["transformer", "ratio"], what)?;
+    let Some([a, b]) = connection.get("transformer").and_then(J::as_array) else {
+        return Err(format!("{what}: transformer is [effort_in_port, flow_in_port]").into());
+    };
+    let a = resolve(builder, elements, &port_text(a, what)?)?;
+    let b = resolve(builder, elements, &port_text(b, what)?)?;
+    builder
+        .transformer(a.port, b.port, number(connection, "ratio", what)?)
+        .map_err(|e| Refusal::Admission(format!("{what}: {e}")))
 }
 
 fn route(
@@ -795,10 +885,12 @@ fn prescribe(
     if quantity == "temperature_k" && !(wave.lowest() > 0.0) {
         return Err(format!("{what}: temperature_k must stay positive").into());
     }
-    // A port carried by a node receives minus the node's flow, so a port
-    // prescribed to move at v (or to carry the current i) receives -v.
+    // A series element end carried by a node receives minus the node's
+    // flow. A node capacitor instead receives current into its own stored
+    // charge, so its prescribed current keeps the component's positive sign.
     let prescribed_flow =
-        matches!((target.carrier, target.role), (Carrier::Power(_), PortRole::FlowIn));
+        matches!((target.carrier, target.role), (Carrier::Power(_), PortRole::FlowIn))
+            && elements[target.element].kind != Kind::NodeCapacitor;
     let sign = if prescribed_flow { -1.0 } else { 1.0 };
     builder
         .boundary(
@@ -890,21 +982,31 @@ fn load(path: &Path) -> Result<Device, Refusal> {
     let mut guesses = Guesses::new();
     for (index, connection) in connections.iter().enumerate() {
         let what = format!("connections[{index}]");
-        if let Some(list) = connection.get("join") {
-            fields(connection, &["join"], &what)?;
+        if let Some(list) = connection
+            .get("join")
+            .or_else(|| connection.get("common_effort"))
+        {
+            let common_effort = connection.get("common_effort").is_some();
+            let operation = if common_effort { "common_effort" } else { "join" };
+            fields(connection, &[operation], &what)?;
             let ports = list
                 .as_array()
-                .ok_or_else(|| format!("{what}: join is an array of ports"))?
+                .ok_or_else(|| format!("{what}: {operation} is an array of ports"))?
                 .iter()
                 .map(|port| resolve(&builder, &elements, &port_text(port, &what)?))
                 .collect::<Result<Vec<_>, _>>()?;
-            join(&mut builder, &elements, &ports, &mut guesses, &what)?;
+            join(&mut builder, &elements, &ports, &mut guesses, common_effort, &what)?;
+        } else if connection.get("transformer").is_some() {
+            transformer(&mut builder, &elements, connection, &what)?;
         } else if connection.get("route").is_some() {
             route(&mut builder, &elements, connection, &mut guesses, &what)?;
         } else if connection.get("prescribe").is_some() {
             prescribe(&mut builder, &elements, connection, &what)?;
         } else {
-            return Err(format!("{what}: expected join, route or prescribe").into());
+            return Err(format!(
+                "{what}: expected join, common_effort, transformer, route or prescribe"
+            )
+            .into());
         }
     }
     let mut system = builder
@@ -1011,11 +1113,18 @@ impl Device {
                 domain.names().extension,
                 system.state::<f64>(element.node).copied().unwrap_or(f64::NAN),
             )],
+            Kind::NodeCapacitor => {
+                let charge = system.state::<f64>(element.node).copied().unwrap_or(f64::NAN);
+                vec![
+                    ("charge_c", charge),
+                    ("voltage_v", charge / element.capacitance_f.unwrap_or(f64::NAN)),
+                ]
+            }
             Kind::HeatCapacity => vec![(
                 "temperature_k",
                 system.state::<f64>(element.node).copied().unwrap_or(f64::NAN),
             )],
-            Kind::Source(_) | Kind::Heater => vec![(
+            Kind::Source(_) | Kind::CurrentSource | Kind::Heater => vec![(
                 "energy_in_j",
                 system
                     .state::<SourceAccount>(element.node)
@@ -1023,6 +1132,9 @@ impl Device {
             )],
             Kind::Resistance(domain) => {
                 vec![(domain.names().effort, output("a")), ("heat_w", -output("heat"))]
+            }
+            Kind::ResistorBranch => {
+                vec![("current_a", output("a")), ("heat_w", -output("heat"))]
             }
             Kind::Gyrator => vec![("effort_a", output("a")), ("effort_b", output("b"))],
             Kind::Conductance => vec![("heat_rate_w", output("a"))],

@@ -786,6 +786,25 @@ four laws exist about a shaft (`inertia`, `torsion_spring`, `rotary_damper`,
 `torque`, with `angular_velocity_rad_s` and `torque_n_m`) and in a series
 current loop (`inductor`, `capacitor`, `resistor`, `voltage`, with
 `current_a` and `voltage_v`), and a `gyrator` joins two domains without loss.
+A `node_capacitor` (`capacitance_f`, optional `charge_c`) sets the voltage of
+parallel branches through `common_effort`. A `resistor_branch` (`resistance_ohm`)
+receives voltages at `a` and `b`, returns currents and delivers its Joule heat
+through `heat`. A `current_source` (`current_a`, a waveform) supplies prescribed
+current; its positive sign is into the source, so negative current supplies the
+node. A branch's far end is grounded with `voltage_v: 0`. A node capacitor's
+prescribed `current_a` is positive into its stored charge. Its reported
+`voltage_v` is the endpoint `charge_c / capacitance_f`, while stateless branch
+readings are step means. The legacy `capacitor`, `resistor` and `join` retain
+their series-loop conventions.
+
+A `transformer: [effort_in_port, flow_in_port]` connection with finite nonzero
+signed `ratio` lowers directly to the kernel's power-preserving transformer.
+It may connect distinct power domains and obeys `f_b = -ratio * f_a` and
+`e_a = ratio * e_b`; endpoint roles and widths are checked by the kernel.
+Parallel RLC and geared-oscillator scenes in `examples/system/` exercise these
+paths; `tests/system_command.rs` compares them to independent midpoint
+references, including source work, resistor heat and reflected stiffness.
+
 A heat receiver may be named by several routes. Temperature
 inputs joined to a heat capacity, and route sources, start from the initial
 temperatures. Examples and their checks: `examples/system/README.md`; tests:

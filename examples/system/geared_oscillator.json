@@ -1,0 +1,14 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 3.0,
+  "step_s": 0.002,
+  "sample_every_s": 0.02,
+  "elements": {
+    "mass": {"kind": "mass", "mass_kg": 2.0, "position_m": 0.1, "velocity_m_s": -0.4},
+    "spring": {"kind": "spring", "stiffness_n_m": 80.0, "extension_m": -0.25}
+  },
+  "connections": [
+    {"transformer": ["mass.p", "spring.a"], "ratio": 2.5},
+    {"prescribe": "spring.b", "velocity_m_s": 0}
+  ]
+}

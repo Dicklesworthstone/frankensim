@@ -1,0 +1,18 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 2.0,
+  "step_s": 0.001,
+  "sample_every_s": 0.02,
+  "elements": {
+    "capacitor": {"kind": "node_capacitor", "capacitance_f": 0.01, "charge_c": 0.02},
+    "coil": {"kind": "inductor", "inductance_h": 0.2, "current_a": -0.1},
+    "load": {"kind": "resistor_branch", "resistance_ohm": 20.0},
+    "source": {"kind": "current_source", "current_a": {"sine": {"amplitude": -0.2, "frequency_hz": 3.0, "phase_rad": 0.3, "offset": -0.4}}},
+    "case": {"kind": "heat_capacity", "capacity_j_k": 10.0, "temperature_k": 293.15}
+  },
+  "connections": [
+    {"common_effort": ["capacitor.p", "coil.p", "load.a", "source.p"]},
+    {"prescribe": "load.b", "voltage_v": 0},
+    {"route": "load.heat", "to": [["case.heat", 1.0]]}
+  ]
+}

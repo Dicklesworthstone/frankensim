@@ -6,6 +6,9 @@ on:
     paths:
       - .github/workflows/composition-kernel.yml
       - Cargo.lock
+      - crates/fs-cli/src/system_command.rs
+      - crates/fs-cli/tests/system_command.rs
+      - examples/system/**
       - crates/fs-system/**
       - crates/fs-ports/**
       - crates/fs-mbd/src/component.rs
@@ -60,6 +63,8 @@ jobs:
           git rev-parse HEAD
       - name: Kernel and library elements
         run: cargo +nightly-2026-07-06 test -p fs-system --lib --test system_g0 --test elements --test power_maps --test parallel_elements --locked
+      - name: Devices described as data
+        run: cargo +nightly-2026-07-06 test -p fs-cli --test system_command --locked
       - name: Native thermal Component
         run: cargo +nightly-2026-07-06 test -p fs-thermal --test component --locked
       - name: Native mechanical and thermal slices
