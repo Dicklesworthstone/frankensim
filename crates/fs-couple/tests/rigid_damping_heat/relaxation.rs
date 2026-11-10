@@ -1,5 +1,7 @@
 //! Original Maxwell storage, finite heat and accepted history continuation.
 
+#[path = "relaxation/graph.rs"]
+mod graph;
 #[path = "relaxation/temperature.rs"]
 mod temperature;
 use super::*;

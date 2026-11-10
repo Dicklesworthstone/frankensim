@@ -26,9 +26,14 @@
 //!
 //! [`network::ViscousNetwork`] is the second owner here: several bodies and
 //! their viscous connectors as one Component, with a heat port per connector.
+//! [`relaxation::RelaxationNetwork`] is the third: the same with Maxwell
+//! branches, whose elastic memory is part of the state and of the stored
+//! energy.
 
 /// A damped rigid-body network behind the Component contract.
 pub mod network;
+/// A rigid-body network with Maxwell memory behind the Component contract.
+pub mod relaxation;
 
 use core::num::NonZeroUsize;
 

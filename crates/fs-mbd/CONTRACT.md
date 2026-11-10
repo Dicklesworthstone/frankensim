@@ -114,8 +114,61 @@ No claim: no torque port, because the owner reports couple work as one total
 and not per body, so a couple cannot be attached to a body through the kernel
 yet; no analytic tangent; one propose allocates the load and state banks; the
 owner's accuracy statements are unchanged by the wrapping; the thermal side
-in the test is the kernel's ideal `HeatCapacity`, not the fs-thermal
-deposition timeline that `fs-couple::rigid_damping_heat` drives.
+in the test is the kernel's ideal `HeatCapacity`. The pairing with the
+fs-thermal deposition timeline that `fs-couple::rigid_damping_heat` drives is
+in `crates/fs-system/tests/thermal_timeline_slice.rs` and, against that
+module itself, in `crates/fs-couple/tests/rigid_damping_heat/graph.rs`.
+
+## A rigid-body network with Maxwell memory as a composition-kernel Component
+
+`component::relaxation::RelaxationNetwork` wraps
+`step_relaxation_network_with_loads` behind the same contract: bodies joined
+by connectors that have, beside their Kelvin viscosity, Maxwell or lossless
+equilibrium branches, each with its own elastic memory. The owner advances
+bodies and every memory coordinate together; the wrapper integrates nothing.
+
+The state is `RelaxationState`: the bank of `RigidBodyState` and the complete
+memory, one six-component energy amplitude `a` [sqrt(J)] per branch, with
+storage `|a|^2 / 2`. The memory is never inferred from a pose; `relaxed`
+makes the state with every amplitude zero. Ports, in this order, are those of
+`ViscousNetwork`: `force<i>` per body and `heat<e>` per connector (Kelvin and
+Maxwell loss together). Stored energy is kinetic plus uniform-gravity
+potential plus memory. The receipt's stored change, dissipation and connector
+heats are the owner's numbers; the owner's work-heat residual is booked as
+numerical loss; entropy is `sum(D_e / T_e)`. `RelaxationNetworkRefusal`
+carries the owner's error unchanged, or names a state of the wrong length, a
+memory that is not one finite amplitude per branch, a temperature that is not
+positive and finite, or cancellation.
+
+G0, in `crates/fs-system/tests/relaxation_network_slice.rs` (run with
+`cargo test -p fs-system --features slices`): conformance under forces and
+gravity with a preloaded memory, the kernel's booked energy equal to the
+owner's work minus heat, the stored change including the memory, the idle
+actuator's work exactly zero and the numerical loss equal to minus the
+owner's residual; a propose returns the owner's bodies and memory bit for
+bit; a pair at rest with a preloaded memory sets itself in motion and heats,
+against the pair's own two equations integrated independently (speed, memory
+and heat to 1e-9); an equilibrium branch stores and returns energy and the
+heat is the Kelvin viscosity's alone; without branches the outputs agree with
+`ViscousNetwork` to 1e-5 (two methods for the same connectors; measured
+4e-7); the refusals above; a kernel run with the connector's heat routed by
+fraction to two thermal bodies and a named sink, bit-identical to the owner
+marched alone, with the ledger closed. Twenty planted defects were each
+caught. Compared with the hand-written Maxwell-memory coupling of fs-couple
+in `crates/fs-couple/tests/rigid_damping_heat/relaxation/graph.rs`.
+
+No claim: the owner's held internal efforts (actuators on a connector) are
+all zero in the Component, because their work would enter with no port to
+carry it; no torque port; the Kelvin viscosity and the relaxation times are
+fixed (the owner's held-kinetics entry, which scales those two, is not
+wrapped); the owner solves bodies and branches as one dense system and
+refuses one that does not fit (at this writing, bodies plus branches above
+21), at the first step and not at construction; no analytic tangent;
+cancellation raised while the owner is inside a step is passed to it but not
+exercised by a test. Inherited from `RigidBody` and `ViscousNetwork` and not
+checked here: the energy tolerance is sized by the kinetic terms, which a
+reviewer's emulation found too small for a very thin body (inertia ratio
+1e6) whose principal frame is rotated against the body frame.
 
 ## Affine friction stopping and reversal on finite bodies
 

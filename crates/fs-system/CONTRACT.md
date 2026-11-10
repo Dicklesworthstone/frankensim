@@ -617,8 +617,33 @@ Bit-for-bit bodies rest on the kernel's negotiated step being the thermal
 clock's `end - start`, which holds on every step of these fixtures and is
 not a property of every grid.
 
-Still without a Component: the module's driven and relaxation entry points.
-Nothing in the module is deleted.
+Owner slice, `tests/relaxation_network_slice.rs` (`--features slices`): the
+fs-mbd network with Maxwell memory
+(`fs_mbd::component::relaxation::RelaxationNetwork`, the owner's
+`step_relaxation_network_with_loads` behind the contract; bodies and the
+complete elastic memory are one state, and the memory is stored energy). The
+list of what it shows is in `crates/fs-mbd/CONTRACT.md`.
+
+Against the hand-written Maxwell-memory coupling,
+`crates/fs-couple/tests/rigid_damping_heat/relaxation/graph.rs`: the module's
+own pair (Kelvin viscosity 0.4, one Maxwell branch preloaded to 0.6 sqrt(J),
+closing at 2 m/s, no actuator), its connector's heat routed 70 % and 20 % to
+two timeline cells and the rest to a sink.
+- `relaxation::advance_candidate`, explicit thermal steps, targets 0.25 s and
+  0.3 s: as many kernel steps as thermal substeps, the bodies and the memory
+  bit for bit, the cells to 1e-11 K, and dissipation, unallocated loss, heat
+  stored and the change of mechanical and memory energy against the ledger to
+  1e-11 of the dissipated energy.
+- `relaxation::advance_implicit_candidate`, backward Euler and SDIRK2, with
+  two Newton iterations allowed so that the solve rejects intervals: the
+  module's accepted intervals one for one, one kernel shortening for every
+  rejection, the bodies and the memory bit for bit, the cells to 1e-10 K.
+Three planted defects in the graph side were each caught. The module is
+called with a zero held effort: a driven connector cannot be reproduced yet.
+
+Still without a Component: the module's driven entry points (a held actuator
+effort needs a power port) and its relaxation entry with temperature-dependent
+kinetics. Nothing in the module is deleted.
 
 Other domains, `tests/elements.rs`: the gyrator and one element of each law
 in the rotational and electrical domains pass the conformance and tangent

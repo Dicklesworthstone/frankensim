@@ -32,7 +32,8 @@
 //! compared: the
 //! module refuses a whole advance when its law has no form at the final
 //! temperature, where the graph takes that step and refuses the next; the
-//! `driven` and `relaxation` entry points, which have no Component.
+//! `driven` entry points, which have no Component. The `relaxation` entry
+//! points are compared in `relaxation/graph.rs`.
 
 use super::*;
 use fs_alloc::{ArenaConfig, ArenaPool};
@@ -41,7 +42,7 @@ use fs_mbd::component::network::{DampingLaw, ViscousNetwork};
 use fs_system::{Ledger, NodeId, RouteTemperature, System, SystemBuilder, heat_sink};
 use fs_thermal::component::{ImplicitScheme, ThermalTimeline, TimelineState};
 
-fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
+pub(crate) fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let pool = ArenaPool::new(ArenaConfig::default());
     pool.scope(|arena| {
         let key = StreamKey {
@@ -123,7 +124,7 @@ fn graph(
     (system, moving, cells)
 }
 
-fn sink(ledger: &Ledger, name: &str) -> f64 {
+pub(crate) fn sink(ledger: &Ledger, name: &str) -> f64 {
     ledger
         .sinks
         .iter()
@@ -131,7 +132,7 @@ fn sink(ledger: &Ledger, name: &str) -> f64 {
         .map_or(0.0, |sink| sink.heat_j.value())
 }
 
-fn node<'a>(ledger: &'a Ledger, name: &str) -> &'a fs_system::ledger::NodeAccount {
+pub(crate) fn node<'a>(ledger: &'a Ledger, name: &str) -> &'a fs_system::ledger::NodeAccount {
     ledger.nodes.iter().find(|node| node.name == name).unwrap()
 }
 
@@ -143,7 +144,7 @@ fn run(system: &mut System, target_s: f64) -> Vec<f64> {
 }
 
 /// [`run`], and the number of times the kernel shortened a step on the way.
-fn run_counting(system: &mut System, target_s: f64) -> (Vec<f64>, usize) {
+pub(crate) fn run_counting(system: &mut System, target_s: f64) -> (Vec<f64>, usize) {
     let gate = CancelGate::new_clock_free();
     let mut intervals = Vec::new();
     let mut shortenings = 0_usize;
