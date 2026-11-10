@@ -869,7 +869,7 @@ fn the_damped_pair_scene_runs_the_rigid_body_owner_and_matches_the_closed_form()
     // The last step's mean heat rate of the connector is reported.
     let last = 2.0 * ((-1.4 * (t - 0.125)).exp() - (-1.4 * t).exp()) / 0.125;
     assert!((value(&json, &pair, "connector0.heat_w") - last).abs() <= 1.0e-12);
-    assert!(json.contains("rigid_network elements stepped by the fs-mbd damped rigid-body owner"));
+    assert!(json.contains("elements stepped by the fs-mbd network owners"));
     let (code, text, _) = run_binary(&["system", &example("damped_pair.json")]);
     assert_eq!(code, 0);
     assert!(text.contains("rigid_network"), "{text}");
@@ -965,4 +965,157 @@ fn rigid_network_scenes_that_cannot_run_are_refused_with_the_reason() {
     let (code, stderr) = refused("adaptive.json", &adaptive);
     assert_eq!(code, 3);
     assert!(stderr.contains("rotor is a rigid_network"), "{stderr}");
+}
+
+/// Two 2 kg bodies on one axial connector with viscous damping `C`, one
+/// Maxwell branch of stiffness `K` relaxing in `TAU` and a held force `f`
+/// (RK4, 16384 steps). With u the relative speed (reduced mass 1 kg) and x
+/// the branch's elastic extension: `u' = f - C u - K x`, `x' = u - x / TAU`,
+/// heat `C u^2 + K x^2 / TAU`, actuator work `f u`. Returns
+/// `[u, x, heat, work]` at `t`.
+fn mount_reference(f: f64, u: f64, x: f64, t: f64) -> [f64; 4] {
+    const C: f64 = 0.4;
+    const K: f64 = 1.69;
+    const TAU: f64 = 0.2;
+    let rhs = |s: [f64; 4]| {
+        [
+            f - C * s[0] - K * s[1],
+            s[0] - s[1] / TAU,
+            C * s[0] * s[0] + K * s[1] * s[1] / TAU,
+            f * s[0],
+        ]
+    };
+    let add = |a: [f64; 4], b: [f64; 4], h: f64| core::array::from_fn(|i| a[i] + h * b[i]);
+    let mut state = [u, x, 0.0, 0.0];
+    let h = t / 16384.0;
+    for _ in 0..16384 {
+        let a = rhs(state);
+        let b = rhs(add(state, a, 0.5 * h));
+        let c = rhs(add(state, b, 0.5 * h));
+        let d = rhs(add(state, c, h));
+        for i in 0..4 {
+            state[i] += h * (a[i] + 2.0 * b[i] + 2.0 * c[i] + d[i]) / 6.0;
+        }
+    }
+    state
+}
+
+#[test]
+fn the_viscoelastic_mount_scene_releases_its_stored_energy_as_motion_and_heat() {
+    let (code, json, stderr) =
+        run_binary(&["--json", "system", &example("viscoelastic_mount.json")]);
+    assert_eq!(code, 0, "{stderr}");
+    // At rest with the branch stretched by 0.5 m: 1.69 * 0.25 / 2 J stored.
+    let [u, x, heat, _] = mount_reference(0.0, 0.0, 0.5, 0.25);
+    let mount = element("mount");
+    let speed = value(&json, &mount, "body1.velocity_x_m_s") - value(&json, &mount, "body0.velocity_x_m_s");
+    assert!(u.abs() > 0.1, "the branch sets the bodies moving: {u} m/s");
+    assert!((speed - u).abs() <= 1.0e-9, "{speed} vs {u}");
+    let stored = value(&json, &mount, "connector0.branch0.energy_j");
+    assert!((stored - 0.5 * 1.69 * x * x).abs() <= 1.0e-9, "{stored}");
+    assert!((value(&json, &mount, "dissipated_j") - heat).abs() <= 1.0e-9, "{heat}");
+    let casing = value(&json, &element("casing"), "temperature_k");
+    assert!((casing - 300.0 - heat / 5.0).abs() <= 1.0e-9, "{casing}");
+    // What left the branch is motion or heat.
+    let kinetic = 0.5 * u * u;
+    assert!((0.5 * 1.69 * 0.25 - stored - kinetic - heat).abs() <= 1.0e-9);
+    assert!(value(&json, "\"totals\"", "energy_residual_j").abs() <= 1.0e-12);
+    // The first sample holds the starting state, before any step.
+    let first = value(&json, "\"samples\"", "mount.connector0.branch0.energy_j");
+    assert!((first - 0.5 * 1.69 * 0.25).abs() <= 1.0e-15, "{first}");
+}
+
+#[test]
+fn an_actuator_on_a_viscoelastic_connector_does_the_work_of_its_own_equations() {
+    // The mount relaxed and at rest, pushed apart by 3 N held on the
+    // connector, in the first body's axes and in world axes (nothing turns,
+    // so the two are the same run).
+    let mount = std::fs::read_to_string(example("viscoelastic_mount.json")).unwrap();
+    let mut reports = Vec::new();
+    for frame in ["body", "world"] {
+        let driven = mount
+            .replace("\"extension_m\": [0.5, 0.0, 0.0]}", "\"extension_m\": [0.0, 0.0, 0.0]}")
+            .replace(
+                "\"damping_n_s_m\": [0.4, 0.0, 0.0],",
+                &format!("\"damping_n_s_m\": [0.4, 0.0, 0.0], \"drive\": \"{frame}\","),
+            )
+            .replace(
+                "{\"route\": \"mount.heat0\"",
+                "{\"prescribe\": \"mount.drive0\", \"force_n\": [3.0, 0, 0]},\n    \
+                 {\"prescribe\": \"mount.couple0\", \"torque_n_m\": [0, 0, 0]},\n    \
+                 {\"route\": \"mount.heat0\"",
+            );
+        assert!(driven.contains("\"drive\"") && driven.contains("mount.couple0"));
+        let path = scratch("driven_mount.json", &driven);
+        let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+        assert_eq!(code, 0, "{stderr}");
+        let [u, x, heat, work] = mount_reference(3.0, 0.0, 0.0, 0.25);
+        let name = element("mount");
+        let speed = value(&json, &name, "body1.velocity_x_m_s") - value(&json, &name, "body0.velocity_x_m_s");
+        assert!((speed - u).abs() <= 1.0e-9, "{frame}: {speed} vs {u}");
+        let stored = value(&json, &name, "connector0.branch0.energy_j");
+        assert!((stored - 0.5 * 1.69 * x * x).abs() <= 1.0e-9, "{frame}: {stored}");
+        assert!((value(&json, &name, "dissipated_j") - heat).abs() <= 1.0e-9, "{frame}");
+        // The actuator's work is its boundary's account, and nothing else
+        // brought energy in.
+        assert!(work > 0.05 && heat > 0.01, "work {work} J and heat {heat} J to measure");
+        assert!((value(&json, "mount.drive0", "energy_in_j") - work).abs() <= 1.0e-9, "{frame}");
+        assert!(value(&json, "mount.couple0", "energy_in_j").abs() <= 0.0);
+        assert!((value(&json, "\"totals\"", "boundary_energy_in_j") - work).abs() <= 1.0e-9);
+        assert!(value(&json, "\"totals\"", "energy_residual_j").abs() <= 1.0e-12);
+        reports.push(json.replace("driven_mount.json", ""));
+    }
+    assert_eq!(reports[0], reports[1], "body and world axes agree while nothing turns");
+}
+
+#[test]
+fn viscoelastic_scenes_that_cannot_run_are_refused_with_the_reason() {
+    let mount = std::fs::read_to_string(example("viscoelastic_mount.json")).unwrap();
+    let check = |name: &str, from: &str, to: &str, said: &str| {
+        let bad = mount.replace(from, to);
+        assert_ne!(bad, mount, "{name}");
+        let (code, stderr) = refused(name, &bad);
+        assert_eq!(code, 3, "{name}: {stderr}");
+        assert!(stderr.contains(said), "{name}: {stderr}");
+    };
+    check(
+        "negative.json",
+        "\"stiffness_n_m\": [1.69, 0.0, 0.0]",
+        "\"stiffness_n_m\": [-1.69, 0.0, 0.0]",
+        "branches[0]: a stiffness is never negative",
+    );
+    check(
+        "axis.json",
+        "\"extension_m\": [0.5, 0.0, 0.0]",
+        "\"extension_m\": [0.5, 0.1, 0.0]",
+        "an extension or twist needs a stiffness on the same axis",
+    );
+    check(
+        "time.json",
+        "\"relaxation_time_s\": 0.2",
+        "\"relaxation_time_s\": 0",
+        "relaxation_time_s must be positive",
+    );
+    check("field.json", "\"relaxation_time_s\"", "\"relaxation_s\"", "unsupported field");
+    check(
+        "drive.json",
+        "\"damping_n_s_m\": [0.4, 0.0, 0.0],",
+        "\"damping_n_s_m\": [0.4, 0.0, 0.0], \"drive\": \"sideways\",",
+        "drive is \"body\" or \"world\"",
+    );
+    // A rigid_network has no branches: the field is refused there.
+    check(
+        "kind.json",
+        "\"kind\": \"viscoelastic_network\"",
+        "\"kind\": \"rigid_network\"",
+        "unsupported field \"branches\"",
+    );
+    // An actuator's ports must be connected like any other.
+    let loose = mount.replace(
+        "\"damping_n_s_m\": [0.4, 0.0, 0.0],",
+        "\"damping_n_s_m\": [0.4, 0.0, 0.0], \"drive\": \"body\",",
+    );
+    let (code, stderr) = refused("loose.json", &loose);
+    assert_eq!(code, 4);
+    assert!(stderr.contains("mount.drive0") || stderr.contains("mount.couple0"), "{stderr}");
 }

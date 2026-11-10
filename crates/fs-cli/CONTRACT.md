@@ -824,9 +824,33 @@ at that step); a falling body spun by a prescribed torque against `v = -g t`,
 `z = z0 - g t^2 / 2`, `omega = tau t / I` and the torque's work; refusals. No
 claim: a body's principal axes are its own axes and its centre of mass its
 origin; damping is constant and diagonal; no Maxwell branches, actuators or
-temperature-dependent damping from a scene (the fs-mbd Components have them);
-a force port cannot be joined to a lumped element; `adaptive` refuses a scene
-that holds a `rigid_network`.
+temperature-dependent damping in a `rigid_network`; a force port cannot be
+joined to a lumped element; `adaptive` refuses a scene that holds a network
+of rigid bodies.
+
+A `viscoelastic_network` takes the same fields and lowers to
+`fs_mbd::component::relaxation::RelaxationNetwork` (the fs-mbd relaxation
+owner). A connector may add `branches`, each with `stiffness_n_m` and
+`rotary_stiffness_n_m_rad` (three each, never negative), an optional
+`relaxation_time_s` (a Maxwell branch; without it the branch never relaxes)
+and a starting `extension_m` and `twist_rad` (refused on an axis without
+stiffness), and `drive` (`"body"` or `"world"`), which gives the connector an
+actuator with ports `drive<e>` (force on its second attachment, `force_n`)
+and `couple<e>` (`torque_n_m`), three waveforms each. A branch of stiffness
+`k` on an axis is lowered to the owner's factor `sqrt(k)` and an extension
+`x` to the memory amplitude `sqrt(k) x`. The report adds
+`connector<e>.branch<b>.energy_j`. G1, same test file:
+`examples/system/viscoelastic_mount.json` (a pair at rest on a mount whose
+branch is stretched by 0.5 m) against the pair's two equations integrated
+independently, relative speed, branch energy, heat and the casing's
+temperature to 1e-9; the same mount relaxed and pushed by a held 3 N, in
+body and in world axes, with the actuator's work on its boundary account to
+1e-9 and the two reports equal; refusals. No claim: branch stiffness is
+diagonal; a branch is a rate law in its first body's axes, not a spring with
+a rest geometry; the owner solves bodies and branches as one dense system
+and refuses one too large for it at the first step, not when the scene is
+read; no temperature-dependent damping or relaxation times from a scene (the
+Component has both).
 
 `nonlinear_capacitor` takes `charge_voltage_curve` as `[charge_c, voltage_v]`
 knots and an optional initial `charge_c`; `nonlinear_inductor` takes

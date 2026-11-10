@@ -14,10 +14,16 @@ use std::path::Path;
 
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_mbd::component::network::ViscousNetwork;
+use fs_mbd::component::relaxation::{DriveFrame, RelaxationNetwork, RelaxationState};
 use fs_mbd::spatial_loads::internal_impulse::InternalWrenchImpulseControls;
+use fs_mbd::spatial_loads::internal_impulse::viscous::network::driven::DrivenViscousNetworkLimits;
+use fs_mbd::spatial_loads::internal_impulse::viscous::network::relaxation::{
+    RelaxationNetworkLimits, RelaxationNetworkLink, SpatialRelaxationBranch,
+};
 use fs_mbd::spatial_loads::internal_impulse::viscous::network::{
     ViscousNetworkLimits, ViscousNetworkLink,
 };
+use fs_mbd::spatial_loads::internal_motion::viscous::network::relaxation::RelaxationNetworkMotionControls;
 use fs_mbd::spatial_loads::internal_impulse::viscous::{
     BushingCoordinateScales, PassiveBushingMatrix, ViscousConnectorControls,
 };
@@ -51,7 +57,7 @@ const MAX_ELEMENTS: usize = 2_000;
 const MAX_STEPS: f64 = 10_000_000.0;
 const MAX_SAMPLES: usize = 100_000;
 const NO_CLAIM: &str = "lumped elements with constant parameters or authored nonlinear electrical storage curves, using work-conjugate discrete-gradient stepping; no material-card resolution, contact, friction, phase change or step-size error control; the ledger states what the discrete system did, not what a physical device would do";
-const NETWORK_NO_CLAIM: &str = "lumped elements with constant parameters or authored nonlinear electrical storage curves, using work-conjugate discrete-gradient stepping, and rigid_network elements stepped by the fs-mbd damped rigid-body owner (its connector sources are exact at fixed geometry and its composition is second order for moving geometry); bodies have their principal axes along their own axes and their centre of mass at their origin, and connector damping is constant and diagonal; no material-card resolution, contact, friction, phase change or step-size error control; the ledger states what the discrete system did, not what a physical device would do";
+const NETWORK_NO_CLAIM: &str = "lumped elements with constant parameters or authored nonlinear electrical storage curves, using work-conjugate discrete-gradient stepping, and rigid_network or viscoelastic_network elements stepped by the fs-mbd network owners (their connector sources are exact at fixed geometry and their composition is second order for moving geometry); bodies have their principal axes along their own axes and their centre of mass at their origin; connector damping and branch stiffness are constant and diagonal, and a branch is a rate law in its first body's axes, not a spring with a rest geometry; no material-card resolution, contact, friction, phase change or step-size error control; the ledger states what the discrete system did, not what a physical device would do";
 /// Bodies and connectors one `rigid_network` may hold: its owner sweeps the
 /// connectors of the whole bank on every step.
 const MAX_NETWORK_BODIES: usize = 64;
@@ -142,6 +148,19 @@ is its origin:
   At most 64 bodies and 256 connectors. force<i> takes the world force on the
   centre of mass and torque<i> the torque in the body's axes; prescribe both
   with three waveforms. heat<e> is routed like a damper's heat.
+  viscoelastic_network  the same fields, stepped by the fs-mbd relaxation
+                 owner (which solves bodies and branches as one dense system
+                 and refuses one too large for it at the first step); a
+                 connector may also have
+                   branches = [{stiffness_n_m = 0, rotary_stiffness_n_m_rad
+                     = 0 (three each), relaxation_time_s (a Maxwell branch;
+                     without it the branch never relaxes), extension_m = 0,
+                     twist_rad = 0 (the branch's starting elastic stretch)}]
+                   drive = \"body\" | \"world\" (an actuator: the axes its
+                     held force and couple are in)
+                 [as rigid_network, and drive<e> and couple<e> for each
+                  driven connector: the force [N] and couple [N m] held on
+                  its second attachment, three waveforms each]
 A waveform is a number, {\"sine\": {amplitude, frequency_hz, phase_rad = 0,
 offset = 0}} or {\"table\": [[time_s, value], ...]} (linear, ends held).
 
@@ -172,8 +191,9 @@ Connections, ports written element.port:
                           node_capacitor or nonlinear_capacitor increases its charge;
                           temperature_k for a damper, resistor, conductance or
                           heater, heat_rate_w for a heat capacity; for a
-                          rigid_network, force_n or torque_n_m as an array of
-                          three waveforms ([0, 0, 0] leaves a body free)
+                          network of rigid bodies, force_n or torque_n_m as
+                          an array of three waveforms ([0, 0, 0] leaves a
+                          body free or an actuator idle)
 
 Each element's port a is the end at mass A and b the end at mass B; the
 extension of a spring is x_B - x_A less its unloaded length; a series
@@ -385,13 +405,15 @@ enum Kind {
     Gyrator,
     /// Rigid bodies and viscous connectors, stepped by their fs-mbd owner.
     RigidNetwork,
+    /// The same with Maxwell branches and actuators on the connectors.
+    ViscoelasticNetwork,
     HeatCapacity,
     Conductance,
     Heater,
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 22] = [
+    const TABLE: [(&'static str, Self); 23] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
@@ -411,6 +433,7 @@ impl Kind {
         ("nonlinear_inductor", Self::NonlinearInductor),
         ("gyrator", Self::Gyrator),
         ("rigid_network", Self::RigidNetwork),
+        ("viscoelastic_network", Self::ViscoelasticNetwork),
         ("heat_capacity", Self::HeatCapacity),
         ("conductance", Self::Conductance),
         ("heater", Self::Heater),
@@ -444,10 +467,10 @@ struct Element {
     /// Original laws for endpoint probes; prepared data are shared on clone.
     charge_voltage_curve: Option<CapacitorChargeCurve>,
     flux_current_curve: Option<InductorFluxCurve>,
-    /// The bodies of a rigid network, for reading velocities from momenta,
-    /// and the number of its connectors.
+    /// The bodies of a network, for reading velocities from momenta, and for
+    /// each of its connectors the number of its Maxwell branches.
     bodies: Vec<MassProperties>,
-    connectors: usize,
+    branches: Vec<usize>,
 }
 
 struct Device {
@@ -799,13 +822,17 @@ fn network_body(row: &J, what: &str) -> Result<(MassProperties, RigidBodyState),
     Ok((properties, state))
 }
 
-/// One viscous connector of a rigid network of `bodies` bodies.
-fn network_connector(row: &J, bodies: usize, what: &str) -> Result<ViscousNetworkLink, Refusal> {
-    fields(
-        row,
-        &["bodies", "attachments_m", "damping_n_s_m", "rotary_damping_n_m_s_rad"],
-        what,
-    )?;
+/// One viscous connector of a network of `bodies` bodies. `extra` names the
+/// further fields of the row that the caller reads itself.
+fn network_connector(
+    row: &J,
+    bodies: usize,
+    extra: &[&str],
+    what: &str,
+) -> Result<ViscousNetworkLink, Refusal> {
+    let mut allowed = vec!["bodies", "attachments_m", "damping_n_s_m", "rotary_damping_n_m_s_rad"];
+    allowed.extend_from_slice(extra);
+    fields(row, &allowed, what)?;
     let ends = match row.get("bodies").and_then(J::as_array) {
         Some([a, b]) => index_below(a, bodies).zip(index_below(b, bodies)),
         _ => None,
@@ -845,15 +872,19 @@ fn network_connector(row: &J, bodies: usize, what: &str) -> Result<ViscousNetwor
     })
 }
 
-/// A `rigid_network`: rigid bodies joined by viscous connectors, lowered to
-/// the fs-mbd network Component. Returns the node, its ports, the bodies and
-/// the number of connectors.
-fn rigid_network(
-    builder: &mut SystemBuilder,
-    name: &str,
-    definition: &J,
-    what: &str,
-) -> Result<(NodeId, Vec<PortSpec>, Vec<MassProperties>, usize), Refusal> {
+/// What the two network elements share in a scene: gravity, the bodies and
+/// their starting states, the connector rows, the owner's balance controls
+/// and the bodies that get a torque port.
+struct NetworkBase<'a> {
+    gravity: Gravity,
+    properties: Vec<MassProperties>,
+    states: Vec<RigidBodyState>,
+    connectors: &'a [J],
+    source: ViscousConnectorControls,
+    torques: Vec<usize>,
+}
+
+fn network_base<'a>(definition: &'a J, what: &str) -> Result<NetworkBase<'a>, Refusal> {
     fields(
         definition,
         &[
@@ -880,63 +911,239 @@ fn rigid_network(
         properties.push(body);
         states.push(state);
     }
-    let rows = definition
+    let connectors = definition
         .get("connectors")
         .and_then(J::as_array)
         .filter(|rows| rows.len() <= MAX_NETWORK_CONNECTORS)
         .ok_or_else(|| {
             format!("{what}: connectors is an array of at most {MAX_NETWORK_CONNECTORS} connectors")
         })?;
-    let links = rows
-        .iter()
-        .enumerate()
-        .map(|(index, row)| {
-            network_connector(row, properties.len(), &format!("{what}.connectors[{index}]"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let connectors = links.len();
     let tolerance = match definition.get("balance_tolerance") {
         None => 1.0e-9,
         Some(_) => positive(definition, "balance_tolerance", what)?,
     };
-    let controls = ViscousNetworkMotionControls {
-        source: ViscousConnectorControls {
-            impulse: InternalWrenchImpulseControls {
-                angular_origin_world_m: Vec3::ZERO,
-                linear_tolerance_ns: tolerance,
-                angular_tolerance_nms: tolerance,
-                work_tolerance_j: tolerance,
-            },
-            linear_speed_tolerance_m_s: tolerance,
-            angular_speed_tolerance_rad_s: tolerance,
+    let source = ViscousConnectorControls {
+        impulse: InternalWrenchImpulseControls {
+            angular_origin_world_m: Vec3::ZERO,
+            linear_tolerance_ns: tolerance,
+            angular_tolerance_nms: tolerance,
+            work_tolerance_j: tolerance,
         },
-        source_substeps: 1,
-        limits: ViscousNetworkLimits {
-            maximum_bodies: properties.len(),
-            maximum_connectors: connectors,
-            maximum_pair_relaxations: 1_000_000,
-            maximum_live_bytes: 64 << 20,
-        },
+        linear_speed_tolerance_m_s: tolerance,
+        angular_speed_tolerance_rad_s: tolerance,
     };
-    let mut network = ViscousNetwork::new(properties.clone(), links, gravity, controls)
-        .map_err(|e| Refusal::Input(format!("{what}: {e}")))?;
+    let mut torques = Vec::new();
     if let Some(list) = definition.get("torque_ports") {
         let rows = list
             .as_array()
             .ok_or_else(|| format!("{what}: torque_ports is an array of body indices"))?;
         for row in rows {
-            let body = index_below(row, properties.len())
-                .ok_or_else(|| format!("{what}: torque_ports is an array of body indices"))?;
-            network = network
-                .torqued(body)
-                .map_err(|e| Refusal::Input(format!("{what}.torque_ports: {e}")))?;
+            torques.push(
+                index_below(row, properties.len())
+                    .ok_or_else(|| format!("{what}: torque_ports is an array of body indices"))?,
+            );
         }
+    }
+    Ok(NetworkBase {
+        gravity,
+        properties,
+        states,
+        connectors,
+        source,
+        torques,
+    })
+}
+
+/// A network element lowered into the builder: its node and ports, its
+/// bodies, and for each connector the number of its Maxwell branches.
+struct NetworkParts {
+    node: NodeId,
+    ports: Vec<PortSpec>,
+    bodies: Vec<MassProperties>,
+    branches: Vec<usize>,
+}
+
+/// A `rigid_network`: rigid bodies joined by viscous connectors, lowered to
+/// the fs-mbd network Component.
+fn rigid_network(
+    builder: &mut SystemBuilder,
+    name: &str,
+    definition: &J,
+    what: &str,
+) -> Result<NetworkParts, Refusal> {
+    let base = network_base(definition, what)?;
+    let links = base
+        .connectors
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let inner = format!("{what}.connectors[{index}]");
+            network_connector(row, base.properties.len(), &[], &inner)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let branches = vec![0; links.len()];
+    let controls = ViscousNetworkMotionControls {
+        source: base.source,
+        source_substeps: 1,
+        limits: ViscousNetworkLimits {
+            maximum_bodies: base.properties.len(),
+            maximum_connectors: links.len(),
+            maximum_pair_relaxations: 1_000_000,
+            maximum_live_bytes: 64 << 20,
+        },
+    };
+    let mut network = ViscousNetwork::new(base.properties.clone(), links, base.gravity, controls)
+        .map_err(|e| Refusal::Input(format!("{what}: {e}")))?;
+    for &body in &base.torques {
+        network = network
+            .torqued(body)
+            .map_err(|e| Refusal::Input(format!("{what}.torque_ports: {e}")))?;
     }
     let ports = network.ports().to_vec();
     let node = builder
-        .add(name, network, states)
+        .add(name, network, base.states)
         .map_err(|e| Refusal::Admission(e.to_string()))?;
-    Ok((node, ports, properties, connectors))
+    Ok(NetworkParts {
+        node,
+        ports,
+        bodies: base.properties,
+        branches,
+    })
+}
+
+/// The Maxwell branches of one connector and their starting memory. A branch
+/// of stiffness `k` on an axis has the factor `sqrt(k)` there, and an
+/// elastic extension `x` of it is the memory amplitude `sqrt(k) x`, whose
+/// stored energy is `k x^2 / 2`.
+fn network_branches(
+    row: &J,
+    what: &str,
+) -> Result<(Vec<SpatialRelaxationBranch>, Vec<[f64; 6]>), Refusal> {
+    let Some(list) = row.get("branches") else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let rows = list
+        .as_array()
+        .ok_or_else(|| format!("{what}: branches is an array of branches"))?;
+    let mut branches = Vec::with_capacity(rows.len());
+    let mut memory = Vec::with_capacity(rows.len());
+    for (index, branch) in rows.iter().enumerate() {
+        let inner = format!("{what}.branches[{index}]");
+        fields(
+            branch,
+            &[
+                "stiffness_n_m",
+                "rotary_stiffness_n_m_rad",
+                "relaxation_time_s",
+                "extension_m",
+                "twist_rad",
+            ],
+            &inner,
+        )?;
+        let linear = triple(branch, "stiffness_n_m", Some([0.0; 3]), &inner)?;
+        let rotary = triple(branch, "rotary_stiffness_n_m_rad", Some([0.0; 3]), &inner)?;
+        let extension = triple(branch, "extension_m", Some([0.0; 3]), &inner)?;
+        let twist = triple(branch, "twist_rad", Some([0.0; 3]), &inner)?;
+        let mut factors = [[0.0; 6]; 6];
+        let mut amplitude = [0.0; 6];
+        for axis in 0..3 {
+            for (slot, stiffness, stretch) in [
+                (axis, linear[axis], extension[axis]),
+                (3 + axis, rotary[axis], twist[axis]),
+            ] {
+                if stiffness < 0.0 {
+                    return Err(format!("{inner}: a stiffness is never negative").into());
+                }
+                if stiffness == 0.0 && stretch != 0.0 {
+                    return Err(format!(
+                        "{inner}: an extension or twist needs a stiffness on the same axis"
+                    )
+                    .into());
+                }
+                factors[slot][slot] = stiffness.sqrt();
+                amplitude[slot] = stiffness.sqrt() * stretch;
+            }
+        }
+        let built = match branch.get("relaxation_time_s") {
+            Some(_) => SpatialRelaxationBranch::from_gram_rows(
+                factors,
+                positive(branch, "relaxation_time_s", &inner)?,
+            ),
+            None => SpatialRelaxationBranch::from_equilibrium_gram_rows(factors),
+        }
+        .map_err(|e| format!("{inner}: {e:?}"))?;
+        branches.push(built);
+        memory.push(amplitude);
+    }
+    Ok((branches, memory))
+}
+
+/// A `viscoelastic_network`: rigid bodies joined by connectors with viscous
+/// damping, Maxwell branches and, on request, an actuator, lowered to the
+/// fs-mbd relaxation-network Component.
+fn viscoelastic_network(
+    builder: &mut SystemBuilder,
+    name: &str,
+    definition: &J,
+    what: &str,
+) -> Result<NetworkParts, Refusal> {
+    let base = network_base(definition, what)?;
+    let mut links = Vec::with_capacity(base.connectors.len());
+    let mut memory = Vec::with_capacity(base.connectors.len());
+    let mut drives = Vec::new();
+    for (index, row) in base.connectors.iter().enumerate() {
+        let inner = format!("{what}.connectors[{index}]");
+        let viscous =
+            network_connector(row, base.properties.len(), &["branches", "drive"], &inner)?;
+        let (branches, amplitudes) = network_branches(row, &inner)?;
+        match row.get("drive").map(J::as_str) {
+            None => {}
+            Some(Some("body")) => drives.push((index, DriveFrame::MaterialFirst)),
+            Some(Some("world")) => drives.push((index, DriveFrame::World)),
+            Some(_) => return Err(format!("{inner}: drive is \"body\" or \"world\"").into()),
+        }
+        links.push(RelaxationNetworkLink { viscous, branches });
+        memory.push(amplitudes);
+    }
+    let branches: Vec<usize> = memory.iter().map(Vec::len).collect();
+    let controls = RelaxationNetworkMotionControls {
+        source: base.source,
+        limits: RelaxationNetworkLimits {
+            source: DrivenViscousNetworkLimits {
+                maximum_bodies: base.properties.len(),
+                maximum_connectors: links.len(),
+                maximum_live_bytes: 128_000_000,
+                maximum_preparation_terms: 10_000_000_000,
+            },
+            maximum_branches: branches.iter().sum(),
+        },
+    };
+    let refused = |e: fs_mbd::component::relaxation::RelaxationNetworkBuildError| {
+        Refusal::Input(format!("{what}: {e}"))
+    };
+    let mut network =
+        RelaxationNetwork::new(base.properties.clone(), links, base.gravity, controls)
+            .map_err(refused)?;
+    for (connector, frame) in drives {
+        network = network.driven(connector, frame).map_err(refused)?;
+    }
+    for &body in &base.torques {
+        network = network.torqued(body).map_err(refused)?;
+    }
+    let ports = network.ports().to_vec();
+    let state = RelaxationState {
+        bodies: base.states,
+        memory,
+    };
+    let node = builder
+        .add(name, network, state)
+        .map_err(|e| Refusal::Admission(e.to_string()))?;
+    Ok(NetworkParts {
+        node,
+        ports,
+        bodies: base.properties,
+        branches,
+    })
 }
 
 fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<Element, Refusal> {
@@ -951,7 +1158,7 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
     let mut charge_voltage_curve = None;
     let mut flux_current_curve = None;
     let mut bodies = Vec::new();
-    let mut connectors = 0;
+    let mut branches = Vec::new();
     let (node, ports) = match kind {
         Kind::Inertance(domain) => {
             let names = domain.names();
@@ -1053,11 +1260,15 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
             add(builder, name, NonlinearInductor::new(curve), flux)?
         }
         Kind::Gyrator => gyrator(builder, name, definition, &what)?,
-        Kind::RigidNetwork => {
-            let (node, ports, properties, links) = rigid_network(builder, name, definition, &what)?;
-            bodies = properties;
-            connectors = links;
-            (node, ports)
+        Kind::RigidNetwork | Kind::ViscoelasticNetwork => {
+            let parts = if kind == Kind::RigidNetwork {
+                rigid_network(builder, name, definition, &what)?
+            } else {
+                viscoelastic_network(builder, name, definition, &what)?
+            };
+            bodies = parts.bodies;
+            branches = parts.branches;
+            (parts.node, parts.ports)
         }
         Kind::HeatCapacity => {
             fields(definition, &["kind", "capacity_j_k", "temperature_k"], &what)?;
@@ -1091,7 +1302,7 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
         charge_voltage_curve,
         flux_current_curve,
         bodies,
-        connectors,
+        branches,
     })
 }
 
@@ -1432,11 +1643,12 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             Kind::HeatCapacity => vec![("temperature_k", Coordinate::Scalar)],
             Kind::Source(_) | Kind::CurrentSource | Kind::Heater => vec![("energy_in_j", Coordinate::SourceWork)],
             Kind::Resistance(_) | Kind::ResistorBranch | Kind::Gyrator | Kind::Conductance => Vec::new(),
-            Kind::RigidNetwork => {
+            Kind::RigidNetwork | Kind::ViscoelasticNetwork => {
                 return Err(format!(
-                    "adaptive: {} is a rigid_network, whose bodies have no error account here; \
+                    "adaptive: {} is a {}, whose bodies have no error account here; \
                      run it with a fixed step_s",
-                    element.name
+                    element.name,
+                    element.kind.name()
                 ));
             }
         };
@@ -1585,7 +1797,7 @@ impl Device {
     fn no_claim(&self) -> &'static str {
         if self.adaptive.is_some() {
             ADAPTIVE_NO_CLAIM
-        } else if self.elements.iter().any(|element| element.kind == Kind::RigidNetwork) {
+        } else if self.elements.iter().any(|element| !element.bodies.is_empty()) {
             NETWORK_NO_CLAIM
         } else {
             NO_CLAIM
@@ -1670,7 +1882,7 @@ impl Device {
     /// The state of an element, and for stateless ones the step-mean values
     /// of the last step.
     fn values(&self, element: &Element) -> Vec<(String, f64)> {
-        if element.kind == Kind::RigidNetwork {
+        if matches!(element.kind, Kind::RigidNetwork | Kind::ViscoelasticNetwork) {
             return self.network_values(element);
         }
         self.lumped_values(element)
@@ -1679,14 +1891,24 @@ impl Device {
             .collect()
     }
 
-    /// Every body of a rigid network (position and velocity of its centre of
-    /// mass in world axes, orientation, angular velocity in its own axes)
-    /// and the mean heat rate of every connector over the last step.
+    /// Every body of a network (position and velocity of its centre of mass
+    /// in world axes, orientation, angular velocity in its own axes), the
+    /// mean heat rate of every connector over the last step, and the energy
+    /// stored in every Maxwell branch.
     fn network_values(&self, element: &Element) -> Vec<(String, f64)> {
         let system = &self.system;
-        let states = system.state::<Vec<RigidBodyState>>(element.node);
+        let (states, memory) = if element.kind == Kind::ViscoelasticNetwork {
+            let state = system.state::<RelaxationState>(element.node);
+            (
+                state.map(|state| state.bodies.as_slice()),
+                state.map(|state| state.memory.as_slice()),
+            )
+        } else {
+            let bank = system.state::<Vec<RigidBodyState>>(element.node);
+            (bank.map(Vec::as_slice), None)
+        };
         let unknown = Vec3::new(f64::NAN, f64::NAN, f64::NAN);
-        let mut values = Vec::with_capacity(13 * element.bodies.len() + element.connectors);
+        let mut values = Vec::with_capacity(13 * element.bodies.len() + element.branches.len());
         for (index, properties) in element.bodies.iter().enumerate() {
             let state = states.and_then(|states| states.get(index));
             let position = state.map_or(unknown, |state| state.pose().position_world());
@@ -1716,12 +1938,20 @@ impl Device {
                 values.push((format!("body{index}.orientation_{axis}"), component));
             }
         }
-        for connector in 0..element.connectors {
+        for (connector, &branches) in element.branches.iter().enumerate() {
             let heat_w = match system.port(element.node, &format!("heat{connector}")) {
                 Some(port) if system.steps() > 0 => -system.last_output(port)[0],
                 _ => f64::NAN,
             };
             values.push((format!("connector{connector}.heat_w"), heat_w));
+            for branch in 0..branches {
+                let energy_j = memory
+                    .and_then(|memory| memory.get(connector)?.get(branch))
+                    .map_or(f64::NAN, |amplitude| {
+                        0.5 * amplitude.iter().map(|a| a * a).sum::<f64>()
+                    });
+                values.push((format!("connector{connector}.branch{branch}.energy_j"), energy_j));
+            }
         }
         values
     }
@@ -1784,7 +2014,7 @@ impl Device {
             Kind::Gyrator => vec![("effort_a", output("a")), ("effort_b", output("b"))],
             Kind::Conductance => vec![("heat_rate_w", output("a"))],
             // Read by `network_values`.
-            Kind::RigidNetwork => Vec::new(),
+            Kind::RigidNetwork | Kind::ViscoelasticNetwork => Vec::new(),
         }
     }
 

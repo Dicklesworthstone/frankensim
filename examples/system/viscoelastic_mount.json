@@ -1,0 +1,29 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 0.25,
+  "step_s": 0.0125,
+  "sample_every_s": 0.05,
+  "elements": {
+    "mount": {
+      "kind": "viscoelastic_network",
+      "bodies": [
+        {"mass_kg": 2.0, "principal_inertia_kg_m2": [2.0, 3.0, 4.0], "position_m": [0.0, 0.0, 0.0]},
+        {"mass_kg": 2.0, "principal_inertia_kg_m2": [2.0, 3.0, 4.0], "position_m": [1.0, 0.0, 0.0]}
+      ],
+      "connectors": [
+        {"bodies": [0, 1],
+         "damping_n_s_m": [0.4, 0.0, 0.0],
+         "branches": [
+           {"stiffness_n_m": [1.69, 0.0, 0.0], "relaxation_time_s": 0.2,
+            "extension_m": [0.5, 0.0, 0.0]}
+         ]}
+      ]
+    },
+    "casing": {"kind": "heat_capacity", "capacity_j_k": 5.0, "temperature_k": 300.0}
+  },
+  "connections": [
+    {"prescribe": "mount.force0", "force_n": [0, 0, 0]},
+    {"prescribe": "mount.force1", "force_n": [0, 0, 0]},
+    {"route": "mount.heat0", "to": [["casing.heat", 1.0]]}
+  ]
+}

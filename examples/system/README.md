@@ -22,6 +22,7 @@ is the kernel's state and its energy and entropy ledger.
 | `nonlinear_rlc.json` | the same topology with voltage-dependent capacitance and flux-dependent inductance, crossing both curves' knees | independent charge/flux differential equations, original constitutive energies and Joule heat |
 | `geared_oscillator.json` | an ideal 2.5:1 transformer couples a mass to an anchored spring | reflected stiffness `ratio² × stiffness`, the midpoint oscillation phase and conserved energy |
 | `damped_pair.json` | two rigid bodies in three dimensions closing at 2 m/s on a viscous connector, stepped by the fs-mbd network owner (`rigid_network`); a quarter of the connector's heat warms a shell, half an oil bath, the rest goes to the air | the closed form: each momentum decays as `exp(-0.7 t)`, the heat is `2 (1 - exp(-1.4 t))` J, split 25 / 50 / 25 |
+| `viscoelastic_mount.json` | two rigid bodies at rest on a mount with viscous damping and one Maxwell branch stretched by 0.5 m (`viscoelastic_network`, the fs-mbd relaxation owner): the stored 0.21 J sets the bodies moving and heats the casing | the pair's own two equations integrated independently: relative speed, branch energy and heat |
 | `quarter_car.json` | a car body and wheel on a suspension spring and shock absorber, a tyre spring driven over a 30 mm bump; 70 % of the shock's heat warms it, the rest goes to the air | the ledger: road work = mechanical energy + heat, and the 70/30 split |
 
 ## Rigid bodies from a physics owner
@@ -38,6 +39,20 @@ gives every body's position, velocity, orientation and angular velocity and
 every connector's mean heat rate over the last step. Error-controlled
 stepping does not cover a `rigid_network`; a scene with one runs at a fixed
 `step_s`.
+
+`viscoelastic_mount.json` uses the second fs-mbd owner,
+`fs_mbd::component::relaxation::RelaxationNetwork`, through a
+`viscoelastic_network`. Its connectors may carry Maxwell `branches`: a
+stiffness on each axis, a `relaxation_time_s` (without one the branch never
+relaxes) and a starting `extension_m` or `twist_rad`. A branch is a rate law
+in its first body's axes: it stores the integral of the relative velocity
+it has seen, less what has relaxed, and is not a spring with a rest
+geometry. The report adds each branch's stored energy,
+`connector<e>.branch<b>.energy_j`. A connector with `"drive": "body"` or
+`"world"` has an actuator: ports `drive<e>` and `couple<e>` take the force
+and couple it holds on the connector's second attachment, three waveforms
+each, in the first body's axes or in world axes, and the work it does is
+that boundary's account in the ledger.
 
 ## Error-controlled stepping
 
