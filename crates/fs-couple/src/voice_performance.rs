@@ -66,6 +66,8 @@
 //! fricative_noise <seed> <k> <j> [stevens [<m>]]          (optional; turbulence after section k, or the obstacle m)
 //! receiver free_field_monopole                            (optional; the mouth flow as a monopole in free space)
 //! rest_gap <time_s> <gap_m>                               (repeat, optional, two_mass only; the fold's rest gap over time)
+//! fold_tension <time_s> <stiffness_scale> <vibrato_scale> <flutter_scale>
+//!                                                         (repeat, optional; the fold's tension over time)
 //! nasal_source <identifier without spaces>                (optional; with any nasal row: the nasal tables)
 //! nasal_licence <free text to end of line>
 //! velum <after_section> <port_area_m2> <attach_source>    (the port opens after 0-based oral section after_section)
@@ -148,6 +150,20 @@
 //! moves between them; a card states where its gaps and times come from. `body_cover` and `one_dof` folds and
 //! `glottal_orifice` refuse them by name. Without the rows the fold keeps the `fold` row's gap and a performance is
 //! bit-identical to one written before the rows existed.
+//!
+//! `fold_tension` rows move the fold's tension over time, as a singer does from one note or vowel to the next within
+//! one render (the lyric phrase, MB 23138): linear between rows in strictly increasing time, the first row held before
+//! it and the last row after it, as `rest_gap` is. At time `t` the three factors `s`, `g_v` and `g_f` are read, and
+//! the fold's stiffnesses take `s (1 + g_v a sin(2 pi r t) + g_f y)` in place of `1 + a sin(2 pi r t) + y`, where
+//! `a` and `r` are the `tension_modulation` row's and `y` is the flutter rows' sum ([`GlottalIsland::set_tension`],
+//! once per output sample, so the springs' energy change is reported as work on the fold as the gestures' already is).
+//! A card states where its factors come from; nothing here picks them. A vibrato scale other than 1 needs
+//! `tension_modulation`, a flutter scale other than 1 needs `tension_flutter`, the scaled vibrato amplitude and the
+//! scaled flutter sds keep their rows' own bounds (0.5 and 0.1), the stiffness factor lies in the fold's admitted
+//! tension range (1/4 to 4), and `glottal_orifice` refuses the rows by name. The product with the gestures must stay
+//! inside that range too; a render that leaves it is refused there. Without the rows nothing is read or
+//! called and a performance is bit-identical to one written before the rows existed; rows at `1 1 1` are bit-identical
+//! too, since a product with 1 is exact.
 //!
 //! A moving tract (pexfp.327.1): each `tract_move` takes the tract from the shape it holds (the card's own `section`
 //! rows until the first move) to keyframe `name`, or back to the card's shape with `card`, through `steps` shapes at
@@ -454,8 +470,25 @@ pub struct VoiceDescription {
     pub free_field_receiver: bool,
     /// Opt-in `rest_gap` rows `(time_s, gap_m)` in strictly increasing time (module doc); empty keeps the `fold` row's gap.
     pub rest_gap: Vec<(f64, f64)>,
+    /// Opt-in `fold_tension` rows in strictly increasing time (module doc); empty keeps the card's own tension.
+    pub fold_tension: Vec<FoldTensionPoint>,
     /// Opt-in nasal rows (module doc; the `nasal` child module); `None` keeps the series tract and the one opening.
     pub nasal: Option<NasalCard>,
+}
+
+/// One `fold_tension <time_s> <stiffness_scale> <vibrato_scale> <flutter_scale>` row (module doc): at `time_s` the
+/// fold's stiffnesses are scaled by `stiffness`, the `tension_modulation` amplitude by `vibrato` and the flutter rows'
+/// output by `flutter`; linear between rows. The card names all four numbers; this code chooses none.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FoldTensionPoint {
+    /// Time of the row [s].
+    pub time_s: f64,
+    /// Common factor on the fold's stiffnesses.
+    pub stiffness: f64,
+    /// Factor on the `tension_modulation` amplitude.
+    pub vibrato: f64,
+    /// Factor on the flutter rows' summed output.
+    pub flutter: f64,
 }
 
 /// The `fricative_noise <seed> <k> <j> [stevens [<m>]]` row: the supraglottal constriction `k` (0-based section index)
@@ -782,6 +815,7 @@ impl VoiceDescription {
         let mut fricative_noise = None;
         let mut free_field_receiver = None;
         let mut rest_gap: Vec<(f64, f64)> = Vec::new();
+        let mut fold_tension: Vec<FoldTensionPoint> = Vec::new();
         let mut nasal_draft = nasal::NasalDraft::default();
         for line in lines {
             let mut tokens = line.split_whitespace();
@@ -979,6 +1013,33 @@ impl VoiceDescription {
                         return Err("rest_gap times must be strictly increasing".into());
                     }
                     rest_gap.push(point);
+                }
+                "fold_tension" => {
+                    arity(&rest, 4, key)?;
+                    if fold_tension.len() >= MAX_SCHEDULE_POINTS {
+                        return Err("too many fold_tension points".into());
+                    }
+                    let point = FoldTensionPoint {
+                        time_s: field(&rest, 0, "fold_tension time")?,
+                        stiffness: field(&rest, 1, "fold_tension stiffness scale")?,
+                        vibrato: field(&rest, 2, "fold_tension vibrato scale")?,
+                        flutter: field(&rest, 3, "fold_tension flutter scale")?,
+                    };
+                    if point.time_s < 0.0 {
+                        return Err("fold_tension time must be non-negative".into());
+                    }
+                    // The fold's admitted tension range (`GlottalIsland::set_tension`, 1/4..=4): a factor outside it
+                    // could never be set, so it is refused here, by the row's name.
+                    if !(0.25..=4.0).contains(&point.stiffness) {
+                        return Err("fold_tension stiffness scale must be in 0.25..=4, the fold's tension range".into());
+                    }
+                    if point.vibrato < 0.0 || point.flutter < 0.0 {
+                        return Err("fold_tension vibrato and flutter scales must be non-negative".into());
+                    }
+                    if fold_tension.last().is_some_and(|last: &FoldTensionPoint| point.time_s <= last.time_s) {
+                        return Err("fold_tension times must be strictly increasing".into());
+                    }
+                    fold_tension.push(point);
                 }
                 "tract_source" => {
                     arity(&rest, 1, key)?;
@@ -1276,6 +1337,24 @@ impl VoiceDescription {
         if tension_flutter_second.is_some() && tension_flutter.is_none() {
             return Err("tension_flutter_second needs tension_flutter: it adds to that row".into());
         }
+        // `fold_tension` (module doc): a factor on a gesture needs that gesture; the scaled vibrato keeps its bound.
+        if tension_modulation.is_none() && fold_tension.iter().any(|p| p.vibrato != 1.0) {
+            return Err("fold_tension's vibrato scale needs tension_modulation: it scales that row's amplitude".into());
+        }
+        if tension_flutter.is_none() && fold_tension.iter().any(|p| p.flutter != 1.0) {
+            return Err("fold_tension's flutter scale needs tension_flutter: it scales that row's output".into());
+        }
+        if let Some((_, amplitude)) = tension_modulation
+            && fold_tension.iter().any(|p| p.vibrato * amplitude > 0.5)
+        {
+            return Err("fold_tension's vibrato scale takes the tension modulation amplitude above 0.5".into());
+        }
+        // The flutter rows' own bound (sd 0.1, `TensionFlutterCard::validate`) holds for the scaled rows too.
+        for card in [tension_flutter, tension_flutter_second].into_iter().flatten() {
+            if fold_tension.iter().any(|p| p.flutter * card.sd_rel > 0.1) {
+                return Err("fold_tension's flutter scale takes a tension_flutter sd above 0.1".into());
+            }
+        }
         if head_load.is_some() {
             if head_sphere.is_none() {
                 return Err(HEAD_LOAD_NEEDS_SPHERE.into());
@@ -1303,6 +1382,7 @@ impl VoiceDescription {
             let fold_rows = [
                 ("fold_shape", fold_shape.is_some()),
                 ("rest_gap", !rest_gap.is_empty()),
+                ("fold_tension", !fold_tension.is_empty()),
                 ("tension_modulation", tension_modulation.is_some()),
                 ("tension_flutter", tension_flutter.is_some()),
                 ("pulse_shimmer", pulse_shimmer.is_some()),
@@ -1413,6 +1493,7 @@ impl VoiceDescription {
             fricative_noise,
             free_field_receiver: free_field_receiver.is_some(),
             rest_gap,
+            fold_tension,
             nasal,
         })
     }
@@ -1898,6 +1979,13 @@ impl VoiceDescription {
             rest_gap: (!self.rest_gap.is_empty()).then(|| Schedule {
                 points: self.rest_gap.clone(),
                 cursor: 0,
+            }),
+            fold_tension: (!self.fold_tension.is_empty()).then(|| {
+                let factor = |read: fn(&FoldTensionPoint) -> f64| Schedule {
+                    points: self.fold_tension.iter().map(|p| (p.time_s, read(p))).collect(),
+                    cursor: 0,
+                };
+                [factor(|p| p.stiffness), factor(|p| p.vibrato), factor(|p| p.flutter)]
             }),
             tension_modulation: self.tension_modulation,
             tension_flutter: self.tension_flutter.map(|card| TensionFlutter::new(card, self.output_rate_hz)),
@@ -2434,6 +2522,9 @@ pub struct VoicePerformance {
     schedule: Schedule,
     /// Opt-in `rest_gap` rows: the fold's rest gap over time [m] (module doc); `None` keeps the `fold` row's gap.
     rest_gap: Option<Schedule>,
+    /// Opt-in `fold_tension` rows: the stiffness, vibrato and flutter factors over time (module doc); `None` keeps the
+    /// card's own tension.
+    fold_tension: Option<[Schedule; 3]>,
     tension_modulation: Option<(f64, f64)>,
     tension_flutter: Option<TensionFlutter>,
     tension_flutter_second: Option<TensionFlutter>,
@@ -2607,25 +2698,38 @@ impl VoicePerformance {
             let t = self.steps as f64 / f64::from(self.mechanics_rate);
             // The gesture is far slower than the audio clock, so the tension is set once per output sample.
             if j == 0 {
-                let vibrato = self
-                    .tension_modulation
-                    .map(|(rate_hz, amplitude)| amplitude * det::sin(core::f64::consts::TAU * rate_hz * t));
+                // `fold_tension`: the stiffness, vibrato and flutter factors at `t` (module doc). Without the rows
+                // nothing is read, and every expression below is the one written before the rows existed.
+                let scales = self
+                    .fold_tension
+                    .as_mut()
+                    .map(|[stiffness, vibrato, flutter]| [stiffness.at(t), vibrato.at(t), flutter.at(t)]);
+                let vibrato = self.tension_modulation.map(|(rate_hz, amplitude)| {
+                    let amplitude = scales.map_or(amplitude, |[_, g_v, _]| g_v * amplitude);
+                    amplitude * det::sin(core::f64::consts::TAU * rate_hz * t)
+                });
                 let flutter = self.tension_flutter.as_mut().map(|flutter| {
                     let first = flutter.next_relative();
                     // No sum with zero when the row is absent: such a card keeps the first row's value bit for bit.
-                    match self.tension_flutter_second.as_mut() {
+                    let y = match self.tension_flutter_second.as_mut() {
                         Some(second) => first + second.next_relative(),
                         None => first,
-                    }
+                    };
+                    scales.map_or(y, |[_, _, g_f]| g_f * y)
                 });
                 // The same: only a card with both gestures takes the sum, and only such a card was refused before it.
                 let moved = match (vibrato, flutter) {
                     (Some(v), Some(y)) => Some(v + y),
                     (one, None) | (None, one) => one,
                 };
-                if let Some(moved) = moved {
+                let tension = match (scales, moved) {
+                    (None, moved) => moved.map(|moved| 1.0 + moved),
+                    (Some([s, _, _]), Some(moved)) => Some(s * (1.0 + moved)),
+                    (Some([s, _, _]), None) => Some(s),
+                };
+                if let Some(tension) = tension {
                     self.island
-                        .set_tension(1.0 + moved)
+                        .set_tension(tension)
                         .map_err(|e| format!("fold tension refused: {e:?}"))?;
                 }
                 // `rest_gap`: the abducting gesture, on the same clock (module doc). Without the rows nothing is called.
@@ -3770,6 +3874,156 @@ mod tests {
         );
         assert!(card > 0.0, "the card's own fold must shut ({card})");
         assert!(abducted < card, "an abducted fold shuts less often: {abducted} against {card}");
+    }
+
+    /// The `fold_tension` rows (MB 23138, the lyric phrase) parse in time order, and each refusal names what it meets:
+    /// the fields, a stiffness scale outside the fold's tension range, a negative gesture scale, times that do not
+    /// increase, a factor on a gesture the card lacks, a scaled vibrato or flutter past its row's own bound, and the
+    /// flow rig (no fold).
+    #[test]
+    fn fold_tension_parses_and_is_refused_by_name() {
+        let parse = |text: &str| VoiceDescription::from_bytes(text.as_bytes());
+        let gestures = "tension_modulation 5.9 0.11\ntension_flutter 7 4 1.3 0.02\n";
+        let rows = "fold_tension 0 1 1 1\nfold_tension 0.9 1.08 1.02 0.87\nfold_tension 1.8 1.58 3.8 2.9\n";
+        let ok = parse(&modulation_text(&format!("{gestures}{rows}"))).expect("parses");
+        let point = |time_s, stiffness, vibrato, flutter| FoldTensionPoint { time_s, stiffness, vibrato, flutter };
+        assert_eq!(
+            ok.fold_tension,
+            vec![point(0.0, 1.0, 1.0, 1.0), point(0.9, 1.08, 1.02, 0.87), point(1.8, 1.58, 3.8, 2.9)]
+        );
+        assert!(parse(&modulation_text(gestures)).expect("parses").fold_tension.is_empty());
+        parse(&modulation_text("fold_tension 0 1.2 1 1\n")).expect("a stiffness factor alone needs no gesture");
+        for (extra, needle) in [
+            ("fold_tension 0 1 1\n", "takes 4 fields"),
+            ("fold_tension 0 x 1 1\n", "not a number"),
+            ("fold_tension 0 inf 1 1\n", "must be finite"),
+            ("fold_tension -0.1 1 1 1\n", "time must be non-negative"),
+            ("fold_tension 0 0 1 1\n", "stiffness scale must be in 0.25..=4"),
+            ("fold_tension 0 -1 1 1\n", "stiffness scale must be in 0.25..=4"),
+            ("fold_tension 0 0.24 1 1\n", "stiffness scale must be in 0.25..=4"),
+            ("fold_tension 0 4.01 1 1\n", "stiffness scale must be in 0.25..=4"),
+            ("fold_tension 0 1 -1 1\n", "scales must be non-negative"),
+            ("fold_tension 0 1 1 -1\n", "scales must be non-negative"),
+            ("fold_tension 0.1 1 1 1\nfold_tension 0.1 1.1 1 1\n", "strictly increasing"),
+            ("fold_tension 0.2 1 1 1\nfold_tension 0.1 1.1 1 1\n", "strictly increasing"),
+            ("fold_tension 0 1 4.6 1\n", "above 0.5"),
+            ("fold_tension 0 1 1 5.1\n", "sd above 0.1"),
+        ] {
+            let error = parse(&modulation_text(&format!("{gestures}{extra}"))).expect_err(extra);
+            assert!(error.contains(needle), "{extra:?} -> {error}");
+        }
+        for (extra, needle) in [
+            ("fold_tension 0 1 1.1 1\n", "vibrato scale needs tension_modulation"),
+            ("fold_tension 0 1 1 1.1\n", "flutter scale needs tension_flutter"),
+        ] {
+            let error = parse(&modulation_text(extra)).expect_err(extra);
+            assert!(error.contains(needle), "{extra:?} -> {error}");
+        }
+        let error = parse(&fixture("glottal_orifice 7.854e-5\nfold_tension 0 1 1 1\n")).expect_err("orifice");
+        assert!(error.contains("`fold_tension` moves or reads a fold"), "{error}");
+    }
+
+    /// Rows at `1 1 1` change nothing, held from the start or from a later first row, on a card with both gestures and
+    /// on a card with neither: a product with 1 is exact, and a tension of 1 is the island's own (a no-op).
+    #[test]
+    fn fold_tension_at_one_is_bit_identical() {
+        let gestures =
+            "tension_modulation 5.9 0.11\ntension_flutter 7 20 20 0.005\ntension_flutter_second 7 20 20 0.002\n";
+        for card in ["", gestures] {
+            let plain = render(&fixture(card));
+            for rows in ["fold_tension 0 1 1 1\n", "fold_tension 0.01 1 1 1\nfold_tension 0.04 1 1 1\n"] {
+                let own = render(&fixture(&format!("{card}{rows}")));
+                let at = first_difference(&plain, &own);
+                assert_eq!(at, None, "{card:?} {rows:?}: rows at 1 1 1 must change nothing");
+            }
+        }
+    }
+
+    /// The rows reach the fold exactly as the module doc writes them: a card with the rows plays the card without them,
+    /// its tension set by hand before each output sample to `s (1 + (g_v a sin(2 pi r t) + g_f (y1 + y2)))`, with the
+    /// factors interpolated as written out here and the flutter streams written out from their keys. The factors reach
+    /// the pressure, and the result does not depend on the partition.
+    #[test]
+    fn fold_tension_reaches_the_fold_as_written() {
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        let (rate_hz, amplitude) = (5.9, 0.11);
+        let gestures = format!(
+            "tension_modulation {rate_hz} {amplitude}\ntension_flutter 7 20 20 0.005\n\
+             tension_flutter_second 7 20 20 0.002\n"
+        );
+        // Two rows: the first held before 0.01 s, the second after 0.03 s, linear between.
+        let rows = [(0.01, 1.0, 1.0, 1.0), (0.03, 1.2, 1.5, 0.5)];
+        let card = fixture(&format!(
+            "{gestures}fold_tension {} {} {} {}\nfold_tension {} {} {} {}\n",
+            rows[0].0, rows[0].1, rows[0].2, rows[0].3, rows[1].0, rows[1].1, rows[1].2, rows[1].3
+        ));
+        let engine = render(&card);
+        let plain = fixture("");
+        let n = VoiceDescription::from_bytes(plain.as_bytes()).expect("parses").samples as usize;
+        let first = TensionFlutterCard { seed: 7, centre_hz: 20.0, bandwidth_hz: 20.0, sd_rel: 0.005 };
+        let second = TensionFlutterCard { seed: 7, centre_hz: 20.0, bandwidth_hz: 20.0, sd_rel: 0.002 };
+        let (y1, y2) = (flutter_written_out(first, 0, 48_000, n), flutter_written_out(second, 1, 48_000, n));
+        let factor = |t: f64, (a, b): (f64, f64)| -> f64 {
+            let (t0, t1) = (rows[0].0, rows[1].0);
+            if t <= t0 {
+                a
+            } else if t >= t1 {
+                b
+            } else {
+                a + (b - a) * (t - t0) / (t1 - t0)
+            }
+        };
+        let description = VoiceDescription::from_bytes(plain.as_bytes()).expect("parses");
+        let mut performance = description.build().expect("builds");
+        let mut by_hand = vec![0.0; n];
+        for (k, sample) in by_hand.iter_mut().enumerate() {
+            let t = performance.steps as f64 / f64::from(performance.mechanics_rate);
+            let s = factor(t, (rows[0].1, rows[1].1));
+            let v = (factor(t, (rows[0].2, rows[1].2)) * amplitude) * det::sin(core::f64::consts::TAU * rate_hz * t);
+            let y = factor(t, (rows[0].3, rows[1].3)) * (y1[k] + y2[k]);
+            performance.island.set_tension(s * (1.0 + (v + y))).expect("tension");
+            performance.block(core::slice::from_mut(sample)).expect("renders");
+        }
+        assert_eq!(bits(&engine), bits(&by_hand), "the rows must reach the fold as the module doc writes them");
+        let unscaled = render(&fixture(&gestures));
+        assert!(first_difference(&unscaled, &engine).is_some(), "the factors must reach the pressure");
+        let description = VoiceDescription::from_bytes(card.as_bytes()).expect("parses");
+        let mut split = description.build().expect("builds");
+        let mut chunked = vec![0.0_f64; n];
+        for chunk in chunked.chunks_mut(37) {
+            split.block(chunk).expect("split");
+        }
+        assert_eq!(first_difference(&engine, &chunked), None, "the rows must not depend on the partition");
+    }
+
+    /// A held stiffness factor is the card whose `fold` row carries the scaled stiffnesses: every stiffness-derived
+    /// quantity goes through the fold's one tensioning path, and 80, 8 and 25 times 1.21 are exactly 96.8, 9.68 and
+    /// 30.25 in binary64, so the two render bit for bit the same. A step to the factor then settles on that note: the
+    /// read window starts 0.25 s after the step ends, and 1e-3 (1.7 cents) is a stated bound on what is left of the
+    /// self-oscillation's return to its cycle plus the f0 track's window-phase sensitivity, not a derived one (the
+    /// value is printed). The factor must move f0 by more than 20 times that bound.
+    #[test]
+    fn a_stiffness_factor_plays_the_scaled_cards_note() {
+        let rate = 48_000.0;
+        let mean_f0 = |pcm: &[f64]| {
+            let tail = &pcm[(0.9 * rate) as usize..];
+            let track = f0_track(tail, rate, steady_f0_hz(tail, rate));
+            assert!(!track.is_empty(), "the read window holds no f0 frame");
+            track.iter().map(|(_, f)| f).sum::<f64>() / track.len() as f64
+        };
+        let card = modulation_text("");
+        let scaled_text = card.replace("2.5e-5 80 8 25 0.1", "2.5e-5 96.8 9.68 30.25 0.1");
+        assert_ne!(scaled_text, card, "the scaled card must differ from the card");
+        let at_one = mean_f0(&render(&card));
+        let (row_pcm, scaled_pcm) = (render(&modulation_text("fold_tension 0 1.21 1 1\n")), render(&scaled_text));
+        assert_eq!(first_difference(&row_pcm, &scaled_pcm), None, "the held factor must be the scaled card bit for bit");
+        let row = mean_f0(&row_pcm);
+        let stepped = mean_f0(&render(&modulation_text("fold_tension 0.6 1 1 1\nfold_tension 0.65 1.21 1 1\n")));
+        println!(
+            "{{\"suite\":\"fs-couple\",\"case\":\"voice-fold-tension-note\",\"f0_card_hz\":{at_one},\"f0_row_hz\":{row},\"f0_stepped_hz\":{stepped}}}"
+        );
+        assert!((stepped / row - 1.0).abs() < 1e-3, "stepped {stepped} Hz against the held row {row} Hz");
+        assert!(row / at_one - 1.0 > 2e-2, "the factor must raise f0: {row} Hz against {at_one} Hz");
     }
 
     /// The five filters of Ternstrom and Friberg's Fig. 9, at a rate low enough for a long run. Standard deviation
