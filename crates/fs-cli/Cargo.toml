@@ -50,7 +50,7 @@ fs-report = { path = "../fs-report" }
 fs-scenario = { path = "../fs-scenario" }
 fs-session = { path = "../fs-session" }
 fs-solver = { path = "../fs-solver" }
-fs-system = { path = "../fs-system" }
+fs-system = { path = "../fs-system", features = ["constitutive"] }
 fs-topols = { path = "../fs-topols" }
 fs-topopt = { path = "../fs-topopt", features = ["cutfem-marquee"], optional = true }
 fs-uq = { path = "../fs-uq" }

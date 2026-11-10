@@ -1,7 +1,8 @@
 # Devices described as data
 
 Each file here is a `frankensim.system.v0` scene: elements from
-`fs_system::elements` and the connections between their ports. Run one with
+`fs_system::elements` or `fs_system::constitutive` and the connections between
+their ports. Run one with
 
     frankensim system examples/system/quarter_car.json
     frankensim --json system examples/system/quarter_car.json
@@ -17,6 +18,7 @@ is the kernel's state and its energy and entropy ledger.
 | `heated_body.json` | a 30 W heater in a body that loses heat through a wall to 293.15 K | the closed-form discrete approach to 308.15 K |
 | `dc_motor.json` | a DC motor across three domains: a 12 V supply, winding inductance and resistance in a current loop, a gyrator to a rotor with a viscous bearing, and both heats into one case | the monolithic midpoint rule for the two coupled equations, the supply's energy against stored energy plus heat |
 | `parallel_rlc.json` | a current source drives a capacitor, inductor and resistor in parallel; all Joule heat warms the case | independent coupled voltage/current equations, source work, electrical storage and heat |
+| `nonlinear_rlc.json` | the same topology with voltage-dependent capacitance and flux-dependent inductance, crossing both curves' knees | independent charge/flux differential equations, original constitutive energies and Joule heat |
 | `geared_oscillator.json` | an ideal 2.5:1 transformer couples a mass to an anchored spring | reflected stiffness `ratio² × stiffness`, the midpoint oscillation phase and conserved energy |
 | `quarter_car.json` | a car body and wheel on a suspension spring and shock absorber, a tyre spring driven over a 30 mm bump; 70 % of the shock's heat warms it, the rest goes to the air | the ledger: road work = mechanical energy + heat, and the 70/30 split |
 
@@ -33,6 +35,34 @@ connected; the example routes every joule to the case.
 the source: the negative source waveform in the example supplies
 `0.4 + 0.2 sin(2π × 3t + 0.3)` amperes to the node. The existing `capacitor`
 and `resistor` elements remain the forms used in series current loops.
+
+## Nonlinear electrical storage
+
+`nonlinear_rlc.json` supplies a `nonlinear_capacitor` with a
+`charge_voltage_curve` of `[charge_c, voltage_v]` pairs, and a
+`nonlinear_inductor` with a `flux_current_curve` of `[flux_wb, current_a]`
+pairs. These are illustrative authored laws, with no measured-material claim.
+The capacitor's differential capacitance falls from 0.01 F to 0.005 F beyond
+0.02 C in either polarity. The inductor's differential inductance falls from
+0.05 H to 0.025 H beyond 0.05 Wb. The initial state excites both regions, and
+the resistor's heat flows into the case while the current source supplies
+0.05 A.
+
+Each curve needs 3–4096 knots, with both coordinates strictly increasing and
+an interior `(0,0)` knot. The existing `fs-phs` constitutive owner retains the
+knots and exact piecewise integrals. The capacitor stores `integral V dq` and
+the inductor `integral I d(flux)`. A local differential capacitance or
+inductance multiplied by a squared endpoint value is not their energy.
+States outside the supplied curve support refuse by name; the curves never
+extrapolate or clamp. They do not model hysteresis, dielectric loss or
+temperature dependence.
+
+Both elements have a single `p` port. The capacitor receives entering current
+and stores `charge_c`; the inductor receives voltage and stores `flux_wb`.
+Their reported `voltage_v` and `current_a` are endpoint constitutive values.
+The kernel uses integral mean efforts for work during a finite step, retaining
+energy when a step crosses knots. The original constant `capacitor`,
+`node_capacitor` and `inductor` scene forms keep their existing conventions.
 
 ## Ideal transformers
 

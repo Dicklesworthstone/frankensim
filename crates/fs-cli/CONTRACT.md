@@ -797,6 +797,23 @@ prescribed `current_a` is positive into its stored charge. Its reported
 readings are step means. The legacy `capacitor`, `resistor` and `join` retain
 their series-loop conventions.
 
+`nonlinear_capacitor` takes `charge_voltage_curve` as `[charge_c, voltage_v]`
+knots and an optional initial `charge_c`; `nonlinear_inductor` takes
+`flux_current_curve` as `[flux_wb, current_a]` knots and optional `flux_wb`.
+Their single electrical `p` ports receive current and voltage respectively.
+Both lower to `fs_system::constitutive` adapters over the existing `fs-phs`
+curve owners. The CLI enables the kernel's optional `constitutive` feature.
+Curves retain 3–4096 strictly increasing pairs, both polarities and an interior
+`(0,0)` datum. Invalid tables or unsupported initial coordinates refuse as
+named scene inputs; leaving source support during a step is a kernel refusal.
+No extrapolation or parameter fitting occurs. Endpoint probes evaluate the
+original voltage/charge or current/flux law; the kernel exchanges their
+work-conjugate finite-step means and stores the exact constitutive integrals.
+Prescribed current into a nonlinear capacitor increases its charge. The
+nonlinear RLC example and binary regressions check independently integrated
+charge/flux equations, source work, original storage and delivered Joule heat.
+Authored curves confer no material provenance, hysteresis or thermal law.
+
 A `transformer: [effort_in_port, flow_in_port]` connection with finite nonzero
 signed `ratio` lowers directly to the kernel's power-preserving transformer.
 It may connect distinct power domains and obeys `f_b = -ratio * f_a` and
@@ -817,8 +834,9 @@ is written; the driven oscillator against the
 monolithic midpoint rule through the binary, the heated body against its discrete
 closed form, the quarter car's road work against motion plus heat and its
 70/30 heat split, library and binary byte-identical, eight refusals). No
-claim beyond the kernel's: ideal elements with constant parameters, no
-material cards, contact, friction or step-size error control. The experimental
+claim beyond the kernel's: lumped elements with constant parameters or authored
+nonlinear electrical storage curves, no material-card resolution, contact,
+friction or step-size error control. The experimental
 workflows keep their existing request/result schemas, numerical limits and
 exit classes; dispatch does not turn them into ledger-backed `.fsim` solves.
 All commands recognize one global `--json` flag, at any position, and reject

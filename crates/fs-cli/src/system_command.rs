@@ -15,6 +15,10 @@ use std::path::Path;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_ports::PortKind;
 use fs_ports::component::{Carrier, PortRole, PortSpec, PortTangent};
+use fs_system::constitutive::{
+    CapacitorChargeCurve, InductorFluxCurve, MAX_CAPACITOR_KNOTS, MAX_INDUCTOR_KNOTS,
+    NonlinearCapacitor, NonlinearInductor,
+};
 use fs_system::elements::{
     Admittance, Conductance, Damper, FlowSource, Force, Gyrator, HeatCapacity, Heater, Mass,
     Motion, SourceAccount, Spring, Storage, Waveform,
@@ -35,7 +39,7 @@ const MAX_SCENE_BYTES: u64 = 1024 * 1024;
 const MAX_ELEMENTS: usize = 2_000;
 const MAX_STEPS: f64 = 10_000_000.0;
 const MAX_SAMPLES: usize = 100_000;
-const NO_CLAIM: &str = "ideal lumped elements with constant parameters integrated by the implicit midpoint rule; no material cards, contact, friction, phase change or step-size error control; the ledger states what the discrete system did, not what a physical device would do";
+const NO_CLAIM: &str = "lumped elements with constant parameters or authored nonlinear electrical storage curves, using work-conjugate discrete-gradient stepping; no material-card resolution, contact, friction, phase change or step-size error control; the ledger states what the discrete system did, not what a physical device would do";
 
 const HELP: &str = "Usage: frankensim [--json] system <scene.json>
 
@@ -76,6 +80,15 @@ share that voltage (current is positive into each component):
   node_capacitor capacitance_f, charge_c = 0                          [p]
   resistor_branch resistance_ohm                                      [a, b, heat]
   current_source current_a (waveform; negative supplies the node)     [p]
+Source-owned reversible electrical curves, with both polarities and an
+interior (0,0) knot; both coordinates must increase strictly:
+  nonlinear_capacitor charge_voltage_curve = [[charge_c, voltage_v], ...],
+                      charge_c = 0                                  [p]
+  nonlinear_inductor flux_current_curve = [[flux_wb, current_a], ...],
+                     flux_wb = 0                                    [p]
+The capacitor receives current and the inductor receives voltage. Curves
+refuse extrapolation; reported voltage/current are endpoint values, while
+the kernel exchanges work-conjugate means over each step.
 Between two domains, without loss (an ideal DC machine with a = electrical,
 b = rotation and ratio in N m/A: torque ratio * i on the rotor, back-EMF
 ratio * w against the loop):
@@ -89,7 +102,8 @@ Connections, ports written element.port:
                           (angular velocity, current), or a heat capacity and
                           the elements at its temperature
   {\"common_effort\": [ports]}
-                          one effort-setting port (node_capacitor or voltage)
+                          one effort-setting port (node_capacitor,
+                          nonlinear_capacitor or voltage)
                           and branches sharing its voltage (inductor,
                           resistor_branch, current_source)
   {\"transformer\": [effort_in_port, flow_in_port], \"ratio\": r}
@@ -106,7 +120,7 @@ Connections, ports written element.port:
                           about a shaft; current_a and voltage_v in a loop (0
                           current grounds a series element's far end); voltage_v
                           grounds a resistor_branch end; current_a into a
-                          node_capacitor increases its charge;
+                          node_capacitor or nonlinear_capacitor increases its charge;
                           temperature_k for a damper, resistor, conductance or
                           heater, heat_rate_w for a heat capacity
 
@@ -299,6 +313,10 @@ enum Kind {
     ResistorBranch,
     /// A prescribed current, positive into the source.
     CurrentSource,
+    /// Charge storage governed by a source-owned V(q) curve.
+    NonlinearCapacitor,
+    /// Flux storage governed by a source-owned I(flux) curve.
+    NonlinearInductor,
     Gyrator,
     HeatCapacity,
     Conductance,
@@ -306,7 +324,7 @@ enum Kind {
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 19] = [
+    const TABLE: [(&'static str, Self); 21] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
@@ -322,6 +340,8 @@ impl Kind {
         ("node_capacitor", Self::NodeCapacitor),
         ("resistor_branch", Self::ResistorBranch),
         ("current_source", Self::CurrentSource),
+        ("nonlinear_capacitor", Self::NonlinearCapacitor),
+        ("nonlinear_inductor", Self::NonlinearInductor),
         ("gyrator", Self::Gyrator),
         ("heat_capacity", Self::HeatCapacity),
         ("conductance", Self::Conductance),
@@ -353,6 +373,9 @@ struct Element {
     temperature_k: Option<f64>,
     /// Convert a node capacitor's endpoint charge to its endpoint voltage.
     capacitance_f: Option<f64>,
+    /// Original laws for endpoint probes; prepared data are shared on clone.
+    charge_voltage_curve: Option<CapacitorChargeCurve>,
+    flux_current_curve: Option<InductorFluxCurve>,
 }
 
 struct Device {
@@ -481,6 +504,29 @@ where
     Ok((node, ports))
 }
 
+fn storage_knots(
+    definition: &J,
+    key: &str,
+    coordinates: &str,
+    maximum: usize,
+    what: &str,
+) -> Result<Vec<(f64, f64)>, String> {
+    let rows = definition
+        .get(key)
+        .and_then(J::as_array)
+        .ok_or_else(|| format!("{what}.{key}: expected an array of {coordinates}"))?;
+    if !(3..=maximum).contains(&rows.len()) {
+        return Err(format!("{what}.{key}: expected 3..={maximum} knots"));
+    }
+    rows.iter()
+        .map(|row| match row.as_array() {
+            Some([coordinate, conjugate]) => coordinate.as_f64().zip(conjugate.as_f64()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| format!("{what}.{key}: every knot is {coordinates}"))
+}
+
 /// A spring, torsion spring or capacitor. A capacitor is declared by its
 /// capacitance and has no cubic term.
 fn compliance(
@@ -539,6 +585,8 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
     let invalid = |e: fs_system::elements::ElementError| Refusal::Input(format!("{what}: {e}"));
     let mut temperature_k = None;
     let mut capacitance_f = None;
+    let mut charge_voltage_curve = None;
+    let mut flux_current_curve = None;
     let (node, ports) = match kind {
         Kind::Inertance(domain) => {
             let names = domain.names();
@@ -613,6 +661,32 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
             );
             add(builder, name, source, SourceAccount::default())?
         }
+        Kind::NonlinearCapacitor => {
+            fields(definition, &["kind", "charge_voltage_curve", "charge_c"], &what)?;
+            let curve = CapacitorChargeCurve::try_new(storage_knots(
+                definition, "charge_voltage_curve", "[charge_c, voltage_v]",
+                MAX_CAPACITOR_KNOTS, &what,
+            )?)
+            .map_err(|error| format!("{what}.charge_voltage_curve: {error:?}"))?;
+            let charge = number_or(definition, "charge_c", 0.0, &what)?;
+            curve.voltage_v(charge)
+                .map_err(|error| format!("{what}.charge_c: {error:?}"))?;
+            charge_voltage_curve = Some(curve.clone());
+            add(builder, name, NonlinearCapacitor::new(curve), charge)?
+        }
+        Kind::NonlinearInductor => {
+            fields(definition, &["kind", "flux_current_curve", "flux_wb"], &what)?;
+            let curve = InductorFluxCurve::try_new(storage_knots(
+                definition, "flux_current_curve", "[flux_wb, current_a]",
+                MAX_INDUCTOR_KNOTS, &what,
+            )?)
+            .map_err(|error| format!("{what}.flux_current_curve: {error:?}"))?;
+            let flux = number_or(definition, "flux_wb", 0.0, &what)?;
+            curve.current_a(flux)
+                .map_err(|error| format!("{what}.flux_wb: {error:?}"))?;
+            flux_current_curve = Some(curve.clone());
+            add(builder, name, NonlinearInductor::new(curve), flux)?
+        }
         Kind::Gyrator => gyrator(builder, name, definition, &what)?,
         Kind::HeatCapacity => {
             fields(definition, &["kind", "capacity_j_k", "temperature_k"], &what)?;
@@ -643,6 +717,8 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
         ports,
         temperature_k,
         capacitance_f,
+        charge_voltage_curve,
+        flux_current_curve,
     })
 }
 
@@ -890,7 +966,7 @@ fn prescribe(
     // charge, so its prescribed current keeps the component's positive sign.
     let prescribed_flow =
         matches!((target.carrier, target.role), (Carrier::Power(_), PortRole::FlowIn))
-            && elements[target.element].kind != Kind::NodeCapacitor;
+            && !matches!(elements[target.element].kind, Kind::NodeCapacitor | Kind::NonlinearCapacitor);
     let sign = if prescribed_flow { -1.0 } else { 1.0 };
     builder
         .boundary(
@@ -1119,6 +1195,18 @@ impl Device {
                     ("charge_c", charge),
                     ("voltage_v", charge / element.capacitance_f.unwrap_or(f64::NAN)),
                 ]
+            }
+            Kind::NonlinearCapacitor => {
+                let charge = system.state::<f64>(element.node).copied().unwrap_or(f64::NAN);
+                let voltage = element.charge_voltage_curve.as_ref()
+                    .and_then(|curve| curve.voltage_v(charge).ok()).unwrap_or(f64::NAN);
+                vec![("charge_c", charge), ("voltage_v", voltage)]
+            }
+            Kind::NonlinearInductor => {
+                let flux = system.state::<f64>(element.node).copied().unwrap_or(f64::NAN);
+                let current = element.flux_current_curve.as_ref()
+                    .and_then(|curve| curve.current_a(flux).ok()).unwrap_or(f64::NAN);
+                vec![("flux_wb", flux), ("current_a", current)]
             }
             Kind::HeatCapacity => vec![(
                 "temperature_k",

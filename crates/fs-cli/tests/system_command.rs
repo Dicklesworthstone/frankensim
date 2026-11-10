@@ -334,6 +334,105 @@ fn a_prescribed_current_enters_the_node_capacitor() {
     assert!(value(&json, "\"totals\"", "energy_residual_j").abs() <= 1.0e-12);
 }
 
+// Independent piecewise laws for nonlinear_rlc.json: the outer slope is
+// twice the inner slope, and energy integrates the physical conjugate value.
+fn nonlinear_effort(coordinate: f64, knee: f64, at_knee: f64) -> f64 {
+    let x = coordinate / knee;
+    at_knee * if x.abs() <= 1.0 { x } else { 2.0 * x - x.signum() }
+}
+
+fn nonlinear_energy(coordinate: f64, knee: f64, at_knee: f64) -> f64 {
+    let x = (coordinate / knee).abs();
+    knee * at_knee * if x <= 1.0 { 0.5 * x * x } else { x * x - x + 0.5 }
+}
+
+fn nonlinear_rhs([charge, flux, _, _]: [f64; 4]) -> [f64; 4] {
+    let voltage = nonlinear_effort(charge, 0.02, 2.0);
+    let current = nonlinear_effort(flux, 0.05, 1.0);
+    // q' = supplied current - resistor current - inductor current;
+    // flux' = node voltage. The other states integrate heat and source work.
+    [0.05 - 0.1 * voltage - current, voltage, 0.1 * voltage * voltage, 0.05 * voltage]
+}
+
+#[test]
+fn nonlinear_storage_scene_follows_the_differential_laws_and_closes_all_energy_accounts() {
+    let (code, json, stderr) = run_binary(&["--json", "system", &example("nonlinear_rlc.json")]);
+    assert_eq!(code, 0, "{stderr}");
+    let (mut reference, dt) = ([0.032, -0.04, 0.0, 0.0], 5.0e-6);
+    // Independent continuous-time RK4, 100x finer than the scene. This
+    // reference does not call the native curves or their discrete gradients.
+    for _ in 0..100_000 {
+        let a = nonlinear_rhs(reference);
+        let b = nonlinear_rhs(std::array::from_fn(|i| reference[i] + 0.5 * dt * a[i]));
+        let c = nonlinear_rhs(std::array::from_fn(|i| reference[i] + 0.5 * dt * b[i]));
+        let d = nonlinear_rhs(std::array::from_fn(|i| reference[i] + dt * c[i]));
+        reference = std::array::from_fn(|i| reference[i] + dt * (a[i] + 2.0*b[i] + 2.0*c[i] + d[i]) / 6.0);
+    }
+    let charge = value(&json, &element("capacitor"), "charge_c");
+    let flux = value(&json, &element("coil"), "flux_wb");
+    assert!((charge - reference[0]).abs() <= 3.0e-6, "{charge} vs {}", reference[0]);
+    assert!((flux - reference[1]).abs() <= 8.0e-6, "{flux} vs {}", reference[1]);
+    // Probes report endpoint efforts, not the last step's integral means.
+    let voltage = value(&json, &element("capacitor"), "voltage_v");
+    let current = value(&json, &element("coil"), "current_a");
+    assert!((voltage - nonlinear_effort(charge, 0.02, 2.0)).abs() < 1.0e-13);
+    assert!((current - nonlinear_effort(flux, 0.05, 1.0)).abs() < 1.0e-13);
+
+    let heat = value(&json, &element("load"), "dissipated_j");
+    let supplied = -value(&json, &element("source"), "energy_in_j");
+    assert!((heat - reference[2]).abs() < 1.0e-6);
+    assert!((supplied - reference[3]).abs() < 1.0e-6);
+    let electrical_change = nonlinear_energy(charge, 0.02, 2.0)
+        + nonlinear_energy(flux, 0.05, 1.0)
+        - nonlinear_energy(0.032, 0.02, 2.0)
+        - nonlinear_energy(-0.04, 0.05, 1.0);
+    assert!((electrical_change + heat - supplied).abs() < 1.0e-10);
+    let warmed = value(&json, &element("case"), "stored_change_j");
+    assert!((warmed - heat).abs() < 1.0e-10);
+    assert!(value(&json, "\"totals\"", "energy_residual_j").abs() < 1.0e-10);
+    assert!(value(&json, "\"totals\"", "entropy_generated_j_per_k") > 0.0);
+    assert_eq!(json.matches("{\"time_s\":").count(), 101);
+}
+
+#[test]
+fn prescribed_current_and_voltage_advance_the_original_charge_and_flux_curves() {
+    let scene = r#"{
+  "schema": "frankensim.system.v0", "duration_s": 0.3, "step_s": 0.03,
+  "elements": {
+    "cap": {"kind": "nonlinear_capacitor", "charge_voltage_curve": [[-0.04, -6.0], [-0.02, -2.0], [0.0, 0.0], [0.02, 2.0], [0.04, 6.0]], "charge_c": 0.012},
+    "coil": {"kind": "nonlinear_inductor", "flux_current_curve": [[-0.1, -3.0], [-0.05, -1.0], [0.0, 0.0], [0.05, 1.0], [0.1, 3.0]], "flux_wb": 0.03}
+  },
+  "connections": [{"prescribe": "cap.p", "current_a": 0.08}, {"prescribe": "coil.p", "voltage_v": 0.2}]
+}"#;
+    let path = scratch("prescribed_nonlinear_storage.json", scene);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!((value(&json, &element("cap"), "charge_c") - 0.036).abs() < 1.0e-14);
+    assert!((value(&json, &element("cap"), "voltage_v") - 5.2).abs() < 1.0e-12);
+    assert!((value(&json, &element("coil"), "flux_wb") - 0.09).abs() < 1.0e-14);
+    assert!((value(&json, &element("coil"), "current_a") - 2.6).abs() < 1.0e-12);
+    let capacitor_work = value(&json, "\"port\":\"cap.p\"", "energy_in_j");
+    let inductor_work = value(&json, "\"port\":\"coil.p\"", "energy_in_j");
+    assert!((capacitor_work - (nonlinear_energy(0.036, 0.02, 2.0) - nonlinear_energy(0.012, 0.02, 2.0))).abs() < 1.0e-12);
+    assert!((inductor_work - (nonlinear_energy(0.09, 0.05, 1.0) - nonlinear_energy(0.03, 0.05, 1.0))).abs() < 1.0e-12);
+
+    for (file, original, replacement, named_field) in [
+        ("bad_charge_curve.json", "[0.02, 2.0]", "[0.02, -2.0]", "charge_voltage_curve"),
+        ("bad_flux_curve.json", "[0.05, 1.0]", "[0.05, 0.0]", "flux_current_curve"),
+        ("unsupported_initial_charge.json", "\"charge_c\": 0.012", "\"charge_c\": 0.5", "charge_c"),
+    ] {
+        let changed = scene.replace(original, replacement);
+        assert_ne!(changed, scene);
+        let (code, stderr) = refused(file, &changed);
+        assert_eq!(code, 3, "{stderr}");
+        assert!(stderr.contains(named_field), "{stderr}");
+    }
+    let changed = scene.replace("\"current_a\": 0.08", "\"current_a\": 10.0");
+    let (code, stderr) = refused("nonlinear_storage_support_exit.json", &changed);
+    assert_eq!(code, 4, "{stderr}");
+    assert!(stderr.contains("cap") && stderr.contains("outside the supplied curve support"), "{stderr}");
+}
+
 #[test]
 fn the_transformer_scene_has_reflected_stiffness_with_either_signed_ratio() {
     let scene = std::fs::read_to_string(example("geared_oscillator.json")).unwrap();
