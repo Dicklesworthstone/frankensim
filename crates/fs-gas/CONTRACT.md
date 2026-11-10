@@ -10089,3 +10089,60 @@ reconstruction, and original fs-la decay/reaction dependency. Unrelated
 network orchestration, molecular/piston wrappers and finite thermal-partner
 wrappers are outside that source slice. No full workspace Cargo/DSR verdict,
 coupled temporal-order guarantee or combustion validation is claimed.
+
+
+## Closed gas cavity on the shared composition kernel
+
+The optional `component` feature exposes `component::GasCavity`. Its accepted
+state is the original `ClosedGasParcel`; mass, frozen composition, source
+models, auxiliary material coordinates and variable volume stay with that
+owner. The immutable component retains a reference parcel and the original
+`GasEnergySolve`. Energy measurement uses the source-integrated increment
+from the reference, cancelling formation datums before arithmetic and refusing
+a different inventory, source model or auxiliary context. Default library
+features are unchanged.
+
+Both ports receive flow. Pressure port `p` receives compression volume rate
+[m3/s], positive into the cavity, so `V1 = V0 - dt*f`; it returns absolute
+work pressure [Pa]. Heat port `heat` receives heat rate [W] into the gas and
+returns the entropy-conjugate mean temperature [K]. The original
+`discrete_gradient_heat_volume` operation owns simultaneous heat/work,
+caloric reconstruction, positive-branch admission, transport-source queries,
+bounded iterations and cancellation. It supplies no separate prescribed
+pressure or constant-Cv substitute.
+
+The complete map is classified `Smooth`, with two coupled nonlinear inputs.
+Its analytic JVP and VJP use the original pressure derivatives. For the ideal
+parcel's native residual, `theta_Q = (theta/p)*p_Q` and
+`theta_V = -(m*R*theta/V1)*theta_Q`; the port columns multiply volume
+derivatives by `-dt` and heat derivatives by `dt`. These identities retain
+the owner's caloric mean derivative, including its coincident-state limit.
+They are not a nonideal-gas tangent. Candidate states, port values and tangent
+outputs are written only after all source queries and a final cancellation
+poll; the original `GasEnergyError` is returned unchanged.
+
+The receipt carries original stored-energy change and reports minus the
+owner's first-law residual as numerical loss, separately from physical heat.
+Its energy allowance includes the original absolute joule budget and endpoint/
+represented-volume roundoff. The native Gibbs and entropy residuals remain
+numerical residuals; they are not declared physical entropy generation. Heat
+entropy transfer is `Q/theta`, and the source independently admits actual
+`Delta S-Q/theta`. A heat-exchange component must supply its own physical law
+and entropy production.
+
+The new focused tests cover component conformance, both tangent columns and
+their transpose, analytic coincidence coefficients, closed-form adiabatic and
+fixed-volume heating, reference-datum invariance, typed refusal/cancellation,
+and a vacuum piston assembled from a generic Mass and an area transformer.
+Its trajectory is compared with an independent adiabatic ODE and checked for
+time refinement and combined energy closure. Compilation and execution were
+unavailable during implementation; these tests are not claimed passed.
+
+This is spatially uniform frozen ideal gas, not an open mass/species stream,
+reacting volume, nonideal parcel or wave solver. The cavity does not know its
+mechanical partner's mass or piston area and cannot enforce the native
+piston's coupled acoustic-frequency timestep admission. The generic binary
+transformer also does not attach additional exterior-pressure or suspension
+loads to the same single mass port. The vacuum-piston slice does not replace
+the complete native piston family or complete bead
+`frankensim-rc-1109-root-3gc12.6.2`.

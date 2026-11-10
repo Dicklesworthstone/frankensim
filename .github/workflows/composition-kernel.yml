@@ -11,6 +11,10 @@ on:
       - examples/system/**
       - crates/fs-system/**
       - crates/fs-ports/**
+      - crates/fs-gas/Cargo.toml
+      - crates/fs-gas/src/lib.rs
+      - crates/fs-gas/src/component.rs
+      - crates/fs-gas/tests/component.rs
       - crates/fs-mbd/src/component.rs
       - crates/fs-mbd/src/component/**
       - crates/fs-mbd/src/spatial_loads/internal_motion/viscous/network.rs
@@ -65,6 +69,8 @@ jobs:
         run: cargo +nightly-2026-07-06 test -p fs-system --features constitutive --lib --test system_g0 --test elements --test power_maps --test parallel_elements --test checkpoints --test adaptive --test constitutive --locked
       - name: Devices described as data
         run: cargo +nightly-2026-07-06 test -p fs-cli --test system_command --locked
+      - name: Native source-backed gas Component
+        run: cargo +nightly-2026-07-06 test -p fs-gas --features component --test component --locked
       - name: Native thermal Component
         run: cargo +nightly-2026-07-06 test -p fs-thermal --test component --locked
       - name: Native mechanical and thermal slices

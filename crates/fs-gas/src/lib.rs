@@ -15,6 +15,10 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod chemistry;
 
+/// Closed source-backed gas storage with pressure-work and heat ports.
+#[cfg(feature = "component")]
+pub mod component;
+
 /// Reacting adiabatic throttles, compressors and expanders over original sources.
 pub mod equilibrium_flow;
 

@@ -1837,12 +1837,16 @@ dependencies = [
 name = "fs-gas"
 version = "0.0.1"
 dependencies = [
+ "fs-alloc",
  "fs-evidence",
+ "fs-exec",
  "fs-la",
  "fs-matdb",
  "fs-material",
  "fs-math",
+ "fs-ports",
  "fs-qty",
+ "fs-system",
  "fs-thermal",
  "fs-thermochem",
 ]

@@ -14,8 +14,12 @@ layer = "L3"
 default = []
 experimental-euler = ["dep:fs-thermal"]
 material = ["dep:fs-material", "dep:fs-matdb"]
+# Closed source-backed gas storage on the shared composition contract.
+component = ["material", "dep:fs-ports", "dep:fs-exec"]
 
 [dependencies]
+fs-exec = { path = "../fs-exec", optional = true }
+fs-ports = { path = "../fs-ports", optional = true }
 fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
 fs-qty = { path = "../fs-qty" }
@@ -25,8 +29,14 @@ fs-material = { path = "../fs-material", optional = true }
 fs-matdb = { path = "../fs-matdb", optional = true }
 
 [dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
+fs-system = { path = "../fs-system" }
 fs-matdb = { path = "../fs-matdb" }
 fs-evidence = { path = "../fs-evidence" }
+
+[[test]]
+name = "component"
+required-features = ["component"]
 
 [[example]]
 name = "shock_tube"
