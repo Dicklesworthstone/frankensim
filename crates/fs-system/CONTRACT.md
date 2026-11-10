@@ -77,6 +77,19 @@ physics owners below fs-couple can be composed without it.
   first-law residual of the window.
 - `SystemError`, `AdmissionError`, `OwnerError` (the component's own error,
   recoverable with `downcast_ref`).
+- With the `constitutive` feature, `constitutive::NonlinearCapacitor` and
+  `NonlinearInductor` wrap the existing `fs-phs` charge/voltage and
+  flux/current curves. Their scalar state is charge [C] or flux linkage [Wb].
+  The capacitor's port receives current and returns voltage; the inductor's
+  receives voltage and returns current. Both integrate the conserved
+  coordinate from the held input, use the source curve's exact energy change
+  and discrete conjugate mean, and expose its analytic endpoint derivative
+  through port JVP/VJP. Authored knots are retained without resampling;
+  extrapolation is refused with the original `CircuitError`. The component
+  class is `Monotone1d`: at a coincident knot, its derivative is the owner's
+  one-sided Newton representative. No unique derivative at that knot,
+  hysteresis, thermal evolution or material provenance is inferred. Read the
+  retained curve for endpoint voltage/current; the port output is a step mean.
 - `elements`: ideal lumped elements, each a `Component` with `PortTangent`,
   constant SI parameters and a closed energy account. `Mass` (port `p`
   receives the net force, returns the step-mean velocity; state `Motion`),
@@ -222,6 +235,12 @@ iteration and immediately before publication, and returns
 None. The crate denies `unsafe_code`.
 
 ## Feature flags
+
+- `constitutive`: source-owned nonlinear electrical storage; enables the
+  optional `fs-phs` dependency. Off by default. `tests/constitutive.rs`
+  checks conformance and tangent action away from knots, named support
+  refusals, nonlinear RC relaxation with heat, and nonlinear LC exchange
+  against independent piecewise or continuous-equation references.
 
 `slices` (off by default) adds fs-mbd as a dependency and enables the owner
 slice tests, which compose real physics owners on the kernel. The library

@@ -36,6 +36,8 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+#[cfg(feature = "constitutive")]
+pub mod constitutive;
 pub mod elements;
 mod erased;
 pub mod ledger;

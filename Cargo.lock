@@ -2960,6 +2960,7 @@ dependencies = [
  "fs-alloc",
  "fs-exec",
  "fs-mbd",
+ "fs-phs",
  "fs-ports",
 ]
 

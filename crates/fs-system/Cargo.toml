@@ -14,10 +14,13 @@ layer = "L3"
 # Owner slices: tests that compose real physics owners on the kernel. Off by
 # default so that the kernel's own tests build nothing but the kernel.
 slices = ["dep:fs-mbd"]
+# Source-owned nonlinear electrical storage; keeps the default kernel small.
+constitutive = ["dep:fs-phs"]
 
 [dependencies]
 fs-exec = { path = "../fs-exec" }
 fs-mbd = { path = "../fs-mbd", optional = true }
+fs-phs = { path = "../fs-phs", optional = true }
 fs-ports = { path = "../fs-ports" }
 
 [dev-dependencies]
@@ -30,6 +33,10 @@ required-features = ["slices"]
 [[test]]
 name = "viscous_network_slice"
 required-features = ["slices"]
+
+[[test]]
+name = "constitutive"
+required-features = ["constitutive"]
 
 [lints]
 workspace = true
