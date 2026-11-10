@@ -442,6 +442,7 @@ fn realize_response_line(
         zc,
         vec![bulk_delay_pole_state(geo_delay)],
         ladder,
+        super::PassivityFallback::Refuse,
         |omega| match solve(omega) {
             Err(DuctError::Singular) if omega < first_bin => {
                 let mut w = omega;

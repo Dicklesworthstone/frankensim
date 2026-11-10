@@ -184,6 +184,14 @@ fn bore_json(bore: &LipBoreInfo) -> String {
                 .collect::<Vec<_>>()
                 .join(",");
             let line = &lines.line;
+            // A player's tract admitted by the passivity gain names it (MB 20665); every other card keeps its provenance bytes.
+            let tract_gain = lines.player_tract_passivity_gain.map_or_else(String::new, |gain| {
+                format!(
+                    "\"player_tract_passivity_gain\":{{\"passes\":{},\"top_band_db\":{:e}}},",
+                    gain.passes,
+                    gain.top_band_db
+                )
+            });
             let (radiation, scope) = if let Some(r) = &lines.modal_radiation {
                 let changes = |values: &[Vec<f64>; 2]| values.iter().map(|row|
                     format!("[{}]", row.iter().map(|v| number(*v)).collect::<Vec<_>>().join(",")))
@@ -196,7 +204,7 @@ fn bore_json(bore: &LipBoreInfo) -> String {
                 ("null".into(), "uniform baffled-disk Rayleigh radiation of total mouth flow; higher mouth-mode directivity unresolved; source termination retains its declared scalar load")
             };
             format!(
-                "\"reflectance_line\":{{\"taps\":{},\"round_trip_samples\":{},\"peak_reflectance\":{},\"rungs_tried\":{},\"tail_energy\":{},\"peak_shift_cents\":{},\
+                "{tract_gain}\"reflectance_line\":{{\"taps\":{},\"round_trip_samples\":{},\"peak_reflectance\":{},\"rungs_tried\":{},\"tail_energy\":{},\"peak_shift_cents\":{},\
                  \"image_peaks\":{},\"image_worst_cents\":{},\"image_worst_db\":{}}},\
                  \"mouth_flow_line\":{{\"taps\":{},\"rungs\":{},\"tail_tol\":{},\"ladder\":[{}],\"modes\":{}}},\
                  \"modal_radiation\":{},\

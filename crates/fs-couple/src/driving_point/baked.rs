@@ -161,6 +161,7 @@ pub(super) fn characteristic_in(
             zc,
             poles,
             ladder,
+            super::PassivityFallback::Refuse,
             sample,
         )
     } else {

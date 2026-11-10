@@ -486,6 +486,46 @@ must meet the original convergence tolerance. The receipt records those two unta
 This preserves resolved lossless pulse reflections without artificial damping;
 active or unresolved noncausal returns still refuse.
 
+When that fallback declines too, a caller that opts in tries a passivity gain
+(MB 20665, 23083). Only `UpstreamAirway` opts in, and every receipt writer of
+an airway prints the gain. Every other line keeps the refusal: bores,
+tabulated mouths, nasal networks and molecular lines. A
+passive sampled response can still exceed the bound between its bins, near
+the rolloff, after the precursor fold. The gain is the same tapered
+construction with its rolloff times `exp(-depth eta(u))`, where `eta` is the
+rolloff's own blend. That gain is real and at most 1, and it is exactly 1 at
+and below 0.5 Nyquist. `depth` rises by `ln(1 + excess) / eta` at the 4x
+excess, times 1.001, until the unchanged bound holds. A rung declines after 64
+updates, or where `eta` at the excess is below 1e-3. These three numbers are
+numerical controls, not physics; none is fitted, measured or derived. A rung declines if
+any sampled bin has `|R| > 1`, or if its first excess is larger than twice the
+summed magnitude of the folded precursor. Such an excess is not the fold's.
+It also declines if what the gain removes from any bin,
+`|R W| (1 - exp(-depth eta))`, is larger than that same bound: the gain takes
+away no more than the fold could have added.
+The gain is judged like the untapered pair, on its own two rungs: the converged
+rung and the next. Each must fit the delay and meet the tail tolerance and the
+bound. Their first three peaks must agree within the original tolerance, with
+each other and with the converged rung's ordinary construction. A source
+refusal while sampling the next rung is a decline, and the line keeps the
+passivity refusal; a source owner's cancellation there cancels the line, as on
+every rung.
+The next rung is admitted. `LineRealization::passivity_gain` records the passes
+and the gain at and above 0.95 Nyquist in dB; a next rung that met the bound
+with no pass records 0 passes at +0 dB. A line the gain tries takes the next
+rung's samples even when it keeps the refusal. A line admitted any other way
+records `None` and keeps its taps. A line that took a gain names it:
+`player_tract_passivity_gain` in the lip and reed provenance, `passivity_gain`
+inside the voice `subglottal_airway` block and in a `subglottal_tube` block of
+its own, `passivity_gain` inside the flue `upstream_airway` record and inside
+the `upstream_airway` record of a material-modal DG valve, and
+`airway_line_passivity_gain` on the `voice_rig` example's stderr (the rig logs
+every airway line there, `null` without a gain). In an
+ensemble's part provenance a lip part names `player_tract_passivity_gain`, a
+voice part `subglottal_passivity_gain` and a flue part
+`upstream_airway_passivity_gain`; a reed part carries its solo provenance.
+Provenance without a gain is unchanged byte for byte.
+
 Tests in `driving_point::ladder_tests`:
 - `network_line_matches_the_duct_line_for_one_edge`: same rung, taps within
   1e-9 of the duct line.
@@ -493,6 +533,31 @@ Tests in `driving_point::ladder_tests`:
   both declaration refusals.
 - `network_line_keeps_the_branched_bore_resonances`: an open mid-bore chimney
   and a radiating bell. Line and network `|Z|` maxima agree within 0.05 cent.
+- `the_refused_sh_airway_is_admitted_by_the_passivity_gain`: the /ʃ/ rig
+  cards' 20 subglottal tubes at 26 kHz are admitted with a gain on two rungs
+  within the bound. Their first three peaks are within the peak tolerance of
+  the ordinary converged rung, and the top-band gain is an independent
+  oracle's within the rounding of the two measurements of the first excess.
+  At 40 kHz the same chain takes none.
+- `an_admitted_line_keeps_its_taps_and_takes_no_gain`: taps bit for bit the
+  tapered construction, `passivity_gain` `None`.
+- `the_passivity_gain_runs_only_where_the_caller_opts_in`: a lossy delay
+  refused under `PassivityFallback::Refuse` is admitted under `Gain`. A
+  cancellation at the first sample of the gain's next rung cancels the line;
+  any other refusal there keeps the passivity refusal.
+- `an_active_reflectance_is_not_given_the_passivity_gain`: a rung the gain
+  admits is declined when only its Nyquist bin, where the rolloff is below
+  1e-15, is raised to `|R|` above 1. `|R|` 1.02 at sampled bins keeps the
+  passivity refusal.
+- `an_excess_beyond_the_fold_keeps_its_refusal`: a passive line whose excess
+  exceeds twice its folded precursor keeps the refusal.
+- `a_gain_deeper_than_the_fold_keeps_the_refusal`: the horn and tuba cards'
+  tract rows and wall, in moist ambient air on the 9.6 kHz clock, converge
+  first at 2048 taps (unconverged with a 1024-tap ceiling, the passivity
+  refusal with a 2048-tap one). There they meet the bound only with a gain that
+  removes more than the fold bound, and keep the refusal.
+- `the_gain_search_declines_at_its_pass_cap_and_below_its_minimum_blend`: the
+  64-pass and minimum-blend declines, and a non-finite peak.
 
 `render::inlet_geometry_tests::reed_voice_on_a_one_edge_network_matches_the_duct_voice`
 renders within 1e-6 of the duct voice.

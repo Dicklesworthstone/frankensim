@@ -198,7 +198,7 @@ mod tests {
                     vec![direct, 0.0, 0.0, -0.1, 0.0, 0.0, 0.0, 0.02]).unwrap(),
                 crate::driving_point::LineRealization {
                     n_fft: 8, tail_energy: 0.0, peak_shift_cents: 0.0,
-                    pole_states: Vec::new(), rungs_tried: Vec::new(),
+                    pole_states: Vec::new(), rungs_tried: Vec::new(), passivity_gain: None,
                 },
             )),
         ).unwrap()

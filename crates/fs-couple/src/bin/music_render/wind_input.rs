@@ -794,7 +794,10 @@ pub(super) fn material_modal_dg_provenance(
             TractPressure::Lung => "lung".to_string(),
             TractPressure::Mouth { tau_s } => format!("mouth, regulation time constant {tau_s:e} s"),
         };
-        format!(",\"upstream_airway\":{{\"scope\":\"a player's airway (a measured area function realized as a passive wave-variable FIR) upstream of the valve; it stores no energy in the DG account, its absorbed-work ledger and passivity certificate are reported per step\",\"pressure\":\"{pressure}\",\"sections\":{},\"port_impedance_pa_s_m3\":{:e},\"series_impedance_pa_s_m3\":{:e},\"dc_resistance_pa_s_m3\":{:e},\"reflectance_taps\":{},\"source_taps\":{},\"sample_rate_hz\":{},\"inlet_gas\":{}}}",
+        // An airway line admitted by the passivity gain names it here, as in every other airway receipt writer.
+        let gain = receipt.reflectance.passivity_gain.map_or_else(String::new, |gain| format!(
+            ",\"passivity_gain\":{{\"passes\":{},\"top_band_db\":{:e}}}", gain.passes, gain.top_band_db));
+        format!(",\"upstream_airway\":{{\"scope\":\"a player's airway (a measured area function realized as a passive wave-variable FIR) upstream of the valve; it stores no energy in the DG account, its absorbed-work ledger and passivity certificate are reported per step\",\"pressure\":\"{pressure}\",\"sections\":{},\"port_impedance_pa_s_m3\":{:e},\"series_impedance_pa_s_m3\":{:e},\"dc_resistance_pa_s_m3\":{:e},\"reflectance_taps\":{},\"source_taps\":{},\"sample_rate_hz\":{},\"inlet_gas\":{}{gain}}}",
             receipt.sections, receipt.port_impedance, receipt.series_impedance, receipt.dc_resistance,
             tract.airway().reflectance_taps().len(), receipt.source_taps, tract.airway().sample_rate_hz(),
             super::duct_metadata::gas_state(tract.gas()))

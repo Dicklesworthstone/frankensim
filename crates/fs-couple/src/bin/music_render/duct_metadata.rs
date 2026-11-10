@@ -458,7 +458,12 @@ pub(super) fn reed_provenance(p: &fs_couple::render::schedule::reed::ReedPerform
             "terminal and open-hole Rayleigh pressure; same regional TMM and flanged feedback load; each open or vented hole is its own baffled disk, with no scattering between mouths; finite-history sampled approximation, not a certified broadband radiation match; no jet, structural or room radiation; not measured calibration",
             "sum of terminal and all open or vented hole pressures in the bound exterior gas; each mouth uses its own range and observer filter")
     } else { (point, scope, observation_scope) };
-    format!(",\"pressure_point\":\"{point}\",\"model_scope\":\"{scope}\",\"observation_scope\":\"{observation_scope}\",\"ambient_gas\":{},\"segment_gases\":[{}]{receiver}{field}{molecular}{wall}",
+    // A player's tract admitted by the passivity gain names it (MB 20665); every other card keeps its provenance bytes.
+    let tract_gain = p.player_tract()
+        .and_then(|tract| tract.airway().receipt().reflectance.passivity_gain)
+        .map_or_else(String::new, |gain| format!(
+            ",\"player_tract_passivity_gain\":{{\"passes\":{},\"top_band_db\":{:e}}}", gain.passes, gain.top_band_db));
+    format!(",\"pressure_point\":\"{point}\",\"model_scope\":\"{scope}\",\"observation_scope\":\"{observation_scope}\",\"ambient_gas\":{},\"segment_gases\":[{}]{receiver}{field}{molecular}{wall}{tract_gain}",
         gas_state(p.ambient_gas()),regions.join(","))
 }
 

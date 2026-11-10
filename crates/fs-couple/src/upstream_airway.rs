@@ -867,7 +867,8 @@ impl UpstreamAirway {
     ///
     /// # Errors
     /// A zero rate; either ladder unconverged at `ladder.max_taps`; a reflectance line that is not passive or not a
-    /// plain FIR; a gas-wave or wall refusal at any bin.
+    /// plain FIR; a gas-wave or wall refusal at any bin of the ladder (one at a bin only the passivity gain samples, past
+    /// the converged rung, keeps the passivity refusal instead).
     pub fn realize(
         chain: &AirwayChain,
         gas: &GasState,
@@ -887,13 +888,17 @@ impl UpstreamAirway {
     ///
     /// Each distinct dyadic-grid frequency is sampled once, and both FIRs reuse its paired
     /// reflected-wave and source-pressure responses. Storage and calls are bounded by
-    /// `ladder.max_taps / 2`; callback errors, including a source owner's cancellation, propagate.
+    /// `ladder.max_taps / 2`; callback errors, including a source owner's cancellation, propagate, except a refusal
+    /// other than a cancellation while the passivity gain samples its next rung: that is a decline of the gain, and the
+    /// line keeps the passivity refusal. A line the gain tries takes that next rung's samples as well, within the same
+    /// bound, even when it then keeps the refusal.
     /// After realization neither the callback nor any frequency solve runs in `port`/`commit`.
     /// The existing convergence and 4x-oversampled reflection-passivity gates still apply;
     /// source work is supplied by the open-circuit pressure signal, not clipped to unit gain.
     ///
     /// # Errors
-    /// As [`Self::realize`], an invalid DC limit, or a non-finite/negative-real source sample.
+    /// As [`Self::realize`], an invalid DC limit, or a non-finite/negative-real source sample (one at a bin only the
+    /// passivity gain samples keeps the passivity refusal instead).
     /// A source with infinite DC impedance can use [`Self::realize_with_source_admittance`]
     /// for its zero-state wave response; this route admits finite DC resistance only.
     pub fn realize_with_source_impedance(
@@ -961,7 +966,8 @@ impl UpstreamAirway {
     ///
     /// # Errors
     /// As [`Self::realize`], an invalid DC conductance, a non-finite/negative-real
-    /// source admittance, or the source callback's own refusal/cancellation.
+    /// source admittance, or the source callback's own refusal/cancellation (a refusal other than a cancellation at a
+    /// bin only the passivity gain samples keeps the passivity refusal instead).
     pub fn realize_with_source_admittance(
         chain: &AirwayChain,
         gas: &GasState,
@@ -1048,6 +1054,9 @@ impl UpstreamAirway {
             zs,
             vec![PoleState::BulkDelay { samples, frac }],
             ladder,
+            // Every receipt writer of an airway prints the gain: the voice, lip, reed and flue provenance, solo and in
+            // the ensemble, and voice_rig's stderr.
+            crate::driving_point::PassivityFallback::Gain,
             |omega| response_at(omega).map(|response| response.0),
         )?;
         let r_taps = line

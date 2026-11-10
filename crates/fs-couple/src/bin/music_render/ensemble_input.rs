@@ -15,7 +15,7 @@ use fs_couple::bernoulli_aperture::performance::file::material_modal::dg::{
 use fs_couple::bernoulli_aperture::radiation::environment::multiport::input::MAX_MIMO_RADIATION_BYTES;
 use fs_couple::bernoulli_aperture::two_sided::ValveSide;
 use fs_couple::bowed_string::runtime::schedule::file::{BowedPerformance, BOWED_PERFORMANCE_SCHEMA, MAX_BOWED_PERFORMANCE_BYTES};
-use fs_couple::brass_loop::performance::{LipDescription, LIP_PERFORMANCE_SCHEMA, MAX_LIP_PERFORMANCE_BYTES};
+use fs_couple::brass_loop::performance::{LipBoreInfo, LipDescription, LIP_PERFORMANCE_SCHEMA, MAX_LIP_PERFORMANCE_BYTES};
 use fs_couple::voice_performance::{VoiceDescription, VOICE_PERFORMANCE_SCHEMA, MAX_VOICE_PERFORMANCE_BYTES};
 use fs_couple::flue_loop::dg::performance::file::{FlueDgFilePerformance, FLUE_DG_PERFORMANCE_SCHEMA};
 use fs_couple::flue_loop::network::performance::file::{
@@ -236,7 +236,15 @@ fn load_with_gas_sources(
                 format!(",\"observer_gas\":{}",
                     super::duct_metadata::observer_gas_provenance(Some(report)))
             });
-            let exterior_json = format!("{}{observer_gas},\"observation_scope\":\"lip-driven bore mouth flow through its original baffled exterior receiver\",\"control_item_kind\":\"source pressure/tension initial values and events\",\"mode_count_kind\":\"retained transverse bore order plus one lip coordinate\"",
+            // A player's tract admitted by the passivity gain names it, as the solo sidecar does (MB 23083); every other
+            // part keeps its bytes.
+            let tract_gain = match &i.bore {
+                LipBoreInfo::Linear(lines) => lines.player_tract_passivity_gain,
+                LipBoreInfo::Nonlinear(_) => None,
+            }
+            .map_or_else(String::new, |gain| format!(
+                ",\"player_tract_passivity_gain\":{{\"passes\":{},\"top_band_db\":{:e}}}", gain.passes, gain.top_band_db));
+            let exterior_json = format!("{}{observer_gas}{tract_gain},\"observation_scope\":\"lip-driven bore mouth flow through its original baffled exterior receiver\",\"control_item_kind\":\"source pressure/tension initial values and events\",\"mode_count_kind\":\"retained transverse bore order plus one lip coordinate\"",
                 super::thermochemical::provenance(std::slice::from_ref(description.gas_record())));
             let info = SourceInfo {
                 kind: input.kind, schema: LIP_PERFORMANCE_SCHEMA, hash: i.input_hash,
@@ -257,7 +265,12 @@ fn load_with_gas_sources(
                 format!(",\"observer_gas\":{}",
                     super::duct_metadata::observer_gas_provenance(Some(report)))
             });
-            let exterior_json = format!("{}{observer_gas},\"observation_scope\":\"glottal-driven tract mouth flow through its original multirate baffled exterior receiver\",\"control_item_kind\":\"source subglottal pressure breakpoints\",\"mode_count_kind\":\"one or two glottal fold coordinates\"{}",
+            // A subglottal airway admitted by the passivity gain names it, as the solo sidecar does (MB 23083); every
+            // other part keeps its bytes.
+            let airway_gain = i.subglottal_airway.as_ref().and_then(|receipt| receipt.reflectance.passivity_gain)
+                .map_or_else(String::new, |gain| format!(
+                    ",\"subglottal_passivity_gain\":{{\"passes\":{},\"top_band_db\":{:e}}}", gain.passes, gain.top_band_db));
+            let exterior_json = format!("{}{observer_gas}{airway_gain},\"observation_scope\":\"glottal-driven tract mouth flow through its original multirate baffled exterior receiver\",\"control_item_kind\":\"source subglottal pressure breakpoints\",\"mode_count_kind\":\"one or two glottal fold coordinates\"{}",
                 super::thermochemical::provenance(std::slice::from_ref(description.gas_record())),
                 super::voice_input::tract_gas_json(&description));
             let mechanics_samples = i.samples.checked_mul(u64::from(description.mechanics_per_output))
@@ -341,7 +354,14 @@ fn load_with_gas_sources(
                 let source_filter_delay_samples = renderer.receiver().filter_delay_samples();
                 let mechanics_samples = i.samples.checked_mul(renderer.mechanics_per_output() as u64)
                     .ok_or("flue mechanical window overflow")?;
-                let exterior_json = format!(",{},\"observation_scope\":\"exterior pressure from the original multirate flue receiver\"",
+                // An upstream airway admitted by the passivity gain names it, as the solo sidecar's record does
+                // (MB 23083); every other part keeps its bytes.
+                let airway_gain = renderer.voice().upstream_airway()
+                    .and_then(|airway| airway.receipt().reflectance.passivity_gain)
+                    .map_or_else(String::new, |gain| format!(
+                        ",\"upstream_airway_passivity_gain\":{{\"passes\":{},\"top_band_db\":{:e}}}",
+                        gain.passes, gain.top_band_db));
+                let exterior_json = format!(",{}{airway_gain},\"observation_scope\":\"exterior pressure from the original multirate flue receiver\"",
                     super::wind_input::flue_provenance(&p));
                 (Box::new(p.into_renderer()) as Box<dyn PressureRenderer>, SourceInfo {
                     kind: input.kind, schema: FLUE_PERFORMANCE_SCHEMA, hash: i.input_hash,

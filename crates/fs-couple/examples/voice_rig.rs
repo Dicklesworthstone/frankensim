@@ -8,6 +8,7 @@
 //! usage: `cargo run --release -p fs-couple --example voice_rig -- INPUT.performance OUT.wav`
 //! The output must not exist. One JSON line goes to stdout: the clock, the sample count, clipping, the pressure peak and
 //! RMS, the glottal flow extremes and, for a card with `glottal_orifice`, the mean glottal flow over the last 2 s.
+//! A card with an airway below the glottis logs that line's length, rung count and passivity gain to stderr first.
 
 use std::fs::File;
 use std::io::{BufWriter, Read};
@@ -44,6 +45,18 @@ fn run() -> Result<(), String> {
         return Err("the render needs a positive RIFF-sized history".into());
     }
     let mut performance = description.build()?;
+    if let Some(airway) = &performance.info().subglottal_airway {
+        let line = &airway.reflectance;
+        let gain = line.passivity_gain.map_or_else(
+            || "null".to_string(),
+            |g| format!("{{\"passes\":{},\"top_band_db\":{:e}}}", g.passes, g.top_band_db),
+        );
+        eprintln!(
+            "{{\"suite\":\"voice-rig\",\"airway_line_n_fft\":{},\"airway_line_rungs\":{},\"airway_line_passivity_gain\":{gain}}}",
+            line.n_fft,
+            line.rungs_tried.len()
+        );
+    }
     performance.validate_sample_rate(rate).map_err(|e| e.to_string())?;
     performance.validate_sample_count(samples as u64).map_err(|e| e.to_string())?;
     if BLOCK > performance.max_block_len() {

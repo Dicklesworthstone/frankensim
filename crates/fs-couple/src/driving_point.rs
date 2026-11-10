@@ -116,6 +116,8 @@ pub struct LineRealization {
     /// Rungs of the accepted tap construction. An untapered fallback records
     /// its own two measured rungs, never a mixed tapered/untapered comparison.
     pub rungs_tried: Vec<LineRung>,
+    /// `Some` only for a line the passivity gain admitted; its own two rungs are in `rungs_tried`.
+    pub passivity_gain: Option<PassivityGain>,
 }
 
 /// Typed refusal from a driving-point characteristic line.
@@ -378,21 +380,31 @@ pub(crate) fn reflectance_rolloff(n_fft: usize) -> Vec<C64> {
 
     let mut rolloff = vec![C64::ONE; half + 1];
     for k in 1..=half {
-        let u = k as f64 / half as f64;
-        let eta = if u <= 0.50 {
-            0.0
-        } else if u >= 0.95 {
-            1.0
-        } else {
-            let s = (u - 0.50) / (0.95 - 0.50);
-            let s4 = s * s * s * s;
-            s4 * (35.0 - 84.0 * s + 70.0 * s * s - 20.0 * s * s * s)
-        };
+        let eta = rolloff_blend(k as f64 / half as f64);
         let mag = cep[k].re.exp();
         let (s, c) = (eta * cep[k].im).sin_cos();
         rolloff[k] = C64::new(mag * c, mag * s);
     }
     rolloff
+}
+
+/// The rolloff's blend `η(u)` at `u` = frequency / Nyquist: 0 on `u <= 0.50`, 1 on `u >= 0.95`, a C^3 septic
+/// smoothstep between. It phases in the rolloff's minimum phase, and it shapes the passivity gain.
+fn rolloff_blend(u: f64) -> f64 {
+    if u <= 0.50 {
+        0.0
+    } else if u >= 0.95 {
+        1.0
+    } else {
+        let s = (u - 0.50) / (0.95 - 0.50);
+        let s4 = s * s * s * s;
+        s4 * (35.0 - 84.0 * s + 70.0 * s * s - 20.0 * s * s * s)
+    }
+}
+
+/// Taps of the negative-time precursor folded back into positive time at `n_fft`.
+fn precursor_fold_len(n_fft: usize) -> usize {
+    (n_fft / 16).min(192)
 }
 
 /// Realize a causal reflectance impulse response from positive-frequency samples
@@ -445,7 +457,7 @@ pub(crate) fn realize_reflectance_ir_with_rolloff(
     if fold_precursor {
         // Fold the localized precursor skirt (from tapering η on [0.50, 0.95])
         // at the end of the circular buffer back into its causal mirror.
-        let pre_k = (n_fft / 16).min(192);
+        let pre_k = precursor_fold_len(n_fft);
         for m in 1..=pre_k {
             ir[m] += ir[n_fft - m];
             ir[n_fft - m] = 0.0;
@@ -461,15 +473,8 @@ pub(crate) fn analyze_reflectance_ir(
     dt: f64,
     geo_delay: f64,
 ) -> (f64, Vec<f64>) {
-    let n_fft = ir.len();
-    let n_os = 4 * n_fft;
-    let fft_os = Fft::new(n_os);
-    let mut os_buf = vec![FftC64::new(0.0, 0.0); n_os];
-    for (dst, &src) in os_buf[..n_fft].iter_mut().zip(ir) {
-        *dst = FftC64::new(src, 0.0);
-    }
-    let mut os_scratch = vec![FftC64::new(0.0, 0.0); n_os];
-    fft_os.forward(&mut os_buf, &mut os_scratch);
+    let os_buf = oversampled_spectrum(ir);
+    let n_os = os_buf.len();
 
     let half_os = n_os / 2;
     let mut max_r_abs = 0.0_f64;
@@ -541,6 +546,152 @@ pub(crate) fn analyze_reflectance_ir(
         peaks = collect_peaks(1.0);
     }
     (max_r_abs, peaks)
+}
+
+/// The 4x zero-padded DFT of `ir`, the grid every passivity bound here is read on.
+fn oversampled_spectrum(ir: &[f64]) -> Vec<FftC64> {
+    let n_os = 4 * ir.len();
+    let fft_os = Fft::new(n_os);
+    let mut os_buf = vec![FftC64::new(0.0, 0.0); n_os];
+    for (dst, &src) in os_buf[..ir.len()].iter_mut().zip(ir) {
+        *dst = FftC64::new(src, 0.0);
+    }
+    let mut os_scratch = vec![FftC64::new(0.0, 0.0); n_os];
+    fft_os.forward(&mut os_buf, &mut os_scratch);
+    os_buf
+}
+
+/// `max |R|` on the 4x grid of [`analyze_reflectance_ir`] and where it sits, as a fraction of Nyquist.
+fn oversampled_peak(ir: &[f64]) -> (f64, f64) {
+    let os_buf = oversampled_spectrum(ir);
+    let half_os = os_buf.len() / 2;
+    let (mut peak, mut at) = (0.0_f64, 0_usize);
+    for (m, c) in os_buf[..=half_os].iter().enumerate() {
+        let r_abs = (c.re * c.re + c.im * c.im).sqrt();
+        if !(r_abs <= peak) {
+            (peak, at) = (r_abs, m);
+        }
+    }
+    (peak, at as f64 / half_os as f64)
+}
+
+// Numerical controls of the passivity gain (`passivity_gain_rung`), not physics: none is fitted, measured or derived.
+/// Numerical control: gain updates allowed on one rung.
+const PASSIVITY_GAIN_MAX_PASSES: u32 = 64;
+/// Numerical control: below this blend at the excess the gain has no authority there, and its depth would grow
+/// without bound.
+const PASSIVITY_GAIN_MIN_BLEND: f64 = 1.0e-3;
+/// Numerical control: each update takes the measured excess times this, so a pass does not stop just short of the
+/// bound.
+const PASSIVITY_GAIN_STEP: f64 = 1.001;
+
+/// The real gain a passivity fallback put inside the Nyquist rolloff ([`LineRealization::passivity_gain`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PassivityGain {
+    /// Gain updates on the admitted rung (0 when that rung met the bound without one).
+    pub passes: u32,
+    /// The gain at and above 0.95 Nyquist [dB]; it is 0 dB at and below 0.5 Nyquist and blends between.
+    pub top_band_db: f64,
+}
+
+/// What [`realize_characteristic_response`] does with a converged rung that fails the 4x passivity bound after the
+/// untapered pair. Only a caller whose every receipt writer prints [`LineRealization::passivity_gain`] passes
+/// [`PassivityFallback::Gain`]; every other line keeps its refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PassivityFallback {
+    /// The passivity refusal, as before the gain.
+    Refuse,
+    /// Try the passivity gain on this rung and the next.
+    Gain,
+}
+
+// The depth search of the passivity gain. `first` is the ungained construction's 4x peak and where it sits (a
+// fraction of Nyquist); `measure(depth)` rebuilds the taps with that depth and returns the same pair. depth grows by
+// ln(1 + excess) / eta at the excess, times the step, until the unchanged bound holds. Declines after the pass cap,
+// where eta at the excess is below the minimum blend, or on a peak that is not finite. Returns the depth and passes.
+fn passivity_gain_depth(first: (f64, f64), mut measure: impl FnMut(f64) -> (f64, f64)) -> Option<(f64, u32)> {
+    let ((mut peak, mut at), mut depth, mut passes) = (first, 0.0_f64, 0_u32);
+    while peak > 1.0 + PASSIVITY_TOL {
+        let authority = rolloff_blend(at);
+        if passes == PASSIVITY_GAIN_MAX_PASSES || !(authority >= PASSIVITY_GAIN_MIN_BLEND) {
+            return None;
+        }
+        depth += (peak - 1.0).ln_1p() / authority * PASSIVITY_GAIN_STEP;
+        passes += 1;
+        (peak, at) = measure(depth);
+    }
+    peak.is_finite().then_some((depth, passes))
+}
+
+/// The largest shift [cents] among the first three peaks of `a` and `b`: 0 when neither has a peak, infinite when
+/// their counts differ.
+fn first_peaks_shift_cents(a: &[f64], b: &[f64]) -> f64 {
+    if a.is_empty() && b.is_empty() {
+        0.0
+    } else if a.len() != b.len() {
+        f64::INFINITY
+    } else {
+        a.iter().zip(b).take(3).map(|(&x, &y)| (1200.0 * (y / x).log2()).abs()).fold(0.0_f64, f64::max)
+    }
+}
+
+// One rung of the passivity gain, reached only after the ordinary construction and the untapered pair have both
+// failed the passivity bound on a converged rung. Every sampled bin must be passive (|R| <= 1), and the first 4x
+// excess must be no larger than the fold can have moved (twice the summed magnitude of the folded precursor):
+// otherwise the excess is not the realization's and the rung declines. The ordinary taps are rebuilt with the
+// rolloff times exp(-depth eta(u)), a real gain <= 1 that is exactly 1 at and below 0.5 Nyquist; depth grows by
+// ln(1 + excess) / eta at the excess until the unchanged 4x bound holds ([`passivity_gain_depth`]). What the gain
+// removes from any bin, |R W| (1 - exp(-depth eta)), must also be no larger than that fold bound: the gain takes away
+// no more than the fold could have added. The rung must also fit the delay and meet the tail tolerance. Returns the
+// taps, their tail energy, first three peaks and the gain.
+fn passivity_gain_rung(
+    r_pos: &[C64],
+    n_fft: usize,
+    dt: f64,
+    geo_delay: f64,
+    ladder: &LineLadder,
+) -> Option<(Vec<f64>, f64, Vec<f64>, PassivityGain)> {
+    if n_fft as f64 <= geo_delay + 2.0 || r_pos.iter().any(|z| !(z.re.hypot(z.im) <= 1.0)) {
+        return None;
+    }
+    let half = n_fft / 2;
+    let rolloff = reflectance_rolloff(n_fft);
+    let unfolded = realize_reflectance_ir_with_rolloff(r_pos, &rolloff, n_fft, false);
+    let fold_bound = 2.0 * unfolded[n_fft - precursor_fold_len(n_fft)..].iter().map(|h| h.abs()).sum::<f64>();
+    let mut ir = realize_reflectance_ir_with_rolloff(r_pos, &rolloff, n_fft, true);
+    let first = oversampled_peak(&ir);
+    if !(first.0 - 1.0 <= fold_bound) {
+        return None;
+    }
+    let blend: Vec<f64> = (0..=half).map(|k| rolloff_blend(k as f64 / half as f64)).collect();
+    let (depth, passes) = passivity_gain_depth(first, |depth| {
+        let gained: Vec<C64> = rolloff.iter().zip(&blend).map(|(w, &eta)| w.scale((-depth * eta).exp())).collect();
+        ir = realize_reflectance_ir_with_rolloff(r_pos, &gained, n_fft, true);
+        oversampled_peak(&ir)
+    })?;
+    if !depth.is_finite() || ir.iter().any(|h| !h.is_finite()) {
+        return None;
+    }
+    let removed = r_pos
+        .iter()
+        .zip(&rolloff)
+        .zip(&blend)
+        .map(|((r, w), &eta)| r.re.hypot(r.im) * w.re.hypot(w.im) * -(-depth * eta).exp_m1())
+        .fold(0.0_f64, f64::max);
+    if !(removed <= fold_bound) {
+        return None;
+    }
+    let total: f64 = ir.iter().map(|h| h * h).sum();
+    let tail: f64 = ir[3 * (n_fft / 4)..].iter().map(|h| h * h).sum();
+    let tail_energy = if total > 0.0 { tail / total } else { 0.0 };
+    let (bound, peaks) = analyze_reflectance_ir(&ir, dt, geo_delay);
+    if !(tail_energy < ladder.tail_tol && bound <= 1.0 + PASSIVITY_TOL) {
+        return None;
+    }
+    // `+ 0.0` keeps a rung that met the bound with no pass at +0 dB, never -0 (printed `-0e0`); any other value is
+    // unchanged by it.
+    let top_band_db = -20.0 * depth / core::f64::consts::LN_10 + 0.0;
+    Some((ir, tail_energy, peaks, PassivityGain { passes, top_band_db }))
 }
 
 // A Nyquist window can make an already causal lossless response nonpassive
@@ -656,6 +807,7 @@ pub fn realize_line<'a>(
         zc,
         pole_states,
         ladder,
+        PassivityFallback::Refuse,
         |omega| duct_reflectance(physics, gas, omega, LossModel::Bessel, termination, wall, zc),
     )
 }
@@ -691,6 +843,8 @@ pub(crate) fn duct_reflectance(
 
 /// `reflectance_at(omega)` is R referenced to `zc`, never an impedance: a
 /// characteristic line must stay realizable at lossless Z poles.
+/// `fallback` is [`PassivityFallback::Refuse`] unless every receipt writer of the caller prints the gain.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn realize_characteristic_response<E>(
     geo_delay: f64,
     termination: impl Into<LineDc>,
@@ -698,6 +852,7 @@ pub(crate) fn realize_characteristic_response<E>(
     zc: f64,
     pole_states: Vec<PoleState>,
     ladder: &LineLadder,
+    fallback: PassivityFallback,
     mut reflectance_at: impl FnMut(f64) -> Result<C64, E>,
 ) -> Result<(DelayedFilter, LineRealization), DrivingPointError>
 where
@@ -830,11 +985,62 @@ where
                     let realization = LineRealization {
                         n_fft, tail_energy: last.tail_energy,
                         peak_shift_cents: last.peak_shift_cents,
-                        pole_states, rungs_tried: raw_rungs,
+                        pole_states, rungs_tried: raw_rungs, passivity_gain: None,
                     };
                     let filter = DelayedFilter::from_impulse_response(dt, raw)
                         .map_err(DrivingPointError::Discrete)?;
                     return Ok((filter, realization));
+                }
+                // The passivity gain, only where the caller opted in, judged like the untapered pair: two rungs of
+                // the same construction, this one and the next, each admitted on its own, their first three peaks
+                // within the unchanged tolerance of each other and of this rung's ordinary construction. The next
+                // rung is admitted; the receipt records both rungs and its gain. A source refusal while sampling the
+                // next rung is a decline: the line keeps the passivity refusal below. A source owner's cancellation
+                // there cancels the line, as on every rung.
+                if fallback == PassivityFallback::Gain
+                    && 2 * n_fft <= max_taps
+                    && let Some((_, lower_tail, lower_peaks, _)) =
+                        passivity_gain_rung(&r_pos, n_fft, dt, geo_delay, ladder)
+                {
+                    let top = 2 * n_fft;
+                    let mut top_r_pos = vec![C64::ZERO; top / 2 + 1];
+                    for (k, &val) in r_pos.iter().enumerate() {
+                        top_r_pos[2 * k] = val;
+                    }
+                    let mut sampled = true;
+                    for k in (1..top / 2).step_by(2) {
+                        let omega = core::f64::consts::TAU * k as f64 / (top as f64 * dt);
+                        match reflectance_at(omega).map_err(DrivingPointError::from) {
+                            Ok(value) => top_r_pos[k] = value,
+                            Err(cancelled @ DrivingPointError::Duct(DuctError::Cancelled { .. })) => {
+                                return Err(cancelled);
+                            }
+                            Err(_) => {
+                                sampled = false;
+                                break;
+                            }
+                        }
+                    }
+                    if sampled
+                        && let Some((gained, top_tail, top_peaks, gain)) =
+                            passivity_gain_rung(&top_r_pos, top, dt, geo_delay, ladder)
+                    {
+                        let shift = first_peaks_shift_cents(&lower_peaks, &top_peaks);
+                        let ordinary_shift = first_peaks_shift_cents(&peaks_hz, &top_peaks);
+                        if shift < ladder.peak_tol_cents && ordinary_shift < ladder.peak_tol_cents {
+                            let realization = LineRealization {
+                                n_fft: top, tail_energy: top_tail, peak_shift_cents: shift, pole_states,
+                                rungs_tried: vec![
+                                    LineRung { n_fft, tail_energy: lower_tail, peak_shift_cents: f64::INFINITY },
+                                    LineRung { n_fft: top, tail_energy: top_tail, peak_shift_cents: shift },
+                                ],
+                                passivity_gain: Some(gain),
+                            };
+                            let filter = DelayedFilter::from_impulse_response(dt, gained)
+                                .map_err(DrivingPointError::Discrete)?;
+                            return Ok((filter, realization));
+                        }
+                    }
                 }
                 return Err(DrivingPointError::Invalid {
                     what: "converged characteristic line violates 4x-oversampled passivity",
@@ -848,6 +1054,7 @@ where
                 peak_shift_cents,
                 pole_states,
                 rungs_tried,
+                passivity_gain: None,
             };
             return Ok((filter, realization));
         }
@@ -999,6 +1206,7 @@ pub fn characteristic_line_realized_with_ladder<'a>(
             zc,
             pole_states,
             ladder,
+            PassivityFallback::Refuse,
             |omega| duct_reflectance(physics, gas, omega, LossModel::Bessel, termination, wall, zc),
         );
     }
@@ -1112,6 +1320,7 @@ pub(crate) fn characteristic_line_response_with_poles_ladder(
             zc,
             pole_states,
             ladder.unwrap_or(&LineLadder::default()),
+            PassivityFallback::Refuse,
             reflectance_at,
         );
     };
@@ -1167,6 +1376,7 @@ pub(crate) fn characteristic_line_response_with_poles_ladder(
             tail_energy,
             peak_shift_cents: 0.0,
         }],
+        passivity_gain: None,
     };
     Ok((line, realization))
 }
@@ -1316,6 +1526,7 @@ pub fn realize_impedance_line(
                 tail_energy: 0.0,
                 peak_shift_cents: 0.0,
             }],
+            passivity_gain: None,
         };
         return Ok((line, realization));
     }
@@ -1500,7 +1711,7 @@ fn realize_impedance_response(
                 .and_then(|line| line.with_exact_poles(compliance_gain, &[]))
                 .map_err(DrivingPointError::Discrete)?;
             return Ok((line, LineRealization {
-                n_fft: count, tail_energy, peak_shift_cents, pole_states, rungs_tried: rungs,
+                n_fft: count, tail_energy, peak_shift_cents, pole_states, rungs_tried: rungs, passivity_gain: None,
             }));
         }
         if count == max_taps {

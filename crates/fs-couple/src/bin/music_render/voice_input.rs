@@ -196,19 +196,28 @@ pub(super) fn run_with_gas_sources(
         )
     });
     // Only a performance with the `subglottal_airway` row writes this block; without it the sidecar is byte for byte what
-    // it was. The wall is the card's `tract_wall` on every tube's perimeter, or rigid without one.
+    // it was. The wall is the card's `tract_wall` on every tube's perimeter, or rigid without one. A line admitted by the
+    // passivity gain (MB 20665) names it inside the block; a line admitted any other way writes the same bytes as before.
     let airway = match (&info.subglottal_airway, description.subglottal_airway) {
         (Some(receipt), Some(generations)) => format!(
             "\"subglottal_airway\":{{\"tree\":\"{}\",\"geometry\":\"{}\",\"generations\":{generations},\
              \"wall\":\"{}\",\"port_impedance_pa_s_m3\":{:e},\"dc_resistance_pa_s_m3\":{:e},\
              \"same_sample_reflection\":{:e},\"series_impedance_pa_s_m3\":{:e},\"reflectance_taps\":{},\
-             \"source_taps\":{},\"schedule\":\"lung pressure at the tree's far end\"}},",
+             \"source_taps\":{},\"schedule\":\"lung pressure at the tree's far end\"{}}},",
             fs_couple::voice_performance::SUBGLOTTAL_AIRWAY_TREE,
             fs_couple::voice_performance::SUBGLOTTAL_AIRWAY_GEOMETRY,
             if description.wall.is_some() { "the card's tract_wall pin on every tube's perimeter" } else { "rigid" },
             receipt.port_impedance, receipt.dc_resistance, receipt.same_sample_reflection,
             receipt.series_impedance, receipt.reflectance.n_fft, receipt.source_taps,
+            receipt.reflectance.passivity_gain.map_or_else(String::new, |gain| format!(
+                ",\"passivity_gain\":{{\"passes\":{},\"top_band_db\":{:e}}}", gain.passes, gain.top_band_db)),
         ),
+        // The airway of the `subglottal_tube` rows writes a block only when its line was admitted by the passivity
+        // gain (MB 23083); otherwise the sidecar is byte for byte what it was.
+        (Some(receipt), None) => receipt.reflectance.passivity_gain.map_or_else(String::new, |gain| format!(
+            "\"subglottal_tube\":{{\"sections\":{},\"reflectance_taps\":{},\"source_taps\":{},\
+             \"passivity_gain\":{{\"passes\":{},\"top_band_db\":{:e}}}}},",
+            receipt.sections, receipt.reflectance.n_fft, receipt.source_taps, gain.passes, gain.top_band_db)),
         _ => String::new(),
     };
     // Only a performance with the `head_sphere` row writes this block and the sphere's scope; without it the sidecar is byte

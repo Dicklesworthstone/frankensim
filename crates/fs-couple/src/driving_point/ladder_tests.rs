@@ -1305,3 +1305,454 @@ fn network_line_keeps_the_branched_bore_resonances() {
         );
     }
 }
+
+/// A delay with a boundary-layer loss, `gain exp(i theta delay) exp(-k sqrt(-i theta))`:
+/// causal, and passive for `gain <= 1`.
+fn lossy_delay(theta: f64, gain: f64, delay: f64, k: f64) -> C64 {
+    let s = (0.5 * theta).sqrt();
+    let (magnitude, phase) = (gain * (-k * s).exp(), theta * delay + k * s);
+    C64::new(magnitude * phase.cos(), magnitude * phase.sin())
+}
+
+/// The samples the ladder holds at rung `n`: each bin keeps the value computed
+/// on the rung where that bin first appeared.
+fn ladder_spectrum(
+    n: usize,
+    first_rung: usize,
+    dt: f64,
+    dc: f64,
+    reflectance: &dyn Fn(f64) -> C64,
+) -> Vec<C64> {
+    let mut spectrum = vec![C64::from_re(dc); n / 2 + 1];
+    for (bin, slot) in spectrum.iter_mut().enumerate().skip(1) {
+        let (mut k, mut rung) = (bin, n);
+        while rung > first_rung && k % 2 == 0 {
+            k /= 2;
+            rung /= 2;
+        }
+        *slot = reflectance(core::f64::consts::TAU * k as f64 / (rung as f64 * dt));
+    }
+    spectrum
+}
+
+/// The DC reflection [`crate::upstream_airway::UpstreamAirway::realize`] gives `chain` (no source impedance), by its
+/// own arithmetic.
+fn airway_dc_reflection(chain: &crate::upstream_airway::AirwayChain, gas: &GasState) -> f64 {
+    let (zs, r_dc) = (chain.port_impedance(gas), chain.dc_resistance(gas));
+    let scale = zs.max(r_dc).max(0.0);
+    let (resistance, reference) = (r_dc / scale + 0.0 / scale, zs / scale);
+    (resistance - reference) / (resistance + reference)
+}
+
+/// The ladder's first rung for a round trip of `geo_delay` samples, by its own arithmetic.
+fn first_rung(geo_delay: f64, ladder: &LineLadder) -> usize {
+    let max_taps = ladder.max_taps;
+    let base = ((4.0 * geo_delay).ceil().min(max_taps as f64) as usize).max(256).next_power_of_two().min(max_taps);
+    if max_taps >= 512 { base.min(max_taps / 2).max(256) } else { base }
+}
+
+/// G1 (MB 20665, 23083): the /ʃ/ rig cards' subglottal tube chain on their 26 kHz clock was refused by the passivity
+/// bound, every sampled bin passive and the excess between bins. The passivity gain admits it on its own two rungs under
+/// the unchanged bound, tail and peak tolerances. The admitted line's first three peaks are within the peak tolerance of
+/// the same clock's ordinary converged rung, rebuilt here from the chain's own samples, and its top-band gain is the
+/// independent oracle's to within the rounding of the two measurements of its first excess. The same chain on a 40 kHz
+/// clock takes no gain. The 26 kHz
+/// line's peaks against the 40 kHz line's are printed beside the ordinary 26 kHz rung's against the same: that
+/// difference, about 1 c in the oracle with no gain at all, is the clock's; the gain's own share is the same-clock
+/// shift asserted here.
+#[test]
+fn the_refused_sh_airway_is_admitted_by_the_passivity_gain() {
+    use crate::upstream_airway::{AirwayChain, AirwaySection, UpstreamAirway};
+    // The independent numpy chain and gain (outside the repository; it matched every engine print, MB 20663), with this
+    // module's blend at the excess and its step: on the 4096-tap rung one pass, the first excess 4.635099393973441e-3,
+    // the top band at -4.020783641708502e-2 dB.
+    const ORACLE_TOP_BAND_DB: f64 = -4.020783641708502e-2;
+    const ORACLE_FIRST_EXCESS: f64 = 4.635099393973441e-3;
+    // `subglottal_tube AREA_M2 LENGTH_M` rows of dvtd-s1-12-schoen-sh-rig-*.performance, glottis first.
+    let rows: [(f64, f64); 20] = [
+        (7.809555556e-05, 3.77e-03), (2.53852e-04, 8.2e-02), (2.63267e-04, 2.0e-03), (3.01847e-04, 2.0e-03),
+        (3.45033e-04, 2.0e-03), (3.91959e-04, 2.0e-03), (4.44424e-04, 2.0e-03), (5.02504e-04, 2.0e-03),
+        (5.65882e-04, 2.0e-03), (6.3685e-04, 2.0e-03), (7.1438e-04, 2.0e-03), (7.98684e-04, 2.0e-03),
+        (8.92295e-04, 2.0e-03), (9.93884e-04, 2.0e-03), (1.104095e-03, 2.0e-03), (1.225724e-03, 2.0e-03),
+        (1.357506e-03, 2.0e-03), (1.499638e-03, 2.0e-03), (1.655512e-03, 2.0e-03), (1.74739e-03, 2.3e-04),
+    ];
+    let sections = rows
+        .iter()
+        .map(|&(area, length)| AirwaySection::from_area(length, area, 1, None).expect("a tube"))
+        .collect();
+    let chain = AirwayChain::new(sections, LossModel::Bessel).expect("an airway");
+    let gas = GasState::try_new_moist_air(295.15, 100_700.0, 0.46).expect("the cards' ambient");
+    let ladder = LineLadder { max_taps: GLOTTAL_LINE_MAX_TAPS, ..LineLadder::default() };
+    let dc = airway_dc_reflection(&chain, &gas);
+    let sample = |omega: f64| chain.reflectance(&gas, omega).expect("a sample of the chain");
+    let mut clocks: Vec<(Vec<f64>, Vec<f64>)> = Vec::with_capacity(2);
+    for (rate, gained) in [(26_000_u32, true), (40_000, false)] {
+        let airway = UpstreamAirway::realize(&chain, &gas, rate, &ladder).expect("the airway is admitted");
+        let receipt = &airway.receipt().reflectance;
+        let dt = 1.0 / f64::from(rate);
+        let geo_delay = 2.0 * chain.path_length_m() / gas.sound_speed * f64::from(rate);
+        let (bound, peaks) = analyze_reflectance_ir(airway.reflectance_taps(), dt, geo_delay);
+        assert!(bound <= 1.0 + super::PASSIVITY_TOL, "{rate} Hz: 4x max {bound}");
+        assert_eq!(receipt.passivity_gain.is_some(), gained, "{rate} Hz: {receipt:?}");
+        let (mut ordinary_peaks, mut ordinary_shift) = (Vec::new(), "null".to_string());
+        if let Some(gain) = receipt.passivity_gain {
+            assert_eq!(receipt.rungs_tried.len(), 2);
+            assert_eq!(receipt.n_fft, 2 * receipt.rungs_tried[0].n_fft);
+            assert!(receipt.rungs_tried.iter().all(|rung| rung.tail_energy < ladder.tail_tol));
+            assert!(receipt.peak_shift_cents < ladder.peak_tol_cents);
+            assert!(gain.passes >= 1 && gain.passes <= super::PASSIVITY_GAIN_MAX_PASSES, "{gain:?}");
+            assert_eq!(receipt.n_fft, 4096, "the oracle's rung");
+            // The gain in dB is linear in ln(1 + excess), and the oracle and the engine take the same step and blend, so
+            // what separates them is each one's measurement of the first excess. Each 4x bin is an n-term sum of the
+            // rung's taps after the n-point transform that made them: within 2 n eps (sum |h| + 1) of its exact
+            // value. Two measurements, over the excess (ln(1 + e) (1 + e) >= e), make the width. A dropped step
+            // (1e-3 relative), another blend or another pass count falls outside it.
+            let abs_taps: f64 = airway.reflectance_taps().iter().map(|h| h.abs()).sum();
+            let width = ORACLE_TOP_BAND_DB.abs() * 4.0 * receipt.n_fft as f64 * f64::EPSILON * (abs_taps + 1.0)
+                / ORACLE_FIRST_EXCESS;
+            assert!(
+                (gain.top_band_db - ORACLE_TOP_BAND_DB).abs() <= width,
+                "{gain:?} against the oracle's {ORACLE_TOP_BAND_DB:e} dB"
+            );
+            let n = receipt.rungs_tried[0].n_fft;
+            let spectrum = ladder_spectrum(n, first_rung(geo_delay, &ladder), dt, dc, &sample);
+            let ordinary = super::realize_reflectance_ir_from_positive_spectrum(&spectrum, n, geo_delay, true);
+            let (ordinary_bound, found) = analyze_reflectance_ir(&ordinary, dt, geo_delay);
+            assert!(ordinary_bound > 1.0 + super::PASSIVITY_TOL, "the rebuilt rung is the refused one: {ordinary_bound}");
+            let shift = super::first_peaks_shift_cents(&found, &peaks);
+            assert!(shift < ladder.peak_tol_cents, "{shift} c from the ordinary converged rung");
+            (ordinary_peaks, ordinary_shift) = (found, format!("{shift:e}"));
+        }
+        let gain = receipt.passivity_gain.map_or_else(
+            || "null".to_string(),
+            |g| format!("{{\"passes\":{},\"top_band_db\":{:e}}}", g.passes, g.top_band_db),
+        );
+        eprintln!(
+            "{{\"suite\":\"fs-couple\",\"case\":\"sh-airway-passivity-gain\",\"rate_hz\":{rate},\"n_fft\":{},\
+             \"rungs\":{},\"tail_energy\":{:e},\"peak_shift_cents\":{:e},\"max_abs_4x\":{bound:e},\"passivity_gain\":{gain},\
+             \"ordinary_rung_shift_cents\":{ordinary_shift}}}",
+            receipt.n_fft,
+            receipt.rungs_tried.len(),
+            receipt.tail_energy,
+            receipt.peak_shift_cents,
+        );
+        clocks.push((peaks, ordinary_peaks));
+    }
+    let against = |a: &[f64], b: &[f64]| {
+        a.iter().zip(b).take(3).map(|(&x, &y)| format!("{:e}", 1200.0 * (x / y).log2())).collect::<Vec<_>>().join(",")
+    };
+    eprintln!(
+        "{{\"suite\":\"fs-couple\",\"case\":\"sh-airway-passivity-gain-clocks\",\"line_26k_vs_40k_cents\":[{}],\
+         \"ordinary_26k_vs_40k_cents\":[{}]}}",
+        against(&clocks[0].0, &clocks[1].0),
+        against(&clocks[0].1, &clocks[1].0),
+    );
+}
+
+/// G0 (MB 20665): a line admitted at its first converged rung takes no passivity gain, and its taps are bit for bit
+/// the tapered construction of that rung's samples.
+#[test]
+fn an_admitted_line_keeps_its_taps_and_takes_no_gain() {
+    let (delay, rate, dc) = (18.083639, 26_000_u32, 0.9996);
+    let dt = 1.0 / f64::from(rate);
+    let ladder = LineLadder::default();
+    let reflectance = |omega: f64| lossy_delay(omega * dt, dc, delay, 0.03);
+    let (line, receipt) = super::realize_characteristic_response(
+        delay,
+        super::LineDc::Explicit(dc),
+        rate,
+        1.0,
+        Vec::new(),
+        &ladder,
+        super::PassivityFallback::Gain,
+        |omega| Ok::<_, DrivingPointError>(reflectance(omega)),
+    )
+    .expect("the passive line is admitted");
+    assert_eq!(receipt.passivity_gain, None);
+    let spectrum = ladder_spectrum(receipt.n_fft, receipt.rungs_tried[0].n_fft, dt, dc, &reflectance);
+    let expected =
+        super::realize_reflectance_ir_from_positive_spectrum(&spectrum, receipt.n_fft, delay, true);
+    let taps = line.quiescent_fir().expect("a plain FIR").1;
+    assert_eq!(
+        taps.iter().map(|h| h.to_bits()).collect::<Vec<_>>(),
+        expected.iter().map(|h| h.to_bits()).collect::<Vec<_>>()
+    );
+}
+
+/// G0 (MB 23083): the gain runs only where the caller opts in. A lossy delay whose converged 2048-tap rung exceeds the
+/// bound between bins keeps the passivity refusal with [`super::PassivityFallback::Refuse`], every caller's choice but
+/// the airway's, and is admitted with [`super::PassivityFallback::Gain`] on its rungs 2048 and 4096, its receipt naming
+/// the gain.
+#[test]
+fn the_passivity_gain_runs_only_where_the_caller_opts_in() {
+    let (delay, rate, dc) = (18.083639, 26_000_u32, 0.9996);
+    let dt = 1.0 / f64::from(rate);
+    let ladder = LineLadder::default();
+    let reflectance = |omega: f64| Ok::<_, DrivingPointError>(lossy_delay(omega * dt, dc, delay, 0.0195));
+    let realize = |fallback: super::PassivityFallback| {
+        super::realize_characteristic_response(
+            delay, super::LineDc::Explicit(dc), rate, 1.0, Vec::new(), &ladder, fallback, reflectance,
+        )
+    };
+    let refusal = realize(super::PassivityFallback::Refuse).expect_err("refused without the gain");
+    assert!(
+        matches!(refusal, DrivingPointError::Invalid { what } if what == "converged characteristic line violates 4x-oversampled passivity"),
+        "{refusal:?}"
+    );
+    let (line, receipt) = realize(super::PassivityFallback::Gain).expect("admitted with the gain");
+    let gain = receipt.passivity_gain.expect("the receipt names the gain");
+    assert_eq!(receipt.rungs_tried.iter().map(|rung| rung.n_fft).collect::<Vec<_>>(), [2048, 4096]);
+    assert_eq!(receipt.n_fft, 4096);
+    assert!(gain.passes <= super::PASSIVITY_GAIN_MAX_PASSES && gain.top_band_db <= 0.0, "{gain:?}");
+    // Rung 2048 takes the gain (the active-reflectance test's control); rung 4096 may meet the bound with no pass, and
+    // its receipt then names a zero-pass gain at +0 dB, never -0.
+    assert!(gain.passes >= 1 || gain.top_band_db.to_bits() == 0.0_f64.to_bits(), "{gain:?}");
+    let taps = line.quiescent_fir().expect("a plain FIR").1;
+    let (bound, _) = analyze_reflectance_ir(taps, dt, delay);
+    assert!(bound <= 1.0 + super::PASSIVITY_TOL, "4x max {bound}");
+    // The gain's next rung is sampled after every call the ordinary ladder made. A source owner's cancellation at the
+    // first of those samples cancels the line; any other source refusal there is a decline, and the line keeps the
+    // passivity refusal.
+    let mut ordinary = 0_usize;
+    let counted = super::realize_characteristic_response(
+        delay, super::LineDc::Explicit(dc), rate, 1.0, Vec::new(), &ladder, super::PassivityFallback::Refuse,
+        |omega| {
+            ordinary += 1;
+            reflectance(omega)
+        },
+    );
+    assert_eq!(counted.expect_err("refused without the gain"), refusal);
+    let stopped_at_next = |stop: DuctError| {
+        let mut calls = 0_usize;
+        let result = super::realize_characteristic_response(
+            delay, super::LineDc::Explicit(dc), rate, 1.0, Vec::new(), &ladder, super::PassivityFallback::Gain,
+            |omega| {
+                calls += 1;
+                if calls > ordinary { Err(DrivingPointError::Duct(stop.clone())) } else { reflectance(omega) }
+            },
+        );
+        (result.map(|(_, receipt)| receipt), calls)
+    };
+    let cancel = DuctError::Cancelled { completed_steps: 7 };
+    let (cancelled, calls) = stopped_at_next(cancel.clone());
+    assert_eq!((cancelled, calls), (Err(DrivingPointError::Duct(cancel)), ordinary + 1));
+    let (declined, calls) = stopped_at_next(DuctError::LevineSchwingerCutoff { ka: 4.0, cutoff: 3.8317 });
+    assert_eq!((declined, calls), (Err(refusal), ordinary + 1));
+}
+
+/// G0 (MB 20665, 23083): the gain is not a way around the bound, and the |R| <= 1 gate alone keeps an active rung out.
+/// The control is the converged 2048-tap rung of the lossy delay above: it exceeds the bound between bins, and the gain
+/// admits it after at least one pass. The same samples with only the Nyquist bin raised to |R| = 1 + 1e-9 are
+/// declined: the rolloff there is below 1e-15, so the taps are the control's to rounding and only the gate can refuse
+/// them. An active two-path line, |R| 1.02 at sampled bins, keeps the passivity refusal through the whole ladder.
+#[test]
+fn an_active_reflectance_is_not_given_the_passivity_gain() {
+    let (delay, rate, dc, n) = (18.083639, 26_000_u32, 0.9996, 2048_usize);
+    let dt = 1.0 / f64::from(rate);
+    let ladder = LineLadder::default();
+    let control = ladder_spectrum(n, 256, dt, dc, &|omega: f64| lossy_delay(omega * dt, dc, delay, 0.0195));
+    let taps = super::realize_reflectance_ir_from_positive_spectrum(&control, n, delay, true);
+    assert!(super::oversampled_peak(&taps).0 > 1.0 + super::PASSIVITY_TOL, "the control exceeds the bound");
+    let (_, _, _, gain) =
+        super::passivity_gain_rung(&control, n, dt, delay, &ladder).expect("the gain admits the control");
+    assert!(gain.passes >= 1, "{gain:?}");
+    let nyquist = super::reflectance_rolloff(n)[n / 2];
+    assert!(nyquist.re.hypot(nyquist.im) < 1.0e-15, "the rolloff at Nyquist: {nyquist:?}");
+    let mut active = control.clone();
+    let z = active[n / 2];
+    active[n / 2] = z.scale((1.0 + 1.0e-9) / z.re.hypot(z.im));
+    assert!(active[n / 2].re.hypot(active[n / 2].im) > 1.0, "the raised bin is active");
+    assert!(super::passivity_gain_rung(&active, n, dt, delay, &ladder).is_none(), "the gate declines it");
+
+    let (depth, path) = (0.02, 16.0);
+    let reflectance = |omega: f64| {
+        let theta = omega * dt;
+        let echo = C64::new((theta * path).cos(), (theta * path).sin()).scale(depth);
+        C64::new((theta * delay).cos(), (theta * delay).sin()) * (C64::ONE - echo)
+    };
+    let peak = reflectance(core::f64::consts::PI / path / dt);
+    assert!(peak.re.hypot(peak.im) > 1.0 + 0.01, "the reflectance must be active");
+    let refusal = super::realize_characteristic_response(
+        delay,
+        super::LineDc::Explicit(1.0 - depth),
+        rate,
+        1.0,
+        Vec::new(),
+        &ladder,
+        super::PassivityFallback::Gain,
+        |omega| Ok::<_, DrivingPointError>(reflectance(omega)),
+    )
+    .expect_err("an active line is refused");
+    match refusal {
+        DrivingPointError::Invalid { what } => {
+            assert_eq!(what, "converged characteristic line violates 4x-oversampled passivity");
+        }
+        other => panic!("expected the passivity refusal, got {other:?}"),
+    }
+}
+
+/// G0 (MB 20665): a passive line whose 4x excess is larger than its fold can have moved is not the realization's to
+/// repair. At the converged rung (2048 taps: tail met, bound exceeded) every bin is passive, the excess exceeds twice
+/// the folded precursor, the gain declines and the line keeps its refusal.
+#[test]
+fn an_excess_beyond_the_fold_keeps_its_refusal() {
+    let (delay, rate, dc, n) = (18.083639, 26_000_u32, 0.9996, 2048_usize);
+    let dt = 1.0 / f64::from(rate);
+    let ladder = LineLadder::default();
+    let reflectance = |omega: f64| lossy_delay(omega * dt, dc, delay, 0.004);
+    let refusal = super::realize_characteristic_response(
+        delay,
+        super::LineDc::Explicit(dc),
+        rate,
+        1.0,
+        Vec::new(),
+        &ladder,
+        super::PassivityFallback::Gain,
+        |omega| Ok::<_, DrivingPointError>(reflectance(omega)),
+    )
+    .expect_err("the line is refused");
+    assert!(
+        matches!(refusal, DrivingPointError::Invalid { what } if what == "converged characteristic line violates 4x-oversampled passivity"),
+        "{refusal:?}"
+    );
+    let spectrum = ladder_spectrum(n, 256, dt, dc, &reflectance);
+    assert!(spectrum.iter().all(|z| z.re.hypot(z.im) <= 1.0), "every sampled bin is passive");
+    let rolloff = super::reflectance_rolloff(n);
+    let taps = super::realize_reflectance_ir_with_rolloff(&spectrum, &rolloff, n, true);
+    let total: f64 = taps.iter().map(|h| h * h).sum();
+    let tail: f64 = taps[3 * (n / 4)..].iter().map(|h| h * h).sum();
+    assert!(tail / total < ladder.tail_tol, "the rung meets the tail tolerance");
+    let unfolded = super::realize_reflectance_ir_with_rolloff(&spectrum, &rolloff, n, false);
+    let fold = 2.0 * unfolded[n - super::precursor_fold_len(n)..].iter().map(|h| h.abs()).sum::<f64>();
+    let excess = super::oversampled_peak(&taps).0 - 1.0;
+    assert!(excess > super::PASSIVITY_TOL && excess > fold, "excess {excess:e}, fold {fold:e}");
+    assert!(super::passivity_gain_rung(&spectrum, n, dt, delay, &ladder).is_none());
+}
+
+/// G0 (MB 23083): the gain takes away no more than the fold could have added. The trumpeter's tract rows of the horn and
+/// tuba cards (eb5d476f) with their `player_tract_wall` pin, in the /ʃ/ cards' moist ambient air, on the tuba's 9.6 kHz
+/// clock. At the converged 2048-tap rung every bin is passive, the first excess is inside the fold, and the depth search
+/// meets the bound; but what that depth removes from the top band is larger than the fold bound (1.49 times in the
+/// independent oracle), so the rung declines and the airway keeps the passivity refusal.
+#[test]
+fn a_gain_deeper_than_the_fold_keeps_the_refusal() {
+    use crate::upstream_airway::{AirwayChain, AirwaySection, UpstreamAirway};
+    // `player_tract_section LENGTH_M AREA_M2` rows, the player's end first, and `player_tract_wall 15.4 3.79e5 6.22e3`.
+    let mut rows: Vec<(f64, f64)> = [
+        6.79e-05, 4.216e-04, 5.289e-04, 4.784e-04, 3.205e-04, 3.016e-04, 2.763e-04, 2.511e-04, 2.574e-04, 1.658e-04,
+        1.089e-04, 5.84e-05, 4.58e-05, 3.63e-05, 6.79e-05, 5.84e-05, 4.89e-05, 4.26e-05, 1.279e-04, 9.63e-05, 9.95e-05,
+        1.153e-04, 1.626e-04, 2.068e-04, 3.458e-04, 3.047e-04, 2.858e-04, 2.732e-04, 2.984e-04, 4.626e-04, 4.342e-04,
+        3.995e-04, 2.037e-04, 1.247e-04, 9.95e-05, 7.74e-05, 9.32e-05, 9.95e-05, 1.216e-04,
+    ]
+    .into_iter()
+    .map(|area| (0.00435, area))
+    .collect();
+    rows.push((1.2e-3, 1.4e-5));
+    let wall = WallPin { surface_density: 15.4, stiffness_per_area: 3.79e5, resistance: 6.22e3 };
+    let sections = rows
+        .iter()
+        .map(|&(length, area)| AirwaySection::from_area(length, area, 1, Some(wall)).expect("a tube"))
+        .collect();
+    let chain = AirwayChain::new(sections, LossModel::Bessel).expect("a tract");
+    let gas = GasState::try_new_moist_air(295.15, 100_700.0, 0.46).expect("the /ʃ/ cards' ambient");
+    let (rate, n, ladder) = (9_600_u32, 2048_usize, LineLadder::default());
+    let refusal = UpstreamAirway::realize(&chain, &gas, rate, &ladder).expect_err("the tract keeps its refusal");
+    assert!(
+        matches!(refusal, DrivingPointError::Invalid { what } if what == "converged characteristic line violates 4x-oversampled passivity"),
+        "{refusal:?}"
+    );
+    // The rung judged below is the one the ladder converged on: under a 1024-tap ceiling no rung converges, and under
+    // a 2048-tap ceiling (no room for the gain's next rung) the line has the passivity refusal of a converged rung.
+    // Both ceilings start the ladder on the default's first rung, so their rungs are the default's.
+    let dt = 1.0 / f64::from(rate);
+    let geo_delay = 2.0 * chain.path_length_m() / gas.sound_speed * f64::from(rate);
+    for ceiling in [n / 2, n] {
+        let capped = LineLadder { max_taps: ceiling, ..ladder };
+        assert_eq!(first_rung(geo_delay, &capped), first_rung(geo_delay, &ladder), "a {ceiling}-tap ceiling");
+    }
+    let short = UpstreamAirway::realize(&chain, &gas, rate, &LineLadder { max_taps: n / 2, ..ladder })
+        .expect_err("no rung below 2048 converges");
+    assert!(matches!(short, DrivingPointError::LadderUnconverged { max_taps, .. } if max_taps == n / 2), "{short:?}");
+    let at_n = UpstreamAirway::realize(&chain, &gas, rate, &LineLadder { max_taps: n, ..ladder })
+        .expect_err("the converged 2048-tap rung exceeds the bound");
+    assert_eq!(at_n, refusal);
+    let sample = |omega: f64| chain.reflectance(&gas, omega).expect("a sample of the tract");
+    let spectrum = ladder_spectrum(n, first_rung(geo_delay, &ladder), dt, airway_dc_reflection(&chain, &gas), &sample);
+    assert!(spectrum.iter().all(|z| z.re.hypot(z.im) <= 1.0), "every sampled bin is passive");
+    let rolloff = super::reflectance_rolloff(n);
+    let taps = super::realize_reflectance_ir_with_rolloff(&spectrum, &rolloff, n, true);
+    let total: f64 = taps.iter().map(|h| h * h).sum();
+    let tail: f64 = taps[3 * (n / 4)..].iter().map(|h| h * h).sum();
+    assert!(tail / total < ladder.tail_tol, "the rung meets the tail tolerance");
+    let unfolded = super::realize_reflectance_ir_with_rolloff(&spectrum, &rolloff, n, false);
+    let fold = 2.0 * unfolded[n - super::precursor_fold_len(n)..].iter().map(|h| h.abs()).sum::<f64>();
+    let first = super::oversampled_peak(&taps);
+    assert!(first.0 - 1.0 > super::PASSIVITY_TOL && first.0 - 1.0 <= fold, "excess {:e}, fold {fold:e}", first.0 - 1.0);
+    let half = n / 2;
+    let blend: Vec<f64> = (0..=half).map(|k| super::rolloff_blend(k as f64 / half as f64)).collect();
+    let (depth, passes) = super::passivity_gain_depth(first, |depth| {
+        let gained: Vec<C64> = rolloff.iter().zip(&blend).map(|(w, &eta)| w.scale((-depth * eta).exp())).collect();
+        super::oversampled_peak(&super::realize_reflectance_ir_with_rolloff(&spectrum, &gained, n, true))
+    })
+    .expect("the depth search meets the bound");
+    let removed = spectrum
+        .iter()
+        .zip(&rolloff)
+        .zip(&blend)
+        .map(|((r, w), &eta)| r.re.hypot(r.im) * w.re.hypot(w.im) * -(-depth * eta).exp_m1())
+        .fold(0.0_f64, f64::max);
+    assert!(removed > fold, "removed {removed:e}, fold {fold:e}, {passes} passes");
+    assert!(super::passivity_gain_rung(&spectrum, n, dt, geo_delay, &ladder).is_none());
+    eprintln!(
+        "{{\"suite\":\"fs-couple\",\"case\":\"tract-gain-beyond-fold\",\"rate_hz\":{rate},\"n_fft\":{n},\
+         \"first_excess\":{:e},\"fold_bound\":{fold:e},\"passes\":{passes},\"removed\":{removed:e}}}",
+        first.0 - 1.0
+    );
+}
+
+/// G0 (MB 23083): the depth search declines after its pass cap and where the blend at the excess has no authority, and
+/// admits on the pass that meets the bound, the cap's last included.
+#[test]
+fn the_gain_search_declines_at_its_pass_cap_and_below_its_minimum_blend() {
+    let excess = 1.0e-3;
+    let cap = super::PASSIVITY_GAIN_MAX_PASSES;
+    // An excess at 0.97 Nyquist (blend 1) that no depth removes: declined after exactly the cap.
+    let mut calls = 0_u32;
+    let search = super::passivity_gain_depth((1.0 + excess, 0.97), |_| {
+        calls += 1;
+        (1.0 + excess, 0.97)
+    });
+    assert_eq!((search, calls), (None, cap));
+    // The same excess removed on the cap's last pass: admitted with that many passes, each the same step.
+    let mut calls = 0_u32;
+    let (depth, passes) = super::passivity_gain_depth((1.0 + excess, 0.97), |_| {
+        calls += 1;
+        if calls == cap { (1.0, 0.97) } else { (1.0 + excess, 0.97) }
+    })
+    .expect("met on the cap's last pass");
+    assert_eq!(passes, cap);
+    // The search reads the excess back from the peak, `(1 + excess) - 1`, which is not `excess` in binary.
+    let whole = f64::from(cap) * ((1.0 + excess) - 1.0).ln_1p() * super::PASSIVITY_GAIN_STEP;
+    assert!((depth - whole).abs() <= f64::from(cap) * f64::EPSILON * whole, "{depth:e} against {whole:e}");
+    // An excess where the blend is positive but below its minimum: declined before any pass.
+    let low = 0.52;
+    let authority = super::rolloff_blend(low);
+    assert!(authority > 0.0 && authority < super::PASSIVITY_GAIN_MIN_BLEND, "blend {authority:e}");
+    let mut calls = 0_u32;
+    let search = super::passivity_gain_depth((1.0 + excess, low), |_| {
+        calls += 1;
+        (1.0, low)
+    });
+    assert_eq!((search, calls), (None, 0));
+    // An excess a pass moves to where the blend has no authority: declined at that pass.
+    let mut calls = 0_u32;
+    let search = super::passivity_gain_depth((1.0 + excess, 0.97), |_| {
+        calls += 1;
+        (1.0 + excess, low)
+    });
+    assert_eq!((search, calls), (None, 1));
+    // A peak that is not finite: declined.
+    assert_eq!(super::passivity_gain_depth((1.0 + excess, 0.97), |_| (f64::NAN, 0.97)), None);
+    // A bound met with no pass costs nothing.
+    assert_eq!(super::passivity_gain_depth((1.0, 0.97), |_| unreachable!("no pass is taken")), Some((0.0, 0)));
+}

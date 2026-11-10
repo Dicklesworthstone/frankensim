@@ -22,13 +22,18 @@ struct AirwayClosureTap {
     seen: Rc<Cell<Option<FlueAirwayClosures>>>,
 }
 
-/// The record and receipt of `p`'s airway, before it is turned into its renderer; `None` without the row.
+/// The record and receipt of `p`'s airway, before it is turned into its renderer; `None` without the row. A line
+/// admitted by the passivity gain (MB 23083) names it after `clock_hz`; a line admitted any other way writes the same
+/// bytes as before.
 pub(super) fn head(p: &FlueFilePerformance) -> Option<String> {
     let record = p.upstream_airway()?;
     let airway = p.renderer().voice().upstream_airway()?;
     let r = airway.receipt();
+    let gain = r.reflectance.passivity_gain.map_or_else(String::new, |gain| {
+        format!(",\"passivity_gain\":{{\"passes\":{},\"top_band_db\":{:e}}}", gain.passes, gain.top_band_db)
+    });
     Some(format!(
-        "\"source\":{},\"generations\":{},\"duct_sections\":{},\"sections\":{},\"wall\":{},\"two_way\":{},\"port_impedance_pa_s_m3\":{:e},\"dc_resistance_pa_s_m3\":{:e},\"same_sample_reflection\":{:e},\"reflectance_taps\":{},\"source_taps\":{},\"clock_hz\":{}",
+        "\"source\":{},\"generations\":{},\"duct_sections\":{},\"sections\":{},\"wall\":{},\"two_way\":{},\"port_impedance_pa_s_m3\":{:e},\"dc_resistance_pa_s_m3\":{:e},\"same_sample_reflection\":{:e},\"reflectance_taps\":{},\"source_taps\":{},\"clock_hz\":{}{gain}",
         json_string(&record.source), record.generations, record.duct_sections, record.chain.sections().len(),
         record.wall.is_some(), record.two_way,
         r.port_impedance, r.dc_resistance, r.same_sample_reflection, r.reflectance.n_fft, r.source_taps,

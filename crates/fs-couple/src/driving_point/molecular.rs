@@ -325,6 +325,7 @@ impl MolecularDrivingPoint {
             zc,
             vec![bulk_delay_pole_state(delay)],
             ladder,
+            super::PassivityFallback::Refuse,
             |omega| self.reflectance(omega, termination, zc),
         )
     }

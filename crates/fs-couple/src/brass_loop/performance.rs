@@ -198,7 +198,7 @@ use super::{BrassBlockDiag, BrassControl, BrassVoice, LipIsland, LipMode2};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::upstream_airway::{AirwayChain, AirwaySection, WEIBEL_SAAB_2021_TABLE_1_B_MM};
 use crate::brass_sequence::mouth::{MAX_MOUTH_FLOW_TAPS, MouthFlowConfig, modal_flow_lines, plane_flow_line};
-use crate::driving_point::LineLadder;
+use crate::driving_point::{LineLadder, PassivityGain};
 use crate::mm_line::{MmComboReceipt, MmLineConfig, MmLoad};
 use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
 use crate::pcm_wav::baffled::gas::{GasPropagation, GasPropagationReport};
@@ -1449,6 +1449,9 @@ impl LipDescription {
                 .map(|r| (r.n_fft, r.tail_energy.iter().copied().fold(0.0, f64::max),
                     r.tap_change.iter().copied().fold(0.0, f64::max)))
                 .collect(),
+            player_tract_passivity_gain: voice
+                .player_tract()
+                .and_then(|tract| tract.airway().receipt().reflectance.passivity_gain),
         });
         Ok(self.performance(
             mouth_radius_m,
@@ -1823,6 +1826,9 @@ pub struct LinearBoreInfo {
     pub mouth_flow_tail_tol: f64,
     /// Every mouth-flow rung: `(taps, worst modal tail energy, worst modal tap change)`.
     pub mouth_flow_ladder: Vec<(usize, f64, f64)>,
+    /// The passivity gain the player tract's airway line took ([`PassivityGain`]); `None` without a tract or when its
+    /// line was admitted without one.
+    pub player_tract_passivity_gain: Option<PassivityGain>,
 }
 
 /// Receipts of the nonlinear gas bore.
