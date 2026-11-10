@@ -489,6 +489,102 @@ impl SystemBuilder {
         }
     }
 
+    fn need_power_map_roles(&self, a: PortRef, b: PortRef) -> Result<(), AdmissionError> {
+        for (port, role, needs) in [
+            (a, PortRole::EffortIn, "a power port that receives effort"),
+            (b, PortRole::FlowIn, "a power port that receives flow"),
+        ] {
+            if !matches!(self.spec(port).carrier(), Carrier::Power(_)) {
+                return Err(AdmissionError::Role {
+                    port: self.label(port),
+                    needs,
+                });
+            }
+            self.need_role(port, role, needs)?;
+        }
+        Ok(())
+    }
+
+    /// Connect power ports through an ideal transformer of signed `ratio`.
+    ///
+    /// `a` receives effort and returns flow; `b` receives flow and returns
+    /// effort. The generated equations are `f_b = -ratio f_a` and
+    /// `e_a = ratio e_b`, so the power entering the two owners cancels.
+    /// The ratio acts on each coefficient when the ports have width > 1.
+    ///
+    /// Unlike a bond, this explicit transformation may join different power
+    /// domains: a lever, gear, piston area or electrical turns ratio supplies
+    /// the conversion in the ports' SI units. A negative ratio reverses the
+    /// orientation. Heat-rate and signal ports are not power-conjugate pairs
+    /// and are refused. Two integral-causality inertias cannot be joined by
+    /// this connection: one side must receive flow.
+    ///
+    /// # Errors
+    /// Wrong roles or carriers, unequal widths, a zero or non-finite ratio,
+    /// or a port already connected. Refusal leaves the builder unchanged.
+    pub fn transformer(
+        &mut self,
+        a: PortRef,
+        b: PortRef,
+        ratio: f64,
+    ) -> Result<(), AdmissionError> {
+        self.need_power_map_roles(a, b)?;
+        if self.spec(a).width() != self.spec(b).width() {
+            return Err(AdmissionError::Mismatch {
+                a: self.label(a),
+                b: self.label(b),
+            });
+        }
+        if !ratio.is_finite() || ratio == 0.0 {
+            return Err(AdmissionError::TransformerRatio { ratio });
+        }
+        self.check_free(&[a, b])?;
+        self.take(&[a, b]);
+        self.connections
+            .push(Connection::Transformer { a, b, ratio });
+        Ok(())
+    }
+
+    /// Connect power ports of possibly different widths by an adjoint pair.
+    ///
+    /// `a` receives effort; `b` receives flow. `map` is the row-major matrix
+    /// `P` with `b.width()` rows and `a.width()` columns. The kernel generates
+    /// `f_b = -P f_a` and `e_a = P^T e_b` from the same coefficients, so their
+    /// Euclidean power pairings cancel, including for rectangular or
+    /// rank-deficient maps. Different power domains are explicitly allowed;
+    /// coefficients must supply the conversion in the ports' SI units.
+    ///
+    /// These are the executable contract's power-normalized coefficients.
+    /// An arbitrary field duality `e^T M f` needs an owner-side normalization;
+    /// this method does not infer a trace metric or a conservative heat map.
+    ///
+    /// # Errors
+    /// Wrong roles or carriers, a matrix of the wrong size, a non-finite
+    /// coefficient, or a port already connected. Refusal changes nothing.
+    pub fn power_map(
+        &mut self,
+        a: PortRef,
+        b: PortRef,
+        map: Vec<f64>,
+    ) -> Result<(), AdmissionError> {
+        self.need_power_map_roles(a, b)?;
+        let (rows, columns) = (self.spec(b).width(), self.spec(a).width());
+        if rows.checked_mul(columns) != Some(map.len()) {
+            return Err(AdmissionError::MapShape {
+                rows,
+                columns,
+                entries: map.len(),
+            });
+        }
+        if let Some((index, &value)) = map.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+            return Err(AdmissionError::MapCoefficient { index, value });
+        }
+        self.check_free(&[a, b])?;
+        self.take(&[a, b]);
+        self.connections.push(Connection::PowerMap { a, b, map });
+        Ok(())
+    }
+
     /// Deliver the heat leaving `source` to `sinks` by fraction. Fractions
     /// below one in total need `remainder`, a named sink outside the system.
     ///
@@ -704,6 +800,40 @@ impl SystemBuilder {
                         }
                     }
                 }
+                Connection::Transformer { a, b, ratio } => {
+                    for (offset, index) in input_of(*a).enumerate() {
+                        drivers[index] =
+                            Driver::Linear(vec![(output_of(*b).start + offset, *ratio)]);
+                    }
+                    for (offset, index) in input_of(*b).enumerate() {
+                        drivers[index] =
+                            Driver::Linear(vec![(output_of(*a).start + offset, -*ratio)]);
+                    }
+                }
+                Connection::PowerMap { a, b, map } => {
+                    let columns = self.spec(*a).width();
+                    let rows = self.spec(*b).width();
+                    for (column, index) in input_of(*a).enumerate() {
+                        let terms = (0..rows)
+                            .filter_map(|row| {
+                                let coefficient = map[row * columns + column];
+                                (coefficient != 0.0)
+                                    .then_some((output_of(*b).start + row, coefficient))
+                            })
+                            .collect();
+                        drivers[index] = Driver::Linear(terms);
+                    }
+                    for (row, index) in input_of(*b).enumerate() {
+                        let terms = (0..columns)
+                            .filter_map(|column| {
+                                let coefficient = map[row * columns + column];
+                                (coefficient != 0.0)
+                                    .then_some((output_of(*a).start + column, -coefficient))
+                            })
+                            .collect();
+                        drivers[index] = Driver::Linear(terms);
+                    }
+                }
                 Connection::HeatRoute {
                     source,
                     sinks,
@@ -905,8 +1035,7 @@ impl SystemBuilder {
                 continue;
             };
             for earlier in 0..later {
-                let Connection::HeatRoute { sinks: theirs, .. } = &self.connections[earlier]
-                else {
+                let Connection::HeatRoute { sinks: theirs, .. } = &self.connections[earlier] else {
                     continue;
                 };
                 let shares = mine

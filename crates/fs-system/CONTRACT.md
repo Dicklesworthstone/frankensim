@@ -30,6 +30,20 @@ physics owners below fs-couple can be composed without it.
     receives minus that flow, and the setter receives the sum of the members'
     efforts.
   - `bond(a, b)`: the two-port case of either.
+  - `transformer(a, b, ratio)`: `a` receives effort and returns flow; `b`
+    receives flow and returns effort. The equations are `f_b = -ratio f_a`
+    and `e_a = ratio e_b`. A signed finite nonzero ratio converts a lever,
+    gear, piston area or electrical turns ratio, with equal port widths.
+    Unlike `bond`, explicit transformations may cross power domains; the
+    ratio supplies the conversion in the ports' SI units. Two inertias that
+    both receive effort still require a constraint solve or reflected-inertia
+    lowering, not this connection.
+  - `power_map(a, b, P)`: the same roles, with `P` a finite row-major matrix
+    of `b.width()` rows and `a.width()` columns. The kernel generates
+    `f_b = -P f_a` and `e_a = P^T e_b`; rectangular and rank-deficient maps
+    are allowed. The two directions share their coefficients. These are
+    Euclidean power-normalized coefficients, not arbitrary field duality
+    metrics. Heat-rate and signal ports are refused by both APIs.
   - `heat_route(source, sinks, remainder, temperature)`: heat leaving the
     source is delivered to the sinks by fraction; a remainder goes to a named
     `HeatSink` outside the system. `RouteTemperature::SinkEquivalent` gives the
@@ -112,6 +126,10 @@ Tarjan, index order).
   route multiplies by fractions and cancels to roundoff.
 - A refused builder call changes nothing: every port of a connection is
   checked, including for use twice in the same call, before any is claimed.
+- A transformer or power map uses an adjoint pair of linear drivers in the
+  same block plan, Newton Jacobian and energy audit as a junction. Its powers
+  cancel to roundoff and interface-solve tolerance; no integration is added
+  to a device. A rejected ratio, map shape or coefficient claims no ports.
 - A convergence test compares each residual with the size of the terms its
   driver sums, not with their total, so a balance of large efforts that
   nearly cancel in the driver can still converge. Each scalar signal input is
@@ -141,7 +159,9 @@ Tarjan, index order).
 
 ## Error model
 
-`AdmissionError` for descriptions that cannot run. `SystemError` for a failed
+`AdmissionError` for descriptions that cannot run, including
+`TransformerRatio`, `MapShape` and `MapCoefficient` for invalid power maps.
+`SystemError` for a failed
 step: the component's own error unchanged (`Component`, with the phase), a
 contract breach (`Contract`), a bad negotiation answer, `NotConverged` naming
 the block and the worst input, `Singular`, `Unsupported` naming a component
@@ -242,6 +262,17 @@ Unit tests cover the block ordering (including a 200,000-node chain without
 recursion), the equivalent-temperature gradient, the dense solve and the
 compensated sum.
 
+Power conversions, `tests/power_maps.rs`:
+- positive and negative gear ratios give the reflected stiffness `ratio² k`
+  and the exact implicit-midpoint phase, conserving the oscillator's energy;
+- a pressure source drives a piston through its declared area, reproducing
+  constant acceleration and pressure-volume work in a different power domain;
+- full-rank, rank-one and zero rectangular maps match an independent
+  monolithic two-coordinate solve, including conservation and null modes,
+  with one Newton update per step;
+- invalid ratios, shapes, coefficients, roles, carriers and occupied ports
+  are refused before mutation; a repaired builder seals and steps.
+
 Owner slice, `tests/rigid_body_slice.rs` (`--features slices`): the native
 fs-mbd rigid body (`fs_mbd::component::RigidBody`), the first physics owner on
 the kernel.
@@ -309,8 +340,8 @@ the refused calls change nothing.
   stores its absolute temperature, so a small heat increment is rounded to an
   ulp of that temperature each step; its ledger account, a compensated sum of
   receipts, does not lose it.
-- No transformer or mapped field transfer, and no gyrator as a connection
-  (the `Gyrator` element is a component); no stream or field ports;
+- No mapped transfer for arbitrary field duality metrics, and no gyrator as a
+  connection (the `Gyrator` element is a component); no stream or field ports;
   no non-smooth tier (contact, stick-slip); no multirate stepping; no
   monolithic solve through `StageResidual`; no step-size error control; no
   snapshot encoding, resume or fork; no adjoint. These are beads `.5.2` to

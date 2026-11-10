@@ -130,6 +130,27 @@ pub enum AdmissionError {
         /// The setter port, as `node.port`.
         port: String,
     },
+    /// An ideal transformer's ratio is zero or not finite.
+    TransformerRatio {
+        /// The rejected signed ratio.
+        ratio: f64,
+    },
+    /// A dense power map does not have one entry per row and column.
+    MapShape {
+        /// Width of the flow-receiving port.
+        rows: usize,
+        /// Width of the effort-receiving port.
+        columns: usize,
+        /// Number of coefficients supplied.
+        entries: usize,
+    },
+    /// A power-map coefficient is not finite.
+    MapCoefficient {
+        /// Row-major index of the rejected coefficient.
+        index: usize,
+        /// The rejected value.
+        value: f64,
+    },
 }
 
 impl fmt::Display for AdmissionError {
@@ -173,6 +194,26 @@ impl fmt::Display for AdmissionError {
                 "heat port `{port}` cannot set a common flow for several members: heat ports \
                  share a temperature (common effort) or use a heat route"
             ),
+            Self::TransformerRatio { ratio } => {
+                write!(
+                    f,
+                    "transformer ratio must be finite and nonzero (got {ratio})"
+                )
+            }
+            Self::MapShape {
+                rows,
+                columns,
+                entries,
+            } => write!(
+                f,
+                "power map needs a {rows} by {columns} row-major matrix (got {entries} entries)"
+            ),
+            Self::MapCoefficient { index, value } => {
+                write!(
+                    f,
+                    "power-map coefficient {index} must be finite (got {value})"
+                )
+            }
         }
     }
 }
@@ -193,6 +234,16 @@ pub(crate) enum Connection {
     CommonFlow {
         setter: PortRef,
         members: Vec<PortRef>,
+    },
+    /// `b` receives `-ratio * flow_a`; `a` receives `ratio * effort_b`.
+    /// A signed scalar ratio acts independently on each coefficient.
+    Transformer { a: PortRef, b: PortRef, ratio: f64 },
+    /// `b` receives `-P flow_a`; `a` receives `P^T effort_b`. The matrix is
+    /// row-major, with `b.width()` rows and `a.width()` columns.
+    PowerMap {
+        a: PortRef,
+        b: PortRef,
+        map: Vec<f64>,
     },
     /// Heat leaving `source` is delivered to `sinks` by fraction; the rest
     /// goes to the declared sink outside the system.
@@ -215,6 +266,10 @@ impl Connection {
             Self::CommonEffort { setter, members } | Self::CommonFlow { setter, members } => {
                 out.push(*setter);
                 out.extend_from_slice(members);
+            }
+            Self::Transformer { a, b, .. } | Self::PowerMap { a, b, .. } => {
+                out.push(*a);
+                out.push(*b);
             }
             Self::HeatRoute { source, sinks, .. } => {
                 out.push(*source);

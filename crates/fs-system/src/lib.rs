@@ -9,6 +9,7 @@
 //! ```text
 //! SystemBuilder::add / add_with_tangent      components and initial states
 //!              ::bond / common_effort / common_flow / heat_route / signal
+//!              ::transformer / power_map    lossless power conversion
 //!              ::boundary                    prescribed inputs
 //!              ::seal -> System              admission and plan
 //! System::step                               negotiate, solve, audit, admit, publish
@@ -24,7 +25,7 @@
 //! The contract in fs-ports is v0 and so is this driver. It solves looped
 //! blocks by a dense interface Newton iteration, using each component's port
 //! tangent when it offers one and a forward difference otherwise. It has no
-//! transformer or mapped field transfer, no non-smooth tier, no multirate
+//! metric field transfer, no non-smooth tier, no multirate
 //! stepping, no monolithic solve through `StageResidual`, no step-size error
 //! control and no snapshot encoding. Those are beads `.5.3`, `.5.5` and
 //! `.5.7` to `.5.10` of `frankensim-rc-1109-root-3gc12`.
