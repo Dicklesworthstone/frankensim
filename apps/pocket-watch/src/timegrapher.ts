@@ -272,14 +272,28 @@ export class HorologicalTimegrapher {
     let maxAbs = 0;
     for (const p of pts) maxAbs = Math.max(maxAbs, Math.abs(p.devS - mean));
     const steps = [1, 2, 5, 10, 20, 50, 100, 200];
-    let scaleMs = 200;
+    let scaleMs = 0;
     for (const s of steps) {
       if (maxAbs * 1000 * 1.15 <= s) {
         scaleMs = s;
         break;
       }
     }
-    const yOf = (devS: number): number => padT + plotH / 2 - ((devS - mean) * 1000 / scaleMs) * (plotH / 2);
+    // Beyond ±200 ms in the window the trace wraps modulo one beat, as on a paper-strip
+    // timegrapher whose drum turns once per nominal beat: a steep rate becomes parallel bands
+    // instead of a line pinned to the chart edge. The reference is the run's first beat, so the
+    // bands only scroll sideways.
+    const wrap = scaleMs === 0;
+    const beatMs = NOMINAL_BEAT_S * 1000;
+    if (wrap) scaleMs = beatMs / 2;
+    const centre = wrap ? 0 : mean;
+    const devMs = (devS: number): number => {
+      const d = (devS - centre) * 1000;
+      if (!wrap) return d;
+      return ((((d + scaleMs) % beatMs) + beatMs) % beatMs) - scaleMs;
+    };
+    const yOfMs = (dMs: number): number => padT + plotH / 2 - (dMs / scaleMs) * (plotH / 2);
+    const yOf = (devS: number): number => yOfMs(devMs(devS));
     const xOf = (t: number): number => padL + ((t - tStart) / WINDOW_S) * plotW;
 
     // Grid: centre line, ±scale/2, ±scale; 5 s verticals.
@@ -323,8 +337,24 @@ export class HorologicalTimegrapher {
         ctx.strokeStyle = side === 0 ? "rgba(232, 199, 125, 0.45)" : "rgba(111, 240, 192, 0.45)";
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.moveTo(xOf(ta), yOf(f.a + f.b * (ta - f.tMean) + f.c * s));
-        ctx.lineTo(xOf(tb), yOf(f.a + f.b * (tb - f.tMean) + f.c * s));
+        const devAt = (t: number): number => f.a + f.b * (t - f.tMean) + f.c * s;
+        if (!wrap) {
+          ctx.moveTo(xOf(ta), yOf(devAt(ta)));
+          ctx.lineTo(xOf(tb), yOf(devAt(tb)));
+        } else {
+          // Split the straight fit at every wrap so each band is drawn edge to edge.
+          const slopeMs = f.b * 1000;
+          let t = ta;
+          let guard = 0;
+          while (t < tb && guard++ < 400) {
+            const d = devMs(devAt(t));
+            const toEdge = slopeMs > 0 ? (scaleMs - d) / slopeMs : slopeMs < 0 ? (-scaleMs - d) / slopeMs : Infinity;
+            const tNext = Math.min(tb, t + Math.max(toEdge, 1e-6));
+            ctx.moveTo(xOf(t), yOfMs(d));
+            ctx.lineTo(xOf(tNext), yOfMs(d + slopeMs * (tNext - t)));
+            t = tNext + 1e-6;
+          }
+        }
         ctx.stroke();
       }
     }
@@ -351,8 +381,8 @@ export class HorologicalTimegrapher {
     const silent = pts.length === 0 || tEnd - (pts[pts.length - 1]?.t ?? -1e9) > 1.0;
     let note: string;
     if (snap.statusCode >= 2 && silent) note = "NO BEAT — ESCAPEMENT STOPPED";
-    else if (this.sourceKind === "impacts") note = "● tick  ○ tock · lock impacts · 30 s";
-    else if (this.sourceKind === "crossings") note = "● tick  ○ tock · balance line-of-centres · 30 s";
+    else if (this.sourceKind === "impacts") note = `● tick  ○ tock · lock impacts · 30 s${wrap ? " · wrapped" : ""}`;
+    else if (this.sourceKind === "crossings") note = `● tick  ○ tock · line of centres · 30 s${wrap ? " · wrapped" : ""}`;
     else note = "waiting for beats…";
     ctx.fillText(note, padL, H - 5);
   }

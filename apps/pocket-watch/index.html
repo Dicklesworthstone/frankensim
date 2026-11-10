@@ -59,11 +59,13 @@
     </svg>
 
     <div id="app-shell" data-sheet="peek" data-inspector="open">
-      <canvas
-        id="viewport-canvas"
-        role="img"
-        aria-label="Interactive 3D model of the tourbillon pocket watch. Drag to orbit, scroll or pinch to zoom."
-      ></canvas>
+      <main id="stage" aria-label="Watch stage">
+        <canvas
+          id="viewport-canvas"
+          role="img"
+          aria-label="Interactive 3D model of the tourbillon pocket watch. Drag to orbit, scroll or pinch to zoom, middle- or right-drag to pan, double-click a part to focus it. Arrow keys pan, plus and minus zoom, 0 resets the view."
+        ></canvas>
+      </main>
 
       <!-- Boot splash: replaced by the first rendered frame -->
       <div id="boot-splash" role="status" aria-live="polite">
@@ -114,6 +116,7 @@
             <span class="status-dot" aria-hidden="true"></span>
             <span class="status-head">Running</span>
             <span class="status-detail">Chronometer certified</span>
+            <span class="status-short">Certified</span>
           </div>
           <button id="btn-pause-sim" class="icon-btn" type="button" aria-pressed="false" aria-label="Pause simulation" title="Pause simulation (Space)">
             <svg aria-hidden="true"><use href="#i-pause" /></svg>
@@ -203,7 +206,7 @@
       </div>
 
       <!-- Live readouts over the stage (desktop) -->
-      <div id="stage-readouts" aria-label="Live multiphysics readouts">
+      <div id="stage-readouts" role="region" aria-label="Live multiphysics readouts">
         <div class="readout">
           <span>6h case temperature</span>
           <strong id="ov-case-temp" class="mono">293.2 K · 20.0 °C</strong>
@@ -217,7 +220,7 @@
           <strong id="ov-fouled-gold" class="mono">0.000 / 0.000 g</strong>
         </div>
         <div class="readout">
-          <span>Escapement |B|</span>
+          <span title="Field at the escapement, and the hairspring's magnetic polarization J (in the field while the magnet is on; remanent once it is gone)">Escapement |B| · spring J</span>
           <strong id="ov-b-field" class="mono">0.0 mT</strong>
         </div>
       </div>
@@ -226,7 +229,7 @@
       <button id="btn-view-menu" class="icon-btn glass fab" type="button" aria-controls="view-dock" aria-expanded="false" aria-label="View and field overlays">
         <svg aria-hidden="true"><use href="#i-layers" /></svg>
       </button>
-      <div id="view-dock" class="glass">
+      <div id="view-dock" class="glass" role="region" aria-label="View and field overlays">
         <div id="camera-bar" class="seg" role="group" aria-label="Camera">
           <button data-cam="overview" class="cam-btn active" type="button" aria-pressed="true">Watch</button>
           <button data-cam="tourbillon" class="cam-btn" type="button" aria-pressed="false">Tourbillon</button>
@@ -293,7 +296,7 @@
             <div id="subtool-torch" class="subtool" data-tone="torch">
               <div class="subtool-head">
                 <span class="subtool-icon" aria-hidden="true"><svg><use href="#i-flame" /></svg></span>
-                <span class="subtool-name">Blowtorch <small>oxy-butane, 2250 K</small></span>
+                <span class="subtool-name">Blowtorch <small>air–propane, 2250 K flame</small></span>
                 <strong id="lbl-torch-power" class="mono">0% · 0 W</strong>
               </div>
               <label class="field">
@@ -306,7 +309,7 @@
                 <button data-torch-aim="0,24,2" class="chip" type="button" aria-pressed="false">12h crown</button>
                 <button data-torch-aim="-24,0,2" class="chip" type="button" aria-pressed="false">9h flank</button>
               </div>
-              <p class="note">Gold melts at <i>T</i><sub>m</sub> = 1337 K.</p>
+              <p class="note">The 750 yellow-gold case melts between 1158 and 1168 K (885–895 °C).</p>
             </div>
 
             <div id="subtool-ln2" class="subtool" data-tone="cryo">
@@ -353,7 +356,7 @@
                 <input id="slider-magnet-dist" type="range" min="8" max="80" step="1" value="28" aria-label="Magnet distance from the escapement in millimetres" />
               </label>
               <div class="btn-row split">
-                <span class="note">Remanence <b id="lbl-remanence" class="mono">0.0 mT</b></span>
+                <span class="note" title="Magnetic polarization of the Nivarox-type hairspring: in the field while the magnet is on, remanent once it is gone">Hairspring J <b id="lbl-remanence" class="mono">0.0 mT</b></span>
                 <button id="btn-degauss" class="btn btn-sm" type="button">AC degauss</button>
               </div>
             </div>
@@ -404,51 +407,51 @@
             <div class="preset-list">
               <button data-preset="chronometer" class="preset-btn active" type="button" aria-pressed="true">
                 <span class="preset-top"><b>Pristine chronometer</b><span class="tag" data-tone="ok">Nominal</span></span>
-                <span class="preset-desc">20 °C, 285° amplitude: the COSC reference state.</span>
+                <span class="preset-desc">20 °C, ~280° amplitude, rate within COSC limits: the reference state.</span>
               </button>
               <button data-preset="thermal-drift" class="preset-btn" type="button" aria-pressed="false">
                 <span class="preset-top"><b>Thermal rate drift</b><span class="tag" data-tone="torch">Thermoelastic</span></span>
-                <span class="preset-desc">A gentle flame warms balance and hairspring (∂E/∂T &lt; 0), so the watch loses.</span>
-                <span class="preset-ff mono">fast-forward 1.5 s</span>
+                <span class="preset-desc">A low flame warms the balance ~120 K in 10 s. The compensating spring is only flat near 20 °C, so the watch starts to lose; turn compensation off for −11 s/d per kelvin.</span>
+                <span class="preset-ff mono">fast-forward 10 s</span>
               </button>
               <button data-preset="melt-gold" class="preset-btn" type="button" aria-pressed="false">
                 <span class="preset-top"><b>Melt the 18k case</b><span class="tag" data-tone="torch">Phase change</span></span>
-                <span class="preset-desc">A 2250 K jet liquefies the 6h case; molten gold runs into the tourbillon.</span>
-                <span class="preset-ff mono">fast-forward 6.3 s</span>
+                <span class="preset-desc">A full flame soaks the whole watch; after about a minute the 6h band slumps and gold drips away.</span>
+                <span class="preset-ff mono">fast-forward 75 s</span>
               </button>
               <button data-preset="melt-then-ln2" class="preset-btn" type="button" aria-pressed="false">
                 <span class="preset-top"><b>Quench with LN₂</b><span class="tag" data-tone="cryo">Solidification</span></span>
-                <span class="preset-desc">77 K nitrogen on slumped gold freezes it in place.</span>
-                <span class="preset-ff mono">fast-forward up to 11.5 s</span>
+                <span class="preset-desc">Lay the glowing watch dial-up and pour 77 K nitrogen: a Leidenfrost vapour film throttles the quench.</span>
+                <span class="preset-ff mono">fast-forward up to 100 s</span>
               </button>
               <button data-preset="cryo-freeze" class="preset-btn" type="button" aria-pressed="false">
-                <span class="preset-top"><b>Cryogenic shrink</b><span class="tag" data-tone="cryo">Cryogenic</span></span>
-                <span class="preset-desc">An LN₂ bath freezes the oil and pinches brass-to-steel clearances.</span>
-                <span class="preset-ff mono">fast-forward 4.3 s</span>
+                <span class="preset-top"><b>Cryogenic seizure</b><span class="tag" data-tone="cryo">Cryogenic</span></span>
+                <span class="preset-desc">LN₂ pools over the dial-up tourbillon; the pivot oil congeals near 190 K and the balance seizes.</span>
+                <span class="preset-ff mono">fast-forward 50 s</span>
               </button>
               <button data-preset="oil-flood" class="preset-btn" type="button" aria-pressed="false">
                 <span class="preset-top"><b>Flood the hairspring</b><span class="tag" data-tone="oil">Capillary</span></span>
-                <span class="preset-desc">An oil meniscus bridges the outer coils: the rate jumps, then viscous stall.</span>
-                <span class="preset-ff mono">fast-forward 1.3 s</span>
+                <span class="preset-desc">A dropper floods the tourbillon: the oil climbs the wheels and viscous drag stalls the balance.</span>
+                <span class="preset-ff mono">fast-forward 7 s</span>
               </button>
               <button data-preset="magnet-attack" class="preset-btn" type="button" aria-pressed="false">
                 <span class="preset-top"><b>Magnet lock-up</b><span class="tag" data-tone="magnet">Ferromagnetic</span></span>
-                <span class="preset-desc">A dipole gradient skews the beat error and can pin the steel lever.</span>
+                <span class="preset-desc">An N42 magnet 13 mm from the balance (~60 mT) drags the steel lever off its lock and stalls the watch.</span>
               </button>
               <button data-preset="air-blow-gold" class="preset-btn" type="button" aria-pressed="false">
-                <span class="preset-top"><b>Blow molten gold</b><span class="tag" data-tone="air">Aero shear</span></span>
-                <span class="preset-desc">Melt the case, then an air jet pushes liquid gold across the bridges.</span>
-                <span class="preset-ff mono">fast-forward 7.5 s</span>
+                <span class="preset-top"><b>Air-jet quench</b><span class="tag" data-tone="air">Forced convection</span></span>
+                <span class="preset-desc">Melt the rim, then a compressed-air jet strips heat from the case while its crossflow drags the balance.</span>
+                <span class="preset-ff mono">fast-forward 76 s</span>
               </button>
               <button data-preset="vacuum-chamber" class="preset-btn" type="button" aria-pressed="false">
                 <span class="preset-top"><b>Bell-jar vacuum</b><span class="tag" data-tone="ok">No air drag</span></span>
-                <span class="preset-desc">Remove the air: no Stokes–Stuart drag, so the amplitude climbs.</span>
-                <span class="preset-ff mono">fast-forward 2.3 s</span>
+                <span class="preset-desc">Remove the air: no aerodynamic drag on the balance, so the amplitude climbs until it knocks the banking.</span>
+                <span class="preset-ff mono">fast-forward 10 s</span>
               </button>
               <button data-preset="shock-centrifuge" class="preset-btn" type="button" aria-pressed="false">
                 <span class="preset-top"><b>Drop shock + 4 g</b><span class="tag" data-tone="gold">Inertial</span></span>
                 <span class="preset-desc">A 500 g Incabloc jewel impact under a 4 g centrifuge load.</span>
-                <span class="preset-ff mono">fast-forward 0.8 s</span>
+                <span class="preset-ff mono">fast-forward 2 s</span>
               </button>
             </div>
           </section>
@@ -458,7 +461,7 @@
             <div class="card">
               <div class="card-head">
                 <h3>Mainspring barrel</h3>
-                <span id="hud-power-reserve-pct" class="badge mono">88% · 37.0 h</span>
+                <span id="hud-power-reserve-pct" class="badge mono">88% · 47.2 h</span>
               </div>
               <div class="meter" role="presentation"><div id="hud-power-reserve-bar" class="meter-fill" style="width: 88%"></div></div>
               <dl class="kv">
@@ -521,7 +524,7 @@
               <div class="switch-grid">
                 <label class="switch"><input id="chk-open-case" type="checkbox" role="switch" checked /><span class="switch-track" aria-hidden="true"></span><span>Open case (no crystal)</span></label>
                 <label class="switch"><input id="chk-thermal-overlay" type="checkbox" role="switch" /><span class="switch-track" aria-hidden="true"></span><span>Infrared false colour</span></label>
-                <label class="switch"><input id="chk-invar-spring" type="checkbox" role="switch" /><span class="switch-track" aria-hidden="true"></span><span>Invar Fe-36Ni hairspring</span></label>
+                <label class="switch" title="Off: plain carbon-steel spring, about −11 s/d per kelvin"><input id="chk-invar-spring" type="checkbox" role="switch" checked /><span class="switch-track" aria-hidden="true"></span><span>Compensating hairspring (Nivarox-type)</span></label>
                 <label class="switch"><input id="chk-slow-mo" type="checkbox" role="switch" /><span class="switch-track" aria-hidden="true"></span><span>Slow motion 0.15×</span></label>
               </div>
               <label class="field select-field">
@@ -580,7 +583,7 @@
                 <div><dt>6h case</dt><dd class="mono" data-bind="caseTemp">—</dd></div>
                 <div><dt>Case melt</dt><dd class="mono" data-bind="goldMelt">—</dd></div>
                 <div><dt>Gold in movement</dt><dd class="mono" data-bind="fouledGold">—</dd></div>
-                <div><dt>Escapement |B|</dt><dd class="mono" data-bind="bField">—</dd></div>
+                <div><dt>Escapement |B| · spring J</dt><dd class="mono" data-bind="bField">—</dd></div>
               </dl>
             </div>
 
@@ -618,7 +621,7 @@
         <p class="coach-kicker">Welcome to the bench</p>
         <h2 id="coach-title">A pocket watch you can break with physics</h2>
         <ol class="coach-steps">
-          <li><span class="coach-ic" aria-hidden="true"><svg><use href="#i-orbit" /></svg></span><span><b>Look closer.</b> <span class="only-fine">Drag to orbit, scroll to zoom, right-drag to pan.</span><span class="only-touch">Drag to orbit, pinch to zoom.</span></span></li>
+          <li><span class="coach-ic" aria-hidden="true"><svg><use href="#i-orbit" /></svg></span><span><b>Look closer.</b> <span class="only-fine">Drag to orbit, scroll to zoom, middle- or right-drag to pan; double-click a part to fly to it.</span><span class="only-touch">Drag to orbit, pinch or two fingers to zoom and pan; double-tap a part to fly to it.</span></span></li>
           <li><span class="coach-ic" aria-hidden="true"><svg><use href="#i-flame" /></svg></span><span><b>Pick a tool</b> and drag across the watch to aim it: heat, freeze, oil, magnetize or blow air.</span></li>
           <li><span class="coach-ic" aria-hidden="true"><svg><use href="#i-sound" /></svg></span><span><b>Listen and measure.</b> The timegrapher and microphone read the escapement live.</span></li>
         </ol>
@@ -638,8 +641,10 @@
             <h3>Gestures</h3>
             <ul class="help-list">
               <li><span>Orbit</span><span>drag · one finger</span></li>
-              <li><span>Zoom</span><span>scroll · pinch</span></li>
-              <li><span>Pan</span><span>right-drag · two fingers</span></li>
+              <li><span>Zoom (toward the cursor)</span><span>scroll · pinch</span></li>
+              <li><span>Pan</span><span>middle- or right-drag · Shift-drag · two fingers</span></li>
+              <li><span>Fly to a part</span><span>double-click · double-tap</span></li>
+              <li><span>Reframe the watch</span><span>double-click empty space</span></li>
               <li><span>Aim a tool</span><span>drag · one finger</span></li>
               <li><span>Orbit while aiming</span><span>right-drag · two fingers</span></li>
             </ul>
@@ -647,6 +652,8 @@
           <section>
             <h3>Keyboard</h3>
             <ul class="help-list keys">
+              <li><span>Pan · orbit</span><span><kbd>←</kbd><kbd>↑</kbd><kbd>→</kbd><kbd>↓</kbd> · <kbd>Shift</kbd>+arrows</span></li>
+              <li><span>Zoom · reframe</span><span><kbd>+</kbd> <kbd>−</kbd> · <kbd>0</kbd></span></li>
               <li><span>Tools</span><span><kbd>1</kbd>–<kbd>7</kbd></span></li>
               <li><span>Back to orbit</span><span><kbd>Esc</kbd></span></li>
               <li><span>Stop perturbations</span><span><kbd>X</kbd></span></li>

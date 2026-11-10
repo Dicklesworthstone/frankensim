@@ -187,7 +187,19 @@ kbd {
   background: radial-gradient(120% 90% at 50% 40%, #0d1119 0%, #05070b 70%);
 }
 
-#viewport-canvas.tool-cursor {
+#viewport-canvas {
+  cursor: grab;
+}
+
+#viewport-canvas.is-dragging {
+  cursor: grabbing;
+}
+
+#viewport-canvas.is-panning {
+  cursor: move;
+}
+
+#viewport-canvas.tool-cursor:not(.is-dragging, .is-panning) {
   cursor: crosshair;
 }
 
@@ -399,6 +411,12 @@ dd[data-tone="bad"] {
   background: color-mix(in srgb, var(--pill) 12%, transparent);
   color: color-mix(in srgb, var(--pill) 82%, white);
   --pill: var(--ok);
+}
+
+.status-short {
+  display: none;
+  color: color-mix(in srgb, var(--pill) 55%, var(--text-2));
+  font-weight: 500;
 }
 
 .status-pill.status-warn {
@@ -854,7 +872,8 @@ html:not(.is-compact) #app-shell[data-inspector="closed"] #inspector {
 
 .tabs [role="tab"] {
   position: relative;
-  flex: 1;
+  /* Content-sized basis: a long label ("Experiments") takes the room a short one leaves. */
+  flex: 1 1 auto;
   display: grid;
   justify-items: center;
   gap: 3px;
@@ -1880,6 +1899,9 @@ td[data-state="muted"] {
   .status-detail {
     display: none;
   }
+  .status-short {
+    display: inline;
+  }
   .brand-sub {
     display: none;
   }
@@ -1934,6 +1956,20 @@ html.is-compact #top-bar {
 
 html.is-compact .brand {
   grid-area: brand;
+  /* The status pill's width varies with the status word; the name adapts to what is left. */
+  container: brand / inline-size;
+}
+
+@container brand (max-width: 134px) {
+  .brand-mark {
+    display: none;
+  }
+}
+
+@container brand (max-width: 90px) {
+  .brand-name {
+    font-size: 12px;
+  }
 }
 
 html.is-compact .brand-text {
@@ -1969,11 +2005,39 @@ html.is-compact .hud dd {
   font-size: 13.5px;
 }
 
+/* Two-line pill: a small state word over the one-word cause, so the qualifier is text, not hue. */
 html.is-compact .status-pill {
-  height: 30px;
-  max-width: 132px;
+  display: inline-grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  align-content: center;
+  column-gap: 7px;
+  row-gap: 2px;
+  height: 34px;
+  max-width: 124px;
   margin-right: 2px;
-  padding: 0 10px 0 9px;
+  padding: 0 12px 0 10px;
+}
+
+html.is-compact .status-dot {
+  grid-row: 1 / span 2;
+}
+
+html.is-compact .status-head {
+  font-size: 9px;
+  line-height: 1;
+  font-weight: 650;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  opacity: 0.78;
+}
+
+html.is-compact .status-short {
+  display: block;
+  font-size: 12.5px;
+  line-height: 1.05;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 html.is-compact .status-detail,
@@ -2210,6 +2274,47 @@ html.is-short #view-dock {
   transition-property: opacity, visibility, translate, right;
 }
 
+/* Short landscape: the coach sits beside the watch, left of the view menu, instead of over it. */
+html.is-short:not(.is-compact) #coach {
+  left: auto;
+  right: calc(var(--stage-r, var(--edge)) + var(--safe-r) + 56px);
+  top: calc(var(--topbar-bottom) + 10px);
+  bottom: auto;
+  transform: none;
+  width: min(360px, 46vw);
+  max-height: calc(100dvh - var(--topbar-bottom) - 18px);
+  overflow-y: auto;
+  padding: 12px 14px;
+  animation-name: coach-side-in;
+}
+
+html.is-short:not(.is-compact) #coach h2 {
+  margin-bottom: 8px;
+  font-size: 16px;
+}
+
+html.is-short:not(.is-compact) .coach-steps {
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+html.is-short:not(.is-compact) .coach-steps li {
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+html.is-short:not(.is-compact) .coach-ic {
+  width: 22px;
+  height: 22px;
+}
+
+@keyframes coach-side-in {
+  from {
+    opacity: 0;
+    transform: translateX(8px);
+  }
+}
+
 html.is-short #view-dock {
   top: calc(var(--topbar-bottom) + 62px);
   width: min(330px, calc(100vw - var(--stage-r, 0px) - var(--safe-r) - 80px));
@@ -2247,6 +2352,29 @@ html.is-compact #coach {
   left: 50%;
   bottom: calc(var(--toolbar-total) + var(--peek-h) + 10px);
   max-width: 520px;
+}
+
+/* Shorter phones: a tighter coach leaves the watch room above it. */
+@media (max-height: 780px) {
+  html.is-compact #coach {
+    padding: 14px 14px 12px;
+  }
+  html.is-compact #coach h2 {
+    margin-bottom: 9px;
+    font-size: 17px;
+  }
+  html.is-compact .coach-steps {
+    gap: 7px;
+    margin-bottom: 12px;
+  }
+  html.is-compact .coach-steps li {
+    font-size: 12.5px;
+    line-height: 1.4;
+  }
+  html.is-compact .coach-ic {
+    width: 24px;
+    height: 24px;
+  }
 }
 
 /* Touch-friendly targets */
@@ -2290,10 +2418,10 @@ html.is-compact #coach {
   }
   html.is-compact .brand-name {
     /* Two stacked words keep the full name beside the status pill on a 390 px screen. */
-    max-width: 6.4em;
     white-space: normal;
-    font-size: 15px;
-    line-height: 1.02;
+    text-overflow: clip;
+    font-size: 14px;
+    line-height: 1.05;
   }
   html.is-compact .hud-item {
     padding: 0 4px;
@@ -2325,7 +2453,7 @@ html.is-compact #coach {
     display: none;
   }
   html.is-compact .status-pill {
-    max-width: 96px;
+    max-width: 112px;
   }
 }
 

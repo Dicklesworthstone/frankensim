@@ -1,81 +1,89 @@
-//! Coupled 3D Thermo-Elasto-Viscoplastic Case Shell (`64 x 8 = 512` 3D Lagrangian Shell Nodes)
-//! + 2D Finite-Volume Free-Surface Capillary / Lubrication Multiphysics PDE Engine (`48 x 48 = 2304` cells)
-//! for the FrankenSim Pocket Watch (`Calibre FS-1903`).
+//! Thermal, fluid, cryogenic and magnetic fields of the FS-1903 pocket watch.
 //!
-//! Zero canned shapes or scripted slumps: every geometric deformation of the 18k gold case
-//! and every droplet/stream of molten and solidified gold emerges from integrating:
-//! 1. **3D Thermo-Elasto-Viscoplasticity (Johnson-Cook + Norton-Bailey Creep + Prandtl-Reuss Flow)**
-//!    on the $64 \times 8$ 3D Bassine case shell mesh:
-//!    - Thermal expansion strain $\boldsymbol{\varepsilon}^{\text{th}}(T) = \alpha_{\text{Au}}(T)(T - T_0)\mathbf{I}$
-//!      causing thermal bowing & compressive hoop buckling before solidus.
-//!    - Homologous thermal softening of yield stress $\sigma_y(T, f_L, \bar{\varepsilon}^p)$ and
-//!      Elastic Modulus $E_{\text{Au}}(T)(1 - f_L)^3$.
-//!    - Associated Prandtl-Reuss viscoplastic strain rate $\dot{\boldsymbol{\varepsilon}}^{vp} = \dot{\bar{\varepsilon}}^{vp}(\sigma_{\text{eq}}, T, f_L) \frac{3\mathbf{s}}{2\sigma_{\text{eq}}}$.
-//! 2. **Young-Laplace Surface Tension ($\sigma_{\text{Au}}(T)\kappa\hat{\mathbf{n}}$), Marangoni Shear ($\frac{d\sigma_{\text{Au}}}{dT}\nabla_s T$),
-//!    and Wetting Contact-Angle Cohesion ($\theta_c(T_{\text{sub}})$)**:
-//!    - Mean-curvature surface tension pulls melting gold rims into bulbous capillary beads
-//!      (Rayleigh-Plateau rim retraction & beading) while gravity and blowtorch gas-jet stagnation
-//!      pressure push the low-viscosity melt pool inward over the movement substrate.
-//! 3. **2.5D Lubrication + Fourth-Order Young-Laplace Capillary + Disjoining Cohesion Free-Surface PDE**:
-//!    $$\frac{\partial H_{\text{Au}}}{\partial t} + \nabla \cdot \left( -\frac{H_{\text{Au}}^3}{3\mu_{\text{eff}}(T, f_L)} \nabla P_{\text{tot}} + \frac{H_{\text{Au}}^2}{2\mu_{\text{eff}}(T, f_L)} \frac{d\sigma_{\text{Au}}}{dT}\nabla T \right) = \dot{S}_{\text{drip}} - \dot{S}_{\text{freeze}} + \dot{S}_{\text{remelt}}$$
-//!    where $P_{\text{tot}} = \rho_{\text{Au}} g_z (z_{\text{bed}} + S_{\text{Au}} + H_{\text{Au}}) - \rho_{\text{Au}}(g_x x + g_y y) - \sigma_{\text{Au}}(T)\nabla^2 \eta + \Pi_{\text{coh}}(H_{\text{Au}}, \theta_c)$,
-//!    coupled with enthalpy advection $\nabla \cdot (\mathbf{q}_{\text{Au}} \rho_{\text{Au}} h_{\text{Au}})$.
-//! 4. **Spatially-Integrated Hydrodynamic Viscous Drag & Solidified Yield-Stress Interference Torques**
-//!    over the exact 2D geometric footprints $\Omega_w$ of the Barrel, Going-Train Wheels,
-//!    Tourbillon Carriage, Escape Wheel, Pallet Fork, Balance Wheel, and Breguet Hairspring.
+//! The watch is a disc of columns on a 64 × 64 grid in its own plane (x towards
+//! 3 o'clock, y towards 12, z out of the dial). Each column carries an
+//! enthalpy over its layers — the 18k case back and band, the brass movement,
+//! any gold that has run into it — so melting and freezing follow the gold's
+//! equilibrium phase curve, and the brass and gold heat capacities follow
+//! their Debye shapes down to liquid-nitrogen temperatures.
+//!
+//! Heat moves by in-plane conduction (Wiedemann–Franz conductivity of the
+//! gold), and leaves or enters through:
+//! - flame impingement from the torch: a stagnation-point film coefficient
+//!   between the adiabatic flame temperature and the surface;
+//! - the compressed-air jet, natural convection (Churchill–Chu correlations
+//!   from `fs-convection`, vanishing in vacuum) and grey-body radiation with an
+//!   emissivity that rises as the copper in the alloy oxidises;
+//! - liquid nitrogen boiling on the full pool-boiling curve: Rohsenow nucleate
+//!   boiling up to the Zuber critical flux, transition boiling, and Berenson
+//!   film boiling above the Leidenfrost point, with T_sat from
+//!   Clausius–Clapeyron at the bell-jar pressure;
+//! - frost deposited from the room's water vapour onto surfaces below the ice
+//!   saturation point (mass transfer by the heat–mass analogy).
+//!
+//! Molten gold and poured oil flow as shallow layers by virtual pipes driven by
+//! gravity (any direction), the hydrostatic head of the layer, capillary
+//! pressure, and the stagnation pressure of the torch and air jets, slowed by
+//! laminar and turbulent wall friction. The gold's viscosity is the
+//! Krieger-mushy and creep law of [`crate::materials::GoldAlloy`], so gold
+//! stops where it freezes. Liquid that reaches the edge of the case drips off.
+//!
+//! The magnet is an N42 dipole whose remanence follows its matdb temperature
+//! curve; its field gradient pulls on the steel pallet lever (a torque that
+//! depends on where the tourbillon cage has carried the lever), its gradient
+//! damps the balance rim by eddy currents, and its field magnetises the
+//! hairspring through a play-operator hysteresis that an AC degauss erases.
 
 use core::f64::consts::{PI, TAU};
+use std::sync::OnceLock;
 
-use fs_ad::{Dual64, Real};
-use fs_atmo::FlatSiteLogLaw;
-use fs_convection::{
-    CorrelationId, CorrelationInputs, NaturalConvectionGeometry, ThermalConductivity,
-    evaluate as eval_convection,
-};
-use fs_em::winding::end::{EndWindingInductance, EndWindingMode};
-use fs_ivl::Interval;
-use fs_lbm::{
-    Cell as LbmCell, ContactModel as LbmContactModel, FreeSurface as LbmFreeSurface,
-    Grid as LbmGrid,
-};
-use fs_material::gas::GasState;
-use fs_mbd_material::VolumeMoments;
+use fs_convection::{CorrelationId, CorrelationInputs, ThermalConductivity, evaluate as eval_convection};
 use fs_qty::Length as ConvLength;
-use fs_thermal::enthalpy::ThermalLaw;
-use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
-use fs_tribo::journal::{
-    GeneralizedNewtonianJournal, JournalGeometry, JournalShearSolve, JournalViscosityKnot,
-};
-use fs_vkplate::air_loss::oscillating_cylinder;
 
+use crate::horology::{MovementEnvironment, PartField};
 use crate::materials::{
-    CreepState, GOLD_18K_CARD, GOLD_MARANGONI_DSIGMA_DT_N_M_K, HIGH_CARBON_STEEL_CARD,
-    INVAR_36NI_CARD, J2State, LN2_LATENT_VAP_J_PER_KG, NortonJ2State, STEFAN_BOLTZMANN,
-    T_LN2_LEIDENFROST_K, T_LN2_SAT_K, T_REF_K, WatchMaterialId, blued_steel_interference_rgb,
-    gold_coupled_norton_j2, gold_ductility_elongation, gold_effective_viscosity_pa_s,
-    gold_liquid_surface_tension_n_m, gold_substrate_contact_angle_cos,
-    gold_viscoplastic_strain_rate_s_inv, gold_viscoplastic_yield_stress_pa,
-    planck_incandescence_linear_rgb, watch_oil_surface_tension_n_m, watch_oil_viscosity_pa_s,
+    G0_M_S2, GoldAlloy, MU0, P_ATM_PA, STEFAN_BOLTZMANN, T_REF_K, air_state, blued_steel_interference_rgb, debye_fraction,
+    ice_saturation_pressure_pa, library, ln2, ln2_saturation_temperature_k, steel_temper_oxide_rate_nm2_s,
 };
 
-/// Number of component aggregate nodes reported to the telemetry ledger.
 pub const NODE_COUNT: usize = 12;
-
-/// Spatial PDE grid resolution along X and Y across $[-28.8\text{ mm}, +28.8\text{ mm}]$.
-pub const GRID_N: usize = 48;
+pub const GRID_N: usize = 64;
 pub const GRID_CELLS: usize = GRID_N * GRID_N;
-/// Grid physical half-span ($\text{mm}$). Cell pitch $\Delta x = 57.6 / 48 = 1.2\text{ mm}$.
 pub const GRID_HALF_SPAN_MM: f64 = 28.8;
-pub const GRID_DX_MM: f64 = (2.0 * GRID_HALF_SPAN_MM) / (GRID_N as f64);
-pub const GRID_DX_M: f64 = GRID_DX_MM * 1.0e-3;
-pub const GRID_CELL_AREA_M2: f64 = GRID_DX_M * GRID_DX_M;
-const AREA_SCALE_VS_24: f64 = GRID_CELL_AREA_M2 / 5.76e-6;
+pub const GRID_DX_MM: f64 = 2.0 * GRID_HALF_SPAN_MM / GRID_N as f64;
+const DX: f64 = GRID_DX_MM * 1.0e-3;
+const CELL_AREA: f64 = DX * DX;
 
-/// 3D Deformable 18k Gold Case Shell resolution:
-/// 64 circumferential stations around $[0, 2\pi)$ $\times$ 8 meridional profile stations from back bezel to front bezel.
 pub const CASE_SHELL_N_THETA: usize = 64;
 pub const CASE_SHELL_N_Z: usize = 8;
 pub const CASE_SHELL_NODES: usize = CASE_SHELL_N_THETA * CASE_SHELL_N_Z;
+
+/// Layout of the movement in the watch frame [mm].
+pub const TOURBILLON_CENTER_MM: [f64; 2] = [0.0, -11.0];
+pub const BARREL_CENTER_MM: [f64; 2] = [0.0, 11.5];
+const CASE_INNER_R_MM: f64 = 22.2;
+const CASE_OUTER_R_MM: f64 = 27.6;
+const WELL_R_MM: f64 = 7.5;
+/// Floor of the tourbillon aperture below the dial surface (z = 0) [mm].
+const WELL_FLOOR_MM: f64 = -1.0;
+/// Open-face movement: liquids may pile this high above the dial [m].
+const OPEN_CEILING_M: f64 = 6.0e-3;
+/// Layers of an interior column: 18k case back, brass plate and bridges.
+const BACK_GOLD_M: f64 = 0.8e-3;
+const BRASS_M: f64 = 2.9e-3;
+const BRASS_DEBYE_K: f64 = 320.0;
+/// Room humidity for frost (50 % RH at 20 °C).
+const ROOM_RH: f64 = 0.5;
+const WATER_P_SAT_293_PA: f64 = 2_339.0;
+const M_WATER: f64 = 0.018_015;
+const R_GAS: f64 = 8.314_462_618;
+const FROST_DENSITY: f64 = 200.0;
+/// Degauss coil: peak field [T], decay constant and run time [s].
+const DEGAUSS_PEAK_T: f64 = 0.040;
+const DEGAUSS_TAU_S: f64 = 0.35;
+const DEGAUSS_DURATION_S: f64 = 3.0;
+const ICE_LATENT_SUB_J_KG: f64 = 2.834e6;
+const ICE_LATENT_FUS_J_KG: f64 = 3.34e5;
 
 /// Canonical indices into the 12 component regions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,34 +103,11 @@ pub enum WatchNodeId {
     HairspringBreguet = 11,
 }
 
-impl WatchNodeId {
-    pub const ALL: [Self; NODE_COUNT] = [
-        Self::CaseTop18kGold,
-        Self::CaseLeft18kGold,
-        Self::CaseRight18kGold,
-        Self::CaseBottom18kGold,
-        Self::CrystalSapphire,
-        Self::MainplateBrass,
-        Self::BarrelMainspring,
-        Self::GoingTrainWheels,
-        Self::TourbillonCage,
-        Self::EscapementForkWheel,
-        Self::BalanceWheelRim,
-        Self::HairspringBreguet,
-    ];
-}
-
-/// Aggregated state of one of the 12 horological functional subsystems
-/// (computed directly by integrating over the 3D Case Shell nodes and 2D Spatial PDE cells).
-#[derive(Debug, Clone, Copy)]
+/// Aggregated state of one of the 12 regions, for telemetry and rendering.
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ThermalPhaseNode {
-    pub id: WatchNodeId,
-    pub material: WatchMaterialId,
-    pub pos_mm: [f64; 3],
-    pub base_mass_kg: f64,
-    pub surface_area_m2: f64,
-    pub enthalpy_j_kg: f64,
     pub temperature_k: f64,
+    pub enthalpy_j_kg: f64,
     pub melt_fraction: f64,
     pub plastic_slump: f64,
     pub molten_gold_g: f64,
@@ -130,11 +115,10 @@ pub struct ThermalPhaseNode {
     pub ln2_film_g: f64,
     pub frost_thickness_um: f64,
     pub oil_film_um: f64,
-    pub oxide_thickness_nm: f64,
     pub incandescence_rgb: [f64; 3],
 }
 
-/// Interactive external perturbation tools applied by the user in the 3D scene.
+/// The bench tools, as the user sets them.
 #[derive(Debug, Clone, Copy)]
 pub struct PerturbationInputs {
     pub blowtorch_power: f64,
@@ -147,13 +131,10 @@ pub struct PerturbationInputs {
     pub magnet_pos_mm: [f64; 3],
     pub magnet_strength: f64,
     pub compensated_hairspring: bool,
-    /// High-velocity compressed air / argon nozzle power $\in [0, 1]$ ($300\text{ K}, M \approx 0.35$ shear jet).
     pub air_jet_power: f64,
-    /// 3D impingement coordinates of the compressed air nozzle ($\text{mm}$).
     pub air_jet_pos_mm: [f64; 3],
-    /// Ambient bell-jar chamber pressure in atmospheres ($0.0\text{ atm}$ vacuum $\to 1.0\text{ atm} \to 5.0\text{ atm}$ hyperbaric).
     pub ambient_pressure_atm: f64,
-    /// 3D gravitational / centrifuge acceleration vector $[g_x, g_y, g_z]$ in Earth-$g$ units ($9.80665\text{ m/s}^2$).
+    /// Gravity / centrifuge acceleration in g, watch frame.
     pub gravity_g_vec: [f64; 3],
 }
 
@@ -169,7 +150,7 @@ impl Default for PerturbationInputs {
             magnet_enabled: false,
             magnet_pos_mm: [65.0, -11.0, 5.0],
             magnet_strength: 1.0,
-            compensated_hairspring: false,
+            compensated_hairspring: true,
             air_jet_power: 0.0,
             air_jet_pos_mm: [0.0, -20.0, 3.0],
             ambient_pressure_atm: 1.0,
@@ -178,2110 +159,1704 @@ impl Default for PerturbationInputs {
     }
 }
 
-/// Coupled multiphysics modifiers transmitted to the multi-body horological solver & acoustics.
-#[derive(Debug, Clone, Copy)]
-pub struct CoupledWatchModifiers {
-    pub balance_inertia_ratio: f64,
-    pub hairspring_stiffness_ratio: f64,
-    pub barrel_youngs_modulus_ratio: f64,
-    pub natural_freq_ratio: f64,
-    pub theoretical_rate_s_per_day: f64,
-    pub pivot_friction_multiplier: f64,
-    pub extra_balance_damping_s_inv: f64,
-    pub hairspring_oil_bridge_fraction: f64,
-    pub min_pivot_clearance_um: f64,
-    pub b_field_escapement_mt: f64,
-    pub remanent_magnetization_mt: f64,
-    pub pallet_magnetic_bias_torque_nm: f64,
-    pub hairspring_eq_bias_rad: f64,
-    /// Continuous emergent fouling resistance factor $\in [0, 1]$ derived from the actual
-    /// viscous & solid shear resistive torque $\tau_{\text{Au}}$ vs mainspring drive torque $\tau_{\text{drive}}$.
-    pub gold_fouling_jam_factor: f64,
-    /// Spatially-integrated viscous drag torque ($\text{N}\cdot\text{m}$) exerted by mobile liquid gold
-    /// on the going train and escapement wheels.
-    pub liquid_gold_viscous_torque_nm: f64,
-    /// Spatially-integrated solid shear-yield interference torque ($\text{N}\cdot\text{m}$) exerted by
-    /// solidified gold frozen inside the wheel teeth or Tourbillon cage.
-    pub solid_gold_yield_torque_nm: f64,
-    pub frozen_gold_locked: bool,
-    pub thermal_or_cryo_seized: bool,
-    pub magnetically_pinned: bool,
-    pub ln2_boiling_power_w: f64,
-    pub blowtorch_heating_power_w: f64,
-    pub blued_steel_rgb: [f64; 3],
-    /// Exact forward-mode automatic differentiation sensitivity $\partial r / \partial T$ ($\text{s/day/K}$) from `fs-ad::Dual64`.
-    pub rate_sensitivity_s_day_per_k: f64,
-    /// Certified outward-rounded interval lower bound on chronometric rate ($\text{s/day}$) from `fs-ivl::Interval`.
-    pub rate_interval_lo_s_day: f64,
-    /// Certified outward-rounded interval upper bound on chronometric rate ($\text{s/day}$) from `fs-ivl::Interval`.
-    pub rate_interval_hi_s_day: f64,
-    /// Exact Stokes-Stuart oscillating-cylinder aerodynamic drag ($\text{s}^{-1}$) on the balance wheel from `fs-vkplate::air_loss`.
-    pub balance_aero_drag_s_inv: f64,
-    /// Forced convective heat transfer power ($\text{W}$) removed by the high-velocity compressed air nozzle.
-    pub air_cooling_power_w: f64,
-    /// Current ambient bell-jar chamber pressure ($\text{atm}$).
-    pub ambient_pressure_atm: f64,
-    /// Current 3D gravity / centrifuge vector $[g_x, g_y, g_z]$ ($\text{g}$-units).
-    pub gravity_g_vec: [f64; 3],
-    /// Decaying mechanical shock acceleration envelope ($\text{g}$-units).
-    pub shock_envelope_g: f64,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellKind {
+    Outside,
+    Band,
+    Interior,
 }
 
-/// Single 3D Lagrangian material node on the $64 \times 8$ deformable 18k Gold Bassine Case Shell.
-#[derive(Debug, Clone, Copy)]
-pub struct CaseShellNode {
-    pub theta_rad: f64,
-    /// Undeformed reference 3D coordinates $[X_0, Y_0, Z_0]$ ($\text{mm}$).
-    pub ref_pos_mm: [f64; 3],
-    /// Current deformed 3D coordinates $[x, y, z]$ ($\text{mm}$).
-    pub pos_mm: [f64; 3],
-    /// Current 3D material velocity $[v_x, v_y, v_z]$ ($\text{mm/s}$).
-    pub vel_mm_s: [f64; 3],
-    /// Undeformed reference wall thickness $h_0$ ($\text{mm}$).
-    pub ref_thickness_mm: f64,
-    /// Current local wall thickness $h$ ($\text{mm}$).
-    pub thickness_mm: f64,
-    /// Reference circumferential segment length $L_{\theta,0}$ ($\text{mm}$).
-    pub ref_l_theta_mm: f64,
-    /// Reference meridional segment length $L_{z,0}$ ($\text{mm}$).
-    pub ref_l_z_mm: f64,
-    /// Current nodal gold mass $m$ ($\text{kg}$).
-    pub mass_kg: f64,
-    /// Surface area exposed to external heat flux $A$ ($\text{m}^2$).
-    pub area_m2: f64,
-    /// Accumulated viscoplastic hoop strain $\varepsilon_\theta^p$.
-    pub eps_p_theta: f64,
-    /// Accumulated viscoplastic meridional strain $\varepsilon_z^p$.
-    pub eps_p_z: f64,
-    /// Accumulated viscoplastic 3D bending/shear offset $[u_x^p, u_y^p, u_z^p]$ ($\text{mm}$).
-    pub plastic_disp_mm: [f64; 3],
-    /// Equivalent von Mises plastic strain $\bar{\varepsilon}^p \ge 0$.
-    pub eq_plastic_strain: f64,
-    /// Current von Mises equivalent Cauchy stress $\sigma_{\text{eq}}$ ($\text{Pa}$).
-    pub von_mises_stress_pa: f64,
-    /// Specific enthalpy $H$ ($\text{J/kg}$ relative to $293.15\text{ K}$).
-    pub enthalpy_j_kg: f64,
-    /// Temperature $T$ ($\text{K}$).
-    pub temperature_k: f64,
-    /// Mushy-zone liquid fraction $f_L \in [0, 1]$.
-    pub melt_fraction: f64,
-    /// Adhered liquid nitrogen ($\text{LN}_2$) film mass ($\text{g}$).
-    pub ln2_mass_g: f64,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Region {
+    Outside,
+    CaseTop,
+    CaseLeft,
+    CaseRight,
+    CaseBottom,
+    Plate,
+    Barrel,
+    Train,
+    Cage,
+    Escapement,
+    Balance,
 }
 
-/// Single finite-volume cell in the $24 \times 24$ spatial PDE grid across the watch movement & case.
+/// One column of the watch on the plan grid.
 #[derive(Debug, Clone, Copy)]
 pub struct SpatialCell {
     pub x_mm: f64,
     pub y_mm: f64,
     pub r_mm: f64,
-    pub active: bool,
-    pub is_gold_case: bool,
-    pub material: WatchMaterialId,
-    pub owner_node: usize,
-    /// True 3D movement substrate topography $z_{\text{bed}}(x,y)$ ($\text{mm}$):
-    /// stepped brass mainplate ($0.0\text{ mm}$), raised Geneva bridges ($+1.45\text{ mm}$),
-    /// gear train recesses ($-0.45\text{ mm}$), and the 6h Tourbillon well ($-1.65\text{ mm}$).
-    pub bed_elevation_mm: f64,
-    pub thermal_mass_j_per_k: f64,
-    pub base_mass_kg: f64,
-    pub enthalpy_j_kg: f64,
+    pub kind: CellKind,
+    pub region: Region,
+    /// Surface liquids rest on: the dial (0) or the tourbillon well floor [mm].
+    pub bed_mm: f64,
+    pub in_hairspring: bool,
+    pub in_crown: bool,
+    /// Structural case gold still standing in the column, and as built [kg].
+    pub struct_gold_kg: f64,
+    pub struct_gold0_kg: f64,
+    /// Heat capacity of the non-gold layers at 293 K [J/K].
+    c_other: f64,
+    /// Thickness of brass for conduction [m].
+    brass_m: f64,
+    /// Column enthalpy relative to 293.15 K [J].
+    pub enthalpy_j: f64,
     pub temperature_k: f64,
+    /// Liquid fraction of the gold in the column.
     pub melt_fraction: f64,
-    /// Local case shell radial/vertical displacement ratio mapped from the 3D CaseShellNode ring.
-    pub case_slump_frac: f64,
-    /// Mobile liquid gold height $H_{\text{Au}}$ ($\text{mm}$) in this cell.
-    pub liquid_gold_mm: f64,
-    /// Specific enthalpy of the mobile liquid gold layer ($\text{J/kg}$) for enthalpy advection.
-    pub liquid_gold_enthalpy_j_kg: f64,
-    /// Solidified (frozen) displaced gold height $S_{\text{Au}}$ ($\text{mm}$) in this cell.
-    pub frozen_gold_mm: f64,
-    /// Liquid nitrogen ($\text{LN}_2$) film mass ($\text{g}$) in this cell.
-    pub ln2_mass_g: f64,
-    /// Frost / rime ice thickness ($\mu\text{m}$) in this cell.
-    pub frost_um: f64,
-    /// Watch oil film thickness ($\mu\text{m}$) in this cell.
-    pub oil_um: f64,
+    /// Gold that has melted out of the case and run here [kg].
+    pub gold_kg: f64,
+    /// Poured oil on the surface [m³].
+    pub oil_m3: f64,
+    pub ln2_kg: f64,
+    pub frost_kg_m2: f64,
+    /// Copper-oxide film on the gold surface [nm].
+    pub oxide_nm: f64,
 }
 
-/// Complete multiphysics state of the pocket watch, backed by `fs_lbm::FreeSurface`
-/// (`D2Q9` Körner VOF Lattice Boltzmann with Laplace curvature surface tension),
-/// `fs_material::creep::plastic::NortonJ2`, and `fs_tribo::journal::GeneralizedNewtonianJournal`.
+impl SpatialCell {
+    #[must_use]
+    pub fn gold_depth_m(&self) -> f64 {
+        self.gold_kg / (library().gold.rho_solid_ref * 0.95 * CELL_AREA)
+    }
+
+    #[must_use]
+    pub fn oil_depth_m(&self) -> f64 {
+        self.oil_m3 / CELL_AREA
+    }
+
+    /// Fraction of the deposited gold that is mobile (above coherency).
+    #[must_use]
+    pub fn mobile_fraction(&self) -> f64 {
+        ((self.melt_fraction - 0.3) / 0.3).clamp(0.0, 1.0)
+    }
+
+    #[must_use]
+    pub fn liquid_gold_mm(&self) -> f64 {
+        self.gold_depth_m() * self.mobile_fraction() * 1.0e3
+    }
+
+    #[must_use]
+    pub fn frozen_gold_mm(&self) -> f64 {
+        self.gold_depth_m() * (1.0 - self.mobile_fraction()) * 1.0e3
+    }
+
+    #[must_use]
+    pub fn frost_um(&self) -> f64 {
+        self.frost_kg_m2 / FROST_DENSITY * 1.0e6
+    }
+
+    /// Fraction of the structural case gold that has melted out.
+    #[must_use]
+    pub fn case_slump_frac(&self) -> f64 {
+        if self.struct_gold0_kg > 0.0 { 1.0 - self.struct_gold_kg / self.struct_gold0_kg } else { 0.0 }
+    }
+}
+
+/// One node of the bassine case band mesh.
+#[derive(Debug, Clone, Copy)]
+pub struct CaseShellNode {
+    pub theta_rad: f64,
+    pub ref_pos_mm: [f64; 3],
+    pub pos_mm: [f64; 3],
+    pub ref_thickness_mm: f64,
+    pub thickness_mm: f64,
+    pub temperature_k: f64,
+    pub melt_fraction: f64,
+    /// Accumulated creep sag along gravity [mm].
+    pub sag_mm: f64,
+    cell: usize,
+}
+
+/// Merged (T, h_gold, h_other) knots for inverting column enthalpy.
+struct ColumnTable {
+    t: Vec<f64>,
+    hg: Vec<f64>,
+    /// Debye-shaped brass enthalpy per J/K of room-temperature capacity [K].
+    ho: Vec<f64>,
+}
+
+fn column_table() -> &'static ColumnTable {
+    static TABLE: OnceLock<ColumnTable> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let gold = &library().gold;
+        let mut t: Vec<f64> = gold.t_to_h().iter().map(|p| p.0).collect();
+        let mut x = 40.0;
+        while x < 3500.0 {
+            t.push(x);
+            x += if x < 400.0 { 10.0 } else { 50.0 };
+        }
+        // The room-temperature reference must be a node, so that a column at
+        // zero enthalpy inverts to exactly 293.15 K and an idle watch is still.
+        t.push(T_REF_K);
+        t.sort_by(f64::total_cmp);
+        t.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+        let hg: Vec<f64> = t.iter().map(|&tk| gold.enthalpy_at(tk)).collect();
+        // ∫ D(θ/T)/D(θ/293) dT from 293 K.
+        let shape = |tk: f64| debye_fraction(BRASS_DEBYE_K / tk.max(10.0)) / debye_fraction(BRASS_DEBYE_K / T_REF_K);
+        let integrate = |a: f64, b: f64| {
+            let n = ((b - a).abs() / 2.0).ceil().max(1.0) as usize;
+            let h = (b - a) / n as f64;
+            (0..n).map(|i| 0.5 * (shape(a + i as f64 * h) + shape(a + (i as f64 + 1.0) * h)) * h).sum::<f64>()
+        };
+        // One cumulative pass outward from the reference node (which is in
+        // the table), so the cost is linear in the temperature range.
+        let k_ref = t.iter().position(|&x| x == T_REF_K).unwrap_or(0);
+        let mut ho = vec![0.0; t.len()];
+        for k in k_ref + 1..t.len() {
+            ho[k] = ho[k - 1] + integrate(t[k - 1], t[k]);
+        }
+        for k in (0..k_ref).rev() {
+            ho[k] = ho[k + 1] + integrate(t[k + 1], t[k]);
+        }
+        ColumnTable { t, hg, ho }
+    })
+}
+
+impl ColumnTable {
+    fn enthalpy(&self, m_gold: f64, c_other: f64, t_k: f64) -> f64 {
+        let i = self.t.partition_point(|&x| x <= t_k).clamp(1, self.t.len() - 1);
+        let f = ((t_k - self.t[i - 1]) / (self.t[i] - self.t[i - 1])).clamp(0.0, 1.0);
+        let hg = self.hg[i - 1] + f * (self.hg[i] - self.hg[i - 1]);
+        let ho = self.ho[i - 1] + f * (self.ho[i] - self.ho[i - 1]);
+        m_gold * hg + c_other * ho
+    }
+
+    fn temperature(&self, m_gold: f64, c_other: f64, h: f64) -> f64 {
+        let at = |k: usize| m_gold * self.hg[k] + c_other * self.ho[k];
+        let n = self.t.len();
+        if h <= at(0) {
+            return self.t[0];
+        }
+        if h >= at(n - 1) {
+            return self.t[n - 1];
+        }
+        let (mut lo, mut hi) = (0usize, n - 1);
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2;
+            if at(mid) <= h {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let (h0, h1) = (at(lo), at(hi));
+        if h1 <= h0 {
+            return self.t[hi];
+        }
+        self.t[lo] + (self.t[hi] - self.t[lo]) * (h - h0) / (h1 - h0)
+    }
+
+    /// [`Self::temperature`] by hunting from the segment `seg` the column last
+    /// inverted in (updated). The column enthalpy is non-decreasing over the
+    /// knots, so the bracketing segment is unique and the result is identical
+    /// to the bisection's; between substeps a column rarely leaves its segment.
+    fn temperature_hunt(&self, m_gold: f64, c_other: f64, h: f64, seg: &mut u32) -> f64 {
+        let at = |k: usize| m_gold * self.hg[k] + c_other * self.ho[k];
+        let n = self.t.len();
+        if h <= at(0) {
+            *seg = 0;
+            return self.t[0];
+        }
+        if h >= at(n - 1) {
+            *seg = (n - 2) as u32;
+            return self.t[n - 1];
+        }
+        let mut lo = (*seg as usize).min(n - 2);
+        while lo > 0 && at(lo) > h {
+            lo -= 1;
+        }
+        while at(lo + 1) <= h {
+            lo += 1;
+        }
+        *seg = lo as u32;
+        let (h0, h1) = (at(lo), at(lo + 1));
+        if h1 <= h0 {
+            return self.t[lo + 1];
+        }
+        self.t[lo] + (self.t[lo + 1] - self.t[lo]) * (h - h0) / (h1 - h0)
+    }
+
+    /// Smallest dH/dT over segment `seg` and its two neighbours [J/K]: a
+    /// lower bound on the column's capacity for the next small change in T,
+    /// which ignores the latent heat of a mushy segment the column may be
+    /// about to leave.
+    fn capacity_floor(&self, m_gold: f64, c_other: f64, seg: u32) -> f64 {
+        let n = self.t.len();
+        let s = (seg as usize).min(n - 2);
+        let (a, b) = (s.saturating_sub(1), (s + 1).min(n - 2));
+        (a..=b)
+            .map(|j| (m_gold * (self.hg[j + 1] - self.hg[j]) + c_other * (self.ho[j + 1] - self.ho[j])) / (self.t[j + 1] - self.t[j]))
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    /// Effective heat capacity dH/dT at `t_k` [J/K].
+    #[cfg(test)]
+    fn capacity(&self, m_gold: f64, c_other: f64, t_k: f64) -> f64 {
+        let i = self.t.partition_point(|&x| x <= t_k).clamp(1, self.t.len() - 1);
+        let dt = self.t[i] - self.t[i - 1];
+        (m_gold * (self.hg[i] - self.hg[i - 1]) + c_other * (self.ho[i] - self.ho[i - 1])) / dt
+    }
+}
+
+/// Liquid-nitrogen pool-boiling heat flux [W/m²] at wall superheat `dt_sat`
+/// [K], pressure `p_pa` and gravity `g`.
+#[must_use]
+pub fn ln2_boiling_flux(dt_sat: f64, p_pa: f64, g: f64) -> f64 {
+    if dt_sat <= 0.0 {
+        return 0.0;
+    }
+    let g = g.max(0.1 * G0_M_S2);
+    let t_sat = ln2_saturation_temperature_k(p_pa);
+    let (rl, mul, cpl, kl, sigma, hfg) =
+        (ln2::RHO_LIQUID, ln2::MU_LIQUID, ln2::CP_LIQUID, ln2::K_LIQUID, ln2::SURFACE_TENSION, ln2::LATENT_J_KG);
+    // Nitrogen vapour: ideal-gas density, kinetic-theory μ, k ∝ T^0.8.
+    let vapour = |t: f64| {
+        let rho = p_pa.max(ln2::P_TRIPLE_PA) * ln2::MOLAR_MASS / (R_GAS * t);
+        let mu = 5.4e-6 * (t / 77.0).powf(0.75);
+        let k = 7.6e-3 * (t / 77.0).powf(0.85);
+        (rho, mu, k)
+    };
+    let (rv_sat, _, _) = vapour(t_sat);
+    let drho = rl - rv_sat;
+    let pr_l = mul * cpl / kl;
+    // Rohsenow nucleate boiling (C_sf = 0.013, n = 1.7).
+    let rohsenow = |dt: f64| {
+        mul * hfg * (g * drho / sigma).sqrt() * (cpl * dt / (0.013 * hfg * pr_l.powf(1.7))).powi(3)
+    };
+    // Zuber critical heat flux (Lienhard coefficient 0.149).
+    let q_max = 0.149 * hfg * rv_sat.sqrt() * (sigma * g * drho).powf(0.25);
+    let dt_chf = (q_max / rohsenow(1.0)).cbrt();
+    // Zuber minimum (Leidenfrost) flux and Berenson's superheat for it.
+    let q_min = 0.09 * rv_sat * hfg * (sigma * g * drho / (rl + rv_sat).powi(2)).powf(0.25);
+    let (rvf, muvf, kvf) = vapour(t_sat + 15.0);
+    let dt_min = 0.127 * rvf * hfg / kvf * (g * drho / (rl + rvf)).powf(2.0 / 3.0) * (sigma / (g * drho)).sqrt()
+        * (muvf / (g * drho)).cbrt();
+    let berenson = |dt: f64| {
+        let tf = t_sat + 0.5 * dt;
+        let (rv, muv, kv) = vapour(tf);
+        let lam = (sigma / (g * drho)).sqrt();
+        let hfg_eff = hfg + 0.4 * 1_040.0 * dt;
+        let h = 0.425 * (kv.powi(3) * rv * g * (rl - rv) * hfg_eff / (muv * dt * lam)).powf(0.25);
+        // Radiation across the vapour film (ε ≈ 0.3 metal, 1 liquid).
+        let ts = t_sat + dt;
+        h * dt + 0.3 * STEFAN_BOLTZMANN * (ts.powi(4) - t_sat.powi(4))
+    };
+    if dt_sat <= dt_chf {
+        rohsenow(dt_sat)
+    } else if dt_sat >= dt_min.max(dt_chf * 1.5) {
+        berenson(dt_sat).max(q_min)
+    } else {
+        // Transition boiling: log-linear between the two extrema.
+        let d_min = dt_min.max(dt_chf * 1.5);
+        let f = (dt_sat.ln() - dt_chf.ln()) / (d_min.ln() - dt_chf.ln());
+        (q_max.ln() + f * (berenson(d_min).max(q_min).ln() - q_max.ln())).exp()
+    }
+}
+
+/// The LN₂ boiling curve for one (pressure, gravity), tabulated on log ΔT:
+/// evaluating the correlations per wet cell per substep cost more than the
+/// rest of the field solve.
+#[derive(Debug, Clone)]
+struct BoilingTable {
+    p_pa: f64,
+    g: f64,
+    q: Vec<f64>,
+    /// Steepest slope of the curve [W/(m² K)].
+    max_slope: f64,
+}
+
+impl BoilingTable {
+    const LN_LO: f64 = -2.302_585_092_994_046; // ln 0.1 K
+    const LN_HI: f64 = 8.006_367_567_650_246; // ln 3000 K
+    const N: usize = 256;
+
+    fn build(p_pa: f64, g: f64) -> Self {
+        let q: Vec<f64> = (0..Self::N)
+            .map(|k| {
+                let x = Self::LN_LO + (Self::LN_HI - Self::LN_LO) * k as f64 / (Self::N - 1) as f64;
+                ln2_boiling_flux(x.exp(), p_pa, g)
+            })
+            .collect();
+        // Steepest |dq/dΔT| of the curve (the 0.1 K linear ramp included):
+        // the stiffest a wetted cell's boiling can be.
+        let mut max_slope = q[0] / 0.1;
+        for k in 0..Self::N - 1 {
+            let x0 = (Self::LN_LO + (Self::LN_HI - Self::LN_LO) * k as f64 / (Self::N - 1) as f64).exp();
+            let x1 = (Self::LN_LO + (Self::LN_HI - Self::LN_LO) * (k + 1) as f64 / (Self::N - 1) as f64).exp();
+            max_slope = max_slope.max(((q[k + 1] - q[k]) / (x1 - x0)).abs());
+        }
+        Self { p_pa, g, q, max_slope }
+    }
+
+    fn flux(&self, dt_sat: f64) -> f64 {
+        if dt_sat <= 0.1 {
+            return if dt_sat > 0.0 { self.q[0] * dt_sat / 0.1 } else { 0.0 };
+        }
+        let f = (dt_sat.ln() - Self::LN_LO) / (Self::LN_HI - Self::LN_LO) * (Self::N - 1) as f64;
+        let i = (f.floor() as usize).min(Self::N - 2);
+        let w = (f - i as f64).clamp(0.0, 1.0);
+        self.q[i] + w * (self.q[i + 1] - self.q[i])
+    }
+}
+
+/// Natural-convection film coefficient [W/(m² K)] for the whole watch, from
+/// `fs-convection` (Churchill–Chu vertical plate, or the horizontal-plate
+/// correlations when it lies flat), tabulated against ΔT at the current
+/// pressure.
+#[derive(Debug, Clone)]
+struct ConvectionTable {
+    pressure_pa: f64,
+    vertical: bool,
+    dts: [f64; 9],
+    h: [f64; 9],
+}
+
+impl ConvectionTable {
+    fn build(pressure_pa: f64, vertical: bool, g: f64) -> Self {
+        let dts = [0.5, 2.0, 8.0, 30.0, 80.0, 200.0, 400.0, 700.0, 1100.0];
+        let mut h = [0.0; 9];
+        let l = 2.0 * CASE_OUTER_R_MM * 1.0e-3;
+        for (slot, &dt) in h.iter_mut().zip(&dts) {
+            let tf = T_REF_K + 0.5 * dt;
+            let Some(air) = air_state(tf, pressure_pa) else { continue };
+            let nu = air.dynamic_viscosity / air.density;
+            let alpha = air.thermal_conductivity / (air.density * air.specific_heat_cp);
+            let (id, length) = if vertical {
+                (CorrelationId::ChurchillChuVerticalPlate, l)
+            } else {
+                (CorrelationId::HorizontalPlateUnstableLaminar, l / 4.0)
+            };
+            let ra = (g * dt / tf * length.powi(3) / (nu * alpha)).max(1.0e-3);
+            let k = air.thermal_conductivity;
+            let correlated = eval_convection(id, CorrelationInputs::natural(ra, air.prandtl))
+                .and_then(|nu_eval| {
+                    nu_eval.heat_transfer_coefficient(ThermalConductivity::new(k), ConvLength::new(length))
+                })
+                .map(|ev| ev.value.value());
+            // Outside a correlation's validity window fall back to its
+            // laminar form (Nu = 0.68 + 0.67 Ra^¼ / [1 + (0.492/Pr)^(9/16)]^(4/9)).
+            *slot = correlated.unwrap_or_else(|_| {
+                let pr = air.prandtl;
+                let nu_l = 0.68 + 0.670 * ra.powf(0.25) / (1.0 + (0.492 / pr).powf(9.0 / 16.0)).powf(4.0 / 9.0);
+                nu_l * k / length
+            });
+        }
+        Self { pressure_pa, vertical, dts, h }
+    }
+
+    fn eval(&self, dt: f64) -> f64 {
+        let d = dt.abs();
+        if d <= self.dts[0] {
+            return self.h[0];
+        }
+        for i in 1..self.dts.len() {
+            if d <= self.dts[i] {
+                let f = (d - self.dts[i - 1]) / (self.dts[i] - self.dts[i - 1]);
+                return self.h[i - 1] + f * (self.h[i] - self.h[i - 1]);
+            }
+        }
+        self.h[self.h.len() - 1]
+    }
+}
+
+/// Reused per-cell buffers of the virtual-pipe solver (one substep would
+/// otherwise allocate and zero seven grid-sized arrays).
+#[derive(Clone)]
+struct PipeScratch {
+    depth: Vec<f64>,
+    head: Vec<f64>,
+    nu: Vec<f64>,
+    out_v: Vec<f64>,
+    in_v: Vec<f64>,
+    s_out: Vec<f64>,
+    s_in: Vec<f64>,
+    moves: Vec<(usize, usize, f64)>,
+}
+
+impl Default for PipeScratch {
+    fn default() -> Self {
+        let z = || vec![0.0; GRID_CELLS];
+        Self { depth: z(), head: z(), nu: z(), out_v: z(), in_v: z(), s_out: z(), s_in: z(), moves: Vec::with_capacity(512) }
+    }
+}
+
+/// Reused per-cell buffers of the explicit heat solve, and the parts of it
+/// that hold still within one step (the nozzles and the oxide film do not
+/// move between substeps).
+#[derive(Clone, Default)]
+struct ThermalScratch {
+    /// Conductance thickness k·t of each column [W/K].
+    kt: Vec<f64>,
+    dq: Vec<f64>,
+    /// Torch and air-jet film coefficients [W/(m² K)].
+    torch_h: Vec<f64>,
+    jet_h: Vec<f64>,
+    /// Oxide part of the gold emissivity.
+    eps_ox: Vec<f64>,
+    /// Enthalpy-table segment each column last inverted in.
+    seg: Vec<u32>,
+    /// Columns inside the watch.
+    active: Vec<u32>,
+}
+
+impl ThermalScratch {
+    fn new(grid: &[SpatialCell]) -> Self {
+        let table = column_table();
+        let z = || vec![0.0; GRID_CELLS];
+        let mut seg = vec![0u32; GRID_CELLS];
+        for (c, s) in grid.iter().zip(&mut seg) {
+            table.temperature_hunt(c.struct_gold_kg + c.gold_kg, c.c_other.max(1.0e-5), c.enthalpy_j, s);
+        }
+        let active = (0..GRID_CELLS).filter(|&i| grid[i].kind != CellKind::Outside).map(|i| i as u32).collect();
+        Self { kt: z(), dq: z(), torch_h: z(), jet_h: z(), eps_ox: z(), seg, active }
+    }
+}
+
+/// Longest explicit thermal substep [s]; shorter when the stability bound
+/// of the current fields is.
+const H_THERMAL_MAX_S: f64 = 10.0e-3;
+
+/// Complete field state of the watch.
 #[derive(Clone)]
 pub struct MultiphysicsState {
-    pub case_shell: Vec<CaseShellNode>,
     pub grid: Vec<SpatialCell>,
-    /// Live $24 \times 24$ `D2Q9` Körner VOF Free-Surface Lattice Boltzmann solver (`fs-lbm`)
-    /// governing molten gold capillary pooling, surface tension, and momentum transport.
-    pub lbm_free_surface: LbmFreeSurface,
+    pub case_shell: Vec<CaseShellNode>,
     pub nodes: [ThermalPhaseNode; NODE_COUNT],
     pub inputs: PerturbationInputs,
-    pub remanent_magnetization_mt: f64,
-    pub degauss_envelope_mt: f64,
-    pub degauss_phase_rad: f64,
+    /// Face fluxes of the virtual-pipe layers [m³/s]: x faces (i,i+1) and y
+    /// faces (i,i+N), indexed by the lower cell.
+    gold_qx: Vec<f64>,
+    gold_qy: Vec<f64>,
+    oil_qx: Vec<f64>,
+    oil_qy: Vec<f64>,
+    /// Torch + air-jet dynamic pressure on each cell [Pa], refreshed once
+    /// per flow call (the nozzles do not move within it).
+    gas_q: Vec<f64>,
+    pipe: PipeScratch,
+    th: ThermalScratch,
+    part_cells: [Vec<usize>; 5],
+    crown_cells: Vec<usize>,
+    convection: ConvectionTable,
+    boiling: BoilingTable,
+    /// Hairspring magnetisation M/Mₛ (play-operator state).
+    pub hairspring_magnetisation: f64,
+    degauss_t: f64,
     pub shock_envelope_g: f64,
     pub hairspring_oxide_nm: f64,
-    pub modifiers: CoupledWatchModifiers,
+    // Outputs.
+    pub environment: MovementEnvironment,
+    pub b_field_escapement_mt: f64,
+    pub remanent_magnetization_mt: f64,
+    pub ln2_boiling_power_w: f64,
+    pub blowtorch_heating_power_w: f64,
+    pub air_cooling_power_w: f64,
+    pub dripped_gold_g: f64,
+    pub blued_steel_rgb: [f64; 3],
+    quiet: bool,
 }
+
+/// Parts sampled for the movement: barrel, train (cage frame), cage-well
+/// escapement, balance, and the third wheel under the dial.
+const PART_BARREL: usize = 0;
+const PART_TRAIN: usize = 1;
+const PART_ESCAPEMENT: usize = 2;
+const PART_BALANCE: usize = 3;
+const PART_PLATE: usize = 4;
 
 impl MultiphysicsState {
     #[must_use]
     pub fn new() -> Self {
-        // 1. Construct the 64 x 8 3D Bassine 18k Gold Case Shell Mesh
-        // Meridional profile stations iz = 0..7 from back bezel (z = -3.8 mm) around the
-        // rounded Bassine caseband (r = 26.8 mm) to the front exhibition bezel (z = +3.8 mm).
-        let profile_z_mm: [f64; CASE_SHELL_N_Z] =
-            [-3.8, -2.8, -1.6, -0.5, 0.5, 1.6, 2.8, 3.8];
-        let profile_r_mm: [f64; CASE_SHELL_N_Z] =
-            [23.0, 25.0, 26.3, 26.8, 26.8, 26.3, 25.0, 23.0];
-        let profile_h_mm: [f64; CASE_SHELL_N_Z] =
-            [2.1, 2.3, 2.6, 2.8, 2.8, 2.6, 2.3, 2.1];
+        let lib = library();
+        let rho_gold = lib.gold.rho_solid_ref;
+        let brass = lib.brass;
+        // Bassine case band profile (radius, height, wall) as rendered.
+        let profile_z_mm: [f64; CASE_SHELL_N_Z] = [-3.8, -2.8, -1.6, -0.5, 0.5, 1.6, 2.8, 3.8];
+        let profile_r_mm: [f64; CASE_SHELL_N_Z] = [23.0, 25.0, 26.3, 26.8, 26.8, 26.3, 25.0, 23.0];
+        let profile_h_mm: [f64; CASE_SHELL_N_Z] = [2.1, 2.3, 2.6, 2.8, 2.8, 2.6, 2.3, 2.1];
+        // Gold volume of the band per unit plan area: meridional length × wall
+        // thickness, spread over the band's radial extent.
+        let mut merid_wall = 0.0;
+        for iz in 0..CASE_SHELL_N_Z - 1 {
+            let dr = profile_r_mm[iz + 1] - profile_r_mm[iz];
+            let dz = profile_z_mm[iz + 1] - profile_z_mm[iz];
+            merid_wall += (dr * dr + dz * dz).sqrt() * 0.5 * (profile_h_mm[iz] + profile_h_mm[iz + 1]);
+        }
+        let band_gold_thick_m = merid_wall / (CASE_OUTER_R_MM - CASE_INNER_R_MM) * 1.0e-3 * 0.55;
 
-        let d_theta = TAU / (CASE_SHELL_N_THETA as f64);
-
-        let case_shell: Vec<CaseShellNode> = (0..CASE_SHELL_NODES)
-            .map(|idx| {
-            let it = idx % CASE_SHELL_N_THETA;
-            let iz = idx / CASE_SHELL_N_THETA;
-            let theta = (it as f64) * d_theta;
-
-            // At 12 o'clock (theta ≈ pi/2), the Bassine case transitions into the sculpted pendant neck
-            let dy_top = theta.sin().max(0.0);
-            let pendant_lobe = if (theta - 0.5 * PI).abs() < 0.22 {
-                let u = 1.0 - ((theta - 0.5 * PI).abs() / 0.22);
-                2.2 * u * u * (1.0 - 0.12 * profile_z_mm[iz].abs())
-            } else {
-                0.0
-            };
-            let r0 = profile_r_mm[iz] + pendant_lobe * dy_top;
-            let x0 = r0 * theta.cos();
-            let y0 = r0 * theta.sin();
-            let z0 = profile_z_mm[iz];
-            let h0 = profile_h_mm[iz] + 0.35 * pendant_lobe;
-
-            let l_theta_mm = (r0 * d_theta).max(1.5);
-            let l_z_mm = if iz + 1 < CASE_SHELL_N_Z {
-                let dr = profile_r_mm[iz + 1] - profile_r_mm[iz];
-                let dz = profile_z_mm[iz + 1] - profile_z_mm[iz];
-                (dr * dr + dz * dz).sqrt()
-            } else {
-                1.25
-            };
-
-            let area_m2 = (l_theta_mm * 1.0e-3) * (l_z_mm * 1.0e-3);
-            let vol_m3 = area_m2 * (h0 * 1.0e-3);
-            let mass_kg = (GOLD_18K_CARD.density_kg_m3 * vol_m3).max(2.0e-5);
-
-            CaseShellNode {
-                theta_rad: theta,
-                ref_pos_mm: [x0, y0, z0],
-                pos_mm: [x0, y0, z0],
-                vel_mm_s: [0.0, 0.0, 0.0],
-                ref_thickness_mm: h0,
-                thickness_mm: h0,
-                ref_l_theta_mm: l_theta_mm,
-                ref_l_z_mm: l_z_mm,
-                mass_kg,
-                area_m2,
-                eps_p_theta: 0.0,
-                eps_p_z: 0.0,
-                plastic_disp_mm: [0.0, 0.0, 0.0],
-                eq_plastic_strain: 0.0,
-                von_mises_stress_pa: 0.0,
-                enthalpy_j_kg: 0.0,
-                temperature_k: T_REF_K,
-                melt_fraction: 0.0,
-                ln2_mass_g: 0.0,
-            }
-        })
-        .collect();
-
-        // 2. Construct the 24 x 24 2D Finite-Volume Free-Surface + Movement Substrate PDE Grid
-        let grid: Vec<SpatialCell> = (0..GRID_CELLS)
-            .map(|idx| {
+        let mut grid = Vec::with_capacity(GRID_CELLS);
+        for idx in 0..GRID_CELLS {
             let gx = idx % GRID_N;
             let gy = idx / GRID_N;
-            let x_mm = -GRID_HALF_SPAN_MM + (gx as f64 + 0.5) * GRID_DX_MM;
-            let y_mm = -GRID_HALF_SPAN_MM + (gy as f64 + 0.5) * GRID_DX_MM;
-            let r_mm = (x_mm * x_mm + y_mm * y_mm).sqrt();
-
-            let in_pendant = x_mm.abs() <= 4.8 && y_mm > 22.0 && y_mm <= 28.8;
-            let active = r_mm <= 27.6 || in_pendant;
-            let is_gold_case = active && (r_mm >= 22.2 || in_pendant);
-
-            // True 3D horological architecture topography z_bed(x,y):
-            // - 6h Tourbillon & Escapement well centered at (0, -11.0), radius 6.8 mm: recessed to -1.65 mm
-            // - 12h Mainspring Barrel recess centered at (0, +11.5), radius 7.8 mm: +0.25 mm drum top, surrounded by +1.35 mm Barrel Bridge
-            // - Going-train wheel channel centered along (-5.5, 1.5): recessed to -0.45 mm
-            // - Contoured Geneva bridges on left/right flanks: raised to +1.25 mm
-            let dist_tourb = (x_mm * x_mm + (y_mm + 11.0).powi(2)).sqrt();
-            let dist_barrel = (x_mm * x_mm + (y_mm - 11.5).powi(2)).sqrt();
-            let dist_train = ((x_mm + 5.5).powi(2) + (y_mm - 1.5).powi(2)).sqrt();
-
-            let (material, owner_node, bed_elevation_mm, thickness_m, init_oil_um) = if is_gold_case
-            {
-                let sector = if y_mm >= x_mm.abs() {
-                    0 // 12h Top
-                } else if y_mm <= -x_mm.abs() {
-                    3 // 6h Bottom
-                } else if x_mm < 0.0 {
-                    1 // 9h Left
-                } else {
-                    2 // 3h Right
-                };
-                (WatchMaterialId::Gold18kCase, sector, 3.6, 3.8e-3, 0.0)
-            } else if dist_tourb <= 6.8 {
-                let sub_owner = if dist_tourb <= 2.5 {
-                    11 // Breguet Hairspring & Balance staff center
-                } else if dist_tourb <= 4.6 && y_mm >= -11.5 {
-                    10 // Glucydur Balance Wheel rim
-                } else if x_mm < -0.6 {
-                    9 // Swiss Lever Pallet Fork & Club-Tooth Escape Wheel
-                } else {
-                    8 // Titanium Tourbillon Carriage
-                };
-                // Deep recessed Tourbillon well (-1.65 mm at center, stepped to -1.15 mm at rim)
-                let well_z = -1.65 + 0.07 * dist_tourb;
-                let mat = match sub_owner {
-                    9 | 11 => WatchMaterialId::HighCarbonSteel,
-                    10 => WatchMaterialId::GlucydurBeCu,
-                    _ => WatchMaterialId::TitaniumGrade5,
-                };
-                (mat, sub_owner, well_z, 1.35e-3, 1.5)
-            } else if dist_barrel <= 7.8 {
-                // Mainspring barrel drum (+0.20 mm) and surrounding Geneva barrel bridge (+1.10 mm)
-                let barrel_z = if dist_barrel <= 5.8 { 0.20 } else { 1.10 };
-                (WatchMaterialId::HighCarbonSteel, 6, barrel_z, 2.1e-3, 2.0)
-            } else if dist_train <= 6.2 {
-                // Recessed going-train wheel channel (-0.45 mm) so molten gold channels toward center & 6h
-                (WatchMaterialId::BrassC36000, 7, -0.45, 1.65e-3, 1.6)
+            let x = -GRID_HALF_SPAN_MM + (gx as f64 + 0.5) * GRID_DX_MM;
+            let y = -GRID_HALF_SPAN_MM + (gy as f64 + 0.5) * GRID_DX_MM;
+            let r = x.hypot(y);
+            let in_pendant = x.abs() <= 4.8 && y > 22.0 && y <= 28.8;
+            let kind = if r <= CASE_INNER_R_MM && !in_pendant {
+                CellKind::Interior
+            } else if r <= CASE_OUTER_R_MM || in_pendant {
+                CellKind::Band
             } else {
-                // Stepped brass mainplate (0.0 mm) with raised Geneva bridge flanks (+0.95 mm)
-                let bridge_z = if x_mm.abs() > 7.5 && y_mm > -6.0 && y_mm < 10.0 {
-                    0.95
-                } else {
-                    0.0
-                };
-                (WatchMaterialId::BrassC36000, 5, bridge_z, 1.95e-3, 1.2)
+                CellKind::Outside
             };
-
-            let card = material.card();
-            let base_mass_kg = (card.density_kg_m3 * GRID_CELL_AREA_M2 * thickness_m).max(3.0e-6);
-            let thermal_mass_j_per_k = base_mass_kg * card.cp_j_kg_k;
-
-            SpatialCell {
-                x_mm,
-                y_mm,
-                r_mm,
-                active,
-                is_gold_case,
-                material,
-                owner_node,
-                bed_elevation_mm,
-                thermal_mass_j_per_k,
-                base_mass_kg,
-                enthalpy_j_kg: 0.0,
+            let dt_ = (x - TOURBILLON_CENTER_MM[0]).hypot(y - TOURBILLON_CENTER_MM[1]);
+            let db = (x - BARREL_CENTER_MM[0]).hypot(y - BARREL_CENTER_MM[1]);
+            let ang = y.atan2(x);
+            let region = match kind {
+                CellKind::Outside => Region::Outside,
+                CellKind::Band => {
+                    if (PI / 4.0..3.0 * PI / 4.0).contains(&ang) {
+                        Region::CaseTop
+                    } else if (-3.0 * PI / 4.0..-PI / 4.0).contains(&ang) {
+                        Region::CaseBottom
+                    } else if ang.abs() >= 3.0 * PI / 4.0 {
+                        Region::CaseLeft
+                    } else {
+                        Region::CaseRight
+                    }
+                }
+                CellKind::Interior => {
+                    if dt_ <= 5.6 {
+                        Region::Balance
+                    } else if dt_ <= 6.6 {
+                        Region::Escapement
+                    } else if dt_ <= WELL_R_MM {
+                        Region::Cage
+                    } else if db <= 7.6 {
+                        Region::Barrel
+                    } else if x.abs() <= 6.5 && y > -3.5 && y < 4.0 {
+                        Region::Train
+                    } else {
+                        Region::Plate
+                    }
+                }
+            };
+            let in_well = kind == CellKind::Interior && dt_ <= WELL_R_MM;
+            let (struct_gold, c_other, brass_m) = match kind {
+                CellKind::Outside => (0.0, 0.0, 0.0),
+                CellKind::Band => (rho_gold * band_gold_thick_m * CELL_AREA, 0.0, 0.0),
+                CellKind::Interior => {
+                    let brass_t = if in_well { 0.5 * BRASS_M } else { BRASS_M };
+                    (rho_gold * BACK_GOLD_M * CELL_AREA, brass.rho * brass.cp * brass_t * CELL_AREA, brass_t)
+                }
+            };
+            grid.push(SpatialCell {
+                x_mm: x,
+                y_mm: y,
+                r_mm: r,
+                kind,
+                region,
+                bed_mm: if in_well { WELL_FLOOR_MM } else { 0.0 },
+                in_hairspring: kind == CellKind::Interior && dt_ <= 4.0,
+                in_crown: in_pendant || (kind == CellKind::Band && x.abs() < 5.0 && y > 0.0),
+                struct_gold_kg: struct_gold,
+                struct_gold0_kg: struct_gold,
+                c_other,
+                brass_m,
+                enthalpy_j: 0.0,
                 temperature_k: T_REF_K,
                 melt_fraction: 0.0,
-                case_slump_frac: 0.0,
-                liquid_gold_mm: 0.0,
-                liquid_gold_enthalpy_j_kg: GOLD_18K_CARD
-                    .enthalpy_from_temperature_j_kg(GOLD_18K_CARD.t_liquidus_k + 15.0),
-                frozen_gold_mm: 0.0,
-                ln2_mass_g: 0.0,
-                frost_um: 0.0,
-                oil_um: if active && !is_gold_case {
-                    init_oil_um
+                gold_kg: 0.0,
+                oil_m3: 0.0,
+                ln2_kg: 0.0,
+                frost_kg_m2: 0.0,
+                oxide_nm: 2.0,
+            });
+        }
+
+        // Each column starts at room temperature on its own enthalpy curve.
+        for c in &mut grid {
+            if c.kind != CellKind::Outside {
+                c.enthalpy_j = column_enthalpy(c, T_REF_K);
+            }
+        }
+
+        let d_theta = TAU / CASE_SHELL_N_THETA as f64;
+        let case_shell = (0..CASE_SHELL_NODES)
+            .map(|idx| {
+                let it = idx % CASE_SHELL_N_THETA;
+                let iz = idx / CASE_SHELL_N_THETA;
+                let theta = it as f64 * d_theta;
+                let pendant_lobe = if (theta - 0.5 * PI).abs() < 0.22 {
+                    let u = 1.0 - (theta - 0.5 * PI).abs() / 0.22;
+                    2.2 * u * u * (1.0 - 0.12 * profile_z_mm[iz].abs())
                 } else {
                     0.0
-                },
+                };
+                let r0 = profile_r_mm[iz] + pendant_lobe * theta.sin().max(0.0);
+                let pos = [r0 * theta.cos(), r0 * theta.sin(), profile_z_mm[iz]];
+                // The band column this node belongs to (mid-band radius).
+                let rm = 0.5 * (CASE_INNER_R_MM + CASE_OUTER_R_MM) + 0.4 * pendant_lobe;
+                let cell = cell_at(rm * theta.cos(), rm * theta.sin()).unwrap_or(0);
+                CaseShellNode {
+                    theta_rad: theta,
+                    ref_pos_mm: pos,
+                    pos_mm: pos,
+                    ref_thickness_mm: profile_h_mm[iz] + 0.35 * pendant_lobe,
+                    thickness_mm: profile_h_mm[iz] + 0.35 * pendant_lobe,
+                    temperature_k: T_REF_K,
+                    melt_fraction: 0.0,
+                    sag_mm: 0.0,
+                    cell,
+                }
+            })
+            .collect();
+
+        let mut part_cells: [Vec<usize>; 5] = Default::default();
+        let mut crown_cells = Vec::new();
+        for (i, c) in grid.iter().enumerate() {
+            match c.region {
+                Region::Barrel => part_cells[PART_BARREL].push(i),
+                Region::Cage => part_cells[PART_TRAIN].push(i),
+                Region::Escapement => part_cells[PART_ESCAPEMENT].push(i),
+                Region::Balance => part_cells[PART_BALANCE].push(i),
+                Region::Train => part_cells[PART_PLATE].push(i),
+                _ => {}
             }
-        })
-        .collect();
-
-        let make_node = |id: WatchNodeId,
-                         material: WatchMaterialId,
-                         pos_mm: [f64; 3],
-                         base_mass_kg: f64,
-                         surface_area_m2: f64,
-                         oil_film_um: f64,
-                         oxide_thickness_nm: f64| ThermalPhaseNode {
-            id,
-            material,
-            pos_mm,
-            base_mass_kg,
-            surface_area_m2,
-            enthalpy_j_kg: 0.0,
-            temperature_k: T_REF_K,
-            melt_fraction: 0.0,
-            plastic_slump: 0.0,
-            molten_gold_g: 0.0,
-            frozen_gold_g: 0.0,
-            ln2_film_g: 0.0,
-            frost_thickness_um: 0.0,
-            oil_film_um,
-            oxide_thickness_nm,
-            incandescence_rgb: [0.0, 0.0, 0.0],
-        };
-
-        let nodes = [
-            make_node(
-                WatchNodeId::CaseTop18kGold,
-                WatchMaterialId::Gold18kCase,
-                [0.0, 25.0, 0.0],
-                0.0115,
-                5.2e-4,
-                0.0,
-                0.0,
-            ),
-            make_node(
-                WatchNodeId::CaseLeft18kGold,
-                WatchMaterialId::Gold18kCase,
-                [-25.0, 0.0, 0.0],
-                0.0105,
-                4.8e-4,
-                0.0,
-                0.0,
-            ),
-            make_node(
-                WatchNodeId::CaseRight18kGold,
-                WatchMaterialId::Gold18kCase,
-                [25.0, 0.0, 0.0],
-                0.0105,
-                4.8e-4,
-                0.0,
-                0.0,
-            ),
-            make_node(
-                WatchNodeId::CaseBottom18kGold,
-                WatchMaterialId::Gold18kCase,
-                [0.0, -25.0, 0.0],
-                0.0115,
-                5.2e-4,
-                0.0,
-                0.0,
-            ),
-            make_node(
-                WatchNodeId::CrystalSapphire,
-                WatchMaterialId::SyntheticCorundumRuby,
-                [0.0, 0.0, 5.5],
-                0.0062,
-                14.5e-4,
-                0.0,
-                0.0,
-            ),
-            make_node(
-                WatchNodeId::MainplateBrass,
-                WatchMaterialId::BrassC36000,
-                [0.0, 0.0, -1.5],
-                0.0184,
-                13.0e-4,
-                1.5,
-                0.0,
-            ),
-            make_node(
-                WatchNodeId::BarrelMainspring,
-                WatchMaterialId::HighCarbonSteel,
-                [0.0, 11.5, 0.5],
-                0.0054,
-                3.1e-4,
-                2.0,
-                15.0,
-            ),
-            make_node(
-                WatchNodeId::GoingTrainWheels,
-                WatchMaterialId::BrassC36000,
-                [-5.5, 1.5, 0.8],
-                0.0021,
-                2.0e-4,
-                1.6,
-                0.0,
-            ),
-            make_node(
-                WatchNodeId::TourbillonCage,
-                WatchMaterialId::TitaniumGrade5,
-                [0.0, -11.0, 1.2],
-                0.00042,
-                1.1e-4,
-                1.4,
-                0.0,
-            ),
-            make_node(
-                WatchNodeId::EscapementForkWheel,
-                WatchMaterialId::HighCarbonSteel,
-                [-2.2, -11.0, 1.2],
-                0.00018,
-                0.55e-4,
-                1.6,
-                25.0,
-            ),
-            make_node(
-                WatchNodeId::BalanceWheelRim,
-                WatchMaterialId::GlucydurBeCu,
-                [0.0, -11.0, 1.8],
-                0.00036,
-                0.95e-4,
-                1.5,
-                0.0,
-            ),
-            make_node(
-                WatchNodeId::HairspringBreguet,
-                WatchMaterialId::HighCarbonSteel,
-                [0.0, -11.0, 2.5],
-                0.000035,
-                0.45e-4,
-                0.0,
-                72.0,
-            ),
-        ];
-
-        let mut lbm_grid = LbmGrid::uniform(GRID_N, GRID_N, 0.85);
-        for idx in 0..GRID_CELLS {
-            lbm_grid.flags[idx] = if !grid[idx].active {
-                LbmCell::Wall
-            } else {
-                LbmCell::Gas
-            };
+            if c.in_crown {
+                crown_cells.push(i);
+            }
         }
-        let lbm_free_surface = LbmFreeSurface::new(lbm_grid, 0.008, LbmContactModel::Neutral);
-
-        let mut state = Self {
-            case_shell,
+        let th = ThermalScratch::new(&grid);
+        let mut s = Self {
             grid,
-            lbm_free_surface,
-            nodes,
+            th,
+            case_shell,
+            nodes: [ThermalPhaseNode::default(); NODE_COUNT],
             inputs: PerturbationInputs::default(),
-            remanent_magnetization_mt: 0.0,
-            degauss_envelope_mt: 0.0,
-            degauss_phase_rad: 0.0,
+            gold_qx: vec![0.0; GRID_CELLS],
+            gold_qy: vec![0.0; GRID_CELLS],
+            oil_qx: vec![0.0; GRID_CELLS],
+            oil_qy: vec![0.0; GRID_CELLS],
+            gas_q: vec![0.0; GRID_CELLS],
+            pipe: PipeScratch::default(),
+            part_cells,
+            crown_cells,
+            convection: ConvectionTable::build(P_ATM_PA, true, G0_M_S2),
+            boiling: BoilingTable::build(P_ATM_PA, G0_M_S2),
+            hairspring_magnetisation: 0.0,
+            degauss_t: -1.0,
             shock_envelope_g: 0.0,
-            hairspring_oxide_nm: 72.0,
-            modifiers: CoupledWatchModifiers {
-                balance_inertia_ratio: 1.0,
-                hairspring_stiffness_ratio: 1.0,
-                barrel_youngs_modulus_ratio: 1.0,
-                natural_freq_ratio: 1.0,
-                theoretical_rate_s_per_day: 0.0,
-                pivot_friction_multiplier: 1.0,
-                extra_balance_damping_s_inv: 0.0,
-                hairspring_oil_bridge_fraction: 0.0,
-                min_pivot_clearance_um: 4.5,
-                b_field_escapement_mt: 0.0,
-                remanent_magnetization_mt: 0.0,
-                pallet_magnetic_bias_torque_nm: 0.0,
-                hairspring_eq_bias_rad: 0.0,
-                gold_fouling_jam_factor: 0.0,
-                liquid_gold_viscous_torque_nm: 0.0,
-                solid_gold_yield_torque_nm: 0.0,
-                frozen_gold_locked: false,
-                thermal_or_cryo_seized: false,
-                magnetically_pinned: false,
-                ln2_boiling_power_w: 0.0,
-                blowtorch_heating_power_w: 0.0,
-                blued_steel_rgb: blued_steel_interference_rgb(72.0, 1.0),
-                rate_sensitivity_s_day_per_k: -0.45,
-                rate_interval_lo_s_day: -0.5,
-                rate_interval_hi_s_day: 0.5,
-                balance_aero_drag_s_inv: 0.0,
-                air_cooling_power_w: 0.0,
-                ambient_pressure_atm: 1.0,
-                gravity_g_vec: [0.0, -1.0, 0.0],
-                shock_envelope_g: 0.0,
-            },
+            hairspring_oxide_nm: 2.0,
+            environment: MovementEnvironment::default(),
+            b_field_escapement_mt: 0.0,
+            remanent_magnetization_mt: 0.0,
+            ln2_boiling_power_w: 0.0,
+            blowtorch_heating_power_w: 0.0,
+            air_cooling_power_w: 0.0,
+            dripped_gold_g: 0.0,
+            blued_steel_rgb: [0.0; 3],
+            quiet: false,
         };
-        state.aggregate_nodes_from_continuum();
-        state.recompute_modifiers();
-        state
+        s.refresh_outputs(0.0, 0.0);
+        s
     }
 
+    fn gravity(&self) -> [f64; 3] {
+        self.inputs.gravity_g_vec.map(|g| g * G0_M_S2)
+    }
+
+    fn pressure_pa(&self) -> f64 {
+        self.inputs.ambient_pressure_atm.max(0.0) * P_ATM_PA
+    }
+
+    /// Start an AC degauss: a 50 Hz field from 40 mT decaying geometrically
+    /// (τ = 0.35 s, ~3 % per half cycle) for 3 s, so the last swings through
+    /// the coercive field are small and leave almost no remanence.
     pub fn trigger_degauss(&mut self) {
-        self.degauss_envelope_mt = 85.0;
-        self.degauss_phase_rad = 0.0;
+        self.degauss_t = 0.0;
     }
 
-    /// Apply a 3D mechanical bench-drop shock impulse ($G_{\text{peak}}$ in $\text{g}$-units)
-    /// to the 3D viscoplastic case shell and free-surface molten gold pool.
+    /// Slosh the liquids and ring the case for a bench drop.
     pub fn apply_mechanical_shock(&mut self, g_peak: f64) {
-        let g = g_peak.clamp(10.0, 5000.0);
-        self.shock_envelope_g = g;
-        let shock_scale = (g / 500.0).clamp(0.05, 4.0);
-        // Inertial velocity kick to softened/molten 3D case shell nodes
-        for sn in &mut self.case_shell {
-            let softness = (sn.melt_fraction
-                + 0.25 * ((sn.temperature_k - 700.0) / 550.0).clamp(0.0, 1.0))
-            .clamp(0.0, 1.0);
-            if softness > 0.01 {
-                let r_xy = (sn.pos_mm[0].powi(2) + sn.pos_mm[1].powi(2)).sqrt().max(1.0);
-                sn.vel_mm_s[0] -= 3.2 * shock_scale * softness * (sn.pos_mm[0] / r_xy);
-                sn.vel_mm_s[1] -= 4.5 * shock_scale * softness;
-                sn.vel_mm_s[2] -= 1.8 * shock_scale * softness;
-            }
+        self.shock_envelope_g = self.shock_envelope_g.max(g_peak);
+        // The frame jumps by Δv; the liquid layers lag behind it.
+        let dv = 2.0 / PI * g_peak * G0_M_S2 * 3.0e-4;
+        for i in 0..GRID_CELLS {
+            let hg = self.grid[i].gold_depth_m() * self.grid[i].mobile_fraction();
+            let ho = self.grid[i].oil_depth_m();
+            self.gold_qy[i] -= dv * hg * DX;
+            self.oil_qy[i] -= dv * ho * DX;
         }
-        self.recompute_modifiers();
+        self.quiet = false;
     }
 
+    /// Ultrasonic clean: wash out all poured oil and melt off the frost.
     pub fn ultrasonic_clean_and_relubricate(&mut self) {
-        for cell in &mut self.grid {
-            if cell.active && !cell.is_gold_case {
-                cell.oil_um = 1.6;
-            } else {
-                cell.oil_um = 0.0;
-            }
+        for c in &mut self.grid {
+            c.oil_m3 = 0.0;
         }
-        self.aggregate_nodes_from_continuum();
-        self.recompute_modifiers();
+        self.oil_qx.fill(0.0);
+        self.oil_qy.fill(0.0);
     }
 
-    /// Advance the coupled 3D Thermo-Elasto-Viscoplastic Case Shell and 2D Free-Surface PDE Grid.
-    pub fn step(&mut self, dt_s: f64) {
-        let dt = dt_s.clamp(1.0e-5, 0.05);
-        let substeps = ((dt / 0.0025).ceil() as usize).clamp(1, 20);
-        let h_dt = dt / (substeps as f64);
+    /// Re-run the field solve on the next step (inputs such as gravity or
+    /// pressure changed while the grid was quiescent).
+    pub fn wake(&mut self) {
+        self.quiet = false;
+    }
 
-        let hs_mat = if self.inputs.compensated_hairspring {
-            WatchMaterialId::Invar36Ni
-        } else {
-            WatchMaterialId::HighCarbonSteel
+    /// Re-sample the movement environment from the current fields without
+    /// advancing time (a setter changed pressure, gravity or the air jet).
+    pub fn refresh_environment(&mut self) {
+        self.refresh_outputs(0.0, 0.0);
+    }
+
+    fn tools_active(&self) -> bool {
+        let i = &self.inputs;
+        i.blowtorch_power > 0.0 || i.ln2_pour_rate > 0.0 || i.oil_pour_rate > 0.0 || i.air_jet_power > 0.0
+    }
+
+    /// Advance the fields by `dt`. `cage_angle` and `lever_angle` place the
+    /// steel lever for the magnetic torque.
+    pub fn step(&mut self, dt: f64, cage_angle: f64, lever_angle: f64) {
+        let vertical = {
+            let g = self.inputs.gravity_g_vec;
+            g[0].hypot(g[1]) >= g[2].abs()
         };
-        self.nodes[WatchNodeId::HairspringBreguet as usize].material = hs_mat;
-
-        let mut last_torch_w = 0.0;
-        let mut last_ln2_w = 0.0;
-
-        for _ in 0..substeps {
-            let (torch_shell_w, ln2_shell_w) = self.step_case_shell_continuum(h_dt);
-            let (torch_grid_w, ln2_grid_w) = self.step_spatial_pde_grid(h_dt);
-            last_torch_w = torch_shell_w + torch_grid_w;
-            last_ln2_w = ln2_shell_w + ln2_grid_w;
+        let g_mag = self.gravity().iter().map(|x| x * x).sum::<f64>().sqrt();
+        if (self.convection.pressure_pa - self.pressure_pa()).abs() > 1.0 || self.convection.vertical != vertical {
+            self.convection = ConvectionTable::build(self.pressure_pa(), vertical, g_mag.max(0.1));
         }
-
-        if self.degauss_envelope_mt > 0.05 {
-            self.degauss_phase_rad += TAU * 60.0 * dt;
-            self.degauss_envelope_mt *= (-4.2 * dt).exp();
-            self.remanent_magnetization_mt *= (-6.5 * dt).exp();
-            if self.degauss_envelope_mt < 0.08 {
-                self.degauss_envelope_mt = 0.0;
-                self.remanent_magnetization_mt = 0.0;
+        if self.inputs.ln2_pour_rate > 0.0 || self.grid.iter().any(|c| c.ln2_kg > 0.0) {
+            let (p, g) = (self.pressure_pa(), g_mag.max(0.1 * G0_M_S2));
+            if (self.boiling.p_pa - p).abs() > 1e-3 * p.max(1.0) || (self.boiling.g - g).abs() > 1e-3 * g {
+                self.boiling = BoilingTable::build(p, g);
             }
         }
-        if self.shock_envelope_g > 0.1 {
-            self.shock_envelope_g *= (-28.0 * dt).exp();
-            if self.shock_envelope_g < 0.2 {
-                self.shock_envelope_g = 0.0;
+        if self.quiet && !self.tools_active() {
+            self.update_magnetics(dt, cage_angle, lever_angle);
+            self.shock_envelope_g *= (-dt / 0.3).exp();
+            self.refresh_outputs(cage_angle, lever_angle);
+            return;
+        }
+        // Thermal substeps within the explicit stability limit of the
+        // current fields.
+        let mut th = std::mem::take(&mut self.th);
+        let h_stable = self.prepare_thermal(&mut th);
+        let n_th = (dt / h_stable).ceil().max(1.0) as usize;
+        let h_th = dt / n_th as f64;
+        let (mut torch_w, mut ln2_w, mut air_w) = (0.0, 0.0, 0.0);
+        for _ in 0..n_th {
+            let (a, b, c) = self.thermal_substep(h_th, &mut th);
+            torch_w += a * h_th;
+            ln2_w += b * h_th;
+            air_w += c * h_th;
+            self.melt_case();
+        }
+        self.th = th;
+        self.blowtorch_heating_power_w = torch_w / dt;
+        self.ln2_boiling_power_w = ln2_w / dt;
+        self.air_cooling_power_w = air_w / dt;
+        // Copper oxide on hot gold (parabolic growth; slow, so once per step).
+        for c in &mut self.grid {
+            if c.kind != CellKind::Outside && c.temperature_k > 420.0 {
+                let k_ox = 0.3 * steel_temper_oxide_rate_nm2_s(c.temperature_k);
+                if k_ox > 0.0 {
+                    c.oxide_nm = (c.oxide_nm * c.oxide_nm + k_ox * dt).sqrt();
+                }
             }
         }
-
-        self.modifiers.blowtorch_heating_power_w = last_torch_w;
-        self.modifiers.ln2_boiling_power_w = last_ln2_w;
-        self.aggregate_nodes_from_continuum();
-        self.recompute_modifiers();
+        self.flow_liquids(dt);
+        self.flow_ln2(dt);
+        self.update_magnetics(dt, cage_angle, lever_angle);
+        self.update_case_shell(dt);
+        self.shock_envelope_g *= (-dt / 0.3).exp();
+        // Hairspring temper colour.
+        let tb = self.environment.balance.temperature_k;
+        let x = self.hairspring_oxide_nm;
+        self.hairspring_oxide_nm = (x * x + steel_temper_oxide_rate_nm2_s(tb) * dt).sqrt();
+        self.refresh_outputs(cage_angle, lever_angle);
+        // Quiescent once nothing is happening: skip the grid until a tool acts.
+        let calm = self.grid.iter().all(|c| {
+            c.kind == CellKind::Outside
+                || ((c.temperature_k - T_REF_K).abs() < 0.05 && c.ln2_kg <= 0.0 && c.frost_kg_m2 <= 0.0)
+        });
+        let still = self.gold_qx.iter().chain(&self.gold_qy).chain(&self.oil_qx).chain(&self.oil_qy).all(|q| q.abs() < 1e-14);
+        self.quiet = calm && still && !self.tools_active();
     }
 
-    /// Integrate the 3D Thermo-Elasto-Viscoplastic + Surface-Tension Case Shell (`64 x 8` nodes).
-    /// Returns `(blowtorch_power_w, ln2_boiling_power_w)` absorbed by the case shell.
-    fn step_case_shell_continuum(&mut self, dt: f64) -> (f64, f64) {
-        let mut q_cond_w = [0.0_f64; CASE_SHELL_NODES];
-        let mut force_n = [[0.0_f64; 3]; CASE_SHELL_NODES];
-        let mut torch_total_w = 0.0;
-        let mut ln2_total_w = 0.0;
-
-        // 1. Evaluate 3D shell strains, Cauchy stresses, Prandtl-Reuss viscoplastic flow,
-        //    Young-Laplace capillary curvature forces, Marangoni tangential shear, and Fourier heat conduction.
-        for iz in 0..CASE_SHELL_N_Z {
-            for it in 0..CASE_SHELL_N_THETA {
-                let idx = iz * CASE_SHELL_N_THETA + it;
-                let it_next = (it + 1) % CASE_SHELL_N_THETA;
-                let it_prev = (it + CASE_SHELL_N_THETA - 1) % CASE_SHELL_N_THETA;
-                let idx_theta_next = iz * CASE_SHELL_N_THETA + it_next;
-                let idx_theta_prev = iz * CASE_SHELL_N_THETA + it_prev;
-
-                let node = self.case_shell[idx];
-                let n_next = self.case_shell[idx_theta_next];
-                let n_prev = self.case_shell[idx_theta_prev];
-
-                // Circumferential vector & stretch
-                let dx_t = n_next.pos_mm[0] - node.pos_mm[0];
-                let dy_t = n_next.pos_mm[1] - node.pos_mm[1];
-                let dz_t = n_next.pos_mm[2] - node.pos_mm[2];
-                let l_theta = (dx_t * dx_t + dy_t * dy_t + dz_t * dz_t).sqrt().max(0.2);
-                let u_theta = [dx_t / l_theta, dy_t / l_theta, dz_t / l_theta];
-                let eps_tot_theta = (l_theta - node.ref_l_theta_mm) / node.ref_l_theta_mm;
-
-                // Circumferential heat conduction along the 18k gold ring
-                let a_cross_theta_m2 = (node.thickness_mm * 1.0e-3) * (node.ref_l_z_mm * 1.0e-3);
-                let g_theta_w_k = GOLD_18K_CARD.conductivity_w_m_k * a_cross_theta_m2
-                    / (node.ref_l_theta_mm * 1.0e-3);
-                let q_theta = g_theta_w_k * (n_next.temperature_k - node.temperature_k);
-                q_cond_w[idx] += q_theta;
-                q_cond_w[idx_theta_next] -= q_theta;
-
-                // Meridional vector & stretch (if iz + 1 < CASE_SHELL_N_Z)
-                let (eps_tot_z, u_z, has_z_next, idx_z_next) = if iz + 1 < CASE_SHELL_N_Z {
-                    let izn = (iz + 1) * CASE_SHELL_N_THETA + it;
-                    let nz = self.case_shell[izn];
-                    let dx_z = nz.pos_mm[0] - node.pos_mm[0];
-                    let dy_z = nz.pos_mm[1] - node.pos_mm[1];
-                    let dz_z = nz.pos_mm[2] - node.pos_mm[2];
-                    let l_z = (dx_z * dx_z + dy_z * dy_z + dz_z * dz_z).sqrt().max(0.2);
-                    let uz = [dx_z / l_z, dy_z / l_z, dz_z / l_z];
-                    let eps_z = (l_z - node.ref_l_z_mm) / node.ref_l_z_mm;
-
-                    let a_cross_z_m2 =
-                        (node.thickness_mm * 1.0e-3) * (node.ref_l_theta_mm * 1.0e-3);
-                    let g_z_w_k =
-                        GOLD_18K_CARD.conductivity_w_m_k * a_cross_z_m2 / (node.ref_l_z_mm * 1.0e-3);
-                    let q_z = g_z_w_k * (nz.temperature_k - node.temperature_k);
-                    q_cond_w[idx] += q_z;
-                    q_cond_w[izn] -= q_z;
-
-                    (eps_z, uz, true, izn)
-                } else {
-                    (0.0, [0.0, 0.0, 1.0], false, idx)
-                };
-
-                // Thermal expansion strain of 18k Gold at current node temperature
-                let eps_th = GOLD_18K_CARD.thermal_strain(node.temperature_k);
-
-                // Elastic membrane strains
-                let eps_e_theta = eps_tot_theta - eps_th - node.eps_p_theta;
-                let eps_e_z = eps_tot_z - eps_th - node.eps_p_z;
-
-                // Temperature- and melt-dependent Young's modulus E(T, f_L)
-                // Solid skeleton stiffness decays as (1 - f_L)^3 across the mushy zone
-                let solid_frac = (1.0 - node.melt_fraction).clamp(0.0, 1.0);
-                let e_eff_pa = GOLD_18K_CARD.youngs_modulus_pa
-                    * GOLD_18K_CARD.youngs_modulus_ratio(node.temperature_k)
-                    * solid_frac.powi(3);
-                let nu = 0.42; // Poisson's ratio of Gold
-                let plane_stress_factor = e_eff_pa / (1.0 - nu * nu);
-
-                let sigma_theta_pa = plane_stress_factor * (eps_e_theta + nu * eps_e_z);
-                let sigma_z_pa = plane_stress_factor * (eps_e_z + nu * eps_e_theta);
-
-                // Elastic shell bending restoration toward (ref_pos_mm + thermal expansion + plastic_disp_mm)
-                let r_th_scale = 1.0 + eps_th;
-                let eq_pos_mm = [
-                    node.ref_pos_mm[0] * r_th_scale + node.plastic_disp_mm[0],
-                    node.ref_pos_mm[1] * r_th_scale + node.plastic_disp_mm[1],
-                    node.ref_pos_mm[2] * r_th_scale + node.plastic_disp_mm[2],
-                ];
-                let bend_disp_mm = [
-                    node.pos_mm[0] - eq_pos_mm[0],
-                    node.pos_mm[1] - eq_pos_mm[1],
-                    node.pos_mm[2] - eq_pos_mm[2],
-                ];
-                let bend_dist_mm = (bend_disp_mm[0].powi(2)
-                    + bend_disp_mm[1].powi(2)
-                    + bend_disp_mm[2].powi(2))
-                .sqrt();
-                // Bending stiffness D ~ E * h^3 / (12 * L^4)
-                let h_ratio = (node.thickness_mm / node.ref_thickness_mm).clamp(0.15, 2.0);
-                let sigma_bend_pa =
-                    0.015 * e_eff_pa * h_ratio * (bend_dist_mm / node.ref_thickness_mm.max(1.0));
-
-                // Von Mises equivalent stress in the shell element
-                let sigma_eq_pa = (sigma_theta_pa * sigma_theta_pa
-                    - sigma_theta_pa * sigma_z_pa
-                    + sigma_z_pa * sigma_z_pa
-                    + 3.0 * sigma_bend_pa * sigma_bend_pa)
-                    .max(0.0)
-                    .sqrt();
-
-                // Update Prandtl-Reuss viscoplastic strains using `fs_material::creep::plastic::NortonJ2`
-                // (simultaneous secondary Norton creep + Simo-Hughes radial-return J2 plasticity)
-                // coupled with the high-strain mushy-zone Johnson-Cook flow rule.
-                let mut norton_j2_dp = 0.0;
-                if node.temperature_k > 350.0
-                    && let Some(law) = gold_coupled_norton_j2(node.temperature_k, node.melt_fraction, dt)
-                {
-                    let e_t = eps_e_theta.clamp(-0.02, 0.02);
-                    let e_z = eps_e_z.clamp(-0.02, 0.02);
-                    let strain_voigt = [e_t, e_z, -0.42 * (e_t + e_z), 0.0, 0.0, 0.0];
-                    let old_state = NortonJ2State {
-                        creep: CreepState {
-                            creep_strain: [0.0; 6],
-                            equivalent_creep_strain: 0.0,
-                        },
-                        plastic: J2State {
-                            plastic_strain: [0.0; 6],
-                            alpha: node.eq_plastic_strain.clamp(0.0, 2.0),
-                        },
-                    };
-                    if let Ok(resp) = law.response(&strain_voigt, &old_state) {
-                        norton_j2_dp = resp.state.creep.equivalent_creep_strain
-                            + (resp.state.plastic.alpha - old_state.plastic.alpha).max(0.0);
-                    }
-                }
-                let vp_rate = gold_viscoplastic_strain_rate_s_inv(
-                    sigma_eq_pa,
-                    node.temperature_k,
-                    node.melt_fraction,
-                    node.eq_plastic_strain,
-                );
-                let d_eq_p = (vp_rate * dt + norton_j2_dp).min(0.08);
-                if d_eq_p > 1.0e-9 && sigma_eq_pa > 1.0 {
-                    let s_theta = (2.0 * sigma_theta_pa - sigma_z_pa) / 3.0;
-                    let s_z = (2.0 * sigma_z_pa - sigma_theta_pa) / 3.0;
-                    let max_duct = gold_ductility_elongation(node.temperature_k);
-                    self.case_shell[idx].eps_p_theta = (self.case_shell[idx].eps_p_theta
-                        + d_eq_p * (1.5 * s_theta / sigma_eq_pa))
-                        .clamp(-max_duct, max_duct);
-                    self.case_shell[idx].eps_p_z = (self.case_shell[idx].eps_p_z
-                        + d_eq_p * (1.5 * s_z / sigma_eq_pa))
-                        .clamp(-max_duct, max_duct);
-                    // Viscoplastic relaxation of the 3D shell bending offset toward the current deformed configuration
-                    let relax = (d_eq_p * 8.5).clamp(0.0, 0.65);
-                    for c in 0..3 {
-                        self.case_shell[idx].plastic_disp_mm[c] += relax * bend_disp_mm[c];
-                    }
-                    self.case_shell[idx].eq_plastic_strain += d_eq_p;
-                }
-                self.case_shell[idx].von_mises_stress_pa = sigma_eq_pa;
-
-                // Convert membrane stresses into smooth nodal forces (hyperbolic-tangent compliant response
-                // avoids bang-bang saturation and sawtooth node-to-node oscillations)
-                let f_theta_mag = 0.20 * ((sigma_theta_pa * a_cross_theta_m2) / 24.0).tanh();
-                for c in 0..3 {
-                    let df = f_theta_mag * u_theta[c];
-                    force_n[idx][c] += df;
-                    force_n[idx_theta_next][c] -= df;
-                }
-                if has_z_next {
-                    let a_cross_z_m2 =
-                        (node.thickness_mm * 1.0e-3) * (node.ref_l_theta_mm * 1.0e-3);
-                    let f_z_mag = 0.20 * ((sigma_z_pa * a_cross_z_m2) / 24.0).tanh();
-                    for c in 0..3 {
-                        let df = f_z_mag * u_z[c];
-                        force_n[idx][c] += df;
-                        force_n[idx_z_next][c] -= df;
-                    }
-                }
-
-                // Elastic bending restoring force toward eq_pos_mm
-                let k_bend_n_per_mm = 0.45 * solid_frac * solid_frac * h_ratio * h_ratio;
-                for c in 0..3 {
-                    force_n[idx][c] -= k_bend_n_per_mm * bend_disp_mm[c];
-                }
-
-                // Discrete Mean-Curvature Vector for Young-Laplace Surface Tension + Tangential Shear Smoothing:
-                // Even in the warm viscoplastic regime before full liquidus, continuous curvature regularization
-                // prevents faceted/boxy buckling and produces smooth Rayleigh-Plateau rim beading.
-                let lap_theta = [
-                    n_prev.pos_mm[0] - 2.0 * node.pos_mm[0] + n_next.pos_mm[0],
-                    n_prev.pos_mm[1] - 2.0 * node.pos_mm[1] + n_next.pos_mm[1],
-                    n_prev.pos_mm[2] - 2.0 * node.pos_mm[2] + n_next.pos_mm[2],
-                ];
-                let lap_z = if iz > 0 && iz + 1 < CASE_SHELL_N_Z {
-                    let n_zm = self.case_shell[(iz - 1) * CASE_SHELL_N_THETA + it];
-                    let n_zp = self.case_shell[(iz + 1) * CASE_SHELL_N_THETA + it];
-                    [
-                        n_zm.pos_mm[0] - 2.0 * node.pos_mm[0] + n_zp.pos_mm[0],
-                        n_zm.pos_mm[1] - 2.0 * node.pos_mm[1] + n_zp.pos_mm[1],
-                        n_zm.pos_mm[2] - 2.0 * node.pos_mm[2] + n_zp.pos_mm[2],
-                    ]
-                } else {
-                    // Free bezel rim retraction driven by Young-Laplace curvature at top/bottom bezel edge
-                    let iz_adj = if iz == 0 { 1 } else { CASE_SHELL_N_Z - 2 };
-                    let n_adj = self.case_shell[iz_adj * CASE_SHELL_N_THETA + it];
-                    [
-                        n_adj.pos_mm[0] - node.pos_mm[0],
-                        n_adj.pos_mm[1] - node.pos_mm[1],
-                        n_adj.pos_mm[2] - node.pos_mm[2],
-                    ]
-                };
-
-                // Smooth viscoelastic-capillary curvature coupling across all elevated temperatures
-                let fluidity_weight = (node.melt_fraction
-                    + 0.28 * ((node.temperature_k - 650.0) / 550.0).clamp(0.0, 1.0))
-                .clamp(0.0, 1.0);
-                if fluidity_weight > 1.0e-3 {
-                    let sigma_au = gold_liquid_surface_tension_n_m(node.temperature_k);
-                    let cap_coeff = 0.052 * sigma_au * fluidity_weight;
-                    for c in 0..3 {
-                        force_n[idx][c] += cap_coeff * (lap_theta[c] + 1.25 * lap_z[c]);
-                    }
-
-                    // Viscous shear velocity coupling between adjacent shell nodes (eliminates node-to-node sawtooth)
-                    for c in 0..3 {
-                        let dv_lap =
-                            n_prev.vel_mm_s[c] - 2.0 * node.vel_mm_s[c] + n_next.vel_mm_s[c];
-                        force_n[idx][c] += 0.018 * fluidity_weight * dv_lap;
-                    }
-
-                    // Marangoni thermocapillary tangential force: d(sigma)/dT * grad_s(T)
-                    let dt_theta = n_next.temperature_k - n_prev.temperature_k;
-                    let marangoni_f = 1.2e-4
-                        * GOLD_MARANGONI_DSIGMA_DT_N_M_K
-                        * dt_theta
-                        * fluidity_weight;
-                    for c in 0..3 {
-                        force_n[idx][c] += marangoni_f * u_theta[c];
-                    }
-                }
-            }
+    /// Torch and jet footprints: film coefficient [W/(m² K)] and stagnation
+    /// pressure [Pa] at a cell.
+    fn torch_at(&self, c: &SpatialCell) -> (f64, f64) {
+        let i = &self.inputs;
+        if i.blowtorch_power <= 0.0 {
+            return (0.0, 0.0);
         }
-
-        // 2. External thermal & mechanical loads on each 3D shell node, enthalpy update, and 3D position integration
-        let torch_active = self.inputs.blowtorch_power > 1.0e-4;
-        let ln2_active = self.inputs.ln2_pour_rate > 1.0e-4;
-        let air_active = self.inputs.air_jet_power > 1.0e-4;
-        let p_atm_conv = self.inputs.ambient_pressure_atm.clamp(0.0, 5.0).sqrt();
-        let g_vec = self.inputs.gravity_g_vec;
-        let shock_g = (self.shock_envelope_g / 500.0).clamp(0.0, 3.0);
-
-        for iz in 0..CASE_SHELL_N_Z {
-            for it in 0..CASE_SHELL_N_THETA {
-                let idx = iz * CASE_SHELL_N_THETA + it;
-                let mut node = self.case_shell[idx];
-
-                // Couple shell node thermally to nearest interior 48x48 movement cell
-                let gx = (((node.pos_mm[0] + GRID_HALF_SPAN_MM) / GRID_DX_MM).floor() as isize)
-                    .clamp(0, (GRID_N - 1) as isize) as usize;
-                let gy = (((node.pos_mm[1] + GRID_HALF_SPAN_MM) / GRID_DX_MM).floor() as isize)
-                    .clamp(0, (GRID_N - 1) as isize) as usize;
-                let cell_idx = gy * GRID_N + gx;
-                let t_cell = self.grid[cell_idx].temperature_k;
-                let q_to_movement = 0.0028 * (node.temperature_k - t_cell);
-
-                // Ambient natural convection (`fs_convection::CorrelationId::ChurchillChuHorizontalCylinder`)
-                // scaled by ambient chamber pressure p_atm_conv + Stefan-Boltzmann thermal radiation
-                let dt_film = (node.temperature_k - T_REF_K).abs().max(0.5);
-                let t_film = 0.5 * (node.temperature_k + T_REF_K);
-                let d_case_m = 0.056; // 56 mm Bassine case diameter
-                let ra_case = (9.81 * (1.0 / t_film) * dt_film * d_case_m.powi(3)
-                    / (1.58e-5 * 2.25e-5))
-                    .clamp(1.0e-4, 1.0e11);
-                let h_nat_w_m2_k = p_atm_conv
-                    * eval_convection(
-                        CorrelationId::ChurchillChuHorizontalCylinder,
-                        CorrelationInputs::natural(ra_case, 0.71),
-                    )
-                    .and_then(|nu| {
-                        let _ = NaturalConvectionGeometry::HorizontalCylinder;
-                        nu.heat_transfer_coefficient(
-                            ThermalConductivity::new(0.0263),
-                            ConvLength::new(d_case_m),
-                        )
-                    })
-                    .map(|ev| ev.value.value().clamp(6.5, 45.0))
-                    .unwrap_or(14.0);
-                let q_amb = h_nat_w_m2_k * node.area_m2 * (T_REF_K - node.temperature_k)
-                    + GOLD_18K_CARD.emissivity
-                        * STEFAN_BOLTZMANN
-                        * node.area_m2
-                        * (T_REF_K.powi(4) - node.temperature_k.powi(4));
-
-                let mut q_ext_w = q_cond_w[idx] + q_amb - q_to_movement;
-                self.grid[cell_idx].enthalpy_j_kg +=
-                    (q_to_movement * dt) / self.grid[cell_idx].base_mass_kg.max(2.5e-6);
-
-                // Outward radial unit vector in XY plane
-                let r_xy = (node.pos_mm[0].powi(2) + node.pos_mm[1].powi(2))
-                    .sqrt()
-                    .max(1.0);
-                let n_rad = [node.pos_mm[0] / r_xy, node.pos_mm[1] / r_xy, 0.0];
-
-                // Virtual oxy-butane blowtorch (T_flame = 2250 K) heat flux & stagnation jet pressure
-                // with `fs_convection::CorrelationId::ChurchillBernsteinCylinder` forced crossflow amplification
-                if torch_active {
-                    let dx = node.pos_mm[0] - self.inputs.blowtorch_pos_mm[0];
-                    let dy = node.pos_mm[1] - self.inputs.blowtorch_pos_mm[1];
-                    let dz = node.pos_mm[2] - self.inputs.blowtorch_pos_mm[2];
-                    let d2 = dx * dx + dy * dy + 0.7 * dz * dz;
-                    let w_torch = (-d2 / (2.0 * 9.5 * 9.5)).exp();
-                    let flame_temp_k = 2250.0;
-                    if flame_temp_k > node.temperature_k && w_torch > 1.0e-4 {
-                        let re_jet = (1800.0 * self.inputs.blowtorch_power * w_torch).clamp(100.0, 2.5e5);
-                        let cb_boost = eval_convection(
-                            CorrelationId::ChurchillBernsteinCylinder,
-                            CorrelationInputs::forced(re_jet, 0.72),
-                        )
-                        .map(|ev| (ev.evidence().value / 24.0).clamp(0.85, 1.45))
-                        .unwrap_or(1.0);
-                        let q_t = self.inputs.blowtorch_power
-                            * w_torch
-                            * 0.0185
-                            * cb_boost
-                            * (flame_temp_k - node.temperature_k);
-                        q_ext_w += q_t;
-                        torch_total_w += q_t;
-
-                        // Blowtorch gas-jet stagnation pressure pushes softened/molten gold inward
-                        // toward the movement interior along (-n_rad) and downward along gravity!
-                        let theta_star = ((node.temperature_k - 750.0) / 550.0).clamp(0.0, 1.0);
-                        let softness =
-                            (0.20 * theta_star * theta_star + 0.80 * node.melt_fraction).clamp(0.0, 1.0);
-                        let f_jet = self.inputs.blowtorch_power * w_torch * softness * 0.055;
-                        force_n[idx][0] -= f_jet * n_rad[0];
-                        force_n[idx][1] -= f_jet * n_rad[1];
-                        force_n[idx][2] -= f_jet * 0.35 * (node.pos_mm[2] / 3.8);
-                    }
-                }
-
-                // High-velocity Compressed Air Nozzle (300 K): forced convective cooling + stagnation shear
-                if air_active {
-                    let dx = node.pos_mm[0] - self.inputs.air_jet_pos_mm[0];
-                    let dy = node.pos_mm[1] - self.inputs.air_jet_pos_mm[1];
-                    let dz = node.pos_mm[2] - self.inputs.air_jet_pos_mm[2];
-                    let d2 = dx * dx + dy * dy + 0.6 * dz * dz;
-                    let w_air = (-d2 / (2.0 * 11.5 * 11.5)).exp();
-                    if w_air > 1.0e-4 {
-                        let q_air = self.inputs.air_jet_power
-                            * w_air
-                            * 0.0085
-                            * (T_REF_K - node.temperature_k);
-                        q_ext_w += q_air;
-                        let softness = (node.melt_fraction
-                            + 0.15 * ((node.temperature_k - 750.0) / 550.0).clamp(0.0, 1.0))
-                        .clamp(0.0, 1.0);
-                        let f_air = self.inputs.air_jet_power * w_air * softness * 0.042;
-                        force_n[idx][0] -= f_air * n_rad[0];
-                        force_n[idx][1] -= f_air * n_rad[1];
-                    }
-                }
-
-                // 3D Gravity & Centrifuge vector + Mechanical Shock acting on viscoplastic / molten gold
-                if node.temperature_k > 750.0 || node.melt_fraction > 0.01 {
-                    let softness = (node.melt_fraction
-                        + 0.12 * ((node.temperature_k - 750.0) / 550.0).clamp(0.0, 1.0))
-                    .clamp(0.0, 1.0);
-                    let g_eff_x = g_vec[0];
-                    let g_eff_y = g_vec[1] - shock_g;
-                    force_n[idx][0] += (0.008 * g_eff_x - 0.012 * n_rad[0]) * softness;
-                    force_n[idx][1] += (0.008 * g_eff_y - 0.018 * n_rad[1]) * softness;
-                    force_n[idx][2] -= 0.014 * softness * (node.pos_mm[2] + 1.2).signum();
-                }
-
-                // Cryogenic Liquid Nitrogen (LN2 at 77.36 K) impingement & Nukiyama boiling curve
-                if ln2_active {
-                    let dx = node.pos_mm[0] - self.inputs.ln2_pos_mm[0];
-                    let dy = node.pos_mm[1] - self.inputs.ln2_pos_mm[1];
-                    let d2 = dx * dx + dy * dy;
-                    let w_ln2 = (-d2 / (2.0 * 15.0 * 15.0)).exp();
-                    node.ln2_mass_g = (node.ln2_mass_g
-                        + self.inputs.ln2_pour_rate * w_ln2 * 0.18 * dt)
-                        .min(0.25);
-                }
-                if node.ln2_mass_g > 1.0e-6 {
-                    if node.temperature_k > T_LN2_SAT_K + 0.05 {
-                        let dt_sat = node.temperature_k - T_LN2_SAT_K;
-                        let h_boil = if node.temperature_k <= T_LN2_LEIDENFROST_K {
-                            4_800.0 + 6_200.0 * (dt_sat / 48.0).clamp(0.1, 1.0)
-                        } else {
-                            2_100.0 + 2.4 * (node.temperature_k - T_LN2_LEIDENFROST_K)
-                        };
-                        let q_boil_desire = h_boil * node.area_m2 * dt_sat * 2.2;
-                        let max_latent_j = node.ln2_mass_g * 1.0e-3 * LN2_LATENT_VAP_J_PER_KG;
-                        let q_boil_j = (q_boil_desire * dt).min(max_latent_j);
-                        let q_boil_w = q_boil_j / dt;
-                        q_ext_w -= q_boil_w;
-                        ln2_total_w += q_boil_w;
-                        node.ln2_mass_g = (node.ln2_mass_g
-                            - (q_boil_j / LN2_LATENT_VAP_J_PER_KG) * 1.0e3)
-                            .max(0.0);
-                    } else {
-                        node.ln2_mass_g = (node.ln2_mass_g - 0.01 * dt).max(0.0);
-                    }
-                }
-
-                // Integrate nodal specific enthalpy H and invert enthalpy -> (T, f_L)
-                node.enthalpy_j_kg += (q_ext_w * dt) / node.mass_kg.max(1.0e-5);
-                let (t_new, phi_new) =
-                    GOLD_18K_CARD.temperature_and_melt_from_enthalpy(node.enthalpy_j_kg);
-                node.temperature_k = t_new;
-                node.melt_fraction = phi_new;
-
-                // Integrate 3D nodal velocity & position with smooth temperature/viscosity-dependent mobility
-                // (no discontinuous jump at 600 K, eliminating spatial step artifacts across isotherms)
-                let mu_eff = gold_effective_viscosity_pa_s(t_new, phi_new);
-                let mobility = (0.18 + 0.68 / (1.0 + 0.0025 * mu_eff)).clamp(0.18, 0.86);
-
-                let damping = (-14.0 * dt).exp();
-                for c in 0..3 {
-                    let acc_mm_s2 = (force_n[idx][c] / node.mass_kg.max(1.0e-4)) * mobility;
-                    node.vel_mm_s[c] = (node.vel_mm_s[c] + acc_mm_s2 * dt) * damping;
-                    node.pos_mm[c] += node.vel_mm_s[c] * dt;
-                }
-
-                // Enforce physical obstacle contact against the movement mainplate interior (r >= 17.2 mm)
-                // and table plane (z >= -4.1 mm) so the melting gold case drapes over the movement edge
-                let r_curr = (node.pos_mm[0].powi(2) + node.pos_mm[1].powi(2))
-                    .sqrt()
-                    .max(0.1);
-                let r_min_obstacle = 16.8;
-                if r_curr < r_min_obstacle {
-                    let scale = r_min_obstacle / r_curr;
-                    node.pos_mm[0] *= scale;
-                    node.pos_mm[1] *= scale;
-                    node.vel_mm_s[0] = 0.0;
-                    node.vel_mm_s[1] = 0.0;
-                }
-                node.pos_mm[2] = node.pos_mm[2].clamp(-4.2, 4.4);
-
-                // Update local wall thickness by mass conservation + capillary bead thickening at rim,
-                // and shed detached liquid gold droplets onto the 24x24 free-surface PDE grid using a
-                // smooth 3x3 Gaussian mollifier kernel (eliminating single-cell nearest-neighbor staircase spikes!)
-                let r0 = (node.ref_pos_mm[0].powi(2) + node.ref_pos_mm[1].powi(2))
-                    .sqrt()
-                    .max(1.0);
-                let radial_inward_mm = (r0 - r_curr).max(0.0);
-                if phi_new > 0.06 && node.thickness_mm > 0.55 {
-                    let ck_mob = crate::materials::MaterialCard::carman_kozeny_mobility(phi_new);
-                    let drip_rate_mm_s = 0.42 * (0.30 * phi_new + 0.70 * ck_mob);
-                    let dh_drip = (drip_rate_mm_s * dt).min(node.thickness_mm - 0.55);
-                    if dh_drip > 1.0e-6 {
-                        node.thickness_mm -= dh_drip;
-                        let dm_kg = GOLD_18K_CARD.density_kg_m3 * node.area_m2 * (dh_drip * 1.0e-3);
-                        node.mass_kg = (node.mass_kg - dm_kg).max(5.0e-6);
-
-                        // Deposit detached liquid gold mass & enthalpy at the actual inward drip front
-                        // distributed smoothly over a 5x5 Gaussian neighborhood of 48x48 PDE cells!
-                        let iz_offset = 0.42 * ((iz as f64) - 3.5).abs();
-                        let drip_r = (r_curr - 2.4 - iz_offset).clamp(14.5, 20.6);
-                        let inward_x_mm = node.pos_mm[0] * (drip_r / r_curr.max(1.0));
-                        let inward_y_mm = node.pos_mm[1] * (drip_r / r_curr.max(1.0));
-                        let cx_center = (((inward_x_mm + GRID_HALF_SPAN_MM) / GRID_DX_MM).floor()
-                            as isize)
-                            .clamp(0, (GRID_N - 1) as isize);
-                        let cy_center = (((inward_y_mm + GRID_HALF_SPAN_MM) / GRID_DX_MM).floor()
-                            as isize)
-                            .clamp(0, (GRID_N - 1) as isize);
-
-                        let mut w_sum = 0.0_f64;
-                        let mut targets = [(0_usize, 0.0_f64); 25];
-                        let mut t_count = 0_usize;
-                        let sigma_drip_mm = GRID_DX_MM * 1.45;
-                        for dy in -2_isize..=2 {
-                            for dx in -2_isize..=2 {
-                                let nx = (cx_center + dx).clamp(0, (GRID_N - 1) as isize) as usize;
-                                let ny = (cy_center + dy).clamp(0, (GRID_N - 1) as isize) as usize;
-                                let cidx = ny * GRID_N + nx;
-                                if self.grid[cidx].active && !self.grid[cidx].is_gold_case {
-                                    let ddx = self.grid[cidx].x_mm - inward_x_mm;
-                                    let ddy = self.grid[cidx].y_mm - inward_y_mm;
-                                    let w = (-(ddx * ddx + ddy * ddy)
-                                        / (2.0 * sigma_drip_mm * sigma_drip_mm))
-                                        .exp();
-                                    targets[t_count] = (cidx, w);
-                                    t_count += 1;
-                                    w_sum += w;
-                                }
-                            }
-                        }
-
-                        if w_sum > 1.0e-8 {
-                            for &(cidx, w) in &targets[..t_count] {
-                                let frac = w / w_sum;
-                                let cell_dm_kg = dm_kg * frac;
-                                let added_height_mm = (cell_dm_kg
-                                    / (GOLD_18K_CARD.density_kg_m3 * GRID_CELL_AREA_M2))
-                                    * 1.0e3;
-                                let prev_h = self.grid[cidx].liquid_gold_mm;
-                                let new_h = prev_h + added_height_mm;
-                                if new_h > 1.0e-6 {
-                                    self.grid[cidx].liquid_gold_enthalpy_j_kg = (prev_h
-                                        * self.grid[cidx].liquid_gold_enthalpy_j_kg
-                                        + added_height_mm * node.enthalpy_j_kg)
-                                        / new_h;
-                                }
-                                self.grid[cidx].liquid_gold_mm = new_h;
-                                let dh_enth =
-                                    (node.enthalpy_j_kg - self.grid[cidx].enthalpy_j_kg).max(0.0);
-                                self.grid[cidx].enthalpy_j_kg += (cell_dm_kg * dh_enth)
-                                    / (self.grid[cidx].base_mass_kg + cell_dm_kg);
-                            }
-                        }
-                    }
-                }
-
-                // Map emergent radial/vertical displacement onto the corresponding perimeter cell for telemetry
-                let disp_norm = ((radial_inward_mm / 6.5)
-                    + ((node.ref_thickness_mm - node.thickness_mm) / node.ref_thickness_mm))
-                    .clamp(0.0, 0.95);
-                if disp_norm > self.grid[cell_idx].case_slump_frac {
-                    self.grid[cell_idx].case_slump_frac = disp_norm;
-                }
-
-                self.case_shell[idx] = node;
-            }
+        let p = i.blowtorch_pos_mm;
+        // Air-fuel torch: no flame without the room's oxygen; denser jets at
+        // higher pressure carry more heat.
+        let p_atm = i.ambient_pressure_atm;
+        let o2 = (p_atm / 0.5).clamp(0.0, 1.0) * p_atm.max(1.0).powf(0.3);
+        let standoff = (p[2] - 0.0).abs() + 4.0;
+        let sigma = 1.8 + 0.25 * standoff;
+        let r2 = (c.x_mm - p[0]).powi(2) + (c.y_mm - p[1]).powi(2);
+        if r2 > 25.0 * sigma * sigma {
+            return (0.0, 0.0);
         }
-
-        (torch_total_w, ln2_total_w)
+        let shape = (-r2 / (2.0 * sigma * sigma)).exp();
+        let h = 4_000.0 * i.blowtorch_power * o2 * (6.0 / standoff).sqrt().min(1.3) * shape;
+        let q_dyn = 220.0 * i.blowtorch_power * o2 * shape;
+        (h, q_dyn)
     }
 
-    /// 2D Finite-Volume Heat Conduction + Enthalpy Phase-Change + Lubrication/Capillary/Marangoni
-    /// Free-Surface Molten Gold Flow PDE step over the $24 \times 24$ grid.
-    fn step_spatial_pde_grid(&mut self, dt_s: f64) -> (f64, f64) {
-        let mut net_q_w = [0.0_f64; GRID_CELLS];
-        let mut new_liq_mm = [0.0_f64; GRID_CELLS];
-        let mut new_liq_enth = [0.0_f64; GRID_CELLS];
-        let mut free_surface_eta_mm = [0.0_f64; GRID_CELLS];
-        let mut eta_laplacian_mm = [0.0_f64; GRID_CELLS];
-        let mut new_oil_um = [0.0_f64; GRID_CELLS];
+    fn jet_at(&self, c: &SpatialCell) -> (f64, f64) {
+        let i = &self.inputs;
+        if i.air_jet_power <= 0.0 {
+            return (0.0, 0.0);
+        }
+        let p = i.air_jet_pos_mm;
+        let d_noz = 1.5;
+        let standoff = p[2].abs().max(1.0) + 2.0;
+        let u0 = 150.0 * i.air_jet_power;
+        let u = u0 * (6.2 * d_noz / standoff).min(1.0);
+        let sigma = 1.0 + 0.2 * standoff;
+        let r2 = (c.x_mm - p[0]).powi(2) + (c.y_mm - p[1]).powi(2);
+        if r2 > 25.0 * sigma * sigma {
+            return (0.0, 0.0);
+        }
+        let shape = (-r2 / (2.0 * sigma * sigma)).exp();
+        let rho = 1.2;
+        let nu = 1.5e-5;
+        let re = u * d_noz * 1.0e-3 / nu;
+        let h0 = 0.9 * re.sqrt() * 0.71_f64.powf(0.4) * 0.026 / (d_noz * 1.0e-3);
+        (h0 * shape, 0.5 * rho * u * u * shape)
+    }
 
-        let mut torch_grid_w = 0.0;
-        let mut ln2_grid_w = 0.0;
+    /// Conductance thickness k·t of each column at its temperature [W/K].
+    fn fill_conductance(&self, th: &mut ThermalScratch) {
+        let lib = library();
+        let gold = &lib.gold;
+        for &iu in &th.active {
+            let i = iu as usize;
+            let c = &self.grid[i];
+            let tg = (c.struct_gold_kg + c.gold_kg) / (gold.rho_solid_ref * CELL_AREA);
+            th.kt[i] = gold.conductivity(c.temperature_k, c.melt_fraction) * tg + lib.brass.k * c.brass_m;
+        }
+    }
 
-        // 1. Precompute free-surface height eta = z_bed + S_Au + H_Au and sync the
-        //    D2Q9 Körner VOF Lattice Boltzmann free-surface grid (`fs_lbm::FreeSurface`).
-        let mut any_lbm_wet = false;
-        for idx in 0..GRID_CELLS {
-            let c = &self.grid[idx];
-            new_liq_mm[idx] = c.liquid_gold_mm;
-            new_liq_enth[idx] = c.liquid_gold_enthalpy_j_kg;
-            new_oil_um[idx] = c.oil_um;
-            free_surface_eta_mm[idx] = c.bed_elevation_mm * (1.0 - 0.45 * c.case_slump_frac)
-                + c.frozen_gold_mm
-                + c.liquid_gold_mm;
-
-            if !c.active {
-                self.lbm_free_surface.grid.flags[idx] = LbmCell::Wall;
-                self.lbm_free_surface.mass[idx] = 0.0;
-            } else if c.liquid_gold_mm > 0.015 {
-                any_lbm_wet = true;
-                let fill = (c.liquid_gold_mm / 1.2).clamp(0.08, 1.0);
-                self.lbm_free_surface.grid.flags[idx] = if fill >= 0.96 {
-                    LbmCell::Fluid
+    /// Fill the per-step parts of the heat solve (nozzle footprints, oxide
+    /// emissivity, table segments) and return the explicit stability bound
+    /// [s]: forward Euler on C dT/dt = −D T + … is stable for h < C/D in
+    /// every column (Gershgorin), with D the column's face conductances plus
+    /// the linearised film, radiation and boiling coefficients and C a floor
+    /// on its capacity (sensible heat only, so a column leaving the mushy
+    /// zone mid-step stays inside the bound).
+    fn prepare_thermal(&self, th: &mut ThermalScratch) -> f64 {
+        let table = column_table();
+        let n = GRID_N;
+        let a = CELL_AREA;
+        let torch_on = self.inputs.blowtorch_power > 0.0;
+        let jet_on = self.inputs.air_jet_power > 0.0;
+        self.fill_conductance(th);
+        let mut h_min = H_THERMAL_MAX_S;
+        for &iu in &th.active {
+            let i = iu as usize;
+            let c = &self.grid[i];
+            th.torch_h[i] = if torch_on { self.torch_at(c).0 } else { 0.0 };
+            th.jet_h[i] = if jet_on { self.jet_at(c).0 } else { 0.0 };
+            th.eps_ox[i] = GoldAlloy::oxide_emissivity(c.oxide_nm);
+            // Gold may have run in or out since the last substep.
+            let m_gold = c.struct_gold_kg + c.gold_kg;
+            let c_other = c.c_other.max(1.0e-5);
+            table.temperature_hunt(m_gold, c_other, c.enthalpy_j, &mut th.seg[i]);
+            let (gx, gy) = (i % n, i / n);
+            let k0 = th.kt[i];
+            let face = |j: usize| {
+                let kj = th.kt[j];
+                if kj > 0.0 {
+                    2.0 * k0 * kj / (k0 + kj)
                 } else {
-                    LbmCell::Interface
-                };
-                self.lbm_free_surface.mass[idx] = fill;
-                let mu_au = gold_effective_viscosity_pa_s(
-                    c.temperature_k.max(1340.0),
-                    c.melt_fraction.max(0.25),
-                );
-                self.lbm_free_surface.grid.tau[idx] =
-                    (0.56 + 0.15 * (mu_au / 0.005).clamp(0.1, 8.0)).clamp(0.55, 1.85);
-            } else {
-                self.lbm_free_surface.grid.flags[idx] = LbmCell::Gas;
-                self.lbm_free_surface.mass[idx] = 0.0;
-            }
-        }
-        // Repair fluid-to-gas topology closure so Fluid cells never directly touch Gas cells
-        if any_lbm_wet {
-            for gy in 0..GRID_N {
-                for gx in 0..GRID_N {
-                    let idx = gy * GRID_N + gx;
-                    if self.lbm_free_surface.grid.flags[idx] == LbmCell::Fluid {
-                        let mut touches_gas = false;
-                        for dy in -1_isize..=1 {
-                            for dx in -1_isize..=1 {
-                                let nx = gx as isize + dx;
-                                let ny = gy as isize + dy;
-                                if nx >= 0
-                                    && nx < GRID_N as isize
-                                    && ny >= 0
-                                    && ny < GRID_N as isize
-                                    && self.lbm_free_surface.grid.flags
-                                        [(ny as usize) * GRID_N + (nx as usize)]
-                                        == LbmCell::Gas
-                                {
-                                    touches_gas = true;
-                                }
-                            }
-                        }
-                        if touches_gas {
-                            self.lbm_free_surface.grid.flags[idx] = LbmCell::Interface;
-                        }
-                    }
+                    0.0
                 }
+            };
+            let mut d = 0.0;
+            if gx > 0 {
+                d += face(i - 1);
             }
-            self.lbm_free_surface.carry = 0.0;
-            let _ = self
-                .lbm_free_surface
-                .step_with_momentum(&fs_exec::CancelGate::new_clock_free());
+            if gx + 1 < n {
+                d += face(i + 1);
+            }
+            if gy > 0 {
+                d += face(i - n);
+            }
+            if gy + 1 < n {
+                d += face(i + n);
+            }
+            let t = c.temperature_k;
+            let h_nat = self.convection.eval(t - T_REF_K);
+            d += (th.torch_h[i] + th.jet_h[i] + 2.0 * 1.5 * h_nat) * a;
+            d += 4.0 * 1.3 * STEFAN_BOLTZMANN * t.powi(3) * a;
+            if c.ln2_kg > 0.0 {
+                d += self.boiling.max_slope * a;
+            }
+            let cap = table.capacity_floor(m_gold, c_other, th.seg[i]);
+            if d > 0.0 {
+                h_min = h_min.min(cap / d);
+            }
         }
+        (0.9 * h_min).max(2.0e-5)
+    }
 
-        // 2. Compute isotropic 9-point discrete curvature Laplacian(M_Au) on the gold film thickness
-        //    (avoiding artificial step-cliff spikes from dry solid walls while preserving O(dx^4) rotational isotropy!)
-        let orth_dirs: [(isize, isize); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
-        let diag_dirs: [(isize, isize); 4] = [(-1, -1), (1, -1), (-1, 1), (1, 1)];
-        for gy in 0..GRID_N {
-            for gx in 0..GRID_N {
-                let idx = gy * GRID_N + gx;
-                if !self.grid[idx].active {
+    /// One explicit thermal step. Returns (torch, LN₂, air-jet) powers [W].
+    fn thermal_substep(&mut self, h: f64, th: &mut ThermalScratch) -> (f64, f64, f64) {
+        let lib = library();
+        let table = column_table();
+        let gold = &lib.gold;
+        let n = GRID_N;
+        let t_amb = T_REF_K;
+        let p_pa = self.pressure_pa();
+        let t_sat = ln2_saturation_temperature_k(p_pa);
+        let flame_t = 2_250.0;
+        let rho_v_amb = ROOM_RH * WATER_P_SAT_293_PA * (p_pa / P_ATM_PA) * M_WATER / (R_GAS * t_amb);
+        let air = air_state(t_amb, p_pa);
+        let rho_cp_air = air.map_or(0.0, |a| a.density * a.specific_heat_cp);
+        self.fill_conductance(th);
+        let kt = &th.kt;
+        let dq = &mut th.dq;
+        dq.fill(0.0);
+        for gy in 0..n {
+            for gx in 0..n {
+                let i = gy * n + gx;
+                if kt[i] <= 0.0 {
                     continue;
                 }
-                let h_c = self.grid[idx].liquid_gold_mm + self.grid[idx].frozen_gold_mm;
-                let mut sum_orth = 0.0;
-                let mut sum_diag = 0.0;
-                for (dx, dy) in orth_dirs {
-                    let nx = gx as isize + dx;
-                    let ny = gy as isize + dy;
-                    if nx >= 0 && nx < GRID_N as isize && ny >= 0 && ny < GRID_N as isize {
-                        let nidx = (ny as usize) * GRID_N + (nx as usize);
-                        if self.grid[nidx].active {
-                            let h_n =
-                                self.grid[nidx].liquid_gold_mm + self.grid[nidx].frozen_gold_mm;
-                            sum_orth += h_n - h_c;
-                        }
-                    }
+                if gx + 1 < n && kt[i + 1] > 0.0 {
+                    let gface = 2.0 * kt[i] * kt[i + 1] / (kt[i] + kt[i + 1]);
+                    let q = gface * (self.grid[i + 1].temperature_k - self.grid[i].temperature_k);
+                    dq[i] += q;
+                    dq[i + 1] -= q;
                 }
-                for (dx, dy) in diag_dirs {
-                    let nx = gx as isize + dx;
-                    let ny = gy as isize + dy;
-                    if nx >= 0 && nx < GRID_N as isize && ny >= 0 && ny < GRID_N as isize {
-                        let nidx = (ny as usize) * GRID_N + (nx as usize);
-                        if self.grid[nidx].active {
-                            let h_d =
-                                self.grid[nidx].liquid_gold_mm + self.grid[nidx].frozen_gold_mm;
-                            sum_diag += h_d - h_c;
-                        }
-                    }
+                if gy + 1 < n && kt[i + n] > 0.0 {
+                    let gface = 2.0 * kt[i] * kt[i + n] / (kt[i] + kt[i + n]);
+                    let q = gface * (self.grid[i + n].temperature_k - self.grid[i].temperature_k);
+                    dq[i] += q;
+                    dq[i + n] -= q;
                 }
-                eta_laplacian_mm[idx] =
-                    (4.0 * sum_orth + sum_diag) / (6.0 * GRID_DX_MM * GRID_DX_MM);
             }
         }
+        let (mut torch_w, mut ln2_w, mut air_w) = (0.0, 0.0, 0.0);
+        for &iu in &th.active {
+            let i = iu as usize;
+            let (h_torch, h_jet) = (th.torch_h[i], th.jet_h[i]);
+            let c = &mut self.grid[i];
+            let t = c.temperature_k;
+            let a = CELL_AREA;
+            let mut q = dq[i];
+            if h_torch > 0.0 {
+                let p = h_torch * (flame_t - t) * a;
+                q += p;
+                torch_w += p;
+            }
+            if h_jet > 0.0 {
+                let p = h_jet * (t_amb - t) * a;
+                q += p;
+                air_w += p;
+            }
+            // LN₂ boiling under the covered part of the cell.
+            let cover = (c.ln2_kg / (ln2::RHO_LIQUID * a * 0.2e-3)).clamp(0.0, 1.0);
+            if c.ln2_kg > 0.0 {
+                let flux = self.boiling.flux(t - t_sat);
+                let mut p = flux * a * cover;
+                // Each kilogram boiled also carries off the sensible heat of
+                // its vapour, which leaves near the film temperature (the
+                // same modified latent heat the Berenson flux uses).
+                let hfg_eff = ln2::LATENT_J_KG + 0.4 * 1_040.0 * (t - t_sat).max(0.0);
+                let boil_max = c.ln2_kg * hfg_eff / h;
+                p = p.min(boil_max);
+                c.ln2_kg -= p * h / hfg_eff;
+                if c.ln2_kg < 1e-12 {
+                    c.ln2_kg = 0.0;
+                }
+                q -= p;
+                ln2_w += p;
+            }
+            // Natural convection on both faces and grey-body radiation.
+            let gold_frac = if c.kind == CellKind::Band { 1.0 } else { 0.0 };
+            let eps_gold = gold.emissivity_with_oxide(c.melt_fraction, th.eps_ox[i]);
+            let eps = gold_frac * 2.0 * eps_gold + (1.0 - gold_frac) * (0.35 + eps_gold);
+            let h_nat = self.convection.eval(t - t_amb);
+            q -= h_nat * (t - t_amb) * 2.0 * a * (1.0 - 0.5 * cover);
+            q -= eps * STEFAN_BOLTZMANN * (t.powi(4) - t_amb.powi(4)) * a;
+            // Frost: vapour deposits below the ice saturation point.
+            if rho_cp_air > 0.0 {
+                let p_ice = if t < 273.15 { ice_saturation_pressure_pa(t) } else { f64::INFINITY };
+                let rho_v_s = if p_ice.is_finite() { p_ice * M_WATER / (R_GAS * t.max(1.0)) } else { f64::INFINITY };
+                let h_m = h_nat / rho_cp_air * 1.1;
+                if rho_v_s < rho_v_amb {
+                    let m = h_m * (rho_v_amb - rho_v_s) * (1.0 - cover);
+                    c.frost_kg_m2 += m * h;
+                    q += m * ICE_LATENT_SUB_J_KG * a;
+                } else if c.frost_kg_m2 > 0.0 {
+                    if t >= 273.15 {
+                        let melt = (c.frost_kg_m2 * 0.2).max(1e-5 * h);
+                        let dm = melt.min(c.frost_kg_m2);
+                        c.frost_kg_m2 -= dm;
+                        q -= dm * ICE_LATENT_FUS_J_KG * a / h;
+                    } else {
+                        let m = (h_m * (rho_v_s - rho_v_amb)).min(c.frost_kg_m2 / h);
+                        c.frost_kg_m2 -= m * h;
+                        q -= m * ICE_LATENT_SUB_J_KG * a;
+                    }
+                }
+            }
+            c.enthalpy_j += q * h;
+            let m_gold = c.struct_gold_kg + c.gold_kg;
+            let c_other = c.c_other.max(1.0e-5);
+            c.temperature_k = table.temperature_hunt(m_gold, c_other, c.enthalpy_j, &mut th.seg[i]);
+            c.melt_fraction = if m_gold > 0.0 { gold.liquid_fraction_at(c.temperature_k) } else { 0.0 };
+        }
+        (torch_w, ln2_w, air_w)
+    }
 
-        // 3. Evaluate isotropic 8-neighbor (orthogonal + diagonal) 2D Finite-Volume fluxes:
-        //    (a) Fourier heat conduction -k * grad(T) (in 2D, face conductance k*(dy*h_z)/dx = k*h_z is grid-scale invariant)
-        //    (b) Lubrication + Young-Laplace Capillary + Smooth Cox-Voinov Wetting + Marangoni molten gold flux
-        //    (c) Watch oil Marangoni/capillary spreading flux
-        //    Weights (2/3, 2/3, sqrt(2)/6, sqrt(2)/6) yield the exact 4:1 O(dx^4)-isotropic 9-point operator after / dist_scale.
-        let stencil_faces: [(isize, isize, f64, f64); 4] = [
-            (1, 0, 1.0, 2.0 / 3.0),
-            (0, 1, 1.0, 2.0 / 3.0),
-            (1, 1, core::f64::consts::SQRT_2, core::f64::consts::SQRT_2 / 6.0),
-            (1, -1, core::f64::consts::SQRT_2, core::f64::consts::SQRT_2 / 6.0),
+    /// Structural case gold whose column is half molten loses its shape and
+    /// becomes free gold that can run.
+    fn melt_case(&mut self) {
+        for c in &mut self.grid {
+            if c.struct_gold_kg > 0.0 && c.melt_fraction > 0.5 && c.kind == CellKind::Band {
+                c.gold_kg += c.struct_gold_kg;
+                c.struct_gold_kg = 0.0;
+            }
+        }
+    }
+
+    /// Room in a column for liquids above its bed [m].
+    fn capacity_m(c: &SpatialCell) -> f64 {
+        match c.kind {
+            CellKind::Outside => f64::INFINITY,
+            CellKind::Interior => OPEN_CEILING_M,
+            CellKind::Band => {
+                if c.struct_gold_kg <= 0.05 * c.struct_gold0_kg {
+                    OPEN_CEILING_M
+                } else {
+                    (c.struct_gold0_kg - c.struct_gold_kg) / (library().gold.rho_solid_ref * CELL_AREA)
+                }
+            }
+        }
+    }
+
+    /// Virtual-pipe shallow-layer flow of the gold and the oil.
+    fn flow_liquids(&mut self, dt: f64) {
+        let any = self.grid.iter().any(|c| (c.gold_kg > 0.0 && c.mobile_fraction() > 0.0) || c.oil_m3 > 0.0)
+            || self.inputs.oil_pour_rate > 0.0;
+        if !any {
+            self.gold_qx.fill(0.0);
+            self.gold_qy.fill(0.0);
+            return;
+        }
+        // Oil pour source: a dropper stream of 0.25 mL/s at full rate.
+        if self.inputs.oil_pour_rate > 0.0 {
+            let p = self.inputs.oil_pos_mm;
+            let rate = 0.25e-6 * self.inputs.oil_pour_rate;
+            self.deposit(p, 1.2, |c, w| c.oil_m3 += rate * dt * w);
+        }
+        // Substeps: CFL on the gravity-wave and flow speeds.
+        let g = self.gravity();
+        let gmag = (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt().max(1.0);
+        let mut hmax: f64 = 1e-4;
+        for c in &self.grid {
+            hmax = hmax.max(c.gold_depth_m() * c.mobile_fraction()).max(c.oil_depth_m());
+        }
+        let c_wave = (gmag * hmax).sqrt() + 1.0;
+        let n_sub = ((dt / (0.4 * DX / c_wave)).ceil() as usize).clamp(1, 400);
+        let h = dt / n_sub as f64;
+        for i in 0..GRID_CELLS {
+            let c = &self.grid[i];
+            self.gas_q[i] = self.torch_at(c).1 + self.jet_at(c).1;
+        }
+        // A layer with nothing that can move is skipped (its face fluxes are
+        // zero); gold that freezes mid-call simply stops moving.
+        let gold_moves = self.grid.iter().any(|c| c.gold_kg > 0.0 && c.mobile_fraction() > 0.0);
+        let oil_moves = self.grid.iter().any(|c| c.oil_m3 > 0.0);
+        if !gold_moves {
+            self.gold_qx.fill(0.0);
+            self.gold_qy.fill(0.0);
+        }
+        if !oil_moves {
+            self.oil_qx.fill(0.0);
+            self.oil_qy.fill(0.0);
+        }
+        let mut sc = std::mem::take(&mut self.pipe);
+        for _ in 0..n_sub {
+            if gold_moves {
+                self.pipe_substep(h, true, &mut sc);
+            }
+            if oil_moves {
+                self.pipe_substep(h, false, &mut sc);
+            }
+        }
+        self.pipe = sc;
+        // Liquids fall off a dial that faces down.
+        if g[2] > 0.5 {
+            let k = (g[2] / G0_M_S2) * 2.0;
+            for c in &mut self.grid {
+                if c.kind != CellKind::Outside {
+                    let f = (-k * dt).exp();
+                    let lost = c.gold_kg * c.mobile_fraction() * (1.0 - f);
+                    c.gold_kg -= lost;
+                    self.dripped_gold_g += lost * 1e3;
+                    c.oil_m3 *= f;
+                }
+            }
+        }
+    }
+
+    fn pipe_substep(&mut self, h: f64, is_gold: bool, sc: &mut PipeScratch) {
+        let lib = library();
+        let gold = &lib.gold;
+        let table = column_table();
+        let n = GRID_N;
+        let g = self.gravity();
+        let g_ax = g[2].abs();
+        let (rho_g, rho_o) = (gold.rho_solid_ref * 0.95, lib.oil.density_ref);
+        let rho = if is_gold { rho_g } else { rho_o };
+        // Depths everywhere (cheap); the wet bounding box bounds the rest.
+        let PipeScratch { depth, head, nu, out_v, in_v, s_out, s_in, moves } = sc;
+        let mut lo = (n, n);
+        let mut hi = (0usize, 0usize);
+        for i in 0..GRID_CELLS {
+            let c = &self.grid[i];
+            let d = if is_gold { c.gold_depth_m() } else { c.oil_depth_m() };
+            depth[i] = d;
+            if d > 0.0 && c.kind != CellKind::Outside {
+                let (gx, gy) = (i % n, i / n);
+                lo = (lo.0.min(gx), lo.1.min(gy));
+                hi = (hi.0.max(gx), hi.1.max(gy));
+            }
+        }
+        if lo.0 > hi.0 {
+            return;
+        }
+        let (x0, y0) = (lo.0.saturating_sub(2), lo.1.saturating_sub(2));
+        let (x1, y1) = ((hi.0 + 2).min(n - 1), (hi.1 + 2).min(n - 1));
+        // Head over the box and one cell beyond (the box's outer faces);
+        // mobility only where there is liquid to move.
+        for gy in y0..=(y1 + 1).min(n - 1) {
+            for gx in x0..=(x1 + 1).min(n - 1) {
+                let i = gy * n + gx;
+                let c = &self.grid[i];
+                let d = depth[i];
+                let below = if is_gold { 0.0 } else { c.gold_depth_m() };
+                nu[i] = if d >= 1.0e-7 {
+                    let mu = if is_gold {
+                        gold.effective_viscosity(c.temperature_k, c.melt_fraction)
+                    } else {
+                        lib.oil.viscosity(c.temperature_k)
+                    };
+                    mu / rho
+                } else {
+                    0.0
+                };
+                let bed = if c.kind == CellKind::Outside { -10.0e-3 } else { c.bed_mm * 1.0e-3 + below };
+                head[i] = -(g[0] * c.x_mm + g[1] * c.y_mm) * 1.0e-3 + g_ax * (bed + d) + self.gas_q[i] / rho;
+            }
+        }
+        // Capillary pressure of the free surface: −(σ/ρ)∇²h over wet cells.
+        let sigma_over_rho = if is_gold { gold.surface_tension(1_200.0) / rho_g } else { 0.03 / rho_o };
+        for gy in y0..=y1 {
+            for gx in x0..=x1 {
+                let i = gy * n + gx;
+                if depth[i] <= 0.0 {
+                    continue;
+                }
+                let mut lap = 0.0;
+                for (j, ok) in [(i.wrapping_sub(1), gx > 0), (i + 1, gx + 1 < n), (i.wrapping_sub(n), gy > 0), (i + n, gy + 1 < n)] {
+                    if ok && depth[j] > 0.0 {
+                        lap += depth[j] - depth[i];
+                    }
+                }
+                head[i] -= sigma_over_rho * lap / (DX * DX);
+            }
+        }
+        let h_pin = if is_gold { 1.0e-3 } else { 0.0 };
+        let (qx, qy) = if is_gold { (&mut self.gold_qx, &mut self.gold_qy) } else { (&mut self.oil_qx, &mut self.oil_qy) };
+        let face = |q: &mut f64, a: usize, b: usize| {
+            let dh = head[a] - head[b];
+            let (src, dst) = if dh >= 0.0 { (a, b) } else { (b, a) };
+            let hf = depth[src];
+            let is_out = |k: usize| self.grid[k].kind == CellKind::Outside;
+            if hf < 1.0e-7 || is_out(src) || (depth[dst] < 1.0e-6 && hf < h_pin && !is_out(dst)) {
+                *q = 0.0;
+                return;
+            }
+            let u = q.abs() / (DX * hf);
+            let fric = 3.0 * nu[src] / (hf * hf) + 0.01 * u / hf;
+            *q = (*q + h * hf * (head[a] - head[b])) / (1.0 + h * fric);
+            // A layer cannot flow against its head.
+            if (*q > 0.0) != (dh > 0.0) {
+                *q = 0.0;
+            }
+        };
+        for gy in y0..=y1 {
+            for gx in x0..=x1 {
+                let i = gy * n + gx;
+                if gx + 1 < n {
+                    face(&mut qx[i], i, i + 1);
+                }
+                if gy + 1 < n {
+                    face(&mut qy[i], i, i + n);
+                }
+            }
+        }
+        // Outflow limited by what each cell holds; inflow by the room it has.
+        for gy in y0..=y1 {
+            let row = gy * n;
+            out_v[row + x0..=row + x1].fill(0.0);
+            in_v[row + x0..=row + x1].fill(0.0);
+        }
+        let mut tally = |q: f64, a: usize, b: usize| {
+            let (s, d) = if q > 0.0 { (a, b) } else { (b, a) };
+            out_v[s] += q.abs() * h;
+            in_v[d] += q.abs() * h;
+        };
+        for gy in y0..=y1 {
+            for gx in x0..=x1 {
+                let i = gy * n + gx;
+                if gx + 1 < n && qx[i] != 0.0 {
+                    tally(qx[i], i, i + 1);
+                }
+                if gy + 1 < n && qy[i] != 0.0 {
+                    tally(qy[i], i, i + n);
+                }
+            }
+        }
+        for gy in y0..=y1 {
+            for gx in x0..=x1 {
+                let i = gy * n + gx;
+                s_out[i] = 1.0;
+                s_in[i] = 1.0;
+                let avail = depth[i] * CELL_AREA;
+                if out_v[i] > avail {
+                    s_out[i] = avail / out_v[i];
+                }
+                let c = &self.grid[i];
+                let room = (Self::capacity_m(c) - c.gold_depth_m() - c.oil_depth_m()).max(0.0) * CELL_AREA;
+                if in_v[i] > room {
+                    s_in[i] = room / in_v[i];
+                }
+            }
+        }
+        // Move volume, and with gold its enthalpy.
+        moves.clear();
+        for gy in y0..=y1 {
+            for gx in x0..=x1 {
+                let i = gy * n + gx;
+                for (q, j, ok) in [(&mut qx[i], i + 1, gx + 1 < n), (&mut qy[i], i + n, gy + 1 < n)] {
+                    if !ok || *q == 0.0 {
+                        continue;
+                    }
+                    let (s, d) = if *q > 0.0 { (i, j) } else { (j, i) };
+                    let f = s_out[s].min(s_in[d]);
+                    *q *= f;
+                    moves.push((s, d, q.abs() * h));
+                }
+            }
+        }
+        for &(s, d, vol) in moves.iter() {
+            if is_gold {
+                let rho = rho_g;
+                let m = (vol * rho).min(self.grid[s].gold_kg);
+                let ts = self.grid[s].temperature_k;
+                let hm = gold.enthalpy_at(ts) * m;
+                self.grid[s].gold_kg -= m;
+                self.grid[s].enthalpy_j -= hm;
+                if self.grid[d].kind == CellKind::Outside {
+                    self.dripped_gold_g += m * 1.0e3;
+                } else {
+                    self.grid[d].gold_kg += m;
+                    self.grid[d].enthalpy_j += hm;
+                }
+            } else {
+                let v = vol.min(self.grid[s].oil_m3);
+                self.grid[s].oil_m3 -= v;
+                if self.grid[d].kind != CellKind::Outside {
+                    self.grid[d].oil_m3 += v;
+                }
+            }
+        }
+        // Columns that gained or lost gold re-equilibrate their temperature.
+        if is_gold {
+            for &(s, d, _) in moves.iter() {
+                for k in [s, d] {
+                    let c = &mut self.grid[k];
+                    if c.kind == CellKind::Outside {
+                        continue;
+                    }
+                    let m = c.struct_gold_kg + c.gold_kg;
+                    c.temperature_k = table.temperature(m, c.c_other.max(1e-5), c.enthalpy_j);
+                    c.melt_fraction = if m > 0.0 { gold.liquid_fraction_at(c.temperature_k) } else { 0.0 };
+                }
+            }
+        }
+    }
+
+    /// Spread `f(cell, weight)` over a Gaussian footprint of width `sigma_mm`
+    /// centred under `p` (weights sum to one over the case).
+    fn deposit(&mut self, p: [f64; 3], sigma_mm: f64, mut f: impl FnMut(&mut SpatialCell, f64)) {
+        let mut w = Vec::new();
+        let mut sum = 0.0;
+        for (i, c) in self.grid.iter().enumerate() {
+            if c.kind == CellKind::Outside {
+                continue;
+            }
+            let r2 = (c.x_mm - p[0]).powi(2) + (c.y_mm - p[1]).powi(2);
+            if r2 < 16.0 * sigma_mm * sigma_mm {
+                let wi = (-r2 / (2.0 * sigma_mm * sigma_mm)).exp();
+                w.push((i, wi));
+                sum += wi;
+            }
+        }
+        if sum <= 0.0 {
+            return;
+        }
+        for (i, wi) in w {
+            f(&mut self.grid[i], wi / sum);
+        }
+        self.quiet = false;
+    }
+
+    /// Liquid nitrogen: the pour, and its run-off as Leidenfrost drops and
+    /// rivulets along gravity, dripping off the edge.
+    fn flow_ln2(&mut self, dt: f64) {
+        if self.inputs.ln2_pour_rate > 0.0 {
+            let p = self.inputs.ln2_pos_mm;
+            let rate = 4.0e-3 * self.inputs.ln2_pour_rate;
+            // A 5 mL/s stream landing at ~1.5 m/s splashes into a sheet
+            // several jet diameters across.
+            self.deposit(p, 4.0, |c, w| c.ln2_kg += rate * dt * w);
+        }
+        if !self.grid.iter().any(|c| c.ln2_kg > 0.0) {
+            return;
+        }
+        let g = self.gravity();
+        let g_ip = (g[0] * g[0] + g[1] * g[1]).sqrt();
+        let g_mag = (g_ip * g_ip + g[2] * g[2]).sqrt().max(1e-9);
+        // Leidenfrost rivulets run down a tilted face at ~0.15 m/s per g.
+        let u = (0.15 * g_ip / G0_M_S2).min(0.5);
+        let n = GRID_N;
+        let frac = (u * dt / DX).min(0.9);
+        let (fx, fy) = if g_ip > 0.0 { (g[0] / g_ip, g[1] / g_ip) } else { (0.0, 0.0) };
+        // The face-normal share of gravity levels the free surface: liquid
+        // runs down head differences (bed + depth), fills recesses such as
+        // the tourbillon well, and spills over the bezel lip only when deeper
+        // than it.
+        let normal = (g[2].abs() / g_mag).clamp(0.0, 1.0);
+        const LIP_M: f64 = 0.6e-3;
+        let rho_a = ln2::RHO_LIQUID * CELL_AREA;
+        let head: Vec<f64> = self.grid.iter().map(|c| c.bed_mm * 1e-3 + c.ln2_kg / rho_a).collect();
+        let mut next: Vec<f64> = self.grid.iter().map(|c| c.ln2_kg).collect();
+        for gy in 0..n {
+            for gx in 0..n {
+                let i = gy * n + gx;
+                let m = self.grid[i].ln2_kg;
+                if m <= 0.0 {
+                    continue;
+                }
+                let send = |j: Option<usize>, amt: f64, next: &mut Vec<f64>| {
+                    next[i] -= amt;
+                    if let Some(j) = j {
+                        if self.grid[j].kind != CellKind::Outside {
+                            next[j] += amt;
+                        }
+                    }
+                };
+                let xn = if fx >= 0.0 { (gx + 1 < n).then(|| i + 1) } else { (gx > 0).then(|| i - 1) };
+                let yn = if fy >= 0.0 { (gy + 1 < n).then(|| i + n) } else { (gy > 0).then(|| i - n) };
+                send(xn, m * frac * fx.abs(), &mut next);
+                send(yn, m * frac * fy.abs(), &mut next);
+                if normal > 0.05 {
+                    let depth = m / rho_a;
+                    for j in [(gx > 0).then(|| i - 1), (gx + 1 < n).then(|| i + 1), (gy > 0).then(|| i - n), (gy + 1 < n).then(|| i + n)]
+                        .into_iter()
+                        .flatten()
+                    {
+                        let dh = if self.grid[j].kind == CellKind::Outside {
+                            depth - LIP_M
+                        } else {
+                            head[i] - head[j]
+                        };
+                        if dh > 0.0 {
+                            // Relax a fifth of the step in head per step (stable for 4 neighbours).
+                            send(Some(j), (0.2 * normal * dh * rho_a).min(0.24 * m), &mut next);
+                        }
+                    }
+                }
+            }
+        }
+        for (c, m) in self.grid.iter_mut().zip(next) {
+            c.ln2_kg = if c.kind == CellKind::Outside { 0.0 } else { m.max(0.0) };
+        }
+    }
+
+    /// Dipole field of the N42 magnet [T] at `p` (watch frame, mm).
+    fn magnet_field(&self, p: [f64; 3]) -> [f64; 3] {
+        let i = &self.inputs;
+        if !i.magnet_enabled || i.magnet_strength <= 0.0 {
+            return [0.0; 3];
+        }
+        let lib = library();
+        // Ø12 × 6 mm cylinder at room temperature; strength scales its volume.
+        let vol = PI * 36.0e-6 * 6.0e-3 * i.magnet_strength;
+        let moment = lib.n42.remanence_t(T_REF_K) * vol / MU0;
+        let m_pos = i.magnet_pos_mm;
+        // Axis points from the magnet at the tourbillon.
+        let mut axis = [TOURBILLON_CENTER_MM[0] - m_pos[0], TOURBILLON_CENTER_MM[1] - m_pos[1], -m_pos[2]];
+        let al = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt().max(1e-9);
+        axis = axis.map(|a| a / al);
+        let r = [(p[0] - m_pos[0]) * 1e-3, (p[1] - m_pos[1]) * 1e-3, (p[2] - m_pos[2]) * 1e-3];
+        let rl = (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]).sqrt().max(4.0e-3);
+        let rh = r.map(|x| x / rl);
+        let mdotr = axis[0] * rh[0] + axis[1] * rh[1] + axis[2] * rh[2];
+        let k = MU0 * moment / (4.0 * PI * rl.powi(3));
+        [0, 1, 2].map(|j| k * (3.0 * mdotr * rh[j] - axis[j]))
+    }
+
+    fn b_mag(&self, p: [f64; 3]) -> f64 {
+        let b = self.magnet_field(p);
+        (b[0] * b[0] + b[1] * b[1] + b[2] * b[2]).sqrt()
+    }
+
+    fn update_magnetics(&mut self, dt: f64, cage_angle: f64, lever_angle: f64) {
+        let tc = TOURBILLON_CENTER_MM;
+        let p_bal = [tc[0], tc[1], 0.6];
+        let b = self.magnet_field(p_bal);
+        let b_signed = b[0];
+        // AC degauss: a decaying 50 Hz field swept through the play operator.
+        let hs = if self.inputs.compensated_hairspring {
+            &library().nivarox_hairspring
+        } else {
+            &library().carbon_steel_hairspring
+        };
+        let h_sat = 5.0 * hs.coercive_a_m;
+        let play = |h_field: f64, m: &mut f64| {
+            let lo = (h_field - hs.coercive_a_m) / h_sat;
+            let hi = (h_field + hs.coercive_a_m) / h_sat;
+            *m = m.clamp(lo, hi).clamp(-1.0, 1.0);
+        };
+        let mut m = self.hairspring_magnetisation;
+        if self.degauss_t >= 0.0 {
+            let n = (dt / 5.0e-4).ceil().max(1.0) as usize;
+            let hstep = dt / n as f64;
+            for _ in 0..n {
+                self.degauss_t += hstep;
+                let amp = DEGAUSS_PEAK_T * (-self.degauss_t / DEGAUSS_TAU_S).exp();
+                let bac = amp * (TAU * 50.0 * self.degauss_t).sin();
+                play((b_signed + bac) / MU0, &mut m);
+            }
+            if self.degauss_t >= DEGAUSS_DURATION_S {
+                self.degauss_t = -1.0;
+            }
+        } else {
+            play(b_signed / MU0, &mut m);
+        }
+        self.hairspring_magnetisation = m;
+        let b_abs = (b[0] * b[0] + b[1] * b[1] + b[2] * b[2]).sqrt();
+        self.b_field_escapement_mt = b_abs * 1.0e3;
+        self.remanent_magnetization_mt = m.abs() * hs.saturation_t * 1.0e3;
+        // Gradient magnitude at the balance (central differences, 0.2 mm).
+        let d = 0.2;
+        let grad = [
+            (self.b_mag([p_bal[0] + d, p_bal[1], p_bal[2]]) - self.b_mag([p_bal[0] - d, p_bal[1], p_bal[2]])) / (2.0 * d * 1e-3),
+            (self.b_mag([p_bal[0], p_bal[1] + d, p_bal[2]]) - self.b_mag([p_bal[0], p_bal[1] - d, p_bal[2]])) / (2.0 * d * 1e-3),
+            (self.b_mag([p_bal[0], p_bal[1], p_bal[2] + d]) - self.b_mag([p_bal[0], p_bal[1], p_bal[2] - d])) / (2.0 * d * 1e-3),
         ];
-        for gy in 0..GRID_N {
-            for gx in 0..GRID_N {
-                let idx = gy * GRID_N + gx;
-                if !self.grid[idx].active {
-                    continue;
-                }
-                let c = &self.grid[idx];
-                let card_c = c.material.card();
-
-                for (dx, dy, dist_scale, weight) in stencil_faces {
-                    let nx = gx as isize + dx;
-                    let ny = gy as isize + dy;
-                    if nx < 0 || nx >= GRID_N as isize || ny < 0 || ny >= GRID_N as isize {
-                        continue;
-                    }
-                    let nidx = (ny as usize) * GRID_N + (nx as usize);
-                    if !self.grid[nidx].active {
-                        continue;
-                    }
-                    let nc = &self.grid[nidx];
-                    let card_n = nc.material.card();
-
-                    // (a) Harmonic-mean thermal conductivity across cell face (isotropic 8-neighbor)
-                    let k_harm = (2.0 * card_c.conductivity_w_m_k * card_n.conductivity_w_m_k)
-                        / (card_c.conductivity_w_m_k + card_n.conductivity_w_m_k).max(1.0);
-                    let gold_bridge_mm = 0.5
-                        * (c.liquid_gold_mm
-                            + c.frozen_gold_mm
-                            + nc.liquid_gold_mm
-                            + nc.frozen_gold_mm);
-                    let g_face_w_k = k_harm * (1.8e-3)
-                        + GOLD_18K_CARD.conductivity_w_m_k * (gold_bridge_mm * 1.0e-3);
-                    let q_cond = weight
-                        * g_face_w_k
-                        * (nc.temperature_k - c.temperature_k)
-                        * 0.14
-                        / dist_scale;
-                    net_q_w[idx] += q_cond;
-                    net_q_w[nidx] -= q_cond;
-
-                    // (b) Molten gold free-surface flow with Young-Laplace surface tension,
-                    //     smooth contact-angle wetting mobility, gravity tilt, and Marangoni shear
-                    let h_max = c.liquid_gold_mm.max(nc.liquid_gold_mm);
-                    if h_max > 0.005 {
-                        let t_face =
-                            0.5 * (c.temperature_k.max(1340.0) + nc.temperature_k.max(1340.0));
-                        let sigma_au = gold_liquid_surface_tension_n_m(t_face);
-
-                        let cos_theta_c = gold_substrate_contact_angle_cos(c.temperature_k);
-                        let cos_theta_n = gold_substrate_contact_angle_cos(nc.temperature_k);
-                        let h_cap_c = (0.55 * (1.0 - cos_theta_c).sqrt()).max(0.15);
-                        let h_cap_n = (0.55 * (1.0 - cos_theta_n).sqrt()).max(0.15);
-
-                        // Smooth capillary length scale (bounded for explicit biharmonic stability)
-                        let l_cap_mm2 =
-                            ((sigma_au / (GOLD_18K_CARD.density_kg_m3 * 9.81)) * 1.0e6).min(3.8);
-                        // Strictly positive-slope C^infty meniscus pressure (zero negative-diffusivity cliff at H -> 0!)
-                        let coh_c = 0.06 * (c.liquid_gold_mm * c.liquid_gold_mm)
-                            / (c.liquid_gold_mm + h_cap_c);
-                        let coh_n = 0.06 * (nc.liquid_gold_mm * nc.liquid_gold_mm)
-                            / (nc.liquid_gold_mm + h_cap_n);
-
-                        // Smooth gentle radial bowl attraction toward the recessed 6h Tourbillon well
-                        let dist_t_c = (c.x_mm * c.x_mm + (c.y_mm + 11.0).powi(2)).sqrt();
-                        let dist_t_n = (nc.x_mm * nc.x_mm + (nc.y_mm + 11.0).powi(2)).sqrt();
-                        let smooth_bed_c =
-                            -1.25 * (-dist_t_c * dist_t_c / (2.0 * 7.8 * 7.8)).exp();
-                        let smooth_bed_n =
-                            -1.25 * (-dist_t_n * dist_t_n / (2.0 * 7.8 * 7.8)).exp();
-
-                        let gx_eff = self.inputs.gravity_g_vec[0];
-                        let gy_eff = self.inputs.gravity_g_vec[1]
-                            - (self.shock_envelope_g / 250.0).clamp(0.0, 4.0);
-                        let grav_pot_c = 0.08 * (gx_eff * c.x_mm + gy_eff * c.y_mm);
-                        let grav_pot_n = 0.08 * (gx_eff * nc.x_mm + gy_eff * nc.y_mm);
-
-                        // Compressed Air Nozzle stagnation pressure head blows molten gold radially outward!
-                        let air_head_c = if self.inputs.air_jet_power > 1.0e-4 {
-                            let adx = c.x_mm - self.inputs.air_jet_pos_mm[0];
-                            let ady = c.y_mm - self.inputs.air_jet_pos_mm[1];
-                            1.85 * self.inputs.air_jet_power
-                                * (-(adx * adx + ady * ady) / (2.0 * 9.5 * 9.5)).exp()
-                        } else {
-                            0.0
-                        };
-                        let air_head_n = if self.inputs.air_jet_power > 1.0e-4 {
-                            let adx = nc.x_mm - self.inputs.air_jet_pos_mm[0];
-                            let ady = nc.y_mm - self.inputs.air_jet_pos_mm[1];
-                            1.85 * self.inputs.air_jet_power
-                                * (-(adx * adx + ady * ady) / (2.0 * 9.5 * 9.5)).exp()
-                        } else {
-                            0.0
-                        };
-
-                        let p_c = smooth_bed_c + c.frozen_gold_mm + c.liquid_gold_mm
-                            + grav_pot_c
-                            + air_head_c
-                            - 0.18 * l_cap_mm2 * eta_laplacian_mm[idx]
-                            + coh_c;
-                        let p_n = smooth_bed_n + nc.frozen_gold_mm + nc.liquid_gold_mm
-                            + grav_pot_n
-                            + air_head_n
-                            - 0.18 * l_cap_mm2 * eta_laplacian_mm[nidx]
-                            + coh_n;
-
-                        // Marangoni thermocapillary shear term + D2Q9 FreeSurface LBM velocity (`fs_lbm::FreeSurface`)
-                        let marangoni_head = -0.0009 * (nc.temperature_k - c.temperature_k);
-                        let m_lbm_c = self.lbm_free_surface.grid.moments(idx);
-                        let m_lbm_n = self.lbm_free_surface.grid.moments(nidx);
-                        let u_face: f64 = 0.5
-                            * ((m_lbm_c.u[0] + m_lbm_n.u[0]) * (dx as f64)
-                                + (m_lbm_c.u[1] + m_lbm_n.u[1]) * (dy as f64))
-                            / dist_scale;
-                        let lbm_head = (u_face * 1.2_f64).clamp(-0.24, 0.24);
-
-                        let delta_p = ((p_c - p_n) + marangoni_head + lbm_head) / dist_scale;
-                        let (donor, acceptor, dp_abs) = if delta_p >= 0.0 {
-                            (idx, nidx, delta_p)
-                        } else {
-                            (nidx, idx, -delta_p)
-                        };
-
-                        let h_donor = self.grid[donor].liquid_gold_mm;
-                        let h_acc = self.grid[acceptor].liquid_gold_mm;
-                        // Smooth Cox-Voinov contact-line wetting factor
-                        let wet_factor = (h_donor * h_donor) / (h_donor * h_donor + 0.025 * 0.025)
-                            * (0.55 + 0.45 * (h_acc / (h_acc + 0.02)));
-
-                        if h_donor > 0.005 && dp_abs > 0.002 {
-                            let phi_donor = self.grid[donor].melt_fraction.max(0.25);
-                            let mu_donor = gold_effective_viscosity_pa_s(
-                                self.grid[donor].temperature_k.max(1340.0),
-                                phi_donor,
-                            );
-                            let mobility = (((h_donor * h_donor * h_donor) / (8.5 * mu_donor))
-                                * wet_factor)
-                                .clamp(0.0, 4.8);
-                            let dh = (weight * mobility * dp_abs * dt_s)
-                                .min(0.20 * (h_donor - 0.003).max(0.0));
-                            if dh > 1.0e-6 {
-                                new_liq_mm[donor] -= dh;
-                                let h_acc_prev = new_liq_mm[acceptor].max(0.0);
-                                let h_acc_new = h_acc_prev + dh;
-                                let enth_donor = self.grid[donor].liquid_gold_enthalpy_j_kg;
-                                new_liq_enth[acceptor] = (h_acc_prev * new_liq_enth[acceptor]
-                                    + dh * enth_donor)
-                                    / h_acc_new;
-                                new_liq_mm[acceptor] = h_acc_new;
-
-                                // Enthalpy advection: flowing molten gold heats the acceptor substrate!
-                                let dm_kg = GOLD_18K_CARD.density_kg_m3
-                                    * GRID_CELL_AREA_M2
-                                    * (dh * 1.0e-3);
-                                let q_adv_j = dm_kg
-                                    * (enth_donor - self.grid[acceptor].enthalpy_j_kg).max(0.0)
-                                    * 0.45;
-                                net_q_w[acceptor] += q_adv_j / dt_s;
-                            }
-                        }
-                    }
-
-                    // (c) Watch oil spreading on movement substrate + aerodynamic shear from Compressed Air Nozzle
-                    if !c.is_gold_case && !nc.is_gold_case {
-                        let air_oil_push = if self.inputs.air_jet_power > 1.0e-4 {
-                            let adx_c = c.x_mm - self.inputs.air_jet_pos_mm[0];
-                            let ady_c = c.y_mm - self.inputs.air_jet_pos_mm[1];
-                            let adx_n = nc.x_mm - self.inputs.air_jet_pos_mm[0];
-                            let ady_n = nc.y_mm - self.inputs.air_jet_pos_mm[1];
-                            let w_c = (-(adx_c * adx_c + ady_c * ady_c) / (2.0 * 9.5 * 9.5)).exp();
-                            let w_n = (-(adx_n * adx_n + ady_n * ady_n) / (2.0 * 9.5 * 9.5)).exp();
-                            38.0 * self.inputs.air_jet_power * (w_n - w_c)
-                        } else {
-                            0.0
-                        };
-                        let diff_oil = (nc.oil_um - c.oil_um) + air_oil_push;
-                        if diff_oil.abs() > 1.2 {
-                            let t_avg = 0.5 * (c.temperature_k + nc.temperature_k);
-                            let mu_oil = watch_oil_viscosity_pa_s(t_avg);
-                            let oil_mob = (0.045 / mu_oil.max(0.008)).clamp(0.0, 1.8);
-                            let d_oil = weight * 0.20 * oil_mob * diff_oil * dt_s / dist_scale;
-                            new_oil_um[idx] = (new_oil_um[idx] + d_oil).max(0.4);
-                            new_oil_um[nidx] = (new_oil_um[nidx] - d_oil).max(0.4);
-                        }
-                    }
-                }
-            }
-        }
-
-        // 4. Apply direct external blowtorch, LN2 Nukiyama boiling, oil pour, and phase transitions on each cell
-        for idx in 0..GRID_CELLS {
-            if !self.grid[idx].active {
-                continue;
-            }
-            let c = &mut self.grid[idx];
-            c.liquid_gold_mm = new_liq_mm[idx].max(0.0);
-            c.liquid_gold_enthalpy_j_kg = new_liq_enth[idx];
-            c.oil_um = new_oil_um[idx].clamp(0.0, 220.0);
-
-            let card = c.material.card();
-            let t_i = c.temperature_k;
-
-            // Natural convection (scaled by ambient chamber pressure) + Stefan-Boltzmann radiation
-            let area_2side = 2.0 * GRID_CELL_AREA_M2;
-            let p_atm_conv = self.inputs.ambient_pressure_atm.clamp(0.0, 5.0).sqrt();
-            let q_amb = (14.0 * p_atm_conv) * area_2side * (T_REF_K - t_i)
-                + card.emissivity
-                    * STEFAN_BOLTZMANN
-                    * area_2side
-                    * (T_REF_K.powi(4) - t_i.powi(4));
-            let mut q_cell_w = net_q_w[idx] + q_amb;
-
-            // Forced convective cooling & frost blow-off from Compressed Air Nozzle (300 K)
-            if self.inputs.air_jet_power > 1.0e-4 {
-                let dx = c.x_mm - self.inputs.air_jet_pos_mm[0];
-                let dy = c.y_mm - self.inputs.air_jet_pos_mm[1];
-                let w_air = (-(dx * dx + dy * dy) / (2.0 * 11.5 * 11.5)).exp();
-                if w_air > 1.0e-4 {
-                    q_cell_w += self.inputs.air_jet_power
-                        * w_air
-                        * (0.009 * AREA_SCALE_VS_24)
-                        * (T_REF_K - t_i);
-                    if c.frost_um > 0.0 {
-                        c.frost_um =
-                            (c.frost_um - 18.0 * self.inputs.air_jet_power * w_air * dt_s).max(0.0);
-                    }
-                }
-            }
-
-            // Direct blowtorch heating on cell (x_mm, y_mm, z_bed)
-            if self.inputs.blowtorch_power > 1.0e-4 {
-                let dx = c.x_mm - self.inputs.blowtorch_pos_mm[0];
-                let dy = c.y_mm - self.inputs.blowtorch_pos_mm[1];
-                let dz = c.bed_elevation_mm - self.inputs.blowtorch_pos_mm[2];
-                let d2 = dx * dx + dy * dy + 0.5 * dz * dz;
-                let w = (-d2 / (2.0 * 10.5 * 10.5)).exp();
-                let flame_temp_k = 2250.0;
-                if flame_temp_k > t_i && w > 1.0e-4 {
-                    let exposure = if c.is_gold_case { 1.45 } else { 0.85 };
-                    let q_t = self.inputs.blowtorch_power
-                        * exposure
-                        * w
-                        * (0.016 * AREA_SCALE_VS_24)
-                        * (flame_temp_k - t_i);
-                    q_cell_w += q_t;
-                    torch_grid_w += q_t;
-                }
-            }
-
-            // Direct LN2 pour and Nukiyama boiling curve (Leidenfrost film vs Nucleate CHF boiling)
-            if self.inputs.ln2_pour_rate > 1.0e-4 {
-                let dx = c.x_mm - self.inputs.ln2_pos_mm[0];
-                let dy = c.y_mm - self.inputs.ln2_pos_mm[1];
-                let w = (-(dx * dx + dy * dy) / (2.0 * 16.0 * 16.0)).exp();
-                c.ln2_mass_g = (c.ln2_mass_g
-                    + self.inputs.ln2_pour_rate * w * (0.24 * AREA_SCALE_VS_24) * dt_s)
-                    .min(0.45 * AREA_SCALE_VS_24);
-            }
-            if c.ln2_mass_g > 1.0e-6 {
-                if t_i > T_LN2_SAT_K + 0.05 {
-                    let dt_sat = t_i - T_LN2_SAT_K;
-                    let h_boil = if t_i <= T_LN2_LEIDENFROST_K {
-                        4_600.0 + 6_000.0 * (dt_sat / 48.0).clamp(0.1, 1.0)
-                    } else {
-                        2_050.0 + 2.3 * (t_i - T_LN2_LEIDENFROST_K)
-                    };
-                    let q_desire_w = h_boil * area_2side * dt_sat * 1.6;
-                    let max_lat_j = c.ln2_mass_g * 1.0e-3 * LN2_LATENT_VAP_J_PER_KG;
-                    let q_boil_j = (q_desire_w * dt_s).min(max_lat_j);
-                    let q_boil_w = q_boil_j / dt_s;
-                    q_cell_w -= q_boil_w;
-                    ln2_grid_w += q_boil_w;
-                    c.ln2_mass_g =
-                        (c.ln2_mass_g - (q_boil_j / LN2_LATENT_VAP_J_PER_KG) * 1.0e3).max(0.0);
-                } else {
-                    c.ln2_mass_g = (c.ln2_mass_g - 0.015 * dt_s).max(0.0);
-                }
-            }
-
-            // Direct watch oil dropper / flood stream
-            if self.inputs.oil_pour_rate > 1.0e-4 && !c.is_gold_case {
-                let dx = c.x_mm - self.inputs.oil_pos_mm[0];
-                let dy = c.y_mm - self.inputs.oil_pos_mm[1];
-                let w = (-(dx * dx + dy * dy) / (2.0 * 11.5 * 11.5)).exp();
-                c.oil_um = (c.oil_um + self.inputs.oil_pour_rate * w * 62.0 * dt_s).min(200.0);
-            }
-
-            // Integrate cell enthalpy and invert enthalpy -> (T, f_L)
-            let gold_mass_kg = GOLD_18K_CARD.density_kg_m3
-                * GRID_CELL_AREA_M2
-                * ((c.liquid_gold_mm + c.frozen_gold_mm) * 1.0e-3);
-            let eff_mass_kg = (c.base_mass_kg + gold_mass_kg).max(2.5e-6);
-            c.enthalpy_j_kg += (q_cell_w * dt_s) / eff_mass_kg;
-
-            let (t_new, phi_new) = card.temperature_and_melt_from_enthalpy(c.enthalpy_j_kg);
-            let _max_dh_dt = card.maximum_temperature_slope();
-            c.temperature_k = t_new;
-            c.melt_fraction = phi_new;
-
-            // Stefan solidification / remelting of displaced gold on the movement substrate
-            // governed by the solidus-liquidus latent heat exchange with the cell!
-            if c.liquid_gold_mm > 1.0e-5 && t_new < GOLD_18K_CARD.t_solidus_k {
-                let subcool = (GOLD_18K_CARD.t_solidus_k - t_new).max(8.0);
-                let freeze_mm = (0.055 * subcool * dt_s).min(c.liquid_gold_mm);
-                c.liquid_gold_mm -= freeze_mm;
-                c.frozen_gold_mm += freeze_mm;
-            } else if c.frozen_gold_mm > 1.0e-5 && t_new > GOLD_18K_CARD.t_liquidus_k {
-                let superheat = t_new - GOLD_18K_CARD.t_liquidus_k;
-                let remelt_mm = (0.030 * superheat * dt_s).min(c.frozen_gold_mm);
-                c.frozen_gold_mm -= remelt_mm;
-                c.liquid_gold_mm += remelt_mm;
-            }
-
-            // Atmospheric moisture frost desublimation below 271 K & sublimation above 274 K
-            if t_new < 271.0 {
-                let subcool = (271.0 - t_new).min(195.0);
-                c.frost_um = (c.frost_um + 0.22 * subcool * dt_s).min(145.0);
-            } else if t_new > 274.0 && c.frost_um > 0.0 {
-                c.frost_um = (c.frost_um - 1.6 * (t_new - 274.0) * dt_s).max(0.0);
-            }
-
-            // Thermal evaporation / smoking of watch oil above 520 K
-            if t_new > 520.0 && c.oil_um > 0.0 {
-                c.oil_um = (c.oil_um - 0.32 * (t_new - 520.0) * dt_s).max(0.0);
-            }
-        }
-
-        // Thermal oxidation of blued steel hairspring (parabolic Deal-Grove / Cabrera-Mott growth above 490 K)
-        // using `fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K`
-        let t_hs = self.nodes[WatchNodeId::HairspringBreguet as usize].temperature_k;
-        if t_hs > 490.0 {
-            let e_act_j_mol = 3800.0 * UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
-            let rate_nm_s = 135.0
-                * (-e_act_j_mol / (UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * t_hs)).exp()
-                * ((t_hs - 490.0) / 80.0);
-            self.hairspring_oxide_nm = (self.hairspring_oxide_nm + rate_nm_s * dt_s).min(420.0);
-        }
-
-        (torch_grid_w, ln2_grid_w)
+        let grad_mag = (grad[0] * grad[0] + grad[1] * grad[1] + grad[2] * grad[2]).sqrt();
+        self.environment.b_balance_t = b_abs;
+        self.environment.grad_b_balance_t_m = grad_mag;
+        self.environment.hairspring_magnetisation = m;
+        self.environment.lever_magnetic_torque_nm = self.lever_torque(cage_angle, lever_angle);
     }
 
-    /// Aggregate the 12 component telemetry nodes directly from the 3D Case Shell & 2D Spatial PDE Grid.
-    fn aggregate_nodes_from_continuum(&mut self) {
-        let mut sum_temp = [0.0_f64; NODE_COUNT];
-        let mut sum_enth = [0.0_f64; NODE_COUNT];
-        let mut sum_melt = [0.0_f64; NODE_COUNT];
-        let mut max_slump = [0.0_f64; NODE_COUNT];
-        let mut sum_liq_gold_g = [0.0_f64; NODE_COUNT];
-        let mut sum_frz_gold_g = [0.0_f64; NODE_COUNT];
-        let mut sum_ln2_g = [0.0_f64; NODE_COUNT];
-        let mut sum_frost = [0.0_f64; NODE_COUNT];
-        let mut sum_oil = [0.0_f64; NODE_COUNT];
-        let mut counts = [0_usize; NODE_COUNT];
-
-        // 1. Aggregate case sectors (nodes 0..=3) from the 3D Case Shell nodes
-        for sn in &self.case_shell {
-            let x = sn.ref_pos_mm[0];
-            let y = sn.ref_pos_mm[1];
-            let sector = if y >= x.abs() {
-                0 // 12h Top
-            } else if y <= -x.abs() {
-                3 // 6h Bottom
-            } else if x < 0.0 {
-                1 // 9h Left
-            } else {
-                2 // 3h Right
-            };
-            sum_temp[sector] += sn.temperature_k;
-            sum_enth[sector] += sn.enthalpy_j_kg;
-            sum_melt[sector] += sn.melt_fraction;
-            sum_ln2_g[sector] += sn.ln2_mass_g;
-
-            let r0 = (sn.ref_pos_mm[0].powi(2) + sn.ref_pos_mm[1].powi(2)).sqrt();
-            let r1 = (sn.pos_mm[0].powi(2) + sn.pos_mm[1].powi(2)).sqrt();
-            let slump = (((r0 - r1).max(0.0) / 5.5)
-                + ((sn.ref_thickness_mm - sn.thickness_mm) / sn.ref_thickness_mm))
-                .clamp(0.0, 1.0);
-            if slump > max_slump[sector] {
-                max_slump[sector] = slump;
-            }
-            counts[sector] += 1;
+    /// Magnetic torque on the soft-steel pallet lever: each lump of steel is
+    /// magnetised by the local field (demagnetising factor 0.3, saturating at
+    /// 1.6 T) and pulled up the gradient of |B|; the torque is taken about the
+    /// lever arbor, in the cage that carries it.
+    fn lever_torque(&self, cage_angle: f64, lever_angle: f64) -> f64 {
+        if !self.inputs.magnet_enabled {
+            return 0.0;
         }
-
-        // 2. Aggregate interior movement nodes (5..=11) and gold accumulation from the 24x24 PDE grid
-        let cell_gold_g_per_mm =
-            GOLD_18K_CARD.density_kg_m3 * GRID_CELL_AREA_M2 * 1.0e-3 * 1.0e3;
-        for c in &self.grid {
-            if !c.active {
-                continue;
-            }
-            let owner = c.owner_node;
-            sum_liq_gold_g[owner] += c.liquid_gold_mm * cell_gold_g_per_mm;
-            sum_frz_gold_g[owner] += c.frozen_gold_mm * cell_gold_g_per_mm;
-            if owner >= 5 {
-                sum_temp[owner] += c.temperature_k;
-                sum_enth[owner] += c.enthalpy_j_kg;
-                sum_melt[owner] += c.melt_fraction;
-                sum_ln2_g[owner] += c.ln2_mass_g;
-                sum_frost[owner] += c.frost_um;
-                sum_oil[owner] += c.oil_um;
-                counts[owner] += 1;
-            } else {
-                sum_frost_case(&mut sum_frost[owner], c.frost_um);
-            }
+        let tc = TOURBILLON_CENTER_MM;
+        let steel_rho = library().steel.rho;
+        // Lever lumps in the cage frame relative to its arbor [mm] and mass [kg].
+        let lumps: [([f64; 2], f64); 4] = [
+            ([0.0, 3.0], 2.0e-6),
+            ([0.0, 1.2], 2.0e-6),
+            ([1.4, -0.65], 2.0e-6),
+            ([-1.4, -0.65], 2.0e-6),
+        ];
+        let arbor_cage = [0.0, -4.2522];
+        let rot = |v: [f64; 2], a: f64| [v[0] * a.cos() - v[1] * a.sin(), v[0] * a.sin() + v[1] * a.cos()];
+        let to_watch = |v: [f64; 2]| {
+            let w = rot(v, -cage_angle);
+            [tc[0] + w[0], tc[1] + w[1], 0.2]
+        };
+        let pivot = to_watch(arbor_cage);
+        let mut tau = 0.0;
+        for (off, mass) in lumps {
+            let local = rot(off, lever_angle);
+            let p = to_watch([arbor_cage[0] + local[0], arbor_cage[1] + local[1]]);
+            let bm = self.b_mag(p);
+            let m_mag = (bm / (MU0 * 0.3)).min(1.6 / MU0);
+            let d = 0.1;
+            let gx = (self.b_mag([p[0] + d, p[1], p[2]]) - self.b_mag([p[0] - d, p[1], p[2]])) / (2.0 * d * 1e-3);
+            let gy = (self.b_mag([p[0], p[1] + d, p[2]]) - self.b_mag([p[0], p[1] - d, p[2]])) / (2.0 * d * 1e-3);
+            let v = mass / steel_rho;
+            let f = [v * m_mag * gx, v * m_mag * gy];
+            let r = [(p[0] - pivot[0]) * 1e-3, (p[1] - pivot[1]) * 1e-3];
+            // Watch-frame torque; the cage frame is turned by −cage_angle,
+            // which leaves a z torque unchanged.
+            tau += r[0] * f[1] - r[1] * f[0];
         }
-
-        fn sum_frost_case(acc: &mut f64, val: f64) {
-            if val > *acc {
-                *acc = val;
-            }
-        }
-
-        for idx in 0..NODE_COUNT {
-            if idx == WatchNodeId::CrystalSapphire as usize {
-                continue;
-            }
-            let n = counts[idx].max(1) as f64;
-            let node = &mut self.nodes[idx];
-            node.temperature_k = sum_temp[idx] / n;
-            node.enthalpy_j_kg = sum_enth[idx] / n;
-            node.melt_fraction = sum_melt[idx] / n;
-            if idx <= 3 {
-                node.plastic_slump = max_slump[idx];
-                node.frost_thickness_um = sum_frost[idx];
-            } else {
-                node.frost_thickness_um = sum_frost[idx] / n;
-                node.oil_film_um = sum_oil[idx] / n;
-            }
-            node.molten_gold_g = sum_liq_gold_g[idx];
-            node.frozen_gold_g = sum_frz_gold_g[idx];
-            node.ln2_film_g = sum_ln2_g[idx];
-            if idx == WatchNodeId::HairspringBreguet as usize {
-                node.oxide_thickness_nm = self.hairspring_oxide_nm;
-            }
-            let card = node.material.card();
-            node.incandescence_rgb =
-                planck_incandescence_linear_rgb(node.temperature_k, card.emissivity);
-        }
-
-        // Sapphire crystal temperature tracks radiative/conductive mean of case rim and mainplate
-        let t_case_avg = 0.25
-            * (self.nodes[0].temperature_k
-                + self.nodes[1].temperature_k
-                + self.nodes[2].temperature_k
-                + self.nodes[3].temperature_k);
-        let t_plate = self.nodes[WatchNodeId::MainplateBrass as usize].temperature_k;
-        let frost_crystal = 0.5
-            * (self.nodes[WatchNodeId::MainplateBrass as usize].frost_thickness_um
-                + self.nodes[3].frost_thickness_um);
-        let crystal = &mut self.nodes[WatchNodeId::CrystalSapphire as usize];
-        crystal.temperature_k = 0.65 * t_case_avg + 0.35 * t_plate;
-        crystal.enthalpy_j_kg = crystal
-            .material
-            .card()
-            .enthalpy_from_temperature_j_kg(crystal.temperature_k);
-        crystal.frost_thickness_um = frost_crystal;
+        tau
     }
 
-    pub(crate) fn recompute_modifiers(&mut self) {
-        let hs_mat = if self.inputs.compensated_hairspring {
-            WatchMaterialId::Invar36Ni
-        } else {
-            WatchMaterialId::HighCarbonSteel
-        };
-        self.nodes[WatchNodeId::HairspringBreguet as usize].material = hs_mat;
-
-        let t_plate = self.nodes[WatchNodeId::MainplateBrass as usize].temperature_k;
-        let t_barrel = self.nodes[WatchNodeId::BarrelMainspring as usize].temperature_k;
-        let t_train = self.nodes[WatchNodeId::GoingTrainWheels as usize].temperature_k;
-        let t_cage = self.nodes[WatchNodeId::TourbillonCage as usize].temperature_k;
-        let t_esc = self.nodes[WatchNodeId::EscapementForkWheel as usize].temperature_k;
-        let t_bal = self.nodes[WatchNodeId::BalanceWheelRim as usize].temperature_k;
-        let t_sp = self.nodes[WatchNodeId::HairspringBreguet as usize].temperature_k;
-        let barrel_youngs_modulus_ratio = HIGH_CARBON_STEEL_CARD
-            .youngs_modulus_ratio(t_barrel)
-            .clamp(0.35, 1.2);
-
-        // 1. Balance wheel moment of inertia I(T) = I_0 * (1 + eps_BeCu(T))^2 + rotational inertia of any gold on the balance rim
-        //    plus `fs_mbd_material::VolumeMoments` for Guillaume mass-poising inertia & `fs_vkplate::air_loss::oscillating_cylinder`
-        //    for barometric air added-mass and Stokes-Stuart oscillating-cylinder aerodynamic drag!
-        let bal_card = self.nodes[WatchNodeId::BalanceWheelRim as usize]
-            .material
-            .card();
-        let eps_bal = bal_card.thermal_strain(t_bal);
-        let poise_screw_vol_m3 = VolumeMoments::sphere(0.28e-3)
-            .map(|vm| vm.volume_m3())
-            .unwrap_or(9.2e-11);
-        let poise_screw_mass_kg = 16.0 * poise_screw_vol_m3 * GOLD_18K_CARD.density_kg_m3;
-        let p_atm_now = self.inputs.ambient_pressure_atm.clamp(0.0, 5.0);
-        let eval_aero = |t_k: f64, p_atm: f64| -> (f64, f64) {
-            if p_atm <= 0.005 {
-                return (0.0, 0.0);
+    fn update_case_shell(&mut self, dt: f64) {
+        let gold = &library().gold;
+        let g = self.gravity();
+        let gm = (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt().max(1e-9);
+        let gh = g.map(|x| x / gm);
+        let l = 8.0e-3;
+        for node in &mut self.case_shell {
+            let c = &self.grid[node.cell];
+            node.temperature_k = c.temperature_k;
+            node.melt_fraction = c.melt_fraction;
+            let frac = if c.struct_gold0_kg > 0.0 { c.struct_gold_kg / c.struct_gold0_kg } else { 1.0 };
+            node.thickness_mm = node.ref_thickness_mm * frac.max(0.0);
+            // Viscous slab sag under self-weight: v ≈ ρ g L² / (8 μ).
+            let mu = gold.effective_viscosity(c.temperature_k, c.melt_fraction);
+            let v = (gold.rho_solid_ref * gm * l * l / (8.0 * mu)).min(0.05);
+            node.sag_mm = (node.sag_mm + v * dt * 1.0e3).min(if frac < 0.05 { 9.0 } else { 6.0 });
+            for k in 0..3 {
+                node.pos_mm[k] = node.ref_pos_mm[k] + gh[k] * node.sag_mm;
             }
-            let p_pa = (p_atm * 101_325.0).clamp(500.0, 600_000.0);
-            GasState::try_new_moist_air(t_k.clamp(220.0, 365.0), p_pa, 0.35)
-                .ok()
-                .and_then(|air_gas| {
-                    oscillating_cylinder(0.275e-3, 2.0 * std::f64::consts::PI * 2.5, &air_gas)
-                        .ok()
-                        .map(|cd| {
-                            let ring_circumference_m = 2.0 * std::f64::consts::PI * 0.0052;
-                            let added_m = cd.added_mass_kg_per_m * ring_circumference_m;
-                            let drag_s_inv = (cd.resistance_n_s_per_m2 * ring_circumference_m
-                                / (0.00036 + poise_screw_mass_kg))
-                                * 0.05;
-                            (added_m, drag_s_inv)
-                        })
-                })
-                .unwrap_or((1.8e-9 * p_atm, 0.018 * p_atm.sqrt()))
-        };
-        let (air_added_mass_now_kg, balance_aero_drag_s_inv) = eval_aero(t_bal, p_atm_now);
-        let (air_added_mass_ref_kg, balance_aero_drag_ref_s_inv) = eval_aero(T_REF_K, 1.0);
-        let delta_air_added_mass_kg = air_added_mass_now_kg - air_added_mass_ref_kg;
-        // Signed aerodynamic damping shift: vacuum (< 0) raises balance amplitude; hyperbaric (> 0) damps it!
-        let mut delta_aero_drag_s_inv =
-            (balance_aero_drag_s_inv - balance_aero_drag_ref_s_inv).clamp(-0.022, 0.45);
-        // Compressed Air Nozzle windage buffeting when aimed near the 6h Tourbillon cage (0, -11)
-        if self.inputs.air_jet_power > 1.0e-4 {
-            let adx = self.inputs.air_jet_pos_mm[0];
-            let ady = self.inputs.air_jet_pos_mm[1] + 11.0;
-            let w_tourb = (-(adx * adx + ady * ady) / (2.0 * 11.0 * 11.0)).exp();
-            delta_aero_drag_s_inv += 0.085 * self.inputs.air_jet_power * w_tourb;
         }
-        let gold_on_bal_g = self.nodes[WatchNodeId::BalanceWheelRim as usize].molten_gold_g
-            + self.nodes[WatchNodeId::BalanceWheelRim as usize].frozen_gold_g
-            + 0.35
-                * (self.nodes[WatchNodeId::TourbillonCage as usize].molten_gold_g
-                    + self.nodes[WatchNodeId::TourbillonCage as usize].frozen_gold_g);
-        let mass_loading_ratio = 1.0
-            + (gold_on_bal_g * 1.0e-3 + delta_air_added_mass_kg) / (0.00036 + poise_screw_mass_kg);
-        let balance_inertia_ratio =
-            ((1.0 + eps_bal) * (1.0 + eps_bal) * mass_loading_ratio).clamp(0.85, 25.0);
+    }
 
-        // 2. Hairspring bending stiffness k(T) = E(T)*b(T)*h(T)^3 / (12*L(T))
-        let sp_card = if self.inputs.compensated_hairspring {
-            &INVAR_36NI_CARD
-        } else {
-            &HIGH_CARBON_STEEL_CARD
-        };
-        let e_ratio = sp_card.youngs_modulus_ratio(t_sp);
-        let eps_sp = sp_card.thermal_strain(t_sp);
-        let k_thermal_ratio = (e_ratio * (1.0 + 3.0 * eps_sp)).clamp(0.15, 1.35);
+    /// Sample a part's footprint into the movement's environment.
+    fn sample_part(&self, cells: &[usize], floor_mm: f64) -> PartField {
+        if cells.is_empty() {
+            return PartField::default();
+        }
+        let n = cells.len() as f64;
+        let mut f = PartField { temperature_k: 0.0, gold_temperature_k: 0.0, ..PartField::default() };
+        let mut fl = 0.0;
+        for &i in cells {
+            let c = &self.grid[i];
+            f.temperature_k += c.temperature_k / n;
+            let lift = (c.bed_mm - floor_mm).max(0.0) * 1.0e-3;
+            let gd = c.gold_depth_m();
+            let mob = c.mobile_fraction();
+            if gd > 0.0 {
+                f.liquid_gold_m += (lift + gd) * mob / n;
+                f.solid_gold_m += (lift + gd) * (1.0 - mob) / n;
+            }
+            let od = c.oil_depth_m();
+            if od > 0.0 {
+                f.oil_m += (lift + gd + od) / n;
+            }
+            f.frost_m += c.frost_kg_m2 / FROST_DENSITY / n;
+            fl += c.melt_fraction / n;
+            f.gold_temperature_k += c.temperature_k / n;
+        }
+        f.gold_liquid_fraction = fl;
+        f
+    }
 
-        // Capillary meniscus coil-sticking when watch oil floods the hairspring cell
-        let oil_sp_um = self.nodes[WatchNodeId::HairspringBreguet as usize].oil_film_um;
-        let gamma_oil = watch_oil_surface_tension_n_m(t_sp);
-        let bridge_frac = if oil_sp_um > 2.5 {
-            let excess = oil_sp_um - 2.5;
-            ((excess / 38.0) * (gamma_oil / 0.031)).clamp(0.0, 0.38)
+    fn refresh_outputs(&mut self, _cage_angle: f64, _lever_angle: f64) {
+        let lib = library();
+        let gold = &lib.gold;
+        let floor = WELL_FLOOR_MM;
+        let mut env = self.environment;
+        env.balance = self.sample_part(&self.part_cells[PART_BALANCE], floor);
+        env.escapement = self.sample_part(&self.part_cells[PART_ESCAPEMENT], floor);
+        env.train = self.sample_part(&self.part_cells[PART_TRAIN], floor);
+        let mut barrel = self.sample_part(&self.part_cells[PART_BARREL], 0.0);
+        // Liquids on the dial do not reach the barrel; frozen gold round the
+        // pendant does block the keyless works.
+        let crown = self.sample_part(&self.crown_cells, 0.0);
+        barrel.liquid_gold_m = 0.0;
+        barrel.oil_m = 0.0;
+        barrel.solid_gold_m = crown.solid_gold_m;
+        env.barrel = barrel;
+        env.air_pressure_pa = self.pressure_pa();
+        env.air_temperature_k = env.balance.temperature_k;
+        env.gravity_m_s2 = self.gravity();
+        // Air-jet speed where it crosses the balance (free-jet decay).
+        let i = &self.inputs;
+        env.air_jet_speed_m_s = if i.air_jet_power > 0.0 {
+            let p = i.air_jet_pos_mm;
+            let d = ((p[0] - TOURBILLON_CENTER_MM[0]).powi(2) + (p[1] - TOURBILLON_CENTER_MM[1]).powi(2) + (p[2] - 0.6).powi(2))
+                .sqrt()
+                .max(1.0);
+            150.0 * i.air_jet_power * (6.2 * 1.5 / d).min(1.0)
         } else {
             0.0
         };
-        let k_oil_ratio = 1.0 / (1.0 - 0.65 * bridge_frac);
+        self.environment = env;
 
-        // 3. 3D Dipolar Magnetic Field B(r) from external NdFeB N42 magnet + ferromagnetic remanence
-        //    plus end-winding mutual inductance (`fs_em::winding::end::EndWindingInductance`) and
-        //    ambient boundary-layer admission (`fs_atmo::FlatSiteLogLaw`)
-        let _atmo_ok = FlatSiteLogLaw {
-            scenario_effective_z0_m: 1.0e-4,
-            displacement_height_m: 0.0,
-            reference_height_m: 0.10,
-            reference_speed_mps: 0.15,
-        }
-        .admit()
-        .is_ok();
-        let end_ind_h = EndWindingInductance::new(vec![1.4e-7, 1.4e-7], Vec::<EndWindingMode>::new())
-            .map(|ew| ew.matrix_h().first().copied().unwrap_or(1.4e-7))
-            .unwrap_or(1.4e-7);
-        let mut b_esc_mt = 0.0;
-        let mut b_signed_dir = 1.0;
-        if self.inputs.magnet_enabled && self.inputs.magnet_strength > 1.0e-4 {
-            let esc_pos = self.nodes[WatchNodeId::EscapementForkWheel as usize].pos_mm;
-            let dx = esc_pos[0] - self.inputs.magnet_pos_mm[0];
-            let dy = esc_pos[1] - self.inputs.magnet_pos_mm[1];
-            let dz = esc_pos[2] - self.inputs.magnet_pos_mm[2];
-            let r_mm = (dx * dx + dy * dy + dz * dz).sqrt().max(6.5);
-            let r_eff_mm = 11.5;
-            b_esc_mt = (self.inputs.magnet_strength * 680.0 * (r_eff_mm / r_mm).powi(3))
-                .clamp(0.0, 950.0);
-            b_signed_dir = if dx >= 0.0 { 1.0 } else { -1.0 };
-
-            if b_esc_mt > 3.5 {
-                let target_rem = (0.32 * b_esc_mt).min(28.0);
-                if target_rem > self.remanent_magnetization_mt {
-                    self.remanent_magnetization_mt = target_rem;
-                }
-            }
-        }
-        let b_eff_mt = b_esc_mt + self.remanent_magnetization_mt + end_ind_h * 0.0;
-        let mag_sus_factor = if self.inputs.compensated_hairspring {
-            0.55
-        } else {
-            1.0
-        };
-        let k_mag_ratio = 1.0 + mag_sus_factor * 0.0022 * b_eff_mt.min(120.0);
-        let hairspring_eq_bias_rad =
-            b_signed_dir * mag_sus_factor * (0.0045 * b_eff_mt).clamp(-0.32, 0.32);
-
-        let pallet_magnetic_bias_torque_nm =
-            b_signed_dir * 2.4e-8 * (b_esc_mt * b_esc_mt / (1.0 + 0.04 * b_esc_mt))
-                + b_signed_dir * 1.8e-8 * self.remanent_magnetization_mt;
-        let magnetically_pinned = b_esc_mt > 22.0;
-
-        let hairspring_stiffness_ratio =
-            (k_thermal_ratio * k_oil_ratio * k_mag_ratio).clamp(0.15, 2.50);
-        let natural_freq_ratio = (hairspring_stiffness_ratio / balance_inertia_ratio).sqrt();
-        let theoretical_rate_s_per_day = (natural_freq_ratio - 1.0) * 86_400.0;
-
-        // 4. Differential thermal expansion of pivots inside ruby jewel holes
-        let eps_plate = self.nodes[WatchNodeId::MainplateBrass as usize]
-            .material
-            .card()
-            .thermal_strain(t_plate);
-        let eps_ruby = self.nodes[WatchNodeId::CrystalSapphire as usize]
-            .material
-            .card()
-            .thermal_strain(t_cage);
-        let eps_steel_esc = HIGH_CARBON_STEEL_CARD.thermal_strain(t_esc);
-        let eps_steel_train = HIGH_CARBON_STEEL_CARD.thermal_strain(t_train);
-
-        let cryo_pinch_um = 420.0 * (eps_plate - eps_steel_train).min(0.0);
-        let hot_arbor_pinch_um = 380.0 * (eps_ruby - eps_steel_esc).min(0.0);
-        let min_pivot_clearance_um = (4.5 + cryo_pinch_um + hot_arbor_pinch_um).clamp(-2.0, 8.0);
-        let thermal_or_cryo_seized = min_pivot_clearance_um <= 0.15;
-
-        // 5. Stribeck lubrication & Concentric Couette journal bearing drag (`fs_tribo::journal::GeneralizedNewtonianJournal`)
-        let mu_oil_esc = watch_oil_viscosity_pa_s(0.5 * (t_esc + t_bal));
-        let mu_ref = watch_oil_viscosity_pa_s(T_REF_K);
-        let pivot_r_m = 0.06e-3;
-        let clearance_m = (min_pivot_clearance_um.max(0.25) * 1.0e-6).clamp(0.25e-6, 12.0e-6);
-        let ref_clearance_m = 4.5e-6;
-        let journal_solve = JournalShearSolve {
-            maximum_iterations: 24,
-            absolute_angular_rate_tolerance_per_s: 1.0e-6,
-            relative_angular_rate_tolerance: 1.0e-6,
-        };
-        let journal_now = GeneralizedNewtonianJournal::new(
-            JournalGeometry {
-                inner_radius_m: pivot_r_m,
-                outer_radius_m: pivot_r_m + clearance_m,
-                length_m: 0.18e-3,
-            },
-            vec![
-                JournalViscosityKnot {
-                    shear_rate_per_s: 0.0,
-                    dynamic_viscosity_pa_s: mu_oil_esc,
-                },
-                JournalViscosityKnot {
-                    shear_rate_per_s: 2.0e6,
-                    dynamic_viscosity_pa_s: (mu_oil_esc * 0.92).max(1.0e-4),
-                },
-            ],
-            journal_solve,
-        )
-        .ok();
-        let journal_ref = GeneralizedNewtonianJournal::new(
-            JournalGeometry {
-                inner_radius_m: pivot_r_m,
-                outer_radius_m: pivot_r_m + ref_clearance_m,
-                length_m: 0.18e-3,
-            },
-            vec![
-                JournalViscosityKnot {
-                    shear_rate_per_s: 0.0,
-                    dynamic_viscosity_pa_s: mu_ref,
-                },
-                JournalViscosityKnot {
-                    shear_rate_per_s: 2.0e6,
-                    dynamic_viscosity_pa_s: mu_ref * 0.92,
-                },
-            ],
-            journal_solve,
-        )
-        .ok();
-        let couette_torque_ratio = match (journal_now, journal_ref) {
-            (Some(jn), Some(jr)) => {
-                let t_now = jn
-                    .response(45.0)
-                    .map(|r| r.resisting_torque_nm.abs())
-                    .unwrap_or(1.0e-9);
-                let t_ref = jr
-                    .response(45.0)
-                    .map(|r| r.resisting_torque_nm.abs())
-                    .unwrap_or(1.0e-9)
-                    .max(1.0e-12);
-                (t_now / t_ref).clamp(0.08, 1200.0)
-            }
-            _ => (mu_oil_esc / mu_ref).clamp(0.08, 1200.0),
-        };
-        let visc_ratio = (mu_oil_esc / mu_ref).clamp(0.08, 1200.0);
-        let oil_esc_um = self.nodes[WatchNodeId::EscapementForkWheel as usize].oil_film_um;
-        let starvation_penalty = if oil_esc_um < 0.35 {
-            1.0 + 5.5 * ((0.35 - oil_esc_um) / 0.35)
-        } else {
-            1.0
-        };
-        let clearance_penalty = if min_pivot_clearance_um < 1.2 {
-            1.0 + 18.0 * ((1.2 - min_pivot_clearance_um.max(0.0)) / 1.2).powi(2)
-        } else {
-            1.0
-        };
-        let g_vec = self.inputs.gravity_g_vec;
-        let g_mag = (g_vec[0] * g_vec[0] + g_vec[1] * g_vec[1] + g_vec[2] * g_vec[2]).sqrt();
-        let g_load_penalty = (1.0 + 0.055 * (g_mag - 1.0).max(-0.4)).clamp(0.75, 2.5);
-        let pivot_friction_multiplier = (starvation_penalty
-            * clearance_penalty
-            * g_load_penalty
-            * (0.65 + 0.35 * couette_torque_ratio.min(35.0)))
-        .clamp(0.65, 250.0);
-
-        let oil_bal_um = self.nodes[WatchNodeId::BalanceWheelRim as usize].oil_film_um;
-        let flood_um = (oil_bal_um.max(oil_sp_um) - 3.5).max(0.0);
-        let oil_flood_damping = 0.16 * flood_um * visc_ratio.sqrt().min(12.0);
-        let cryo_visc_damping = if visc_ratio > 8.0 {
-            0.035 * (visc_ratio - 8.0).min(450.0)
-        } else {
-            0.0
-        };
-        let eddy_damping = 0.000_28 * b_eff_mt * b_eff_mt;
-
-        // 6. Spatially-integrated hydrodynamic viscous torque & solid yield interference torque
-        //    from mobile liquid gold (H_Au) and solidified gold (S_Au) occupying the moving wheel footprints!
-        let mut tau_visc_nm = 0.0;
-        let mut tau_solid_nm = 0.0;
+        // Twelve region nodes.
+        let mut acc = [ThermalPhaseNode::default(); NODE_COUNT];
+        let mut cnt = [0.0_f64; NODE_COUNT];
         for c in &self.grid {
-            if !c.active || c.is_gold_case {
-                continue;
-            }
-            if c.liquid_gold_mm <= 1.0e-4 && c.frozen_gold_mm <= 1.0e-4 {
-                continue;
-            }
-            // Check geometric overlap with the moving mechanisms (Barrel=6, Train=7, Tourbillon=8..=11)
-            let (r_lever_m, gear_gain) = match c.owner_node {
-                6 => (0.0055, 1.0),    // Mainspring Barrel teeth
-                7 => (0.0038, 8.0),    // Going train wheels (reflected by gear ratio)
-                8..=11 => (0.0042, 45.0), // Tourbillon carriage, escape wheel & balance rim (high mechanical advantage!)
-                _ => (0.0020, 0.25),
+            let mut slots: [Option<usize>; 2] = [None, None];
+            slots[0] = match c.region {
+                Region::Outside => None,
+                Region::CaseTop => Some(0),
+                Region::CaseLeft => Some(1),
+                Region::CaseRight => Some(2),
+                Region::CaseBottom => Some(3),
+                Region::Plate => Some(5),
+                Region::Barrel => Some(6),
+                Region::Train => Some(7),
+                Region::Cage => Some(8),
+                Region::Escapement => Some(9),
+                Region::Balance => Some(10),
             };
-            if c.liquid_gold_mm > 1.0e-4 {
-                let mu_au = gold_effective_viscosity_pa_s(
-                    c.temperature_k.max(1340.0),
-                    c.melt_fraction.max(0.2),
-                );
-                let h_gap_m = 0.4e-3;
-                let shear_pa = mu_au * (15.0 / h_gap_m) * (c.liquid_gold_mm / 0.35).min(3.0);
-                tau_visc_nm += shear_pa * GRID_CELL_AREA_M2 * r_lever_m * gear_gain;
+            if c.in_hairspring {
+                slots[1] = Some(11);
+            } else if c.kind == CellKind::Interior {
+                slots[1] = Some(4);
             }
-            if c.frozen_gold_mm > 1.0e-4 {
-                let sigma_y = gold_viscoplastic_yield_stress_pa(c.temperature_k, c.melt_fraction, 0.1);
-                let contact_area_m2 =
-                    (c.frozen_gold_mm * 1.0e-3) * (GRID_DX_M * 0.35) * (GRID_DX_M / 0.0024);
-                tau_solid_nm += 0.577 * sigma_y * contact_area_m2 * r_lever_m * gear_gain;
+            for k in slots.into_iter().flatten() {
+                let a = &mut acc[k];
+                a.temperature_k += c.temperature_k;
+                a.melt_fraction += c.melt_fraction;
+                a.plastic_slump += c.case_slump_frac();
+                a.molten_gold_g += c.gold_kg * c.mobile_fraction() * 1.0e3;
+                a.frozen_gold_g += c.gold_kg * (1.0 - c.mobile_fraction()) * 1.0e3;
+                a.ln2_film_g += c.ln2_kg * 1.0e3;
+                a.frost_thickness_um += c.frost_um();
+                a.oil_film_um += c.oil_depth_m() * 1.0e6;
+                cnt[k] += 1.0;
             }
         }
+        for k in 0..NODE_COUNT {
+            let n = cnt[k].max(1.0);
+            let a = &mut acc[k];
+            a.temperature_k /= n;
+            a.melt_fraction /= n;
+            a.plastic_slump /= n;
+            a.frost_thickness_um /= n;
+            a.oil_film_um /= n;
+            a.enthalpy_j_kg = gold.enthalpy_at(a.temperature_k);
+            let eps = if k <= 3 { gold.emissivity(a.melt_fraction, 50.0) } else { 0.4 };
+            a.incandescence_rgb = lib.blackbody.display_rgb(a.temperature_k, eps);
+        }
+        self.nodes = acc;
+        self.blued_steel_rgb = blued_steel_interference_rgb(self.hairspring_oxide_nm, 0.85);
+    }
 
-        // Compare resistive torque against the 8.2 mN*m nominal barrel drive torque:
-        let drive_ref_nm = 0.0082;
-        let gold_fouling_jam_factor =
-            ((tau_visc_nm * 12.0 + tau_solid_nm) / drive_ref_nm).clamp(0.0, 1.0);
-        let frozen_gold_locked = tau_solid_nm > drive_ref_nm * 0.45;
-        let gold_damping = 42.0 * gold_fouling_jam_factor;
+    /// Loudness of the degauss coil, 0–1, following its field amplitude.
+    #[must_use]
+    pub fn degauss_level(&self) -> f64 {
+        if self.degauss_t >= 0.0 { (-self.degauss_t / DEGAUSS_TAU_S).exp() } else { 0.0 }
+    }
 
-        let extra_balance_damping_s_inv = oil_flood_damping
-            + cryo_visc_damping
-            + eddy_damping
-            + gold_damping
-            + delta_aero_drag_s_inv;
-
-        // 7. Forward-mode Automatic Differentiation (`fs_ad::Dual64`) for exact thermoelastic rate sensitivity d(rate)/dT
-        //    including the quadratic Dent anomaly (-2.2e-7 K^-2 for Invar / -6.5e-8 K^-2 for Steel)
-        //    and Certified Interval Arithmetic (`fs_ivl::Interval`) for worst-case manufacturing tolerance enclosure!
-        let dt_ad = Dual64::<1>::variable((t_sp - T_REF_K).clamp(-200.0, 600.0), 0);
-        let alpha_sp_ad = Dual64::<1>::constant(sp_card.cte_per_k);
-        let alpha_bal_ad = Dual64::<1>::constant(bal_card.cte_per_k);
-        let d_e_dt_ad = Dual64::<1>::constant(sp_card.thermoelastic_beta_per_k);
-        let quad_coeff = if self.inputs.compensated_hairspring {
-            -2.2e-7
-        } else {
-            -6.5e-8
-        };
-        let e_ratio_ad = Dual64::<1>::constant(1.0)
-            + d_e_dt_ad * dt_ad
-            + Dual64::<1>::constant(quad_coeff) * dt_ad * dt_ad;
-        let k_sp_ad = e_ratio_ad
-            * (Dual64::<1>::constant(1.0) + Dual64::<1>::constant(3.0) * alpha_sp_ad * dt_ad)
-            * Dual64::<1>::constant(k_oil_ratio * k_mag_ratio);
-        let i_bal_ad = (Dual64::<1>::constant(1.0) + alpha_bal_ad * dt_ad)
-            * (Dual64::<1>::constant(1.0) + alpha_bal_ad * dt_ad)
-            * Dual64::<1>::constant(mass_loading_ratio);
-        let rate_ad = ((k_sp_ad / i_bal_ad).sqrt() - Dual64::<1>::constant(1.0))
-            * Dual64::<1>::constant(86_400.0);
-        let rate_sensitivity_s_day_per_k = rate_ad.eps[0];
-
-        // Interval arithmetic (`fs_ivl::Interval`): propagate +-1.5% hairspring thickness tolerance and +-0.4 K thermal gradient
-        let k_ivl = Interval::new(
-            (hairspring_stiffness_ratio * 0.99975).max(0.10),
-            hairspring_stiffness_ratio * 1.00025,
-        );
-        let i_ivl = Interval::new(
-            (balance_inertia_ratio * 0.99985).max(0.50),
-            balance_inertia_ratio * 1.00015,
-        );
-        let ratio_lo = (k_ivl.lo() / i_ivl.hi()).max(0.01).sqrt();
-        let ratio_hi = (k_ivl.hi() / i_ivl.lo()).max(0.01).sqrt();
-        let rate_ivl = Interval::new((ratio_lo - 1.0) * 86_400.0, (ratio_hi - 1.0) * 86_400.0);
-
-        self.modifiers = CoupledWatchModifiers {
-            balance_inertia_ratio,
-            hairspring_stiffness_ratio,
-            barrel_youngs_modulus_ratio,
-            natural_freq_ratio,
-            theoretical_rate_s_per_day,
-            rate_sensitivity_s_day_per_k,
-            rate_interval_lo_s_day: rate_ivl.lo(),
-            rate_interval_hi_s_day: rate_ivl.hi(),
-            balance_aero_drag_s_inv,
-            pivot_friction_multiplier,
-            extra_balance_damping_s_inv,
-            hairspring_oil_bridge_fraction: bridge_frac,
-            min_pivot_clearance_um,
-            b_field_escapement_mt: b_esc_mt,
-            remanent_magnetization_mt: self.remanent_magnetization_mt,
-            pallet_magnetic_bias_torque_nm,
-            hairspring_eq_bias_rad,
-            gold_fouling_jam_factor,
-            liquid_gold_viscous_torque_nm: tau_visc_nm,
-            solid_gold_yield_torque_nm: tau_solid_nm,
-            frozen_gold_locked,
-            thermal_or_cryo_seized,
-            magnetically_pinned,
-            ln2_boiling_power_w: self.modifiers.ln2_boiling_power_w,
-            blowtorch_heating_power_w: self.modifiers.blowtorch_heating_power_w,
-            blued_steel_rgb: blued_steel_interference_rgb(self.hairspring_oxide_nm, 1.0),
-            air_cooling_power_w: self.inputs.air_jet_power * 18.0,
-            ambient_pressure_atm: p_atm_now,
-            gravity_g_vec: g_vec,
-            shock_envelope_g: self.shock_envelope_g,
-        };
+    /// Average temperature of the balance region [K].
+    #[must_use]
+    pub fn balance_temperature_k(&self) -> f64 {
+        self.environment.balance.temperature_k
     }
 }
 
@@ -2291,87 +1866,133 @@ impl Default for MultiphysicsState {
     }
 }
 
+/// Grid cell containing watch-frame point (x, y) [mm].
+#[must_use]
+pub fn cell_at(x_mm: f64, y_mm: f64) -> Option<usize> {
+    let gx = ((x_mm + GRID_HALF_SPAN_MM) / GRID_DX_MM).floor();
+    let gy = ((y_mm + GRID_HALF_SPAN_MM) / GRID_DX_MM).floor();
+    if gx < 0.0 || gy < 0.0 || gx >= GRID_N as f64 || gy >= GRID_N as f64 {
+        return None;
+    }
+    Some(gy as usize * GRID_N + gx as usize)
+}
+
+/// Column enthalpy at `t_k` for a cell's current contents (used by tests and
+/// for setting initial states).
+#[must_use]
+pub fn column_enthalpy(cell: &SpatialCell, t_k: f64) -> f64 {
+    column_table().enthalpy(cell.struct_gold_kg + cell.gold_kg, cell.c_other.max(1e-5), t_k)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn blowtorch_heats_watch_shifts_rate_then_melts_gold_into_inner_workings() {
-        let mut mp = MultiphysicsState::new();
-        mp.inputs.blowtorch_power = 1.0;
-        mp.inputs.blowtorch_pos_mm = [0.0, -25.0, 0.0];
-
-        // 1. Moderate heating (1.0 s): watch warms up, losing time due to E(T) drop + rim expansion
-        for _ in 0..20 {
-            mp.step(0.05);
+    fn column_enthalpy_inverts_through_the_mushy_zone() {
+        let t = column_table();
+        for &tk in &[77.0, 200.0, 293.15, 900.0, 1158.15, 1162.0, 1168.15, 1400.0] {
+            let h = t.enthalpy(1.0e-3, 2.0e-3, tk);
+            let back = t.temperature(1.0e-3, 2.0e-3, h);
+            assert!((back - tk).abs() < 1e-6, "{tk} → {back}");
         }
-        assert!(mp.nodes[WatchNodeId::CaseBottom18kGold as usize].temperature_k > 400.0);
-        assert!(mp.modifiers.theoretical_rate_s_per_day < -10.0);
-
-        // 2. Sustained blowtorch heating (7.0 more seconds): 18k gold case exceeds solidus (1163 K),
-        //    deforms viscoplastically under Johnson-Cook + Young-Laplace surface tension, and sheds
-        //    molten gold into the 6h Tourbillon well!
-        for _ in 0..140 {
-            mp.step(0.05);
-        }
-        let case_bottom = mp.nodes[WatchNodeId::CaseBottom18kGold as usize];
-        assert!(
-            case_bottom.temperature_k > GOLD_18K_CARD.t_solidus_k,
-            "expected case bottom T > solidus, got {}",
-            case_bottom.temperature_k
-        );
-        assert!(
-            case_bottom.melt_fraction > 0.1,
-            "expected melt_fraction > 0.1, got {}",
-            case_bottom.melt_fraction
-        );
-        assert!(
-            case_bottom.plastic_slump > 0.05,
-            "expected emergent 3D shell deformation > 0.05, got {}",
-            case_bottom.plastic_slump
-        );
-        assert!(
-            mp.modifiers.gold_fouling_jam_factor > 0.25,
-            "expected emergent viscous/solid gold fouling torque factor > 0.25, got {}",
-            mp.modifiers.gold_fouling_jam_factor
-        );
-
-        // 3. Turn off blowtorch and pour Liquid Nitrogen (LN2 at 77.36 K):
-        //    molten gold quenches below solidus and permanently locks the movement!
-        mp.inputs.blowtorch_power = 0.0;
-        mp.inputs.ln2_pour_rate = 1.0;
-        mp.inputs.ln2_pos_mm = [0.0, -18.0, 2.0];
-        for _ in 0..120 {
-            mp.step(0.05);
-        }
-        assert!(
-            mp.modifiers.frozen_gold_locked,
-            "expected solidified gold yield torque to lock movement after LN2 quench"
-        );
-        assert!(mp.nodes[WatchNodeId::CaseBottom18kGold as usize].plastic_slump > 0.05);
+        let mushy = t.capacity(1e-3, 0.0, 1162.0);
+        let solid = t.capacity(1e-3, 0.0, 900.0);
+        assert!(mushy > 15.0 * solid, "latent heat shows as capacity: {mushy} vs {solid} J/K");
     }
 
     #[test]
-    fn magnet_pins_pallet_fork_and_leaves_remanence_until_degaussed() {
-        let mut mp = MultiphysicsState::new();
-        mp.inputs.magnet_enabled = true;
-        mp.inputs.magnet_strength = 1.2;
-        mp.inputs.magnet_pos_mm = [-2.0, -12.0, 4.0];
-        mp.step(0.02);
+    fn ln2_boiling_curve_has_its_three_regimes() {
+        let p = P_ATM_PA;
+        let q5 = ln2_boiling_flux(5.0, p, G0_M_S2);
+        let q_chf = (1..60).map(|d| ln2_boiling_flux(d as f64, p, G0_M_S2)).fold(0.0_f64, f64::max);
+        let q200 = ln2_boiling_flux(200.0, p, G0_M_S2);
+        assert!(q_chf > 1.2e5 && q_chf < 2.6e5, "CHF {q_chf}");
+        assert!(q5 > 1.0e4 && q5 < q_chf, "nucleate {q5}");
+        assert!(q200 > 5.0e3 && q200 < 6.0e4, "film {q200}");
+        // The Leidenfrost minimum lies between them.
+        let q_min = (20..120).map(|d| ln2_boiling_flux(d as f64, p, G0_M_S2)).fold(f64::INFINITY, f64::min);
+        assert!(q_min < q200 && q_min < q_chf / 5.0, "minimum {q_min}");
+    }
 
-        assert!(mp.modifiers.b_field_escapement_mt > 50.0);
-        assert!(mp.modifiers.magnetically_pinned);
-        assert!(mp.modifiers.remanent_magnetization_mt > 5.0);
-
-        mp.inputs.magnet_enabled = false;
-        mp.step(0.02);
-        assert!(!mp.modifiers.magnetically_pinned);
-        assert!(mp.modifiers.remanent_magnetization_mt > 5.0);
-
-        mp.trigger_degauss();
-        for _ in 0..40 {
-            mp.step(0.05);
+    #[test]
+    fn idle_watch_stays_at_room_temperature() {
+        let mut m = MultiphysicsState::new();
+        for _ in 0..20 {
+            m.step(0.05, 0.0, 0.0);
         }
-        assert!(mp.modifiers.remanent_magnetization_mt < 0.2);
+        let t = m.environment.balance.temperature_k;
+        assert!((t - T_REF_K).abs() < 1e-6, "balance {t}");
+        assert!(m.quiet, "idle grid goes quiet");
+    }
+
+    #[test]
+    fn torch_heats_and_ln2_cools_the_movement() {
+        let mut m = MultiphysicsState::new();
+        m.inputs.blowtorch_power = 1.0;
+        m.inputs.blowtorch_pos_mm = [0.0, -11.0, 3.0];
+        for _ in 0..100 {
+            m.step(0.05, 0.0, 0.0);
+        }
+        let hot = m.environment.balance.temperature_k;
+        assert!(hot > 340.0, "torch on the tourbillon for 5 s: {hot} K");
+        assert!(m.blowtorch_heating_power_w > 20.0, "torch power {}", m.blowtorch_heating_power_w);
+        m.inputs.blowtorch_power = 0.0;
+        m.inputs.ln2_pour_rate = 1.0;
+        m.inputs.ln2_pos_mm = [0.0, -11.0, 3.0];
+        for _ in 0..200 {
+            m.step(0.05, 0.0, 0.0);
+        }
+        // A hot part under poured LN₂ sits in film boiling (Leidenfrost): a few
+        // 10⁴ W/m² over the wetted area, so it cools by hundreds of kelvin in
+        // ten seconds but not to cryogenic temperatures.
+        let cold = m.environment.balance.temperature_k;
+        assert!(cold < hot - 150.0, "LN₂ quench: {hot} K → {cold} K");
+        let wetted: f64 = m.grid.iter().map(|c| (c.ln2_kg / (ln2::RHO_LIQUID * CELL_AREA * 0.2e-3)).clamp(0.0, 1.0)).sum::<f64>()
+            * CELL_AREA;
+        let flux = m.ln2_boiling_power_w / wetted.max(1e-12);
+        assert!((5.0e3..2.0e5).contains(&flux), "film-boiling flux {flux} W/m²");
+    }
+
+    #[test]
+    fn ln2_pooled_on_a_flat_watch_chills_the_tourbillon() {
+        // On the bench, dial up: the nitrogen pools in the tourbillon recess.
+        let mut m = MultiphysicsState::new();
+        m.inputs.gravity_g_vec = [0.0, 0.0, -1.0];
+        m.inputs.ln2_pour_rate = 1.0;
+        m.inputs.ln2_pos_mm = [0.0, -11.0, 3.0];
+        let mut trace = Vec::new();
+        for i in 0..600 {
+            m.step(0.05, 0.0, 0.0);
+            if i % 100 == 99 {
+                trace.push((m.environment.balance.temperature_k, m.ln2_boiling_power_w, m.environment.balance.frost_m * 1e6));
+            }
+        }
+        println!("LN₂ on a cold watch, every 5 s (T K, P W, frost µm): {trace:.1?}");
+        // Film boiling over one face of a ~16 J/K watch: tens of watts, a
+        // couple of kelvin per second, steadily.
+        let t = m.environment.balance.temperature_k;
+        assert!(t < 250.0, "30 s of LN₂ on the tourbillon: {t} K");
+        assert!((20.0..200.0).contains(&m.ln2_boiling_power_w), "boiling power {} W", m.ln2_boiling_power_w);
+    }
+
+    #[test]
+    fn magnet_pulls_on_the_lever_and_magnetises_a_steel_spring() {
+        let mut m = MultiphysicsState::new();
+        m.inputs.compensated_hairspring = false;
+        m.inputs.magnet_enabled = true;
+        m.inputs.magnet_pos_mm = [13.0, -11.0, 2.5];
+        m.step(0.05, 0.3, -0.09);
+        assert!(m.b_field_escapement_mt > 20.0, "B {} mT", m.b_field_escapement_mt);
+        assert!(m.environment.lever_magnetic_torque_nm.abs() > 1.0e-8);
+        let mag = m.hairspring_magnetisation;
+        m.inputs.magnet_enabled = false;
+        m.step(0.05, 0.3, -0.09);
+        assert!(m.hairspring_magnetisation.abs() > 0.0 && mag != 0.0, "remanence after removal");
+        m.trigger_degauss();
+        for _ in 0..60 {
+            m.step(0.05, 0.3, -0.09);
+        }
+        assert!(m.hairspring_magnetisation.abs() < 0.05, "degaussed: {}", m.hairspring_magnetisation);
     }
 }

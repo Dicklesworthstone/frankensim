@@ -51,6 +51,8 @@ export interface ToolRenderParams {
   ambientPressureAtm?: number;
   gravityGVec?: [number, number, number];
   micPosMm: [number, number, number];
+  /** Draw the microphone capsule (it hovers over the dial, so only while it is in use). */
+  micVisible?: boolean;
   caseShellData?: Float32Array;
   spatialGridData?: Float32Array;
   mainspringCoilsMm?: Float32Array;
@@ -69,7 +71,7 @@ const CASE_RENDER_NODES = CASE_RENDER_N_THETA * CASE_RENDER_N_Z;
 
 // The Rust spatial PDE grid size can change between engine builds: the scene infers N from the
 // snapshot length (7 floats per cell) and takes the half span from `grid_half_span_mm()` when exposed.
-let GRID_N = 48;
+let GRID_N = 64;
 let GRID_HALF_SPAN_MM = 28.8;
 let GRID_DX_MM = (2.0 * GRID_HALF_SPAN_MM) / GRID_N;
 /** Vertices per side of the GPU-displaced molten/solid gold heightfield meshes. */
@@ -1106,9 +1108,24 @@ export class PocketWatchScene {
     this.controls.minDistance = 4;
     this.controls.maxDistance = 480; // portrait phones frame the whole watch from ~260 mm
     this.controls.target.set(0, -2, 0);
+    // Scroll and pinch zoom toward the point under the cursor, as in CAD and map viewers.
+    this.controls.zoomToCursor = true;
+    this.controls.screenSpacePanning = true;
     this.controls.addEventListener("start", () => {
       this.cameraTween = null;
       this.userAdjustedView = true;
+    });
+    // Apply the inspect-mode button map now; OrbitControls' own default dollies on the middle button.
+    this.setToolMode(this.activeTool);
+    // Keep the orbit centre on the watch: panning or cursor zoom can never lose it off-screen.
+    this.controls.addEventListener("change", () => {
+      const t = this.controls.target;
+      const r = t.length();
+      if (r > PocketWatchScene.TARGET_LIMIT_MM) {
+        const back = t.clone().multiplyScalar(PocketWatchScene.TARGET_LIMIT_MM / r - 1);
+        t.add(back);
+        this.camera.position.add(back);
+      }
     });
 
     // Museum-grade chiaroscuro horological lighting (balanced to prevent metallic blowout)
@@ -2387,7 +2404,7 @@ if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) 
    * 7. 48-Part 1-Minute Titanium Tourbillon Carriage at 6h (`x = 0, y = -11.0`),
    *    15-Tooth Club-Tooth Steel Escape Wheel, Counterpoised Swiss Lever Pallet Fork
    *    with Angled Synthetic Ruby Pallet Stones, Double-Roller Glucydur Balance Wheel
-   *    with 16 Gold Timing Screws + 4 Microstella Nuts, and 14-Turn 3D Breguet Overcoil Hairspring.
+   *    with 8 Gold Timing Screws + 4 Microstella Nuts, and a 13-turn hairspring with a Breguet overcoil end.
    */
   private buildTourbillonEscapementAndBalance(): void {
     this.tourbillonCageGroup.position.set(0, -11.0, 0.45);
@@ -2554,7 +2571,7 @@ if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) 
       this.tourbillonCageGroup.add(bankPin);
     }
 
-    // Pierced 4-Arm Glucydur Beryllium-Copper Balance Wheel + Double Roller + 16 Gold Screws + 4 Microstella Nuts
+    // Pierced 4-Arm Glucydur Beryllium-Copper Balance Wheel + Double Roller + 8 Gold Screws + 4 Microstella Nuts
     this.balanceWheelGroup.position.set(0, 0, 0.22);
 
     const balanceRim = new THREE.Mesh(
@@ -2584,9 +2601,9 @@ if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) 
       this.balanceWheelGroup.add(microstella);
     }
 
-    // 16 Slotted 18k Gold Poising Screws around the Glucydur Balance Rim
-    for (let k = 0; k < 16; k++) {
-      const a = (k * Math.PI * 2) / 16;
+    // 8 slotted 18k gold timing screws round the rim (the engine's balance inertia counts these 8)
+    for (let k = 0; k < 8; k++) {
+      const a = (k * Math.PI * 2) / 8 + Math.PI / 8;
       const screw = new THREE.Mesh(
         new THREE.CylinderGeometry(0.22, 0.16, 0.55, 12),
         this.matSolidGoldStatic,
@@ -2626,7 +2643,7 @@ if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) 
     this.balanceWheelGroup.add(largeRoller, rubyImpulsePin, safetyRoller, balanceStaff);
     this.tourbillonCageGroup.add(this.balanceWheelGroup);
 
-    // True 14-Turn 3D Rectangular-Ribbon Breguet Overcoil Hairspring (with Terminal Overcoil Riser & Stud!)
+    // 13-turn rectangular-ribbon hairspring with a Breguet overcoil end, riser and stud
     const hsSamples = 14 * 72;
     this.hairspringRibbonGeometry = buildSpiralRibbonGeometry(hsSamples, 0.24, 0.045);
     this.updateHairspringRibbon(0.0, 0.0);
@@ -2736,26 +2753,43 @@ if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) 
       this.layerDialHands.add(marker);
     }
 
-    // 10 o'clock Power-Reserve Sector Subdial (x = -8.6, y = +5.2, z = 1.92)
-    const prRingShape = new THREE.Shape();
-    prRingShape.absarc(0, 0, 4.1, 0, Math.PI * 2, false);
-    const prHole = new THREE.Path();
-    prHole.absarc(0, 0, 3.1, 0, Math.PI * 2, true);
-    prRingShape.holes.push(prHole);
+    // 10 o'clock power-reserve sector (x = -8.6, y = +5.2, z = 1.92): an arc track swept by the
+    // blued hand over ±PR_SWEEP (empty on the left, full on the right; see the hand update), with
+    // five graduations at 0, ¼, ½, ¾ and full wind and the empty end in red enamel.
+    const PR_SWEEP = 1.05;
+    const prArc = PR_SWEEP + 0.16;
+    const prShape = new THREE.Shape();
+    prShape.absarc(0, 0, 4.0, Math.PI * 0.5 - prArc, Math.PI * 0.5 + prArc, false);
+    prShape.absarc(0, 0, 2.95, Math.PI * 0.5 + prArc, Math.PI * 0.5 - prArc, true);
     const prSubdial = new THREE.Mesh(
-      new THREE.ExtrudeGeometry(prRingShape, { depth: 0.18, bevelEnabled: false }),
+      new THREE.ExtrudeGeometry(prShape, { depth: 0.18, bevelEnabled: false, curveSegments: 40 }),
       dialMat,
     );
     prSubdial.position.set(-8.6, 5.2, 1.92);
     this.layerDialHands.add(prSubdial);
+    const enamelRed = new THREE.MeshStandardMaterial({ color: new THREE.Color(0xa3221b), metalness: 0.05, roughness: 0.35 });
+    for (let k = 0; k <= 4; k++) {
+      const phi = (0.5 - k / 4) * 2.0 * PR_SWEEP;
+      const major = k % 2 === 0;
+      const tick = new THREE.Mesh(
+        new THREE.BoxGeometry(major ? 0.2 : 0.14, major ? 0.86 : 0.6, 0.08),
+        k === 0 ? enamelRed : this.matSolidGoldStatic,
+      );
+      const r = major ? 3.48 : 3.6;
+      tick.position.set(-8.6 - Math.sin(phi) * r, 5.2 + Math.cos(phi) * r, 2.13);
+      tick.rotation.z = phi;
+      this.layerDialHands.add(tick);
+    }
 
     this.powerReserveHandGroup.position.set(-8.6, 5.2, 2.18);
     const prHand = new THREE.Mesh(
-      new THREE.ConeGeometry(0.24, 3.4, 12),
+      new THREE.ConeGeometry(0.22, 3.9, 12),
       this.matBluedSteel,
     );
-    prHand.position.y = 1.3;
-    this.powerReserveHandGroup.add(prHand);
+    prHand.position.y = 1.55;
+    const prBoss = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, 0.2, 20), this.matSolidGoldStatic);
+    prBoss.rotation.x = Math.PI * 0.5;
+    this.powerReserveHandGroup.add(prHand, prBoss);
     this.layerDialHands.add(this.powerReserveHandGroup);
 
     // 2 o'clock Astronomical Moonphase Complication (x = +8.6, y = +5.2, z = 1.90)
@@ -3314,6 +3348,7 @@ if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) 
     this.secondsHandGroup.rotation.z = secAngle;
     this.minuteHandGroup.rotation.z = minAngle;
     this.hourHandGroup.rotation.z = hourAngle;
+    // ±1.05 rad: the sweep of the graduated power-reserve track (PR_SWEEP in the dial builder).
     this.powerReserveHandGroup.rotation.z = (0.5 - snap.mainspringWind) * 2.1;
     this.moonDiscGroup.rotation.z = snap.moonphaseAngleRad;
 
@@ -3378,6 +3413,7 @@ if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) 
       airScale * (0.94 + Math.cos(performance.now() * 0.05) * 0.06),
     );
 
+    this.micGroup.visible = tools.micVisible ?? true;
     this.micGroup.position.set(tools.micPosMm[0], tools.micPosMm[1], tools.micPosMm[2]);
 
     // 7. Update Superimposed 3D Physics Vector Fields when any layer is active
@@ -3737,17 +3773,19 @@ if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) 
     this.controls.enabled = true;
     this.controls.enableZoom = true;
     if (mode === "inspect") {
+      // Left orbits (Shift/Ctrl/Cmd + left pans), middle and right pan, the wheel zooms.
       this.controls.mouseButtons = {
         LEFT: THREE.MOUSE.ROTATE,
-        MIDDLE: THREE.MOUSE.DOLLY,
+        MIDDLE: THREE.MOUSE.PAN,
         RIGHT: THREE.MOUSE.PAN,
       };
       this.controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
     } else {
-      // Aiming a tool: primary button / one finger aims; right button or two fingers still orbit.
+      // Aiming a tool: primary button / one finger aims; right button or two fingers orbit,
+      // the middle button pans and the wheel zooms.
       this.controls.mouseButtons = {
         LEFT: null as unknown as THREE.MOUSE,
-        MIDDLE: THREE.MOUSE.DOLLY,
+        MIDDLE: THREE.MOUSE.PAN,
         RIGHT: THREE.MOUSE.ROTATE,
       };
       this.controls.touches = {
@@ -3778,6 +3816,81 @@ if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) 
 
   public setThermalOverlayMode(enabled: boolean): void {
     this.thermalOverlayMode = enabled;
+  }
+
+  /** Farthest the orbit centre may wander from the watch centre [mm]. */
+  private static readonly TARGET_LIMIT_MM = 42;
+
+  /**
+   * Keyboard and button camera moves: pan by screen pixels, orbit by radians, zoom by a factor
+   * (> 1 zooms in). They go through the controls, so damping smooths them like a drag.
+   */
+  public nudgeCamera(kind: "pan" | "orbit" | "zoom", a: number, b = 0): void {
+    this.cameraTween = null;
+    this.userAdjustedView = true;
+    const c = this.controls;
+    if (kind === "pan") c.pan(a, b);
+    else if (kind === "orbit") {
+      c.rotateLeft(a);
+      c.rotateUp(b);
+    } else {
+      // Keyboard zoom is about the orbit centre, not the last cursor position.
+      const toCursor = c.zoomToCursor;
+      c.zoomToCursor = false;
+      if (a > 1) c.dollyIn(1 / a);
+      else c.dollyOut(a);
+      c.zoomToCursor = toCursor;
+    }
+  }
+
+  /**
+   * Fly the orbit centre to the watch part under a screen point (CSS px in the canvas) and close
+   * in on it; returns false when nothing of the watch is there.
+   */
+  public focusAt(clientX: number, clientY: number): boolean {
+    const rect = this.canvas.getBoundingClientRect();
+    this.pointerNdc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointerNdc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(this.pointerNdc, this.camera);
+    const roots = [
+      this.layerCase,
+      this.layerMainplate,
+      this.layerKeyless,
+      this.layerBarrel,
+      this.layerGoingTrain,
+      this.layerBridges,
+      this.layerTourbillon,
+      this.layerDialHands,
+    ].filter((g) => g.visible);
+    const hit = this.raycaster.intersectObjects(roots, true).find((h) => (h.object as THREE.Mesh).isMesh && h.object.visible);
+    if (!hit) return false;
+    const target = hit.point.clone();
+    if (target.length() > PocketWatchScene.TARGET_LIMIT_MM) target.setLength(PocketWatchScene.TARGET_LIMIT_MM);
+    const offset = this.camera.position.clone().sub(this.controls.target);
+    const dist = THREE.MathUtils.clamp(offset.length() * 0.55, 14, 160);
+    const pos = target.clone().addScaledVector(offset.normalize(), dist);
+    this.userAdjustedView = true;
+    if (this.reducedMotion) {
+      this.cameraTween = null;
+      this.camera.position.copy(pos);
+      this.controls.target.copy(target);
+      this.controls.update();
+    } else {
+      this.cameraTween = {
+        fromPos: this.camera.position.clone(),
+        toPos: pos,
+        fromTarget: this.controls.target.clone(),
+        toTarget: target,
+        t0: performance.now(),
+        durationMs: 620,
+      };
+    }
+    return true;
+  }
+
+  /** Back to the current camera preset's framing (double-click on empty space, the 0 key). */
+  public resetView(): void {
+    this.applyCameraPreset(this.currentPreset, !this.reducedMotion);
   }
 
   public setCameraPreset(preset: CameraPreset): void {
@@ -3863,6 +3976,17 @@ if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) 
       return null;
     };
     const activePointers = new Set<number>();
+    // Double-click / double-tap: fly to the part under the pointer, or reframe on empty space.
+    let tapDown: { id: number; x: number; y: number; t: number } | null = null;
+    let lastTap: { x: number; y: number; t: number } | null = null;
+    const setDragCursor = (cls: "is-dragging" | "is-panning" | null): void => {
+      this.canvas.classList.toggle("is-dragging", cls === "is-dragging");
+      this.canvas.classList.toggle("is-panning", cls === "is-panning");
+    };
+    // No middle-click autoscroll or paste: the middle button pans.
+    this.canvas.addEventListener("mousedown", (ev) => {
+      if (ev.button === 1) ev.preventDefault();
+    });
 
     this.canvas.addEventListener("pointerdown", (ev) => {
       activePointers.add(ev.pointerId);
@@ -3870,8 +3994,16 @@ if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) 
         // A second finger means orbit/zoom, never aim.
         this.isDraggingTool = false;
         this.aimPointerId = null;
+        tapDown = null;
+        lastTap = null;
         return;
       }
+      tapDown = ev.pointerType !== "mouse" || ev.button === 0 ? { id: ev.pointerId, x: ev.clientX, y: ev.clientY, t: performance.now() } : null;
+      const modPan = ev.shiftKey || ev.ctrlKey || ev.metaKey;
+      if (this.activeTool === "inspect") {
+        setDragCursor(ev.button === 1 || ev.button === 2 || (ev.button === 0 && modPan) ? "is-panning" : "is-dragging");
+      } else if (ev.button === 1) setDragCursor("is-panning");
+      else if (ev.button === 2) setDragCursor("is-dragging");
       if (this.activeTool === "inspect" || ev.button !== 0) return;
       this.isDraggingTool = true;
       this.aimPointerId = ev.pointerId;
@@ -3888,10 +4020,21 @@ if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) 
 
     const release = (ev: PointerEvent): void => {
       activePointers.delete(ev.pointerId);
+      if (activePointers.size === 0) setDragCursor(null);
       if (ev.pointerId === this.aimPointerId) {
         this.isDraggingTool = false;
         this.aimPointerId = null;
       }
+      if (tapDown && ev.pointerId === tapDown.id && ev.type === "pointerup") {
+        const now = performance.now();
+        const still = Math.hypot(ev.clientX - tapDown.x, ev.clientY - tapDown.y) < 8 && now - tapDown.t < 350;
+        if (!still) lastTap = null;
+        else if (lastTap && now - lastTap.t < 400 && Math.hypot(ev.clientX - lastTap.x, ev.clientY - lastTap.y) < 30) {
+          lastTap = null;
+          if (this.activeTool === "inspect" && !this.focusAt(ev.clientX, ev.clientY)) this.resetView();
+        } else lastTap = { x: ev.clientX, y: ev.clientY, t: now };
+      }
+      if (!tapDown || ev.pointerId === tapDown.id) tapDown = null;
     };
     window.addEventListener("pointerup", release);
     window.addEventListener("pointercancel", release);

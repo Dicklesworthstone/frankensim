@@ -3,7 +3,7 @@ name = "fs-pocket-watch"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "FrankenSim Grand Complication Pocket Watch (Calibre FS-1903 Tourbillon) — coupled horological escapement kinematics, 12-node enthalpy phase-change & liquid gold fouling, cryogenic LN2 quenching, Stribeck/capillary watch-oil tribology, NdFeB magnetostatics, spectral optics, and 48 kHz virtual-microphone modal acoustics."
+description = "FrankenSim tourbillon pocket watch: a contact-dynamics Swiss lever escapement and going train driven by a mainspring, coupled to an enthalpy heat/phase-change field with liquid gold and oil films, LN2 boiling, an NdFeB magnet and hairspring hysteresis, and modal acoustics rung by the escapement impacts."
 
 [workspace]
 
@@ -18,54 +18,19 @@ layer = "L6"
 fs-blake3 = { path = "../../../crates/fs-blake3" }
 fs-math = { path = "../../../crates/fs-math" }
 fs-qty = { path = "../../../crates/fs-qty" }
-fs-la = { path = "../../../crates/fs-la" }
-fs-sparse = { path = "../../../crates/fs-sparse" }
-fs-exec = { path = "../../../crates/fs-exec" }
-fs-ga = { path = "../../../crates/fs-ga" }
-fs-ad = { path = "../../../crates/fs-ad" }
-fs-ivl = { path = "../../../crates/fs-ivl" }
-fs-cheb = { path = "../../../crates/fs-cheb" }
-fs-fft = { path = "../../../crates/fs-fft" }
-fs-rand = { path = "../../../crates/fs-rand" }
-fs-evidence = { path = "../../../crates/fs-evidence" }
-fs-regime = { path = "../../../crates/fs-regime" }
 fs-material = { path = "../../../crates/fs-material" }
-fs-matdb = { path = "../../../crates/fs-matdb" }
 fs-thermochem = { path = "../../../crates/fs-thermochem" }
-fs-atmo = { path = "../../../crates/fs-atmo" }
-fs-geom = { path = "../../../crates/fs-geom" }
-fs-rep-sdf = { path = "../../../crates/fs-rep-sdf" }
-fs-rep-mesh = { path = "../../../crates/fs-rep-mesh" }
-fs-topo = { path = "../../../crates/fs-topo" }
-fs-asbuilt = { path = "../../../crates/fs-asbuilt" }
-fs-orbit = { path = "../../../crates/fs-orbit" }
-fs-thermal = { path = "../../../crates/fs-thermal" }
-fs-conduction = { path = "../../../crates/fs-conduction" }
 fs-convection = { path = "../../../crates/fs-convection" }
-fs-lbm = { path = "../../../crates/fs-lbm" }
 fs-plate = { path = "../../../crates/fs-plate" }
 fs-vkplate = { path = "../../../crates/fs-vkplate" }
-fs-nlmodal = { path = "../../../crates/fs-nlmodal" }
-fs-solid = { path = "../../../crates/fs-solid" }
 fs-tribo = { path = "../../../crates/fs-tribo" }
 fs-contact = { path = "../../../crates/fs-contact" }
-fs-dcontact = { path = "../../../crates/fs-dcontact" }
-fs-mbd = { path = "../../../crates/fs-mbd" }
-fs-mbd-material = { path = "../../../crates/fs-mbd-material" }
 fs-modal = { path = "../../../crates/fs-modal" }
-fs-phs = { path = "../../../crates/fs-phs" }
-fs-ports = { path = "../../../crates/fs-ports" }
-fs-time = { path = "../../../crates/fs-time" }
 fs-duct = { path = "../../../crates/fs-duct" }
-fs-vfit = { path = "../../../crates/fs-vfit" }
 fs-aeroac = { path = "../../../crates/fs-aeroac" }
 fs-psycho = { path = "../../../crates/fs-psycho" }
-fs-em = { path = "../../../crates/fs-em" }
 fs-eproc = { path = "../../../crates/fs-eproc" }
-fs-uq = { path = "../../../crates/fs-uq" }
-fs-toleralloc = { path = "../../../crates/fs-toleralloc" }
 fs-render = { path = "../../../crates/fs-render", features = ["tracer", "photometry"] }
-fs-viz = { path = "../../../crates/fs-viz" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "=0.2.128"

@@ -1,3 +1,6 @@
+// Behavioural tests of the wasm engine the page ships. Each scenario mirrors a guided experiment in
+// src/main.ts and checks the outcome the physics produces (thresholds carry margin around the values
+// the native calibration runs `presets_*` in engine-watch/src/lib.rs print).
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -7,111 +10,195 @@ import initWasm, { PocketWatchSim } from "../src/wasm-pkg/fs_pocket_watch.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const wasmBytes = readFileSync(join(__dirname, "../src/wasm-pkg/fs_pocket_watch_bg.wasm"));
+await initWasm({ module_or_path: wasmBytes });
 
-test("WASM PocketWatchSim — chronometer timekeeping, winding, and all 5 multiphysics perturbations", async () => {
-  await initWasm({ module_or_path: wasmBytes });
+const HEADER = 32;
+const STRIDE = 12;
+const node = (snap, i, field) => snap[HEADER + i * STRIDE + field];
+const N_CASE_6H = 3;
+const N_BALANCE = 10;
+const T = 0;
 
-  // 1. Chronometer timekeeping at 293.15 K (18,000 vph = 5 beats/sec)
+const run = (sim, labS, dt = 0.1) => {
+  for (let i = 0; i < Math.round(labS / dt); i++) sim.step(dt);
+  return sim.snapshot();
+};
+
+const maxShellMelt = (sim) => {
+  const shell = sim.case_shell_snapshot();
+  let m = 0;
+  for (let i = 5; i < shell.length; i += 6) m = Math.max(m, shell[i]);
+  return m;
+};
+
+const withSim = (fn) => {
   const sim = new PocketWatchSim();
-  const snap0 = sim.snapshot();
-  const tWatch0 = snap0[1];
-  for (let i = 0; i < 100; i++) {
-    sim.step(0.05); // 5.0 seconds total
+  try {
+    return fn(sim);
+  } finally {
+    sim.free();
   }
-  const snap5 = sim.snapshot();
-  const beats5 = snap5[14];
-  const dtWatch = snap5[1] - tWatch0;
-  assert.ok(beats5 >= 24 && beats5 <= 26, `expected ~25 beats in 5s, got ${beats5}`);
-  assert.ok(Math.abs(dtWatch - 5.0) <= 0.25, `expected watch hands to advance ~5.0s, got ${dtWatch}s`);
-  assert.equal(sim.status_label(), "RUNNING — CHRONOMETER CERTIFIED");
+};
 
-  // 2. Virtual Microphone 48 kHz synthesis
-  sim.set_microphone(0, -11, 10, 1.5);
-  const audio = sim.render_audio_block(1024);
-  assert.equal(audio.length, 1024);
-  let peak = 0;
-  for (const s of audio) peak = Math.max(peak, Math.abs(s));
-  assert.ok(peak > 1e-4, `expected non-zero modal audio peak, got ${peak}`);
-  assert.ok(Number.isFinite(sim.mic_spl_db()), "expected finite mic_spl_db");
-  assert.ok(sim.mic_loudness_sone() >= 0.0, "expected non-negative Zwicker loudness (sone)");
-  assert.ok(sim.mic_loudness_phon() >= 0.0, "expected non-negative loudness level (phon)");
-  assert.ok(sim.mic_sharpness_acum() >= 0.0, "expected non-negative DIN sharpness (acum)");
-  assert.ok(sim.rate_sensitivity_s_day_per_k() < -1.0, "expected negative thermoelastic rate sensitivity d(rate)/dT");
-  sim.set_compensated_hairspring(true);
-  assert.ok(
-    Math.abs(sim.rate_sensitivity_s_day_per_k()) < Math.abs(-1.0),
-    "expected set_compensated_hairspring(true) to immediately update d(rate)/dT even while paused",
-  );
-  sim.set_compensated_hairspring(false);
-  assert.ok(sim.rate_interval_lo_s_day() <= sim.rate_interval_hi_s_day(), "expected valid interval rate bounds");
-  assert.ok(sim.balance_aero_drag_s_inv() > 0.0, "expected positive Stokes-Stuart oscillating-cylinder aero drag");
-  assert.ok(sim.cosc_e_value() > 0.0, "expected positive COSC e-process wealth");
-  assert.ok(sim.gdt_allocated_cost() > 0.0, "expected positive Lagrange GD&T allocated cost");
-  const auditSummary = sim.multiphysics_crate_audit_summary();
-  assert.equal(auditSummary.length, 9, "expected 9-element 51-crate audit summary");
+test("a fresh watch keeps time at 18 000 vph and certifies", () =>
+  withSim((sim) => {
+    const t0 = sim.snapshot()[1];
+    const s = run(sim, 5.0);
+    assert.ok(s[14] >= 24 && s[14] <= 26, `expected ~25 beats in 5 s, got ${s[14]}`);
+    assert.ok(Math.abs(s[1] - t0 - 5.0) <= 0.25, `hands advanced ${s[1] - t0} s in 5 s`);
+    assert.ok(s[13] > 260 && s[13] < 320, `amplitude ${s[13]}°`);
+    assert.equal(sim.status_label(), "RUNNING — CHRONOMETER CERTIFIED");
+  }));
 
-  // 3. Blowtorch heating -> thermal expansion timekeeping drift -> 18k gold case melting -> liquid gold fouls gears
-  sim.set_blowtorch(1.0, 0, -25, 0);
-  for (let i = 0; i < 160; i++) {
-    sim.step(0.05);
-  }
-  const snapMelt = sim.snapshot();
-  assert.ok(snapMelt[26] > 0.25, `expected molten gold fouling factor > 0.25, got ${snapMelt[26]}`);
-  const caseShell = sim.case_shell_snapshot();
-  assert.equal(caseShell.length, 512 * 6, "expected 512 3D Lagrangian shell nodes * 6 floats");
-  const spatialGrid = sim.spatial_grid_snapshot();
-  assert.equal(spatialGrid.length, 2304 * 7, "expected 48x48 (2304) PDE cells * 7 floats");
-  const coils = sim.mainspring_coils_mm();
-  assert.equal(coils.length, 18, "expected 18 discretized elastica mainspring coil radii");
+test("the buffers the page decodes have the documented layout", () =>
+  withSim((sim) => {
+    run(sim, 2.0);
+    assert.equal(sim.snapshot().length, HEADER + 12 * STRIDE);
+    assert.equal(sim.grid_n(), 64);
+    assert.equal(sim.grid_half_span_mm(), 28.8);
+    assert.equal(sim.spatial_grid_snapshot().length, 64 * 64 * 7);
+    assert.equal(sim.case_shell_snapshot().length, 64 * 8 * 6);
+    assert.equal(sim.mainspring_coils_mm().length, 18);
+    const esc = sim.escapement_state();
+    assert.equal(esc.length, 16);
+    assert.ok(esc[13] > 30 && esc[13] < 60, `power reserve ${esc[13]} h`);
+    const drained = sim.timegrapher_drain();
+    assert.equal(drained.length % 3, 0);
+    assert.ok(drained.length / 3 >= 8, `expected lock impacts from 2 s of running, got ${drained.length / 3}`);
+    assert.equal(sim.timegrapher_drain().length, 0, "a drain empties the queue");
+  }));
 
-  // 4. Pour Liquid Nitrogen (LN2, 77.36 K) -> stops melting and freezes gold in deformed shape
-  sim.set_blowtorch(0.0, 0, -25, 0);
-  sim.set_liquid_nitrogen(1.0, 0, -18, 2);
-  for (let i = 0; i < 110; i++) {
-    sim.step(0.05);
-  }
-  assert.equal(sim.status_label(), "LOCKED — ENCASED IN SOLIDIFIED GOLD");
+test("readouts follow the inputs at once, even while paused", () =>
+  withSim((sim) => {
+    sim.set_compensated_hairspring(false);
+    const steel = sim.rate_sensitivity_s_day_per_k();
+    assert.ok(steel < -8 && steel > -14, `carbon-steel hairspring d(rate)/dT = ${steel} s/d/K`);
+    sim.set_compensated_hairspring(true);
+    const comp = sim.rate_sensitivity_s_day_per_k();
+    assert.ok(Math.abs(comp) < 0.5, `compensated hairspring d(rate)/dT = ${comp} s/d/K`);
+    sim.set_ambient_pressure_atm(0.0);
+    assert.equal(sim.balance_aero_drag_s_inv(), 0.0, "no aerodynamic drag in a vacuum");
+    sim.set_ambient_pressure_atm(1.0);
+    assert.ok(sim.balance_aero_drag_s_inv() > 0.0);
+    assert.ok(sim.rate_interval_lo_s_day() <= sim.rate_interval_hi_s_day());
+    assert.ok(sim.cosc_e_value() > 0.0);
+  }));
 
-  // 5. Reset & test Watch Oil flooding + ultrasonic clean
-  sim.reset();
-  sim.set_oil_pour(1.0, 0, -11, 2);
-  for (let i = 0; i < 20; i++) {
-    sim.step(0.05);
-  }
-  const snapOil = sim.snapshot();
-  assert.ok(snapOil[21] > 1.02, `expected capillary coil bridging to raise hairspring stiffness ratio, got ${snapOil[21]}`);
-  sim.set_oil_pour(0.0, 0, -11, 2);
-  sim.clean_excess_oil();
-
-  // 6. External NdFeB N42 Super-Magnet pins pallet fork and leaves remanence until degaussed
-  sim.set_magnet(true, 1.0, 10, -11, 2);
-  sim.step(0.05);
-  assert.equal(sim.status_label(), "STALLED — PALLET FORK MAGNETICALLY PINNED");
-  sim.set_magnet(false, 1.0, 60, -11, 2);
-  sim.step(0.05);
-  assert.ok(sim.snapshot()[25] > 5.0, "expected residual ferromagnetic remanence");
-  sim.trigger_degauss();
-  for (let i = 0; i < 40; i++) {
-    sim.step(0.05);
-  }
-  assert.equal(sim.snapshot()[25], 0.0, "expected AC degauss coil to clear remanence");
-
-  // 7. Bell-Jar Vacuum (0.0 atm) vs Hyperbaric (5.0 atm), Compressed Air Nozzle, 3D Gravity & 500G Shock
-  sim.reset();
-  sim.set_ambient_pressure_atm(0.0);
-  assert.equal(sim.balance_aero_drag_s_inv(), 0.0, "expected zero balance aero drag in bell-jar vacuum (0 atm)");
-  sim.set_ambient_pressure_atm(1.0);
-  assert.ok(sim.balance_aero_drag_s_inv() > 0.0, "expected restored aero drag at 1.0 atm");
-
-  sim.set_air_jet(0.85, 0, -20, 3);
-  sim.set_gravity_vector(0, -4.0, 0);
-  sim.trigger_mechanical_shock(500.0);
-  sim.step(0.05);
-
-  // Verify blowtorch audio at 100% power stays comfortable and never clips full-scale
-  sim.set_blowtorch(1.0, 0, -24, 2);
-  const torchAudio = sim.render_audio_block(1024);
-  let maxTorchSample = 0;
-  for (const s of torchAudio) maxTorchSample = Math.max(maxTorchSample, Math.abs(s));
-  assert.ok(maxTorchSample < 0.85, `expected balanced blowtorch audio without full-scale clipping, got ${maxTorchSample}`);
+test("same inputs replay to the same state digest", () => {
+  const digest = (pour) =>
+    withSim((sim) => {
+      sim.set_blowtorch(0.5, 0, -22, 4);
+      if (pour) sim.set_oil_pour(0.3, 0, -11, 2);
+      run(sim, 3.0);
+      return sim.state_digest_hex();
+    });
+  assert.equal(digest(false), digest(false));
+  assert.notEqual(digest(false), digest(true));
 });
+
+test("the microphone hears the ticks without clipping, flame or not", () =>
+  withSim((sim) => {
+    sim.set_microphone(0, -11, 11, 1.4);
+    const listen = (labS) => {
+      let peak = 0;
+      let rails = 0;
+      for (let k = 0; k < Math.round((labS * 48000) / 1024); k++) {
+        sim.step(1024 / 48000);
+        for (const x of sim.render_audio_block(1024)) {
+          peak = Math.max(peak, Math.abs(x));
+          if (Math.abs(x) >= 0.975) rails++;
+        }
+      }
+      return { peak, rails };
+    };
+    const quiet = listen(1.0);
+    assert.ok(quiet.peak > 0.1 && quiet.peak < 0.9, `tick peak ${quiet.peak}`);
+    assert.equal(quiet.rails, 0, "ticks never reach the rails at the default gain");
+    assert.ok(Number.isFinite(sim.mic_spl_db()) && sim.mic_spl_db() > 30, `SPL ${sim.mic_spl_db()} dB`);
+    assert.ok(sim.mic_loudness_sone() > 0 && sim.mic_loudness_phon() > 0 && sim.mic_sharpness_acum() > 0);
+    sim.set_blowtorch(1.0, 0, -24, 2);
+    const torch = listen(0.5);
+    assert.ok(torch.peak < 0.95, `torch + ticks peak ${torch.peak}`);
+  }));
+
+test("a gentle flame warms the balance and the watch loses", () =>
+  withSim((sim) => {
+    sim.set_blowtorch(0.25, 0.0, -22.0, 6.0);
+    const s = run(sim, 10.0);
+    const tBal = node(s, N_BALANCE, T);
+    assert.ok(tBal > 360 && tBal < 470, `balance at ${tBal} K`);
+    assert.ok(s[16] < -50, `theoretical rate ${s[16]} s/d`);
+    assert.ok(s[15] < -20, `measured rate ${s[15]} s/d`);
+    assert.equal(sim.status_label(), "RUNNING — MULTIPHYSICS PERTURBED");
+  }));
+
+test("an oil flood stalls the balance; cleaning lets it restart", () =>
+  withSim((sim) => {
+    sim.set_oil_pour(0.85, 0, -11, 2);
+    let s = run(sim, 8.0);
+    assert.equal(sim.status_label(), "STALLED — VISCOUS OIL FLOOD OVERDAMPING");
+    assert.ok(s[13] < 40, `flooded amplitude ${s[13]}°`);
+    sim.set_oil_pour(0, 0, -11, 2);
+    sim.clean_excess_oil();
+    s = run(sim, 10.0);
+    assert.match(sim.status_label(), /^RUNNING/);
+    assert.ok(s[13] > 200, `amplitude after cleaning ${s[13]}°`);
+  }));
+
+test("a close magnet pins the lever and magnetises the spring until degaussed", () =>
+  withSim((sim) => {
+    sim.set_magnet(true, 1.0, 13, -11, 2.5);
+    let s = run(sim, 3.0);
+    assert.equal(sim.status_label(), "STALLED — PALLET FORK MAGNETICALLY PINNED");
+    assert.ok(s[24] > 30, `field at the escapement ${s[24]} mT`);
+    sim.set_magnet(false, 1.0, 60, -11, 2.5);
+    s = run(sim, 1.0);
+    assert.ok(s[24] < 1, `field after removal ${s[24]} mT`);
+    assert.ok(s[25] > 50, `remanence after removal ${s[25]} mT`);
+    sim.trigger_degauss();
+    s = run(sim, 4.0);
+    assert.ok(s[25] < 5, `remanence after degauss ${s[25]} mT`);
+  }));
+
+test("in a vacuum the amplitude climbs to the banking", () =>
+  withSim((sim) => {
+    sim.set_ambient_pressure_atm(0.0);
+    const s = run(sim, 10.0);
+    assert.ok(s[13] > 330, `vacuum amplitude ${s[13]}°`);
+  }));
+
+test("a 500 g shock under 4 g leaves the watch running", () =>
+  withSim((sim) => {
+    sim.set_gravity_vector(0, -4, 0);
+    sim.trigger_mechanical_shock(500);
+    const s = run(sim, 2.0);
+    assert.match(sim.status_label(), /^RUNNING/);
+    assert.ok(s[13] > 200, `amplitude ${s[13]}°`);
+  }));
+
+test("LN₂ pooled on a dial-up watch congeals the oil and seizes it", () =>
+  withSim((sim) => {
+    sim.set_gravity_vector(0, 0, -1);
+    sim.set_liquid_nitrogen(1.0, 0, -11, 3);
+    const s = run(sim, 55.0);
+    assert.equal(sim.status_label(), "SEIZED — THERMAL / CRYOGENIC CLEARANCE LOSS");
+    assert.ok(node(s, N_BALANCE, T) < 200, `balance at ${node(s, N_BALANCE, T)} K`);
+    assert.ok(s[27] > 10, `LN₂ boiling power ${s[27]} W`);
+  }));
+
+test("a full flame melts the 6h band; LN₂ then quenches through its vapour film", () =>
+  withSim((sim) => {
+    sim.set_blowtorch(1.0, 0, -25, 1.5);
+    let s = run(sim, 75.0);
+    assert.ok(s[28] > 100, `torch power absorbed ${s[28]} W`);
+    assert.ok(node(s, N_CASE_6H, T) > 1050, `6h case at ${node(s, N_CASE_6H, T)} K`);
+    assert.ok(maxShellMelt(sim) > 0.5, `case-shell melt fraction ${maxShellMelt(sim)}`);
+    assert.equal(sim.status_label(), "RUNNING — MULTIPHYSICS PERTURBED");
+    sim.set_blowtorch(0, 0, -25, 1.5);
+    sim.set_gravity_vector(0, 0, -1);
+    sim.set_liquid_nitrogen(1.0, 0, -11, 3);
+    s = run(sim, 20.0);
+    assert.ok(s[27] > 100, `film-boiling power ${s[27]} W`);
+    assert.ok(node(s, N_CASE_6H, T) < 800, `6h case after 20 s of LN₂ at ${node(s, N_CASE_6H, T)} K`);
+    assert.equal(maxShellMelt(sim), 0, "the case has refrozen");
+  }));

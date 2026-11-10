@@ -188,6 +188,7 @@ async function boot(): Promise<void> {
   const hudStatusPill = $("#hud-status-pill");
   const statusHead = hudStatusPill.querySelector(".status-head")!;
   const statusDetail = hudStatusPill.querySelector(".status-detail")!;
+  const statusShort = hudStatusPill.querySelector(".status-short")!;
   const hudDigest = $("#hud-digest");
   const hudPerf = $("#hud-perf");
   const btnPauseSim = $<HTMLButtonElement>("#btn-pause-sim");
@@ -441,6 +442,8 @@ async function boot(): Promise<void> {
     updatePerturbationBannerAndBadges();
   };
   syncToolsToSim();
+  // The page's switch, not the engine's constructor default, decides the hairspring alloy.
+  sim.set_compensated_hairspring(chkInvarSpring.checked);
 
   // ---------------------------------------------------------------------------------------------
   // Layout: inspector panel / bottom sheet, focus mode, view insets for camera framing
@@ -519,6 +522,14 @@ async function boot(): Promise<void> {
       const cx = insetsTarget.left + (W - insetsTarget.left - insetsTarget.right) / 2;
       root.style.setProperty("--stage-cx", `${Math.round(cx)}px`);
       root.style.setProperty("--stage-r", `${Math.round(Math.max(insetsTarget.right, edge + 8))}px`);
+    }
+    // While the first-run coach is up, frame the whole watch beside or above it, not behind it.
+    if (!coach.classList.contains("hidden")) {
+      const cr = coach.getBoundingClientRect();
+      if (cr.height > 0) {
+        if (cr.left > W * 0.45) insetsTarget.right = Math.max(insetsTarget.right, W - cr.left + 10);
+        else if (cr.top > 0) insetsTarget.bottom = Math.max(insetsTarget.bottom, H - cr.top + 10);
+      }
     }
     // Never let the chrome squeeze the stage below a usable window.
     const minH = H * 0.32;
@@ -1103,6 +1114,9 @@ async function boot(): Promise<void> {
   }
   let ff: FfJob | null = null;
   let heavyPollNow = false;
+  /** Engine time the fast-forward spent in the last tick, and an EMA of the rest of a frame. */
+  let ffSpentMs = 0;
+  let frameRestMs = 8;
 
   function startFastForward(title: string, phases: FfPhase[], after?: () => void): void {
     cancelFastForward();
@@ -1124,7 +1138,9 @@ async function boot(): Promise<void> {
   const runFastForward = (): void => {
     const job = ff;
     if (!job) return;
-    const budgetMs = isCompact ? 9 : 13;
+    // Give the engine ~60 % of each frame: 1.5x whatever rendering and the page take, so a slow GPU
+    // (or a software rasterizer) does not starve the fast-forward, while frames stay under ~0.2 s.
+    const budgetMs = Math.min(120, Math.max(isCompact ? 12 : 20, 1.5 * frameRestMs));
     const t0 = performance.now();
     do {
       const ph = job.phases[job.phase];
@@ -1142,6 +1158,7 @@ async function boot(): Promise<void> {
         job.stepInPhase = 0;
       }
     } while (performance.now() - t0 < budgetMs);
+    ffSpentMs = performance.now() - t0;
     heavyPollNow = true;
     const frac = job.total > 0 ? job.done / job.total : 1;
     ffBarFill.style.width = `${(frac * 100).toFixed(1)}%`;
@@ -1159,10 +1176,26 @@ async function boot(): Promise<void> {
   });
 
   // ---------------------------------------------------------------------------------------------
-  // Guided experiments
+  // Lay the watch in a chosen pose (gravity in the watch frame) and light the matching chip.
+  const setPose = (vec: Vec3, label: string): void => {
+    gravityGVec = vec;
+    gravityLabel = label;
+    setChipGroupActive("[data-gravity-vec]", document.querySelector(`[data-gravity-vec^="${vec.join(",")},"]`));
+  };
+
+  // Guided experiments. Durations come from the engine's own time scales (native calibration runs
+  // in engine-watch/src/lib.rs, `presets_*`): the whole case has to soak up heat before gold melts,
+  // and LN₂ boils in a Leidenfrost film, so these are tens of lab seconds, not a few.
+  const FF_DT = 0.1;
+  const ffSteps = (labS: number): number => Math.round(labS / FF_DT);
   const runPreset = (preset: string): void => {
     dismissCoach();
     cancelFastForward();
+    // Each experiment starts from a clean view; the ones that need an overlay turn it on below.
+    for (const layer of ["heat", "convection", "magnetic", "acoustic", "stress"] as const) {
+      scene.setVectorFieldVisible(layer, false);
+    }
+    syncVectorFieldButtons();
     switch (preset) {
       case "chronometer":
         resetWatchAll();
@@ -1170,31 +1203,34 @@ async function boot(): Promise<void> {
         break;
 
       case "thermal-drift":
+        // ~0.1 kW absorbed at the 6h rim: the balance warms ~120 K in 10 s and the watch loses.
         resetWatchAll();
-        torchPosMm = [0.0, -22.0, 2.0];
-        torchPower = 0.42;
+        torchPosMm = [0.0, -22.0, 6.0];
+        torchPower = 0.25;
         setRange(sliderTorchPower, torchPower);
         syncToolsToSim();
         applyCameraPreset("tourbillon");
-        startFastForward("Thermal rate drift", [{ steps: 30 }]);
+        startFastForward("Thermal rate drift", [{ steps: ffSteps(10), dt: FF_DT }]);
         break;
 
       case "melt-gold":
+        // Full flame on the 6h rim: the case soaks for about a minute before the band slumps.
         resetWatchAll();
         torchPosMm = [0.0, -25.0, 1.5];
         torchPower = 1.0;
         setRange(sliderTorchPower, torchPower);
         syncToolsToSim();
         applyCameraPreset("overview");
-        startFastForward("Melting the 18k case", [{ steps: 125 }]);
+        startFastForward("Melting the 18k case", [{ steps: ffSteps(75), dt: FF_DT }]);
         break;
 
       case "melt-then-ln2": {
         const curSnap = decodeWatchSnapshot(sim.snapshot());
         const phases: FfPhase[] = [];
-        if ((curSnap.nodes[3]?.plasticSlump ?? 0) < 0.08) {
+        if ((curSnap.nodes[3]?.temperatureK ?? 0) < 950) {
           phases.push({
-            steps: 140,
+            steps: ffSteps(70),
+            dt: FF_DT,
             before: () => {
               torchPosMm = [0.0, -25.0, 1.5];
               torchPower = 1.0;
@@ -1204,11 +1240,14 @@ async function boot(): Promise<void> {
           });
         }
         phases.push({
-          steps: 90,
+          steps: ffSteps(30),
+          dt: FF_DT,
           before: () => {
+            // Lay it dial-up so the nitrogen pools in the tourbillon aperture instead of running off.
             torchPower = 0.0;
             setRange(sliderTorchPower, 0);
-            ln2PosMm = [0.0, -18.0, 2.0];
+            setPose([0, 0, -1], "1.0 g · dial up");
+            ln2PosMm = [0.0, -11.0, 3.0];
             ln2Rate = 1.0;
             setRange(sliderLn2Rate, ln2Rate);
             syncToolsToSim();
@@ -1220,13 +1259,15 @@ async function boot(): Promise<void> {
       }
 
       case "cryo-freeze":
+        // Dial-up so the LN₂ pools over the balance; the oil congeals near 190 K and seizes it.
         resetWatchAll();
+        setPose([0, 0, -1], "1.0 g · dial up");
         ln2PosMm = [0.0, -11.0, 3.0];
         ln2Rate = 1.0;
         setRange(sliderLn2Rate, ln2Rate);
         syncToolsToSim();
         applyCameraPreset("tourbillon");
-        startFastForward("Cryogenic shrink", [{ steps: 85 }]);
+        startFastForward("Cryogenic seizure", [{ steps: ffSteps(50), dt: FF_DT }]);
         break;
 
       case "oil-flood":
@@ -1236,11 +1277,12 @@ async function boot(): Promise<void> {
         setRange(sliderOilRate, oilRate);
         syncToolsToSim();
         applyCameraPreset("tourbillon");
-        startFastForward("Flooding the hairspring", [{ steps: 25 }]);
+        startFastForward("Flooding the hairspring", [{ steps: ffSteps(7), dt: FF_DT }]);
         break;
 
       case "magnet-attack":
-        stopAllPerturbations();
+        // From a fresh running watch, so the stall it shows is the magnet's and nothing earlier.
+        resetWatchAll();
         magnetOn = true;
         chkMagnetOn.checked = true;
         magnetDistMm = 13.0;
@@ -1252,13 +1294,16 @@ async function boot(): Promise<void> {
         break;
 
       case "air-blow-gold":
+        // Melt the rim, kill the flame, then a compressed-air jet: forced convection pulls heat out
+        // and its crossflow drags on the balance rim.
         resetWatchAll();
         applyCameraPreset("overview");
         startFastForward(
-          "Blowing molten gold",
+          "Air-jet quench",
           [
             {
-              steps: 120,
+              steps: ffSteps(70),
+              dt: FF_DT,
               before: () => {
                 torchPosMm = [0.0, -25.0, 1.5];
                 torchPower = 1.0;
@@ -1267,7 +1312,8 @@ async function boot(): Promise<void> {
               },
             },
             {
-              steps: 30,
+              steps: ffSteps(6),
+              dt: FF_DT,
               before: () => {
                 torchPower = 0.0;
                 setRange(sliderTorchPower, 0);
@@ -1289,19 +1335,17 @@ async function boot(): Promise<void> {
         syncToolsToSim();
         setVectorField("convection", true);
         applyCameraPreset("tourbillon");
-        startFastForward("Evacuating the bell jar", [{ steps: 45 }]);
+        startFastForward("Evacuating the bell jar", [{ steps: ffSteps(10), dt: FF_DT }]);
         break;
 
       case "shock-centrifuge": {
         resetWatchAll();
-        gravityGVec = [0.0, -4.0, 0.0];
-        gravityLabel = "4.0 g · centrifuge";
-        setChipGroupActive("[data-gravity-vec]", document.querySelector('[data-gravity-vec^="0,-4,0"]'));
+        setPose([0, -4, 0], "4.0 g · centrifuge");
         syncToolsToSim();
         sim.trigger_mechanical_shock(500.0);
         setVectorField("stress", true);
         applyCameraPreset("overview");
-        startFastForward("Drop shock under 4 g", [{ steps: 15 }]);
+        startFastForward("Drop shock under 4 g", [{ steps: ffSteps(2), dt: FF_DT }]);
         break;
       }
     }
@@ -1327,7 +1371,11 @@ async function boot(): Promise<void> {
     if (coach.classList.contains("hidden")) return;
     coach.classList.add("hidden");
     storeSet(STORE_COACH, "done");
+    layoutDirty = true;
+    refitPending = true;
   }
+  // Shown under the boot splash so the first layout already frames the watch above it.
+  if (storeGet(STORE_COACH) !== "done") coach.classList.remove("hidden");
   $("#btn-coach-dismiss").addEventListener("click", dismissCoach);
   $("#btn-coach-experiments").addEventListener("click", () => {
     dismissCoach();
@@ -1365,6 +1413,28 @@ async function boot(): Promise<void> {
       openHelp();
       return;
     }
+    // Camera: arrows pan (Shift orbits), + and − zoom, 0 or Home reframes. Only when no control
+    // has focus, so arrows still move sliders, tabs and the tool rail.
+    const free = !ev.defaultPrevented && (target === document.body || target === canvasViewport || target?.id === "stage");
+    if (free && ev.key.startsWith("Arrow")) {
+      ev.preventDefault();
+      const dir = ev.key === "ArrowLeft" ? [1, 0] : ev.key === "ArrowRight" ? [-1, 0] : ev.key === "ArrowUp" ? [0, 1] : [0, -1];
+      if (ev.shiftKey) scene.nudgeCamera("orbit", dir[0]! * 0.12, dir[1]! * 0.09);
+      else scene.nudgeCamera("pan", dir[0]! * 36, dir[1]! * 36);
+      return;
+    }
+    if (ev.key === "+" || ev.key === "=") {
+      scene.nudgeCamera("zoom", 1.18);
+      return;
+    }
+    if (ev.key === "-" || ev.key === "_") {
+      scene.nudgeCamera("zoom", 1 / 1.18);
+      return;
+    }
+    if (ev.key === "0" || ev.key === "Home") {
+      scene.resetView();
+      return;
+    }
     const toolKeys: Record<string, ActiveToolMode> = { "1": "inspect", "2": "torch", "3": "ln2", "4": "oil", "5": "magnet", "6": "air", "7": "mic" };
     const tool = toolKeys[key];
     if (tool) {
@@ -1399,6 +1469,17 @@ async function boot(): Promise<void> {
   let lastEsc: Float64Array | null = null;
   let frameCounter = 0;
 
+  // One word for the compact pill, so certified and perturbed differ in text, not colour alone.
+  const STATUS_SHORT: Readonly<Record<string, string>> = {
+    "CHRONOMETER CERTIFIED": "Certified",
+    "MULTIPHYSICS PERTURBED": "Perturbed",
+    "MAINSPRING UNWOUND": "Unwound",
+    "FOULED BY LIQUID MOLTEN GOLD": "Molten gold",
+    "ENCASED IN SOLIDIFIED GOLD": "In gold",
+    "THERMAL / CRYOGENIC CLEARANCE LOSS": "No clearance",
+    "PALLET FORK MAGNETICALLY PINNED": "Magnetized",
+    "VISCOUS OIL FLOOD OVERDAMPING": "Oil flood",
+  };
   const parseStatus = (label: string): [string, string] => {
     const [head, detail] = label.split(" — ");
     const cap = (s: string): string => (s ? s.charAt(0) + s.slice(1).toLowerCase() : "");
@@ -1415,17 +1496,21 @@ async function boot(): Promise<void> {
     const tg = timegrapher.readings(snap.labTimeS);
     // A stopped balance has no rate or beat error; say so instead of extrapolating a fit.
     const stopped = tg.stopped || (snap.statusCode >= 2 && tg.rateSDay === null);
-    const blendRate = 0.35 * snap.measuredRateSPerDay + 0.65 * snap.theoreticalRateSPerDay;
-    const rate = tg.rateSDay ?? blendRate;
+    // Until a dozen beats are in, there is no measured rate: the free-oscillator figure would
+    // leave out the escapement's own error (which regulation cancels), so show a dash instead.
+    const engineRate = snap.totalBeats >= 12 ? snap.measuredRateSPerDay : null;
+    const rate = tg.rateSDay ?? engineRate;
     const beatErr = tg.beatErrorMs ?? snap.measuredBeatErrorMs;
     const rateStr = stopped
       ? "stopped"
-      : `${signed(rate, Math.abs(rate) >= 100 ? 0 : 1)}${Math.abs(rate) >= 10_000 ? "" : " s/d"}`;
+      : rate === null
+        ? "— s/d"
+        : `${signed(rate, Math.abs(rate) >= 100 ? 0 : 1)}${Math.abs(rate) >= 10_000 ? "" : " s/d"}`;
     setText(hudRateSDay, rateStr);
     setAttr(
       hudRateSDay,
       "data-tone",
-      stopped ? "bad" : rate >= -4 && rate <= 6 ? "ok" : Math.abs(rate) < 60 ? "warn" : "bad",
+      stopped ? "bad" : rate === null ? "" : rate >= -4 && rate <= 6 ? "ok" : Math.abs(rate) < 60 ? "warn" : "bad",
     );
     const amp = snap.balanceAmplitudeDeg;
     setText(hudAmp, `${amp.toFixed(0)}°`);
@@ -1442,10 +1527,20 @@ async function boot(): Promise<void> {
     );
 
     const label = sim.status_label();
-    const [head, detail] = simPaused ? ["Paused", "Simulation frozen"] : parseStatus(label);
+    let [head, detail] = simPaused ? ["Paused", "Simulation frozen"] : parseStatus(label);
+    let title = simPaused ? "Paused" : label;
+    let short = simPaused ? "Time frozen" : (STATUS_SHORT[label.split(" — ")[1] ?? ""] ?? detail);
+    // With the magnet gone the lever stays where the field threw it: across its banking, the guard
+    // pin riding the safety roller. Say so, since degaussing or a knock will not bring it back.
+    if (!simPaused && label.startsWith("STALLED — PALLET FORK MAGNETICALLY") && snap.bFieldEscapementMt < 1) {
+      detail = "Lever overbanked · reset to recover";
+      short = "Overbanked";
+      title = `${label}. The field is gone, but it dragged the lever across its banking; the guard pin now rides the safety roller and holds it there. A watchmaker would have to open the case: press Reset.`;
+    }
     setText(statusHead, head);
     setText(statusDetail, detail);
-    hudStatusPill.title = simPaused ? "Paused" : label;
+    setText(statusShort, short);
+    hudStatusPill.title = title;
     const cls =
       "status-pill " + (simPaused ? "status-warn" : snap.statusCode === 0 ? "status-ok" : snap.statusCode === 1 ? "status-warn" : "status-danger");
     if (hudStatusPill.className !== cls) hudStatusPill.className = cls;
@@ -1453,6 +1548,13 @@ async function boot(): Promise<void> {
     const reserveH = lastEsc ? (lastEsc[13] ?? snap.mainspringWind * 42) : snap.mainspringWind * 42;
     const reservePct = Math.round(snap.mainspringWind * 100);
     setText(hudPowerReservePct, `${reservePct}% · ${reserveH.toFixed(1)} h`);
+    setAttr(
+      hudPowerReservePct,
+      "title",
+      reserveH < 0.05 && reservePct > 5
+        ? `${reservePct}% of the slip turns are still wound, but the spring can no longer hold 150° of amplitude: no power reserve (a mainspring held above ~700 K loses its set)`
+        : `${reservePct}% of the slip turns wound · ${reserveH.toFixed(1)} h until the amplitude falls below ~150°`,
+    );
     hudPowerReserveBar.style.width = `${reservePct}%`;
     setText(hudBarrelTorque, `${(snap.mainspringTorqueNm * 1000).toFixed(2)} mN·m`);
     setText(hudBalanceAmp, `${amp.toFixed(1)}°`);
@@ -1464,7 +1566,7 @@ async function boot(): Promise<void> {
     setText(lblOilRate, `${(snap.nodes[9]?.oilFilmUm ?? 0).toFixed(1)} µm film`);
     setText(lblBField, `${snap.bFieldEscapementMt.toFixed(1)} mT`);
     setText(lblRemanence, `${snap.remanentMagnetizationMt.toFixed(1)} mT`);
-    setText(lblAirPower, `${Math.round(airPower * 100)}% · ${Math.round(airPower * 120)} m/s`);
+    setText(lblAirPower, `${Math.round(airPower * 100)}% · ${Math.round(airPower * 150)} m/s`);
     setText(lblChamberEnv, `${ambientPressureAtm.toFixed(2)} atm · ${gravityLabel.split(" · ")[0] ?? gravityLabel}`);
 
     const n6h = snap.nodes[3];
@@ -1483,7 +1585,7 @@ async function boot(): Promise<void> {
       sol += snap.nodes[i]?.frozenGoldG ?? 0;
     }
     const gold = `${liq.toFixed(3)} / ${sol.toFixed(3)} g`;
-    const bField = `${snap.bFieldEscapementMt.toFixed(1)} mT · rem ${snap.remanentMagnetizationMt.toFixed(1)}`;
+    const bField = `${snap.bFieldEscapementMt.toFixed(1)} mT · J ${snap.remanentMagnetizationMt.toFixed(snap.remanentMagnetizationMt >= 100 ? 0 : 1)} mT`;
     setText(ovFouledGold, gold);
     setText(ovBField, bField);
     bindText("fouledGold", gold);
@@ -1536,6 +1638,10 @@ async function boot(): Promise<void> {
   // ---------------------------------------------------------------------------------------------
   // Adaptive resolution: hold the frame rate by trading pixels, never physics.
   const gov = { ema: 16.7, slowSince: 0, fastSince: 0, lastChange: 0, fps: 60 };
+  // ?debug exposes the live objects for profiling from the console.
+  if (new URLSearchParams(window.location.search).has("debug")) {
+    (window as unknown as { __pw: unknown }).__pw = { scene, sim, gov };
+  }
   const governDpr = (frameMs: number, now: number): void => {
     if (frameMs > 250) return; // tab switch or breakpoint
     gov.ema += (frameMs - gov.ema) * 0.06;
@@ -1580,7 +1686,12 @@ async function boot(): Promise<void> {
     const rawMs = nowMs - lastFrameMs;
     lastFrameMs = nowMs;
     const dtReal = Math.min(0.05, Math.max(0.001, rawMs / 1000));
-    governDpr(rawMs, nowMs);
+    // The resolution governor and the fast-forward budget both look at the frame minus the
+    // engine work the previous tick spent fast-forwarding.
+    const restMs = Math.max(0, rawMs - ffSpentMs);
+    ffSpentMs = 0;
+    if (restMs < 500) frameRestMs += (restMs - frameRestMs) * 0.2;
+    governDpr(restMs, nowMs);
 
     if (ff) {
       runFastForward();
@@ -1624,6 +1735,7 @@ async function boot(): Promise<void> {
       ambientPressureAtm,
       gravityGVec,
       micPosMm,
+      micVisible: activeToolMode === "mic" || micAudio.isRunning() || panelVisible("metrology"),
       caseShellData: heavy ? sim.case_shell_snapshot() : undefined,
       spatialGridData: heavy ? sim.spatial_grid_snapshot() : undefined,
       mainspringCoilsMm: heavy ? sim.mainspring_coils_mm() : undefined,
@@ -1652,7 +1764,6 @@ async function boot(): Promise<void> {
       firstFrame = false;
       splash.classList.add("is-done");
       window.setTimeout(() => splash.remove(), 700);
-      if (storeGet(STORE_COACH) !== "done") coach.classList.remove("hidden");
     }
   };
 

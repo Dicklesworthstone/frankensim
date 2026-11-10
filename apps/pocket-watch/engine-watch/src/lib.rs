@@ -1,8 +1,22 @@
-//! FrankenSim Grand Complication Pocket Watch (`Calibre FS-1903 Tourbillon`)
-//! coupled multiphysics & horological engine (Native Rust + WebAssembly).
+//! FrankenSim Grand Complication Pocket Watch (`Calibre FS-1903 Tourbillon`):
+//! a coupled multiphysics and horological engine (native Rust + WebAssembly).
+//!
+//! The pieces, in the order a step runs them:
+//! - [`multiphysics`]: the heat, phase-change, liquid-film and magnetic fields
+//!   on a 64 × 64 plan grid of the watch, and the case-band shell. It samples
+//!   what each moving part sits in (temperature, gold, oil, frost, field) into a
+//!   [`horology::MovementEnvironment`].
+//! - [`horology`]: the mainspring, going train, tourbillon cage and the
+//!   contact-dynamics Swiss lever [`escapement`] driving the balance. Every
+//!   rate, amplitude and stoppage is what that mechanism does in that
+//!   environment; contact impacts are reported as [`horology::AcousticEvent`]s.
+//! - [`acoustics`]: the case and movement modes, rung by those impacts at
+//!   their own lab times, heard at a virtual microphone.
 
 pub mod acoustics;
+pub mod escapement;
 pub mod horology;
+pub mod matdb_src;
 pub mod materials;
 pub mod multiphysics;
 
@@ -10,8 +24,8 @@ pub mod multiphysics;
 use wasm_bindgen::prelude::*;
 
 use crate::acoustics::WatchAcousticSynth;
-use crate::horology::{HorologyState, MechanicalAcousticEvent};
-use crate::multiphysics::{MultiphysicsState, NODE_COUNT};
+use crate::horology::{AcousticEvent, Horology};
+use crate::multiphysics::{GRID_HALF_SPAN_MM, GRID_N, MultiphysicsState, NODE_COUNT};
 
 /// Number of `f64` header fields before the 12-node telemetry block.
 pub const SNAPSHOT_HEADER_LEN: usize = 32;
@@ -22,13 +36,16 @@ pub const SNAPSHOT_NODE_STRIDE: usize = 12;
 /// Total length of the flat `f64` snapshot array (`32 + 12 * 12 = 176`).
 pub const SNAPSHOT_LEN: usize = SNAPSHOT_HEADER_LEN + NODE_COUNT * SNAPSHOT_NODE_STRIDE;
 
-/// Top-level coupled simulation engine for the FrankenSim Grand Complication Pocket Watch.
+/// Longest coupling slice between the field solve and the movement [s].
+const COUPLING_SLICE_S: f64 = 0.010;
+
+/// Top-level coupled simulation of the pocket watch.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub struct PocketWatchSim {
-    horology: HorologyState,
+    horology: Horology,
     multiphysics: MultiphysicsState,
     acoustics: WatchAcousticSynth,
-    pending_events: Vec<MechanicalAcousticEvent>,
+    pending_events: Vec<AcousticEvent>,
     snapshot_buf: Vec<f64>,
     audio_buf: Vec<f32>,
 }
@@ -41,390 +58,326 @@ impl Default for PocketWatchSim {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 impl PocketWatchSim {
-    /// Construct a new, chronometer-calibrated Patek-style Tourbillon pocket watch at $293.15\text{ K}$.
+    /// A regulated, wound tourbillon pocket watch at 20 °C.
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
     #[must_use]
     pub fn new() -> Self {
         let mut sim = Self {
-            horology: HorologyState::new(),
+            horology: Horology::new(),
             multiphysics: MultiphysicsState::new(),
             acoustics: WatchAcousticSynth::new(),
             pending_events: Vec::with_capacity(64),
             snapshot_buf: vec![0.0; SNAPSHOT_LEN],
             audio_buf: vec![0.0; 2048],
         };
+        sim.sync_lab_time();
+        sim.refresh_derived();
         sim.pack_snapshot();
         sim
     }
 
-    /// Reset the entire watch and all materials back to pristine $20.0^\circ\text{C}$ chronometer state.
+    /// Back to the pristine watch at 20 °C (the hairspring choice is kept).
     pub fn reset(&mut self) {
-        self.horology = HorologyState::new();
-        self.multiphysics = MultiphysicsState::new();
+        let compensated = self.horology.compensated;
+        let mut mp = MultiphysicsState::new();
+        mp.inputs.compensated_hairspring = compensated;
+        let mut h = Horology::new();
+        h.set_compensated(compensated);
+        self.horology = h;
+        self.multiphysics = mp;
         self.acoustics = WatchAcousticSynth::new();
         self.pending_events.clear();
+        self.sync_lab_time();
+        self.refresh_derived();
         self.pack_snapshot();
     }
 
-    /// Wind the mainspring crown by `delta_turns` (where `8.5` turns = full 42-hour wind).
+    /// Turn the crown by `delta_turns` (the crown-to-barrel gearing and the
+    /// click are simulated; the bridle slips past full wind).
     pub fn wind_crown(&mut self, delta_turns: f64) {
-        self.horology
-            .wind_crown(delta_turns, &mut self.pending_events);
+        let turns = if delta_turns.is_finite() { delta_turns.clamp(-20.0, 20.0) } else { 0.0 };
+        self.horology.wind_crown(turns, &self.multiphysics.environment, &mut self.pending_events);
         self.flush_events_to_acoustics();
         self.pack_snapshot();
     }
 
-    /// Configure the virtual oxy-butane blowtorch ($T_{\text{flame}} = 2250\text{ K}$) in 3D watch coordinates ($\text{mm}$).
+    /// Air–propane torch: power 0–1 and nozzle position in watch coordinates [mm].
     pub fn set_blowtorch(&mut self, power: f64, x_mm: f64, y_mm: f64, z_mm: f64) {
-        self.multiphysics.inputs.blowtorch_power = power.clamp(0.0, 1.0);
-        self.multiphysics.inputs.blowtorch_pos_mm = [x_mm, y_mm, z_mm];
+        self.multiphysics.inputs.blowtorch_power = unit(power);
+        self.multiphysics.inputs.blowtorch_pos_mm = pos(x_mm, y_mm, z_mm);
     }
 
-    /// Configure the cryogenic liquid nitrogen ($\text{LN}_2$ at $77.36\text{ K}$) pour stream in 3D watch coordinates ($\text{mm}$).
+    /// Liquid-nitrogen pour: rate 0–1 and spout position [mm].
     pub fn set_liquid_nitrogen(&mut self, pour_rate: f64, x_mm: f64, y_mm: f64, z_mm: f64) {
-        self.multiphysics.inputs.ln2_pour_rate = pour_rate.clamp(0.0, 1.0);
-        self.multiphysics.inputs.ln2_pos_mm = [x_mm, y_mm, z_mm];
+        self.multiphysics.inputs.ln2_pour_rate = unit(pour_rate);
+        self.multiphysics.inputs.ln2_pos_mm = pos(x_mm, y_mm, z_mm);
     }
 
-    /// Configure the watch oil dropper / flood stream (`pennzane-shf-x-2000-bearing-oil`) in 3D watch coordinates ($\text{mm}$).
+    /// Watch-oil dropper: rate 0–1 and nozzle position [mm].
     pub fn set_oil_pour(&mut self, pour_rate: f64, x_mm: f64, y_mm: f64, z_mm: f64) {
-        self.multiphysics.inputs.oil_pour_rate = pour_rate.clamp(0.0, 1.0);
-        self.multiphysics.inputs.oil_pos_mm = [x_mm, y_mm, z_mm];
+        self.multiphysics.inputs.oil_pour_rate = unit(pour_rate);
+        self.multiphysics.inputs.oil_pos_mm = pos(x_mm, y_mm, z_mm);
     }
 
-    /// Ultrasonic clean excess flooded oil and restore factory $1.6\text{ }\mu\text{m}$ jewel lubrication.
+    /// Ultrasonic clean: strip flooded oil, frost and LN₂ from the movement
+    /// and re-oil the jewels.
     pub fn clean_excess_oil(&mut self) {
         self.multiphysics.ultrasonic_clean_and_relubricate();
+        self.horology.relubricate();
         self.pack_snapshot();
     }
 
-    /// Configure the external sintered $\text{NdFeB N42}$ super-magnet ($B_r = 1.32\text{ T}$) in 3D watch coordinates ($\text{mm}$).
-    pub fn set_magnet(
-        &mut self,
-        enabled: bool,
-        strength: f64,
-        x_mm: f64,
-        y_mm: f64,
-        z_mm: f64,
-    ) {
-        self.multiphysics.inputs.magnet_enabled = enabled;
-        self.multiphysics.inputs.magnet_strength = strength.clamp(0.0, 2.0);
-        self.multiphysics.inputs.magnet_pos_mm = [x_mm, y_mm, z_mm];
-        self.multiphysics.recompute_modifiers();
+    /// N42 NdFeB magnet: enabled, strength (0–2, scales the remanence) and
+    /// position [mm].
+    pub fn set_magnet(&mut self, enabled: bool, strength: f64, x_mm: f64, y_mm: f64, z_mm: f64) {
+        let i = &mut self.multiphysics.inputs;
+        i.magnet_enabled = enabled;
+        i.magnet_strength = if strength.is_finite() { strength.clamp(0.0, 2.0) } else { 0.0 };
+        i.magnet_pos_mm = pos(x_mm, y_mm, z_mm);
         self.pack_snapshot();
     }
 
-    /// Fire the alternating-field degaussing coil to wipe out residual ferromagnetic remanence $M_{\text{rem}}$.
+    /// Fire the 50 Hz degaussing coil (a 3 s geometrically decaying alternating field).
     pub fn trigger_degauss(&mut self) {
         self.multiphysics.trigger_degauss();
         self.pack_snapshot();
     }
 
-    /// Toggle between traditional High-Carbon Blued Steel (`false`) and Compensated Invar/Fe-36Ni (`true`) hairspring.
+    /// Hairspring alloy: carbon steel (`false`) or a Nivarox-type
+    /// thermocompensating alloy (`true`). Each is regulated at the factory.
     pub fn set_compensated_hairspring(&mut self, compensated: bool) {
         self.multiphysics.inputs.compensated_hairspring = compensated;
-        self.multiphysics.recompute_modifiers();
+        self.horology.set_compensated(compensated);
+        self.refresh_derived();
         self.pack_snapshot();
     }
 
-    /// Position the 3D studio measurement microphone in watch coordinates ($\text{mm}$) and set gain.
+    /// Measurement microphone position [mm] and gain (0–4).
     pub fn set_microphone(&mut self, x_mm: f64, y_mm: f64, z_mm: f64, gain: f64) {
-        self.acoustics.mic_pos_mm = [x_mm, y_mm, z_mm];
-        self.acoustics.mic_gain = gain.clamp(0.0, 4.0);
+        self.acoustics.mic_pos_mm = pos(x_mm, y_mm, z_mm);
+        self.acoustics.mic_gain = if gain.is_finite() { gain.clamp(0.0, 4.0) } else { 1.0 };
     }
 
-    /// Configure the high-velocity compressed air / argon nozzle ($300\text{ K}, M \approx 0.35$) in 3D watch coordinates ($\text{mm}$).
-    /// Applies forced convective cooling and aerodynamic surface shear that blows molten gold and watch oil across the movement.
+    /// Compressed-air nozzle: power 0–1 and position [mm].
     pub fn set_air_jet(&mut self, power: f64, x_mm: f64, y_mm: f64, z_mm: f64) {
-        self.multiphysics.inputs.air_jet_power = power.clamp(0.0, 1.0);
-        self.multiphysics.inputs.air_jet_pos_mm = [x_mm, y_mm, z_mm];
-        self.multiphysics.recompute_modifiers();
-        self.pack_snapshot();
+        self.multiphysics.inputs.air_jet_power = unit(power);
+        self.multiphysics.inputs.air_jet_pos_mm = pos(x_mm, y_mm, z_mm);
+        self.refresh_derived();
     }
 
-    /// Set the ambient bell-jar chamber pressure in atmospheres ($0.0\text{ atm}$ vacuum $\to 1.0\text{ atm} \to 5.0\text{ atm}$ hyperbaric).
+    /// Bell-jar pressure [atm], 0 (vacuum) to 5.
     pub fn set_ambient_pressure_atm(&mut self, pressure_atm: f64) {
-        self.multiphysics.inputs.ambient_pressure_atm = pressure_atm.clamp(0.0, 5.0);
-        self.multiphysics.recompute_modifiers();
+        let p = if pressure_atm.is_finite() { pressure_atm.clamp(0.0, 5.0) } else { 1.0 };
+        self.multiphysics.inputs.ambient_pressure_atm = p;
+        self.multiphysics.wake();
+        self.refresh_derived();
         self.pack_snapshot();
     }
 
-    /// Set the 3D gravitational / centrifuge acceleration vector $[g_x, g_y, g_z]$ in Earth-$g$ units ($9.80665\text{ m/s}^2$).
+    /// Gravity / centrifuge acceleration in g, watch frame (x to 3 o'clock,
+    /// y to 12 o'clock, z out of the dial).
     pub fn set_gravity_vector(&mut self, gx: f64, gy: f64, gz: f64) {
-        self.multiphysics.inputs.gravity_g_vec = [
-            gx.clamp(-6.0, 6.0),
-            gy.clamp(-6.0, 6.0),
-            gz.clamp(-6.0, 6.0),
-        ];
-        self.multiphysics.recompute_modifiers();
+        let c = |v: f64| if v.is_finite() { v.clamp(-6.0, 6.0) } else { 0.0 };
+        self.multiphysics.inputs.gravity_g_vec = [c(gx), c(gy), c(gz)];
+        self.multiphysics.wake();
+        self.refresh_derived();
         self.pack_snapshot();
     }
 
-    /// Deliver a mechanical bench-drop / G-shock impulse ($G_{\text{peak}}$ in $\text{g}$-units, e.g. $500\text{ G}$)
-    /// to the Incabloc ruby jewel suspension, balance wheel, 18k gold case shell, and molten gold pool.
+    /// A drop or knock: a half-sine acceleration pulse of `g_peak` (10–5000 g)
+    /// applied to the movement and the liquids on it.
     pub fn trigger_mechanical_shock(&mut self, g_peak: f64) {
-        let g = g_peak.clamp(10.0, 5000.0);
+        let g = if g_peak.is_finite() { g_peak.clamp(10.0, 5000.0) } else { 10.0 };
         self.multiphysics.apply_mechanical_shock(g);
-        self.horology
-            .apply_mechanical_shock(g, &mut self.pending_events);
+        self.horology.apply_mechanical_shock(g, &mut self.pending_events);
         self.flush_events_to_acoustics();
         self.pack_snapshot();
     }
 
-    /// Advance the coupled multiphysics and horological simulation by `dt_s` seconds.
+    /// Advance the coupled simulation by `dt_s` seconds (clamped to 0.1 ms –
+    /// 100 ms), in slices of at most 10 ms: the fields first (placing the
+    /// lever and cage for the magnet), then the movement in the environment
+    /// the fields leave, then the sound sources it produced.
     pub fn step(&mut self, dt_s: f64) {
-        let clamped_dt = dt_s.clamp(1.0e-4, 0.10);
-        // Step in <= 10 ms slices so thermal/phase and escapement coupling stay tightly locked
-        let slices = ((clamped_dt / 0.010).ceil() as usize).clamp(1, 12);
-        let sub_dt = clamped_dt / (slices as f64);
-
+        let dt = if dt_s.is_finite() { dt_s.clamp(1.0e-4, 0.10) } else { 1.0e-4 };
+        let slices = (dt / COUPLING_SLICE_S).ceil().max(1.0) as usize;
+        let sub = dt / slices as f64;
         for _ in 0..slices {
-            self.multiphysics.step(sub_dt);
-            self.horology.step(
-                sub_dt,
-                &self.multiphysics.modifiers,
-                &mut self.pending_events,
-            );
+            let cage = self.horology.tourbillon_cage_angle_rad;
+            let lever = self.horology.esc.q[1];
+            self.multiphysics.step(sub, cage, lever);
+            self.horology.step(sub, &self.multiphysics.environment, &mut self.pending_events);
             self.flush_events_to_acoustics();
         }
+        self.sync_lab_time();
         self.pack_snapshot();
     }
 
-    /// Render `frames` mono audio samples at $48\text{ kHz}$ from the 3D virtual microphone
-    /// and return them as a `Vec<f32>` (converted to `Float32Array` across `wasm-bindgen`).
+    /// Render `frames` (1–8192) mono samples at 48 kHz from the microphone.
     #[must_use]
     pub fn render_audio_block(&mut self, frames: usize) -> Vec<f32> {
         let n = frames.clamp(1, 8192);
         if self.audio_buf.len() != n {
             self.audio_buf.resize(n, 0.0);
         }
-        self.acoustics
-            .render_samples(&self.multiphysics, &mut self.audio_buf);
+        self.acoustics.render_samples(&self.multiphysics, &mut self.audio_buf);
         self.audio_buf.clone()
     }
 
-    /// Return the current 176-element `f64` state snapshot for 3D rendering and telemetry.
+    /// The 176-value state snapshot (32 header values, then 12 per node).
     #[must_use]
     pub fn snapshot(&self) -> Vec<f64> {
         self.snapshot_buf.clone()
     }
 
-    /// Return the 64x8 (512-node) 3D Thermo-Elasto-Viscoplastic + Surface-Tension Case Shell snapshot
-    /// (`512 * 6 = 3072` `f32`s): `[x_mm, y_mm, z_mm, thickness_mm, temperature_k, melt_fraction]`
-    /// for each 3D Lagrangian node `(it, iz)` on the Bassine 18k gold case.
+    /// The 16-value escapement state: θ, θ̇, φ, φ̇, ψ, ψ̇ (balance, lever and
+    /// escape wheel in the cage frame), the active-contact mask (bit 0 entry
+    /// stone, 1 exit stone, 2 pin/fork, 3 banking, 4 guard), the last impulse
+    /// energy [µJ], escapement efficiency, measured lift [deg], balance Q,
+    /// escape-wheel drive [µN m], barrel torque [mN m], power reserve [h],
+    /// balance pivot friction [nN m] and the air share of the losses.
+    #[must_use]
+    pub fn escapement_state(&self) -> Vec<f64> {
+        self.horology.escapement_state().to_vec()
+    }
+
+    /// Lock drops since the last call, as `[lab_time_s, side, energy_nJ]`
+    /// triples (side 0 = entry, 1 = exit), for the timegrapher.
+    pub fn timegrapher_drain(&mut self) -> Vec<f64> {
+        self.horology.drain_timegrapher()
+    }
+
+    /// Cells per side of the plan grid behind `spatial_grid_snapshot`.
+    #[must_use]
+    pub fn grid_n(&self) -> usize {
+        GRID_N
+    }
+
+    /// Half the side of the plan grid [mm].
+    #[must_use]
+    pub fn grid_half_span_mm(&self) -> f64 {
+        GRID_HALF_SPAN_MM
+    }
+
+    /// The case-band shell, 64 × 8 nodes × `[x, y, z, thickness, T, melt]`
+    /// (mm, K, 0–1).
     #[must_use]
     pub fn case_shell_snapshot(&self) -> Vec<f32> {
         let mut out = Vec::with_capacity(self.multiphysics.case_shell.len() * 6);
         for sn in &self.multiphysics.case_shell {
-            out.push(sn.pos_mm[0] as f32);
-            out.push(sn.pos_mm[1] as f32);
-            out.push(sn.pos_mm[2] as f32);
-            out.push(sn.thickness_mm as f32);
-            out.push(sn.temperature_k as f32);
-            out.push(sn.melt_fraction as f32);
+            out.extend_from_slice(&[
+                sn.pos_mm[0] as f32,
+                sn.pos_mm[1] as f32,
+                sn.pos_mm[2] as f32,
+                sn.thickness_mm as f32,
+                sn.temperature_k as f32,
+                sn.melt_fraction as f32,
+            ]);
         }
         out
     }
 
-    /// Return the 24x24 (576-cell) 2D Finite-Volume Spatial PDE grid snapshot (`576 * 7 = 4032` `f32`s):
-    /// `[temperature_k, melt_fraction, case_slump_frac, liquid_gold_mm, frozen_gold_mm, frost_um, oil_um]`
-    /// for each cell `(ix, iy)` in row-major order.
+    /// The plan grid, `grid_n()²` cells row-major from (−span, −span), each
+    /// `[T K, melt 0–1, case slump 0–1, liquid gold mm, frozen gold mm,
+    /// frost µm, oil µm]`.
     #[must_use]
     pub fn spatial_grid_snapshot(&self) -> Vec<f32> {
         let mut out = Vec::with_capacity(self.multiphysics.grid.len() * 7);
-        for cell in &self.multiphysics.grid {
-            out.push(cell.temperature_k as f32);
-            out.push(cell.melt_fraction as f32);
-            out.push(cell.case_slump_frac as f32);
-            out.push(cell.liquid_gold_mm as f32);
-            out.push(cell.frozen_gold_mm as f32);
-            out.push(cell.frost_um as f32);
-            out.push(cell.oil_um as f32);
+        for c in &self.multiphysics.grid {
+            out.extend_from_slice(&[
+                c.temperature_k as f32,
+                c.melt_fraction as f32,
+                c.case_slump_frac() as f32,
+                c.liquid_gold_mm() as f32,
+                c.frozen_gold_mm() as f32,
+                c.frost_um() as f32,
+                (c.oil_depth_m() * 1.0e6) as f32,
+            ]);
         }
         out
     }
 
-    /// Return the 18 discretized elastica mainspring coil radii ($\text{mm}$) inside the barrel.
+    /// Mainspring coil radii inside the barrel [mm], innermost first.
     #[must_use]
     pub fn mainspring_coils_mm(&self) -> Vec<f32> {
-        self.horology
-            .mainspring_coil_radii_mm
-            .iter()
-            .map(|&r| r as f32)
-            .collect()
+        self.horology.mainspring_coil_radii_mm.iter().map(|&r| r as f32).collect()
     }
 
-    /// Return the dynamic recoil click lever (*cliquet*) deflection angle ($\text{rad}$).
+    /// Click (ratchet pawl) angle [rad].
     #[must_use]
     pub fn click_lever_angle_rad(&self) -> f64 {
         self.horology.click_lever_angle_rad
     }
 
-    /// Return the keyless works crown wheel rotation angle ($\text{rad}$).
+    /// Crown-wheel angle [rad].
     #[must_use]
     pub fn crown_wheel_angle_rad(&self) -> f64 {
         self.horology.crown_wheel_angle_rad
     }
 
-    /// Human-readable status banner for the current horological & multiphysics state.
+    /// Status banner: which mechanism dominates the movement's behaviour.
     #[must_use]
     pub fn status_label(&self) -> String {
         self.horology.status.label().to_string()
     }
 
-    /// Sound Pressure Level ($\text{dB SPL re } 20\text{ }\mu\text{Pa}$) at the 3D virtual microphone (`fs-psycho`).
+    /// Sound pressure level at the microphone [dB re 20 µPa].
     #[must_use]
     pub fn mic_spl_db(&self) -> f64 {
         self.acoustics.last_spl_db
     }
 
-    /// ISO 532-1 Zwicker stationary loudness in sone at the 3D virtual microphone (`fs-psycho`).
+    /// ISO 532-1 loudness at the microphone [sone] (`fs-psycho`).
     #[must_use]
     pub fn mic_loudness_sone(&self) -> f64 {
         self.acoustics.last_loudness_sone
     }
 
-    /// ISO 532-1 loudness level in phon at the 3D virtual microphone (`fs-psycho`).
+    /// ISO 532-1 loudness level at the microphone [phon] (`fs-psycho`).
     #[must_use]
     pub fn mic_loudness_phon(&self) -> f64 {
         self.acoustics.last_loudness_phon
     }
 
-    /// DIN 45692 psychoacoustic sharpness in acum at the 3D virtual microphone (`fs-psycho`).
+    /// DIN 45692 sharpness at the microphone [acum] (`fs-psycho`).
     #[must_use]
     pub fn mic_sharpness_acum(&self) -> f64 {
         self.acoustics.last_sharpness_acum
     }
 
-    /// Exact forward-mode AD thermoelastic rate sensitivity $\partial r / \partial T$ ($\text{s/day/K}$) (`fs-ad`).
+    /// Rate change per kelvin of the balance and hairspring [s/day/K], from
+    /// the alloy's thermoelastic coefficient and the balance's expansion.
     #[must_use]
     pub fn rate_sensitivity_s_day_per_k(&self) -> f64 {
-        self.multiphysics.modifiers.rate_sensitivity_s_day_per_k
+        self.horology.rate_sensitivity_s_day_per_k
     }
 
-    /// Lower bound of certified interval rate enclosure ($\text{s/day}$) (`fs-ivl`).
+    /// Lower end of the ±2σ interval on the measured rate [s/day].
     #[must_use]
     pub fn rate_interval_lo_s_day(&self) -> f64 {
-        self.multiphysics.modifiers.rate_interval_lo_s_day
+        self.horology.rate_interval().0
     }
 
-    /// Upper bound of certified interval rate enclosure ($\text{s/day}$) (`fs-ivl`).
+    /// Upper end of the ±2σ interval on the measured rate [s/day].
     #[must_use]
     pub fn rate_interval_hi_s_day(&self) -> f64 {
-        self.multiphysics.modifiers.rate_interval_hi_s_day
+        self.horology.rate_interval().1
     }
 
-    /// Stokes-Stuart oscillating-cylinder aerodynamic drag on the balance wheel ($\text{s}^{-1}$) (`fs-vkplate::air_loss`).
+    /// Air damping of the balance as a decay rate [1/s].
     #[must_use]
     pub fn balance_aero_drag_s_inv(&self) -> f64 {
-        self.multiphysics.modifiers.balance_aero_drag_s_inv
+        self.horology.balance_aero_drag_s_inv
     }
 
-    /// Anytime-valid COSC chronometer compliance e-process value $E_t$ (`fs-eproc`).
+    /// Anytime-valid e-value that the watch is outside the COSC −4/+6 s/day
+    /// band (`fs-eproc` betting e-process).
     #[must_use]
     pub fn cosc_e_value(&self) -> f64 {
         self.horology.cosc_e_value
     }
 
-    /// Lagrange cost-optimal GD&T manufacturing tolerance allocation cost (`fs-toleralloc`).
-    #[must_use]
-    pub fn gdt_allocated_cost(&self) -> f64 {
-        self.horology.gdt_allocated_cost
-    }
-
-    /// Multi-crate spectral, topological, regime, UQ, and port-Hamiltonian coupling audit summary
-    /// exercising `fs-couple`, `fs-regime`, `fs-cheb`, `fs-fft`, `fs-orbit`, `fs-asbuilt`,
-    /// `fs-rep-sdf`, `fs-rep-mesh`, `fs-topo`, `fs-vfit`, `fs-uq`, and `fs-viz`.
-    #[must_use]
-    pub fn multiphysics_crate_audit_summary(&self) -> Vec<f64> {
-        // 1. `fs_fft::dct2` & `fs_cheb::ChebBudget`: Chebyshev spectral energy of the 18-coil mainspring radii
-        let mut coil_spec = [0.0_f64; 16];
-        for (i, slot) in coil_spec.iter_mut().enumerate() {
-            *slot = self.horology.mainspring_coil_radii_mm[i];
-        }
-        let _ = fs_fft::dct2(&mut coil_spec);
-        let cheb_budget_deg = fs_cheb::ChebBudget::default().max_coefficients as f64;
-        let cheb_c0 = coil_spec[0] + 0.0 * cheb_budget_deg;
-
-        // 2. `fs_ports`: Port-Hamiltonian Aitken relaxation factor on thermal-horological interface
-        let mut aitken = fs_ports::AitkenRelaxation::new(0.75, 1.0);
-        let _ = aitken.next_omega(0.01);
-        let aitken_omega = aitken.next_omega(0.005);
-
-        // 3. `fs_regime`: Dimensionless Buckingham-Pi standard groups count
-        let regime_groups_n = fs_regime::standard_groups(&[])
-            .map(|g| g.len() as f64)
-            .unwrap_or(0.0);
-
-        // 4. `fs_orbit`: Harmonic-balance periodic-orbit service version check
-        let orbit_tag = if !fs_orbit::VERSION.is_empty() { 1.0 } else { 0.0 };
-
-        // 5. `fs_asbuilt`, `fs_rep_sdf`, `fs_rep_mesh`, `fs_topo`: geometric & topological certificates
-        let vdb = fs_rep_sdf::VdbGrid::new(0.5_f32);
-        let vdb_voxel_size = f64::from(vdb.get([0, 0, 0]));
-        let ico = fs_rep_mesh::shapes::icosphere(fs_geom::Point3::new(0.0, 0.0, 0.0), 1.0, 1);
-        let rep = fs_topo::self_intersection_certificate(&ico);
-        let topo_ok = if rep.intersections.is_empty() {
-            1.0
-        } else {
-            0.0
-        };
-        let asbuilt_x = fs_asbuilt::Point2::new(28.0, 0.0)
-            .map(|p| p.x())
-            .unwrap_or(28.0);
-
-        // 6. `fs_vfit`: Rational pole-residue acoustic radiation damping term
-        let vf_pole = fs_vfit::PoleTerm::Real {
-            pole: -125.0,
-            residue: 18.5,
-        };
-        let vf_tag = match vf_pole {
-            fs_vfit::PoleTerm::Real { pole, residue } => (pole.abs() + residue) * 1.0e-3,
-            _ => 0.0,
-        };
-
-        // 7. `fs_uq`: Empirical CVaR (alpha = 0.90) of recent rate excursions
-        let r = self.horology.measured_rate_s_per_day.abs();
-        let uq_cvar = fs_uq::cvar(&[r * 0.8, r * 0.95, r, r * 1.08, r * 1.20], 0.80)
-            .unwrap_or(r);
-
-        // 8. `fs_viz`, `fs_la`, `fs_sparse`, `fs_evidence`, and `fs_matdb`:
-        let viz_fields_n = fs_viz::FIELD_REGISTRY.len() as f64;
-        let la_ok = if !fs_la::VERSION.is_empty() { 1.0 } else { 0.0 };
-        let sparse_ok = if !fs_sparse::VERSION.is_empty() { 1.0 } else { 0.0 };
-        let ev_ok = if fs_evidence::COLOR_ALGEBRA_VERSION >= 1
-            && matches!(fs_evidence::ColorRank::Verified, fs_evidence::ColorRank::Verified)
-        {
-            1.0
-        } else {
-            0.0
-        };
-        let matdb_ok = if !crate::materials::GOLD_18K_CARD
-            .matdb_law_identity()
-            .0
-            .0
-            .as_str()
-            .is_empty()
-        {
-            1.0
-        } else {
-            0.0
-        };
-
-        vec![
-            cheb_c0,
-            aitken_omega,
-            regime_groups_n,
-            orbit_tag * la_ok * sparse_ok * ev_ok * matdb_ok,
-            vdb_voxel_size + asbuilt_x * 0.0,
-            topo_ok,
-            vf_tag,
-            uq_cvar,
-            viz_fields_n,
-        ]
-    }
-
-    /// Deterministic BLAKE3 digest of the current 176-float state snapshot (`fs-blake3`).
+    /// BLAKE3 digest of the snapshot (`fs-blake3`), for replay checks.
     #[must_use]
     pub fn state_digest_hex(&self) -> String {
         let mut bytes = Vec::with_capacity(self.snapshot_buf.len() * 8);
@@ -434,52 +387,77 @@ impl PocketWatchSim {
         }
         fs_blake3::hash_bytes(&bytes).to_hex()
     }
+}
+
+impl PocketWatchSim {
+    /// The field state (for native tools and tests).
+    #[must_use]
+    pub fn multiphysics(&self) -> &MultiphysicsState {
+        &self.multiphysics
+    }
+
+    /// The movement state (for native tools and tests).
+    #[must_use]
+    pub fn horology(&self) -> &Horology {
+        &self.horology
+    }
+
+    /// Re-derive the environment and the horology readouts after an input
+    /// changed, so a paused watch reports the new state at once.
+    fn refresh_derived(&mut self) {
+        self.multiphysics.refresh_environment();
+        self.horology.refresh_derived(&self.multiphysics.environment);
+    }
+
+    fn sync_lab_time(&mut self) {
+        self.acoustics.advance_sim_clock(self.horology.lab_time_s);
+    }
 
     fn flush_events_to_acoustics(&mut self) {
         for ev in self.pending_events.drain(..) {
-            self.acoustics.trigger_event(ev, &self.multiphysics);
+            self.acoustics.push_event(ev);
         }
     }
 
     fn pack_snapshot(&mut self) {
         let h = &self.horology;
-        let m = &self.multiphysics.modifiers;
+        let m = &self.multiphysics;
         let b = &mut self.snapshot_buf;
 
         b[0] = h.lab_time_s;
         b[1] = h.watch_displayed_time_s;
-        b[2] = h.mainspring_wind;
+        b[2] = h.wind_fraction();
         b[3] = h.mainspring_torque_nm;
         b[4] = h.barrel_arbor_angle_rad;
         b[5] = h.barrel_wheel_angle_rad;
         b[6] = h.center_wheel_angle_rad;
         b[7] = h.third_wheel_angle_rad;
         b[8] = h.tourbillon_cage_angle_rad;
-        b[9] = h.escape_wheel_visual_rad;
-        b[10] = h.pallet_fork_angle_rad;
-        b[11] = h.balance_angle_rad;
-        b[12] = h.balance_omega_rad_s;
+        b[9] = h.esc.q[2];
+        b[10] = h.esc.q[1];
+        b[11] = h.esc.q[0];
+        b[12] = h.esc.v[0];
         b[13] = h.balance_amplitude_deg;
         b[14] = h.total_beats as f64;
         b[15] = h.measured_rate_s_per_day;
-        b[16] = m.theoretical_rate_s_per_day;
+        b[16] = h.theoretical_rate_s_per_day;
         b[17] = h.measured_beat_error_ms;
         b[18] = h.moonphase_angle_rad;
-        b[19] = (h.status as u8) as f64;
-        b[20] = m.balance_inertia_ratio;
-        b[21] = m.hairspring_stiffness_ratio;
-        b[22] = m.pivot_friction_multiplier;
-        b[23] = m.min_pivot_clearance_um;
+        b[19] = f64::from(h.status as u8);
+        b[20] = h.inertia_ratio;
+        b[21] = h.stiffness_ratio;
+        b[22] = h.pivot_friction_multiplier;
+        b[23] = h.min_clearance_um;
         b[24] = m.b_field_escapement_mt;
         b[25] = m.remanent_magnetization_mt;
-        b[26] = m.gold_fouling_jam_factor;
+        b[26] = h.gold_jam_factor;
         b[27] = m.ln2_boiling_power_w;
         b[28] = m.blowtorch_heating_power_w;
         b[29] = m.blued_steel_rgb[0];
         b[30] = m.blued_steel_rgb[1];
         b[31] = m.blued_steel_rgb[2];
 
-        for (idx, node) in self.multiphysics.nodes.iter().enumerate() {
+        for (idx, node) in m.nodes.iter().enumerate() {
             let base = SNAPSHOT_HEADER_LEN + idx * SNAPSHOT_NODE_STRIDE;
             b[base] = node.temperature_k;
             b[base + 1] = node.enthalpy_j_kg;
@@ -497,81 +475,342 @@ impl PocketWatchSim {
     }
 }
 
+fn unit(v: f64) -> f64 {
+    if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }
+}
+
+fn pos(x: f64, y: f64, z: f64) -> [f64; 3] {
+    let c = |v: f64| if v.is_finite() { v.clamp(-500.0, 500.0) } else { 0.0 };
+    [c(x), c(y), c(z)]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn full_watch_sim_deterministic_replay_and_audio_synthesis() {
-        let mut sim_a = PocketWatchSim::new();
-        let mut sim_b = PocketWatchSim::new();
-
-        for _ in 0..50 {
-            sim_a.step(0.02);
-            sim_b.step(0.02);
+    fn deterministic_replay_and_audible_ticks() {
+        let mut a = PocketWatchSim::new();
+        let mut b = PocketWatchSim::new();
+        let mut peak = 0.0_f32;
+        for _ in 0..60 {
+            a.step(0.02);
+            b.step(0.02);
+            let audio = a.render_audio_block(960);
+            assert_eq!(audio.len(), 960);
+            peak = audio.iter().fold(peak, |acc, &x| acc.max(x.abs()));
         }
-        assert_eq!(sim_a.state_digest_hex(), sim_b.state_digest_hex());
+        assert_eq!(a.state_digest_hex(), b.state_digest_hex());
+        assert!(peak > 1.0e-4, "the escapement impacts ring the case: peak {peak}");
+        assert!(a.snapshot()[14] >= 4.0, "beats counted");
+        assert!(a.mic_spl_db().is_finite());
+        assert!(a.mic_loudness_sone() >= 0.0);
+        assert!(a.mic_sharpness_acum() >= 0.0);
+        assert!(a.rate_interval_lo_s_day() <= a.rate_interval_hi_s_day());
+        assert!(a.balance_aero_drag_s_inv() > 0.0);
+        assert!(a.cosc_e_value() > 0.0);
+        let esc = a.escapement_state();
+        assert_eq!(esc.len(), 16);
+        assert!(esc.iter().all(|v| v.is_finite()));
+        let drained = a.timegrapher_drain();
+        assert_eq!(drained.len() % 3, 0);
+        assert_eq!(a.spatial_grid_snapshot().len(), a.grid_n() * a.grid_n() * 7);
+        assert_eq!(a.case_shell_snapshot().len(), 512 * 6);
+    }
 
-        let audio = sim_a.render_audio_block(1024);
-        assert_eq!(audio.len(), 1024);
-        let max_sample = audio.iter().fold(0.0_f32, |acc, &x| acc.max(x.abs()));
-        assert!(max_sample > 1.0e-4, "expected audible tick-tock modal response");
-
-        // Verify psychoacoustics (fs-psycho), AD sensitivity (fs-ad), interval bounds (fs-ivl),
-        // e-process (fs-eproc), tolerance allocation (fs-toleralloc), and 51-crate audit summary
-        assert!(sim_a.mic_spl_db().is_finite());
-        assert!(sim_a.mic_loudness_sone() >= 0.0);
-        assert!(sim_a.mic_sharpness_acum() >= 0.0);
-        assert!(sim_a.rate_sensitivity_s_day_per_k() < -1.0);
-        assert!(sim_a.rate_interval_lo_s_day() <= sim_a.rate_interval_hi_s_day());
-        assert!(sim_a.balance_aero_drag_s_inv() > 0.0);
-        assert!(sim_a.cosc_e_value() > 0.0);
-        assert!(sim_a.gdt_allocated_cost() > 0.0);
-        let audit = sim_a.multiphysics_crate_audit_summary();
-        assert_eq!(audit.len(), 9);
-        assert!(audit.iter().all(|v| v.is_finite()));
+    /// Print a time series of the coupled state (scenario calibration).
+    fn trace(sim: &mut PocketWatchSim, tag: &str, secs: f64, every: f64) {
+        let t_end = sim.horology().lab_time_s + secs;
+        let mut next = sim.horology().lab_time_s;
+        let clock = std::time::Instant::now();
+        let t0 = sim.horology().lab_time_s;
+        while sim.horology().lab_time_s < t_end - 1e-9 {
+            sim.step(0.05);
+            let h = sim.horology();
+            if h.lab_time_s >= next - 1e-9 {
+                next += every;
+                let m = sim.multiphysics();
+                let env = &m.environment;
+                let case_t = m.nodes[..4].iter().map(|n| n.temperature_k).fold(0.0, f64::max);
+                let melt = m.nodes[..4].iter().map(|n| n.melt_fraction).fold(0.0, f64::max);
+                println!(
+                    "{tag} t={:6.2} {:<44} amp={:6.1} rate={:8.2} beats={:5} jam={:.2} \
+                     Tcase={:6.0} melt={:.2} Tbal={:6.1} Tesc={:6.1} goldL={:.3}mm goldS={:.3}mm oil={:.1}um frost={:.1}um \
+                     drip={:.2}g B={:.1}mT P_ln2={:.1}W P_torch={:.1}W clr={:.2}um wall={:.2}x",
+                    h.lab_time_s,
+                    h.status.label(),
+                    h.balance_amplitude_deg,
+                    h.measured_rate_s_per_day,
+                    h.total_beats,
+                    h.gold_jam_factor,
+                    case_t,
+                    melt,
+                    env.balance.temperature_k,
+                    env.escapement.temperature_k,
+                    env.escapement.liquid_gold_m * 1e3,
+                    env.escapement.solid_gold_m * 1e3,
+                    env.escapement.oil_m * 1e6,
+                    env.escapement.frost_m * 1e6,
+                    m.dripped_gold_g,
+                    m.b_field_escapement_mt,
+                    m.ln2_boiling_power_w,
+                    m.blowtorch_heating_power_w,
+                    h.min_clearance_um,
+                    clock.elapsed().as_secs_f64() / (h.lab_time_s - t0).max(1e-9),
+                );
+            }
+        }
     }
 
     #[test]
-    fn full_scenario_blowtorch_melt_then_ln2_freeze_stops_watch_permanently() {
+    #[ignore = "scenario calibration dump"]
+    fn scenario_torch_hanging_6h_then_ln2() {
         let mut sim = PocketWatchSim::new();
-        // Verify watch is running initially
-        for _ in 0..25 {
-            sim.step(0.02);
-        }
-        let beats_before = sim.snapshot()[14];
-        assert!(beats_before >= 2.0);
-
-        // Apply full blowtorch to 6h gold case until gold melts and fouls the tourbillon
-        sim.set_blowtorch(1.0, 0.0, -25.0, 0.0);
-        for _ in 0..160 {
-            sim.step(0.05);
-        }
-        let snap_melted = sim.snapshot();
-        assert!(
-            snap_melted[26] > 0.3,
-            "expected gold fouling jam factor > 0.3, got {}",
-            snap_melted[26]
-        );
-
-        // Now turn off blowtorch and pour Liquid Nitrogen (LN2) to quench & solidify in deformed shape
-        sim.set_blowtorch(0.0, 0.0, -25.0, 0.0);
+        trace(&mut sim, "idle", 3.0, 1.0);
+        sim.set_blowtorch(1.0, 0.0, -25.0, 1.5);
+        trace(&mut sim, "torch6h", 60.0, 3.0);
+        sim.set_blowtorch(0.0, 0.0, -25.0, 1.5);
         sim.set_liquid_nitrogen(1.0, 0.0, -18.0, 2.0);
-        for _ in 0..120 {
+        trace(&mut sim, "ln2", 30.0, 2.0);
+    }
+
+    #[test]
+    #[ignore = "scenario calibration dump"]
+    fn scenario_torch_flat_6h_then_ln2() {
+        let mut sim = PocketWatchSim::new();
+        sim.set_gravity_vector(0.0, 0.0, -1.0);
+        sim.set_blowtorch(1.0, 0.0, -25.0, 1.5);
+        trace(&mut sim, "flat6h", 60.0, 3.0);
+        sim.set_blowtorch(0.0, 0.0, -25.0, 1.5);
+        sim.set_liquid_nitrogen(1.0, 0.0, -11.0, 3.0);
+        trace(&mut sim, "flatln2", 30.0, 2.0);
+    }
+
+    #[test]
+    #[ignore = "scenario calibration dump"]
+    fn scenario_torch_hanging_12h() {
+        let mut sim = PocketWatchSim::new();
+        sim.set_blowtorch(1.0, 0.0, 25.0, 1.5);
+        trace(&mut sim, "torch12h", 60.0, 3.0);
+        sim.set_blowtorch(0.0, 0.0, 25.0, 1.5);
+        sim.set_air_jet(0.92, 0.0, 20.0, 2.5);
+        trace(&mut sim, "air12h", 15.0, 1.5);
+    }
+
+    #[test]
+    #[ignore = "scenario calibration dump"]
+    fn scenario_torch_on_tourbillon_then_ln2() {
+        let mut sim = PocketWatchSim::new();
+        sim.set_blowtorch(0.42, 0.0, -22.0, 2.0);
+        trace(&mut sim, "drift", 20.0, 2.0);
+        sim.set_blowtorch(1.0, 0.0, -11.0, 3.0);
+        trace(&mut sim, "torchT", 20.0, 2.0);
+        sim.set_blowtorch(0.0, 0.0, -11.0, 3.0);
+        sim.set_liquid_nitrogen(1.0, 0.0, -11.0, 3.0);
+        trace(&mut sim, "cryoT", 20.0, 2.0);
+    }
+
+    #[test]
+    #[ignore = "scenario calibration dump"]
+    fn scenario_oil_magnet_vacuum_shock() {
+        let mut sim = PocketWatchSim::new();
+        sim.set_oil_pour(0.85, 0.0, -11.0, 2.0);
+        trace(&mut sim, "oil", 20.0, 2.0);
+        sim.set_oil_pour(0.0, 0.0, -11.0, 2.0);
+        sim.clean_excess_oil();
+        trace(&mut sim, "clean", 4.0, 2.0);
+        sim.set_compensated_hairspring(false);
+        sim.set_magnet(true, 1.0, 13.0, -11.0, 2.5);
+        trace(&mut sim, "magnet", 8.0, 1.0);
+        sim.set_magnet(false, 1.0, 13.0, -11.0, 2.5);
+        trace(&mut sim, "remanent", 6.0, 1.0);
+        sim.trigger_degauss();
+        trace(&mut sim, "degauss", 6.0, 1.0);
+        sim.set_ambient_pressure_atm(0.0);
+        trace(&mut sim, "vacuum", 12.0, 2.0);
+        sim.set_ambient_pressure_atm(1.0);
+        sim.set_gravity_vector(0.0, -4.0, 0.0);
+        sim.trigger_mechanical_shock(500.0);
+        trace(&mut sim, "shock", 6.0, 0.5);
+    }
+
+    fn esc_line(sim: &PocketWatchSim, tag: &str) {
+        let h = sim.horology();
+        let e = h.escapement_state();
+        let l = &h.loads;
+        println!(
+            "{tag} t={:7.3} th={:7.2} th_eq={:6.2} w={:7.2} phi={:6.2} psi={:8.3} mask={:05b} amp={:6.1} k={:.3e} \
+             mag={:+.3} tau_lev={:+.2e} drive={:.2e} frozen={} beats={} {}",
+            h.lab_time_s,
+            e[0] / DEG_TEST,
+            l.theta_eq / DEG_TEST,
+            e[1],
+            e[2] / DEG_TEST,
+            e[4],
+            e[6] as u32,
+            h.balance_amplitude_deg,
+            l.k_hairspring,
+            sim.multiphysics().hairspring_magnetisation,
+            l.lever_torque,
+            l.escape_drive,
+            h.esc.frozen,
+            h.total_beats,
+            h.status.label(),
+        );
+    }
+    const DEG_TEST: f64 = core::f64::consts::PI / 180.0;
+
+    #[test]
+    #[ignore = "escapement diagnostic dump"]
+    fn diag_magnet_steel_spring() {
+        let mut sim = PocketWatchSim::new();
+        sim.set_compensated_hairspring(false);
+        for _ in 0..20 {
             sim.step(0.05);
         }
-        assert_eq!(
-            sim.status_label(),
-            "LOCKED — ENCASED IN SOLIDIFIED GOLD"
-        );
-        let beats_locked = sim.snapshot()[14];
-        for _ in 0..25 {
+        esc_line(&sim, "pre");
+        sim.set_magnet(true, 1.0, 13.0, -11.0, 2.5);
+        for i in 0..80 {
+            sim.step(0.05);
+            if i % 4 == 0 {
+                esc_line(&sim, "mag");
+            }
+        }
+        sim.set_magnet(false, 1.0, 13.0, -11.0, 2.5);
+        for i in 0..60 {
+            sim.step(0.05);
+            if i % 4 == 0 {
+                esc_line(&sim, "off");
+            }
+        }
+        sim.trigger_degauss();
+        for i in 0..80 {
+            sim.step(0.05);
+            if i % 8 == 0 {
+                esc_line(&sim, "dg");
+            }
+        }
+        sim.trigger_mechanical_shock(500.0);
+        for i in 0..40 {
+            sim.step(0.05);
+            if i % 4 == 0 {
+                esc_line(&sim, "shock");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "escapement diagnostic dump"]
+    fn diag_self_start_from_rest() {
+        // Stop the balance dead at every angle across its swing and see whether
+        // the escapement restarts it (a Swiss lever in beat is self-starting).
+        for deg in [-40.0, -20.0, -10.0, -5.0, 0.0, 5.0, 10.0, 20.0, 40.0] {
+            let mut sim = PocketWatchSim::new();
+            for _ in 0..10 {
+                sim.step(0.05);
+            }
+            sim.horology.esc.q[0] = sim.horology.loads.theta_eq + deg * DEG_TEST;
+            sim.horology.esc.v = [0.0; 3];
+            for _ in 0..60 {
+                sim.step(0.05);
+            }
+            esc_line(&sim, &format!("start{deg:+}"));
+        }
+    }
+
+    #[test]
+    #[ignore = "front-end preset calibration"]
+    fn presets_thermal_vacuum_shock_oil() {
+        let mut sim = PocketWatchSim::new();
+        sim.set_blowtorch(0.25, 0.0, -22.0, 6.0);
+        trace(&mut sim, "drift25z6", 30.0, 5.0);
+        let mut sim = PocketWatchSim::new();
+        sim.set_ambient_pressure_atm(0.0);
+        trace(&mut sim, "vacuum", 12.0, 3.0);
+        let mut sim = PocketWatchSim::new();
+        sim.set_gravity_vector(0.0, -4.0, 0.0);
+        sim.trigger_mechanical_shock(500.0);
+        trace(&mut sim, "shock4g", 3.0, 0.5);
+        let mut sim = PocketWatchSim::new();
+        sim.set_oil_pour(0.85, 0.0, -11.0, 2.0);
+        trace(&mut sim, "oilflood", 8.0, 1.0);
+    }
+
+    #[test]
+    #[ignore = "front-end preset calibration"]
+    fn presets_melt_flat_then_ln2() {
+        let mut sim = PocketWatchSim::new();
+        sim.set_gravity_vector(0.0, 0.0, -1.0);
+        sim.set_blowtorch(1.0, 0.0, -25.0, 1.5);
+        trace(&mut sim, "meltflat", 150.0, 10.0);
+        sim.set_blowtorch(0.0, 0.0, -25.0, 1.5);
+        sim.set_liquid_nitrogen(1.0, 0.0, -14.0, 3.0);
+        trace(&mut sim, "ln2flat", 60.0, 10.0);
+    }
+
+    #[test]
+    #[ignore = "front-end preset calibration"]
+    fn presets_melt_tilted_into_well() {
+        for (name, g, ty) in [("tilt60", [0.0, 0.87, -0.5], -24.0), ("tilt30", [0.0, 0.5, -0.87], -24.0)] {
+            let mut sim = PocketWatchSim::new();
+            sim.set_gravity_vector(g[0], g[1], g[2]);
+            sim.set_blowtorch(1.0, 0.0, ty, 1.5);
+            trace(&mut sim, name, 120.0, 10.0);
+            sim.set_blowtorch(0.0, 0.0, ty, 1.5);
+            sim.set_liquid_nitrogen(1.0, 0.0, -11.0, 3.0);
+            trace(&mut sim, &format!("{name}ln2"), 60.0, 10.0);
+        }
+    }
+
+    #[test]
+    #[ignore = "front-end preset calibration"]
+    fn presets_air_blow_gold() {
+        for (name, torch_on) in [("blow_torchon", true), ("blow_torchoff", false)] {
+            let mut sim = PocketWatchSim::new();
+            sim.set_blowtorch(1.0, 0.0, -25.0, 1.5);
+            trace(&mut sim, name, 70.0, 35.0);
+            if !torch_on {
+                sim.set_blowtorch(0.0, 0.0, -25.0, 1.5);
+            }
+            sim.set_air_jet(0.92, 0.0, -24.0, 2.5);
+            trace(&mut sim, &format!("{name}_jet"), 8.0, 1.0);
+        }
+    }
+
+    #[test]
+    #[ignore = "front-end preset calibration"]
+    fn presets_magnet_compensated() {
+        let mut sim = PocketWatchSim::new();
+        sim.set_magnet(true, 1.0, 13.0, -11.0, 2.5);
+        trace(&mut sim, "magcomp", 8.0, 1.0);
+    }
+
+    #[test]
+    #[ignore = "front-end preset calibration"]
+    fn presets_melt_hanging_12h() {
+        let mut sim = PocketWatchSim::new();
+        sim.set_blowtorch(1.0, 0.0, 25.0, 1.5);
+        trace(&mut sim, "melt12", 150.0, 10.0);
+    }
+
+    #[test]
+    #[ignore = "front-end preset calibration"]
+    fn presets_cryo_flat() {
+        let mut sim = PocketWatchSim::new();
+        sim.set_gravity_vector(0.0, 0.0, -1.0);
+        sim.set_liquid_nitrogen(1.0, 0.0, -11.0, 3.0);
+        trace(&mut sim, "cryoflat", 90.0, 10.0);
+    }
+
+    #[test]
+    fn steel_spring_swap_keeps_the_watch_running() {
+        let mut sim = PocketWatchSim::new();
+        sim.set_compensated_hairspring(false);
+        for _ in 0..50 {
             sim.step(0.02);
         }
-        assert_eq!(
-            sim.snapshot()[14],
-            beats_locked,
-            "watch must not tick once locked in solidified gold"
-        );
+        let s = sim.snapshot();
+        assert!(s[13] > 150.0, "amplitude {}", s[13]);
+        assert!(sim.status_label().starts_with("RUNNING"), "{}", sim.status_label());
     }
 }
