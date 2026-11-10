@@ -1,0 +1,4 @@
+frankensim.specimen-parts.v1
+part	material	state	joins	note
+bore	unstated (the body is not maple; the sheet does not name the wood)	assembled	tone-holes	unfolded air column from the reed end of the bocal to the bell end, 2382.7 mm: bocal (Grenser H3, a straight cone declared between its two printed end diameters), receiver, wing joint, boot small bore, U-turn at the septum, boot large bore, long joint, bell; joints overlap by the tenon lengths and the step at each joint is drawn over 1.0 mm
+tone-holes	metal inserts on most holes of the long joint and boot per the sheet; not modelled	assembled	bore	23 holes: 11 from the data sheet and 12 keyed holes from the General Information sheet; keys, pads and linkages unstated (u-pad-lift)

@@ -1,0 +1,20 @@
+frankensim.specimen.v1
+key	value
+specimen_id	bassoon-heckel1-murry-rachor-grenserh3-bocal
+maker	Heckel body: Johann Adam Heckel (Biebrich); bocal: Heinrich Grenser (Dresden), a different instrument (stand-in)
+model	body: 18-key Almenraeder/Heckel bassoon, no serial (made before Heckel numbered), Murry Collection, Tennessee (database id Heckel1-O-Murry); bocal: the original bocal of the Grenser 13-key bassoon, Historisches Museum Basel (database id GrenserH3-O-Basel1904.312)
+year	body c. 1840-1850 (sheet); bocal c. 1764-1813 (the maker's dates on the sheet)
+system	body: Almenraeder/Heckel system, 18 keys, not the modern Heckel system; the pitch input of the authors' program is 440 Hz, a best guess, not a measurement
+holder	body: Murry Collection, Tennessee; bocal: Historisches Museum Basel; neither accessible to FrankenSim
+reference_state	assembled; unfolded into one series, bocal to bell, the boot's two bores joined at the septum
+environment	unstated
+source_ids	hichwa-rachor-heckel1-o-murry-data-sheet;hichwa-rachor-heckel1-o-murry-general-information;hichwa-rachor-grenserh3-o-basel1904-312-data-sheet;grothe-2014-bassoon-acoustics-tu-dresden;fuks-sundberg-1996-blowing-pressures
+target_relation	NOT the instrument of the UIowa bassoon recordings (a modern instrument whose system the Iowa pages do not give); an openly measured historical bassoon used as a labelled stand-in, with a bocal from another instrument and a modern plastic reed from another source
+measured_body	Heckel1-O-Murry measured 17 Sept of the year the sheet prints as 20124 (General Information sheet), data sheet PDF last modified 2024-10-23
+measured_bocal	GrenserH3-O-Basel1904.312 measured 25 Jan 2011 (its General Information sheet); original bocal 'yes' (data sheet row 1)
+hole_numbering	hole numbers 01 to 23 counted from the reed end by the axial position of the hole centre; the table geometry-report.txt maps each number to the sheet's name, bore and key; the wing's high A and high C vent holes and the long joint's B and Bb touches are NOT on the sheets and are omitted
+transcription	every number was parsed from the pdftotext -layout text of the sheets by build-tables.py (row number and label asserted) and re-parsed independently by check-tables.py; nothing was typed by hand
+citation_body	Hichwa-Rachor Database of Individual Historical Bassoons (D. Rachor, list v48, 7 March 2025), Heckel1-O-Murry, Data Spreadsheet and General Information, https://davidrachor.com/heckel-johann-adam-bassoons/ ; sheet files https://davidrachor.com/wp-content/uploads/2024/10/Heckel1-O-Murry-Data-Spreadsheet.pdf and .../Heckel1-O-Murry-General-Information.pdf, accessed 2026-11-09
+citation_bocal	Hichwa-Rachor Database, GrenserH3-O-Basel1904.312, Data Spreadsheet https://davidrachor.com/wp-content/uploads/2023/09/GrenserH3-O-Basel1904.312-Data-Spreadsheet.pdf and General Information https://davidrachor.com/wp-content/uploads/2021/07/GrenserH3-O-Basel1904.312-General-Information.pdf, accessed 2026-11-09
+citation_reed	T. Grothe, Experimental Investigation of Bassoon Acoustics, Dr.-Ing. thesis, TU Dresden (submitted 25 Nov 2013, defended 3 Jun 2014), https://d-nb.info/1068447982/34, Table 3.2 (thesis p. 51) and Sec. 4.1, accessed 2026-11-09
+terms	the sheets state no licence; the MIRCat edition of the database says 'Some content in this archive remains under copyright ... When in doubt, seek permission'; MB ruled (20047, 20065) that measured dimensions and positions are facts and may be used with this citation; the PDFs, their text and any quotation are NOT committed

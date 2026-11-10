@@ -1,0 +1,39 @@
+frankensim.wind-description.v1
+key	value	unit	status	source
+description_id	bassoon-heckel1-grenserh3-grothe-d2-c71-v1	-	authored	-
+family	bassoon, double reed, conical bore with 23 modelled tone holes: Heckel1-O-Murry body (Almenraeder/Heckel 18 keys, c. 1840-50), Grenser H3 bocal (another instrument), Grothe plastic reed (another source); a labelled stand-in, not the recorded instrument	-	authored	-
+specimen_dir	data/instruments/geometry/bassoon-heckel1-murry-rachor-grenserh3-bocal	path	published-measured	hichwa-rachor-heckel1-o-murry-data-sheet; hichwa-rachor-grenserh3-o-basel1904-312-data-sheet; see specimen.tsv
+fingering_chart	data/instruments/geometry/bassoon-heckel1-murry-rachor-grenserh3-bocal/fingerings.tsv	path	inferred	row d2 comes from Almenraeder 1824 Tabelle II as a DECLARED stand-in chart (15 keys, used for an 18-key instrument of 1840-50); C3 is not built (its plate column needs rows of unidentified keys)
+bore.interpolation	linear radius between consecutive stations (cone), cylinder when equal	-	authored	Heckel1 rod stations (data sheet rows 162-184) and bores at the holes (rows 116-128); a straight cone between the Grenser H3 bocal's two printed end diameters is DECLARED (u-bocal-profile)
+tonehole.diameter_quantity	hole-diameter	-	published-measured	hichwa-rachor-heckel1-o-murry-data-sheet rows 64-76 and the General Information sheet's keyed holes; undercut, edge rounding and metal inserts NOT modelled (u-undercut)
+tonehole.height_quantity	chimney-height	-	derived	the sheet's tone hole depth/length (data sheet rows 83-95, General Information 'mm length'), a depth-gauge reading, stands in for a chimney height (u-pad-lift)
+tonehole.opening	1 for holes in the fingering open set, 0 otherwise; pads and key rise UNKNOWN (u-pad-lift)	-	inferred	hichwa-rachor-heckel1-o-murry-data-sheet
+mouthpiece.part	-	-	authored	a double reed has no mouthpiece: the bore stations start at the reed end of the bocal
+reed.rest_opening_m	0.001	m	published-measured	Grothe thesis (TU Dresden 2013/14, https://d-nb.info/1068447982/34) Table 3.2 (thesis p. 51), structural column, h_inf = 1 mm, read from the h(Dp) curve of a SYNTHETIC bassoon reed (Selmer Premium Plastic Medium 270M) in an artificial mouth on modern bassoon bocals: not cane, not of the 1840s; Table 3.2's caption does not name its reed, the identity is stated at Sec. 4.1 (geometry) and Sec. 5.2.4 (Table 5.1)
+reed.width_m	0.0093	m	derived	S_inf / h_inf = 9.3 mm2 / 1 mm (Table 3.2 structural column; the flow fit gives S_inf 8.4 mm2); the engine row takes an equivalent width, not the channel width of Sec. 4.1 (14.4 mm at x = 0)
+reed.closing_pressure_pa	7100	Pa	published-measured	Grothe Table 3.2 FLOW-FIT closing pressure p_M = 7.1 kPa (the second printed value of the same table; the structural curve gives 9.5 kPa, the base card); GRID CORNER of MB 20363: only this value differs from the base card, so stiffness 494 N/m, mass, damping, width 0.0093 m stay as derived from the structural column; the engine's implied face area (k / p_M) h0 becomes 69.6 mm2 against the printed S_r 26 mm2 (u-reed-face-area)
+reed.stiffness_n_m	494	N/m	derived	k = K S_r = 19000000 N/m3 x 26 mm2 (Table 3.2); Grothe: S_r 'may be greater by factor 2' (rough); u-reed-factor-2. The engine's implied face area (k / p_M) h0 = 52 mm2 is TWICE the printed S_r = 26 mm2 (u-reed-face-area)
+reed.mass_kg	7.28e-6	kg	derived	m = mu_r S_r = 0.28 kg/m2 x 26 mm2 (Table 3.2); gives sqrt(k/m)/2pi = 1311 Hz against the printed f_r = 1306 Hz; u-reed-factor-2
+reed.damping_ratio	0.116279069767	-	derived	1 / (2 Q_r) with Q_r = 4.3 (Table 3.2); Grothe: Q_r 'may be smaller by factor 2' (rough); u-reed-factor-2
+reed.operating_blowing_pa	1961	Pa	published-measured	fuks-sundberg-1996-blowing-pressures Bn1 (A7), mf, D2: up 21.0 and down 19.0 cm H2O, mean 20 cm H2O x 98.0665 = 1961 Pa, rounded to 1 Pa; the repo lowerer's convention (mean of the up and down rows of the pitch) restricted to Bn1 (MB 20137); up alone would be 2059 Pa, down alone 1863 Pa; blow / closing pressure = 0.206
+ambient.gas_pack	breath-woodwind-exhaled-coltman1966-nederveen1969	-	published-model	the family's exhaled-breath bore gas, as on the clarinet and the oboe
+exterior.temperature_k	293.15	K	authored	20 C dry room air, as on the posted cards; an assumption
+exterior.pressure_pa	101325	Pa	authored	standard atmosphere
+exterior.relative_humidity	0	-	authored	20 C dry room air, as on the posted cards; an assumption
+observer.record	baffled_outlet 0 0 0.5 32 128 4800	-	authored	the clarinet's and the oboe's receiver
+observer.law	iso9613	-	published-model	as on the clarinet ALL-IN cards
+observer.termination	flanged	-	authored	required by the baffled_outlet receiver; a bassoon bell is not a flanged pipe
+audio.rate_hz	48000	Hz	authored	authored: 48 kHz, as on the clarinet and sax cards; NUMERICAL setting, not a measurement. The oboe description's 96 kHz made the characteristic line ladder of this 2.38 m bore reach its tap ceiling before convergence (passive sweeps of 11-09 23:28Z, refused on s1 and s2); at 48 kHz the same tail needs half the taps
+audio.full_scale_pa	20	Pa	authored	PCM scale at the microphone, never a gain; clipped_samples must be 0
+audio.duration_s	2.65	s	authored	as on the clarinet and the oboe
+compile_limits	600000 8192	-	authored	as on the clarinet and the oboe
+gesture.control_rate_hz	48000	Hz	authored	as on the clarinet and the oboe
+gesture.attack_start_s	0.15	s	authored	as on the clarinet and the oboe
+gesture.attack_s	0.02	s	authored	as on the clarinet and the oboe, UNKNOWN real attack; no tongue row
+gesture.release_start_s	2.45	s	authored	as on the clarinet and the oboe
+gesture.release_s	0.06	s	authored	as on the clarinet and the oboe
+player.level	mf	-	published-measured	fuks-sundberg-1996-blowing-pressures: the UIowa bassoon recordings are mf; the pressure is Bn1's (see reed.operating_blowing_pa)
+player.pressure_table	-	-	authored	fixed operating point, reed.operating_blowing_pa: the repo's pressure table averages BOTH bassoon players (Bn1 and Bn2) per pitch, and MB ruled Bn1 only (20137)
+player.extrapolation_semitones_max	1	semitone	authored	unused under a fixed operating point
+player.pressure_round_pa	1	Pa	authored	rounding step
+output.prefix	Bassoon	-	authored	UIowa MIS name prefix

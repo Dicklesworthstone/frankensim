@@ -1,0 +1,4 @@
+frankensim.specimen-frames.v1
+part	origin	axis_x	axis_y	axis_z	note
+bore	the reed end of the bocal on the bore axis (x = 0)	+x along the unfolded bore axis toward the bell end	unstated	unstated	one assembly frame; the boot's U-turn is unfolded (the small bore runs down, the large bore back up, both in +x)
+tone-holes	the reed end of the bocal on the bore axis (x = 0)	+x along the unfolded bore axis toward the bell end	unstated	unstated	azimuthal orientation of the holes is not given (u-hole-azimuth)
