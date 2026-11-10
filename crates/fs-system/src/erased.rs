@@ -32,6 +32,11 @@ pub struct OwnerError(Box<dyn DebugAny>);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StateTypeMismatch;
 
+/// Marker error for a tangent asked of a component that offers none. The
+/// driver checks before it asks, so this means the kernel itself is wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TangentNotOffered;
+
 impl OwnerError {
     fn new<E: fmt::Debug + 'static>(error: E) -> Self {
         Self(Box::new(error))
@@ -39,6 +44,10 @@ impl OwnerError {
 
     fn state_type() -> Self {
         Self(Box::new(StateTypeMismatch))
+    }
+
+    fn tangent_not_offered() -> Self {
+        Self(Box::new(TangentNotOffered))
     }
 
     /// The owner's error, if it is of type `E`.
@@ -174,7 +183,7 @@ where
         _d_outputs: &mut [f64],
         _cx: &Cx<'_>,
     ) -> Result<(), OwnerError> {
-        Err(OwnerError::state_type())
+        Err(OwnerError::tangent_not_offered())
     }
 }
 

@@ -16,7 +16,7 @@ use fs_ports::component::conformance::{
 };
 use fs_ports::component::{
     Carrier, Class, Component, ContractViolation, PortLayout, PortRole, PortSpec, PortTangent,
-    Proposal, Receipt,
+    Proposal, Receipt, audit_step,
 };
 use fs_ports::{PortKind, StableId};
 
@@ -230,7 +230,11 @@ fn reference_component_passes_conformance() {
     // The damper loss leaves as heat: heat-port energy in is minus the loss.
     let heat_in_j = component.ports()[1].energy_in_j(1.0e-3, &INPUTS[1..], &outputs[1..]);
     assert!((heat_in_j + receipt.dissipated_j).abs() <= receipt.energy_tolerance_j);
-    assert!(audit.balance_defect_j.abs() <= receipt.energy_tolerance_j);
+    // With a bound that does not come from the receipt: the net port energy
+    // is the stored change to 1e-13 of the energy that crossed the ports.
+    let work_in_j = component.ports()[0].energy_in_j(1.0e-3, &INPUTS[..1], &outputs[..1]);
+    let crossed_j = work_in_j.abs() + heat_in_j.abs();
+    assert!((audit.port_energy_in_j - receipt.stored_change_j).abs() <= 1.0e-13 * crossed_j);
     // Entropy leaves through the heat port at the port temperature.
     let entropy_out = -audit.port_entropy_in_j_per_k;
     assert!((entropy_out - receipt.entropy_generated_j_per_k).abs() <= 1.0e-18);
@@ -323,6 +327,29 @@ fn cancellation_reaches_the_caller_as_the_owner_error() {
     let failure =
         with_cx(&gate, |cx| check_component(&component, &case(), cx)).expect_err("cancelled");
     assert!(matches!(failure, Failure::Owner(Cancelled)), "{failure}");
+}
+
+#[test]
+fn an_audit_with_a_port_list_that_does_not_fit_the_layout_is_refused() {
+    // Too many ports used to index past the layout and panic; too few were
+    // silently left out of the energy sum.
+    let component = SpringMassDamper::new(Fault::None);
+    let ports = component.ports();
+    let receipt = Receipt::lossless(0.0, 1.0);
+    let short = PortLayout::new(&ports[..1]).expect("layout");
+    let long = PortLayout::new(ports).expect("layout");
+    for (given, layout, values) in [(ports, &short, 1_usize), (&ports[..1], &long, 2)] {
+        let vector = vec![0.0; values];
+        let refusal = audit_step(given, layout, 1.0e-3, &vector, &vector, &receipt, 0.0, 0.0);
+        assert_eq!(
+            refusal,
+            Err(ContractViolation::VectorLength {
+                vector: "ports",
+                expected: layout.ports(),
+                actual: given.len(),
+            })
+        );
+    }
 }
 
 #[test]

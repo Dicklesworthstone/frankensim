@@ -341,14 +341,25 @@ impl SystemBuilder {
         )
     }
 
-    fn claim(&mut self, port: PortRef) -> Result<(), AdmissionError> {
-        if self.used[port.node][port.port] {
-            return Err(AdmissionError::AlreadyConnected {
-                port: self.label(port),
-            });
+    /// Refuse a port that is already connected or named twice in one call.
+    ///
+    /// Every connection method checks all of its ports with this before it
+    /// changes anything, so a refused call leaves the builder as it was.
+    fn check_free(&self, ports: &[PortRef]) -> Result<(), AdmissionError> {
+        for (index, &port) in ports.iter().enumerate() {
+            if self.used[port.node][port.port] || ports[..index].contains(&port) {
+                return Err(AdmissionError::AlreadyConnected {
+                    port: self.label(port),
+                });
+            }
         }
-        self.used[port.node][port.port] = true;
         Ok(())
+    }
+
+    fn take(&mut self, ports: &[PortRef]) {
+        for &port in ports {
+            self.used[port.node][port.port] = true;
+        }
     }
 
     fn need_role(
@@ -399,10 +410,22 @@ impl SystemBuilder {
             self.need_role(member, member_role, member_needs)?;
             self.need_match(setter, member)?;
         }
-        self.claim(setter)?;
-        for &member in members {
-            self.claim(member)?;
+        // Heat rate is power itself, so handing the same heat rate to several
+        // members would multiply the energy. Heat ports share a temperature
+        // (common effort) or go through a heat route.
+        if setter_role == PortRole::EffortIn
+            && members.len() > 1
+            && self.spec(setter).carrier() == Carrier::Heat
+        {
+            return Err(AdmissionError::HeatCommonFlow {
+                port: self.label(setter),
+            });
         }
+        let mut all = Vec::with_capacity(members.len() + 1);
+        all.push(setter);
+        all.extend_from_slice(members);
+        self.check_free(&all)?;
+        self.take(&all);
         Ok(())
     }
 
@@ -502,29 +525,29 @@ impl SystemBuilder {
         {
             return Err(AdmissionError::Temperature { kelvin });
         }
-        let remainder = match remainder {
-            Some(sink) => {
-                if !(sink.temperature_k.is_finite() && sink.temperature_k > 0.0) {
-                    return Err(AdmissionError::Temperature {
-                        kelvin: sink.temperature_k,
-                    });
-                }
-                let temperature_k = sink.temperature_k;
-                self.sinks.push(sink);
-                Some((self.sinks.len() - 1, unallocated, temperature_k))
+        match &remainder {
+            Some(sink) if !(sink.temperature_k.is_finite() && sink.temperature_k > 0.0) => {
+                return Err(AdmissionError::Temperature {
+                    kelvin: sink.temperature_k,
+                });
             }
             None if unallocated > slack => {
                 return Err(AdmissionError::SinkRequired { unallocated });
             }
-            None => None,
-        };
-        if sinks.is_empty() && remainder.is_none() {
-            return Err(AdmissionError::Empty);
+            None if sinks.is_empty() => return Err(AdmissionError::Empty),
+            _ => {}
         }
-        self.claim(source)?;
-        for &(sink, _) in sinks {
-            self.claim(sink)?;
-        }
+        let mut all = Vec::with_capacity(sinks.len() + 1);
+        all.push(source);
+        all.extend(sinks.iter().map(|(sink, _)| *sink));
+        self.check_free(&all)?;
+        // Every check has passed: only now does the builder change.
+        self.take(&all);
+        let remainder = remainder.map(|sink| {
+            let temperature_k = sink.temperature_k;
+            self.sinks.push(sink);
+            (self.sinks.len() - 1, unallocated, temperature_k)
+        });
         self.connections.push(Connection::HeatRoute {
             source,
             sinks: sinks.to_vec(),
@@ -543,7 +566,8 @@ impl SystemBuilder {
         self.need_role(from, PortRole::SignalOut, "a signal output")?;
         self.need_role(to, PortRole::SignalIn, "a signal input")?;
         self.need_match(from, to)?;
-        self.claim(to)?;
+        self.check_free(&[to])?;
+        self.take(&[to]);
         self.connections.push(Connection::Signal { from, to });
         Ok(())
     }
@@ -559,7 +583,8 @@ impl SystemBuilder {
                 needs: "a port with an input side",
             });
         }
-        self.claim(port)?;
+        self.check_free(&[port])?;
+        self.take(&[port]);
         self.boundaries.push((port, value));
         Ok(())
     }
@@ -737,22 +762,44 @@ impl SystemBuilder {
             }
         }
 
-        // Tolerance group and label of every input.
+        // Tolerance group and label of every input. Power and heat inputs of
+        // one carrier and side are compared with the largest of their kind in
+        // the block. A signal has no kind, so each scalar signal input is a
+        // group of its own and is judged against its own size only.
         let mut groups = Vec::new();
+        let mut signal_inputs = Vec::new();
         let mut input_group = vec![0_usize; inputs];
         let mut input_label = vec![String::new(); inputs];
         let mut input_is_temperature = vec![false; inputs];
         for node in 0..count {
             for (port, spec) in self.nodes[node].ports().iter().enumerate() {
-                let group = tolerance_group(&mut groups, spec);
                 let reference = PortRef { node, port };
                 for index in input_of(reference) {
-                    input_group[index] = group;
+                    if spec.carrier() == Carrier::Signal {
+                        signal_inputs.push(index);
+                    } else {
+                        input_group[index] = tolerance_group(&mut groups, spec);
+                    }
                     input_label[index] = self.label(reference);
                     input_is_temperature[index] =
                         spec.carrier() == Carrier::Heat && spec.role() == PortRole::EffortIn;
                 }
             }
+        }
+        let mut group_count = groups.len();
+        for index in signal_inputs {
+            input_group[index] = group_count;
+            group_count += 1;
+        }
+        // Every claimed port got a driver above; an input without one would
+        // be read as NaN by the first step, so it is refused here instead.
+        if let Some(index) = drivers
+            .iter()
+            .position(|driver| matches!(driver, Driver::Unset))
+        {
+            return Err(AdmissionError::Unconnected {
+                port: input_label[index].clone(),
+            });
         }
 
         let ledger = Ledger {
@@ -818,7 +865,7 @@ impl SystemBuilder {
             input_group,
             input_label,
             input_is_temperature,
-            group_count: groups.len(),
+            group_count,
             inputs: vec![0.0; inputs],
             outputs: vec![0.0; outputs],
             accepted_inputs: vec![0.0; inputs],
@@ -984,29 +1031,52 @@ impl System {
             .collect()
     }
 
-    /// Propose `node` at the current inputs. `Ok(Some(dt))` asks to shorten.
-    fn propose(&mut self, node: usize, dt_s: f64, cx: &Cx<'_>) -> Result<Option<f64>, SystemError> {
-        let (inputs, outputs) = (self.node_inputs(node), self.node_outputs(node));
-        let proposal = self.nodes[node]
-            .propose(
-                self.accepted[node].as_ref(),
-                dt_s,
-                &self.inputs[inputs],
-                self.candidate[node].as_mut(),
-                &mut self.outputs[outputs],
-                cx,
-            )
-            .map_err(|error| SystemError::Component {
+    /// A component's refusal during a trial. Once cancellation has been
+    /// requested every refusal is reported as [`SystemError::Cancelled`], so
+    /// callers see one cancellation outcome whichever component noticed first.
+    fn refused(&self, node: usize, error: OwnerError, cx: &Cx<'_>) -> SystemError {
+        if cx.is_cancel_requested() {
+            SystemError::Cancelled
+        } else {
+            SystemError::Component {
                 node: self.names[node].clone(),
                 phase: Phase::Propose,
                 error,
-            })?;
+            }
+        }
+    }
+
+    /// Admit a component's request for a shorter step, or name the component
+    /// that asked for a step that is not shorter.
+    fn shorter(&self, node: usize, dt_s: f64, shorter: f64) -> Result<Option<f64>, SystemError> {
+        if shorter > 0.0 && shorter < dt_s {
+            Ok(Some(shorter))
+        } else {
+            Err(SystemError::Contract {
+                node: self.names[node].clone(),
+                violation: ContractViolation::Step { dt_s: shorter },
+            })
+        }
+    }
+
+    /// Propose `node` at the current inputs. `Ok(Some(dt))` asks to shorten.
+    fn propose(&mut self, node: usize, dt_s: f64, cx: &Cx<'_>) -> Result<Option<f64>, SystemError> {
+        let (inputs, outputs) = (self.node_inputs(node), self.node_outputs(node));
+        let proposal = self.nodes[node].propose(
+            self.accepted[node].as_ref(),
+            dt_s,
+            &self.inputs[inputs],
+            self.candidate[node].as_mut(),
+            &mut self.outputs[outputs],
+            cx,
+        );
         match proposal {
-            Proposal::Step(receipt) => {
+            Ok(Proposal::Step(receipt)) => {
                 self.receipts[node] = receipt;
                 Ok(None)
             }
-            Proposal::Shorten { dt_s: shorter } => Ok(Some(shorter)),
+            Ok(Proposal::Shorten { dt_s: shorter }) => self.shorter(node, dt_s, shorter),
+            Err(error) => Err(self.refused(node, error, cx)),
         }
     }
 
@@ -1022,26 +1092,22 @@ impl System {
     ) -> Result<Option<f64>, SystemError> {
         let (inputs, outputs) = (self.node_inputs(node), self.node_outputs(node));
         let width = outputs.len();
-        let component_error = |names: &[String], error| SystemError::Component {
-            node: names[node].clone(),
-            phase: Phase::Propose,
-            error,
-        };
         if self.nodes[node].has_tangent() {
             let direction = &mut self.scratch_direction[..inputs.len()];
             direction.fill(0.0);
             direction[local] = 1.0;
-            self.nodes[node]
-                .jvp(
-                    self.accepted[node].as_ref(),
-                    dt_s,
-                    &self.inputs[inputs.clone()],
-                    &self.scratch_direction[..inputs.len()],
-                    &mut self.scratch_outputs[..width],
-                    cx,
-                )
-                .map_err(|error| component_error(&self.names, error))?;
-            return Ok(None);
+            let tangent = self.nodes[node].jvp(
+                self.accepted[node].as_ref(),
+                dt_s,
+                &self.inputs[inputs.clone()],
+                &self.scratch_direction[..inputs.len()],
+                &mut self.scratch_outputs[..width],
+                cx,
+            );
+            return match tangent {
+                Ok(()) => Ok(None),
+                Err(error) => Err(self.refused(node, error, cx)),
+            };
         }
         if !matches!(self.nodes[node].class(), Class::ExactLinear | Class::Smooth) {
             return Err(SystemError::Unsupported {
@@ -1065,9 +1131,10 @@ impl System {
             cx,
         );
         self.inputs[index] = base;
-        match proposal.map_err(|error| component_error(&self.names, error))? {
-            Proposal::Shorten { dt_s: shorter } => Ok(Some(shorter)),
-            Proposal::Step(_) => {
+        match proposal {
+            Err(error) => Err(self.refused(node, error, cx)),
+            Ok(Proposal::Shorten { dt_s: shorter }) => self.shorter(node, dt_s, shorter),
+            Ok(Proposal::Step(_)) => {
                 for (column, current) in self.scratch_outputs[..width]
                     .iter_mut()
                     .zip(&self.outputs[outputs])
@@ -1111,14 +1178,19 @@ impl System {
                     return Ok(Err(shorter));
                 }
             }
+            // The scale of an unknown is the size of the terms its driver
+            // sums, not of their total: a force balance near rest is a small
+            // difference of large efforts, and its residual cannot be driven
+            // below the roundoff of those efforts.
             group_scale.fill(0.0);
             for (row, &index) in unknowns.iter().enumerate() {
-                let target = self.drivers[index].value(&self.outputs, &self.boundary_values);
+                let driver = &self.drivers[index];
+                let target = driver.value(&self.outputs, &self.boundary_values);
                 residual[row] = self.inputs[index] - target;
                 let group = self.input_group[index];
                 group_scale[group] = group_scale[group]
                     .max(self.inputs[index].abs())
-                    .max(target.abs());
+                    .max(driver.magnitude(&self.outputs, &self.boundary_values));
             }
             let mut worst = (0_usize, 0.0_f64);
             let mut converged = true;
@@ -1288,14 +1360,22 @@ impl System {
                     phase: Phase::Negotiate,
                     error,
                 })?;
-            let event = self.nodes[node].next_event_s(self.accepted[node].as_ref());
-            let next = event.map_or(limited, |event| limited.min(event));
-            if !(next > 0.0 && next <= dt_s) {
-                return Err(SystemError::Negotiation {
-                    node: self.names[node].clone(),
-                    proposed_s: dt_s,
-                    returned_s: next,
-                });
+            // The limit and the event are checked one at a time: `min` would
+            // silently drop a NaN from either.
+            let refuse = |returned_s: f64| SystemError::Negotiation {
+                node: self.names[node].clone(),
+                proposed_s: dt_s,
+                returned_s,
+            };
+            if !(limited > 0.0 && limited <= dt_s) {
+                return Err(refuse(limited));
+            }
+            let mut next = limited;
+            if let Some(event) = self.nodes[node].next_event_s(self.accepted[node].as_ref()) {
+                if !(event > 0.0) {
+                    return Err(refuse(event));
+                }
+                next = next.min(event);
             }
             dt_s = next;
         }
@@ -1304,13 +1384,8 @@ impl System {
         let iterations = loop {
             match self.trial(dt_s, cx)? {
                 Trial::Done { iterations } => break iterations,
+                // `shorter` was checked against `dt_s` where it was asked for.
                 Trial::Shorten { dt_s: shorter } => {
-                    if !(shorter > 0.0 && shorter < dt_s) {
-                        return Err(SystemError::Contract {
-                            node: String::from("(shorten)"),
-                            violation: ContractViolation::Step { dt_s: shorter },
-                        });
-                    }
                     shortenings += 1;
                     if shortenings > self.config.max_shortenings {
                         return Err(SystemError::StepUnderflow { dt_s: shorter });

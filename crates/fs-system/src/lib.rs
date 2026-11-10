@@ -34,7 +34,7 @@ mod solve;
 mod system;
 mod wiring;
 
-pub use erased::{OwnerError, StateTypeMismatch};
+pub use erased::{OwnerError, StateTypeMismatch, TangentNotOffered};
 pub use ledger::Ledger;
 pub use system::{
     BoundaryFn, Phase, SolveConfig, StepReport, System, SystemBuilder, SystemError, heat_sink,

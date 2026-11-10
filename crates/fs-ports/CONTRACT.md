@@ -90,8 +90,8 @@ below states its own limits.
 
 `component` is the executable composition contract (bead
 `frankensim-rc-1109-root-3gc12.5.1`). It is version 0 and may change until the
-five kernel slices of that epic pass on it; nothing outside this crate
-implements it yet.
+five kernel slices of that epic pass on it. Its first implementer outside this
+crate is `fs_mbd::component::RigidBody`.
 
 **Tiers.** `Component` is mandatory: ports, class, `stored_energy_j`,
 `limit_dt_s`, `next_event_s`, `propose`, `admit`. `PortTangent` adds the JVP and
@@ -120,7 +120,11 @@ lossless connection book the same number.
 energies; dissipation and entropy production not negative; residual within the
 owner's tolerance. Physical dissipation stays in the component as stored
 thermal energy or leaves through a heat port; it is never booked as numerical
-loss.
+loss. The audit trusts `energy_tolerance_j`. The owner must make it cover the
+roundoff of `stored_energy_j` at both ends of the step, which scales with the
+terms of the stored energy when they cancel (kinetic against potential), and
+a tolerance claimed too wide lets a leak through the audit. A port list that
+does not fit the layout is refused, not indexed.
 
 **Errors.** `Component::Error` is the owner's type and reaches the caller
 unchanged. Contract breaches are `ContractViolation`.
@@ -134,7 +138,8 @@ Components poll `Cx::checkpoint` and return their own cancellation error.
 `tests/component_reference.rs`: a spring-mass-damper with a mechanical and a
 heat port passes; 20,000 driven steps close energy to 1e-11 relative; a heat
 leak, a read of the candidate slot and a wrong VJP sign each fail the law they
-break; cancellation returns the owner's error.
+break; cancellation returns the owner's error; an audit given a port list
+longer or shorter than its layout is refused.
 
 **No claim.** v0 has no stream ports with flow reversal, no field ports with a
 duality matrix, no multistage port values and no snapshot identity. The kit

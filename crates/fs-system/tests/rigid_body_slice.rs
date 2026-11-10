@@ -15,6 +15,7 @@ use fs_exec::{Budget, CancelGate, Cancelled, Cx, ExecMode, StreamKey};
 use fs_mbd::component::RigidBody;
 use fs_mbd::{
     Gravity, MassProperties, Pose, RigidBodyIntegrator, RigidBodyState, UnitQuaternion, Vec3,
+    Wrench,
 };
 use fs_ports::component::conformance::{Case, Observed, check_component};
 use fs_ports::component::{Class, Component, PortRole, PortSpec, Proposal, Receipt};
@@ -37,10 +38,16 @@ fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
 
 const MASS_KG: f64 = 2.0;
 
+fn properties() -> MassProperties {
+    MassProperties::new(MASS_KG, Vec3::ZERO, Vec3::new(0.02, 0.05, 0.03)).expect("properties")
+}
+
 fn body(gravity: Gravity) -> RigidBody {
-    let properties =
-        MassProperties::new(MASS_KG, Vec3::ZERO, Vec3::new(0.02, 0.05, 0.03)).expect("properties");
-    RigidBody::new(RigidBodyIntegrator::new(gravity), properties).expect("ports")
+    RigidBody::new(RigidBodyIntegrator::new(gravity), properties()).expect("ports")
+}
+
+fn norm3(v: &[f64]) -> f64 {
+    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
 }
 
 fn state(position: Vec3, momentum: Vec3, spin: Vec3) -> RigidBodyState {
@@ -80,20 +87,181 @@ fn the_native_rigid_body_conforms_under_force_torque_and_gravity() {
     else {
         panic!("the rigid body takes the step");
     };
-    // The wire values reproduce the integrator's own applied work: the first
-    // law closes inside the owner's tolerance, with nothing booked as heat.
-    assert!(audit.balance_defect_j.abs() <= receipt.energy_tolerance_j);
+    // Independent of the component and of its tolerance: the integrator's own
+    // account of the work of this force and torque. The kernel books the same
+    // work from the two values on each wire.
+    let wrench = Wrench {
+        force_world: Vec3::new(inputs[0], inputs[1], inputs[2]),
+        torque_body: Vec3::new(inputs[3], inputs[4], inputs[5]),
+    };
+    let native = RigidBodyIntegrator::new(gravity)
+        .step(start, properties(), wrench, 1.0e-3)
+        .expect("native step");
+    let paired_j = 1.0e-3
+        * (norm3(&inputs[..3]) * norm3(&outputs[..3]) + norm3(&inputs[3..]) * norm3(&outputs[3..]));
+    assert!(native.work.applied_work_j.abs() > 0.1 * paired_j);
+    assert!(
+        (audit.port_energy_in_j - native.work.applied_work_j).abs() <= 1.0e-13 * paired_j,
+        "{} vs {}",
+        audit.port_energy_in_j,
+        native.work.applied_work_j
+    );
     assert_eq!(receipt.dissipated_j, 0.0);
     // What the midpoint step fails to conserve is reported, and it is small.
     let exchanged_j = audit.port_energy_in_j.abs() + receipt.stored_change_j.abs();
     assert!(receipt.numerical_loss_j.abs() <= 1.0e-9 * exchanged_j);
-    // The force port returns the mean centre-of-mass velocity.
+    // The force port returns the mean centre-of-mass velocity: the momentum
+    // gains (force + weight) dt, and the mean is half way.
     let expected = 0.4 / MASS_KG + 0.5 * 1.0e-3 * 1.5 / MASS_KG;
     assert!(
         (outputs[0] - expected).abs() <= 1.0e-12,
         "{} vs {expected}",
         outputs[0]
     );
+    let expected_z = 0.1 / MASS_KG + 0.5 * 1.0e-3 * (2.0 / MASS_KG - 9.81);
+    assert!(
+        (outputs[2] - expected_z).abs() <= 1.0e-12,
+        "{} vs {expected_z}",
+        outputs[2]
+    );
+}
+
+/// Deterministic values in (-1, 1).
+struct Sequence(u64);
+
+impl Sequence {
+    fn next(&mut self) -> f64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        (self.0 >> 11) as f64 / (1_u64 << 53) as f64 * 2.0 - 1.0
+    }
+
+    fn vector(&mut self, scale: f64) -> Vec3 {
+        Vec3::new(
+            scale * self.next(),
+            scale * self.next(),
+            scale * self.next(),
+        )
+    }
+}
+
+#[test]
+fn the_rigid_body_conforms_across_heights_speeds_frames_and_loads() {
+    // One operating point proves little. These states include the ones that
+    // defeat a tolerance scaled by the energy exchanged in the step: free
+    // fall far from the origin (kinetic energy and potential cancel), a
+    // principal frame rotated against the body frame, and a torque nearly
+    // perpendicular to the spin.
+    let gate = CancelGate::new_clock_free();
+    let gravity = Gravity::new(Vec3::new(0.0, 0.0, -9.81)).expect("gravity");
+    let rotated = MassProperties::from_principal_frame(
+        MASS_KG,
+        Vec3::ZERO,
+        Vec3::new(0.02, 0.05, 0.03),
+        UnitQuaternion::new(0.9, 0.2, -0.3, 0.1).expect("orientation"),
+    )
+    .expect("rotated properties");
+    let bodies = [
+        body(gravity),
+        RigidBody::new(RigidBodyIntegrator::new(gravity), rotated).expect("ports"),
+    ];
+    let stale = state(
+        Vec3::new(9.0, 9.0, 9.0),
+        Vec3::new(1.0, 2.0, 3.0),
+        Vec3::ZERO,
+    );
+    let mut sequence = Sequence(0x9E37_79B9_7F4A_7C15);
+    let mut refused = Vec::new();
+    for case_index in 0..400_usize {
+        let component = &bodies[case_index % 2];
+        // Heights to 500 m and fall speeds to 100 m/s.
+        let height = 500.0 * sequence.next();
+        let fall = 100.0 * sequence.next();
+        let start = state(
+            Vec3::new(sequence.next(), sequence.next(), height),
+            Vec3::new(sequence.next(), sequence.next(), MASS_KG * fall),
+            sequence.vector(0.05),
+        );
+        let mut inputs = [0.0_f64; 6];
+        match case_index % 4 {
+            // Free fall: no load at all.
+            0 => {}
+            // A torque about one axis only, against a spin in the other two.
+            1 => inputs[3] = 1.0e-3 * sequence.next(),
+            // A general wrench.
+            _ => {
+                for value in &mut inputs {
+                    *value = sequence.next();
+                }
+            }
+        }
+        let dt_s = if case_index % 3 == 0 { 1.0e-2 } else { 1.0e-3 };
+        let case = Case {
+            state: &start,
+            stale: &stale,
+            dt_s,
+            inputs: &inputs,
+        };
+        if let Err(failure) = with_cx(&gate, |cx| check_component(component, &case, cx)) {
+            refused.push(format!("case {case_index}: {failure}"));
+        }
+    }
+    assert!(
+        refused.is_empty(),
+        "{} refused, first: {}",
+        refused.len(),
+        refused[0]
+    );
+}
+
+#[test]
+fn a_body_in_free_fall_follows_the_parabola_for_seconds() {
+    // A constant force is integrated exactly by the midpoint rule, so the
+    // trajectory is the parabola to roundoff. The body starts at rest at the
+    // origin, where its stored energy is zero and stays the difference of two
+    // growing terms.
+    let gate = CancelGate::new_clock_free();
+    let gravity = Gravity::new(Vec3::new(0.0, 0.0, -9.81)).expect("gravity");
+    let mut builder = SystemBuilder::new();
+    let rigid = builder
+        .add(
+            "body",
+            body(gravity),
+            state(Vec3::ZERO, Vec3::ZERO, Vec3::new(0.010, -0.020, 0.015)),
+        )
+        .expect("add body");
+    for name in ["force", "torque"] {
+        builder
+            .boundary(
+                builder.port(rigid, name).expect("port"),
+                Box::new(|_, _, value| value.fill(0.0)),
+            )
+            .expect("boundary");
+    }
+    let mut system = builder.seal().expect("seal");
+    let (dt, steps) = (1.0e-3, 5_000_u32);
+    with_cx(&gate, |cx| {
+        for step in 0..steps {
+            system
+                .step(dt, cx)
+                .unwrap_or_else(|error| panic!("step {step}: {error}"));
+        }
+    });
+    let time = f64::from(steps) * dt;
+    let end = *system.state::<RigidBodyState>(rigid).expect("state");
+    let (fallen, speed) = (0.5 * 9.81 * time * time, 9.81 * time);
+    let z = end.pose().position_world().z;
+    let p = end.linear_momentum_world().z;
+    assert!((z + fallen).abs() <= 1.0e-10 * fallen, "{z} vs -{fallen}");
+    assert!((p + MASS_KG * speed).abs() <= 1.0e-10 * MASS_KG * speed);
+    // Nothing did work on the body: kinetic energy grew by what the
+    // potential lost, to a part in 1e10 of the kinetic energy.
+    let kinetic_j = 0.5 * MASS_KG * speed * speed;
+    let ledger = system.ledger();
+    assert_eq!(ledger.boundary_energy_in_j(), 0.0);
+    assert!(ledger.stored_change_j().abs() <= 1.0e-10 * kinetic_j);
+    assert!(ledger.numerical_loss_j().abs() <= 1.0e-10 * kinetic_j);
 }
 
 /// Isotropic three-axis spring to the origin: receives the flow of its end,

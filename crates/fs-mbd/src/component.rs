@@ -172,20 +172,36 @@ impl Component for RigidBody {
             self.properties
                 .angular_velocity_body(after.angular_momentum_body()),
         );
-        // Sum of magnitudes, not magnitude of the sum: the kernel's f64 port
-        // products round term by term.
-        let mut paired_j = 0.0_f64;
+        let (mut force_sq, mut velocity_sq, mut torque_sq, mut omega_sq) = (0.0_f64, 0.0, 0.0, 0.0);
         for axis in 0..3 {
             let velocity = (end[axis] - start[axis]) / dt_s;
             let omega = 0.5 * (omega_before[axis] + omega_after[axis]);
             outputs[axis] = velocity;
             outputs[3 + axis] = omega;
-            paired_j += (dt_s * inputs[axis] * velocity).abs();
-            paired_j += (dt_s * inputs[3 + axis] * omega).abs();
+            force_sq += inputs[axis] * inputs[axis];
+            velocity_sq += velocity * velocity;
+            torque_sq += inputs[3 + axis] * inputs[3 + axis];
+            omega_sq += omega * omega;
         }
 
+        // What the owner's tolerance has to cover, term by term:
+        // - the kernel's f64 port products. The angular velocity comes out of
+        //   a frame rotation, so each component carries roundoff of the whole
+        //   vector's size: products of norms, not of components.
+        // - the roundoff of `stored_energy_j` at both ends. Kinetic energy
+        //   and gravity potential cancel in free fall, so the measured total
+        //   is only as exact as its terms, not as itself.
         let work = receipt.work;
+        let (before, after_energy) = (receipt.diagnostics_before, receipt.diagnostics_after);
+        let paired_j = dt_s * ((force_sq * velocity_sq).sqrt() + (torque_sq * omega_sq).sqrt());
+        let stored_terms_j = before.translational_kinetic_energy
+            + before.rotational_kinetic_energy
+            + before.gravitational_potential_energy.abs()
+            + after_energy.translational_kinetic_energy
+            + after_energy.rotational_kinetic_energy
+            + after_energy.gravitational_potential_energy.abs();
         let scale_j = paired_j
+            + stored_terms_j
             + work.kinetic_energy_change_j.abs()
             + work.gravitational_potential_energy_change_j.abs()
             + work.work_energy_residual_j.abs();

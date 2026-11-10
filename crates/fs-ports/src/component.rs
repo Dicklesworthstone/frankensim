@@ -356,7 +356,15 @@ pub struct Receipt {
     pub numerical_loss_j: f64,
     /// Entropy generated inside the component [J/K]. Never negative.
     pub entropy_generated_j_per_k: f64,
-    /// Absolute tolerance [J] the owner claims for its energy balance.
+    /// Absolute tolerance [J] the owner claims for its energy balance and
+    /// for the re-measurement of its endpoints.
+    ///
+    /// It must cover the roundoff of [`Component::stored_energy_j`] at both
+    /// ends of the step. When the stored energy is a sum of terms that cancel
+    /// (kinetic plus a negative potential), that roundoff scales with the
+    /// size of the terms, not of the total, and only the owner knows it. The
+    /// audit trusts this number: a tolerance claimed too wide hides a leak
+    /// from the audit, though not from the ledger's accepted-defect account.
     pub energy_tolerance_j: f64,
     /// Norm of the owner's solver residual; zero for a closed-form step.
     pub residual: f64,
@@ -597,9 +605,10 @@ pub enum ContractViolation {
         /// The offending port.
         port: String,
     },
-    /// An input or output vector has the wrong length for the layout.
+    /// The port list or an input or output vector has the wrong length for
+    /// the layout.
     VectorLength {
-        /// Which vector: "inputs" or "outputs".
+        /// Which one: "ports", "inputs" or "outputs".
         vector: &'static str,
         /// Length the layout requires.
         expected: usize,
@@ -745,6 +754,13 @@ pub fn audit_step(
 ) -> Result<StepAudit, ContractViolation> {
     if !(dt_s.is_finite() && dt_s > 0.0) {
         return Err(ContractViolation::Step { dt_s });
+    }
+    if ports.len() != layout.ports() {
+        return Err(ContractViolation::VectorLength {
+            vector: "ports",
+            expected: layout.ports(),
+            actual: ports.len(),
+        });
     }
     if inputs.len() != layout.input_len() {
         return Err(ContractViolation::VectorLength {

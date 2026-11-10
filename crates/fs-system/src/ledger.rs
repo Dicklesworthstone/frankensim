@@ -165,8 +165,10 @@ impl Ledger {
     /// `stored change + numerical loss + sink heat - boundary energy in
     ///  - connection defect`.
     ///
-    /// It equals the sum of the per-step defects the component audits
-    /// accepted, so it is roundoff for exact components.
+    /// It equals minus the sum of the per-step balance defects the component
+    /// audits accepted (each defect is port energy in, minus stored change,
+    /// minus numerical loss), so it is roundoff for exact components and it
+    /// shows a leak that a component hid behind a wide tolerance.
     #[must_use]
     pub fn energy_residual_j(&self) -> f64 {
         let mut total = Sum::default();

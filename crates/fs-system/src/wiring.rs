@@ -114,6 +114,13 @@ pub enum AdmissionError {
     },
     /// A connection has no member.
     Empty,
+    /// A common-flow junction of heat ports with more than one member. Heat
+    /// rate is power itself, so giving the same heat rate to several members
+    /// would multiply the energy.
+    HeatCommonFlow {
+        /// The setter port, as `node.port`.
+        port: String,
+    },
 }
 
 impl fmt::Display for AdmissionError {
@@ -144,6 +151,11 @@ impl fmt::Display for AdmissionError {
                 write!(f, "temperature {kelvin} K is not positive and finite")
             }
             Self::Empty => write!(f, "a connection needs at least one member"),
+            Self::HeatCommonFlow { port } => write!(
+                f,
+                "heat port `{port}` cannot set a common flow for several members: heat ports \
+                 share a temperature (common effort) or use a heat route"
+            ),
         }
     }
 }
@@ -245,6 +257,25 @@ impl Driver {
                 component,
             } => boundaries[*boundary][*component],
             Self::Fixed(value) => *value,
+        }
+    }
+
+    /// Size of the terms that make up the value: the sum of the magnitudes a
+    /// linear driver adds, or the magnitude of the value itself. A convergence
+    /// test scaled by the value alone cannot be met when the terms cancel.
+    pub(crate) fn magnitude(&self, outputs: &[f64], boundaries: &[Vec<f64>]) -> f64 {
+        match self {
+            Self::Linear(terms) => {
+                let mut sum = 0.0;
+                for &(index, coefficient) in terms {
+                    sum += (coefficient * outputs[index]).abs();
+                }
+                sum
+            }
+            Self::Unset
+            | Self::EquivalentTemperature { .. }
+            | Self::Boundary { .. }
+            | Self::Fixed(_) => self.value(outputs, boundaries).abs(),
         }
     }
 

@@ -7,12 +7,21 @@
 //! A count below the file is also a violation: the commit that removed code
 //! lowers the file, so the mark can only move down.
 //!
-//! Counted by a text scan of non-test source: distinct `pub fn` names
-//! containing `_with_`, distinct `pub struct` names ending in `Candidate`,
-//! distinct `pub struct` or `pub enum` names ending in `Error`, and trait
-//! definitions. Source lines are recorded for the record and are not gated.
+//! Counted by a text scan of non-test source, one per declaration:
+//! - `fn` items whose name contains `_with_`, at any visibility, so that trait
+//!   methods and a second method of the same name on another type count;
+//! - `struct`, `enum` and `type` items whose name ends in `Candidate`;
+//! - `struct`, `enum` and `type` items whose name ends in `Error`;
+//! - trait definitions.
+//!
+//! A name that is exactly `Error` or `Candidate` is not counted (it is an
+//! associated type). Scanning of a file stops at a `#[cfg(test)]` line that is
+//! followed by a `mod`. Source lines are recorded and not gated.
+//!
+//! No claim: this is a line scan, not a parser. A declaration inside a block
+//! comment or a string literal is counted, and one produced by a macro, or
+//! with an attribute on the same line, is not.
 
-use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -29,9 +38,9 @@ const GATED: [&str; 4] = ["with_fns", "candidates", "errors", "traits"];
 /// The marks found in one crate.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Marks {
-    with_fns: BTreeSet<String>,
-    candidates: BTreeSet<String>,
-    errors: BTreeSet<String>,
+    with_fns: usize,
+    candidates: usize,
+    errors: usize,
     traits: usize,
     lines: usize,
 }
@@ -39,31 +48,36 @@ pub(crate) struct Marks {
 impl Marks {
     fn count(&self, key: &str) -> usize {
         match key {
-            "with_fns" => self.with_fns.len(),
-            "candidates" => self.candidates.len(),
-            "errors" => self.errors.len(),
+            "with_fns" => self.with_fns,
+            "candidates" => self.candidates,
+            "errors" => self.errors,
             "traits" => self.traits,
             _ => self.lines,
         }
     }
 }
 
-/// Name of the item a line declares with `keyword`, with or without `pub`.
-fn declared<'a>(line: &'a str, keyword: &str, public_only: bool) -> Option<&'a str> {
+/// Name of the item a line declares with `keyword`, at any visibility.
+fn declared<'a>(line: &'a str, keyword: &str) -> Option<&'a str> {
     let mut rest = line.trim_start();
     if let Some(after) = rest.strip_prefix("pub") {
-        rest = match after.strip_prefix('(') {
+        let after = match after.strip_prefix('(') {
             Some(scoped) => &scoped[scoped.find(')')? + 1..],
             None => after,
         };
-        if !rest.starts_with(' ') {
-            return None;
+        // `public_thing` is not `pub`: keep the line as it was.
+        if after.starts_with(' ') {
+            rest = after.trim_start();
         }
-    } else if public_only {
-        return None;
     }
-    rest = rest.trim_start();
-    for qualifier in ["const ", "async ", "unsafe "] {
+    for qualifier in [
+        "default ",
+        "const ",
+        "async ",
+        "unsafe ",
+        "extern \"C\" ",
+        "extern \"system\" ",
+    ] {
         rest = rest.strip_prefix(qualifier).unwrap_or(rest);
     }
     let name = rest.strip_prefix(keyword)?.strip_prefix(' ')?;
@@ -73,32 +87,41 @@ fn declared<'a>(line: &'a str, keyword: &str, public_only: bool) -> Option<&'a s
     (end > 0).then(|| &name[..end])
 }
 
+/// Whether `name` is longer than `suffix` and ends in it.
+fn names_a(name: &str, suffix: &str) -> bool {
+    name.len() > suffix.len() && name.ends_with(suffix)
+}
+
 /// Scan one source text into `marks`.
 pub(crate) fn scan(text: &str, marks: &mut Marks) {
-    for line in text.lines() {
+    let mut lines = text.lines().peekable();
+    let mut in_tests = false;
+    while let Some(line) = lines.next() {
         marks.lines += 1;
-        if let Some(name) = declared(line, "fn", true)
-            && name.contains("_with_")
+        if line.trim() == "#[cfg(test)]"
+            && lines
+                .peek()
+                .is_some_and(|next| declared(next, "mod").is_some())
         {
-            marks.with_fns.insert(name.to_owned());
+            in_tests = true;
         }
-        for keyword in ["struct", "enum"] {
-            if let Some(name) = declared(line, keyword, true) {
-                if keyword == "struct" && name.ends_with("Candidate") {
-                    marks.candidates.insert(name.to_owned());
-                }
-                if name.ends_with("Error") {
-                    marks.errors.insert(name.to_owned());
-                }
+        if in_tests {
+            continue;
+        }
+        if declared(line, "fn").is_some_and(|name| name.contains("_with_")) {
+            marks.with_fns += 1;
+        }
+        for keyword in ["struct", "enum", "type"] {
+            if let Some(name) = declared(line, keyword) {
+                marks.candidates += usize::from(names_a(name, "Candidate"));
+                marks.errors += usize::from(names_a(name, "Error"));
             }
         }
-        if declared(line, "trait", false).is_some() {
-            marks.traits += 1;
-        }
+        marks.traits += usize::from(declared(line, "trait").is_some());
     }
 }
 
-/// Scan every non-test `.rs` file under `dir`, in sorted order.
+/// Scan every non-test `.rs` file under `dir`.
 fn scan_tree(dir: &Path) -> Result<Marks, String> {
     let mut marks = Marks::default();
     let mut stack = vec![dir.to_path_buf()];
@@ -138,7 +161,7 @@ fn recorded(text: &str, scope: &str, key: &str) -> Option<usize> {
 
 fn render(all: &[(&str, Marks)]) -> String {
     let mut out = String::from(
-        "{\n  \"schema\": \"frankensim-enumeration-ratchet-v1\",\n  \"bead\": \"frankensim-rc-1109-root-3gc12.8.1\",\n",
+        "{\n  \"schema\": \"frankensim-enumeration-ratchet-v2\",\n  \"bead\": \"frankensim-rc-1109-root-3gc12.8.1\",\n",
     );
     for (scope, marks) in all {
         for key in GATED.iter().chain(&["lines"]) {
@@ -146,7 +169,7 @@ fn render(all: &[(&str, Marks)]) -> String {
         }
     }
     out.push_str(
-        "  \"no_claim\": \"text-scan counts of non-test source: pub fn names containing _with_, pub struct names ending in Candidate, pub struct or enum names ending in Error, trait definitions; lines are recorded and not gated; a count says nothing about whether the code is correct or used\"\n}\n",
+        "  \"no_claim\": \"line-scan counts of declarations in non-test source: fn names containing _with_ at any visibility; struct, enum and type names ending in Candidate; struct, enum and type names ending in Error; trait definitions. Lines are recorded and not gated. A count says nothing about whether the code is correct or used.\"\n}\n",
     );
     out
 }
@@ -209,9 +232,36 @@ pub(crate) fn check(root: &Path) -> Vec<Violation> {
 mod tests {
     use super::{Marks, compare, render, scan};
 
-    const SOURCE: &str = "pub fn advance_x_with_y() {}\n    pub(crate) fn step_with_heat(a: f64) {}\n\
-        fn private_with_nothing() {}\npub struct StepCandidate;\npub enum StepError {}\n\
-        pub struct OtherError;\ntrait Hidden {}\npub trait Shown {}\n// pub fn note_with_text\n";
+    const SOURCE: &str = "\
+pub fn advance_x_with_y() {}
+    pub(crate) fn step_with_heat(a: f64) {}
+fn private_with_nothing() {}
+pub struct StepCandidate;
+pub enum StepError {}
+pub struct OtherError;
+trait Hidden {}
+pub trait Shown {
+    fn drive_with_load(&self);
+}
+// pub fn note_with_text
+impl Shown for StepCandidate {
+    type Error = StepError;
+    fn drive_with_load(&self) {}
+}
+pub type AliasError = StepError;
+pub enum TrialCandidate {}
+pub const unsafe fn raw_with_parts() {}
+public_with_macro!(fn);
+";
+
+    const TESTS: &str = "\
+#[cfg(test)]
+mod tests {
+    pub fn helper_with_fixture() {}
+    pub struct FixtureError;
+    trait Probe {}
+}
+";
 
     fn marks(text: &str) -> Marks {
         let mut marks = Marks::default();
@@ -220,15 +270,33 @@ mod tests {
     }
 
     #[test]
-    fn scan_counts_public_marks_only() {
+    fn scan_counts_one_per_declaration_at_any_visibility() {
         let found = marks(SOURCE);
-        let names: Vec<&str> = found.with_fns.iter().map(String::as_str).collect();
-        assert_eq!(names, ["advance_x_with_y", "step_with_heat"]);
+        // advance_x_with_y, step_with_heat, private_with_nothing, the trait
+        // method, its implementation, raw_with_parts. Not the comment and
+        // not the macro call.
+        assert_eq!(found.with_fns, 6);
+        // StepCandidate, TrialCandidate.
+        assert_eq!(found.candidates, 2);
+        // StepError, OtherError, AliasError. Not the associated `type Error`.
+        assert_eq!(found.errors, 3);
+        assert_eq!(found.traits, 2);
+        assert_eq!(found.lines, 19);
+    }
+
+    #[test]
+    fn a_trailing_test_module_is_not_counted() {
+        let with_tests = format!("{SOURCE}{TESTS}");
+        let found = marks(&with_tests);
+        let plain = marks(SOURCE);
         assert_eq!(
-            (found.candidates.len(), found.errors.len(), found.traits),
-            (1, 2, 2)
+            (found.with_fns, found.candidates, found.errors, found.traits),
+            (plain.with_fns, plain.candidates, plain.errors, plain.traits)
         );
-        assert_eq!(found.lines, 9);
+        assert_eq!(found.lines, plain.lines + 6);
+        // The attribute alone, without a module after it, hides nothing.
+        let gated = format!("#[cfg(test)]\npub fn only_with_tests() {{}}\n{SOURCE}");
+        assert_eq!(marks(&gated).with_fns, plain.with_fns + 1);
     }
 
     #[test]
@@ -236,11 +304,12 @@ mod tests {
         let tracked = render(&[("fs-couple", marks(SOURCE))]);
         assert!(compare(&[("fs-couple", marks(SOURCE))], &tracked).is_empty());
 
-        let grown = format!("{SOURCE}pub fn advance_x_with_y_and_z() {{}}\n");
+        // A second method with a name that already exists is a new pairing.
+        let grown = format!("{SOURCE}impl Other {{\n    pub fn advance_x_with_y() {{}}\n}}\n");
         let problems = compare(&[("fs-couple", marks(&grown))], &tracked);
         assert_eq!(problems.len(), 1);
         assert!(
-            problems[0].contains("with_fns rose from 2 to 3"),
+            problems[0].contains("with_fns rose from 6 to 7"),
             "{}",
             problems[0]
         );
@@ -249,7 +318,7 @@ mod tests {
         let shrunk = SOURCE.replace("pub fn advance_x_with_y() {}\n", "");
         let problems = compare(&[("fs-couple", marks(&shrunk))], &tracked);
         assert!(
-            problems[0].contains("with_fns fell from 2 to 1"),
+            problems[0].contains("with_fns fell from 6 to 5"),
             "{}",
             problems[0]
         );

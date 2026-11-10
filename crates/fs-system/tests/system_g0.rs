@@ -779,7 +779,13 @@ fn a_nonlinear_spring_without_a_tangent_converges_and_conserves_energy() {
     builder.bond(a, b).unwrap();
     let mut system = builder.seal().unwrap();
     let steps = 3_000_u32;
-    let iterations = step_all(&mut system, 2.0e-4, steps, &gate);
+    let (mut iterations, mut reach) = (0_u32, 0.0_f64);
+    with_cx(&gate, |cx| {
+        for _ in 0..steps {
+            iterations += system.step(2.0e-4, cx).expect("step").iterations;
+            reach = reach.max(system.state::<f64>(spring).unwrap().abs());
+        }
+    });
     assert!(
         iterations > steps,
         "a nonlinear loop needs more than one iteration per step"
@@ -792,9 +798,20 @@ fn a_nonlinear_spring_without_a_tangent_converges_and_conserves_energy() {
     let ledger = system.ledger();
     assert!(ledger.stored_change_j().abs() <= 1.0e-9 * start_j);
     assert!(ledger.energy_residual_j().abs() <= 1.0e-10 * start_j);
-    // The cubic term matters at this amplitude.
-    let reach = system.state::<f64>(spring).unwrap().abs();
-    assert!(reach < 0.9 * (MASS * 0.81 / STIFFNESS).sqrt() || reach < 0.02);
+    // The turning point follows from energy alone, independently of the
+    // integrator: E = k q^2 / 2 + k3 q^4 / 4. The largest displacement seen
+    // over several periods must reach it and may not pass it.
+    let cubic = 6.0e7;
+    let turning =
+        ((-STIFFNESS + (STIFFNESS * STIFFNESS + 4.0 * cubic * start_j).sqrt()) / cubic).sqrt();
+    assert!(
+        reach <= turning * (1.0 + 1.0e-9),
+        "{reach} passes {turning}"
+    );
+    assert!(reach >= 0.995 * turning, "{reach} falls short of {turning}");
+    // The cubic term matters at this amplitude: a linear spring would reach
+    // more than twice as far.
+    assert!(turning < 0.5 * (2.0 * start_j / STIFFNESS).sqrt());
 }
 
 /// Refuses in `admit` while the shared flag is set.
@@ -1040,7 +1057,30 @@ fn a_component_bounds_the_step_before_or_during_the_trial() {
         // Announced events cost no retry; a shortening during the trial does.
         assert_eq!(report.shortenings, u32::from(!announce));
         assert_eq!(*system.state::<f64>(timer).unwrap(), 0.0);
-        // The whole system took the short step, not only the timer.
+        // The whole system took the short step, not only the timer: the
+        // oscillator is where a twin without a timer is after 0.25 ms.
+        let mut twin = SystemBuilder::new();
+        let twin_mass = twin
+            .add_with_tangent("mass", Inertia::new(MASS), -0.3)
+            .unwrap();
+        let twin_spring = twin
+            .add_with_tangent("spring", Spring::new(STIFFNESS, 0.0), -2.0e-3)
+            .unwrap();
+        let (a, b) = (
+            twin.port(twin_mass, "p").unwrap(),
+            twin.port(twin_spring, "p").unwrap(),
+        );
+        twin.bond(a, b).unwrap();
+        let mut twin = twin.seal().unwrap();
+        with_cx(&gate, |cx| twin.step(2.5e-4, cx)).expect("twin step");
+        assert_eq!(
+            system.state::<f64>(mass).unwrap().to_bits(),
+            twin.state::<f64>(twin_mass).unwrap().to_bits()
+        );
+        assert_eq!(
+            system.state::<f64>(spring).unwrap().to_bits(),
+            twin.state::<f64>(twin_spring).unwrap().to_bits()
+        );
         let report = with_cx(&gate, |cx| system.step(1.0e-3, cx)).expect("step");
         assert_eq!(report.dt_s.to_bits(), 1.0e-3_f64.to_bits());
         assert!((system.time_s() - 1.25e-3).abs() <= 1.0e-18);
@@ -1246,4 +1286,749 @@ fn descriptions_that_cannot_run_are_refused_at_admission() {
         route([0.7, -0.1], true),
         Err(AdmissionError::Fractions { .. })
     ));
+}
+
+// ---------------------------------------------------------------------------
+// Regressions from the independent review of 2026-11-10.
+// ---------------------------------------------------------------------------
+
+/// Mass, spring, optional damper and a constant force on one common-flow
+/// junction. The damper's heat goes to an ambient sink.
+fn loaded_oscillator(damping: Option<f64>, position_m: f64) -> (System, NodeId, NodeId) {
+    let mut builder = SystemBuilder::new();
+    let mass = builder
+        .add_with_tangent("mass", Inertia::new(MASS), 0.0)
+        .unwrap();
+    let spring = builder
+        .add_with_tangent("spring", Spring::new(STIFFNESS, 0.0), -position_m)
+        .unwrap();
+    let source = builder
+        .add(
+            "load",
+            ForceSource::new(0.7, 0.0),
+            SourceState {
+                time_s: 0.0,
+                energy_j: 0.0,
+            },
+        )
+        .unwrap();
+    let mut members = vec![
+        builder.port(spring, "p").unwrap(),
+        builder.port(source, "p").unwrap(),
+    ];
+    if let Some(damping) = damping {
+        let damper = builder.add("damper", Damper::new(damping), ()).unwrap();
+        members.push(builder.port(damper, "p").unwrap());
+        builder
+            .heat_route(
+                builder.port(damper, "heat").unwrap(),
+                &[],
+                Some(heat_sink("ambient", 293.15).unwrap()),
+                RouteTemperature::Fixed(293.15),
+            )
+            .unwrap();
+    }
+    builder
+        .common_flow(builder.port(mass, "p").unwrap(), &members)
+        .unwrap();
+    (builder.seal().unwrap(), mass, spring)
+}
+
+#[test]
+fn a_loaded_oscillator_settles_to_rest_under_the_default_tolerances() {
+    // Near rest the force on the mass is a small difference of large efforts.
+    // The convergence test must be scaled by those efforts, or the residual
+    // can never get under it and the run stops with NotConverged.
+    let gate = CancelGate::new_clock_free();
+    let (mut system, mass, spring) = loaded_oscillator(Some(DAMPING), 0.0);
+    // The envelope decays as exp(-3 t): ten seconds leave 1e-13 of it.
+    step_all(&mut system, 1.0e-3, 10_000, &gate);
+    let rest_m = 0.7 / STIFFNESS;
+    let position = -*system.state::<f64>(spring).unwrap();
+    assert!(
+        (position - rest_m).abs() <= 1.0e-9 * rest_m,
+        "{position} vs {rest_m}"
+    );
+    assert!(system.state::<f64>(mass).unwrap().abs() <= 1.0e-9);
+    // The work of the load ended as spring energy and ambient heat.
+    let ledger = system.ledger();
+    assert!((ledger.sink_heat_j() - 0.5 * 0.7 * rest_m).abs() <= 1.0e-9 * 0.7 * rest_m);
+    assert!(ledger.energy_residual_j().abs() <= 1.0e-12);
+
+    // An undamped oscillator started exactly at its loaded equilibrium stays
+    // there, at a small and at a large step.
+    for dt in [1.0e-3, 5.0e-2] {
+        let (mut system, mass, spring) = loaded_oscillator(None, rest_m);
+        step_all(&mut system, dt, 2_000, &gate);
+        assert!(system.state::<f64>(mass).unwrap().abs() <= 1.0e-12);
+        assert!((-*system.state::<f64>(spring).unwrap() - rest_m).abs() <= 1.0e-12 * rest_m);
+    }
+}
+
+#[test]
+fn a_refused_connection_leaves_the_builder_as_it_was() {
+    let gate = CancelGate::new_clock_free();
+    let mut builder = SystemBuilder::new();
+    let mass = builder
+        .add_with_tangent("mass", Inertia::new(MASS), -0.3)
+        .unwrap();
+    let first = builder
+        .add_with_tangent("first", Spring::new(STIFFNESS, 0.0), 0.0)
+        .unwrap();
+    let second = builder
+        .add_with_tangent("second", Spring::new(STIFFNESS, 0.0), 0.0)
+        .unwrap();
+    let other = builder
+        .add_with_tangent("other", Inertia::new(MASS), 0.1)
+        .unwrap();
+    let port = |builder: &SystemBuilder, node| builder.port(node, "p").unwrap();
+    let (m, p1, p2, o) = (
+        port(&builder, mass),
+        port(&builder, first),
+        port(&builder, second),
+        port(&builder, other),
+    );
+    builder.bond(o, p2).unwrap();
+    // `second` is taken, so the junction is refused as a whole...
+    assert!(matches!(
+        builder.common_flow(m, &[p1, p2]),
+        Err(AdmissionError::AlreadyConnected { .. })
+    ));
+    // ...and so is one that names a port twice.
+    assert!(matches!(
+        builder.common_flow(m, &[p1, p1]),
+        Err(AdmissionError::AlreadyConnected { .. })
+    ));
+    // Neither refusal claimed `mass.p` or `first.p`: the valid call succeeds,
+    // the system seals and it runs.
+    builder.common_flow(m, &[p1]).unwrap();
+    let mut system = builder.seal().unwrap();
+    step_all(&mut system, 1.0e-3, 10, &gate);
+    assert!(system.ledger().energy_residual_j().abs() <= 1.0e-15);
+
+    // A refused heat route leaves no sink behind in the ledger.
+    let mut builder = SystemBuilder::new();
+    let damper = builder.add("damper", Damper::new(1.0), ()).unwrap();
+    let hot = builder.add("hot", ThermalMass::new(1.0), 300.0).unwrap();
+    let (source, sink) = (
+        builder.port(damper, "heat").unwrap(),
+        builder.port(hot, "heat").unwrap(),
+    );
+    assert!(matches!(
+        builder.heat_route(
+            source,
+            &[(sink, 0.4), (sink, 0.4)],
+            Some(heat_sink("ambient", 293.15).unwrap()),
+            RouteTemperature::Fixed(300.0),
+        ),
+        Err(AdmissionError::AlreadyConnected { .. })
+    ));
+    builder
+        .heat_route(
+            source,
+            &[(sink, 0.4)],
+            Some(heat_sink("ambient", 293.15).unwrap()),
+            RouteTemperature::Fixed(300.0),
+        )
+        .unwrap();
+    let mechanical_port = builder.port(damper, "p").unwrap();
+    builder
+        .boundary(mechanical_port, Box::new(|_, _, flow| flow[0] = 0.5))
+        .unwrap();
+    let system = builder.seal().unwrap();
+    assert_eq!(system.ledger().sinks.len(), 1);
+}
+
+#[test]
+fn heat_ports_cannot_share_one_heat_rate_among_several_members() {
+    let mut builder = SystemBuilder::new();
+    let oscillator = builder
+        .add("oscillator", Oscillator::new(), (2.0e-3, -0.3))
+        .unwrap();
+    let hot = builder.add("hot", ThermalMass::new(2.0), 320.0).unwrap();
+    let cold = builder.add("cold", ThermalMass::new(5.0), 290.0).unwrap();
+    let setter = builder.port(oscillator, "heat").unwrap();
+    let members = [
+        builder.port(hot, "heat").unwrap(),
+        builder.port(cold, "heat").unwrap(),
+    ];
+    let Err(AdmissionError::HeatCommonFlow { port }) = builder.common_flow(setter, &members) else {
+        panic!("a heat rate handed to two members would be counted twice");
+    };
+    assert_eq!(port, "oscillator.heat");
+    // One member is an ordinary bond and is admitted.
+    builder.common_flow(setter, &members[..1]).unwrap();
+}
+
+/// Emits a large constant signal and the cosine of the signal it receives.
+struct CosineLoop {
+    large: f64,
+    ports: [PortSpec; 3],
+}
+
+impl CosineLoop {
+    fn new(large: f64) -> Self {
+        Self {
+            large,
+            ports: [
+                PortSpec::signal_in(id("x"), NonZeroUsize::MIN),
+                PortSpec::signal_out(id("large"), NonZeroUsize::MIN),
+                PortSpec::signal_out(id("cos"), NonZeroUsize::MIN),
+            ],
+        }
+    }
+}
+
+impl Component for CosineLoop {
+    type State = ();
+    type Error = Cancelled;
+
+    fn ports(&self) -> &[PortSpec] {
+        &self.ports
+    }
+
+    fn class(&self) -> Class {
+        Class::Smooth
+    }
+
+    fn stored_energy_j(&self, _state: &()) -> Result<f64, Cancelled> {
+        Ok(0.0)
+    }
+
+    fn propose(
+        &self,
+        _old: &(),
+        _dt_s: f64,
+        inputs: &[f64],
+        _new: &mut (),
+        outputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<Proposal, Cancelled> {
+        outputs[0] = self.large;
+        outputs[1] = inputs[0].cos();
+        Ok(Proposal::Step(Receipt::lossless(0.0, 0.0)))
+    }
+}
+
+/// Passes a signal through unchanged.
+struct Relay {
+    ports: [PortSpec; 2],
+}
+
+impl Component for Relay {
+    type State = ();
+    type Error = Cancelled;
+
+    fn ports(&self) -> &[PortSpec] {
+        &self.ports
+    }
+
+    fn class(&self) -> Class {
+        Class::ExactLinear
+    }
+
+    fn stored_energy_j(&self, _state: &()) -> Result<f64, Cancelled> {
+        Ok(0.0)
+    }
+
+    fn propose(
+        &self,
+        _old: &(),
+        _dt_s: f64,
+        inputs: &[f64],
+        _new: &mut (),
+        outputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<Proposal, Cancelled> {
+        outputs[0] = inputs[0];
+        Ok(Proposal::Step(Receipt::lossless(0.0, 0.0)))
+    }
+}
+
+#[test]
+fn a_signal_loop_is_judged_by_its_own_size_not_by_a_large_neighbour() {
+    // x = cos(x) has the root 0.7390851332151607. A second signal of 1e12 in
+    // the same block must not loosen the test on x.
+    let gate = CancelGate::new_clock_free();
+    for large in [1.0, 1.0e12] {
+        let mut builder = SystemBuilder::new();
+        let looped = builder.add("loop", CosineLoop::new(large), ()).unwrap();
+        let relay = builder
+            .add(
+                "relay",
+                Relay {
+                    ports: [
+                        PortSpec::signal_in(id("in"), NonZeroUsize::MIN),
+                        PortSpec::signal_out(id("out"), NonZeroUsize::MIN),
+                    ],
+                },
+                (),
+            )
+            .unwrap();
+        // cos -> x closes the loop; large -> relay -> nothing puts the large
+        // signal's consumer next to it.
+        builder
+            .signal(
+                builder.port(looped, "cos").unwrap(),
+                builder.port(looped, "x").unwrap(),
+            )
+            .unwrap();
+        builder
+            .signal(
+                builder.port(looped, "large").unwrap(),
+                builder.port(relay, "in").unwrap(),
+            )
+            .unwrap();
+        let mut system = builder.seal().unwrap();
+        with_cx(&gate, |cx| system.step(1.0e-3, cx)).expect("step");
+        let x = system.last_input(system.port(looped, "x").unwrap())[0];
+        assert!(
+            (x - 0.739_085_133_215_160_7).abs() <= 1.0e-10,
+            "large {large}: x = {x}"
+        );
+        // The relay saw the large signal exactly.
+        let relayed = system.last_output(system.port(relay, "out").unwrap())[0];
+        assert_eq!(relayed.to_bits(), large.to_bits());
+    }
+}
+
+#[test]
+fn two_masses_on_one_spring_share_its_force() {
+    // Common effort with two members: both masses feel the spring force and
+    // the spring shortens by the sum of their displacements.
+    let gate = CancelGate::new_clock_free();
+    let (m1, m2, k) = (0.25, 0.4, STIFFNESS);
+    let (v1, v2, q) = (-0.3, 0.2, 1.5e-3);
+    let mut builder = SystemBuilder::new();
+    let first = builder
+        .add_with_tangent("first", Inertia::new(m1), v1)
+        .unwrap();
+    let second = builder
+        .add_with_tangent("second", Inertia::new(m2), v2)
+        .unwrap();
+    let spring = builder
+        .add_with_tangent("spring", Spring::new(k, 0.0), q)
+        .unwrap();
+    let members = [
+        builder.port(first, "p").unwrap(),
+        builder.port(second, "p").unwrap(),
+    ];
+    builder
+        .common_effort(builder.port(spring, "p").unwrap(), &members)
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    let (dt, steps) = (1.0e-3, 3_000_u32);
+    step_all(&mut system, dt, steps, &gate);
+
+    // Monolithic midpoint rule: e = k q_mid, q' = -(v1 + v2), m_i v_i' = e.
+    let (mut a, mut b, mut c) = (v1, v2, q);
+    for _ in 0..steps {
+        let effort =
+            k * (c - 0.5 * dt * (a + b)) / (1.0 + 0.25 * k * dt * dt * (1.0 / m1 + 1.0 / m2));
+        let (a_mean, b_mean) = (a + 0.5 * dt * effort / m1, b + 0.5 * dt * effort / m2);
+        c -= dt * (a_mean + b_mean);
+        a = 2.0 * a_mean - a;
+        b = 2.0 * b_mean - b;
+    }
+    let got = |node| *system.state::<f64>(node).unwrap();
+    assert!((got(first) - a).abs() <= 1.0e-10, "{} vs {a}", got(first));
+    assert!((got(second) - b).abs() <= 1.0e-10, "{} vs {b}", got(second));
+    assert!((got(spring) - c).abs() <= 1.0e-11, "{} vs {c}", got(spring));
+    let start_j = 0.5 * m1 * v1 * v1 + 0.5 * m2 * v2 * v2 + 0.5 * k * q * q;
+    assert!(system.ledger().stored_change_j().abs() <= 1.0e-11 * start_j);
+}
+
+/// Returns `gain * input + offset` on its one mechanical port; it keeps no
+/// accounts, because the steps it is used in are refused before the audit.
+struct Affine {
+    gain: f64,
+    offset: f64,
+    ports: [PortSpec; 1],
+}
+
+impl Component for Affine {
+    type State = ();
+    type Error = Cancelled;
+
+    fn ports(&self) -> &[PortSpec] {
+        &self.ports
+    }
+
+    fn class(&self) -> Class {
+        Class::ExactLinear
+    }
+
+    fn stored_energy_j(&self, _state: &()) -> Result<f64, Cancelled> {
+        Ok(0.0)
+    }
+
+    fn propose(
+        &self,
+        _old: &(),
+        _dt_s: f64,
+        inputs: &[f64],
+        _new: &mut (),
+        outputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<Proposal, Cancelled> {
+        outputs[0] = self.gain * inputs[0] + self.offset;
+        Ok(Proposal::Step(Receipt::lossless(0.0, 0.0)))
+    }
+}
+
+impl PortTangent for Affine {
+    fn jvp(
+        &self,
+        _old: &(),
+        _dt_s: f64,
+        _inputs: &[f64],
+        d_inputs: &[f64],
+        d_outputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<(), Cancelled> {
+        d_outputs[0] = self.gain * d_inputs[0];
+        Ok(())
+    }
+
+    fn vjp(
+        &self,
+        _old: &(),
+        _dt_s: f64,
+        _inputs: &[f64],
+        bar_outputs: &[f64],
+        bar_inputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<(), Cancelled> {
+        bar_inputs[0] = self.gain * bar_outputs[0];
+        Ok(())
+    }
+}
+
+#[test]
+fn solver_failures_are_typed_and_name_what_failed() {
+    let gate = CancelGate::new_clock_free();
+    let oscillator = || {
+        let mut builder = SystemBuilder::new();
+        let mass = builder
+            .add_with_tangent("mass", Inertia::new(MASS), -0.3)
+            .unwrap();
+        let spring = builder
+            .add_with_tangent("spring", Spring::new(STIFFNESS, 0.0), -2.0e-3)
+            .unwrap();
+        let (a, b) = (
+            builder.port(mass, "p").unwrap(),
+            builder.port(spring, "p").unwrap(),
+        );
+        builder.bond(a, b).unwrap();
+        (builder.seal().unwrap(), mass, spring)
+    };
+
+    // No iteration allowed: the loop cannot be solved and says where.
+    let (mut system, _, _) = oscillator();
+    system.set_config(SolveConfig {
+        max_iterations: 0,
+        ..SolveConfig::default()
+    });
+    let error = with_cx(&gate, |cx| system.step(1.0e-3, cx)).expect_err("not converged");
+    let SystemError::NotConverged {
+        nodes,
+        iterations,
+        worst,
+        residual,
+    } = error
+    else {
+        panic!("expected NotConverged, got {error}");
+    };
+    assert_eq!((nodes.len(), iterations), (2, 0));
+    assert!(worst == "mass.p" || worst == "spring.p", "{worst}");
+    assert!(residual != 0.0);
+    assert_eq!(system.steps(), 0);
+
+    // A tolerance so loose that a wrong first guess is accepted leaves the
+    // two sides of the bond with different energies; the interface check
+    // refuses what the solver let through.
+    let (mut system, mass, spring) = oscillator();
+    system.set_config(SolveConfig {
+        relative_tolerance: 10.0,
+        ..SolveConfig::default()
+    });
+    for node in [mass, spring] {
+        let port = system.port(node, "p").expect("port");
+        assert!(system.guess(port, &[1.0]));
+    }
+    let error = with_cx(&gate, |cx| system.step(1.0e-3, cx)).expect_err("interface");
+    assert!(
+        matches!(error, SystemError::Interface { connection: 0, .. }),
+        "{error}"
+    );
+    assert_eq!(system.steps(), 0);
+
+    // A conductance of 2 against a resistance of -1/2: the interface
+    // Jacobian [[1, 1/2], [2, 1]] is singular. Exact tangents make it so
+    // exactly; a differenced tangent would only make it nearly so.
+    let mut builder = SystemBuilder::new();
+    let conductance = builder
+        .add_with_tangent(
+            "conductance",
+            Affine {
+                gain: 2.0,
+                offset: 0.0,
+                ports: [mechanical("p", PortRole::EffortIn)],
+            },
+            (),
+        )
+        .unwrap();
+    let resistance = builder
+        .add_with_tangent(
+            "resistance",
+            Affine {
+                gain: -0.5,
+                offset: 1.0,
+                ports: [mechanical("p", PortRole::FlowIn)],
+            },
+            (),
+        )
+        .unwrap();
+    let (a, b) = (
+        builder.port(conductance, "p").unwrap(),
+        builder.port(resistance, "p").unwrap(),
+    );
+    builder.bond(a, b).unwrap();
+    let mut system = builder.seal().unwrap();
+    let error = with_cx(&gate, |cx| system.step(1.0e-3, cx)).expect_err("singular");
+    let SystemError::Singular { nodes } = error else {
+        panic!("expected Singular, got {error}");
+    };
+    assert_eq!(nodes, ["conductance", "resistance"]);
+}
+
+/// Answers the step negotiation with fixed values, valid or not.
+// The shared `_s` suffix is the unit, seconds.
+#[allow(clippy::struct_field_names)]
+struct Negotiator {
+    limit_s: f64,
+    event_s: Option<f64>,
+    shorten_to_s: Option<f64>,
+}
+
+impl Component for Negotiator {
+    type State = ();
+    type Error = Cancelled;
+
+    fn ports(&self) -> &[PortSpec] {
+        &[]
+    }
+
+    fn class(&self) -> Class {
+        Class::ExactLinear
+    }
+
+    fn stored_energy_j(&self, _state: &()) -> Result<f64, Cancelled> {
+        Ok(0.0)
+    }
+
+    fn limit_dt_s(&self, _state: &(), _proposed_s: f64) -> Result<f64, Cancelled> {
+        Ok(self.limit_s)
+    }
+
+    fn next_event_s(&self, _state: &()) -> Option<f64> {
+        self.event_s
+    }
+
+    fn propose(
+        &self,
+        _old: &(),
+        _dt_s: f64,
+        _inputs: &[f64],
+        _new: &mut (),
+        _outputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<Proposal, Cancelled> {
+        Ok(match self.shorten_to_s {
+            Some(dt_s) => Proposal::Shorten { dt_s },
+            None => Proposal::Step(Receipt::lossless(0.0, 0.0)),
+        })
+    }
+}
+
+#[test]
+fn a_bad_answer_in_the_step_negotiation_is_refused_and_names_the_component() {
+    let gate = CancelGate::new_clock_free();
+    let attempt = |limit_s: f64, event_s: Option<f64>, shorten_to_s: Option<f64>| {
+        let mut builder = SystemBuilder::new();
+        builder
+            .add(
+                "negotiator",
+                Negotiator {
+                    limit_s,
+                    event_s,
+                    shorten_to_s,
+                },
+                (),
+            )
+            .unwrap();
+        let mut system = builder.seal().unwrap();
+        with_cx(&gate, |cx| system.step(1.0e-3, cx))
+    };
+    // A valid limit and event are taken.
+    assert_eq!(
+        attempt(5.0e-4, Some(2.5e-4), None).unwrap().dt_s.to_bits(),
+        2.5e-4_f64.to_bits()
+    );
+    // A limit that is not a number is refused even beside a valid event, and
+    // so is an event that is not a number beside a valid limit.
+    for (limit, event) in [
+        (f64::NAN, Some(2.5e-4)),
+        (5.0e-4, Some(f64::NAN)),
+        (0.0, None),
+        (2.0e-3, None),
+        (5.0e-4, Some(0.0)),
+    ] {
+        let error = attempt(limit, event, None).expect_err("refused");
+        let SystemError::Negotiation { node, .. } = error else {
+            panic!("limit {limit}, event {event:?}: expected Negotiation, got {error}");
+        };
+        assert_eq!(node, "negotiator");
+    }
+    // A request to shorten to a step that is not shorter names its author.
+    for shorter in [1.0e-3, 2.0e-3, 0.0, f64::NAN] {
+        let error = attempt(1.0e-3, None, Some(shorter)).expect_err("refused");
+        let SystemError::Contract { node, .. } = error else {
+            panic!("shorten to {shorter}: expected Contract, got {error}");
+        };
+        assert_eq!(node, "negotiator");
+    }
+}
+
+/// Gives off a fixed heat rate from a finite store and claims to generate no
+/// entropy doing so.
+struct Heater {
+    watts: f64,
+    ports: [PortSpec; 1],
+}
+
+impl Component for Heater {
+    type State = f64;
+    type Error = Cancelled;
+
+    fn ports(&self) -> &[PortSpec] {
+        &self.ports
+    }
+
+    fn class(&self) -> Class {
+        Class::ExactLinear
+    }
+
+    fn stored_energy_j(&self, store_j: &f64) -> Result<f64, Cancelled> {
+        Ok(*store_j)
+    }
+
+    fn propose(
+        &self,
+        old: &f64,
+        dt_s: f64,
+        _inputs: &[f64],
+        new: &mut f64,
+        outputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<Proposal, Cancelled> {
+        *new = old - dt_s * self.watts;
+        outputs[0] = -self.watts;
+        Ok(Proposal::Step(Receipt::lossless(
+            -dt_s * self.watts,
+            roundoff(old.abs() + new.abs()),
+        )))
+    }
+}
+
+#[test]
+fn a_route_that_would_destroy_entropy_is_refused() {
+    // The heater says its heat leaves at 100 K and generates no entropy, and
+    // the route delivers that heat to a body at 300 K: entropy Q/100 leaves
+    // the heater and only Q/300 arrives. Nothing accounts for the difference.
+    let gate = CancelGate::new_clock_free();
+    let build = |source_k: f64| {
+        let mut builder = SystemBuilder::new();
+        let heater = builder
+            .add(
+                "heater",
+                Heater {
+                    watts: 5.0,
+                    ports: [heat("heat", PortRole::EffortIn)],
+                },
+                100.0,
+            )
+            .unwrap();
+        let body = builder.add("body", ThermalMass::new(2.0), 300.0).unwrap();
+        builder
+            .heat_route(
+                builder.port(heater, "heat").unwrap(),
+                &[(builder.port(body, "heat").unwrap(), 1.0)],
+                None,
+                RouteTemperature::Fixed(source_k),
+            )
+            .unwrap();
+        (builder.seal().unwrap(), body)
+    };
+    let (mut system, body) = build(100.0);
+    let error = with_cx(&gate, |cx| system.step(1.0e-2, cx)).expect_err("second law");
+    let SystemError::SecondLaw { generated_j_per_k } = error else {
+        panic!("expected SecondLaw, got {error}");
+    };
+    assert!(generated_j_per_k < 0.0);
+    assert_eq!(
+        system.state::<f64>(body).unwrap().to_bits(),
+        300.0_f64.to_bits()
+    );
+    // Heat that leaves at 1000 K and arrives at 300 K generates entropy and
+    // is admitted.
+    let (mut system, body) = build(1000.0);
+    with_cx(&gate, |cx| system.step(1.0e-2, cx)).expect("step");
+    assert!(*system.state::<f64>(body).unwrap() > 300.0);
+    assert!(system.ledger().entropy_generated_j_per_k() > 0.0);
+}
+
+/// Requests cancellation and then notices it itself, returning its own error.
+struct SelfCancelling;
+
+impl Component for SelfCancelling {
+    type State = ();
+    type Error = Cancelled;
+
+    fn ports(&self) -> &[PortSpec] {
+        &[]
+    }
+
+    fn class(&self) -> Class {
+        Class::ExactLinear
+    }
+
+    fn stored_energy_j(&self, _state: &()) -> Result<f64, Cancelled> {
+        Ok(0.0)
+    }
+
+    fn propose(
+        &self,
+        _old: &(),
+        _dt_s: f64,
+        _inputs: &[f64],
+        _new: &mut (),
+        _outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<Proposal, Cancelled> {
+        cx.cancel_gate().request();
+        cx.checkpoint()?;
+        Ok(Proposal::Step(Receipt::lossless(0.0, 0.0)))
+    }
+}
+
+#[test]
+fn cancellation_noticed_by_a_component_is_reported_as_cancellation() {
+    let gate = CancelGate::new_clock_free();
+    let mut builder = SystemBuilder::new();
+    builder.add("stopper", SelfCancelling, ()).unwrap();
+    let mut system = builder.seal().unwrap();
+    let error = with_cx(&gate, |cx| system.step(1.0e-3, cx)).expect_err("cancelled");
+    assert!(matches!(error, SystemError::Cancelled), "{error}");
+    assert_eq!(system.steps(), 0);
 }

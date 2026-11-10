@@ -17,13 +17,33 @@ and its numerical loss is minus `work_energy_residual_j`; dissipation and
 entropy production are zero. `RigidBodyRefusal` carries the native
 `DynamicsError` unchanged, or `Cancelled` when the `Cx` was already requested.
 
+The receipt's energy tolerance is 64 machine epsilons of three things added
+together: the products of the norms of force and mean velocity and of torque
+and mean angular velocity (the angular velocity comes out of a frame rotation,
+so its components carry roundoff of the whole vector); the kinetic energies
+and the magnitudes of the gravity potential at both ends of the step (in free
+fall they cancel, and the measured total is only as exact as its terms); and
+the magnitudes of the changes and of the residual. A tolerance scaled only by
+the energy exchanged in the step refused free fall from the origin after 298
+steps; that defect was found by an independent review on 2026-11-10 and is
+pinned by the tests below.
+
 G0, in `crates/fs-system/tests/rigid_body_slice.rs` (run with
-`cargo test -p fs-system --features slices`): a tumbling asymmetric body under
-force, torque and gravity passes `component::conformance::check_component`,
-with the first law closed inside the receipt's tolerance; the same body with
-zero torque, bonded by the kernel to a three-axis spring defined in the test,
-follows the monolithic midpoint rule for translation over 4,000 steps, keeps
-the size of its body angular momentum, and the window ledger closes.
+`cargo test -p fs-system --features slices`):
+- a tumbling asymmetric body under force, torque and gravity passes
+  `component::conformance::check_component`, and the work booked from the wire
+  values equals the integrator's `applied_work_j` to 1e-13 of the paired
+  magnitudes;
+- 400 generated states pass the conformance check: heights to 500 m, fall
+  speeds to 100 m/s, a principal frame rotated against the body frame, free
+  fall, a torque across the spin, general wrenches, two step sizes;
+- a body released at the origin under gravity follows the parabola for 5,000
+  steps to 1e-10 with its stored energy unchanged to 1e-10 of the kinetic
+  energy;
+- the same body with zero torque, bonded by the kernel to a three-axis spring
+  defined in the test, follows the monolithic midpoint rule for translation
+  over 4,000 steps, keeps the size of its body angular momentum, and the
+  window ledger closes.
 
 No claim: no contact, constraint or collision; no analytic tangent of the port
 map (a kernel loop differences it); the split variants of the integrator are

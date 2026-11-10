@@ -68,10 +68,19 @@ Tarjan, index order).
   admitted. A failed step leaves every accepted state, the clock, the ledger
   and the warm-start values bitwise unchanged.
 - A step repeated after a failure is bitwise equal to a first attempt.
-- Junction connections use coefficients of exactly plus or minus one, so a
-  junction solved without iteration cancels interface energy exactly. A heat
-  route multiplies by fractions and cancels to roundoff. A looped block
-  cancels to the solver tolerance; the remainder is reported per connection.
+- Junction equations use coefficients of exactly plus or minus one, so the
+  connection itself adds no rounding. A junction always closes a loop between
+  its setter and its members, so its interface energy cancels to the solver
+  tolerance, and the remainder is reported per connection. A one-way heat
+  route multiplies by fractions and cancels to roundoff.
+- A refused builder call changes nothing: every port of a connection is
+  checked, including for use twice in the same call, before any is claimed.
+- A convergence test compares each residual with the size of the terms its
+  driver sums, not with their total, so a balance of large efforts that
+  nearly cancel can still converge. Each scalar signal input is judged
+  against its own size only.
+- Once cancellation has been requested, any refusal during a trial is
+  reported as `SystemError::Cancelled`.
 - A graph without loops is evaluated once per component per step, in
   dependency order: it reproduces a hand-staggered run of the same components
   bitwise.
@@ -135,17 +144,40 @@ G0, `tests/system_g0.rs`, on one-port elements defined in the test:
   (`Proposal::Shorten`), and the whole system takes the short step;
 - a non-smooth component in a loop is refused by name; a temperature in a loop
   without a starting value is refused by port;
-- nine admission refusals.
+- nine admission refusals;
+- a loaded damped oscillator settles to rest over 10,000 steps under the
+  default tolerances, and an undamped one started at its loaded equilibrium
+  stays there (both stopped with `NotConverged` before the convergence scale
+  was corrected);
+- a refused junction or heat route leaves the builder usable and leaves no
+  sink behind; a heat rate cannot be shared by several members of a common-flow
+  junction;
+- a signal loop `x = cos(x)` reaches its root beside a signal of 1e12 in the
+  same block; two masses on one spring (a three-port common-effort junction)
+  follow the monolithic rule;
+- `NotConverged`, `Interface`, `Singular`, `Negotiation` (including a NaN
+  limit beside a valid event), a bad `Shorten`, and `SecondLaw` are each
+  produced and name what failed; cancellation noticed by a component is
+  reported as cancellation.
 
 Unit tests cover the block ordering (including a 200,000-node chain without
 recursion), the equivalent-temperature gradient, the dense solve and the
 compensated sum.
 
 Owner slice, `tests/rigid_body_slice.rs` (`--features slices`): the native
-fs-mbd rigid body (`fs_mbd::component::RigidBody`) passes the conformance
-check under force, torque and gravity, and a tumbling body bonded to a
-three-axis spring follows the monolithic midpoint rule for translation over
-4,000 steps with a closed ledger. It is the first physics owner on the kernel.
+fs-mbd rigid body (`fs_mbd::component::RigidBody`), the first physics owner on
+the kernel.
+- At one state under force, torque and gravity it passes the conformance
+  check, and the work the kernel books from the wire values equals the
+  integrator's own `applied_work_j` to 1e-13 of the paired magnitudes.
+- At 400 generated states (heights to 500 m, fall speeds to 100 m/s, a
+  principal frame rotated against the body frame, free fall, a torque across
+  the spin, general wrenches, two step sizes) it passes the conformance check.
+- A body released at the origin under gravity follows the parabola for 5,000
+  steps to 1e-10, with the stored energy unchanged to 1e-10 of the kinetic
+  energy.
+- A tumbling body bonded to a three-axis spring follows the monolithic
+  midpoint rule for translation over 4,000 steps with a closed ledger.
 
 ## No-claim boundaries
 
@@ -159,6 +191,15 @@ three-axis spring follows the monolithic midpoint rule for translation over
   allocates per looped block and per step. No performance claim is made; the
   static plan and allocation-free stepping are beads `.5.7` and `.15.1`.
 - Entropy is accounted as generation and as flow through heat ports. Stored
-  entropy of components is not tracked.
+  entropy of components is not tracked, so the second-law check is narrow: it
+  refuses a step in which the entropy components say they generated, plus the
+  entropy that appears or vanishes across connections, is negative. It does
+  not check the entropy balance of each component.
+- The audit trusts the tolerance a component claims for its own energy
+  balance. A component that claims a wide tolerance passes the audit with a
+  leak; the leak is visible in the ledger's `balance_defect_j` and
+  `energy_residual_j`, not refused.
+- `common_flow` on heat ports is admitted for one member only (a bond). Heat
+  shared between several bodies goes through `common_effort` or `heat_route`.
 - Conserved inventories other than energy (mass, momentum, charge) are not in
   the ledger yet (bead `.5.6`).
