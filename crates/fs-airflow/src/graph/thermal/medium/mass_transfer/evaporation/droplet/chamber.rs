@@ -244,7 +244,7 @@ impl Prepared<'_, '_> {
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-fn advance<'surface, 'm, 'catalog>(
+fn advance<'surface, 'm: 'surface, 'catalog>(
     surfaces: impl ExactSizeIterator<
         Item = (
             SourceGasDropletSurface<'surface, 'm>,

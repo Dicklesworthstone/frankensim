@@ -276,7 +276,7 @@ impl<'a, 'card> LiquidHeatPath<'a, 'card> {
             if wall >= inlet.temperature_k() { ThermalDirection::HeatingFluid } else { ThermalDirection::CoolingFluid },
         )?;
         let segment = &channel.path().segments()[0];
-        let outlet = march_region(cx, self.source.curve(), inlet, self.mass_flow, segment, wall)?;
+        let outlet = march_region(cx, self.source, inlet, self.mass_flow, segment, wall)?;
         let heat_rate_w = self.mass_flow * (outlet.specific_enthalpy_j_kg() - inlet.specific_enthalpy_j_kg());
         let reference = wall - heat_rate_w / (segment.htc_w_per_m2_k() * segment.area_m2());
         let velocity_m_s = volume_flow / section.geometry.flow_area.value();

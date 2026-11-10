@@ -196,7 +196,7 @@ pub fn advance_droplets_with_gas_transport_and_heat_adaptive<'catalog>(
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-fn advance<'surface, 'm, 'catalog>(
+fn advance<'surface, 'm: 'surface, 'catalog>(
     surfaces: impl ExactSizeIterator<
         Item = (
             SourceGasDropletSurface<'surface, 'm>,
