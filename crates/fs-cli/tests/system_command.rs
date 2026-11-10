@@ -139,6 +139,48 @@ fn the_quarter_car_returns_the_road_work_as_motion_and_heat_split_seventy_thirty
     // by 3 s.
     assert!(mechanical.abs() < 0.05 * dissipated, "{mechanical} vs {dissipated}");
     assert!(value(&json, "\"totals\"", "energy_residual_j").abs() <= 1.0e-9 * dissipated);
+
+    // The assertions above follow from the kernel's audit and the route
+    // fractions for any dynamics. This pins the dynamics: the midpoint rule
+    // for the body (1) and the wheel (2) over the same road,
+    //   m1 v1' = -k1 (x1 - x2) - c (v1 - v2),
+    //   m2 v2' =  k1 (x1 - x2) + c (v1 - v2) - k2 (x2 - r).
+    let (m1, m2, k1, c, k2) = (300.0_f64, 40.0_f64, 2.0e4_f64, 1500.0_f64, 1.8e5_f64);
+    let road = Waveform::table(vec![(0.5, 0.0), (0.55, 0.6), (0.6, 0.0), (0.65, -0.6), (0.7, 0.0)])
+        .unwrap();
+    let (dt, steps) = (5.0e-4_f64, 6_000_u32);
+    let (alpha, beta) = (0.5 * k1 * dt + c, 0.5 * k2 * dt);
+    let (a11, a12, a22) = (2.0 * m1 / dt + alpha, -alpha, 2.0 * m2 / dt + alpha + beta);
+    let determinant = a11 * a22 - a12 * a12;
+    let (mut x1, mut v1, mut x2, mut v2, mut r) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+    let (mut heat, mut crest) = (0.0_f64, 0.0_f64);
+    for i in 0..steps {
+        let u = road.mean(f64::from(i) * dt, dt);
+        let b1 = 2.0 * m1 * v1 / dt - k1 * (x1 - x2);
+        let b2 = 2.0 * m2 * v2 / dt + k1 * (x1 - x2) - k2 * (x2 - r) + beta * u;
+        let mean1 = (b1 * a22 - a12 * b2) / determinant;
+        let mean2 = (a11 * b2 - a12 * b1) / determinant;
+        x1 += dt * mean1;
+        x2 += dt * mean2;
+        v1 = 2.0 * mean1 - v1;
+        v2 = 2.0 * mean2 - v2;
+        r += dt * u;
+        heat += dt * c * (mean1 - mean2) * (mean1 - mean2);
+        crest = crest.max(r);
+    }
+    // The road rose 30 mm and came back.
+    assert!((crest - 0.03).abs() <= 1.0e-12 && r.abs() <= 1.0e-12, "{crest}, {r}");
+    let close = |name: &str, key: &str, expected: f64, scale: f64| {
+        let actual = value(&json, &element(name), key);
+        assert!((actual - expected).abs() <= 1.0e-9 * scale, "{name}.{key}: {actual} vs {expected}");
+    };
+    close("body", "position_m", x1, crest);
+    close("wheel", "position_m", x2, crest);
+    close("body", "velocity_m_s", v1, 0.6);
+    close("wheel", "velocity_m_s", v2, 0.6);
+    close("suspension", "extension_m", x1 - x2, crest);
+    close("tyre", "extension_m", x2 - r, crest);
+    assert!((dissipated - heat).abs() <= 1.0e-9 * heat, "{dissipated} vs {heat}");
 }
 
 #[test]
@@ -356,6 +398,62 @@ fn a_prescribed_end_moves_the_way_it_is_written() {
     let work = value(&json, "\"port\":\"s.b\"", "energy_in_j");
     let stored = 50.0 * extension * extension + 0.5 * velocity * velocity;
     assert!(work > 0.0 && (work - stored).abs() <= 1.0e-12, "{work} vs {stored}");
+}
+
+#[test]
+fn a_motor_drives_a_load_through_a_compliant_shaft_and_a_run_reaches_rest() {
+    // Second independent review, 2026-11-10: this scene was refused at step
+    // 6912, because the shaft's two ends turn together at 140 rad/s while its
+    // twist is tiny, and the spring's energy tolerance did not cover that.
+    let scene = std::fs::read_to_string(example("dc_motor.json"))
+        .unwrap()
+        .replace(
+            "    \"case\": {",
+            "    \"shaft\": {\"kind\": \"torsion_spring\", \"stiffness_n_m_rad\": 500.0},\n    \
+             \"load\": {\"kind\": \"inertia\", \"inertia_kg_m2\": 5.0e-4},\n    \
+             \"load_bearing\": {\"kind\": \"rotary_damper\", \"damping_n_m_s_rad\": 1.0e-4},\n    \
+             \"case\": {",
+        )
+        .replace(
+            "\"bearing.a\"]},",
+            "\"bearing.a\", \"shaft.a\"]},\n    \
+             {\"join\": [\"load.p\", \"shaft.b\", \"load_bearing.a\"]},\n    \
+             {\"prescribe\": \"load_bearing.b\", \"angular_velocity_rad_s\": 0},\n    \
+             {\"route\": \"load_bearing.heat\", \"to\": [[\"case.heat\", 1.0]]},",
+        );
+    assert!(scene.contains("load_bearing.heat") && scene.contains("\"shaft\""));
+    let path = scratch("motor_shaft.json", &scene);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    // The two inertias turn together, the shaft carrying the load's share.
+    let rotor = value(&json, &element("rotor"), "angular_velocity_rad_s");
+    let load = value(&json, &element("load"), "angular_velocity_rad_s");
+    assert!(rotor > 50.0 && (rotor - load).abs() < 0.05 * rotor, "{rotor} vs {load}");
+    let supplied = -value(&json, &element("supply"), "energy_in_j");
+    assert!(value(&json, "\"totals\"", "energy_residual_j").abs() <= 1.0e-11 * supplied);
+
+    // Two bodies through a wall, run until nothing more can change: the
+    // kernel used to refuse at step 192 of this scene.
+    let scene = r#"{
+  "schema": "frankensim.system.v0", "duration_s": 1000.0, "step_s": 0.5,
+  "elements": {
+    "x1": {"kind": "heat_capacity", "capacity_j_k": 10.0, "temperature_k": 400.0},
+    "x2": {"kind": "heat_capacity", "capacity_j_k": 12.0, "temperature_k": 350.0},
+    "wall": {"kind": "conductance", "conductance_w_k": 0.7}
+  },
+  "connections": [
+    {"join": ["x1.heat", "wall.a"]},
+    {"join": ["x2.heat", "wall.b"]}
+  ]
+}"#;
+    let path = scratch("equilibrate.json", scene);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    let mixed = (10.0 * 400.0 + 12.0 * 350.0) / 22.0;
+    for name in ["x1", "x2"] {
+        let reached = value(&json, &element(name), "temperature_k");
+        assert!((reached - mixed).abs() <= 1.0e-12 * mixed, "{name}: {reached} vs {mixed}");
+    }
 }
 
 const OSCILLATOR: &str = r#"{

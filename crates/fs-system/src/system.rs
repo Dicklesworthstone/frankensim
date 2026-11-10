@@ -23,6 +23,12 @@ use crate::wiring::{
 /// step that starts at `t0` and lasts `dt`.
 pub type BoundaryFn = Box<dyn Fn(f64, f64, &mut [f64])>;
 
+/// How many units of first-order rounding a block solve accepts in a
+/// residual. The estimate is `eps * sum |d residual / d input| |input|` over
+/// the block's own inputs; the factor covers the few operations between an
+/// input and a residual and the inputs a block does not solve for.
+const ROUNDING_UNITS: f64 = 16.0;
+
 /// Limits of the step driver.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SolveConfig {
@@ -546,6 +552,20 @@ impl SystemBuilder {
             None if sinks.is_empty() => return Err(AdmissionError::Empty),
             _ => {}
         }
+        // A sink named before is the same place: one ledger row, and so one
+        // temperature.
+        let known = remainder
+            .as_ref()
+            .and_then(|sink| self.sinks.iter().position(|known| known.name == sink.name));
+        if let (Some(position), Some(sink)) = (known, &remainder)
+            && self.sinks[position].temperature_k.to_bits() != sink.temperature_k.to_bits()
+        {
+            return Err(AdmissionError::SinkTemperature {
+                name: sink.name.as_str().to_owned(),
+                declared_k: self.sinks[position].temperature_k,
+                repeated_k: sink.temperature_k,
+            });
+        }
         let mut all = Vec::with_capacity(sinks.len() + 1);
         all.push(source);
         all.extend(sinks.iter().map(|(sink, _)| *sink));
@@ -564,8 +584,11 @@ impl SystemBuilder {
         }
         let remainder = remainder.map(|sink| {
             let temperature_k = sink.temperature_k;
-            self.sinks.push(sink);
-            (self.sinks.len() - 1, unallocated, temperature_k)
+            let position = known.unwrap_or_else(|| {
+                self.sinks.push(sink);
+                self.sinks.len() - 1
+            });
+            (position, unallocated, temperature_k)
         });
         self.connections.push(Connection::HeatRoute {
             source,
@@ -928,6 +951,7 @@ impl SystemBuilder {
             outputs: vec![0.0; outputs],
             accepted_inputs: vec![0.0; inputs],
             accepted_outputs: vec![0.0; outputs],
+            input_allowance: vec![0.0; inputs],
             receipts: vec![Receipt::lossless(0.0, 0.0); count],
             port_energy: vec![0.0; ports],
             port_entropy: vec![0.0; ports],
@@ -979,6 +1003,11 @@ pub struct System {
     outputs: Vec<f64>,
     accepted_inputs: Vec<f64>,
     accepted_outputs: Vec<f64>,
+    /// Per scalar input, the part of the residual the block solve accepted
+    /// for it in the current trial that no relative tolerance covers: its
+    /// rounding estimate and the configured absolute tolerance. Zero for an
+    /// input copied from its driver.
+    input_allowance: Vec<f64>,
     receipts: Vec<Receipt>,
     port_energy: Vec<f64>,
     port_entropy: Vec<f64>,
@@ -1230,6 +1259,11 @@ impl System {
         }
         let mut residual = vec![0.0; m];
         let mut jacobian = vec![0.0; m * m];
+        // First-order size of the rounding in each residual: how strongly its
+        // driver's sources depend on the block's inputs, times the size of
+        // those inputs. Known after the first tangent assembly.
+        let mut rounding = vec![0.0_f64; m];
+        let mut allowance = vec![0.0_f64; m];
         let mut group_scale = vec![0.0_f64; self.group_count];
         let mut gradient = Vec::new();
         let mut iterations = 0_u32;
@@ -1254,11 +1288,22 @@ impl System {
                     .max(self.inputs[index].abs())
                     .max(driver.magnitude(&self.outputs, &self.boundary_values));
             }
+            // A residual cannot be driven below the rounding of the values
+            // it is computed from. When a component's output is a small
+            // difference of large inputs (a heat rate between two bodies near
+            // one temperature, a spring force between two ends that move
+            // together), that rounding is set by the inputs, not by the
+            // output, and no tolerance relative to the output covers it.
             let mut worst = (0_usize, 0.0_f64);
             let mut converged = true;
             for (row, &index) in unknowns.iter().enumerate() {
+                // The interface audit is told only this part: it keeps its
+                // own relative tolerance, so a loose solver tolerance is
+                // still caught there.
+                allowance[row] = self.config.absolute_tolerance
+                    + ROUNDING_UNITS * f64::EPSILON * rounding[row];
                 let allowed = self.config.relative_tolerance * group_scale[self.input_group[index]]
-                    + self.config.absolute_tolerance;
+                    + allowance[row];
                 let excess = residual[row].abs() - allowed;
                 if !(excess <= 0.0) {
                     converged = false;
@@ -1268,6 +1313,9 @@ impl System {
                 }
             }
             if converged {
+                for (row, &index) in unknowns.iter().enumerate() {
+                    self.input_allowance[index] = allowance[row];
+                }
                 return Ok(Ok(iterations));
             }
             if iterations >= self.config.max_iterations {
@@ -1281,6 +1329,7 @@ impl System {
             iterations += 1;
 
             // J = I - (d driver / d outputs) (d outputs / d inputs).
+            rounding.fill(0.0);
             jacobian.fill(0.0);
             for diagonal in 0..m {
                 jacobian[diagonal * m + diagonal] = 1.0;
@@ -1296,8 +1345,9 @@ impl System {
                     self.drivers[target].gradient(&self.outputs, &mut gradient);
                     for &(source, slope) in &gradient {
                         if outputs.contains(&source) {
-                            jacobian[row * m + column] -=
-                                slope * self.scratch_outputs[source - outputs.start];
+                            let through = slope * self.scratch_outputs[source - outputs.start];
+                            jacobian[row * m + column] -= through;
+                            rounding[row] += (through * self.inputs[index]).abs();
                         }
                     }
                 }
@@ -1318,6 +1368,7 @@ impl System {
 
     /// Fill every candidate for a step of `dt_s`.
     fn trial(&mut self, dt_s: f64, cx: &Cx<'_>) -> Result<Trial, SystemError> {
+        self.input_allowance.fill(0.0);
         let t0 = self.time.value();
         for ((_, value), slot) in self.boundaries.iter().zip(&mut self.boundary_values) {
             value(t0, dt_s, slot);
@@ -1510,8 +1561,28 @@ impl System {
                     entropy_scale += (heat / kelvin).abs();
                 }
             }
-            let tolerance_j =
-                self.config.interface_energy_tolerance * magnitude + f64::MIN_POSITIVE;
+            // What rounding and the configured absolute tolerance let the
+            // block solve leave in each input, as energy: a power port's
+            // input pairs with its output, a heat receiver's input is the
+            // heat rate itself.
+            let mut solve_slack_j = 0.0_f64;
+            for port in &members {
+                let spec = &self.nodes[port.node].ports()[port.port];
+                let weight_one = match (spec.carrier(), spec.role()) {
+                    (Carrier::Heat, PortRole::FlowIn) => Some(1.0),
+                    (Carrier::Power(_), _) => None,
+                    _ => Some(0.0),
+                };
+                let outputs = self.output_range(*port);
+                for (offset, index) in self.input_range(*port).enumerate() {
+                    let weight = weight_one
+                        .unwrap_or_else(|| self.outputs[outputs.start + offset].abs());
+                    solve_slack_j += dt_s * self.input_allowance[index] * weight;
+                }
+            }
+            let tolerance_j = self.config.interface_energy_tolerance * magnitude
+                + solve_slack_j
+                + f64::MIN_POSITIVE;
             if !(energy.abs() <= tolerance_j) {
                 return Err(SystemError::Interface {
                     connection: index,

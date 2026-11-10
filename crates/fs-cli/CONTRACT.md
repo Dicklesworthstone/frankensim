@@ -766,7 +766,8 @@ binary, including `system`, `cooling-cht`, `electrothermal`, `cooling-network`,
 ### Devices described as data (`system <scene.json>`)
 
 `frankensim [--json] system <scene.json>` reads a `frankensim.system.v0` scene
-(at most 1 MiB, 10,000 elements, 1e7 steps, 1e5 samples; unknown fields
+(at most 1 MiB, 2,000 elements, 1e7 planned steps and twice that many
+kernel steps if the kernel shortens them, 1e5 samples; unknown fields
 refused), lowers it to an `fs_system::SystemBuilder` with the elements of
 `fs_system::elements`, steps the sealed system for `duration_s` with steps of
 at most `step_s`, and reports final states, optional samples every

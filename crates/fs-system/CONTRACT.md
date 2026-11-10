@@ -2,10 +2,10 @@
 
 > Status: version 0. The Component contract in fs-ports is v0 until five kernel
 > slices pass on it (epic `frankensim-rc-1109-root-3gc12`, beads `.6.1` to
-> `.6.7`), and this driver changes with it. One physics owner implements the
-> contract so far: the fs-mbd rigid body. The crate's own `elements` are ideal
-> lumped elements, and `frankensim system <scene.json>` runs devices made of
-> them from a data file.
+> `.6.7`), and this driver changes with it. Two physics owners implement the
+> contract so far, both in fs-mbd: the rigid body and the damped rigid-body
+> network. The crate's own `elements` are ideal lumped elements, and
+> `frankensim system <scene.json>` runs devices made of them from a data file.
 
 ## Purpose and layer
 
@@ -67,7 +67,10 @@ physics owners below fs-couple can be composed without it.
   receives bit for bit; their stored energy is the energy that entered them
   (negative when they deliver), so a driven device closes its first law.
   `Waveform` is a constant, a sine or a piecewise-linear table with
-  validating constructors; `mean(t0, dt)` is the exact step average.
+  validating constructors (parameters finite and at most 1e150 in size);
+  `mean(t0, dt)` is the step average in closed form, over the interval the
+  two floating-point ends span, and NaN at a time that is not finite, which
+  `Force` and `Heater` refuse.
   `Mass`, `Spring`, `Damper` and `Force` have `in_domain(kind, ..)`
   constructors that give the same four laws in another power domain of
   `PortKind`: inertia, torsion spring, rotary damper and torque about a
@@ -111,15 +114,29 @@ Tarjan, index order).
   checked, including for use twice in the same call, before any is claimed.
 - A convergence test compares each residual with the size of the terms its
   driver sums, not with their total, so a balance of large efforts that
-  nearly cancel can still converge. Each scalar signal input is judged
-  against its own size only.
+  nearly cancel in the driver can still converge. Each scalar signal input is
+  judged against its own size only.
+- A residual is also allowed 16 units of its first-order rounding,
+  `eps * sum |d residual / d input| |input|` over the block's own inputs,
+  taken from the tangents of the previous iterate. Without it a block could
+  not converge once a component's output became a small difference of large
+  inputs: the heat rate between two bodies near one temperature, the force of
+  a spring whose ends move together. The interface audit allows the energy
+  that this rounding estimate and the configured absolute tolerance amount
+  to, on top of its own relative tolerance; it is not told the solver's
+  relative tolerance, so a solve accepted too loosely is still refused there.
+  Inputs the block does not solve for (boundaries, earlier blocks) are not in
+  the estimate.
 - Once cancellation has been requested, any refusal during a trial is
   reported as `SystemError::Cancelled`.
 - A graph without loops is evaluated once per component per step, in
   dependency order: it reproduces a hand-staggered run of the same components
   bitwise.
 - Every port that exchanges power or needs an input is in exactly one
-  connection or boundary; `seal` refuses anything else.
+  connection or boundary, except a heat receiver, which may be in several
+  heat routes; `seal` refuses anything else.
+- A sink named by several heat routes is one ledger row; naming it again at
+  another temperature is refused (`SinkTemperature`).
 - Numerical loss is accounted separately from physical dissipation.
 
 ## Error model
@@ -292,7 +309,8 @@ the refused calls change nothing.
   stores its absolute temperature, so a small heat increment is rounded to an
   ulp of that temperature each step; its ledger account, a compensated sum of
   receipts, does not lose it.
-- No transformer, gyrator or mapped field transfer; no stream or field ports;
+- No transformer or mapped field transfer, and no gyrator as a connection
+  (the `Gyrator` element is a component); no stream or field ports;
   no non-smooth tier (contact, stick-slip); no multirate stepping; no
   monolithic solve through `StageResidual`; no step-size error control; no
   snapshot encoding, resume or fork; no adjoint. These are beads `.5.2` to

@@ -10,7 +10,7 @@ use std::f64::consts::PI;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_ports::component::conformance::{Case, Observed, check_component, check_port_tangent};
-use fs_ports::component::{Component, PortTangent, Proposal};
+use fs_ports::component::{Component, PortTangent, Proposal, Receipt};
 use fs_ports::PortKind;
 use fs_system::elements::{
     Conductance, Damper, ElementError, Force, Gyrator, HeatCapacity, Heater, Mass, Motion,
@@ -916,4 +916,402 @@ fn a_dc_motor_composed_from_elements_matches_the_monolithic_midpoint_rule() {
     assert!(ledger.energy_residual_j().abs() <= 1.0e-11 * supplied);
     let reached_t = *motor.system.state::<f64>(motor.case).unwrap();
     assert!(((reached_t - 293.15) * CASE_J_K - warmed).abs() <= 1.0e-8 * supplied);
+}
+
+// ---------------------------------------------------------------------------
+// Pinned after the second independent review (2026-11-10): each test below
+// fails on the code as it was before that review's findings were fixed, or
+// would have passed with one of the wrong implementations it tried.
+// ---------------------------------------------------------------------------
+
+/// The receipt of one conforming step.
+fn receipt_of<C>(element: &C, state: &C::State, stale: &C::State, dt_s: f64, inputs: &[f64]) -> Receipt
+where
+    C: Component,
+    C::State: PartialEq + core::fmt::Debug,
+{
+    let case = Case {
+        state,
+        stale,
+        dt_s,
+        inputs,
+    };
+    with_cx(|cx| match check_component(element, &case, cx) {
+        Ok(Observed::Stepped { receipt, .. }) => receipt,
+        other => panic!("no step at {inputs:?}: {other:?}"),
+    })
+}
+
+fn within(actual: f64, expected: f64, relative: f64) {
+    assert!(
+        (actual - expected).abs() <= relative * expected.abs(),
+        "{actual} vs {expected}"
+    );
+}
+
+#[test]
+fn dissipative_elements_report_the_entropy_of_their_heat_and_sources_their_step_mean() {
+    let dt = 0.01;
+    let damper = Damper::new(2.5).unwrap();
+    let receipt = receipt_of(&damper, &(), &(), dt, &[1.2, -0.3, 310.0]);
+    let heat = dt * 2.5 * 1.5 * 1.5;
+    within(receipt.dissipated_j, heat, 1.0e-15);
+    within(receipt.entropy_generated_j_per_k, heat / 310.0, 1.0e-15);
+
+    let wall = Conductance::new(0.8).unwrap();
+    let receipt = receipt_of(&wall, &(), &(), dt, &[350.0, 300.0]);
+    within(
+        receipt.entropy_generated_j_per_k,
+        dt * 0.8 * 50.0 * 50.0 / (350.0 * 300.0),
+        1.0e-14,
+    );
+
+    // A ramp from 0 to 10 over one second, asked over [0.2, 0.6]: the mean
+    // is 4, the value at the start is 2.
+    let ramp = || Waveform::table(vec![(0.0, 0.0), (1.0, 10.0)]).unwrap();
+    let started = SourceAccount::starting_at(0.2);
+    let heater = Heater::new(ramp()).unwrap();
+    let outputs = conforms(&heater, &started, &SourceAccount::default(), 0.4, &[320.0]);
+    within(-outputs[0], 4.0, 1.0e-15);
+    let receipt = receipt_of(&heater, &started, &SourceAccount::default(), 0.4, &[320.0]);
+    within(receipt.dissipated_j, 1.6, 1.0e-15);
+    within(receipt.entropy_generated_j_per_k, 1.6 / 320.0, 1.0e-15);
+    let push = Force::new(ramp());
+    let outputs = conforms(&push, &started, &SourceAccount::default(), 0.4, &[0.7]);
+    within(outputs[0], 4.0, 1.0e-15);
+}
+
+#[test]
+fn waveforms_stay_exact_at_large_times_and_refuse_what_would_overflow() {
+    // A constant table at a time whose spacing is coarser than the step.
+    let flat = Waveform::table(vec![(0.0, 5.0)]).unwrap();
+    assert_eq!(flat.mean(1000.0, 1.0e-6), 5.0);
+    assert_eq!(flat.mean(1.0e6, 1.0e-3), 5.0);
+    assert_eq!(flat.mean(1.0e9, 1.0e-8), 5.0);
+    let ramp = Waveform::table(vec![(0.0, 0.0), (2.0e6, 2.0e6)]).unwrap();
+    let (t0, dt) = (1.0e6, 1.0e-3);
+    within(ramp.mean(t0, dt), 0.5 * (t0 + (t0 + dt)), 4.0 * f64::EPSILON);
+
+    // A time that is not finite gives NaN, never a panic and never zero.
+    for wave in [&flat, &ramp, &Waveform::sine(1.0, 2.0, 0.0, 0.0).unwrap()] {
+        assert!(wave.value_at(f64::NAN).is_nan());
+        assert!(wave.mean(f64::NAN, 0.1).is_nan());
+        assert!(wave.mean(f64::INFINITY, 1.0).is_nan());
+        assert!(wave.mean(0.0, f64::INFINITY).is_nan());
+    }
+    // Sources refuse it instead of delivering nothing.
+    let lost = SourceAccount::starting_at(f64::NAN);
+    let heater = Heater::new(Waveform::constant(30.0).unwrap()).unwrap();
+    let mut next = SourceAccount::default();
+    let mut outputs = [0.0];
+    let refused = with_cx(|cx| {
+        let table = Heater::new(Waveform::table(vec![(0.0, 1.0), (1.0, 2.0)]).unwrap()).unwrap();
+        (
+            table.propose(&lost, 0.1, &[300.0], &mut next, &mut outputs, cx),
+            heater.propose(&lost, 0.1, &[300.0], &mut next, &mut outputs, cx).is_err(),
+            Force::new(Waveform::sine(1.0, 2.0, 0.0, 0.0).unwrap())
+                .propose(&lost, 0.1, &[1.0], &mut next, &mut outputs, cx),
+        )
+    });
+    assert!(matches!(refused.0, Err(ElementError::Input { value }) if value.is_nan()));
+    assert!(refused.1, "a clock that is not a time is refused whatever the waveform");
+    assert!(matches!(refused.2, Err(ElementError::Input { value }) if value.is_nan()));
+
+    // Parameters whose products or differences would overflow.
+    assert!(matches!(
+        Waveform::sine(1.0, 1.0e308, 0.0, 100.0),
+        Err(ElementError::Parameter { name: "frequency_hz", .. })
+    ));
+    assert!(Waveform::sine(1.0e200, 1.0, 0.0, 0.0).is_err());
+    assert!(Waveform::constant(1.0e200).is_err());
+    assert!(matches!(
+        Waveform::table(vec![(0.0, -1.0e308), (1.0, 1.0e308)]),
+        Err(ElementError::Table { .. })
+    ));
+    assert!(Waveform::table(vec![(-1.0e308, 0.0), (1.0e308, 1.0)]).is_err());
+}
+
+#[test]
+fn a_spring_between_two_ends_that_move_together_closes_its_account() {
+    // The stretch is tiny beside the common travel of the two ends.
+    let hitch = Spring::new(1.0e4, 0.0).unwrap();
+    conforms(&hitch, &1.0e-4, &0.5, 1.0e-3, &[30.0, 30.0]);
+    conforms(&hitch, &0.0, &0.5, 1.0e-3, &[5.0, 5.000_001]);
+    conforms(&hitch, &1.0e-4, &0.5, 1.0e-3, &[-3.0e3, -3.0e3]);
+    let shaft = Spring::in_domain(ROTATION, 1.0e4, 0.0).unwrap();
+    conforms(&shaft, &1.0e-4, &0.5, 1.0e-3, &[300.0, 300.0]);
+
+    // A car and a trailer at 30 m/s on a stretched hitch: 2,000 steps.
+    let mut builder = SystemBuilder::new();
+    let moving = |position_m| Motion {
+        position_m,
+        velocity_m_s: 30.0,
+    };
+    let car = builder
+        .add_with_tangent("car", Mass::new(1.0).unwrap(), moving(0.0))
+        .unwrap();
+    let trailer = builder
+        .add_with_tangent("trailer", Mass::new(1.0).unwrap(), moving(1.0e-4))
+        .unwrap();
+    let link = builder.add_with_tangent("hitch", hitch, 1.0e-4).unwrap();
+    let port = |builder: &SystemBuilder, node, name| builder.port(node, name).unwrap();
+    let (a, b) = (port(&builder, link, "a"), port(&builder, link, "b"));
+    builder.common_flow(port(&builder, car, "p"), &[a]).unwrap();
+    builder.common_flow(port(&builder, trailer, "p"), &[b]).unwrap();
+    let mut system = builder.seal().unwrap();
+    step(&mut system, 1.0e-3, 2_000);
+    let (front, back) = (
+        *system.state::<Motion>(car).unwrap(),
+        *system.state::<Motion>(trailer).unwrap(),
+    );
+    // Momentum is kept and the pair has travelled 60 m.
+    within(front.velocity_m_s + back.velocity_m_s, 60.0, 1.0e-13);
+    within(front.position_m + back.position_m, 120.0 + 1.0e-4, 1.0e-13);
+    assert!(system.ledger().energy_residual_j().abs() <= 1.0e-12);
+}
+
+#[test]
+fn a_system_reaching_equilibrium_keeps_stepping() {
+    // Two bodies through a wall, marched far past the point where their
+    // difference is below the rounding of their temperatures.
+    let (c_hot, c_cold, g) = (10.0_f64, 12.0_f64, 0.7_f64);
+    let mut builder = SystemBuilder::new();
+    let hot = builder
+        .add_with_tangent("hot", HeatCapacity::new(c_hot).unwrap(), 400.0)
+        .unwrap();
+    let cold = builder
+        .add_with_tangent("cold", HeatCapacity::new(c_cold).unwrap(), 350.0)
+        .unwrap();
+    let wall = builder
+        .add_with_tangent("wall", Conductance::new(g).unwrap(), ())
+        .unwrap();
+    let port = |builder: &SystemBuilder, node, name| builder.port(node, name).unwrap();
+    let (a, b) = (port(&builder, wall, "a"), port(&builder, wall, "b"));
+    builder.common_effort(port(&builder, hot, "heat"), &[a]).unwrap();
+    builder.common_effort(port(&builder, cold, "heat"), &[b]).unwrap();
+    let mut system = builder.seal().unwrap();
+    assert!(system.guess(a, &[400.0]));
+    assert!(system.guess(b, &[350.0]));
+    step(&mut system, 0.5, 2_000);
+    let mixed = (c_hot * 400.0 + c_cold * 350.0) / (c_hot + c_cold);
+    within(*system.state::<f64>(hot).unwrap(), mixed, 1.0e-13);
+    within(*system.state::<f64>(cold).unwrap(), mixed, 1.0e-13);
+    let ledger = system.ledger();
+    assert!(ledger.energy_residual_j().abs() <= 1.0e-10);
+    // Entropy of mixing, to the accuracy of the midpoint rule's account.
+    let expected = c_hot * (mixed / 400.0).ln() + c_cold * (mixed / 350.0).ln();
+    within(ledger.entropy_generated_j_per_k(), expected, 1.0e-4);
+
+    // Two masses at 30 and 31 m/s on a damper approach one speed.
+    let mut builder = SystemBuilder::new();
+    let at = |velocity_m_s| Motion {
+        position_m: 0.0,
+        velocity_m_s,
+    };
+    let slow = builder
+        .add_with_tangent("slow", Mass::new(2.0).unwrap(), at(30.0))
+        .unwrap();
+    let fast = builder
+        .add_with_tangent("fast", Mass::new(3.0).unwrap(), at(31.0))
+        .unwrap();
+    let drag = builder
+        .add_with_tangent("drag", Damper::new(4.0).unwrap(), ())
+        .unwrap();
+    let pad = builder
+        .add_with_tangent("pad", HeatCapacity::new(5.0).unwrap(), 300.0)
+        .unwrap();
+    let port = |builder: &SystemBuilder, node, name| builder.port(node, name).unwrap();
+    builder
+        .common_flow(port(&builder, slow, "p"), &[port(&builder, drag, "a")])
+        .unwrap();
+    builder
+        .common_flow(port(&builder, fast, "p"), &[port(&builder, drag, "b")])
+        .unwrap();
+    let heat = port(&builder, drag, "heat");
+    builder
+        .common_effort(port(&builder, pad, "heat"), &[heat])
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    assert!(system.guess(heat, &[300.0]));
+    step(&mut system, 0.01, 6_000);
+    let common = (2.0 * 30.0 + 3.0 * 31.0) / 5.0;
+    within(system.state::<Motion>(slow).unwrap().velocity_m_s, common, 1.0e-13);
+    within(system.state::<Motion>(fast).unwrap().velocity_m_s, common, 1.0e-13);
+    // The kinetic energy of the relative motion is in the pad.
+    let lost = 0.5 * (2.0 * 3.0 / 5.0) * 1.0;
+    let warmed = (*system.state::<f64>(pad).unwrap() - 300.0) * 5.0;
+    within(warmed, lost, 1.0e-9);
+}
+
+#[test]
+fn bodies_in_uniform_motion_on_relaxed_springs_keep_stepping() {
+    // Three unequal masses at one speed: every force is zero, and what the
+    // solve sees is only the rounding of their equal velocities.
+    for speed in [1.0, 0.3, 30.0, -7.5] {
+        let mut builder = SystemBuilder::new();
+        let at = |position_m| Motion {
+            position_m,
+            velocity_m_s: speed,
+        };
+        let masses = [(300.0, "body"), (40.0, "wheel"), (5.0, "hub")].map(|(kg, name)| {
+            builder
+                .add_with_tangent(name, Mass::new(kg).unwrap(), at(0.0))
+                .unwrap()
+        });
+        let upper = builder
+            .add_with_tangent("upper", Spring::new(2.0e4, 0.0).unwrap(), 0.0)
+            .unwrap();
+        let lower = builder
+            .add_with_tangent("lower", Spring::new(1.8e5, 0.0).unwrap(), 0.0)
+            .unwrap();
+        let port = |builder: &SystemBuilder, node, name| builder.port(node, name).unwrap();
+        builder
+            .common_flow(port(&builder, masses[0], "p"), &[port(&builder, upper, "a")])
+            .unwrap();
+        builder
+            .common_flow(
+                port(&builder, masses[1], "p"),
+                &[port(&builder, upper, "b"), port(&builder, lower, "a")],
+            )
+            .unwrap();
+        builder
+            .common_flow(port(&builder, masses[2], "p"), &[port(&builder, lower, "b")])
+            .unwrap();
+        let mut system = builder.seal().unwrap();
+        step(&mut system, 1.0e-3, 1_000);
+        for node in masses {
+            let motion = *system.state::<Motion>(node).unwrap();
+            within(motion.velocity_m_s, speed, 1.0e-12);
+            within(motion.position_m, speed, 1.0e-12);
+        }
+        for node in [upper, lower] {
+            assert!(system.state::<f64>(node).unwrap().abs() <= 1.0e-12 * speed.abs());
+        }
+    }
+}
+
+#[test]
+fn heat_routes_that_share_receivers_in_a_chain_are_one_group_in_any_order() {
+    // lamp -> r1; coil -> r1, r2 and a sink; stove -> r2. The coil links the
+    // other two. A junction of its own sits between the routes.
+    let powers = [("lamp", 10.0_f64), ("coil", 20.0), ("stove", 40.0)];
+    for order in [[0_usize, 2, 1], [1, 0, 2], [2, 1, 0]] {
+        let mut builder = SystemBuilder::new();
+        let body = |builder: &mut SystemBuilder, name: &str| {
+            builder
+                .add_with_tangent(name, HeatCapacity::new(50.0).unwrap(), 300.0)
+                .unwrap()
+        };
+        let (r1, r2, r3) = (
+            body(&mut builder, "r1"),
+            body(&mut builder, "r2"),
+            body(&mut builder, "r3"),
+        );
+        let sources = powers.map(|(name, watts)| heater(&mut builder, name, watts));
+        let extra = heater(&mut builder, "extra", 3.0);
+        let port = |builder: &SystemBuilder, node, name| builder.port(node, name).unwrap();
+        let heat = |builder: &SystemBuilder, node| port(builder, node, "heat");
+        let whole = RouteTemperature::SinkEquivalent;
+        for (position, &which) in order.iter().enumerate() {
+            let source = heat(&builder, sources[which]);
+            match which {
+                0 => builder.heat_route(source, &[(heat(&builder, r1), 1.0)], None, whole),
+                1 => builder.heat_route(
+                    source,
+                    &[(heat(&builder, r1), 0.5), (heat(&builder, r2), 0.25)],
+                    Some(heat_sink("air", 293.15).unwrap()),
+                    whole,
+                ),
+                _ => builder.heat_route(source, &[(heat(&builder, r2), 1.0)], None, whole),
+            }
+            .unwrap();
+            if position == 0 {
+                builder
+                    .common_effort(heat(&builder, r3), &[heat(&builder, extra)])
+                    .unwrap();
+            }
+        }
+        let mut system = builder.seal().unwrap();
+        for node in sources.into_iter().chain([extra]) {
+            let source = system.port(node, "heat").unwrap();
+            assert!(system.guess(source, &[300.0]));
+        }
+        step(&mut system, 0.5, 100);
+        let elapsed = 50.0;
+        let ledger = system.ledger();
+        let stored = |name: &str| {
+            ledger
+                .nodes
+                .iter()
+                .find(|node| node.name == name)
+                .unwrap()
+                .stored_change_j
+                .value()
+        };
+        within(stored("r1"), (10.0 + 10.0) * elapsed, 1.0e-13);
+        within(stored("r2"), (5.0 + 40.0) * elapsed, 1.0e-13);
+        within(stored("r3"), 3.0 * elapsed, 1.0e-13);
+        within(ledger.sink_heat_j(), 5.0 * elapsed, 1.0e-13);
+        // Four connections: the first route holds the group, the junction
+        // its own row, the two later routes nothing.
+        assert_eq!(ledger.connections.len(), 4);
+        let defects: Vec<f64> = ledger
+            .connections
+            .iter()
+            .map(|row| row.energy_defect_j.value())
+            .collect();
+        assert!(defects[0].abs() <= 1.0e-12 * 70.0 * elapsed, "{defects:?}");
+        assert_eq!((defects[2], defects[3]), (0.0, 0.0), "{order:?}");
+        assert!(ledger.energy_residual_j().abs() <= 1.0e-12 * 73.0 * elapsed);
+    }
+}
+
+#[test]
+fn a_sink_named_by_two_routes_is_one_row_at_one_temperature() {
+    let mut builder = SystemBuilder::new();
+    let body = builder
+        .add_with_tangent("body", HeatCapacity::new(40.0).unwrap(), 300.0)
+        .unwrap();
+    let lamp = heater(&mut builder, "lamp", 30.0);
+    let coil = heater(&mut builder, "coil", 12.0);
+    let third = heater(&mut builder, "third", 5.0);
+    let port = |builder: &SystemBuilder, node, name| builder.port(node, name).unwrap();
+    let body_heat = port(&builder, body, "heat");
+    let whole = RouteTemperature::SinkEquivalent;
+    let air = || Some(heat_sink("air", 293.15).unwrap());
+    builder
+        .heat_route(port(&builder, lamp, "heat"), &[(body_heat, 0.5)], air(), whole)
+        .unwrap();
+    builder
+        .heat_route(port(&builder, coil, "heat"), &[(body_heat, 0.25)], air(), whole)
+        .unwrap();
+    // The same name at another temperature is another place: refused, and
+    // the builder is as it was.
+    let refused = builder.heat_route(
+        port(&builder, third, "heat"),
+        &[(body_heat, 0.5)],
+        Some(heat_sink("air", 280.0).unwrap()),
+        whole,
+    );
+    assert!(
+        matches!(
+            &refused,
+            Err(AdmissionError::SinkTemperature { name, declared_k, repeated_k })
+                if name == "air" && *declared_k == 293.15 && *repeated_k == 280.0
+        ),
+        "{refused:?}"
+    );
+    builder
+        .heat_route(port(&builder, third, "heat"), &[(body_heat, 1.0)], None, whole)
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    for node in [lamp, coil, third] {
+        let source = system.port(node, "heat").unwrap();
+        assert!(system.guess(source, &[300.0]));
+    }
+    step(&mut system, 0.5, 20);
+    let ledger = system.ledger();
+    assert_eq!(ledger.sinks.len(), 1);
+    assert_eq!(ledger.sinks[0].name, "air");
+    within(ledger.sinks[0].heat_j.value(), (15.0 + 9.0) * 10.0, 1.0e-13);
 }

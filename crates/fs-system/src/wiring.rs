@@ -87,6 +87,15 @@ pub enum AdmissionError {
         /// Second port, as `node.port`.
         b: String,
     },
+    /// Two heat routes name the same sink at different temperatures.
+    SinkTemperature {
+        /// The sink's name.
+        name: String,
+        /// Temperature [K] of the first declaration.
+        declared_k: f64,
+        /// Temperature [K] of the refused one.
+        repeated_k: f64,
+    },
     /// A port is used by more than one connection or boundary.
     AlreadyConnected {
         /// The port, as `node.port`.
@@ -135,6 +144,14 @@ impl fmt::Display for AdmissionError {
             Self::Mismatch { a, b } => {
                 write!(f, "ports `{a}` and `{b}` differ in carrier or width")
             }
+            Self::SinkTemperature {
+                name,
+                declared_k,
+                repeated_k,
+            } => write!(
+                f,
+                "sink `{name}` was declared at {declared_k} K and is named again at {repeated_k} K"
+            ),
             Self::AlreadyConnected { port } => write!(f, "port `{port}` is already connected"),
             Self::Unconnected { port } => write!(f, "port `{port}` is connected to nothing"),
             Self::Fractions { sum } => {

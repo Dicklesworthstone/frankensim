@@ -424,3 +424,38 @@ fn a_tumbling_rigid_body_on_a_spring_is_composed_by_the_kernel() {
     assert!(ledger.numerical_loss_j().abs() <= 1.0e-8 * start_j);
     assert_eq!(ledger.nodes[rigid.index()].dissipated_j.value(), 0.0);
 }
+
+#[test]
+fn a_body_far_out_on_a_level_surface_of_an_oblique_field_keeps_its_account() {
+    // Second independent review, 2026-11-10: with the tolerance sized by the
+    // magnitude of the potential's total, 278 of these 2,000 steps failed
+    // the audit, because the three terms of `-m g . x` are large and cancel.
+    let gate = CancelGate::new_clock_free();
+    let gravity = Gravity::new(Vec3::new(6.9367, 0.0, -6.9367)).expect("gravity");
+    let component = body(gravity);
+    let mut current = state(
+        Vec3::new(1000.0, 0.0, 1000.0),
+        Vec3::new(0.4, -0.2, 0.1),
+        Vec3::new(0.010, -0.020, 0.015),
+    );
+    let stale = current;
+    let inputs = [0.0; 6];
+    let mut outputs = [0.0; 6];
+    with_cx(&gate, |cx| {
+        for step in 0..2_000 {
+            let case = Case {
+                state: &current,
+                stale: &stale,
+                dt_s: 1.0e-3,
+                inputs: &inputs,
+            };
+            check_component(&component, &case, cx)
+                .unwrap_or_else(|failure| panic!("step {step}: {failure}"));
+            let mut next = current;
+            component
+                .propose(&current, 1.0e-3, &inputs, &mut next, &mut outputs, cx)
+                .expect("step");
+            current = next;
+        }
+    });
+}

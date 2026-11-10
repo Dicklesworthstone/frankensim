@@ -38,7 +38,9 @@ use fs_ports::component::{
 };
 use fs_ports::{PortKind, StableId};
 
-use crate::{DynamicsError, MassProperties, RigidBodyIntegrator, RigidBodyState, Vec3, Wrench};
+use crate::{
+    DynamicsError, Gravity, MassProperties, RigidBodyIntegrator, RigidBodyState, Vec3, Wrench,
+};
 
 /// Why a [`RigidBody`] refused a call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +133,17 @@ fn components(vector: Vec3) -> [f64; 3] {
     [vector.x, vector.y, vector.z]
 }
 
+/// `m (|g_x x| + |g_y y| + |g_z z|)`: the sizes of the terms of the
+/// uniform-gravity potential `-m g . x`, whose rounding their sum carries.
+pub(crate) fn potential_terms_j(
+    gravity: Gravity,
+    properties: MassProperties,
+    state: RigidBodyState,
+) -> f64 {
+    let (g, x) = (gravity.acceleration_world(), state.pose().position_world());
+    properties.mass() * ((g.x * x.x).abs() + (g.y * x.y).abs() + (g.z * x.z).abs())
+}
+
 impl Component for RigidBody {
     type State = RigidBodyState;
     type Error = RigidBodyRefusal;
@@ -200,12 +213,16 @@ impl Component for RigidBody {
         let work = receipt.work;
         let (before, after_energy) = (receipt.diagnostics_before, receipt.diagnostics_after);
         let paired_j = dt_s * ((force_sq * velocity_sq).sqrt() + (torque_sq * omega_sq).sqrt());
+        // The potential is `-m g . x`: three products that cancel when the
+        // body sits on a level surface of an oblique field, so their sizes
+        // count, not their sum.
+        let gravity = self.integrator.gravity();
         let stored_terms_j = before.translational_kinetic_energy
             + before.rotational_kinetic_energy
-            + before.gravitational_potential_energy.abs()
+            + potential_terms_j(gravity, self.properties, *old)
             + after_energy.translational_kinetic_energy
             + after_energy.rotational_kinetic_energy
-            + after_energy.gravitational_potential_energy.abs();
+            + potential_terms_j(gravity, self.properties, after);
         let scale_j = paired_j
             + stored_terms_j
             + work.kinetic_energy_change_j.abs()

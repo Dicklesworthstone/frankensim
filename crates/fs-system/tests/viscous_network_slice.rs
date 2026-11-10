@@ -99,6 +99,13 @@ fn body(p: MassProperties, x: Vec3, v: Vec3, w: Vec3) -> RigidBodyState {
 /// axis and rotation about one, through arms that are off the centres of
 /// mass; the second damps along the row only.
 fn fixture() -> (Vec<MassProperties>, Vec<ViscousNetworkLink>, Vec<RigidBodyState>) {
+    fixture_at(Vec3::ZERO)
+}
+
+/// The same bodies with every position moved by `shift`.
+fn fixture_at(
+    shift: Vec3,
+) -> (Vec<MassProperties>, Vec<ViscousNetworkLink>, Vec<RigidBodyState>) {
     let properties = vec![
         MassProperties::new(2.0, Vec3::ZERO, Vec3::new(2.0, 3.0, 4.0)).expect("properties"),
         MassProperties::new(1.5, Vec3::ZERO, Vec3::new(1.0, 1.5, 2.5)).expect("properties"),
@@ -119,19 +126,19 @@ fn fixture() -> (Vec<MassProperties>, Vec<ViscousNetworkLink>, Vec<RigidBodyStat
     let states = vec![
         body(
             properties[0],
-            Vec3::new(-1.0, 0.0, 0.2),
+            Vec3::new(-1.0, 0.0, 0.2).add(shift),
             Vec3::new(1.2, 0.1, 0.0),
             Vec3::new(0.0, 0.3, -0.2),
         ),
         body(
             properties[1],
-            Vec3::new(0.0, 0.1, 0.0),
+            Vec3::new(0.0, 0.1, 0.0).add(shift),
             Vec3::new(-0.8, 0.0, 0.2),
             Vec3::new(0.1, 0.0, 0.4),
         ),
         body(
             properties[2],
-            Vec3::new(1.0, -0.1, 0.0),
+            Vec3::new(1.0, -0.1, 0.0).add(shift),
             Vec3::new(0.2, -0.3, 0.0),
             Vec3::ZERO,
         ),
@@ -528,4 +535,71 @@ fn a_held_force_under_gravity_enters_as_boundary_work() {
     assert!((stored_heat - heat_j).abs() <= 1.0e-11 * exchanged_j);
     assert!((work_j - mechanical_j - heat_j).abs() <= 1.0e-8 * exchanged_j);
     assert!(ledger.energy_residual_j().abs() <= 1.0e-11 * exchanged_j);
+}
+
+/// March the network alone, checking every step against the conformance kit
+/// (which includes the audit of the endpoint energies).
+fn march_checked(
+    component: &ViscousNetwork,
+    mut state: Vec<RigidBodyState>,
+    dt_s: f64,
+    steps: usize,
+    what: &str,
+) -> Vec<RigidBodyState> {
+    let gate = CancelGate::new_clock_free();
+    let mut inputs = [0.0; 11];
+    inputs[9] = 300.0;
+    inputs[10] = 300.0;
+    let stale = state.clone();
+    let mut outputs = [0.0; 11];
+    with_cx(&gate, |cx| {
+        for step in 0..steps {
+            let case = Case {
+                state: &state,
+                stale: &stale,
+                dt_s,
+                inputs: &inputs,
+            };
+            check_component(component, &case, cx)
+                .unwrap_or_else(|failure| panic!("{what}, step {step}: {failure}"));
+            let mut next = Vec::new();
+            component
+                .propose(&state, dt_s, &inputs, &mut next, &mut outputs, cx)
+                .unwrap_or_else(|refusal| panic!("{what}, step {step}: {refusal}"));
+            state = next;
+        }
+    });
+    state
+}
+
+#[test]
+fn the_network_keeps_its_account_through_free_fall_and_under_oblique_gravity() {
+    // Free fall for three seconds: kinetic and potential energy grow against
+    // each other, and a tolerance sized by their difference refuses.
+    let g = 9.81;
+    let gravity = Gravity::new(Vec3::new(0.0, 0.0, -g)).expect("gravity");
+    let (component, start) = network(gravity);
+    let (properties, _, _) = fixture();
+    let centre = |states: &[RigidBodyState]| -> (f64, f64) {
+        let (mut mass, mut height, mut momentum) = (0.0, 0.0, 0.0);
+        for (state, body) in states.iter().zip(&properties) {
+            mass += body.mass();
+            height += body.mass() * state.pose().position_world().z;
+            momentum += state.linear_momentum_world().z;
+        }
+        (height / mass, momentum / mass)
+    };
+    let (z0, v0) = centre(&start);
+    let fallen = march_checked(&component, start, 1.0e-3, 3_000, "free fall");
+    let (z, v) = centre(&fallen);
+    let t = 3.0;
+    assert!((v - (v0 - g * t)).abs() <= 1.0e-10 * g * t, "{v}");
+    assert!((z - (z0 + v0 * t - 0.5 * g * t * t)).abs() <= 1.0e-10 * g * t * t, "{z}");
+
+    // An oblique field, a kilometre from the origin along a level surface:
+    // the three terms of m g . x are large and cancel.
+    let oblique = Gravity::new(Vec3::new(6.9367, 0.0, -6.9367)).expect("gravity");
+    let (properties, links, far) = fixture_at(Vec3::new(1000.0, 0.0, 1000.0));
+    let component = ViscousNetwork::new(properties, links, oblique, controls()).expect("network");
+    march_checked(&component, far, 1.0e-3, 300, "oblique gravity");
 }

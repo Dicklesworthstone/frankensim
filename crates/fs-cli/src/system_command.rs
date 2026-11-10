@@ -30,7 +30,9 @@ const SCHEMA: &str = "frankensim.system.v0";
 const RESULT_SCHEMA: &str = "frankensim.system.result.v0";
 const DIAGNOSTIC_SCHEMA: &str = "frankensim.system.diagnostic.v0";
 const MAX_SCENE_BYTES: u64 = 1024 * 1024;
-const MAX_ELEMENTS: usize = 10_000;
+// A looped block is solved with a dense matrix over its interface inputs:
+// about 120 MB per step at 2,400 elements, growing with the square.
+const MAX_ELEMENTS: usize = 2_000;
 const MAX_STEPS: f64 = 10_000_000.0;
 const MAX_SAMPLES: usize = 100_000;
 const NO_CLAIM: &str = "ideal lumped elements with constant parameters integrated by the implicit midpoint rule; no material cards, contact, friction, phase change or step-size error control; the ledger states what the discrete system did, not what a physical device would do";
@@ -44,7 +46,8 @@ and the energy and entropy ledger of the run.
 Scene schema: frankensim.system.v0. Top-level fields:
   duration_s        simulated time
   step_s            largest step; the kernel may take shorter ones
-  sample_every_s    optional; record every element's state at this interval
+  sample_every_s    optional; record every element's state at the end of the
+                    first step at or after each multiple of this interval
   solver            optional {relative_tolerance, absolute_tolerance, max_iterations}
   elements          object: name -> element
   connections       array of connections
@@ -94,8 +97,9 @@ Connections, ports written element.port:
                           heater, heat_rate_w for a heat capacity
 
 Each element's port a is the end at mass A and b the end at mass B; the
-extension of a spring is x_B - x_A less its unloaded length. Every port must
-be connected. See examples/system/.
+extension of a spring is x_B - x_A less its unloaded length; a capacitor's
+charge_c is the same difference, so one charged by a current entering at a
+reads negative. Every port must be connected. See examples/system/.
 ";
 
 pub fn run(args: &[OsString], json: bool) -> CommandOutput {

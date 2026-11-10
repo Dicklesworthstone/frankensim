@@ -171,7 +171,9 @@ fn roundoff(scale: f64) -> f64 {
 }
 
 /// A value prescribed as a function of time. Built only by its constructors,
-/// which refuse values that are not finite.
+/// which refuse parameters that are not finite or exceed [`Waveform::LIMIT`]
+/// in size, so that no sum or difference of them overflows. Asked at a time
+/// that is not finite, it returns NaN, which every source refuses.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Waveform(Shape);
 
@@ -191,13 +193,24 @@ enum Shape {
     Table(Vec<(f64, f64)>),
 }
 
+fn bounded(name: &'static str, value: f64) -> Result<f64, ElementError> {
+    if value.is_finite() && value.abs() <= Waveform::LIMIT {
+        Ok(value)
+    } else {
+        Err(ElementError::Parameter { name, value })
+    }
+}
+
 impl Waveform {
+    /// Largest size of a waveform value, time or angular frequency.
+    pub const LIMIT: f64 = 1.0e150;
+
     /// A constant value.
     ///
     /// # Errors
     /// A value that is not finite.
     pub fn constant(value: f64) -> Result<Self, ElementError> {
-        Ok(Self(Shape::Constant(finite("value", value)?)))
+        Ok(Self(Shape::Constant(bounded("value", value)?)))
     }
 
     /// `offset + amplitude sin(2 pi frequency_hz t + phase_rad)`.
@@ -210,11 +223,19 @@ impl Waveform {
         phase_rad: f64,
         offset: f64,
     ) -> Result<Self, ElementError> {
+        // The angular frequency is what is multiplied by a time.
+        let frequency_hz = nonnegative("frequency_hz", frequency_hz)?;
+        if !(2.0 * PI * frequency_hz <= Self::LIMIT) {
+            return Err(ElementError::Parameter {
+                name: "frequency_hz",
+                value: frequency_hz,
+            });
+        }
         Ok(Self(Shape::Sine {
-            amplitude: finite("amplitude", amplitude)?,
-            frequency_hz: nonnegative("frequency_hz", frequency_hz)?,
-            phase_rad: finite("phase_rad", phase_rad)?,
-            offset: finite("offset", offset)?,
+            amplitude: bounded("amplitude", amplitude)?,
+            frequency_hz,
+            phase_rad: bounded("phase_rad", phase_rad)?,
+            offset: bounded("offset", offset)?,
         }))
     }
 
@@ -228,9 +249,10 @@ impl Waveform {
         if knots.is_empty() {
             return Err(ElementError::Table { what: "it has no knots" });
         }
-        if knots.iter().any(|(t, v)| !t.is_finite() || !v.is_finite()) {
+        let admitted = |x: f64| x.is_finite() && x.abs() <= Self::LIMIT;
+        if knots.iter().any(|(t, v)| !admitted(*t) || !admitted(*v)) {
             return Err(ElementError::Table {
-                what: "a time or value is not finite",
+                what: "a time or value is not finite or exceeds 1e150",
             });
         }
         if knots.windows(2).any(|pair| !(pair[1].0 > pair[0].0)) {
@@ -265,6 +287,9 @@ impl Waveform {
     /// The value at time `t_s`.
     #[must_use]
     pub fn value_at(&self, t_s: f64) -> f64 {
+        if !t_s.is_finite() {
+            return f64::NAN;
+        }
         match &self.0 {
             Shape::Constant(value) => *value,
             Shape::Sine {
@@ -281,6 +306,9 @@ impl Waveform {
     /// `dt_s` is not positive.
     #[must_use]
     pub fn mean(&self, t0_s: f64, dt_s: f64) -> f64 {
+        if !(t0_s.is_finite() && dt_s.is_finite()) {
+            return f64::NAN;
+        }
         if !(dt_s > 0.0) {
             return self.value_at(t0_s);
         }
@@ -300,7 +328,18 @@ impl Waveform {
                 let sinc = if half == 0.0 { 1.0 } else { half.sin() / half };
                 offset + amplitude * (omega * (t0_s + 0.5 * dt_s) + phase_rad).sin() * sinc
             }
-            Shape::Table(knots) => table_integral(knots, t0_s, t0_s + dt_s) / dt_s,
+            Shape::Table(knots) => {
+                // Divide by the interval the two ends actually span: at a
+                // large time `t0 + dt` is rounded, and dividing by `dt`
+                // would carry that rounding into the mean.
+                let end = t0_s + dt_s;
+                let span = end - t0_s;
+                if span > 0.0 {
+                    table_integral(knots, t0_s, end) / span
+                } else {
+                    table_value(knots, t0_s)
+                }
+            }
         }
     }
 }
@@ -564,7 +603,14 @@ impl Component for Spring {
         outputs[0] = force_n;
         outputs[1] = -force_n;
         let stored_change_j = force_n * (b - a);
-        let scale = self.potential_size(a) + self.potential_size(b) + stored_change_j.abs();
+        // The kernel books `dt f_a F - dt f_b F`. When both ends move
+        // together those two products are large and cancel, so their
+        // rounding is set by the common travel, not by the stretch.
+        let paired = dt_s * force_n.abs() * (inputs[0].abs() + inputs[1].abs());
+        let scale = self.potential_size(a)
+            + self.potential_size(b)
+            + stored_change_j.abs()
+            + paired;
         Ok(Proposal::Step(Receipt::lossless(
             stored_change_j,
             roundoff(scale),
@@ -758,6 +804,16 @@ impl SourceAccount {
     }
 }
 
+/// The step mean of a prescribed value, refused if it is not finite.
+fn prescribed(wave: &Waveform, account: &SourceAccount, dt_s: f64) -> Result<f64, ElementError> {
+    let value = wave.mean(account.time_s(), dt_s);
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(ElementError::Input { value })
+    }
+}
+
 fn source_step(old: &SourceAccount, dt_s: f64, change_j: f64) -> (SourceAccount, Receipt) {
     let mut clock_s = old.clock_s;
     clock_s.add(dt_s);
@@ -823,7 +879,7 @@ impl Component for Force {
     ) -> Result<Proposal, ElementError> {
         cx.checkpoint()?;
         inputs_finite(inputs)?;
-        let force_n = self.force_n.mean(old.time_s(), dt_s);
+        let force_n = prescribed(&self.force_n, old, dt_s)?;
         outputs[0] = force_n;
         let (next, receipt) = source_step(old, dt_s, dt_s * force_n * inputs[0]);
         *new = next;
@@ -1102,7 +1158,7 @@ impl Component for Heater {
         let kelvin = temperature(inputs[0])?;
         // Non-negative by construction; the mean of a non-negative waveform
         // is non-negative.
-        let power_w = self.power_w.mean(old.time_s(), dt_s).max(0.0);
+        let power_w = prescribed(&self.power_w, old, dt_s)?.max(0.0);
         outputs[0] = -power_w;
         let (next, mut receipt) = source_step(old, dt_s, -dt_s * power_w);
         *new = next;

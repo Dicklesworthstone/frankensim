@@ -233,7 +233,7 @@ impl ViscousNetwork {
             total += diagnostics.mechanical_energy;
             terms += diagnostics.translational_kinetic_energy
                 + diagnostics.rotational_kinetic_energy
-                + diagnostics.gravitational_potential_energy.abs();
+                + super::potential_terms_j(self.gravity, *properties, *body);
         }
         Ok((total, terms))
     }

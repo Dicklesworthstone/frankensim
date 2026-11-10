@@ -21,12 +21,17 @@ The receipt's energy tolerance is 64 machine epsilons of three things added
 together: the products of the norms of force and mean velocity and of torque
 and mean angular velocity (the angular velocity comes out of a frame rotation,
 so its components carry roundoff of the whole vector); the kinetic energies
-and the magnitudes of the gravity potential at both ends of the step (in free
-fall they cancel, and the measured total is only as exact as its terms); and
-the magnitudes of the changes and of the residual. A tolerance scaled only by
+and the sizes of the three terms of the gravity potential `-m g . x` at both
+ends of the step (in free fall kinetic and potential energy cancel, and on a
+level surface of an oblique field the three terms cancel each other, so the
+measured total is only as exact as its terms); and the magnitudes of the
+changes and of the residual. A tolerance scaled only by
 the energy exchanged in the step refused free fall from the origin after 298
 steps; that defect was found by an independent review on 2026-11-10 and is
-pinned by the tests below.
+pinned by the tests below. A second review the same day showed that the
+magnitude of the potential's total was still too small under oblique gravity
+far from the origin (the network refused at step 1, the single body failed
+278 of 2,000 steps); both components now use the per-axis terms.
 
 G0, in `crates/fs-system/tests/rigid_body_slice.rs` (run with
 `cargo test -p fs-system --features slices`):
