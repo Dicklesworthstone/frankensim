@@ -296,9 +296,10 @@ std::thread_local! {
 }
 
 /// Run `f` with `workers` (at least one) threads declared for every
-/// [`lu_complex`] factorization it makes on this thread, then restore the
-/// previous declaration, also on unwind. This is a scheduling budget only:
-/// factors are bit-identical for every worker count.
+/// [`lu_complex`] factorization it makes on this thread, and for the dense
+/// matrix products of fs-phs's exponentials ([`declared_workers`]), then restore
+/// the previous declaration, also on unwind. This is a scheduling budget only:
+/// factors and products are bit-identical for every worker count.
 pub fn with_lu_workers<R>(workers: usize, f: impl FnOnce() -> R) -> R {
     struct Restore(usize);
     impl Drop for Restore {
@@ -308,6 +309,13 @@ pub fn with_lu_workers<R>(workers: usize, f: impl FnOnce() -> R) -> R {
     }
     let _restore = Restore(LU_WORKERS.with(|w| w.replace(workers.max(1))));
     f()
+}
+
+/// This thread's worker count declared by [`with_lu_workers`] (which
+/// `fs_bem::helmholtz::with_dense_workers` forwards to); 1 when undeclared.
+#[must_use]
+pub fn declared_workers() -> usize {
+    LU_WORKERS.with(core::cell::Cell::get)
 }
 
 /// Factor with the blocked elimination ([`lu_complex_blocked_with_cancel`])

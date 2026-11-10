@@ -20,12 +20,42 @@ pub(crate) fn product(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
     out
 }
 
+/// Side length from which [`accumulate`] uses the declared workers: below it a product takes a few milliseconds and the
+/// serial loop beats starting threads.
+const PARALLEL_MIN_N: usize = 128;
+/// Most threads one product uses: the bound the render's `--workers` option already holds (1 to 256).
+const MAX_PRODUCT_WORKERS: usize = 256;
+
+/// Threads one `n` x `n` product uses: one unless `n` reaches [`PARALLEL_MIN_N`] and more than one worker is declared,
+/// and never more than [`MAX_PRODUCT_WORKERS`] or the number of four-row blocks.
+fn product_threads(declared: usize, n: usize) -> usize {
+    if n < PARALLEL_MIN_N { 1 } else { declared.clamp(1, MAX_PRODUCT_WORKERS).min(n.div_ceil(4)) }
+}
+
 // Preserve the existing i-k-j addition order, sharing each row of b between
 // four output rows. Both the ordinary exponential and integral use this kernel.
+// On the workers that `fs_la::eigen_complex::with_lu_workers` declares (one by default) the four-row blocks are shared
+// between threads. A block reads its own rows of `a` and all of `b` and writes only its own rows of `out`, and every
+// entry keeps its own ascending-k sum of unfused products, so the result is bit-identical for every worker count.
 pub(crate) fn accumulate(out: &mut [f64], a: &[f64], b: &[f64], n: usize) {
     if n == 0 {
         return;
     }
+    let threads = product_threads(fs_la::eigen_complex::declared_workers(), n);
+    if threads == 1 {
+        accumulate_blocks(out, a, b, n);
+        return;
+    }
+    // Whole four-row blocks per thread: each thread's blocks are exactly the serial blocks.
+    let per_thread = n.div_ceil(4).div_ceil(threads) * 4 * n;
+    std::thread::scope(|scope| {
+        for (a_part, out_part) in a.chunks(per_thread).zip(out.chunks_mut(per_thread)) {
+            scope.spawn(move || accumulate_blocks(out_part, a_part, b, n));
+        }
+    });
+}
+
+fn accumulate_blocks(out: &mut [f64], a: &[f64], b: &[f64], n: usize) {
     for (a_rows, out_rows) in a.chunks(4 * n).zip(out.chunks_mut(4 * n)) {
         for (k, b_row) in b.chunks_exact(n).enumerate() {
             for (a_row, out_row) in a_rows.chunks_exact(n).zip(out_rows.chunks_exact_mut(n)) {
@@ -409,6 +439,112 @@ fn compensated_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::linear_exact::{
+        DenseExponentialBudget, UpperBlocks, exponential_with_budget, upper_block_exponential_with_budget,
+    };
+    use fs_la::eigen_complex::with_lu_workers;
+
+    /// Deterministic entries in [-1, 1) with every bit of the significand in play (xorshift64).
+    fn filled(len: usize, seed: u64) -> Vec<f64> {
+        let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 11) as f64 / (1_u64 << 53) as f64 * 2.0 - 1.0
+            })
+            .collect()
+    }
+
+    fn bits(values: &[f64]) -> Vec<u64> {
+        values.iter().map(|v| v.to_bits()).collect()
+    }
+
+    /// Gauntlet G0/G5: the thread count follows the declaration (one when undeclared), the side-length floor and the number of
+    /// four-row blocks, and never exceeds the bound of the render's `--workers` option.
+    #[test]
+    fn product_threads_follow_the_declaration_the_floor_and_the_block_count() {
+        assert_eq!(fs_la::eigen_complex::declared_workers(), 1);
+        assert_eq!(with_lu_workers(3, fs_la::eigen_complex::declared_workers), 3);
+        assert_eq!(fs_la::eigen_complex::declared_workers(), 1);
+        assert_eq!(product_threads(1, 5433), 1);
+        assert_eq!(product_threads(0, 5433), 1);
+        assert_eq!(product_threads(8, PARALLEL_MIN_N - 1), 1);
+        assert_eq!(product_threads(8, PARALLEL_MIN_N), 8);
+        assert_eq!(product_threads(1000, 129), 33);
+        assert_eq!(product_threads(1000, 5433), MAX_PRODUCT_WORKERS);
+    }
+
+    /// Gauntlet G5: a product on any declared worker count equals the serial one bit for bit, on sizes that are and are not
+    /// multiples of four (the last block is short) and from a nonzero start (the kernel adds into `out`).
+    #[test]
+    fn threaded_products_equal_the_serial_product_bit_for_bit() {
+        for n in [PARALLEL_MIN_N, PARALLEL_MIN_N + 1, PARALLEL_MIN_N + 2, PARALLEL_MIN_N + 3, 150, 203] {
+            let (a, b, start) = (filled(n * n, 1), filled(n * n, 2), filled(n * n, 3));
+            let mut serial = start.clone();
+            accumulate(&mut serial, &a, &b, n);
+            assert_ne!(bits(&serial), bits(&start));
+            for workers in [2, 3, 5, 8] {
+                assert!(product_threads(workers, n) > 1, "n {n}, {workers} workers would run serially");
+                let mut threaded = start.clone();
+                with_lu_workers(workers, || accumulate(&mut threaded, &a, &b, n));
+                assert_eq!(bits(&threaded), bits(&serial), "n {n}, {workers} workers");
+            }
+        }
+    }
+
+    /// Gauntlet G5: the budgeted exponential and the block upper-triangular one, whose products are these, return the serial
+    /// bits on every declared worker count. The scale puts the row sums near one, so a squaring follows the Taylor series.
+    #[test]
+    fn threaded_exponentials_equal_the_serial_ones_through_both_budgeted_entry_points() {
+        let d = PARALLEL_MIN_N + 1;
+        let scaled = |seed: u64| -> Vec<f64> { filled(d * d, seed).into_iter().map(|v| v * 0.012).collect() };
+        let budget = |n: usize| DenseExponentialBudget {
+            max_dimension: n,
+            max_dense_bytes: 5 * n * n * core::mem::size_of::<f64>(),
+            max_multiply_terms: 80 * (n as u64).pow(3),
+        };
+        let full = scaled(4);
+        let blocks = UpperBlocks { first: scaled(5), cross: scaled(6), last: scaled(7) };
+        let run = || {
+            (
+                exponential_with_budget(&full, d, budget(d)).unwrap(),
+                upper_block_exponential_with_budget(&blocks, d, budget(2 * d)).unwrap(),
+            )
+        };
+        let (serial_full, serial_blocks) = run();
+        for workers in [2, 3, 8] {
+            let (threaded_full, threaded_blocks) = with_lu_workers(workers, run);
+            assert_eq!(bits(&threaded_full), bits(&serial_full), "exponential, {workers} workers");
+            assert_eq!(bits(&threaded_blocks.first), bits(&serial_blocks.first), "first block, {workers} workers");
+            assert_eq!(bits(&threaded_blocks.cross), bits(&serial_blocks.cross), "cross block, {workers} workers");
+            assert_eq!(bits(&threaded_blocks.last), bits(&serial_blocks.last), "last block, {workers} workers");
+        }
+    }
+
+    /// The D4c film page's shape (d = 5433): one product at one worker and at 8 and 16, equal bit for bit, with each wall time
+    /// printed. Run by hand: `cargo test --release -p fs-phs --lib -- --ignored --nocapture --test-threads 1 d4c_shape`.
+    #[test]
+    #[ignore = "measurement: 1.6e11 multiply-adds per run, a few minutes serial"]
+    fn d4c_shape_product_is_bitwise_equal_threaded_and_reports_the_wall_times() {
+        let n = 5433;
+        let (a, b) = (filled(n * n, 11), filled(n * n, 12));
+        let mut serial = vec![0.0; n * n];
+        let start = std::time::Instant::now();
+        accumulate(&mut serial, &a, &b, n);
+        let serial_s = start.elapsed().as_secs_f64();
+        let serial_bits = bits(&serial);
+        eprintln!("d4c shape n {n}: 1 worker {serial_s:.2} s");
+        for workers in [8, 16] {
+            let mut threaded = vec![0.0; n * n];
+            let start = std::time::Instant::now();
+            with_lu_workers(workers, || accumulate(&mut threaded, &a, &b, n));
+            let threaded_s = start.elapsed().as_secs_f64();
+            eprintln!("d4c shape n {n}: {workers} workers {threaded_s:.2} s, speedup {:.2}", serial_s / threaded_s);
+            assert_eq!(bits(&threaded), serial_bits, "{workers} workers");
+        }
+    }
 
     fn close(actual: f64, expected: f64, scale: f64) {
         assert!(

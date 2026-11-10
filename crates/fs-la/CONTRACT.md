@@ -293,6 +293,8 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
     for every block size and worker count.
   - `lu_complex` runs the blocked path on the workers that a scoped
     `with_lu_workers` declares, one by default.
+  - `eigen_complex::declared_workers()` returns this thread's declared count,
+    one when undeclared. fs-phs's dense matrix products read it.
   - `eigen_complex::solve_tridiagonal_complex(lower, diag, upper, rhs,
     columns)` solves a complex TRIDIAGONAL system for several right-hand
     sides with the same operation graph as `lu_complex` plus `solve`, minus
