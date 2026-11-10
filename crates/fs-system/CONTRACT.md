@@ -59,6 +59,17 @@ physics owners below fs-couple can be composed without it.
 - `System::step(dt_max, cx) -> StepReport`, `state`, `last_input`,
   `last_output`, `guess`, `plan_shape`, `time_s`, `steps`, `ledger`,
   `set_config`.
+- `System::checkpoint() -> Result<Checkpoint, CheckpointError>` captures
+  accepted typed states, interface warm starts and outputs, the exact
+  compensated clock, step count, complete ledger and solve configuration.
+  `restore(&checkpoint)` atomically rewinds the originating sealed system;
+  the same checkpoint may be reused. A checkpoint from another system is
+  refused before anything changes, even when the graphs have the same names
+  and types. `Checkpoint` exposes read-only `state`, `time_s`, `steps`,
+  `ledger` and `config`; it keeps no trial candidates. Capture after a failed
+  or cancelled step still describes the last accepted state. Boundary
+  closures and their captured external data are not copied: deterministic
+  replay requires identical boundary responses and pure component proposals.
 - `Ledger`: per component (port energy in, stored change, dissipation,
   numerical loss, entropy generated, accepted balance defect), per connection
   (energy defect, entropy generated), per boundary (energy and entropy in), per
@@ -219,6 +230,12 @@ only fs-ports and fs-exec.
 
 ## Conformance tests
 
+`tests/checkpoints.rs` checks reusable restore/replay of a driven dissipative
+graph, source and kernel clocks, interface warm starts, every ledger field
+and solver configuration; restore after failed or cancelled trials; and
+foreign-system refusal without mutation. Checkpoints are in memory and bind
+to one sealed system's allocation identity; they are not durable snapshots.
+
 G0, `tests/system_g0.rs`, on one-port elements defined in the test:
 
 - a bonded mass and spring against the monolithic implicit midpoint rule over
@@ -368,7 +385,7 @@ the refused calls change nothing.
   connection (the `Gyrator` element is a component); no stream or field ports;
   no non-smooth tier (contact, stick-slip); no multirate stepping; no
   monolithic solve through `StageResidual`; no step-size error control; no
-  snapshot encoding, resume or fork; no adjoint. These are beads `.5.2` to
+  durable snapshot encoding, process restart or fork; no adjoint. These are beads `.5.2` to
   `.5.10` of the epic.
 - The interface solve is dense and re-derives the Jacobian every iteration. It
   allocates per looped block and per step. No performance claim is made; the

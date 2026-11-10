@@ -70,6 +70,7 @@ pub(crate) trait Node {
     fn ports(&self) -> &[PortSpec];
     fn class(&self) -> Class;
     fn has_tangent(&self) -> bool;
+    fn clone_state(&self, state: &dyn Any) -> Result<Box<dyn Any>, OwnerError>;
     fn stored_energy_j(&self, state: &dyn Any) -> Result<f64, OwnerError>;
     fn limit_dt_s(&self, state: &dyn Any, proposed_s: f64) -> Result<f64, OwnerError>;
     fn next_event_s(&self, state: &dyn Any) -> Option<f64>;
@@ -113,6 +114,10 @@ macro_rules! mandatory_tier {
 
         fn class(&self) -> Class {
             self.0.class()
+        }
+
+        fn clone_state(&self, state: &dyn Any) -> Result<Box<dyn Any>, OwnerError> {
+            Ok(Box::new(state_of::<C::State>(state)?.clone()))
         }
 
         fn stored_energy_j(&self, state: &dyn Any) -> Result<f64, OwnerError> {

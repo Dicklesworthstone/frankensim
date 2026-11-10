@@ -3,6 +3,7 @@
 use core::any::Any;
 use core::fmt;
 use core::ops::Range;
+use std::rc::Rc;
 
 use fs_exec::Cx;
 use fs_ports::StableId;
@@ -214,6 +215,104 @@ impl fmt::Display for SystemError {
 }
 
 impl std::error::Error for SystemError {}
+
+/// Why an accepted-state checkpoint could not be captured or restored.
+#[derive(Debug)]
+pub enum CheckpointError {
+    /// The checkpoint belongs to another sealed system, even if its graph
+    /// has the same component names and types. Nothing was restored.
+    ForeignSystem,
+    /// An erased state slot does not match its owner's concrete state type.
+    /// This is a kernel invariant violation, not a component refusal.
+    State {
+        /// Component name.
+        node: String,
+        /// The type-erasure error, recoverable with `downcast_ref`.
+        source: OwnerError,
+    },
+}
+
+impl fmt::Display for CheckpointError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ForeignSystem => write!(f, "checkpoint belongs to another sealed system"),
+            Self::State { node, source } => {
+                write!(
+                    f,
+                    "component `{node}` cannot clone its accepted state: {source:?}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for CheckpointError {}
+
+/// A reusable in-memory checkpoint of one sealed [`System`].
+///
+/// It retains accepted component states, interface values and warm starts,
+/// the compensated clock, step count, complete ledger and solve configuration.
+/// It can be inspected after its system is dropped, but can be restored only
+/// into the same system that created it. It contains no candidate trial state.
+///
+/// This is not an encoded checkpoint for process restart or graph cloning.
+/// Boundaries and components remain those of the sealed system. Any external
+/// data captured by a [`BoundaryFn`] is outside this checkpoint; bitwise replay
+/// requires the same boundary responses and pure component proposals.
+pub struct Checkpoint {
+    identity: Rc<()>,
+    accepted: Vec<Box<dyn Any>>,
+    inputs: Vec<f64>,
+    outputs: Vec<f64>,
+    time: Sum,
+    steps: u64,
+    ledger: Ledger,
+    config: SolveConfig,
+}
+
+impl fmt::Debug for Checkpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Checkpoint")
+            .field("components", &self.accepted.len())
+            .field("time_s", &self.time.value())
+            .field("steps", &self.steps)
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Checkpoint {
+    /// Simulated time captured by the checkpoint [s].
+    #[must_use]
+    pub fn time_s(&self) -> f64 {
+        self.time.value()
+    }
+
+    /// Accepted steps captured by the checkpoint.
+    #[must_use]
+    pub fn steps(&self) -> u64 {
+        self.steps
+    }
+
+    /// The saved accepted state of `node`, if it has type `S`.
+    /// Use the node identifier from the originating system.
+    #[must_use]
+    pub fn state<S: 'static>(&self, node: NodeId) -> Option<&S> {
+        self.accepted.get(node.0)?.downcast_ref::<S>()
+    }
+
+    /// The complete window ledger, including each sum's compensation.
+    #[must_use]
+    pub fn ledger(&self) -> &Ledger {
+        &self.ledger
+    }
+
+    /// The solve configuration restored with this checkpoint.
+    #[must_use]
+    pub fn config(&self) -> SolveConfig {
+        self.config
+    }
+}
 
 /// What one accepted step did.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1057,6 +1156,7 @@ impl SystemBuilder {
         }
 
         Ok(System {
+            identity: Rc::new(()),
             names: self.names,
             nodes: self.nodes,
             layouts: self.layouts,
@@ -1106,6 +1206,9 @@ enum Trial {
 /// all of them by swapping; a failed step leaves every accepted state, the
 /// clock and the ledger untouched.
 pub struct System {
+    /// Allocation identity survives moves and cannot be reused while a
+    /// checkpoint exists. Equal graph descriptions still get distinct tokens.
+    identity: Rc<()>,
     names: Vec<String>,
     nodes: Vec<Box<dyn Node>>,
     layouts: Vec<PortLayout>,
@@ -1149,6 +1252,71 @@ pub struct System {
 }
 
 impl System {
+    /// Capture the accepted state for later inspection or rewind.
+    ///
+    /// Capture also works after a refused or cancelled step: trial candidates
+    /// and scratch values are excluded. The system itself is unchanged.
+    ///
+    /// # Errors
+    /// A component state has the wrong erased type (a kernel invariant breach).
+    pub fn checkpoint(&self) -> Result<Checkpoint, CheckpointError> {
+        Ok(Checkpoint {
+            identity: Rc::clone(&self.identity),
+            accepted: self.clone_states(&self.accepted)?,
+            inputs: self.accepted_inputs.clone(),
+            outputs: self.accepted_outputs.clone(),
+            time: self.time,
+            steps: self.steps,
+            ledger: self.ledger.clone(),
+            config: self.config,
+        })
+    }
+
+    /// Restore an accepted-state checkpoint without consuming it.
+    ///
+    /// Every saved state is cloned before anything is published, so a refusal
+    /// leaves the system untouched. Candidate slots remain disposable scratch;
+    /// the next proposal overwrites them under the Component contract.
+    /// The graph, boundary closures and external execution context are retained.
+    ///
+    /// # Errors
+    /// A checkpoint from another sealed system, or an erased state type mismatch.
+    pub fn restore(&mut self, checkpoint: &Checkpoint) -> Result<(), CheckpointError> {
+        if !Rc::ptr_eq(&self.identity, &checkpoint.identity) {
+            return Err(CheckpointError::ForeignSystem);
+        }
+        let accepted = self.clone_states(&checkpoint.accepted)?;
+        let inputs = checkpoint.inputs.clone();
+        let outputs = checkpoint.outputs.clone();
+        let ledger = checkpoint.ledger.clone();
+
+        self.accepted = accepted;
+        self.accepted_inputs = inputs;
+        self.accepted_outputs = outputs;
+        self.inputs.copy_from_slice(&self.accepted_inputs);
+        self.outputs.copy_from_slice(&self.accepted_outputs);
+        self.time = checkpoint.time;
+        self.steps = checkpoint.steps;
+        self.ledger = ledger;
+        self.config = checkpoint.config;
+        Ok(())
+    }
+
+    fn clone_states(&self, states: &[Box<dyn Any>]) -> Result<Vec<Box<dyn Any>>, CheckpointError> {
+        self.nodes
+            .iter()
+            .zip(states)
+            .enumerate()
+            .map(|(index, (node, state))| {
+                node.clone_state(state.as_ref())
+                    .map_err(|source| CheckpointError::State {
+                        node: self.names[index].clone(),
+                        source,
+                    })
+            })
+            .collect()
+    }
+
     /// Replace the driver's limits.
     pub fn set_config(&mut self, config: SolveConfig) {
         self.config = config;
@@ -1429,8 +1597,8 @@ impl System {
                 // The interface audit is told only this part: it keeps its
                 // own relative tolerance, so a loose solver tolerance is
                 // still caught there.
-                allowance[row] = self.config.absolute_tolerance
-                    + ROUNDING_UNITS * f64::EPSILON * rounding[row];
+                allowance[row] =
+                    self.config.absolute_tolerance + ROUNDING_UNITS * f64::EPSILON * rounding[row];
                 let allowed = self.config.relative_tolerance * group_scale[self.input_group[index]]
                     + allowance[row];
                 let excess = residual[row].abs() - allowed;
@@ -1704,8 +1872,8 @@ impl System {
                 };
                 let outputs = self.output_range(*port);
                 for (offset, index) in self.input_range(*port).enumerate() {
-                    let weight = weight_one
-                        .unwrap_or_else(|| self.outputs[outputs.start + offset].abs());
+                    let weight =
+                        weight_one.unwrap_or_else(|| self.outputs[outputs.start + offset].abs());
                     solve_slack_j += dt_s * self.input_allowance[index] * weight;
                 }
             }

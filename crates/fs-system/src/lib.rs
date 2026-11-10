@@ -14,6 +14,7 @@
 //!              ::seal -> System              admission and plan
 //! System::step                               negotiate, solve, audit, admit, publish
 //! System::ledger                             window accounts
+//! System::checkpoint / restore               accepted-state rewind and replay
 //! ```
 //!
 //! [`elements`] holds ideal lumped elements (mass, spring, damper, force,
@@ -45,6 +46,7 @@ mod wiring;
 pub use erased::{OwnerError, StateTypeMismatch, TangentNotOffered};
 pub use ledger::Ledger;
 pub use system::{
-    BoundaryFn, Phase, SolveConfig, StepReport, System, SystemBuilder, SystemError, heat_sink,
+    BoundaryFn, Checkpoint, CheckpointError, Phase, SolveConfig, StepReport, System, SystemBuilder,
+    SystemError, heat_sink,
 };
 pub use wiring::{AdmissionError, HeatSink, NodeId, PortRef, RouteTemperature};
