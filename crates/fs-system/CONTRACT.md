@@ -445,6 +445,23 @@ behind the contract), two linked cells with a law each.
   cells or the sink to 1e-11.
 Thirty-seven planted defects in the component were each caught.
 
+Against the hand-written coupling,
+`crates/fs-couple/tests/rigid_damping_heat/graph.rs` (run with
+`cargo test -p fs-couple --test rigid_damping_heat`): the same graph, built
+from that module's own test fixtures (four bodies, two connectors, both
+routed to both cells, nonlinear calorics, cells on a bed), against
+`fs_couple::rigid_damping_heat::advance_candidate`. In four cases (with and
+without an authored source, a contact and a source change at 0.35 s; targets
+on and off the thermal step) the kernel takes as many steps as the module
+takes thermal substeps, the bodies are equal bit for bit, the two thermal
+clocks are equal, the cells agree to 1e-11 K, and the module's report
+(dissipation, unallocated loss, boundary heat, heat stored in the cells,
+mechanical energy change) equals the kernel's ledger to 1e-11 of the
+dissipated energy. Five planted defects in the graph side were each caught.
+This covers the module's explicit, memoryless, temperature-independent
+entry point only: its implicit, driven, relaxation and temperature-dependent
+entry points have no Component yet, and nothing in the module is deleted.
+
 Other domains, `tests/elements.rs`: the gyrator and one element of each law
 in the rotational and electrical domains pass the conformance and tangent
 checks at 100 generated points, and the gyrator's two port powers cancel to

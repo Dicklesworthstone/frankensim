@@ -89,6 +89,9 @@ fs-plate = { path = "../fs-plate" }
 fs-solver = { path = "../fs-solver" }
 fs-evidence = { path = "../fs-evidence" }
 fs-fmm = { path = "../fs-fmm" }
+# The composition kernel with its owner slices: tests that compare a declared
+# graph with a hand-written coupling of this crate.
+fs-system = { path = "../fs-system", features = ["slices"] }
 [lints]
 workspace = true
 

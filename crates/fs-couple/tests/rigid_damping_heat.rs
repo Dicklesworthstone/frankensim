@@ -9,6 +9,9 @@ mod driven;
 #[path = "rigid_damping_heat/driven_network.rs"]
 mod driven_network;
 
+#[path = "rigid_damping_heat/graph.rs"]
+mod graph;
+
 #[path = "rigid_damping_heat/relaxation.rs"]
 mod relaxation;
 
