@@ -186,12 +186,39 @@ sections. All dimensions and numerical error allowances are explicit.
 | `duct_node impedance R L C` | Degree-one series resistance, inertance and compliance |
 | `duct_node series R L C` | Two-section inline pressure-drop load |
 | `duct_node shunt R L C` | Load from an interior common-pressure junction to its reference |
+| `duct_node closed-hole B T` | Closed side hole of radius `B` and height `T`, shorter than one step, on an interior bore junction |
 
 For R-L-C records, units are Pa s/m³, Pa s²/m³ and m³/Pa. Zero `C` explicitly
 omits compliance. Positive compliance and nonnegative resistance/inertance are
 checked by the existing passive impedance owner; the file parser contains no
 replacement impedance or propagation equations. Supplied coefficients are not
 promoted to measured radiation, tissue or structural material properties.
+
+`duct_node closed-hole HOLE_RADIUS_M HEIGHT_M` stands in for a closed side
+hole's chimney `duct_section` and its `reflection 1` end when the hole is
+shorter than one acoustic step (`T < c / f_mechanics`, about 1.19 mm for air at
+288 kHz), which the fractional owner cannot carry as a section. It is the shared
+shunt load holding the first two terms of a closed tube's input impedance,
+`-j Z_h cot(k T) = 1 / (j w C) + j w L + O((k T)^3)` with `Z_h = rho c / (pi B^2)`:
+`C = pi B^2 T / (rho c^2)` (the hole's volume), `L = rho T / (3 pi B^2)` and
+`R = 0`, in the gas of the junction's sections, which must be one gas. The
+junction needs at least two sections, none narrower than the hole and none an
+`inner` side hole's chimney. A closed hole of one step or more refuses: it is a
+`duct_section`. No end correction is added, as the closed waveguide chimney
+takes none. A closed hole has them in print: the matching volume `t_m` is the
+same as an open hole's (Lefebvre and Scavone 2012, Eq. 8) and the closed
+series length `t_a` is their Eq. 34, both as fs-duct's `hole_lengths` applies
+them. Leaving `t_m` out makes `C` low: on the D whistle's closed holes `t_m`
+is 42 to 77 % of `T = 0.3 mm`, so `C` is 0.57 to 0.70 of the value with it.
+At one step the lumped hole and the one-sample closed chimney
+differ in branch impedance by `(tau^2 / 3) / (1 - tau^2)`,
+`tau = tan(pi f / f_mechanics)`: 9.9e-6 at 500 Hz, 4.0e-5 at 1 kHz and 3.6e-4 at
+3 kHz at 288 kHz. The provenance records each hole's `B`, `T`, gas, `L` and `C`
+under `closed_holes`.
+
+An open side hole has no lumped form: its outlet load and receiver live on its
+far node. A side hole with an `inner` row whose graph length (the chimney plus
+its added lengths) is below one step refuses by name; use a finer clock.
 
 A section without `gas` uses the top-level gas record. A supplied record uses
 the shared material gas parser, including explicit species mixtures and loaded

@@ -1211,12 +1211,14 @@ impl FlueVoice {
     /// ([`forced_jet::JetExit::developing`]: its core speed over its bulk speed at the held
     /// pressure); otherwise its core speed reaches only the island's card, through
     /// [`FlueVoice::with_card_centreline_speed`] (pexfp.135.5). A jet transfer attached before
-    /// the windway is refused: the windway sets its exit.
+    /// the windway is refused: the windway sets its exit. An upstream airway comes after it
+    /// ([`FlueVoice::with_upstream_airway`] judges it again at its steady foot pressure).
     ///
     /// # Errors
     /// Invalid geometry or gas, repeated/late attachment, another windway, an attached
-    /// jet transfer, a poisoned voice, or a held pressure outside the law's validity or
-    /// the admitted jet-speed domain.
+    /// jet transfer or upstream airway ([`airway::DEVELOPING_WINDWAY_AFTER_AIRWAY`]), a
+    /// poisoned voice, or a held pressure outside the law's validity or the admitted
+    /// jet-speed domain.
     pub fn with_developing_windway(mut self, length_m: f64, held_pressure_pa: f64)
         -> Result<Self, FlueError>
     {
@@ -1225,7 +1227,7 @@ impl FlueVoice {
             return Err(FlueError::Invalid { what: "developing windway requires one cold attachment and no other windway" });
         }
         if self.upstream_airway.is_some() {
-            return Err(FlueError::Invalid { what: airway::AIRWAY_REFUSES_DEVELOPING_WINDWAY });
+            return Err(FlueError::Invalid { what: airway::DEVELOPING_WINDWAY_AFTER_AIRWAY });
         }
         if self.auvray.is_some() {
             return Err(FlueError::Invalid { what: auvray_jet::WINDWAY_REFUSAL });

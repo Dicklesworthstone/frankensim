@@ -130,6 +130,29 @@ impl DevelopingSlit {
             + mu * l * speed_m_s * shah_apparent_friction_re(x_plus) / (2.0 * height_m * height_m)
     }
 
+    /// The slit fed through a series resistance: the bulk speed `U` through a gap `h` with `P(U) + series U = P_oc`,
+    /// `P(U)` the plenum pressure the law holds at `U` and `P_oc` the source's open-circuit pressure. The left side
+    /// rises strictly with `U` and reaches `P_oc` by `sqrt(2 P_oc/rho)`, so the root is bracketed by `[0, sqrt(2
+    /// P_oc/rho)]` and bisected to adjacent floating-point values as [`Self::held`] bisects. With `series_pa_s_m = 0`
+    /// every comparison is [`Self::held`]'s (`x + 0 U` is `x`), so its speed comes back bit for bit. Returns `(P(U),
+    /// U)`: the plenum pressure the slit sees, below `P_oc` by `series U`. A non-positive or non-finite `P_oc` gives
+    /// `(0, 0)`. Validity is not judged here ([`DevelopingSlitState::validity`]).
+    #[must_use]
+    pub fn against_series(&self, height_m: f64, open_circuit_pa: f64, series_pa_s_m: f64) -> (f64, f64) {
+        if !(open_circuit_pa > 0.0 && open_circuit_pa.is_finite()) {
+            return (0.0, 0.0);
+        }
+        let drive = |speed: f64| self.pressure_at(height_m, speed) + series_pa_s_m * speed;
+        let (mut lo, mut hi) = (0.0_f64, (2.0 * open_circuit_pa / self.gas.density).sqrt());
+        loop {
+            let mid = 0.5 * (lo + hi);
+            if mid <= lo || mid >= hi { break; }
+            if drive(mid) > open_circuit_pa { hi = mid; } else { lo = mid; }
+        }
+        let speed = if open_circuit_pa - drive(lo) <= drive(hi) - open_circuit_pa { lo } else { hi };
+        (self.pressure_at(height_m, speed), speed)
+    }
+
     /// Held state at plenum pressure `pressure_pa` through a `width_m` by
     /// `height_m` exit. The held pressure rises strictly with speed, so the bulk
     /// speed is the unique root, bracketed by `[0, sqrt(2P/rho)]` and bisected to

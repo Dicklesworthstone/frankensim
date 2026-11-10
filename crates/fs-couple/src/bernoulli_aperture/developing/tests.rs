@@ -69,6 +69,38 @@ fn g2_held_speed_solves_the_relation_below_the_inviscid_core() {
 }
 
 #[test]
+fn g2_a_series_resistance_lowers_the_plenum_by_its_own_drop_and_zero_is_the_held_law_bit_for_bit() {
+    // The whistle's slit (0.02455 m, 8 by 1.48 mm). Without a series resistance the root is `held`'s, bit for bit;
+    // with one, P(U) + series U = P_oc to the adjacent floating-point values the bisection stops at, and the plenum
+    // the slit sees is below P_oc by series U.
+    let gas = air();
+    let (width, h) = (0.008, 0.00148);
+    let law = DevelopingSlit::from_gas(&gas, 0.02455).unwrap();
+    for pressure in [1e-3, 1.0, 67.15, 93.447, 292.44, 757.5, 5000.0] {
+        let held = law.held(width, h, pressure).unwrap();
+        let (plenum, speed) = law.against_series(h, pressure, 0.0);
+        assert_eq!(speed.to_bits(), held.bulk_speed_m_s.to_bits(), "{pressure} Pa");
+        assert_eq!(plenum.to_bits(), law.pressure_at(h, held.bulk_speed_m_s).to_bits(), "{pressure} Pa");
+        // A series resistance of the order of a player's airway (R_dc 5.287e4 Pa s/m^3 over the exit), and ten times it.
+        let mut previous = speed;
+        for series in [5.287e4 * width * h, 5.287e5 * width * h] {
+            let (plenum, speed) = law.against_series(h, pressure, series);
+            let residual = plenum + series * speed - pressure;
+            // Adjacent floats u, u + ulp(u) bracket the root, so the residual is at most u f'(u) eps <= 2 eps P_oc
+            // (P(U) rises no faster than U^2 and series U as U); the rest of the allowance is the rounding of P(U)'s
+            // evaluation and of this sum. A stop at a relative tolerance of 1e-12 fails it.
+            assert!(residual.abs() <= 16.0 * f64::EPSILON * pressure, "{pressure} Pa, series {series:e}: residual {residual:e}");
+            assert!(speed > 0.0 && speed < previous && plenum < pressure, "{pressure} Pa, series {series:e}");
+            assert_eq!(plenum.to_bits(), law.pressure_at(h, speed).to_bits());
+            previous = speed;
+        }
+    }
+    for pressure in [0.0, -1.0, f64::NAN] {
+        assert_eq!(law.against_series(h, pressure, 1.0), (0.0, 0.0), "{pressure}");
+    }
+}
+
+#[test]
 fn g3_gas_and_geometry_are_explicit_and_refused_when_unphysical() {
     let gas = air();
     let hot = GasState::try_new(&GasSpec::dry_air_ussa1976(), 393.15, 101325.0).unwrap();

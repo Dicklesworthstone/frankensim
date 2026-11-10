@@ -26,6 +26,7 @@ fn input(explicit_network: bool) -> Input {
         },
         gases: vec![gas],
         inner: Vec::new(),
+        closed: Vec::new(),
         explicit_network,
     }
 }

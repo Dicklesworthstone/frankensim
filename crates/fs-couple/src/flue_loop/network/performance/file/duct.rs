@@ -10,6 +10,8 @@ pub(super) struct Input {
     pub graph: TubeNetworkSpec,
     pub gases: Vec<GasState>,
     pub inner: Vec<HoleInnerLength>,
+    /// The `closed-hole` nodes, each with its row's line for the clock's check.
+    pub closed: Vec<(ClosedHoleLump, usize)>,
     explicit_network: bool,
 }
 
@@ -26,6 +28,9 @@ fn read_loss_sampling(row: &mut Row<'_>) -> Result<RelaxationSampling, FlueInput
 
 #[cfg(test)]
 mod sampling_tests;
+
+#[cfg(test)]
+mod closed_hole_tests;
 
 /// An open side hole's inner length, from `inner BORE_RADIUS_M` on its
 /// chimney's `duct_section` row (before any `gas`):
@@ -64,7 +69,10 @@ mod sampling_tests;
 /// source's series mass does not carry: that is this realisation's own
 /// error. `series` needs exactly two bore sections at the junction, one gas
 /// on the hole and both of them, and each section longer than its share.
-/// These are their open-hole forms: a closed hole takes none of the three.
+/// `t_i` and `t_a` are their open-hole forms; `t_m` is the same for an open
+/// and a closed hole (Lefebvre and Scavone 2012, Eq. 8, as fs-duct's
+/// `hole_lengths` applies it). A `closed-hole` node takes none of the three
+/// (see [`ClosedHoleLump`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HoleInnerLength {
     /// The chimney's section index.
@@ -124,14 +132,109 @@ impl HoleInnerLength {
     }
 }
 
+/// A closed side hole shorter than one sample step, from
+/// `duct_node closed-hole HOLE_RADIUS_M HEIGHT_M` on the bore junction it
+/// opens from. It stands in for the chimney's `duct_section` and its
+/// `reflection 1` end, which a hole under one step cannot be: the fractional
+/// owner (`TubeNetworkSpec::realize_fractional_waveguide`) refuses a section
+/// shorter than one complete sample.
+///
+/// The hole is the network's existing shunt load, a passive series R-L-C from
+/// the junction to zero pressure with no delay, holding the first two terms of
+/// a closed uniform tube's input impedance,
+/// `-j Z_h cot(k t) = 1 / (j w C) + j w L + O((k t)^3)`, `Z_h = rho c / S`,
+/// `S = pi b^2`:
+/// `C = S t / (rho c^2)`, the hole's volume as a compliance, and
+/// `L = rho t / (3 S)`, its column's inertance in series (a third of the
+/// column's mass: the flow falls linearly to zero at the closed end).
+/// `R = 0`: the closed waveguide chimney it stands in for is lossless too.
+/// b is the hole's radius and t its height on its axis from the bore wall (the
+/// length a chimney row would give); rho and c are the gas of the junction's
+/// sections, which must be one gas. The fs-vfit owner realises the load by the
+/// bilinear (implicit-midpoint) rule, so its discrete impedance is
+/// `R + s L + 1 / (s C)` at `s = j (2 / dt) tan(w dt / 2)`.
+///
+/// End corrections: none is added, as the closed waveguide chimney takes none,
+/// so the two agree where the hole passes one step. A closed hole has them in
+/// print: the matching volume `t_m = b d (1 + 0.207 d^3) / 8`, `d = b / a`,
+/// the same as an open hole's (Lefebvre and Scavone 2012, Eq. 8), and a closed
+/// series length `t_a` (their Eq. 34), both as fs-duct's `hole_lengths`
+/// applies them. Leaving `t_m` out makes `C` low: on the D whistle's six
+/// closed holes (b 2.47 to 3.31 mm, bore radius a 6.1 mm, t 0.3 mm) `t_m` is 0.13
+/// to 0.23 mm, 42 to 77 % of `t`, so `C` is 0.57 to 0.70 of the value with it.
+/// Nothing is added at the closed end.
+///
+/// Admission: `b > 0`, `t > 0`, b no wider than any section at the junction,
+/// at least two sections there, one gas on them, no `inner` side hole's
+/// chimney on the same junction, and `t < c dt` once the clock is known
+/// (checked after the duct is read): a closed hole of one step or more is a
+/// `duct_section`. An open hole has no lumped form here: its outlet load and
+/// its receiver live on its far node.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClosedHoleLump {
+    /// The bore junction's node index.
+    pub node: usize,
+    /// b, the hole's radius [m].
+    pub hole_radius_m: f64,
+    /// t, the hole's height on its axis from the bore wall [m].
+    pub height_m: f64,
+    /// rho, the junction gas's density [kg/m^3].
+    pub density_kg_m3: f64,
+    /// c, the junction gas's sound speed [m/s].
+    pub sound_speed_m_s: f64,
+    /// `L = rho t / (3 pi b^2)` [Pa s^2/m^3].
+    pub inertance_pa_s2_m3: f64,
+    /// `C = pi b^2 t / (rho c^2)` [m^3/Pa].
+    pub compliance_m3_pa: f64,
+}
+
+impl ClosedHoleLump {
+    /// `(L, C)` for a closed hole of radius b and height t in a gas of density
+    /// rho and sound speed c; `None` unless all four, L and C are finite and
+    /// positive.
+    #[must_use]
+    pub fn law(hole_radius_m: f64, height_m: f64, density_kg_m3: f64, sound_speed_m_s: f64)
+        -> Option<(f64, f64)>
+    {
+        [hole_radius_m, height_m, density_kg_m3, sound_speed_m_s].iter()
+            .all(|value| value.is_finite() && *value > 0.0)
+            .then(|| {
+                let area = core::f64::consts::PI * hole_radius_m * hole_radius_m;
+                (density_kg_m3 * height_m / (3.0 * area),
+                    area * height_m / (density_kg_m3 * sound_speed_m_s * sound_speed_m_s))
+            })
+            .filter(|&(inertance, compliance)| inertance.is_finite() && inertance > 0.0
+                && compliance.is_finite() && compliance > 0.0)
+    }
+}
+
 impl Input {
+    /// The clock's admission of hole lengths, once it is known: a `closed-hole`
+    /// node must be shorter than one step (`t < c dt`; one step or more is a
+    /// `duct_section`), and an `inner` side hole's chimney must be at least one
+    /// step long in the graph (an open hole has no lumped form here).
+    pub(super) fn check_hole_steps(&self, mechanics_rate_hz: u32) -> Result<(), FlueInputError> {
+        let dt = 1.0 / f64::from(mechanics_rate_hz);
+        for (hole, line) in &self.closed {
+            if hole.height_m >= hole.sound_speed_m_s * dt {
+                return Err(bad(*line, "duct_node closed-hole of one step or more (height >= c dt) is a duct_section"));
+            }
+        }
+        for hole in &self.inner {
+            if hole.network_length_m < self.gases[hole.section].sound_speed * dt {
+                return Err(bad(0, "an open side hole shorter than one step in the graph has no lumped form (its outlet load and receiver live on its far node): use a finer clock"));
+            }
+        }
+        Ok(())
+    }
+
     pub fn read(rows: &mut Rows<'_>, default: GasState,
         sources: Option<&ThermochemicalSources<'_>>, records: &mut Vec<GasRecord>,
         gate: &CancelGate) -> Result<Self, FlueInputError>
     {
         let explicit_network = rows.next_is("network");
         let mut inner = Vec::new();
-        let (nodes, sections, gases) = if explicit_network {
+        let (nodes, sections, gases, closed) = if explicit_network {
             let mut row = rows.row("network")?;
             let node_count: usize = row.number()?;
             let section_count: usize = row.number()?;
@@ -140,6 +243,7 @@ impl Input {
                 return Err(bad(rows.line, "network requires 2..=64 nodes and 1..=128 sections"));
             }
             let mut nodes = Vec::with_capacity(node_count);
+            let mut holes = Vec::new();
             for _ in 0..node_count {
                 poll(gate)?;
                 let mut row = rows.row("duct_node")?;
@@ -173,6 +277,18 @@ impl Input {
                                 else { NetworkNode::Shunt { load } }
                             }
                         }
+                    }
+                    Some("closed-hole") => {
+                        let hole_radius_m = row.scalar()?;
+                        let height_m = row.scalar()?;
+                        if !(hole_radius_m.is_finite() && hole_radius_m > 0.0
+                            && height_m.is_finite() && height_m > 0.0) {
+                            return Err(bad(row.line, "duct_node closed-hole needs a positive hole radius and height"));
+                        }
+                        holes.push((nodes.len(), hole_radius_m, height_m, row.line));
+                        // A junction until its sections and gas are read; then
+                        // the hole's shunt load ([`ClosedHoleLump`]).
+                        NetworkNode::Junction
                     }
                     _ => return Err(bad(row.line, "unsupported physical duct node")),
                 };
@@ -209,6 +325,39 @@ impl Input {
                 row.end()?;
                 sections.push(section);
                 gases.push(gas);
+            }
+            // Closed holes first, so that an `inner` chimney on the same
+            // junction is refused by name and never read as an open hole's.
+            let mut closed = Vec::with_capacity(holes.len());
+            for (node, hole_radius_m, height_m, line) in holes {
+                let incident: Vec<usize> = (0..sections.len())
+                    .filter(|&j| sections[j].nodes.contains(&node)).collect();
+                if incident.len() < 2 {
+                    return Err(bad(line, "duct_node closed-hole needs a bore junction of at least two sections"));
+                }
+                if requests.iter().any(|request| incident.contains(&request.0)) {
+                    return Err(bad(line, "duct_node closed-hole cannot share its junction with an inner side hole's chimney"));
+                }
+                if incident.iter().any(|&j| hole_radius_m > sections[j].radius_m) {
+                    return Err(bad(line, "duct_node closed-hole needs a hole no wider than its junction's sections"));
+                }
+                let gas = gases[incident[0]];
+                if incident.iter().any(|&j| gases[j] != gas) {
+                    return Err(bad(line, "duct_node closed-hole needs one gas on its junction's sections"));
+                }
+                let Some((inertance, compliance)) =
+                    ClosedHoleLump::law(hole_radius_m, height_m, gas.density, gas.sound_speed) else {
+                    return Err(bad(line, "duct_node closed-hole needs a finite positive inertance and compliance"));
+                };
+                let load = SeriesImpedanceSpec { resistance_pa_s_m3: 0.0, inertance_pa_s2_m3: inertance,
+                    compliance_m3_pa: Some(compliance) };
+                load.validate().map_err(|_| bad(line, "invalid passive closed-hole load"))?;
+                let load = RelaxationImpedanceSpec::new(load, &[])
+                    .map_err(|_| bad(line, "invalid passive closed-hole load"))?;
+                nodes[node] = NetworkNode::Shunt { load };
+                closed.push((ClosedHoleLump { node, hole_radius_m, height_m, density_kg_m3: gas.density,
+                    sound_speed_m_s: gas.sound_speed, inertance_pa_s2_m3: inertance,
+                    compliance_m3_pa: compliance }, line));
             }
             let chimneys: Vec<usize> = requests.iter().map(|request| request.0).collect();
             for (index, bore_radius_m, matching, series, line) in requests {
@@ -260,7 +409,7 @@ impl Input {
                     chimney_m: length_m, inner_length_m, matching_length_m, series_length_m,
                     series_bore, network_length_m });
             }
-            (nodes, sections, gases)
+            (nodes, sections, gases, closed)
         } else {
             let mut row = rows.row("tube")?;
             let length_m = row.scalar()?;
@@ -270,7 +419,7 @@ impl Input {
             row.end()?;
             (vec![NetworkNode::Inlet, NetworkNode::Termination { reflection }],
                 vec![TubeSection { nodes: [0, 1], length_m, radius_m, max_length_error_m }],
-                vec![default])
+                vec![default], Vec::new())
         };
         let mut graph = TubeNetworkSpec { nodes, sections,
             sound_speed_m_s: default.sound_speed, max_wave_memory_bytes: 0 };
@@ -279,7 +428,7 @@ impl Input {
         graph.sound_speed_m_s = gases[inlet].sound_speed;
         graph.validate_section_gases(&gases).map_err(|source|
             FlueInputError::Physics(FlueError::Physics(source)))?;
-        Ok(Self { graph, gases, inner, explicit_network })
+        Ok(Self { graph, gases, inner, closed, explicit_network })
     }
 
     pub fn read_losses(&self, rows: &mut Rows<'_>)

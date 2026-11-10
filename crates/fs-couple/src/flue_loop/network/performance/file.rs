@@ -82,7 +82,7 @@ use excitation::{FlueFlowInput, FlueJetInput};
 pub use airway::{FlueAirwayRecord, MAX_UPSTREAM_AIRWAY_SECTIONS, UPSTREAM_AIRWAY_MAX_TAPS, UPSTREAM_AIRWAY_TWO_WAY};
 pub use wall::{FlueWallRecord, MAX_FLUE_WALL_PACK_BYTES};
 pub use window::{ERNOULT_FABRE_SPANS, ErnoultFabreSpans, ErnoultFabreWindow, FlueWindowRecord};
-pub use duct::HoleInnerLength;
+pub use duct::{ClosedHoleLump, HoleInnerLength};
 pub use boundary::{FlueBoundaryRecord, boundary_closing_force_path, flue_source_control_paths};
 
 /// Versioned SI source grammar; the suffix is the existing gesture format.
@@ -196,6 +196,7 @@ pub struct FlueFilePerformance {
     jet_forcing_area_m2: Option<f64>,
     jet_source_on_strip: bool,
     hole_inner_lengths: Vec<HoleInnerLength>,
+    closed_holes: Vec<ClosedHoleLump>,
     upstream_airway: Option<FlueAirwayRecord>,
 }
 impl FlueFilePerformance {
@@ -284,6 +285,9 @@ impl FlueFilePerformance {
     /// centre, and keeps the computed one only in the record
     /// ([`ErnoultFabreWindow`]). An `inner BORE_RADIUS_M` on a side hole's
     /// `duct_section` row adds that hole's inner length ([`HoleInnerLength`]).
+    /// A `duct_node closed-hole HOLE_RADIUS_M HEIGHT_M` puts a closed hole
+    /// shorter than one step on its bore junction as a lumped shunt in place of
+    /// a chimney section and its closed end ([`ClosedHoleLump`]).
     /// `mouth_reaction window-cylinder` instead radiates that window's solved
     /// outer face from the head's outer cylinder in the declared exterior
     /// (see [`crate::flue_loop::window_radiation`]), replacing the authored
@@ -517,6 +521,7 @@ impl FlueFilePerformance {
         };
         let exterior_record = gas_records.last().expect("both gas routes retain their source record").clone();
         let mut duct = duct::Input::read(&mut rows, gas, sources, &mut gas_records, gate)?;
+        duct.check_hole_steps(mechanics_rate_hz)?;
         let walls = wall::ParsedWalls::read(&mut rows)?;
         // Independent terminal separation loss, in series with whatever
         // physical radiation load the description selects below.
@@ -720,6 +725,7 @@ impl FlueFilePerformance {
         poll(gate)?;
         duct.graph.max_wave_memory_bytes = max_wave_memory_bytes;
         let hole_inner_lengths = core::mem::take(&mut duct.inner);
+        let closed_holes: Vec<ClosedHoleLump> = duct.closed.iter().map(|&(hole, _)| hole).collect();
         let source = FlueNetworkSpec { graph: duct.graph, gases: duct.gases,
             viscothermal, minimum_jet_speed_m_s, maximum_jet_mach, max_jet_history_samples };
         let mut material_sources = material::Sources::default();
@@ -874,7 +880,7 @@ impl FlueFilePerformance {
             jet_card_hash: card.content_hash(), jet_card_source, compiled_controls: renderer.controls.len() };
         Ok(Self { info, renderer, geometry, card, gas_records, wall_records, boundary_records,
             radiation_bindings, mimo_radiation_record, computed_radiation_record, window,
-            jet_forcing_area_m2, jet_source_on_strip, hole_inner_lengths, upstream_airway })
+            jet_forcing_area_m2, jet_source_on_strip, hole_inner_lengths, closed_holes, upstream_airway })
     }
     /// Original identity and finite clocks, separate from the evolving solver.
     #[must_use] pub const fn info(&self) -> FluePerformanceInfo { self.info }
@@ -909,6 +915,8 @@ impl FlueFilePerformance {
     #[must_use] pub const fn jet_source_on_strip(&self) -> bool { self.jet_source_on_strip }
     /// The side holes' inner lengths added by `inner` rows, in row order.
     #[must_use] pub fn hole_inner_lengths(&self) -> &[HoleInnerLength] { &self.hole_inner_lengths }
+    /// The closed holes `duct_node closed-hole` rows lumped on their junctions, in node order.
+    #[must_use] pub fn closed_holes(&self) -> &[ClosedHoleLump] { &self.closed_holes }
     /// The player's airway an `upstream_airway` record put ahead of the windway, when selected.
     #[must_use] pub const fn upstream_airway(&self) -> Option<&FlueAirwayRecord> { self.upstream_airway.as_ref() }
     /// Move the original physical pressure producer into streaming/PCM output.

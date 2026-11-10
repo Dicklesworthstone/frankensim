@@ -46,6 +46,31 @@ fn opening_loss_provenance<'a>(
     format!(",\"opening_losses\":[{records}],\"opening_loss_scope\":\"same-sample symmetric quasi-steady separation in series with original local radiation; no vortex memory, directional pressure recovery or measured instrument coefficient\"")
 }
 
+/// The card's `outlet_mutual` row (delayed explicit mutual radiation between the compact outlets): its form and law,
+/// the coupled terminals in the declared order, every pair, and the cold admission numbers. Empty without the row, so a
+/// card without it keeps its bytes.
+fn outlet_mutual_provenance(mutual: Option<&fs_couple::flue_loop::network::outlet_mutual::OutletMutual>) -> String {
+    use fs_couple::flue_loop::network::outlet_mutual::OutletMutualForm;
+    let Some(mutual) = mutual else { return String::new() };
+    let r = mutual.record();
+    let (form, law) = match r.form {
+        OutletMutualForm::FreeField => ("free-field",
+            "p_m = sum_n rho/(4 pi d_mn) dq_n/dt(t - d_mn/c), the off-diagonal of Z_mn = j w rho exp(-j k d)/(4 pi d); \
+             central difference on a linearly interpolated delay of accepted flows, a known series pressure in each outlet's own solve"),
+        OutletMutualForm::Pritchard => ("pritchard",
+            "the free-field term times w_ij = sqrt(R_ii R_jj)/(rho w^2/(4 pi c)): Pritchard 1960 as printed by Butler 2022 Eq. 1, \
+             Z_12 = R_11 [sin(kd) + j cos(kd)]/(kd) for (ka)^2 << 1 and a/d << 1, R_11 -> sqrt(R_ii R_jj) for unequal openings; \
+             the weight a symmetric FIR from the self loads' bilinear-realized resistance, normalized to its exact DC value"),
+    };
+    let nodes = mutual.nodes().iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
+    let pairs = mutual.pairs().iter().map(|pair| format!(
+        "{{\"outlets\":[{},{}],\"distance_m\":{:e},\"delay_samples\":{},\"delay_fraction\":{:e}}}",
+        pair.outlets[0], pair.outlets[1], pair.distance_m, pair.delay_samples, pair.delay_fraction)).collect::<Vec<_>>().join(",");
+    format!(",\"outlet_mutual\":{{\"form\":\"{form}\",\"law\":{},\"nodes\":[{nodes}],\"pairs\":[{pairs}],\"density_kg_m3\":{:e},\"sound_speed_m_s\":{:e},\"time_step_s\":{:e},\"band_hz\":{:e},\"grid_points\":{},\"min_delay_samples\":{},\"max_band_error\":{:e},\"max_band_error_hz\":{:e},\"min_pivot_ratio\":{:e},\"min_pivot_hz\":{:e},\"min_weight_half_taps\":{},\"max_free_field_deviation\":{:e},\"scope\":\"outlets in the card's flat plane at their declared centers, in free field; no scattering by the body, baffle image, mouth coupling or mean flow\"}}",
+        json_string(law), r.density_kg_m3, r.sound_speed_m_s, r.time_step_s, r.band_hz, r.grid_points, r.min_delay_samples,
+        r.max_band_error, r.max_band_error_hz, r.min_pivot_ratio, r.min_pivot_hz, r.min_weight_half_taps, r.max_free_field_deviation)
+}
+
 // The aperture-flow path, and whether `--labium` adds the labium displacement to it.
 type FlowsOption<'a> = Option<(&'a str, bool)>;
 
@@ -1180,8 +1205,12 @@ pub(super) fn flue_provenance(p: &FlueFilePerformance) -> String {
         format!(",\"windway_model\":\"unsteady-no-slip-slit-v1\",\"windway_length_m\":{:e},\"windway_dynamic_viscosity_pa_s\":{:e},\"windway_transverse_cells\":{},\"jet_convection_cells\":{}",
             spec.length_m, channel.gas().dynamic_viscosity, spec.transverse_cells, flow.convection_cells())
     } else if let Some((law, held)) = renderer.voice().developing_windway() {
-        // The held note's validity measures; the attack and release are not covered.
-        format!(",\"windway_model\":\"developing-slit-shah1978-v1\",\"windway_length_m\":{:e},\"windway_dynamic_viscosity_pa_s\":{:e},\"windway_held\":{{\"pressure_pa\":{:e},\"bulk_speed_m_s\":{:e},\"core_speed_m_s\":{:e},\"x_plus\":{:e},\"reynolds_hydraulic\":{:e},\"reynolds_length\":{:e},\"displacement_thickness_m\":{:e},\"reynolds_displacement\":{:e},\"chen_inlet_shift\":{:e},\"developed\":{},\"attack_covered\":false,\"geometry\":\"straight parallel plates; a converging windway declared as its exit gap is most likely overstated\"}}",
+        // The held note's validity measures; the attack and release are not covered. Behind an airway they are the steady
+        // foot's (named only then, so a card without an airway keeps its bytes).
+        let held_at = if renderer.voice().upstream_airway().is_some() {
+            ",\"held_at\":\"the steady foot pressure behind the upstream airway, P_s(u) + R_dc W h u = P_held (R_dc the airway's DC resistance in the source gas, P_held the gesture's held lung pressure)\""
+        } else { "" };
+        format!(",\"windway_model\":\"developing-slit-shah1978-v1\",\"windway_length_m\":{:e},\"windway_dynamic_viscosity_pa_s\":{:e},\"windway_held\":{{\"pressure_pa\":{:e},\"bulk_speed_m_s\":{:e},\"core_speed_m_s\":{:e},\"x_plus\":{:e},\"reynolds_hydraulic\":{:e},\"reynolds_length\":{:e},\"displacement_thickness_m\":{:e},\"reynolds_displacement\":{:e},\"chen_inlet_shift\":{:e},\"developed\":{},\"attack_covered\":false,\"geometry\":\"straight parallel plates; a converging windway declared as its exit gap is most likely overstated\"{held_at}}}",
             law.length_m(), law.gas().dynamic_viscosity, held.pressure_pa, held.bulk_speed_m_s,
             held.core_speed_m_s, held.x_plus, held.reynolds_hydraulic, held.reynolds_length,
             held.displacement_thickness_m, held.reynolds_displacement, held.chen_inlet_shift, held.developed)
@@ -1290,6 +1319,14 @@ pub(super) fn flue_provenance(p: &FlueFilePerformance) -> String {
                 h.series_bore.map_or_else(|| "null".to_string(), |[(i, a), (j, b)]| format!("[[{i},{a:e}],[{j},{b:e}]]")),
                 h.network_length_m)).collect::<Vec<_>>().join(","))
     };
+    // Present only when a `duct_node closed-hole` row adds one, so other cards' provenance is unchanged.
+    let closed_holes_json = if p.closed_holes().is_empty() { String::new() } else {
+        format!(",\"closed_holes\":{{\"law\":\"closed hole shorter than one step as a lossless series L-C shunt on its bore junction: the first two terms of -j Z_h cot(k t), C = pi b^2 t / (rho c^2) (the hole volume), L = rho t / (3 pi b^2) (its column in series), R = 0; bilinear (implicit-midpoint) realisation\",\"not_added\":\"every end correction, as on a closed waveguide chimney: the closed hole's matching volume t_m = b d (1 + 0.207 d^3) / 8, d = b/a (the same as an open hole's, Lefebvre and Scavone 2012 Eq. 8), which leaves C low by the factor t / (t + t_m); its closed series length t_a (their Eq. 34); and any closed-end term\",\"holes\":[{}]}}",
+            p.closed_holes().iter().map(|h| format!(
+                "{{\"node\":{},\"hole_radius_m\":{:e},\"height_m\":{:e},\"density_kg_m3\":{:e},\"sound_speed_m_s\":{:e},\"inertance_pa_s2_m3\":{:e},\"compliance_m3_pa\":{:e}}}",
+                h.node, h.hole_radius_m, h.height_m, h.density_kg_m3, h.sound_speed_m_s,
+                h.inertance_pa_s2_m3, h.compliance_m3_pa)).collect::<Vec<_>>().join(","))
+    };
     let (phase, details) = network.fractional_sections().expect("file selects fractional travel");
     let actual_length: f64 = details.iter().map(|s|s.realized_dc_length_m).sum();
     let phase_error: f64 = details.iter().map(|s|s.phase_error_bound_rad).sum();
@@ -1315,6 +1352,7 @@ pub(super) fn flue_provenance(p: &FlueFilePerformance) -> String {
             format!(",\"mimo_radiation\":{}", super::duct_metadata::mimo_radiation_provenance(record)))
     };
     let mutual = p.mimo_radiation_record().is_some() || p.computed_radiation_record().is_some();
+    let outlet_mutual_json = outlet_mutual_provenance(network.outlet_mutual());
     let terminal_reaction = !p.radiation_bindings().is_empty() || mutual;
     let reaction = terminal_reaction || mouth_reaction.is_some() || window_radiation.is_some();
     let radiation_json = p.radiation_bindings().iter().map(|binding| format!(
@@ -1326,17 +1364,19 @@ pub(super) fn flue_provenance(p: &FlueFilePerformance) -> String {
         "in-loop geometry/gas-derived mutual baffled terminal reaction and matched-medium ordered outlet pressure"
     } else if p.mimo_radiation_record().is_some() {
         "in-loop source-bound mutual baffled terminal reaction and matched-medium ordered outlet pressure"
+    } else if terminal_reaction && network.outlet_mutual().is_some() {
+        "in-loop compact baffled terminal self reaction, delayed explicit mutual radiation between the outlets (outlet_mutual), and matched-medium outlet pressure"
     } else if terminal_reaction {
         "in-loop independent compact baffled terminal reaction and matched-medium outlet pressure"
     } else { "one-way infinite-baffle outlet pressure; supplied passive loads" };
-    let radiation_exclusion = if mutual { "broadband unbaffled radiation" }
+    let radiation_exclusion = if mutual || network.outlet_mutual().is_some() { "broadband unbaffled radiation" }
         else { "broadband unbaffled or mutual radiation" };
     let mouth_scope = if mouth_reaction.is_some() {
         "same-sample compact rectangular mouth reaction and matched exterior observation"
     } else if window_radiation.is_some() {
         "same-sample window radiation from the head's rigid outer cylinder; optional rectangular mouth is observation only"
     } else { "optional rectangular mouth is observation only" };
-    let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"represented_length_m\":{actual_length:e},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e}{jet_json}{momentum_json}{card_speed_json}{noise_json}{edge_json},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"radiation_feedback_added\":{reaction},\"radiation_bindings\":[{radiation_json}],\"model_scope\":\"estimated tonal jet and supplied cylindrical graph; {observation_scope}; {mouth_scope}; wall image separately declared; no full shell dynamics, mouth-to-terminal mutual reaction, {radiation_exclusion}, resolved turbulence or measured flute/SPL claim\"{gas_sources}{windway_json}{mouth_loss_json}{mouth_radiation_json}{mouth_reaction_json}{window_json}{jet_forcing_json}{hole_inner_json}{window_radiation_json}{duct_json}{wall_json}{boundary_json}{mimo_json}{opening_loss_json}}}",
+    let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"represented_length_m\":{actual_length:e},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e}{jet_json}{momentum_json}{card_speed_json}{noise_json}{edge_json},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"radiation_feedback_added\":{reaction},\"radiation_bindings\":[{radiation_json}],\"model_scope\":\"estimated tonal jet and supplied cylindrical graph; {observation_scope}; {mouth_scope}; wall image separately declared; no full shell dynamics, mouth-to-terminal mutual reaction, {radiation_exclusion}, resolved turbulence or measured flute/SPL claim\"{gas_sources}{windway_json}{mouth_loss_json}{mouth_radiation_json}{mouth_reaction_json}{window_json}{jet_forcing_json}{hole_inner_json}{closed_holes_json}{window_radiation_json}{duct_json}{wall_json}{boundary_json}{mimo_json}{opening_loss_json}{outlet_mutual_json}}}",
         i.jet_card_source,i.jet_card_hash,p.card().claim.kind(),p.card().authority.label(),i.compiled_controls,
         geometry.flue_width_m,geometry.flue_height_m,geometry.cut_up_m,geometry.labium_offset_m,
         geometry.jet_angle_rad,geometry.mouth_loss_rel,island.displacement_gain,island.seed_amplitude_rel,
@@ -1900,5 +1940,39 @@ mod tests {
         let piston = load(&declared).unwrap_or_else(|error| panic!("G3 piston: {error}"));
         assert!(piston.source_json.contains("\"open_hole_interaction_mutual\":\"baffled-piston large-distance product"), "{}", piston.source_json);
         assert!(piston.source_json.contains("\"open_hole_interaction_fallback\":{\"bead\":\"frankensim-1xe5t\""), "{}", piston.source_json);
+    }
+
+    /// `outlet_mutual` (MB 20806): a flue card with the row names the row, its law and its admission on the receipt and
+    /// no longer excludes mutual radiation; apart from that record, the two scope phrases and the input hash, its receipt
+    /// is the plain card's byte for byte, and the plain card names no mutual term.
+    #[test]
+    fn flue_record_names_the_outlet_mutual_row_and_its_law_only_when_declared() {
+        const A1: &str = include_str!("../../../../../data/instruments/descriptions/recorder/recorder-a1.performance");
+        const LAST_OUTLET: &str = "outlet 21 -0.0863000 0\n";
+        const INDEPENDENT: &str = "in-loop independent compact baffled terminal reaction and matched-medium outlet pressure";
+        const COUPLED: &str = "in-loop compact baffled terminal self reaction, delayed explicit mutual radiation between the outlets (outlet_mutual), and matched-medium outlet pressure";
+        const EXCLUDED: &str = "broadband unbaffled or mutual radiation";
+        const KEPT: &str = "broadband unbaffled radiation";
+        assert_eq!(A1.matches(LAST_OUTLET).count(), 1, "the a1 outlet rows changed; update this test");
+        assert!(!A1.contains("outlet_mutual"));
+        let receipt = |text: &str| load(text.as_bytes(), 256, ObservationPolicy::Diagnostic)
+            .unwrap_or_else(|error| panic!("a1: {error}")).source_json;
+        let hash = |json: &str| json.split("\"blake3\":\"").nth(1).and_then(|rest| rest.split('"').next()).unwrap().to_owned();
+        let plain = receipt(A1);
+        assert!(!plain.contains("\"outlet_mutual\"") && !plain.contains(COUPLED), "{plain}");
+        assert_eq!((plain.matches(INDEPENDENT).count(), plain.matches(EXCLUDED).count()), (1, 1), "{plain}");
+        for form in ["free-field", "pritchard"] {
+            let row = receipt(&A1.replace(LAST_OUTLET, &format!("{LAST_OUTLET}outlet_mutual {form}\n")));
+            let start = row.find(",\"outlet_mutual\":{").unwrap_or_else(|| panic!("{form}: no record in {row}"));
+            let record = &row[start..row.len() - 1];
+            assert!(record.starts_with(&format!(",\"outlet_mutual\":{{\"form\":\"{form}\",\"law\":\"")), "{record}");
+            assert!(record.contains("\"nodes\":[24,19,21],\"pairs\":[{\"outlets\":[0,1],") && record.ends_with('}'), "{record}");
+            assert!(row.ends_with(&format!("{record}}}")), "{form}: the record closes the receipt");
+            assert_eq!((row.matches(COUPLED).count(), row.matches(KEPT).count(), row.matches(EXCLUDED).count()), (1, 1, 0), "{row}");
+            assert!(!row.contains(INDEPENDENT));
+            let restored = format!("{}}}", &row[..start]).replacen(&hash(&row), &hash(&plain), 1)
+                .replacen(COUPLED, INDEPENDENT, 1).replacen(KEPT, EXCLUDED, 1);
+            assert_eq!(restored, plain, "{form}: the row changes only its record, the two scope phrases and the input hash");
+        }
     }
 }
