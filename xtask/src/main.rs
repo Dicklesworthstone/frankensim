@@ -60,6 +60,7 @@ mod constellation_cleanliness;
 mod constellation_drift;
 mod critical_path;
 mod depgraph;
+mod enumeration;
 mod identities;
 mod instrument_claims;
 mod manifest_fixture;
@@ -8410,6 +8411,18 @@ fn main() -> ExitCode {
                 }
             };
         }
+        "generate-enumeration-ratchet" => {
+            return match enumeration::generate(&root) {
+                Ok(()) => {
+                    println!("enumeration ratchet regenerated");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         "generate-source-manifest" => {
             let scope: std::collections::BTreeSet<String> = std::env::args().skip(2).collect();
             return match source_manifest::generate(&root, &scope) {
@@ -8695,6 +8708,7 @@ fn main() -> ExitCode {
             (violations, vec![suite_receipt::CHECK])
         }
         "check-spine-ratchet" => (spine_ratchet::check(&root), vec![spine_ratchet::CHECK]),
+        "check-enumeration" => (enumeration::check(&root), vec![enumeration::CHECK]),
         "check-citable-producers" => (check_citable_producers(&root), vec![CITABLE_PRODUCER_CHECK]),
         "check-all" => {
             let mut v = check_layers(&manifests);
@@ -8748,6 +8762,7 @@ fn main() -> ExitCode {
             v.extend(claims::check_claim_language(&root));
             v.extend(closures::check_closures(&root));
             v.extend(spine_ratchet::check(&root));
+            v.extend(enumeration::check(&root));
             let spine_metrics_report = spine_metrics::check(&root);
             v.extend(spine_metrics_report.0);
             policy_notes.extend(spine_metrics_report.1);
@@ -8795,6 +8810,7 @@ fn main() -> ExitCode {
                     "claim-state",
                     "closure-evidence",
                     spine_ratchet::CHECK,
+                    enumeration::CHECK,
                     spine_metrics::CHECK,
                     tropical_path::CHECK,
                     suite_receipt::CHECK,

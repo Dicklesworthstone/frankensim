@@ -229,6 +229,13 @@ cell of a physics x integrator x controller matrix that has no end, and every
 cell must later be migrated or removed. Between 2026-10-26 and 2026-11-09
 `crates/fs-couple/src` gained 822,563 lines and lost 12,841 that way.
 
+`cargo run -p xtask -- check-enumeration` (part of `check-all`) counts these
+entry points and the `*Candidate`, `*Error` and trait definitions in
+`fs-couple` and `fs-material` and compares them with
+`enumeration-ratchet.json`. A count may not rise. A commit that removes code
+lowers the file in the same commit with
+`cargo run -p xtask -- generate-enumeration-ratchet`.
+
 Until the Component contract is frozen at v1, the accepted work is the menu on
 bead `frankensim-rc-1109-root-3gc12.8.3`: compile repairs, Component
 implementations for existing physics owners, adapters, the kernel slices, card

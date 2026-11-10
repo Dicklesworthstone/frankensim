@@ -1,0 +1,15 @@
+{
+  "schema": "frankensim-enumeration-ratchet-v1",
+  "bead": "frankensim-rc-1109-root-3gc12.8.1",
+  "fs-couple.with_fns": 823,
+  "fs-couple.candidates": 368,
+  "fs-couple.errors": 578,
+  "fs-couple.traits": 115,
+  "fs-couple.lines": 796498,
+  "fs-material.with_fns": 242,
+  "fs-material.candidates": 113,
+  "fs-material.errors": 298,
+  "fs-material.traits": 62,
+  "fs-material.lines": 447345,
+  "no_claim": "text-scan counts of non-test source: pub fn names containing _with_, pub struct names ending in Candidate, pub struct or enum names ending in Error, trait definitions; lines are recorded and not gated; a count says nothing about whether the code is correct or used"
+}
