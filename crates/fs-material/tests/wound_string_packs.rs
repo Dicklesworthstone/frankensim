@@ -233,6 +233,25 @@ fn spirocore_bass_rows_are_their_catalogue_derivations() {
     }
 }
 
+/// The SURROGATE string loss of the posted surrogate bass pages: the Spirocore catalogue seed with one observation and two scalar rows added, the loss factors 1/900 (the translational-wave Q of typically 900
+/// that Bavu, Smith and Wolfe (2005) report for a bass-guitar string, not a measurement of any Spirocore string). Every catalogue row is kept unchanged, the two new rows are 1/900 on both factors, and the
+/// observation says in its own words that it is a surrogate.
+#[test]
+fn spirocore_surrogate_seed_is_the_catalogue_seed_plus_two_loss_rows_of_one_over_900() {
+    let parent = load_pack("bass-strings-thomastik-spirocore-orchestra-catalogue-2019", PERMITTED_FACTS);
+    let dir = "bass-strings-thomastik-spirocore-orchestra-surrogate-loss-bavu2005";
+    let s = load_pack(dir, PERMITTED_FACTS);
+    for (k, v) in &parent {
+        assert_eq!(s.get(k), Some(v), "{k}: the surrogate seed keeps the catalogue row");
+    }
+    assert_eq!(s.len(), parent.len() + 2, "exactly two scalar rows are added");
+    for k in ["loss_factor_tension_bass_surrogate", "loss_factor_bending_bass_surrogate"] {
+        assert!(((s[k] - 1.0 / 900.0) * 900.0).abs() < 1e-12, "{k} is 1/900, got {}", s[k]);
+    }
+    let text = std::fs::read_to_string(repo_root().join(format!("data/matdb/seed-v1/{dir}/properties.tsv"))).expect("properties");
+    assert!(text.contains("SURROGATE row, not a measurement of any Spirocore string"), "the observation names itself a surrogate");
+}
+
 #[test]
 fn multifilament_core_patents_satisfy_their_identities() {
     let s = load_pack(
