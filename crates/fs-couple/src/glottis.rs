@@ -2086,6 +2086,18 @@ impl GlottalIsland {
         }
     }
 
+    /// The displacements of the lower and upper masses `[x_1, x_2]` [m] at the present state, positive away from the
+    /// midline: the two-mass island's (with a [`FoldShape`], each section's modal coordinate `q`, strip `j` at
+    /// `rest[j] + mode[j] q`), or the body-cover fold's cover masses `q_l`, `q_u`. `None` for the 1-DOF island, which
+    /// has one coordinate. Read only; nothing in the step uses it.
+    #[must_use]
+    pub fn mass_displacements_m(&self) -> Option<[f64; 2]> {
+        match &self.valve {
+            Valve::OneDof { .. } => None,
+            Valve::TwoMass { x, .. } | Valve::BodyCover { x, .. } => Some([x[0], x[2]]),
+        }
+    }
+
     /// [`GlottalFrame::shut`] at the present state.
     fn shut(&self, gap: f64) -> bool {
         match (&self.valve, &self.strips) {

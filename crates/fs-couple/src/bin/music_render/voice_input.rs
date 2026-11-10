@@ -3,7 +3,7 @@
 use super::{RATE, create_outputs, json_string, stream_output};
 use fs_blake3::DomainHasher;
 use fs_couple::voice_performance::{
-    MAX_VOICE_PERFORMANCE_BYTES, NasalSinus, VOICE_PERFORMANCE_SCHEMA, VoiceDescription,
+    GLOTTAL_TRACE_COLUMNS, MAX_VOICE_PERFORMANCE_BYTES, NasalSinus, VOICE_PERFORMANCE_SCHEMA, VoiceDescription,
 };
 use fs_material::gas_species::input::ThermochemicalSources;
 use std::io::{Read, Write};
@@ -48,9 +48,12 @@ fn nasal_head_scope(head_load: bool, torso: bool) -> String {
     )
 }
 
-fn options(args: &[String]) -> Result<(&str, &str, usize), String> {
+/// The voice command's host options: the input, the output, `--block N`, and `--glottal-trace PATH` (an output, like
+/// the wav: the fold's own trace, [`write_glottal_trace`]). Nothing physical is an option.
+fn options(args: &[String]) -> Result<(&str, &str, usize, Option<&str>), String> {
     let mut paths = Vec::new();
     let mut block = None;
+    let mut trace = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -60,6 +63,11 @@ fn options(args: &[String]) -> Result<(&str, &str, usize), String> {
                     .filter(|v| (1..=65_536).contains(v))
                     .ok_or_else(|| "--block needs an integer in 1..=65536".to_string())?);
             }
+            "--glottal-trace" => {
+                if trace.is_some() { return Err("--glottal-trace may only be supplied once".into()); }
+                trace = Some(iter.next().map(String::as_str).filter(|v| !v.is_empty() && !v.starts_with('-'))
+                    .ok_or_else(|| "--glottal-trace needs an output path".to_string())?);
+            }
             value if value.starts_with('-') => return Err(format!(
                 "unsupported voice option {value:?}; the fold, tract, gas, duration, pressure and microphone belong to the file"
             )),
@@ -67,20 +75,60 @@ fn options(args: &[String]) -> Result<(&str, &str, usize), String> {
         }
     }
     let [input, output] = paths.as_slice() else {
-        return Err("usage: music_render voice INPUT.performance OUT.wav [--block N]".into());
+        return Err("usage: music_render voice INPUT.performance OUT.wav [--block N] [--glottal-trace OUT.f32]".into());
     };
-    Ok((*input, *output, block.unwrap_or(512)))
+    Ok((*input, *output, block.unwrap_or(512), trace))
+}
+
+/// `--glottal-trace PATH`: the kept trace as little-endian `f32` rows of [`GLOTTAL_TRACE_COLUMNS`] on the mechanics
+/// clock, into `PATH`, and into `PATH` with the extension `json` a header naming the columns, the clock, the fold
+/// length and the wav and card it belongs to. Both files were created before the render (`create_new`), so a bad path refuses
+/// before anything is written. The sidecar is not touched, so with or without the option it is the same.
+fn write_glottal_trace(
+    files: (std::fs::File, std::fs::File),
+    values: &[f32],
+    rate_hz: u32,
+    fold_length_m: f64,
+    wav_hash: &str,
+    input_hash: &str,
+) -> Result<(), String> {
+    let (data, mut header) = files;
+    let mut data = std::io::BufWriter::new(data);
+    for value in values {
+        data.write_all(&value.to_le_bytes()).map_err(|e| format!("glottal trace write failed: {e}"))?;
+    }
+    data.flush().map_err(|e| format!("glottal trace write failed: {e}"))?;
+    let columns = GLOTTAL_TRACE_COLUMNS.iter().map(|c| json_string(c)).collect::<Vec<_>>().join(",");
+    let text = format!(
+        "{{\"schema\":\"frankensim-voice-glottal-trace-v1\",\"columns\":[{columns}],\"dtype\":\"f32le\",\
+         \"rows\":{},\"rate_hz\":{rate_hz},\"fold_length_m\":{fold_length_m:e},\
+         \"wav_blake3\":\"{wav_hash}\",\"input_blake3\":\"{input_hash}\"}}\n",
+        values.len() / GLOTTAL_TRACE_COLUMNS.len()
+    );
+    header.write_all(text.as_bytes()).and_then(|()| header.flush())
+        .map_err(|e| format!("glottal trace header write failed: {e}"))
 }
 
 pub(super) fn run_with_gas_sources(
     args: &[String],
     sources: Option<&ThermochemicalSources<'_>>,
 ) -> Result<(), String> {
-    let (input, output, block) = options(args)?;
+    let (input, output, block, trace) = options(args)?;
     let output = Path::new(output);
     let sidecar = output.with_extension("provenance.json");
     if output == sidecar.as_path() || output.exists() || sidecar.exists() {
         return Err("output/sidecar paths must be distinct and must not already exist".into());
+    }
+    let trace = trace.map(|path| (Path::new(path), Path::new(path).with_extension("json")));
+    if let Some((data, header)) = &trace
+        && (*data == header.as_path()
+            || [output, sidecar.as_path()].iter().any(|p| *p == *data || *p == header.as_path())
+            || data.exists()
+            || header.exists())
+    {
+        return Err("--glottal-trace: the trace and its .json header must be distinct from the outputs and must not \
+            already exist"
+            .into());
     }
     let file = std::fs::File::open(input).map_err(|e| format!("voice input open failed: {e}"))?;
     let mut bytes = Vec::new();
@@ -91,7 +139,22 @@ pub(super) fn run_with_gas_sources(
         return Err("music_render requires an explicitly declared 48000 Hz output clock; no implicit resampling".into());
     }
     let samples = usize::try_from(description.samples).map_err(|_| "sample count exceeds this host".to_string())?;
+    // A `glottal_orifice` card (a flow rig) never steps the fold, so its trace would describe a fold that isn't there.
+    if trace.is_some() && description.glottal_orifice.is_some() {
+        return Err("--glottal-trace has no fold to trace on a `glottal_orifice` card".into());
+    }
     let mut performance = description.build()?;
+    // The trace's two files are claimed before the outputs, so a bad trace path refuses before anything is rendered.
+    let trace_files = match &trace {
+        Some((data, header)) => {
+            performance.keep_glottal_trace(samples.saturating_mul(description.mechanics_per_output as usize));
+            Some((
+                std::fs::File::create_new(data).map_err(|e| format!("glottal trace create failed: {e}"))?,
+                std::fs::File::create_new(header).map_err(|e| format!("glottal trace header create failed: {e}"))?,
+            ))
+        }
+        None => None,
+    };
     let (mut audio, mut metadata) = create_outputs(output, &sidecar)?;
     let rendered = stream_output::render_waveform(
         &mut performance, &mut audio, samples, block, description.full_scale_pa,
@@ -235,6 +298,10 @@ pub(super) fn run_with_gas_sources(
     );
     writeln!(metadata, "{provenance}").and_then(|_| metadata.flush())
         .map_err(|e| format!("sidecar write failed: {e}"))?;
+    if let (Some(files), Some(values)) = (trace_files, performance.glottal_trace()) {
+        let (rate, length) = (info.mechanics_rate_hz, description.fold.fold_length_m);
+        write_glottal_trace(files, values, rate, length, &wav_hash, &input_hash)?;
+    }
     println!(
         "{{\"suite\":\"music-render\",\"verdict\":\"rendered\",\"fixture\":\"voice-input\",\
          \"wav\":{},\"samples\":{samples},\"clipped\":{},\"peak_pa\":{:e},\"rms_pa\":{:e},\
@@ -389,7 +456,16 @@ mod tests {
         assert!(options(&args(&["input", "output", "--block", "37", "--block", "64"])).is_err());
         assert!(options(&args(&["input"])).is_err());
         let a = args(&["input", "output", "--block", "37"]);
-        assert_eq!(options(&a).unwrap(), ("input", "output", 37));
+        assert_eq!(options(&a).unwrap(), ("input", "output", 37, None));
+    }
+    /// `--glottal-trace` (MB 22209) is an output path, given once, and never takes a flag as its path.
+    #[test]
+    fn glottal_trace_is_one_output_path() {
+        let a = args(&["input", "output", "--glottal-trace", "fold.f32", "--block", "64"]);
+        assert_eq!(options(&a).unwrap(), ("input", "output", 64, Some("fold.f32")));
+        assert!(options(&args(&["input", "output", "--glottal-trace"])).is_err());
+        assert!(options(&args(&["input", "output", "--glottal-trace", "--block", "64"])).is_err());
+        assert!(options(&args(&["input", "output", "--glottal-trace", "a.f32", "--glottal-trace", "b.f32"])).is_err());
     }
     #[test]
     fn rest_gap_rows_reach_the_sidecar_and_a_card_without_them_adds_nothing() {

@@ -63,10 +63,13 @@
 //! Bessel horns, a pressure phrase, and a baffled-disk microphone on the bore's mouth flow. The
 //! file declares its own clock (a large bell bounds it below 48 kHz) and the WAV is written on it.
 //!
-//! `music_render voice INPUT.performance OUT.wav [--block N]` plays a lumped
+//! `music_render voice INPUT.performance OUT.wav [--block N] [--glottal-trace OUT.f32]` plays a lumped
 //! glottal source into a tract area function and writes the pressure at a
 //! baffled microphone. The file owns every physical input; see
 //! `fs_couple::voice_performance` for the format and its stated limits.
+//! `--glottal-trace` also writes the fold's own trace (aperture gap, glottal flow and the two masses'
+//! displacements per physical substep, `fs_couple::voice_performance::GLOTTAL_TRACE_COLUMNS`) as `f32` rows at
+//! OUT.f32 with a JSON header at OUT.json; the wav and the sidecar are the same with or without it.
 //!
 //! Both `lip` and `voice` accept shared `ambient mixture T P mole|mass COUNT
 //! SPECIES FRACTION...` records. `ambient thermochemical T P mole|mass COUNT

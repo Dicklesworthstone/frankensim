@@ -1887,6 +1887,7 @@ impl VoiceDescription {
             constriction_noise,
             fricative,
             pulse_shimmer: self.pulse_shimmer.map(PulseShimmer::new),
+            glottal_trace: None,
             gas_density: gas.density,
             gas_viscosity: gas.dynamic_viscosity,
             fold_length_m: self.fold.fold_length_m,
@@ -2406,6 +2407,18 @@ impl PulseShimmer {
     }
 }
 
+/// The columns of [`VoicePerformance::glottal_trace`], in row order, each an `f32`:
+/// - `gap_m`: [`GlottalFrame::gap_m`](crate::glottis::GlottalFrame::gap_m) at the end of the step [m]: the narrower
+///   section's gap, negative in contact, or with a `fold_shape` the narrower section's mean open gap (never
+///   negative). Both [`FoldMode`]s are non-negative at every strip and the two sections share the strips' rest gaps,
+///   so one section is the narrower at every strip and `l max(gap_m, 0)` is the glottal area a view from above sees;
+/// - `flow_m3_s`: [`GlottalFrame::flow_m3_s`](crate::glottis::GlottalFrame::flow_m3_s), the glottal volume flow
+///   [m^3/s];
+/// - `x_lower_m`, `x_upper_m`: the lower and upper masses' displacements [m]
+///   ([`GlottalIsland::mass_displacements_m`]); with a `fold_shape`, each section's modal coordinate `q`, strip `j`
+///   sitting at `rest[j] + mode[j] q` (the sine mode's middle moves `(pi/2) q`); NaN for the one-mass fold.
+pub const GLOTTAL_TRACE_COLUMNS: [&str; 4] = ["gap_m", "flow_m3_s", "x_lower_m", "x_upper_m"];
+
 /// A realized performance: the fold, the tract and the microphone, advanced
 /// together on one physical clock.
 pub struct VoicePerformance {
@@ -2434,6 +2447,10 @@ pub struct VoicePerformance {
     fricative: Option<FricativeSource>,
     /// Opt-in per-cycle gain on the wave the tract receives.
     pulse_shimmer: Option<PulseShimmer>,
+    /// The render option `--glottal-trace` ([`Self::keep_glottal_trace`]): per physical substep the
+    /// [`GLOTTAL_TRACE_COLUMNS`], appended after the step, so nothing the island, the tract or the receiver sees
+    /// changes. `None` keeps nothing.
+    glottal_trace: Option<Vec<f32>>,
     gas_density: f64,
     gas_viscosity: f64,
     fold_length_m: f64,
@@ -2539,6 +2556,20 @@ impl VoicePerformance {
     #[must_use]
     pub fn filter_delay_samples(&self) -> f64 {
         self.receiver.filter_delay_samples() + self.head.as_ref().map_or(0.0, |head| head.latency_samples() as f64)
+    }
+
+    /// Keep the glottal trace from the next physical substep on ([`Self::glottal_trace`]), with room reserved for
+    /// `substeps` rows. The render option `--glottal-trace` calls it; the card has no key for it, so a card's text and
+    /// its pressure are those of a render without it, sample for sample.
+    pub fn keep_glottal_trace(&mut self, substeps: usize) {
+        self.glottal_trace = Some(Vec::with_capacity(substeps.saturating_mul(GLOTTAL_TRACE_COLUMNS.len())));
+    }
+
+    /// The glottal trace kept so far: time-major, one row of [`GLOTTAL_TRACE_COLUMNS`] per physical substep, on the
+    /// mechanics clock ([`VoiceInfo::mechanics_rate_hz`]). `None` unless [`Self::keep_glottal_trace`] was called.
+    #[must_use]
+    pub fn glottal_trace(&self) -> Option<&[f32]> {
+        self.glottal_trace.as_deref()
     }
 
     /// The opt-in glottal jet noise's open-gate mechanics steps so far by how much of the band each could represent at the
@@ -2783,6 +2814,11 @@ impl VoicePerformance {
             {
                 *sum += frame.flow_m3_s;
                 *count += 1;
+            }
+            if let Some(trace) = self.glottal_trace.as_mut() {
+                // Read after the step: the island's state is the one the frame reports, and nothing here feeds back.
+                let [lower, upper] = self.island.mass_displacements_m().unwrap_or([f64::NAN; 2]);
+                trace.extend_from_slice(&[frame.gap_m as f32, frame.flow_m3_s as f32, lower as f32, upper as f32]);
             }
             self.steps += 1;
         }
@@ -4220,6 +4256,54 @@ mod tests {
         assert!((sd / card.sd_rel - 1.0).abs() < 0.03, "sd {sd:e}");
         let lag = gains.iter().zip(&gains[1..]).map(|(a, b)| (a - mean) * (b - mean)).sum::<f64>() / (gains.len() - 1) as f64;
         assert!((lag / (sd * sd)).abs() < 0.03, "consecutive gains correlate {}", lag / (sd * sd));
+    }
+
+    /// The render option `--glottal-trace` (MB 22209): keeping the trace leaves the pressure bit for bit, on the
+    /// uniform fold and on a shaped one. The trace holds one row per physical substep; its last row is the island's own
+    /// gap and displacements at the end of the render; its flow column's extremes (from 0) are the stats' peak and
+    /// minimum; on the uniform fold its rows with no open gap are the steps `closed_fraction` counts, and on the shaped
+    /// fold (contact on any strip) they are no more than those.
+    #[test]
+    fn glottal_trace_leaves_the_pressure_bit_for_bit_and_reads_the_island() {
+        const N: usize = GLOTTAL_TRACE_COLUMNS.len();
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        for (extra, uniform) in [("", true), ("fold_shape sine uniform\n", false)] {
+            let text = modulation_text(extra);
+            let description = VoiceDescription::from_bytes(text.as_bytes()).expect("parses");
+            let plain = render(&text);
+            let mut kept = description.build().expect("builds");
+            assert!(kept.glottal_trace().is_none(), "nothing kept before the call");
+            let substeps = description.samples as usize * description.mechanics_per_output as usize;
+            kept.keep_glottal_trace(substeps);
+            let mut out = vec![0.0; description.samples as usize];
+            for block in out.chunks_mut(4096) {
+                kept.block(block).expect("renders");
+            }
+            assert_eq!(bits(&plain), bits(&out), "the trace changed the pressure ({extra:?})");
+            assert_eq!(kept.info().mechanics_rate_hz, 48_000 * description.mechanics_per_output);
+            let (rows, rest) = kept.glottal_trace().expect("kept").as_chunks::<N>();
+            assert!(rest.is_empty());
+            assert_eq!(rows.len(), substeps, "one row per substep");
+            assert_eq!(kept.steps as usize, substeps);
+            let last = rows[rows.len() - 1];
+            assert_eq!(last[0], kept.island.gap_m() as f32, "gap column");
+            let [lower, upper] = kept.island.mass_displacements_m().expect("two masses");
+            assert_eq!((last[2], last[3]), (lower as f32, upper as f32), "displacement columns");
+            let stats = kept.stats();
+            // The stats' peak and minimum start from 0, so the folds over the column do too.
+            let flows = rows.iter().map(|row| row[1]);
+            assert_eq!(flows.clone().fold(0.0_f32, f32::max), stats.peak_glottal_flow_m3_s as f32, "peak flow");
+            assert_eq!(flows.fold(0.0_f32, f32::min), stats.min_glottal_flow_m3_s as f32, "minimum flow");
+            let shut_rows = rows.iter().filter(|row| row[0] <= 0.0).count() as u64;
+            assert!(kept.closed_steps > 0, "the fixture's fold makes contact ({extra:?})");
+            if uniform {
+                assert_eq!(shut_rows, kept.closed_steps, "uniform: no open gap is contact");
+            } else {
+                // The sine mode holds the ends, so the whole length may never shut while some strip touches.
+                let contact = kept.closed_steps;
+                assert!(shut_rows <= contact, "shaped: {shut_rows} rows shut, {contact} steps in contact");
+            }
+        }
     }
 
     /// Gauntlet G0: no key or `sd_rel` 0 leaves the pressure bit for bit. A real gain reaches the pressure, repeats on its
