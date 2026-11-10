@@ -1,4 +1,5 @@
-//! Ideal lumped elements for one-dimensional mechanical and thermal networks.
+//! Ideal lumped elements for one-dimensional mechanical, rotational,
+//! electrical and thermal networks.
 //!
 //! Each element is a [`Component`] with a closed energy account and the
 //! tangent of its port map, so a device made of masses, springs, dampers,
@@ -6,6 +7,23 @@
 //! by [`crate::System`] with no element-specific code in the driver.
 //! Parameters are constants in SI units. Laws that depend on the state of a
 //! material or come from material cards belong to the physics owners.
+//!
+//! # Domains
+//!
+//! [`Mass`], [`Spring`], [`Damper`] and [`Force`] are written for a point on
+//! a line, and their `in_domain` constructors give the same four laws in any
+//! other power domain of [`PortKind`], where effort times flow is power:
+//!
+//! | element | translation | rotation | electrical (series loop) |
+//! |---|---|---|---|
+//! | [`Mass`] | mass [kg] | inertia [kg m^2] | inductance [H] |
+//! | [`Spring`] | stiffness [N/m] | stiffness [N m/rad] | 1 / capacitance [1/F] |
+//! | [`Damper`] | damping [N s/m] | damping [N m s/rad] | resistance [ohm] |
+//! | [`Force`] | force [N] | torque [N m] | source voltage [V] |
+//!
+//! The flow is velocity, angular velocity or current; a spring's state is
+//! the displacement, twist or charge. A [`Gyrator`] joins two domains without
+//! loss: it is the ideal DC machine between a current loop and a rotor.
 //!
 //! # Signs
 //!
@@ -102,10 +120,6 @@ fn port(name: &str, kind: Option<PortKind>, role: PortRole) -> PortSpec {
         None => PortSpec::heat(id, role),
     }
     .expect("element ports are valid power or heat ports")
-}
-
-fn mechanical(name: &str, role: PortRole) -> PortSpec {
-    port(name, Some(PortKind::MechanicalForceVelocity), role)
 }
 
 fn heat(name: &str, role: PortRole) -> PortSpec {
@@ -329,7 +343,9 @@ fn table_integral(knots: &[(f64, f64)], start: f64, end: f64) -> f64 {
     total
 }
 
-/// Position and velocity of a [`Mass`].
+/// Position and velocity of a [`Mass`]. In another domain the same two
+/// fields hold its displacement and flow: angle [rad] and angular velocity
+/// [rad/s], or charge passed [C] and current [A].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Motion {
     /// Position [m].
@@ -352,9 +368,19 @@ impl Mass {
     /// # Errors
     /// A mass that is not positive and finite.
     pub fn new(mass_kg: f64) -> Result<Self, ElementError> {
+        Self::in_domain(PortKind::MechanicalForceVelocity, mass_kg)
+    }
+
+    /// The same law in the power domain `kind`: `inertance` is momentum per
+    /// unit flow there, a moment of inertia [kg m^2] for rotation or an
+    /// inductance [H] for a current loop.
+    ///
+    /// # Errors
+    /// An inertance that is not positive and finite.
+    pub fn in_domain(kind: PortKind, inertance: f64) -> Result<Self, ElementError> {
         Ok(Self {
-            mass_kg: positive("mass_kg", mass_kg)?,
-            ports: [mechanical("p", PortRole::EffortIn)],
+            mass_kg: positive("mass_kg", inertance)?,
+            ports: [port("p", Some(kind), PortRole::EffortIn)],
         })
     }
 
@@ -461,12 +487,23 @@ impl Spring {
     /// A stiffness that is not positive and finite, or a cubic coefficient
     /// that is not finite.
     pub fn new(stiffness_n_m: f64, cubic_n_m3: f64) -> Result<Self, ElementError> {
+        Self::in_domain(PortKind::MechanicalForceVelocity, stiffness_n_m, cubic_n_m3)
+    }
+
+    /// The same law in the power domain `kind`: effort per unit displacement
+    /// there, a torsional stiffness [N m/rad] for rotation or the reciprocal
+    /// of a capacitance [1/F] in a current loop (the state is then the
+    /// charge on the capacitor).
+    ///
+    /// # Errors
+    /// As for [`Self::new`].
+    pub fn in_domain(kind: PortKind, stiffness: f64, cubic: f64) -> Result<Self, ElementError> {
         Ok(Self {
-            stiffness_n_m: positive("stiffness_n_m", stiffness_n_m)?,
-            cubic_n_m3: finite("cubic_n_m3", cubic_n_m3)?,
+            stiffness_n_m: positive("stiffness_n_m", stiffness)?,
+            cubic_n_m3: finite("cubic_n_m3", cubic)?,
             ports: [
-                mechanical("a", PortRole::FlowIn),
-                mechanical("b", PortRole::FlowIn),
+                port("a", Some(kind), PortRole::FlowIn),
+                port("b", Some(kind), PortRole::FlowIn),
             ],
         })
     }
@@ -581,11 +618,21 @@ impl Damper {
     /// # Errors
     /// A damping coefficient that is not positive and finite.
     pub fn new(damping_n_s_m: f64) -> Result<Self, ElementError> {
+        Self::in_domain(PortKind::MechanicalForceVelocity, damping_n_s_m)
+    }
+
+    /// The same law in the power domain `kind`: effort per unit flow there,
+    /// a rotary damping [N m s/rad] or a resistance [ohm]. Its heat port is
+    /// where the Joule or friction heat leaves.
+    ///
+    /// # Errors
+    /// A coefficient that is not positive and finite.
+    pub fn in_domain(kind: PortKind, resistance: f64) -> Result<Self, ElementError> {
         Ok(Self {
-            damping_n_s_m: positive("damping_n_s_m", damping_n_s_m)?,
+            damping_n_s_m: positive("damping_n_s_m", resistance)?,
             ports: [
-                mechanical("a", PortRole::FlowIn),
-                mechanical("b", PortRole::FlowIn),
+                port("a", Some(kind), PortRole::FlowIn),
+                port("b", Some(kind), PortRole::FlowIn),
                 heat("heat", PortRole::EffortIn),
             ],
         })
@@ -735,9 +782,16 @@ impl Force {
     /// A force that follows `force_n`.
     #[must_use]
     pub fn new(force_n: Waveform) -> Self {
+        Self::in_domain(PortKind::MechanicalForceVelocity, force_n)
+    }
+
+    /// The same source in the power domain `kind`: a prescribed torque
+    /// [N m] or a source voltage [V].
+    #[must_use]
+    pub fn in_domain(kind: PortKind, effort: Waveform) -> Self {
         Self {
-            force_n,
-            ports: [mechanical("p", PortRole::FlowIn)],
+            force_n: effort,
+            ports: [port("p", Some(kind), PortRole::FlowIn)],
         }
     }
 }
@@ -1082,6 +1136,113 @@ impl PortTangent for Heater {
         _cx: &Cx<'_>,
     ) -> Result<(), ElementError> {
         bar_inputs[0] = 0.0;
+        Ok(())
+    }
+}
+
+/// A lossless gyrator between ports `a` and `b`, which may be in different
+/// power domains: the effort at each port is `ratio` times the flow at the
+/// other, with opposite signs, so the power entering at one port leaves at
+/// the other.
+///
+/// It is the ideal DC machine. With its constant as `ratio` [N m/A, the same
+/// number in V s/rad], port `a` in a current loop and port `b` on a rotor,
+/// both joined as members of common-flow junctions, a positive loop current
+/// drives the rotor with torque `ratio i` and a positive rotor speed puts
+/// the back-EMF `ratio w` against the loop. Each port receives a flow and
+/// returns an effort: `e_a = ratio f_b` and `e_b = -ratio f_a`.
+#[derive(Debug, Clone)]
+pub struct Gyrator {
+    ratio: f64,
+    ports: [PortSpec; 2],
+}
+
+impl Gyrator {
+    /// A gyrator of `ratio` between the power domains `kind_a` and `kind_b`.
+    ///
+    /// # Errors
+    /// A ratio that is zero or not finite.
+    pub fn new(kind_a: PortKind, kind_b: PortKind, ratio: f64) -> Result<Self, ElementError> {
+        if !(ratio.is_finite() && ratio != 0.0) {
+            return Err(ElementError::Parameter {
+                name: "ratio",
+                value: ratio,
+            });
+        }
+        Ok(Self {
+            ratio,
+            ports: [
+                port("a", Some(kind_a), PortRole::FlowIn),
+                port("b", Some(kind_b), PortRole::FlowIn),
+            ],
+        })
+    }
+}
+
+impl Component for Gyrator {
+    type State = ();
+    type Error = ElementError;
+
+    fn ports(&self) -> &[PortSpec] {
+        &self.ports
+    }
+
+    fn class(&self) -> Class {
+        Class::ExactLinear
+    }
+
+    fn stored_energy_j(&self, _state: &()) -> Result<f64, ElementError> {
+        Ok(0.0)
+    }
+
+    fn propose(
+        &self,
+        _old: &(),
+        dt_s: f64,
+        inputs: &[f64],
+        _new: &mut (),
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<Proposal, ElementError> {
+        cx.checkpoint()?;
+        inputs_finite(inputs)?;
+        outputs[0] = self.ratio * inputs[1];
+        outputs[1] = -self.ratio * inputs[0];
+        // The two port powers are equal and opposite products of the same
+        // three numbers; what is left is their rounding.
+        Ok(Proposal::Step(Receipt::lossless(
+            0.0,
+            roundoff(2.0 * dt_s * (self.ratio * inputs[0] * inputs[1]).abs()),
+        )))
+    }
+}
+
+impl PortTangent for Gyrator {
+    fn jvp(
+        &self,
+        _old: &(),
+        _dt_s: f64,
+        _inputs: &[f64],
+        d_inputs: &[f64],
+        d_outputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        d_outputs[0] = self.ratio * d_inputs[1];
+        d_outputs[1] = -self.ratio * d_inputs[0];
+        Ok(())
+    }
+
+    fn vjp(
+        &self,
+        _old: &(),
+        _dt_s: f64,
+        _inputs: &[f64],
+        bar_outputs: &[f64],
+        bar_inputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        bar_inputs[0] = -self.ratio * bar_outputs[1];
+        bar_inputs[1] = self.ratio * bar_outputs[0];
         Ok(())
     }
 }

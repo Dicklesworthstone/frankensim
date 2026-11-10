@@ -68,6 +68,14 @@ physics owners below fs-couple can be composed without it.
   (negative when they deliver), so a driven device closes its first law.
   `Waveform` is a constant, a sine or a piecewise-linear table with
   validating constructors; `mean(t0, dt)` is the exact step average.
+  `Mass`, `Spring`, `Damper` and `Force` have `in_domain(kind, ..)`
+  constructors that give the same four laws in another power domain of
+  `PortKind`: inertia, torsion spring, rotary damper and torque about a
+  shaft; inductance, 1 / capacitance, resistance and source voltage in a
+  series current loop. `Gyrator::new(kind_a, kind_b, ratio)` joins two
+  domains without loss (`e_a = ratio f_b`, `e_b = -ratio f_a`): the ideal DC
+  machine between a current loop and a rotor. Port kinds keep the domains
+  apart: a junction across two of them is refused (`Mismatch`).
   Two-port signs: joined to masses by common flow, a port receives minus the
   mass's velocity, so port `a` on mass A and `b` on mass B extend at
   `v_B - v_A` and return the force on each end. A `HeatCapacity` asks for a
@@ -258,6 +266,17 @@ Five planted defects were each caught: half of a connector's heat leaving,
 velocities written to the wrong body, entropy at the other connector's
 temperature, a later route replacing an earlier delivery, and routes that
 share a receiver audited alone.
+
+Other domains, `tests/elements.rs`: the gyrator and one element of each law
+in the rotational and electrical domains pass the conformance and tangent
+checks at 100 generated points, and the gyrator's two port powers cancel to
+rounding; a DC motor of seven elements (supply, inductance, resistance,
+gyrator, rotor, bearing, one thermal case that takes both heats) matches the
+monolithic midpoint rule for its two coupled equations over 20,000 steps to
+1e-9, the supply's account equals stored magnetic and kinetic energy plus
+heat, the gyrator's account is zero, and a rotor port joined into the current
+loop is refused. Two planted gyrator defects were each caught (both efforts
+with the same sign; the transpose with the wrong sign).
 
 Shared receivers, `tests/elements.rs`: two heaters routed into one body (one
 of them also into a second body and a named sink) deliver the sum of their

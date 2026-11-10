@@ -11,9 +11,10 @@ use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_ports::component::conformance::{Case, Observed, check_component, check_port_tangent};
 use fs_ports::component::{Component, PortTangent, Proposal};
+use fs_ports::PortKind;
 use fs_system::elements::{
-    Conductance, Damper, ElementError, Force, HeatCapacity, Heater, Mass, Motion, SourceAccount,
-    Spring, Waveform,
+    Conductance, Damper, ElementError, Force, Gyrator, HeatCapacity, Heater, Mass, Motion,
+    SourceAccount, Spring, Waveform,
 };
 use fs_system::{
     AdmissionError, NodeId, RouteTemperature, System, SystemBuilder, heat_sink,
@@ -675,4 +676,244 @@ fn a_shared_receiver_takes_route_deliveries_and_nothing_else() {
     step(&mut system, 0.5, 10);
     let warmed = *system.state::<f64>(body).unwrap() - 300.0;
     assert!((warmed - 42.0 * 5.0 / 40.0).abs() <= 1.0e-12 * 300.0, "{warmed}");
+}
+
+const ELECTRICAL: PortKind = PortKind::ElectricalVoltageCurrent;
+const ROTATION: PortKind = PortKind::RotationalTorqueAngularVelocity;
+
+#[test]
+fn the_gyrator_and_the_other_domains_conform_and_exchange_no_net_power() {
+    let mut n = Numbers(20_261_111);
+    let machine = Gyrator::new(ELECTRICAL, ROTATION, 0.08).unwrap();
+    let rotor = Mass::in_domain(ROTATION, 3.0e-4).unwrap();
+    let inductor = Mass::in_domain(ELECTRICAL, 2.0e-3).unwrap();
+    let capacitor = Spring::in_domain(ELECTRICAL, 1.0 / 4.7e-6, 0.0).unwrap();
+    let resistor = Damper::in_domain(ELECTRICAL, 1.2).unwrap();
+    let shaft = Spring::in_domain(ROTATION, 40.0, 5.0).unwrap();
+    let supply = Force::in_domain(ELECTRICAL, Waveform::sine(12.0, 50.0, 0.3, 1.0).unwrap());
+    for _ in 0..100 {
+        let dt = n.next(1.0e-6, 1.0e-3);
+        let (current, speed) = (n.next(-20.0, 20.0), n.next(-300.0, 300.0));
+        let outputs = conforms(&machine, &(), &(), dt, &[current, speed]);
+        assert_eq!(outputs, vec![0.08 * speed, -0.08 * current]);
+        // The power entering at one port leaves at the other.
+        let net = current * outputs[0] + speed * outputs[1];
+        assert!(net.abs() <= 4.0 * f64::EPSILON * (0.08 * current * speed).abs(), "{net}");
+
+        let state = Motion {
+            position_m: n.next(-1.0, 1.0),
+            velocity_m_s: speed,
+        };
+        let stale = Motion {
+            position_m: 9.0,
+            velocity_m_s: -9.0,
+        };
+        let torque = n.next(-2.0, 2.0);
+        let mean = conforms(&rotor, &state, &stale, dt, &[torque]);
+        let expected = speed + 0.5 * dt * torque / 3.0e-4;
+        assert!((mean[0] - expected).abs() <= 1.0e-12 * (1.0 + speed.abs()));
+        let state = Motion {
+            position_m: 0.0,
+            velocity_m_s: current,
+        };
+        conforms(&inductor, &state, &stale, dt, &[n.next(-24.0, 24.0)]);
+        conforms(&capacitor, &n.next(-1.0e-5, 1.0e-5), &0.5, dt, &[current, 0.0]);
+        conforms(&shaft, &n.next(-0.2, 0.2), &0.5, dt, &[speed, n.next(-300.0, 300.0)]);
+        let heat = conforms(&resistor, &(), &(), dt, &[current, 0.0, n.next(250.0, 400.0)]);
+        assert!((heat[2] + 1.2 * current * current).abs() <= 1.0e-12 * (1.0 + current * current));
+        conforms(
+            &supply,
+            &SourceAccount::starting_at(n.next(0.0, 1.0)),
+            &SourceAccount::default(),
+            dt,
+            &[current],
+        );
+    }
+    for ratio in [0.0, f64::NAN, f64::INFINITY] {
+        assert!(matches!(
+            Gyrator::new(ELECTRICAL, ROTATION, ratio),
+            Err(ElementError::Parameter { name: "ratio", .. })
+        ));
+    }
+}
+
+struct Motor {
+    system: System,
+    inductor: NodeId,
+    rotor: NodeId,
+    supply: NodeId,
+    case: NodeId,
+}
+
+const SUPPLY_V: f64 = 12.0;
+const INDUCTANCE_H: f64 = 2.0e-3;
+const RESISTANCE_OHM: f64 = 1.2;
+const MACHINE_N_M_A: f64 = 0.08;
+const ROTOR_KG_M2: f64 = 3.0e-4;
+const BEARING_N_M_S: f64 = 2.0e-4;
+const CASE_J_K: f64 = 60.0;
+
+/// A DC motor from seven elements: a supply, an inductance and a winding
+/// resistance in one current loop; a gyrator to a rotor with a viscous
+/// bearing; winding and bearing heat into one thermal body.
+fn motor() -> Motor {
+    let mut builder = SystemBuilder::new();
+    let rest = Motion {
+        position_m: 0.0,
+        velocity_m_s: 0.0,
+    };
+    let inductor = builder
+        .add_with_tangent("inductor", Mass::in_domain(ELECTRICAL, INDUCTANCE_H).unwrap(), rest)
+        .unwrap();
+    let rotor = builder
+        .add_with_tangent("rotor", Mass::in_domain(ROTATION, ROTOR_KG_M2).unwrap(), rest)
+        .unwrap();
+    let supply = builder
+        .add_with_tangent(
+            "supply",
+            Force::in_domain(ELECTRICAL, Waveform::constant(SUPPLY_V).unwrap()),
+            SourceAccount::default(),
+        )
+        .unwrap();
+    let winding = builder
+        .add_with_tangent("winding", Damper::in_domain(ELECTRICAL, RESISTANCE_OHM).unwrap(), ())
+        .unwrap();
+    let machine = builder
+        .add_with_tangent(
+            "machine",
+            Gyrator::new(ELECTRICAL, ROTATION, MACHINE_N_M_A).unwrap(),
+            (),
+        )
+        .unwrap();
+    let bearing = builder
+        .add_with_tangent("bearing", Damper::in_domain(ROTATION, BEARING_N_M_S).unwrap(), ())
+        .unwrap();
+    let case = builder
+        .add_with_tangent("case", HeatCapacity::new(CASE_J_K).unwrap(), 293.15)
+        .unwrap();
+    let port = |builder: &SystemBuilder, node, name| builder.port(node, name).unwrap();
+
+    // A rotor port does not belong in the current loop: the kernel's port
+    // kinds refuse the wiring mistake, and the refused call changes nothing.
+    let wrong = builder.common_flow(
+        port(&builder, inductor, "p"),
+        &[port(&builder, supply, "p"), port(&builder, bearing, "a")],
+    );
+    assert!(
+        matches!(&wrong, Err(AdmissionError::Mismatch { b, .. }) if b == "bearing.a"),
+        "{wrong:?}"
+    );
+
+    builder
+        .common_flow(
+            port(&builder, inductor, "p"),
+            &[
+                port(&builder, supply, "p"),
+                port(&builder, winding, "a"),
+                port(&builder, machine, "a"),
+            ],
+        )
+        .unwrap();
+    builder
+        .common_flow(
+            port(&builder, rotor, "p"),
+            &[port(&builder, machine, "b"), port(&builder, bearing, "a")],
+        )
+        .unwrap();
+    anchored(&mut builder, winding, "b");
+    anchored(&mut builder, bearing, "b");
+    let case_heat = port(&builder, case, "heat");
+    let (winding_heat, bearing_heat) = (
+        port(&builder, winding, "heat"),
+        port(&builder, bearing, "heat"),
+    );
+    for source in [winding_heat, bearing_heat] {
+        builder
+            .heat_route(source, &[(case_heat, 1.0)], None, RouteTemperature::SinkEquivalent)
+            .unwrap();
+    }
+    let mut system = builder.seal().unwrap();
+    assert!(system.guess(winding_heat, &[293.15]));
+    assert!(system.guess(bearing_heat, &[293.15]));
+    Motor {
+        system,
+        inductor,
+        rotor,
+        supply,
+        case,
+    }
+}
+
+#[test]
+fn a_dc_motor_composed_from_elements_matches_the_monolithic_midpoint_rule() {
+    let mut motor = motor();
+    let (dt, steps) = (2.0e-5_f64, 20_000_u32);
+    step(&mut motor.system, dt, steps);
+
+    // L di/dt = V - R i - k w,  J dw/dt = k i - b w, by the midpoint rule:
+    // two linear equations for the step means of i and w.
+    let (l, r, k, j, b) = (
+        INDUCTANCE_H,
+        RESISTANCE_OHM,
+        MACHINE_N_M_A,
+        ROTOR_KG_M2,
+        BEARING_N_M_S,
+    );
+    let (a11, a12, a21, a22) = (2.0 * l / dt + r, k, -k, 2.0 * j / dt + b);
+    let determinant = a11 * a22 - a12 * a21;
+    let (mut current, mut speed) = (0.0_f64, 0.0_f64);
+    let (mut supplied, mut joule, mut friction) = (0.0_f64, 0.0_f64, 0.0_f64);
+    for _ in 0..steps {
+        let (b1, b2) = (SUPPLY_V + 2.0 * l * current / dt, 2.0 * j * speed / dt);
+        let mean_i = (b1 * a22 - a12 * b2) / determinant;
+        let mean_w = (a11 * b2 - a21 * b1) / determinant;
+        current = 2.0 * mean_i - current;
+        speed = 2.0 * mean_w - speed;
+        supplied += dt * SUPPLY_V * mean_i;
+        joule += dt * r * mean_i * mean_i;
+        friction += dt * b * mean_w * mean_w;
+    }
+    let reached_i = motor
+        .system
+        .state::<Motion>(motor.inductor)
+        .unwrap()
+        .velocity_m_s;
+    let reached_w = motor
+        .system
+        .state::<Motion>(motor.rotor)
+        .unwrap()
+        .velocity_m_s;
+    // After 0.4 s (many electrical and several mechanical time constants)
+    // the machine is near k V / (k^2 + R b) and b V / (k^2 + R b).
+    let scale = k * k + r * b;
+    let (steady_w, steady_i) = (k * SUPPLY_V / scale, b * SUPPLY_V / scale);
+    assert!((reached_w - speed).abs() <= 1.0e-9 * steady_w, "{reached_w} vs {speed}");
+    assert!((reached_i - current).abs() <= 1.0e-9 * SUPPLY_V / r, "{reached_i} vs {current}");
+    assert!((reached_w - steady_w).abs() <= 0.02 * steady_w, "{reached_w} vs {steady_w}");
+    assert!((reached_i - steady_i).abs() <= 0.02 * SUPPLY_V / r, "{reached_i} vs {steady_i}");
+
+    // Electrical energy in = magnetic and kinetic energy stored + all heat,
+    // and both heats are in the one thermal body.
+    let ledger = motor.system.ledger();
+    let delivered = -motor
+        .system
+        .state::<SourceAccount>(motor.supply)
+        .unwrap()
+        .energy_in_j;
+    assert!((delivered - supplied).abs() <= 1.0e-9 * supplied, "{delivered} vs {supplied}");
+    let account = |name: &str| ledger.nodes.iter().find(|node| node.name == name).unwrap();
+    let warmed = account("case").stored_change_j.value();
+    assert!(
+        (warmed - joule - friction).abs() <= 1.0e-9 * supplied,
+        "{warmed} vs {joule} + {friction}"
+    );
+    let stored = 0.5 * l * reached_i * reached_i + 0.5 * j * reached_w * reached_w;
+    assert!((delivered - stored - warmed).abs() <= 1.0e-9 * supplied);
+    // The gyrator converts and keeps nothing.
+    let machine = account("machine");
+    assert!(machine.port_energy_in_j.value().abs() <= 1.0e-12 * supplied);
+    assert_eq!(machine.stored_change_j.value(), 0.0);
+    assert!(ledger.energy_residual_j().abs() <= 1.0e-11 * supplied);
+    let reached_t = *motor.system.state::<f64>(motor.case).unwrap();
+    assert!(((reached_t - 293.15) * CASE_J_K - warmed).abs() <= 1.0e-8 * supplied);
 }

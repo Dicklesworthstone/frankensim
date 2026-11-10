@@ -13,10 +13,11 @@ use std::io::Read as _;
 use std::path::Path;
 
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_ports::PortKind;
 use fs_ports::component::{Carrier, PortRole, PortSpec, PortTangent};
 use fs_system::elements::{
-    Conductance, Damper, Force, HeatCapacity, Heater, Mass, Motion, SourceAccount, Spring,
-    Waveform,
+    Conductance, Damper, Force, Gyrator, HeatCapacity, Heater, Mass, Motion, SourceAccount,
+    Spring, Waveform,
 };
 use fs_system::{
     NodeId, PortRef, RouteTemperature, SolveConfig, System, SystemBuilder, SystemError, heat_sink,
@@ -36,9 +37,9 @@ const NO_CLAIM: &str = "ideal lumped elements with constant parameters integrate
 
 const HELP: &str = "Usage: frankensim [--json] system <scene.json>
 
-Run a one-dimensional mechanical and thermal device described as data on the
-composition kernel, and report its final state, sampled states and the energy
-and entropy ledger of the run.
+Run a lumped mechanical, rotational, electrical and thermal device described
+as data on the composition kernel, and report its final state, sampled states
+and the energy and entropy ledger of the run.
 
 Scene schema: frankensim.system.v0. Top-level fields:
   duration_s        simulated time
@@ -56,13 +57,29 @@ Elements (ports in brackets; SI units in every field name):
   heat_capacity  capacity_j_k, temperature_k                          [heat]
   conductance    conductance_w_k                                      [a, b]
   heater         power_w (waveform, never negative)                   [heat]
+The same four laws about a shaft, with angle, angular velocity and torque:
+  inertia        inertia_kg_m2, angle_rad = 0, angular_velocity_rad_s = 0  [p]
+  torsion_spring stiffness_n_m_rad, cubic_n_m_rad3 = 0, twist_rad = 0  [a, b]
+  rotary_damper  damping_n_m_s_rad                                    [a, b, heat]
+  torque         torque_n_m (waveform)                                [p]
+and in a current loop, with charge, current and voltage (an inductor is the
+loop's node; a capacitor and a resistor sit in series in it):
+  inductor       inductance_h, charge_c = 0, current_a = 0            [p]
+  capacitor      capacitance_f, charge_c = 0                          [a, b]
+  resistor       resistance_ohm                                       [a, b, heat]
+  voltage        voltage_v (waveform)                                 [p]
+Between two domains, without loss (an ideal DC machine with a = electrical,
+b = rotation and ratio in N m/A: torque ratio * i on the rotor, back-EMF
+ratio * w against the loop):
+  gyrator        ratio, a, b (translation | rotation | electrical)    [a, b]
 A waveform is a number, {\"sine\": {amplitude, frequency_hz, phase_rad = 0,
 offset = 0}} or {\"table\": [[time_s, value], ...]} (linear, ends held).
 
 Connections, ports written element.port:
-  {\"join\": [ports]}       the ports meet at one node: a mass and the ends that
-                          move with it, or a heat capacity and the elements at
-                          its temperature
+  {\"join\": [ports]}       the ports meet at one node: a mass (inertia,
+                          inductor) and the ends that share its velocity
+                          (angular velocity, current), or a heat capacity and
+                          the elements at its temperature
   {\"route\": port, \"to\": [[port, fraction], ...],
    \"rest\": {\"sink\": name, \"temperature_k\": T},
    \"temperature\": \"sink-equivalent\" | {\"fixed_k\": T}}
@@ -70,8 +87,11 @@ Connections, ports written element.port:
   {\"prescribe\": port, <quantity>: waveform}
                           hold a port's input from outside: velocity_m_s for a
                           spring, damper or force end (0 anchors it), force_n
-                          for a mass, temperature_k for a damper, conductance
-                          or heater, heat_rate_w for a heat capacity
+                          for a mass; angular_velocity_rad_s and torque_n_m
+                          about a shaft; current_a and voltage_v in a loop (0
+                          current grounds a series element's far end);
+                          temperature_k for a damper, resistor, conductance or
+                          heater, heat_rate_w for a heat capacity
 
 Each element's port a is the end at mass A and b the end at mass B; the
 extension of a spring is x_B - x_A less its unloaded length. Every port must
@@ -157,41 +177,143 @@ impl From<&str> for Refusal {
     }
 }
 
+/// A power domain of the lumped elements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Domain {
+    Translation,
+    Rotation,
+    Electrical,
+}
+
+/// Field names of one domain, SI units in each.
+struct Names {
+    /// Parameter of the node element (mass, inertia, inductor).
+    inertance: &'static str,
+    /// The node's displacement and flow.
+    displacement: &'static str,
+    flow: &'static str,
+    /// Parameters and state of the two-port storage element.
+    stiffness: &'static str,
+    cubic: &'static str,
+    extension: &'static str,
+    /// Parameter of the two-port dissipative element.
+    resistance: &'static str,
+    /// The effort: what a source prescribes and a dissipative element returns.
+    effort: &'static str,
+}
+
+impl Domain {
+    fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "translation" => Self::Translation,
+            "rotation" => Self::Rotation,
+            "electrical" => Self::Electrical,
+            _ => return None,
+        })
+    }
+
+    fn port_kind(self) -> PortKind {
+        match self {
+            Self::Translation => PortKind::MechanicalForceVelocity,
+            Self::Rotation => PortKind::RotationalTorqueAngularVelocity,
+            Self::Electrical => PortKind::ElectricalVoltageCurrent,
+        }
+    }
+
+    fn of(kind: PortKind) -> Option<Self> {
+        [Self::Translation, Self::Rotation, Self::Electrical]
+            .into_iter()
+            .find(|domain| domain.port_kind() == kind)
+    }
+
+    fn names(self) -> Names {
+        match self {
+            Self::Translation => Names {
+                inertance: "mass_kg",
+                displacement: "position_m",
+                flow: "velocity_m_s",
+                stiffness: "stiffness_n_m",
+                cubic: "cubic_n_m3",
+                extension: "extension_m",
+                resistance: "damping_n_s_m",
+                effort: "force_n",
+            },
+            Self::Rotation => Names {
+                inertance: "inertia_kg_m2",
+                displacement: "angle_rad",
+                flow: "angular_velocity_rad_s",
+                stiffness: "stiffness_n_m_rad",
+                cubic: "cubic_n_m_rad3",
+                extension: "twist_rad",
+                resistance: "damping_n_m_s_rad",
+                effort: "torque_n_m",
+            },
+            // A capacitor is declared by its capacitance; its stiffness is
+            // the reciprocal and it has no cubic term.
+            Self::Electrical => Names {
+                inertance: "inductance_h",
+                displacement: "charge_c",
+                flow: "current_a",
+                stiffness: "capacitance_f",
+                cubic: "",
+                extension: "charge_c",
+                resistance: "resistance_ohm",
+                effort: "voltage_v",
+            },
+        }
+    }
+}
+
+/// What an element is: one of four laws in a power domain, a gyrator
+/// between two, or a thermal element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
-    Mass,
-    Spring,
-    Damper,
-    Force,
+    /// The node of a domain: momentum over flow (mass, inertia, inductor).
+    Inertance(Domain),
+    /// Effort from displacement (spring, torsion spring, capacitor).
+    Compliance(Domain),
+    /// Effort from flow, with a heat port (damper, rotary damper, resistor).
+    Resistance(Domain),
+    /// A prescribed effort (force, torque, voltage).
+    Source(Domain),
+    Gyrator,
     HeatCapacity,
     Conductance,
     Heater,
 }
 
 impl Kind {
+    const TABLE: [(&'static str, Self); 16] = [
+        ("mass", Self::Inertance(Domain::Translation)),
+        ("spring", Self::Compliance(Domain::Translation)),
+        ("damper", Self::Resistance(Domain::Translation)),
+        ("force", Self::Source(Domain::Translation)),
+        ("inertia", Self::Inertance(Domain::Rotation)),
+        ("torsion_spring", Self::Compliance(Domain::Rotation)),
+        ("rotary_damper", Self::Resistance(Domain::Rotation)),
+        ("torque", Self::Source(Domain::Rotation)),
+        ("inductor", Self::Inertance(Domain::Electrical)),
+        ("capacitor", Self::Compliance(Domain::Electrical)),
+        ("resistor", Self::Resistance(Domain::Electrical)),
+        ("voltage", Self::Source(Domain::Electrical)),
+        ("gyrator", Self::Gyrator),
+        ("heat_capacity", Self::HeatCapacity),
+        ("conductance", Self::Conductance),
+        ("heater", Self::Heater),
+    ];
+
     fn parse(name: &str) -> Option<Self> {
-        Some(match name {
-            "mass" => Self::Mass,
-            "spring" => Self::Spring,
-            "damper" => Self::Damper,
-            "force" => Self::Force,
-            "heat_capacity" => Self::HeatCapacity,
-            "conductance" => Self::Conductance,
-            "heater" => Self::Heater,
-            _ => return None,
-        })
+        Self::TABLE
+            .iter()
+            .find(|(known, _)| *known == name)
+            .map(|(_, kind)| *kind)
     }
 
     fn name(self) -> &'static str {
-        match self {
-            Self::Mass => "mass",
-            Self::Spring => "spring",
-            Self::Damper => "damper",
-            Self::Force => "force",
-            Self::HeatCapacity => "heat_capacity",
-            Self::Conductance => "conductance",
-            Self::Heater => "heater",
-        }
+        Self::TABLE
+            .iter()
+            .find(|(_, kind)| *kind == self)
+            .map_or("element", |(name, _)| name)
     }
 }
 
@@ -331,6 +453,55 @@ where
     Ok((node, ports))
 }
 
+/// A spring, torsion spring or capacitor. A capacitor is declared by its
+/// capacitance and has no cubic term.
+fn compliance(
+    builder: &mut SystemBuilder,
+    name: &str,
+    definition: &J,
+    domain: Domain,
+    what: &str,
+) -> Result<(NodeId, Vec<PortSpec>), Refusal> {
+    let names = domain.names();
+    let (stiffness, cubic) = if domain == Domain::Electrical {
+        fields(definition, &["kind", names.stiffness, names.extension], what)?;
+        (1.0 / positive(definition, names.stiffness, what)?, 0.0)
+    } else {
+        fields(definition, &["kind", names.stiffness, names.cubic, names.extension], what)?;
+        (
+            number(definition, names.stiffness, what)?,
+            number_or(definition, names.cubic, 0.0, what)?,
+        )
+    };
+    let extension = number_or(definition, names.extension, 0.0, what)?;
+    if !extension.is_finite() {
+        return Err(format!("{what}: {} must be finite", names.extension).into());
+    }
+    let spring = Spring::in_domain(domain.port_kind(), stiffness, cubic).map_err(|_| {
+        format!("{what}: {} must be positive and the cubic term finite", names.stiffness)
+    })?;
+    add(builder, name, spring, extension)
+}
+
+fn gyrator(
+    builder: &mut SystemBuilder,
+    name: &str,
+    definition: &J,
+    what: &str,
+) -> Result<(NodeId, Vec<PortSpec>), Refusal> {
+    fields(definition, &["kind", "ratio", "a", "b"], what)?;
+    let side = |key: &str| {
+        definition
+            .str_field(key)
+            .and_then(Domain::parse)
+            .ok_or_else(|| format!("{what}: {key} is one of translation, rotation, electrical"))
+    };
+    let (a, b) = (side("a")?, side("b")?);
+    let gyrator = Gyrator::new(a.port_kind(), b.port_kind(), number(definition, "ratio", what)?)
+        .map_err(|e| Refusal::Input(format!("{what}: {e}")))?;
+    add(builder, name, gyrator, ())
+}
+
 fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<Element, Refusal> {
     let what = format!("elements.{name}");
     let kind_name = definition
@@ -340,44 +511,47 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
     let invalid = |e: fs_system::elements::ElementError| Refusal::Input(format!("{what}: {e}"));
     let mut temperature_k = None;
     let (node, ports) = match kind {
-        Kind::Mass => {
-            fields(definition, &["kind", "mass_kg", "position_m", "velocity_m_s"], &what)?;
+        Kind::Inertance(domain) => {
+            let names = domain.names();
+            fields(definition, &["kind", names.inertance, names.displacement, names.flow], &what)?;
             let state = Motion {
-                position_m: number_or(definition, "position_m", 0.0, &what)?,
-                velocity_m_s: number_or(definition, "velocity_m_s", 0.0, &what)?,
+                position_m: number_or(definition, names.displacement, 0.0, &what)?,
+                velocity_m_s: number_or(definition, names.flow, 0.0, &what)?,
             };
             if !(state.position_m.is_finite() && state.velocity_m_s.is_finite()) {
-                return Err(format!("{what}: position and velocity must be finite").into());
+                return Err(format!(
+                    "{what}: {} and {} must be finite",
+                    names.displacement, names.flow
+                )
+                .into());
             }
-            let mass = Mass::new(number(definition, "mass_kg", &what)?).map_err(invalid)?;
-            add(builder, name, mass, state)?
+            let inertance = number(definition, names.inertance, &what)?;
+            let node = Mass::in_domain(domain.port_kind(), inertance)
+                .map_err(|_| format!("{what}: {} must be positive", names.inertance))?;
+            add(builder, name, node, state)?
         }
-        Kind::Spring => {
-            fields(definition, &["kind", "stiffness_n_m", "cubic_n_m3", "extension_m"], &what)?;
-            let extension = number_or(definition, "extension_m", 0.0, &what)?;
-            if !extension.is_finite() {
-                return Err(format!("{what}: extension_m must be finite").into());
-            }
-            let spring = Spring::new(
-                number(definition, "stiffness_n_m", &what)?,
-                number_or(definition, "cubic_n_m3", 0.0, &what)?,
-            )
-            .map_err(invalid)?;
-            add(builder, name, spring, extension)?
-        }
-        Kind::Damper => {
-            fields(definition, &["kind", "damping_n_s_m"], &what)?;
-            let damper = Damper::new(number(definition, "damping_n_s_m", &what)?).map_err(invalid)?;
+        Kind::Compliance(domain) => compliance(builder, name, definition, domain, &what)?,
+        Kind::Resistance(domain) => {
+            let names = domain.names();
+            fields(definition, &["kind", names.resistance], &what)?;
+            let resistance = number(definition, names.resistance, &what)?;
+            let damper = Damper::in_domain(domain.port_kind(), resistance)
+                .map_err(|_| format!("{what}: {} must be positive", names.resistance))?;
             add(builder, name, damper, ())?
         }
-        Kind::Force => {
-            fields(definition, &["kind", "force_n"], &what)?;
+        Kind::Source(domain) => {
+            let names = domain.names();
+            fields(definition, &["kind", names.effort], &what)?;
             let wave = definition
-                .get("force_n")
-                .ok_or_else(|| format!("{what}: missing force_n"))?;
-            let force = Force::new(waveform(wave, &format!("{what}.force_n"))?);
-            add(builder, name, force, SourceAccount::default())?
+                .get(names.effort)
+                .ok_or_else(|| format!("{what}: missing {}", names.effort))?;
+            let source = Force::in_domain(
+                domain.port_kind(),
+                waveform(wave, &format!("{what}.{}", names.effort))?,
+            );
+            add(builder, name, source, SourceAccount::default())?
         }
+        Kind::Gyrator => gyrator(builder, name, definition, &what)?,
         Kind::HeatCapacity => {
             fields(definition, &["kind", "capacity_j_k", "temperature_k"], &what)?;
             let start = positive(definition, "temperature_k", &what)?;
@@ -489,8 +663,8 @@ fn join(
     let nodes = ports.iter().filter(|port| is_node(port)).count();
     if nodes != 1 {
         return Err(format!(
-            "{what}: a join has exactly one mass or heat-capacity port, the node, and the \
-             ports that meet at it; this one has {nodes}"
+            "{what}: a join has exactly one node port (a mass, inertia, inductor or heat \
+             capacity) and the ports that meet at it; this one has {nodes}"
         )
         .into());
     }
@@ -595,11 +769,15 @@ fn prescribe(
     what: &str,
 ) -> Result<(), Refusal> {
     let target = resolve(builder, elements, &port_text(connection.get("prescribe").unwrap_or(&J::Null), what)?)?;
-    let quantity = match (target.carrier, target.role) {
-        (Carrier::Heat, PortRole::EffortIn) => "temperature_k",
-        (Carrier::Heat, PortRole::FlowIn) => "heat_rate_w",
-        (Carrier::Power(_), PortRole::EffortIn) => "force_n",
-        (Carrier::Power(_), PortRole::FlowIn) => "velocity_m_s",
+    let domain = match target.carrier {
+        Carrier::Power(kind) => Domain::of(kind),
+        _ => None,
+    };
+    let quantity = match (target.carrier, target.role, domain) {
+        (Carrier::Heat, PortRole::EffortIn, _) => "temperature_k",
+        (Carrier::Heat, PortRole::FlowIn, _) => "heat_rate_w",
+        (Carrier::Power(_), PortRole::EffortIn, Some(domain)) => domain.names().effort,
+        (Carrier::Power(_), PortRole::FlowIn, Some(domain)) => domain.names().flow,
         _ => return Err(format!("{what}: this port cannot be prescribed").into()),
     };
     fields(connection, &["prescribe", quantity], what)
@@ -613,9 +791,11 @@ fn prescribe(
     if quantity == "temperature_k" && !(wave.lowest() > 0.0) {
         return Err(format!("{what}: temperature_k must stay positive").into());
     }
-    // A port carried by a mass receives minus the mass's velocity, so a port
-    // prescribed to move at v receives -v.
-    let sign = if quantity == "velocity_m_s" { -1.0 } else { 1.0 };
+    // A port carried by a node receives minus the node's flow, so a port
+    // prescribed to move at v (or to carry the current i) receives -v.
+    let prescribed_flow =
+        matches!((target.carrier, target.role), (Carrier::Power(_), PortRole::FlowIn));
+    let sign = if prescribed_flow { -1.0 } else { 1.0 };
     builder
         .boundary(
             target.port,
@@ -815,28 +995,32 @@ impl Device {
             _ => f64::NAN,
         };
         match element.kind {
-            Kind::Mass => {
+            Kind::Inertance(domain) => {
+                let names = domain.names();
                 let motion = system.state::<Motion>(element.node).copied().unwrap_or(Motion {
                     position_m: f64::NAN,
                     velocity_m_s: f64::NAN,
                 });
-                vec![("position_m", motion.position_m), ("velocity_m_s", motion.velocity_m_s)]
+                vec![(names.displacement, motion.position_m), (names.flow, motion.velocity_m_s)]
             }
-            Kind::Spring => vec![(
-                "extension_m",
+            Kind::Compliance(domain) => vec![(
+                domain.names().extension,
                 system.state::<f64>(element.node).copied().unwrap_or(f64::NAN),
             )],
             Kind::HeatCapacity => vec![(
                 "temperature_k",
                 system.state::<f64>(element.node).copied().unwrap_or(f64::NAN),
             )],
-            Kind::Force | Kind::Heater => vec![(
+            Kind::Source(_) | Kind::Heater => vec![(
                 "energy_in_j",
                 system
                     .state::<SourceAccount>(element.node)
                     .map_or(f64::NAN, |account| account.energy_in_j),
             )],
-            Kind::Damper => vec![("force_n", output("a")), ("heat_w", -output("heat"))],
+            Kind::Resistance(domain) => {
+                vec![(domain.names().effort, output("a")), ("heat_w", -output("heat"))]
+            }
+            Kind::Gyrator => vec![("effort_a", output("a")), ("effort_b", output("b"))],
             Kind::Conductance => vec![("heat_rate_w", output("a"))],
         }
     }

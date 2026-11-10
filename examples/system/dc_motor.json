@@ -1,0 +1,23 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 0.4,
+  "step_s": 2.0e-5,
+  "sample_every_s": 0.002,
+  "elements": {
+    "supply": {"kind": "voltage", "voltage_v": 12.0},
+    "winding_l": {"kind": "inductor", "inductance_h": 2.0e-3},
+    "winding_r": {"kind": "resistor", "resistance_ohm": 1.2},
+    "machine": {"kind": "gyrator", "ratio": 0.08, "a": "electrical", "b": "rotation"},
+    "rotor": {"kind": "inertia", "inertia_kg_m2": 3.0e-4},
+    "bearing": {"kind": "rotary_damper", "damping_n_m_s_rad": 2.0e-4},
+    "case": {"kind": "heat_capacity", "capacity_j_k": 60.0, "temperature_k": 293.15}
+  },
+  "connections": [
+    {"join": ["winding_l.p", "supply.p", "winding_r.a", "machine.a"]},
+    {"join": ["rotor.p", "machine.b", "bearing.a"]},
+    {"prescribe": "winding_r.b", "current_a": 0},
+    {"prescribe": "bearing.b", "angular_velocity_rad_s": 0},
+    {"route": "winding_r.heat", "to": [["case.heat", 1.0]]},
+    {"route": "bearing.heat", "to": [["case.heat", 1.0]]}
+  ]
+}

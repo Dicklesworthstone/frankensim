@@ -780,11 +780,21 @@ wrong roles) or a step it refuses, 2 for usage. A `join` has exactly one mass
 or heat-capacity port (the node) and the ports that meet it; `route` is the
 kernel's heat route; `prescribe` holds a port's input with the quantity its
 role takes (`velocity_m_s` for an element end, entered as the attachment
-velocity; `force_n` for a mass; `temperature_k`; `heat_rate_w`). Temperature
+velocity; `force_n` for a mass; `temperature_k`; `heat_rate_w`). The same
+four laws exist about a shaft (`inertia`, `torsion_spring`, `rotary_damper`,
+`torque`, with `angular_velocity_rad_s` and `torque_n_m`) and in a series
+current loop (`inductor`, `capacitor`, `resistor`, `voltage`, with
+`current_a` and `voltage_v`), and a `gyrator` joins two domains without loss.
+A heat receiver may be named by several routes. Temperature
 inputs joined to a heat capacity, and route sources, start from the initial
 temperatures. Examples and their checks: `examples/system/README.md`; tests:
-`tests/system_command.rs` (the driven oscillator against the monolithic
-midpoint rule through the binary, the heated body against its discrete
+`tests/system_command.rs` (the DC motor scene, electrical, rotational and
+thermal, against the monolithic midpoint rule for its two coupled equations,
+with a cross-domain join refused by name; an RLC loop ringing down and a
+torsion pendulum under a constant torque against the same midpoint reference
+in their own units; a spring end pulled at +1 m/s moving its mass the way it
+is written; the driven oscillator against the
+monolithic midpoint rule through the binary, the heated body against its discrete
 closed form, the quarter car's road work against motion plus heat and its
 70/30 heat split, library and binary byte-identical, eight refusals). No
 claim beyond the kernel's: ideal elements with constant parameters, no
