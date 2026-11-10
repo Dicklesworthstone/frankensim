@@ -31,9 +31,9 @@
 //! ulp of the time, the bodies agree to rounding and not by bits. Not
 //! compared: the
 //! module refuses a whole advance when its law has no form at the final
-//! temperature, where the graph takes that step and refuses the next; the
-//! `driven` entry points, which have no Component. The `relaxation` entry
-//! points are compared in `relaxation/graph.rs`.
+//! temperature, where the graph takes that step and refuses the next. The
+//! `relaxation` entry points are compared in `relaxation/graph.rs` and the
+//! `driven` ones in `driven_graph.rs`.
 
 use super::*;
 use fs_alloc::{ArenaConfig, ArenaPool};

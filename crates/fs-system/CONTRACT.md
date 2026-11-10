@@ -638,12 +638,36 @@ two timeline cells and the rest to a sink.
   two Newton iterations allowed so that the solve rejects intervals: the
   module's accepted intervals one for one, one kernel shortening for every
   rejection, the bodies and the memory bit for bit, the cells to 1e-10 K.
-Three planted defects in the graph side were each caught. The module is
-called with a zero held effort: a driven connector cannot be reproduced yet.
+Each of the two is run with the held effort zero and no actuator in the
+graph, and with 0.7 N and -0.7 N held on the connector as a boundary on the
+Component's `drive0` port; the module's signed actuator work is then the
+energy that entered through that boundary, to 1e-11 of the dissipated energy.
 
-Still without a Component: the module's driven entry points (a held actuator
-effort needs a power port) and its relaxation entry with temperature-dependent
-kinetics. Nothing in the module is deleted.
+Against the hand-written driven couplings,
+`crates/fs-couple/tests/rigid_damping_heat/driven_graph.rs`: the same
+Component with no Maxwell branch and an actuator on every connector.
+- `driven::network::advance_candidate` and `advance_implicit_candidate`
+  (backward Euler and SDIRK2): the module's cycle of three bodies and three
+  connectors plus a free fourth body, held forces `(F, -F / 2, 2F)` for
+  `F = -0.35` and `0.4` N.
+- `driven::advance_candidate` and `advance_implicit_candidate`: the module's
+  pair with 0.7 N s/m, held forces of -1.4 and 1.4 N.
+The module calls fs-mbd's driven-pair and driven-network owners and the
+Component the relaxation-network owner, which share connector geometry,
+impulse application and rigid drift and differ in how they assemble and
+solve the source. So the bodies agree to rounding and not by bits: measured
+1.7e-15 in position and momentum (allowed 1e-13), the cells equal to the bit
+(allowed 1e-12 K), and dissipation, unallocated loss, heat stored, mechanical
+energy and each actuator's signed work against the ledger to 7.3e-15 of the
+dissipation plus the work (allowed 1e-12). The thermal intervals are the
+module's one for one.
+Five planted defects in the graph side of these comparisons were each caught.
+
+Still without a Component: the module's entry points with
+temperature-dependent damping when a connector is driven
+(`driven::advance_temperature_candidate` and its three siblings) and its
+relaxation entry with temperature-dependent kinetics. Nothing in the module
+is deleted.
 
 Other domains, `tests/elements.rs`: the gyrator and one element of each law
 in the rotational and electrical domains pass the conformance and tangent

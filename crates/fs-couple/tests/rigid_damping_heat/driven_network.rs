@@ -11,7 +11,7 @@ use fs_mbd::spatial_loads::{
     internal_motion::viscous::network::driven::DrivenViscousNetworkMotionControls,
 };
 
-fn graph_controls() -> DrivenNetworkDampingThermalConfig {
+pub(crate) fn graph_controls() -> DrivenNetworkDampingThermalConfig {
     let base = config();
     DrivenNetworkDampingThermalConfig {
         mechanical: DrivenViscousNetworkMotionControls {
@@ -28,10 +28,10 @@ fn graph_controls() -> DrivenNetworkDampingThermalConfig {
         energy_tolerance_j: base.energy_tolerance_j,
     }
 }
-fn held(force: f64) -> HeldInternalEffort {
+pub(crate) fn held(force: f64) -> HeldInternalEffort {
     HeldInternalEffort::MaterialFirst([force, 0.0, 0.0, 0.0, 0.0, 0.0])
 }
-fn cycle_bodies() -> Bodies {
+pub(crate) fn cycle_bodies() -> Bodies {
     let mut bodies = Bodies::new([0.7, 0.7]);
     for i in 0..3 {
         bodies.states[i] = RigidBodyState::new(
@@ -43,17 +43,17 @@ fn cycle_bodies() -> Bodies {
     }
     bodies
 }
-fn cycle_links() -> [ViscousNetworkLink; 3] {
+pub(crate) fn cycle_links() -> [ViscousNetworkLink; 3] {
     [axial([0, 1], 0.7), axial([1, 2], 0.7), axial([0, 2], 0.7)]
 }
-fn cycle_routes() -> [BTreeMap<CellId, f64>; 3] {
+pub(crate) fn cycle_routes() -> [BTreeMap<CellId, f64>; 3] {
     [
         BTreeMap::from([(CellId(0), 0.5), (CellId(1), 0.5)]),
         BTreeMap::from([(CellId(1), 1.0)]),
         BTreeMap::from([(CellId(0), 0.25)]),
     ]
 }
-fn graph_input<'a>(
+pub(crate) fn graph_input<'a>(
     bodies: &'a Bodies,
     links: &'a [ViscousNetworkLink],
     routes: &'a [BTreeMap<CellId, f64>],

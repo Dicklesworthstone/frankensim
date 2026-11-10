@@ -13,14 +13,20 @@
 //! out equal to the bit with either driver), and the module's report with
 //! the kernel's ledger.
 //!
-//! The Component has no actuator, so the fixture's held internal effort is
-//! zero here; the module's own tests cover a driven connector, which the
-//! graph cannot reproduce yet. The heat is released at a fixed temperature,
-//! as in the module, whose mechanics never sees a cell.
+//! Each comparison is made three times: with the fixture's held internal
+//! effort zero and a Component that has no actuator, and with 0.7 N and
+//! -0.7 N held on the connector (against the closing motion and with it),
+//! where the Component has an actuator (`driven`) and the effort is a
+//! boundary on its `drive0` port. The module's signed actuator work is then
+//! the energy that entered through that boundary. Both sides call the same
+//! owner here, so that agreement shows the port's rate is conjugate to the
+//! effort; it is not a second computation of the work. The heat is
+//! released at a fixed temperature, as in the module, whose mechanics never
+//! sees a cell.
 
 use super::*;
 use crate::graph::{node, run_counting, sink};
-use fs_mbd::component::relaxation::{RelaxationNetwork, RelaxationState};
+use fs_mbd::component::relaxation::{DriveFrame, RelaxationNetwork, RelaxationState};
 use fs_mbd::spatial_loads::internal_impulse::viscous::network::relaxation::RelaxationNetworkLink;
 use fs_system::{NodeId, RouteTemperature, System, SystemBuilder, heat_sink};
 use fs_thermal::component::{ImplicitScheme, ThermalTimeline, TimelineState};
@@ -32,15 +38,17 @@ fn routes() -> [BTreeMap<CellId, f64>; 1] {
 }
 
 /// The fixture's pair as a graph with `timeline` (heat ports on cells 0 and
-/// 1, and the environment port). Returns the system, the network and the
-/// cells.
+/// 1, and the environment port). With `held` the connector has an actuator
+/// holding that force [N] along the first body's x axis; without, it has
+/// none. Returns the system, the network and the cells.
 fn memory_graph(
     fixture: &MemoryPair,
     mechanical: RelaxationNetworkMotionControls,
     timeline: ThermalTimeline<'static>,
     heat: &DepositionSimulation<'static>,
+    held: Option<f64>,
 ) -> (System, NodeId, NodeId) {
-    let network = RelaxationNetwork::new(
+    let mut network = RelaxationNetwork::new(
         fixture.bodies.properties[..2].to_vec(),
         vec![RelaxationNetworkLink {
             viscous: fixture.links[0].clone(),
@@ -50,6 +58,9 @@ fn memory_graph(
         mechanical,
     )
     .unwrap();
+    if held.is_some() {
+        network = network.driven(0, DriveFrame::MaterialFirst).unwrap();
+    }
     let start = RelaxationState {
         bodies: fixture.bodies.states[..2].to_vec(),
         memory: fixture.memory.to_vec(),
@@ -62,6 +73,19 @@ fn memory_graph(
         let force = builder.port(moving, &format!("force{body}")).unwrap();
         builder
             .boundary(force, Box::new(|_, _, out: &mut [f64]| out.fill(0.0)))
+            .unwrap();
+    }
+    if let Some(force) = held {
+        let drive = builder.port(moving, "drive0").unwrap();
+        builder
+            .boundary(
+                drive,
+                Box::new(move |_, _, out: &mut [f64]| out.copy_from_slice(&[force, 0.0, 0.0])),
+            )
+            .unwrap();
+        let couple = builder.port(moving, "couple0").unwrap();
+        builder
+            .boundary(couple, Box::new(|_, _, out: &mut [f64]| out.fill(0.0)))
             .unwrap();
     }
     builder
@@ -145,20 +169,38 @@ fn same_run(
         "mechanical and memory energy",
     );
     assert!(report.memory_energy_change_j.abs() > 1e-3, "{case}: the memory moved");
+    // The actuator's signed work is what entered through its boundary; a
+    // graph without an actuator has no such boundary and the module's
+    // actuator did nothing.
+    let drive = ledger.boundaries.iter().find(|account| account.port == "network.drive0");
+    match drive {
+        Some(account) => {
+            assert!(report.actuator_work_j.abs() > 0.05, "{case}: {} J", report.actuator_work_j);
+            close(account.energy_in_j.value(), report.actuator_work_j, "the actuator's work");
+        }
+        // Exactly: a zero effort does no work.
+        None => assert!(report.actuator_work_j.abs() <= 0.0, "{case}"),
+    }
+    close(ledger.boundary_energy_in_j(), report.actuator_work_j, "all boundary work");
     close(ledger.energy_residual_j(), 0.0, "the ledger closes");
 }
+
+/// The fixture's held force and the graph's actuator: none, then 0.7 N
+/// and -0.7 N.
+const HELD: [(f64, Option<f64>); 3] = [(0.0, None), (0.7, Some(0.7)), (-0.7, Some(-0.7))];
 
 #[test]
 fn the_declared_graph_reproduces_the_memory_candidate() {
     // The module's pair: Kelvin viscosity 0.4, one Maxwell branch (factor
-    // 1.3, time 0.2 s) preloaded to 0.6 sqrt(J), closing at 2 m/s, no
-    // actuator. Explicit thermal steps of an eighth of a second.
+    // 1.3, time 0.2 s) preloaded to 0.6 sqrt(J), closing at 2 m/s, without
+    // and with a held force. Explicit thermal steps of an eighth of a
+    // second.
     let laws: &'static [Caloric; 2] = Box::leak(Box::new(laws()));
-    let fixture = MemoryPair::new(0.4, 1.3, 0.2, 0.6, -2.0, 0.0);
     let routes = routes();
     let heat = thermal(laws, false, true);
     let controls = memory_controls();
-    for target_s in [0.25, 0.3] {
+    for ((force, held), target_s) in HELD.into_iter().flat_map(|held| [(held, 0.25), (held, 0.3)]) {
+        let fixture = MemoryPair::new(0.4, 1.3, 0.2, 0.6, -2.0, force);
         let candidate = advance_memory(
             fixture.input(&routes),
             &heat,
@@ -171,9 +213,9 @@ fn the_declared_graph_reproduces_the_memory_candidate() {
         let timeline =
             ThermalTimeline::new(vec![CellId(0), CellId(1)], true, controls.thermal).unwrap();
         let (mut system, moving, cells) =
-            memory_graph(&fixture, controls.mechanical, timeline, &heat);
+            memory_graph(&fixture, controls.mechanical, timeline, &heat, held);
         let (intervals, shortenings) = run_counting(&mut system, target_s);
-        let case = format!("explicit, target {target_s}");
+        let case = format!("explicit, force {force}, target {target_s}");
         assert_eq!(candidate.report().thermal.substeps, intervals.len(), "{case}");
         // Neither Component of an explicit graph shortens a step.
         assert_eq!(shortenings, 0, "{case}");
@@ -186,7 +228,7 @@ fn the_declared_graph_reproduces_the_memory_candidate() {
         same_run(&case, &system, (moving, cells), &module, 1e-11);
         // The fixture is the module's: its candidate is the pair's own
         // equations, as the module's tests have them.
-        let expected = reference(0.4, 1.3, 0.2, 0.0, -2.0, 0.6, target_s);
+        let expected = reference(0.4, 1.3, 0.2, force, -2.0, 0.6, target_s);
         near(relative(candidate.states(), &fixture.bodies), expected[0], 8e-11);
         near(candidate.memory()[0][0][0], expected[1], 8e-11);
     }
@@ -204,13 +246,16 @@ fn the_declared_graph_reproduces_the_implicit_memory_candidate() {
     // module halves each one and restarts bodies and memory from the
     // accepted banks; the graph's timeline answers `Shorten`.
     let laws: &'static [Caloric; 2] = Box::leak(Box::new(laws()));
-    let fixture = MemoryPair::new(0.4, 1.3, 0.2, 0.6, -2.0, 0.0);
     let routes = routes();
     let heat = stiff_thermal(laws, 128);
-    for (module_scheme, scheme) in [
+    let schemes = [
         (ImplicitThermalScheme::BackwardEuler, ImplicitScheme::BackwardEuler),
         (ImplicitThermalScheme::Sdirk2, ImplicitScheme::Sdirk2),
-    ] {
+    ];
+    for ((force, held), (module_scheme, scheme)) in
+        HELD.into_iter().flat_map(|held| schemes.map(|scheme| (held, scheme)))
+    {
+        let fixture = MemoryPair::new(0.4, 1.3, 0.2, 0.6, -2.0, force);
         let mut controls = memory_implicit_controls(module_scheme);
         controls.thermal.maximum_newton_iterations = 2;
         controls.thermal.cell_tolerance_j = 1e-8;
@@ -227,7 +272,7 @@ fn the_declared_graph_reproduces_the_implicit_memory_candidate() {
             || false,
         )
         .unwrap();
-        let case = format!("{scheme:?}");
+        let case = format!("{scheme:?}, force {force}");
         assert!(native.rejected_intervals > 0, "{case}: {native:?}");
         let module_intervals: Vec<f64> =
             candidate.observer().intervals.iter().map(|&(_, dt_s, _)| dt_s).collect();
@@ -240,7 +285,7 @@ fn the_declared_graph_reproduces_the_implicit_memory_candidate() {
         )
         .unwrap();
         let (mut system, moving, cells) =
-            memory_graph(&fixture, controls.mechanical, timeline, &heat);
+            memory_graph(&fixture, controls.mechanical, timeline, &heat, held);
         let (intervals, shortenings) = run_counting(&mut system, 0.25);
         assert_eq!(intervals, module_intervals, "{case}");
         assert_eq!(shortenings, native.rejected_intervals, "{case}");

@@ -6,7 +6,9 @@
 //! bodies and the complete elastic memory are one state, and the memory is
 //! stored energy. Here it passes the conformance check, equals the owner
 //! driven directly, releases its preloaded memory as motion and heat, and
-//! heats thermal bodies through routes.
+//! heats thermal bodies through routes; with an actuator on a connector its
+//! drive ports carry the owner's actuator work, in material and in world
+//! axes.
 //! Run with `cargo test -p fs-system --features slices`.
 
 // Exact float comparisons here assert bitwise agreement with the owner.
@@ -16,7 +18,8 @@ use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_mbd::component::network::ViscousNetwork;
 use fs_mbd::component::relaxation::{
-    RelaxationNetwork, RelaxationNetworkBuildError, RelaxationNetworkRefusal, RelaxationState,
+    DriveFrame, RelaxationNetwork, RelaxationNetworkBuildError, RelaxationNetworkRefusal,
+    RelaxationState,
 };
 use fs_mbd::spatial_loads::internal_impulse::{
     InternalWrenchImpulseControls,
@@ -43,7 +46,8 @@ use fs_mbd::spatial_loads::internal_motion::{
 };
 use fs_mbd::{Gravity, MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3, Wrench};
 use fs_ports::component::conformance::{Case, Observed, check_component};
-use fs_ports::component::{Component, Proposal, Receipt};
+use fs_ports::PortKind;
+use fs_ports::component::{Carrier, Component, Proposal, Receipt};
 use fs_system::elements::HeatCapacity;
 use fs_system::{RouteTemperature, SystemBuilder, heat_sink};
 
@@ -297,12 +301,24 @@ fn owner_step(
     dt_s: f64,
 ) -> RelaxationNetworkMotionStep {
     let idle = [HeldInternalEffort::MaterialFirst([0.0; 6]); 2];
+    owner_step_driven(state, wrenches, &idle, gravity, dt_s)
+}
+
+/// The owner's step of the three-body network with `efforts` held on its
+/// two connectors.
+fn owner_step_driven(
+    state: &RelaxationState,
+    wrenches: &[Wrench],
+    efforts: &[HeldInternalEffort; 2],
+    gravity: Gravity,
+    dt_s: f64,
+) -> RelaxationNetworkMotionStep {
     step_relaxation_network_with_loads(
         &state.bodies,
         &properties(),
         &links(),
         &state.memory,
-        &idle,
+        efforts,
         HeldExternalLoads { wrenches, gravity },
         dt_s,
         controls(),
@@ -749,4 +765,969 @@ fn connector_heat_with_memory_reaches_thermal_bodies_and_the_ledger_closes() {
     let released = -account("network").stored_change_j.value();
     assert!((released - heat_j).abs() <= 1.0e-10, "{released} vs {heat_j}");
     assert!(ledger.energy_residual_j().abs() <= 1.0e-10);
+}
+
+/// The three-body network with an actuator on both connectors: the first
+/// held in the material axes of body 0, the second in world axes.
+fn driven_network(gravity: Gravity) -> RelaxationNetwork {
+    network(gravity)
+        .driven(0, DriveFrame::MaterialFirst)
+        .expect("actuator on connector 0")
+        .driven(1, DriveFrame::World)
+        .expect("actuator on connector 1")
+}
+
+/// Held efforts, force then couple: connector 0 in the material axes of
+/// body 0, connector 1 in world axes.
+const DRIVE: [f64; 12] = [
+    0.5, -0.2, 0.1, 0.03, 0.0, -0.04, -0.3, 0.25, 0.0, 0.0, 0.02, 0.05,
+];
+
+fn drive_efforts() -> [HeldInternalEffort; 2] {
+    [
+        HeldInternalEffort::MaterialFirst(core::array::from_fn(|c| DRIVE[c])),
+        HeldInternalEffort::World(core::array::from_fn(|c| DRIVE[6 + c])),
+    ]
+}
+
+fn turn(state: RigidBodyState, orientation: UnitQuaternion) -> RigidBodyState {
+    RigidBodyState::new(
+        Pose::new(state.pose().position_world(), orientation).expect("pose"),
+        state.linear_momentum_world(),
+        state.angular_momentum_body(),
+    )
+    .expect("state")
+}
+
+/// [`moving`] with the first two bodies turned well away from the world
+/// axes, so that material and world components differ.
+fn turned() -> Vec<RigidBodyState> {
+    let orientations = [
+        UnitQuaternion::new(0.9, -0.1, 0.3, 0.2).expect("orientation"),
+        UnitQuaternion::new(0.8, 0.2, -0.3, 0.4).expect("orientation"),
+        UnitQuaternion::IDENTITY,
+    ];
+    moving()
+        .into_iter()
+        .zip(orientations)
+        .map(|(state, orientation)| turn(state, orientation))
+        .collect()
+}
+
+/// Energy the kernel books on the two ports of the actuator in `slot` of a
+/// network with `bodies` bodies and `connectors` connectors, and the sum of
+/// the sizes of its six products.
+fn drive_port_energy_j(
+    (bodies, connectors, slot): (usize, usize, usize),
+    dt_s: f64,
+    inputs: &[f64],
+    outputs: &[f64],
+) -> (f64, f64) {
+    let base = 3 * bodies + connectors + 6 * slot;
+    let (mut energy, mut size) = (0.0_f64, 0.0_f64);
+    for c in 0..6 {
+        energy += inputs[base + c] * outputs[base + c];
+        size += (inputs[base + c] * outputs[base + c]).abs();
+    }
+    (dt_s * energy, dt_s * size)
+}
+
+#[test]
+fn a_driven_network_conforms_and_its_drive_ports_carry_the_owners_actuator_work() {
+    let gate = CancelGate::new_clock_free();
+    let gravity = Gravity::new(Vec3::new(0.0, -1.0, -9.81)).expect("gravity");
+    let component = driven_network(gravity);
+    let names: Vec<&str> = component.ports().iter().map(|port| port.id().as_str()).collect();
+    assert_eq!(
+        names,
+        ["force0", "force1", "force2", "heat0", "heat1", "drive0", "couple0", "drive1", "couple1"]
+    );
+    // A held force is conjugate to a velocity, a held couple to an angular
+    // velocity; each port is three components wide.
+    for (index, port) in component.ports()[5..].iter().enumerate() {
+        let kind = if index % 2 == 0 {
+            PortKind::MechanicalForceVelocity
+        } else {
+            PortKind::RotationalTorqueAngularVelocity
+        };
+        assert_eq!(port.carrier(), Carrier::Power(kind), "{}", port.id().as_str());
+        assert_eq!(port.width(), 3);
+    }
+    let start = RelaxationState {
+        bodies: turned(),
+        memory: preloaded(),
+    };
+    let efforts = drive_efforts();
+    let stale = {
+        let step = owner_step_driven(&start, &held_wrenches(), &efforts, gravity, 0.1);
+        RelaxationState {
+            bodies: step.states_after().to_vec(),
+            memory: step.memory_after().clone(),
+        }
+    };
+    let mut inputs = HELD.to_vec();
+    inputs.extend([300.0, 320.0]);
+    inputs.extend(DRIVE);
+    for dt_s in [4.0e-3, 2.0e-2] {
+        let case = Case {
+            state: &start,
+            stale: &stale,
+            dt_s,
+            inputs: &inputs,
+        };
+        let observed =
+            with_cx(&gate, |cx| check_component(&component, &case, cx)).expect("conforms");
+        let Observed::Stepped {
+            receipt,
+            audit,
+            outputs,
+        } = observed
+        else {
+            panic!("the network takes the step");
+        };
+        let native = owner_step_driven(&start, &held_wrenches(), &efforts, gravity, dt_s);
+        // The kernel books applied work and actuator work in and connector
+        // heat out.
+        let applied = native.external_loads.applied_work_j;
+        let heat = native.dissipated_energy_j;
+        let supplied = native.actuator_work_j;
+        let size = applied.abs() + heat + supplied.abs() + native.mechanical_energy_change_j.abs();
+        assert!(
+            (audit.port_energy_in_j - (applied + supplied - heat)).abs() <= 1.0e-11 * size,
+            "{} vs {}",
+            audit.port_energy_in_j,
+            applied + supplied - heat
+        );
+        // Each actuator's two ports carry the owner's work on that
+        // connector, in material axes and in world axes alike.
+        for connector in 0..2 {
+            let (port_j, terms_j) = drive_port_energy_j((3, 2, connector), dt_s, &inputs, &outputs);
+            let native_j = native.connector_actuator_work_j[connector];
+            assert!(native_j.abs() > 1.0e-5, "connector {connector} does work: {native_j} J");
+            assert!(
+                (port_j - native_j).abs() <= 1.0e-13 * terms_j,
+                "connector {connector}: ports {port_j:e} J, owner {native_j:e} J"
+            );
+        }
+        // With every connector driven nothing is left over: the numerical
+        // loss is the owner's residual alone.
+        // The allowance is rounding: 64 ulp of the terms (about 13 J of
+        // kinetic and potential energy here), measured 1.9e-13 J.
+        assert!(
+            receipt.energy_tolerance_j <= 1.0e-12,
+            "{:e} J",
+            receipt.energy_tolerance_j
+        );
+        assert_eq!(receipt.stored_change_j, native.mechanical_energy_change_j);
+        assert_eq!(receipt.numerical_loss_j, -native.work_heat_residual_j);
+        assert!((receipt.dissipated_j - heat).abs() <= 1.0e-14 * heat);
+        for connector in 0..2 {
+            assert_eq!(outputs[9 + connector], -native.connector_dissipation_j[connector] / dt_s);
+        }
+        // The wrapper adds nothing to the driven step either.
+        let (next, _, _) = propose(&component, &start, dt_s, &inputs, &gate).expect("step");
+        assert_eq!(next.bodies.as_slice(), native.states_after());
+        assert_eq!(&next.memory, native.memory_after());
+    }
+}
+
+#[test]
+fn one_actuator_on_a_network_of_two_connectors_carries_all_the_actuator_work() {
+    let gate = CancelGate::new_clock_free();
+    let gravity = Gravity::new(Vec3::new(0.0, -1.0, -9.81)).expect("gravity");
+    let start = RelaxationState {
+        bodies: turned(),
+        memory: preloaded(),
+    };
+    let efforts = drive_efforts();
+    let stale = {
+        let step = owner_step_driven(&start, &held_wrenches(), &efforts, gravity, 0.1);
+        RelaxationState {
+            bodies: step.states_after().to_vec(),
+            memory: step.memory_after().clone(),
+        }
+    };
+    // An actuator on connector 1 only: connector 0 holds no effort.
+    let single = network(gravity).driven(1, DriveFrame::World).expect("actuator");
+    let mut inputs = HELD.to_vec();
+    inputs.extend([300.0, 320.0]);
+    inputs.extend(&DRIVE[6..]);
+    let only = [HeldInternalEffort::MaterialFirst([0.0; 6]), efforts[1]];
+    let dt_s = 2.0e-2;
+    let case = Case {
+        state: &start,
+        stale: &stale,
+        dt_s,
+        inputs: &inputs,
+    };
+    let observed = with_cx(&gate, |cx| check_component(&single, &case, cx)).expect("conforms");
+    let Observed::Stepped {
+        receipt, outputs, ..
+    } = observed
+    else {
+        panic!("the network takes the step");
+    };
+    let native = owner_step_driven(&start, &held_wrenches(), &only, gravity, dt_s);
+    // A connector without an actuator holds a zero effort, and the owner's
+    // work for it is exactly zero: nothing is left outside the ports.
+    assert_eq!(native.connector_actuator_work_j[0], 0.0);
+    assert!(native.actuator_work_j.abs() > 1.0e-5, "{} J", native.actuator_work_j);
+    let (port_j, terms_j) = drive_port_energy_j((3, 2, 0), dt_s, &inputs, &outputs);
+    assert!((port_j - native.actuator_work_j).abs() <= 1.0e-13 * terms_j);
+    assert_eq!(receipt.numerical_loss_j, -native.work_heat_residual_j);
+    let (next, _, _) = propose(&single, &start, dt_s, &inputs, &gate).expect("step");
+    assert_eq!(next.bodies.as_slice(), native.states_after());
+    assert_eq!(&next.memory, native.memory_after());
+}
+
+/// The driven pair's own equations (RK4, 16384 steps): with a held axial
+/// force `f` on the connector, `u' = f - c u - k q`, `q' = k u - q / tau`,
+/// heat `c u^2 + q^2 / tau` and actuator work `f u`. Returns
+/// `[u, q, heat, work]` at `t_s`.
+fn driven_pair_reference(force: f64, u: f64, q: f64, t_s: f64) -> [f64; 4] {
+    let f = |s: [f64; 4]| {
+        [
+            force - PAIR_C * s[0] - PAIR_ROOT_K * s[1],
+            PAIR_ROOT_K * s[0] - s[1] / PAIR_TAU_S,
+            PAIR_C * s[0] * s[0] + s[1] * s[1] / PAIR_TAU_S,
+            force * s[0],
+        ]
+    };
+    let add = |a: [f64; 4], b: [f64; 4], h: f64| core::array::from_fn(|i| a[i] + h * b[i]);
+    let mut state = [u, q, 0.0, 0.0];
+    let h = t_s / 16384.0;
+    for _ in 0..16384 {
+        let a = f(state);
+        let b = f(add(state, a, 0.5 * h));
+        let c = f(add(state, b, 0.5 * h));
+        let d = f(add(state, c, h));
+        for i in 0..4 {
+            state[i] += h * (a[i] + 2.0 * b[i] + 2.0 * c[i] + d[i]) / 6.0;
+        }
+    }
+    state
+}
+
+/// `steps` steps of the pair with a held axial force on its connector, in
+/// `frame`. Returns the reached state, the heat and the energy the drive
+/// ports carried in.
+fn drive_pair(
+    frame: DriveFrame,
+    start: &RelaxationState,
+    force: f64,
+    (dt_s, steps): (f64, u32),
+    gate: &CancelGate,
+) -> (RelaxationState, f64, f64) {
+    let pair = pair().driven(0, frame).expect("actuator");
+    let mut inputs = vec![0.0; 6];
+    inputs.push(300.0);
+    inputs.extend([force, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    let mut state = start.clone();
+    let (mut heat_j, mut work_j) = (0.0_f64, 0.0_f64);
+    for _ in 0..steps {
+        let (next, receipt, outputs) = propose(&pair, &state, dt_s, &inputs, gate).expect("step");
+        heat_j -= dt_s * outputs[6];
+        work_j += drive_port_energy_j((2, 1, 0), dt_s, &inputs, &outputs).0;
+        assert!(receipt.numerical_loss_j.abs() <= 1.0e-10);
+        state = next;
+    }
+    (state, heat_j, work_j)
+}
+
+#[test]
+fn a_held_force_on_the_pair_does_the_work_of_its_own_equations() {
+    let gate = CancelGate::new_clock_free();
+    let pair = pair();
+    let run = (0.0125, 20_u32);
+    let t_s = run.0 * f64::from(run.1);
+    // Pushed apart from rest with a relaxed memory, then driven against its
+    // motion (the actuator recovers energy while the connector still heats).
+    for (force, u0, q0) in [(3.0, 0.0, 0.0), (-0.7, 2.0, 0.6)] {
+        let start = pair_state(u0, q0);
+        let (state, heat_j, work_j) = drive_pair(DriveFrame::MaterialFirst, &start, force, run, &gate);
+        let [u, q, heat, work] = driven_pair_reference(force, u0, q0, t_s);
+        assert!((relative_speed(&state) - u).abs() <= 1.0e-9, "{} vs {u}", relative_speed(&state));
+        assert!((state.memory[0][0][0] - q).abs() <= 1.0e-9, "{} vs {q}", state.memory[0][0][0]);
+        assert!((heat_j - heat).abs() <= 1.0e-9, "{heat_j} vs {heat}");
+        assert!((work_j - work).abs() <= 1.0e-9, "{work_j} vs {work}");
+        assert!(work.abs() > 0.05 && heat > 0.01, "work {work} J and heat {heat} J to measure");
+        // First law over the run: the work that came in is stored or is heat.
+        let stored_j = pair.stored_energy_j(&state).expect("energy")
+            - pair.stored_energy_j(&start).expect("energy");
+        assert!((work_j - heat_j - stored_j).abs() <= 1.0e-10);
+        if force < 0.0 {
+            // The actuator takes energy out (-0.30 J) while the connector
+            // still heats (0.67 J).
+            assert!(
+                work_j < -0.25 && heat_j > 0.5,
+                "recovery {work_j} J, connector heat {heat_j} J"
+            );
+        }
+        // Nothing turns in this pair, so world axes are material axes.
+        let (world, world_heat_j, world_work_j) =
+            drive_pair(DriveFrame::World, &start, force, run, &gate);
+        assert_eq!(world, state);
+        assert_eq!((world_heat_j, world_work_j), (heat_j, work_j));
+    }
+}
+
+/// The pair's relative rate in world axes, from a state alone: the
+/// velocity of the second centre of mass against the point of the first
+/// body that is there, `v1 - v0 - w0 x (x1 - x0)`, and the relative angular
+/// velocity `w1 - w0`.
+fn pair_relative_rate(state: &RelaxationState) -> [f64; 6] {
+    let p = pair_properties();
+    let velocity = |body: usize| {
+        state.bodies[body]
+            .center_of_mass_velocity_world(p[body])
+            .expect("velocity")
+    };
+    let spin = |body: usize| {
+        let s = state.bodies[body];
+        s.pose().orientation().rotate_body_to_world(
+            p[body]
+                .angular_velocity_body_checked(s.angular_momentum_body())
+                .expect("angular velocity"),
+        )
+    };
+    let (v0, v1, w0, w1) = (velocity(0), velocity(1), spin(0), spin(1));
+    let (x0, x1) = (
+        state.bodies[0].pose().position_world(),
+        state.bodies[1].pose().position_world(),
+    );
+    let r = [x1.x - x0.x, x1.y - x0.y, x1.z - x0.z];
+    let carried = [
+        w0.y * r[2] - w0.z * r[1],
+        w0.z * r[0] - w0.x * r[2],
+        w0.x * r[1] - w0.y * r[0],
+    ];
+    [
+        v1.x - v0.x - carried[0],
+        v1.y - v0.y - carried[1],
+        v1.z - v0.z - carried[2],
+        w1.x - w0.x,
+        w1.y - w0.y,
+        w1.z - w0.z,
+    ]
+}
+
+#[test]
+fn a_world_held_drive_returns_the_relative_velocity_in_world_axes() {
+    let gate = CancelGate::new_clock_free();
+    // The pair with its first body turned about one radian from the world
+    // axes and spinning, its second body spinning otherwise, a metre apart.
+    // The connector's attachments are the two centres of mass, and the
+    // first body's wrench is carried to the second attachment; so the rate
+    // conjugate to a force is the velocity of the second centre against
+    // the point of the first body that is there, and the rate conjugate to
+    // a couple is the relative angular velocity.
+    let p = pair_properties();
+    let start = RelaxationState {
+        bodies: vec![
+            turn(
+                body(p[0], Vec3::ZERO, Vec3::new(-0.6, 0.2, 0.1), Vec3::new(0.4, -0.6, 0.9)),
+                UnitQuaternion::new(0.85, 0.3, -0.2, 0.4).expect("orientation"),
+            ),
+            body(p[1], Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.5, -0.1, 0.3), Vec3::new(-0.2, 0.5, 0.3)),
+        ],
+        memory: vec![vec![[0.2, 0.0, 0.0, 0.0, 0.0, 0.0]]],
+    };
+    let held = [0.4, -0.3, 0.2, 0.05, 0.1, -0.08];
+    let mut inputs = vec![0.0; 6];
+    inputs.push(300.0);
+    inputs.extend(held);
+    // The mean of the start and end relative rates is the conjugate rate
+    // to second order in the step: halving the step quarters the
+    // difference.
+    let gap = |frame: DriveFrame, dt_s: f64| {
+        let pair = pair().driven(0, frame).expect("actuator");
+        let (next, _, outputs) = propose(&pair, &start, dt_s, &inputs, &gate).expect("step");
+        let (before, after) = (pair_relative_rate(&start), pair_relative_rate(&next));
+        let mut rate = [0.0; 6];
+        rate.copy_from_slice(&outputs[7..13]);
+        if frame == DriveFrame::MaterialFirst {
+            // The same vector in the first body's axes, which turn during
+            // the step: turned to world axes by the start orientation and
+            // by the end orientation, the mean of the two is the world
+            // rate to second order.
+            let material = rate;
+            rate = [0.0; 6];
+            for state in [&start, &next] {
+                let rotation = state.bodies[0].pose().orientation();
+                let linear =
+                    rotation.rotate_body_to_world(Vec3::new(material[0], material[1], material[2]));
+                let angular =
+                    rotation.rotate_body_to_world(Vec3::new(material[3], material[4], material[5]));
+                for (c, value) in [linear.x, linear.y, linear.z, angular.x, angular.y, angular.z]
+                    .into_iter()
+                    .enumerate()
+                {
+                    rate[c] += 0.5 * value;
+                }
+            }
+        }
+        let mut worst = 0.0_f64;
+        for c in 0..6 {
+            let mean = 0.5 * (before[c] + after[c]);
+            worst = worst.max((rate[c] - mean).abs());
+        }
+        worst
+    };
+    for frame in [DriveFrame::World, DriveFrame::MaterialFirst] {
+        // Measured: 2.0e-5 then 5.0e-6 in world axes, 3.2e-5 then 8.2e-6
+        // in material axes, of a relative rate of about 1 m/s.
+        let (coarse, fine) = (gap(frame, 2.0e-2), gap(frame, 1.0e-2));
+        assert!(coarse <= 1.0e-4, "{frame:?}: rate against the relative velocity: {coarse:e}");
+        assert!(
+            (3.0..=5.0).contains(&(coarse / fine)),
+            "{frame:?}: second order: {coarse:e} then {fine:e}"
+        );
+    }
+}
+
+#[test]
+fn an_actuator_is_refused_where_it_cannot_be() {
+    let gate = CancelGate::new_clock_free();
+    assert_eq!(
+        network(Gravity::ZERO).driven(2, DriveFrame::World).unwrap_err(),
+        RelaxationNetworkBuildError::Drive { connector: 2 }
+    );
+    assert_eq!(
+        network(Gravity::ZERO)
+            .driven(1, DriveFrame::World)
+            .expect("actuator")
+            .driven(1, DriveFrame::MaterialFirst)
+            .unwrap_err(),
+        RelaxationNetworkBuildError::Drive { connector: 1 }
+    );
+    let component = driven_network(Gravity::ZERO);
+    let start = RelaxationState {
+        bodies: moving(),
+        memory: preloaded(),
+    };
+    let mut inputs = vec![0.0; 9];
+    inputs.extend([300.0, 300.0]);
+    inputs.extend(DRIVE);
+    assert!(propose(&component, &start, 4.0e-3, &inputs, &gate).is_ok());
+    // A held effort that is not a number, on the force port and on the
+    // couple port.
+    for (index, connector) in [(11, 0), (16, 0), (17, 1), (22, 1)] {
+        for value in [f64::NAN, f64::INFINITY] {
+            let mut wild = inputs.clone();
+            wild[index] = value;
+            assert_eq!(
+                propose(&component, &start, 4.0e-3, &wild, &gate).unwrap_err(),
+                RelaxationNetworkRefusal::Effort { connector }
+            );
+        }
+    }
+}
+
+#[test]
+fn a_held_drive_is_a_boundary_and_its_work_is_in_the_ledger() {
+    let gate = CancelGate::new_clock_free();
+    // The pair at rest and relaxed, pushed apart by 3 N held on its
+    // connector; the connector's heat goes to one thermal body.
+    let start = pair_state(0.0, 0.0);
+    let component = pair().driven(0, DriveFrame::MaterialFirst).expect("actuator");
+    let mut builder = SystemBuilder::new();
+    let moving_node = builder.add("network", component, start.clone()).expect("network");
+    let cell = builder
+        .add("cell", HeatCapacity::new(5.0).expect("capacity"), 300.0_f64)
+        .expect("cell");
+    for index in 0..2 {
+        let port = builder.port(moving_node, &format!("force{index}")).expect("port");
+        builder
+            .boundary(port, Box::new(|_, _, out: &mut [f64]| out.fill(0.0)))
+            .expect("free");
+    }
+    builder
+        .boundary(
+            builder.port(moving_node, "drive0").expect("port"),
+            Box::new(|_, _, out: &mut [f64]| out.copy_from_slice(&[3.0, 0.0, 0.0])),
+        )
+        .expect("held force");
+    builder
+        .boundary(
+            builder.port(moving_node, "couple0").expect("port"),
+            Box::new(|_, _, out: &mut [f64]| out.fill(0.0)),
+        )
+        .expect("no couple");
+    builder
+        .heat_route(
+            builder.port(moving_node, "heat0").expect("port"),
+            &[(builder.port(cell, "heat").expect("port"), 1.0)],
+            None,
+            RouteTemperature::SinkEquivalent,
+        )
+        .expect("route");
+    let mut system = builder.seal().expect("sealed");
+    let heat_port = system.port(moving_node, "heat0").expect("heat port");
+    assert!(system.guess(heat_port, &[300.0]));
+
+    // The owner marched alone over the same steps with the same effort.
+    let idle = [Wrench::ZERO; 2];
+    let held = [HeldInternalEffort::MaterialFirst([3.0, 0.0, 0.0, 0.0, 0.0, 0.0])];
+    let mut twin = start.clone();
+    let (dt_s, steps) = (0.0125, 20_u32);
+    let (mut heat_j, mut work_j) = (0.0_f64, 0.0_f64);
+    with_cx(&gate, |cx| {
+        for _ in 0..steps {
+            system.step(dt_s, cx).expect("kernel step");
+            let native = step_relaxation_network_with_loads(
+                &twin.bodies,
+                &pair_properties(),
+                &pair_links(),
+                &twin.memory,
+                &held,
+                HeldExternalLoads {
+                    wrenches: &idle,
+                    gravity: Gravity::ZERO,
+                },
+                dt_s,
+                controls(),
+                || false,
+            )
+            .expect("the owner takes the step");
+            heat_j += native.connector_dissipation_j[0];
+            work_j += native.connector_actuator_work_j[0];
+            twin = RelaxationState {
+                bodies: native.states_after().to_vec(),
+                memory: native.memory_after().clone(),
+            };
+        }
+    });
+    let reached = system.state::<RelaxationState>(moving_node).expect("state");
+    assert_eq!(reached, &twin);
+    let [u, q, heat, work] = driven_pair_reference(3.0, 0.0, 0.0, dt_s * f64::from(steps));
+    assert!((relative_speed(reached) - u).abs() <= 1.0e-9);
+    assert!((reached.memory[0][0][0] - q).abs() <= 1.0e-9);
+    assert!((heat_j - heat).abs() <= 1.0e-9 && (work_j - work).abs() <= 1.0e-9);
+
+    // The ledger: the actuator's work came in through the drive boundary
+    // and nowhere else, and it is stored in the pair or is heat in the cell.
+    let ledger = system.ledger();
+    let boundary = |port: &str| {
+        ledger
+            .boundaries
+            .iter()
+            .find(|account| account.port == port)
+            .unwrap_or_else(|| panic!("boundary {port}"))
+            .energy_in_j
+            .value()
+    };
+    assert!(work_j > 0.05 && heat_j > 0.01, "work {work_j} J and heat {heat_j} J to measure");
+    assert!((boundary("network.drive0") - work_j).abs() <= 1.0e-13 * work_j);
+    for idle_port in ["network.couple0", "network.force0", "network.force1"] {
+        assert_eq!(boundary(idle_port), 0.0, "{idle_port}");
+    }
+    assert!((ledger.boundary_energy_in_j() - work_j).abs() <= 1.0e-13 * work_j);
+    let account = |name: &str| ledger.nodes.iter().find(|node| node.name == name).expect("node");
+    let warmed = account("cell").stored_change_j.value();
+    assert!((warmed - heat_j).abs() <= 1.0e-11 * heat_j, "{warmed} vs {heat_j}");
+    let stored = account("network").stored_change_j.value();
+    assert!((work_j - heat_j - stored).abs() <= 1.0e-10);
+    assert!(ledger.energy_residual_j().abs() <= 1.0e-10);
+}
+
+#[test]
+fn actuators_given_out_of_connector_order_keep_their_own_ports() {
+    let gate = CancelGate::new_clock_free();
+    let gravity = Gravity::new(Vec3::new(0.0, -1.0, -9.81)).expect("gravity");
+    // Connector 1 first (world axes), then connector 0 (material axes).
+    let component = network(gravity)
+        .driven(1, DriveFrame::World)
+        .expect("actuator on connector 1")
+        .driven(0, DriveFrame::MaterialFirst)
+        .expect("actuator on connector 0");
+    let names: Vec<&str> = component.ports().iter().map(|port| port.id().as_str()).collect();
+    assert_eq!(
+        names,
+        ["force0", "force1", "force2", "heat0", "heat1", "drive1", "couple1", "drive0", "couple0"]
+    );
+    let start = RelaxationState {
+        bodies: turned(),
+        memory: preloaded(),
+    };
+    let efforts = drive_efforts();
+    let dt_s = 2.0e-2;
+    let stale = {
+        let step = owner_step_driven(&start, &held_wrenches(), &efforts, gravity, 0.1);
+        RelaxationState {
+            bodies: step.states_after().to_vec(),
+            memory: step.memory_after().clone(),
+        }
+    };
+    // The inputs follow the ports: connector 1's effort, then connector 0's.
+    let mut inputs = HELD.to_vec();
+    inputs.extend([300.0, 320.0]);
+    inputs.extend(&DRIVE[6..]);
+    inputs.extend(&DRIVE[..6]);
+    let case = Case {
+        state: &start,
+        stale: &stale,
+        dt_s,
+        inputs: &inputs,
+    };
+    let observed = with_cx(&gate, |cx| check_component(&component, &case, cx)).expect("conforms");
+    let Observed::Stepped { outputs, .. } = observed else {
+        panic!("the network takes the step");
+    };
+    let native = owner_step_driven(&start, &held_wrenches(), &efforts, gravity, dt_s);
+    for (slot, connector) in [(0, 1), (1, 0)] {
+        let (port_j, terms_j) = drive_port_energy_j((3, 2, slot), dt_s, &inputs, &outputs);
+        let native_j = native.connector_actuator_work_j[connector];
+        assert!(
+            (port_j - native_j).abs() <= 1.0e-13 * terms_j,
+            "connector {connector}: ports {port_j:e} J, owner {native_j:e} J"
+        );
+    }
+    // The two connectors do different work, so a swap would show.
+    let [first, second] = [native.connector_actuator_work_j[0], native.connector_actuator_work_j[1]];
+    assert!((first - second).abs() > 1.0e-4, "{first} J and {second} J");
+    // The same physics as with the actuators given in connector order.
+    let (next, _, _) = propose(&component, &start, dt_s, &inputs, &gate).expect("step");
+    assert_eq!(next.bodies.as_slice(), native.states_after());
+    assert_eq!(&next.memory, native.memory_after());
+    // A refusal names the connector, not the position of its ports.
+    for (index, connector) in [(11, 1), (16, 1), (17, 0), (22, 0)] {
+        let mut wild = inputs.clone();
+        wild[index] = f64::NAN;
+        assert_eq!(
+            propose(&component, &start, dt_s, &wild, &gate).unwrap_err(),
+            RelaxationNetworkRefusal::Effort { connector }
+        );
+    }
+}
+
+#[test]
+fn an_actuator_holding_nothing_changes_nothing_and_still_reports_its_rate() {
+    let gate = CancelGate::new_clock_free();
+    let gravity = Gravity::new(Vec3::new(0.0, -1.0, -9.81)).expect("gravity");
+    let start = RelaxationState {
+        bodies: turned(),
+        memory: preloaded(),
+    };
+    let dt_s = 2.0e-2;
+    let mut plain = HELD.to_vec();
+    plain.extend([300.0, 320.0]);
+    let mut inputs = plain.clone();
+    inputs.extend([0.0; 12]);
+    let (without, bare, _) =
+        propose(&network(gravity), &start, dt_s, &plain, &gate).expect("step");
+    let (with, receipt, outputs) =
+        propose(&driven_network(gravity), &start, dt_s, &inputs, &gate).expect("step");
+    assert_eq!(with, without);
+    assert_eq!(receipt, bare);
+    // Connector 0's rate, in the first body's material axes, is the mean of
+    // the two half-step twists the owner reports.
+    let native = owner_step(&start, &held_wrenches(), gravity, dt_s);
+    let [initial, endpoint] = &native.half_sources;
+    for c in 0..6 {
+        let mean =
+            0.5 * (initial.average_relative_twist[0][c] + endpoint.average_relative_twist[0][c]);
+        assert_eq!(outputs[11 + c], mean, "component {c}");
+    }
+    for slot in 0..2 {
+        // No work, and the relative rate of the connector all the same.
+        assert_eq!(drive_port_energy_j((3, 2, slot), dt_s, &inputs, &outputs).0, 0.0);
+        let rate = &outputs[11 + 6 * slot..17 + 6 * slot];
+        assert!(rate.iter().any(|value| value.abs() > 0.05), "{rate:?}");
+    }
+}
+
+/// The pair's connector with its bodies named the other way round: body 1
+/// is the connector's first body.
+fn reversed_pair() -> (Vec<RelaxationNetworkLink>, RelaxationState) {
+    let mut links = pair_links();
+    links[0].viscous.bodies = [1, 0];
+    let p = pair_properties();
+    let state = RelaxationState {
+        bodies: vec![
+            turn(
+                body(p[0], Vec3::ZERO, Vec3::new(-0.6, 0.2, 0.1), Vec3::new(0.4, -0.6, 0.9)),
+                UnitQuaternion::new(0.85, 0.3, -0.2, 0.4).expect("orientation"),
+            ),
+            turn(
+                body(p[1], Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.5, -0.1, 0.3), Vec3::new(-0.2, 0.5, 0.3)),
+                UnitQuaternion::new(0.6, -0.5, 0.4, 0.1).expect("orientation"),
+            ),
+        ],
+        memory: vec![vec![[0.2, 0.0, 0.0, 0.0, 0.0, 0.0]]],
+    };
+    (links, state)
+}
+
+#[test]
+fn a_world_drive_turns_with_its_connectors_first_body_whichever_that_is() {
+    let gate = CancelGate::new_clock_free();
+    // Connector 0 with body 1 as its first body: the pose that matters for
+    // a world-held effort is body 1's, and both bodies are turned (each
+    // differently) and spinning.
+    let (links, start) = reversed_pair();
+    let held = [0.4, -0.3, 0.2, 0.05, 0.1, -0.08];
+    let mut inputs = vec![0.0; 6];
+    inputs.push(300.0);
+    inputs.extend(held);
+    let idle = [Wrench::ZERO; 2];
+    for frame in [DriveFrame::World, DriveFrame::MaterialFirst] {
+        let component =
+            RelaxationNetwork::new(pair_properties(), links.clone(), Gravity::ZERO, controls())
+                .expect("network")
+                .driven(0, frame)
+                .expect("actuator");
+        let effort = match frame {
+            DriveFrame::World => HeldInternalEffort::World(held),
+            DriveFrame::MaterialFirst => HeldInternalEffort::MaterialFirst(held),
+        };
+        let owner = |dt_s: f64| {
+            step_relaxation_network_with_loads(
+                &start.bodies,
+                &pair_properties(),
+                &links,
+                &start.memory,
+                &[effort],
+                HeldExternalLoads {
+                    wrenches: &idle,
+                    gravity: Gravity::ZERO,
+                },
+                dt_s,
+                controls(),
+                || false,
+            )
+            .expect("the owner takes the step")
+        };
+        let stale = {
+            let step = owner(0.1);
+            RelaxationState {
+                bodies: step.states_after().to_vec(),
+                memory: step.memory_after().clone(),
+            }
+        };
+        let dt_s = 2.0e-2;
+        let case = Case {
+            state: &start,
+            stale: &stale,
+            dt_s,
+            inputs: &inputs,
+        };
+        let observed =
+            with_cx(&gate, |cx| check_component(&component, &case, cx)).expect("conforms");
+        let Observed::Stepped { outputs, .. } = observed else {
+            panic!("the network takes the step");
+        };
+        let native = owner(dt_s);
+        let (port_j, terms_j) = drive_port_energy_j((2, 1, 0), dt_s, &inputs, &outputs);
+        let native_j = native.connector_actuator_work_j[0];
+        assert!(native_j.abs() > 1.0e-3, "{frame:?}: the actuator does work: {native_j} J");
+        assert!(
+            (port_j - native_j).abs() <= 1.0e-13 * terms_j,
+            "{frame:?}: ports {port_j:e} J, owner {native_j:e} J"
+        );
+    }
+}
+
+#[test]
+fn half_step_works_that_cancel_leave_an_allowance_for_their_rounding() {
+    let gate = CancelGate::new_clock_free();
+    // The pair with no Kelvin viscosity and a lossless branch is an
+    // oscillator of angular frequency 1.3 rad/s. Pushed from rest by a held
+    // force for one period, it is back at rest and relaxed: the actuator's
+    // work in the first half step is taken back in the second, nothing is
+    // stored and nothing is heat. Every total is then zero to rounding,
+    // while each half step's work is not.
+    let mut rows = [[0.0; 6]; 6];
+    rows[0][0] = PAIR_ROOT_K;
+    let lossless = SpatialRelaxationBranch::from_equilibrium_gram_rows(rows).expect("branch");
+    let links = vec![RelaxationNetworkLink {
+        viscous: ViscousNetworkLink {
+            bodies: [0, 1],
+            arms_body_m: [Vec3::ZERO; 2],
+            damping: damping([0.0; 6]),
+        },
+        branches: vec![lossless],
+    }];
+    let component =
+        RelaxationNetwork::new(pair_properties(), links.clone(), Gravity::ZERO, controls())
+            .expect("network")
+            .driven(0, DriveFrame::MaterialFirst)
+            .expect("actuator");
+    let force = 0.7;
+    let mut inputs = vec![0.0; 6];
+    inputs.push(300.0);
+    inputs.extend([force, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    let period_s = core::f64::consts::TAU / PAIR_ROOT_K;
+    let idle = [Wrench::ZERO; 2];
+    let stale = pair_state(0.3, -0.2);
+    // The last case spins the bodies against each other about the
+    // connector's axis at 2 rad/s (2 J of rotation). No couple is held, so
+    // the spin does no work on the actuator.
+    let p = pair_properties();
+    let spinning = RelaxationState {
+        bodies: vec![
+            body(p[0], Vec3::ZERO, Vec3::ZERO, Vec3::new(-2.0, 0.0, 0.0)),
+            body(p[1], Vec3::new(1.0, 0.0, 0.0), Vec3::ZERO, Vec3::new(2.0, 0.0, 0.0)),
+        ],
+        memory: vec![vec![[0.0; 6]]],
+    };
+    for (stretch, start) in [
+        (1.0, pair_state(0.0, 0.0)),
+        (0.999, pair_state(0.0, 0.0)),
+        (1.002, pair_state(0.0, 0.0)),
+        (1.0, spinning),
+    ] {
+        let dt_s = stretch * period_s;
+        let native = step_relaxation_network_with_loads(
+            &start.bodies,
+            &pair_properties(),
+            &links,
+            &start.memory,
+            &[HeldInternalEffort::MaterialFirst([force, 0.0, 0.0, 0.0, 0.0, 0.0])],
+            HeldExternalLoads {
+                wrenches: &idle,
+                gravity: Gravity::ZERO,
+            },
+            dt_s,
+            controls(),
+            || false,
+        )
+        .expect("the owner takes the step");
+        let [first, second] = [
+            native.half_sources[0].connector_actuator_work_j[0],
+            native.half_sources[1].connector_actuator_work_j[0],
+        ];
+        // 2 F^2 / k^2 = 0.58 J in, and the same out.
+        assert!(first > 0.5 && second < -0.5, "{first} J then {second} J");
+        assert!(native.actuator_work_j.abs() <= 1.0e-4 * first, "{} J", native.actuator_work_j);
+        let case = Case {
+            state: &start,
+            stale: &stale,
+            dt_s,
+            inputs: &inputs,
+        };
+        let observed =
+            with_cx(&gate, |cx| check_component(&component, &case, cx)).expect("conforms");
+        let Observed::Stepped { receipt, .. } = observed else {
+            panic!("the network takes the step");
+        };
+        // The allowance is the rounding of what is there: 64 ulp of each
+        // half's work, of each half's port product (the same size) and of
+        // the energy stored at the two ends, with a quarter to spare. A
+        // force is paired with the linear rate only: the spin of the last
+        // case adds its stored energy and nothing else. Measured: 3.3e-14 J
+        // without the spin and 9.0e-14 J with it.
+        let before = component.stored_energy_j(&start).expect("energy");
+        let (after, _, _) = propose(&component, &start, dt_s, &inputs, &gate).expect("step");
+        let after = component.stored_energy_j(&after).expect("energy");
+        assert!(receipt.energy_tolerance_j >= 64.0 * f64::EPSILON * (first - second));
+        assert!(
+            receipt.energy_tolerance_j
+                <= 80.0 * f64::EPSILON * (2.0 * (first - second) + before + after),
+            "{:e} J with {before} J stored",
+            receipt.energy_tolerance_j
+        );
+    }
+}
+
+#[test]
+fn drives_in_world_axes_with_a_couple_reach_the_ledger_through_the_kernel() {
+    let gate = CancelGate::new_clock_free();
+    // The three-body network, its first two bodies turned and spinning,
+    // with both actuators holding a force and a couple (connector 0 in
+    // material axes, connector 1 in world axes), held forces on the bodies,
+    // and each connector's heat to its own sink.
+    let start = RelaxationState {
+        bodies: turned(),
+        memory: preloaded(),
+    };
+    let mut builder = SystemBuilder::new();
+    let moving_node = builder
+        .add("network", driven_network(Gravity::ZERO), start.clone())
+        .expect("network");
+    for body in 0..3 {
+        let port = builder.port(moving_node, &format!("force{body}")).expect("port");
+        let held: [f64; 3] = core::array::from_fn(|axis| HELD[3 * body + axis]);
+        builder
+            .boundary(port, Box::new(move |_, _, out: &mut [f64]| out.copy_from_slice(&held)))
+            .expect("held force");
+    }
+    for (slot, name) in ["drive0", "couple0", "drive1", "couple1"].into_iter().enumerate() {
+        let port = builder.port(moving_node, name).expect("port");
+        let held: [f64; 3] = core::array::from_fn(|axis| DRIVE[3 * slot + axis]);
+        builder
+            .boundary(port, Box::new(move |_, _, out: &mut [f64]| out.copy_from_slice(&held)))
+            .expect("held effort");
+    }
+    for connector in 0..2 {
+        builder
+            .heat_route(
+                builder.port(moving_node, &format!("heat{connector}")).expect("port"),
+                &[],
+                Some(heat_sink(&format!("sink{connector}"), 300.0).expect("sink")),
+                RouteTemperature::Fixed(300.0),
+            )
+            .expect("route");
+    }
+    let mut system = builder.seal().expect("sealed");
+
+    // The owner marched alone over the same steps.
+    let efforts = drive_efforts();
+    let mut twin = start.clone();
+    let (dt_s, steps) = (4.0e-3, 5_u32);
+    let (mut works_j, mut heats_j, mut applied_j) = ([0.0_f64; 2], [0.0_f64; 2], 0.0_f64);
+    with_cx(&gate, |cx| {
+        for _ in 0..steps {
+            system.step(dt_s, cx).expect("kernel step");
+            let native = owner_step_driven(&twin, &held_wrenches(), &efforts, Gravity::ZERO, dt_s);
+            for connector in 0..2 {
+                works_j[connector] += native.connector_actuator_work_j[connector];
+                heats_j[connector] += native.connector_dissipation_j[connector];
+            }
+            applied_j += native.external_loads.applied_work_j;
+            twin = RelaxationState {
+                bodies: native.states_after().to_vec(),
+                memory: native.memory_after().clone(),
+            };
+        }
+    });
+    assert_eq!(system.state::<RelaxationState>(moving_node).expect("state"), &twin);
+
+    let ledger = system.ledger();
+    let boundary = |port: &str| {
+        ledger
+            .boundaries
+            .iter()
+            .find(|account| account.port == port)
+            .unwrap_or_else(|| panic!("boundary {port}"))
+            .energy_in_j
+            .value()
+    };
+    let size = works_j[0].abs() + works_j[1].abs() + heats_j[0] + heats_j[1] + applied_j.abs();
+    for connector in 0..2 {
+        let force_j = boundary(&format!("network.drive{connector}"));
+        let couple_j = boundary(&format!("network.couple{connector}"));
+        // Both ports of an actuator carry work (-2.1e-2 J and -2.2e-4 J on
+        // connector 0, -8.1e-3 J and -1.7e-4 J on connector 1), and together
+        // the owner's. Measured: equal to the bit for the actuators and the
+        // sinks, 9e-19 J apart for the body forces, a ledger residual of
+        // 2e-19 J; `size` is 0.10 J.
+        assert!(force_j.abs() > 1.0e-5 && couple_j.abs() > 1.0e-7, "{force_j} J, {couple_j} J");
+        assert!(
+            (force_j + couple_j - works_j[connector]).abs() <= 1.0e-14 * size,
+            "connector {connector}: {} vs {}",
+            force_j + couple_j,
+            works_j[connector]
+        );
+        let sink_j = ledger
+            .sinks
+            .iter()
+            .find(|sink| sink.name == format!("sink{connector}"))
+            .expect("sink")
+            .heat_j
+            .value();
+        assert!((sink_j - heats_j[connector]).abs() <= 1.0e-14 * size);
+    }
+    let pushed: f64 = (0..3).map(|body| boundary(&format!("network.force{body}"))).sum();
+    assert!((pushed - applied_j).abs() <= 1.0e-14 * size, "{pushed} vs {applied_j}");
+    assert!(ledger.energy_residual_j().abs() <= 1.0e-14 * size);
 }

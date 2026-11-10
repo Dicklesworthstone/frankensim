@@ -7,7 +7,7 @@ use fs_couple::rigid_damping_heat::driven::{
     advance_temperature_implicit_candidate as advance_driven_temperature_implicit,
 };
 
-fn pair_input<'a>(
+pub(crate) fn pair_input<'a>(
     bodies: &'a Bodies,
     routes: &'a [BTreeMap<CellId, f64>],
 ) -> RigidDampingThermalInput<'a> {
@@ -18,7 +18,7 @@ fn pair_input<'a>(
     input.loads.wrenches = &bodies.loads[..2];
     input
 }
-fn controls() -> DrivenDampingThermalConfig {
+pub(crate) fn controls() -> DrivenDampingThermalConfig {
     let baseline = config();
     DrivenDampingThermalConfig {
         mechanical: baseline.mechanical.source,
@@ -27,7 +27,7 @@ fn controls() -> DrivenDampingThermalConfig {
         energy_tolerance_j: baseline.energy_tolerance_j,
     }
 }
-fn effort(force: f64) -> HeldInternalEffort {
+pub(crate) fn effort(force: f64) -> HeldInternalEffort {
     HeldInternalEffort::MaterialFirst([force, 0.0, 0.0, 0.0, 0.0, 0.0])
 }
 fn scalar_reference(c: f64, force: f64, time: f64) -> (f64, f64, f64) {

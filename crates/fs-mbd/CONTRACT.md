@@ -138,7 +138,24 @@ heats are the owner's numbers; the owner's work-heat residual is booked as
 numerical loss; entropy is `sum(D_e / T_e)`. `RelaxationNetworkRefusal`
 carries the owner's error unchanged, or names a state of the wrong length, a
 memory that is not one finite amplitude per branch, a temperature that is not
-positive and finite, or cancellation.
+positive and finite, a held effort that is not finite, or cancellation.
+
+An actuator on a connector is opt-in: `driven(connector, frame)` appends two
+power ports, `drive<e>` (the force the actuator holds on the connector's
+second attachment [N]) and `couple<e>` (the couple it holds there [N m]),
+three components each, held over the step in the axes of `frame`:
+`DriveFrame::MaterialFirst` (the first body's material axes, turning with it)
+or `DriveFrame::World`. The first body takes the opposite wrench, carried to
+the second attachment. The ports return the conjugate rates in the same axes:
+the velocity of the second attachment against the point of the first body
+that is there [m/s] and the relative angular velocity [rad/s], each the mean
+of the owner's two half-step averages. Effort times rate times the step is
+the owner's actuator work on that connector, signed: an actuator working
+against the motion recovers energy while the connector still heats. With the
+actuator work on its ports, the numerical loss is the owner's residual
+alone. The energy allowance is sized by each half step's work, because the
+two can cancel, and port by port (a force with the linear rate, a couple with
+the angular rate).
 
 G0, in `crates/fs-system/tests/relaxation_network_slice.rs` (run with
 `cargo test -p fs-system --features slices`): conformance under forces and
@@ -157,9 +174,32 @@ marched alone, with the ledger closed. Twenty planted defects were each
 caught. Compared with the hand-written Maxwell-memory coupling of fs-couple
 in `crates/fs-couple/tests/rigid_damping_heat/relaxation/graph.rs`.
 
-No claim: the owner's held internal efforts (actuators on a connector) are
-all zero in the Component, because their work would enter with no port to
-carry it; no torque port; the Kelvin viscosity and the relaxation times are
+G0 for the actuators, in the same test file: conformance with both
+connectors driven (one in material axes, one in world axes, force and couple,
+the first two bodies turned about a radian and spinning), each actuator's two
+ports carrying the owner's work on its connector to 1e-13 of the products'
+sizes and the numerical loss equal to minus the owner's residual; the same
+with the actuators given in the other order, with one connector driven, and
+with a connector whose first body is not the body of the same index; an
+actuator that holds nothing leaves the step and the receipt identical to
+those of the network without actuators and still reports its rate; a pair
+pushed from rest and a pair driven against its motion (-0.30 J recovered,
+0.67 J of connector heat) against the pair's own equations integrated
+independently (speed, memory, heat and work to 1e-9); the returned rate
+against the relative velocity computed from the states alone, second order
+in the step, in both frames; a pair driven for one period of its own
+oscillation, where the two half-step works (0.58 J in, 0.58 J out) cancel and
+the step still passes the audit with an allowance of 3.3e-14 J, and the same
+with the bodies spinning against each other, where the spin adds its stored
+energy to the allowance and nothing else; refusals; two kernel runs with the
+held efforts as boundaries, the ledger's boundary accounts equal to the
+owner's actuator work (force and couple ports, material and world axes) and
+the ledger closed. PLANTS Compared with the hand-written driven couplings of
+fs-couple in `crates/fs-couple/tests/rigid_damping_heat/driven_graph.rs`.
+
+No claim: an effort is held over the whole step (a varying command is sampled
+by whatever feeds the port); no torque port on a body; the Kelvin viscosity
+and the relaxation times are
 fixed (the owner's held-kinetics entry, which scales those two, is not
 wrapped); the owner solves bodies and branches as one dense system and
 refuses one that does not fit (at this writing, bodies plus branches above
