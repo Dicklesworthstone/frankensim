@@ -159,4 +159,5 @@ fn invalid_mass_path_and_late_failure_preserve_the_complete_circulating_history(
     });
 }
 
+#[path = "advection/resolved.rs"]
 mod resolved;

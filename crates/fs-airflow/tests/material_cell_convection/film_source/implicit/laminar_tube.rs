@@ -91,7 +91,7 @@ fn g1_mean_laminar_liquid_retains_bulk_state_and_complete_wall_viscosity_tangent
                 &bulk, &wall, 0.001 / config.characteristic_length.value(),
                 config.characteristic_length, LENGTH_OVER_DIAMETER,
             ).unwrap();
-            near(actual.coefficient.value.value(), direct.coefficient().value.value(), 2e-12 * expected);
+            near(actual.coefficient.value.value(), direct.bulk().coefficient().value.value(), 2e-12 * expected);
             check_derivative(&law, surface, 300.0);
             let flux = law.flux_state_at_surface(0.0, surface, 300.0).unwrap();
             near(flux.convection_temperature_tangent_w_m2_k,

@@ -1,7 +1,9 @@
 //! Dense homogeneous gas through the original reciprocal thermal/convection path.
 //! Manufactured source packs and invariants; no empirical validation is implied.
 
+#[path = "real_gas/film.rs"]
 mod film;
+#[path = "real_gas/natural.rs"]
 mod natural;
 
 use super::{body, near, scope, source, surface, uniform_boundary};

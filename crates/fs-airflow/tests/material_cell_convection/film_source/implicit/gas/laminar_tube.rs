@@ -32,7 +32,7 @@ fn g1_laminar_gas_mean_retains_original_bulk_wall_and_analytic_tangent() {
             ).unwrap();
             let actual = source.evaluate(surface, 300.0).unwrap();
             let h = actual.coefficient.value.value();
-            near(h, expected.coefficient().value.value(), 2e-12 * h);
+            near(h, expected.bulk().coefficient().value.value(), 2e-12 * h);
             assert_eq!(actual.property_temperature_k, 300.0);
             assert_eq!(actual.transport, bulk);
             assert_eq!(actual.nusselt.card().id, CorrelationId::SiederTateLaminar);

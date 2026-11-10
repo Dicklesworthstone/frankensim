@@ -320,7 +320,7 @@ fn power_curves_refuse_impossible_interior_output_and_unsupported_material() {
     with_network(FIXED, |cx, network| {
         let head = pump(false);
         let state = network.solve_with_pump(cx, &[300.0; 2], &head, local(), work(), root()).unwrap();
-        let curve = head.with_drive_curve(drive(0.0001, 0.0002));
+        let curve = pump(false).with_drive_curve(drive(0.0001, 0.0002));
         // Both head endpoints have zero hydraulic output, but between them
         // rho*g*H(Q)*Q exceeds the authored shaft input. Do not clip the loss.
         for q in [0.0, 1e-5] {

@@ -157,6 +157,8 @@ fn unsupported_bulk_state_duplicate_inventory_and_late_failure_leave_all_histori
     });
 }
 
+#[path = "pressure/pump.rs"]
 mod pump;
 
+#[path = "pressure/gravity.rs"]
 mod gravity;

@@ -361,5 +361,7 @@ fn malformed_common_solid_response_and_controls_refuse_before_publication() {
     });
 }
 
+#[path = "liquid_parallel/porous.rs"]
 mod porous;
+#[path = "liquid_parallel/hydraulic_heat.rs"]
 mod hydraulic_heat;

@@ -340,4 +340,5 @@ fn late_coolant_failure_keeps_its_typed_cause_and_rolls_back_the_complete_assemb
     });
 }
 
+#[path = "relaxation_convection/finite.rs"]
 mod finite;

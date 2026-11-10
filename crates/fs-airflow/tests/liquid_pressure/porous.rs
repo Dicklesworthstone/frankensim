@@ -1,6 +1,8 @@
 //! Source permeability through the native heat/pressure/solid owners.
 
+#[path = "porous/forchheimer.rs"]
 mod forchheimer;
+#[path = "porous/wet.rs"]
 mod wet;
 
 use super::*;

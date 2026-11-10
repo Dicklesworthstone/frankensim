@@ -141,7 +141,7 @@ fn finite_recovery_matches_analytical_heating_cooling_and_reversed_hydraulics() 
 // This manufactures a 300 -> 400 K fresh path and a 500 K exhaust at Q=150 kW.
 fn recovery_ua() -> f64 {
     let heat = 150_000.0;
-    let integrand = |progress| {
+    let integrand = |progress: f64| {
         let hot = after_heat(500.0, -progress);
         let cold = after_heat(300.0, heat - progress);
         1.0 / (hot - cold)

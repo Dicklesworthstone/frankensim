@@ -6,6 +6,7 @@ use fs_airflow::graph::thermal::medium::convection::{
     evaluate_sphere_from_material,
     implicit::{ExteriorConvectionSettings, ImplicitGasConvection},
 };
+use fs_material::fluid_transport::FluidTransport;
 use fs_material::gas_species::input::temperature::IsobaricGasLaw;
 use fs_qty::Temperature;
 use fs_thermal::enthalpy::conduction::implicit::boundary::ImplicitGrayExteriorLaw;
@@ -148,7 +149,7 @@ fn active_thermochemical_wall_viscosity_uses_its_original_bulk_and_surface_sourc
             &bulk, &wall, 1.0, Length::new(0.1),
         ).unwrap();
         let actual = convection.evaluate(surface, 400.0).unwrap();
-        near(actual.coefficient.value.value(), expected.coefficient().value.value(), 1e-11);
+        near(actual.coefficient.value.value(), expected.bulk().coefficient().value.value(), 1e-11);
         assert_eq!(actual.property_temperature_k, 400.0);
         let delta = 0.01;
         let value = |t| convection.evaluate(t, 400.0).unwrap().coefficient.value.value();

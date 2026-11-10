@@ -476,11 +476,14 @@ fn heated_outlet_prediction_stays_inside_narrow_transport_support() {
     }
 }
 
+#[path = "liquid_pressure/porous.rs"]
 mod porous;
+#[path = "liquid_pressure/direction.rs"]
 mod direction;
 #[path = "liquid_pressure/transient.rs"]
 mod transient;
 
+#[path = "liquid_pressure/dissipative_solid.rs"]
 mod dissipative_solid;
 
 fn gravity_reservoir_controls() -> GravityReservoirControls {

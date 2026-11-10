@@ -206,6 +206,8 @@ fn incomplete_links_and_late_coolant_refusal_preserve_the_whole_finite_inventory
     });
 }
 
+#[path = "finite/advection.rs"]
 mod advection;
 
+#[path = "finite/pressure.rs"]
 mod pressure;

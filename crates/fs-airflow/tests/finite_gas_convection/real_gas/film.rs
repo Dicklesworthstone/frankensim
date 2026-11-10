@@ -116,7 +116,11 @@ fn forced_oriented_natural_and_aiding_films_use_real_density_cp_and_expansion() 
         let ra = 9.80665 * beta * 5.0 * 0.01_f64.powi(3) * rho.powi(2) * cp / (mu * k);
         let groups = evaluated.nusselt.groups();
         let nu = match law {
-            FilmGasHeatLaw::BulkForced(_) | FilmGasHeatLaw::ForcedPlateSection(_) => {
+            FilmGasHeatLaw::BulkForced(_)
+            | FilmGasHeatLaw::ForcedPlateSection(_)
+            | FilmGasHeatLaw::BulkForcedTubeSection(_)
+            | FilmGasHeatLaw::BulkForcedLaminarTubeSection(_)
+            | FilmGasHeatLaw::BulkForcedRectangularDuctSection(_) => {
                 unreachable!("only whole external surfaces enter this mean-film oracle")
             }
             FilmGasHeatLaw::Forced(surface) => {

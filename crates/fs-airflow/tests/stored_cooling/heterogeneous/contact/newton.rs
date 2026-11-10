@@ -1,4 +1,5 @@
 //! Real stored-solid/coolant solves checked against independent surface moments.
+#[path = "newton/material.rs"]
 mod material;
 
 use super::*;

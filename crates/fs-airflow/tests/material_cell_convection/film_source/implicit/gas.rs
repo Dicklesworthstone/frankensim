@@ -234,6 +234,7 @@ fn bulk_wall_viscosity_corrections_query_the_same_gas_without_a_film_substitutio
             SourceCellConvectionLaw::ForcedSphere { speed_m_s } => {
                 evaluate_sphere_from_material(gas.reference(), &wall, speed_m_s, Length::new(0.1))
                     .unwrap()
+                    .bulk()
                     .coefficient()
                     .value
                     .value()
@@ -246,6 +247,7 @@ fn bulk_wall_viscosity_corrections_query_the_same_gas_without_a_film_substitutio
                 100.0,
             )
             .unwrap()
+            .bulk()
             .coefficient()
             .value
             .value(),

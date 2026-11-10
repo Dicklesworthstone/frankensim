@@ -1,5 +1,6 @@
 //! Original source Cp(T), analytic channel heat, and native coupled admission.
 
+#[path = "caloric/linearization.rs"]
 mod linearization;
 
 use std::sync::Arc;
