@@ -212,3 +212,12 @@ fn directional_source_and_gas_changes_reach_the_original_dg_pressure_and_energy(
     assert_ne!(histories[0], histories[2]);
     assert!(histories.iter().flatten().all(|p| p.is_finite()));
 }
+
+#[test]
+fn an_orthotropic_wall_over_a_twentieth_of_the_radius_is_refused_because_the_thick_law_is_isotropic() {
+    let bound = wall(source([12e6, 3e6, 1.5e6], [0.25, -0.2, 0.3], 0.0), [0, 1], AxialConstraint::StressFree, false);
+    // THICKNESS / 0.005 = 0.04 (under the gate): runs; THICKNESS / 0.003 = 0.067 (over it): refused.
+    assert!(bound.base_patch(0.005, 0.3).is_ok());
+    let error = format!("{:?}", bound.base_patch(0.003, 0.3).unwrap_err());
+    assert!(error.contains("isotropic"), "{error}");
+}

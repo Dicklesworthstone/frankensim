@@ -397,7 +397,7 @@ also requires the dimensioned `kelvin_voigt_young_viscosity` property; `elastic`
 explicitly chooses zero internal loss. Source claims must be constant at that
 solid temperature and valid across the whole wall band. That band must cover
 the declared propagation and microphone bands. Unsupported material data,
-thickness/radius above 0.05, missing coefficients or invalid graph sites refuse.
+missing coefficients or invalid graph sites refuse; thickness/radius above 0.05 takes Lame's thick-cylinder law for an isotropic wall (an orthotropic wall still refuses).
 
 The same original graph sites also accept a principal-aligned orthotropic wall:
 

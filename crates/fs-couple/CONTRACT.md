@@ -70,6 +70,21 @@ a test outside the crate can march the load as its own reference:
 claim: unlike `step_with_mouth_flow` it takes no cancellation gate, and it is
 not a coupling path (nonlinear participants keep using the trial).
 
+### Thick isotropic wall: Lame above thickness/radius 0.05
+
+`LocalMaterialWall::base_patch` (graph, DG and acoustic-cell walls all pass through it) keeps the
+membrane expressions at thickness/radius <= 0.05, bit for bit. Above that an ISOTROPIC wall takes
+Lame's thick cylinder (Timoshenko and Goodier, thick-walled cylinder under internal pressure; free
+outer face; plane stress for a stress-free axial restraint, plane strain for a strain-fixed one):
+the stiffness per inner area is `p / u(a)` and the surface density is the kinetic energy of the same
+radial field `u = A r + B / r` per inner area (a Rayleigh estimate, below the through-thickness
+resonances). The Poisson ratio is the wall's own resolved material's; the Kelvin-Voigt resistance and
+Maxwell arms scale with `stiffness / E` as before. An ORTHOTROPIC wall over the limit is still
+refused. At the gate for nu = 1/3 the two laws differ by 4.06 % in stiffness and 0.68 % in mass
+(stress-free), 4.82 % and 0.12 % (strain-fixed); the tests carry those amounts in their names.
+This replaces the refusal `local membrane wall requires positive geometry and thickness/radius <= 0.05`
+for isotropic walls (test `g3_the_same_input_over_a_twentieth_of_the_radius_now_takes_the_thick_wall_law`).
+
 ### Adaptive laminar enthalpy and external hydraulic continuation
 
 `LaminarEnthalpy::advance_windkessel_adaptive` reuses the original coupled

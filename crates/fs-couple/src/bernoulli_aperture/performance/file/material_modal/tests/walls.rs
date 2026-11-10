@@ -285,8 +285,11 @@ fn g0_missing_out_of_band_and_incompatible_wall_sources_refuse() {
         text.replace("wall downstream 1", "wall downstream 2"),
         text.replace("wall.matpack", "../wall.matpack"),
         text.replace("wall.matpack 303.15", "wall.matpack 500"),
-        text.replace("0.0002 strain-fixed", "0.001 strain-fixed"),
+        text.replace("0.0002 strain-fixed", "0 strain-fixed"),
     ] { assert!(loaded(&changed, &material, 37).is_err()); }
+    // GATE CHANGE (RubyPrairie, MB 20755): the 1 mm wall that used to be listed above (thickness/radius over the
+    // 0.05 membrane limit) now loads on Lame's thick cylinder; a zero-thickness wall replaces it in the refusals.
+    assert!(loaded(&text.replace("0.0002 strain-fixed", "0.001 strain-fixed"), &material, 37).is_ok());
 }
 
 const WALL_MAXWELL: &str =
@@ -416,8 +419,8 @@ fn g3_held_wall_environment_reaches_both_ducts_and_the_same_coupled_reed() {
 
     // Uniform and regional DG adapters call this same original wall input.
     // Geometry, constitutive selection and use band remain fixed.
-    // The thin-membrane law is admitted only for thickness/radius <= 0.05 (local.rs base_patch),
-    // and the impedance below is evaluated at 7 mm, so the wall is 0.3 mm (0.043), not the 1 mm
+    // The thin-membrane law is used for thickness/radius <= 0.05 (local.rs base_patch; Lame's thick cylinder
+    // above it), and the impedance below is evaluated at 7 mm, so the wall is 0.3 mm (0.043), not the 1 mm
     // (0.143) this test was born with.
     let load_dg = |moisture| {
         let text = format!("isotropic wall.matpack 293.15 1000 3e-4 strain-fixed 50 2000 kelvin-voigt environment 1 moisture_content {moisture}");
@@ -434,20 +437,27 @@ fn g3_held_wall_environment_reaches_both_ducts_and_the_same_coupled_reed() {
         b.wall().specific_impedance(0.007, 1000.0).unwrap());
 }
 
-// Negative for the thin-membrane limit above: the same declaration with a 1 mm wall is refused
-// just over thickness/radius = 0.05 and accepted just under it.
+// GATE CHANGE (RubyPrairie, MB 20755): the thin-membrane limit used to REFUSE the declaration below just over
+// thickness/radius = 0.05 (this test was `g3_membrane_wall_refuses_thickness_over_a_twentieth_of_the_radius`).
+// An isotropic wall over the limit now takes Lame's thick-cylinder law (local/lame.rs); one under it is unchanged.
 #[test]
-fn g3_membrane_wall_refuses_thickness_over_a_twentieth_of_the_radius() {
+fn g3_the_same_input_over_a_twentieth_of_the_radius_now_takes_the_thick_wall_law() {
     let material = environment_pack(wall_pack(1e6, None, 100000.0), true);
     let text = "isotropic wall.matpack 293.15 1000 0.001 strain-fixed 50 2000 kelvin-voigt environment 1 moisture_content 0";
     let loaded = crate::dg_port::input::wall::DgMaterialWallInput::read(1, &mut text.split_ascii_whitespace())
         .unwrap().unwrap().resolve(std::sync::Arc::new(material.clone()),
             &CancelGate::new_clock_free()).unwrap();
-    // 0.001 / 0.0195 = 0.0513 and 0.001 / 0.021 = 0.0476.
-    assert!(matches!(
-        loaded.wall().specific_impedance(0.0195, 1000.0),
-        Err(crate::acoustic_realize::AcousticRealizeError::InvalidDescription { what })
-            if what == "local membrane wall requires positive geometry and thickness/radius <= 0.05"
-    ));
+    // 0.001 / 0.0195 = 0.0513 (over the gate) and 0.001 / 0.021 = 0.0476 (under it).
+    let thick = loaded.wall().base_patch(0.0195, 1.0).unwrap().wall;
+    let thin = loaded.wall().base_patch(0.021, 1.0).unwrap().wall;
+    // The membrane law's stiffness scales as 1/r^2 and its mass does not depend on r, so the membrane
+    // value at 0.0195 follows from the one at 0.021.
+    let membrane_stiffness = thin.stiffness_per_area * (0.021_f64 / 0.0195).powi(2);
+    let ratio = thick.stiffness_per_area / membrane_stiffness;
+    assert!(ratio > 0.93 && ratio < 0.98, "Lame stiffness over the membrane's: {ratio}");
+    assert!((thick.surface_density / thin.surface_density - 1.0).abs() < 0.01);
+    assert!(loaded.wall().specific_impedance(0.0195, 1000.0).is_ok());
     assert!(loaded.wall().specific_impedance(0.021, 1000.0).is_ok());
+    // Non-positive geometry still refuses.
+    assert!(loaded.wall().base_patch(0.0, 1.0).is_err());
 }

@@ -1,4 +1,5 @@
-//! One source-bound thin-membrane law for discrete and continuous ducts.
+//! One source-bound thin-membrane law for discrete and continuous ducts. Above thickness/radius 0.05
+//! an isotropic wall takes Lame's thick-cylinder law instead (`lame`); an orthotropic wall is refused there.
 //! Geometry reduction is shared with the existing graph wall. Frequency-domain
 //! memory uses GeneralizedMaxwell::modulus; no fitted loss factor is introduced.
 use super::{
@@ -13,8 +14,13 @@ use fs_phs::{WallPin, wall_specific_impedance};
 use fs_qty::{Density, Dims, DynViscosity, Pressure};
 use fs_vfit::relaxation::RelaxationImpedanceSpec;
 
+/// Largest thickness/radius for which the membrane law is used; above it an isotropic wall takes
+/// Lame's thick cylinder.
+const MEMBRANE_THICKNESS_OVER_RADIUS: f64 = 0.05;
+
 mod update;
 mod thermal;
+mod lame;
 mod orthotropic;
 pub(super) mod finite_gas;
 
@@ -22,8 +28,8 @@ pub(super) mod finite_gas;
 ///
 /// The frozen-state, small-displacement membrane may be isotropic or have
 /// orthotropic principal axes aligned with the hoop and axial directions. It does not include axial shell waves, pressure prestress, thermal
-/// evolution, or nonlocal wall radiation. Every queried radius must satisfy
-/// the original thickness/radius <= 0.05 admission.
+/// evolution, or nonlocal wall radiation. At thickness/radius <= 0.05 the membrane law runs; above it
+/// an isotropic wall takes Lame's thick-cylinder law and an orthotropic wall is refused.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LocalMaterialWall {
     material: ResolvedMaterialStatePoint,
@@ -86,8 +92,9 @@ impl RegionalMaterialWallDg {
     /// replaces them. Exactly homogeneous sources retain the original uniform path.
     ///
     /// The returned applicability band is the intersection of all source bands,
-    /// not a filter or error certificate. Original cylindrical/thin-membrane,
-    /// frozen-state and cold-binding restrictions apply.
+    /// not a filter or error certificate. Original cylindrical, frozen-state and
+    /// cold-binding restrictions apply; the wall law is the membrane's up to thickness/radius 0.05
+    /// and Lame's thick cylinder above it (isotropic walls only).
     pub fn new(
         walls: Vec<LocalMaterialWall>,
         duct: fs_duct::dg::DgDuct,
@@ -281,7 +288,8 @@ impl LocalMaterialWall {
     /// and wall motion. Midpoint-network clock limits do not apply to that
     /// propagator. The original pointwise gas-field masses also couple to this
     /// wall; its inertia and spring mass use the geometric Gram matrix, never
-    /// an averaged gas. Uniform-cylinder and thin-wall restrictions apply. This is
+    /// an averaged gas. The uniform-cylinder restriction applies; the wall law is the membrane's
+    /// up to thickness/radius 0.05 and Lame's thick cylinder above it (isotropic walls only). This is
     /// cold compilation. `MaterialWallDg::rebind_controlled` updates an already
     /// vibrating wall and its certified propagator together; Maxwell histories
     /// require complete original source-arm correspondence on fixed geometry.
@@ -326,22 +334,35 @@ impl LocalMaterialWall {
 
     /// Base mass/equilibrium/viscosity image for an actual cylindrical strip.
     /// Hereditary arms remain in `loss()`; this is not its complete impedance.
+    ///
+    /// At thickness/radius <= 0.05 the membrane expressions run. Above it an isotropic wall takes
+    /// Lame's thick cylinder (`lame`, with the Poisson ratio of its own resolved material) and an
+    /// orthotropic wall is refused. Non-positive or non-finite geometry is refused.
     pub fn base_patch(&self, radius: f64, length: f64) -> Result<WallPatch, AcousticRealizeError> {
         let h = self.thickness_m;
         if ![radius, length, h]
             .iter()
             .all(|x| x.is_finite() && *x > 0.0)
-            || h / radius > 0.05
         {
             return Err(invalid(
-                "local membrane wall requires positive geometry and thickness/radius <= 0.05",
+                "local wall requires positive finite radius, length and thickness",
             ));
         }
-        let factor = (h / radius) / radius * self.axial_factor;
+        // (stiffness / E, surface density) from either law, in `lame::thick_cylinder`'s order.
+        let (factor, surface_density) = if h / radius <= MEMBRANE_THICKNESS_OVER_RADIUS {
+            ((h / radius) / radius * self.axial_factor, self.density * h)
+        } else if self.orthotropic_axes.is_some() {
+            return Err(invalid(
+                "orthotropic wall requires thickness/radius <= 0.05; the thick-wall law is isotropic",
+            ));
+        } else {
+            let nu = property(&self.material, POISSON_RATIO_PROPERTY, Dims([0; 6]), self.band_hz)?;
+            lame::thick_cylinder(radius, h, self.density, nu, self.axial)
+        };
         let patch = WallPatch {
             area_m2: core::f64::consts::TAU * radius * length,
             wall: WallPin {
-                surface_density: self.density * h,
+                surface_density,
                 stiffness_per_area: self.young * factor,
                 resistance: self.viscosity * factor,
             },

@@ -332,6 +332,60 @@ fn adjacent_assignments_preserve_addresses_and_do_not_double_count_area() {
 }
 
 #[test]
+fn an_isotropic_wall_above_the_membrane_gate_takes_lames_thick_cylinder() {
+    // Thickness/radius 0.001 / 0.006 = 0.17 is above the membrane law's 0.05 gate. The reference is the textbook thick cylinder
+    // (Timoshenko and Goodier, internal pressure p on the bore a, free outer face b = a + h), derived here from its STRESSES and not
+    // from the implementation's algebra: sigma_r = p a^2 (1 - b^2/r^2) / (b^2 - a^2) and sigma_theta = p a^2 (1 + b^2/r^2) / (b^2 - a^2)
+    // (so sigma_r(a) = -p and sigma_r(b) = 0), with the hoop strain u / r from Hooke's law: stress-free ends (plane stress) give
+    // E eps_theta = sigma_theta - nu sigma_r, strain-fixed ends (plane strain, sigma_z = nu (sigma_r + sigma_theta)) give
+    // E eps_theta = (1 + nu) ((1 - nu) sigma_theta - nu sigma_r). The wall's stiffness per area is p / u(a); its resistance is that
+    // stiffness times eta / E (the membrane's correspondence); its surface density is the Rayleigh estimate rho int u^2 r dr / (a u(a)^2)
+    // of the SAME field, here by composite Simpson on 4096 panels, whose truncation error on this smooth integrand is far below the
+    // 1e-9 relative tolerance (the tolerance is sized by the quadrature bound and the rounding of two algebraically equal forms).
+    let (a, h, young, rho, nu, eta) = (0.006_f64, 0.001_f64, 1e6_f64, 1000.0_f64, 0.3_f64, 2.0_f64);
+    let b = a + h;
+    assert!(h / a > 0.05, "the fixture must sit above the membrane gate");
+    for (label, axial) in [("stress-free", AxialConstraint::StressFree), ("strain-fixed", AxialConstraint::StrainFixed)] {
+        let u = |r: f64| {
+            let sigma_r = a * a * (1.0 - b * b / (r * r)) / (b * b - a * a);
+            let sigma_theta = a * a * (1.0 + b * b / (r * r)) / (b * b - a * a);
+            let hoop = match axial {
+                AxialConstraint::StressFree => sigma_theta - nu * sigma_r,
+                AxialConstraint::StrainFixed => (1.0 + nu) * ((1.0 - nu) * sigma_theta - nu * sigma_r),
+            };
+            r * hoop / young
+        };
+        // The field's own boundary conditions, for a unit bore pressure.
+        let sigma_r = |r: f64| a * a * (1.0 - b * b / (r * r)) / (b * b - a * a);
+        assert!((sigma_r(a) + 1.0).abs() < 1e-12 && sigma_r(b).abs() < 1e-12);
+        let mut thick = assignment(rho, young, eta);
+        thick.thickness_m = h;
+        thick.axial = axial;
+        let wall = bound(thick).patch().wall;
+        let stiffness = 1.0 / u(a);
+        close(wall.stiffness_per_area, stiffness);
+        close(wall.resistance, stiffness * eta / young);
+        let panels = 4096_usize;
+        let dr = h / panels as f64;
+        let integral = (0..=panels)
+            .map(|i| {
+                let weight = if i == 0 || i == panels { 1.0 } else if i % 2 == 1 { 4.0 } else { 2.0 };
+                let r = a + dr * i as f64;
+                weight * u(r) * u(r) * r
+            })
+            .sum::<f64>()
+            * dr
+            / 3.0;
+        let density = rho * integral / (a * u(a) * u(a));
+        assert!(
+            (wall.surface_density - density).abs() <= 1e-9 * density,
+            "{label}: surface density {} against the closed form {density}",
+            wall.surface_density
+        );
+    }
+}
+
+#[test]
 fn incompatible_material_topology_domain_or_budget_never_silently_falls_back() {
     let gate = CancelGate::new_clock_free();
     let refuses = |g, a| assert!(bind_material_walls(g, vec![a], BAND, 1, &gate).is_err());
@@ -351,9 +405,31 @@ fn incompatible_material_topology_domain_or_budget_never_silently_falls_back() {
         b.material = state(&p, None, None);
         refuses(graph(), b);
     }
-    let mut b = a.clone();
-    b.thickness_m = 0.001;
-    refuses(graph(), b);
+    // Above the membrane gate (thickness/radius 0.05) an isotropic wall is no longer refused: it takes Lame's thick cylinder, pinned
+    // in `an_isotropic_wall_above_the_membrane_gate_takes_lames_thick_cylinder`. What still refuses there is a wall that law does not
+    // cover, an orthotropic one. The same orthotropic wall binds at the membrane thickness, so the refusal below is the gate.
+    let orthotropic = |thickness_m: f64| {
+        use fs_couple::bernoulli_aperture::wall::material::WallMaterialModel;
+        MaterialWallAssignment {
+            node: 1,
+            material: state(
+                &[
+                    ("density", Density::DIMS, 1000.0),
+                    ("young_modulus_1", Pressure::DIMS, 1e6),
+                    ("young_modulus_2", Pressure::DIMS, 4e6),
+                    ("poisson_ratio_12", Dims::NONE, 0.1),
+                ],
+                None,
+                None,
+            ),
+            model: WallMaterialModel::Orthotropic { axes: [0, 1], proportional_viscosity_time_property: None },
+            thickness_m,
+            axial: AxialConstraint::StressFree,
+            loss: WallMaterialLoss::Elastic,
+        }
+    };
+    assert_eq!(bound(orthotropic(0.0002)).patch().wall.resistance, 0.0);
+    refuses(graph(), orthotropic(0.001));
     let mut b = a.clone();
     b.material = state(&properties(1000.0, 1e6, 2.0), Some([1.0, 2000.0]), None);
     refuses(graph(), b);

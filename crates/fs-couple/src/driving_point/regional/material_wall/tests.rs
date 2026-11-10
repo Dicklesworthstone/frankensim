@@ -179,7 +179,10 @@ fn continuous_material_wall_matches_original_graph_hereditary_impedance() {
     let wide = law.base_patch(2.0 * RADIUS, 1.0).unwrap().wall;
     assert_eq!(wide.surface_density, narrow.surface_density);
     assert_eq!(wide.stiffness_per_area, narrow.stiffness_per_area / 4.0);
-    assert!(law.specific_impedance(THICKNESS, TAU * 430.0).is_err());
+    // GATE CHANGE (RubyPrairie, MB 20755): a radius equal to the wall thickness (thickness/radius = 1) was refused
+    // by the 0.05 membrane limit; the isotropic wall now takes Lame's thick cylinder there. Non-positive radius refuses.
+    assert!(law.base_patch(THICKNESS, 1.0).is_ok());
+    assert!(law.specific_impedance(0.0, TAU * 430.0).is_err());
     assert!(law.specific_impedance(RADIUS, TAU * 5000.0).is_err());
 }
 
