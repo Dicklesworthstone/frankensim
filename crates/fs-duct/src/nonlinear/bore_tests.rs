@@ -1740,3 +1740,7 @@ fn the_one_mode_equivalent_kernel_drives_the_bore_like_the_piston() {
     assert!(peak > 0.0);
     assert!(worst <= 5.0e-3 * peak, "{worst} against {peak}");
 }
+
+// The breathing-wall shell (RubyPrairie, MB 23820): its tests share this module's fixtures.
+#[path = "bore_shell_tests.rs"]
+mod shell_tests;

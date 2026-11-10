@@ -26,9 +26,14 @@
 //!   causal real weights, so the plane gas still sees one impedance, now the one a
 //!   plane wave at the mouth meets once the higher mouth modes are counted.
 //!
-//! The driven end is a caller-owned port. Walls are rigid, the room is at
-//! rest, and the bell radiates as a baffled piston: no flare-mode or
-//! unflanged-lip radiation is claimed.
+//! - Optionally, a breathing wall ([`NonlinearBore::bind_shell`]): one radial
+//!   oscillator per cell, driven by the cell pressure, that changes the volume
+//!   the gas fills (the wall of a flaring bell moves under the bore pressure;
+//!   see the `shell` module for the law, the gas update and the energy account).
+//!
+//! The driven end is a caller-owned port. Walls are rigid unless a shell is
+//! bound, the room is at rest, and the bell radiates as a baffled piston: no
+//! flare-mode or unflanged-lip radiation is claimed.
 
 use super::{NonlinearDuctError, area, positive, profile_volume, radius, reserved, unsupported};
 use crate::modal::MouthKernel;
@@ -41,6 +46,10 @@ use fs_material::fluid_transport::FluidTransportState;
 use fs_math::det;
 use fs_phs::ZkDiffusiveBasis;
 use fs_qty::{Pressure, Temperature, Time};
+
+mod shell;
+use shell::Shell;
+pub use shell::{ShellLaw, ShellLedger, ShellReceipt, ShellStrip};
 
 /// Zwikker–Kosten wall-memory admission for every cell.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -208,6 +217,8 @@ pub struct NonlinearBore {
     room: Primitive,
     radiation: PistonRadiation,
     walls: Option<Walls>,
+    shell: Option<Shell>,
+    inlet_volume_m3: f64,
     step_s: f64,
     cfl: f64,
     centers_m: Vec<f64>,
@@ -301,6 +312,8 @@ impl NonlinearBore {
             room,
             radiation,
             walls,
+            shell: None,
+            inlet_volume_m3: spec.inlet_volume_m3,
             step_s: spec.step_s,
             cfl: spec.cfl,
             centers_m: geometry.centers_m,
@@ -372,6 +385,9 @@ impl NonlinearBore {
         if let Some(walls) = self.walls.as_mut() {
             walls.apply(&mut self.solver, &self.gas)?;
         }
+        if let Some(shell) = self.shell.as_mut() {
+            shell.apply(&mut self.solver, self.room.pressure)?;
+        }
         let outlet_mass_flow_kg_s = -report.right_boundary_change.mass / self.step_s;
         Ok(BoreStep {
             report,
@@ -436,6 +452,52 @@ impl NonlinearBore {
     #[must_use]
     pub fn wall_receipt(&self) -> Option<WallReceipt> {
         self.walls.as_ref().map(|walls| walls.receipt)
+    }
+
+    /// Bind a breathing wall to every cell, before the first step. `duct` must be the duct this bore was built
+    /// from (its length and every cell volume are checked), `law` supplies each cell's strip mass and stiffness
+    /// at the cell's mean radius, and `quality` is the quality factor of every cell's breathing mode. The walls
+    /// start at rest at the room pressure. Not binding a shell leaves every byte of the bore as it was.
+    ///
+    /// # Errors
+    /// A bore that already stepped or already has a shell, a duct that is not this bore's own, a non-positive
+    /// quality factor, or a strip the law refuses or returns non-positive.
+    pub fn bind_shell(
+        &mut self,
+        duct: &Duct,
+        law: &dyn ShellLaw,
+        quality: f64,
+    ) -> Result<ShellReceipt, NonlinearDuctError> {
+        if self.shell.is_some() {
+            return Err(unsupported("a bore binds its shell once"));
+        }
+        if self.solver.time().value() != 0.0 {
+            return Err(unsupported("a shell binds before the first step"));
+        }
+        let mesh = self.solver.mesh();
+        let (shell, receipt) = Shell::new(
+            duct,
+            mesh.positions(),
+            mesh.volumes(),
+            law,
+            quality,
+            self.step_s,
+            self.inlet_volume_m3,
+        )?;
+        self.shell = Some(shell);
+        Ok(receipt)
+    }
+
+    /// What binding the breathing wall admitted, or `None` without a shell.
+    #[must_use]
+    pub fn shell_receipt(&self) -> Option<ShellReceipt> {
+        self.shell.as_ref().map(|shell| shell.receipt)
+    }
+
+    /// The breathing wall's energy account so far, or `None` without a shell.
+    #[must_use]
+    pub fn shell_ledger(&self) -> Option<ShellLedger> {
+        self.shell.as_ref().map(Shell::ledger)
     }
 }
 
