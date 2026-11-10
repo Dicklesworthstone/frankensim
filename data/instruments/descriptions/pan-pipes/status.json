@@ -26,7 +26,8 @@
     "Prompt speech on the low tubes: D3's fundamental takes about 0.34 s to come within 3 dB of its held level, with the tube's third mode above it until about 0.11 s and within 2 dB of it until about 0.24 s",
     "Pitch: the notes read -1.9, -3.1, -6.3 and -11.1 c from equal temperament at D3, G3, D4 and B4. Nothing was aimed at this",
     "Neighbouring tubes aren't coupled, and the array's radiation and the player's lips and face aren't there",
-    "The percussive Andean playing style with a turbulent jet. The onset ramp is authored, not a player's"
+    "The percussive Andean playing style with a turbulent jet. The onset ramp is authored, not a player's",
+    "The player's airway (`upstream_airway`, the row the flute's C5, D4 and G4 pages carry, `two-way`, with the voice cards' yielding wall): tried on 2026-11-10 on all four notes, ahead of each tube's lip, with the authored blowing pressure as the lung pressure and nothing rescaled. Each note still plays, lower and quieter on its held part: D3 by 3.2 c and 1.1 dB, G3 by 2.4 c and 0.7 dB, D4 by 1.6 c and 0.4 dB, B4 by 1.0 c and 0.2 dB. D3's fundamental comes within 3 dB of its held level at 0.42 s instead of 0.34 s. Every note already sits flat of the siku tube beside it, so each moved further from it: 21.4 to 24.6 c at D3, 35.7 to 38.2 at G3, 67.0 to 68.6 at D4 and 47.7 to 48.6 at B4. The mean miss of H2 to H12 re H1 against that tube moved 24.4 to 23.5 dB at D3, 20.5 to 19.4 at G3, 15.0 to 15.5 at D4 and 12.0 to 11.9 at B4. That tube is not this pipe, so none of this is a grade; the pages stay without the row"
   ],
   "blocked": null,
   "beads": [
