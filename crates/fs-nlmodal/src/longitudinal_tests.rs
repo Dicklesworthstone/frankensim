@@ -265,7 +265,17 @@ fn finite_step_work_is_exact_and_linear_axial_storage_is_removed_only_from_resid
     assert_eq!(gs, residual_s);
     for j in 0..gu.len() {
         let linear = model.axial_omegas()[j].powi(2) * f64::midpoint(u[j], v[j]);
-        relative(gu[j], residual_u[j] + linear, 3e-15);
+        // The gradient is the coupling residual plus the linear axial term.
+        // Here the two have opposite signs and cancel to a small part of
+        // either, so the round-off of their sum is that of the terms.
+        let terms = residual_u[j].abs() + linear.abs();
+        let defect = (gu[j] - (residual_u[j] + linear)).abs();
+        assert!(
+            defect <= 4.0 * f64::EPSILON * terms,
+            "mode {j}: gradient {:.17e}, residual {:.17e}, linear {linear:.17e}, defect {defect:e}",
+            gu[j],
+            residual_u[j]
+        );
     }
     let residual_work = residual_s
         .iter()

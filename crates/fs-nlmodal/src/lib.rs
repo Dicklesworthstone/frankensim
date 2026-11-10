@@ -1894,7 +1894,7 @@ pub fn single_mode_beta(storage: &SosModalStorage, k: usize) -> f64 {
 mod fd_probe {
     use super::{
         SineMode, SosModalStorage, StressChannel, analytic_coupling_integral, coupling_integral,
-        fd_coupling, fd_d2, gauss_01, sample_sine, triple_sine_integral,
+        fd_d2, gauss_01, sample_sine, sampled_coupling, sampled_hessians, triple_sine_integral,
     };
     use fs_phs::Storage;
 
@@ -2037,8 +2037,10 @@ mod fd_probe {
         assert!((a4 - want).abs() / want.abs() < 0.02);
         assert!((a2 - a4).abs() / a4.abs() < 0.05);
         let psi = sample_sine(SineMode { m: 1, n: 1 }, lx, ly, nx, ny);
-        let c2 = fd_coupling(&psi, &w, &w, nx, ny, dx, dy, 2);
-        let c4 = fd_coupling(&psi, &w, &w, nx, ny, dx, dy, 4);
+        // The production assembler's own pair: one Hessian table per field,
+        // reduced at second and at fourth order.
+        let hessians = sampled_hessians(&w, nx, ny, dx, dy);
+        let (c2, c4) = sampled_coupling(&psi, &hessians, &hessians, dx * dy);
         assert!(
             c4.abs() > 1.0e-6 && (c2 - c4).abs() / c4.abs() < 0.05,
             "interior coupling 2={c2} 4={c4}"
