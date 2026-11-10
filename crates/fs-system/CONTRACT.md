@@ -663,11 +663,44 @@ dissipation plus the work (allowed 1e-12). The thermal intervals are the
 module's one for one.
 Five planted defects in the graph side of these comparisons were each caught.
 
-Still without a Component: the module's entry points with
-temperature-dependent damping when a connector is driven
-(`driven::advance_temperature_candidate` and its three siblings) and its
-relaxation entry with temperature-dependent kinetics. Nothing in the module
-is deleted.
+With temperature feedback, same file: `driven::advance_temperature_candidate`
+and `driven::network::advance_temperature_candidate`, each with its implicit
+twin. The timeline publishes cell 0's start-of-step temperature and the
+Component's damping law (the module's own synthetic law) reads it on one
+signal per connector. The module's pair (0.6 N held, c = 0.7 (1 + 2 (T -
+300))) and its cycle (forces 0.2, -0.1, 0.4 N, c = 0.7 (1 + (T - 300) / 2)),
+sixteen explicit thermal steps and two implicit steps of a quarter of a
+second in both schemes; cell 0 warms by 0.39 to 1.37 K. Measured agreement:
+5.9e-15 for the bodies, one ulp of 300 K for the cells, 5.2e-15 for the
+energy accounts and each actuator's work (allowed 1e-12, 1e-11 K, 1e-12).
+The cycle is run to 0.25 s and not to the 0.3 s of the module's own test:
+sixteen steps of 0.3 / 16 s do not sum to 0.3 s in floating point, the
+module's thermal clock lands on its target and the kernel's ends one ulp
+short.
+
+With calibrated kinetics, `relaxation/graph.rs`:
+`relaxation::temperature::advance_candidate` and its implicit twin on the
+module's own fixture (the pair preloaded to 2 sqrt(J), 0.7 N held, an
+Arrhenius shift about 300 K read at cell 0). The Component follows a shift
+law that calls the module's calibration; both sides call the owner's
+held-kinetics entry. Bodies and memory equal to the bit in the three runs
+(allowed 1e-12), with the shift factor ending at 0.77 (explicit) and 0.89
+(implicit).
+
+The allowances of these two comparisons hold the kernel to what it does
+today, delivering a start-of-step signal exactly. Its contract is the solve
+tolerance; if it ever uses that here, they become 1e-9. Four planted defects
+in the graph side of these two comparisons were each caught.
+
+Every entry point of `fs_couple::rigid_damping_heat` that advances a state
+now agrees with a declared graph: sixteen of them (explicit and implicit,
+each for frozen damping, temperature-dependent damping, Maxwell memory,
+Maxwell memory with calibrated kinetics, the driven pair, the driven network,
+and the last two with temperature-dependent damping). Not reproduced:
+`temperature::shift::CalibratedKelvinDamping`, which is a law and not an
+entry point, has no adapter to the Component's `DampingLaw`; the module's
+refusal behaviour, continuation from a candidate and observer hooks are the
+module's own and are not compared. Nothing in the module is deleted.
 
 Other domains, `tests/elements.rs`: the gyrator and one element of each law
 in the rotational and electrical domains pass the conformance and tangent

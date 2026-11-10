@@ -24,8 +24,15 @@
 //! actuator's signed work is the energy that entered through its drive
 //! boundary, and only the viscous loss is heat.
 //!
-//! Not compared: the temperature-dependent twins of these entry points
-//! (the Component's Kelvin viscosity is fixed).
+//! The temperature-dependent twins of these entry points
+//! (`advance_temperature_candidate` and its implicit form, for the pair and
+//! for the network) are compared too: the timeline publishes cell 0's
+//! start-of-step temperature and the Component's damping law reads it on a
+//! `temperature<e>` signal, one per connector. The law is the module's own
+//! synthetic one on both sides, and so is the thermal owner; what the
+//! feedback comparison adds is how the temperature reaches the law (a
+//! published signal in place of a call) on top of the two mechanical
+//! entries.
 
 // Exact float comparisons here assert that nothing entered through an idle
 // port.
@@ -34,15 +41,19 @@
 use super::*;
 use crate::driven::{controls as pair_controls, effort, pair_input};
 use crate::driven_network::{cycle_bodies, cycle_links, cycle_routes, graph_controls, graph_input, held};
-use crate::graph::{node, run_counting, sink};
+use crate::graph::{ModuleLaw, node, run_counting, sink};
 use fs_couple::rigid_damping_heat::RigidDampingThermalReport;
 use fs_couple::rigid_damping_heat::driven::network::{
     DrivenNetworkDampingImplicitConfig, advance_candidate as advance_cycle,
     advance_implicit_candidate as advance_cycle_implicit,
+    advance_temperature_candidate as advance_cycle_temperature,
+    advance_temperature_implicit_candidate as advance_cycle_temperature_implicit,
 };
 use fs_couple::rigid_damping_heat::driven::{
     DrivenDampingImplicitConfig, advance_candidate as advance_pair,
     advance_implicit_candidate as advance_pair_implicit,
+    advance_temperature_candidate as advance_pair_temperature,
+    advance_temperature_implicit_candidate as advance_pair_temperature_implicit,
 };
 use fs_mbd::component::relaxation::{DriveFrame, RelaxationNetwork, RelaxationState};
 use fs_mbd::spatial_loads::internal_impulse::viscous::network::driven::DrivenViscousNetworkLimits;
@@ -50,8 +61,11 @@ use fs_mbd::spatial_loads::internal_impulse::viscous::network::relaxation::{
     RelaxationNetworkLimits, RelaxationNetworkLink,
 };
 use fs_mbd::spatial_loads::internal_motion::viscous::network::relaxation::RelaxationNetworkMotionControls;
+use fs_couple::rigid_damping_heat::temperature::TemperatureDampingThermalCandidate;
 use fs_system::{NodeId, RouteTemperature, System, SystemBuilder, heat_sink};
 use fs_thermal::component::{ImplicitScheme, ThermalTimeline, TimelineState};
+use fs_thermal::enthalpy::StepConfig;
+use fs_thermal::enthalpy::conduction::implicit::ImplicitConductionReport;
 
 /// What one driven graph is made of.
 struct Parts<'a> {
@@ -63,6 +77,9 @@ struct Parts<'a> {
     forces: &'a [f64],
     routes: &'a [BTreeMap<CellId, f64>],
     mechanical: RelaxationNetworkMotionControls,
+    /// With a law, every connector's Kelvin form follows it at cell 0's
+    /// start-of-step temperature, which the timeline must publish.
+    feedback: Option<&'a ModuleLaw>,
 }
 
 /// The relaxation owner's controls for a network of this size with no
@@ -102,6 +119,14 @@ fn driven_graph(
             .unwrap();
     for connector in 0..parts.links.len() {
         network = network.driven(connector, DriveFrame::MaterialFirst).unwrap();
+    }
+    if let Some(law) = parts.feedback {
+        network = network
+            .temperature_dependent(std::rc::Rc::new(ModuleLaw {
+                beta_per_k: law.beta_per_k,
+                maximum_k: law.maximum_k,
+            }))
+            .unwrap();
     }
     let start = network.relaxed(parts.states.to_vec());
     let cells_start = timeline.start(heat).unwrap();
@@ -151,7 +176,27 @@ fn driven_graph(
             RouteTemperature::Fixed(300.0),
         )
         .unwrap();
-    (builder.seal().unwrap(), moving, cells)
+    if parts.feedback.is_some() {
+        // One published temperature feeds every connector's law.
+        for connector in 0..parts.links.len() {
+            builder
+                .signal(
+                    builder.port(cells, "temperature0").unwrap(),
+                    builder.port(moving, &format!("temperature{connector}")).unwrap(),
+                )
+                .unwrap();
+        }
+    }
+    let mut system = builder.seal().unwrap();
+    if parts.feedback.is_some() {
+        // The kernel solves the signals with the rest of their block and
+        // starts from these.
+        for connector in 0..parts.links.len() {
+            let port = system.port(moving, &format!("temperature{connector}")).unwrap();
+            assert!(system.guess(port, &[300.0]));
+        }
+    }
+    (system, moving, cells)
 }
 
 /// What the module's candidate holds.
@@ -175,6 +220,36 @@ const CELL_K: f64 = 1e-12;
 /// 4.5e-15 (the cycle).
 const ACCOUNT: f64 = 1e-12;
 
+/// How closely a graph must follow the module: bodies [m, N s, N m s],
+/// cells [K], energy accounts (relative).
+#[derive(Clone, Copy)]
+struct Allowance {
+    body: f64,
+    cell_k: f64,
+    account: f64,
+}
+
+/// With fixed Kelvin forms.
+const FIXED: Allowance = Allowance {
+    body: BODY,
+    cell_k: CELL_K,
+    account: ACCOUNT,
+};
+
+/// With temperature feedback. Measured: 5.9e-15 for the bodies, 5.7e-14 K
+/// for the cells (one ulp of 300 K), 5.2e-15 for the accounts, with cell 0
+/// warming by 0.39 to 1.37 K. These bounds hold the kernel to what it does
+/// today, delivering a start-of-step signal exactly; its contract is the
+/// solve tolerance (1e-12 relative, 3e-10 K), at which the pair's Kelvin
+/// form would move by 2e-10 and the bodies by about 5e-11 a step. If the
+/// kernel ever uses that tolerance here, these become 1e-9, as in
+/// `graph.rs`.
+const FEEDBACK: Allowance = Allowance {
+    body: 1e-12,
+    cell_k: 1e-11,
+    account: 1e-12,
+};
+
 fn apart(a: Vec3, b: Vec3) -> f64 {
     (a.x - b.x).abs().max((a.y - b.y).abs()).max((a.z - b.z).abs())
 }
@@ -186,6 +261,7 @@ fn same_run(
     (moving, cells): (NodeId, NodeId),
     module: &Module<'_>,
     forces: &[f64],
+    allowed: Allowance,
 ) {
     let Module {
         states,
@@ -199,7 +275,7 @@ fn same_run(
         let momentum = apart(ours.linear_momentum_world(), theirs.linear_momentum_world());
         let spin = apart(ours.angular_momentum_body(), theirs.angular_momentum_body());
         assert!(
-            position <= BODY && momentum <= BODY && spin <= BODY,
+            position <= allowed.body && momentum <= allowed.body && spin <= allowed.body,
             "{case}: body {body}: position {position:e}, momentum {momentum:e}, spin {spin:e}"
         );
         // Nothing turns in these fixtures, on either side.
@@ -214,7 +290,7 @@ fn same_run(
     for id in [CellId(0), CellId(1)] {
         let kernel = timeline.simulation().temperature_k(id).unwrap();
         let module = heat.temperature_k(id).unwrap();
-        assert!((kernel - module).abs() <= CELL_K, "{case}: {id:?} {kernel} vs {module}");
+        assert!((kernel - module).abs() <= allowed.cell_k, "{case}: {id:?} {kernel} vs {module}");
     }
 
     let ledger = system.ledger();
@@ -225,7 +301,7 @@ fn same_run(
     let scale = dissipated + driven;
     let close = |ours: f64, theirs: f64, what: &str| {
         assert!(
-            (ours - theirs).abs() <= ACCOUNT * scale,
+            (ours - theirs).abs() <= allowed.account * scale,
             "{case}: {what}: ledger {ours:e}, report {theirs:e}"
         );
     };
@@ -282,7 +358,21 @@ fn cycle_parts<'a>(
         forces,
         routes,
         mechanical: mechanical(module.source, module.limits),
+        feedback: None,
     }
+}
+
+/// The relaxation owner's controls for the module's pair.
+fn pair_mechanical() -> RelaxationNetworkMotionControls {
+    mechanical(
+        pair_controls().mechanical,
+        DrivenViscousNetworkLimits {
+            maximum_bodies: 2,
+            maximum_connectors: 1,
+            maximum_live_bytes: 128_000_000,
+            maximum_preparation_terms: 10_000_000_000,
+        },
+    )
 }
 
 #[test]
@@ -316,7 +406,7 @@ fn the_declared_graph_follows_the_driven_network_candidate() {
             heat: candidate.thermal(),
             report: candidate.report(),
         };
-        same_run(&case, &system, (moving, cells), &module, &forces);
+        same_run(&case, &system, (moving, cells), &module, &forces, FIXED);
 
         // The stiff pair of cells by the implicit solve, both schemes.
         let laws: &'static [Caloric; 2] = Box::leak(Box::new(linear_calorics()));
@@ -366,7 +456,7 @@ fn the_declared_graph_follows_the_driven_network_candidate() {
                 heat: candidate.thermal(),
                 report: candidate.report(),
             };
-            same_run(&case, &system, (moving, cells), &module, &forces);
+            same_run(&case, &system, (moving, cells), &module, &forces, FIXED);
         }
     }
 }
@@ -387,15 +477,8 @@ fn the_declared_graph_follows_the_driven_pair_candidate() {
             links: &bodies.links[..1],
             forces: &forces,
             routes: &routes,
-            mechanical: mechanical(
-                pair_controls().mechanical,
-                DrivenViscousNetworkLimits {
-                    maximum_bodies: 2,
-                    maximum_connectors: 1,
-                    maximum_live_bytes: 128_000_000,
-                    maximum_preparation_terms: 10_000_000_000,
-                },
-            ),
+            mechanical: pair_mechanical(),
+            feedback: None,
         };
 
         let laws: &'static [Caloric; 2] = Box::leak(Box::new(laws()));
@@ -415,7 +498,7 @@ fn the_declared_graph_follows_the_driven_pair_candidate() {
             heat: candidate.thermal(),
             report: candidate.report(),
         };
-        same_run(&case, &system, (moving, cells), &module, &forces);
+        same_run(&case, &system, (moving, cells), &module, &forces, FIXED);
 
         let laws: &'static [Caloric; 2] = Box::leak(Box::new(linear_calorics()));
         let heat = stiff_thermal(laws, 8);
@@ -464,7 +547,247 @@ fn the_declared_graph_follows_the_driven_pair_candidate() {
                 heat: candidate.thermal(),
                 report: candidate.report(),
             };
-            same_run(&case, &system, (moving, cells), &module, &forces);
+            same_run(&case, &system, (moving, cells), &module, &forces, FIXED);
         }
     }
+}
+
+/// One temperature-feedback fixture and the module's two entry points for
+/// it.
+struct FeedbackCase<'a, E, I> {
+    name: &'a str,
+    parts: Parts<'a>,
+    /// Where the explicit run ends: sixteen thermal steps, on a grid whose
+    /// steps sum to it exactly.
+    target_s: f64,
+    /// The module's explicit entry, given the thermal state, the thermal
+    /// step limits and the target.
+    explicit: E,
+    /// The module's implicit entry, run to half a second in two steps.
+    implicit: I,
+}
+
+/// The graph of `parts` run to `target_s` on `timeline`, compared with the
+/// module's candidate. Returns the kernel's intervals and shortenings.
+fn follow(
+    parts: &Parts<'_>,
+    (label, target_s): (&str, f64),
+    timeline: ThermalTimeline<'static>,
+    heat: &DepositionSimulation<'static>,
+    module: &Module<'_>,
+) -> (Vec<f64>, usize) {
+    let (mut system, moving, cells) = driven_graph(parts, timeline, heat);
+    let counted = run_counting(&mut system, target_s);
+    // The feedback is real: cell 0 warmed, so the Kelvin forms changed on
+    // the way.
+    let warmed = module.heat.temperature_k(CellId(0)).unwrap() - 300.0;
+    assert!(warmed > 0.05, "{label}: cell 0 warmed by {warmed} K");
+    same_run(label, &system, (moving, cells), module, parts.forces, FEEDBACK);
+    counted
+}
+
+/// `case` against the module: explicit thermal steps, then the stiff pair
+/// of cells by the implicit solve in both schemes.
+fn follow_with_feedback<E, I>(case: &FeedbackCase<'_, E, I>)
+where
+    E: Fn(&DepositionSimulation<'static>, StepConfig, f64) -> TemperatureDampingThermalCandidate<'static, ()>,
+    I: Fn(
+        &DepositionSimulation<'static>,
+        RigidDampingImplicitConfig,
+        &ImplicitConductionGraph<'_>,
+        &mut ImplicitConductionWorkspace,
+    ) -> (TemperatureDampingThermalCandidate<'static, Observe>, ImplicitConductionReport),
+{
+    let laws: &'static [Caloric; 2] = Box::leak(Box::new(linear_calorics()));
+    // All the heat goes to cell 0: the timeline has a heat port for it
+    // alone, and the kernel wants every declared port connected.
+    let cells = || vec![CellId(0)];
+
+    let heat = thermal(laws, false, true);
+    let mut step = config().thermal;
+    step.max_dt_s = case.target_s / 16.0;
+    let candidate = (case.explicit)(&heat, step, case.target_s);
+    // The module evaluated its law at more than the starting temperature.
+    assert!(candidate.law_evaluations() > 1, "{}: explicit", case.name);
+    let timeline = ThermalTimeline::new(cells(), true, step)
+        .unwrap()
+        .publishing(vec![CellId(0)])
+        .unwrap();
+    let module = Module {
+        states: candidate.states(),
+        heat: candidate.thermal(),
+        report: candidate.report(),
+    };
+    let label = format!("{}, explicit", case.name);
+    let (intervals, shortenings) =
+        follow(&case.parts, (&label, case.target_s), timeline, &heat, &module);
+    assert_eq!(candidate.report().thermal.substeps, intervals.len(), "{label}");
+    assert_eq!(shortenings, 0, "{label}");
+
+    // Two implicit steps of a quarter of a second, so that the second
+    // step's forms are read at a warmed cell.
+    let heat = stiff_thermal(laws, 8);
+    for (module_scheme, scheme) in [
+        (ImplicitThermalScheme::BackwardEuler, ImplicitScheme::BackwardEuler),
+        (ImplicitThermalScheme::Sdirk2, ImplicitScheme::Sdirk2),
+    ] {
+        let common = implicit_config(module_scheme);
+        let conduction = stiff_graph(laws, &heat);
+        let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+        let (candidate, native) = (case.implicit)(&heat, common, &conduction, &mut workspace);
+        assert!(candidate.law_evaluations() > 1, "{}: {scheme:?}", case.name);
+        let timeline =
+            ThermalTimeline::implicit(cells(), stiff_graph(laws, &heat), common.thermal, scheme)
+                .unwrap()
+                .publishing(vec![CellId(0)])
+                .unwrap();
+        let module = Module {
+            states: candidate.states(),
+            heat: candidate.thermal(),
+            report: candidate.report(),
+        };
+        let label = format!("{}, {scheme:?}", case.name);
+        let (intervals, shortenings) = follow(&case.parts, (&label, 0.5), timeline, &heat, &module);
+        assert_eq!(intervals, [0.25, 0.25], "{label}");
+        assert_eq!(native.energy.substeps, intervals.len(), "{label}");
+        assert_eq!(shortenings, native.rejected_intervals, "{label}");
+    }
+}
+
+#[test]
+fn the_declared_graph_follows_the_driven_pair_with_temperature_feedback() {
+    // The module's own feedback fixture: 0.7 N s/m, all of its heat into
+    // cell 0 (1 J/K), c = 0.7 (1 + 2 (T - 300)), 0.6 N held.
+    let bodies = Bodies::new([0.7, 0.0]);
+    let routes = [BTreeMap::from([(CellId(0), 1.0)])];
+    let law = ModuleLaw {
+        beta_per_k: 2.0,
+        maximum_k: 303.0,
+    };
+    let forces = [0.6];
+    follow_with_feedback(&FeedbackCase {
+        name: "pair",
+        parts: Parts {
+            properties: &bodies.properties[..2],
+            states: &bodies.states[..2],
+            links: &bodies.links[..1],
+            forces: &forces,
+            routes: &routes,
+            mechanical: pair_mechanical(),
+            feedback: Some(&law),
+        },
+        target_s: 0.5,
+        explicit: |heat: &DepositionSimulation<'static>, step: StepConfig, target_s: f64| {
+            let mut controls = pair_controls();
+            controls.thermal = step;
+            advance_pair_temperature(
+                pair_input(&bodies, &routes),
+                effort(forces[0]),
+                heat,
+                &(),
+                &law.source(),
+                &[CellId(0)],
+                target_s,
+                controls,
+                || false,
+            )
+            .unwrap()
+        },
+        implicit: |heat: &DepositionSimulation<'static>,
+                   common: RigidDampingImplicitConfig,
+                   conduction: &ImplicitConductionGraph<'_>,
+                   workspace: &mut ImplicitConductionWorkspace| {
+            let implicit = DrivenDampingImplicitConfig {
+                mechanical: pair_controls().mechanical,
+                thermal: common.thermal,
+                scheme: common.scheme,
+                maximum_heat_bindings: common.maximum_heat_bindings,
+                energy_tolerance_j: common.energy_tolerance_j,
+            };
+            advance_pair_temperature_implicit(
+                pair_input(&bodies, &routes),
+                effort(forces[0]),
+                heat,
+                &Observe::default(),
+                &law.source(),
+                &[CellId(0)],
+                0.5,
+                conduction,
+                implicit,
+                workspace,
+                || false,
+            )
+            .unwrap()
+        },
+    });
+}
+
+#[test]
+fn the_declared_graph_follows_the_driven_network_with_temperature_feedback() {
+    // The module's cycle with all heat into cell 0 and
+    // c = 0.7 (1 + (T - 300) / 2), forces (0.2, -0.1, 0.4) N.
+    let bodies = cycle_bodies();
+    let links = cycle_links();
+    let routes = core::array::from_fn::<_, 3, _>(|_| BTreeMap::from([(CellId(0), 1.0)]));
+    let law = ModuleLaw {
+        beta_per_k: 0.5,
+        maximum_k: 303.0,
+    };
+    let forces = [0.2, -0.1, 0.4];
+    let efforts = [held(forces[0]), held(forces[1]), held(forces[2])];
+    follow_with_feedback(&FeedbackCase {
+        name: "cycle",
+        parts: Parts {
+            feedback: Some(&law),
+            ..cycle_parts(&bodies, &links, &forces, &routes)
+        },
+        // The module's own test runs to 0.3 s in sixteen steps. Sixteen
+        // steps of 0.3 / 16 s do not sum to 0.3 s in floating point: the
+        // module's thermal clock lands on its target and the kernel's sum
+        // ends one ulp short (the limit stated in `graph.rs`). A quarter of
+        // a second in sixteen steps is exact.
+        target_s: 0.25,
+        explicit: |heat: &DepositionSimulation<'static>, step: StepConfig, target_s: f64| {
+            let mut controls = graph_controls();
+            controls.thermal = step;
+            advance_cycle_temperature(
+                graph_input(&bodies, &links, &routes),
+                &efforts,
+                heat,
+                &(),
+                &law.source(),
+                &[CellId(0); 3],
+                target_s,
+                controls,
+                || false,
+            )
+            .unwrap()
+        },
+        implicit: |heat: &DepositionSimulation<'static>,
+                   common: RigidDampingImplicitConfig,
+                   conduction: &ImplicitConductionGraph<'_>,
+                   workspace: &mut ImplicitConductionWorkspace| {
+            let implicit = DrivenNetworkDampingImplicitConfig {
+                mechanical: graph_controls().mechanical,
+                thermal: common.thermal,
+                scheme: common.scheme,
+                maximum_heat_bindings: common.maximum_heat_bindings,
+                energy_tolerance_j: common.energy_tolerance_j,
+            };
+            advance_cycle_temperature_implicit(
+                graph_input(&bodies, &links, &routes),
+                &efforts,
+                heat,
+                &Observe::default(),
+                &law.source(),
+                &[CellId(0); 3],
+                0.5,
+                conduction,
+                implicit,
+                workspace,
+                || false,
+            )
+            .unwrap()
+        },
+    });
 }

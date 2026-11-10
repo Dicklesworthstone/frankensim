@@ -13,7 +13,7 @@ use fs_material::visco::temperature::{TemperatureShift, TemperatureShiftModel};
 
 const GAS_CONSTANT: f64 = 8.31446261815324;
 
-fn arrhenius(reference_k: f64, high_k: f64) -> TemperatureShift {
+pub(crate) fn arrhenius(reference_k: f64, high_k: f64) -> TemperatureShift {
     TemperatureShift::new(
         TemperatureShiftModel::Arrhenius {
             activation_energy_j_mol: 20_000.0 * GAS_CONSTANT,

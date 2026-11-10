@@ -251,13 +251,13 @@ fn the_declared_graph_reproduces_the_explicit_candidate() {
 /// The module's own synthetic temperature law, offered to the network
 /// Component through that Component's law interface.
 #[derive(Debug)]
-struct ModuleLaw {
-    beta_per_k: f64,
-    maximum_k: f64,
+pub(crate) struct ModuleLaw {
+    pub(crate) beta_per_k: f64,
+    pub(crate) maximum_k: f64,
 }
 
 impl ModuleLaw {
-    fn source(&self) -> LinearTemperatureDamping {
+    pub(crate) fn source(&self) -> LinearTemperatureDamping {
         LinearTemperatureDamping {
             beta_per_k: self.beta_per_k,
             maximum_k: self.maximum_k,

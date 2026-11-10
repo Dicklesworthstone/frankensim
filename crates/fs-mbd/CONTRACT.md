@@ -194,14 +194,50 @@ with the bodies spinning against each other, where the spin adds its stored
 energy to the allowance and nothing else; refusals; two kernel runs with the
 held efforts as boundaries, the ledger's boundary accounts equal to the
 owner's actuator work (force and couple ports, material and world axes) and
-the ledger closed. PLANTS Compared with the hand-written driven couplings of
-fs-couple in `crates/fs-couple/tests/rigid_damping_heat/driven_graph.rs`.
+the ledger closed. Twenty-nine planted defects in the drive ports were each
+caught (twenty-seven by this file, two by the comparison with the module).
+Compared with the hand-written driven couplings of fs-couple in
+`crates/fs-couple/tests/rigid_damping_heat/driven_graph.rs`.
+
+Following temperature is opt-in too, one way or the other, and appends one
+signal input `temperature<e>` [K] per connector. `temperature_dependent(law)`
+takes a `DampingLaw` (the one `ViscousNetwork` takes): each connector's
+Kelvin form for a step is the law's at that temperature, always from the
+built form, and the branches do not change. `shifted(law)` takes a
+`ShiftLaw`: one factor per connector, `a_T = tau(T) / tau_ref`, by which its
+Kelvin viscosity and every relaxation time of its branches are multiplied
+for the step (the owner's held-kinetics entry); elastic factors, memory and
+storage do not change, and a lossless branch stays lossless. A factor that is
+not positive and finite is refused as the law's. The signal is separate from
+the heat port's temperature, and entropy is booked where the heat is
+released. Actuators and signals may be asked for in any order; ports are
+laid out in that order.
+
+G0 for the temperature laws, in the same test file: with a damping law that
+has its own slope per connector, the step equal bit for bit to the owner on
+forms shifted by hand, the entropy at the heat ports' temperatures and not at
+the signals', and at the reference temperature the step of the network that
+follows nothing; three orders of actuators and signals (actuators first,
+signals first, one actuator on each side) each conforming, equal to the owner
+and carrying its actuator work; with a shift law that has its own activation
+temperature per connector, the step equal bit for bit to the owner's
+held-kinetics entry; a pair at 330 K (factor 0.545) against its own equations
+with viscosity and relaxation time both scaled (speed, memory and heat to
+1e-9; scaling one of the two alone ends 0.02 and 0.08 m/s away), and at the
+reference temperature the built pair; a lossless branch under a shift; a
+pair without branches by a shift factor and by a scaled Kelvin form, equal to
+the bit; refusals (two laws, a signal that is no temperature, a temperature
+outside the law, a factor that is zero, negative or not finite, with and
+without branches); a kernel run with the temperature held on the signal.
+Twenty-five planted defects in the temperature laws and the stored port offsets were each caught (twenty-three by this file, two by the comparison with the module).
 
 No claim: an effort is held over the whole step (a varying command is sampled
-by whatever feeds the port); no torque port on a body; the Kelvin viscosity
-and the relaxation times are
-fixed (the owner's held-kinetics entry, which scales those two, is not
-wrapped); the owner solves bodies and branches as one dense system and
+by whatever feeds the port), and so is a temperature (the law is read once
+per step, at what the signal carries; fed a start-of-step temperature this is
+first-order feedback); no torque port on a body; a network follows a damping
+law or a shift law, not both, and a shift is one factor per connector (the
+owner's kinetics take one per Kelvin form and one per branch); the owner
+solves bodies and branches as one dense system and
 refuses one that does not fit (at this writing, bodies plus branches above
 21), at the first step and not at construction; no analytic tangent;
 cancellation raised while the owner is inside a step is passed to it but not

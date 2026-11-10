@@ -1,7 +1,8 @@
 //! A rigid-body network with Maxwell memory as one composition-kernel
 //! Component.
 //!
-//! [`RelaxationNetwork`] wraps [`step_relaxation_network_with_loads`]: rigid
+//! [`RelaxationNetwork`] wraps [`step_relaxation_network_with_loads`] (and,
+//! for kinetics that follow temperature, its held-kinetics twin): rigid
 //! bodies joined by connectors that have, beside their Kelvin viscosity,
 //! Maxwell (or lossless equilibrium) branches, each with its own elastic
 //! memory. The owner solves bodies and branches as one system and admits
@@ -19,7 +20,7 @@
 //!
 //! Ports, as for [`super::network::ViscousNetwork`]: the force ports in body
 //! order, then the heat ports in connector order, then the two ports of each
-//! actuator in the order the actuators were given.
+//! actuator and the temperature signals, in the order they were asked for.
 //!
 //! - `force<i>`, one per body, receiving effort: the world-frame force on
 //!   the centre of mass [N], three components. It returns the mean
@@ -41,6 +42,17 @@
 //!   order in its length). Their products with the efforts, times the step,
 //!   are the owner's actuator work on that connector, which may be negative
 //!   (recovery).
+//! - `temperature<e>`, one per connector and only for a network that
+//!   follows temperature, a signal input [K], appended when
+//!   [`RelaxationNetwork::temperature_dependent`] or
+//!   [`RelaxationNetwork::shifted`] is called. With the first, the
+//!   connector's Kelvin form for the step is its [`DampingLaw`] at that
+//!   temperature, from the form the network was built with, and the Maxwell
+//!   branches do not change. With the second, the connector's [`ShiftLaw`]
+//!   gives one factor at that temperature, by which its Kelvin viscosity
+//!   and every relaxation time of its branches are multiplied; elastic
+//!   factors, memory and storage do not change. Either is held over the
+//!   step. What is said of this signal for the viscous network holds here.
 //!
 //! Receipt: the stored change is kinetic plus uniform-gravity potential plus
 //! elastic memory, as the owner reduces them; the dissipation is the owner's
@@ -52,16 +64,18 @@
 //! No claim: an effort is held over the whole step (the owner's source is
 //! exact for a held effort at fixed geometry; a varying command is sampled
 //! by whatever feeds the port); a connector without drive ports has no
-//! actuator; no torque port on a body, as for the viscous network; the
-//! Kelvin viscosity and
-//! the relaxation times are fixed (the owner's held-kinetics entry, which
-//! scales those two, is not wrapped); the port map has no analytic tangent;
+//! actuator; no torque port on a body, as for the viscous network; a
+//! network follows temperature by a damping law or by a shift factor, not
+//! both, and a shift factor is one number per connector (the owner's
+//! kinetics take one per Kelvin form and one per branch); the port map has
+//! no analytic tangent;
 //! cancellation raised while the owner is inside a step is passed to it but
 //! not exercised by a test; the owner's
 //! accuracy statements (exact sources at fixed geometry, second order for
 //! the moving geometry) are unchanged by the wrapping.
 
 use core::num::NonZeroUsize;
+use std::rc::Rc;
 
 use fs_exec::Cx;
 use fs_ports::component::{
@@ -74,12 +88,55 @@ use crate::spatial_loads::internal_impulse::viscous::network::relaxation::{
 };
 use crate::spatial_loads::internal_motion::HeldExternalLoads;
 use crate::spatial_loads::internal_motion::viscous::network::relaxation::{
-    HeldInternalEffort, RelaxationNetworkMotionControls, RelaxationNetworkMotionError,
-    RelaxationNetworkMotionStep, step_relaxation_network_with_loads,
+    HeldInternalEffort, HeldRelaxationKinetics, RelaxationNetworkMotionControls,
+    RelaxationNetworkMotionError, RelaxationNetworkMotionStep, step_relaxation_network_with_loads,
+    step_relaxation_network_with_loads_and_kinetics,
 };
 use crate::{
     DynamicsError, Gravity, MassProperties, RigidBodyIntegrator, RigidBodyState, Vec3, Wrench,
 };
+
+pub use super::network::DampingLaw;
+
+/// How a connector's kinetics follow temperature: one factor per connector,
+/// `a_T = tau(T) / tau_ref`, by which its Kelvin viscosity and every
+/// relaxation time of its Maxwell branches are multiplied (a
+/// thermorheologically simple connector). Elastic factors, the memory and
+/// its storage do not change with it, and a lossless equilibrium branch
+/// stays lossless.
+///
+/// A factor is a ratio of times: it must be positive and finite, and a
+/// network refuses a step for which the law returns anything else. The law
+/// must be a function, as a [`DampingLaw`] must, and the network's `Smooth`
+/// class holds only as far as the factor is differentiable in temperature.
+pub trait ShiftLaw: core::fmt::Debug {
+    /// The factor of `connector` at `temperature_k`.
+    ///
+    /// # Errors
+    /// The law's reason, when it has no factor at that temperature.
+    fn factor(&self, connector: usize, temperature_k: f64) -> Result<f64, String>;
+}
+
+/// What the `temperature<e>` signals set.
+#[derive(Debug, Clone)]
+enum Thermal {
+    /// Nothing: the network has no such signals.
+    Fixed,
+    /// Each connector's Kelvin form.
+    Damping(Rc<dyn DampingLaw>),
+    /// Each connector's Kelvin viscosity and relaxation times.
+    Kinetics(Rc<dyn ShiftLaw>),
+}
+
+/// One actuator: its connector, its axes, and where its two ports'
+/// coefficients start in the input and output vectors.
+#[derive(Debug, Clone, Copy)]
+struct Drive {
+    connector: usize,
+    frame: DriveFrame,
+    input: usize,
+    output: usize,
+}
 
 /// The axes in which a drive port's effort is held during a step, and in
 /// which its conjugate rate is returned.
@@ -108,6 +165,8 @@ pub enum RelaxationNetworkBuildError {
         /// Index of the connector in the supplied order.
         connector: usize,
     },
+    /// The network already follows temperature.
+    Thermal,
     /// A port identifier was refused.
     Identifier(fs_ports::CoupleError),
     /// A port specification was refused.
@@ -126,6 +185,7 @@ impl core::fmt::Display for RelaxationNetworkBuildError {
                 f,
                 "connector {connector} does not exist or already has an actuator"
             ),
+            Self::Thermal => write!(f, "the network already follows temperature"),
             Self::Identifier(error) => write!(f, "port identifier refused: {error:?}"),
             Self::Port(violation) => write!(f, "port refused: {violation}"),
         }
@@ -167,6 +227,21 @@ pub enum RelaxationNetworkRefusal {
         /// Index of the connector in the supplied order.
         connector: usize,
     },
+    /// A temperature signal that is not positive and finite.
+    DampingTemperature {
+        /// Index of the connector in the supplied order.
+        connector: usize,
+        /// The value received [K].
+        kelvin: f64,
+    },
+    /// The damping law or the shift law has nothing for a connector at its
+    /// temperature.
+    Law {
+        /// Index of the connector in the supplied order.
+        connector: usize,
+        /// The law's own reason.
+        reason: String,
+    },
     /// Cancellation was requested.
     Cancelled,
 }
@@ -192,6 +267,14 @@ impl core::fmt::Display for RelaxationNetworkRefusal {
                 f,
                 "the actuator of connector {connector} received an effort that is not finite"
             ),
+            Self::DampingTemperature { connector, kelvin } => write!(
+                f,
+                "connector {connector}'s law is asked for at {kelvin} K, which is not a \
+                 temperature"
+            ),
+            Self::Law { connector, reason } => {
+                write!(f, "connector {connector}'s temperature law refused: {reason}")
+            }
             Self::Cancelled => write!(f, "cancelled during the network step"),
         }
     }
@@ -232,8 +315,12 @@ pub struct RelaxationNetwork {
     links: Vec<RelaxationNetworkLink>,
     gravity: Gravity,
     controls: RelaxationNetworkMotionControls,
-    /// Driven connectors and their axes, in the order of their ports.
-    drives: Vec<(usize, DriveFrame)>,
+    /// The actuators, in the order of their ports.
+    drives: Vec<Drive>,
+    /// What the temperature signals set, and where the first of them is in
+    /// the input vector.
+    thermal: Thermal,
+    temperature_input: usize,
     ports: Vec<PortSpec>,
 }
 
@@ -289,8 +376,61 @@ impl RelaxationNetwork {
             gravity,
             controls,
             drives: Vec::new(),
+            thermal: Thermal::Fixed,
+            temperature_input: 0,
             ports,
         })
+    }
+
+    /// Coefficients the ports declared so far take in the input vector and
+    /// in the output vector.
+    fn widths(&self) -> (usize, usize) {
+        self.ports.iter().fold((0, 0), |(input, output), port| {
+            (input + port.input_width(), output + port.output_width())
+        })
+    }
+
+    /// Appends one `temperature<e>` signal input per connector, read by
+    /// `thermal`.
+    fn following(mut self, thermal: Thermal) -> Result<Self, RelaxationNetworkBuildError> {
+        if !matches!(self.thermal, Thermal::Fixed) {
+            return Err(RelaxationNetworkBuildError::Thermal);
+        }
+        self.temperature_input = self.widths().0;
+        for connector in 0..self.links.len() {
+            let id = StableId::new(format!("temperature{connector}"))
+                .map_err(RelaxationNetworkBuildError::Identifier)?;
+            self.ports.push(PortSpec::signal_in(id, NonZeroUsize::MIN));
+        }
+        self.thermal = thermal;
+        Ok(self)
+    }
+
+    /// The same network with Kelvin damping that follows temperature: each
+    /// connector's Kelvin form for a step is `law` at the temperature its
+    /// `temperature<e>` signal input receives, from the form the network
+    /// was built with. The Maxwell branches are not changed.
+    ///
+    /// # Errors
+    /// [`RelaxationNetworkBuildError::Thermal`] for a network that already
+    /// follows temperature.
+    pub fn temperature_dependent(
+        self,
+        law: Rc<dyn DampingLaw>,
+    ) -> Result<Self, RelaxationNetworkBuildError> {
+        self.following(Thermal::Damping(law))
+    }
+
+    /// The same network with kinetics that follow temperature: each
+    /// connector's Kelvin viscosity and every relaxation time of its
+    /// branches are, for a step, the built ones times `law`'s factor at the
+    /// temperature its `temperature<e>` signal input receives.
+    ///
+    /// # Errors
+    /// [`RelaxationNetworkBuildError::Thermal`] for a network that already
+    /// follows temperature.
+    pub fn shifted(self, law: Rc<dyn ShiftLaw>) -> Result<Self, RelaxationNetworkBuildError> {
+        self.following(Thermal::Kinetics(law))
     }
 
     /// Gives `connector` an actuator: the ports `drive<connector>` (held
@@ -305,9 +445,12 @@ impl RelaxationNetwork {
         connector: usize,
         frame: DriveFrame,
     ) -> Result<Self, RelaxationNetworkBuildError> {
-        if connector >= self.links.len() || self.drives.iter().any(|&(e, _)| e == connector) {
+        if connector >= self.links.len()
+            || self.drives.iter().any(|drive| drive.connector == connector)
+        {
             return Err(RelaxationNetworkBuildError::Drive { connector });
         }
+        let (input, output) = self.widths();
         let three = NonZeroUsize::MIN.saturating_add(2);
         for (name, kind) in [
             ("drive", PortKind::MechanicalForceVelocity),
@@ -320,7 +463,12 @@ impl RelaxationNetwork {
                     .map_err(RelaxationNetworkBuildError::Port)?,
             );
         }
-        self.drives.push((connector, frame));
+        self.drives.push(Drive {
+            connector,
+            frame,
+            input,
+            output,
+        });
         Ok(self)
     }
 
@@ -344,27 +492,26 @@ impl RelaxationNetwork {
     }
 
     /// Number of connectors; ports `bodies()..bodies() + connectors()` are
-    /// their heat ports. The two ports of each actuator follow, in the
-    /// order the actuators were given.
+    /// their heat ports. The two ports of each actuator and the temperature
+    /// signals follow, in the order they were asked for.
     #[must_use]
     pub fn connectors(&self) -> usize {
         self.links.len()
-    }
-
-    /// Where the first drive port's coefficients start in the input and
-    /// output vectors.
-    fn drive_base(&self) -> usize {
-        3 * self.properties.len() + self.links.len()
     }
 
     /// The effort each connector holds during a step: zero without an
     /// actuator, and what the actuator's two ports received (force, then
     /// couple) with one.
     fn efforts(&self, inputs: &[f64]) -> Result<Vec<HeldInternalEffort>, RelaxationNetworkRefusal> {
-        let drive_base = self.drive_base();
         let mut efforts = vec![HeldInternalEffort::MaterialFirst([0.0; 6]); self.links.len()];
-        for (slot, &(connector, frame)) in self.drives.iter().enumerate() {
-            let held: [f64; 6] = core::array::from_fn(|c| inputs[drive_base + 6 * slot + c]);
+        for &Drive {
+            connector,
+            frame,
+            input,
+            ..
+        } in &self.drives
+        {
+            let held: [f64; 6] = core::array::from_fn(|c| inputs[input + c]);
             if held.iter().any(|value| !value.is_finite()) {
                 return Err(RelaxationNetworkRefusal::Effort { connector });
             }
@@ -403,11 +550,16 @@ impl RelaxationNetwork {
         inputs: &[f64],
         outputs: &mut [f64],
     ) -> f64 {
-        let drive_base = self.drive_base();
         let after = step.states_after();
         let [initial, endpoint] = &step.half_sources;
         let mut allowance_j = 0.0_f64;
-        for (slot, &(connector, frame)) in self.drives.iter().enumerate() {
+        for &Drive {
+            connector,
+            frame,
+            input,
+            output,
+        } in &self.drives
+        {
             let twists = [
                 initial.average_relative_twist[connector],
                 endpoint.average_relative_twist[connector],
@@ -433,9 +585,8 @@ impl RelaxationNetwork {
             for port in 0..2 {
                 let (mut effort_sq, mut twist_sq) = (0.0_f64, [0.0_f64; 2]);
                 for c in 3 * port..3 * port + 3 {
-                    let index = drive_base + 6 * slot + c;
-                    outputs[index] = rate[c];
-                    effort_sq += inputs[index] * inputs[index];
+                    outputs[output + c] = rate[c];
+                    effort_sq += inputs[input + c] * inputs[input + c];
                     twist_sq[0] += twists[0][c] * twists[0][c];
                     twist_sq[1] += twists[1][c] * twists[1][c];
                 }
@@ -448,6 +599,107 @@ impl RelaxationNetwork {
                 + endpoint.connector_actuator_work_j[connector].abs();
         }
         allowance_j
+    }
+
+    /// The temperature `connector`'s signal carries.
+    fn signal(&self, connector: usize, inputs: &[f64]) -> Result<f64, RelaxationNetworkRefusal> {
+        let kelvin = inputs[self.temperature_input + connector];
+        if kelvin.is_finite() && kelvin > 0.0 {
+            Ok(kelvin)
+        } else {
+            Err(RelaxationNetworkRefusal::DampingTemperature { connector, kelvin })
+        }
+    }
+
+    /// The owner's step from `old` under `wrenches` and the efforts and
+    /// temperatures in `inputs`: with the built connectors, with Kelvin
+    /// forms from the damping law, or with kinetics from the shift law.
+    fn step(
+        &self,
+        old: &RelaxationState,
+        wrenches: &[Wrench],
+        inputs: &[f64],
+        dt_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<RelaxationNetworkMotionStep, RelaxationNetworkRefusal> {
+        let efforts = self.efforts(inputs)?;
+        let loads = HeldExternalLoads {
+            wrenches,
+            gravity: self.gravity,
+        };
+        let cancelled = || cx.is_cancel_requested();
+        let refused = |connector: usize| {
+            move |reason: String| RelaxationNetworkRefusal::Law { connector, reason }
+        };
+        let step = match &self.thermal {
+            Thermal::Fixed => step_relaxation_network_with_loads(
+                &old.bodies,
+                &self.properties,
+                &self.links,
+                &old.memory,
+                &efforts,
+                loads,
+                dt_s,
+                self.controls,
+                cancelled,
+            )?,
+            Thermal::Damping(law) => {
+                // Always from the built form, never from a shifted one.
+                let mut links = self.links.clone();
+                for (connector, link) in links.iter_mut().enumerate() {
+                    let kelvin = self.signal(connector, inputs)?;
+                    link.viscous.damping = law
+                        .at_temperature(connector, &self.links[connector].viscous.damping, kelvin)
+                        .map_err(refused(connector))?;
+                }
+                step_relaxation_network_with_loads(
+                    &old.bodies,
+                    &self.properties,
+                    &links,
+                    &old.memory,
+                    &efforts,
+                    loads,
+                    dt_s,
+                    self.controls,
+                    cancelled,
+                )?
+            }
+            Thermal::Kinetics(law) => {
+                let mut viscosity = Vec::with_capacity(self.links.len());
+                let mut times = Vec::with_capacity(self.links.len());
+                for (connector, link) in self.links.iter().enumerate() {
+                    let kelvin = self.signal(connector, inputs)?;
+                    let factor = law.factor(connector, kelvin).map_err(refused(connector))?;
+                    // The owner admits a zero viscosity scale and refuses a
+                    // zero time scale, so it would take a connector without
+                    // branches at a factor of zero and refuse one with a
+                    // branch. A factor is a ratio of times either way.
+                    if !(factor.is_finite() && factor > 0.0) {
+                        return Err(refused(connector)(format!(
+                            "a shift factor of {factor} is not a positive ratio of times"
+                        )));
+                    }
+                    viscosity.push(factor);
+                    times.push(vec![factor; link.branches.len()]);
+                }
+                step_relaxation_network_with_loads_and_kinetics(
+                    &old.bodies,
+                    &self.properties,
+                    &self.links,
+                    &old.memory,
+                    &efforts,
+                    HeldRelaxationKinetics {
+                        viscosity_scales: &viscosity,
+                        relaxation_time_scales: &times,
+                    },
+                    loads,
+                    dt_s,
+                    self.controls,
+                    cancelled,
+                )?
+            }
+        };
+        Ok(step)
     }
 
     /// The stored energy of one state and the sum of the sizes of its
@@ -540,21 +792,7 @@ impl Component for RelaxationNetwork {
                 torque_body: Vec3::ZERO,
             })
             .collect();
-        let efforts = self.efforts(inputs)?;
-        let step = step_relaxation_network_with_loads(
-            &old.bodies,
-            &self.properties,
-            &self.links,
-            &old.memory,
-            &efforts,
-            HeldExternalLoads {
-                wrenches: &wrenches,
-                gravity: self.gravity,
-            },
-            dt_s,
-            self.controls,
-            || cx.is_cancel_requested(),
-        )?;
+        let step = self.step(old, &wrenches, inputs, dt_s, cx)?;
         let after = step.states_after();
 
         // Work the kernel will book on the force ports, as a size.
