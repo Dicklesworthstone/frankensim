@@ -10,6 +10,8 @@
 //! continuum FEM solve, an equation of state, or a melt-flow model. Its original
 //! cell-uniformity, timestep and supplied-conductance assumptions still apply.
 
+/// The explicit enthalpy timeline behind the composition-kernel contract.
+pub mod component;
 pub mod enthalpy;
 pub mod observers;
 /// Mass-owned layer/cylinder/sphere fronts and thermostatted extinction.

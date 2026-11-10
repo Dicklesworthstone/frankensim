@@ -1,5 +1,81 @@
 # fs-thermal contract
 
+## The enthalpy timeline as a composition-kernel Component
+
+`component::ThermalTimeline` puts the explicit `DepositionSimulation` behind
+`fs_ports::component::Component` (contract v0), so the kernel in `fs-system`
+can deliver heat to its cells from any other component and route what leaves
+it. Nothing is integrated in the wrapper: a step is the owner's own
+`advance_observed`, with the delivered heat given to the owner as its
+`step_sources`.
+
+Ports, in this order: `cell<id>` per declared cell (a heat port that receives
+the heat rate into that cell and returns the mean of its temperatures at the
+two ends of the step), and `environment` if declared (returns the mean rate at
+which heat entered through the timeline's own authored boundaries: ambient
+films, reservoirs, authored sources; the temperature it receives is not used
+by the timeline).
+
+Boundary heat is on that wire or it does not exist. Without the port, a
+timeline in which any active cell has a film coefficient, a reservoir or an
+authored source is refused at `ThermalTimeline::start` and at every step
+(`TimelineRefusal::Boundary`), and so is a step in which an event gives a cell
+such a boundary. The test is on the declared boundary, not on the heat it
+exchanges, so exchanges that cancel or are still zero are refused too. While
+no boundary exchanges, the environment port returns exactly zero.
+
+The state is `TimelineState`, the owner's checkpoint, made only by `start`
+(which applies the events scheduled at the current time: the births a run
+starts with) and by a step.
+
+Interval and energy: the owner's clock is one `f64`. A step of `dt` from time
+`t` ends at the representable `t + dt`, and the owner integrates over its own
+substep durations, whose sum is not exactly `dt` once `t` is large beside
+`dt`. The kernel's energy is kept, not its rate: each port's `rate * dt` is
+handed to the owner substep by substep, in proportion to the clock interval
+each substep covers, and what is left goes into the substep that ends the
+step. A step that does not move the clock is refused
+(`TimelineRefusal::Interval`). A step of exactly the distance `next_event_s`
+reported ends on that event.
+
+`limit_dt_s` returns the smaller of the proposal and the owner's explicit
+bound for a substep from that state (which includes its `max_dt_s`), read from
+the owner without taking a step. A kernel that honours it normally takes one
+thermal substep per step, so the rest of the system advances on the thermal
+clock, as the hand-written couplings of this timeline do; a longer step is the
+owner's several substeps. `next_event_s` is the time to the next scheduled
+event.
+
+The receipt's stored change is the owner's `EnergyAudit`; numerical loss is
+what entered through the ports less that. The energy tolerance is
+`(64 + 2 cells) eps` times the sum of the sizes of the port energies, of the
+terms `|m e|` of the stored energy at both ends (they cancel when laws have
+datums of opposite sign) and of the owner's totals.
+
+G0, in `crates/fs-system/tests/thermal_timeline_slice.rs` (run with
+`cargo test -p fs-system --features slices`); the list is in
+`crates/fs-system/CONTRACT.md`.
+
+No claim: the entropy generated inside the timeline is reported as zero. That
+is a lower bound for conduction between cells; for the boundaries it is one
+only if the environment wire is at the authored ambient temperature, which is
+not checked. A birth after the start is refused, because its mass and enthalpy
+would enter with no port to carry them. The class is `Smooth`; a law with a
+latent interval has kinks at the interval's ends, where a kernel that
+differences the port map gets a one-sided slope. No analytic tangent. The
+implicit and staged variants of the owner are not wrapped. Beside port heat,
+the environment heat carries that heat's rounding (about 1e-16 of it), since
+it is the owner's external heat less the port heat. Against the owner driven
+directly with held rates, a step agrees to rounding, not bit for bit: the
+wrapper hands the owner energy. Not pinned by a test: the sign of the
+numerical loss (it is at rounding level); every term of the tolerance but the
+stored-energy terms, and its per-cell factor (the plain stored-energy sum
+needs it from about 1e6 cells); equality's use of the budget, and its
+blindness to the schedule past the next event and to contact coverage; that
+the step limit reads the bound without a trial step (a trial step would
+return the same bound). fs-thermal depends on fs-ports and fs-exec for this
+module only.
+
 ## Shared immutable inputs across thermal candidates
 
 Every clone of the original `DepositionSimulation` shares its immutable

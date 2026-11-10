@@ -11,8 +11,10 @@ description = "Shared conservative enthalpy timelines, material birth, thermal c
 layer = "L3"
 
 [dependencies]
+fs-exec = { path = "../fs-exec" }
 fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
+fs-ports = { path = "../fs-ports" }
 fs-solver = { path = "../fs-solver" }
 fs-sparse = { path = "../fs-sparse" }
 

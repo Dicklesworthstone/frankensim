@@ -263,10 +263,10 @@ None. The crate denies `unsafe_code`.
   refusals, nonlinear RC relaxation with heat, and nonlinear LC exchange
   against independent piecewise or continuous-equation references.
 
-`slices` (off by default) adds fs-mbd as a dependency and enables the owner
-slice tests, which compose real physics owners on the kernel. The library
-itself does not use fs-mbd. Without the feature the crate and its tests build
-only fs-ports and fs-exec.
+`slices` (off by default) adds fs-mbd and fs-thermal as dependencies and
+enables the owner slice tests, which compose real physics owners on the
+kernel. The library itself uses neither. Without the feature the crate and its
+tests build only fs-ports and fs-exec.
 
 ## Conformance tests
 
@@ -402,6 +402,48 @@ Five planted defects were each caught: half of a connector's heat leaving,
 velocities written to the wrong body, entropy at the other connector's
 temperature, a later route replacing an earlier delivery, and routes that
 share a receiver audited alone.
+
+Owner slice, `tests/thermal_timeline_slice.rs` (`--features slices`): the
+fs-thermal explicit enthalpy timeline
+(`fs_thermal::component::ThermalTimeline`, the owner's `advance_observed`
+behind the contract), two linked cells with a law each.
+- At three steps and heat rates it passes the conformance check, with the
+  returned temperatures equal to explicit Euler by hand; again with the two
+  cells' enthalpies at +1e9 and -1e9 J/kg, where the stored total is small
+  and its terms are not.
+- `limit_dt_s` is the owner's documented bound `0.8 C / G` and what the owner
+  proposes when driven directly; a step of one bound, and one of two and a
+  half bounds in three substeps, agree with the owner driven directly with
+  held rates to 1e-11 K and 1e-12 of the energy.
+- At a clock time of 2^30 s, where an ulp is 0.24 us: a 1 us step (four ulps
+  on the clock, one substep the target clips), a 1.1 us step under a 1.1 us
+  bound (five ulps, one substep the bound limits) and a 10 us step under a
+  0.3 us bound (42 substeps of one ulp, each integrating 0.3 us) all store
+  the kernel's `rate * dt` to the rounding of the enthalpy. A step under
+  half an ulp is refused.
+- A step cut to an event whose time does not round-trip in floating point
+  ends on the event; a shorter step does not.
+- Refusals: no ports, a cell twice, a port on a missing cell, a rate that is
+  not finite, the owner's own refusal (from the step limit and from the
+  step), cancellation on entry and cancellation raised inside the owner's
+  step, a birth at the end of a step and inside one; without the environment
+  port, a film, a reservoir, authored sources that cancel, a film at ambient
+  temperature, an event that adds a film, and a state admitted by a timeline
+  that has the port.
+- With the environment port the returned rate is the film's and the authored
+  source's by hand, also on a timeline with that port alone, and exactly
+  zero while nothing exchanges. In a kernel run with fan changes at 0.4 s
+  and 0.7 s, a step ends on each change, the cells match the owner alone to
+  1e-10 K and the heat in the named sink is the owner's boundary heat to
+  1e-9.
+- The damping-heat pairing with both real owners: the fs-mbd network's
+  connector heat routed 60 % and 30 % to the two cells and the rest to a
+  named sink, the second connector's all to the second cell. The thermal
+  bound (10 ms) is the system's clock. Over 300 steps the bodies equal the
+  owner network marched alone bit for bit, the cells equal the owner
+  timeline fed the same heat by hand to 1e-11 K, and every joule is in the
+  cells or the sink to 1e-11.
+Thirty-seven planted defects in the component were each caught.
 
 Other domains, `tests/elements.rs`: the gyrator and one element of each law
 in the rotational and electrical domains pass the conformance and tangent

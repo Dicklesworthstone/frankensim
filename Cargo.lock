@@ -2966,14 +2966,17 @@ dependencies = [
  "fs-mbd",
  "fs-phs",
  "fs-ports",
+ "fs-thermal",
 ]
 
 [[package]]
 name = "fs-thermal"
 version = "0.0.1"
 dependencies = [
+ "fs-exec",
  "fs-la",
  "fs-math",
+ "fs-ports",
  "fs-solver",
  "fs-sparse",
 ]
