@@ -40,8 +40,11 @@ fn initial(curve:&EquilibriumEnthalpyPhaseCurve, temperatures:[f64;2], htc:f64,
             geometry:CellGeometry {start_m:[0.0,i as f64,0.0],end_m:[0.1,i as f64,0.0],
                 volume_m3:1e-6,surface_area_m2:AREA},
             boundary:Boundary {ambient_k:300.0,htc_w_m2_k:htc,reservoir:None,source_w:0.0}})}).collect::<Vec<_>>();
-    events.push(TimedEvent {time_s:0.0,event:Event::Contact(ThermalLink {
-        id:5,a:IDS[0],b:IDS[1],area_m2:coverage,conductance_w_k:0.0})});
+    // No coverage is no contact: the owner refuses a link of zero area.
+    if coverage > 0.0 {
+        events.push(TimedEvent {time_s:0.0,event:Event::Contact(ThermalLink {
+            id:5,a:IDS[0],b:IDS[1],area_m2:coverage,conductance_w_k:0.0})});
+    }
     DepositionSimulation::new(events,&[(MaterialId(0),curve as &dyn ThermalLaw)],
         DepositionBudget {max_cells:2,max_links:1,max_events:3,max_substeps:100}).unwrap()
         .advance_to(0.0,StepConfig {max_dt_s:1.0,energy_tolerance_j:1e-10},||Ok(())).unwrap().0
