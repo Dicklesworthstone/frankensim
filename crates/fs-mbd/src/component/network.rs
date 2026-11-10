@@ -30,15 +30,23 @@
 //!   to the bit, and one that differences the port map also asks the law
 //!   for a form about 1.5e-8 of the temperature above it, so the law has to
 //!   be defined that far past any temperature the system reaches.
+//! - `torque<i>`, only for a body given one by [`ViscousNetwork::torqued`],
+//!   receiving effort: the torque held on that body in its own frame [N m],
+//!   three components. It returns the mean of the body's angular velocities
+//!   at the two ends of its drift [rad/s], which is the rate the native
+//!   step pairs with a held body torque. These ports follow all others, in
+//!   the order they were asked for.
 //!
 //! Receipt: the stored change is kinetic plus uniform-gravity potential
 //! energy as the owner reduces them; the dissipation is the owner's total
 //! connector heat; the owner's work-heat residual is booked as numerical
 //! loss; the entropy generated is `sum(D_e / T_e)`.
 //!
-//! No claim: there is no torque port, because the owner reports couple work
-//! as one total and not per body, so a couple cannot be attached to a body
-//! through the kernel yet; the port map has no analytic tangent, so a kernel
+//! No claim: a torque is held in the body's frame over the whole step (the
+//! owner's world-held couples and point loads are not wrapped); a torque
+//! port repeats that body's drift to find the rate, because the owner
+//! reports couple work as one total and keeps no state at the end of the
+//! drift; the port map has no analytic tangent, so a kernel
 //! loop differences it; one propose allocates the load and state banks; the
 //! owner's accuracy statements (second order for smooth motion, nothing at
 //! unresolved moving geometry) are unchanged by the wrapping.
@@ -58,9 +66,7 @@ use crate::spatial_loads::internal_motion::HeldExternalLoads;
 use crate::spatial_loads::internal_motion::viscous::network::{
     ViscousNetworkMotionControls, ViscousNetworkMotionError, step_viscous_network_with_loads,
 };
-use crate::{
-    DynamicsError, Gravity, MassProperties, RigidBodyIntegrator, RigidBodyState, Vec3, Wrench,
-};
+use crate::{DynamicsError, Gravity, MassProperties, RigidBodyIntegrator, RigidBodyState};
 
 /// Why a [`ViscousNetwork`] could not be built.
 #[derive(Debug, Clone, PartialEq)]
@@ -72,10 +78,25 @@ pub enum ViscousNetworkBuildError {
         /// Index of the connector in the supplied order.
         connector: usize,
     },
+    /// A torque port was asked for on a body that does not exist, or on one
+    /// that already has it.
+    Torque {
+        /// Index of the body in the supplied order.
+        body: usize,
+    },
     /// A port identifier was refused.
     Identifier(fs_ports::CoupleError),
     /// A port specification was refused.
     Port(ContractViolation),
+}
+
+impl From<super::PortBuildError> for ViscousNetworkBuildError {
+    fn from(error: super::PortBuildError) -> Self {
+        match error {
+            super::PortBuildError::Identifier(error) => Self::Identifier(error),
+            super::PortBuildError::Port(violation) => Self::Port(violation),
+        }
+    }
 }
 
 impl core::fmt::Display for ViscousNetworkBuildError {
@@ -86,6 +107,9 @@ impl core::fmt::Display for ViscousNetworkBuildError {
                 f,
                 "connector {connector} must join two different bodies of the network"
             ),
+            Self::Torque { body } => {
+                write!(f, "body {body} does not exist or already has a torque port")
+            }
             Self::Identifier(error) => write!(f, "port identifier refused: {error:?}"),
             Self::Port(violation) => write!(f, "port refused: {violation}"),
         }
@@ -206,6 +230,8 @@ pub struct ViscousNetwork {
     gravity: Gravity,
     controls: ViscousNetworkMotionControls,
     law: Option<Rc<dyn DampingLaw>>,
+    /// The body torque ports, in the order of their ports.
+    torques: Vec<super::TorquePort>,
     ports: Vec<PortSpec>,
 }
 
@@ -260,8 +286,24 @@ impl ViscousNetwork {
             gravity,
             controls,
             law: None,
+            torques: Vec::new(),
             ports,
         })
+    }
+
+    /// Gives `body` a torque port `torque<body>`, appended after the ports
+    /// the network already has.
+    ///
+    /// # Errors
+    /// [`ViscousNetworkBuildError::Torque`] for a body that does not exist
+    /// or already has the port.
+    pub fn torqued(mut self, body: usize) -> Result<Self, ViscousNetworkBuildError> {
+        if body >= self.properties.len() || self.torques.iter().any(|port| port.body == body) {
+            return Err(ViscousNetworkBuildError::Torque { body });
+        }
+        let port = super::TorquePort::declare(body, &mut self.ports)?;
+        self.torques.push(port);
+        Ok(self)
     }
 
     /// The same network with damping that follows temperature: each
@@ -300,6 +342,27 @@ impl ViscousNetwork {
     #[must_use]
     pub fn connectors(&self) -> usize {
         self.links.len()
+    }
+
+    /// The connectors with the law's forms at the temperatures the signals
+    /// carry; nothing for a network without a law.
+    fn forms(&self, inputs: &[f64]) -> Result<Vec<ViscousNetworkLink>, ViscousNetworkRefusal> {
+        let mut shifted = Vec::new();
+        if let Some(law) = &self.law {
+            let first = 3 * self.properties.len() + self.links.len();
+            let signals = &inputs[first..first + self.links.len()];
+            for (connector, link) in self.links.iter().enumerate() {
+                let kelvin = signals[connector];
+                if !(kelvin.is_finite() && kelvin > 0.0) {
+                    return Err(ViscousNetworkRefusal::DampingTemperature { connector, kelvin });
+                }
+                let damping = law
+                    .at_temperature(connector, &link.damping, kelvin)
+                    .map_err(|reason| ViscousNetworkRefusal::Law { connector, reason })?;
+                shifted.push(ViscousNetworkLink { damping, ..*link });
+            }
+        }
+        Ok(shifted)
     }
 
     /// Kinetic terms and gravity potential of one bank, as sizes for a
@@ -362,35 +425,13 @@ impl Component for ViscousNetwork {
         }
         // The forms of the step: the built ones, or the law's at the
         // temperatures the signals carry.
-        let mut shifted = Vec::new();
-        if let Some(law) = &self.law {
-            let signals = &inputs[3 * bodies + connectors..];
-            for (connector, link) in self.links.iter().enumerate() {
-                let kelvin = signals[connector];
-                if !(kelvin.is_finite() && kelvin > 0.0) {
-                    return Err(ViscousNetworkRefusal::DampingTemperature { connector, kelvin });
-                }
-                let damping = law
-                    .at_temperature(connector, &link.damping, kelvin)
-                    .map_err(|reason| ViscousNetworkRefusal::Law { connector, reason })?;
-                shifted.push(ViscousNetworkLink { damping, ..*link });
-            }
-        }
+        let shifted = self.forms(inputs)?;
         let links = if self.law.is_some() {
             &shifted
         } else {
             &self.links
         };
-        let wrenches: Vec<Wrench> = (0..bodies)
-            .map(|body| Wrench {
-                force_world: Vec3::new(
-                    inputs[3 * body],
-                    inputs[3 * body + 1],
-                    inputs[3 * body + 2],
-                ),
-                torque_body: Vec3::ZERO,
-            })
-            .collect();
+        let wrenches = super::held_wrenches(bodies, &self.torques, inputs);
         let step = step_viscous_network_with_loads(
             old,
             &self.properties,
@@ -431,6 +472,18 @@ impl Component for ViscousNetwork {
             heat_terms_j += heat_j.abs();
             entropy_j_per_k += heat_j.max(0.0) / heat_inputs[connector];
         }
+        let torques_j = super::torque_rates(
+            &self.torques,
+            &super::Drift {
+                gravity: self.gravity,
+                properties: &self.properties,
+                starts: &step.half_sources[0].states_after,
+                wrenches: &wrenches,
+                dt_s,
+            },
+            inputs,
+            outputs,
+        )?;
         let stored_change_j = step.mechanical_energy_change_j;
         let residual_j = step.work_heat_residual_j;
         let dissipated_j = step.dissipated_energy_j.max(0.0);
@@ -447,7 +500,8 @@ impl Component for ViscousNetwork {
             + terms_before_j
             + terms_after_j
             + stored_change_j.abs()
-            + residual_j.abs();
+            + residual_j.abs()
+            + torques_j;
         Ok(Proposal::Step(Receipt {
             stored_change_j,
             dissipated_j,

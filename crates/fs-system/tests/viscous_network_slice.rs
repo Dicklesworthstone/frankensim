@@ -11,8 +11,11 @@
 // Exact float comparisons here assert bitwise agreement with the owner.
 #![allow(clippy::float_cmp)]
 
+use std::rc::Rc;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_mbd::component::RigidBody;
 use fs_mbd::component::network::{
     DampingLaw, ViscousNetwork, ViscousNetworkBuildError, ViscousNetworkRefusal,
 };
@@ -29,9 +32,13 @@ use fs_mbd::spatial_loads::internal_motion::{
         ViscousNetworkMotionControls, ViscousNetworkMotionStep, step_viscous_network_with_loads,
     },
 };
-use fs_mbd::{Gravity, MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3, Wrench};
+use fs_mbd::{
+    Gravity, MassProperties, Pose, RigidBodyIntegrator, RigidBodyState, UnitQuaternion, Vec3,
+    Wrench,
+};
+use fs_ports::PortKind;
 use fs_ports::component::conformance::{Case, Observed, check_component};
-use fs_ports::component::{Component, Proposal};
+use fs_ports::component::{Carrier, Component, Proposal};
 use fs_system::elements::HeatCapacity;
 use fs_system::{NodeId, RouteTemperature, System, SystemBuilder, heat_sink};
 
@@ -754,4 +761,509 @@ fn the_network_keeps_its_account_through_free_fall_and_under_oblique_gravity() {
     let (properties, links, far) = fixture_at(Vec3::new(1000.0, 0.0, 1000.0));
     let component = ViscousNetwork::new(properties, links, oblique, controls()).expect("network");
     march_checked(&component, far, 1.0e-3, 300, "oblique gravity");
+}
+
+/// Body torques held on bodies 2 and 0, in that order of ports, each in its
+/// body's frame [N m].
+const TORQUES: [[f64; 3]; 2] = [[0.04, -0.02, 0.05], [-0.03, 0.06, 0.02]];
+
+/// World forces held on the three bodies [N].
+const FORCES: [f64; 9] = [1.5, -0.5, 2.0, 0.0, 0.7, -0.3, -0.4, 0.0, 0.2];
+
+/// The three-body network with a torque port on body 2, then on body 0.
+fn torqued_network(gravity: Gravity) -> (ViscousNetwork, Vec<RigidBodyState>) {
+    let (plain, start) = network(gravity);
+    let component = plain
+        .torqued(2)
+        .expect("torque port on body 2")
+        .torqued(0)
+        .expect("torque port on body 0");
+    (component, start)
+}
+
+/// The wrenches the three bodies hold: [`FORCES`], and [`TORQUES`] on
+/// bodies 2 and 0.
+fn torqued_wrenches() -> [Wrench; 3] {
+    let wrench = |body: usize, torque: [f64; 3]| Wrench {
+        force_world: Vec3::new(FORCES[3 * body], FORCES[3 * body + 1], FORCES[3 * body + 2]),
+        torque_body: Vec3::new(torque[0], torque[1], torque[2]),
+    };
+    [wrench(0, TORQUES[1]), wrench(1, [0.0; 3]), wrench(2, TORQUES[0])]
+}
+
+/// Energy the kernel books on the three-coefficient power port whose
+/// efforts and rates start at `at` in the two vectors, and the size of its
+/// products.
+fn port_energy_j(at: usize, dt_s: f64, inputs: &[f64], outputs: &[f64]) -> (f64, f64) {
+    let (mut energy, mut size) = (0.0_f64, 0.0_f64);
+    for axis in 0..3 {
+        energy += inputs[at + axis] * outputs[at + axis];
+        size += (inputs[at + axis] * outputs[at + axis]).abs();
+    }
+    (dt_s * energy, dt_s * size)
+}
+
+#[test]
+fn body_torques_enter_through_their_ports_and_do_the_owners_couple_work() {
+    let gate = CancelGate::new_clock_free();
+    let gravity = Gravity::new(Vec3::new(0.0, 0.0, -9.81)).expect("gravity");
+    let (component, start) = torqued_network(gravity);
+    let names: Vec<&str> = component.ports().iter().map(|port| port.id().as_str()).collect();
+    assert_eq!(names, ["force0", "force1", "force2", "heat0", "heat1", "torque2", "torque0"]);
+    for port in &component.ports()[5..] {
+        assert_eq!(
+            port.carrier(),
+            Carrier::Power(PortKind::RotationalTorqueAngularVelocity),
+            "{}",
+            port.id().as_str()
+        );
+        assert_eq!(port.width(), 3);
+    }
+    let stale = vec![start[2]];
+    let mut inputs = FORCES.to_vec();
+    inputs.extend([305.0, 288.0]);
+    inputs.extend(TORQUES[0]);
+    inputs.extend(TORQUES[1]);
+    let wrenches = torqued_wrenches();
+    for dt_s in [5.0e-3, 2.0e-2] {
+        let case = Case {
+            state: &start,
+            stale: &stale,
+            dt_s,
+            inputs: &inputs,
+        };
+        let observed =
+            with_cx(&gate, |cx| check_component(&component, &case, cx)).expect("conforms");
+        let Observed::Stepped {
+            receipt,
+            audit,
+            outputs,
+        } = observed
+        else {
+            panic!("the network takes the step");
+        };
+        assert_eq!(outputs.len(), 17);
+        let native = owner_step(&start, &wrenches, gravity, dt_s);
+        // The two torque ports together carry the owner's couple work.
+        let couple_j = native.external_loads.applied_torque_work_j;
+        let (first_j, first_terms_j) = port_energy_j(11, dt_s, &inputs, &outputs);
+        let (second_j, second_terms_j) = port_energy_j(14, dt_s, &inputs, &outputs);
+        assert!(couple_j.abs() > 1.0e-6, "the torques do work: {couple_j} J");
+        assert!((first_j - second_j).abs() > 1.0e-7, "{first_j} J and {second_j} J");
+        assert!(
+            (first_j + second_j - couple_j).abs() <= 1.0e-13 * (first_terms_j + second_terms_j),
+            "ports {:e} J, owner {couple_j:e} J",
+            first_j + second_j
+        );
+        // All ports: forces and torques in, connector heat out.
+        let heat_j: f64 = native.connector_dissipation_j.iter().sum();
+        let work_j = native.external_loads.applied_work_j;
+        let paired_j: f64 = (0..3)
+            .map(|body| {
+                dt_s * norm3(&inputs[3 * body..3 * body + 3]) * norm3(&outputs[3 * body..3 * body + 3])
+            })
+            .sum();
+        let exchanged_j = paired_j + heat_j + first_terms_j + second_terms_j;
+        assert!(
+            (audit.port_energy_in_j - (work_j - heat_j)).abs() <= 1.0e-12 * exchanged_j,
+            "{} vs {} - {}",
+            audit.port_energy_in_j,
+            work_j,
+            heat_j
+        );
+        assert_eq!(receipt.stored_change_j, native.mechanical_energy_change_j);
+        assert_eq!(receipt.numerical_loss_j, -native.work_heat_residual_j);
+        // The wrapper adds nothing to the torqued step.
+        let mut next = stale.clone();
+        let mut again = vec![f64::NAN; 17];
+        with_cx(&gate, |cx| {
+            component
+                .propose(&start, dt_s, &inputs, &mut next, &mut again, cx)
+                .expect("step")
+        });
+        assert_eq!(next.as_slice(), native.states_after());
+    }
+}
+
+#[test]
+fn a_lone_body_of_a_network_is_the_rigid_body_component() {
+    let gate = CancelGate::new_clock_free();
+    // One body and no connector: nothing but the body's drift happens in
+    // the network's step. For this body (three different moments, spin
+    // about two axes) the integrator's default step, which the single-body
+    // Component takes, and its Cayley step, by which the owner drifts a
+    // torqued body, are the same map; so the network's state and both
+    // ports' returns must equal the single-body Component's. A symmetric
+    // body, for which the two differ, is the next test's.
+    let gravity = Gravity::new(Vec3::new(0.3, -0.2, -9.81)).expect("gravity");
+    let (properties, _, states) = fixture();
+    let (properties, start) = (properties[0], states[0]);
+    let network = ViscousNetwork::new(vec![properties], Vec::new(), gravity, controls())
+        .expect("network")
+        .torqued(0)
+        .expect("torque port");
+    let single = RigidBody::new(RigidBodyIntegrator::new(gravity), properties).expect("body");
+    for torque in [[0.04, -0.02, 0.05], [0.0, 0.0, 0.0]] {
+        let inputs = [1.5, -0.5, 2.0, torque[0], torque[1], torque[2]];
+        let dt_s = 2.0e-2;
+        let (mut bank, mut bank_outputs) = (vec![start], [f64::NAN; 6]);
+        let (mut alone, mut alone_outputs) = (start, [f64::NAN; 6]);
+        with_cx(&gate, |cx| {
+            network
+                .propose(&vec![start], dt_s, &inputs, &mut bank, &mut bank_outputs, cx)
+                .expect("network step");
+            single
+                .propose(&start, dt_s, &inputs, &mut alone, &mut alone_outputs, cx)
+                .expect("body step");
+        });
+        assert_eq!(bank, [alone], "torque {torque:?}");
+        assert_eq!(bank_outputs, alone_outputs, "torque {torque:?}");
+        // The body spins, so the rate is reported with or without a torque.
+        assert!(norm3(&bank_outputs[3..]) > 0.05, "{bank_outputs:?}");
+    }
+}
+
+#[test]
+fn a_torque_about_a_principal_axis_spins_a_body_up_as_its_equation_says() {
+    let gate = CancelGate::new_clock_free();
+    // A body at rest with principal inertia 4 kg m^2 about z, a held torque
+    // of 0.5 N m about z: omega = tau t / I, and the work done is
+    // tau^2 t^2 / (2 I).
+    let properties =
+        MassProperties::new(2.0, Vec3::ZERO, Vec3::new(2.0, 3.0, 4.0)).expect("properties");
+    let network = ViscousNetwork::new(vec![properties], Vec::new(), Gravity::ZERO, controls())
+        .expect("network")
+        .torqued(0)
+        .expect("torque port");
+    let inputs = [0.0, 0.0, 0.0, 0.0, 0.0, 0.5];
+    let (dt_s, steps) = (0.0125, 40_u32);
+    let mut state = vec![body(properties, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO)];
+    let mut work_j = 0.0_f64;
+    with_cx(&gate, |cx| {
+        for _ in 0..steps {
+            let (mut next, mut outputs) = (state.clone(), [f64::NAN; 6]);
+            network
+                .propose(&state, dt_s, &inputs, &mut next, &mut outputs, cx)
+                .expect("step");
+            work_j += port_energy_j(3, dt_s, &inputs, &outputs).0;
+            state = next;
+        }
+    });
+    let t_s = dt_s * f64::from(steps);
+    let spin = state[0].angular_momentum_body();
+    assert!((spin.z - 0.5 * t_s).abs() <= 1.0e-14, "{} N m s", spin.z);
+    assert!(spin.x.abs() <= 1.0e-15 && spin.y.abs() <= 1.0e-15);
+    let expected_j = 0.5 * 0.5 * t_s * t_s / (2.0 * 4.0);
+    assert!((work_j - expected_j).abs() <= 1.0e-14, "{work_j} J vs {expected_j} J");
+    let stored_j = network.stored_energy_j(&state).expect("energy");
+    assert!((stored_j - expected_j).abs() <= 1.0e-14);
+}
+
+#[test]
+fn a_torque_port_holding_nothing_changes_nothing_and_is_refused_where_it_cannot_be() {
+    let gate = CancelGate::new_clock_free();
+    let gravity = Gravity::new(Vec3::new(0.0, 0.0, -9.81)).expect("gravity");
+    let (plain, start) = network(gravity);
+    let (component, _) = torqued_network(gravity);
+    let dt_s = 2.0e-2;
+    let mut bare = FORCES.to_vec();
+    bare.extend([305.0, 288.0]);
+    let mut inputs = bare.clone();
+    inputs.extend([0.0; 6]);
+    let step = |component: &ViscousNetwork, inputs: &[f64], width: usize| {
+        let mut next = start.clone();
+        let mut outputs = vec![f64::NAN; width];
+        let proposal = with_cx(&gate, |cx| {
+            component.propose(&start, dt_s, inputs, &mut next, &mut outputs, cx)
+        })
+        .expect("step");
+        let Proposal::Step(receipt) = proposal else {
+            panic!("the network takes the step");
+        };
+        (next, receipt, outputs)
+    };
+    let (without, bare_receipt, _) = step(&plain, &bare, 11);
+    let (with, receipt, outputs) = step(&component, &inputs, 17);
+    assert_eq!(with, without);
+    assert_eq!(receipt, bare_receipt);
+    // No work; body 0 spins, so its port (the second) still reports a
+    // rate.
+    assert_eq!(port_energy_j(11, dt_s, &inputs, &outputs).0, 0.0);
+    assert_eq!(port_energy_j(14, dt_s, &inputs, &outputs).0, 0.0);
+    assert!(norm3(&outputs[14..17]) > 0.05, "{:?}", &outputs[14..17]);
+
+    assert_eq!(
+        network(gravity).0.torqued(3).unwrap_err(),
+        ViscousNetworkBuildError::Torque { body: 3 }
+    );
+    assert_eq!(
+        torqued_network(gravity).0.torqued(2).unwrap_err(),
+        ViscousNetworkBuildError::Torque { body: 2 }
+    );
+}
+
+#[test]
+fn a_held_body_torque_is_a_boundary_and_its_work_is_in_the_ledger() {
+    let gate = CancelGate::new_clock_free();
+    // The three-body network with the torques held on bodies 2 and 0 as
+    // boundaries, no force on any body, each connector's heat to a sink.
+    let (component, start) = torqued_network(Gravity::ZERO);
+    let mut builder = SystemBuilder::new();
+    let node = builder.add("network", component, start.clone()).expect("network");
+    for body in 0..3 {
+        let port = builder.port(node, &format!("force{body}")).expect("port");
+        builder
+            .boundary(port, Box::new(|_, _, out: &mut [f64]| out.fill(0.0)))
+            .expect("free");
+    }
+    for (name, torque) in [("torque2", TORQUES[0]), ("torque0", TORQUES[1])] {
+        let port = builder.port(node, name).expect("port");
+        builder
+            .boundary(port, Box::new(move |_, _, out: &mut [f64]| out.copy_from_slice(&torque)))
+            .expect("held torque");
+    }
+    for connector in 0..2 {
+        builder
+            .heat_route(
+                builder.port(node, &format!("heat{connector}")).expect("port"),
+                &[],
+                Some(heat_sink(&format!("sink{connector}"), 300.0).expect("sink")),
+                RouteTemperature::Fixed(300.0),
+            )
+            .expect("route");
+    }
+    let mut system = builder.seal().expect("sealed");
+    let wrenches = {
+        let mut wrenches = torqued_wrenches();
+        for wrench in &mut wrenches {
+            wrench.force_world = Vec3::ZERO;
+        }
+        wrenches
+    };
+    let mut twin = start;
+    let (dt_s, steps) = (5.0e-3, 8_u32);
+    let (mut couple_j, mut heat_j) = (0.0_f64, 0.0_f64);
+    with_cx(&gate, |cx| {
+        for _ in 0..steps {
+            system.step(dt_s, cx).expect("kernel step");
+            let native = owner_step(&twin, &wrenches, Gravity::ZERO, dt_s);
+            couple_j += native.external_loads.applied_torque_work_j;
+            heat_j += native.dissipated_energy_j;
+            twin = native.states_after().to_vec();
+        }
+    });
+    assert_eq!(system.state::<Vec<RigidBodyState>>(node).expect("state"), &twin);
+    let ledger = system.ledger();
+    let boundary = |port: &str| {
+        ledger
+            .boundaries
+            .iter()
+            .find(|account| account.port == port)
+            .unwrap_or_else(|| panic!("boundary {port}"))
+            .energy_in_j
+            .value()
+    };
+    let through = boundary("network.torque2") + boundary("network.torque0");
+    assert!(couple_j.abs() > 1.0e-5, "couple work to measure: {couple_j} J");
+    assert!((through - couple_j).abs() <= 1.0e-13 * (couple_j.abs() + heat_j), "{through} vs {couple_j}");
+    assert!((ledger.boundary_energy_in_j() - couple_j).abs() <= 1.0e-13 * (couple_j.abs() + heat_j));
+    assert!((ledger.sink_heat_j() - heat_j).abs() <= 1.0e-13 * heat_j);
+    assert!(ledger.energy_residual_j().abs() <= 1.0e-12);
+}
+
+/// One step of a network of one body and no connector, by the owner.
+fn lone_owner_step(
+    properties: MassProperties,
+    start: RigidBodyState,
+    wrench: Wrench,
+    gravity: Gravity,
+    dt_s: f64,
+) -> ViscousNetworkMotionStep {
+    step_viscous_network_with_loads(
+        &[start],
+        &[properties],
+        &[],
+        HeldExternalLoads {
+            wrenches: &[wrench],
+            gravity,
+        },
+        dt_s,
+        controls(),
+        || false,
+    )
+    .expect("the owner takes the step")
+}
+
+/// A lone body with a torque port conforms under `torque`, moves as the
+/// owner moves it, and its port carries the owner's couple work. Returns
+/// that work.
+fn lone_body_conforms(
+    properties: MassProperties,
+    start: RigidBodyState,
+    torque: [f64; 3],
+    dt_s: f64,
+) -> f64 {
+    let gate = CancelGate::new_clock_free();
+    let network = ViscousNetwork::new(vec![properties], Vec::new(), Gravity::ZERO, controls())
+        .expect("network")
+        .torqued(0)
+        .expect("torque port");
+    let inputs = [0.0, 0.0, 0.0, torque[0], torque[1], torque[2]];
+    let state = vec![start];
+    let stale = Vec::new();
+    let case = Case {
+        state: &state,
+        stale: &stale,
+        dt_s,
+        inputs: &inputs,
+    };
+    let observed = with_cx(&gate, |cx| check_component(&network, &case, cx)).expect("conforms");
+    let Observed::Stepped { outputs, .. } = observed else {
+        panic!("the network takes the step");
+    };
+    let wrench = Wrench {
+        force_world: Vec3::ZERO,
+        torque_body: Vec3::new(torque[0], torque[1], torque[2]),
+    };
+    let native = lone_owner_step(properties, start, wrench, Gravity::ZERO, dt_s);
+    let couple_j = native.external_loads.applied_torque_work_j;
+    let (port_j, terms_j) = port_energy_j(3, dt_s, &inputs, &outputs);
+    assert!(
+        (port_j - couple_j).abs() <= 1.0e-13 * terms_j,
+        "port {port_j:e} J, owner {couple_j:e} J"
+    );
+    let mut next = state.clone();
+    let mut again = [f64::NAN; 6];
+    with_cx(&gate, |cx| {
+        network
+            .propose(&state, dt_s, &inputs, &mut next, &mut again, cx)
+            .expect("step")
+    });
+    assert_eq!(next.as_slice(), native.states_after());
+    couple_j
+}
+
+#[test]
+fn a_symmetric_spinning_body_takes_a_transverse_torque_as_the_owner_does() {
+    // An axisymmetric body (inertia 2, 2, 4) spinning about its axis, with
+    // a torque across it: it precesses, and the torque works against a
+    // spin that turns. (The integrator's default step and its Cayley step
+    // differ for such a body in the attitude only; the rate is read from
+    // the body's angular momentum, which both give alike.)
+    let properties =
+        MassProperties::new(2.0, Vec3::ZERO, Vec3::new(2.0, 2.0, 4.0)).expect("properties");
+    let start = body(properties, Vec3::ZERO, Vec3::ZERO, Vec3::new(0.0, 0.0, 1.2));
+    let couple_j = lone_body_conforms(properties, start, [0.3, 0.1, 0.0], 5.0e-2);
+    assert!(couple_j.abs() > 1.0e-6, "the torque does work: {couple_j} J");
+}
+
+#[test]
+fn a_needle_whose_principal_axes_are_turned_conforms_under_a_torque() {
+    // Principal moments 1, 1 and 1e-4 kg m^2 in a frame turned against the
+    // body's axes, so that the body-frame inertia has products of inertia.
+    // The spin is across the needle, with a little about its axis; the
+    // torque has a part along the axis.
+    let turn = UnitQuaternion::new(0.9, 0.2, -0.3, 0.1).expect("orientation");
+    let properties =
+        MassProperties::from_principal_frame(1.0, Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0e-4), turn)
+            .expect("properties");
+    let spin = turn.rotate_body_to_world(Vec3::new(0.5, -0.3, 1.0e-5));
+    let start = body(properties, Vec3::ZERO, Vec3::ZERO, spin);
+    let torque = turn.rotate_body_to_world(Vec3::new(0.02, 0.01, 0.02));
+    let couple_j = lone_body_conforms(properties, start, [torque.x, torque.y, torque.z], 5.0e-3);
+    assert!(couple_j.abs() > 1.0e-7, "the torque does work: {couple_j} J");
+}
+
+#[test]
+fn a_torque_port_follows_the_signals_of_a_network_with_a_damping_law() {
+    let gate = CancelGate::new_clock_free();
+    let gravity = Gravity::new(Vec3::new(0.0, 0.0, -9.81)).expect("gravity");
+    let (properties, links, start) = fixture();
+    let law = Thinning { beta_per_k: -0.004 };
+    // The signals are declared with the network, the torque port after
+    // them: its torque is read after the two signals, its rate written
+    // right after the two heat flows.
+    let component = ViscousNetwork::temperature_dependent(
+        properties.clone(),
+        links.clone(),
+        gravity,
+        controls(),
+        Rc::new(Thinning { beta_per_k: -0.004 }),
+    )
+    .expect("network")
+    .torqued(1)
+    .expect("torque port");
+    let names: Vec<&str> =
+        component.ports()[5..].iter().map(|port| port.id().as_str()).collect();
+    assert_eq!(names, ["temperature0", "temperature1", "torque1"]);
+    let torque = [0.05, -0.04, 0.03];
+    let mut inputs = FORCES.to_vec();
+    inputs.extend([305.0, 288.0, 310.0, 330.0]);
+    inputs.extend(torque);
+    let dt_s = 2.0e-2;
+    let stale = vec![start[2]];
+    let case = Case {
+        state: &start,
+        stale: &stale,
+        dt_s,
+        inputs: &inputs,
+    };
+    let observed = with_cx(&gate, |cx| check_component(&component, &case, cx)).expect("conforms");
+    let Observed::Stepped { outputs, .. } = observed else {
+        panic!("the network takes the step");
+    };
+    assert_eq!(outputs.len(), 14);
+    // The owner on the forms the law gives at 310 K and 330 K.
+    let shifted: Vec<ViscousNetworkLink> = links
+        .iter()
+        .zip([310.0, 330.0])
+        .enumerate()
+        .map(|(connector, (link, kelvin))| ViscousNetworkLink {
+            damping: law.at_temperature(connector, &link.damping, kelvin).expect("form"),
+            ..*link
+        })
+        .collect();
+    let mut wrenches = torqued_wrenches();
+    wrenches[0].torque_body = Vec3::ZERO;
+    wrenches[2].torque_body = Vec3::ZERO;
+    wrenches[1].torque_body = Vec3::new(torque[0], torque[1], torque[2]);
+    let native = step_viscous_network_with_loads(
+        &start,
+        &properties,
+        &shifted,
+        HeldExternalLoads {
+            wrenches: &wrenches,
+            gravity,
+        },
+        dt_s,
+        controls(),
+        || false,
+    )
+    .expect("the owner takes the step");
+    let couple_j = native.external_loads.applied_torque_work_j;
+    let (mut port_j, mut terms_j) = (0.0_f64, 0.0_f64);
+    for axis in 0..3 {
+        port_j += dt_s * inputs[13 + axis] * outputs[11 + axis];
+        terms_j += dt_s * (inputs[13 + axis] * outputs[11 + axis]).abs();
+    }
+    assert!(couple_j.abs() > 1.0e-6, "the torque does work: {couple_j} J");
+    assert!(
+        (port_j - couple_j).abs() <= 1.0e-13 * terms_j,
+        "port {port_j:e} J, owner {couple_j:e} J"
+    );
+    let mut next = stale.clone();
+    let mut again = vec![f64::NAN; 14];
+    with_cx(&gate, |cx| {
+        component
+            .propose(&start, dt_s, &inputs, &mut next, &mut again, cx)
+            .expect("step")
+    });
+    assert_eq!(next.as_slice(), native.states_after());
+    // A torque that is not a number is refused, by the owner.
+    let mut wild = inputs.clone();
+    wild[14] = f64::NAN;
+    let refused = with_cx(&gate, |cx| {
+        component.propose(&start, dt_s, &wild, &mut next, &mut again, cx)
+    });
+    assert!(matches!(refused, Err(ViscousNetworkRefusal::Motion(_))), "{refused:?}");
 }

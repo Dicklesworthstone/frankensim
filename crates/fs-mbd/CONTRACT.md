@@ -110,9 +110,41 @@ of 0, -5, infinity and NaN are refused. Compared with the hand-written
 temperature feedback of fs-couple in
 `crates/fs-couple/tests/rigid_damping_heat/graph.rs`.
 
-No claim: no torque port, because the owner reports couple work as one total
-and not per body, so a couple cannot be attached to a body through the kernel
-yet; no analytic tangent; one propose allocates the load and state banks; the
+A body torque is opt-in: `torqued(body)` appends a power port `torque<body>`,
+the torque held on that body in its own frame [N m], three components. It
+returns the mean of the body's angular velocities at the two ends of its
+drift (the native rigid step between the two connector sources), which is the
+rate the native step pairs with a held body torque; torque times rate times
+the step is that body's couple work, and the ports together carry the
+owner's `applied_torque_work_j`. The owner keeps the bodies where the drift
+begins and not where it ends, so the port repeats that body's drift with the
+integrator call the owner makes (the default step for a zero torque, the
+Cayley step otherwise). `RelaxationNetwork::torqued` is the same port on the
+network with Maxwell memory, in any order with its actuators and signals.
+
+G0 for the torque ports, in the same test file: conformance with torques on
+two bodies given out of body order, the two ports together carrying the
+owner's couple work to 1e-13 of the products' sizes and the step equal to the
+owner's bit for bit; a network of one body and no connector equal to the
+single-body `RigidBody` Component in state and in both ports' returns; a body
+spun up from rest about a principal axis against `omega = tau t / I` and work
+`tau^2 t^2 / (2 I)` to 1e-14; an axisymmetric spinning body precessing
+under a transverse torque; a needle of inertia ratio 1e4 whose principal
+axes are turned
+against its body axes, with a torque along its axis; a torque port after the
+temperature signals of a network with a damping law; a port holding nothing
+leaves the step and the receipt identical and still reports the rate;
+refusals; a kernel run with the torques held as boundaries and the ledger's
+boundary accounts equal to the owner's couple work. On the relaxation
+network, `crates/fs-system/tests/relaxation_network_slice.rs`: two torque
+ports with an actuator and the temperature signals between them.
+Eighteen planted defects in the torque ports were each caught (ten in the code the two networks share, four in each network).
+
+No claim: a torque is held in the body's frame over the whole step (the
+owner's world-held couples and point loads are not wrapped); a torque port
+doubles the rotation solve of its body; a torque that is not finite is
+refused by the owner, after its first connector source has run; no analytic
+tangent; one propose allocates the load and state banks; the
 owner's accuracy statements are unchanged by the wrapping; the thermal side
 in the test is the kernel's ideal `HeatCapacity`. The pairing with the
 fs-thermal deposition timeline that `fs-couple::rigid_damping_heat` drives is
@@ -234,7 +266,8 @@ Twenty-five planted defects in the temperature laws and the stored port offsets 
 No claim: an effort is held over the whole step (a varying command is sampled
 by whatever feeds the port), and so is a temperature (the law is read once
 per step, at what the signal carries; fed a start-of-step temperature this is
-first-order feedback); no torque port on a body; a network follows a damping
+first-order feedback); a body torque is held in the body's frame, as for the
+viscous network; a network follows a damping
 law or a shift law, not both, and a shift is one factor per connector (the
 owner's kinetics take one per Kelvin form and one per branch); the owner
 solves bodies and branches as one dense system and

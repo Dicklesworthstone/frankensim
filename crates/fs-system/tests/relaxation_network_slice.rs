@@ -2411,3 +2411,116 @@ fn a_temperature_held_on_the_signal_reaches_the_kinetics_through_the_kernel() {
     assert_eq!(ledger.boundary_energy_in_j(), 0.0);
     assert!(ledger.energy_residual_j().abs() <= 1.0e-10);
 }
+
+#[test]
+fn body_torques_sit_with_an_actuator_and_signals_on_the_relaxation_network() {
+    let gate = CancelGate::new_clock_free();
+    let gravity = Gravity::new(Vec3::new(0.0, -1.0, -9.81)).expect("gravity");
+    // A torque port on body 1, an actuator on connector 0, the temperature
+    // signals, then a torque port on body 2: the two torque ports sit apart,
+    // with ports of every other kind between them.
+    let component = network(gravity)
+        .torqued(1)
+        .expect("torque port on body 1")
+        .driven(0, DriveFrame::MaterialFirst)
+        .expect("actuator on connector 0")
+        .temperature_dependent(Rc::new(Stiffening { betas_per_k: BETAS.to_vec() }))
+        .expect("law")
+        .torqued(2)
+        .expect("torque port on body 2");
+    let names: Vec<&str> =
+        component.ports()[5..].iter().map(|port| port.id().as_str()).collect();
+    assert_eq!(
+        names,
+        ["torque1", "drive0", "couple0", "temperature0", "temperature1", "torque2"]
+    );
+    let torques = [[0.03, -0.05, 0.02], [-0.04, 0.01, 0.06]];
+    let mut inputs = HELD.to_vec();
+    inputs.extend([300.0, 320.0]);
+    inputs.extend(torques[0]);
+    inputs.extend(&DRIVE[..6]);
+    inputs.extend([310.0, 330.0]);
+    inputs.extend(torques[1]);
+    let start = RelaxationState {
+        bodies: turned(),
+        memory: preloaded(),
+    };
+    let efforts = [
+        HeldInternalEffort::MaterialFirst(core::array::from_fn(|c| DRIVE[c])),
+        HeldInternalEffort::MaterialFirst([0.0; 6]),
+    ];
+    let mut wrenches = held_wrenches();
+    wrenches[1].torque_body = Vec3::new(torques[0][0], torques[0][1], torques[0][2]);
+    wrenches[2].torque_body = Vec3::new(torques[1][0], torques[1][1], torques[1][2]);
+    let dt_s = 2.0e-2;
+    let stale = stale_after(&start, &efforts, gravity);
+    let case = Case {
+        state: &start,
+        stale: &stale,
+        dt_s,
+        inputs: &inputs,
+    };
+    let observed = with_cx(&gate, |cx| check_component(&component, &case, cx)).expect("conforms");
+    let Observed::Stepped {
+        receipt, outputs, ..
+    } = observed
+    else {
+        panic!("the network takes the step");
+    };
+    // A signal input has no output: forces 9, heat 2, torque 3, drive 6,
+    // torque 3.
+    assert_eq!(outputs.len(), 23);
+    let native = step_relaxation_network_with_loads(
+        &start.bodies,
+        &properties(),
+        &stiffened_links([1.0 + BETAS[0] * 10.0, 1.0 + BETAS[1] * 30.0]),
+        &start.memory,
+        &efforts,
+        HeldExternalLoads {
+            wrenches: &wrenches,
+            gravity,
+        },
+        dt_s,
+        controls(),
+        || false,
+    )
+    .expect("the owner takes the step");
+    let (next, _, _) = propose(&component, &start, dt_s, &inputs, &gate).expect("step");
+    assert_eq!(next.bodies.as_slice(), native.states_after());
+    assert_eq!(&next.memory, native.memory_after());
+    assert_eq!(receipt.stored_change_j, native.mechanical_energy_change_j);
+    assert_eq!(receipt.numerical_loss_j, -native.work_heat_residual_j);
+    // The two torque ports (efforts at 11 and 22, rates at 11 and 20) carry
+    // the owner's couple work; the actuator (efforts and rates at 14) its
+    // actuator work.
+    let energy = |input: usize, output: usize| {
+        let (mut energy, mut size) = (0.0_f64, 0.0_f64);
+        for axis in 0..3 {
+            energy += inputs[input + axis] * outputs[output + axis];
+            size += (inputs[input + axis] * outputs[output + axis]).abs();
+        }
+        (dt_s * energy, dt_s * size)
+    };
+    let (first_j, first_terms_j) = energy(11, 11);
+    let (second_j, second_terms_j) = energy(22, 20);
+    let couple_j = native.external_loads.applied_torque_work_j;
+    assert!(couple_j.abs() > 1.0e-6, "the torques do work: {couple_j} J");
+    assert!(
+        (first_j + second_j - couple_j).abs() <= 1.0e-13 * (first_terms_j + second_terms_j),
+        "ports {:e} J, owner {couple_j:e} J",
+        first_j + second_j
+    );
+    let (drive_j, drive_terms_j) = drive_energy_at((14, 14), dt_s, &inputs, &outputs);
+    let actuator_j = native.connector_actuator_work_j[0];
+    assert!(actuator_j.abs() > 1.0e-5);
+    assert!((drive_j - actuator_j).abs() <= 1.0e-13 * drive_terms_j);
+
+    assert_eq!(
+        network(gravity).torqued(3).unwrap_err(),
+        RelaxationNetworkBuildError::Torque { body: 3 }
+    );
+    assert_eq!(
+        network(gravity).torqued(1).expect("torque port").torqued(1).unwrap_err(),
+        RelaxationNetworkBuildError::Torque { body: 1 }
+    );
+}

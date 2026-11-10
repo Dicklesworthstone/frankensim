@@ -20,7 +20,8 @@
 //!
 //! Ports, as for [`super::network::ViscousNetwork`]: the force ports in body
 //! order, then the heat ports in connector order, then the two ports of each
-//! actuator and the temperature signals, in the order they were asked for.
+//! actuator, the temperature signals and the body torque ports, in the
+//! order they were asked for.
 //!
 //! - `force<i>`, one per body, receiving effort: the world-frame force on
 //!   the centre of mass [N], three components. It returns the mean
@@ -53,6 +54,11 @@
 //!   and every relaxation time of its branches are multiplied; elastic
 //!   factors, memory and storage do not change. Either is held over the
 //!   step. What is said of this signal for the viscous network holds here.
+//! - `torque<i>`, only for a body given one by
+//!   [`RelaxationNetwork::torqued`], receiving effort: the torque held on
+//!   that body in its own frame [N m]. It returns the mean of the body's
+//!   angular velocities at the two ends of its drift [rad/s], the rate the
+//!   viscous network's torque port returns.
 //!
 //! Receipt: the stored change is kinetic plus uniform-gravity potential plus
 //! elastic memory, as the owner reduces them; the dissipation is the owner's
@@ -64,7 +70,8 @@
 //! No claim: an effort is held over the whole step (the owner's source is
 //! exact for a held effort at fixed geometry; a varying command is sampled
 //! by whatever feeds the port); a connector without drive ports has no
-//! actuator; no torque port on a body, as for the viscous network; a
+//! actuator; a body torque is held in the body's frame, and its port
+//! repeats that body's drift, as for the viscous network; a
 //! network follows temperature by a damping law or by a shift factor, not
 //! both, and a shift factor is one number per connector (the owner's
 //! kinetics take one per Kelvin form and one per branch); the port map has
@@ -167,6 +174,12 @@ pub enum RelaxationNetworkBuildError {
     },
     /// The network already follows temperature.
     Thermal,
+    /// A torque port was asked for on a body that does not exist, or on one
+    /// that already has it.
+    Torque {
+        /// Index of the body in the supplied order.
+        body: usize,
+    },
     /// A port identifier was refused.
     Identifier(fs_ports::CoupleError),
     /// A port specification was refused.
@@ -186,6 +199,9 @@ impl core::fmt::Display for RelaxationNetworkBuildError {
                 "connector {connector} does not exist or already has an actuator"
             ),
             Self::Thermal => write!(f, "the network already follows temperature"),
+            Self::Torque { body } => {
+                write!(f, "body {body} does not exist or already has a torque port")
+            }
             Self::Identifier(error) => write!(f, "port identifier refused: {error:?}"),
             Self::Port(violation) => write!(f, "port refused: {violation}"),
         }
@@ -193,6 +209,15 @@ impl core::fmt::Display for RelaxationNetworkBuildError {
 }
 
 impl std::error::Error for RelaxationNetworkBuildError {}
+
+impl From<super::PortBuildError> for RelaxationNetworkBuildError {
+    fn from(error: super::PortBuildError) -> Self {
+        match error {
+            super::PortBuildError::Identifier(error) => Self::Identifier(error),
+            super::PortBuildError::Port(violation) => Self::Port(violation),
+        }
+    }
+}
 
 /// Why a [`RelaxationNetwork`] refused a call.
 #[derive(Debug, Clone, PartialEq)]
@@ -321,6 +346,8 @@ pub struct RelaxationNetwork {
     /// the input vector.
     thermal: Thermal,
     temperature_input: usize,
+    /// The body torque ports, in the order of their ports.
+    torques: Vec<super::TorquePort>,
     ports: Vec<PortSpec>,
 }
 
@@ -378,6 +405,7 @@ impl RelaxationNetwork {
             drives: Vec::new(),
             thermal: Thermal::Fixed,
             temperature_input: 0,
+            torques: Vec::new(),
             ports,
         })
     }
@@ -385,9 +413,22 @@ impl RelaxationNetwork {
     /// Coefficients the ports declared so far take in the input vector and
     /// in the output vector.
     fn widths(&self) -> (usize, usize) {
-        self.ports.iter().fold((0, 0), |(input, output), port| {
-            (input + port.input_width(), output + port.output_width())
-        })
+        super::widths(&self.ports)
+    }
+
+    /// Gives `body` a torque port `torque<body>`, appended after the ports
+    /// the network already has.
+    ///
+    /// # Errors
+    /// [`RelaxationNetworkBuildError::Torque`] for a body that does not
+    /// exist or already has the port.
+    pub fn torqued(mut self, body: usize) -> Result<Self, RelaxationNetworkBuildError> {
+        if body >= self.properties.len() || self.torques.iter().any(|port| port.body == body) {
+            return Err(RelaxationNetworkBuildError::Torque { body });
+        }
+        let port = super::TorquePort::declare(body, &mut self.ports)?;
+        self.torques.push(port);
+        Ok(self)
     }
 
     /// Appends one `temperature<e>` signal input per connector, read by
@@ -492,8 +533,9 @@ impl RelaxationNetwork {
     }
 
     /// Number of connectors; ports `bodies()..bodies() + connectors()` are
-    /// their heat ports. The two ports of each actuator and the temperature
-    /// signals follow, in the order they were asked for.
+    /// their heat ports. The two ports of each actuator, the temperature
+    /// signals and the body torque ports follow, in the order they were
+    /// asked for.
     #[must_use]
     pub fn connectors(&self) -> usize {
         self.links.len()
@@ -782,16 +824,7 @@ impl Component for RelaxationNetwork {
                 return Err(RelaxationNetworkRefusal::Temperature { connector, kelvin });
             }
         }
-        let wrenches: Vec<Wrench> = (0..bodies)
-            .map(|body| Wrench {
-                force_world: Vec3::new(
-                    inputs[3 * body],
-                    inputs[3 * body + 1],
-                    inputs[3 * body + 2],
-                ),
-                torque_body: Vec3::ZERO,
-            })
-            .collect();
+        let wrenches = super::held_wrenches(bodies, &self.torques, inputs);
         let step = self.step(old, &wrenches, inputs, dt_s, cx)?;
         let after = step.states_after();
 
@@ -822,6 +855,18 @@ impl Component for RelaxationNetwork {
             entropy_j_per_k += heat_j.max(0.0) / heat_inputs[connector];
         }
         let drives_j = self.drive_rates(&step, &old.bodies, dt_s, inputs, outputs);
+        let torques_j = super::torque_rates(
+            &self.torques,
+            &super::Drift {
+                gravity: self.gravity,
+                properties: &self.properties,
+                starts: &step.half_sources[0].states_after,
+                wrenches: &wrenches,
+                dt_s,
+            },
+            inputs,
+            outputs,
+        )?;
         // Kinetic, gravity and memory storage together.
         let stored_change_j = step.mechanical_energy_change_j;
         let residual_j = step.work_heat_residual_j;
@@ -841,7 +886,8 @@ impl Component for RelaxationNetwork {
             + terms_after_j
             + stored_change_j.abs()
             + residual_j.abs()
-            + drives_j;
+            + drives_j
+            + torques_j;
         Ok(Proposal::Step(Receipt {
             stored_change_j,
             dissipated_j,

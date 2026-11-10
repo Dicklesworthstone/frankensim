@@ -696,11 +696,17 @@ Every entry point of `fs_couple::rigid_damping_heat` that advances a state
 now agrees with a declared graph: sixteen of them (explicit and implicit,
 each for frozen damping, temperature-dependent damping, Maxwell memory,
 Maxwell memory with calibrated kinetics, the driven pair, the driven network,
-and the last two with temperature-dependent damping). Not reproduced:
+and the last two with temperature-dependent damping). The comparisons hold
+no body torque and supply no thermal observer. The module takes both: a
+`Wrench` per body, whose torque the two network Components now take on an
+opt-in `torque<i>` port (crates/fs-mbd/CONTRACT.md; not yet compared with
+the module), and a caller's `DepositionObserver` (sources, conductances,
+heat transfers, a transition time and a step limit on the thermal clock),
+which the timeline Component does not take. Not reproduced either:
 `temperature::shift::CalibratedKelvinDamping`, which is a law and not an
 entry point, has no adapter to the Component's `DampingLaw`; the module's
-refusal behaviour, continuation from a candidate and observer hooks are the
-module's own and are not compared. Nothing in the module is deleted.
+refusal behaviour and continuation from a candidate are the module's own and
+are not compared. Nothing in the module is deleted.
 
 Other domains, `tests/elements.rs`: the gyrator and one element of each law
 in the rotational and electrical domains pass the conformance and tangent
