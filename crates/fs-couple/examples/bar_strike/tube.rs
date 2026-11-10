@@ -7,6 +7,16 @@
 //! viscothermal wall, Eq. 12 (Levine and Schwinger, unflanged) for the open end. The rigid bar's reflection of
 //! the mouth's flow back onto the mouth is solved by the same BEM, which is what lowers a tube close under a bar.
 //!
+//! With the card's `tube_bore_m` row the bore is the one drawn, and each mode is the same fixed point with the column's
+//! length replaced by its plane-wave length in the mouth's units: a walk up the bore, each cylinder's phase at its own
+//! Eq. 7 speed, and at each change of radius the pressure and the volume velocity continuous. The open end's correction
+//! is Eq. 12's at the mouth, as above. Each mode's mass per unit volume velocity, its wall loss (Eq. 7's viscous term on
+//! the mode's kinetic energy, its thermal term on the potential energy, each cylinder at its own radius) and its open-end
+//! loss come from the mode's energy along the bore. Drawn as one cylinder, the bore gives the law above bit for bit.
+//! Declared omissions of the drawn bore: at a change of radius only the plane wave is carried, so the inertance of the
+//! step's evanescent field and the loss on the step's annular face are left out; sloped pieces are cylinders
+//! `BORE_CUT_M` long.
+//!
 //! Declared omissions, none corrected by a constant: the tube's wall is not a scatterer of the bar's field; the
 //! mouth radiates to the receiver as a free compact source, with no reflection off the bar; the mouth's flow is a
 //! piston; each tube mode's reflection is taken at that mode's frequency and modes aren't coupled through it; the
@@ -37,6 +47,10 @@ const VISCOUS_LENGTH_M: f64 = 4e-8;
 const THERMAL_LENGTH_M: f64 = 5.6e-8;
 /// Eq. 12 holds below this, and the plane-wave column well below its cut-off (Eq. 5: ka = 1.84).
 const LARGEST_KA: f64 = 1.5;
+/// A sloped piece of a drawn bore is cut into cylinders no longer than this [m], each at its mid radius. On the
+/// vibraphone C4 and E4 tubes' rings this cut is within 8e-7 Hz of a 0.002 mm cut on every mode, and a 0.1 mm cut
+/// within 7e-5 Hz.
+const BORE_CUT_M: f64 = 1e-5;
 
 /// One plane-wave mode of the isolated column.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -47,7 +61,8 @@ pub struct IsolatedMode {
     /// Amplitude decay rate through the open end [1/s]: c Re(Z)/L, with Z normalized by Z0.
     pub radiation_per_s: f64,
     pub ka: f64,
-    /// Column length with the open end's correction [m].
+    /// Column length with the open end's correction [m]. Over a drawn bore, the length of a column of the mouth's
+    /// radius with this mode's mass per unit volume velocity at the open end's plane.
     pub acoustic_length_m: f64,
 }
 
@@ -62,8 +77,11 @@ pub fn open_end(ka: f64) -> (f64, f64) {
 }
 
 /// The column's first `tube.modes` odd modes: each frequency is a fixed point, since the wall slows the wave
-/// and the open end's correction both depend on it.
+/// and the open end's correction both depend on it. With a drawn bore, `drawn_modes`.
 pub fn isolated_modes(tube: &Tube, gas: &GasState) -> Result<Vec<IsolatedMode>, String> {
+    if tube.bore.is_some() {
+        return drawn_modes(tube, gas);
+    }
     let c0 = gas.sound_speed;
     let a = tube.radius_m;
     let eps = VISCOUS_LENGTH_M.sqrt() + (gas.gamma - 1.0) * THERMAL_LENGTH_M.sqrt();
@@ -98,6 +116,170 @@ pub fn isolated_modes(tube: &Tube, gas: &GasState) -> Result<Vec<IsolatedMode>, 
                 w = next;
             }
             out.ok_or_else(|| "tube mode has no fixed point".to_string())
+        })
+        .collect()
+}
+
+/// The drawn bore as cylinders from the floor face up, [length, radius] [m]: the card's points joined by straight
+/// lines, each sloped piece cut into cylinders `BORE_CUT_M` long or less at their mid radii, neighbours of one radius
+/// made one. Without the row, the one cylinder of the card's radius.
+pub fn cylinders(tube: &Tube) -> Vec<[f64; 2]> {
+    let Some(points) = &tube.bore else {
+        return vec![[tube.air_length_m, tube.radius_m]];
+    };
+    let mut out: Vec<[f64; 2]> = Vec::new();
+    for pair in points.windows(2) {
+        let ([za, ra], [zb, rb]) = (pair[0], pair[1]);
+        if zb == za {
+            continue;
+        }
+        let pieces = if ra == rb {
+            1
+        } else {
+            ((zb - za) / BORE_CUT_M).ceil() as usize
+        };
+        for j in 0..pieces {
+            let piece = if ra == rb {
+                [zb - za, ra]
+            } else {
+                let n = pieces as f64;
+                [(zb - za) / n, ra + (rb - ra) * (j as f64 + 0.5) / n]
+            };
+            match out.last_mut() {
+                Some(last) if last[1] == piece[1] => last[0] += piece[0],
+                _ => out.push(piece),
+            }
+        }
+    }
+    out
+}
+
+/// One cylinder of the walk up a drawn bore at one frequency.
+struct Run {
+    /// [m]; the last carries the open end's correction.
+    length: f64,
+    radius: f64,
+    /// Eq. 7's slowed speed at this radius [m/s].
+    speed: f64,
+    /// Eq. 7's wall factor at this radius.
+    wall: f64,
+    /// Pressure amplitude, the floor's being 1: p = A cos(phase), Z0 U = A sin(phase).
+    amplitude: f64,
+    /// Phase at the cylinder's lower end [rad].
+    phase: f64,
+}
+
+/// `isolated_modes` over the drawn bore (see the header). Each mode is the law's fixed point with the column's length
+/// replaced by the walk's length in the mouth's units. The mass, the wall loss and the open-end loss come from the
+/// mode's energy over the walk, with the open end's correction carried at the mouth's radius to the plane where the
+/// pressure is zero; the mass is per unit volume velocity there, as the law's is.
+fn drawn_modes(tube: &Tube, gas: &GasState) -> Result<Vec<IsolatedMode>, String> {
+    let c0 = gas.sound_speed;
+    let a = tube.radius_m;
+    let viscous = VISCOUS_LENGTH_M.sqrt();
+    let thermal = (gas.gamma - 1.0) * THERMAL_LENGTH_M.sqrt();
+    let eps = viscous + thermal;
+    // Eq. 7's viscous share less its thermal share.
+    let split = (viscous - thermal) / eps;
+    let bore = cylinders(tube);
+    let walls: Vec<f64> = bore
+        .iter()
+        .map(|c| eps / (c[1] * core::f64::consts::SQRT_2))
+        .collect();
+    let pi = core::f64::consts::PI;
+    (0..tube.modes)
+        .map(|m| {
+            let quarter = (2 * m + 1) as f64 * 0.25 * TAU;
+            let mut w = quarter * c0 / tube.air_length_m;
+            let mut runs: Vec<Run> = Vec::with_capacity(bore.len());
+            for _ in 0..64 {
+                let ka = w * a / c0;
+                if ka >= LARGEST_KA {
+                    return Err(format!(
+                        "tube mode {} reaches ka {ka:.3}: the open-end law holds below {LARGEST_KA}; lower tube_modes",
+                        m + 1
+                    ));
+                }
+                let (re, im) = open_end(ka);
+                let root = (c0 / w).sqrt();
+                let mouth = c0 * (1.0 - walls[walls.len() - 1] * root);
+                // The walk, its length in the mouth's units.
+                runs.clear();
+                let (mut length, mut amplitude) = (0.0, 1.0);
+                for (i, (c, wall)) in bore.iter().zip(&walls).enumerate() {
+                    let speed = c0 * (1.0 - wall * root);
+                    if i > 0 {
+                        // A change of radius: p and U continuous.
+                        let phase = w * length / mouth;
+                        let turns = (phase / pi).floor();
+                        let (s, co) = det::sin_cos(phase - turns * pi);
+                        let below = bore[i - 1][1];
+                        let ratio = (below * below) / (c[1] * c[1]);
+                        amplitude *= det::hypot(co, ratio * s);
+                        length = (turns * pi + det::atan2(ratio * s, co)) * mouth / w;
+                    }
+                    runs.push(Run {
+                        length: c[0],
+                        radius: c[1],
+                        speed,
+                        wall: *wall,
+                        amplitude,
+                        phase: w * length / mouth,
+                    });
+                    length += c[0] * (mouth / speed);
+                }
+                let correction = a * im / ka;
+                let column = length + correction;
+                let next = quarter * mouth / column;
+                if (next - w).abs() <= 1e-12 * w {
+                    let last = runs.len() - 1;
+                    runs[last].length += correction;
+                    let (area, peak) = (a * a, runs[last].amplitude);
+                    let (mut kinetic, mut potential) = (0.0, 0.0);
+                    let mut parts = Vec::with_capacity(runs.len());
+                    for (i, r) in runs.iter().enumerate() {
+                        let k = w / r.speed;
+                        // The last run ends where the pressure is zero.
+                        let top = if i == last {
+                            0.0
+                        } else {
+                            det::sin(2.0 * (r.phase + k * r.length))
+                        };
+                        let swing = (top - det::sin(2.0 * r.phase)) / (4.0 * k);
+                        let weight = (r.radius * r.radius / area)
+                            * (r.amplitude / peak)
+                            * (r.amplitude / peak);
+                        let (ke, pe) = (
+                            weight * (r.length / 2.0 - swing),
+                            weight * (r.length / 2.0 + swing),
+                        );
+                        kinetic += ke;
+                        potential += pe;
+                        parts.push((ke, pe));
+                    }
+                    let total = kinetic + potential;
+                    let mass_length = 2.0 * kinetic;
+                    let rise = (next / c0).sqrt();
+                    let wall_per_s = runs.iter().zip(&parts).fold(0.0, |sum, (r, (ke, pe))| {
+                        sum + r.wall
+                            * rise
+                            * r.speed
+                            * ((ke + pe) / total + split * (ke - pe) / total)
+                    });
+                    return Ok(IsolatedMode {
+                        omega_rad_s: next,
+                        wall_per_s,
+                        radiation_per_s: mouth * re / mass_length,
+                        ka,
+                        acoustic_length_m: mass_length,
+                    });
+                }
+                w = next;
+            }
+            Err(format!(
+                "tube mode {} has no fixed point over the drawn bore",
+                m + 1
+            ))
         })
         .collect()
 }
@@ -608,8 +790,19 @@ pub fn report(
         .iter()
         .map(|f| [f.reflection.re, f.reflection.im])
         .collect();
+    // Only a drawn bore adds to the row, so a card without one writes the row it always wrote.
+    let bore = tube.bore.as_ref().map_or(String::new(), |b| {
+        format!(
+            ",\"bore_m\":{b:?},\"bore_cylinders\":{},\"acoustic_length_m\":{:?}",
+            cylinders(tube).len(),
+            modes
+                .iter()
+                .map(|m| m.acoustic_length_m)
+                .collect::<Vec<_>>()
+        )
+    });
     println!(
-        "{{\"suite\":\"bar-strike\",\"case\":\"tube\",\"bar\":\"{}\",\"radius_m\":{},\"air_length_m\":{},\"gap_m\":{},\"mouth_m\":{:?},\"isolated_hz\":{hz:?},\"with_bar_reflection_hz\":{coupled:?},\"decay_per_s\":{decay:?},\"wall_per_s\":{wall:?},\"open_end_per_s\":{open:?},\"ka\":{ka:?},\"reflection_re_im\":{reflection:?},\"resistance\":{:?},\"inertance\":{:?}}}",
+        "{{\"suite\":\"bar-strike\",\"case\":\"tube\",\"bar\":\"{}\",\"radius_m\":{},\"air_length_m\":{},\"gap_m\":{},\"mouth_m\":{:?},\"isolated_hz\":{hz:?},\"with_bar_reflection_hz\":{coupled:?},\"decay_per_s\":{decay:?},\"wall_per_s\":{wall:?},\"open_end_per_s\":{open:?},\"ka\":{ka:?},\"reflection_re_im\":{reflection:?},\"resistance\":{:?},\"inertance\":{:?}{bore}}}",
         card.name,
         tube.radius_m,
         tube.air_length_m,

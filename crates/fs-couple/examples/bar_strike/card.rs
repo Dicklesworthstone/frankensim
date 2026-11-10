@@ -54,6 +54,10 @@ pub struct Tube {
     pub gap_m: f64,
     /// How many odd plane-wave modes to carry.
     pub modes: usize,
+    /// The optional row `tube_bore_m`: the bore as drawn, points (height above the floor face, radius) [m] joined by
+    /// straight lines, from the floor face (height 0) to the mouth (`air_length_m`, at `radius_m`); two points at
+    /// one height are a step. Absent, the bore is one cylinder of `radius_m`, as every card before it.
+    pub bore: Option<Vec<[f64; 2]>>,
 }
 
 #[derive(Clone, Debug)]
@@ -394,6 +398,25 @@ impl Card {
                     air_length_m: rows.number("tube_air_length_m")?,
                     gap_m: rows.number("tube_gap_m")?,
                     modes: rows.count("tube_modes")?,
+                    bore: match rows.get("tube_bore_m") {
+                        Err(_) => None,
+                        Ok(v) if v.len() >= 4 && v.len() % 2 == 0 => Some(
+                            v.chunks(2)
+                                .map(|p| {
+                                    Ok([
+                                        parse_f64("tube_bore_m", &p[0])?,
+                                        parse_f64("tube_bore_m", &p[1])?,
+                                    ])
+                                })
+                                .collect::<Result<Vec<_>, String>>()?,
+                        ),
+                        Ok(_) => {
+                            return Err(
+                                "row `tube_bore_m` needs two or more points, each a height and a radius"
+                                    .into(),
+                            );
+                        }
+                    },
                 }),
                 Ok(_) => return Err("tube must be `closed_open`".into()),
             },
@@ -468,6 +491,19 @@ impl Card {
                     "tube needs a positive radius and gap and a column longer than its diameter"
                         .into(),
                 );
+            }
+            if let Some(bore) = &t.bore {
+                let (first, last) = (bore[0], bore[bore.len() - 1]);
+                if !(first[0] == 0.0 && last[0] == t.air_length_m && last[1] == t.radius_m) {
+                    return Err("tube_bore_m runs from the floor face (height 0) to the mouth (tube_air_length_m, at tube_radius_m)".into());
+                }
+                if bore.windows(2).any(|p| !(p[1][0] >= p[0][0]))
+                    || bore.iter().any(|p| !(p[1] > 0.0))
+                {
+                    return Err(
+                        "tube_bore_m needs heights that never fall and positive radii".into(),
+                    );
+                }
             }
         }
         if let Profile::Arc {

@@ -886,7 +886,35 @@ fn a3_tube() -> Tube {
         air_length_m: 14.375 * inch,
         gap_m: 0.625 * inch,
         modes: 5,
+        bore: None,
     }
+}
+
+/// The bore of the builder's vibraphone tube as its CAD parts draw it [m], from the lower part's floor face (C4: parts
+/// 0000236998 lower and 0000236997 upper; E4: 0000237024 and 0000237023): the lower part's bore `a` up to `z0`, where
+/// its ring begins; a 0.1 mm step in; a 45 degree cone; an R3 fillet whose centre runs on radius `a` + 0.9 mm, down to
+/// `a` - 2.1 mm; flat; the same back out over the ring's 12 mm; then the upper part's bore `a` to the mouth. Each fillet
+/// is drawn as `chords` straight pieces.
+fn drawn_ring(a: f64, z0: f64, column: f64, chords: usize) -> Vec<[f64; 2]> {
+    let mm = 1e-3;
+    let half = core::f64::consts::FRAC_1_SQRT_2;
+    let (step, centre, fillet) = (a - 0.1 * mm, a + 0.9 * mm, 3.0 * mm);
+    let cone = step - (centre - fillet * half);
+    let near = z0 + cone + fillet * half;
+    let far = z0 + 12.0 * mm - (near - z0);
+    let arc = |zc: f64, from: f64, to: f64| -> Vec<[f64; 2]> {
+        (0..=chords)
+            .map(|j| {
+                let z = from + (to - from) * j as f64 / chords as f64;
+                [z, centre - (fillet * fillet - (z - zc) * (z - zc)).sqrt()]
+            })
+            .collect()
+    };
+    let mut points = vec![[0.0, a], [z0, a], [z0, step]];
+    points.extend(arc(near, z0 + cone, near));
+    points.extend(arc(far, far, z0 + 12.0 * mm - cone));
+    points.extend([[z0 + 12.0 * mm, step], [z0 + 12.0 * mm, a], [column, a]]);
+    points
 }
 
 fn plain_modes(rows: &[(f64, f64)]) -> Vec<ModalAcousticMode> {
@@ -912,8 +940,42 @@ fn tube_rows_parse_and_refusals_are_explicit() {
             air_length_m: 0.36,
             gap_m: 0.016,
             modes: 5,
+            bore: None,
         })
     );
+    let bore =
+        "tube_bore_m\t0\t0.03\t0.048\t0.03\t0.048\t0.0299\t0.06\t0.0299\t0.06\t0.03\t0.36\t0.03\n";
+    let drawn =
+        Card::parse(&format!("{text}\n{rows}{bore}"), &root()).expect("the bore row parses");
+    assert_eq!(
+        drawn.tube.expect("tube").bore,
+        Some(vec![
+            [0.0, 0.03],
+            [0.048, 0.03],
+            [0.048, 0.0299],
+            [0.06, 0.0299],
+            [0.06, 0.03],
+            [0.36, 0.03]
+        ])
+    );
+    for (bad, says) in [
+        ("tube_bore_m\t0\t0.03\t0.36\n", "two or more points"),
+        ("tube_bore_m\t0\t0.03\n", "two or more points"),
+        ("tube_bore_m\t0.001\t0.03\t0.36\t0.03\n", "floor face"),
+        ("tube_bore_m\t0\t0.03\t0.35\t0.03\n", "floor face"),
+        ("tube_bore_m\t0\t0.03\t0.36\t0.031\n", "floor face"),
+        (
+            "tube_bore_m\t0\t0.03\t0.2\t0.03\t0.1\t0.03\t0.36\t0.03\n",
+            "never fall",
+        ),
+        (
+            "tube_bore_m\t0\t0.03\t0.1\t0\t0.36\t0.03\n",
+            "positive radii",
+        ),
+    ] {
+        let err = Card::parse(&format!("{text}\n{rows}{bad}"), &root()).unwrap_err();
+        assert!(err.contains(says), "{bad:?}: {err}");
+    }
     let kind = rows.replace("closed_open", "open_open");
     assert!(
         Card::parse(&format!("{text}\n{kind}"), &root())
@@ -976,6 +1038,160 @@ fn isolated_tube_follows_the_printed_laws() {
     // The wall rises as the root of frequency, the open end much faster.
     assert!((modes[2].wall_per_s / modes[0].wall_per_s - 5.0_f64.sqrt()).abs() < 0.05);
     assert!(modes[2].radiation_per_s > 15.0 * modes[0].radiation_per_s);
+}
+
+/// A bore drawn as one cylinder of the card's radius gives the law bit for bit, every field of every mode: the
+/// vibraphone C4 tube and La Favre's A3.
+#[test]
+fn a_bore_drawn_as_one_cylinder_is_the_law_bit_for_bit() {
+    let g = gas(&blank());
+    let c4 = Tube {
+        radius_m: 0.03,
+        air_length_m: 0.304,
+        gap_m: 0.0127,
+        modes: 5,
+        bore: None,
+    };
+    for t in [c4, a3_tube()] {
+        let law = tube::isolated_modes(&t, &g).expect("the law");
+        let drawn = Tube {
+            bore: Some(vec![[0.0, t.radius_m], [t.air_length_m, t.radius_m]]),
+            ..t.clone()
+        };
+        assert_eq!(tube::cylinders(&drawn), vec![[t.air_length_m, t.radius_m]]);
+        let walked = tube::isolated_modes(&drawn, &g).expect("the drawn bore");
+        assert_eq!(law.len(), walked.len());
+        let bits = |v: &tube::IsolatedMode| {
+            [
+                v.omega_rad_s,
+                v.wall_per_s,
+                v.radiation_per_s,
+                v.ka,
+                v.acoustic_length_m,
+            ]
+            .map(f64::to_bits)
+        };
+        for (m, (x, y)) in law.iter().zip(&walked).enumerate() {
+            assert_eq!(bits(x), bits(y), "mode {m}: {x:?} against {y:?}");
+        }
+    }
+}
+
+/// The walk over a two-cylinder bore (125 mm at radius 20 mm under 250 mm at 30 mm) against the bore's own condition,
+/// solved apart from the walk: with each cylinder's Eq. 7 speed and Eq. 12's correction at the mouth, a mode is a root
+/// of S2 cos(k1 l1) cos(k2 (l2 + delta)) - S1 sin(k1 l1) sin(k2 (l2 + delta)). The mass length is checked against a
+/// midpoint sum of the kinetic energy over that mode's shape.
+#[test]
+fn a_two_cylinder_bore_meets_its_own_condition() {
+    let g = gas(&blank());
+    let (l1, r1, l2, r2) = (0.125, 0.020, 0.25, 0.030);
+    let t = Tube {
+        radius_m: r2,
+        air_length_m: l1 + l2,
+        gap_m: 0.0127,
+        modes: 3,
+        bore: Some(vec![[0.0, r1], [l1, r1], [l1, r2], [l1 + l2, r2]]),
+    };
+    let c0 = g.sound_speed;
+    let eps = 4e-8_f64.sqrt() + (g.gamma - 1.0) * 5.6e-8_f64.sqrt();
+    let speed =
+        |w: f64, r: f64| c0 * (1.0 - eps / (r * core::f64::consts::SQRT_2) * (c0 / w).sqrt());
+    // Wavenumbers below and above, and the upper cylinder's length with the open end's correction.
+    let shape = |w: f64| {
+        let ka = w * r2 / c0;
+        let (_, im) = tube::open_end(ka);
+        (w / speed(w, r1), w / speed(w, r2), l2 + r2 * im / ka)
+    };
+    let condition = |w: f64| {
+        let (k1, k2, top) = shape(w);
+        r2 * r2 * (k1 * l1).cos() * (k2 * top).cos() - r1 * r1 * (k1 * l1).sin() * (k2 * top).sin()
+    };
+    let modes = tube::isolated_modes(&t, &g).expect("the walk");
+    assert_eq!(modes.len(), 3);
+    for (m, mode) in modes.iter().enumerate() {
+        let w = mode.omega_rad_s;
+        let (mut lo, mut hi) = (0.97 * w, 1.03 * w);
+        assert!(
+            condition(lo) * condition(hi) < 0.0,
+            "mode {m}: no root bracketed"
+        );
+        for _ in 0..200 {
+            let mid = 0.5 * (lo + hi);
+            if condition(lo) * condition(mid) <= 0.0 {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        let root = 0.5 * (lo + hi);
+        assert!(
+            (w / root - 1.0).abs() < 1e-10,
+            "mode {m}: walk {w} rad/s against the condition's {root}"
+        );
+        let (k1, k2, top) = shape(root);
+        let ratio = (r1 * r1) / (r2 * r2);
+        let phase = (ratio * (k1 * l1).sin()).atan2((k1 * l1).cos());
+        let upper = (k1 * l1).cos().hypot(ratio * (k1 * l1).sin());
+        let n = 200_000;
+        let sum = |length: f64, k: f64, start: f64| {
+            (0..n)
+                .map(|j| {
+                    (k * (j as f64 + 0.5) * length / n as f64 + start)
+                        .sin()
+                        .powi(2)
+                })
+                .sum::<f64>()
+                * length
+                / n as f64
+        };
+        let mass_length = 2.0 * (ratio / (upper * upper) * sum(l1, k1, 0.0) + sum(top, k2, phase));
+        assert!(
+            (mode.acoustic_length_m / mass_length - 1.0).abs() < 1e-9,
+            "mode {m}: mass length {} against the sum's {mass_length}",
+            mode.acoustic_length_m
+        );
+    }
+}
+
+/// The ring where the builder's two printed tube parts join narrows the bore over 12 mm. Drawn as the CAD draws it,
+/// it raises C4's first tube mode by 0.950 Hz and E4's by 0.824 Hz; with each fillet as one straight piece, by 0.920
+/// and 0.800 Hz.
+#[test]
+fn the_ring_where_the_tube_parts_join_raises_the_first_tube_mode() {
+    let g = gas(&blank());
+    for (a, column, z0, modes, drawn, chord) in [
+        (0.030, 0.304, 0.048, 5, 0.950487, 0.919718),
+        (0.0265, 0.239, 0.083, 4, 0.823798, 0.799638),
+    ] {
+        let uniform = Tube {
+            radius_m: a,
+            air_length_m: column,
+            gap_m: 0.0127,
+            modes,
+            bore: None,
+        };
+        let base = tube::isolated_modes(&uniform, &g).expect("uniform");
+        for (chords, expected) in [(9, drawn), (1, chord)] {
+            let ring = Tube {
+                bore: Some(drawn_ring(a, z0, column, chords)),
+                ..uniform.clone()
+            };
+            let got = tube::isolated_modes(&ring, &g).expect("the ring");
+            let shift = (got[0].omega_rad_s - base[0].omega_rad_s) / bar::TAU;
+            println!(
+                "radius {a} m, ring at {z0} m, {chords} chord(s) per fillet: {} cylinders, mode shifts {:?} Hz",
+                tube::cylinders(&ring).len(),
+                got.iter()
+                    .zip(&base)
+                    .map(|(x, y)| (x.omega_rad_s - y.omega_rad_s) / bar::TAU)
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                (shift - expected).abs() < 2e-5,
+                "radius {a}: {chords} chord(s), first mode moves {shift} Hz, not {expected}"
+            );
+        }
+    }
 }
 
 /// A mutual resistance held at a far tube mode's frequency, as A3's 2027 Hz tube mode against the bar's 220 Hz mode,
@@ -1205,6 +1421,7 @@ fn mouth_transfers_are_reciprocal_on_the_bem() {
         air_length_m: 0.2,
         gap_m: 0.016,
         modes: 1,
+        bore: None,
     };
     let isolated = tube::isolated_modes(&t, &g).expect("modes");
     let fields =
@@ -1273,6 +1490,7 @@ fn a_tube_adds_its_line_and_the_two_way_render_replays() {
         air_length_m: 0.2,
         gap_m: 0.016,
         modes: 1,
+        bore: None,
     });
     let s = structure(&bare, 1, bare.density_kg_m3).expect("structure");
     let alone = strike(&bare, &s).expect("bar alone");
@@ -1321,6 +1539,7 @@ fn broadband_observer_hears_the_bar_over_its_tube() {
         air_length_m: 0.2,
         gap_m: 0.016,
         modes: 1,
+        bore: None,
     });
     let s = structure(&card, 1, card.density_kg_m3).expect("structure");
     let plain = strike(&card, &s).expect("narrow-band strike over the tube");
