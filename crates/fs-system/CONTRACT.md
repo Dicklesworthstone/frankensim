@@ -2,7 +2,8 @@
 
 > Status: version 0. The Component contract in fs-ports is v0 until five kernel
 > slices pass on it (epic `frankensim-rc-1109-root-3gc12`, beads `.6.1` to
-> `.6.7`), and this driver changes with it. No physics owner uses it yet.
+> `.6.7`), and this driver changes with it. One physics owner implements the
+> contract so far: the fs-mbd rigid body.
 
 ## Purpose and layer
 
@@ -107,7 +108,10 @@ None. The crate denies `unsafe_code`.
 
 ## Feature flags
 
-None.
+`slices` (off by default) adds fs-mbd as a dependency and enables the owner
+slice tests, which compose real physics owners on the kernel. The library
+itself does not use fs-mbd. Without the feature the crate and its tests build
+only fs-ports and fs-exec.
 
 ## Conformance tests
 
@@ -136,6 +140,12 @@ G0, `tests/system_g0.rs`, on one-port elements defined in the test:
 Unit tests cover the block ordering (including a 200,000-node chain without
 recursion), the equivalent-temperature gradient, the dense solve and the
 compensated sum.
+
+Owner slice, `tests/rigid_body_slice.rs` (`--features slices`): the native
+fs-mbd rigid body (`fs_mbd::component::RigidBody`) passes the conformance
+check under force, torque and gravity, and a tumbling body bonded to a
+three-axis spring follows the monolithic midpoint rule for translation over
+4,000 steps with a closed ledger. It is the first physics owner on the kernel.
 
 ## No-claim boundaries
 

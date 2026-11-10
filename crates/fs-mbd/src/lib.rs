@@ -25,6 +25,7 @@ pub mod articulated_contacts;
 pub mod articulated_impact;
 /// Full-inertia rigid assembly, separation, and inelastic latching.
 pub mod assembly;
+pub mod component;
 pub mod daimler;
 pub mod davinci;
 /// Coupled normal/Coulomb events on native rigid-body momenta.

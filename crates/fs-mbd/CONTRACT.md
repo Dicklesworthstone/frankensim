@@ -1,3 +1,34 @@
+## The native rigid body as a composition-kernel Component
+
+`component::RigidBody` wraps `RigidBodyIntegrator::step` behind
+`fs_ports::component::Component` (contract v0), so that the kernel in
+`fs-system` can join a free rigid body to other components without code
+written for the combination. It adds no integrator and changes none.
+
+Two ports, both receiving effort, three components each. `force` takes the
+world-frame force on the centre of mass and returns the mean centre-of-mass
+velocity `(x1 - x0) / dt`. `torque` takes the body-frame torque and returns the
+mean body angular velocity `(omega0 + omega1) / 2`. These are the conjugate
+increments the midpoint step already pairs with a held force and torque, so
+the work the kernel books from the wire values equals `StepWorkDiagnostics::
+applied_work_j` to roundoff. Stored energy is `DynamicsDiagnostics::
+mechanical_energy`. The receipt's stored change is `mechanical_energy_change_j`
+and its numerical loss is minus `work_energy_residual_j`; dissipation and
+entropy production are zero. `RigidBodyRefusal` carries the native
+`DynamicsError` unchanged, or `Cancelled` when the `Cx` was already requested.
+
+G0, in `crates/fs-system/tests/rigid_body_slice.rs` (run with
+`cargo test -p fs-system --features slices`): a tumbling asymmetric body under
+force, torque and gravity passes `component::conformance::check_component`,
+with the first law closed inside the receipt's tolerance; the same body with
+zero torque, bonded by the kernel to a three-axis spring defined in the test,
+follows the monolithic midpoint rule for translation over 4,000 steps, keeps
+the size of its body angular momentum, and the window ledger closes.
+
+No claim: no contact, constraint or collision; no analytic tangent of the port
+map (a kernel loop differences it); the split variants of the integrator are
+not wrapped; fs-mbd now depends on fs-ports for this module only.
+
 ## Affine friction stopping and reversal on finite bodies
 
 The original rate-driven Hertz adapter retains the law's `exact_invariant`

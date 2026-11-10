@@ -2141,6 +2141,7 @@ dependencies = [
  "fs-math",
  "fs-modal",
  "fs-phs",
+ "fs-ports",
  "fs-qty",
  "fs-solver",
  "fs-time",
@@ -2956,6 +2957,7 @@ version = "0.0.1"
 dependencies = [
  "fs-alloc",
  "fs-exec",
+ "fs-mbd",
  "fs-ports",
 ]
 

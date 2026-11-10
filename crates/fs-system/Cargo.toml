@@ -10,12 +10,22 @@ description = "Composition kernel: a system of Components joined by connections,
 [package.metadata.frankensim]
 layer = "L3"
 
+[features]
+# Owner slices: tests that compose real physics owners on the kernel. Off by
+# default so that the kernel's own tests build nothing but the kernel.
+slices = ["dep:fs-mbd"]
+
 [dependencies]
 fs-exec = { path = "../fs-exec" }
+fs-mbd = { path = "../fs-mbd", optional = true }
 fs-ports = { path = "../fs-ports" }
 
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }
+
+[[test]]
+name = "rigid_body_slice"
+required-features = ["slices"]
 
 [lints]
 workspace = true

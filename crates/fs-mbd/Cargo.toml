@@ -19,6 +19,7 @@ fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
 fs-modal = { path = "../fs-modal" }
 fs-phs = { path = "../fs-phs" }
+fs-ports = { path = "../fs-ports" }
 fs-solver = { path = "../fs-solver" }
 fs-time = { path = "../fs-time" }
 fs-tribo = { path = "../fs-tribo" }
