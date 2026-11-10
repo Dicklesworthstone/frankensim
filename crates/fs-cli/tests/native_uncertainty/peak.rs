@@ -1,5 +1,6 @@
 //! G1/G3/G4: a hot initial state must enter uncertainty and probability events
 //! even when the same ordinary native trajectory ends below the thermal limit.
+#[path = "peak/schedule.rs"]
 mod schedule;
 use super::*;
 use fs_project::{ConductionTransient, TransientInitialTemperature, TransientRegionCapacity, spec::dims};

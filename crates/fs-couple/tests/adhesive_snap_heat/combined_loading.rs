@@ -1,6 +1,8 @@
 //! Shared shear/twist failure, explicit release, and actual finite caloric storage.
 
+#[path = "combined_loading/temperature.rs"]
 mod temperature;
+#[path = "combined_loading/timed.rs"]
 mod timed;
 
 use super::{MASS, close, curves, source, thermal};

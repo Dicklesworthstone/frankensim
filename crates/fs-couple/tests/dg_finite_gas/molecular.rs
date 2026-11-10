@@ -87,7 +87,7 @@ fn warm(molecular: bool, fraction: f64) -> (DgPortLoad, ClosedGasParcel) {
     .with_terminal_channels(vec![*template.terminal_channels()[0].input()], CELLS)
     .unwrap();
     for _ in 0..24 {
-        load.preview_step(FLOW).unwrap().accept();
+        load.step(FLOW).unwrap();
     }
     assert!(load.cumulative_dissipated_j() > 0.0);
     if molecular {
@@ -173,7 +173,7 @@ fn g1_finite_heat_pays_native_spatial_and_molecular_work_without_erasing_memory(
         let (mut live, mut gas) = warm(molecular, 0.8);
         let (original, old_gas) = (live.clone(), gas.clone());
         let mut marched = live.clone();
-        let frozen = marched.preview_step(FLOW).unwrap().accept();
+        let frozen = marched.step(FLOW).unwrap();
         // Unchanged coefficients still pass native memory admission. Their
         // continuing state and next sample equal the original acoustic owner.
         let (mut identity, mut identity_gas) = (original.clone(), old_gas.clone());
@@ -206,8 +206,8 @@ fn g1_finite_heat_pays_native_spatial_and_molecular_work_without_erasing_memory(
         );
         let mut same_sample = marched.clone();
         assert_eq!(
-            identity.preview_step(0.0).unwrap().accept(),
-            same_sample.preview_step(0.0).unwrap().accept()
+            identity.step(0.0).unwrap(),
+            same_sample.step(0.0).unwrap()
         );
         let invalid = live.step_with_finite_gas_heat_controlled(
             &mut gas,
@@ -298,8 +298,8 @@ fn g1_finite_heat_pays_native_spatial_and_molecular_work_without_erasing_memory(
         }
         let mut difference = 0.0;
         for _ in 0..8 {
-            let updated = live.preview_step(0.0).unwrap().accept();
-            let reference = marched.preview_step(0.0).unwrap().accept();
+            let updated = live.step(0.0).unwrap();
+            let reference = marched.step(0.0).unwrap();
             difference += (updated.port_outputs[0].conjugate_rate
                 - reference.port_outputs[0].conjugate_rate)
                 .abs();
@@ -394,7 +394,7 @@ fn g3_equal_composition_transport_pays_molecular_and_channel_work_once() {
     )
     .unwrap();
     let mut marched = old_load.clone();
-    marched.preview_step(0.0).unwrap().accept();
+    marched.step(0.0).unwrap();
     let report = advance_finite_gas_port_transport(
         &mut parcels,
         &mut nodes,
@@ -573,15 +573,13 @@ fn g4_composition_refusal_invalid_accuracy_and_final_cancel_preserve_every_owner
         let actual = nodes
             .get_mut(&10)
             .unwrap()
-            .preview_step(0.0)
-            .unwrap()
-            .accept();
+            .step(0.0)
+            .unwrap();
         let clean = expected_nodes
             .get_mut(&10)
             .unwrap()
-            .preview_step(0.0)
-            .unwrap()
-            .accept();
+            .step(0.0)
+            .unwrap();
         assert_eq!(actual, clean);
     }
 }

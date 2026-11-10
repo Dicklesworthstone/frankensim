@@ -1,4 +1,5 @@
 //! Actual native schedule sampling, pulse sizing, project export and recovery.
+#[path = "schedule/adjoint.rs"]
 mod adjoint;
 use super::*;
 use fs_project::{TransientPowerStep, TransientRegionPower, ThermalBoundaryCondition};

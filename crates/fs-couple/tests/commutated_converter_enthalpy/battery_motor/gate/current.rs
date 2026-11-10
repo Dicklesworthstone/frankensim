@@ -457,7 +457,7 @@ fn accepted_temperature_scales_actual_channel_power_and_retains_original_source_
     }
     let actual = next.drive().gate_parameters(4096);
     let mut replay = PreparedGateBatteryMotorCycle::new_gate_controlled(
-        steady.native.clone(),
+        steady_drive(false).native,
         actual,
         &deck,
         1,

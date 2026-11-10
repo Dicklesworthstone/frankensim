@@ -212,8 +212,9 @@ fn current_momentum_and_each_original_finite_body_close_at_one_endpoint_and_cont
                     let after = before_speed + dt * (2.0 * j + external_y) / 2.0;
                     let midpoint = 0.5 * (before_speed + after);
                     let voltage = ep[0] + ep[1] + 2.0 * midpoint;
+                    let prepared = heat.prepare(cx, &thermal).unwrap();
                     let next = step_spatial_conduction_response_mechanical_candidate(
-                        &heat,
+                        &prepared,
                         cx,
                         &thermal,
                         step as f64 * dt,
@@ -356,9 +357,10 @@ fn coupled_budget_and_cancellation_preserve_all_three_owners_for_retry() {
     with_cx(|cx, gate| {
         let mut solve = config();
         solve.maximum_circuit_trials = 1;
+        let prepared = heat.prepare(cx, &thermal).unwrap();
         let attempt = |controls| {
             step_spatial_conduction_response_mechanical_candidate(
-                &heat,
+                &prepared,
                 cx,
                 &thermal,
                 0.1,

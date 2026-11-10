@@ -248,6 +248,9 @@ impl DepositionObserver for RefuseLate {
             Err(DepositionError::InvalidInput("synthetic late tone-heat refusal"))
         } else { Ok(()) }
     }
+    fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 #[test]

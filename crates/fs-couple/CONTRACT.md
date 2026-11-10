@@ -17,6 +17,19 @@
 
 ## New sections (newest first)
 
+### A prescribed-flow step of the DG port load
+
+`DgPortLoad::step(volume_flow_m3_s)` advances the load alone by one sample
+under a prescribed bore volume flow: the crate-private trial of
+`preview_step`, accepted at once. It adds no numerics and no state; a refusal
+publishes nothing, as for the trial. It is the public counterpart of
+`step_with_mouth_flow` for a load with no driven mouth, and it exists so that
+a test outside the crate can march the load as its own reference:
+`tests/dg_finite_gas/molecular.rs` called the crate-private trial and the
+`dg_finite_gas` target did not compile from 2026-10-29 until 2026-11-10. No
+claim: unlike `step_with_mouth_flow` it takes no cancellation gate, and it is
+not a coupling path (nonlinear participants keep using the trial).
+
 ### Adaptive laminar enthalpy and external hydraulic continuation
 
 `LaminarEnthalpy::advance_windkessel_adaptive` reuses the original coupled

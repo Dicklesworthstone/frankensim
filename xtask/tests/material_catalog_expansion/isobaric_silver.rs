@@ -213,7 +213,7 @@ fn g1_g3_isobaric_cp_uses_the_shared_integral_inverse_and_source_conditions() {
             None,
         );
         let (heated, audit) = initial.advance_to(10.0, CONFIG, || Ok(())).unwrap();
-        let delta = 200.0 / scale / (500.0 + (250000.0 + 400.0 / scale).sqrt());
+        let delta = 200.0 / scale / (500.0 + f64::sqrt(250000.0 + 400.0 / scale));
         near(
             heated.temperature_k(CellId(1)).unwrap(),
             300.0 + delta,
@@ -284,7 +284,7 @@ fn g1_g3_silver_caloric_columns_preserve_original_values_and_domains() {
         1172.725,
         1e-10,
     );
-    assert!((1172.725 - (52518.6 - 51338.1)).abs() > 1.0);
+    assert!(f64::abs(1172.725 - (52518.6 - 51338.1)) > 1.0);
 }
 
 #[test]

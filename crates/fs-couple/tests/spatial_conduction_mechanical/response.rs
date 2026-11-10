@@ -524,8 +524,8 @@ fn full_rigid_nonlinear_feedback_matches_independent_original_cell_moments() {
         for &c in &centroids {
             let e = (linear + angular.cross(c)).cross(flux);
             let norm = (e.x * e.x + e.y * e.y + e.z * e.z).sqrt();
-            let j = Vec3::new(e.x, e.y, e.z) * (1.0 / (1.0 + 0.5 * norm));
-            let cell_force = j.cross(flux) * (1.0 / 6.0);
+            let j = Vec3::new(e.x, e.y, e.z).scale(1.0 / (1.0 + 0.5 * norm));
+            let cell_force = j.cross(flux).scale(1.0 / 6.0);
             torque = torque + c.cross(cell_force);
             force = force + cell_force;
         }

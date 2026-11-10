@@ -14646,7 +14646,7 @@ mod tests {
 
         use fs_conduction::{ConductionMesh, ScalarField, ThermalBc};
         use fs_exec::{Budget, Cx, ExecMode, StreamKey};
-        use fs_feec::TetComplex;
+        use fs_rep_mesh::TetComplex;
 
         let gate = CancelGate::new_clock_free();
         let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());

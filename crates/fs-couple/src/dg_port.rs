@@ -365,6 +365,13 @@ impl DgPortLoad {
         self.preview_step_inner(volume_flow_m3_s, None)
     }
 
+    /// Advance the load alone by one sample under a prescribed bore volume
+    /// flow, with no nonlinear participant: the trial of `preview_step`,
+    /// accepted at once. A refusal publishes nothing.
+    pub fn step(&mut self, volume_flow_m3_s: f64) -> Result<DgStepOutput, AcousticRealizeError> {
+        Ok(self.preview_step(volume_flow_m3_s)?.accept())
+    }
+
     /// Independent outward mouth flow remains with the original joint exterior.
     /// No candidate state is published until every participant accepts.
     pub(crate) fn preview_step_with_mouth_flow(

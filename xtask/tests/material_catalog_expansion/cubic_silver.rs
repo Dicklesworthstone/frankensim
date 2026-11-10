@@ -144,7 +144,7 @@ fn g1_g3_silver_table_reaches_the_same_oriented_wave_and_solid_law() {
     ] {
         let actual = principal.directional_waves(direction).unwrap();
         for (mode, modulus) in actual.modes.iter().zip(expected) {
-            near(mode.phase_speed_m_s, (modulus / rho).sqrt());
+            near(mode.phase_speed_m_s, f64::sqrt(modulus / rho));
         }
     }
     let pressure = principal.hydrostatic_response(1e6).unwrap();
