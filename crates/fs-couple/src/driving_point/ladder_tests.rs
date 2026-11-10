@@ -702,23 +702,23 @@ fn glottal_ceiling_settles_a_broad_first_resonance_and_moves_no_converged_line()
     ));
 }
 
-/// The ceiling a caller may declare is 524288 taps (the nasal flow lines',
+/// The ceiling a caller may declare is 1048576 taps (the nasal flow lines',
 /// `voice_performance/nasal.rs`): it is admitted, and the next power of two and a ceiling between
 /// powers of two are refused by name.
 #[test]
-fn line_ladder_ceiling_admits_524288_and_refuses_past_it_or_off_a_power_of_two() {
+fn line_ladder_ceiling_admits_1048576_and_refuses_past_it_or_off_a_power_of_two() {
     let check = |max_taps: usize| {
         super::validate_ladder(&LineLadder {
             max_taps,
             ..LineLadder::default()
         })
     };
-    assert_eq!(check(524_288).expect("the ceiling is admitted"), 524_288);
-    for max_taps in [1_048_576, 196_608] {
+    assert_eq!(check(1_048_576).expect("the ceiling is admitted"), 1_048_576);
+    for max_taps in [2_097_152, 196_608] {
         match check(max_taps) {
             Err(DrivingPointError::Invalid { what }) => assert_eq!(
                 what,
-                "line ladder max_taps must be a power of two in [256, 524288]",
+                "line ladder max_taps must be a power of two in [256, 1048576]",
                 "{max_taps}"
             ),
             other => panic!("{max_taps}: {other:?}"),
