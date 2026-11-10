@@ -760,8 +760,35 @@ budget-exceeded/stage-gap terminals.
 ## Public types and semantics
 
 `run` and `run_os` share the same parser and dispatcher as the `frankensim`
-binary, including `cooling-cht`, `electrothermal`, `cooling-network`,
-`cooling-network-uq`, and `cooling-component-design`. The experimental
+binary, including `system`, `cooling-cht`, `electrothermal`, `cooling-network`,
+`cooling-network-uq`, and `cooling-component-design`.
+
+### Devices described as data (`system <scene.json>`)
+
+`frankensim [--json] system <scene.json>` reads a `frankensim.system.v0` scene
+(at most 1 MiB, 10,000 elements, 1e7 steps, 1e5 samples; unknown fields
+refused), lowers it to an `fs_system::SystemBuilder` with the elements of
+`fs_system::elements`, steps the sealed system for `duration_s` with steps of
+at most `step_s`, and reports final states, optional samples every
+`sample_every_s`, the per-element ledger, boundaries, sinks and the window
+totals. Text mode prints the first-law identity
+`stored = boundary in - sink heat - numerical loss + connection defect +
+residual`. JSON mode emits `frankensim.system.result.v0`; refusals are
+`frankensim.system.diagnostic.v0` on stderr. Exit 3 for an unreadable or
+malformed scene, 4 for a description the kernel refuses (unconnected port,
+wrong roles) or a step it refuses, 2 for usage. A `join` has exactly one mass
+or heat-capacity port (the node) and the ports that meet it; `route` is the
+kernel's heat route; `prescribe` holds a port's input with the quantity its
+role takes (`velocity_m_s` for an element end, entered as the attachment
+velocity; `force_n` for a mass; `temperature_k`; `heat_rate_w`). Temperature
+inputs joined to a heat capacity, and route sources, start from the initial
+temperatures. Examples and their checks: `examples/system/README.md`; tests:
+`tests/system_command.rs` (the driven oscillator against the monolithic
+midpoint rule through the binary, the heated body against its discrete
+closed form, the quarter car's road work against motion plus heat and its
+70/30 heat split, library and binary byte-identical, eight refusals). No
+claim beyond the kernel's: ideal elements with constant parameters, no
+material cards, contact, friction or step-size error control. The experimental
 workflows keep their existing request/result schemas, numerical limits and
 exit classes; dispatch does not turn them into ledger-backed `.fsim` solves.
 All commands recognize one global `--json` flag, at any position, and reject

@@ -1,0 +1,21 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 2.0,
+  "step_s": 2.0e-4,
+  "sample_every_s": 0.01,
+  "elements": {
+    "block": {"kind": "mass", "mass_kg": 0.25, "position_m": 0.002, "velocity_m_s": -0.3},
+    "spring": {"kind": "spring", "stiffness_n_m": 400.0, "extension_m": -0.002},
+    "damper": {"kind": "damper", "damping_n_s_m": 1.5},
+    "shaker": {"kind": "force", "force_n": {"sine": {"amplitude": 0.8, "frequency_hz": 28.64788975654116}}},
+    "housing": {"kind": "heat_capacity", "capacity_j_k": 2.0, "temperature_k": 300.0},
+    "skin": {"kind": "conductance", "conductance_w_k": 0.05}
+  },
+  "connections": [
+    {"join": ["block.p", "spring.a", "damper.a", "shaker.p"]},
+    {"prescribe": "spring.b", "velocity_m_s": 0},
+    {"prescribe": "damper.b", "velocity_m_s": 0},
+    {"join": ["housing.heat", "damper.heat", "skin.a"]},
+    {"prescribe": "skin.b", "temperature_k": 293.15}
+  ]
+}

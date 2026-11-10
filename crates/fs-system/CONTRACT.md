@@ -3,7 +3,9 @@
 > Status: version 0. The Component contract in fs-ports is v0 until five kernel
 > slices pass on it (epic `frankensim-rc-1109-root-3gc12`, beads `.6.1` to
 > `.6.7`), and this driver changes with it. One physics owner implements the
-> contract so far: the fs-mbd rigid body.
+> contract so far: the fs-mbd rigid body. The crate's own `elements` are ideal
+> lumped elements, and `frankensim system <scene.json>` runs devices made of
+> them from a data file.
 
 ## Purpose and layer
 
@@ -46,6 +48,26 @@ physics owners below fs-couple can be composed without it.
   first-law residual of the window.
 - `SystemError`, `AdmissionError`, `OwnerError` (the component's own error,
   recoverable with `downcast_ref`).
+- `elements`: ideal lumped elements, each a `Component` with `PortTangent`,
+  constant SI parameters and a closed energy account. `Mass` (port `p`
+  receives the net force, returns the step-mean velocity; state `Motion`),
+  `Spring` (ports `a`, `b`; linear plus optional cubic term; force is the
+  discrete gradient of the potential), `Damper` (ports `a`, `b`, `heat`; all
+  absorbed power leaves as heat at the temperature `heat` receives, with
+  entropy `P dt / T`), `Force` (port `p`, a prescribed `Waveform`), and
+  `HeatCapacity` (port `heat` receives heat rate, returns the step-mean
+  temperature), `Conductance` (heat ports `a`, `b`, entropy
+  `G (Ta - Tb)^2 / (Ta Tb) dt`), `Heater` (Joule heater, power never
+  negative). `Force` and `Heater` keep a `SourceAccount` whose clock is a
+  compensated sum like the kernel's, so they read the time a boundary
+  receives bit for bit; their stored energy is the energy that entered them
+  (negative when they deliver), so a driven device closes its first law.
+  `Waveform` is a constant, a sine or a piecewise-linear table with
+  validating constructors; `mean(t0, dt)` is the exact step average.
+  Two-port signs: joined to masses by common flow, a port receives minus the
+  mass's velocity, so port `a` on mass A and `b` on mass B extend at
+  `v_B - v_A` and return the force on each end. A `HeatCapacity` asks for a
+  half step (`Proposal::Shorten`) instead of crossing absolute zero.
 
 **One step.** (1) The step is the largest that every `limit_dt_s` and
 `next_event_s` allow. (2) Blocks are evaluated in dependency order; a block
@@ -160,6 +182,33 @@ G0, `tests/system_g0.rs`, on one-port elements defined in the test:
   produced and name what failed; cancellation noticed by a component is
   reported as cancellation.
 
+Elements, `tests/elements.rs`:
+- every element passes `check_component` and `check_port_tangent` at 200
+  generated operating points (three spring laws), with outputs compared to
+  independent formulas (mean velocity, linear spring force, damper heat equal
+  to absorbed power, conductance antisymmetry);
+- refusals: non-finite or out-of-range parameters, empty or non-increasing
+  tables, a heater whose power could turn negative, a temperature input that
+  is not positive, a step that would cool a body below 0 K (`Shorten`);
+- waveform means against composite Simpson quadrature, additivity over
+  adjacent intervals, and hand values;
+- an anchored mass and spring rotate by `2 atan(w dt / 2)` per step (the
+  implicit midpoint rule's exact discrete solution) and keep their energy;
+- two masses on a hardening spring keep their momentum, their centre of mass
+  moves uniformly;
+- two bodies through a conductance relax by `(1 - h) / (1 + h)` per step,
+  keep their energy, and the ledger's entropy matches `sum C ln(T / T0)`;
+- a driven damped oscillator built from the library matches the monolithic
+  midpoint rule, the body's account equals the damper's dissipation, the
+  force's clock equals the kernel's bit for bit;
+- a heater in a body behind a conductance to a fixed ambient approaches
+  `T_amb + P / G` by the discrete factor, and heat kept plus heat out through
+  the boundary equals heat given.
+Three planted defects were each caught: the spring's far end pulling the same
+way (momentum and conformance), the damper's heat tangent without its factor 2
+(tangent check), a force sampled at the start of the step instead of its mean
+(oscillator reference).
+
 Unit tests cover the block ordering (including a 200,000-node chain without
 recursion), the equivalent-temperature gradient, the dense solve and the
 compensated sum.
@@ -182,6 +231,10 @@ the kernel.
 ## No-claim boundaries
 
 - No accuracy claim for any component; the kernel checks accounts, not physics.
+- The elements are ideal and their parameters constant. A `HeatCapacity`
+  stores its absolute temperature, so a small heat increment is rounded to an
+  ulp of that temperature each step; its ledger account, a compensated sum of
+  receipts, does not lose it.
 - No transformer, gyrator or mapped field transfer; no stream or field ports;
   no non-smooth tier (contact, stick-slip); no multirate stepping; no
   monolithic solve through `StageResidual`; no step-size error control; no

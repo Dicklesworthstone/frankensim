@@ -1,0 +1,20 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 3.0,
+  "step_s": 5.0e-4,
+  "sample_every_s": 0.01,
+  "elements": {
+    "body": {"kind": "mass", "mass_kg": 300.0},
+    "wheel": {"kind": "mass", "mass_kg": 40.0},
+    "suspension": {"kind": "spring", "stiffness_n_m": 20000.0},
+    "shock": {"kind": "damper", "damping_n_s_m": 1500.0},
+    "tyre": {"kind": "spring", "stiffness_n_m": 180000.0},
+    "shock_body": {"kind": "heat_capacity", "capacity_j_k": 450.0, "temperature_k": 293.15}
+  },
+  "connections": [
+    {"join": ["wheel.p", "suspension.a", "shock.a", "tyre.b"]},
+    {"join": ["body.p", "suspension.b", "shock.b"]},
+    {"prescribe": "tyre.a", "velocity_m_s": {"table": [[0.5, 0.0], [0.55, 0.6], [0.6, 0.0], [0.65, -0.6], [0.7, 0.0]]}},
+    {"route": "shock.heat", "to": [["shock_body.heat", 0.7]], "rest": {"sink": "air", "temperature_k": 293.15}}
+  ]
+}

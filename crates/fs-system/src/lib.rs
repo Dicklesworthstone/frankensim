@@ -15,6 +15,10 @@
 //! System::ledger                             window accounts
 //! ```
 //!
+//! [`elements`] holds ideal lumped elements (mass, spring, damper, force,
+//! heat capacity, conductance, heater) so that a one-dimensional mechanical
+//! and thermal device can be described as data and run without code.
+//!
 //! # Version 0
 //!
 //! The contract in fs-ports is v0 and so is this driver. It solves looped
@@ -28,6 +32,7 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod elements;
 mod erased;
 pub mod ledger;
 mod solve;

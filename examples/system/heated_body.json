@@ -1,0 +1,15 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 2000.0,
+  "step_s": 5.0,
+  "sample_every_s": 50.0,
+  "elements": {
+    "body": {"kind": "heat_capacity", "capacity_j_k": 500.0, "temperature_k": 293.15},
+    "heater": {"kind": "heater", "power_w": 30.0},
+    "wall": {"kind": "conductance", "conductance_w_k": 2.0}
+  },
+  "connections": [
+    {"join": ["body.heat", "heater.heat", "wall.a"]},
+    {"prescribe": "wall.b", "temperature_k": 293.15}
+  ]
+}

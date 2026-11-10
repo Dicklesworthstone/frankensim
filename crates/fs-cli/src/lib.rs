@@ -22,6 +22,7 @@ mod package;
 mod report;
 mod solve;
 mod study;
+mod system_command;
 mod uq_command;
 
 use std::ffi::OsString;
@@ -80,7 +81,7 @@ const VALIDATION_NO_CLAIM: &str =
     "does not prove artifact existence, capability availability, solvability, or physical validity";
 const USAGE: &str = "frankensim [--json] validate <project.fsim|project.json> | discover <request.json> <pack>... | import <project> <source>... <ledger.db> --unit <unit> (--max-hole-edges <n> | --step-root <id> --target-h <spacing>) | solve <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | solve --resume <run-id> <ledger.db> | report <run-id> [<ledger.db>] | package <run-id> [<ledger.db>] | run <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | run <program.fs|program.fs.json> <ledger.db> | compare <left-run> <right-run> [<ledger.db>] | study <study.fsim|study.json> <ledger.db> [--budget <N>] | study --resume <study-run-id> <ledger.db> [--budget <N>] | cinematic <mode> <config.fscine> <trajectory-source> [cinematic options] (verify/mux require --trajectory <artifact>; other cinematic modes also allow --run-reduced)";
 
-const COUPLED_USAGE: &str = "Experimental coupled workflows:\n  cooling-cht <scene.json>\n  electrothermal <scene.json> [--transient <time.json>]\n  cooling-network <request.json>\n  cooling-network-uq <base-request.json> <uq-request.json> [options]\n  cooling-component-design <base-request.json> <allocation.json>\nUse each command's --help for its file-driven interface. These workflows retain their own numerical scope and do not produce ledger-backed .fsim runs. Embedded UQ and component design require an explicit CommandContext cooling worker.\n";
+const COUPLED_USAGE: &str = "Experimental coupled workflows:\n  system <scene.json>\n  cooling-cht <scene.json>\n  electrothermal <scene.json> [--transient <time.json>]\n  cooling-network <request.json>\n  cooling-network-uq <base-request.json> <uq-request.json> [options]\n  cooling-component-design <base-request.json> <allocation.json>\nUse each command's --help for its file-driven interface. These workflows retain their own numerical scope and do not produce ledger-backed .fsim runs; system runs a device described as data on the composition kernel and reports its energy ledger. Embedded UQ and component design require an explicit CommandContext cooling worker.\n";
 
 /// Captured command output. Final result records are on stdout; diagnostics
 /// are on stderr.
@@ -119,6 +120,7 @@ enum Command {
     CoolingNetwork(Vec<OsString>),
     CoolingNetworkUq(Vec<OsString>),
     CoolingComponentDesign(Vec<OsString>),
+    System(Vec<OsString>),
     Cinematic(Vec<String>),
     Validate(PathBuf),
     Discover {
@@ -247,6 +249,7 @@ fn dispatch(command: Command, mode: OutputMode, context: CommandContext<'_>) -> 
         Command::CoolingNetwork(arguments) => {
             network_command::run(&arguments, mode == OutputMode::Json)
         }
+        Command::System(arguments) => system_command::run(&arguments, mode == OutputMode::Json),
         Command::CoolingNetworkUq(arguments) => {
             uq_command::run(&arguments, mode == OutputMode::Json, context.cooling_worker)
         }
@@ -418,6 +421,7 @@ fn parse_args(
         [verb, rest @ ..] if verb == "cooling-component-design" => {
             Some(Command::CoolingComponentDesign(rest.to_vec()))
         }
+        [verb, rest @ ..] if verb == "system" => Some(Command::System(rest.to_vec())),
         _ => None,
     };
     if let Some(command) = native {

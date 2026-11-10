@@ -42,6 +42,7 @@ fs-math = { path = "../fs-math" }
 fs-mesh = { path = "../fs-mesh" }
 fs-opt = { path = "../fs-opt" }
 fs-package = { path = "../fs-package" }
+fs-ports = { path = "../fs-ports" }
 fs-project = { path = "../fs-project" }
 fs-qty = { path = "../fs-qty" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
@@ -49,6 +50,7 @@ fs-report = { path = "../fs-report" }
 fs-scenario = { path = "../fs-scenario" }
 fs-session = { path = "../fs-session" }
 fs-solver = { path = "../fs-solver" }
+fs-system = { path = "../fs-system" }
 fs-topols = { path = "../fs-topols" }
 fs-topopt = { path = "../fs-topopt", features = ["cutfem-marquee"], optional = true }
 fs-uq = { path = "../fs-uq" }
