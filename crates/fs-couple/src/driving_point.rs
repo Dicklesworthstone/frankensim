@@ -45,12 +45,12 @@ pub struct LineLadder {
     pub tail_tol: f64,
     /// Maximum resonance-peak shift between adjacent rungs (`default = 0.05` cents).
     pub peak_tol_cents: f64,
-    /// Hard upper bound on DFT length (`default = 65_536`, at most `262_144`).
+    /// Hard upper bound on DFT length (`default = 65_536`, at most `524_288`).
     pub max_taps: usize,
 }
 
 /// Largest ceiling a caller may declare for a line ladder; the default stays lower.
-const MAX_LINE_TAPS: usize = 262_144;
+const MAX_LINE_TAPS: usize = 524_288;
 
 impl Default for LineLadder {
     fn default() -> Self {
@@ -139,6 +139,20 @@ pub enum DrivingPointError {
         /// Required peak shift tolerance [cents].
         peak_tol_cents: f64,
     },
+    /// A transfer ladder hit `max_taps` before `tail_energy` and `tap_change` converged. A transfer has no peak-shift
+    /// gate: it gates on the change of its shared taps.
+    TransferLadderUnconverged {
+        /// Ceiling tap count reached.
+        max_taps: usize,
+        /// Measured relative tail energy in `[3N/4 .. N)` at the ceiling rung.
+        tail_energy: f64,
+        /// Required tail energy tolerance.
+        tail_tol: f64,
+        /// Measured RMS change of the taps shared with the rung below, over the ceiling rung's RMS (`+∞` at rung 0).
+        tap_change: f64,
+        /// Required tap change tolerance: the square root of `tail_tol`.
+        tap_tol: f64,
+    },
     /// TMM refusal.
     Duct(DuctError),
     /// Original constitutive-state refusal from a material-backed line.
@@ -164,6 +178,18 @@ impl core::fmt::Display for DrivingPointError {
                 "FS-COUPLE-DRIVE-UNCONVERGED: ladder reached max_taps={max_taps} with \
                  tail_energy={tail_energy:.3e} (tol={tail_tol:.3e}) and \
                  peak_shift_cents={peak_shift_cents:.4} (tol={peak_tol_cents:.4})"
+            ),
+            Self::TransferLadderUnconverged {
+                max_taps,
+                tail_energy,
+                tail_tol,
+                tap_change,
+                tap_tol,
+            } => write!(
+                f,
+                "FS-COUPLE-DRIVE-UNCONVERGED: ladder reached max_taps={max_taps} with \
+                 tail_energy={tail_energy:.3e} (tol={tail_tol:.3e}) and \
+                 tap_change={tap_change:.3e} (tol={tap_tol:.3e})"
             ),
             Self::Duct(e) => write!(f, "{e}"),
             Self::Material(e) => write!(f, "{e}"),
@@ -272,7 +298,7 @@ fn validate_ladder(ladder: &LineLadder) -> Result<usize, DrivingPointError> {
     }
     if !(256..=MAX_LINE_TAPS).contains(&ladder.max_taps) || !ladder.max_taps.is_power_of_two() {
         return Err(DrivingPointError::Invalid {
-            what: "line ladder max_taps must be a power of two in [256, 262144]",
+            what: "line ladder max_taps must be a power of two in [256, 524288]",
         });
     }
     Ok(ladder.max_taps)

@@ -1466,6 +1466,9 @@ pub(crate) fn map_drive(err: crate::driving_point::DrivingPointError) -> Acousti
         crate::driving_point::DrivingPointError::LadderUnconverged {
             max_taps, tail_energy, tail_tol, peak_shift_cents, peak_tol_cents,
         } => AcousticRealizeError::ReedLadder { max_taps, tail_energy, tail_tol, peak_shift_cents, peak_tol_cents },
+        e @ crate::driving_point::DrivingPointError::TransferLadderUnconverged { .. } => {
+            AcousticRealizeError::Nonlinear(e.to_string())
+        }
         crate::driving_point::DrivingPointError::Duct(d) => AcousticRealizeError::Duct(d),
         crate::driving_point::DrivingPointError::Material(e) => AcousticRealizeError::Ambient(e.to_string()),
         crate::driving_point::DrivingPointError::Realize(_) => AcousticRealizeError::Reed {

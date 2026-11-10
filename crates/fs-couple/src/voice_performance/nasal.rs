@@ -29,7 +29,7 @@
 //! ([`GlottalIsland::new_with_tract_line`]); the lips' and each nostril's outward flow per incident wave are the same
 //! solve's port flows ([`NetworkDrivingPoint::realize_port_flow_ir_regional`]) on the series mouth line's default
 //! ladder's rungs and tolerances up to [`NASAL_FLOW_MAX_TAPS`], so a flow the series cap holds stops on the series
-//! rung, and an open port's flows, whose slow tails still miss the tolerances at 65536 taps, get two more doublings.
+//! rung, and an open port's flows, whose slow tails still miss the tolerances at 65536 taps, get three more doublings.
 //! The receiver takes the three openings on one baffle: the mouth at the origin and the nostrils at `(x, y)` and
 //! `(-x, y)`, the baffle's `x` the subject's left. It is one plane: a nostril in front of the mouth's plane (the
 //! nostrils row's source states by how much) is not modeled in front of it, and the openings do not load one another.
@@ -67,12 +67,12 @@ pub(super) const NASAL_KEYS: [&str; 7] =
 /// sliver cylinder, and a sinus this close to either end of its passage is refused.
 const CUT_SNAP_M: f64 = 1.0e-12;
 
-/// Cap of the lips' and nostrils' flow ladders [taps]: the series line's rungs and tolerances, two doublings past its
+/// Cap of the lips' and nostrils' flow ladders [taps]: the series line's rungs and tolerances, three doublings past its
 /// cap. An open port's flows carry a slow, smooth tail that falls in late time (no content before time 0, no line):
 /// on the walled and the rigid test fixtures at 96 kHz the lips stop at 131072 taps and the left nostril still misses
-/// the tap-change tolerance there. Each flow is a direct FIR, so every doubling doubles its cost per sample; past this
-/// cap the ladder refuses by name.
-const NASAL_FLOW_MAX_TAPS: usize = 262_144;
+/// the tap-change tolerance there, and on the C3-a card at 192 kHz (port 1.5e-5 m2) the lips miss it at 262144. Each flow
+/// is a direct FIR, so every doubling doubles its cost per sample; past this cap the ladder refuses by name.
+const NASAL_FLOW_MAX_TAPS: usize = 524_288;
 
 /// One `nasal_pair` row: the left and right passages' areas over one length.
 #[derive(Debug, Clone, Copy, PartialEq)]

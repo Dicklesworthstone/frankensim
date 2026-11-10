@@ -274,14 +274,12 @@ pub(super) fn transfer_ladder(
             return Ok((ir, MouthFlowRealization { n_fft, rungs }));
         }
         if n_fft >= max_taps {
-            return Err(DrivingPointError::LadderUnconverged {
+            return Err(DrivingPointError::TransferLadderUnconverged {
                 max_taps,
                 tail_energy,
                 tail_tol: ladder.tail_tol,
-                // Peak shift is a reflectance-line criterion; the transfer
-                // ladder gates on the tap change instead.
-                peak_shift_cents: f64::NAN,
-                peak_tol_cents: ladder.peak_tol_cents,
+                tap_change,
+                tap_tol,
             });
         }
         previous = ir[..half].to_vec();
@@ -621,9 +619,34 @@ mod tests {
 
     fn tail_of<T>(result: Result<T, DrivingPointError>) -> f64 {
         match result {
-            Err(DrivingPointError::LadderUnconverged { tail_energy, .. }) => tail_energy,
+            Err(
+                DrivingPointError::LadderUnconverged { tail_energy, .. }
+                | DrivingPointError::TransferLadderUnconverged { tail_energy, .. },
+            ) => tail_energy,
             Err(other) => panic!("unexpected refusal: {other}"),
             Ok(_) => panic!("a ladder with an unreachable tolerance cannot converge"),
+        }
+    }
+
+    /// A transfer ladder that reaches its ceiling prints what it gated on, the measured tap change and its tolerance.
+    #[test]
+    fn a_transfer_ladder_refusal_prints_the_tap_change() {
+        // One pole decaying over 2400 samples: the 1024-tap ceiling cannot hold it.
+        let sigma = 20.0;
+        let response = |w: f64| Ok(C64::new(1.0, 0.0) / C64::new(sigma, -w));
+        let ladder = LineLadder { tail_tol: 1.0e-10, peak_tol_cents: 0.05, max_taps: 1024 };
+        let refusal = transfer_ladder(&response, 1.0 / sigma, 8.0, 1.0 / f64::from(RATE), 1024, &ladder)
+            .map(|_| ())
+            .expect_err("the ceiling is far shorter than the decay");
+        let message = refusal.to_string();
+        assert!(message.contains("tap_change=") && !message.contains("NaN"), "{message}");
+        match refusal {
+            DrivingPointError::TransferLadderUnconverged { max_taps, tail_tol, tap_change, tap_tol, .. } => {
+                assert_eq!(max_taps, 1024);
+                assert_eq!(tap_tol, tail_tol.sqrt());
+                assert!(tap_change.is_finite() && tap_change > 0.0, "tap change {tap_change}");
+            }
+            other => panic!("unexpected refusal: {other}"),
         }
     }
 

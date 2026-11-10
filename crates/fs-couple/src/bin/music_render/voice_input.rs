@@ -107,6 +107,7 @@ pub(super) fn run_with_gas_sources(
         super::thermochemical::provenance(core::slice::from_ref(description.gas_record()));
     let tract_gas = tract_gas_json(&description);
     let tract_motion = tract_motion_json(&description, info);
+    let rest_gap = rest_gap_json(&description.rest_gap);
     let observer = performance.observer_gas_report().map_or_else(String::new, |report| {
         format!(",\"observer_gas\":{}",
             super::duct_metadata::observer_gas_provenance(Some(report)))
@@ -223,7 +224,7 @@ pub(super) fn run_with_gas_sources(
          \"passive_tract_formants_hz\":{passive},\
          \"peak_glottal_flow_m3_s\":{:e},\"min_glottal_flow_m3_s\":{:e},\"closed_fraction\":{:e},\
          \"max_force_passes\":{},\"mean_force_passes\":{:e},{rig}{jet_band}{head}{airway}{nasal}\
-         \"model_scope\":\"{scope}\"{observer}}}{gas_sources}{tract_gas}{tract_motion}}}",
+         \"model_scope\":\"{scope}\"{observer}}}{gas_sources}{tract_gas}{tract_motion}{rest_gap}}}",
         description.full_scale_pa, rendered.clipped, rendered.peak_pa, rendered.rms_pa,
         info.mechanics_rate_hz, info.two_mass, info.sections, info.tract_length_m,
         info.glottal_radius_m, info.mouth_radius_m, info.sound_speed_m_s,
@@ -306,6 +307,20 @@ pub(super) fn nasal_json(
     )
 }
 
+/// The `rest_gap` rows' block, `,"rest_gap_time_s_gap_m":[[time,gap],...]`, as the card declares them, or nothing
+/// without the rows, so a sidecar without them is byte for byte what it was.
+fn rest_gap_json(rows: &[(f64, f64)]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let rows = rows
+        .iter()
+        .map(|(time, gap)| format!("[{time:e},{gap:e}]"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(",\"rest_gap_time_s_gap_m\":[{rows}]")
+}
+
 /// The moving tract's block, `,"tract_motion":{...}`, or nothing without `tract_move` rows, so a sidecar without them
 /// is byte for byte what it was.
 pub(super) fn tract_motion_json(
@@ -375,6 +390,14 @@ mod tests {
         assert!(options(&args(&["input"])).is_err());
         let a = args(&["input", "output", "--block", "37"]);
         assert_eq!(options(&a).unwrap(), ("input", "output", 37));
+    }
+    #[test]
+    fn rest_gap_rows_reach_the_sidecar_and_a_card_without_them_adds_nothing() {
+        assert_eq!(rest_gap_json(&[]), "");
+        assert_eq!(
+            rest_gap_json(&[(0.0, 2.5e-3), (0.2375, 3.57e-4)]),
+            ",\"rest_gap_time_s_gap_m\":[[0e0,2.5e-3],[2.375e-1,3.57e-4]]"
+        );
     }
     #[test]
     fn a_nasal_card_on_a_head_names_each_cap_its_placement_and_the_sum() {
