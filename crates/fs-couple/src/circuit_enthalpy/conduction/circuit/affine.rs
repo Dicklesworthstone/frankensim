@@ -123,5 +123,5 @@ fn sum(values: impl IntoIterator<Item = f64>) -> Result<f64, Error> {
         )?;
         total = next;
     }
-    finite(total + correction)
+    Ok(finite(total + correction)?)
 }
