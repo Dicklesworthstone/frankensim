@@ -525,7 +525,41 @@ behind the contract), two linked cells with a law each.
   owner network marched alone bit for bit, the cells equal the owner
   timeline fed the same heat by hand to 1e-11 K, and every joule is in the
   cells or the sink to 1e-11.
-Thirty-seven planted defects in the component were each caught.
+- The implicit driver (`ThermalTimeline::implicit`), backward Euler and
+  SDIRK2: a quarter-second step conforms and equals the owner's own solve
+  with the rates held (one interval, cells to 1e-11 K), backward Euler also
+  by hand to 1e-9 K, and the two schemes differ; on a 400 W/K link, where
+  the explicit bound is 10 ms, a half-second step leaves the cells
+  `76 / 405` K apart, as one backward-Euler interval does; a constant 3 W
+  source owned by the conduction graph, which no cell's boundary shows,
+  comes out on the environment port and is stored with the port heat.
+- A rejected interval: with a conductivity that rises with temperature and
+  two Newton iterations allowed, a half-second step is answered
+  `Shorten { 0.25 }`; a half of exactly `minimum_dt_s` is still asked for and
+  one under it is the owner's `NotConverged`; with one halving allowed the
+  owner alone refuses the half second and so does the Component after the
+  quarter second. In the kernel the run takes as many steps as the owner
+  alone accepts intervals and as many shortenings as it rejects, and reaches
+  the same cells.
+- A loose solve (two iterations, 1e-4 J a cell): the receipt's residual is
+  the owner's (above 1e-6 J, inside the tolerance), the total is kept to
+  rounding and the environment port is zero. Over 20 us on the 0.2 W/K link
+  the owner accepts without iterating: the stored change is exactly zero and
+  all 8e-5 J delivered is the receipt's numerical loss.
+- An implicit run with a fan change at 0.4 s ends a step on it (seven steps
+  for the second, as the owner alone), reaches the owner's cells to 1e-10 K
+  and puts the film's heat in the room's sink; a step that reaches a birth
+  is the owner's refusal. Refusals: an event pending at the start, a cell
+  twice, a longest interval of 0, -1, infinity or NaN, a rate that is not
+  finite, controls the owner refuses, the law's refusal, cancellation
+  raised inside the owner's call.
+- The damping-heat pairing on an implicit timeline, both schemes, at steps
+  of an eighth of a second (twelve and a half explicit bounds): over twelve
+  steps the bodies equal the owner network marched alone bit for bit, the
+  cells equal the owner's solve fed the same heat by hand to 1e-10 K, and
+  every joule is in the cells or the sink to 1e-11.
+Thirty-seven planted defects in the explicit component were each caught, and
+twenty-three in the implicit driver.
 
 Against the hand-written coupling,
 `crates/fs-couple/tests/rigid_damping_heat/graph.rs` (run with
@@ -556,8 +590,35 @@ promise. Not compared: the module refuses a whole advance when its law has no
 form at the final temperature, where the graph takes that step and refuses
 the next; a run with thermal events; two connectors reading one cell.
 
-Still without a Component: the module's implicit, driven and relaxation
-entry points. Nothing in the module is deleted.
+The same file compares the module's implicit entry points with graphs on an
+implicit timeline, on the module's own stiff fixture (two cells on a
+1000 W/K link, which the explicit rule cannot step within its substep
+allowance), for backward Euler and SDIRK2:
+- `advance_implicit_candidate`, both connectors' heat into cell 0, two
+  quarter-second intervals: the same intervals, the bodies bit for bit, the
+  two thermal clocks equal, the cells to 1e-9 K, and dissipation, stored
+  heat and mechanical energy against the ledger;
+- `temperature::advance_implicit_candidate`, cell 0's temperature setting
+  the connector's damping, eight sixteenth-second intervals: the cells to
+  1e-9 K, the bodies' velocities to 1e-8 m/s, the accounts to the solve's
+  closure;
+- through rejected intervals (calorics that curve, two Newton iterations
+  allowed): the module halves an interval and re-runs its mechanics over the
+  half; the graph's timeline answers `Shorten` and the kernel re-steps the
+  network with it. With the heat released at a fixed temperature, as in the
+  module, the graph takes the module's accepted intervals one for one, one
+  shortening for every rejection (20 intervals and 64 rejections for
+  backward Euler, 15 and 40 for SDIRK2), and the bodies are equal bit for
+  bit. With the heat released at the receivers' temperature the kernel
+  solves the network and the cells together and the timeline can answer on
+  an iterate: the run is finer there (23 and 76, 16 and 44) and agrees with
+  the module's to 6e-6 K.
+Bit-for-bit bodies rest on the kernel's negotiated step being the thermal
+clock's `end - start`, which holds on every step of these fixtures and is
+not a property of every grid.
+
+Still without a Component: the module's driven and relaxation entry points.
+Nothing in the module is deleted.
 
 Other domains, `tests/elements.rs`: the gyrator and one element of each law
 in the rotational and electrical domains pass the conformance and tangent

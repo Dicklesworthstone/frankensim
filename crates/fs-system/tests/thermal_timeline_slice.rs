@@ -30,7 +30,7 @@ use fs_mbd::spatial_loads::internal_motion::{
 use fs_mbd::{Gravity, MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3, Wrench};
 use fs_ports::component::conformance::{Case, Observed, check_component};
 use fs_ports::component::{Component, Proposal, Receipt};
-use fs_system::{Ledger, RouteTemperature, SystemBuilder, heat_sink};
+use fs_system::{Ledger, NodeId, RouteTemperature, System, SystemBuilder, heat_sink};
 use fs_thermal::component::{
     ImplicitScheme, ThermalTimeline, TimelineBuildError, TimelineRefusal, TimelineState,
 };
@@ -295,6 +295,34 @@ fn proposal(
     let mut next = state.clone();
     let mut outputs = vec![f64::NAN; component.ports().len()];
     with_cx(gate, |cx| component.propose(state, dt_s, inputs, &mut next, &mut outputs, cx))
+}
+
+/// A system of the timeline alone: `rates_w` held on cell ports `cell10`
+/// and `cell20`, and the environment port routed to a sink named `room`.
+fn heated_alone(
+    component: ThermalTimeline<'static>,
+    start: TimelineState<'static>,
+    rates_w: [f64; 2],
+) -> (System, NodeId) {
+    let mut builder = SystemBuilder::new();
+    let cells = builder.add("cells", component, start).expect("cells");
+    for (name, rate_w) in [("cell10", rates_w[0]), ("cell20", rates_w[1])] {
+        builder
+            .boundary(
+                builder.port(cells, name).expect("port"),
+                Box::new(move |_, _, out: &mut [f64]| out[0] = rate_w),
+            )
+            .expect("heated");
+    }
+    builder
+        .heat_route(
+            builder.port(cells, "environment").expect("port"),
+            &[],
+            Some(heat_sink("room", 293.15).expect("sink")),
+            RouteTemperature::Fixed(293.15),
+        )
+        .expect("route");
+    (builder.seal().expect("sealed"), cells)
 }
 
 /// The conformance check on one case, which must step.
@@ -943,24 +971,7 @@ fn boundary_heat_is_on_the_environment_wire_and_reaches_a_named_sink() {
     let component = ThermalTimeline::new(vec![A, B], true, config(0.05)).expect("component");
     let start = component.start(&scene.timeline()).expect("start");
     let origin = start.simulation().clone();
-    let mut builder = SystemBuilder::new();
-    let cells = builder.add("cells", component, start).expect("cells");
-    let port = |builder: &SystemBuilder, name: &str| builder.port(cells, name).expect("port");
-    builder
-        .boundary(port(&builder, "cell10"), Box::new(|_, _, out: &mut [f64]| out[0] = 0.0))
-        .expect("idle");
-    builder
-        .boundary(port(&builder, "cell20"), Box::new(|_, _, out: &mut [f64]| out[0] = 1.5))
-        .expect("heated");
-    builder
-        .heat_route(
-            port(&builder, "environment"),
-            &[],
-            Some(heat_sink("room", 293.15).expect("sink")),
-            RouteTemperature::Fixed(293.15),
-        )
-        .expect("route");
-    let mut system = builder.seal().expect("sealed");
+    let (mut system, cells) = heated_alone(component, start, [0.0, 1.5]);
     let (mut steps, mut cut_steps, mut landed) = (0_u32, 0_u32, [false; 2]);
     with_cx(&gate, |cx| {
         while system.time_s() < 1.0 - 1.0e-12 {
@@ -1155,9 +1166,8 @@ fn the_implicit_timeline_conforms_and_its_step_is_the_owners_solve() {
         same_cells(&next, &native);
         let stored = receipt.stored_change_j;
         assert!((stored - report.energy.stored_energy_change_j).abs() <= 1.0e-12 * delivered);
-        // The solve closes each cell to 1e-11 J.
-        assert!((stored - delivered).abs() <= 1.0e-10, "{stored} vs {delivered}");
-        assert!(receipt.numerical_loss_j.abs() <= 1.0e-10, "{}", receipt.numerical_loss_j);
+        assert!((stored - delivered).abs() <= 1.0e-12 * delivered, "{stored} vs {delivered}");
+        assert!(receipt.numerical_loss_j.abs() <= 1.0e-12 * delivered);
         for (port, id) in [A, B].into_iter().enumerate() {
             let mean = 0.5 * (temperature(&start, id) + native.temperature_k(id).expect("T"));
             assert!((outputs[port] - mean).abs() <= 1.0e-11, "{} vs {mean}", outputs[port]);
@@ -1165,8 +1175,8 @@ fn the_implicit_timeline_conforms_and_its_step_is_the_owners_solve() {
         // Nothing exchanges here: the port carries only the rounding
         // between the owner's external heat and the port heat it was handed.
         assert!(outputs[2].abs() <= 1.0e-13, "{} W", outputs[2]);
-        // A linear problem converges to rounding, well inside its tolerance.
-        assert!(receipt.residual <= receipt.tolerance);
+        // The receipt names the tolerance the solve was held to (the
+        // conformance check has already held the residual to it).
         assert_eq!(receipt.tolerance, controls.cell_tolerance_j);
         ends.push([temperature(&next, A), temperature(&next, B)]);
     }
@@ -1265,37 +1275,50 @@ fn a_rejected_implicit_interval_is_the_kernels_to_shorten() {
         proposal(&component, &start, 0.5, &inputs, &gate).expect("answer"),
         Proposal::Shorten { dt_s: 0.25 }
     );
-    let floor = implicit(ImplicitConductionControls {
+    let not_converged = |answer: Result<Proposal, TimelineRefusal>| {
+        matches!(
+            answer,
+            Err(TimelineRefusal::Implicit(ImplicitConductionError::NotConverged { .. }))
+        )
+    };
+    // A half of exactly the shortest interval is still asked for; under
+    // it, the owner's refusal.
+    let at_floor = implicit(ImplicitConductionControls {
+        minimum_dt_s: 0.25,
+        ..strict
+    });
+    assert_eq!(
+        proposal(&at_floor, &start, 0.5, &inputs, &gate).expect("answer"),
+        Proposal::Shorten { dt_s: 0.25 }
+    );
+    let under_floor = implicit(ImplicitConductionControls {
         minimum_dt_s: 0.3,
         ..strict
     });
-    assert!(matches!(
-        proposal(&floor, &start, 0.5, &inputs, &gate),
-        Err(TimelineRefusal::Implicit(ImplicitConductionError::NotConverged { .. }))
-    ));
+    assert!(not_converged(proposal(&under_floor, &start, 0.5, &inputs, &gate)));
+    // The owner's depth is kept. Allowed one halving of its half-second
+    // interval, the owner alone refuses this half second, and so does the
+    // Component once a quarter second has been rejected.
+    let shallow = ImplicitConductionControls {
+        maximum_halvings: 1,
+        ..strict
+    };
+    let mut workspace = ImplicitConductionWorkspace::new(2).expect("workspace");
+    assert!(
+        twin.advance_observed_to(&active, &held, target_s, shallow, &mut workspace, || Ok(()))
+            .is_err()
+    );
+    let capped = implicit(shallow);
+    assert_eq!(
+        proposal(&capped, &start, 0.5, &inputs, &gate).expect("answer"),
+        Proposal::Shorten { dt_s: 0.25 }
+    );
+    assert!(not_converged(proposal(&capped, &start, 0.25, &inputs, &gate)));
 
     // In the kernel the shortened steps are the owner's own intervals: as
     // many steps as it accepts, as many shortenings as it rejects, and the
     // same cells.
-    let mut builder = SystemBuilder::new();
-    let cells = builder.add("cells", component, start).expect("cells");
-    for (name, rate_w) in [("cell10", rates[0]), ("cell20", rates[1])] {
-        builder
-            .boundary(
-                builder.port(cells, name).expect("port"),
-                Box::new(move |_, _, out: &mut [f64]| out[0] = rate_w),
-            )
-            .expect("heated");
-    }
-    builder
-        .heat_route(
-            builder.port(cells, "environment").expect("port"),
-            &[],
-            Some(heat_sink("room", 293.15).expect("sink")),
-            RouteTemperature::Fixed(293.15),
-        )
-        .expect("route");
-    let mut system = builder.seal().expect("sealed");
+    let (mut system, cells) = heated_alone(component, start, rates);
     let (mut steps, mut shortenings) = (0_usize, 0_usize);
     with_cx(&gate, |cx| {
         while system.time_s() < target_s {
@@ -1315,9 +1338,9 @@ fn a_rejected_implicit_interval_is_the_kernels_to_shorten() {
 }
 
 #[test]
-fn a_loose_implicit_solve_leaves_its_residual_in_the_numerical_loss() {
+fn a_loose_implicit_solve_reports_its_residual_and_books_what_it_does_not_store() {
     // Two Newton iterations are all this solve gets, and a cell tolerance
-    // of 1e-4 J accepts what they leave.
+    // of 1e-4 J accepts what they leave (measured: 3e-5 J in a cell).
     let curved = Scene {
         link_w_k: 400.0,
         conductivity_slope_per_k: 0.01,
@@ -1344,15 +1367,135 @@ fn a_loose_implicit_solve_leaves_its_residual_in_the_numerical_loss() {
     let stale = later(&component, &active, 1.0);
     let (dt_s, inputs) = (0.5, [3.0, 1.0, 293.15]);
     let (receipt, _, outputs) = conforms(&component, &start, &stale, dt_s, &inputs);
-    // The receipt says how well the solve closed, and what it was asked.
-    assert!(receipt.residual > 1.0e-9, "{}", receipt.residual);
+    // The receipt says how well the solve closed each cell, and what it
+    // was asked.
+    assert!(receipt.residual > 1.0e-6, "{}", receipt.residual);
     assert!(receipt.residual <= receipt.tolerance);
     assert_eq!(receipt.tolerance, 1.0e-4);
-    // What the solve did not close is numerical loss. It is not heat on
-    // the environment wire, where nothing flows.
-    assert!(receipt.numerical_loss_j.abs() > 1.0e-9, "{}", receipt.numerical_loss_j);
-    assert!(receipt.numerical_loss_j.abs() <= 2.0e-4, "{}", receipt.numerical_loss_j);
+    // After its Newton steps, what one cell's balance lacks here is heat
+    // the other has too much of (the owner's form is conservative and
+    // nothing in this scene exchanges), so the total is kept to rounding.
+    let delivered = dt_s * (inputs[0] + inputs[1]);
+    assert!((receipt.stored_change_j - delivered).abs() <= 1.0e-12 * delivered);
+    assert!(receipt.numerical_loss_j.abs() <= 1.0e-12 * delivered, "{}", receipt.numerical_loss_j);
+    // The environment wire is the owner's external heat less the port
+    // heat: nothing, whatever the solve left.
     assert!(outputs[2].abs() <= 1.0e-13, "{} W", outputs[2]);
+
+    // The owner accepts an interval without iterating when every cell's
+    // balance at the start state is already inside its tolerance. On the
+    // 0.2 W/K link over 20 us, cell A's 6e-5 J of port heat is what the
+    // link would carry away and cell B lacks 8e-5 J: both under 1e-4 J.
+    // The cells keep their enthalpy, and the receipt books every joule
+    // delivered as numerical loss, where the ledger shows it.
+    let slack = Scene::default();
+    let (active, laws) = slack.active();
+    let component = ThermalTimeline::implicit(
+        vec![A, B],
+        slack.graph(&active, laws),
+        ImplicitConductionControls {
+            maximum_dt_s: 0.5,
+            ..loose
+        },
+        ImplicitScheme::BackwardEuler,
+    )
+    .expect("component");
+    let start = component.start(&active).expect("start");
+    let stale = later(&component, &active, 1.0);
+    let brief_s = 2.0e-5;
+    let (receipt, port_energy_in_j, _) = conforms(&component, &start, &stale, brief_s, &inputs);
+    let unstored = brief_s * (inputs[0] + inputs[1]);
+    assert!((port_energy_in_j - unstored).abs() <= 1.0e-12 * unstored);
+    assert_eq!(receipt.stored_change_j, 0.0);
+    assert!((receipt.numerical_loss_j - unstored).abs() <= 1.0e-12 * unstored);
+    assert!(receipt.residual > 1.0e-5 && receipt.residual <= receipt.tolerance);
+}
+
+#[test]
+fn an_implicit_run_ends_a_step_on_a_boundary_change_and_refuses_a_birth() {
+    let gate = CancelGate::new_clock_free();
+    let film = |htc_w_m2_k| Boundary {
+        htc_w_m2_k,
+        ..insulated()
+    };
+    // A film on cell A, and a fan change at 0.4 s.
+    let scene = Scene {
+        boundaries: [film(25.0), insulated()],
+        extra: vec![boundary_event(0.4, A, film(5.0))],
+        ..Scene::default()
+    };
+    let (active, laws) = scene.active();
+    let controls = implicit_controls(0.15);
+    let component = ThermalTimeline::implicit(
+        vec![A, B],
+        scene.graph(&active, laws),
+        controls,
+        ImplicitScheme::BackwardEuler,
+    )
+    .expect("component");
+    let start = component.start(&active).expect("start");
+    assert_eq!(component.next_event_s(&start), Some(0.4));
+    let (mut system, cells) = heated_alone(component, start, [0.0, 1.5]);
+    let (mut steps, mut landed) = (0_usize, false);
+    with_cx(&gate, |cx| {
+        while system.time_s() < 1.0 - 1.0e-12 {
+            let report = system.step(1.0 - system.time_s(), cx).expect("step");
+            landed |= (report.time_s - 0.4).abs() <= 1.0e-12;
+            steps += 1;
+            assert!(steps < 100);
+        }
+    });
+    // 0.15, 0.30, then a step cut to the change at 0.40, then four more.
+    assert!(landed, "a step ends on the fan change");
+    assert_eq!(steps, 7);
+
+    // The owner alone over the same second with the same held heat takes
+    // the same intervals and reaches the same cells.
+    let held = HeldSources::new([(A, 0.0), (B, 1.5)]);
+    let twin = scene.graph(&active, laws);
+    let (native, report) =
+        owner_solve(&twin, &active, &held, 1.0, controls, ImplicitScheme::BackwardEuler);
+    assert_eq!((report.energy.substeps, report.energy.events), (7, 1));
+    let reached = system.state::<TimelineState<'static>>(cells).expect("state");
+    assert!((reached.simulation().time_s() - 1.0).abs() <= 1.0e-12);
+    assert_eq!(reached.simulation().cells()[&A].boundary, film(5.0));
+    for id in [A, B] {
+        let (kernel, owner) = (temperature(reached, id), native.temperature_k(id).expect("T"));
+        assert!((kernel - owner).abs() <= 1.0e-10, "{kernel} vs {owner}");
+    }
+    // What the film took is in the room: the owner's external heat less
+    // the port heat.
+    let through_film = report.energy.external_heat_j - 1.5;
+    assert!(through_film < -0.1, "the film cools cell A: {through_film} J");
+    let room = system.ledger().sink_heat_j();
+    assert!((room + through_film).abs() <= 1.0e-9 * through_film.abs(), "{room} vs {through_film}");
+
+    // A birth changes the graph's bindings: the owner refuses the step
+    // that reaches it.
+    let growing = Scene {
+        extra: vec![TimedEvent {
+            time_s: 0.3,
+            event: Event::Birth(Scene::default().cell(CellId(30), 1, 320.0, insulated())),
+        }],
+        ..Scene::default()
+    };
+    let (active, laws) = growing.active();
+    let component = ThermalTimeline::implicit(
+        vec![A, B],
+        growing.graph(&active, laws),
+        controls,
+        ImplicitScheme::BackwardEuler,
+    )
+    .expect("component");
+    let start = component.start(&active).expect("start");
+    assert_eq!(component.next_event_s(&start), Some(0.3));
+    let inputs = [0.0, 0.0, 293.15];
+    assert!(propose(&component, &start, 0.1, &inputs, &gate).is_ok());
+    let refused = propose(&component, &start, 0.3, &inputs, &gate).unwrap_err();
+    assert!(
+        matches!(refused, TimelineRefusal::Implicit(ImplicitConductionError::Invalid(_))),
+        "{refused}"
+    );
 }
 
 /// A constant heat source bound to a cell of the conduction graph: heat the
@@ -1464,6 +1607,18 @@ fn the_implicit_timeline_refuses_what_it_cannot_carry() {
             TimelineBuildError::Interval { maximum_dt_s }
         );
     }
+    assert!(matches!(
+        ThermalTimeline::implicit(
+            vec![A, B],
+            scene.graph(&active, laws),
+            ImplicitConductionControls {
+                maximum_dt_s: f64::NAN,
+                ..controls
+            },
+            ImplicitScheme::BackwardEuler
+        ),
+        Err(TimelineBuildError::Interval { maximum_dt_s }) if maximum_dt_s.is_nan()
+    ));
     let start = component.start(&active).expect("start");
     let inputs = [1.0, 0.0, 293.15];
     assert!(matches!(
@@ -1563,25 +1718,21 @@ const FRACTION_B: f64 = 0.3;
 /// thermal owner's explicit bound, 10 ms, is the system's clock.
 const STIFF_LINK_W_K: f64 = 400.0;
 
-#[test]
-fn damper_heat_reaches_the_timelines_cells_on_the_thermal_clock() {
-    let gate = CancelGate::new_clock_free();
-    let (properties, links, start_bodies) = bodies();
-    let network =
-        ViscousNetwork::new(properties.clone(), links.clone(), Gravity::ZERO, controls())
-            .expect("network");
-    let scene = Scene {
-        link_w_k: STIFF_LINK_W_K,
-        ..Scene::default()
-    };
-    let thermal = ThermalTimeline::new(vec![A, B], false, config(1.0)).expect("timeline");
-    let start_cells = thermal.start(&scene.timeline()).expect("start");
-    let clock = thermal.limit_dt_s(&start_cells, 1.0).expect("bound");
-    assert!((clock - explicit_bound_s(STIFF_LINK_W_K)).abs() <= 1.0e-12 * clock, "{clock}");
-
+/// The pairing's system: the network's first connector heats cell A by
+/// `FRACTION_A`, cell B by `FRACTION_B` and a sink named `unallocated` with
+/// the rest; the second heats cell B (a receiver two routes share). No body
+/// is loaded. With `environment`, the timeline's environment port goes to a
+/// sink named `room`. Returns the system, the network and the cells.
+fn pairing(
+    network: ViscousNetwork,
+    bodies: Vec<RigidBodyState>,
+    thermal: ThermalTimeline<'static>,
+    cells: TimelineState<'static>,
+    environment: bool,
+) -> (System, NodeId, NodeId) {
     let mut builder = SystemBuilder::new();
-    let moving = builder.add("network", network, start_bodies.clone()).expect("network");
-    let cells = builder.add("cells", thermal, start_cells.clone()).expect("cells");
+    let moving = builder.add("network", network, bodies).expect("network");
+    let cells = builder.add("cells", thermal, cells).expect("cells");
     let port = |builder: &SystemBuilder, node, name: &str| builder.port(node, name).expect("port");
     for body in 0..3 {
         let force = port(&builder, moving, &format!("force{body}"));
@@ -1606,11 +1757,44 @@ fn damper_heat_reaches_the_timelines_cells_on_the_thermal_clock() {
             RouteTemperature::SinkEquivalent,
         )
         .expect("route 1");
+    if environment {
+        builder
+            .heat_route(
+                port(&builder, cells, "environment"),
+                &[],
+                Some(heat_sink("room", 293.15).expect("sink")),
+                RouteTemperature::Fixed(293.15),
+            )
+            .expect("environment");
+    }
     let mut system = builder.seal().expect("sealed");
+    // The receivers' temperature comes back to the network's heat ports;
+    // the kernel solves the two together and starts from this.
     for name in ["heat0", "heat1"] {
         let heat = system.port(moving, name).expect("heat port");
         assert!(system.guess(heat, &[300.0]));
     }
+    (system, moving, cells)
+}
+
+#[test]
+fn damper_heat_reaches_the_timelines_cells_on_the_thermal_clock() {
+    let gate = CancelGate::new_clock_free();
+    let (properties, links, start_bodies) = bodies();
+    let network =
+        ViscousNetwork::new(properties.clone(), links.clone(), Gravity::ZERO, controls())
+            .expect("network");
+    let scene = Scene {
+        link_w_k: STIFF_LINK_W_K,
+        ..Scene::default()
+    };
+    let thermal = ThermalTimeline::new(vec![A, B], false, config(1.0)).expect("timeline");
+    let start_cells = thermal.start(&scene.timeline()).expect("start");
+    let clock = thermal.limit_dt_s(&start_cells, 1.0).expect("bound");
+    assert!((clock - explicit_bound_s(STIFF_LINK_W_K)).abs() <= 1.0e-12 * clock, "{clock}");
+
+    let (mut system, moving, cells) =
+        pairing(network, start_bodies.clone(), thermal, start_cells.clone(), false);
 
     // The same protocol by hand, as the hand-written coupling does it: the
     // thermal owner picks each interval, mechanics advances once over it,
@@ -1700,47 +1884,8 @@ fn damper_heat_reaches_an_implicit_timeline_on_steps_the_explicit_rule_cannot_ta
             ThermalTimeline::implicit(vec![A, B], scene.graph(&active, laws), solve, scheme)
                 .expect("timeline");
         let start_cells = thermal.start(&active).expect("start");
-        let mut builder = SystemBuilder::new();
-        let moving = builder.add("network", network, start_bodies.clone()).expect("network");
-        let cells = builder.add("cells", thermal, start_cells).expect("cells");
-        let port =
-            |builder: &SystemBuilder, node, name: &str| builder.port(node, name).expect("port");
-        for body in 0..3 {
-            let force = port(&builder, moving, &format!("force{body}"));
-            builder
-                .boundary(force, Box::new(|_, _, out: &mut [f64]| out.fill(0.0)))
-                .expect("free");
-        }
-        let (cell_a, cell_b) = (port(&builder, cells, "cell10"), port(&builder, cells, "cell20"));
-        builder
-            .heat_route(
-                port(&builder, moving, "heat0"),
-                &[(cell_a, FRACTION_A), (cell_b, FRACTION_B)],
-                Some(heat_sink("unallocated", 293.15).expect("sink")),
-                RouteTemperature::SinkEquivalent,
-            )
-            .expect("route 0");
-        builder
-            .heat_route(
-                port(&builder, moving, "heat1"),
-                &[(cell_b, 1.0)],
-                None,
-                RouteTemperature::SinkEquivalent,
-            )
-            .expect("route 1");
-        builder
-            .heat_route(
-                port(&builder, cells, "environment"),
-                &[],
-                Some(heat_sink("room", 293.15).expect("sink")),
-                RouteTemperature::Fixed(293.15),
-            )
-            .expect("environment");
-        let mut system = builder.seal().expect("sealed");
-        for name in ["heat0", "heat1"] {
-            let heat = system.port(moving, name).expect("heat port");
-            assert!(system.guess(heat, &[300.0]));
-        }
+        let (mut system, moving, cells) =
+            pairing(network, start_bodies.clone(), thermal, start_cells, true);
 
         // The same protocol by hand with the owners: mechanics over each
         // interval, then the owner's implicit solve fed the mean powers.
@@ -1808,11 +1953,11 @@ fn damper_heat_reaches_an_implicit_timeline_on_steps_the_explicit_rule_cannot_ta
         };
         let unallocated = (1.0 - FRACTION_A - FRACTION_B) * heat_0;
         assert!((sink("unallocated") - unallocated).abs() <= 1.0e-11 * total);
-        // Nothing exchanges with the room. The solve closes each cell to
-        // 1e-11 J per interval, and that residual is in the cells'
-        // numerical loss.
+        // Nothing exchanges with the room.
         assert!(sink("room").abs() <= 1.0e-13, "{scheme:?}: {} J", sink("room"));
-        let closure_j = 1.0e-9;
+        // The cells stored what they were given: the solves closed to
+        // rounding in the total (their per-cell tolerance is 1e-11 J).
+        let closure_j = 1.0e-11 * total;
         let warmed = account("cells").stored_change_j.value();
         assert!((warmed - (total - unallocated)).abs() <= closure_j, "{scheme:?}: {warmed}");
         assert!((account("network").dissipated_j.value() - total).abs() <= 1.0e-11 * total);

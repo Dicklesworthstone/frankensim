@@ -2,12 +2,13 @@
 
 ## The enthalpy timeline as a composition-kernel Component
 
-`component::ThermalTimeline` puts the explicit `DepositionSimulation` behind
+`component::ThermalTimeline` puts `DepositionSimulation` behind
 `fs_ports::component::Component` (contract v0), so the kernel in `fs-system`
 can deliver heat to its cells from any other component and route what leaves
 it. Nothing is integrated in the wrapper: a step is the owner's own
-`advance_observed`, with the delivered heat given to the owner as its
-`step_sources`.
+`advance_observed` (`ThermalTimeline::new`, the explicit rule) or its
+implicit solve on a prepared conduction graph (`ThermalTimeline::implicit`,
+see below), with the delivered heat given to the owner as its `step_sources`.
 
 Ports, in this order: `cell<id>` per declared cell (a heat port that receives
 the heat rate into that cell and returns the mean of its temperatures at the
@@ -51,6 +52,36 @@ clock, as the hand-written couplings of this timeline do; a longer step is the
 owner's several substeps. `next_event_s` is the time to the next scheduled
 event.
 
+Implicit conduction. `ThermalTimeline::implicit(cells, graph, controls,
+scheme)` steps the same timeline with the owner's backward-Euler or SDIRK2
+solve on an `ImplicitConductionGraph` (`advance_observed_to`,
+`advance_sdirk2_observed_to`), with the same ports and the same hand-over of
+energy. It always has the `environment` port, because a graph can own heat
+sources and boundary laws that no cell's boundary shows; its heat is the
+owner's external heat less the port heat. `limit_dt_s` is the smaller of the
+proposal and the controls' `maximum_dt_s`: no conduction bound. `start`
+applies no events (the graph was prepared against the timeline as it stands)
+and refuses one still scheduled at the timeline's time
+(`TimelineRefusal::PendingEvent`). When the owner's solve rejects an interval
+(no convergence, an entropy decrease, a singular or unconverged linear
+solve), the step is not taken: the Component answers `Proposal::Shorten` with
+half the step and the kernel retries every component over it, as the
+hand-written couplings re-run their mechanics over a halved interval. The
+owner's own halving is switched off for the step and its depth is kept: a
+step is shortened only while its half is at least `minimum_dt_s` and at least
+`maximum_dt_s / 2^maximum_halvings`; below that the owner's refusal is
+returned. In a block the kernel solves by iteration the answer is given on an
+iterate, so a step can be shortened, or refused at that depth, that the
+converged inputs would have passed. The receipt carries the solve's largest
+cell residual and the tolerance it met. What the solve leaves unclosed in the
+total is the owner's energy residual, at most `total_tolerance_j` an
+interval, booked as numerical loss; the owner accepts an interval without
+iterating when the heat it would store is already inside the tolerances, and
+that heat is then all loss. With scheduled events the graph admits what
+leaves its bindings as they are: a boundary change is taken; a birth, a
+contact or a separation is the owner's refusal. One step allocates the
+solver's workspace.
+
 The receipt's stored change is the owner's `EnergyAudit`; numerical loss is
 what entered through the ports less that. The energy tolerance is
 `(64 + 2 cells) eps` times the sum of the sizes of the port energies, of the
@@ -67,13 +98,21 @@ only if the environment wire is at the authored ambient temperature, which is
 not checked. A birth after the start is refused, because its mass and enthalpy
 would enter with no port to carry them. The class is `Smooth`; a law with a
 latent interval has kinks at the interval's ends, where a kernel that
-differences the port map gets a one-sided slope. No analytic tangent. The
-implicit and staged variants of the owner are not wrapped. Beside port heat,
+differences the port map gets a one-sided slope; with the implicit solve the
+map is smooth to the solve's tolerance only, and a step is refused outright
+on one side of a rejection. No analytic tangent. The owner's adaptive
+(step-doubling) and staged variants are not wrapped. Beside port heat,
 the environment heat carries that heat's rounding (about 1e-16 of it), since
 it is the owner's external heat less the port heat. Against the owner driven
 directly with held rates, a step agrees to rounding, not bit for bit: the
 wrapper hands the owner energy. Not pinned by a test: the sign of the
-numerical loss (it is at rounding level); every term of the tolerance but the
+numerical loss with the explicit rule (it is at rounding level there); that
+port energy is booked when the owner accepts an interval and not when it is
+prepared (no owner retries inside a step now); the entropy-decrease and
+linear-solve rejections (only non-convergence is exercised); that the
+receipt's residual is the largest over several intervals and both SDIRK2
+stages; an event before the timeline's time at an implicit start; every term
+of the tolerance but the
 stored-energy terms, and its per-cell factor (the plain stored-energy sum
 needs it from about 1e6 cells); equality's use of the budget, and its
 blindness to the schedule past the next event and to contact coverage; that

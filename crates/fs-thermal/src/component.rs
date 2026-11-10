@@ -77,11 +77,23 @@
 //! not taken: the Component answers `Proposal::Shorten` with half the step,
 //! and the kernel retries every component over the shorter interval, as the
 //! hand-written couplings of this solve re-run their mechanics over a halved
-//! interval. The owner's own halving is switched off for the step, so the
-//! controls' `maximum_halvings` is not used and the kernel's limit on
-//! shortenings applies; a step whose half would be under the controls'
-//! `minimum_dt_s` returns the owner's refusal. The receipt carries the
-//! solve's largest cell residual and the tolerance it met. One step
+//! interval. The owner's own halving is switched off for the step, and its
+//! depth is kept: a step is shortened only while its half is at least the
+//! controls' `minimum_dt_s` and at least `maximum_dt_s / 2^maximum_halvings`,
+//! the shortest interval the owner itself would try; below that the owner's
+//! refusal is returned. (A `maximum_halvings` above the 32 the owner admits
+//! is not refused here.) In a block that the kernel solves by iteration the
+//! answer is given on an iterate, so a step can be shortened, or refused at
+//! that depth, that the converged inputs would have passed.
+//!
+//! The receipt carries the solve's largest cell residual and the tolerance
+//! it met. What the solve leaves unclosed in the total is the owner's
+//! energy residual, at most the controls' `total_tolerance_j` an interval,
+//! and it is booked as numerical loss. After a Newton step on a problem
+//! without state-dependent exchange it is at rounding, because the owner's
+//! form is conservative; but the owner accepts an interval without
+//! iterating when the heat it would store is already inside the
+//! tolerances, and that heat is then all loss. One step
 //! allocates the solver's workspace. With scheduled events the graph admits
 //! only what leaves its bindings as they are: a boundary change is taken, a
 //! birth, a contact or a separation is the owner's refusal.
@@ -128,8 +140,8 @@ use crate::enthalpy::conduction::implicit::{
     ImplicitConductionObservedError, ImplicitConductionWorkspace,
 };
 use crate::enthalpy::{
-    Boundary, CellId, DepositionError, DepositionObserver, DepositionSimulation, Event,
-    StepConfig,
+    Boundary, CellId, DepositionError, DepositionObserver, DepositionSimulation, EnergyAudit,
+    Event, StepConfig,
 };
 
 /// Why a [`ThermalTimeline`] could not be built.
@@ -568,7 +580,9 @@ impl<'a> ThermalTimeline<'a> {
     /// # Errors
     /// [`TimelineBuildError::Duplicate`] for a cell named twice;
     /// [`TimelineBuildError::Interval`] for a longest interval that is not
-    /// positive and finite. The owner checks the other controls at a step.
+    /// positive and finite. The owner checks the other controls at a step,
+    /// except `maximum_halvings`, which only bounds how far a step is
+    /// shortened.
     pub fn implicit(
         cells: Vec<CellId>,
         graph: ImplicitConductionGraph<'a>,
@@ -657,6 +671,92 @@ impl<'a> ThermalTimeline<'a> {
             simulation: started,
         })
     }
+
+    /// The owner's advance of `old` to `target_s` with `observer`, by this
+    /// timeline's driver. `None` when the implicit solve rejected the
+    /// interval and half of the kernel's step `dt_s` may be asked for.
+    fn advance(
+        &self,
+        old: &DepositionSimulation<'a>,
+        observer: &Held,
+        target_s: f64,
+        dt_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Option<Advanced<'a>>, TimelineRefusal> {
+        match &self.driver {
+            Driver::Explicit => {
+                let (next, held, audit) =
+                    old.advance_observed(observer, target_s, self.config, || {
+                        cx.checkpoint().map_err(|_| DepositionError::Cancelled)
+                    })?;
+                Ok(Some(Advanced {
+                    next,
+                    held,
+                    audit,
+                    solve: (0.0, 0.0),
+                }))
+            }
+            Driver::Implicit {
+                graph,
+                controls,
+                scheme,
+            } => {
+                let mut workspace = ImplicitConductionWorkspace::new(graph.cell_ids().len())?;
+                let checkpoint = || cx.checkpoint().map_err(|_| DepositionError::Cancelled);
+                // A rejected interval is the kernel's to shorten, with every
+                // other component: the owner does not halve it here.
+                let single = ImplicitConductionControls {
+                    maximum_halvings: 0,
+                    ..*controls
+                };
+                let advanced = match scheme {
+                    ImplicitScheme::BackwardEuler => graph.advance_observed_to(
+                        old,
+                        observer,
+                        target_s,
+                        single,
+                        &mut workspace,
+                        checkpoint,
+                    ),
+                    ImplicitScheme::Sdirk2 => graph.advance_sdirk2_observed_to(
+                        old,
+                        observer,
+                        target_s,
+                        single,
+                        &mut workspace,
+                        checkpoint,
+                    ),
+                };
+                // The owner's own depth: it halves an interval of at most
+                // `maximum_dt_s` at most `maximum_halvings` times, and
+                // never under `minimum_dt_s`.
+                let halvings = i32::try_from(controls.maximum_halvings).unwrap_or(i32::MAX);
+                let floor_s = controls
+                    .minimum_dt_s
+                    .max(controls.maximum_dt_s * 0.5_f64.powi(halvings));
+                let (next, held, report) = match advanced {
+                    Ok(advanced) => advanced,
+                    Err(ImplicitConductionObservedError::Implicit(error))
+                        if rejected(&error) && 0.5 * dt_s >= floor_s =>
+                    {
+                        return Ok(None);
+                    }
+                    Err(ImplicitConductionObservedError::Implicit(error)) => {
+                        return Err(error.into());
+                    }
+                    Err(ImplicitConductionObservedError::Observer(error)) => {
+                        return Err(error.into());
+                    }
+                };
+                Ok(Some(Advanced {
+                    next,
+                    held,
+                    audit: report.energy,
+                    solve: (report.maximum_cell_residual_j, controls.cell_tolerance_j),
+                }))
+            }
+        }
+    }
 }
 
 /// The first active cell whose boundary exchanges heat.
@@ -666,6 +766,16 @@ fn exchanging_cell(simulation: &DepositionSimulation<'_>) -> Option<u64> {
         .values()
         .find(|cell| exchanges(&cell.boundary))
         .map(|cell| cell.id.0)
+}
+
+/// A step the owner took.
+struct Advanced<'a> {
+    next: DepositionSimulation<'a>,
+    held: Held,
+    audit: EnergyAudit,
+    /// The implicit solve's largest cell residual and its tolerance [J];
+    /// zeros for the explicit rule.
+    solve: (f64, f64),
 }
 
 /// `sum |m e|` over the active cells: the size of the terms of the stored
@@ -776,63 +886,16 @@ impl<'a> Component for ThermalTimeline<'a> {
             delivered_terms_j += (dt_s * rate_w).abs();
         }
         let observer = Held::new(energy_j, target_s, false);
-        // The implicit solve's largest cell residual and its tolerance.
-        let mut solve = (0.0_f64, 0.0_f64);
-        let (next, held, audit) = match &self.driver {
-            Driver::Explicit => {
-                old.simulation
-                    .advance_observed(&observer, target_s, self.config, || {
-                        cx.checkpoint().map_err(|_| DepositionError::Cancelled)
-                    })?
-            }
-            Driver::Implicit {
-                graph,
-                controls,
-                scheme,
-            } => {
-                let mut workspace = ImplicitConductionWorkspace::new(graph.cell_ids().len())?;
-                let checkpoint = || cx.checkpoint().map_err(|_| DepositionError::Cancelled);
-                // A rejected interval is the kernel's to shorten, with every
-                // other component: the owner does not halve it here.
-                let single = ImplicitConductionControls {
-                    maximum_halvings: 0,
-                    ..*controls
-                };
-                let advanced = match scheme {
-                    ImplicitScheme::BackwardEuler => graph.advance_observed_to(
-                        &old.simulation,
-                        &observer,
-                        target_s,
-                        single,
-                        &mut workspace,
-                        checkpoint,
-                    ),
-                    ImplicitScheme::Sdirk2 => graph.advance_sdirk2_observed_to(
-                        &old.simulation,
-                        &observer,
-                        target_s,
-                        single,
-                        &mut workspace,
-                        checkpoint,
-                    ),
-                };
-                let (next, held, report) = match advanced {
-                    Ok(advanced) => advanced,
-                    Err(ImplicitConductionObservedError::Implicit(error))
-                        if rejected(&error) && 0.5 * dt_s >= controls.minimum_dt_s =>
-                    {
-                        return Ok(Proposal::Shorten { dt_s: 0.5 * dt_s });
-                    }
-                    Err(ImplicitConductionObservedError::Implicit(error)) => {
-                        return Err(error.into());
-                    }
-                    Err(ImplicitConductionObservedError::Observer(error)) => {
-                        return Err(error.into());
-                    }
-                };
-                solve = (report.maximum_cell_residual_j, controls.cell_tolerance_j);
-                (next, held, report.energy)
-            }
+        let Some(Advanced {
+            next,
+            held,
+            audit,
+            solve,
+        }) = self.advance(&old.simulation, &observer, target_s, dt_s, cx)?
+        else {
+            // The owner's solve rejected the interval, and half of the step
+            // is still within its depth.
+            return Ok(Proposal::Shorten { dt_s: 0.5 * dt_s });
         };
         if let Some(cell) = held.born {
             return Err(TimelineRefusal::Birth {

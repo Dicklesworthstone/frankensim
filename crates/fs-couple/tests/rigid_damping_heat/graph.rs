@@ -7,13 +7,32 @@
 //! (`fs_mbd::component::network::ViscousNetwork` and
 //! `fs_thermal::component::ThermalTimeline`), the authored heat fractions are
 //! heat routes, and the kernel in `fs-system` steps them. No code is written
-//! for the combination. Where the module succeeds the two must agree: the
-//! bodies bit for bit (to the kernel's solve tolerance when a temperature
-//! signal feeds the damping), the cells to the rounding of handing heat over
-//! as energy instead of as a rate, and the report's accounts with the
-//! kernel's ledger. Not compared: the module refuses a whole advance when
-//! its law has no form at the final temperature, where the graph takes that
-//! step and refuses the next.
+//! for the combination. The same is done for the implicit thermal entry
+//! points and for temperature-dependent damping.
+//!
+//! Where the module succeeds the two must agree: the bodies bit for bit (to
+//! the kernel's solve tolerance when a temperature signal feeds the
+//! damping), the cells to the rounding of handing heat over as energy
+//! instead of as a rate, and the report's accounts with the kernel's ledger.
+//! When the implicit solve rejects an interval, the module re-runs its
+//! mechanics over half of it; the graph's timeline answers `Shorten` and the
+//! kernel re-steps every component over half of it, so the two take the same
+//! intervals, provided the timeline's solve is tried with the heat it will
+//! be given. That holds when the network does not depend on what the cells
+//! return (heat released at a fixed temperature, as in the module). When the
+//! receivers' temperature is fed back, the kernel solves the two together
+//! and the timeline can answer on an iterate: the graph's run can then be
+//! finer than the module's, and in the fixture below it is.
+//!
+//! Limits of the comparison. The module advances its mechanics over the
+//! thermal clock's `end - start`, the kernel over the step it negotiated.
+//! On every step of these fixtures the two are the same number; that is how
+//! these times round, not a property of every grid. Where they differ by an
+//! ulp of the time, the bodies agree to rounding and not by bits. Not
+//! compared: the
+//! module refuses a whole advance when its law has no form at the final
+//! temperature, where the graph takes that step and refuses the next; the
+//! `driven` and `relaxation` entry points, which have no Component.
 
 use super::*;
 use fs_alloc::{ArenaConfig, ArenaPool};
@@ -120,16 +139,23 @@ fn node<'a>(ledger: &'a Ledger, name: &str) -> &'a fs_system::ledger::NodeAccoun
 /// thermal Component's bound and events cut the step, as the thermal owner's
 /// do inside `advance_candidate`.
 fn run(system: &mut System, target_s: f64) -> Vec<f64> {
+    run_counting(system, target_s).0
+}
+
+/// [`run`], and the number of times the kernel shortened a step on the way.
+fn run_counting(system: &mut System, target_s: f64) -> (Vec<f64>, usize) {
     let gate = CancelGate::new_clock_free();
     let mut intervals = Vec::new();
+    let mut shortenings = 0_usize;
     with_cx(&gate, |cx| {
         while system.time_s() < target_s {
             let report = system.step(target_s - system.time_s(), cx).unwrap();
             intervals.push(report.dt_s);
+            shortenings += report.shortenings as usize;
             assert!(intervals.len() < 1000);
         }
     });
-    intervals
+    (intervals, shortenings)
 }
 
 #[test]
@@ -402,6 +428,164 @@ fn the_declared_graph_reproduces_the_temperature_feedback_candidate() {
     }
 }
 
+/// The stiff pair's graph: the network, the timeline stepped by the
+/// owner's implicit solve on a conduction graph prepared as the module's
+/// is, and both connectors' heat routed whole to cell 0 (one receiver
+/// shared by two routes), released at `released`. Returns the system and
+/// its two nodes.
+fn implicit_graph(
+    bodies: &Bodies,
+    laws: &'static [Caloric; 2],
+    heat: &DepositionSimulation<'static>,
+    config: RigidDampingImplicitConfig,
+    scheme: ImplicitScheme,
+    released: RouteTemperature,
+) -> (System, NodeId, NodeId) {
+    let network = ViscousNetwork::new(
+        bodies.properties.to_vec(),
+        bodies.links.to_vec(),
+        bodies.gravity,
+        config.mechanical,
+    )
+    .unwrap();
+    let timeline =
+        ThermalTimeline::implicit(vec![CellId(0)], stiff_graph(laws, heat), config.thermal, scheme)
+            .unwrap();
+    let start = timeline.start(heat).unwrap();
+    let mut builder = SystemBuilder::new();
+    let moving = builder.add("network", network, bodies.states.to_vec()).unwrap();
+    let cells = builder.add("cells", timeline, start).unwrap();
+    for body in 0..bodies.loads.len() {
+        let force = builder.port(moving, &format!("force{body}")).unwrap();
+        builder
+            .boundary(force, Box::new(|_, _, out: &mut [f64]| out.fill(0.0)))
+            .unwrap();
+    }
+    for connector in 0..2 {
+        builder
+            .heat_route(
+                builder.port(moving, &format!("heat{connector}")).unwrap(),
+                &[(builder.port(cells, "cell0").unwrap(), 1.0)],
+                None,
+                released,
+            )
+            .unwrap();
+    }
+    builder
+        .heat_route(
+            builder.port(cells, "environment").unwrap(),
+            &[],
+            Some(heat_sink("environment", 300.0).unwrap()),
+            RouteTemperature::Fixed(300.0),
+        )
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    if matches!(released, RouteTemperature::SinkEquivalent) {
+        // The receivers' temperature comes back to the network, so the
+        // kernel solves the two together and starts from this.
+        for connector in 0..2 {
+            let port = system.port(moving, &format!("heat{connector}")).unwrap();
+            assert!(system.guess(port, &[300.0]));
+        }
+    }
+    (system, moving, cells)
+}
+
+#[test]
+fn the_declared_graph_follows_the_module_through_rejected_intervals() {
+    // The stiff pair with calorics that curve (e = a dT + b dT^2 / 2) and a
+    // solve allowed two Newton iterations. The module's solve rejects
+    // intervals; it halves each one and re-runs its mechanics over the half.
+    let laws: &'static [Caloric; 2] = Box::leak(Box::new(laws()));
+    let bodies = Bodies::new([0.7, 1.1]);
+    let routes = [
+        BTreeMap::from([(CellId(0), 1.0)]),
+        BTreeMap::from([(CellId(0), 1.0)]),
+    ];
+    let heat = stiff_thermal(laws, 256);
+    for (module_scheme, scheme) in [
+        (ImplicitThermalScheme::BackwardEuler, ImplicitScheme::BackwardEuler),
+        (ImplicitThermalScheme::Sdirk2, ImplicitScheme::Sdirk2),
+    ] {
+        let mut config = implicit_config(module_scheme);
+        config.thermal.maximum_newton_iterations = 2;
+        let conduction = stiff_graph(laws, &heat);
+        let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+        let (candidate, native) = advance_implicit_candidate(
+            bodies.input(&routes),
+            &heat,
+            &Observe::default(),
+            0.5,
+            &conduction,
+            config,
+            &mut workspace,
+            || false,
+        )
+        .unwrap();
+        let case = format!("{scheme:?}");
+        assert!(native.rejected_intervals > 0, "{case}: {native:?}");
+        let module_intervals: Vec<f64> =
+            candidate.observer().intervals.iter().map(|&(_, dt_s, _)| dt_s).collect();
+        assert_eq!(module_intervals.len(), native.energy.substeps, "{case}");
+
+        // The graph's timeline answers `Shorten` where the module's solve
+        // rejects, and the kernel re-steps the network with it: the same
+        // accepted intervals, one shortening for every rejection. The heat
+        // is released at a fixed temperature here, as in the module, whose
+        // mechanics never sees a cell: the network then depends on nothing
+        // the cells return, the kernel steps it first, and the timeline's
+        // solve is tried with the heat it will be given.
+        let (mut system, moving, cells) = implicit_graph(
+            &bodies,
+            laws,
+            &heat,
+            config,
+            scheme,
+            RouteTemperature::Fixed(300.0),
+        );
+        let (intervals, shortenings) = run_counting(&mut system, 0.5);
+        assert_eq!(intervals, module_intervals, "{case}");
+        assert_eq!(shortenings, native.rejected_intervals, "{case}");
+        let reached = system.state::<Vec<RigidBodyState>>(moving).unwrap();
+        assert_eq!(reached.as_slice(), candidate.states(), "{case}");
+        let timeline = system.state::<TimelineState<'static>>(cells).unwrap();
+        for id in [CellId(0), CellId(1)] {
+            let kernel = timeline.simulation().temperature_k(id).unwrap();
+            let module = candidate.thermal().temperature_k(id).unwrap();
+            assert!((kernel - module).abs() <= 1e-9, "{case}: {id:?} {kernel} vs {module}");
+        }
+        let dissipated = candidate.report().dissipated_energy_j;
+        let stored = node(system.ledger(), "cells").stored_change_j.value();
+        assert!((stored - dissipated).abs() <= 1e-11 * dissipated, "{case}: {stored}");
+
+        // Released at the receivers' temperature, the heat's temperature
+        // comes back to the network, the kernel solves the two together,
+        // and the timeline can answer `Shorten` on an iterate that is not
+        // yet the heat it will be given. From one state that can only add
+        // shortenings; here the run comes out finer than the module's
+        // (measured: 23 steps and 76 shortenings against 20 and 64 for
+        // backward Euler, 16 and 44 against 15 and 40 for SDIRK2) and
+        // agrees with it as two discretisations do (measured: 6e-6 K).
+        let (mut looped, _, cells) = implicit_graph(
+            &bodies,
+            laws,
+            &heat,
+            config,
+            scheme,
+            RouteTemperature::SinkEquivalent,
+        );
+        let (finer, more) = run_counting(&mut looped, 0.5);
+        assert!(finer.len() >= module_intervals.len(), "{case}: {}", finer.len());
+        assert!(more >= native.rejected_intervals, "{case}: {more}");
+        let timeline = looped.state::<TimelineState<'static>>(cells).unwrap();
+        for id in [CellId(0), CellId(1)] {
+            let kernel = timeline.simulation().temperature_k(id).unwrap();
+            let module = candidate.thermal().temperature_k(id).unwrap();
+            assert!((kernel - module).abs() <= 1e-4, "{case}: {id:?} {kernel} vs {module}");
+        }
+    }
+}
+
 #[test]
 fn the_declared_graph_reproduces_the_implicit_candidate() {
     // The fixture of the module's own implicit test: two cells on a
@@ -436,56 +620,14 @@ fn the_declared_graph_reproduces_the_implicit_candidate() {
         let report = candidate.report();
         assert_eq!((native.energy.substeps, native.rejected_intervals), (2, 0));
 
-        // The graph: the same network, the timeline stepped by the same
-        // solve on a graph prepared the same way, both connectors' heat
-        // routed whole to cell 0 (one receiver shared by two routes).
-        let network = ViscousNetwork::new(
-            bodies.properties.to_vec(),
-            bodies.links.to_vec(),
-            bodies.gravity,
-            config.mechanical,
-        )
-        .unwrap();
-        let timeline = ThermalTimeline::implicit(
-            vec![CellId(0)],
-            stiff_graph(laws, &heat),
-            config.thermal,
+        let (mut system, moving, cells) = implicit_graph(
+            &bodies,
+            laws,
+            &heat,
+            config,
             scheme,
-        )
-        .unwrap();
-        let start = timeline.start(&heat).unwrap();
-        let mut builder = SystemBuilder::new();
-        let moving = builder.add("network", network, bodies.states.to_vec()).unwrap();
-        let cells = builder.add("cells", timeline, start).unwrap();
-        for body in 0..bodies.loads.len() {
-            let force = builder.port(moving, &format!("force{body}")).unwrap();
-            builder
-                .boundary(force, Box::new(|_, _, out: &mut [f64]| out.fill(0.0)))
-                .unwrap();
-        }
-        for connector in 0..2 {
-            builder
-                .heat_route(
-                    builder.port(moving, &format!("heat{connector}")).unwrap(),
-                    &[(builder.port(cells, "cell0").unwrap(), 1.0)],
-                    None,
-                    RouteTemperature::SinkEquivalent,
-                )
-                .unwrap();
-        }
-        builder
-            .heat_route(
-                builder.port(cells, "environment").unwrap(),
-                &[],
-                Some(heat_sink("environment", 300.0).unwrap()),
-                RouteTemperature::Fixed(300.0),
-            )
-            .unwrap();
-        let mut system = builder.seal().unwrap();
-        for connector in 0..2 {
-            let port = system.port(moving, &format!("heat{connector}")).unwrap();
-            assert!(system.guess(port, &[300.0]));
-        }
+            RouteTemperature::SinkEquivalent,
+        );
         let intervals = run(&mut system, 0.5);
         let case = format!("{scheme:?}");
 
@@ -517,9 +659,10 @@ fn the_declared_graph_reproduces_the_implicit_candidate() {
             );
         };
         let rounding = 1e-11 * dissipated;
-        // The solve's own closure, 1e-9 J for the call.
+        // The tolerance the owner's solve gates its energy balance with.
         let closure = config.thermal.total_tolerance_j;
         close(node(ledger, "network").dissipated_j.value(), dissipated, rounding, "dissipated");
+        // A property of the fixture: its routes leave nothing unallocated.
         close(report.deposited_heat_j, dissipated, rounding, "all of it deposited");
         close(
             node(ledger, "cells").stored_change_j.value(),
