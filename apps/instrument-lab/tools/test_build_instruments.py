@@ -618,7 +618,8 @@ class EndToEnd(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root, out = Path(tmp) / "analysis", Path(tmp) / "out"
             make_pair(root, ours_peak=1.0)
-            with mock.patch("sys.argv", ["build_instruments.py", "--analysis", str(root), "--out", str(out)]):
+            # no status files: the real clarinet card carries a "blocked" line, which would turn the badge into "blocked"
+            with mock.patch("sys.argv", ["build_instruments.py", "--analysis", str(root), "--out", str(out), "--descriptions", str(Path(tmp) / "none")]):
                 self.assertEqual(B.main(), 2)
             card = json.loads((out / "clarinet" / "card.json").read_text())
             self.assertEqual(card["pairs"], [])
