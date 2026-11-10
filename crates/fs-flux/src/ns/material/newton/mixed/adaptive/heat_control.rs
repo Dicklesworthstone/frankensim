@@ -369,4 +369,5 @@ fn invalid(message: &'static str) -> MaterialSdirk2AdaptiveError {
 }
 
 #[cfg(test)]
+#[path = "heat_control/tests.rs"]
 mod tests;

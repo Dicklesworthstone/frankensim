@@ -156,9 +156,9 @@ fn g1_adaptive_mixed_carreau_retains_time_dependent_slip_traction_reservoir_and_
     let laws = [thermal_law(density, 1.0), thermal_law(density, 3.0)];
     let amplitude = |time: f64| 1.0 + 0.4 * (time - 1.0);
     let temperature = |time: f64| 300.0 + 20.0 * (time - 1.0);
-    let velocity = |t, p: [f64; 2]| [amplitude(t) * layer_shape(p[1]), 0.2];
-    let pressure = |time| density * (7.0 + time);
-    let stress = |time| {
+    let velocity = |t: f64, p: [f64; 2]| [amplitude(t) * layer_shape(p[1]), 0.2];
+    let pressure = |time: f64| density * (7.0 + time);
+    let stress = |time: f64| {
         let rate = 3.0 * amplitude(time);
         laws[0]
             .evaluate(temperature(time), rate)

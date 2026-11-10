@@ -253,7 +253,7 @@ fn reversing_frozen_advector_backflow_uses_actual_split_cubic_work() {
             .unwrap()
             .solve()
             .unwrap();
-        let at = |cell, point| {
+        let at = |cell: usize, point: [f64; 2]| {
             let mut u = [0.0; 2];
             for local in 0..6 {
                 let basis = eval_basis(&system.bases[cell], local, point);

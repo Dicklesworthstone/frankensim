@@ -1068,7 +1068,7 @@ fn transient_flow_control_preserves_sources_and_both_histories_on_refusal() {
         (0, 0),
         "history refusal precedes physical callbacks"
     );
-    let refusal = source_refusal();
+    let refusal = crate::density::source_refusal();
     let failed = owner.bdf2_navier_stokes_mixed_rheology_variable_step_flow_control(
         &force,
         &boundaries,

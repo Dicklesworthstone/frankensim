@@ -141,7 +141,9 @@ fn controlled_sheared_channel_resolves_density_rheology_and_port_pressure_togeth
         })
         .collect();
     let previous = vec![0.0; system.n_u];
-    let mut invariant = None;
+    // Annotated: on macOS an extra `IntoIterator` impl in the dependency
+    // graph leaves `.zip(velocity)` below without a unique type otherwise.
+    let mut invariant: Option<(Vec<f64>, f64, f64)> = None;
     for reference in [1.0, 13.0] {
         let samples = RefCell::new(vec![(Cell::default(), 0.0, 0.0); original.len()]);
         let force_calls = Counter::new(0);

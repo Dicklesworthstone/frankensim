@@ -41,7 +41,7 @@ fn transported_density_has_one_physical_free_fall_acceleration() {
         })
         .collect();
     let gravity = [1.7, -3.2];
-    let mut reference_velocity = None;
+    let mut reference_velocity: Option<Vec<f64>> = None;
     for reference in [0.5, 7.0, 1000.0] {
         let setting = controls(reference);
         let accepted = system
@@ -376,7 +376,7 @@ fn spatial_acceleration_uses_transported_mass_and_resolves_angular_motion() {
     // gradient. The exact native endpoint is a rigid rotation superposed on
     // the transported free stream, even though rho_new differs in every cell.
     let acceleration = |p: [f64; 2]| [1.3 * (p[1] + 0.2), -1.3 * (p[0] - 0.4)];
-    let mut reference_velocity = None;
+    let mut reference_velocity: Option<Vec<f64>> = None;
     for reference in [0.5, 7.0, 1000.0] {
         let samples = std::cell::Cell::new(0);
         let source = |_: usize, point| {

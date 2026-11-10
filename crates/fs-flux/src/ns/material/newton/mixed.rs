@@ -17,6 +17,7 @@ use fs_math::dd::Dd;
 use std::cell::RefCell;
 
 /// Adaptive physical-time advancement on the original mixed SDIRK2 owner.
+#[path = "mixed/adaptive.rs"]
 pub mod adaptive;
 
 /// Accepted mixed Navier--Stokes Newton endpoint and original material owners.

@@ -55,7 +55,7 @@ fn rheology_and_transport_share_the_accepted_endpoint_and_native_energy_balance(
         .collect();
     let dt = 0.06;
     let depth = 1.7;
-    let mut first_velocity = None;
+    let mut first_velocity: Option<Vec<f64>> = None;
     for reference in [1.0, 11.0] {
         let calls = Counter::new(0);
         let samples = RefCell::new(vec![(Cell::default(), 0.0, 0.0); original.len()]);

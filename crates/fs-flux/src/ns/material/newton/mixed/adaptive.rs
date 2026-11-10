@@ -12,6 +12,7 @@ use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_time::PiController;
 
+#[path = "adaptive/heat_control.rs"]
 mod heat_control;
 use heat_control::HeatControl;
 pub use heat_control::{

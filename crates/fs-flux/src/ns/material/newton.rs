@@ -12,6 +12,9 @@ use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use std::cell::RefCell;
 
+// This file is itself included by path, so a bare `mod mixed;` would resolve
+// beside it and compile `material/mixed.rs` a second time.
+#[path = "newton/mixed.rs"]
 mod mixed;
 pub use mixed::adaptive;
 pub use mixed::{MaterialNavierStokesNewtonStep, MaterialNavierStokesSdirk2Step};

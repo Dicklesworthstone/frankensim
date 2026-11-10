@@ -449,7 +449,9 @@ struct SwitchSource {
     refuse: Cell<bool>,
 }
 
-fn source_refusal() -> MaterialError {
+// Shared with `navier_stokes_rheology.rs`, which called it while it was
+// private to this file.
+pub(crate) fn source_refusal() -> MaterialError {
     MaterialError::State {
         what: "original source outside admitted conditions".into(),
     }
