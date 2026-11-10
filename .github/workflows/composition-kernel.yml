@@ -1,0 +1,63 @@
+name: Composition kernel
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/composition-kernel.yml
+      - Cargo.lock
+      - crates/fs-system/**
+      - crates/fs-ports/**
+      - crates/fs-mbd/src/component.rs
+      - crates/fs-mbd/src/component/**
+      - crates/fs-mbd/src/spatial_loads/internal_motion/viscous/network.rs
+      - crates/fs-thermal/**
+  workflow_dispatch:
+    inputs:
+      candidate:
+        description: Optional commit to validate before landing
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: composition-kernel-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  owners:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: frankensim
+    env:
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      RUSTFLAGS: '-Z threads=1'
+      RUST_BACKTRACE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Bootstrap the unlanded candidate; switch the default to github.sha
+          # after these focused tests pass and its source lands on main.
+          ref: ${{ inputs.candidate || '20520d9884975be4e5d3d20e4a9dea1a62197fb4' }}
+          path: frankensim
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Install the pinned compiler and sibling constellation
+        run: |
+          rustup toolchain install nightly-2026-07-06 --profile minimal
+          bash scripts/ci/checkout_constellation.sh "$GITHUB_WORKSPACE"
+          rustc +nightly-2026-07-06 --version
+          git rev-parse HEAD
+      - name: Kernel and library elements
+        run: cargo +nightly-2026-07-06 test -p fs-system --lib --test system_g0 --test elements --locked
+      - name: Native thermal Component
+        run: cargo +nightly-2026-07-06 test -p fs-thermal --test component --locked
+      - name: Native mechanical and thermal slices
+        run: cargo +nightly-2026-07-06 test -p fs-system --features slices --test viscous_heat_slice --test rigid_body_slice --locked
