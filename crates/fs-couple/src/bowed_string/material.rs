@@ -15,7 +15,9 @@
 use super::BowedStringCard;
 use crate::acoustic_realize::{AcousticRealizeError, mode_zeta, validate_incremental_string};
 use crate::material_assembly::concentric::with_concentric_kelvin_voigt_section;
-use crate::modal_acoustic_time::{ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel};
+use crate::modal_acoustic_time::{
+    ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeError, ModalAcousticTimeModel,
+};
 use crate::string_specimen::{ResolvedStringSpecimen, StringPrestress};
 use fs_exec::Cx;
 use fs_material::gas::GasState;
@@ -283,8 +285,70 @@ fn lower_backbone_with_modal_loss(
     }
     ModalAcousticTimeModel::try_new(sample_rate_hz, modes,
         ModalAcousticTimeBudget::audible_reference())
-        .map_err(|_| invalid("material bow modes violate time-domain admission"))?;
+        .map_err(|error| match error {
+            // A mode above the Nyquist guard names itself (its zero-based index, its frequency and the maximum), so a
+            // card author reads the figure and not only that some mode failed. Every other cause keeps its text.
+            guard @ ModalAcousticTimeError::ModeAboveNyquistGuard { .. } => AcousticRealizeError::Modal(guard),
+            _ => invalid("material bow modes violate time-domain admission"),
+        })?;
     card.validate().map_err(|_| invalid("material bow card is not physically representable"))?;
     poll(cx)?;
     Ok(card)
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+    use fs_exec::CancelGate;
+    use fs_scenario::AmbientGas;
+
+    fn scoped(f: impl FnOnce(&Cx<'_>)) {
+        let gate = CancelGate::new_clock_free();
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| f(&Cx::new(&gate, arena, fs_exec::StreamKey {
+            seed: 7, kernel_id: 83, tile: 0, iteration: 0,
+        }, fs_exec::Budget::INFINITE, fs_exec::ExecMode::Deterministic)));
+    }
+
+    // A cello C string of the E3 cards (span 0.806 m, 131.5 N, 0.01614 kg/m, EI 0.00062 N m^2) retaining `n_modes`.
+    fn string(n_modes: usize) -> PrestressedString {
+        PrestressedString {
+            length_m: 0.806, tension_n: 131.5, lin_density_kg_m: 0.01614, axial_stiffness_n: 0.0, width_m: 0.001,
+            n_modes, damping_ratio: 0.0, rayleigh: None, bending_stiffness_n_m2: 0.00062,
+            kelvin_voigt_bending: None, relaxation_bending: None, polarization_detune: 0.0, moving_end: false,
+            tension_loss_factor: None, bending_loss_factor: None,
+        }
+    }
+
+    // G0: the guard is 0.5 x rate x 0.9; the last retained mode inside it lowers, one more retained mode crosses it
+    // and the refusal names that mode (zero-based), its frequency and the maximum.
+    #[test]
+    fn a_mode_above_the_nyquist_guard_is_refused_with_its_index_frequency_and_maximum() {
+        let rate = 48_000_u32;
+        let maximum_hz = 0.5 * f64::from(rate) * 0.9;
+        let hz = |k: usize| {
+            let s = string(1);
+            fs_nlmodal::prestressed_beam_omega(s.length_m, s.tension_n, s.lin_density_kg_m,
+                s.bending_stiffness_n_m2, k) / core::f64::consts::TAU
+        };
+        let first_over = (1..2000).find(|&k| hz(k) > maximum_hz).expect("no mode crosses the guard");
+        assert!(first_over > 2 && hz(first_over - 1) <= maximum_hz);
+        let gas = crate::acoustic_realize::gas_state(AmbientGas {
+            temperature_k: 293.15, pressure_pa: 101_325.0, relative_humidity: 0.0 }).unwrap();
+        scoped(|cx| {
+            lower_backbone(cx, &string(first_over - 1), &gas, rate, 0.0)
+                .expect("every mode inside the guard lowers");
+            let error = lower_backbone(cx, &string(first_over), &gas, rate, 0.0)
+                .err().expect("a mode above the guard was admitted");
+            let AcousticRealizeError::Modal(ModalAcousticTimeError::ModeAboveNyquistGuard {
+                mode, frequency_hz, maximum_hz: reported }) = &error else {
+                panic!("a mode above the guard was not refused with its figures: {error:?}");
+            };
+            assert_eq!(*mode, first_over - 1);
+            assert!((*frequency_hz - hz(first_over)).abs() <= 1e-9 * frequency_hz, "{frequency_hz}");
+            assert!((*reported - maximum_hz).abs() <= 1e-9, "{reported}");
+            let text = error.to_string();
+            assert!(text.contains(&format!("mode {}", first_over - 1)) && text.contains("exceeds"), "{text}");
+        });
+    }
 }

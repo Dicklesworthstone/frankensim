@@ -459,7 +459,8 @@ impl CoupledModalSystem {
         }
         let guard = core::f64::consts::PI / dt * config.nyquist_guard_fraction;
         let linear_frequency_upper_bound_rad_s = upper_squared.sqrt();
-        if linear_frequency_upper_bound_rad_s > guard { return Err(invalid("coupled stiffness bound exceeds the Nyquist guard")); }
+        // A refusal names both figures: the bound the network asked for and the guard it was held to.
+        limit("stiffness bound, rad/s (Nyquist guard)", linear_frequency_upper_bound_rad_s, guard)?;
         let operator = preparation::prepare(&models, &columns, &connections,
             count, dt, preparation, &[], None, config, gate)?;
         let candidates = models.clone();
@@ -960,3 +961,8 @@ pub mod render;
 pub mod contact;
 
 crate::port_adoption::impl_ported_module!(CoupledModalSystem, ports);
+
+// Last in the file on purpose: `check-enumeration` stops counting a file at its first `#[cfg(test)]` line that precedes a
+// `mod`, so a test module declared above the network's items would hide every `*_with_*` fn and `*Error` type below it.
+#[cfg(test)]
+mod guard_tests;
