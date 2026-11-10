@@ -26,6 +26,13 @@ pub const MAX_INPUT_BYTES: usize = 1_048_576;
 pub const MAX_PACK_BYTES: usize = 8 * 1_048_576;
 pub const MAX_TOTAL_PACK_BYTES: usize = 64 * 1_048_576;
 pub const MAX_MODES: usize = 128;
+/// Bending modes a `string` record may retain per polarization plane. Only that one field is wider than [`MAX_MODES`]:
+/// the twist-mode field and the fibre rows' axial and normal fields keep [`MAX_MODES`]. The complete instrument
+/// (strings on every plane, cavity, body) still has to fit [`MAX_TOTAL_MODES`], so a card at this bound has 1024 minus
+/// its other coordinates left for the rest: one string on two planes at 256 bending modes, a 256-mode body and one
+/// cavity mode make 769.
+pub const MAX_STRING_BENDING_MODES: usize = 256;
+const _: () = assert!(MAX_STRING_BENDING_MODES >= MAX_MODES);
 /// Retained body modes a `body` record may request: the shell owner's own ceiling, `MAX_SHELL_MODES`. Flat plate
 /// bodies keep [`MAX_PLATE_BODY_MODES`]. The complete instrument (strings, cavity, body) still has to fit
 /// [`MAX_TOTAL_MODES`], so the body count that a card can use is what remains of 1024 after its other coordinates.
@@ -485,7 +492,7 @@ impl Spec {
                     _ => return Err("v2 support must be tension N or extension L0 STRAIN_LIMIT".into()),
                 }
             } else { StringPrestress::FixedTension(row.positive()?) };
-            let bending_modes = row.count(MAX_MODES)?;
+            let bending_modes = row.count(MAX_STRING_BENDING_MODES)?;
             let twist_modes = row.count(MAX_MODES)?;
             let station_fraction = row.scalar()?;
             let sourced = row.words.clone().next() == Some("interface");

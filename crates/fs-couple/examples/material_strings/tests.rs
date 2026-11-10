@@ -199,15 +199,17 @@ fn malformed_or_unobserved_controls_and_unbounded_decoder_counts_refuse() {
     // Mode counts are derived from the crate's own ceilings, not typed in:
     // one past the per-field decoder bound on each field, then the first
     // string count whose full-bound strings exceed the complete mode ceiling.
-    let over=input::MAX_MODES+1;
-    for to in [format!("{over} 3 0.8"),format!("4 {over} 0.8")] {
+    // The bending field has its own bound (MAX_STRING_BENDING_MODES); the twist field keeps MAX_MODES.
+    let (over_bending,over_twist)=(input::MAX_STRING_BENDING_MODES+1,input::MAX_MODES+1);
+    for (to,cap) in [(format!("{over_bending} 3 0.8"),input::MAX_STRING_BENDING_MODES),
+        (format!("4 {over_twist} 0.8"),input::MAX_MODES)] {
         match input::Spec::parse(text.replace("4 3 0.8",&to).as_bytes()) {
             Ok(_)=>panic!("accepted {to}"),
-            Err(error)=>assert!(error.to_string().contains(&format!("count exceeds {}",input::MAX_MODES)),"{error}"),
+            Err(error)=>assert!(error.to_string().contains(&format!("count exceeds {cap}")),"{error}"),
         }
     }
     let line="string wire.fsmatpk 0.5 0.0003 20 4 3 0.8 3000 0.1\n";
-    let full=line.replace("4 3 0.8",&format!("{m} {m} 0.8",m=input::MAX_MODES));
+    let full=line.replace("4 3 0.8",&format!("{b} {t} 0.8",b=input::MAX_STRING_BENDING_MODES,t=input::MAX_MODES));
     let strings=|k:usize| text.replace(&format!("strings 1\n{line}"),&format!("strings {k}\n{}",full.repeat(k)));
     let modes=|k:usize| input::Spec::parse(strings(k).as_bytes()).unwrap().network_dimensions(false).unwrap().0;
     let per_string=modes(2)-modes(1);
@@ -221,6 +223,33 @@ fn malformed_or_unobserved_controls_and_unbounded_decoder_counts_refuse() {
     }
     assert!(input::Spec::parse(format!("{text}unconsumed\n").as_bytes()).is_err());
     assert!(input::Spec::parse(include_bytes!("pluck-and-bow.material-strings")).is_ok());
+}
+
+#[test]
+fn string_bending_field_admits_its_own_bound_while_twist_and_fibre_fields_keep_the_old_one() {
+    let bound=input::MAX_STRING_BENDING_MODES;
+    assert!(bound>input::MAX_MODES,"the bending bound is the one that rose");
+    // Both sides of the string row's bending field: the bound itself parses (the complete instrument still fits
+    // MAX_TOTAL_MODES), one past it refuses with its own number.
+    let text=include_str!("pluck.material-strings");
+    let at_bound=text.replace("4 3 0.8",&format!("{bound} 3 0.8"));
+    assert_ne!(at_bound,text);
+    input::Spec::parse(at_bound.as_bytes()).unwrap_or_else(|error| panic!("{bound} bending modes refused: {error}"));
+    let one_past=text.replace("4 3 0.8",&format!("{} 3 0.8",bound+1));
+    let error=input::Spec::parse(one_past.as_bytes()).err().expect("one past the bending bound parsed").to_string();
+    assert!(error.contains(&format!("count exceeds {bound}")),"{error}");
+    // The twist field and the fibre rung's axial and normal fields keep MAX_MODES: one past each still refuses at 128.
+    let old=input::MAX_MODES;
+    let fibres=include_str!("fiber-ribbon.material-strings");
+    input::Spec::parse(fibres.as_bytes()).expect("the fibre fixture parses before it is changed");
+    for (card,field) in [
+        (text.replace("4 3 0.8",&format!("4 {} 0.8",old+1)),"twist"),
+        (fibres.replace("0.4 2 2",&format!("0.4 {} 2",old+1)),"fibre axial"),
+        (fibres.replace("0.4 2 2",&format!("0.4 2 {}",old+1)),"fibre normal"),
+    ] {
+        let error=input::Spec::parse(card.as_bytes()).err().unwrap_or_else(|| panic!("{field} field accepted {}",old+1)).to_string();
+        assert!(error.contains(&format!("count exceeds {old}")),"{field}: {error}");
+    }
 }
 
 #[path = "tests/layered.rs"]
