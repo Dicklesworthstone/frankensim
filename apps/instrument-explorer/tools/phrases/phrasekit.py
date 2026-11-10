@@ -141,11 +141,19 @@ def whole_cycles(x, a, b, rate, m, want):
     cycles instead: its phase advance over a whole number of vibrato cycles weighs every moment alike, whatever the
     level does. m's f0_hz only has to be within a tenth of the note, to find the band. This is a mean of frequency, not
     of cents: at +-90 cents it stands about 1.2 cents above the mean of cents. On the ten unmodulated vowels it agrees
-    with pitch() within 0.15 cents."""
+    with pitch() within 0.15 cents.
+
+    A first reading more than 600 cents ABOVE the written note is a lock on an upper harmonic or a formant (the vowel
+    phrase's /e/ C3 read 1919.87 Hz, about its 15th harmonic, where its second formant sits), and counting cycles in a band
+    around it counts that harmonic. Then the band is seeded at the written note instead, and the row says seeded. A first
+    reading below the note stands as read: a subharmonic or an octave-low reading can be the render's own fault, and this
+    must not hide one."""
     cycles = int((b - a) * rate)
     if cycles < 1:
         return m
-    f, n = m["f0_hz"], int(round(cycles / rate * SR))
+    t = hz(want) if want else None
+    seeded = bool(t and m["f0_hz"] > t * 2 ** (600 / 1200))
+    f, n = (t if seeded else m["f0_hz"]), int(round(cycles / rate * SR))
     i = int((a + b) / 2 * SR) - n // 2
     lo = max(0, i - SR // 10)  # a margin either side keeps the band filter's edges off the span
     seg = x[lo:i + n + SR // 10 + 1]
@@ -153,13 +161,15 @@ def whole_cycles(x, a, b, rate, m, want):
     gain = np.where(off <= 0.2, 1.0, np.where(off >= 0.3, 0.0, 0.5 + 0.5 * np.cos(np.pi * (off - 0.2) / 0.1)))
     phase = np.unwrap(np.angle(np.fft.ifft(np.fft.fft(seg - seg.mean()) * gain)))
     f = float(phase[i - lo + n] - phase[i - lo]) / (2 * math.pi) * SR / n
-    t = hz(want) if want else None
     # periodicity too: one span across a swing has no single period to repeat, and /e/ C4 read as no steady pitch for it.
     # Windows this short read lower on any tone: the unmodulated vowels give 0.81 to 0.90 here and 0.99 on the long span.
     w = SR // 25
     clear = np.median([f0_samples(x[j:j + w], SR)[1] for j in range(i, i + n - w, w)])
-    return dict(m, f0_hz=round(f, 2), cents=None if not t else round(1200 * math.log2(f / t), 1),
-                periodicity=round(float(clear), 3), whole_cycles=cycles)
+    out = dict(m, f0_hz=round(f, 2), cents=None if not t else round(1200 * math.log2(f / t), 1),
+               periodicity=round(float(clear), 3), whole_cycles=cycles)
+    if seeded:
+        out["seeded"] = True
+    return out
 
 
 def fade_out(y, at, secs):

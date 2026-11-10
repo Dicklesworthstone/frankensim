@@ -10,6 +10,11 @@ from phrasekit import SR, hz, pitch, whole_cycles  # noqa: E402
 RATE = 5.9
 PLAIN = [1.0, 0.5, 0.3, 0.2, 0.15, 0.1, 0.08, 0.05]
 SEVENTH = [10 ** (-11 / 20), 0.3, 0.3, 0.4, 0.5, 0.7, 1.0, 0.5, 0.2]  # the 7th harmonic 11 dB over the 1st, as sung /a/ C3 has
+# The harmonic levels (dB under the strongest) of the vowel phrase's /e/ C3 render over 0.26-0.86 s: the 14th harmonic,
+# about 1.83 kHz in /e/'s second formant, is the strongest; pitch() read that render near 2015 Hz, and the phrase page
+# showed it at 1919.87 Hz, 4650 cents sharp.
+E_C3 = [10 ** (d / 20) for d in (-5.7, -1.6, -1.6, -28.4, -21.3, -27.4, -32.2, -29.6, -33.8, -27.8, -25.3, -23.2, -8.7, 0.0,
+                                 -6.5, -10.5, -7.1, -3.3, -8.2, -13.9, -15.2, -9.5, -4.9, -6.5)]
 
 
 def tone(note, centre, swing, amps, low_louder_db=0.0, secs=1.2):
@@ -74,6 +79,25 @@ def test_a_vibrato_note_keeps_its_reading_through_the_analyzer():
     assert plain["cents"] == 61.0 and "speaks_ms" in plain, plain  # the planted failure: the mistracked frames win
     tracked = analyze.note_measures(x, dict(fr, f0=[right] * frames), n, "voice")
     assert got["partials_db"] == tracked["partials_db"], (got, tracked)
+
+
+def test_a_lock_above_the_note_is_counted_at_the_written_note():
+    m, w = read(tone("C3", 12, 40, E_C3), "C3")
+    assert m["cents"] > 600, m  # the planted failure: pitch() locks on the formant's harmonics, as on /e/ C3
+    assert abs(w["cents"] - 12) < 1.3 and w.get("seeded") is True, w
+    assert w["whole_cycles"] == 3
+
+
+def test_a_reading_below_the_note_stands():
+    # a render an octave low (written C3, sounding C2) is a fault of the render, and the reading must show it
+    m, w = read(tone("C2", 0, 40, PLAIN), "C3")
+    assert abs(m["cents"] + 1200) < 5, m
+    assert abs(w["cents"] + 1200) < 1.3 and "seeded" not in w, w
+
+
+def test_a_reading_less_than_600_cents_sharp_stands():
+    m, w = read(tone("C3", 500, 40, PLAIN), "C3")
+    assert abs(w["cents"] - 500) < 1.3 and "seeded" not in w, (m, w)
 
 
 for name, fn in sorted(globals().copy().items()):
