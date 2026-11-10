@@ -39,8 +39,9 @@ fn linear_curves(
         elastic.surface_b_state().resolved().card_identity(),
     ]
     .map(|card| {
-        EquilibriumEnthalpyPhaseCurve::try_new(
+        EquilibriumEnthalpyPhaseCurve::try_single_phase(
             card,
+            fs_material::phase::SolidLiquidPhase::Solid,
             [0.0, 1000.0]
                 .map(|rise| EnthalpyPhaseKnot {
                     specific_enthalpy_j_kg: rise * capacity_j_k / MASS,

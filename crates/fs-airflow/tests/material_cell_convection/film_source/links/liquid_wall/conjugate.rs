@@ -546,8 +546,9 @@ fn original_caloric_area_contact_source_support_and_cancellation_are_retained() 
     ));
     // A restricted source endpoint is allowed a small h(T)->T(h) round trip.
     // Native link heat must still use the original UNSNAPPED caloric trace.
-    let shifted = EquilibriumEnthalpyPhaseCurve::try_new(
+    let shifted = EquilibriumEnthalpyPhaseCurve::try_single_phase(
         solid.content_hash(),
+        fs_material::phase::SolidLiquidPhase::Solid,
         [280.0, 320.0]
             .map(|t| EnthalpyPhaseKnot {
                 specific_enthalpy_j_kg: 1e7 + CP * (t - 280.0),

@@ -27,7 +27,8 @@ fn curve() -> EquilibriumEnthalpyPhaseCurve {
     let card=MaterialCard::assemble(MaterialStateId {chemistry:"synthetic".into(),
         phase:"solid".into(),process:"convection test, not measured data".into(),revision:0},
         ClaimSet::new(),vec![]).unwrap();
-    EquilibriumEnthalpyPhaseCurve::try_new(card.content_hash(),[280.0,320.0].map(|t|
+    EquilibriumEnthalpyPhaseCurve::try_single_phase(card.content_hash(),
+        fs_material::phase::SolidLiquidPhase::Solid,[280.0,320.0].map(|t|
         EnthalpyPhaseKnot {specific_enthalpy_j_kg:CP*(t-300.0),temperature_k:t,
             liquid_mass_fraction:0.0,bulk_density_kg_m3:1000.0}).to_vec()).unwrap()
 }
