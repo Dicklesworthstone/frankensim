@@ -58,3 +58,10 @@ validity	loss-friction-c2	temperature_known	0	0	1
 scalar	loss-bending-c2	mansour-2016-table1	loss_bending_ks510_c2	0.047	1	constant
 uncertainty	loss-bending-c2	unstated	-	-	-	-
 validity	loss-bending-c2	temperature_known	0	0	1
+observation	mansour-2016-finger-damping	A finger-stopped cello string: the paper's rule of thumb for the extra damping of a stopped string, taken there from Saw's comparison of finger-stopped and open strings	Mansour, Woodhouse and Scavone, Enhanced wave-based modelling of musical strings, Part 1: Plucked strings, Acta Acustica 102(6) 2016, section 2.1.2, last paragraph: the results of Saw (the paper's reference 22) suggest representing the finger damping, roughly, by tripling the friction coefficient eta_F while keeping eta_A and eta_B unchanged; the values here are 3 times the eta_F printed in Table 1	Second-hand from Saw and stated there as a rough rule; not a measurement of these strings; it changes eta_F only (eta_B is the Table 1 value); the paper gives no frequency band for the rule
+scalar	loss-friction-c2-fingered	mansour-2016-finger-damping	loss_friction_ks510_c2_fingered	0.00036	1	constant
+uncertainty	loss-friction-c2-fingered	unstated	-	-	-	-
+validity	loss-friction-c2-fingered	temperature_known	0	0	1
+scalar	loss-friction-a3-fingered	mansour-2016-finger-damping	loss_friction_ks510_a3_fingered	0.00066	1	constant
+uncertainty	loss-friction-a3-fingered	unstated	-	-	-	-
+validity	loss-friction-a3-fingered	temperature_known	0	0	1
