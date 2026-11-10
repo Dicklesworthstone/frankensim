@@ -24,6 +24,7 @@ use fs_system::elements::{
     Motion, SourceAccount, Spring, Storage, Waveform,
 };
 use fs_system::{
+    AdaptiveConfig, AdaptiveError, AdaptiveReport, Checkpoint, ErrorNorm, ErrorTolerance,
     NodeId, PortRef, RouteTemperature, SolveConfig, System, SystemBuilder, SystemError, heat_sink,
 };
 
@@ -40,6 +41,7 @@ const MAX_ELEMENTS: usize = 2_000;
 const MAX_STEPS: f64 = 10_000_000.0;
 const MAX_SAMPLES: usize = 100_000;
 const NO_CLAIM: &str = "lumped elements with constant parameters or authored nonlinear electrical storage curves, using work-conjugate discrete-gradient stepping; no material-card resolution, contact, friction, phase change or step-size error control; the ledger states what the discrete system did, not what a physical device would do";
+const ADAPTIVE_NO_CLAIM: &str = "step-doubling estimates control the declared state coordinates and source-work increments under the selected order assumption; they are local numerical estimates, not global error bounds or physical validation; dissipated heat and interface balances retain the kernel's separate ledger audits; no material-card resolution, contact, friction or phase change";
 
 const HELP: &str = "Usage: frankensim [--json] system <scene.json>
 
@@ -53,8 +55,21 @@ Scene schema: frankensim.system.v0. Top-level fields:
   sample_every_s    optional; record every element's state at the end of the
                     first step at or after each multiple of this interval
   solver            optional {relative_tolerance, absolute_tolerance, max_iterations}
+  adaptive          optional {order = 1, min_step_s = 1e-12, max_attempts = 32,
+                    tolerances: {element.state_field: {absolute, relative}, ...}}
   elements          object: name -> element
   connections       array of connections
+
+Adaptive stepping requires an explicit tolerance for every dynamic state
+coordinate and source energy_in_j account. Absolute tolerances are positive
+in that field's SI units; relative tolerances are nonnegative. Source-work
+tolerances apply to each trial interval's energy increment. Derived endpoint
+voltage/current and stateless last-step means are not independent accounts.
+The default order is 1; choose order 2 only for a smooth second-order model.
+The refined two-half-step state is retained; rejected trials leave no state
+or ledger entries. step_s remains the largest interval.
+The final externally capped interval may be shorter than min_step_s; an
+accuracy rejection still cannot reduce that final interval further.
 
 Elements (ports in brackets; SI units in every field name):
   mass           mass_kg, position_m = 0, velocity_m_s = 0            [p]
@@ -172,6 +187,19 @@ pub fn run(args: &[OsString], json: bool) -> CommandOutput {
             );
             refusal(code, "system-step", &message, json)
         }
+        Err(RunError::Adaptive(error)) => {
+            let code = if matches!(error, AdaptiveError::Step(SystemError::Cancelled)) {
+                exit::CANCELLED
+            } else {
+                exit::REFUSED
+            };
+            let message = format!(
+                "step {} at t = {} s: {error}",
+                device.system.steps() + 1,
+                device.system.time_s()
+            );
+            refusal(code, "system-adaptive", &message, json)
+        }
         Err(RunError::TooManySteps) => {
             let message = format!(
                 "the kernel took {} steps and reached t = {} s of {} s; components keep \
@@ -187,6 +215,7 @@ pub fn run(args: &[OsString], json: bool) -> CommandOutput {
 
 enum RunError {
     Step(SystemError),
+    Adaptive(AdaptiveError),
     TooManySteps,
 }
 
@@ -388,6 +417,70 @@ struct Device {
     samples: Vec<(f64, Vec<(String, f64)>)>,
     iterations: u64,
     shortenings: u64,
+    adaptive: Option<AdaptiveSettings>,
+}
+
+#[derive(Clone, Copy)]
+enum Coordinate {
+    Position,
+    Velocity,
+    Scalar,
+    SourceWork,
+}
+
+struct ErrorAccount {
+    node: NodeId,
+    coordinate: Coordinate,
+    tolerance: ErrorTolerance,
+}
+
+impl ErrorAccount {
+    fn read(&self, checkpoint: &Checkpoint) -> f64 {
+        match self.coordinate {
+            Coordinate::Position => checkpoint.state::<Motion>(self.node)
+                .map_or(f64::NAN, |state| state.position_m),
+            Coordinate::Velocity => checkpoint.state::<Motion>(self.node)
+                .map_or(f64::NAN, |state| state.velocity_m_s),
+            Coordinate::Scalar => checkpoint.state::<f64>(self.node).copied().unwrap_or(f64::NAN),
+            Coordinate::SourceWork => checkpoint.state::<SourceAccount>(self.node)
+                .map_or(f64::NAN, |state| state.energy_in_j),
+        }
+    }
+}
+
+struct AdaptiveSettings {
+    config: AdaptiveConfig,
+    accounts: Vec<ErrorAccount>,
+    attempts: u64,
+    trial_steps: u64,
+    last_error_norm: f64,
+    max_error_norm: f64,
+    suggested_dt_s: f64,
+}
+
+impl AdaptiveSettings {
+    fn metric(&self, initial: &Checkpoint, coarse: &Checkpoint, refined: &Checkpoint) -> f64 {
+        let mut norm = ErrorNorm::new();
+        for account in &self.accounts {
+            let (start, full, half) = (account.read(initial), account.read(coarse), account.read(refined));
+            if matches!(account.coordinate, Coordinate::SourceWork) {
+                // Work is controlled over this interval, so a large cumulative
+                // source account cannot loosen a later interval's tolerance.
+                norm.include(0.0, full - start, half - start, account.tolerance);
+            } else {
+                norm.include(start, full, half, account.tolerance);
+            }
+        }
+        norm.value()
+    }
+
+    fn record(&mut self, report: &AdaptiveReport) {
+        self.attempts += u64::from(report.attempts);
+        self.trial_steps += report.trial_steps;
+        self.last_error_norm = report.error_norm;
+        self.max_error_norm = self.max_error_norm.max(report.error_norm);
+        self.suggested_dt_s = report.suggested_dt_s;
+    }
 }
 
 fn read(path: &Path) -> Result<String, String> {
@@ -1006,6 +1099,73 @@ fn solver(definition: &J) -> Result<SolveConfig, String> {
     Ok(config)
 }
 
+fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<AdaptiveSettings, String> {
+    fields(definition, &["order", "min_step_s", "max_attempts", "tolerances"], "adaptive")?;
+    let defaults = AdaptiveConfig::default();
+    let order = number_or(definition, "order", f64::from(defaults.order), "adaptive")?;
+    let attempts = number_or(definition, "max_attempts", f64::from(defaults.max_attempts), "adaptive")?;
+    let minimum = number_or(definition, "min_step_s", defaults.min_step_s, "adaptive")?;
+    if !(1.0..=32.0).contains(&order) || order.fract() != 0.0 {
+        return Err("adaptive.order must be a whole number from 1 to 32".into());
+    }
+    if !(1.0..=f64::from(u32::MAX)).contains(&attempts) || attempts.fract() != 0.0 {
+        return Err("adaptive.max_attempts must be a positive whole number fitting u32".into());
+    }
+    if !(minimum.is_finite() && minimum > 0.0 && minimum <= step_s) {
+        return Err("adaptive.min_step_s must be positive, finite and no larger than step_s".into());
+    }
+    let tolerances = definition.get("tolerances").and_then(J::as_object)
+        .ok_or("adaptive.tolerances must name every dynamic state coordinate and source-work account")?;
+    let mut expected = Vec::new();
+    for element in elements {
+        let coordinates = match element.kind {
+            Kind::Inertance(domain) => vec![
+                (domain.names().displacement, Coordinate::Position),
+                (domain.names().flow, Coordinate::Velocity),
+            ],
+            Kind::Compliance(domain) => vec![(domain.names().extension, Coordinate::Scalar)],
+            Kind::NodeCapacitor | Kind::NonlinearCapacitor => vec![("charge_c", Coordinate::Scalar)],
+            Kind::NonlinearInductor => vec![("flux_wb", Coordinate::Scalar)],
+            Kind::HeatCapacity => vec![("temperature_k", Coordinate::Scalar)],
+            Kind::Source(_) | Kind::CurrentSource | Kind::Heater => vec![("energy_in_j", Coordinate::SourceWork)],
+            Kind::Resistance(_) | Kind::ResistorBranch | Kind::Gyrator | Kind::Conductance => Vec::new(),
+        };
+        for (field, coordinate) in coordinates {
+            expected.push((format!("{}.{field}", element.name), element.node, coordinate));
+        }
+    }
+    if expected.is_empty() {
+        return Err("adaptive stepping needs at least one dynamic state or source-work account".into());
+    }
+    for (name, _) in tolerances {
+        if !expected.iter().any(|(known, _, _)| known == name) {
+            return Err(format!("adaptive.tolerances.{name}: not a dynamic state coordinate or source-work account"));
+        }
+    }
+    let mut accounts = Vec::with_capacity(expected.len());
+    for (name, node, coordinate) in expected {
+        let what = format!("adaptive.tolerances.{name}");
+        let value = tolerances.iter().find(|(key, _)| key == &name).map(|(_, value)| value)
+            .ok_or_else(|| format!("{what}: missing explicit tolerance"))?;
+        fields(value, &["absolute", "relative"], &what)?;
+        let absolute = positive(value, "absolute", &what)?;
+        let relative = number(value, "relative", &what)?;
+        if !(relative.is_finite() && relative >= 0.0) {
+            return Err(format!("{what}.relative must be finite and nonnegative"));
+        }
+        accounts.push(ErrorAccount { node, coordinate, tolerance: ErrorTolerance { absolute, relative } });
+    }
+    Ok(AdaptiveSettings {
+        config: AdaptiveConfig { order: order as u32, min_step_s: minimum, max_attempts: attempts as u32 },
+        accounts,
+        attempts: 0,
+        trial_steps: 0,
+        last_error_norm: f64::NAN,
+        max_error_norm: 0.0,
+        suggested_dt_s: step_s,
+    })
+}
+
 fn load(path: &Path) -> Result<Device, Refusal> {
     let text = read(path)?;
     let root = J::parse(&text).map_err(|e| e.to_string())?;
@@ -1017,6 +1177,7 @@ fn load(path: &Path) -> Result<Device, Refusal> {
             "step_s",
             "sample_every_s",
             "solver",
+            "adaptive",
             "elements",
             "connections",
         ],
@@ -1094,6 +1255,8 @@ fn load(path: &Path) -> Result<Device, Refusal> {
     for (port, kelvin) in guesses {
         system.guess(port, &[kelvin]);
     }
+    let adaptive = root.get("adaptive")
+        .map(|definition| adaptive(definition, &elements, step_s)).transpose()?;
     Ok(Device {
         system,
         elements,
@@ -1104,10 +1267,15 @@ fn load(path: &Path) -> Result<Device, Refusal> {
         samples: Vec::new(),
         iterations: 0,
         shortenings: 0,
+        adaptive,
     })
 }
 
 impl Device {
+    fn no_claim(&self) -> &'static str {
+        if self.adaptive.is_some() { ADAPTIVE_NO_CLAIM } else { NO_CLAIM }
+    }
+
     fn run(&mut self) -> Result<(), RunError> {
         let gate = CancelGate::new();
         let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
@@ -1128,16 +1296,32 @@ impl Device {
                     return Err(RunError::TooManySteps);
                 }
                 let remaining = self.duration_s - self.system.time_s();
-                let report = self
-                    .system
-                    .step(self.step_s.min(remaining), &cx)
-                    .map_err(RunError::Step)?;
-                self.iterations += u64::from(report.iterations);
-                self.shortenings += u64::from(report.shortenings);
-                if report.time_s >= next_sample - slack {
+                let time_s = if let Some(adaptive) = &mut self.adaptive {
+                    let proposed = adaptive.suggested_dt_s.min(self.step_s).min(remaining);
+                    let mut config = adaptive.config;
+                    // A caller-imposed final horizon is not an accuracy retry.
+                    // Its own retries must still respect this smaller floor.
+                    config.min_step_s = config.min_step_s.min(remaining);
+                    let report = self.system.step_adaptive(
+                        proposed, config,
+                        |initial, coarse, refined| adaptive.metric(initial, coarse, refined),
+                        &cx,
+                    ).map_err(RunError::Adaptive)?;
+                    self.iterations += report.iterations;
+                    self.shortenings += report.shortenings;
+                    adaptive.record(&report);
+                    report.time_s
+                } else {
+                    let report = self.system.step(self.step_s.min(remaining), &cx)
+                        .map_err(RunError::Step)?;
+                    self.iterations += u64::from(report.iterations);
+                    self.shortenings += u64::from(report.shortenings);
+                    report.time_s
+                };
+                if time_s >= next_sample - slack {
                     self.sample();
                     let every = self.sample_every_s.unwrap_or(f64::INFINITY);
-                    while next_sample <= report.time_s + slack {
+                    while next_sample <= time_s + slack {
                         next_sample += every;
                     }
                 }
@@ -1249,6 +1433,14 @@ impl Device {
             self.iterations,
             self.shortenings
         );
+        if let Some(adaptive) = &self.adaptive {
+            let _ = writeln!(
+                out,
+                "adaptive order {}: {} attempts, {} trial steps; last normalized error {:.6e}, maximum accepted {:.6e}; suggested next interval {:.6e} s\n",
+                adaptive.config.order, adaptive.attempts, adaptive.trial_steps,
+                adaptive.last_error_norm, adaptive.max_error_norm, adaptive.suggested_dt_s
+            );
+        }
         let _ = writeln!(out, "{:<16} {:<14} state", "element", "kind");
         for element in &self.elements {
             let state = self
@@ -1306,7 +1498,7 @@ impl Device {
         if !self.samples.is_empty() {
             let _ = writeln!(out, "\n{} samples (use --json to read them)", self.samples.len());
         }
-        let _ = writeln!(out, "\nNo claim: {NO_CLAIM}.");
+        let _ = writeln!(out, "\nNo claim: {}.", self.no_claim());
         out
     }
 
@@ -1390,7 +1582,16 @@ impl Device {
                 object(values.iter().map(|(k, v)| (k.clone(), *v)))
             );
         }
-        let _ = writeln!(out, "],\"no_claim\":{}}}", quote(NO_CLAIM));
+        out.push(']');
+        if let Some(adaptive) = &self.adaptive {
+            let _ = write!(
+                out,
+                ",\"adaptive\":{{\"order\":{},\"attempts\":{},\"trial_steps\":{},\"last_error_norm\":{},\"max_error_norm\":{},\"suggested_dt_s\":{}}}",
+                adaptive.config.order, adaptive.attempts, adaptive.trial_steps,
+                num(adaptive.last_error_norm), num(adaptive.max_error_norm), num(adaptive.suggested_dt_s)
+            );
+        }
+        let _ = writeln!(out, ",\"no_claim\":{}}}", quote(self.no_claim()));
         out
     }
 }

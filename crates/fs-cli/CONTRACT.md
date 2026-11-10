@@ -814,6 +814,39 @@ nonlinear RLC example and binary regressions check independently integrated
 charge/flux equations, source work, original storage and delivered Joule heat.
 Authored curves confer no material provenance, hysteresis or thermal law.
 
+An optional `adaptive` object selects the kernel's checkpoint-based
+`step_adaptive` path. It declares `order` (default 1, range 1–32),
+`min_step_s` (default 1e-12, positive and no larger than `step_s`),
+`max_attempts` (default 32), and `tolerances`. Every dynamic state coordinate
+and source `energy_in_j` account needs exactly one `element.state_field`
+entry with finite positive `absolute` and finite nonnegative `relative`.
+Unknown, omitted, duplicate, derived-voltage/current or stateless accounts
+refuse at scene admission. Mass/inertia/linear-inductor coordinates are both
+controlled; nonlinear storage uses its actual charge/flux coordinate.
+
+The metric compares accepted coarse/refined checkpoints, scaling each state
+difference by `absolute + relative * max(|initial|, |refined|)`. Source accounts
+use trial work increments relative to the initial checkpoint. The kernel owns
+the Richardson divisor, same-end-time checks, retries, cancellation and full
+rollback; the CLI adds no integration. It retains the audited two-half-step
+solution, counts all trial solves and caps suggested intervals by `step_s`
+and the remaining duration. An externally capped final interval alone may
+lower that call's minimum to the remaining duration; rejected accuracy trials
+cannot shorten it further. An adaptive failure reports the original accepted
+time/step with exit 4 (`system-adaptive`), or the cancellation exit for a
+cancelled kernel step.
+
+Adaptive JSON adds order, attempts, trial_steps, last_error_norm,
+max_error_norm and suggested_dt_s; fixed-mode output is unchanged. The default
+order is 1; order 2 is selected only under a smooth second-order model
+assumption. Estimates remain conditional at curve knees or discontinuities.
+They are local to declared coordinates and source-work increments, not global
+error bounds or separate accumulated dissipation tolerances. Physical
+energy/entropy audits remain in force.
+The analytic loaded-oscillator example tests phase improvement with tighter
+tolerances, source-work closure, attempt exhaustion with rollback, named
+tolerance refusals and an externally capped final interval below the floor.
+
 A `transformer: [effort_in_port, flow_in_port]` connection with finite nonzero
 signed `ratio` lowers directly to the kernel's power-preserving transformer.
 It may connect distinct power domains and obeys `f_b = -ratio * f_a` and
@@ -836,7 +869,8 @@ closed form, the quarter car's road work against motion plus heat and its
 70/30 heat split, library and binary byte-identical, eight refusals). No
 claim beyond the kernel's: lumped elements with constant parameters or authored
 nonlinear electrical storage curves, no material-card resolution, contact,
-friction or step-size error control. The experimental
+friction or phase change; fixed mode has no step-size error control, while
+adaptive mode has the scoped numerical estimate described above. The experimental
 workflows keep their existing request/result schemas, numerical limits and
 exit classes; dispatch does not turn them into ledger-backed `.fsim` solves.
 All commands recognize one global `--json` flag, at any position, and reject

@@ -99,6 +99,85 @@ fn the_driven_oscillator_matches_the_monolithic_midpoint_rule() {
 }
 
 #[test]
+fn adaptive_oscillator_tracks_the_analytic_phase_more_accurately_with_tighter_tolerances() {
+    let scene = std::fs::read_to_string(example("adaptive_oscillator.json")).unwrap();
+    let mut errors = Vec::new();
+    let mut accepted_steps = Vec::new();
+    for tight in [false, true] {
+        let text = if tight {
+            scene.replace("\"absolute\": 1e-5", "\"absolute\": 1e-7")
+                .replace("\"absolute\": 1e-6", "\"absolute\": 1e-8")
+        } else { scene.clone() };
+        let path = scratch(if tight { "adaptive_tight.json" } else { "adaptive_loose.json" }, &text);
+        let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+        assert_eq!(code, 0, "{stderr}");
+        let time = value(&json, "\"schema\"", "time_s");
+        assert!((time - 4.0).abs() < 1.0e-11);
+        // x'' + 4x = 0.4, x(0)=0.2, v(0)=0: the equilibrium is 0.1 m
+        // and the natural frequency is 2 rad/s, independently of stepping.
+        let expected_x = 0.1 + 0.1 * (2.0 * time).cos();
+        let expected_v = -0.2 * (2.0 * time).sin();
+        let x = value(&json, &element("block"), "position_m");
+        let v = value(&json, &element("block"), "velocity_m_s");
+        errors.push((x - expected_x).hypot(0.5 * (v - expected_v)));
+        let steps = value(&json, "\"schema\"", "steps");
+        accepted_steps.push(steps);
+        assert!(value(&json, "\"adaptive\"", "attempts") > 0.5 * steps);
+        assert!(value(&json, "\"adaptive\"", "trial_steps") > steps);
+        assert!(value(&json, "\"adaptive\"", "max_error_norm") <= 1.0);
+        assert!(value(&json, "\"adaptive\"", "last_error_norm") <= 1.0);
+
+        // Trial work must not survive rejection. Only the actual accepted
+        // displacement enters the source's cumulative work account.
+        let source_energy = value(&json, &element("drive"), "energy_in_j");
+        assert!((source_energy + 0.4 * (x - 0.2)).abs() < 1.0e-11);
+        assert!(value(&json, "\"totals\"", "energy_residual_j").abs() < 1.0e-10);
+    }
+    assert!(errors[1] < 0.15 * errors[0], "loose {}, tight {}", errors[0], errors[1]);
+    assert!(errors[1] < 5.0e-5, "tight error {}", errors[1]);
+    assert!(accepted_steps[1] > accepted_steps[0]);
+}
+
+#[test]
+fn an_exhausted_adaptive_trial_reports_the_original_state_time_after_rollback() {
+    let scene = std::fs::read_to_string(example("adaptive_oscillator.json")).unwrap()
+        .replace("\"max_attempts\": 32", "\"max_attempts\": 1")
+        .replace("\"absolute\": 1e-5", "\"absolute\": 1e-20")
+        .replace("\"absolute\": 1e-6", "\"absolute\": 1e-20");
+    let (code, stderr) = refused("adaptive_attempt_exhaustion.json", &scene);
+    assert_eq!(code, 4, "{stderr}");
+    assert!(stderr.contains("system-adaptive"), "{stderr}");
+    assert!(stderr.contains("step 1 at t = 0 s"), "{stderr}");
+}
+
+#[test]
+fn adaptive_tolerances_are_complete_and_a_short_final_horizon_can_cross_the_step_floor() {
+    let scene = r#"{
+  "schema": "frankensim.system.v0", "duration_s": 0.03125, "step_s": 0.125,
+  "adaptive": {"min_step_s": 0.0625, "tolerances": {
+    "cap.charge_c": {"absolute": 1e-12, "relative": 0}
+  }},
+  "elements": {"cap": {"kind": "node_capacitor", "capacitance_f": 2.0, "charge_c": 0.25}},
+  "connections": [{"prescribe": "cap.p", "current_a": 0.5}]
+}"#;
+    let path = scratch("adaptive_final_interval.json", scene);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!((value(&json, "\"schema\"", "time_s") - 0.03125).abs() < 1.0e-15);
+    assert!((value(&json, &element("cap"), "charge_c") - 0.265625).abs() < 1.0e-15);
+    assert!((value(&json, "\"schema\"", "steps") - 2.0).abs() < 0.5);
+    for (name, changed, expected) in [
+        ("adaptive_missing_account.json", scene.replace("\"cap.charge_c\": {\"absolute\": 1e-12, \"relative\": 0}", ""), "cap.charge_c"),
+        ("adaptive_derived_account.json", scene.replace("\"cap.charge_c\"", "\"cap.voltage_v\""), "cap.voltage_v"),
+        ("adaptive_zero_tolerance.json", scene.replace("\"absolute\": 1e-12", "\"absolute\": 0"), "absolute"),
+    ] {
+        let (code, stderr) = refused(name, &changed);
+        assert_eq!(code, 3, "{stderr}");
+        assert!(stderr.contains(expected), "{stderr}");
+    }
+}
+
+#[test]
 fn the_heated_body_approaches_its_steady_temperature_by_the_discrete_factor() {
     let (code, json, stderr) = run_binary(&["--json", "system", &example("heated_body.json")]);
     assert_eq!(code, 0, "{stderr}");
