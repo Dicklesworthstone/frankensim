@@ -61,10 +61,38 @@
 //! handed, so beside port heat it carries that heat's rounding (about 1e-16
 //! of it); it is exactly zero while no boundary exchanges.
 //!
+//! Implicit conduction: [`ThermalTimeline::implicit`] steps the same
+//! timeline with the owner's backward-Euler or SDIRK2 solve on a prepared
+//! [`ImplicitConductionGraph`]
+//! (`advance_observed_to` / `advance_sdirk2_observed_to`), with the same
+//! ports and the same hand-over of energy. No conduction bound limits the
+//! step: [`Component::limit_dt_s`] is the smaller of the proposal and the
+//! controls' `maximum_dt_s`. The graph can own heat sources and boundary
+//! laws that the cells' boundaries do not show, so an implicit timeline
+//! always has the `environment` port, and its heat is the owner's external
+//! heat less the port heat whether or not a cell's boundary exchanges.
+//!
+//! When the owner's nonlinear solve rejects an interval (no convergence, an
+//! entropy decrease, a singular or unconverged linear solve), the step is
+//! not taken: the Component answers `Proposal::Shorten` with half the step,
+//! and the kernel retries every component over the shorter interval, as the
+//! hand-written couplings of this solve re-run their mechanics over a halved
+//! interval. The owner's own halving is switched off for the step, so the
+//! controls' `maximum_halvings` is not used and the kernel's limit on
+//! shortenings applies; a step whose half would be under the controls'
+//! `minimum_dt_s` returns the owner's refusal. The receipt carries the
+//! solve's largest cell residual and the tolerance it met. One step
+//! allocates the solver's workspace. With scheduled events the graph admits
+//! only what leaves its bindings as they are: a boundary change is taken, a
+//! birth, a contact or a separation is the owner's refusal.
+//!
 //! Class: `Smooth`. With the explicit rule the returned temperatures are as
 //! differentiable in the heat rates as the laws are in enthalpy; a law with
 //! a latent interval has kinks at the interval's ends, where a kernel that
-//! differences the port map gets a one-sided slope.
+//! differences the port map gets a one-sided slope. With the implicit solve
+//! the map is smooth to the solve's tolerance only: its value moves by up to
+//! that tolerance where the iteration count changes, and a step is refused
+//! outright on one side of a rejection.
 //!
 //! The kernel keeps component states as `'static` values, so a timeline
 //! added to a system must borrow laws that live that long.
@@ -75,9 +103,9 @@
 //! boundaries it is one only if the environment wire is at the authored
 //! ambient temperature, which is not checked. A birth after the start is
 //! refused, because mass and its enthalpy would enter with no port to carry
-//! them; the port map has no analytic tangent; the implicit and staged
-//! variants of the owner are not wrapped; the owner's own accuracy
-//! statements are unchanged by the wrapping.
+//! them; the port map has no analytic tangent; the owner's adaptive
+//! (step-doubling) and staged variants are not wrapped; the owner's own
+//! accuracy statements are unchanged by the wrapping.
 //!
 //! [`EnergyAudit`]: crate::enthalpy::EnergyAudit
 
@@ -89,11 +117,16 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 use fs_exec::Cx;
+use fs_la::tridiagonal::TridiagonalError;
 use fs_ports::StableId;
 use fs_ports::component::{
     Class, Component, ContractViolation, PortRole, PortSpec, Proposal, Receipt,
 };
 
+use crate::enthalpy::conduction::implicit::{
+    ImplicitConductionControls, ImplicitConductionError, ImplicitConductionGraph,
+    ImplicitConductionObservedError, ImplicitConductionWorkspace,
+};
 use crate::enthalpy::{
     Boundary, CellId, DepositionError, DepositionObserver, DepositionSimulation, Event,
     StepConfig,
@@ -113,6 +146,11 @@ pub enum TimelineBuildError {
     Identifier(fs_ports::CoupleError),
     /// A port specification was refused.
     Port(ContractViolation),
+    /// The implicit controls' longest interval is not a positive time.
+    Interval {
+        /// The value given [s].
+        maximum_dt_s: f64,
+    },
 }
 
 impl fmt::Display for TimelineBuildError {
@@ -122,6 +160,9 @@ impl fmt::Display for TimelineBuildError {
             Self::Duplicate { cell } => write!(f, "cell {cell} is named twice"),
             Self::Identifier(error) => write!(f, "port identifier refused: {error:?}"),
             Self::Port(violation) => write!(f, "port refused: {violation}"),
+            Self::Interval { maximum_dt_s } => {
+                write!(f, "a longest thermal interval of {maximum_dt_s} s is not a positive time")
+            }
         }
     }
 }
@@ -133,6 +174,15 @@ impl std::error::Error for TimelineBuildError {}
 pub enum TimelineRefusal {
     /// The owner refused; its error is unchanged.
     Thermal(DepositionError),
+    /// The owner's implicit solve refused; its error is unchanged.
+    Implicit(ImplicitConductionError),
+    /// An event is scheduled at the timeline's own time. A conduction graph
+    /// is prepared against the timeline as it stands, so the events a run
+    /// starts with are applied before the graph is built.
+    PendingEvent {
+        /// The timeline's time [s].
+        time_s: f64,
+    },
     /// A cell with a port is not active in the timeline.
     InactiveCell {
         /// The cell.
@@ -171,6 +221,12 @@ impl fmt::Display for TimelineRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Thermal(error) => write!(f, "thermal timeline refused: {error}"),
+            Self::Implicit(error) => write!(f, "thermal timeline refused: {error}"),
+            Self::PendingEvent { time_s } => write!(
+                f,
+                "an event is still scheduled at the timeline's time, {time_s} s; apply it before \
+                 the conduction graph is prepared"
+            ),
             Self::InactiveCell { cell } => write!(f, "cell {cell} has a port and is not active"),
             Self::Birth { cell, energy_j } => write!(
                 f,
@@ -198,6 +254,68 @@ impl From<DepositionError> for TimelineRefusal {
         match error {
             DepositionError::Cancelled => Self::Cancelled,
             error => Self::Thermal(error),
+        }
+    }
+}
+
+impl From<ImplicitConductionError> for TimelineRefusal {
+    fn from(error: ImplicitConductionError) -> Self {
+        match error {
+            ImplicitConductionError::Thermal(error) => error.into(),
+            error => Self::Implicit(error),
+        }
+    }
+}
+
+/// Whether the owner's solve rejected the interval, as distinct from
+/// refusing the problem: the errors on which the owner itself retries a
+/// shorter interval.
+fn rejected(error: &ImplicitConductionError) -> bool {
+    matches!(
+        error,
+        ImplicitConductionError::NotConverged { .. }
+            | ImplicitConductionError::EntropyDecrease { .. }
+            | ImplicitConductionError::KrylovNotConverged { .. }
+            | ImplicitConductionError::Linear(TridiagonalError::Singular { .. })
+    )
+}
+
+/// The owner's implicit thermal quadrature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImplicitScheme {
+    /// Backward Euler, `advance_observed_to`.
+    BackwardEuler,
+    /// The owner's two-stage SDIRK, `advance_sdirk2_observed_to`.
+    Sdirk2,
+}
+
+/// How the owner advances the timeline over a step.
+#[derive(Clone)]
+enum Driver<'a> {
+    /// The explicit rule, `DepositionSimulation::advance_observed`.
+    Explicit,
+    /// An implicit solve on a prepared conduction graph.
+    Implicit {
+        graph: Rc<ImplicitConductionGraph<'a>>,
+        controls: ImplicitConductionControls,
+        scheme: ImplicitScheme,
+    },
+}
+
+impl fmt::Debug for Driver<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Explicit => write!(f, "Explicit"),
+            Self::Implicit {
+                graph,
+                controls,
+                scheme,
+            } => f
+                .debug_struct("Implicit")
+                .field("cells", &graph.cell_ids().len())
+                .field("controls", controls)
+                .field("scheme", scheme)
+                .finish(),
         }
     }
 }
@@ -269,6 +387,10 @@ struct Held {
     first_bound_s: Rc<Cell<Option<f64>>>,
     /// Stop at that bound, before any enthalpy changes.
     probe: bool,
+    /// The shares prepared for the interval now on trial [J]. The owner may
+    /// reject a trial and prepare a shorter one; a share is handed over only
+    /// when the owner accepts its interval.
+    pending_j: BTreeMap<CellId, f64>,
     /// Port heat handed to the owner [J], and the sum of its terms' sizes.
     took_j: f64,
     took_terms_j: f64,
@@ -287,6 +409,7 @@ impl Held {
             target_s,
             first_bound_s: Rc::new(Cell::new(None)),
             probe,
+            pending_j: BTreeMap::new(),
             took_j: 0.0,
             took_terms_j: 0.0,
             born: None,
@@ -302,10 +425,11 @@ impl DepositionObserver for Held {
         true
     }
 
-    /// The mean rate into each port cell over one accepted substep: that
-    /// substep's share of the energy still to hand over. The substep that
+    /// The mean rate into each port cell over one trial interval: that
+    /// interval's share of the energy still to hand over. The interval that
     /// ends the advance takes all that is left, so the cell receives the
-    /// kernel's `rate * dt` whatever the owner's durations sum to.
+    /// kernel's `rate * dt` whatever the owner's durations sum to. Nothing
+    /// is booked here: the owner may reject the trial and ask again.
     fn step_sources(
         &mut self,
         _thermal: &DepositionSimulation<'_>,
@@ -318,15 +442,14 @@ impl DepositionObserver for Held {
         let last = end_s.to_bits() == self.target_s.to_bits();
         let fraction = duration_s / (self.target_s - start_s);
         let mut rates_w = BTreeMap::new();
-        for (cell, remaining_j) in &mut self.remaining_j {
+        self.pending_j.clear();
+        for (cell, remaining_j) in &self.remaining_j {
             let share_j = if last {
                 *remaining_j
             } else {
                 *remaining_j * fraction
             };
-            *remaining_j -= share_j;
-            self.took_j += share_j;
-            self.took_terms_j += share_j.abs();
+            self.pending_j.insert(*cell, share_j);
             rates_w.insert(*cell, share_j / duration_s);
         }
         Ok(rates_w)
@@ -371,18 +494,29 @@ impl DepositionObserver for Held {
         _: &DepositionSimulation<'_>,
         _: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), DepositionError> {
+        // The owner accepted the interval: its shares are handed over.
+        for (cell, share_j) in core::mem::take(&mut self.pending_j) {
+            if let Some(remaining_j) = self.remaining_j.get_mut(&cell) {
+                *remaining_j -= share_j;
+            }
+            self.took_j += share_j;
+            self.took_terms_j += share_j.abs();
+        }
         Ok(())
     }
 }
 
-/// The explicit enthalpy timeline of [`DepositionSimulation`], stepped by
-/// its owner. `'a` is the lifetime of the thermal laws the timeline borrows.
+/// The enthalpy timeline of [`DepositionSimulation`], stepped by its owner:
+/// by the explicit rule ([`ThermalTimeline::new`]) or by an implicit solve
+/// on a conduction graph ([`ThermalTimeline::implicit`]). `'a` is the
+/// lifetime of the thermal laws the timeline borrows.
 #[derive(Debug, Clone)]
 pub struct ThermalTimeline<'a> {
     cells: Vec<CellId>,
     environment: bool,
     published: Vec<CellId>,
     config: StepConfig,
+    driver: Driver<'a>,
     ports: Vec<PortSpec>,
     laws: PhantomData<&'a ()>,
 }
@@ -420,9 +554,43 @@ impl<'a> ThermalTimeline<'a> {
             environment,
             published: Vec::new(),
             config,
+            driver: Driver::Explicit,
             ports,
             laws: PhantomData,
         })
+    }
+
+    /// A timeline stepped by the owner's implicit solve on `graph`, with a
+    /// heat port for each of `cells`, in that order, and the `environment`
+    /// port. `controls.maximum_dt_s` is the longest thermal interval and the
+    /// step limit; `controls.total_tolerance_j` gates each step's balance.
+    ///
+    /// # Errors
+    /// [`TimelineBuildError::Duplicate`] for a cell named twice;
+    /// [`TimelineBuildError::Interval`] for a longest interval that is not
+    /// positive and finite. The owner checks the other controls at a step.
+    pub fn implicit(
+        cells: Vec<CellId>,
+        graph: ImplicitConductionGraph<'a>,
+        controls: ImplicitConductionControls,
+        scheme: ImplicitScheme,
+    ) -> Result<Self, TimelineBuildError> {
+        if !(controls.maximum_dt_s > 0.0 && controls.maximum_dt_s.is_finite()) {
+            return Err(TimelineBuildError::Interval {
+                maximum_dt_s: controls.maximum_dt_s,
+            });
+        }
+        let config = StepConfig {
+            max_dt_s: controls.maximum_dt_s,
+            energy_tolerance_j: controls.total_tolerance_j,
+        };
+        let mut timeline = Self::new(cells, true, config)?;
+        timeline.driver = Driver::Implicit {
+            graph: Rc::new(graph),
+            controls,
+            scheme,
+        };
+        Ok(timeline)
     }
 
     /// Also publish the temperature of each of `cells` at the start of the
@@ -449,15 +617,31 @@ impl<'a> ThermalTimeline<'a> {
     /// scheduled at its current time applied (the births a run starts
     /// with).
     ///
+    /// An implicit timeline applies no events here: its graph was prepared
+    /// against `simulation` as it stands.
+    ///
     /// # Errors
     /// The owner's refusal; a cell with a port or a published temperature
     /// that is not active; without an `environment` port, a cell whose
-    /// boundary exchanges heat.
+    /// boundary exchanges heat; for an implicit timeline, an event still
+    /// scheduled at the simulation's time.
     pub fn start(
         &self,
         simulation: &DepositionSimulation<'a>,
     ) -> Result<TimelineState<'a>, TimelineRefusal> {
-        let (started, _) = simulation.advance_to(simulation.time_s(), self.config, || Ok(()))?;
+        let time_s = simulation.time_s();
+        let started = match self.driver {
+            Driver::Explicit => simulation.advance_to(time_s, self.config, || Ok(()))?.0,
+            Driver::Implicit { .. } => {
+                if simulation
+                    .next_event_time_s()
+                    .is_some_and(|event_s| event_s <= time_s)
+                {
+                    return Err(TimelineRefusal::PendingEvent { time_s });
+                }
+                simulation.clone()
+            }
+        };
         if let Some(cell) = self
             .cells
             .iter()
@@ -520,6 +704,10 @@ impl<'a> Component for ThermalTimeline<'a> {
         state: &TimelineState<'a>,
         proposed_s: f64,
     ) -> Result<f64, TimelineRefusal> {
+        if let Driver::Implicit { controls, .. } = &self.driver {
+            // No conduction bound: the longest interval the controls admit.
+            return Ok(proposed_s.min(controls.maximum_dt_s));
+        }
         // The owner proposes its explicit bound to its observer before it
         // changes any enthalpy; the probe stops it there. The bound comes
         // from the start state's capacities and conductances, not from the
@@ -587,12 +775,65 @@ impl<'a> Component for ThermalTimeline<'a> {
             delivered_j += dt_s * rate_w;
             delivered_terms_j += (dt_s * rate_w).abs();
         }
-        let (next, held, audit) = old.simulation.advance_observed(
-            &Held::new(energy_j, target_s, false),
-            target_s,
-            self.config,
-            || cx.checkpoint().map_err(|_| DepositionError::Cancelled),
-        )?;
+        let observer = Held::new(energy_j, target_s, false);
+        // The implicit solve's largest cell residual and its tolerance.
+        let mut solve = (0.0_f64, 0.0_f64);
+        let (next, held, audit) = match &self.driver {
+            Driver::Explicit => {
+                old.simulation
+                    .advance_observed(&observer, target_s, self.config, || {
+                        cx.checkpoint().map_err(|_| DepositionError::Cancelled)
+                    })?
+            }
+            Driver::Implicit {
+                graph,
+                controls,
+                scheme,
+            } => {
+                let mut workspace = ImplicitConductionWorkspace::new(graph.cell_ids().len())?;
+                let checkpoint = || cx.checkpoint().map_err(|_| DepositionError::Cancelled);
+                // A rejected interval is the kernel's to shorten, with every
+                // other component: the owner does not halve it here.
+                let single = ImplicitConductionControls {
+                    maximum_halvings: 0,
+                    ..*controls
+                };
+                let advanced = match scheme {
+                    ImplicitScheme::BackwardEuler => graph.advance_observed_to(
+                        &old.simulation,
+                        &observer,
+                        target_s,
+                        single,
+                        &mut workspace,
+                        checkpoint,
+                    ),
+                    ImplicitScheme::Sdirk2 => graph.advance_sdirk2_observed_to(
+                        &old.simulation,
+                        &observer,
+                        target_s,
+                        single,
+                        &mut workspace,
+                        checkpoint,
+                    ),
+                };
+                let (next, held, report) = match advanced {
+                    Ok(advanced) => advanced,
+                    Err(ImplicitConductionObservedError::Implicit(error))
+                        if rejected(&error) && 0.5 * dt_s >= controls.minimum_dt_s =>
+                    {
+                        return Ok(Proposal::Shorten { dt_s: 0.5 * dt_s });
+                    }
+                    Err(ImplicitConductionObservedError::Implicit(error)) => {
+                        return Err(error.into());
+                    }
+                    Err(ImplicitConductionObservedError::Observer(error)) => {
+                        return Err(error.into());
+                    }
+                };
+                solve = (report.maximum_cell_residual_j, controls.cell_tolerance_j);
+                (next, held, report.energy)
+            }
+        };
         if let Some(cell) = held.born {
             return Err(TimelineRefusal::Birth {
                 cell,
@@ -615,8 +856,10 @@ impl<'a> Component for ThermalTimeline<'a> {
         // The owner's external heat is the port heat it was handed plus what
         // its own boundaries exchanged. The second part is on the
         // environment wire; while no boundary exchanges it is nothing, not
-        // the rounding between the two sums.
-        let environment_j = if exchanging.is_some() || held.exchanging.is_some() {
+        // the rounding between the two sums. A conduction graph can own
+        // exchanges no cell's boundary shows, so there it is always read.
+        let owned = matches!(self.driver, Driver::Implicit { .. });
+        let environment_j = if owned || exchanging.is_some() || held.exchanging.is_some() {
             audit.external_heat_j - held.took_j
         } else {
             0.0
@@ -653,8 +896,8 @@ impl<'a> Component for ThermalTimeline<'a> {
             numerical_loss_j: booked_j - audit.stored_energy_change_j,
             entropy_generated_j_per_k: 0.0,
             energy_tolerance_j: units * f64::EPSILON * scale_j + f64::MIN_POSITIVE,
-            residual: 0.0,
-            tolerance: 0.0,
+            residual: solve.0,
+            tolerance: solve.1,
         }))
     }
 }

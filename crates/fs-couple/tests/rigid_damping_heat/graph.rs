@@ -20,7 +20,7 @@ use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_mbd::component::network::{DampingLaw, ViscousNetwork};
 use fs_system::{Ledger, NodeId, RouteTemperature, System, SystemBuilder, heat_sink};
-use fs_thermal::component::{ThermalTimeline, TimelineState};
+use fs_thermal::component::{ImplicitScheme, ThermalTimeline, TimelineState};
 
 fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let pool = ArenaPool::new(ArenaConfig::default());
@@ -252,29 +252,28 @@ impl DampingLaw for ModuleLaw {
 }
 
 /// The feedback graph: one connector, all of its heat into cell 0, whose
-/// start-of-step temperature the timeline publishes and the network's law
-/// reads. Returns the system and its two nodes, the network and the cells.
+/// start-of-step temperature `timeline` publishes and the network's law
+/// reads. `timeline` has a heat port and a published temperature for cell 0
+/// and the environment port. Returns the system and its two nodes, the
+/// network and the cells.
 fn feedback_graph(
     bodies: &Bodies,
     heat: &DepositionSimulation<'static>,
-    controls: RigidDampingThermalConfig,
+    timeline: ThermalTimeline<'static>,
+    mechanical: ViscousNetworkMotionControls,
     law: &ModuleLaw,
 ) -> (System, NodeId, NodeId) {
     let network = ViscousNetwork::temperature_dependent(
         bodies.properties.to_vec(),
         bodies.links[..1].to_vec(),
         bodies.gravity,
-        controls.mechanical,
+        mechanical,
         std::rc::Rc::new(ModuleLaw {
             beta_per_k: law.beta_per_k,
             maximum_k: law.maximum_k,
         }),
     )
     .unwrap();
-    let timeline = ThermalTimeline::new(vec![CellId(0)], true, controls.thermal)
-        .unwrap()
-        .publishing(vec![CellId(0)])
-        .unwrap();
     let start = timeline.start(heat).unwrap();
     let mut builder = SystemBuilder::new();
     let moving = builder.add("network", network, bodies.states.to_vec()).unwrap();
@@ -348,7 +347,12 @@ fn the_declared_graph_reproduces_the_temperature_feedback_candidate() {
         .unwrap();
         let report = candidate.report();
 
-        let (mut system, moving, cells) = feedback_graph(&bodies, &heat, controls, &law);
+        let timeline = ThermalTimeline::new(vec![CellId(0)], true, controls.thermal)
+            .unwrap()
+            .publishing(vec![CellId(0)])
+            .unwrap();
+        let (mut system, moving, cells) =
+            feedback_graph(&bodies, &heat, timeline, controls.mechanical, &law);
         let intervals = run(&mut system, target_s);
         let case = format!("target {target_s}");
 
@@ -384,6 +388,239 @@ fn the_declared_graph_reproduces_the_temperature_feedback_candidate() {
         let close = |ours: f64, theirs: f64, what: &str| {
             assert!(
                 (ours - theirs).abs() <= 1e-11 * dissipated,
+                "{case}: {what}: ledger {ours:e}, report {theirs:e}"
+            );
+        };
+        close(node(ledger, "network").dissipated_j.value(), dissipated, "dissipated");
+        close(node(ledger, "cells").stored_change_j.value(), report.deposited_heat_j, "stored");
+        close(
+            node(ledger, "network").stored_change_j.value(),
+            report.mechanical_energy_change_j,
+            "mechanical energy",
+        );
+        close(ledger.energy_residual_j(), 0.0, "the ledger closes");
+    }
+}
+
+#[test]
+fn the_declared_graph_reproduces_the_implicit_candidate() {
+    // The fixture of the module's own implicit test: two cells on a
+    // 1000 W/K link, which the explicit rule cannot step in its substep
+    // allowance, and both connectors' heat into cell 0. A quarter-second
+    // thermal interval, backward Euler and SDIRK2.
+    let laws: &'static [Caloric; 2] = Box::leak(Box::new(linear_calorics()));
+    let bodies = Bodies::new([0.7, 1.1]);
+    let routes = [
+        BTreeMap::from([(CellId(0), 1.0)]),
+        BTreeMap::from([(CellId(0), 1.0)]),
+    ];
+    let heat = stiff_thermal(laws, 8);
+    for (module_scheme, scheme) in [
+        (ImplicitThermalScheme::BackwardEuler, ImplicitScheme::BackwardEuler),
+        (ImplicitThermalScheme::Sdirk2, ImplicitScheme::Sdirk2),
+    ] {
+        let config = implicit_config(module_scheme);
+        let conduction = stiff_graph(laws, &heat);
+        let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+        let (candidate, native) = advance_implicit_candidate(
+            bodies.input(&routes),
+            &heat,
+            &(),
+            0.5,
+            &conduction,
+            config,
+            &mut workspace,
+            || false,
+        )
+        .unwrap();
+        let report = candidate.report();
+        assert_eq!((native.energy.substeps, native.rejected_intervals), (2, 0));
+
+        // The graph: the same network, the timeline stepped by the same
+        // solve on a graph prepared the same way, both connectors' heat
+        // routed whole to cell 0 (one receiver shared by two routes).
+        let network = ViscousNetwork::new(
+            bodies.properties.to_vec(),
+            bodies.links.to_vec(),
+            bodies.gravity,
+            config.mechanical,
+        )
+        .unwrap();
+        let timeline = ThermalTimeline::implicit(
+            vec![CellId(0)],
+            stiff_graph(laws, &heat),
+            config.thermal,
+            scheme,
+        )
+        .unwrap();
+        let start = timeline.start(&heat).unwrap();
+        let mut builder = SystemBuilder::new();
+        let moving = builder.add("network", network, bodies.states.to_vec()).unwrap();
+        let cells = builder.add("cells", timeline, start).unwrap();
+        for body in 0..bodies.loads.len() {
+            let force = builder.port(moving, &format!("force{body}")).unwrap();
+            builder
+                .boundary(force, Box::new(|_, _, out: &mut [f64]| out.fill(0.0)))
+                .unwrap();
+        }
+        for connector in 0..2 {
+            builder
+                .heat_route(
+                    builder.port(moving, &format!("heat{connector}")).unwrap(),
+                    &[(builder.port(cells, "cell0").unwrap(), 1.0)],
+                    None,
+                    RouteTemperature::SinkEquivalent,
+                )
+                .unwrap();
+        }
+        builder
+            .heat_route(
+                builder.port(cells, "environment").unwrap(),
+                &[],
+                Some(heat_sink("environment", 300.0).unwrap()),
+                RouteTemperature::Fixed(300.0),
+            )
+            .unwrap();
+        let mut system = builder.seal().unwrap();
+        for connector in 0..2 {
+            let port = system.port(moving, &format!("heat{connector}")).unwrap();
+            assert!(system.guess(port, &[300.0]));
+        }
+        let intervals = run(&mut system, 0.5);
+        let case = format!("{scheme:?}");
+
+        // Two quarter-second steps, where the explicit rule's bound is
+        // under a millisecond: the same intervals as the module's.
+        assert_eq!(intervals, [0.25, 0.25], "{case}");
+        let reached = system.state::<Vec<RigidBodyState>>(moving).unwrap();
+        assert_eq!(reached.as_slice(), candidate.states(), "{case}");
+        let timeline = system.state::<TimelineState<'static>>(cells).unwrap();
+        assert_eq!(
+            timeline.simulation().time_s().to_bits(),
+            candidate.thermal().time_s().to_bits(),
+            "{case}: the two thermal clocks"
+        );
+        // Both sides close each cell to 1e-10 J on a capacity of 1 J/K.
+        for id in [CellId(0), CellId(1)] {
+            let kernel = timeline.simulation().temperature_k(id).unwrap();
+            let module = candidate.thermal().temperature_k(id).unwrap();
+            assert!((kernel - module).abs() <= 1e-9, "{case}: {id:?} {kernel} vs {module}");
+            assert!(kernel > 300.5, "{case}: the damper heat warmed {id:?} to {kernel}");
+        }
+        let ledger = system.ledger();
+        let dissipated = report.dissipated_energy_j;
+        assert!(dissipated > 1.0, "{case}: enough heat to compare, {dissipated} J");
+        let close = |ours: f64, theirs: f64, allowance: f64, what: &str| {
+            assert!(
+                (ours - theirs).abs() <= allowance,
+                "{case}: {what}: ledger {ours:e}, report {theirs:e}"
+            );
+        };
+        let rounding = 1e-11 * dissipated;
+        // The solve's own closure, 1e-9 J for the call.
+        let closure = config.thermal.total_tolerance_j;
+        close(node(ledger, "network").dissipated_j.value(), dissipated, rounding, "dissipated");
+        close(report.deposited_heat_j, dissipated, rounding, "all of it deposited");
+        close(
+            node(ledger, "cells").stored_change_j.value(),
+            report.thermal.stored_energy_change_j,
+            closure,
+            "stored in the cells",
+        );
+        close(node(ledger, "cells").stored_change_j.value(), dissipated, closure, "stored");
+        close(sink(ledger, "environment"), 0.0, closure, "no boundary heat");
+        close(
+            node(ledger, "network").stored_change_j.value(),
+            report.mechanical_energy_change_j,
+            rounding,
+            "mechanical energy",
+        );
+        close(ledger.energy_residual_j(), 0.0, closure, "the ledger closes");
+    }
+}
+
+#[test]
+fn the_declared_graph_reproduces_the_implicit_temperature_feedback_candidate() {
+    // Temperature feedback on the stiff pair: one connector between two
+    // 2 kg bodies heats cell 0, which a 1000 W/K link shares with cell 1,
+    // and cell 0's temperature sets the connector's damping. Sixteenth-second
+    // thermal intervals, backward Euler and SDIRK2.
+    let laws: &'static [Caloric; 2] = Box::leak(Box::new(linear_calorics()));
+    let bodies = Bodies::new([0.7, 0.0]);
+    let routes = [BTreeMap::from([(CellId(0), 1.0)])];
+    let heat = stiff_thermal(laws, 8);
+    let law = ModuleLaw {
+        beta_per_k: 2.0,
+        maximum_k: 303.0,
+    };
+    for (module_scheme, scheme) in [
+        (ImplicitThermalScheme::BackwardEuler, ImplicitScheme::BackwardEuler),
+        (ImplicitThermalScheme::Sdirk2, ImplicitScheme::Sdirk2),
+    ] {
+        let mut config = implicit_config(module_scheme);
+        config.thermal.maximum_dt_s = 0.0625;
+        let mut input = bodies.input(&routes);
+        input.links = &bodies.links[..1];
+        let conduction = stiff_graph(laws, &heat);
+        let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+        let (candidate, native) =
+            fs_couple::rigid_damping_heat::temperature::advance_implicit_candidate(
+                input,
+                &heat,
+                &(),
+                &law.source(),
+                &[CellId(0)],
+                0.5,
+                &conduction,
+                config,
+                &mut workspace,
+                || false,
+            )
+            .unwrap();
+        let report = candidate.report();
+        assert_eq!((native.energy.substeps, native.rejected_intervals), (8, 0));
+
+        let timeline = ThermalTimeline::implicit(
+            vec![CellId(0)],
+            stiff_graph(laws, &heat),
+            config.thermal,
+            scheme,
+        )
+        .unwrap()
+        .publishing(vec![CellId(0)])
+        .unwrap();
+        let (mut system, moving, cells) =
+            feedback_graph(&bodies, &heat, timeline, config.mechanical, &law);
+        let intervals = run(&mut system, 0.5);
+        let case = format!("{scheme:?}");
+
+        assert_eq!(intervals, [0.0625; 8], "{case}");
+        let timeline = system.state::<TimelineState<'static>>(cells).unwrap();
+        // The feedback is real: cell 0 warmed, so the damping rose on the way.
+        let module_k = candidate.thermal().temperature_k(CellId(0)).unwrap();
+        assert!(module_k > 300.2, "{case}: {module_k}");
+        for id in [CellId(0), CellId(1)] {
+            let kernel = timeline.simulation().temperature_k(id).unwrap();
+            let module = candidate.thermal().temperature_k(id).unwrap();
+            assert!((kernel - module).abs() <= 1e-9, "{case}: {id:?} {kernel} vs {module}");
+        }
+        // The law sees the module's temperature to the kernel's solve
+        // tolerance and to the closure of the two thermal solves.
+        let reached = system.state::<Vec<RigidBodyState>>(moving).unwrap();
+        for (body, (ours, theirs)) in reached.iter().zip(candidate.states()).enumerate() {
+            let (ours, theirs) = (
+                ours.center_of_mass_velocity_world(bodies.properties[body]).unwrap(),
+                theirs.center_of_mass_velocity_world(bodies.properties[body]).unwrap(),
+            );
+            assert!((ours.x - theirs.x).abs() <= 1e-8, "{case}: body {body}: {ours:?} vs {theirs:?}");
+        }
+        let ledger = system.ledger();
+        let dissipated = report.dissipated_energy_j;
+        assert!(dissipated > 0.5, "{case}: {dissipated} J");
+        let closure = 8.0 * config.thermal.total_tolerance_j;
+        let close = |ours: f64, theirs: f64, what: &str| {
+            assert!(
+                (ours - theirs).abs() <= closure,
                 "{case}: {what}: ledger {ours:e}, report {theirs:e}"
             );
         };

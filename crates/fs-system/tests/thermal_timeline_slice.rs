@@ -32,8 +32,17 @@ use fs_ports::component::conformance::{Case, Observed, check_component};
 use fs_ports::component::{Component, Proposal, Receipt};
 use fs_system::{Ledger, RouteTemperature, SystemBuilder, heat_sink};
 use fs_thermal::component::{
-    ThermalTimeline, TimelineBuildError, TimelineRefusal, TimelineState,
+    ImplicitScheme, ThermalTimeline, TimelineBuildError, TimelineRefusal, TimelineState,
 };
+use fs_thermal::enthalpy::conduction::implicit::{
+    ImplicitConductionControls, ImplicitConductionError, ImplicitConductionGraph,
+    ImplicitConductionLaw, ImplicitConductionLinearControls, ImplicitConductionReport,
+    ImplicitConductionState, ImplicitConductionWorkspace,
+};
+use fs_thermal::enthalpy::conduction::implicit::source::{
+    ImplicitHeatSourceLaw, ImplicitHeatSourceState,
+};
+use fs_thermal::enthalpy::conduction::{ConductionObserver, ConductiveLink, ConductivityLaw};
 use fs_thermal::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
     DepositionObserver, DepositionSimulation, Event, MaterialId, Reservoir, StepConfig,
@@ -62,6 +71,8 @@ struct Sensible {
     datum_j_kg: f64,
     tripwire: Cell<Option<&'static CancelGate>>,
     refuse: Cell<bool>,
+    /// For the implicit graph: conductivity `1 + slope (T - 300 K)` W/(m K).
+    conductivity_slope_per_k: f64,
 }
 
 const LAW_REFUSAL: DepositionError = DepositionError::InvalidInput("the test law refuses");
@@ -79,6 +90,17 @@ impl ThermalLaw for Sensible {
 
     fn maximum_temperature_slope(&self) -> f64 {
         1.0 / CP
+    }
+
+    /// `cp ln(T1 / T0)`, which the implicit owner's entropy account needs.
+    fn specific_entropy_change_j_kg_k(
+        &self,
+        initial_h_j_kg: f64,
+        final_h_j_kg: f64,
+    ) -> Result<Option<f64>, DepositionError> {
+        let before_k = self.temperature_k(initial_h_j_kg)?;
+        let after_k = self.temperature_k(final_h_j_kg)?;
+        Ok(Some(CP * ((after_k - before_k) / before_k).ln_1p()))
     }
 }
 
@@ -123,6 +145,7 @@ struct Scene {
     extra: Vec<TimedEvent>,
     datums_j_kg: [f64; 2],
     birth_s: f64,
+    conductivity_slope_per_k: f64,
 }
 
 impl Default for Scene {
@@ -133,6 +156,7 @@ impl Default for Scene {
             extra: Vec::new(),
             datums_j_kg: [0.0; 2],
             birth_s: 0.0,
+            conductivity_slope_per_k: 0.0,
         }
     }
 }
@@ -167,11 +191,17 @@ impl Scene {
     /// The timeline and the first cell's law. The laws live as long as the
     /// test process: the kernel keeps component states as `'static` values.
     fn build(&self) -> (DepositionSimulation<'static>, &'static Sensible) {
+        let (simulation, [law, _]) = self.build_laws();
+        (simulation, law)
+    }
+
+    fn build_laws(&self) -> (DepositionSimulation<'static>, [&'static Sensible; 2]) {
         let [law, other] = self.datums_j_kg.map(|datum_j_kg| {
             let law: &'static Sensible = Box::leak(Box::new(Sensible {
                 datum_j_kg,
                 tripwire: Cell::new(None),
                 refuse: Cell::new(false),
+                conductivity_slope_per_k: self.conductivity_slope_per_k,
             }));
             law
         });
@@ -205,7 +235,7 @@ impl Scene {
             },
         )
         .expect("timeline");
-        (simulation, law)
+        (simulation, [law, other])
     }
 
     fn timeline(&self) -> DepositionSimulation<'static> {
@@ -252,6 +282,19 @@ fn propose(
         panic!("the timeline takes the step or refuses");
     };
     Ok((next, receipt, outputs))
+}
+
+/// What `component` answers to one step from `state`, outside the kernel.
+fn proposal(
+    component: &ThermalTimeline<'static>,
+    state: &TimelineState<'static>,
+    dt_s: f64,
+    inputs: &[f64],
+    gate: &CancelGate,
+) -> Result<Proposal, TimelineRefusal> {
+    let mut next = state.clone();
+    let mut outputs = vec![f64::NAN; component.ports().len()];
+    with_cx(gate, |cx| component.propose(state, dt_s, inputs, &mut next, &mut outputs, cx))
 }
 
 /// The conformance check on one case, which must step.
@@ -962,6 +1005,497 @@ fn boundary_heat_is_on_the_environment_wire_and_reaches_a_named_sink() {
 }
 
 // ---------------------------------------------------------------------------
+// The implicit driver.
+// ---------------------------------------------------------------------------
+
+impl ConductivityLaw for Sensible {
+    fn conductivity_w_m_k(&self, specific_h_j_kg: f64) -> Result<f64, DepositionError> {
+        let kelvin = self.temperature_k(specific_h_j_kg)?;
+        Ok(1.0 + self.conductivity_slope_per_k * (kelvin - 300.0))
+    }
+}
+
+impl ImplicitConductionLaw for Sensible {
+    fn caloric_law(&self) -> &dyn ThermalLaw {
+        self
+    }
+
+    fn conductivity_law(&self) -> &dyn ConductivityLaw {
+        self
+    }
+
+    /// 250 K to 400 K.
+    fn enthalpy_bounds_j_kg(&self) -> [f64; 2] {
+        [self.datum_j_kg - 50.0 * CP, self.datum_j_kg + 100.0 * CP]
+    }
+
+    fn state_at_specific_enthalpy(
+        &self,
+        specific_h_j_kg: f64,
+    ) -> Result<ImplicitConductionState, DepositionError> {
+        Ok(ImplicitConductionState {
+            temperature_k: self.temperature_k(specific_h_j_kg)?,
+            temperature_slope_kg_k_j: 1.0 / CP,
+            conductivity_w_m_k: self.conductivity_w_m_k(specific_h_j_kg)?,
+            conductivity_slope_kg_w_m_k_j: self.conductivity_slope_per_k / CP,
+        })
+    }
+}
+
+impl Scene {
+    /// The scene with the events it starts with applied, and its laws: what
+    /// a conduction graph is prepared against.
+    fn active(&self) -> (DepositionSimulation<'static>, [&'static Sensible; 2]) {
+        let (simulation, laws) = self.build_laws();
+        let (active, _) = simulation
+            .advance_to(self.birth_s, config(0.05), || Ok(()))
+            .expect("the scene's own events");
+        (active, laws)
+    }
+
+    /// The conduction graph of the scene's one link. Its half distances give
+    /// the link the scene's conductance where the conductivity is 1 W/(m K),
+    /// at 300 K.
+    fn graph(
+        &self,
+        active: &DepositionSimulation<'static>,
+        laws: [&'static Sensible; 2],
+    ) -> ImplicitConductionGraph<'static> {
+        let half_m = LINK_AREA_M2 / (2.0 * self.link_w_k);
+        let conduction = ConductionObserver::new(
+            active,
+            &[
+                (MaterialId(0), laws[0] as &dyn ConductivityLaw),
+                (MaterialId(1), laws[1] as &dyn ConductivityLaw),
+            ],
+            &[ConductiveLink {
+                link_id: 7,
+                half_distances_m: [half_m; 2],
+                contact_resistance_m2_k_w: 0.0,
+            }],
+            &[],
+            || Ok(()),
+        )
+        .expect("conduction");
+        ImplicitConductionGraph::new(
+            active,
+            &conduction,
+            &[
+                (MaterialId(0), laws[0] as &dyn ImplicitConductionLaw),
+                (MaterialId(1), laws[1] as &dyn ImplicitConductionLaw),
+            ],
+            ImplicitConductionLinearControls::default(),
+            || Ok(()),
+        )
+        .expect("graph")
+    }
+}
+
+fn implicit_controls(maximum_dt_s: f64) -> ImplicitConductionControls {
+    ImplicitConductionControls {
+        maximum_dt_s,
+        cell_tolerance_j: 1.0e-11,
+        total_tolerance_j: 1.0e-9,
+        ..ImplicitConductionControls::default()
+    }
+}
+
+/// The owner's own implicit solve to `target_s`, with held rates.
+fn owner_solve(
+    graph: &ImplicitConductionGraph<'static>,
+    from: &DepositionSimulation<'static>,
+    held: &HeldSources,
+    target_s: f64,
+    controls: ImplicitConductionControls,
+    scheme: ImplicitScheme,
+) -> (DepositionSimulation<'static>, ImplicitConductionReport) {
+    let mut workspace = ImplicitConductionWorkspace::new(graph.cell_ids().len()).expect("workspace");
+    let advanced = match scheme {
+        ImplicitScheme::BackwardEuler => {
+            graph.advance_observed_to(from, held, target_s, controls, &mut workspace, || Ok(()))
+        }
+        ImplicitScheme::Sdirk2 => {
+            graph.advance_sdirk2_observed_to(from, held, target_s, controls, &mut workspace, || Ok(()))
+        }
+    };
+    let (next, _, report) = advanced.expect("the owner's solve");
+    (next, report)
+}
+
+#[test]
+fn the_implicit_timeline_conforms_and_its_step_is_the_owners_solve() {
+    let gate = CancelGate::new_clock_free();
+    let scene = Scene::default();
+    let (active, laws) = scene.active();
+    let controls = implicit_controls(0.5);
+    let (dt_s, rates) = (0.25, [2.0, -0.5]);
+    let held = HeldSources::new([(A, rates[0]), (B, rates[1])]);
+    let delivered = dt_s * (rates[0] + rates[1]);
+    let mut ends = Vec::new();
+    for scheme in [ImplicitScheme::BackwardEuler, ImplicitScheme::Sdirk2] {
+        let component =
+            ThermalTimeline::implicit(vec![A, B], scene.graph(&active, laws), controls, scheme)
+                .expect("component");
+        let names: Vec<&str> = component.ports().iter().map(|port| port.id().as_str()).collect();
+        assert_eq!(names, ["cell10", "cell20", "environment"]);
+        let start = component.start(&active).expect("start");
+        // The limit is the controls' longest interval, or the proposal.
+        assert_eq!(component.limit_dt_s(&start, 10.0).expect("limit"), 0.5);
+        assert_eq!(component.limit_dt_s(&start, 0.1).expect("limit"), 0.1);
+        let stale = later(&component, &active, 1.0);
+        let inputs = [rates[0], rates[1], 293.15];
+        let (receipt, _, outputs) = conforms(&component, &start, &stale, dt_s, &inputs);
+        let (next, _, _) = propose(&component, &start, dt_s, &inputs, &gate).expect("step");
+
+        // The owner's own solve with the rates held: one interval, the same
+        // cells and the same stored change.
+        let twin = scene.graph(&active, laws);
+        let (native, report) = owner_solve(&twin, &active, &held, dt_s, controls, scheme);
+        assert_eq!((report.energy.substeps, report.rejected_intervals), (1, 0));
+        same_cells(&next, &native);
+        let stored = receipt.stored_change_j;
+        assert!((stored - report.energy.stored_energy_change_j).abs() <= 1.0e-12 * delivered);
+        // The solve closes each cell to 1e-11 J.
+        assert!((stored - delivered).abs() <= 1.0e-10, "{stored} vs {delivered}");
+        assert!(receipt.numerical_loss_j.abs() <= 1.0e-10, "{}", receipt.numerical_loss_j);
+        for (port, id) in [A, B].into_iter().enumerate() {
+            let mean = 0.5 * (temperature(&start, id) + native.temperature_k(id).expect("T"));
+            assert!((outputs[port] - mean).abs() <= 1.0e-11, "{} vs {mean}", outputs[port]);
+        }
+        // Nothing exchanges here: the port carries only the rounding
+        // between the owner's external heat and the port heat it was handed.
+        assert!(outputs[2].abs() <= 1.0e-13, "{} W", outputs[2]);
+        // A linear problem converges to rounding, well inside its tolerance.
+        assert!(receipt.residual <= receipt.tolerance);
+        assert_eq!(receipt.tolerance, controls.cell_tolerance_j);
+        ends.push([temperature(&next, A), temperature(&next, B)]);
+    }
+    // Backward Euler by hand for two equal cells on one link: the sum of the
+    // temperatures takes the delivered heat, and the difference d obeys
+    // C (d' - d) = dt (qa - qb) - 2 dt G d'.
+    let sum = 310.0 + 295.0 + delivered / CAPACITY;
+    let difference = (CAPACITY * 15.0 + dt_s * (rates[0] - rates[1]))
+        / (CAPACITY + 2.0 * dt_s * LINK_W_K);
+    let by_hand = [0.5 * (sum + difference), 0.5 * (sum - difference)];
+    for cell in 0..2 {
+        assert!((ends[0][cell] - by_hand[cell]).abs() <= 1.0e-9, "{:?} vs {by_hand:?}", ends[0]);
+    }
+    // The second scheme is another quadrature of the same step.
+    assert!((ends[1][0] - ends[0][0]).abs() > 1.0e-6, "{ends:?}");
+}
+
+#[test]
+fn an_implicit_step_is_not_bound_by_conduction() {
+    let gate = CancelGate::new_clock_free();
+    // A 400 W/K link: the explicit rule may not step past 10 ms.
+    let stiff = Scene {
+        link_w_k: 400.0,
+        ..Scene::default()
+    };
+    let explicit = ThermalTimeline::new(vec![A, B], false, config(1.0)).expect("component");
+    let bounded = explicit.start(&stiff.timeline()).expect("start");
+    assert!(explicit.limit_dt_s(&bounded, 1.0).expect("limit") <= 0.0101);
+    let (active, laws) = stiff.active();
+    let controls = implicit_controls(0.5);
+    let component = ThermalTimeline::implicit(
+        vec![A, B],
+        stiff.graph(&active, laws),
+        controls,
+        ImplicitScheme::BackwardEuler,
+    )
+    .expect("component");
+    let start = component.start(&active).expect("start");
+    // The stiff link does not move the implicit limit.
+    assert_eq!(component.limit_dt_s(&start, 10.0).expect("limit"), 0.5);
+    let (dt_s, rates) = (0.5, [3.0, 1.0]);
+    let inputs = [rates[0], rates[1], 293.15];
+    let (next, receipt, _) = propose(&component, &start, dt_s, &inputs, &gate).expect("step");
+    assert_eq!(next.simulation().time_s(), 0.5);
+    // Fifty explicit bounds in one backward-Euler interval: the difference
+    // d obeys C (d' - d) = dt (qa - qb) - 2 dt G d', so d' = 76 / 405 K.
+    // Fifty explicit substeps would leave about 0.0025 K.
+    let apart_k = temperature(&next, A) - temperature(&next, B);
+    assert!((apart_k - 76.0 / 405.0).abs() <= 1.0e-9, "{apart_k}");
+    let delivered = dt_s * (rates[0] + rates[1]);
+    assert!((receipt.stored_change_j - delivered).abs() <= 1.0e-10);
+
+}
+
+#[test]
+fn a_rejected_implicit_interval_is_the_kernels_to_shorten() {
+    let gate = CancelGate::new_clock_free();
+    // A conductivity that rises with temperature and a solve allowed two
+    // Newton iterations: the owner, left to itself, rejects an interval and
+    // halves it until two iterations are enough (measured here: 15 accepted
+    // intervals and 118 rejected ones in the half second).
+    let curved = Scene {
+        link_w_k: 400.0,
+        conductivity_slope_per_k: 0.01,
+        ..Scene::default()
+    };
+    let (active, laws) = curved.active();
+    let strict = ImplicitConductionControls {
+        maximum_newton_iterations: 2,
+        ..implicit_controls(0.5)
+    };
+    let (target_s, rates) = (0.5, [3.0, 1.0]);
+    let held = HeldSources::new([(A, rates[0]), (B, rates[1])]);
+    let twin = curved.graph(&active, laws);
+    let (native, report) =
+        owner_solve(&twin, &active, &held, target_s, strict, ImplicitScheme::BackwardEuler);
+    assert!(report.rejected_intervals > 100, "{report:?}");
+    assert!(report.energy.substeps > 10, "{report:?}");
+
+    // The Component does not halve inside a step: it asks for half the
+    // step, down to the controls' shortest interval, where the owner's
+    // refusal comes through.
+    let implicit = |controls| {
+        ThermalTimeline::implicit(
+            vec![A, B],
+            curved.graph(&active, laws),
+            controls,
+            ImplicitScheme::BackwardEuler,
+        )
+        .expect("component")
+    };
+    let component = implicit(strict);
+    let start = component.start(&active).expect("start");
+    let inputs = [rates[0], rates[1], 293.15];
+    assert_eq!(
+        proposal(&component, &start, 0.5, &inputs, &gate).expect("answer"),
+        Proposal::Shorten { dt_s: 0.25 }
+    );
+    let floor = implicit(ImplicitConductionControls {
+        minimum_dt_s: 0.3,
+        ..strict
+    });
+    assert!(matches!(
+        proposal(&floor, &start, 0.5, &inputs, &gate),
+        Err(TimelineRefusal::Implicit(ImplicitConductionError::NotConverged { .. }))
+    ));
+
+    // In the kernel the shortened steps are the owner's own intervals: as
+    // many steps as it accepts, as many shortenings as it rejects, and the
+    // same cells.
+    let mut builder = SystemBuilder::new();
+    let cells = builder.add("cells", component, start).expect("cells");
+    for (name, rate_w) in [("cell10", rates[0]), ("cell20", rates[1])] {
+        builder
+            .boundary(
+                builder.port(cells, name).expect("port"),
+                Box::new(move |_, _, out: &mut [f64]| out[0] = rate_w),
+            )
+            .expect("heated");
+    }
+    builder
+        .heat_route(
+            builder.port(cells, "environment").expect("port"),
+            &[],
+            Some(heat_sink("room", 293.15).expect("sink")),
+            RouteTemperature::Fixed(293.15),
+        )
+        .expect("route");
+    let mut system = builder.seal().expect("sealed");
+    let (mut steps, mut shortenings) = (0_usize, 0_usize);
+    with_cx(&gate, |cx| {
+        while system.time_s() < target_s {
+            let step = system.step(target_s - system.time_s(), cx).expect("step");
+            steps += 1;
+            shortenings += step.shortenings as usize;
+            assert!(steps < 1000);
+        }
+    });
+    assert_eq!(steps, report.energy.substeps);
+    assert_eq!(shortenings, report.rejected_intervals);
+    let reached = system.state::<TimelineState<'static>>(cells).expect("state");
+    same_cells(reached, &native);
+    let delivered = target_s * (rates[0] + rates[1]);
+    let stored = system.ledger().stored_change_j();
+    assert!((stored - delivered).abs() <= 1.0e-9, "{stored} vs {delivered}");
+}
+
+#[test]
+fn a_loose_implicit_solve_leaves_its_residual_in_the_numerical_loss() {
+    // Two Newton iterations are all this solve gets, and a cell tolerance
+    // of 1e-4 J accepts what they leave.
+    let curved = Scene {
+        link_w_k: 400.0,
+        conductivity_slope_per_k: 0.01,
+        ..Scene::default()
+    };
+    let (active, laws) = curved.active();
+    let loose = ImplicitConductionControls {
+        maximum_newton_iterations: 2,
+        cell_tolerance_j: 1.0e-4,
+        total_tolerance_j: 1.0e-3,
+        ..ImplicitConductionControls::default()
+    };
+    let component = ThermalTimeline::implicit(
+        vec![A, B],
+        curved.graph(&active, laws),
+        ImplicitConductionControls {
+            maximum_dt_s: 0.5,
+            ..loose
+        },
+        ImplicitScheme::BackwardEuler,
+    )
+    .expect("component");
+    let start = component.start(&active).expect("start");
+    let stale = later(&component, &active, 1.0);
+    let (dt_s, inputs) = (0.5, [3.0, 1.0, 293.15]);
+    let (receipt, _, outputs) = conforms(&component, &start, &stale, dt_s, &inputs);
+    // The receipt says how well the solve closed, and what it was asked.
+    assert!(receipt.residual > 1.0e-9, "{}", receipt.residual);
+    assert!(receipt.residual <= receipt.tolerance);
+    assert_eq!(receipt.tolerance, 1.0e-4);
+    // What the solve did not close is numerical loss. It is not heat on
+    // the environment wire, where nothing flows.
+    assert!(receipt.numerical_loss_j.abs() > 1.0e-9, "{}", receipt.numerical_loss_j);
+    assert!(receipt.numerical_loss_j.abs() <= 2.0e-4, "{}", receipt.numerical_loss_j);
+    assert!(outputs[2].abs() <= 1.0e-13, "{} W", outputs[2]);
+}
+
+/// A constant heat source bound to a cell of the conduction graph: heat the
+/// graph owns, which no cell's boundary shows.
+struct Steady {
+    law: &'static Sensible,
+    power_w: f64,
+}
+
+impl ImplicitHeatSourceLaw for Steady {
+    fn caloric_law(&self) -> &dyn ThermalLaw {
+        self.law
+    }
+
+    fn state_at_specific_enthalpy(
+        &self,
+        _: f64,
+        _: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<ImplicitHeatSourceState, DepositionError> {
+        Ok(ImplicitHeatSourceState {
+            power_w: self.power_w,
+            power_enthalpy_derivative_w_kg_j: 0.0,
+        })
+    }
+}
+
+#[test]
+fn heat_the_conduction_graph_owns_is_on_the_environment_wire() {
+    let gate = CancelGate::new_clock_free();
+    let scene = Scene::default();
+    let (active, laws) = scene.active();
+    let source: &'static Steady = Box::leak(Box::new(Steady {
+        law: laws[0],
+        power_w: 3.0,
+    }));
+    let controls = implicit_controls(0.5);
+    for scheme in [ImplicitScheme::BackwardEuler, ImplicitScheme::Sdirk2] {
+        let graph = scene
+            .graph(&active, laws)
+            .with_heat_sources(&active, &[(A, source as &dyn ImplicitHeatSourceLaw)], || Ok(()))
+            .expect("source");
+        let component =
+            ThermalTimeline::implicit(vec![B], graph, controls, scheme).expect("component");
+        let start = component.start(&active).expect("start");
+        let stale = later(&component, &active, 1.0);
+        // Both cells are insulated: nothing about them says heat enters.
+        assert!(start.simulation().cells().values().all(|cell| cell.boundary == insulated()));
+        let (dt_s, rate_w) = (0.25, 0.75);
+        let inputs = [rate_w, 293.15];
+        let (receipt, port_energy_in_j, outputs) =
+            conforms(&component, &start, &stale, dt_s, &inputs);
+        // The graph's three watts are the environment port's output, and
+        // with the port heat they are what the cells stored.
+        assert!((outputs[1] - 3.0).abs() <= 1.0e-9, "{scheme:?}: {} W", outputs[1]);
+        let entered = dt_s * (rate_w + 3.0);
+        assert!((port_energy_in_j - entered).abs() <= 1.0e-9);
+        assert!((receipt.stored_change_j - entered).abs() <= 1.0e-9);
+        assert!(receipt.numerical_loss_j.abs() <= 1.0e-9, "{}", receipt.numerical_loss_j);
+        let (next, _, _) = propose(&component, &start, dt_s, &inputs, &gate).expect("step");
+        let warmed_k = temperature(&next, A) + temperature(&next, B) - (310.0 + 295.0);
+        assert!((CAPACITY * warmed_k - entered).abs() <= 1.0e-9, "{scheme:?}: {warmed_k} K");
+    }
+}
+
+#[test]
+fn the_implicit_timeline_refuses_what_it_cannot_carry() {
+    let gate = CancelGate::new_clock_free();
+    let scene = Scene::default();
+    let (active, laws) = scene.active();
+    let controls = implicit_controls(0.5);
+    let implicit = |controls| {
+        ThermalTimeline::implicit(
+            vec![A, B],
+            scene.graph(&active, laws),
+            controls,
+            ImplicitScheme::BackwardEuler,
+        )
+        .expect("component")
+    };
+    let component = implicit(controls);
+    // The scene before its births are applied: the graph was not prepared
+    // against that.
+    assert_eq!(
+        component.start(&scene.timeline()).unwrap_err(),
+        TimelineRefusal::PendingEvent { time_s: 0.0 }
+    );
+    assert_eq!(
+        ThermalTimeline::implicit(
+            vec![A, A],
+            scene.graph(&active, laws),
+            controls,
+            ImplicitScheme::Sdirk2
+        )
+        .unwrap_err(),
+        TimelineBuildError::Duplicate { cell: 10 }
+    );
+    for maximum_dt_s in [0.0, -1.0, f64::INFINITY] {
+        assert_eq!(
+            ThermalTimeline::implicit(
+                vec![A, B],
+                scene.graph(&active, laws),
+                ImplicitConductionControls {
+                    maximum_dt_s,
+                    ..controls
+                },
+                ImplicitScheme::BackwardEuler
+            )
+            .unwrap_err(),
+            TimelineBuildError::Interval { maximum_dt_s }
+        );
+    }
+    let start = component.start(&active).expect("start");
+    let inputs = [1.0, 0.0, 293.15];
+    assert!(matches!(
+        propose(&component, &start, 0.1, &[f64::NAN, 0.0, 293.15], &gate),
+        Err(TimelineRefusal::Input { value }) if value.is_nan()
+    ));
+    // The owner's refusal of its controls comes through unchanged.
+    let unworkable = implicit(ImplicitConductionControls {
+        maximum_newton_iterations: 0,
+        ..controls
+    });
+    assert!(matches!(
+        propose(&unworkable, &start, 0.1, &inputs, &gate),
+        Err(TimelineRefusal::Implicit(ImplicitConductionError::Invalid(_)))
+    ));
+    // So does the law's refusal, and a cancellation raised inside the
+    // owner's call.
+    laws[0].refuse.set(true);
+    assert_eq!(
+        propose(&component, &start, 0.1, &inputs, &gate).unwrap_err(),
+        TimelineRefusal::Thermal(LAW_REFUSAL)
+    );
+    laws[0].refuse.set(false);
+    let tripped: &'static CancelGate = Box::leak(Box::new(CancelGate::new_clock_free()));
+    laws[0].tripwire.set(Some(tripped));
+    assert_eq!(
+        propose(&component, &start, 0.1, &inputs, tripped).unwrap_err(),
+        TimelineRefusal::Cancelled
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The damping-heat pairing with both real owners.
 // ---------------------------------------------------------------------------
 
@@ -1143,6 +1677,148 @@ fn damper_heat_reaches_the_timelines_cells_on_the_thermal_clock() {
 
     every_joule_is_in_the_cells_or_the_sink(system.ledger(), heat_0, heat_1);
     assert_eq!(system.ledger().steps, steps as u64);
+}
+
+#[test]
+fn damper_heat_reaches_an_implicit_timeline_on_steps_the_explicit_rule_cannot_take() {
+    let gate = CancelGate::new_clock_free();
+    let (properties, links, start_bodies) = bodies();
+    let scene = Scene {
+        link_w_k: STIFF_LINK_W_K,
+        ..Scene::default()
+    };
+    let (active, laws) = scene.active();
+    // An eighth of a second: twelve and a half of the explicit rule's bounds.
+    let solve = implicit_controls(0.125);
+    assert!(solve.maximum_dt_s > 12.0 * explicit_bound_s(STIFF_LINK_W_K));
+    let idle = [Wrench::ZERO; 3];
+    for scheme in [ImplicitScheme::BackwardEuler, ImplicitScheme::Sdirk2] {
+        let network =
+            ViscousNetwork::new(properties.clone(), links.clone(), Gravity::ZERO, controls())
+                .expect("network");
+        let thermal =
+            ThermalTimeline::implicit(vec![A, B], scene.graph(&active, laws), solve, scheme)
+                .expect("timeline");
+        let start_cells = thermal.start(&active).expect("start");
+        let mut builder = SystemBuilder::new();
+        let moving = builder.add("network", network, start_bodies.clone()).expect("network");
+        let cells = builder.add("cells", thermal, start_cells).expect("cells");
+        let port =
+            |builder: &SystemBuilder, node, name: &str| builder.port(node, name).expect("port");
+        for body in 0..3 {
+            let force = port(&builder, moving, &format!("force{body}"));
+            builder
+                .boundary(force, Box::new(|_, _, out: &mut [f64]| out.fill(0.0)))
+                .expect("free");
+        }
+        let (cell_a, cell_b) = (port(&builder, cells, "cell10"), port(&builder, cells, "cell20"));
+        builder
+            .heat_route(
+                port(&builder, moving, "heat0"),
+                &[(cell_a, FRACTION_A), (cell_b, FRACTION_B)],
+                Some(heat_sink("unallocated", 293.15).expect("sink")),
+                RouteTemperature::SinkEquivalent,
+            )
+            .expect("route 0");
+        builder
+            .heat_route(
+                port(&builder, moving, "heat1"),
+                &[(cell_b, 1.0)],
+                None,
+                RouteTemperature::SinkEquivalent,
+            )
+            .expect("route 1");
+        builder
+            .heat_route(
+                port(&builder, cells, "environment"),
+                &[],
+                Some(heat_sink("room", 293.15).expect("sink")),
+                RouteTemperature::Fixed(293.15),
+            )
+            .expect("environment");
+        let mut system = builder.seal().expect("sealed");
+        for name in ["heat0", "heat1"] {
+            let heat = system.port(moving, name).expect("heat port");
+            assert!(system.guess(heat, &[300.0]));
+        }
+
+        // The same protocol by hand with the owners: mechanics over each
+        // interval, then the owner's implicit solve fed the mean powers.
+        let twin = scene.graph(&active, laws);
+        let mut twin_bodies = start_bodies.clone();
+        let mut twin_cells = active.clone();
+        let steps = 12_usize;
+        let (mut heat_0, mut heat_1) = (0.0_f64, 0.0_f64);
+        with_cx(&gate, |cx| {
+            for step in 0..steps {
+                let dt_s = system.step(1.0, cx).expect("kernel step").dt_s;
+                assert_eq!(dt_s, 0.125, "step {step}");
+                let motion = step_viscous_network_with_loads(
+                    &twin_bodies,
+                    &properties,
+                    &links,
+                    HeldExternalLoads {
+                        wrenches: &idle,
+                        gravity: Gravity::ZERO,
+                    },
+                    dt_s,
+                    controls(),
+                    || false,
+                )
+                .expect("owner motion");
+                let (d0, d1) = (
+                    motion.connector_dissipation_j[0],
+                    motion.connector_dissipation_j[1],
+                );
+                heat_0 += d0;
+                heat_1 += d1;
+                let held = HeldSources::new([
+                    (A, FRACTION_A * d0 / dt_s),
+                    (B, FRACTION_B * d0 / dt_s + d1 / dt_s),
+                ]);
+                let target_s = twin_cells.time_s() + dt_s;
+                let (next, report) =
+                    owner_solve(&twin, &twin_cells, &held, target_s, solve, scheme);
+                assert_eq!((report.energy.substeps, report.rejected_intervals), (1, 0));
+                twin_cells = next;
+                twin_bodies = motion.into_states_after();
+            }
+        });
+
+        let reached_bodies = system.state::<Vec<RigidBodyState>>(moving).expect("bodies");
+        assert_eq!(reached_bodies, &twin_bodies, "{scheme:?}");
+        let reached_cells = system.state::<TimelineState<'static>>(cells).expect("cells");
+        assert_eq!(reached_cells.simulation().time_s(), twin_cells.time_s());
+        for id in [A, B] {
+            let (kernel, hand) =
+                (temperature(reached_cells, id), twin_cells.temperature_k(id).expect("T"));
+            assert!((kernel - hand).abs() <= 1.0e-10, "{scheme:?} {id:?}: {kernel} vs {hand}");
+        }
+        // The stiff link has equalised the pair, and the damper heat warmed it.
+        let apart_k = temperature(reached_cells, A) - temperature(reached_cells, B);
+        assert!(apart_k.abs() < 0.05, "{scheme:?}: {apart_k} K apart");
+        let total = heat_0 + heat_1;
+        assert!(total > 0.5, "enough heat to measure: {total} J");
+        let ledger = system.ledger();
+        let account =
+            |name: &str| ledger.nodes.iter().find(|node| node.name == name).expect("node");
+        let sink = |name: &str| {
+            let found = ledger.sinks.iter().find(|sink| sink.name == name).expect("sink");
+            found.heat_j.value()
+        };
+        let unallocated = (1.0 - FRACTION_A - FRACTION_B) * heat_0;
+        assert!((sink("unallocated") - unallocated).abs() <= 1.0e-11 * total);
+        // Nothing exchanges with the room. The solve closes each cell to
+        // 1e-11 J per interval, and that residual is in the cells'
+        // numerical loss.
+        assert!(sink("room").abs() <= 1.0e-13, "{scheme:?}: {} J", sink("room"));
+        let closure_j = 1.0e-9;
+        let warmed = account("cells").stored_change_j.value();
+        assert!((warmed - (total - unallocated)).abs() <= closure_j, "{scheme:?}: {warmed}");
+        assert!((account("network").dissipated_j.value() - total).abs() <= 1.0e-11 * total);
+        assert!(ledger.energy_residual_j().abs() <= closure_j);
+        assert_eq!(ledger.steps, steps as u64);
+    }
 }
 
 /// Connector heat (`heat_0` from the first damper, `heat_1` from the second,
