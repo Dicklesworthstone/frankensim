@@ -103,6 +103,22 @@ type Result<T> = std::result::Result<T,Box<dyn Error>>;
 const SHEAR: &str = "shear_modulus";
 const SHEAR_ETA: &str = "kelvin_voigt_shear_viscosity";
 fn modal_budget() -> ModalAcousticTimeBudget { ModalAcousticTimeBudget::audible_reference() }
+/// Setup work of the simultaneous bow-friction network: the count `friction::multiple` checks against `max_setup_terms`
+/// before it allocates, `((k + 1)^2 + n (k + 2)) p + n p^2` for n modal coordinates, k network connections and p friction
+/// ports. The network's declared dimensions bound n and k, so this admits every ribbon the card declares; a ribbon whose
+/// work passes the explicit network setup ceiling `input::MAX_WORK` is refused here, by name, with its figures.
+fn joint_friction_setup_terms(modes:usize,connections:usize,ports:usize) -> Result<usize> {
+    let terms=connections.checked_add(1).and_then(|l| l.checked_mul(l))
+        .and_then(|square| connections.checked_add(2).and_then(|l| modes.checked_mul(l)).and_then(|m| m.checked_add(square)))
+        .and_then(|per_port| per_port.checked_mul(ports))
+        .and_then(|v| ports.checked_mul(ports).and_then(|pp| modes.checked_mul(pp)).and_then(|w| v.checked_add(w)));
+    match terms {
+        Some(terms) if terms <= input::MAX_WORK as usize => Ok(terms),
+        _ => Err(format!("bow friction setup work exceeds the explicit network setup work budget {} \
+            (modes {modes}, connections {connections}, friction ports {ports}, terms {})",
+            input::MAX_WORK,terms.map_or_else(|| "overflow".to_string(),|t| t.to_string())).into()),
+    }
+}
 fn poll(gate: &CancelGate) -> Result<()> { if gate.is_requested() { Err("material-string construction cancelled".into()) } else { Ok(()) } }
 fn options(spec:&input::Spec,bow:StringBowLocation,tensor_body:bool,
     additional_body_connections:usize,additional_body_modes:usize) -> Result<StringBankOptions> {
@@ -613,7 +629,8 @@ impl input::Spec {
             None => (bank, None),
         };
         let joint=MultiFrictionConfig { max_ports:self.bow_contact_count(),max_sweeps:128,
-            max_setup_terms:8_388_608 };
+            max_setup_terms:joint_friction_setup_terms(settings.network.max_modes,settings.network.max_connections,
+                self.bow_contact_count())? };
         let mut bank=if let Some(fibers)=&self.bow_fibers {
             let ribbon=fibers.compile(&self,&mut catalog,&mut loader,gate)?;
             bank.with_tensioned_fiber_ribbon(ribbon,fibers.station_fraction,joint,gate)?

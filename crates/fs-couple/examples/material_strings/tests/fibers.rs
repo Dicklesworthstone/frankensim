@@ -1081,7 +1081,7 @@ fn moving_hair_and_bow_migration_refuse_shear_layers_that_would_not_travel_with_
         let error=moving.compile_with_profiles(cx,gate,None,Some(profile()),layered_hair_pack).err()
             .expect("moving fibers over a shear layer were accepted");
         assert_eq!(error.to_string(),
-            "moving fibers require dry heat routes or a complete v3 film binding attached to the original string patches");
+            "moving fibers require explicit dry/body heat routes or a complete v3 film binding attached to the original string patches");
     });
     // String-side station migration over the same layer is refused while parsing.
     let migrating=layered(concat!("bow_station_motion 2 0.00003 1048576 2\n",

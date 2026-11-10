@@ -32,6 +32,21 @@ mod shell_observer;
 #[path = "tests/one_way_observer.rs"]
 mod one_way_observer;
 
+#[test]
+fn the_bow_friction_setup_budget_follows_the_ribbon_and_is_refused_above_the_network_ceiling() {
+    // 649 coordinates (512 body, 136 string, 1 cavity) and 515 connections, the dimensions of a bass shell card.
+    let terms=|ports| joint_friction_setup_terms(649,515,ports).unwrap();
+    assert_eq!(terms(1),602_438);
+    assert_eq!(terms(9),5_468_670);
+    assert_eq!(terms(17),10_417_974);
+    // At these dimensions 13 cells fit under 2^23 = 8_388_608 (the former fixed limit of the joint) and 15 do not.
+    assert!(terms(13)<=8_388_608 && terms(15)>8_388_608);
+    // One refusal for a ribbon past the ceiling, naming its figures; overflow is refused, not wrapped.
+    let refusal=joint_friction_setup_terms(1<<20,1<<20,63).unwrap_err().to_string();
+    assert!(refusal.contains("modes 1048576") && refusal.contains("connections 1048576") && refusal.contains("friction ports 63"), "{refusal}");
+    assert!(joint_friction_setup_terms(usize::MAX,usize::MAX,63).unwrap_err().to_string().contains("terms overflow"));
+}
+
 fn pack(name:&str,rho:f64,band:f64,omit:Option<&str>)->NormalizedPack {
     let mut claims=ClaimSet::new();
     let provenance=Provenance {source:"synthetic executable test".into(),license:"CC0-1.0".into(),artifact:Some(fs_blake3::ContentHash([7;32]))};
