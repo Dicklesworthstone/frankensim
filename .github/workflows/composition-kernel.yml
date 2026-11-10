@@ -45,14 +45,19 @@ jobs:
         with:
           # Bootstrap the unlanded candidate; switch the default to github.sha
           # after these focused tests pass and its source lands on main.
-          ref: ${{ inputs.candidate || '20520d9884975be4e5d3d20e4a9dea1a62197fb4' }}
+          ref: ${{ inputs.candidate || 'f6568c4081e10efb29ec65e361f1f88e30ff928a' }}
           path: frankensim
           fetch-depth: 1
           persist-credentials: false
       - name: Install the pinned compiler and sibling constellation
         run: |
           rustup toolchain install nightly-2026-07-06 --profile minimal
-          bash scripts/ci/checkout_constellation.sh "$GITHUB_WORKSPACE"
+          if ! bash scripts/ci/checkout_constellation.sh "$GITHUB_WORKSPACE"; then
+            # This pinned file has eol=crlf, but the source verifier compares
+            # raw Git blobs. Restore its canonical bytes and recheck all pins.
+            git -C "$GITHUB_WORKSPACE/franken_numpy" show HEAD:legacy_numpy_code/numpy/doc/make.bat > "$GITHUB_WORKSPACE/franken_numpy/legacy_numpy_code/numpy/doc/make.bat"
+            bash scripts/ci/checkout_constellation.sh "$GITHUB_WORKSPACE"
+          fi
           rustc +nightly-2026-07-06 --version
           git rev-parse HEAD
       - name: Kernel and library elements
@@ -60,4 +65,4 @@ jobs:
       - name: Native thermal Component
         run: cargo +nightly-2026-07-06 test -p fs-thermal --test component --locked
       - name: Native mechanical and thermal slices
-        run: cargo +nightly-2026-07-06 test -p fs-system --features slices --test viscous_heat_slice --test rigid_body_slice --locked
+        run: cargo +nightly-2026-07-06 test -p fs-system --features slices --test viscous_heat_slice --test rigid_body_slice --test viscous_network_slice --locked
