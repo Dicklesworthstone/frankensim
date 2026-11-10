@@ -318,32 +318,105 @@ function sampleSmoothPdeField(
 }
 
 /**
+ * Shader-level Geometric & Normal-Map Specular Anti-Aliasing (Kaplanyan & Olano 2016 / Filament
+ * GGX NDF variance filtering) plus soft-knee highlight compression on sub-pixel specular spikes.
+ * Eliminates shimmering and stair-stepped highlights on bevels, gear teeth, screw slots, and
+ * horological normal maps (Côtes de Genève, perlage, guilloché, sunburst) at ~6 ALU ops/fragment.
+ */
+const GLSL_SPECULAR_AA_FRAGMENT = /* glsl */ `#include <lights_physical_fragment>
+{
+  vec3 dndu = dFdx( normal );
+  vec3 dndv = dFdy( normal );
+  vec3 dgdu = dFdx( nonPerturbedNormal );
+  vec3 dgdv = dFdy( nonPerturbedNormal );
+  float normalVar = max( dot( dndu, dndu ) + dot( dndv, dndv ), dot( dgdu, dgdu ) + dot( dgdv, dgdv ) );
+  float kernelRoughness2 = min( 2.0 * 0.22 * normalVar, 0.18 );
+  float rAlpha = material.roughness * material.roughness;
+  material.roughness = clamp( pow( rAlpha * rAlpha + kernelRoughness2, 0.25 ), 0.0525, 1.0 );
+  #ifdef USE_CLEARCOAT
+    vec3 dcdu = dFdx( geometryClearcoatNormal );
+    vec3 dcdv = dFdy( geometryClearcoatNormal );
+    float ccVar = max( normalVar, dot( dcdu, dcdu ) + dot( dcdv, dcdv ) );
+    float ccKernel2 = min( 2.0 * 0.20 * ccVar, 0.16 );
+    float ccAlpha = material.clearcoatRoughness * material.clearcoatRoughness;
+    material.clearcoatRoughness = clamp( pow( ccAlpha * ccAlpha + ccKernel2, 0.25 ), 0.0525, 1.0 );
+  #endif
+}`;
+
+const GLSL_SPECULAR_CLAMP_FRAGMENT = /* glsl */ `vec3 totalSpecular = reflectedLight.directSpecular + reflectedLight.indirectSpecular;
+{
+  float specPeak = max( totalSpecular.r, max( totalSpecular.g, totalSpecular.b ) );
+  if ( specPeak > 1.0 ) {
+    totalSpecular *= ( 1.0 + 0.35 * ( specPeak - 1.0 ) ) / specPeak;
+  }
+  #ifdef USE_CLEARCOAT
+    vec3 ccSpec = clearcoatSpecularDirect + clearcoatSpecularIndirect;
+    float ccPeak = max( ccSpec.r, max( ccSpec.g, ccSpec.b ) );
+    if ( ccPeak > 1.0 ) {
+      float ccScale = ( 1.0 + 0.35 * ( ccPeak - 1.0 ) ) / ccPeak;
+      clearcoatSpecularDirect *= ccScale;
+      clearcoatSpecularIndirect *= ccScale;
+    }
+  #endif
+}`;
+
+function injectSpecularAAIntoShader(shader: { fragmentShader: string }): void {
+  shader.fragmentShader = shader.fragmentShader
+    .replace("#include <lights_physical_fragment>", GLSL_SPECULAR_AA_FRAGMENT)
+    .replace(
+      "vec3 totalSpecular = reflectedLight.directSpecular + reflectedLight.indirectSpecular;",
+      GLSL_SPECULAR_CLAMP_FRAGMENT,
+    );
+}
+
+function enableMaterialSpecularAA<T extends THREE.MeshStandardMaterial>(mat: T): T {
+  mat.onBeforeCompile = (shader) => {
+    injectSpecularAAIntoShader(shader);
+  };
+  mat.customProgramCacheKey = () => "fs-specular-aa-v1";
+  return mat;
+}
+
+/**
  * Generate high-DPI procedural horological surface finishing normal & roughness textures:
  * 1. Côtes de Genève (Geneva Stripes) for the 4 contoured movement bridges
  * 2. Perlage (overlapping circular engine-turned graining) for the stepped mainplate recesses
  * 3. Clous de Paris / Barleycorn Guilloché for the silvered exhibition dial
  * 4. Soleil (radial sunburst brushing) for the winding ratchet & crown wheels
  */
-function buildHorologicalFinishTextures(): {
+function buildHorologicalFinishTextures(maxAnisotropy: number): {
   genevaNormal: THREE.CanvasTexture;
   perlageNormal: THREE.CanvasTexture;
   guillocheNormal: THREE.CanvasTexture;
   sunburstNormal: THREE.CanvasTexture;
   softParticleTex: THREE.CanvasTexture;
 } {
-  // 1. Côtes de Genève (Geneva Stripes)
+  const configureNormalMap = (tex: THREE.CanvasTexture): void => {
+    tex.generateMipmaps = true;
+    tex.minFilter = THREE.LinearMipmapLinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.anisotropy = maxAnisotropy;
+    tex.needsUpdate = true;
+  };
+
+  // 1. Côtes de Genève (Geneva Stripes) — band-limited C² Hermite rib groove + tile-periodic micro-brush
   const cGeneva = document.createElement("canvas");
   cGeneva.width = 512;
   cGeneva.height = 512;
   const gCtx = cGeneva.getContext("2d")!;
   const gImg = gCtx.createImageData(512, 512);
+  const kyBrush = (2 * Math.PI * 128) / 512;
+  const kxBrush = (2 * Math.PI * 20) / 512;
   for (let y = 0; y < 512; y++) {
     for (let x = 0; x < 512; x++) {
       const u = (x + y * 0.18) / 512;
       const ribPhase = (u * 14.0) % 1.0;
-      const microBrush = Math.sin(y * 1.65 + Math.sin(x * 0.25) * 2.0) * 0.12;
-      // Sharp rib boundary + gentle cylindrical camber across each Geneva stripe
-      const nx = (ribPhase - 0.5) * 0.65 + (ribPhase < 0.04 || ribPhase > 0.96 ? -0.55 : 0.0);
+      const microBrush = Math.sin(y * kyBrush + Math.sin(x * kxBrush) * 2.0) * 0.11;
+      // Smooth C² Hermite rib boundary + gentle cylindrical camber across each Geneva stripe
+      const edgeDist = Math.min(ribPhase, 1.0 - ribPhase);
+      const grooveT = Math.max(0.0, 1.0 - edgeDist / 0.065);
+      const groove = grooveT * grooveT * (3.0 - 2.0 * grooveT);
+      const nx = (ribPhase - 0.5) * 0.62 - 0.52 * groove;
       const ny = microBrush;
       const idx = (y * 512 + x) * 4;
       gImg.data[idx] = Math.round(Math.max(0, Math.min(255, (nx * 0.5 + 0.5) * 255)));
@@ -357,6 +430,7 @@ function buildHorologicalFinishTextures(): {
   genevaNormal.wrapS = THREE.RepeatWrapping;
   genevaNormal.wrapT = THREE.RepeatWrapping;
   genevaNormal.repeat.set(2.5, 2.5);
+  configureNormalMap(genevaNormal);
 
   // 2. Perlage (overlapping circular graining)
   const cPerlage = document.createElement("canvas");
@@ -391,7 +465,8 @@ function buildHorologicalFinishTextures(): {
         }
       }
       const rNorm = Math.max(1e-3, bestDist);
-      const ringGroove = Math.sin(bestDist * 1.45) * 0.42;
+      const centerFade = Math.min(1.0, bestDist / 3.2);
+      const ringGroove = Math.sin(bestDist * 1.45) * 0.42 * centerFade;
       const tx = -bestDy / rNorm;
       const ty = bestDx / rNorm;
       const nx = tx * ringGroove;
@@ -408,6 +483,7 @@ function buildHorologicalFinishTextures(): {
   perlageNormal.wrapS = THREE.RepeatWrapping;
   perlageNormal.wrapT = THREE.RepeatWrapping;
   perlageNormal.repeat.set(3.5, 3.5);
+  configureNormalMap(perlageNormal);
 
   // 3. Clous de Paris / Barleycorn Guilloché
   const cGuill = document.createElement("canvas");
@@ -432,8 +508,9 @@ function buildHorologicalFinishTextures(): {
   guillocheNormal.wrapS = THREE.RepeatWrapping;
   guillocheNormal.wrapT = THREE.RepeatWrapping;
   guillocheNormal.repeat.set(2, 2);
+  configureNormalMap(guillocheNormal);
 
-  // 4. Soleil (Radial Sunburst Brushing)
+  // 4. Soleil (Radial Sunburst Brushing) — Nyquist-band-limited near the hub to prevent central moiré
   const cSun = document.createElement("canvas");
   cSun.width = 256;
   cSun.height = 256;
@@ -443,8 +520,10 @@ function buildHorologicalFinishTextures(): {
     for (let x = 0; x < 256; x++) {
       const dx = x - 128;
       const dy = y - 128;
+      const r = Math.hypot(dx, dy);
+      const nyquistFade = Math.min(1.0, Math.max(0.0, (r - 5.0) / 24.0));
       const ang = Math.atan2(dy, dx);
-      const ray = Math.sin(ang * 96) * 0.42;
+      const ray = Math.sin(ang * 96) * 0.42 * nyquistFade * nyquistFade;
       const nx = -Math.sin(ang) * ray;
       const ny = Math.cos(ang) * ray;
       const idx = (y * 256 + x) * 4;
@@ -456,6 +535,7 @@ function buildHorologicalFinishTextures(): {
   }
   sCtx.putImageData(sImg, 0, 0);
   const sunburstNormal = new THREE.CanvasTexture(cSun);
+  configureNormalMap(sunburstNormal);
 
   // 5. Soft Radial Gaussian Sprite Texture (prevents square WebGL point-sprite artifacts)
   const cPart = document.createElement("canvas");
@@ -997,6 +1077,7 @@ export class PocketWatchScene {
   // Quality, framing, camera animation, and escapement contact highlights
   private tier: QualityTier;
   private readonly reducedMotion: boolean;
+  private readonly hasNativeCanvasMsaa: boolean;
   private pixelRatio = 1;
   private readonly keyLight: THREE.DirectionalLight;
   private viewInsets: ViewInsets = { left: 0, right: 0, top: 0, bottom: 0 };
@@ -1022,13 +1103,15 @@ export class PocketWatchScene {
     this.tier = opts.tier ?? "high";
     this.reducedMotion = opts.reducedMotion ?? false;
 
-    // The composer owns anti-aliasing (MSAA on the HDR target), so the default framebuffer stays
-    // single-sampled: no wasted multisample buffer on phones.
+    // Native hardware MSAA on the default backbuffer lets non-bloom frames (99% of runtime) render
+    // directly with in-shader NeutralToneMapping + sRGB conversion BEFORE hardware MSAA subsample
+    // resolve—bypassing the offscreen HalfFloat FBO resolve and OutputPass fullscreen blit.
     this.renderer = new THREE.WebGLRenderer({
       canvas,
-      antialias: false,
+      antialias: true,
       powerPreference: "high-performance",
     });
+    this.hasNativeCanvasMsaa = Boolean(this.renderer.getContext().getContextAttributes()?.antialias);
     this.pixelRatio = Math.min(window.devicePixelRatio || 1, PocketWatchScene.dprCap(this.tier));
     this.renderer.setPixelRatio(this.pixelRatio);
     // Khronos PBR Neutral keeps base colors faithful (gold stays gold instead of drifting orange).
@@ -1080,25 +1163,27 @@ export class PocketWatchScene {
     this.camera = new THREE.PerspectiveCamera(34, 1.0, 0.5, 1200);
     this.camera.position.set(0, -34, 66);
 
-    // Half-float HDR post chain (RenderPass -> UnrealBloomPass -> OutputPass). MSAA lives on the HDR
-    // target; SMAA is only enabled on the low tier where the target is single-sampled. Bloom is
-    // gated off whenever nothing is incandescent or burning, so idle frames skip its five blur mips.
+    // Half-float HDR post chain (RenderPass -> UnrealBloomPass -> OutputPass -> SMAAPass) used when
+    // incandescent bloom is active (or if the context lacks native canvas MSAA). OutputPass runs
+    // BEFORE SMAAPass so SMAA edge detection operates on tone-mapped perceptual sRGB colors.
     const initW = Math.max(320, canvas.clientWidth || 960);
     const initH = Math.max(260, canvas.clientHeight || 640);
     const hdrTarget = new THREE.WebGLRenderTarget(initW * this.pixelRatio, initH * this.pixelRatio, {
       type: THREE.HalfFloatType,
       format: THREE.RGBAFormat,
-      samples: this.tier === "high" ? 4 : this.tier === "medium" ? 2 : 0,
+      samples: this.targetSamplesForTier(this.tier),
+      resolveDepthBuffer: false,
+      stencilBuffer: false,
     });
     this.composer = new EffectComposer(this.renderer, hdrTarget);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
     this.bloomPass = new UnrealBloomPass(new THREE.Vector2(initW, initH), 0.08, 0.36, 1.25);
     this.bloomPass.enabled = false;
     this.composer.addPass(this.bloomPass);
+    this.composer.addPass(new OutputPass());
     this.smaaPass = new SMAAPass();
     this.smaaPass.enabled = this.tier === "low";
     this.composer.addPass(this.smaaPass);
-    this.composer.addPass(new OutputPass());
 
     this.controls = new OrbitControls(this.camera, this.canvas);
     this.controls.enableDamping = true;
@@ -1153,8 +1238,9 @@ export class PocketWatchScene {
     underFill.position.set(0, 24, -38);
     this.scene.add(underFill);
 
-    // Procedural Horological Finishes
-    const finishes = buildHorologicalFinishTextures();
+    // Procedural Horological Finishes (with trilinear mipmaps + hardware anisotropic filtering)
+    const maxAnisotropy = Math.min(16, this.renderer.capabilities.getMaxAnisotropy());
+    const finishes = buildHorologicalFinishTextures(maxAnisotropy);
 
     // Physically based conductor reflectances (linear-sRGB F0 at normal incidence, from measured
     // n,k data: Au/Ag/Cu 18k yellow alloy, CuZn brass, rhodium plating, carbon steel, Ti-6Al-4V,
@@ -1174,15 +1260,18 @@ export class PocketWatchScene {
       specularIntensity: 1.0,
     });
 
-    this.matSolidGoldStatic = new THREE.MeshPhysicalMaterial({
-      color: linear(0.95, 0.76, 0.4),
-      metalness: 1.0,
-      roughness: 0.17,
-      clearcoat: 0.1,
-      clearcoatRoughness: 0.12,
-    });
+    this.matSolidGoldStatic = enableMaterialSpecularAA(
+      new THREE.MeshPhysicalMaterial({
+        color: linear(0.95, 0.76, 0.4),
+        metalness: 1.0,
+        roughness: 0.17,
+        clearcoat: 0.1,
+        clearcoatRoughness: 0.12,
+      }),
+    );
 
     // Liquid gold is a mirror (roughness ~0.05) whose base color whitens slightly when hot.
+    // alphaToCoverage converts the smooth meniscus alpha into hardware MSAA subsample coverage.
     this.matMoltenGold = new THREE.MeshPhysicalMaterial({
       color: new THREE.Color(1, 1, 1),
       metalness: 1.0,
@@ -1191,6 +1280,7 @@ export class PocketWatchScene {
       clearcoatRoughness: 0.05,
       transparent: true,
       alphaTest: 0.02,
+      alphaToCoverage: !lowTier,
       depthWrite: true,
     });
 
@@ -1201,111 +1291,142 @@ export class PocketWatchScene {
       clearcoat: 0.08,
       transparent: true,
       alphaTest: 0.02,
+      alphaToCoverage: !lowTier,
       depthWrite: true,
     });
 
-    this.matRhodiumPlate = new THREE.MeshStandardMaterial({
-      color: linear(0.66, 0.67, 0.68),
-      metalness: 1.0,
-      roughness: 0.32,
-      normalMap: finishes.perlageNormal,
-      normalScale: new THREE.Vector2(0.45, 0.45),
-    });
+    this.matRhodiumPlate = enableMaterialSpecularAA(
+      new THREE.MeshStandardMaterial({
+        color: linear(0.66, 0.67, 0.68),
+        metalness: 1.0,
+        roughness: 0.32,
+        normalMap: finishes.perlageNormal,
+        normalScale: new THREE.Vector2(0.45, 0.45),
+      }),
+    );
 
-    this.matGenevaBridge = new THREE.MeshStandardMaterial({
-      color: linear(0.7, 0.71, 0.72),
-      metalness: 1.0,
-      roughness: 0.24,
-      normalMap: finishes.genevaNormal,
-      normalScale: new THREE.Vector2(0.55, 0.55),
-    });
+    this.matGenevaBridge = enableMaterialSpecularAA(
+      new THREE.MeshStandardMaterial({
+        color: linear(0.7, 0.71, 0.72),
+        metalness: 1.0,
+        roughness: 0.24,
+        normalMap: finishes.genevaNormal,
+        normalScale: new THREE.Vector2(0.55, 0.55),
+      }),
+    );
 
-    this.matBrassWheel = new THREE.MeshStandardMaterial({
-      color: linear(0.91, 0.73, 0.38),
-      metalness: 1.0,
-      roughness: 0.22,
-    });
+    this.matBrassWheel = enableMaterialSpecularAA(
+      new THREE.MeshStandardMaterial({
+        color: linear(0.91, 0.73, 0.38),
+        metalness: 1.0,
+        roughness: 0.22,
+      }),
+    );
 
-    this.matPolishedSteel = new THREE.MeshStandardMaterial({
-      color: linear(0.58, 0.58, 0.6),
-      metalness: 1.0,
-      roughness: 0.12,
-    });
+    this.matPolishedSteel = enableMaterialSpecularAA(
+      new THREE.MeshStandardMaterial({
+        color: linear(0.58, 0.58, 0.6),
+        metalness: 1.0,
+        roughness: 0.12,
+      }),
+    );
 
-    this.matSunburstSteel = new THREE.MeshStandardMaterial({
-      color: linear(0.56, 0.57, 0.6),
-      metalness: 1.0,
-      roughness: 0.2,
-      normalMap: finishes.sunburstNormal,
-      normalScale: new THREE.Vector2(0.52, 0.52),
-    });
+    this.matSunburstSteel = enableMaterialSpecularAA(
+      new THREE.MeshStandardMaterial({
+        color: linear(0.56, 0.57, 0.6),
+        metalness: 1.0,
+        roughness: 0.2,
+        normalMap: finishes.sunburstNormal,
+        normalScale: new THREE.Vector2(0.52, 0.52),
+      }),
+    );
 
     // Blued steel is a ~250 nm Fe3O4 temper film on steel: thin-film interference (iridescence)
     // over a steel substrate, tinted by the engine's fs-render interference color.
-    this.matBluedSteel = new THREE.MeshPhysicalMaterial({
-      color: linear(0.09, 0.2, 0.62),
-      metalness: 0.9,
-      roughness: 0.16,
-      clearcoat: 0.4,
-      clearcoatRoughness: 0.08,
-      iridescence: lowTier ? 0 : 0.55,
-      iridescenceIOR: 2.4,
-      iridescenceThicknessRange: [220, 300],
-    });
+    this.matBluedSteel = enableMaterialSpecularAA(
+      new THREE.MeshPhysicalMaterial({
+        color: linear(0.09, 0.2, 0.62),
+        metalness: 0.9,
+        roughness: 0.16,
+        clearcoat: 0.4,
+        clearcoatRoughness: 0.08,
+        iridescence: lowTier ? 0 : 0.55,
+        iridescenceIOR: 2.4,
+        iridescenceThicknessRange: [220, 300],
+      }),
+    );
 
-    this.matHairspring = new THREE.MeshPhysicalMaterial({
-      color: linear(0.12, 0.25, 0.7),
-      metalness: 0.9,
-      roughness: 0.16,
-      clearcoat: 0.35,
-      iridescence: lowTier ? 0 : 0.45,
-      iridescenceIOR: 2.4,
-      iridescenceThicknessRange: [220, 300],
-    });
+    this.matHairspring = enableMaterialSpecularAA(
+      new THREE.MeshPhysicalMaterial({
+        color: linear(0.12, 0.25, 0.7),
+        metalness: 0.9,
+        roughness: 0.16,
+        clearcoat: 0.35,
+        iridescence: lowTier ? 0 : 0.45,
+        iridescenceIOR: 2.4,
+        iridescenceThicknessRange: [220, 300],
+      }),
+    );
 
-    this.matTitaniumCage = new THREE.MeshStandardMaterial({
-      color: linear(0.54, 0.5, 0.45),
-      metalness: 1.0,
-      roughness: 0.18,
-    });
+    this.matTitaniumCage = enableMaterialSpecularAA(
+      new THREE.MeshStandardMaterial({
+        color: linear(0.54, 0.5, 0.45),
+        metalness: 1.0,
+        roughness: 0.18,
+      }),
+    );
 
-    this.matGlucydurBalance = new THREE.MeshStandardMaterial({
-      color: linear(0.93, 0.66, 0.4),
-      metalness: 1.0,
-      roughness: 0.16,
-    });
+    this.matGlucydurBalance = enableMaterialSpecularAA(
+      new THREE.MeshStandardMaterial({
+        color: linear(0.93, 0.66, 0.4),
+        metalness: 1.0,
+        roughness: 0.16,
+      }),
+    );
 
-    // Synthetic ruby (Cr:Al2O3): transmissive corundum with Cr3+ absorption (green/blue absorbed).
-    this.matRubyJewel = new THREE.MeshPhysicalMaterial({
-      color: linear(1.0, 0.22, 0.3),
-      emissive: linear(0.45, 0.0, 0.04),
-      emissiveIntensity: 0.0,
-      metalness: 0.0,
-      roughness: 0.05,
-      transmission: lowTier ? 0 : 0.9,
-      ior: 1.768,
-      thickness: 0.8,
-      attenuationColor: linear(0.95, 0.06, 0.12),
-      attenuationDistance: 0.45,
-      specularIntensity: 1.0,
-      transparent: lowTier,
-      opacity: lowTier ? 0.9 : 1.0,
-    });
+    // Synthetic ruby (Cr:Al2O3): high-IOR dielectric corundum with Cr3+ crimson absorption.
+    // Using thin-surface dielectric shading instead of screen-space `transmission` avoids
+    // triggering Three.js's full-scene _transmissionRenderTarget double-render + full-screen mipmap
+    // pass on every frame while preserving 100% hardware MSAA subsample coverage.
+    this.matRubyJewel = enableMaterialSpecularAA(
+      new THREE.MeshPhysicalMaterial({
+        color: linear(0.86, 0.03, 0.12),
+        emissive: linear(0.42, 0.005, 0.04),
+        emissiveIntensity: 0.16,
+        metalness: 0.0,
+        roughness: 0.04,
+        ior: 1.768,
+        clearcoat: 1.0,
+        clearcoatRoughness: 0.03,
+        specularIntensity: 1.0,
+        transparent: true,
+        opacity: 0.92,
+      }),
+    );
 
-    this.matSapphireCrystal = new THREE.MeshPhysicalMaterial({
-      color: new THREE.Color(1, 1, 1),
-      metalness: 0.0,
-      roughness: 0.03,
-      transmission: lowTier ? 0 : 1.0,
-      ior: 1.768,
-      thickness: 0.65,
-      specularIntensity: 1.0,
-      transparent: true,
-      opacity: lowTier ? 0.14 : 1.0,
-      depthWrite: false,
-    });
+    // Anti-reflective flat exhibition sapphire crystal: crisp IOR 1.768 Fresnel reflections with
+    // direct alpha blending so the movement behind the crystal retains full hardware MSAA.
+    this.matSapphireCrystal = enableMaterialSpecularAA(
+      new THREE.MeshPhysicalMaterial({
+        color: new THREE.Color(0xf4f8ff),
+        metalness: 0.0,
+        roughness: 0.02,
+        ior: 1.768,
+        clearcoat: 1.0,
+        clearcoatRoughness: 0.02,
+        specularIntensity: 1.0,
+        transparent: true,
+        opacity: 0.09,
+        depthWrite: false,
+      }),
+    );
 
-    this.matScrewSlot = new THREE.MeshBasicMaterial({ color: 0x0b101b });
+    this.matScrewSlot = new THREE.MeshBasicMaterial({
+      color: 0x0b101b,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+    });
 
     this.matFrostOverlay = new THREE.MeshStandardMaterial({
       color: new THREE.Color(0xdff4ff),
@@ -1368,6 +1489,21 @@ export class PocketWatchScene {
     this.bindPointerEvents();
     this.resize();
     this.applyCameraPreset("overview", false);
+
+    // Pre-warm both the direct-canvas shader programs and the HDR composer shader programs so
+    // activating the blowtorch (which enables bloomPass) never triggers a compilation hitch.
+    const prevTarget = this.renderer.getRenderTarget();
+    this.renderer.setRenderTarget(this.composer.renderTarget1);
+    this.renderer.compile(this.scene, this.camera);
+    this.renderer.setRenderTarget(prevTarget);
+    this.renderer.compile(this.scene, this.camera);
+  }
+
+  /** Hardware MSAA sample count for the HDR bloom target per quality tier. */
+  private targetSamplesForTier(tier: QualityTier): number {
+    if (tier === "low") return 0;
+    const maxSamples = this.renderer.capabilities.maxSamples || 4;
+    return tier === "high" ? Math.min(8, Math.max(4, maxSamples)) : Math.min(4, maxSamples);
   }
 
   /** DPR ceiling per quality tier. */
@@ -1396,7 +1532,7 @@ export class PocketWatchScene {
     return next;
   }
 
-  /** Downgrade/upgrade quality without rebuilding the scene (MSAA sample count is fixed at boot). */
+  /** Dynamically update quality tier (shadow resolution, MSAA samples, SMAA, alpha-to-coverage, DPR). */
   public setQualityTier(tier: QualityTier): void {
     if (tier === this.tier) return;
     this.tier = tier;
@@ -1406,7 +1542,23 @@ export class PocketWatchScene {
       this.keyLight.shadow.map?.dispose();
       this.keyLight.shadow.map = null;
     }
-    this.setPixelRatio(this.pixelRatio);
+    const samples = this.targetSamplesForTier(tier);
+    if (this.composer.renderTarget1.samples !== samples) {
+      this.composer.renderTarget1.samples = samples;
+      this.composer.renderTarget2.samples = samples;
+      this.composer.renderTarget1.dispose();
+      this.composer.renderTarget2.dispose();
+    }
+    this.smaaPass.enabled = tier === "low";
+    const useA2C = tier !== "low";
+    if (this.matMoltenGold.alphaToCoverage !== useA2C) {
+      this.matMoltenGold.alphaToCoverage = useA2C;
+      this.matMoltenGold.needsUpdate = true;
+      this.matSolidifiedGold.alphaToCoverage = useA2C;
+      this.matSolidifiedGold.needsUpdate = true;
+    }
+    const targetDpr = Math.min(window.devicePixelRatio || 1, PocketWatchScene.dprCap(tier));
+    this.setPixelRatio(targetDpr);
   }
 
   /**
@@ -1602,8 +1754,9 @@ if (vShellSide < 0.0) diffuseColor.rgb *= 0.9;`,
 totalEmissiveRadiance += blackbodyRadiance(vShellTempK) * (0.45 + 0.25 * vShellMelt);
 if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vShellTempK) * 0.3;`,
         );
+      injectSpecularAAIntoShader(shader);
     };
-    this.matGoldCase.customProgramCacheKey = () => "fs-case-shell-v2";
+    this.matGoldCase.customProgramCacheKey = () => "fs-case-shell-v3";
 
     const depthMat = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
     depthMat.onBeforeCompile = (shader) => {
@@ -1715,8 +1868,9 @@ diffuseColor.a *= vHfAlpha;`,
 totalEmissiveRadiance += blackbodyRadiance(vHfTempK) * ${mode === 0 ? "0.75" : "0.5"};
 if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) * 0.3;`,
           );
+        injectSpecularAAIntoShader(shader);
       };
-      mat.customProgramCacheKey = () => `fs-gold-heightfield-v2-${mode}`;
+      mat.customProgramCacheKey = () => `fs-gold-heightfield-v3-${mode}`;
     };
     installHeightfield(this.matMoltenGold, 0);
     installHeightfield(this.matSolidifiedGold, 1);
@@ -2527,9 +2681,9 @@ if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) 
     palletYoke.rotation.z = 0.52;
 
     // Each contact ruby gets its own material instance so the live contact set can light it.
-    const matEntry = this.matRubyJewel.clone();
-    const matExit = this.matRubyJewel.clone();
-    const matPin = this.matRubyJewel.clone();
+    const matEntry = enableMaterialSpecularAA(this.matRubyJewel.clone());
+    const matExit = enableMaterialSpecularAA(this.matRubyJewel.clone());
+    const matPin = enableMaterialSpecularAA(this.matRubyJewel.clone());
     this.contactMats.push(matEntry, matExit, matPin);
     const entryRubyPallet = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.72, 0.26), matEntry);
     entryRubyPallet.position.set(-0.35, -0.98, 0);
@@ -2707,13 +2861,15 @@ if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) 
    *    & 18k Gold Moonphase Complication, and Sculpted 3D Blued-Steel Breguet Pomme Hands.
    */
   private buildExhibitionGuillocheDialAndHands(guillocheNormal: THREE.CanvasTexture): void {
-    const dialMat = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(0xf4efe4),
-      metalness: 0.25,
-      roughness: 0.32,
-      normalMap: guillocheNormal,
-      normalScale: new THREE.Vector2(0.35, 0.35),
-    });
+    const dialMat = enableMaterialSpecularAA(
+      new THREE.MeshStandardMaterial({
+        color: new THREE.Color(0xf4efe4),
+        metalness: 0.25,
+        roughness: 0.32,
+        normalMap: guillocheNormal,
+        normalScale: new THREE.Vector2(0.35, 0.35),
+      }),
+    );
 
     // Peripheral skeletonized chapter ring (R = 18.6..22.1 mm) leaving the entire movement & bridges visible!
     const ringShape = new THREE.Shape();
@@ -2767,7 +2923,9 @@ if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) 
     );
     prSubdial.position.set(-8.6, 5.2, 1.92);
     this.layerDialHands.add(prSubdial);
-    const enamelRed = new THREE.MeshStandardMaterial({ color: new THREE.Color(0xa3221b), metalness: 0.05, roughness: 0.35 });
+    const enamelRed = enableMaterialSpecularAA(
+      new THREE.MeshStandardMaterial({ color: new THREE.Color(0xa3221b), metalness: 0.05, roughness: 0.35 }),
+    );
     for (let k = 0; k <= 4; k++) {
       const phi = (0.5 - k / 4) * 2.0 * PR_SWEEP;
       const major = k % 2 === 0;
@@ -2795,11 +2953,13 @@ if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) 
     // 2 o'clock Astronomical Moonphase Complication (x = +8.6, y = +5.2, z = 1.90)
     const moonGroup = new THREE.Group();
     moonGroup.position.set(8.6, 5.2, 1.90);
-    const nightSkyMat = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(0x0c1b48),
-      metalness: 0.35,
-      roughness: 0.25,
-    });
+    const nightSkyMat = enableMaterialSpecularAA(
+      new THREE.MeshStandardMaterial({
+        color: new THREE.Color(0x0c1b48),
+        metalness: 0.35,
+        roughness: 0.25,
+      }),
+    );
     const skyDisc = new THREE.Mesh(
       new THREE.CylinderGeometry(3.85, 3.85, 0.16, 40),
       nightSkyMat,
@@ -3058,13 +3218,17 @@ if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) 
     oilNeedle.rotation.x = Math.PI * 0.5;
     const oilStreamMesh = new THREE.Mesh(
       new THREE.CylinderGeometry(0.22, 0.52, 8.5, 20),
-      new THREE.MeshPhysicalMaterial({
-        color: 0xffb82e,
-        transmission: 0.85,
-        roughness: 0.05,
-        transparent: true,
-        opacity: 0.82,
-      }),
+      enableMaterialSpecularAA(
+        new THREE.MeshPhysicalMaterial({
+          color: 0xffb82e,
+          ior: 1.47,
+          clearcoat: 1.0,
+          clearcoatRoughness: 0.03,
+          roughness: 0.04,
+          transparent: true,
+          opacity: 0.78,
+        }),
+      ),
     );
     oilStreamMesh.position.set(0, 0, 4.2);
     oilStreamMesh.rotation.x = Math.PI * 0.5;
@@ -3309,7 +3473,7 @@ if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) 
     for (let i = 0; i < 3; i++) {
       const g = this.contactGlow[i]!;
       const mat = this.contactMats[i];
-      if (mat) mat.emissiveIntensity = g * 2.2;
+      if (mat) mat.emissiveIntensity = 0.16 + g * 2.2;
       this.contactGlow[i] = g * 0.82;
     }
     if (tools.mainspringCoilsMm) {
@@ -3420,7 +3584,7 @@ if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) 
     this.updateVectorFieldOverlays(snap, tools);
 
     this.controls.update();
-    this.composer.render();
+    this.executeRenderPass();
   }
 
   private setArrowInstance(
@@ -4062,6 +4226,22 @@ if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) 
   public renderOnly(): void {
     this.stepCameraTween(performance.now());
     this.controls.update();
-    this.composer.render();
+    this.executeRenderPass();
+  }
+
+  /**
+   * Fast-path renderer: when incandescent bloom is inactive and the canvas has hardware MSAA,
+   * render directly to the default framebuffer (in-shader NeutralToneMapping + sRGB conversion
+   * before hardware MSAA resolve, skipping offscreen FBO resolve and OutputPass fullscreen blit).
+   */
+  private executeRenderPass(): void {
+    if (this.bloomPass.enabled || !this.hasNativeCanvasMsaa) {
+      this.composer.render();
+    } else {
+      if (this.renderer.getRenderTarget() !== null) {
+        this.renderer.setRenderTarget(null);
+      }
+      this.renderer.render(this.scene, this.camera);
+    }
   }
 }
