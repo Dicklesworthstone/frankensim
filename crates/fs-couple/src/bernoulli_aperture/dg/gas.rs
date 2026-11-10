@@ -6,7 +6,7 @@
 //! gas inertia: updating its density, source viscosity and actual mean impedance
 //! changes no mechanical/contact/material coordinate or stored energy.
 
-use super::{ApertureDg, ApertureDgLoad, invalid};
+use super::{ApertureDg, ApertureDgLoad, UpstreamOwner, invalid};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::two_sided::LoadedAperture;
 use crate::dg_port::{DgBranchGasInput, DgGasRefresh, DgPortGasUpdate, DgRegionalGasUpdate};
@@ -56,6 +56,7 @@ fn prepare_series<R, C: FnMut() -> bool>(
     let upstream = model
         .upstream
         .as_ref()
+        .and_then(UpstreamOwner::as_dg)
         .ok_or_else(|| invalid("live series gas refresh requires an original upstream DG tract"))?;
     if cancelled() {
         return Err(AcousticRealizeError::Cancelled);
@@ -260,7 +261,7 @@ impl ApertureDg<LoadedAperture> {
         self.aperture
             .rebind_exact_gas_load(&candidate.gas, candidate.impedance)?;
         let [up, down] = candidate.loads;
-        self.upstream = Some(up);
+        self.upstream = Some(UpstreamOwner::Dg(up));
         self.load = down;
         Ok(candidate.reports)
     }
@@ -304,7 +305,7 @@ impl ApertureDg<LoadedAperture> {
         self.aperture
             .rebind_exact_gas_load(&candidate.gas, candidate.impedance)?;
         let [up, down] = candidate.loads;
-        self.upstream = Some(up);
+        self.upstream = Some(UpstreamOwner::Dg(up));
         self.load = down;
         Ok(candidate.reports)
     }

@@ -6,7 +6,8 @@
 //! This does not replace two independently evolving inlet inventories.
 
 use super::super::tract::prepare_upstream_step;
-use super::super::{ApertureDg, DgApertureFrame};
+use super::super::upstream::UpstreamRef;
+use super::super::{ApertureDg, DgApertureFrame, UpstreamOwner};
 use crate::bernoulli_aperture::tube::TubeDrive;
 use crate::bernoulli_aperture::two_sided::LoadedAperture;
 use crate::bernoulli_aperture::wall::material::{
@@ -103,7 +104,7 @@ impl ApertureDg<LoadedAperture> {
             ));
         }
         admit_finite_gas_controls(controls)?;
-        let upstream = self.upstream.as_ref().ok_or(FiniteGasDgError::Invalid(
+        let upstream = self.upstream.as_ref().and_then(UpstreamOwner::as_dg).ok_or(FiniteGasDgError::Invalid(
             "shared finite gas requires the original upstream and downstream tracts",
         ))?;
         let original = [upstream, &self.load];
@@ -131,7 +132,7 @@ impl ApertureDg<LoadedAperture> {
         let mut marched = [original[0].clone(), original[1].clone()];
         let [up, down] = &mut marched;
         let (mechanical, mut frame) =
-            prepare_upstream_step(&self.aperture, up, down, drive, forces_n, pressures_pa)
+            prepare_upstream_step(&self.aperture, UpstreamRef::Dg(up), down, drive, forces_n, pressures_pa)
                 .map_err(acoustic)?;
         check(cancelled)?;
         let [lo, hi] = controls.work_bracket_j;
@@ -229,7 +230,7 @@ impl ApertureDg<LoadedAperture> {
             .map_err(acoustic)?;
         self.aperture.accept(mechanical);
         let [up, down] = candidate.loads;
-        self.upstream = Some(up);
+        self.upstream = Some(UpstreamOwner::Dg(up));
         self.load = down;
         *gas = candidate.background.gas;
         Ok(FiniteGasSeriesApertureDgStep {

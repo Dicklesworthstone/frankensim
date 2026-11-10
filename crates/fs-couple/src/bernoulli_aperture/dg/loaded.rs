@@ -8,7 +8,9 @@
 /// Finite authored pressure, force and spatial-pressure playback.
 pub mod performance;
 
-use super::{ApertureDg, ApertureDgLoad, DgApertureFrame, accept_acoustic_candidate, invalid};
+use super::{
+    ApertureDg, ApertureDgLoad, DgApertureFrame, UpstreamOwner, accept_acoustic_candidate, invalid,
+};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::dynamic::ApertureDrive;
 use crate::bernoulli_aperture::paired::BladePropagator;
@@ -89,7 +91,7 @@ impl ApertureDg<LoadedAperture> {
     ) -> Result<DgApertureFrame, AcousticRealizeError> {
         if self.supply_channel.is_some() {
             let (mechanical, frame, channel) = super::tract::prepare_series_step(
-                &self.aperture, self.upstream.as_mut(), &mut self.load,
+                &self.aperture, self.upstream.as_mut().map(UpstreamOwner::as_ref_mut), &mut self.load,
                 self.supply_channel.as_ref(), drive, forces_n, pressures_pa,
             )?;
             self.aperture.accept(mechanical);
@@ -97,7 +99,12 @@ impl ApertureDg<LoadedAperture> {
             return Ok(frame);
         }
         if self.upstream.is_some() {
-            return self.step_with_upstream(drive, forces_n, pressures_pa);
+            let frame = self.step_with_upstream(drive, forces_n, pressures_pa)?;
+            // The series source at an airway's valve was for this accepted step alone.
+            if let Some(UpstreamOwner::Airway { series_pa, .. }) = &mut self.upstream {
+                *series_pa = 0.0;
+            }
+            return Ok(frame);
         }
         let relation = self.load.port_response()?;
         let trial = self.aperture.preview(ApertureDrive {

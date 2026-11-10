@@ -29,11 +29,16 @@ pub mod finite_gas;
 /// Finite-body wall heat and signed material work on the original moving load.
 pub mod thermal_wall;
 mod tract;
+mod upstream;
 /// Fixed material-gas passages in the same valve and acoustic transaction.
 pub mod supply;
 mod gas;
 /// Actual upstream tract exchange and cold preparation of the series load.
 pub use tract::{DgTractFrame, series_inlet_state};
+/// The owner upstream of a DG valve: an original DG tract or a player's airway.
+pub use upstream::UpstreamOwner;
+/// What one accepted sample did to a player's airway (`DgApertureFrame::airway`).
+pub use crate::render::player_tract::AirwayLedgerFrame;
 /// Independent blades or material modes on the same DG pressure/work coupling.
 pub use loaded::LoadedApertureDg;
 
@@ -57,6 +62,11 @@ pub struct DgApertureFrame {
     /// Optional original upstream tract. Its inlet points away from the valve;
     /// its work and terminal exchange are included once in the total accounts.
     pub upstream: Option<DgTractFrame>,
+    /// Optional player's airway upstream of the valve ([`UpstreamOwner::Airway`]), in place of an original DG
+    /// tract. It stores no energy in this account: the work it delivered through the valve face and the work its
+    /// source-free part took are reported here as their own term, as `supply` is, and
+    /// [`DgApertureFrame::balance_residual_j`] credits the delivered work.
+    pub airway: Option<AirwayLedgerFrame>,
     /// Original fixed no-slip passage, when explicitly included upstream of
     /// the valve. Its storage and losses are already in the total accounts.
     pub supply: Option<super::two_sided::supply::SupplyChannelFrame>,
@@ -101,8 +111,9 @@ impl DgApertureFrame {
             - self.upstream_work_j
             - self.body_work_j
             - self.aperture.mechanical_work_j;
-        self.upstream.as_ref().map_or(residual,
-            |tract| residual + sum_terminal_work(&tract.terminals))
+        let residual = self.upstream.as_ref().map_or(residual,
+            |tract| residual + sum_terminal_work(&tract.terminals));
+        self.airway.as_ref().map_or(residual, |airway| residual - airway.delivered_work_j)
     }
 }
 
@@ -113,7 +124,7 @@ impl DgApertureFrame {
 pub struct ApertureDg<A = DynamicAperture> {
     aperture: A,
     load: ApertureDgLoad,
-    upstream: Option<ApertureDgLoad>,
+    upstream: Option<UpstreamOwner>,
     supply_channel: Option<super::slit_channel::FixedChannel>,
 }
 
@@ -126,9 +137,45 @@ impl<A> ApertureDg<A> {
     #[must_use]
     pub const fn load(&self) -> &ApertureDgLoad { &self.load }
 
-    /// Optional retained upstream tract; its inlet points AWAY from the valve.
+    /// Optional retained upstream DG tract; its inlet points AWAY from the valve. `None` when the owner is a
+    /// player's airway: use [`Self::has_upstream`] to ask whether ANY owner sits upstream.
     #[must_use]
-    pub const fn upstream_load(&self) -> Option<&ApertureDgLoad> { self.upstream.as_ref() }
+    pub fn upstream_load(&self) -> Option<&ApertureDgLoad> {
+        self.upstream.as_ref().and_then(UpstreamOwner::as_dg)
+    }
+
+    /// Whether any owner, a DG tract or a player's airway, sits upstream of the valve. Every refusal that
+    /// reads "an upstream owner is present" asks this and not [`Self::upstream_load`].
+    #[must_use]
+    pub const fn has_upstream(&self) -> bool { self.upstream.is_some() }
+
+    /// The retained upstream owner, whichever it is.
+    #[must_use]
+    pub const fn upstream_owner(&self) -> Option<&UpstreamOwner> { self.upstream.as_ref() }
+
+    /// The player's airway upstream of the valve, if that is the owner.
+    #[must_use]
+    pub fn upstream_airway(&self) -> Option<&crate::render::player_tract::PlayerTract> {
+        self.upstream.as_ref().and_then(UpstreamOwner::as_airway)
+    }
+
+    /// Set the series source at the valve [Pa] for the NEXT step of a player's airway owner: the opt-in
+    /// constriction noise, which stays at the valve because the airway's far end takes the gesture pressure
+    /// alone. The step that accepts it resets it to zero.
+    ///
+    /// # Errors
+    /// A non-finite value, or an upstream owner that is not a player's airway (a DG tract takes the noise with
+    /// the gesture pressure at its inlet).
+    pub fn set_airway_series_pa(&mut self, value_pa: f64) -> Result<(), AcousticRealizeError> {
+        match &mut self.upstream {
+            Some(UpstreamOwner::Airway { series_pa, .. }) if value_pa.is_finite() => {
+                *series_pa = value_pa;
+                Ok(())
+            }
+            Some(UpstreamOwner::Airway { .. }) => Err(invalid("airway series source must be finite")),
+            _ => Err(invalid("a series source at the valve needs a player's airway as the upstream owner")),
+        }
+    }
 
     /// Original fixed passage, complete material gas and accepted transverse
     /// momentum field. This is separate geometry from the moving reed gap.
@@ -280,7 +327,7 @@ fn accept_acoustic_candidate_observed<T>(
     let observed = observe(&acoustic)?;
     let duct = acoustic.accept();
     Ok((DgApertureFrame {
-        aperture, spatial_pressure, duct, upstream: None, supply: None, terminal, terminals, stored_energy_j, storage_change_j, parameter_work_j: 0.0, inferred_total_dissipation_j,
+        aperture, spatial_pressure, duct, upstream: None, airway: None, supply: None, terminal, terminals, stored_energy_j, storage_change_j, parameter_work_j: 0.0, inferred_total_dissipation_j,
         upstream_work_j, body_work_j, port_work_residual_j,
     }, observed))
 }

@@ -31,7 +31,7 @@ impl LoadedDgPerformance {
         {
             return Err(invalid("finite gas heat must bind once before loaded DG playback"));
         }
-        if self.system.upstream_load().is_some() || self.system.supply_channel().is_some() {
+        if self.system.has_upstream() || self.system.supply_channel().is_some() {
             return Err(invalid("finite gas heat requires independent inventories for an upstream tract or fixed supply passage"));
         }
         self.finite_gas = Some(FiniteGasPlayback::new(

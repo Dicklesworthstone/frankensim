@@ -8,7 +8,13 @@
 //! Record order: schema; audio RATE RATE SAMPLES FULL_SCALE_PA;
 //! propagator exact-zoh; ambient GAS_RECORD; shared dg_tube/dg_bore and its
 //! geometry/gas/radiation records and optional material walls; optional
-//! upstream_tract followed by the same DG source/wall records; optional supply
+//! upstream_tract followed by the same DG source/wall records, or, in its place, `player_tract mouth TAU_S` |
+//! `player_tract lung`, one or more `player_tract_section LENGTH_M AREA_M2` (valve side first), an optional
+//! `player_tract_wall SURFACE_DENSITY STIFFNESS RESISTANCE` and an optional
+//! `player_airway weibel-1963 saab-2021-table-1-B GENERATIONS`: a player's airway (a measured area function as a
+//! passive wave-variable FIR, the reed-performance file's rows and refusals) upstream of the valve, realized in the
+//! bore's inlet gas on the valve's own clock; the constriction noise is then a series source at the valve and the
+//! gesture pressure alone the airway's far-end source; optional supply
 //! none|slit LENGTH WIDTH HEIGHT CELLS|circular LENGTH RADIUS CELLS; optional
 //! finite_gas, gas_energy, gas_feedback, gas_heat and heat records; slit_length
 //! none|LENGTH; observation
@@ -58,7 +64,7 @@ use super::{
     bad, checkpoint, closure, forces, gas, optional_positive, plate, pressure,
     read_propagator, read_receiver, reed, solid, wetted, SupplyInput,
 };
-use crate::bernoulli_aperture::dg::LoadedApertureDg;
+use crate::bernoulli_aperture::dg::{LoadedApertureDg, UpstreamOwner};
 use crate::bernoulli_aperture::dg::loaded::performance::LoadedDgPerformance;
 use crate::bernoulli_aperture::performance::{ApertureObservation, AperturePerformanceConfig};
 use crate::bernoulli_aperture::performance::file::finite_gas::FiniteGasInput;
@@ -225,6 +231,14 @@ impl MaterialModalDgValvePerformance {
             } else { DgMaterialWallLayout::default() };
             Some((source, walls))
         } else { None };
+        // A player's airway is the other upstream owner, in the upstream tract's place: the reed-performance file's
+        // `player_tract` rows with the same admission (`PlayerTractInput`), realized below in the bore's inlet gas on
+        // this clock. A card with both blocks reaches the second one as an unexpected record.
+        let player_tract = if upstream.is_none() && rows.lines.clone().next().and_then(|line|
+            line.split_ascii_whitespace().next()) == Some("player_tract")
+        {
+            Some(read_player_tract(&mut rows)?)
+        } else { None };
         let supply = if rows.lines.clone().next().and_then(|line|
             line.split_ascii_whitespace().next()) == Some("supply")
         {
@@ -370,12 +384,22 @@ impl MaterialModalDgValvePerformance {
                 let load = source.prepare_with_material_wall_layout(&ambient, dt, gate, &walls)?;
                 Ok((load, walls))
             }).transpose()?;
-        let (inlet, mut impedance) = match &upstream {
-            Some((tract, _)) => crate::bernoulli_aperture::dg::series_inlet_state(tract, &load)
+        let airway = player_tract.map(|(chain, pressure)| {
+            crate::render::player_tract::PlayerTract::realize(
+                &chain, load.duct().inlet_gas(), pressure, mechanics,
+                &crate::driving_point::LineLadder::default(),
+            ).map(UpstreamOwner::from)
+        }).transpose().map_err(PlateValveInputError::Physics)?;
+        let (inlet, mut impedance) = match (&upstream, &airway) {
+            (Some((tract, _)), _) => crate::bernoulli_aperture::dg::series_inlet_state(tract, &load)
                 .map_err(PlateValveInputError::Physics)?,
-            None => (*load.duct().inlet_gas(), load.impedance_pa_s_m3()),
+            (None, Some(owner)) => owner.inlet_state(&load).map_err(PlateValveInputError::Physics)?,
+            (None, None) => (*load.duct().inlet_gas(), load.impedance_pa_s_m3()),
         };
         let supply = supply.resolve(&inlet, dt)?;
+        if airway.is_some() && supply.is_some() {
+            return Err(bad(rows.line, "an airway tract with a fixed supply passage is not composed"));
+        }
         if let Some(channel) = &supply {
             impedance = crate::bernoulli_aperture::dg::supply::inlet_state_with_supply(
                 upstream.as_ref().map(|(load, _)| load), &load, channel,
@@ -462,14 +486,21 @@ impl MaterialModalDgValvePerformance {
             };
             (LoadedApertureDg::new_loaded_with_supply(valve, tract, load, channel)
                 .map_err(PlateValveInputError::Physics)?, walls)
-        } else { match upstream {
-            Some((tract, walls)) => (
+        } else { match (upstream, airway) {
+            (Some((tract, walls)), None) => (
                 LoadedApertureDg::new_loaded_with_upstream(valve, tract, load)
                     .map_err(PlateValveInputError::Physics)?,
                 Some(walls),
             ),
-            None => (LoadedApertureDg::new_loaded(valve, load)
+            (None, Some(airway)) => (
+                LoadedApertureDg::new_loaded_with_upstream(valve, airway, load)
+                    .map_err(PlateValveInputError::Physics)?,
+                None,
+            ),
+            (None, None) => (LoadedApertureDg::new_loaded(valve, load)
                 .map_err(PlateValveInputError::Physics)?, None),
+            (Some(_), Some(_)) => return Err(bad(rows.line,
+                "a DG upstream tract and a player's airway are exclusive upstream owners")),
         }};
         let mut renderer = LoadedDgPerformance::new(system, observation, schedule,
             AperturePerformanceConfig {
@@ -548,4 +579,63 @@ impl MaterialModalDgValvePerformance {
     pub const fn ambient_gas(&self) -> &GasState { &self.ambient }
     /// Move the complete accepted physical and scheduling state without a reset.
     pub fn into_renderer(self) -> LoadedDgPerformance { self.renderer }
+}
+
+/// The `player_tract` block of this card: the reed-performance file's rows, read with this file's row type and
+/// admitted by the same `PlayerTractInput`, so the refusals and the chain are one.
+fn read_player_tract(
+    rows: &mut Reader<'_>,
+) -> Result<(crate::upstream_airway::AirwayChain, crate::render::player_tract::TractPressure), PlateValveInputError> {
+    use crate::render::player_tract::TractPressure;
+    use crate::render::schedule::reed::PlayerTractInput;
+    use crate::upstream_airway::WEIBEL_SAAB_2021_TABLE_1_B_MM;
+    fn positive(row: &mut super::super::Row<'_>) -> Result<f64, PlateValveInputError> {
+        let x = row.scalar()?;
+        if x <= 0.0 {
+            return Err(bad(row.line, "physical dimension/scale must be positive"));
+        }
+        Ok(x)
+    }
+    let next_is = |rows: &Reader<'_>, key: &str| rows.lines.clone().next()
+        .and_then(|line| line.split_ascii_whitespace().next()) == Some(key);
+    let mut row = rows.row("player_tract")?;
+    let line = row.line;
+    let pressure = match row.word()? {
+        "mouth" => TractPressure::Mouth { tau_s: positive(&mut row)? },
+        "lung" => TractPressure::Lung,
+        _ => return Err(bad(line, "player_tract takes `mouth TAU_S` or `lung`")),
+    };
+    row.finish()?;
+    let mut input = PlayerTractInput::new(pressure);
+    while next_is(rows, "player_tract_section") {
+        let mut row = rows.row("player_tract_section")?;
+        let section_line = row.line;
+        let length_m = positive(&mut row)?;
+        let area_m2 = positive(&mut row)?;
+        row.finish()?;
+        input.push_section(length_m, area_m2).map_err(|what| bad(section_line, what))?;
+    }
+    input.require_sections().map_err(|what| bad(line, what))?;
+    if next_is(rows, "player_tract_wall") {
+        let mut row = rows.row("player_tract_wall")?;
+        let wall_line = row.line;
+        let pin = fs_phs::WallPin {
+            surface_density: positive(&mut row)?,
+            stiffness_per_area: row.scalar()?,
+            resistance: row.scalar()?,
+        };
+        row.finish()?;
+        input.set_wall(pin).map_err(|what| bad(wall_line, what))?;
+    }
+    if next_is(rows, "player_airway") {
+        let mut row = rows.row("player_airway")?;
+        let airway_line = row.line;
+        if row.word()? != "weibel-1963" || row.word()? != "saab-2021-table-1-B" {
+            return Err(bad(airway_line, "player_airway takes `weibel-1963 saab-2021-table-1-B GENERATIONS`"));
+        }
+        let generations = row.count(WEIBEL_SAAB_2021_TABLE_1_B_MM.len())?;
+        row.finish()?;
+        input.set_generations(generations).map_err(|what| bad(airway_line, what))?;
+    }
+    input.chain().map_err(|what| bad(line, what))
 }

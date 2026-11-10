@@ -785,6 +785,20 @@ pub(super) fn material_modal_dg_provenance(
             super::duct_metadata::gas_state(duct.outlet_gas()),
             mesh.elements, mesh.order, duct.total_dofs())
     });
+    // A player's airway upstream of the valve (the other upstream owner): what it is, not a DG duct, so it is named
+    // here and not dropped. Its work ledger and passivity certificate are per step, in the frame.
+    let upstream_airway = source.system().upstream_airway().map_or_else(String::new, |tract| {
+        use fs_couple::render::player_tract::TractPressure;
+        let receipt = tract.airway().receipt();
+        let pressure = match tract.pressure() {
+            TractPressure::Lung => "lung".to_string(),
+            TractPressure::Mouth { tau_s } => format!("mouth, regulation time constant {tau_s:e} s"),
+        };
+        format!(",\"upstream_airway\":{{\"scope\":\"a player's airway (a measured area function realized as a passive wave-variable FIR) upstream of the valve; it stores no energy in the DG account, its absorbed-work ledger and passivity certificate are reported per step\",\"pressure\":\"{pressure}\",\"sections\":{},\"port_impedance_pa_s_m3\":{:e},\"series_impedance_pa_s_m3\":{:e},\"dc_resistance_pa_s_m3\":{:e},\"reflectance_taps\":{},\"source_taps\":{},\"sample_rate_hz\":{},\"inlet_gas\":{}}}",
+            receipt.sections, receipt.port_impedance, receipt.series_impedance, receipt.dc_resistance,
+            tract.airway().reflectance_taps().len(), receipt.source_taps, tract.airway().sample_rate_hz(),
+            super::duct_metadata::gas_state(tract.gas()))
+    });
     let relaxation_json = match source.system().aperture() {
         fs_couple::bernoulli_aperture::two_sided::LoadedAperture::Modal(valve) =>
             modal_relaxation_provenance(valve),
@@ -843,7 +857,7 @@ pub(super) fn material_modal_dg_provenance(
     };
     let supply = fixed_channel_provenance(source.system().supply_channel());
     let finite_gas = finite_gas_heat::loaded_provenance(source, i.mechanics_rate_hz);
-    let source_json = format!("\"material_modal_dg_valve_input\":{{\"schema\":\"frankensim-material-modal-dg-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"mechanics_rate_hz\":{},\"pressure_point\":\"{pressure_point}\",\"material_sources\":[{materials}],\"structural_propagator\":\"exact-zoh\",\"dg_operator_identity\":\"{}\",\"length_m\":{:e},\"inlet_gas\":{inlet},\"outlet_gas\":{outlet},\"supply_channel\":{supply},\"model_scope\":\"{model_scope}\"{structure}{surface_closure}{observation}{radiation}{gas_sources}{solid_wall}{upstream}{relaxation_json}{finite_gas}}}",
+    let source_json = format!("\"material_modal_dg_valve_input\":{{\"schema\":\"frankensim-material-modal-dg-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"mechanics_rate_hz\":{},\"pressure_point\":\"{pressure_point}\",\"material_sources\":[{materials}],\"structural_propagator\":\"exact-zoh\",\"dg_operator_identity\":\"{}\",\"length_m\":{:e},\"inlet_gas\":{inlet},\"outlet_gas\":{outlet},\"supply_channel\":{supply},\"model_scope\":\"{model_scope}\"{structure}{surface_closure}{observation}{radiation}{gas_sources}{solid_wall}{upstream}{upstream_airway}{relaxation_json}{finite_gas}}}",
         i.input_hash.to_hex(), i.blades, i.modes, i.nodes, i.triangles,
         i.mechanics_rate_hz, load.duct().operator_identity().to_hex(),
         load.duct().total_length());

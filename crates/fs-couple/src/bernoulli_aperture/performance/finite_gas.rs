@@ -186,7 +186,7 @@ impl AperturePerformance {
         let CoupledAperture::Dg(system) = &self.system else {
             return Err(invalid("finite thermochemical heat requires the original DG aperture owner"));
         };
-        if system.upstream_load().is_some() || system.supply_channel().is_some() {
+        if system.has_upstream() || system.supply_channel().is_some() {
             return Err(invalid("finite gas heat requires independent inventories for an upstream tract or fixed supply passage"));
         }
         self.finite_gas = Some(FiniteGasPlayback::new(

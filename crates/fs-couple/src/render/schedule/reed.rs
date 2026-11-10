@@ -1142,7 +1142,7 @@ impl ReedPerformance {
         let player_tract = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("player_tract") {
             use crate::render::player_tract::TractPressure;
-            use crate::upstream_airway::{AirwayChain, AirwaySection, WEIBEL_SAAB_2021_TABLE_1_B_MM};
+            use crate::upstream_airway::WEIBEL_SAAB_2021_TABLE_1_B_MM;
             let mut row = r.row("player_tract")?;
             let line = row.line;
             let pressure = match row.word()? {
@@ -1151,7 +1151,8 @@ impl ReedPerformance {
                 _ => return Err(bad(line, "player_tract takes `mouth TAU_S` or `lung`")),
             };
             row.finish()?;
-            let mut sections = Vec::new();
+            // The numbers are admitted by `PlayerTractInput`, once for every route that carries the block.
+            let mut input = PlayerTractInput::new(pressure);
             while r.lines.clone().next()
                 .and_then(|line| line.split_ascii_whitespace().next()) == Some("player_tract_section") {
                 let mut row = r.row("player_tract_section")?;
@@ -1159,15 +1160,10 @@ impl ReedPerformance {
                 let length_m = row.positive()?;
                 let area_m2 = row.positive()?;
                 row.finish()?;
-                if sections.len() == MAX_PLAYER_TRACT_SECTIONS {
-                    return Err(bad(section_line, "player_tract takes at most 256 sections"));
-                }
-                sections.push((length_m, area_m2));
+                input.push_section(length_m, area_m2).map_err(|what| bad(section_line, what))?;
             }
-            if sections.is_empty() {
-                return Err(bad(line, "player_tract needs at least one player_tract_section row"));
-            }
-            let wall = if r.lines.clone().next()
+            input.require_sections().map_err(|what| bad(line, what))?;
+            if r.lines.clone().next()
                 .and_then(|line| line.split_ascii_whitespace().next()) == Some("player_tract_wall") {
                 let mut row = r.row("player_tract_wall")?;
                 let wall_line = row.line;
@@ -1177,12 +1173,9 @@ impl ReedPerformance {
                     resistance: row.scalar()?,
                 };
                 row.finish()?;
-                if pin.stiffness_per_area < 0.0 || pin.resistance < 0.0 {
-                    return Err(bad(wall_line, "player_tract_wall needs a nonnegative stiffness and resistance"));
-                }
-                Some(pin)
-            } else { None };
-            let generations = if r.lines.clone().next()
+                input.set_wall(pin).map_err(|what| bad(wall_line, what))?;
+            }
+            if r.lines.clone().next()
                 .and_then(|line| line.split_ascii_whitespace().next()) == Some("player_airway") {
                 let mut row = r.row("player_airway")?;
                 let airway_line = row.line;
@@ -1191,25 +1184,9 @@ impl ReedPerformance {
                 }
                 let generations = row.count(WEIBEL_SAAB_2021_TABLE_1_B_MM.len())?;
                 row.finish()?;
-                if generations == 0 {
-                    return Err(bad(airway_line, "player_airway takes 1 to 24 generations"));
-                }
-                Some(generations)
-            } else { None };
-            let tubes = sections
-                .iter()
-                .map(|&(length_m, area_m2)| AirwaySection::from_area(length_m, area_m2, 1, wall))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| bad(line, "player_tract sections need positive finite lengths and areas"))?;
-            let chain = AirwayChain::new(tubes, fs_duct::LossModel::Bessel)
-                .map_err(|_| bad(line, "player_tract sections did not form an airway"))?;
-            let chain = match generations {
-                Some(generations) => AirwayChain::weibel_saab_2021_b(generations, wall)
-                    .and_then(|tree| chain.ahead_of(&tree))
-                    .map_err(|_| bad(line, "player_airway did not join the tract"))?,
-                None => chain,
-            };
-            Some((chain, pressure))
+                input.set_generations(generations).map_err(|what| bad(airway_line, what))?;
+            }
+            Some(input.chain().map_err(|what| bad(line, what))?)
         } else { None };
         let mut row = r.row("compile_limits")?;
         let max_work: u64 = row.parse()?;
@@ -1861,6 +1838,83 @@ impl<'a> Row<'a> {
             return Err(bad(self.line, "unexpected extra field"));
         }
         Ok(())
+    }
+}
+
+/// A `player_tract` block's numbers, admitted once for every route that carries the block (the reed-performance file
+/// here and the DG-valve file's upstream owner): where the card's pressure acts, the tract's sections valve side
+/// first, an optional locally reacting wall and an optional Weibel airway tree. Each file reads its own rows with its
+/// own row type and errors and hands the numbers here; the refusals and the chain are one.
+#[derive(Clone)]
+pub(crate) struct PlayerTractInput {
+    pressure: crate::render::player_tract::TractPressure,
+    sections: Vec<(f64, f64)>,
+    wall: Option<fs_phs::WallPin>,
+    generations: Option<usize>,
+}
+
+impl PlayerTractInput {
+    /// A block with no section yet, the card's pressure acting as `pressure`.
+    pub(crate) const fn new(pressure: crate::render::player_tract::TractPressure) -> Self {
+        Self { pressure, sections: Vec::new(), wall: None, generations: None }
+    }
+
+    /// Admit one `player_tract_section LENGTH_M AREA_M2` row (the caller has checked both positive and finite).
+    pub(crate) fn push_section(&mut self, length_m: f64, area_m2: f64) -> Result<(), &'static str> {
+        if self.sections.len() == MAX_PLAYER_TRACT_SECTIONS {
+            return Err("player_tract takes at most 256 sections");
+        }
+        self.sections.push((length_m, area_m2));
+        Ok(())
+    }
+
+    /// The block needs a section: called when the section rows end, before any later row is read.
+    pub(crate) fn require_sections(&self) -> Result<(), &'static str> {
+        if self.sections.is_empty() {
+            return Err("player_tract needs at least one player_tract_section row");
+        }
+        Ok(())
+    }
+
+    /// Admit the `player_tract_wall` row (the caller has checked the surface density positive and the others finite).
+    pub(crate) fn set_wall(&mut self, pin: fs_phs::WallPin) -> Result<(), &'static str> {
+        if pin.stiffness_per_area < 0.0 || pin.resistance < 0.0 {
+            return Err("player_tract_wall needs a nonnegative stiffness and resistance");
+        }
+        self.wall = Some(pin);
+        Ok(())
+    }
+
+    /// Admit the `player_airway` row's generation count (the caller has checked it against the table).
+    pub(crate) fn set_generations(&mut self, generations: usize) -> Result<(), &'static str> {
+        if generations == 0 {
+            return Err("player_airway takes 1 to 24 generations");
+        }
+        self.generations = Some(generations);
+        Ok(())
+    }
+
+    /// The airway chain, valve side first, and where the card's pressure acts.
+    pub(crate) fn chain(
+        self,
+    ) -> Result<(crate::upstream_airway::AirwayChain, crate::render::player_tract::TractPressure), &'static str> {
+        use crate::upstream_airway::{AirwayChain, AirwaySection};
+        let wall = self.wall;
+        let tubes = self
+            .sections
+            .iter()
+            .map(|&(length_m, area_m2)| AirwaySection::from_area(length_m, area_m2, 1, wall))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "player_tract sections need positive finite lengths and areas")?;
+        let chain = AirwayChain::new(tubes, fs_duct::LossModel::Bessel)
+            .map_err(|_| "player_tract sections did not form an airway")?;
+        let chain = match self.generations {
+            Some(generations) => AirwayChain::weibel_saab_2021_b(generations, wall)
+                .and_then(|tree| chain.ahead_of(&tree))
+                .map_err(|_| "player_airway did not join the tract")?,
+            None => chain,
+        };
+        Ok((chain, self.pressure))
     }
 }
 

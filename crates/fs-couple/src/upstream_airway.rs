@@ -766,8 +766,16 @@ pub struct UpstreamAirway {
     g0: f64,
     series_impedance: f64,
     sample_rate_hz: u32,
-    /// The source pressure and the known part `A` of this sample's received wave, between `port` and `commit`.
-    pending: Option<(f64, f64)>,
+    /// The source pressure, the known part `A` of this sample's received wave and the shadow's past (zero when
+    /// there is no shadow), between `port` and `commit`.
+    pending: Option<(f64, f64, f64)>,
+    /// The reflectance history of the airway driven by the flow alone, the far-end source at rest: the response a
+    /// valve ledger needs to read the work the SOURCE-FREE airway takes. `reflect` cannot give it, because the
+    /// waves it holds were launched against the source's own contribution. Off unless asked
+    /// ([`Self::track_source_free_response`]); the voice route never asks, and its arithmetic is untouched.
+    free: Option<PastFir>,
+    /// Samples closed by [`Self::commit`].
+    commits: u64,
     receipt: AirwayReceipt,
 }
 
@@ -1081,6 +1089,8 @@ impl UpstreamAirway {
             series_impedance,
             sample_rate_hz,
             pending: None,
+            free: None,
+            commits: 0,
             receipt,
         })
     }
@@ -1096,11 +1106,12 @@ impl UpstreamAirway {
             return Err(DrivingPointError::Invalid { what: "airway source pressure must be finite" });
         }
         let known = self.reflect.past() + (self.g0 * source_pa + self.source.past());
+        let free_past = self.free.as_ref().map_or(0.0, PastFir::past);
         let open_circuit_pa = 2.0 * known / (1.0 - self.r0);
         if !open_circuit_pa.is_finite() {
             return Err(DrivingPointError::Invalid { what: "airway port left the finite set" });
         }
-        self.pending = Some((source_pa, known));
+        self.pending = Some((source_pa, known, free_past));
         Ok(UpstreamPort {
             open_circuit_pa,
             impedance: self.series_impedance,
@@ -1113,16 +1124,21 @@ impl UpstreamAirway {
     /// # Errors
     /// No [`Self::port`] this sample, or a non-finite flow or wave; a refusal leaves the airway as it was.
     pub fn commit(&mut self, flow_m3_s: f64) -> Result<f64, DrivingPointError> {
-        let (source_pa, known) =
+        let (source_pa, known, free_past) =
             self.pending.ok_or(DrivingPointError::Invalid { what: "an airway commit needs this sample's port" })?;
         let b = (known - self.zs * flow_m3_s) / (1.0 - self.r0);
         let p = (1.0 + self.r0) * b + known;
-        if !(flow_m3_s.is_finite() && b.is_finite() && p.is_finite()) {
+        let b_free = (free_past - self.zs * flow_m3_s) / (1.0 - self.r0);
+        if !(flow_m3_s.is_finite() && b.is_finite() && p.is_finite() && (self.free.is_none() || b_free.is_finite())) {
             return Err(DrivingPointError::Invalid { what: "airway wave left the finite set" });
         }
         self.pending = None;
         self.reflect.push(b);
         self.source.push(source_pa);
+        if let Some(free) = &mut self.free {
+            free.push(b_free);
+        }
+        self.commits += 1;
         Ok(p)
     }
 
@@ -1136,6 +1152,44 @@ impl UpstreamAirway {
     #[must_use]
     pub const fn sample_rate_hz(&self) -> u32 {
         self.sample_rate_hz
+    }
+
+    /// Start the flow-only shadow of the reflectance history, so that [`Self::source_free_open_circuit_pa`] can
+    /// answer. By linearity the airway's port is the sum of its response to the flow history with the source at
+    /// rest and its response to the source; the shadow carries the first alone: `b_free = (free_past - Z_s U) /
+    /// (1 - r_0)` pushed at every commit. It can only start on an airway that has not advanced, since it would
+    /// otherwise miss the history already launched. Calling it again is a no-op.
+    ///
+    /// # Errors
+    /// An airway that has already closed a sample.
+    pub fn track_source_free_response(&mut self) -> Result<(), DrivingPointError> {
+        if self.free.is_some() {
+            return Ok(());
+        }
+        if self.commits != 0 {
+            return Err(DrivingPointError::Invalid {
+                what: "the source-free response can only start on an airway that has not advanced",
+            });
+        }
+        self.free = Some(PastFir::new(self.reflect.taps.clone()));
+        Ok(())
+    }
+
+    /// The open-circuit pressure of the airway with its far-end source at rest, between [`Self::port`] and
+    /// [`Self::commit`]: `2 free_past / (1 - r_0)` [Pa], the flow history's part of `open_circuit_pa`. `None`
+    /// without a pending port or without [`Self::track_source_free_response`]. A valve ledger reads the work the
+    /// source-free airway takes from the valve with this.
+    #[must_use]
+    pub fn source_free_open_circuit_pa(&self) -> Option<f64> {
+        let (_, _, free_past) = self.pending?;
+        self.free.as_ref()?;
+        Some(2.0 * free_past / (1.0 - self.r0))
+    }
+
+    /// Samples closed so far.
+    #[must_use]
+    pub const fn commit_count(&self) -> u64 {
+        self.commits
     }
 
     /// The reflectance taps, `r_0` first.

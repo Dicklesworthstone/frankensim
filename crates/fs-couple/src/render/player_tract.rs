@@ -61,6 +61,66 @@ pub struct PlayerTract {
     margin: Option<(f64, f64)>,
     mouth_pa: f64,
     flow_m3_s: f64,
+    gas: GasState,
+    ledger: AirwayLedger,
+}
+
+/// Relative slack of the airway's passivity certificate ([`PlayerTract::dg_commit`]): the work the source-free
+/// airway has taken from the valve may be negative by this fraction of the wave energy through its port. The
+/// realized reflectance is refused above `|R| = 1 + 4e-16` on its grid (`UpstreamAirway`), which allows a cumulative
+/// deficit of about `4e-16` of that energy; the mouth-pressure load is admitted on the analytic `Re Z_in - R_dc Re H`
+/// ([`admitted_margin`]), whose realization error is that of the ladder's tail tolerance. `1e-6` sits above both and
+/// far below any active load, which takes an O(1) fraction.
+const AIRWAY_PASSIVITY_TOLERANCE: f64 = 1e-6;
+
+/// Cumulative work the source-free airway has taken from the valve, and the wave energy through its port
+/// ([`PlayerTract::dg_commit`]). Moved only by an accepted DG sample; the voice route never touches it.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct AirwayLedger {
+    absorbed_j: f64,
+    wave_energy_j: f64,
+}
+
+/// One DG valve sample's airway port, between [`PlayerTract::dg_port`] and [`PlayerTract::dg_commit`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AirwayPort {
+    /// The valve-side open-circuit pressure: the airway's, the regulation's DC offset and the series source [Pa].
+    pub(crate) open_circuit_pa: f64,
+    /// The airway's same-sample series impedance against the flow into the valve [Pa s/m^3].
+    pub(crate) impedance: f64,
+    source_pa: f64,
+    series_pa: f64,
+    /// The open-circuit pressure with the far-end source at rest, regulation included, series source excluded [Pa].
+    free_open_circuit_pa: f64,
+}
+
+/// What one accepted DG valve sample did to the airway: the separate term the DG frame reports for a tract that is
+/// not a DG duct (`DgApertureFrame::airway`). The airway has no stored energy of its own in the DG account: its
+/// FIRs are a lumped, band-limited port law, so the work it delivers and takes is the whole of its ledger.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AirwayLedgerFrame {
+    /// The far-end source: the card's blowing pressure [Pa].
+    pub source_pa: f64,
+    /// The series source at the valve (the opt-in constriction noise) [Pa].
+    pub series_pa: f64,
+    /// The open-circuit pressure at the valve this sample, series source included [Pa].
+    pub open_circuit_pa: f64,
+    /// The series impedance against the flow [Pa s/m^3].
+    pub impedance_pa_s_m3: f64,
+    /// The flow from the airway into the valve [m^3/s].
+    pub flow_m3_s: f64,
+    /// The pressure at the valve face, series source included [Pa].
+    pub face_pressure_pa: f64,
+    /// Work the airway, its far-end source and its regulation deliver through the valve face, series source
+    /// excluded: `(face - series) U dt` [J]. `DgApertureFrame::balance_residual_j` credits it.
+    pub delivered_work_j: f64,
+    /// Work the source-free airway took from the valve this sample [J]: `-(p_free) U dt`, `p_free` the face pressure
+    /// with the far-end source at rest.
+    pub absorbed_work_j: f64,
+    /// The sum of `absorbed_work_j` over every accepted sample [J]; it is refused below `-1e-6` of `wave_energy_j`.
+    pub cumulative_absorbed_work_j: f64,
+    /// The sum over samples of `(p_free^2 / Z_s + Z_s U^2) dt / 2`, the wave energy through the port [J].
+    pub wave_energy_j: f64,
 }
 
 /// One sample's tract junction, between [`PlayerTract::fold`] and [`PlayerTract::commit`].
@@ -234,7 +294,18 @@ impl PlayerTract {
         step: TractStep,
         flow_m3_s: f64,
     ) -> Result<f64, AcousticRealizeError> {
-        let mouth_pa = step.open_circuit_pa - step.impedance * flow_m3_s;
+        self.commit_port(step.open_circuit_pa, step.impedance, flow_m3_s)
+    }
+
+    /// The airway takes `flow_m3_s`, the one-pole advances, and the face pressure is returned [Pa]; the arithmetic of
+    /// [`Self::commit`], which the DG route shares. A refusal leaves the airway as it was.
+    fn commit_port(
+        &mut self,
+        open_circuit_pa: f64,
+        impedance: f64,
+        flow_m3_s: f64,
+    ) -> Result<f64, AcousticRealizeError> {
+        let mouth_pa = open_circuit_pa - impedance * flow_m3_s;
         if !mouth_pa.is_finite() {
             return Err(AcousticRealizeError::Reed {
                 what: "player tract mouth pressure left the finite set",
@@ -245,6 +316,193 @@ impl PlayerTract {
         self.mouth_pa = mouth_pa;
         self.flow_m3_s = flow_m3_s;
         Ok(mouth_pa)
+    }
+}
+
+impl PlayerTract {
+    /// Realize `chain` filled with `gas` on a `sample_rate_hz` clock, the card's pressure acting where `pressure`
+    /// says, at rest: the tract of [`ReedBoreVoice::set_player_tract`] and of a DG valve's upstream owner. A mouth
+    /// pressure's load is read on every positive bin of the realized reflectance grid and refused if it is active
+    /// anywhere ([`admitted_margin`]).
+    ///
+    /// # Errors
+    /// A zero clock; a `tau_s` that is not positive and finite; the airway's own refusals; a negative passivity margin.
+    pub fn realize(
+        chain: &AirwayChain,
+        gas: &GasState,
+        pressure: TractPressure,
+        sample_rate_hz: u32,
+        ladder: &LineLadder,
+    ) -> Result<Self, AcousticRealizeError> {
+        if sample_rate_hz == 0 {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "a player tract needs a positive clock",
+            });
+        }
+        let airway =
+            UpstreamAirway::realize(chain, gas, sample_rate_hz, ladder).map_err(airway_error)?;
+        let dc_resistance = airway.receipt().dc_resistance;
+        let dt = 1.0 / f64::from(sample_rate_hz);
+        let (pole, margin) = match pressure {
+            TractPressure::Lung => (0.0, None),
+            TractPressure::Mouth { tau_s } => {
+                if !(tau_s > 0.0 && tau_s.is_finite()) {
+                    return Err(AcousticRealizeError::InvalidDescription {
+                        what: "a mouth-pressure tract needs a positive finite time constant",
+                    });
+                }
+                let pole = 1.0 - fs_math::det::exp(-dt / tau_s);
+                if !(pole > 0.0 && pole <= 1.0) {
+                    return Err(AcousticRealizeError::InvalidDescription {
+                        what: "the tract's one-pole coefficient must lie in (0, 1]",
+                    });
+                }
+                let n = airway.receipt().reflectance.n_fft;
+                let margin = admitted_margin(chain, gas, sample_rate_hz, n, |omega| {
+                    one_pole_response(pole, omega, dt)
+                })?;
+                (pole, Some(margin))
+            }
+        };
+        Ok(Self {
+            airway,
+            pressure,
+            dc_resistance,
+            pole,
+            flow_lp: 0.0,
+            margin,
+            mouth_pa: 0.0,
+            flow_m3_s: 0.0,
+            gas: *gas,
+            ledger: AirwayLedger::default(),
+        })
+    }
+
+    /// The gas the airway was realized in: the inlet gas of the valve it sits upstream of.
+    #[must_use]
+    pub const fn gas(&self) -> &GasState {
+        &self.gas
+    }
+
+    /// The airway's same-sample series impedance against the flow into the valve [Pa s/m^3]: the impedance the valve
+    /// is declared against, in the DG route a constant of the realization.
+    #[must_use]
+    pub const fn series_impedance_pa_s_m3(&self) -> f64 {
+        self.airway.receipt().series_impedance
+    }
+
+    /// The sum of the work the source-free airway took from the valve over every accepted DG sample [J]
+    /// ([`AirwayLedgerFrame::cumulative_absorbed_work_j`]); zero in the voice route.
+    #[must_use]
+    pub const fn cumulative_absorbed_work_j(&self) -> f64 {
+        self.ledger.absorbed_j
+    }
+
+    /// Whether no sample has been taken: the one-pole, the last flows and the DG ledger are all at rest. The airway's
+    /// FIR histories move only with a committed flow, so a zero flow and an empty ledger mean they are empty too.
+    #[must_use]
+    pub fn is_cold(&self) -> bool {
+        self.airway.commit_count() == 0
+            && self.flow_lp == 0.0
+            && self.flow_m3_s == 0.0
+            && self.mouth_pa == 0.0
+            && self.ledger == AirwayLedger::default()
+    }
+
+    /// This DG valve sample's port with `source_pa` at the airway's far end and a series source `series_pa` at the
+    /// valve. Nothing moves until [`Self::dg_commit`]; the open-circuit pressure is [`Self::fold`]'s, term for term.
+    pub(crate) fn dg_port(
+        &mut self,
+        source_pa: f64,
+        series_pa: f64,
+    ) -> Result<AirwayPort, AcousticRealizeError> {
+        if !series_pa.is_finite() {
+            return Err(AcousticRealizeError::Reed {
+                what: "player tract series source must be finite",
+            });
+        }
+        // The shadow of the flow-only response starts with the first DG sample, on an airway at rest.
+        self.airway.track_source_free_response().map_err(airway_error)?;
+        let port = self.airway.port(source_pa).map_err(airway_error)?;
+        let offset = self.dc_offset_pa();
+        let open_circuit_pa = port.open_circuit_pa + offset + series_pa;
+        let free_open_circuit_pa = self.airway.source_free_open_circuit_pa().ok_or(AcousticRealizeError::Reed {
+            what: "player tract has no source-free response",
+        })? + offset;
+        if !(open_circuit_pa.is_finite() && free_open_circuit_pa.is_finite() && port.impedance.is_finite()) {
+            return Err(AcousticRealizeError::Reed {
+                what: "player tract port left the finite set",
+            });
+        }
+        Ok(AirwayPort {
+            open_circuit_pa,
+            impedance: port.impedance,
+            source_pa,
+            series_pa,
+            free_open_circuit_pa,
+        })
+    }
+
+    /// Close this DG valve sample at the flow `flow_m3_s` from the airway into the valve: the work the source-free
+    /// airway takes is added to its ledger, which is the passivity certificate (a cumulative deficit beyond
+    /// `AIRWAY_PASSIVITY_TOLERANCE` of the wave energy refuses by name), then the airway takes the flow. A refusal
+    /// leaves the airway, the one-pole and the ledger as they were.
+    pub(crate) fn dg_commit(
+        &mut self,
+        port: AirwayPort,
+        flow_m3_s: f64,
+    ) -> Result<AirwayLedgerFrame, AcousticRealizeError> {
+        let dt = 1.0 / f64::from(self.airway.sample_rate_hz());
+        let zs = self.airway.port_impedance();
+        let face_pressure_pa = port.open_circuit_pa - port.impedance * flow_m3_s;
+        let free_face_pa = port.free_open_circuit_pa - port.impedance * flow_m3_s;
+        let absorbed_work_j = -free_face_pa * flow_m3_s * dt;
+        let wave_j = 0.5 * (free_face_pa * free_face_pa / zs + zs * flow_m3_s * flow_m3_s) * dt;
+        let cumulative_absorbed_work_j = self.ledger.absorbed_j + absorbed_work_j;
+        let wave_energy_j = self.ledger.wave_energy_j + wave_j;
+        let delivered_work_j = (face_pressure_pa - port.series_pa) * flow_m3_s * dt;
+        if ![face_pressure_pa, free_face_pa, absorbed_work_j, wave_j, cumulative_absorbed_work_j, wave_energy_j,
+            delivered_work_j].iter().all(|x| x.is_finite())
+        {
+            return Err(AcousticRealizeError::Reed {
+                what: "player tract ledger left the finite set",
+            });
+        }
+        if cumulative_absorbed_work_j < -AIRWAY_PASSIVITY_TOLERANCE * wave_energy_j {
+            return Err(AcousticRealizeError::Nonlinear(format!(
+                "player tract refused: the source-free airway has taken {cumulative_absorbed_work_j:.6e} J from the \
+                 valve against {wave_energy_j:.6e} J of wave energy through its port (limit -{AIRWAY_PASSIVITY_TOLERANCE:e} of it), \
+                 so the tract is acting as a source"
+            )));
+        }
+        self.commit_port(port.open_circuit_pa, port.impedance, flow_m3_s)?;
+        self.ledger = AirwayLedger { absorbed_j: cumulative_absorbed_work_j, wave_energy_j };
+        Ok(AirwayLedgerFrame {
+            source_pa: port.source_pa,
+            series_pa: port.series_pa,
+            open_circuit_pa: port.open_circuit_pa,
+            impedance_pa_s_m3: port.impedance,
+            flow_m3_s,
+            face_pressure_pa,
+            delivered_work_j,
+            absorbed_work_j,
+            cumulative_absorbed_work_j,
+            wave_energy_j,
+        })
+    }
+}
+
+#[cfg(test)]
+impl PlayerTract {
+    /// This tract with a mouth-pressure regulation of time constant `tau_s` and DC resistance `dc_resistance`
+    /// [Pa s/m^3] that no admission read: the planted active load of the passivity certificate's test.
+    pub(crate) fn with_unadmitted_regulation(mut self, tau_s: f64, dc_resistance: f64) -> Self {
+        let dt = 1.0 / f64::from(self.airway.sample_rate_hz());
+        self.pressure = TractPressure::Mouth { tau_s };
+        self.pole = 1.0 - fs_math::det::exp(-dt / tau_s);
+        self.dc_resistance = dc_resistance;
+        self.margin = None;
+        self
     }
 }
 
@@ -274,42 +532,13 @@ impl ReedBoreVoice {
                 what: "a player tract is realized on the voice's own clock",
             });
         }
-        let gas = self.inlet_gas;
-        let airway =
-            UpstreamAirway::realize(chain, &gas, sample_rate_hz, ladder).map_err(airway_error)?;
-        let dc_resistance = airway.receipt().dc_resistance;
-        let (pole, margin) = match pressure {
-            TractPressure::Lung => (0.0, None),
-            TractPressure::Mouth { tau_s } => {
-                if !(tau_s > 0.0 && tau_s.is_finite()) {
-                    return Err(AcousticRealizeError::InvalidDescription {
-                        what: "a mouth-pressure tract needs a positive finite time constant",
-                    });
-                }
-                let pole = 1.0 - fs_math::det::exp(-self.dt / tau_s);
-                if !(pole > 0.0 && pole <= 1.0) {
-                    return Err(AcousticRealizeError::InvalidDescription {
-                        what: "the tract's one-pole coefficient must lie in (0, 1]",
-                    });
-                }
-                let dt = self.dt;
-                let n = airway.receipt().reflectance.n_fft;
-                let margin = admitted_margin(chain, &gas, sample_rate_hz, n, |omega| {
-                    one_pole_response(pole, omega, dt)
-                })?;
-                (pole, Some(margin))
-            }
-        };
-        self.player_tract = Some(PlayerTract {
-            airway,
+        self.player_tract = Some(PlayerTract::realize(
+            chain,
+            &self.inlet_gas,
             pressure,
-            dc_resistance,
-            pole,
-            flow_lp: 0.0,
-            margin,
-            mouth_pa: 0.0,
-            flow_m3_s: 0.0,
-        });
+            sample_rate_hz,
+            ladder,
+        )?);
         Ok(())
     }
 

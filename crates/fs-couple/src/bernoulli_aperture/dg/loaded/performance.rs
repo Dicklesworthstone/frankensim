@@ -204,9 +204,19 @@ impl LoadedDgPerformance {
             self.spatial_pressures[i].as_ref().map_or(0.0, |p| p.candidate(sample)));
         // The opt-in constriction noise is a series source on the mouth side of the held blowing pressure; the held
         // pressure itself (the gesture) is untouched. Absent, the drive is the gesture's pressure bit for bit.
-        let upstream_pressure_pa = match self.constriction_noise.as_mut() {
-            Some(noise) => pressure + noise.pressure_pa(pressure, self.system.load().duct().inlet_gas().density),
-            None => pressure,
+        let noise_pa = self.constriction_noise.as_mut()
+            .map(|noise| noise.pressure_pa(pressure, self.system.load().duct().inlet_gas().density));
+        // Upstream of a player's airway the gesture pressure ALONE is the airway's far-end source and the noise is a
+        // series source at the valve (the lumped-route limit of the voice's tract); upstream of a DG tract, or of
+        // nothing, the noise joins the gesture pressure at the inlet, as before.
+        let upstream_pressure_pa = if self.system.upstream_airway().is_some() {
+            self.system.set_airway_series_pa(noise_pa.unwrap_or(0.0)).map_err(RenderError::Voice)?;
+            pressure
+        } else {
+            match noise_pa {
+                Some(noise_pa) => pressure + noise_pa,
+                None => pressure,
+            }
         };
         let drive = TubeDrive { upstream_pressure_pa, body_flow_m3_s: 0.0 };
         let frame = if let Some(gas) = &mut self.finite_gas {

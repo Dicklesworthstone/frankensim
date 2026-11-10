@@ -10,7 +10,8 @@
 //! original acoustic, branch, material-wall and terminal histories until both
 //! port-work audits and the original mechanics have succeeded.
 
-use super::{ApertureDg, ApertureDgLoad, DgApertureFrame, invalid};
+use super::upstream::UpstreamRef;
+use super::{ApertureDg, ApertureDgLoad, DgApertureFrame, UpstreamOwner, invalid};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::dynamic::ApertureDrive;
 use crate::bernoulli_aperture::paired::BladePropagator;
@@ -73,12 +74,17 @@ impl ApertureDg<LoadedAperture> {
     /// Construct the valve with series_inlet_state's gas and impedance. All
     /// original signed modes, source loads, contact and material memory remain
     /// in that valve. Inlet and outlet observers continue to observe the bore.
+    ///
+    /// The owner is an original DG tract ([`ApertureDgLoad`]) or a player's airway
+    /// ([`crate::render::player_tract::PlayerTract`]); [`UpstreamOwner::inlet_state`] resolves the gas and the
+    /// summed impedance for either.
     pub fn new_loaded_with_upstream(
         aperture: impl Into<LoadedAperture>,
-        upstream: ApertureDgLoad,
+        upstream: impl Into<UpstreamOwner>,
         load: ApertureDgLoad,
     ) -> Result<Self, AcousticRealizeError> {
-        let (gas, impedance) = series_inlet_state(&upstream, &load)?;
+        let upstream = upstream.into();
+        let (gas, impedance) = upstream.inlet_state(&load)?;
         let aperture = aperture.into();
         let (density, declared_impedance) = aperture.load();
         if aperture.accepted_steps() != 0
@@ -102,7 +108,7 @@ impl ApertureDg<LoadedAperture> {
         forces_n: [f64; 2],
         pressures_pa: [f64; 2],
     ) -> Result<DgApertureFrame, AcousticRealizeError> {
-        let upstream = self.upstream.as_mut().expect("selected upstream tract");
+        let upstream = self.upstream.as_mut().expect("selected upstream tract").as_ref_mut();
         let (mechanical, frame) = prepare_upstream_step(
             &self.aperture, upstream, &mut self.load, drive, forces_n, pressures_pa)?;
         self.aperture.accept(mechanical);
@@ -115,7 +121,7 @@ impl ApertureDg<LoadedAperture> {
 /// final publication. Finite backgrounds call this once on private load copies.
 pub(super) fn prepare_upstream_step(
     source: &LoadedAperture,
-    upstream: &mut ApertureDgLoad,
+    upstream: UpstreamRef<'_>,
     load: &mut ApertureDgLoad,
     drive: TubeDrive,
     forces_n: [f64; 2],
@@ -133,7 +139,7 @@ pub(super) fn prepare_upstream_step(
 // pressure. The source's private nonlinear trial remains its sole owner.
 pub(super) fn prepare_series_step(
     source: &LoadedAperture,
-    upstream: Option<&mut ApertureDgLoad>,
+    upstream: Option<UpstreamRef<'_>>,
     load: &mut ApertureDgLoad,
     channel: Option<&FixedChannel>,
     drive: TubeDrive,
@@ -143,14 +149,30 @@ pub(super) fn prepare_series_step(
         if !drive.upstream_pressure_pa.is_finite() || !drive.body_flow_m3_s.is_finite() {
             return Err(invalid("DG tract source pressure and body flow must be finite"));
         }
+        // An original DG tract keeps every line below as it was. A player's airway takes the same elimination
+        // with its constant series impedance and its sample's open-circuit pressure: the gesture pressure is
+        // ITS far-end source, so it is not added again, and the series source at the valve is its own.
+        let (upstream, mut airway) = match upstream {
+            Some(UpstreamRef::Dg(load)) => (Some(load), None),
+            Some(UpstreamRef::Airway { tract, series_pa }) => (None, Some((tract, series_pa))),
+            None => (None, None),
+        };
+        if airway.is_some() && channel.is_some() {
+            return Err(invalid("an airway tract with a fixed supply passage is not composed"));
+        }
         let up = upstream.as_deref().map(ApertureDgLoad::port_response).transpose()?;
         let down = load.port_response()?;
+        let air = match airway.as_mut() {
+            Some((tract, series_pa)) => Some(tract.dg_port(drive.upstream_pressure_pa, *series_pa)?),
+            None => None,
+        };
         let supply_load = channel.map(FixedChannel::pressure_load).transpose()?;
         let dt = load.propagator().dt();
-        let effective_source = match up {
-            Some(up) => drive.upstream_pressure_pa + up.history_pressure_pa
+        let effective_source = match (up, &air) {
+            (Some(up), _) => drive.upstream_pressure_pa + up.history_pressure_pa
                 + up.impedance_pa_s_m3 * drive.body_flow_m3_s,
-            None => drive.upstream_pressure_pa,
+            (None, Some(air)) => air.open_circuit_pa + air.impedance * drive.body_flow_m3_s,
+            (None, None) => drive.upstream_pressure_pa,
         };
         let effective_source = match supply_load {
             Some(supply) => effective_source + supply.history_pressure_pa
@@ -191,11 +213,16 @@ pub(super) fn prepare_series_step(
         };
         let pd = down_output.port_outputs.iter().find(|p| p.id == down_id)
             .ok_or_else(|| invalid("DG bore lost its original inlet"))?.conjugate_rate;
-        let face_pressure = drive.upstream_pressure_pa + pu;
+        let face_pressure = match &air {
+            Some(air) => air.open_circuit_pa - air.impedance * through,
+            None => drive.upstream_pressure_pa + pu,
+        };
         let face_pressure = supply.map_or(face_pressure, |supply| face_pressure - supply.pressure_drop_pa);
         let pressure_drop = face_pressure - pd;
         let up_scale = up.map_or(0.0, |up| up.history_pressure_pa.abs()
             + (up.impedance_pa_s_m3 * through).abs() + pu.abs());
+        let up_scale = up_scale + air.as_ref().map_or(0.0, |air| air.open_circuit_pa.abs()
+            + (air.impedance * through).abs());
         let supply_scale = supply_load.map_or(0.0, |supply| supply.history_pressure_pa.abs()
             + (supply.impedance_pa_s_m3 * through).abs())
             + supply.map_or(0.0, |supply| supply.pressure_drop_pa.abs());
@@ -248,7 +275,13 @@ pub(super) fn prepare_series_step(
             + down_output.ledger.cumulative_dissipated_j - down_trial.previous_cumulative_dissipated_j()
             + supply.map_or(0.0, |supply| supply.channel.viscous_dissipation_j
                 + supply.channel.numerical_dissipation_j + supply.channel.exit_work_j);
-        let upstream_work_j = drive.upstream_pressure_pa * (through * dt);
+        // A DG tract: the gesture pressure is the series source at its inlet. An airway takes the gesture
+        // pressure at its far end, so the series source is the noise at the valve; what the airway delivers
+        // is its own `delivered_work_j`.
+        let upstream_work_j = match &airway {
+            Some((_, series_pa)) => *series_pa * (through * dt),
+            None => drive.upstream_pressure_pa * (through * dt),
+        };
         let body_work_j = pd * (drive.body_flow_m3_s * dt);
         let terminal = down_trial.terminal_frame().copied();
         let terminals = down_trial.terminal_frames().to_vec();
@@ -262,6 +295,12 @@ pub(super) fn prepare_series_step(
         {
             return Err(invalid("DG tract candidate left the finite total energy/work domain"));
         }
+        // The airway's commit is the one fallible publication (its passivity certificate refuses by name); it
+        // leaves the airway as it was on a refusal, and nothing else has been published.
+        let airway_frame = match (airway, air) {
+            (Some((tract, _)), Some(port)) => Some(tract.dg_commit(port, through)?),
+            _ => None,
+        };
         // No fallible operation follows the first publication.
         let up_duct = up_trial.map(|trial| trial.accept());
         let duct = down_trial.accept();
@@ -272,6 +311,7 @@ pub(super) fn prepare_series_step(
                 upstream_face_pressure_pa: face_pressure, pressure_drop_pa: pressure_drop,
                 inlet_work_j: up_work, terminals: up_terminals, port_work_residual_j: up_defect,
             }),
+            airway: airway_frame,
             supply, terminal, terminals, stored_energy_j, storage_change_j,
             parameter_work_j: 0.0,
             inferred_total_dissipation_j, upstream_work_j, body_work_j,

@@ -6,7 +6,7 @@
 //! then advances every participant at the same accepted through-flow. No
 //! fitted inertance, hydraulic-diameter substitution or delayed pressure enters.
 
-use super::{ApertureDg, ApertureDgLoad, invalid, series_inlet_state};
+use super::{ApertureDg, ApertureDgLoad, UpstreamOwner, invalid, series_inlet_state};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::paired::BladePropagator;
 use crate::bernoulli_aperture::slit_channel::FixedChannel;
@@ -104,7 +104,7 @@ impl ApertureDg<LoadedAperture> {
         Ok(Self {
             aperture,
             load,
-            upstream,
+            upstream: upstream.map(UpstreamOwner::Dg),
             supply_channel: Some(channel),
         })
     }

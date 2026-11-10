@@ -145,6 +145,8 @@ fn folded_junction_is_the_reed_law_with_the_tract_in_series() {
             margin: None,
             mouth_pa: 0.0,
             flow_m3_s: 0.0,
+            gas,
+            ledger: AirwayLedger::default(),
         };
         let boundary = ScatteringResponse {
             direct: d,
