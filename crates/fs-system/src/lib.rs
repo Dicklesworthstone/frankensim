@@ -15,6 +15,7 @@
 //! System::step                               negotiate, solve, audit, admit, publish
 //! System::ledger                             window accounts
 //! System::checkpoint / restore               accepted-state rewind and replay
+//! System::step_adaptive                      state/account error-controlled steps
 //! ```
 //!
 //! [`elements`] holds ideal lumped elements (mass, spring, damper, force,
@@ -29,13 +30,15 @@
 //! blocks by a dense interface Newton iteration, using each component's port
 //! tangent when it offers one and a forward difference otherwise. It has no
 //! metric field transfer, no non-smooth tier, no multirate
-//! stepping, no monolithic solve through `StageResidual`, no step-size error
-//! control and no snapshot encoding. Those are beads `.5.3`, `.5.5` and
+//! stepping, no monolithic solve through `StageResidual` and no snapshot
+//! encoding. Step-doubling error control uses an explicitly supplied state
+//! norm and convergence order. The remaining work is in beads `.5.3`, `.5.5` and
 //! `.5.7` to `.5.10` of `frankensim-rc-1109-root-3gc12`.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+mod adaptive;
 #[cfg(feature = "constitutive")]
 pub mod constitutive;
 pub mod elements;
@@ -45,6 +48,7 @@ mod solve;
 mod system;
 mod wiring;
 
+pub use adaptive::{AdaptiveConfig, AdaptiveError, AdaptiveReport, ErrorNorm, ErrorTolerance};
 pub use erased::{OwnerError, StateTypeMismatch, TangentNotOffered};
 pub use ledger::Ledger;
 pub use system::{

@@ -62,7 +62,7 @@ jobs:
           rustc +nightly-2026-07-06 --version
           git rev-parse HEAD
       - name: Kernel and library elements
-        run: cargo +nightly-2026-07-06 test -p fs-system --features constitutive --lib --test system_g0 --test elements --test power_maps --test parallel_elements --test checkpoints --test constitutive --locked
+        run: cargo +nightly-2026-07-06 test -p fs-system --features constitutive --lib --test system_g0 --test elements --test power_maps --test parallel_elements --test checkpoints --test adaptive --test constitutive --locked
       - name: Devices described as data
         run: cargo +nightly-2026-07-06 test -p fs-cli --test system_command --locked
       - name: Native thermal Component

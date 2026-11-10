@@ -59,6 +59,27 @@ physics owners below fs-couple can be composed without it.
 - `System::step(dt_max, cx) -> StepReport`, `state`, `last_input`,
   `last_output`, `guess`, `plan_shape`, `time_s`, `steps`, `ledger`,
   `set_config`.
+- `System::step_adaptive(dt_max, config, metric, cx) -> AdaptiveReport`:
+  error-controlled stepping of the same coupled graph. From one checkpoint,
+  compare one coarse step to two equal half steps at the same end time. The
+  caller supplies a norm over typed states or account increments and declares
+  the least time order of the coupled method. `ErrorNorm` combines explicit
+  `ErrorTolerance { absolute, relative }` per coordinate; invalid values or
+  an empty norm refuse instead of disappearing in a maximum. Divide the
+  weighted coarse/refined difference by `2^order - 1`, accept at most one
+  tolerance unit, and retain the two audited half steps without extrapolation.
+  A shortened coarse step sets the comparison interval; a shortened half
+  discards the whole attempt and restarts from the original checkpoint.
+  Component refusals, cancellation, invalid estimates, exhausted attempts,
+  and the minimum-step/clock-resolution floor restore every accepted state,
+  warm start, clock and ledger. Discarded trials add no accepted ledger rows.
+  The report counts all completed trial solves and suggests the next step
+  using a bounded proportional controller. `System::steps` counts the two
+  accepted substeps. This is an estimated local error target, not a global
+  bound: order, covered accounts, source smoothness and event resolution
+  remain caller obligations. Source-work norms should compare interval
+  increments, so a large past account cannot hide a new error. External
+  side effects of boundary, metric or component calls cannot be rolled back.
 - `System::checkpoint() -> Result<Checkpoint, CheckpointError>` captures
   accepted typed states, interface warm starts and outputs, the exact
   compensated clock, step count, complete ledger and solve configuration.
@@ -249,6 +270,13 @@ only fs-ports and fs-exec.
 
 ## Conformance tests
 
+`tests/adaptive.rs` compares error-controlled oscillator trajectories against
+closed-form motion, checks tighter-tolerance refinement, and compares retained
+states, source clocks, warm starts and every ledger row with two explicit
+half steps after an error rejection. It also exercises a late half-step
+shortening, invalid norms, exhausted attempts, cancellation after both fine
+steps, rollback/retry, and per-coordinate tolerance scaling.
+
 `tests/checkpoints.rs` checks reusable restore/replay of a driven dissipative
 graph, source and kernel clocks, interface warm starts, every ledger field
 and solver configuration; restore after failed or cancelled trials; and
@@ -403,7 +431,8 @@ the refused calls change nothing.
 - No mapped transfer for arbitrary field duality metrics, and no gyrator as a
   connection (the `Gyrator` element is a component); no stream or field ports;
   no non-smooth tier (contact, stick-slip); no multirate stepping; no
-  monolithic solve through `StageResidual`; no step-size error control; no
+  monolithic solve through `StageResidual`; no embedded error estimator or
+  PI controller (step doubling and proportional control are available); no
   durable snapshot encoding, process restart or fork; no adjoint. These are beads `.5.2` to
   `.5.10` of the epic.
 - The interface solve is dense and re-derives the Jacobian every iteration. It
