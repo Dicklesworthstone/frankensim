@@ -6,7 +6,7 @@ use fs_topols::evaluated::DesignEvaluationStage;
 const EXAMPLE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
     "/../../examples/marquee/bracket-mesh-checked-2d.fsim"));
 fn strict() -> ElasticitySpec {
-    parse_study(&EXAMPLE.replace(":absolute-compliance-tolerance-j 0.000001", ":absolute-compliance-tolerance-j 0.00000000000001")
+    parse_study(&EXAMPLE.replace(":absolute-compliance-tolerance-j 0.000000001953125", ":absolute-compliance-tolerance-j 0.00000000000000001953125")
         .replace(":relative-compliance-tolerance 0.05", ":relative-compliance-tolerance 0.0")).unwrap()
 }
 fn gate() -> CancelGate { CancelGate::new_clock_free() }

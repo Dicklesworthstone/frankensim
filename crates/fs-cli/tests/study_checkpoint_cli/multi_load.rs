@@ -44,7 +44,7 @@ fn noncollinear_native_loads_match_independent_pde_replay_and_retained_exports()
         RobustLoadCase::new(DesignBoxEdge::Right, 0.375, 0.625, [0.5, 0.0], 1.0).unwrap(),
     ];
     let oracle = fs_topols::evaluate_robust_sampled_stress(&field(&db, &out), &cases,
-        OptimizeSettings { level: 3, youngs: 2.0, poisson: 0.3, ..OptimizeSettings::default() },
+        OptimizeSettings { level: 3, youngs: 1024.0, poisson: 0.3, ..OptimizeSettings::default() },
         RobustAggregate::WeightedSum).unwrap();
     for (i, state) in measured.iter().enumerate() {
         for (name, expected) in [("compliance_j", oracle.case_compliances[i]),

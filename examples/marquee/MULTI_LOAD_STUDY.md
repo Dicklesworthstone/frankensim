@@ -229,7 +229,7 @@ The already available single-load controlled startup/recovery path is unchanged.
 Assembly, individual area evaluations and ledger I/O are also non-preemptible.
 No hard deadline or measured peak-memory guarantee is claimed.
 
-The strict example's 2 Pa modulus, 1 Pa primary traction and 1e12 Pa stress limit
+The strict example's 1024 Pa modulus, 1 Pa primary traction and 1e12 Pa stress limit
 are a software exercise, not calibrated engineering data. Scope remains the unit
 plate with the existing unit-thickness, 2-D plane-strain convention and a left
 clamp. No arbitrary boundary conditions, 3-D physics, physical validation,

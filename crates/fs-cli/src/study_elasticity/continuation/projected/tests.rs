@@ -6,7 +6,7 @@ const POLICY: &str = "    :constraint-mode projected-stress\n    :area-tolerance
 
 fn source() -> String {
     ORIGINAL.replace(":mesh-level 5", ":mesh-level 3")
-        .replace(":youngs-modulus-pa 70000000000.0", ":youngs-modulus-pa 2.0")
+        .replace(":youngs-modulus-pa 70000000000.0", ":youngs-modulus-pa 1024.0")
         .replace(":load-traction-pa 1000000.0", ":load-traction-pa 1.0")
         .replace(":volume-fraction 0.45", ":volume-fraction 0.75")
         .replace(":max-iterations 32", ":max-iterations 2")

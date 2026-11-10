@@ -5,7 +5,7 @@ use fs_topols::evaluated::DesignEvaluationStage;
 
 const BASE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
     "/../../examples/marquee/bracket-projected-stress-2d.fsim"));
-const CHECK: &str = "    :mesh-check (refinement\n      :extra-levels 1\n      :absolute-compliance-tolerance-j 0.00000000000001\n      :relative-compliance-tolerance 0.0\n      :area-tolerance-m2 0.005)";
+const CHECK: &str = "    :mesh-check (refinement\n      :extra-levels 1\n      :absolute-compliance-tolerance-j 0.00000000000000001953125\n      :relative-compliance-tolerance 0.0\n      :area-tolerance-m2 0.005)";
 fn source() -> String {
     BASE.replace("    :stress-tolerance-pa 0.0)", &format!("    :stress-tolerance-pa 0.0\n{CHECK}\n  )"))
 }
@@ -99,7 +99,7 @@ fn stress_mesh_fine_sampling_cancellation_retains_the_seed_and_retry_matches_ful
 
 #[test]
 fn stress_mesh_candidate_cancellation_and_resume_preserve_the_real_accepted_search() {
-    let loose = source().replace(":absolute-compliance-tolerance-j 0.00000000000001", ":absolute-compliance-tolerance-j 1000000.0")
+    let loose = source().replace(":absolute-compliance-tolerance-j 0.00000000000000001953125", ":absolute-compliance-tolerance-j 1000000.0")
         .replace(":area-tolerance-m2 0.005", ":area-tolerance-m2 1.0");
     let spec = parse_study(&loose).unwrap();
     let ledger = Ledger::open(":memory:").unwrap();

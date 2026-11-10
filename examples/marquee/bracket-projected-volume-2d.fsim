@@ -28,7 +28,7 @@
   (physics
     :type elasticity-2d
     :mesh-level 3
-    :youngs-modulus-pa 2.0
+    :youngs-modulus-pa 1024.0
     :poissons-ratio 0.3)
   (scenario
     :fixed-boundary left

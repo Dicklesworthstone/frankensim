@@ -28,7 +28,7 @@
   (physics
     :type elasticity-2d
     :mesh-level 3
-    :youngs-modulus-pa 2.0
+    :youngs-modulus-pa 1024.0
     :poissons-ratio 0.3)
   (scenario
     :fixed-boundary left
@@ -71,7 +71,7 @@
     :max-level 4
     :max-rounds 2
     :max-cells 256
-    :absolute-tolerance-j 0.00000000000001
+    :absolute-tolerance-j 0.00000000000000001953125
     :relative-tolerance 0.0
     :mark-fraction 0.3)
 )

@@ -6,7 +6,7 @@ use fs_topols::robust_resolution::{MultiLoadMeshStage, MultiLoadResolutionStage}
 const EXAMPLE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
     "/../../examples/marquee/bracket-multi-load-mesh-2d.fsim"));
 fn source(strict: bool) -> String {
-    EXAMPLE.replace(":absolute-compliance-tolerance-j 0.01",
+    EXAMPLE.replace(":absolute-compliance-tolerance-j 0.00001953125",
         if strict { ":absolute-compliance-tolerance-j 1e-30" }
         else { ":absolute-compliance-tolerance-j 1000000.0" })
         .replace(":relative-compliance-tolerance 0.05", ":relative-compliance-tolerance 0.0")

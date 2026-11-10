@@ -28,7 +28,7 @@
   (physics
     :type elasticity-2d
     :mesh-level 3
-    :youngs-modulus-pa 2.0
+    :youngs-modulus-pa 1024.0
     :poissons-ratio 0.3)
   (scenario
     :fixed-boundary left
@@ -58,7 +58,7 @@
     :cg-poll-iters 1
     :mesh-check (refinement
       :extra-levels 1
-      :absolute-compliance-tolerance-j 0.000001
+      :absolute-compliance-tolerance-j 0.000000001953125
       :relative-compliance-tolerance 0.05
       :area-tolerance-m2 0.005)
   )

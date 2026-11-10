@@ -19,7 +19,7 @@ cargo run --release -p fs-cli -- --json package "$RUN_ID" ./constrained.db
 ```
 
 The example is a **software/numerical exercise**, not an engineering design.
-Its 2 Pa Young's modulus, 1 Pa traction, and deliberately loose 1e12 Pa stress
+Its 1024 Pa Young's modulus, 1 Pa traction, and deliberately loose 1e12 Pa stress
 limit are not a calibrated material or a safety recommendation. The model is
 still the native 1 m × 1 m, left-clamped, downward right-loaded plane-strain
 plate with interior circular holes and the existing unit-thickness convention.
@@ -122,7 +122,14 @@ that this example accepts a step or that a checkpoint replays successfully.
 
 ## Measured behaviour under a binding limit (2026-09-24)
 
-With this example's 2 Pa modulus and 1 Pa traction the baseline's sampled
+These were measured when the example declared a 2 Pa modulus. It declares
+1024 Pa since 2026-11-10, because 2 Pa under this traction is a strain of
+1.13, outside the material's small-strain limit, and the study refuses it.
+The stresses of this traction-loaded linear study do not depend on the
+modulus (checked 2026-11-10 at 1024 and 2048 Pa: every retained stress
+bit-identical, every compliance exactly halved).
+
+With this example's 1 Pa traction the baseline's sampled
 von Mises maximum is 1.586 Pa and the unconstrained first update reaches
 1.617 Pa, so the tracked 1e12 Pa limit never binds. Re-running with a binding
 limit over six steps: 1.59 or 1.60 Pa stops with `no-feasible-descent` and no
