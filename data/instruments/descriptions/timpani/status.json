@@ -3,9 +3,10 @@
   "family": "timpani",
   "title": "Timpani",
   "reference_instrument": "VCSL Timpani 2B one-shots, hits, velocity layers v2 to v5 (Versilian Community Sample Library, CC0); VCSL documents nothing about the drum, so the card is a measured drum of the same class, Fleischer's Kolberg Pauke Nr. 2 with kettle B, tuned to the recordings' principal",
-  "summary": "One 4 s strike of one kettle, with no head loss, a sealed and rigid kettle, and no floor or room. Its upper partials are too weak and still die too fast against a recording of another drum, and that isn't explained, so its decays bound this model only and nothing is graded. A tensioned PET head sits on Fleischer's measured kettle B, tuned so the (1,1) mode sits at the recording's principal; every other frequency follows from the physics. The kettle's air modes and an exterior load fitted from a boundary-element model act inside the same time step, and the mallet is Rhaouti, Chaigne and Joly's measured timpani mallet. Partial ratios are checked against the model's own coupled modes, not against a recording. VCSL documents nothing about its drum, so the recording locates a defect and sets no target.",
+  "summary": "One 4 s strike of one kettle, with no friction at the head's edge, a sealed and rigid kettle, and no floor or room; the head film's own loss is a curve derived for another, thinner PET film, on bending only. Its upper partials are too weak and still die too fast against a recording of another drum, and that isn't explained, so its decays bound this model only and nothing is graded. A tensioned PET head sits on Fleischer's measured kettle B, tuned so the (1,1) mode sits at the recording's principal; every other frequency follows from the physics. The kettle's air modes and an exterior load fitted from a boundary-element model act inside the same time step, and the mallet is Rhaouti, Chaigne and Joly's measured timpani mallet. Partial ratios are checked against the model's own coupled modes, not against a recording. VCSL documents nothing about its drum, so the recording locates a defect and sets no target.",
   "physics_present": [
     "Head: a tensioned PET film (Remo Weather King thickness, DuPont Mylar constants) with bending and nonlinear stretching, on Fleischer's measured kettle B",
+    "Head film loss: the PET card's tensile loss-tangent curve on each head mode's bending share only (loss tangent times bending share times angular frequency, at the mode's in-vacuo frequency); the tension's prestress carries no loss",
     "Interior air: the kettle's own pressure modes, every angular order, coupled to the head by reciprocal pressure work",
     "Exterior air: a closed-surface boundary-element model of the head and the kettle's outer wall, kept as its reciprocal part and fitted to a passive multiport load whose radiation damping and added mass act inside the same time step",
     "Mallet: Rhaouti, Chaigne and Joly's measured timpani mallet, struck in from the rim",
@@ -13,15 +14,14 @@
     "Receiver: the boundary-element model's own pressure, in free field"
   ],
   "physics_missing": [
-    "Head loss: film internal loss and bearing-edge friction are zero, because no measured loss exists for this film. Entering any would shorten every decay, so these decays bound this model only",
+    "Head loss: bearing-edge and collar friction are zero. The film's own loss is a curve derived from a low-frequency measurement of a much thinner biaxially oriented PET film, not this head; it acts on bending only, which is about a thousandth of a retained mode's stiffness at most on this simply supported head, so it barely shortens any decay and moves no partial. Entering edge friction would shorten every decay, so these decays bound this model only",
     "Upper-partial decay: part of the gap to the recording is the exterior formulation, shown in a short test against plain CBIE. It isn't all of the gap. The pole fit is the next suspect, which is a correlation and not a cause",
     "Upper-partial levels, a separate finding: weak against one hit of the recording. The cause isn't named, and the recording is another drum and mallet",
     "Head modes above the (5,1) pair are absent, so above it the only partials are the kettle's air modes heard through the head. The exterior load and the receiver are fitted over a limited band, so those lines' levels and radiation damping are extrapolations",
-    "Length and depth: the posted file is 16-bit, so the signal ends before the 4 s does",
     "The vent: the kettle is sealed",
     "Kettle, stand and counterhoop are rigid and silent",
     "Uniform tension: the degenerate pairs don't split, so there's no beating",
-    "Felt hysteresis: the mallet law is the source's hysteresis-free fit",
+    "Felt hysteresis: the mallet law is the source's hysteresis-free fit (unloading exponent equal to loading, no crush). No open source found prints a loading and unloading loop of a timpani mallet (searched 2026-11-09); the measured felt loops in open print are piano-hammer felt, another object with a rate-dependent law. The mallet's own source (Rhaouti, Chaigne and Joly 1999, J. Acoust. Soc. Am. 105(6), 3545-3562, open copy HAL hal-05707183) neglects the felt's hysteresis; Ramdane and Chaigne 1992 is unread",
     "Room: free field, no floor and no room decay",
     "Converged interior air and head mesh: both are illustrative numerical choices (u-cavity-truncation, u-head-mesh)"
   ],
