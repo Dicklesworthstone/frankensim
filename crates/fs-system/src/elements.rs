@@ -503,6 +503,106 @@ impl PortTangent for Mass {
     }
 }
 
+/// A one-port linear storage element. Port `p` receives flow, integrates it
+/// into the state `q`, and returns the step-mean effort `q / capacity`.
+/// Its stored energy is `q² / (2 capacity)`.
+///
+/// This is the dual of [`Mass`]: a compliance [m/N] in translation, a
+/// rotational compliance [rad/(N m)], or a capacitance [F] in a parallel
+/// electrical network. The state is displacement, twist or charge [C]. A
+/// common-effort junction joins this element to its parallel branches.
+#[derive(Debug, Clone)]
+pub struct Storage {
+    capacity: f64,
+    ports: [PortSpec; 1],
+}
+
+impl Storage {
+    /// A mechanical compliance `capacity` [m/N].
+    ///
+    /// # Errors
+    /// A capacity that is not positive and finite.
+    pub fn new(capacity: f64) -> Result<Self, ElementError> {
+        Self::in_domain(PortKind::MechanicalForceVelocity, capacity)
+    }
+
+    /// A linear storage law in `kind`, with capacity in units of integrated
+    /// flow per effort. In the electrical domain `capacity` is capacitance
+    /// [F], and the state is charge [C].
+    ///
+    /// # Errors
+    /// A capacity that is not positive and finite.
+    pub fn in_domain(kind: PortKind, capacity: f64) -> Result<Self, ElementError> {
+        Ok(Self {
+            capacity: positive("capacity", capacity)?,
+            ports: [port("p", Some(kind), PortRole::FlowIn)],
+        })
+    }
+}
+
+impl Component for Storage {
+    type State = f64;
+    type Error = ElementError;
+
+    fn ports(&self) -> &[PortSpec] {
+        &self.ports
+    }
+
+    fn class(&self) -> Class {
+        Class::ExactLinear
+    }
+
+    fn stored_energy_j(&self, state: &f64) -> Result<f64, ElementError> {
+        Ok(0.5 * state * (state / self.capacity))
+    }
+
+    fn propose(
+        &self,
+        old: &f64,
+        dt_s: f64,
+        inputs: &[f64],
+        new: &mut f64,
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<Proposal, ElementError> {
+        cx.checkpoint()?;
+        inputs_finite(inputs)?;
+        *new = old + dt_s * inputs[0];
+        outputs[0] = (0.5 * old + 0.5 * *new) / self.capacity;
+        let change_j = outputs[0] * (*new - old);
+        let scale =
+            self.stored_energy_j(old)?.abs() + self.stored_energy_j(new)?.abs() + change_j.abs();
+        Ok(Proposal::Step(Receipt::lossless(change_j, roundoff(scale))))
+    }
+}
+
+impl PortTangent for Storage {
+    fn jvp(
+        &self,
+        _old: &f64,
+        dt_s: f64,
+        _inputs: &[f64],
+        d_inputs: &[f64],
+        d_outputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        d_outputs[0] = 0.5 * dt_s / self.capacity * d_inputs[0];
+        Ok(())
+    }
+
+    fn vjp(
+        &self,
+        old: &f64,
+        dt_s: f64,
+        inputs: &[f64],
+        bar_outputs: &[f64],
+        bar_inputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        self.jvp(old, dt_s, inputs, bar_outputs, bar_inputs, cx)
+    }
+}
+
 /// A spring between ports `a` and `b` with force
 /// `stiffness e + cubic e^3` at extension `e` [m]. The state is the extension
 /// from the unloaded length. Each port receives a flow [m/s] and returns the
@@ -771,7 +871,133 @@ impl PortTangent for Damper {
     }
 }
 
-/// Clock and energy account of a prescribed source ([`Force`], [`Heater`]).
+/// A dissipative branch driven by an effort difference. Ports `a` and `b`
+/// receive effort and return opposite flows `g (e_a - e_b)`, positive into
+/// the branch at `a`. All absorbed power leaves through port `heat`.
+///
+/// In an electrical network the coefficient is conductance [S], the efforts
+/// are terminal voltages [V], and the flows are currents [A]. In mechanics
+/// it is a mobility [m/(N s)]. The heat port receives temperature [K], so the
+/// generated entropy is the dissipated energy divided by that temperature.
+#[derive(Debug, Clone)]
+pub struct Admittance {
+    conductance: f64,
+    ports: [PortSpec; 3],
+}
+
+impl Admittance {
+    /// A mechanical mobility `conductance` [m/(N s)].
+    ///
+    /// # Errors
+    /// A coefficient that is not positive and finite.
+    pub fn new(conductance: f64) -> Result<Self, ElementError> {
+        Self::in_domain(PortKind::MechanicalForceVelocity, conductance)
+    }
+
+    /// A dissipative branch in `kind`, with conductance in flow per effort.
+    ///
+    /// # Errors
+    /// A coefficient that is not positive and finite.
+    pub fn in_domain(kind: PortKind, conductance: f64) -> Result<Self, ElementError> {
+        Ok(Self {
+            conductance: positive("conductance", conductance)?,
+            ports: [
+                port("a", Some(kind), PortRole::EffortIn),
+                port("b", Some(kind), PortRole::EffortIn),
+                heat("heat", PortRole::EffortIn),
+            ],
+        })
+    }
+}
+
+impl Component for Admittance {
+    type State = ();
+    type Error = ElementError;
+
+    fn ports(&self) -> &[PortSpec] {
+        &self.ports
+    }
+
+    fn class(&self) -> Class {
+        Class::Smooth
+    }
+
+    fn stored_energy_j(&self, _state: &()) -> Result<f64, ElementError> {
+        Ok(0.0)
+    }
+
+    fn propose(
+        &self,
+        _old: &(),
+        dt_s: f64,
+        inputs: &[f64],
+        _new: &mut (),
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<Proposal, ElementError> {
+        cx.checkpoint()?;
+        inputs_finite(inputs)?;
+        let difference = inputs[0] - inputs[1];
+        let kelvin = temperature(inputs[2])?;
+        let flow = self.conductance * difference;
+        let loss_w = flow * difference;
+        outputs[0] = flow;
+        outputs[1] = -flow;
+        outputs[2] = -loss_w;
+        let dissipated_j = dt_s * loss_w;
+        Ok(Proposal::Step(Receipt {
+            stored_change_j: 0.0,
+            dissipated_j,
+            numerical_loss_j: 0.0,
+            entropy_generated_j_per_k: dissipated_j / kelvin,
+            energy_tolerance_j: roundoff(
+                dt_s * (flow * inputs[0]).abs() + dt_s * (flow * inputs[1]).abs() + dissipated_j,
+            ),
+            residual: 0.0,
+            tolerance: 0.0,
+        }))
+    }
+}
+
+impl PortTangent for Admittance {
+    fn jvp(
+        &self,
+        _old: &(),
+        _dt_s: f64,
+        inputs: &[f64],
+        d_inputs: &[f64],
+        d_outputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        let difference = inputs[0] - inputs[1];
+        let d_difference = d_inputs[0] - d_inputs[1];
+        d_outputs[0] = self.conductance * d_difference;
+        d_outputs[1] = -d_outputs[0];
+        d_outputs[2] = -2.0 * self.conductance * difference * d_difference;
+        Ok(())
+    }
+
+    fn vjp(
+        &self,
+        _old: &(),
+        _dt_s: f64,
+        inputs: &[f64],
+        bar_outputs: &[f64],
+        bar_inputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        let difference = inputs[0] - inputs[1];
+        let along = self.conductance * (bar_outputs[0] - bar_outputs[1])
+            - 2.0 * self.conductance * difference * bar_outputs[2];
+        bar_inputs[0] = along;
+        bar_inputs[1] = -along;
+        bar_inputs[2] = 0.0;
+        Ok(())
+    }
+}
+
+/// Clock and energy account of a prescribed source
+/// ([`Force`], [`FlowSource`], [`Heater`]).
 ///
 /// The clock is summed with the same compensation as the kernel's own, so a
 /// source started with the system reads the time a prescribed boundary
@@ -888,6 +1114,101 @@ impl Component for Force {
 }
 
 impl PortTangent for Force {
+    fn jvp(
+        &self,
+        _old: &SourceAccount,
+        _dt_s: f64,
+        _inputs: &[f64],
+        _d_inputs: &[f64],
+        d_outputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        d_outputs[0] = 0.0;
+        Ok(())
+    }
+
+    fn vjp(
+        &self,
+        _old: &SourceAccount,
+        _dt_s: f64,
+        _inputs: &[f64],
+        _bar_outputs: &[f64],
+        bar_inputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        bar_inputs[0] = 0.0;
+        Ok(())
+    }
+}
+
+/// A prescribed flow at port `p`, receiving the effort against which it acts.
+/// The output is the waveform's exact average over the step. Positive flow
+/// enters the source; an electrical current source supplying a positive
+/// current to its connected node therefore has a negative waveform.
+///
+/// Its [`SourceAccount`] stores the work received (negative when delivered),
+/// closing the energy account of a device driven through a common-effort
+/// junction. This is the dual of [`Force`].
+#[derive(Debug, Clone)]
+pub struct FlowSource {
+    flow: Waveform,
+    ports: [PortSpec; 1],
+}
+
+impl FlowSource {
+    /// A mechanical velocity source [m/s].
+    #[must_use]
+    pub fn new(flow: Waveform) -> Self {
+        Self::in_domain(PortKind::MechanicalForceVelocity, flow)
+    }
+
+    /// A source in `kind`: current [A], angular velocity [rad/s], or another
+    /// power-conjugate flow, positive into the source.
+    #[must_use]
+    pub fn in_domain(kind: PortKind, flow: Waveform) -> Self {
+        Self {
+            flow,
+            ports: [port("p", Some(kind), PortRole::EffortIn)],
+        }
+    }
+}
+
+impl Component for FlowSource {
+    type State = SourceAccount;
+    type Error = ElementError;
+
+    fn ports(&self) -> &[PortSpec] {
+        &self.ports
+    }
+
+    fn class(&self) -> Class {
+        Class::ExactLinear
+    }
+
+    fn stored_energy_j(&self, state: &SourceAccount) -> Result<f64, ElementError> {
+        Ok(state.energy_in_j)
+    }
+
+    fn propose(
+        &self,
+        old: &SourceAccount,
+        dt_s: f64,
+        inputs: &[f64],
+        new: &mut SourceAccount,
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<Proposal, ElementError> {
+        cx.checkpoint()?;
+        inputs_finite(inputs)?;
+        let flow = prescribed(&self.flow, old, dt_s)?;
+        outputs[0] = flow;
+        let (next, receipt) = source_step(old, dt_s, dt_s * inputs[0] * flow);
+        *new = next;
+        Ok(Proposal::Step(receipt))
+    }
+}
+
+impl PortTangent for FlowSource {
     fn jvp(
         &self,
         _old: &SourceAccount,

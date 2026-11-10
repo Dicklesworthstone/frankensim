@@ -17,8 +17,10 @@
 //! ```
 //!
 //! [`elements`] holds ideal lumped elements (mass, spring, damper, force,
-//! heat capacity, conductance, heater) so that a one-dimensional mechanical
-//! and thermal device can be described as data and run without code.
+//! heat capacity, conductance, heater), their power-domain variants, and the
+//! dual storage, admittance and flow source for common-effort networks.
+//! Mechanical, electrical and thermal devices can be described as data and
+//! run through the same kernel.
 //!
 //! # Version 0
 //!

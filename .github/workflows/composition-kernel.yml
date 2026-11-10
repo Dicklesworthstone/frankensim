@@ -43,9 +43,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Bootstrap the unlanded candidate; switch the default to github.sha
-          # after these focused tests pass and its source lands on main.
-          ref: ${{ inputs.candidate || 'f6568c4081e10efb29ec65e361f1f88e30ff928a' }}
+          ref: ${{ inputs.candidate || github.sha }}
           path: frankensim
           fetch-depth: 1
           persist-credentials: false
@@ -61,7 +59,7 @@ jobs:
           rustc +nightly-2026-07-06 --version
           git rev-parse HEAD
       - name: Kernel and library elements
-        run: cargo +nightly-2026-07-06 test -p fs-system --lib --test system_g0 --test elements --locked
+        run: cargo +nightly-2026-07-06 test -p fs-system --lib --test system_g0 --test elements --test power_maps --test parallel_elements --locked
       - name: Native thermal Component
         run: cargo +nightly-2026-07-06 test -p fs-thermal --test component --locked
       - name: Native mechanical and thermal slices

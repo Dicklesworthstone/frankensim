@@ -76,7 +76,7 @@ physics owners below fs-couple can be composed without it.
   `HeatCapacity` (port `heat` receives heat rate, returns the step-mean
   temperature), `Conductance` (heat ports `a`, `b`, entropy
   `G (Ta - Tb)^2 / (Ta Tb) dt`), `Heater` (Joule heater, power never
-  negative). `Force` and `Heater` keep a `SourceAccount` whose clock is a
+  negative). `Force`, `FlowSource` and `Heater` keep a `SourceAccount` whose clock is a
   compensated sum like the kernel's, so they read the time a boundary
   receives bit for bit; their stored energy is the energy that entered them
   (negative when they deliver), so a driven device closes its first law.
@@ -84,7 +84,7 @@ physics owners below fs-couple can be composed without it.
   validating constructors (parameters finite and at most 1e150 in size);
   `mean(t0, dt)` is the step average in closed form, over the interval the
   two floating-point ends span, and NaN at a time that is not finite, which
-  `Force` and `Heater` refuse.
+  `Force`, `FlowSource` and `Heater` refuse.
   `Mass`, `Spring`, `Damper` and `Force` have `in_domain(kind, ..)`
   constructors that give the same four laws in another power domain of
   `PortKind`: inertia, torsion spring, rotary damper and torque about a
@@ -97,6 +97,30 @@ physics owners below fs-couple can be composed without it.
   mass's velocity, so port `a` on mass A and `b` on mass B extend at
   `v_B - v_A` and return the force on each end. A `HeatCapacity` asks for a
   half step (`Proposal::Shorten`) instead of crossing absolute zero.
+  The dual elements support common-effort networks:
+  - `Storage::in_domain(kind, capacity)` has a flow-input port `p` and an
+    `f64` state `q`, with `q_new = q_old + dt * flow`,
+    `effort = (q_old + q_new) / (2 * capacity)`, and stored energy
+    `q^2 / (2 * capacity)`. Its default domain is mechanical compliance;
+    in the electrical domain it is the capacitor setting a parallel node's
+    voltage. Capacity is positive and finite.
+  - `Admittance::in_domain(kind, conductance)` has effort-input ports
+    `a`, `b` and a temperature-input `heat` port. It returns opposite
+    flows `conductance * (effort_a - effort_b)`, releases all absorbed
+    power as heat, and accounts for entropy `dissipation / temperature`.
+    Conductance is positive and finite. Its default is mechanical mobility;
+    electrical conductance is the reciprocal of a branch's resistance.
+  - `FlowSource::in_domain(kind, waveform)` receives effort at `p` and
+    returns the prescribed step-mean flow. Flow is positive into the source:
+    a negative electrical waveform supplies positive current to the node.
+    It shares the validated waveform and compensated clock of effort sources.
+  Each supplies analytic port JVPs and VJPs. `Storage` and `FlowSource`
+  are exact-linear; `Admittance` is smooth because its heat output is
+  quadratic. The `new` constructors use the mechanical translation domain.
+  `tests/parallel_elements.rs` checks component conformance and tangents,
+  floating capacitor nodes with parallel resistor branches, lossless LC
+  oscillation, and a driven parallel RLC circuit including source work,
+  shared heat and the total energy ledger.
 
 **One step.** (1) The step is the largest that every `limit_dt_s` and
 `next_event_s` allow. (2) Blocks are evaluated in dependency order; a block
