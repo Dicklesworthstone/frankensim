@@ -123,6 +123,11 @@ pub struct DrumSpec {
     pub provenance: &'static str,
     /// Opt-in: the heads' compact dipole radiation (`HeadDipole`). None leaves the render untouched.
     pub head_dipole: Option<HeadDipole>,
+    /// Opt-in (MB 22635), card route only: the pillow as a porous layer on each head from a
+    /// measured card (`crate::pillow`), in place of the muffle dashpot. `card_drum` drops the
+    /// dashpot when a pillow is given; `build_drum` refuses the two together. None leaves the
+    /// render untouched.
+    pub pillow: Option<crate::pillow::Pillow>,
 }
 
 /// What the build needs for the heads' compact dipole radiation (`crate::RadDipole`).
@@ -316,9 +321,16 @@ pub fn kick_with_materials(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, mat
 /// and nothing in the render models one.
 pub const KICK_PILLOW_RECEIPT: &str = "kick: pillow not modelled";
 
+/// How the kick's receipt on the card route begins when its pillow is the porous layer.
+pub const KICK_PILLOW_LAYER_RECEIPT: &str = "kick: the pillow is a porous layer on each head from a measured card (the pillow lines)";
+
 /// KICK_PILLOW_RECEIPT with what stands in for the pillow: the spec's declared
-/// muffle dashpot, if any, which is an estimate and not a pillow model.
+/// muffle dashpot, if any, which is an estimate and not a pillow model. With
+/// the pillow given (`DrumSpec::pillow`), KICK_PILLOW_LAYER_RECEIPT instead.
 pub fn kick_pillow_note(s: &DrumSpec) -> String {
+    if s.pillow.is_some() {
+        return format!("{KICK_PILLOW_LAYER_RECEIPT}; the provenance's declared muffle dashpot is off; the head tensions were set to place the lowest mode without the pillow, whose branch springs on the patch move that mode, and they are not reset for it");
+    }
     let stand_in = s.muffle.map_or_else(
         || "no muffle dashpot is declared".to_string(),
         |(_, _, radius, c)| format!("only the preset's declared muffle dashpot ({c} N s/m^3 over a {:.0} mm radius on each head, an estimate) stands in for it", radius * 1e3),
@@ -332,6 +344,15 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
     }
     if s.port.is_some_and(|radius| !radius.is_finite() || radius <= 0.0 || radius > 0.4 * s.radius) {
         return Err("drum vent radius must be positive and fit at the declared off-center opening".into());
+    }
+    if s.pillow.is_some() && s.muffle.is_some() {
+        return Err(format!("pillow: {} carries a declared muffle dashpot; the pillow replaces it, and the two are refused together", s.name));
+    }
+    if s.pillow.is_some() && materials.is_none() {
+        return Err(format!("pillow: {} needs the card route; a fitted head's T60 already lumps its loss", s.name));
+    }
+    if s.pillow.is_some() && s.name != "kick 18x18" {
+        return Err(format!("pillow: offered on the kick only, not on {:?}", s.name));
     }
     let (batter_loss, reso_loss) = match materials {
         None => (FilmLoss::FittedT60, FilmLoss::FittedT60),
@@ -420,6 +441,14 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
             for line in lines {
                 notes.push(format!("{label} {line}"));
             }
+        }
+    }
+    // The pillow after the film law and the head radiation, so their receipts read the head without it.
+    if let Some(p) = s.pillow {
+        let law = crate::pillow::fit(p)?;
+        notes.extend(law.receipt());
+        for head in [&mut batter, &mut reso] {
+            notes.push(head.attach_pillow(&law)?);
         }
     }
     let bi = ins.add(batter);
@@ -573,6 +602,7 @@ pub fn snare() -> DrumSpec {
         floor: Some(floor_z(-0.65)),
         provenance: FITTED_DRUM_RECEIPT,
         head_dipole: None,
+        pillow: None,
     }
 }
 
@@ -606,6 +636,7 @@ pub fn kick() -> DrumSpec {
         floor: Some(floor_y(-(0.221 + KICK_HOOP_RISE_M))),
         provenance: FITTED_DRUM_RECEIPT,
         head_dipole: None,
+        pillow: None,
     }
 }
 
@@ -643,6 +674,7 @@ pub fn tom(size_in: f64) -> DrumSpec {
         floor: Some(floor_z(if size_in <= 12.5 { -0.75 } else { -0.55 })),
         provenance: FITTED_DRUM_RECEIPT,
         head_dipole: None,
+        pillow: None,
     }
 }
 
@@ -734,12 +766,16 @@ pub fn card_drum(preset: &DrumSpec) -> Result<DrumSpec, String> {
         return Err(format!("card_drum: {:?} has wires of another coil than Canopus Vintage, whose strand count is the only one printed here", preset.name));
     }
     s.wires = preset.wires.map(|w| Wires { strands: crate::coil::CANOPUS_VINTAGE_STRANDS, tension: 2.0, preload_per_m: 0.25, contact: Law::Power { k: 2.0e7, alpha: 1.5, mu: 2.0 }, ..w });
+    if preset.pillow.is_some() && card_name != "kick 18x18" {
+        return Err(format!("card_drum: a pillow is offered on the kick only, not on {:?}", preset.name));
+    }
     if card_name == "kick 18x18" {
         // a felt beater face of 3 cm radius, power-law felt stiffening with compression (about
         // 5 mm of felt compression at 180 N), and the muffle dashpot against the lower part of the
-        // heads, standing in for the pillow (not modelled; KICK_PILLOW_RECEIPT)
+        // heads, standing in for the pillow (not modelled; KICK_PILLOW_RECEIPT), unless the
+        // pillow itself is given (`DrumSpec::pillow`), which replaces it
         s.striker = (0.12, Law::Power { k: 1.0e8, alpha: 2.5, mu: 0.3 }, 0.03);
-        s.muffle = preset.muffle.map(|(x, y, r, _)| (x, y, r, 25.0));
+        s.muffle = if preset.pillow.is_some() { None } else { preset.muffle.map(|(x, y, r, _)| (x, y, r, 25.0)) };
     }
     Ok(s)
 }

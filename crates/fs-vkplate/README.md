@@ -1124,6 +1124,29 @@ Their drums (`kick snare snare-off tom-12 tom-14`) are built from the sourced ca
   that no pillow is modelled (`kit::KICK_PILLOW_RECEIPT`): only the declared muffle dashpot, an
   estimate, stands in for it.
 
+`--kick-pillow pinta-fleece-foam02 --pillow-thickness M --pillow-backing rigid|air [--pillow-radius M]`
+(MB 22635; opt-in, kick only, card route) replaces that dashpot with the pillow as a porous layer on
+each head (`pillow`, `Body::attach_pillow`, `kit::KICK_PILLOW_LAYER_RECEIPT`):
+- the layer's normal surface resistance Re Zs is FOAM 02's Pinta-fleece JCAL row (`fs_material::porous`,
+  identified on a 50 mm sample) at the declared thickness, rigid-backed or backed by a half-space of
+  air, the pair that brackets a pillow's far side;
+- the fit is non-negative least squares over 40-5000 Hz, to that curve alone and never to a recording,
+  as a dashpot plus Maxwell branches on a fixed relaxation ladder (3 per decade, a decade beyond each
+  end of the band). The receipt gives the sup residual inside and outside the card's 150-1600 Hz band
+  (outside it the JCAL law is extrapolated) and names a branch kept on the ladder's end rung. A
+  relaxation ladder's resistance cannot rise with frequency, so a rigid-backed layer's rise towards
+  its quarter-wave frequency is missed by the stated residual;
+- the dashpot joins `s0` on the patch nodes exactly as the muffle dashpot does there; the branches step
+  by the film law's exact linear-ramp recursion on the patch nodes, their heat closes the discrete
+  energy, and the leapfrog admission takes their glassy springs;
+- dropped and named: the layer's own reactance (the receipt prints the card's Im Zs beside the law's),
+  the frame's motion (JCAL takes it rigid) and any pressure beyond the patch. Declared: that a pillow is
+  there, its patch (the dashpot's centre, (0, -160) mm, and its 70 mm radius unless `--pillow-radius`),
+  thickness and backing; the fleece stands in for pillow fill, a borrowed material. The head tensions
+  are not reset for the branches' springs;
+- it is refused beside the dashpot, off the kick, on the fitted route, with `--preset-heads` and by the
+  exported stepper.
+
 Their cymbals and hi-hat take `kit::DECLARED_CYMBAL_INTERFACE` (and the hi-hat
 `DECLARED_HIHAT_RIM_LAW`), and their ride is `kit::card_ride()`.
 

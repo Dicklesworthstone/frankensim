@@ -75,6 +75,9 @@ pub mod hertz;
 /// A head film's generalized-Maxwell law on a plate's bending operator, fitted to the film card's
 /// loss-tangent curve (every grid mode carries the film loss).
 pub mod film;
+/// A drum pillow as a porous layer on the heads, from a measured JCAL card: its surface resistance
+/// as a dashpot plus Maxwell branches on the patch nodes (opt-in).
+pub mod pillow;
 
 /// A cymbal struck with the stick's shaft across its edge: the shaft's effective mass and its
 /// elastic contact across the grain from the stick card.
@@ -697,6 +700,8 @@ pub struct Body {
     radiated_j: f64,
     /// The film's generalized-Maxwell law on the bending operator (`film`), if attached.
     film: Option<Box<film::FilmField>>,
+    /// A pillow's Maxwell branches on its patch nodes (`attach_pillow`), if attached.
+    pillow: Option<Box<pillow::PatchBranches>>,
     /// Whether `stiff` also holds support springs (it is then not the bending operator alone).
     support_springs: bool,
     /// Whether `s0`/`s1` hold the legacy fitted T60 surface loss, which lumps every loss path.
@@ -1114,7 +1119,7 @@ impl Body {
             name: name.into(), h, n, xy, rest_z, grid_index, mass, s0: s0v, s1, lap, stiff, viscosity, modal: None, shape_damping: None, tension: s.tension, berger, vk,
             w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![], flux_zero: vec![], flux_rows: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: true, area, air_mass: 0.0, head_radiation: None, radiated_j: 0.0,
-            film: None, support_springs: s.support.is_some(), surface_t60: s0 > 0.0 || s1 > 0.0,
+            film: None, pillow: None, support_springs: s.support.is_some(), surface_t60: s0 > 0.0 || s1 > 0.0,
         })
     }
 
@@ -1135,7 +1140,7 @@ impl Body {
             tension: tension / h, berger: 0.0, vk: None, // tension/h: the chain energy T/2 sum (dw)^2/h
             w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![], flux_zero: vec![], flux_rows: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: false, area: 0.0, air_mass: 0.0, head_radiation: None, radiated_j: 0.0,
-            film: None, support_springs: false, surface_t60: 6.907755 / t60 > 0.0,
+            film: None, pillow: None, support_springs: false, surface_t60: 6.907755 / t60 > 0.0,
         }
     }
 
@@ -1304,7 +1309,7 @@ impl Body {
             tension: 0.0, berger: 0.0, vk: None,
             w: vec![0.0], wp: vec![0.0], wn: vec![0.0], f: vec![0.0], bias: vec![0.0], tmp: vec![0.0], lw: vec![0.0], lwp: vec![0.0], g: vec![0.0], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![], flux_zero: vec![], flux_rows: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: false, area: 0.0, air_mass: 0.0, head_radiation: None, radiated_j: 0.0,
-            film: None, support_springs: false, surface_t60: false,
+            film: None, pillow: None, support_springs: false, surface_t60: false,
         }
     }
 
@@ -1498,6 +1503,69 @@ impl Body {
     /// The film law's heat in the last step [J].
     pub fn film_step_j(&self) -> f64 {
         self.film.as_deref().map_or(0.0, |f| f.last_j)
+    }
+
+    /// Put a pillow's law (`pillow::fit`) on the nodes its patch covers, by the
+    /// muffle dashpot's rule (node within the patch radius of its centre): the
+    /// law's dashpot joins `s0` there, as a muffle of that value would, and its
+    /// Maxwell branches step with the plate (`pillow`). Attaches once, before
+    /// the body steps (the update coefficients and the stability bound read it).
+    pub fn attach_pillow(&mut self, law: &pillow::PillowLaw) -> Result<String, String> {
+        if self.vk.is_some() || self.n < 2 || self.stiff.col.is_empty() {
+            return Err(format!("{}: a pillow lies on a flat plate's patch", self.name));
+        }
+        if self.surface_t60 {
+            return Err(format!("{}: a fitted T60 already lumps this head's loss; a pillow needs a head without it", self.name));
+        }
+        if self.pillow.is_some() {
+            return Err(format!("{}: a pillow attaches once", self.name));
+        }
+        if !self.cf.is_empty() {
+            return Err(format!("{}: attach a pillow before the body steps", self.name));
+        }
+        let (mx, my, mr) = law.pillow.patch;
+        let nodes: Vec<usize> = (0..self.n)
+            .filter(|&k| ((self.xy[k][0] - mx).powi(2) + (self.xy[k][1] - my).powi(2)).sqrt() <= mr)
+            .collect();
+        if nodes.is_empty() {
+            return Err(format!("{}: the pillow's patch {:?} covers no node", self.name, law.pillow.patch));
+        }
+        let branches = law.branches();
+        if branches.iter().any(|&(e, tau)| !(e.is_finite() && e > 0.0 && tau.is_finite() && tau > 0.0))
+            || !(law.r_inf.is_finite() && law.r_inf >= 0.0)
+        {
+            return Err(format!("{}: a pillow law needs a finite nonnegative dashpot and positive branches", self.name));
+        }
+        for &k in &nodes {
+            self.s0[k] += law.r_inf * self.h * self.h / (2.0 * self.mass[k]);
+        }
+        let area = self.h * self.h;
+        let line = format!(
+            "{}: pillow branches on {} nodes ({:.4} m^2), dashpot {:.1} Pa s/m and {} branches",
+            self.name,
+            nodes.len(),
+            area * nodes.len() as f64,
+            law.r_inf,
+            branches.len()
+        );
+        self.pillow = Some(Box::new(pillow::PatchBranches::new(nodes, area, &branches)));
+        Ok(line)
+    }
+
+    /// Heat a pillow's branches have dissipated [J] (closes `discrete_energy`
+    /// with the branches' storage; its dashpot, in `s0`, has no joule account).
+    pub fn pillow_heat_j(&self) -> f64 {
+        self.pillow.as_deref().map_or(0.0, |p| p.heat_j)
+    }
+
+    /// The number of nodes a pillow's patch covers (0 without one).
+    pub fn pillow_nodes(&self) -> usize {
+        self.pillow.as_deref().map_or(0, |p| p.nodes().len())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn node_s0(&self) -> &[f64] {
+        &self.s0
     }
 
     pub fn node_at(&self, x: f64, y: f64) -> Option<usize> {
@@ -1730,6 +1798,9 @@ impl Body {
             // which the admission's power iteration also calls).
             film.advance(&self.w, &self.wp, &mut self.f, k, &self.stiff);
         }
+        if let Some(pillow) = self.pillow.as_deref_mut() {
+            pillow.advance(&self.w, &self.wp, &mut self.f, k);
+        }
         if let Some(viscous) = &self.viscosity {
             for i in 0..n { self.tmp[i] = self.w[i] - self.wp[i]; }
             // Backward velocity preserves the existing diagonal contact and
@@ -1948,6 +2019,9 @@ impl Body {
         if let Some(film) = self.film.as_deref_mut() {
             film.reset();
         }
+        if let Some(pillow) = self.pillow.as_deref_mut() {
+            pillow.reset();
+        }
     }
 
     /// Largest eigenvalue of M^-1 K for the LINEAR stiffness (power iteration on the symmetric
@@ -1970,6 +2044,10 @@ impl Body {
                 for (f, s) in self.f.iter_mut().zip(&film.sw) {
                     *f -= excess * s;
                 }
+            }
+            if let Some(pillow) = self.pillow.as_deref() {
+                // A pillow's branches reach their glassy springs within a step.
+                pillow.subtract_glassy(&self.w, &mut self.f);
             }
             let y: Vec<f64> = (0..n).map(|i| -self.f[i] / self.mass[i].sqrt()).collect();
             let norm = reference_inertia::spectral_norm(&y);
@@ -2138,7 +2216,8 @@ impl Body {
     /// this correction is never reported as material heat. Centered head
     /// radiation adds positive air inertia and dissipates without that correction.
     /// Coupling/contact/source work belongs to the complete instrument balance.
-    /// With a film law it includes the branches' storage, and the law's midpoint heat is one more loss.
+    /// With a film law it includes the branches' storage, and the law's midpoint heat is one more loss;
+    /// a pillow's branches likewise (`attach_pillow`, `pillow_heat_j`).
     pub fn discrete_energy(&self, k: f64) -> f64 {
         let velocity: Vec<f64> = self.w.iter().zip(&self.wp).map(|(w, wp)| (w - wp) / k).collect();
         let mut kw = vec![0.0; self.n];
@@ -2149,7 +2228,8 @@ impl Body {
         let film = self
             .film
             .as_deref()
-            .map_or(0.0, |f| f.stored_j(&self.w, &self.wp));
+            .map_or(0.0, |f| f.stored_j(&self.w, &self.wp))
+            + self.pillow.as_deref().map_or(0.0, |p| p.stored_j(&self.w, &self.wp));
         let kinetic = self.mass.iter().zip(&velocity).map(|(m, v)| 0.5*m*v*v).sum::<f64>();
         let volume_air = if self.air_mass > 0.0 {
             let mean_velocity = self.h * self.h * velocity.iter().sum::<f64>() / self.area;
@@ -2189,6 +2269,7 @@ impl Body {
         e + 0.5 * self.tension * self.lap.quad(&mid)
             + 0.5 * bending * self.stiff.quad(&mid)
             + film
+            + self.pillow.as_deref().map_or(0.0, |p| p.elastic_j())
             + 0.5 * self.psi * self.psi
     }
 }
@@ -4734,7 +4815,8 @@ impl Instrument {
     /// exported stepper does not implement their simultaneous solve. These
     /// checks include contacts a scheduled strike may activate later. A head's
     /// measured shape damping (`Body::attach_shape_damping`) and a shell's radiation loss
-    /// (`Body::attach_shell_radiation`), which shares its form, are refused too.
+    /// (`Body::attach_shell_radiation`), which shares its form, are refused too, and so is a
+    /// pillow's branches (`Body::attach_pillow`).
     pub fn image(&mut self) -> InstrumentImage {
         assert!(self.contact_failure.is_none(), "cannot export an instrument after a refused contact step");
         assert!(self.mics.iter().all(|m| m.pressure_fraction == 1.0),
@@ -4747,6 +4829,8 @@ impl Instrument {
             "the exported stepper does not implement retained Mindlin contact memory; use Instrument::try_step");
         assert!(self.bodies.iter().all(|b| b.shape_damping.is_none()),
             "the exported stepper does not implement measured shape damping or shell radiation; use Instrument::step");
+        assert!(self.bodies.iter().all(|b| b.pillow.is_none()),
+            "the exported stepper does not implement a pillow's branches; use Instrument::step");
         assert!(self.cavities.iter().filter_map(|c| c.port.as_ref()).all(|q|
             !q.has_baffled_radiation() && q.flow_loss_coefficient() == 0.0),
             "the exported stepper does not implement nonlinear or memory vent pressure laws; use Instrument::step");

@@ -39,6 +39,13 @@
 //! full resistance block (MB 14957); the modes above take none. Without a printed shell loss it is
 //! refused (declared T60 points already lump radiation), and on the drums (their heads have their
 //! own route), the hi-hats (two shells in contact) and `--preset-heads`.
+//! `--kick-pillow pinta-fleece-foam02 --pillow-thickness M --pillow-backing rigid|air
+//! [--pillow-radius M]`, on the kick only (MB 22635), replaces the declared muffle dashpot with the
+//! pillow as a porous layer on each head (`fs_vkplate::pillow`): the layer's surface resistance from
+//! the measured JCAL card at that thickness and backing, as a dashpot plus Maxwell branches fitted
+//! to the card's curve alone, on the dashpot's patch (centre (0, -160) mm; radius 70 mm unless
+//! `--pillow-radius`). The fleece stands in for pillow fill, a borrowed material; the thickness,
+//! backing and patch are declared. It is refused on `--preset-heads`.
 //!
 //! The drums' heads and stick come from sourced material cards, and no piece keeps a value fitted
 //! to a recording (see `drum_cards`); `--preset-heads` renders the recording-fitted presets
@@ -74,6 +81,12 @@ const SHELL_LOSS_ROWS: &str = "b20|b20-low|b20-high|cusn8|cusn8-eta|cusn8-low";
 /// `--shell-radiation baffled-rayleigh`, the played shell's radiation loss on its own rest modes.
 const SHELL_RADIATION_FLAG: &str = "--shell-radiation";
 const SHELL_RADIATION_ROWS: &str = "baffled-rayleigh";
+/// Opt-in (MB 22635), kick only: `--kick-pillow CARD --pillow-thickness M --pillow-backing rigid|air
+/// [--pillow-radius M]`, the pillow as a porous layer on each head in place of the muffle dashpot.
+const KICK_PILLOW_FLAG: &str = "--kick-pillow";
+const PILLOW_THICKNESS_FLAG: &str = "--pillow-thickness";
+const PILLOW_BACKING_FLAG: &str = "--pillow-backing";
+const PILLOW_RADIUS_FLAG: &str = "--pillow-radius";
 
 fn main() {
     let preset_heads = std::env::args().any(|a| a == drum_cards::PRESET_HEADS_FLAG);
@@ -146,6 +159,28 @@ fn main() {
             std::process::exit(2)
         }
     });
+    let kick_pillow = all.iter().position(|a| a == KICK_PILLOW_FLAG).map(|i| {
+        all.get(i + 1).and_then(|s| fs_vkplate::pillow::PillowCard::parse(s)).unwrap_or_else(|| {
+            eprintln!("usage: {KICK_PILLOW_FLAG} {}", fs_vkplate::pillow::PillowCard::ROWS);
+            std::process::exit(2)
+        })
+    });
+    let pillow_thickness = port_value(PILLOW_THICKNESS_FLAG);
+    let pillow_radius = port_value(PILLOW_RADIUS_FLAG);
+    let pillow_backing = all.iter().position(|a| a == PILLOW_BACKING_FLAG).map(|i| {
+        all.get(i + 1).and_then(|s| fs_vkplate::pillow::Backing::parse(s)).unwrap_or_else(|| {
+            eprintln!("usage: {PILLOW_BACKING_FLAG} {}", fs_vkplate::pillow::Backing::ROWS);
+            std::process::exit(2)
+        })
+    });
+    if (pillow_thickness.is_some() || pillow_radius.is_some() || pillow_backing.is_some()) && kick_pillow.is_none() {
+        eprintln!("refused: {PILLOW_THICKNESS_FLAG}, {PILLOW_BACKING_FLAG} and {PILLOW_RADIUS_FLAG} describe the pillow; give {KICK_PILLOW_FLAG} CARD too");
+        std::process::exit(1)
+    }
+    if kick_pillow.is_some() && (pillow_thickness.is_none_or(|d| d <= 0.0) || pillow_backing.is_none() || pillow_radius.is_some_and(|r| r <= 0.0)) {
+        eprintln!("refused: {KICK_PILLOW_FLAG} needs {PILLOW_THICKNESS_FLAG} M > 0 and {PILLOW_BACKING_FLAG} {} (optional {PILLOW_RADIUS_FLAG} M > 0)", fs_vkplate::pillow::Backing::ROWS);
+        std::process::exit(1)
+    }
     let wall_loss = all.iter().any(|a| a == CAVITY_WALL_LOSS_FLAG);
     if wall_loss && cavity_modes.is_none() {
         eprintln!("refused: {CAVITY_WALL_LOSS_FLAG} is the loss of the air modes; give {CAVITY_MODES_FLAG} F_MAX_HZ too");
@@ -164,19 +199,23 @@ fn main() {
                 std::process::exit(1)
             })
     });
-    let valued = |i: usize| (i > 0 && (all[i - 1] == OBSERVER_FLAG || all[i - 1] == CAVITY_MODES_FLAG || all[i - 1] == WIRE_CONTACT_FLAG || all[i - 1] == PORT_FLAG || all[i - 1] == PORT_FLOW_LOSS_FLAG || all[i - 1] == HEAD_MODE_DAMPING_FLAG || all[i - 1] == SHELL_LOSS_FLAG || all[i - 1] == SHELL_RADIATION_FLAG))
+    let valued = |i: usize| (i > 0 && (all[i - 1] == OBSERVER_FLAG || all[i - 1] == CAVITY_MODES_FLAG || all[i - 1] == WIRE_CONTACT_FLAG || all[i - 1] == PORT_FLAG || all[i - 1] == PORT_FLOW_LOSS_FLAG || all[i - 1] == HEAD_MODE_DAMPING_FLAG || all[i - 1] == SHELL_LOSS_FLAG || all[i - 1] == SHELL_RADIATION_FLAG || all[i - 1] == KICK_PILLOW_FLAG || all[i - 1] == PILLOW_THICKNESS_FLAG || all[i - 1] == PILLOW_BACKING_FLAG || all[i - 1] == PILLOW_RADIUS_FLAG))
         || mic_index.is_some_and(|j| i > j && i <= j + 4);
     let a: Vec<String> = all
         .iter()
         .enumerate()
         .filter(|(i, a)| {
-            *a != drum_cards::PRESET_HEADS_FLAG && *a != OBSERVER_FLAG && *a != CAVITY_MODES_FLAG && *a != WIRE_CONTACT_FLAG && *a != CAVITY_WALL_LOSS_FLAG && *a != HEAD_DIPOLE_FLAG && *a != PORT_FLAG && *a != PORT_FLOW_LOSS_FLAG && *a != PORT_RADIATION_FLAG && *a != MIC_FIRST_ORDER_FLAG && *a != HEAD_MODE_DAMPING_FLAG && *a != SHELL_LOSS_FLAG && *a != SHELL_RADIATION_FLAG && !valued(*i)
+            *a != drum_cards::PRESET_HEADS_FLAG && *a != OBSERVER_FLAG && *a != CAVITY_MODES_FLAG && *a != WIRE_CONTACT_FLAG && *a != CAVITY_WALL_LOSS_FLAG && *a != HEAD_DIPOLE_FLAG && *a != PORT_FLAG && *a != PORT_FLOW_LOSS_FLAG && *a != PORT_RADIATION_FLAG && *a != MIC_FIRST_ORDER_FLAG && *a != HEAD_MODE_DAMPING_FLAG && *a != SHELL_LOSS_FLAG && *a != SHELL_RADIATION_FLAG && *a != KICK_PILLOW_FLAG && *a != PILLOW_THICKNESS_FLAG && *a != PILLOW_BACKING_FLAG && *a != PILLOW_RADIUS_FLAG && !valued(*i)
         })
         .map(|(_, a)| a.clone())
         .collect();
     if a.len() < 3 {
-        eprintln!("usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS] [--preset-heads] [--observer TABLE.tsv] [--port RADIUS_M [--port-flow-loss K] [--port-radiation]] [--mic-first-order ALPHA FX FY FZ] [--head-mode-damping skrodzka2006] [--shell-loss {SHELL_LOSS_ROWS} [--shell-radiation {SHELL_RADIATION_ROWS}]]");
+        eprintln!("usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS] [--preset-heads] [--observer TABLE.tsv] [--port RADIUS_M [--port-flow-loss K] [--port-radiation]] [--mic-first-order ALPHA FX FY FZ] [--head-mode-damping skrodzka2006] [--shell-loss {SHELL_LOSS_ROWS} [--shell-radiation {SHELL_RADIATION_ROWS}]] [{KICK_PILLOW_FLAG} {} {PILLOW_THICKNESS_FLAG} M {PILLOW_BACKING_FLAG} {} [{PILLOW_RADIUS_FLAG} M]]", fs_vkplate::pillow::PillowCard::ROWS, fs_vkplate::pillow::Backing::ROWS);
         std::process::exit(2);
+    }
+    if kick_pillow.is_some() && (a[1] != "kick" || preset_heads) {
+        eprintln!("refused: {KICK_PILLOW_FLAG} replaces the kick's declared muffle dashpot, offered on the kick without {} only", drum_cards::PRESET_HEADS_FLAG);
+        std::process::exit(1)
     }
     if port_radius.is_some() && (!matches!(a[1].as_str(), "kick" | "snare" | "snare-off" | "tom-12" | "tom-14") || observer.is_some()) {
         eprintln!("refused: {PORT_FLAG} needs a drum and the vent-capable Rayleigh observer; closed-body tables contain no opening");
@@ -198,10 +237,22 @@ fn main() {
     // FS_KIT_STROKE_TIMES lists a drum's strokes in seconds, comma separated, each at the same speed (a roll); unset, the one stroke at 5 ms
     let stroke_times: Vec<f64> = std::env::var("FS_KIT_STROKE_TIMES")
         .map_or_else(|_| vec![0.005], |s| s.split(',').map(|t| t.parse().expect("stroke time")).collect());
+    // --kick-pillow: on the declared dashpot's patch (its radius unless --pillow-radius); card_drum then drops the dashpot
+    let pillow = |s: &kit::DrumSpec| {
+        kick_pillow.map(|card| {
+            let Some((x, y, r, _)) = s.muffle else {
+                eprintln!("refused: {KICK_PILLOW_FLAG} lies on the preset's muffle patch, and {} declares none", s.name);
+                std::process::exit(1)
+            };
+            let (Some(thickness_m), Some(backing)) = (pillow_thickness, pillow_backing) else { unreachable!("checked above") };
+            fs_vkplate::pillow::Pillow { card, thickness_m, backing, patch: (x, y, pillow_radius.unwrap_or(r)) }
+        })
+    };
     let configure_drum = |s: kit::DrumSpec| kit::DrumSpec {
         head_dipole,
         port: port_radius.or(s.port),
         port_flow_loss: port_flow_loss.unwrap_or(s.port_flow_loss),
+        pillow: pillow(&s).or(s.pillow),
         ..s
     };
     let drum = |s: kit::DrumSpec, kick: bool, v: f64| {

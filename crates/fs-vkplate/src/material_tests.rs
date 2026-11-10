@@ -2204,6 +2204,49 @@ fn g1_the_film_card_curve_gives_each_head_mode_the_loss_tangent_at_its_own_frequ
 }
 
 #[test]
+fn g1_the_card_kick_takes_the_pillow_in_place_of_its_dashpot() {
+    use crate::pillow::{Backing, Pillow, PillowCard};
+    let film = KitMaterials::from_card_packs(HEAD_FILM, &[], HICKORY, &hickory_point(293.15).unwrap(), 9e-6, 0.005, 0.05)
+        .and_then(|m| m.with_film_loss_curve("T", "frequency", 293.15))
+        .unwrap();
+    let mut preset = kit::kick();
+    preset.grid *= 6.0;
+    let pillow = Pillow { card: PillowCard::PintaFleeceFoam02, thickness_m: 0.10, backing: Backing::Air, patch: (0.0, -0.16, 0.0766) };
+    let plain = kit::card_drum(&preset).unwrap();
+    assert_eq!(plain.muffle, Some((0.0, -0.16, 0.07, 25.0)));
+    let card = kit::card_drum(&kit::DrumSpec { pillow: Some(pillow), ..preset }).unwrap();
+    assert!(card.muffle.is_none() && card.pillow == Some(pillow), "the pillow replaces the dashpot");
+    let kick = kit::kick_with_materials(&card, &[], standard_gas(), &film).unwrap();
+    assert!(kick.notes.iter().any(|n| n.starts_with(kit::KICK_PILLOW_LAYER_RECEIPT)));
+    assert!(kick.notes.iter().any(|n| n.starts_with("pillow law: a dashpot of")));
+    assert!(kick.notes.iter().any(|n| n.starts_with("pillow, dropped and declared:")));
+    assert!(!kick.notes.iter().any(|n| n.starts_with(kit::KICK_PILLOW_RECEIPT)));
+    assert_eq!(kick.instrument.bodies.iter().filter(|b| b.pillow_nodes() > 0).count(), 2, "the pillow lies on each head");
+    // Struck, with the film law, the head radiation and the air sharing each step, the pillow's
+    // branches take heat on both heads and the output stays finite.
+    let struck = kit::kick_with_materials(&card, &[(0.002, 3.5)], standard_gas(), &film).unwrap();
+    let mut ins = struck.instrument;
+    assert!(ins.bodies.iter().filter(|b| b.pillow_nodes() > 0).all(|b| b.film_law().is_some()));
+    let mut out = vec![0.0; ins.mics.len()];
+    for _ in 0..(0.03 / ins.k()) as usize {
+        ins.step(&mut out);
+        assert!(out.iter().all(|x| x.is_finite()));
+    }
+    let heads: Vec<_> = ins.bodies.iter().filter(|b| b.pillow_nodes() > 0).collect();
+    assert!(heads.len() == 2 && heads.iter().all(|b| b.pillow_heat_j() > 0.0 && b.film_heat_j() > 0.0));
+    // Beside the dashpot, off the kick and on the fitted route, refused.
+    let both = kit::DrumSpec { pillow: Some(pillow), ..plain };
+    let error = kit::kick_with_materials(&both, &[], standard_gas(), &film).err().unwrap();
+    assert!(error.contains("refused together"), "{error}");
+    let snare = kit::card_drum(&kit::DrumSpec { pillow: Some(pillow), ..kit::snare() }).err().unwrap();
+    assert!(snare.contains("kick only"), "{snare}");
+    let direct = kit::drum_with_materials(&kit::DrumSpec { pillow: Some(pillow), muffle: None, ..kit::tom(12.0) }, &[], standard_gas(), &film).err().unwrap();
+    assert!(direct.contains("kick only"), "{direct}");
+    let fitted = kit::drum(&kit::DrumSpec { pillow: Some(pillow), muffle: None, ..preset }, &[]).err().unwrap();
+    assert!(fitted.contains("card route"), "{fitted}");
+}
+
+#[test]
 fn g1_the_crash_shaft_is_the_hickory_card_across_its_grain_on_bronze() {
     use crate::hertz::EllipticHertz;
     use crate::shaft::{
