@@ -31,6 +31,18 @@ fn channel(normal: usize, velocity: [f64; 3]) -> MixtureEuler3d {
 }
 
 fn source_with_conductivity(flow: &MixtureEuler3d, conductivity: f64) -> SpatialTransport<ConstantTransport> {
+    source_scaled_diffusion(flow, conductivity, 1.0)
+}
+
+/// `source_with_conductivity` with every binary diffusivity multiplied by `diffusion_scale`. The scale 1.0
+/// returns the same bits (`x * 1.0` is exact), so every caller that passes it is unchanged; a smaller scale
+/// lets a test see the viscous stability bound, which the species-diffusion bound (about 3e-2 here, against
+/// the viscous 6.7e-4) otherwise exceeds on every face.
+fn source_scaled_diffusion(
+    flow: &MixtureEuler3d,
+    conductivity: f64,
+    diffusion_scale: f64,
+) -> SpatialTransport<ConstantTransport> {
     let law = ConstantTransport::new(
         flow.gas().source().clone(),
         "equilibrium-mixture-sgs-wall",
@@ -46,7 +58,10 @@ fn source_with_conductivity(flow: &MixtureEuler3d, conductivity: f64) -> Spatial
             bulk_viscosity: DynViscosity::new(0.0),
             thermal_conductivity: ThermalConductivityQuantityV1::new(conductivity),
         },
-        vec![0.0, 0.01, 0.012, 0.01, 0.0, 0.013, 0.012, 0.013, 0.0],
+        [0.0, 0.01, 0.012, 0.01, 0.0, 0.013, 0.012, 0.013, 0.0]
+            .into_iter()
+            .map(|diffusivity| diffusivity * diffusion_scale)
+            .collect(),
     )
     .unwrap();
     SpatialTransport::new(flow.gas().clone(), law, || false).unwrap()
@@ -84,7 +99,19 @@ fn prepared_with_conductivity(
     kind: usize,
     conductivity: f64,
 ) -> MolecularTransport3d<ConstantTransport> {
-    let source = source_with_conductivity(flow, conductivity);
+    prepared_scaled_diffusion(flow, normal, velocity, kind, conductivity, 1.0)
+}
+
+/// `prepared_with_conductivity` on a source whose binary diffusivities are scaled (`source_scaled_diffusion`).
+fn prepared_scaled_diffusion(
+    flow: &MixtureEuler3d,
+    normal: usize,
+    velocity: [f64; 3],
+    kind: usize,
+    conductivity: f64,
+    diffusion_scale: f64,
+) -> MolecularTransport3d<ConstantTransport> {
+    let source = source_scaled_diffusion(flow, conductivity, diffusion_scale);
     match kind {
         0 => {
             let bytes =
@@ -277,20 +304,69 @@ fn equilibrium_sgs_wall_mixture_faces_preserve_species_and_native_work_for_local
         let wall_velocity = velocity.map(|u| 0.25 * u);
         let flow = channel(axis, velocity);
         let distance = 0.5 * flow.grid.spacing[axis];
-        let ratio =
-            law_of_the_wall_ratios((0.15_f64.powi(2) + 0.075_f64.powi(2)).sqrt() * distance / 1e-4)
-                .1;
-        let mut base = prepared(&flow, axis, wall_velocity, 0);
+        // The fixture's dynamic viscosity (`source_scaled_diffusion`; its bulk viscosity is 0) and density (`channel`).
+        let mu = 1e-4;
+        let rho = 0.4 + 0.6;
+        let (eddy_ratio, ratio) =
+            law_of_the_wall_ratios((0.15_f64.powi(2) + 0.075_f64.powi(2)).sqrt() * distance / mu);
+        // The claim is that attaching the wall adds its nonlinear Jacobian term, 4 (tangent - molecular) / rho, to
+        // the wall face's diffusivity and so to the stability rate. The rate is the
+        // maximum over faces; with the fixture's own binary diffusivities (0.01 to 0.013) the species-diffusion
+        // bound (about 3.4e-2) is that maximum on every face, 30 times the wall face's 1.1e-3, and no wall term
+        // can show in it. With the diffusivities scaled by 1e-3 the viscous bound is the maximum.
+        let diffusion_scale = 1e-3;
+        let scaling = 4.0 * flow.grid.spacing.iter().map(|h| h.recip().powi(2)).sum::<f64>();
+        let mut base =
+            prepared_scaled_diffusion(&flow, axis, wall_velocity, 0, 0.0, diffusion_scale);
         let base_rate = faces(&mut base, &flow).rate;
+        // The exact identity below holds only if the wall face's diffusivity before the Jacobian term is the base
+        // maximum, the viscous bound (4/3 mu + 2 |bulk - 2/3 mu| + 4 mu) / rho with bulk 0, which every face has.
+        // Roundings: three products and two sums for the bound, a division, and the scaling (three squares, two
+        // sums, a product) times it: 16 eps relative bounds them.
+        let floor = (4.0 / 3.0 * mu + 2.0 * (2.0 / 3.0 * mu) + 4.0 * mu) / rho * scaling;
+        assert!(
+            (base_rate - floor).abs() <= 16.0 * f64::EPSILON * floor,
+            "base rate {base_rate:e} is not the viscous bound {floor:e}: species diffusion still binds"
+        );
         for kind in 0..3 {
-            let mut op = prepared(&flow, axis, wall_velocity, kind);
+            let mut op = prepared_scaled_diffusion(
+                &flow,
+                axis,
+                wall_velocity,
+                kind,
+                0.0,
+                diffusion_scale,
+            );
             let bytes = op.workspace_bytes();
             for upper in [false, true] {
                 let side = BoundarySide::ALL[2 * axis + usize::from(upper)];
                 op = op.with_equilibrium_sgs_wall(side, wall_config()).unwrap();
                 assert_eq!(op.equilibrium_sgs_wall(side), Some(wall_config()));
             }
-            assert!(faces(&mut op, &flow).rate > base_rate);
+            let walled_rate = faces(&mut op, &flow).rate;
+            assert!(
+                walled_rate > base_rate,
+                "walled rate {walled_rate:e} does not exceed the base rate {base_rate:e}"
+            );
+            if kind == 0 {
+                // Smagorinsky with cs = 0 adds no eddy viscosity, so the wall face is the maximum and the walled
+                // rate is the base rate plus the wall term times the scaling. The wall term's tangent is the
+                // Jacobian of the discrete wall flux, d(secant Re)/dRe, not the interior eddy ratio: with
+                // sigma = secant, s = dy+/du+ = 1 + eddy_ratio, Re = sigma u+^2 and dRe/du+ = Re/u+ + u+ s, it is
+                // 2 sigma s / (sigma + s) (the helper's two public outputs; the operator's own tangent comes from a
+                // differently ordered Newton and agrees with it to about 3e-16 relative). Roundings: that is a
+                // sum, two products and a division; the `- 1` cancels about half of it (a factor 1.85 on its
+                // relative error), and the term is 0.41 of the rate; the operator's (bound + term) * scaling is
+                // one sum and one product, this side's base + term * scaling two products and a sum: 16 eps
+                // relative bounds them. If the wall term were dropped, the walled rate would equal the base rate
+                // and both assertions would fail.
+                let jacobian = 2.0 * ratio * (1.0 + eddy_ratio) / (ratio + 1.0 + eddy_ratio);
+                let expected = base_rate + 4.0 * mu * (jacobian - 1.0) / rho * scaling;
+                assert!(
+                    (walled_rate - expected).abs() <= 16.0 * f64::EPSILON * expected,
+                    "walled rate {walled_rate:e} against base + wall term {expected:e}"
+                );
+            }
             assert_eq!(op.workspace_bytes(), bytes);
             for upper in [false, true] {
                 let sign = if upper { 1.0 } else { -1.0 };
