@@ -31,6 +31,9 @@ impl<const B: usize> PairHistory for History<B> {
                 visitor(value)?;
             }
         }
+        // Not a physical channel: each corrector stage's source-closure bound
+        // adds over the stages as that stage's mismatch can.
+        visitor(&mut self.source_allowance_j)?;
         Ok(())
     }
 }
@@ -157,87 +160,101 @@ impl<const B: usize> SaturablePhotonRecycling<B> {
         Ok(components)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn finish(
+    /// Admits the composed emitted-source closure D of a finished history: the
+    /// mismatch, in joules, between the photons each emission path carried and
+    /// those its source's radiative events emitted.
+    ///
+    /// A midpoint history of N corrector stages k obeys three steps:
+    /// 1. D <= sum_k d_k, where d_k is the same mismatch over stage k alone.
+    ///    The history sums each stage's events and photons channel by channel,
+    ///    and |sum_k x_k| <= sum_k |x_k| (triangle inequality). D's own products
+    ///    round by about eps x their photon terms, which sum_k r_k counts four
+    ///    times over.
+    /// 2. d_k <= (1 + f) c_k + r_k. feedback() closes stage k on c_k, the same
+    ///    mismatch formed from the supplied rate x duration and the state
+    ///    energy. In exact arithmetic d_k = |supplied - actual| x the sum of
+    ///    fraction x photon energy <= (1 + f) c_k: try_new refuses a photon
+    ///    energy above its state energy (recycling.rs:208) and admits
+    ///    fractions that sum to one within f = fraction_roundoff
+    ///    (recycling.rs:223, "conditional spectra must sum to one"). The bound
+    ///    is one-sided; a Stokes shift only lowers d_k. The two are formed
+    ///    from different products, and r_k = 4 eps x the summed magnitudes of
+    ///    the terms that cancel in them (supplied and actual counts x state
+    ///    energy, emitted and incident photons x photon energy) bounds that
+    ///    rounding.
+    /// 3. c_k <= a_k = 0.0625 x tolerance x S_k, the stage's own admission in
+    ///    feedback(), with S_k the stage's external scale: the storage at its
+    ///    start, its external supply and its local absorption.
+    ///
+    /// So D <= sum_k (a_k + r_k + f c_k), the sum the history carries. N enters
+    /// because every S_k counts the storage present at the start of stage k
+    /// again: sum_k a_k grows with N, while tolerance x S of the whole step does
+    /// not. Past about 1 / 0.0625 = 16 stages of similar storage, a history
+    /// whose every stage closed can exceed the single-step value, so D is
+    /// admitted against the larger of the single-step value and the carried
+    /// sum. A stationary or zero-duration history carries zero.
+    pub(super) fn admit_composed_source(
         &self,
         initial: &[[f64; 3]],
-        mut history: History<B>,
-        substeps: usize,
-        cell_evaluations: usize,
-        coupling_iterations: usize,
-        feedback_iterations: usize,
-        max_energy_discrepancy_j: f64,
+        history: &History<B>,
         tolerance: f64,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<SaturableRecyclingStep<B>, SingletTripletError> {
-        self.audit_history(initial, &mut history, tolerance, cancelled)?;
-        let cells = self.models().len();
-        let mut source_heat = vec![[Sum::default(); 2]; cells];
-        let mut emitted = vec![[Sum::default(); 2]; cells];
-        let mut escaped = vec![[Sum::default(); 2]; cells];
-        let mut unresolved = vec![[Sum::default(); 2]; cells];
-        let mut source_discrepancy = Sum::default();
+    ) -> Result<(), SingletTripletError> {
+        let mut discrepancy = Sum::default();
         for (path, photons) in self
             .emission
             .iter()
             .zip(&history.beams.beams[self.external_paths..])
         {
             poll(cancelled)?;
-            let c = path.source_cell;
-            let s = path.source_state;
-            let state_energy = self.models()[c].excitation_energies_j()[s];
             for lane in 0..B {
                 let count = positive_product(
-                    history.beams.cells[c].radiative_events[s],
+                    history.beams.cells[path.source_cell].radiative_events[path.source_state],
                     path.photon_fractions[lane],
                     "emitted spectral photons",
                 )?;
-                let photon_energy = path.path.photon_energies_j[lane];
-                emitted[c][s].add(positive_product(
-                    count,
-                    photon_energy,
-                    "emitted spectral energy",
-                )?)?;
-                if path.photon_fractions[lane] > 0.0 {
-                    source_heat[c][s].add(positive_product(
-                        count,
-                        state_energy - photon_energy,
-                        "source Stokes heat",
-                    )?)?;
-                }
-                source_discrepancy.add(positive_product(
+                discrepancy.add(positive_product(
                     (count - photons.incident_photons[lane]).abs(),
-                    photon_energy,
+                    path.path.photon_energies_j[lane],
                     "integrated emitted source mismatch",
                 )?)?;
-                let target = match path.terminal {
-                    EmissionTerminal::Escape => &mut escaped[c][s],
-                    EmissionTerminal::Unresolved => &mut unresolved[c][s],
-                };
-                target.add(photons.transmitted_energy_j[lane])?;
             }
         }
-        admit_energy(
-            source_discrepancy.value()?,
-            self.external_scale(initial, &history.beams)?,
-            tolerance,
-        )?;
-        let source_relaxation_heat_j = source_heat
-            .into_iter()
-            .map(values)
-            .collect::<Result<Vec<_>, _>>()?;
-        let emitted_energy_j = emitted
-            .into_iter()
-            .map(values)
-            .collect::<Result<Vec<_>, _>>()?;
-        let escaped_energy_j = escaped
-            .into_iter()
-            .map(values)
-            .collect::<Result<Vec<_>, _>>()?;
-        let unresolved_energy_j = unresolved
-            .into_iter()
-            .map(values)
-            .collect::<Result<Vec<_>, _>>()?;
+        let discrepancy_j = discrepancy.value()?;
+        let allowance_j = (tolerance * self.external_scale(initial, &history.beams)?)
+            .max(history.source_allowance_j);
+        if discrepancy_j.abs() > allowance_j {
+            return Err(SingletTripletError::EnergyBalance {
+                residual_j: discrepancy_j,
+                allowance_j,
+            });
+        }
+        Ok(())
+    }
+
+    /// Admits the total energy balance of a finished history and returns its
+    /// residual, in joules, as computed.
+    ///
+    /// residual = R + M. Each emitting cell loses count x photon energy beyond
+    /// its Stokes heat, while its emission paths deliver incident photons x
+    /// photon energy, so the balance holds M, the signed source mismatch: the
+    /// terms of D without their magnitudes. |M| <= D <= the carried sum, by the
+    /// chain in admit_composed_source(). R is the rest of the balance, which
+    /// the single-step value tolerance x scale has always admitted. R and M
+    /// add, so the allowance is the single-step value plus the carried sum,
+    /// not the larger of the two. A stationary or zero-duration history
+    /// carries zero, and its allowance is the single-step value.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn admit_total_balance(
+        &self,
+        initial: &[[f64; 3]],
+        history: &History<B>,
+        source_relaxation_heat_j: &[[f64; 2]],
+        escaped_energy_j: &[[f64; 2]],
+        unresolved_energy_j: &[[f64; 2]],
+        tolerance: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64, SingletTripletError> {
         let mut residual = Sum::default();
         let mut scale = Sum::default();
         for local in &history.beams.local_pumps {
@@ -288,7 +305,96 @@ impl<const B: usize> SaturablePhotonRecycling<B> {
             }
         }
         let residual_j = residual.value()?;
-        admit_energy(residual_j, scale.value()?, tolerance)?;
+        let allowance_j = tolerance * scale.value()? + history.source_allowance_j;
+        if residual_j.abs() > allowance_j {
+            return Err(SingletTripletError::EnergyBalance {
+                residual_j,
+                allowance_j,
+            });
+        }
+        Ok(residual_j)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn finish(
+        &self,
+        initial: &[[f64; 3]],
+        mut history: History<B>,
+        substeps: usize,
+        cell_evaluations: usize,
+        coupling_iterations: usize,
+        feedback_iterations: usize,
+        max_energy_discrepancy_j: f64,
+        tolerance: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SaturableRecyclingStep<B>, SingletTripletError> {
+        self.audit_history(initial, &mut history, tolerance, cancelled)?;
+        let cells = self.models().len();
+        let mut source_heat = vec![[Sum::default(); 2]; cells];
+        let mut emitted = vec![[Sum::default(); 2]; cells];
+        let mut escaped = vec![[Sum::default(); 2]; cells];
+        let mut unresolved = vec![[Sum::default(); 2]; cells];
+        for (path, photons) in self
+            .emission
+            .iter()
+            .zip(&history.beams.beams[self.external_paths..])
+        {
+            poll(cancelled)?;
+            let c = path.source_cell;
+            let s = path.source_state;
+            let state_energy = self.models()[c].excitation_energies_j()[s];
+            for lane in 0..B {
+                let count = positive_product(
+                    history.beams.cells[c].radiative_events[s],
+                    path.photon_fractions[lane],
+                    "emitted spectral photons",
+                )?;
+                let photon_energy = path.path.photon_energies_j[lane];
+                emitted[c][s].add(positive_product(
+                    count,
+                    photon_energy,
+                    "emitted spectral energy",
+                )?)?;
+                if path.photon_fractions[lane] > 0.0 {
+                    source_heat[c][s].add(positive_product(
+                        count,
+                        state_energy - photon_energy,
+                        "source Stokes heat",
+                    )?)?;
+                }
+                let target = match path.terminal {
+                    EmissionTerminal::Escape => &mut escaped[c][s],
+                    EmissionTerminal::Unresolved => &mut unresolved[c][s],
+                };
+                target.add(photons.transmitted_energy_j[lane])?;
+            }
+        }
+        self.admit_composed_source(initial, &history, tolerance, cancelled)?;
+        let source_relaxation_heat_j = source_heat
+            .into_iter()
+            .map(values)
+            .collect::<Result<Vec<_>, _>>()?;
+        let emitted_energy_j = emitted
+            .into_iter()
+            .map(values)
+            .collect::<Result<Vec<_>, _>>()?;
+        let escaped_energy_j = escaped
+            .into_iter()
+            .map(values)
+            .collect::<Result<Vec<_>, _>>()?;
+        let unresolved_energy_j = unresolved
+            .into_iter()
+            .map(values)
+            .collect::<Result<Vec<_>, _>>()?;
+        let residual_j = self.admit_total_balance(
+            initial,
+            &history,
+            &source_relaxation_heat_j,
+            &escaped_energy_j,
+            &unresolved_energy_j,
+            tolerance,
+            cancelled,
+        )?;
         let emission_paths = history.beams.beams.split_off(self.external_paths);
         poll(cancelled)?;
         Ok(SaturableRecyclingStep {

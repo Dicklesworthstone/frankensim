@@ -100,6 +100,7 @@ impl<const B: usize> SaturablePhotonRecycling<B> {
                 .into_iter()
                 .map(|v| v.value())
                 .collect::<Result<_, _>>()?,
+            source_allowance_j: 0.0,
         }))
     }
 
@@ -198,7 +199,7 @@ impl<const B: usize> SaturablePhotonRecycling<B> {
                 }
                 incident.push(lanes);
             }
-            let Some(history) = self.frozen_history(
+            let Some(mut history) = self.frozen_history(
                 frozen,
                 initial,
                 &incident,
@@ -215,6 +216,10 @@ impl<const B: usize> SaturablePhotonRecycling<B> {
             let mut residual = Vec::with_capacity(n);
             let mut norm = 0.0_f64;
             let mut closure_energy = Sum::default();
+            // Magnitudes of the terms that cancel in this stage's closure c_k
+            // and in its composed-source mismatch d_k; they bound the rounding
+            // between the two (admit_composed_source() states the chain).
+            let mut cancelling = Sum::default();
             for (index, source) in sources.iter().enumerate() {
                 let scale = positive_product(source.upper_rate, duration, "radiative count bound")?;
                 let actual = history.beams.cells[source.cell].radiative_events[source.state];
@@ -226,6 +231,13 @@ impl<const B: usize> SaturablePhotonRecycling<B> {
                     self.models()[source.cell].excitation_energies_j()[source.state],
                     "radiative closure energy",
                 )?)?;
+                for count in [supplied, actual] {
+                    cancelling.add(positive_product(
+                        count,
+                        self.models()[source.cell].excitation_energies_j()[source.state],
+                        "closure rounding term",
+                    )?)?;
+                }
                 let f = difference / scale;
                 if !f.is_finite() {
                     return Err(SingletTripletError::Unrepresentable(
@@ -235,12 +247,42 @@ impl<const B: usize> SaturablePhotonRecycling<B> {
                 norm = norm.max(f.abs());
                 residual.push(f);
             }
+            for (path, beam) in self
+                .emission
+                .iter()
+                .zip(&history.beams.beams[self.external_paths..])
+            {
+                let events =
+                    history.beams.cells[path.source_cell].radiative_events[path.source_state];
+                for lane in 0..B {
+                    let count = positive_product(
+                        events,
+                        path.photon_fractions[lane],
+                        "emitted closure photons",
+                    )?;
+                    for photons in [count, beam.incident_photons[lane]] {
+                        cancelling.add(positive_product(
+                            photons,
+                            path.path.photon_energies_j[lane],
+                            "closure rounding term",
+                        )?)?;
+                    }
+                }
+            }
             // Gross radiative traffic NEVER enlarges this source tolerance.
             // Only actual initial storage, external supply and bath exchange
             // can pay for an unresolved internal photon mismatch.
             let scale = self.external_scale(initial, &history.beams)?;
             let allowance = 0.0625 * limits.pump.column.kinetic.relative_tolerance * scale;
             let consistent = closure_energy.value()? <= allowance;
+            // A returned trial carries a_k + r_k + f c_k: the allowance it
+            // closed to, r_k = 4 eps x the cancelling magnitudes above, and
+            // fraction_roundoff x its closure (admit_composed_source() derives
+            // both). Neither extra term enters the admission just above. A
+            // midpoint history sums all three over its corrector stages.
+            history.source_allowance_j = allowance
+                + 4.0 * f64::EPSILON * cancelling.value()?
+                + self.fraction_roundoff * closure_energy.value()?;
             Ok(Some(Trial {
                 history,
                 residual,

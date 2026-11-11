@@ -9,7 +9,8 @@ use super::*;
 pub(crate) trait PairHistory {
     fn populations(&self) -> Vec<[f64; 3]>;
 
-    /// Integrated physical channels only: never endpoint stores or residuals.
+    /// Integrated physical channels, and per-stage allowances that add over
+    /// stages as those channels do, only: never endpoint stores or residuals.
     fn visit_integrated(
         &mut self,
         visitor: &mut impl FnMut(&mut f64) -> Result<(), SingletTripletError>,

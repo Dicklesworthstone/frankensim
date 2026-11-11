@@ -380,6 +380,7 @@ impl<const B: usize> SaturablePhotonRecycling<B> {
                 .into_iter()
                 .map(|v| v.value())
                 .collect::<Result<_, _>>()?,
+            source_allowance_j: 0.0,
         }))
     }
 }

@@ -124,6 +124,14 @@ struct History<const B: usize> {
     recycled_relaxation: Vec<[f64; 2]>,
     external_passive: Vec<f64>,
     recycled_passive: Vec<f64>,
+    /// Composed source-closure bound this history carries, in joules: for each
+    /// accepted feedback stage, the allowance it closed to plus that stage's
+    /// rounding and fraction terms, summed over the corrector stages of a
+    /// midpoint history. Zero for a stationary or zero-duration history.
+    /// admit_composed_source() states the bound; finish() adds it to the
+    /// single-step allowance of the total balance, which holds the signed
+    /// source mismatch.
+    source_allowance_j: f64,
 }
 
 impl<const B: usize> SaturablePhotonRecycling<B> {

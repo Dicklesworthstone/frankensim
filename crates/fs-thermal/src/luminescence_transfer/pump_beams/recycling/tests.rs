@@ -560,3 +560,158 @@ fn g1_sixty_five_radiating_cells_recycle_a_nonstationary_ring_on_original_invent
         step.residual_j,
     );
 }
+
+/// One singlet cell of excitation energy `energy` that radiates on one
+/// escaping emission path of the same photon energy (no Stokes shift).
+fn planted_network(energy: f64) -> SaturablePhotonRecycling<1> {
+    prepare(
+        &[model(energy, 1e3)],
+        &[],
+        &[emission(
+            0,
+            SaturablePumpPath {
+                photon_energies_j: [energy],
+                segments: vec![],
+            },
+        )],
+    )
+}
+
+/// A history of planted_network() built directly, not computed: from a full
+/// singlet, `events` radiative events, `incident` photons carried on the
+/// emission path and escaped whole, and the carried bound `bound`.
+fn planted_history(energy: f64, events: f64, incident: f64, bound: f64) -> History<1> {
+    let cell = SaturableSingletTripletStep {
+        populations: [events, 1.0 - events, 0.0],
+        pump_events: [0.0; 2],
+        absorbed_pump_energy_j: [0.0; 2],
+        pump_relaxation_heat_j: [0.0; 2],
+        radiative_events: [events, 0.0],
+        nonradiative_events: [0.0; 2],
+        crossing_events: [0.0; 2],
+        stored_energy_j: [(1.0 - events) * energy, 0.0],
+        radiative_decay_energy_j: [events * energy, 0.0],
+        nonradiative_heat_j: [0.0; 2],
+        crossing_heat_j: 0.0,
+        reverse_crossing_heat_absorbed_j: 0.0,
+        annihilation_events: 0.0,
+        annihilation_singlets: 0.0,
+        annihilation_heat_j: 0.0,
+        population_residual: 0.0,
+        residual_j: 0.0,
+    };
+    let beam = PumpBeamStep {
+        incident_photons: [incident],
+        transmitted_photons: [incident],
+        absorbed_photons: [0.0],
+        passive_absorbed_photons: [0.0],
+        incident_energy_j: [incident * energy],
+        transmitted_energy_j: [incident * energy],
+        absorbed_energy_j: [0.0],
+        passive_absorbed_energy_j: [0.0],
+        photon_residual: [0.0],
+    };
+    History {
+        beams: PumpBeamsStep {
+            cells: vec![cell],
+            passive_heat_j: vec![0.0],
+            beams: vec![beam],
+            local_pumps: vec![],
+            residual_j: 0.0,
+            substeps: 1,
+            cell_evaluations: 0,
+            coupling_iterations: 0,
+            max_energy_discrepancy_j: 0.0,
+        },
+        external_absorbed: vec![[0.0; 2]],
+        recycled_absorbed: vec![[0.0; 2]],
+        external_events: vec![[0.0; 2]],
+        recycled_events: vec![[0.0; 2]],
+        external_relaxation: vec![[0.0; 2]],
+        recycled_relaxation: vec![[0.0; 2]],
+        external_passive: vec![0.0],
+        recycled_passive: vec![0.0],
+        source_allowance_j: bound,
+    }
+}
+
+/// Planted negative for the composed source closure. The History is built
+/// directly, not computed: one singlet cell whose directly outgoing emission
+/// path carried more photons than its radiative events emitted. A composed
+/// mismatch 10 % over the bound the history carries is refused with exactly
+/// that residual and that bound; the same mismatch under the bound passes.
+#[test]
+fn g4_composed_source_closure_refuses_ten_percent_over_the_carried_bound() {
+    let energy = 2e-19;
+    let network = planted_network(energy);
+    let events = 0.5;
+    let incident = 0.5 * (1.0 + 1e-9);
+    let history = |bound: f64| planted_history(energy, events, incident, bound);
+    let initial = [[0.0, 1.0, 0.0]];
+    let tolerance = 1e-12;
+    let mismatch = (events - incident).abs() * energy;
+    let over = mismatch / 1.1;
+    // The single-step value (tolerance x the initial singlet storage) stays
+    // below the carried bound, so the carried bound is the one tested.
+    assert!(tolerance * energy < over);
+    match network.admit_composed_source(&initial, &history(over), tolerance, &mut || false) {
+        Err(SingletTripletError::EnergyBalance {
+            residual_j,
+            allowance_j,
+        }) => {
+            assert_eq!(residual_j, mismatch);
+            assert_eq!(allowance_j, over);
+        }
+        other => panic!("expected the composed source refusal, got {other:?}"),
+    }
+    network
+        .admit_composed_source(&initial, &history(mismatch / 0.9), tolerance, &mut || false)
+        .unwrap();
+}
+
+/// Planted negative for the total energy balance. The History is built
+/// directly, not computed: the planted cell with no source mismatch, whose
+/// escaped energy exceeds what it emitted by `excess`. Every term is a power
+/// of two times the photon energy 2^-62 J, so the balance and its scale are
+/// exact. A balance 10 % over tolerance x scale + the carried bound is refused
+/// with exactly that residual and that allowance. The same balance under the
+/// sum is admitted, although the single-step value alone would refuse it.
+#[test]
+fn g4_total_balance_refuses_ten_percent_over_the_single_step_value_plus_the_carried_bound() {
+    let energy = 0.5_f64.powi(62);
+    let network = planted_network(energy);
+    let events = 0.5;
+    let excess = energy * 0.5_f64.powi(36);
+    let initial = [[0.0, 1.0, 0.0]];
+    let tolerance = 1e-12;
+    let source_relaxation = [[0.0; 2]];
+    let escaped = [[events * energy + excess, 0.0]];
+    let unresolved = [[0.0; 2]];
+    // The scale's nonzero terms: the initial singlet, the stored remainder and
+    // the escaped energy.
+    let single = tolerance * (2.0 * energy + excess);
+    let over = excess / 1.1 - single;
+    assert!(0.0 < over && single < excess);
+    let balance = |bound: f64| {
+        network.admit_total_balance(
+            &initial,
+            &planted_history(energy, events, events, bound),
+            &source_relaxation,
+            &escaped,
+            &unresolved,
+            tolerance,
+            &mut || false,
+        )
+    };
+    match balance(over) {
+        Err(SingletTripletError::EnergyBalance {
+            residual_j,
+            allowance_j,
+        }) => {
+            assert_eq!(residual_j, -excess);
+            assert_eq!(allowance_j, single + over);
+        }
+        other => panic!("expected the total balance refusal, got {other:?}"),
+    }
+    assert_eq!(balance(excess / 0.9 - single).unwrap(), -excess);
+}
