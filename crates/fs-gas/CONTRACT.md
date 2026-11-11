@@ -10138,6 +10138,27 @@ Its trajectory is compared with an independent adiabatic ODE and checked for
 time refinement and combined energy closure. They were written without being
 compiled; they first compiled and ran on 2026-11-11 (233aa70285) and pass.
 
+A single-acting piston about its rest volume (the cavity on one face of a
+1 kg mass of 0.01 m2, a constant force `p0 A` on the other, no heat) is
+compared with the closed form of the adiabatic gas spring,
+`omega0^2 = gamma p A^2 / (m V)`, with `gamma` and `p` read from the parcel:
+118.3216 rad/s. The frequency is taken over four periods from the zeros of
+the wall's velocity. What the assertion allows is derived before the run and
+none of it is measured: the amplitude moves the frequency by
+`-(gamma + 1)(2 gamma - 1) / 48 (a / l)^2`, 6.4e-8 at `a / l` = 8.5e-4 (the
+cubic expansion of the adiabat and the second-order frequency of an
+anharmonic oscillator; twice it is allowed); a straight line through two
+samples misses a zero by at most `0.0161 dt (omega dt)^2`; together 1.6e-7 of
+`omega0`. The step's own phase error is second order: linearised about rest
+the cavity's discrete-gradient pressure is the pressure at the mean volume
+and the mass's rule is the midpoint rule, whose frequency is
+`(2 / dt) atan(omega0 dt / 2)`, a lag of 7.3e-5 at `dt` = 0.25 ms. Measured:
+the graph is 7.294e-5 below `omega0` and 3.4e-8 from the midpoint rule's
+frequency; at half the step 6.2e-8 from it; the ratio of the two lags is
+3.988 (allowed 4 +- 0.045). The ledger residual over 903 and 1,806 steps is
+1.9e-13 J and 4.0e-13 J, against the owner's own tolerance summed over the
+steps (7.6e-8 J and 1.5e-7 J) and a motion of 5e-5 J.
+
 This is spatially uniform ideal gas, not a reacting volume, nonideal parcel or
 wave solver. The cavity does not know its mechanical partner's mass or piston
 area and cannot enforce the native piston's coupled acoustic-frequency

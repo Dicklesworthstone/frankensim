@@ -18,7 +18,7 @@ use fs_ports::component::conformance::{Case, Observed, check_component, check_po
 use fs_ports::component::{Class, Component, PortTangent, Proposal};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{DynViscosity, MolarMass, Pressure, QuantitySpec};
-use fs_system::elements::{Mass, Motion, Restriction};
+use fs_system::elements::{Force, Mass, Motion, Restriction, SourceAccount, Waveform};
 use fs_system::{SolveConfig, SystemBuilder};
 use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
 use fs_thermochem::{
@@ -348,6 +348,152 @@ fn generic_vacuum_piston_refines_to_the_independent_adiabatic_ode() {
     };
     assert!(norm(fine) < 0.3 * norm(coarse), "coarse {}, fine {}", norm(coarse), norm(fine));
     assert!(norm(fine) < 2.0e-5, "fine error {}", norm(fine));
+}
+
+const PISTON_KG: f64 = 1.0;
+const PISTON_M2: f64 = 0.01;
+
+/// A single-acting piston about its rest volume, from a graph: the gas on
+/// one face of a mass, a constant force `P0 * area` on the other, an
+/// insulated wall. It starts at rest volume moving outward at `rate_m_s`.
+/// Returns the angular frequency [rad/s] over `periods` periods, from the
+/// times at which the mass's velocity passes through zero going down, each
+/// found by a straight line between the two steps around it.
+fn piston_frequency(dt: f64, rate_m_s: f64, periods: usize) -> f64 {
+    let gas = parcel(0.0, 0.0);
+    let gas_kg = gas.mass_kg();
+    let mut builder = SystemBuilder::new();
+    let body = builder.add_with_tangent(
+        "piston", Mass::new(PISTON_KG).unwrap(),
+        Motion { position_m: V0 / PISTON_M2, velocity_m_s: rate_m_s },
+    ).unwrap();
+    let cavity = builder.add_with_tangent(
+        "gas", GasCavity::new(gas.clone(), controls()).unwrap(), gas,
+    ).unwrap();
+    let outside = builder.add_with_tangent(
+        "outside", Force::new(Waveform::constant(-P0 * PISTON_M2).unwrap()), SourceAccount::default(),
+    ).unwrap();
+    // The mass sets the velocity; the gas sees it through the area, the
+    // outside force directly.
+    builder.common_flow_ratios(
+        builder.port(body, "p").unwrap(),
+        &[(builder.port(cavity, "p").unwrap(), PISTON_M2), (builder.port(outside, "p").unwrap(), 1.0)],
+    ).unwrap();
+    builder.boundary(
+        builder.port(cavity, "heat").unwrap(), Box::new(|_, _, values| values[0] = 0.0),
+    ).unwrap();
+    let mut system = builder.seal().unwrap();
+    system.set_config(SolveConfig { relative_tolerance: 1.0e-11, ..SolveConfig::default() });
+    let mut crossings = Vec::new();
+    let mut before = rate_m_s;
+    let mut steps = 0_u32;
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        while crossings.len() <= periods {
+            system.step(dt, cx).unwrap();
+            let after = system.state::<Motion>(body).unwrap().velocity_m_s;
+            if before > 0.0 && after <= 0.0 {
+                crossings.push(dt * (f64::from(steps) + before / (before - after)));
+            }
+            before = after;
+            steps += 1;
+            assert!(steps < 100_000, "no oscillation");
+        }
+    });
+    let omega = core::f64::consts::TAU * periods as f64 / (crossings[periods] - crossings[0]);
+    // The gas owner may leave its energy tolerance per kilogram unaccounted
+    // in each step, and nothing else may be lost. The motion's whole energy
+    // is m v^2 / 2 = 5e-5 J.
+    let ledger_j = system.ledger().energy_residual_j();
+    let budget_j = f64::from(steps) * gas_kg * controls().energy_tolerance_j_kg;
+    eprintln!(
+        "piston, dt {dt:e} s: {steps} steps, omega {omega:.12} rad/s, \
+         ledger residual {ledger_j:.3e} J (budget {budget_j:.3e} J)"
+    );
+    close(ledger_j, 0.0, budget_j);
+    omega
+}
+
+#[test]
+fn a_small_oscillation_about_rest_has_the_frequency_of_the_adiabatic_gas_spring() {
+    // omega0^2 = gamma p A^2 / (m V), with gamma and p from the parcel at
+    // its state point.
+    let state = *parcel(0.0, 0.0).state().state();
+    let gamma = state.gamma;
+    close(gamma, 1.4, 1.0e-12);
+    let omega0 = (gamma * state.pressure * PISTON_M2 * PISTON_M2 / (PISTON_KG * V0)).sqrt();
+    let (dt, rate, periods) = (2.5e-4, 0.01, 4_usize);
+
+    // What the assertion has to allow, each from its expansion.
+    //
+    // The amplitude. With x the displacement and l = V / A, the force is
+    // p A ((1 + x / l)^-gamma - 1), so
+    //   x'' + omega0^2 x = -alpha x^2 - beta x^3,
+    //   alpha = -omega0^2 (gamma + 1) / (2 l),
+    //   beta = omega0^2 (gamma + 1) (gamma + 2) / (6 l^2),
+    // and to second order in the amplitude a the frequency moves by
+    //   (3 beta / (8 omega0) - 5 alpha^2 / (12 omega0^3)) a^2
+    //     = -omega0 (gamma + 1) (2 gamma - 1) / 48 * (a / l)^2
+    // (Landau and Lifshitz, Mechanics, section 28). Here a = rate / omega0
+    // and a / l = 8.5e-4, so that is 6.4e-8 of omega0; twice it is allowed,
+    // for the orders above.
+    let swing = rate / omega0 * PISTON_M2 / V0;
+    let amplitude = 2.0 * (gamma + 1.0) * (2.0 * gamma - 1.0) / 48.0 * swing * swing;
+    // The crossing times. A straight line through two samples of a sine a
+    // fraction s and 1 - s of a step either side of its zero misses the
+    // zero by dt (omega dt)^2 s (1 - s) (1 - 2 s) / 6, at most
+    // 0.0161 dt (omega dt)^2. The velocity is odd about each of its zeros
+    // (they are the turning points), so the second harmonic the gas adds,
+    // h = (gamma + 1) / 6 * (a / l) of the first in the velocity, adds no
+    // quadratic term there: it changes the slope by at most 2 h and the
+    // cubic term by at most 8 h of theirs. Two crossings over `periods`
+    // periods.
+    let harmonic = (gamma + 1.0) / 6.0 * swing;
+    let turn = |dt: f64| {
+        let angle = omega0 * dt;
+        2.0 * 0.0161 * angle.powi(3) * (1.0 + 8.0 * harmonic) / (1.0 - 2.0 * harmonic)
+            / (core::f64::consts::TAU * periods as f64)
+    };
+    // The step. Linearised about rest, the cavity's discrete-gradient
+    // pressure is the pressure at the mean volume and the mass's rule is
+    // the midpoint rule, so the graph is the implicit midpoint rule on the
+    // oscillator: second order, with the frequency
+    //   (2 / dt) atan(omega0 dt / 2) = omega0 (1 - (omega0 dt)^2 / 12 + ...),
+    // a lag of 7.3e-5 at this step.
+    let midpoint = |dt: f64| 2.0 / dt * (0.5 * omega0 * dt).atan();
+    let lag = (omega0 * dt).powi(2) / 12.0;
+
+    // Together 1.6e-7 (1.3e-7 and 0.3e-7), a four-hundredth of the lag.
+    let allowed = amplitude + turn(dt);
+    assert!(allowed < 2.0e-7 && lag > 400.0 * allowed, "{allowed:e} {lag:e}");
+    // With errors e1 and e2 of at most `allowed` at the two steps, the
+    // ratio of the lags is (lag + e1) / (lag / 4 + e2), within this of 4.
+    let ratio_allowed = 5.0 * allowed / (0.25 * lag - allowed);
+
+    let measured = piston_frequency(dt, rate, periods);
+    let halved = piston_frequency(0.5 * dt, rate, periods);
+    let ratio = (omega0 - measured) / (omega0 - halved);
+    eprintln!(
+        "gas spring: omega0 {omega0:.12} rad/s; at dt {measured:.12}, {:.3e} of omega0 from it \
+         (lag {lag:.3e}) and {:.3e} from the midpoint rule's {:.12} (allowed {allowed:.3e}); \
+         at dt / 2 {halved:.12}, {:.3e} from the midpoint rule's (allowed {:.3e}); \
+         ratio of the lags {ratio:.5} (allowed 4 +- {ratio_allowed:.4})",
+        measured / omega0 - 1.0,
+        (measured - midpoint(dt)) / omega0,
+        midpoint(dt),
+        (halved - midpoint(0.5 * dt)) / omega0,
+        amplitude + turn(0.5 * dt),
+    );
+    // Against the closed form, within the step's own lag and the rest.
+    assert!((measured / omega0 - 1.0).abs() <= lag + allowed, "{measured} vs {omega0}");
+    // The lag is the midpoint rule's, and nothing else is left.
+    assert!((measured - midpoint(dt)).abs() <= allowed * omega0, "{measured} vs {}", midpoint(dt));
+    assert!(
+        (halved - midpoint(0.5 * dt)).abs() <= (amplitude + turn(0.5 * dt)) * omega0,
+        "{halved} vs {}",
+        midpoint(0.5 * dt)
+    );
+    // Second order: at half the step the lag is a quarter.
+    assert!((ratio - 4.0).abs() <= ratio_allowed, "{ratio}");
 }
 
 #[test]
