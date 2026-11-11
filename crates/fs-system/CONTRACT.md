@@ -120,7 +120,10 @@ physics owners below fs-couple can be composed without it.
   absorbed power leaves as heat at the temperature `heat` receives, with
   entropy `P dt / T`), `Force` (port `p`, a prescribed `Waveform`), and
   `HeatCapacity` (port `heat` receives heat rate, returns the step-mean
-  temperature), `Conductance` (heat ports `a`, `b`, entropy
+  temperature; `publishing()` adds the signal output `temperature`, the
+  temperature at the start of the step, which carries no power and leaves
+  state and receipt unchanged, so a law that reads it is held over the step:
+  first-order feedback), `Conductance` (heat ports `a`, `b`, entropy
   `G (Ta - Tb)^2 / (Ta Tb) dt`), `Heater` (Joule heater, power never
   negative). `Force`, `FlowSource` and `Heater` keep a `SourceAccount` whose clock is a
   compensated sum like the kernel's, so they read the time a boundary

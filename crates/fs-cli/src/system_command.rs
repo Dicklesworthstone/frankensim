@@ -12,9 +12,12 @@ use std::fmt::Write as _;
 use std::io::Read as _;
 use std::path::Path;
 
+use std::rc::Rc;
+
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
-use fs_mbd::component::network::ViscousNetwork;
-use fs_mbd::component::relaxation::{DriveFrame, RelaxationNetwork, RelaxationState};
+use fs_material::visco::temperature::{TemperatureShift, TemperatureShiftModel};
+use fs_mbd::component::network::{DampingLaw, ViscousNetwork};
+use fs_mbd::component::relaxation::{DriveFrame, RelaxationNetwork, RelaxationState, ShiftLaw};
 use fs_mbd::spatial_loads::internal_impulse::InternalWrenchImpulseControls;
 use fs_mbd::spatial_loads::internal_impulse::viscous::network::driven::DrivenViscousNetworkLimits;
 use fs_mbd::spatial_loads::internal_impulse::viscous::network::relaxation::{
@@ -98,6 +101,8 @@ Elements (ports in brackets; SI units in every field name):
   damper         damping_n_s_m                                        [a, b, heat]
   force          force_n (waveform)                                   [p]
   heat_capacity  capacity_j_k, temperature_k                          [heat]
+                 (and a signal output, temperature: its temperature at the
+                 start of the step; it may stay unconnected)
   conductance    conductance_w_k                                      [a, b]
   heater         power_w (waveform, never negative)                   [heat]
 The same four laws about a shaft, with angle, angular velocity and torque:
@@ -161,6 +166,15 @@ is its origin:
                  [as rigid_network, and drive<e> and couple<e> for each
                   driven connector: the force [N] and couple [N m] held on
                   its second attachment, three waveforms each]
+  Either network may follow temperature:
+                 shift = {\"arrhenius\": {activation_energy_j_mol,
+                   reference_k, valid_k = [lowest, highest]}} or
+                   {\"wlf\": {c1, c2_k, reference_k, valid_k}}
+                 the factor tau(T) / tau_ref of the fs-material owner; it
+                 multiplies every connector's damping, and in a
+                 viscoelastic_network every relaxation time as well. Each
+                 connector then has a signal input temperature<e> [K], read
+                 once a step; a temperature outside valid_k refuses the step.
 A waveform is a number, {\"sine\": {amplitude, frequency_hz, phase_rad = 0,
 offset = 0}} or {\"table\": [[time_s, value], ...]} (linear, ends held).
 
@@ -181,6 +195,10 @@ Connections, ports written element.port:
    \"rest\": {\"sink\": name, \"temperature_k\": T},
    \"temperature\": \"sink-equivalent\" | {\"fixed_k\": T}}
                           send the heat leaving a port by fraction
+  {\"signal\": port, \"to\": [ports]}
+                          copy a signal output (heat_capacity.temperature) to
+                          signal inputs (a network's temperature<e>); it
+                          carries no energy
   {\"prescribe\": port, <quantity>: waveform}
                           hold a port's input from outside: velocity_m_s for a
                           spring, damper or force end (0 anchors it), force_n
@@ -193,7 +211,8 @@ Connections, ports written element.port:
                           heater, heat_rate_w for a heat capacity; for a
                           network of rigid bodies, force_n or torque_n_m as
                           an array of three waveforms ([0, 0, 0] leaves a
-                          body free or an actuator idle)
+                          body free or an actuator idle), and temperature_k
+                          for a temperature<e> input held from outside
 
 Each element's port a is the end at mass A and b the end at mass B; the
 extension of a spring is x_B - x_A less its unloaded length; a series
@@ -872,9 +891,77 @@ fn network_connector(
     })
 }
 
+/// A scene's temperature shift `a_T = tau(T) / tau_ref`, evaluated by the
+/// fs-material owner, offered to the two fs-mbd network Components: it
+/// scales a viscous network's damping forms, and a viscoelastic network's
+/// Kelvin viscosity and relaxation times together.
+#[derive(Debug)]
+struct SceneShift(TemperatureShift);
+
+impl SceneShift {
+    fn at(&self, temperature_k: f64) -> Result<f64, String> {
+        self.0
+            .evaluate(temperature_k)
+            .map(|state| state.factor())
+            .map_err(|e| e.to_string())
+    }
+}
+
+impl ShiftLaw for SceneShift {
+    fn factor(&self, _connector: usize, temperature_k: f64) -> Result<f64, String> {
+        self.at(temperature_k)
+    }
+}
+
+impl DampingLaw for SceneShift {
+    fn at_temperature(
+        &self,
+        _connector: usize,
+        reference: &PassiveBushingMatrix,
+        temperature_k: f64,
+    ) -> Result<PassiveBushingMatrix, String> {
+        reference
+            .scaled(self.at(temperature_k)?)
+            .map_err(|e| format!("{e:?}"))
+    }
+}
+
+/// The `shift` field of a network: an Arrhenius or WLF calibration with its
+/// reference temperature and the band it is valid in.
+fn scene_shift(definition: &J, what: &str) -> Result<Option<TemperatureShift>, Refusal> {
+    let Some(shift) = definition.get("shift") else {
+        return Ok(None);
+    };
+    let what = format!("{what}.shift");
+    let (model, body) = match shift.as_object() {
+        Some([(key, body)]) if key == "arrhenius" => {
+            fields(body, &["activation_energy_j_mol", "reference_k", "valid_k"], &what)?;
+            let activation_energy_j_mol = number(body, "activation_energy_j_mol", &what)?;
+            (TemperatureShiftModel::Arrhenius { activation_energy_j_mol }, body)
+        }
+        Some([(key, body)]) if key == "wlf" => {
+            fields(body, &["c1", "c2_k", "reference_k", "valid_k"], &what)?;
+            let (c1, c2_k) = (number(body, "c1", &what)?, number(body, "c2_k", &what)?);
+            (TemperatureShiftModel::WilliamsLandelFerry { c1, c2_k }, body)
+        }
+        _ => {
+            return Err(format!("{what}: expected {{\"arrhenius\": ...}} or {{\"wlf\": ...}}").into());
+        }
+    };
+    let valid = match body.get("valid_k").and_then(J::as_array) {
+        Some([lowest, highest]) => lowest.as_f64().zip(highest.as_f64()),
+        _ => None,
+    };
+    let (lowest, highest) =
+        valid.ok_or_else(|| format!("{what}: valid_k is [lowest, highest] in kelvin"))?;
+    TemperatureShift::new(model, number(body, "reference_k", &what)?, [lowest, highest])
+        .map(Some)
+        .map_err(|e| Refusal::Input(format!("{what}: {e}")))
+}
+
 /// What the two network elements share in a scene: gravity, the bodies and
-/// their starting states, the connector rows, the owner's balance controls
-/// and the bodies that get a torque port.
+/// their starting states, the connector rows, the owner's balance controls,
+/// the bodies that get a torque port and the temperature shift, if any.
 struct NetworkBase<'a> {
     gravity: Gravity,
     properties: Vec<MassProperties>,
@@ -882,6 +969,7 @@ struct NetworkBase<'a> {
     connectors: &'a [J],
     source: ViscousConnectorControls,
     torques: Vec<usize>,
+    shift: Option<TemperatureShift>,
 }
 
 fn network_base<'a>(definition: &'a J, what: &str) -> Result<NetworkBase<'a>, Refusal> {
@@ -894,9 +982,11 @@ fn network_base<'a>(definition: &'a J, what: &str) -> Result<NetworkBase<'a>, Re
             "gravity_m_s2",
             "torque_ports",
             "balance_tolerance",
+            "shift",
         ],
         what,
     )?;
+    let shift = scene_shift(definition, what)?;
     let gravity = Gravity::new(vec3(triple(definition, "gravity_m_s2", Some([0.0; 3]), what)?))
         .map_err(|e| format!("{what}.gravity_m_s2: {e}"))?;
     let rows = definition
@@ -951,6 +1041,7 @@ fn network_base<'a>(definition: &'a J, what: &str) -> Result<NetworkBase<'a>, Re
         connectors,
         source,
         torques,
+        shift,
     })
 }
 
@@ -992,8 +1083,19 @@ fn rigid_network(
             maximum_live_bytes: 64 << 20,
         },
     };
-    let mut network = ViscousNetwork::new(base.properties.clone(), links, base.gravity, controls)
-        .map_err(|e| Refusal::Input(format!("{what}: {e}")))?;
+    // With a shift, every connector's damping form follows its own
+    // `temperature<e>` signal.
+    let built = match base.shift {
+        None => ViscousNetwork::new(base.properties.clone(), links, base.gravity, controls),
+        Some(shift) => ViscousNetwork::temperature_dependent(
+            base.properties.clone(),
+            links,
+            base.gravity,
+            controls,
+            Rc::new(SceneShift(shift)),
+        ),
+    };
+    let mut network = built.map_err(|e| Refusal::Input(format!("{what}: {e}")))?;
     for &body in &base.torques {
         network = network
             .torqued(body)
@@ -1126,6 +1228,11 @@ fn viscoelastic_network(
             .map_err(refused)?;
     for (connector, frame) in drives {
         network = network.driven(connector, frame).map_err(refused)?;
+    }
+    // With a shift, every connector's Kelvin viscosity and relaxation
+    // times follow its own `temperature<e>` signal.
+    if let Some(shift) = base.shift {
+        network = network.shifted(Rc::new(SceneShift(shift))).map_err(refused)?;
     }
     for &body in &base.torques {
         network = network.torqued(body).map_err(refused)?;
@@ -1274,7 +1381,11 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
             fields(definition, &["kind", "capacity_j_k", "temperature_k"], &what)?;
             let start = positive(definition, "temperature_k", &what)?;
             temperature_k = Some(start);
-            let body = HeatCapacity::new(number(definition, "capacity_j_k", &what)?).map_err(invalid)?;
+            // Every heat capacity of a scene has the signal output
+            // `temperature`; unconnected, it changes nothing.
+            let body = HeatCapacity::new(number(definition, "capacity_j_k", &what)?)
+                .map_err(invalid)?
+                .publishing();
             add(builder, name, body, start)?
         }
         Kind::Conductance => {
@@ -1519,6 +1630,41 @@ fn route(
     Ok(())
 }
 
+/// `{"signal": output, "to": [inputs]}`: copy a signal output (a heat
+/// capacity's start-of-step temperature) to signal inputs (the temperatures
+/// a network's shift is read at).
+fn signal(
+    builder: &mut SystemBuilder,
+    elements: &[Element],
+    connection: &J,
+    guesses: &mut Guesses,
+    what: &str,
+) -> Result<(), Refusal> {
+    fields(connection, &["signal", "to"], what)?;
+    let source = resolve(
+        builder,
+        elements,
+        &port_text(connection.get("signal").unwrap_or(&J::Null), what)?,
+    )?;
+    let targets = connection
+        .get("to")
+        .and_then(J::as_array)
+        .filter(|rows| !rows.is_empty())
+        .ok_or_else(|| format!("{what}: to is an array of the ports that read the signal"))?;
+    for target in targets {
+        let target = resolve(builder, elements, &port_text(target, what)?)?;
+        builder
+            .signal(source.port, target.port)
+            .map_err(|e| Refusal::Admission(format!("{what}: {e}")))?;
+        // The kernel solves a signal with the rest of its block and starts
+        // from the publisher's temperature.
+        if let Some(kelvin) = elements[source.element].temperature_k {
+            guesses.push((target.port, kelvin));
+        }
+    }
+    Ok(())
+}
+
 fn prescribe(
     builder: &mut SystemBuilder,
     elements: &[Element],
@@ -1531,7 +1677,11 @@ fn prescribe(
         _ => None,
     };
     let quantity = match (target.carrier, target.role, domain) {
-        (Carrier::Heat, PortRole::EffortIn, _) => "temperature_k",
+        // The only signal inputs of a scene are the temperatures a network's
+        // shift is read at.
+        (Carrier::Heat, PortRole::EffortIn, _) | (Carrier::Signal, PortRole::SignalIn, _) => {
+            "temperature_k"
+        }
         (Carrier::Heat, PortRole::FlowIn, _) => "heat_rate_w",
         (Carrier::Power(_), PortRole::EffortIn, Some(domain)) => domain.names().effort,
         (Carrier::Power(_), PortRole::FlowIn, Some(domain)) => domain.names().flow,
@@ -1759,11 +1909,13 @@ fn load(path: &Path) -> Result<Device, Refusal> {
             transformer(&mut builder, &elements, connection, &what)?;
         } else if connection.get("route").is_some() {
             route(&mut builder, &elements, connection, &mut guesses, &what)?;
+        } else if connection.get("signal").is_some() {
+            signal(&mut builder, &elements, connection, &mut guesses, &what)?;
         } else if connection.get("prescribe").is_some() {
             prescribe(&mut builder, &elements, connection, &what)?;
         } else {
             return Err(format!(
-                "{what}: expected join, common_effort, transformer, route or prescribe"
+                "{what}: expected join, common_effort, transformer, route, signal or prescribe"
             )
             .into());
         }

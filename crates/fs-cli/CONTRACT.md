@@ -849,8 +849,32 @@ body and in world axes, with the actuator's work on its boundary account to
 diagonal; a branch is a rate law in its first body's axes, not a spring with
 a rest geometry; the owner solves bodies and branches as one dense system
 and refuses one too large for it at the first step, not when the scene is
-read; no temperature-dependent damping or relaxation times from a scene (the
-Component has both).
+read.
+
+Temperature feedback is composed, not written for a pair. Every scene
+`heat_capacity` has a signal output `temperature`, its temperature at the
+start of the step (`fs_system::elements::HeatCapacity::publishing`); left
+unconnected it changes nothing, and the ten scenes that existed before it
+give byte-identical JSON reports with it. `{"signal": port, "to": [ports]}`
+copies a signal output to signal inputs. Either network takes a `shift`,
+`{"arrhenius": {activation_energy_j_mol, reference_k, valid_k}}` or
+`{"wlf": {c1, c2_k, reference_k, valid_k}}`, evaluated by
+`fs_material::visco::temperature::TemperatureShift`; each connector then has
+a signal input `temperature<e>`. In a `rigid_network` the factor multiplies
+each connector's damping form (`ViscousNetwork::temperature_dependent`); in
+a `viscoelastic_network` it multiplies the damping and every relaxation time
+(`RelaxationNetwork::shifted`). A `temperature<e>` input can instead be held
+with `prescribe` and `temperature_k`. G1, same test file:
+`examples/system/self_heating_damper.json` against the scheme's exact
+recursion (damping held over a step at the step's starting temperature:
+relative speed and fluid temperature to 1e-11), the heat equal to the kinetic
+energy lost, first-order convergence to the coupled equations (the distance
+halves with the step), and the same scene held at 300 K equal to the unshifted
+pair to 1e-13; a viscoelastic mount held at 330 K against its two equations
+with viscosity and relaxation time both scaled (1e-9); refusals, including a
+temperature that leaves the shift's band. No claim: one shift for all
+connectors of a network; the feedback is first order in the step; a law is
+read once per step at what the signal carries.
 
 `nonlinear_capacitor` takes `charge_voltage_curve` as `[charge_c, voltage_v]`
 knots and an optional initial `charge_c`; `nonlinear_inductor` takes

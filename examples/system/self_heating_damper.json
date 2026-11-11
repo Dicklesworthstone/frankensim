@@ -1,0 +1,29 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 0.5,
+  "step_s": 0.03125,
+  "sample_every_s": 0.0625,
+  "elements": {
+    "pair": {
+      "kind": "rigid_network",
+      "bodies": [
+        {"mass_kg": 2.0, "principal_inertia_kg_m2": [2.0, 3.0, 4.0],
+         "position_m": [0.0, 0.0, 0.0], "velocity_m_s": [1.0, 0.0, 0.0]},
+        {"mass_kg": 2.0, "principal_inertia_kg_m2": [2.0, 3.0, 4.0],
+         "position_m": [1.0, 0.0, 0.0], "velocity_m_s": [-1.0, 0.0, 0.0]}
+      ],
+      "connectors": [
+        {"bodies": [0, 1], "damping_n_s_m": [0.7, 0.0, 0.0]}
+      ],
+      "shift": {"arrhenius": {"activation_energy_j_mol": 166289.2523630648,
+                              "reference_k": 300.0, "valid_k": [280.0, 360.0]}}
+    },
+    "fluid": {"kind": "heat_capacity", "capacity_j_k": 1.0, "temperature_k": 300.0}
+  },
+  "connections": [
+    {"prescribe": "pair.force0", "force_n": [0, 0, 0]},
+    {"prescribe": "pair.force1", "force_n": [0, 0, 0]},
+    {"route": "pair.heat0", "to": [["fluid.heat", 1.0]]},
+    {"signal": "fluid.temperature", "to": ["pair.temperature0"]}
+  ]
+}

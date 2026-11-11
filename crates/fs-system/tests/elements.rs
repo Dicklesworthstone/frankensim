@@ -1315,3 +1315,31 @@ fn a_sink_named_by_two_routes_is_one_row_at_one_temperature() {
     assert_eq!(ledger.sinks[0].name, "air");
     within(ledger.sinks[0].heat_j.value(), (15.0 + 9.0) * 10.0, 1.0e-13);
 }
+
+#[test]
+fn a_publishing_heat_capacity_reports_the_temperature_its_step_began_with() {
+    let plain = HeatCapacity::new(40.0).unwrap();
+    let publishing = HeatCapacity::new(40.0).unwrap().publishing();
+    let names: Vec<&str> = publishing.ports().iter().map(|port| port.id().as_str()).collect();
+    assert_eq!(names, ["heat", "temperature"]);
+    // Asking twice adds the signal once.
+    assert_eq!(publishing.clone().publishing().ports().len(), 2);
+    let mut n = Numbers(20_261_111);
+    for _ in 0..50 {
+        let (start, heat_w, dt) = (n.next(250.0, 900.0), n.next(-50.0, 50.0), n.next(1.0e-5, 2.0e-2));
+        let outputs = conforms(&publishing, &start, &1.0, dt, &[heat_w]);
+        // The mean temperature on the heat port, and the start temperature
+        // (not the mean, not the end) on the signal.
+        let end = start + dt * heat_w / 40.0;
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].to_bits(), (0.5 * (start + end)).to_bits());
+        assert_eq!(outputs[1].to_bits(), start.to_bits());
+        // The signal carries nothing: state and receipt are those of the
+        // body that does not publish.
+        assert_eq!(
+            receipt_of(&publishing, &start, &1.0, dt, &[heat_w]),
+            receipt_of(&plain, &start, &1.0, dt, &[heat_w])
+        );
+        assert_eq!(conforms(&plain, &start, &1.0, dt, &[heat_w]), [outputs[0]]);
+    }
+}

@@ -1119,3 +1119,200 @@ fn viscoelastic_scenes_that_cannot_run_are_refused_with_the_reason() {
     assert_eq!(code, 4);
     assert!(stderr.contains("mount.drive0") || stderr.contains("mount.couple0"), "{stderr}");
 }
+
+/// The self-heating pair at step `dt`: relative speed `u` (reduced mass
+/// 1 kg), damping `0.7 a(T)` with `a = exp(20000 (1 / T - 1 / 300))`, all
+/// heat into 1 J/K. The scheme holds the damping over a step at the
+/// temperature the step began with, and the owner's connector source is
+/// exact for a held damping; so a step is `u -> u exp(-0.7 a(T) dt)` and the
+/// kinetic energy lost is the heat. Returns `[u, T]` after `steps` steps.
+fn self_heating_recursion(dt: f64, steps: u32) -> [f64; 2] {
+    let (mut u, mut kelvin) = (-2.0_f64, 300.0_f64);
+    for _ in 0..steps {
+        let factor = (20_000.0 * (1.0 / kelvin - 1.0 / 300.0)).exp();
+        let next = u * (-0.7 * factor * dt).exp();
+        kelvin += 0.5 * (u * u - next * next);
+        u = next;
+    }
+    [u, kelvin]
+}
+
+/// The coupled equations themselves, `u' = -0.7 a(T) u` and
+/// `T' = 0.7 a(T) u^2` (RK4, 16384 steps). Returns `[u, T]` at `t`.
+fn self_heating_reference(t: f64) -> [f64; 2] {
+    let rhs = |s: [f64; 2]| {
+        let c = 0.7 * (20_000.0 * (1.0 / s[1] - 1.0 / 300.0)).exp();
+        [-c * s[0], c * s[0] * s[0]]
+    };
+    let add = |a: [f64; 2], b: [f64; 2], h: f64| [a[0] + h * b[0], a[1] + h * b[1]];
+    let mut state = [-2.0, 300.0];
+    let h = t / 16384.0;
+    for _ in 0..16384 {
+        let a = rhs(state);
+        let b = rhs(add(state, a, 0.5 * h));
+        let c = rhs(add(state, b, 0.5 * h));
+        let d = rhs(add(state, c, h));
+        for i in 0..2 {
+            state[i] += h * (a[i] + 2.0 * b[i] + 2.0 * c[i] + d[i]) / 6.0;
+        }
+    }
+    state
+}
+
+#[test]
+fn the_self_heating_damper_scene_thins_as_its_fluid_warms() {
+    let scene = std::fs::read_to_string(example("self_heating_damper.json")).unwrap();
+    let run = |text: &str| {
+        let path = scratch("self_heating.json", text);
+        let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+        assert_eq!(code, 0, "{stderr}");
+        let pair = element("pair");
+        let speed = value(&json, &pair, "body1.velocity_x_m_s") - value(&json, &pair, "body0.velocity_x_m_s");
+        (speed, value(&json, &element("fluid"), "temperature_k"), json)
+    };
+    // The scene as shipped: sixteen steps of 1/32 s, against the scheme's
+    // own recursion.
+    let (speed, kelvin, json) = run(&scene);
+    let [u, expected_k] = self_heating_recursion(0.03125, 16);
+    assert!((speed - u).abs() <= 1.0e-11, "{speed} vs {u}");
+    assert!((kelvin - expected_k).abs() <= 1.0e-11, "{kelvin} vs {expected_k}");
+    // The feedback is real: the fluid warms by 0.93 K and the damping ends
+    // at 0.81 of its reference value, so the pair has slowed less (to
+    // 1.461 m/s) than it would without the shift (1.409 m/s).
+    let thinned = (20_000.0 * (1.0 / kelvin - 1.0 / 300.0)).exp();
+    assert!(kelvin > 300.9 && thinned < 0.82, "{kelvin} K, factor {thinned}");
+    assert!(speed.abs() > 2.0 * (-0.7_f64 * 0.5).exp() + 0.05, "{speed}");
+    // The heat is what the motion lost, whatever the feedback did.
+    let heat = value(&json, &element("pair"), "dissipated_j");
+    assert!((heat - 0.5 * (4.0 - speed * speed)).abs() <= 1.0e-12, "{heat}");
+    assert!(value(&json, "\"totals\"", "energy_residual_j").abs() <= 1.0e-12);
+
+    // First order in the step: against the coupled equations, half the step
+    // leaves half the distance.
+    let [exact_u, exact_k] = self_heating_reference(0.5);
+    let halved = scene.replace("\"step_s\": 0.03125", "\"step_s\": 0.015625");
+    assert_ne!(halved, scene);
+    let (fine_speed, fine_k, _) = run(&halved);
+    let [fine_u, _] = self_heating_recursion(0.015625, 32);
+    assert!((fine_speed - fine_u).abs() <= 1.0e-11);
+    let (coarse, fine) = ((kelvin - exact_k).abs(), (fine_k - exact_k).abs());
+    assert!(coarse > 1.0e-3, "a distance to measure: {coarse} K");
+    assert!((1.7..=2.3).contains(&(coarse / fine)), "{coarse} K then {fine} K");
+    assert!((speed - exact_u).abs() > (fine_speed - exact_u).abs());
+
+    // The same scene with the temperature held at 300 K from outside is the
+    // damped pair without a shift.
+    let held = scene.replace(
+        "{\"signal\": \"fluid.temperature\", \"to\": [\"pair.temperature0\"]}",
+        "{\"prescribe\": \"pair.temperature0\", \"temperature_k\": 300.0}",
+    );
+    assert_ne!(held, scene);
+    let (held_speed, _, _) = run(&held);
+    assert!((held_speed + 2.0 * (-0.7_f64 * 0.5).exp()).abs() <= 1.0e-13, "{held_speed}");
+}
+
+#[test]
+fn a_viscoelastic_mount_held_warm_relaxes_faster_by_its_shift() {
+    // The mount of viscoelastic_mount.json with a shift, held at 330 K: its
+    // viscosity and its relaxation time are both multiplied by
+    // exp(20000 (1 / 330 - 1 / 300)) = 0.0023, its stiffness is not.
+    let mount = std::fs::read_to_string(example("viscoelastic_mount.json")).unwrap();
+    let warm = mount
+        .replace(
+            "\"connectors\": [",
+            "\"shift\": {\"arrhenius\": {\"activation_energy_j_mol\": 166289.2523630648, \
+             \"reference_k\": 300.0, \"valid_k\": [280.0, 360.0]}},\n      \"connectors\": [",
+        )
+        .replace(
+            "{\"route\": \"mount.heat0\"",
+            "{\"prescribe\": \"mount.temperature0\", \"temperature_k\": 330.0},\n    \
+             {\"route\": \"mount.heat0\"",
+        );
+    assert!(warm.contains("\"shift\"") && warm.contains("mount.temperature0"));
+    let path = scratch("warm_mount.json", &warm);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    let factor = (20_000.0_f64 * (1.0 / 330.0 - 1.0 / 300.0)).exp();
+    // u' = -c a u - K x, x' = u - x / (tau a), from rest with x = 0.5 m.
+    let (c, k, tau) = (0.4 * factor, 1.69_f64, 0.2 * factor);
+    let rhs = |s: [f64; 3]| {
+        [
+            -c * s[0] - k * s[1],
+            s[0] - s[1] / tau,
+            c * s[0] * s[0] + k * s[1] * s[1] / tau,
+        ]
+    };
+    let add = |a: [f64; 3], b: [f64; 3], h: f64| core::array::from_fn(|i| a[i] + h * b[i]);
+    let mut state = [0.0, 0.5, 0.0];
+    let h = 0.25 / 1_048_576.0;
+    for _ in 0..1_048_576 {
+        let a = rhs(state);
+        let b = rhs(add(state, a, 0.5 * h));
+        let c = rhs(add(state, b, 0.5 * h));
+        let d = rhs(add(state, c, h));
+        for i in 0..3 {
+            state[i] += h * (a[i] + 2.0 * b[i] + 2.0 * c[i] + d[i]) / 6.0;
+        }
+    }
+    let [u, x, heat] = state;
+    let name = element("mount");
+    let speed = value(&json, &name, "body1.velocity_x_m_s") - value(&json, &name, "body0.velocity_x_m_s");
+    assert!((speed - u).abs() <= 1.0e-9, "{speed} vs {u}");
+    let stored = value(&json, &name, "connector0.branch0.energy_j");
+    assert!((stored - 0.5 * k * x * x).abs() <= 1.0e-9, "{stored}");
+    assert!((value(&json, &name, "dissipated_j") - heat).abs() <= 1.0e-9, "{heat}");
+    // At 330 K the branch has let go of nearly all it held (0.21 J), which
+    // the mount at its reference temperature has not.
+    assert!(heat > 0.2 && stored < 1.0e-6, "heat {heat} J, stored {stored} J");
+}
+
+#[test]
+fn temperature_feedback_that_cannot_run_is_refused_with_the_reason() {
+    let scene = std::fs::read_to_string(example("self_heating_damper.json")).unwrap();
+    let check = |name: &str, from: &str, to: &str, code_expected: i32, said: &str| {
+        let bad = scene.replace(from, to);
+        assert_ne!(bad, scene, "{name}");
+        let (code, stderr) = refused(name, &bad);
+        assert_eq!(code, code_expected, "{name}: {stderr}");
+        assert!(stderr.contains(said), "{name}: {stderr}");
+    };
+    // A shift is an Arrhenius or a WLF calibration, with its band.
+    check("model.json", "\"arrhenius\"", "\"exponential\"", 3, "expected {\"arrhenius\": ...} or {\"wlf\": ...}");
+    check("band.json", "\"valid_k\": [280.0, 360.0]", "\"valid_k\": [310.0, 360.0]", 3, "pair.shift");
+    check("field.json", "\"reference_k\"", "\"reference\"", 3, "unsupported field");
+    // The signal input of a shifted network must be fed.
+    check(
+        "unfed.json",
+        ",\n    {\"signal\": \"fluid.temperature\", \"to\": [\"pair.temperature0\"]}",
+        "",
+        4,
+        "pair.temperature0",
+    );
+    // A signal goes from an output to inputs.
+    check(
+        "backwards.json",
+        "{\"signal\": \"fluid.temperature\", \"to\": [\"pair.temperature0\"]}",
+        "{\"signal\": \"pair.temperature0\", \"to\": [\"fluid.temperature\"]}",
+        4,
+        "signal",
+    );
+    check("nowhere.json", "\"to\": [\"pair.temperature0\"]", "\"to\": []", 3, "to is an array of the ports that read the signal");
+    // A network without a shift has no temperature input.
+    let (code, stderr) = refused(
+        "noshift.json",
+        &std::fs::read_to_string(example("damped_pair.json")).unwrap().replace(
+            "{\"prescribe\": \"pair.force0\"",
+            "{\"signal\": \"shell.temperature\", \"to\": [\"pair.temperature0\"]},\n    {\"prescribe\": \"pair.force0\"",
+        ),
+    );
+    assert_eq!(code, 3);
+    assert!(stderr.contains("a rigid_network has ports"), "{stderr}");
+    // A temperature that leaves the shift's band refuses the step, by name.
+    let (code, stderr) = refused(
+        "hot.json",
+        &scene.replace("\"valid_k\": [280.0, 360.0]", "\"valid_k\": [280.0, 300.5]"),
+    );
+    assert_eq!(code, 4);
+    assert!(stderr.contains("component `pair` refused"), "{stderr}");
+    assert!(stderr.contains("temperature leaves the declared shift calibration band"), "{stderr}");
+}

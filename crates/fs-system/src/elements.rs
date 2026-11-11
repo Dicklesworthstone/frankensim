@@ -1264,10 +1264,16 @@ impl PortTangent for FlowSource {
 /// A body of constant heat capacity [J/K]. Port `heat` receives the heat rate
 /// into it [W] and returns its mean temperature over the step [K]. Its stored
 /// energy is measured from absolute zero, `C T`.
+///
+/// [`HeatCapacity::publishing`] adds a signal output `temperature`: the
+/// body's temperature at the start of the step [K]. It carries no power. A
+/// law that reads it (a damping form, a relaxation time) is therefore held
+/// over the step at the temperature the step began with, which is
+/// first-order feedback; refine the step for it.
 #[derive(Debug, Clone)]
 pub struct HeatCapacity {
     capacity_j_k: f64,
-    ports: [PortSpec; 1],
+    ports: Vec<PortSpec>,
 }
 
 impl HeatCapacity {
@@ -1278,8 +1284,19 @@ impl HeatCapacity {
     pub fn new(capacity_j_k: f64) -> Result<Self, ElementError> {
         Ok(Self {
             capacity_j_k: positive("capacity_j_k", capacity_j_k)?,
-            ports: [heat("heat", PortRole::FlowIn)],
+            ports: vec![heat("heat", PortRole::FlowIn)],
         })
+    }
+
+    /// The same body with the signal output `temperature`, its temperature
+    /// at the start of each step. Asking twice adds it once.
+    #[must_use]
+    pub fn publishing(mut self) -> Self {
+        if self.ports.len() == 1 {
+            let id = StableId::new("temperature").expect("element port names are valid stable ids");
+            self.ports.push(PortSpec::signal_out(id, NonZeroUsize::MIN));
+        }
+        self
     }
 }
 
@@ -1319,6 +1336,10 @@ impl Component for HeatCapacity {
         }
         *new = next;
         outputs[0] = 0.5 * (old + next);
+        // The published temperature is the one the step began with.
+        if let Some(published) = outputs.get_mut(1) {
+            *published = *old;
+        }
         let scale = self.capacity_j_k * (old.abs() + next.abs());
         Ok(Proposal::Step(Receipt::lossless(heat_j, roundoff(scale))))
     }
@@ -1335,6 +1356,11 @@ impl PortTangent for HeatCapacity {
         _cx: &Cx<'_>,
     ) -> Result<(), ElementError> {
         d_outputs[0] = 0.5 * dt_s / self.capacity_j_k * d_inputs[0];
+        // The published start temperature does not depend on the heat of
+        // this step.
+        if let Some(published) = d_outputs.get_mut(1) {
+            *published = 0.0;
+        }
         Ok(())
     }
 
