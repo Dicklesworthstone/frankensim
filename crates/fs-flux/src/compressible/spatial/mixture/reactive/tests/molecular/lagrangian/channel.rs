@@ -154,12 +154,25 @@ fn g4_reacting_channel_history_retains_no_slip_heat_chemistry_and_atomic_replay(
         assert!(report.chemistry.species_change_kg[0] < 0.0);
         assert!(report.chemistry.referenced_energy_change_j > 0.0);
         assert!(report.boundary_change.energy.abs() > 1e-10);
+        // The y walls are impermeable: their boundary rows are exactly 0.0. The periodic x and z
+        // sides enter the outward sum as +f and -f for each face (bitwise equal pairs), which
+        // cancel in real arithmetic but leave rounding in a floating-point sum of all the rows:
+        // at most rows*eps*sum|f|. A face moves at most one cell's species mass per step (CFL < 1),
+        // so sum|f| <= rows*m_cell with m_cell <= rho_max*V = 1.15*V (density is 1 + 0.15*noise).
+        // A real wall flux would be of the face-flux size (about 1e-5), many orders above this.
+        let rows = 2 * (shape[1] * shape[2] + shape[0] * shape[2] + shape[0] * shape[1]);
+        let rounding = (rows * rows) as f64
+            * f64::EPSILON
+            * 1.15
+            * (spacing[0] * spacing[1] * spacing[2]);
         assert!(
             report
                 .boundary_change
                 .species_masses
                 .iter()
-                .all(|mass| *mass == 0.0)
+                .all(|mass| mass.abs() <= rounding),
+            "species masses through the boundary {:?} exceed the rounding bound {rounding:e}",
+            report.boundary_change.species_masses
         );
         trial.commit();
 

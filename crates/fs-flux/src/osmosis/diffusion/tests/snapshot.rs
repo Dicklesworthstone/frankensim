@@ -86,6 +86,12 @@ fn snapshot_work_budget_and_cancellation_do_not_change_accepted_evolution() {
         Err(OsmoticNetworkError::Workspace { .. })
     ));
     assert_eq!(bits(&system), before);
+    // Since 80db26a836 the Maxwell-Stefan workspaces keep their matrix factorizations
+    // between calls on the same matrices, so a repeat snapshot polls fewer times than
+    // the first. One warm-up snapshot leaves the system in the state that the counted
+    // call and the cancelled call both start from, so the count is the cancelled call's.
+    system.ionic_diffusion_snapshot(1 << 20, || false).unwrap();
+    assert_eq!(bits(&system), before);
     let mut polls = 0;
     system
         .ionic_diffusion_snapshot(1 << 20, || {

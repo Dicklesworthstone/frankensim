@@ -268,6 +268,23 @@ fn ionic_face_refuses_singular_empty_fronts_and_preserves_outputs_on_late_cancel
     let mut workspace = material.workspace().unwrap();
     let (left, right) = (cell(&model, &[100.0, 100.0]), cell(&model, &[20.0, 20.0]));
     let mut output = [123.0, 456.0];
+    // Since 80db26a836 the workspace keeps its matrix factorization between calls
+    // on the same matrix, so a repeat call polls fewer times than the first. One
+    // warm-up call puts the workspace in the state that the counted call and the
+    // cancelled call both start from, so the count below is the cancelled call's.
+    material
+        .flux_zero_current_into(
+            left.solution(),
+            right.solution(),
+            0.001,
+            physical().constitutive,
+            &policy,
+            &mut workspace,
+            &mut output,
+            || false,
+        )
+        .unwrap();
+    output = [123.0, 456.0];
     let mut polls = 0;
     material
         .flux_zero_current_into(

@@ -17,12 +17,32 @@ fn g0_isothermal_composition_gradients_generate_all_baroclinic_components() {
     };
     let rotation = [0.2, -0.1, 0.3];
     let expansion = 0.07;
+    let linear = 0.4;
+    // Each cell's temperature comes from a bounded energy inversion that stops once the
+    // energy residual is within rho*abs + rel*|e| (fs-gas eos.rs decode_cell, with the
+    // CaloricDomain::new defaults that `gas` uses), so |dT| <= abs/cv_min + rel*T. cv_min is
+    // the smaller specific heat at T=2: species B, R_B*(3.5 + linear*T - 1) = 0.5*(3.5 + 0.8 - 1).
+    // p = rho*(0.5 + 0.5*Y)*T with 0.5 + 0.5*Y <= 1, so |dp| <= rho_max*|dT|. The pressure
+    // gradient on an open face is one-sided, |d(grad p)| <= 2*|dp|/h_min, and the torque is
+    // grad(rho) x grad(p)/rho^2 with |grad rho| = 0.2, so |d torque| <= 0.2*|d(grad p)|/rho_min^2.
+    let caloric = fs_gas::multicomponent::CaloricDomain::new(
+        fs_qty::Temperature::new(0.001),
+        fs_qty::Temperature::new(50.0),
+    );
+    let cv_min = 0.5 * (3.5 + linear * 2.0 - 1.0);
+    let temperature_error =
+        caloric.absolute_energy_tolerance / cv_min + caloric.relative_energy_tolerance * 2.0;
+    let extent = [4.0 * 0.3, 5.0 * 0.2, 3.0 * 0.4];
+    let rho_min = 1.2;
+    let rho_max = 1.2 + 0.2 * extent.into_iter().fold(0.0_f64, f64::max);
+    let h_min = grid.spacing.into_iter().fold(f64::INFINITY, f64::min);
+    let torque_error = 0.2 * (2.0 * rho_max * temperature_error / h_min) / (rho_min * rho_min);
     // The two present species have R_A=1 and R_B=1/2. Holding T=2 while
     // varying total density and composition along independent axes makes
     // p = T*rho*(R_B + (R_A-R_B)*Y_A). Its cross gradient has a known sign.
     for [density_axis, fraction_axis, torque_axis] in [[0, 1, 2], [1, 2, 0], [2, 0, 1]] {
         for boost in [[0.0; 3], [0.7, -0.4, 0.2]] {
-            let flow = field(standard(0.4), grid, boundaries, |x| {
+            let flow = field(standard(linear), grid, boundaries, |x| {
                 let rho = 1.2 + 0.2 * x[density_axis];
                 let fraction = 0.35 + 0.12 * x[fraction_axis];
                 let swirl = [
@@ -39,14 +59,15 @@ fn g0_isothermal_composition_gradients_generate_all_baroclinic_components() {
             for (i, sample) in evaluate(&flow).iter().enumerate() {
                 let x = grid.cell_center(i).unwrap();
                 let rho = 1.2 + 0.2 * x[density_axis];
-                close(
-                    flow.cell(i)
-                        .unwrap()
-                        .primitive(flow.gas(), || false)
-                        .unwrap()
-                        .temperature,
-                    2.0,
-                    2e-11,
+                let temperature = flow
+                    .cell(i)
+                    .unwrap()
+                    .primitive(flow.gas(), || false)
+                    .unwrap()
+                    .temperature;
+                assert!(
+                    (temperature - 2.0).abs() <= temperature_error,
+                    "{temperature:e} is further from 2 than the inversion tolerance {temperature_error:e}"
                 );
                 close(sample.divergence, 3.0 * expansion, 2e-12);
                 for (d, omega) in rotation.map(|value| 2.0 * value).into_iter().enumerate() {
@@ -54,11 +75,18 @@ fn g0_isothermal_composition_gradients_generate_all_baroclinic_components() {
                     close(sample.vorticity[d], omega, 2e-12);
                     close(sample.stretching[d], expansion * omega, 2e-12);
                     close(sample.dilation[d], -3.0 * expansion * omega, 2e-12);
-                    close(sample.baroclinic[d], torque, 2e-11);
-                    close(
-                        sample.inviscid_material_rate()[d],
-                        -2.0 * expansion * omega + torque,
-                        2e-11,
+                    assert!(
+                        (sample.baroclinic[d] - torque).abs() <= torque_error,
+                        "{:e} is further from {torque:e} than the propagated inversion tolerance {torque_error:e}",
+                        sample.baroclinic[d]
+                    );
+                    // The stretching and dilation terms keep their own 2e-12 closeness; the rest is the torque's.
+                    let expected_rate = -2.0 * expansion * omega + torque;
+                    assert!(
+                        (sample.inviscid_material_rate()[d] - expected_rate).abs()
+                            <= torque_error + 2e-11 * (1.0 + expected_rate.abs()),
+                        "{:e} is further from {expected_rate:e} than the propagated inversion tolerance",
+                        sample.inviscid_material_rate()[d]
                     );
                 }
             }
