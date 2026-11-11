@@ -57,6 +57,15 @@ pub struct GasContents {
 /// ports return, so the first law holds for any step. The temperature and
 /// the fractions returned are the means of their old and new values.
 /// Entropy made by mixing a stream into the volume is not reported.
+///
+/// A step that would empty the volume, close it, take more energy than it
+/// holds or draw a carried quantity below nothing is shortened. So a small
+/// volume between restrictions sets the step: more than about twice its
+/// mass cannot pass through it in one. A prescribed draw of a quantity the
+/// volume holds none of is never satisfied and ends in step underflow.
+///
+/// Volumes joined by streams must hold the same gas. Nothing checks it: a
+/// volume reads what enters as its own gas, and mass and energy still close.
 #[derive(Debug, Clone)]
 pub struct GasVolume {
     gas_constant_j_kg_k: f64,
@@ -234,7 +243,8 @@ impl GasVolume {
         }
         // U1 - U0 = E + (p0 + p1) / 2 * dV with p = (ratio - 1) U / V is
         // linear in U1.
-        let supplied = dt_s * (inputs[STREAM_ENTHALPY_RATE] + heat_w);
+        let enthalpy_w = inputs[STREAM_ENTHALPY_RATE];
+        let supplied = dt_s * (enthalpy_w + heat_w);
         let solved = (old.energy_j * (1.0 + half / old.volume_m3) + supplied) / pivot;
         let pressure_pa =
             0.5 * (self.ratio - 1.0) * (old.energy_j / old.volume_m3 + solved / volume_m3);
@@ -256,7 +266,13 @@ impl GasVolume {
             temperature_k: 0.5
                 * (old.energy_j / (old.mass_kg * capacity) + energy_j / (mass_kg * capacity)),
             change_j,
-            scale_j: old.energy_j + energy_j + supplied.abs() + work_j.abs(),
+            // The ports book the enthalpy and the heat separately, so the
+            // allowance is sized by each and not by their sum, which can
+            // cancel.
+            scale_j: old.energy_j
+                + energy_j
+                + dt_s * (enthalpy_w.abs() + heat_w.abs())
+                + work_j.abs(),
         })
     }
 
@@ -356,13 +372,15 @@ impl Component for GasVolume {
         let Some(trial) = self.trial(old, dt_s, inputs) else {
             return Ok(shorter);
         };
-        // A carried quantity cannot be drawn below nothing.
+        // A carried quantity cannot be drawn below nothing. A result within
+        // rounding below nothing is nothing.
         let rates = &inputs[STREAM_CARRIED..STREAM_CARRIED + self.carried];
+        let nothing = -roundoff(old.mass_kg + trial.mass_kg);
         if old
             .carried_kg
             .iter()
             .zip(rates)
-            .any(|(held, rate)| !(held + dt_s * rate >= 0.0))
+            .any(|(held, rate)| !(held + dt_s * rate >= nothing))
         {
             return Ok(shorter);
         }
@@ -371,7 +389,7 @@ impl Component for GasVolume {
         new.volume_m3 = trial.volume_m3;
         new.carried_kg.clear();
         for (index, (held, rate)) in old.carried_kg.iter().zip(rates).enumerate() {
-            let carried = held + dt_s * rate;
+            let carried = (held + dt_s * rate).max(0.0);
             new.carried_kg.push(carried);
             outputs[STREAM_CARRIED + index] =
                 0.5 * (held / old.mass_kg + carried / trial.mass_kg);

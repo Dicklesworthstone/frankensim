@@ -808,9 +808,14 @@ step) and `elements::Restriction` (mass rate `conductance (p_a - p_b)`, the
 enthalpy and carried quantities those of the side the mass leaves).
 - Both pass the conformance and tangent checks at 100 generated points, the
   restriction on both sides of zero flow; at equal pressures nothing crosses
-  (the mandatory check only: the port map has a kink there). Steps that would
-  empty a volume, overdraw a carried quantity or take more energy than it
-  holds are shortened with the candidate untouched.
+  (the mandatory check only: the port map has a kink there). The kit's
+  tangent check takes one norm over all outputs, which pins the small rows
+  of a mixed-unit port only loosely, so every entry of both tangents is also
+  compared on its own with a central difference (1e-6 of the entry). The
+  volume's returned pressure, temperature, enthalpy and fractions are
+  checked against the means of their values before and after the step.
+  Steps that would empty a volume, overdraw a carried quantity or take more
+  energy than it holds are shortened with the candidate untouched.
 - Two vessels (5 bar at 350 K in 10 l, 1 bar at 290 K in 30 l, each holding a
   quantity the other lacks) through one restriction against an independent
   RK4 integration of the same equations: errors 1.35e-6 and 3.37e-7 at 100
@@ -828,6 +833,15 @@ enthalpy and carried quantities those of the side the mass leaves).
   (1.2e-7 and 6.4e-8) is bounded by 5e-3 of the step squared and has no
   clean ratio: the step in which the supplier changes costs up to its length
   squared, depending on where in it the turn falls.
+- Three vessels in a line at 4, 2.5 and 1 bar, the first holding a quantity:
+  it reaches the third only through the second, which receives and gives in
+  one step. Against RK4 the quantity's error is 1.6e-7 and 4.1e-8 at 100 and
+  200 steps and mass and energy 8.8e-7 and 2.2e-7, ratios of 4.0. A storage
+  returning its fractions at the start or end of the step would be first
+  order here; the two-vessel cases cannot tell, because a donor's
+  composition does not change within a step.
+- No step of these runs is shortened, the one in which the flow turns
+  included.
 - A vessel filled from a line through a prescribed stream boundary ends at
   `(m0 c_v T0 + m_in c_p T_line) / ((m0 + m_in) c_v)`, 355 K from a 300 K
   line, to 1e-12.
@@ -857,6 +871,17 @@ the refused calls change nothing.
   stores its absolute temperature, so a small heat increment is rounded to an
   ulp of that temperature each step; its ledger account, a compensated sum of
   receipts, does not lose it.
+- Streams: the kernel audits a stream port's enthalpy and nothing else.
+  Mass and carried quantities cancel across a junction by its equations, but
+  no audit checks that a component keeps them (a transport element that
+  returned the same mass rate at both ports would pass the kernel and the
+  kit; only its own tests would catch it), and the ledger has no mass row.
+  Entropy carried by streams and made by mixing or throttling is not
+  accounted. Nothing checks that joined volumes hold the same gas. A
+  `GasVolume` shortens a step that passes more than about twice its mass
+  through it, so a small volume between restrictions sets the step; a
+  prescribed draw of a quantity a volume holds none of ends in step
+  underflow. Stream inputs inside a loop start from zero on the first step.
 - No mapped transfer for arbitrary field duality metrics, and no gyrator as a
   connection (the `Gyrator` element is a component); no field ports;
   no non-smooth tier (contact, stick-slip); no multirate stepping; no

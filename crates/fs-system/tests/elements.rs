@@ -10,7 +10,7 @@ use std::f64::consts::PI;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_ports::component::conformance::{Case, Observed, check_component, check_port_tangent};
-use fs_ports::component::{Component, PortTangent, Proposal, Receipt};
+use fs_ports::component::{Component, PortSpec, PortTangent, Proposal, Receipt};
 use fs_ports::PortKind;
 use fs_system::elements::{
     Conductance, Damper, ElementError, Force, GasContents, GasVolume, Gyrator, HeatCapacity,
@@ -1353,6 +1353,49 @@ fn air(carried: usize) -> GasVolume {
     GasVolume::new(AIR_J_KG_K, RATIO, carried).unwrap()
 }
 
+/// Every entry of the port tangent against a central difference of the
+/// port map, input `j` moved on its own by `moves[j]`. An entry must agree
+/// to 1e-6 of its own size, or to the rounding of the difference.
+fn tangent_entries<C>(element: &C, state: &C::State, dt_s: f64, inputs: &[f64], moves: &[f64])
+where
+    C: PortTangent,
+    C::State: Clone,
+{
+    let n_out: usize = element.ports().iter().map(PortSpec::output_width).sum();
+    with_cx(|cx| {
+        let at = |x: &[f64]| {
+            let mut slot = state.clone();
+            let mut out = vec![0.0; n_out];
+            match element.propose(state, dt_s, x, &mut slot, &mut out, cx) {
+                Ok(Proposal::Step(_)) => out,
+                _ => panic!("no step at {x:?}"),
+            }
+        };
+        let base = at(inputs);
+        for (column, by) in moves.iter().enumerate() {
+            let mut moved = inputs.to_vec();
+            moved[column] = inputs[column] + by;
+            let plus = at(&moved);
+            moved[column] = inputs[column] - by;
+            let minus = at(&moved);
+            let mut direction = vec![0.0; inputs.len()];
+            direction[column] = 1.0;
+            let mut tangent = vec![f64::NAN; n_out];
+            assert!(element.jvp(state, dt_s, inputs, &direction, &mut tangent, cx).is_ok());
+            for row in 0..n_out {
+                let difference = (plus[row] - minus[row]) / (2.0 * by);
+                let size = difference.abs().max(tangent[row].abs());
+                let rounding = 16.0 * f64::EPSILON * base[row].abs() / by;
+                assert!(
+                    (difference - tangent[row]).abs() <= 1.0e-6 * size + rounding,
+                    "d output {row} / d input {column}: {} against the difference {difference}",
+                    tangent[row]
+                );
+            }
+        }
+    });
+}
+
 #[test]
 fn gas_volumes_and_restrictions_conform_and_carry_what_the_upstream_side_holds() {
     let mut n = Numbers(20_261_112);
@@ -1381,14 +1424,40 @@ fn gas_volumes_and_restrictions_conform_and_carry_what_the_upstream_side_holds()
         // by the enthalpy and heat that entered, so the mean pressure is
         let mean = pressure + 0.5 * (RATIO - 1.0) * dt * (enthalpy_w + heat_w) / volume;
         within(out[0], mean, 1.0e-13);
-        // The specific enthalpy is c_p times the temperature the heat port
-        // returns.
-        within(out[1], RATIO * closed.heat_capacity_j_kg_k() * out[4], 1.0e-15);
+        // The temperature and each fraction returned are the means of their
+        // values before and after the step, and the specific enthalpy is
+        // c_p times that temperature.
+        let capacity = closed.heat_capacity_j_kg_k();
+        let mass = state.mass_kg + dt * rate;
+        let energy = state.energy_j + dt * (enthalpy_w + heat_w);
+        let kelvin =
+            0.5 * (state.energy_j / (state.mass_kg * capacity) + energy / (mass * capacity));
+        within(out[4], kelvin, 1.0e-13);
+        within(out[1], RATIO * capacity * kelvin, 1.0e-13);
+        for index in 0..2 {
+            let after = (state.carried_kg[index] + dt * inputs[2 + index]) / mass;
+            within(out[2 + index], 0.5 * (fractions[index] + after), 1.0e-13);
+        }
+        // The kit's tangent check takes one norm over all outputs, which
+        // leaves the small rows of a port whose coefficients are different
+        // quantities loosely pinned. Here every entry is checked on its own,
+        // each input moved by 1e-4 of what would double the contents.
+        let per_second = 1.0e-4 / dt;
+        let mut moves = vec![
+            per_second * state.mass_kg,
+            per_second * state.energy_j,
+            per_second * state.mass_kg,
+            per_second * state.mass_kg,
+            per_second * state.energy_j,
+        ];
+        tangent_entries(&closed, &state, dt, &inputs, &moves);
 
         // Behind a wall the stream and the wall see one pressure.
         inputs.push(n.next(-1.0e-2, 1.0e-2));
         let out = conforms(&walled, &state, &stale, dt, &inputs);
         assert_eq!(out[0], out[5]);
+        moves.push(per_second * state.volume_m3);
+        tangent_entries(&walled, &state, dt, &inputs, &moves);
 
         let mut side = || {
             [
@@ -1410,6 +1479,11 @@ fn gas_volumes_and_restrictions_conform_and_carry_what_the_upstream_side_holds()
         }
         for index in 0..4 {
             assert_eq!(out[4 + index], -out[index]);
+        }
+        // The map is linear in each input away from zero flow.
+        if (a[0] - b[0]).abs() > 1.0e3 {
+            let moves = [100.0, 300.0, 1.0e-3, 1.0e-3, 100.0, 300.0, 1.0e-3, 1.0e-3];
+            tangent_entries(&pipe, &(), dt, &both, &moves);
         }
     }
     // At equal pressures nothing crosses, whatever the two sides hold. The
@@ -1646,7 +1720,7 @@ fn two_vessels_through_a_restriction_equalize_and_the_donor_keeps_its_compositio
         let dt = 2.0 / f64::from(steps);
         with_cx(|cx| {
             for _ in 0..steps {
-                vessels.system.step(dt, cx).unwrap();
+                assert_eq!(vessels.system.step(dt, cx).unwrap().shortenings, 0);
                 // Mass leaves `a` for the whole run, so `a` keeps the
                 // composition it started with and receives none of what only
                 // `b` holds. Nothing in either element says so.
@@ -1718,7 +1792,8 @@ fn a_flow_that_turns_round_carries_back_what_the_other_vessel_holds() {
         let mut last = 0.0_f64;
         with_cx(|cx| {
             for index in 0..steps {
-                vessels.system.step(dt, cx).unwrap();
+                // The step in which the flow turns is taken whole.
+                assert_eq!(vessels.system.step(dt, cx).unwrap().shortenings, 0, "step {index}");
                 let rate = vessels.rate();
                 if rate > 0.0 {
                     forward += 1;
@@ -1760,6 +1835,134 @@ fn a_flow_that_turns_round_carries_back_what_the_other_vessel_holds() {
     // and 1.5e-8.
     let ratio = errors[0] / errors[1];
     assert!(errors[1] < 3.0e-8 && (3.8..4.6).contains(&ratio), "{errors:?}");
+}
+
+/// A line of equal vessels `[m, U, c]`, each joined to the next by the same
+/// restriction, integrated by classical RK4. Independent of the elements.
+fn line_reference(
+    mut y: Vec<[f64; 3]>,
+    volume: f64,
+    conductance: f64,
+    t_end: f64,
+    steps: u32,
+) -> Vec<[f64; 3]> {
+    let rhs = |y: &[[f64; 3]]| {
+        let mut d = vec![[0.0; 3]; y.len()];
+        let pressure = |vessel: usize| (RATIO - 1.0) * y[vessel][1] / volume;
+        for link in 0..y.len() - 1 {
+            let rate = conductance * (pressure(link) - pressure(link + 1));
+            let from = if rate >= 0.0 { link } else { link + 1 };
+            let per_mass = [
+                1.0,
+                RATIO * y[from][1] / y[from][0],
+                y[from][2] / y[from][0],
+            ];
+            for index in 0..3 {
+                d[link][index] -= rate * per_mass[index];
+                d[link + 1][index] += rate * per_mass[index];
+            }
+        }
+        d
+    };
+    let moved = |y: &[[f64; 3]], d: &[[f64; 3]], by: f64| -> Vec<[f64; 3]> {
+        y.iter()
+            .zip(d)
+            .map(|(value, slope)| core::array::from_fn(|index| value[index] + by * slope[index]))
+            .collect()
+    };
+    let h = t_end / f64::from(steps);
+    for _ in 0..steps {
+        let k1 = rhs(&y);
+        let k2 = rhs(&moved(&y, &k1, 0.5 * h));
+        let k3 = rhs(&moved(&y, &k2, 0.5 * h));
+        let k4 = rhs(&moved(&y, &k3, h));
+        for (vessel, value) in y.iter_mut().enumerate() {
+            for index in 0..3 {
+                value[index] += h
+                    * (k1[vessel][index]
+                        + 2.0 * k2[vessel][index]
+                        + 2.0 * k3[vessel][index]
+                        + k4[vessel][index])
+                    / 6.0;
+            }
+        }
+    }
+    y
+}
+
+/// Three 20 l vessels of air at 300 K in a line, joined by two restrictions
+/// of 5e-8 kg/(s Pa); the first holds `fraction` of one carried quantity.
+fn vessel_line(pressures: [f64; 3], fraction: f64) -> (System, Vec<NodeId>) {
+    let mut builder = SystemBuilder::new();
+    let mut vessels = Vec::new();
+    for (index, (name, pressure)) in ["first", "second", "third"].into_iter().zip(pressures).enumerate() {
+        let held = if index == 0 { fraction } else { 0.0 };
+        let contents = air(1).contents(pressure, 300.0, 0.02, &[held]).unwrap();
+        let node = builder.add_with_tangent(name, air(1), contents).unwrap();
+        anchored(&mut builder, node, "heat");
+        vessels.push(node);
+    }
+    let mut pipes = Vec::new();
+    for name in ["upper", "lower"] {
+        let pipe = Restriction::new(5.0e-8, 1).unwrap();
+        pipes.push(builder.add_with_tangent(name, pipe, ()).unwrap());
+    }
+    let stream = |builder: &SystemBuilder, index: usize| builder.port(vessels[index], "stream").unwrap();
+    let end = |builder: &SystemBuilder, pipe: usize, side: &str| builder.port(pipes[pipe], side).unwrap();
+    builder.bond(stream(&builder, 0), end(&builder, 0, "a")).unwrap();
+    builder
+        .common_effort(stream(&builder, 1), &[end(&builder, 0, "b"), end(&builder, 1, "a")])
+        .unwrap();
+    builder.bond(end(&builder, 1, "b"), stream(&builder, 2)).unwrap();
+    (builder.seal().unwrap(), vessels)
+}
+
+#[test]
+fn a_quantity_carried_through_a_middle_vessel_arrives_at_second_order() {
+    // At 4, 2.5 and 1 bar the flow runs one way down the line, and what the
+    // first vessel holds reaches the third only through the second, which
+    // receives and gives in the same step. A storage that returned its
+    // fractions at the start or the end of the step, and not their mean,
+    // would deliver it at first order.
+    let pressures = [4.0e5, 2.5e5, 1.0e5];
+    let numbers = |system: &System, nodes: &[NodeId]| -> Vec<[f64; 3]> {
+        nodes
+            .iter()
+            .map(|node| {
+                let held = system.state::<GasContents>(*node).unwrap();
+                [held.mass_kg, held.energy_j, held.carried_kg[0]]
+            })
+            .collect()
+    };
+    let (system, nodes) = vessel_line(pressures, 0.4);
+    let initial = numbers(&system, &nodes);
+    let reference = line_reference(initial.clone(), 0.02, 5.0e-8, 2.0, 2_000);
+    let mut errors = Vec::new();
+    for steps in [100_u32, 200] {
+        let (mut system, nodes) = vessel_line(pressures, 0.4);
+        step(&mut system, 2.0 / f64::from(steps), steps);
+        let now = numbers(&system, &nodes);
+        // Mass, energy and the quantity are conserved down the line.
+        for index in 0..3 {
+            let total = |all: &[[f64; 3]]| all.iter().map(|vessel| vessel[index]).sum::<f64>();
+            within(total(&now), total(&initial), 4.0e-15);
+        }
+        let (mut flow, mut carried) = (0.0_f64, 0.0_f64);
+        for (got, want) in now.iter().zip(&reference) {
+            flow = flow
+                .max((got[0] - want[0]).abs() / want[0])
+                .max((got[1] - want[1]).abs() / want[1]);
+            carried = carried.max((got[2] - want[2]).abs() / want[0]);
+        }
+        errors.push([flow, carried]);
+    }
+    // The third vessel has received 0.41 g of it. Measured errors: mass and
+    // energy 8.8e-7 and 2.2e-7, the quantity 1.6e-7 and 4.1e-8.
+    assert!(reference[2][2] > 1.0e-4, "{}", reference[2][2]);
+    for kind in 0..2 {
+        let ratio = errors[0][kind] / errors[1][kind];
+        assert!((3.7..4.3).contains(&ratio), "{errors:?}");
+    }
 }
 
 #[test]
