@@ -316,7 +316,7 @@ fn fixed_flow_turbulent_channel_requires_more_pressure_and_retains_si_pressure_w
     let initial = vec![0.0; system.n_u];
     let widths = vec![0.4; mesh.tris.len()];
     let requested = -0.3;
-    let mut normalized = None;
+    let mut normalized: Option<Vec<f64>> = None;
     for rho in [2.0, 7.0] {
         let reference = transport(rho, 0.2);
         let owner = MaterialFluxSystem::new(&system, &reference, numerics()).unwrap();

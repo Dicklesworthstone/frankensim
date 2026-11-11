@@ -16,8 +16,11 @@ use fs_thermochem::transport::maxwell_stefan::MaxwellStefanV1;
 
 const MASSES: [f64; 3] = [0.002, 0.028, 0.044];
 
+#[path = "multicomponent/nonisothermal.rs"]
 mod nonisothermal;
+#[path = "multicomponent/phase_field.rs"]
 mod phase_field;
+#[path = "multicomponent/transport.rs"]
 mod transport;
 
 fn species(index: usize) -> SpeciesId {
