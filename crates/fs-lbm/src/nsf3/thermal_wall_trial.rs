@@ -65,8 +65,10 @@ impl<L: Lattice3<27>> NsfThermalWallTrial<'_, L> {
 
 impl<L: Lattice3<27>> NsfGrid3<L> {
     /// Preview one original lattice step under proposed local thermal walls.
-    /// The controls are held over this step; the original setter refreshes its
-    /// starting FV history even when the proposed table is unchanged, and its
+    /// The controls are held over this step; the recorded setter (`record = true`
+    /// in `set_thermal_walls_impl`) refreshes its starting FV history even when
+    /// the proposed table is unchanged, which the public setter does not (it
+    /// returns early then), and its
     /// actual old/new face fluxes supply the heat
     /// account. No post-step material query reconstructs the exchanged joules.
     ///

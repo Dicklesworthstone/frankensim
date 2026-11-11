@@ -85,6 +85,13 @@ fn g3_periodic_thermal_trials_retain_the_original_dynamic_closure() {
     for _ in 0..2 {
         let before = grid.state_hash();
         let bytes = grid.dynamic_sgs_workspace_bytes();
+        // The trial rebases its starting FV history on every call (thermal_wall_trial.rs:73-75, "including the explicit
+        // starting-history rebase"); a plain step does not, so from the second pass on it starts from the un-rebased
+        // end-of-step history and differs at corrector tolerance. The oracle takes the same path: the recorded setter,
+        // which (unlike the public one, thermal_wall.rs:202) does not return early for an unchanged table.
+        direct
+            .set_thermal_walls_recorded(Vec::new(), || false)
+            .unwrap();
         let expected = direct.step().unwrap();
         let trial = grid
             .preview_thermal_wall_step(Vec::new(), 210, || false)

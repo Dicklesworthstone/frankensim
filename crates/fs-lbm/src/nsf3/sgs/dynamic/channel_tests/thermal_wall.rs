@@ -389,7 +389,14 @@ fn g3_finite_wall_trials_keep_dynamic_transport_and_rollback_filter_scratch() {
             )
         };
         let bytes = grid.dynamic_sgs_workspace_bytes();
-        direct.set_thermal_walls(patterned_walls()).unwrap();
+        // A trial rebases its starting FV history on every call (`set_thermal_walls_recorded`, record = true;
+        // thermal_wall_trial.rs:73-75, "including the explicit starting-history rebase"), while the public setter returns
+        // early when the table is unchanged (thermal_wall.rs:202). From the second pass on, the public setter would leave
+        // this oracle on the un-rebased end-of-step history, a different numerical path that differs from the trial at
+        // corrector tolerance (internal_j 1e-9 relative, measured).
+        direct
+            .set_thermal_walls_recorded(patterned_walls(), || false)
+            .unwrap();
         let expected = direct.step().unwrap();
         let mut complete_polls = 0;
         let trial = grid
