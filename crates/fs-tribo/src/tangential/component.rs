@@ -42,9 +42,9 @@
 //! reported stored change disagrees with the law's stored energies by more
 //! than it (the admission of the hand-written friction-heat coupling's
 //! `tangential_heat_candidate`); a source whose law gives the held state
-//! another stored energy than the state was left with. A reversible law
-//! whose stiffness depends on temperature needs a thermoelastic account that
-//! this adapter does not have.
+//! another stored energy than the state was left with, by any amount. A
+//! reversible law whose stiffness depends on temperature needs a
+//! thermoelastic account that this adapter does not have.
 //!
 //! One call does a bounded amount of work (the law's own root budget), and
 //! [`TriboError`] has no cancellation value, so `cx` is not polled here.
@@ -217,10 +217,15 @@ where
         }
         let law = self.law_at_k(kelvin)?;
         let tolerance_j = self.drive.work_tolerance_j;
-        // The held state must be worth to this law what it was left worth:
-        // otherwise changing the law has created or destroyed energy.
+        // The held state must be worth to this law exactly what it was left
+        // worth: otherwise changing the law has created or destroyed
+        // energy. No tolerance is given here. The receipt's stored change
+        // is formed from this value and the kernel re-measures it from the
+        // one the state holds, so any difference the check let through
+        // would be a broken audit instead of this refusal.
         let before_j = law.stored_energy_j(&old.tangential);
-        if !((before_j - old.reversible_j).abs() <= tolerance_j) {
+        #[allow(clippy::float_cmp)]
+        if before_j != old.reversible_j {
             return Err(refused("sliding_interface_law_changed_stored_energy"));
         }
         let step = law.advance(

@@ -176,12 +176,24 @@ fn the_account_runs_on_and_an_interface_at_rest_makes_no_heat() {
 }
 
 /// A linear tangential spring along the first axis: it stores
-/// `k x^2 / 2`, its traction over a step is the mean of the two ends, and
-/// it dissipates `unaccounted_j` that no work pays for.
+/// `k x^2 / 2` and its traction over a step is the mean of the two ends.
+/// Two defects can be switched on: it dissipates `unaccounted_j` that no
+/// work pays for, and it reports a stored change that is `misreported_j`
+/// more than its stored energies changed.
 #[derive(Debug, Clone, PartialEq)]
 struct Spring {
     stiffness_n_m: f64,
     unaccounted_j: f64,
+    misreported_j: f64,
+}
+
+/// The sound spring of `stiffness_n_m`.
+fn spring(stiffness_n_m: f64) -> Spring {
+    Spring {
+        stiffness_n_m,
+        unaccounted_j: 0.0,
+        misreported_j: 0.0,
+    }
 }
 
 impl TangentialLaw for Spring {
@@ -213,7 +225,7 @@ impl TangentialLaw for Spring {
             slip_increment_m: [moved_m, 0.0],
             state: next,
             regime: FrictionRegime::Sticking,
-            stored_change_j,
+            stored_change_j: stored_change_j + self.misreported_j,
             dissipated_j: self.unaccounted_j,
             closure_residual_j: stored_change_j + self.unaccounted_j - traction_n * moved_m,
             compatibility_residual_m: [0.0; 2],
@@ -224,12 +236,7 @@ impl TangentialLaw for Spring {
 
 #[test]
 fn storage_is_in_the_account_and_a_law_that_revalues_the_held_state_is_refused() {
-    let sound = |_: f64| {
-        Ok(Spring {
-            stiffness_n_m: 400.0,
-            unaccounted_j: 0.0,
-        })
-    };
+    let sound = |_: f64| Ok(spring(400.0));
     let interface = SlidingInterface::new(sound, drive([0.5, 0.0])).expect("interface");
     let start = interface.start(300.0).expect("start");
     let (stale, _, _) = propose(&interface, &start, 0.3, &[300.0]).expect("stale");
@@ -265,12 +272,7 @@ fn storage_is_in_the_account_and_a_law_that_revalues_the_held_state_is_refused()
 
     // The same spring with a stiffness that follows the temperature: at
     // another temperature the held stretch is worth another energy.
-    let softening = |kelvin: f64| {
-        Ok(Spring {
-            stiffness_n_m: 400.0 - (kelvin - 300.0),
-            unaccounted_j: 0.0,
-        })
-    };
+    let softening = |kelvin: f64| Ok(spring(400.0 - (kelvin - 300.0)));
     let revaluing = SlidingInterface::new(softening, drive([0.5, 0.0])).expect("interface");
     let cold = revaluing.start(300.0).expect("start");
     let (stretched, _, _) = propose(&revaluing, &cold, 0.02, &[300.0]).expect("step");
@@ -281,12 +283,45 @@ fn storage_is_in_the_account_and_a_law_that_revalues_the_held_state_is_refused()
     );
     // From the unloaded state every stiffness agrees, and the step is taken.
     assert!(propose(&revaluing, &cold, 0.02, &[310.0]).is_ok());
+    // However little the law revalues the held state, it is the owner's
+    // refusal. 1e-8 K changes the spring's 0.02 J by 5e-13 J, inside the
+    // work tolerance of 1e-12 J and far outside the rounding the receipt
+    // claims. The component as first landed (27fb5fd106) compared the two
+    // energies to the work tolerance, took this step, and the contract's
+    // check answered `EndpointEnergy { measured_change_j:
+    // -5.000028169277471e-13, stored_change_j: 0.0, tolerance_j:
+    // 3.694822225874806e-15 }` (found by review).
+    let barely = [300.000_000_01];
+    let case = Case {
+        state: &stretched,
+        stale: &stretched,
+        dt_s: 0.02,
+        inputs: &barely,
+    };
+    let checked = with_cx(|cx| check_component(&revaluing, &case, cx));
+    assert!(
+        matches!(
+            checked,
+            Err(Failure::Owner(TriboError::InvalidInput {
+                field: "sliding_interface_law_changed_stored_energy"
+            }))
+        ),
+        "{checked:?}"
+    );
+    assert_eq!(
+        field(propose(&revaluing, &stretched, 0.02, &barely)),
+        "sliding_interface_law_changed_stored_energy"
+    );
 
+}
+
+#[test]
+fn a_law_whose_accounts_do_not_balance_is_refused() {
     // A law whose heat no work pays for breaks the work balance.
     let leaking = |_: f64| {
         Ok(Spring {
-            stiffness_n_m: 400.0,
             unaccounted_j: 1.0e-6,
+            ..spring(400.0)
         })
     };
     let leaky = SlidingInterface::new(leaking, drive([0.5, 0.0])).expect("interface");
@@ -295,6 +330,40 @@ fn storage_is_in_the_account_and_a_law_that_revalues_the_held_state_is_refused()
         field(propose(&leaky, &unloaded, 0.02, &[300.0])),
         "sliding_interface_work_balance"
     );
+    // So does one whose energies balance while the stored change it
+    // reports is not the change of its stored energies: nothing else is
+    // wrong with this step.
+    let misreporting = |_: f64| {
+        Ok(Spring {
+            misreported_j: 1.0e-6,
+            ..spring(400.0)
+        })
+    };
+    let misreports = SlidingInterface::new(misreporting, drive([0.5, 0.0])).expect("interface");
+    let at_rest = misreports.start(300.0).expect("start");
+    assert_eq!(
+        field(propose(&misreports, &at_rest, 0.02, &[300.0])),
+        "sliding_interface_work_balance"
+    );
+    // And one that reports heat taken out of nothing, or no number at all.
+    for unaccounted_j in [-1.0e-6, f64::NAN] {
+        let taking = move |_: f64| {
+            Ok(Spring {
+                unaccounted_j,
+                ..spring(400.0)
+            })
+        };
+        let takes = SlidingInterface::new(taking, drive([0.5, 0.0])).expect("interface");
+        let rest = takes.start(300.0).expect("start");
+        assert_eq!(
+            field(propose(&takes, &rest, 0.02, &[300.0])),
+            "sliding_interface_work_balance"
+        );
+    }
+    // A law whose stored energy is not a number has no state to start from.
+    let unbounded = SlidingInterface::new(|_: f64| Ok(spring(f64::INFINITY)), drive([0.5, 0.0]))
+        .expect("interface");
+    assert_eq!(field(unbounded.start(300.0)), "stored_energy_j");
     // The conformance check carries the owner's refusal as it is.
     let case = Case {
         state: &unloaded,
@@ -354,8 +423,21 @@ fn it_refuses_what_it_cannot_take() {
         })
     );
     // At 390 K the coefficient is negative, which the dry law refuses.
-    assert!(propose(&bounded, &held, 0.2, &[390.0]).is_err());
+    assert_eq!(field(propose(&bounded, &held, 0.2, &[390.0])), "static_mu");
     assert_eq!(held, before);
+
+    // An output slice that is not the heat rate and the two tractions is
+    // refused with nothing written to it or to the candidate.
+    for length in [0_usize, 1, 2, 4] {
+        let mut candidate = start.clone();
+        let mut outputs = vec![f64::NAN; length];
+        let answered = with_cx(|cx| {
+            interface.propose(&start, 0.2, &[300.0], &mut candidate, &mut outputs, cx)
+        });
+        assert_eq!(field(answered), "sliding_interface_outputs");
+        assert_eq!(candidate, start);
+        assert!(outputs.iter().all(|value| value.is_nan()), "{outputs:?}");
+    }
 
     // What an interface cannot be held to.
     let built = |change: fn(&mut PrescribedSlip)| {

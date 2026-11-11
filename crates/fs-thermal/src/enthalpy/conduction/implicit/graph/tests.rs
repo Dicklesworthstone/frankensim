@@ -1512,7 +1512,9 @@ fn a_link_carried_outside_conducts_nothing_and_keeps_the_area_it_covers() {
         leaving_j += kg * (after - start);
     }
     assert_eq!(report.energy.substeps, 1);
-    // All the heat is the films': none passed between the cells unseen.
+    // The owner's external heat is the two cells' stored change. (Heat
+    // between the cells would cancel in this sum; that there was none is
+    // shown by each cell's own closed form above.)
     near(report.energy.external_heat_j, leaving_j, 1e-9);
     // The explicit timeline with the binding is the one whose contact was
     // authored without conductance, to the bit.

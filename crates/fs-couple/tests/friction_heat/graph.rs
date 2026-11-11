@@ -18,10 +18,14 @@
 //! verdict: the endpoint of every kernel step (the cells' energy increments
 //! and the plane's temperature) is handed to `FrictionHeatStep::evaluate`
 //! with the module tests' own law callback, and must be accepted at the
-//! tests' tolerances of 1e-10 J; what the module then publishes (cells,
-//! tangential state, traction) must be what the graph holds. The tests' own
-//! independent references (their LU endpoint in temperature coordinates,
-//! their closed forms) are checked on the graph as well.
+//! tests' tolerances of 1e-10 J. Acceptance is the evidence: the module
+//! forms each cell's residual from its own authored conductances, its own
+//! route conductances and its own call of the law. The tangential state and
+//! traction of that call are also compared with the graph's, which shows
+//! that the interface component drives the law with the tests' input. The
+//! tests' own independent references (their LU endpoint in temperature
+//! coordinates, their closed forms, the module's own runs) are checked on
+//! the graph as well.
 //!
 //! The graph has no equivalent of: conductances that follow the materials'
 //! conductivities at the endpoint (the plane's are constants, as the
@@ -155,6 +159,72 @@ fn refusing(kelvin: f64) -> Result<FrictionLaw, TriboError> {
         Err(LAW_REFUSAL)
     } else {
         coulomb(1.0)
+    }
+}
+
+thread_local! {
+    /// The gate [`tripping`] requests cancellation on, when one is armed,
+    /// and how often it has.
+    static TRIPWIRE: std::cell::Cell<(Option<&'static CancelGate>, u32)> =
+        const { std::cell::Cell::new((None, 0)) };
+}
+
+/// The first case's law. Asked above 300 K, which happens only inside a
+/// kernel step (the interface starts and is first evaluated at 300 K), it
+/// requests cancellation on the armed gate.
+fn tripping(kelvin: f64) -> Result<FrictionLaw, TriboError> {
+    if kelvin > 300.0 {
+        TRIPWIRE.with(|wire| {
+            if let (Some(gate), tripped) = wire.get() {
+                gate.request();
+                wire.set((Some(gate), tripped + 1));
+            }
+        });
+    }
+    coulomb(1.0)
+}
+
+/// The module's own run beside a graph, as its tests take it: each step at
+/// the endpoint their LU solve gives.
+struct Own {
+    thermal: DepositionSimulation<'static>,
+    history: DryTangentialState,
+    route: FrictionHeatRoute,
+    lu: LuWorkspace,
+    law_at: LawAt,
+    k: [f64; 2],
+    /// The friction power at 300 K that the LU's right-hand side carries
+    /// [W]; its fall with temperature is the `beta` the LU was factored
+    /// with.
+    power_w: f64,
+}
+
+impl Own {
+    /// One accepted step of `dt`; the module's report of it.
+    fn step(&mut self, dt: f64) -> FrictionHeatReport {
+        let (energy, t) = endpoint(&self.thermal, &mut self.lu, dt, self.power_w);
+        let target_s = self.thermal.time_s() + dt;
+        let own =
+            FrictionHeatStep::new(&self.thermal, target_s, &self.route, || Ok(())).expect("step");
+        let (law_at, k, history) = (self.law_at, self.k, &self.history);
+        let trial = own
+            .evaluate(
+                &energy,
+                t,
+                |_, temperature| {
+                    let law = law_at(temperature).expect("law");
+                    let friction =
+                        tangential_heat_candidate(&law, history, input(dt), temperature, 1e-12)
+                            .expect("friction");
+                    Ok::<_, DepositionError>(source(friction.dissipated_j, k, friction))
+                },
+                || Ok(()),
+            )
+            .expect("trial");
+        let (next, friction, report) = trial.accept(tolerances(), || Ok(())).expect("accepted");
+        self.history = friction.state;
+        self.thermal = next;
+        report
     }
 }
 
@@ -436,9 +506,16 @@ impl Graph {
         )?;
         let residual_j = trial.residual_j().iter().fold(0.0_f64, |worst, r| worst.max(r.abs()));
         let (next, friction, report) = trial.accept(tolerances(), || Ok(()))?;
-        // What the module publishes is what the graph holds: the cells to
-        // the rounding of forming an increment and adding it back, the
-        // tangential state and the traction exactly.
+        // The evidence is the acceptance above: the module formed every
+        // cell's residual with its own authored conductances, its own
+        // route conductances and its own call of the law. What follows
+        // only checks the hand-over. The cells the module publishes are
+        // the increments handed to it added back, so they return the
+        // graph's to rounding by construction. The tangential state and
+        // the traction come from the tests' own call of the law with the
+        // tests' own input, so their equality with the graph's shows that
+        // the interface component drives the law with that same input and
+        // history; it is not a result of the module.
         assert_eq!(next.time_s(), new.time_s());
         for (id, cell) in next.cells() {
             let held = new.cells()[id].specific_h_j_kg;
@@ -452,7 +529,6 @@ impl Graph {
         }
         assert_eq!(&friction.state, self.friction().tangential());
         assert_eq!(friction.traction_n, self.traction_n());
-        assert_eq!(report.interface_temperature_k, self.interface_k());
         // The loop the plane and the interface are on is closed to the
         // tolerance set in `declare` and the rounding the kernel allows a
         // temperature (16 units).
@@ -511,7 +587,10 @@ fn friction_work_enters_the_network_once_through_the_plane() {
     close(account("interface").dissipated_j.value(), 2.0, 1e-12);
     close(account("cells").stored_change_j.value(), 2.0, 1e-12);
     close(account("interface").stored_change_j.value(), -2.0, 1e-12);
-    assert_eq!(ledger.sink_heat_j(), 0.0);
+    // No film here. An implicit timeline's environment heat is the owner's
+    // external heat less the port heat it was handed, so what reaches the
+    // room is the rounding of that difference, not an exact zero.
+    assert!(ledger.sink_heat_j().abs() <= 1e-14, "{}", ledger.sink_heat_j());
     assert!(ledger.energy_residual_j().abs() <= 1e-12, "{}", ledger.energy_residual_j());
     // The work became heat at the plane's temperature, and the plane then
     // conducted it down to the cells.
@@ -554,10 +633,15 @@ fn friction_that_falls_with_temperature_settles_where_the_module_says() {
     let (lengths, k, dt) = ([1.0; 2], [1.0, 2.0], 0.25);
     let start = sided(1, lengths, k, [1.0; 2], [3.0, 5.0], [0.0; 2]);
     let mut graph = declare(&start, lengths, k, mu_falling, 1.0, dt, true);
-    let route = FrictionHeatRoute::from_link(&start, CONTACT, k).expect("route");
-    let mut lu = factor(&start, dt, [2.0, 4.0], 0.1);
-    let mut module = start.clone();
-    let mut history = mu_falling(300.0).expect("law").initial_state();
+    let mut own = Own {
+        thermal: start.clone(),
+        history: mu_falling(300.0).expect("law").initial_state(),
+        route: FrictionHeatRoute::from_link(&start, CONTACT, k).expect("route"),
+        lu: factor(&start, dt, [2.0, 4.0], 0.1),
+        law_at: mu_falling,
+        k,
+        power_w: 8.0,
+    };
     let (mut worst_residual_j, mut worst_apart_k, mut to_room_j) = (0.0_f64, 0.0_f64, 0.0_f64);
     let (mut last_force, mut worst_wire_k) = (0.0, 0.0_f64);
     with_cx(&gate, |cx| {
@@ -571,28 +655,9 @@ fn friction_that_falls_with_temperature_settles_where_the_module_says() {
             last_force = verdict.friction.traction_n[0];
 
             // The module's own step, as its test takes it.
-            let (energy, t) = endpoint(&module, &mut lu, dt, 8.0);
-            let own = FrictionHeatStep::new(&module, module.time_s() + dt, &route, || Ok(()))
-                .expect("module step");
-            let trial = own
-                .evaluate(
-                    &energy,
-                    t,
-                    |_, temperature| {
-                        let law = mu_falling(temperature).expect("law");
-                        let friction =
-                            tangential_heat_candidate(&law, &history, input(dt), temperature, 1e-12)
-                                .expect("friction");
-                        Ok::<_, DepositionError>(source(friction.dissipated_j, k, friction))
-                    },
-                    || Ok(()),
-                )
-                .expect("trial");
-            let (next, friction, report) = trial.accept(tolerances(), || Ok(())).expect("accepted");
+            let report = own.step(dt);
             worst_apart_k =
                 worst_apart_k.max((graph.plane_k() - report.interface_temperature_k).abs());
-            history = friction.state;
-            module = next;
         }
     });
     let effective = 2.0 * 3.0 / (2.0 + 3.0) + 4.0 * 5.0 / (4.0 + 5.0);
@@ -607,7 +672,6 @@ fn friction_that_falls_with_temperature_settles_where_the_module_says() {
     close(graph.plane_k(), expected, 1e-9);
     assert!(last_force < 8.0);
     close(last_force, 8.0 - 0.1 * (expected - 300.0), 1e-9);
-    close(graph.traction_n()[0], last_force, 0.0);
     assert_eq!(graph.friction().tangential().contact_temperature_k(), Some(graph.interface_k()));
     assert!(worst_apart_k <= 1e-10, "{worst_apart_k}");
     // The films' heat is in the room, as the module's reports have it.
@@ -635,13 +699,20 @@ fn a_refusal_publishes_nothing_and_mean_temperature_ports_are_not_the_modules_ru
     assert_eq!((graph.system.time_s(), graph.system.steps()), (0.0, 0));
     assert_eq!(graph.friction(), &unloaded);
 
-    let mut graph = declare(&old, lengths, k, mu_one, 1.0, dt, true);
-    let cancelled = CancelGate::new_clock_free();
-    cancelled.request();
-    let stopped = with_cx(&cancelled, |cx| graph.system.step(dt, cx));
+    // Cancellation requested inside the step, by the interface's own law
+    // once the solve has taken the plane above 300 K: the components have
+    // been called by then, and nothing of theirs is published.
+    let mut graph = declare(&old, lengths, k, tripping, 1.0, dt, true);
+    let unloaded = graph.friction().clone();
+    let cancelled: &'static CancelGate = Box::leak(Box::new(CancelGate::new_clock_free()));
+    TRIPWIRE.with(|wire| wire.set((Some(cancelled), 0)));
+    let stopped = with_cx(cancelled, |cx| graph.system.step(dt, cx));
+    let (_, tripped) = TRIPWIRE.with(|wire| wire.replace((None, 0)));
+    assert!(tripped >= 1, "the law was not asked inside the step");
     assert!(matches!(stopped, Err(SystemError::Cancelled)), "{stopped:?}");
     assert_eq!(graph.thermal().cells(), old.cells());
     assert_eq!((graph.system.time_s(), graph.system.steps()), (0.0, 0));
+    assert_eq!(graph.friction(), &unloaded);
 
     // The same graph with the default ports, which return the mean of the
     // two ends, is another discrete rule: the kernel takes its step, and
@@ -718,7 +789,18 @@ fn the_partition_and_the_plane_temperature_converge_on_three_grids() {
     for n in [16, 32, 64] {
         let start = sided(n, lengths, k, [1.0; 2], [0.0; 2], [0.0; 2]);
         let mut graph = declare(&start, lengths, k, mu_three_tenths, 1.0, dt, true);
+        // Beside it, the module's own run as its test takes it.
+        let mut own = Own {
+            thermal: start.clone(),
+            history: mu_three_tenths(300.0).expect("law").initial_state(),
+            route: FrictionHeatRoute::from_link(&start, CONTACT, k).expect("route"),
+            lu: factor(&start, dt, [2.0 * n as f64 / 4.0, 8.0 * n as f64 / 4.0], 0.0),
+            law_at: mu_three_tenths,
+            k,
+            power_w: 3.0,
+        };
         let (mut received, mut worst_residual_j, mut worst_wire_k) = ([0.0; 2], 0.0_f64, 0.0_f64);
+        let (mut own_received, mut worst_apart_k) = ([0.0; 2], 0.0_f64);
         with_cx(&gate, |cx| {
             for step in 0..512 {
                 let verdict = graph.step(dt, cx).unwrap_or_else(|refusal| {
@@ -727,13 +809,27 @@ fn the_partition_and_the_plane_temperature_converge_on_three_grids() {
                 worst_residual_j = worst_residual_j.max(verdict.residual_j);
                 worst_wire_k = worst_wire_k.max(verdict.wire_k.abs());
                 let on_the_wires = graph.body_heat_j(dt);
+                let report = own.step(dt);
                 for side in 0..2 {
                     received[side] += on_the_wires[side];
+                    own_received[side] += report.body_heat_j[side];
                 }
+                worst_apart_k =
+                    worst_apart_k.max((graph.plane_k() - report.interface_temperature_k).abs());
             }
         });
         close(received.iter().sum(), 0.75, 1e-10);
         close(graph.thermal().energy_j(), 0.75, 1e-10);
+        // The graph against the module's own run: the plane's temperature
+        // at every step, and what each body received in all.
+        let apart_j = [0, 1].map(|side: usize| (received[side] - own_received[side]).abs());
+        eprintln!(
+            "sixth case, n={n}: against the module's own run the plane is {worst_apart_k:.3e} K \
+             apart at worst and the two bodies' heats {:.3e} J and {:.3e} J",
+            apart_j[0], apart_j[1]
+        );
+        assert!(worst_apart_k <= 1e-11, "{worst_apart_k}");
+        assert!(apart_j[0] <= 1e-12 && apart_j[1] <= 1e-12, "{apart_j:?}");
         let partition_error = (received[0] / 0.75 - 1.0 / 3.0).abs();
         let temperature_error =
             ((graph.plane_k() - 300.0) - 1.0 / core::f64::consts::PI.sqrt()).abs();

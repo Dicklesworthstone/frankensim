@@ -168,10 +168,25 @@ apart at worst (allowed 4.1e-10 K), 16.758 J to the room in both accounts;
 the same cells not in contact at all, whose films act on the whole faces,
 end 0.19 K away.
 
-Not tested: the isolated-equilibrium solve on a graph with a named link (by
-reading, `closed_components` refuses it as a non-conducting link); an
-adaptive advance with a named link; a named link beside a reservoir or a
-bound ambient face on the same cell.
+What a named link means to the other solves on the binding, by reading and
+not tested: the operating-point solve, the thermal impedance (plain and
+driven) and the explicit power balance treat it as the advances do, with no
+conduction and its covered area kept, and say nothing about it in their
+results. Their answer is therefore the timeline's alone, without what the
+other owner carries across the contact; whoever asks for a stationary state
+of the pair must supply that heat as sources. The isolated-equilibrium solve
+refuses a named link, as it refuses any link that does not conduct
+(`closed_components`, `ConductingTopology`). Also not tested: an adaptive
+advance with a named link; a named link beside a reservoir or a bound
+ambient face on the same cell.
+
+The option is on the conduction binding. The kernel-facing
+`ThermalTimeline` takes a binding only in its implicit form
+(`ThermalTimeline::implicit`, through the graph prepared on it). Its
+explicit form steps with the links' authored conductances and has no
+binding to name a contact on: there a contact carried through the ports
+must be authored without conductance, and a conductance wired across the
+ports of a pair whose link still conducts is counted twice with no refusal.
 
 The receipt's stored change is the owner's `EnergyAudit`; numerical loss is
 what entered through the ports less that. The energy tolerance is

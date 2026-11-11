@@ -3113,9 +3113,16 @@ fraction, heat capacity or flash temperature.
   off by more than `work_tolerance_j`, or whose reported stored change
   disagrees with the law's stored energies by more than it (the admission of
   fs-couple's `tangential_heat_candidate`); a source whose law gives the
-  held state another stored energy than it was left with.
+  held state another stored energy than it was left with, by any amount.
+  That comparison is exact: the receipt's stored change is formed from the
+  law's value and the kernel re-measures it from the state's, so a
+  difference let through would break the audit of the step's endpoints.
+  (As first landed in 27fb5fd106 the comparison had the work tolerance; a
+  spring softened by 1e-8 K was then taken and the contract's check answered
+  `EndpointEnergy` with 5.0e-13 J measured against 3.7e-15 J allowed. Found
+  by review.)
 
-`tests/sliding_interface.rs` (five tests, `cargo test -p fs-tribo --features
+`tests/sliding_interface.rs` (six tests, `cargo test -p fs-tribo --features
 component --test sliding_interface`): with a Coulomb coefficient
 `0.8 - 0.01 (T - 300 K)` the interface passes the contract's conformance
 check at three slip rates (one oblique, one reversed), three temperatures
@@ -3123,9 +3130,18 @@ and three steps, with heat `-mu N |v|`, traction `mu N` along the slip, the
 law's own slip and thermal boundary in the state, and the work as the
 account; fifty steps book 2.775 J; at rest it makes no heat. A synthetic
 spring (not a material) shows storage in the account (1.28 J in the spring,
-1.28 J of work, nothing net), the refusal of a stiffness that follows the
-temperature, and the refusal of heat no work pays for. The refusals are
-each checked by the field they name.
+1.28 J of work, nothing net) and these refusals, each by the field it
+names: a stiffness that follows the temperature, by 10 K and by 1e-8 K
+(also through the conformance check, which carries the owner's refusal);
+heat no work pays for; a reported stored change that is not the change of
+the stored energies while everything else balances; negative and
+non-numeric dissipation; a law whose stored energy is not a number, at the
+start. Also checked by field: temperatures and steps that are not positive
+and finite, a wrong number of inputs, an output slice of the wrong length
+(with nothing written), the source's own refusal and the dry law's
+(`static_mu` at a negative coefficient) carried unchanged, and seven things
+an interface cannot be held to. Not tested: a stored energy that becomes
+non-finite when re-measured from a state.
 
 Against the hand-written coupling: `crates/fs-couple/tests/friction_heat/
 graph.rs` declares fs-couple's friction-heat module from this component, a
