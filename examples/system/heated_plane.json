@@ -1,0 +1,17 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 200.0,
+  "step_s": 0.5,
+  "sample_every_s": 20.0,
+  "elements": {
+    "pad": {"kind": "heat_capacity", "capacity_j_k": 50.0, "temperature_k": 400.0},
+    "disc": {"kind": "heat_capacity", "capacity_j_k": 120.0, "temperature_k": 300.0},
+    "plane": {"kind": "heat_node", "conductances_w_k": [2.0, 6.0], "temperature_k": 325.0},
+    "rubbing": {"kind": "heater", "power_w": 30.0}
+  },
+  "connections": [
+    {"join": ["pad.heat", "plane.body0"]},
+    {"join": ["disc.heat", "plane.body1"]},
+    {"join": ["plane.source", "rubbing.heat"]}
+  ]
+}

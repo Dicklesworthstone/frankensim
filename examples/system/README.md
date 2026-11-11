@@ -17,6 +17,7 @@ is the kernel's state and its energy and entropy ledger.
 | `driven_oscillator.json` | a mass on a spring and damper, driven by a sine force; the damper heats a housing that loses heat to a fixed ambient | the monolithic midpoint rule for the same oscillator |
 | `adaptive_oscillator.json` | a loaded oscillator chooses shorter intervals to meet explicit coordinate and source-work tolerances | the analytic oscillation phase, tolerance refinement and work from the accepted displacement |
 | `heated_body.json` | a 30 W heater in a body that loses heat through a wall to 293.15 K | the closed-form discrete approach to 308.15 K |
+| `heated_plane.json` | 30 W generated on a plane of no heat capacity (`heat_node`) between a 50 J/K pad at 400 K and a 120 J/K disc at 300 K, joined to the plane by 2 and 6 W/K: no fraction is given, the heat divides by where the two temperatures put the plane | the midpoint rule for the two bodies and the plane's balance, solved independently each step: both temperatures and the plane's to 1e-9, every joule in the two bodies; the same device with the heat rate prescribed on the plane |
 | `dc_motor.json` | a DC motor across three domains: a 12 V supply, winding inductance and resistance in a current loop, a gyrator to a rotor with a viscous bearing, and both heats into one case | the monolithic midpoint rule for the two coupled equations, the supply's energy against stored energy plus heat |
 | `parallel_rlc.json` | a current source drives a capacitor, inductor and resistor in parallel; all Joule heat warms the case | independent coupled voltage/current equations, source work, electrical storage and heat |
 | `nonlinear_rlc.json` | the same topology with voltage-dependent capacitance and flux-dependent inductance, crossing both curves' knees | independent charge/flux differential equations, original constitutive energies and Joule heat |
@@ -56,6 +57,27 @@ geometry. The report adds each branch's stored energy,
 and couple it holds on the connector's second attachment, three waveforms
 each, in the first body's axes or in world axes, and the work it does is
 that boundary's account in the ledger.
+
+## Heat generated between bodies
+
+`heated_plane.json` puts a heat source on a `heat_node`: a thermal node that
+stores nothing, joined to each of its bodies by a conductance
+(`conductances_w_k`, one per body; ports `body0`, `body1`, ...), with a port
+`source` for the heat put into the node. Its temperature is fixed by its
+balance, `T = (P + sum G_k T_k) / sum G_k`, and each body receives
+`G_k (T - T_k)`. A hot body therefore gives heat up through the node while a
+cold one takes the source's and its neighbour's, with no fraction written
+anywhere. This is the plane a sliding interface generates its heat on, a
+thin heater between two parts, or a glue line.
+
+- Join each `body<k>` to a `heat_capacity` (or prescribe its
+  `temperature_k`), and join a `heater` to `source` or prescribe
+  `heat_rate_w` there.
+- `temperature_k` on the element is optional and is not a state. With a
+  heater on `source` the node's temperature is solved in a loop, and this is
+  where that solve starts; the result does not depend on it. Without it such
+  a scene is refused, naming the heater's port.
+- The node reports `temperature_k`: what its balance gave in the last step.
 
 ## Temperature feedback
 

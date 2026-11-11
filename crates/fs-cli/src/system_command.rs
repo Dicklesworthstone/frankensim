@@ -40,7 +40,8 @@ use fs_system::constitutive::{
 };
 use fs_system::elements::{
     Admittance, Conductance, Damper, FlowSource, Force, GasContents, GasVolume, Gyrator,
-    HeatCapacity, Heater, Mass, Motion, Restriction, SourceAccount, Spring, Storage, Waveform,
+    HeatCapacity, HeatNode, Heater, Mass, Motion, Restriction, SourceAccount, Spring, Storage,
+    Waveform,
 };
 use fs_system::{
     AdaptiveConfig, AdaptiveError, AdaptiveReport, Checkpoint, ErrorNorm, ErrorTolerance,
@@ -67,6 +68,8 @@ const MAX_NETWORK_BODIES: usize = 64;
 const MAX_NETWORK_CONNECTORS: usize = 256;
 /// Quantities one stream of a scene may carry besides mass and enthalpy.
 const MAX_CARRIED: usize = 16;
+/// Bodies one `heat_node` may join.
+const MAX_NODE_BODIES: usize = 64;
 const ADAPTIVE_NO_CLAIM: &str = "step-doubling estimates control the declared state coordinates and source-work increments under the selected order assumption; they are local numerical estimates, not global error bounds or physical validation; dissipated heat and interface balances retain the kernel's separate ledger audits; no material-card resolution, contact, friction or phase change";
 
 const HELP: &str = "Usage: frankensim [--json] system <scene.json>
@@ -106,6 +109,14 @@ Elements (ports in brackets; SI units in every field name):
                  (and a signal output, temperature: its temperature at the
                  start of the step; it may stay unconnected)
   conductance    conductance_w_k                                      [a, b]
+  heat_node      conductances_w_k (one per body), temperature_k (optional)
+                                                [source, body0, body1, ...]
+                 (a plane of no heat capacity between bodies: join each
+                 body<k> to a heat capacity and a heater to source, or
+                 prescribe heat_rate_w on source. The heat divides by where
+                 the bodies' temperatures put the node; no fraction is
+                 given. temperature_k is not a state: with a heater on
+                 source it is where the solve for the node starts.)
   heater         power_w (waveform, never negative)                   [heat]
 Gas in volumes joined by restrictions (a perfect gas with constant heat
 capacities; all joined volumes must hold the same gas):
@@ -230,8 +241,9 @@ Connections, ports written element.port:
                           current grounds a series element's far end); voltage_v
                           grounds a resistor_branch end; current_a into a
                           node_capacitor or nonlinear_capacitor increases its charge;
-                          temperature_k for a damper, resistor, conductance or
-                          heater, heat_rate_w for a heat capacity; for a
+                          temperature_k for a damper, resistor, conductance,
+                          heater or heat node body, heat_rate_w for a heat
+                          capacity or a heat node's source; for a
                           network of rigid bodies, force_n or torque_n_m as
                           an array of three waveforms ([0, 0, 0] leaves a
                           body free or an actuator idle), and temperature_k
@@ -458,6 +470,9 @@ enum Kind {
     ViscoelasticNetwork,
     HeatCapacity,
     Conductance,
+    /// A thermal node of no capacity joined to bodies by conductances, with
+    /// a heat source at the node: the plane a heat is generated on.
+    HeatNode,
     /// A well-mixed volume of perfect gas: the node streams meet at.
     GasVolume,
     /// A linear flow restriction between two gas volumes.
@@ -466,7 +481,7 @@ enum Kind {
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 25] = [
+    const TABLE: [(&'static str, Self); 26] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
@@ -489,6 +504,7 @@ impl Kind {
         ("viscoelastic_network", Self::ViscoelasticNetwork),
         ("heat_capacity", Self::HeatCapacity),
         ("conductance", Self::Conductance),
+        ("heat_node", Self::HeatNode),
         ("gas_volume", Self::GasVolume),
         ("restriction", Self::Restriction),
         ("heater", Self::Heater),
@@ -1434,6 +1450,32 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
                 Conductance::new(number(definition, "conductance_w_k", &what)?).map_err(invalid)?;
             add(builder, name, wall, ())?
         }
+        Kind::HeatNode => {
+            fields(definition, &["kind", "conductances_w_k", "temperature_k"], &what)?;
+            let rows = definition
+                .get("conductances_w_k")
+                .and_then(J::as_array)
+                .filter(|rows| (1..=MAX_NODE_BODIES).contains(&rows.len()))
+                .ok_or_else(|| {
+                    format!(
+                        "{what}: conductances_w_k is an array of 1 to {MAX_NODE_BODIES} \
+                         conductances, one per body"
+                    )
+                })?;
+            let conductances = rows
+                .iter()
+                .map(|row| {
+                    row.as_f64()
+                        .ok_or_else(|| format!("{what}: conductances_w_k must be numbers"))
+                })
+                .collect::<Result<Vec<f64>, String>>()?;
+            // The node stores nothing. A temperature given here is only
+            // where the solve starts for what is joined to its source.
+            if definition.get("temperature_k").is_some() {
+                temperature_k = Some(positive(definition, "temperature_k", &what)?);
+            }
+            add(builder, name, HeatNode::new(&conductances).map_err(invalid)?, ())?
+        }
         Kind::GasVolume => {
             let (volume, contents) = gas_volume(definition, &what)?;
             temperature_k = Some(volume.temperature_k(&contents));
@@ -1653,8 +1695,8 @@ fn join(
         }
         return Err(format!(
             "{what}: a join has exactly one node port (a mass, inertia, inductor, heat \
-             capacity, or a gas volume's stream or heat) and the ports that meet at it; \
-             this one has {nodes}"
+             capacity, a heat node's source, or a gas volume's stream or heat) and the \
+             ports that meet at it; this one has {nodes}"
         )
         .into());
     }
@@ -1962,6 +2004,7 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             | Kind::ResistorBranch
             | Kind::Gyrator
             | Kind::Conductance
+            | Kind::HeatNode
             | Kind::Restriction => Vec::new(),
             Kind::RigidNetwork | Kind::ViscoelasticNetwork | Kind::GasVolume => {
                 return Err(format!(
@@ -2341,6 +2384,8 @@ impl Device {
             }
             Kind::Gyrator => vec![("effort_a", output("a")), ("effort_b", output("b"))],
             Kind::Conductance => vec![("heat_rate_w", output("a"))],
+            // The temperature the node's balance gave it in the last step.
+            Kind::HeatNode => vec![("temperature_k", output("source"))],
             // What crossed from `a` to `b` during the last step.
             Kind::Restriction => {
                 let crossing = match system.port(element.node, "a") {

@@ -876,6 +876,29 @@ temperature that leaves the shift's band. No claim: one shift for all
 connectors of a network; the feedback is first order in the step; a law is
 read once per step at what the signal carries.
 
+Heat generated between bodies. `heat_node` lowers to
+`fs_system::elements::HeatNode`: `conductances_w_k` (1 to 64, one per body)
+gives ports `body0`, `body1`, ... and `source`. `source` is the node port of
+a join (a heater joined to it, or `heat_rate_w` prescribed on it); each
+`body<k>` is a member of a join whose node is a heat capacity, or takes a
+prescribed `temperature_k`. The element reports `temperature_k`, what the
+node's balance gave in the last step. An optional `temperature_k` on the
+element is not a state: with a heater on `source` the node's temperature is
+solved in a loop, and this is where that solve starts. G1, same test file:
+`examples/system/heated_plane.json` (30 W on a plane between a 50 J/K pad at
+400 K and a 120 J/K disc at 300 K, 2 and 6 W/K, 400 steps of 0.5 s) against
+the midpoint rule for the two bodies with the plane's balance solved
+independently each step: both temperatures and the plane's to 1e-9, every
+joule of the source in the two bodies, the pad cooling in the first step
+(it gives heat up through the plane) and the disc taking its share of the
+heat capacity to 2e-3 at the end; the same device with the heat rate
+prescribed on `source`, no heater and no starting temperature, to the same
+numbers; nine refusals, among them a body port left unconnected (the
+kernel's, by name) and a heater on `source` with no starting temperature
+(the kernel's, naming the heater's port). No claim: the conductances are
+constants; nothing reports the heat each body received (it is in the
+ledger's accounts of the bodies).
+
 `nonlinear_capacitor` takes `charge_voltage_curve` as `[charge_c, voltage_v]`
 knots and an optional initial `charge_c`; `nonlinear_inductor` takes
 `flux_current_curve` as `[flux_wb, current_a]` knots and optional `flux_wb`.

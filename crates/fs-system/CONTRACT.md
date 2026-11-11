@@ -159,7 +159,8 @@ physics owners below fs-couple can be composed without it.
   that leaves the node no positive temperature. Without a source it is the
   conductances in series; with one it is the plane a heat is generated on
   between bodies, and the heat divides by where the bodies put the node, not
-  by a prescribed fraction), `Heater` (Joule heater, power never
+  by a prescribed fraction; `frankensim system` offers it as the scene kind
+  `heat_node`), `Heater` (Joule heater, power never
   negative). `Force`, `FlowSource` and `Heater` keep a `SourceAccount` whose clock is a
   compensated sum like the kernel's, so they read the time a boundary
   receives bit for bit; their stored energy is the energy that entered them

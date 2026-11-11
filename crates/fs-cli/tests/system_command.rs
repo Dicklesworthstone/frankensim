@@ -1643,3 +1643,128 @@ fn gas_held_from_outside_fills_a_vessel_and_a_supply_sets_its_pressure() {
         "whose state has no error account here",
     );
 }
+
+/// One step of the midpoint rule for two bodies on a plane of no heat
+/// capacity that carries a heat source: `C_k (T_k' - T_k) = dt G_k (T_n -
+/// m_k)` with `m_k = (T_k + T_k') / 2`, and the plane's balance
+/// `P + sum G_k (m_k - T_n) = 0`. Returns the bodies' end temperatures and
+/// the plane's temperature.
+fn plane_step(t: [f64; 2], c: [f64; 2], g: [f64; 2], power: f64, dt: f64) -> ([f64; 2], f64) {
+    let total = g[0] + g[1];
+    let a = [dt * g[0] / c[0], dt * g[1] / c[1]];
+    // (2 + a_k) m_k - a_k T_n = 2 T_k, with T_n = (P + G_1 m_1 + G_2 m_2) / G.
+    let rows = [
+        [2.0 + a[0] - a[0] * g[0] / total, -a[0] * g[1] / total],
+        [-a[1] * g[0] / total, 2.0 + a[1] - a[1] * g[1] / total],
+    ];
+    let rhs = [2.0 * t[0] + a[0] * power / total, 2.0 * t[1] + a[1] * power / total];
+    let det = rows[0][0] * rows[1][1] - rows[0][1] * rows[1][0];
+    let mean = [
+        (rhs[0] * rows[1][1] - rows[0][1] * rhs[1]) / det,
+        (rows[0][0] * rhs[1] - rows[1][0] * rhs[0]) / det,
+    ];
+    let plane = (power + g[0] * mean[0] + g[1] * mean[1]) / total;
+    ([2.0 * mean[0] - t[0], 2.0 * mean[1] - t[1]], plane)
+}
+
+#[test]
+fn the_heated_plane_scene_divides_its_heat_by_where_the_bodies_put_it() {
+    let scene = std::fs::read_to_string(example("heated_plane.json")).unwrap();
+    let (c, g, power, dt, steps) = ([50.0_f64, 120.0], [2.0_f64, 6.0], 30.0_f64, 0.5_f64, 400_u32);
+    let (mut t, mut plane, mut disc_share) = ([400.0_f64, 300.0], f64::NAN, f64::NAN);
+    let mut pad_after_one_step = f64::NAN;
+    for step in 0..steps {
+        let before = t[1];
+        (t, plane) = plane_step(t, c, g, power, dt);
+        disc_share = c[1] * (t[1] - before) / (power * dt);
+        if step == 0 {
+            pad_after_one_step = t[0];
+        }
+    }
+    let given_j = power * dt * f64::from(steps);
+
+    // The heat source as a heater on the plane, and as a heat rate
+    // prescribed on the plane's source port with no heater and no starting
+    // temperature: one device, written two ways.
+    let prescribed = scene
+        .replace(", \"temperature_k\": 325.0}", "}")
+        .replace(",\n    \"rubbing\": {\"kind\": \"heater\", \"power_w\": 30.0}", "")
+        .replace(
+            "{\"join\": [\"plane.source\", \"rubbing.heat\"]}",
+            "{\"prescribe\": \"plane.source\", \"heat_rate_w\": 30.0}",
+        );
+    assert!(!prescribed.contains("rubbing") && !prescribed.contains("325.0"), "{prescribed}");
+    let path = scratch("prescribed.json", &prescribed);
+    for (scene, heater) in [(example("heated_plane.json"), true), (path.to_str().unwrap().to_owned(), false)] {
+        let (code, json, stderr) = run_binary(&["--json", "system", &scene]);
+        assert_eq!(code, 0, "{stderr}");
+        let reached = [
+            value(&json, &element("pad"), "temperature_k"),
+            value(&json, &element("disc"), "temperature_k"),
+        ];
+        for body in 0..2 {
+            assert!(
+                (reached[body] - t[body]).abs() <= 1.0e-9 * t[body],
+                "{} vs {}",
+                reached[body],
+                t[body]
+            );
+        }
+        // The plane reports the temperature its balance gave it in the
+        // last step: above both bodies, which it is heating.
+        let node = value(&json, &element("plane"), "temperature_k");
+        assert!((node - plane).abs() <= 1.0e-9 * plane, "{node} vs {plane}");
+        assert!(node > reached[0] && node > reached[1], "{node} {reached:?}");
+        // Every joule of the source is in the two bodies.
+        let stored_j = c[0] * (reached[0] - 400.0) + c[1] * (reached[1] - 300.0);
+        assert!((stored_j - given_j).abs() <= 1.0e-9 * given_j, "{stored_j} vs {given_j}");
+        if heater {
+            let account_j = -value(&json, &element("rubbing"), "energy_in_j");
+            assert!((account_j - given_j).abs() <= 1.0e-9 * given_j, "{account_j}");
+        }
+    }
+    // No fraction is prescribed. In the first step the hot pad cools: it
+    // gives heat up through the plane, which is at 328.75 K before any of
+    // it warms. By the end the two warm at nearly one rate and the disc
+    // takes nearly its share of the heat capacity, 120 / 170.
+    assert!(pad_after_one_step < 400.0, "{pad_after_one_step}");
+    assert!((disc_share - 120.0 / 170.0).abs() < 2.0e-3, "{disc_share}");
+}
+
+#[test]
+fn heat_node_scenes_that_cannot_run_are_refused_with_the_reason() {
+    let scene = std::fs::read_to_string(example("heated_plane.json")).unwrap();
+    let check = |name: &str, from: &str, to: &str, code: i32, reason: &str| {
+        assert!(scene.contains(from), "{name}: {from:?} is not in the scene");
+        let (exit, stderr) = refused(name, &scene.replace(from, to));
+        assert_eq!(exit, code, "{name}: {stderr}");
+        assert!(stderr.contains(reason), "{name}: {stderr}");
+    };
+    let list = "\"conductances_w_k\": [2.0, 6.0]";
+    check("node_scalar.json", list, "\"conductances_w_k\": 2.0", 3, "conductances_w_k is an array of 1 to 64");
+    check("node_empty.json", list, "\"conductances_w_k\": []", 3, "conductances_w_k is an array of 1 to 64");
+    check("node_text.json", list, "\"conductances_w_k\": [2.0, \"six\"]", 3, "conductances_w_k must be numbers");
+    check("node_negative.json", list, "\"conductances_w_k\": [2.0, -6.0]", 3, "plane");
+    check("node_field.json", list, "\"conductances_w_k\": [2.0, 6.0], \"capacity_j_k\": 1.0", 3, "unsupported field \"capacity_j_k\"");
+    check("node_cold.json", "\"temperature_k\": 325.0", "\"temperature_k\": 0.0", 3, "temperature_k must be positive and finite");
+    // A third conductance is a third body port, and the kernel refuses a
+    // port left unconnected, by name.
+    check("node_loose.json", list, "\"conductances_w_k\": [2.0, 6.0, 1.0]", 4, "plane.body2");
+    // Two bodies cannot meet at one body port: nothing there sets a
+    // temperature for both.
+    check(
+        "node_two.json",
+        "{\"join\": [\"pad.heat\", \"plane.body0\"]},\n    {\"join\": [\"disc.heat\", \"plane.body1\"]}",
+        "{\"join\": [\"pad.heat\", \"disc.heat\", \"plane.body0\"]},\n    {\"prescribe\": \"plane.body1\", \"temperature_k\": 300.0}",
+        3,
+        "this one has 2",
+    );
+    // With a heater on its source the temperature there is solved in a
+    // loop, and the solve needs somewhere to start.
+    let (exit, stderr) = refused("node_start.json", &scene.replace(", \"temperature_k\": 325.0}", "}"));
+    assert_ne!(exit, 0, "{stderr}");
+    assert!(
+        stderr.contains("rubbing.heat") && stderr.contains("needs a positive starting value"),
+        "{stderr}"
+    );
+}
