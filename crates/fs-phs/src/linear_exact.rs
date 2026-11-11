@@ -28,6 +28,78 @@ use fs_math::det;
 /// reads it to find where its own f64 rounding could reach the gate.
 const EXACT_BALANCE_RELATIVE: f64 = 1e-12;
 
+/// Rounding of the plain f64 doubling chain that integrates the dissipated heat (positive_heat.rs,
+/// `integral_factors`: a QR doubling with no compensated branch), in units of 2^s eps for its s
+/// doublings. Each doubling forms W <- W + E^T W E from n-term dot products and carries the error
+/// already held, so s doublings leave about 2^s eps relative: the recurrence delta_s <= 2
+/// delta_(s-1) + gamma_n of `gramian::doubling_rounding_bound` (Higham, Accuracy and Stability of
+/// Numerical Algorithms, 2nd ed., section 3.1, for gamma_n). Measured on 57 chains of the
+/// fs-airflow laminar fixtures (s = 14 to 19) by running each at s and at s + 1 doublings: the
+/// relative difference of the two Gram matrices was between 0.0 and 1.18 times 2^s eps. Two is the
+/// next whole number above the largest. The a-priori bound of `gramian` is about 150 times looser
+/// at s = 18 and would admit a dissipated heat that is wrong by 1e-9 relative, so it is not used.
+const HEAT_CHAIN_ROUNDING: f64 = 2.0;
+
+/// Relative allowance of the step's energy balance: the flat gate above, or the rounding of the
+/// positive-heat chain when that is larger (`heat_doublings` is its number of doublings).
+fn balance_allowance(heat_doublings: u32) -> f64 {
+    let mut doubled = 1.0;
+    for _ in 0..heat_doublings {
+        doubled *= 2.0;
+    }
+    EXACT_BALANCE_RELATIVE.max(HEAT_CHAIN_ROUNDING * doubled * f64::EPSILON)
+}
+
+/// Whether |delta H + D - S| is within `balance_allowance` of the step's energy scale.
+fn balance_admitted(
+    delta_h: f64,
+    dissipated: f64,
+    supplied: f64,
+    scale: f64,
+    heat_doublings: u32,
+) -> bool {
+    (delta_h + dissipated - supplied).abs() <= balance_allowance(heat_doublings) * scale
+}
+
+#[cfg(test)]
+mod balance_tests {
+    use super::*;
+
+    // laminar_pipe_startup_and_reversal_match_independent_radial_stokes_series, first refusal of the
+    // flat 1e-12 gate as measured: residual -7.0e-18, 8.4e-12 of the scale, longest chain 18 doublings.
+    const DELTA_H: f64 = 3.8755643700484244e-7;
+    const DISSIPATED: f64 = 4.506076669115767e-7;
+    const SUPPLIED: f64 = 8.381641039234246e-7;
+    const SCALE: f64 = 8.381641039234246e-7;
+
+    #[test]
+    fn a_measured_stiff_step_is_admitted_by_its_chain_rounding_and_not_by_the_flat_gate() {
+        let residual = (DELTA_H + DISSIPATED - SUPPLIED).abs();
+        assert!(residual > EXACT_BALANCE_RELATIVE * SCALE);
+        assert!(balance_admitted(DELTA_H, DISSIPATED, SUPPLIED, SCALE, 18));
+    }
+
+    #[test]
+    fn the_same_step_with_dissipated_changed_by_1e_9_relative_is_still_refused() {
+        for heat_doublings in [14, 18, 19] {
+            for factor in [1.0 + 1e-9, 1.0 - 1e-9] {
+                assert!(
+                    !balance_admitted(DELTA_H, DISSIPATED * factor, SUPPLIED, SCALE, heat_doublings),
+                    "{heat_doublings} {factor}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_flat_gate_is_the_floor_and_the_allowance_grows_as_two_to_the_doublings() {
+        assert_eq!(balance_allowance(0), EXACT_BALANCE_RELATIVE);
+        assert_eq!(balance_allowance(10), EXACT_BALANCE_RELATIVE);
+        assert!(balance_allowance(18) > 1.1e-10 && balance_allowance(18) < 1.2e-10);
+        assert_eq!(balance_allowance(19), 2.0 * balance_allowance(18));
+    }
+}
+
 mod gramian;
 mod constitutive;
 use gramian::{accumulate, identity, product};

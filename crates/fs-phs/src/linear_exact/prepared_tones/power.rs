@@ -10,6 +10,8 @@ struct Observation {
     map: Vec<f64>,
     left: Vec<f64>,
     right: Option<Vec<f64>>,
+    /// Doublings of the plain f64 chain that integrated this observation.
+    doublings: u32,
 }
 
 pub(in crate::linear_exact) struct TonePower {
@@ -24,6 +26,8 @@ pub(in crate::linear_exact) struct TonePower {
     source_scales: Vec<f64>,
     work: Observation,
     heat: Vec<Observation>,
+    /// Longest chain among the work and heat observations: the step's energy-balance gate reads it.
+    doublings: u32,
 }
 
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), crate::PreparedStepError> {
@@ -143,6 +147,7 @@ impl TonePower {
             )?);
         }
         poll(cancelled)?;
+        let doublings = heat.iter().fold(work.doublings, |s, o| s.max(o.doublings));
         Ok(Self {
             n,
             m,
@@ -155,7 +160,13 @@ impl TonePower {
             source_scales: source_scales.to_vec(),
             work,
             heat,
+            doublings,
         })
+    }
+
+    /// Doublings of the longest plain f64 chain behind the supplied work and dissipated heat.
+    pub(in crate::linear_exact) fn doublings(&self) -> u32 {
+        self.doublings
     }
 
     /// Leading and remainder planes for the largest original observation.
@@ -372,6 +383,7 @@ fn prepare_observation(
             map,
             left: Vec::new(),
             right: paired.then(Vec::new),
+            doublings: 0,
         });
     }
     let root_rate = det::sqrt(rate);
@@ -442,6 +454,7 @@ fn prepare_observation(
         map,
         left,
         right,
+        doublings: positive_heat::scaling_doublings(&generator, d, dt)?,
     })
 }
 

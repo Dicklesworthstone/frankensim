@@ -7,7 +7,8 @@ pub(super) mod power;
 pub use observer::PreparedToneObserver;
 
 use super::{
-    DenseExponentialBudget, LinearSplitBudget, MAX_LINEAR_EXPONENTIAL_BLOCK_DIM, finite,
+    DenseExponentialBudget, LinearSplitBudget, MAX_LINEAR_EXPONENTIAL_BLOCK_DIM, balance_admitted,
+    finite,
     prepared::PreparedQuadraticFlow,
     prepared_zoh::{System, energetic_scale_into},
     refuse, split_quadratic,
@@ -693,7 +694,7 @@ impl<'a> PreparedExactTones<'a> {
             || !system.hamiltonian(&scratch.endpoint).is_finite()
             || !finite(&[delta_h, dissipated, supplied, scale, residual])
             || scratch.heat.iter().any(|v| *v < 0.0)
-            || residual.abs() > 1e-12 * scale
+            || !balance_admitted(delta_h, dissipated, supplied, scale, self.power.doublings())
         {
             return Err(refuse(
                 "continuous-tone original physical energy balance refused",

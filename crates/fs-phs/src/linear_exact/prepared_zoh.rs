@@ -1,6 +1,7 @@
 //! Complete held-input dynamics cached through the existing quadratic owner.
 use super::{DenseExponentialBudget, LinearSplitBudget, MAX_LINEAR_EXPONENTIAL_BLOCK_DIM,
-    finite, positive_heat::PositiveHeat, prepared::PreparedQuadraticFlow, refuse, split_quadratic};
+    balance_admitted, finite, positive_heat::PositiveHeat, prepared::PreparedQuadraticFlow, refuse,
+    split_quadratic};
 use crate::{PhsError, PortHamiltonian, PreparedStepRecord, StepRecord, storage_energy_change};
 use crate::interconnection::accumulation::Sum;
 
@@ -313,8 +314,8 @@ fn evaluate_step_with_work_inputs<const K: usize>(
         work_inputs, &mut scratch.augmented, &mut scratch.balanced,
         &mut scratch.endpoint, &mut scratch.integrals, Some(&mut scratch.port_integrals))?;
     for (out, value) in scratch.output.iter_mut().zip(&scratch.integrals) { *out = value/duration; }
-    let dissipated = heat.ok_or_else(||refuse("prepared positive heat is missing"))?
-        .evaluate_into(sys,initial,input,&mut scratch.effort,&mut scratch.balanced,
+    let heat = heat.ok_or_else(||refuse("prepared positive heat is missing"))?;
+    let dissipated = heat.evaluate_into(sys,initial,input,&mut scratch.effort,&mut scratch.balanced,
             &mut scratch.heat_state)?;
     let delta_h = storage_energy_change(sys.storage.as_ref(), initial, &scratch.endpoint,
         &mut scratch.midpoint, &mut scratch.effort);
@@ -324,7 +325,8 @@ fn evaluate_step_with_work_inputs<const K: usize>(
     let residual = delta_h + dissipated - supplied;
     if !finite(&scratch.output) || !sys.hamiltonian(&scratch.endpoint).is_finite()
         || !finite(&[delta_h, supplied, dissipated, scale, residual])
-        || dissipated < -1e-12*scale || residual.abs() > 1e-12*scale {
+        || dissipated < -1e-12*scale
+        || !balance_admitted(delta_h, dissipated, supplied, scale, heat.doublings()) {
         return Err(refuse("prepared ZOH physical energy balance refused"));
     }
     Ok((PreparedStepRecord { delta_h, dissipated, supplied,

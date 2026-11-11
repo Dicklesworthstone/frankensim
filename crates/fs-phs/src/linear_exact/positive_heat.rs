@@ -18,6 +18,9 @@ pub(super) struct PositiveHeat {
     resistance_root: Vec<f64>,
     rate: f64,
     root: Vec<f64>,
+    /// Doublings of the Gramian chain that integrated the dissipated heat (`scaling_doublings`);
+    /// the step's energy-balance gate reads it.
+    doublings: u32,
 }
 
 impl PositiveHeat {
@@ -82,6 +85,7 @@ impl PositiveHeat {
                 resistance_root: Vec::new(),
                 rate: 1.0,
                 root: Vec::new(),
+                doublings: 0,
             });
         }
         let mut original = vec![0.0; n * n];
@@ -96,7 +100,7 @@ impl PositiveHeat {
         let balanced = product(&product(&forward, &original, n), &inverse, n);
         let effort = product(&split.quadratic.matrix, &inverse, n);
         let loss_map = product(&resistance_root, &effort, n);
-        let (rate, root) = source_integral(&balanced, &loss_map, n, dt)?;
+        let (rate, root, doublings) = source_integral_counted(&balanced, &loss_map, n, dt)?;
         Ok(Self {
             n,
             m,
@@ -105,7 +109,13 @@ impl PositiveHeat {
             resistance_root,
             rate,
             root,
+            doublings,
         })
+    }
+
+    /// Doublings of the plain f64 chain behind the dissipated heat of one step.
+    pub(super) fn doublings(&self) -> u32 {
+        self.doublings
     }
 
     pub(super) fn evaluate(
@@ -266,6 +276,15 @@ impl PositiveHeat {
 pub(super) fn source_integral(
     flow: &[f64], loss_map: &[f64], n: usize, dt: f64,
 ) -> Result<(f64, Vec<f64>), PhsError> {
+    let (rate, root, _) = source_integral_counted(flow, loss_map, n, dt)?;
+    Ok((rate, root))
+}
+
+/// `source_integral` with the doublings of its chain, for the step whose energy balance reads them
+/// (`PositiveHeat`); the source-loss cache has no balance to gate and keeps the two-value form.
+pub(super) fn source_integral_counted(
+    flow: &[f64], loss_map: &[f64], n: usize, dt: f64,
+) -> Result<(f64, Vec<f64>, u32), PhsError> {
     let d = 2 * n;
     let mut rate = 1.0_f64;
     for i in 0..n {
@@ -286,7 +305,11 @@ pub(super) fn source_integral(
             generator[(n + i) * d + n + j] = flow[i * n + j];
         }
     }
-    Ok((rate, integral_root(&generator, &factor, d, dt)?))
+    Ok((
+        rate,
+        integral_root(&generator, &factor, d, dt)?,
+        scaling_doublings(&generator, d, dt)?,
+    ))
 }
 
 // Exact zero entries separate independent resistance components. A general
@@ -437,10 +460,48 @@ fn nonnegative_ground(resistance: &[f64], n: usize, i: usize) -> Option<f64> {
     (ground.is_finite() && ground >= 0.0).then_some(ground)
 }
 
+/// Constant of the normwise allowance for a factor of a matrix outside passive-graph form, in
+/// units of n eps max|R_kl| (see `check_resistance_root`): the measured deviation is 0.017 of it.
+const GENERAL_ROOT_BACKWARD_ERROR: f64 = 1.0;
+
+/// Whether `graph_root` would decompose this matrix: symmetric, with every ground nonnegative.
+fn passive_graph_form(resistance: &[f64], n: usize) -> bool {
+    for i in 0..n {
+        for j in 0..n {
+            if resistance[i * n + j] != resistance[j * n + i] {
+                return false;
+            }
+        }
+        if nonnegative_ground(resistance, n, i).is_none() {
+            return false;
+        }
+    }
+    true
+}
+
 // Both graph and eigen factors must resolve each represented nonzero entry;
 // a large unrelated diagonal or cancellation inside QR cannot hide its loss.
 // At structural zeros only, use the local product sum as the roundoff scale.
 pub(crate) fn check_resistance_root(resistance: &[f64], root: &[f64], n: usize) -> Result<(), PhsError> {
+    // A matrix in passive-graph form (symmetric, every ground R_ii - sum_j |R_ij| nonnegative) has
+    // an exact decomposition into edge and ground squares (`graph_root`) and keeps the
+    // componentwise bound below. A symmetric matrix with a nonnegative diagonal (necessary for a
+    // resistance) that is not in that form is factored by a symmetric eigensolve, which is
+    // backward stable in the NORM: the computed eigenpairs are exact for R + E with
+    // ||E||_2 <= p(n) u ||R||_2 (Golub and Van Loan, Matrix Computations, 4th ed., sections 8.3 and
+    // 8.5 for symmetric QR and Jacobi, as stated to this change: the pages were not read here). A
+    // componentwise bound asks of such a factor an entry it cannot give: at a structural zero of
+    // the n = 17 laminar resistance (R_11 = 4.5e5) the Gram entry was 2.887e-11 off against an
+    // allowance of 7.7e-12. For that class the allowance is raised to
+    // GENERAL_ROOT_BACKWARD_ERROR * n * eps * max|R_kl|, 59 times that measured deviation (1.7e-9).
+    // It never makes the bound stricter, and an entry the class cannot resolve below that level is
+    // no longer certified there (a weak coupling under n eps max|R| in an eigen-factored component).
+    // A negative diagonal or an asymmetry stays under the componentwise bound that refuses it.
+    let symmetric = (0..n).all(|i| (0..n).all(|j| resistance[i * n + j] == resistance[j * n + i]));
+    let general = symmetric
+        && (0..n).all(|i| resistance[i * n + i] >= 0.0)
+        && !passive_graph_form(resistance, n);
+    let largest = resistance.iter().fold(0.0_f64, |s, r| s.max(r.abs()));
     for i in 0..n {
         for j in i..n {
             let mut gram = 0.0;
@@ -455,10 +516,14 @@ pub(crate) fn check_resistance_root(resistance: &[f64], root: &[f64], n: usize) 
             } else {
                 products
             };
+            let mut allowance = 128.0 * n as f64 * f64::EPSILON * magnitude;
+            if general {
+                allowance =
+                    allowance.max(GENERAL_ROOT_BACKWARD_ERROR * n as f64 * f64::EPSILON * largest);
+            }
             if !gram.is_finite()
                 || !magnitude.is_finite()
-                || (gram - resistance[i * n + j]).abs()
-                    > 128.0 * n as f64 * f64::EPSILON * magnitude
+                || (gram - resistance[i * n + j]).abs() > allowance
             {
                 return Err(refuse(
                     "physical resistance factor exceeds componentwise roundoff",
@@ -538,26 +603,42 @@ pub(super) fn integral_cross_root(
     Ok((left, right.expect("paired integral retains its second factor")))
 }
 
-fn integral_factors(
-    generator: &[f64], factor: &[f64], paired: Option<&[f64]>, n: usize, dt: f64,
-) -> Result<(Vec<f64>, Option<Vec<f64>>), PhsError> {
+/// Doublings of the positive-heat Gramian chain for `generator` over `dt`: the scaling loop of
+/// `integral_factors`, kept in one place so that the energy-balance gate reads the count the
+/// chain used. The chain is plain f64 and its rounding grows as 2^s eps (see `HEAT_CHAIN_ROUNDING`
+/// in linear_exact.rs).
+pub(super) fn scaling_doublings(generator: &[f64], n: usize, dt: f64) -> Result<u32, PhsError> {
     let mut norm = 0.0_f64;
     for i in 0..n {
         let row: f64 = (0..n).map(|j| (dt * generator[i * n + j]).abs()).sum();
         let column: f64 = (0..n).map(|j| (dt * generator[j * n + i]).abs()).sum();
         norm = norm.max(row).max(column);
     }
-    if !norm.is_finite() || !finite(factor) {
+    if !norm.is_finite() {
         return Err(refuse("positive heat operator is nonfinite"));
     }
     let mut scale = 1.0;
-    let mut doublings = 0;
+    let mut doublings = 0_u32;
     while norm * scale > 0.25 {
         if doublings == 48 {
             return Err(refuse("positive heat scaling exceeds 48 doublings"));
         }
         scale *= 0.5;
         doublings += 1;
+    }
+    Ok(doublings)
+}
+
+fn integral_factors(
+    generator: &[f64], factor: &[f64], paired: Option<&[f64]>, n: usize, dt: f64,
+) -> Result<(Vec<f64>, Option<Vec<f64>>), PhsError> {
+    if !finite(factor) {
+        return Err(refuse("positive heat operator is nonfinite"));
+    }
+    let doublings = scaling_doublings(generator, n, dt)?;
+    let mut scale = 1.0;
+    for _ in 0..doublings {
+        scale *= 0.5;
     }
     let h = dt * scale;
     let a: Vec<_> = generator.iter().map(|x| h * x).collect();
@@ -631,6 +712,42 @@ fn integral_factors(
 mod tests {
     use super::*;
     use crate::{QuadraticStorage, linear_exact::{LinearSplitBudget, split_quadratic}};
+
+    #[test]
+    fn a_matrix_outside_graph_form_is_held_to_the_normwise_bound_of_its_eigen_factor() {
+        // Ground 1 - 2 < 0: not a passive graph, so the factor comes from the eigensolve.
+        let (r, n) = (vec![1.0, 2.0, 2.0, 5.0], 2);
+        assert!(!passive_graph_form(&r, n));
+        let root = factor_resistance(&r, n).unwrap();
+        check_resistance_root(&r, &root, n).unwrap();
+        // One factor entry moved by 1e-6 relative is still refused.
+        for k in 0..n * n {
+            if root[k].abs() > 1e-3 {
+                let mut bent = root.clone();
+                bent[k] *= 1.0 + 1e-6;
+                assert!(check_resistance_root(&r, &bent, n).is_err(), "entry {k}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_negative_diagonal_stays_under_the_componentwise_bound() {
+        // A large unrelated entry cannot conceal unsupported negative tiny heat: 1e-200 is far below
+        // n eps max|R|, so the normwise allowance must not reach this matrix.
+        let (r, n) = (vec![1.0, 0.0, 0.0, -1e-200], 2);
+        assert!(check_resistance_root(&r, &[1.0, 0.0, 0.0, 0.0], n).is_err());
+    }
+
+    #[test]
+    fn a_passive_graph_keeps_the_componentwise_bound() {
+        let (r, n) = (vec![3.0, -1.0, -1.0, 3.0], 2);
+        assert!(passive_graph_form(&r, n));
+        let root = factor_resistance(&r, n).unwrap();
+        check_resistance_root(&r, &root, n).unwrap();
+        let mut bent = root.clone();
+        bent[0] *= 1.0 + 1e-6;
+        assert!(check_resistance_root(&r, &bent, n).is_err());
+    }
 
     #[test]
     fn held_effort_offset_integrates_the_original_resistance_square() {
