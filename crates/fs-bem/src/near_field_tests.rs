@@ -116,8 +116,11 @@ fn g1_finite_microphones_use_exact_exterior_geometry_at_both_faces_of_a_thin_rad
     // These microphones are outside the actual mesh. The former centroid
     // solid-angle proxy diverged near the closest panel and refused them.
     let geometry=Geometry::new(&surface,&points,0.004).unwrap();
+    // The 1e-9 reference of six receivers 5 to 20 mm from the 4 mm skin used 2,169,600 kernel evaluations
+    // (`Prepared::kernel_evaluations`, measured), above the default ceiling of 2,000,000, so the ceiling is the
+    // validated maximum, 20,000,000.
     let reference=geometry.prepare(k,medium,Options {
-        relative_tolerance:1e-9,..Options::default()
+        relative_tolerance:1e-9,maximum_kernel_evaluations:20_000_000,..Options::default()
     }).unwrap().evaluate(&solution).unwrap();
     let integrated=helmholtz::exterior_pressure_at_points_integrated(&surface,&solution,medium,&points).unwrap();
     let centroid=helmholtz::exterior_pressure_at_points(&surface,&solution,medium,&points).unwrap();
