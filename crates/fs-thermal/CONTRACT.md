@@ -82,6 +82,28 @@ leaves its bindings as they are: a boundary change is taken; a birth, a
 contact or a separation is the owner's refusal. One step allocates the
 solver's workspace.
 
+End-of-step temperatures. `ThermalTimeline::returning_end_temperatures` makes
+each `cell<id>` port return the cell's temperature at the end of the step in
+place of the mean of the two ends; state, receipt and the `environment` port
+are unchanged. Only a backward-Euler timeline takes it
+(`TimelineBuildError::EndTemperatures` for the explicit rule and for SDIRK2,
+whose steps are not written at their end state alone). The owner's
+backward-Euler balance carries a link's heat `G (T_a - T_b)` at the end
+temperatures, so a conductance outside the timeline that is given these
+temperatures, with its heat returning through the ports, is that same term:
+cells joined through their ports are joined by the same first-order rule as
+cells joined inside. With the default mean temperatures such a coupling is
+the trapezoidal rule across the ports while everything inside stays backward
+Euler. Measured in `thermal_timeline_slice.rs`: two cells 15 K apart with no
+link inside and the kernel's `Conductance` of 0.2 W/K between their ports,
+against the same cells joined by the owner's link and stepped by the owner,
+40 steps of 0.5 s: 5.7e-14 K apart through end-temperature ports (allowed
+4.1e-10 K from the two solves' tolerances), 5.5e-2 K through mean-temperature
+ports. The entropy the kernel books on such a wire is the heat over the end
+temperature. This is what lets a hand-written coupling that solves an
+interface inside one backward-Euler thermal solve be matched step by step by
+a graph (bead `.6.3`).
+
 The receipt's stored change is the owner's `EnergyAudit`; numerical loss is
 what entered through the ports less that. The energy tolerance is
 `(64 + 2 cells) eps` times the sum of the sizes of the port energies, of the

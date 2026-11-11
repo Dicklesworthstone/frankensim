@@ -30,6 +30,7 @@ use fs_mbd::spatial_loads::internal_motion::{
 use fs_mbd::{Gravity, MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3, Wrench};
 use fs_ports::component::conformance::{Case, Observed, check_component};
 use fs_ports::component::{Component, Proposal, Receipt};
+use fs_system::elements::Conductance;
 use fs_system::{Ledger, NodeId, RouteTemperature, System, SystemBuilder, heat_sink};
 use fs_thermal::component::{
     ImplicitScheme, ThermalTimeline, TimelineBuildError, TimelineRefusal, TimelineState,
@@ -141,6 +142,9 @@ fn insulated() -> Boundary {
 /// law has its own enthalpy datum.
 struct Scene {
     link_w_k: f64,
+    /// Whether the two cells are in contact at all. Without the link they
+    /// exchange heat only through what is connected to their ports.
+    linked: bool,
     boundaries: [Boundary; 2],
     extra: Vec<TimedEvent>,
     datums_j_kg: [f64; 2],
@@ -152,6 +156,7 @@ impl Default for Scene {
     fn default() -> Self {
         Self {
             link_w_k: LINK_W_K,
+            linked: true,
             boundaries: [insulated(); 2],
             extra: Vec::new(),
             datums_j_kg: [0.0; 2],
@@ -212,14 +217,16 @@ impl Scene {
         let mut schedule = vec![
             at(Event::Birth(self.cell(A, 0, 310.0, self.boundaries[0]))),
             at(Event::Birth(self.cell(B, 1, 295.0, self.boundaries[1]))),
-            at(Event::Contact(ThermalLink {
+        ];
+        if self.linked {
+            schedule.push(at(Event::Contact(ThermalLink {
                 id: 7,
                 a: A,
                 b: B,
                 area_m2: LINK_AREA_M2,
                 conductance_w_k: self.link_w_k,
-            })),
-        ];
+            })));
+        }
         schedule.extend(self.extra.iter().cloned());
         let simulation = DepositionSimulation::new(
             schedule,
@@ -1073,17 +1080,18 @@ impl Scene {
         laws: [&'static Sensible; 2],
     ) -> ImplicitConductionGraph<'static> {
         let half_m = LINK_AREA_M2 / (2.0 * self.link_w_k);
+        let link = [ConductiveLink {
+            link_id: 7,
+            half_distances_m: [half_m; 2],
+            contact_resistance_m2_k_w: 0.0,
+        }];
         let conduction = ConductionObserver::new(
             active,
             &[
                 (MaterialId(0), laws[0] as &dyn ConductivityLaw),
                 (MaterialId(1), laws[1] as &dyn ConductivityLaw),
             ],
-            &[ConductiveLink {
-                link_id: 7,
-                half_distances_m: [half_m; 2],
-                contact_resistance_m2_k_w: 0.0,
-            }],
+            if self.linked { &link } else { &[] },
             &[],
             || Ok(()),
         )
@@ -1192,6 +1200,167 @@ fn the_implicit_timeline_conforms_and_its_step_is_the_owners_solve() {
     }
     // The second scheme is another quadrature of the same step.
     assert!((ends[1][0] - ends[0][0]).abs() > 1.0e-6, "{ends:?}");
+}
+
+#[test]
+fn a_backward_euler_timeline_can_return_the_temperatures_at_the_end_of_the_step() {
+    let gate = CancelGate::new_clock_free();
+    let scene = Scene::default();
+    let (active, laws) = scene.active();
+    let controls = implicit_controls(0.5);
+    let euler = || {
+        let graph = scene.graph(&active, laws);
+        ThermalTimeline::implicit(vec![A, B], graph, controls, ImplicitScheme::BackwardEuler)
+            .expect("component")
+    };
+    let (mean, ending) = (euler(), euler().returning_end_temperatures().expect("end"));
+    let start = ending.start(&active).expect("start");
+    let stale = later(&ending, &active, 1.0);
+    let (dt_s, inputs) = (0.25, [2.0, -0.5, 293.15]);
+    let (receipt, _, outputs) = conforms(&ending, &start, &stale, dt_s, &inputs);
+    let (next, _, _) = propose(&ending, &start, dt_s, &inputs, &gate).expect("step");
+    // It is the same step: the same state and the same account. Only what
+    // the two cell ports return differs.
+    let (same, same_receipt, means) = propose(&mean, &start, dt_s, &inputs, &gate).expect("step");
+    assert_eq!(next, same);
+    assert_eq!(receipt, same_receipt);
+    assert_eq!(outputs[2].to_bits(), means[2].to_bits());
+    for (port, id) in [A, B].into_iter().enumerate() {
+        let (before, after) = (temperature(&start, id), temperature(&next, id));
+        assert_eq!(outputs[port].to_bits(), after.to_bits());
+        assert_eq!(means[port].to_bits(), (0.5 * (before + after)).to_bits());
+        assert!((after - before).abs() > 0.01, "{before} to {after}");
+    }
+    // Only the backward-Euler solve is written at its end state alone.
+    let explicit = ThermalTimeline::new(vec![A, B], false, config(0.05)).expect("component");
+    assert_eq!(
+        explicit.returning_end_temperatures().err(),
+        Some(TimelineBuildError::EndTemperatures)
+    );
+    let staged =
+        ThermalTimeline::implicit(vec![A, B], scene.graph(&active, laws), controls, ImplicitScheme::Sdirk2)
+            .expect("component");
+    assert_eq!(
+        staged.returning_end_temperatures().err(),
+        Some(TimelineBuildError::EndTemperatures)
+    );
+}
+
+/// The two cells of `apart`, which are not in contact, in a backward-Euler
+/// timeline, with the kernel's ideal conductance of `LINK_W_K` between
+/// their two heat ports; the ports return the end temperatures if `end`.
+fn joined_through_ports(
+    apart: &Scene,
+    controls: ImplicitConductionControls,
+    end: bool,
+) -> (System, NodeId) {
+    let (alone, laws) = apart.active();
+    let timeline = ThermalTimeline::implicit(
+        vec![A, B],
+        apart.graph(&alone, laws),
+        controls,
+        ImplicitScheme::BackwardEuler,
+    )
+    .expect("component");
+    let timeline = if end {
+        timeline.returning_end_temperatures().expect("end")
+    } else {
+        timeline
+    };
+    let start = timeline.start(&alone).expect("start");
+    let mut builder = SystemBuilder::new();
+    let cells = builder.add("cells", timeline, start).expect("cells");
+    let wall = builder
+        .add_with_tangent("wall", Conductance::new(LINK_W_K).expect("wall"), ())
+        .expect("wall");
+    let port = |builder: &SystemBuilder, node, name: &str| builder.port(node, name).expect("port");
+    let (a, b) = (port(&builder, wall, "a"), port(&builder, wall, "b"));
+    builder
+        .common_effort(port(&builder, cells, "cell10"), &[a])
+        .expect("hot side");
+    builder
+        .common_effort(port(&builder, cells, "cell20"), &[b])
+        .expect("cold side");
+    builder
+        .heat_route(
+            port(&builder, cells, "environment"),
+            &[],
+            Some(heat_sink("room", 293.15).expect("sink")),
+            RouteTemperature::Fixed(293.15),
+        )
+        .expect("environment");
+    let mut system = builder.seal().expect("sealed");
+    // The wall's two temperature inputs are in the loop and need a start.
+    assert!(system.guess(a, &[310.0]));
+    assert!(system.guess(b, &[295.0]));
+    (system, cells)
+}
+
+#[test]
+fn cells_joined_through_end_temperature_ports_follow_the_owners_implicit_link() {
+    // The reference: two cells joined by the owner's link of 0.2 W/K and
+    // stepped by the owner's backward-Euler solve. The graph: the same two
+    // cells with no link inside, and the kernel's ideal conductance of
+    // 0.2 W/K between their ports. Backward Euler writes the link's heat at
+    // the end temperatures, so with ports that return those the two are
+    // one discrete rule, and they agree step by step to what the two
+    // solves leave: the owner's cell tolerance on either side, and the
+    // kernel's 1e-12 of the temperatures it solves for, carried through
+    // the wall.
+    let gate = CancelGate::new_clock_free();
+    let controls = implicit_controls(0.5);
+    let (dt_s, steps) = (0.5, 40_u32);
+    let scene = Scene::default();
+    let (active, laws) = scene.active();
+    let twin = scene.graph(&active, laws);
+    let apart = Scene {
+        linked: false,
+        ..Scene::default()
+    };
+    let (mut ending, ending_cells) = joined_through_ports(&apart, controls, true);
+    let (mut mean, mean_cells) = joined_through_ports(&apart, controls, false);
+    let unheated = HeldSources::new([(A, 0.0), (B, 0.0)]);
+    let mut native = active.clone();
+    let (mut worst_ending, mut worst_mean) = (0.0_f64, 0.0_f64);
+    with_cx(&gate, |cx| {
+        for step in 0..steps {
+            let target_s = native.time_s() + dt_s;
+            let (next, report) = owner_solve(
+                &twin,
+                &native,
+                &unheated,
+                target_s,
+                controls,
+                ImplicitScheme::BackwardEuler,
+            );
+            assert_eq!((report.energy.substeps, report.rejected_intervals), (1, 0));
+            native = next;
+            assert_eq!(ending.step(dt_s, cx).expect("kernel step").dt_s, dt_s, "step {step}");
+            assert_eq!(mean.step(dt_s, cx).expect("kernel step").dt_s, dt_s, "step {step}");
+            let (ended, meant) = (
+                ending.state::<TimelineState<'static>>(ending_cells).expect("cells"),
+                mean.state::<TimelineState<'static>>(mean_cells).expect("cells"),
+            );
+            for id in [A, B] {
+                let owner = native.temperature_k(id).expect("T");
+                worst_ending = worst_ending.max((temperature(ended, id) - owner).abs());
+                worst_mean = worst_mean.max((temperature(meant, id) - owner).abs());
+            }
+        }
+    });
+    // The cells came most of the way together: 15 K apart at the start.
+    let apart_k = native.temperature_k(A).expect("T") - native.temperature_k(B).expect("T");
+    assert!(apart_k > 1.0 && apart_k < 5.0, "{apart_k}");
+    let a_step_k = (2.0 * controls.cell_tolerance_j + LINK_W_K * dt_s * 1.0e-12 * 310.0) / CAPACITY;
+    eprintln!(
+        "through end-temperature ports: {worst_ending:.3e} K from the owner's link (allowed \
+         {:.3e}); through mean-temperature ports: {worst_mean:.3e} K",
+        f64::from(steps) * a_step_k
+    );
+    assert!(worst_ending <= f64::from(steps) * a_step_k, "{worst_ending}");
+    // The default ports return the mean of the two ends, which makes the
+    // wall's heat the trapezoidal rule's: another rule, first order away.
+    assert!(worst_mean > 1.0e-3, "{worst_mean}");
 }
 
 #[test]

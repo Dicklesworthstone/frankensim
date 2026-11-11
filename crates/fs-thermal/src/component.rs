@@ -12,7 +12,10 @@
 //!
 //! - `cell<id>`, one per declared cell, a heat port receiving flow: the heat
 //!   rate into that cell [W], held over the step. It returns the mean of the
-//!   cell's temperatures at the two ends of the step [K].
+//!   cell's temperatures at the two ends of the step [K], or, for a
+//!   backward-Euler timeline built with
+//!   [`ThermalTimeline::returning_end_temperatures`], the temperature at the
+//!   end of the step.
 //! - `environment`, only if declared, a heat port receiving effort: it
 //!   returns the mean rate [W] at which heat entered the timeline through
 //!   its own authored boundaries (ambient films, reservoirs, authored
@@ -163,6 +166,9 @@ pub enum TimelineBuildError {
         /// The value given [s].
         maximum_dt_s: f64,
     },
+    /// End-of-step temperatures were asked of a timeline that is not
+    /// stepped by the owner's backward-Euler solve.
+    EndTemperatures,
 }
 
 impl fmt::Display for TimelineBuildError {
@@ -175,6 +181,10 @@ impl fmt::Display for TimelineBuildError {
             Self::Interval { maximum_dt_s } => {
                 write!(f, "a longest thermal interval of {maximum_dt_s} s is not a positive time")
             }
+            Self::EndTemperatures => write!(
+                f,
+                "end-of-step temperatures are returned only by a backward-Euler timeline"
+            ),
         }
     }
 }
@@ -529,6 +539,8 @@ pub struct ThermalTimeline<'a> {
     published: Vec<CellId>,
     config: StepConfig,
     driver: Driver<'a>,
+    /// Set by [`Self::returning_end_temperatures`].
+    end_temperatures: bool,
     ports: Vec<PortSpec>,
     laws: PhantomData<&'a ()>,
 }
@@ -567,9 +579,43 @@ impl<'a> ThermalTimeline<'a> {
             published: Vec::new(),
             config,
             driver: Driver::Explicit,
+            end_temperatures: false,
             ports,
             laws: PhantomData,
         })
+    }
+
+    /// Return on each cell's heat port the cell's temperature at the END of
+    /// the step, in place of the mean of the two ends.
+    ///
+    /// The owner's backward-Euler balance is written at the end of the
+    /// step: a link inside the timeline carries `G (T_a - T_b)` at the end
+    /// temperatures. A conductance outside it that is given these
+    /// temperatures and whose heat comes back through the ports is that
+    /// same term, so cells joined through their ports are joined by the
+    /// same first-order rule as cells joined inside. With the mean
+    /// temperatures such a coupling is the trapezoidal rule across the
+    /// ports while everything inside stays backward Euler.
+    ///
+    /// The entropy the kernel books on the wire is then the heat over the
+    /// end temperature, backward Euler's own reading of it.
+    ///
+    /// # Errors
+    /// [`TimelineBuildError::EndTemperatures`] for a timeline stepped by
+    /// the explicit rule or by SDIRK2, whose step is not written at its end
+    /// state alone.
+    pub fn returning_end_temperatures(mut self) -> Result<Self, TimelineBuildError> {
+        if !matches!(
+            self.driver,
+            Driver::Implicit {
+                scheme: ImplicitScheme::BackwardEuler,
+                ..
+            }
+        ) {
+            return Err(TimelineBuildError::EndTemperatures);
+        }
+        self.end_temperatures = true;
+        Ok(self)
     }
 
     /// A timeline stepped by the owner's implicit solve on `graph`, with a
@@ -908,9 +954,12 @@ impl<'a> Component for ThermalTimeline<'a> {
         }
 
         for (port, cell) in self.cells.iter().enumerate() {
-            let before_k = old.simulation.temperature_k(*cell)?;
             let after_k = next.temperature_k(*cell)?;
-            outputs[port] = 0.5 * (before_k + after_k);
+            outputs[port] = if self.end_temperatures {
+                after_k
+            } else {
+                0.5 * (old.simulation.temperature_k(*cell)? + after_k)
+            };
         }
         let signals = self.cells.len() + usize::from(self.environment);
         for (port, cell) in self.published.iter().enumerate() {

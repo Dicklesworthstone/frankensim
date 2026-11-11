@@ -681,8 +681,18 @@ behind the contract), two linked cells with a law each.
   steps the bodies equal the owner network marched alone bit for bit, the
   cells equal the owner's solve fed the same heat by hand to 1e-10 K, and
   every joule is in the cells or the sink to 1e-11.
+- End-of-step temperatures (`returning_end_temperatures`, backward Euler
+  only): the step, the receipt and the environment port are those of the
+  default timeline and each cell port returns the end temperature to the
+  bit; the explicit rule and SDIRK2 refuse the option. Two cells with no
+  link inside, the kernel's `Conductance` of 0.2 W/K between their ports,
+  against the same cells joined by the owner's link and stepped by the
+  owner, 40 steps of 0.5 s: 5.7e-14 K apart (allowed 4.1e-10 K from the two
+  solves' tolerances); the same graph with the default mean-temperature
+  ports is 5.5e-2 K away, the trapezoidal rule across the wall.
 Thirty-seven planted defects in the explicit component were each caught, and
-twenty-three in the implicit driver.
+twenty-three in the implicit driver; none was planted for the end-of-step
+option.
 
 Against the hand-written coupling,
 `crates/fs-couple/tests/rigid_damping_heat/graph.rs` (run with
