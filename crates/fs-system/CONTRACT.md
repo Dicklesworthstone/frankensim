@@ -82,8 +82,10 @@ physics owners below fs-couple can be composed without it.
     coefficients are different quantities.
 - `boundary(port, f)`: the input side of a port prescribed as `f(t0, dt)`.
 - `System::step(dt_max, cx) -> StepReport`, `state`, `last_input`,
-  `last_output`, `guess`, `plan_shape`, `time_s`, `steps`, `ledger`,
-  `set_config`.
+  `last_output`, `guess`, `plan_shape`, `plan_loops`, `time_s`, `steps`,
+  `ledger`, `set_config`. `plan_loops` lists, per loop of the plan, how many
+  inputs it solves for and how many of those are solved together; the others
+  are copies and follow by substitution.
 - `System::step_adaptive(dt_max, config, metric, cx) -> AdaptiveReport`:
   error-controlled stepping of the same coupled graph. From one checkpoint,
   compare one coarse step to two equal half steps at the same end time. The
@@ -280,6 +282,28 @@ Tarjan, index order).
   allocates nothing (`tests/step_cost.rs`, counted per thread, damped and
   undamped lines). A refused step may: it drops the step's lists and builds
   its error.
+- The linear system of a Newton update is the interface Jacobian in every
+  scalar input of the loop, but it is not eliminated densely. At sealing the
+  inputs are split by the pattern of that Jacobian (row `r` has an entry in
+  column `j` when the driver of `r` reads an output of the component `j` is
+  an input of). An input *follows* if nothing it depends on depends on it;
+  where inputs depend on each other in a ring, the ones that depend on the
+  most members of the ring are *kept*, no two of them neighbours in one
+  round, until no ring is left, and of a ring that is one plain cycle one is
+  kept. The followers are substituted in dependency order (their part of
+  the matrix is unit lower triangular), and the kept inputs are eliminated
+  together with partial pivoting. This is the same linear system, so the
+  Newton iterates are those of a dense solve up to the rounding of the
+  elimination, and every input keeps its residual, its tolerance and its
+  place in the audit. For a line of masses, springs and dampers the kept
+  inputs are the force sum on each mass and the body's heat sum; for modes
+  that meet at one contact, the contact's rate alone, which is the scalar a
+  hand-written impact loop solves for (`tests/step_cost.rs` asserts both
+  shapes through `plan_loops` and compares each graph with a hand-written
+  loop to 1e-12; `src/solve.rs` tests the elimination against dense
+  elimination on lines, stars, rings, chains and full patterns, and its
+  refusal of a singular matrix). The rule that picks the kept inputs is not
+  a search for the fewest: keeping more than needed costs time only.
 - A block whose components are all `Class::ExactLinear` and whose drivers
   are all linear is affine, so its interface Jacobian depends on the step
   length only. Its factors are kept and used for the first update of every
@@ -431,8 +455,12 @@ way (momentum and conformance), the damper's heat tangent without its factor 2
 (oscillator reference).
 
 Unit tests cover the block ordering (including a 200,000-node chain without
-recursion), the equivalent-temperature gradient, the dense solve and the
-compensated sum.
+recursion), the equivalent-temperature gradient, the dense solve, the
+condensed solve (which inputs are kept for a line, a star, a chain, a plain
+cycle and an input that depends on itself; agreement with dense elimination
+to 1e-13 on eight patterns; the same bits from kept factors; refusal of a
+singular kept matrix and of a solution that overflows) and the compensated
+sum.
 
 Power conversions, `tests/power_maps.rs`:
 - positive and negative gear ratios give the reflected stiffness `ratio² k`
@@ -928,40 +956,65 @@ the refused calls change nothing.
   PI controller (step doubling and proportional control are available); no
   durable snapshot encoding, process restart or fork; no adjoint. These are beads `.5.2` to
   `.5.10` of the epic.
-- The interface solve is dense, in every scalar port input of a loop, and
-  slow against hand-written code. Measured by `tests/step_cost.rs` (ignored
-  by default; `cargo test --release -p fs-system --test step_cost --
-  --ignored --nocapture`) on a line of masses joined by springs, with or
-  without dampers, against a hand-written loop for the same midpoint
-  equations (one tridiagonal solve a step), which the graph reproduces to
-  1e-12. On an Apple M5 Ultra under other load (load average 19 to 25),
-  2026-11-11, nanoseconds a step:
+- A step is slow against hand-written code: 21 to 160 times in the cases
+  measured. Measured by `tests/step_cost.rs` (ignored by default; `cargo
+  test --release -p fs-system --test step_cost -- --ignored --nocapture`)
+  on a line of masses joined by springs, with or without dampers, against a
+  hand-written loop for the same midpoint equations (one tridiagonal solve
+  a step), and on modes that meet at one contact against a hand-written
+  loop in the one scalar (two passes over the modes a step); the graphs
+  reproduce both to 1e-12. On an Apple M5 Ultra under other load,
+  2026-11-11, nanoseconds a step (the first two columns at load average 19
+  to 25, the rest at 23 to 29):
 
-  | masses | dampers | first measurement | now | hand | now / hand |
-  |---|---|---|---|---|---|
-  | 1 | yes | 1,145 | 842 | 7.8 | 108 |
-  | 4 | yes | 9,401 | 4,581 | 43 | 106 |
-  | 16 | yes | 112,718 | 55,880 | 164 | 340 |
-  | 48 | yes | 1,109,593 | 633,621 | 562 | 1,128 |
-  | 1 | no | | 380 | 8.5 | 45 |
-  | 4 | no | | 1,193 | 42 | 28 |
-  | 16 | no | | 5,317 | 162 | 33 |
-  | 48 | no | | 23,695 | 558 | 42 |
+  | masses | dampers | first measurement | dense, kept factors | now | hand | now / hand |
+  |---|---|---|---|---|---|---|
+  | 1 | yes | 1,145 | 842 | 830 | 8.3 | 100 |
+  | 4 | yes | 9,401 | 4,581 | 3,129 | 38 | 82 |
+  | 16 | yes | 112,718 | 55,880 | 10,359 | 152 | 68 |
+  | 48 | yes | 1,109,593 | 633,621 | 37,630 | 508 | 74 |
+  | 1 | no | | 380 | 322 | 9.0 | 36 |
+  | 4 | no | | 1,193 | 928 | 37 | 25 |
+  | 16 | no | | 5,317 | 3,247 | 146 | 22 |
+  | 48 | no | | 23,695 | 10,489 | 509 | 21 |
+
+  | modes at one contact | now | hand | now / hand |
+  |---|---|---|---|
+  | 1 | 258 | 9.9 | 26 |
+  | 16 | 1,374 | 21.5 | 64 |
+  | 200 | 27,267 | 172 | 159 |
 
   The first measurement re-derived the Jacobian by asking every driver about
   every unknown, factored it every iteration, and allocated 12 to 19 times a
-  step. Now a step that is accepted allocates nothing (asserted), the
-  Jacobian is assembled from a list made at sealing of which residual rows
-  read which component's outputs, and a block that is affine throughout
-  (every component `Class::ExactLinear`, every driver linear) keeps its
-  factors for as long as the step length stays the same: one iteration a
-  step and one back-substitution. The results are those of the first
-  measurement's code to the bit (the suites below did not move; the kept
-  factors are tested against factors derived afresh every step). A damper
-  makes a block not affine, because its heat is quadratic in its rate, so a
-  damped line still assembles and factors every step: that, the dense
-  factors, and the unknowns that are plain copies of an output are what
-  bead `.5.7` still has to remove.
+  step. The second column kept workspaces between steps (an accepted step
+  allocates nothing, asserted), assembled the Jacobian from a list made at
+  sealing of which residual rows read which component's outputs, and kept
+  the factors of a block that is affine throughout (every component
+  `Class::ExactLinear`, every driver linear) for as long as the step length
+  stays the same; its results were those of the first measurement's code to
+  the bit. "Now" substitutes the inputs that are copies and eliminates only
+  the ones that close the loops (the invariant above): 49 of 288 inputs for
+  48 damped masses, one of 201 for 200 modes. Results moved at the rounding
+  of the elimination and every suite below passes unchanged: of the reports
+  of ten example scenes stored before the change, three are the same bytes
+  (no loop, or one component) and seven moved, the fixed-step ones by at
+  most 8.9e-15 in any number, the adaptive one by 2.8e-13 s in the times its
+  controller chose and 9.3e-12 in its last normalized error; no step or
+  iteration count changed. The cost is now linear in the number of
+  components in these cases, at 100 to 140 ns a component a step with one
+  iteration and about 260 ns with two.
+
+  What is left, and what bead `.5.7` still has to remove: the kept inputs
+  are eliminated densely (49 by 49 twice a step for 48 damped masses; that
+  part grows with the cube); a damper makes a block not
+  affine, because its heat is quadratic in its rate, so a damped line
+  assembles and factors twice a step although its mechanics are linear;
+  every component is proposed once more than it is iterated, audited and
+  published through dynamic calls whatever its class; the plan is not
+  explainable beyond `plan_shape` and `plan_loops`. A graph whose modes are
+  each a component pays the per-component cost 200 times where the
+  hand-written loop does two passes over an array; a modal bank that is one
+  component would not.
 - Entropy is accounted as generation and as flow through heat ports. Stored
   entropy of components is not tracked, so the second-law check is narrow: it
   refuses a step in which the entropy components say they generated, plus the

@@ -14,7 +14,7 @@ use fs_ports::component::{
 
 use crate::erased::{Node, OwnerError, Plain, Tangent};
 use crate::ledger::{BoundaryAccount, ConnectionAccount, Ledger, NodeAccount, SinkAccount, Sum};
-use crate::solve::{factor_dense, solve_factored};
+use crate::solve::Condensed;
 use crate::wiring::{
     AdmissionError, Block, Connection, Driver, HeatSink, NodeId, PortRef, RouteTemperature,
     blocks_in_dependency_order, tolerance_group,
@@ -1352,17 +1352,25 @@ struct BlockWork {
     allowance: Vec<f64>,
     group_scale: Vec<f64>,
     gradient: Vec<(usize, f64)>,
-    /// The interface Jacobian, then its factors, row-major.
-    factors: Vec<f64>,
-    pivots: Vec<usize>,
+    /// The interface Jacobian and its factors: the unknowns that are
+    /// copies substituted, the rest eliminated together.
+    condensed: Condensed,
     /// Per unknown, the part of `readers` that reads its owner's outputs.
     column_readers: Vec<Range<usize>>,
     /// `(row, position in the owner's outputs, slope)` for every term of a
-    /// linear driver of the block, grouped by the component whose output it
-    /// reads, in row order and then in the driver's order.
+    /// driver of the block, grouped by the component whose output it
+    /// reads, in row order and then in the driver's order. The slope of a
+    /// driver that is not linear is remade before every assembly.
     readers: Vec<(usize, usize, f64)>,
-    /// Rows whose driver's slopes depend on the outputs it reads.
-    varying_rows: Vec<usize>,
+    /// Per unknown, where the Jacobian keeps the entry of each of its
+    /// readers: `slots[slot_start[column]..]`, in the readers' order.
+    slots: Vec<usize>,
+    slot_start: Vec<usize>,
+    /// Rows whose driver's slopes depend on the outputs it reads, each with
+    /// its part of `varying_terms`: per term of the driver, the reader that
+    /// carries its slope (`usize::MAX` for a term read from another block).
+    varying: Vec<(usize, Range<usize>)>,
+    varying_terms: Vec<usize>,
     /// Every component is exactly linear and every driver is linear, so the
     /// Jacobian depends on the step length and on nothing else.
     affine: bool,
@@ -1384,6 +1392,21 @@ impl BlockWork {
         affine: bool,
     ) -> Self {
         let m = block.unknowns.len();
+        // Rows whose driver is not linear, and room for where its terms go.
+        let mut varying = Vec::new();
+        let mut varying_terms = Vec::new();
+        let mut terms_of_row = vec![usize::MAX; m];
+        let mut sources = Vec::new();
+        for (row, &target) in block.unknowns.iter().enumerate() {
+            if matches!(drivers[target], Driver::Linear(_)) {
+                continue;
+            }
+            sources.clear();
+            drivers[target].sources(&mut sources);
+            terms_of_row[row] = varying_terms.len();
+            varying_terms.resize(varying_terms.len() + sources.len(), usize::MAX);
+            varying.push((row, terms_of_row[row]..varying_terms.len()));
+        }
         let mut readers = Vec::new();
         let mut of_node = Vec::with_capacity(block.nodes.len());
         for &node in &block.nodes {
@@ -1396,11 +1419,20 @@ impl BlockWork {
                             readers.push((row, source - outputs.start, slope));
                         }
                     }
+                } else {
+                    sources.clear();
+                    drivers[target].sources(&mut sources);
+                    for (term, &source) in sources.iter().enumerate() {
+                        if outputs.contains(&source) {
+                            varying_terms[terms_of_row[row] + term] = readers.len();
+                            readers.push((row, source - outputs.start, 0.0));
+                        }
+                    }
                 }
             }
             of_node.push(start..readers.len());
         }
-        let column_readers = block
+        let column_readers: Vec<Range<usize>> = block
             .unknowns
             .iter()
             .map(|&index| {
@@ -1411,25 +1443,41 @@ impl BlockWork {
                 of_node[position].clone()
             })
             .collect();
-        let varying_rows: Vec<usize> = block
-            .unknowns
+        // Column `j` of the Jacobian has an entry in every row that reads
+        // an output of the component unknown `j` is an input of.
+        let pattern: Vec<Vec<usize>> = column_readers
             .iter()
-            .enumerate()
-            .filter(|&(_, &target)| !matches!(drivers[target], Driver::Linear(_)))
-            .map(|(row, _)| row)
+            .map(|range| {
+                let mut rows: Vec<usize> =
+                    readers[range.clone()].iter().map(|&(row, _, _)| row).collect();
+                rows.sort_unstable();
+                rows.dedup();
+                rows
+            })
             .collect();
+        let condensed = Condensed::plan(&pattern);
+        let mut slots = Vec::new();
+        let mut slot_start = Vec::with_capacity(m);
+        for (column, range) in column_readers.iter().enumerate() {
+            slot_start.push(slots.len());
+            slots.extend(
+                readers[range.clone()].iter().map(|&(row, _, _)| condensed.slot(row, column)),
+            );
+        }
         Self {
             residual: vec![0.0; m],
             rounding: vec![0.0; m],
             allowance: vec![0.0; m],
             group_scale: Vec::new(),
             gradient: Vec::new(),
-            factors: vec![0.0; m * m],
-            pivots: vec![0; m],
+            condensed,
             column_readers,
             readers,
-            affine: affine && varying_rows.is_empty(),
-            varying_rows,
+            slots,
+            slot_start,
+            affine: affine && varying.is_empty(),
+            varying,
+            varying_terms,
             kept_dt_s: f64::NAN,
             slopes: Vec::new(),
         }
@@ -1589,6 +1637,19 @@ impl System {
     pub fn plan_shape(&self) -> (usize, usize) {
         let loops = self.blocks.iter().filter(|block| block.looped()).count();
         (self.blocks.len(), loops)
+    }
+
+    /// Per loop of the plan, in its order: how many inputs it solves for,
+    /// and how many of those are solved together. The others are copies and
+    /// follow from them by substitution.
+    #[must_use]
+    pub fn plan_loops(&self) -> Vec<(usize, usize)> {
+        self.blocks
+            .iter()
+            .zip(&self.block_work)
+            .filter(|(block, _)| block.looped())
+            .map(|(block, work)| (block.unknowns.len(), work.condensed.kept()))
+            .collect()
     }
 
     /// The accepted state of `node`, if it has type `S`.
@@ -1826,7 +1887,6 @@ impl System {
         dt_s: f64,
         cx: &Cx<'_>,
     ) -> Result<Result<u32, f64>, SystemError> {
-        let m = unknowns.len();
         for &index in unknowns {
             let start = self.accepted_inputs[index];
             if self.input_is_temperature[index] && !(start.is_finite() && start > 0.0) {
@@ -1845,11 +1905,13 @@ impl System {
             allowance,
             group_scale,
             gradient,
-            factors,
-            pivots,
+            condensed,
             column_readers,
             readers,
-            varying_rows,
+            slots,
+            slot_start,
+            varying,
+            varying_terms,
             affine,
             kept_dt_s,
             slopes,
@@ -1951,9 +2013,16 @@ impl System {
             } else {
                 *kept_dt_s = f64::NAN;
                 slopes.clear();
-                factors.fill(0.0);
-                for diagonal in 0..m {
-                    factors[diagonal * m + diagonal] = 1.0;
+                condensed.clear();
+                // The slopes of the drivers that are not linear, at the
+                // outputs of this iterate.
+                for (row, terms) in varying.iter() {
+                    self.drivers[unknowns[*row]].gradient(&self.outputs, gradient);
+                    for (&reader, &(_, slope)) in varying_terms[terms.clone()].iter().zip(gradient.iter()) {
+                        if reader != usize::MAX {
+                            readers[reader].2 = slope;
+                        }
+                    }
                 }
                 for (column, &index) in unknowns.iter().enumerate() {
                     let node = self.input_owner[index];
@@ -1962,29 +2031,19 @@ impl System {
                     {
                         return Ok(Err(shorter));
                     }
-                    let mut entry = |row: usize, through: f64| {
-                        factors[row * m + column] -= through;
+                    // Every row that reads this component's outputs, where
+                    // the plan keeps its entry in this column.
+                    let reading = &readers[column_readers[column].clone()];
+                    for (&(row, offset, slope), &slot) in reading.iter().zip(&slots[slot_start[column]..]) {
+                        let through = slope * self.scratch_outputs[offset];
+                        condensed.subtract(slot, through);
                         rounding[row] += (through * self.inputs[index]).abs();
                         if affine {
                             slopes.push((row, column, through));
                         }
-                    };
-                    // Rows with linear drivers read this component's
-                    // outputs where the plan says; the others are asked.
-                    for &(row, offset, slope) in &readers[column_readers[column].clone()] {
-                        entry(row, slope * self.scratch_outputs[offset]);
-                    }
-                    let outputs = self.node_outputs(node);
-                    for &row in varying_rows.iter() {
-                        self.drivers[unknowns[row]].gradient(&self.outputs, gradient);
-                        for &(source, slope) in gradient.iter() {
-                            if outputs.contains(&source) {
-                                entry(row, slope * self.scratch_outputs[source - outputs.start]);
-                            }
-                        }
                     }
                 }
-                if !factor_dense(factors, pivots, m) {
+                if !condensed.factor() {
                     return Err(SystemError::Singular {
                         nodes: self.names_of(nodes),
                     });
@@ -1996,7 +2055,7 @@ impl System {
             for value in residual.iter_mut() {
                 *value = -*value;
             }
-            if !solve_factored(factors, pivots, residual, m) {
+            if !condensed.solve(residual) {
                 return Err(SystemError::Singular {
                     nodes: self.names_of(nodes),
                 });

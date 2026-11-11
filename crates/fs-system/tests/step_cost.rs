@@ -259,6 +259,129 @@ impl Hand {
     }
 }
 
+/// Mass [kg], ratio and starting rate [m/s] of mode `index` of [`star`].
+fn mode(index: usize) -> (f64, f64, f64) {
+    let at = index as f64;
+    (
+        MASS_KG * (1.0 + 0.01 * at),
+        1.0 / (1.0 + 0.05 * at),
+        0.1 * (1.0 + (index % 3) as f64),
+    )
+}
+
+/// `n` masses that each feel one spring's force through a ratio of their
+/// own, while the spring is stretched by the sum of their rates through the
+/// same ratios: the modes of a body that meet at one contact. The spring's
+/// other end is fixed. `n + 1` components in one looped block.
+fn star(n: usize) -> (System, Vec<NodeId>) {
+    let mut builder = SystemBuilder::new();
+    let contact = builder
+        .add_with_tangent("contact", Spring::new(STIFFNESS_N_M, 0.0).unwrap(), 0.0)
+        .unwrap();
+    let mut members = Vec::new();
+    let masses = (0..n)
+        .map(|index| {
+            let (mass_kg, ratio, velocity_m_s) = mode(index);
+            let mass = builder
+                .add_with_tangent(
+                    &format!("mode{index}"),
+                    Mass::new(mass_kg).unwrap(),
+                    Motion {
+                        position_m: 0.0,
+                        velocity_m_s,
+                    },
+                )
+                .unwrap();
+            members.push((builder.port(mass, "p").unwrap(), ratio));
+            mass
+        })
+        .collect();
+    builder
+        .common_effort_ratios(builder.port(contact, "a").unwrap(), &members)
+        .unwrap();
+    builder
+        .boundary(
+            builder.port(contact, "b").unwrap(),
+            Box::new(|_, _, values| values[0] = 0.0),
+        )
+        .unwrap();
+    (builder.seal().unwrap(), masses)
+}
+
+/// The star by the implicit midpoint rule in one unknown, the spring's mean
+/// extension: the modes' compliance at the contact is summed once, and a
+/// step is one pass for the rate they bring and one to move them.
+struct StarHand {
+    modes: Vec<(f64, f64)>,
+    velocity: Vec<f64>,
+    extension: f64,
+    compliance: f64,
+}
+
+impl StarHand {
+    fn new(n: usize) -> Self {
+        let modes: Vec<(f64, f64)> = (0..n).map(|index| (mode(index).0, mode(index).1)).collect();
+        Self {
+            compliance: modes.iter().map(|(mass, ratio)| ratio * ratio / mass).sum(),
+            velocity: (0..n).map(|index| mode(index).2).collect(),
+            extension: 0.0,
+            modes,
+        }
+    }
+
+    fn step(&mut self) {
+        // The spring is stretched at minus the sum of ratio times rate.
+        let rate: f64 = self
+            .modes
+            .iter()
+            .zip(&self.velocity)
+            .map(|((_, ratio), velocity)| ratio * velocity)
+            .sum();
+        let mean = (self.extension - 0.5 * DT_S * rate)
+            / (1.0 + 0.25 * STIFFNESS_N_M * DT_S * DT_S * self.compliance);
+        let force = STIFFNESS_N_M * mean;
+        for ((mass, ratio), velocity) in self.modes.iter().zip(&mut self.velocity) {
+            let mean_rate = *velocity + 0.5 * DT_S * ratio * force / mass;
+            *velocity = 2.0 * mean_rate - *velocity;
+        }
+        self.extension = 2.0 * mean - self.extension;
+    }
+}
+
+#[test]
+fn the_plan_solves_for_what_closes_the_loops_and_substitutes_the_copies() {
+    // The line is one loop. A force sum for each mass and the body's heat
+    // sum are solved together; every end rate of a spring, a damper or the
+    // force, and every damper's temperature, is a copy and follows.
+    for n in [1_usize, 4, 48] {
+        assert_eq!(line(n, true).0.plan_loops(), [(6 * n, n + 1)], "{n} masses, damped");
+        assert_eq!(line(n, false).0.plan_loops(), [(3 * n, n)], "{n} masses");
+    }
+    // Modes that meet at one contact: the contact's rate alone, whatever
+    // their number. That is the scalar the hand-written loop solves for.
+    for n in [1_usize, 5, 200] {
+        let (mut system, masses) = star(n);
+        assert_eq!(system.plan_loops(), [(n + 1, 1)], "{n} modes");
+        let mut hand = StarHand::new(n);
+        with_cx(|cx| {
+            for _ in 0..300 {
+                assert_eq!(system.step(DT_S, cx).unwrap().iterations, 1);
+                hand.step();
+            }
+        });
+        for (mass, expected) in masses.iter().zip(&hand.velocity) {
+            let velocity = system.state::<Motion>(*mass).unwrap().velocity_m_s;
+            assert!(
+                (velocity - expected).abs() <= 1.0e-12,
+                "{n} modes: {velocity} vs {expected}"
+            );
+        }
+        // The modes have been turned round by the contact.
+        assert!(hand.velocity[0] < 0.0 && hand.extension.abs() > 1.0e-4);
+        assert!(system.ledger().energy_residual_j().abs() <= 1.0e-12);
+    }
+}
+
 #[test]
 fn the_chain_from_elements_is_the_hand_written_midpoint_rule() {
     for (n, damped) in [(1_usize, true), (4, true), (9, true), (1, false), (6, false)] {
@@ -420,6 +543,39 @@ fn cost_of_a_step_against_the_hand_written_loop() {
         println!(
             "{n:>6}  {:>7}  {kernel_ns:>14.0}  {hand_ns:>12.1}  {:>5.0}  {allocations:>16.1}  {iterations:>15.2}",
             if damped { "yes" } else { "no" },
+            kernel_ns / hand_ns
+        );
+    }
+    println!(" modes  kernel ns/step  hand ns/step  ratio  allocations/step");
+    for (n, steps) in [(1_usize, 20_000_u32), (16, 8_000), (200, 2_000)] {
+        let (mut system, _) = star(n);
+        let mut hand = StarHand::new(n);
+        let (kernel_ns, allocations) = with_cx(|cx| {
+            for _ in 0..20 {
+                system.step(DT_S, cx).unwrap();
+            }
+            let mut elapsed = std::time::Duration::ZERO;
+            let allocations = allocations_of(|| {
+                let start = Instant::now();
+                for _ in 0..steps {
+                    system.step(DT_S, cx).unwrap();
+                }
+                elapsed = start.elapsed();
+            });
+            (
+                elapsed.as_nanos() as f64 / f64::from(steps),
+                allocations as f64 / f64::from(steps),
+            )
+        });
+        let hand_steps = steps * 200;
+        let start = Instant::now();
+        for _ in 0..hand_steps {
+            hand.step();
+        }
+        let hand_ns = start.elapsed().as_nanos() as f64 / f64::from(hand_steps);
+        assert!(hand.extension.is_finite());
+        println!(
+            "{n:>6}  {kernel_ns:>14.0}  {hand_ns:>12.1}  {:>5.0}  {allocations:>16.1}",
             kernel_ns / hand_ns
         );
     }

@@ -30,8 +30,10 @@
 //! # Version 0
 //!
 //! The contract in fs-ports is v0 and so is this driver. It solves looped
-//! blocks by a dense interface Newton iteration, using each component's port
-//! tangent when it offers one and a forward difference otherwise. It has no
+//! blocks by a Newton iteration on their interface inputs, using each
+//! component's port tangent when it offers one and a forward difference
+//! otherwise; the inputs that are copies are substituted and the ones that
+//! close the loops are eliminated together. It has no
 //! metric field transfer, no non-smooth tier, no multirate
 //! stepping, no monolithic solve through `StageResidual` and no snapshot
 //! encoding. Step-doubling error control uses an explicitly supplied state
