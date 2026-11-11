@@ -535,6 +535,55 @@ fn g3_prescribed_flow_admits_pressure_redistribution_beyond_zero_pressure_wall_l
 }
 
 #[test]
+fn equal_wall_limit_reconstructs_both_walls_inside_every_neighbouring_ceiling() {
+    // a=0.001, b=0.1: z=0.98, so 1-z=0.0198 turns every rounding of z into 49.5
+    // roundings of the inner wall. The ceiling itself reconstructs one wall
+    // above itself for a share of the 20000 consecutive doubles around
+    // 1200/sqrt(61) Pa; every one is admitted with both walls inside, and none
+    // is lowered by more than twice the stated bound.
+    let owner = LaminarCarreauAnnulus::new(law(false), 300.0, 0.001, 0.1, 0.5, 100.0).unwrap();
+    let z = 0.5 * (owner.gap_m / owner.mean_radius_m);
+    let kappa = 4.0 * z / (1.0 - z) + 4.0;
+    let mut ceiling = 1200.0 / 61.0_f64.sqrt();
+    for _ in 0..10_000 {
+        ceiling = ceiling.next_down();
+    }
+    let mut lowered = 0usize;
+    for _ in 0..20_000 {
+        let limit = owner.equal_wall_limit(ceiling, z).unwrap();
+        for wall in owner.wall_stresses(limit, -z * limit) {
+            assert!(wall.is_finite() && wall.abs() <= ceiling, "{ceiling:e}");
+        }
+        assert!(
+            limit >= ceiling * (1.0 - 2.0 * kappa * f64::EPSILON),
+            "{ceiling:e}"
+        );
+        lowered += usize::from(limit < ceiling);
+        ceiling = ceiling.next_up();
+    }
+    assert!(
+        lowered > 0,
+        "the sweep must contain ceilings that need the bound"
+    );
+}
+
+#[test]
+fn equal_wall_limit_still_refuses_a_reconstruction_error_beyond_its_bound() {
+    // z perturbed by 1e-12 relative is 4500 times the unit roundoff, where the
+    // bound covers 4 roundings of z: the inner wall then sits 4.95e-11 of the
+    // ceiling above it, 1100 times the lowering, so the verification refuses.
+    let owner = LaminarCarreauAnnulus::new(law(false), 300.0, 0.001, 0.1, 0.5, 100.0).unwrap();
+    let z = 0.5 * (owner.gap_m / owner.mean_radius_m);
+    let ceiling = 1200.0 / 61.0_f64.sqrt();
+    assert_eq!(
+        owner
+            .equal_wall_limit(ceiling, z * (1.0 - 1e-12))
+            .unwrap_err(),
+        state_error("Carreau annular equal-wall stress span is unrepresentable")
+    );
+}
+
+#[test]
 fn g4_prescribed_annular_flow_refuses_unsupported_targets_and_retries_after_cancellation() {
     let owner = annulus();
     for (tolerance, iterations) in [(0.0, 96), (f64::NAN, 96), (1e-9, 0), (1e-9, 129)] {

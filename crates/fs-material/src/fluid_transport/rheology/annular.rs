@@ -639,6 +639,40 @@ impl LaminarCarreauAnnulus {
         ))
     }
 
+    // The equal-wall stress amplitude c at which BOTH reconstructed wall
+    // stresses stay inside the ceiling. With s=-z*c and z=h/(2*Rm) the walls
+    // are (Rm/a)*(c-z*c) and (Rm/b)*(c+z*c), analytically both exactly c, so
+    // the ceiling itself is the supported amplitude; the reconstruction can
+    // still round one wall above it. The ceiling is taken when its walls
+    // reconstruct inside it. Otherwise c is lowered ONCE by kappa*eps, where
+    // kappa bounds the first-order relative error of the worse (inner) wall:
+    // z carries 3 roundings (gap=b-a, mean=a+gap/2, their quotient) and z*c one,
+    // and 1-z is a cancellation that turns each of those 4 into z/(1-z) of
+    // them in the wall; the prefactor Rm/a, the subtraction and the final
+    // product add 3 more, and the lowering itself one: kappa = 4*z/(1-z) + 4.
+    // The outer wall has no cancellation (4*z/(1+z) + 3 < kappa). The check on
+    // the lowered amplitude stays as verification and refuses what the bound
+    // does not cover. No profile is clipped: the lowering is about 4e-14 of c
+    // for the annulus a=0.001, b=0.1 (z=0.98), far below the wall-velocity
+    // tolerance that closes the solve below.
+    fn equal_wall_limit(&self, ceiling: f64, z: f64) -> Result<f64, MaterialError> {
+        let inside = |limit: f64| {
+            self.wall_stresses(limit, -z * limit)
+                .into_iter()
+                .all(|tau| tau.is_finite() && tau.abs() <= ceiling)
+        };
+        let mut limit = ceiling;
+        if !inside(limit) {
+            limit = ceiling * (1.0 - (4.0 * z / (1.0 - z) + 4.0) * f64::EPSILON);
+        }
+        if !limit.is_finite() || limit <= 0.0 || !inside(limit) {
+            return Err(state_error(
+                "Carreau annular equal-wall stress span is unrepresentable",
+            ));
+        }
+        Ok(limit)
+    }
+
     // Equal actual wall stresses t give c=t and s=-h*t/(2*Rm). The
     // cylindrical stress is positive in BOTH boundary stresses. Consequently
     // this path connects zero relative motion to the largest admissible
@@ -664,27 +698,7 @@ impl LaminarCarreauAnnulus {
             ));
         }
         let z = 0.5 * (self.gap_m / self.mean_radius_m);
-        let ceiling = self.prepared.ceiling.stress();
-        let mut limit = ceiling;
-        for _ in 0..8 {
-            if self
-                .wall_stresses(limit, -z * limit)
-                .into_iter()
-                .all(|tau| tau.is_finite() && tau.abs() <= ceiling)
-            {
-                break;
-            }
-            limit = limit.next_down();
-        }
-        if self
-            .wall_stresses(limit, -z * limit)
-            .into_iter()
-            .any(|tau| !tau.is_finite() || tau.abs() > ceiling)
-        {
-            return Err(state_error(
-                "Carreau annular equal-wall stress span is unrepresentable",
-            ));
-        }
+        let limit = self.equal_wall_limit(self.prepared.ceiling.stress(), z)?;
         check()?;
         let mut stress = self.prepared.sample_rate(mean_rate)?.stress().min(limit);
         let (mut low, mut high) = (0.0, limit);
