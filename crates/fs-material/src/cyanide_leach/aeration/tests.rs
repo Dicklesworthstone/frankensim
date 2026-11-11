@@ -684,6 +684,32 @@ fn initially_balanced_transfer_and_consumption_have_known_second_derivative() {
 }
 
 #[test]
+fn an_unresolvable_published_oxygen_change_still_refuses_while_stage_probes_admit_it() {
+    // The same balanced start over 1e-12 s. The Au increment from x = 0 is
+    // resolvable at every stage, so only the oxygen is in question: its stage
+    // changes (about 1e-25 mol) and its published change (about h*O'' h/2 =
+    // 2e-24 mol) are all far below half an ulp of 2/3 (5.55e-17 mol). The
+    // stage probes admit that, so the refusal must now come from the published
+    // update, with the same words, and leave the batch unchanged.
+    let mut batch = make_batch(4.0, 2.0, 2.0 / 3.0);
+    let before = batch.clone();
+    let result = batch.advance(
+        Time::new(1e-12),
+        Pressure::new(100_000.0),
+        &QueryPoint::new(),
+        AerationNumerics::default(),
+        || false,
+    );
+    assert!(matches!(
+        result,
+        Err(CyanidationError::Arithmetic(
+            "nonzero DO change is below numeric resolution"
+        ))
+    ));
+    unchanged(&batch, &before);
+}
+
+#[test]
 fn flux_reversal_and_resumed_pressure_schedule_retain_independent_gross_accounts() {
     let mut whole = make_batch(4.0, 0.5, 1.05);
     let complete = advance(&mut whole, 1.0, 100_000.0);

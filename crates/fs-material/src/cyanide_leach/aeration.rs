@@ -881,12 +881,29 @@ fn derivative(boundary: &Boundary<'_>, sample: &Sample) -> Result<[f64; 4]> {
         (-flux).max(0.0),
     ])
 }
+/// The role of a displaced sample inside one RK step.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Displacement {
+    /// A stage abscissa. When the stage rate times the stage step is below
+    /// half an ulp of the dissolved oxygen, the abscissa keeps the old oxygen.
+    /// That abscissa is off by at most 0.5 ulp(DO), far below the O(h^2)
+    /// truncation error of the stage itself, and a rate that is an exact zero
+    /// of the law but a rounding residue of the speciation (the initially
+    /// balanced transfer, printed 2e-13 of a 0.67 mol/s flux) must not stop the
+    /// step. The published update is still checked.
+    Stage,
+    /// The published update of the step: an absorbed nonzero oxygen change is
+    /// refused there, so the stored oxygen never silently skips a resolvable
+    /// change.
+    Published,
+}
 fn displaced(
     layout: &Layout,
     boundary: &Boundary<'_>,
     initial: &Sample,
     elapsed: f64,
     rate: [f64; 4],
+    role: Displacement,
     work: &mut Work<'_, impl FnMut() -> bool>,
 ) -> Result<Sample> {
     let dt = elapsed - initial.chemistry.elapsed.value();
@@ -906,7 +923,7 @@ fn displaced(
     if oxygen < 0.0 || (old > 0.0 && oxygen == 0.0) || oxygen > old.max(boundary.saturation) {
         return Err(CyanidationError::TrialDepletion);
     }
-    if change > 0.0 && oxygen == old {
+    if role == Displacement::Published && change > 0.0 && oxygen == old {
         return Err(CyanidationError::Arithmetic(
             "nonzero DO change is below numeric resolution",
         ));
@@ -930,11 +947,35 @@ fn aerated_rk4(
 ) -> Result<Sample> {
     let middle = stage_midpoint(initial.chemistry.elapsed.value(), end)?;
     let first = derivative(boundary, initial)?;
-    let second = displaced(layout, boundary, initial, middle, first, work)?;
+    let second = displaced(
+        layout,
+        boundary,
+        initial,
+        middle,
+        first,
+        Displacement::Stage,
+        work,
+    )?;
     let second = derivative(boundary, &second)?;
-    let third = displaced(layout, boundary, initial, middle, second, work)?;
+    let third = displaced(
+        layout,
+        boundary,
+        initial,
+        middle,
+        second,
+        Displacement::Stage,
+        work,
+    )?;
     let third = derivative(boundary, &third)?;
-    let fourth = displaced(layout, boundary, initial, end, third, work)?;
+    let fourth = displaced(
+        layout,
+        boundary,
+        initial,
+        end,
+        third,
+        Displacement::Stage,
+        work,
+    )?;
     let fourth = derivative(boundary, &fourth)?;
     let mut average = [0.0; 4];
     for i in 0..4 {
@@ -946,7 +987,15 @@ fn aerated_rk4(
         ]
         .into_iter())?;
     }
-    displaced(layout, boundary, initial, end, average, work)
+    displaced(
+        layout,
+        boundary,
+        initial,
+        end,
+        average,
+        Displacement::Published,
+        work,
+    )
 }
 fn stage_midpoint(start: f64, end: f64) -> Result<f64> {
     let middle = start + product(end - start, 0.5)?;
