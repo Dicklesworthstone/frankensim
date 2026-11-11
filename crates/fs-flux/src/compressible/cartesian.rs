@@ -83,6 +83,9 @@ pub(super) struct StageStats {
     pub rate: f64,
     pub fallback: usize,
     pub limited: usize,
+    /// The step the stages used when the first stage's face rate set it; 0.0 when the step the
+    /// attempt was given stood (the retry loop's own `dt` then applies).
+    pub dt: f64,
 }
 pub(super) struct AcceptedStep {
     pub dt: f64,
@@ -151,6 +154,7 @@ pub(super) fn rk2<E, C: FnMut() -> bool>(
         rate: first.rate.max(second.rate),
         fallback: first.fallback + second.fallback,
         limited: first.limited + second.limited,
+        dt: second.dt,
     })
 }
 

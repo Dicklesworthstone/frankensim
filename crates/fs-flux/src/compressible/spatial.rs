@@ -838,6 +838,9 @@ impl Euler3d {
             };
             match trial {
                 Ok((stats, source_change)) => {
+                    // An unforced, unprofiled attempt on a hydrostatic field takes its step from the first
+                    // stage's face rate (see `evolve::attempt`); every other attempt keeps its step.
+                    let dt = if stats.dt > 0.0 { stats.dt } else { dt };
                     let after = checked_totals(
                         &self.work.candidate,
                         self.grid.cell_volume(),

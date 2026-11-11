@@ -100,6 +100,48 @@ fn g1_variable_cp_lapse_and_integrated_pressure_balance_remain_at_rest() {
     }
 }
 
+/// A forced step keeps the step its retry loop gave it: the body-force owner kicks half a step before
+/// and half a step after the attempt with that step, so the attempt must not shorten it (an unforced
+/// attempt on a hydrostatic field does take the step its first stage's face rate admits, as the test
+/// above shows). On this atmosphere the first attempt exceeds the CFL budget, because the face rate
+/// along the stratified axis exceeds the estimate's cell-centre sum, so the forced step halves as it
+/// always did, and the force impulse over the accepted step is the force times its elapsed time. That
+/// holds only if the kicks and the stages used one step. The force acts along the periodic axis, where
+/// the atmosphere has no gravity, so the whole y impulse is the force's. It is small enough (the
+/// velocity it adds, about 1e-16, changes the endpoint's cell rate by far less than the CFL check's
+/// 16 eps) that the forcing owner's own endpoint check admits the given step: only the first stage's
+/// face rate can shorten it, which is what an attempt that wrongly took the step would show.
+#[test]
+fn a_forced_atmosphere_step_keeps_its_given_step_and_its_force_impulse_matches_the_elapsed_time() {
+    let mut flow = field(0, 0.0, -3.0);
+    let mass = flow.totals().mass;
+    let acceleration = [0.0, 1e-14];
+    let mut scratch = flow
+        .forcing_workspace(flow.required_forcing_workspace_bytes().unwrap())
+        .unwrap();
+    let report = flow
+        .step_with_forcing(
+            Time::new(0.02),
+            StepControl {
+                reconstruction: Reconstruction::FirstOrder,
+                ..StepControl::default()
+            },
+            BodyForce2d::UniformAcceleration(acceleration),
+            ForceControl2d { maximum_mach: 8.0 },
+            &mut scratch,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(report.halvings, 1, "the forced first attempt exceeds its CFL budget and halves");
+    // The impulse is about 1e-16: compare it relatively, not with `close`'s absolute floor.
+    let expected = acceleration[1] * mass * report.elapsed.value();
+    let impulse = report.source_change.impulse[1];
+    assert!(
+        (impulse - expected).abs() <= 1e-9 * expected.abs(),
+        "impulse {impulse:e} against force x elapsed {expected:e}"
+    );
+}
+
 #[test]
 fn g3_isentropic_reference_allows_pressure_disturbances_and_conserves_total_energy() {
     let equilibrium = field(1, 0.4, -3.0);

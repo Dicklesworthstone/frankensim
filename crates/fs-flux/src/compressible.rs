@@ -672,6 +672,8 @@ impl Euler2d {
             reconstruction,
             stats,
         } = accepted;
+        // An unforced attempt on a hydrostatic field takes its step from the first stage's face rate (see `attempt`).
+        let dt = if stats.dt > 0.0 { stats.dt } else { dt };
         let after = checked_totals(
             &self.work.candidate,
             self.grid.cell_volume(),
@@ -733,8 +735,19 @@ fn attempt(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(StageStats, ForceChange2d), Error> {
     let mut source = ForceChange2d::default();
+    // Where the face states are reconstructed about a hydrostatic reference, their wave speeds are
+    // not bounded by the caller's estimate (cell-centre speeds), so an atmosphere would halve its
+    // step on every attempt. The face pass of the first stage does not depend on the step and its
+    // signal speeds are what the CFL check reads, so there that stage takes the step they admit:
+    // `dt` is the most the estimate allows. Both stages and the update use the same step. A body-force
+    // owner (`forcing::attempt`, which calls this with `Some(controls)`) kicks half a step before and
+    // after this attempt with the step it gave, so a forced attempt keeps that step. No other 2D
+    // attempt fixes its step before the stages run: there is no timed-profile source in this stepper
+    // and the clock advances only after acceptance.
+    let atmosphere = hydrostatic.is_some() && force_controls.is_none();
+    let mut dt = dt;
     let stats = cartesian::rk2::<Error, _>(cancelled, |final_stage, cancelled| {
-        let stats = spatial(
+        let mut stats = spatial(
             gas,
             grid,
             boundaries,
@@ -750,6 +763,12 @@ fn attempt(
             final_stage,
             cancelled,
         )?;
+        if atmosphere && !final_stage {
+            dt = dt.min(cfl / stats.rate);
+        }
+        if atmosphere {
+            stats.dt = dt;
+        }
         cartesian::check_cfl::<Error>(stats.rate * dt, cfl)?;
         let change = if final_stage {
             update(

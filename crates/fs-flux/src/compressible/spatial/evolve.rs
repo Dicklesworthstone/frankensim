@@ -15,6 +15,15 @@ pub(super) fn attempt(
     hydrostatic: Option<&hydrostatic::HydrostaticBalance>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(StageStats, ForceChange3d), Error> {
+    // Where the face states are reconstructed about a hydrostatic reference, their wave speeds are
+    // not bounded by the caller's estimate (cell-centre speeds), so an atmosphere would halve its
+    // step on every attempt. The first stage's face pass does not depend on the step and its signal
+    // speeds are what the CFL check reads, so there that stage takes the step they admit: `dt` is the
+    // most the estimate allows. Both stages and the update use the same step. A body-force owner
+    // kicks half a step before and after this attempt with its own step, so a forced attempt keeps
+    // the step it is given.
+    let shrink = force_controls.is_none() && hydrostatic.is_some();
+    let mut dt = dt;
     let first = rk_stage(
         gas,
         grid,
@@ -22,9 +31,10 @@ pub(super) fn attempt(
         reservoirs.accepted(),
         states,
         work,
-        dt,
+        &mut dt,
         cfl,
         false,
+        shrink,
         reconstruction,
         force_controls,
         hydrostatic,
@@ -38,9 +48,10 @@ pub(super) fn attempt(
         reservoirs.accepted().with_finite_trial(),
         states,
         work,
-        dt,
+        &mut dt,
         cfl,
         true,
+        shrink,
         reconstruction,
         force_controls,
         hydrostatic,
@@ -74,6 +85,9 @@ pub(super) fn attempt_with_reservoir_profiles(
         .staged()
         .maximum_rate(gas, grid, states, hydrostatic, cancelled)?;
     check_cfl::<Error>(first_rate * dt, cfl)?;
+    // This variant's profile staging and exterior bounds fix the step before the stages run, so
+    // its stages keep the step they are given (`shrink` false).
+    let mut step = dt;
     let first = rk_stage(
         gas,
         grid,
@@ -81,8 +95,9 @@ pub(super) fn attempt_with_reservoir_profiles(
         reservoirs.staged(),
         states,
         work,
-        dt,
+        &mut step,
         cfl,
+        false,
         false,
         reconstruction,
         force_controls,
@@ -107,9 +122,10 @@ pub(super) fn attempt_with_reservoir_profiles(
         reservoirs.staged().with_finite_trial(),
         states,
         work,
-        dt,
+        &mut step,
         cfl,
         true,
+        false,
         reconstruction,
         force_controls,
         hydrostatic,
@@ -130,6 +146,7 @@ fn combine(
             rate: first.rate.max(second.rate),
             fallback: first.fallback + second.fallback,
             limited: first.limited + second.limited,
+            dt: second.dt,
         },
         ForceChange3d {
             impulse: std::array::from_fn(|axis| a.impulse[axis] + b.impulse[axis]),
@@ -146,16 +163,17 @@ fn rk_stage(
     reservoirs: reservoir::View<'_>,
     states: &[State],
     work: &mut Workspace,
-    dt: f64,
+    dt: &mut f64,
     cfl: f64,
     final_stage: bool,
+    shrink: bool,
     reconstruction: Reconstruction,
     force_controls: Option<forcing::ForceControl3d>,
     hydrostatic: Option<&hydrostatic::HydrostaticBalance>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(StageStats, ForceChange3d), Error> {
     let input = if final_stage { &work.stage[..] } else { states };
-    let stats = spatial(
+    let mut stats = spatial(
         gas,
         grid,
         boundaries,
@@ -169,6 +187,14 @@ fn rk_stage(
         hydrostatic,
         cancelled,
     )?;
+    // `shrink`: the first stage takes the step its own face rate admits (see `attempt`).
+    if shrink && !final_stage {
+        *dt = dt.min(cfl / stats.rate);
+    }
+    let dt = *dt;
+    if shrink {
+        stats.dt = dt;
+    }
     check_cfl::<Error>(stats.rate * dt, cfl)?;
     let change = if final_stage {
         update(
