@@ -1,6 +1,8 @@
 //! Density-weighted moments on the existing tetrahedron/box intersections.
 
-use super::{OverlapError, Point, clipped_tetrahedron, determinant, poll, position, sub};
+use super::{
+    OverlapError, Point, clipped_tetrahedron, determinant, fan_det_noise, poll, position, sub,
+};
 use fs_exec::Cx;
 
 mod moments;
@@ -92,12 +94,17 @@ pub fn tetrahedron_box_density_moments(
         for i in 1..face.len() - 1 {
             let vertices = [center, face[0], face[i], face[i + 1]];
             let points = vertices.map(position);
-            let det = determinant(
+            let edges = [
                 sub(points[1], center_position),
                 sub(points[2], center_position),
                 sub(points[3], center_position),
-            );
+            ];
+            let det = determinant(edges[0], edges[1], edges[2]);
             if det < 0.0 {
+                // The error model of the fan determinant is in overlap.rs (fan_det_noise).
+                if det >= -fan_det_noise(edges) {
+                    continue;
+                }
                 return Err(OverlapError::Unrepresentable);
             }
             if det == 0.0 {

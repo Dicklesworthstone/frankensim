@@ -211,6 +211,43 @@ fn determinant(a: Point, b: Point, c: Point) -> f64 {
         + a[1] * (b[2] * c[0] - b[0] * c[2])
         + a[2] * (b[0] * c[1] - b[1] * c[0])
 }
+fn norm(v: Point) -> f64 {
+    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
+}
+fn cross(a: Point, b: Point) -> Point {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+// Error model of a fan determinant det = e1 . (e2 x e3), e_k = p_k - centre, in the clip's
+// normalized coordinates (every |x| <= 1; u = eps / 2). A computed det < 0 is refused only when it
+// is below -(a) - (b): within them its sign is rounding and vertex error, not geometry (a cap or
+// face whose three vertices agree to roundoff has no orientation), and the fan triangle is a
+// zero-volume contact, as det == 0.0 already is.
+// (a) Evaluation. determinant() is the cofactor expansion, so |fl(det) - det| <= gamma_5 sum_i
+//     |a_i| (|b_j c_k| + |b_k c_j|) <= sqrt(2) gamma_5 |e1||e2||e3| (Cauchy-Schwarz over the six
+//     products b_j c_k, j != k); rounding each e_k (a difference, relative u) adds 3 u
+//     |e1||e2||e3| to first order. (5 sqrt(2) + 3) u = 5.04 eps, taken as 6 eps |e1||e2||e3|.
+// (b) Vertices. A clipped vertex is an edge meeting a plane, t = (bound - a) / (b - a), p = a + t
+//     (b - a): about 15 u of absolute error in coordinates of size 1; the normalization
+//     (p - base) / scale adds 2 u; a vertex comes from at most six sequential clips. So the vertex
+//     error is V = (2 + 6 x 15) u = 46 eps, taken as 48 eps (a multiple of eps times the
+//     coordinate scale, 1); the centre is a mean of vertices and carries at most V as well. A
+//     change dv of e_k changes det by dv . (e_i x e_j), so the bound is
+//     2 V (|e1 x e2| + |e2 x e3| + |e3 x e1|), the 2 for vertex and centre.
+const FAN_EVALUATION: f64 = 6.0;
+const FAN_VERTEX: f64 = 48.0;
+fn fan_det_noise(e: [Point; 3]) -> f64 {
+    let evaluation = FAN_EVALUATION * f64::EPSILON * norm(e[0]) * norm(e[1]) * norm(e[2]);
+    let vertices = 2.0
+        * FAN_VERTEX
+        * f64::EPSILON
+        * (norm(cross(e[0], e[1])) + norm(cross(e[1], e[2])) + norm(cross(e[2], e[0])));
+    evaluation + vertices
+}
 fn order<const N: usize>(a: &[f64; N], b: &[f64; N]) -> core::cmp::Ordering {
     a[0].total_cmp(&b[0])
         .then(a[1].total_cmp(&b[1]))
@@ -342,12 +379,16 @@ fn integrate(
         poll(cx)?;
         for i in 1..face.len() - 1 {
             let points = [center, face[0], face[i], face[i + 1]];
-            let det = determinant(
+            let edges = [
                 sub(points[1], center),
                 sub(points[2], center),
                 sub(points[3], center),
-            );
+            ];
+            let det = determinant(edges[0], edges[1], edges[2]);
             if det < 0.0 {
+                if det >= -fan_det_noise(edges) {
+                    continue;
+                }
                 return Err(OverlapError::Unrepresentable);
             }
             if det == 0.0 {
