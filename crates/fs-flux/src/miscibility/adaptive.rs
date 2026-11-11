@@ -313,6 +313,28 @@ impl BinaryMiscibilityNetwork {
     }
 }
 
+/// Endpoint of the next step-doubling trial: `elapsed_s + step_s`, or
+/// `target_s` once the step reaches it. Each trial is compared with two half
+/// steps, so the interval it leaves behind must itself be divisible. When the
+/// midpoint of the leftover `[endpoint, target_s]` is not strictly inside it
+/// (a remainder of one ulp, left by rounded sums of steps), no later trial
+/// could take it, and this trial runs on to `target_s` instead. Every other
+/// endpoint is the one the step alone gives.
+pub(crate) fn trial_endpoint(elapsed_s: f64, step_s: f64, target_s: f64) -> f64 {
+    let endpoint = if step_s >= target_s - elapsed_s {
+        target_s
+    } else {
+        (elapsed_s + step_s).min(target_s)
+    };
+    let leftover_midpoint = endpoint + 0.5 * (target_s - endpoint);
+    let divisible = endpoint < leftover_midpoint && leftover_midpoint < target_s;
+    if endpoint < target_s && !divisible {
+        target_s
+    } else {
+        endpoint
+    }
+}
+
 #[cfg(test)]
 #[path = "adaptive/tests.rs"]
 mod tests;

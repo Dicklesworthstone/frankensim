@@ -9,6 +9,7 @@
 //! error estimates, not spatial or global-trajectory accuracy certificates.
 
 use super::*;
+use crate::miscibility::adaptive::trial_endpoint;
 use crate::miscibility::nonisothermal::adaptive::{
     BinaryNonisothermalAdvanceError, BinaryNonisothermalTimeControl, admit_time, error_ratio,
     factor, retryable,
@@ -133,11 +134,7 @@ impl BinaryNonisothermalPhaseField {
                 });
             }
             let remaining = target - field.elapsed_s();
-            let endpoint = if next_step >= remaining {
-                target
-            } else {
-                (field.elapsed_s() + next_step).min(target)
-            };
+            let endpoint = trial_endpoint(field.elapsed_s(), next_step, target);
             let dt = endpoint - field.elapsed_s();
             if !positive(dt) {
                 return Err(BinaryNonisothermalError::Invalid(

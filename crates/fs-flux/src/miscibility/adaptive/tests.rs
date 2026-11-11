@@ -199,3 +199,31 @@ fn continuation_lands_on_requested_time_with_a_short_final_remainder() {
     );
     assert_eq!(short.advance().free_energy_change_j, 0.0);
 }
+
+#[test]
+fn a_trial_that_would_strand_an_indivisible_remainder_runs_to_the_target() {
+    // Nine accepted 0.01 s steps end at 0.09, as in the binary nonisothermal
+    // phase-field interval of tests/miscibility_material. 0.09 + 0.01 rounds
+    // to one ulp below 0.1, a remainder whose half step cannot advance time.
+    let (elapsed, step, target) = (0.09_f64, 0.01_f64, 0.1_f64);
+    assert!(step < target - elapsed);
+    assert_eq!(elapsed + step, 9.999_999_999_999_999e-2);
+    assert_eq!((elapsed + step).next_up(), target);
+    assert_eq!(trial_endpoint(elapsed, step, target), target);
+    // From the stranded value itself, a target one ulp past elapsed + step.
+    let elapsed = 9.999_999_999_999_999e-2_f64;
+    let target = (elapsed + step).next_up();
+    assert!(step < target - elapsed);
+    assert_eq!(trial_endpoint(elapsed, step, target), target);
+}
+
+#[test]
+fn an_ordinary_trial_endpoint_is_the_one_the_step_alone_gives() {
+    assert_eq!(trial_endpoint(0.0, 0.01, 0.1), 0.01);
+    assert_eq!(trial_endpoint(0.02, 0.01, 0.1), 0.02 + 0.01);
+    assert_eq!(trial_endpoint(0.05, 0.2, 0.1), 0.1);
+    // Two ulps can still be halved, so that leftover stays for the next trial.
+    let elapsed = 9.999_999_999_999_999e-2_f64;
+    let target = (elapsed + 0.01).next_up().next_up();
+    assert_eq!(trial_endpoint(elapsed, 0.01, target), elapsed + 0.01);
+}
