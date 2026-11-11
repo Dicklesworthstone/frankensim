@@ -189,8 +189,9 @@ function listenItems(doc) {
   // A/B sets (a new render heard against the current one) come first: they are what changed.
   for (const x of doc.extras.filter(x => x.group)) add(x.group, `x-${x.id}`, x.title, x.before_audio ? 'A/B' : fmt.date(x.date), 'extra', x);
   for (const p of doc.pairs) {
+    const counted = p.tally ? p.tally.loose.inside + p.tally.loose.outside : 0;
     const sub = p.kind === 'graded' && p.tally
-      ? `${p.tally.loose.inside}/${p.tally.loose.inside + p.tally.loose.outside} inside`
+      ? (counted ? `${p.tally.loose.inside}/${counted} inside` : 'no ruler')
       : p.kind === 'refused' ? 'refused' : p.kind === 'listening' ? 'no recording' : p.kind === 'compared' ? 'with recording' : 'recording only';
     const group = { graded: 'Graded against a recording', listening: 'Rendered, no recording to grade against', refused: 'Refused by the grader', compared: 'Beside a recording (not graded)', 'reference-only': 'Recordings the grader holds, not rendered yet' }[p.kind];
     add(group, p.id, [p.note, p.dynamic].filter(Boolean).join(' '), sub, p.kind, p);
@@ -222,11 +223,16 @@ function pairDetail(doc, p) {
   if (p.ours && p.ours.rendered_utc) out.push(renderStamp(p.ours));
   if (p.kind === 'graded' && p.tally) {
     const t = p.tally;
-    out.push(h('p.verdictline', null, splitBar(t.loose.inside, t.loose.outside),
-      ` ${t.loose.inside} of ${t.loose.inside + t.loose.outside} measures inside the real spread`,
-      t.strict.inside + t.strict.outside ? ` (same-note ruler: ${t.strict.inside} of ${t.strict.inside + t.strict.outside})` : '',
-      ' · ', h('a', { href: `${link('f', doc.id, 'grades')}` }, 'see the measures')));
+    out.push(t.loose.inside + t.loose.outside
+      ? h('p.verdictline', null, splitBar(t.loose.inside, t.loose.outside),
+        ` ${t.loose.inside} of ${t.loose.inside + t.loose.outside} measures inside the real spread`,
+        t.strict.inside + t.strict.outside ? ` (same-note ruler: ${t.strict.inside} of ${t.strict.inside + t.strict.outside})` : '',
+        ' · ', h('a', { href: `${link('f', doc.id, 'grades')}` }, 'see the measures'))
+      // no second take, dynamic or neighbouring note of this recording in the set: every gap is shown, none is counted
+      : h('p.verdictline', null, 'No measure has a ruler: the recording set holds no second take, dynamic or neighbouring note of this one, so nothing is counted',
+        ' · ', h('a', { href: `${link('f', doc.id, 'grades')}` }, 'see the measures')));
   }
+  if (p.shared) out.push(h('p.small.muted', null, p.shared));
   if (p.kind === 'refused' && p.refused) {
     out.push(h('div.note.warn', null, h('b', null, 'The grader gave no count. '), String(p.refused.reason || ''),
       p.refused.render_sha ? h('span.small.muted', null, ` (render ${p.refused.render_sha})`) : null));

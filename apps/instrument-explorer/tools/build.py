@@ -406,7 +406,7 @@ def measure_table(family_docs: dict) -> list[dict]:
     acc: dict[str, dict] = {}
     for doc in family_docs.values():
         for p in doc["pairs"]:
-            for m in p["metrics"] if p["kind"] == "graded" else []:
+            for m in p["metrics"] if p["kind"] == "graded" and not p.get("shared") else []:
                 if m["gap"] is None or m["inside"] is None:
                     continue
                 e = acc.setdefault(m["id"], {"id": m["id"], "label": m["label"], "unit": m["unit"], "graded": 0, "inside": 0,
@@ -499,6 +499,11 @@ KIT_FITTED_CAVEAT = ("Several of this kit's settings were chosen on 2026-10-14 (
 # verisim.py's diverging map (its DIV stops), which differs from the grader's: the key must show the colours drawn
 VERISIM_DIFF_KEY = ("linear-gradient(90deg, rgb(58,120,190), rgb(24,40,60) 42%, rgb(14,15,18) 50%, "
                     "rgb(70,34,20) 58%, rgb(232,106,60))")
+# The kit pieces with a head whose tension was set so the drum's lowest mode sits at its Salamander stroke's late pitch
+TUNED_DRUMS = ("kick", "snare", "snare-off", "tom-12", "tom-14")
+# The kit's graded snare strokes (analysis/kit/snare*, graded with the kit's pieces against VCSL) are the snare card's
+# grade: the kit page shows them with this line, and no count or total takes them from the kit as well
+SHARED_SNARE = "Graded with the kit's pieces and counted on the snare drum's card, not this one."
 
 
 def kit_commit(src: dict, pid: str) -> str:
@@ -535,7 +540,9 @@ def kit_pairs(kit: Path, media: Media) -> list[dict]:
                                         "span_db": im["span_db"], "diff_range_db": im["diff_range_db"], "diff_key": VERISIM_DIFF_KEY}},
             "ours": {"git_sha": kit_commit(src, pid), "observer": g["ours"]["label"], "recipe": late.get("recipe", f"kit {pid} (fs-vkplate)"),
                      "sample_rate": 48000, "rendered_utc": late.get("rendered_utc"), "physics": late.get("physics") or []},
-            "real": {"reference_id": g["real"]["file"], "file": f"{g['real']['file']}.wav", "segment_s": None, **SALAMANDER},
+            # each drum's head tension was set from this same stroke (source.json's caveat), so it is no grade (MB 27665 Q1)
+            "real": {"reference_id": g["real"]["file"], "segment_s": None, **SALAMANDER,
+                     "file": f"{g['real']['file']}.wav" + (", the recording the head tension was tuned to" if pid in TUNED_DRUMS else "")},
             "no_reference": None, "refused": None,
             "f0_hz": {"ours": d["fundamental_hz"]["ours"], "real": d["fundamental_hz"]["real"]},
             "metrics": [], "tally": None, "history": [],
@@ -580,6 +587,7 @@ def kit_decay_evidence(kit: Path) -> list[dict]:
 
 
 def judge(pairs: list[dict], status: dict | None) -> dict:
+    pairs = [p for p in pairs if not p.get("shared")]  # counted on the card it is shared from
     graded = [p for p in pairs if p["kind"] == "graded"]
     listening = [p for p in pairs if p["kind"] == "listening"]
     refused = [p for p in pairs if p["kind"] == "refused"]
@@ -1035,6 +1043,13 @@ def main() -> int:
             if not status.get("draft"):
                 sys.exit(f"{draft}: a status draft must say why it is not the committed card (its 'draft' field)")
         pairs = [p for p in (build_pair(fid, nid, nd, media, origin) for nid, nd, origin in pair_dirs.get(fid, [])) if p]
+        if fid == "snare":  # the kit's graded snare strokes, on the kit's media paths
+            pairs += [p for p in (build_pair("kit", nid, nd, media, origin) for nid, nd, origin in pair_dirs.get("kit", [])
+                                  if nid.startswith("snare")) if p]
+        elif fid == "kit":
+            for p in pairs:
+                if p["id"].startswith("snare"):
+                    p["shared"] = SHARED_SNARE
         pairs.sort(key=lambda p: ({"graded": 0, "compared": 1, "listening": 2, "refused": 3, "reference-only": 4}[p["kind"]], note_key(p["note"]), p["id"]))
         kit_dir = mirror / "kit" if (mirror / "kit").is_dir() else mirror / "kit9"  # mirrors before 2026-10-26T03:30Z
         if fid == "kit":
@@ -1134,8 +1149,9 @@ def main() -> int:
         "sections": SECTIONS,
         # The grading method page: the score over time, the measures, the rulers' own check, and the pitch of every
         # note each family can play today.
-        "program_score": score_history([(fid, p) for fid, doc in family_docs.items() for p in doc["pairs"]]),
-        "scores": {fid: pts for fid, doc in family_docs.items() if (pts := score_history([(fid, p) for p in doc["pairs"]]))},
+        "program_score": score_history([(fid, p) for fid, doc in family_docs.items() for p in doc["pairs"] if not p.get("shared")]),
+        "scores": {fid: pts for fid, doc in family_docs.items()
+                   if (pts := score_history([(fid, p) for p in doc["pairs"] if not p.get("shared")]))},
         "titles": {fid: doc["title"] for fid, doc in family_docs.items()},
         "measures": measure_table(family_docs),
         "calibration": [{"id": fid, "title": doc["title"], "source": doc["baseline"]["source"],

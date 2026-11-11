@@ -657,6 +657,10 @@ class UnvoicedNote(Note):
 ALL_CATS = ("other_dynamic", "other_take", "neighbour")
 B_RESOLUTION = 0.2  # B x 1e-4: smaller differences are inside the stiff-string fit's own scatter
 SAME_NOTE = ("other_dynamic", "other_take")  # a neighbouring note is not a spread of THIS note's pitch-absolute measures
+# Instruments whose partials are not a harmonic series: their pitch is their strongest line and no harmonic comb or
+# fundamental check is applied. A struck membrane's modes are Bessel-function zeros, not integer multiples (MB 27665): the
+# timpani, and the kit's drums (its cymbals and hi-hats are graded unvoiced).
+INHARMONIC = ("xylophone", "marimba", "vibraphone", "timpani", "kit")
 
 
 def _m(label, unit, gap_unit, note, cats=ALL_CATS, value=None, scale=1.0):
@@ -967,7 +971,7 @@ class Refs:
         key = (e["file"], e["start"], self.band_hz)
         if key not in self._notes:
             y, info = self.aligned(e)
-            self._notes[key] = Note(y, hz_of(e["note"]), e["kind"], e["inst"] in ("xylophone", "marimba", "vibraphone"), f'{e["file"]}@{e["name"]}.{e["dyn"]}', info, band_hz=self.band_hz)
+            self._notes[key] = Note(y, hz_of(e["note"]), e["kind"], e["inst"] in INHARMONIC, f'{e["file"]}@{e["name"]}.{e["dyn"]}', info, band_hz=self.band_hz)
             while len(self._notes) > 160:
                 self._notes.popitem(last=False)
         return self._notes[key]
@@ -1297,7 +1301,7 @@ def write_pair(root, family, note_name, ref_e, refs: Refs, ref_y, ref_info, cand
 def _write_pair_staged(stage, final, family, note_name, ref_e, refs, ref_y, ref_info, cand_y, cand_info, ours_meta, review, cand_meta=None,
                        chain=None):
     f0 = hz_of(ref_e["note"])
-    inh = ref_e["inst"] in ("xylophone", "marimba", "vibraphone")
+    inh = ref_e["inst"] in INHARMONIC
     n = len(ref_y) if cand_y is None else min(len(ref_y), len(cand_y))
     real = Note(ref_y[:n], f0, ref_e["kind"], inh, "real", ref_info, band_hz=refs.band_hz)
     ours = Note(cand_y[:n], f0, ref_e["kind"], inh, "ours", cand_info, max_cents=400.0, band_hz=refs.band_hz) if cand_y is not None else None
@@ -1494,7 +1498,7 @@ def run_pair(refs, c, root):
         if refs.band_hz:
             raw = lowpass(raw, refs.band_hz)
         hp = highpass(raw, f0)
-        if ref_e["inst"] not in ("xylophone", "marimba", "vibraphone"):
+        if ref_e["inst"] not in INHARMONIC:
             check_fundamental(hp, f0_comb(hp, f0, ref_e["kind"], 400.0), ref_e["kind"], "ours", f0)
         cand_y, cand_info = _labelled("render", align, raw, f0, render_floor(hp, f0))
         ours_meta = dict(wav=c["wav"], git_sha=c["git_sha"], observer=c["observer"], recipe=c["recipe"], sample_rate=wav_sample_rate(c["wav"]))

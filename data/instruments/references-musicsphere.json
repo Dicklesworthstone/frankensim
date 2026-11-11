@@ -1,0 +1,183 @@
+{
+ "schema": "frankensim.instrument-references.v1",
+ "source": "https://doi.org/10.5281/zenodo.19497225",
+ "external": {
+  "name": "MusicSphere: Room and Organ Acoustic Measurements of St. Jakobus Church Ilmenau - Part 3",
+  "url": "https://doi.org/10.5281/zenodo.19497225",
+  "licence": "CC BY 4.0",
+  "licence_url": "https://creativecommons.org/licenses/by/4.0/",
+  "credit": "Stolz, Treybig, McLeod, Klein, Werner, MusicSphere: Room and Organ Acoustic Measurements of St. Jakobus Church Ilmenau, Part 3: Recordings of Individual Pipe Tones, Zenodo, 2026, doi 10.5281/zenodo.19497225. Cut from the longer take and resampled; otherwise unchanged."
+ },
+ "licences": [
+  {
+   "id": "musicsphere-cc-by-4.0",
+   "text": "CC BY 4.0 (Stolz, Treybig, McLeod, Klein, Werner 2026, MusicSphere: Room and Organ Acoustic Measurements of St. Jakobus Church Ilmenau, Part 3: Recordings of Individual Pipe Tones)",
+   "url": "https://creativecommons.org/licenses/by/4.0/"
+  }
+ ],
+ "files": [
+  {
+   "id": "musicsphere-p3-mic2-reg1-keyB5-take1",
+   "path": "MusicSphere-Part3/musicsphere-p3-mic2-reg1-keyB5-take1.wav",
+   "url": "https://doi.org/10.5281/zenodo.19497225",
+   "member": "Tone B/Mic 2 Register 1 Tone B.wav",
+   "sha256": "c73a3a7a67e93a1766f1e4f3ed2a0eb88b90dd11331d0e7c65a5e1cbe2f7cb72",
+   "bytes": 108288690,
+   "kind": "pipe-tone",
+   "instrument": "Organ, St. Jakobus Ilmenau, Principal 16'",
+   "articulation": "held",
+   "dynamic": "mf",
+   "range": "B4",
+   "page": "https://doi.org/10.5281/zenodo.19497225",
+   "chain": "MusicSphere Part 3, 96 kHz 24-bit mono, Mic 2",
+   "licence": "musicsphere-cc-by-4.0",
+   "channels": "mono",
+   "gradable": true,
+   "key": "B5",
+   "take": 1,
+   "cut_s": [
+    0.0,
+    7.64
+   ],
+   "midi_minus_wav_s": 51.86,
+   "onset_minus_midi_s": 0.003,
+   "note_source": "key B5 on the Principal 16'; the note is the measured f0 482.77 Hz rounded to the nearest semitone"
+  },
+  {
+   "id": "musicsphere-p3-mic2-reg1-keyB5-take2",
+   "path": "MusicSphere-Part3/musicsphere-p3-mic2-reg1-keyB5-take2.wav",
+   "url": "https://doi.org/10.5281/zenodo.19497225",
+   "member": "Tone B/Mic 2 Register 1 Tone B.wav",
+   "sha256": "c73a3a7a67e93a1766f1e4f3ed2a0eb88b90dd11331d0e7c65a5e1cbe2f7cb72",
+   "bytes": 108288690,
+   "kind": "pipe-tone",
+   "instrument": "Organ, St. Jakobus Ilmenau, Principal 16'",
+   "articulation": "held",
+   "dynamic": "mf",
+   "range": "B4",
+   "page": "https://doi.org/10.5281/zenodo.19497225",
+   "chain": "MusicSphere Part 3, 96 kHz 24-bit mono, Mic 2",
+   "licence": "musicsphere-cc-by-4.0",
+   "channels": "mono",
+   "gradable": true,
+   "key": "B5",
+   "take": 2,
+   "cut_s": [
+    125.640979,
+    135.64
+   ],
+   "midi_minus_wav_s": 51.86,
+   "onset_minus_midi_s": 0.001,
+   "note_source": "key B5 on the Principal 16'; the note is the measured f0 482.80 Hz rounded to the nearest semitone"
+  },
+  {
+   "id": "musicsphere-p3-mic2-reg1-keyB5-take3",
+   "path": "MusicSphere-Part3/musicsphere-p3-mic2-reg1-keyB5-take3.wav",
+   "url": "https://doi.org/10.5281/zenodo.19497225",
+   "member": "Tone B/Mic 2 Register 1 Tone B.wav",
+   "sha256": "c73a3a7a67e93a1766f1e4f3ed2a0eb88b90dd11331d0e7c65a5e1cbe2f7cb72",
+   "bytes": 108288690,
+   "kind": "pipe-tone",
+   "instrument": "Organ, St. Jakobus Ilmenau, Principal 16'",
+   "articulation": "held",
+   "dynamic": "mf",
+   "range": "B4",
+   "page": "https://doi.org/10.5281/zenodo.19497225",
+   "chain": "MusicSphere Part 3, 96 kHz 24-bit mono, Mic 2",
+   "licence": "musicsphere-cc-by-4.0",
+   "channels": "mono",
+   "gradable": true,
+   "key": "B5",
+   "take": 3,
+   "cut_s": [
+    253.641,
+    263.64
+   ],
+   "midi_minus_wav_s": 51.86,
+   "onset_minus_midi_s": 0.001,
+   "note_source": "key B5 on the Principal 16'; the note is the measured f0 482.79 Hz rounded to the nearest semitone"
+  },
+  {
+   "id": "musicsphere-p3-mic2-reg1-keyC6-take1",
+   "path": "MusicSphere-Part3/musicsphere-p3-mic2-reg1-keyC6-take1.wav",
+   "url": "https://doi.org/10.5281/zenodo.19497225",
+   "member": "Tone C/Mic 2 Register 1 Tone C.wav",
+   "sha256": "a01064f231033d5d1ced7f82cb97de5aea255acdacb170f9e21e76a94d3915ac",
+   "bytes": 220032690,
+   "kind": "pipe-tone",
+   "instrument": "Organ, St. Jakobus Ilmenau, Principal 16'",
+   "articulation": "held",
+   "dynamic": "mf",
+   "range": "C5",
+   "page": "https://doi.org/10.5281/zenodo.19497225",
+   "chain": "MusicSphere Part 3, 96 kHz 24-bit mono, Mic 2",
+   "licence": "musicsphere-cc-by-4.0",
+   "channels": "mono",
+   "gradable": true,
+   "key": "C6",
+   "take": 1,
+   "cut_s": [
+    0.0,
+    7.64
+   ],
+   "midi_minus_wav_s": 3641.86,
+   "onset_minus_midi_s": 0.003,
+   "note_source": "key C6 on the Principal 16'; the note is the measured f0 512.54 Hz rounded to the nearest semitone"
+  },
+  {
+   "id": "musicsphere-p3-mic2-reg1-keyC6-take2",
+   "path": "MusicSphere-Part3/musicsphere-p3-mic2-reg1-keyC6-take2.wav",
+   "url": "https://doi.org/10.5281/zenodo.19497225",
+   "member": "Tone C/Mic 2 Register 1 Tone C.wav",
+   "sha256": "a01064f231033d5d1ced7f82cb97de5aea255acdacb170f9e21e76a94d3915ac",
+   "bytes": 220032690,
+   "kind": "pipe-tone",
+   "instrument": "Organ, St. Jakobus Ilmenau, Principal 16'",
+   "articulation": "held",
+   "dynamic": "mf",
+   "range": "C5",
+   "page": "https://doi.org/10.5281/zenodo.19497225",
+   "chain": "MusicSphere Part 3, 96 kHz 24-bit mono, Mic 2",
+   "licence": "musicsphere-cc-by-4.0",
+   "channels": "mono",
+   "gradable": true,
+   "key": "C6",
+   "take": 2,
+   "cut_s": [
+    255.643979,
+    265.64
+   ],
+   "midi_minus_wav_s": 3641.86,
+   "onset_minus_midi_s": 0.004,
+   "note_source": "key C6 on the Principal 16'; the note is the measured f0 512.54 Hz rounded to the nearest semitone"
+  },
+  {
+   "id": "musicsphere-p3-mic2-reg1-keyC6-take3",
+   "path": "MusicSphere-Part3/musicsphere-p3-mic2-reg1-keyC6-take3.wav",
+   "url": "https://doi.org/10.5281/zenodo.19497225",
+   "member": "Tone C/Mic 2 Register 1 Tone C.wav",
+   "sha256": "a01064f231033d5d1ced7f82cb97de5aea255acdacb170f9e21e76a94d3915ac",
+   "bytes": 220032690,
+   "kind": "pipe-tone",
+   "instrument": "Organ, St. Jakobus Ilmenau, Principal 16'",
+   "articulation": "held",
+   "dynamic": "mf",
+   "range": "C5",
+   "page": "https://doi.org/10.5281/zenodo.19497225",
+   "chain": "MusicSphere Part 3, 96 kHz 24-bit mono, Mic 2",
+   "licence": "musicsphere-cc-by-4.0",
+   "channels": "mono",
+   "gradable": true,
+   "key": "C6",
+   "take": 3,
+   "cut_s": [
+    513.642979,
+    523.64
+   ],
+   "midi_minus_wav_s": 3641.86,
+   "onset_minus_midi_s": 0.003,
+   "note_source": "key C6 on the Principal 16'; the note is the measured f0 512.54 Hz rounded to the nearest semitone"
+  }
+ ],
+ "refused": []
+}

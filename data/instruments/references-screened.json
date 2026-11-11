@@ -89,6 +89,12 @@
    "name": "YouTube standard licence (all rights reserved)",
    "url": "https://www.youtube.com/watch?v=XxE9aegz5hw",
    "notes": "yt-dlp's license field for the video; without one a YouTube video is all rights reserved. Grading use only, never redistributed."
+  },
+  {
+   "id": "freesound-cc0-1-0",
+   "name": "CC0 1.0",
+   "url": "http://creativecommons.org/publicdomain/zero/1.0/",
+   "notes": "Freesound's licence field for the sound, read from its page. The file is the MP3 preview Freesound serves openly, so a lossy copy of the upload (about 130-180 kbit/s)."
   }
  ],
  "files": [
@@ -20867,6 +20873,567 @@
    "author": "Partesi Music Services Inc.",
    "title": "Recorder Demonstration",
    "notes": "best audio as YouTube serves it (lossy), fetched by the current yt-dlp release; the video names no per-note pitch"
+  },
+  {
+   "id": "freesound-64926-hq-preview",
+   "instrument": "pan pipe (Freesound pack 'Pan_pipe', uploaded 2008-12-22; maker, model, material and tuning not stated); 'long tone vibrato'",
+   "family": "pan-pipes",
+   "url": "https://cdn.freesound.org/previews/64/64926_413842-hq.mp3",
+   "source_page": "https://freesound.org/people/timohanes/sounds/64926/",
+   "sha256": "8a26ac736fa54895b810812cc6006fd81fe06268b5b1f824483de861a8bf4c31",
+   "bytes": 209959,
+   "licence": "freesound-cc0-1-0",
+   "licence_name": "Creative Commons 0 (CC0 1.0)",
+   "licence_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+   "licence_evidence": "https://freesound.org/people/timohanes/sounds/64926/ (sound page states: Creative Commons 0, linking http://creativecommons.org/publicdomain/zero/1.0/)",
+   "author": "timohanes",
+   "title": "Pan pipe_A1.WAV by timohanes",
+   "source_description": "long tone vibrato pan pipe A1",
+   "format": "Freesound HQ MP3 preview (LOSSY, about 180 kbps), the openly served file; the original upload was not downloaded (needs login)",
+   "original_upload": {
+    "Type": "Wave (.wav)",
+    "Duration": "0:09.199",
+    "File size": "1.5 MB",
+    "Sample rate": "44.1 kHz",
+    "Bit depth": "16 bit",
+    "Channels": "Stereo"
+   },
+   "articulation": "long held tone with vibrato (source: 'long tone vibrato')",
+   "dynamic": "not stated",
+   "takes_per_note": 1,
+   "gradable": false,
+   "clips": [
+    {"id": "pan-pipes-fs-timohanes-64926-A4", "family": "pan-pipes", "note": "A4", "pitch_from": "source label 'A1' gives the letter; the label's octave number is the uploader's own (not scientific pitch); octave from the measured f0: harmonic-sum f0 439.639 Hz, YIN 438.899 Hz (-1.4 / -4.3 c from A4)", "dynamic": "not stated", "articulation": "long held tone with vibrato (source: 'long tone vibrato')", "kind": "sustained", "cut_args": {"hint_s": null, "until_s": null}, "trim_start_s": 0.0, "trim_end_s": 7.946281, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 350431, "clip_sha256": "e057237d150ca80c12f61507b3af331a99cdc1c65b33e03d9461b42b55193da7", "status": "VALID", "failed": [], "screen": {"onset_s": 0.0957, "noise_db": -70.38, "noise_method": "lead-in", "floor_p5_db": -29.53, "peak_db": -16.91, "steady_db": -20.24, "snr_db": 53.47, "f0_comb_hz": 439.639, "f0_yin_hz": 438.899, "cents_comb": -1.4, "cents_yin": -4.3, "yin_frames": 131, "reattack_db": 2.23, "tail_db": -74.35, "clipped_runs": 0, "version": "refscreen-4", "cut": {"floor_db": -69.93, "onset_in_source_s": 0.0963}}}
+   ],
+   "path": "U4/freesound/64926_413842-hq.mp3"
+  },
+  {
+   "id": "freesound-64927-hq-preview",
+   "instrument": "pan pipe (Freesound pack 'Pan_pipe', uploaded 2008-12-22; maker, model, material and tuning not stated); 'long tone vibrato'",
+   "family": "pan-pipes",
+   "url": "https://cdn.freesound.org/previews/64/64927_413842-hq.mp3",
+   "source_page": "https://freesound.org/people/timohanes/sounds/64927/",
+   "sha256": "ba7cc3ce16b8026904fc4b8e9f686d304730b6cb816735e07ca77cca28f965b8",
+   "bytes": 194248,
+   "licence": "freesound-cc0-1-0",
+   "licence_name": "Creative Commons 0 (CC0 1.0)",
+   "licence_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+   "licence_evidence": "https://freesound.org/people/timohanes/sounds/64927/ (sound page states: Creative Commons 0, linking http://creativecommons.org/publicdomain/zero/1.0/)",
+   "author": "timohanes",
+   "title": "Pan pipe_A2.WAV by timohanes",
+   "source_description": "long tone vibrato pan pipe A2",
+   "format": "Freesound HQ MP3 preview (LOSSY, about 180 kbps), the openly served file; the original upload was not downloaded (needs login)",
+   "original_upload": {
+    "Type": "Wave (.wav)",
+    "Duration": "0:08.093",
+    "File size": "1.4 MB",
+    "Sample rate": "44.1 kHz",
+    "Bit depth": "16 bit",
+    "Channels": "Stereo"
+   },
+   "articulation": "long held tone with vibrato (source: 'long tone vibrato')",
+   "dynamic": "not stated",
+   "takes_per_note": 1,
+   "gradable": false,
+   "clips": [
+    {"id": "pan-pipes-fs-timohanes-64927-A5", "family": "pan-pipes", "note": "A5", "pitch_from": "source label 'A2' gives the letter; the label's octave number is the uploader's own (not scientific pitch); octave from the measured f0: harmonic-sum f0 866.053 Hz, YIN 864.994 Hz (-27.7 / -29.8 c from A5)", "dynamic": "not stated", "articulation": "long held tone with vibrato (source: 'long tone vibrato')", "kind": "sustained", "cut_args": {"hint_s": null, "until_s": null}, "trim_start_s": 0.023129, "trim_end_s": 7.433129, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 326781, "clip_sha256": "36824e4469730f3285896664693e41f21eee1812b110ad0d159c497bb4d78262", "status": "VALID", "failed": [], "screen": {"onset_s": 0.1009, "noise_db": -68.78, "noise_method": "lead-in", "floor_p5_db": -25.21, "peak_db": -16.17, "steady_db": -20.06, "snr_db": 52.62, "f0_comb_hz": 866.053, "f0_yin_hz": 864.994, "cents_comb": -27.7, "cents_yin": -29.8, "yin_frames": 131, "reattack_db": 2.59, "tail_db": -67.85, "clipped_runs": 0, "version": "refscreen-4", "cut": {"floor_db": -64.92, "onset_in_source_s": 0.1231}}}
+   ],
+   "path": "U4/freesound/64927_413842-hq.mp3"
+  },
+  {
+   "id": "freesound-64928-hq-preview",
+   "instrument": "pan pipe (Freesound pack 'Pan_pipe', uploaded 2008-12-22; maker, model, material and tuning not stated); 'long tone vibrato'",
+   "family": "pan-pipes",
+   "url": "https://cdn.freesound.org/previews/64/64928_413842-hq.mp3",
+   "source_page": "https://freesound.org/people/timohanes/sounds/64928/",
+   "sha256": "bb6ec8904497322244d28b4d0b55376ba7c4b1546e9cf7d16e6bf06191f335f1",
+   "bytes": 207243,
+   "licence": "freesound-cc0-1-0",
+   "licence_name": "Creative Commons 0 (CC0 1.0)",
+   "licence_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+   "licence_evidence": "https://freesound.org/people/timohanes/sounds/64928/ (sound page states: Creative Commons 0, linking http://creativecommons.org/publicdomain/zero/1.0/)",
+   "author": "timohanes",
+   "title": "Pan pipe_B1.WAV by timohanes",
+   "source_description": "long tone vibrato pan pipe B1",
+   "format": "Freesound HQ MP3 preview (LOSSY, about 180 kbps), the openly served file; the original upload was not downloaded (needs login)",
+   "original_upload": {
+    "Type": "Wave (.wav)",
+    "Duration": "0:09.039",
+    "File size": "1.5 MB",
+    "Sample rate": "44.1 kHz",
+    "Bit depth": "16 bit",
+    "Channels": "Stereo"
+   },
+   "articulation": "long held tone with vibrato (source: 'long tone vibrato')",
+   "dynamic": "not stated",
+   "takes_per_note": 1,
+   "gradable": false,
+   "clips": [
+    {"id": "pan-pipes-fs-timohanes-64928-B4", "family": "pan-pipes", "note": "B4", "pitch_from": "source label 'B1' gives the letter; the label's octave number is the uploader's own (not scientific pitch); octave from the measured f0: harmonic-sum f0 490.154 Hz, YIN 488.774 Hz (-13.1 / -18.0 c from B4)", "dynamic": "not stated", "articulation": "long held tone with vibrato (source: 'long tone vibrato')", "kind": "sustained", "cut_args": {"hint_s": null, "until_s": null}, "trim_start_s": 0.005011, "trim_end_s": 8.015011, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 353241, "clip_sha256": "e27c47b33643c63e554ec7b6868f639413114bfa72bccfcb13c38d9c3860d894", "status": "VALID", "failed": [], "screen": {"onset_s": 0.1, "noise_db": -79.06, "noise_method": "lead-in", "floor_p5_db": -26.23, "peak_db": -17.19, "steady_db": -21.79, "snr_db": 61.87, "f0_comb_hz": 490.154, "f0_yin_hz": 488.774, "cents_comb": -13.1, "cents_yin": -18.0, "yin_frames": 131, "reattack_db": 1.79, "tail_db": -70.7, "clipped_runs": 0, "version": "refscreen-4", "cut": {"floor_db": -68.56, "onset_in_source_s": 0.105}}}
+   ],
+   "path": "U4/freesound/64928_413842-hq.mp3"
+  },
+  {
+   "id": "freesound-64929-hq-preview",
+   "instrument": "pan pipe (Freesound pack 'Pan_pipe', uploaded 2008-12-22; maker, model, material and tuning not stated); 'long tone vibrato'",
+   "family": "pan-pipes",
+   "url": "https://cdn.freesound.org/previews/64/64929_413842-hq.mp3",
+   "source_page": "https://freesound.org/people/timohanes/sounds/64929/",
+   "sha256": "2305075a3876d45deee95a44228aa201b4ee4df09123545b77323e8289658fd3",
+   "bytes": 207648,
+   "licence": "freesound-cc0-1-0",
+   "licence_name": "Creative Commons 0 (CC0 1.0)",
+   "licence_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+   "licence_evidence": "https://freesound.org/people/timohanes/sounds/64929/ (sound page states: Creative Commons 0, linking http://creativecommons.org/publicdomain/zero/1.0/)",
+   "author": "timohanes",
+   "title": "Pan pipe_B2.WAV by timohanes",
+   "source_description": "long tone vibrato pan pipe B2",
+   "format": "Freesound HQ MP3 preview (LOSSY, about 180 kbps), the openly served file; the original upload was not downloaded (needs login)",
+   "original_upload": {
+    "Type": "Wave (.wav)",
+    "Duration": "0:08.546",
+    "File size": "1.4 MB",
+    "Sample rate": "44.1 kHz",
+    "Bit depth": "16 bit",
+    "Channels": "Stereo"
+   },
+   "articulation": "long held tone with vibrato (source: 'long tone vibrato')",
+   "dynamic": "not stated",
+   "takes_per_note": 1,
+   "gradable": false,
+   "clips": [
+    {"id": "pan-pipes-fs-timohanes-64929-B5", "family": "pan-pipes", "note": "B5", "pitch_from": "source label 'B2' gives the letter; the label's octave number is the uploader's own (not scientific pitch); octave from the measured f0: harmonic-sum f0 986.543 Hz, YIN 980.371 Hz (-2.1 / -13.0 c from B5)", "dynamic": "not stated", "articulation": "long held tone with vibrato (source: 'long tone vibrato')", "kind": "sustained", "cut_args": {"hint_s": null, "until_s": null}, "trim_start_s": 0.0, "trim_end_s": 7.803016, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 344113, "clip_sha256": "661a63f65555b88bf64758698e9d6114186d184cd02ee634d52cdfb045bb61ac", "status": "VALID", "failed": [], "screen": {"onset_s": 0.093, "noise_db": -71.86, "noise_method": "lead-in", "floor_p5_db": -22.13, "peak_db": -15.25, "steady_db": -18.07, "snr_db": 56.6, "f0_comb_hz": 986.543, "f0_yin_hz": 980.371, "cents_comb": -2.1, "cents_yin": -13.0, "yin_frames": 131, "reattack_db": 2.92, "tail_db": -56.53, "clipped_runs": 0, "version": "refscreen-4", "cut": {"floor_db": -61.07, "onset_in_source_s": 0.093}}}
+   ],
+   "path": "U4/freesound/64929_413842-hq.mp3"
+  },
+  {
+   "id": "freesound-64930-hq-preview",
+   "instrument": "pan pipe (Freesound pack 'Pan_pipe', uploaded 2008-12-22; maker, model, material and tuning not stated); 'long tone vibrato'",
+   "family": "pan-pipes",
+   "url": "https://cdn.freesound.org/previews/64/64930_413842-hq.mp3",
+   "source_page": "https://freesound.org/people/timohanes/sounds/64930/",
+   "sha256": "8b33e4cb310177aaac972e0bbdd13d83f460ec9f001b619c84d1043d1d16d1df",
+   "bytes": 203069,
+   "licence": "freesound-cc0-1-0",
+   "licence_name": "Creative Commons 0 (CC0 1.0)",
+   "licence_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+   "licence_evidence": "https://freesound.org/people/timohanes/sounds/64930/ (sound page states: Creative Commons 0, linking http://creativecommons.org/publicdomain/zero/1.0/)",
+   "author": "timohanes",
+   "title": "Pan pipe_C2.WAV by timohanes",
+   "source_description": "long tone vibrato pan pipe C2",
+   "format": "Freesound HQ MP3 preview (LOSSY, about 180 kbps), the openly served file; the original upload was not downloaded (needs login)",
+   "original_upload": {
+    "Type": "Wave (.wav)",
+    "Duration": "0:08.813",
+    "File size": "1.5 MB",
+    "Sample rate": "44.1 kHz",
+    "Bit depth": "16 bit",
+    "Channels": "Stereo"
+   },
+   "articulation": "long held tone with vibrato (source: 'long tone vibrato')",
+   "dynamic": "not stated",
+   "takes_per_note": 1,
+   "gradable": false,
+   "clips": [
+    {"id": "pan-pipes-fs-timohanes-64930-C5", "family": "pan-pipes", "note": "C5", "pitch_from": "source label 'C2' gives the letter; the label's octave number is the uploader's own (not scientific pitch); octave from the measured f0: harmonic-sum f0 522.049 Hz, YIN 521.293 Hz (-4.0 / -6.5 c from C5)", "dynamic": "not stated", "articulation": "long held tone with vibrato (source: 'long tone vibrato')", "kind": "sustained", "cut_args": {"hint_s": null, "until_s": null}, "trim_start_s": 0.014898, "trim_end_s": 7.844898, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 345303, "clip_sha256": "104e5e65bf9391cb058519986838be8b30b82efbfc15251c7d5252713f2dcaa6", "status": "VALID", "failed": [], "screen": {"onset_s": 0.1001, "noise_db": -73.51, "noise_method": "lead-in", "floor_p5_db": -29.97, "peak_db": -20.44, "steady_db": -23.48, "snr_db": 53.07, "f0_comb_hz": 522.049, "f0_yin_hz": 521.293, "cents_comb": -4.0, "cents_yin": -6.5, "yin_frames": 131, "reattack_db": 1.5, "tail_db": -74.69, "clipped_runs": 0, "version": "refscreen-4", "cut": {"floor_db": -68.76, "onset_in_source_s": 0.1149}}}
+   ],
+   "path": "U4/freesound/64930_413842-hq.mp3"
+  },
+  {
+   "id": "freesound-64931-hq-preview",
+   "instrument": "pan pipe (Freesound pack 'Pan_pipe', uploaded 2008-12-22; maker, model, material and tuning not stated); 'long tone vibrato'",
+   "family": "pan-pipes",
+   "url": "https://cdn.freesound.org/previews/64/64931_413842-hq.mp3",
+   "source_page": "https://freesound.org/people/timohanes/sounds/64931/",
+   "sha256": "6406ea022c1418df28400f47fe947575e3f83f22845f9dc4ee09fbcd0166dbe7",
+   "bytes": 198083,
+   "licence": "freesound-cc0-1-0",
+   "licence_name": "Creative Commons 0 (CC0 1.0)",
+   "licence_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+   "licence_evidence": "https://freesound.org/people/timohanes/sounds/64931/ (sound page states: Creative Commons 0, linking http://creativecommons.org/publicdomain/zero/1.0/)",
+   "author": "timohanes",
+   "title": "Pan pipe_C3.WAV by timohanes",
+   "source_description": "long tone vibrato pan pipe C3",
+   "format": "Freesound HQ MP3 preview (LOSSY, about 180 kbps), the openly served file; the original upload was not downloaded (needs login)",
+   "original_upload": {
+    "Type": "Wave (.wav)",
+    "Duration": "0:08.053",
+    "File size": "1.4 MB",
+    "Sample rate": "44.1 kHz",
+    "Bit depth": "16 bit",
+    "Channels": "Stereo"
+   },
+   "articulation": "long held tone with vibrato (source: 'long tone vibrato')",
+   "dynamic": "not stated",
+   "takes_per_note": 1,
+   "gradable": false,
+   "clips": [
+    {"id": "pan-pipes-fs-timohanes-64931-C6", "family": "pan-pipes", "note": "C6", "pitch_from": "source label 'C3' gives the letter; the label's octave number is the uploader's own (not scientific pitch); octave from the measured f0: harmonic-sum f0 1047.192 Hz, YIN 1039.282 Hz (1.1 / -12.0 c from C6)", "dynamic": "not stated", "articulation": "long held tone with vibrato (source: 'long tone vibrato')", "kind": "sustained", "cut_args": {"hint_s": null, "until_s": null}, "trim_start_s": 0.0, "trim_end_s": 8.053333, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 355152, "clip_sha256": "7642dfa994487b0e8a23fc2c5d050d77db9c9bc4db2cfb0e018f2a396642e7ff", "status": "INVALID", "failed": ["snr: peak level -17.0 dB is 36.6 dB over the noise -53.6 dB (lead-in; < 40)"], "screen": {"onset_s": 0.124, "noise_db": -53.61, "noise_method": "lead-in", "floor_p5_db": -24.17, "peak_db": -16.99, "steady_db": -20.48, "snr_db": 36.62, "f0_comb_hz": 1047.192, "f0_yin_hz": 1039.282, "cents_comb": 1.1, "cents_yin": -12.0, "yin_frames": 131, "reattack_db": 1.36, "tail_db": -78.43, "clipped_runs": 0, "version": "refscreen-4", "cut": {"floor_db": -24.17, "onset_error": "IRPDECOMP_NO_SIGNAL: steady level -20.8 dB is under floor -24.2 dB + 20"}}}
+   ],
+   "path": "U4/freesound/64931_413842-hq.mp3"
+  },
+  {
+   "id": "freesound-64932-hq-preview",
+   "instrument": "pan pipe (Freesound pack 'Pan_pipe', uploaded 2008-12-22; maker, model, material and tuning not stated); 'long tone vibrato'",
+   "family": "pan-pipes",
+   "url": "https://cdn.freesound.org/previews/64/64932_413842-hq.mp3",
+   "source_page": "https://freesound.org/people/timohanes/sounds/64932/",
+   "sha256": "75cac11f5506ad19abff6e6490a575827b65525a524c00dafca0748f05919d75",
+   "bytes": 244695,
+   "licence": "freesound-cc0-1-0",
+   "licence_name": "Creative Commons 0 (CC0 1.0)",
+   "licence_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+   "licence_evidence": "https://freesound.org/people/timohanes/sounds/64932/ (sound page states: Creative Commons 0, linking http://creativecommons.org/publicdomain/zero/1.0/)",
+   "author": "timohanes",
+   "title": "Pan pipe_D2.WAV by timohanes",
+   "source_description": "long tone vibrato pan pipe D2",
+   "format": "Freesound HQ MP3 preview (LOSSY, about 180 kbps), the openly served file; the original upload was not downloaded (needs login)",
+   "original_upload": {
+    "Type": "Wave (.wav)",
+    "Duration": "0:10.439",
+    "File size": "1.8 MB",
+    "Sample rate": "44.1 kHz",
+    "Bit depth": "16 bit",
+    "Channels": "Stereo"
+   },
+   "articulation": "long held tone with vibrato (source: 'long tone vibrato')",
+   "dynamic": "not stated",
+   "takes_per_note": 1,
+   "gradable": false,
+   "clips": [
+    {"id": "pan-pipes-fs-timohanes-64932-D5", "family": "pan-pipes", "note": "D5", "pitch_from": "source label 'D2' gives the letter; the label's octave number is the uploader's own (not scientific pitch); octave from the measured f0: harmonic-sum f0 587.789 Hz, YIN 586.774 Hz (1.4 / -1.6 c from D5)", "dynamic": "not stated", "articulation": "long held tone with vibrato (source: 'long tone vibrato')", "kind": "sustained", "cut_args": {"hint_s": null, "until_s": null}, "trim_start_s": 0.0, "trim_end_s": 8.000703, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 352831, "clip_sha256": "5604e3bbf9a663b88790df86e2e0974c9965ac5b91eab9131b65a2106eb225bf", "status": "INVALID", "failed": ["snr: the noise is not measurable: no lead-in before the onset and no stationary tail (the clip begins at its attack and its last 10 frames above digital silence are a decay or a fade)"], "screen": {"onset_s": 0.0713, "noise_db": null, "noise_method": "none", "floor_p5_db": -47.06, "peak_db": -18.72, "steady_db": -21.15, "snr_db": null, "f0_comb_hz": 587.789, "f0_yin_hz": 586.774, "cents_comb": 1.4, "cents_yin": -1.6, "yin_frames": 131, "reattack_db": 1.16, "tail_db": -71.07, "clipped_runs": 0, "version": "refscreen-4", "cut": {"floor_db": -81.17, "onset_in_source_s": 0.0707}}}
+   ],
+   "path": "U4/freesound/64932_413842-hq.mp3"
+  },
+  {
+   "id": "freesound-64934-hq-preview",
+   "instrument": "pan pipe (Freesound pack 'Pan_pipe', uploaded 2008-12-22; maker, model, material and tuning not stated); 'long tone vibrato'",
+   "family": "pan-pipes",
+   "url": "https://cdn.freesound.org/previews/64/64934_413842-hq.mp3",
+   "source_page": "https://freesound.org/people/timohanes/sounds/64934/",
+   "sha256": "9445ba84d349047bd040bd9fcade2690fc4a4463d389d35339a47b5f3d7aa156",
+   "bytes": 207800,
+   "licence": "freesound-cc0-1-0",
+   "licence_name": "Creative Commons 0 (CC0 1.0)",
+   "licence_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+   "licence_evidence": "https://freesound.org/people/timohanes/sounds/64934/ (sound page states: Creative Commons 0, linking http://creativecommons.org/publicdomain/zero/1.0/)",
+   "author": "timohanes",
+   "title": "Pan pipe_E2.WAV by timohanes",
+   "source_description": "long tone vibrato pan pipe E2",
+   "format": "Freesound HQ MP3 preview (LOSSY, about 180 kbps), the openly served file; the original upload was not downloaded (needs login)",
+   "original_upload": {
+    "Type": "Wave (.wav)",
+    "Duration": "0:08.759",
+    "File size": "1.5 MB",
+    "Sample rate": "44.1 kHz",
+    "Bit depth": "16 bit",
+    "Channels": "Stereo"
+   },
+   "articulation": "long held tone with vibrato (source: 'long tone vibrato')",
+   "dynamic": "not stated",
+   "takes_per_note": 1,
+   "gradable": false,
+   "clips": [
+    {"id": "pan-pipes-fs-timohanes-64934-E5", "family": "pan-pipes", "note": "E5", "pitch_from": "source label 'E2' gives the letter; the label's octave number is the uploader's own (not scientific pitch); octave from the measured f0: harmonic-sum f0 657.251 Hz, YIN 656.132 Hz (-5.3 / -8.2 c from E5)", "dynamic": "not stated", "articulation": "long held tone with vibrato (source: 'long tone vibrato')", "kind": "sustained", "cut_args": {"hint_s": null, "until_s": null}, "trim_start_s": 0.0, "trim_end_s": 7.871519, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 347134, "clip_sha256": "82e438d82bebc1f7e58c37137899003031fa91d919d3230cc80d439a8b5a01a1", "status": "VALID", "failed": [], "screen": {"onset_s": 0.0815, "noise_db": -69.59, "noise_method": "lead-in", "floor_p5_db": -22.29, "peak_db": -10.64, "steady_db": -16.62, "snr_db": 58.94, "f0_comb_hz": 657.251, "f0_yin_hz": 656.132, "cents_comb": -5.3, "cents_yin": -8.2, "yin_frames": 131, "reattack_db": 1.68, "tail_db": -66.99, "clipped_runs": 0, "version": "refscreen-4", "cut": {"floor_db": -66.08, "onset_in_source_s": 0.0815}}}
+   ],
+   "path": "U4/freesound/64934_413842-hq.mp3"
+  },
+  {
+   "id": "freesound-64935-hq-preview",
+   "instrument": "pan pipe (Freesound pack 'Pan_pipe', uploaded 2008-12-22; maker, model, material and tuning not stated); 'long tone vibrato'",
+   "family": "pan-pipes",
+   "url": "https://cdn.freesound.org/previews/64/64935_413842-hq.mp3",
+   "source_page": "https://freesound.org/people/timohanes/sounds/64935/",
+   "sha256": "905a2a15a1e8d3038d0161d37f697de68f93ef803d47348bb1390d93e47c5291",
+   "bytes": 246833,
+   "licence": "freesound-cc0-1-0",
+   "licence_name": "Creative Commons 0 (CC0 1.0)",
+   "licence_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+   "licence_evidence": "https://freesound.org/people/timohanes/sounds/64935/ (sound page states: Creative Commons 0, linking http://creativecommons.org/publicdomain/zero/1.0/)",
+   "author": "timohanes",
+   "title": "Pan pipe_F2.WAV by timohanes",
+   "source_description": "long tone vibrato pan pipe F2",
+   "format": "Freesound HQ MP3 preview (LOSSY, about 180 kbps), the openly served file; the original upload was not downloaded (needs login)",
+   "original_upload": {
+    "Type": "Wave (.wav)",
+    "Duration": "0:10.226",
+    "File size": "1.7 MB",
+    "Sample rate": "44.1 kHz",
+    "Bit depth": "16 bit",
+    "Channels": "Stereo"
+   },
+   "articulation": "long held tone with vibrato (source: 'long tone vibrato')",
+   "dynamic": "not stated",
+   "takes_per_note": 1,
+   "gradable": false,
+   "clips": [
+    {"id": "pan-pipes-fs-timohanes-64935-F5", "family": "pan-pipes", "note": "F5", "pitch_from": "source label 'F2' gives the letter; the label's octave number is the uploader's own (not scientific pitch); octave from the measured f0: harmonic-sum f0 696.957 Hz, YIN 695.138 Hz (-3.7 / -8.2 c from F5)", "dynamic": "not stated", "articulation": "long held tone with vibrato (source: 'long tone vibrato')", "kind": "sustained", "cut_args": {"hint_s": null, "until_s": null}, "trim_start_s": 0.013424, "trim_end_s": 9.263424, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 407925, "clip_sha256": "15c8fca71553fdb44d0196fa14a887e2b3ceffaa2f82092d13a3b37676bc9b5f", "status": "VALID", "failed": [], "screen": {"onset_s": 0.0996, "noise_db": -64.32, "noise_method": "lead-in", "floor_p5_db": -29.76, "peak_db": -17.81, "steady_db": -21.58, "snr_db": 46.51, "f0_comb_hz": 696.957, "f0_yin_hz": 695.138, "cents_comb": -3.7, "cents_yin": -8.2, "yin_frames": 131, "reattack_db": 2.04, "tail_db": -67.52, "clipped_runs": 0, "version": "refscreen-4", "cut": {"floor_db": -64.75, "onset_in_source_s": 0.1134}}}
+   ],
+   "path": "U4/freesound/64935_413842-hq.mp3"
+  },
+  {
+   "id": "freesound-64936-hq-preview",
+   "instrument": "pan pipe (Freesound pack 'Pan_pipe', uploaded 2008-12-22; maker, model, material and tuning not stated); 'long tone vibrato'",
+   "family": "pan-pipes",
+   "url": "https://cdn.freesound.org/previews/64/64936_413842-hq.mp3",
+   "source_page": "https://freesound.org/people/timohanes/sounds/64936/",
+   "sha256": "164c54892fbe8d4d8bddd208f2a54cb4a805f47564cb97928733e06e6f3471d5",
+   "bytes": 203909,
+   "licence": "freesound-cc0-1-0",
+   "licence_name": "Creative Commons 0 (CC0 1.0)",
+   "licence_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+   "licence_evidence": "https://freesound.org/people/timohanes/sounds/64936/ (sound page states: Creative Commons 0, linking http://creativecommons.org/publicdomain/zero/1.0/)",
+   "author": "timohanes",
+   "title": "Pan pipe_G1.WAV by timohanes",
+   "source_description": "long tone vibrato pan pipe G1",
+   "format": "Freesound HQ MP3 preview (LOSSY, about 180 kbps), the openly served file; the original upload was not downloaded (needs login)",
+   "original_upload": {
+    "Type": "Wave (.wav)",
+    "Duration": "0:08.919",
+    "File size": "1.5 MB",
+    "Sample rate": "44.1 kHz",
+    "Bit depth": "16 bit",
+    "Channels": "Stereo"
+   },
+   "articulation": "long held tone with vibrato (source: 'long tone vibrato')",
+   "dynamic": "not stated",
+   "takes_per_note": 1,
+   "gradable": false,
+   "clips": [
+    {"id": "pan-pipes-fs-timohanes-64936-G4", "family": "pan-pipes", "note": "G4", "pitch_from": "source label 'G1' gives the letter; the label's octave number is the uploader's own (not scientific pitch); octave from the measured f0: harmonic-sum f0 390.798 Hz, YIN 390.091 Hz (-5.3 / -8.4 c from G4)", "dynamic": "not stated", "articulation": "long held tone with vibrato (source: 'long tone vibrato')", "kind": "sustained", "cut_args": {"hint_s": null, "until_s": null}, "trim_start_s": 0.0, "trim_end_s": 7.015533, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 309385, "clip_sha256": "d448fea6bca89dc20d7a9c7e2dcbdda2ae6aa20be61927626efc43e911c6e732", "status": "VALID", "failed": [], "screen": {"onset_s": 0.0855, "noise_db": -70.13, "noise_method": "lead-in", "floor_p5_db": -33.17, "peak_db": -13.24, "steady_db": -16.87, "snr_db": 56.89, "f0_comb_hz": 390.798, "f0_yin_hz": 390.091, "cents_comb": -5.3, "cents_yin": -8.4, "yin_frames": 131, "reattack_db": 1.09, "tail_db": -74.53, "clipped_runs": 0, "version": "refscreen-4", "cut": {"floor_db": -81.51, "onset_in_source_s": 0.0855}}}
+   ],
+   "path": "U4/freesound/64936_413842-hq.mp3"
+  },
+  {
+   "id": "freesound-64937-hq-preview",
+   "instrument": "pan pipe (Freesound pack 'Pan_pipe', uploaded 2008-12-22; maker, model, material and tuning not stated); 'long tone vibrato'",
+   "family": "pan-pipes",
+   "url": "https://cdn.freesound.org/previews/64/64937_413842-hq.mp3",
+   "source_page": "https://freesound.org/people/timohanes/sounds/64937/",
+   "sha256": "2baf028bda4968509446a148122b6c6ff055c136074733c79fc9dd34ab625c97",
+   "bytes": 219539,
+   "licence": "freesound-cc0-1-0",
+   "licence_name": "Creative Commons 0 (CC0 1.0)",
+   "licence_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+   "licence_evidence": "https://freesound.org/people/timohanes/sounds/64937/ (sound page states: Creative Commons 0, linking http://creativecommons.org/publicdomain/zero/1.0/)",
+   "author": "timohanes",
+   "title": "Pan pipe_G2.WAV by timohanes",
+   "source_description": "long tone vibrato pan pipe G2",
+   "format": "Freesound HQ MP3 preview (LOSSY, about 180 kbps), the openly served file; the original upload was not downloaded (needs login)",
+   "original_upload": {
+    "Type": "Wave (.wav)",
+    "Duration": "0:09.226",
+    "File size": "1.6 MB",
+    "Sample rate": "44.1 kHz",
+    "Bit depth": "16 bit",
+    "Channels": "Stereo"
+   },
+   "articulation": "long held tone with vibrato (source: 'long tone vibrato')",
+   "dynamic": "not stated",
+   "takes_per_note": 1,
+   "gradable": false,
+   "clips": [
+    {"id": "pan-pipes-fs-timohanes-64937-G5", "family": "pan-pipes", "note": "G5", "pitch_from": "source label 'G2' gives the letter; the label's octave number is the uploader's own (not scientific pitch); octave from the measured f0: harmonic-sum f0 782.202 Hz, YIN 776.549 Hz (-4.0 / -16.5 c from G5)", "dynamic": "not stated", "articulation": "long held tone with vibrato (source: 'long tone vibrato')", "kind": "sustained", "cut_args": {"hint_s": null, "until_s": null}, "trim_start_s": 0.0, "trim_end_s": 8.437279, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 372084, "clip_sha256": "0c76795d4014f8cccc898ab25e69d38ee62cbbfe4bf9de163f1af0ffb0a69b32", "status": "VALID", "failed": [], "screen": {"onset_s": 0.0877, "noise_db": -74.39, "noise_method": "lead-in", "floor_p5_db": -24.55, "peak_db": -17.89, "steady_db": -21.02, "snr_db": 56.5, "f0_comb_hz": 782.202, "f0_yin_hz": 776.549, "cents_comb": -4.0, "cents_yin": -16.5, "yin_frames": 131, "reattack_db": 1.57, "tail_db": -67.98, "clipped_runs": 0, "version": "refscreen-4", "cut": {"floor_db": -66.25, "onset_in_source_s": 0.0873}}}
+   ],
+   "path": "U4/freesound/64937_413842-hq.mp3"
+  },
+  {
+   "id": "freesound-cernoel-394740",
+   "instrument": "tin whistle (Waltons Irish whistle in D)",
+   "family": "tin-whistle",
+   "title": "D.wav",
+   "path": "U4/freesound/394740_6676530-hq.mp3",
+   "url": "https://cdn.freesound.org/previews/394/394740_6676530-hq.mp3",
+   "sha256": "1f7008dc1471f871377e77bc0d2a1a70c506f3fda5086733708357e8f73bc591",
+   "bytes": 58233,
+   "licence": "freesound-cc0-1-0",
+   "licence_name": "CC0 1.0",
+   "licence_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+   "licence_evidence": "https://freesound.org/people/cernoel/sounds/394740/",
+   "source_page": "https://freesound.org/people/cernoel/sounds/394740/",
+   "gradable": false,
+   "author": "cernoel",
+   "notes": "Freesound's openly served HQ preview (MP3, LOSSY, about 154 kbit/s, a re-encode); the original (16-bit 44.1 kHz stereo WAV, 3.000 s) needs a Freesound login and was NOT acquired. Pack 22189 'Waltons Irish ThinWhistle in D'; description 'Waltons Irish ThinWhistle recorded with a sm57'; uploaded 2017-06-04. The file holds two separate notes of one pitch (a held one and a short one) with near-digital silence between them: in the decoded preview the gaps read -96 dBFS rms, max -85 dBFS, identical in every file of the pack, and the two channels are identical; the screen's lead-in noise of the second note is that edited floor, not a room noise. The first note starts 0.02-0.04 s into the file, so it has no lead-in to read noise from.",
+   "clips": [
+    {"id": "tin-whistle-freesound-cernoel-394740-00-D5", "family": "tin-whistle", "note": "D5", "pitch_from": "the source names the pitch class only (file name 'D.wav'); the octave is the D whistle's: first octave, low D = D5", "dynamic": "not stated", "articulation": "whole file cut without --until: both notes of the file in one clip (kept as the first attempt)", "kind": "sustained", "trim_start_s": 0.0, "trim_end_s": 2.288707, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 100932, "clip_sha256": "f6ee1aa6ad92ac9a1f56ad36cf3f1ce465667dc7ecf0f751b38a0735e7210454", "status": "INVALID", "failed": ["snr", "single"], "failed_detail": ["snr: the noise is not measurable: no lead-in before the onset and no stationary tail (the clip begins at its attack and its last 10 frames above digital silence are a decay or a fade)", "single: 2.00 s after the onset a 10 ms frame is 47.0 dB over the loudest of the 300 ms before it: a second note or strike"], "screen": {"onset_s": 0.0393, "noise_db": null, "noise_method": "none", "floor_p5_db": -97.12, "steady_db": -41.42, "peak_db": -33.86, "snr_db": null, "f0_comb_hz": 590.875, "f0_yin_hz": 588.878, "cents_comb": 10.4, "cents_yin": 4.6, "yin_frames": 88, "reattack_db": 46.96, "tail_db": -96.84, "clipped_runs": 0, "screen": "refscreen-4"}, "cut": {"floor_db": -97.18, "onset_in_source_s": 0.0387, "command": "uv run --with numpy python3 -I refscreen.py cut dl/fs394740/394740_6676530-hq.mp3 clips/tin-whistle/tin-whistle-freesound-cernoel-394740-00-D5.wav --note D5 --kind sustained (whole file, no hint/until: both takes in one clip)"}},
+    {"id": "tin-whistle-freesound-cernoel-394740-01-D5", "family": "tin-whistle", "note": "D5", "pitch_from": "the source names the pitch class only (file name 'D.wav'); the octave is the D whistle's: first octave, low D = D5", "dynamic": "not stated", "articulation": "held note, first of the file's two separate notes of this pitch (about 1 s, starts 0.02-0.04 s into the file)", "kind": "sustained", "trim_start_s": 0.0, "trim_end_s": 1.169705, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 51584, "clip_sha256": "980d6fe1f879e2fed98855a6322e823ca5ad07a4d733cf0d0601ebb19476898e", "status": "INVALID", "failed": ["snr"], "failed_detail": ["snr: the noise is not measurable: no lead-in before the onset and no stationary tail (the clip begins at its attack and its last 10 frames above digital silence are a decay or a fade)"], "screen": {"onset_s": 0.0393, "noise_db": null, "noise_method": "none", "floor_p5_db": -84.31, "steady_db": -41.34, "peak_db": -38.54, "snr_db": null, "f0_comb_hz": 591.055, "f0_yin_hz": 588.882, "cents_comb": 10.9, "cents_yin": 4.6, "yin_frames": 88, "reattack_db": 1.03, "tail_db": -97.01, "clipped_runs": 0, "screen": "refscreen-4"}, "cut": {"floor_db": -97.01, "onset_in_source_s": 0.0397, "command": "uv run --with numpy python3 -I /Users/jemanuel/projects/frankensim/apps/instrument-lab/tools/instrgrade/refscreen.py cut dl/fs394740/394740_6676530-hq.mp3 clips/tin-whistle/tin-whistle-freesound-cernoel-394740-01-D5.wav --note D5 --kind sustained --until 1.6"}},
+    {"id": "tin-whistle-freesound-cernoel-394740-02-D5", "family": "tin-whistle", "note": "D5", "pitch_from": "the source names the pitch class only (file name 'D.wav'); the octave is the D whistle's: first octave, low D = D5", "dynamic": "not stated", "articulation": "short note, second of the file's two separate notes of this pitch (about 0.15-0.2 s, near 2.0 s)", "kind": "sustained", "trim_start_s": 1.905692, "trim_end_s": 2.295692, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 17199, "clip_sha256": "b1aa28c2d139f214206103a80e64eef3e1111904904959b1a9bfbb82a4c2f20e", "status": "VALID", "failed": [], "failed_detail": [], "screen": {"onset_s": 0.1183, "noise_db": -96.8, "noise_method": "lead-in", "floor_p5_db": -96.88, "steady_db": -50.64, "peak_db": -34.74, "snr_db": 62.06, "f0_comb_hz": 590.791, "f0_yin_hz": 596.311, "cents_comb": 10.2, "cents_yin": 26.3, "yin_frames": 4, "reattack_db": 0.0, "tail_db": -96.83, "clipped_runs": 0, "screen": "refscreen-4"}, "cut": {"floor_db": -97.19, "onset_in_source_s": 2.0057, "command": "uv run --with numpy python3 -I /Users/jemanuel/projects/frankensim/apps/instrument-lab/tools/instrgrade/refscreen.py cut dl/fs394740/394740_6676530-hq.mp3 clips/tin-whistle/tin-whistle-freesound-cernoel-394740-02-D5.wav --note D5 --kind sustained --hint 2.08"}}
+   ]
+  },
+  {
+   "id": "freesound-cernoel-394739",
+   "instrument": "tin whistle (Waltons Irish whistle in D)",
+   "family": "tin-whistle",
+   "title": "D2.wav",
+   "path": "U4/freesound/394739_6676530-hq.mp3",
+   "url": "https://cdn.freesound.org/previews/394/394739_6676530-hq.mp3",
+   "sha256": "66c901c2077aa778259cdd1536b57b6bcf9e6cf10a80f671a0d2e3ee73cd3ed8",
+   "bytes": 48778,
+   "licence": "freesound-cc0-1-0",
+   "licence_name": "CC0 1.0",
+   "licence_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+   "licence_evidence": "https://freesound.org/people/cernoel/sounds/394739/",
+   "source_page": "https://freesound.org/people/cernoel/sounds/394739/",
+   "gradable": false,
+   "author": "cernoel",
+   "notes": "Freesound's openly served HQ preview (MP3, LOSSY, about 154 kbit/s, a re-encode); the original (16-bit 44.1 kHz stereo WAV, 3.000 s) needs a Freesound login and was NOT acquired. Pack 22189 'Waltons Irish ThinWhistle in D'; description 'Waltons Irish ThinWhistle recorded with a sm57'; uploaded 2017-06-04. The file holds two separate notes of one pitch (a held one and a short one) with near-digital silence between them: in the decoded preview the gaps read -96 dBFS rms, max -85 dBFS, identical in every file of the pack, and the two channels are identical; the screen's lead-in noise of the second note is that edited floor, not a room noise. The first note starts 0.02-0.04 s into the file, so it has no lead-in to read noise from.",
+   "clips": [
+    {"id": "tin-whistle-freesound-cernoel-394739-01-D6", "family": "tin-whistle", "note": "D6", "pitch_from": "the source names the pitch class only (file name 'D2.wav'); the octave is the D whistle's: second-octave D", "dynamic": "not stated", "articulation": "held note, first of the file's two separate notes of this pitch (about 1 s, starts 0.02-0.04 s into the file)", "kind": "sustained", "trim_start_s": 0.0, "trim_end_s": 1.056009, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 46570, "clip_sha256": "8e89fe028dc6e1c33e4c30b31c6ddac9b0e958699e327509d8d1d18daefea2f3", "status": "INVALID", "failed": ["snr"], "failed_detail": ["snr: the noise is not measurable: no lead-in before the onset and no stationary tail (the clip begins at its attack and its last 10 frames above digital silence are a decay or a fade)"], "screen": {"onset_s": 0.046, "noise_db": null, "noise_method": "none", "floor_p5_db": -85.52, "steady_db": -21.48, "peak_db": -18.5, "snr_db": null, "f0_comb_hz": 1182.675, "f0_yin_hz": 1181.979, "cents_comb": 11.8, "cents_yin": 10.8, "yin_frames": 74, "reattack_db": 0.13, "tail_db": -108.52, "clipped_runs": 0, "screen": "refscreen-4"}, "cut": {"floor_db": -107.28, "onset_in_source_s": 0.046, "command": "uv run --with numpy python3 -I /Users/jemanuel/projects/frankensim/apps/instrument-lab/tools/instrgrade/refscreen.py cut dl/fs394739/394739_6676530-hq.mp3 clips/tin-whistle/tin-whistle-freesound-cernoel-394739-01-D6.wav --note D6 --kind sustained --until 1.6"}},
+    {"id": "tin-whistle-freesound-cernoel-394739-02-D6", "family": "tin-whistle", "note": "D6", "pitch_from": "the source names the pitch class only (file name 'D2.wav'); the octave is the D whistle's: second-octave D", "dynamic": "not stated", "articulation": "short note, second of the file's two separate notes of this pitch (about 0.15-0.2 s, near 2.0 s)", "kind": "sustained", "trim_start_s": 1.926009, "trim_end_s": 2.536009, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 26901, "clip_sha256": "3606f784d0c173c865b280300af181257c6290ce3dc8b9cfd47ceb7ba6e4c2d8", "status": "VALID", "failed": [], "failed_detail": [], "screen": {"onset_s": 0.1, "noise_db": -91.31, "noise_method": "lead-in", "floor_p5_db": -101.57, "steady_db": -23.79, "peak_db": -18.08, "snr_db": 73.23, "f0_comb_hz": 1191.963, "f0_yin_hz": 1194.413, "cents_comb": 25.3, "cents_yin": 28.9, "yin_frames": 23, "reattack_db": 0.0, "tail_db": -111.59, "clipped_runs": 0, "screen": "refscreen-4"}, "cut": {"floor_db": -108.21, "onset_in_source_s": 2.026, "command": "uv run --with numpy python3 -I /Users/jemanuel/projects/frankensim/apps/instrument-lab/tools/instrgrade/refscreen.py cut dl/fs394739/394739_6676530-hq.mp3 clips/tin-whistle/tin-whistle-freesound-cernoel-394739-02-D6.wav --note D6 --kind sustained --hint 2.08"}}
+   ]
+  },
+  {
+   "id": "freesound-cernoel-394738",
+   "instrument": "tin whistle (Waltons Irish whistle in D)",
+   "family": "tin-whistle",
+   "title": "E.wav",
+   "path": "U4/freesound/394738_6676530-hq.mp3",
+   "url": "https://cdn.freesound.org/previews/394/394738_6676530-hq.mp3",
+   "sha256": "8d74a7eaa36b9437649fa5df51be0bec0739b28dfa68748ee33e08125ebe4f79",
+   "bytes": 57813,
+   "licence": "freesound-cc0-1-0",
+   "licence_name": "CC0 1.0",
+   "licence_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+   "licence_evidence": "https://freesound.org/people/cernoel/sounds/394738/",
+   "source_page": "https://freesound.org/people/cernoel/sounds/394738/",
+   "gradable": false,
+   "author": "cernoel",
+   "notes": "Freesound's openly served HQ preview (MP3, LOSSY, about 154 kbit/s, a re-encode); the original (16-bit 44.1 kHz stereo WAV, 3.000 s) needs a Freesound login and was NOT acquired. Pack 22189 'Waltons Irish ThinWhistle in D'; description 'Waltons Irish ThinWhistle recorded with a sm57'; uploaded 2017-06-04. The file holds two separate notes of one pitch (a held one and a short one) with near-digital silence between them: in the decoded preview the gaps read -96 dBFS rms, max -85 dBFS, identical in every file of the pack, and the two channels are identical; the screen's lead-in noise of the second note is that edited floor, not a room noise. The first note starts 0.02-0.04 s into the file, so it has no lead-in to read noise from.",
+   "clips": [
+    {"id": "tin-whistle-freesound-cernoel-394738-01-E5", "family": "tin-whistle", "note": "E5", "pitch_from": "the source names the pitch class only (file name 'E.wav'); the octave is the D whistle's: the octave the measured f0 lies in", "dynamic": "not stated", "articulation": "held note, first of the file's two separate notes of this pitch (about 1 s, starts 0.02-0.04 s into the file)", "kind": "sustained", "trim_start_s": 0.0, "trim_end_s": 1.207506, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 53251, "clip_sha256": "979047aa01caa6a401212df511cd3d6a6d69822cdf2428ebf8e5e892df74ad01", "status": "INVALID", "failed": ["snr"], "failed_detail": ["snr: the noise is not measurable: no lead-in before the onset and no stationary tail (the clip begins at its attack and its last 10 frames above digital silence are a decay or a fade)"], "screen": {"onset_s": 0.0175, "noise_db": null, "noise_method": "none", "floor_p5_db": -78.17, "steady_db": -38.53, "peak_db": -37.09, "snr_db": null, "f0_comb_hz": 663.341, "f0_yin_hz": 659.921, "cents_comb": 10.7, "cents_yin": 1.7, "yin_frames": 96, "reattack_db": 1.2, "tail_db": -96.55, "clipped_runs": 0, "screen": "refscreen-4"}, "cut": {"floor_db": -97.01, "onset_in_source_s": 0.0175, "command": "uv run --with numpy python3 -I /Users/jemanuel/projects/frankensim/apps/instrument-lab/tools/instrgrade/refscreen.py cut dl/fs394738/394738_6676530-hq.mp3 clips/tin-whistle/tin-whistle-freesound-cernoel-394738-01-E5.wav --note E5 --kind sustained --until 1.6"}},
+    {"id": "tin-whistle-freesound-cernoel-394738-02-E5", "family": "tin-whistle", "note": "E5", "pitch_from": "the source names the pitch class only (file name 'E.wav'); the octave is the D whistle's: the octave the measured f0 lies in", "dynamic": "not stated", "articulation": "short note, second of the file's two separate notes of this pitch (about 0.15-0.2 s, near 2.0 s)", "kind": "sustained", "trim_start_s": 1.91551, "trim_end_s": 2.32551, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 18081, "clip_sha256": "9f270ec52c94e1fa14cbec5581730fe3413b9584c50d869f34f536d1cc1d99fe", "status": "VALID", "failed": [], "failed_detail": [], "screen": {"onset_s": 0.1005, "noise_db": -96.77, "noise_method": "lead-in", "floor_p5_db": -96.89, "steady_db": -39.46, "peak_db": -31.29, "snr_db": 65.48, "f0_comb_hz": 650.968, "f0_yin_hz": 653.194, "cents_comb": -21.9, "cents_yin": -16.0, "yin_frames": 9, "reattack_db": 0.0, "tail_db": -97.2, "clipped_runs": 0, "screen": "refscreen-4"}, "cut": {"floor_db": -97.19, "onset_in_source_s": 2.0155, "command": "uv run --with numpy python3 -I /Users/jemanuel/projects/frankensim/apps/instrument-lab/tools/instrgrade/refscreen.py cut dl/fs394738/394738_6676530-hq.mp3 clips/tin-whistle/tin-whistle-freesound-cernoel-394738-02-E5.wav --note E5 --kind sustained --hint 2.08"}}
+   ]
+  },
+  {
+   "id": "freesound-cernoel-394737",
+   "instrument": "tin whistle (Waltons Irish whistle in D)",
+   "family": "tin-whistle",
+   "title": "F.wav",
+   "path": "U4/freesound/394737_6676530-hq.mp3",
+   "url": "https://cdn.freesound.org/previews/394/394737_6676530-hq.mp3",
+   "sha256": "999dd9245bf6bbbd1153144536abfa4f0ae2a4621d6af8c21be503cd18817259",
+   "bytes": 58074,
+   "licence": "freesound-cc0-1-0",
+   "licence_name": "CC0 1.0",
+   "licence_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+   "licence_evidence": "https://freesound.org/people/cernoel/sounds/394737/",
+   "source_page": "https://freesound.org/people/cernoel/sounds/394737/",
+   "gradable": false,
+   "author": "cernoel",
+   "notes": "Freesound's openly served HQ preview (MP3, LOSSY, about 154 kbit/s, a re-encode); the original (16-bit 44.1 kHz stereo WAV, 3.000 s) needs a Freesound login and was NOT acquired. Pack 22189 'Waltons Irish ThinWhistle in D'; description 'Waltons Irish ThinWhistle recorded with a sm57'; uploaded 2017-06-04. The file holds two separate notes of one pitch (a held one and a short one) with near-digital silence between them: in the decoded preview the gaps read -96 dBFS rms, max -85 dBFS, identical in every file of the pack, and the two channels are identical; the screen's lead-in noise of the second note is that edited floor, not a room noise. The first note starts 0.02-0.04 s into the file, so it has no lead-in to read noise from.",
+   "clips": [
+    {"id": "tin-whistle-freesound-cernoel-394737-01-F5", "family": "tin-whistle", "note": "F5", "pitch_from": "the source names the pitch class only (file name 'F.wav'); the octave is the D whistle's: the octave the measured f0 lies in; named F by the source but measured nearest F#5 (Gb5): screened as F5 (the named pitch, pitch check fails) and re-screened as Gb5 (rescreen_as_nearest)", "dynamic": "not stated", "articulation": "held note, first of the file's two separate notes of this pitch (about 1 s, starts 0.02-0.04 s into the file)", "kind": "sustained", "trim_start_s": 0.0, "trim_end_s": 1.197438, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 52807, "clip_sha256": "094a71444812966ce4993baf3d136666b253226881c43e464978a7bf42d7a71d", "status": "INVALID", "failed": ["snr", "pitch"], "failed_detail": ["snr: the noise is not measurable: no lead-in before the onset and no stationary tail (the clip begins at its attack and its last 10 frames above digital silence are a decay or a fade)", "pitch: named F5 698.46 Hz; harmonic-sum f0 735.47 Hz (+89 c), YIN 734.44 Hz (+87 c) on 89 periodic frames; tolerance 50 c"], "screen": {"onset_s": 0.0276, "noise_db": null, "noise_method": "none", "floor_p5_db": -81.07, "steady_db": -32.62, "peak_db": -30.99, "snr_db": null, "f0_comb_hz": 735.474, "f0_yin_hz": 734.436, "cents_comb": 89.4, "cents_yin": 87.0, "yin_frames": 89, "reattack_db": 0.58, "tail_db": -96.6, "clipped_runs": 0, "screen": "refscreen-4"}, "cut": {"floor_db": -97.01, "onset_in_source_s": 0.0274, "command": "uv run --with numpy python3 -I /Users/jemanuel/projects/frankensim/apps/instrument-lab/tools/instrgrade/refscreen.py cut dl/fs394737/394737_6676530-hq.mp3 clips/tin-whistle/tin-whistle-freesound-cernoel-394737-01-F5.wav --note F5 --kind sustained --until 1.6"}, "rescreen_as_nearest": {"note": "Gb5", "screen": "refscreen-4", "noise_db": null, "noise_method": "none", "floor_p5_db": -81.07, "clipped_runs": 0, "onset_s": 0.0277, "steady_db": -32.63, "peak_db": -31.01, "snr_db": null, "f0_comb_hz": 735.474, "f0_yin_hz": 734.442, "cents_comb": -10.6, "cents_yin": -13.0, "yin_frames": 89, "reattack_db": 0.54, "tail_db": -96.6, "status": "INVALID", "failed": ["snr: the noise is not measurable: no lead-in before the onset and no stationary tail (the clip begins at its attack and its last 10 frames above digital silence are a decay or a fade)"]}},
+    {"id": "tin-whistle-freesound-cernoel-394737-02-F5", "family": "tin-whistle", "note": "F5", "pitch_from": "the source names the pitch class only (file name 'F.wav'); the octave is the D whistle's: the octave the measured f0 lies in; named F by the source but measured nearest F#5 (Gb5): screened as F5 (the named pitch, pitch check fails) and re-screened as Gb5 (rescreen_as_nearest)", "dynamic": "not stated", "articulation": "short note, second of the file's two separate notes of this pitch (about 0.15-0.2 s, near 2.0 s)", "kind": "sustained", "trim_start_s": 1.918435, "trim_end_s": 2.388435, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 20727, "clip_sha256": "336aba81c038e3f8f4aae6752dae0c0e420cfa2b6b99d99bf811143d27b95d13", "status": "INVALID", "failed": ["pitch"], "failed_detail": ["pitch: named F5 698.46 Hz; harmonic-sum f0 732.46 Hz (+82 c), YIN 726.64 Hz (+68 c) on 11 periodic frames; tolerance 50 c"], "screen": {"onset_s": 0.1016, "noise_db": -96.8, "noise_method": "lead-in", "floor_p5_db": -96.94, "steady_db": -39.4, "peak_db": -33.65, "snr_db": 63.15, "f0_comb_hz": 732.456, "f0_yin_hz": 726.636, "cents_comb": 82.3, "cents_yin": 68.5, "yin_frames": 11, "reattack_db": 0.0, "tail_db": -97.19, "clipped_runs": 0, "screen": "refscreen-4"}, "cut": {"floor_db": -97.19, "onset_in_source_s": 2.0184, "command": "uv run --with numpy python3 -I /Users/jemanuel/projects/frankensim/apps/instrument-lab/tools/instrgrade/refscreen.py cut dl/fs394737/394737_6676530-hq.mp3 clips/tin-whistle/tin-whistle-freesound-cernoel-394737-02-F5.wav --note F5 --kind sustained --hint 2.08"}, "rescreen_as_nearest": {"note": "Gb5", "screen": "refscreen-4", "noise_db": -96.8, "noise_method": "lead-in", "floor_p5_db": -96.94, "clipped_runs": 0, "onset_s": 0.1007, "steady_db": -39.34, "peak_db": -33.57, "snr_db": 63.23, "f0_comb_hz": 732.477, "f0_yin_hz": 725.779, "cents_comb": -17.7, "cents_yin": -33.6, "yin_frames": 11, "reattack_db": 0.0, "tail_db": -97.19, "status": "VALID", "failed": []}}
+   ]
+  },
+  {
+   "id": "freesound-cernoel-394741",
+   "instrument": "tin whistle (Waltons Irish whistle in D)",
+   "family": "tin-whistle",
+   "title": "G.wav",
+   "path": "U4/freesound/394741_6676530-hq.mp3",
+   "url": "https://cdn.freesound.org/previews/394/394741_6676530-hq.mp3",
+   "sha256": "4bb4637be380cf3991a0f6f5c02ba756251ab41e43ad1fb0c6af52b2396cf7ec",
+   "bytes": 57868,
+   "licence": "freesound-cc0-1-0",
+   "licence_name": "CC0 1.0",
+   "licence_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+   "licence_evidence": "https://freesound.org/people/cernoel/sounds/394741/",
+   "source_page": "https://freesound.org/people/cernoel/sounds/394741/",
+   "gradable": false,
+   "author": "cernoel",
+   "notes": "Freesound's openly served HQ preview (MP3, LOSSY, about 154 kbit/s, a re-encode); the original (16-bit 44.1 kHz stereo WAV, 3.000 s) needs a Freesound login and was NOT acquired. Pack 22189 'Waltons Irish ThinWhistle in D'; description 'Waltons Irish ThinWhistle recorded with a sm57'; uploaded 2017-06-04. The file holds two separate notes of one pitch (a held one and a short one) with near-digital silence between them: in the decoded preview the gaps read -96 dBFS rms, max -85 dBFS, identical in every file of the pack, and the two channels are identical; the screen's lead-in noise of the second note is that edited floor, not a room noise. The first note starts 0.02-0.04 s into the file, so it has no lead-in to read noise from.",
+   "clips": [
+    {"id": "tin-whistle-freesound-cernoel-394741-01-G5", "family": "tin-whistle", "note": "G5", "pitch_from": "the source names the pitch class only (file name 'G.wav'); the octave is the D whistle's: the octave the measured f0 lies in", "dynamic": "not stated", "articulation": "held note, first of the file's two separate notes of this pitch (about 1 s, starts 0.02-0.04 s into the file)", "kind": "sustained", "trim_start_s": 0.0, "trim_end_s": 1.252268, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 55225, "clip_sha256": "08d00c59e2d9be3ba1073dd7fc51452f06017fac83005f3a32c97fece2274469", "status": "INVALID", "failed": ["snr"], "failed_detail": ["snr: the noise is not measurable: no lead-in before the onset and no stationary tail (the clip begins at its attack and its last 10 frames above digital silence are a decay or a fade)"], "screen": {"onset_s": 0.0427, "noise_db": null, "noise_method": "none", "floor_p5_db": -87.2, "steady_db": -31.82, "peak_db": -30.93, "snr_db": null, "f0_comb_hz": 786.28, "f0_yin_hz": 785.917, "cents_comb": 5.0, "cents_yin": 4.2, "yin_frames": 96, "reattack_db": 0.14, "tail_db": -96.63, "clipped_runs": 0, "screen": "refscreen-4"}, "cut": {"floor_db": -97.01, "onset_in_source_s": 0.0423, "command": "uv run --with numpy python3 -I /Users/jemanuel/projects/frankensim/apps/instrument-lab/tools/instrgrade/refscreen.py cut dl/fs394741/394741_6676530-hq.mp3 clips/tin-whistle/tin-whistle-freesound-cernoel-394741-01-G5.wav --note G5 --kind sustained --until 1.6"}},
+    {"id": "tin-whistle-freesound-cernoel-394741-02-G5", "family": "tin-whistle", "note": "G5", "pitch_from": "the source names the pitch class only (file name 'G.wav'); the octave is the D whistle's: the octave the measured f0 lies in", "dynamic": "not stated", "articulation": "short note, second of the file's two separate notes of this pitch (about 0.15-0.2 s, near 2.0 s)", "kind": "sustained", "trim_start_s": 1.926281, "trim_end_s": 2.396281, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 20727, "clip_sha256": "39f945772794913ed5963938c8acfa68cc838e61ffeb56c6beafd058cb6f7fca", "status": "VALID", "failed": [], "failed_detail": [], "screen": {"onset_s": 0.1017, "noise_db": -92.29, "noise_method": "lead-in", "floor_p5_db": -97.08, "steady_db": -44.75, "peak_db": -31.99, "snr_db": 60.3, "f0_comb_hz": 781.125, "f0_yin_hz": 778.258, "cents_comb": -6.3, "cents_yin": -12.7, "yin_frames": 7, "reattack_db": 0.0, "tail_db": -97.26, "clipped_runs": 0, "screen": "refscreen-4"}, "cut": {"floor_db": -97.19, "onset_in_source_s": 2.0263, "command": "uv run --with numpy python3 -I /Users/jemanuel/projects/frankensim/apps/instrument-lab/tools/instrgrade/refscreen.py cut dl/fs394741/394741_6676530-hq.mp3 clips/tin-whistle/tin-whistle-freesound-cernoel-394741-02-G5.wav --note G5 --kind sustained --hint 2.08"}}
+   ]
+  },
+  {
+   "id": "freesound-cernoel-394736",
+   "instrument": "tin whistle (Waltons Irish whistle in D)",
+   "family": "tin-whistle",
+   "title": "A.wav",
+   "path": "U4/freesound/394736_6676530-hq.mp3",
+   "url": "https://cdn.freesound.org/previews/394/394736_6676530-hq.mp3",
+   "sha256": "b80e8c2f060afab89123c3cc1a74c24d67e9946fd7260a6a126d1b35e7e31cc0",
+   "bytes": 58027,
+   "licence": "freesound-cc0-1-0",
+   "licence_name": "CC0 1.0",
+   "licence_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+   "licence_evidence": "https://freesound.org/people/cernoel/sounds/394736/",
+   "source_page": "https://freesound.org/people/cernoel/sounds/394736/",
+   "gradable": false,
+   "author": "cernoel",
+   "notes": "Freesound's openly served HQ preview (MP3, LOSSY, about 154 kbit/s, a re-encode); the original (16-bit 44.1 kHz stereo WAV, 3.000 s) needs a Freesound login and was NOT acquired. Pack 22189 'Waltons Irish ThinWhistle in D'; description 'Waltons Irish ThinWhistle recorded with a sm57'; uploaded 2017-06-04. The file holds two separate notes of one pitch (a held one and a short one) with near-digital silence between them: in the decoded preview the gaps read -96 dBFS rms, max -85 dBFS, identical in every file of the pack, and the two channels are identical; the screen's lead-in noise of the second note is that edited floor, not a room noise. The first note starts 0.02-0.04 s into the file, so it has no lead-in to read noise from.",
+   "clips": [
+    {"id": "tin-whistle-freesound-cernoel-394736-01-A5", "family": "tin-whistle", "note": "A5", "pitch_from": "the source names the pitch class only (file name 'A.wav'); the octave is the D whistle's: the octave the measured f0 lies in", "dynamic": "not stated", "articulation": "held note, first of the file's two separate notes of this pitch (about 1 s, starts 0.02-0.04 s into the file)", "kind": "sustained", "trim_start_s": 0.0, "trim_end_s": 1.198141, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 52838, "clip_sha256": "a67bf3df79dcecaa99c5e2ffbdce5b19fa63ef833cb068bdb37a40975fcb997b", "status": "INVALID", "failed": ["snr"], "failed_detail": ["snr: the noise is not measurable: no lead-in before the onset and no stationary tail (the clip begins at its attack and its last 10 frames above digital silence are a decay or a fade)"], "screen": {"onset_s": 0.0279, "noise_db": null, "noise_method": "none", "floor_p5_db": -75.9, "steady_db": -29.54, "peak_db": -28.94, "snr_db": null, "f0_comb_hz": 865.811, "f0_yin_hz": 862.377, "cents_comb": -28.1, "cents_yin": -35.0, "yin_frames": 94, "reattack_db": 0.2, "tail_db": -96.53, "clipped_runs": 0, "screen": "refscreen-4"}, "cut": {"floor_db": -97.02, "onset_in_source_s": 0.0281, "command": "uv run --with numpy python3 -I /Users/jemanuel/projects/frankensim/apps/instrument-lab/tools/instrgrade/refscreen.py cut dl/fs394736/394736_6676530-hq.mp3 clips/tin-whistle/tin-whistle-freesound-cernoel-394736-01-A5.wav --note A5 --kind sustained --until 1.6"}},
+    {"id": "tin-whistle-freesound-cernoel-394736-02-A5", "family": "tin-whistle", "note": "A5", "pitch_from": "the source names the pitch class only (file name 'A.wav'); the octave is the D whistle's: the octave the measured f0 lies in", "dynamic": "not stated", "articulation": "short note, second of the file's two separate notes of this pitch (about 0.15-0.2 s, near 2.0 s)", "kind": "sustained", "trim_start_s": 1.932132, "trim_end_s": 2.422132, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 21609, "clip_sha256": "bfbf61c949850c8b1ec8f039463403db06ba16c2b1bc95f0d61bdb00b5678cad", "status": "VALID", "failed": [], "failed_detail": [], "screen": {"onset_s": 0.1009, "noise_db": -89.37, "noise_method": "lead-in", "floor_p5_db": -97.03, "steady_db": -40.58, "peak_db": -27.03, "snr_db": 62.34, "f0_comb_hz": 862.621, "f0_yin_hz": 863.616, "cents_comb": -34.5, "cents_yin": -32.5, "yin_frames": 11, "reattack_db": 0.0, "tail_db": -97.03, "clipped_runs": 0, "screen": "refscreen-4"}, "cut": {"floor_db": -97.18, "onset_in_source_s": 2.0321, "command": "uv run --with numpy python3 -I /Users/jemanuel/projects/frankensim/apps/instrument-lab/tools/instrgrade/refscreen.py cut dl/fs394736/394736_6676530-hq.mp3 clips/tin-whistle/tin-whistle-freesound-cernoel-394736-02-A5.wav --note A5 --kind sustained --hint 2.08"}}
+   ]
+  },
+  {
+   "id": "freesound-cernoel-394735",
+   "instrument": "tin whistle (Waltons Irish whistle in D)",
+   "family": "tin-whistle",
+   "title": "B.wav",
+   "path": "U4/freesound/394735_6676530-hq.mp3",
+   "url": "https://cdn.freesound.org/previews/394/394735_6676530-hq.mp3",
+   "sha256": "033bb01bda8af3840d47962d1854a110aaaaa5ba5ac8c04d742026007eae0764",
+   "bytes": 56925,
+   "licence": "freesound-cc0-1-0",
+   "licence_name": "CC0 1.0",
+   "licence_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+   "licence_evidence": "https://freesound.org/people/cernoel/sounds/394735/",
+   "source_page": "https://freesound.org/people/cernoel/sounds/394735/",
+   "gradable": false,
+   "author": "cernoel",
+   "notes": "Freesound's openly served HQ preview (MP3, LOSSY, about 154 kbit/s, a re-encode); the original (16-bit 44.1 kHz stereo WAV, 3.000 s) needs a Freesound login and was NOT acquired. Pack 22189 'Waltons Irish ThinWhistle in D'; description 'Waltons Irish ThinWhistle recorded with a sm57'; uploaded 2017-06-04. The file holds two separate notes of one pitch (a held one and a short one) with near-digital silence between them: in the decoded preview the gaps read -96 dBFS rms, max -85 dBFS, identical in every file of the pack, and the two channels are identical; the screen's lead-in noise of the second note is that edited floor, not a room noise. The first note starts 0.02-0.04 s into the file, so it has no lead-in to read noise from.",
+   "clips": [
+    {"id": "tin-whistle-freesound-cernoel-394735-01-B5", "family": "tin-whistle", "note": "B5", "pitch_from": "the source names the pitch class only (file name 'B.wav'); the octave is the D whistle's: the octave the measured f0 lies in", "dynamic": "not stated", "articulation": "held note, first of the file's two separate notes of this pitch (about 1 s, starts 0.02-0.04 s into the file)", "kind": "sustained", "trim_start_s": 0.0, "trim_end_s": 1.212018, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 53450, "clip_sha256": "a03c223d8d12663ba37588032cce586a964462210e75d38177f142dec752919f", "status": "INVALID", "failed": ["snr"], "failed_detail": ["snr: the noise is not measurable: no lead-in before the onset and no stationary tail (the clip begins at its attack and its last 10 frames above digital silence are a decay or a fade)"], "screen": {"onset_s": 0.022, "noise_db": null, "noise_method": "none", "floor_p5_db": -77.74, "steady_db": -26.84, "peak_db": -25.99, "snr_db": null, "f0_comb_hz": 982.11, "f0_yin_hz": 983.294, "cents_comb": -9.9, "cents_yin": -7.9, "yin_frames": 96, "reattack_db": 0.46, "tail_db": -106.12, "clipped_runs": 0, "screen": "refscreen-4"}, "cut": {"floor_db": -97.2, "onset_in_source_s": 0.022, "command": "uv run --with numpy python3 -I /Users/jemanuel/projects/frankensim/apps/instrument-lab/tools/instrgrade/refscreen.py cut dl/fs394735/394735_6676530-hq.mp3 clips/tin-whistle/tin-whistle-freesound-cernoel-394735-01-B5.wav --note B5 --kind sustained --until 1.6"}},
+    {"id": "tin-whistle-freesound-cernoel-394735-02-B5", "family": "tin-whistle", "note": "B5", "pitch_from": "the source names the pitch class only (file name 'B.wav'); the octave is the D whistle's: the octave the measured f0 lies in", "dynamic": "not stated", "articulation": "short note, second of the file's two separate notes of this pitch (about 0.15-0.2 s, near 2.0 s)", "kind": "sustained", "trim_start_s": 1.922018, "trim_end_s": 2.452018, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 23373, "clip_sha256": "086417b7db5d9bdc27011b23a3f924e11b8c6f94718276e36940ff471357598e", "status": "VALID", "failed": [], "failed_detail": [], "screen": {"onset_s": 0.105, "noise_db": -94.89, "noise_method": "lead-in", "floor_p5_db": -97.09, "steady_db": -29.72, "peak_db": -25.11, "snr_db": 69.78, "f0_comb_hz": 1001.864, "f0_yin_hz": 996.58, "cents_comb": 24.5, "cents_yin": 15.4, "yin_frames": 16, "reattack_db": 0.0, "tail_db": -96.62, "clipped_runs": 0, "screen": "refscreen-4"}, "cut": {"floor_db": -97.52, "onset_in_source_s": 2.022, "command": "uv run --with numpy python3 -I /Users/jemanuel/projects/frankensim/apps/instrument-lab/tools/instrgrade/refscreen.py cut dl/fs394735/394735_6676530-hq.mp3 clips/tin-whistle/tin-whistle-freesound-cernoel-394735-02-B5.wav --note B5 --kind sustained --hint 2.08"}}
+   ]
+  },
+  {
+   "id": "freesound-cernoel-394734",
+   "instrument": "tin whistle (Waltons Irish whistle in D)",
+   "family": "tin-whistle",
+   "title": "C#.wav",
+   "path": "U4/freesound/394734_6676530-hq.mp3",
+   "url": "https://cdn.freesound.org/previews/394/394734_6676530-hq.mp3",
+   "sha256": "4c8f75a0322dbfc21c5a4364c1abb28757e9137dba83c0f92769a13bd75bcd6c",
+   "bytes": 51368,
+   "licence": "freesound-cc0-1-0",
+   "licence_name": "CC0 1.0",
+   "licence_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+   "licence_evidence": "https://freesound.org/people/cernoel/sounds/394734/",
+   "source_page": "https://freesound.org/people/cernoel/sounds/394734/",
+   "gradable": false,
+   "author": "cernoel",
+   "notes": "Freesound's openly served HQ preview (MP3, LOSSY, about 154 kbit/s, a re-encode); the original (16-bit 44.1 kHz stereo WAV, 3.000 s) needs a Freesound login and was NOT acquired. Pack 22189 'Waltons Irish ThinWhistle in D'; description 'Waltons Irish ThinWhistle recorded with a sm57'; uploaded 2017-06-04. The file holds two separate notes of one pitch (a held one and a short one) with near-digital silence between them: in the decoded preview the gaps read -96 dBFS rms, max -85 dBFS, identical in every file of the pack, and the two channels are identical; the screen's lead-in noise of the second note is that edited floor, not a room noise. The first note starts 0.02-0.04 s into the file, so it has no lead-in to read noise from.",
+   "clips": [
+    {"id": "tin-whistle-freesound-cernoel-394734-01-Db6", "family": "tin-whistle", "note": "Db6", "pitch_from": "the source names the pitch class only (file name 'C#.wav'); the octave is the D whistle's: the octave the measured f0 lies in; C#6 is passed to refscreen as Db6 (its note names take flats)", "dynamic": "not stated", "articulation": "held note, first of the file's two separate notes of this pitch (about 1 s, starts 0.02-0.04 s into the file)", "kind": "sustained", "trim_start_s": 0.0, "trim_end_s": 1.213991, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 53537, "clip_sha256": "6fdbf8ff7e4ab1f85b7bfc64ef1cca2d903003197ecab718155d96d3cd281820", "status": "INVALID", "failed": ["snr"], "failed_detail": ["snr: the noise is not measurable: no lead-in before the onset and no stationary tail (the clip begins at its attack and its last 10 frames above digital silence are a decay or a fade)"], "screen": {"onset_s": 0.024, "noise_db": null, "noise_method": "none", "floor_p5_db": -81.57, "steady_db": -22.99, "peak_db": -22.49, "snr_db": null, "f0_comb_hz": 1101.934, "f0_yin_hz": 1102.196, "cents_comb": -10.6, "cents_yin": -10.2, "yin_frames": 97, "reattack_db": 0.32, "tail_db": -104.65, "clipped_runs": 0, "screen": "refscreen-4"}, "cut": {"floor_db": -105.13, "onset_in_source_s": 0.024, "command": "uv run --with numpy python3 -I /Users/jemanuel/projects/frankensim/apps/instrument-lab/tools/instrgrade/refscreen.py cut dl/fs394734/394734_6676530-hq.mp3 clips/tin-whistle/tin-whistle-freesound-cernoel-394734-01-Db6.wav --note Db6 --kind sustained --until 1.6"}},
+    {"id": "tin-whistle-freesound-cernoel-394734-02-Db6", "family": "tin-whistle", "note": "Db6", "pitch_from": "the source names the pitch class only (file name 'C#.wav'); the octave is the D whistle's: the octave the measured f0 lies in; C#6 is passed to refscreen as Db6 (its note names take flats)", "dynamic": "not stated", "articulation": "short note, second of the file's two separate notes of this pitch (about 0.15-0.2 s, near 2.0 s)", "kind": "sustained", "trim_start_s": 1.936009, "trim_end_s": 2.526009, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 26019, "clip_sha256": "d58f2e69abd6c19eb20964500ff37c0ad42ef47de4d68c5a1faa2eccd4b48aa6", "status": "VALID", "failed": [], "failed_detail": [], "screen": {"onset_s": 0.1, "noise_db": -85.8, "noise_method": "lead-in", "floor_p5_db": -102.11, "steady_db": -23.28, "peak_db": -20.39, "snr_db": 65.41, "f0_comb_hz": 1121.373, "f0_yin_hz": 1105.844, "cents_comb": 19.6, "cents_yin": -4.5, "yin_frames": 13, "reattack_db": 0.0, "tail_db": -111.31, "clipped_runs": 0, "screen": "refscreen-4"}, "cut": {"floor_db": -107.66, "onset_in_source_s": 2.036, "command": "uv run --with numpy python3 -I /Users/jemanuel/projects/frankensim/apps/instrument-lab/tools/instrgrade/refscreen.py cut dl/fs394734/394734_6676530-hq.mp3 clips/tin-whistle/tin-whistle-freesound-cernoel-394734-02-Db6.wav --note Db6 --kind sustained --hint 2.08"}}
+   ]
+  },
+  {
+   "id": "freesound-cernoel-394733",
+   "instrument": "tin whistle (Waltons Irish whistle in D)",
+   "family": "tin-whistle",
+   "title": "C.wav",
+   "path": "U4/freesound/394733_6676530-hq.mp3",
+   "url": "https://cdn.freesound.org/previews/394/394733_6676530-hq.mp3",
+   "sha256": "befd67dcb29426aaea5d3cdbed6d509dc16122d1f5cc9331238c80c3ba0c8406",
+   "bytes": 58183,
+   "licence": "freesound-cc0-1-0",
+   "licence_name": "CC0 1.0",
+   "licence_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+   "licence_evidence": "https://freesound.org/people/cernoel/sounds/394733/",
+   "source_page": "https://freesound.org/people/cernoel/sounds/394733/",
+   "gradable": false,
+   "author": "cernoel",
+   "notes": "Freesound's openly served HQ preview (MP3, LOSSY, about 154 kbit/s, a re-encode); the original (16-bit 44.1 kHz stereo WAV, 3.000 s) needs a Freesound login and was NOT acquired. Pack 22189 'Waltons Irish ThinWhistle in D'; description 'Waltons Irish ThinWhistle recorded with a sm57'; uploaded 2017-06-04. The file holds two separate notes of one pitch (a held one and a short one) (C.wav: only the held one) with near-digital silence between them: in the decoded preview the gaps read -96 dBFS rms, max -85 dBFS, identical in every file of the pack, and the two channels are identical; the screen's lead-in noise of the second note is that edited floor, not a room noise. The first note starts 0.02-0.04 s into the file, so it has no lead-in to read noise from.",
+   "clips": [
+    {"id": "tin-whistle-freesound-cernoel-394733-01-C6", "family": "tin-whistle", "note": "C6", "pitch_from": "the source names the pitch class only (file name 'C.wav'); the octave is the D whistle's: the octave the measured f0 lies in; C natural on a D whistle (half-hole or cross fingering, not stated)", "dynamic": "not stated", "articulation": "held note, first of the file's two separate notes of this pitch (about 1 s, starts 0.02-0.04 s into the file)", "kind": "sustained", "trim_start_s": 0.0, "trim_end_s": 1.14, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 50274, "clip_sha256": "5186cdb2d476702352e3ba91316c7b7486edbc60dd4b4633c98c6753de3908b5", "status": "INVALID", "failed": ["snr"], "failed_detail": ["snr: the noise is not measurable: no lead-in before the onset and no stationary tail (the clip begins at its attack and its last 10 frames above digital silence are a decay or a fade)"], "screen": {"onset_s": 0.03, "noise_db": null, "noise_method": "none", "floor_p5_db": -83.67, "steady_db": -27.33, "peak_db": -26.34, "snr_db": null, "f0_comb_hz": 1051.556, "f0_yin_hz": 1052.16, "cents_comb": 8.3, "cents_yin": 9.3, "yin_frames": 89, "reattack_db": 0.35, "tail_db": -96.87, "clipped_runs": 0, "screen": "refscreen-4"}, "cut": {"floor_db": -97.01, "onset_in_source_s": 0.03, "command": "uv run --with numpy python3 -I /Users/jemanuel/projects/frankensim/apps/instrument-lab/tools/instrgrade/refscreen.py cut dl/fs394733/394733_6676530-hq.mp3 clips/tin-whistle/tin-whistle-freesound-cernoel-394733-01-C6.wav --note C6 --kind sustained --until 1.6"}}
+   ]
   }
  ],
  "coverage": {
@@ -21118,17 +21685,17 @@
    }
   },
   "pan-pipes": {
-   "rows": 82,
-   "valid": 44,
+   "rows": 93,
+   "valid": 53,
    "dynamics_with_valid": 1,
-   "most_pitches_in_one_dynamic": 26,
-   "distinct_valid": 26,
+   "most_pitches_in_one_dynamic": 27,
+   "distinct_valid": 27,
    "done_when": true,
    "by_dynamic": {
-    "not stated": "C3 Ab3 Bb3 C4 Db4 Eb4 F4 Gb4 G4 Ab4 Bb4 B4 C5 Db5 D5 Eb5 E5 F5 G5 Ab5 A5 B5 C6 D6 Eb6 Bb6"
+    "not stated": "C3 Ab3 Bb3 C4 Db4 Eb4 F4 Gb4 G4 Ab4 A4 Bb4 B4 C5 Db5 D5 Eb5 E5 F5 G5 Ab5 A5 B5 C6 D6 Eb6 Bb6"
    },
    "failed_checks": {
-    "snr": 31,
+    "snr": 33,
     "pitch": 6,
     "onset": 2
    }
@@ -21205,19 +21772,19 @@
    }
   },
   "tin-whistle": {
-   "rows": 62,
-   "valid": 4,
+   "rows": 80,
+   "valid": 11,
    "dynamics_with_valid": 1,
-   "most_pitches_in_one_dynamic": 3,
-   "distinct_valid": 3,
+   "most_pitches_in_one_dynamic": 8,
+   "distinct_valid": 8,
    "done_when": true,
    "by_dynamic": {
-    "not stated": "A5 D6 G6"
+    "not stated": "D5 E5 G5 A5 B5 Db6 D6 G6"
    },
    "failed_checks": {
-    "snr": 56,
-    "pitch": 26,
-    "single": 27,
+    "snr": 66,
+    "pitch": 28,
+    "single": 28,
     "decay": 46,
     "onset": 1
    }
