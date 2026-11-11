@@ -363,12 +363,15 @@ fn affine_restore_preserves_reserved_work_on_cancellation_and_linear_budget_stop
     assert_eq!(copy.optimizer.sample, checkpoint.optimizer.sample);
     assert_eq!(copy.history, checkpoint.history);
     assert_eq!(cancelled.work(), SolveWork::default());
+    // `control` still holds `poll` and is used below; the one-iteration
+    // budget gets its own callback with the same Continue behaviour.
+    let mut tiny_poll = |_| ControlFlow::Continue(());
     let mut tiny = SolveControl::new(
         SolveBudget {
             total_iterations: 1,
             ..SolveBudget::default()
         },
-        &mut poll,
+        &mut tiny_poll,
     );
     assert!(matches!(
         AffineLoadSpaceDesign3::restore(

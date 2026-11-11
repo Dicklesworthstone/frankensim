@@ -58,8 +58,13 @@ fn design_settings(reference: f64) -> Sdf3EigenfrequencyDesignOptions3 {
     }
 }
 
+// This file is loaded through `#[path]`, so a bare `mod` resolves beside it;
+// the submodules live in `adaptive/`.
+#[path = "adaptive/assessment.rs"]
 mod assessment;
 
+#[path = "adaptive/refit.rs"]
 mod refit;
 
+#[path = "adaptive/campaign.rs"]
 mod campaign;

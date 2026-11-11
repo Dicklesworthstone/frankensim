@@ -158,8 +158,10 @@ fn live_ir_can_impose_multiple_load_case_limits_without_force_cross_terms() {
     let one = builder.konst(1.0,Dims::NONE).unwrap();
     let scale0 = builder.konst(s0.value,COMPLIANCE_DIMS).unwrap();
     let scale1 = builder.konst(s1.value,COMPLIANCE_DIMS).unwrap();
-    let c0 = builder.sub(builder.div(p0,scale0).unwrap(),one).unwrap();
-    let c1 = builder.sub(builder.div(p1,scale1).unwrap(),one).unwrap();
+    let r0 = builder.div(p0,scale0).unwrap();
+    let c0 = builder.sub(r0,one).unwrap();
+    let r1 = builder.div(p1,scale1).unwrap();
+    let c1 = builder.sub(r1,one).unwrap();
     builder.constraint(c0,ConstraintKind::LeZero,"load case 0").unwrap();
     builder.constraint(c1,ConstraintKind::LeZero,"load case 1").unwrap();
     let problem = builder.finish();
@@ -169,7 +171,7 @@ fn live_ir_can_impose_multiple_load_case_limits_without_force_cross_terms() {
           PhysicsBinding {node:pv,model:&volume}],None).unwrap();
     let tape = oracle.evaluate(&[x.clone()]).unwrap();
     let multipliers = [0.4,0.7];
-    let gradient = tape.lagrangian_gradient().unwrap();
+    let gradient = tape.lagrangian_gradient(&multipliers).unwrap();
     let mut expected_gradient = sv.gradient.clone();
     add_scaled(&mut expected_gradient,multipliers[0]/s0.value,&s0.gradient);
     add_scaled(&mut expected_gradient,multipliers[1]/s1.value,&s1.gradient);

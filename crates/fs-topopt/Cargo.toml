@@ -236,3 +236,11 @@ required-features = ["cutfem-marquee"]
 [[test]]
 name = "thermoelastic_sdf3"
 required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "eigenstrain_sdf3"
+required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "eigenstrain_stress_design_sdf3"
+required-features = ["cutfem-marquee"]
