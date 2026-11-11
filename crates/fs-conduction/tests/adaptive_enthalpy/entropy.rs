@@ -1,4 +1,5 @@
 //! G1/G3/G4: original adaptive fields and accepted-only thermodynamic history.
+#[path = "entropy/sdirk.rs"]
 mod sdirk;
 
 use super::*;
