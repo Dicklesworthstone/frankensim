@@ -73,17 +73,42 @@ fn source_card(maximum_x_a: f64, density_perturbation: f64) -> MaterialCard {
             [1e-6, 2e-6, 4e-6],
         ),
     ] {
+        // A claim may hold samples only inside its own validity (fs-matdb
+        // refuses the claim otherwise). A card narrowed to x_A <= maximum_x_a
+        // keeps the same linear surface, restricted to that bound: the two
+        // cut corners take the surface's own values, so every property inside
+        // the narrowed validity is unchanged and only its support ends there.
+        let linear = |x_a: f64, x_b: f64| {
+            values[0] + (values[1] - values[0]) * x_a + (values[2] - values[0]) * x_b
+        };
+        let (samples, triangles) = if maximum_x_a < 1.0 {
+            let cut = [[maximum_x_a, 0.0], [maximum_x_a, 1.0 - maximum_x_a]];
+            (
+                vec![
+                    ([0.0, 0.0], values[0]),
+                    (cut[0], linear(cut[0][0], cut[0][1])),
+                    (cut[1], linear(cut[1][0], cut[1][1])),
+                    ([0.0, 1.0], values[2]),
+                ],
+                vec![[0, 1, 2], [0, 2, 3]],
+            )
+        } else {
+            (
+                [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]
+                    .into_iter()
+                    .zip(values)
+                    .collect(),
+                vec![[0, 1, 2]],
+            )
+        };
         claims
             .insert_claim(PropertyClaim {
                 key: PropertyKey::with_quantity(name, spec),
                 value: PropertyValue::Surface2D {
                     axes: ["x_a".into(), "x_b".into()],
                     axis_dims: [Dimensionless::DIMS; 2],
-                    samples: [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]
-                        .into_iter()
-                        .zip(values)
-                        .collect(),
-                    triangles: vec![[0, 1, 2]],
+                    samples,
+                    triangles,
                     dims: spec.dims(),
                 },
                 validity: ValidityDomain::unconstrained()
