@@ -61,6 +61,64 @@ impl Stokes {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Mueller(pub [[f64; 4]; 4]);
 
+// Rounding allowance of the weak channel that `apply_diagonal_jones` rebuilds from the cross entries.
+//
+// In exact arithmetic a nondepolarizing diagonal Jones matrix has |cross|^2 = R_s R_p, so the weak power rebuilt as
+// |cross|^2 / large cannot exceed `large`. In binary64 it can, by rounding alone: a total internal reflection at cosine
+// 0.6 from index 1.5 to 1.0 published an intensity of 1 + 2^-52 for unit input.
+//
+// u = 2^-53 and gamma_k = k u / (1 - k u). Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed., Lemma 3.1:
+// prod (1 + d_i)^(+-1) = 1 + theta_k with |theta_k| <= gamma_k. For the total internal reflection matrix of
+// polarization/dielectric/interface.rs (large = 1 exactly), with (a, b) the admittances handed to `tir_amplitude`:
+//   1. d = fl(a^2 + b^2) has relative error gamma_2, both terms being positive. The difference a^2 - b^2 cancels, so its
+//      error is gamma_2 (a^2 + b^2): absolute, and relative to |r| = 1, not to the component. Hence sr = fl(n / d) is
+//      within gamma_2 (1 + gamma_3) + |x| gamma_3 of x = (a^2 - b^2) / (a^2 + b^2), and si = fl(fl(-2 a b) / d) has
+//      relative error gamma_4. With x^2 + y^2 = 1: |sr^2 + si^2 - 1| <= 2 (gamma_2 (1 + gamma_3) + gamma_4), about 12 u.
+//   2. c = fl(sr pr + si pi) and s = fl(si pr - sr pi) are each within gamma_2 (|sr pr| + |si pi|) <= gamma_2 |r_s| |r_p|
+//      of the exact value (Cauchy-Schwarz), so the pair is within sqrt(2) gamma_2 |r_s| |r_p|. On the stored floats
+//      c^2 + s^2 = |r_s|^2 |r_p|^2 (Lagrange), so |(c, s)|^2 <= (1 + 12 u)^2 (1 + sqrt(2) gamma_2)^2, about 1 + 29.7 u.
+//   3. The rebuild: the ratio rounds once and its square twice, the fma once and the two products twice, gamma_5 in all,
+//      so small <= (c^2 + s^2) (1 + gamma_5), about 1 + 34.7 u: k = 36.
+// The matrices that reach the call carry two more roundings: one for the division by `large` when large != 1, and the
+// callers' weight scaling v -> fl(fl(v / m) w) of every entry (transport.rs, coated_diffuse.rs), which puts gamma_2 on
+// each entry, squares it in |cross|^2 and shows once more in `large`: k = 36 + 1 + 7 = 44.
+//
+// k is derived for the dielectric and scaled paths only. The conductor thin-film builder (conductor/thin_film) reaches
+// the same call (dielectric.rs `apply_passive`) and its k is not derived: measured over the fs-render lib on ts2,
+// 2026-11-11, the largest (small - large) / large at each caller site was 10.0 u at transport.rs `scatter`, 4.0 u at the
+// contact `apply_power`, 3.1 u at camera/sequential.rs and 0.0 u at `apply_passive` (small never exceeded large there).
+const DIAGONAL_JONES_ROUNDING_K: f64 = 44.0;
+const DIAGONAL_JONES_UNIT_ROUNDOFF: f64 = f64::EPSILON * 0.5;
+const DIAGONAL_JONES_ALLOWANCE: f64 = 1.0
+    + DIAGONAL_JONES_ROUNDING_K * DIAGONAL_JONES_UNIT_ROUNDOFF
+        / (1.0 - DIAGONAL_JONES_ROUNDING_K * DIAGONAL_JONES_UNIT_ROUNDOFF);
+
+/// A matrix given to [`Mueller::apply_diagonal_jones`] is not a nondepolarizing diagonal Jones response.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DiagonalJonesError {
+    /// The weak power rebuilt from the cross entries exceeds the strong one by more than rounding explains
+    /// (`weak > strong * (1 + gamma_44)`). In exact arithmetic that is impossible, so the matrix is malformed.
+    WeakChannelExceedsStrong {
+        /// `|cross|^2 / strong` as rebuilt.
+        weak: f64,
+        /// The strong power, `mean + |difference|`.
+        strong: f64,
+    },
+}
+
+impl core::fmt::Display for DiagonalJonesError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::WeakChannelExceedsStrong { weak, strong } => write!(
+                f,
+                "diagonal Jones matrix: weak channel {weak:e} exceeds strong channel {strong:e} by more than rounding"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for DiagonalJonesError {}
+
 impl Mueller {
     pub const IDENTITY: Self = Self([
         [1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0],
@@ -108,23 +166,39 @@ impl Mueller {
     /// This is only for the native coherent interface matrices (including a
     /// scalar transport weight). Arbitrary or depolarizing Mueller matrices
     /// must use `apply`; their U/V block does not determine s/p powers.
-    pub fn apply_diagonal_jones(self, input: Stokes) -> Stokes {
+    ///
+    /// # Errors
+    /// [`DiagonalJonesError::WeakChannelExceedsStrong`] when the rebuilt weak power exceeds the strong one by more
+    /// than the rounding allowance derived at `DIAGONAL_JONES_ROUNDING_K`. A smaller excess is that rounding and
+    /// the weak power is set to the strong one, so no unpolarized input is published above its own power.
+    pub fn apply_diagonal_jones(self, input: Stokes) -> Result<Stokes, DiagonalJonesError> {
         let mean = self.0[0][0];
         let difference = self.0[0][1];
         let large = mean + difference.abs();
         if large == 0.0 {
-            return Stokes::unpolarized(0.0);
+            return Ok(Stokes::unpolarized(0.0));
         }
         let cross_re = self.0[2][2];
         let cross_im = self.0[3][2];
         let cross_scale = cross_re.abs().max(cross_im.abs());
-        let small = if cross_scale == 0.0 { 0.0 } else {
+        let mut small = if cross_scale == 0.0 {
+            0.0
+        } else {
             let ratio = cross_re.abs().min(cross_im.abs()) / cross_scale;
             // Divide before multiplying: |cross|² can underflow while the
             // weaker power remains representable. Scaling also avoids sqrt
             // and platform-libm hypot, retaining deterministic IEEE ops.
             cross_scale * ((cross_scale / large) * ratio.mul_add(ratio, 1.0))
         };
+        if small > large {
+            if small > large * DIAGONAL_JONES_ALLOWANCE {
+                return Err(DiagonalJonesError::WeakChannelExceedsStrong {
+                    weak: small,
+                    strong: large,
+                });
+            }
+            small = large;
+        }
         let (s_power, p_power) = if difference >= 0.0 {
             (large, small)
         } else {
@@ -136,12 +210,12 @@ impl Mueller {
         };
         let s = s_power * half_sum(input.i, input.q);
         let p = p_power * half_sum(input.i, -input.q);
-        Stokes {
+        Ok(Stokes {
             i: s + p,
             q: s - p,
             u: cross_re * input.u - cross_im * input.v,
             v: cross_im * input.u + cross_re * input.v,
-        }
+        })
     }
 
     /// Composition: self acts after rhs.
@@ -218,10 +292,12 @@ mod tests {
             let q = if swapped { 1.0 } else { -1.0 };
             let weak = Stokes::try_new(1.0, q, 0.0, 0.0).unwrap();
             assert_eq!(matrix.apply(weak).i, 0.0, "regression must expose cancellation");
-            let actual = matrix.apply_diagonal_jones(weak);
+            let actual = matrix.apply_diagonal_jones(weak).unwrap();
             assert!((actual.i / rp - 1.0).abs() < 8.0 * f64::EPSILON);
             assert_eq!(actual.q, q * actual.i);
-            let mixed = matrix.apply_diagonal_jones(Stokes::try_new(1.0, 0.0, 0.6, 0.8).unwrap());
+            let mixed = matrix
+                .apply_diagonal_jones(Stokes::try_new(1.0, 0.0, 0.6, 0.8).unwrap())
+                .unwrap();
             near(mixed.i, mean);
             near(mixed.q, difference);
             assert!((mixed.u - (0.6 * re - 0.8 * phase_im)).abs() < 1e-25);
@@ -242,7 +318,14 @@ mod tests {
             [0.0, 0.0, cross, 0.0],
             [0.0, 0.0, 0.0, cross],
         ]);
-        let out = matrix.apply_diagonal_jones(Stokes { i: 1.0, q: -1.0, u: 0.0, v: 0.0 });
+        let out = matrix
+            .apply_diagonal_jones(Stokes {
+                i: 1.0,
+                q: -1.0,
+                u: 0.0,
+                v: 0.0,
+            })
+            .unwrap();
         assert!(out.i > 0.0);
         assert!((out.i - p).abs() <= f64::from_bits(2));
         assert_eq!(out.q, -out.i);
@@ -256,15 +339,133 @@ mod tests {
             [0.0, 0.0, component, -component],
             [0.0, 0.0, component, component],
         ]);
-        assert_eq!(complex.apply_diagonal_jones(Stokes { i: 1.0, q: -1.0, u: 0.0, v: 0.0 }).i,
-            minimum);
+        assert_eq!(
+            complex
+                .apply_diagonal_jones(Stokes {
+                    i: 1.0,
+                    q: -1.0,
+                    u: 0.0,
+                    v: 0.0
+                })
+                .unwrap()
+                .i,
+            minimum
+        );
         let identity = Mueller::IDENTITY;
         for i in [f64::from_bits(1), 1.0, f64::MAX] {
             let state = Stokes { i, q: -i, u: 0.0, v: 0.0 };
-            assert_eq!(identity.apply_diagonal_jones(state), state);
+            assert_eq!(identity.apply_diagonal_jones(state).unwrap(), state);
         }
-        assert_eq!(Mueller([[0.0; 4]; 4]).apply_diagonal_jones(Stokes::unpolarized(1.0)),
-            Stokes::unpolarized(0.0));
+        assert_eq!(
+            Mueller([[0.0; 4]; 4])
+                .apply_diagonal_jones(Stokes::unpolarized(1.0))
+                .unwrap(),
+            Stokes::unpolarized(0.0)
+        );
+    }
+
+    // Two unit powers and a cross entry c + 0i: in exact arithmetic the weak channel is c^2 and a lossless
+    // interface has c = 1.
+    fn unit_power_matrix(cross: f64) -> Mueller {
+        Mueller([
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, cross, 0.0],
+            [0.0, 0.0, 0.0, cross],
+        ])
+    }
+
+    #[test]
+    fn g0_diagonal_jones_sets_a_rounding_excess_of_the_weak_channel_to_the_strong_one() {
+        // |cross|^2 = 1 + 2^-51, as the contact total internal reflection rebuilt it.
+        let cross = 1.0 + f64::EPSILON;
+        assert!(
+            cross * cross > 1.0,
+            "the rebuilt weak power exceeds the strong one by rounding alone"
+        );
+        let out = unit_power_matrix(cross)
+            .apply_diagonal_jones(Stokes::unpolarized(1.0))
+            .unwrap();
+        assert_eq!(out, Stokes::unpolarized(1.0));
+        // The allowance is 44 u = 22 * 2^-52 above 1 (DIAGONAL_JONES_ROUNDING_K): cross = 1 + m 2^-52 rebuilds
+        // 1 + 2m 2^-52, so m = 10 is inside and m = 12 is outside; m = 11 sits on the edge and is not used.
+        let inside = 1.0 + 10.0 * f64::EPSILON;
+        let out = unit_power_matrix(inside)
+            .apply_diagonal_jones(Stokes::unpolarized(1.0))
+            .unwrap();
+        assert_eq!(out, Stokes::unpolarized(1.0));
+        let polarized = Stokes::try_new(1.0, -0.5, 0.0, 0.0).unwrap();
+        let out = unit_power_matrix(inside)
+            .apply_diagonal_jones(polarized)
+            .unwrap();
+        // Strong and weak powers both 1 act as the identity on (I, Q): Q' = P_s (I + Q)/2 - P_p (I - Q)/2 = Q.
+        assert_eq!((out.i, out.q), (1.0, -0.5));
+    }
+
+    #[test]
+    fn g0_diagonal_jones_refuses_a_weak_channel_above_the_strong_one_beyond_rounding() {
+        // Planted negative: just above the allowance (m = 12), and a weak channel 1e-3 above the strong one.
+        let outside = 1.0 + 12.0 * f64::EPSILON;
+        assert_eq!(
+            unit_power_matrix(outside).apply_diagonal_jones(Stokes::unpolarized(1.0)),
+            Err(DiagonalJonesError::WeakChannelExceedsStrong {
+                weak: 1.0 + 24.0 * f64::EPSILON,
+                strong: 1.0
+            })
+        );
+        let gross = (1.0_f64 + 1e-3).sqrt();
+        let refused = unit_power_matrix(gross).apply_diagonal_jones(Stokes::unpolarized(1.0));
+        let Err(DiagonalJonesError::WeakChannelExceedsStrong { weak, strong }) = refused else {
+            panic!("a weak channel 1e-3 above the strong one must be refused, got {refused:?}");
+        };
+        assert_eq!(strong, 1.0);
+        near(weak, 1.001);
+    }
+
+    #[cfg(feature = "tracer")]
+    #[test]
+    fn g1_total_internal_reflection_never_publishes_more_than_the_input_power() {
+        use super::dielectric::fresnel_dielectric_polarized;
+        // The contact case: index 1.5 to 1.0 at cosine 0.6 read 1 + 2^-52 for unit input before the cap.
+        let reflection = fresnel_dielectric_polarized(0.6, 1.5, 1.0)
+            .unwrap()
+            .reflection;
+        assert_eq!(
+            reflection
+                .apply_diagonal_jones(Stokes::unpolarized(1.0))
+                .unwrap(),
+            Stokes::unpolarized(1.0)
+        );
+        // A grid over the whole total-internal-reflection range: none is refused and none exceeds 1.
+        let mut reflected = 0;
+        for transmitted in [1.0_f64, 1.33, 1.5] {
+            for ratio in [1.02_f64, 1.1, 1.5, 2.0, 3.0] {
+                let incident = transmitted * ratio;
+                let critical = (1.0 - (transmitted / incident).powi(2)).sqrt();
+                for step in 1..200 {
+                    let cosine = critical * 0.999 * f64::from(step) / 200.0;
+                    let fresnel =
+                        fresnel_dielectric_polarized(cosine, incident, transmitted).unwrap();
+                    if !fresnel.scalar.total_internal_reflection {
+                        continue;
+                    }
+                    reflected += 1;
+                    let out = fresnel
+                        .reflection
+                        .apply_diagonal_jones(Stokes::unpolarized(1.0))
+                        .unwrap();
+                    assert!(
+                        out.i <= 1.0,
+                        "{incident}/{transmitted} at {cosine}: {}",
+                        out.i
+                    );
+                }
+            }
+        }
+        assert!(
+            reflected > 2000,
+            "the grid must reach total internal reflection, got {reflected}"
+        );
     }
 }
 

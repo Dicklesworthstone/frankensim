@@ -820,7 +820,9 @@ impl SequentialLens {
             } else {
                 response.transmission
             };
-            power = matrix.apply_diagonal_jones(input);
+            power = matrix
+                .apply_diagonal_jones(input)
+                .map_err(|_| CameraError::SequentialLensOutsideModel)?;
             if step.reflect
                 && input.i > 0.0
                 && power.i == 0.0

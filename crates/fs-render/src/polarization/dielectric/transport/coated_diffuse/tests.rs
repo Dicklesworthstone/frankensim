@@ -66,8 +66,16 @@ fn g1_absorbing_coat_furnace_retains_polarized_entry_and_repeated_layer_loss() {
                 [(i as f64+0.5)/N as f64, 0.2, 0.9]).unwrap();
             diffuse += event.beam.power().i/N as f64;
         }
-        let entered = fresnel.transmission.apply_diagonal_jones(input.power()).i;
-        let expected = fresnel.reflection.apply_diagonal_jones(input.power()).i
+        let entered = fresnel
+            .transmission
+            .apply_diagonal_jones(input.power())
+            .unwrap()
+            .i;
+        let expected = fresnel
+            .reflection
+            .apply_diagonal_jones(input.power())
+            .unwrap()
+            .i
             + entered*downward*rho*coating.escape_probability()/denominator;
         assert!((masses[0]*mirror.beam.power().i+masses[1]*diffuse-expected).abs() < 4e-6);
     }

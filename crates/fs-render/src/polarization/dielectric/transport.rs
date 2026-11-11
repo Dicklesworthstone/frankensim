@@ -33,7 +33,7 @@ use crate::gradient_index::{
     GradientIndexError, GradientIndexField, GradientIndexOptions, GradientIndexPropagation,
     GradientIndexSample, propagate_with_control,
 };
-use crate::polarization::{Mueller, Stokes};
+use crate::polarization::{DiagonalJonesError, Mueller, Stokes};
 
 use super::{
     attenuate_stokes, fresnel_dielectric_polarized, sample_smooth_dielectric_polarized,
@@ -83,6 +83,13 @@ pub enum BeamError {
 impl From<DielectricError> for BeamError {
     fn from(error: DielectricError) -> Self {
         Self::Dielectric(error)
+    }
+}
+
+impl From<DiagonalJonesError> for BeamError {
+    /// The refusal `apply_passive` and `physical_roundoff` already raise for a result beyond rounding.
+    fn from(_: DiagonalJonesError) -> Self {
+        Self::NumericalRange
     }
 }
 
@@ -651,7 +658,7 @@ impl PolarizedBeam {
         } else { unit(transverse)? };
         let incident_frame = PolarizationFrame::try_new(self.frame.direction, s)?;
         let input = self.frame.express_in(self.power, incident_frame);
-        let output = matrix.apply_diagonal_jones(input);
+        let output = matrix.apply_diagonal_jones(input)?;
         // Bounds the four-term matrix/vector roundoff, including extinction
         // where the correct result is zero. Refuse meaningful violations.
         let magnitude = matrix.0.iter().flatten().fold(0.0_f64, |m, v| m.max(v.abs()));

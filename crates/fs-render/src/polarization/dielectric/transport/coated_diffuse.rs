@@ -129,12 +129,14 @@ impl PolarizedBeam {
         let (transmission, weight) = if divisor < 1.0 {
             (Mueller(entry.transmission.0.map(|row| row.map(|value| value / divisor))), weight)
         } else { (entry.transmission, weight / divisor) };
-        let entered = transmission.apply_diagonal_jones(incident.power).i;
+        let entered = transmission.apply_diagonal_jones(incident.power)?.i;
         let base = checked_product(entered, weight)?;
         // Power transmission is reciprocal at paired Snell angles. Evaluating
         // from the external direction retains the exact same native s/p law
         // without subtracting a critical-angle cosine inside the escape cone.
-        let power = exit.transmission.apply_diagonal_jones(Stokes::unpolarized(base));
+        let power = exit
+            .transmission
+            .apply_diagonal_jones(Stokes::unpolarized(base))?;
         if base > 0.0 && outgoing_cosine > 0.0 && power.i == 0.0 { return Err(BeamError::NumericalRange); }
         let axis = interface_axis(direction, normal)?;
         let frame = PolarizationFrame::try_new(direction, axis)?;

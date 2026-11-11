@@ -33,7 +33,7 @@ use crate::gradient_index::{
 };
 use crate::polarization::dielectric::fresnel_dielectric_polarized;
 use crate::polarization::dielectric::transport::{BeamError, PolarizationFrame, physical_roundoff};
-use crate::polarization::{Mueller, Stokes};
+use crate::polarization::{DiagonalJonesError, Mueller, Stokes};
 
 /// Curved propagation and polarized refraction through nonuniform P1 contacts.
 pub mod curved;
@@ -155,6 +155,11 @@ impl From<DielectricError> for P1ContactError {
 impl From<BeamError> for P1ContactError {
     fn from(error: BeamError) -> Self {
         Self::Polarization(error)
+    }
+}
+impl From<DiagonalJonesError> for P1ContactError {
+    fn from(error: DiagonalJonesError) -> Self {
+        Self::Polarization(error.into())
     }
 }
 impl core::fmt::Display for P1ContactError {
@@ -696,7 +701,7 @@ fn apply_power(matrix: Mueller, input: Stokes) -> Result<Stokes, P1ContactError>
     // Preserve its weak polarization channel near Brewster incidence instead
     // of subtracting two rounded, nearly equal Mueller intensity entries.
     Ok(physical_roundoff(
-        matrix.apply_diagonal_jones(input),
+        matrix.apply_diagonal_jones(input)?,
         input.i * magnitude,
     )?)
 }

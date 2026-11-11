@@ -235,7 +235,11 @@ fn lens_and_scene_fresnel_are_composed_before_intensity_projection() {
         let power = optical.frame().express_in(optical.power(), incidence_frame);
         assert!(power.q.abs() > 1e-4);
         let survival = 1.0 - interface.scalar.reflectance;
-        let transmitted = interface.transmission.apply_diagonal_jones(power).i;
+        let transmitted = interface
+            .transmission
+            .apply_diagonal_jones(power)
+            .unwrap()
+            .i;
         let result = scene
             .sample_sequential_ray_with_samples(cx, &optical, 0, settings(), |_| [0.5, 0.5, 0.99])
             .unwrap();
@@ -245,6 +249,7 @@ fn lens_and_scene_fresnel_are_composed_before_intensity_projection() {
             * interface
                 .transmission
                 .apply_diagonal_jones(Stokes::unpolarized(power.i))
+                .unwrap()
                 .i
             / survival
             / (1.5 * 1.5);

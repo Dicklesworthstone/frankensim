@@ -141,7 +141,7 @@ pub mod mirrors {
         // Normalize before mixing signed terms to avoid overflow at large power.
         let mut out = matrix.apply_diagonal_jones(Stokes {
             i: 1.0, q: input.q / input.i, u: input.u / input.i, v: input.v / input.i,
-        });
+        })?;
         let tolerance = 128.0 * f64::EPSILON;
         let norm = det::hypot(det::hypot(out.q, out.u), out.v);
         if ![out.i, out.q, out.u, out.v, norm].iter().all(|x| x.is_finite())

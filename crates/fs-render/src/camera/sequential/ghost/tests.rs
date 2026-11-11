@@ -464,7 +464,7 @@ fn exact_zero_reflection_is_a_miss_and_tir_does_not_invent_group_delay() {
         u: 0.0,
         v: 0.0,
     };
-    assert_eq!(weak.apply_diagonal_jones(weak_input).i, 0.0);
+    assert_eq!(weak.apply_diagonal_jones(weak_input).unwrap().i, 0.0);
     assert!(!reflection_has_zero_support(weak, weak_input));
     let pair = LensGhostPath::try_new(1, 0).unwrap();
     let matched = slab(glass(CauchyIor::try_constant(1.0).unwrap(), 0.0));

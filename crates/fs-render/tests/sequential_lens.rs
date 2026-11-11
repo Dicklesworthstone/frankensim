@@ -147,7 +147,8 @@ fn absorbing_lens_films_retain_authored_order_and_polarization_correlation() {
         let one = fs_render::polarization::Stokes::unpolarized(1.0);
         let expected = second
             .transmission
-            .apply_diagonal_jones(first.transmission.apply_diagonal_jones(one))
+            .apply_diagonal_jones(first.transmission.apply_diagonal_jones(one).unwrap())
+            .unwrap()
             .i
             * (-0.7_f64 * 0.01 / ct).exp();
         let traced = trace(&coated, cx, ray(0.0, si / ci), 550.0);
@@ -164,7 +165,8 @@ fn absorbing_lens_films_retain_authored_order_and_polarization_correlation() {
             .fresnel_polarized(ct, 1.5, 1.0)
             .unwrap()
             .transmission
-            .apply_diagonal_jones(first.transmission.apply_diagonal_jones(one))
+            .apply_diagonal_jones(first.transmission.apply_diagonal_jones(one).unwrap())
+            .unwrap()
             .i
             * (-0.7_f64 * 0.01 / ct).exp();
         assert!((expected - wrong_order).abs() > 1e-3);
