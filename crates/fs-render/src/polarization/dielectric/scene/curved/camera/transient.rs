@@ -46,6 +46,7 @@ const LIGHT_M_S: f64 = 299_792_458.0;
 
 pub mod area_lights;
 /// Retarded histories for exact calibrated point fixtures and their native connections.
+#[cfg(feature = "photometry")]
 pub mod point_lights;
 pub mod exposure;
 #[cfg(feature = "volumes")]

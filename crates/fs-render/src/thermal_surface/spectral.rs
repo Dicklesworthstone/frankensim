@@ -188,7 +188,6 @@ impl SpectralDiffuseThermalSurface {
     }
 
     /// Borrow the declared knots for source integration without copying them.
-    #[cfg(feature = "photometry")]
     pub(crate) fn emissivity_knots(&self) -> &[(f64, f64)] {
         self.emissivity.knots()
     }
