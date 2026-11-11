@@ -220,7 +220,50 @@ fn hereditary_wall_reflection_retains_both_phase_and_amplitude_under_time_refine
     ]);
 }
 
+// The order of the time error is read on the rms over ALL dofs, not on the max. The dof where the max sits hops from count
+// to count (omega = 2, hereditary, counts 8 to 256: dofs 49, 61, 123, 67, 49, 63, with signs +, -, +, -, -, +), so adjacent
+// ratios of the max scatter between 3.1 and 15.5 and are not an order measurement; the rms ratios from 16 steps on lie in
+// [3.64, 4.58] for both omegas, with and without memory arms (measured). A second-order scheme halves the step to a quarter of
+// the error: the band is 4 +- 20 %, and a first-order variant must fall outside it.
+const ORDER_BAND: core::ops::Range<f64> = 3.4..4.8;
+
 fn reflection_phase(relaxation: &[AcousticWallRelaxation]) {
+    for (omega, max, rms) in reflection_errors(relaxation, &[2.0, 5.0], 0.5, &[16, 32, 64, 128]) {
+        assert!(
+            max[0] > 1e-5 && max[2] < 2e-3,
+            "omega {omega}: temporal max errors {max:?}"
+        );
+        for pair in rms.windows(2) {
+            assert!(
+                ORDER_BAND.contains(&(pair[0] / pair[1])),
+                "omega {omega}: rms errors {rms:?}, max errors {max:?}"
+            );
+        }
+    }
+}
+
+// Planted negative: the same predicate on a first-order variant, the inlet drive held at the START of each step instead of
+// its midpoint, must fall outside the band at every pair.
+#[test]
+fn a_drive_held_at_the_step_start_is_first_order_and_the_rms_order_band_refuses_it() {
+    let results = reflection_errors(&[], &[2.0], 0.0, &[16, 32, 64, 128]);
+    let (_, max, rms) = &results[0];
+    for pair in rms.windows(2) {
+        assert!(
+            !ORDER_BAND.contains(&(pair[0] / pair[1])),
+            "rms errors {rms:?}, max errors {max:?}"
+        );
+    }
+}
+
+// For each omega: the max and the rms over all dofs of |p + Im(reference)| at each count. `drive_sample` places the held
+// inlet drive of each step inside the step: 0.5 is the midpoint (second order), 0 the step start (first order).
+fn reflection_errors(
+    relaxation: &[AcousticWallRelaxation],
+    omegas: &[f64],
+    drive_sample: f64,
+    counts: &[usize],
+) -> Vec<(f64, Vec<f64>, Vec<f64>)> {
     let (complex, positions) = brick(8, [1.0, 0.1, 0.1]);
     let geometry = HelmholtzFe::new(&complex, &positions, 2, MEDIUM).unwrap();
     let model = uniform(&geometry);
@@ -233,7 +276,8 @@ fn reflection_phase(relaxation: &[AcousticWallRelaxation]) {
         resistance: 0.4,
     };
     // Frequencies straddle the original wall's sqrt(K/sigma) resonance.
-    for omega in [2.0, 5.0] {
+    let mut results = Vec::new();
+    for &omega in omegas {
         // WallPin uses exp(-i omega t); FEEC uses exp(+i omega t).
         let mut impedance = fs_phs::wall_specific_impedance(&pin, omega).unwrap().conj();
         // Independent continuous Maxwell transform: each arm contributes
@@ -286,7 +330,8 @@ fn reflection_phase(relaxation: &[AcousticWallRelaxation]) {
         assert!((mean(&field.pressure_pa) * phase - C64::ONE - reflection).abs() < 2e-3);
         let duration = core::f64::consts::FRAC_PI_2 / omega;
         let mut errors = Vec::new();
-        for count in [8, 16, 32] {
+        let mut rms_errors = Vec::new();
+        for &count in counts {
             let h = duration / count as f64;
             let prepared = model
                 .prepare_time_with_walls(
@@ -335,7 +380,7 @@ fn reflection_phase(relaxation: &[AcousticWallRelaxation]) {
                 )
                 .unwrap();
             for index in 0..count {
-                let inward = 2.0 / z0 * det::cos(omega * (index as f64 + 0.5) * h);
+                let inward = 2.0 / z0 * det::cos(omega * (index as f64 + drive_sample) * h);
                 let drive = inlet
                     .iter()
                     .map(|&face| (face, [inward; 3]))
@@ -355,23 +400,26 @@ fn reflection_phase(relaxation: &[AcousticWallRelaxation]) {
                 .zip(&field.pressure_pa)
                 .map(|(&p, &reference)| (p + reference.im).abs())
                 .fold(0.0_f64, f64::max);
-            println!("mechanical wall phase omega={omega} steps={count} error={error:e}");
-            if count == 32 {
+            let rms = (state
+                .pressure_pa()
+                .iter()
+                .zip(&field.pressure_pa)
+                .map(|(&p, &reference)| (p + reference.im).powi(2))
+                .sum::<f64>()
+                / field.pressure_pa.len() as f64)
+                .sqrt();
+            println!(
+                "mechanical wall phase omega={omega} steps={count} error={error:e} rms={rms:e}"
+            );
+            if count == 32 && drive_sample == 0.5 {
                 assert!((mean(&reconstructed) * phase - C64::ONE - reflection).abs() < 3e-3);
             }
             errors.push(error);
+            rms_errors.push(rms);
         }
-        assert!(
-            errors[0] > 1e-5 && errors[2] < 2e-3,
-            "temporal errors {errors:?}"
-        );
-        for pair in errors.windows(2) {
-            assert!(
-                (3.5..4.5).contains(&(pair[0] / pair[1])),
-                "temporal errors {errors:?}"
-            );
-        }
+        results.push((omega, errors, rms_errors));
     }
+    results
 }
 
 #[test]

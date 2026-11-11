@@ -144,7 +144,13 @@ fn g3_original_complex_cp_fields_and_loss_reappear_as_the_force_clock_refines() 
             .map(|p| p.abs())
             .fold(0.0, f64::max);
         let mut errors = Vec::new();
-        for samples in [80, 320] {
+        // The ladder starts at 320 samples per period. With isothermal walls the pressure error at 80, 160, 320, 640 and 1280
+        // samples was 9.8e-3, 1.07e-2, 2.6e-3, 6.0e-5 and 1.5e-5 (a five-level run of this test): it RISES from 80 to 160, and
+        // the old ladder's pair, 80 to 320, had the ratio 3.8 against the 5 that the gate below demands, so 80 samples are not
+        // yet in the asymptotic range; at the finest pair the ratio is 4.1, second order. Without isothermal walls the same
+        // five levels were 4.7e-3, 2.1e-3, 2.0e-4, 3.8e-5, 9.1e-6. From 320 to 1280 the ratios are 22 (not isothermal) and 177
+        // (isothermal) against the 0.2 gate below.
+        for samples in [320, 1280] {
             let dt = 1.0 / (frequency * samples as f64);
             let prepared = model
                 .prepare_time_with_caloric_reservoirs(
@@ -174,7 +180,7 @@ fn g3_original_complex_cp_fields_and_loss_reappear_as_the_force_clock_refines() 
                 .map(|(a, b)| (a - b).abs() / pressure_scale)
                 .fold(0.0, f64::max);
             errors.push(error);
-            if samples == 320 {
+            if samples == 1280 {
                 assert!(relative(molecular_heat, harmonic.power.caloric_w / frequency) < 2e-3);
                 for (actual, expected) in state
                     .molecular_temperature_k
