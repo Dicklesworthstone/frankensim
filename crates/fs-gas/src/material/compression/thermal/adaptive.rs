@@ -127,6 +127,13 @@ impl From<MaterialCompressionError> for AdaptiveMaterialThermalCompressionError 
         }
     }
 }
+// A kinetics refusal reaches this type as the compression owner would report
+// it: cancellation stays cancellation, anything else is a physical refusal.
+impl From<crate::material::MaterialKineticsError> for AdaptiveMaterialThermalCompressionError {
+    fn from(error: crate::material::MaterialKineticsError) -> Self {
+        MaterialCompressionError::from(error).into()
+    }
+}
 // The original comparison helpers currently return only Invalid or Cancelled.
 // Preserve every native error shape if their internal scope later expands.
 impl From<AdaptiveMaterialCompressionError> for AdaptiveMaterialThermalCompressionError {
