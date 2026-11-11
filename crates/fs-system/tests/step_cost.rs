@@ -6,7 +6,7 @@
 //! `cargo test --release -p fs-system --test step_cost -- --ignored --nocapture`.
 
 use std::alloc::{GlobalAlloc, Layout, System as SystemAllocator};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::cell::Cell;
 use std::time::Instant;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
@@ -18,18 +18,33 @@ use fs_system::{NodeId, System, SystemBuilder};
 
 struct Counting;
 
-static TRACKING: AtomicBool = AtomicBool::new(false);
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+// Tests run side by side, so each thread counts its own allocations.
+thread_local! {
+    static TRACKING: Cell<bool> = const { Cell::new(false) };
+    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+}
 
 fn count() {
-    if TRACKING.load(Ordering::Relaxed) {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+    // A thread that is being torn down has no cell to read: it is not
+    // counting.
+    if TRACKING.try_with(Cell::get).unwrap_or(false) {
+        let _ = ALLOCATIONS.try_with(|count| count.set(count.get() + 1));
     }
 }
 
+/// How many times `f` allocated on this thread.
+fn allocations_of(f: impl FnOnce()) -> usize {
+    ALLOCATIONS.with(|count| count.set(0));
+    TRACKING.with(|tracking| tracking.set(true));
+    f();
+    TRACKING.with(|tracking| tracking.set(false));
+    ALLOCATIONS.with(Cell::get)
+}
+
 // SAFETY: this test-only allocator delegates every operation to the system
-// allocator unchanged. The only addition is relaxed atomic bookkeeping,
-// which neither allocates nor touches the memory being delegated.
+// allocator unchanged. The only addition is bookkeeping in two thread-local
+// cells with constant initialisers, which neither allocates nor touches the
+// memory being delegated.
 #[allow(unsafe_code)]
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
@@ -90,6 +105,13 @@ fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
 /// and the last to the ground, a constant force on the first, and every
 /// damper's heat in one body. `3 n + 2` components in one looped block.
 fn chain(n: usize) -> (System, Vec<NodeId>, NodeId) {
+    line(n, true)
+}
+
+/// The chain, or with `damped` false the same line without its dampers:
+/// masses, springs and the force, every part of it exactly linear. The body
+/// is then alone and receives nothing.
+fn line(n: usize, damped: bool) -> (System, Vec<NodeId>, NodeId) {
     let mut builder = SystemBuilder::new();
     let masses: Vec<NodeId> = (0..n)
         .map(|index| {
@@ -126,14 +148,19 @@ fn chain(n: usize) -> (System, Vec<NodeId>, NodeId) {
                 0.0,
             )
             .unwrap();
-        let damper = builder
-            .add_with_tangent(
-                &format!("damper{index}"),
-                Damper::new(DAMPING_N_S_M).unwrap(),
-                (),
-            )
-            .unwrap();
-        for element in [spring, damper] {
+        let mut between = vec![spring];
+        if damped {
+            let damper = builder
+                .add_with_tangent(
+                    &format!("damper{index}"),
+                    Damper::new(DAMPING_N_S_M).unwrap(),
+                    (),
+                )
+                .unwrap();
+            between.push(damper);
+            heats.push(builder.port(damper, "heat").unwrap());
+        }
+        for element in between {
             ends[index].push(builder.port(element, "a").unwrap());
             let far = builder.port(element, "b").unwrap();
             if index + 1 < n {
@@ -144,16 +171,20 @@ fn chain(n: usize) -> (System, Vec<NodeId>, NodeId) {
                     .unwrap();
             }
         }
-        heats.push(builder.port(damper, "heat").unwrap());
     }
     for (mass, members) in masses.iter().zip(&ends) {
         builder
             .common_flow(builder.port(*mass, "p").unwrap(), members)
             .unwrap();
     }
-    builder
-        .common_effort(builder.port(body, "heat").unwrap(), &heats)
-        .unwrap();
+    let warmth = builder.port(body, "heat").unwrap();
+    if damped {
+        builder.common_effort(warmth, &heats).unwrap();
+    } else {
+        builder
+            .boundary(warmth, Box::new(|_, _, values| values[0] = 0.0))
+            .unwrap();
+    }
     let mut system = builder.seal().unwrap();
     // The dampers' temperature inputs are in the loop and need a start.
     for heat in heats {
@@ -165,6 +196,7 @@ fn chain(n: usize) -> (System, Vec<NodeId>, NodeId) {
 /// The same chain by the implicit midpoint rule in its own unknowns: one
 /// tridiagonal solve for the masses' mean velocities a step.
 struct Hand {
+    damping: f64,
     velocity: Vec<f64>,
     extension: Vec<f64>,
     kelvin: f64,
@@ -175,8 +207,9 @@ struct Hand {
 }
 
 impl Hand {
-    fn new(n: usize) -> Self {
+    fn new(n: usize, damped: bool) -> Self {
         Self {
+            damping: if damped { DAMPING_N_S_M } else { 0.0 },
             velocity: vec![0.0; n],
             extension: vec![0.0; n],
             kelvin: 300.0,
@@ -190,7 +223,7 @@ impl Hand {
         let n = self.velocity.len();
         // Each spring and damper acts on the mean relative velocity:
         // s (u[i+1] - u[i]) with s = k dt / 2 + c, and u[n] = 0.
-        let s = 0.5 * STIFFNESS_N_M * DT_S + DAMPING_N_S_M;
+        let s = 0.5 * STIFFNESS_N_M * DT_S + self.damping;
         let inertia = 2.0 * MASS_KG / DT_S;
         for index in 0..n {
             let above = if index > 0 { s } else { 0.0 };
@@ -219,7 +252,7 @@ impl Hand {
             let below = if index + 1 < n { self.mean[index + 1] } else { 0.0 };
             let rate = below - self.mean[index];
             self.extension[index] += DT_S * rate;
-            heat_j += DT_S * DAMPING_N_S_M * rate * rate;
+            heat_j += DT_S * self.damping * rate * rate;
             self.velocity[index] = 2.0 * self.mean[index] - self.velocity[index];
         }
         self.kelvin += heat_j / BODY_J_K;
@@ -228,9 +261,9 @@ impl Hand {
 
 #[test]
 fn the_chain_from_elements_is_the_hand_written_midpoint_rule() {
-    for n in [1_usize, 4, 9] {
-        let (mut system, masses, body) = chain(n);
-        let mut hand = Hand::new(n);
+    for (n, damped) in [(1_usize, true), (4, true), (9, true), (1, false), (6, false)] {
+        let (mut system, masses, body) = line(n, damped);
+        let mut hand = Hand::new(n, damped);
         with_cx(|cx| {
             for _ in 0..300 {
                 system.step(DT_S, cx).unwrap();
@@ -250,9 +283,65 @@ fn the_chain_from_elements_is_the_hand_written_midpoint_rule() {
             "{kelvin} vs {}",
             hand.kelvin
         );
-        // The chain is moving and has warmed its body.
-        assert!(hand.velocity[0].abs() > 1.0e-4 && hand.kelvin > 300.0);
+        // The chain is moving, and with dampers it has warmed its body.
+        assert!(hand.velocity[0].abs() > 1.0e-4 && (hand.kelvin > 300.0) == damped);
     }
+}
+
+#[test]
+fn an_accepted_step_allocates_nothing() {
+    // The block's workspaces, its lists and the step's rows are kept
+    // between steps. A few steps let them reach their size.
+    for (n, damped) in [(1_usize, true), (6, true), (6, false)] {
+        let (mut system, _, _) = line(n, damped);
+        with_cx(|cx| {
+            for _ in 0..10 {
+                system.step(DT_S, cx).unwrap();
+            }
+            let allocations = allocations_of(|| {
+                for _ in 0..200 {
+                    system.step(DT_S, cx).unwrap();
+                }
+            });
+            assert_eq!(allocations, 0, "{n} masses, damped {damped}");
+        });
+    }
+}
+
+#[test]
+fn factors_kept_for_an_affine_block_change_no_bit() {
+    // Masses, springs and a force are affine throughout, so the block's
+    // interface Jacobian depends on the step length only and its factors
+    // are kept from one step to the next. A second copy is made to derive
+    // them afresh for every step: before each one it takes a step of
+    // another length, which replaces the kept factors, and goes back.
+    let n = 6;
+    let (mut kept, masses, _) = line(n, false);
+    let (mut fresh, _, _) = line(n, false);
+    with_cx(|cx| {
+        for step in 0..400 {
+            let report = kept.step(DT_S, cx).unwrap();
+            let before = fresh.checkpoint().unwrap();
+            fresh.step(0.37 * DT_S, cx).unwrap();
+            fresh.restore(&before).unwrap();
+            let again = fresh.step(DT_S, cx).unwrap();
+            assert_eq!(report.iterations, again.iterations, "step {step}");
+            for mass in &masses {
+                let a = kept.state::<Motion>(*mass).unwrap();
+                let b = fresh.state::<Motion>(*mass).unwrap();
+                assert_eq!(a.position_m.to_bits(), b.position_m.to_bits(), "step {step}");
+                assert_eq!(a.velocity_m_s.to_bits(), b.velocity_m_s.to_bits(), "step {step}");
+            }
+        }
+    });
+    // The line has moved, and the detour left no trace in the copy's clock
+    // or accounts.
+    assert!(kept.state::<Motion>(masses[0]).unwrap().position_m.abs() > 1.0e-4);
+    assert_eq!(kept.time_s().to_bits(), fresh.time_s().to_bits());
+    assert_eq!(
+        kept.ledger().energy_residual_j().to_bits(),
+        fresh.ledger().energy_residual_j().to_bits()
+    );
 }
 
 #[test]
@@ -287,27 +376,36 @@ fn a_loaded_mass_that_has_come_to_rest_keeps_stepping() {
 #[test]
 #[ignore = "a measurement: run with --release -- --ignored --nocapture"]
 fn cost_of_a_step_against_the_hand_written_loop() {
-    println!("masses  components  kernel ns/step  hand ns/step  ratio  allocations/step  iterations/step");
-    for (n, steps) in [(1_usize, 20_000_u32), (4, 8_000), (16, 1_500), (48, 150)] {
-        let (mut system, _, _) = chain(n);
-        let mut hand = Hand::new(n);
+    println!("masses  dampers  kernel ns/step  hand ns/step  ratio  allocations/step  iterations/step");
+    for (n, damped, steps) in [
+        (1_usize, true, 20_000_u32),
+        (4, true, 8_000),
+        (16, true, 1_500),
+        (48, true, 150),
+        (1, false, 20_000),
+        (4, false, 8_000),
+        (16, false, 3_000),
+        (48, false, 600),
+    ] {
+        let (mut system, _, _) = line(n, damped);
+        let mut hand = Hand::new(n, damped);
         let (kernel_ns, allocations, iterations) = with_cx(|cx| {
             // Warm up, so one-time growth is not counted.
             for _ in 0..20 {
                 system.step(DT_S, cx).unwrap();
             }
             let mut iterations = 0_u64;
-            ALLOCATIONS.store(0, Ordering::Relaxed);
-            TRACKING.store(true, Ordering::Relaxed);
-            let start = Instant::now();
-            for _ in 0..steps {
-                iterations += u64::from(system.step(DT_S, cx).unwrap().iterations);
-            }
-            let elapsed = start.elapsed();
-            TRACKING.store(false, Ordering::Relaxed);
+            let mut elapsed = std::time::Duration::ZERO;
+            let allocations = allocations_of(|| {
+                let start = Instant::now();
+                for _ in 0..steps {
+                    iterations += u64::from(system.step(DT_S, cx).unwrap().iterations);
+                }
+                elapsed = start.elapsed();
+            });
             (
                 elapsed.as_nanos() as f64 / f64::from(steps),
-                ALLOCATIONS.load(Ordering::Relaxed) as f64 / f64::from(steps),
+                allocations as f64 / f64::from(steps),
                 iterations as f64 / f64::from(steps),
             )
         });
@@ -320,8 +418,8 @@ fn cost_of_a_step_against_the_hand_written_loop() {
         // Keep the hand loop's result alive.
         assert!(hand.kelvin.is_finite());
         println!(
-            "{n:>6}  {:>10}  {kernel_ns:>14.0}  {hand_ns:>12.1}  {:>5.0}  {allocations:>16.1}  {iterations:>15.2}",
-            3 * n + 2,
+            "{n:>6}  {:>7}  {kernel_ns:>14.0}  {hand_ns:>12.1}  {:>5.0}  {allocations:>16.1}  {iterations:>15.2}",
+            if damped { "yes" } else { "no" },
             kernel_ns / hand_ns
         );
     }

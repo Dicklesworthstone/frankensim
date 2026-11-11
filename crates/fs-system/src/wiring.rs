@@ -406,6 +406,9 @@ pub(crate) struct Block {
     pub(crate) nodes: Vec<usize>,
     /// Global input indices that depend on outputs of this block.
     pub(crate) unknowns: Vec<usize>,
+    /// The other inputs of its components, which earlier blocks, boundaries
+    /// and constants supply, in component and then port order.
+    pub(crate) known: Vec<usize>,
 }
 
 impl Block {

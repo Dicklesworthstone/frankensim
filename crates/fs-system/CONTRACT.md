@@ -276,6 +276,23 @@ Tarjan, index order).
   its damper sharing a body's temperature, steps 40,000 times to rest (it
   used to be refused after about 20 s at a residual of 4.6e-37 W), ends at
   `F / k`, and the body holds `F² / (2 k)` to 1e-10.
+- A looped block keeps its workspaces between steps, and an accepted step
+  allocates nothing (`tests/step_cost.rs`, counted per thread, damped and
+  undamped lines). A refused step may: it drops the step's lists and builds
+  its error.
+- A block whose components are all `Class::ExactLinear` and whose drivers
+  are all linear is affine, so its interface Jacobian depends on the step
+  length only. Its factors are kept and used for the first update of every
+  later step of the same length; the rounding estimate is remade from the
+  kept entries at the current inputs, in the order it was first formed. If
+  that update does not converge (a component whose slopes moved with its
+  state after all), the next iteration derives the Jacobian as before. The
+  kept factors solve to the bit of the elimination they replace (unit test
+  in `src/solve.rs`, against an elimination that carries the right-hand side
+  along), and a line of masses and springs stepped with them equals, bit
+  for bit over 400 steps, a copy forced to derive them afresh for every
+  step by a detour through another step length and a checkpoint
+  (`tests/step_cost.rs`).
 - Once cancellation has been requested, any refusal during a trial is
   reported as `SystemError::Cancelled`.
 - A graph without loops is evaluated once per component per step, in
@@ -903,23 +920,40 @@ the refused calls change nothing.
   PI controller (step doubling and proportional control are available); no
   durable snapshot encoding, process restart or fork; no adjoint. These are beads `.5.2` to
   `.5.10` of the epic.
-- The interface solve is dense and re-derives the Jacobian every iteration. It
-  allocates per looped block and per step. It is slow: measured by
-  `tests/step_cost.rs` (ignored by default; `cargo test --release -p
-  fs-system --test step_cost -- --ignored --nocapture`) on a line of masses
-  joined by springs and dampers, against a hand-written loop for the same
-  midpoint equations (one tridiagonal solve a step), which the graph
-  reproduces to 1e-12. On an Apple M5 Ultra under other load, 2026-11-11:
+- The interface solve is dense, in every scalar port input of a loop, and
+  slow against hand-written code. Measured by `tests/step_cost.rs` (ignored
+  by default; `cargo test --release -p fs-system --test step_cost --
+  --ignored --nocapture`) on a line of masses joined by springs, with or
+  without dampers, against a hand-written loop for the same midpoint
+  equations (one tridiagonal solve a step), which the graph reproduces to
+  1e-12. On an Apple M5 Ultra under other load (load average 19 to 25),
+  2026-11-11, nanoseconds a step:
 
-  | masses | components | kernel ns/step | hand ns/step | ratio | allocations/step |
+  | masses | dampers | first measurement | now | hand | now / hand |
   |---|---|---|---|---|---|
-  | 1 | 5 | 1,145 | 8.0 | 143 | 12 |
-  | 4 | 14 | 9,401 | 40 | 234 | 14 |
-  | 16 | 50 | 112,718 | 146 | 770 | 18 |
-  | 48 | 146 | 1,109,593 | 486 | 2,282 | 19 |
+  | 1 | yes | 1,145 | 842 | 7.8 | 108 |
+  | 4 | yes | 9,401 | 4,581 | 43 | 106 |
+  | 16 | yes | 112,718 | 55,880 | 164 | 340 |
+  | 48 | yes | 1,109,593 | 633,621 | 562 | 1,128 |
+  | 1 | no | | 380 | 8.5 | 45 |
+  | 4 | no | | 1,193 | 42 | 28 |
+  | 16 | no | | 5,317 | 162 | 33 |
+  | 48 | no | | 23,695 | 558 | 42 |
 
-  Two Newton iterations a step. The static plan and allocation-free stepping
-  are beads `.5.7` and `.15.1`.
+  The first measurement re-derived the Jacobian by asking every driver about
+  every unknown, factored it every iteration, and allocated 12 to 19 times a
+  step. Now a step that is accepted allocates nothing (asserted), the
+  Jacobian is assembled from a list made at sealing of which residual rows
+  read which component's outputs, and a block that is affine throughout
+  (every component `Class::ExactLinear`, every driver linear) keeps its
+  factors for as long as the step length stays the same: one iteration a
+  step and one back-substitution. The results are those of the first
+  measurement's code to the bit (the suites below did not move; the kept
+  factors are tested against factors derived afresh every step). A damper
+  makes a block not affine, because its heat is quadratic in its rate, so a
+  damped line still assembles and factors every step: that, the dense
+  factors, and the unknowns that are plain copies of an output are what
+  bead `.5.7` still has to remove.
 - Entropy is accounted as generation and as flow through heat ports. Stored
   entropy of components is not tracked, so the second-law check is narrow: it
   refuses a step in which the entropy components say they generated, plus the

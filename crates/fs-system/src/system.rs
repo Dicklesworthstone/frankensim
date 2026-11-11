@@ -14,7 +14,7 @@ use fs_ports::component::{
 
 use crate::erased::{Node, OwnerError, Plain, Tangent};
 use crate::ledger::{BoundaryAccount, ConnectionAccount, Ledger, NodeAccount, SinkAccount, Sum};
-use crate::solve::solve_dense;
+use crate::solve::{factor_dense, solve_factored};
 use crate::wiring::{
     AdmissionError, Block, Connection, Driver, HeatSink, NodeId, PortRef, RouteTemperature,
     blocks_in_dependency_order, tolerance_group,
@@ -1121,6 +1121,7 @@ impl SystemBuilder {
             .map(|nodes| Block {
                 nodes,
                 unknowns: Vec::new(),
+                known: Vec::new(),
             })
             .collect();
         for (index, driver) in drivers.iter().enumerate() {
@@ -1134,6 +1135,25 @@ impl SystemBuilder {
                 blocks[block].unknowns.push(index);
             }
         }
+        for block in &mut blocks {
+            for &node in &block.nodes {
+                for index in input_start[node]..input_start[node + 1] {
+                    if !block.unknowns.contains(&index) {
+                        block.known.push(index);
+                    }
+                }
+            }
+        }
+        let block_work = blocks
+            .iter()
+            .map(|block| {
+                let affine = block
+                    .nodes
+                    .iter()
+                    .all(|&node| self.nodes[node].class() == Class::ExactLinear);
+                BlockWork::plan(block, &drivers, &input_owner, &output_start, affine)
+            })
+            .collect();
 
         // Tolerance group and label of every input. Power and heat inputs of
         // one carrier and side are compared with the largest of their kind in
@@ -1275,6 +1295,8 @@ impl SystemBuilder {
             boundary_values,
             drivers,
             blocks,
+            block_work,
+            step_scratch: StepScratch::default(),
             input_start,
             output_start,
             port_start,
@@ -1307,6 +1329,113 @@ enum Trial {
     Shorten { dt_s: f64 },
 }
 
+/// Lists a step fills and empties, kept between steps.
+#[derive(Default)]
+struct StepScratch {
+    defects: Vec<f64>,
+    members: Vec<PortRef>,
+    group_members: Vec<PortRef>,
+    connection_rows: Vec<(f64, f64)>,
+    sink_heat: Vec<f64>,
+}
+
+/// What a looped block keeps between steps: the workspaces of its solve,
+/// which residual rows read which component's outputs, and, for a block
+/// that is affine throughout, the factors of its interface Jacobian.
+#[derive(Default)]
+struct BlockWork {
+    residual: Vec<f64>,
+    /// First-order size of the rounding in each residual: how strongly its
+    /// driver's sources depend on the block's inputs, times the size of
+    /// those inputs. Known after a tangent assembly.
+    rounding: Vec<f64>,
+    allowance: Vec<f64>,
+    group_scale: Vec<f64>,
+    gradient: Vec<(usize, f64)>,
+    /// The interface Jacobian, then its factors, row-major.
+    factors: Vec<f64>,
+    pivots: Vec<usize>,
+    /// Per unknown, the part of `readers` that reads its owner's outputs.
+    column_readers: Vec<Range<usize>>,
+    /// `(row, position in the owner's outputs, slope)` for every term of a
+    /// linear driver of the block, grouped by the component whose output it
+    /// reads, in row order and then in the driver's order.
+    readers: Vec<(usize, usize, f64)>,
+    /// Rows whose driver's slopes depend on the outputs it reads.
+    varying_rows: Vec<usize>,
+    /// Every component is exactly linear and every driver is linear, so the
+    /// Jacobian depends on the step length and on nothing else.
+    affine: bool,
+    /// Of an affine block: the step its factors were made for (NaN if it
+    /// has none), and the Jacobian's entries off the identity as
+    /// `(row, column, value)`, in the order they were formed.
+    kept_dt_s: f64,
+    slopes: Vec<(usize, usize, f64)>,
+}
+
+impl BlockWork {
+    /// Workspaces and reader lists of `block`. `affine` says whether every
+    /// component of it is exactly linear.
+    fn plan(
+        block: &Block,
+        drivers: &[Driver],
+        input_owner: &[usize],
+        output_start: &[usize],
+        affine: bool,
+    ) -> Self {
+        let m = block.unknowns.len();
+        let mut readers = Vec::new();
+        let mut of_node = Vec::with_capacity(block.nodes.len());
+        for &node in &block.nodes {
+            let outputs = output_start[node]..output_start[node + 1];
+            let start = readers.len();
+            for (row, &target) in block.unknowns.iter().enumerate() {
+                if let Driver::Linear(terms) = &drivers[target] {
+                    for &(source, slope) in terms {
+                        if outputs.contains(&source) {
+                            readers.push((row, source - outputs.start, slope));
+                        }
+                    }
+                }
+            }
+            of_node.push(start..readers.len());
+        }
+        let column_readers = block
+            .unknowns
+            .iter()
+            .map(|&index| {
+                let position = block
+                    .nodes
+                    .binary_search(&input_owner[index])
+                    .expect("an unknown belongs to a component of its block");
+                of_node[position].clone()
+            })
+            .collect();
+        let varying_rows: Vec<usize> = block
+            .unknowns
+            .iter()
+            .enumerate()
+            .filter(|&(_, &target)| !matches!(drivers[target], Driver::Linear(_)))
+            .map(|(row, _)| row)
+            .collect();
+        Self {
+            residual: vec![0.0; m],
+            rounding: vec![0.0; m],
+            allowance: vec![0.0; m],
+            group_scale: Vec::new(),
+            gradient: Vec::new(),
+            factors: vec![0.0; m * m],
+            pivots: vec![0; m],
+            column_readers,
+            readers,
+            affine: affine && varying_rows.is_empty(),
+            varying_rows,
+            kept_dt_s: f64::NAN,
+            slopes: Vec::new(),
+        }
+    }
+}
+
 /// Components joined by connections, stepped as one.
 ///
 /// The system owns every state in two generations, accepted and candidate. A
@@ -1331,6 +1460,9 @@ pub struct System {
     boundary_values: Vec<Vec<f64>>,
     drivers: Vec<Driver>,
     blocks: Vec<Block>,
+    /// Per block, what its solve keeps between steps.
+    block_work: Vec<BlockWork>,
+    step_scratch: StepScratch,
     input_start: Vec<usize>,
     output_start: Vec<usize>,
     port_start: Vec<usize>,
@@ -1523,12 +1655,8 @@ impl System {
         self.output_start[node]..self.output_start[node + 1]
     }
 
-    fn block_names(&self, block: usize) -> Vec<String> {
-        self.blocks[block]
-            .nodes
-            .iter()
-            .map(|&node| self.names[node].clone())
-            .collect()
+    fn names_of(&self, nodes: &[usize]) -> Vec<String> {
+        nodes.iter().map(|&node| self.names[node].clone()).collect()
     }
 
     /// A component's refusal during a trial. Once cancellation has been
@@ -1670,17 +1798,36 @@ impl System {
     }
 
     /// Solve one looped block by Newton iteration on its interface inputs.
-    #[allow(clippy::too_many_lines)]
     fn solve_block(
         &mut self,
         block: usize,
         dt_s: f64,
         cx: &Cx<'_>,
     ) -> Result<Result<u32, f64>, SystemError> {
-        let unknowns = self.blocks[block].unknowns.clone();
-        let nodes = self.blocks[block].nodes.clone();
+        // The block's lists and workspace are lent to the solve and handed
+        // back, so a step allocates nothing for them.
+        let unknowns = core::mem::take(&mut self.blocks[block].unknowns);
+        let nodes = core::mem::take(&mut self.blocks[block].nodes);
+        let mut work = core::mem::take(&mut self.block_work[block]);
+        let result = self.solve_lent(&unknowns, &nodes, &mut work, dt_s, cx);
+        self.blocks[block].unknowns = unknowns;
+        self.blocks[block].nodes = nodes;
+        self.block_work[block] = work;
+        result
+    }
+
+    /// [`Self::solve_block`] on a block's own lists and workspace.
+    #[allow(clippy::too_many_lines)]
+    fn solve_lent(
+        &mut self,
+        unknowns: &[usize],
+        nodes: &[usize],
+        work: &mut BlockWork,
+        dt_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Result<u32, f64>, SystemError> {
         let m = unknowns.len();
-        for &index in &unknowns {
+        for &index in unknowns {
             let start = self.accepted_inputs[index];
             if self.input_is_temperature[index] && !(start.is_finite() && start > 0.0) {
                 return Err(SystemError::GuessRequired {
@@ -1689,19 +1836,32 @@ impl System {
             }
             self.inputs[index] = start;
         }
-        let mut residual = vec![0.0; m];
-        let mut jacobian = vec![0.0; m * m];
-        // First-order size of the rounding in each residual: how strongly its
-        // driver's sources depend on the block's inputs, times the size of
-        // those inputs. Known after the first tangent assembly.
-        let mut rounding = vec![0.0_f64; m];
-        let mut allowance = vec![0.0_f64; m];
-        let mut group_scale = vec![0.0_f64; self.group_count];
-        let mut gradient = Vec::new();
+        work.group_scale.resize(self.group_count, 0.0);
+        work.rounding.fill(0.0);
+        work.allowance.fill(0.0);
+        let BlockWork {
+            residual,
+            rounding,
+            allowance,
+            group_scale,
+            gradient,
+            factors,
+            pivots,
+            column_readers,
+            readers,
+            varying_rows,
+            affine,
+            kept_dt_s,
+            slopes,
+        } = work;
+        let affine = *affine;
+        // Whether this step has already used the factors an affine block
+        // kept from an earlier one.
+        let mut kept_used = false;
         let mut iterations = 0_u32;
         loop {
             cx.checkpoint().map_err(|_| SystemError::Cancelled)?;
-            for &node in &nodes {
+            for &node in nodes {
                 if let Some(shorter) = self.propose(node, dt_s, cx)? {
                     return Ok(Err(shorter));
                 }
@@ -1738,7 +1898,7 @@ impl System {
             // has the same rounding-sized flow against an effort that is not
             // rounding), so an energy rate is also allowed rounding in units
             // of that power.
-            let power_scale = self.block_power_scale(&nodes);
+            let power_scale = self.block_power_scale(nodes);
             let mut worst = (0_usize, 0.0_f64);
             let mut converged = true;
             for (row, &index) in unknowns.iter().enumerate() {
@@ -1768,7 +1928,7 @@ impl System {
             }
             if iterations >= self.config.max_iterations {
                 return Err(SystemError::NotConverged {
-                    nodes: self.block_names(block),
+                    nodes: self.names_of(nodes),
                     iterations,
                     worst: self.input_label[unknowns[worst.0]].clone(),
                     residual: residual[worst.0],
@@ -1778,34 +1938,67 @@ impl System {
 
             // J = I - (d driver / d outputs) (d outputs / d inputs).
             rounding.fill(0.0);
-            jacobian.fill(0.0);
-            for diagonal in 0..m {
-                jacobian[diagonal * m + diagonal] = 1.0;
-            }
-            for (column, &index) in unknowns.iter().enumerate() {
-                let node = self.input_owner[index];
-                let local = index - self.input_start[node];
-                if let Some(shorter) = self.tangent_column(node, local, dt_s, &group_scale, cx)? {
-                    return Ok(Err(shorter));
+            if affine && !kept_used && kept_dt_s.to_bits() == dt_s.to_bits() {
+                // Every part of the block is affine in its inputs, so the
+                // Jacobian is the one factored at this step length before.
+                // Only the rounding estimate depends on the inputs. If a
+                // part's slopes moved with its state after all, the update
+                // does not converge and the next iteration derives them.
+                kept_used = true;
+                for &(row, column, through) in slopes.iter() {
+                    rounding[row] += (through * self.inputs[unknowns[column]]).abs();
                 }
-                let outputs = self.node_outputs(node);
-                for (row, &target) in unknowns.iter().enumerate() {
-                    self.drivers[target].gradient(&self.outputs, &mut gradient);
-                    for &(source, slope) in &gradient {
-                        if outputs.contains(&source) {
-                            let through = slope * self.scratch_outputs[source - outputs.start];
-                            jacobian[row * m + column] -= through;
-                            rounding[row] += (through * self.inputs[index]).abs();
+            } else {
+                *kept_dt_s = f64::NAN;
+                slopes.clear();
+                factors.fill(0.0);
+                for diagonal in 0..m {
+                    factors[diagonal * m + diagonal] = 1.0;
+                }
+                for (column, &index) in unknowns.iter().enumerate() {
+                    let node = self.input_owner[index];
+                    let local = index - self.input_start[node];
+                    if let Some(shorter) = self.tangent_column(node, local, dt_s, group_scale, cx)?
+                    {
+                        return Ok(Err(shorter));
+                    }
+                    let mut entry = |row: usize, through: f64| {
+                        factors[row * m + column] -= through;
+                        rounding[row] += (through * self.inputs[index]).abs();
+                        if affine {
+                            slopes.push((row, column, through));
+                        }
+                    };
+                    // Rows with linear drivers read this component's
+                    // outputs where the plan says; the others are asked.
+                    for &(row, offset, slope) in &readers[column_readers[column].clone()] {
+                        entry(row, slope * self.scratch_outputs[offset]);
+                    }
+                    let outputs = self.node_outputs(node);
+                    for &row in varying_rows.iter() {
+                        self.drivers[unknowns[row]].gradient(&self.outputs, gradient);
+                        for &(source, slope) in gradient.iter() {
+                            if outputs.contains(&source) {
+                                entry(row, slope * self.scratch_outputs[source - outputs.start]);
+                            }
                         }
                     }
                 }
+                if !factor_dense(factors, pivots, m) {
+                    return Err(SystemError::Singular {
+                        nodes: self.names_of(nodes),
+                    });
+                }
+                if affine {
+                    *kept_dt_s = dt_s;
+                }
             }
-            for value in &mut residual {
+            for value in residual.iter_mut() {
                 *value = -*value;
             }
-            if !solve_dense(&mut jacobian, &mut residual, m) {
+            if !solve_factored(factors, pivots, residual, m) {
                 return Err(SystemError::Singular {
-                    nodes: self.block_names(block),
+                    nodes: self.names_of(nodes),
                 });
             }
             for (row, &index) in unknowns.iter().enumerate() {
@@ -1825,14 +2018,10 @@ impl System {
         for block in 0..self.blocks.len() {
             cx.checkpoint().map_err(|_| SystemError::Cancelled)?;
             // Inputs that come from earlier blocks, boundaries and constants.
-            for position in 0..self.blocks[block].nodes.len() {
-                let node = self.blocks[block].nodes[position];
-                for index in self.node_inputs(node) {
-                    if !self.blocks[block].unknowns.contains(&index) {
-                        self.inputs[index] =
-                            self.drivers[index].value(&self.outputs, &self.boundary_values);
-                    }
-                }
+            for position in 0..self.blocks[block].known.len() {
+                let index = self.blocks[block].known[position];
+                self.inputs[index] =
+                    self.drivers[index].value(&self.outputs, &self.boundary_values);
             }
             if self.blocks[block].looped() {
                 match self.solve_block(block, dt_s, cx)? {
@@ -1956,20 +2145,31 @@ impl System {
             }
         };
 
-        let mut defects = vec![0.0; self.nodes.len()];
+        // The step's lists are taken from the system and given back when
+        // the step is published, so an accepted step allocates nothing for
+        // them. A refused step drops them and the next one makes new ones.
+        let StepScratch {
+            mut defects,
+            mut members,
+            mut group_members,
+            mut connection_rows,
+            mut sink_heat,
+        } = core::mem::take(&mut self.step_scratch);
+        defects.clear();
+        defects.resize(self.nodes.len(), 0.0);
         self.audit(dt_s, &mut defects)?;
 
         // Connection and boundary rows of this step.
-        let mut members = Vec::new();
-        let mut connection_rows = Vec::with_capacity(self.connections.len());
-        let mut sink_heat = vec![0.0; self.ledger.sinks.len()];
+        members.clear();
+        connection_rows.clear();
+        sink_heat.clear();
+        sink_heat.resize(self.ledger.sinks.len(), 0.0);
         let (mut generated, mut entropy_scale) = (0.0_f64, 0.0_f64);
         let mut entropy_slack = 0.0_f64;
         for receipt in &self.receipts {
             generated += receipt.entropy_generated_j_per_k;
             entropy_scale += receipt.entropy_generated_j_per_k;
         }
-        let mut group_members = Vec::new();
         for (index, group) in self.audit_groups.iter().enumerate() {
             // A heat route that shares a receiver with an earlier one is
             // audited in that one's row.
@@ -2096,14 +2296,22 @@ impl System {
                 .add(receipt.entropy_generated_j_per_k);
             account.balance_defect_j.add(defects[node]);
         }
-        for (account, (energy, entropy)) in self.ledger.connections.iter_mut().zip(connection_rows)
+        for (account, &(energy, entropy)) in
+            self.ledger.connections.iter_mut().zip(&connection_rows)
         {
             account.energy_defect_j.add(energy);
             account.entropy_generated_j_per_k.add(entropy);
         }
-        for (account, heat) in self.ledger.sinks.iter_mut().zip(sink_heat) {
+        for (account, &heat) in self.ledger.sinks.iter_mut().zip(&sink_heat) {
             account.heat_j.add(heat);
         }
+        self.step_scratch = StepScratch {
+            defects,
+            members,
+            group_members,
+            connection_rows,
+            sink_heat,
+        };
         for (account, (port, _)) in self.ledger.boundaries.iter_mut().zip(&self.boundaries) {
             let global = self.port_start[port.node] + port.port;
             account.energy_in_j.add(self.port_energy[global]);
