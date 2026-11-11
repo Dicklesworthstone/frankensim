@@ -516,13 +516,18 @@ mod material_rates {
         )
     }
 
-    fn point() -> QueryPoint {
-        let temperature = QuantitySpec::semantic(SemanticType::new(
+    /// The absolute temperature the native thermal owner queries. A claim's
+    /// temperature validity declares the same quantity.
+    fn kelvin() -> QuantitySpec {
+        QuantitySpec::semantic(SemanticType::new(
             QuantityKind::AbsoluteTemperature,
             ValueForm::Static,
-        ));
+        ))
+    }
+
+    fn point() -> QueryPoint {
         QueryPoint::new()
-            .with_quantity("T", temperature, 300.0)
+            .with_quantity("T", kelvin(), 300.0)
             .unwrap()
     }
 
@@ -637,7 +642,8 @@ mod material_rates {
                 knots: vec![(300.0, 0.1), (400.0, 1.1)],
                 dims: PHOSPHORESCENCE_RATE_DIMS,
             };
-            data[3].validity = ValidityDomain::unconstrained().with("T", 300.0, 400.0);
+            data[3].validity =
+                ValidityDomain::unconstrained().with_quantity("T", kelvin(), 300.0, 400.0);
             data[3].interpolation = InterpolationPolicy::LinearInside;
             let (singlet, coupling) = native_sources(card(data), &point()).unwrap();
             let (thermal, heating) = setup(cx, singlet);
@@ -732,7 +738,8 @@ mod material_rates {
             knots: vec![(300.0, HC_J_NM / 500.0), (400.0, 0.9 * HC_J_NM / 500.0)],
             dims: PHOSPHORESCENCE_ENERGY_DIMS,
         };
-        data[0].validity = ValidityDomain::unconstrained().with("T", 300.0, 400.0);
+        data[0].validity =
+            ValidityDomain::unconstrained().with_quantity("T", kelvin(), 300.0, 400.0);
         data[0].interpolation = InterpolationPolicy::LinearInside;
         assert!(native_sources(card(data), &point()).is_err());
 
@@ -745,14 +752,11 @@ mod material_rates {
             knots: vec![(300.0, 0.1), (400.0, 1.1)],
             dims: PHOSPHORESCENCE_RATE_DIMS,
         };
-        data[3].validity = ValidityDomain::unconstrained().with("T_material", 300.0, 400.0);
+        data[3].validity =
+            ValidityDomain::unconstrained().with_quantity("T_material", kelvin(), 300.0, 400.0);
         data[3].interpolation = InterpolationPolicy::LinearInside;
-        let absolute = QuantitySpec::semantic(SemanticType::new(
-            QuantityKind::AbsoluteTemperature,
-            ValueForm::Static,
-        ));
         let two_temperatures = point()
-            .with_quantity("T_material", absolute, 300.0)
+            .with_quantity("T_material", kelvin(), 300.0)
             .unwrap();
         assert!(native_sources(card(data), &two_temperatures).is_err());
         with_cx(|cx| {

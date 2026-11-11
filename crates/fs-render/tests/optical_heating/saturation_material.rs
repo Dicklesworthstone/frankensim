@@ -17,7 +17,8 @@ fn g1_saturable_material_rates_refresh_on_the_actual_thermal_clock() {
             knots: vec![(300.0, 1.0), (400.0, 2.0)],
             dims: PHOSPHORESCENCE_RATE_DIMS,
         };
-        data[2].validity = ValidityDomain::unconstrained().with("T", 300.0, 400.0);
+        data[2].validity =
+            ValidityDomain::unconstrained().with_quantity("T", kelvin(), 300.0, 400.0);
         data[2].interpolation = InterpolationPolicy::LinearInside;
         data[6].value = PropertyValue::Scalar {
             value: 0.0,

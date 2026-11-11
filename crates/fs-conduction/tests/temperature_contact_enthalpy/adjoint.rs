@@ -249,6 +249,14 @@ fn g0_enthalpy_contact_tangent_has_true_transpose_and_zero_seed_controls() {
     });
 }
 
+fn absolute_kelvin() -> fs_qty::QuantitySpec {
+    use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+    fs_qty::QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature,
+        ValueForm::Static,
+    ))
+}
+
 fn two_sided_scaled_card(scale: f64) -> InterfaceSystemCard {
     let dims = fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS;
     let mut claims = ClaimSet::new();
@@ -263,8 +271,8 @@ fn two_sided_scaled_card(scale: f64) -> InterfaceSystemCard {
             axis_dims: [fs_conduction::TEMPERATURE_DIMS; 2],
             samples, triangles: vec![[0, 1, 2], [1, 3, 2]], dims,
         },
-        validity: ValidityDomain::unconstrained().with("TA", 256., 384.)
-            .with("TB", 256., 384.).with("normal_pressure", 1e6, 1e6),
+        validity: ValidityDomain::unconstrained().with_quantity("TA", absolute_kelvin(), 256., 384.)
+            .with_quantity("TB", absolute_kelvin(), 256., 384.).with("normal_pressure", 1e6, 1e6),
         uncertainty: UncertaintyModel::Unstated,
         interpolation: InterpolationPolicy::LinearInside,
         observations: vec![],
@@ -287,10 +295,7 @@ fn two_sided_scaled_card(scale: f64) -> InterfaceSystemCard {
 }
 
 fn two_sided_law<'c>(mesh: &ConductionMesh, card: &'c InterfaceSystemCard) -> TemperatureContact<'c> {
-    use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
-    let kelvin = fs_qty::QuantitySpec::semantic(SemanticType::new(
-        QuantityKind::AbsoluteTemperature, ValueForm::Static,
-    ));
+    let kelvin = absolute_kelvin();
     let point = QueryPoint::new().with_quantity("TA", kelvin, 320.).unwrap()
         .with_quantity("TB", kelvin, 320.).unwrap().with("normal_pressure", 1e6).unwrap();
     let mut pair = ThermalInterfaces::coincident_face_pairs(mesh).unwrap()[0];
