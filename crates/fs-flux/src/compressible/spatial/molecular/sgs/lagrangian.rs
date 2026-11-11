@@ -157,6 +157,15 @@ pub(super) struct LagrangianTransport {
 }
 
 impl LagrangianTransport {
+    /// Owned capacities while the filter is attached (it is `None` only while a
+    /// coupled step or observation holds the admitted trial, which then owns its bytes).
+    pub(super) fn workspace_bytes(&self) -> usize {
+        self.filter.as_ref().map_or(0, LagrangianFilter::workspace_bytes)
+            + (self.density.capacity() + self.temperature.capacity() + self.heat_coefficient.capacity())
+                * core::mem::size_of::<f64>()
+            + self.velocity.capacity() * core::mem::size_of::<[f64; 3]>()
+    }
+
     pub(super) fn filter_width(&self) -> f64 {
         self.filter_width
     }
@@ -293,27 +302,23 @@ impl SubgridTransport {
         } else {
             Vec::new()
         };
-        let bytes = filter.workspace_bytes()
-            + (density.capacity()
-                + dynamic_coefficient_squared.capacity()
-                + temperature.capacity()
-                + heat_coefficient.capacity())
-                * core::mem::size_of::<f64>()
-            + velocity.capacity() * core::mem::size_of::<[f64; 3]>();
+        let transport = LagrangianTransport {
+            config,
+            filter: Some(filter),
+            filter_width,
+            normal_axis,
+            density,
+            velocity,
+            temperature,
+            heat_coefficient,
+            last_report: None,
+            last_heat_report: None,
+        };
+        let bytes = transport.workspace_bytes()
+            + dynamic_coefficient_squared.capacity() * core::mem::size_of::<f64>();
         dynamic::admit_bytes(bytes, maximum_bytes)?;
         Ok(Self {
-            closure: SubgridClosure::Lagrangian(LagrangianTransport {
-                config,
-                filter: Some(filter),
-                filter_width,
-                normal_axis,
-                density,
-                velocity,
-                temperature,
-                heat_coefficient,
-                last_report: None,
-                last_heat_report: None,
-            }),
+            closure: SubgridClosure::Lagrangian(transport),
             wall_models: [None; 6],
             dynamic_coefficient_squared,
         })

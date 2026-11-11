@@ -236,6 +236,19 @@ enum SubgridClosure {
 }
 
 impl SubgridTransport {
+    /// Owned capacities of the closure and of the fitted-coefficient cache; the
+    /// six wall models are fixed-size fields.
+    pub(super) fn workspace_bytes(&self) -> usize {
+        self.dynamic_coefficient_squared.capacity() * core::mem::size_of::<f64>()
+            + match &self.closure {
+                SubgridClosure::Local { .. } => 0,
+                SubgridClosure::Dynamic(dynamic) => dynamic.workspace_bytes(),
+                SubgridClosure::Lagrangian(dynamic) => dynamic.workspace_bytes(),
+                SubgridClosure::DynamicThermal(dynamic) => dynamic.workspace_bytes(),
+                SubgridClosure::ChannelDynamicThermal(dynamic) => dynamic.workspace_bytes(),
+            }
+    }
+
     fn local_reservoir_exchange_enabled(&self) -> bool {
         matches!(
             &self.closure,

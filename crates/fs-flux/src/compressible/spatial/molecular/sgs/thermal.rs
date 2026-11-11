@@ -123,9 +123,7 @@ impl SubgridTransport {
             work: ThermalWorkspace::new(n)?,
         };
         let dynamic_coefficient_squared = allocated(n, 0.0)?;
-        let bytes = closure.momentum.workspace_bytes()
-            + closure.heat.workspace_bytes()
-            + closure.work.workspace_bytes()
+        let bytes = closure.workspace_bytes()
             + dynamic_coefficient_squared.capacity() * core::mem::size_of::<f64>();
         dynamic::admit_bytes(bytes, maximum_bytes)?;
         Ok(Self {
@@ -137,6 +135,11 @@ impl SubgridTransport {
 }
 
 impl DynamicThermalTransport {
+    /// Owned capacities of the momentum and heat filters and the staged fields.
+    pub(super) fn workspace_bytes(&self) -> usize {
+        self.momentum.workspace_bytes() + self.heat.workspace_bytes() + self.work.workspace_bytes()
+    }
+
     pub(super) fn filter_width(&self) -> f64 {
         self.momentum.filter_width()
     }

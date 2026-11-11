@@ -169,6 +169,35 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         &self.law
     }
 
+    /// Owned numerical capacities: the state, primitive, gradient, viscosity,
+    /// face-flux, binary-diffusivity and boundary-impulse workspaces, the RKL2
+    /// buffers once prepared and, with `experimental-sgs`, the attached SGS
+    /// closure. The external flow, allocator metadata and the transport law's own
+    /// data are excluded. Attaching walls or a wall model reuses these capacities
+    /// and leaves the value unchanged.
+    pub fn workspace_bytes(&self) -> usize {
+        let work = &self.work;
+        let bytes = (work.current.capacity() + work.stage.capacity() + work.candidate.capacity())
+            * size_of::<State>()
+            + work.primitive.capacity() * size_of::<Primitive>()
+            + work.gradient.capacity() * size_of::<[[f64; 3]; 3]>()
+            + work.viscosity.capacity() * size_of::<crate::compressible::stress::Viscosity>()
+            + work.flux.iter().map(Vec::capacity).sum::<usize>() * size_of::<SpatialFaceFlux>()
+            + work.binary.capacity() * size_of::<f64>()
+            + (self.boundary_impulses.capacity()
+                + work.boundary_step.capacity()
+                + work.boundary_trial.capacity())
+                * size_of::<BoundaryImpulse>()
+            + self.stabilized_workspace_bytes();
+        #[cfg(feature = "experimental-sgs")]
+        let bytes = bytes
+            + self
+                .sgs
+                .as_ref()
+                .map_or(0, sgs::SubgridTransport::workspace_bytes);
+        bytes
+    }
+
     /// Whether the complete domain admits the compatible molecular stress
     /// identity. This describes the molecular contribution; modeled SGS stress
     /// retains its own physical and numerical qualifications.

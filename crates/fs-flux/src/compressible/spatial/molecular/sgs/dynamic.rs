@@ -129,9 +129,7 @@ impl SubgridTransport {
             velocity: allocated(n, [0.0; 3])?,
         };
         let dynamic_coefficient_squared = allocated(n, 0.0)?;
-        let bytes = dynamic.filter.workspace_bytes()
-            + dynamic.density.capacity() * core::mem::size_of::<f64>()
-            + dynamic.velocity.capacity() * core::mem::size_of::<[f64; 3]>()
+        let bytes = dynamic.workspace_bytes()
             + dynamic_coefficient_squared.capacity() * core::mem::size_of::<f64>();
         admit_bytes(bytes, maximum_bytes)?;
         Ok(Self {
@@ -145,6 +143,13 @@ impl SubgridTransport {
 impl DynamicTransport {
     pub(super) fn filter_width(&self) -> f64 {
         self.filter.filter_width()
+    }
+
+    /// Owned capacities of the filter and its density and velocity staging.
+    pub(super) fn workspace_bytes(&self) -> usize {
+        self.filter.workspace_bytes()
+            + self.density.capacity() * core::mem::size_of::<f64>()
+            + self.velocity.capacity() * core::mem::size_of::<[f64; 3]>()
     }
 
     pub(super) fn prepare(

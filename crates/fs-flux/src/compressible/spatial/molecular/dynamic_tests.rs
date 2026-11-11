@@ -123,6 +123,50 @@ fn g0_g5_uniform_dynamic_model_preserves_the_original_coupled_trajectory() {
 }
 
 #[test]
+fn workspace_bytes_totals_the_owned_capacities_and_sees_the_attached_closure() {
+    let n = 6;
+    let flow = cube(n, mixed);
+    let cells = flow.states.len();
+    let boundary = flow.grid.boundary_len();
+    let species = law(flow.gas(), 0.002, 0.0, 0.004).source().models().len();
+    let face_fluxes: usize = (0..3).map(|axis| flow.grid.face_len(axis)).sum();
+    // The parts, from the grid, the species count and the element types alone:
+    // three state copies, the primitive, gradient and viscosity caches, one flux
+    // per face, the species-by-species diffusivity table and three impulse tables.
+    let parts = 3 * cells * size_of::<State>()
+        + cells
+            * (size_of::<Primitive>()
+                + size_of::<[[f64; 3]; 3]>()
+                + size_of::<crate::compressible::stress::Viscosity>())
+        + face_fluxes * size_of::<SpatialFaceFlux>()
+        + species * species * size_of::<f64>()
+        + 3 * boundary * size_of::<Totals>();
+    let mut molecular =
+        MolecularTransport3d::new(&flow, law(flow.gas(), 0.002, 0.0, 0.004), || false).unwrap();
+    assert_eq!(molecular.workspace_bytes(), parts);
+    // The RKL2 buffers, once prepared, are counted by what the stabilized accessor reports.
+    molecular.prepare_stabilized(usize::MAX).unwrap();
+    let stabilized = molecular.stabilized_workspace_bytes();
+    assert!(stabilized > 0);
+    assert_eq!(molecular.workspace_bytes(), parts + stabilized);
+    // An attached dynamic closure adds exactly its documented payload (176 bytes per cell on this
+    // grid, from the independent required-bytes function), and nothing else changes.
+    let active = MolecularTransport3d::with_dynamic_sgs(
+        &flow,
+        law(flow.gas(), 0.002, 0.0, 0.004),
+        config(DynamicAveraging::LocalBox),
+        usize::MAX,
+        || false,
+    )
+    .unwrap();
+    let payload =
+        MolecularTransport3d::<ConstantTransport>::required_dynamic_sgs_workspace_bytes(&flow)
+            .unwrap();
+    assert!(payload > 0);
+    assert_eq!(active.workspace_bytes(), parts + payload);
+}
+
+#[test]
 fn g0_dynamic_favre_viscosity_drives_the_original_stress_heat_and_conservative_update() {
     let n = 6;
     let mut base = cube(n, mixed);
