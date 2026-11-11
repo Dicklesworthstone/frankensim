@@ -685,6 +685,150 @@ fn material_support_remains_required_while_dense_lossless_resonances_are_finite(
     ));
 }
 
+// The guard above samples +-1e-10 around a lossless pin's resonance. The refusal it guards was not a 1e-10
+// effect: through the rounded reflection r = -1 + i theta (theta = 2|X|/(rho c)), `r.re` rounds to exactly -1
+// until theta^2/2 reaches half an ulp, the pair [(1 + r)/2, (1 - r)/2] is slightly active (conductance
+// -theta^2/4, that is -theta/2 of |p||w|), and the passive-work check (-1e-10) refused the wall for detunings
+// from about 2e-11 (theta/2 = 4.9 eps_rel above 1e-10) to about 3e-9, where |beta| falls below 1/sqrt(eps)
+// and the admittance chart takes over. The native pressure/flow coordinates are exactly passive for a lossless
+// pin, so the same continuity holds across that whole band; the offsets below are inside it (|beta| above 6.7e7).
+#[test]
+fn lossless_resonance_stays_continuous_across_the_reflection_rounding_band() {
+    let surface = SpherePanels::icosphere(0.025, 0).unwrap();
+    let lossless = uniform(
+        &surface,
+        LocalWall::Mechanical(WallPin {
+            surface_density: 1.0,
+            stiffness_per_area: 1e6,
+            resistance: 0.0,
+        }),
+    );
+    let resonant =
+        LocalBoundaryObservation::for_scattering(scattering(&surface), lossless, None).unwrap();
+    let exact = resonant.physical_frequency_sample(1000.0, || false).unwrap();
+    assert!(exact.iter().any(|&v| v != C64::ZERO));
+    for offset in [-2e-9, -1e-9, 1e-9, 2e-9] {
+        let nearby = resonant
+            .physical_frequency_sample(1000.0 * (1.0 + offset), || false)
+            .unwrap();
+        for (&actual, &reference) in nearby.iter().zip(&exact) {
+            assert!(
+                (actual - reference).abs() < 1e-6 * reference.abs().max(1.0),
+                "offset {offset:e}"
+            );
+        }
+    }
+}
+
+// A genuinely active mechanical wall still refuses, at construction (the owner's admission of the physical
+// coefficients) and in the coordinate route (a planted negative conductance), and only the declaration admits it.
+#[test]
+fn active_mechanical_coordinates_still_refuse_and_only_the_declaration_admits_them() {
+    let surface = SpherePanels::icosphere(0.025, 0).unwrap();
+    for resistance in [-1.0, -1e-12] {
+        assert!(
+            LocalBoundary::try_new(
+                medium(),
+                vec![LocalWall::Mechanical(WallPin {
+                    surface_density: 1.0,
+                    stiffness_per_area: 1e6,
+                    resistance,
+                })],
+                vec![0; surface.areas().len()],
+            )
+            .is_err(),
+            "resistance {resistance:e}"
+        );
+    }
+    let lossless = uniform(
+        &surface,
+        LocalWall::Mechanical(WallPin {
+            surface_density: 1.0,
+            stiffness_per_area: 1e6,
+            resistance: 0.0,
+        }),
+    );
+    let omega = 1000.0 * (1.0 + 1e-9);
+    let k = omega / medium().sound_speed;
+    let coordinates = lossless.pressure_flow_coordinates(omega, || false).unwrap();
+    assert_eq!(coordinates.len(), surface.areas().len());
+    for &[p, w] in &coordinates {
+        // Exactly passive: no conductance at all for a lossless pin.
+        assert_eq!((p * w.conj()).re, 0.0);
+    }
+    let build = |pairs: &[[C64; 2]], declared_active: bool| {
+        crate::helmholtz::bc::PreparedReflectionBoundary::from_pressure_flow(
+            &surface,
+            k,
+            medium(),
+            pairs,
+            declared_active,
+            crate::helmholtz::Formulation::BurtonMiller,
+        )
+    };
+    assert!(build(&coordinates, false).is_ok());
+    let active: Vec<[C64; 2]> = coordinates
+        .iter()
+        .map(|&[p, w]| [p + w.scale(-1e-3), w])
+        .collect();
+    assert!(build(&active, false).is_err());
+    assert!(build(&active, true).is_ok());
+}
+
+// A slightly lossy pin near its resonance keeps the exact conductance `reflected_work` carries: the amplitude-
+// invariant Re(p conj w)/|p + w|^2 of the native pair is that conductance, z.re rho c/|z + rho c|^2. Both are
+// formed from the same normalized z and rho c, so they agree to 8 eps relative (a product, a sum, a division).
+#[test]
+fn lossy_resonant_pin_coordinates_keep_the_exact_work_conductance() {
+    let surface = SpherePanels::icosphere(0.025, 0).unwrap();
+    let lossy = uniform(
+        &surface,
+        LocalWall::Mechanical(WallPin {
+            surface_density: 1.0,
+            stiffness_per_area: 1e6,
+            resistance: 1e-6,
+        }),
+    );
+    for omega in [1000.0, 1000.0 * (1.0 + 1e-9), 1000.0 * (1.0 - 1e-9)] {
+        let coordinates = lossy.pressure_flow_coordinates(omega, || false).unwrap();
+        let work = lossy.work_coordinates(omega, || false).unwrap();
+        for (&[p, w], coordinate) in coordinates.iter().zip(work) {
+            let super::boundary::WallWorkCoordinates::Reflection { conductance, .. } = coordinate
+            else {
+                panic!("a pin this close to its resonance is outside the well-scaled admittance chart");
+            };
+            assert!(conductance > 0.0);
+            let pair = (p * w.conj()).re / (p + w).norm_sq();
+            assert!(
+                (pair - conductance).abs() <= 8.0 * f64::EPSILON * conductance,
+                "omega {omega:e}: pair {pair:e} against reflected_work {conductance:e}"
+            );
+        }
+    }
+}
+
+// Every non-mechanical law keeps the reflection pair it always had, bit for bit, and a boundary without a
+// mechanical law never takes the coordinate route.
+#[test]
+fn non_mechanical_laws_keep_their_reflection_pair_bits() {
+    let bind = |wall| LocalBoundary::try_new(medium(), vec![LocalWall::Rigid, wall], vec![1, 0, 1]);
+    for wall in [layered()] {
+        let boundary = bind(wall).unwrap();
+        assert!(!boundary.has_mechanical_law());
+        for frequency in [200.0, 700.0, 1500.0] {
+            let omega = TAU * frequency;
+            let reflection = boundary.pressure_reflection(omega, || false).unwrap();
+            let coordinates = boundary.pressure_flow_coordinates(omega, || false).unwrap();
+            assert_eq!(coordinates.len(), reflection.len());
+            for (&r, &pair) in reflection.iter().zip(&coordinates) {
+                assert_eq!(pair, [(C64::ONE + r).scale(0.5), (C64::ONE - r).scale(0.5)]);
+            }
+        }
+    }
+    let mechanical = bind(LocalWall::Mechanical(pin())).unwrap();
+    assert!(mechanical.has_mechanical_law());
+}
+
 #[test]
 fn lower_window_requires_live_passband_bins_and_binds_artifact_identity() {
     let surface = SpherePanels::icosphere(0.025, 0).unwrap();

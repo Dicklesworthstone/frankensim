@@ -462,6 +462,54 @@ impl LocalBoundary {
         Ok(panels)
     }
 
+    /// Whether any physical law is a mechanical pin. Only then does the near-node reflection route
+    /// use native pressure/flow coordinates; every other boundary keeps the reflection pair it always had.
+    pub(super) fn has_mechanical_law(&self) -> bool {
+        self.laws.iter().any(|law| matches!(law, LocalWall::Mechanical(_)))
+    }
+
+    /// Native `[p, rho c v_inward]` coordinates per panel, in original panel order, for the reflection
+    /// constructors' `from_pressure_flow`. A mechanical law gives `[z, rho c]` divided by their common scale
+    /// and never forms the reflection `r`; every other law gives `[(1 + r)/2, (1 - r)/2]`, the pair the
+    /// reflection constructors form. Both are the same boundary equation up to a common complex amplitude.
+    /// Every constitutive, frequency and passivity refusal of `pressure_reflection` remains.
+    ///
+    /// Why not through `r`: for a lossless pin at detuning X from its resonance, r = -1 + i theta with
+    /// theta = 2|X|/(rho c). The true real part is -1 + theta^2/2, which for theta below about 1e-8 is under
+    /// half an ulp of 1, so `r.re` rounds to exactly -1 and |r|^2 = 1 + theta^2: a hair active. The pair
+    /// `[(1 + r)/2, (1 - r)/2]` then has conductance -theta^2/4, that is -theta/2 of |p||w|, and the passive-work
+    /// check (-1e-10) refused the wall for detunings from about 2e-11 (theta/2 above 1e-10) up to about 3e-9,
+    /// where |beta| falls below 1/sqrt(eps) and the admittance chart takes over. Here the pair has
+    /// `Re(p conj w) = z.re rho c / scale^2`, exactly zero for a lossless pin.
+    pub(super) fn pressure_flow_coordinates(
+        &self,
+        omega: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<[C64; 2]>, TransferError> {
+        if cancelled() {
+            return Err(TransferError::Cancelled);
+        }
+        if !omega.is_finite() || omega <= 0.0 {
+            return Err(TransferError::Invalid("local wall frequency must be positive and finite"));
+        }
+        let rho_c = self.medium.density * self.medium.sound_speed;
+        let mut coordinates = Vec::with_capacity(self.laws.len());
+        for law in &self.laws {
+            if cancelled() {
+                return Err(TransferError::Cancelled);
+            }
+            coordinates.push(law.pressure_flow_coordinates(rho_c, omega)?);
+        }
+        let mut panels = Vec::with_capacity(self.panel_laws.len());
+        for (panel, &index) in self.panel_laws.iter().enumerate() {
+            if panel % 256 == 0 && cancelled() {
+                return Err(TransferError::Cancelled);
+            }
+            panels.push(coordinates[index]);
+        }
+        Ok(panels)
+    }
+
     /// Retain ordinary admittance arithmetic where well scaled, and the
     /// original bounded wall law through mechanical/layered pressure nodes.
     /// Distinct material laws are queried once before scattering to panels.
@@ -738,6 +786,17 @@ impl LocalWall {
         // reflection. A failed admittance is not replaced by a rigid boundary.
         let (reflection, conductance) = self.reflected_work(rho_c, omega)?;
         Ok(WallWorkCoordinates::Reflection { reflection, conductance })
+    }
+
+    fn pressure_flow_coordinates(&self, rho_c: f64, omega: f64) -> Result<[C64; 2], TransferError> {
+        // The reflection is formed first, so every refusal (nonfinite, active, constitutive) is the old one.
+        let (reflection, _) = self.reflected_work(rho_c, omega)?;
+        if let Self::Mechanical(pin) = self {
+            let z = fs_phs::wall_specific_impedance(pin, omega)?;
+            let scale = z.re.abs().max(z.im.abs()).max(rho_c);
+            return Ok([C64::new(z.re / scale, z.im / scale), C64::from_re(rho_c / scale)]);
+        }
+        Ok([(C64::ONE + reflection).scale(0.5), (C64::ONE - reflection).scale(0.5)])
     }
 
     fn reflected_work(&self, rho_c: f64, omega: f64) -> Result<(C64, f64), TransferError> {

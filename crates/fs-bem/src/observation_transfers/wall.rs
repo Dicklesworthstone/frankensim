@@ -473,6 +473,13 @@ impl<'a> LocalBoundaryObservation<'a> {
                 surface, k, medium, Admittance::Local { beta, declared_active: false },
                 helmholtz::Formulation::BurtonMiller,
             )?)
+        } else if self.boundary.has_mechanical_law() {
+            // A mechanical pin near its resonance: native [p, rho c v] coordinates, never through the rounded
+            // reflection (see LocalBoundary::pressure_flow_coordinates).
+            let coordinates = self.boundary.pressure_flow_coordinates(omega, &mut cancelled)?;
+            PreparedLocalBoundary::Reflection(PreparedReflectionBoundary::from_pressure_flow(
+                surface, k, medium, &coordinates, false, helmholtz::Formulation::BurtonMiller,
+            )?)
         } else {
             let reflection = self.boundary.pressure_reflection(omega, &mut cancelled)?;
             PreparedLocalBoundary::Reflection(PreparedReflectionBoundary::new(
