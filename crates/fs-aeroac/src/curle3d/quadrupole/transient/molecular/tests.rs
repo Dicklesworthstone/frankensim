@@ -612,7 +612,7 @@ fn onset_front_ownership_budget_and_cancellation_are_explicit() {
                 polls == 3
             }
         ),
-        Err(AeroacError::Cancelled)
+        Err(AeroacError::Cancelled { .. })
     ));
     assert!(
         owner

@@ -831,7 +831,7 @@ fn mechanism_specific_initial_rest_storage_limits_and_cancellation() {
                 polls == 3
             }
         ),
-        Err(AeroacError::Cancelled)
+        Err(AeroacError::Cancelled { .. })
     ));
     assert!(
         owner

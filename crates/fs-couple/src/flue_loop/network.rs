@@ -66,7 +66,7 @@ pub struct FlueBoundaryAperture {
     pub exterior_pressure_pa: f64,
 }
 
-/// Exact typed source controls consumed by the existing pressure/angle owner.
+/// Exact typed source controls consumed by the existing pressure/angle/length owner.
 /// A v2 performance contains only resolved paths; it never mixes legacy targets.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FlueSourcePaths {
@@ -74,14 +74,17 @@ pub struct FlueSourcePaths {
     pub pressure: ParameterPath,
     /// Source jet direction in radians.
     pub jet_angle: ParameterPath,
+    /// Source jet length in metres: a lip jet's exit to labium distance.
+    pub jet_length: ParameterPath,
 }
 impl FlueSourcePaths {
-    /// Bind both physical parameters to an explicitly declared source entity.
+    /// Bind the physical parameters to an explicitly declared source entity.
     #[must_use]
     pub fn for_entity(entity: EntityId) -> Self {
         Self {
             pressure: ParameterPath { entity, parameter: ParameterKey::new("blowing_pressure", fs_scenario::gesture::path::PRESSURE) },
             jet_angle: ParameterPath { entity, parameter: ParameterKey::new("jet_angle", fs_qty::Dims::NONE) },
+            jet_length: ParameterPath { entity, parameter: ParameterKey::new("jet_length", fs_scenario::gesture::path::LENGTH) },
         }
     }
 }

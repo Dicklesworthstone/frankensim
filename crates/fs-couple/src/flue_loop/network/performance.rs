@@ -18,7 +18,6 @@ pub mod aperture_flows;
 
 use super::{FlueError, FlueResonator, FlueVoice};
 use crate::acoustic_realize::AcousticRealizeError;
-#[cfg(test)]
 use crate::flue_loop::FlueControl;
 #[cfg(test)]
 use crate::pcm_wav::baffled::RayleighMedium;
@@ -168,8 +167,10 @@ fn source_error(error: FlueError) -> RenderError {
 
 impl FlueOutletPerformance {
     /// Bind a canonical blowing-pressure track and optional jet-angle track to
-    /// a quiescent physical graph. Both use the existing gesture ramp semantics
-    /// and apply on the same mechanical clock before their named sample.
+    /// a quiescent physical graph, and on an admitted lip jet
+    /// ([`FlueVoice::admit_jet_length`]) an optional jet-length track, whose forced
+    /// jet is prepared once over the lengths it takes. All use the existing gesture
+    /// ramp semantics and apply on the same mechanical clock before their named sample.
     /// Every emitted input is checked against the actual jet's declared domain
     /// before any source or observer advances. No source track is silently ignored.
     ///
@@ -239,7 +240,7 @@ impl FlueOutletPerformance {
         Self::build(voice, schedule, config, Some(radiation), Some(mechanics_rate_hz))
     }
 
-    fn build(voice: FlueVoice, schedule: GestureSchedule, config: FlueOutletConfig,
+    fn build(mut voice: FlueVoice, schedule: GestureSchedule, config: FlueOutletConfig,
         radiation: Option<FlueRadiationInput>, reconstruction_rate: Option<u32>)
         -> Result<Self, GestureCompileError>
     {
@@ -294,6 +295,11 @@ impl FlueOutletPerformance {
             controls::FlueControlLimits { max_controls: config.max_controls,
                 max_compile_work: config.max_compile_work },
             mechanics_rate_hz, mechanical_samples)?;
+        // A jet-length track prepares its lip jet once, over the lengths it takes.
+        if let Some((near_m, far_m)) = controls::jet_length_span(&controls) {
+            voice.prepare_jet_length_span(near_m, far_m)
+                .map_err(|e| GestureCompileError::Render(source_error(e)))?;
+        }
         let mut launched = Vec::new();
         launched.try_reserve_exact(scratch_samples)
             .map_err(|_| invalid("flue callback scratch exceeds available allocation"))?;
@@ -311,8 +317,8 @@ impl FlueOutletPerformance {
     ///
     /// This explicitly describes a coplanar baffled assembly. It does not claim
     /// the free-field geometry of an orchestral flute. Mouth and outlet openings
-    /// must not overlap. Geometry is frozen; the admitted pressure/angle controls
-    /// change excitation without changing either observed surface.
+    /// must not overlap. Geometry is frozen; the admitted pressure/angle/length
+    /// controls change excitation without changing either observed surface.
     pub fn with_mouth_radiation(
         mut self,
         input: FlueMouthRadiation,
@@ -470,6 +476,19 @@ impl FlueOutletPerformance {
     /// Exact original physical gesture schedule.
     #[must_use]
     pub const fn schedule(&self) -> &GestureSchedule { &self.schedule }
+    /// The largest change of a compiled jet-length track over one control tick, per second: its
+    /// steepest `|dW/dt|` [m/s] as the controls apply it. `None` without a track.
+    #[must_use]
+    pub fn jet_length_rate_m_s(&self) -> Option<f64> {
+        let mut lengths = self.controls.iter().filter_map(|event| match event.delta {
+            FlueControl::SetJetLength(length) => Some(length),
+            _ => None,
+        });
+        let first = lengths.next()?;
+        let (_, step) = lengths.fold((first, 0.0f64), |(previous, step), length|
+            (length, step.max((length - previous).abs())));
+        Some(step * f64::from(self.schedule.control_rate_hz))
+    }
     /// Admitted physical receiver and finite output limits.
     #[must_use]
     pub const fn config(&self) -> &FlueOutletConfig { &self.config }

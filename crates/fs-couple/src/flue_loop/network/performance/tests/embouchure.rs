@@ -259,3 +259,124 @@ fn independent_aperture_changes_observation_and_reaction_without_redefining_the_
             .with_mouth_radiation(FlueMouthRadiation { aperture_size_m: Some(size), ..input }).is_err());
     }
 }
+
+// The jet-length track (MB 23643) on the forced jet of the plumbing row: cut-up 4 mm, 5.33 b.
+const LIP_CUT_UP_M: f64 = 0.004;
+
+fn lip_voice() -> FlueVoice {
+    voice(source(gas(), -0.9)).with_forced_jet(crate::flue_loop::forced_jet::COARSE_SPEC, 300.0).unwrap()
+}
+
+fn lip(initial: f64, events: Vec<GestureEvent>) -> GestureTrack {
+    GestureTrack { id: "lip".into(), target: GestureTarget::JetLength,
+        initial: GestureValue::LengthM(initial), events }
+}
+
+fn with_lip(track: GestureTrack) -> GestureSchedule {
+    let mut tracks = schedule(300.0).tracks().to_vec();
+    tracks.push(track);
+    GestureSchedule::try_new(700, tracks).unwrap()
+}
+
+// From 3.8 to 4.2 mm over four ticks, held after.
+fn moving_lip() -> GestureSchedule {
+    with_lip(lip(0.0038, vec![GestureEvent { time_s: 1.0/700.0, transition_s: 4.0/700.0,
+        value: GestureValue::LengthM(0.0042) }]))
+}
+
+fn rendered_bits(performance: &mut FlueOutletPerformance, partition: usize) -> Vec<u64> {
+    let mut out = vec![0.0; performance.config.samples as usize];
+    for block in out.chunks_mut(partition) { performance.block(block).unwrap(); }
+    out.iter().map(|p| p.to_bits()).collect()
+}
+
+#[test]
+fn no_track_an_admission_and_a_track_held_at_the_cut_up_render_the_same_bits() {
+    let cfg = config(1);
+    let mut plain = FlueOutletPerformance::new(lip_voice(), schedule(300.0), cfg).unwrap();
+    let mut admitted = FlueOutletPerformance::new(lip_voice().admit_jet_length().unwrap(),
+        schedule(300.0), cfg).unwrap();
+    let mut held = FlueOutletPerformance::new(lip_voice().admit_jet_length().unwrap(),
+        with_lip(lip(LIP_CUT_UP_M, vec![])), cfg).unwrap();
+    assert_eq!(plain.jet_length_rate_m_s(), None);
+    assert_eq!(plain.voice().forced_jet().unwrap().jet_length_span_m(), None);
+    assert_eq!(held.jet_length_rate_m_s(), Some(0.0));
+    assert_eq!(held.voice().forced_jet().unwrap().jet_length_span_m(), Some((LIP_CUT_UP_M, LIP_CUT_UP_M)));
+    let expected = rendered_bits(&mut plain, 513);
+    assert!(expected.iter().any(|p| f64::from_bits(*p).abs() > 1.0e-12));
+    assert_eq!(rendered_bits(&mut admitted, 513), expected);
+    assert_eq!(rendered_bits(&mut held, 513), expected);
+}
+
+#[test]
+fn sampled_jet_length_matches_physical_source_and_receiver_on_the_exact_clock() {
+    let schedule = moving_lip();
+    let g = gas();
+    let cfg = config(1);
+    let ticks = (cfg.samples - 1) * 700 / 48_000 + 1;
+    let lengths: Vec<f64> = (0..ticks).map(|tick| schedule.sample("lip", tick).unwrap()).collect();
+    let near = lengths.iter().copied().fold(f64::INFINITY, f64::min);
+    let far = lengths.iter().copied().fold(0.0, f64::max);
+    let mut original = lip_voice().admit_jet_length().unwrap();
+    original.prepare_jet_length_span(near, far).unwrap();
+    let mut receiver = BaffledPressure::circular_outlet(0.006, 48_000, cfg.receiver,
+        RayleighMedium { density: g.density, sound_speed: g.sound_speed }).unwrap();
+    let mut expected = vec![0.0f64; cfg.samples as usize];
+    for (sample, pressure) in expected.iter_mut().enumerate() {
+        let tick = (sample as u64 * 700)/48_000;
+        original.apply(FlueControl::SetBlowingPressure(schedule.sample("blow", tick).unwrap())).unwrap();
+        original.apply(FlueControl::SetJetLength(lengths[tick as usize])).unwrap();
+        original.step_block_observed(&mut [0.0], |line| {
+            let FlueResonator::Network(n) = line else { panic!("network") };
+            *pressure = receiver.step(&[n.node_frame(1).unwrap().net_flow_into_node_m3_s]).unwrap();
+            Ok(())
+        }).unwrap();
+    }
+    let expected: Vec<u64> = expected.iter().map(|p| p.to_bits()).collect();
+    for partition in [513, 37, 1] {
+        let mut performance = FlueOutletPerformance::new(lip_voice().admit_jet_length().unwrap(),
+            schedule.clone(), cfg).unwrap();
+        assert_eq!(performance.voice().forced_jet().unwrap().jet_length_span_m(), Some((near, far)));
+        assert_eq!(rendered_bits(&mut performance, partition), expected, "length controls must not depend on callbacks");
+        assert_eq!(performance.voice().jet_length_m(), 0.0042);
+        let rate = performance.jet_length_rate_m_s().unwrap();
+        assert!((rate - 0.0004 / (4.0 / 700.0)).abs() < 1e-9, "{rate:e}");
+        // The moving jet closes the forced jet's own work balance.
+        for d in performance.voice().diagnostics() {
+            let scale = d.source_work_j.abs() + d.pipe_work_j.abs() + d.stored_delta_j.abs()
+                + d.radiation_loss_j + d.numerical_dissipation_j + d.separation_loss_j;
+            assert!(d.ledger_defect_j.abs() <= 2e-12 * scale + 1e-30, "{d:?}");
+        }
+    }
+    let mut held = FlueOutletPerformance::new(lip_voice().admit_jet_length().unwrap(),
+        with_lip(lip(LIP_CUT_UP_M, vec![])), cfg).unwrap();
+    assert_ne!(rendered_bits(&mut held, 513), expected, "the jet length must reach actual microphone pressure");
+}
+
+#[test]
+fn jet_length_is_refused_by_name_off_an_admitted_lip_jet_and_outside_its_span() {
+    let cfg = config(1);
+    let err = FlueOutletPerformance::new(lip_voice(), moving_lip(), cfg).err().unwrap();
+    assert!(format!("{err:?}").contains(crate::flue_loop::JET_LENGTH_NEEDS_LIP_JET), "{err:?}");
+    let err = voice(source(gas(), -0.9)).admit_jet_length().err().unwrap();
+    assert!(err.to_string().contains("refused by the island's convection chain"), "{err}");
+    let mut warm = lip_voice();
+    warm.apply(FlueControl::SetBlowingPressure(300.0)).unwrap();
+    warm.step_block(&mut [0.0]).unwrap();
+    assert!(warm.admit_jet_length().is_err(), "a warm voice");
+    let mut cold = lip_voice().admit_jet_length().unwrap();
+    for length in [0.0, -LIP_CUT_UP_M, f64::NAN, f64::INFINITY] {
+        assert!(cold.validate_jet_length(length).is_err(), "{length}");
+    }
+    // A tenth of a millimetre is under one 0.25 b cell of the 0.75 mm exit half-width.
+    let err = cold.validate_jet_length(1e-4).err().unwrap();
+    assert!(err.to_string().contains("shorter than one grid cell"), "{err}");
+    assert!(cold.apply(FlueControl::SetJetLength(0.0042)).is_err(), "no span");
+    cold.prepare_jet_length_span(0.0038, 0.0042).unwrap();
+    assert!(cold.prepare_jet_length_span(0.0038, 0.0042).is_err(), "one preparation");
+    assert_eq!(cold.jet_length_m(), LIP_CUT_UP_M);
+    assert!(cold.apply(FlueControl::SetJetLength(0.0043)).is_err(), "outside the span");
+    assert_eq!(cold.jet_length_m(), LIP_CUT_UP_M);
+    cold.apply(FlueControl::SetJetLength(0.0042)).unwrap();
+    assert_eq!(cold.jet_length_m(), 0.0042);
+}

@@ -55,7 +55,7 @@ use crate::bernoulli_aperture::radiation::environment::multiport::source::{
 use crate::bernoulli_aperture::viscothermal::{ViscothermalSectionSpec, ViscothermalTimeOptions};
 use crate::flue_loop::network::{FlueNetworkSpec, FlueSourcePaths};
 use crate::flue_loop::window_radiation::{WindowFlux, WindowRadiationLoad, WindowRadiationSampling, cut_up_piston};
-use crate::flue_loop::{FlueError, FlueGeometry, FlueVoice, JetNoiseSpec};
+use crate::flue_loop::{FlueError, FlueGeometry, FlueVoice, JET_LENGTH_NEEDS_LIP_JET, JetNoiseSpec};
 use crate::pcm_wav::baffled::CircularOutletReceiver;
 use crate::pcm_wav::baffled::gas::GasPropagation;
 use crate::pcm_wav::baffled::openings::duct::{DuctOpening, DuctRadiationSpec, DuctReconstruction};
@@ -155,6 +155,15 @@ pub(crate) fn held_blowing_pressure(schedule: &GestureSchedule, source: Option<&
         .filter_map(|value| match value { GestureValue::PressurePa(p) => Some(*p), _ => None })
         .fold(0.0f64, f64::max)
 }
+/// Whether the gesture carries a jet-length track: the legacy target or the declared source's
+/// length path.
+fn jet_length_tracked(schedule: &GestureSchedule, source: Option<&FlueSourcePaths>) -> bool {
+    schedule.tracks().iter().any(|track| match &track.target {
+        GestureTarget::JetLength => true,
+        GestureTarget::Parameter(path) => source.is_some_and(|paths| *path == paths.jet_length),
+        _ => false,
+    })
+}
 fn poll(gate: &CancelGate) -> Result<(), FlueInputError> {
     if gate.is_requested() { Err(bad(0, "flue source construction cancelled")) } else { Ok(()) }
 }
@@ -176,7 +185,7 @@ pub struct FluePerformanceInfo {
     pub jet_card_hash: u64,
     /// Exact explicit selector, or an inline canonical card.
     pub jet_card_source: &'static str,
-    /// Pressure, optional jet-angle and physical force assignments on one clock.
+    /// Pressure, optional jet-angle, optional jet-length and physical force assignments on one clock.
     pub compiled_controls: usize,
 }
 
@@ -254,6 +263,8 @@ impl FlueFilePerformance {
     /// Gains, seed, dimensions, limits, clocks and the pressure phrase are data.
     /// The gesture suffix may also contain one typed `jet-angle` track in radians:
     /// it changes the existing geometric jet split at fixed cut-up and mouth area.
+    /// After a `window embouchure` row, with the forced jet, it may contain one typed
+    /// `jet-length` track in metres: the lips' jet length, with the flue row's mouth held.
     /// `exterior same` shares the default gas; another gas record selects the
     /// same pressure-matched exterior for observation and any chosen reaction.
     /// `network` replaces
@@ -718,9 +729,14 @@ impl FlueFilePerformance {
             }
         }
         let schedule = GestureSchedule::from_canonical_bytes(gestures.as_bytes())
-            .map_err(|_| bad(rows.line+1, "invalid canonical pressure/jet-angle/force gesture suffix"))?;
+            .map_err(|_| bad(rows.line+1, "invalid canonical pressure/jet-angle/jet-length/force gesture suffix"))?;
         if schedule.to_canonical_bytes() != gestures.as_bytes() {
             return Err(bad(rows.line+1,"gesture suffix must be canonical without ignored trailing data"));
+        }
+        // A jet-length track moves a lip jet only: the forced jet over a `window embouchure` hole.
+        let jet_length_track = jet_length_tracked(&schedule, control_source.as_ref());
+        if jet_length_track && !window_row.is_some_and(|row| row.is_embouchure()) {
+            return Err(bad(rows.line + 1, JET_LENGTH_NEEDS_LIP_JET));
         }
         poll(gate)?;
         duct.graph.max_wave_memory_bytes = max_wave_memory_bytes;
@@ -858,6 +874,10 @@ impl FlueFilePerformance {
             }
             None => voice,
         };
+        // After every jet row: the voice names the jet law that refuses a length track.
+        let voice = if jet_length_track {
+            voice.admit_jet_length().map_err(FlueInputError::Physics)?
+        } else { voice };
         let mut renderer = FlueOutletPerformance::with_multirate_radiation(voice, schedule,
             FlueOutletConfig { sample_rate_hz, samples, max_block, max_controls, max_compile_work,
                 outlet_node, receiver, maximum_abs_pressure_pa },

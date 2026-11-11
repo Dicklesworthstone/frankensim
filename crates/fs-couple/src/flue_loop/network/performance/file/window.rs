@@ -98,6 +98,14 @@ pub(super) struct WindowRow {
     shape: Shape,
 }
 
+impl WindowRow {
+    /// Whether the row is a `window embouchure`: the hole a flutist's lips blow across, whose jet
+    /// length the lips set.
+    pub(super) const fn is_embouchure(&self) -> bool {
+        matches!(self.shape, Shape::Embouchure { .. })
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Shape {
     /// The flue's window, flue width by cut-up.

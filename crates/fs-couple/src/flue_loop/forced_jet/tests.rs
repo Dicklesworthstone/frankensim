@@ -191,3 +191,121 @@ fn measured_exit_reynolds_neighbourhood_is_closed_at_both_ends() {
     for no in [99.999999, 400.000001, 0.0, -200.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY,
         1224.0, 1755.0] { assert!(!admitted(no), "{no}"); }
 }
+
+// The jet-length track (MB 23643) on the plumbing row: the card's station is 3 b, the span 2.8 to
+// 3.47 b. A track held at the card's length changes no bit; a parallel span read at any length is
+// the kernel built at that length, bit for bit; a length step reads the same retained intervals at
+// the new station; a spread span is exact at its far end; refusals change nothing.
+const CARD_LENGTH_M: f64 = 0.00225;
+const NEAR_LENGTH_M: f64 = 0.0021;
+const FAR_LENGTH_M: f64 = 0.0026;
+
+fn kernel_at(cut_up_m: f64) -> ForcedJetKernel {
+    ForcedJetKernel::new(ForcedJetSpec { spacing: 0.5, window: 8.0 }, JetExit::UNIFORM, 0.001,
+        cut_up_m, 1.5e-5, 12.0, 1.0, 4096, 1.0 / 48_000.0).unwrap()
+}
+
+fn spread_at(cut_up_m: f64) -> ForcedJetKernel {
+    ForcedJetKernel::new_with_spreading(ForcedJetSpec { spacing: 0.5, window: 8.0 }, JetExitLaw::Kutta,
+        JetSpreadingLaw::Bickley, JetExit::UNIFORM, 0.001, cut_up_m, 1.5e-5, 12.0, 1.0, 4096,
+        1.0 / 48_000.0).unwrap()
+}
+
+fn bits(values: &[f64]) -> Vec<u64> {
+    values.iter().map(|v| v.to_bits()).collect()
+}
+
+// Samples `from..to`: one speed (the cached-weight path) before 250, a speed that changes every
+// seven samples after it, so the intervals carry their own convective ages.
+fn drive(kernel: &mut ForcedJetKernel, from: usize, to: usize) -> Vec<(u64, u64)> {
+    (from..to).map(|n| {
+        let bulk = if n < 250 { 12.0 } else { 12.0 + 0.5 * ((n / 7) % 3) as f64 };
+        let (known, gain) = kernel.prepare(bulk).unwrap().unwrap();
+        kernel.push(input(n));
+        (known.to_bits(), gain.to_bits())
+    }).collect()
+}
+
+#[test]
+fn g0_a_track_held_at_the_card_length_changes_no_bit() {
+    let mut plain = kernel_at(CARD_LENGTH_M);
+    let mut held = kernel_at(CARD_LENGTH_M);
+    held.span_jet_lengths(CARD_LENGTH_M, CARD_LENGTH_M).unwrap();
+    assert_eq!(held.jet_length_span_m(), Some((CARD_LENGTH_M, CARD_LENGTH_M)));
+    assert_eq!(held.jet_length_m().to_bits(), CARD_LENGTH_M.to_bits());
+    assert_eq!(bits(held.step.values()), bits(plain.step.values()));
+    held.set_jet_length(CARD_LENGTH_M).unwrap();
+    assert_eq!(drive(&mut held, 0, 400), drive(&mut plain, 0, 400));
+}
+
+#[test]
+fn g1_a_parallel_span_read_at_any_length_is_the_kernel_built_there_bit_for_bit() {
+    for length in [NEAR_LENGTH_M, 0.0023, FAR_LENGTH_M] {
+        let mut spanned = kernel_at(CARD_LENGTH_M);
+        spanned.span_jet_lengths(NEAR_LENGTH_M, FAR_LENGTH_M).unwrap();
+        assert_eq!(spanned.jet_length_m().to_bits(), CARD_LENGTH_M.to_bits(), "read at the card's length inside");
+        spanned.set_jet_length(length).unwrap();
+        let mut built = kernel_at(length);
+        assert_eq!(bits(spanned.step.values()), bits(built.step.values()), "{length}");
+        assert_eq!(spanned.step.station().to_bits(), built.step.station().to_bits());
+        assert_eq!(spanned.ring.len(), built.ring.len());
+        assert_eq!(drive(&mut spanned, 0, 400), drive(&mut built, 0, 400), "{length}");
+    }
+}
+
+#[test]
+fn g1_a_length_step_reads_the_same_retained_history_at_the_new_station() {
+    let mut moved = kernel_at(CARD_LENGTH_M);
+    moved.span_jet_lengths(NEAR_LENGTH_M, FAR_LENGTH_M).unwrap();
+    moved.set_jet_length(NEAR_LENGTH_M).unwrap();
+    let mut short = kernel_at(NEAR_LENGTH_M);
+    let mut long = kernel_at(FAR_LENGTH_M);
+    // Before the step the moved jet is the short one; the step publishes nothing by itself.
+    assert_eq!(drive(&mut moved, 0, 200), drive(&mut short, 0, 200));
+    let _ = drive(&mut long, 0, 200);
+    let used = moved.used;
+    moved.set_jet_length(FAR_LENGTH_M).unwrap();
+    assert_eq!(moved.used, used);
+    // After it, the same history reads at the long station: on the cached speed, then a varied one.
+    assert_eq!(drive(&mut moved, 200, 500), drive(&mut long, 200, 500));
+}
+
+#[test]
+fn g1_a_spread_span_is_the_kernel_built_at_its_far_end_bit_for_bit() {
+    let mut spanned = spread_at(CARD_LENGTH_M);
+    spanned.span_jet_lengths(NEAR_LENGTH_M, FAR_LENGTH_M).unwrap();
+    spanned.set_jet_length(FAR_LENGTH_M).unwrap();
+    let mut built = spread_at(FAR_LENGTH_M);
+    assert_eq!(bits(spanned.step.values()), bits(built.step.values()));
+    assert_eq!(spanned.station_spread(), built.station_spread());
+    assert_eq!(drive(&mut spanned, 0, 400), drive(&mut built, 0, 400));
+    // Short of it the base spreads out to the far end: a stated, small difference.
+    spanned.set_jet_length(NEAR_LENGTH_M).unwrap();
+    let near = spread_at(NEAR_LENGTH_M);
+    assert_ne!(bits(spanned.step.values()), bits(near.step.values()));
+    let rel = (spanned.step.held_gain() - near.step.held_gain()).abs() / near.step.held_gain().abs();
+    assert!(rel < 1e-2, "{rel:e}");
+}
+
+#[test]
+fn g0_lengths_off_a_prepared_span_are_refused_and_change_nothing() {
+    let mut cold = kernel_at(CARD_LENGTH_M);
+    assert!(cold.set_jet_length(NEAR_LENGTH_M).is_err(), "no span");
+    assert!(cold.set_jet_length(CARD_LENGTH_M).is_ok(), "its own length is no change");
+    for (near, far) in [(FAR_LENGTH_M, NEAR_LENGTH_M), (0.0, FAR_LENGTH_M), (-NEAR_LENGTH_M, FAR_LENGTH_M),
+        (f64::NAN, FAR_LENGTH_M), (NEAR_LENGTH_M, f64::INFINITY)] {
+        assert!(cold.span_jet_lengths(near, far).is_err(), "({near}, {far})");
+        assert_eq!(cold.jet_length_span_m(), None);
+    }
+    let mut warm = kernel_at(CARD_LENGTH_M);
+    let _ = drive(&mut warm, 0, 1);
+    assert!(warm.span_jet_lengths(NEAR_LENGTH_M, FAR_LENGTH_M).is_err(), "a jet that has accepted an interval");
+    cold.span_jet_lengths(NEAR_LENGTH_M, FAR_LENGTH_M).unwrap();
+    assert!(cold.span_jet_lengths(NEAR_LENGTH_M, FAR_LENGTH_M).is_err(), "one preparation");
+    let values = bits(cold.step.values());
+    for length in [NEAR_LENGTH_M * 0.999, FAR_LENGTH_M * 1.001, f64::NAN, -CARD_LENGTH_M] {
+        assert!(cold.set_jet_length(length).is_err(), "{length}");
+        assert_eq!(cold.jet_length_m().to_bits(), CARD_LENGTH_M.to_bits());
+        assert_eq!(bits(cold.step.values()), values);
+    }
+}

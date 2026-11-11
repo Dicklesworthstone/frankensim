@@ -59,6 +59,23 @@
 //!   would need `phi` 9.3 and 8.1 deg from those traverses. Eq. 26 prints the flux integral of
 //!   eq. 24 with a factor 1/2 that eq. 24 does not give; no width enters through it here.
 //!
+//! A jet-length track (`GestureTarget::JetLength`, the player's lips setting `W`) moves the
+//! station `X = W / b0` during the note ([`ForcedJetKernel::span_jet_lengths`],
+//! [`ForcedJetKernel::set_jet_length`]). The labium does not react back on the jet, so moving it
+//! reads the same free jet at another station: every retained interval is read at the current
+//! station, exactly. ONE integration records every grid node of the track's span, and each new
+//! length rebuilds the response there by the solver's own interpolation. Three stated
+//! differences:
+//! - Under a named spreading law the base is held past the span's far end, so a station short of
+//!   it reads a base that goes on spreading out to the far end, where a card whose flue row says
+//!   that length holds it from its own station on.
+//! - A length step at a control tick steps the labium displacement and the cut at that sample, and
+//!   the step enters the source derivative `(Q_cut - Q_prev) / dt` as a jet-angle step does.
+//! - The jet's exit is where the lips move it; its own motion against the jet, `(dW/dt) / U0`, is
+//!   neglected.
+//!
+//! A track held at the card's own length builds no span and leaves every bit unchanged.
+//!
 //! Not claimed:
 //! - The base jet's own spreading over the cut-up, unless `jet_spreading` names a law; then the
 //!   base's transverse velocity and streamwise derivatives (the quasi-parallel truncation), and
@@ -76,7 +93,7 @@ use std::sync::{Mutex, PoisonError};
 use fs_aeroac::AeroacError;
 use fs_aeroac::forced_jet::{
     BaseSpreading, ExitReceptivity, FRONT_MARGIN, ForcedJetResolution, JetStepResponse,
-    bickley_step_response_with_base,
+    JetStepSpan, bickley_step_response_with_base, bickley_step_span,
 };
 use fs_math::det;
 
@@ -250,6 +267,21 @@ pub const JET_CUT_WIDTH_STATION_SOURCE: &str = "one b, the jet's own sech^2 widt
      Fletcher and Douglas 1980 eq. 1-2, Verge 1995 eq. 4.25, Auvray et al. 2014; the default half the flue height is a volume match, 2 b H U = U h H, \
      in none of these prints. Same slope at the crossing, so only the saturation differs";
 
+/// The jet-length track's law, as the render sidecar prints it (MB 23643).
+pub const JET_LENGTH_LAW: &str = "W(t) moves the station X = W / b0 inside the span the track takes: ONE integration over the span, \
+     every grid node recorded, and each length's response rebuilt there by the single station's own interpolation; the cut takes \
+     that station's width and swing, the swing limit the new lip, the tilted offset y0 = offset - W tan(theta)";
+
+/// What a jet-length track holds at the flue row's own values.
+pub const JET_LENGTH_HELD: &str = "the mouth: S_m = H l of the flue row, its contraction and the forcing-speed check; any embouchure window as declared";
+
+/// The three differences a jet-length track states, in the order of the module text.
+pub const JET_LENGTH_STATED: [&str; 3] = [
+    "under a named spreading law the base is held past the span's far end, so a length short of it reads a base that spreads out to the far end",
+    "a length step at a control tick enters the source derivative (Q_cut - Q_prev) / dt as a jet-angle step does",
+    "the exit's own motion against the jet, (dW/dt) / U0, is neglected",
+];
+
 /// Optional card row `jet_spreading LAW` after `jet_response forced-bickley ...`: the base jet's
 /// own streamwise development over the cut-up (module documentation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -320,6 +352,7 @@ pub struct ForcedJetKernel {
     step: JetStepResponse,
     half_width_m: f64,
     centre_over_bulk: f64,
+    reference_bulk_m_s: f64,
     reynolds: f64,
     dt: f64,
     ring: Vec<JetInterval>,
@@ -337,6 +370,44 @@ pub struct ForcedJetKernel {
     weights: Vec<f64>,
     weights_bulk_bits: u64,
     current: (f64, f64),
+    // The jet length `W` [m] the response is read at: the card's cut-up until a track moves it.
+    jet_length_m: f64,
+    // A jet-length track's span [m], and the response recorded over it when the span is not one
+    // length.
+    track_span_m: Option<(f64, f64)>,
+    span: Option<JetStepSpan>,
+}
+
+/// The integration's resolution for a response read at `station` [b0], or a span whose far end it
+/// is: the box reaches the window or the station, and a spread base widens the band.
+fn resolution_at(spec: ForcedJetSpec, spreading: JetSpreadingLaw, station: f64, reynolds: f64)
+    -> Result<ForcedJetResolution, &'static str>
+{
+    let reach = (spec.window + FRONT_MARGIN).max(station + FRONT_MARGIN);
+    let cells = ((reach / spec.spacing).ceil() as usize)
+        .max(32)
+        .next_power_of_two();
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(MAX_WORKERS);
+    let half_height = if spreading == JetSpreadingLaw::None {
+        BAND_HALF_HEIGHT
+    } else {
+        let widest = spreading.base().width_ratio(station, reynolds);
+        if !widest.is_finite() {
+            return Err("jet_spreading: the station's half-width is not finite");
+        }
+        (BAND_HALF_HEIGHT * widest / spec.spacing).ceil() * spec.spacing
+    };
+    Ok(ForcedJetResolution {
+        spacing: spec.spacing,
+        streamwise_cells: cells,
+        half_height,
+        window: spec.window,
+        courant: COURANT,
+        reynolds,
+        workers,
+    })
 }
 
 fn refusal(error: AeroacError) -> &'static str {
@@ -439,34 +510,9 @@ impl ForcedJetKernel {
         let station = cut_up_m / half_width_m;
         let reynolds =
             centre_over_bulk * reference_bulk_m_s * half_width_m / kinematic_viscosity_m2_s;
-        let reach = (spec.window + FRONT_MARGIN).max(station + FRONT_MARGIN);
-        let cells = ((reach / spec.spacing).ceil() as usize)
-            .max(32)
-            .next_power_of_two();
-        let workers = std::thread::available_parallelism()
-            .map_or(1, std::num::NonZeroUsize::get)
-            .min(MAX_WORKERS);
-        let base = spreading.base();
-        let half_height = if spreading == JetSpreadingLaw::None {
-            BAND_HALF_HEIGHT
-        } else {
-            let widest = base.width_ratio(station, reynolds);
-            if !widest.is_finite() {
-                return Err("jet_spreading: the station's half-width is not finite");
-            }
-            (BAND_HALF_HEIGHT * widest / spec.spacing).ceil() * spec.spacing
-        };
-        let resolution = ForcedJetResolution {
-            spacing: spec.spacing,
-            streamwise_cells: cells,
-            half_height,
-            window: spec.window,
-            courant: COURANT,
-            reynolds,
-            workers,
-        };
-        let step = integrated(station, &resolution, exit_law.receptivity(width_ratio), base)
-            .map_err(refusal)?;
+        let resolution = resolution_at(spec, spreading, station, reynolds)?;
+        let step = integrated(station, &resolution, exit_law.receptivity(width_ratio),
+            spreading.base()).map_err(refusal)?;
         let slowest = step
             .hat_weights(
                 centre_over_bulk * minimum_bulk_m_s,
@@ -485,6 +531,7 @@ impl ForcedJetKernel {
             step,
             half_width_m,
             centre_over_bulk,
+            reference_bulk_m_s,
             reynolds,
             dt: sample_period_s,
             ring: vec![JetInterval::default(); slowest],
@@ -500,7 +547,87 @@ impl ForcedJetKernel {
             weights: Vec::new(),
             weights_bulk_bits: 0,
             current: (0.0, 0.0),
+            jet_length_m: cut_up_m,
+            track_span_m: None,
+            span: None,
         })
+    }
+
+    /// The jet length `W` [m] the response is read at now.
+    #[must_use]
+    pub const fn jet_length_m(&self) -> f64 {
+        self.jet_length_m
+    }
+
+    /// The span [m] of the jet-length track this kernel was prepared for, if any.
+    #[must_use]
+    pub const fn jet_length_span_m(&self) -> Option<(f64, f64)> {
+        self.track_span_m
+    }
+
+    /// Prepare a cold kernel for a jet-length track whose lengths lie in `[near_m, far_m]`. A track
+    /// held at one length integrates the single-station response there (nothing changes when that
+    /// is the current length); otherwise ONE integration over the span, with the base held past
+    /// `far_m`, serves every length inside it, and the response is read at the current length when
+    /// it lies in the span, at `near_m` otherwise.
+    ///
+    /// # Errors
+    /// A kernel that has accepted an interval or is already prepared, lengths that are not finite,
+    /// positive and ordered, or the integrator's refusal of the span.
+    pub fn span_jet_lengths(&mut self, near_m: f64, far_m: f64) -> Result<(), &'static str> {
+        if self.used != 0 || self.track_span_m.is_some() {
+            return Err("jet-length span requires one preparation of a cold forced jet");
+        }
+        if !(near_m.is_finite() && far_m.is_finite() && near_m > 0.0 && near_m <= far_m) {
+            return Err("jet-length span must be finite, positive and ordered");
+        }
+        let exit = self.step.exit();
+        let reynolds = self.reynolds;
+        if near_m.to_bits() == far_m.to_bits() {
+            if near_m.to_bits() != self.jet_length_m.to_bits() {
+                let station = near_m / self.half_width_m;
+                let resolution = resolution_at(self.spec, self.spreading, station, reynolds)?;
+                self.step = integrated(station, &resolution, exit, self.spreading.base())
+                    .map_err(refusal)?;
+                self.jet_length_m = near_m;
+            }
+        } else {
+            let (near, far) = (near_m / self.half_width_m, far_m / self.half_width_m);
+            let resolution = resolution_at(self.spec, self.spreading, far, reynolds)?;
+            let span = bickley_step_span(near, far, &resolution, exit, self.spreading.base())
+                .map_err(refusal)?;
+            let length = if (near_m..=far_m).contains(&self.jet_length_m) { self.jet_length_m } else { near_m };
+            self.step = span.response_at(length / self.half_width_m).map_err(refusal)?;
+            self.jet_length_m = length;
+            self.span = Some(span);
+        }
+        self.weights.clear();
+        self.weights_bulk_bits = 0;
+        self.track_span_m = Some((near_m, far_m));
+        Ok(())
+    }
+
+    /// Read the response at jet length `length_m` [m] from the next prepared sample on. The
+    /// retained intervals keep their convective ages; the labium reads them at the new station.
+    ///
+    /// # Errors
+    /// A length outside the prepared span, or any change of length without a span.
+    pub fn set_jet_length(&mut self, length_m: f64) -> Result<(), &'static str> {
+        if length_m.to_bits() == self.jet_length_m.to_bits() {
+            return Ok(());
+        }
+        let Some(span) = &self.span else {
+            return Err("jet length moves only inside the span its track prepared");
+        };
+        let (near_m, far_m) = self.track_span_m.expect("a span has its lengths");
+        if !(near_m..=far_m).contains(&length_m) {
+            return Err("jet length moves only inside the span its track prepared");
+        }
+        self.step = span.response_at(length_m / self.half_width_m).map_err(refusal)?;
+        self.jet_length_m = length_m;
+        self.weights.clear();
+        self.weights_bulk_bits = 0;
+        Ok(())
     }
 
     /// The card row this response was integrated from.
@@ -547,6 +674,12 @@ impl ForcedJetKernel {
     #[must_use]
     pub const fn centre_over_bulk(&self) -> f64 {
         self.centre_over_bulk
+    }
+
+    /// The bulk speed [m/s] at the held pressure, which sets `U0` and the Reynolds number.
+    #[must_use]
+    pub const fn reference_bulk_m_s(&self) -> f64 {
+        self.reference_bulk_m_s
     }
 
     /// `U0 b / nu` the response was integrated at.

@@ -200,7 +200,7 @@ fn closing_force_refuses_wrong_dimensions_and_tension_payloads() {
 #[test]
 fn legacy_targets_resolve_as_aliases() {
     let (d, cases) = fixture::fixture();
-    // All sixteen variants (and both declared hole indices) are tested alone:
+    // All seventeen variants (and both declared hole indices) are tested alone:
     // all alias addresses and values are independent fixture declarations.
     for (alias, path, value) in &cases {
         let v1 =

@@ -133,6 +133,20 @@ impl JetSwingLimit {
         })
     }
 
+    /// Move the lip: a jet-length track's spread width `W` at the new station and its cut-up `X`.
+    /// The half cycles carry across, and the next gain is set from these at the next sign change.
+    ///
+    /// # Errors
+    /// Either not finite and positive; the limit is then unchanged.
+    pub fn set_lip(&mut self, spread_width_m: f64, cut_up_m: f64) -> Result<(), &'static str> {
+        if ![spread_width_m, cut_up_m].iter().all(|x| x.is_finite() && *x > 0.0) {
+            return Err("jet swing limit needs a finite positive spread width and cut-up");
+        }
+        self.spread_width_m = spread_width_m;
+        self.cut_up_m = cut_up_m;
+        Ok(())
+    }
+
     /// The spread width `W` at the lip [m].
     #[must_use]
     pub const fn spread_width_m(&self) -> f64 {
@@ -328,6 +342,31 @@ mod tests {
         let tail = &gains[gains.len() - 2 * 1440..];
         assert!(tail.iter().all(|g| *g == tail[0]), "the gain alternates");
         assert!(tail[0] < 1.0, "the limit did not bite: {}", tail[0]);
+    }
+
+    // A moved lip is a limit built there: the same envelope, and the next gain from the new lip
+    // over the half cycles the old one saw.
+    #[test]
+    fn a_moved_lip_reads_the_new_width_and_cut_up_and_keeps_its_half_cycles() {
+        let (w2, x2) = (1.53e-3, 6.46e-3);
+        let mut moved = limit();
+        drive(&mut moved, 10e-3, 10e-3, 2);
+        let held = moved.clone();
+        moved.set_lip(w2, x2).unwrap();
+        assert_eq!((moved.spread_width_m(), moved.cut_up_m()), (w2, x2));
+        let built = JetSwingLimit::new(w2, x2, DT).unwrap();
+        for (y, v) in [(10e-3, 2.0), (10e-3, 5.0), (w2, 0.5), (10e-3, 0.0)] {
+            assert_eq!(moved.envelope_m(y, v, OMEGA_500), built.envelope_m(y, v, OMEGA_500));
+        }
+        assert_eq!(moved.gain(), held.gain(), "the gain holds until the next sign change");
+        let mut rebuilt = JetSwingLimit { spread_width_m: w2, cut_up_m: x2, ..held };
+        assert_eq!(drive(&mut moved, 10e-3, 10e-3, 2), drive(&mut rebuilt, 10e-3, 10e-3, 2));
+        for (w, x) in [(0.0, x2), (w2, f64::NAN), (f64::INFINITY, x2), (w2, -x2)] {
+            assert!(moved.clone().set_lip(w, x).is_err(), "{w} {x}");
+        }
+        let before = moved.clone();
+        assert!(moved.set_lip(0.0, x2).is_err());
+        assert_eq!(moved, before, "a refused lip leaves the limit unchanged");
     }
 
     #[test]

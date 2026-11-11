@@ -2466,8 +2466,27 @@ enters the same source-pressure derivative and mouth-work balance. Finite
 direction and transverse-coordinate admission precede held-input mutation.
 Acoustic, convection, windway, material-wall and radiation histories persist.
 
-`FlueOutletPerformance` accepts one blowing-pressure track and an optional
-typed jet-angle track. The original pressure compiler and `GestureSchedule`
+`FlueControl::SetJetLength` (`GestureTarget::JetLength`, value `LengthM`, or
+the source entity's `jet_length` path) moves a lip jet's exit to labium
+distance `W`: admitted only by `FlueVoice::admit_jet_length` on the forced jet,
+which the file route calls only after a `window embouchure` row; a wall-cut
+window, no window, and the Nolle, Auvray and island-chain jet laws refuse it by
+name. `FlueOutletPerformance` prepares the forced jet ONCE over the lengths the
+compiled track takes (`prepare_jet_length_span`, one fs-aeroac
+`bickley_step_span` integration); each control reads the response at
+`X = W / b0` from it, with every retained interval at its own convective age.
+The cut takes that station's width and swing, `jet_swing_limit` its new lip
+(`JetSwingLimit::set_lip`, half-cycles kept) and the tilted offset
+`labium_offset - W tan(angle)`. The flue row's `S_m = H l`, its contraction,
+its forcing-speed check and any embouchure window stay as declared. Stated:
+under a spreading law the base spreads out to the span's far end; a length step
+enters the source derivative as an angle step does; the exit's own motion
+`(dW/dt) / U0` is neglected, and the sidecar's `jet_length` record prints the
+track's largest `|dW/dt|` and its ratio to `U0`. Without a track, and with a
+track held at the flue row's cut-up, every bit is unchanged.
+
+`FlueOutletPerformance` accepts one blowing-pressure track, an optional
+typed jet-angle track and, on an admitted lip jet, an optional jet-length track. The original pressure compiler and `GestureSchedule`
 sampler share exact ceiling-rounded mechanical timestamps; both controls apply
 before that sample. Whole-phrase admission bounds every track/tick assignment
 and source-sampling work before stepping. The existing multirate observer

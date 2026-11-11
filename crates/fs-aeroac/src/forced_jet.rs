@@ -627,16 +627,18 @@ impl ForcedJet {
         }
         let (shift, _, carried) = self.exit.exit_values(self.vac, self.xi);
         let i = s.floor() as usize;
-        let f = s - i as f64;
+        let w = cubic_weights(s - i as f64);
         let val = |n: usize| if n == 0 { -shift } else { self.eta[n - 1] };
-        let w = [
-            -f * (f - 1.0) * (f - 2.0) / 6.0,
-            (f + 1.0) * (f - 1.0) * (f - 2.0) / 2.0,
-            -(f + 1.0) * f * (f - 2.0) / 2.0,
-            (f + 1.0) * f * (f - 1.0) / 6.0,
-        ];
         let dev = w[0] * val(i - 1) + w[1] * val(i) + w[2] * val(i + 1) + w[3] * val(i + 2);
         Ok(carried + dev)
+    }
+
+    /// Append the node values `displacement_at` reads, nodes `first..first + count` (node 0 is
+    /// the exit's `-shift`, node `n` the deviation `eta[n - 1]`), and the carried displacement.
+    fn record_nodes(&self, first: usize, count: usize, nodes: &mut Vec<f64>, carried: &mut Vec<f64>) {
+        let (shift, _, carry) = self.exit.exit_values(self.vac, self.xi);
+        nodes.extend((first..first + count).map(|n| if n == 0 { -shift } else { self.eta[n - 1] }));
+        carried.push(carry);
     }
 
     /// Advance one SSP-RK3 step of `courant * spacing`.
@@ -806,6 +808,17 @@ impl ForcedJet {
     }
 }
 
+/// Cubic Lagrange weights at fraction `f` of the cell from node `i` to `i + 1`, on nodes
+/// `i - 1 ..= i + 2`.
+fn cubic_weights(f: f64) -> [f64; 4] {
+    [
+        -f * (f - 1.0) * (f - 2.0) / 6.0,
+        (f + 1.0) * (f - 1.0) * (f - 2.0) / 2.0,
+        -(f + 1.0) * f * (f - 2.0) / 2.0,
+        (f + 1.0) * f * (f - 1.0) / 6.0,
+    ]
+}
+
 /// Step response `s(t)` of the centreline displacement at one station to a
 /// unit transverse velocity switched on at `t = 0` [b per U0, at times in b/U0].
 #[derive(Debug, Clone)]
@@ -872,6 +885,133 @@ pub fn bickley_step_response_with_base(
         exit,
         spreading,
     })
+}
+
+/// The forced jet's unit-step response at every grid node of a station span `[near, far]` [b0],
+/// from ONE integration under the named exit and base, the base held past `far` (a jet whose length
+/// moves inside the span: the labium reads the same free jet at another station, because the
+/// labium does not react back on the jet). [`JetStepSpan::response_at`] rebuilds the response at
+/// any station of the span by [`ForcedJet::displacement_at`]'s own arithmetic, so a span of one
+/// station is [`bickley_step_response_with_base`] at that station, bit for bit.
+///
+/// A parallel base never reads the station, so there every reading of the span equals the
+/// single-station integration at that station bit for bit. Under a spread base a station short of
+/// `far` reads a base that goes on spreading out to `far`, where the single-station integration
+/// holds it from that station on: the span's one stated difference.
+#[derive(Debug, Clone)]
+pub struct JetStepSpan {
+    near: f64,
+    far: f64,
+    first_node: usize,
+    nodes: usize,
+    time_step: f64,
+    // `nodes` node values per record after the first (record 0 is the rest state).
+    node_values: Vec<f64>,
+    carried: Vec<f64>,
+    resolution: ForcedJetResolution,
+    exit: ExitReceptivity,
+    spreading: BaseSpreading,
+}
+
+/// Integrate the forced jet's unit-step response over the station span `[near, far]` [b0] under the
+/// named exit receptivity and base development, the base held past `far`.
+///
+/// # Errors
+/// Stations that are not finite, positive and ordered, or outside the interpolation range; every
+/// refusal of [`bickley_step_response_with_base`].
+pub fn bickley_step_span(
+    near: f64,
+    far: f64,
+    resolution: &ForcedJetResolution,
+    exit: ExitReceptivity,
+    spreading: BaseSpreading,
+) -> Result<JetStepSpan, AeroacError> {
+    if !(near.is_finite() && far.is_finite() && near > 0.0 && near <= far) {
+        return Err(AeroacError::InvalidParameter {
+            what: "forced jet span: stations must be finite, positive and ordered",
+        });
+    }
+    let mut jet = ForcedJet::with_base(*resolution, exit, spreading, far)?;
+    jet.displacement_at(near)?;
+    jet.displacement_at(far)?;
+    let h = resolution.spacing;
+    let first_node = (near / h).floor() as usize - 1;
+    let nodes = (far / h).floor() as usize + 2 - first_node + 1;
+    let dt = resolution.time_step();
+    let steps = (resolution.window / dt).ceil() as usize;
+    let mut node_values = Vec::with_capacity(steps * nodes);
+    let mut carried = Vec::with_capacity(steps);
+    let forcing = |t: f64| (1.0, t);
+    for _ in 0..steps {
+        jet.step(&forcing)?;
+        jet.record_nodes(first_node, nodes, &mut node_values, &mut carried);
+    }
+    Ok(JetStepSpan {
+        near,
+        far,
+        first_node,
+        nodes,
+        time_step: dt,
+        node_values,
+        carried,
+        resolution: *resolution,
+        exit,
+        spreading,
+    })
+}
+
+impl JetStepSpan {
+    /// The span's near and far stations [b0].
+    #[must_use]
+    pub fn stations(&self) -> (f64, f64) {
+        (self.near, self.far)
+    }
+
+    /// The resolution the span was integrated at.
+    #[must_use]
+    pub fn resolution(&self) -> &ForcedJetResolution {
+        &self.resolution
+    }
+
+    /// The step response at `station` [b0], rebuilt from the recorded nodes.
+    ///
+    /// # Errors
+    /// A station outside the span.
+    pub fn response_at(&self, station: f64) -> Result<JetStepResponse, AeroacError> {
+        if !(station >= self.near && station <= self.far) {
+            return Err(AeroacError::InvalidParameter {
+                what: "forced jet span: station outside the recorded span",
+            });
+        }
+        let s = station / self.resolution.spacing;
+        let i = s.floor() as usize;
+        let w = cubic_weights(s - i as f64);
+        let at = i - 1 - self.first_node;
+        let mut values = Vec::with_capacity(self.carried.len() + 1);
+        values.push(0.0);
+        for (record, carried) in self.node_values.chunks_exact(self.nodes).zip(&self.carried) {
+            let v = &record[at..at + 4];
+            let dev = w[0] * v[0] + w[1] * v[1] + w[2] * v[2] + w[3] * v[3];
+            values.push(carried + dev);
+        }
+        let dt = self.time_step;
+        let mut integrals = Vec::with_capacity(values.len());
+        let mut acc = 0.0;
+        integrals.push(0.0);
+        for pair in values.windows(2) {
+            acc += 0.5 * dt * (pair[0] + pair[1]);
+            integrals.push(acc);
+        }
+        Ok(JetStepResponse {
+            station,
+            time_step: dt,
+            values,
+            integrals,
+            resolution: self.resolution,
+            exit: self.exit,
+            spreading: self.spreading,
+        })
+    }
 }
 
 /// `(1 - e^-x) / x` and `(1 - (1 + x) e^-x) / x^2` for imaginary `x = i w h`.

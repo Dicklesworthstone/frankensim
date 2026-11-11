@@ -107,6 +107,9 @@ pub enum GestureTarget {
     JetSpeed,
     /// Flue jet angle (value: `AngleRad`).
     JetAngle,
+    /// Flue jet length, the exit to labium distance `W` the player sets with
+    /// the lips (value: `LengthM`, dimension L).
+    JetLength,
 }
 
 impl GestureTarget {
@@ -122,7 +125,8 @@ impl GestureTarget {
             (
                 GestureTarget::ValveInsertedLength { .. }
                     | GestureTarget::SlideLength
-                    | GestureTarget::RestAperture,
+                    | GestureTarget::RestAperture
+                    | GestureTarget::JetLength,
                 GestureValue::LengthM(_)
             ) | (
                 GestureTarget::ToneHoleSigma { .. }
@@ -897,6 +901,7 @@ fn encode_target(t: &GestureTarget) -> String {
         GestureTarget::RestAperture => "rest-aperture".to_string(),
         GestureTarget::JetSpeed => "jet-speed".to_string(),
         GestureTarget::JetAngle => "jet-angle".to_string(),
+        GestureTarget::JetLength => "jet-length".to_string(),
     }
 }
 
@@ -935,6 +940,7 @@ fn decode_target(s: &str) -> Option<GestureTarget> {
         "rest-aperture" => GestureTarget::RestAperture,
         "jet-speed" => GestureTarget::JetSpeed,
         "jet-angle" => GestureTarget::JetAngle,
+        "jet-length" => GestureTarget::JetLength,
         _ => return None,
     })
 }

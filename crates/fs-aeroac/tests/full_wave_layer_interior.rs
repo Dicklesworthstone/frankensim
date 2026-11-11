@@ -133,10 +133,10 @@ fn image_series(rho: [f64; 3], c: f64, hz: f64, a: f64, h: f64, receiver: [f64; 
             let (sin, cos) = (k * distance).sin_cos();
             let pressure =
                 C64::new(sin, -cos).scale(omega * rho[0] * t12 * weight / (4.0 * PI * distance));
-            total[0] += pressure;
+            total[0] = total[0] + pressure;
             let radial = pressure * C64::new(1.0, 1.0 / (k * distance)).scale(1.0 / (rho[1] * c));
             for axis in 0..3 {
-                total[axis + 1] += radial.scale(delta[axis] / distance);
+                total[axis + 1] = total[axis + 1] + radial.scale(delta[axis] / distance);
             }
         }
         return_weight *= r21 * r23;
@@ -279,8 +279,9 @@ fn interior_velocity_obeys_receiving_momentum_and_rotates_with_original_geometry
             .evaluate(C64::ONE)
             .unwrap();
         let derivative = (after.pressure_pa - before.pressure_pa).scale(0.5 / step);
-        divergence += (after.particle_velocity_m_s[axis] - before.particle_velocity_m_s[axis])
-            .scale(0.5 / step);
+        divergence = divergence
+            + (after.particle_velocity_m_s[axis] - before.particle_velocity_m_s[axis])
+                .scale(0.5 / step);
         close(
             derivative,
             original.particle_velocity_m_s[axis]

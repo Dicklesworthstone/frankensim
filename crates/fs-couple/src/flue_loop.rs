@@ -152,6 +152,11 @@ pub mod airway;
 /// never a scheduling artifact).
 pub const FLUE_SEED_KERNEL: u32 = 0x666c_7565; // "flue"
 
+/// The refusal of a jet-length track on any jet the lips do not set: only the forced jet on a
+/// window embouchure is a lip jet.
+pub const JET_LENGTH_NEEDS_LIP_JET: &str =
+    "a jet-length track needs a lip jet: the forced jet on a window embouchure";
+
 /// The opt-in breath noise of a flue jet (card row `jet_noise SEED GAIN ST_LO ST_HI RE_ON`): a dipole pressure jump
 /// in series in the mouth, uncorrelated with the acoustic field, of rms `gain * rho U_j^2 / 2 = gain * P_f` INSIDE the band
 /// `St_h = f h / U_j` in `[strouhal_lo, strouhal_hi]`, `h` the flue height, and zero while `Re_h = U_j h / nu` is below
@@ -618,6 +623,15 @@ pub enum FlueControl {
     /// The existing geometric cut law changes the injected flow; all acoustic,
     /// convection and fluid-momentum histories remain live.
     SetJetAngle(f64),
+    /// Prescribed jet length `W` [m], the exit to labium distance a flutist's lips set, on a lip
+    /// jet ([`FlueVoice::admit_jet_length`]) whose forced jet was prepared for the track's span
+    /// ([`FlueVoice::prepare_jet_length_span`]). The forced jet reads its retained intervals at
+    /// the new station, the cut takes that station's width and swing, the swing limit the new lip
+    /// and the tilted jet's offset the new length. The mouth (the flue row's `S_m`, its contraction
+    /// and the forcing-speed check) and any embouchure window stay as declared. Stated: under a
+    /// spreading law the base spreads out to the span's far end; a length step enters the source
+    /// derivative as an angle step does; the exit's own motion, `(dW/dt) / U0`, is neglected.
+    SetJetLength(f64),
     /// Nonnegative physical closing force at an explicitly bound graph endpoint.
     /// The existing mechanical/contact state evolves on subsequent samples.
     SetBoundaryClosingForce {
@@ -734,6 +748,8 @@ pub struct FlueVoice {
     jet_swing_limit: Option<jet_swing_limit::JetSwingLimit>,
     // Opt-in `jet_cut_width station`: the cut takes the forced jet's own width and the printed swing.
     jet_cut_width_station: bool,
+    // Whether a jet-length track may move the jet: a lip jet (`admit_jet_length`).
+    jet_length_admitted: bool,
     viscous_windway: Option<crate::bernoulli_aperture::viscous::ViscousSlit>,
     // Shah's developing-flow law and its state at the held note's pressure.
     developing_windway: Option<(DevelopingSlit, DevelopingSlitState)>,
@@ -894,6 +910,7 @@ impl FlueVoice {
             jet_forcing_area_m2: s_m,
             jet_swing_limit: None,
             jet_cut_width_station: false,
+            jet_length_admitted: false,
             viscous_windway: None,
             developing_windway: None,
             unsteady_windway: None,
@@ -980,6 +997,7 @@ impl FlueVoice {
                 self.validate_jet_angle(angle)?;
                 self.geometry.jet_angle_rad = angle;
             }
+            FlueControl::SetJetLength(length) => self.set_jet_length(length)?,
             FlueControl::SetBoundaryClosingForce { node, force_n } => {
                 self.set_boundary_closing_force(node, force_n)?;
             }
@@ -1001,7 +1019,7 @@ impl FlueVoice {
     /// Nonfinite direction, an angle outside (-pi/2, pi/2), or a geometric
     /// offset that cannot be represented in the jet's transverse coordinate.
     pub fn validate_jet_angle(&self, angle_rad: f64) -> Result<(), FlueError> {
-        let mut geometry = self.geometry;
+        let mut geometry = self.jet_geometry();
         geometry.jet_angle_rad = angle_rad;
         geometry.validate()?;
         if !(geometry.effective_offset_m() / (0.5 * geometry.flue_height_m)).is_finite() {
@@ -1013,6 +1031,117 @@ impl FlueVoice {
     /// Current prescribed direction [rad], including accepted angle controls.
     #[must_use]
     pub const fn jet_angle_rad(&self) -> f64 { self.geometry.jet_angle_rad }
+
+    /// Admit a jet-length track ([`FlueControl::SetJetLength`]) on this cold voice: the caller
+    /// declares a lip jet, a flutist's jet over an embouchure hole, whose length the lips set. The
+    /// file route calls this only after a `window embouchure` row, where the mouth's acoustic
+    /// geometry is the hole's own and not the flue row's cut-up. It needs the forced jet, which
+    /// alone reads its station at run time; the Auvray and Nolle transfers and the unsteady
+    /// windway hold the cut-up in their own laws and exclude the forced jet.
+    ///
+    /// # Errors
+    /// A late attachment or a poisoned voice; the DG bore, whose route prepares no span; any jet
+    /// law other than the forced jet, by name.
+    pub fn admit_jet_length(mut self) -> Result<Self, FlueError> {
+        if self.poisoned || self.samples != 0 {
+            return Err(FlueError::Invalid { what: "jet-length admission requires a cold voice" });
+        }
+        if self.dg().is_some() {
+            return Err(FlueError::Invalid {
+                what: "a jet-length track is refused on the DG bore: its route prepares no span for the forced jet",
+            });
+        }
+        if self.forced.is_none() {
+            let what = if self.nolle.is_some() {
+                "a jet-length track is refused by the Nolle jet transfer: its published law holds the flue row's cut-up"
+            } else if self.auvray.is_some() {
+                "a jet-length track is refused by the Auvray jet drive: its published law holds the flue row's cut-up"
+            } else {
+                "a jet-length track is refused by the island's convection chain: its history holds the flue row's cut-up"
+            };
+            return Err(FlueError::Invalid { what });
+        }
+        self.jet_length_admitted = true;
+        Ok(self)
+    }
+
+    /// Whether a jet-length track may move this voice's jet.
+    #[must_use]
+    pub const fn jet_length_admitted(&self) -> bool { self.jet_length_admitted }
+
+    /// The jet length `W` [m] the jet runs at now: the flue row's cut-up until a track moves it.
+    #[must_use]
+    pub fn jet_length_m(&self) -> f64 {
+        self.forced.as_ref().map_or(self.geometry.cut_up_m, forced_jet::ForcedJetKernel::jet_length_m)
+    }
+
+    /// The flue row's geometry at the jet's current length: the tilted jet's offset at the labium.
+    /// The mouth keeps the row's own cut-up.
+    fn jet_geometry(&self) -> FlueGeometry {
+        FlueGeometry { cut_up_m: self.jet_length_m(), ..self.geometry }
+    }
+
+    /// Validate a jet length [m] for this voice: an admitted lip jet, a finite positive length and,
+    /// at the current angle, a tilted offset the transverse coordinate can hold.
+    ///
+    /// # Errors
+    /// No admission, or a length or offset outside those domains.
+    pub fn validate_jet_length(&self, length_m: f64) -> Result<(), FlueError> {
+        if !self.jet_length_admitted {
+            return Err(FlueError::Invalid { what: JET_LENGTH_NEEDS_LIP_JET });
+        }
+        if !(length_m.is_finite() && length_m > 0.0) {
+            return Err(FlueError::Invalid { what: "jet length must be finite and positive" });
+        }
+        // The labium reads the response between grid nodes from the node before it on.
+        if let Some(kernel) = &self.forced {
+            if length_m / kernel.half_width_m() < kernel.spec().spacing {
+                return Err(FlueError::Invalid {
+                    what: "jet length is shorter than one grid cell of the forced jet's integration",
+                });
+            }
+        }
+        let geometry = FlueGeometry { cut_up_m: length_m, ..self.geometry };
+        if !(geometry.effective_offset_m() / (0.5 * geometry.flue_height_m)).is_finite() {
+            return Err(FlueError::Invalid { what: "jet length exceeds the finite transverse geometry" });
+        }
+        Ok(())
+    }
+
+    /// Prepare the cold voice's forced jet for a jet-length track whose lengths lie in
+    /// `[near_m, far_m]` ([`forced_jet::ForcedJetKernel::span_jet_lengths`]): one integration over
+    /// the span, or none when the track holds the flue row's own length.
+    ///
+    /// # Errors
+    /// A late call, an unadmitted voice, lengths outside the domain, or the kernel's refusal.
+    pub fn prepare_jet_length_span(&mut self, near_m: f64, far_m: f64) -> Result<(), FlueError> {
+        if self.poisoned || self.samples != 0 {
+            return Err(FlueError::Invalid { what: "jet-length span requires a cold voice" });
+        }
+        self.validate_jet_length(near_m)?;
+        self.validate_jet_length(far_m)?;
+        let kernel = self.forced.as_mut().ok_or(FlueError::Invalid { what: JET_LENGTH_NEEDS_LIP_JET })?;
+        kernel.span_jet_lengths(near_m, far_m).map_err(|what| FlueError::Invalid { what })?;
+        self.move_swing_limit_lip()
+    }
+
+    fn set_jet_length(&mut self, length_m: f64) -> Result<(), FlueError> {
+        self.validate_jet_length(length_m)?;
+        let kernel = self.forced.as_mut().ok_or(FlueError::Invalid { what: JET_LENGTH_NEEDS_LIP_JET })?;
+        kernel.set_jet_length(length_m).map_err(|what| FlueError::Invalid { what })?;
+        self.move_swing_limit_lip()
+    }
+
+    // The swing limit's lip follows the forced jet's station: its spread width and length.
+    fn move_swing_limit_lip(&mut self) -> Result<(), FlueError> {
+        if let (Some(limit), Some(jet)) = (&mut self.jet_swing_limit, &self.forced) {
+            let (beta, _) = jet.station_spread()
+                .ok_or(FlueError::Invalid { what: "jet swing limit takes the spread width at the lip: it requires a named jet_spreading law" })?;
+            limit.set_lip(beta * jet.half_width_m(), jet.jet_length_m())
+                .map_err(|what| FlueError::Invalid { what })?;
+        }
+        Ok(())
+    }
 
     /// Accepted jet bulk speed. An unsteady windway retains its velocity field
     /// across pressure controls, including a release to zero blowing pressure.
@@ -1330,11 +1459,12 @@ impl FlueVoice {
             .and_then(|jet| jet.station_spread().map(|(beta, _)| beta * jet.half_width_m())) else {
             return Err(FlueError::Invalid { what: "jet swing limit takes the spread width at the lip: it requires a named jet_spreading law" });
         };
-        let limit = jet_swing_limit::JetSwingLimit::new(width, self.geometry.cut_up_m, self.dt)
+        let length = self.jet_length_m();
+        let limit = jet_swing_limit::JetSwingLimit::new(width, length, self.dt)
             .map_err(|what| FlueError::Invalid { what })?;
         self.island.provenance.push_str(&format!(
             "; jet swing limit: {} (W {width:.4e} m, X {:.4e} m): {}; {}; {}",
-            jet_swing_limit::NAME, self.geometry.cut_up_m, jet_swing_limit::LAW,
+            jet_swing_limit::NAME, length, jet_swing_limit::LAW,
             jet_swing_limit::PRINTED, jet_swing_limit::OURS));
         self.jet_swing_limit = Some(limit);
         Ok(self)
@@ -1754,7 +1884,7 @@ impl FlueVoice {
         if let Some(jet) = &self.auvray {
             return jet.transit_s(self.jet_speed_m_s());
         }
-        self.geometry.cut_up_m / (self.island.convection_ratio * self.card_speed_m_s())
+        self.jet_length_m() / (self.island.convection_ratio * self.card_speed_m_s())
     }
 
     // The law of `transit_s` at one sample's inlet pressure and bulk speed: the opt-in airway's own (module `airway`),
@@ -1767,7 +1897,7 @@ impl FlueVoice {
         if let Some(jet) = &self.auvray {
             return jet.transit_s(bulk_m_s);
         }
-        self.geometry.cut_up_m / (self.island.convection_ratio * self.card_speed_at(pressure_pa, bulk_m_s))
+        self.jet_length_m() / (self.island.convection_ratio * self.card_speed_at(pressure_pa, bulk_m_s))
     }
 
     // Evaluate the original filter, displacement and cut law without advancing
@@ -2129,7 +2259,7 @@ impl FlueVoice {
         // `jet_cut_width station`: the centre speed over bulk of the printed swing `2 b H U`.
         let station_centre = self.forced.as_ref().filter(|_| self.jet_cut_width_station)
             .map(|jet| jet.centre_over_bulk() / jet.station_spread().map_or(1.0, |(_, flux)| flux));
-        let y0 = self.geometry.effective_offset_m();
+        let y0 = self.jet_geometry().effective_offset_m();
         let (l, r) = (self.inertance, self.resistance);
         // The mouth and wave boundary are solved together below. A TMM FIR
         // can reflect instantaneously; a delayed tube graph has r0 exactly zero.

@@ -41,7 +41,7 @@ pub(crate) fn accepts(path: &ParameterPath, value: &GestureValue) -> bool {
         return false;
     }
     match path.parameter.name.as_str() {
-        "inserted_length" | "slide_length" | "rest_aperture" => {
+        "inserted_length" | "slide_length" | "rest_aperture" | "jet_length" => {
             matches!(value, GestureValue::LengthM(_))
         }
         "open_fraction" | "sustain" | "una_corda" | "sostenuto_hold" => {
@@ -154,6 +154,7 @@ pub fn legacy_alias(target: &GestureTarget) -> Option<LegacyAlias> {
         GestureTarget::RestAperture => ("rest_aperture", LENGTH, 0),
         GestureTarget::JetSpeed => ("jet_speed", SPEED, 0),
         GestureTarget::JetAngle => ("jet_angle", Dims::NONE, 0),
+        GestureTarget::JetLength => ("jet_length", LENGTH, 0),
         GestureTarget::Parameter(_) => return None,
     };
     Some(LegacyAlias {

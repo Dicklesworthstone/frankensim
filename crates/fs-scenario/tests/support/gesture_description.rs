@@ -154,6 +154,13 @@ pub fn fixture() -> (AssemblyDescription, Vec<(T, ParameterPath, V)>) {
             Dims::NONE,
             V::AngleRad(-0.2),
         ),
+        (
+            T::JetLength,
+            root,
+            "jet_length",
+            length,
+            V::LengthM(0.006),
+        ),
     ];
     let cases: Vec<_> = specs
         .into_iter()

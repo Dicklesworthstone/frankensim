@@ -1,4 +1,4 @@
-//! Physical pressure, jet direction and closing forces on one mechanical clock.
+//! Physical pressure, jet direction, a lip jet's length and closing forces on one mechanical clock.
 //! All interpolation remains in fs-scenario, including interruptible force ramps.
 use super::{FlueVoice, invalid, source_error};
 use crate::flue_loop::FlueControl;
@@ -12,6 +12,26 @@ use fs_scenario::gesture::{GestureSchedule, GestureTarget};
 pub(in crate::flue_loop) struct ScheduledFlueControl {
     pub(in crate::flue_loop) sample: u64,
     pub(in crate::flue_loop) delta: FlueControl,
+}
+
+/// The scalar tracks after pressure, compiled in this order: angle, length, then each force.
+#[derive(Clone, Copy, Debug)]
+enum Scalar {
+    Angle,
+    Length,
+    Force(usize),
+}
+
+/// The lengths [m] a compiled jet-length track takes, nearest and farthest, if it has one: the
+/// span its forced jet is prepared over before the first sample.
+pub(in crate::flue_loop) fn jet_length_span(controls: &[ScheduledFlueControl]) -> Option<(f64, f64)> {
+    controls.iter().filter_map(|event| match event.delta {
+        FlueControl::SetJetLength(length) => Some(length),
+        _ => None,
+    }).fold(None, |span, length| Some(match span {
+        None => (length, length),
+        Some((near, far)) => (f64::min(near, length), f64::max(far, length)),
+    }))
 }
 
 /// Shared source-control bounds, independent of the physical observation path.
@@ -30,20 +50,24 @@ pub(in crate::flue_loop) fn compile(
 ) -> Result<Vec<ScheduledFlueControl>, GestureCompileError> {
     let tracks = schedule.tracks();
     if !(1..=66).contains(&tracks.len()) {
-        return Err(invalid("flue needs bounded pressure, angle and physical boundary-force tracks"));
+        return Err(invalid("flue needs bounded pressure, angle, length and physical boundary-force tracks"));
     }
     let mut pressure = None;
     let mut angle = None;
+    let mut length = None;
     let mut forces = Vec::new();
     let source_paths = voice.network().and_then(|network| network.source_control_paths());
     for track in tracks {
         match track.target {
             GestureTarget::BlowingPressure if pressure.is_none() => pressure = Some(track),
             GestureTarget::JetAngle if angle.is_none() => angle = Some(track),
+            GestureTarget::JetLength if length.is_none() => length = Some(track),
             GestureTarget::Parameter(ref path) if source_paths.is_some_and(|source| path == &source.pressure)
                 && pressure.is_none() => pressure = Some(track),
             GestureTarget::Parameter(ref path) if source_paths.is_some_and(|source| path == &source.jet_angle)
                 && angle.is_none() => angle = Some(track),
+            GestureTarget::Parameter(ref path) if source_paths.is_some_and(|source| path == &source.jet_length)
+                && length.is_none() => length = Some(track),
             GestureTarget::Parameter(ref path) => {
                 let node = voice.network().and_then(|network| network.boundary_node(path))
                     .ok_or_else(|| invalid("flue parameter track has no bound physical boundary consumer"))?;
@@ -52,7 +76,7 @@ pub(in crate::flue_loop) fn compile(
                 }
                 forces.push((track, node));
             }
-            _ => return Err(invalid("flue tracks must address pressure, optional jet angle or bound closing force")),
+            _ => return Err(invalid("flue tracks must address pressure, optional jet angle, optional jet length or bound closing force")),
         }
     }
     let pressure = pressure.ok_or_else(|| invalid("flue needs an explicitly typed blowing-pressure track"))?;
@@ -100,21 +124,30 @@ pub(in crate::flue_loop) fn compile(
             sample: event.sample, delta: FlueControl::SetBlowingPressure(pressure_pa),
         });
     }
-    let scalar_tracks = angle.into_iter().map(|track| (track, None))
-        .chain(forces.into_iter().map(|(track, node)| (track, Some(node))));
-    for (track, boundary) in scalar_tracks {
+    let scalar_tracks = angle.into_iter().map(|track| (track, Scalar::Angle))
+        .chain(length.into_iter().map(|track| (track, Scalar::Length)))
+        .chain(forces.into_iter().map(|(track, node)| (track, Scalar::Force(node))));
+    for (track, scalar) in scalar_tracks {
         let ticks = u64::try_from(ticks).map_err(|_| invalid("flue control clock exceeds u64"))?;
         let mut previous = None;
         for tick in 0..ticks {
             let value = schedule.sample(&track.id, tick).map_err(GestureCompileError::Gesture)?;
-            let delta = if let Some(node) = boundary {
-                voice.validate_boundary_closing_force(node, value)
-                    .map_err(|e| GestureCompileError::Render(source_error(e)))?;
-                FlueControl::SetBoundaryClosingForce { node, force_n: value }
-            } else {
-                voice.validate_jet_angle(value)
-                    .map_err(|e| GestureCompileError::Render(source_error(e)))?;
-                FlueControl::SetJetAngle(value)
+            let delta = match scalar {
+                Scalar::Force(node) => {
+                    voice.validate_boundary_closing_force(node, value)
+                        .map_err(|e| GestureCompileError::Render(source_error(e)))?;
+                    FlueControl::SetBoundaryClosingForce { node, force_n: value }
+                }
+                Scalar::Angle => {
+                    voice.validate_jet_angle(value)
+                        .map_err(|e| GestureCompileError::Render(source_error(e)))?;
+                    FlueControl::SetJetAngle(value)
+                }
+                Scalar::Length => {
+                    voice.validate_jet_length(value)
+                        .map_err(|e| GestureCompileError::Render(source_error(e)))?;
+                    FlueControl::SetJetLength(value)
+                }
             };
             if previous != Some(value.to_bits()) {
                 let sample = (u128::from(tick) * u128::from(mechanics_rate_hz))
@@ -129,7 +162,7 @@ pub(in crate::flue_loop) fn compile(
         }
     }
     // Stable ordering: all assignments precede the same physical source step;
-    // a force/angle change alone does not advance or reset any participant.
+    // a force/angle/length change alone does not advance or reset any participant.
     controls.sort_by_key(|event| event.sample);
     Ok(controls)
 }

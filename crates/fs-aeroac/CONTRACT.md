@@ -898,6 +898,18 @@ material scaling and domain/representability refusals.
   band narrower than 4 of the held half-widths. NOT CLAIMED: the base's
   transverse velocity and streamwise derivatives, and the jet past the
   station.
+- `forced_jet::{bickley_step_span, JetStepSpan}` — MB 23643, a jet length
+  that moves during a note: ONE integration over stations `[near, far]`,
+  with the base held past `far`, records every grid node the cubic reads
+  from one node before `near` to two past `far`.
+  `JetStepSpan::response_at(X)` rebuilds the step response at any `X` in
+  the span by `displacement_at`'s own weights and the same trapezoid
+  integrals. A span of one station is the single-station response bit for
+  bit. A parallel base never reads the station, so every station of a
+  parallel span is its own integration bit for bit. A spread base is the
+  single-station response bit for bit at `far`; nearer stations read a
+  base that spreads out to `far` (stated, small). Refuses stations that are
+  not finite, positive and ordered, and a read outside the span.
 
 ## Invariants
 
@@ -1320,6 +1332,12 @@ balance; a laminar Bickley base at Re 1e8 tends to the parallel jet
 (|dG|/|G| 2.990e-8); the Fletcher slope at the station moves |G(0.3)| by
 0.1376; the measured exit stays in phase at the exit; laws, holds and
 bands outside their domain are refused.
+
+`tests/forced_jet_span.rs` (4): a span of one station is the single-station
+response bit for bit (values, integrals, metadata) under the parallel and the
+laminar Bickley bases and both exits (the linear base is not run); every station of a parallel span is its own integration bit for bit;
+a spread span is exact at its far end and within 1e-2 of the single station
+at its near end (printed); stations outside their domain are refused.
 
 `tests/aeroac.rs` (11): Wronskian identity; derivative cross-checks;
 fsci-special oracle; small-argument limits; Hankel far-field
