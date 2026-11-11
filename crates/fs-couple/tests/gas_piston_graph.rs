@@ -19,6 +19,7 @@ use fs_couple::cavity_phs::piston::double_acting::{
 use fs_couple::cavity_phs::piston::{GasPiston, PistonInput, PistonSolve};
 use fs_evidence::ValidityDomain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_ga::Vec3;
 use fs_gas::component::GasCavity;
 use fs_matdb::{
     ClaimSet, ConstitutiveModelCard, InitialStatePolicy, InterpolationPolicy, LawId, LawParameter,
@@ -29,9 +30,15 @@ use fs_material::state_point::{MaterialPropertySelection, THERMAL_CONDUCTIVITY_D
 use fs_material::thermochemical_gas::energy::GasEnergySolve;
 use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 use fs_material::thermochemical_gas::{SpeciesTransportMaterial, ThermochemicalGasModel};
+use fs_mbd::component::RigidBody;
+use fs_mbd::{
+    Gravity, MassProperties, Pose, RigidBodyIntegrator, RigidBodyState, UnitQuaternion,
+    Vec3 as BodyVec3,
+};
+use fs_mbd_material::{RegionBinding, ResolvedBody, VolumeMoments, resolve_body};
 use fs_ports::PortKind;
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
-use fs_qty::{DynViscosity, MolarMass, Pressure, QuantitySpec, Temperature};
+use fs_qty::{Density, DynViscosity, MolarMass, Pressure, QuantitySpec, Temperature};
 use fs_system::elements::{Force, Mass, Motion, SourceAccount, Waveform};
 use fs_system::{NodeId, SolveConfig, System, SystemBuilder};
 use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
@@ -519,6 +526,197 @@ fn a_wall_between_two_gases_matches_the_double_acting_module() {
         }
         worst.check();
         assert!(force_gap_j.abs() <= 1.0e-12, "{force_gap_j}");
+        assert!(ledger_j.abs() <= 1.0e-12, "{ledger_j}");
+    }
+}
+
+/// A 0.1 m square plate, 10 mm thick, of an authored solid with the given
+/// density: the fixture of the module's material-wall tests. Its mass is
+/// what the rigid-body compiler makes of the density claim and the geometry.
+fn plate(density_kg_m3: f64) -> ResolvedBody {
+    let mut claims = ClaimSet::new();
+    claims
+        .insert_claim(PropertyClaim {
+            key: PropertyKey::new("density", Density::DIMS),
+            value: PropertyValue::Curve {
+                abscissa: "T".into(),
+                abscissa_dims: Temperature::DIMS,
+                knots: vec![(200.0, density_kg_m3), (400.0, density_kg_m3)],
+                dims: Density::DIMS,
+            },
+            validity: ValidityDomain::unconstrained().with("T", 200.0, 400.0),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::LinearInside,
+            observations: vec![],
+            provenance: provenance("synthetic specimen density"),
+        })
+        .unwrap();
+    let card = MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "synthetic specimen".into(),
+            phase: "solid".into(),
+            process: "authored".into(),
+            revision: 0,
+        },
+        claims,
+        vec![],
+    )
+    .unwrap();
+    let point = QueryPoint::new().with("T", 300.0).unwrap();
+    resolve_body(
+        &[RegionBinding {
+            key: "wall",
+            material: &card,
+            point: &point,
+            geometry: VolumeMoments::cuboid(Vec3::new(0.1, 0.1, 0.01)).unwrap(),
+            selection: MaterialPropertySelection::SingleClaimOnly,
+        }],
+        1,
+        || false,
+    )
+    .unwrap()
+}
+
+/// A free fs-mbd rigid body at `z = V / area` moving along `z`, with the
+/// gas on its face through a 1 x 3 power map of the area, no torque, and
+/// the early heat on the gas.
+fn plate_on_gas(
+    properties: MassProperties,
+    velocity_m_s: f64,
+    area_m2: f64,
+    gas: &ClosedGasParcel,
+) -> (System, NodeId, NodeId) {
+    let mut builder = SystemBuilder::new();
+    let start = RigidBodyState::new(
+        Pose::new(
+            BodyVec3::new(0.0, 0.0, gas.volume_m3() / area_m2),
+            UnitQuaternion::IDENTITY,
+        )
+        .unwrap(),
+        BodyVec3::new(0.0, 0.0, properties.mass() * velocity_m_s),
+        BodyVec3::ZERO,
+    )
+    .unwrap();
+    let wall = builder
+        .add(
+            "wall",
+            RigidBody::new(RigidBodyIntegrator::new(Gravity::ZERO), properties).unwrap(),
+            start,
+        )
+        .unwrap();
+    let cavity = builder
+        .add_with_tangent(
+            "gas",
+            GasCavity::new(gas.clone(), controls().gas).unwrap(),
+            gas.clone(),
+        )
+        .unwrap();
+    builder
+        .power_map(
+            builder.port(wall, "force").unwrap(),
+            builder.port(cavity, "p").unwrap(),
+            vec![0.0, 0.0, area_m2],
+        )
+        .unwrap();
+    let torque = builder.port(wall, "torque").unwrap();
+    builder
+        .boundary(torque, Box::new(|_, _, values| values.fill(0.0)))
+        .unwrap();
+    let heat = builder.port(cavity, "heat").unwrap();
+    builder
+        .boundary(
+            heat,
+            Box::new(|t0, _, values| values[0] = early_heat_w(t0)),
+        )
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    system.set_config(SolveConfig {
+        relative_tolerance: 1.0e-13,
+        ..SolveConfig::default()
+    });
+    (system, wall, cavity)
+}
+
+#[test]
+fn a_material_plate_as_a_free_rigid_body_on_the_gas_matches_the_module() {
+    // The module's material wall takes its mass from the resolved body and
+    // otherwise is `GasPiston`. Here the same body is the fs-mbd rigid body
+    // in three dimensions, and the gas pushes it along the plate's normal
+    // through a 1 x 3 power map of the face area. Nothing constrains the
+    // body: it stays on the axis because nothing pushes it off.
+    let area = 0.01;
+    for (density, velocity) in [(1000.0, 0.0), (8000.0, -0.2)] {
+        let body = plate(density);
+        let inertia = body.inertia();
+        let tensor = inertia.inertia_com().m;
+        // The plate's own frame is principal and centred, so its tensor
+        // goes to the rigid-body owner as three moments.
+        let offset = inertia.center_of_mass();
+        assert!(offset.x.abs() + offset.y.abs() + offset.z.abs() <= 0.0);
+        assert!(
+            [1, 2, 3, 5, 6, 7]
+                .iter()
+                .all(|&entry| tensor[entry].abs() <= 0.0),
+            "{tensor:?}"
+        );
+        let mass_kg = inertia.mass();
+        let properties = MassProperties::new(
+            mass_kg,
+            BodyVec3::ZERO,
+            BodyVec3::new(tensor[0], tensor[4], tensor[8]),
+        )
+        .unwrap();
+        let mut module = GasPiston::new(gas(0.75, 0.001), mass_kg, area, velocity).unwrap();
+        let initial = module.gas().clone();
+        let (mut system, wall, cavity) = plate_on_gas(properties, velocity, area, &initial);
+
+        let (mut worst_velocity, mut worst_volume, mut worst_temperature) = (0.0_f64, 0.0_f64, 0.0_f64);
+        let mut off_axis = 0.0_f64;
+        with_cx(|cx| {
+            for step in 0..48 {
+                let input = PistonInput {
+                    duration_s: DT_S,
+                    heat_j: DT_S * early_heat_w(f64::from(step) * DT_S),
+                    exterior_pressure_pa: 0.0,
+                    external_force_n: 0.0,
+                };
+                module
+                    .step_discrete_gradient(input, controls(), || false)
+                    .unwrap_or_else(|error| panic!("module refused step {step}: {error:?}"));
+                system.step(DT_S, cx).unwrap();
+                let state = system.state::<RigidBodyState>(wall).unwrap();
+                let momentum = state.linear_momentum_world();
+                let position = state.pose().position_world();
+                let spin = state.angular_momentum_body();
+                let parcel = system.state::<ClosedGasParcel>(cavity).unwrap();
+                worst_velocity =
+                    worst_velocity.max((momentum.z / mass_kg - module.velocity_m_s()).abs());
+                worst_volume =
+                    worst_volume.max((parcel.volume_m3() - module.gas().volume_m3()).abs());
+                worst_temperature = worst_temperature
+                    .max((temperature_k(parcel) - temperature_k(module.gas())).abs());
+                off_axis = off_axis
+                    .max(momentum.x.abs())
+                    .max(momentum.y.abs())
+                    .max(position.x.abs())
+                    .max(position.y.abs())
+                    .max(spin.dot(spin).sqrt())
+                    .max((area * position.z - parcel.volume_m3()).abs());
+            }
+        });
+        let ledger_j = system.ledger().energy_residual_j();
+        eprintln!(
+            "plate of {mass_kg} kg, v0 {velocity}: velocity {worst_velocity:.2e} m/s, volume \
+             {worst_volume:.2e} m3, temperature {worst_temperature:.2e} K, off axis \
+             {off_axis:.2e}, ledger residual {ledger_j:.2e} J"
+        );
+        assert!((module.gas().volume_m3() - initial.volume_m3()).abs() > 1.0e-8);
+        // Measured: 9e-12 m/s, 2e-16 m3, 4e-11 K, 9e-19 off the axis and a
+        // ledger residual of 4e-14 J.
+        assert!(worst_velocity <= 1.0e-10, "{worst_velocity}");
+        assert!(worst_volume <= 1.0e-15, "{worst_volume}");
+        assert!(worst_temperature <= 1.0e-9, "{worst_temperature}");
+        assert!(off_axis <= 1.0e-16, "{off_axis}");
         assert!(ledger_j.abs() <= 1.0e-12, "{ledger_j}");
     }
 }

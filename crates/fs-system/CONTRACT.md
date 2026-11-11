@@ -753,6 +753,16 @@ of 0.01 m²) for 48 steps.
   composition on the other face at minus its area, two runs: equal faces,
   and a smaller opposing face (0.008 m²) with a 1.5 N force; the first gas
   is heated as above.
+- The module's material wall (`piston::material`), whose mass is the
+  resolved body's: the fixture's plate (0.1 m square, 10 mm, densities 1000
+  and 8000 kg/m³, so 0.1 and 0.8 kg) as a free fs-mbd `RigidBody` in three
+  dimensions, the gas on its face through a 1 x 3 `power_map` of the area,
+  its torque port held at zero, against `GasPiston` with that mass and the
+  discrete-gradient step. Two runs, the gas heated as above. Wall velocity
+  within 9e-12 m/s, volume 2e-16 m³, temperature 4e-11 K; the body stays on
+  the axis to 9e-19 (momentum, position, spin) with nothing constraining
+  it; ledger 4e-14 J. `MaterialGasPiston` itself offers only the midpoint
+  step, which the fs-gas cavity does not have.
 Measured at every step: wall velocity within 1e-11 m/s (allowed 1e-10, ten
 times the module's impulse tolerance on the unit mass), gas volumes within
 2e-16 m³ (allowed 1e-15), gas temperatures within 4e-11 K (allowed 1e-9).
