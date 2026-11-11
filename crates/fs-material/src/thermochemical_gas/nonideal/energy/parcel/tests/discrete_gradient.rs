@@ -404,20 +404,41 @@ fn dilute_original_pr_limit_recovers_the_ideal_discrete_gibbs_rule_and_its_tange
 
 #[test]
 fn four_stable_corners_cannot_silently_cross_a_peng_robinson_spinodal_rectangle() {
+    // Pure A. fs-thermochem refuses a zero declared fraction (mixture.rs:357-364, d571a4691d;
+    // CONTRACT.md:2214-2215: absent species are omitted, not represented by zero), so the
+    // former `vec![1.0, 0.0]` source refused before the test began. `with_composition` omits
+    // the explicit zero B fraction and keeps A's own NASA-9 and transport cards. The
+    // Peng-Robinson binding is `bound()`'s A record alone, with no pair interaction. A zero B
+    // fraction adds nothing to the PR attraction or covolume, so this is the same pure-A
+    // fluid, and the test keeps its corner claim: each of the four (T, rho) corners, T in
+    // {150, 151} K and rho in {liquid, vapor} at 150 K and 1 MPa, is admissible as a
+    // mechanically stable state on its own, yet the rectangle they span crosses the PR
+    // spinodal, so the discrete gradient must refuse it instead of accepting its corners.
+    let pure_a_fractions =
+        Composition::new(CompositionBasis::MoleFraction, vec![1.0, 0.0]).unwrap();
     let source = model_in_domains(
-        vec![1.0, 0.0],
+        vec![0.5, 0.5],
         0.001,
         [140.0, 220.0],
         [140.0, 220.0],
         [1e4, 1e8],
-    );
-    let gas = IsochoricRealGasParcel::new(
-        bound(source),
-        point(150.0, 1e6),
-        0.01,
-        PengRobinsonPhaseV1::Liquid,
+    )
+    .with_composition(pure_a_fractions)
+    .unwrap();
+    let pure_a = ThermochemicalPengRobinsonModel::new(
+        source,
+        vec![PengRobinsonSpeciesBinding {
+            species: SpeciesId::new("A").unwrap(),
+            critical_temperature: Temperature::new(190.564),
+            critical_pressure: Pressure::new(4.5992e6),
+            acentric_factor: 0.01142,
+        }],
+        vec![],
     )
     .unwrap();
+    let gas =
+        IsochoricRealGasParcel::new(pure_a, point(150.0, 1e6), 0.01, PengRobinsonPhaseV1::Liquid)
+            .unwrap();
     let vapor = gas
         .state()
         .mechanics()

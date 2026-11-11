@@ -43,6 +43,17 @@ fn validity(t: [f64; 2], p: [f64; 2]) -> ValidityDomain {
 }
 
 fn surface(reverse: bool, dims: Dims, value: impl Fn(f64, f64) -> f64) -> PropertyValue {
+    sampled_surface([256.0, 384.0], [65_536.0, 196_608.0], reverse, dims, value)
+}
+
+// The same two cells, sampled on the four corners of one T/p box.
+fn sampled_surface(
+    t_box: [f64; 2],
+    p_box: [f64; 2],
+    reverse: bool,
+    dims: Dims,
+    value: impl Fn(f64, f64) -> f64,
+) -> PropertyValue {
     let mut axes = ["T".into(), "p".into()];
     let mut axis_dims = [Temperature::DIMS, Pressure::DIMS];
     if reverse {
@@ -50,10 +61,10 @@ fn surface(reverse: bool, dims: Dims, value: impl Fn(f64, f64) -> f64) -> Proper
         axis_dims.swap(0, 1);
     }
     let samples = [
-        [256.0, 65_536.0],
-        [384.0, 65_536.0],
-        [384.0, 196_608.0],
-        [256.0, 196_608.0],
+        [t_box[0], p_box[0]],
+        [t_box[1], p_box[0]],
+        [t_box[1], p_box[1]],
+        [t_box[0], p_box[1]],
     ]
     .map(|[t, p]| (if reverse { [p, t] } else { [t, p] }, value(t, p)))
     .to_vec();
@@ -66,10 +77,12 @@ fn surface(reverse: bool, dims: Dims, value: impl Fn(f64, f64) -> f64) -> Proper
     }
 }
 
+fn density_law(rho_t: f64, rho_p: f64) -> impl Fn(f64, f64) -> f64 {
+    move |t: f64, p: f64| 1000.0 + rho_t * (t - 256.0) + rho_p * (p - 65_536.0)
+}
+
 fn density_surface(rho_t: f64, rho_p: f64, reverse: bool) -> PropertyValue {
-    surface(reverse, Density::DIMS, |t, p| {
-        1000.0 + rho_t * (t - 256.0) + rho_p * (p - 65_536.0)
-    })
+    surface(reverse, Density::DIMS, density_law(rho_t, rho_p))
 }
 
 fn card_with_density(
@@ -405,9 +418,21 @@ fn source_edges_validity_endpoints_and_unsupported_points_do_not_gain_derivative
     ] {
         assert!(initial.at_query_point(&card, &point(t, p)).is_err());
     }
-    // The validity box can end inside an otherwise differentiable source cell.
+    // Declared T/p validity endpoints refuse
+    // (crates/fs-material/contracts/part-04.md:4957-4958). Since b323fed42a,
+    // fs-matdb admits a surface claim only when its finite validity bounds
+    // enclose every source sample (crates/fs-matdb/CONTRACT.md:348-349), so a
+    // validity box can no longer end inside a source cell. The restricted card
+    // keeps the same affine density law and the same two cells, sampled on the
+    // corners of its own validity box; its validity endpoints are source edges.
     let restricted = card_with_density(
-        density_surface(-0.5, RHO_P, false),
+        sampled_surface(
+            [280.0, 360.0],
+            [90_000.0, 180_000.0],
+            false,
+            Density::DIMS,
+            density_law(-0.5, RHO_P),
+        ),
         InterpolationPolicy::LinearInside,
         validity([280.0, 360.0], [90_000.0, 180_000.0]),
         LiquidViscosityBasis::Dynamic,

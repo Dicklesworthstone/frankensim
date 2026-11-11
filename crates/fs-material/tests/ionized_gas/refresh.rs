@@ -341,7 +341,7 @@ fn reacting_refresh_uses_changed_carrier_and_neutral_densities_without_lte_reset
         .unwrap();
     // A refresh pins each selected claim; `original` was resolved with
     // SingleClaimOnly. The library states the rule in
-    // src/liquid/density/tests.rs:283-287: "A refresh records pinned-claim
+    // src/liquid/density/tests.rs:285-287: "A refresh records pinned-claim
     // selection; an independent resolution records SingleClaimOnly. Their
     // physical tuples, not policy receipts, must agree exactly." So the whole
     // struct equals the original refreshed through the same pinned path, and

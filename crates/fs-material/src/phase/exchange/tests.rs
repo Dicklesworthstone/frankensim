@@ -4,7 +4,7 @@
 mod driven;
 
 use super::*;
-use crate::phase::EnthalpyPhaseKnot;
+use crate::phase::{EnthalpyPhaseKnot, SolidLiquidPhase};
 use fs_blake3::ContentHash;
 
 fn source_curve(datum: f64, split: bool) -> EquilibriumEnthalpyPhaseCurve {
@@ -381,8 +381,9 @@ fn g1_weak_and_rounded_equilibrium_responses_retain_nonzero_derivatives() {
     );
     assert_eq!(weak.jacobian.mean_log_exposure_derivative_k, 0.0);
 
-    let constant = EquilibriumEnthalpyPhaseCurve::try_new(
+    let constant = EquilibriumEnthalpyPhaseCurve::try_single_phase(
         ContentHash([0xd7; 32]),
+        SolidLiquidPhase::Solid,
         [(0.0, 300.0), (100_000.0, 800.0)]
             .into_iter()
             .map(|(h, t)| EnthalpyPhaseKnot {

@@ -103,7 +103,7 @@ fn fixture() -> (
             chemistry: "synthetic cathode".into(),
             phase: "solid".into(),
             process: "named surface".into(),
-            revision: 1,
+            revision: 0,
         },
         set,
         Vec::new(),
@@ -117,6 +117,22 @@ fn fixture() -> (
     )
     .unwrap();
     (card, resolved, work, thickness, bins)
+}
+
+/// Every f64 a refresh must reproduce: the held state coordinates, each
+/// resolved property value, the bound work function and thickness, and each
+/// bin's end fraction and authored wavelengths.
+fn physical_bits(material: &DepthPhotoelectricMaterial) -> Vec<u64> {
+    let resolved = material.resolved();
+    let mut values: Vec<f64> = Vec::new();
+    values.extend(resolved.query_point().iter().map(|(_, value)| *value));
+    values.extend(resolved.properties().iter().map(|p| p.value_si()));
+    values.extend([material.work_function_j(), material.thickness_m()]);
+    for bin in material.bins() {
+        values.push(bin.end_fraction);
+        values.extend(bin.knots.iter().map(|knot| knot.wavelength_nm));
+    }
+    values.into_iter().map(f64::to_bits).collect()
 }
 
 #[test]
@@ -163,7 +179,22 @@ fn g1_depth_conditional_projection_and_original_source_refresh() {
         hot.resolved().property("density").unwrap().value_si(),
         2900.0
     );
-    assert_eq!(hot.at_query_point(&card, &point(300.0)).unwrap(), material);
+    // A refresh pins each selected claim; `material` was resolved with
+    // SingleClaimOnly. The library states the rule in
+    // src/liquid/density/tests.rs:285-287: "A refresh records pinned-claim
+    // selection; an independent resolution records SingleClaimOnly. Their
+    // physical tuples, not policy receipts, must agree exactly." So the restored
+    // law equals the original refreshed through the same pinned path at its own
+    // state, and every physical value equals the single-claim original bit for
+    // bit; only the receipt policies, their provenance and the identities that
+    // bind them differ.
+    let restored = hot.at_query_point(&card, &point(300.0)).unwrap();
+    assert_eq!(
+        restored,
+        material.at_query_point(&card, &point(300.0)).unwrap()
+    );
+    assert_eq!(restored.resolved().query(), material.resolved().query());
+    assert_eq!(physical_bits(&restored), physical_bits(&material));
     assert!(material.at_query_point(&card, &point(401.0)).is_err());
     for (a, b) in resolved
         .properties()

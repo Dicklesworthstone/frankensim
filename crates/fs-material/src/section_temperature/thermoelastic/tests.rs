@@ -172,6 +172,37 @@ fn g1_temperature_derivatives_and_internal_energy_obey_helmholtz_relations() {
     assert_eq!(reference.layers[0].entropy_per_reference_length_j_m_k, 0.0);
 }
 
+/// Every f64 a refresh must reproduce in a section: its geometry and aggregate
+/// integrals, each layer's radius and integrals, and each layer's state
+/// coordinates and resolved property values.
+fn physical_bits(section: &ConcentricElasticSection) -> Vec<u64> {
+    let mut values = vec![
+        section.inner_radius_m(),
+        section.area_m2(),
+        section.second_moment_m4(),
+        section.line_density_kg_m(),
+        section.axial_stiffness_n(),
+        section.bending_stiffness_n_m2(),
+    ];
+    for (layer, integral) in section.layers().iter().zip(section.layer_integrals()) {
+        let material = &layer.material;
+        values.push(layer.outer_radius_m);
+        values.extend(material.query_point().iter().map(|(_, value)| *value));
+        values.extend(material.properties().iter().map(|p| p.value_si()));
+        values.extend([
+            integral.density_kg_m3(),
+            integral.young_modulus_pa(),
+            integral.area_m2(),
+            integral.second_moment_m4(),
+            integral.line_density_kg_m(),
+            integral.axial_stiffness_n(),
+            integral.bending_stiffness_n_m2(),
+        ]);
+        values.extend(integral.isotropic_shear_modulus_pa());
+    }
+    values.into_iter().map(f64::to_bits).collect()
+}
+
 #[test]
 fn g0_nonaffine_or_variable_reference_laws_and_invalid_states_refuse() {
     for defect in [YOUNG_MODULUS_PROPERTY, ALPHA, DENSITY_PROPERTY] {
@@ -190,5 +221,23 @@ fn g0_nonaffine_or_variable_reference_laws_and_invalid_states_refuse() {
     assert!(law.at_temperatures_k(&[340.0], f64::NAN, 0.01).is_err());
     assert_eq!(law.reference(), &reference);
     let recovered = law.at_temperatures_k(&[300.0], 0.0, 0.01).unwrap();
-    assert_eq!(recovered.section.section(), &reference);
+    // A refresh pins each selected claim; `reference` was resolved with
+    // SingleClaimOnly. The library states the rule in
+    // src/liquid/density/tests.rs:285-287: "A refresh records pinned-claim
+    // selection; an independent resolution records SingleClaimOnly. Their
+    // physical tuples, not policy receipts, must agree exactly." So the
+    // recovered section equals the original section refreshed through the same
+    // pinned path at its own temperature, and every physical value equals the
+    // single-claim original bit for bit; only the receipt policy, its
+    // provenance and the identity binding them differ.
+    let pinned = ConcentricSectionTemperatureLaw::try_new(reference.clone(), &[&card], &["T"])
+        .unwrap()
+        .at_temperatures_k(&[300.0])
+        .unwrap();
+    let section = recovered.section.section();
+    assert_eq!(section, &pinned);
+    for (new, old) in section.layers().iter().zip(reference.layers()) {
+        assert_eq!(new.material.query(), old.material.query());
+    }
+    assert_eq!(physical_bits(section), physical_bits(&reference));
 }

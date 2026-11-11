@@ -155,8 +155,9 @@ fn g4_native_phase_pair_retains_original_inverse_and_narrow_conductivity_support
     use crate::phase::exchange::pair::{self as phase_pair, FinitePhaseBody};
     let source = Fixture::new(false);
     // Explicit authored constant-C h/T source; the material card supplies k.
-    let curve = EquilibriumEnthalpyPhaseCurve::try_new(
+    let curve = EquilibriumEnthalpyPhaseCurve::try_single_phase(
         source.card.content_hash(),
+        SolidLiquidPhase::Solid,
         vec![
             EnthalpyPhaseKnot { specific_enthalpy_j_kg: 0.0, temperature_k: 300.0,
                 liquid_mass_fraction: 0.0, bulk_density_kg_m3: 1000.0 },

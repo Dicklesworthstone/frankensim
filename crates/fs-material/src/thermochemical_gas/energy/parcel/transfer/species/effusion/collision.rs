@@ -660,17 +660,25 @@ mod tests {
     fn g0_equal_mass_mixtures_recover_the_pure_limit_at_the_work_bound() {
         let make_bank = |count: usize| {
             let names: Vec<_> = (0..count).map(|i| format!("S{i:02}")).collect();
+            // fs-thermochem mixture.rs:349 sorts the fractions into canonical SpeciesId
+            // order and :366-367 refuse unless their `Iterator::sum` is bit-exact 1.0
+            // (d571a4691d); 33 copies of fl(1/33) sum to 1 - 6 * 2^-53. S00, S01, ...
+            // already sort in that order, so the last fraction closes the sum as 1 - s,
+            // with s the sum of the others taken the same way. With the partial sum s in
+            // [0.5, 2], Sterbenz's lemma makes 1 - s exact, so s + (1 - s) == 1 exactly.
+            // Here s = 31/32 (32 names, every fraction stays 1/32) or 0.9696969696969691
+            // (33 names).
+            let mut fractions = vec![1.0 / count as f64; count - 1];
+            let others: f64 = fractions.iter().sum();
+            fractions.push(1.0 - others);
+            assert_eq!(fractions.iter().sum::<f64>().to_bits(), 1.0_f64.to_bits());
             ThermochemicalGasModel::new(
                 FrozenIdealGasMixtureModelV1::new(
                     names
                         .iter()
                         .map(|name| species(name, 0.028, 3.5, 0.0))
                         .collect(),
-                    Composition::new(
-                        CompositionBasis::MoleFraction,
-                        vec![1.0 / count as f64; count],
-                    )
-                    .unwrap(),
+                    Composition::new(CompositionBasis::MoleFraction, fractions).unwrap(),
                 )
                 .unwrap(),
                 names

@@ -1,8 +1,20 @@
 //! Manufactured original calorics and independent two-body trajectory references.
 
 use super::*;
-use crate::phase::EnthalpyPhaseKnot;
+use crate::phase::{EnthalpyPhaseKnot, SolidLiquidPhase};
 use fs_blake3::ContentHash;
+
+fn chart_knots(datum: f64, points: &[(f64, f64, f64)]) -> Vec<EnthalpyPhaseKnot> {
+    points
+        .iter()
+        .map(|&(h, t, liquid)| EnthalpyPhaseKnot {
+            specific_enthalpy_j_kg: datum + h,
+            temperature_k: t,
+            liquid_mass_fraction: liquid,
+            bulk_density_kg_m3: 1000.0 - 200.0 * liquid,
+        })
+        .collect()
+}
 
 fn curve(
     id: u8,
@@ -10,17 +22,25 @@ fn curve(
     points: &[(f64, f64, f64)],
     cp: &[Option<[f64; 2]>],
 ) -> EquilibriumEnthalpyPhaseCurve {
-    let mut law = EquilibriumEnthalpyPhaseCurve::try_new(
+    let mut law =
+        EquilibriumEnthalpyPhaseCurve::try_new(ContentHash([id; 32]), chart_knots(datum, points))
+            .unwrap();
+    law.retain_sensible_heat_capacities(cp.to_vec()).unwrap();
+    law
+}
+
+// An all-solid chart declares its one phase. The two-phase ingress admits only
+// a chart that begins fully solid and ends fully liquid.
+fn solid_curve(
+    id: u8,
+    datum: f64,
+    points: &[(f64, f64, f64)],
+    cp: &[Option<[f64; 2]>],
+) -> EquilibriumEnthalpyPhaseCurve {
+    let mut law = EquilibriumEnthalpyPhaseCurve::try_single_phase(
         ContentHash([id; 32]),
-        points
-            .iter()
-            .map(|&(h, t, liquid)| EnthalpyPhaseKnot {
-                specific_enthalpy_j_kg: datum + h,
-                temperature_k: t,
-                liquid_mass_fraction: liquid,
-                bulk_density_kg_m3: 1000.0 - 200.0 * liquid,
-            })
-            .collect(),
+        SolidLiquidPhase::Solid,
+        chart_knots(datum, points),
     )
     .unwrap();
     law.retain_sensible_heat_capacities(cp.to_vec()).unwrap();
@@ -41,7 +61,7 @@ fn melting(datum: f64) -> EquilibriumEnthalpyPhaseCurve {
     )
 }
 fn sensible(datum: f64) -> EquilibriumEnthalpyPhaseCurve {
-    curve(
+    solid_curve(
         0xe2,
         datum,
         &[(0.0, 200.0, 0.0), (1200.0, 500.0, 0.0)],
@@ -207,13 +227,13 @@ fn nonlinear(
 ) -> (EquilibriumEnthalpyPhaseCurve, EquilibriumEnthalpyPhaseCurve) {
     if split {
         (
-            curve(
+            solid_curve(
                 0xf1,
                 datum,
                 &[(0.0, 400.0, 0.0), (125.0, 450.0, 0.0), (300.0, 500.0, 0.0)],
                 &[Some([2.0, 3.0]), Some([3.0, 4.0])],
             ),
-            curve(
+            solid_curve(
                 0xf2,
                 -datum,
                 &[(0.0, 300.0, 0.0), (175.0, 350.0, 0.0), (300.0, 400.0, 0.0)],
@@ -222,13 +242,13 @@ fn nonlinear(
         )
     } else {
         (
-            curve(
+            solid_curve(
                 0xf1,
                 datum,
                 &[(0.0, 400.0, 0.0), (300.0, 500.0, 0.0)],
                 &[Some([2.0, 4.0])],
             ),
-            curve(
+            solid_curve(
                 0xf2,
                 -datum,
                 &[(0.0, 300.0, 0.0), (300.0, 400.0, 0.0)],
@@ -312,7 +332,7 @@ fn g0_source_work_representation_identity_and_late_cancellation_remain_transacti
     let controls = FinitePhaseExchangeControls::default();
     let a = body(&hot, 1200.0, 2.0);
     let b = body(&pcm, 0.0, 1.0);
-    let limited = curve(
+    let limited = solid_curve(
         0xe5,
         0.0,
         &[(0.0, 450.0, 0.0), (200.0, 500.0, 0.0)],

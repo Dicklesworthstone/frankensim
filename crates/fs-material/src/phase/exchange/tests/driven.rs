@@ -205,7 +205,8 @@ fn g1_source_only_phase_storage_is_independent_of_sensible_subdivisions() {
     let curve = |split: bool| {
         let offsets: &[f64] = if split { &[0.0, 16_384.0, 49_152.0, 98_304.0] }
             else { &[0.0, 98_304.0] };
-        EquilibriumEnthalpyPhaseCurve::try_new(ContentHash([0xe3; 32]),
+        EquilibriumEnthalpyPhaseCurve::try_single_phase(ContentHash([0xe3; 32]),
+            SolidLiquidPhase::Solid,
             offsets.iter().map(|&offset| EnthalpyPhaseKnot {
                 specific_enthalpy_j_kg: datum + offset,
                 temperature_k: 300.0 + offset / 163.84,
@@ -236,7 +237,8 @@ fn g1_source_only_phase_storage_is_independent_of_sensible_subdivisions() {
 
 #[test]
 fn g1_source_only_phase_exchange_reaches_finite_source_endpoints() {
-    let curve = EquilibriumEnthalpyPhaseCurve::try_new(ContentHash([0xe4; 32]),
+    let curve = EquilibriumEnthalpyPhaseCurve::try_single_phase(ContentHash([0xe4; 32]),
+        SolidLiquidPhase::Solid,
         [0.0, 1.0, 4.0, 7.0].into_iter().map(|h| EnthalpyPhaseKnot {
             specific_enthalpy_j_kg: h, temperature_k: 300.0 + h,
             liquid_mass_fraction: 0.0, bulk_density_kg_m3: 1000.0,

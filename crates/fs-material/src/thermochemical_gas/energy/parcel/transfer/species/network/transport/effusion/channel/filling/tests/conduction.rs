@@ -68,6 +68,7 @@ fn capture_pools_all_wall_heat_without_counting_conduction_as_molecular_energy()
     let law = FixedVolumeThermalLaw::try_new(&source, 1000.0, 200.0)
         .unwrap().with_sensible_entropy();
     let walls = wall_pair(&law, [500.0, 300.0]);
+    let wall_temperatures_k = [walls[&9].temperature_k(), walls[&10].temperature_k()];
     let conduction = [conductor([&law; 2])];
     let donor = gas(800.0, 100_000.0, 0.0);
     let receiver = empty(0.001);
@@ -144,8 +145,13 @@ fn capture_pools_all_wall_heat_without_counting_conduction_as_molecular_energy()
     }
     balance(&second.step().balance);
     assert!(matches!(receiver, EffusionReceiver::Evacuated(_)));
-    assert_eq!(walls[&9].temperature_k(), 500.0);
-    assert_eq!(walls[&10].temperature_k(), 300.0);
+    // Both original walls are unchanged. try_new_isochoric stores the law's own
+    // inverse of the stored energy (T to e to T, e8cf1188b7), so the requested
+    // 500 K and 300 K come back within rounding, not necessarily bit for bit.
+    assert_eq!(walls[&9].temperature_k(), wall_temperatures_k[0]);
+    assert_eq!(walls[&10].temperature_k(), wall_temperatures_k[1]);
+    assert!((wall_temperatures_k[0] - 500.0).abs() <= 2.0 * (500.0_f64.next_up() - 500.0));
+    assert!((wall_temperatures_k[1] - 300.0).abs() <= 2.0 * (300.0_f64.next_up() - 300.0));
 }
 
 // Independent continuous n/U balances plus two nonlinear finite capacities.

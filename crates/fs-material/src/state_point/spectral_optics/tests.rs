@@ -548,6 +548,19 @@ fn g1_tabulated_absorption_retains_lossless_support_and_large_positive_values() 
     }
 }
 
+/// Every f64 a refresh must reproduce: the held state coordinates, each
+/// resolved property value, and each wavelength with its absorption.
+fn physical_bits(state: &SpectralDielectricAbsorptionStatePoint) -> Vec<u64> {
+    let resolved = state.resolved();
+    let mut values: Vec<f64> = Vec::new();
+    values.extend(resolved.query_point().iter().map(|(_, value)| *value));
+    values.extend(resolved.properties().iter().map(|p| p.value_si()));
+    for sample in state.absorption_samples() {
+        values.extend([sample.wavelength_m, sample.absorption_per_m]);
+    }
+    values.into_iter().map(f64::to_bits).collect()
+}
+
 #[test]
 fn g3_independent_absorption_refreshes_claims_without_phase_requirements() {
     let alpha_card = card(true, |source| {
@@ -567,7 +580,23 @@ fn g3_independent_absorption_refreshes_claims_without_phase_requirements() {
     for (old, new) in original.resolved().properties().iter().zip(hot.resolved().properties()) {
         assert_eq!(old.answer().receipt.selected, new.answer().receipt.selected);
     }
-    assert_eq!(hot.at_query_point(&alpha_card, &point(300.0)).unwrap(), original);
+    // A refresh pins each selected claim; `original` was resolved with
+    // SingleClaimOnly. The library states the rule in
+    // src/liquid/density/tests.rs:285-287: "A refresh records pinned-claim
+    // selection; an independent resolution records SingleClaimOnly. Their
+    // physical tuples, not policy receipts, must agree exactly." So the whole
+    // struct equals the original refreshed through the same pinned path at its
+    // own state, and every physical value equals the single-claim original bit
+    // for bit; only the receipt policies, their provenance and the identity
+    // binding them differ.
+    let start = point(300.0);
+    let restored = hot.at_query_point(&alpha_card, &start).unwrap();
+    assert_eq!(
+        restored,
+        original.at_query_point(&alpha_card, &start).unwrap()
+    );
+    assert_eq!(restored.resolved().query(), original.resolved().query());
+    assert_eq!(physical_bits(&restored), physical_bits(&original));
     assert!(original.at_query_point(&alpha_card, &point(601.0)).is_err());
     let complete_card = card(true, Some);
     assert!(original.at_query_point(&complete_card, &point(450.0)).is_err());

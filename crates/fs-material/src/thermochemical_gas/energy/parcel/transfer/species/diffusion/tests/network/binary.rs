@@ -211,7 +211,17 @@ fn temperature_card() -> MaterialCard {
                 knots: vec![(200.0, 1e-5), (1800.0, 9e-5)],
                 dims: BINARY_DIFFUSIVITY_DIMS,
             },
-            validity: ValidityDomain::unconstrained(),
+            // The face query sends an absolute temperature. The claim declares
+            // the same quantity over its knots, as the sibling card() does.
+            validity: ValidityDomain::unconstrained().with_quantity(
+                "temperature",
+                QuantitySpec::semantic(SemanticType::new(
+                    QuantityKind::AbsoluteTemperature,
+                    ValueForm::Static,
+                )),
+                200.0,
+                1800.0,
+            ),
             uncertainty: UncertaintyModel::Unstated,
             interpolation: InterpolationPolicy::LinearInside,
             observations: vec![],

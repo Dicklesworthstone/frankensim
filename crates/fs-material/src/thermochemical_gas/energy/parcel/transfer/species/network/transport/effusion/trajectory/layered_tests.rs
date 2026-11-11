@@ -332,8 +332,17 @@ fn heterogeneous_knudsen_resistance_changes_actual_inventory_and_carried_energy(
 
 #[test]
 fn multicomponent_laminate_reuses_original_flux_and_reference_energy_update() {
+    // fs-thermochem mixture.rs:349 sorts the fractions into canonical SpeciesId order (A, B, C)
+    // and :366-367 refuse unless their `Iterator::sum` is bit-exact 1.0 (d571a4691d);
+    // 0.70 + 0.20 + 0.10 sums to 1 - 2^-53. C closes the sum as 1 - s, with s = A + B taken
+    // the same way. With the partial sum s in [0.5, 2], Sterbenz's lemma makes 1 - s exact,
+    // so s + (1 - s) == 1 exactly. Here s = 0.8999999999999999 and C = 0.10000000000000009.
+    let leading: [f64; 2] = [0.70, 0.20];
+    let others: f64 = leading.iter().sum();
+    let fractions = vec![leading[0], leading[1], 1.0 - others];
+    assert_eq!(fractions.iter().sum::<f64>().to_bits(), 1.0_f64.to_bits());
     let gases = BTreeMap::from([
-        (10, ternary(vec![0.70, 0.20, 0.10])),
+        (10, ternary(fractions)),
         (20, ternary(vec![0.15, 0.25, 0.60])),
         (30, ternary(vec![0.15, 0.25, 0.60])),
     ]);

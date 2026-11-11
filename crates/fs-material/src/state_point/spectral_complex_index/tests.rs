@@ -130,6 +130,19 @@ fn close(actual: f64, expected: f64) {
     );
 }
 
+/// Every f64 a refresh must reproduce: the held state coordinates, each
+/// resolved property value, and each wavelength knot with its n and k.
+fn physical_bits(spectrum: &SpectralComplexIndexStatePoint) -> Vec<u64> {
+    let resolved = spectrum.resolved();
+    let mut values: Vec<f64> = Vec::new();
+    values.extend(resolved.query_point().iter().map(|(_, value)| *value));
+    values.extend(resolved.properties().iter().map(|p| p.value_si()));
+    for sample in spectrum.samples() {
+        values.extend([sample.wavelength_nm, sample.eta, sample.k]);
+    }
+    values.into_iter().map(f64::to_bits).collect()
+}
+
 #[test]
 fn g1_infrared_knots_interpolate_without_replacing_the_complete_material_state() {
     let (claims, bindings) = sources(3);
@@ -203,7 +216,22 @@ fn g1_infrared_knots_interpolate_without_replacing_the_complete_material_state()
             .unwrap();
     }
     assert_ne!(hot.identity(), spectrum.identity());
-    assert_eq!(hot.at_query_point(&card, &point(300.0)).unwrap(), spectrum);
+    // A refresh pins each selected claim; `spectrum` was resolved with
+    // SingleClaimOnly. The library states the rule in
+    // src/liquid/density/tests.rs:285-287: "A refresh records pinned-claim
+    // selection; an independent resolution records SingleClaimOnly. Their
+    // physical tuples, not policy receipts, must agree exactly." So the whole
+    // struct equals the original refreshed through the same pinned path at its
+    // own state, and every physical value equals the single-claim original bit
+    // for bit; only the receipt policies, their provenance and the identities
+    // binding them differ.
+    let restored = hot.at_query_point(&card, &point(300.0)).unwrap();
+    assert_eq!(
+        restored,
+        spectrum.at_query_point(&card, &point(300.0)).unwrap()
+    );
+    assert_eq!(restored.resolved().query(), spectrum.resolved().query());
+    assert_eq!(physical_bits(&restored), physical_bits(&spectrum));
 }
 
 #[test]
@@ -359,7 +387,22 @@ fn g3_refresh_keeps_original_claims_when_competing_spectra_become_available() {
     assert!(resolve(&card, &requirements, &point(550.0)).is_ok());
     assert!(hot.at_query_point(&card, &point(550.0)).is_err());
     assert_eq!(spectrum.resolved(), &original);
-    assert_eq!(hot.at_query_point(&card, &point(350.0)).unwrap(), spectrum);
+    // A refresh pins each selected claim; `spectrum` was resolved with
+    // SingleClaimOnly. The library states the rule in
+    // src/liquid/density/tests.rs:285-287: "A refresh records pinned-claim
+    // selection; an independent resolution records SingleClaimOnly. Their
+    // physical tuples, not policy receipts, must agree exactly." So the whole
+    // struct equals the original refreshed through the same pinned path at its
+    // own state, and every physical value equals the single-claim original bit
+    // for bit; only the receipt policies, their provenance and the identities
+    // binding them differ.
+    let restored = hot.at_query_point(&card, &point(350.0)).unwrap();
+    assert_eq!(
+        restored,
+        spectrum.at_query_point(&card, &point(350.0)).unwrap()
+    );
+    assert_eq!(restored.resolved().query(), spectrum.resolved().query());
+    assert_eq!(physical_bits(&restored), physical_bits(&spectrum));
 }
 
 #[test]

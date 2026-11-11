@@ -252,6 +252,10 @@ fn idle_phase_retains_native_empty_geometry_and_pending_event_semantics() {
     };
     let empty =
         DepositionSimulation::new(vec![], &[(MaterialId(1), &ORIGINAL_LIQUID)], budget).unwrap();
+    // fs-thermal backward_euler.rs:173-182 refuses the empty active-cell roster with
+    // `DepositionError::InvalidInput`; ef5ab372af reworded its text. No refusal-specific
+    // variant exists: `InvalidInput` also carries, on this same path, the pending-event
+    // refusal of endpoint.rs:83-86, so the text still names which refusal this is.
     assert!(matches!(
         solve_deposition_with_gas(
             &empty,
@@ -265,7 +269,7 @@ fn idle_phase_retains_native_empty_geometry_and_pending_event_semantics() {
         ),
         Err(ImplicitGasError::Thermal(ThermalEvaporationError::Thermal(
             DepositionError::InvalidInput(
-                "implicit step needs active cells and a later finite target"
+                "implicit step needs active cells, positive duration and a matching later target"
             )
         )))
     ));

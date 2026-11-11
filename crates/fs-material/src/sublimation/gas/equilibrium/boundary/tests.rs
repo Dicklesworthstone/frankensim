@@ -4,6 +4,7 @@ use crate::sublimation::gas::{
     equilibrium::{advance_equilibrium_surface, tests as phase_fixture},
     tests as fixture,
 };
+use crate::thermochemical_gas::energy::GasEnergyError;
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
 
 const FUSION: f64 = 100000.0;
@@ -333,26 +334,53 @@ fn event_keeps_original_donor_source_and_cancellation_refusals_atomic() {
         },
     )
     .unwrap();
-    for stop in [1, calls / 2, calls] {
+    // Each stop asserts the one cancellation that its first firing poll gives. With no
+    // accommodation law the polls run in this order. First boundary.rs:117, the probe at
+    // boundary.rs:138, the event re-evaluation at boundary.rs:138 when the event shortens the
+    // interval, and equilibrium.rs:262: b <= 4 polls through gas.rs:204-209, each refusing
+    // with `Surface(SublimationError::Cancelled)`. Then the gas owner,
+    // `exchange_species_boundary_relative` in transfer/species/boundary.rs: :447 and :456,
+    // then :478 and :484 on its idle path, or :511, :557, :569, its caloric reconstruction,
+    // :609 per species and :627, so g >= 4 polls, each refusing with
+    // `GasEnergyError::Cancelled`. Last, gas.rs:920 in `finish_surface` and boundary.rs:260.
+    // Stop 1 fires at boundary.rs:117 and stop `calls` at boundary.rs:260. Since g >= b, stop
+    // calls / 2 = (b + g + 2) / 2 lies in (b, b + g], inside the gas owner, whose refusal
+    // reaches this owner through `From<GasEnergyError> for GasSurfaceError` (gas.rs:117-121).
+    // The sibling sublimation::gas::tests, over the same three stops, accepts either owner
+    // (sublimation/gas/tests.rs:648-652):
+    //     Err(GasSurfaceError::Surface(SublimationError::Cancelled))
+    //         | Err(GasSurfaceError::Gas(GasEnergyError::Cancelled))
+    for (stop, gas_owner_fires) in [(1, false), (calls / 2, true), (calls, false)] {
         let mut count = 0;
-        assert!(matches!(
-            advance_to_melting(
-                inventory,
-                &fixture::phase(),
-                &binding,
-                initial,
-                &gas,
-                &catalog,
-                None,
-                1.0,
-                fixture::controls(),
-                || {
-                    count += 1;
-                    count == stop
-                }
-            ),
-            Err(GasSurfaceError::Surface(SublimationError::Cancelled))
-        ));
+        let result = advance_to_melting(
+            inventory,
+            &fixture::phase(),
+            &binding,
+            initial,
+            &gas,
+            &catalog,
+            None,
+            1.0,
+            fixture::controls(),
+            || {
+                count += 1;
+                count == stop
+            },
+        );
+        if gas_owner_fires {
+            assert!(
+                matches!(result, Err(GasSurfaceError::Gas(GasEnergyError::Cancelled))),
+                "stop {stop} of {calls}: {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    result,
+                    Err(GasSurfaceError::Surface(SublimationError::Cancelled))
+                ),
+                "stop {stop} of {calls}: {result:?}"
+            );
+        }
         assert_eq!(gas, saved);
         assert_eq!(initial, phase_fixture::bulk(&chart, 0.999));
     }

@@ -814,7 +814,12 @@ fn safeguarded_caloric_inverse_crosses_source_chart_knots_in_both_directions() {
         let dry_change = if target <= 300.0 {
             500.0 * (target - 300.0)
         } else if target <= 301.0 {
-            750.0 * (target - 300.0)
+            // The runtime caloric integrates the source's affine Cp(T) = 500 + 500 (T - 300)
+            // on [300, 301], not the 750 chord (contracts/part-04.md:868-872, 1eb01aba1a):
+            // h(300 + d) - h(300) = int_0^d (500 + 500 s) ds = 500 d + 250 d^2, which
+            // reaches the chord value 750 only at the knot d = 1.
+            let d = target - 300.0;
+            500.0 * d + 250.0 * d * d
         } else {
             750.0 + 1000.0 * (target - 301.0)
         };

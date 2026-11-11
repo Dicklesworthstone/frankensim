@@ -5466,7 +5466,20 @@ mod tests {
                     } else {
                         // An extra frequency applicability bound cannot be
                         // frozen into a knot that already names its wavelength.
-                        source.validity = source.validity.with("omega", 1.0, 2.0);
+                        // The bound declares the query's own angular-frequency
+                        // quantity, so the query admits the claim and the
+                        // refusal comes from the frequency role.
+                        source.validity = source.validity.with_quantity(
+                            "omega",
+                            QuantitySpec::semantic(SemanticType::new(
+                                QuantityKind::Frequency(
+                                    fs_qty::semantic::FrequencyConvention::Angular,
+                                ),
+                                ValueForm::Static,
+                            )),
+                            1.0,
+                            2.0,
+                        );
                     }
                 }
                 requirements.push(

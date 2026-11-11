@@ -52,8 +52,17 @@ fn transport(reversed: bool) -> (PropertyValue, PropertyValue) {
 fn prepared_surface_tangents_retain_original_axis_order_pressure_edges_and_inward_endpoints() {
     for reversed in [false, true] {
         let (mu, k) = transport(reversed);
+        // Both surface axes declare explicit validity bounds
+        // (crates/fs-matdb/CONTRACT.md:348-349). The temperature bound is the
+        // sample hull, so 256 K and 512 K stay the inward source endpoints.
         let model = gas(
-            vec![source("A", mu, k, InterpolationPolicy::LinearInside, None)],
+            vec![source(
+                "A",
+                mu,
+                k,
+                InterpolationPolicy::LinearInside,
+                Some([256.0, 512.0]),
+            )],
             vec![1.0],
         );
         for pressure in [65536.0, 98304.0, 131072.0] {
@@ -142,8 +151,69 @@ fn mixed_cached_surfaces_and_uncached_curves_use_original_wilke_wms_tangents() {
     }
 }
 
+// The same two source cells of `transport(false)`, restricted to the side of
+// T = 384 K that `bounds` admits. Since b323fed42a, fs-matdb admits a surface
+// claim only when its finite validity bounds enclose every source sample
+// (crates/fs-matdb/CONTRACT.md:348-349), so a claim whose temperature validity
+// ends at 384 K holds only its own side of the cells. The original diagonal
+// from sample 1 to sample 2 crosses 384 K at 98304 Pa. Each cut vertex is the
+// midpoint of an original cell edge and takes that edge's mean, which is the
+// cell's own affine value there: the law on the admitted side is unchanged.
+fn admitted_side(value: PropertyValue, bounds: [f64; 2]) -> PropertyValue {
+    if bounds == [256.0, 512.0] {
+        return value;
+    }
+    let PropertyValue::Surface2D {
+        axes,
+        axis_dims,
+        samples: original,
+        dims,
+        ..
+    } = value
+    else {
+        unreachable!()
+    };
+    let sample = |index: usize| original[index].1;
+    let mean = |a: usize, b: usize| 0.5 * (sample(a) + sample(b));
+    let (samples, triangles) = if bounds == [256.0, 384.0] {
+        (
+            vec![
+                ([256.0, 65536.0], sample(0)),
+                ([384.0, 65536.0], mean(0, 1)),
+                ([256.0, 131072.0], sample(2)),
+                ([384.0, 131072.0], mean(2, 3)),
+                ([384.0, 98304.0], mean(1, 2)),
+            ],
+            vec![[0, 1, 2], [1, 4, 2], [4, 3, 2]],
+        )
+    } else {
+        assert_eq!(bounds, [384.0, 512.0]);
+        (
+            vec![
+                ([384.0, 65536.0], mean(0, 1)),
+                ([512.0, 65536.0], sample(1)),
+                ([384.0, 131072.0], mean(2, 3)),
+                ([512.0, 131072.0], sample(3)),
+                ([384.0, 98304.0], mean(1, 2)),
+            ],
+            vec![[0, 1, 4], [1, 3, 2], [1, 2, 4]],
+        )
+    };
+    PropertyValue::Surface2D {
+        axes,
+        axis_dims,
+        samples,
+        triangles,
+        dims,
+    }
+}
+
 #[test]
 fn surface_corners_refuse_except_on_the_original_claims_admitted_side() {
+    // Claim validity clips the permitted directions
+    // (crates/fs-material/contracts/part-04.md:5550). Under the sample rule of
+    // b323fed42a a one-sided claim also holds only its admitted side of the
+    // cells (admitted_side above), so its validity endpoint is a source edge.
     let bind = |bounds| {
         let (mut mu, k) = transport(false);
         let PropertyValue::Surface2D { samples, .. } = &mut mu else {
@@ -154,8 +224,8 @@ fn surface_corners_refuse_except_on_the_original_claims_admitted_side() {
             gas(
                 vec![source(
                     "A",
-                    mu,
-                    k,
+                    admitted_side(mu, bounds),
+                    admitted_side(k, bounds),
                     InterpolationPolicy::LinearInside,
                     Some(bounds),
                 )],

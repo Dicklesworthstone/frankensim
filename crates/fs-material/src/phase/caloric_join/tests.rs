@@ -9,6 +9,16 @@ use fs_qty::{Density, Temperature};
 
 const CP: Dims = Dims([2, 0, -2, -1, 0, 0]);
 
+/// The absolute temperature that every span query sends. The claims'
+/// temperature validity declares the same quantity: fs-matdb compares the two
+/// descriptors exactly, and an untyped axis is not a wildcard.
+fn kelvin() -> QuantitySpec {
+    QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature,
+        ValueForm::Static,
+    ))
+}
+
 fn card(revision: u32, cp_slope: f64, varying_density: bool) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (name, dims, centre, slope) in [
@@ -23,7 +33,7 @@ fn card(revision: u32, cp_slope: f64, varying_density: bool) -> MaterialCard {
                 knots: vec![(280.0, centre - 20.0 * slope), (320.0, centre + 20.0 * slope)],
                 dims,
             },
-            validity: ValidityDomain::unconstrained().with("T", 280.0, 320.0)
+            validity: ValidityDomain::unconstrained().with_quantity("T", kelvin(), 280.0, 320.0)
                 .with("pressure", 100_000.0, 200_000.0),
             uncertainty: UncertaintyModel::Unstated,
             interpolation: InterpolationPolicy::LinearInside,
@@ -45,7 +55,7 @@ fn span(card: &MaterialCard, limits: [f64; 2], pressure: f64, cp_key: &str,
     phase: SolidLiquidPhase, datum: f64, error: f64) -> ResolvedHeatCapacityCurve
 {
     let point = |t| QueryPoint::new()
-        .with_quantity("T", QuantitySpec::dimensional(Temperature::DIMS), t).unwrap()
+        .with_quantity("T", kelvin(), t).unwrap()
         .with("pressure", pressure).unwrap();
     ResolvedHeatCapacityCurve::try_new(card, HeatCapacitySourceQuery {
         heat_capacity: &PropertyKey::new(cp_key, CP),
@@ -188,7 +198,9 @@ fn affine_capacity_integrals_and_fixed_mass_work_survive_rebasing() {
 #[test]
 fn numerical_parity_does_not_admit_foreign_sources_contexts_or_phases() {
     let material = card(0, 0.0, false);
-    let foreign = card(1, 0.0, false);
+    // A later revision of the same state, with the same claims. assemble
+    // starts a lineage at revision 0, so the successor comes from supersede.
+    let foreign = MaterialCard::supersede(&material, material.claims().clone(), vec![]).unwrap();
     let (lower, upper) = pair(&material, SolidLiquidPhase::Solid, 1e-6);
     let before = lower.clone();
     for incompatible in [
