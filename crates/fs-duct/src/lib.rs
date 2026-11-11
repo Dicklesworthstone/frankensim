@@ -120,8 +120,9 @@ mod chimney;
 pub use chimney::{
     PROFILED_CHIMNEY_LIMITATION, profiled_tone_hole_junction, profiled_tone_hole_shunt,
 };
-/// Equivalent lengths of a compact tone hole: the engine's and the printed thick-wall set.
-mod hole_lengths;
+/// Equivalent lengths of a compact tone hole: the engine's and the printed thick-wall set. Public
+/// so that fs-couple's lumped closed hole takes its printed closed-hole lengths from here.
+pub mod hole_lengths;
 /// Opt-in external radiation interaction between open tone holes and the bell (TMMI).
 mod interaction;
 pub use interaction::OpenHoleInteraction;

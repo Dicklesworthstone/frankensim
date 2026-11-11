@@ -186,7 +186,7 @@ sections. All dimensions and numerical error allowances are explicit.
 | `duct_node impedance R L C` | Degree-one series resistance, inertance and compliance |
 | `duct_node series R L C` | Two-section inline pressure-drop load |
 | `duct_node shunt R L C` | Load from an interior common-pressure junction to its reference |
-| `duct_node closed-hole B T` | Closed side hole of radius `B` and height `T`, shorter than one step, on an interior bore junction |
+| `duct_node closed-hole B T [matching] [series] A` | Closed side hole of radius `B` and height `T`, shorter than one step, on an interior bore junction; the words add its printed lengths at bore radius `A` |
 
 For R-L-C records, units are Pa s/m³, Pa s²/m³ and m³/Pa. Zero `C` explicitly
 omits compliance. Positive compliance and nonnegative resistance/inertance are
@@ -204,17 +204,36 @@ shunt load holding the first two terms of a closed tube's input impedance,
 `R = 0`, in the gas of the junction's sections, which must be one gas. The
 junction needs at least two sections, none narrower than the hole and none an
 `inner` side hole's chimney. A closed hole of one step or more refuses: it is a
-`duct_section`. No end correction is added, as the closed waveguide chimney
-takes none. A closed hole has them in print: the matching volume `t_m` is the
-same as an open hole's (Lefebvre and Scavone 2012, Eq. 8) and the closed
-series length `t_a` is their Eq. 34, both as fs-duct's `hole_lengths` applies
-them. Leaving `t_m` out makes `C` low: on the D whistle's closed holes `t_m`
-is 42 to 77 % of `T = 0.3 mm`, so `C` is 0.57 to 0.70 of the value with it.
-At one step the lumped hole and the one-sample closed chimney
+`duct_section`. No end correction is added unless the row names it, as the
+closed waveguide chimney takes none. A closed hole has two in print (Lefebvre
+and Scavone 2012), and the row takes them from fs-duct's `hole_lengths` with the
+open hole's words, either or both, followed by `A`, the main bore's radius at
+the hole (`0 < B < A`):
+
+- `matching` adds the matching volume `t_m = B d (1 + 0.207 d^3) / 8`,
+  `d = B / A` (their Eq. 8, the same as an open hole's): `L` and `C` are taken
+  at `T + t_m`, and the one-step admission reads `T + t_m`. A closed waveguide
+  chimney takes no words; written `T + t_m` long it is the same hole.
+- `series` adds the closed series length of their Eq. 34,
+  `t_a = (-0.12 - 0.17 tanh(2.4 T / B)) B d^2` (negative). Their arm is a
+  series mass only, so each of the junction's two bore sections is shortened
+  by `(|t_a| / 2) (r_i / A)^2` and the volume they lose,
+  `V_a = sum_i pi r_i^2 (|t_a| / 2) (r_i / A)^2`, is given back to the hole's
+  `C`: the junction loses mass only. Without that volume the shortening took
+  about the hole's own volume off the D whistle's wide holes and played its
+  closed notes 1.6 to 2.3 cents sharp of the arm. It needs exactly two sections
+  at the junction, each longer than its share.
+
+Left out with or without the words: the `-Z_a / 4` of the symmetric T and the
+`k t_i` mass of Eq. 16, each under 0.001 cent on the D whistle in a scratch
+lossless model. Without `matching`, `C` is low: on the D whistle's closed holes
+`t_m` is 42 to 77 % of `T = 0.3 mm`, so `C` is 0.56 to 0.70 of the value with
+it. At one step the lumped hole and the one-sample closed chimney
 differ in branch impedance by `(tau^2 / 3) / (1 - tau^2)`,
 `tau = tan(pi f / f_mechanics)`: 9.9e-6 at 500 Hz, 4.0e-5 at 1 kHz and 3.6e-4 at
 3 kHz at 288 kHz. The provenance records each hole's `B`, `T`, gas, `L` and `C`
-under `closed_holes`.
+under `closed_holes`; with the words it adds `A`, the height `L` and `C` are taken
+at, `t_m`, `t_a`, each bore section's share and `V_a`, and says what was added.
 
 An open side hole has no lumped form: its outlet load and receiver live on its
 far node. A side hole with an `inner` row whose graph length (the chimney plus

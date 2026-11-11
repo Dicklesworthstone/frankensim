@@ -298,7 +298,9 @@ impl FlueFilePerformance {
     /// `duct_section` row adds that hole's inner length ([`HoleInnerLength`]).
     /// A `duct_node closed-hole HOLE_RADIUS_M HEIGHT_M` puts a closed hole
     /// shorter than one step on its bore junction as a lumped shunt in place of
-    /// a chimney section and its closed end ([`ClosedHoleLump`]).
+    /// a chimney section and its closed end ([`ClosedHoleLump`]); `matching`
+    /// and `series` after it, then the bore radius, add the closed hole's
+    /// printed matching volume and series length from fs-duct's `hole_lengths`.
     /// `mouth_reaction window-cylinder` instead radiates that window's solved
     /// outer face from the head's outer cylinder in the declared exterior
     /// (see [`crate::flue_loop::window_radiation`]), replacing the authored

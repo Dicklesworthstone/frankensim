@@ -849,6 +849,10 @@ low-frequency Eq. 7 reactance, and the engine terms bit for bit, are tested; the
 independent transfer-matrix model predicts the passive-peak shift of the set on
 the posted D3 (+14.2 cent), F4 (+1.8) and G4 (+1.0) cards, and with the
 interaction F4 -6.8 and G4 -8.0 cent, agreed to 0.3 cent in the tests.
+The module is public (`fs_duct::hole_lengths`) so that the lengths have one
+home: fs-couple's lumped closed hole (`duct_node closed-hole ... [matching]
+[series] BORE_RADIUS_M`) reads `HoleLengths::Printed`'s `sealed_extra_m` (`t_m`, Eq. 8)
+and `series_m` with the hole closed (`sigma = 0`, Eq. 34) from it.
 `GasFieldDuct::response_with_wall_and_holes` retains open/vented chimney flows
 from their actual locations in that same stable cascade. Uniform and varying
 fields share one chimney/series-branch preparation and flow-reconstruction

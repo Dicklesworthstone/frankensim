@@ -1346,13 +1346,29 @@ pub(super) fn flue_provenance(p: &FlueFilePerformance) -> String {
                 h.series_bore.map_or_else(|| "null".to_string(), |[(i, a), (j, b)]| format!("[[{i},{a:e}],[{j},{b:e}]]")),
                 h.network_length_m)).collect::<Vec<_>>().join(","))
     };
-    // Present only when a `duct_node closed-hole` row adds one, so other cards' provenance is unchanged.
+    // Present only when a `duct_node closed-hole` row adds one, so other cards' provenance is unchanged; the
+    // printed lengths' record and its wording appear only when a row names `matching` or `series`.
+    let named = p.closed_holes().iter().any(|h| h.bore_radius_m.is_some());
     let closed_holes_json = if p.closed_holes().is_empty() { String::new() } else {
-        format!(",\"closed_holes\":{{\"law\":\"closed hole shorter than one step as a lossless series L-C shunt on its bore junction: the first two terms of -j Z_h cot(k t), C = pi b^2 t / (rho c^2) (the hole volume), L = rho t / (3 pi b^2) (its column in series), R = 0; bilinear (implicit-midpoint) realisation\",\"not_added\":\"every end correction, as on a closed waveguide chimney: the closed hole's matching volume t_m = b d (1 + 0.207 d^3) / 8, d = b/a (the same as an open hole's, Lefebvre and Scavone 2012 Eq. 8), which leaves C low by the factor t / (t + t_m); its closed series length t_a (their Eq. 34); and any closed-end term\",\"holes\":[{}]}}",
-            p.closed_holes().iter().map(|h| format!(
-                "{{\"node\":{},\"hole_radius_m\":{:e},\"height_m\":{:e},\"density_kg_m3\":{:e},\"sound_speed_m_s\":{:e},\"inertance_pa_s2_m3\":{:e},\"compliance_m3_pa\":{:e}}}",
-                h.node, h.hole_radius_m, h.height_m, h.density_kg_m3, h.sound_speed_m_s,
-                h.inertance_pa_s2_m3, h.compliance_m3_pa)).collect::<Vec<_>>().join(","))
+        let corrections = if named {
+            "\"added\":\"on the rows that name them, from fs-duct's hole_lengths (Lefebvre and Scavone 2012): matching, the matching volume t_m = b d (1 + 0.207 d^3) / 8, d = b/a (Eq. 8), with C and L taken at t + t_m; series, the closed series length t_a = (-0.12 - 0.17 tanh(2.4 t / b)) b d^2 (Eq. 34), its arm a series mass only: (|t_a| / 2) (r_i / a)^2 taken off each of the junction's two bore sections and the volume they lose, V_a = sum_i pi r_i^2 (|t_a| / 2) (r_i / a)^2, given back to C\",\"not_added\":\"the -Z_a / 4 of the symmetric T, the k t_i mass of Eq. 16, any closed-end term, and on a row without the words every end correction\""
+        } else {
+            "\"not_added\":\"every end correction, as on a closed waveguide chimney: the closed hole's matching volume t_m = b d (1 + 0.207 d^3) / 8, d = b/a (the same as an open hole's, Lefebvre and Scavone 2012 Eq. 8), which leaves C low by the factor t / (t + t_m); its closed series length t_a (their Eq. 34); and any closed-end term\""
+        };
+        let length = |v: Option<f64>| v.map_or_else(|| "null".to_string(), |x| format!("{x:e}"));
+        format!(",\"closed_holes\":{{\"law\":\"closed hole shorter than one step as a lossless series L-C shunt on its bore junction: the first two terms of -j Z_h cot(k t), C = pi b^2 t / (rho c^2) (the hole volume), L = rho t / (3 pi b^2) (its column in series), R = 0; bilinear (implicit-midpoint) realisation\",{corrections},\"holes\":[{}]}}",
+            p.closed_holes().iter().map(|h| {
+                let printed = h.bore_radius_m.map_or_else(String::new, |a| format!(
+                    ",\"bore_radius_m\":{a:e},\"lumped_height_m\":{:e},\"matching_length_m\":{},\"series_length_m\":{},\"series_bore\":{},\"series_volume_m3\":{}",
+                    h.lumped_height_m(), length(h.matching_length_m), length(h.series_length_m),
+                    h.series_bore.map_or_else(|| "null".to_string(),
+                        |[(i, x), (j, y)]| format!("[[{i},{x:e}],[{j},{y:e}]]")),
+                    length(h.series_volume_m3)));
+                format!(
+                    "{{\"node\":{},\"hole_radius_m\":{:e},\"height_m\":{:e},\"density_kg_m3\":{:e},\"sound_speed_m_s\":{:e},\"inertance_pa_s2_m3\":{:e},\"compliance_m3_pa\":{:e}{printed}}}",
+                    h.node, h.hole_radius_m, h.height_m, h.density_kg_m3, h.sound_speed_m_s,
+                    h.inertance_pa_s2_m3, h.compliance_m3_pa)
+            }).collect::<Vec<_>>().join(","))
     };
     let (phase, details) = network.fractional_sections().expect("file selects fractional travel");
     let actual_length: f64 = details.iter().map(|s|s.realized_dc_length_m).sum();

@@ -36,7 +36,7 @@ const FLANGED_END_CORRECTION: f64 = 0.8216;
 
 /// Which equivalent lengths a compact tone hole carries.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum HoleLengths {
+pub enum HoleLengths {
     /// No bore-junction corrections: the chimney and the radiation load alone.
     Uncorrected,
     /// The engine's laws, unchanged.
@@ -76,7 +76,8 @@ impl HoleLengths {
     }
 
     /// Length added to the height of the SEALED part of the chimney.
-    pub(crate) fn sealed_extra_m(self, hole_radius: f64, bore_radius: f64) -> f64 {
+    #[must_use]
+    pub fn sealed_extra_m(self, hole_radius: f64, bore_radius: f64) -> f64 {
         match self.effective(hole_radius, bore_radius) {
             Self::Printed => matching_m(hole_radius, hole_radius / bore_radius),
             Self::Uncorrected | Self::Engine => 0.0,
@@ -85,7 +86,8 @@ impl HoleLengths {
 
     /// Signed series length referred to the bore (its inertance is `rho * length / (pi a^2)`), the
     /// open and closed parts weighted by `sigma`, plus the mutual length of the open holes.
-    pub(crate) fn series_m(
+    #[must_use]
+    pub fn series_m(
         self, hole_radius: f64, chimney_height: f64, bore_radius: f64, sigma: f64, mutual_m: f64,
     ) -> f64 {
         match self.effective(hole_radius, bore_radius) {

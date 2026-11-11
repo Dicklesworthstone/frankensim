@@ -71,8 +71,9 @@ mod closed_hole_tests;
 /// on the hole and both of them, and each section longer than its share.
 /// `t_i` and `t_a` are their open-hole forms; `t_m` is the same for an open
 /// and a closed hole (Lefebvre and Scavone 2012, Eq. 8, as fs-duct's
-/// `hole_lengths` applies it). A `closed-hole` node takes none of the three
-/// (see [`ClosedHoleLump`]).
+/// `hole_lengths` applies it). A `closed-hole` node takes none of these
+/// open-hole forms: its own printed `t_m` and `t_a` come by its words (see
+/// [`ClosedHoleLump`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HoleInnerLength {
     /// The chimney's section index.
@@ -154,22 +155,56 @@ impl HoleInnerLength {
 /// bilinear (implicit-midpoint) rule, so its discrete impedance is
 /// `R + s L + 1 / (s C)` at `s = j (2 / dt) tan(w dt / 2)`.
 ///
-/// End corrections: none is added, as the closed waveguide chimney takes none,
-/// so the two agree where the hole passes one step. A closed hole has them in
-/// print: the matching volume `t_m = b d (1 + 0.207 d^3) / 8`, `d = b / a`,
-/// the same as an open hole's (Lefebvre and Scavone 2012, Eq. 8), and a closed
-/// series length `t_a` (their Eq. 34), both as fs-duct's `hole_lengths`
-/// applies them. Leaving `t_m` out makes `C` low: on the D whistle's six
-/// closed holes (b 2.47 to 3.31 mm, bore radius a 6.1 mm, t 0.3 mm) `t_m` is 0.13
-/// to 0.23 mm, 42 to 77 % of `t`, so `C` is 0.57 to 0.70 of the value with it.
-/// Nothing is added at the closed end.
+/// End corrections: none is added unless the row names them, as the closed
+/// waveguide chimney takes none, so the two agree where the hole passes one
+/// step. A closed hole has two in print (Lefebvre and Scavone 2012), and the
+/// row takes them from fs-duct's `hole_lengths` (`HoleLengths::Printed`) with
+/// the open hole's own words:
+/// `duct_node closed-hole HOLE_RADIUS_M HEIGHT_M [matching] [series] BORE_RADIUS_M`,
+/// either word or both, then a, the main bore's radius at the hole.
+///
+/// - `matching` adds the matching volume `t_m = b d (1 + 0.207 d^3) / 8`,
+///   `d = b / a` (their Eq. 8, the same as an open hole's;
+///   `HoleLengths::sealed_extra_m`) to the height: `L` and `C` are taken at
+///   `t + t_m`, the first two terms of their Eq. 16, `-j Z_h cot k(t + t_m)`,
+///   and the one-step admission reads `t + t_m`. A closed waveguide chimney
+///   takes no words: written `t + t_m` long it is the same hole, and the
+///   crossover test reads it so.
+/// - `series` adds the closed series length of their Eq. 34,
+///   `t_a = (-0.12 - 0.17 tanh(2.4 t / b)) b d^2`, negative
+///   (`HoleLengths::series_m` with the hole closed, `sigma = 0`). Their arm
+///   `Z_a = j k Z_c t_a` is a series mass only, and a negative mass is not a
+///   passive load, so each of the junction's two bore sections is shortened by
+///   `(|t_a| / 2) (r_i / a)^2`, the same series mass in its own area, and the
+///   volume the two sections lose, `V_a = sum_i pi r_i^2 (|t_a| / 2) (r_i / a)^2`,
+///   is given back to the hole: `C` holds `pi b^2 (t + t_m) + V_a`. The
+///   junction then loses mass only, as the arm does. Without the volume the
+///   shortening also took `V_a` off the junction, about the hole's own volume
+///   on the D whistle's wide holes (17.7 against 18.1 mm^3 on the 3.3 mm hole),
+///   and moved its closed notes 1.6 to 2.3 cents sharp of the arm (MB 25080).
+///   `V_a` sits behind the hole column's mass `L`, not beside it: the shunt's
+///   admittance differs from the arm's by `w^2 L (C^2 - C_0^2) / C_0`, `C_0`
+///   without `V_a`, 4e-4 at 3 kHz on the test hole. The one-step admission
+///   still reads `t (+ t_m)`. It needs exactly two sections at the junction,
+///   each longer than its share.
+///
+/// Either word needs `0 < b < a`: the fits are printed for `b < a`, and
+/// fs-duct keeps the engine's terms outside it, which add nothing to a closed
+/// hole. Left out, with or without the words: the `-Z_a / 4` of the symmetric T,
+/// the `k t_i` mass of Eq. 16 (the paper calls `t_i` negligible at low
+/// frequency, and fs-duct leaves it out too), each under 0.001 cent on the D
+/// whistle's closed holes in a scratch lossless model, and any closed-end
+/// term. Without the words `t_m` is missing and `C` is low: on the D whistle's
+/// six closed holes (b 2.47 to 3.31 mm, bore radius a 6.1 mm, t 0.3 mm) `t_m`
+/// is 0.13 to 0.23 mm, 42 to 77 % of `t`, so `C` is 0.56 to 0.70 of the value
+/// with it.
 ///
 /// Admission: `b > 0`, `t > 0`, b no wider than any section at the junction,
 /// at least two sections there, one gas on them, no `inner` side hole's
-/// chimney on the same junction, and `t < c dt` once the clock is known
-/// (checked after the duct is read): a closed hole of one step or more is a
-/// `duct_section`. An open hole has no lumped form here: its outlet load and
-/// its receiver live on its far node.
+/// chimney on the same junction, and `t < c dt` (`t + t_m < c dt` with
+/// `matching`) once the clock is known (checked after the duct is read): a
+/// closed hole of one step or more is a `duct_section`. An open hole has no
+/// lumped form here: its outlet load and its receiver live on its far node.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ClosedHoleLump {
     /// The bore junction's node index.
@@ -182,13 +217,33 @@ pub struct ClosedHoleLump {
     pub density_kg_m3: f64,
     /// c, the junction gas's sound speed [m/s].
     pub sound_speed_m_s: f64,
-    /// `L = rho t / (3 pi b^2)` [Pa s^2/m^3].
+    /// `L = rho t / (3 pi b^2)` [Pa s^2/m^3], `t + t_m` in place of `t` with `matching`.
     pub inertance_pa_s2_m3: f64,
-    /// `C = pi b^2 t / (rho c^2)` [m^3/Pa].
+    /// `C = pi b^2 t / (rho c^2)` [m^3/Pa], `t + t_m` in place of `t` with
+    /// `matching`; with `series` it also holds the bore volume `V_a` the
+    /// shortened sections lose, `+ V_a / (rho c^2)`.
     pub compliance_m3_pa: f64,
+    /// a, the main bore's radius at the hole, with either word [m]; `None` without them.
+    pub bore_radius_m: Option<f64>,
+    /// `t_m` [m] with `matching`; `None` without it.
+    pub matching_length_m: Option<f64>,
+    /// `t_a` [m] (negative) of Eq. 34 with `series`; `None` without it.
+    pub series_length_m: Option<f64>,
+    /// With `series`: the junction's two bore sections and the length taken
+    /// off each, `(|t_a| / 2) (r_i / a)^2` [m].
+    pub series_bore: Option<[(usize, f64); 2]>,
+    /// With `series`: `V_a`, the volume the two shortened sections lose and
+    /// `C` holds instead [m^3].
+    pub series_volume_m3: Option<f64>,
 }
 
 impl ClosedHoleLump {
+    /// The height `L` and `C` are taken at [m]: `t`, or `t + t_m` with `matching`.
+    #[must_use]
+    pub fn lumped_height_m(&self) -> f64 {
+        self.matching_length_m.map_or(self.height_m, |t_m| self.height_m + t_m)
+    }
+
     /// `(L, C)` for a closed hole of radius b and height t in a gas of density
     /// rho and sound speed c; `None` unless all four, L and C are finite and
     /// positive.
@@ -210,14 +265,15 @@ impl ClosedHoleLump {
 
 impl Input {
     /// The clock's admission of hole lengths, once it is known: a `closed-hole`
-    /// node must be shorter than one step (`t < c dt`; one step or more is a
-    /// `duct_section`), and an `inner` side hole's chimney must be at least one
-    /// step long in the graph (an open hole has no lumped form here).
+    /// node must be shorter than one step (`t < c dt`, `t + t_m < c dt` with
+    /// `matching`; one step or more is a `duct_section`), and an `inner` side
+    /// hole's chimney must be at least one step long in the graph (an open hole
+    /// has no lumped form here).
     pub(super) fn check_hole_steps(&self, mechanics_rate_hz: u32) -> Result<(), FlueInputError> {
         let dt = 1.0 / f64::from(mechanics_rate_hz);
         for (hole, line) in &self.closed {
-            if hole.height_m >= hole.sound_speed_m_s * dt {
-                return Err(bad(*line, "duct_node closed-hole of one step or more (height >= c dt) is a duct_section"));
+            if hole.lumped_height_m() >= hole.sound_speed_m_s * dt {
+                return Err(bad(*line, "duct_node closed-hole of one step or more (height, plus t_m with matching, >= c dt) is a duct_section"));
             }
         }
         for hole in &self.inner {
@@ -285,7 +341,21 @@ impl Input {
                             && height_m.is_finite() && height_m > 0.0) {
                             return Err(bad(row.line, "duct_node closed-hole needs a positive hole radius and height"));
                         }
-                        holes.push((nodes.len(), hole_radius_m, height_m, row.line));
+                        // The open hole's words, then the bore radius they need ([`ClosedHoleLump`]).
+                        let matching = row.fields.clone().next() == Some("matching");
+                        if matching { row.fields.next(); }
+                        let series = row.fields.clone().next() == Some("series");
+                        if series { row.fields.next(); }
+                        let line = row.line;
+                        let bore_radius_m = if matching || series {
+                            if row.fields.clone().next().is_none() {
+                                return Err(bad(line, "duct_node closed-hole matching or series needs the main bore's radius after the words"));
+                            }
+                            Some(row.scalar()?)
+                        } else if row.fields.clone().next().is_some() {
+                            return Err(bad(line, "duct_node closed-hole takes a bore radius only after matching or series"));
+                        } else { None };
+                        holes.push((nodes.len(), hole_radius_m, height_m, matching, series, bore_radius_m, line));
                         // A junction until its sections and gas are read; then
                         // the hole's shunt load ([`ClosedHoleLump`]).
                         NetworkNode::Junction
@@ -329,7 +399,7 @@ impl Input {
             // Closed holes first, so that an `inner` chimney on the same
             // junction is refused by name and never read as an open hole's.
             let mut closed = Vec::with_capacity(holes.len());
-            for (node, hole_radius_m, height_m, line) in holes {
+            for (node, hole_radius_m, height_m, matching, series, bore_radius_m, line) in holes {
                 let incident: Vec<usize> = (0..sections.len())
                     .filter(|&j| sections[j].nodes.contains(&node)).collect();
                 if incident.len() < 2 {
@@ -345,10 +415,40 @@ impl Input {
                 if incident.iter().any(|&j| gases[j] != gas) {
                     return Err(bad(line, "duct_node closed-hole needs one gas on its junction's sections"));
                 }
+                if bore_radius_m.is_some_and(|a| !(a.is_finite() && hole_radius_m < a)) {
+                    return Err(bad(line, "duct_node closed-hole matching or series needs a hole narrower than the bore: 0 < hole radius < bore radius"));
+                }
+                let printed = fs_duct::hole_lengths::HoleLengths::Printed;
+                let matching_length_m = bore_radius_m.filter(|_| matching)
+                    .map(|a| printed.sealed_extra_m(hole_radius_m, a));
+                let lumped_height_m = matching_length_m.map_or(height_m, |t_m| height_m + t_m);
                 let Some((inertance, compliance)) =
-                    ClosedHoleLump::law(hole_radius_m, height_m, gas.density, gas.sound_speed) else {
+                    ClosedHoleLump::law(hole_radius_m, lumped_height_m, gas.density, gas.sound_speed) else {
                     return Err(bad(line, "duct_node closed-hole needs a finite positive inertance and compliance"));
                 };
+                let (mut series_length_m, mut series_bore, mut series_volume_m3) = (None, None, None);
+                if let Some(a) = bore_radius_m.filter(|_| series) {
+                    let &[first, second] = incident.as_slice() else {
+                        return Err(bad(line, "duct_node closed-hole series needs a junction of exactly two bore sections"));
+                    };
+                    // Eq. 34 at the physical height t: the hole closed (sigma 0), no open neighbour's mutual length.
+                    let t_a = printed.series_m(hole_radius_m, height_m, a, 0.0, 0.0);
+                    let mut shares = [(first, 0.0), (second, 0.0)];
+                    let mut volume = 0.0;
+                    for (j, share) in &mut shares {
+                        let ratio = sections[*j].radius_m / a;
+                        *share = -t_a / 2.0 * ratio * ratio;
+                        if sections[*j].length_m <= *share {
+                            return Err(bad(line, "duct_node closed-hole series needs each bore section at the hole longer than its share of t_a"));
+                        }
+                        sections[*j].length_m -= *share;
+                        volume += core::f64::consts::PI * sections[*j].radius_m * sections[*j].radius_m * *share;
+                    }
+                    (series_length_m, series_bore, series_volume_m3) = (Some(t_a), Some(shares), Some(volume));
+                }
+                // The arm is mass only: the volume the shortened sections lose goes back into the hole's compliance.
+                let compliance = series_volume_m3.map_or(compliance,
+                    |volume| compliance + volume / (gas.density * gas.sound_speed * gas.sound_speed));
                 let load = SeriesImpedanceSpec { resistance_pa_s_m3: 0.0, inertance_pa_s2_m3: inertance,
                     compliance_m3_pa: Some(compliance) };
                 load.validate().map_err(|_| bad(line, "invalid passive closed-hole load"))?;
@@ -357,7 +457,8 @@ impl Input {
                 nodes[node] = NetworkNode::Shunt { load };
                 closed.push((ClosedHoleLump { node, hole_radius_m, height_m, density_kg_m3: gas.density,
                     sound_speed_m_s: gas.sound_speed, inertance_pa_s2_m3: inertance,
-                    compliance_m3_pa: compliance }, line));
+                    compliance_m3_pa: compliance, bore_radius_m, matching_length_m, series_length_m,
+                    series_bore, series_volume_m3 }, line));
             }
             let chimneys: Vec<usize> = requests.iter().map(|request| request.0).collect();
             for (index, bore_radius_m, matching, series, line) in requests {
