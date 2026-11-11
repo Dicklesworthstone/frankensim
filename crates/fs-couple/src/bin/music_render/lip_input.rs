@@ -247,7 +247,7 @@ fn bore_json(bore: &LipBoreInfo) -> String {
             number(n.wall_maximum_complex_error),
             number(n.wall_maximum_loss_error),
             // The walled bore's own `bore_wall` object states what is modelled; the denial stays for every other bore.
-            if n.bore_wall.is_some() { "" } else { "no bore wall vibration, " },
+            if n.bore_wall.is_some() || n.bell_shell.is_some() { "" } else { "no bore wall vibration, " },
         ),
     }
 }
@@ -320,7 +320,7 @@ fn rim_stop_json(i: &LipInfo) -> String {
 /// The lip receipt's optional breathing-bore-wall object, empty for a performance without a `bore_wall thin-brass` record (so
 /// every receipt written before the record existed is unchanged; the audio of `bore_wall rigid` is bit-identical to the row absent, but its input
 /// bytes and so its hash differ).
-fn bore_wall_json(i: &LipInfo) -> String {
+fn ring_wall_json(i: &LipInfo) -> String {
     let (Some((record, source)), LipBoreInfo::Nonlinear(n)) = (&i.bore_wall, &i.bore) else {
         return String::new();
     };
@@ -342,6 +342,38 @@ fn bore_wall_json(i: &LipInfo) -> String {
         number(w.highest_resonance_hz),
     )
 }
+
+/// The modal bell wall's receipt object (`bore_wall shell-brass`), with its trailing comma; empty without the row.
+fn bell_shell_json(i: &LipInfo) -> String {
+    let (Some((record, source)), LipBoreInfo::Nonlinear(n)) = (&i.bell_shell, &i.bore) else {
+        return String::new();
+    };
+    let Some(b) = n.bell_shell else {
+        return String::new();
+    };
+    format!(
+        "\"bore_wall\":{{\"kind\":\"shell-brass\",\"thickness_m\":{},\"loss_factor\":{},\"max_frequency_hz\":{},\"azimuths\":{},\"source\":{},\"cells_covered\":{},\"first_covered_cell\":{},\"coupling_modes\":{},\"modes_below_cutoff\":{},\"lowest_mode_hz\":{},\"highest_mode_hz\":{},\"model\":{}}},",
+        number(record.thickness_m),
+        number(record.loss_factor),
+        number(record.max_frequency_hz),
+        record.azimuths,
+        json_string(source),
+        b.cells_covered,
+        b.first_covered_cell,
+        b.coupling_modes,
+        b.modes_below_cutoff,
+        number(b.lowest_mode_hz),
+        number(b.highest_mode_hz),
+        json_string(MODEL_TEXT),
+    )
+}
+
+/// The breathing-wall receipt object of whichever opt-in row the file declared (the ring or the shell); empty for neither.
+fn bore_wall_json(i: &LipInfo) -> String {
+    format!("{}{}", ring_wall_json(i), bell_shell_json(i))
+}
+
+const MODEL_TEXT: &str = "the bell as a MITC3+ shell of revolution (fs_plate::shell) of UNS C26000 brass (MIL-HDBK-698A Table XV row 260), meshed at the bore's own cell faces over the trailing run of widening cones; the throat ring is clamped (an assumed mount), the rest is free; its axisymmetric modes below the cut-off, mass-normalised, each with modal damping loss_factor x omega (one loss factor for a homogeneous wall, so the damping is diagonal), are driven by every bell cell's pressure through one pressure port per cell band and sweep volume from every cell; midpoint-force coupling, exact account. Gorman, Rokni, Moore, Kausel and Chatziioannou, ISMA 2014, pp. 215 to 218: 'We posit that these axial resonances are broad-band and are responsible for the audible effects'. The loss that would broaden these modes (the mount, seams, radiation into the outside air) is not carried; the loss factor is a borrowed material figure; braces, the rim bead, the player's hand and a non-uniform thickness are not carried";
 
 fn input_json(i: &LipInfo) -> String {
     let lip = &i.lip;

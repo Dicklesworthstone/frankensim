@@ -52,7 +52,11 @@ use crate::turbulence_noise::{
 
 mod finite_mouth;
 pub use finite_mouth::{FiniteMouthReport, FiniteMouthSpec, FiniteMouthState};
-use super::bore_wall::{BoreWallRecord, ThinBrassWall};
+use super::bell_shell::{ModalBellWall, ShellMaterial};
+use super::bore_wall::{
+    BRASS_DENSITY_KG_M3, BRASS_POISSON_RATIO, BRASS_YOUNG_PA, BellShellRecord, BoreWallRecord, ThinBrassWall,
+};
+use super::performance::BellShellInfo;
 use finite_mouth::FiniteMouth;
 
 /// How the nonlinear bore is cut, clocked and walled.
@@ -123,6 +127,8 @@ pub struct NonlinearLip {
     lip2: Option<LipSecondMode>,
     /// The opt-in flow-area exponent `q` ([`NonlinearLip::with_lip_area_exponent`]); exactly 1.0 is the plain `width x gap`.
     area_exponent: f64,
+    /// The modal bell wall's admission receipt (`bore_wall shell-brass`), if bound.
+    bell_shell: Option<BellShellInfo>,
 }
 
 impl NonlinearLip {
@@ -223,6 +229,7 @@ impl NonlinearLip {
             reference_density_kg_m3,
             lip2: None,
             area_exponent: 1.0,
+            bell_shell: None,
         })
     }
 
@@ -257,6 +264,48 @@ impl NonlinearLip {
             .bind_shell(duct, &law, record.quality)
             .map_err(|e| format!("bore wall refused: {e}"))?;
         Ok(self)
+    }
+
+    /// Bind the opt-in modal bell wall (`bore_wall shell-brass`) before any gas step: the flaring end of the bore is meshed as a
+    /// brass shell of revolution, its axisymmetric modes below the cut-off become a [`fs_duct::nonlinear::bore::WallDriver`], and
+    /// every bell cell's pressure drives them while they sweep volume from every cell ([`super::bell_shell`]). A lip without it
+    /// steps exactly the rigid-walled bore, bit for bit.
+    ///
+    /// # Errors
+    /// A bore without a flaring bell, a shell the owner refuses, or a driver the bore refuses.
+    pub fn with_bell_shell(mut self, duct: &Duct, record: BellShellRecord) -> Result<Self, String> {
+        let faces = self.bore.solver().mesh().positions().to_vec();
+        let wall = ModalBellWall::from_duct(
+            duct,
+            &faces,
+            record,
+            ShellMaterial {
+                density_kg_m3: BRASS_DENSITY_KG_M3,
+                young_pa: BRASS_YOUNG_PA,
+                poisson: BRASS_POISSON_RATIO,
+            },
+            self.clock.gas_step_s(),
+        )?;
+        let frequencies = wall.frequencies_hz();
+        self.bell_shell = Some(BellShellInfo {
+            record,
+            cells_covered: wall.covered_cells(),
+            coupling_modes: frequencies.len(),
+            modes_below_cutoff: wall.modes_below_cutoff(),
+            first_covered_cell: wall.first_covered_cell().unwrap_or(0),
+            lowest_mode_hz: frequencies.first().copied().unwrap_or(0.0),
+            highest_mode_hz: frequencies.last().copied().unwrap_or(0.0),
+        });
+        self.bore
+            .bind_wall_driver(Box::new(wall))
+            .map_err(|e| format!("bell shell refused: {e}"))?;
+        Ok(self)
+    }
+
+    /// What binding the modal bell wall admitted, or `None` without one.
+    #[must_use]
+    pub fn bell_shell_info(&self) -> Option<BellShellInfo> {
+        self.bell_shell
     }
 
     /// Add the opt-in flow-area exponent `q` before any gas step: the aperture the lip channel meters through becomes

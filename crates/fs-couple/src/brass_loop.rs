@@ -51,6 +51,10 @@ pub mod player_tract;
 
 /// The `bore_wall` row: the breathing wall of a brass bore (opt-in, nonlinear bore).
 pub mod bore_wall;
+
+/// The modal bell wall: the bending branch of the bore wall (the `nonlinear-brass` feature).
+#[cfg(feature = "nonlinear-brass")]
+pub mod bell_shell;
 use player_tract::{LipTract, TractPressure};
 
 mod tension;

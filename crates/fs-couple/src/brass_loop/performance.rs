@@ -25,6 +25,7 @@
 //! lip_area_exponent <q>                                    optional; flow area w h (h/H0)^(q-1), 1 <= q <= 4 (q = 1 is the plain w h)
 //! lip_rim_stop inelastic|elastic                           optional; the lip gap may not exceed the first bore cone's diameter (two limit cases of an unmeasured restitution)
 //! bore_wall rigid|thin-brass <thickness_m> <quality>        optional; on bore nonlinear the bell's breathing wall: every cell a radial oscillator of cartridge brass (rigid is the row absent)
+//! bore_wall shell-brass <thickness_m> <loss_factor> <max_frequency_hz> <azimuths>  optional alternative to thin-brass: the bell as a MITC3+ shell of brass (its bending modes up to the cut-off, on a mesh of that many points round, even, 16 to 128), throat ring clamped
 //! bore_wall_source <free text to end of line>               required with bore_wall thin-brass: whose instrument and whose measurement the thickness and the quality factor are
 //! player_tract mouth <tau_s>                               optional (or `player_tract lung`); a player's tract upstream of the lip, the card's pressure measured in the mouth or at the lung
 //! player_tract_section <length_m> <area_m2>                1 to 256 rows beside `player_tract`, lip side first, each a cylinder of that area (the glottis a section of its own)
@@ -197,7 +198,7 @@ use fs_math::det;
 use fs_scenario::gesture::{GestureSchedule, GestureTarget};
 use fs_vfit::discretize::DelayedFilter;
 
-use super::bore_wall::BoreWallRecord;
+use super::bore_wall::{BELL_MAX_AZIMUTHS, BELL_MIN_AZIMUTHS, BellShellRecord, BoreWallRecord};
 use super::player_tract::TractPressure;
 use super::{BrassBlockDiag, BrassControl, BrassVoice, LipIsland, LipMode2};
 use crate::acoustic_realize::AcousticRealizeError;
@@ -369,6 +370,8 @@ pub struct LipDescription {
     lip_rim_stop: Option<super::RimStopKind>,
     /// The optional breathing bore wall (`bore_wall thin-brass`) and the provenance sentence that names whose thickness and quality factor it carries.
     bore_wall: Option<(BoreWallRecord, String)>,
+    /// The optional modal bell wall (`bore_wall shell-brass`) and its provenance sentence.
+    bell_shell: Option<(BellShellRecord, String)>,
     /// The optional player's tract upstream of the lip: its airway chain (lip side first) and where the card's pressure acts.
     player_tract: Option<(AirwayChain, TractPressure)>,
 }
@@ -576,6 +579,7 @@ impl LipDescription {
         let mut lip_area_exponent_raw: Option<f64> = None;
         let mut lip_rim_stop_raw: Option<super::RimStopKind> = None;
         let mut bore_wall_raw: Option<Option<BoreWallRecord>> = None;
+        let mut bell_shell_raw: Option<BellShellRecord> = None;
         let mut bore_wall_source: Option<String> = None;
         let mut player_tract_raw: Option<TractPressure> = None;
         let mut tract_sections: Vec<(f64, f64)> = Vec::new();
@@ -693,16 +697,44 @@ impl LipDescription {
                     f.finish()?;
                 }
                 "bore_wall" => {
-                    let record = match f.word()? {
-                        "rigid" => None,
-                        "thin-brass" => {
-                            let thickness_m = f.positive()?;
-                            let quality = f.positive()?;
-                            Some(BoreWallRecord { thickness_m, quality })
+                    let kind = f.word()?;
+                    if kind == "shell-brass" {
+                        let thickness_m = f.positive()?;
+                        let loss_factor = f.positive()?;
+                        let max_frequency_hz = f.positive()?;
+                        let azimuths = f.count(BELL_MAX_AZIMUTHS as u64)? as usize;
+                        if azimuths < BELL_MIN_AZIMUTHS || azimuths % 2 != 0 {
+                            return f.err(&format!(
+                                "the bell mesh needs an even azimuth count from {BELL_MIN_AZIMUTHS} to {BELL_MAX_AZIMUTHS}"
+                            ));
                         }
-                        _ => return f.err("expected `rigid` or `thin-brass <thickness_m> <quality>`"),
-                    };
-                    once(&mut bore_wall_raw, record, &f)?;
+                        if bore_wall_raw.is_some() {
+                            return f.err("may only appear once");
+                        }
+                        once(
+                            &mut bell_shell_raw,
+                            BellShellRecord { thickness_m, loss_factor, max_frequency_hz, azimuths },
+                            &f,
+                        )?;
+                    } else {
+                        let record = match kind {
+                            "rigid" => None,
+                            "thin-brass" => {
+                                let thickness_m = f.positive()?;
+                                let quality = f.positive()?;
+                                Some(BoreWallRecord { thickness_m, quality })
+                            }
+                            _ => {
+                                return f.err(
+                                    "expected `rigid`, `thin-brass <thickness_m> <quality>` or `shell-brass <thickness_m> <loss_factor> <max_frequency_hz> <azimuths>`",
+                                );
+                            }
+                        };
+                        if bell_shell_raw.is_some() {
+                            return f.err("may only appear once");
+                        }
+                        once(&mut bore_wall_raw, record, &f)?;
+                    }
                     f.finish()?;
                 }
                 "bore_wall_source" => {
@@ -1045,19 +1077,27 @@ impl LipDescription {
             Some(kind) => Some(kind),
         };
         // `bore_wall` (module doc): rigid is the row absent; thin-brass needs the nonlinear bore and a sentence naming whose numbers.
-        let bore_wall = match (bore_wall_raw, bore_wall_source) {
-            (None, None) | (Some(None), None) => None,
-            (None, Some(_)) => return Err("bore_wall_source needs a bore_wall row".into()),
-            (Some(None), Some(_)) => {
-                return Err("bore_wall_source needs bore_wall thin-brass; bore_wall rigid carries no source".into());
+        let (bore_wall, bell_shell) = match (bore_wall_raw, bell_shell_raw, bore_wall_source) {
+            (None, None, None) | (Some(None), None, None) => (None, None),
+            (None, None, Some(_)) => return Err("bore_wall_source needs a bore_wall row".into()),
+            (Some(None), None, Some(_)) => {
+                return Err("bore_wall_source needs bore_wall thin-brass or shell-brass; bore_wall rigid carries no source".into());
             }
-            (Some(Some(_)), None) => {
+            (Some(Some(_)), None, None) => {
                 return Err("bore_wall thin-brass needs a bore_wall_source row naming whose instrument and whose measurement the thickness and the quality factor are".into());
             }
-            (Some(Some(_)), Some(_)) if nonlinear.is_none() => {
+            (None, Some(_), None) => {
+                return Err("bore_wall shell-brass needs a bore_wall_source row naming whose instrument and whose measurement the thickness and the loss factor are".into());
+            }
+            (Some(Some(_)), None, Some(_)) if nonlinear.is_none() => {
                 return Err("bore_wall thin-brass is on the nonlinear bore only: the linear mode-matching bore has rigid walls and refuses the row (add a bore nonlinear row)".into());
             }
-            (Some(Some(record)), Some(source)) => Some((record, source)),
+            (None, Some(_), Some(_)) if nonlinear.is_none() => {
+                return Err("bore_wall shell-brass is on the nonlinear bore only: the linear mode-matching bore has rigid walls and refuses the row (add a bore nonlinear row)".into());
+            }
+            (Some(Some(record)), None, Some(source)) => (Some((record, source)), None),
+            (None, Some(record), Some(source)) => (None, Some((record, source))),
+            (Some(_), Some(_), _) => return Err("bore_wall may only appear once".into()),
         };
         // `player_tract` and its rows (module doc): the chain is built here, so a malformed tract refuses at the parse.
         let player_tract = match player_tract_raw {
@@ -1175,6 +1215,7 @@ impl LipDescription {
             lip_area_exponent,
             lip_rim_stop,
             bore_wall,
+            bell_shell,
             player_tract,
         })
     }
@@ -1213,6 +1254,12 @@ impl LipDescription {
     #[must_use]
     pub fn bore_wall(&self) -> Option<&(BoreWallRecord, String)> {
         self.bore_wall.as_ref()
+    }
+
+    /// The opt-in modal bell wall and its provenance sentence, if the file declared `bore_wall shell-brass` ([`super::bell_shell`]).
+    #[must_use]
+    pub fn bell_shell(&self) -> Option<&(BellShellRecord, String)> {
+        self.bell_shell.as_ref()
     }
 
     /// The opt-in rim stop's limit case, if the file declared one ([`super::BrassVoice::with_lip_rim_stop`]).
@@ -1637,6 +1684,13 @@ impl LipDescription {
                 .map_err(|e| format!("bore_wall refused: {e}"))?,
             None => lip,
         };
+        let lip = match &self.bell_shell {
+            Some((record, _)) => lip
+                .with_bell_shell(&self.duct, *record)
+                .map_err(|e| format!("bore_wall shell-brass refused: {e}"))?,
+            None => lip,
+        };
+        let bell_shell_info = lip.bell_shell_info();
         let bore_wall_info = match (&self.bore_wall, lip.bore().shell_receipt()) {
             (Some((record, _)), Some(receipt)) => Some(BoreWallInfo {
                 record: *record,
@@ -1667,6 +1721,7 @@ impl LipDescription {
             wall_maximum_complex_error: wall.maximum_complex_error,
             wall_maximum_loss_error: wall.maximum_loss_error,
             bore_wall: bore_wall_info,
+            bell_shell: bell_shell_info,
         });
         Ok(self.performance(
             mouth_radius_m,
@@ -1728,6 +1783,7 @@ impl LipDescription {
                 .zip(self.rim_max_gap_m().ok())
                 .map(|(kind, max_gap_m)| RimStopInfo { kind, max_gap_m }),
             bore_wall: self.bore_wall.clone(),
+            bell_shell: self.bell_shell.clone(),
             lip_source: self.lip_source.clone(),
             bore_source: self.bore_source.clone(),
             cup_volume_m3: self.cup_volume_m3,
@@ -1847,6 +1903,8 @@ pub struct LipInfo {
     pub rim_stop: Option<RimStopInfo>,
     /// The opt-in breathing bore wall with its provenance sentence, when the file declared `bore_wall thin-brass`.
     pub bore_wall: Option<(BoreWallRecord, String)>,
+    /// The opt-in modal bell wall with its provenance sentence, when the file declared `bore_wall shell-brass`.
+    pub bell_shell: Option<(BellShellRecord, String)>,
     /// Provenance sentence of the lip numbers.
     pub lip_source: String,
     /// Provenance sentence of the bore geometry.
@@ -1927,6 +1985,27 @@ pub struct NonlinearBoreInfo {
     pub wall_maximum_loss_error: f64,
     /// The breathing wall's admission receipt, or `None` for the rigid-walled bore (the row absent or `rigid`).
     pub bore_wall: Option<BoreWallInfo>,
+    /// The modal bell wall's admission receipt, or `None` without a `bore_wall shell-brass` row.
+    pub bell_shell: Option<BellShellInfo>,
+}
+
+/// What binding `bore_wall shell-brass` admitted.
+#[derive(Debug, Clone, Copy)]
+pub struct BellShellInfo {
+    /// The declared thickness, loss factor and cut-off.
+    pub record: BellShellRecord,
+    /// Bore cells the shell covers (the bell's).
+    pub cells_covered: usize,
+    /// Modes that couple to the bore (axisymmetric, below the cut-off).
+    pub coupling_modes: usize,
+    /// Modes the cut-off admitted, of every circumferential harmonic.
+    pub modes_below_cutoff: usize,
+    /// The first bore cell with a wall band: the clamp is at the bore face at or after the throat that starts it.
+    pub first_covered_cell: usize,
+    /// Lowest and highest coupling mode frequency [Hz].
+    pub lowest_mode_hz: f64,
+    /// Highest coupling mode frequency [Hz].
+    pub highest_mode_hz: f64,
 }
 
 /// What binding `bore_wall thin-brass` admitted: the declared numbers and the wall's cells.
@@ -2077,6 +2156,15 @@ impl Engine {
         }
     }
 
+    /// The breathing walls' energy account on the nonlinear bore, if one is bound.
+    #[cfg(feature = "nonlinear-brass")]
+    fn wall_ledger(&self) -> Option<fs_duct::nonlinear::bore::ShellLedger> {
+        match self {
+            Self::Linear { .. } => None,
+            Self::Nonlinear(lip) => lip.bore().shell_ledger(),
+        }
+    }
+
     fn rim_stop_hits(&self) -> Option<u64> {
         match self {
             Self::Linear { voice, .. } => voice.rim_stop_hits(),
@@ -2145,6 +2233,14 @@ impl LipPerformance {
     #[must_use]
     pub fn first_order_fallbacks(&self) -> Option<u64> {
         self.engine.first_order_fallbacks()
+    }
+
+    /// The breathing walls' energy account so far (gas work, work against the room, dissipated and stored energy): `None` for the
+    /// linear bore and for a nonlinear bore without a `bore_wall` row.
+    #[cfg(feature = "nonlinear-brass")]
+    #[must_use]
+    pub fn wall_ledger(&self) -> Option<fs_duct::nonlinear::bore::ShellLedger> {
+        self.engine.wall_ledger()
     }
 
     /// Samples at which the opt-in rim stop acted so far; `None` without the `lip_rim_stop` row (and for `bore nonlinear`).
@@ -3651,7 +3747,7 @@ mod tests {
         assert_eq!(parse("bore_wall rigid\n").expect("parses").bore_wall(), None);
         for (extra, needle) in [
             ("bore_wall\n", "missing field"),
-            ("bore_wall soft\n", "expected `rigid` or `thin-brass"),
+            ("bore_wall soft\n", "expected `rigid`, `thin-brass"),
             ("bore_wall thin-brass 0.0005\n", "missing field"),
             ("bore_wall thin-brass 0 100\nbore_wall_source x\n", "expected a positive number"),
             ("bore_wall thin-brass 0.0005 0\nbore_wall_source x\n", "expected a positive number"),
@@ -3660,6 +3756,17 @@ mod tests {
             ("bore_wall rigid\nbore_wall_source x\n", "bore_wall rigid carries no source"),
             ("bore_wall thin-brass 0.0005 100\n", "needs a bore_wall_source row"),
             ("bore_wall thin-brass 0.0005 100\nbore_wall_source x\n", "nonlinear bore only"),
+            ("bore_wall shell-brass 0.0005\n", "missing field"),
+            ("bore_wall shell-brass 0.0005 1e-4\n", "missing field"),
+            ("bore_wall shell-brass 0.0005 1e-4 4000\n", "missing field"),
+            ("bore_wall shell-brass 0.0005 1e-4 4000 15\nbore_wall_source x\n", "even azimuth count"),
+            ("bore_wall shell-brass 0.0005 1e-4 4000 12\nbore_wall_source x\n", "even azimuth count"),
+            ("bore_wall shell-brass 0.0005 1e-4 4000 256\nbore_wall_source x\n", "count outside its admitted range"),
+            ("bore_wall shell-brass 0 1e-4 4000 16\nbore_wall_source x\n", "expected a positive number"),
+            ("bore_wall shell-brass 0.0005 1e-4 4000 16\n", "needs a bore_wall_source row"),
+            ("bore_wall shell-brass 0.0005 1e-4 4000 16\nbore_wall_source x\n", "nonlinear bore only"),
+            ("bore_wall thin-brass 0.0005 100\nbore_wall shell-brass 0.0005 1e-4 4000 16\nbore_wall_source x\n", "may only appear once"),
+            ("bore_wall shell-brass 0.0005 1e-4 4000 16\nbore_wall rigid\n", "may only appear once"),
         ] {
             let error = parse(extra).expect_err(extra);
             assert!(error.contains(needle), "{extra:?} -> {error}");
@@ -3704,6 +3811,98 @@ mod tests {
         assert_eq!(wall.thick_cells + wall.membrane_cells, wall.cells);
         assert!(wall.largest_thick_half_angle_rad < wall.largest_half_angle_rad);
         assert!(performance.info().bore_wall.is_some());
+    }
+
+    // The nonlinear fixture with 10 mm gas cells (the 37 cells of the bell stay cheap for the bell's shell solve) and `samples`
+    // output samples of a steady blow.
+    #[cfg(feature = "nonlinear-brass")]
+    fn coarse_description(row: &str, pressure: &str, samples: u32) -> LipDescription {
+        use fs_material::gas_species::input::ThermochemicalPhase;
+        let packs = gas_test_support::packs("specimen-gas", 0.029, 3.5, 200.0);
+        let bindings = [packs.binding()];
+        let sources = ThermochemicalSources {
+            species: &bindings,
+            water_species: None,
+            phase: ThermochemicalPhase::FrozenGas,
+        };
+        let steady = format!(
+            "frankensim-gesture-schedule-v1\n\
+             control_rate_hz\t700\n\
+             tracks\t1\n\
+             track\tblow\tblowing-pressure\n\
+             initial\tpressure-pa\t{pressure}\n\
+             events\t0\n"
+        );
+        let rows = format!("bore nonlinear 0.01 16 1 64 20 8000 1e-2\n{row}");
+        let text = fixture(&rows)
+            .replace("moist_air 293.15 101325 0", SPECIMEN)
+            .replace("audio 24000 2400", &format!("audio 24000 {samples}"))
+            .replace(SCHEDULE, &steady);
+        LipDescription::from_bytes_with_gas_sources(text.as_bytes(), Some(&sources)).unwrap()
+    }
+
+    // MB 24332 (the bending branch): the bell of the fixture bore (the two widening cones, 0.37 m) as a brass shell, throat clamped.
+    // Bounds fixed before the first run (satwall/STAMP-bell-tests.txt): the shell reaches the mouthpiece pressure (a nonzero, finite
+    // difference of at most 5 % of the peak); the wall's effect changes by under 25 % when the cut-off doubles (3 kHz to 6 kHz);
+    // the same card repeats bit for bit; the receipt names the coupling modes inside the cut-off.
+    #[cfg(feature = "nonlinear-brass")]
+    #[test]
+    fn bore_wall_shell_brass_reaches_the_mouthpiece_pressure_and_converges_in_its_cut_off() {
+        let samples = 600;
+        let render = |rows: &str| {
+            let mut performance = coarse_description(rows, "3e3", samples).build().unwrap();
+            performance.apply_controls(0).unwrap();
+            performance.record_mouthpiece();
+            performance.block(&mut [0.0; 600]).unwrap();
+            performance.mouthpiece_pressure().to_vec()
+        };
+        let source = "bore_wall_source test fixture, not a measurement\n";
+        let card = |cut: &str, azimuths: usize| format!("bore_wall shell-brass 4.826e-4 1e-4 {cut} {azimuths}\n{source}");
+        let plain = render("");
+        let low = render(&card("3000", 16));
+        let high = render(&card("6000", 16));
+        let fine = render(&card("3000", 32));
+        assert!(plain.iter().chain(&low).chain(&high).chain(&fine).all(|p| p.is_finite()));
+        let peak = plain.iter().fold(0.0_f64, |m, p| m.max(p.abs()));
+        assert!(peak > 1.0, "the blow must reach the cup");
+        let gap = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
+        let (effect, doubling, mesh) = (gap(&plain, &low), gap(&low, &high), gap(&low, &fine));
+        println!("bell shell: effect of the wall {effect:.3e} Pa of a {peak:.3e} Pa peak; doubling the cut-off moves it by {doubling:.3e} Pa, doubling the azimuth count by {mesh:.3e} Pa");
+        assert!(effect > 0.0, "the shell must reach the mouthpiece pressure");
+        assert!(effect <= 0.05 * peak, "{effect} of {peak}");
+        assert!(doubling <= 0.25 * effect, "the cut-off is not converged: {doubling} against {effect}");
+        assert!(mesh <= 0.25 * effect, "the azimuth count is not converged: {mesh} against {effect}");
+        assert!(render(&card("3000", 16)).iter().zip(&low).all(|(a, b)| a.to_bits() == b.to_bits()), "the same card repeats bit for bit");
+        let description = coarse_description(&card("3000", 16), "3e3", 32);
+        let (record, text) = description.bell_shell().expect("declared");
+        assert_eq!(*record, BellShellRecord { thickness_m: 4.826e-4, loss_factor: 1e-4, max_frequency_hz: 3000.0, azimuths: 16 });
+        assert_eq!(text, "test fixture, not a measurement");
+        let performance = description.build().unwrap();
+        let LipBoreInfo::Nonlinear(info) = &performance.info().bore else {
+            panic!("a nonlinear bore");
+        };
+        let bell = info.bell_shell.expect("the shell's receipt");
+        assert!(bell.coupling_modes >= 1 && bell.cells_covered >= 20, "{bell:?}");
+        assert!(bell.lowest_mode_hz > 50.0 && bell.highest_mode_hz <= 3000.0, "{bell:?}");
+        assert!(performance.info().bell_shell.is_some() && info.bore_wall.is_none());
+    }
+
+    // The walls' energy account on the card bell (MB 24332: "energy account closes"). Bounds fixed before the run: gas work equals
+    // stored + dissipated + room work within 1e-9 of the largest of the four (the account of the bore's own step); the wall holds
+    // energy and has dissipated some.
+    #[cfg(feature = "nonlinear-brass")]
+    #[test]
+    fn bore_wall_shell_brass_account_closes_on_the_card_bell() {
+        let source = "bore_wall_source test fixture, not a measurement\n";
+        let rows = format!("bore_wall shell-brass 4.826e-4 1e-4 3000 16\n{source}");
+        let mut performance = coarse_description(&rows, "3e3", 600).build().unwrap();
+        performance.apply_controls(0).unwrap();
+        performance.record_mouthpiece();
+        performance.block(&mut [0.0; 600]).unwrap();
+        let ledger = performance.wall_ledger().expect("the shell's account");
+        println!("bell shell account {ledger:?}: closing error {:.3e}", ledger.closing_error());
+        assert!(ledger.closing_error() <= 1.0e-9, "{ledger:?}");
+        assert!(ledger.stored_j > 0.0 && ledger.dissipated_j > 0.0 && ledger.gas_work_j != 0.0, "{ledger:?}");
     }
 
     #[cfg(feature = "nonlinear-brass")]

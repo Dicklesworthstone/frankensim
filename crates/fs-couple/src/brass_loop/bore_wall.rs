@@ -48,6 +48,27 @@ pub struct BoreWallRecord {
     pub quality: f64,
 }
 
+/// The parsed `bore_wall shell-brass` row: the bell as a shell of brass ([`super::bell_shell`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BellShellRecord {
+    /// Wall thickness [m].
+    pub thickness_m: f64,
+    /// Loss factor of every mode (modal damping `eta omega`).
+    pub loss_factor: f64,
+    /// Modes up to this frequency [Hz] are retained.
+    pub max_frequency_hz: f64,
+    /// Points round the bell's mesh (even, `BELL_MIN_AZIMUTHS` to `BELL_MAX_AZIMUTHS`). The mesh is a polygon of flat facets, which is
+    /// stiffer than the circle for a breathing that varies along the axis by an error that falls as the square of this count: a
+    /// convergence quantity of the card, like the cut-off.
+    pub azimuths: usize,
+}
+
+/// The fewest points round the bell's mesh: the shell owner admits a director only within 0.9 of the facet normals at its node, which
+/// the 16-gon (neighbouring normals at cos(2 pi / 16) = 0.924) meets and the 12-gon (0.866) does not.
+pub const BELL_MIN_AZIMUTHS: usize = 16;
+/// The most points round the bell's mesh.
+pub const BELL_MAX_AZIMUTHS: usize = 128;
+
 /// The brass wall's reduction for the shell: surface density and stiffness at a cell radius.
 #[derive(Clone, Debug)]
 pub struct ThinBrassWall {
