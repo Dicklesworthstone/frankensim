@@ -400,3 +400,31 @@ fn positive_asymptotic_vapor_is_not_deleted_by_net_transfer_rounding() {
         ))
     ));
 }
+
+#[test]
+fn a_net_transfer_encodes_a_tail_only_in_the_tails_own_inventory_class() {
+    // (old inventory plus net transfer, integrated tail, encoded). The first
+    // row is the printed case of the test above: -6.776263578034403e-21 kg
+    // against a 7.04e-154 kg tail. A zero tail keeps its old rule: only an
+    // exactly zero sum encodes it, so a negative sum still refuses there.
+    let tail = 7.040127103708638e-154;
+    for (sum, tail, encoded) in [
+        (-6.776263578034403e-21, tail, false),
+        (0.0, tail, false),
+        (-0.0, tail, false),
+        (1e-30, tail, true),
+        (-1e-30, 0.0, false),
+        (1e-30, 0.0, false),
+        (0.0, 0.0, true),
+        (-0.0, 0.0, true),
+        (f64::NAN, 0.0, false),
+        (f64::INFINITY, 1.0, false),
+        (1.0, f64::NAN, false),
+    ] {
+        assert_eq!(
+            net_transfer_encodes_tail(sum, tail),
+            encoded,
+            "sum {sum:e}, tail {tail:e}"
+        );
+    }
+}

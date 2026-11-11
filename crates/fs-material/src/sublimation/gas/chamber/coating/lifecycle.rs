@@ -150,6 +150,28 @@ fn volume_fraction(
     Ok(fraction)
 }
 
+/// Whether the represented net transfer keeps the inventory class of the
+/// integrated tail. An inventory is negative, exactly zero or positive; a
+/// non-finite one is never encoded. The tail is nonnegative, so a positive tail
+/// whose old inventory plus net transfer rounds to zero OR BELOW is a positive
+/// tail that the net-transfer representation cannot carry, and an exactly zero
+/// tail needs an exactly zero sum. Both kinds refuse, whichever way the last bit
+/// of the sum rounds.
+fn net_transfer_encodes_tail(sum: f64, tail: f64) -> bool {
+    fn class(value: f64) -> Option<u8> {
+        if !value.is_finite() {
+            None
+        } else if value > 0.0 {
+            Some(2)
+        } else if value == 0.0 {
+            Some(1)
+        } else {
+            Some(0)
+        }
+    }
+    matches!((class(sum), class(tail)), (Some(a), Some(b)) if a == b)
+}
+
 /// Advance one internally isothermal supported deposit through birth/extinction.
 ///
 /// `film` retains the original linear series resistance: `None` is the local
@@ -244,11 +266,13 @@ pub fn advance_supported_lifecycle<'catalog>(
                     "integrated supported turnover lost its finite reservoir",
                 ));
             };
-            if ((snapshot.solid.mass_kg - turnover.transferred_mass_kg) == 0.0)
-                != (turnover.deposit_mass_kg == 0.0)
-                || ((context.vapor_mass_kg + turnover.transferred_mass_kg) == 0.0)
-                    != (vapor_mass_kg == 0.0)
-            {
+            if !net_transfer_encodes_tail(
+                snapshot.solid.mass_kg - turnover.transferred_mass_kg,
+                turnover.deposit_mass_kg,
+            ) || !net_transfer_encodes_tail(
+                context.vapor_mass_kg + turnover.transferred_mass_kg,
+                vapor_mass_kg,
+            ) {
                 return Err(invalid(
                     "integrated molecular net transfer cannot represent a positive inventory tail",
                 ));
