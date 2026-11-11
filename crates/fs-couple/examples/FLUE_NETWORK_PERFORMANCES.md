@@ -239,6 +239,22 @@ An open side hole has no lumped form: its outlet load and receiver live on its
 far node. A side hole with an `inner` row whose graph length (the chimney plus
 its added lengths) is below one step refuses by name; use a finer clock.
 
+An open hole's `inner ... series` (Garcia Mayen et al. 2021, eq. 10) is taken
+off the bore the same way, `(|t_a| / 2) (r_i / A)^2` from each of the two bore
+sections (`A` the row's bore radius), and the bore volume they lose, `S_a |t_a|`,
+is not given back: that is the realisation's own error (`HoleInnerLength` in
+`file/duct.rs`). Its size, measured in a scratch lossless plane-wave model of the Davies D whistle
+(HazyDune's `open_ta_size.py`, md5 5b89910f1dff74c138038a708b09e191; 0.3 and
+1.5 mm walls, two outer end corrections): the first resonance sits 0.01 to
+0.28 cent above the source's circuit, 1 to 18 % of the move its `t_a` itself
+makes, growing with the number of open holes (one 0.01 cent, three 0.08 to
+0.11, five 0.21 to 0.28). Given back as a parallel compliance
+`S_a |t_a| / (rho c^2)` at the junction, the lost volume would leave under
+0.006 cent; nothing adds it, and an `inner` row needs a plain `junction` node,
+so a card cannot. On a closed hole the same loss is about the hole's own
+volume and is given back (above); on an open hole the shunt is a mass, so it
+moves the pitch far less. The recorder rows were not sized.
+
 A section without `gas` uses the top-level gas record. A supplied record uses
 the shared material gas parser, including explicit species mixtures and loaded
 thermochemical sources. All regions must have the same static pressure. The

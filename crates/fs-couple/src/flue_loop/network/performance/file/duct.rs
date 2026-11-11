@@ -67,8 +67,18 @@ mod closed_hole_tests;
 /// area, and `-Z_a / 4` is chimney length `d^2 |t_a| / 4` (one gas across the
 /// junction). The shortened bore also loses `S_a |t_a|` of volume, which the
 /// source's series mass does not carry: that is this realisation's own
-/// error. `series` needs exactly two bore sections at the junction, one gas
-/// on the hole and both of them, and each section longer than its share.
+/// error. Its size, measured in a scratch lossless plane-wave model of the
+/// Davies D whistle (HazyDune's `open_ta_size.py`, md5
+/// 5b89910f1dff74c138038a708b09e191; 0.3 and 1.5 mm walls, two outer end
+/// corrections): the first resonance sits 0.01 to 0.28 cent above their
+/// circuit's, 1 to 18 % of the move their `t_a` itself makes, growing with
+/// the number of open holes (one 0.01 cent, three 0.08 to 0.11, five 0.21
+/// to 0.28). Given back as a parallel compliance `S_a |t_a| / (rho c^2)` at
+/// the junction, the lost volume would leave under 0.006 cent; nothing adds
+/// it, and this row needs a plain `junction` node, so a card cannot. The
+/// recorder rows were not sized. `series` needs exactly two bore sections
+/// at the junction, one gas on the hole and both of them, and each section
+/// longer than its share.
 /// `t_i` and `t_a` are their open-hole forms; `t_m` is the same for an open
 /// and a closed hole (Lefebvre and Scavone 2012, Eq. 8, as fs-duct's
 /// `hole_lengths` applies it). A `closed-hole` node takes none of these
