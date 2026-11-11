@@ -1,0 +1,36 @@
+# Outer profile of the bell of a Kruspe F/B-flat double horn, last 85 mm to the rim: READ FROM PHOTOGRAPHS, NOT A MEASURED TABLE.
+# Source: Eduard Kruspe, Double Horn in F / B-flat, 1904-19, brass and nickel-silver, the Metropolitan Museum of Art, object 503607 (public domain; the museum's API records the stated dimensions
+#   'Height 41.9 cm, Diameter (of bell) 31.4 cm', the diameter as 31.432564 cm). Images https://images.metmuseum.org/CRDImages/mi/original/DP-12679-153.jpg and DP-12679-154.jpg (4000 x 3963 px each; the
+#   front and back of the instrument; the bell is seen from the side with its rim almost edge-on).
+# Method [R]: silhouette = pixels of HSV saturation above a threshold (brass against a grey ground), closed, largest component, holes filled (the lane's bell_mask.py, not committed). The two rim tips are the lowest silhouette
+#   point and the extreme point on the other side; the rim line between them is 2033.7 px (front) and 2034.2 px (back) and is SET TO the museum's stated bell diameter 314.3 mm, which gives 0.1545 mm/px
+#   (the lane's bell_profile.py, not committed). The bell axis is the rim line's normal; at each axial distance z from the rim the width of the silhouette along the rim direction is the OUTER diameter. Six extractions: two views,
+#   saturation thresholds 0.15, 0.22 and 0.30. Interpolated to z = 0, 5, 10 ... mm.
+# Checks: the front and back views agree within 1.2 mm for z = 20 to 90 mm (largest 2.1 mm at z = 10 mm). THE SCALE RESTS ON ONE NUMBER: the museum's stated height 41.9 cm does not match the photograph at that scale (the silhouette
+#   is 3415 px tall = 527.6 mm, 26 percent more) and is unexplained. An independent modern horn's printed point, the Alexander double horn of the Edinburgh University Collection (MIMEd 15417, read 2026-11-09: 114 mm at 74.5 mm from the
+#   bell end), is 5 percent above this profile at z = 74.5 mm (108.3 mm); at the height-based scale this profile would read 86 mm there.
+# Uncertainty: range of the six extractions 3 mm for z = 30 to 100 mm (about +-1.5 mm), 7 mm at z = 20, 13 mm at z = 10; z = 0, 5 and 15 mm met a second run of the silhouette on the measuring line (the rolled rim); z > 90 mm is not
+#   readable (another tube touches the line). The wall (about 0.3 to 0.5 mm) is not subtracted: inside diameters are 0.6 to 1.0 mm smaller. THIS IS ANOTHER HORN'S BELL: no Schmid bell picture or scan was found in open form.
+# Columns: z_from_rim_mm; outer_diameter_mm_mean_of_6; min_of_6; max_of_6; primary_view_t0.22; back_view_t0.22; runs_on_line_max; note.
+z_from_rim_mm	outer_diameter_mm_mean_of_6	min_of_6	max_of_6	primary_view_t0.22	back_view_t0.22	runs_on_line_max	note
+0	314.04	312.67	314.40	314.34	314.28	2	another tube touches the line
+5	276.67	265.80	288.30	276.56	277.73	3	another tube touches the line
+10	255.30	248.72	261.81	256.23	258.19	1	
+15	236.81	232.34	241.32	237.76	238.18	2	another tube touches the line
+20	219.14	215.65	222.54	219.76	221.41	1	
+25	202.90	199.43	204.91	204.00	204.34	1	
+30	187.90	185.07	189.58	189.01	189.12	1	
+35	174.31	172.25	175.56	175.56	174.99	1	
+40	162.22	159.86	163.51	163.51	162.70	1	
+45	151.52	149.06	152.66	152.31	152.35	1	
+50	141.84	139.80	142.83	142.80	142.46	1	
+55	133.41	131.22	134.79	133.99	134.04	1	
+60	125.89	124.03	127.22	126.42	126.24	1	
+65	118.97	117.06	120.28	119.61	119.28	1	
+70	112.75	110.71	114.11	113.28	112.95	1	
+75	106.90	104.97	108.41	107.25	107.00	1	
+80	101.62	99.84	103.03	102.15	101.67	1	
+85	96.87	94.94	98.11	97.06	97.19	1	
+90	92.39	90.80	93.82	92.26	92.71	1	
+95	88.40	86.75	89.68	88.48	88.62	2	another tube touches the line
+100	84.56	82.99	86.32	84.84	84.67	2	another tube touches the line

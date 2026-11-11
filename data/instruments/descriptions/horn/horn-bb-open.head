@@ -1,0 +1,237 @@
+# Modern Bb horn, valves open (the Bb side of a double horn, no valve pressed), one held note: mouthpiece, bore from the mouthpiece to the bell rim, lip, microphone.
+# render.sh prepends the schema and audio records and appends the per-note lip exponent and the schedule record, so one description serves every open-valve note.
+#
+# LABELS. Every number carries one: [M] measured in the cited source, [R] read from an image by this lane with the calibration stated, [B] borrowed from another instrument or another player, [N] a maker's nominal figure.
+# UNKNOWN marks what no source this lane could open gives. Nothing is fitted to a recording. The pitch of a note is never an input: it is the lock the loop finds between the lip and the bore.
+#
+# --- what this card is ------------------------------------------------------------------------------------------------------------------------------------------
+# The air column of the Bb side of a modern double horn by Engelbert Schmid (Germany, rotary valves, screw-on bell), valves open, measured by acoustic pulse reflectometry: Kemp, Chick, Campbell and Hendrie,
+# 'Acoustic pulse reflectometry for the measurement of horn crooks', Acoustics'08 Paris, Figs 8 and 9, curve 'Bb Schmid' (with bell). The recorded horn (University of Iowa MIS, J. Wiskus) is of a model the Iowa pages do not state:
+# this bore is a population stand-in for it, not that instrument, and the open Bb series is the only series it can play (the valve loops are not measured, so no valved note is claimed).
+#
+# --- bore: three parts, joined end to end ---------------------------------------------------------------------------------------------------------------------------
+# 1. MOUTHPIECE, 2 cones: the Paxman '3A' formerly used with the Alexander double horn of the Edinburgh University Collection (MIMEd record 16358, as read on 2026-11-09; the record is behind an access check today):
+#    cup diameter 16.6 mm [M], throat 4.5 mm [M], cup depth about 26 mm [M], shank depth 31.7 mm [M]. No cup or backbore contour is printed: the cup is ONE cone from the rim to the throat and the backbore ONE cone from the throat to the
+#    receiver bore [B: straight cones between the printed ends]. ANOTHER HORN'S MOUTHPIECE, not the Schmid's own, and not the Iowa player's. The mouthpiece is taken to end where the reflectometer's profile starts (x = 0 below): the profile's first
+#    diameter, 7.7 mm, is the leadpipe just beyond a shank tip (shank outer diameter 7.5 mm at its tip, the same record), not the receiver socket 9 mm wide; the alternative reading (shank inside the profile) would shorten the tube by 31.7 mm.
+# 2. MAIN BORE, x = 0 to 2770 mm from the reflectometer's reference plane, 147 cones through stations every 20 mm [R]: the diameter of the 'Bb Schmid' curve read from the two raster figures of the paper
+#    (560 x 420 px JPEGs): Fig 9 for x up to 1860 mm (diameter 7.7 to 15.8 mm; 0.026 mm and 4.6 mm per pixel), Fig 8 for 1880 to 2770 mm (diameter 15.8 to 98.8 mm; 0.272 mm and 8.4 mm per pixel). Calibration by least squares on
+#    the plot-box ticks (residuals 0.0 to 0.44 px), curves isolated by colour mask; the reading error of one pixel is 0.03 mm in the main bore, 0.3 to 0.7 mm above 16 mm, 1 to 4 mm above 40 mm diameter; the source's own
+#    bound is +-0.1 mm up to 1 m and +-0.8 mm beyond 2 m [M], and it says plane-wave reflectometry is unreliable from about 60 mm diameter on (x about 2660 mm). Values are kept as read: the spikes at 560 to 800 mm (change valves) and 1100 to
+#    1300 mm (tuning slide and water keys) are not smoothed. Stations x = 20 to 160 mm are the reflectometer's red and green curves where the blue is hidden (they coincide on the shared path). The station at x = 0 is the red curve's first pixel,
+#    7.66 mm at x = 6 mm, carried to x = 0. Data and method: descriptions/horn/kemp2008-fig8-9-bb-schmid-stations.tsv (the scripts of the run are not committed).
+# 3. BELL END, 17 cones from the reflectometer's last diameter (98.75 mm, x = 2770 mm) to the rim: the OUTER profile of the bell of a Kruspe F/B-flat double horn (Metropolitan Museum object 503607, 1904-19, public domain), read from two photographs,
+#    front and back, side-on [R]: silhouette by colour saturation, rim line = the Met's stated bell diameter 314.3 mm [M] as the scale (0.1545 mm per pixel), width along the rim direction at each distance z from the rim, mean of six extractions
+#    (two views, three thresholds), range +-1.5 mm for z = 30 to 85 mm, +-3 mm at z = 20, +-7 mm at z = 10 mm. The Met's stated height 41.9 cm does NOT match the photograph at that scale (26 percent), so the scale rests on one number. The wall (about
+#    0.3 to 0.5 mm) is not subtracted. The Schmid's own bell is not measured: this is ANOTHER HORN'S BELL joined at its outer diameter of 98.75 mm (z = 83.0 mm from its rim); rim diameter 314.3 mm (nominal Schmid and Alexander bells 310 mm [N]).
+#    At z = 0, 5 and 15 mm the measuring line met a second run of the silhouette (the rolled rim, a neighbouring tube); those values are kept and are the least certain. Data and method:
+#    descriptions/horn/met503607-kruspe-bell-stations.tsv (the scripts of the run are not committed). The join is a straight cone between the two sets of stations: no flare law is fitted.
+# Total: 166 cones, 2.9107 m from the cup rim to the bell rim; the open Bb series of a Bb1 horn has a half wavelength near 2.9 m.
+# NOT in this card: the valve loops and slides, the water keys as apertures, the hand in the bell (no geometry published; Watts 2009 and Dell et al. 2010 give impedance only), the receiver socket and the leadpipe's soldered joints.
+#
+# --- ambient and bore gas (borrowed, byte for byte from the live horn cards) ---------------------------------------------------------------------------------------
+# 293.15 K, dry; UNKNOWN: the temperature and humidity of the Iowa anechoic chamber. The bore holds the steady full-breath state of the clarinet and oboe cards (27 C, saturated, 4.5 % CO2, 16.5 % O2 dry basis: Coltman 1966 and
+# Nederveen 1969 through Fletcher and Rossing 1998), uniform along the bore: a woodwind source borrowed for a brass bore, the end-member and not a played-in state (Boutin, Smith and Wolfe 2020, JASA 148:1817).
+full_scale_pa 50
+ambient moist_air 293.15 101325 0
+bore_gas pack breath-woodwind-exhaled-coltman1966-nederveen1969
+#
+# --- lip (borrowed, byte for byte from the live horn cards) ---------------------------------------------------------------------------------------------------------
+# NO HORN-PLAYER LIP IS PUBLISHED. Cullen (2000), PhD thesis, University of Edinburgh, Table A.2 p.253 embouchure 19 (the tightest of 20): fL1 237.0 Hz, QL1 12.0, 1/muL1 0.072 m2/kg [M]; b 9 mm and H0 0.25 mm are ESTIMATED by the thesis;
+# ARTIFICIAL latex lips on a trombone-size mouthpiece (outward-striking mode only), not a horn player's. The lip pre-stress of the schedule is the free player input: the setting of each held note is a ladder read from the render, never a pitch.
+lip_response 237.0 12.0 0.072 0.009 0.00025 1.0e-4
+lip_source Cullen (2000) PhD Edinburgh Table A.2 p.253 embouchure 19 (tightest of 20): fL1 237.0 Hz, QL1 12.0, 1/muL1 0.072 m2/kg, b 9 mm, H0 0.25 mm; artificial latex lips on a trombone-size mouthpiece, outward-striking mode only
+# lip_area_exponent: appended per note by render.sh. MEASURED on a TROMBONIST, per note: Bromage, Campbell and Gilbert (2010), 'Open areas of vibrating lips in trombone playing' (HAL hal-00474644v1), Table 2, one player, mezzo forte:
+# q = 1.2 at Bb1, 1.3 at Bb2, 1.6 at F3, 1.9 at F4; linear interpolation in MIDI between the printed notes, no extrapolation (a note above F4 carries no row). A trombonist's lips on a trombone mouthpiece, not a horn player's.
+#
+# --- mouthpiece cup volume, termination, modes, radiation load (borrowed, byte for byte) ----------------------------------------------------------------------------
+# The cup is geometry in the bore above (rim radius 8.3 mm falling to a 2.25 mm throat), so the lumped cup volume is the smallest the format admits (1 mm^3): a format floor, not a measurement.
+cup_volume_m3 1e-9
+termination flanged
+modes 3 1
+modal_baffle 1e-5 33554432
+# constriction_noise: the printed duct-constriction law of Oldham and Ukpoho (J. Sound Vib. 140(2), 1990) on the lip channel, an extrapolation from dampers and orifice plates in a 300 mm duct at 10-25 m/s; the radius is the cup rim radius of this
+# card's first bore record (8.3 mm); the seed is a declared label.
+constriction_noise 7 8.3e-3
+# NUMERICAL CONTROL (not physics, not fitted to any recording), as on the live horn cards: the trombone card's mouth_flow_tail_tol 2e-6 is refused on a 4.5 m bore at the 65536-tap ceiling; the tolerance declared here is the live horn cards' 4e-6.
+mouth_flow_tail_tol 4e-6
+#
+# --- bore: 166 cones, [M]/[R]/[B] as stated above, units metres: inlet radius, outlet radius, length -----------------------------------------------------------------
+# mouthpiece cup (Paxman 3A, [M] ends, one cone [B])
+cone 8.3000000e-03 2.2500000e-03 2.6000000e-02
+# mouthpiece backbore (Paxman 3A throat to the reflectometer's first diameter, one cone [B])
+cone 2.2500000e-03 3.8300000e-03 3.1700000e-02
+# main bore, Schmid Bb side, acoustic pulse reflectometry [R]: stations at x = 0, 20, 40 ... 2770 mm
+cone 3.8300000e-03 3.9850000e-03 2.0000000e-02
+cone 3.9850000e-03 4.5555000e-03 2.0000000e-02
+cone 4.5555000e-03 4.8150000e-03 2.0000000e-02
+cone 4.8150000e-03 4.8945000e-03 2.0000000e-02
+cone 4.8945000e-03 4.8980000e-03 2.0000000e-02
+cone 4.8980000e-03 5.0080000e-03 2.0000000e-02
+cone 5.0080000e-03 5.0930000e-03 2.0000000e-02
+cone 5.0930000e-03 5.1315000e-03 2.0000000e-02
+cone 5.1315000e-03 5.2000000e-03 2.0000000e-02
+cone 5.2000000e-03 5.2695000e-03 2.0000000e-02
+cone 5.2695000e-03 5.3415000e-03 2.0000000e-02
+cone 5.3415000e-03 5.4105000e-03 2.0000000e-02
+cone 5.4105000e-03 5.4940000e-03 2.0000000e-02
+cone 5.4940000e-03 5.5830000e-03 2.0000000e-02
+cone 5.5830000e-03 5.6315000e-03 2.0000000e-02
+cone 5.6315000e-03 5.6775000e-03 2.0000000e-02
+cone 5.6775000e-03 5.7040000e-03 2.0000000e-02
+cone 5.7040000e-03 5.7675000e-03 2.0000000e-02
+cone 5.7675000e-03 5.8430000e-03 2.0000000e-02
+cone 5.8430000e-03 5.8860000e-03 2.0000000e-02
+cone 5.8860000e-03 5.9065000e-03 2.0000000e-02
+cone 5.9065000e-03 5.9340000e-03 2.0000000e-02
+cone 5.9340000e-03 5.9425000e-03 2.0000000e-02
+cone 5.9425000e-03 5.9115000e-03 2.0000000e-02
+cone 5.9115000e-03 5.9730000e-03 2.0000000e-02
+cone 5.9730000e-03 5.9655000e-03 2.0000000e-02
+cone 5.9655000e-03 5.9750000e-03 2.0000000e-02
+cone 5.9750000e-03 6.0515000e-03 2.0000000e-02
+cone 6.0515000e-03 6.0525000e-03 2.0000000e-02
+cone 6.0525000e-03 6.0925000e-03 2.0000000e-02
+cone 6.0925000e-03 6.0845000e-03 2.0000000e-02
+cone 6.0845000e-03 5.9540000e-03 2.0000000e-02
+cone 5.9540000e-03 5.9390000e-03 2.0000000e-02
+cone 5.9390000e-03 6.0400000e-03 2.0000000e-02
+cone 6.0400000e-03 6.0400000e-03 2.0000000e-02
+cone 6.0400000e-03 6.0395000e-03 2.0000000e-02
+cone 6.0395000e-03 6.0515000e-03 2.0000000e-02
+cone 6.0515000e-03 6.1130000e-03 2.0000000e-02
+cone 6.1130000e-03 6.0075000e-03 2.0000000e-02
+cone 6.0075000e-03 6.0600000e-03 2.0000000e-02
+cone 6.0600000e-03 6.0595000e-03 2.0000000e-02
+cone 6.0595000e-03 6.0900000e-03 2.0000000e-02
+cone 6.0900000e-03 6.1100000e-03 2.0000000e-02
+cone 6.1100000e-03 6.1445000e-03 2.0000000e-02
+cone 6.1445000e-03 6.1000000e-03 2.0000000e-02
+cone 6.1000000e-03 6.1355000e-03 2.0000000e-02
+cone 6.1355000e-03 6.1115000e-03 2.0000000e-02
+cone 6.1115000e-03 6.0955000e-03 2.0000000e-02
+cone 6.0955000e-03 6.1285000e-03 2.0000000e-02
+cone 6.1285000e-03 6.1650000e-03 2.0000000e-02
+cone 6.1650000e-03 6.1565000e-03 2.0000000e-02
+cone 6.1565000e-03 6.1245000e-03 2.0000000e-02
+cone 6.1245000e-03 6.1195000e-03 2.0000000e-02
+cone 6.1195000e-03 6.1220000e-03 2.0000000e-02
+cone 6.1220000e-03 6.1915000e-03 2.0000000e-02
+cone 6.1915000e-03 6.2030000e-03 2.0000000e-02
+cone 6.2030000e-03 6.1515000e-03 2.0000000e-02
+cone 6.1515000e-03 5.9980000e-03 2.0000000e-02
+cone 5.9980000e-03 5.8685000e-03 2.0000000e-02
+cone 5.8685000e-03 6.1860000e-03 2.0000000e-02
+cone 6.1860000e-03 6.2225000e-03 2.0000000e-02
+cone 6.2225000e-03 6.2280000e-03 2.0000000e-02
+cone 6.2280000e-03 6.3610000e-03 2.0000000e-02
+cone 6.3610000e-03 6.2975000e-03 2.0000000e-02
+cone 6.2975000e-03 6.2180000e-03 2.0000000e-02
+cone 6.2180000e-03 6.2010000e-03 2.0000000e-02
+cone 6.2010000e-03 6.2335000e-03 2.0000000e-02
+cone 6.2335000e-03 6.2920000e-03 2.0000000e-02
+cone 6.2920000e-03 6.2630000e-03 2.0000000e-02
+cone 6.2630000e-03 6.2320000e-03 2.0000000e-02
+cone 6.2320000e-03 6.2200000e-03 2.0000000e-02
+cone 6.2200000e-03 6.2245000e-03 2.0000000e-02
+cone 6.2245000e-03 6.1975000e-03 2.0000000e-02
+cone 6.1975000e-03 6.2010000e-03 2.0000000e-02
+cone 6.2010000e-03 6.3405000e-03 2.0000000e-02
+cone 6.3405000e-03 6.3385000e-03 2.0000000e-02
+cone 6.3385000e-03 6.3780000e-03 2.0000000e-02
+cone 6.3780000e-03 6.4210000e-03 2.0000000e-02
+cone 6.4210000e-03 6.4660000e-03 2.0000000e-02
+cone 6.4660000e-03 6.5130000e-03 2.0000000e-02
+cone 6.5130000e-03 6.5275000e-03 2.0000000e-02
+cone 6.5275000e-03 6.6240000e-03 2.0000000e-02
+cone 6.6240000e-03 6.6580000e-03 2.0000000e-02
+cone 6.6580000e-03 6.7500000e-03 2.0000000e-02
+cone 6.7500000e-03 6.8355000e-03 2.0000000e-02
+cone 6.8355000e-03 6.9710000e-03 2.0000000e-02
+cone 6.9710000e-03 7.0690000e-03 2.0000000e-02
+cone 7.0690000e-03 7.1825000e-03 2.0000000e-02
+cone 7.1825000e-03 7.2895000e-03 2.0000000e-02
+cone 7.2895000e-03 7.4115000e-03 2.0000000e-02
+cone 7.4115000e-03 7.5270000e-03 2.0000000e-02
+cone 7.5270000e-03 7.6265000e-03 2.0000000e-02
+cone 7.6265000e-03 7.8160000e-03 2.0000000e-02
+cone 7.8160000e-03 7.9110000e-03 2.0000000e-02
+cone 7.9110000e-03 8.0725000e-03 2.0000000e-02
+cone 8.0725000e-03 8.2865000e-03 2.0000000e-02
+cone 8.2865000e-03 8.4545000e-03 2.0000000e-02
+cone 8.4545000e-03 8.5260000e-03 2.0000000e-02
+cone 8.5260000e-03 8.5905000e-03 2.0000000e-02
+cone 8.5905000e-03 8.8235000e-03 2.0000000e-02
+cone 8.8235000e-03 9.0890000e-03 2.0000000e-02
+cone 9.0890000e-03 9.2765000e-03 2.0000000e-02
+cone 9.2765000e-03 9.4640000e-03 2.0000000e-02
+cone 9.4640000e-03 9.6520000e-03 2.0000000e-02
+cone 9.6520000e-03 9.9505000e-03 2.0000000e-02
+cone 9.9505000e-03 1.0086500e-02 2.0000000e-02
+cone 1.0086500e-02 1.0351000e-02 2.0000000e-02
+cone 1.0351000e-02 1.0538500e-02 2.0000000e-02
+cone 1.0538500e-02 1.0850000e-02 2.0000000e-02
+cone 1.0850000e-02 1.1133500e-02 2.0000000e-02
+cone 1.1133500e-02 1.1416500e-02 2.0000000e-02
+cone 1.1416500e-02 1.1700000e-02 2.0000000e-02
+cone 1.1700000e-02 1.2021000e-02 2.0000000e-02
+cone 1.2021000e-02 1.2321000e-02 2.0000000e-02
+cone 1.2321000e-02 1.2668000e-02 2.0000000e-02
+cone 1.2668000e-02 1.2947500e-02 2.0000000e-02
+cone 1.2947500e-02 1.3389500e-02 2.0000000e-02
+cone 1.3389500e-02 1.3775000e-02 2.0000000e-02
+cone 1.3775000e-02 1.4371000e-02 2.0000000e-02
+cone 1.4371000e-02 1.4694500e-02 2.0000000e-02
+cone 1.4694500e-02 1.5290000e-02 2.0000000e-02
+cone 1.5290000e-02 1.5885500e-02 2.0000000e-02
+cone 1.5885500e-02 1.6485000e-02 2.0000000e-02
+cone 1.6485000e-02 1.7104500e-02 2.0000000e-02
+cone 1.7104500e-02 1.7844500e-02 2.0000000e-02
+cone 1.7844500e-02 1.8676500e-02 2.0000000e-02
+cone 1.8676500e-02 1.9408000e-02 2.0000000e-02
+cone 1.9408000e-02 1.9867500e-02 2.0000000e-02
+cone 1.9867500e-02 2.1865000e-02 2.0000000e-02
+cone 2.1865000e-02 2.3099000e-02 2.0000000e-02
+cone 2.3099000e-02 2.3925000e-02 1.0000000e-02
+cone 2.3925000e-02 2.4746000e-02 1.0000000e-02
+cone 2.4746000e-02 2.7206500e-02 1.0000000e-02
+cone 2.7206500e-02 2.7499500e-02 1.0000000e-02
+cone 2.7499500e-02 2.8383000e-02 1.0000000e-02
+cone 2.8383000e-02 2.9920500e-02 1.0000000e-02
+cone 2.9920500e-02 3.2665000e-02 1.0000000e-02
+cone 3.2665000e-02 3.4631000e-02 1.0000000e-02
+cone 3.4631000e-02 3.6305000e-02 1.0000000e-02
+cone 3.6305000e-02 3.7712500e-02 1.0000000e-02
+cone 3.7712500e-02 3.9536000e-02 1.0000000e-02
+cone 3.9536000e-02 4.0810000e-02 1.0000000e-02
+cone 4.0810000e-02 4.3992500e-02 1.0000000e-02
+cone 4.3992500e-02 4.5948000e-02 1.0000000e-02
+cone 4.5948000e-02 4.7360500e-02 1.0000000e-02
+cone 4.7360500e-02 4.8225500e-02 1.0000000e-02
+cone 4.8225500e-02 4.9376500e-02 1.0000000e-02
+# bell end, Kruspe F/B-flat double horn (Metropolitan Museum 503607), photographs [R]: from z = 83.0 mm to the rim
+cone 4.9376500e-02 5.0810000e-02 3.0178947e-03
+cone 5.0810000e-02 5.3450000e-02 5.0000000e-03
+cone 5.3450000e-02 5.6375000e-02 5.0000000e-03
+cone 5.6375000e-02 5.9485000e-02 5.0000000e-03
+cone 5.9485000e-02 6.2945000e-02 5.0000000e-03
+cone 6.2945000e-02 6.6705000e-02 5.0000000e-03
+cone 6.6705000e-02 7.0920000e-02 5.0000000e-03
+cone 7.0920000e-02 7.5760000e-02 5.0000000e-03
+cone 7.5760000e-02 8.1110000e-02 5.0000000e-03
+cone 8.1110000e-02 8.7155000e-02 5.0000000e-03
+cone 8.7155000e-02 9.3950000e-02 5.0000000e-03
+cone 9.3950000e-02 1.0145000e-01 5.0000000e-03
+cone 1.0145000e-01 1.0957000e-01 5.0000000e-03
+cone 1.0957000e-01 1.1840500e-01 5.0000000e-03
+cone 1.1840500e-01 1.2765000e-01 5.0000000e-03
+cone 1.2765000e-01 1.3833500e-01 5.0000000e-03
+cone 1.3833500e-01 1.5715000e-01 5.0000000e-03
+bore_source Kemp, Chick, Campbell and Hendrie (2008) Acoustics'08 Paris Figs 8 and 9 'Bb Schmid' (Engelbert Schmid Bb/Eb-alto double horn, rotary valves, valves open), 166 cones through 148 stations read from the raster figures (read error 0.03 mm to 4 mm by diameter, source bound +-0.1 mm to +-0.8 mm); mouthpiece Paxman 3A of an Alexander double horn (Edinburgh MIMEd 16358: cup 16.6, throat 4.5, cup depth about 26, shank 31.7 mm); bell end read from photographs of a Kruspe F/B-flat double horn (Metropolitan Museum 503607, rim diameter 314.3 mm); population stand-in for the Iowa horn, whose model is unstated
+#
+# --- microphone and observer ------------------------------------------------------------------------------------------------------------------------------------
+# UIowa MIS pages: 'Distance 5 feet' = 1.524 m, anechoic chamber (as on the live horn cards). On the bell axis in the baffle frame; UNKNOWN: the player's bell-to-microphone orientation and the microphone's directivity are not modelled.
+# The band is the resolved band of the 128-ring, 512-point receiver on the 0.157 m bell rim, declared at 2300 Hz.
+microphone 0 0 1.524 128 512 2300
+# observer_gas: the exterior gas's absorption and dispersion on the bell-to-microphone paths (classical Stokes-Kirchhoff law, the form the flute pages use); it changes observation only, not the lip, the bore or the bell load (borrowed, byte for byte).
+observer_gas stokes-kirchhoff 4096 1000000 50000000
