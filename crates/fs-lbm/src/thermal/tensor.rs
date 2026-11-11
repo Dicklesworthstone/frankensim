@@ -30,6 +30,12 @@ pub struct DiffusivityTensor<const D: usize> {
     pub(crate) relaxation: [[f64; D]; D],
 }
 
+/// Largest relative error, in units of `f64::EPSILON`, with which a diagonal
+/// diffusivity must come back from the represented relaxation: 2^26 x eps = 2^-26,
+/// half of the 52 fraction bits (a diffusivity of about 1e-8 lattice units keeps that
+/// much; the loss grows as 1 / D, so a smaller one refuses).
+const OFFSET_ROUND_TRIP: f64 = 67_108_864.0;
+
 impl<const D: usize> DiffusivityTensor<D> {
     /// Admit a finite, symmetric, strictly positive-definite tensor expressed
     /// in the fixed Cartesian axes of the square/cubic lattice.
@@ -87,11 +93,34 @@ impl<const D: usize> DiffusivityTensor<D> {
                 (if row == column { 2.0 } else { 0.0 }) - relaxation[row][column]
             })
         });
-        fs_la::factor::cholesky(relaxation.as_flattened(), D)
-            .and_then(|_| fs_la::factor::cholesky(complement.as_flattened(), D))
-            .map_err(|_| {
+        let relaxation_factor =
+            fs_la::factor::cholesky(relaxation.as_flattened(), D).map_err(|_| {
                 invalid("thermal tensor flux relaxation must have eigenvalues in (0, 2)")
             })?;
+        fs_la::factor::cholesky(complement.as_flattened(), D).map_err(|_| {
+            invalid("thermal tensor flux relaxation must have eigenvalues in (0, 2)")
+        })?;
+        // The half-step offset puts the diffusivity into the low bits of a number near 1/2
+        // (tau = D / c_T^2 + I / 2), so a tiny diffusivity is lost when tau is formed and the
+        // represented relaxation S = tau^-1 cannot give it back; the positivity checks above
+        // can still pass on roundoff alone (MIN_POSITIVE next to 0.1 passed them). Recover
+        // each diagonal diffusivity from S, by inverting S, and refuse unless it returns to
+        // within OFFSET_ROUND_TRIP x eps of itself (relative): the diffusivity must keep half of
+        // its 52 fraction bits through the offset. Off-diagonal entries carry no offset.
+        for axis in 0..D {
+            let mut basis = [0.0; D];
+            basis[axis] = 1.0;
+            relaxation_factor.solve(&mut basis);
+            let recovered = cs2 * (basis[axis] - 0.5);
+            let error = (recovered - diffusivity[axis][axis]).abs();
+            if !error.is_finite()
+                || error > OFFSET_ROUND_TRIP * f64::EPSILON * diffusivity[axis][axis]
+            {
+                return Err(invalid(
+                    "thermal diffusivity is lost in the half-step offset of its relaxation",
+                ));
+            }
+        }
         for row in 0..D {
             let mut residual = 0.0;
             for column in 0..D {

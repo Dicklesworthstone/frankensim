@@ -167,6 +167,22 @@ fn g0_tensor_admission_preserves_axes_and_refuses_unresolved_or_nonpassive_laws(
     );
 }
 
+#[test]
+fn g0_tensor_admission_refuses_a_diffusivity_lost_in_the_half_step_offset_and_keeps_the_rest() {
+    // A diagonal diffusivity must come back from the represented relaxation to 2^-26 (tensor.rs): 1e-6
+    // keeps about ten digits through the offset, 1e-12 about five, and 0.1 all but the last few bits.
+    for kept in [
+        [[0.1, 0.0], [0.0, 0.1]],
+        [[1e-6, 0.0], [0.0, 0.1]],
+        [[0.1, 0.0], [0.0, 1e-6]],
+    ] {
+        assert!(DiffusivityTensor::from_lattice(kept).is_ok(), "{kept:?}");
+    }
+    for lost in [[[1e-12, 0.0], [0.0, 0.1]], [[0.1, 0.0], [0.0, 1e-12]]] {
+        assert!(DiffusivityTensor::from_lattice(lost).is_err(), "{lost:?}");
+    }
+}
+
 fn limits(cells: usize) -> ThermalSourceLimits {
     ThermalSourceLimits {
         max_cells: cells,
