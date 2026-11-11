@@ -95,14 +95,18 @@ fn liquid_response(
             residual_temperature_k: [rlo, rhi],
         });
     }
-    let converged = |sample: LiquidSample, residual: f64, width: f64| {
+    // `gate` is the share of the declared temperature tolerance the residual
+    // may use. The search keeps 0.25 of it, so that rebuilding the gas from the
+    // accepted heat and rounding the liquid enthalpy still fit the declared
+    // tolerance that the caller checks afterwards.
+    let converged = |sample: LiquidSample, residual: f64, width: f64, gate: f64| {
         // Since T(h) increases, dF/dQ >= 1/K. Either the retained Q bracket
         // or K*|F| bounds the local heat error without guessing a derivative.
         let uncertainty = width.abs().min(response.k * residual.abs());
         let direction = sample.q == 0.0 || sample.q.signum() * (gas_t - sample.t) >= 0.0;
         if sample.q != 0.0
             && direction
-            && residual.abs() <= 0.25 * response.temperature_tolerance
+            && residual.abs() <= gate * response.temperature_tolerance
             && uncertainty <= energy_allowance
         {
             Some(uncertainty)
@@ -110,18 +114,26 @@ fn liquid_response(
             None
         }
     };
-    if let Some(error) = converged(lo, rlo, hi.q - lo.q) {
+    if let Some(error) = converged(lo, rlo, hi.q - lo.q, 0.25) {
         return Ok((lo, error));
     }
-    if let Some(error) = converged(hi, rhi, hi.q - lo.q) {
+    if let Some(error) = converged(hi, rhi, hi.q - lo.q, 0.25) {
         return Ok((hi, error));
     }
     let mut count = 0usize;
+    let mut collapsed = false;
     while count < response.maximum_iterations {
         poll(cancelled)?;
-        let h = interior(lo.h, hi.h, rlo, rhi);
+        let mut h = interior(lo.h, hi.h, rlo, rhi);
         if h == lo.h || h == hi.h {
-            break;
+            // The safeguarded secant rounded onto an end of a bracket that may
+            // still be several ulps wide: bisect on, so that the search closes
+            // only on two ADJACENT represented enthalpies.
+            h = lo.h + 0.5 * (hi.h - lo.h);
+            if h == lo.h || h == hi.h {
+                collapsed = true;
+                break;
+            }
         }
         let sample = response.sample(h, temperature)?;
         count += 1;
@@ -129,7 +141,7 @@ fn liquid_response(
             .checked_add(1)
             .ok_or(invalid("joint heat work overflow"))?;
         let residual = response.residual(sample, gas_t)?;
-        if let Some(error) = converged(sample, residual, hi.q - lo.q) {
+        if let Some(error) = converged(sample, residual, hi.q - lo.q, 0.25) {
             return Ok((sample, error));
         }
         if residual < 0.0 {
@@ -138,6 +150,26 @@ fn liquid_response(
         } else {
             hi = sample;
             rhi = residual;
+        }
+    }
+    // The bracket closed on two adjacent represented enthalpies: nothing lies
+    // between them, so the endpoint with the smaller |residual| is the closest
+    // the chart can come. One enthalpy ulp moves the residual by
+    // ulp(h)*(1/cp + m/k); at a datum of 1e8 J/kg and an 8e-6 kg droplet that is
+    // 8e-9 K, so a root between the two leaves the better endpoint up to 4e-9 K
+    // away (3.6e-9 K in the measured call), which the search's own gate
+    // 0.25*tolerance (2.5e-9 K at a tolerance of 1e-8 K) refuses for every
+    // represented enthalpy. The declared tolerance itself is the acceptance
+    // here, with the same ordering and uncertainty checks; a one-ulp bracket
+    // whose better endpoint is outside it still refuses.
+    if collapsed && lo.h.next_up() == hi.h {
+        let (sample, residual) = if rlo.abs() <= rhi.abs() {
+            (lo, rlo)
+        } else {
+            (hi, rhi)
+        };
+        if let Some(error) = converged(sample, residual, hi.q - lo.q, 1.0) {
+            return Ok((sample, error));
         }
     }
     Err(GasEvaporationError::HeatNotConverged {
@@ -548,3 +580,6 @@ pub(super) fn sensible_heat(
         surfaces: reports,
     })
 }
+
+#[cfg(test)]
+mod tests;
