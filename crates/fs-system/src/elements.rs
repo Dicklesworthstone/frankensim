@@ -70,6 +70,8 @@ use fs_ports::{PortKind, StableId};
 
 use crate::ledger::Sum;
 
+mod node;
+pub use node::HeatNode;
 mod resistance;
 pub use resistance::Resistance;
 mod stream;

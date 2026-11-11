@@ -150,7 +150,16 @@ physics owners below fs-couple can be composed without it.
   temperature at the start of the step, which carries no power and leaves
   state and receipt unchanged, so a law that reads it is held over the step:
   first-order feedback), `Conductance` (heat ports `a`, `b`, entropy
-  `G (Ta - Tb)^2 / (Ta Tb) dt`), `Heater` (Joule heater, power never
+  `G (Ta - Tb)^2 / (Ta Tb) dt`), `HeatNode` (a thermal node of no capacity
+  joined to `n` bodies by conductances, with a heat source at the node:
+  port `source` receives the heat rate put into the node and returns its
+  temperature `T_n = (P + sum G_k T_k) / sum G_k`; `body<k>` receives that
+  body's temperature and returns `G_k (T_k - T_n)`; each branch generates
+  `G_k (T_k - T_n)^2 / (T_k T_n) dt`; exactly linear; it refuses a source
+  that leaves the node no positive temperature. Without a source it is the
+  conductances in series; with one it is the plane a heat is generated on
+  between bodies, and the heat divides by where the bodies put the node, not
+  by a prescribed fraction), `Heater` (Joule heater, power never
   negative). `Force`, `FlowSource` and `Heater` keep a `SourceAccount` whose clock is a
   compensated sum like the kernel's, so they read the time a boundary
   receives bit for bit; their stored energy is the energy that entered them
@@ -465,6 +474,23 @@ Elements, `tests/elements.rs`:
   moves uniformly;
 - two bodies through a conductance relax by `(1 - h) / (1 + h)` per step,
   keep their energy, and the ledger's entropy matches `sum C ln(T / T0)`;
+- a heat node: over 200 drawn sources and body temperatures it passes the
+  conformance and tangent checks, sits where its balance puts it, returns
+  each branch's heat, and generates exactly the entropy that leaves through
+  its ports less what enters; it also conforms with its bodies within a
+  nanokelvin of one temperature and exactly at it (its first energy
+  tolerance was sized by the rates, which vanish there, where the rounding
+  is that of the terms `G T`; a graph refused such a step, and the tolerance
+  is now sized by those terms); it refuses no conductance, a conductance
+  that is not positive, a source that leaves it no positive temperature and
+  values that are not numbers, writing nothing. Two bodies through a node of
+  2 and 6 W/K with nothing on its source keep step with the same bodies
+  through one conductance of 1.5 W/K to 1.1e-13 K over 400 steps (allowed
+  2.4e-9 K from the kernel's solve tolerance) and generate the same entropy
+  to 1e-12. With 30 W on its source every joule is in the two bodies; the
+  cold body's share of the source is 5.70 in the first step (it also takes
+  what the hot body gives up) and 0.707 at the end, `C2 / (C1 + C2)`, with
+  the node 4.35 K and 3.49 K above the bodies;
 - a driven damped oscillator built from the library matches the monolithic
   midpoint rule, the body's account equals the damper's dissipation, the
   force's clock equals the kernel's bit for bit;

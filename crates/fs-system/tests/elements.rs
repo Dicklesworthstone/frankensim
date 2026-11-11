@@ -14,7 +14,7 @@ use fs_ports::component::{Component, PortSpec, PortTangent, Proposal, Receipt};
 use fs_ports::PortKind;
 use fs_system::elements::{
     Conductance, Damper, ElementError, Force, GasContents, GasVolume, Gyrator, HeatCapacity,
-    Heater, Mass, Motion, Restriction, SourceAccount, Spring, Waveform,
+    HeatNode, Heater, Mass, Motion, Restriction, SourceAccount, Spring, Waveform,
 };
 use fs_system::{
     AdmissionError, NodeId, RouteTemperature, System, SystemBuilder, heat_sink,
@@ -403,6 +403,214 @@ fn two_bodies_through_a_conductance_relax_by_the_discrete_factor_and_generate_th
     let generated = system.ledger().entropy_generated_j_per_k();
     assert!(exact > 0.0);
     assert!((generated - exact).abs() <= 1.0e-6 * exact, "{generated} vs {exact}");
+}
+
+#[test]
+fn a_heat_node_keeps_its_balance_and_refuses_what_leaves_it_no_temperature() {
+    let conductances = [0.8, 2.5, 0.3];
+    let total: f64 = conductances.iter().sum();
+    let node = HeatNode::new(&conductances).unwrap();
+    let ports: Vec<&str> = node.ports().iter().map(|port| port.id().as_str()).collect();
+    assert_eq!(ports, ["source", "body0", "body1", "body2"]);
+    let mut n = Numbers(0x4EA7_0001);
+    for _ in 0..200 {
+        let dt = n.next(1.0e-5, 2.0e-2);
+        let source = n.next(-40.0, 120.0);
+        let bodies = [n.next(250.0, 900.0), n.next(250.0, 900.0), n.next(250.0, 900.0)];
+        let inputs = [source, bodies[0], bodies[1], bodies[2]];
+        let out = conforms(&node, &(), &(), dt, &inputs);
+        // Independent: the node sits where what the source puts in leaves
+        // through the conductances, P = sum G_k (T_n - T_k).
+        let weighted: f64 = conductances.iter().zip(bodies).map(|(g, t)| g * t).sum();
+        let kelvin = (source + weighted) / total;
+        assert!((out[0] - kelvin).abs() <= 1.0e-13 * kelvin, "{} vs {kelvin}", out[0]);
+        let mut entering = 0.0;
+        for ((rate, g), t) in out[1..].iter().zip(conductances).zip(bodies) {
+            assert!((rate - g * (t - kelvin)).abs() <= 1.0e-11, "{rate}");
+            entering += rate;
+        }
+        assert!((entering + source).abs() <= 1.0e-10, "{entering} vs {source}");
+        // It stores nothing, so the entropy it generates is what leaves
+        // through its ports less what enters, and each conductance's share
+        // is positive.
+        let case = Case {
+            state: &(),
+            stale: &(),
+            dt_s: dt,
+            inputs: &inputs,
+        };
+        let observed = with_cx(|cx| check_component(&node, &case, cx)).unwrap();
+        let Observed::Stepped { receipt, audit, .. } = observed else {
+            panic!("the node takes the step");
+        };
+        let generated = receipt.entropy_generated_j_per_k;
+        let by_branch: f64 = conductances
+            .iter()
+            .zip(bodies)
+            .map(|(g, t)| dt * g * (t - kelvin) * (t - kelvin) / (t * kelvin))
+            .sum();
+        assert!(generated > 0.0);
+        assert!((generated - by_branch).abs() <= 1.0e-12 * by_branch);
+        assert!((generated + audit.port_entropy_in_j_per_k).abs() <= 1.0e-12 * by_branch);
+    }
+
+    // Bodies within a nanokelvin of one temperature, and exactly at it: the
+    // rates all but vanish while their rounding stays that of the terms
+    // G T they are differences of. (The node's first energy tolerance was
+    // sized by the rates and refused such a step in a graph.)
+    for spread in [1.0e-9, 1.0e-12, 0.0] {
+        let out = conforms(&node, &(), &(), 0.5, &[0.0, 329.4, 329.4 + spread, 329.4 - spread]);
+        assert!(out[1..].iter().all(|rate| rate.abs() <= 1.0e-8), "{out:?}");
+    }
+
+    assert!(HeatNode::new(&[]).is_err());
+    assert!(HeatNode::new(&[1.0, 0.0]).is_err());
+    assert!(HeatNode::new(&[1.0, -2.0]).is_err());
+    assert!(HeatNode::new(&[f64::NAN]).is_err());
+    assert!(HeatNode::new(&[f64::MAX, f64::MAX]).is_err());
+    with_cx(|cx| {
+        let mut outputs = [7.0; 4];
+        // A source that takes more than the conductances bring at any
+        // temperature above zero; a body at no temperature; a value that is
+        // not a number. Nothing is written.
+        for inputs in [
+            [-total * 300.0, 300.0, 300.0, 300.0],
+            [-total * 300.0 - 1.0, 300.0, 300.0, 300.0],
+            [0.0, 300.0, 0.0, 300.0],
+            [0.0, 300.0, 300.0, f64::NAN],
+            [f64::INFINITY, 300.0, 300.0, 300.0],
+        ] {
+            assert!(node.propose(&(), 1.0e-3, &inputs, &mut (), &mut outputs, cx).is_err(), "{inputs:?}");
+            assert_eq!(outputs, [7.0; 4]);
+        }
+    });
+}
+
+#[test]
+fn two_bodies_through_a_heat_node_are_joined_by_its_conductances_in_series() {
+    // The node with 2 and 6 W/K and nothing on its source is one
+    // conductance of 2 * 6 / (2 + 6) = 1.5 W/K between the bodies: the same
+    // heat for the same two temperatures, so the two graphs keep step to
+    // the rounding of that arithmetic.
+    let (c1, c2, t1, t2) = (50.0_f64, 120.0_f64, 400.0_f64, 300.0_f64);
+    let bodies = |builder: &mut SystemBuilder| {
+        let hot = builder
+            .add_with_tangent("hot", HeatCapacity::new(c1).unwrap(), t1)
+            .unwrap();
+        let cold = builder
+            .add_with_tangent("cold", HeatCapacity::new(c2).unwrap(), t2)
+            .unwrap();
+        (hot, cold)
+    };
+    let port = |builder: &SystemBuilder, node, name| builder.port(node, name).unwrap();
+    // With `power_w`, a heater on the node's source; without, nothing.
+    let through_node = |power_w: Option<f64>| {
+        let mut builder = SystemBuilder::new();
+        let (hot, cold) = bodies(&mut builder);
+        let node = builder
+            .add_with_tangent("node", HeatNode::new(&[2.0, 6.0]).unwrap(), ())
+            .unwrap();
+        let (a, b) = (port(&builder, node, "body0"), port(&builder, node, "body1"));
+        builder.common_effort(port(&builder, hot, "heat"), &[a]).unwrap();
+        builder.common_effort(port(&builder, cold, "heat"), &[b]).unwrap();
+        let source = port(&builder, node, "source");
+        let lamp = power_w.map(|power_w| {
+            let lamp = heater(&mut builder, "lamp", power_w);
+            let heat = port(&builder, lamp, "heat");
+            builder.common_effort(source, &[heat]).unwrap();
+            heat
+        });
+        if lamp.is_none() {
+            builder
+                .boundary(source, Box::new(|_, _, values| values[0] = 0.0))
+                .unwrap();
+        }
+        let mut system = builder.seal().unwrap();
+        // Temperatures received inside the loop need a start.
+        assert!(system.guess(a, &[t1]));
+        assert!(system.guess(b, &[t2]));
+        if let Some(heat) = lamp {
+            assert!(system.guess(heat, &[t1]));
+        }
+        (system, hot, cold, source)
+    };
+    let (mut split, hot, cold, _) = through_node(None);
+    let mut builder = SystemBuilder::new();
+    let (hot_one, cold_one) = bodies(&mut builder);
+    let wall = builder
+        .add_with_tangent("wall", Conductance::new(1.5).unwrap(), ())
+        .unwrap();
+    let (a, b) = (port(&builder, wall, "a"), port(&builder, wall, "b"));
+    builder.common_effort(port(&builder, hot_one, "heat"), &[a]).unwrap();
+    builder.common_effort(port(&builder, cold_one, "heat"), &[b]).unwrap();
+    let mut whole = builder.seal().unwrap();
+    assert!(whole.guess(a, &[t1]));
+    assert!(whole.guess(b, &[t2]));
+    let (dt, steps) = (0.5, 400_u32);
+    let mut worst = 0.0_f64;
+    with_cx(|cx| {
+        for _ in 0..steps {
+            split.step(dt, cx).unwrap();
+            whole.step(dt, cx).unwrap();
+            for (through, direct) in [(hot, hot_one), (cold, cold_one)] {
+                let gap = split.state::<f64>(through).unwrap() - whole.state::<f64>(direct).unwrap();
+                worst = worst.max(gap.abs());
+            }
+        }
+    });
+    // The bodies have come most of the way together: 100 K apart at the
+    // start, and the midpoint rule's factor (1 - a) / (1 + a) a step with
+    // a = dt G (1/C1 + 1/C2) / 2 leaves 0.0203 K after 400.
+    let apart = split.state::<f64>(hot).unwrap() - split.state::<f64>(cold).unwrap();
+    assert!((apart - 0.0203).abs() <= 1.0e-4, "{apart}");
+    // The two graphs keep step. The kernel accepts a temperature it solves
+    // for within 1e-12 of its size; through 1.5 W/K over a step and the
+    // smaller heat capacity, and at every step, that allows 2.4e-9 K.
+    let allowed = f64::from(steps) * 1.5 * dt * 1.0e-12 * t1 / c1;
+    eprintln!("through a heat node against the series conductance: {worst:.3e} K (allowed {allowed:.3e})");
+    assert!(worst <= allowed, "{worst}");
+    // Each branch generates its own entropy; together, the series
+    // conductance's.
+    let series = system_entropy(&split);
+    assert!(series > 1.0);
+    assert!((series - system_entropy(&whole)).abs() <= 1.0e-12 * series, "{series}");
+
+    // With 30 W on the node's source every joule is in the two bodies, and
+    // the heat does not divide by a fixed fraction. In the first step the
+    // cold body also takes what the hot one gives up through the node,
+    // 5.7 times the source; in the end both warm at one rate, the cold body
+    // takes C2 / (C1 + C2) = 0.706 of the source, and the node is 4.4 K and
+    // 3.5 K above them.
+    let power = 30.0;
+    let (mut heated, hot, cold, source) = through_node(Some(power));
+    let mut shares = Vec::new();
+    let mut above = [0.0_f64; 2];
+    with_cx(|cx| {
+        for _ in 0..steps {
+            let before = *heated.state::<f64>(cold).unwrap();
+            heated.step(dt, cx).unwrap();
+            let after = *heated.state::<f64>(cold).unwrap();
+            shares.push(c2 * (after - before) / (dt * power));
+            let node_k = heated.last_output(source)[0];
+            above = [
+                node_k - *heated.state::<f64>(hot).unwrap(),
+                node_k - *heated.state::<f64>(cold).unwrap(),
+            ];
+        }
+    });
+    let given = power * dt * f64::from(steps);
+    let kept = c1 * (heated.state::<f64>(hot).unwrap() - t1) + c2 * (heated.state::<f64>(cold).unwrap() - t2);
+    assert!((kept - given).abs() <= 1.0e-12 * given, "{kept} vs {given}");
+    assert!(heated.ledger().energy_residual_j().abs() <= 1.0e-12 * given);
+    let (first, last) = (shares[0], shares[shares.len() - 1]);
+    eprintln!("a heated node: the cold body's share {first:.4} of the source at first, {last:.4} at last; the node {above:?} K above the bodies");
+    assert!(first > 5.0 && first < 6.0, "{first}");
+    assert!((last - c2 / (c1 + c2)).abs() <= 2.0e-3, "{last}");
+    assert!((above[0] - 4.41).abs() <= 0.1 && (above[1] - 3.53).abs() <= 0.1, "{above:?}");
+}
+
+fn system_entropy(system: &System) -> f64 {
+    system.ledger().entropy_generated_j_per_k()
 }
 
 #[test]
