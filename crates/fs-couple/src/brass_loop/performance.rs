@@ -24,6 +24,8 @@
 //! lip_response_mode2 <f_hz> <q> <inverse_mu_m2_per_kg>      optional; the lip's second, inward-striking mode (a negative 1/mu)
 //! lip_area_exponent <q>                                    optional; flow area w h (h/H0)^(q-1), 1 <= q <= 4 (q = 1 is the plain w h)
 //! lip_rim_stop inelastic|elastic                           optional; the lip gap may not exceed the first bore cone's diameter (two limit cases of an unmeasured restitution)
+//! bore_wall rigid|thin-brass <thickness_m> <quality>        optional; on bore nonlinear the bell's breathing wall: every cell a radial oscillator of cartridge brass (rigid is the row absent)
+//! bore_wall_source <free text to end of line>               required with bore_wall thin-brass: whose instrument and whose measurement the thickness and the quality factor are
 //! player_tract mouth <tau_s>                               optional (or `player_tract lung`); a player's tract upstream of the lip, the card's pressure measured in the mouth or at the lung
 //! player_tract_section <length_m> <area_m2>                1 to 256 rows beside `player_tract`, lip side first, each a cylinder of that area (the glottis a section of its own)
 //! player_tract_wall <surface_density> <stiffness> <resistance>  optional; every tract tube's locally reacting wall (rigid without it)
@@ -180,7 +182,9 @@
 //! fs-duct radiation-band ceiling at the declared clock's Nyquist frequency.
 //! The legacy receiver sees total flow only; `modal_baffle` resolves the retained
 //! axisymmetric mouth-mode directivity. Neither resolves omitted transverse
-//! modes, finite bell/body scattering, wall vibration or a realistic instrument.
+//! modes, finite bell/body scattering or a realistic instrument; wall vibration
+//! is resolved only by the opt-in `bore_wall thin-brass` row on `bore nonlinear`
+//! (its breathing mode, [`super::bore_wall`]), and by nothing else.
 
 use fs_blake3::{ContentHash, hash_domain};
 use fs_duct::{Duct, LossModel, Segment, Termination};
@@ -193,6 +197,7 @@ use fs_math::det;
 use fs_scenario::gesture::{GestureSchedule, GestureTarget};
 use fs_vfit::discretize::DelayedFilter;
 
+use super::bore_wall::BoreWallRecord;
 use super::player_tract::TractPressure;
 use super::{BrassBlockDiag, BrassControl, BrassVoice, LipIsland, LipMode2};
 use crate::acoustic_realize::AcousticRealizeError;
@@ -362,6 +367,8 @@ pub struct LipDescription {
     lip_mode2: Option<LipMode2>,
     lip_area_exponent: Option<f64>,
     lip_rim_stop: Option<super::RimStopKind>,
+    /// The optional breathing bore wall (`bore_wall thin-brass`) and the provenance sentence that names whose thickness and quality factor it carries.
+    bore_wall: Option<(BoreWallRecord, String)>,
     /// The optional player's tract upstream of the lip: its airway chain (lip side first) and where the card's pressure acts.
     player_tract: Option<(AirwayChain, TractPressure)>,
 }
@@ -568,6 +575,8 @@ impl LipDescription {
         let mut lip_mode2_raw: Option<(f64, f64, f64)> = None;
         let mut lip_area_exponent_raw: Option<f64> = None;
         let mut lip_rim_stop_raw: Option<super::RimStopKind> = None;
+        let mut bore_wall_raw: Option<Option<BoreWallRecord>> = None;
+        let mut bore_wall_source: Option<String> = None;
         let mut player_tract_raw: Option<TractPressure> = None;
         let mut tract_sections: Vec<(f64, f64)> = Vec::new();
         let mut tract_wall: Option<fs_phs::WallPin> = None;
@@ -682,6 +691,23 @@ impl LipDescription {
                     };
                     once(&mut lip_rim_stop_raw, kind, &f)?;
                     f.finish()?;
+                }
+                "bore_wall" => {
+                    let record = match f.word()? {
+                        "rigid" => None,
+                        "thin-brass" => {
+                            let thickness_m = f.positive()?;
+                            let quality = f.positive()?;
+                            Some(BoreWallRecord { thickness_m, quality })
+                        }
+                        _ => return f.err("expected `rigid` or `thin-brass <thickness_m> <quality>`"),
+                    };
+                    once(&mut bore_wall_raw, record, &f)?;
+                    f.finish()?;
+                }
+                "bore_wall_source" => {
+                    let value = text_of(&f, rest)?;
+                    once(&mut bore_wall_source, value, &f)?;
                 }
                 "player_tract" => {
                     let pressure = match f.word()? {
@@ -1018,6 +1044,21 @@ impl LipDescription {
             }
             Some(kind) => Some(kind),
         };
+        // `bore_wall` (module doc): rigid is the row absent; thin-brass needs the nonlinear bore and a sentence naming whose numbers.
+        let bore_wall = match (bore_wall_raw, bore_wall_source) {
+            (None, None) | (Some(None), None) => None,
+            (None, Some(_)) => return Err("bore_wall_source needs a bore_wall row".into()),
+            (Some(None), Some(_)) => {
+                return Err("bore_wall_source needs bore_wall thin-brass; bore_wall rigid carries no source".into());
+            }
+            (Some(Some(_)), None) => {
+                return Err("bore_wall thin-brass needs a bore_wall_source row naming whose instrument and whose measurement the thickness and the quality factor are".into());
+            }
+            (Some(Some(_)), Some(_)) if nonlinear.is_none() => {
+                return Err("bore_wall thin-brass is on the nonlinear bore only: the linear mode-matching bore has rigid walls and refuses the row (add a bore nonlinear row)".into());
+            }
+            (Some(Some(record)), Some(source)) => Some((record, source)),
+        };
         // `player_tract` and its rows (module doc): the chain is built here, so a malformed tract refuses at the parse.
         let player_tract = match player_tract_raw {
             None => {
@@ -1133,6 +1174,7 @@ impl LipDescription {
             lip_mode2,
             lip_area_exponent,
             lip_rim_stop,
+            bore_wall,
             player_tract,
         })
     }
@@ -1165,6 +1207,12 @@ impl LipDescription {
     #[must_use]
     pub const fn lip_area_exponent(&self) -> Option<f64> {
         self.lip_area_exponent
+    }
+
+    /// The opt-in breathing bore wall and its provenance sentence, if the file declared `bore_wall thin-brass` ([`super::bore_wall`]).
+    #[must_use]
+    pub fn bore_wall(&self) -> Option<&(BoreWallRecord, String)> {
+        self.bore_wall.as_ref()
     }
 
     /// The opt-in rim stop's limit case, if the file declared one ([`super::BrassVoice::with_lip_rim_stop`]).
@@ -1583,6 +1631,25 @@ impl LipDescription {
                 .map_err(|e| format!("constriction_noise refused: {e}"))?,
             None => lip,
         };
+        let lip = match &self.bore_wall {
+            Some((record, _)) => lip
+                .with_bore_wall(&self.duct, *record)
+                .map_err(|e| format!("bore_wall refused: {e}"))?,
+            None => lip,
+        };
+        let bore_wall_info = match (&self.bore_wall, lip.bore().shell_receipt()) {
+            (Some((record, _)), Some(receipt)) => Some(BoreWallInfo {
+                record: *record,
+                cells: receipt.cells,
+                membrane_cells: receipt.membrane_cells,
+                thick_cells: receipt.thick_cells,
+                largest_half_angle_rad: receipt.largest_half_angle_rad,
+                largest_thick_half_angle_rad: receipt.largest_thick_half_angle_rad,
+                lowest_resonance_hz: receipt.lowest_resonance_hz,
+                highest_resonance_hz: receipt.highest_resonance_hz,
+            }),
+            _ => None,
+        };
         let (receiver, observer_gas) =
             self.scalar_receiver(mouth_radius_m, clock.mechanics_rate_hz())?;
         let wall = lip
@@ -1599,6 +1666,7 @@ impl LipDescription {
             wall_maximum_arms: wall.maximum_arms,
             wall_maximum_complex_error: wall.maximum_complex_error,
             wall_maximum_loss_error: wall.maximum_loss_error,
+            bore_wall: bore_wall_info,
         });
         Ok(self.performance(
             mouth_radius_m,
@@ -1659,6 +1727,7 @@ impl LipDescription {
                 .lip_rim_stop
                 .zip(self.rim_max_gap_m().ok())
                 .map(|(kind, max_gap_m)| RimStopInfo { kind, max_gap_m }),
+            bore_wall: self.bore_wall.clone(),
             lip_source: self.lip_source.clone(),
             bore_source: self.bore_source.clone(),
             cup_volume_m3: self.cup_volume_m3,
@@ -1776,6 +1845,8 @@ pub struct LipInfo {
     pub lip_area_exponent: Option<f64>,
     /// The opt-in rim stop, when the file declared one.
     pub rim_stop: Option<RimStopInfo>,
+    /// The opt-in breathing bore wall with its provenance sentence, when the file declared `bore_wall thin-brass`.
+    pub bore_wall: Option<(BoreWallRecord, String)>,
     /// Provenance sentence of the lip numbers.
     pub lip_source: String,
     /// Provenance sentence of the bore geometry.
@@ -1854,6 +1925,29 @@ pub struct NonlinearBoreInfo {
     pub wall_maximum_complex_error: f64,
     /// Worst sampled error of their dissipative parts.
     pub wall_maximum_loss_error: f64,
+    /// The breathing wall's admission receipt, or `None` for the rigid-walled bore (the row absent or `rigid`).
+    pub bore_wall: Option<BoreWallInfo>,
+}
+
+/// What binding `bore_wall thin-brass` admitted: the declared numbers and the wall's cells.
+#[derive(Debug, Clone, Copy)]
+pub struct BoreWallInfo {
+    /// The declared thickness and quality factor.
+    pub record: BoreWallRecord,
+    /// Cells of the bore.
+    pub cells: usize,
+    /// Cells whose wall ran the thin-membrane expression (the classical cone factor applies).
+    pub membrane_cells: usize,
+    /// Cells whose wall ran Lame's thick cylinder (the cylinder stiffness is carried unchanged).
+    pub thick_cells: usize,
+    /// Largest cell half-angle [rad].
+    pub largest_half_angle_rad: f64,
+    /// Largest half-angle among the thick-wall cells [rad]; 0 with none.
+    pub largest_thick_half_angle_rad: f64,
+    /// Lowest breathing resonance of any cell [Hz].
+    pub lowest_resonance_hz: f64,
+    /// Highest breathing resonance of any cell [Hz].
+    pub highest_resonance_hz: f64,
 }
 
 /// The passive bore's response at one frequency, at its input plane (the mouthpiece cup rim).
@@ -3548,6 +3642,68 @@ mod tests {
         assert_eq!(both.lip_area_exponent(), Some(1.4));
         assert!(both.lip_mode2().is_some());
         assert!(both.build().is_ok());
+    }
+
+    #[test]
+    fn bore_wall_parses_and_is_refused_by_name() {
+        let parse = |extra: &str| LipDescription::from_bytes(fixture(extra).as_bytes());
+        assert_eq!(parse("").expect("parses").bore_wall(), None);
+        assert_eq!(parse("bore_wall rigid\n").expect("parses").bore_wall(), None);
+        for (extra, needle) in [
+            ("bore_wall\n", "missing field"),
+            ("bore_wall soft\n", "expected `rigid` or `thin-brass"),
+            ("bore_wall thin-brass 0.0005\n", "missing field"),
+            ("bore_wall thin-brass 0 100\nbore_wall_source x\n", "expected a positive number"),
+            ("bore_wall thin-brass 0.0005 0\nbore_wall_source x\n", "expected a positive number"),
+            ("bore_wall rigid\nbore_wall rigid\n", "may only appear once"),
+            ("bore_wall_source x\n", "bore_wall_source needs a bore_wall row"),
+            ("bore_wall rigid\nbore_wall_source x\n", "bore_wall rigid carries no source"),
+            ("bore_wall thin-brass 0.0005 100\n", "needs a bore_wall_source row"),
+            ("bore_wall thin-brass 0.0005 100\nbore_wall_source x\n", "nonlinear bore only"),
+        ] {
+            let error = parse(extra).expect_err(extra);
+            assert!(error.contains(needle), "{extra:?} -> {error}");
+        }
+    }
+
+    // MB 23820 (item 4): `bore_wall rigid` is the row absent bit for bit on bore nonlinear, and the brass wall reaches the
+    // mouthpiece pressure by a small, finite amount (the static compliance of a thin brass wall is about 1e-4 of the air's).
+    #[cfg(feature = "nonlinear-brass")]
+    #[test]
+    fn bore_wall_rigid_is_the_row_absent_bit_for_bit_and_thin_brass_reaches_the_mouthpiece_pressure() {
+        let render = |rows: &str| {
+            let mut performance = finite_description(rows, "3e3").build().unwrap();
+            performance.apply_controls(0).unwrap();
+            performance.record_mouthpiece();
+            performance.block(&mut [0.0; 32]).unwrap();
+            performance.mouthpiece_pressure().to_vec()
+        };
+        let same = |a: &[f64], b: &[f64]| a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits());
+        let plain = render("");
+        assert!(plain.iter().any(|p| p.abs() > 1.0), "the blow must reach the cup for the comparison to mean anything");
+        assert!(same(&plain, &render("bore_wall rigid\n")), "bore_wall rigid must be bit-identical to no row");
+        let rows = "bore_wall thin-brass 0.0005 100\nbore_wall_source test fixture, not a measurement\n";
+        let walled = render(rows);
+        assert!(walled.iter().all(|p| p.is_finite()));
+        assert!(!same(&plain, &walled), "the brass wall must reach the mouthpiece pressure");
+        assert!(same(&walled, &render(rows)), "the same card repeats bit for bit");
+        let scale = plain.iter().fold(0.0_f64, |m, p| m.max(p.abs()));
+        let gap = plain.iter().zip(&walled).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+        assert!(gap <= 0.05 * scale, "{gap} of {scale}");
+        let description = finite_description(rows, "3e3");
+        let (record, source) = description.bore_wall().expect("declared");
+        assert_eq!(*record, BoreWallRecord { thickness_m: 0.0005, quality: 100.0 });
+        assert_eq!(source, "test fixture, not a measurement");
+        let performance = description.build().unwrap();
+        let LipBoreInfo::Nonlinear(info) = &performance.info().bore else {
+            panic!("a nonlinear bore");
+        };
+        let wall = info.bore_wall.expect("the wall's receipt");
+        // The 6 mm lead pipe (thickness / radius 0.083) takes Lame's cylinder, the flared bore the membrane.
+        assert!(wall.thick_cells > 0 && wall.membrane_cells > 0, "{wall:?}");
+        assert_eq!(wall.thick_cells + wall.membrane_cells, wall.cells);
+        assert!(wall.largest_thick_half_angle_rad < wall.largest_half_angle_rad);
+        assert!(performance.info().bore_wall.is_some());
     }
 
     #[cfg(feature = "nonlinear-brass")]

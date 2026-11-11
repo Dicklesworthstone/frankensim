@@ -230,7 +230,7 @@ fn bore_json(bore: &LipBoreInfo) -> String {
         LipBoreInfo::Nonlinear(n) => format!(
             "\"nonlinear_bore\":{{\"maximum_cell_m\":{},\"cells\":{},\"mechanics_rate_hz\":{},\"gas_steps_per_mechanics\":{},\"gas_step_s\":{},\"radiation_taps\":{}{},\
              \"wall\":{{\"poles\":{},\"band_hz\":[{},{}],\"tolerance\":{},\"distinct_radii\":{},\"maximum_arms\":{},\"maximum_complex_error\":{},\"maximum_loss_error\":{}}}}},\
-             \"model_scope\":\"one held bore; 1-DOF outward-striking lip island metering an isentropic compressible lip jet that mixes out at the cup face; conservative nonlinear Euler gas of the ambient NASA-9 mixture on the declared cells (steepening and shocks resolved by those cells); Zwikker-Kosten wall memory admitted on its declared band; rigid baffled-piston bell radiation; baffled-disk Rayleigh radiation of the bell volume flow at the declared point; no valve or slide motion, no bore wall vibration, no breath heating, no transverse duct modes\"",
+             \"model_scope\":\"one held bore; 1-DOF outward-striking lip island metering an isentropic compressible lip jet that mixes out at the cup face; conservative nonlinear Euler gas of the ambient NASA-9 mixture on the declared cells (steepening and shocks resolved by those cells); Zwikker-Kosten wall memory admitted on its declared band; rigid baffled-piston bell radiation; baffled-disk Rayleigh radiation of the bell volume flow at the declared point; no valve or slide motion, {}no breath heating, no transverse duct modes\"",
             number(n.record.maximum_cell_m),
             n.cells,
             n.mechanics_rate_hz,
@@ -246,6 +246,8 @@ fn bore_json(bore: &LipBoreInfo) -> String {
             n.wall_maximum_arms,
             number(n.wall_maximum_complex_error),
             number(n.wall_maximum_loss_error),
+            // The walled bore's own `bore_wall` object states what is modelled; the denial stays for every other bore.
+            if n.bore_wall.is_some() { "" } else { "no bore wall vibration, " },
         ),
     }
 }
@@ -315,19 +317,46 @@ fn rim_stop_json(i: &LipInfo) -> String {
     }
 }
 
+/// The lip receipt's optional breathing-bore-wall object, empty for a performance without a `bore_wall thin-brass` record (so
+/// every receipt written before the record existed is unchanged; the audio of `bore_wall rigid` is bit-identical to the row absent, but its input
+/// bytes and so its hash differ).
+fn bore_wall_json(i: &LipInfo) -> String {
+    let (Some((record, source)), LipBoreInfo::Nonlinear(n)) = (&i.bore_wall, &i.bore) else {
+        return String::new();
+    };
+    let Some(w) = n.bore_wall else {
+        return String::new();
+    };
+    format!(
+        "\"bore_wall\":{{\"kind\":\"thin-brass\",\"thickness_m\":{},\"quality\":{},\"source\":{},\"cells\":{},\"membrane_cells\":{},\"thick_cells\":{},\"largest_half_angle_rad\":{},\"largest_thick_half_angle_rad\":{},\"lowest_resonance_hz\":{},\"highest_resonance_hz\":{},\
+         \"model\":\"one radial oscillator per gas cell (mass sigma S, stiffness K A cos(phi) on the membrane branch and K A on Lame's thick-cylinder branch, K and sigma from the landed membrane/Lame reduction of UNS C26000 cartridge brass, MIL-HDBK-698A Table XV row 260), viscous damping m omega0 / Q; the cell pressure above the room pressure drives it and the gas fills the volume it sweeps (mass-conserving rescale, work p dV); the law is the classical thin cone membrane, s = p r^2 / (E t cos(phi)): Kausel, Zietlow and Moore (2010) print 1 / cos^3(phi), a factor 1 / cos^2(phi) more, which is not used; no bending or axial shell modes, rim bead, outside-air added mass or non-uniform thickness\"}},",
+        number(record.thickness_m),
+        number(record.quality),
+        json_string(source),
+        w.cells,
+        w.membrane_cells,
+        w.thick_cells,
+        number(w.largest_half_angle_rad),
+        number(w.largest_thick_half_angle_rad),
+        number(w.lowest_resonance_hz),
+        number(w.highest_resonance_hz),
+    )
+}
+
 fn input_json(i: &LipInfo) -> String {
     let lip = &i.lip;
     let mic = &i.microphone;
     let second = lip_mode2_json(i);
     let exponent = lip_area_exponent_json(i);
     let rim_stop = rim_stop_json(i);
+    let bore_wall = bore_wall_json(i);
     let observer_gas = i.observer_gas.as_ref().map_or_else(String::new, |report| {
         format!("\"observer_gas\":{},",
             super::duct_metadata::observer_gas_provenance(Some(report)))
     });
     format!(
         "\"lip_input\":{{\"schema\":\"{}\",\"blake3\":\"{}\",\"bore\":{{\"segments\":{},\"length_m\":{},\"mouth_radius_m\":{},\"gas_temperature_k\":{},\"sound_speed_m_s\":{},\"source\":{}}},\
-         \"lip\":{{\"mass_kg\":{},\"stiffness_n_m\":{},\"damping_n_s_m\":{},\"width_m\":{},\"rest_gap_m\":{},\"face_area_m2\":{},\"source\":{}}},{}{}{}\
+         \"lip\":{{\"mass_kg\":{},\"stiffness_n_m\":{},\"damping_n_s_m\":{},\"width_m\":{},\"rest_gap_m\":{},\"face_area_m2\":{},\"source\":{}}},{}{}{}{}\
          \"cup_volume_m3\":{},\"control_rate_hz\":{},\"lip_tension_track\":{},\
          \"microphone\":{{\"position_m\":[{},{},{}],\"radial_rings\":{},\"angular_points\":{},\"resolved_band_hz\":{}}},{observer_gas}\
          {}}}",
@@ -349,6 +378,7 @@ fn input_json(i: &LipInfo) -> String {
         second,
         exponent,
         rim_stop,
+        bore_wall,
         number(i.cup_volume_m3),
         i.control_rate_hz,
         i.has_lip_tension_track,

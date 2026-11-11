@@ -332,6 +332,13 @@ impl LocalMaterialWall {
         Ok(MaterialWallDg { wall: self, duct })
     }
 
+    /// Whether [`Self::base_patch`] runs the thin-membrane expression at this inner radius (thickness/radius at or
+    /// under 0.05) and not Lame's thick cylinder; a caller that adds a flare factor to the stiffness needs to know.
+    #[must_use]
+    pub fn runs_membrane_at(&self, radius: f64) -> bool {
+        self.thickness_m / radius <= MEMBRANE_THICKNESS_OVER_RADIUS
+    }
+
     /// Base mass/equilibrium/viscosity image for an actual cylindrical strip.
     /// Hereditary arms remain in `loss()`; this is not its complete impedance.
     ///

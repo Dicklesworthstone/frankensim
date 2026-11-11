@@ -48,6 +48,9 @@ pub mod nonlinear;
 
 /// The player's tract upstream of the lip (opt-in): a measured airway between the blowing pressure and the aperture.
 pub mod player_tract;
+
+/// The `bore_wall` row: the breathing wall of a brass bore (opt-in, nonlinear bore).
+pub mod bore_wall;
 use player_tract::{LipTract, TractPressure};
 
 mod tension;

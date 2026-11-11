@@ -52,6 +52,7 @@ use crate::turbulence_noise::{
 
 mod finite_mouth;
 pub use finite_mouth::{FiniteMouthReport, FiniteMouthSpec, FiniteMouthState};
+use super::bore_wall::{BoreWallRecord, ThinBrassWall};
 use finite_mouth::FiniteMouth;
 
 /// How the nonlinear bore is cut, clocked and walled.
@@ -241,6 +242,20 @@ impl NonlinearLip {
             .map_err(|_| "the second lip mode refused admission".to_string())?;
         let linear = prepare_lip(&sys).map_err(|e| e.to_string())?;
         self.lip2 = Some(LipSecondMode { mode, sys, linear, state: vec![0.0, 0.0] });
+        Ok(self)
+    }
+
+    /// Bind the opt-in breathing wall (`bore_wall thin-brass`) before any gas step: every cell of the bore gets a radial wall
+    /// oscillator of cartridge brass of the declared thickness and breathing-mode quality factor
+    /// ([`NonlinearBore::bind_shell`], [`super::bore_wall`]). A lip without it steps exactly the rigid-walled bore, bit for bit.
+    ///
+    /// # Errors
+    /// A thickness or quality factor the wall refuses, or a duct that is not this bore's own.
+    pub fn with_bore_wall(mut self, duct: &Duct, record: BoreWallRecord) -> Result<Self, String> {
+        let law = ThinBrassWall::new(record.thickness_m)?;
+        self.bore
+            .bind_shell(duct, &law, record.quality)
+            .map_err(|e| format!("bore wall refused: {e}"))?;
         Ok(self)
     }
 
