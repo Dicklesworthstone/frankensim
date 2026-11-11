@@ -1304,7 +1304,7 @@ def _write_pair_staged(stage, final, family, note_name, ref_e, refs, ref_y, ref_
     inh = ref_e["inst"] in INHARMONIC
     n = len(ref_y) if cand_y is None else min(len(ref_y), len(cand_y))
     real = Note(ref_y[:n], f0, ref_e["kind"], inh, "real", ref_info, band_hz=refs.band_hz)
-    ours = Note(cand_y[:n], f0, ref_e["kind"], inh, "ours", cand_info, max_cents=400.0, band_hz=refs.band_hz) if cand_y is not None else None
+    ours = Note(cand_y[:n], f0, ref_e["kind"], inh, "the render", cand_info, max_cents=400.0, band_hz=refs.band_hz) if cand_y is not None else None
     if ours is not None:
         d_on, _ = onset_gap_ms(ours.info, real.info)
         if d_on > ALIGN_TOL_MS:
@@ -1343,7 +1343,7 @@ def _write_pair_staged(stage, final, family, note_name, ref_e, refs, ref_y, ref_
         audio=dict(real="real.wav", ours="ours.wav" if ours else None,
                    level_match=((f"Both clips are low-passed at {refs.band_hz:.0f} Hz (the render is valid only below it). " if refs.band_hz else "")
                                 + f"One shared gain of {20 * math.log10(g):+.1f} dB puts the louder clip at 0.70 of full scale; "
-                                + (f"ours was set {off:+.1f} dB beforehand so its RMS over {real.match_window[0]:.1f}-{real.match_window[1]:.1f} s "
+                                + (f"the render was set {off:+.1f} dB beforehand so its RMS over {real.match_window[0]:.1f}-{real.match_window[1]:.1f} s "
                                    "equals the real recording's." if ours else "the real recording is otherwise untouched."))),
         alignment=dict(onset_real_s=ref_info["source_onset_s"], onset_ours_s=cand_info["onset_s"] if cand_info else None, highpass_hz=hp,
                        level_offset_db=off if ours else None, band_hz=refs.band_hz, preroll_ms=ref_info["preroll_s"] * 1000, tolerance_ms=ALIGN_TOL_MS,
@@ -1499,7 +1499,7 @@ def run_pair(refs, c, root):
             raw = lowpass(raw, refs.band_hz)
         hp = highpass(raw, f0)
         if ref_e["inst"] not in INHARMONIC:
-            check_fundamental(hp, f0_comb(hp, f0, ref_e["kind"], 400.0), ref_e["kind"], "ours", f0)
+            check_fundamental(hp, f0_comb(hp, f0, ref_e["kind"], 400.0), ref_e["kind"], "the render", f0)
         cand_y, cand_info = _labelled("render", align, raw, f0, render_floor(hp, f0))
         ours_meta = dict(wav=c["wav"], git_sha=c["git_sha"], observer=c["observer"], recipe=c["recipe"], sample_rate=wav_sample_rate(c["wav"]))
     ref_y, ref_info = _labelled(f"reference {ref_e['file']}@{ref_e['name']}", refs.aligned, ref_e)
@@ -1564,7 +1564,7 @@ def run_unvoiced(refs, c, root):
 
 def _write_unvoiced_staged(stage, family, slot, ref_e, refs, ref_y, cand_y, ours_start_s, ours_meta, cand_meta):
     real = UnvoicedNote(ref_y, "real", ref_e.get("full_scale_pa"), refs.band_hz)
-    ours = UnvoicedNote(cand_y, "ours", ours_meta.get("full_scale_pa"), refs.band_hz)
+    ours = UnvoicedNote(cand_y, "the render", ours_meta.get("full_scale_pa"), refs.band_hz)
     nf = min(real.frames, ours.frames)
     dur = nf * HOP / SR
     off = real.level_db - ours.level_db
@@ -1591,7 +1591,7 @@ def _write_unvoiced_staged(stage, family, slot, ref_e, refs, ref_y, cand_y, ours
         audio=dict(real="real.wav", ours="ours.wav",
                    level_match=((f"Both clips are low-passed at {refs.band_hz:.0f} Hz (the render is valid only below it). " if refs.band_hz else "")
                                 + f"Both clips are high-passed at {UNVOICED_HP_HZ[1]:.0f} Hz. One shared gain of {20 * math.log10(g):+.1f} dB puts the louder clip "
-                                f"at 0.70 of full scale; ours was set {off:+.1f} dB beforehand so its mean power over the whole clip equals the recording's.")),
+                                f"at 0.70 of full scale; the render was set {off:+.1f} dB beforehand so its mean power over the whole clip equals the recording's.")),
         alignment=dict(onset_real_s=None, onset_ours_s=None, highpass_hz=UNVOICED_HP_HZ[1], level_offset_db=off, band_hz=refs.band_hz,
                        segment_ours_s=[round(ours_start_s, 4), round(ours_start_s + dur, 4)],
                        method="unvoiced: no onset is detected; the recording is its library segment, the render its last span of the same length"),

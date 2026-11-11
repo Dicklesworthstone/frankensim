@@ -62,7 +62,7 @@ export async function render(root, r) {
           to.scrollIntoView({ behavior: scrollMotion(to.getBoundingClientRect().top) });
         } }, `Hear all ${phrases.length} phrases`),
         h('a.btn', { href: '#/instruments' }, 'Where each instrument stands'),
-        h('a.btn', { href: '#/method' }, 'How we grade'))),
+        h('a.btn', { href: '#/method' }, 'How grading works'))),
     h('div.feature', null, h('div.fhead', null, h('b', null, 'Featured'), pick), stageBox));
   if (featured.length) show(featured[0][0]);
 
@@ -106,7 +106,7 @@ export async function render(root, r) {
     h('div.starthere', null,
       h('a.card', { href: link('f', 'violin', 'listen') }, h('b', null, 'Simulation and recording, note by note'),
         h('span', null, 'Violin G3 against a real violin: playback in lock-step, both spectrograms and their difference, a blind test, every measure against its ruler.')),
-      h('a.card', { href: '#/method' }, h('b', null, 'How we grade'),
+      h('a.card', { href: '#/method' }, h('b', null, 'How grading works'),
         h('span', null, 'The qualification gates, the 16 measures and how often each is passed, the rulers checked against a second library, and the score over time.')),
       h('a.card', { href: '#/decisions' }, h('b', null, 'Decisions'),
         h('span', null, 'What was decided and why: the first-principles pivot, materials and air as data, the grading changes, the findings that changed the plan.')),

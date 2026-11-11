@@ -42,7 +42,7 @@ export function rulerBar(m) {
   }
   if (Number.isFinite(m.gap)) {
     kids.push(s(`circle.gap.${m.inside ? 'in' : m.inside === false ? 'out' : 'na'}`, { cx: x(m.gap), cy: H / 2, r: 5 },
-      title(`ours: ${fmt.num(m.gap, 3)} ${m.unit}`)));
+      title(`simulation: ${fmt.num(m.gap, 3)} ${m.unit}`)));
   }
   return s('svg.ruler', { viewBox: `0 0 ${W} ${H}`, width: W, height: H }, kids);
 }

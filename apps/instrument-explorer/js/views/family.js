@@ -462,7 +462,7 @@ function grades(doc) {
         if (!m) return h('td.na');
         if (m.not_applicable) return h('td.na', { title: `${m.label}: not applicable (${m.not_applicable})` }, 'n/a');
         const q = Number.isFinite(m.ruler_max) && m.ruler_max > 0 ? Math.abs(m.gap) / m.ruler_max : null;
-        return h(`td.${ratioClass(m)}`, { title: `${m.label}: ours ${fmt.num(m.gap, 3)} ${m.unit}, real spread up to ${fmt.num(m.ruler_max, 3)}` }, q === null ? '·' : q.toFixed(1));
+        return h(`td.${ratioClass(m)}`, { title: `${m.label}: simulation ${fmt.num(m.gap, 3)} ${m.unit}, real spread up to ${fmt.num(m.ruler_max, 3)}` }, q === null ? '·' : q.toFixed(1));
       })))))),
   h('p.small.muted', null, 'Cells are the simulation\'s distance divided by the ruler: 1.0 or less is inside (green), up to 2 is near (amber), beyond 2 is far (red).'));
   // With more than a few notes the heat map above is the overview and each note's card opens on demand: 21 open cards

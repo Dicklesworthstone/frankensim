@@ -1,4 +1,4 @@
-// How we grade: the target, the gate ladder, how one note is graded, every measure with how often the simulations pass it,
+// How grading works: the target, the gate ladder, how one note is graded, every measure with how often the simulations pass it,
 // the rulers' own check, the score over time, the pitch of every playable note, and what the grader cannot see.
 import { h, getJSON, fmt, chip, link, splitBar, DATA, stack } from '../app.js';
 import { rulerBar, historyChart } from '../charts.js';
@@ -58,7 +58,7 @@ function exampleFigure(p) {
 }
 
 export function title() {
-  return 'How we grade';
+  return 'How grading works';
 }
 
 export async function render(root) {
@@ -105,8 +105,8 @@ export async function render(root) {
 
   root.replaceChildren(h('article.method', null,
     h('section.intro', null,
-      h('h1', null, 'How we grade'),
-      h('p.lede', null, 'The target is the owner\'s: "a spectrogram of our purely synthetic/simulated instrument is basically indistinguishable to a well-recorded sample of a real instrument." Every render is put next to a real recording of the same note and measured. The tolerance on each measure comes from real recordings themselves, not from a number we chose.'),
+      h('h1', null, 'How grading works'),
+      h('p.lede', null, 'The target is the owner\'s: "a spectrogram of our purely synthetic/simulated instrument is basically indistinguishable to a well-recorded sample of a real instrument." Every render is put next to a real recording of the same note and measured. The tolerance on each measure comes from real recordings themselves, not from a chosen number.'),
       h('div.note.warn', null,
         h('p', null, h('b', null, 'The grader checks the work; it does not steer it. '),
           'Until 2026-10-21 the program did hill-climb the grader: find the measure that is furthest off, add a mechanism, re-grade. The owner stopped that as "hill climbing with citations", because a mechanism added to close a gap can raise the score without making the instrument more real. Since then the work is driven by what the real instrument has that the model lacks (geometry, materials, the player). The grader is the final check. ',
@@ -149,12 +149,12 @@ export async function render(root) {
     h('section', null, h('h2', null, 'Is the ruler fair?'),
       h('p.small.muted', null, 'Real recordings from a second library (TinySOL, IRCAM: another room, microphone and player) are scored on exactly the same rulers. If the rulers were too strict, real instruments would fail them too.'),
       h('div.tablewrap', null, stack(h('table.metrics.calib', null,
-        h('thead', null, h('tr', null, ['Family', 'Real recordings inside', 'Our renders inside', 'Recordings checked'].map(t => h('th', null, t)))),
+        h('thead', null, h('tr', null, ['Family', 'Real recordings inside', 'Renders inside', 'Recordings checked'].map(t => h('th', null, t)))),
         h('tbody', null, (proc.calibration || []).map(c => h('tr', null,
           h('td', null, h('a', { href: link('f', c.id, 'grades') }, c.title)),
           h('td.num', null, h('div.cbar', null, h('span.real', { style: { width: `${100 * (c.real || 0)}%` } })), fmt.pct(c.real)),
           h('td.num', null, h('div.cbar', null, h('span.ours', { style: { width: `${100 * (c.ours || 0)}%` } })), fmt.pct(c.ours)),
-          h('td.num', null, String(c.recordings || '–')))))), ['', 'Real recordings inside', 'Our renders inside', 'Recordings checked']))),
+          h('td.num', null, String(c.recordings || '–')))))), ['', 'Real recordings inside', 'Renders inside', 'Recordings checked']))),
 
     h('section', null, h('h2', null, 'The score over time'),
       last ? h('p.small.muted', null, `Share of all graded measures inside the real spread after each grading, every note counted at its latest grading. Now: ${last.inside} of ${last.measured} (${fmt.pct(last.inside / last.measured)}) over ${last.notes} notes. The set of graded notes changes as families are added, so a step can come from coverage as well as quality. The newest grading is from ${fmt.datetime(last.when)}: renders made after it (the assembled violin, the playable notes, the kit) are not graded yet.`) : null,

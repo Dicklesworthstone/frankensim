@@ -1510,7 +1510,7 @@ class UnvoicedTests(unittest.TestCase):
     def test_a_scale_that_is_not_a_real_number_of_pascals_is_refused_on_either_side(self):
         import json
         for v in (True, False, "12.62", "abc", float("nan"), float("inf"), 0.0, -1.0, [1.0]):
-            with self.assertRaisesRegex(dc.GraderRefusalError, "IRPDECOMP_UNVOICED_SCALE: ours"):
+            with self.assertRaisesRegex(dc.GraderRefusalError, "IRPDECOMP_UNVOICED_SCALE: the render"):
                 dc.run_unvoiced(self.refs, self.c(full_scale_pa=v), self.tmp / "u11")
         e = dict(name="s", kind="sustained", inst="rig", art="", dyn="mf", unvoiced=True, file="noise-a.wav", start=1.0, end=3.0)
         p = self.tmp / "scale-lib.json"
