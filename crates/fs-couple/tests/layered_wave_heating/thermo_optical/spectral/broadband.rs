@@ -1,5 +1,6 @@
 //! G3: original per-line Maxwell loads, one caloric solve, and atomic feedback.
 
+#[path = "broadband/incident.rs"]
 mod incident;
 
 use super::*;

@@ -166,6 +166,13 @@ impl<'a> DielectricResponse<'a> {
         }
     }
 
+    /// The complex permittivity (F/m) this response presents at angular
+    /// frequency `omega`: the value the interface, film and slab solvers
+    /// use, with the same refusals.
+    pub fn permittivity_f_m(self, omega: f64) -> Result<C64, ReflectionError> {
+        self.permittivity(omega)
+    }
+
     fn permittivity(self, omega: f64) -> Result<C64, ReflectionError> {
         let epsilon = match self {
             Self::Lossless(material) => C64::from_re(linear_electric_permittivity(material)?),

@@ -70,7 +70,7 @@ fn card(sigma: f64, varying: bool) -> MaterialCard {
             ElectricalPropertyBasis::Resistivity,
             ElectricalPropertyBasis::Conductivity,
         ] {
-            if claim.key.name == basis.property_name() {
+            if claim.key.name() == basis.property_name() {
                 claim.value = PropertyValue::Scalar {
                     value: if basis == ElectricalPropertyBasis::Resistivity {
                         sigma.recip()

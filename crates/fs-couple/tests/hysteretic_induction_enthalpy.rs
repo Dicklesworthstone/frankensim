@@ -335,7 +335,7 @@ fn unsupported_temperature_fit_card_and_late_cancellation_publish_neither_histor
 fn complete_heat_provider_keeps_the_native_field_and_both_physical_losses() {
     use fs_couple::circuit_enthalpy::{
         contacts::{heat::MaterialHeatNetwork, material::ElectricalContactNetwork},
-        eddy::thermal::heat::hysteretic_heat_assembly_candidate,
+        eddy::thermal::hysteretic_heat_assembly_candidate,
     };
     use fs_exec::{CancelGate, Cx};
     let card = card(Some(500.0));

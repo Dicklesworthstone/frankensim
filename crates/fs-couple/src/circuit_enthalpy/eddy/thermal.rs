@@ -26,6 +26,8 @@ pub use heat::{
     fixed_nonlinear_heat_assembly_candidate, heat_assembly_candidate,
     nonlinear_heat_assembly_candidate,
 };
+#[cfg(feature = "magnetic-hysteresis")]
+pub use heat::hysteretic_heat_assembly_candidate;
 
 pub use super::super::magnetic::caloric::{MagneticCaloricSample, MagneticThermalLaw};
 #[derive(Clone, Debug, PartialEq)]

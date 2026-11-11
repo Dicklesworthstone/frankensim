@@ -6,6 +6,7 @@ use fs_em::plane_wave::uniaxial::oriented::{
     slab::{OrientedUniaxialSlab, SlabRegion},
 };
 
+#[path = "slab/illumination.rs"]
 mod illumination;
 
 fn film_density_integral(field: &PreparedAbsorbingSlabField<'_, '_, '_>, a: f64, b: f64) -> f64 {

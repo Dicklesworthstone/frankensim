@@ -445,7 +445,7 @@ fn airy_absorption_with_alpha(wavelength: f64, t: f64, alpha: f64) -> f64 {
     );
     let r = (C64::ONE - n) / (C64::ONE + n);
     let angle = -core::f64::consts::TAU * n.re * DEPTH / wavelength;
-    let p = C64::new(angle.cos(), angle.sin()) * (-alpha * DEPTH / 2.0).exp();
+    let p = C64::new(angle.cos(), angle.sin()).scale((-alpha * DEPTH / 2.0).exp());
     let denominator = C64::ONE - r * r * p * p;
     let reflected = r * (C64::ONE - p * p) / denominator;
     let transmitted = (C64::ONE - r * r) * p / denominator;

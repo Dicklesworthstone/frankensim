@@ -1,5 +1,6 @@
 //! Finite-band source feedback through the existing coherent/thermal owners.
 
+#[path = "spectral/broadband.rs"]
 mod broadband;
 
 use super::*;
