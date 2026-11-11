@@ -315,8 +315,14 @@ fn g1_mixed_caloric_layers_preserve_native_sources_and_exact_contact_flux_tangen
         CaloricConductionLayer::from_isochoric(&a).unwrap(),
         CaloricConductionLayer::from_isobaric(&b).unwrap(),
     );
-    assert!(core::ptr::eq(layer_a.caloric_law(), &cv as &dyn ThermalLaw));
-    assert!(core::ptr::eq(layer_b.caloric_law(), &cp as &dyn ThermalLaw));
+    assert!(core::ptr::addr_eq(
+        layer_a.caloric_law(),
+        &cv as &dyn ThermalLaw
+    ));
+    assert!(core::ptr::addr_eq(
+        layer_b.caloric_law(),
+        &cp as &dyn ThermalLaw
+    ));
     assert!(core::ptr::eq(layer_a.source_line(), a.source_line()));
     assert!(core::ptr::eq(layer_b.source_line(), b.source_line()));
     assert_eq!(

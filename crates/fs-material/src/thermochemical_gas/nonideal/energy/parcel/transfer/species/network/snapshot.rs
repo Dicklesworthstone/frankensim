@@ -29,6 +29,8 @@ pub(super) struct Snapshot<'a> {
     pub budgets: BTreeMap<u64, Budget>,
     pub before: BTreeMap<u64, BTreeMap<SpeciesId, f64>>,
     pub boundary: BoundaryAccounts<'a>,
+    /// Per-parcel bound on the rounding of a law-balanced net mass [kg].
+    pub mass_allowance_kg: BTreeMap<u64, f64>,
 }
 
 // Public entry points call this before building even the borrowed input map.
@@ -61,6 +63,7 @@ pub(super) fn prepare<'a>(
     heat: &[SpeciesNetworkHeatTransfer],
     external: &[SpeciesNetworkExternalHeat],
     boundaries: &[RealGasSpeciesNetworkBoundary<'a>],
+    mass_allowance_kg: &BTreeMap<u64, f64>,
     endpoints: &BTreeMap<u64, GasEnergySolve>,
     controls: SpeciesNetworkSolve,
     cancelled: &mut impl FnMut() -> bool,
@@ -78,6 +81,9 @@ pub(super) fn prepare<'a>(
         || controls.maximum_species_fraction >= 1.0
         || !positive(controls.mass_tolerance_kg)
         || !positive(controls.energy_tolerance_j)
+        || mass_allowance_kg
+            .iter()
+            .any(|(id, kg)| !parcels.contains_key(id) || !kg.is_finite() || *kg < 0.0)
     {
         return Err(Error::Invalid(
             "bounded real-gas graph, exact endpoint map and positive physical limits required",
@@ -268,5 +274,6 @@ pub(super) fn prepare<'a>(
         budgets,
         before,
         boundary,
+        mass_allowance_kg: mass_allowance_kg.clone(),
     })
 }

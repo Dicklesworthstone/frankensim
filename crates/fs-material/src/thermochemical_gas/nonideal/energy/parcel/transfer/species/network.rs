@@ -104,19 +104,26 @@ pub fn exchange_candidate(
 
 /// Additional internal heat shares the same conserved endpoint solve as all
 /// species streams. Positive heat leaves parcels[0] and enters parcels[1].
+/// `mass_allowance_kg` bounds, per parcel, the rounding of a net mass that the
+/// streams' own law sets to zero (a mass-frame diffusion face): a parcel whose
+/// computed net mass lies within its allowance keeps its mass exactly. A parcel
+/// absent from the map has none, the exact balance every other entry requires.
 pub fn exchange_candidate_with_heat(
     parcels: &BTreeMap<u64, IsochoricRealGasParcel>,
     transfers: &[SpeciesNetworkTransfer],
     heat: &[SpeciesNetworkHeatTransfer],
+    mass_allowance_kg: &BTreeMap<u64, f64>,
     endpoints: &BTreeMap<u64, GasEnergySolve>,
     controls: SpeciesNetworkSolve,
     cancelled: impl FnMut() -> bool,
 ) -> Result<RealGasSpeciesNetworkCandidate, Error> {
-    exchange_candidate_with_external_heat(
+    allowed_candidate(
         parcels,
         transfers,
         heat,
         &[],
+        &[],
+        mass_allowance_kg,
         endpoints,
         controls,
         cancelled,
@@ -188,6 +195,33 @@ pub fn exchange_candidate_with_boundaries_and_external_heat(
     external_heat: &[SpeciesNetworkExternalHeat],
     endpoints: &BTreeMap<u64, GasEnergySolve>,
     controls: SpeciesNetworkSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<RealGasSpeciesNetworkCandidate, Error> {
+    allowed_candidate(
+        parcels,
+        transfers,
+        heat,
+        boundaries,
+        external_heat,
+        &BTreeMap::new(),
+        endpoints,
+        controls,
+        cancelled,
+    )
+}
+
+// Every public entry lowers here; only the molecular-diffusion entry carries a
+// nonempty mass allowance.
+#[allow(clippy::too_many_arguments)]
+fn allowed_candidate(
+    parcels: &BTreeMap<u64, IsochoricRealGasParcel>,
+    transfers: &[SpeciesNetworkTransfer],
+    heat: &[SpeciesNetworkHeatTransfer],
+    boundaries: &[RealGasSpeciesNetworkBoundary<'_>],
+    external_heat: &[SpeciesNetworkExternalHeat],
+    mass_allowance_kg: &BTreeMap<u64, f64>,
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    controls: SpeciesNetworkSolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<RealGasSpeciesNetworkCandidate, Error> {
     check(&mut cancelled)?;
@@ -205,6 +239,7 @@ pub fn exchange_candidate_with_boundaries_and_external_heat(
         heat,
         external_heat,
         boundaries,
+        mass_allowance_kg,
         endpoints,
         controls,
         &mut cancelled,
@@ -229,6 +264,7 @@ pub(super) fn exchange_borrowed(
         heat,
         external_heat,
         &[],
+        &BTreeMap::new(),
         endpoints,
         controls,
         cancelled,
@@ -242,6 +278,7 @@ fn exchange_borrowed_with_boundaries(
     heat: &[SpeciesNetworkHeatTransfer],
     external_heat: &[SpeciesNetworkExternalHeat],
     boundaries: &[RealGasSpeciesNetworkBoundary<'_>],
+    mass_allowance_kg: &BTreeMap<u64, f64>,
     endpoints: &BTreeMap<u64, GasEnergySolve>,
     controls: SpeciesNetworkSolve,
     cancelled: &mut impl FnMut() -> bool,
@@ -252,6 +289,7 @@ fn exchange_borrowed_with_boundaries(
         heat,
         external_heat,
         boundaries,
+        mass_allowance_kg,
         endpoints,
         controls,
         cancelled,

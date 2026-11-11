@@ -197,10 +197,34 @@ fn dense_thermal_face_enters_one_native_species_heat_reconstruction() {
             parcels: [10, 20],
             heat_left_to_right_j: flux.additional_heat_rate_left_to_right_w,
         }];
+        // The face's mass-frame allowance, from the owner's published residual
+        // and the same one-second masses, for both of its parcels.
+        let masses: Vec<_> = flux
+            .species
+            .iter()
+            .map(|s| s.mass_rate_left_to_right_kg_s)
+            .collect();
+        let allowance = super::super::network::face_allowance(
+            &masses,
+            flux.mass_frame_residual_kg_m2_s,
+            geometry().area_m2,
+            1.,
+        )
+        .unwrap();
+        // (c) On this two-species face the owner closes the frame explicitly,
+        // so its residual is at rounding level (about 7u of sum|J_i| from the
+        // closure's and the products' own roundings), far inside its 1e-10
+        // relative tolerance.
+        let gross: f64 = masses.iter().map(|m| m.abs()).sum();
+        assert!(
+            flux.mass_frame_residual_kg_m2_s.abs() * geometry().area_m2
+                <= 8.0 * f64::EPSILON * gross
+        );
         let expected = native::exchange_candidate_with_heat(
             &before,
             &transfers,
             &heat,
+            &BTreeMap::from([(10, allowance), (20, allowance)]),
             &endpoints(&before),
             physical().exchange,
             || false,

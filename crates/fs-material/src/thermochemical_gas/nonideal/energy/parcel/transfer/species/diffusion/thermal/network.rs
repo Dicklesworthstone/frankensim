@@ -87,6 +87,9 @@ impl MolecularFace for RealGasThermodiffusionModel<'_> {
     fn heat_rate(flux: &Self::Flux) -> f64 {
         flux.additional_heat_rate_left_to_right_w
     }
+    fn frame_residual(flux: &Self::Flux) -> f64 {
+        flux.mass_frame_residual_kg_m2_s
+    }
 }
 
 /// Explicit first-order interval using every ORIGINAL face snapshot. Thermal

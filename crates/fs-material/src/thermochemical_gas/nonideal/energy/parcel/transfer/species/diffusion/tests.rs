@@ -418,3 +418,97 @@ fn late_cancellation_and_gross_withdrawal_return_no_candidate() {
     );
     assert_eq!(parcels, saved);
 }
+
+#[test]
+fn the_face_audit_refuses_a_net_twice_its_bound_and_admits_the_published_residual() {
+    let u = f64::EPSILON / 2.0;
+    let (area, duration) = (1e-4, 20.0);
+    // With no published residual the bound is 5u sum|m_i|; the allowance adds
+    // 6u sum|m_i| for the network's three compensated sums.
+    let gross = 2e-6;
+    let bound = 5.0 * u * gross;
+    let balanced = network::face_allowance(&[1e-6, -1e-6], 0.0, area, duration).unwrap();
+    assert_eq!(balanced, bound + 6.0 * u * gross);
+    // Planted negative (a): a face netting about twice its bound is refused.
+    let over = [1e-6, -(1e-6 - 2.0 * bound)];
+    let ratio = (over[0] + over[1]) / bound;
+    assert!((1.8..2.2).contains(&ratio), "{ratio}");
+    assert!(network::face_allowance(&over, 0.0, area, duration).is_err());
+    // The owner's residual widens the bound by |r| A dt, and no further.
+    let residual = 1e-14;
+    let rate = residual * area * duration;
+    let within = [1e-6, -(1e-6 - rate)];
+    let beyond = [1e-6, -(1e-6 - 2.0 * rate)];
+    let allowance = network::face_allowance(&within, residual, area, duration).unwrap();
+    assert!(allowance >= (within[0] + within[1]).abs());
+    assert!(network::face_allowance(&within, -residual, area, duration).is_ok());
+    assert!(network::face_allowance(&beyond, residual, area, duration).is_err());
+    assert!(network::face_allowance(&within, f64::NAN, area, duration).is_err());
+}
+
+#[test]
+fn a_general_path_mass_frame_face_is_admitted_within_its_published_residual() {
+    use fs_qty::{AmountConcentration, MolarMass};
+    use fs_thermochem::transport::maxwell_stefan::MaxwellStefanV1;
+    // Planted case (b1). Three species, all present, with three different pair
+    // diffusivities take the owner's dense LU path, where the mass frame is one
+    // row of the solve rather than an explicit closure (fs-thermochem
+    // transport/maxwell_stefan/composition.rs): n = 3 passes the two-species
+    // closure (:23), unequal pairs clear the common diffusivity (:50, :58), and
+    // three positive fractions pass the one-carrier closure (:107) to the LU
+    // solve (:159). Its published residual is that row's rounding.
+    let owner = MaxwellStefanV1::new(vec![
+        (SpeciesId::new("A").unwrap(), MolarMass::new(0.028)),
+        (SpeciesId::new("B").unwrap(), MolarMass::new(0.004)),
+        (SpeciesId::new("C").unwrap(), MolarMass::new(0.044)),
+    ])
+    .unwrap();
+    let mut work = owner.workspace().unwrap();
+    let d = [0.0, 3e-8, 1e-8, 3e-8, 0.0, 7e-8, 1e-8, 7e-8, 0.0];
+    let (area, duration) = (1e-4, 20.0);
+    let mut nonzero = 0;
+    for x in [
+        [0.5, 0.3, 0.2],
+        [0.45, 0.35, 0.2],
+        [0.6, 0.15, 0.25],
+        [0.3, 0.3, 0.4],
+    ] {
+        for forces in [[-37.0, 48.0, -11.0], [5.0, -3.0, -2.0], [-1.5, -2.5, 4.0]] {
+            let flux = owner
+                .evaluate_driving_forces(
+                    &x,
+                    &forces,
+                    AmountConcentration::new(1500.0),
+                    &d,
+                    MaxwellStefanSolveV1::default(),
+                    &mut work,
+                    || false,
+                )
+                .unwrap();
+            let residual = flux.mass_frame_residual_kg_m2_s();
+            let scale: f64 = flux.mass_fluxes().iter().map(|j| j.abs()).sum();
+            assert!(residual.abs() <= 1e-16 + 1e-10 * scale);
+            if residual == 0.0 {
+                continue;
+            }
+            nonzero += 1;
+            let masses: Vec<_> = flux
+                .mass_fluxes()
+                .iter()
+                .map(|j| j * area * duration)
+                .collect();
+            let net = masses
+                .iter()
+                .fold(fs_math::dd::Dd::ZERO, |sum, m| {
+                    sum + fs_math::dd::Dd::from_f64(*m)
+                })
+                .to_f64();
+            let allowance = network::face_allowance(&masses, residual, area, duration).unwrap();
+            assert!(allowance >= net.abs(), "{allowance} < {net}");
+        }
+    }
+    assert!(
+        nonzero > 0,
+        "no general-path case published a nonzero residual"
+    );
+}

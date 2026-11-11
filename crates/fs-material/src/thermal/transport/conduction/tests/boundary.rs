@@ -454,7 +454,7 @@ fn g1_equilibrium_layers_keep_exact_cp_source_bounds_and_inward_phase_tangents()
             phase, [350.0, 500.0], || Ok(()),
         ).unwrap();
         let layer = CaloricConductionLayer::from_equilibrium_phase(&resolved);
-        assert!(core::ptr::eq(layer.caloric_law(), &curve as &dyn ThermalLaw));
+        assert!(core::ptr::addr_eq(layer.caloric_law(), &curve as &dyn ThermalLaw));
         assert!(core::ptr::eq(layer.source_line(), resolved.source_line().as_ref()));
         assert!(layer.supports_material_card(source.card.content_hash()));
         assert_eq!(layer.caloric_law().storage_basis(), ThermalStorageBasis::Enthalpy);

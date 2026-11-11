@@ -611,11 +611,11 @@ fn current_radial_contact_retains_source_tangents_and_native_shell_inventory() {
         );
         assert!(current.supports_current_geometry());
         assert_eq!(current.native_geometry().contact_resistance_m2_k_w, 0.0);
-        assert!(core::ptr::eq(
+        assert!(core::ptr::addr_eq(
             current.caloric_laws()[0],
             &cv as &dyn ThermalLaw
         ));
-        assert!(core::ptr::eq(
+        assert!(core::ptr::addr_eq(
             current.caloric_laws()[1],
             &cp as &dyn ThermalLaw
         ));
@@ -804,7 +804,7 @@ fn current_radial_bath_uses_current_film_area_and_original_shell_mass() {
         assert_eq!(current.reference_geometry(), reference_geometry);
         assert_eq!(current.geometry(), geometry);
         assert!(current.supports_current_geometry());
-        assert!(core::ptr::eq(
+        assert!(core::ptr::addr_eq(
             current.caloric_law(),
             &caloric as &dyn ThermalLaw
         ));

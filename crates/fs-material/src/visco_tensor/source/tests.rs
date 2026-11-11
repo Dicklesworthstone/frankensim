@@ -18,6 +18,87 @@ const BRANCH: [[f64; 6]; 6] = [
     [-2e7, 1e7, 2e7, -1e7, 3e7, 4e8],
 ];
 
+// A bound law holds factor-defined tensors (`new_mandel`): c_eq = gram(R) and
+// c_pa = gram(B), the f64 Gram of the factor rows it keeps. They equal the
+// authored source only within rounding, so the tests below check two things:
+// (a) bit equality with the same constructor on the same source, and (b) the
+// source within the backward-error bound of the factor the law holds.
+
+/// `gamma_k = k u / (1 - k u)` with `u = f64::EPSILON / 2` (Higham, Accuracy
+/// and Stability of Numerical Algorithms, 2nd ed., section 3.1).
+fn gamma(k: f64) -> f64 {
+    let u = f64::EPSILON / 2.0;
+    k * u / (1.0 - k * u)
+}
+
+/// `(|F^T| |F|)_ij` for factor rows `F` with `C = F^T F`.
+fn absolute_gram(rows: &[[f64; 6]; 6]) -> [[f64; 6]; 6] {
+    core::array::from_fn(|i| {
+        core::array::from_fn(|j| (0..6).map(|k| (rows[k][i] * rows[k][j]).abs()).sum())
+    })
+}
+
+/// (b) for a branch: `|c_pa - C|_ij <= 64 EPSILON s_i s_j + gamma_6 (|B^T| |B|)_ij`
+/// with `s_i = sqrt(C_ii)`. Every branch's rows come from `psd_factor`, the
+/// pivoted double-double LDL^T of `factor_passive_work_matrix`, which refuses
+/// a factor whose `B^T B` misses C by more than its own admission, the first
+/// term; the second is the f64 Gram of at most six products (Higham, section
+/// 3.1, inner products). `1 + gamma_8` covers this bound's own f64 evaluation.
+fn branch_within_bound(c_pa: &[[f64; 6]; 6], rows: &[[f64; 6]; 6], source: &[[f64; 6]; 6]) -> bool {
+    let scale = absolute_gram(rows);
+    (0..6).all(|i| {
+        (0..6).all(|j| {
+            let s = fs_math::det::sqrt(source[i][i]) * fs_math::det::sqrt(source[j][j]);
+            let bound = (64.0 * f64::EPSILON * s + gamma(6.0) * scale[i][j]) * (1.0 + gamma(8.0));
+            (c_pa[i][j] - source[i][j]).abs() <= bound
+        })
+    })
+}
+
+/// (b) for the equilibrium: `|c_eq - C| <= (gamma_7 + gamma_6) |R^T| |R|`.
+/// `positive_factor` is a strict f64 Cholesky with correctly rounded square
+/// roots, so Higham 2nd ed. Theorem 10.3 with n = 6 gives
+/// `|R^T R - C| <= gamma_7 |R^T| |R|`; the f64 Gram adds `gamma_6 |R^T| |R|`.
+/// `1 + gamma_8` covers this bound's own f64 evaluation.
+fn equilibrium_within_bound(
+    c_eq: &[[f64; 6]; 6],
+    rows: &[[f64; 6]; 6],
+    source: &[[f64; 6]; 6],
+) -> bool {
+    let scale = absolute_gram(rows);
+    (0..6).all(|i| {
+        (0..6).all(|j| {
+            let bound = (gamma(7.0) + gamma(6.0)) * scale[i][j] * (1.0 + gamma(8.0));
+            (c_eq[i][j] - source[i][j]).abs() <= bound
+        })
+    })
+}
+
+/// (a): the branch tensor a law bound from `source` holds, from the same
+/// constructors the binding uses (`TensorPronyBranch::new`, `new_mandel`).
+/// c_pa does not depend on the equilibrium, so any SPD equilibrium serves.
+fn represented_branch(source: [[f64; 6]; 6]) -> [[f64; 6]; 6] {
+    let equilibrium =
+        core::array::from_fn(|i| core::array::from_fn(|j| if i == j { 1e9 } else { 0.0 }));
+    TensorProny::new_mandel(
+        equilibrium,
+        vec![TensorPronyBranch::new(source, 0.01).unwrap()],
+        0.02,
+    )
+    .unwrap()
+    .branches()[0]
+        .c_pa
+}
+
+/// (a) and (b) for a bound law's branch against its authored source.
+fn assert_branch_represents(branch: &TensorPronyBranch, source: &[[f64; 6]; 6]) {
+    assert_eq!(branch.c_pa, represented_branch(*source));
+    let rows = branch
+        .gram_rows
+        .expect("a bound law keeps its admitted rows");
+    assert!(branch_within_bound(&branch.c_pa, &rows, source));
+}
+
 fn scalar(name: &str, dims: Dims, value: f64) -> PropertyClaim {
     PropertyClaim {
         key: PropertyKey::new(name, dims),
@@ -123,7 +204,17 @@ fn full_source_mandel_matrix_preserves_shear_cross_terms_and_relaxation() {
     let before = state.clone();
     let law = properties.bind(&state).unwrap();
     assert_eq!(state, before, "binding must preserve original evidence");
-    assert_eq!(law.branches()[0].c_pa, BRANCH);
+    assert_branch_represents(&law.branches()[0], &BRANCH);
+    // Planted negative: one source diagonal entry moved by 1e-12 relative is
+    // outside the bound (at [2][2], 7.0e-4 against 1.04e-5, 67 times over). An
+    // off-diagonal entry moved the same way is at most 4.7 times over ([1][2]:
+    // 5.0e-5 against 1.07e-5) and at [0][2] lies inside the bound (0.89 of
+    // it), because the factor's admission scales with s_i s_j, not with
+    // |C_ij|; plant on the diagonal.
+    let mut moved = BRANCH;
+    moved[2][2] *= 1.0 + 1e-12;
+    let rows = law.branches()[0].gram_rows.unwrap();
+    assert!(!branch_within_bound(&law.branches()[0].c_pa, &rows, &moved));
     assert_eq!(law.branches()[0].tau_s, 0.01);
     assert_eq!(law.c_eq()[0][0], 14.4e9);
     assert_eq!(law.c_eq()[0][1], 4.8e9);
@@ -208,7 +299,7 @@ fn independent_equilibrium_pairs_preserve_complete_tensor_histories_and_source_r
         assert_eq!(source.properties(), &properties);
         assert_eq!(source.density_kg_m3(), 900.0);
         assert_eq!(source.law().band_rad_s(), (20.0, 600.0));
-        assert_eq!(source.law().branches()[0].c_pa, BRANCH);
+        assert_branch_represents(&source.law().branches()[0], &BRANCH);
         assert_eq!(source.law().branches()[0].tau_s, 0.01);
         if elasticity != TensorElasticity::Isotropic {
             assert!(source.state().property("poisson_ratio").is_none());
@@ -335,7 +426,7 @@ fn orthotropic_source_retains_all_three_elastic_directions() {
     )
     .unwrap();
     assert_eq!(law.c_eq(), expected.c_eq());
-    assert_eq!(law.branches()[0].c_pa, BRANCH);
+    assert_branch_represents(&law.branches()[0], &BRANCH);
     let third_axis = claims
         .iter_mut()
         .find(|c| c.key.name() == ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES[2])
@@ -506,11 +597,36 @@ fn held_source_moisture_reaches_inertia_equilibrium_and_complete_tensor_memory()
     let wet = dry.at_query_point(&source, &at(0.2)).unwrap();
     assert_eq!(wet.density_kg_m3(), 1.2*dry.density_kg_m3());
     assert_eq!(wet.law().branches()[0].tau_s, 2.0*dry.law().branches()[0].tau_s);
-    for i in 0..6 {
-        for j in 0..6 {
-            assert_eq!(wet.law().c_eq()[i][j], 0.5*dry.law().c_eq()[i][j]);
-            assert_eq!(wet.law().branches()[0].c_pa[i][j], 0.5*dry.law().branches()[0].c_pa[i][j]);
-        }
+    // Moisture halves the source moduli exactly (a power of two at the curve's
+    // knot), but the bound tensors are factor-defined, so they are compared
+    // with the source tensors: the dry ones and exactly half of them wet.
+    let source_equilibrium = |m: &ResolvedTensorMaterial| {
+        let parameters = m
+            .properties
+            .elasticity
+            .isotropic_parameters()
+            .unwrap()
+            .unwrap();
+        ResolvedIsotropicElasticModuli::try_from_resolved(m.state.clone(), &parameters)
+            .unwrap()
+            .stiffness_mandel_pa()
+    };
+    let dry_source = source_equilibrium(&dry);
+    let half = |c: [[f64; 6]; 6]| c.map(|row| row.map(|x| 0.5 * x));
+    assert_eq!(source_equilibrium(&wet), half(dry_source));
+    for (m, equilibrium, branch) in [
+        (&dry, dry_source, BRANCH),
+        (&wet, half(dry_source), half(BRANCH)),
+    ] {
+        let law = m.law();
+        let expected = TensorProny::new_mandel(equilibrium, vec![], law.strain_limit).unwrap();
+        assert_eq!(law.c_eq(), expected.c_eq());
+        assert!(equilibrium_within_bound(
+            law.c_eq(),
+            &law.equilibrium_gram,
+            &equilibrium
+        ));
+        assert_branch_represents(&law.branches()[0], &branch);
     }
     let (dry_storage, dry_loss) = dry.law().modulus_mandel(100.0).unwrap();
     let (wet_storage, wet_loss) = wet.law().modulus_mandel(100.0).unwrap();
@@ -637,7 +753,7 @@ fn independent_affine_bulk_shear_reaches_native_tensor_entropy_and_internal_ener
         );
         assert!(endpoint.state().property("young_modulus").is_none());
         assert!(endpoint.state().property("poisson_ratio").is_none());
-        assert_eq!(endpoint.law().branches()[0].c_pa, BRANCH);
+        assert_branch_represents(&endpoint.law().branches()[0], &BRANCH);
     }
     assert_eq!(material, before);
 }
@@ -790,7 +906,7 @@ fn g1_rational_young_shear_reaches_native_entropy_capacity_and_source_refresh() 
                 >= -value.heat_capacity_j_k / temperature
         );
         assert!(endpoint.state().property("poisson_ratio").is_none());
-        assert_eq!(endpoint.law().branches()[0].c_pa, BRANCH);
+        assert_branch_represents(&endpoint.law().branches()[0], &BRANCH);
         for property in material.state().properties() {
             assert_eq!(
                 property.answer().receipt.selected,

@@ -129,7 +129,7 @@ fn current_link_reuses_original_integrals_contact_and_reference_identity() {
         assert_eq!(current.reference_geometry(), geometry);
         assert_eq!(current.current_geometry(), metric);
         assert_eq!(current.native_geometry().contact_resistance_m2_k_w, 0.0);
-        assert!(core::ptr::eq(
+        assert!(core::ptr::addr_eq(
             current.caloric_laws()[0],
             &cv as &dyn ThermalLaw
         ));

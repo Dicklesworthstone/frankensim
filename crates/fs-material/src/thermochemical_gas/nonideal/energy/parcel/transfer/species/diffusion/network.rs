@@ -68,6 +68,10 @@ pub(super) trait MolecularFace {
     fn heat_rate(_flux: &Self::Flux) -> f64 {
         0.0
     }
+    /// The mass-frame residual the constitutive owner published with this
+    /// flux [kg/(m2 s)], its compensated sum of the published species mass
+    /// fluxes. No default: a face that publishes none does not lower.
+    fn frame_residual(flux: &Self::Flux) -> f64;
 }
 impl MolecularFace for RealGasDiffusionModel<'_> {
     type Flux = RealGasDiffusionFlux;
@@ -100,6 +104,54 @@ impl MolecularFace for RealGasDiffusionModel<'_> {
     fn species_flux(flux: &Self::Flux) -> &[SpeciesDiffusionFlux] {
         &flux.species
     }
+    fn frame_residual(flux: &Self::Flux) -> f64 {
+        flux.mass_frame_residual_kg_m2_s
+    }
+}
+
+/// Unit roundoff of binary64.
+const U: f64 = f64::EPSILON / 2.0;
+/// `gamma_3 = 3u / (1 - 3u)` (Higham, Accuracy and Stability of Numerical
+/// Algorithms, 2nd ed., Lemma 3.1).
+const GAMMA_3: f64 = 3.0 * U / (1.0 - 3.0 * U);
+
+// Both molecular laws are mass-frame laws: the owner's published species mass
+// fluxes J_i sum to zero within its published frame residual r, which is its
+// compensated sum of those J_i. A face therefore moves no net mass by its law.
+// This lowering rounds m_i = fl(fl(J_i A) dt), so (Higham 2nd ed., Lemma 3.1,
+// and section 4.3, (4.8), for the compensated sum)
+//   |sum_i m_i| <= |r| A dt + (4u + O(n u^2)) sum_i |m_i|,
+// 2u from the two roundings of each m_i and 2u from the owner's compensated
+// sum. The audit sums the m_i in double-double and rounds once (u); 1 + gamma_3
+// covers that rounding and the two of |r| A dt, and the fifth u covers the
+// O(n u^2) terms and this bound's own evaluation. A face outside the bound is
+// refused. Inside it, each parcel of the face is allowed the bound plus
+// 6u sum_i |m_i| for the network's three compensated sums of these rows (the
+// per-key merge, the per-species budget and the parcel's net), and the network
+// keeps a parcel's mass exactly when its computed net lies within the sum of
+// its faces' allowances. On the general Maxwell-Stefan path r is the frame row
+// residual of its LU solve, which the owner has already admitted against its
+// own tolerance; it is never recomputed here.
+pub(super) fn face_allowance(
+    masses: &[f64],
+    frame_residual: f64,
+    area_m2: f64,
+    duration_s: f64,
+) -> Result<f64, GasEnergyError> {
+    let (mut net, mut gross) = (Dd::ZERO, Dd::ZERO);
+    for &mass in masses {
+        net = net + Dd::from_f64(mass);
+        gross = gross + Dd::from_f64(mass.abs());
+    }
+    let (net, gross) = (net.to_f64(), gross.to_f64());
+    let rate = (1.0 + GAMMA_3) * (frame_residual.abs() * area_m2 * duration_s);
+    let bound = rate + 5.0 * U * gross;
+    if ![net, gross, rate, bound].iter().all(|v| v.is_finite()) || net.abs() > bound {
+        return Err(GasEnergyError::Invalid(
+            "real-gas mass-frame face nets more mass than its rounding bound",
+        ));
+    }
+    Ok(bound + 6.0 * U * gross)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -284,6 +336,8 @@ pub(super) fn step_counted_candidate<Model: MolecularFace>(
     let mut transfers = Vec::new();
     let mut heat = Vec::new();
     let mut steps = Vec::with_capacity(links.len());
+    let mut face_masses = Vec::new();
+    let mut allowances: BTreeMap<u64, Dd> = BTreeMap::new();
     for (&id, link) in &ordered {
         poll(&mut cancelled)?;
         let [left, right] = link.parcels;
@@ -316,6 +370,7 @@ pub(super) fn step_counted_candidate<Model: MolecularFace>(
                     &mut cancelled,
                 )
                 .map_err(|error| face_error(id, error))?;
+            face_masses.clear();
             for species in Model::species_flux(&flux) {
                 poll(&mut cancelled)?;
                 let rate = species.mass_rate_left_to_right_kg_s;
@@ -325,6 +380,7 @@ pub(super) fn step_counted_candidate<Model: MolecularFace>(
                         "integrated real-gas diffusion mass is unrepresentable",
                     ));
                 }
+                face_masses.push(mass);
                 if mass == 0.0 {
                     continue;
                 }
@@ -344,6 +400,17 @@ pub(super) fn step_counted_candidate<Model: MolecularFace>(
                     species: species.species.clone(),
                     mass_kg: mass.abs(),
                 });
+            }
+            let allowance = face_allowance(
+                &face_masses,
+                Model::frame_residual(&flux),
+                link.geometry.area_m2,
+                duration_s,
+            )
+            .map_err(|error| face_error(id, error))?;
+            for parcel in link.parcels {
+                let total = allowances.entry(parcel).or_insert(Dd::ZERO);
+                *total = *total + Dd::from_f64(allowance);
             }
             let rate = Model::heat_rate(&flux);
             let energy = rate * duration_s;
@@ -371,10 +438,17 @@ pub(super) fn step_counted_candidate<Model: MolecularFace>(
             flux,
         });
     }
+    // Summed in double-double and rounded once: within the fifth u of each
+    // face's allowance for every face of a bounded snapshot.
+    let allowances = allowances
+        .into_iter()
+        .map(|(parcel, total)| (parcel, total.to_f64()))
+        .collect();
     let candidate = exchange::exchange_candidate_with_heat(
         parcels,
         &transfers,
         &heat,
+        &allowances,
         endpoints,
         controls.exchange,
         &mut cancelled,

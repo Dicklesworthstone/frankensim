@@ -286,6 +286,14 @@ the resulting extensive energy once. Local/global mass, individual species and
 energy defects retain their absolute budgets, independent of arbitrary energy
 reference magnitudes. Nonzero net increments that disappear in floating-point
 inventory arithmetic refuse; exactly balanced throughflow remains admissible.
+The one exception is a net that the streams' own law balances: a real-gas
+molecular-diffusion face is mass-frame balanced, so its lowering first refuses a
+face whose integrated masses net more than (1 + gamma_3)|r| A dt + 5u sum|m_i|
+(r the frame residual the Maxwell-Stefan owner published with that flux), then
+passes each parcel of the face that bound plus 6u sum|m_i| for the network's
+compensated sums as a mass allowance (`mass_allowance_kg` of
+`exchange_candidate_with_heat`). A parcel whose computed net lies within its
+allowance keeps its mass and density bits; every other entry passes none.
 
 Internal antisymmetric heat and uniquely identified external heat enter that
 same reconstruction, separately from transported species enthalpy. The external

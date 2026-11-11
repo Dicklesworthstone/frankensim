@@ -173,6 +173,7 @@ fn canonical_parallel_rows_and_heat_orientation_preserve_the_entire_candidate() 
             parcels: [10, 30],
             heat_left_to_right_j: 2.0,
         }],
+        &BTreeMap::new(),
         &endpoints(&parcels),
         controls(),
         || false,
@@ -195,6 +196,7 @@ fn canonical_parallel_rows_and_heat_orientation_preserve_the_entire_candidate() 
                 heat_left_to_right_j: 1.25,
             },
         ],
+        &BTreeMap::new(),
         &endpoints(&parcels),
         controls(),
         || false,
@@ -430,4 +432,53 @@ fn bounded_parallel_expansion_is_combined_before_the_original_energy_solve() {
     let mut missing = endpoints(&parcels);
     missing.remove(&99);
     assert!(exchange_candidate(&parcels, &[], &missing, controls(), || false).is_err());
+}
+
+#[test]
+fn a_counterstream_within_its_mass_allowance_keeps_both_parcels_exactly() {
+    // Planted case (b2). Two species cross one face in opposite directions and
+    // net less than half an ulp of either parcel's mass. Within an allowance
+    // equal to that net both parcels keep their mass and density bit for bit
+    // while their compositions change. With half of it, or none, the net is an
+    // increment the parcel cannot represent and is refused as it always was.
+    let parcels = nodes([0.0; 2]);
+    let (a, b) = (1e-6, 1e-6 - 1e-21);
+    let net = a - b;
+    assert!(net > 0.0);
+    assert_eq!(parcels[&10].mass_kg() + net, parcels[&10].mass_kg());
+    assert_eq!(parcels[&20].mass_kg() - net, parcels[&20].mass_kg());
+    let rows = [stream(10, 20, "A", a), stream(20, 10, "B", b)];
+    let run = |allowance: &BTreeMap<u64, f64>| {
+        exchange_candidate_with_heat(
+            &parcels,
+            &rows,
+            &[],
+            allowance,
+            &endpoints(&parcels),
+            controls(),
+            || false,
+        )
+    };
+    let candidate = run(&BTreeMap::from([(10, net), (20, net)])).unwrap();
+    for id in [10, 20] {
+        let (old, new) = (&parcels[&id], &candidate.parcels()[&id]);
+        assert_eq!(new.mass_kg().to_bits(), old.mass_kg().to_bits());
+        assert_eq!(new.density_kg_m3().to_bits(), old.density_kg_m3().to_bits());
+    }
+    let species_a = SpeciesId::new("A").unwrap();
+    close(
+        species_mass(&parcels[&10], &species_a)
+            - species_mass(&candidate.parcels()[&10], &species_a),
+        a,
+        controls().mass_tolerance_kg,
+    );
+    let refused =
+        SpeciesNetworkError::Invalid("real-gas network mass/density increment is unrepresentable");
+    let half = BTreeMap::from([(10, 0.5 * net), (20, 0.5 * net)]);
+    assert_eq!(run(&half).unwrap_err(), refused);
+    assert_eq!(run(&BTreeMap::new()).unwrap_err(), refused);
+    // An allowance must name an original parcel and be finite and nonnegative.
+    for invalid in [(42, net), (10, -net), (10, f64::NAN)] {
+        assert!(run(&BTreeMap::from([invalid])).is_err());
+    }
 }

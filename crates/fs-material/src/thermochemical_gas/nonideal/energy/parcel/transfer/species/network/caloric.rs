@@ -143,13 +143,24 @@ pub(super) fn finish(
             target.insert(species.clone(), updated);
             delta_mass.add(change.value).map_err(map)?;
         }
-        let mass = old.mass_kg() + delta_mass.value;
+        // A net within the parcel's allowance is the rounding of a mass its
+        // streams' own law balances (a mass-frame face; the lowering derives
+        // the bound), so the parcel keeps its mass exactly. With no allowance
+        // this is the exact test it always was. delta_mass itself stays the
+        // computed value for the reference energy and the mass residual below.
+        let allowance = snapshot.mass_allowance_kg.get(&id).copied().unwrap_or(0.0);
+        let net = if delta_mass.value.abs() <= allowance {
+            0.0
+        } else {
+            delta_mass.value
+        };
+        let mass = old.mass_kg() + net;
         let density = endpoint_density(old, mass);
         if !positive(mass)
             || !positive(density)
-            || (delta_mass.value != 0.0 && mass == old.mass_kg())
+            || (net != 0.0 && mass == old.mass_kg())
             || (mass != old.mass_kg() && density == old.density_kg_m3())
-            || ((mass - old.mass_kg()) - delta_mass.value).abs() > controls.mass_tolerance_kg
+            || ((mass - old.mass_kg()) - net).abs() > controls.mass_tolerance_kg
         {
             return Err(Error::Invalid(
                 "real-gas network mass/density increment is unrepresentable",
