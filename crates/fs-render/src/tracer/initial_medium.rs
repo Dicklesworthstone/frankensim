@@ -415,15 +415,81 @@ fn box_corners(bounds: Aabb) -> [Point3; 8] {
     })
 }
 
-fn mesh_contains(
+const UNIT_ROUNDOFF: f64 = f64::EPSILON * 0.5;
+/// `det::atan2`'s declared budget in ulps (fs-math CONTRACT.md: `atan` 4 plus 1 for the composition; externally
+/// audited by the MPFR lane). An audited budget, not a proof: it is the one assumed stage of the bound below.
+const ATAN2_ULPS: f64 = 5.0;
+/// The compensated sum's error `(2u + O(N u^2)) sum |Omega_i|` (Higham 2nd ed. (4.8); Goldberg 1991, Theorem 8) is taken
+/// as `3u sum |Omega_i|` for at most this many triangles. The sources state the second-order term only as `O(N u^2)`, so
+/// the range is stated, not its constant: `3u` covers `2u + c N u^2` whenever `c N u <= 1`, which holds for any `c <= 2^23`
+/// at `N <= 2^30`. Above it the plain recursive bound `gamma_{N-1} sum |Omega_i|` (Higham section 4.2) is used.
+const COMPENSATED_SUM_MAX_TERMS: f64 = 1_073_741_824.0;
+/// A winding whose bound reaches this is not resolved at all: nearest-integer rounding needs it below 1/2, and the
+/// bound is kept to half of that.
+const WINDING_BOUND_LIMIT: f64 = 0.25;
+
+/// `k u / (1 - k u)` for u = 2^-53 (Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed., Lemma 3.1:
+/// `prod (1 + d_i)^(+-1) = 1 + theta_k`, `|theta_k| <= gamma_k`). The caller keeps `k u < 1`.
+fn gamma(k: f64) -> f64 {
+    k * UNIT_ROUNDOFF / (1.0 - k * UNIT_ROUNDOFF)
+}
+
+/// Absolute error `e0` of the computed pair `(D, N)` of one triangle, the same for every triangle.
+///
+/// A triangle's solid angle is `Omega = 2 atan2(N, D)` with `N = a.(b x c)` and `D = 1 + a.b + b.c + c.a` for the unit
+/// vectors a, b, c towards its corners (Van Oosterom & Strackee, IEEE TBME 30(2), 1983). Near a face edge `N` and `D`
+/// both go to 0, the origin being almost in the triangle's plane, and the conditioning of the angle is `1 / |(D, N)|`, so
+/// the bound is computed per triangle from its own `(D, N)`. A fixed multiple of epsilon cannot serve.
+///
+/// With u = 2^-53 and gamma_k as above:
+/// 1. A computed unit vector. `delta = vertex - origin` has relative error u per component; `|delta|` is
+///    `sqrt(x*x + y*y + z*z)` summed left to right, relative gamma_3 / 2 + u; the reciprocal and the product add u each.
+///    The computed vector is within `eps = gamma_6` of the exact unit vector (5.5 u) and has norm at most `m = 1 + eps`.
+/// 2. `N` and `D` of the exact unit vectors against those of the computed ones. `N` is trilinear and `D` is bilinear
+///    in the vectors, so the difference telescopes: `|dN| <= eps (|b x c| + |a x c| + |a x b|) <= 3 eps m^2` and
+///    `|dD| <= eps (|b| + |a| + |c| + |b| + |c| + |a|) <= 6 eps m`.
+/// 3. Rounding in `N`. Each component of `fl(b x c)` is within `gamma_2 (|b_i c_j| + |b_j c_i|) <= gamma_2 |b| |c|`
+///    (Cauchy-Schwarz), so the vector is within `sqrt(3) gamma_2 m^2`; the dot with `a` adds `m` times that and its own
+///    `gamma_3 |a| |w|` (Higham 3.5): `m^3 (sqrt(3) gamma_2 + gamma_3 (1 + sqrt(3) gamma_2))`.
+/// 4. Rounding in `D`. Three dots, each within `gamma_3 m^2`, and the sum `((1 + ab) + bc) + ca`, whose three
+///    roundings are at most `u (|s_1| + |s_2| + |s_3|) <= u (3 + 6 m^2) <= 9 u m^2`.
+///
+/// The components of the pair are `e0 = hypot(3 eps m^2 + [3.], 6 eps m + [4.])`.
+fn triangle_pair_error() -> f64 {
+    let eps = gamma(6.0);
+    let m = 1.0 + eps;
+    let root3 = 3.0_f64.sqrt();
+    let n_error = 3.0 * eps * m * m
+        + m.powi(3) * (root3 * gamma(2.0) + gamma(3.0) * (1.0 + root3 * gamma(2.0)));
+    let d_error = 6.0 * eps * m + 3.0 * gamma(3.0) * m * m + 9.0 * UNIT_ROUNDOFF * m * m;
+    n_error.hypot(d_error)
+}
+
+/// Oriented solid-angle winding of a closed mesh at `origin` and a bound `E` on its rounding error.
+///
+/// `E` assembles, over the triangles, `Omega_i`'s error and divides by 4 pi. The computed pair `(D, N)` lies within
+/// `e0` of the exact pair (`triangle_pair_error`); the angle between two vectors of the plane, one of them known to lie in
+/// the disc of radius `e0` about the other of length `|(D, N)|`, is at most `asin(rho)` with `rho = e0 / |(D, N)|`
+/// (rigorous: no first-order expansion), and `asin(rho) <= rho / sqrt(1 - rho^2)`. So `Omega_i` is within
+/// `2 rho / sqrt(1 - rho^2)` for `rho < 1` (otherwise `E` is infinite), plus the `det::atan2` budget `5 ulp(Omega_i)
+/// <= 5 * 2^-52 |Omega_i|`. The sum is compensated (Kahan), error `3u sum |Omega_i|` up to `COMPENSATED_SUM_MAX_TERMS`
+/// terms and `gamma_{N-1} sum |Omega_i|` beyond. The division by `4 pi` (the f64 constant is within 0.35 u of it) adds `2u |w|`. Evaluating
+/// `E` itself costs at most `64 + N` roundings of relative size u on positive terms, `gamma_{64 + N}`.
+///
+/// `E < 1/2` is what nearest-integer rounding of the exact integer winding needs; `WINDING_BOUND_LIMIT` keeps half of
+/// that for the one assumed stage.
+fn mesh_winding(
     vertices: &[[f64; 3]],
     triangles: &[[u32; 3]],
     origin: Point3,
     primitive: usize,
     mut checkpoint: impl FnMut() -> Result<(), TracerError>,
-) -> Result<bool, TracerError> {
+) -> Result<(f64, f64), TracerError> {
+    let pair_error = triangle_pair_error();
     let mut sum = 0.0;
     let mut correction = 0.0;
+    let mut angle_error = 0.0;
+    let mut magnitude = 0.0;
     for (index, triangle) in triangles.iter().enumerate() {
         if index % 128 == 0 {
             checkpoint()?;
@@ -452,29 +518,65 @@ fn mesh_contains(
             ));
         }
         let angle = 2.0 * det::atan2(numerator, denominator);
+        let rho = pair_error / (numerator * numerator + denominator * denominator).sqrt();
+        angle_error += if rho < 1.0 {
+            2.0 * rho / (1.0 - rho * rho).sqrt() + ATAN2_ULPS * 2.0_f64.powi(-52) * angle.abs()
+        } else {
+            f64::INFINITY
+        };
+        magnitude += angle.abs();
         let adjusted = angle - correction;
         let next = sum + adjusted;
         correction = (next - sum) - adjusted;
         sum = next;
     }
     let winding = sum / (4.0 * PI);
-    let tolerance = 512.0 * f64::EPSILON * (triangles.len().max(1) as f64);
-    if !winding.is_finite() || tolerance >= 0.01 {
+    let count = triangles.len() as f64;
+    let sum_coefficient = if count <= COMPENSATED_SUM_MAX_TERMS {
+        3.0 * UNIT_ROUNDOFF
+    } else {
+        gamma(count - 1.0)
+    };
+    let rounding = (angle_error + sum_coefficient * magnitude) / (4.0 * PI)
+        + 2.0 * UNIT_ROUNDOFF * winding.abs();
+    Ok((winding, rounding * (1.0 + gamma(64.0 + count))))
+}
+
+/// Whether `origin` is inside the closed mesh. The exact winding of a closed, consistently oriented, non-intersecting
+/// mesh is 1 inside and 0 outside; the computed one is accepted only within its derived bound `E` of that integer.
+///
+/// - `E` not finite or at least 1/4: refuse, numerical resolution;
+/// - the nearest integer `k` is not 0 or 1: refuse, reversed or intersecting;
+/// - `k` is 0 or 1 and `|w - k| > E`: refuse, unresolved winding;
+/// - otherwise the origin is inside exactly when `k == 1`.
+fn mesh_contains(
+    vertices: &[[f64; 3]],
+    triangles: &[[u32; 3]],
+    origin: Point3,
+    primitive: usize,
+    checkpoint: impl FnMut() -> Result<(), TracerError>,
+) -> Result<bool, TracerError> {
+    let (winding, bound) = mesh_winding(vertices, triangles, origin, primitive, checkpoint)?;
+    if !winding.is_finite() || !(bound < WINDING_BOUND_LIMIT) {
         return Err(refusal(
             primitive,
             "dielectric winding evaluation exceeds its numerical resolution",
         ));
     }
-    if winding.abs() <= tolerance {
-        Ok(false)
-    } else if (winding - 1.0).abs() <= tolerance {
-        Ok(true)
-    } else {
-        Err(refusal(
+    let nearest = winding.round();
+    if nearest != 0.0 && nearest != 1.0 {
+        return Err(refusal(
             primitive,
-            "dielectric mesh has reversed, intersecting or unresolved winding at the launch point",
-        ))
+            "dielectric mesh has reversed or intersecting winding at the launch point",
+        ));
     }
+    if (winding - nearest).abs() > bound {
+        return Err(refusal(
+            primitive,
+            "dielectric mesh has an unresolved winding at the launch point",
+        ));
+    }
+    Ok(nearest == 1.0)
 }
 
 fn mesh_closed(
@@ -600,6 +702,122 @@ mod tests {
         ] {
             assert!(mesh_contains(&VERTICES, &TRIANGLES, p, 7, || Ok(())).is_err());
         }
+    }
+
+    // The bdpt fixture's slab: x and y in [-2, 2], z from `bottom` to 1, the cube's triangles.
+    fn slab(bottom: f64) -> [[f64; 3]; 8] {
+        VERTICES.map(|v| {
+            [
+                2.0 * v[0],
+                2.0 * v[1],
+                if v[2] < 0.0 { bottom } else { 1.0 },
+            ]
+        })
+    }
+
+    #[test]
+    fn g1_a_launch_point_micrometres_from_a_face_edge_is_resolved_inside_and_outside() {
+        for bottom in [-5.0e-5, -0.5e-6] {
+            let vertices = slab(bottom);
+            // Over the bottom face and its diagonal edge, 4e-7 m above it in the thin case.
+            for (x, y) in [(0.0, 0.0), (0.3, 0.3), (-0.7, 0.2)] {
+                let origin = Point3::new(x, y, -0.1e-6);
+                let (winding, bound) =
+                    mesh_winding(&vertices, &TRIANGLES, origin, 7, || Ok(())).unwrap();
+                assert!(bound < 1.0e-7, "{bound}");
+                assert!((winding - 1.0).abs() <= bound, "{winding} {bound}");
+                assert!(mesh_contains(&vertices, &TRIANGLES, origin, 7, || Ok(())).unwrap());
+            }
+            // The same distance below the bottom face: outside, with the same conditioning.
+            let outside = Point3::new(0.0, 0.0, bottom - 4.0e-7);
+            let (winding, bound) =
+                mesh_winding(&vertices, &TRIANGLES, outside, 7, || Ok(())).unwrap();
+            assert!(winding.abs() <= bound, "{winding} {bound}");
+            assert!(!mesh_contains(&vertices, &TRIANGLES, outside, 7, || Ok(())).unwrap());
+        }
+        // The bound is the conditioning, not a constant: it grows as the point nears the face, and the
+        // computed winding stays inside it all the way to the on-surface guard.
+        let vertices = slab(-0.5e-6);
+        let mut previous = 0.0;
+        for height in [1.0e-6, 1.0e-8, 1.0e-10, 1.0e-12, 1.0e-13] {
+            let origin = Point3::new(0.0, 0.0, -0.5e-6 + height);
+            let (winding, bound) =
+                mesh_winding(&vertices, &TRIANGLES, origin, 7, || Ok(())).unwrap();
+            assert!(
+                bound > previous && bound < WINDING_BOUND_LIMIT,
+                "{height} {bound}"
+            );
+            assert!(
+                (winding - 1.0).abs() <= bound,
+                "{height}: {winding} {bound}"
+            );
+            assert!(mesh_contains(&vertices, &TRIANGLES, origin, 7, || Ok(())).unwrap());
+            previous = bound;
+        }
+    }
+
+    #[test]
+    fn g0_the_derived_bound_still_refuses_reversed_doubled_open_and_boundary_launches() {
+        let vertices = slab(-0.5e-6);
+        let inside = Point3::new(0.0, 0.0, -0.1e-6);
+        let mut reversed = TRIANGLES;
+        for triangle in &mut reversed {
+            triangle.swap(1, 2);
+        }
+        let refused = |result: Result<bool, TracerError>, needle: &str| match result {
+            Err(TracerError::InitialMedium { reason, .. }) => {
+                assert!(reason.contains(needle), "{reason}");
+            }
+            other => panic!("expected a refusal containing {needle:?}, got {other:?}"),
+        };
+        // A reversed slab: w = -1.
+        refused(
+            mesh_contains(&vertices, &reversed, inside, 7, || Ok(())),
+            "reversed or intersecting",
+        );
+        // A doubly covered mesh: w = 2.
+        let doubled = [TRIANGLES.as_slice(), TRIANGLES.as_slice()].concat();
+        refused(
+            mesh_contains(&vertices, &doubled, inside, 7, || Ok(())),
+            "reversed or intersecting",
+        );
+        // An open mesh (the wall triangle [3, 4, 7] removed), 0.01 in front of the gap: w is about 1/2.
+        let gap = Point3::new(-1.99, 1.0, 0.9);
+        let (winding, bound) =
+            mesh_winding(&vertices, &TRIANGLES[..11], gap, 7, || Ok(())).unwrap();
+        assert!(
+            winding > 0.2 && winding < 0.8 && bound < 1.0e-6,
+            "{winding} {bound}"
+        );
+        refused(
+            mesh_contains(&vertices, &TRIANGLES[..11], gap, 7, || Ok(())),
+            "unresolved winding",
+        );
+        // On a face: the on-surface guard, with its own reason.
+        refused(
+            mesh_contains(&vertices, &TRIANGLES, Point3::new(0.2, 0.3, 1.0), 7, || {
+                Ok(())
+            }),
+            "on or unresolved against a dielectric triangle",
+        );
+        // So close to the bottom face that the guard refuses before any bound is asked.
+        refused(
+            mesh_contains(
+                &vertices,
+                &TRIANGLES,
+                Point3::new(0.0, 0.0, -0.5e-6 + 1.0e-15),
+                7,
+                || Ok(()),
+            ),
+            "on or unresolved against a dielectric triangle",
+        );
+        // 1 m outside: not an error.
+        assert!(
+            !mesh_contains(&vertices, &TRIANGLES, Point3::new(0.0, 0.0, 2.0), 7, || Ok(
+                ()
+            ))
+            .unwrap()
+        );
     }
 
     #[test]
