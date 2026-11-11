@@ -44,6 +44,29 @@ fn tetra() -> (TetComplex, [[f64; 3]; 4]) {
     )
 }
 
+/// `tetra()` with one interior vertex (index 4, its centroid) joined to the
+/// four corners: four tetrahedra on the same outer boundary. The outer faces
+/// are returned separately because every face through vertex 4 is interior.
+/// A boundary of only no-slip faces leaves a single tetrahedron without a free
+/// velocity or temperature node, which the thermoviscous owner refuses.
+fn centered_tetra() -> (TetComplex, [[f64; 3]; 5], Vec<[u32; 3]>) {
+    let (_, corners) = tetra();
+    let centroid = std::array::from_fn(|axis| corners.iter().map(|p| p[axis]).sum::<f64>() / 4.0);
+    let mesh = TetComplex::from_tets(
+        5,
+        vec![[4, 1, 2, 3], [0, 4, 2, 3], [0, 1, 4, 3], [0, 1, 2, 4]],
+    );
+    let outer: Vec<_> = mesh
+        .faces
+        .iter()
+        .copied()
+        .filter(|f| !f.contains(&4))
+        .collect();
+    assert_eq!(outer.len(), 4);
+    let positions = [corners[0], corners[1], corners[2], corners[3], centroid];
+    (mesh, positions, outer)
+}
+
 fn resolution(elements: &[usize]) -> ThermoviscousWallDiscretization<'_> {
     ThermoviscousWallDiscretization {
         normal_elements: elements,
@@ -53,9 +76,9 @@ fn resolution(elements: &[usize]) -> ThermoviscousWallDiscretization<'_> {
 
 #[test]
 fn g1_uniform_insulated_fluid_molecule_and_solid_keep_the_complete_heat_capacity() {
-    let (mesh, pos) = tetra();
+    let (mesh, pos, outer) = centered_tetra();
     let boundary = ThermoviscousBoundary {
-        no_slip_faces: mesh.faces.clone(),
+        no_slip_faces: outer.clone(),
         isothermal_faces: vec![],
         ports: vec![],
     };
@@ -63,7 +86,7 @@ fn g1_uniform_insulated_fluid_molecule_and_solid_keep_the_complete_heat_capacity
         .unwrap()
         .with_conductive_walls(
             &[region(
-                vec![mesh.faces[0]],
+                vec![outer[0]],
                 air().temperature_k,
                 ThermalBacking::Adiabatic,
             )],
@@ -85,16 +108,24 @@ fn g1_uniform_insulated_fluid_molecule_and_solid_keep_the_complete_heat_capacity
         )
         .unwrap();
     let mut state = prepared.zero_state();
-    state.temperature_k[..4].fill(1.0);
-    state.molecular_temperature_k[0][..4].fill(1.0);
+    let vertices = mesh.vertex_count;
+    state.temperature_k[..vertices].fill(1.0);
+    state.molecular_temperature_k[0][..vertices].fill(1.0);
     let layout = &prepared.conductive_wall_layouts()[0];
     for depth in state.conductive_wall_temperature_k[0].chunks_mut(layout.trace_dofs().len()) {
         for (value, &dof) in depth.iter_mut().zip(layout.trace_dofs()) {
-            *value = if dof < 4 { 1.0 } else { 0.0 };
+            *value = if dof < vertices { 1.0 } else { 0.0 };
         }
     }
-    let (_, _, area) = model.fe.boundary_geometry(mesh.faces[0]).unwrap();
-    let volume = model.geometry.vol_signed[0].abs();
+    let (_, _, area) = model.fe.boundary_geometry(outer[0]).unwrap();
+    // The gas fills all four tetrahedra: the heat capacity is that of the
+    // whole original tetrahedron, not of the first piece.
+    let volume = model
+        .geometry
+        .vol_signed
+        .iter()
+        .map(|v| v.abs())
+        .sum::<f64>();
     let expected = (air().density_kg_m3 * air().cp_j_kg_k * volume + 2000.0 * 0.00002 * area)
         / (2.0 * air().temperature_k);
     assert!(relative(prepared.stored_energy_j(&state).unwrap(), expected) < 2e-14);
@@ -110,10 +141,10 @@ fn g1_uniform_insulated_fluid_molecule_and_solid_keep_the_complete_heat_capacity
 fn g1_nonuniform_surface_and_depth_energy_preserves_consistent_interface_cross_mass() {
     use crate::acoustics::helmholtz::tri_quadrature;
     use crate::highorder::simplex::LocalFn;
-    let (mesh, pos) = tetra();
-    let face = mesh.faces[0];
+    let (mesh, pos, outer) = centered_tetra();
+    let face = outer[0];
     let boundary = ThermoviscousBoundary {
-        no_slip_faces: mesh.faces.clone(),
+        no_slip_faces: outer,
         isothermal_faces: vec![],
         ports: vec![],
     };
@@ -346,17 +377,17 @@ fn g1_finite_solid_molecules_and_original_moving_wall_share_one_state_and_work_w
 
 #[test]
 fn g0_clamped_front_trace_keeps_interior_solid_coefficients_and_refuses_incomplete_states() {
-    let (mesh, pos) = tetra();
+    let (mesh, pos, outer) = centered_tetra();
     let boundary = ThermoviscousBoundary {
-        no_slip_faces: mesh.faces.clone(),
-        isothermal_faces: vec![mesh.faces[1]],
+        no_slip_faces: outer.clone(),
+        isothermal_faces: vec![outer[1]],
         ports: vec![],
     };
     let model = ThermoviscousFe::new(&mesh, &pos, air(), &boundary, limits(), &mut || false)
         .unwrap()
         .with_conductive_walls(
             &[region(
-                vec![mesh.faces[0]],
+                vec![outer[0]],
                 air().temperature_k,
                 ThermalBacking::Isothermal,
             )],

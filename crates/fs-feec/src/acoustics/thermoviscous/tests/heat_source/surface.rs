@@ -30,12 +30,41 @@ fn same_values(actual: &[f64], expected: &[f64]) {
     );
 }
 
+/// Every boundary face (a face of exactly one tetrahedron) as a no-slip wall.
 fn all_walls(mesh: &TetComplex) -> ThermoviscousBoundary {
+    let no_slip_faces = mesh
+        .faces
+        .iter()
+        .copied()
+        .filter(|face| {
+            mesh.tets
+                .iter()
+                .filter(|tet| face.iter().all(|v| tet.contains(v)))
+                .count()
+                == 1
+        })
+        .collect();
     ThermoviscousBoundary {
-        no_slip_faces: mesh.faces.clone(),
+        no_slip_faces,
         isothermal_faces: vec![],
         ports: vec![],
     }
+}
+
+/// `fixtures::single_tet` with one interior vertex (index 4, its centroid)
+/// joined to the four corners: four tetrahedra on the same outer boundary.
+/// With every outer face a wall, a lone tetrahedron has no free velocity or
+/// temperature node, which the thermoviscous owner refuses; the interior
+/// vertex supplies them without changing any boundary face or its geometry.
+fn centered_tet() -> (TetComplex, Vec<[f64; 3]>) {
+    let (_, mut positions) = crate::fixtures::single_tet();
+    let centroid = std::array::from_fn(|axis| positions.iter().map(|p| p[axis]).sum::<f64>() / 4.0);
+    positions.push(centroid);
+    let mesh = TetComplex::from_tets(
+        5,
+        vec![[4, 1, 2, 3], [0, 4, 2, 3], [0, 1, 4, 3], [0, 1, 2, 4]],
+    );
+    (mesh, positions)
 }
 
 fn constant_shape(model: &ThermoviscousFe<'_>, faces: &[[u32; 3]], density: f64) -> Vec<f64> {
@@ -50,7 +79,7 @@ fn constant_shape(model: &ThermoviscousFe<'_>, faces: &[[u32; 3]], density: f64)
 
 #[test]
 fn g1_surface_flux_retains_midside_moments_signed_shapes_and_strict_admission() {
-    let (mesh, positions) = crate::fixtures::single_tet();
+    let (mesh, positions) = centered_tet();
     let boundary = all_walls(&mesh);
     let make = || {
         ThermoviscousFe::new(&mesh, &positions, air(), &boundary, limits(), &mut || false).unwrap()
@@ -151,7 +180,7 @@ fn g1_surface_flux_retains_midside_moments_signed_shapes_and_strict_admission() 
         &positions,
         air(),
         &ThermoviscousBoundary {
-            isothermal_faces: mesh.faces.clone(),
+            isothermal_faces: boundary.no_slip_faces.clone(),
             ..boundary.clone()
         },
         limits(),
@@ -170,7 +199,12 @@ fn g1_surface_flux_retains_midside_moments_signed_shapes_and_strict_admission() 
         &positions,
         air(),
         &ThermoviscousBoundary {
-            isothermal_faces: mesh.faces.iter().copied().filter(|f| *f != face).collect(),
+            isothermal_faces: boundary
+                .no_slip_faces
+                .iter()
+                .copied()
+                .filter(|f| *f != face)
+                .collect(),
             ..boundary
         },
         limits(),
@@ -201,7 +235,7 @@ fn g1_curved_surface_flux_uses_the_original_variable_measure() {
             Budget::INFINITE,
             ExecMode::Deterministic,
         );
-        let (mesh, original) = crate::fixtures::single_tet();
+        let (mesh, original) = centered_tet();
         let a = 0.6;
         let map = |[x, y, z]: [f64; 3]| [x, y, z * (1.0 + a * x)];
         let positions: Vec<_> = original.iter().copied().map(map).collect();

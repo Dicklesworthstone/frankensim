@@ -9,15 +9,30 @@ use crate::acoustics::thermoviscous::{ThermoviscousBoundary, ThermoviscousLimits
 const SIDE: f64 = 0.002;
 const DEPTH: f64 = 0.00002;
 
+/// Two tetrahedra over the planar z = 0 square, the first split into four by
+/// an interior vertex (index 5, its centroid). The boundary faces, and so the
+/// two wall triangles, are those of the unsplit pair. With every boundary face
+/// a no-slip wall, the unsplit pair has no free velocity or temperature node,
+/// which the thermoviscous owner refuses; the interior vertex supplies them.
 fn specimen() -> (TetComplex, Vec<[f64; 3]>) {
     (
-        TetComplex::from_tets(5, vec![[0, 1, 2, 4], [1, 3, 2, 4]]),
+        TetComplex::from_tets(
+            6,
+            vec![
+                [5, 1, 2, 4],
+                [0, 5, 2, 4],
+                [0, 1, 5, 4],
+                [0, 1, 2, 5],
+                [1, 3, 2, 4],
+            ],
+        ),
         vec![
             [0.0, 0.0, 0.0],
             [SIDE, 0.0, 0.0],
             [0.0, SIDE, 0.0],
             [SIDE, SIDE, 0.0],
             [0.0, 0.0, SIDE],
+            [SIDE / 4.0, SIDE / 4.0, SIDE / 4.0],
         ],
     )
 }

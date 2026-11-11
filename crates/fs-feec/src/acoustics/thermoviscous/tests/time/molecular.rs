@@ -21,21 +21,44 @@ fn reservoirs() -> [ThermoviscousCaloricReservoir; 3] {
 
 #[test]
 fn g1_isothermal_translational_wall_does_not_erase_internal_molecular_state() {
-    let mesh = TetComplex::from_tets(4, vec![[0, 1, 2, 3]]);
-    let pos = [
+    // The specimen of the other tests with one interior vertex (index 4, its centroid) joined to the four corners. With
+    // every outer face a no-slip isothermal wall a lone tetrahedron has no free velocity or temperature node, and the
+    // owner refuses it (thermoviscous.rs:800, e2ed1713ad); the interior vertex supplies them. The claim of the test is
+    // about the wall dofs, and each molecular dof relaxes alone: rows of the full unconstrained P2 mass stand on both
+    // sides of M eta' = M (theta - eta) / tau (caloric.rs), so eta_i' = (theta_i - eta_i) / tau at every dof i, with
+    // theta_i = 0 where the translational temperature is pinned.
+    let mesh = TetComplex::from_tets(
+        5,
+        vec![[4, 1, 2, 3], [0, 4, 2, 3], [0, 1, 4, 3], [0, 1, 2, 4]],
+    );
+    let corners = [
         [0.0; 3],
         [0.002, 0.0, 0.0],
         [0.0, 0.001, 0.0],
         [0.0, 0.0, 0.001],
     ];
+    let centroid = std::array::from_fn(|axis| corners.iter().map(|p| p[axis]).sum::<f64>() / 4.0);
+    let pos = [corners[0], corners[1], corners[2], corners[3], centroid];
+    let outer: Vec<_> = mesh
+        .faces
+        .iter()
+        .copied()
+        .filter(|f| !f.contains(&4))
+        .collect();
+    assert_eq!(outer.len(), 4);
     let boundary = ThermoviscousBoundary {
-        no_slip_faces: mesh.faces.clone(),
-        isothermal_faces: mesh.faces.clone(),
+        no_slip_faces: outer.clone(),
+        isothermal_faces: outer,
         ports: vec![],
     };
     let model =
         ThermoviscousFe::new(&mesh, &pos, air(), &boundary, limits(), &mut || false).unwrap();
-    assert!(model.temperature_map.iter().all(Option::is_none));
+    // Wall dofs: the 4 corner vertices and the 6 edges between them. Free: the centroid and the 4 edges to it.
+    let wall: Vec<usize> = (0..model.space.ndof)
+        .filter(|&dof| model.temperature_map[dof].is_none())
+        .collect();
+    assert_eq!((wall.len(), model.space.ndof - wall.len()), (10, 5));
+    assert!(wall.contains(&0) && !wall.contains(&4));
     let reservoir = reservoirs()[0];
     let dt = 0.4 * reservoir.relaxation_time_s;
     let prepared = model
@@ -49,32 +72,30 @@ fn g1_isothermal_translational_wall_does_not_erase_internal_molecular_state() {
         .unwrap();
     let mut initial = prepared.zero_state();
     assert_eq!(initial.molecular_temperature_k[0].len(), model.space.ndof);
-    initial.molecular_temperature_k[0][0] = 1.0;
-    initial.molecular_temperature_k[0][model.space.ndof - 1] = -0.5;
+    initial.molecular_temperature_k[0][wall[0]] = 1.0;
+    initial.molecular_temperature_k[0][wall[wall.len() - 1]] = -0.5;
     let original = initial.clone();
     let energy = prepared.stored_energy_j(&initial).unwrap();
     assert!(energy > 0.0);
     let frame = prepared.step(&initial, &[], &[], &mut || false).unwrap();
     assert_eq!(initial, original);
     let decay = det::exp(-dt / reservoir.relaxation_time_s);
-    for (before, after) in initial.molecular_temperature_k[0]
-        .iter()
-        .zip(&frame.state.molecular_temperature_k[0])
-    {
-        assert!((after - decay * before).abs() < 2e-12);
+    for &dof in &wall {
+        let before = initial.molecular_temperature_k[0][dof];
+        let after = frame.state.molecular_temperature_k[0][dof];
+        assert!(
+            (after - decay * before).abs() < 2e-12,
+            "wall dof {dof}: {after:e} against {:e}",
+            decay * before
+        );
+        assert_eq!(frame.state.temperature_k[dof], 0.0);
     }
-    assert!(frame.state.temperature_k.iter().all(|v| *v == 0.0));
-    assert!(frame.state.pressure_pa.iter().all(|v| v.abs() < 1e-12));
-    assert!(relative(frame.work.final_energy_j, energy * decay * decay) < 2e-11);
-    assert!(
-        relative(
-            frame.work.molecular_relaxation_heat_j,
-            energy * (1.0 - decay * decay)
-        ) < 2e-11
-    );
+    // The wall molecules release heat into the gas through the shared mass, so the free temperatures move; the stored
+    // energy falls and the work balance closes.
+    assert!(frame.state.temperature_k.iter().any(|v| *v != 0.0));
+    assert!(frame.work.molecular_relaxation_heat_j > 0.0);
+    assert!(frame.work.final_energy_j < energy);
     assert!(frame.work.balance_residual_j().abs() < 1e-11 * energy);
-    assert_eq!(frame.work.fluid_conductive_heat_j, 0.0);
-    assert_eq!(frame.work.fluid_viscous_heat_j, 0.0);
 }
 
 #[test]
