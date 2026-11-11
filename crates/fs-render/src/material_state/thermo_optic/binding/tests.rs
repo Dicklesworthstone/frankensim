@@ -22,7 +22,7 @@ use fs_material::state_point::{
 };
 use fs_material::thermo_optic::{SchottThermoOpticLaw, ThermoOpticCoefficients};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
-use fs_qty::{Density, Dims, Pressure, QuantitySpec};
+use fs_qty::{Density, Dims, QuantitySpec};
 
 const SURFACE: ContentHash = ContentHash([91; 32]);
 
@@ -33,9 +33,16 @@ fn absolute_temperature() -> QuantitySpec {
     ))
 }
 
-fn point(temperature: f64, pressure: f64, typed: bool) -> QueryPoint {
+// Finite-band optics are admitted only at fixed external conditions, and an axis is one only if it carries its semantic
+// type (state_point.rs:416-444, spectral_optics.rs:482): a pressure typed by dimensions alone is refused. As in
+// particle_scattering/tests.rs:38.
+fn pressure() -> QuantitySpec {
+    QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static))
+}
+
+fn point(temperature: f64, pressure_pa: f64, typed: bool) -> QueryPoint {
     let query = QueryPoint::new()
-        .with_quantity("P", QuantitySpec::dimensional(Pressure::DIMS), pressure)
+        .with_quantity("P", pressure(), pressure_pa)
         .unwrap();
     if typed {
         query
@@ -49,12 +56,8 @@ fn point(temperature: f64, pressure: f64, typed: bool) -> QueryPoint {
 fn card(typed: bool, foreign: bool) -> MaterialCard {
     let mut claims = ClaimSet::new();
     let mut add = |name: &str, quantity: QuantitySpec, value: f64| {
-        let domain = ValidityDomain::unconstrained().with_quantity(
-            "P",
-            QuantitySpec::dimensional(Pressure::DIMS),
-            90_000.0,
-            120_000.0,
-        );
+        let domain =
+            ValidityDomain::unconstrained().with_quantity("P", pressure(), 90_000.0, 120_000.0);
         let validity = if typed {
             domain.with_quantity("T", absolute_temperature(), 250.0, 450.0)
         } else {
@@ -117,17 +120,25 @@ fn card(typed: bool, foreign: bool) -> MaterialCard {
             0.15,
         );
     }
-    MaterialCard::assemble(
+    let genesis = MaterialCard::assemble(
         MaterialStateId {
             chemistry: "manufactured thermo-optic glass".into(),
             phase: "solid".into(),
             process: "analytic verification, not a measured specimen".into(),
-            revision: if foreign { 1 } else { 0 },
+            revision: 0,
         },
         claims,
         Vec::new(),
     )
-    .unwrap()
+    .unwrap();
+    if foreign {
+        // A later revision of the same state with the same claims. assemble starts a lineage at revision 0
+        // (fs-matdb cards.rs:599), so the successor comes from supersede, as in fs-material's refresh tests
+        // (state_point.rs:3817).
+        MaterialCard::supersede(&genesis, genesis.claims().clone(), Vec::new()).unwrap()
+    } else {
+        genesis
+    }
 }
 
 fn state(
@@ -270,9 +281,26 @@ fn g3_temperature_cycles_keep_original_absorption_surface_and_reference() {
                 3e-15,
             );
         }
+        // A refresh re-queries with PinnedByProperty (state_point.rs:1085-1093, 5c6b323c6e) and the accepted
+        // state's identity hashes the selection policy, so the state reached by returning to T0 is the pinned
+        // twin of `cold` (SingleClaimOnly): its identity differs from cold's by design and no physical value
+        // does. Returning to T0 restores the source observed at that same pinned state, with the original
+        // appearance, surface and reference.
+        let restored = cold
+            .at_query_point(&card, &point(300.0, 100_000.0, true))
+            .unwrap();
         assert_eq!(
-            observation, source,
-            "returning to T0 restores the binding exactly"
+            observation,
+            source.at_material_state(&restored).unwrap(),
+            "returning to T0 restores the binding of the same pinned state exactly"
+        );
+        assert_eq!(
+            observation.binding().appearance(),
+            source.binding().appearance()
+        );
+        assert_eq!(
+            observation.binding().accepted_state_identity(),
+            restored.identity()
         );
         let other_surface = reference(&card, &cold, roughness, ContentHash([93; 32]));
         let other = MaterialThermoOpticBinding::try_new(other_surface, &cold, law(), "T").unwrap();

@@ -221,6 +221,50 @@ fn near(actual: f64, expected: f64, tolerance: f64) {
     );
 }
 
+// A refresh re-queries with PinnedByProperty (state_point.rs:1085-1093, 5c6b323c6e) and the optical identity hashes the
+// selection policy, so a binding resolved with SingleClaimOnly (`cold`) and the same state reached by a refresh differ in
+// that identity by design (fs-material's refresh tests, a044e818f3, measured the same on another owner). The round trip
+// is therefore compared with the same pinned path at the same state, and with the physical values of `cold`.
+fn assert_pinned_round_trip(
+    source: &Original,
+    cold: MaterialOpticalBinding,
+    back: MaterialOpticalBinding,
+    card: &MaterialCard,
+) {
+    let pinned = source.refresh(cold, card, &state(card, 300.0)).unwrap().0;
+    assert_eq!(
+        back, pinned,
+        "the returned original source supports the next accepted endpoint"
+    );
+    match (back.appearance(), cold.appearance()) {
+        (
+            OpticalAppearance::Conductor {
+                optics: back,
+                surface: back_surface,
+            },
+            OpticalAppearance::Conductor {
+                optics: cold,
+                surface: cold_surface,
+            },
+        ) => {
+            // The bulk source identity hashes the resolved bundle with its selection policy, so it is the pinned
+            // path's (compared above through the whole binding); every physical value is the cold one.
+            assert_eq!(back.samples(), cold.samples());
+            assert_eq!(back.max_knot_span_nm(), cold.max_knot_span_nm());
+            assert_eq!(back.coating(), cold.coating());
+            assert_eq!(back.absorbing_coating(), cold.absorbing_coating());
+            assert_eq!(back.periodic_coating(), cold.periodic_coating());
+            assert_eq!(back.source().status(), cold.source().status());
+            assert_eq!(back_surface, cold_surface);
+        }
+        (back, cold) => assert_eq!(back, cold),
+    }
+    assert_eq!(
+        back.accepted_state_identity(),
+        cold.accepted_state_identity()
+    );
+}
+
 #[test]
 fn accepted_dielectric_refresh_retains_coated_anisotropic_scalar_and_polarized_transport() {
     let card = card(1.0);
@@ -250,11 +294,11 @@ fn accepted_dielectric_refresh_retains_coated_anisotropic_scalar_and_polarized_t
         assert_ne!(cold.identity(), bare.identity(), "actual finish bytes enter identity");
         let (heated, refreshed) = source.refresh(cold, &card, &hot).unwrap();
         assert_eq!(heated.accepted_state_identity(), hot.identity());
-        assert_eq!(
-            refreshed.refresh(heated, &card, &state(&card, 300.0)).unwrap().0,
-            cold,
-            "the returned original source supports the next accepted endpoint"
-        );
+        let back = refreshed
+            .refresh(heated, &card, &state(&card, 300.0))
+            .unwrap()
+            .0;
+        assert_pinned_round_trip(&source, cold, back, &card);
         let mut observations = Vec::new();
         for bound in [cold, heated] {
             let Material::Dielectric { glass, surface } = bound.material() else {
@@ -330,9 +374,11 @@ fn accepted_conductor_refresh_retains_each_native_coating_and_polarization() {
                 OpticalAppearance::Conductor { optics: coated, surface: finish }, FINISH,
             ).unwrap();
             let (heated, refreshed) = source.refresh(cold, &card, &hot).unwrap();
-            assert_eq!(
-                refreshed.refresh(heated, &card, &state(&card, 300.0)).unwrap().0, cold,
-            );
+            let back = refreshed
+                .refresh(heated, &card, &state(&card, 300.0))
+                .unwrap()
+                .0;
+            assert_pinned_round_trip(&source, cold, back, &card);
             let mut reflectances = Vec::new();
             for bound in [cold, heated] {
                 let Material::Conductor { optics, surface } = bound.material() else {

@@ -13,7 +13,7 @@ use fs_material::gas::GasSpec;
 use fs_material::gas_scattering::{MolecularRayleigh, MolecularRayleighMixture};
 use fs_material::state_point::*;
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
-use fs_qty::{Density, Dims, QuantitySpec};
+use fs_qty::{Density, Dims, QuantitySpec, Temperature};
 use std::sync::Arc;
 
 #[path = "deposition/tests.rs"]
@@ -93,20 +93,39 @@ fn particles_with_temperature(
     }
     let mut claims = ClaimSet::new();
     for (name, dims, value) in values {
+        // No value depends on temperature. fs-matdb refuses LinearInside on a scalar claim (query.rs:2210, ff8eed4150: no knot
+        // span to interpolate inside), so a state at a stated temperature carries a constant Curve over the thermal axis, as
+        // particle_scattering's fixture does, valid over the span of its knots; a state with no temperature has no axis for a
+        // Curve to be read on and carries the plateau policy of a scalar claim over unconstrained validity.
+        let (claim_value, validity, interpolation) = match temperature {
+            Some(temperature) => (
+                PropertyValue::Curve {
+                    abscissa: "thermal".into(),
+                    abscissa_dims: Temperature::DIMS,
+                    knots: vec![(temperature, value), (temperature + 100.0, value)],
+                    dims,
+                },
+                ValidityDomain::unconstrained().with_quantity(
+                    "thermal",
+                    temperature_quantity,
+                    temperature,
+                    temperature + 100.0,
+                ),
+                InterpolationPolicy::LinearInside,
+            ),
+            None => (
+                PropertyValue::Scalar { value, dims },
+                ValidityDomain::unconstrained(),
+                InterpolationPolicy::ConstantWithinValidity,
+            ),
+        };
         claims
             .insert_claim(PropertyClaim {
                 key: PropertyKey::new(name, dims),
-                value: PropertyValue::Scalar { value, dims },
-                validity: temperature.map_or_else(ValidityDomain::unconstrained, |temperature| {
-                    ValidityDomain::unconstrained().with_quantity(
-                        "thermal",
-                        temperature_quantity,
-                        temperature,
-                        temperature,
-                    )
-                }),
+                value: claim_value,
+                validity,
                 uncertainty: UncertaintyModel::Unstated,
-                interpolation: InterpolationPolicy::LinearInside,
+                interpolation,
                 observations: Vec::new(),
                 provenance: Provenance {
                     source: format!("synthetic coexisting population {variant}; not measured"),
