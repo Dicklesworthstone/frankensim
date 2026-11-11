@@ -138,8 +138,55 @@ pub(super) struct PreparedNetwork {
     ledger: Arc<LedgerData>,
     sweep: Mutex<Option<LossSweep>>,
     sweeps: AtomicU64,
+    /// The last states whose storage `hamiltonian` evaluated and their values (see [`EnergyMemo`]).
+    energies: Mutex<EnergyMemo>,
+    energy_evaluations: AtomicU64,
     /// Two-way exterior air beside the transition (`air`); None for the mechanics alone.
     air: Option<air::PreparedAir>,
+}
+
+/// Most states [`EnergyMemo`] holds.
+const ENERGY_MEMO_SLOTS: usize = 3;
+
+/// The last [`ENERGY_MEMO_SLOTS`] states whose storage `PreparedNetwork::hamiltonian` evaluated, by the exact bits of the
+/// entries it reads (mechanics and material memory), with the values found, the state asked most recently first. One
+/// accepted step asks for the storage of its start state in `advance`, for that of its end state, and again for its start
+/// state in the stage, and the next step starts where this one ended; a verify step adds a request for its start state and
+/// one for a state of its own. A request moves its state to the front and a new state replaces the one asked longest ago,
+/// so the start state's second request is served, and so is the next step's first. A value returned is the very value a
+/// fresh evaluation returns: the storage is a function of those bits and of constants.
+#[derive(Default)]
+struct EnergyMemo {
+    slots: Vec<(Vec<f64>, f64)>,
+}
+
+impl EnergyMemo {
+    /// The value held for the state with these bits, which then moves to the front.
+    fn serve(&mut self, key: &[f64]) -> Option<f64> {
+        let at = self.slots.iter().position(|(bits, _)| same_bits(bits, key))?;
+        self.slots[..=at].rotate_right(1);
+        Some(self.slots[0].1)
+    }
+
+    /// Hold a state and its value at the front; when the slots are full the state asked longest ago is replaced.
+    fn keep(&mut self, key: &[f64], energy: f64) {
+        if self.serve(key).is_some() {
+            return;
+        }
+        let mut bits = if self.slots.len() >= ENERGY_MEMO_SLOTS {
+            self.slots.pop().map(|(bits, _)| bits).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        bits.clear();
+        bits.extend_from_slice(key);
+        self.slots.insert(0, (bits, energy));
+    }
+}
+
+/// Whether two slices hold the same bits, entry for entry.
+fn same_bits(a: &[f64], b: &[f64]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
 }
 
 const MATRIX_TOL: f64 = 1e-11;
@@ -399,7 +446,8 @@ impl PreparedNetwork {
         });
         let result = Self { count, dt, weights, stiffness, rest_force, transition, component_loss, connection_total,
             material_couplings, material_loss, ledger,
-            sweep: Mutex::new(None), sweeps: AtomicU64::new(0), air };
+            sweep: Mutex::new(None), sweeps: AtomicU64::new(0),
+            energies: Mutex::new(EnergyMemo::default()), energy_evaluations: AtomicU64::new(0), air };
         result.validate_energy_identity(gate)?;
         poll(Some(gate))?;
         Ok(result)
@@ -409,8 +457,27 @@ impl PreparedNetwork {
         state_vector(self.count, self.material_couplings.len(), &self.weights, self.dt, x, u, dt)
     }
 
-    /// Original mechanical storage plus every Maxwell arm's stored strain energy.
+    /// Original mechanical storage plus every Maxwell arm's stored strain energy. A state whose mechanics and material-memory
+    /// entries have the bits of one of the last states asked for is served from its earlier evaluation (see [`EnergyMemo`]);
+    /// the value is the one `hamiltonian_direct` returns for it.
     pub(super) fn hamiltonian(&self, x: &[f64]) -> f64 {
+        let Some(key) = x.get(..2 * self.count + self.material_couplings.len()) else {
+            return self.hamiltonian_direct(x);
+        };
+        let served = self.energies.lock().ok().and_then(|mut memo| memo.serve(key));
+        if let Some(energy) = served {
+            return energy;
+        }
+        let energy = self.hamiltonian_direct(x);
+        self.energy_evaluations.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut memo) = self.energies.lock() {
+            memo.keep(key, energy);
+        }
+        energy
+    }
+
+    /// The storage of one state, evaluated from its entries.
+    fn hamiltonian_direct(&self, x: &[f64]) -> f64 {
         let n = self.count;
         let mut energy = 0.0;
         for i in 0..n {
@@ -602,6 +669,9 @@ impl PreparedNetwork {
 
     #[cfg(test)]
     pub(super) fn sweeps(&self) -> u64 { self.sweeps.load(Ordering::Relaxed) }
+
+    #[cfg(test)]
+    pub(super) fn energy_evaluations(&self) -> u64 { self.energy_evaluations.load(Ordering::Relaxed) }
 
     #[cfg(test)]
     pub(super) fn ledger_evaluations(&self) -> u64 { self.ledger.evaluations.load(Ordering::Relaxed) }

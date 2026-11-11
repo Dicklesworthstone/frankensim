@@ -182,3 +182,92 @@ fn stiff_unloaded_material_history_releases_exact_heat_without_inverse_overflow(
     close(step.delta_h + loss.2, 0.0);
     assert_eq!(step.supplied, 0.0);
 }
+
+/// The state of the prepared fixture with its first velocity moved by `shift`: another set of bits for each shift.
+fn shifted_state(models: &[ModalAcousticTimeModel], memory: &[f64], shift: f64) -> Vec<f64> {
+    let mut x = flatten(models);
+    x.extend_from_slice(memory);
+    x[1] += shift;
+    x
+}
+
+#[test]
+fn the_storage_memo_keys_on_the_material_memory_entries_and_serves_only_an_identical_state() {
+    let (owner, models, memory) = prepared(48_000);
+    let mut x = flatten(&models);
+    x.extend_from_slice(&memory);
+    let direct = owner.hamiltonian_direct(&x);
+    let start = owner.energy_evaluations();
+    assert_eq!(owner.hamiltonian(&x).to_bits(), direct.to_bits());
+    assert_eq!(owner.hamiltonian(&x).to_bits(), direct.to_bits());
+    assert_eq!(owner.energy_evaluations() - start, 1, "the second request is served");
+    // A material-memory entry moved: the storage depends on it, and the old value is not served for the new state.
+    let mut moved = x.clone();
+    *moved.last_mut().unwrap() += 1e-3;
+    let direct_moved = owner.hamiltonian_direct(&moved);
+    assert_ne!(direct_moved.to_bits(), direct.to_bits());
+    assert_eq!(owner.hamiltonian(&moved).to_bits(), direct_moved.to_bits());
+    assert_eq!(owner.energy_evaluations() - start, 2, "the moved state is evaluated, not served");
+    // Entries past those the storage reads (an air pair, a caller's extra) are not part of the key.
+    let mut longer = x.clone();
+    longer.push(1.0);
+    assert_eq!(owner.hamiltonian(&longer).to_bits(), direct.to_bits());
+    assert_eq!(owner.energy_evaluations() - start, 2, "the state with extra entries is served");
+    // Zero and its negative are two states: the key is the bits, not the value.
+    let mut zero = x.clone();
+    zero[1] = 0.0;
+    let mut negative_zero = x.clone();
+    negative_zero[1] = -0.0;
+    assert_eq!(owner.hamiltonian(&zero).to_bits(), owner.hamiltonian_direct(&zero).to_bits());
+    assert_eq!(owner.hamiltonian(&negative_zero).to_bits(), owner.hamiltonian_direct(&negative_zero).to_bits());
+    assert_eq!(owner.energy_evaluations() - start, 4, "0.0 and -0.0 are keyed apart");
+}
+
+#[test]
+fn the_storage_memo_holds_three_states_and_replaces_the_one_asked_longest_ago() {
+    let (owner, models, memory) = prepared(48_000);
+    let states: Vec<Vec<f64>> = (0..4).map(|k| shifted_state(&models, &memory, 0.25 * f64::from(k))).collect();
+    let direct: Vec<u64> = states.iter().map(|s| owner.hamiltonian_direct(s).to_bits()).collect();
+    let start = owner.energy_evaluations();
+    let ask = |k: usize| assert_eq!(owner.hamiltonian(&states[k]).to_bits(), direct[k], "state {k}");
+    let evaluated = || owner.energy_evaluations() - start;
+    for k in 0..3 {
+        ask(k);
+    }
+    assert_eq!(evaluated(), 3);
+    // Asking state 0 again moves it to the front, so state 1 is now the one asked longest ago, not state 0.
+    ask(0);
+    assert_eq!(evaluated(), 3, "state 0 is served");
+    ask(3);
+    assert_eq!(evaluated(), 4, "a fourth state is evaluated");
+    for k in [0, 2, 3] {
+        ask(k);
+    }
+    assert_eq!(evaluated(), 4, "the three states held are served");
+    ask(1);
+    assert_eq!(evaluated(), 5, "state 1 was the one replaced");
+}
+
+#[test]
+fn the_storage_of_a_chain_of_steps_is_evaluated_once_per_new_state_whatever_verify_steps_come_between() {
+    let (owner, models, memory) = prepared(48_000);
+    let steps = 200_u64;
+    // A step's end state is the next step's start state; a verify step first asks for its start and a state of its own.
+    let state = |k: u64| shifted_state(&models, &memory, 0.01 * k as f64);
+    let free = |k: u64| shifted_state(&models, &memory, -0.01 * (k as f64 + 1.0));
+    let ask = |x: &[f64]| assert_eq!(owner.hamiltonian(x).to_bits(), owner.hamiltonian_direct(x).to_bits());
+    let start = owner.energy_evaluations();
+    let mut verify_steps = 0;
+    for i in 0..steps {
+        if i % 64 == 63 {
+            verify_steps += 1;
+            ask(&state(i));
+            ask(&free(i));
+        }
+        ask(&state(i));
+        ask(&state(i + 1));
+        ask(&state(i));
+    }
+    assert_eq!(owner.energy_evaluations() - start, steps + 1 + verify_steps,
+        "one evaluation per new state: each end state, the first start state, each verify step's own");
+}

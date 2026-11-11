@@ -580,6 +580,45 @@ fn the_threaded_loss_quadratics_equal_the_serial_forms_bit_for_bit_and_refuse_in
     }
 }
 
+#[test]
+fn the_storage_of_a_state_is_evaluated_once_per_step_and_every_served_value_equals_a_direct_evaluation_bit_for_bit() {
+    let mut system = fixture(48_000, true);
+    let evaluations = |s: &CoupledModalSystem| s.exact.as_ref().unwrap().prepared.as_ref().unwrap().energy_evaluations();
+    let before = evaluations(&system);
+    let steps = 8_u64;
+    for tick in 0..steps {
+        let external = [0.003, if tick % 2 == 0 { -0.002 } else { 0.004 }, 0.001];
+        system.step(&external).unwrap();
+    }
+    // A step asks for its start state's storage in `advance`, its end state's, and its start state's again in the stage, and
+    // the next step starts at the end state: two evaluations for the first step and one for each later one, where the
+    // three requests of every step were three evaluations before.
+    assert_eq!(evaluations(&system) - before, steps + 1);
+    let prepared = system.exact.as_ref().unwrap().prepared.as_ref().unwrap();
+    let mut x = flatten(&system.models);
+    x.extend_from_slice(&system.material_memory);
+    // Each state asked twice: the first request is a fresh evaluation or a served one, the second is always served; every
+    // value equals a direct evaluation. A velocity moved by one part in 2^20 changes the storage, so the state is a new key
+    // and is evaluated fresh once, not served as the old one.
+    for round in 0..4 {
+        let direct = prepared.hamiltonian_direct(&x);
+        let before = prepared.energy_evaluations();
+        assert_eq!(prepared.hamiltonian(&x).to_bits(), direct.to_bits(), "round {round}");
+        let first = prepared.energy_evaluations() - before;
+        assert!(first <= 1, "round {round}");
+        assert_eq!(prepared.hamiltonian(&x).to_bits(), direct.to_bits(), "round {round}, served again");
+        assert_eq!(prepared.energy_evaluations() - before, first, "round {round}, the second request is served");
+        let mut moved = x.clone();
+        moved[1] = moved[1] * (1.0 + 2.0_f64.powi(-20)) + 1e-9;
+        let direct_moved = prepared.hamiltonian_direct(&moved);
+        assert_ne!(direct_moved.to_bits(), direct.to_bits(), "round {round}, the moved state has another storage");
+        let before = prepared.energy_evaluations();
+        assert_eq!(prepared.hamiltonian(&moved).to_bits(), direct_moved.to_bits(), "round {round}, moved");
+        assert_eq!(prepared.energy_evaluations() - before, 1, "round {round}, the moved state is evaluated, not served");
+        x = moved;
+    }
+}
+
 // ---- wohg3: the prepared owner against a closed form (the secular KAT) ----
 //
 // A 60 Hz harmonic string ladder (omega_i = 2 pi 60 i) on ONE bridge spring k = omega_1^2 at station 0.8137, with a
