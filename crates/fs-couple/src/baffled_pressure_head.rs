@@ -641,6 +641,46 @@ pub fn head_opening_load(radius_m: f64, opening: CircularOpening, torso: Option<
     cap_load(radius_m, opening.radius_m, axis, torso, axial_position_m, gas, sample_rate_hz, max_taps)
 }
 
+/// The lips' declared flanged load with no head, for `tract_gas` without `head_load` (MB 23833, 24424): fs-duct's
+/// flanged load across a stationary gas interface ([`fs_duct::flanged_pipe_impedance_with_exterior`] with
+/// [`fs_duct::FLANGED_MODES`]), whose radiation is in `exterior` and whose eliminated higher duct modes are in `tract`,
+/// for the duct's mouth radius, on the bins of [`head_mouth_load`], bound to the duct's own mouth plane and radius and
+/// to `exterior` with DC 0. Every row is that law at its own bin; with one gas (`tract` equal to `exterior`) it is
+/// [`fs_duct::compact_radiation_impedance`]'s flanged load bit for bit.
+///
+/// # Errors
+/// An empty duct, a zero rate or a tap count that is not a power of two of at least 2, a flanged refusal (unequal
+/// static pressures, or `ka` above the flanged ceiling in either gas), or a row the table refuses (not finite or not
+/// passive within 1e-12).
+pub fn flanged_mouth_load(duct: &Duct, tract: &GasState, exterior: &GasState, sample_rate_hz: u32, max_taps: usize)
+    -> Result<TabulatedLoad, String> {
+    let mouth = duct.segments.last().ok_or("the flanged load needs a duct with segments")?.outlet_radius();
+    let length: f64 = duct.segments.iter().map(Segment::axial_length).sum();
+    if sample_rate_hz == 0 || max_taps < 2 || !max_taps.is_power_of_two() {
+        return Err("the flanged load needs a positive rate and a power-of-two tap count of at least 2".into());
+    }
+    let dt = 1.0 / f64::from(sample_rate_hz);
+    // `cap_load`'s bins, the lines' own expression, so each rung's query lands on its row bit for bit.
+    let omegas: Vec<f64> =
+        (1..=max_taps / 2).map(|k| core::f64::consts::TAU * k as f64 / (max_taps as f64 * dt)).collect();
+    // Each row is solved alone (the first refusal in row order is returned): the same table on any thread count.
+    let rows = torso::par_map(omegas.len(), |i| {
+        let omega = omegas[i];
+        fs_duct::flanged_pipe_impedance_with_exterior(tract, exterior, mouth, omega, fs_duct::FLANGED_MODES)
+            .map(|z| (z.re, z.im))
+            .map_err(|e| format!("the flanged load refused at {omega} rad/s: {e:?}"))
+    })?;
+    let z: Vec<fs_math::c64::C64> = rows.iter().map(|&(re, im)| fs_math::c64::C64::new(re, im)).collect();
+    let source = "flanged across the gas interface (fs-duct flanged_pipe_impedance_with_exterior)";
+    TabulatedLoad::try_new(omegas, z, source, 1.0e-12)
+        .and_then(|table| {
+            table.with_mouth(TabulatedMouth {
+                axial_position_m: length, radius_m: mouth, gas: *exterior, dc_impedance: 0.0,
+            })
+        })
+        .map_err(|e| format!("the flanged load table refused: {e:?}"))
+}
+
 fn mouth_load(radius_m: f64, torso: Option<(TorsoSphere, f64)>, duct: &Duct, gas: &GasState, sample_rate_hz: u32,
     max_taps: usize) -> Result<TabulatedLoad, String> {
     if !radius_m.is_finite() || radius_m <= 0.0 {
@@ -1167,6 +1207,49 @@ mod tests {
         };
         let (near, far) = (back(0.4), back(1.6));
         assert!(far < 0.03 && far < 0.4 * near, "1.6 m head {far}, 0.4 m head {near}");
+    }
+
+    /// The table with no head (MB 24424). With one gas every row is today's flanged load
+    /// (`compact_radiation_impedance`) bit for bit. With a tract gas unlike the exterior every row is fs-duct's
+    /// two-gas flanged load (radiation in the exterior, the eliminated duct modes in the tract) bit for bit, called
+    /// directly, and no row is the one-gas load. Both tables lie on the head table's support and carry the duct's mouth
+    /// in the exterior with DC 0. The rate, tap-count, empty-duct and static-pressure refusals hold.
+    #[test]
+    fn the_flanged_table_is_the_two_gas_flanged_load_on_every_row() {
+        let gas = air_state();
+        let warm = GasState::try_new(&fs_material::gas::GasSpec::dry_air_ussa1976(), 310.15, 101_325.0).unwrap();
+        assert_ne!(warm.sound_speed.to_bits(), gas.sound_speed.to_bits(), "the test needs two gases");
+        let b = 0.013_548;
+        let (rate, taps) = (48_000_u32, 4096_usize);
+        let one = flanged_mouth_load(&tube(b), &gas, &gas, rate, taps).unwrap();
+        let two = flanged_mouth_load(&tube(b), &warm, &gas, rate, taps).unwrap();
+        let head = head_mouth_load(0.0875, &tube(b), &gas, rate, taps).unwrap();
+        for table in [&one, &two] {
+            assert_eq!(table.support(), head.support());
+            let mouth = table.validate_mouth(0.17, b, &gas).unwrap();
+            assert_eq!((mouth.dc_impedance.to_bits(), mouth.gas == gas), (0.0_f64.to_bits(), true));
+        }
+        assert!(two.validate_mouth(0.17, b, &warm).is_err(), "the table is bound to the exterior, not the tract");
+        let dt = 1.0 / f64::from(rate);
+        let bits = |z: fs_math::c64::C64| (z.re.to_bits(), z.im.to_bits());
+        for k in 1..=taps / 2 {
+            let omega = TAU * k as f64 / (taps as f64 * dt);
+            let today = fs_duct::compact_radiation_impedance(Termination::FlangedOpen, &gas, b, omega).unwrap();
+            assert_eq!(bits(one.z_at(omega).unwrap()), bits(today), "one gas, bin {k}");
+            let law = fs_duct::flanged_pipe_impedance_with_exterior(&warm, &gas, b, omega, fs_duct::FLANGED_MODES)
+                .unwrap();
+            assert_eq!(bits(two.z_at(omega).unwrap()), bits(law), "two gases, bin {k}");
+            assert_ne!(bits(law), bits(today), "two gases, bin {k}: the tract's gas moved nothing");
+        }
+        for (rate, taps) in [(0, 256), (48_000, 300), (48_000, 1)] {
+            let err = flanged_mouth_load(&tube(b), &gas, &gas, rate, taps).unwrap_err();
+            assert!(err.contains("power-of-two"), "{err}");
+        }
+        let err = flanged_mouth_load(&Duct { segments: vec![] }, &gas, &gas, 48_000, 256).unwrap_err();
+        assert!(err.contains("segments"), "{err}");
+        let thin = GasState::try_new(&fs_material::gas::GasSpec::dry_air_ussa1976(), 293.15, 90_000.0).unwrap();
+        let err = flanged_mouth_load(&tube(b), &thin, &gas, 48_000, 256).unwrap_err();
+        assert!(err.contains("refused"), "{err}");
     }
 
     #[test]

@@ -314,6 +314,11 @@ fn nasal_rows_are_refused_by_name() {
         (format!("{rows}tract_move 0 0.01 card 1\n"), "refused with `tract_move`"),
         (format!("{rows}fricative_noise 1 2 5\n"), "refused with `fricative_noise`"),
         (format!("{rows}receiver free_field_monopole\n"), "refused with `receiver free_field_monopole`"),
+        // B2 (MB 24424): a tract gas with no head stands on the series tract only; beside the nasal rows it is untried.
+        (
+            format!("tract_gas moist_air 290.15 101325 0.5\n{rows}"),
+            "a nasal card with a tract gas and no head is untried",
+        ),
     ];
     for (extra, needle) in cases {
         let error = VoiceDescription::from_bytes(fixture(&extra).as_bytes()).expect_err(needle);
@@ -327,6 +332,11 @@ fn nasal_rows_are_refused_by_name() {
     let headed = parse(&fixture(&format!("{HEAD_ROWS}{rows}")));
     assert!(headed.nasal.is_some() && headed.head_sphere.is_some() && headed.head_load);
     assert!(headed.torso_sphere.is_some() && headed.tract_gas_record().is_some());
+    // The same refusal in `build`, for a description whose `head_load` was turned off after parsing.
+    let mut bare = headed;
+    bare.head_load = false;
+    let error = bare.build().err().expect("a nasal card with a tract gas and no head is refused");
+    assert!(error.contains("a nasal card with a tract gas and no head is untried"), "{error:?}");
 }
 
 /// An ostium inside a passage section splits it into two of the same area; on a boundary nothing is split. The graph

@@ -56,7 +56,7 @@
 //! head_sphere <radius_m> <radius source without spaces>   (optional; the mouth as a cap on a rigid sphere)
 //! head_load cap                                           (optional, needs head_sphere and termination flanged; the lips see the sphere's load)
 //! torso_sphere <radius_m> <neck_gap_m> <source without spaces>   (optional, needs head_sphere; a torso sphere under the head)
-//! tract_gas <any `ambient` record>                        (optional, needs head_load; the gas inside the tract)
+//! tract_gas <any `ambient` record>                        (optional; without head_load needs termination flanged and no nasal rows; the gas inside the tract)
 //! keyframe <name> source <identifier without spaces>      (optional; a further measured shape of a moving tract)
 //! keyframe <name> licence <free text to end of line>
 //! keyframe_section <name> <area_m2> <length_m>            (repeat, glottis first)
@@ -182,8 +182,11 @@
 //! line, the mouth-flow line, the passive formants and the glottal flow's density and viscosity take the tract gas; the
 //! lips' load table, the receiver and the head and torso spheres take `ambient`. The table is an absolute impedance
 //! (Pa s/m^3) computed in the exterior and checked against it, so nothing is converted at the lips: pressure and volume
-//! flow are continuous there. It needs `head_load`, because a declared termination would be evaluated in the tract's gas,
-//! and the two gases share one static pressure (mean flow is not modeled). The medium is stationary: the breath does not
+//! flow are continuous there. Without `head_load` the table is the declared flanged load across the gas interface, on
+//! the same bins: fs-duct's two-gas law, whose radiation is in the exterior and whose eliminated higher duct modes are
+//! in the tract's gas ([`crate::pcm_wav::baffled::head::flanged_mouth_load`]; MB 23833, 24424). That needs
+//! `termination flanged`; a nasal card with a tract gas and no head is untried and refused. The two gases share one
+//! static pressure (mean flow is not modeled). The medium is stationary: the breath does not
 //! mix with the room or replace the tract's air over a note. Without the row the one `ambient` gas fills the tract and the
 //! exterior exactly as before.
 //!
@@ -337,7 +340,7 @@ use crate::glottis::{
 };
 use crate::keyframe_line::ShapeLine;
 use crate::pcm_wav::baffled::head::{
-    HeadSphere, TorsoSphere, head_mouth_load, head_opening_load, head_torso_mouth_load,
+    HeadSphere, TorsoSphere, flanged_mouth_load, head_mouth_load, head_opening_load, head_torso_mouth_load,
 };
 use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium, SurfaceSample};
 use crate::air_path::input::{ObserverLawInput, resolve_observer_law};
@@ -368,8 +371,10 @@ pub const VOICE_PERFORMANCE_SCHEMA: &str = "frankensim-voice-performance-v1";
 const HEAD_LOAD_NEEDS_SPHERE: &str = "head_load needs the head_sphere row: the load is that sphere's";
 const HEAD_LOAD_NEEDS_FLANGED: &str = "head_load needs `termination flanged`: it adds the sphere's change to the flanged load";
 const TORSO_NEEDS_SPHERE: &str = "torso_sphere needs the head_sphere row: the torso sits under that head";
-const TRACT_GAS_NEEDS_HEAD_LOAD: &str =
-    "tract_gas needs the head_load row: the lips' load must be computed in the exterior, not the tract's gas";
+const TRACT_GAS_NEEDS_FLANGED: &str =
+    "tract_gas without head_load needs `termination flanged`: the lips' flanged load is computed in the exterior";
+const TRACT_GAS_NASAL_NEEDS_HEAD_LOAD: &str =
+    "tract_gas with the nasal rows needs the head_load row: a nasal card with a tract gas and no head is untried";
 /// The `subglottal_airway` row's tree token: Weibel's symmetric model.
 pub const SUBGLOTTAL_AIRWAY_TREE: &str = "weibel-1963";
 /// The `subglottal_airway` row's geometry token: the dimensions as Saab et al. (2021) print them, Table 1 column B.
@@ -1370,8 +1375,8 @@ impl VoiceDescription {
         let full_scale_pa = full_scale.ok_or_else(|| missing("full_scale_pa"))?;
         let gas = gas.ok_or_else(|| missing("ambient"))?;
         if let Some(tract) = &tract_gas {
-            if head_load.is_none() {
-                return Err(TRACT_GAS_NEEDS_HEAD_LOAD.into());
+            if head_load.is_none() && !matches!(termination, Some(Termination::FlangedOpen)) {
+                return Err(TRACT_GAS_NEEDS_FLANGED.into());
             }
             if tract.state().pressure != gas.state().pressure {
                 return Err("tract_gas and ambient need one static pressure: mean flow is not modeled".into());
@@ -1440,6 +1445,9 @@ impl VoiceDescription {
         // row whose lines or load are one series mouth's. `head_sphere`, `head_load`, `torso_sphere` and `tract_gas` are
         // taken per opening (N3b; the `nasal` module doc).
         let nasal = nasal_draft.admit(&sections)?;
+        if nasal.is_some() && tract_gas.is_some() && head_load.is_none() {
+            return Err(TRACT_GAS_NASAL_NEEDS_HEAD_LOAD.into());
+        }
         if nasal.is_some() {
             let series_rows = [
                 ("tract_move", !tract_moves.is_empty()),
@@ -1522,6 +1530,22 @@ impl VoiceDescription {
         self.tract_gas.as_ref()
     }
 
+    /// `tract_gas` without `head_load` on the series tract with `termination flanged`: the lips' declared flanged load
+    /// across the gas interface (radiation in the exterior, the eliminated duct modes in the tract's gas), tabulated on
+    /// the head table's bins (module doc; MB 23833, 24424). `None` for every other card, which keeps its load exactly
+    /// as before; `build` refuses the combinations that need a table and have none.
+    fn exterior_flanged_load(&self, duct: &fs_duct::Duct, mechanics_rate: u32)
+        -> Result<Option<fs_duct::TabulatedLoad>, String> {
+        if self.tract_gas.is_none() || self.head_load || self.nasal.is_some()
+            || !matches!(self.termination, Termination::FlangedOpen)
+        {
+            return Ok(None);
+        }
+        flanged_mouth_load(duct, self.tract_gas(), self.ambient_gas(), mechanics_rate, GLOTTAL_LINE_MAX_TAPS)
+            .map(Some)
+            .map_err(|e| format!("flanged load refused: {e}"))
+    }
+
     /// Realize the island, the tract's mouth-flow line and the microphone.
     ///
     /// # Errors
@@ -1581,14 +1605,19 @@ impl VoiceDescription {
                 .map_err(|e| format!("head load refused: {e}"))?,
             ),
         };
-        let mouth_load = head_load.as_ref().map_or(MouthLoad::Analytic(self.termination), MouthLoad::Tabulated);
+        // `tract_gas` without `head_load`: the declared flanged load across the gas interface (module doc). Without
+        // `tract_gas` this is `None` and the lips' table is the head's, as before.
+        let flanged = self.exterior_flanged_load(&duct, mechanics_rate)?;
+        let lips_table = head_load.as_ref().or(flanged.as_ref());
+        let mouth_load = lips_table.map_or(MouthLoad::Analytic(self.termination), MouthLoad::Tabulated);
         // With `tract_gas` both tract lines check the table against the exterior it was computed in.
-        let split = match (&self.tract_gas, head_load.as_ref()) {
+        let split = match (&self.tract_gas, lips_table) {
             (None, _) => None,
             (Some(_), Some(table)) => Some(table),
             // The nasal rows with `head_load`: the network's ports read their own tables in the exterior.
             (Some(_), None) if self.head_load && self.nasal.is_some() => None,
-            (Some(_), None) => return Err(TRACT_GAS_NEEDS_HEAD_LOAD.into()),
+            (Some(_), None) if self.nasal.is_some() => return Err(TRACT_GAS_NASAL_NEEDS_HEAD_LOAD.into()),
+            (Some(_), None) => return Err(TRACT_GAS_NEEDS_FLANGED.into()),
         };
         // `subglottal_airway`: Weibel's tree below the folds in the tract's gas, every tube carrying the card's
         // `tract_wall` (rigid without one), on the mechanics clock. Without the row the island takes no airway.
@@ -1837,7 +1866,7 @@ impl VoiceDescription {
         let passive_formants_hz = if self.nasal.is_some() {
             Err("the passive formants are the series tract's: a nasal card does not read them".to_string())
         } else {
-            match &head_load {
+            match lips_table {
                 Some(table) => chart.tmm_formants_tabulated(gas, self.wall.as_ref(), table, 4),
                 None => chart.tmm_formants_terminated(gas, self.wall.as_ref(), self.termination, 4),
             }
@@ -2118,8 +2147,10 @@ impl VoiceDescription {
             ),
             _ => None,
         };
-        let mouth_load = head_load.as_ref().map_or(MouthLoad::Analytic(self.termination), MouthLoad::Tabulated);
-        let split = if self.tract_gas.is_some() { head_load.as_ref() } else { None };
+        let flanged = self.exterior_flanged_load(&duct, mechanics_rate).map_err(|e| format!("moving tract {e}"))?;
+        let lips_table = head_load.as_ref().or(flanged.as_ref());
+        let mouth_load = lips_table.map_or(MouthLoad::Analytic(self.termination), MouthLoad::Tabulated);
+        let split = if self.tract_gas.is_some() { lips_table } else { None };
         let wall = self.wall.as_ref();
         let (island_taps, shape_zc) = match split {
             None => glottal_tract_line_taps(&duct, gas, None, mouth_load, mechanics_rate, wall),
@@ -2141,7 +2172,7 @@ impl VoiceDescription {
         let (_, mouth_taps) = mouth
             .quiescent_fir()
             .ok_or("a moving tract needs every shape's mouth-flow line to be a plain FIR")?;
-        let formants = match &head_load {
+        let formants = match lips_table {
             Some(table) => chart.tmm_formants_tabulated(gas, wall, table, 4),
             None => chart.tmm_formants_terminated(gas, wall, self.termination, 4),
         }
@@ -4438,9 +4469,11 @@ mod tests {
 
     #[test]
     fn tract_gas_rows_are_refused_by_name() {
-        let rows: [(String, &str); 5] = [
-            ("tract_gas moist_air 310.15 101325 1.0\n".into(), "needs the head_load row"),
-            ("head_sphere 0.087 s\ntract_gas moist_air 310.15 101325 1.0\n".into(), "needs the head_load row"),
+        let unflanged =
+            fixture("tract_gas moist_air 310.15 101325 1.0\n").replace("termination flanged", "termination unflanged");
+        let err = VoiceDescription::from_bytes(unflanged.as_bytes()).unwrap_err();
+        assert!(err.contains("needs `termination flanged`"), "{err}");
+        let rows: [(String, &str); 3] = [
             (format!("{HEAD_LOAD}tract_gas moist_air 310.15 90000 1.0\n"), "one static pressure"),
             (format!("{HEAD_LOAD}tract_gas moist_air 310.15 101325 1.0 7\n"), "contains extra fields"),
             (
@@ -4452,14 +4485,58 @@ mod tests {
             let err = VoiceDescription::from_bytes(fixture(&row).as_bytes()).unwrap_err();
             assert!(err.contains(why), "{row}: {err}");
         }
-        // The fields are public, so `build` refuses a tract gas without the head's load again.
+        // The fields are public, so `build` refuses a tract gas with neither the head's load nor a flanged mouth.
         let mut flipped = VoiceDescription::from_bytes(
             fixture(&format!("{HEAD_LOAD}tract_gas moist_air 290.15 101325 0.5\n")).as_bytes(),
         )
         .unwrap();
         flipped.head_load = false;
+        flipped.termination = Termination::UnflangedOpen;
         let err = flipped.build().err().expect("refused");
-        assert!(err.contains("needs the head_load row"), "{err}");
+        assert!(err.contains("needs `termination flanged`"), "{err}");
+    }
+
+    /// `tract_gas` with no head (MB 23833, 24424): the lips' load is the declared flanged load across the gas interface
+    /// (radiation in the exterior, the eliminated duct modes in the tract's gas). The formants are, bit for bit, the
+    /// tract gas's TMM against that table made by hand, and not the TMM with the
+    /// flanged load evaluated in the tract's gas; they move by the sound-speed ratio to within 1 % (as with the head's
+    /// load), the receiver stays the exterior's, and a tract gas equal to the ambient gives the card's own formants to
+    /// within the table's linear interpolation between rows (1e-6).
+    #[test]
+    fn tract_gas_without_the_head_load_reads_the_flanged_load_in_the_exterior() {
+        let base = VoiceDescription::from_bytes(fixture("").as_bytes()).unwrap();
+        let breath =
+            VoiceDescription::from_bytes(fixture("tract_gas moist_air 290.15 101325 0.5\n").as_bytes()).unwrap();
+        let same =
+            VoiceDescription::from_bytes(fixture("tract_gas moist_air 310.15 101325 1.0\n").as_bytes()).unwrap();
+        assert_eq!(same.tract_gas(), same.ambient_gas());
+        let (a, b, s) = (base.build().unwrap(), breath.build().unwrap(), same.build().unwrap());
+        assert!(!a.info().head_load && !b.info().head_load && !s.info().head_load);
+        let chart = TractChart::try_new(breath.sections.clone(), &breath.tract_source, &breath.tract_licence).unwrap();
+        let rate = breath.output_rate_hz * breath.mechanics_per_output;
+        let (tract, exterior) = (breath.tract_gas(), breath.ambient_gas());
+        let table = flanged_mouth_load(&chart.to_duct(), tract, exterior, rate, GLOTTAL_LINE_MAX_TAPS).unwrap();
+        let by_hand = chart.tmm_formants_tabulated(breath.tract_gas(), breath.wall.as_ref(), &table, 4).unwrap();
+        let fb = b.info().passive_formants_hz.clone().unwrap();
+        assert_eq!(fb, by_hand);
+        let in_tract = chart
+            .tmm_formants_terminated(breath.tract_gas(), breath.wall.as_ref(), Termination::FlangedOpen, 4)
+            .unwrap();
+        assert_ne!(fb, in_tract, "the lips' load must not be evaluated in the tract's gas");
+        let ratio = breath.tract_gas().sound_speed / base.ambient_gas().sound_speed;
+        assert!(ratio < 0.97, "the test gas must move the sound speed: {ratio}");
+        let fa = a.info().passive_formants_hz.clone().unwrap();
+        assert_eq!(fa.len(), fb.len());
+        for (x, y) in fa.iter().zip(&fb) {
+            assert!((y / x / ratio - 1.0).abs() < 0.01, "formant {x} -> {y} Hz against the ratio {ratio}");
+        }
+        assert_eq!(b.filter_delay_samples(), a.filter_delay_samples(), "the exterior's receiver is unchanged");
+        let fs = s.info().passive_formants_hz.clone().unwrap();
+        assert_eq!(fa.len(), fs.len());
+        for (x, y) in fa.iter().zip(&fs) {
+            assert!((y / x - 1.0).abs() < 1e-6, "equal gases: formant {x} -> {y} Hz");
+        }
+        assert_ne!(pressure(&base), pressure(&breath));
     }
 
     #[test]
@@ -4969,6 +5046,38 @@ mod tests {
         assert_eq!(formants(&one), formants(&three));
         let (a, b) = (render_performance(one, samples), render_performance(three, samples));
         assert!(a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()), "the thread count changed a sample");
+    }
+
+    /// `tract_gas` with no head on a moving tract (MB 24424): `shape_taps` makes each further shape's own flanged table
+    /// across the gas interface, from that shape's duct. The keyframe target's passive formants are, bit for bit, the
+    /// tract gas's TMM against that table made by hand on the shape `build` makes (the log-area morph at fraction 1,
+    /// the card's glottal section held), and not the TMM with the flanged load evaluated in the tract's gas.
+    #[test]
+    fn a_moving_tract_with_tract_gas_and_no_head_reads_each_shapes_own_flanged_table() {
+        let rows = keyframe_i() + "tract_move 0.05 0.1 i 3\ntract_gas moist_air 290.15 101325 0.5\n";
+        let description =
+            VoiceDescription::from_bytes(moving_card(&SHAPE_A, 0.02, 0.15, &rows).as_bytes()).expect("parses");
+        assert!(!description.head_load && description.tract_gas_record().is_some());
+        let built = description.build().expect("builds");
+        let formants = &built.info().keyframe_formants_hz;
+        assert_eq!(formants.len(), 1);
+        assert_eq!(formants[0].0, "i");
+        let card = TractChart::try_new(description.sections.clone(), &description.tract_source,
+            &description.tract_licence).expect("card chart");
+        let k = &description.keyframes[0];
+        let keyframe = TractChart::try_new(k.sections.clone(), &k.source, &k.licence).expect("keyframe chart");
+        // The move's last step: `k / steps` with k = steps = 3 is exactly 1.
+        let morph = card.log_area_morph(&keyframe, 1.0).expect("morph");
+        let mut sections = morph.sections().to_vec();
+        sections[0].area_m2 = card.sections()[0].area_m2;
+        let shape = TractChart::try_new(sections, morph.source_id(), morph.license()).expect("held shape");
+        let (tract, exterior, wall) = (description.tract_gas(), description.ambient_gas(), description.wall.as_ref());
+        let rate = description.output_rate_hz * description.mechanics_per_output;
+        let table = flanged_mouth_load(&shape.to_duct(), tract, exterior, rate, GLOTTAL_LINE_MAX_TAPS).expect("table");
+        let by_hand = shape.tmm_formants_tabulated(tract, wall, &table, 4).expect("formants");
+        assert_eq!(formants[0].1.as_ref().expect("keyframe formants"), &by_hand);
+        let in_tract = shape.tmm_formants_terminated(tract, wall, Termination::FlangedOpen, 4).expect("formants");
+        assert_ne!(by_hand, in_tract, "the keyframe's lips' load must not be evaluated in the tract's gas");
     }
 
     /// Build time per shape at the live cards' clock and rows (head sphere and load, torso, tract gas, 192 kHz), which a
