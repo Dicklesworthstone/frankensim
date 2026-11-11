@@ -104,6 +104,75 @@ temperature. This is what lets a hand-written coupling that solves an
 interface inside one backward-Euler thermal solve be matched step by step by
 a graph (bead `.6.3`).
 
+A contact carried outside. `ConductionObserver::with_links_carried_outside`
+names contact links whose heat another owner carries. A named link stays in
+the thermal owner: its two cells are still in contact and the area it covers
+is still taken from their exposed faces. The binding gives it no conduction.
+The explicit timeline is handed a conductance of exactly `0.0` in place of
+the authored one; an implicit chain or graph prepared on the binding has no
+heat term and no tangent entry for the link, and its tangent still takes the
+covered area off the film on each face. This is what the hand-written
+friction-heat coupling does to its interface link inside its own trial
+(`fs-couple/src/friction_heat.rs` replaces that link's conductance by zero
+and adds the interface's heat to the two cells as sources), offered on the
+binding so that a graph can carry a contact through the cells' ports while
+the timeline keeps its coverage.
+
+A link has one owner. Refused: a link the binding also gives a conductance,
+an inactive link, a link named twice (in one call or two). An implicit
+contact law or link law on a named link is refused by its own attachment,
+which looks for a bound link. A contact neither bound nor named is still
+refused by the implicit solve. The direct chain refuses a named link, having
+no link to put between that pair of neighbours. A separation of a named
+link, or a contact event that changes its cells or its area, is refused like
+one on a bound link. Planar phase layers and current mechanical metrics are
+refused beside named links, in either order: their coverage rules have not
+been extended to a contact the binding does not conduct through. A very
+large contact resistance standing in for absence is not offered.
+
+The zero is written in one place (`ConductionObserver::carry_outside`), from
+which both the explicit timeline's coefficient map and the implicit
+endpoint's take it. Checked, in `enthalpy/conduction/implicit/graph/tests.rs`
+(four tests) on two cells of 2 kg and 3 kg (`T = h`) at 600 K and 200 K, in
+contact over 1 m2 of their 10 m2 each, the contact authored with 0.7 W/K:
+
+- insulated, over 10 s: the map handed to the explicit timeline holds the
+  bits of `0.0` for the contact; the explicit timeline with the binding, the
+  backward-Euler graph and the SDIRK2 graph (both with cell and total
+  tolerances of zero) each leave both enthalpies bit-equal to their start,
+  with largest cell residual, stored change, energy residual and conduction
+  entropy all exactly zero, while the explicit timeline without the binding
+  conducts through the authored 0.7 W/K; afterwards the link still carries
+  0.7 W/K and covers 1 m2 on each side;
+- with a film of 0.3 W/(m2 K) to a 300 K ambient, one backward-Euler step of
+  10 s: each cell ends where it would alone with the film on 9 m2
+  (320.690 K and 290.000 K, to 1e-9 K), not on 10 m2 (318.750 K and
+  290.909 K); the owner's external heat is the two cells' stored change; the
+  explicit timeline with the binding is bit-equal to the one whose contact
+  was authored with no conductance;
+- the tangent: no entry joins the two cells, and the diagonals are
+  `1 + dt htc A / m` with the exposed 9 m2, 14.5 and 10 (16 and 11 with
+  10 m2), equal to centred differences of the owner's residual to 1e-8;
+- the refusals above, each by its message; on three cells with one contact
+  bound and one named, the cell behind the named contact keeps its enthalpy
+  to the bit while the other two exchange; a law that refuses to be
+  consulted is not consulted when attached to the named link and is when
+  attached to the bound one.
+
+In `crates/fs-system/tests/thermal_timeline_slice.rs`: two cells in contact,
+each also losing heat to the room through a film on its exposed face, the
+contact named as carried outside and the kernel's `Conductance` of 0.2 W/K
+between the two end-temperature ports, against the owner's backward-Euler
+solve with the contact's conduction inside, 40 steps of 0.5 s: 5.7e-14 K
+apart at worst (allowed 4.1e-10 K), 16.758 J to the room in both accounts;
+the same cells not in contact at all, whose films act on the whole faces,
+end 0.19 K away.
+
+Not tested: the isolated-equilibrium solve on a graph with a named link (by
+reading, `closed_components` refuses it as a non-conducting link); an
+adaptive advance with a named link; a named link beside a reservoir or a
+bound ambient face on the same cell.
+
 The receipt's stored change is the owner's `EnergyAudit`; numerical loss is
 what entered through the ports less that. The energy tolerance is
 `(64 + 2 cells) eps` times the sum of the sizes of the port energies, of the

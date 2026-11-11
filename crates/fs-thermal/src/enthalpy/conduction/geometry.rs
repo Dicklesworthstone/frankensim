@@ -145,6 +145,11 @@ impl<'a> ConductionObserver<'a> {
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, DepositionError> {
         checkpoint()?;
+        if !self.outside.is_empty() {
+            return Err(DepositionError::InvalidInput(
+                "current conduction metrics are not admitted beside links carried outside",
+            ));
+        }
         if self.has_phase_layers
             || geometry.links.keys().ne(self.links.keys())
             || geometry.reservoirs.keys().ne(self.reservoirs.keys())

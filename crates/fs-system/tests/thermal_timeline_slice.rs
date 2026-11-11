@@ -145,6 +145,10 @@ struct Scene {
     /// Whether the two cells are in contact at all. Without the link they
     /// exchange heat only through what is connected to their ports.
     linked: bool,
+    /// With `linked`: the conduction graph names the contact as carried
+    /// outside. It still covers its area of both cells' faces, and its heat
+    /// is whatever is connected to the cells' ports.
+    outside: bool,
     boundaries: [Boundary; 2],
     extra: Vec<TimedEvent>,
     datums_j_kg: [f64; 2],
@@ -157,6 +161,7 @@ impl Default for Scene {
         Self {
             link_w_k: LINK_W_K,
             linked: true,
+            outside: false,
             boundaries: [insulated(); 2],
             extra: Vec::new(),
             datums_j_kg: [0.0; 2],
@@ -1091,11 +1096,18 @@ impl Scene {
                 (MaterialId(0), laws[0] as &dyn ConductivityLaw),
                 (MaterialId(1), laws[1] as &dyn ConductivityLaw),
             ],
-            if self.linked { &link } else { &[] },
+            if self.linked && !self.outside { &link } else { &[] },
             &[],
             || Ok(()),
         )
         .expect("conduction");
+        let conduction = if self.linked && self.outside {
+            conduction
+                .with_links_carried_outside(active, &[7], || Ok(()))
+                .expect("carried outside")
+        } else {
+            conduction
+        };
         ImplicitConductionGraph::new(
             active,
             &conduction,
@@ -1361,6 +1373,93 @@ fn cells_joined_through_end_temperature_ports_follow_the_owners_implicit_link() 
     // The default ports return the mean of the two ends, which makes the
     // wall's heat the trapezoidal rule's: another rule, first order away.
     assert!(worst_mean > 1.0e-3, "{worst_mean}");
+}
+
+#[test]
+fn a_contact_carried_through_the_ports_still_covers_the_cells_faces() {
+    // Two cells in contact that also lose heat to the room through a film
+    // on their exposed faces. The reference is the owner's backward-Euler
+    // solve with the contact's conduction inside. The graph names the
+    // contact as carried outside the timeline and puts the kernel's ideal
+    // conductance of the same 0.2 W/K between the two cell ports. The
+    // contact covers 1e-3 m2 of each cell's 1e-2 m2, so in both the films
+    // act on 9e-3 m2, and the two agree step by step as far as two solves
+    // of one discrete rule can. A third system, whose cells are not in
+    // contact at all, has films on the whole faces and ends elsewhere:
+    // that is what losing the covered area would look like.
+    let gate = CancelGate::new_clock_free();
+    let controls = implicit_controls(0.5);
+    let (dt_s, steps) = (0.5, 40_u32);
+    let film = Boundary {
+        htc_w_m2_k: 5.5,
+        ..insulated()
+    };
+    let scene = Scene {
+        boundaries: [film; 2],
+        ..Scene::default()
+    };
+    let (active, laws) = scene.active();
+    let twin = scene.graph(&active, laws);
+    let carried = Scene {
+        outside: true,
+        boundaries: [film; 2],
+        ..Scene::default()
+    };
+    let apart = Scene {
+        linked: false,
+        boundaries: [film; 2],
+        ..Scene::default()
+    };
+    let (mut covered, covered_cells) = joined_through_ports(&carried, controls, true);
+    let (mut bare, bare_cells) = joined_through_ports(&apart, controls, true);
+    let unheated = HeldSources::new([(A, 0.0), (B, 0.0)]);
+    let mut native = active.clone();
+    let (mut worst_covered, mut worst_bare, mut to_room_j) = (0.0_f64, 0.0_f64, 0.0_f64);
+    with_cx(&gate, |cx| {
+        for step in 0..steps {
+            let target_s = native.time_s() + dt_s;
+            let (next, report) = owner_solve(
+                &twin,
+                &native,
+                &unheated,
+                target_s,
+                controls,
+                ImplicitScheme::BackwardEuler,
+            );
+            assert_eq!((report.energy.substeps, report.rejected_intervals), (1, 0));
+            to_room_j -= report.energy.external_heat_j;
+            native = next;
+            assert_eq!(covered.step(dt_s, cx).expect("kernel step").dt_s, dt_s, "step {step}");
+            assert_eq!(bare.step(dt_s, cx).expect("kernel step").dt_s, dt_s, "step {step}");
+            let (kept, lost) = (
+                covered.state::<TimelineState<'static>>(covered_cells).expect("cells"),
+                bare.state::<TimelineState<'static>>(bare_cells).expect("cells"),
+            );
+            for id in [A, B] {
+                let owner = native.temperature_k(id).expect("T");
+                worst_covered = worst_covered.max((temperature(kept, id) - owner).abs());
+                worst_bare = worst_bare.max((temperature(lost, id) - owner).abs());
+            }
+        }
+    });
+    // The films took about a sixth of the 93.5 J the cells held above the
+    // room (5 J/K each, 16.85 K and 1.85 K above it at the start): two
+    // films of 0.0495 W/K over 20 s.
+    assert!(to_room_j > 15.0 && to_room_j < 18.5, "{to_room_j} J");
+    let a_step_k = (2.0 * controls.cell_tolerance_j + LINK_W_K * dt_s * 1.0e-12 * 310.0) / CAPACITY;
+    eprintln!(
+        "a contact carried through the ports: {worst_covered:.3e} K from the owner's link \
+         (allowed {:.3e}), {to_room_j:.3} J to the room; cells not in contact: {worst_bare:.3e} K",
+        f64::from(steps) * a_step_k
+    );
+    assert!(worst_covered <= f64::from(steps) * a_step_k, "{worst_covered}");
+    assert!(worst_bare > 1.0e-2, "{worst_bare}");
+    // The kernel's account of the same run: what left the cells is in the
+    // room, as the owner's own audit has it.
+    let ledger = covered.ledger();
+    let room_j = ledger.sink_heat_j();
+    assert!((room_j - to_room_j).abs() <= 1.0e-9 * to_room_j, "{room_j} vs {to_room_j}");
+    assert!(ledger.energy_residual_j().abs() <= 1.0e-9 * to_room_j);
 }
 
 #[test]

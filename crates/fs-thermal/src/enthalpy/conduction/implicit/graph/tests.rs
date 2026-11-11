@@ -1355,3 +1355,395 @@ fn cancelling_source_owners_retain_entropy_flags_through_native_stages() {
         near(next.temperature_k(id(i)).unwrap(), 300.0, 0.0);
     }
 }
+
+/// Two cells in contact over 1 m2 of the 10 m2 each has, the contact
+/// authored with 0.7 W/K, each exchanging with the 300 K ambient through a
+/// film of `htc` on what the contact leaves exposed; and the binding that
+/// names the contact as carried outside.
+fn carried_outside(
+    law: &Law,
+    h: [f64; 2],
+    mass: [f64; 2],
+    htc: f64,
+) -> (DepositionSimulation<'_>, ConductionObserver<'_>) {
+    let (mut thermal, _) = setup(law, &h, &mass, &[(0, 1, 0.0)]);
+    thermal.links.get_mut(&0).unwrap().conductance_w_k = 0.7;
+    for i in 0..2 {
+        thermal.cells.get_mut(&id(i)).unwrap().boundary.htc_w_m2_k = htc;
+    }
+    let observer = ConductionObserver::new(&thermal, &[(MaterialId(1), law)], &[], &[], || Ok(()))
+        .unwrap()
+        .with_links_carried_outside(&thermal, &[0], || Ok(()))
+        .unwrap();
+    (thermal, observer)
+}
+
+/// `observer` with `links` also named as carried outside.
+fn named_on<'a>(
+    thermal: &DepositionSimulation<'_>,
+    observer: &ConductionObserver<'a>,
+    links: &[u64],
+) -> Result<ConductionObserver<'a>, DepositionError> {
+    observer.clone().with_links_carried_outside(thermal, links, || Ok(()))
+}
+
+/// The implicit graph on `observer`, or its refusal.
+fn solve_on<'a>(
+    thermal: &DepositionSimulation<'_>,
+    observer: &ConductionObserver<'a>,
+    law: &'a Law,
+) -> Result<ImplicitConductionGraph<'a>, ImplicitConductionError> {
+    ImplicitConductionGraph::new(
+        thermal,
+        observer,
+        &[(MaterialId(1), law)],
+        ImplicitConductionLinearControls::default(),
+        || Ok(()),
+    )
+}
+
+/// A contact law and a link law that refuse to be consulted: attaching
+/// either to a link carried outside must fail before it is asked anything.
+struct NeverAsked<'a>(&'a Law);
+const ASKED: DepositionError =
+    DepositionError::InvalidInput("a law on a link carried outside was consulted");
+impl ImplicitContactLaw for NeverAsked<'_> {
+    fn caloric_laws(&self) -> [&dyn ThermalLaw; 2] {
+        [self.0; 2]
+    }
+    fn enthalpy_bounds_j_kg(&self) -> [[f64; 2]; 2] {
+        [[100.0, 1500.0]; 2]
+    }
+    fn state_at_specific_enthalpies(
+        &self,
+        _: [f64; 2],
+    ) -> Result<ImplicitContactState, DepositionError> {
+        Err(ASKED)
+    }
+}
+impl ImplicitLinkLaw for NeverAsked<'_> {
+    fn caloric_laws(&self) -> [&dyn ThermalLaw; 2] {
+        [self.0; 2]
+    }
+    fn state_at_specific_enthalpies(
+        &self,
+        _: [f64; 2],
+        _: ConductiveLink,
+        _: ContactPatch,
+        _: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<ImplicitLinkState, DepositionError> {
+        Err(ASKED)
+    }
+}
+
+#[test]
+fn a_link_carried_outside_conducts_nothing_and_keeps_the_area_it_covers() {
+    let law = Law {
+        plateau: false,
+        nonlinear: false,
+    };
+    let (h, mass, htc, dt) = ([600.0, 200.0], [2.0, 3.0], 0.3, 10.0);
+    let config = StepConfig {
+        max_dt_s: 1.0,
+        energy_tolerance_j: 1e-9,
+    };
+    let enthalpy = |state: &DepositionSimulation<'_>, i: usize| state.cells()[&id(i)].specific_h_j_kg;
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+
+    // Insulated cells 400 K apart. What the binding hands the explicit
+    // timeline for the contact is zero, not a small number.
+    let (still, observer) = carried_outside(&law, h, mass, 0.0);
+    let mut asked = observer.clone();
+    let handed = asked.conductances(&still, &mut || Ok(())).unwrap();
+    assert_eq!(handed.len(), 1);
+    assert_eq!(handed[&0].to_bits(), 0.0_f64.to_bits());
+    // The authored 0.7 W/K conducts; with the binding nothing moves.
+    let (authored, _) = still.advance_to(dt, config, || Ok(())).unwrap();
+    assert!(authored.temperature_k(id(0)).unwrap() < 500.0);
+    let (held, _, audit) = still.advance_observed(&observer, dt, config, || Ok(())).unwrap();
+    for (i, start) in h.into_iter().enumerate() {
+        assert_eq!(enthalpy(&held, i).to_bits(), start.to_bits());
+    }
+    near(audit.stored_energy_change_j, 0.0, 0.0);
+    // The implicit solves, with tolerances of zero: a conductance of any
+    // size would leave a residual at the start that nothing is allowed to.
+    let exact = ImplicitConductionControls {
+        cell_tolerance_j: 0.0,
+        total_tolerance_j: 0.0,
+        ..controls(dt)
+    };
+    let solver = graph(&still, &observer, &law);
+    let euler = solver.advance_to(&still, dt, exact, &mut workspace, || Ok(()));
+    let staged = solver.advance_sdirk2_to(&still, dt, exact, &mut workspace, || Ok(()));
+    for (next, report) in [euler.unwrap(), staged.unwrap()] {
+        for (i, start) in h.into_iter().enumerate() {
+            assert_eq!(enthalpy(&next, i).to_bits(), start.to_bits());
+        }
+        assert_eq!(report.energy.substeps, 1);
+        near(report.maximum_cell_residual_j, 0.0, 0.0);
+        near(report.energy.stored_energy_change_j, 0.0, 0.0);
+        near(report.energy.residual_j, 0.0, 0.0);
+        near(report.entropy.conduction_generation_j_k, 0.0, 0.0);
+        // The contact is still the owner's, with what was authored on it.
+        near(next.links()[&0].conductance_w_k, 0.7, 0.0);
+        for side_m2 in next.contact_patch(0).unwrap().covered_area_m2 {
+            near(side_m2, 1.0, 0.0);
+        }
+    }
+
+    // With a film each cell cools or warms alone through the 9 m2 the
+    // contact leaves exposed: one backward-Euler step of
+    // m (T1 - T0) = dt htc A (300 - T1), which differs by kelvins from the
+    // step through all 10 m2.
+    let (thermal, observer) = carried_outside(&law, h, mass, htc);
+    let solver = graph(&thermal, &observer, &law);
+    let (next, report) = solver
+        .advance_to(&thermal, dt, controls(dt), &mut workspace, || Ok(()))
+        .unwrap();
+    let mut leaving_j = 0.0;
+    for (i, (start, kg)) in h.into_iter().zip(mass).enumerate() {
+        let alone = |area_m2: f64| {
+            let r = dt * htc * area_m2;
+            (kg * start + r * 300.0) / (kg + r)
+        };
+        let after = next.temperature_k(id(i)).unwrap();
+        near(after, alone(9.0), 1e-9);
+        assert!((alone(9.0) - alone(10.0)).abs() > 0.5, "{} vs {}", alone(9.0), alone(10.0));
+        leaving_j += kg * (after - start);
+    }
+    assert_eq!(report.energy.substeps, 1);
+    // All the heat is the films': none passed between the cells unseen.
+    near(report.energy.external_heat_j, leaving_j, 1e-9);
+    // The explicit timeline with the binding is the one whose contact was
+    // authored without conductance, to the bit.
+    let mut twin = thermal.clone();
+    twin.links.get_mut(&0).unwrap().conductance_w_k = 0.0;
+    let (reference, _) = twin.advance_to(dt, config, || Ok(())).unwrap();
+    let (observed, _, _) = thermal.advance_observed(&observer, dt, config, || Ok(())).unwrap();
+    for (i, start) in h.into_iter().enumerate() {
+        assert_eq!(enthalpy(&observed, i).to_bits(), enthalpy(&reference, i).to_bits());
+        assert!((enthalpy(&observed, i) - start).abs() > 1.0);
+    }
+}
+
+#[test]
+fn the_tangent_of_a_link_carried_outside_has_no_entry_and_the_exposed_area() {
+    let law = Law {
+        plateau: false,
+        nonlinear: false,
+    };
+    let (mass, htc, dt) = ([2.0, 3.0], 0.3, 10.0);
+    let (thermal, observer) = carried_outside(&law, [600.0, 200.0], mass, htc);
+    let solver = graph(&thermal, &observer, &law);
+    let step = BackwardEulerStep::new(&thermal, dt, || Ok(())).unwrap();
+    let mut work = empty_report();
+    let energy = [-40.0, 25.0];
+    let mut residual = |energy: &[f64; 2]| {
+        solver
+            .inner
+            .evaluate(
+                &step,
+                energy,
+                &BTreeMap::new(),
+                &[],
+                false,
+                controls(dt),
+                &mut work,
+                &mut || Ok(()),
+            )
+            .unwrap()
+    };
+    let trial = residual(&energy);
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    solver
+        .inner
+        .jacobian(&thermal, trial.payload(), step.duration_s(), &mut workspace, &mut || Ok(()))
+        .unwrap();
+    // No entry joins the two cells.
+    assert!(workspace.graph_entries.as_ref().unwrap().is_empty());
+    let epsilon = 1e-3;
+    for column in 0..2 {
+        let (mut plus, mut minus) = (energy, energy);
+        plus[column] += epsilon;
+        minus[column] -= epsilon;
+        let (plus, minus) = (residual(&plus), residual(&minus));
+        for row in 0..2 {
+            let analytic = if row == column { workspace.diagonal[row] } else { 0.0 };
+            near(
+                analytic,
+                (plus.residual_j()[row] - minus.residual_j()[row]) / (2.0 * epsilon),
+                1e-8,
+            );
+        }
+    }
+    // Each diagonal is 1 + dt htc A / m with the 9 m2 left exposed; with
+    // the contact's area not taken off they would be 16 and 11.
+    near(workspace.diagonal[0], 1.0 + dt * htc * 9.0 / mass[0], 1e-12);
+    near(workspace.diagonal[1], 1.0 + dt * htc * 9.0 / mass[1], 1e-12);
+}
+
+#[test]
+fn a_contact_has_one_owner_a_conductance_or_a_carrier_outside() {
+    let law = Law {
+        plateau: false,
+        nonlinear: false,
+    };
+    let h = [600.0, 200.0, 300.0];
+    let (thermal, bound) = setup(&law, &h, &[2.0, 3.0, 5.0], &[(0, 1, 0.0), (1, 2, 0.0)]);
+    let why = |result: Result<ConductionObserver<'_>, DepositionError>| match result {
+        Err(DepositionError::InvalidInput(why)) => why,
+        Err(other) => panic!("{other:?}"),
+        Ok(_) => panic!("admitted"),
+    };
+    let name = |observer, links: &[u64]| named_on(&thermal, observer, links);
+    let solve = |observer| solve_on(&thermal, observer, &law);
+    let second = ConductiveLink {
+        link_id: 1,
+        half_distances_m: [0.5; 2],
+        contact_resistance_m2_k_w: 0.0,
+    };
+    let partial =
+        ConductionObserver::new(&thermal, &[(MaterialId(1), &law)], &[second], &[], || Ok(()))
+            .unwrap();
+    let also_bound = "a link carried outside is also bound to a conductance";
+    assert_eq!(why(name(&bound, &[0])), also_bound);
+    assert_eq!(why(name(&partial, &[1])), also_bound);
+    assert_eq!(why(name(&partial, &[9])), "inactive link carried outside");
+    assert_eq!(why(name(&partial, &[0, 0])), "repeated link carried outside");
+    let named = name(&partial, &[0]).unwrap();
+    assert_eq!(why(name(&named, &[0])), "repeated link carried outside");
+    // Naming none changes nothing.
+    assert!(name(&partial, &[]).is_ok());
+
+    // A contact neither bound nor named is still refused by the implicit
+    // solve, and the direct chain refuses a named one: it has no link to
+    // put between that pair.
+    let laws: [(MaterialId, &dyn ImplicitConductionLaw); 1] = [(MaterialId(1), &law)];
+    assert!(matches!(
+        solve(&partial).err(),
+        Some(ImplicitConductionError::Invalid(
+            "thermal graph bindings changed or direct-chain topology is invalid"
+        ))
+    ));
+    assert!(ImplicitConductionChain::new(&thermal, &bound, &laws, || Ok(())).is_ok());
+    assert!(matches!(
+        ImplicitConductionChain::new(&thermal, &named, &laws, || Ok(())).err(),
+        Some(ImplicitConductionError::Invalid(
+            "each neighboring cell pair needs exactly one link"
+        ))
+    ));
+
+    // The graph takes it: the bound contact conducts and the named one
+    // does not, so the first cell keeps its enthalpy to the bit while the
+    // other two exchange.
+    let solver = solve(&named).unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(3).unwrap();
+    let (next, _) = solver
+        .advance_to(&thermal, 5.0, controls(5.0), &mut workspace, || Ok(()))
+        .unwrap();
+    assert_eq!(next.cells()[&id(0)].specific_h_j_kg.to_bits(), h[0].to_bits());
+    assert!(next.temperature_k(id(1)).unwrap() > h[1] + 10.0);
+    assert!(next.temperature_k(id(2)).unwrap() < h[2] - 5.0);
+
+    // A law attached to the named contact would be a second owner. The
+    // attachment looks for a bound link and refuses before asking the law;
+    // on the bound contact the same law is asked, and its own answer comes
+    // back.
+    let never = NeverAsked(&law);
+    assert!(matches!(
+        solve(&named).unwrap().with_contacts(&thermal, &[(0, &never)], || Ok(())).err(),
+        Some(ImplicitConductionError::Invalid("inactive implicit contact link"))
+    ));
+    assert!(matches!(
+        solve(&named).unwrap().with_link_laws(&thermal, &[(0, &never)], || Ok(())).err(),
+        Some(ImplicitConductionError::Invalid("inactive implicit flux link"))
+    ));
+    assert_eq!(
+        solve(&named).unwrap().with_link_laws(&thermal, &[(1, &never)], || Ok(())).err(),
+        Some(ImplicitConductionError::Thermal(ASKED))
+    );
+
+    // Planar layers and current metrics, in either order.
+    let beside = "links carried outside are not admitted beside planar layers or current metrics";
+    let layer = PlanarPhaseLayer {
+        cell_id: id(2),
+        footprint_area_m2: 5.0,
+        density_kg_m3: 1.0,
+    };
+    assert_eq!(
+        why(named.clone().with_planar_phase_layers(&thermal, &[layer], || Ok(()))),
+        "planar phase geometry is not admitted beside links carried outside"
+    );
+    let layered = partial
+        .clone()
+        .with_planar_phase_layers(&thermal, &[layer], || Ok(()))
+        .unwrap();
+    assert_eq!(why(name(&layered, &[0])), beside);
+    assert_eq!(
+        why(named.with_current_geometry(&thermal, CurrentConductionGeometry::default(), || Ok(()))),
+        "current conduction metrics are not admitted beside links carried outside"
+    );
+    let metrics = CurrentConductionGeometry {
+        links: [(
+            1,
+            CurrentConductiveLink {
+                area_m2: 1.0,
+                half_distances_m: [0.5; 2],
+            },
+        )]
+        .into(),
+        ..CurrentConductionGeometry::default()
+    };
+    let current = partial.with_current_geometry(&thermal, metrics, || Ok(())).unwrap();
+    assert_eq!(why(name(&current, &[0])), beside);
+}
+
+#[test]
+fn an_event_on_a_link_carried_outside_is_refused_like_one_on_a_bound_link() {
+    let law = Law {
+        plateau: false,
+        nonlinear: false,
+    };
+    let config = StepConfig {
+        max_dt_s: 1.0,
+        energy_tolerance_j: 1e-9,
+    };
+    let (thermal, observer) = carried_outside(&law, [600.0, 200.0], [2.0, 3.0], 0.0);
+    let link = thermal.links()[&0];
+    // The contact separating at 1 s, on the fixture's own schedule: the
+    // explicit timeline asks the binding, which refuses.
+    let mut scheduled = thermal.clone();
+    let mut events = (*scheduled.schedule).clone();
+    events.push(TimedEvent {
+        time_s: 1.0,
+        event: Event::Separation(0),
+    });
+    scheduled.schedule = std::rc::Rc::new(events);
+    assert_eq!(
+        scheduled
+            .advance_observed(&observer, 2.0, config, || Ok(()))
+            .err(),
+        Some(DepositionError::InvalidInput("event removes bound conduction face"))
+    );
+    // The owner itself refuses a second contact with a link's identifier
+    // ("contact requires distinct active cells and a unique ID"), so a
+    // changed contact is put to the binding's hook directly, as the owner
+    // of a candidate state would.
+    let heard = |event: Event| observer.clone().event(&event, &thermal);
+    assert_eq!(
+        heard(Event::Contact(ThermalLink { area_m2: 0.5, ..link })),
+        Err(DepositionError::InvalidInput("event changes bound conduction face"))
+    );
+    assert_eq!(
+        heard(Event::Contact(ThermalLink { a: link.b, b: link.a, ..link })),
+        Err(DepositionError::InvalidInput("event changes bound conduction face"))
+    );
+    // The same cells and area with another conductance is the same contact.
+    assert_eq!(
+        heard(Event::Contact(ThermalLink {
+            conductance_w_k: 3.0,
+            ..link
+        })),
+        Ok(())
+    );
+}

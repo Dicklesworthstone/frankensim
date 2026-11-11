@@ -716,9 +716,19 @@ behind the contract), two linked cells with a law each.
   owner, 40 steps of 0.5 s: 5.7e-14 K apart (allowed 4.1e-10 K from the two
   solves' tolerances); the same graph with the default mean-temperature
   ports is 5.5e-2 K away, the trapezoidal rule across the wall.
+- A contact carried through the ports
+  (`ConductionObserver::with_links_carried_outside`, fs-thermal): two cells
+  in contact, each also losing heat to the room through a film on its
+  exposed face; the conduction graph names the contact as carried outside
+  and the kernel's `Conductance` of 0.2 W/K joins the two end-temperature
+  ports. Against the owner's backward-Euler solve with the contact's
+  conduction inside, 40 steps of 0.5 s: 5.7e-14 K apart (allowed 4.1e-10 K);
+  16.758 J to the room in the owner's audit and in the kernel's sink, to
+  1e-9 of it; the same cells not in contact, whose films act on the whole
+  faces, end 0.19 K away, which is what losing the covered area would be.
 Thirty-seven planted defects in the explicit component were each caught, and
 twenty-three in the implicit driver; none was planted for the end-of-step
-option.
+option or for the contact carried outside.
 
 Against the hand-written coupling,
 `crates/fs-couple/tests/rigid_damping_heat/graph.rs` (run with

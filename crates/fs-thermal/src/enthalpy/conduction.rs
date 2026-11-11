@@ -139,6 +139,30 @@ struct BoundLink {
     covered_area_m2: [f64; 2],
 }
 
+/// A contact whose heat another owner carries: it keeps its covered area in
+/// the thermal owner and has no conduction term here.
+#[derive(Clone, Copy)]
+struct OutsideLink {
+    a: CellId,
+    b: CellId,
+    area_m2: f64,
+}
+
+impl OutsideLink {
+    /// The contact is still the one that was named.
+    fn admit(&self, thermal: &DepositionSimulation<'_>, id: u64) -> Result<(), DepositionError> {
+        let link = thermal.links.get(&id).ok_or(DepositionError::InvalidInput(
+            "link carried outside disappeared",
+        ))?;
+        if link.a != self.a || link.b != self.b || link.area_m2 != self.area_m2 {
+            return Err(DepositionError::InvalidInput(
+                "link carried outside changed",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy)]
 struct BoundReservoir {
     geometry: ConductiveReservoir,
@@ -154,6 +178,8 @@ pub struct ConductionObserver<'a> {
     laws: BTreeMap<MaterialId, &'a dyn ConductivityLaw>,
     cells: BTreeMap<CellId, BoundCell>,
     links: BTreeMap<u64, BoundLink>,
+    /// Contacts named by [`Self::with_links_carried_outside`].
+    outside: BTreeMap<u64, OutsideLink>,
     reservoirs: BTreeMap<CellId, BoundReservoir>,
     ambient_faces: BTreeMap<CellId, BoundAmbient>,
     conductivity: BTreeMap<CellId, f64>,
@@ -190,6 +216,7 @@ impl<'a> ConductionObserver<'a> {
             laws: BTreeMap::new(),
             cells: BTreeMap::new(),
             links: BTreeMap::new(),
+            outside: BTreeMap::new(),
             reservoirs: BTreeMap::new(),
             ambient_faces: BTreeMap::new(),
             conductivity: BTreeMap::new(),
@@ -300,6 +327,11 @@ impl<'a> ConductionObserver<'a> {
         if self.current_geometry.is_some() && !layers.is_empty() {
             return Err(DepositionError::InvalidInput(
                 "mechanical face metrics and planar phase geometry need one explicit combined owner",
+            ));
+        }
+        if !self.outside.is_empty() && !layers.is_empty() {
+            return Err(DepositionError::InvalidInput(
+                "planar phase geometry is not admitted beside links carried outside",
             ));
         }
         if layers.len() > self.cells.len() {
@@ -485,6 +517,94 @@ impl<'a> ConductionObserver<'a> {
         Ok(self)
     }
 
+    /// Name contact links whose heat another owner carries.
+    ///
+    /// A named link stays in the thermal owner: its two cells are still in
+    /// contact, and the area it covers is still taken from their exposed
+    /// faces. This binding gives it no conduction. The explicit timeline is
+    /// handed a conductance of exactly zero for it in place of its authored
+    /// one, and an implicit chain or graph prepared on this binding has no
+    /// heat term and no tangent entry for it. What crosses the contact is
+    /// then what the other owner puts into the two cells as sources: a
+    /// coupling that generates heat on the interface, or a composition graph
+    /// that joins the cells through their ports.
+    ///
+    /// A link has one owner. Refused: a link this binding already gives a
+    /// conductance, an inactive link, a link named twice. An implicit contact
+    /// or link law on a named link is refused by its own attachment, which
+    /// finds no bound link there; the direct chain refuses a named link as a
+    /// neighbouring pair without one. A contact or separation event that
+    /// changes a named link is refused like one on a bound link. Later calls
+    /// add links.
+    ///
+    /// Planar phase layers and current mechanical metrics are refused on a
+    /// binding with named links, and named links on a binding with either:
+    /// their coverage rules have not been extended to a contact this binding
+    /// does not conduct through.
+    pub fn with_links_carried_outside(
+        mut self,
+        thermal: &DepositionSimulation<'_>,
+        link_ids: &[u64],
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
+        checkpoint()?;
+        if !link_ids.is_empty() && (self.has_phase_layers || self.current_geometry.is_some()) {
+            return Err(DepositionError::InvalidInput(
+                "links carried outside are not admitted beside planar layers or current metrics",
+            ));
+        }
+        // A repeated link ends the loop, so it runs at most once more than
+        // the owner has links.
+        for (i, &id) in link_ids.iter().enumerate() {
+            if i % 256 == 0 {
+                checkpoint()?;
+            }
+            let link = thermal.links.get(&id).ok_or(DepositionError::InvalidInput(
+                "inactive link carried outside",
+            ))?;
+            if self.links.contains_key(&id) {
+                return Err(DepositionError::InvalidInput(
+                    "a link carried outside is also bound to a conductance",
+                ));
+            }
+            let named = OutsideLink {
+                a: link.a,
+                b: link.b,
+                area_m2: link.area_m2,
+            };
+            if self.outside.insert(id, named).is_some() {
+                return Err(DepositionError::InvalidInput(
+                    "repeated link carried outside",
+                ));
+            }
+        }
+        self.prepare(thermal, &mut checkpoint)?;
+        checkpoint()?;
+        Ok(self)
+    }
+
+    // Write each link carried outside into a map of link conductances as
+    // exactly zero, after checking it is still the contact that was named.
+    // The owner then keeps the contact's covered area and moves no heat
+    // across it. This is the one place the zero is written: the explicit
+    // timeline's coefficient map and the implicit endpoint's both come here,
+    // so the two kernels cannot disagree about a named link.
+    fn carry_outside(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        conductances_w_k: &mut BTreeMap<u64, f64>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), DepositionError> {
+        for (i, (&id, named)) in self.outside.iter().enumerate() {
+            if i % 256 == 0 {
+                checkpoint()?;
+            }
+            named.admit(thermal, id)?;
+            conductances_w_k.insert(id, 0.0);
+        }
+        Ok(())
+    }
+
     // One native coverage sweep, preserving per-side contact measures and the
     // original subtraction order, instead of a link scan for every face.
     fn admit_ambient_areas(
@@ -631,6 +751,7 @@ impl<'a> ConductionObserver<'a> {
             )?;
             links.insert(id, g);
         }
+        self.carry_outside(thermal, &mut links, checkpoint)?;
         for (i, (&id, binding)) in self.reservoirs.iter().enumerate() {
             if i % 256 == 0 {
                 checkpoint()?;
@@ -835,13 +956,18 @@ impl DepositionObserver for ConductionObserver<'_> {
                     .links
                     .get(&link.id)
                     .is_some_and(|b| b.a != link.a || b.b != link.b || b.area_m2 != link.area_m2)
+                    || self.outside.get(&link.id).is_some_and(|b| {
+                        b.a != link.a || b.b != link.b || b.area_m2 != link.area_m2
+                    })
                 {
                     return Err(DepositionError::InvalidInput(
                         "event changes bound conduction face",
                     ));
                 }
             }
-            Event::Separation(id) if self.links.contains_key(id) => {
+            Event::Separation(id)
+                if self.links.contains_key(id) || self.outside.contains_key(id) =>
+            {
                 return Err(DepositionError::InvalidInput(
                     "event removes bound conduction face",
                 ));

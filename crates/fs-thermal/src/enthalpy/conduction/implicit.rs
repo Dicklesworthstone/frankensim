@@ -475,8 +475,9 @@ impl<'a> ImplicitConductionChain<'a> {
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), ImplicitConductionError> {
         checkpoint()?;
+        // Every contact is bound to a conductance or named as carried outside.
         if thermal.cells.len() != self.ids.len()
-            || self.conduction.links.len() != thermal.links.len()
+            || self.conduction.links.len() + self.conduction.outside.len() != thermal.links.len()
             || (matches!(self.topology, LinearTopology::Chain)
                 && (thermal.links.len() != self.ids.len() - 1 || !thermal.covered_areas.is_empty()))
         {
@@ -485,6 +486,10 @@ impl<'a> ImplicitConductionChain<'a> {
             ));
         }
         self.conduction.admit_ambient_areas(thermal, checkpoint)?;
+        for (&id, named) in &self.conduction.outside {
+            checkpoint()?;
+            named.admit(thermal, id)?;
+        }
         let mut neighbors = vec![false; self.ids.len().saturating_sub(1)];
         for (&id, binding) in &self.conduction.links {
             checkpoint()?;
@@ -740,6 +745,10 @@ impl<'a> ImplicitConductionChain<'a> {
                 )?,
             );
         }
+        // Contacts carried outside: the residual owner takes exactly zero in
+        // place of their authored conductances and keeps the areas they
+        // cover. Written by the binding, as for the explicit timeline.
+        self.conduction.carry_outside(thermal, &mut link_values, checkpoint)?;
         let mut boundary_values = BoundaryConductances::default();
         let mut exchange_values = BoundaryExchanges::default();
         let mut reservoir_states = BTreeMap::new();
@@ -1200,6 +1209,15 @@ impl<'a> ImplicitConductionChain<'a> {
             add_entry(workspace, ib, ia, dt * qa)?;
             add_entry(workspace, ib, ib, dt * qb)?;
             let coverage = thermal.contact_areas(&thermal.links[&id]);
+            covered[ia] = finite(covered[ia] + coverage[0])?;
+            covered[ib] = finite(covered[ib] + coverage[1])?;
+        }
+        for (&id, named) in &self.conduction.outside {
+            checkpoint()?;
+            // No conduction entry; the contact still covers both faces, as
+            // in the residual owner's exposed areas.
+            let coverage = thermal.contact_areas(&thermal.links[&id]);
+            let (ia, ib) = (self.index[&named.a], self.index[&named.b]);
             covered[ia] = finite(covered[ia] + coverage[0])?;
             covered[ib] = finite(covered[ib] + coverage[1])?;
         }
