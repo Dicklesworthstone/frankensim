@@ -39,7 +39,7 @@ impl<F, O: ScanObservationSpec> ConstrainedScanStudy<F, O> {
     /// requirements; no after-the-fact clipping or surrogate is introduced.
     /// Original constructors retain their behavior when no rates are declared.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_power_slew_bounds<'h, 'm, 'c>(cx: &Cx<'_>, mut study: ScanPowerStudy<F, O>,
+    pub fn new_with_power_slew_bounds<'h, 'm: 'h, 'c>(cx: &Cx<'_>, mut study: ScanPowerStudy<F, O>,
         bounds: Vec<ScanControlBound>, energy: Vec<ScanEnergyCap>, states: Vec<ScanStateBound>,
         peaks: Vec<ScanPeakBound>, response_budget: ScanResponseBudget, max_peak_samples: usize,
         slew_bounds: Vec<ScanPowerSlewBound>, max_slew_segments: usize, max_kkt_dimension: usize)

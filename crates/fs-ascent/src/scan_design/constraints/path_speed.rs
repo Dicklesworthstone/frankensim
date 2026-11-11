@@ -70,7 +70,7 @@ impl<F, O: ScanObservationSpec> ConstrainedScanStudy<F, O> {
     /// not modeled. A zero speed cap is degenerate for a first-order KKT test;
     /// leave stationary path coordinates unselected when possible.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_actuator_bounds<'h, 'm, 'c>(cx: &Cx<'_>, mut study: ScanPowerStudy<F, O>,
+    pub fn new_with_actuator_bounds<'h, 'm: 'h, 'c>(cx: &Cx<'_>, mut study: ScanPowerStudy<F, O>,
         bounds: Vec<ScanControlBound>, energy: Vec<ScanEnergyCap>, states: Vec<ScanStateBound>,
         peaks: Vec<ScanPeakBound>, response_budget: ScanResponseBudget, max_peak_samples: usize,
         actuators: ScanActuatorBounds, max_kkt_dimension: usize)

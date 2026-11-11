@@ -106,7 +106,7 @@ impl<F, O: ScanObservationSpec> ScanConstraintValueBatch<'_, F, O> {
     /// Evaluate every original inequality, without a derivative or penalty.
     /// F must be callable through an immutable reference; sharing the batch
     /// between threads additionally requires F and its observation layout Sync.
-    pub fn evaluate_at<'h, 'm, 'c>(&self, cx: &Cx<'_>, point: &[f64])
+    pub fn evaluate_at<'h, 'm: 'h, 'c>(&self, cx: &Cx<'_>, point: &[f64])
         -> Result<(ScanPowerValueEvaluation, ScanConstraintValues), ScanSensitivityError>
     where F: Fn(&Cx<'_>, Vec<MovingHeatSource>)
         -> Result<ScanningEnthalpyRun<'h, 'm, 'c>, ScanSensitivityError>
@@ -234,7 +234,7 @@ impl<F, O: ScanObservationSpec> ValueConstrainedScanStudy<F, O> {
     /// No dense Jacobian, transpose solve, replay or phase derivative is needed.
     /// A successful but infeasible simulation returns its signed violations;
     /// failed physics remains an error and never becomes a fake penalty value.
-    pub fn evaluate_at<'h, 'm, 'c>(&mut self, cx: &Cx<'_>, point: &[f64])
+    pub fn evaluate_at<'h, 'm: 'h, 'c>(&mut self, cx: &Cx<'_>, point: &[f64])
         -> Result<(ScanPowerValueEvaluation, ScanConstraintValues), ScanSensitivityError>
     where F: FnMut(&Cx<'_>, Vec<MovingHeatSource>)
         -> Result<ScanningEnthalpyRun<'h, 'm, 'c>, ScanSensitivityError>

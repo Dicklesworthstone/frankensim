@@ -192,7 +192,7 @@ impl<F, O: ScanObservationSpec> ScanScenarioStudy<F, O> {
     /// Run every case through its original producer. No partial aggregate or
     /// feasibility score escapes failure. Completed work remains charged; a
     /// retry recomputes this candidate's cases, not just its failed suffix.
-    pub fn evaluate_at<'h, 'm, 'c>(&mut self, cx: &Cx<'_>, point: &[f64])
+    pub fn evaluate_at<'h, 'm: 'h, 'c>(&mut self, cx: &Cx<'_>, point: &[f64])
         -> Result<ScanScenarioEvaluation, ScanScenarioError>
     where F: FnMut(&Cx<'_>, Vec<MovingHeatSource>)
         -> Result<ScanningEnthalpyRun<'h, 'm, 'c>, ScanSensitivityError>
@@ -223,7 +223,7 @@ impl<F, O: ScanObservationSpec> ScanScenarioStudy<F, O> {
 }
 
 impl<F, O: ScanObservationSpec> ScanScenarioValueBatch<'_, F, O> {
-    pub fn evaluate_at<'h, 'm, 'c>(&self, cx: &Cx<'_>, point: &[f64])
+    pub fn evaluate_at<'h, 'm: 'h, 'c>(&self, cx: &Cx<'_>, point: &[f64])
         -> Result<ScanScenarioEvaluation, ScanScenarioError>
     where F: Fn(&Cx<'_>, Vec<MovingHeatSource>)
         -> Result<ScanningEnthalpyRun<'h, 'm, 'c>, ScanSensitivityError>

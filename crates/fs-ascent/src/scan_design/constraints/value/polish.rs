@@ -49,7 +49,7 @@ impl<F, O: ScanObservationSpec> ValueConstrainedScanStudy<F, O> {
     /// Constitutive corners can refuse this derivative path even when the
     /// original value-only evaluation succeeds. No accepted population state
     /// needs to be discarded: end this borrow and continue that search.
-    pub fn begin_sqp_at<'h, 'm, 'c>(&mut self, cx: &Cx<'_>, point: &[f64],
+    pub fn begin_sqp_at<'h, 'm: 'h, 'c>(&mut self, cx: &Cx<'_>, point: &[f64],
         coordinate_bounds: &[[f64; 2]], response_budget: ScanResponseBudget,
         max_kkt_dimension: usize)
         -> Result<ScanSqpPolish<'_, F, O>, SqpError<ScanSensitivityError>>
@@ -98,7 +98,7 @@ impl<F, O: ScanObservationSpec> ScanSqpPolish<'_, F, O> {
     /// ceiling AND the original remaining physical allowance, excluding replay.
     /// Out-of-box and negative-power trials may spend callback attempts without
     /// running physics. Original solve/derivative failures always propagate.
-    pub fn advance<'h, 'm, 'c>(&mut self, cx: &Cx<'_>, tolerance: f64,
+    pub fn advance<'h, 'm: 'h, 'c>(&mut self, cx: &Cx<'_>, tolerance: f64,
         additional_iterations: usize, additional_evaluations: usize)
         -> Result<SqpRunReport, SqpError<ScanSensitivityError>>
     where F: FnMut(&Cx<'_>, Vec<MovingHeatSource>)
@@ -116,7 +116,7 @@ impl<F, O: ScanObservationSpec> ScanSqpPolish<'_, F, O> {
     /// Run the accepted design through the original value-only owner. Require
     /// bit-identical objective and EVERY inequality, not merely the largest
     /// violation. A failed check publishes no replay or source declaration.
-    pub fn replay<'h, 'm, 'c>(&mut self, cx: &Cx<'_>)
+    pub fn replay<'h, 'm: 'h, 'c>(&mut self, cx: &Cx<'_>)
         -> Result<ScanSqpReplay, SqpError<ScanSensitivityError>>
     where F: FnMut(&Cx<'_>, Vec<MovingHeatSource>)
         -> Result<ScanningEnthalpyRun<'h, 'm, 'c>, ScanSensitivityError>
@@ -155,7 +155,7 @@ fn box_rows(point: &[f64], boxes: &[[f64; 2]]) -> Vec<f64> {
     point.iter().zip(boxes).flat_map(|(&x, &[lo, hi])| [lo-x, x-hi]).collect()
 }
 
-fn sample<'h, 'm, 'c, F, O: ScanObservationSpec>(cx: &Cx<'_>,
+fn sample<'h, 'm: 'h, 'c, F, O: ScanObservationSpec>(cx: &Cx<'_>,
     owner: &mut ValueConstrainedScanStudy<F, O>, limits: &Limits,
     boxes: &[[f64; 2]], point: &[f64]) -> Result<Option<SqpSample>, ScanSensitivityError>
 where F: FnMut(&Cx<'_>, Vec<MovingHeatSource>)

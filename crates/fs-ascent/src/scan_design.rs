@@ -291,7 +291,7 @@ impl<F, O: ScanObservationSpec> ScanPowerStudy<F, O> {
     /// Evaluate actual physics and the full history adjoint once. Failed probes
     /// consume a reserved evaluation slot; they do not change an accepted
     /// optimizer point. The factory must not vary non-source model data.
-    pub fn evaluate<'h,'m,'c>(&mut self, cx: &Cx<'_>, point: &[f64])
+    pub fn evaluate<'h,'m: 'h,'c>(&mut self, cx: &Cx<'_>, point: &[f64])
         -> Result<ScanPowerEvaluation, ScanSensitivityError>
     where F: FnMut(&Cx<'_>, Vec<MovingHeatSource>) -> Result<ScanningEnthalpyRun<'h,'m,'c>, ScanSensitivityError>
     {
@@ -300,7 +300,7 @@ impl<F, O: ScanObservationSpec> ScanPowerStudy<F, O> {
 
     // Constraint rows and the fitting objective share the exact supplied-source
     // check, one original trajectory, and one cumulative evaluation reservation.
-    fn evaluate_with_responses<'h,'m,'c>(&mut self, cx: &Cx<'_>, point: &[f64],
+    fn evaluate_with_responses<'h,'m: 'h,'c>(&mut self, cx: &Cx<'_>, point: &[f64],
         responses: Option<(&[ScanResponse], &[ScanPeakResponse], ScanResponseBudget, usize)>)
         -> Result<(ScanPowerEvaluation, Vec<ScanResponseEvaluation>, Vec<ScanPeakEvaluation>), ScanSensitivityError>
     where F: FnMut(&Cx<'_>, Vec<MovingHeatSource>) -> Result<ScanningEnthalpyRun<'h,'m,'c>, ScanSensitivityError>
@@ -356,7 +356,7 @@ impl<F, O: ScanObservationSpec> ScanPowerStudy<F, O> {
     }
 
     /// Initialize the existing fallible L-BFGS engine on these exact coordinates.
-    pub fn begin_optimizer<'h,'m,'c>(&mut self, cx: &Cx<'_>, memory: usize)
+    pub fn begin_optimizer<'h,'m: 'h,'c>(&mut self, cx: &Cx<'_>, memory: usize)
         -> Result<LbfgsState,LbfgsError<ScanSensitivityError>>
     where F: FnMut(&Cx<'_>, Vec<MovingHeatSource>) -> Result<ScanningEnthalpyRun<'h,'m,'c>, ScanSensitivityError>
     {
@@ -373,7 +373,7 @@ impl<F, O: ScanObservationSpec> ScanPowerStudy<F, O> {
     /// Continue this study's L-BFGS checkpoint under both native and cumulative
     /// physical-evaluation limits. Typed source/phase/solver errors propagate;
     /// they are never replaced by an invented penalty or a widened physical gate.
-    pub fn advance_optimizer<'h,'m,'c>(&mut self, cx: &Cx<'_>, state: &mut LbfgsState,
+    pub fn advance_optimizer<'h,'m: 'h,'c>(&mut self, cx: &Cx<'_>, state: &mut LbfgsState,
         rule: &StopRule, max_iterations: usize) -> Result<LbfgsReport,LbfgsError<ScanSensitivityError>>
     where F: FnMut(&Cx<'_>, Vec<MovingHeatSource>) -> Result<ScanningEnthalpyRun<'h,'m,'c>, ScanSensitivityError>
     {

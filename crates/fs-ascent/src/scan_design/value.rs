@@ -57,7 +57,7 @@ impl<F, O: ScanObservationSpec> ScanValueBatch<'_, F, O> {
 
     pub(crate) fn study(&self) -> &ScanPowerStudy<F, O> { self.study }
 
-    pub fn evaluate_value<'h, 'm, 'c>(&self, cx: &Cx<'_>, point: &[f64])
+    pub fn evaluate_value<'h, 'm: 'h, 'c>(&self, cx: &Cx<'_>, point: &[f64])
         -> Result<ScanPowerValueEvaluation, ScanSensitivityError>
     where F: Fn(&Cx<'_>, Vec<MovingHeatSource>)
         -> Result<ScanningEnthalpyRun<'h, 'm, 'c>, ScanSensitivityError>
@@ -69,7 +69,7 @@ impl<F, O: ScanObservationSpec> ScanValueBatch<'_, F, O> {
 
     /// Same producer, response reductions and phase-corner semantics as serial
     /// evaluation. Each started reservation is charged once even on failure.
-    pub fn evaluate_value_with_responses<'h, 'm, 'c>(&self, cx: &Cx<'_>, point: &[f64],
+    pub fn evaluate_value_with_responses<'h, 'm: 'h, 'c>(&self, cx: &Cx<'_>, point: &[f64],
         responses: &[ScanResponse], peaks: &[ScanPeakResponse], budget: ScanValueResponseBudget)
         -> Result<(ScanPowerValueEvaluation, Vec<ScanResponseValue>, Vec<ScanPeakValue>), ScanSensitivityError>
     where F: Fn(&Cx<'_>, Vec<MovingHeatSource>)
@@ -115,7 +115,7 @@ impl<F, O: ScanObservationSpec> ScanPowerStudy<F, O> {
     ///
     /// This evaluates only the fitting objective, not a ConstrainedScanStudy's
     /// inequalities. A scalar score must not be interpreted as feasibility.
-    pub fn evaluate_value<'h, 'm, 'c>(&mut self, cx: &Cx<'_>, point: &[f64])
+    pub fn evaluate_value<'h, 'm: 'h, 'c>(&mut self, cx: &Cx<'_>, point: &[f64])
         -> Result<ScanPowerValueEvaluation, ScanSensitivityError>
     where F: FnMut(&Cx<'_>, Vec<super::MovingHeatSource>)
         -> Result<ScanningEnthalpyRun<'h, 'm, 'c>, ScanSensitivityError>
@@ -129,7 +129,7 @@ impl<F, O: ScanObservationSpec> ScanPowerStudy<F, O> {
     /// value-only trajectory and one cumulative evaluation reservation.
     /// Response values are never softened by a robust fitting loss. No adjoint
     /// tape or smoothness assumption is introduced, including at phase corners.
-    pub fn evaluate_value_with_responses<'h, 'm, 'c>(&mut self, cx: &Cx<'_>, point: &[f64],
+    pub fn evaluate_value_with_responses<'h, 'm: 'h, 'c>(&mut self, cx: &Cx<'_>, point: &[f64],
         responses: &[ScanResponse], peaks: &[ScanPeakResponse], budget: ScanValueResponseBudget)
         -> Result<(ScanPowerValueEvaluation, Vec<ScanResponseValue>, Vec<ScanPeakValue>), ScanSensitivityError>
     where F: FnMut(&Cx<'_>, Vec<super::MovingHeatSource>)
