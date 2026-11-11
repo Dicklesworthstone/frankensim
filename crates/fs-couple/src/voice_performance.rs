@@ -129,11 +129,15 @@
 //! obstacle (Shadle's source placement), so after `stevens` a fifth field `m` (MB 17712) puts the junction lines after
 //! section `m` instead of `k`, `k <= m` and a section after `m`: the obstacle the card names (the incisors, measured on
 //! the tract's own surface), with the law's level still read from the flow and `A_k` and the Borda-Carnot drop and K3
-//! still at `k`; without it `m = k`, bit-identical. An obstacle section is refused with `tract_move`: a moving shape's obstacle has
-//! no correspondence built. The printed source is the source in Shadle's 5.067 cm^2 tube; the law carries Shadle's eq. 3.3
-//! duct-area factor (MB 18252; [`crate::turbulence_noise::shadle_duct_area_factor`]): at the junction after section `m`
-//! the source is the printed one times `A_tube / A_m`, `A_m` the area of section `m` (on a moving tract, where `m = k`,
-//! each shape's own `A_k`). `fricative_throat <area_m2> <source>` (MB 25440 ruling A, 25482) gives the constriction laws
+//! still at `k`; without it `m = k`, bit-identical. On a moving tract (MB 25469) each shape's `m` is the card's `m`
+//! by the same correspondence as its `k` (`shape_constriction`: `m` itself at the card's section count, else the
+//! shape's section at the card's `m`'s centre fraction), so it is never before the shape's `k`; a shape whose `m`
+//! falls on its last section is refused by name, as one whose `k` does. With `m = k` every shape's lines and `A_m` are
+//! the ones it took before `m` was allowed to move. The printed source is the source in Shadle's 5.067 cm^2 tube; the
+//! law carries Shadle's eq. 3.3 duct-area factor (MB 18252; [`crate::turbulence_noise::shadle_duct_area_factor`]): at
+//! the junction after section `m` the source is the printed one times `A_tube / A_m`, `A_m` the area of section `m`
+//! (on a moving tract, each shape's own section `m`).
+//! `fricative_throat <area_m2> <source>` (MB 25440 ruling A, 25482) gives the constriction laws
 //! the throat measured on the tract's own surface by a flat-section route, the route and its read named in the source
 //! field: the tract's sections are an acoustic-equivalent area function (a level cut keeps each section's volume and
 //! energy), which is not the geometric throat the jet passes, and one number cannot serve both. The row moves `A_k` in
@@ -1455,18 +1459,13 @@ impl VoiceDescription {
                     .into());
             }
             // The obstacle (`stevens m`, MB 17712): at or after the constriction, with a section after it for the
-            // junction; on a fixed tract only.
+            // junction. On a moving tract each further shape takes its own `m` (`shape_taps`, MB 25469).
             let m = card.obstacle;
             if !(k <= m && m + 1 < sections.len()) {
                 return Err(format!(
                     "fricative_noise needs k <= m < the last section {}: got k {k}, m {m}",
                     sections.len() - 1
                 ));
-            }
-            if m != k && !tract_moves.is_empty() {
-                return Err("fricative_noise obstacle section m is refused with tract_move: a moving shape's obstacle has \
-                            no correspondence built"
-                    .into());
             }
         }
         // `fricative_throat` (MB 25440 ruling A, 25482): the measured throat of the card's constriction, for its laws only.
@@ -2024,7 +2023,7 @@ impl VoiceDescription {
                     shapes.extend(further.iter().map(|f| FricativeShape {
                         section: f.section,
                         area_k_m2: f.area_k_m2,
-                        area_m_m2: f.area_k_m2, // a moving tract's obstacle is its constriction (m = k, refused otherwise)
+                        area_m_m2: f.area_m_m2,
                         open_area_ratio: f.area_k_m2 / f.area_j_m2,
                         duct_radius_m: (f.area_j_m2 / core::f64::consts::PI).sqrt(),
                     }));
@@ -2232,8 +2231,10 @@ impl VoiceDescription {
         }
         .map_err(|e| format!("{e:?}"));
         // `fricative_noise` (MB 16735 piece 2): this shape's `k` by the morph's own correspondence (`shape_constriction`;
-        // MB 16891 (c)); its junction lines after that section with this shape's own mouth load, exactly as `build`
-        // makes the card's; and its constriction, `A_j` the shape's largest section after its `k` (MB 15828).
+        // MB 16891 (c)), and its obstacle `m` by the same correspondence (MB 25469; `m = k` gives `k` itself); its
+        // junction lines after `m` with this shape's own mouth load, exactly as `build` makes the card's; and its
+        // constriction, `A_j` the shape's largest section after its `k` (MB 15828). The correspondence is monotone in
+        // the centre fraction, so the card's `k <= m` gives the shape's `k <= m`.
         let fricative = match self.fricative_noise {
             Some(card) => {
                 let sections = chart.sections();
@@ -2243,10 +2244,16 @@ impl VoiceDescription {
                                 nothing after it"
                         .into());
                 }
+                let m = shape_constriction(&self.sections, card.obstacle, sections);
+                if m + 1 >= sections.len() {
+                    return Err("fricative_noise: the card's obstacle section m falls on a moving shape's last section, \
+                                with nothing after it for the junction"
+                        .into());
+                }
                 let lines = match split {
-                    None => junction_source_lines(&duct, k, gas, mouth_load, mechanics_rate, zc, wall, &LineLadder::default()),
+                    None => junction_source_lines(&duct, m, gas, mouth_load, mechanics_rate, zc, wall, &LineLadder::default()),
                     Some(table) => junction_source_lines_exterior(
-                        &duct, k, gas, exterior, table, mechanics_rate, zc, wall, &LineLadder::default(),
+                        &duct, m, gas, exterior, table, mechanics_rate, zc, wall, &LineLadder::default(),
                     ),
                 }
                 .map_err(|e| format!("moving fricative junction lines refused: {e}"))?;
@@ -2260,6 +2267,7 @@ impl VoiceDescription {
                     inlet_taps: plain(&lines.to_inlet_wave)?,
                     section: k,
                     area_k_m2: sections[k].area_m2,
+                    area_m_m2: sections[m].area_m2,
                     area_j_m2: widest_after(sections, k),
                     span: line_span(sections, k),
                 })
@@ -2281,6 +2289,9 @@ struct FricativeShapeLines {
     /// The shape's `k`: its section at the card's section `k`'s fractional distance from the glottis.
     section: usize,
     area_k_m2: f64,
+    /// The area of the shape's obstacle section `m` (the card's `m` by the same correspondence; MB 25469), which the
+    /// junction lines sit after and the Stevens form's duct-area factor reads.
+    area_m_m2: f64,
     /// The shape's largest section after `k` (MB 15828).
     area_j_m2: f64,
     /// The shape's line sections its constriction spans (`line_span`): their Poiseuille resistance comes out of the
@@ -2679,13 +2690,13 @@ struct FricativeSource {
 /// `A_j` (`sigma >= 1` on a shape with no expansion after `k`, where the law drives no band).
 #[derive(Debug, Clone, Copy)]
 struct FricativeShape {
-    /// The (c) rule's section, read by the tests; the junction lines were built at it (on a fixed tract at the card's
-    /// obstacle section, which is it unless `stevens m` names another), and the step reads the rest.
+    /// The (c) rule's section `k`, read by the tests; the junction lines were built after the shape's obstacle section
+    /// `m`, which is `k` unless `stevens m` names another, and the step reads the rest.
     #[cfg_attr(not(test), allow(dead_code))]
     section: usize,
     area_k_m2: f64,
-    /// The area of the duct the source sits in, section `m` (the card's obstacle; a moving shape's own `A_k`): the Stevens
-    /// form's duct-area factor reads it (MB 18252).
+    /// The area of the duct the source sits in, section `m` (the card's obstacle; on a moving shape, its own `m` by the
+    /// card's correspondence, MB 25469): the Stevens form's duct-area factor reads it (MB 18252).
     area_m_m2: f64,
     open_area_ratio: f64,
     duct_radius_m: f64,
@@ -5403,7 +5414,8 @@ mod tests {
     /// else is read as one; a row without it is Oldham and Ukpoho's, so a card written before the field renders as it did
     /// (the rendered byte controls of the change carry that across the whole engine). The fifth field is the obstacle
     /// section `m`: without it `m = k`, and `m = k` written out renders bit for bit the same; `m < k`, `m` on the last
-    /// section, an unreadable `m` and an `m` other than `k` on a moving tract are refused by name. On the rig the named law
+    /// section and an unreadable `m` are refused by name, and an `m` other than `k` parses on a moving tract too (MB
+    /// 25469; `fricative_obstacle_on_a_moving_tract_is_each_shapes_own_m`). On the rig the named law
     /// reaches the radiated pressure, renders finite, one seed gives one noise, it is not the other law's noise, and the
     /// source at an obstacle downstream is not the source at `k`.
     #[test]
@@ -5441,8 +5453,7 @@ mod tests {
         };
         VoiceDescription::from_bytes(moving(" stevens").as_bytes()).expect("the law on a moving tract parses");
         VoiceDescription::from_bytes(moving(" stevens 1").as_bytes()).expect("m = k on a moving tract parses");
-        let error = VoiceDescription::from_bytes(moving(" stevens 3").as_bytes()).unwrap_err();
-        assert!(error.contains("refused with tract_move"), "{error}");
+        VoiceDescription::from_bytes(moving(" stevens 3").as_bytes()).expect("m after k on a moving tract parses");
         let base = "glottal_orifice 4.0e-5\nsubglottal_tube 2.5e-4 0.08\nreceiver free_field_monopole\n";
         let quiet = render(&fixture(base));
         let oldham = render(&fixture(&format!("{base}fricative_noise 5 1 4\n")));
@@ -5710,6 +5721,81 @@ mod tests {
         assert_eq!(uneven_source.shapes.iter().map(|s| s.section).collect::<Vec<_>>(), [1, 1, 1], "k on every shape");
         assert_eq!(of(uneven_source.shapes[0]), of(own), "shape 0: the fixed card's own");
         assert!(render(&uneven(5)).iter().all(|x| x.is_finite()));
+    }
+
+    /// The obstacle section `m` on a moving tract (MB 25469): every shape takes the card's `m` by the correspondence
+    /// it takes `k` by, its junction lines after that section and its `A_m` that section's area. At the card's
+    /// section count that is `m` itself; at another count, the shape's section at the card's `m`'s centre fraction.
+    /// With `m = k` every shape's `A_m` is its `A_k` bit for bit, as before `m` could move. The source after `m` is
+    /// not the source after `k`, and a shape whose `m` falls on its last section is refused by name at build.
+    #[test]
+    fn fricative_obstacle_on_a_moving_tract_is_each_shapes_own_m() {
+        let bits = |xs: &[f64]| xs.iter().map(|x| x.to_bits()).collect::<Vec<u64>>();
+        // Test chart, not data: the card's k = 1, j = 4, m = 3 (2.5 cm^2); the keyframe narrows section 3 to 2.2 cm^2.
+        let card = |seed: u32, tail: &str, keyframe: &[(f64, f64)]| {
+            let mut rows = format!("fricative_noise {seed} 1 4 stevens{tail}\n");
+            rows.push_str("keyframe b source src\nkeyframe b licence test\n");
+            for (area, length) in keyframe {
+                rows.push_str(&format!("keyframe_section b {area:e} {length:e}\n"));
+            }
+            rows.push_str("tract_move 0.01 0.02 b 2\n");
+            fixture(&rows)
+        };
+        let equal: Vec<(f64, f64)> =
+            [0.5e-4, 0.7e-4, 1.5e-4, 2.2e-4, 3.0e-4, 3.0e-4, 2.5e-4, 2.0e-4].iter().map(|&a| (a, 0.02)).collect();
+        let shapes = |text: &str| {
+            VoiceDescription::from_bytes(text.as_bytes())
+                .expect("parses")
+                .build()
+                .expect("builds")
+                .fricative
+                .expect("the source")
+                .shapes
+        };
+        let at_m = shapes(&card(5, " 3", &equal));
+        assert_eq!(at_m.len(), 3, "the card and the move's two steps");
+        assert_eq!(at_m[0].area_m_m2.to_bits(), 2.5e-4_f64.to_bits(), "shape 0: the card's own section m");
+        assert!((at_m[2].area_m_m2 / 2.2e-4 - 1.0).abs() < 1.0e-12, "the target's own section m: {:?}", at_m[2]);
+        assert!((at_m[2].area_k_m2 / 0.7e-4 - 1.0).abs() < 1.0e-12, "k stays the target's section 1: {:?}", at_m[2]);
+        assert_eq!(at_m.iter().map(|s| s.section).collect::<Vec<_>>(), [1, 1, 1], "k on every shape");
+        let at_k = shapes(&card(5, "", &equal));
+        for (s, (with_m, without)) in at_m.iter().zip(&at_k).enumerate() {
+            assert_eq!(without.area_m_m2.to_bits(), without.area_k_m2.to_bits(), "m = k: shape {s}'s A_m is its A_k");
+            let law = |x: &FricativeShape| [x.area_k_m2, x.open_area_ratio, x.duct_radius_m].map(f64::to_bits);
+            assert_eq!(law(with_m), law(without), "shape {s}: m moves neither A_k, sigma nor A_j's radius");
+        }
+        let spoken = render(&card(5, " 3", &equal));
+        assert!(spoken.iter().all(|x| x.is_finite()));
+        assert_ne!(bits(&spoken), bits(&render(&card(6, " 3", &equal))), "the noise reaches the pressure from m");
+        assert_ne!(bits(&spoken), bits(&render(&card(5, "", &equal))), "the source after m is not the source after k");
+        // Another section count, the card's length: ten sections of 1.6 cm. The card's m's centre (0.4375 of the
+        // length, 7.0 cm) falls in the keyframe's section 4 and its k's (0.1875, 3.0 cm) in section 1.
+        let recounted: Vec<(f64, f64)> =
+            [0.5e-4, 0.7e-4, 1.5e-4, 2.0e-4, 2.2e-4, 3.0e-4, 3.0e-4, 2.5e-4, 2.0e-4, 1.8e-4]
+                .iter()
+                .map(|&a| (a, 0.016))
+                .collect();
+        let description = VoiceDescription::from_bytes(card(5, " 3", &recounted).as_bytes()).expect("parses");
+        let keyframe: Vec<TractSection> =
+            recounted.iter().map(|&(area_m2, length_m)| TractSection { area_m2, length_m }).collect();
+        assert_eq!(shape_constriction(&description.sections, 3, &keyframe), 4, "the card's m's centre fraction");
+        assert_eq!(shape_constriction(&description.sections, 1, &keyframe), 1, "the card's k's centre fraction");
+        let target = description.build().expect("builds").fricative.expect("the source").shapes[2];
+        assert!((target.area_m_m2 / 2.2e-4 - 1.0).abs() < 1.0e-12, "the keyframe's section 4: {target:?}");
+        assert!((target.area_k_m2 / 0.7e-4 - 1.0).abs() < 1.0e-12, "the keyframe's section 1: {target:?}");
+        // Seven sections, six of 2 cm and a last of 4 cm: the card's m = 6's centre (0.8125 of the length, 13 cm)
+        // falls on the keyframe's last section, while its k's (3 cm) falls on section 1.
+        let short: Vec<(f64, f64)> = [0.5e-4, 0.7e-4, 1.5e-4, 2.5e-4, 3.0e-4, 2.5e-4, 2.0e-4]
+            .iter()
+            .enumerate()
+            .map(|(i, &a)| (a, if i == 6 { 0.04 } else { 0.02 }))
+            .collect();
+        let error = VoiceDescription::from_bytes(card(5, " 6", &short).as_bytes())
+            .expect("parses: the card's own m is before its last section")
+            .build()
+            .err()
+            .expect("refused at build");
+        assert!(error.contains("obstacle section m falls on a moving shape's last section"), "{error}");
     }
 
     /// The free-field monopole: a low-frequency sinusoidal flow `Q0 sin(w t)` reaches the microphone at distance `R` as
