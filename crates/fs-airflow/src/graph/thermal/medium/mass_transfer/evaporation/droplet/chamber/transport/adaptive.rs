@@ -330,11 +330,7 @@ fn advance<'surface, 'm: 'surface, 'catalog>(
         if comparisons >= numerical.maximum_comparisons {
             return Err(AdaptiveGasDropletError::ComparisonBudget);
         }
-        let end = if span >= duration_s - time {
-            duration_s
-        } else {
-            finite(time + span)?
-        };
+        let end = trial_endpoint(time, span, duration_s)?;
         let middle = f64::midpoint(time, end);
         if !(time < middle && middle < end && end <= duration_s) {
             return Err(AdaptiveGasDropletError::Invalid(
@@ -559,6 +555,63 @@ fn smaller_span(start: f64, end: f64, wanted: f64, floor: f64) -> Option<f64> {
         next = next.next_up();
     }
     (start < next && next < end).then_some(next - start)
+}
+
+/// Endpoint of the next step-doubling trial: `elapsed_s + step_s`, or `target_s` once the step
+/// reaches it. Each trial is compared with two half steps, so the interval it leaves behind must
+/// itself be divisible. When the midpoint of the leftover `[endpoint, target_s]` is not strictly
+/// inside it (a remainder of one ulp, left by rounded sums of steps), no later trial could take
+/// it, and this trial runs on to `target_s` instead. Every other endpoint is the one the step
+/// alone gives. This is the twin of `crate::miscibility::adaptive::trial_endpoint` in fs-flux
+/// (e38444e640), which fixed the same loop there; one shared copy is a later job (bead .7).
+fn trial_endpoint(
+    elapsed_s: f64,
+    step_s: f64,
+    target_s: f64,
+) -> Result<f64, AdaptiveGasDropletTransportError> {
+    let endpoint = if step_s >= target_s - elapsed_s {
+        target_s
+    } else {
+        finite(elapsed_s + step_s)?
+    };
+    let leftover_midpoint = endpoint + 0.5 * (target_s - endpoint);
+    let divisible = endpoint < leftover_midpoint && leftover_midpoint < target_s;
+    Ok(if endpoint < target_s && !divisible {
+        target_s
+    } else {
+        endpoint
+    })
+}
+
+#[cfg(test)]
+mod trial_endpoint_tests {
+    use super::trial_endpoint;
+
+    #[test]
+    fn a_trial_that_would_strand_an_indivisible_remainder_runs_to_the_target() {
+        // The droplet fixture's loop reached 9.999999999999998e-3 and took a 1e-2 step: the rounded
+        // sum is one ulp below the 2e-2 target, and the leftover has no representable midpoint.
+        let (elapsed, step, target) = (9.999999999999998e-3_f64, 1e-2_f64, 2e-2_f64);
+        assert_eq!(elapsed + step, 1.9999999999999997e-2);
+        assert_eq!(1.9999999999999997e-2_f64.next_up(), target);
+        assert_eq!(trial_endpoint(elapsed, step, target).unwrap(), target);
+        // From one ulp below the target any step runs on to it.
+        assert_eq!(trial_endpoint(1.9999999999999997e-2, 1e-2, target).unwrap(), target);
+    }
+
+    #[test]
+    fn an_ordinary_trial_endpoint_is_the_one_the_step_alone_gives() {
+        assert_eq!(trial_endpoint(0.0, 5e-3, 2e-2).unwrap(), 5e-3);
+        assert_eq!(trial_endpoint(5e-3, 1e-2, 2e-2).unwrap(), 5e-3 + 1e-2);
+        // A step that reaches the target ends on it.
+        assert_eq!(trial_endpoint(1.5e-2, 2e-2, 2e-2).unwrap(), 2e-2);
+        // A leftover of two ulps still has a midpoint strictly inside it: the endpoint is kept.
+        let target = 2e-2_f64;
+        let endpoint = target.next_down().next_down();
+        assert_eq!(trial_endpoint(0.0, endpoint, target).unwrap(), endpoint);
+        // A step that is not a number is refused as before.
+        assert!(trial_endpoint(0.0, f64::NAN, target).is_err());
+    }
 }
 
 fn increment(value: usize) -> Result<usize, AdaptiveGasDropletTransportError> {
