@@ -153,7 +153,7 @@ fn trajectory_gradient(cx: &Cx<'_>, complete_contact_feedback: bool) -> (f64, Ve
                 cx, problem.boundary, &endpoint.conduction.temperature, 1,
             ).unwrap();
             let step = engine.linearize_accepted(
-                cx, problem, Some(contact.physical_contacts().frozen_interfaces()),
+                cx, problem, Some(endpoint.applied_contacts.frozen_interfaces()),
                 &histories[index], dts[index], config(), endpoint.conduction,
             ).unwrap();
             let seed = carry.take().unwrap_or_else(|| {
@@ -164,7 +164,7 @@ fn trajectory_gradient(cx: &Cx<'_>, complete_contact_feedback: bool) -> (f64, Ve
             let gradient = step.pullback(cx, &seed, linear()).unwrap();
             let mut load_dual = gradient.transport.adjoint.clone();
             for value in &mut load_dual { *value *= dts[index]; }
-            resistance += contact.physical_contacts().frozen_interfaces()
+            resistance += endpoint.applied_contacts.frozen_interfaces()
                 .matching_resistance_scale_pullback(
                     cx, contact.temperature(), &load_dual, 1,
                 ).unwrap()[0].derivative;
