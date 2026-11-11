@@ -498,6 +498,88 @@ fn the_fused_loss_pair_equals_two_textbook_quadratics_bit_for_bit_refusals_inclu
     }
 }
 
+#[test]
+fn the_threaded_apply_equals_the_serial_rows_bit_for_bit_on_every_thread_count_refusals_included() {
+    let outcome = |r: Result<Vec<f64>, ModalCouplingError>| {
+        r.map(|v| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>()).map_err(|e| e.to_string())
+    };
+    let mut seed = 0x7f4a_7c15_9e37_79b9_u64;
+    // Sides below, at and between the eight-row block, the thread chunks and a remainder after the last block.
+    for n in [1, 8, 9, 64, 130, 131, 257] {
+        let (a, z) = (entries(n * n, &mut seed), entries(n, &mut seed));
+        let serial = outcome(apply_rows(&a, &z));
+        for threads in [1, 2, 3, 8, 64] {
+            assert_eq!(outcome(apply_on(&a, &z, threads)), serial, "n = {n}, {threads} threads");
+        }
+    }
+    // A row that overflows refuses wherever it sits: the first block, a middle chunk, the remainder rows.
+    let n = 131;
+    for row in [0, 40, 100, 130] {
+        let mut a = vec![1.0; n * n];
+        a[row * n] = f64::MAX;
+        for threads in [1, 2, 3, 8] {
+            assert!(apply_on(&a, &vec![2.0; n], threads).is_err(), "row {row}, {threads} threads");
+        }
+    }
+    // The entry the step calls takes the declared workers from the side where threads start, and the same bits come out.
+    let n = STEP_PARALLEL_MIN_SIDE;
+    let (a, z) = (entries(n * n, &mut seed), entries(n, &mut seed));
+    let serial = outcome(apply_rows(&a, &z));
+    for workers in [1, 3, 8] {
+        assert_eq!(outcome(fs_la::eigen_complex::with_lu_workers(workers, || apply(&a, &z))), serial, "{workers} declared workers");
+    }
+    assert_eq!(step_threads(8, STEP_PARALLEL_MIN_SIDE - 1), 1);
+    assert_eq!(step_threads(8, STEP_PARALLEL_MIN_SIDE), 8);
+    assert_eq!(step_threads(0, STEP_PARALLEL_MIN_SIDE), 1);
+    assert_eq!(step_threads(100_000, 5433), MAX_STEP_WORKERS);
+}
+
+#[test]
+fn the_threaded_loss_quadratics_equal_the_serial_forms_bit_for_bit_and_refuse_in_the_serial_order() {
+    let outcome = |r: Result<(f64, f64, f64), ModalCouplingError>| {
+        r.map(|(a, b, c)| (a.to_bits(), b.to_bits(), c.to_bits())).map_err(|e| e.to_string())
+    };
+    let mut seed = 0x1357_9bdf_2468_ace0_u64;
+    for n in [1, 3, 9, 64, 130, 131] {
+        let z = entries(n, &mut seed);
+        // Gramian-like PSD matrices B^T B, so the forms are not refused.
+        let gram = |b: &[f64]| -> Vec<f64> {
+            (0..n * n).map(|ij| (0..n).fold(0.0, |s, k| s + b[k * n + ij / n] * b[k * n + ij % n])).collect()
+        };
+        let matrices = [gram(&entries(n * n, &mut seed)), gram(&entries(n * n, &mut seed)), gram(&entries(n * n, &mut seed))];
+        // Every combination of the Gramians that exist, on one to eight threads, against the forms evaluated one by one.
+        for present in 0..8_u8 {
+            let pick = |bit: u8, index: usize| (present & bit != 0).then_some(matrices[index].as_slice());
+            let (c, k, w) = (pick(1, 0), pick(2, 1), pick(4, 2));
+            let form = |m: Option<&[f64]>| m.map_or(Ok(0.0), |m| quadratic(m, &z));
+            let expected = outcome((|| Ok::<_, ModalCouplingError>((form(c)?, form(k)?, form(w)?)))());
+            for threads in [1, 2, 3, 8] {
+                assert_eq!(outcome(loss_quadratics(c, k, w, &z, threads)), expected, "n = {n}, gramians {present:03b}, {threads} threads");
+            }
+        }
+    }
+    // Refusals are read in the order component, connection, material, whichever thread finishes first: a negative form and
+    // an overflowing one carry different messages.
+    let z = [2.0_f64; 3];
+    let fine = vec![1.0; 9];
+    let negative = vec![-1.0; 9];
+    let mut overflow = vec![1.0; 9];
+    overflow[4] = f64::MAX;
+    let message = |r: Result<(f64, f64, f64), ModalCouplingError>| r.unwrap_err().to_string();
+    let (f, n, o) = (Some(fine.as_slice()), Some(negative.as_slice()), Some(overflow.as_slice()));
+    assert_ne!(message(loss_quadratics(f, n, None, &z, 1)), message(loss_quadratics(o, None, None, &z, 1)));
+    for threads in [1, 2, 3, 8] {
+        for (components, expected) in [
+            ([f, n, o], message(loss_quadratics(f, n, None, &z, 1))),
+            ([o, n, o], message(loss_quadratics(o, None, None, &z, 1))),
+            ([f, f, o], message(loss_quadratics(None, None, o, &z, 1))),
+        ] {
+            let got = message(loss_quadratics(components[0], components[1], components[2], &z, threads));
+            assert_eq!(got, expected, "{threads} threads, {components:?}");
+        }
+    }
+}
+
 // ---- wohg3: the prepared owner against a closed form (the secular KAT) ----
 //
 // A 60 Hz harmonic string ladder (omega_i = 2 pi 60 i) on ONE bridge spring k = omega_1^2 at station 0.8137, with a

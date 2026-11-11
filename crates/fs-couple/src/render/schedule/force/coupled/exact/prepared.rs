@@ -571,16 +571,9 @@ impl PreparedNetwork {
     /// each link's own form is evaluated only when its ledger is requested.
     fn compute_sweep(&self, z: &[f64]) -> Result<LossSweep, ModalCouplingError> {
         self.sweeps.fetch_add(1, Ordering::Relaxed);
-        let (component, connection) = match (&self.component_loss, &self.connection_total) {
-            (Some(c), Some(k)) => quadratic_pair(c, k, z)?,
-            (Some(c), None) => (quadratic(c, z)?, 0.0),
-            (None, Some(k)) => (0.0, quadratic(k, z)?),
-            (None, None) => (0.0, 0.0),
-        };
-        let material = match &self.material_loss {
-            Some(w) => quadratic(w, z)?,
-            None => 0.0,
-        };
+        let threads = step_threads(fs_la::eigen_complex::declared_workers(), z.len());
+        let (component, connection, material) = loss_quadratics(
+            self.component_loss.as_deref(), self.connection_total.as_deref(), self.material_loss.as_deref(), z, threads)?;
         Ok(LossSweep { z: z.to_vec(), component, connection, material })
     }
 
@@ -1001,7 +994,91 @@ fn gramian(
     Ok(w)
 }
 
+/// Side length from which the step's dense products with the state vector (`apply`, the loss quadratics) use the declared
+/// workers: below it one of them takes well under a millisecond and the serial loop beats starting threads.
+const STEP_PARALLEL_MIN_SIDE: usize = 1024;
+/// Most threads those products use: the bound the render's `--workers` option already holds (1 to 256).
+const MAX_STEP_WORKERS: usize = 256;
+/// Fewest matrix rows one thread of `apply` is given.
+const APPLY_MIN_ROWS_PER_THREAD: usize = 256;
+
+/// Threads a step's dense products of side `side` use: one unless `side` reaches [`STEP_PARALLEL_MIN_SIDE`] and more than
+/// one worker is declared, and never more than [`MAX_STEP_WORKERS`].
+fn step_threads(declared: usize, side: usize) -> usize {
+    if side < STEP_PARALLEL_MIN_SIDE { 1 } else { declared.clamp(1, MAX_STEP_WORKERS) }
+}
+
+/// The three loss quadratics z^T W z of one vector, from the Gramians that exist: component, connection, material. On one
+/// thread the component and connection forms share one pass (`quadratic_pair`) and the material form follows. On two the
+/// material form runs on a second thread beside that pass; on three or more every Gramian has its own thread. Each form
+/// keeps its own left-to-right sums and `quadratic_pair` equals two `quadratic`, so every value is bit-identical for every
+/// thread count, and the refusals are read in the serial order: component, connection, material.
+fn loss_quadratics(
+    component: Option<&[f64]>, connection: Option<&[f64]>, material: Option<&[f64]>, z: &[f64], threads: usize,
+) -> Result<(f64, f64, f64), ModalCouplingError> {
+    let pair = |c: Option<&[f64]>, k: Option<&[f64]>| match (c, k) {
+        (Some(c), Some(k)) => quadratic_pair(c, k, z),
+        (Some(c), None) => Ok((quadratic(c, z)?, 0.0)),
+        (None, Some(k)) => Ok((0.0, quadratic(k, z)?)),
+        (None, None) => Ok((0.0, 0.0)),
+    };
+    let single = |w: Option<&[f64]>| w.map_or(Ok(0.0), |w| quadratic(w, z));
+    if threads <= 1 {
+        let (component, connection) = pair(component, connection)?;
+        return Ok((component, connection, single(material)?));
+    }
+    if threads == 2 {
+        return std::thread::scope(|scope| {
+            let material = scope.spawn(|| single(material));
+            let first = pair(component, connection);
+            let material = joined(material);
+            let (component, connection) = first?;
+            Ok((component, connection, material?))
+        });
+    }
+    std::thread::scope(|scope| {
+        let connection = scope.spawn(|| single(connection));
+        let material = scope.spawn(|| single(material));
+        let component = single(component);
+        let (connection, material) = (joined(connection), joined(material));
+        Ok((component?, connection?, material?))
+    })
+}
+
+/// The value of a scoped thread, or its panic raised again on the joining thread.
+fn joined<T>(handle: std::thread::ScopedJoinHandle<'_, T>) -> T {
+    handle.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
 fn apply(matrix: &[f64], z: &[f64]) -> Result<Vec<f64>, ModalCouplingError> {
+    let n = z.len();
+    let threads = step_threads(fs_la::eigen_complex::declared_workers(), n)
+        .min((matrix.len() / n.max(1)).div_ceil(APPLY_MIN_ROWS_PER_THREAD));
+    apply_on(matrix, z, threads)
+}
+
+/// `apply` on `threads` threads (the calling thread among them): whole eight-row blocks per thread, so each thread's blocks
+/// are exactly the serial blocks, each output entry keeps its own left-to-right sum, and the result is bit-identical for
+/// every thread count. The first refusal in row order is the one returned.
+fn apply_on(matrix: &[f64], z: &[f64], threads: usize) -> Result<Vec<f64>, ModalCouplingError> {
+    let n = z.len();
+    if threads <= 1 || n == 0 || matrix.is_empty() {
+        return apply_rows(matrix, z);
+    }
+    let per_thread = (matrix.len() / n).div_ceil(8).div_ceil(threads) * 8 * n;
+    std::thread::scope(|scope| {
+        let mut parts = matrix.chunks(per_thread);
+        let first = parts.next().unwrap_or(&[]);
+        let rest: Vec<_> = parts.map(|part| scope.spawn(move || apply_rows(part, z))).collect();
+        let mut result = apply_rows(first, z)?;
+        for handle in rest {
+            result.extend(joined(handle)?);
+        }
+        Ok(result)
+    })
+}
+
+fn apply_rows(matrix: &[f64], z: &[f64]) -> Result<Vec<f64>, ModalCouplingError> {
     // Each entry is its row's left-to-right sum, bit for bit; eight rows advance together so their independent sums overlap.
     // A partial sum that leaves the finite range never returns to it (inf + finite = inf, inf - inf = NaN, NaN stays), so
     // checking each finished row refuses exactly what a check of every partial sum refused.
