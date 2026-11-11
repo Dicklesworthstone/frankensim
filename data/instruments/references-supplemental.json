@@ -1759,6 +1759,43 @@
           }
         }
       ]
+    },
+    {
+      "id": "dvtd-s1-12-schoen-sh-noise-500mW",
+      "instrument": "Voice",
+      "kind": "archive",
+      "archive_format": "zip",
+      "path": "DVTD/dvtd.zip",
+      "url": "https://www.vocaltractlab.de/dvtd.zip",
+      "sha256": null,
+      "bytes": 1129467424,
+      "source_checksum": "md5:02d159b107c9dd129744fc005e0f91d7",
+      "source_checksum_status": "The MD5 figshare publishes for the complete archive (figshare 11897187, dvtd.zip, 1129467424 bytes, the same length as the vocaltractlab.de mirror), not independently verified. The complete archive was not downloaded. The selected member has its own SHA-256 and byte-length pin.",
+      "retrieved_utc": "2026-11-11T01:01:04Z",
+      "acquisition_check": "The member was read by HTTP range request from the vocaltractlab.de mirror by fetch-references.sh --members --zip-ranges on ts2, which matched its SHA-256 and length on 2026-11-11; ffmpeg decoded it in full on 2026-11-11.",
+      "source_page": "https://doi.org/10.6084/m9.figshare.c.4869732",
+      "paper": "https://doi.org/10.1038/s41597-020-00597-w",
+      "licence": "dvtd-cc0",
+      "chain": "dvtd-flow-rig-2020",
+      "articulation": "the stationary-flow noise of the 3-D printed model of subject 1's /ʃ/ (s1-12-schoen-sh), blown through a 10 mm glottal hole with no vocal folds, at a fluid power of 500 mW",
+      "range": "unvoiced fricative noise: no pitch",
+      "dynamic": null,
+      "notes": "A physical model, not a voice: DVTD's flow rig blows the printed model of one speaker's /ʃ/ from a tank through a trachea and bronchial horn, in an anechoic room. The dataset prints the subglottal pressure, the flow and the noise spectrum for this recording in s1-12-schoen-sh-noise-metadata.txt and s1-12-schoen-sh-noise-psd.txt. The metadata file's level column reads relative to 2e-4 Pa, 20.0 dB under the same signal re 20 uPa. The recording has no pitch: a grader's f0, harmonic and partial measures do not apply to it. It has no dynamic either: the dataset prints its fluid power, 500 mW, and no dynamic marking. A grader library entry for it carries dyn \"mf\" only because the site's grading contract needs one of pp, mf or ff; \"mf\" is the site's default label, not a measurement.",
+      "gradable": false,
+      "members": [
+        {
+          "archive_member": "subject-1/s1-12-schoen-sh/s1-12-schoen-sh-noise-500mW.wav",
+          "path": "DVTD/subject-1/s1-12-schoen-sh/s1-12-schoen-sh-noise-500mW.wav",
+          "sha256": "5d6da162685d314e2d91dda18a506a7751d1cbbab060777059526e572aa11de6",
+          "bytes": 1440044,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 1,
+            "duration_s": 10.0,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        }
+      ]
     }
   ],
   "acquisition_check": {
