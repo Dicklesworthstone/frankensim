@@ -7,7 +7,9 @@ use fs_em::plane_wave::angular_spectrum::{
 };
 use fs_fft::harmonic_window::HarmonicWindowProfile;
 
+#[path = "integrated_heat/carrier.rs"]
 mod carrier;
+#[path = "integrated_heat/rectangle.rs"]
 mod rectangle;
 
 fn integrated_limits() -> AngularSpectrumIntegratedHeatLimits {

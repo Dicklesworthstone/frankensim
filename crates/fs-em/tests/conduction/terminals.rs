@@ -23,7 +23,7 @@ pub(super) fn disconnected_layers(metric: Metric2, layers: usize) -> TriComplex2
     let mut faces = Vec::new();
     for layer in 0..layers {
         let z = layer as f64;
-        let first = vertices.len();
+        let first = vertices.len() as u32;
         vertices.extend([[0.0, z], [1.0, z], [1.0, z + 1.0], [0.0, z + 1.0]]);
         faces.extend([[first, first + 1, first + 2], [first, first + 2, first + 3]]);
     }

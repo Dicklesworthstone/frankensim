@@ -815,4 +815,5 @@ fn measure(
 }
 
 #[cfg(test)]
+#[path = "box_integral/tests.rs"]
 mod tests;

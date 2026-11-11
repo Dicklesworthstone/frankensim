@@ -6,7 +6,7 @@ use fs_material::conductor::{ElectricalPropertyBasis, ResolvedConductorState};
 fn original_debye_and_ohmic_sources_drive_absorbing_incidence_without_changing_old_ports() {
     let outside = material(4.0 * E, M);
     let dielectric = finite_layers::debye(2.0 * E, 3.0 * E, 0.7, 0.002);
-    let sigma = 0.02;
+    let sigma: f64 = 0.02;
     let electric = [C64::new(0.7, 0.2), C64::new(-0.3, 0.5)];
     for basis in [
         ElectricalPropertyBasis::Conductivity,

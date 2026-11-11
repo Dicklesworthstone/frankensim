@@ -2319,7 +2319,10 @@ fn prepared_oriented_frequency_jets_reuse_exact_signed_and_grazing_coordinates()
     }
 }
 
+#[path = "uniaxial_tests/boundary_dispersion.rs"]
 mod boundary_dispersion;
 
+#[path = "uniaxial_tests/oriented_boundary_dispersion.rs"]
 mod oriented_boundary_dispersion;
+#[path = "uniaxial_tests/slab_thickness.rs"]
 mod slab_thickness;

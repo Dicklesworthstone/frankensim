@@ -9,11 +9,17 @@ use fs_em::plane_wave::{
 };
 use fs_math::det;
 
+#[path = "angular_spectrum/carrier.rs"]
 mod carrier;
+#[path = "angular_spectrum/aplanatic.rs"]
 mod aplanatic;
+#[path = "angular_spectrum/carrier_correlation.rs"]
 mod carrier_correlation;
+#[path = "angular_spectrum/oversampled.rs"]
 mod oversampled;
+#[path = "angular_spectrum/probes.rs"]
 mod probes;
+#[path = "angular_spectrum/transverse.rs"]
 mod transverse;
 
 fn limits() -> AngularSpectrumLimits {

@@ -1,16 +1,29 @@
 //! G1/G3 finite-window vector interference through the actual film operator.
+#[path = "exposure/aperture.rs"]
 mod aperture;
+#[path = "exposure/aperture_interferometer.rs"]
 mod aperture_interferometer;
+#[path = "exposure/carrier.rs"]
 mod carrier;
+#[path = "exposure/carrier_cell.rs"]
 mod carrier_cell;
+#[path = "exposure/carrier_stress.rs"]
 mod carrier_stress;
+#[path = "exposure/exterior_momentum.rs"]
 mod exterior_momentum;
+#[path = "exposure/heat_spectrum.rs"]
 mod heat_spectrum;
+#[path = "exposure/integrated_heat.rs"]
 mod integrated_heat;
+#[path = "exposure/interferometer.rs"]
 mod interferometer;
+#[path = "exposure/statistics.rs"]
 mod statistics;
+#[path = "exposure/stress.rs"]
 mod stress;
+#[path = "exposure/stress_momentum.rs"]
 mod stress_momentum;
+#[path = "exposure/two_sided.rs"]
 mod two_sided;
 use super::*;
 use fs_em::plane_wave::{

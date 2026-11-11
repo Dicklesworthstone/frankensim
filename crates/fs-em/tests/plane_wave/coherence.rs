@@ -11,8 +11,11 @@ use fs_em::plane_wave::{
 };
 use fs_math::det;
 
+#[path = "coherence/absorption.rs"]
 mod absorption;
+#[path = "coherence/correlation.rs"]
 mod correlation;
+#[path = "coherence/aperture.rs"]
 mod aperture;
 
 fn limits() -> AngularSpectrumLimits {

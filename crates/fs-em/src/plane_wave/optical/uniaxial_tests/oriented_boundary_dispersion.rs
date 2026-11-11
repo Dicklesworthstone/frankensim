@@ -338,4 +338,5 @@ fn matched_prepared_grazing_boundary_preserves_zero_fields_and_incident_admittan
     }
 }
 
+#[path = "oriented_boundary_dispersion/spatial.rs"]
 mod spatial;
