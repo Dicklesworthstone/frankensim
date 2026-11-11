@@ -640,20 +640,23 @@ fn fnv(bytes: &[u8]) -> u64 {
     acc
 }
 
-/// Re-frozen 2026-08-22 for tracer bit-semantics v3 (bead frankensim-aivv6):
-/// image bits moved under v2 WITHOUT a surface bump through the composite of
-/// landed post-2026-08-06 shading-path changes (anisotropic-GGX kernels and
-/// BrushedConductor threading, reflected-manifold preparation reuse, BVH
-/// inclusive current-best-t pruning) while every one of those lanes' own
-/// declared fingerprints stayed green; the Cornell probe was the only observer
-/// of the drift, which is why check-goldens could not catch it. v2's label was
-/// therefore corrupted and is retired by this bump. Digest reproduced
-/// deterministically on x86_64-linux (RCH) at tree HEAD 1a7fa261. Fixture:
-/// 24×24, 8 spp, depth 4, MIS + iid Philox, seed 7; FNV-1a over the EXR bytes.
-/// This freeze records chart-backend-bits=11 and bvh-determinism
-/// 0xcf18_55d9_4642_e0fd as unchanged dependencies.
+/// Re-frozen 2026-11-11 for tracer bit-semantics v10 (bead frankensim-rc-1109-root-3gc12.1.5,
+/// MB 26879). Seven declared bumps moved the image bits, each reaching this fixture: v4
+/// e97bf69fb9 (an emitting surface keeps scattering through its BSDF: the white ceiling quad), v5
+/// 20f64e98ed (bounded mesh hit origins for opaque reflection and visibility: the mesh walls), v6
+/// c441981f01 (shadow rays aimed at the physical light endpoint: the rectangle light's NEE), v7
+/// 2cbbcc078b (the Duff frame for diffuse directions: every wall), v8 ccf3ac8032 (side-specific
+/// departures at native chart boundaries: the sphere), v9 4d5123920d (height-correlated Smith G2:
+/// the sphere's GGX), v10 6a13950eae (spherical-cap VNDF proposals: the sphere's sampling).
+/// e97bf69fb9 and 2cbbcc078b deferred the re-pin until a two-mode native reproduction existed.
+/// Controls, debug: the committed tree 00e0857b68 and c829d3bd39 (whose fs-render tree is
+/// e97bf69fb9^'s, privately patched to compile, not landed) both reproduce the v3 value
+/// 0x9ce1_e693_4ae1_8543, so the drift starts at the first declared bump. Digest reproduced on
+/// x86_64-linux (ts2) at the committed tree 1a250dca25, identical in debug and release. Fixture
+/// unchanged: 24×24, 8 spp, depth 4, MIS + iid Philox, seed 7; FNV-1a over the EXR bytes.
+/// chart-backend-bits stays 11.
 /// Re-freeze only per docs/GOLDEN_POLICY.md.
-const CORNELL_GOLDEN: u64 = 0x9ce1_e693_4ae1_8543;
+const CORNELL_GOLDEN: u64 = 0xbe59_6423_e509_36a9;
 
 /// ACCEPTANCE (2): the Cornell-class fixture matches the frozen
 /// reference image hash in deterministic mode.
