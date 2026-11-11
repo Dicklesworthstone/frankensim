@@ -44,14 +44,23 @@ as the heat rises (it is flat across a plateau). The tangent is the chart's
 derivative of the mean in the final enthalpy times `dt / m`. That derivative
 is continuous in the heat even where a step ends on a corner of the chart;
 only at no heat on a corner is it the chart's one-sided choice (half the
-right derivative, the left one at the upper end of the chart).
+right derivative, the left one at the upper end of the chart). The class has
+a cost today: fs-system differences a component without a tangent only if
+its class is smooth or exactly linear, so in a loop this body must be added
+with the tangent it offers.
+
+A state that does not move (no heat, or heat too small to change the
+enthalpy) is returned as it is, sign of a zero enthalpy and identity
+included, as the chart's own `advance_specific_energy` returns it.
 
 Refused, with candidate and outputs untouched: a mass that is not positive
 and finite; widths other than one; a heat rate that is not a number
 (`NonFiniteSpecificEnergyIncrement`); a step that is not positive and
 finite; a state of another chart (`StateCurveMismatch`); a step that leaves
-the chart (`OutsideEnthalpyDomain`, the chart's own); cancellation
-(`EntropyEvaluationCancelled`). It does not shorten a step.
+the chart (`OutsideEnthalpyDomain`, the chart's own); a mass so large that
+`m h` is not a finite number of joules (both the stored energy and the
+step); cancellation (`EntropyEvaluationCancelled`). It does not shorten a
+step.
 
 Not here: the body's volume, surface and density, a conductance law, heat
 generated inside the body, expansion work, and any limit on the step for
@@ -61,32 +70,45 @@ accuracy. The enumeration ratchet is unchanged: no new `*_with_*` function,
 Tests. `tests/phase_temperature_derivative.rs`, module `body`, 2 tests with
 the feature (`cargo test -p fs-material --features component --test
 phase_temperature_derivative`): the conformance kit and the tangent check
-on nine steps of a melting chart (within the solid; ending on, starting on
-and crossing each corner of the plateau; along the plateau; back down across
-both), with state and temperature equal to the chart's own answers to the
-bit, heat over temperature equal to the chart's entropy change to 1e-13, the
-slope equal to the chart's derivative to the bit; the mean rising with nine
-heats from one state; the one-sided slope at rest on each corner, confirmed
-from the right by a difference and exactly zero from the left; a heat of
-1e-30 W taken and booked as lost; and every refusal above.
+on ten steps of a melting chart (within the solid; ending on and starting
+on each of the two corners of the plateau; onto it, along it and across it;
+back down across both), with state and temperature equal to the chart's own
+answers to the bit, heat over temperature equal to the chart's entropy
+change to 1e-13, the slope equal to the chart's derivative to the bit; the
+mean rising with nine heats from one state; the one-sided slope at rest on
+each corner, confirmed from the right by a difference and exactly zero from
+the left; a heat of 1e-30 W taken and booked as lost; a state at an enthalpy
+of minus zero kept as it is under no heat; and every refusal above.
 `crates/fs-couple/tests/gas_piston_graph.rs`, 3 tests: the body, the
 kernel's `Conductance` and the fs-gas cavity as a declared graph against the
 piston module's own finite-body step
 (`GasPiston::thermal_discrete_gradient_candidate`) on that module's
 fixtures, a step at a time, with every bound computed from the two solves'
-tolerances before the run (the module's 1e-10 J source tolerance and the gas
-owner's 1e-7 J/kg, summed over the steps). Measured against allowed:
+tolerances before the run. Per step the module's heat may be off by its
+1e-10 J source tolerance (as much again is allowed for the graph) and each
+side's gas energy by the owner's 1e-7 J/kg. The exact step does not amplify
+a difference between two runs (contact damps the difference of the two
+stores' energies and keeps their sum), so after n steps either store's
+energy differs by at most n errors of both kinds; with a moving wall the two
+first-order couplings between volume and gas temperature are added.
+Measured against allowed:
 
 | fixture | steps | body | gas | heat a step | entropy |
 |---|---|---|---|---|---|
-| fixed walls, body from 300 K, 4000 W/K | 12 | 2.3e-11 K (4.8e-9) | 2.1e-11 K (7.8e-9) | 1.2e-11 J (2.7e-9) | 4.7e-15 J/K (3.9e-10) |
-| fixed walls, body from 650 K, 4000 W/K | 12 | 5.2e-11 K (4.8e-9) | 4.6e-11 K (7.8e-9) | 2.6e-11 J (2.7e-9) | 9.3e-16 J/K (3.9e-10) |
-| wall thrown at -2 and 2 m/s, 2000 W/K | 12 | 1.1e-10 K (4.8e-9) | 8.0e-11 K (6.9e-9) | 5.2e-11 J (1.4e-9) | 6.9e-15 J/K (4.3e-10) |
-| melting through a plateau at 350 K, 2000 W/K | 40 | 4.1e-8 J/kg (8.0e-6) | 6.5e-11 K (2.3e-8) | 4.1e-11 J (4.3e-9) | 3.3e-15 J/K (1.7e-9) |
-| freezing through a plateau at 500 K, 2000 W/K | 40 | 1.0e-7 J/kg (8.0e-6) | 1.5e-10 K (2.3e-8) | 7.5e-11 J (4.9e-9) | 1.7e-15 J/K (1.9e-9) |
+| fixed walls, body from 300 K, 4000 W/K | 12 | 2.3e-11 K (8.0e-9) | 2.1e-11 K (7.8e-9) | 1.2e-11 J (3.4e-9) | 4.7e-15 J/K (4.9e-10) |
+| fixed walls, body from 650 K, 4000 W/K | 12 | 3.3e-11 K (8.0e-9) | 2.9e-11 K (7.8e-9) | 1.7e-11 J (3.4e-9) | 5.8e-16 J/K (6.7e-10) |
+| wall thrown at -2 and 2 m/s, 2000 W/K | 12 | 1.1e-10 K (8.0e-9) | 8.0e-11 K (7.6e-9) | 5.2e-11 J (1.8e-9) | 6.9e-15 J/K (5.7e-10) |
+| melting through a plateau at 350 K, 2000 W/K | 40 | 4.1e-8 J/kg (1.3e-5) | 6.5e-11 K (2.3e-8) | 4.1e-11 J (5.5e-9) | 3.3e-15 J/K (2.2e-9) |
+| freezing through a plateau at 500 K, 2000 W/K | 40 | 1.0e-7 J/kg (1.3e-5) | 1.5e-10 K (2.3e-8) | 7.5e-11 J (6.5e-9) | 1.7e-15 J/K (2.6e-9) |
 
-With the wall moving, its velocity agrees to 9.4e-13 m/s (1.2e-10) and the
-gas volume to 3.0e-18 m3 (7.2e-16). These are not small steps: in its twelve
+With the wall moving, its velocity agrees to 9.4e-13 m/s (1.3e-10) and the
+gas volume to 3.0e-18 m3 (8.1e-16). The states above do not depend on the
+tangents the graph is given; the iterations do, and each run is held to
+three a step (measured 27 and 28 in 12 steps, 25 behind the moving wall, 77
+and 69 in 40). An independent reader's copies with the body's slope halved
+or doubled (and, on the fixed sensible run, zeroed) still met every bound
+above, in 107 to 339 iterations.
+These are not small steps: in its twelve
 the body from 650 K gives 66 J and cools by 132 K, and the bodies on a
 plateau leave it, one molten at 351.5 K and one frozen at 464.8 K. With the
 kernel's ideal `HeatCapacity` in the body's
@@ -97,16 +119,28 @@ more than a million times the bounds, as the test requires.
 
 In those comparisons the conductance is constant (the module's own latent
 test makes it depend on the liquid fraction, which the kernel's element does
-not). The moving run uses the module fixture's heat bracket of 100 J either
-way; the fixed sensible runs use 60 J and the latent runs 20 J, because with
-100 J the module refuses the second step of the first and the tenth of the
-second (observed: `OutsideBracket` from the gas's own temperature solve at
-the far end of the bracket, which its solve tries). The module's answer
-depends a little on its bracket: with 60 J the moving run's row read
-6.3e-11 K, 4.9e-11 K, 3.1e-11 J and 3.3e-14 J/K. The module's midpoint
-thermal step, a conductance that
-depends on state, and its real-gas and reactive thermal variants are not
-compared.
+not). Three of the six runs use the module fixture's heat bracket of 100 J
+either way: both moving runs and the fixed run from 650 K. The other three
+have a narrower one because the module, alone, refuses a step with its own,
+which the test checks and prints before it narrows anything: from 300 K
+(60 J used) it refuses its second step and from the plateau at 350 K (20 J)
+its tenth, both `OutsideBracket` from the gas's own temperature solve at the
+far end of the bracket; from the plateau at 500 K (20 J) it refuses its
+sixth, `OutsideEnthalpyDomain` from the body's chart at -4,213 J/kg. (The
+first landing said all three kinds of run needed a narrower bracket, and its
+correction that the fixed sensible and the latent runs did for the gas's
+sake; both generalised from the first failure of a loop.) The module's
+answer depends a little on its bracket: with 60 J the moving row read
+6.3e-11 K, 4.9e-11 K and 3.1e-11 J, and the 650 K row 5.2e-11 K, 4.6e-11 K
+and 2.6e-11 J.
+
+What these comparisons cannot see: an error inside the chart's mean or the
+gas owner's step, which both sides call; an error in how the step length or
+the body's mass enters that is right at 5e-5 s and 1e-3 kg, the only values
+used; heat that rounds away, a step that starts on a corner, a heat that
+reverses, and a chart made from heat-capacity data. The module's midpoint
+thermal step, a conductance that depends on state, and its real-gas and
+reactive thermal variants are not compared.
 
 ## Causal pressure-driven molecular compressibility
 

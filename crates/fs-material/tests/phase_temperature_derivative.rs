@@ -255,6 +255,7 @@ mod body {
                 (0.0, 50.0, "from the solid onto the plateau"),
                 (200.0, 50.0, "along the plateau"),
                 (300.0, 50.0, "ending on its upper corner"),
+                (500.0, 50.0, "starting on that corner"),
                 (50.0, 200.0, "across the whole plateau into the liquid"),
                 (900.0, -225.0, "back down across both corners"),
                 (900.0, -100.0, "from the liquid onto the upper corner"),
@@ -340,6 +341,11 @@ mod body {
             same(receipt.stored_change_j, 0.0);
             same(receipt.numerical_loss_j, DT_S * faint);
             assert_eq!(stepped(&body, 900.0, faint, cx).0, old);
+            // A state that does not move is kept as it is, sign of zero
+            // and identity included, as the chart's own advance keeps it.
+            let (kept, _) = stepped(&body, -0.0, 0.0, cx);
+            assert_eq!(kept, state(-0.0));
+            same(kept.specific_enthalpy_j_kg(), -0.0);
         });
     }
 
@@ -395,6 +401,19 @@ mod body {
             }
             assert_eq!(attempt(&foreign, DT_S, &[1.0]), PhaseStateError::StateCurveMismatch);
             assert_eq!(body.stored_energy_j(&foreign), Err(PhaseStateError::StateCurveMismatch));
+            // A mass so large that its enthalpy is not a number of joules:
+            // the stored energy and the step both say so.
+            let vast = UniformEnthalpyBody::new(curve.clone(), 1.0e306).unwrap();
+            assert_eq!(
+                vast.stored_energy_j(&stale),
+                Err(step("a uniform enthalpy body's stored energy is unrepresentable"))
+            );
+            let (mut kept, mut slot) = (old, [7.0]);
+            assert_eq!(
+                vast.propose(&stale, DT_S, &[1.0], &mut kept, &mut slot, cx),
+                Err(step("a uniform enthalpy body's energy account is unrepresentable"))
+            );
+            assert_eq!((kept, slot[0].to_bits()), (old, 7.0_f64.to_bits()));
             // Heat that would take the body off either end of its chart is
             // the chart's own refusal.
             for heat_w in [330.0, -30.0] {

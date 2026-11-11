@@ -19,7 +19,7 @@ use fs_ports::component::{Class, Component, PortTangent, Proposal};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{DynViscosity, MolarMass, Pressure, QuantitySpec};
 use fs_system::elements::{Force, Mass, Motion, Restriction, SourceAccount, Waveform};
-use fs_system::{NodeId, SolveConfig, System, SystemBuilder};
+use fs_system::{NodeId, SolveConfig, System, SystemBuilder, SystemError};
 use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
 use fs_thermochem::{
     Composition, CompositionBasis, ElementalReferenceIdV1, NASA9_LAW_ID_V1, NASA9_LAW_VERSION_V1,
@@ -357,9 +357,10 @@ const PISTON_M2: f64 = 0.01;
 /// one face of a mass, a constant force `P0 * area` on the other, no heat.
 /// It starts at rest volume moving outward at `rate_m_s`. With `insulated`
 /// the gas is the one-port cavity, a scalar monotone relation; without, it
-/// is the two-port cavity with its heat port held at zero. Returns the
-/// system, the mass and the gas.
-fn spring_piston(insulated: bool, rate_m_s: f64) -> (System, NodeId, NodeId) {
+/// is the two-port cavity with its heat port held at zero. With `tangent`
+/// the gas is added with the tangent it offers; without, the kernel is left
+/// to difference it. Returns the system, the mass and the gas.
+fn spring_piston(insulated: bool, tangent: bool, rate_m_s: f64) -> (System, NodeId, NodeId) {
     let gas = parcel(0.0, 0.0);
     let mut builder = SystemBuilder::new();
     let body = builder.add_with_tangent(
@@ -367,15 +368,18 @@ fn spring_piston(insulated: bool, rate_m_s: f64) -> (System, NodeId, NodeId) {
         Motion { position_m: V0 / PISTON_M2, velocity_m_s: rate_m_s },
     ).unwrap();
     let closed = GasCavity::new(gas.clone(), controls()).unwrap();
-    let cavity = if insulated {
-        builder.add_with_tangent("gas", closed.insulated().unwrap(), gas).unwrap()
-    } else {
-        let cavity = builder.add_with_tangent("gas", closed, gas).unwrap();
+    let cavity = match (insulated, tangent) {
+        (true, true) => builder.add_with_tangent("gas", closed.insulated().unwrap(), gas),
+        (true, false) => builder.add("gas", closed.insulated().unwrap(), gas),
+        (false, true) => builder.add_with_tangent("gas", closed, gas),
+        (false, false) => builder.add("gas", closed, gas),
+    }
+    .unwrap();
+    if !insulated {
         builder.boundary(
             builder.port(cavity, "heat").unwrap(), Box::new(|_, _, values| values[0] = 0.0),
         ).unwrap();
-        cavity
-    };
+    }
     let outside = builder.add_with_tangent(
         "outside", Force::new(Waveform::constant(-P0 * PISTON_M2).unwrap()), SourceAccount::default(),
     ).unwrap();
@@ -396,7 +400,7 @@ fn spring_piston(insulated: bool, rate_m_s: f64) -> (System, NodeId, NodeId) {
 /// between the two steps around it.
 fn piston_frequency(dt: f64, rate_m_s: f64, periods: usize) -> f64 {
     let gas_kg = parcel(0.0, 0.0).mass_kg();
-    let (mut system, body, _) = spring_piston(true, rate_m_s);
+    let (mut system, body, cavity) = spring_piston(true, true, rate_m_s);
     let mut crossings = Vec::new();
     let mut before = rate_m_s;
     let mut steps = 0_u32;
@@ -413,15 +417,25 @@ fn piston_frequency(dt: f64, rate_m_s: f64, periods: usize) -> f64 {
         }
     });
     let omega = core::f64::consts::TAU * periods as f64 / (crossings[periods] - crossings[0]);
-    // The gas owner may leave its energy tolerance per kilogram unaccounted
-    // in each step, and nothing else may be lost. The motion's whole energy
-    // is m v^2 / 2 = 5e-5 J.
-    let ledger_j = system.ledger().energy_residual_j();
-    let budget_j = f64::from(steps) * gas_kg * controls().energy_tolerance_j_kg;
+    // Two accounts. What the gas owner's energy solve leaves in a step the
+    // cavity books as numerical loss: at most its tolerance per kilogram
+    // and the rounding of the two p V the step's volume is formed from.
+    // That booked loss is what a cavity returning a wrong pressure would
+    // have to hide in, so it is held to that many steps' worth. The
+    // ledger's residual is what nobody booked; it cancels a booked loss
+    // identically and so says nothing about it, and is held to the same
+    // sum. The motion's whole energy is m v^2 / 2 = 5e-5 J.
+    let ledger = system.ledger();
+    let booked_j = ledger.nodes[cavity.index()].numerical_loss_j.value();
+    let ledger_j = ledger.energy_residual_j();
+    let a_step_j =
+        gas_kg * controls().energy_tolerance_j_kg + 64.0 * f64::EPSILON * 2.0 * P0 * V0;
+    let budget_j = f64::from(steps) * a_step_j;
     eprintln!(
-        "piston, dt {dt:e} s: {steps} steps, omega {omega:.12} rad/s, \
-         ledger residual {ledger_j:.3e} J (budget {budget_j:.3e} J)"
+        "piston, dt {dt:e} s: {steps} steps, omega {omega:.12} rad/s, gas numerical loss booked \
+         {booked_j:.3e} J, ledger residual {ledger_j:.3e} J (budget for each {budget_j:.3e} J)"
     );
+    close(booked_j, 0.0, budget_j);
     close(ledger_j, 0.0, budget_j);
     omega
 }
@@ -502,8 +516,8 @@ fn a_piston_on_the_insulated_cavity_is_the_one_on_the_closed_cavity_without_heat
     // same unknowns, the same slopes and the same proposals, so every state
     // is equal to the bit, step for step; nothing is allowed for.
     let (dt, rate) = (2.5e-4, 0.01);
-    let (mut one, body_one, gas_one) = spring_piston(true, rate);
-    let (mut two, body_two, gas_two) = spring_piston(false, rate);
+    let (mut one, body_one, gas_one) = spring_piston(true, true, rate);
+    let (mut two, body_two, gas_two) = spring_piston(false, true, rate);
     assert_eq!(one.plan_loops(), two.plan_loops());
     let mut iterations = 0_u32;
     with_cx(&CancelGate::new_clock_free(), |cx| {
@@ -541,6 +555,26 @@ fn a_piston_on_the_insulated_cavity_is_the_one_on_the_closed_cavity_without_heat
 }
 
 #[test]
+fn an_insulated_cavity_in_a_loop_needs_the_tangent_it_offers() {
+    // What its class costs today. The kernel differences a component that
+    // offers no tangent only if its class is smooth or exactly linear. The
+    // two-port cavity is smooth and steps without its tangent; the
+    // insulated one is a scalar monotone relation, and without its tangent
+    // its first step is refused, naming it and what it lacks.
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        let (mut smooth, _, _) = spring_piston(false, false, 0.01);
+        assert!(smooth.step(2.5e-4, cx).unwrap().iterations >= 1);
+        let (mut monotone, _, _) = spring_piston(true, false, 0.01);
+        let error = monotone.step(2.5e-4, cx).unwrap_err();
+        assert!(
+            matches!(&error, SystemError::Unsupported { node, .. } if node == "gas"),
+            "{error}"
+        );
+        assert_eq!(monotone.steps(), 0);
+    });
+}
+
+#[test]
 fn a_small_oscillation_about_rest_has_the_frequency_of_the_adiabatic_gas_spring() {
     // omega0^2 = gamma p A^2 / (m V), with gamma and p from the parcel at
     // its state point.
@@ -569,7 +603,9 @@ fn a_small_oscillation_about_rest_has_the_frequency_of_the_adiabatic_gas_spring(
     // fraction s and 1 - s of a step either side of its zero misses the
     // zero by dt (omega dt)^2 s (1 - s) (1 - 2 s) / 6, at most
     // 0.0161 dt (omega dt)^2. The velocity is odd about each of its zeros
-    // (they are the turning points), so the second harmonic the gas adds,
+    // (they are the turning points; the step is a reversible map, so the
+    // discrete solution keeps that symmetry), so the second harmonic the
+    // gas adds,
     // h = (gamma + 1) / 6 * (a / l) of the first in the velocity, adds no
     // quadratic term there: it changes the slope by at most 2 h and the
     // cubic term by at most 8 h of theirs. Two crossings over `periods`

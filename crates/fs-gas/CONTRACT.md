@@ -10150,7 +10150,17 @@ solve a `Monotone1d` component differently from a smooth one with a tangent
 (bead `.5.5`), and the class carries no bracket: a driver that brackets it
 must get its admissible interval from the cavity, because the gas owner
 refuses a step that compresses beyond `R ln(V0 / V1) = cv_min T_min / T0`.
-Tests: for two mixtures and seven flows either way, the insulated cavity
+The class has a cost today: the kernel differences a component without a
+tangent only if its class is smooth or exactly linear, so the insulated
+cavity must be added with the tangent it offers, and without it its first
+step in a loop is refused as unsupported (the two-port cavity, being smooth,
+is differenced; a test shows both). And "rising" holds down to the rounding
+of the owner's energy solve, about 1e-15 of the pressure: an independent
+reader's sweep of 2,000 rising flows spaced 1e-11 to 1e-9 apart found falls
+of up to 8.7e-11 Pa at 1e5 Pa, so a bracketing solve must stop above that.
+Tests: for two gases (one species each, with a constant and with a
+temperature-dependent heat capacity) and seven flows from -0.05 to
+0.05 m3/s, the insulated cavity
 passes the conformance and tangent checks, its endpoint and pressure are the
 two-port cavity's with no heat to the bit, its slope in both directions is
 that cavity's entry for pressure against flow to the bit and positive, and
@@ -10183,9 +10193,18 @@ and the mass's rule is the midpoint rule, whose frequency is
 `(2 / dt) atan(omega0 dt / 2)`, a lag of 7.3e-5 at `dt` = 0.25 ms. Measured:
 the graph is 7.294e-5 below `omega0` and 3.4e-8 from the midpoint rule's
 frequency; at half the step 6.2e-8 from it; the ratio of the two lags is
-3.988 (allowed 4 +- 0.045). The ledger residual over 903 and 1,806 steps is
-1.9e-13 J and 4.0e-13 J, against the owner's own tolerance summed over the
-steps (7.6e-8 J and 1.5e-7 J) and a motion of 5e-5 J.
+3.988 (allowed 4 +- 0.045). Two energy accounts are held to the owner's
+tolerance and the rounding of the step's `p V`, summed over the steps
+(7.9e-8 J for 903 steps, 1.6e-7 J for 1,806; the motion holds 5e-5 J): the
+numerical loss the cavity books, 6.6e-11 J and 1.7e-10 J, and the ledger's
+residual, 1.9e-13 J and 4.0e-13 J. Only the first can see a cavity that
+returns a wrong pressure and books the difference; the ledger's residual
+cancels a booked loss identically. (As first landed the test held only the
+residual and its text called that the owner's unaccounted energy, which it
+is not. An independent reader's copy with the endpoint pressure in place of
+the discrete-gradient one booked 1.6e-5 J and passed that assertion; it
+fails the three frequency assertions by 52 to 170 times their allowance,
+and passes them when only 5% of that error is mixed in.)
 
 This is spatially uniform ideal gas, not a reacting volume, nonideal parcel or
 wave solver. The cavity does not know its mechanical partner's mass or piston
@@ -10198,7 +10217,9 @@ that family. Heat through the wall is a connection too: the cavity's `heat`
 port, the kernel's `Conductance`, and a finite body from fs-material's phase
 chart (`fs_material::phase::component::UniformEnthalpyBody`) agree with the
 piston module's finite-body step on that module's sensible, moving and
-latent fixtures; the numbers are in fs-material's contract.
+latent fixtures, with a constant conductance and, on three of the six runs,
+a narrower heat bracket than the module's fixture; the conditions and the
+numbers are in fs-material's contract.
 
 **Stream port.** `GasCavity::streaming(mass_tolerance_kg)` adds a third port,
 `stream`, a storage's stream port (crates/fs-ports/CONTRACT.md) carrying one

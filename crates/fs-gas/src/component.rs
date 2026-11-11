@@ -166,6 +166,14 @@ impl GasCavity {
     /// cavity's stays [`Class::Smooth`]: with a heat partner in a loop its
     /// map has two inputs, and no scalar class describes it.
     ///
+    /// Two things follow from the class. A kernel that differences only
+    /// smooth components (fs-system today) needs this cavity's tangent: in
+    /// a loop, add it with the tangent it offers, or the step is refused as
+    /// unsupported. And "rises" holds down to the rounding of the owner's
+    /// energy solve, about 1e-15 of the pressure: between two flows closer
+    /// than that resolves, the returned pressure can fall by as much, so a
+    /// solve that brackets it must stop above that.
+    ///
     /// # Errors
     /// A streaming cavity, which keeps its heat port.
     pub fn insulated(mut self) -> Result<Self, GasEnergyError> {

@@ -21,7 +21,10 @@ use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_couple::cavity_phs::piston::double_acting::{
     DoubleActingGasPiston, DoublePistonInput, DoublePistonSolve,
 };
-use fs_couple::cavity_phs::piston::thermal::{ConductanceSample, HeatExchangeSolve};
+use fs_couple::cavity_phs::piston::thermal::discrete_gradient::DiscreteGradientThermalCandidate;
+use fs_couple::cavity_phs::piston::thermal::{
+    ConductanceSample, HeatExchangeSolve, ThermalPistonError,
+};
 use fs_couple::cavity_phs::piston::{GasPiston, PistonInput, PistonSolve};
 use fs_evidence::ValidityDomain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -933,46 +936,65 @@ impl Apart {
     ///   of their size, a tenth of that here, and are allowed as much again.
     /// - Each side solves the gas's energy equation to its tolerance per
     ///   kilogram.
-    /// - Contact pulls the two temperatures together, so these errors do
-    ///   not grow from step to step: they add. After `steps` steps the
-    ///   body's enthalpy differs by at most that many heat errors, the
-    ///   gas's energy by as many heat and gas errors, and each temperature
-    ///   by its energy over its heat capacity (the gas's taken at the start,
-    ///   with a tenth more for its change with temperature).
+    /// - The exact step does not amplify a difference between two runs:
+    ///   contact damps the difference of the two stores' energies and
+    ///   keeps their sum. A heat error moves energy between the stores and
+    ///   is damped by later steps; a gas error changes their sum and stays,
+    ///   and on a plateau all of it ends in the body. So after `steps`
+    ///   steps either store's energy differs by at most that many errors of
+    ///   both kinds, and each temperature by its energy over its heat
+    ///   capacity (the gas's taken at the start, with a tenth more for its
+    ///   change with temperature).
     /// - A step's heat follows the two means, which differ at most as the
     ///   states do; its entropy is `q (1 / theta_g - 1 / theta_b)`, no
     ///   temperature being below the controls' 200 K.
     /// - The module stops its impulse solve at its momentum tolerance, on a
-    ///   wall of 1 kg and 0.01 m2.
+    ///   wall of 1 kg and 0.01 m2. With the wall `moving`, the two first
+    ///   order couplings are added, each from the other's bound without
+    ///   it: a volume error changes the gas temperature by at most
+    ///   `(R / cv) T dV / V`, and a gas temperature error changes the
+    ///   pressure by `(m R / V) dT`, which pushes the wall by that times
+    ///   `A dt / m_wall` a step; `T` below the controls' maximum and `V`
+    ///   above the lower end of their volume bracket.
     fn allowed(
         gas: &ClosedGasParcel,
         capacity_j_kg_k: f64,
         conductance_w_k: f64,
         bracket_j: f64,
+        moving: bool,
         steps: u32,
     ) -> Self {
         let n = f64::from(steps);
         let heat_error_j = 2.0 * exchange(bracket_j).source_tolerance_j;
         let gas_error_j = 2.0 * gas.mass_kg() * controls().gas.energy_tolerance_j_kg;
+        let energy_j = n * (heat_error_j + gas_error_j);
         let cv = gas
             .state()
             .thermodynamics()
             .properties()
             .mass_specific_cv()
             .value();
-        let body_j_kg = n * heat_error_j / BODY_KG;
+        let gas_constant = gas.state().state().specific_gas_constant;
+        let (wall_kg, area_m2) = (1.0, 0.01);
+        let least_m3 = controls().volume_bracket_m3[0];
+        let body_j_kg = energy_j / BODY_KG;
         let body_k = body_j_kg / capacity_j_kg_k;
-        let gas_k = 1.1 * n * (heat_error_j + gas_error_j) / (gas.mass_kg() * cv);
+        let mut gas_k = 1.1 * energy_j / (gas.mass_kg() * cv);
+        let mut velocity_m_s = n * controls().momentum_tolerance_n_s / wall_kg;
+        if moving {
+            let volume_m3 = area_m2 * DT_S * n * velocity_m_s;
+            let pressure_pa = gas.mass_kg() * gas_constant / least_m3 * gas_k;
+            velocity_m_s += n * pressure_pa * area_m2 * DT_S / wall_kg;
+            gas_k += gas_constant / cv * controls().gas.maximum_temperature_k * volume_m3 / least_m3;
+        }
         let mean_k = body_k + gas_k;
         let heat_j = heat_error_j + DT_S * conductance_w_k * mean_k;
         let floor_k = controls().gas.minimum_temperature_k;
-        let wall_kg = 1.0;
-        let velocity_m_s = n * controls().momentum_tolerance_n_s / wall_kg;
         Self {
             body_k,
             body_j_kg,
             gas_k,
-            volume_m3: 0.01 * DT_S * n * velocity_m_s,
+            volume_m3: area_m2 * DT_S * n * velocity_m_s,
             velocity_m_s,
             heat_j,
             mean_k,
@@ -1044,14 +1066,16 @@ impl Apart {
     }
 }
 
-/// The module's exchange controls with the caller's heat bracket. The
-/// module's own fixture has 100 J either way, and its solve tries the far
-/// end of the bracket on the side of the root. The moving run takes that
-/// bracket. With it the module refuses the second step of the fixed
-/// sensible run and the tenth of the latent one (observed: `OutsideBracket`
-/// from the gas's own temperature solve, which cannot give or take 100 J
-/// inside its source's range by then), so those two have a narrower one.
-/// The tolerances are the fixture's.
+/// The module's heat bracket in its own thermal fixture [J], either way.
+const FIXTURE_BRACKET_J: f64 = 100.0;
+
+/// The module's exchange controls with the caller's heat bracket; the
+/// tolerances are the fixture's. The module's solve tries the far end of
+/// its bracket on the side of the root, and on some of these runs the gas
+/// or the body cannot give or take the fixture's 100 J inside its source's
+/// range a few steps on. A run has a narrower bracket only where
+/// [`contact_against_the_module`] has first seen the module refuse its
+/// own, and it prints the step and the refusal.
 fn exchange(bracket_j: f64) -> HeatExchangeSolve {
     HeatExchangeSolve {
         heat_bracket_j: [-bracket_j, bracket_j],
@@ -1059,6 +1083,62 @@ fn exchange(bracket_j: f64) -> HeatExchangeSolve {
         energy_tolerance_j: 1.0e-7,
         maximum_iterations: 128,
     }
+}
+
+/// The module's piston for these runs: `gas` behind a 1 kg wall of 0.01 m2
+/// thrown at `velocity_m_s`, or, without a velocity, with fixed walls.
+fn module_piston(gas: ClosedGasParcel, velocity_m_s: Option<f64>) -> GasPiston {
+    let free = GasPiston::new(gas, 1.0, 0.01, velocity_m_s.unwrap_or(0.0)).unwrap();
+    if velocity_m_s.is_some() {
+        free
+    } else {
+        free.with_fixed_support().unwrap()
+    }
+}
+
+/// The module's body fixture on `curve`, at `start`.
+fn module_body(
+    curve: &EquilibriumEnthalpyPhaseCurve,
+    start: EquilibriumPhaseState,
+) -> UniformEnthalpyStepInput<'_> {
+    UniformEnthalpyStepInput {
+        curve,
+        initial: start,
+        mass_kg: BODY_KG,
+        volume_m3: BODY_KG / 4000.0,
+        surface_area_m2: 0.02,
+        internal_heat_j: 0.0,
+        duration_s: DT_S,
+    }
+}
+
+/// One step of the module's finite-body contact under the atmosphere, with
+/// a constant conductance [W/K] and the heat bracket `bracket_j`.
+fn module_step(
+    module: &GasPiston,
+    thermal: UniformEnthalpyStepInput<'_>,
+    conductance_w_k: f64,
+    bracket_j: f64,
+) -> Result<DiscreteGradientThermalCandidate<()>, ThermalPistonError<Infallible>> {
+    let input = PistonInput {
+        duration_s: DT_S,
+        heat_j: 0.0,
+        exterior_pressure_pa: 100_000.0,
+        external_force_n: 0.0,
+    };
+    module.thermal_discrete_gradient_candidate(
+        input,
+        thermal,
+        controls(),
+        exchange(bracket_j),
+        |_, _| {
+            Ok::<_, Infallible>(ConductanceSample {
+                conductance_w_k,
+                source: (),
+            })
+        },
+        || false,
+    )
 }
 
 /// What [`contact_against_the_module`] found.
@@ -1094,46 +1174,38 @@ fn contact_against_the_module(
     steps: u32,
 ) -> ContactRun {
     let start = curve.state_at_specific_enthalpy(enthalpy_j_kg).unwrap();
+    if bracket_j < FIXTURE_BRACKET_J {
+        // A bracket narrower than the module's fixture is used only where
+        // the module, alone, refuses a step of this run with its own.
+        let mut module = module_piston(gas.clone(), velocity_m_s);
+        let mut thermal = module_body(curve, start);
+        let refusal = (0..steps).find_map(|step| {
+            match module_step(&module, thermal, conductance_w_k, FIXTURE_BRACKET_J) {
+                Ok(candidate) => {
+                    let (next, accepted, _) = candidate.into_parts();
+                    module = next;
+                    thermal.initial = accepted.state;
+                    None
+                }
+                Err(error) => Some((step, format!("{error:?}"))),
+            }
+        });
+        let (step, why) =
+            refusal.expect("the module takes its fixture's bracket on this run: use it");
+        eprintln!(
+            "from {:.0} K with its fixture's {FIXTURE_BRACKET_J} J either way the module refuses \
+             step {step}: {why}",
+            start.temperature_k()
+        );
+    }
     let mut graph = contact(&gas, store, start, conductance_w_k, velocity_m_s);
-    let free = GasPiston::new(gas, 1.0, 0.01, velocity_m_s.unwrap_or(0.0)).unwrap();
-    let mut module = if velocity_m_s.is_some() {
-        free
-    } else {
-        free.with_fixed_support().unwrap()
-    };
-    let mut thermal = UniformEnthalpyStepInput {
-        curve,
-        initial: start,
-        mass_kg: BODY_KG,
-        volume_m3: BODY_KG / 4000.0,
-        surface_area_m2: 0.02,
-        internal_heat_j: 0.0,
-        duration_s: DT_S,
-    };
+    let mut module = module_piston(gas, velocity_m_s);
+    let mut thermal = module_body(curve, start);
     let mut apart = Apart::default();
     let (mut produced_j_k, mut moved_j, mut iterations) = (0.0, 0.0, 0_u32);
     with_cx(|cx| {
         for step in 0..steps {
-            let input = PistonInput {
-                duration_s: DT_S,
-                heat_j: 0.0,
-                exterior_pressure_pa: 100_000.0,
-                external_force_n: 0.0,
-            };
-            let candidate = module
-                .thermal_discrete_gradient_candidate(
-                    input,
-                    thermal,
-                    controls(),
-                    exchange(bracket_j),
-                    |_, _| {
-                        Ok::<_, Infallible>(ConductanceSample {
-                            conductance_w_k,
-                            source: (),
-                        })
-                    },
-                    || false,
-                )
+            let candidate = module_step(&module, thermal, conductance_w_k, bracket_j)
                 .unwrap_or_else(|error| panic!("module refused step {step}: {error:?}"));
             let (next, accepted, report) = candidate.into_parts();
             module = next;
@@ -1183,10 +1255,12 @@ fn a_gas_in_contact_with_a_finite_body_matches_the_modules_thermal_step_in_both_
     // body at 300 K and at 650 K, 4000 W/K. These are no small steps: in
     // the twelve the hot body gives 66 J and cools by 132 K (measured).
     let curve = sensible();
-    let (conductance, bracket, steps) = (4000.0, 60.0, 12);
-    for body_k in [300.0, 650.0] {
+    // From 650 K the module's own 100 J bracket serves; from 300 K it does
+    // not (the run prints where the module refuses it).
+    let (conductance, steps) = (4000.0, 12);
+    for (body_k, bracket) in [(300.0, 60.0), (650.0, FIXTURE_BRACKET_J)] {
         let enthalpy = 500.0 * (body_k - 200.0);
-        let allowed = Apart::allowed(&gas(0.75, 0.0), 500.0, conductance, bracket, steps);
+        let allowed = Apart::allowed(&gas(0.75, 0.0), 500.0, conductance, bracket, false, steps);
         let run = contact_against_the_module(
             gas(0.75, 0.0),
             &curve,
@@ -1216,6 +1290,10 @@ fn a_gas_in_contact_with_a_finite_body_matches_the_modules_thermal_step_in_both_
         assert!(run.produced_j_k > 1.0e-3);
         assert!(run.apart.within(&allowed), "{:?} against {allowed:?}", run.apart);
         assert!(run.ledger_j.abs() <= 1.0e-10, "{}", run.ledger_j);
+        // The states above do not depend on the tangents the graph is
+        // given, only its iterations do: with the owners' own, two or
+        // three a step (measured 27 and 28 in the 12).
+        assert!(run.iterations <= 3 * steps, "{}", run.iterations);
 
         // The same graph with the kernel's ideal heat capacity for the
         // body, 0.5 J/K: the same energy, but the arithmetic mean of the
@@ -1254,9 +1332,9 @@ fn a_moving_wall_a_gas_and_a_finite_body_in_contact_match_the_modules_thermal_st
     // The module's moving fixture: the wall thrown at 2 m/s either way, a
     // gas whose heat capacity varies, the body at 650 K, 2000 W/K.
     let curve = sensible();
-    let (conductance, bracket, steps) = (2000.0, 100.0, 12);
+    let (conductance, bracket, steps) = (2000.0, FIXTURE_BRACKET_J, 12);
     for velocity in [-2.0, 2.0] {
-        let allowed = Apart::allowed(&gas(0.75, 0.001), 500.0, conductance, bracket, steps);
+        let allowed = Apart::allowed(&gas(0.75, 0.001), 500.0, conductance, bracket, true, steps);
         let run = contact_against_the_module(
             gas(0.75, 0.001),
             &curve,
@@ -1284,6 +1362,8 @@ fn a_moving_wall_a_gas_and_a_finite_body_in_contact_match_the_modules_thermal_st
         assert!((run.gas_m3 - 0.001) * velocity > 2.0e-6, "{}", run.gas_m3);
         assert!(run.apart.within(&allowed), "{:?} against {allowed:?}", run.apart);
         assert!(run.ledger_j.abs() <= 1.0e-10, "{}", run.ledger_j);
+        // Measured 25 in the 12 steps.
+        assert!(run.iterations <= 3 * steps, "{}", run.iterations);
     }
 }
 
@@ -1300,7 +1380,8 @@ fn a_body_that_melts_or_freezes_in_contact_with_the_gas_matches_the_modules_ther
     for transition in [350.0_f64, 500.0] {
         let curve = latent(transition);
         let capacity = (100_000.0 / (transition - 200.0)).min(240_000.0 / (900.0 - transition));
-        let allowed = Apart::allowed(&gas(0.75, 0.001), capacity, conductance, bracket, steps);
+        let allowed =
+            Apart::allowed(&gas(0.75, 0.001), capacity, conductance, bracket, false, steps);
         let run = contact_against_the_module(
             gas(0.75, 0.001),
             &curve,
@@ -1325,8 +1406,8 @@ fn a_body_that_melts_or_freezes_in_contact_with_the_gas_matches_the_modules_ther
             run.apart,
         );
         // It left the plateau on the side the gas pushed it to: all liquid
-        // above 350 K, or all solid below 500 K.
-        // The plateau held 30 J either way.
+        // above 350 K, or all solid below 500 K. The plateau held 30 J
+        // either way.
         if transition < 400.0 {
             assert!(run.body.liquid_mass_fraction() >= 1.0 && run.body.temperature_k() > transition);
         } else {
@@ -1335,5 +1416,7 @@ fn a_body_that_melts_or_freezes_in_contact_with_the_gas_matches_the_modules_ther
         assert!(run.moved_j > 30.0 && run.produced_j_k > 1.0e-3);
         assert!(run.apart.within(&allowed), "{:?} against {allowed:?}", run.apart);
         assert!(run.ledger_j.abs() <= 1.0e-10, "{}", run.ledger_j);
+        // Measured 77 and 69 in the 40 steps.
+        assert!(run.iterations <= 3 * steps, "{}", run.iterations);
     }
 }

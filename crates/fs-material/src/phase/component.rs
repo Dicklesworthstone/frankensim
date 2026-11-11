@@ -18,6 +18,10 @@
 //! as its chart does. Its volume, its surface and the law of any conductance
 //! that touches it belong to whoever connects it; a phase change moves
 //! nothing mechanical here.
+//!
+//! Its class is `Monotone1d`. A kernel that differences only smooth
+//! components (fs-system today) therefore needs its tangent: in a loop, add
+//! it with the tangent it offers.
 
 use fs_exec::Cx;
 use fs_ports::StableId;
@@ -111,13 +115,20 @@ impl UniformEnthalpyBody {
         }
         let heat_j = dt_s * heat_w;
         let initial = old.specific_enthalpy_j_kg();
-        // Heat too small to move the enthalpy leaves it where it is; the
-        // receipt books what rounding kept and what it lost.
+        // Heat too small to move the enthalpy leaves the state as it is, to
+        // the bit and with its identity, as the chart's own advance does
+        // for no increment; the receipt books what rounding lost.
         let reached = initial + heat_j / self.mass_kg;
-        let endpoint = self.curve.state_at_specific_enthalpy(reached)?;
+        // Exact on purpose: the question is whether the sum moved at all.
+        #[allow(clippy::float_cmp)]
+        let endpoint = if reached == initial {
+            *old
+        } else {
+            self.curve.state_at_specific_enthalpy(reached)?
+        };
         let mean = self.curve.thermodynamic_mean_temperature(
             initial,
-            reached,
+            endpoint.specific_enthalpy_j_kg(),
             self.curve.knots().len() - 1,
             || cx.is_cancel_requested(),
         )?;
@@ -189,7 +200,14 @@ impl Component for UniformEnthalpyBody {
             return Err(PhaseStateError::StateCurveMismatch);
         }
         // Enthalpy in the chart's own datum.
-        Ok(self.mass_kg * state.specific_enthalpy_j_kg())
+        let energy_j = self.mass_kg * state.specific_enthalpy_j_kg();
+        if energy_j.is_finite() {
+            Ok(energy_j)
+        } else {
+            Err(refused(
+                "a uniform enthalpy body's stored energy is unrepresentable",
+            ))
+        }
     }
 
     fn propose(
