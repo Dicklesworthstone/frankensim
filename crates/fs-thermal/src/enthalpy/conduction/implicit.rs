@@ -187,8 +187,38 @@ pub struct ImplicitConductionControls {
     /// Whole-advance ceiling, including rejected trials and final entropy queries.
     pub maximum_residual_evaluations: usize,
     pub cell_tolerance_j: f64,
-    /// Gates each interval and the independently reduced whole-call balance.
+    /// The whole-call joule budget, gating the independently reduced whole-call
+    /// balance. Each interval's Newton stop and gate take its allowance: the
+    /// budget accrued through the interval's end in proportion to time,
+    /// `total_tolerance_j * (end - call start) / call span`, less the residual
+    /// magnitudes already accepted in the call. N accepted interval residuals
+    /// thus sum in magnitude to at most this budget times `1 + 2 * 2^-53` to
+    /// first order in 2^-53 (the rounding of the allowances and of their
+    /// compensated running sum), and a short interval inherits what the
+    /// intervals before it left unspent.
     pub total_tolerance_j: f64,
+}
+impl ImplicitConductionControls {
+    // An interval's controls: the same limits, with its allowance (see
+    // `total_tolerance_j`) as the joule tolerance. `spent_j` is the compensated
+    // sum of the residual magnitudes accepted earlier in the call; at the call's
+    // target the accrued budget is `total_tolerance_j` exactly. A negative
+    // difference, possible only by rounding, is an allowance of zero.
+    fn interval_allowance(
+        self,
+        call_start_s: f64,
+        call_target_s: f64,
+        end_s: f64,
+        spent_j: f64,
+    ) -> Result<Self, DepositionError> {
+        let fraction =
+            finite(finite(end_s - call_start_s)? / finite(call_target_s - call_start_s)?)?;
+        let accrued = finite(self.total_tolerance_j * fraction)?;
+        Ok(Self {
+            total_tolerance_j: finite(accrued - spent_j)?.max(0.0),
+            ..self
+        })
+    }
 }
 impl Default for ImplicitConductionControls {
     fn default() -> Self {
@@ -239,6 +269,16 @@ pub enum ImplicitConductionError {
     KrylovNotConverged {
         /// Last completed cycle's true relative Euclidean linear residual.
         relative_residual: f64,
+    },
+    /// An interval's allowance of `total_tolerance_j` is below the rounding floor
+    /// of its own energy audit, with every cell already within `cell_tolerance_j`:
+    /// f64 cannot resolve what is left of the whole-call budget at this interval.
+    /// Raised at that interval, which publishes nothing; it is not retried.
+    AllowanceBelowAuditFloor {
+        /// The interval's allowance of `total_tolerance_j`.
+        allowance_j: f64,
+        /// The rounding floor of the refused trial's energy audit.
+        floor_j: f64,
     },
 }
 impl From<DepositionError> for ImplicitConductionError {
@@ -1423,6 +1463,15 @@ impl<'a> ImplicitConductionChain<'a> {
                     checkpoint,
                 );
             }
+            if maximum <= controls.cell_tolerance_j {
+                let floor_j = self.audit_floor_j(thermal, &workspace.energy, trial.residual_j())?;
+                if controls.total_tolerance_j < floor_j {
+                    return Err(ImplicitConductionError::AllowanceBelowAuditFloor {
+                        allowance_j: controls.total_tolerance_j,
+                        floor_j,
+                    });
+                }
+            }
             if iteration == controls.maximum_newton_iterations {
                 return Err(ImplicitConductionError::NotConverged {
                     maximum_residual_j: maximum,
@@ -1503,6 +1552,32 @@ impl<'a> ImplicitConductionChain<'a> {
             trial = candidate;
         }
         unreachable!("bounded nonlinear loop returns at its limit")
+    }
+
+    // The rounding floor of a trial's energy audit. A cell's stored joules move
+    // on its enthalpy grid, in steps of m * ulp(h), so without cancellation
+    // between cells the audit resolves no finer than half a step per cell. The
+    // audit is a compensated sum of at most K = 2n + 3 rounded terms (storage and
+    // heat per cell, and the external account's three parts), whose rounding is
+    // at most gamma_K = K u / (1 - K u) times their magnitudes, u = 2^-53.
+    // Both parts come from this trial; neither is a chosen scale.
+    fn audit_floor_j(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        energy_j: &[f64],
+        residual_j: &[f64],
+    ) -> Result<f64, DepositionError> {
+        let unit = f64::EPSILON / 2.0;
+        let terms = (2 * self.ids.len() + 3) as f64;
+        let gamma = finite(terms * unit / (1.0 - terms * unit))?;
+        let (mut grid, mut magnitude) = (Sum::default(), Sum::default());
+        for ((&id, &stored), &residual) in self.ids.iter().zip(energy_j).zip(residual_j) {
+            let cell = &thermal.cells[&id];
+            let h = finite(cell.specific_h_j_kg + stored / cell.mass_kg)?.abs();
+            grid.add(0.5 * cell.mass_kg * (h.next_up() - h))?;
+            magnitude.add(stored.abs() + (stored - residual).abs())?;
+        }
+        finite(grid.total()? + gamma * magnitude.total()?)
     }
 
     /// Advance the original timeline with endpoint-evaluated nonlinear heat.
@@ -1650,7 +1725,7 @@ fn empty_report() -> ImplicitConductionReport {
 fn accumulate_entropy(total: &mut EntropyAudit, next: EntropyAudit) -> Result<(), DepositionError> {
     total.accumulate(next)
 }
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct Sum {
     value: f64,
     correction: f64,

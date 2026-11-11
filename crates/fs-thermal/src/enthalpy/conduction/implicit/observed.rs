@@ -195,6 +195,8 @@ impl ImplicitConductionChain<'_> {
         observers.source.begin().map_err(Observer)?;
         let mut report = empty_report();
         let mut supplied = Sum::default();
+        // Residual magnitudes of the accepted intervals, for their allowances.
+        let mut spent = Sum::default();
         loop {
             checkpoint()?;
             let (with_events, observed, events) = next.advance_observed(
@@ -285,7 +287,13 @@ impl ImplicitConductionChain<'_> {
             let mut halvings = 0;
             loop {
                 checkpoint()?;
-                let end = if dt == stop - start { stop } else { start + dt };
+                // Backward Euler has no stage; an SDIRK2 step absorbs a remainder
+                // that could not hold one (sdirk::sdirk2_step_end).
+                let end = match method {
+                    ObservedMethod::BackwardEuler if dt == stop - start => stop,
+                    ObservedMethod::BackwardEuler => start + dt,
+                    ObservedMethod::Sdirk2 => super::sdirk::sdirk2_step_end(start, dt, stop)?,
+                };
                 if !end.is_finite() || end <= start {
                     return Err(DepositionError::Arithmetic.into());
                 }
@@ -303,18 +311,21 @@ impl ImplicitConductionChain<'_> {
                     visited += 1;
                     combined.add(&next, id, watts)
                 })?;
+                let allowance =
+                    controls.interval_allowance(thermal.time_s, target_s, end, spent.total()?)?;
                 let trial = match method {
                     ObservedMethod::BackwardEuler => self.solve_step_with_sources(
-                        &next, end, &combined, &transfers, controls, workspace,
+                        &next, end, &combined, &transfers, allowance, workspace,
                         &mut report, &mut checkpoint,
                     ),
                     ObservedMethod::Sdirk2 => self.solve_sdirk2_step_with_sources(
-                        &next, end, &combined, &transfers, controls, workspace,
+                        &next, end, &combined, &transfers, allowance, workspace,
                         &mut report, &mut checkpoint,
                     ),
                 };
                 match trial {
                     Ok((accepted, energy, entropy, maximum)) => {
+                        spent.add(energy.residual_j.abs())?;
                         source
                             .step(
                                 start,

@@ -2348,6 +2348,32 @@ joule gates remain active. Bath heat/entropy and conductive generation use the
 two positive stage weights; exact caloric entropy storage is measured from the
 original initial state and the temporal entropy defect remains explicit.
 
+The interval-total gate, and the Newton stop of every stage, take the
+interval's allowance of the whole-call budget in every implicit chain/graph
+driver (backward Euler, SDIRK2, observed and adaptive): the budget accrued
+through the interval's end, `total_tolerance_j * (end - call start) / call
+span`, less the residual magnitudes already accepted in the call (a
+compensated sum; an adaptive comparison's coarse trial spends nothing). N
+accepted interval residuals therefore sum in magnitude to at most
+`total_tolerance_j * (1 + 2 * 2^-53)` to first order in 2^-53, and a short
+interval, such as the remainder backward Euler leaves when `maximum_dt_s` does
+not divide the span in f64, inherits the budget the intervals before it left
+unspent. When a stage's cells are within `cell_tolerance_j` but its allowance
+is below the rounding floor of its own energy audit (half an enthalpy grid
+step `m * ulp(h)` per cell, plus `gamma_K` times the magnitudes of its
+`K = 2n + 3` terms), the call refuses at that interval with
+`ImplicitConductionError::AllowanceBelowAuditFloor { allowance_j, floor_j }`:
+f64 cannot resolve what is left of the whole-call budget there. It is not
+retried and publishes nothing.
+
+A fixed SDIRK2 step (`advance_sdirk2_to`, `advance_sdirk2_observed_to`) whose
+remainder to the interval's stop could not hold a stage time, by the same
+strict test the stage solve applies, ends at the stop instead. The last step
+then exceeds `maximum_dt_s` by less than `U / (gamma * (1 - 2^-53))`, `U` the
+larger ulp of the remainder's two ends, plus the rounding of `start + dt`.
+Ten steps of 0.1 to 1.0 are ten steps ending at exactly 1.0, where the tenth
+used to leave a remainder of one ulp that every stage refused.
+
 This entry point admits fixed-mass chains/graphs, including their existing
 nonlinear bulk, contact and integrated interface laws, with piecewise-constant
 authored cell source/sink powers, ambient/reservoir temperatures and native

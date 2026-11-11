@@ -12,6 +12,39 @@ use super::*;
 
 const GAMMA: f64 = 1.0 - core::f64::consts::FRAC_1_SQRT_2;
 
+// The first-stage weight GAMMA*dt and time of a step from `start_s` to `end_s`,
+// or None when f64 has no stage time strictly inside the step. The step solve
+// refuses such a step; the fixed-step drivers use the same test to merge an
+// unusable remainder into the step before it.
+fn sdirk2_stage(start_s: f64, end_s: f64) -> Result<Option<(f64, f64)>, DepositionError> {
+    let implicit_dt_s = finite(GAMMA * finite(end_s - start_s)?)?;
+    let stage_time_s = finite(start_s + implicit_dt_s)?;
+    let inside = positive(implicit_dt_s) && start_s < stage_time_s && stage_time_s < end_s;
+    Ok(inside.then_some((implicit_dt_s, stage_time_s)))
+}
+
+// The end of a fixed SDIRK2 step of at most `dt_s` from `start_s` toward `stop_s`.
+// When the remainder after `start_s + dt_s` cannot hold a stage (sdirk2_stage),
+// the step ends at `stop_s` instead. That remainder r is below
+// U / (GAMMA * (1 - 2^-53)), U the larger ulp of the remainder's two ends: at
+// that length GAMMA*r rounds to at least one ulp past its start and (1 - GAMMA)*r
+// to at least one ulp before its end, so a stage time exists. The last step thus
+// exceeds `dt_s` by less than that bound plus the rounding of `start_s + dt_s`.
+pub(super) fn sdirk2_step_end(
+    start_s: f64,
+    dt_s: f64,
+    stop_s: f64,
+) -> Result<f64, DepositionError> {
+    if dt_s == stop_s - start_s {
+        return Ok(stop_s);
+    }
+    let end = start_s + dt_s;
+    if end.is_finite() && end < stop_s && sdirk2_stage(end, stop_s)?.is_none() {
+        return Ok(stop_s);
+    }
+    Ok(end)
+}
+
 #[path = "sdirk/adaptive.rs"]
 mod time_control;
 
@@ -107,11 +140,9 @@ impl ImplicitConductionChain<'_> {
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(DepositionSimulation<'m>, EnergyAudit, EntropyAudit, f64), ImplicitConductionError> {
         let dt = finite(target_s - thermal.time_s)?;
-        let implicit_dt_s = finite(GAMMA * dt)?;
-        let stage_time_s = finite(thermal.time_s + implicit_dt_s)?;
-        if !positive(implicit_dt_s) || stage_time_s <= thermal.time_s || stage_time_s >= target_s {
+        let Some((implicit_dt_s, stage_time_s)) = sdirk2_stage(thermal.time_s, target_s)? else {
             return Err(DepositionError::Arithmetic.into());
-        }
+        };
         // Generated contributions add to each cell's authored power.
         // Native StageHeat carries them and any attached endpoint advection with
         // the same quadrature as conduction, including external stream energy
@@ -260,6 +291,8 @@ impl ImplicitConductionChain<'_> {
         let mut observer = None;
         let mut report = empty_report();
         let mut supplied = Sum::default();
+        // Residual magnitudes of the accepted steps, for the step allowances.
+        let mut spent = Sum::default();
         loop {
             checkpoint()?;
             // Reuse the native event owner only when events are due. The common
@@ -308,20 +341,21 @@ impl ImplicitConductionChain<'_> {
             let mut halvings = 0;
             loop {
                 checkpoint()?;
-                let end = if dt == remaining { stop } else { start + dt };
+                let end = sdirk2_step_end(start, dt, stop)?;
                 if !end.is_finite() || end <= start {
                     return Err(DepositionError::Arithmetic.into());
                 }
                 match self.solve_sdirk2_step(
                     &next,
                     end,
-                    controls,
+                    controls.interval_allowance(thermal.time_s, target_s, end, spent.total()?)?,
                     workspace,
                     &mut report,
                     &mut checkpoint,
                 ) {
                     Ok((accepted, energy, entropy, maximum)) => {
                         supplied.add(energy.external_heat_j)?;
+                        spent.add(energy.residual_j.abs())?;
                         accumulate_entropy(&mut report.entropy, entropy)?;
                         report.maximum_cell_residual_j =
                             report.maximum_cell_residual_j.max(maximum);

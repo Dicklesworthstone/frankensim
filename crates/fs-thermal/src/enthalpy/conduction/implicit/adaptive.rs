@@ -145,6 +145,8 @@ pub trait AdaptiveConductionStepper: Sized {
 
     /// Solve exactly this interval, without internal physical subdivisions.
     /// The residual ceiling in `controls` is shared through cumulative `work`.
+    /// Its `total_tolerance_j` is this interval's allowance of the whole-call
+    /// budget (see `ImplicitConductionControls::total_tolerance_j`).
     fn solve_interval<'m>(
         &self,
         thermal: &DepositionSimulation<'m>,
@@ -231,6 +233,8 @@ pub trait AdaptiveConductionStepper: Sized {
             suggested_dt_s: span,
         };
         let mut supplied = Sum::default();
+        // Residual magnitudes of the published half steps, for their allowances.
+        let mut spent = Sum::default();
         let mut reductions = 0;
         loop {
             checkpoint()?;
@@ -284,10 +288,16 @@ pub trait AdaptiveConductionStepper: Sized {
             let dt = end - start;
             report.comparisons += 1;
             let candidate = (|| {
+                // The coarse comparison publishes nothing and spends nothing.
+                let allowance = |end_s, spent_j| {
+                    controls
+                        .step
+                        .interval_allowance(thermal.time_s, target_s, end_s, spent_j)
+                };
                 let (coarse, _, _, _) = self.solve_interval(
                     &next,
                     end,
-                    controls.step,
+                    allowance(end, spent.total()?)?,
                     workspace,
                     &mut report.solve,
                     &mut checkpoint,
@@ -295,15 +305,17 @@ pub trait AdaptiveConductionStepper: Sized {
                 let (half, e1, s1, r1) = self.solve_interval(
                     &next,
                     middle,
-                    controls.step,
+                    allowance(middle, spent.total()?)?,
                     workspace,
                     &mut report.solve,
                     &mut checkpoint,
                 )?;
+                let mut through_half = spent;
+                through_half.add(e1.residual_j.abs())?;
                 let (fine, e2, s2, r2) = self.solve_interval(
                     &half,
                     end,
-                    controls.step,
+                    allowance(end, through_half.total()?)?,
                     workspace,
                     &mut report.solve,
                     &mut checkpoint,
@@ -334,6 +346,8 @@ pub trait AdaptiveConductionStepper: Sized {
                     if error.normalized <= 1.0 {
                         supplied.add(e1.external_heat_j)?;
                         supplied.add(e2.external_heat_j)?;
+                        spent.add(e1.residual_j.abs())?;
+                        spent.add(e2.residual_j.abs())?;
                         accumulate_entropy(&mut report.solve.entropy, s1)?;
                         accumulate_entropy(&mut report.solve.entropy, s2)?;
                         report.solve.maximum_cell_residual_j =

@@ -1280,3 +1280,237 @@ fn convecting_source_events_keep_stage_timing_and_late_cancellation_atomic() {
         ))
     ));
 }
+
+// Ten additions of 0.1 end one ulp short of 1.0. That remainder has no stage
+// time, so the tenth step takes it and the run ends at exactly 1.0.
+#[test]
+fn a_remainder_without_a_stage_time_joins_the_last_step() {
+    let law = Law::constant(3.0, 1.0);
+    let (thermal, observer) = network(
+        &law,
+        &[600.0, 200.0],
+        &[2.0, 5.0],
+        &[(0, 1, 1.0)],
+        None,
+        vec![],
+    );
+    let solver = chain(&thermal, &observer, &law);
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    let (whole, report) = solver
+        .advance_sdirk2_to(&thermal, 1.0, controls(0.1), &mut workspace, || Ok(()))
+        .unwrap();
+    assert_eq!(whole.time_s(), 1.0);
+    assert_eq!(report.energy.substeps, 10);
+
+    let ninth = (0..9).fold(0.0, |t: f64, _| t + 0.1);
+    let end = ninth + 0.1;
+    assert!(end < 1.0 && sdirk2_stage(end, 1.0).unwrap().is_none());
+    assert_eq!(sdirk2_step_end(ninth, 0.1, 1.0).unwrap(), 1.0);
+    let (prefix, _) = solver
+        .advance_sdirk2_to(&thermal, ninth, controls(0.1), &mut workspace, || Ok(()))
+        .unwrap();
+    let (split, last) = solver
+        .advance_sdirk2_to(&prefix, 1.0, controls(0.1), &mut workspace, || Ok(()))
+        .unwrap();
+    assert_eq!((split.time_s(), last.energy.substeps), (1.0, 1));
+    // The last step exceeds maximum_dt_s by less than the rounding of start + dt
+    // plus the remainder bound U / (GAMMA * (1 - 2^-53)) of sdirk2_step_end.
+    let ulp = |x: f64| x.abs().next_up() - x.abs();
+    let bound = ulp(end) / 2.0 + ulp(end).max(ulp(1.0)) / (GAMMA * (1.0 - f64::EPSILON / 2.0));
+    let last_dt = 1.0 - ninth;
+    assert!(last_dt > 0.1 && last_dt <= 0.1 + bound, "{last_dt:e}");
+}
+
+// A remainder that holds a stage time stays its own step, with the same ends as
+// before: 0.6 + 0.3 = 0.8999999999999999 leaves 0.10000000000000009.
+#[test]
+fn a_remainder_with_a_stage_time_stays_its_own_step() {
+    let third = 0.6 + 0.3;
+    assert!(third < 0.9 && sdirk2_stage(third, 1.0).unwrap().is_some());
+    assert_eq!(
+        sdirk2_step_end(0.6, 0.3, 1.0).unwrap().to_bits(),
+        third.to_bits()
+    );
+    let law = Law::constant(3.0, 1.0);
+    let (thermal, observer) = network(
+        &law,
+        &[600.0, 200.0],
+        &[2.0, 5.0],
+        &[(0, 1, 1.0)],
+        None,
+        vec![],
+    );
+    let solver = chain(&thermal, &observer, &law);
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    let (next, report) = solver
+        .advance_sdirk2_to(&thermal, 1.0, controls(0.3), &mut workspace, || Ok(()))
+        .unwrap();
+    assert_eq!((next.time_s(), report.energy.substeps), (1.0, 4));
+}
+
+// The driver's intervals, solved one by one with the driver's allowances: each
+// residual is within its allowance, their magnitudes sum to at most the
+// whole-call budget, and the endpoint is the driver's own, bit for bit.
+#[test]
+fn interval_allowances_bound_the_summed_interval_residuals() {
+    let law = Law {
+        nonlinear: true,
+        ..Law::constant(3.0, 1.0)
+    };
+    let (thermal, observer) = network(
+        &law,
+        &[600.0, 200.0],
+        &[2.0, 5.0],
+        &[(0, 1, 1.0)],
+        None,
+        vec![],
+    );
+    let solver = chain(&thermal, &observer, &law);
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    let step = ImplicitConductionControls {
+        total_tolerance_j: 1e-9,
+        ..controls(1.0 / 256.0)
+    };
+    let (driven, report) = solver
+        .advance_sdirk2_to(&thermal, 1.0, step, &mut workspace, || Ok(()))
+        .unwrap();
+    assert_eq!(report.energy.substeps, 256);
+    let mut state = thermal.clone();
+    let mut work = empty_report();
+    let mut spent = Sum::default();
+    while state.time_s() < 1.0 {
+        let start = state.time_s();
+        let end = sdirk2_step_end(start, step.maximum_dt_s.min(1.0 - start), 1.0).unwrap();
+        let allowance = step
+            .interval_allowance(0.0, 1.0, end, spent.total().unwrap())
+            .unwrap();
+        let (next, energy, _, _) = solver
+            .solve_sdirk2_step(
+                &state,
+                end,
+                allowance,
+                &mut workspace,
+                &mut work,
+                &mut || Ok(()),
+            )
+            .unwrap();
+        assert!(energy.residual_j.abs() <= allowance.total_tolerance_j);
+        spent.add(energy.residual_j.abs()).unwrap();
+        state = next;
+    }
+    assert_eq!(state.cells(), driven.cells());
+    let magnitude = spent.total().unwrap();
+    assert!(magnitude <= step.total_tolerance_j, "{magnitude:e}");
+}
+
+// A long run whose cells hold h near 1e6 J/kg: half an enthalpy grid step of the
+// 5 kg cell is 2.9e-10 J. The first of 1024 intervals has spent nothing, so its
+// allowance is its time share of 1e-9 J, which cannot be resolved; the call
+// refuses there. One interval with the same budget is admitted.
+#[test]
+fn an_allowance_below_the_audit_floor_refuses_with_both_values() {
+    let law = Law {
+        datum: 1e6,
+        ..Law::constant(1.0, 1.0)
+    };
+    let (thermal, observer) = network(
+        &law,
+        &[600.0, 200.0],
+        &[2.0, 5.0],
+        &[(0, 1, 1.0)],
+        None,
+        vec![],
+    );
+    let solver = chain(&thermal, &observer, &law);
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    let step = |dt| ImplicitConductionControls {
+        cell_tolerance_j: 1e-8,
+        total_tolerance_j: 1e-9,
+        ..controls(dt)
+    };
+    let (one, _) = solver
+        .advance_sdirk2_to(&thermal, 1.0, step(1.0), &mut workspace, || Ok(()))
+        .unwrap();
+    assert_eq!(one.time_s(), 1.0);
+    match solver.advance_sdirk2_to(&thermal, 1.0, step(1.0 / 1024.0), &mut workspace, || Ok(())) {
+        Err(ImplicitConductionError::AllowanceBelowAuditFloor {
+            allowance_j,
+            floor_j,
+        }) => {
+            assert_eq!(allowance_j, 1e-9 / 1024.0);
+            assert!(allowance_j < floor_j, "{allowance_j:e} {floor_j:e}");
+        }
+        other => panic!("{:?}", other.map(|(_, report)| report)),
+    }
+}
+
+// Backward Euler has no stage time to merge a remainder by: ten steps of 0.1 end
+// 2^-53 s short of 1.0, and an eleventh interval takes that sliver. Its time
+// share of the 1e-8 J budget, 1e-8 * 2^-53 J, is below the half enthalpy grid
+// step of either cell, so a per-interval time share refused here. The allowance
+// it inherits is the budget the first ten intervals left unspent.
+#[test]
+fn a_backward_euler_sliver_inherits_the_unspent_allowance() {
+    let law = Law::constant(3.0, 1.0);
+    let (thermal, observer) = network(
+        &law,
+        &[600.0, 200.0],
+        &[2.0, 5.0],
+        &[(0, 1, 1.0)],
+        None,
+        vec![],
+    );
+    let solver = chain(&thermal, &observer, &law);
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    let step = controls(0.1);
+    let (whole, report) = solver
+        .advance_to(&thermal, 1.0, step, &mut workspace, || Ok(()))
+        .unwrap();
+    assert_eq!((whole.time_s(), report.energy.substeps), (1.0, 11));
+
+    let mut state = thermal.clone();
+    let mut work = empty_report();
+    let mut spent = Sum::default();
+    for _ in 0..10 {
+        let end = state.time_s() + 0.1;
+        let allowance = step
+            .interval_allowance(0.0, 1.0, end, spent.total().unwrap())
+            .unwrap();
+        let (next, energy, _, _) = solver
+            .solve_step(
+                &state,
+                end,
+                allowance,
+                &mut workspace,
+                &mut work,
+                &mut || Ok(()),
+            )
+            .unwrap();
+        spent.add(energy.residual_j.abs()).unwrap();
+        state = next;
+    }
+    let sliver = 1.0 - state.time_s();
+    assert_eq!(sliver, f64::EPSILON / 2.0);
+    let share = step.total_tolerance_j * sliver;
+    let inherited = step
+        .interval_allowance(0.0, 1.0, 1.0, spent.total().unwrap())
+        .unwrap();
+    let floor = solver.audit_floor_j(&state, &[0.0; 2], &[0.0; 2]).unwrap();
+    eprintln!(
+        "sliver {sliver:e} s: time share {share:e} J, inherited allowance {:e} J, \
+         audit floor at its start {floor:e} J",
+        inherited.total_tolerance_j,
+    );
+    assert!(share < floor && floor < inherited.total_tolerance_j);
+    let (last, _, _, _) = solver
+        .solve_step(
+            &state,
+            1.0,
+            inherited,
+            &mut workspace,
+            &mut work,
+            &mut || Ok(()),
+        )
+        .unwrap();
+    assert_eq!(last.cells(), whole.cells());
+}
