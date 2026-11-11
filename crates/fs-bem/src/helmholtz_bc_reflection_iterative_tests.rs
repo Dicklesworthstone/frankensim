@@ -144,11 +144,17 @@ fn pressure_release_uses_its_own_flow_block_and_retains_zero_wall_work() {
         &gate,
     )
     .unwrap();
-    let (response, report, receipt) = prepared.scatter(&incident(&surface, 3.0), &gate).unwrap();
+    let (response, report, _) = prepared.scatter(&incident(&surface, 3.0), &gate).unwrap();
     assert!(report.converged_euclidean());
-    // Every panel is in one direct-interaction leaf: the transformed block
-    // is the complete physical ikB operator, including its self closure.
-    assert!(receipt.iterations <= 2, "{}", receipt.iterations);
+    // The preconditioner blocks are fs-fmm's leaf groups, and the tree has at least the eight octants of depth
+    // 1, so this 20-panel sphere is several blocks and the transformed block-Jacobi is not the complete operator:
+    // no iteration count is asserted. The solve converges to its own stated tolerance.
+    assert!(
+        report.rel_residual <= options().tol,
+        "relative residual {:e} above the solve's tolerance {:e}",
+        report.rel_residual,
+        options().tol
+    );
     assert!(response.total_pressure_pa().iter().all(|&p| p == C64::ZERO));
     assert_eq!(response.absorbed_power_w, 0.0);
     assert!(response.scattered.velocity.iter().any(|v| v.abs() > 1e-6));
@@ -157,20 +163,29 @@ fn pressure_release_uses_its_own_flow_block_and_retains_zero_wall_work() {
 
 #[test]
 fn transformed_blocks_follow_each_existing_burton_miller_panel_rule() {
-    let surface = SpherePanels::icosphere(0.1, 1).unwrap();
     let gate = CancelGate::new_clock_free();
-    let reflection: Vec<_> = (0..surface.areas().len())
-        .map(|i| match i % 3 {
-            0 => C64::ONE,
-            1 => -C64::ONE,
-            _ => C64::new(0.2, 0.5),
-        })
-        .collect();
-    for rule in [
-        PanelRule::Centroid,
-        PanelRule::TriangleNear { max_pairs: 10000 },
-        PanelRule::Triangle { max_pairs: 10000 },
+    // The Triangle rule admits a cloud only if its leaf box spans CBIE_MIN_LEAF_RADII = 4 panel radii
+    // (helmholtz_iterative.rs). The tree depth is clamped to at least 1, so a leaf is at most half the body, 0.1
+    // here, and no leaf_capacity enlarges it. icosphere(0.1, 1) has panel radius 0.03568 and 4r = 0.1427, which is
+    // refused; icosphere(0.1, 2) has radius 0.01876 and 4r = 0.0750, which is admitted. The Triangle arm therefore
+    // runs on level 2; the other two arms stay on level 1. The Triangle rule's own ceiling, `max_pairs`, bounds
+    // the near pairs it integrates exactly: the ordered pairs i != j with |c_i - c_j| <= 4 r_j
+    // (helmholtz_iterative.rs, triangle_is_near). That count is a property of the mesh, 380, 3,600 and 12,840 on
+    // icosphere(0.1, 0), (0.1, 1) and (0.1, 2), counted independently, so level 1 sits under 10000 and the
+    // level-2 Triangle arm needs 12,840.
+    for (rule, level) in [
+        (PanelRule::Centroid, 1),
+        (PanelRule::TriangleNear { max_pairs: 10000 }, 1),
+        (PanelRule::Triangle { max_pairs: 12840 }, 2),
     ] {
+        let surface = SpherePanels::icosphere(0.1, level).unwrap();
+        let reflection: Vec<_> = (0..surface.areas().len())
+            .map(|i| match i % 3 {
+                0 => C64::ONE,
+                1 => -C64::ONE,
+                _ => C64::new(0.2, 0.5),
+            })
+            .collect();
         let mut config = options();
         config.leaf_capacity = 128;
         config.precond = Preconditioner::NearFieldBlockJacobi {
@@ -191,22 +206,39 @@ fn transformed_blocks_follow_each_existing_burton_miller_panel_rule() {
         let ReflectionFactor::Local(operator) = &prepared.factor else {
             panic!("mixed boundary");
         };
-        assert_eq!(operator.blocks.len(), 1);
-        let x: Vec<_> = (0..reflection.len())
-            .map(|i| C64::new(0.03 * (i + 1) as f64, -0.04))
-            .collect();
-        let pressure: Vec<_> = x
-            .iter()
-            .zip(&prepared.pressure_coefficient)
-            .map(|(&x, &a)| a * x)
-            .collect();
-        let flow: Vec<_> = x
-            .iter()
-            .zip(&prepared.flow_coefficient)
-            .map(|(&x, &b)| b * x)
-            .collect();
-        let actual = prepared.image(operator, &pressure, &flow, &gate).unwrap();
-        assert!(relative(&operator.inverse(&actual), &x) < 3e-10, "{rule:?}");
+        // The blocks are fs-fmm's leaf groups (at least the eight octants of depth 1), so no mesh is one block.
+        // Each panel is in exactly one block, and the exactness of the transform is per block: for x supported
+        // on one block, every pair inside a leaf is a direct near-field pair, so the image restricted to that
+        // block is the block's own transformed matrix times x, and its stored inverse returns x there.
+        assert!(!operator.blocks.is_empty());
+        let mut covered = vec![0usize; reflection.len()];
+        for block in &operator.blocks {
+            for &i in &block.indices {
+                covered[i] += 1;
+            }
+        }
+        assert!(covered.iter().all(|&count| count == 1), "{rule:?}");
+        for block in &operator.blocks {
+            let mut x = vec![C64::ZERO; reflection.len()];
+            for &i in &block.indices {
+                x[i] = C64::new(0.03 * (i + 1) as f64, -0.04);
+            }
+            let pressure: Vec<_> = x
+                .iter()
+                .zip(&prepared.pressure_coefficient)
+                .map(|(&x, &a)| a * x)
+                .collect();
+            let flow: Vec<_> = x
+                .iter()
+                .zip(&prepared.flow_coefficient)
+                .map(|(&x, &b)| b * x)
+                .collect();
+            let actual = prepared.image(operator, &pressure, &flow, &gate).unwrap();
+            let recovered = operator.inverse(&actual);
+            let own: Vec<_> = block.indices.iter().map(|&i| recovered[i]).collect();
+            let expected: Vec<_> = block.indices.iter().map(|&i| x[i]).collect();
+            assert!(relative(&own, &expected) < 3e-10, "{rule:?}");
+        }
     }
 }
 
