@@ -166,9 +166,13 @@ fn observe(
 }
 
 fn near(actual: f64, expected: f64) {
+    near_relative(actual, expected, 2e-9);
+}
+
+fn near_relative(actual: f64, expected: f64, relative: f64) {
     assert!(
-        (actual - expected).abs() <= 2e-9 * expected.abs().max(f64::MIN_POSITIVE),
-        "actual={actual:.17e}, expected={expected:.17e}",
+        (actual - expected).abs() <= relative * expected.abs().max(f64::MIN_POSITIVE),
+        "actual={actual:.17e}, expected={expected:.17e}, relative={relative:.3e}",
     );
 }
 
@@ -274,6 +278,17 @@ fn nonisothermal_absorbing_film_keeps_original_layer_emission_and_beer_path() {
             100_000,
         )
         .unwrap();
+        // The camera ray stops at its contact with the patch, not on the patch.
+        // Arrival is admitted once the witness lies within surface_tolerance_m
+        // of the face (gradient_index/event.rs:519). Along this ray, at approach
+        // cosine `cosine`, the stop is therefore at most surface_tolerance_m / cosine
+        // short of the face. The host's Beer factor covers the path up to the stop,
+        // so the radiance can exceed state.i * exp(-0.4) by at most
+        // expm1(0.4 * surface_tolerance_m / cosine). That is 6.67e-9 relative here;
+        // R-c measured 3.31e-9, from a stop 8.27e-9 m short. The file's 2e-9
+        // allowance for everything else is kept on top of it.
+        let contact_bound_m = settings().event.surface_tolerance_m / cosine;
+        let tolerance = 2e-9 + (0.4 * contact_bound_m).exp_m1();
         for (film_temperature, substrate_temperature) in [(1200.0, 2500.0), (2500.0, 1200.0)] {
             let source = CoatingThermalEmission::try_opaque(
                 &[CoatingLayer::Absorbing(&film)],
@@ -293,12 +308,13 @@ fn nonisothermal_absorbing_film_keeps_original_layer_emission_and_beer_path() {
                 let original = source.evaluate(wavelength, cosine).unwrap();
                 let state = original.stokes();
                 let attenuation = (-0.4_f64).exp();
-                near(
+                near_relative(
                     observe(cx, &camera, 1.0, wavelength, None),
                     state.i * attenuation,
+                    tolerance,
                 );
                 for (angle, sign) in [(0.0, 1.0), (FRAC_PI_2, -1.0)] {
-                    near(
+                    near_relative(
                         observe(
                             cx,
                             &camera,
@@ -307,6 +323,7 @@ fn nonisothermal_absorbing_film_keeps_original_layer_emission_and_beer_path() {
                             Some(CameraAnalyzer::try_linear(Y, angle).unwrap()),
                         ),
                         0.5 * (state.i + sign * state.q) * attenuation,
+                        tolerance,
                     );
                 }
                 assert!(

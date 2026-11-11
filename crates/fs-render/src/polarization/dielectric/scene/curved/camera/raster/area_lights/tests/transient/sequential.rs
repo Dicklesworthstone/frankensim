@@ -159,6 +159,7 @@ fn real_lens_area_pixels_match_retarded_plane_radiometry_and_native_lane_replay(
         let observer = TransientCurvedAreaLightCameraScene::try_new(cx, &timed, &lights).unwrap();
         let raw_observer = TransientCurvedAreaLightCameraScene::try_new(cx, &raw, &lights).unwrap();
         let physical = physical_camera(None);
+        let settings = || scene_settings(&geometry, &physical);
         let raster = CurvedCameraRaster::try_new(&physical, 1, 1).unwrap();
         let mut workspace = AreaLightCameraWorkspace::try_new(1, 1, 8).unwrap();
         let result = raster
@@ -389,6 +390,7 @@ fn qe_real_lens_area_pixels_keep_clipped_probability_mass_and_sensor_admission()
         // Keep the same front plane and its vacuum path in both prescriptions.
         // Only the clear radius changes; absorbing scene length must not change.
         let physical = physical_camera(Some(0.02));
+        let settings = || scene_settings(&geometry, &physical);
         let raster = CurvedCameraRaster::try_new(&physical, 1, 1).unwrap();
         let mut workspace = AreaLightCameraWorkspace::try_new(1, 1, 8).unwrap();
         let full = raster

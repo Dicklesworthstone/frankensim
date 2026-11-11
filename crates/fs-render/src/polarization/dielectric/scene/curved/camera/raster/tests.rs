@@ -90,6 +90,47 @@ pub(super) fn settings() -> CurvedTraceSettings {
     }
 }
 
+/// A trace-distance budget that never ends a homogeneous trace inside `geometry`.
+/// The box is the axis-aligned box of every mesh vertex and the camera `eye`. Each
+/// straight segment between events lies in that box, so it is at most the box
+/// diagonal. Escape is certified only once the forward half-line misses the box,
+/// widened by the contact tolerance (instances/proximity.rs straight_ray_escapes).
+/// The last segment reaches that widened box's boundary within diagonal +
+/// 2 sqrt(3) tolerance. A trace has at most `trace.max_surface_events + 1`
+/// segments, so it needs at most that many diagonals, each lengthened by
+/// 4 tolerances. A diffuse bounce may send its continuation in any direction;
+/// this bound holds for every one.
+pub(super) fn distance_budget_m(
+    geometry: &InstanceScene,
+    eye: Point3,
+    trace: CurvedTraceSettings,
+) -> f64 {
+    let mut lower = [eye.x, eye.y, eye.z];
+    let mut upper = lower;
+    for instance in geometry.instances() {
+        let SharedGeometry::Mesh(mesh) = instance.geometry() else {
+            panic!(
+                "the distance budget reads mesh vertices; object {} is a chart",
+                instance.object_id()
+            );
+        };
+        for vertex in &mesh.vertices {
+            let world = instance
+                .transform()
+                .transform_point(Point3::new(vertex[0], vertex[1], vertex[2]));
+            for (axis, value) in [world.x, world.y, world.z].into_iter().enumerate() {
+                lower[axis] = lower[axis].min(value);
+                upper[axis] = upper[axis].max(value);
+            }
+        }
+    }
+    let diagonal = (0..3)
+        .map(|axis| (upper[axis] - lower[axis]).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    f64::from(trace.max_surface_events + 1) * (diagonal + 4.0 * trace.event.surface_tolerance_m)
+}
+
 fn near(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() <= tolerance,

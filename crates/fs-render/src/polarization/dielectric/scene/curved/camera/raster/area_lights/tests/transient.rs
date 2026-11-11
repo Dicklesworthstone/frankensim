@@ -139,6 +139,7 @@ fn g3_retarded_area_pixels_keep_native_cie_qe_paths_and_channel_independent_work
             TransientCurvedCameraScene::try_new(cx, &camera, &[history_binding(&history)]).unwrap();
         let observer = TransientCurvedAreaLightCameraScene::try_new(cx, &timed, &area).unwrap();
         let physical = fixtures::camera(0.01);
+        let settings = || scene_settings(&geometry, &physical);
         let raster = CurvedCameraRaster::try_new(&physical, 3, 2).unwrap();
         let mut workspace = AreaLightCameraWorkspace::try_new(1, 1, 8).unwrap();
         let (seed, pixel, sample) = (0x1234_5678_0000_0049_u64, 4, 9);
@@ -404,6 +405,7 @@ fn g1_area_detector_shutter_uses_each_chromatic_group_delay_and_native_energy_co
             TransientCurvedCameraScene::try_new(cx, &camera, &[history_binding(&history)]).unwrap();
         let observer = TransientCurvedAreaLightCameraScene::try_new(cx, &timed, &area).unwrap();
         let physical = fixtures::camera(0.01);
+        let settings = || scene_settings(&geometry, &physical);
         let raster = CurvedCameraRaster::try_new(&physical, 3, 2).unwrap();
         let sensor = QuantumEfficiencySensor::try_new(vec![
             (LAMBDA_MIN, [0.25, 0.75, 0.0]),

@@ -3,6 +3,7 @@
 use super::*;
 use super::super::{CAMERA_WAVELENGTHS, CurvedCameraRaster};
 use super::super::tests as fixtures;
+use crate::camera::PhysicalCamera;
 use crate::charts::TriMesh;
 use crate::dielectric::{
     BeerLambertAbsorption, CauchyIor, DielectricEvent, DielectricGlass, DielectricSurface,
@@ -49,6 +50,20 @@ fn settings() -> AreaLightCameraSettings {
     settings.connection.scene.direction_derivative_tolerance = 1e-11;
     settings.max_area_samples = 8;
     settings.max_trace_evaluations = 4096;
+    settings
+}
+
+/// settings() with the camera path's and the light connections' trace distance set
+/// to the scene's own bound (fixtures::distance_budget_m), in place of the fixed
+/// 4 m. A diffuse bounce off the 10 m panel at z = 1 can run its continuation
+/// past 4 m without leaving the scene: R-c measured lane 0 at pixel 4 sample 9
+/// stopping 1.104 m above the z = -1.5 floor.
+fn scene_settings(geometry: &InstanceScene, camera: &PhysicalCamera) -> AreaLightCameraSettings {
+    let mut settings = settings();
+    settings.surfaces.max_distance_m =
+        fixtures::distance_budget_m(geometry, camera.eye(), settings.surfaces);
+    settings.connection.scene.trace.max_distance_m =
+        fixtures::distance_budget_m(geometry, camera.eye(), settings.connection.scene.trace);
     settings
 }
 
@@ -156,6 +171,7 @@ fn g1_area_pixels_match_independent_spectral_irradiance_and_native_lane_streams(
         }];
         let area = CurvedAreaLightCameraScene::try_new(cx, &camera, &bindings).unwrap();
         let physical = fixtures::camera(0.01);
+        let settings = || scene_settings(&geometry, &physical);
         let raster = CurvedCameraRaster::try_new(&physical, 3, 2).unwrap();
         let mut workspace = AreaLightCameraWorkspace::try_new(1, 1, 8).unwrap();
         let (seed, pixel, sample) = (0x1234_5678_0000_0049_u64, 4, 9);

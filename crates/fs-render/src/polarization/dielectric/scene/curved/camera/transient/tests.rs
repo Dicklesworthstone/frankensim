@@ -568,10 +568,69 @@ fn g4_bad_histories_unresolved_clocks_limits_and_late_cancellation_publish_no_sa
                 Err(TransientCameraError::InvalidObservationTime)
             ));
         }
-        assert!(matches!(
-            timed.sample_ray_at_time(cx, ray(), 550.0, 0, Dd::from_f64(1e40), settings(), 3, 0),
-            Err(TransientCameraError::UnresolvedClock { object_id: 1 })
-        ));
+        // The clock guard (transient.rs checked_retarded_time) refuses an emission time
+        // when recovering the group delay G from it misses by more than 64 eps G.
+        // Closed form, through the double-double sum of fs_math::dd (two_sum, then
+        // quick_two_sum), for observation (oh, lo) and G = (gh, gl), with gh and lo
+        // below half an ulp of oh:
+        // - the emission time is (oh, fl(lo - gh));
+        // - the recovered delay is gh - d exactly (Sterbenz), where
+        //   d = fl(lo - gh) - (lo - gh) = -e for (_, e) = two_sum(lo, -gh);
+        // - so the miss is |gl - e|.
+        // A zero lo word misses only |gl| <= eps/2 G, so 1e40 alone cannot fire the
+        // guard (R-c: 4.68e-26 s against 2.46e-23 s for object 1). A lo word can:
+        // half an ulp of lo passes 64 eps G once lo > 128 G.
+        // G is the scene's own reported delay, read from a resolved probe. This test
+        // checks the guard given a delay, not the delay.
+        let probe = History::new(|_| Ok(1.0));
+        TransientCurvedCameraScene::try_new(cx, &camera, &[binding(1, &probe), binding(9, &probe)])
+            .unwrap()
+            .sample_ray_at_time(cx, ray(), 550.0, 0, Dd::ZERO, settings(), 3, 0)
+            .unwrap();
+        let delays: Vec<(u64, Dd)> = probe
+            .queries
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|query| (query.object_id, query.group_delay_s))
+            .collect();
+        assert_eq!(delays.iter().map(|(id, _)| *id).collect::<Vec<_>>(), [1, 9]);
+        // The first contact in path order whose delay the closed form refuses, if any.
+        let refused_by_closed_form = |lo: f64| {
+            delays
+                .iter()
+                .find(|(_, delay)| {
+                    let (_, e) = fs_math::eft::two_sum(lo, -delay.hi);
+                    let miss = (Dd::from_f64(delay.lo) - Dd::from_f64(e)).abs();
+                    (*delay * Dd::from_f64(64.0 * f64::EPSILON)).lt(miss)
+                })
+                .map(|(id, _)| *id)
+        };
+        let at = |lo: f64| {
+            timed.sample_ray_at_time(cx, ray(), 550.0, 0, Dd { hi: 1e40, lo }, settings(), 3, 0)
+        };
+        assert_eq!(refused_by_closed_form(0.0), None);
+        assert!(at(0.0).is_ok());
+        // Plant one lo word on each side of the threshold. Start at a power of two
+        // 2^k <= 127 G1: half an ulp of lo plus |gl| stays within the allowance there,
+        // for G1 and for the larger G9. Then step up one binade at a time. Inside one
+        // binade every lo shares one ulp and gh is fixed, so e is the same for all of
+        // them, and the first binade the closed form refuses is "just past".
+        let mut inside = 2f64.powi((127.0 * delays[0].1.hi).log2().floor() as i32);
+        assert_eq!(refused_by_closed_form(inside), None);
+        let (past, object_id) = loop {
+            let next = 2.0 * inside;
+            if let Some(object_id) = refused_by_closed_form(next) {
+                break (next, object_id);
+            }
+            inside = next;
+            assert!(inside < 1.0, "no lo word below 1 s reaches the clock guard");
+        };
+        assert!(
+            matches!(at(past), Err(TransientCameraError::UnresolvedClock { object_id: id }) if id == object_id),
+            "lo = {past:e} must refuse the clock of object {object_id}"
+        );
+        assert!(at(inside).is_ok(), "lo = {inside:e} must resolve");
         let mut limited = settings();
         limited.max_surface_events = 1;
         assert!(matches!(

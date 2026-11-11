@@ -822,18 +822,68 @@ fn g1_p_polarized_brewster_branch_is_dark_without_invalid_normalized_stokes() {
         .unwrap()
         .continue_in(&field, 1.0 / cosine, BundleOptions::default())
         .unwrap();
-    assert_eq!(dark.interface_log_power(), f64::NEG_INFINITY);
+    // Brewster darkness is exact only for an exact cosine. Here cos^2 = 4/13 is not
+    // representable, and since c7d41c702b near-Brewster p reflection is weak, not
+    // extinct. Error model:
+    // - Near Brewster, rp = -contrast / nt^2 * b / dp^2, where
+    //   b = fma(cos^2, ni^2 + nt^2, -ni^2) (dielectric.rs:1510).
+    // - For 1 -> 1.5 at the exact angle, b = 0, contrast = -1.25, nt^2 = 2.25 and
+    //   dp = 6 / sqrt(13), so dp^2 = 36/13.
+    // - A relative error dc in the cosine gives |b| <= 2 |dc| (1 + eps); the fma
+    //   rounds b only once.
+    // - |dc| <= 8 eps is taken to cover the test's 1/sqrt(3.25), its 1.5x product
+    //   and the bundle's normalization of the direction.
+    // So |rp| <= (1.25 / 2.25) * 16 eps / (36/13), about 3.2 eps, and
+    // ln(rp^2) <= -69.7. R-c measured ln(rp^2) = -78.07.
+    let rp_bound = (1.25 / 2.25) * (16.0 * f64::EPSILON) * (1.0 + f64::EPSILON) / (36.0 / 13.0);
+    let log_power = dark.interface_log_power();
+    assert!(log_power <= 2.0 * rp_bound.ln(), "ln(rp^2) = {log_power}");
     let state = dark.interface_state();
     assert!(Stokes::try_new(state.i, state.q, state.u, state.v).is_some());
     assert_eq!(state.i, 1.0);
-    assert_eq!(
-        dark.point_source_irradiance(
-            Vec3::new(0.0, 0.0, 1.0),
-            ProjectionOptions::default(),
-            1e200,
+    // Sibling rule for the irradiance: the s-polarized beam on the same rays has the
+    // same geometry, and its power is rs^2 = (5/13)^2 at this angle
+    // (rs = (2 - 4.5) / (2 + 4.5) for cos = 2/sqrt(13) and cos_t = 3/sqrt(13)).
+    // So the dark irradiance is at most the bright one times rp_bound^2 / rs^2,
+    // whatever the intensity.
+    let bright = PolarizedRayBundle::try_new(
+        propagate_bundle(
+            &field,
+            launch,
+            Vec3::new(0.0, 1.0, 0.0),
+            550.0,
+            1.0 / cosine,
+            BundleOptions::default(),
         )
         .unwrap(),
-        0.0
+        Stokes::try_new(1.0, 1.0, 0.0, 0.0).unwrap(),
+    )
+    .unwrap()
+    .smooth_interface(
+        plane_normal(Vec3::new(0.0, 0.0, -1.0)),
+        target.sample(endpoint, 550.0).unwrap(),
+        DielectricEvent::Reflection,
+        InterfaceOptions::default(),
+    )
+    .unwrap()
+    .continue_in(&field, 1.0 / cosine, BundleOptions::default())
+    .unwrap();
+    let irradiance = |bundle: &PolarizedRayBundle| {
+        bundle
+            .point_source_irradiance(
+                Vec3::new(0.0, 0.0, 1.0),
+                ProjectionOptions::default(),
+                1e200,
+            )
+            .unwrap()
+    };
+    let (dark_irradiance, bright_irradiance) = (irradiance(&dark), irradiance(&bright));
+    let rs2 = 25.0 / 169.0;
+    assert!(bright_irradiance.is_finite() && bright_irradiance > 0.0);
+    assert!(
+        dark_irradiance >= 0.0
+            && dark_irradiance <= bright_irradiance * rp_bound * rp_bound / rs2 * (1.0 + 1e-12),
+        "dark {dark_irradiance:.17e} bright {bright_irradiance:.17e}"
     );
     assert_eq!(path.interface_log_power(), 0.0);
     assert_eq!(

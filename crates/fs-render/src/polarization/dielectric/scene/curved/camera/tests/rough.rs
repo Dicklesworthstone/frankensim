@@ -411,13 +411,45 @@ fn g1_tilted_brush_camera_raster_matches_radiance_weights_and_keeps_null_lanes()
                     let half = Vec3::new(wo.x + wi.x, wo.y + wi.y, wo.z + wi.z);
                     let half = half.scale(1.0 / half.norm());
                     let (ax, ay) = detail.alpha_pair();
-                    let x = frame.tangent.dot(wi);
-                    let y = frame.bitangent.dot(wi);
-                    let z = frame.shading_normal.dot(wi);
-                    let masking =
-                        2.0 / (1.0 + (1.0 + (ax * ax * x * x + ay * ay * y * y) / (z * z)).sqrt());
-                    let expected =
-                        metals[0].fresnel(*wavelength, 1.33, wo.dot(half)).unwrap() * masking;
+                    // The weight is Fresnel times two closed-form factors, both evaluated
+                    // in the shading frame:
+                    // - 4d5123920d: height-correlated Smith visibility G2(wo, wi) / G1(wo)
+                    //   = (1 + lambda_o) / (1 + lambda_o + lambda_i). It replaced the
+                    //   separable G1(wi) = 1 / (1 + lambda_i).
+                    // - 6a13950eae: the bounded spherical-cap VNDF proposal. Each weight
+                    //   carries the cap mass 1 - (1 - k) * G1(wo) / 2, with
+                    //   k = (1 - a^2) s^2 / (s^2 + a^2 c^2), a = min(ax, ay, 1),
+                    //   c = cos_o and s = 1 + sin_o (tracer.rs ggx_reflection_cap_scale
+                    //   and ggx_reflection_cap_mass).
+                    // R-c measured observed/expected = 0.826579323586119186 on sample 0;
+                    // cap 0.826189551574754710 times G2/G1 over G1(wi) 1.00047177068582127
+                    // matches it to 2 ulp.
+                    let lambda = |v: [f64; 3]| {
+                        0.5 * ((1.0
+                            + (ax * ax * v[0] * v[0] + ay * ay * v[1] * v[1]) / (v[2] * v[2]))
+                            .sqrt()
+                            - 1.0)
+                    };
+                    let wo_local = [
+                        frame.tangent.dot(wo),
+                        frame.bitangent.dot(wo),
+                        frame.shading_normal.dot(wo),
+                    ];
+                    let wi_local = [
+                        frame.tangent.dot(wi),
+                        frame.bitangent.dot(wi),
+                        frame.shading_normal.dot(wi),
+                    ];
+                    let (lambda_o, lambda_i) = (lambda(wo_local), lambda(wi_local));
+                    let correlated_visibility = (1.0 + lambda_o) / (1.0 + lambda_o + lambda_i);
+                    let a = ax.min(ay).min(1.0);
+                    let c = wo_local[2].clamp(0.0, 1.0);
+                    let s = 1.0 + (1.0 - c * c).max(0.0).sqrt();
+                    let k = (1.0 - a * a) * s * s / (s * s + a * a * c * c);
+                    let cap_mass = 1.0 - 0.5 * (1.0 - k) / (1.0 + lambda_o);
+                    let expected = metals[0].fresnel(*wavelength, 1.33, wo.dot(half)).unwrap()
+                        * correlated_visibility
+                        * cap_mass;
                     near(lane.transport_weight(), expected, 3e-6);
                 }
             }

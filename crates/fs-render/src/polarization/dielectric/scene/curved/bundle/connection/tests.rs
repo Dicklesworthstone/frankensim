@@ -771,13 +771,25 @@ fn g1_dark_brewster_connection_keeps_zero_power_through_later_interfaces() {
     with_cx(|cx, _| {
         let cosine = 1.0 / 3.25_f64.sqrt();
         let point = Point3::new(31.0 / 12.0, 0.0, 1.0);
+        // Plane 1 is centred at (2, 0, 0): vertices (-1, -3, 0), (5, -3, 0), (2, 3, 0).
+        // Centred at (1.5, 0, 0), as first written, its right edge ran through (3, 0, 0),
+        // exactly where the second Brewster reflection lands, and that contact refuses
+        // (g1_brewster_second_landing_on_a_triangle_edge_refuses_as_ambiguous_contact).
+        // Here both landings are interior. At y = 0 the edges are at x = 0.5 and
+        // x = 3.5, so the landing at (1.5, 0, 0) is 2/sqrt(5) m from an edge and
+        // the one at (3, 0, 0) is 1/sqrt(5) m, more than 1e3 contact tolerances (1e-8 m).
         let geometry = InstanceScene::try_new(vec![
-            plane(1, Point3::new(1.5, 0.0, 0.0), 3.0),
+            plane(1, Point3::new(2.0, 0.0, 0.0), 3.0),
             // This finite transmitting patch lies on the reflected leg only.
             plane(2, Point3::new(2.25, 0.0, 0.5), 0.5),
             plane(9, point, 0.3),
         ])
         .unwrap();
+        // Error model of the p amplitude at this Brewster angle, as in
+        // transport::bundle g1_p_polarized_brewster_branch_is_dark_without_invalid_normalized_stokes:
+        // |rp| <= (1.25 / 2.25) * 2 |dc| / (36/13), with |dc| <= 8 eps.
+        // Each reflection's power is then at most rp_bound^2.
+        let rp_bound = (1.25 / 2.25) * (16.0 * f64::EPSILON) * (1.0 + f64::EPSILON) / (36.0 / 13.0);
         let air = glass(1.0, 0.02);
         let body = glass(1.5, 0.1);
         let media = [
@@ -838,31 +850,66 @@ fn g1_dark_brewster_connection_keeps_zero_power_through_later_interfaces() {
                 |_, _| DielectricEvent::Reflection,
             )
             .unwrap();
-        assert_eq!(forward.termination(), PathTermination::Extinguished);
-        assert_eq!(forward.surface_events(), 1);
+        // An exactly dark first reflection stops the trace there (Extinguished).
+        // A weak one goes on: the reflection at plane 2's centre and the one at
+        // (3, 0, 0) on plane 1 are at Brewster's angle too. Nothing lies on the
+        // upward leg from (3, 0, 0): it crosses z = 0.5 at x = 3.75, where plane 2
+        // spans x in [2.0, 2.5] at y = 0, and z = 1 at x = 4.5, where plane 9 spans
+        // [2.43, 2.73]. So the trace escapes after three reflections, each bounded.
+        let forward_log_power = forward.bundle().interface_log_power();
+        if forward_log_power == f64::NEG_INFINITY {
+            assert_eq!(forward.termination(), PathTermination::Extinguished);
+            assert_eq!(forward.surface_events(), 1);
+        } else {
+            assert_eq!(forward.termination(), PathTermination::Escaped);
+            assert_eq!(forward.surface_events(), 3);
+            assert!(
+                forward_log_power <= 3.0 * 2.0 * rp_bound.ln(),
+                "ln power after three Brewster reflections = {forward_log_power}"
+            );
+        }
 
         let receiver = target(9, point, 2e-7);
         let plan = [DielectricEvent::Reflection, DielectricEvent::Transmission];
-        let connected = scene
-            .connect_bundle_with_policy(
-                cx,
-                input,
-                receiver,
-                options(),
-                BundleBranchPolicy::Sequence(&plan),
-            )
-            .unwrap();
+        let connect = |normalized_source_stokes: Stokes| {
+            scene
+                .connect_bundle_with_policy(
+                    cx,
+                    BundleConnectionLaunch {
+                        normalized_source_stokes,
+                        ..input
+                    },
+                    receiver,
+                    options(),
+                    BundleBranchPolicy::Sequence(&plan),
+                )
+                .unwrap()
+        };
+        let connected = connect(input.normalized_source_stokes);
+        // Sibling rule: the s-polarized beam on the same rays has the same geometry
+        // and Beer factors. At this angle rs^2 = 25/169 at plane 1, and plane 2 passes
+        // ts = 4 (2/6.5)(4.5/6.5) = 144/169, while the p beam passes tp = 1 there.
+        // So the p power over the s power is at most rp_bound^2 / (25/169 * 144/169).
+        let bright = connect(Stokes::try_new(1.0, 1.0, 0.0, 0.0).unwrap());
+        let sibling_ratio = rp_bound * rp_bound / (25.0 / 169.0 * (144.0 / 169.0)) * (1.0 + 1e-12);
         let path = connected.path();
         assert_eq!(path.termination(), PathTermination::Detected);
         assert_eq!(path.surface_events(), 3);
         assert_eq!(path.medium_index(), 1);
         assert_eq!(path.bundle().propagation().interface_events(), 2);
-        assert_eq!(path.bundle().interface_log_power(), f64::NEG_INFINITY);
-        assert_eq!(
+        assert_eq!(bright.path().termination(), PathTermination::Detected);
+        let log_power = path.bundle().interface_log_power();
+        assert!(log_power <= 2.0 * rp_bound.ln(), "ln power = {log_power}");
+        let irradiance = |path: &CurvedBundlePathResult| {
             path.bundle()
                 .point_source_irradiance(receiver.normal(), ProjectionOptions::default(), 1e200)
-                .unwrap(),
-            0.0
+                .unwrap()
+        };
+        let (dark_irradiance, bright_irradiance) = (irradiance(path), irradiance(bright.path()));
+        assert!(bright_irradiance.is_finite() && bright_irradiance > 0.0);
+        assert!(
+            dark_irradiance >= 0.0 && dark_irradiance <= bright_irradiance * sibling_ratio,
+            "dark {dark_irradiance:.17e} bright {bright_irradiance:.17e}"
         );
         let state = path.bundle().interface_state();
         assert!(Stokes::try_new(state.i, state.q, state.u, state.v).is_some());
@@ -916,16 +963,111 @@ fn g1_dark_brewster_connection_keeps_zero_power_through_later_interfaces() {
                 receiver.position_tolerance_m(),
             )
             .unwrap();
-            assert_eq!(
+            // The same sibling rule bounds the photometric irradiance.
+            let photometric = |path: &CurvedBundlePathResult| {
                 source
                     .spectral_irradiance_from_refractive_bundle(
                         path.bundle(),
                         receiver,
-                        ProjectionOptions::default()
+                        ProjectionOptions::default(),
                     )
-                    .unwrap(),
-                0.0
+                    .unwrap()
+            };
+            let (dark_flux, bright_flux) = (photometric(path), photometric(bright.path()));
+            assert!(bright_flux.is_finite() && bright_flux > 0.0);
+            assert!(
+                dark_flux >= 0.0 && dark_flux <= bright_flux * sibling_ratio,
+                "dark {dark_flux:.17e} bright {bright_flux:.17e}"
             );
+        }
+    });
+}
+
+#[test]
+fn g1_brewster_second_landing_on_a_triangle_edge_refuses_as_ambiguous_contact() {
+    // The geometry first written for g1_dark_brewster_connection_keeps_zero_power_through_later_interfaces,
+    // with plane 1 centred at (1.5, 0, 0) and radius 3. Its right edge
+    // x = 4.5 - (y + 3) / 2 runs through (3, 0, 0). A ray from (0, 0, 1) along
+    // (1.5 c, 0, -c) reflects at (1.5, 0, 0) and at plane 2's centre (2.25, 0, 0.5),
+    // then lands exactly on that edge.
+    // The proximity query refuses a contact whose departure radius is at most 4 contact
+    // tolerances: a normal is not a unique surface event at an unresolved edge
+    // (instances/proximity.rs:1144). The bundle trace passes event.surface_tolerance_m
+    // as that tolerance (bundle.rs:563-567).
+    // Unpolarized light keeps the s power rs^2 = 25/169 at each reflection, so the
+    // trace reaches the edge whatever the rounding of the Brewster cosine.
+    with_cx(|cx, _| {
+        let cosine = 1.0 / 3.25_f64.sqrt();
+        let point = Point3::new(31.0 / 12.0, 0.0, 1.0);
+        let geometry = InstanceScene::try_new(vec![
+            plane(1, Point3::new(1.5, 0.0, 0.0), 3.0),
+            plane(2, Point3::new(2.25, 0.0, 0.5), 0.5),
+            plane(9, point, 0.3),
+        ])
+        .unwrap();
+        let air = glass(1.0, 0.02);
+        let body = glass(1.5, 0.1);
+        let media = [
+            SceneMedium::Homogeneous(&air),
+            SceneMedium::Homogeneous(&body),
+        ];
+        let scene = CurvedPolarizedScene::try_new(
+            cx,
+            &geometry,
+            &media,
+            vec![
+                SurfaceBinding {
+                    object_id: 1,
+                    interaction: Interaction::Dielectric {
+                        outside: 0,
+                        inside: 1,
+                        surface: DielectricSurface::SMOOTH,
+                    },
+                },
+                SurfaceBinding {
+                    object_id: 2,
+                    interaction: Interaction::Dielectric {
+                        outside: 1,
+                        inside: 0,
+                        surface: DielectricSurface::SMOOTH,
+                    },
+                },
+                detector(9),
+            ],
+            100_000,
+        )
+        .unwrap();
+        let ray = Ray {
+            origin: Point3::new(0.0, 0.0, 1.0),
+            dir: Vec3::new(1.5 * cosine, 0.0, -cosine),
+        };
+        let result = scene.trace_bundle_with_branches(
+            cx,
+            scene
+                .launch_bundle(
+                    ray,
+                    Vec3::new(0.0, 1.0, 0.0),
+                    550.0,
+                    Stokes::unpolarized(1.0),
+                    0,
+                )
+                .unwrap(),
+            0,
+            options().scene,
+            |_, _| DielectricEvent::Reflection,
+        );
+        match result {
+            Err(CurvedBundleSceneError::Scene(
+                crate::polarization::dielectric::scene::curved::CurvedSceneError::Geometry(
+                    crate::instances::proximity::ProximityError::AmbiguousContact,
+                ),
+            )) => {}
+            Err(other) => panic!("expected AmbiguousContact at the edge, got {other:?}"),
+            Ok(path) => panic!(
+                "expected AmbiguousContact at the edge, got {:?} after {} events",
+                path.termination(),
+                path.surface_events()
+            ),
         }
     });
 }
