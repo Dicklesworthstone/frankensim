@@ -1,0 +1,457 @@
+# RETRIM for the measured tract (NavyTower, MB 1843 + 1850): ONLY q moved: the card's three fold stiffnesses x 1.005307. Model-only: pressure held at the card's value,
+# SUNG WORD "lila" ON C3 (NavyTower, plan 27341, MB 27342; words lane, owner order 13205/13208): German "lila"
+# ('purple'), one render. The tract moves from DVTD subject 1's measured lateral /l/ to the same subject's tense /i/,
+# back to the /l/ and on to the tense /a/. No recording enters. Built by la/lila/mkword_lila.py from the landed /la/
+# card dvtd-s1-la-C3-word (md5 d6559bd3b35a1732af2254a335d68552), itself built from the C3 phrase /a/ card sh-ph-C3-a
+# (md5 086b98585ace5cbe4d4cc20555899c88); the comments after this header describe that /a/ card.
+# TRACT: Birkholz et al. 2020 (DVTD, CC0), the 3-D models' closed inner surfaces cut by the vowel cards' level cut.
+#   /l/ (base, from 0 s, and the second /l/): s1-09-los-l (German "los"), 102 sections, 209.94 mm,
+#   first (glottal) section 1.877 cm2, narrowest 0.955 cm2 (the two lateral
+#   channels summed); the last two slabs merged under the flanged ceiling keeping volume and sum L/A (mergecut.py).
+#   /i/ (keyframe i): s1-03-tiere-tense-i (German "Tiere"), 98 sections, 203.94 mm: the C3 phrase /i/
+#   card's own sections (sh-ph-C3-i, md5 169d2f820f6e1bcc7adda873005e4ca9), keyframe i of the posted C3 phrase.
+#   /a/ (keyframe a): the /a/ card's own sections, s1-01-bahn-tense-a, 91 sections, 186.78 mm.
+#   Limit: one area per level cannot carry the peak at 4407 Hz in s1-09's measured transfer function (FE 4425 Hz); the
+#   /l/ cut matches its measured R1 239 Hz at -2.0 % and R2 1606 Hz at -1.6 %.
+# TIMING (MB 27342): the onset is the /la/ card's; one time is AUTHORED; three move times are READ FROM FIGURES of
+#   measured speech (Geumann (2001), FIPKM 38: 6 German speakers (5 male, 1 female), EMMA; 600 dpi renders of the
+#   PDF pages, the axis ticks fitted linearly, the residual given; none of these means is printed as a number).
+#   Onset, 0 to 0.1408 s, unchanged from /la/: the /l/ is held 64.8 ms (SD 13.0) after the voice onset, 0.076 s:
+#   Mooshammer, Geumann, Hoole, Alfonso, van Lieshout and Fuchs (2003), ICPhS 15, Tab. 1, /l/ acoustical consonant
+#   duration, German /aCa/ at normal volume; the voice onset is read off the static /l/ render, a model output.
+#   Release, 0.1408 to 0.2188 s (0.078 s) in 18 steps, to keyframe i: Fig. 6-25b, printed p. 322, the jaw
+#   opening gesture from /l/ into V2 /i:/ (maxp to minp, Fig. 6-24), N 152; figure read 0.0780 s (residual 0.64 ms),
+#   mean +- 1 SD bar about 0.070 s.
+#   /i:/ held, 0.2188 to 0.45 s. 0.45 s is AUTHORED player timing: the end of the stressed /i:/, where the
+#   closing starts, the same time as /ala/'s end of V1. No source gives it.
+#   Closing, 0.45 to 0.556 s (0.106 s) in 18 steps, back to the card's own /l/ shape: Fig. 6-13b, printed
+#   p. 303, the jaw closing gesture from V1 /i:/ into /l/ ('jaw dur minp2maxp': from the jaw's lowest position in V1
+#   to its highest in the consonant, Fig. 6-12, p. 302; one maxp per VCV, Fig. 6-4, p. 289), N 152; figure read
+#   0.1061 s (residual 0.34 ms), mean +- 1 SD bar about 0.072 s.
+#   Opening, 0.556 to 0.651 s (0.095 s) in 27 steps, to keyframe a: Fig. 6-25b, the jaw opening from /l/
+#   into /a:/, N 152; figure read 0.0949 s (the /la/ and /ala/ read; read again on the same render as the /i:/ read
+#   within 1 ms), SD about 0.048 s.
+#   The closing ends where the opening starts: maxp is one point, so the /l/ shape is held for no time. Steps: plan
+#   13292's rule, S = ceil(max |d ln A| / 0.1) on max(n_from, n_to) equal sections, every section (18, 18 and 27
+#   over sections 1..). Jaw only: the tongue tip closes and opens with the jaw for /l/ (Mooshammer et al. 2003,
+#   Tab. 1, /l/ closing onset latency 3.2 ms (SD 29.1), opening onset latency -3.2 ms (SD 17.8), printed; /a/ context).
+#   REPORTED, NOT STAMPED (MB 27342): the render's acoustic interval of the second /l/ is printed beside Geumann (2001)
+#   Fig. 7-6b, printed p. 333, the acoustic /l/ duration at normal volume, 70.44 ms, a figure read (a bar chart, the
+#   axis ticks fitted to 0.12 ms; pooled over the six speakers and the /i: e: a:/ contexts; no N or SD is printed in
+#   the figure). The moving tract's extra dip, open since /ala/ (its /l/ interval read 158 ms; the cause is
+#   untested), is the likely reason for any excess. A miss licenses no change to any time here.
+#   CORPUS MISMATCHES (MB 27342): (1) the corpus's opening into /i:/ is into an unstressed V2, while the /i:/ of
+#   "lila" is stressed; (2) the final /a/ of "lila" is short, while the corpus's V2 is /a:/; (3) both figures pool
+#   loud and normal speech; (4) the times are speech, not singing. Also: jaw times are applied to the whole tract's
+#   log-area morph.
+# PITCH: one fold; fold_tension carries each shape's own MODEL TRIM over the /a/ card's fold (stiffness, vibrato and
+#   flutter factors), held through the shape and ramped over each move:
+#   /l/ x 1.02423 1 1: the /la/ card's /l/ trim: pressure held at 489.687 Pa, set on the emergent f0 of one 1.5 s trial
+#   render of the /l/ shape on the same binary (straight tone, no flutter row, autocorrelation over 0.5-1.5 s) to
+#   within 3 cents of 130.81 Hz: x 1.024230 gave 130.81 Hz (-0.0 c, acf peak 0.992).
+#   /i/ x 1.1085501079559006 1.0056209850107067 0.8218615929863832: the posted C3 phrase's /i/ row, the /i/
+#   card's fold stiffness 56.6252796 over the /a/ card's 51.0804872, last set by that card's retrim for the measured
+#   tract (x 1.000000 on one 1.5 s trial render, 131.01 Hz, +2.7 c, acf peak 0.990), and its own vibrato and flutter
+#   amplitudes, 0.11271 and 0.004406, over the /a/ card's 0.11208 and 0.005361.
+#   /a/ x 1 1 1.
+#   The trims are FITTED to the model, not to a recording (MB 27111, 27342).
+#   No value is taken from or fitted to a recording; the fold_tension trim is model-only, set on the emergent f0 of one trial render.
+# BREATH: rise 0 to 0.15 s and release 0.95 to 1.05 s as the /a/ card; the plateau moves per shape on the move
+#   times, as the posted phrase moves it: /l/ and /a/ 489.687 Pa (the /a/ card's), /i/ 463.609 Pa (the /i/ card's). Each
+#   plateau is that card's AUTHORED drive rule (tests/vowel_gates.rs vw-002), 900 Pa x the q of an earlier pitch trim
+#   of that card, so it too carries a value set on trial renders: FITTED to the model, not to a recording (MB 27342).
+#   The fall to /i/'s plateau runs from the end of the rise, 0.15 s, to the end of the release, 0.2188 s (the release
+#   starts at 0.1408 s, inside the rise); the return to 489.687 Pa runs over the closing.
+# Limits as in the one-render phrase: the island's zc and A_1 step to each shape's at its switch (not faded); the
+# microphone, receiver and head sphere keep the /a/ card's mouth radius; frozen shapes moved, no volume source from
+# moving walls; one flutter stream (the /a/ card's seed: only the /i/ card's flutter amplitude is carried).
+#   emergent f0 on a 1.5 s trial render with no flutter row (0.5-1.5 s, autocorrelation), to within 3 cents of the written note 130.81 Hz. No recording enters. Trace:
+#     x 1.000000: f0 130.46 Hz (-4.6 c, acf peak 0.992) -> x 1.005307: f0 130.70 Hz (-1.4 c, acf peak 0.992)
+# Voice performance: Tom et al. (1999) /a/ tract of a trained male singer, condition speech_comf, fold card of the licensed
+# RETRIM (ALL-IN variant abcq, ChartreuseBass, owner GO 2 via MB 14813): the card is the abc card with ONLY q moved again.
+#   The three fold stiffnesses are the abc card's values x 0.802536 (cumulative on the pack values x q of the abc card). Model-only: pressure held at the card's own value,
+#   emergent f0 measured on a 1.5 s trial render (0.5-1.5 s, autocorrelation) of the straight card, iterated to within 3 cents of the written note. No recording enters.
+#   Reason: fold_mapping bilateral (halved m, k, k_c in the full-gap coordinate) moved every emergent f0 sharp while the pack-value q had been trimmed per fold; this re-does the cards' own trim.
+# two-mass pack, cited yielding wall, target note C3 (130.81 Hz). Every number below is cited. UNKNOWN marks a
+# quantity no cited source gives; none is fitted to a recording.
+#
+# TRACT: Tom, K., Titze, I. R., Hoffman, E. A., and Story, B. H. (1999). 3-D vocal tract imaging and formant structure:
+#   varying vocal register, pitch and loudness. NCVS Status and Progress Report 14:101-112 (National Center for Voice and
+#   Speech; free PDF). Journal version: J. Acoust. Soc. Am. 109(2):742-747 (2001), doi:10.1121/1.1332380 (not read: paywalled).
+#   Subject: one 45-year-old male, Western classical training (12 years as a baritone, 6 as a countertenor), EBCT (electron-beam
+#   CT, 0.410 mm pixels, 3 mm axial slices), supine. Condition: spoken /a/, CHEST register, self-selected comfortable pitch B-flat2 (117 Hz) and loudness.
+#   Areas: Table III column speech_comf, sections 1-44 glottis to lips, printed cm^2 digits scaled by e-4 (to m^2), transcribed
+#   from the OCR of the scanned report and checked against the page image (tom1999-table-III-area-functions.tsv).
+#   LENGTH: Table III is normalized to 17.46 cm (44 x 0.396825 cm). Table IV gives the measured length of this condition,
+#   17.39 cm; the section length here is 17.39 cm / 44, which undoes the axial normalization (areas are unchanged by it).
+#   LIMITS: (1) the sung conditions are FALSETTO, while the fold below is a modal two-mass card; (2) no piriform sinus: the
+#   voice grammar has no side branch and the report does not print where the branch (Table V) attaches; (3) supine;
+#   (4) one singer, vowel /a/ only.
+#   Same-specimen check (computed, not measured): the authors' wave-reflection model with the sinus at 17.46 cm gives
+#   F1-F4 543 993 2585 3747 Hz (Table VII). This file's passive tract (flanged, wall, no sinus) was predicted offline before the
+#   render at F1-F5 562 1024 2641 3838 4646 Hz; the render sidecar (passive_tract_formants_hz) gives 563 1027 2643 3840 Hz.
+#   The missing sinus is the main gap to Table VII (F1 +3.5 %).
+#
+# FOLD, FLOW LAW, WALL, GAS, MICROPHONE, LEVEL, MECHANICS: identical to story2008-a-C3-flanagan.performance (see its
+#   header for every citation): Ishizaka-Flanagan two-mass pack in the Steinecke-Herzel form with the Poiseuille drop,
+#   damping ratios 0.1 lower, 0.6 upper open, Ishizaka & Flanagan (1972) p. 1238, 1.0 more each while its section is shut;
+#   RETRIM on this law: only q moved, pressure held, emergent f0 to within 3 cents of the note, no recording, q 0.544096 to 0.79141.
+#   Trace:
+#     q 0.544096: f0 113.80 Hz (-241.2 c) -> q 0.718938: f0 126.22 Hz (-61.8 c) -> q 0.79141: f0 130.79 Hz (-0.3 c)
+#   Any other trace in this header is from an earlier law and ended at an earlier q.
+#   Flanagan wall via Birkholz, Haesner and Kuerbis (ICASSP 2022), K ASSUMED;
+#   saturated air at 310.15 K; flanged mouth; 0.30 m at 45 deg; 96 kHz mechanics clock.
+# SUBGLOTTAL PRESSURE: AUTHORED PLAYER INPUT, 489.687 Pa: 900 Pa x the q 0.544096 of the previous trim, held when q moved on this law (tests/vowel_gates.rs vw-002 rule). Ramp 150 ms, hold, 150 ms release.
+#   The 150 ms RISE is cited: Fant and Kruckenberg 2005, Interspeech, doi:10.21437/Interspeech.2005-425, Sec. 1 on Fig. 1: one male
+#   speaker (a laryngologist) reading prose, true subglottal pressure by sonde: 'the duration of the rise to an initial value of the
+#   order of 6-8 cm H2O is 120-180 ms' at the onset of a breath group; 150 ms is the centre of that range. LIMITS: speech, one subject,
+#   not a singer's gesture, no adduction trajectory. Only the rise time is cited; the plateau P is this card's own authored value,
+#   and their 3-5 and 6-8 cm H2O levels are NOT applied. The earlier 60 ms was authored. Steady state, and so the pitch trim, is unchanged.
+# PITCH CONTROL (model-only objective): the three fold stiffnesses are the pack values x q = 0.79141. q was
+#   iterated on the EMERGENT f0 of the radiated pressure (autocorrelation over 0.5-1.5 s of a 1.5 s trial render, same
+#   binary) until it was within 3 cents of C3 = 130.81 Hz (A4 = 440 Hz). No recording enters. Trace
+#   from the Story /a/ C3 q:
+#     q 0.459164: f0 121.36 Hz (-129.8 c) -> q 0.533469: f0 129.68 Hz (-15.1 c) -> q 0.544097: f0 130.82 Hz (+0.1 c)
+# ALL-IN variant (scratch copy, ChartreuseBass, owner order 14741, 2026-11-02). Original card unchanged in the shared tree.
+# Added keys, each with its source (see make_allin_cards.py): `tension_modulation 5.85 0.09` vibrato (Larrouy-Maestri et al. 2014: 5.75-5.95 Hz, mean extent 139 cents; amplitude from the code's own 61.4 cents at 0.08), `tract_wall` the cited Flanagan/Birkholz wall where the card had none, mechanics ratio 4 (192 kHz, converged contact), `fold_mapping bilateral` (Ishizaka and Flanagan mirror pair, one fold of two), thermochemical ambient (NASA-9 + transport packs).
+# The pitch was NOT retrimmed for these keys: the f0 against the nominal note is reported with each render.
+frankensim-voice-performance-v1
+# MEASURED TRACT A/B (NavyTower, MB 1843 + 1850; no landing, not a posted card): the tract is DVTD subject 1, s1-01-bahn-tense-a. Birkholz, Kuerbis, Stone, Haesner, Blandin, Fleischer, Sci. Data 7:255, 2020,
+#   doi:10.1038/s41597-020-00597-w, CC0. A different man from the singer on this page, and speaking the subject's own vowels. The 3-D-printed model's STL was cut to a 1-D area function by a level cut made by the FrankenSim voice lane:
+#   Laplace field on voxels, 0 at glottis, 1 at lips, walls no-flux; L A = V and L / A = dphi / flux per level. Printed area functions were not used. The last two slabs are merged into one section keeping their volume and sum L / A, since the raw last slab was over the flanged kernel ceiling of ka = 24 (mergecut.py). The section rows below replace the card's 44 Tom or Story rows; everything else in the card is as it was until the retrim moves q.
+audio 48000 72000 4
+full_scale_pa 8.0
+ambient thermochemical 310.15 101325 mole 5 N2 0.73246735 O2 0.19649907 Ar 0.00876139 CO2 0.00029455 H2O 0.06197764
+fold two_mass 0.000125 2.5e-05 51.0804872 5.10804872 15.9626119 0.1 3.57e-4 1.4e-2 2.5e-3
+fold_damping_upper 0.6
+termination flanged
+# straight tone (VocalSet long_straight references): tension_modulation 5.85 0.09
+fold_mapping bilateral
+tract_wall 15 1.48e+06 1.6e4
+tract_source birkholz-2020-dvtd-s1-09-los-l-level-cut
+tract_licence CC0 (DVTD, Birkholz et al. 2020); level cut by the FrankenSim voice lane
+microphone 0.212132 0 0.212132 16 64 8000
+subglottal 0 0
+subglottal 0.15 489.687
+subglottal 0.2188 463.609
+subglottal 0.45 463.609
+subglottal 0.556 489.687
+subglottal 0.95 489.687
+subglottal 1.05 0
+section 1.8774340e-04 2.0180470e-03
+section 2.0735610e-04 2.0224869e-03
+section 1.4992512e-04 2.0293463e-03
+section 1.6086096e-04 2.0172701e-03
+section 1.7386505e-04 2.0073039e-03
+section 1.6510593e-04 2.0047736e-03
+section 1.8402330e-04 2.0146905e-03
+section 2.1043952e-04 2.0106727e-03
+section 2.3548034e-04 2.0155610e-03
+section 2.5806348e-04 2.0033830e-03
+section 2.8066891e-04 2.0112666e-03
+section 3.0885915e-04 2.0288374e-03
+section 3.4517585e-04 2.0612682e-03
+section 3.8587313e-04 2.0738681e-03
+section 4.3509314e-04 2.0785779e-03
+section 5.0424898e-04 2.1078377e-03
+section 6.0932467e-04 2.0619139e-03
+section 7.7328519e-04 2.0010405e-03
+section 1.3113093e-03 2.0881801e-03
+section 1.7437970e-03 2.0826679e-03
+section 1.4065602e-03 2.2398614e-03
+section 1.1797987e-03 2.1136022e-03
+section 1.0263909e-03 2.0430812e-03
+section 9.3314661e-04 2.0432213e-03
+section 8.8854497e-04 2.1224306e-03
+section 8.4414817e-04 2.0163818e-03
+section 8.1867854e-04 2.1185055e-03
+section 7.9052153e-04 2.0456432e-03
+section 7.7534388e-04 2.0063678e-03
+section 7.5890442e-04 2.1148908e-03
+section 7.5810609e-04 2.1126661e-03
+section 7.7339450e-04 2.1552713e-03
+section 8.1094198e-04 2.0984855e-03
+section 8.7951766e-04 2.1008674e-03
+section 1.0260238e-03 2.0423504e-03
+section 1.3845110e-03 2.2047495e-03
+section 1.6113276e-03 2.2451983e-03
+section 1.2635693e-03 2.0121571e-03
+section 1.0879018e-03 2.1655217e-03
+section 9.7926681e-04 2.1442062e-03
+section 8.8798529e-04 2.1210937e-03
+section 8.1314297e-04 2.1041810e-03
+section 7.4989660e-04 2.0897881e-03
+section 6.9926917e-04 2.0878941e-03
+section 6.5831306e-04 2.0966469e-03
+section 6.1966415e-04 2.0969020e-03
+section 5.8935202e-04 2.1116412e-03
+section 5.6619556e-04 2.0286718e-03
+section 5.5922073e-04 2.0036811e-03
+section 5.5199316e-04 2.0876617e-03
+section 4.3437089e-04 2.0751275e-03
+section 3.8734472e-04 2.0046743e-03
+section 3.6044694e-04 2.0089642e-03
+section 3.4685720e-04 2.0022649e-03
+section 3.4977907e-04 2.0191317e-03
+section 3.7180985e-04 2.0722958e-03
+section 3.9270132e-04 2.0323970e-03
+section 3.8653326e-04 2.0004747e-03
+section 3.6109967e-04 2.0126022e-03
+section 3.2722865e-04 2.0192303e-03
+section 2.9870855e-04 2.0216194e-03
+section 2.7367472e-04 2.0156227e-03
+section 2.5140591e-04 2.0017429e-03
+section 2.3245161e-04 2.0359076e-03
+section 2.1328009e-04 2.0378133e-03
+section 1.9404612e-04 2.0085431e-03
+section 1.7700925e-04 2.0083696e-03
+section 1.6563506e-04 2.0111986e-03
+section 1.6135592e-04 2.0234771e-03
+section 1.6008453e-04 2.0075332e-03
+section 1.5910670e-04 2.0269417e-03
+section 1.6215304e-04 2.0011959e-03
+section 1.6560398e-04 2.0108212e-03
+section 1.6355241e-04 2.0184661e-03
+section 1.6355241e-04 2.0184661e-03
+section 1.7057499e-04 2.0372271e-03
+section 1.6606956e-04 2.0164743e-03
+section 1.7593882e-04 2.0312459e-03
+section 1.8636607e-04 2.0403392e-03
+section 1.9022394e-04 2.0068452e-03
+section 1.9192918e-04 2.0248354e-03
+section 1.8541404e-04 2.0299164e-03
+section 1.5085355e-04 2.0118851e-03
+section 1.2635693e-04 2.0121571e-03
+section 1.1019519e-04 2.0180100e-03
+section 9.9739662e-05 2.0052203e-03
+section 9.5515976e-05 2.0153697e-03
+section 9.9280549e-05 2.0157524e-03
+section 1.0205577e-04 2.0111553e-03
+section 1.0410233e-04 2.0100415e-03
+section 1.0344602e-04 2.0179607e-03
+section 1.1157481e-04 2.0210655e-03
+section 1.3008812e-04 2.0197847e-03
+section 1.5441417e-04 2.0286351e-03
+section 1.8482812e-04 2.0235017e-03
+section 1.9376587e-04 2.0056422e-03
+section 2.0536881e-04 2.0031036e-03
+section 2.3541832e-04 2.0150301e-03
+section 3.0818068e-04 2.0243807e-03
+section 3.7108531e-04 2.0682576e-03
+section 4.2493155e-04 2.0300328e-03
+section 6.6770560e-04 3.1898414e-03
+# JET NOISE, EXTRAPOLATION (SunnySnow, MB GO 16259): ONE added row. Page label (MB, verbatim): "constriction noise from a flue-jet measurement (Verge 1995: flue jet at a labium, slit 1 mm), applied to the glottal jet as an extrapolation; Stevens 1971 gives the form (a pressure source proportional to the pressure drop), not this constant". Numbers: gain 1.3e-3 of rho U_j^2/2 (0.92e-3 for the other analyser line width, +-3 dB), St_h 0.045-0.115 on the glottal gap, gate Re_h = Q/(L nu) >= 1700 (a flow threshold; about 44 % of the F4-a peak flow), U_j = Q/(L h) bounded by the Bernoulli speed of the drive. One value for every note; seed declared; nothing read from a recording.
+jet_noise 20261103 1.3e-3 0.045 0.115 1700
+# VIBRATO (sung phrases only; replaces this page's tension_flutter, the engine takes one gesture): 5.9 Hz, +-69.5 c, the means of 50 professional singers,
+#   Larrouy-Maestri, Magis and Morsomme 2014, J Voice, doi:10.1016/j.jvoice.2013.10.019. a = (2^(69.5/1200) - 1) / 0.36548, this card's gain measured at 4 Hz, 0.02, once, not iterated.
+tension_modulation 5.9 0.11208
+# FAST PITCH ROW UNDER VIBRATO (MB 3377): the page card fr-C3-a's second row, seed 1, F 20 BW 20, sd_rel 0.005361, copied as this card's only flutter row. Its size is the straight-tone size of Ternstrom and Friberg 1989 Fig. 5 applied under vibrato: no print for fast movement under vibrato was read. The engine adds it to the vibrato on one tension, 1 + a sin + y, a choice of this card; no print sets it. No recording enters.
+tension_flutter 1 20 20 0.005361
+# pulse_shimmer (MB 3551, 3576, 3719): a per-cycle gain on the wave the tract receives, a new g at each opening of the glottis.
+# Size: local shimmer 1.28 % for classical singing students (n 65), Yoo, Ahn, Kwon and Jeong 2002, Communication Sciences
+# and Disorders 7(2):126-134, read from the abstract only; whether the /a/ was sung or spoken is not stated there, and the
+# tracker floor was not taken out. For independent normal gains local shimmer is 2 sd / sqrt(pi), so sd = 1.28 % x
+# sqrt(pi) / 2 = 1.1344 %. Seed 6 on every card; the row has its own stream kernel.
+pulse_shimmer 6 0.011344
+keyframe i source birkholz-2020-dvtd-s1-03-tiere-tense-i-level-cut
+keyframe i licence CC0 (DVTD, Birkholz et al. 2020); level cut by the FrankenSim voice lane
+keyframe_section i 2.1176485e-04 2.0163875e-03
+keyframe_section i 1.7538790e-04 2.0155324e-03
+keyframe_section i 1.9462807e-04 2.0449260e-03
+keyframe_section i 1.7366706e-04 2.0527784e-03
+keyframe_section i 1.8491667e-04 2.0036051e-03
+keyframe_section i 1.9721372e-04 2.0073400e-03
+keyframe_section i 2.0358295e-04 2.0053251e-03
+keyframe_section i 2.1324747e-04 2.0305047e-03
+keyframe_section i 2.2453538e-04 2.0642626e-03
+keyframe_section i 2.3994628e-04 2.0483751e-03
+keyframe_section i 2.6104805e-04 2.0570925e-03
+keyframe_section i 2.9874402e-04 2.0598739e-03
+keyframe_section i 3.3649592e-04 2.0992082e-03
+keyframe_section i 3.2550890e-04 2.0306664e-03
+keyframe_section i 3.4669416e-04 2.0489962e-03
+keyframe_section i 3.8554023e-04 2.0254047e-03
+keyframe_section i 4.4502569e-04 2.0456684e-03
+keyframe_section i 8.1348596e-04 2.1367916e-03
+keyframe_section i 1.0905597e-03 2.1484380e-03
+keyframe_section i 1.3486769e-03 2.2141144e-03
+keyframe_section i 1.1921814e-03 2.3486359e-03
+keyframe_section i 8.9328406e-04 2.0530983e-03
+keyframe_section i 7.7061746e-04 2.0241885e-03
+keyframe_section i 7.2055270e-04 2.1292683e-03
+keyframe_section i 6.8337207e-04 2.0193977e-03
+keyframe_section i 6.6520126e-04 2.1841134e-03
+keyframe_section i 6.4592101e-04 2.1208089e-03
+keyframe_section i 6.4947707e-04 2.1324848e-03
+keyframe_section i 6.5907793e-04 2.1640081e-03
+keyframe_section i 6.8051873e-04 2.0109660e-03
+keyframe_section i 7.1725765e-04 2.1195312e-03
+keyframe_section i 7.7348365e-04 2.0317172e-03
+keyframe_section i 8.7858144e-04 2.0193063e-03
+keyframe_section i 1.2085677e-03 2.3809175e-03
+keyframe_section i 1.9481137e-03 2.5585647e-03
+keyframe_section i 1.2608209e-03 2.0698817e-03
+keyframe_section i 1.0926813e-03 2.1526176e-03
+keyframe_section i 9.9408241e-04 2.2847703e-03
+keyframe_section i 9.2812999e-04 2.1331872e-03
+keyframe_section i 8.7395754e-04 2.0086788e-03
+keyframe_section i 8.1328119e-04 2.1362538e-03
+keyframe_section i 7.4542552e-04 2.2027687e-03
+keyframe_section i 6.9737272e-04 2.0607703e-03
+keyframe_section i 6.6170093e-04 2.1726205e-03
+keyframe_section i 6.3339268e-04 2.0796735e-03
+keyframe_section i 6.4924256e-04 2.1317148e-03
+keyframe_section i 5.1653686e-04 2.0351887e-03
+keyframe_section i 4.4195989e-04 2.0315757e-03
+keyframe_section i 3.9640350e-04 2.0824740e-03
+keyframe_section i 3.6793206e-04 2.0537079e-03
+keyframe_section i 3.6160858e-04 2.0184118e-03
+keyframe_section i 3.7662445e-04 2.1022268e-03
+keyframe_section i 4.1132108e-04 2.0257897e-03
+keyframe_section i 4.3132070e-04 2.1242894e-03
+keyframe_section i 4.0785100e-04 2.0086992e-03
+keyframe_section i 3.5980813e-04 2.0083621e-03
+keyframe_section i 3.1172872e-04 2.0470523e-03
+keyframe_section i 2.7449292e-04 2.0729132e-03
+keyframe_section i 2.4128507e-04 2.0598042e-03
+keyframe_section i 2.1297027e-04 2.0278653e-03
+keyframe_section i 1.8538399e-04 2.0086686e-03
+keyframe_section i 1.6028932e-04 2.0525385e-03
+keyframe_section i 1.3633354e-04 2.0143612e-03
+keyframe_section i 1.1561900e-04 2.0119964e-03
+keyframe_section i 9.4972447e-05 2.0269037e-03
+keyframe_section i 8.0417445e-05 2.0067163e-03
+keyframe_section i 6.5592446e-05 2.0028983e-03
+keyframe_section i 5.4201707e-05 2.0110068e-03
+keyframe_section i 4.3910954e-05 2.0040557e-03
+keyframe_section i 3.5716854e-05 2.0053558e-03
+keyframe_section i 3.0171147e-05 2.0010840e-03
+keyframe_section i 2.9361128e-05 2.0052023e-03
+keyframe_section i 3.1748685e-05 2.0118944e-03
+keyframe_section i 3.9558101e-05 2.0002224e-03
+keyframe_section i 4.9051522e-05 2.0131893e-03
+keyframe_section i 5.3952503e-05 2.0017607e-03
+keyframe_section i 5.4108390e-05 2.0075445e-03
+keyframe_section i 5.4201707e-05 2.0110068e-03
+keyframe_section i 5.5437557e-05 2.0022527e-03
+keyframe_section i 5.9064118e-05 2.0168760e-03
+keyframe_section i 6.1607690e-05 2.0025909e-03
+keyframe_section i 6.4371319e-05 2.0078818e-03
+keyframe_section i 7.2420735e-05 2.0211753e-03
+keyframe_section i 8.0697267e-05 2.0136989e-03
+keyframe_section i 9.0006475e-05 2.0095776e-03
+keyframe_section i 1.0055103e-04 2.0139027e-03
+keyframe_section i 1.1917719e-04 2.0347854e-03
+keyframe_section i 1.4576327e-04 2.0101086e-03
+keyframe_section i 1.8193100e-04 2.0309898e-03
+keyframe_section i 2.3235646e-04 2.0598739e-03
+keyframe_section i 2.8497573e-04 2.0585086e-03
+keyframe_section i 3.3269324e-04 2.0754855e-03
+keyframe_section i 2.8618763e-04 2.0672627e-03
+keyframe_section i 2.5579986e-04 2.0157361e-03
+keyframe_section i 2.3034520e-04 2.0420438e-03
+keyframe_section i 2.6250237e-04 2.0685527e-03
+keyframe_section i 3.0577933e-04 2.0079840e-03
+keyframe_section i 5.7660659e-04 3.5971233e-03
+keyframe a source birkholz-2020-dvtd-s1-01-bahn-tense-a-level-cut
+keyframe a licence CC0 (DVTD, Birkholz et al. 2020); level cut by the FrankenSim voice lane
+keyframe_section a 1.4281734e-04 2.0218134e-03
+keyframe_section a 1.4358808e-04 2.0327245e-03
+keyframe_section a 1.1242997e-04 2.0201464e-03
+keyframe_section a 1.0907497e-04 2.0192533e-03
+keyframe_section a 1.0593820e-04 2.0188657e-03
+keyframe_section a 9.9574730e-05 2.0060310e-03
+keyframe_section a 9.5765574e-05 2.0075064e-03
+keyframe_section a 9.3681004e-05 2.0148161e-03
+keyframe_section a 9.7975843e-05 2.0004931e-03
+keyframe_section a 1.0941491e-04 2.0255465e-03
+keyframe_section a 1.2494419e-04 2.0068960e-03
+keyframe_section a 1.4928855e-04 2.0321384e-03
+keyframe_section a 1.8373594e-04 2.0008333e-03
+keyframe_section a 2.2321419e-04 2.0053609e-03
+keyframe_section a 3.1950591e-04 2.0875983e-03
+keyframe_section a 5.8585937e-04 2.0734498e-03
+keyframe_section a 7.4558109e-04 2.0297926e-03
+keyframe_section a 5.2783026e-04 2.0117736e-03
+keyframe_section a 3.2129204e-04 2.0117990e-03
+keyframe_section a 2.3836093e-04 2.0116552e-03
+keyframe_section a 1.8732439e-04 2.0399105e-03
+keyframe_section a 1.5702629e-04 2.0092178e-03
+keyframe_section a 1.3258518e-04 2.0213420e-03
+keyframe_section a 1.1523644e-04 2.0078284e-03
+keyframe_section a 1.0587627e-04 2.0176854e-03
+keyframe_section a 1.0204775e-04 2.0002890e-03
+keyframe_section a 9.7049404e-05 2.0079979e-03
+keyframe_section a 9.5453735e-05 2.0009694e-03
+keyframe_section a 9.5211558e-05 2.0218134e-03
+keyframe_section a 9.4484087e-05 2.0320882e-03
+keyframe_section a 9.8256621e-05 2.0062261e-03
+keyframe_section a 1.0072386e-04 2.0017600e-03
+keyframe_section a 1.0550390e-04 2.0105892e-03
+keyframe_section a 1.1764374e-04 2.0177444e-03
+keyframe_section a 1.1905612e-04 2.0095565e-03
+keyframe_section a 1.1986203e-04 2.0231595e-03
+keyframe_section a 1.2485073e-04 2.0053948e-03
+keyframe_section a 1.3187210e-04 2.0104707e-03
+keyframe_section a 1.3769944e-04 2.0243365e-03
+keyframe_section a 1.4417949e-04 2.0018450e-03
+keyframe_section a 1.7517542e-04 2.0029922e-03
+keyframe_section a 1.3652117e-04 2.0070147e-03
+keyframe_section a 1.1205810e-04 2.0134645e-03
+keyframe_section a 9.1190408e-05 2.0109023e-03
+keyframe_section a 6.9682943e-05 2.0108938e-03
+keyframe_section a 5.4583550e-05 2.0060989e-03
+keyframe_section a 5.1773760e-05 2.0014965e-03
+keyframe_section a 5.9925490e-05 2.0066586e-03
+keyframe_section a 8.1020434e-05 2.0072097e-03
+keyframe_section a 1.2253227e-04 2.0015135e-03
+keyframe_section a 1.6297468e-04 2.0409612e-03
+keyframe_section a 1.8381136e-04 2.0516959e-03
+keyframe_section a 2.0924846e-04 2.0507917e-03
+keyframe_section a 2.1932297e-04 2.0301112e-03
+keyframe_section a 2.2451937e-04 2.0170866e-03
+keyframe_section a 2.3100145e-04 2.0124332e-03
+keyframe_section a 2.4040273e-04 2.0288871e-03
+keyframe_section a 2.5205328e-04 2.0585925e-03
+keyframe_section a 2.6744866e-04 2.0387090e-03
+keyframe_section a 2.8336905e-04 2.0057766e-03
+keyframe_section a 3.0872575e-04 2.0171625e-03
+keyframe_section a 3.3433786e-04 2.0024654e-03
+keyframe_section a 3.5992428e-04 2.0577245e-03
+keyframe_section a 3.8555070e-04 2.0992699e-03
+keyframe_section a 4.1430066e-04 2.0302285e-03
+keyframe_section a 4.4051990e-04 2.0387842e-03
+keyframe_section a 4.6869381e-04 2.0415781e-03
+keyframe_section a 4.9584145e-04 2.0248408e-03
+keyframe_section a 5.2168252e-04 2.1303666e-03
+keyframe_section a 5.5176833e-04 2.1030112e-03
+keyframe_section a 5.9432863e-04 2.1034238e-03
+keyframe_section a 6.3293532e-04 2.0677468e-03
+keyframe_section a 9.4230351e-04 2.0522846e-03
+keyframe_section a 7.0661388e-04 2.1160779e-03
+keyframe_section a 7.0124753e-04 2.1000074e-03
+keyframe_section a 7.9279787e-04 2.1583370e-03
+keyframe_section a 7.3140263e-04 2.1903121e-03
+keyframe_section a 6.9011758e-04 2.0666768e-03
+keyframe_section a 6.5087715e-04 2.1263613e-03
+keyframe_section a 6.2612805e-04 2.0455081e-03
+keyframe_section a 5.9536769e-04 2.1071013e-03
+keyframe_section a 5.7210338e-04 2.0247652e-03
+keyframe_section a 5.6928749e-04 2.0147993e-03
+keyframe_section a 5.6454822e-04 2.1517206e-03
+keyframe_section a 5.7668434e-04 2.0409779e-03
+keyframe_section a 5.1202912e-04 2.0909455e-03
+keyframe_section a 3.8878855e-04 2.0110546e-03
+keyframe_section a 2.9047784e-04 2.0560949e-03
+keyframe_section a 2.3667726e-04 2.0618796e-03
+keyframe_section a 2.9518175e-04 2.0893907e-03
+keyframe_section a 5.2687149e-04 3.4424903e-03
+tract_move 0.1408 0.2188 i 18
+tract_move 0.45 0.556 card 18
+tract_move 0.556 0.651 a 27
+fold_tension 0 1.02423 1.0 1.0
+fold_tension 0.1408 1.02423 1.0 1.0
+fold_tension 0.2188 1.1085501079559006 1.0056209850107067 0.8218615929863832
+fold_tension 0.45 1.1085501079559006 1.0056209850107067 0.8218615929863832
+fold_tension 0.556 1.02423 1.0 1.0
+fold_tension 0.651 1.0 1.0 1.0
