@@ -72,7 +72,7 @@ const BOARD_LOSS_FIXTURES: [&str; 6] = [
 
 /// Plain packs the fs-couple literature tests load, by source manifest (pexfp.32): seed packs, then
 /// the authored test fixtures that carry values no source pack does.
-const COUPLE_TEST_FIXTURES: [&str; 13] = [
+const COUPLE_TEST_FIXTURES: [&str; 15] = [
     "data/matdb/seed-v1/spruce-sitka-fpl-gtr282/manifest.tsv",
     "data/matdb/seed-v1/spruce-sitka-loss-qiu2026/manifest.tsv",
     "data/matdb/seed-v1/rosewood-brazilian-fpl-gtr282/manifest.tsv",
@@ -83,6 +83,8 @@ const COUPLE_TEST_FIXTURES: [&str; 13] = [
     "data/matdb/seed-v1/cane-arundo-reedheel-mdpi-ma13204566/manifest.tsv",
     "data/matdb/seed-v1/cane-arundo-reedblank-mdpi-ma18122759/manifest.tsv",
     "data/matdb/seed-v1/cane-arundo-damping-scielo-mr20170795/manifest.tsv",
+    "data/matdb/seed-v1/cane-arundo-wetdry-obataya-jws1999/manifest.tsv",
+    "data/matdb/seed-v1/cane-arundo-culm-tension-coppolino-unibo2020/manifest.tsv",
     "crates/fs-couple/tests/fixtures/matdb/rosewood-brazilian-back-authored-fixture/manifest.tsv",
     "crates/fs-couple/tests/fixtures/matdb/rosewood-indian-bar-authored-fixture/manifest.tsv",
     "crates/fs-couple/tests/fixtures/matdb/cane-reed-authored-fixture/manifest.tsv",
