@@ -38,6 +38,7 @@
 //! columns of a multiport response. Hard limits bound this dense local-domain
 //! owner; it is not a large-domain iterative solver or a geometry error bound.
 
+use super::backward_error::row_scale;
 use super::helmholtz::multiport::{BoundaryMode, MAX_PORT_MODES, PhysicalTrace, physical_trace};
 use super::helmholtz::{AcousticFeError, HelmholtzFe, Medium};
 use crate::highorder::simplex::{SimplexSpace, duffy_quadrature};
@@ -1299,6 +1300,7 @@ impl<'c> ThermoviscousFe<'c> {
         for (v, &scale) in x.iter_mut().zip(columns) {
             *v = v.scale(scale);
         }
+        const RESIDUAL_LIMIT: f64 = 5e-13;
         for correction in 0..=2 {
             poll(cancelled)?;
             if x.iter().any(|z| !finite(*z)) {
@@ -1324,11 +1326,15 @@ impl<'c> ThermoviscousFe<'c> {
             };
             let mut residual = vec![C64::ZERO; n];
             let mut backward_error: f64 = 0.0;
+            let mut componentwise: f64 = 0.0;
+            let x_max = x.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
             for i in 0..n {
                 poll(cancelled)?;
                 let mut re = Dd::from_f64(rhs[i].re);
                 let mut im = Dd::from_f64(rhs[i].im);
                 let mut scale = rhs[i].abs();
+                let mut absolute_row = 0.0;
+                let mut reference_norm = 0.0;
                 for (j, &v) in x.iter().enumerate() {
                     let a = self.operator_entry(i, j, omega, cp, wall_relaxation);
                     if a.re == 0.0 && a.im == 0.0 {
@@ -1341,6 +1347,7 @@ impl<'c> ThermoviscousFe<'c> {
                         - (Dd::from_f64(a.re) * Dd::from_f64(v.im)
                             + Dd::from_f64(a.im) * Dd::from_f64(v.re));
                     scale += a.abs() * v.abs();
+                    absolute_row += a.abs();
                 }
                 // Retain the original unscaled solid boundary operator in the
                 // same extended-precision residual as every gas-volume term.
@@ -1355,6 +1362,7 @@ impl<'c> ThermoviscousFe<'c> {
                         - (Dd::from_f64(a.re) * Dd::from_f64(v.im)
                             + Dd::from_f64(a.im) * Dd::from_f64(v.re));
                     scale += a.abs() * v.abs();
+                    absolute_row += a.abs();
                 }
                 if let Some(reference) = reference {
                     for (port, &r) in reference.iter().enumerate() {
@@ -1363,8 +1371,10 @@ impl<'c> ThermoviscousFe<'c> {
                             let coefficient = Dd::from_f64(r) * Dd::from_f64(b);
                             re = re - coefficient * flows[port].0;
                             im = im - coefficient * flows[port].1;
-                            scale += (r * b).abs()
-                                * C64::new(flows[port].0.to_f64(), flows[port].1.to_f64()).abs();
+                            let flow =
+                                C64::new(flows[port].0.to_f64(), flows[port].1.to_f64()).abs();
+                            scale += (r * b).abs() * flow;
+                            reference_norm += (r * b).abs() * flow;
                         }
                     }
                 }
@@ -1372,15 +1382,20 @@ impl<'c> ThermoviscousFe<'c> {
                 if !finite(value) || !scale.is_finite() {
                     return Err(ThermoviscousError::NonFinite);
                 }
-                backward_error = backward_error.max(value.abs() / scale.max(f64::MIN_POSITIVE));
+                let norm = absolute_row * x_max + rhs[i].abs() + reference_norm;
+                let denominator = row_scale(scale, norm, RESIDUAL_LIMIT);
+                backward_error =
+                    backward_error.max(value.abs() / denominator.max(f64::MIN_POSITIVE));
+                componentwise = componentwise.max(value.abs() / scale.max(f64::MIN_POSITIVE));
                 residual[i] = value.scale(rows[i]);
             }
-            if correction == 2 || backward_error < 1e-18 {
-                const LIMIT: f64 = 5e-13;
-                if backward_error > LIMIT {
+            // The refinement stops early only when the strict componentwise error is exact to double-double, as before; the
+            // mixed error is smaller and would stop it at the first iterate. The mixed one decides acceptance.
+            if correction == 2 || componentwise < 1e-18 {
+                if backward_error > RESIDUAL_LIMIT {
                     return Err(ThermoviscousError::Residual {
                         observed: backward_error,
-                        limit: LIMIT,
+                        limit: RESIDUAL_LIMIT,
                     });
                 }
                 return Ok(x);

@@ -33,6 +33,7 @@ use super::{
     AcousticFeError, BoundaryAdmittance, HeterogeneousError, HeterogeneousHelmholtzFe,
     SpatialResistiveBoundary, invalid, poll,
 };
+use crate::acoustics::backward_error::row_scale;
 use fs_math::{c64::C64, dd::Dd, det};
 use fs_sparse::direct::{DirectOrdering, LdltFactor, LdltOptions, SymbolicLdlt};
 use fs_sparse::{Coo, Csr};
@@ -828,6 +829,9 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
         let h = Dd::from_f64(self.duration_s);
         let mut residual = vec![0.0; self.pressure_release.free_dofs.len()];
         let mut worst: f64 = 0.0;
+        let pressure_max = next.pressure.iter().fold(0.0_f64, |m, p| m.max(p.abs()));
+        let potential_max =
+            (midpoint_psi.iter().chain(&next.potential)).fold(0.0_f64, |m, p| m.max(p.abs()));
         // Eliminated rows are boundary reactions. Their pressure and potential
         // remain zero by admission and reconstruction; only the free physical
         // equations enter the solve residual and correction vector.
@@ -835,9 +839,11 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
             poll(cancelled)?;
             let mut value = -h * Dd::from_f64(load[row]);
             let mut scale = self.duration_s * load[row].abs();
+            let mut norm = scale;
             if let Some(outward) = outward_load {
                 value = value + h * Dd::from_f64(outward[row]);
                 scale += self.duration_s * outward[row].abs();
+                norm += self.duration_s * outward[row].abs();
             }
             let (cols, entries) = self.model.mass.row(row);
             for (&col, &entry) in cols.iter().zip(entries) {
@@ -845,16 +851,18 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
                 let term = Dd::from_f64(entry) * delta;
                 value = value + term;
                 scale += term.to_f64().abs();
+                norm += entry.abs() * pressure_max;
             }
-            for (matrix, field) in [
-                (conductance, midpoint_p),
-                (&self.model.stiffness, midpoint_psi),
+            for (matrix, field, field_max) in [
+                (conductance, midpoint_p, pressure_max),
+                (&self.model.stiffness, midpoint_psi, potential_max),
             ] {
                 let (cols, entries) = matrix.row(row);
                 for (&col, &entry) in cols.iter().zip(entries) {
                     let term = h * Dd::from_f64(entry) * Dd::from_f64(field[col]);
                     value = value + term;
                     scale += term.to_f64().abs();
+                    norm += self.duration_s * entry.abs() * field_max;
                 }
             }
             let value = value.to_f64();
@@ -873,7 +881,10 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
                 return Err(invalid("unrepresentable transient physical residual").into());
             }
             worst = worst
-                .max(relative(value.abs(), scale))
+                .max(relative(
+                    value.abs(),
+                    row_scale(scale, norm, self.limits.residual_tolerance),
+                ))
                 .max(relative(kinematics.abs(), kinematic_scale));
             residual[free_row] = value;
         }

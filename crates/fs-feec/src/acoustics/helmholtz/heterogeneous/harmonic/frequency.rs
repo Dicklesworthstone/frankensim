@@ -6,6 +6,7 @@
 //! Derivatives are per rad/s. Bulk material and geometry remain fixed;
 //! boundary derivatives are explicit inputs. Both equations use the retained LU.
 
+use crate::acoustics::backward_error::row_scale;
 use fs_la::eigen_complex::{LuComplex, LuComplexError};
 use fs_math::{c64::C64, dd::Dd};
 use fs_sparse::Csr;
@@ -430,8 +431,11 @@ impl PressurePencil<'_> {
                     "nonfinite harmonic pressure or tangent",
                 ));
             }
-            let (mut residual, backward_error) = self.residual(&pressure, forcing, cancelled)?;
-            if correction == 2 || backward_error < 1e-18 {
+            let (mut residual, backward_error, componentwise) =
+                self.residual(&pressure, forcing, cancelled)?;
+            // The refinement stops early only when the strict componentwise error is exact to double-double, as before; the
+            // mixed error is smaller and would stop it at the first iterate. The mixed one decides acceptance.
+            if correction == 2 || componentwise < 1e-18 {
                 if backward_error > self.residual_tolerance {
                     return Err(PressureError::Residual {
                         observed: backward_error,
@@ -461,15 +465,18 @@ impl PressurePencil<'_> {
         pressure: &[C64],
         forcing: &Forcing,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<(Vec<C64>, f64), PressureError> {
+    ) -> Result<(Vec<C64>, f64, f64), PressureError> {
         let omega = Dd::from_f64(self.omega);
         let omega2 = omega * omega;
         let mut residual = vec![C64::ZERO; self.free_dofs.len()];
         let mut worst: f64 = 0.0;
+        let mut componentwise: f64 = 0.0;
+        let pressure_max = pressure.iter().fold(0.0_f64, |m, p| m.max(p.abs()));
         for (free_row, &row) in self.free_dofs.iter().enumerate() {
             poll(cancelled)?;
             let [mut real, mut imaginary] = forcing.values[row];
             let mut scale = forcing.magnitude[row];
+            let mut absolute_row = 0.0;
             for (matrix, multiplier, rotate) in [
                 (self.stiffness, Dd::from_f64(1.0), false),
                 (self.mass, -omega2, false),
@@ -488,6 +495,7 @@ impl PressurePencil<'_> {
                         imaginary = imaginary - coefficient * Dd::from_f64(p.im);
                     }
                     scale += coefficient.to_f64().abs() * p.abs();
+                    absolute_row += coefficient.to_f64().abs();
                 }
             }
             let value = C64::new(real.to_f64(), imaginary.to_f64());
@@ -496,10 +504,13 @@ impl PressurePencil<'_> {
                     "unrepresentable physical pressure residual",
                 ));
             }
-            worst = worst.max(value.abs() / scale.max(f64::MIN_POSITIVE));
+            let norm = absolute_row * pressure_max + forcing.magnitude[row];
+            let denominator = row_scale(scale, norm, self.residual_tolerance);
+            worst = worst.max(value.abs() / denominator.max(f64::MIN_POSITIVE));
+            componentwise = componentwise.max(value.abs() / scale.max(f64::MIN_POSITIVE));
             residual[free_row] = value;
         }
-        Ok((residual, worst))
+        Ok((residual, worst, componentwise))
     }
 }
 

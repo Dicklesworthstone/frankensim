@@ -10,3 +10,6 @@ pub mod hybrid;
 
 /// Full m=0 meridional pressure fields with exact swept volume and surface forms.
 pub mod axisymmetric;
+
+/// The mixed componentwise/normwise row gate of the refined solves.
+pub(crate) mod backward_error;
