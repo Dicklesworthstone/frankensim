@@ -68,19 +68,18 @@ fn fixture(
     }
     let mut assignments = vec![0; surface.areas().len()];
     assignments[driven_panels..].fill(1);
-    let boundary = LocalBoundary::try_new_iterative(
-        medium(),
-        vec![
-            LocalWall::Rigid,
-            LocalWall::Mechanical(WallPin {
-                surface_density: 0.1,
-                stiffness_per_area: 4e5,
-                resistance: 200.0,
-            }),
-        ],
-        assignments,
-    )
-    .unwrap();
+    // Only the passive body's panels name the mechanical law, and `LocalBoundary` refuses a law that no panel
+    // names ("local boundary contains an unused law", wall/boundary.rs). The bare radiator therefore binds the
+    // rigid law alone; its physics is unchanged, because no panel ever carried the mechanical one.
+    let mut laws = vec![LocalWall::Rigid];
+    if obstacle.is_some() {
+        laws.push(LocalWall::Mechanical(WallPin {
+            surface_density: 0.1,
+            stiffness_per_area: 4e5,
+            resistance: 200.0,
+        }));
+    }
+    let boundary = LocalBoundary::try_new_iterative(medium(), laws, assignments).unwrap();
     (
         surface,
         vec![
