@@ -176,7 +176,9 @@ impl<'a> ParameterFamily for Family<'a> {
         let mut m=model(self.fixture,self.engine,p[0]); m.targets=self.target.clone(); Ok(m)
     }
 }
-// Independent four-variable normal equations for a uniform-field solution.
+// Four-variable normal equations for a UNIFORM-field solution. Exact only where conduction cannot act on
+// unequal nodal masses: on this mesh (box_grid([2,1,1]), a Kuhn grid) the minimizer varies across nodes, so
+// the joint test compares against `dense` below and keeps this only as the uniform guess it must not match.
 fn uniform_oracle(nodes:usize)->Vec<f64> {
     let n=nodes as f64; let mut a=vec![vec![0.0;4];4]; let mut b=vec![0.0;4];
     let mut term=|row:[f64;4],target:f64,weight:f64| {
@@ -190,6 +192,17 @@ fn uniform_oracle(nodes:usize)->Vec<f64> {
     for i in 0..4 {let pivot=a[i][i];for j in i..4 {a[i][j]/=pivot;} b[i]/=pivot;
         for k in 0..4 {if k!=i {let q=a[k][i];for j in i..4 {a[k][j]-=q*a[i][j];} b[k]-=q*b[i];}}}
     b
+}
+// Gauss--Jordan inverse with partial pivoting, for the dense oracle of the joint test.
+fn invert(a:&[Vec<f64>])->Vec<Vec<f64>> {
+    let m=a.len();
+    let mut w:Vec<Vec<f64>>=(0..m).map(|i|{let mut r=a[i].clone(); r.extend((0..m).map(|j|f64::from(u8::from(i==j)))); r}).collect();
+    for c in 0..m {
+        let piv=(c..m).max_by(|&x,&y|w[x][c].abs().total_cmp(&w[y][c].abs())).unwrap(); w.swap(c,piv);
+        let d=w[c][c]; for v in w[c].iter_mut() {*v/=d;}
+        for r in 0..m {if r!=c {let q=w[r][c]; let pc=w[c].clone(); for (v,x) in w[r].iter_mut().zip(&pc) {*v-=q*x;}}}
+    }
+    w.into_iter().map(|r|r[m..].to_vec()).collect()
 }
 #[test]
 fn joint_source_and_spatial_states_match_independent_map_and_resume() {
@@ -209,9 +222,41 @@ fn joint_source_and_spatial_states_match_independent_map_and_resume() {
         assert_eq!(stop.reason,StopReason::GradNorm,"{stop:?}");
         for _ in 0..400 {if split.run(1,&mut control,&mut||false).unwrap().reason!=StopReason::IterationCap {break;}}
         assert_eq!(straight.accepted(),split.accepted());
-        let oracle=uniform_oracle(n); let got=straight.accepted();
-        for k in 0..3 {for &x in &got.window.states[k*n..(k+1)*n] {close(x-300.0,oracle[k],2e-5);}}
-        close(got.parameters[0],oracle[3],2e-5);
+        // `dense`: the minimizer of the joint objective over all 3n+1 unknowns (state deviations from 300 K at the
+        // three knots, then the source), by dense normal equations. It uses the production FORWARD step only, to
+        // build the map (columns of B from the n unit states, the source column from the unit source); no adjoint,
+        // no pullback and no L-BFGS enter, and the forward step is checked against closed forms by the conduction tests.
+        // The uniform-field oracle fails here: on this Kuhn mesh the nodal masses differ, conduction acts on them and the
+        // minimizer varies across nodes. Measured with the conductivity changed (spread of state 0 over the nodes, gradient
+        // at the uniform point): k = 2 (as written) 3.1e-4 to 1.0e-4 and 8.2e-3, k = 2e-4 1.5e-5 and 3.5e-4, k = 2e-6 1.6e-10 and 3.7e-6.
+        let pf=ConductionWindowPolicy::new(cx,&f.mesh,&f.boundary,&times,config(),&mut||false).unwrap();
+        let step=|source:f64,x:&[f64]| pf.record(&model(&f,&engine,source),0,0.0,0.25,x,&mut||false).unwrap().endpoint().to_vec();
+        let (zero,nn)=(vec![0.0;n],3*n+1);
+        let bcol:Vec<Vec<f64>>=(0..n).map(|j|{let mut e=zero.clone(); e[j]=1.0; step(0.0,&e)}).collect();
+        let s=step(1.0,&zero);
+        let (mut h,mut rhs)=(vec![vec![0.0;nn];nn],vec![0.0;nn]);
+        let mut term=|row:&[(usize,f64)],target:f64,weight:f64| {for &(i,a) in row {rhs[i]+=weight*a*target; for &(j,c) in row {h[i][j]+=weight*a*c;}}};
+        for k in 0..3 {for i in 0..n {term(&[(k*n+i,1.0)],0.5*k as f64,1.0/0.05_f64.powi(2));}}
+        for i in 0..n {term(&[(i,1.0)],0.0,1.0/2.0_f64.powi(2));}
+        for k in 0..2 {for i in 0..n {
+            let mut row=vec![((k+1)*n+i,1.0),(3*n,-s[i])]; for j in 0..n {row.push((k*n+j,-bcol[j][i]));}
+            term(&row,0.0,1.0/0.2_f64.powi(2));}}
+        term(&[(3*n,1.0)],0.0,1.0/10.0_f64.powi(2));
+        let hinv=invert(&h);
+        let dense:Vec<f64>=(0..nn).map(|i|(0..nn).map(|j|hinv[i][j]*rhs[j]).sum()).collect();
+        // Error model: the objective is a convex quadratic, so |z - z*|_2 <= |g|_2 / lambda_min(H_z) with |g|_2 <= sqrt(N) * 2e-6
+        // (the stop test is on the inf norm). H_z = S H S for the optimizer's coordinates (states (x-300)/0.1, source p) and
+        // lambda_min >= 1/|H_z^-1|_1, since a symmetric matrix has |A|_2 <= |A|_1. The tolerance 2e-5 must cover it.
+        let sc=|i:usize| if i<3*n {0.1} else {1.0};
+        let norm1=(0..nn).map(|j|(0..nn).map(|i|hinv[i][j].abs()/(sc(i)*sc(j))).sum::<f64>()).fold(0.0,f64::max);
+        let bound=(nn as f64).sqrt()*2e-6*norm1; assert!(bound<=2e-5,"{bound}");
+        // Planted negative: the dense oracle can tell the true minimizer from the uniform guess.
+        let uniform=uniform_oracle(n);
+        let spread=dense[..n].iter().copied().fold(f64::MIN,f64::max)-dense[..n].iter().copied().fold(f64::MAX,f64::min);
+        assert!(spread>=1e-4,"{spread}"); assert!((dense[0]-uniform[0]).abs()>2e-5);
+        let got=straight.accepted();
+        for k in 0..3 {for (i,&x) in got.window.states[k*n..(k+1)*n].iter().enumerate() {close(x-300.0,dense[k*n+i],2e-5);}}
+        close(got.parameters[0],dense[3*n],2e-5);
         assert_eq!(got.controls,straight.optimizer().x);
     });
 }
