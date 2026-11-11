@@ -7,7 +7,8 @@ serial	unstated
 year	unstated
 system	duduk in A, cylindrical bore, ten finger holes (eight in front, two on the back) per sec. 2.1; the wood of this specimen is not stated (the text says the body is usually apricot)
 holder	not stated; measured at the Laboratoire d'Acoustique de l'Universite du Maine (the impedance sensor and artificial mouth of sec. 4)
-reference_state	assembled, reed attached, holes undercut (the text says so; no dimension is given)
+reference_state	assembled
+reference_detail	assembled, reed attached, holes undercut (the text says so; no dimension is given)
 environment	unstated for the geometry; the model of sec. 5 uses rho 1.2 kg/m3 and c0 340 m/s
 source_ids	maugeais-dalmont-2024;maugeais-dalmont-2024-figure-reads
 target_relation	the specimen of the only published duduk model with a full reed parameter set; not the instrument of any recording in the library
