@@ -21,7 +21,7 @@ cavitation = ["dep:fs-material", "dep:fs-la", "dep:fs-math"]
 # Nonlinear radial response with finite source-backed gas heat and pressure work.
 caloric-cavitation = ["cavitation"]
 quarter-wave = []
-experimental-compressible = ["dep:fs-gas", "dep:fs-qty", "dep:fs-solver"]
+experimental-compressible = ["dep:fs-gas", "dep:fs-qty", "dep:fs-solver", "dep:fs-thermochem"]
 # Observe the original coherent atmosphere on source-owned physical gas faces.
 experimental-mann-inflow = ["experimental-compressible", "dep:fs-atmo", "dep:fs-math"]
 experimental-miscibility = ["dep:fs-thermochem", "dep:fs-qty", "dep:fs-math"]
