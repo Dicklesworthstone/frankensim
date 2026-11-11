@@ -1,6 +1,15 @@
 //! G0/G1/G3/G4: adaptive deposition with original physical heat observers.
 use super::*;
 
+/// A fixture input, not a pass threshold: the temperature tolerance that sets
+/// up a rejecting case on this fixture. At 1e-5 K the 0.004 s Pulse run
+/// accepts both 2 ms trials, with error ratios 0.2994 and 0.8767 (printed for
+/// bead rc-1109 .1.5, 2026-11-11), so it rejects none. A ratio set by the
+/// thermal errors scales as 1/tolerance, so at 4e-6 K (2.5 times tighter)
+/// the two become 0.75 and 2.19: the second trial must be rejected and
+/// refined. If that assumption fails, `rejected_trials > 0` fails with it.
+const REJECTING_TOLERANCE_K: f64 = 4e-6;
+
 fn adaptive_controls(cp: f64, tolerance: f64) -> GasTimelineAdaptiveSolve {
     GasTimelineAdaptiveSolve {
         absolute_mass_tolerance_kg: 1e-11,
@@ -79,7 +88,7 @@ fn accepted_fine_history_counts_source_heat_once_across_rejections_and_transitio
         0.004,
         heat(0.004),
         controls(),
-        adaptive_controls(cp, 1e-5),
+        adaptive_controls(cp, REJECTING_TOLERANCE_K),
         || Ok(()),
     )
     .unwrap();
@@ -222,7 +231,7 @@ fn late_observer_refusal_and_cancellation_publish_no_adaptive_history() {
         0.004,
         heat(0.004),
         controls(),
-        adaptive_controls(cp, 1e-5),
+        adaptive_controls(cp, REJECTING_TOLERANCE_K),
         || Ok(()),
     );
     assert!(matches!(
