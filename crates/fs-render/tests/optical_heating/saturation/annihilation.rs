@@ -33,7 +33,7 @@ fn near(actual: f64, expected: f64) {
 fn g1_finite_pairs_match_independent_rational_decay_and_native_heat() {
     with_cx(|cx| {
         let density = [1.0];
-        let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+        let medium = grid(cx, &density, transparent_host());
         let (thermal, heating) = inventory(
             &medium,
             &[[0.1 * COUNT, 0.1 * COUNT, 0.8 * COUNT]],
@@ -111,7 +111,7 @@ fn g1_finite_pairs_change_the_prescribed_pump_saturation_equilibrium() {
 fn g1_finite_pairs_recover_ground_for_shared_beams_and_emit_delayed_singlets() {
     with_cx(|cx| {
         let density = [1.0];
-        let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+        let medium = grid(cx, &density, transparent_host());
         let (thermal, base) = inventory(&medium, &[[COUNT, 0.0, 0.0]], [0.05, 5.0], 0.0);
         let cross_sections = sections(1, [[0.0; 2], [0.0, 1.0 / COUNT]]);
         let watt = COUNT * HC / 450.0;
@@ -225,7 +225,7 @@ fn g1_finite_pairs_recover_ground_for_shared_beams_and_emit_delayed_singlets() {
 fn g4_finite_pairs_include_unilluminated_cells_and_preserve_retry_and_zero_law_behavior() {
     with_cx(|cx| {
         let density = [1.0; 2];
-        let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+        let medium = grid(cx, &density, transparent_host());
         let (thermal, base) = inventory(
             &medium,
             &[[COUNT, 0.0, 0.0], [0.2 * COUNT, 0.0, 0.8 * COUNT]],

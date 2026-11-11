@@ -57,7 +57,7 @@ fn setup(
     SaturableLuminescentHeating<2>,
 ) {
     let density = [1.0];
-    let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+    let medium = grid(cx, &density, transparent_host());
     let thermal = thermal(vec![cell(1, 1.0, 1.0, 0.0)], &SENSIBLE, vec![]);
     let pump = PrescribedPhotonPump::try_new(
         ContentHash([231; 32]),
@@ -183,7 +183,7 @@ fn g3_pump_edges_split_the_native_clock_and_afterglow_reaches_the_original_obser
             charged.absorbed_pump_energy_j()
         );
         let density = [1.0];
-        let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+        let medium = grid(cx, &density, transparent_host());
         let view = LuminescenceGrid::try_new(
             cx,
             &medium,

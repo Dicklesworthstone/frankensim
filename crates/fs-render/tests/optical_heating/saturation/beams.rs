@@ -153,7 +153,7 @@ pub(super) fn accounts(heating: &SaturableLuminescentHeating<2>) {
 fn g1_simultaneous_pumps_split_one_field_without_duplicating_emitters_or_source_ids() {
     with_cx(|cx| {
         let density = [1.0];
-        let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+        let medium = grid(cx, &density, transparent_host());
         let (thermal, heating) = inventory(&medium, &[[COUNT, 0.0, 0.0]], [1e12; 2], 0.0);
         let cross_sections = sections(1, [[1.0 / COUNT, 0.0], [0.0; 2]]);
         let watt = COUNT * HC / 400.0;
@@ -228,7 +228,7 @@ fn g1_simultaneous_pumps_split_one_field_without_duplicating_emitters_or_source_
 fn g1_counterpropagating_colors_share_ground_inventory_and_preserve_beam_order() {
     with_cx(|cx| {
         let density = [0.0, 1.0];
-        let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+        let medium = grid(cx, &density, transparent_host());
         let (thermal, heating) = inventory(&medium, &[[COUNT, 0.0, 0.0]; 2], [1e12; 2], 0.0);
         let singlet = sections(2, [[1.0 / COUNT, 0.0], [0.0; 2]]);
         let triplet = sections(2, [[0.0; 2], [0.0, 1.0 / COUNT]]);
@@ -315,7 +315,7 @@ fn g1_counterpropagating_colors_share_ground_inventory_and_preserve_beam_order()
 fn g3_simultaneous_pump_windows_intersect_the_global_gate_and_retry_atomically() {
     with_cx(|cx| {
         let density = [1.0];
-        let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+        let medium = grid(cx, &density, transparent_host());
         let (thermal, heating) = inventory(&medium, &[[COUNT, 0.0, 0.0]], [1.0, 5.0], 3.0);
         let cross_sections = sections(1, [[1.0 / COUNT, 0.0], [0.0; 2]]);
         let powers = [2.0 * COUNT * HC / 400.0, 3.0 * COUNT * HC / 400.0];
@@ -474,7 +474,7 @@ fn g1_simultaneous_passive_pump_absorption_is_deposited_once_per_native_cell() {
 fn g3_local_excitation_survives_outside_beams_and_uses_the_original_global_pulse() {
     with_cx(|cx| {
         let density = [1.0, 1.0];
-        let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+        let medium = grid(cx, &density, transparent_host());
         let thermal = thermal(
             vec![cell(1, 1.0, 1.0, 0.0), cell(2, 1.0, 1.0, 0.0)],
             &SENSIBLE,

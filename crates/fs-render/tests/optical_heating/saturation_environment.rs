@@ -15,7 +15,17 @@ fn g1_finite_afterglow_routes_both_spectra_into_passive_cells_once() {
 
     with_cx(|cx| {
         let density = [1.0, 1.0];
-        let optical = grid(cx, &density, MassAbsorptionSpectrum::constant(1.0).unwrap());
+        // A scattering grid takes absorption and scattering over one domain;
+        // both are authored over the scattering table's 380 to 900 nm.
+        let optical = grid(
+            cx,
+            &density,
+            MassAbsorptionSpectrum::source_table(
+                &[(380.0, 1.0), (900.0, 1.0)],
+                ContentHash([243; 32]),
+            )
+            .unwrap(),
+        );
         let medium = ScatteringGrid::try_new(
             cx,
             optical,
@@ -173,7 +183,7 @@ fn g1_finite_afterglow_routes_both_spectra_into_passive_cells_once() {
 fn g1_uniform_emitter_cells_keep_their_own_inventory_and_pump_photon_energy() {
     with_cx(|cx| {
         let density = [1.0; 3];
-        let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+        let medium = grid(cx, &density, transparent_host());
         let thermal = thermal(
             (1..=3).map(|id| cell(id, 1.0, 1.0, 0.0)).collect(),
             &SENSIBLE,

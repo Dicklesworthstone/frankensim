@@ -147,7 +147,7 @@ fn g1_depleting_beam_bleaches_dense_native_cells_in_actual_ray_order() {
         // The first inventory deliberately has zero host density: molecular
         // absorption depends on its actual emitter count, not host mass.
         let density = [0.0, 1.0];
-        let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+        let medium = grid(cx, &density, transparent_host());
         let (thermal, heating) = owner(&medium, &[[COUNT, 0.0, 0.0]; 2], [1e12; 2], 0.0);
         let cross_sections = [[[1.0 / COUNT, 0.0], [0.0; 2]]; 2];
         let powers = [5.0 * COUNT * HC / 400.0, 0.0];
@@ -282,7 +282,7 @@ fn g1_depleting_beam_competing_targets_and_passive_host_heat_keep_distinct_accou
 fn g3_depleting_beam_pulse_dark_afterglow_and_retries_share_transactional_accounts() {
     with_cx(|cx| {
         let density = [1.0];
-        let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+        let medium = grid(cx, &density, transparent_host());
         let (thermal, heating) = owner(&medium, &[[COUNT, 0.0, 0.0]], [1.0, 5.0], 3.0);
         let heating = connect(
             cx,
@@ -388,7 +388,7 @@ fn g3_depleting_beam_pulse_dark_afterglow_and_retries_share_transactional_accoun
 fn g3_depleting_beam_empty_columns_transmit_without_spurious_pump() {
     with_cx(|cx| {
         let density = [0.0];
-        let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+        let medium = grid(cx, &density, transparent_host());
         for misses in [false, true] {
             let initial = if misses {
                 vec![[0.0, COUNT, 0.0]]

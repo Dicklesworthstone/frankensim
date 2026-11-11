@@ -129,6 +129,19 @@ fn grid<'a>(
     .unwrap()
 }
 
+// A passive host that absorbs nothing from 380 to 800 nm. The saturable and
+// phosphorescent fixtures emit at 650 and 800 nm, while
+// `MassAbsorptionSpectrum::constant` spans only 380 to 780 nm, and transport
+// refuses a wavelength outside a spectrum's authored support rather than
+// extrapolating. A host that this light crosses states its 800 nm value.
+fn transparent_host() -> MassAbsorptionSpectrum {
+    MassAbsorptionSpectrum::source_table(
+        &[(380.0, 0.0), (800.0, 0.0)],
+        fs_blake3::ContentHash([84; 32]),
+    )
+    .unwrap()
+}
+
 fn report<const N: usize>(
     cx: &Cx<'_>,
     density: &[f64],

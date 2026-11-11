@@ -28,7 +28,7 @@ fn g1_saturable_material_rates_refresh_on_the_actual_thermal_clock() {
         // The fixture's legacy spectral quantum yield is zero. The original
         // material's radiative rate must still produce nonzero singlet light.
         let density = [1.0];
-        let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+        let medium = grid(cx, &density, transparent_host());
         let thermal = thermal(vec![cell(1, 1.0, 1.0, 0.0)], &SENSIBLE, vec![]);
         let pump = PrescribedPhotonPump::try_new(
             ContentHash([244; 32]),
@@ -226,7 +226,7 @@ mod finite_pair_material {
         with_cx(|cx| {
             let (card, source) = pair_source(310.0);
             let density = [1.0];
-            let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+            let medium = grid(cx, &density, transparent_host());
             let thermal = thermal(vec![cell(1, 1.0, 1.0, 40.0)], &SENSIBLE, vec![]);
             let initial = [0.0, 0.0, COUNT];
             let binding =
@@ -321,7 +321,7 @@ mod finite_pair_material {
         with_cx(|cx| {
             let (card, source) = pair_source(300.01);
             let density = [1.0];
-            let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+            let medium = grid(cx, &density, transparent_host());
             let thermal = thermal(vec![cell(1, 1.0, 1.0, 40.0)], &SENSIBLE, vec![]);
             let binding =
                 EmitterTripletAnnihilation::from_material(0, card.clone(), source, 1.0).unwrap();
@@ -562,7 +562,7 @@ mod finite_recycling_material {
         with_cx(|cx| {
             let (card, source) = molecular_source(310.0);
             let density = [1.0];
-            let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+            let medium = grid(cx, &density, transparent_host());
             let thermal = thermal(vec![cell(1, 1.0, 1.0, 40.0)], &SENSIBLE, vec![]);
             let initial = [0.5 * COUNT, 0.5 * COUNT, 0.0];
             let material = prepare(
@@ -668,7 +668,7 @@ mod finite_recycling_material {
         with_cx(|cx| {
             let (card, source) = molecular_source(300.01);
             let density = [1.0];
-            let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+            let medium = grid(cx, &density, transparent_host());
             let thermal = thermal(vec![cell(1, 1.0, 1.0, 40.0)], &SENSIBLE, vec![]);
             let sections =
                 RecyclingEmitterCrossSections::from_material(0, card.clone(), source).unwrap();
@@ -866,7 +866,7 @@ mod depleting_material {
         with_cx(|cx| {
             let (card, source) = molecular_source(310.0);
             let density = [1.0];
-            let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+            let medium = grid(cx, &density, transparent_host());
             // An original independent boundary source ensures a measurable
             // thermal change even at this modest optical pump power.
             let thermal = thermal(vec![cell(1, 1.0, 1.0, 40.0)], &SENSIBLE, vec![]);
@@ -979,7 +979,7 @@ mod depleting_material {
         with_cx(|cx| {
             let (card, source) = molecular_source(300.01);
             let density = [1.0];
-            let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+            let medium = grid(cx, &density, transparent_host());
             let thermal = thermal(vec![cell(1, 1.0, 1.0, 40.0)], &SENSIBLE, vec![]);
             let heating = prepare(
                 cx,
