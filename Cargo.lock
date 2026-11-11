@@ -2031,6 +2031,7 @@ dependencies = [
  "fs-alloc",
  "fs-atmo",
  "fs-blake3",
+ "fs-conduction",
  "fs-convection",
  "fs-evidence",
  "fs-exec",

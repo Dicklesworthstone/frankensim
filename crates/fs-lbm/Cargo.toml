@@ -21,10 +21,11 @@ implicit-enthalpy-coupling = ["enthalpy-coupling", "dep:fs-solver"]
 thin-film-evolution = ["dep:fs-solver", "dep:fs-conduction"]
 
 [dependencies]
-# Preserve the existing import spelling while selecting ONLY the shared
-# timeline owner. Depending on the full FEM crate here creates a runtime
-# cycle through fs-feec -> fs-couple -> fs-aeroac -> fs-lbm, even when optional.
-# fs-conduction itself re-exports these exact types; there is no conversion.
+# `fs-conduction` here is an alias for fs-thermal, the shared enthalpy timeline owner:
+# it keeps the existing import spelling. The full conduction crate re-exports fs-thermal's
+# timeline types as `transient::deposition`, so a type from either is the same type and
+# there is no conversion. That full crate is the dev-dependency `fs-conduction-full`
+# below, for the implicit contact test only.
 fs-conduction = { package = "fs-thermal", path = "../fs-thermal", optional = true }
 fs-atmo = { path = "../fs-atmo", optional = true }
 fs-blake3 = { path = "../fs-blake3" }
@@ -42,6 +43,11 @@ fs-solver = { path = "../fs-solver", optional = true }
 fs-time = { path = "../fs-time" }
 
 [dev-dependencies]
+# The full conduction crate, for the implicit contact test only
+# (src/conjugate/flow/phase_volume/conduction/tests/implicit/contact.rs): its
+# PreparedMaterialContact lives here, and the `fs-conduction` alias above (fs-thermal)
+# has no contact module. A distinct name keeps the two apart.
+fs-conduction-full = { package = "fs-conduction", path = "../fs-conduction" }
 fs-alloc = { path = "../fs-alloc" }
 fs-ladder = { path = "../fs-ladder" }
 fs-convection = { path = "../fs-convection" }
