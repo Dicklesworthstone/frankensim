@@ -6,6 +6,8 @@
 mod affine;
 pub(crate) use affine::flow_integrals as affine_flow_integrals;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 pub(crate) fn identity(n: usize) -> Vec<f64> {
     let mut a = vec![0.0; n * n];
     for i in 0..n {
@@ -38,25 +40,44 @@ fn product_threads(declared: usize, n: usize) -> usize {
 // between threads. A block reads its own rows of `a` and all of `b` and writes only its own rows of `out`, and every
 // entry keeps its own ascending-k sum of unfused products, so the result is bit-identical for every worker count.
 pub(crate) fn accumulate(out: &mut [f64], a: &[f64], b: &[f64], n: usize) {
+    accumulate_polled(out, a, b, n, &|| false);
+}
+
+/// `out += a * b` for row-major `n` x `n` matrices by the kernel of [`accumulate`], polling `cancelled` once before each
+/// four-row block of `out`, on the thread that runs the block, and running the blocks on the workers that
+/// `fs_la::eigen_complex::with_lu_workers` declares (one by default, and one below side length 128). Returns `true` when every
+/// block ran, and then `out` holds the same bits for every worker count. Returns `false` as soon as a poll answers `true`: `out` is
+/// then partial and the caller must discard it. A request is seen by every thread within one block of work.
+pub fn accumulate_polled(
+    out: &mut [f64], a: &[f64], b: &[f64], n: usize, cancelled: &(impl Fn() -> bool + Sync),
+) -> bool {
     if n == 0 {
-        return;
+        return true;
     }
+    let stopped = AtomicBool::new(false);
     let threads = product_threads(fs_la::eigen_complex::declared_workers(), n);
     if threads == 1 {
-        accumulate_blocks(out, a, b, n);
-        return;
+        return accumulate_blocks(out, a, b, n, cancelled, &stopped);
     }
     // Whole four-row blocks per thread: each thread's blocks are exactly the serial blocks.
     let per_thread = n.div_ceil(4).div_ceil(threads) * 4 * n;
     std::thread::scope(|scope| {
+        let stopped = &stopped;
         for (a_part, out_part) in a.chunks(per_thread).zip(out.chunks_mut(per_thread)) {
-            scope.spawn(move || accumulate_blocks(out_part, a_part, b, n));
+            scope.spawn(move || accumulate_blocks(out_part, a_part, b, n, cancelled, stopped));
         }
     });
+    !stopped.load(Ordering::Relaxed)
 }
 
-fn accumulate_blocks(out: &mut [f64], a: &[f64], b: &[f64], n: usize) {
+fn accumulate_blocks(
+    out: &mut [f64], a: &[f64], b: &[f64], n: usize, cancelled: &(impl Fn() -> bool + Sync), stopped: &AtomicBool,
+) -> bool {
     for (a_rows, out_rows) in a.chunks(4 * n).zip(out.chunks_mut(4 * n)) {
+        if stopped.load(Ordering::Relaxed) || cancelled() {
+            stopped.store(true, Ordering::Relaxed);
+            return false;
+        }
         for (k, b_row) in b.chunks_exact(n).enumerate() {
             for (a_row, out_row) in a_rows.chunks_exact(n).zip(out_rows.chunks_exact_mut(n)) {
                 let scale = a_row[k];
@@ -66,6 +87,7 @@ fn accumulate_blocks(out: &mut [f64], a: &[f64], b: &[f64], n: usize) {
             }
         }
     }
+    true
 }
 
 pub(crate) struct FlowIntegral {
@@ -520,6 +542,42 @@ mod tests {
             assert_eq!(bits(&threaded_blocks.first), bits(&serial_blocks.first), "first block, {workers} workers");
             assert_eq!(bits(&threaded_blocks.cross), bits(&serial_blocks.cross), "cross block, {workers} workers");
             assert_eq!(bits(&threaded_blocks.last), bits(&serial_blocks.last), "last block, {workers} workers");
+        }
+    }
+
+    /// Gauntlet G5: the polled kernel polls once before each four-row block (counted, serial and threaded), returns the plain
+    /// kernel's bits when no poll answers, and stops within one poll per thread when one does.
+    #[test]
+    fn polled_accumulate_polls_once_per_block_stops_on_a_request_and_equals_the_plain_kernel() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        assert!(accumulate_polled(&mut [], &[], &[], 0, &|| true));
+        let n = PARALLEL_MIN_N + 3;
+        let blocks = n.div_ceil(4);
+        let (a, b) = (filled(n * n, 21), filled(n * n, 22));
+        let mut plain = vec![0.0; n * n];
+        accumulate(&mut plain, &a, &b, n);
+        for workers in [1, 3, 8] {
+            let polls = AtomicUsize::new(0);
+            let mut out = vec![0.0; n * n];
+            let done = with_lu_workers(workers, || {
+                accumulate_polled(&mut out, &a, &b, n, &|| {
+                    polls.fetch_add(1, Ordering::Relaxed);
+                    false
+                })
+            });
+            assert!(done, "{workers} workers");
+            assert_eq!(polls.load(Ordering::Relaxed), blocks, "{workers} workers poll once per block");
+            assert_eq!(bits(&out), bits(&plain), "{workers} workers");
+            // The first poll answers no and every later one yes: the call returns false after at most one poll per thread
+            // and one more.
+            let polls = AtomicUsize::new(0);
+            let mut out = vec![0.0; n * n];
+            let done = with_lu_workers(workers, || {
+                accumulate_polled(&mut out, &a, &b, n, &|| polls.fetch_add(1, Ordering::Relaxed) >= 1)
+            });
+            assert!(!done, "{workers} workers");
+            let seen = polls.load(Ordering::Relaxed);
+            assert!((2..=workers + 1).contains(&seen), "{workers} workers polled {seen} times");
         }
     }
 

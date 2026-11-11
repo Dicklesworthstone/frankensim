@@ -31,6 +31,7 @@ const EXACT_BALANCE_RELATIVE: f64 = 1e-12;
 mod gramian;
 mod constitutive;
 use gramian::{accumulate, identity, product};
+pub use gramian::accumulate_polled;
 /// Cold caching of the same complete quadratic trajectory and its integrals.
 pub mod prepared;
 mod prepared_zoh;

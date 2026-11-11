@@ -250,6 +250,39 @@ fn the_prepared_admission_takes_the_wound_e2_string_with_the_string_air_row() {
     assert!(wide.admit(MAX_PREPARED_MODAL_MODES + 1, 1, 1, 0, None).is_err());
 }
 
+/// The prepared dense product runs on the declared workers (one by default) and returns the serial bits on every count; a
+/// requested gate cancels it, serial and threaded, and no result escapes.
+#[test]
+fn the_prepared_product_is_bit_identical_on_declared_workers_and_cancels_at_a_block() {
+    let filled = |len: usize, seed: u64| -> Vec<f64> {
+        let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        (0..len).map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1_u64 << 53) as f64 * 2.0 - 1.0
+        }).collect()
+    };
+    let bits = |v: &[f64]| -> Vec<u64> { v.iter().map(|x| x.to_bits()).collect() };
+    let gate = CancelGate::new_clock_free();
+    for n in [130_usize, 131] {
+        let (a, b) = (filled(n * n, 5), filled(n * n, 6));
+        let serial = product(&a, &b, n, &gate).unwrap();
+        for workers in [2, 3, 8] {
+            let threaded = fs_la::eigen_complex::with_lu_workers(workers, || product(&a, &b, n, &gate)).unwrap();
+            assert_eq!(bits(&threaded), bits(&serial), "n {n}, {workers} workers");
+        }
+    }
+    let n = 131;
+    let (a, b) = (filled(n * n, 5), filled(n * n, 6));
+    gate.request();
+    assert!(matches!(product(&a, &b, n, &gate), Err(ModalCouplingError::Cancelled)));
+    for workers in [2, 8] {
+        let cancelled = fs_la::eigen_complex::with_lu_workers(workers, || product(&a, &b, n, &gate));
+        assert!(matches!(cancelled, Err(ModalCouplingError::Cancelled)), "{workers} workers");
+    }
+}
+
 /// A refused admission prints the bytes (or multiply terms) it asked for and the limit it was held to, not only that
 /// the limit was exceeded: the card's author needs the figure to set the limit.
 #[test]

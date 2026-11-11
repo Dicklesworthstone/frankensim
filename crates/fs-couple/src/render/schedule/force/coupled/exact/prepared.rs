@@ -917,18 +917,11 @@ fn matrix_agrees(a: &[f64], b: &[f64], n: usize, what: &'static str) -> Result<(
 
 fn product(a: &[f64], b: &[f64], n: usize, gate: &CancelGate) -> Result<Vec<f64>, ModalCouplingError> {
     let mut result = vec![0.0; n * n];
-    // Every entry is the k = 0, 1, ... sum of the textbook i-k-j loop, bit for bit. Four rows share each row of b while it
-    // is in cache, and the slice update vectorizes over j.
-    for (a_rows, out_rows) in a.chunks(4 * n).zip(result.chunks_mut(4 * n)) {
-        poll(Some(gate))?;
-        for (k, b_row) in b.chunks_exact(n).enumerate() {
-            for (a_row, out_row) in a_rows.chunks_exact(n).zip(out_rows.chunks_exact_mut(n)) {
-                let scale = a_row[k];
-                for (value, &right) in out_row.iter_mut().zip(b_row) {
-                    *value += scale * right;
-                }
-            }
-        }
+    // fs-phs's kernel: every entry is the k = 0, 1, ... sum of the textbook i-k-j loop, bit for bit, with four rows sharing
+    // each row of b while it is in cache. It runs on the workers the render declares (one by default, the same bits for every
+    // count) and polls the gate once before each four-row block, on the thread that runs the block.
+    if !fs_phs::linear_exact::accumulate_polled(&mut result, a, b, n, &|| gate.is_requested()) {
+        return Err(ModalCouplingError::Cancelled);
     }
     if result.iter().any(|v| !v.is_finite()) { return Err(invalid("prepared dense product overflow")); }
     Ok(result)

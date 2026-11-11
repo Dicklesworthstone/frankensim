@@ -1631,6 +1631,11 @@ at most 256 threads. A block reads its own rows of the left factor and all of th
 every entry keeps its own ascending-k sum of unfused products, so every product, exponential and integral is bit-identical
 for every worker count. The declaration is a scheduling budget: it changes wall time only.
 
+`linear_exact::accumulate_polled(out, a, b, n, cancelled)` is that kernel with a cancellation poll once before each four-row
+block, on the thread that runs the block. It returns `true` when every block ran and `false` as soon as a poll answers `true`;
+`out` is then partial and the caller discards it. fs-couple's prepared exact network calls it for its own dense products, so
+one threaded kernel serves both.
+
 **Stated accuracy.** This holds for `exponential`, `exponential_with_budget` and
 the block upper-triangular variant, under the standard rounding model with no
 fused multiply-add. Write u = 2^-53 and gamma_m = m u / (1 - m u). Let X be the
