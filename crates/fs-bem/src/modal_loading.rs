@@ -86,7 +86,12 @@ pub enum ModalLoadingError {
         omega: f64,
         scale: IterativeErrorScale,
     },
-    /// Symmetric resistance has a resolved negative eigenvalue.
+    /// The row is not shown passive within its floor: the minimum eigenvalue
+    /// of the symmetric resistance, less its eigen error and half the
+    /// reciprocity defect (all relative to the Frobenius norm), is below
+    /// minus the floor, [`dense_reciprocity_bound`] of the row's unknown
+    /// count for a direct row and [`DENSE_RECIPROCITY_BOUND`] for an
+    /// iterative one.
     NonPassive {
         omega: f64,
         minimum_eigenvalue: f64,
@@ -442,9 +447,10 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), ModalLoadingError> {
 }
 
 /// `scale` is the measured error scale of an iterative row, `None` for a
-/// direct one. `unknowns` is the BEM unknown count of a direct row whose bound
-/// grows with its dense solve ([`dense_reciprocity_bound`]); 0 keeps the flat
-/// [`DENSE_RECIPROCITY_BOUND`], and an iterative row ignores it. Nothing is
+/// direct one. `unknowns` is the BEM unknown count of a direct row whose
+/// reciprocity bound and passivity floor grow with its dense solve
+/// ([`dense_reciprocity_bound`]); 0 keeps the flat [`DENSE_RECIPROCITY_BOUND`]
+/// for both, and an iterative row ignores it. Nothing is
 /// symmetrised: the returned matrix is the input.
 fn assess(
     omega: f64,
@@ -538,7 +544,25 @@ fn assess(
         ));
     }
     let eigen_error = residual / (1.0 - orthogonality).sqrt();
-    if minimum - eigen_error - 0.5 * defect / norm < -1e-12 {
+    // The passivity floor carries the error model of the reciprocity bound
+    // of the same row (213385636a; derivation above
+    // [`dense_reciprocity_bound`]): a dense solve of `unknowns` unknowns
+    // leaves the computed matrix with an error E of about
+    // `unknowns * f64::EPSILON * rho * ||Z||_F` in the Frobenius norm, rho
+    // fitted from measured defects. The margin tests that computed matrix,
+    // and by Weyl's inequality each eigenvalue of its symmetric resistance
+    // lies within ||E||_2 <= ||E||_F of the exact one. The reciprocity bound
+    // `2 * unknowns * f64::EPSILON` (two errors in Z_ij - Z_ji) is therefore
+    // twice the eigenvalue estimate at rho <= 1, and it serves as the floor;
+    // a flat 1e-12 floor was the twin of the flat bound 213385636a scaled.
+    // Both equal 1e-12 up to 2251 unknowns. A direct row takes
+    // `dense_reciprocity_bound(unknowns)`, so 0 unknowns (every route but the
+    // reciprocal skin load) keeps 1e-12 exactly; an iterative row keeps 1e-12.
+    let floor = match scale {
+        None => dense_reciprocity_bound(unknowns),
+        Some(_) => DENSE_RECIPROCITY_BOUND,
+    };
+    if minimum - eigen_error - 0.5 * defect / norm < -floor {
         return Err(ModalLoadingError::NonPassive {
             omega,
             minimum_eigenvalue: minimum * norm,
@@ -1313,5 +1337,124 @@ mod tests {
             }
             other => panic!("a 1e-9 asymmetry still refuses at 6002 unknowns: {other:?}"),
         }
+    }
+
+    /// An `n` x `n` matrix whose symmetric resistance is diagonal: 1 on every
+    /// diagonal entry but the last, which is `minimum` times the Frobenius
+    /// norm (taken before that entry and the asymmetry are set; the two norms
+    /// differ by about 1e-16 relative). The reactance is symmetric except at
+    /// (0, 1), where an imaginary asymmetry makes the relative reciprocity
+    /// defect `defect`. The resistance does not see that asymmetry, so its
+    /// minimum eigenvalue, relative to the norm, stays `minimum` and its
+    /// eigendecomposition is exact.
+    fn near_lossless(n: usize, minimum: f64, defect: f64) -> Vec<C64> {
+        let mut z = vec![C64::ZERO; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                z[i * n + j] = if i == j {
+                    C64::new(if i + 1 == n { 0.0 } else { 1.0 }, 0.1)
+                } else {
+                    C64::new(0.0, 1e-3 / (1.0 + (i + j) as f64))
+                };
+            }
+        }
+        let norm = z.iter().fold(0.0_f64, |s, v| s.hypot(v.abs()));
+        z[n * n - 1] = C64::new(minimum * norm, 0.1);
+        // Entries (0, 1) and (1, 0) then differ by i delta: the defect is sqrt(2) delta.
+        z[1] = z[1] + C64::new(0.0, defect * norm / 2.0_f64.sqrt());
+        z
+    }
+
+    /// The held-out row at 1853.617 rad/s of the vibraphone E4+D4+F4 assembly
+    /// (6984 panels, 10488 unknowns) refused as active, min(Re Z) -1.69e-14 at
+    /// norm 2262.28 (-7.5e-18 relative): a near-zero minimum, less half a
+    /// reciprocity defect inside its own scaled bound, fell below the flat
+    /// 1e-12 floor. A near-zero minimum with a 3e-12 relative defect passes
+    /// at 10488 unknowns, and the same matrix at 0 unknowns refuses as before,
+    /// on the flat reciprocity bound. Nothing is symmetrised.
+    #[test]
+    fn a_near_lossless_row_of_many_unknowns_is_passive_within_its_floor() {
+        let omega = 1853.61709671326;
+        let z = near_lossless(8, -7.5e-18, 3e-12);
+        let row = assess(omega, z.clone(), 8, None, 10_488).unwrap();
+        assert!(row.reciprocity_relative_defect() > 2.99e-12);
+        assert!(row.reciprocity_relative_defect() < 3.01e-12);
+        assert_eq!(row.reciprocity_bound(), dense_reciprocity_bound(10_488));
+        assert!(row.minimum_resistance_eigenvalue() < 0.0);
+        assert_eq!(row.impedance(), z);
+        match assess(omega, z, 8, None, 0) {
+            Err(ModalLoadingError::NonReciprocal {
+                bound, scale: None, ..
+            }) => assert_eq!(bound, DENSE_RECIPROCITY_BOUND),
+            other => panic!("0 unknowns keeps the flat bounds: {other:?}"),
+        }
+    }
+
+    /// The passivity floor scales where the dense reciprocity bound does and
+    /// nowhere else. A row whose defect (0.9e-12) passes the flat reciprocity
+    /// bound and whose margin (-0.8e-12 - 0.45e-12) is below the flat 1e-12
+    /// floor refuses as active at 0, 80 and 2251 unknowns, as before, and
+    /// passes at 10488. As an iterative row (bound 1e-11) it refuses at any
+    /// unknown count, since an iterative row keeps the flat floor.
+    #[test]
+    fn the_passivity_floor_scales_only_where_the_dense_reciprocity_bound_does() {
+        let omega = 1853.61709671326;
+        let z = near_lossless(8, -0.8e-12, 0.9e-12);
+        for unknowns in [0, 80, 2251] {
+            match assess(omega, z.clone(), 8, None, unknowns) {
+                Err(ModalLoadingError::NonPassive {
+                    minimum_eigenvalue,
+                    norm,
+                    ..
+                }) => assert!((minimum_eigenvalue / norm / -0.8e-12 - 1.0).abs() < 1e-9),
+                other => panic!("the flat floor refuses below 2252 unknowns: {other:?}"),
+            }
+        }
+        let row = assess(omega, z.clone(), 8, None, 10_488).unwrap();
+        assert_eq!(row.impedance(), z);
+        let twin = |fmm_order| TwinWork {
+            fmm_order,
+            max_translation_work: 1,
+            max_coefficient_slots: 1,
+            applies: 1,
+            wall_s: 0.0,
+        };
+        let scale = IterativeErrorScale {
+            gmres_residual: 1e-12,
+            fmm_orders: [6, 8, 10],
+            fmm_error: 1e-11,
+            fmm_error_next: 1e-12,
+            twins: [twin(8), twin(10)],
+        };
+        for unknowns in [0, 10_488] {
+            assert!(matches!(
+                assess(omega, z.clone(), 8, Some(scale), unknowns),
+                Err(ModalLoadingError::NonPassive { .. })
+            ));
+        }
+    }
+
+    /// A resolved negative resistance still refuses at 10488 unknowns: a
+    /// planted minimum of -1e-10 relative refuses, and at the edge of the
+    /// floor (2 * 10488 * eps = 4.658e-12) a margin of -3e-12 - 1.5e-12 passes
+    /// while -4e-12 - 1.5e-12 refuses.
+    #[test]
+    fn a_resolved_negative_resistance_still_refuses_at_many_unknowns() {
+        let omega = 1853.61709671326;
+        let floor = dense_reciprocity_bound(10_488);
+        assert!(floor > 4.65e-12 && floor < 4.66e-12);
+        match assess(omega, near_lossless(8, -1e-10, 3e-12), 8, None, 10_488) {
+            Err(ModalLoadingError::NonPassive {
+                minimum_eigenvalue,
+                norm,
+                ..
+            }) => assert!((minimum_eigenvalue / norm / -1e-10 - 1.0).abs() < 1e-9),
+            other => panic!("-1e-10 is a resolved negative resistance: {other:?}"),
+        }
+        assert!(assess(omega, near_lossless(8, -3e-12, 3e-12), 8, None, 10_488).is_ok());
+        assert!(matches!(
+            assess(omega, near_lossless(8, -4e-12, 3e-12), 8, None, 10_488),
+            Err(ModalLoadingError::NonPassive { .. })
+        ));
     }
 }

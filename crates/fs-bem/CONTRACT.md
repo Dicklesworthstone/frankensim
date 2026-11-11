@@ -1168,8 +1168,13 @@ row reuse, identity, geometry, clearance, payload/work refusal and cancellation.
 Rows use `exp(-i omega t)`: resistance is `Re Z`, added mass is `-Im Z/omega`.
 The unchanged matrix must have relative reciprocity defect at most
 `DENSE_RECIPROCITY_BOUND` = 1e-12 (an iterative row's bound is below) and
-minimum resistance eigenvalue at least `-1e-12 ||Z||_F`, with a resolved full
-eigendecomposition residual. Failed numerical data refuse instead of being
+a passivity margin (the minimum resistance eigenvalue, less its eigen error and
+half the reciprocity defect, all relative to `||Z||_F`) of at least `-1e-12`,
+with a resolved full eigendecomposition residual. On the reciprocal skin-load
+route a dense solve of N unknowns raises both floors to
+`dense_reciprocity_bound(N)` = `max(1e-12, 2 N eps)`, the passivity floor by
+Weyl's inequality on the same computed matrix; an iterative row's passivity
+floor stays 1e-12. Failed numerical data refuse instead of being
 symmetrized, eigenvalue-clipped or supplied with extra damping. This is a
 sampled floating-point diagnostic, not an interval or positive-real certificate.
 Frequency lookup admits exact declared samples only; it does not extrapolate.
@@ -2570,7 +2575,8 @@ physical loading domain.
 
 `modal_loading::modal_radiation_loading_reciprocal` exposes the existing
 symmetric P1/P0 Galerkin owner's complete work-conjugate velocity-port matrix
-through the unchanged strict modal reciprocity and resistance admissions.
+through the strict modal reciprocity and resistance admissions, with the
+direct-row bound and floor scaled to its dense solve (`dense_reciprocity_bound`).
 Independent localized structural and aperture columns remain intact. Reported
 unknowns, retained cache, original source/projection work, angular refinement,
 backward residual and flux balance describe the actual bounded discrete owner.
