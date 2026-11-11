@@ -19,6 +19,8 @@ use fs_solver::NewtonKrylovConfig;
 use fs_thermal::enthalpy::backward_euler::{BoundaryStepCoefficients, StepCoefficients};
 use std::cell::Cell;
 
+// This file is itself a `#[path]` module of `distributed/tests.rs`, so a bare `mod explicit;` looks beside it in `tests/`, not in `tests/reconstruction/`.
+#[path = "reconstruction/explicit.rs"]
 mod explicit;
 
 fn controls() -> ImplicitTransportControls {
@@ -217,10 +219,11 @@ fn g1_native_quasi_steady_and_retained_momentum_share_the_limited_endpoint() {
             })
             .unwrap();
         let pressure = [boundary(0, q * q), boundary(1, 0.0)];
+        // `GraphSolveConfig` has no `Default` (its budgets are explicit); the sweep and bisection budgets are the shared graph fixture's.
         let hydraulic = GraphSolveConfig {
             absolute_flow_tolerance: VolumetricFlowRate::new(1e-14),
             relative_flow_tolerance: 1e-12,
-            ..GraphSolveConfig::default()
+            ..crate::graph::tests::config()
         };
         let c = controls();
         let qs_controls = QuasiSteadyGraphControls {

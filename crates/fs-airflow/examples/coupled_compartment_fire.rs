@@ -468,6 +468,8 @@ fn run(
     let method_name = match method {
         IsochoricKineticsMethod::BackwardEuler => "be",
         IsochoricKineticsMethod::Sdirk2 => "sdirk2",
+        // The command line selects `be` or `sdirk2` only (an exact first-order method needs its limits), so this arm only names the method.
+        IsochoricKineticsMethod::ExactFirstOrder { .. } => "exact-first-order",
     };
     while slab.time_s() < end {
         if steps >= 50_000 {
