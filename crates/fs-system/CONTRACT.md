@@ -821,6 +821,14 @@ bracket. Not reproduced by a graph: the module's time-resolution admission
 its real-gas, reactive, nozzle-exchange, thermal-body and electrical
 variants. Nothing in the module is deleted.
 
+Two source-backed cavities exchanging gas, `crates/fs-gas/tests/component.rs`
+(`cargo test -p fs-gas --features component --test component`): the fs-gas
+cavity with a stream port (`GasCavity::streaming`, crates/fs-gas/CONTRACT.md)
+on each side of the kernel's `Restriction`, against the gas owner's own pair
+transfer. Masses and species masses equal to the bit over 40 steps,
+temperatures within 5.7e-13 K. This is the first physics owner on a stream
+port; the cavity is added without a tangent and the kernel differences it.
+
 Other domains, `tests/elements.rs`: the gyrator and one element of each law
 in the rotational and electrical domains pass the conformance and tangent
 checks at 100 generated points, and the gyrator's two port powers cancel to

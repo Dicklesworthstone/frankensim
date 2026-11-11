@@ -10135,14 +10135,55 @@ their transpose, analytic coincidence coefficients, closed-form adiabatic and
 fixed-volume heating, reference-datum invariance, typed refusal/cancellation,
 and a vacuum piston assembled from a generic Mass and an area transformer.
 Its trajectory is compared with an independent adiabatic ODE and checked for
-time refinement and combined energy closure. Compilation and execution were
-unavailable during implementation; these tests are not claimed passed.
+time refinement and combined energy closure. They were written without being
+compiled; they first compiled and ran on 2026-11-11 (233aa70285) and pass.
 
-This is spatially uniform frozen ideal gas, not an open mass/species stream,
-reacting volume, nonideal parcel or wave solver. The cavity does not know its
-mechanical partner's mass or piston area and cannot enforce the native
-piston's coupled acoustic-frequency timestep admission. The generic binary
-transformer also does not attach additional exterior-pressure or suspension
-loads to the same single mass port. The vacuum-piston slice does not replace
-the complete native piston family or complete bead
-`frankensim-rc-1109-root-3gc12.6.2`.
+This is spatially uniform ideal gas, not a reacting volume, nonideal parcel or
+wave solver. The cavity does not know its mechanical partner's mass or piston
+area and cannot enforce the native piston's coupled acoustic-frequency
+timestep admission. Exterior pressure and other loads on the same wall are
+members of one ratio junction in the kernel
+(`SystemBuilder::common_flow_ratios`); the comparisons with the native piston
+family are in `crates/fs-couple/tests/gas_piston_graph.rs` and do not replace
+that family.
+
+**Stream port.** `GasCavity::streaming(mass_tolerance_kg)` adds a third port,
+`stream`, a storage's stream port (crates/fs-ports/CONTRACT.md) carrying one
+quantity per species of the reference, in its order. It receives mass rate,
+enthalpy rate in the species' own datum and each species' mass rate, and
+returns the pressure, specific enthalpy and species mass fractions the cavity
+had when the step began. One step is the parcel's
+`exchange_species_boundary` at the old volume with what crossed (the species
+rates change the inventory; the whole enthalpy is supplied on one row, which
+the owner sums; the mass rate is not read), then the same discrete-gradient
+heat and volume step on what the cavity then holds. So the stream side is
+explicit and first order in the step, while heat and wall work keep their
+rule. The reference's model is the catalog: a species the cavity runs out of
+may come back.
+
+A streaming cavity's stored energy is its internal energy in the species'
+datum (mass times specific internal energy), not the increment from the
+reference, because the inventory changes; a large formation energy therefore
+costs it rounding that the closed cavity does not pay. Its receipt adds the
+exchange's stored change and residual to the heat-and-volume step's. It
+offers no port tangent (`jvp` and `vjp` refuse): add it to a system without
+one, and the kernel differences it. Entropy carried by the stream and made by
+mixing is not accounted.
+
+`tests/component.rs`, 2 tests: two litres of different two-species mixtures
+at 2 bar and 1 bar, each a streaming cavity, joined by the kernel's ideal
+`Restriction`, against the owner's own `ClosedGasParcel::transfer_mass_to`
+moving `dt * conductance * (p_a - p_b)` between the two parcels a step at a
+time: over 40 steps the masses and the heavy species' masses are equal to the
+bit, the temperatures within 5.7e-13 K and the pressures within 1.3e-15; the
+donor cools to 399.07 K and keeps its composition, the receiver warms to
+402.52 K; the graph's ledger closes to 2.5e-16 J. A streaming cavity passes
+the mandatory conformance check with compression, heat and a stream in each
+direction, returns its start-of-step values on the stream side, and refuses
+a bad tolerance, a tangent request, short or non-finite inputs and a draw of
+more of a species than it holds, leaving the candidate alone.
+
+Not done: a stream law from the owner (the restriction here is the kernel's
+linear element; the native nozzle is not a Component); the comparison with
+`GasPiston::step_with_nozzle`, which uses the midpoint wall step this
+Component does not have; a tangent for the streaming cavity.
