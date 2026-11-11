@@ -128,6 +128,18 @@ impl<const NI: usize, const NR: usize> DepositionObserver for JointOpticalHeatin
         self.observers.sources(thermal, checkpoint)
     }
 
+    // The native sum receives each owner's terms unrounded, as from
+    // CoupledObservers itself. The trait defaults would emit the pair's
+    // per-cell totals after rounding them into one rate.
+    fn visit_sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
+        self.observers.visit_sources(thermal, emit, checkpoint)
+    }
+
     fn step_sources(
         &mut self,
         thermal: &DepositionSimulation<'_>,
@@ -138,6 +150,19 @@ impl<const NI: usize, const NR: usize> DepositionObserver for JointOpticalHeatin
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
         self.observers
             .step_sources(thermal, start_s, duration_s, end_s, checkpoint)
+    }
+
+    fn visit_step_sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        start_s: f64,
+        duration_s: f64,
+        end_s: f64,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
+        self.observers
+            .visit_step_sources(thermal, start_s, duration_s, end_s, emit, checkpoint)
     }
 
     fn conductances(
