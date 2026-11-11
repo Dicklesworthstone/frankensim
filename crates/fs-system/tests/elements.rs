@@ -10,8 +10,10 @@ use std::f64::consts::PI;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_ports::component::conformance::{Case, Observed, check_component, check_port_tangent};
-use fs_ports::component::{Component, PortSpec, PortTangent, Proposal, Receipt};
-use fs_ports::PortKind;
+use fs_ports::component::{
+    Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt,
+};
+use fs_ports::{PortKind, StableId};
 use fs_system::elements::{
     Conductance, Damper, ElementError, Force, GasContents, GasVolume, Gyrator, HeatCapacity,
     HeatNode, Heater, Mass, Motion, Restriction, SourceAccount, Spring, Waveform,
@@ -2387,4 +2389,188 @@ fn streams_meet_at_storages_and_other_wirings_are_refused() {
         within(air(0).pressure_pa(held), 2.5e5, 1.0e-7);
     }
     assert!(system.ledger().energy_residual_j().abs() <= 1.0e-9);
+}
+
+/// A heat source whose power falls with the temperature it is at,
+/// `P = P0 exp(-(T - 300 K) / scale)`: friction that weakens as its
+/// interface warms. Its one heat port receives the temperature and returns
+/// the heat rate into the source, `-P`. Smooth, and added without a
+/// tangent, so the kernel differences it. Its state is the energy it has
+/// delivered, as a negative stored energy.
+struct FadingSource {
+    power_w: f64,
+    scale_k: f64,
+    ports: [PortSpec; 1],
+}
+
+impl FadingSource {
+    fn new(power_w: f64, scale_k: f64) -> Self {
+        Self {
+            power_w,
+            scale_k,
+            ports: [PortSpec::heat(StableId::new("heat").unwrap(), PortRole::EffortIn).unwrap()],
+        }
+    }
+
+    fn power_at(&self, kelvin: f64) -> f64 {
+        self.power_w * (-(kelvin - 300.0) / self.scale_k).exp()
+    }
+}
+
+impl Component for FadingSource {
+    type State = f64;
+    type Error = ElementError;
+
+    fn ports(&self) -> &[PortSpec] {
+        &self.ports
+    }
+
+    fn class(&self) -> Class {
+        Class::Smooth
+    }
+
+    fn stored_energy_j(&self, delivered_j: &f64) -> Result<f64, ElementError> {
+        Ok(*delivered_j)
+    }
+
+    fn propose(
+        &self,
+        old: &f64,
+        dt_s: f64,
+        inputs: &[f64],
+        new: &mut f64,
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<Proposal, ElementError> {
+        cx.checkpoint()?;
+        let kelvin = inputs[0];
+        if !(kelvin.is_finite() && kelvin > 0.0) {
+            return Err(ElementError::Temperature { kelvin });
+        }
+        let power_w = self.power_at(kelvin);
+        outputs[0] = -power_w;
+        *new = old - dt_s * power_w;
+        Ok(Proposal::Step(Receipt {
+            stored_change_j: -dt_s * power_w,
+            dissipated_j: dt_s * power_w,
+            numerical_loss_j: 0.0,
+            entropy_generated_j_per_k: dt_s * power_w / kelvin,
+            energy_tolerance_j: 64.0 * f64::EPSILON * (old.abs() + new.abs() + dt_s * power_w)
+                + f64::MIN_POSITIVE,
+            residual: 0.0,
+            tolerance: 0.0,
+        }))
+    }
+}
+
+#[test]
+fn a_loop_is_closed_in_the_heat_its_temperatures_drive_at_the_default_tolerance() {
+    // Two bodies of 1 J/K on a plane of 2 and 4 W/K that carries a heat
+    // source falling with the plane's temperature, each body also losing
+    // heat to a 300 K room through a film (3 and 5 W/K). The kernel's
+    // default solve settings, 80 steps of 0.25 s towards the steady state.
+    //
+    // After every step the test solves the step's own equations for the
+    // states the kernel published and measures, in joules, how far each
+    // body is from its balance: with m_k the mean of a body's two end
+    // temperatures (what a heat capacity returns on its port) and T the
+    // plane temperature that satisfies sum G_k (T - m_k) = P(T),
+    //   C_k (T_k' - T_k) = dt (G_k (T - m_k) + F_k (300 - m_k)).
+    // No wire value of the kernel enters: only the bodies' states.
+    //
+    // A loop test that judges a temperature against 300 K lets it stay
+    // open by 3e-10 K, which through 4 W/K over 0.25 s is 3e-10 J. Judged
+    // by the heat they drive, the residuals leave about 1e-11 J.
+    let (capacity, plane_w_k, film_w_k) = ([1.0_f64; 2], [2.0_f64, 4.0], [3.0_f64, 5.0]);
+    let (power_w, scale_k, room_k) = (8.0_f64, 40.0_f64, 300.0_f64);
+    let (dt, steps) = (0.25_f64, 80_u32);
+    let law = FadingSource::new(power_w, scale_k);
+
+    let mut builder = SystemBuilder::new();
+    let port = |builder: &SystemBuilder, node, name: &str| builder.port(node, name).unwrap();
+    let plane = builder
+        .add_with_tangent("plane", HeatNode::new(&plane_w_k).unwrap(), ())
+        .unwrap();
+    let mut bodies = Vec::new();
+    let mut starts = Vec::new();
+    for side in 0..2 {
+        let body = builder
+            .add_with_tangent(&format!("body{side}"), HeatCapacity::new(capacity[side]).unwrap(), room_k)
+            .unwrap();
+        let film = builder
+            .add_with_tangent(&format!("film{side}"), Conductance::new(film_w_k[side]).unwrap(), ())
+            .unwrap();
+        let (on_plane, on_film) =
+            (port(&builder, plane, &format!("body{side}")), port(&builder, film, "a"));
+        builder
+            .common_effort(port(&builder, body, "heat"), &[on_plane, on_film])
+            .unwrap();
+        builder
+            .boundary(port(&builder, film, "b"), Box::new(move |_, _, values| values[0] = room_k))
+            .unwrap();
+        bodies.push(body);
+        starts.extend([on_plane, on_film]);
+    }
+    let source = builder
+        .add("source", FadingSource::new(power_w, scale_k), 0.0)
+        .unwrap();
+    let at_source = port(&builder, source, "heat");
+    builder
+        .common_effort(port(&builder, plane, "source"), &[at_source])
+        .unwrap();
+    starts.push(at_source);
+    let mut system = builder.seal().unwrap();
+    for start in starts {
+        assert!(system.guess(start, &[room_k]));
+    }
+
+    let total_w_k: f64 = plane_w_k.iter().sum();
+    let (mut worst_j, mut worst_step, mut allowed_at_worst_j) = (0.0_f64, 0_u32, 0.0_f64);
+    let mut iterations = 0_u64;
+    let mut before = [room_k; 2];
+    with_cx(|cx| {
+        for step in 0..steps {
+            iterations += u64::from(system.step(dt, cx).unwrap().iterations);
+            let after = [0, 1].map(|side: usize| *system.state::<f64>(bodies[side]).unwrap());
+            let mean = [0, 1].map(|side: usize| 0.5 * (before[side] + after[side]));
+            // The plane's balance for these means, by Newton on a function
+            // that rises with T: sum G_k (T - m_k) - P(T) = 0.
+            let weighted: f64 = (0..2).map(|side| plane_w_k[side] * mean[side]).sum();
+            let mut plane_k = weighted / total_w_k;
+            for _ in 0..60 {
+                let power = law.power_at(plane_k);
+                plane_k -= (total_w_k * plane_k - weighted - power) / (total_w_k + power / scale_k);
+            }
+            let crossed_j = dt * law.power_at(plane_k);
+            for side in 0..2 {
+                let received_j = dt
+                    * (plane_w_k[side] * (plane_k - mean[side])
+                        + film_w_k[side] * (room_k - mean[side]));
+                let defect_j = capacity[side] * (after[side] - before[side]) - received_j;
+                // 1e-12 of the energy that crossed the plane in the step,
+                // and the rounding of the terms the balance is formed from.
+                let allowed_j = 1.0e-12 * crossed_j
+                    + 64.0
+                        * f64::EPSILON
+                        * (capacity[side] * after[side]
+                            + dt * (plane_w_k[side] + film_w_k[side]) * plane_k);
+                if defect_j.abs() / allowed_j > worst_j / allowed_at_worst_j.max(f64::MIN_POSITIVE) {
+                    (worst_j, worst_step, allowed_at_worst_j) = (defect_j.abs(), step, allowed_j);
+                }
+            }
+            before = after;
+        }
+    });
+    // The run is not trivial: the bodies warmed by kelvins and the source
+    // weakened with them.
+    assert!(before[0] > room_k + 0.5 && before[1] > room_k + 0.5, "{before:?}");
+    eprintln!(
+        "a loop at the default tolerance: a body's balance is off by {worst_j:.3e} J at worst \
+         (step {worst_step}, allowed {allowed_at_worst_j:.3e} J); {iterations} iterations in \
+         {steps} steps"
+    );
+    assert!(
+        worst_j <= allowed_at_worst_j,
+        "step {worst_step}: {worst_j:e} J against {allowed_at_worst_j:e} J"
+    );
 }

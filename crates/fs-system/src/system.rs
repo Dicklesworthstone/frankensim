@@ -35,6 +35,14 @@ const ROUNDING_UNITS: f64 = 16.0;
 pub struct SolveConfig {
     /// Interface residual allowed, relative to the larger of the two sides
     /// and to the largest unknown of the same kind in the block.
+    ///
+    /// The same tolerance is applied a second time to what the residuals
+    /// do: carried once through the components that read them, by the
+    /// slopes of the block's most recent Jacobian, they may not move any
+    /// wire's target by more than that wire's own tolerance. A temperature
+    /// is thereby closed to what the heat it drives requires, not to a
+    /// fraction of its absolute value. Only the part of a residual above
+    /// its own rounding floor is carried.
     pub relative_tolerance: f64,
     /// Interface residual always allowed, in the unknown's own unit.
     pub absolute_tolerance: f64,
@@ -1376,10 +1384,21 @@ struct BlockWork {
     /// Jacobian depends on the step length and on nothing else.
     affine: bool,
     /// Of an affine block: the step its factors were made for (NaN if it
-    /// has none), and the Jacobian's entries off the identity as
-    /// `(row, column, value)`, in the order they were formed.
+    /// has none).
     kept_dt_s: f64,
+    /// The Jacobian's entries off the identity as `(row, column, value)`,
+    /// in the order the most recent assembly formed them: how the target
+    /// of wire `row` moves with input `column`. An affine block reuses
+    /// them with its factors; every block's convergence test reads them.
     slopes: Vec<(usize, usize, f64)>,
+    /// The step `slopes` were formed at (NaN if there are none, or if the
+    /// assembly that was forming them did not finish).
+    slopes_dt_s: f64,
+    /// Per wire, for the second convergence test: the rounding floor of
+    /// its residual at the current inputs, and what the residuals of the
+    /// other wires make of its target when carried once through `slopes`.
+    floor: Vec<f64>,
+    carried: Vec<f64>,
 }
 
 impl BlockWork {
@@ -1481,6 +1500,9 @@ impl BlockWork {
             varying_terms,
             kept_dt_s: f64::NAN,
             slopes: Vec::new(),
+            slopes_dt_s: f64::NAN,
+            floor: vec![0.0; m],
+            carried: vec![0.0; m],
         }
     }
 }
@@ -1916,6 +1938,9 @@ impl System {
             affine,
             kept_dt_s,
             slopes,
+            slopes_dt_s,
+            floor,
+            carried,
         } = work;
         let affine = *affine;
         // Whether this step has already used the factors an affine block
@@ -1983,6 +2008,75 @@ impl System {
                     }
                 }
             }
+            // A residual that passes its own test can still be large for
+            // what reads it. An effort is a gauge quantity: a temperature
+            // open by 1e-12 of 300 K is 3e-10 K, and a conductance that
+            // reads it returns a heat rate that is wrong by that much times
+            // its conductance, while the heat wire agrees with what the
+            // conductance returned and passes too. So the residuals are
+            // also carried once through the components that read them, by
+            // the slopes of the most recent assembly, and may not move any
+            // wire's target by more than that wire's own tolerance.
+            //
+            // Only the part of a residual above its own rounding floor is
+            // carried. A force balance near rest sits at the rounding of
+            // forces that cancel, which is far above the rounding of its
+            // small net value and which nothing can lower; carried whole,
+            // it would keep a body's velocity wire from ever closing. The
+            // floor of a wire is therefore the rounding of three things:
+            // the terms its driver sums, its own value, and the inputs its
+            // target depends on through the slopes. (The first test has
+            // the first two through its scale; the allowance it adds has
+            // only the third.)
+            //
+            // What this bounds for each wire is its residual and the
+            // first-order image of the residuals under one more pass
+            // through the block. It does not bound the whole first-order
+            // error `(I - T)^-1 r` of a loop whose gain exceeds one.
+            let mut open = None;
+            if converged {
+                if slopes_dt_s.to_bits() == dt_s.to_bits() {
+                    floor.fill(0.0);
+                    carried.fill(0.0);
+                    for &(row, column, through) in slopes.iter() {
+                        floor[row] += (through * self.inputs[unknowns[column]]).abs();
+                    }
+                    for (row, &index) in unknowns.iter().enumerate() {
+                        let own = self.inputs[index].abs().max(
+                            self.drivers[index].magnitude(&self.outputs, &self.boundary_values),
+                        );
+                        floor[row] = self.config.absolute_tolerance
+                            + ROUNDING_UNITS * f64::EPSILON * (floor[row] + own);
+                        if self.input_is_energy_rate[index] {
+                            floor[row] += ROUNDING_UNITS * f64::EPSILON * power_scale;
+                        }
+                    }
+                    for &(row, column, through) in slopes.iter() {
+                        let above = residual[column].abs() - floor[column];
+                        if above > 0.0 {
+                            carried[row] += through.abs() * above;
+                        }
+                    }
+                    for (row, &index) in unknowns.iter().enumerate() {
+                        let allowed = self.config.relative_tolerance
+                            * group_scale[self.input_group[index]]
+                            + floor[row];
+                        let excess = carried[row] - allowed;
+                        if !(excess <= 0.0) {
+                            converged = false;
+                            if !(excess <= worst.1) {
+                                worst = (row, excess);
+                                open = Some(row);
+                            }
+                        }
+                    }
+                } else {
+                    // No slopes at this step length yet. Without them only
+                    // an exact fixed point is taken; anything else is
+                    // assembled once.
+                    converged = residual.iter().all(|value| *value == 0.0);
+                }
+            }
             if converged {
                 for (row, &index) in unknowns.iter().enumerate() {
                     self.input_allowance[index] = allowance[row];
@@ -1990,6 +2084,19 @@ impl System {
                 return Ok(Ok(iterations));
             }
             if iterations >= self.config.max_iterations {
+                // Named: the wire whose own residual is too large, or, when
+                // every residual passed, the open input that moves another
+                // wire's target the most.
+                if let Some(moved) = open {
+                    let mut largest = 0.0_f64;
+                    for &(row, column, through) in slopes.iter() {
+                        let above = residual[column].abs() - floor[column];
+                        if row == moved && through.abs() * above > largest {
+                            largest = through.abs() * above;
+                            worst.0 = column;
+                        }
+                    }
+                }
                 return Err(SystemError::NotConverged {
                     nodes: self.names_of(nodes),
                     iterations,
@@ -2013,6 +2120,7 @@ impl System {
                 }
             } else {
                 *kept_dt_s = f64::NAN;
+                *slopes_dt_s = f64::NAN;
                 slopes.clear();
                 condensed.clear();
                 // The slopes of the drivers that are not linear, at the
@@ -2039,9 +2147,7 @@ impl System {
                         let through = slope * self.scratch_outputs[offset];
                         condensed.subtract(slot, through);
                         rounding[row] += (through * self.inputs[index]).abs();
-                        if affine {
-                            slopes.push((row, column, through));
-                        }
+                        slopes.push((row, column, through));
                     }
                 }
                 if !condensed.factor() {
@@ -2049,6 +2155,7 @@ impl System {
                         nodes: self.names_of(nodes),
                     });
                 }
+                *slopes_dt_s = dt_s;
                 if affine {
                     *kept_dt_s = dt_s;
                 }

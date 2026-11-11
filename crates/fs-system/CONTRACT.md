@@ -288,6 +288,64 @@ Tarjan, index order).
   its damper sharing a body's temperature, steps 40,000 times to rest (it
   used to be refused after about 20 s at a residual of 4.6e-37 W), ends at
   `F / k`, and the body holds `F² / (2 k)` to 1e-10.
+- A residual is judged a second time, by what it does. A wire that passes
+  the test above can still be too open for what reads it. An effort is a
+  gauge quantity: a temperature closed to 1e-12 of 300 K is open by 3e-10 K,
+  and a conductance that reads it returns a heat rate wrong by that much
+  times its conductance, while the heat wire agrees with what the
+  conductance returned and passes too. So the residuals are carried once
+  through the components that read them, by the slopes
+  `t_ij = d(target of wire i) / d(input j)` of the block's most recent
+  Jacobian assembly, and for every wire `i`
+
+      sum_j |t_ij| max(0, |r_j| - f_j)  <=  rel S_i + f_i
+
+  with `S_i` the scale of the first test. Only the part of a residual above
+  its own rounding floor `f_j` is carried. The floor is the absolute
+  tolerance plus 16 units of `eps` times three sizes: the terms the wire's
+  driver sums, the wire's own value, and `sum_k |t_jk u_k|` (for an energy
+  rate also the block's largest power). Without the floor a force balance
+  near rest, which sits at the rounding of forces that cancel, would keep a
+  body's velocity wire from ever closing.
+  - What it bounds, for every wire: its residual, and the first-order image
+    of all residuals under one more pass through the block, by
+    `rel S_i + f_i` plus each in-floor input's floor carried once,
+    `sum_j |t_ij| f_j`. For a heat-rate wire that bound times the step is
+    the energy a step can leave between a component and what it is joined
+    to; for a power port, times the conjugate effort too.
+  - What it does not bound: the whole first-order error `(I - T)^-1 r` of a
+    loop whose gain exceeds one. Measured at the accepted iterates of every
+    existing graph, in an instrumented scratch copy that is not in the tree
+    (73 tests and 13 scenes with a looped block): the full correction
+    `J^-1 r` exceeds a wire's tolerance in six tests and one scene. Once it
+    is on a wire with a physical size, 1.8 times (2.9e-11 W on a heat wire
+    of the friction graph's sixth case). The others are systems at or near
+    rest whose wires are below 1e-15 in absolute terms, where the ratio
+    reaches 4e10 with a correction of 2.8e-21.
+  - The slopes are those of the most recent assembly: this step's, the kept
+    ones of an affine block, or, at the first check of a step, the last
+    step's if the step length is the same. With none at that step length a
+    block is taken without assembling only at an exact fixed point;
+    otherwise it assembles once. A check is one pass over the stored
+    entries and calls no component.
+  - `tests/elements.rs`, at the default settings: two bodies on a
+    `HeatNode` whose source falls with temperature, each losing heat to a
+    room through a film, 80 steps. After each step the test solves the
+    step's own equations for the states the kernel published and measures
+    each body's balance in joules: 6.6e-12 J at worst (allowed 1.6e-11 J).
+    The same test against the kernel of 42f2803e8d: 5.2e-10 J at step 73.
+    `crates/fs-couple/tests/friction_heat/graph.rs` runs at the default
+    settings: the hand-written module, which accepts 1e-10 J, refused the
+    third case's ninth step with 2.4e-10 J before and sees 4.1e-12 J at
+    worst now.
+  - What changed for existing graphs (A/B on 42f2803e8d, every target that
+    uses the kernel): the 14 example scenes give byte-identical reports
+    with the same iteration counts; no test that pins an iteration count
+    changed; the gas piston's six thermal runs take 28, 28, 81, 73, 27 and
+    27 iterations where they took 27, 28, 77, 69, 25 and 25. One test of a
+    deliberately loose solve was rewritten: a block's first step no longer
+    accepts a wrong guess at any tolerance, so the test takes a first step
+    before it loosens the solve.
 - A looped block keeps its workspaces between steps, and an accepted step
   allocates nothing (`tests/step_cost.rs`, counted per thread, damped and
   undamped lines). A refused step may: it drops the step's lists and builds
@@ -950,9 +1008,9 @@ The six base cases:
 - no slip, the first cell 10 K warmer: accepted (6.8e-14 J), the exchange is
   the tests' closed form and nothing is dissipated;
 - a coefficient `0.8 - 0.01 (T - 300 K)` with films to a 300 K room, 80
-  steps of 0.25 s: every step accepted (1.6e-12 J at worst); the plane is
-  1.0e-12 K at worst from the module's own run from its LU endpoints, and
-  3.4e-13 K from the analytic steady temperature at the end; 153.562 J are
+  steps of 0.25 s: every step accepted (4.1e-12 J at worst); the plane is
+  2.8e-12 K at worst from the module's own run from its LU endpoints, and
+  1.5e-12 K from the analytic steady temperature at the end; 153.562 J are
   in the room's sink, as the module's reports have them;
 - a law that refuses during the step, and cancellation requested inside
   the step by the interface's own law once the solve has moved the plane:
@@ -965,18 +1023,19 @@ The six base cases:
   unsaid;
 - 16, 32 and 64 cells a side, 512 steps: every step accepted (1.7e-13 J at
   worst); beside each grid the module's own run from its tests' LU
-  endpoints, from which the graph's plane is 2.9e-12 K at worst at any step
+  endpoints, from which the graph's plane is 2.4e-12 K at worst at any step
   (asserted to 1e-11 K) and each body's total heat 2.9e-14 J at worst
   (asserted to 1e-12 J); the partition and plane-temperature errors against
   the half-space solution (5.20833182e-3 and 4.31961554e-3 at 16 cells,
   3.25520296e-4 and 1.38133321e-4 at 64) fall with the grid as the module's
   test requires.
-The kernel's loop is closed to a relative 1e-14 in this test. At the
-default 1e-12 of the largest temperature in the block (3e-10 K near 300 K),
-the module refused the third case's ninth step with 2.4e-10 J: a tolerance
-relative to an absolute temperature is loose for heat that moves on small
-temperature differences. The wire between the plane and the interface is
-then open by 1.1e-13 K at worst. Not reproduced by a graph: conductances
+The test runs at the kernel's default solve settings. When a loop was closed
+only to 1e-12 of the largest temperature in the block (3e-10 K near 300 K),
+the module refused the third case's ninth step with 2.4e-10 J at those
+settings, and the test set a tolerance of its own; since the kernel also
+judges a temperature's residual by the heat it drives (above, "A residual is
+judged a second time"), it needs none. The wire between the plane and the
+interface is open by 1.1e-13 K at worst. Not reproduced by a graph: conductances
 that follow the materials' conductivities at the endpoint (the plane's are
 constants, as the six cases' conductivities are), a contact resistance split
 about the plane, the module's entropy audit, and its area, moving-patch,

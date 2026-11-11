@@ -36,9 +36,7 @@
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_system::elements::HeatNode;
-use fs_system::{
-    NodeId, RouteTemperature, SolveConfig, System, SystemBuilder, SystemError, heat_sink,
-};
+use fs_system::{NodeId, RouteTemperature, System, SystemBuilder, SystemError, heat_sink};
 use fs_thermal::component::{ImplicitScheme, ThermalTimeline, TimelineState};
 use fs_thermal::enthalpy::conduction::implicit::{
     ImplicitConductionControls, ImplicitConductionError, ImplicitConductionGraph,
@@ -238,6 +236,8 @@ struct Graph {
     k: [f64; 2],
     law_at: LawAt,
     slip_rate_m_s: f64,
+    /// Newton iterations the kernel has spent on this graph's steps.
+    iterations: u64,
 }
 
 /// What the module made of one kernel step.
@@ -381,16 +381,11 @@ fn declare(
         )
         .expect("environment");
     let mut system = builder.seal().expect("sealed");
-    // The module's tests accept 1e-10 J. The kernel's default closes a loop
-    // to 1e-12 of its largest unknown of a kind, which for temperatures
-    // near 300 K is 3e-10 K, and through these conductances over a step
-    // that is as many joules: at the default the module refused the third
-    // case's ninth step with 2.4e-10 J (observed 2026-11-11). The loop is
-    // closed two orders tighter here.
-    system.set_config(SolveConfig {
-        relative_tolerance: 1.0e-14,
-        ..SolveConfig::default()
-    });
+    // The kernel's default solve settings. (When a loop was closed only to
+    // 1e-12 of its largest temperature, 3e-10 K near 300 K, the module
+    // refused the third case's ninth step with 2.4e-10 J, and this test
+    // set a tighter tolerance of its own. The kernel now also judges a
+    // temperature's residual by the heat it drives.)
     // The temperatures in the loop need a start.
     let kelvin = [a, b].map(|cell| thermal.temperature_k(cell).expect("T"));
     for (body, start_k) in ["body0", "body1"].into_iter().zip(kelvin) {
@@ -408,6 +403,7 @@ fn declare(
         k,
         law_at,
         slip_rate_m_s,
+        iterations: 0,
     }
 }
 
@@ -467,6 +463,7 @@ impl Graph {
         let history = self.friction().tangential().clone();
         let taken = self.system.step(dt, cx).expect("kernel step");
         assert_eq!(taken.dt_s, dt);
+        self.iterations += u64::from(taken.iterations);
         self.verdict(&old, &history, dt)
     }
 
@@ -529,11 +526,12 @@ impl Graph {
         }
         assert_eq!(&friction.state, self.friction().tangential());
         assert_eq!(friction.traction_n, self.traction_n());
-        // The loop the plane and the interface are on is closed to the
-        // tolerance set in `declare` and the rounding the kernel allows a
-        // temperature (16 units).
+        // The wire from the plane to the interface is closed to the
+        // kernel's default: 1e-12 of the temperature where nothing reads
+        // it for a flow (a constant coefficient), and far closer where the
+        // friction heat depends on it.
         let wire_k = self.plane_k() - self.interface_k();
-        assert!(wire_k.abs() <= (1e-14 + 32.0 * f64::EPSILON) * self.plane_k(), "{wire_k}");
+        assert!(wire_k.abs() <= 1e-12 * self.plane_k(), "{wire_k}");
         Ok(Verdict {
             report,
             friction,
@@ -555,8 +553,8 @@ fn friction_work_enters_the_network_once_through_the_plane() {
     let verdict = with_cx(&gate, |cx| graph.step(dt, cx)).expect("the module accepts the step");
     eprintln!(
         "first case: the module's largest residual at the graph's endpoint {:.3e} J (it accepts \
-         1e-10 J); the plane's wire open by {:.3e} K",
-        verdict.residual_j, verdict.wire_k
+         1e-10 J); the plane's wire open by {:.3e} K; {} kernel iterations",
+        verdict.residual_j, verdict.wire_k, graph.iterations
     );
 
     // The tests' own reference, an LU solve in temperature coordinates.
@@ -619,8 +617,9 @@ fn without_slip_the_plane_only_conducts() {
     let interface = ledger.nodes.iter().find(|node| node.name == "interface").expect("node");
     assert_eq!(interface.dissipated_j.value(), 0.0);
     eprintln!(
-        "second case: the module's largest residual at the graph's endpoint {:.3e} J",
-        verdict.residual_j
+        "second case: the module's largest residual at the graph's endpoint {:.3e} J; {} kernel \
+         iterations",
+        verdict.residual_j, graph.iterations
     );
 }
 
@@ -666,8 +665,9 @@ fn friction_that_falls_with_temperature_settles_where_the_module_says() {
         "third case, 80 steps: the module's largest residual at a graph endpoint \
          {worst_residual_j:.3e} J; the plane's wire open by {worst_wire_k:.3e} K at worst; the \
          plane {worst_apart_k:.3e} K at worst from the module's own run; {:.3e} K from the \
-         analytic steady state; {to_room_j:.6} J to the room",
-        (graph.plane_k() - expected).abs()
+         analytic steady state; {to_room_j:.6} J to the room; {} kernel iterations",
+        (graph.plane_k() - expected).abs(),
+        graph.iterations
     );
     close(graph.plane_k(), expected, 1e-9);
     assert!(last_force < 8.0);
@@ -837,7 +837,8 @@ fn the_partition_and_the_plane_temperature_converge_on_three_grids() {
             "sixth case, n={n}: partition_error={partition_error:e} \
              temperature_error={temperature_error:e}; the module's largest residual at a graph \
              endpoint {worst_residual_j:.3e} J over 512 steps; the plane's wire open by \
-             {worst_wire_k:.3e} K at worst"
+             {worst_wire_k:.3e} K at worst; {} kernel iterations",
+            graph.iterations
         );
         errors.push((partition_error, temperature_error));
     }
