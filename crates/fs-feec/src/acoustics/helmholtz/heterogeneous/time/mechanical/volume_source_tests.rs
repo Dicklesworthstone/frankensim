@@ -270,7 +270,7 @@ fn zero_integral_volume_source_moves_release_adjacent_walls_and_retains_source_w
         )
         .unwrap();
     let mut state = owner.zero_state();
-    let mut input = 0.0;
+    let mut input = 0.0_f64;
     let mut heat = 0.0;
     for index in 0..12 {
         let q = if index < 4 { 0.002 } else { 0.0 };

@@ -164,6 +164,7 @@ fn mapped_physical_linear_fields_recover_exact_mixed_stress_storage_and_divergen
             conductive_wall_temperature_k: vec![],
             wall_displacement_m_sqrt_kg: vec![],
             wall_velocity_m_sqrt_kg_per_s: vec![],
+            wall_relaxation_coordinates_sqrt_j: vec![],
         };
         let bary = [0.1, 0.2, 0.3, 0.4];
         let sample = model

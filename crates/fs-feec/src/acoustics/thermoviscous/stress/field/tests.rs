@@ -71,6 +71,7 @@ fn state() -> ThermoviscousTimeState {
         conductive_wall_temperature_k: vec![],
         wall_displacement_m_sqrt_kg: vec![],
         wall_velocity_m_sqrt_kg_per_s: vec![],
+        wall_relaxation_coordinates_sqrt_j: vec![],
     }
 }
 
