@@ -223,17 +223,19 @@ impl std::error::Error for AdmissionError {}
 /// A lossless or routing relation between ports.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Connection {
-    /// The setter returns the effort every member receives; the setter
-    /// receives minus the sum of the members' flows.
+    /// The setter returns the effort; member `i` receives `ratio_i` times it
+    /// and the setter receives minus the sum of `ratio_i` times the members'
+    /// flows. Every ratio of a plain junction is one.
     CommonEffort {
         setter: PortRef,
-        members: Vec<PortRef>,
+        members: Vec<(PortRef, f64)>,
     },
-    /// The setter returns the flow; every member receives minus that flow and
-    /// the setter receives the sum of the members' efforts.
+    /// The setter returns the flow; member `i` receives minus `ratio_i` times
+    /// it and the setter receives the sum of `ratio_i` times the members'
+    /// efforts. Every ratio of a plain junction is one.
     CommonFlow {
         setter: PortRef,
-        members: Vec<PortRef>,
+        members: Vec<(PortRef, f64)>,
     },
     /// `b` receives `-ratio * flow_a`; `a` receives `ratio * effort_b`.
     /// A signed scalar ratio acts independently on each coefficient.
@@ -265,7 +267,7 @@ impl Connection {
         match self {
             Self::CommonEffort { setter, members } | Self::CommonFlow { setter, members } => {
                 out.push(*setter);
-                out.extend_from_slice(members);
+                out.extend(members.iter().map(|(port, _)| *port));
             }
             Self::Transformer { a, b, .. } | Self::PowerMap { a, b, .. } => {
                 out.push(*a);

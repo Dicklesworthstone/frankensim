@@ -480,3 +480,343 @@ fn invalid_transformers_and_maps_leave_every_unclaimed_port_usable() {
     assert_eq!(system.ledger().connections.len(), 2);
     assert_eq!(system.ledger().energy_residual_j(), 0.0);
 }
+
+/// The geared oscillator of the first test after 400 steps, wired by
+/// `transformer` or as a junction whose one member has that ratio.
+fn geared_oscillator(as_junction: bool, ratio: f64) -> (Motion, f64) {
+    let mut builder = SystemBuilder::new();
+    let mass = builder
+        .add_with_tangent(
+            "mass",
+            Mass::new(2.0).unwrap(),
+            Motion {
+                position_m: 0.13,
+                velocity_m_s: -0.4,
+            },
+        )
+        .unwrap();
+    let spring = builder
+        .add_with_tangent("spring", Spring::new(70.0, 0.0).unwrap(), -ratio * 0.13)
+        .unwrap();
+    let a = builder.port(mass, "p").unwrap();
+    let b = builder.port(spring, "a").unwrap();
+    let anchor = builder.port(spring, "b").unwrap();
+    if as_junction {
+        builder.common_flow_ratios(a, &[(b, ratio)]).unwrap();
+    } else {
+        builder.transformer(a, b, ratio).unwrap();
+    }
+    builder
+        .boundary(anchor, Box::new(|_, _, values| values.fill(0.0)))
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    with_cx(|cx| {
+        for _ in 0..400 {
+            system.step(0.015, cx).unwrap();
+        }
+    });
+    (
+        *system.state::<Motion>(mass).unwrap(),
+        *system.state::<f64>(spring).unwrap(),
+    )
+}
+
+#[test]
+fn a_junction_with_one_ratio_is_the_transformer_to_the_bit() {
+    for ratio in [2.75_f64, -1.8] {
+        let (by_transformer, spring_by_transformer) = geared_oscillator(false, ratio);
+        let (by_junction, spring_by_junction) = geared_oscillator(true, ratio);
+        assert_ne!(by_transformer.position_m, 0.13);
+        assert_eq!(
+            by_junction.position_m.to_bits(),
+            by_transformer.position_m.to_bits()
+        );
+        assert_eq!(
+            by_junction.velocity_m_s.to_bits(),
+            by_transformer.velocity_m_s.to_bits()
+        );
+        assert_eq!(
+            spring_by_junction.to_bits(),
+            spring_by_transformer.to_bits()
+        );
+    }
+}
+
+#[test]
+fn a_mass_between_two_levered_springs_and_a_force_is_the_reflected_oscillator() {
+    // m x'' = -(r1² k1 + r2² k2) x + s F: the mass sees each spring through
+    // its own lever and the force through another. The midpoint rule is exact
+    // for the constant offset and turns the phase by 2 atan(w dt / 2) a step.
+    let (mass_kg, x0, v0) = (1.5, 0.08, 0.3);
+    let springs = [(40.0, 1.7), (25.0, -0.6)];
+    let (force_n, lever) = (3.0, -2.5);
+    let mut builder = SystemBuilder::new();
+    let mass = builder
+        .add_with_tangent(
+            "mass",
+            Mass::new(mass_kg).unwrap(),
+            Motion {
+                position_m: x0,
+                velocity_m_s: v0,
+            },
+        )
+        .unwrap();
+    let mut members = Vec::new();
+    let mut spring_nodes = Vec::new();
+    for (name, (stiffness, ratio)) in ["near", "far"].into_iter().zip(springs) {
+        let spring = builder
+            .add_with_tangent(name, Spring::new(stiffness, 0.0).unwrap(), -ratio * x0)
+            .unwrap();
+        members.push((builder.port(spring, "a").unwrap(), ratio));
+        let anchor = builder.port(spring, "b").unwrap();
+        builder
+            .boundary(anchor, Box::new(|_, _, values| values.fill(0.0)))
+            .unwrap();
+        spring_nodes.push(spring);
+    }
+    let push = builder
+        .add_with_tangent(
+            "push",
+            Force::new(Waveform::constant(force_n).unwrap()),
+            SourceAccount::default(),
+        )
+        .unwrap();
+    members.push((builder.port(push, "p").unwrap(), lever));
+    let wall = builder.port(mass, "p").unwrap();
+    builder.common_flow_ratios(wall, &members).unwrap();
+    let mut system = builder.seal().unwrap();
+    // The loop is affine, so one exact Newton update has to close it: the
+    // ratios are in the interface Jacobian as well as in the residual.
+    system.set_config(SolveConfig {
+        max_iterations: 1,
+        ..SolveConfig::default()
+    });
+
+    let reflected: f64 = springs.iter().map(|(k, r)| r * r * k).sum();
+    let omega = (reflected / mass_kg).sqrt();
+    let rest = lever * force_n / reflected;
+    let energy0 = 0.5 * mass_kg * v0 * v0
+        + springs
+            .iter()
+            .map(|(k, r)| 0.5 * k * (r * x0).powi(2))
+            .sum::<f64>();
+    let (dt, steps) = (0.01, 2_000);
+    with_cx(|cx| {
+        for i in 1..=steps {
+            system.step(dt, cx).unwrap();
+            let (sin, cos) = (f64::from(i) * 2.0 * (0.5 * omega * dt).atan()).sin_cos();
+            let x = rest + (x0 - rest) * cos + v0 / omega * sin;
+            let v = v0 * cos - omega * (x0 - rest) * sin;
+            let motion = system.state::<Motion>(mass).unwrap();
+            close(motion.position_m, x, 2.0e-12);
+            close(motion.velocity_m_s, v, 2.0e-11);
+            let mut energy = 0.5 * mass_kg * motion.velocity_m_s.powi(2);
+            for (node, (stiffness, ratio)) in spring_nodes.iter().zip(springs) {
+                let q = *system.state::<f64>(*node).unwrap();
+                close(q, -ratio * x, 4.0e-12);
+                energy += 0.5 * stiffness * q * q;
+            }
+            // The source's account holds the work it received: minus the
+            // levered force times the mass's travel.
+            let account = system.state::<SourceAccount>(push).unwrap().energy_in_j;
+            close(
+                account,
+                -lever * force_n * (motion.position_m - x0),
+                1.0e-12,
+            );
+            close(energy + account, energy0, 4.0e-12 * energy0);
+        }
+    });
+    assert_eq!(system.ledger().connections.len(), 1);
+    close(
+        system.ledger().connections[0].energy_defect_j.value(),
+        0.0,
+        1.0e-11 * energy0,
+    );
+    close(system.ledger().energy_residual_j(), 0.0, 1.0e-11 * energy0);
+}
+
+#[test]
+fn a_capacitor_feeding_two_coils_through_turns_ratios_rings_at_the_reflected_frequency() {
+    // C e' = -(n1 f1 + n2 f2) and L_i f_i' = n_i e. The junction current
+    // g = n1 f1 + n2 f2 and the voltage e are one oscillator with
+    // w² = (n1²/L1 + n2²/L2) / C, and each coil follows g by its own share.
+    let kind = PortKind::ElectricalVoltageCurrent;
+    let (capacitance, charge0) = (2.0e-3, 0.004);
+    let coils = [(0.5, 3.0, 0.2), (0.125, -0.5, -0.1)];
+    let mut builder = SystemBuilder::new();
+    let capacitor = builder
+        .add_with_tangent(
+            "capacitor",
+            fs_system::elements::Storage::in_domain(kind, capacitance).unwrap(),
+            charge0,
+        )
+        .unwrap();
+    let mut members = Vec::new();
+    let mut coil_nodes = Vec::new();
+    for (name, (inductance, turns, current0)) in ["primary", "secondary"].into_iter().zip(coils) {
+        let coil = builder
+            .add_with_tangent(
+                name,
+                Mass::in_domain(kind, inductance).unwrap(),
+                Motion {
+                    position_m: 0.0,
+                    velocity_m_s: current0,
+                },
+            )
+            .unwrap();
+        members.push((builder.port(coil, "p").unwrap(), turns));
+        coil_nodes.push(coil);
+    }
+    let node = builder.port(capacitor, "p").unwrap();
+    builder.common_effort_ratios(node, &members).unwrap();
+    let mut system = builder.seal().unwrap();
+    system.set_config(SolveConfig {
+        max_iterations: 1,
+        ..SolveConfig::default()
+    });
+
+    let share: f64 = coils.iter().map(|(l, n, _)| n * n / l).sum();
+    let omega = (share / capacitance).sqrt();
+    let e0 = charge0 / capacitance;
+    let g0: f64 = coils.iter().map(|(_, n, f)| n * f).sum();
+    let energy0 = 0.5 * charge0 * e0
+        + coils
+            .iter()
+            .map(|(l, _, f)| 0.5 * l * f * f)
+            .sum::<f64>();
+    let (dt, steps) = (2.0e-4, 3_000);
+    with_cx(|cx| {
+        for i in 1..=steps {
+            system.step(dt, cx).unwrap();
+            let (sin, cos) = (f64::from(i) * 2.0 * (0.5 * omega * dt).atan()).sin_cos();
+            let e = e0 * cos - g0 / (capacitance * omega) * sin;
+            let g = g0 * cos + capacitance * omega * e0 * sin;
+            let charge = *system.state::<f64>(capacitor).unwrap();
+            close(charge / capacitance, e, 2.0e-11 * e0);
+            let mut energy = 0.5 * charge * charge / capacitance;
+            for (coil, (inductance, turns, current0)) in coil_nodes.iter().zip(coils) {
+                let current = system.state::<Motion>(*coil).unwrap().velocity_m_s;
+                close(
+                    current,
+                    current0 + turns / inductance / share * (g - g0),
+                    2.0e-11,
+                );
+                energy += 0.5 * inductance * current * current;
+            }
+            close(energy, energy0, 2.0e-11 * energy0);
+        }
+    });
+    close(
+        system.ledger().connections[0].energy_defect_j.value(),
+        0.0,
+        1.0e-11 * energy0,
+    );
+    close(system.ledger().energy_residual_j(), 0.0, 1.0e-11 * energy0);
+}
+
+#[test]
+fn refused_ratio_junctions_leave_every_port_usable() {
+    let id = || StableId::new("p").unwrap();
+    let mut builder = SystemBuilder::new();
+    let wall = terminated(&mut builder, "wall", power(PortRole::EffortIn, 1));
+    let near = terminated(&mut builder, "near", power(PortRole::FlowIn, 1));
+    let far = terminated(&mut builder, "far", power(PortRole::FlowIn, 1));
+    let tank = terminated(&mut builder, "tank", power(PortRole::FlowIn, 1));
+    let pipe = terminated(&mut builder, "pipe", power(PortRole::EffortIn, 1));
+    let drain = terminated(&mut builder, "drain", power(PortRole::EffortIn, 1));
+    let wide = terminated(&mut builder, "wide", power(PortRole::FlowIn, 2));
+    let hot = terminated(
+        &mut builder,
+        "hot",
+        PortSpec::heat(id(), PortRole::EffortIn).unwrap(),
+    );
+    let cold = terminated(
+        &mut builder,
+        "cold",
+        PortSpec::heat(id(), PortRole::FlowIn).unwrap(),
+    );
+    let signal = terminated(
+        &mut builder,
+        "signal",
+        PortSpec::signal_in(id(), NonZeroUsize::MIN),
+    );
+
+    assert!(matches!(
+        builder.common_flow_ratios(wall, &[]),
+        Err(AdmissionError::Empty)
+    ));
+    assert!(matches!(
+        builder.common_effort_ratios(tank, &[]),
+        Err(AdmissionError::Empty)
+    ));
+    for ratio in [0.0, -0.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(matches!(
+            builder.common_flow_ratios(wall, &[(near, 2.0), (far, ratio)]),
+            Err(AdmissionError::TransformerRatio { ratio: rejected }) if rejected.to_bits() == ratio.to_bits()
+        ));
+        assert!(matches!(
+            builder.common_effort_ratios(tank, &[(pipe, ratio), (drain, 2.0)]),
+            Err(AdmissionError::TransformerRatio { ratio: rejected }) if rejected.to_bits() == ratio.to_bits()
+        ));
+    }
+    // A common flow is set by a port that receives effort and shared by
+    // ports that receive flow; heat and signals are not power pairs.
+    for (setter, member) in [
+        (near, far),
+        (wall, pipe),
+        (hot, near),
+        (wall, cold),
+        (wall, signal),
+    ] {
+        assert!(matches!(
+            builder.common_flow_ratios(setter, &[(member, 2.0)]),
+            Err(AdmissionError::Role { .. })
+        ));
+    }
+    // The dual: set by a port that receives flow, shared by ports that
+    // receive effort.
+    for (setter, member) in [
+        (pipe, drain),
+        (tank, near),
+        (cold, pipe),
+        (tank, hot),
+        (tank, signal),
+    ] {
+        assert!(matches!(
+            builder.common_effort_ratios(setter, &[(member, 2.0)]),
+            Err(AdmissionError::Role { .. })
+        ));
+    }
+    assert!(matches!(
+        builder.common_flow_ratios(wall, &[(near, 1.0), (wide, 1.0)]),
+        Err(AdmissionError::Mismatch { .. })
+    ));
+    assert!(matches!(
+        builder.common_flow_ratios(wall, &[(near, 1.0), (near, 2.0)]),
+        Err(AdmissionError::AlreadyConnected { .. })
+    ));
+
+    // Every refusal above named these ports, and none was claimed.
+    builder
+        .common_flow_ratios(wall, &[(near, 2.0), (far, -3.0)])
+        .unwrap();
+    builder
+        .common_effort_ratios(tank, &[(pipe, 0.5), (drain, -4.0)])
+        .unwrap();
+    assert!(matches!(
+        builder.common_flow_ratios(wall, &[(near, 2.0)]),
+        Err(AdmissionError::AlreadyConnected { .. })
+    ));
+    for (port, value) in [(wide, 0.0), (hot, 300.0), (cold, 0.0), (signal, 0.0)] {
+        builder
+            .boundary(port, Box::new(move |_, _, values| values.fill(value)))
+            .unwrap();
+    }
+    let mut system = builder.seal().unwrap();
+    with_cx(|cx| {
+        system.step(0.01, cx).unwrap();
+    });
+    assert_eq!(system.ledger().connections.len(), 2);
+    assert_eq!(system.ledger().energy_residual_j(), 0.0);
+}

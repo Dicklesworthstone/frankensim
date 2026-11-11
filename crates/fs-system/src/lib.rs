@@ -10,6 +10,9 @@
 //! SystemBuilder::add / add_with_tangent      components and initial states
 //!              ::bond / common_effort / common_flow / heat_route / signal
 //!              ::transformer / power_map    lossless power conversion
+//!              ::common_flow_ratios / common_effort_ratios
+//!                                            a junction whose members each
+//!                                            sit behind their own ratio
 //!              ::boundary                    prescribed inputs
 //!              ::seal -> System              admission and plan
 //! System::step                               negotiate, solve, audit, admit, publish

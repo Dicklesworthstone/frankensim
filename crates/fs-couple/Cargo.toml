@@ -92,6 +92,8 @@ fs-fmm = { path = "../fs-fmm" }
 # The composition kernel with its owner slices: tests that compare a declared
 # graph with a hand-written coupling of this crate.
 fs-system = { path = "../fs-system", features = ["slices"] }
+# The gas cavity on the composition contract, for the same comparison.
+fs-gas = { path = "../fs-gas", features = ["component"] }
 [lints]
 workspace = true
 

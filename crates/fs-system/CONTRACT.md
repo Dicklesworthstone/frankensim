@@ -39,6 +39,17 @@ physics owners below fs-couple can be composed without it.
     ratio supplies the conversion in the ports' SI units. Two inertias that
     both receive effort still require a constraint solve or reflected-inertia
     lowering, not this connection.
+  - `common_flow_ratios(setter, [(member, ratio)])`: a common-flow junction
+    whose members each sit behind their own ideal transformer. The setter
+    returns the flow `f`; member `i` receives `-ratio_i f` and the setter
+    receives `sum(ratio_i e_i)`. One member is `transformer`; all ratios
+    equal to one is `common_flow` between power ports. Members may be in
+    different power domains. This is how one inertia carries several loads
+    at different ratios: a wall of area `A` between two gases under a force
+    is the wall's mass with one gas at `A`, the other at `-A`, and the force
+    at one. `common_effort_ratios` is the dual: member `i` receives
+    `ratio_i e` and the setter receives `-sum(ratio_i f_i)`. Both need power
+    ports of equal width and finite nonzero ratios.
   - `power_map(a, b, P)`: the same roles, with `P` a finite row-major matrix
     of `b.width()` rows and `a.width()` columns. The kernel generates
     `f_b = -P f_a` and `e_a = P^T e_b`; rectangular and rank-deficient maps
@@ -388,7 +399,21 @@ Power conversions, `tests/power_maps.rs`:
   monolithic two-coordinate solve, including conservation and null modes,
   with one Newton update per step;
 - invalid ratios, shapes, coefficients, roles, carriers and occupied ports
-  are refused before mutation; a repaired builder seals and steps.
+  are refused before mutation; a repaired builder seals and steps;
+- a junction with one ratio gives the transformer's states bit for bit after
+  400 steps, for a positive and a negative ratio;
+- a mass between two springs behind different levers (one reversed) and a
+  levered constant force follows the oscillator with the reflected stiffness
+  `r1² k1 + r2² k2` about the shifted rest position, at the exact midpoint
+  phase, with one Newton update per step; the springs' extensions are
+  `-r_i x` and the source's account is minus the levered force times the
+  travel;
+- the dual: a capacitor feeding two coils through turns ratios (one
+  reversed, with initial currents) rings at `w² = (n1²/L1 + n2²/L2)/C`, each
+  coil following the junction current by its own share, energy conserved;
+- ratio junctions refuse no member, a zero or non-finite ratio, a wrong
+  role, a heat or signal port, unequal widths and a member named twice,
+  claiming nothing; the same ports then join and the system seals and steps.
 
 Owner slice, `tests/rigid_body_slice.rs` (`--features slices`): the native
 fs-mbd rigid body (`fs_mbd::component::RigidBody`), the first physics owner on
@@ -710,6 +735,37 @@ which the timeline Component does not take. Not reproduced either:
 entry point, has no adapter to the Component's `DampingLaw`; the module's
 refusal behaviour and continuation from a candidate are the module's own and
 are not compared. Nothing in the module is deleted.
+
+Gas piston, `crates/fs-couple/tests/gas_piston_graph.rs` (run with
+`cargo test -p fs-couple --test gas_piston_graph`): the hand-written
+`fs_couple::cavity_phs::piston` against a graph with no pairing code. The
+wall is a `Mass`; `common_flow_ratios` joins to its velocity the fs-gas
+cavity (`fs_gas::component::GasCavity`) at the face area, a constant
+exterior pressure at minus that area, and a constant force at one; heat is a
+boundary on the cavity's heat port. Both sides use the gas, controls and
+0.05 ms clock of the module's own tests (a two-species mixture with a
+temperature-dependent heat capacity, a litre at 400 K and 1 bar, a 1 kg wall
+of 0.01 m²) for 48 steps.
+- `GasPiston::step_discrete_gradient`, three runs: released into vacuum;
+  pushed inwards at 0.2 m/s against 1 bar by 0.5 N while the gas takes 20 J
+  a step for eight steps; thrown outwards at 0.2 m/s against 1 bar.
+- `DoubleActingGasPiston::step_discrete_gradient`, a second gas of another
+  composition on the other face at minus its area, two runs: equal faces,
+  and a smaller opposing face (0.008 m²) with a 1.5 N force; the first gas
+  is heated as above.
+Measured at every step: wall velocity within 1e-11 m/s (allowed 1e-10, ten
+times the module's impulse tolerance on the unit mass), gas volumes within
+2e-16 m³ (allowed 1e-15), gas temperatures within 4e-11 K (allowed 1e-9).
+The sources' accounts equal the module's exterior-pressure and force work to
+2e-11 J of 1 J and 8e-15 J, and the ledger closes to 2e-14 J.
+The two-gas runs give the module a volume bracket of 0.9 to 1.1 litres. With
+the 0.7 to 1.5 litres of the module's own tests it refuses the first step:
+it tries both ends of the bracket, and at the far end the opposing gas would
+be halved, which the gas owner refuses for this mixture. The graph has no
+bracket. Not reproduced by a graph: the module's time-resolution admission
+(the graph accepts any step), its fixed support, impulses and impacts, and
+its real-gas, reactive, nozzle-exchange, thermal-body and electrical
+variants. Nothing in the module is deleted.
 
 Other domains, `tests/elements.rs`: the gyrator and one element of each law
 in the rotational and electrical domains pass the conformance and tangent

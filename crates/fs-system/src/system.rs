@@ -499,25 +499,48 @@ impl SystemBuilder {
         }
     }
 
+    /// Admit a junction. A plain junction joins ports that carry the same
+    /// thing; a `geared` one joins power ports of any domain, each member
+    /// through its own nonzero ratio.
     fn junction(
         &mut self,
         setter: PortRef,
-        members: &[PortRef],
+        members: &[(PortRef, f64)],
         setter_role: PortRole,
         member_role: PortRole,
+        geared: bool,
     ) -> Result<(), AdmissionError> {
         if members.is_empty() {
             return Err(AdmissionError::Empty);
         }
-        let (setter_needs, member_needs) = if setter_role == PortRole::FlowIn {
-            ("a port that receives flow", "a port that receives effort")
+        if geared {
+            self.need_power(setter, setter_role)?;
+            for &(member, _) in members {
+                self.need_power(member, member_role)?;
+                if self.spec(setter).width() != self.spec(member).width() {
+                    return Err(AdmissionError::Mismatch {
+                        a: self.label(setter),
+                        b: self.label(member),
+                    });
+                }
+            }
+            if let Some(&(_, ratio)) = members
+                .iter()
+                .find(|(_, ratio)| !ratio.is_finite() || *ratio == 0.0)
+            {
+                return Err(AdmissionError::TransformerRatio { ratio });
+            }
         } else {
-            ("a port that receives effort", "a port that receives flow")
-        };
-        self.need_role(setter, setter_role, setter_needs)?;
-        for &member in members {
-            self.need_role(member, member_role, member_needs)?;
-            self.need_match(setter, member)?;
+            let (setter_needs, member_needs) = if setter_role == PortRole::FlowIn {
+                ("a port that receives flow", "a port that receives effort")
+            } else {
+                ("a port that receives effort", "a port that receives flow")
+            };
+            self.need_role(setter, setter_role, setter_needs)?;
+            for &(member, _) in members {
+                self.need_role(member, member_role, member_needs)?;
+                self.need_match(setter, member)?;
+            }
         }
         // Heat rate is power itself, so handing the same heat rate to several
         // members would multiply the energy. Heat ports share a temperature
@@ -532,7 +555,7 @@ impl SystemBuilder {
         }
         let mut all = Vec::with_capacity(members.len() + 1);
         all.push(setter);
-        all.extend_from_slice(members);
+        all.extend(members.iter().map(|(port, _)| *port));
         self.check_free(&all)?;
         self.take(&all);
         Ok(())
@@ -548,11 +571,10 @@ impl SystemBuilder {
         setter: PortRef,
         members: &[PortRef],
     ) -> Result<(), AdmissionError> {
-        self.junction(setter, members, PortRole::FlowIn, PortRole::EffortIn)?;
-        self.connections.push(Connection::CommonEffort {
-            setter,
-            members: members.to_vec(),
-        });
+        let members: Vec<_> = members.iter().map(|&port| (port, 1.0)).collect();
+        self.junction(setter, &members, PortRole::FlowIn, PortRole::EffortIn, false)?;
+        self.connections
+            .push(Connection::CommonEffort { setter, members });
         Ok(())
     }
 
@@ -567,8 +589,62 @@ impl SystemBuilder {
         setter: PortRef,
         members: &[PortRef],
     ) -> Result<(), AdmissionError> {
-        self.junction(setter, members, PortRole::EffortIn, PortRole::FlowIn)?;
+        let members: Vec<_> = members.iter().map(|&port| (port, 1.0)).collect();
+        self.junction(setter, &members, PortRole::EffortIn, PortRole::FlowIn, false)?;
+        self.connections
+            .push(Connection::CommonFlow { setter, members });
+        Ok(())
+    }
+
+    /// Join power ports at a common flow, each member through its own ideal
+    /// transformer.
+    ///
+    /// `setter` receives effort and returns the flow `f`. Member `i` receives
+    /// flow `-ratio_i f` and returns an effort `e_i`; the setter receives
+    /// `sum(ratio_i e_i)`. The power entering all owners cancels for any
+    /// ratios. One member is [`Self::transformer`]; every ratio equal to one
+    /// is [`Self::common_flow`] between power ports.
+    ///
+    /// The members may be in different power domains: each ratio supplies the
+    /// conversion to the setter's in the ports' SI units, and its sign the
+    /// orientation. A wall of area `A` between two gases, pushed by a force,
+    /// is one junction: the wall's inertia sets the velocity, one gas has
+    /// ratio `A`, the other `-A`, and the force has ratio one.
+    ///
+    /// # Errors
+    /// Wrong roles, a heat or signal port, unequal widths, a zero or
+    /// non-finite ratio, no member, or a port already connected. Refusal
+    /// leaves the builder unchanged.
+    pub fn common_flow_ratios(
+        &mut self,
+        setter: PortRef,
+        members: &[(PortRef, f64)],
+    ) -> Result<(), AdmissionError> {
+        self.junction(setter, members, PortRole::EffortIn, PortRole::FlowIn, true)?;
         self.connections.push(Connection::CommonFlow {
+            setter,
+            members: members.to_vec(),
+        });
+        Ok(())
+    }
+
+    /// Join power ports at a common effort, each member through its own ideal
+    /// transformer: the dual of [`Self::common_flow_ratios`].
+    ///
+    /// `setter` receives flow and returns the effort `e`. Member `i` receives
+    /// effort `ratio_i e` and returns a flow `f_i`; the setter receives
+    /// `-sum(ratio_i f_i)`. The power entering all owners cancels for any
+    /// ratios.
+    ///
+    /// # Errors
+    /// As for [`Self::common_flow_ratios`].
+    pub fn common_effort_ratios(
+        &mut self,
+        setter: PortRef,
+        members: &[(PortRef, f64)],
+    ) -> Result<(), AdmissionError> {
+        self.junction(setter, members, PortRole::FlowIn, PortRole::EffortIn, true)?;
+        self.connections.push(Connection::CommonEffort {
             setter,
             members: members.to_vec(),
         });
@@ -588,20 +664,25 @@ impl SystemBuilder {
         }
     }
 
-    fn need_power_map_roles(&self, a: PortRef, b: PortRef) -> Result<(), AdmissionError> {
-        for (port, role, needs) in [
-            (a, PortRole::EffortIn, "a power port that receives effort"),
-            (b, PortRole::FlowIn, "a power port that receives flow"),
-        ] {
-            if !matches!(self.spec(port).carrier(), Carrier::Power(_)) {
-                return Err(AdmissionError::Role {
-                    port: self.label(port),
-                    needs,
-                });
-            }
-            self.need_role(port, role, needs)?;
+    /// Require a power port with `role`, which is effort- or flow-receiving.
+    fn need_power(&self, port: PortRef, role: PortRole) -> Result<(), AdmissionError> {
+        let needs = if role == PortRole::EffortIn {
+            "a power port that receives effort"
+        } else {
+            "a power port that receives flow"
+        };
+        if !matches!(self.spec(port).carrier(), Carrier::Power(_)) {
+            return Err(AdmissionError::Role {
+                port: self.label(port),
+                needs,
+            });
         }
-        Ok(())
+        self.need_role(port, role, needs)
+    }
+
+    fn need_power_map_roles(&self, a: PortRef, b: PortRef) -> Result<(), AdmissionError> {
+        self.need_power(a, PortRole::EffortIn)?;
+        self.need_power(b, PortRole::FlowIn)
     }
 
     /// Connect power ports through an ideal transformer of signed `ratio`.
@@ -878,7 +959,9 @@ impl SystemBuilder {
                     let common_effort = matches!(connection, Connection::CommonEffort { .. });
                     // Common effort: members copy the setter, the setter gets
                     // minus the members' sum. Common flow: members get minus
-                    // the setter, the setter gets the members' sum.
+                    // the setter, the setter gets the members' sum. A member's
+                    // ratio multiplies both of its directions, so the powers
+                    // cancel; a ratio of one leaves the coefficients exact.
                     let (to_member, to_setter) = if common_effort {
                         (1.0, -1.0)
                     } else {
@@ -888,14 +971,18 @@ impl SystemBuilder {
                     for (offset, index) in input_of(*setter).enumerate() {
                         let terms = members
                             .iter()
-                            .map(|member| (output_of(*member).start + offset, to_setter))
+                            .map(|(member, ratio)| {
+                                (output_of(*member).start + offset, to_setter * ratio)
+                            })
                             .collect();
                         drivers[index] = Driver::Linear(terms);
                     }
-                    for member in members {
+                    for (member, ratio) in members {
                         for (offset, index) in input_of(*member).enumerate() {
-                            drivers[index] =
-                                Driver::Linear(vec![(setter_out.start + offset, to_member)]);
+                            drivers[index] = Driver::Linear(vec![(
+                                setter_out.start + offset,
+                                to_member * ratio,
+                            )]);
                         }
                     }
                 }
