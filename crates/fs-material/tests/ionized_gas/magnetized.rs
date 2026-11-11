@@ -115,7 +115,7 @@ fn g1_signed_drude_hall_response_matches_independent_cartesian_inverse() {
         C64::new(-0.004, 0.003),
         C64::new(0.002, -0.001),
     ];
-    for b in [-0.08, 0.08] {
+    for b in [-0.08_f64, 0.08] {
         for omega in [1e-6, 2e9, E * b.abs() / ME] {
             let prepared = original
                 .prepare_magnetized(omega, [0.0, 0.0, b], magnetic_limits(), || false)

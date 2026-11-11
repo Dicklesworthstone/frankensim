@@ -7,6 +7,7 @@ use crate::thermochemical_gas::energy::parcel::transfer::species::{
     effusion::channel::{ClausingControls, CylindricalMolecularGeometry},
     network::{SpeciesNetworkError, transport::effusion::EffusionNetworkLink},
 };
+use fs_thermal::enthalpy::ThermalLaw;
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
 const AREA: f64 = 1e-6;

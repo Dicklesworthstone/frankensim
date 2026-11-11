@@ -545,7 +545,7 @@ fn channel_for_catalog(
 fn species_specific_accommodation_drives_closed_and_vacuum_finite_walls() {
     use crate::thermochemical_gas::energy::parcel::transfer::species::effusion::channel::SpeciesThermalAccommodation;
     use crate::thermochemical_gas::{ThermochemicalGasModel, tests::point as gas_point};
-    use fs_qty::SpeciesId;
+    use fs_qty::chemistry::SpeciesId;
     use fs_thermochem::{
         Composition, CompositionBasis, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R,
         mixture::FrozenIdealGasMixtureModelV1,

@@ -21,7 +21,7 @@ fn g1_unstressed_thermal_expansion_changes_compression_waves_but_not_shear() {
         let response = at.adiabatic_acoustics(input([0.0; 6], 1.2)).unwrap();
         let acoustic = response.acoustic();
         let bulk = 1000.0 / (3.0 * (1.0 - 2.0 * 0.2));
-        let shear = 1000.0 / (2.0 * (1.0 + 0.2));
+        let shear: f64 = 1000.0 / (2.0 * (1.0 + 0.2));
         // Independent isotropic thermodynamic identity K_S/K_T = C_sigma/C_epsilon.
         let fixed_strain_capacity = 1.2 - 9.0 * 300.0 * bulk * alpha * alpha;
         let adiabatic_bulk = bulk * 1.2 / fixed_strain_capacity;

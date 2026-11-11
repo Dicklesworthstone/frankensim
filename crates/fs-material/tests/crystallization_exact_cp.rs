@@ -641,7 +641,10 @@ fn g1_exact_cp_contact_solves_live_bulk_and_interface_crystallinity_together() {
         [&pair; 2],
         bodies.each_ref(),
         [0.001; 2],
-        [MaterialPropertySelection::SingleClaimOnly; 2],
+        [
+            MaterialPropertySelection::SingleClaimOnly,
+            MaterialPropertySelection::SingleClaimOnly,
+        ],
         [CrystallizationSolve::default(); 2],
     )
     .unwrap();

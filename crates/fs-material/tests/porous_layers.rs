@@ -279,7 +279,7 @@ fn attenuating_thick_limit_and_extreme_grazing_keep_finite_positive_work() {
     .unwrap();
     let (zc, k) = thick.material_response(0).unwrap().characteristic();
     let z0 = fluid.acoustic().characteristic_impedance_pa_s_m();
-    for cosine in [1.0, 0.5, 0.01] {
+    for cosine in [1.0_f64, 0.5, 0.01] {
         let kt = thick.exterior_wavenumber_rad_m() * (1.0 - cosine * cosine).sqrt();
         let mut kn = (k * k - C64::from_re(kt * kt)).sqrt();
         if kn.im > 0.0 {

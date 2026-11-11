@@ -2,12 +2,12 @@
 //! These cases verify the discrete mechanics, not measured material calibration.
 
 use fs_material::creep::StrainHardeningCreep;
+use fs_material::plastic::finite::FiniteInelasticMaterial;
 use fs_material::plastic::finite::combined::FiniteNortonJ2;
 use fs_material::plastic::finite::creep::FiniteNortonCreep;
 use fs_material::plastic::finite::creep::recovery::{
     FiniteRecoveringCreepState, FiniteRecoveringNortonCreep, FiniteRecoveringNortonJ2,
 };
-use fs_material::plastic::finite::inelastic::FiniteInelasticMaterial;
 use fs_material::plastic::finite::rate::FiniteOverstressParameters;
 use fs_material::plastic::finite::{
     FiniteJ2, FiniteJ2Limits, FiniteJ2Parameters, FiniteJ2Response, FiniteJ2State,

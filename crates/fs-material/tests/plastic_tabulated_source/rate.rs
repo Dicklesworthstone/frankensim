@@ -56,7 +56,7 @@ fn resolved(
         card,
         &context(),
         &step_request(kinetics),
-        MaterialPropertySelection::Policy(SelectionPolicy::SingleClaimOnly),
+        MaterialPropertySelection::SingleClaimOnly,
         SINGLE,
     )
     .unwrap()
@@ -85,7 +85,7 @@ fn source_rate_retains_density_and_curve_evidence_and_native_physical_energy() {
         &card,
         &context(),
         &requirements,
-        MaterialPropertySelection::Policy(SelectionPolicy::SingleClaimOnly),
+        MaterialPropertySelection::SingleClaimOnly,
     )
     .unwrap();
     let curve = resolve_tabulated_hardening(
@@ -221,7 +221,7 @@ fn linear_kinetics_require_only_viscosity_and_never_infer_a_power_law() {
             &card,
             &context(),
             &step_request(TabulatedOverstressKinetics::PowerLaw),
-            MaterialPropertySelection::Policy(SelectionPolicy::SingleClaimOnly),
+            MaterialPropertySelection::SingleClaimOnly,
             SINGLE
         )
         .is_err()
@@ -276,7 +276,7 @@ fn source_kinetic_units_bounds_and_complete_bundle_are_required() {
                 &card(props),
                 &context(),
                 &step_request(TabulatedOverstressKinetics::PowerLaw),
-                MaterialPropertySelection::Policy(SelectionPolicy::SingleClaimOnly),
+                MaterialPropertySelection::SingleClaimOnly,
                 SINGLE
             )
             .is_err()
@@ -287,7 +287,7 @@ fn source_kinetic_units_bounds_and_complete_bundle_are_required() {
         &card,
         &context(),
         &step_request(TabulatedOverstressKinetics::Linear).plasticity,
-        MaterialPropertySelection::Policy(SelectionPolicy::SingleClaimOnly),
+        MaterialPropertySelection::SingleClaimOnly,
         SINGLE,
     )
     .unwrap();
