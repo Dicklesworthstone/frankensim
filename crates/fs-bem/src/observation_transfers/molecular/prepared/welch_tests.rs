@@ -309,7 +309,14 @@ fn actual_molecular_boundary_retains_recorded_work_with_the_original_passive_wal
             position_m: [0.0, 0.0, 1.0],
         }],
         0.01,
-        [1.0, 10_000.0],
+        // `MolecularBemObservation::new` takes the triangle-CBIE arm and refuses a band whose top wavenumber exceeds
+        // the geometry's resonance-exclusion limit, `0.8 pi sqrt(sum 1/w^2)` over the enclosing box widths w. This
+        // surface is an icosahedron of circumradius 0.1, so each w is 0.1701 and the limit is 25.59 rad/m, which is
+        // omega 8,782 rad/s in this gas (c 343.2 m/s); the former top, 10,000 rad/s, was 14% above it. The top is
+        // 4,000 rad/s, 0.46 of that limit, which stays below the limit for any orientation of the icosahedron (box
+        // widths at most 0.2 give a limit of at least 7,470 rad/s) and keeps the Welch bin (BIN 3 of 32 samples at
+        // 4096 Hz: 384 Hz, omega 2,413 rad/s) inside the band.
+        [1.0, 4_000.0],
         ComplexOptions {
             max_panels: panels,
             max_bytes: 32 * panels * panels,
