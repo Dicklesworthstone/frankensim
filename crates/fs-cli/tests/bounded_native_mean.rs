@@ -76,6 +76,13 @@ impl Fixture {
             };
         let mesh=root.join(if cube { "examples/contact-pair/cold-body.stl" }
             else { "data/reference-project/plate.stl" });
+        // The reference project pins the plate's bytes; import refuses any other
+        // source, so the enclosure row names the bytes this fixture imports.
+        let receipt=fs_io::quarantine::import_mesh(&std::fs::read(&mesh).unwrap(),"stl")
+            .unwrap().source_receipt;
+        let enclosure=project.geometry.as_mut().unwrap().iter_mut()
+            .find(|a| a.role=="enclosure").unwrap();
+        enclosure.source_hash=receipt.source_hash;
         Self {dir,project,mesh}
     }
     fn run(&self, p:&fs_project::ProjectSpec, ordinal:usize) -> fs_cli::CommandOutput {
@@ -104,6 +111,18 @@ fn request(p:&mut fs_project::ProjectSpec) {
         name:"temperature-volume-mean-bound".into(),kind:"report".into(),region:None,
     });
 }
+/// The narrowed binding is the retained domain these tests check, so the
+/// project's own demands come inside it: cooling-reference's envelope
+/// (ambient-hi 313.15 K) and its air temperature-max limit (353.15 K) would
+/// raise the span material-resolve requires above the binding and refuse.
+fn inside_binding(p:&mut fs_project::ProjectSpec, hi:f64) {
+    p.envelope.as_mut().unwrap().ambient_hi.value=300.0; // the convection reference above
+    let mut limits=0;
+    for limit in p.requirements.as_mut().unwrap() {
+        if limit.region=="air" && limit.qoi=="temperature-max" { limit.limit.value=hi; limits+=1; }
+    }
+    assert_eq!(limits,1);
+}
 
 #[test]
 fn finite_card_bound_preserves_the_physical_field_and_reaches_retained_reports() {
@@ -111,6 +130,7 @@ fn finite_card_bound_preserves_the_physical_field_and_reaches_retained_reports()
     for binding in p.materials.as_mut().unwrap() {
         binding.temp_lo.value=290.0; binding.temp_hi.value=301.0;
     }
+    inside_binding(&mut p,301.0);
     // Unit cube: the old one-ended bound is 302 K; using both cooled ends
     // gives 300.75 K. Only the latter fits the retained 301 K domain.
     let (_,baseline,field)=fixture.solve(&p,0); request(&mut p);
@@ -162,7 +182,10 @@ fn finite_and_global_claims_use_the_same_nominal_equations() {
 fn unsupported_geometry_and_insufficient_barriers_remain_refusals() {
     for cube in [false,true] {
         let f=Fixture::new(true,cube); let mut p=f.project.clone();
-        if cube { for b in p.materials.as_mut().unwrap() { b.temp_lo.value=290.0; b.temp_hi.value=300.7; } }
+        if cube {
+            for b in p.materials.as_mut().unwrap() { b.temp_lo.value=290.0; b.temp_hi.value=300.7; }
+            inside_binding(&mut p,300.7);
+        }
         f.solve(&p,0); // the actual nominal field is admissible before the bound request
         request(&mut p);
         let result=f.run(&p,1);

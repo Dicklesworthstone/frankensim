@@ -569,6 +569,27 @@ fn g1_native_affine_mean_bound_preserves_field_and_reaches_report_and_package() 
     assert!(fs_checker::check(&package).passed());
 }
 
+/// A receipt's whole `interfaces` section without its `evidence_artifact`.
+/// The evidence bytes name their own run (deliberate provenance), so two
+/// solves of different projects differ only there; each side must carry one.
+#[cfg(feature = "thermal-verification")]
+fn interfaces_without_evidence(receipt: &J) -> J {
+    let mut interfaces = receipt.get("interfaces").unwrap().clone();
+    let J::Object(fields) = &mut interfaces else {
+        panic!("interfaces is an object")
+    };
+    let evidence = fields
+        .iter()
+        .position(|(key, _)| key == "evidence_artifact")
+        .expect("interfaces carry an evidence_artifact");
+    let (_, artifact) = fields.remove(evidence);
+    assert!(
+        artifact.as_str().is_some_and(|hash| !hash.is_empty()),
+        "evidence_artifact is a nonempty hash: {artifact:?}"
+    );
+    interfaces
+}
+
 #[cfg(feature = "thermal-verification")]
 #[test]
 fn g1_native_contact_mean_preserves_traces_and_encloses_the_resistance_dependent_component() {
@@ -579,13 +600,16 @@ fn g1_native_contact_mean_preserves_traces_and_encloses_the_resistance_dependent
         request(&mut project);
         let (run, receipt, field) = fixture.solve(&project, 1);
         assert_eq!(original.get("temperature"), field.get("temperature"));
-        for key in ["energy", "interfaces"] {
-            assert_eq!(
-                baseline.get(key),
-                receipt.get(key),
-                "original {key} changed"
-            );
-        }
+        assert_eq!(
+            baseline.get("energy"),
+            receipt.get("energy"),
+            "original energy changed"
+        );
+        assert_eq!(
+            interfaces_without_evidence(&baseline),
+            interfaces_without_evidence(&receipt),
+            "original interfaces changed"
+        );
         let bound = receipt.get("volume_mean_bound").unwrap();
         let expected = 303.0 + 20.0 * resistance;
         assert_eq!(bound.str_field("region"), Some("hot"));
@@ -765,6 +789,16 @@ mod finite_contacts {
             binding.claim = None; binding.conductivity_tolerance = None;
             binding.temp_lo.value = 290.0; binding.temp_hi.value = 330.0;
         }
+        // contact-pair.fsim's hot temperature-max requirement (353.15 K) raises the
+        // range a hot binding must cover above the [290, 330] K admitted here, so
+        // material-resolve would refuse; the design envelope stays inside that span.
+        let mut limits = 0;
+        for limit in fixture.project.requirements.as_mut().unwrap() {
+            if limit.region == "hot" && limit.qoi == "temperature-max" {
+                limit.limit.value = 330.0; limits += 1;
+            }
+        }
+        assert_eq!(limits, 1);
         // Only the original hot region is heated. The source-free cold region
         // still conducts through its own volume and the unchanged contact.
         let power = &mut fixture.project.power.as_mut().unwrap()[0];
@@ -788,7 +822,8 @@ mod finite_contacts {
             request(&mut p);
             let (_, receipt, field) = fixture.solve(&p, 1);
             assert_eq!(original.get("temperature"), field.get("temperature"));
-            for key in ["energy", "interfaces"] { assert_eq!(baseline.get(key), receipt.get(key)); }
+            assert_eq!(baseline.get("energy"), receipt.get("energy"));
+            assert_eq!(interfaces_without_evidence(&baseline), interfaces_without_evidence(&receipt));
             let bound = receipt.get("volume_mean_bound").unwrap();
             let proof = bound.get("material_validity").unwrap();
             assert_eq!(proof.str_field("method"), Some("continuum-layered-contact-comparison"));
@@ -825,7 +860,14 @@ mod finite_contacts {
         let report = J::parse(&std::fs::read_to_string(exported.str_field("report_json").unwrap()).unwrap()).unwrap();
         let mean = report.get("qois").unwrap().as_array().unwrap().iter()
             .find(|q| q.str_field("name") == Some(OUTPUT)).unwrap();
-        assert_eq!(mean.f64_field("value"), bound.f64_field("value_k"));
+        // The report's JSON prints each QoI value with six decimals: that is the
+        // contract of json_num in fs-report's engineering_report.rs. The receipt
+        // keeps the full value.
+        let value = bound.f64_field("value_k").unwrap();
+        assert_eq!(
+            mean.f64_field("value"),
+            Some(format!("{value:.6}").parse::<f64>().unwrap())
+        );
         assert_eq!(mean.str_field("color"), Some("Verified"));
         assert_eq!(mean.get("total_budget"), Some(&J::Null), "physical uncertainty stays unknown");
         let exported = command(&["--json", "package", id, ledger.to_str().unwrap()]);
