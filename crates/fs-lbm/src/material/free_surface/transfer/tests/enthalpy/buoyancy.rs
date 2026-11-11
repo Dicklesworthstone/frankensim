@@ -52,7 +52,10 @@ fn config(gravity: [f64; 3]) -> BoussinesqConfig<3> {
 fn bounds() -> TetEnthalpyTransferLimits {
     let mut limits = thermal_limits();
     limits.mechanical.max_tetrahedra = 16;
-    limits.max_source_queries = 512;
+    // The budget counts the receiving cells' temperature samples as well as the source nodes and caloric knots
+    // (TetEnthalpyTransferLimits::max_source_queries, transfer/enthalpy.rs). This fixture's transfer used 1048 queries
+    // (measured, report.source_queries; two 8 mm cubes on 1 mm cells are 1024 wet cells), so 512 was exhausted.
+    limits.max_source_queries = 4096;
     limits.enthalpy_tolerance_j = 1e-9;
     limits
 }
