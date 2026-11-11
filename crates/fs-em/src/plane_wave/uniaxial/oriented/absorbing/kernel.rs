@@ -1,9 +1,11 @@
 //! Complex continuation of the native uniaxial Maxwell eigensystem.
 //! For q=(p,0,z), K=No²(I-aaᵀ)+Ne²aaᵀ and q×H=-K E.
 //! Extraordinary dispersion is f z²+2gp z+h p²-No²Ne²=0. We retain
-//! both stable quadratic roots until decay/normal-flux admission selects the
-//! outgoing one; a principal complex square root alone does not select it
-//! for a tilted lossy tensor. All fields use the shared native eigenvectors,
+//! both stable quadratic roots, polish each by a certified double-double
+//! Newton step and select the outgoing one by the certified sign of Im z,
+//! then by the certified normal flux (`certified_root`); a principal complex
+//! square root alone does not select it for a tilted lossy tensor. All fields
+//! use the shared native eigenvectors,
 //! row-scaled boundary solve and compensated physical-point propagator.
 
 use super::super::super::kernel::{binary_scale, unit_axis};
@@ -29,6 +31,9 @@ pub(super) use box_integral::{
     admit_slab_box, coherent_box_absorption, coherent_box_requirements,
     coherent_slab_box_absorption, slab_box_requirements,
 };
+
+#[path = "kernel/certified_root.rs"]
+mod certified_root;
 
 #[path = "kernel/statistics.rs"]
 mod statistics;
@@ -371,17 +376,21 @@ pub(super) fn eigenbasis(data: Input) -> Result<Eigenbasis> {
         }
         let constant = h.scale(p2.to_f64()) - o2 * e2;
         let roots = [numerator / f, constant / numerator];
-        let mut outgoing = None;
-        for z in roots {
-            let candidate = make(z, false)?;
-            if z.im < 0.0 || z.im == 0.0 && flux(candidate.e, candidate.h) > 0.0 {
-                if outgoing.is_some() {
-                    return Err("absorbing extraordinary outgoing branch is ambiguous");
-                }
-                outgoing = Some(candidate);
-            }
+        // These double-precision roots only start the certified step: their Im carries about 1e-16 |z| of
+        // rounding that the inputs do not.
+        let dispersion = certified_root::Dispersion::new(indices, axis, p, p2);
+        let mut candidates = [None; 2];
+        let mut directions = [certified_root::Direction::Incoming; 2];
+        for (slot, start) in roots.into_iter().enumerate() {
+            let root = dispersion
+                .refine(start)
+                .ok_or(certified_root::NOT_CERTIFIED)?;
+            candidates[slot] = Some(make(root.z, false)?);
+            directions[slot] =
+                certified_root::classify(root.z.im, root.im_bound(), || dispersion.flux(&root))?;
         }
-        outgoing.ok_or("absorbing extraordinary mode has no resolved outgoing branch")?
+        candidates[certified_root::select(directions)?]
+            .ok_or("absorbing extraordinary mode has no resolved outgoing branch")?
     };
     Ok(Eigenbasis {
         scale,

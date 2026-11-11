@@ -1243,3 +1243,91 @@ fn coherent_poynting_does_not_require_representable_dielectric_heat() {
         coherent_illumination_field([&response, &response], side, [0.0; 3], || false).is_err()
     );
 }
+
+#[test]
+fn g1_the_extraordinary_mode_keeps_the_loss_the_double_precision_root_lost() {
+    // The optic axis in the interface plane at normal incidence: the ordinary tensor element does not reach the
+    // extraordinary mode. The tip refused both cases as ambiguous, with Im -5.17e-17 and -4.93e-17 on the two
+    // roots; the exactly transparent one is a dichroic polarizer.
+    for loss in [-1.0e-24, 0.0] {
+        let indices = [C64::new(1.45, -0.12), C64::new(2.1, loss)];
+        let basis = eigenbasis(input([1.0, 0.0, 0.0], indices, 0.0)).unwrap();
+        let z = basis.modes[1].z;
+        assert!(
+            z.re > 0.0 && (z.re - 2.1 / 2.0).abs() <= f64::EPSILON,
+            "{z:?}"
+        );
+        assert!((z.im - loss / 2.0).abs() <= 1.0e-28, "{z:?}");
+        assert!(flux(basis.modes[1].e, basis.modes[1].h) > 0.0);
+    }
+}
+
+#[test]
+fn g1_a_nearly_in_plane_axis_is_treated_like_the_in_plane_one() {
+    for tilt in [1.0e-9, 1.0e-12] {
+        let indices = [C64::new(1.45, -0.12), C64::new(2.1, -1.0e-24)];
+        let basis = eigenbasis(input([1.0, 0.0, tilt], indices, 0.0)).unwrap();
+        let z = basis.modes[1].z;
+        assert!(z.re > 0.0 && z.im < 0.0, "{tilt:e} {z:?}");
+    }
+}
+
+#[test]
+fn g0_the_certified_roots_match_the_double_precision_roots_to_their_rounding() {
+    // The roots of the 27209 print, in scaled units, with the inputs that gave them.
+    let cases = [
+        (
+            [1.0, 0.0, 0.0],
+            -1.0e-3,
+            0.0,
+            C64::new(1.05, -5.000_000_000_000_017e-4),
+        ),
+        (
+            [1.0, 0.0, 0.0],
+            -1.0e-24,
+            0.3,
+            C64::new(1.027_754_329_547_13, -3.748_697_141_589_883e-3),
+        ),
+        (
+            [1.0, 0.0, 0.0],
+            -1.0e-24,
+            0.7,
+            C64::new(0.922_655_119_953_977_6, -2.273_441_819_896_722_4e-2),
+        ),
+        (
+            [0.6, 0.0, 0.8],
+            -1.0e-24,
+            0.0,
+            C64::new(0.806_124_793_378_505_7, -5.251_381_597_692_664e-2),
+        ),
+        (
+            [0.6, 0.0, 0.8],
+            -1.0e-24,
+            0.3,
+            C64::new(0.749_428_317_644_494_1, -6.084_845_472_171_465e-2),
+        ),
+        (
+            [0.6, 0.0, 0.8],
+            -1.0e-3,
+            0.7,
+            C64::new(0.640_333_370_224_624_9, -7.103_034_402_419_4e-2),
+        ),
+    ];
+    for (axis, loss, p, old) in cases {
+        let indices = [C64::new(1.45, -0.12), C64::new(2.1, loss)];
+        let basis = eigenbasis(input(axis, indices, p)).unwrap();
+        let z = basis.modes[1].z;
+        assert!(
+            (z - old).abs() <= 1.0e-15,
+            "{axis:?} {loss:e} {p}: {z:?} against {old:?}"
+        );
+        assert!(z.im < 0.0, "{axis:?} {loss:e} {p}: {z:?}");
+    }
+    // With a loss of 1e-3 on the in-plane axis at normal incidence the root is n_e / 2 itself.
+    let indices = [C64::new(1.45, -0.12), C64::new(2.1, -1.0e-3)];
+    let z = eigenbasis(input([1.0, 0.0, 0.0], indices, 0.0))
+        .unwrap()
+        .modes[1]
+        .z;
+    assert_eq!((z.re, z.im), (2.1 / 2.0, -1.0e-3 / 2.0));
+}
