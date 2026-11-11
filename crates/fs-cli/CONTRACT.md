@@ -949,6 +949,34 @@ of itself), the motor's work, the load's received work and the heat, and
 checks the refusals (a ratio on the node port, a zero ratio, an unknown or
 missing field, the same list without ratios).
 
+Gas. `gas_volume` and `restriction` lower to the kernel's `GasVolume` and
+`Restriction` (crates/fs-system/CONTRACT.md, streams): a well-mixed volume of
+perfect gas with constant heat capacities, and a linear restriction whose
+flow carries the enthalpy and carried quantities of the side it leaves. A
+volume's `stream` port is a node of a `join`, as its `heat` port is; with
+`wall: true` it has a port `p` that joins a mass as a member with the face
+area as its ratio. `prescribe` takes `stream` on a volume's stream port (one
+waveform each for mass rate, enthalpy rate and every carried rate, into the
+volume) and `contents` on a restriction's end held from outside (pressure,
+specific enthalpy, carried fractions). A report gives a volume's pressure,
+temperature, mass, volume and `carried<i>` fractions, and a restriction's
+mass and enthalpy rates over the last step. Adaptive stepping refuses a scene
+with a gas volume. Scene: `examples/system/pneumatic_cylinder.json`, a tank
+feeding a cylinder through a valve, with a piston, a spring load, the outside
+pressure, a seal and a barrel that takes the seal's heat and exchanges heat
+with the chamber's gas. `tests/system_command.rs` compares it with an
+independent RK4 integration of the cylinder's seven equations: in mid-stroke
+at 0.3 s the errors at steps of 0.2 and 0.1 ms are 3.3e-8 and 8.1e-9 (ratio
+4.0), and at 3 s 4.9e-9; no step is shortened; the gas the tank lost is in
+the chamber (1e-12), the chamber's volume is the piston's face times its
+position, the outside received 1 bar times the swept volume and the gas
+holds the spring and the outside pressure. A second test fills a vessel from
+a prescribed stream (355.5 K from a 300 K line, the closed form to 1e-10)
+and from a supply held at 2 bar through a restriction (2 bar to 1e-9 and
+350 K), and checks fourteen refusals. Limits: one gas for all joined
+volumes, unchecked; constant heat capacities; no source-backed gas, which
+is the fs-gas cavity and is not reachable from a scene.
+
 A heat receiver may be named by several routes. Temperature
 inputs joined to a heat capacity, and route sources, start from the initial
 temperatures. Examples and their checks: `examples/system/README.md`; tests:

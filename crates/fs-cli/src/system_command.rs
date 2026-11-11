@@ -39,8 +39,8 @@ use fs_system::constitutive::{
     NonlinearCapacitor, NonlinearInductor,
 };
 use fs_system::elements::{
-    Admittance, Conductance, Damper, FlowSource, Force, Gyrator, HeatCapacity, Heater, Mass,
-    Motion, SourceAccount, Spring, Storage, Waveform,
+    Admittance, Conductance, Damper, FlowSource, Force, GasContents, GasVolume, Gyrator,
+    HeatCapacity, Heater, Mass, Motion, Restriction, SourceAccount, Spring, Storage, Waveform,
 };
 use fs_system::{
     AdaptiveConfig, AdaptiveError, AdaptiveReport, Checkpoint, ErrorNorm, ErrorTolerance,
@@ -65,6 +65,8 @@ const NETWORK_NO_CLAIM: &str = "lumped elements with constant parameters or auth
 /// connectors of the whole bank on every step.
 const MAX_NETWORK_BODIES: usize = 64;
 const MAX_NETWORK_CONNECTORS: usize = 256;
+/// Quantities one stream of a scene may carry besides mass and enthalpy.
+const MAX_CARRIED: usize = 16;
 const ADAPTIVE_NO_CLAIM: &str = "step-doubling estimates control the declared state coordinates and source-work increments under the selected order assumption; they are local numerical estimates, not global error bounds or physical validation; dissipated heat and interface balances retain the kernel's separate ledger audits; no material-card resolution, contact, friction or phase change";
 
 const HELP: &str = "Usage: frankensim [--json] system <scene.json>
@@ -105,6 +107,21 @@ Elements (ports in brackets; SI units in every field name):
                  start of the step; it may stay unconnected)
   conductance    conductance_w_k                                      [a, b]
   heater         power_w (waveform, never negative)                   [heat]
+Gas in volumes joined by restrictions (a perfect gas with constant heat
+capacities; all joined volumes must hold the same gas):
+  gas_volume     gas_constant_j_kg_k, heat_capacity_ratio, volume_m3,
+                 pressure_pa, temperature_k, carried = [] (the mass fraction
+                 of each quantity carried with the gas), wall = false
+                                                      [stream, heat, p if wall]
+  restriction    conductance_kg_s_pa, carried = 0 (how many quantities)
+                                                                      [a, b]
+  A restriction passes conductance (p_a - p_b) [kg/s] with the enthalpy and
+  carried quantities of the side the gas leaves. Join each end to a volume's
+  stream port; several restrictions may meet at one volume. heat takes the
+  heat rate into the gas and returns its temperature, like a heat capacity.
+  With wall = true, p is the pressure on a moving wall: join it to a mass
+  as {\"port\": volume.p, \"ratio\": area_m2}, positive for a wall whose
+  motion in the mass's positive direction enlarges the volume.
 The same four laws about a shaft, with angle, angular velocity and torque:
   inertia        inertia_kg_m2, angle_rad = 0, angular_velocity_rad_s = 0  [p]
   torsion_spring stiffness_n_m_rad, cubic_n_m_rad3 = 0, twist_rad = 0  [a, b]
@@ -218,7 +235,14 @@ Connections, ports written element.port:
                           network of rigid bodies, force_n or torque_n_m as
                           an array of three waveforms ([0, 0, 0] leaves a
                           body free or an actuator idle), and temperature_k
-                          for a temperature<e> input held from outside
+                          for a temperature<e> input held from outside; for a
+                          gas volume, heat_rate_w on heat, and stream on its
+                          stream port as an array of waveforms (mass rate
+                          [kg/s], enthalpy rate [W], then each carried rate
+                          [kg/s], all into the volume; zeros close it); for a
+                          restriction's end held from outside, contents
+                          (pressure [Pa], specific enthalpy [J/kg], then each
+                          carried mass fraction)
 
 Each element's port a is the end at mass A and b the end at mass B; the
 extension of a spring is x_B - x_A less its unloaded length; a series
@@ -434,11 +458,15 @@ enum Kind {
     ViscoelasticNetwork,
     HeatCapacity,
     Conductance,
+    /// A well-mixed volume of perfect gas: the node streams meet at.
+    GasVolume,
+    /// A linear flow restriction between two gas volumes.
+    Restriction,
     Heater,
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 23] = [
+    const TABLE: [(&'static str, Self); 25] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
@@ -461,6 +489,8 @@ impl Kind {
         ("viscoelastic_network", Self::ViscoelasticNetwork),
         ("heat_capacity", Self::HeatCapacity),
         ("conductance", Self::Conductance),
+        ("gas_volume", Self::GasVolume),
+        ("restriction", Self::Restriction),
         ("heater", Self::Heater),
     ];
 
@@ -496,6 +526,9 @@ struct Element {
     /// each of its connectors the number of its Maxwell branches.
     bodies: Vec<MassProperties>,
     branches: Vec<usize>,
+    /// The gas of a gas volume, for reading pressure and temperature from
+    /// what it holds.
+    gas: Option<GasVolume>,
 }
 
 struct Device {
@@ -1272,6 +1305,7 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
     let mut flux_current_curve = None;
     let mut bodies = Vec::new();
     let mut branches = Vec::new();
+    let mut gas = None;
     let (node, ports) = match kind {
         Kind::Inertance(domain) => {
             let names = domain.names();
@@ -1400,6 +1434,13 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
                 Conductance::new(number(definition, "conductance_w_k", &what)?).map_err(invalid)?;
             add(builder, name, wall, ())?
         }
+        Kind::GasVolume => {
+            let (volume, contents) = gas_volume(definition, &what)?;
+            temperature_k = Some(volume.temperature_k(&contents));
+            gas = Some(volume.clone());
+            add(builder, name, volume, contents)?
+        }
+        Kind::Restriction => add(builder, name, restriction(definition, &what)?, ())?,
         Kind::Heater => {
             fields(definition, &["kind", "power_w"], &what)?;
             let wave = definition
@@ -1420,7 +1461,78 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
         flux_current_curve,
         bodies,
         branches,
+        gas,
     })
+}
+
+/// A `restriction` between gas volumes.
+fn restriction(definition: &J, what: &str) -> Result<Restriction, Refusal> {
+    fields(definition, &["kind", "conductance_kg_s_pa", "carried"], what)?;
+    let carried = number_or(definition, "carried", 0.0, what)?;
+    if !(0.0..=MAX_CARRIED as f64).contains(&carried) || carried.fract() != 0.0 {
+        return Err(format!(
+            "{what}: carried is the number of carried quantities, 0 to {MAX_CARRIED}"
+        )
+        .into());
+    }
+    Restriction::new(
+        number(definition, "conductance_kg_s_pa", what)?,
+        carried as usize,
+    )
+    .map_err(|e| Refusal::Input(format!("{what}: {e}")))
+}
+
+/// A `gas_volume`: the gas, and what it holds at the start.
+fn gas_volume(definition: &J, what: &str) -> Result<(GasVolume, GasContents), Refusal> {
+    fields(
+        definition,
+        &[
+            "kind",
+            "gas_constant_j_kg_k",
+            "heat_capacity_ratio",
+            "volume_m3",
+            "pressure_pa",
+            "temperature_k",
+            "carried",
+            "wall",
+        ],
+        what,
+    )?;
+    let invalid = |e: fs_system::elements::ElementError| Refusal::Input(format!("{what}: {e}"));
+    let fractions = match definition.get("carried") {
+        None => Vec::new(),
+        Some(list) => list
+            .as_array()
+            .filter(|rows| rows.len() <= MAX_CARRIED)
+            .and_then(|rows| rows.iter().map(J::as_f64).collect::<Option<Vec<f64>>>())
+            .ok_or_else(|| {
+                format!(
+                    "{what}: carried is an array of at most {MAX_CARRIED} mass fractions, \
+                     one per carried quantity"
+                )
+            })?,
+    };
+    let wall = match definition.get("wall") {
+        None => false,
+        Some(J::Bool(wall)) => *wall,
+        Some(_) => return Err(format!("{what}: wall is true or false").into()),
+    };
+    let volume = GasVolume::new(
+        number(definition, "gas_constant_j_kg_k", what)?,
+        number(definition, "heat_capacity_ratio", what)?,
+        fractions.len(),
+    )
+    .map_err(invalid)?;
+    let volume = if wall { volume.with_wall() } else { volume };
+    let contents = volume
+        .contents(
+            number(definition, "pressure_pa", what)?,
+            number(definition, "temperature_k", what)?,
+            number(definition, "volume_m3", what)?,
+            &fractions,
+        )
+        .map_err(invalid)?;
+    Ok((volume, contents))
 }
 
 /// A port named in the scene, resolved.
@@ -1520,9 +1632,12 @@ fn join(
             port.role == PortRole::FlowIn
                 && matches!(port.carrier, Carrier::Power(_) | Carrier::Heat)
         } else {
+            // A gas volume is the node its streams meet at, as it is for
+            // its heat.
             matches!(
                 (port.carrier, port.role),
-                (Carrier::Power(_), PortRole::EffortIn) | (Carrier::Heat, PortRole::FlowIn)
+                (Carrier::Power(_), PortRole::EffortIn)
+                    | (Carrier::Heat | Carrier::Stream, PortRole::FlowIn)
             )
         }
     };
@@ -1537,8 +1652,9 @@ fn join(
             .into());
         }
         return Err(format!(
-            "{what}: a join has exactly one node port (a mass, inertia, inductor or heat \
-             capacity) and the ports that meet at it; this one has {nodes}"
+            "{what}: a join has exactly one node port (a mass, inertia, inductor, heat \
+             capacity, or a gas volume's stream or heat) and the ports that meet at it; \
+             this one has {nodes}"
         )
         .into());
     }
@@ -1729,6 +1845,12 @@ fn prescribe(
         (Carrier::Heat, PortRole::FlowIn, _) => "heat_rate_w",
         (Carrier::Power(_), PortRole::EffortIn, Some(domain)) => domain.names().effort,
         (Carrier::Power(_), PortRole::FlowIn, Some(domain)) => domain.names().flow,
+        // What crosses into a gas volume: mass rate [kg/s], enthalpy rate
+        // [W] and the rate of each carried quantity [kg/s].
+        (Carrier::Stream, PortRole::FlowIn, _) => "stream",
+        // What a restriction's end is held at: pressure [Pa], specific
+        // enthalpy [J/kg] and the mass fraction of each carried quantity.
+        (Carrier::Stream, PortRole::EffortIn, _) => "contents",
         _ => return Err(format!("{what}: this port cannot be prescribed").into()),
     };
     fields(connection, &["prescribe", quantity], what)
@@ -1836,10 +1958,14 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             Kind::NonlinearInductor => vec![("flux_wb", Coordinate::Scalar)],
             Kind::HeatCapacity => vec![("temperature_k", Coordinate::Scalar)],
             Kind::Source(_) | Kind::CurrentSource | Kind::Heater => vec![("energy_in_j", Coordinate::SourceWork)],
-            Kind::Resistance(_) | Kind::ResistorBranch | Kind::Gyrator | Kind::Conductance => Vec::new(),
-            Kind::RigidNetwork | Kind::ViscoelasticNetwork => {
+            Kind::Resistance(_)
+            | Kind::ResistorBranch
+            | Kind::Gyrator
+            | Kind::Conductance
+            | Kind::Restriction => Vec::new(),
+            Kind::RigidNetwork | Kind::ViscoelasticNetwork | Kind::GasVolume => {
                 return Err(format!(
-                    "adaptive: {} is a {}, whose bodies have no error account here; \
+                    "adaptive: {} is a {}, whose state has no error account here; \
                      run it with a fixed step_s",
                     element.name,
                     element.kind.name()
@@ -2084,6 +2210,9 @@ impl Device {
         if matches!(element.kind, Kind::RigidNetwork | Kind::ViscoelasticNetwork) {
             return self.network_values(element);
         }
+        if element.kind == Kind::GasVolume {
+            return self.gas_values(element);
+        }
         self.lumped_values(element)
             .into_iter()
             .map(|(key, value)| (key.to_owned(), value))
@@ -2212,9 +2341,36 @@ impl Device {
             }
             Kind::Gyrator => vec![("effort_a", output("a")), ("effort_b", output("b"))],
             Kind::Conductance => vec![("heat_rate_w", output("a"))],
-            // Read by `network_values`.
-            Kind::RigidNetwork | Kind::ViscoelasticNetwork => Vec::new(),
+            // What crossed from `a` to `b` during the last step.
+            Kind::Restriction => {
+                let crossing = match system.port(element.node, "a") {
+                    Some(port) if system.steps() > 0 => system.last_output(port),
+                    _ => &[f64::NAN, f64::NAN][..],
+                };
+                vec![("mass_rate_kg_s", crossing[0]), ("enthalpy_rate_w", crossing[1])]
+            }
+            // Read by `network_values` and `gas_values`.
+            Kind::RigidNetwork | Kind::ViscoelasticNetwork | Kind::GasVolume => Vec::new(),
         }
+    }
+
+    /// What a gas volume holds: pressure, temperature, mass, volume and the
+    /// mass fraction of each carried quantity.
+    fn gas_values(&self, element: &Element) -> Vec<(String, f64)> {
+        let held = self.system.state::<GasContents>(element.node);
+        let (Some(held), Some(gas)) = (held, element.gas.as_ref()) else {
+            return Vec::new();
+        };
+        let mut values = vec![
+            ("pressure_pa".to_owned(), gas.pressure_pa(held)),
+            ("temperature_k".to_owned(), gas.temperature_k(held)),
+            ("mass_kg".to_owned(), held.mass_kg),
+            ("volume_m3".to_owned(), held.volume_m3),
+        ];
+        for (index, carried) in held.carried_kg.iter().enumerate() {
+            values.push((format!("carried{index}"), carried / held.mass_kg));
+        }
+        values
     }
 
     fn render_text(&self, path: &Path) -> String {

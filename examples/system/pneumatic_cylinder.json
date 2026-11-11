@@ -1,0 +1,35 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 3.0,
+  "step_s": 2.0e-4,
+  "sample_every_s": 0.02,
+  "elements": {
+    "tank": {"kind": "gas_volume", "gas_constant_j_kg_k": 287.0, "heat_capacity_ratio": 1.4,
+             "volume_m3": 2.0e-3, "pressure_pa": 6.0e5, "temperature_k": 293.15},
+    "valve": {"kind": "restriction", "conductance_kg_s_pa": 1.0e-8},
+    "chamber": {"kind": "gas_volume", "gas_constant_j_kg_k": 287.0, "heat_capacity_ratio": 1.4,
+                "volume_m3": 4.0e-5, "pressure_pa": 1.0e5, "temperature_k": 293.15, "wall": true},
+    "piston": {"kind": "mass", "mass_kg": 0.5, "position_m": 0.02},
+    "outside": {"kind": "force", "force_n": -200.0},
+    "load": {"kind": "spring", "stiffness_n_m": 8000.0},
+    "seal": {"kind": "damper", "damping_n_s_m": 60.0},
+    "film": {"kind": "conductance", "conductance_w_k": 0.5},
+    "barrel": {"kind": "heat_capacity", "capacity_j_k": 150.0, "temperature_k": 293.15}
+  },
+  "connections": [
+    {"join": ["tank.stream", "valve.a"]},
+    {"join": ["chamber.stream", "valve.b"]},
+    {"join": [
+      "piston.p",
+      {"port": "chamber.p", "ratio": 2.0e-3},
+      "outside.p",
+      "load.a",
+      "seal.a"
+    ]},
+    {"prescribe": "load.b", "velocity_m_s": 0},
+    {"prescribe": "seal.b", "velocity_m_s": 0},
+    {"prescribe": "tank.heat", "heat_rate_w": 0},
+    {"join": ["chamber.heat", "film.a"]},
+    {"join": ["barrel.heat", "film.b", "seal.heat"]}
+  ]
+}

@@ -22,6 +22,7 @@ is the kernel's state and its energy and entropy ledger.
 | `nonlinear_rlc.json` | the same topology with voltage-dependent capacitance and flux-dependent inductance, crossing both curves' knees | independent charge/flux differential equations, original constitutive energies and Joule heat |
 | `geared_oscillator.json` | an ideal 2.5:1 transformer couples a mass to an anchored spring | reflected stiffness `ratio² × stiffness`, the midpoint oscillation phase and conserved energy |
 | `rack_and_pinion.json` | one pinion inertia carrying a motor torque and a bearing directly, and a rack's spring, friction and load through the pinion radius: three members of one join, each behind its own ratio | the midpoint rule for the pinion's one equation with the reflected stiffness and friction; motor work, the load's received work and the heat |
+| `pneumatic_cylinder.json` | a 2 l tank of air at 6 bar feeds a cylinder through a valve; the piston pushes a spring and the outside pressure out by 104 mm; the tank cools to 281 K as it empties, the chamber warms to 325 K as it fills and gives heat to the barrel, which also takes the seal's friction | an independent RK4 integration of the cylinder's seven equations (4.9e-9 at 3 s, second order in mid-stroke), conservation of the gas, and the force balance at rest |
 | `damped_pair.json` | two rigid bodies in three dimensions closing at 2 m/s on a viscous connector, stepped by the fs-mbd network owner (`rigid_network`); a quarter of the connector's heat warms a shell, half an oil bath, the rest goes to the air | the closed form: each momentum decays as `exp(-0.7 t)`, the heat is `2 (1 - exp(-1.4 t))` J, split 25 / 50 / 25 |
 | `viscoelastic_mount.json` | two rigid bodies at rest on a mount with viscous damping and one Maxwell branch stretched by 0.5 m (`viscoelastic_network`, the fs-mbd relaxation owner): the stored 0.21 J sets the bodies moving and heats the casing | the pair's own two equations integrated independently: relative speed, branch energy and heat |
 | `self_heating_damper.json` | the damped pair with all of its heat in 1 J/K of damper fluid, whose temperature thins the damper by an Arrhenius shift: the damping falls to 0.81 of its value as the fluid warms by 0.93 K | the exact recursion of the scheme (damping held over each step at the temperature the step began with) to 1e-11, and first-order convergence to the coupled differential equations |
@@ -176,6 +177,48 @@ Their reported `voltage_v` and `current_a` are endpoint constitutive values.
 The kernel uses integral mean efforts for work during a finite step, retaining
 energy when a step crosses knots. The original constant `capacitor`,
 `node_capacitor` and `inductor` scene forms keep their existing conventions.
+
+## Gas in volumes
+
+`pneumatic_cylinder.json` has two `gas_volume` elements and a `restriction`
+between them. A volume holds a perfect gas (a gas constant and a heat
+capacity ratio, here air) and is the node its streams meet at:
+
+```json
+{"join": ["tank.stream", "valve.a"]},
+{"join": ["chamber.stream", "valve.b"]}
+```
+
+The valve passes `conductance × (p_a − p_b)` kg/s. What crosses carries the
+enthalpy of the side it leaves, so the gas arriving in the chamber brings
+the tank's `c_p T` with it and the chamber warms as it fills (to 325 K in
+mid-stroke) while the tank cools as it expands (to 281 K). Nothing in the
+scene says so. Several restrictions may meet at one volume; two volumes do
+not join directly.
+
+The chamber has `"wall": true`, which gives it a port `p`: the pressure on a
+moving wall. It joins the piston as a member with the face area as its ratio,
+beside the outside pressure (a constant force), the load spring and the seal:
+
+```json
+{"join": ["piston.p", {"port": "chamber.p", "ratio": 2.0e-3},
+          "outside.p", "load.a", "seal.a"]}
+```
+
+A volume's `heat` port is a node like a heat capacity's: here a film
+conductance joins the chamber's gas to the barrel, which also takes the
+seal's friction heat. The tank is insulated (`heat_rate_w: 0`).
+
+A volume may carry other quantities with its gas (`"carried": [0.2, 0.0]`,
+mass fractions, and `"carried": 2` on each restriction): they move with the
+flow by the same rule. From outside, `{"prescribe": "vessel.stream",
+"stream": [mass rate, enthalpy rate, carried rates...]}` feeds a volume, and
+`{"prescribe": "inlet.a", "contents": [pressure, specific enthalpy,
+fractions...]}` holds a restriction's far end at a supply's state.
+
+All joined volumes must hold the same gas; this is not checked. The gas has
+constant heat capacities. A very small volume between restrictions forces
+small steps: no more than about twice its mass can pass through it in one.
 
 ## Ideal transformers
 

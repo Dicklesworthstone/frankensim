@@ -567,8 +567,20 @@ fn library_and_binary_give_the_same_bytes_and_text_mode_reports_the_ledger() {
     assert_eq!(code, 2);
 }
 
+/// A scratch file of the calling test. Tests run side by side and several
+/// use the same file names, so each test has a directory of its own, named
+/// after its thread, which the test harness names after the test.
 fn scratch(name: &str, text: &str) -> PathBuf {
-    let directory = std::env::temp_dir().join(format!("fs-cli-system-{}", std::process::id()));
+    let thread = std::thread::current();
+    let test: String = thread
+        .name()
+        .unwrap_or("unnamed")
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let directory = std::env::temp_dir()
+        .join(format!("fs-cli-system-{}", std::process::id()))
+        .join(test);
     std::fs::create_dir_all(&directory).unwrap();
     let path = directory.join(name);
     std::fs::write(&path, text).unwrap();
@@ -1398,4 +1410,236 @@ fn the_rack_and_pinion_scene_carries_a_motor_and_a_rack_at_the_pinion_radius_on_
     let (code, stderr) = refused("rack_plain.json", &plain);
     assert_eq!(code, 4, "{stderr}");
     assert!(stderr.contains("rack_spring.a"), "{stderr}");
+}
+
+/// The pneumatic cylinder as `[p_tank, T_tank, p_chamber, T_chamber, x, v,
+/// T_barrel]` at `t_end`, by classical RK4 on its own equations: two volumes
+/// of perfect gas, a valve whose flow carries the enthalpy of the side it
+/// leaves, a piston on the chamber, a spring, a seal whose friction warms the
+/// barrel, and a film between the chamber's gas and the barrel.
+fn cylinder_reference(t_end: f64, steps: u32) -> [f64; 7] {
+    let (gas_constant, ratio, start_k) = (287.0_f64, 1.4_f64, 293.15_f64);
+    let capacity = gas_constant / (ratio - 1.0);
+    let (tank_m3, area, x0) = (2.0e-3_f64, 2.0e-3_f64, 0.02_f64);
+    let (conductance, mass, outside) = (1.0e-8_f64, 0.5_f64, 200.0_f64);
+    let (stiffness, damping, film, barrel) = (8000.0_f64, 60.0_f64, 0.5_f64, 150.0_f64);
+    let held = |pressure: f64, volume: f64| {
+        [pressure * volume / (gas_constant * start_k), pressure * volume / (ratio - 1.0)]
+    };
+    let ([tank_kg, tank_j], [chamber_kg, chamber_j]) = (held(6.0e5, tank_m3), held(1.0e5, area * x0));
+    // m and U of the tank, m and U of the chamber, x, v, barrel temperature.
+    let mut y = [tank_kg, tank_j, chamber_kg, chamber_j, x0, 0.0, start_k];
+    let pressures = |y: &[f64; 7]| {
+        [(ratio - 1.0) * y[1] / tank_m3, (ratio - 1.0) * y[3] / (area * y[4])]
+    };
+    let rhs = |y: &[f64; 7]| {
+        let [p_tank, p_chamber] = pressures(y);
+        let rate = conductance * (p_tank - p_chamber);
+        let enthalpy = if rate >= 0.0 { ratio * y[1] / y[0] } else { ratio * y[3] / y[2] };
+        let heat = film * (y[6] - y[3] / (y[2] * capacity));
+        [
+            -rate,
+            -rate * enthalpy,
+            rate,
+            rate * enthalpy - p_chamber * area * y[5] + heat,
+            y[5],
+            (p_chamber * area - outside - stiffness * (y[4] - x0) - damping * y[5]) / mass,
+            (damping * y[5] * y[5] - heat) / barrel,
+        ]
+    };
+    let h = t_end / f64::from(steps);
+    let moved = |y: &[f64; 7], d: &[f64; 7], by: f64| -> [f64; 7] {
+        core::array::from_fn(|index| y[index] + by * d[index])
+    };
+    for _ in 0..steps {
+        let k1 = rhs(&y);
+        let k2 = rhs(&moved(&y, &k1, 0.5 * h));
+        let k3 = rhs(&moved(&y, &k2, 0.5 * h));
+        let k4 = rhs(&moved(&y, &k3, h));
+        for index in 0..7 {
+            y[index] += h * (k1[index] + 2.0 * k2[index] + 2.0 * k3[index] + k4[index]) / 6.0;
+        }
+    }
+    let [p_tank, p_chamber] = pressures(&y);
+    [
+        p_tank,
+        y[1] / (y[0] * capacity),
+        p_chamber,
+        y[3] / (y[2] * capacity),
+        y[4],
+        y[5],
+        y[6],
+    ]
+}
+
+/// The same seven numbers from a scene report.
+fn cylinder_report(json: &str) -> [f64; 7] {
+    [
+        value(json, &element("tank"), "pressure_pa"),
+        value(json, &element("tank"), "temperature_k"),
+        value(json, &element("chamber"), "pressure_pa"),
+        value(json, &element("chamber"), "temperature_k"),
+        value(json, &element("piston"), "position_m"),
+        value(json, &element("piston"), "velocity_m_s"),
+        value(json, &element("barrel"), "temperature_k"),
+    ]
+}
+
+/// Largest difference, each relative to the reference's value except the
+/// velocity, which is taken against 1 m/s.
+fn cylinder_error(got: &[f64; 7], want: &[f64; 7]) -> f64 {
+    (0..7).fold(0.0_f64, |worst, index| {
+        let scale = if index == 5 { 1.0 } else { want[index].abs() };
+        worst.max((got[index] - want[index]).abs() / scale)
+    })
+}
+
+#[test]
+fn the_pneumatic_cylinder_scene_fills_from_its_tank_and_matches_its_own_equations() {
+    let scene = std::fs::read_to_string(example("pneumatic_cylinder.json")).unwrap();
+    // In mid-stroke, at 0.3 s, at two steps: second order against the
+    // independent integration.
+    let reference = cylinder_reference(0.3, 30_000);
+    let mut errors = Vec::new();
+    for step in ["2.0e-4", "1.0e-4"] {
+        let changed = scene
+            .replace("\"duration_s\": 3.0", "\"duration_s\": 0.3")
+            .replace("\"step_s\": 2.0e-4", &format!("\"step_s\": {step}"));
+        let path = scratch(&format!("cylinder_{step}.json"), &changed);
+        let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+        assert_eq!(code, 0, "{stderr}");
+        errors.push(cylinder_error(&cylinder_report(&json), &reference));
+    }
+    // There the piston is 75 mm out and moving at 89 mm/s, and the chamber
+    // is at 4.0 bar and 325 K against the tank's 5.5 bar. Measured errors:
+    // 3.3e-8 and 8.1e-9.
+    assert!(reference[5] > 0.05 && reference[3] > 320.0, "{reference:?}");
+    let ratio = errors[0] / errors[1];
+    assert!(errors[1] < 2.0e-8 && (3.8..4.2).contains(&ratio), "{errors:?}");
+
+    // The scene as written, to 3 s.
+    let (code, json, stderr) = run_binary(&["--json", "system", &example("pneumatic_cylinder.json")]);
+    assert_eq!(code, 0, "{stderr}");
+    let now = cylinder_report(&json);
+    let reference = cylinder_reference(3.0, 300_000);
+    // Measured 4.9e-9.
+    let error = cylinder_error(&now, &reference);
+    assert!(error < 2.0e-8, "{error}");
+    // The piston has gone out more than 100 mm, the tank has cooled as it
+    // emptied and the chamber warmed as it filled.
+    assert!(now[4] > 0.12 && now[1] < 285.0 && now[3] > 300.0, "{now:?}");
+    // No step was shortened, and the gas the tank lost is in the chamber.
+    assert!(value(&json, "\"scene\"", "shortenings").abs() <= 0.0);
+    let total = value(&json, &element("tank"), "mass_kg") + value(&json, &element("chamber"), "mass_kg");
+    let initial = (6.0e5 * 2.0e-3 + 1.0e5 * 4.0e-5) / (287.0 * 293.15);
+    assert!((total - initial).abs() <= 1.0e-12 * initial, "{total} vs {initial}");
+    // The chamber's volume is the piston's face times its position, the
+    // spring is compressed by the travel, and the outside has received the
+    // work of 1 bar on the volume swept.
+    let travel = now[4] - 0.02;
+    let volume = value(&json, &element("chamber"), "volume_m3");
+    assert!((volume - 2.0e-3 * now[4]).abs() <= 1.0e-12 * volume, "{volume}");
+    assert!((value(&json, &element("load"), "extension_m") + travel).abs() <= 1.0e-13);
+    let pushed = value(&json, &element("outside"), "energy_in_j");
+    assert!((pushed - 200.0 * travel).abs() <= 1.0e-10 * pushed, "{pushed}");
+    // Nearly at rest, the gas holds the spring and the outside pressure.
+    let force = (now[2] - 1.0e5) * 2.0e-3;
+    assert!((force - 8000.0 * travel).abs() <= 1.0e-3 * force, "{force}");
+    assert!(value(&json, "\"totals\"", "energy_residual_j").abs() <= 1.0e-9);
+}
+
+/// A 20 l vessel of air at 1 bar and 300 K carrying one quantity, filled at
+/// 5 g/s for 4 s from a line at 300 K that is all of that quantity. The
+/// enthalpy rate is the mass rate times c_p T = 1004.5 J/(kg K) * 300 K.
+const FILLED_VESSEL: &str = r#"{
+  "schema": "frankensim.system.v0", "duration_s": 4.0, "step_s": 0.01,
+  "elements": {
+    "vessel": {"kind": "gas_volume", "gas_constant_j_kg_k": 287.0, "heat_capacity_ratio": 1.4,
+               "volume_m3": 0.02, "pressure_pa": 1.0e5, "temperature_k": 300.0, "carried": [0.0]}
+  },
+  "connections": [
+    {"prescribe": "vessel.stream", "stream": [5.0e-3, 1506.75, 5.0e-3]},
+    {"prescribe": "vessel.heat", "heat_rate_w": 0}
+  ]
+}"#;
+
+#[test]
+fn gas_held_from_outside_fills_a_vessel_and_a_supply_sets_its_pressure() {
+    // Filled by a prescribed stream: the gas pushed in does flow work, so
+    // the vessel ends at 300 K * (m0 + ratio m_in) / (m0 + m_in), hotter
+    // than the line, and the carried fraction is m_in / (m0 + m_in).
+    let path = scratch("vessel_filled.json", FILLED_VESSEL);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    let (held, added) = (1.0e5 * 0.02 / (287.0 * 300.0), 0.02_f64);
+    let kelvin = 300.0 * (held + 1.4 * added) / (held + added);
+    let reached = value(&json, &element("vessel"), "temperature_k");
+    assert!(kelvin > 350.0 && (reached - kelvin).abs() <= 1.0e-10 * kelvin, "{reached} vs {kelvin}");
+    let fraction = value(&json, &element("vessel"), "carried0");
+    assert!((fraction - added / (held + added)).abs() <= 1.0e-12, "{fraction}");
+    let mass = value(&json, &element("vessel"), "mass_kg");
+    assert!((mass - held - added).abs() <= 1.0e-12 * mass, "{mass}");
+    // The boundary delivered m_in c_p T.
+    let delivered = value(&json, "\"boundaries\"", "energy_in_j");
+    assert!((delivered - added * 1004.5 * 300.0).abs() <= 1.0e-10 * delivered, "{delivered}");
+
+    // Fed through a restriction from a supply held at 2 bar and 300 K: the
+    // pressure ends at the supply's, and the energy that came in fixes the
+    // temperature: U = p V / (ratio - 1) rose by m_in c_p T, which gives
+    // 350 K here.
+    let supplied = FILLED_VESSEL
+        .replace(", \"carried\": [0.0]}", "},\n    \"inlet\": {\"kind\": \"restriction\", \"conductance_kg_s_pa\": 2.0e-7}")
+        .replace(
+            "{\"prescribe\": \"vessel.stream\", \"stream\": [5.0e-3, 1506.75, 5.0e-3]}",
+            "{\"join\": [\"vessel.stream\", \"inlet.b\"]},\n    {\"prescribe\": \"inlet.a\", \"contents\": [2.0e5, 301350.0]}",
+        )
+        .replace("\"duration_s\": 4.0", "\"duration_s\": 40.0");
+    let path = scratch("vessel_supplied.json", &supplied);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    let pressure = value(&json, &element("vessel"), "pressure_pa");
+    assert!((pressure - 2.0e5).abs() <= 1.0e-9 * 2.0e5, "{pressure}");
+    let entered = 1.0e5 * 0.02 / (0.4 * 301_350.0);
+    let kelvin = (2.0e5 * 0.02 / 0.4) / ((held + entered) * 717.5);
+    let reached = value(&json, &element("vessel"), "temperature_k");
+    assert!((reached - kelvin).abs() <= 1.0e-8 * kelvin, "{reached} vs {kelvin}");
+    assert!((kelvin - 350.0).abs() < 0.01, "{kelvin}");
+
+    // Refusals. A stream port takes its own quantity, with one waveform for
+    // each thing it carries.
+    let check = |name: &str, scene: &str, from: &str, to: &str, code: i32, needle: &str| {
+        let changed = scene.replace(from, to);
+        assert_ne!(changed, scene, "{name}");
+        let (got, stderr) = refused(name, &changed);
+        assert_eq!(got, code, "{name}: {stderr}");
+        assert!(stderr.contains(needle), "{name}: {stderr}");
+    };
+    check("vessel_short.json", FILLED_VESSEL, "[5.0e-3, 1506.75, 5.0e-3]", "[5.0e-3, 1506.75]", 3, "stream for this port is an array of 3 waveforms");
+    check("vessel_quantity.json", FILLED_VESSEL, "\"stream\": [5.0e-3, 1506.75, 5.0e-3]", "\"heat_rate_w\": 0", 3, "exactly one quantity, stream");
+    check("vessel_contents.json", &supplied, "\"contents\": [2.0e5, 301350.0]", "\"stream\": [0, 0]", 3, "exactly one quantity, contents");
+    check("vessel_ratio.json", FILLED_VESSEL, "\"heat_capacity_ratio\": 1.4", "\"heat_capacity_ratio\": 1.0", 3, "heat_capacity_ratio");
+    check("vessel_fraction.json", FILLED_VESSEL, "\"carried\": [0.0]", "\"carried\": [1.5]", 3, "carried fraction");
+    check("vessel_list.json", FILLED_VESSEL, "\"carried\": [0.0]", "\"carried\": 1", 3, "carried is an array");
+    check("vessel_field.json", FILLED_VESSEL, "\"carried\": [0.0]", "\"carried\": [0.0], \"lid\": 1", 3, "unsupported field \"lid\"");
+    check("vessel_wall.json", FILLED_VESSEL, "\"carried\": [0.0]", "\"carried\": [0.0], \"wall\": 1", 3, "wall is true or false");
+    // A wall left unconnected is refused by the kernel, by name.
+    check("vessel_loose.json", FILLED_VESSEL, "\"carried\": [0.0]", "\"carried\": [0.0], \"wall\": true", 4, "vessel.p");
+    check("inlet_carried.json", &supplied, "2.0e-7}", "2.0e-7, \"carried\": 1.5}", 3, "carried is the number of carried quantities");
+    // A restriction that carries something the vessel does not is refused
+    // by the kernel's port match.
+    check("inlet_mismatch.json", &supplied, "2.0e-7}", "2.0e-7, \"carried\": 1}", 4, "vessel.stream");
+    // Two volumes have nothing between them, and one flow is not handed to
+    // two of them.
+    let cylinder = std::fs::read_to_string(example("pneumatic_cylinder.json")).unwrap();
+    check("cylinder_direct.json", &cylinder, "[\"tank.stream\", \"valve.a\"]", "[\"tank.stream\", \"chamber.stream\"]", 3, "this one has 2");
+    check("cylinder_open.json", &cylinder, "    {\"join\": [\"chamber.stream\", \"valve.b\"]},\n", "", 4, "valve.b");
+    // A gas volume has no error account for adaptive stepping.
+    check(
+        "vessel_adaptive.json",
+        FILLED_VESSEL,
+        "\"step_s\": 0.01,",
+        "\"step_s\": 0.01, \"adaptive\": {\"order\": 2, \"min_step_s\": 1e-9, \"max_attempts\": 8, \"tolerances\": {}},",
+        3,
+        "whose state has no error account here",
+    );
 }
