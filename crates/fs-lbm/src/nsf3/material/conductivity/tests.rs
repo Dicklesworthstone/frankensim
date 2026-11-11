@@ -206,10 +206,15 @@ fn g1_characteristic_inflow_carries_upstream_enthalpy_once_with_source_integrate
         .unwrap()
         .with_characteristic_thermal_policy([NsfCharacteristicThermalPolicy::EnthalpyFlux; 2])
         .unwrap();
+    // The inflow temperature is admitted only within the characteristic bound of its 300 K reference: |T / 300 - 1| <= 0.1
+    // (the inflow check of open_boundary.rs, 2a01cd338d, 2026-10-30, against the bound of c2d1f74449). The fixture's 340 K is
+    // 13.3 % off. 330 K is not admissible either: 330 / 300 - 1 is 0.10000000000000009 in floating point, over 0.1. 325 K is
+    // 8.3 %.
+    let inflow_temperature_k = 325.0;
     grid.set_boundary_drives([
         NsfBoundaryDrive::PressureTemperature {
             pressure_offset_pa: 0.0,
-            inflow_temperature_k: 340.0,
+            inflow_temperature_k,
         },
         NsfBoundaryDrive::PressureOffset(0.0),
     ])
@@ -222,7 +227,7 @@ fn g1_characteristic_inflow_carries_upstream_enthalpy_once_with_source_integrate
             .characteristic_face(grid.open_faces.as_ref(), i, 0, -1)
             .unwrap();
         assert!(face.u[0] > 0.0);
-        assert!(trace.temperature_k > 300.0 && trace.temperature_k < 340.0);
+        assert!(trace.temperature_k > 300.0 && trace.temperature_k < inflow_temperature_k);
         let (total, _, advected) = grid
             .open_energy_flux(face, i, 0, -1, &rho, &grid.theta, &stress, &[])
             .unwrap();
@@ -233,13 +238,13 @@ fn g1_characteristic_inflow_carries_upstream_enthalpy_once_with_source_integrate
         let point = source
             .context()
             .clone()
-            .with("temperature", 340.0)
+            .with("temperature", inflow_temperature_k)
             .unwrap()
             .with("pressure", trace.pressure_pa)
             .unwrap();
         let upstream = source.model().evaluate(&point).unwrap();
         let h = (upstream.specific_internal_energy_j_kg() - source.energy_reference_j_kg()
-            + upstream.state().specific_gas_constant * 340.0)
+            + upstream.state().specific_gas_constant * inflow_temperature_k)
             / grid.law.specific_energy_unit_j_kg();
         let kinetic = 0.5 * face.u.iter().map(|u| u * u).sum::<f64>();
         close(total, face.rho * face.u[0] * (h + kinetic), 2e-10);
