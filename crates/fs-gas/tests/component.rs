@@ -19,7 +19,7 @@ use fs_ports::component::{Class, Component, PortTangent, Proposal};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{DynViscosity, MolarMass, Pressure, QuantitySpec};
 use fs_system::elements::{Force, Mass, Motion, Restriction, SourceAccount, Waveform};
-use fs_system::{SolveConfig, SystemBuilder};
+use fs_system::{NodeId, SolveConfig, System, SystemBuilder};
 use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
 use fs_thermochem::{
     Composition, CompositionBasis, ElementalReferenceIdV1, NASA9_LAW_ID_V1, NASA9_LAW_VERSION_V1,
@@ -354,22 +354,28 @@ const PISTON_KG: f64 = 1.0;
 const PISTON_M2: f64 = 0.01;
 
 /// A single-acting piston about its rest volume, from a graph: the gas on
-/// one face of a mass, a constant force `P0 * area` on the other, an
-/// insulated wall. It starts at rest volume moving outward at `rate_m_s`.
-/// Returns the angular frequency [rad/s] over `periods` periods, from the
-/// times at which the mass's velocity passes through zero going down, each
-/// found by a straight line between the two steps around it.
-fn piston_frequency(dt: f64, rate_m_s: f64, periods: usize) -> f64 {
+/// one face of a mass, a constant force `P0 * area` on the other, no heat.
+/// It starts at rest volume moving outward at `rate_m_s`. With `insulated`
+/// the gas is the one-port cavity, a scalar monotone relation; without, it
+/// is the two-port cavity with its heat port held at zero. Returns the
+/// system, the mass and the gas.
+fn spring_piston(insulated: bool, rate_m_s: f64) -> (System, NodeId, NodeId) {
     let gas = parcel(0.0, 0.0);
-    let gas_kg = gas.mass_kg();
     let mut builder = SystemBuilder::new();
     let body = builder.add_with_tangent(
         "piston", Mass::new(PISTON_KG).unwrap(),
         Motion { position_m: V0 / PISTON_M2, velocity_m_s: rate_m_s },
     ).unwrap();
-    let cavity = builder.add_with_tangent(
-        "gas", GasCavity::new(gas.clone(), controls()).unwrap(), gas,
-    ).unwrap();
+    let closed = GasCavity::new(gas.clone(), controls()).unwrap();
+    let cavity = if insulated {
+        builder.add_with_tangent("gas", closed.insulated().unwrap(), gas).unwrap()
+    } else {
+        let cavity = builder.add_with_tangent("gas", closed, gas).unwrap();
+        builder.boundary(
+            builder.port(cavity, "heat").unwrap(), Box::new(|_, _, values| values[0] = 0.0),
+        ).unwrap();
+        cavity
+    };
     let outside = builder.add_with_tangent(
         "outside", Force::new(Waveform::constant(-P0 * PISTON_M2).unwrap()), SourceAccount::default(),
     ).unwrap();
@@ -379,11 +385,18 @@ fn piston_frequency(dt: f64, rate_m_s: f64, periods: usize) -> f64 {
         builder.port(body, "p").unwrap(),
         &[(builder.port(cavity, "p").unwrap(), PISTON_M2), (builder.port(outside, "p").unwrap(), 1.0)],
     ).unwrap();
-    builder.boundary(
-        builder.port(cavity, "heat").unwrap(), Box::new(|_, _, values| values[0] = 0.0),
-    ).unwrap();
     let mut system = builder.seal().unwrap();
     system.set_config(SolveConfig { relative_tolerance: 1.0e-11, ..SolveConfig::default() });
+    (system, body, cavity)
+}
+
+/// The angular frequency [rad/s] of [`spring_piston`] on the insulated
+/// cavity over `periods` periods, from the times at which the mass's
+/// velocity passes through zero going down, each found by a straight line
+/// between the two steps around it.
+fn piston_frequency(dt: f64, rate_m_s: f64, periods: usize) -> f64 {
+    let gas_kg = parcel(0.0, 0.0).mass_kg();
+    let (mut system, body, _) = spring_piston(true, rate_m_s);
     let mut crossings = Vec::new();
     let mut before = rate_m_s;
     let mut steps = 0_u32;
@@ -411,6 +424,120 @@ fn piston_frequency(dt: f64, rate_m_s: f64, periods: usize) -> f64 {
     );
     close(ledger_j, 0.0, budget_j);
     omega
+}
+
+#[test]
+fn an_insulated_cavity_is_the_closed_cavity_without_heat_and_its_pressure_rises_with_the_flow() {
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        for slope in [0.0, 0.002] {
+            let old = parcel(slope, 0.0);
+            let stale = parcel(0.0, 12.0);
+            let closed = GasCavity::new(old.clone(), controls()).unwrap();
+            let cavity = closed.clone().insulated().unwrap();
+            let ports: Vec<&str> = cavity.ports().iter().map(|port| port.id().as_str()).collect();
+            assert_eq!(ports, ["p"]);
+            // One input and one output, so a scalar class can be true of
+            // it; the two-port cavity keeps the class of a two-input map.
+            assert_eq!((cavity.class(), closed.class()), (Class::Monotone1d, Class::Smooth));
+            assert_eq!(cavity.stored_energy_j(&old).unwrap().to_bits(), 0.0_f64.to_bits());
+            let dt = 0.001;
+            let mut below: Option<f64> = None;
+            // Flows that take up to a twentieth of the litre in the step,
+            // either way, in rising order.
+            for flow in [-0.05, -0.02, -1.0e-6, 0.0, 1.0e-6, 0.02, 0.05] {
+                let case = Case { state: &old, stale: &stale, dt_s: dt, inputs: &[flow] };
+                check_component(&cavity, &case, cx).unwrap();
+                check_port_tangent(&cavity, &case, 2.0e-5, 1.0e-5, cx).unwrap();
+                // The step is the closed cavity's with no heat, to the bit.
+                let (expected, outputs) = step(&closed, &old, dt, [flow, 0.0], cx);
+                let mut next = stale.clone();
+                let mut pressure = [f64::NAN];
+                let proposal = cavity.propose(&old, dt, &[flow], &mut next, &mut pressure, cx).unwrap();
+                assert!(matches!(proposal, Proposal::Step(_)));
+                assert_eq!(next, expected);
+                assert_eq!(pressure[0].to_bits(), outputs[0].to_bits());
+                // Its slope, in either direction, is the closed cavity's
+                // entry for pressure against flow, and it is positive.
+                let (mut forward, mut back, mut pair) = ([0.0], [0.0], [0.0; 2]);
+                cavity.jvp(&old, dt, &[flow], &[1.0], &mut forward, cx).unwrap();
+                cavity.vjp(&old, dt, &[flow], &[1.0], &mut back, cx).unwrap();
+                closed.jvp(&old, dt, &[flow, 0.0], &[1.0, 0.0], &mut pair, cx).unwrap();
+                assert_eq!(forward[0].to_bits(), pair[0].to_bits());
+                assert_eq!(back[0].to_bits(), pair[0].to_bits());
+                assert!(pair[0] > 0.0, "{flow}: {}", pair[0]);
+                // And the pressure itself rises from each flow to the next.
+                assert!(below.is_none_or(|lower| pressure[0] > lower), "{flow}: {}", pressure[0]);
+                below = Some(pressure[0]);
+            }
+        }
+
+        // What it refuses, leaving the candidate and the outputs alone.
+        let old = parcel(0.0, 0.0);
+        let cavity = GasCavity::new(old.clone(), controls()).unwrap().insulated().unwrap();
+        let stale = parcel(0.002, 7.0);
+        let mut next = stale.clone();
+        let (mut one, mut two) = ([7.0], [7.0, 8.0]);
+        for inputs in [vec![], vec![0.0, 0.0], vec![f64::NAN]] {
+            assert!(cavity.propose(&old, 0.1, &inputs, &mut next, &mut one, cx).is_err());
+            assert!(cavity.jvp(&old, 0.1, &inputs, &[1.0], &mut one, cx).is_err());
+        }
+        // Two outputs, two seeds, two slots.
+        assert!(cavity.propose(&old, 0.1, &[0.0], &mut next, &mut two, cx).is_err());
+        assert!(cavity.jvp(&old, 0.1, &[0.0], &[1.0, 0.0], &mut one, cx).is_err());
+        assert!(cavity.vjp(&old, 0.1, &[0.0], &[1.0], &mut two, cx).is_err());
+        assert_eq!(next, stale);
+        assert_eq!(one[0].to_bits(), 7.0_f64.to_bits());
+        assert_eq!(two.map(f64::to_bits), [7.0_f64.to_bits(), 8.0_f64.to_bits()]);
+        // A cavity has an insulating wall or a stream port, not both.
+        assert!(cavity.clone().streaming(1.0e-15).is_err());
+        let streaming = GasCavity::new(old.clone(), controls()).unwrap().streaming(1.0e-15).unwrap();
+        assert!(streaming.insulated().is_err());
+    });
+}
+
+#[test]
+fn a_piston_on_the_insulated_cavity_is_the_one_on_the_closed_cavity_without_heat_to_the_bit() {
+    // The same graph twice: the gas as the one-port cavity, and as the
+    // two-port cavity with its heat port held at zero. The kernel sees the
+    // same unknowns, the same slopes and the same proposals, so every state
+    // is equal to the bit, step for step; nothing is allowed for.
+    let (dt, rate) = (2.5e-4, 0.01);
+    let (mut one, body_one, gas_one) = spring_piston(true, rate);
+    let (mut two, body_two, gas_two) = spring_piston(false, rate);
+    assert_eq!(one.plan_loops(), two.plan_loops());
+    let mut iterations = 0_u32;
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        for step in 0..400 {
+            let a = one.step(dt, cx).unwrap();
+            let b = two.step(dt, cx).unwrap();
+            assert_eq!(a.iterations, b.iterations, "step {step}");
+            iterations += a.iterations;
+            let wall_one = one.state::<Motion>(body_one).unwrap();
+            let wall_two = two.state::<Motion>(body_two).unwrap();
+            assert_eq!(wall_one.position_m.to_bits(), wall_two.position_m.to_bits(), "step {step}");
+            assert_eq!(wall_one.velocity_m_s.to_bits(), wall_two.velocity_m_s.to_bits(), "step {step}");
+            assert_eq!(
+                one.state::<ClosedGasParcel>(gas_one).unwrap(),
+                two.state::<ClosedGasParcel>(gas_two).unwrap(),
+                "step {step}"
+            );
+        }
+    });
+    // Nearly two periods (1.88): the wall is inside its rest position and
+    // slower than it began, and the solve iterated.
+    let wall = one.state::<Motion>(body_one).unwrap();
+    assert!(wall.position_m < V0 / PISTON_M2 - 1.0e-5, "{}", wall.position_m);
+    assert!((wall.velocity_m_s - rate).abs() > 1.0e-3 && iterations >= 400, "{} {iterations}", wall.velocity_m_s);
+    assert_eq!(
+        one.ledger().energy_residual_j().to_bits(),
+        two.ledger().energy_residual_j().to_bits()
+    );
+    eprintln!(
+        "insulated against closed with no heat: 400 steps equal to the bit, {iterations} iterations, \
+         wall at {:.9e} m/s, ledger residual {:.3e} J",
+        wall.velocity_m_s,
+        one.ledger().energy_residual_j()
+    );
 }
 
 #[test]

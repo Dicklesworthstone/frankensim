@@ -37,6 +37,7 @@ use fs_mbd::{
 };
 use fs_mbd_material::{RegionBinding, ResolvedBody, VolumeMoments, resolve_body};
 use fs_ports::PortKind;
+use fs_ports::component::{Class, Component};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Density, DynViscosity, MolarMass, Pressure, QuantitySpec, Temperature};
 use fs_system::elements::{Force, Mass, Motion, SourceAccount, Waveform};
@@ -223,10 +224,12 @@ fn with_cx<T>(f: impl FnOnce(&Cx<'_>) -> T) -> T {
 
 /// One face of the wall: its gas, its area with the sign of the side it is
 /// on, and the heat rate [W] it receives as a function of the step's start.
+/// A face that nothing heats is the cavity behind an insulating wall, the
+/// one-port cavity whose class is a scalar monotone relation.
 struct Face {
     gas: ClosedGasParcel,
     signed_area_m2: f64,
-    heat_w: fn(f64) -> f64,
+    heat_w: Option<fn(f64) -> f64>,
 }
 
 struct Wall {
@@ -262,19 +265,20 @@ fn wall(
     let mut members = Vec::new();
     let mut gases = Vec::new();
     for (name, face) in ["primary", "opposing"].into_iter().zip(faces) {
-        let cavity = builder
-            .add_with_tangent(
-                name,
-                GasCavity::new(face.gas.clone(), controls().gas).unwrap(),
-                face.gas,
-            )
-            .unwrap();
+        let closed = GasCavity::new(face.gas.clone(), controls().gas).unwrap();
+        let cavity = if let Some(rate) = face.heat_w {
+            let cavity = builder.add_with_tangent(name, closed, face.gas).unwrap();
+            let heat = builder.port(cavity, "heat").unwrap();
+            builder
+                .boundary(heat, Box::new(move |t0, _, values| values[0] = rate(t0)))
+                .unwrap();
+            cavity
+        } else {
+            let insulated = closed.insulated().unwrap();
+            assert_eq!(insulated.class(), Class::Monotone1d);
+            builder.add_with_tangent(name, insulated, face.gas).unwrap()
+        };
         members.push((builder.port(cavity, "p").unwrap(), face.signed_area_m2));
-        let heat = builder.port(cavity, "heat").unwrap();
-        let rate = face.heat_w;
-        builder
-            .boundary(heat, Box::new(move |t0, _, values| values[0] = rate(t0)))
-            .unwrap();
         gases.push(cavity);
     }
     let exterior = (exterior_pressure_pa != 0.0).then(|| {
@@ -382,20 +386,18 @@ impl Worst {
 fn early_heat_w(t0_s: f64) -> f64 {
     if t0_s < 7.5 * DT_S { 400_000.0 } else { 0.0 }
 }
-fn no_heat_w(_: f64) -> f64 {
-    0.0
-}
 
 #[test]
 fn a_wall_on_one_gas_with_exterior_pressure_force_and_heat_matches_the_module() {
     let dt = DT_S;
+    let heated: Option<fn(f64) -> f64> = Some(early_heat_w);
     for (velocity, exterior_pa, force_n, heat_w) in [
-        // Released into vacuum from rest.
-        (0.0, 0.0, 0.0, no_heat_w as fn(f64) -> f64),
+        // Released into vacuum from rest, behind an insulating wall.
+        (0.0, 0.0, 0.0, None),
         // Pushed inwards against the atmosphere while the gas is heated.
-        (-0.2, 100_000.0, -0.5, early_heat_w),
-        // Thrown outwards with nothing but the atmosphere on it.
-        (0.2, 100_000.0, 0.0, no_heat_w),
+        (-0.2, 100_000.0, -0.5, heated),
+        // Thrown outwards with nothing but the atmosphere on it, insulated.
+        (0.2, 100_000.0, 0.0, None),
     ] {
         let mut module = GasPiston::new(gas(0.75, 0.001), 1.0, 0.01, velocity).unwrap();
         let initial = module.gas().clone();
@@ -416,7 +418,7 @@ fn a_wall_on_one_gas_with_exterior_pressure_force_and_heat_matches_the_module() 
             for step in 0..48 {
                 let input = PistonInput {
                     duration_s: dt,
-                    heat_j: dt * heat_w(f64::from(step) * dt),
+                    heat_j: heat_w.map_or(0.0, |rate| dt * rate(f64::from(step) * dt)),
                     exterior_pressure_pa: exterior_pa,
                     external_force_n: force_n,
                 };
@@ -469,12 +471,13 @@ fn a_wall_between_two_gases_matches_the_double_acting_module() {
                 Face {
                     gas: gas(0.75, 0.001),
                     signed_area_m2: 0.01,
-                    heat_w: early_heat_w,
+                    heat_w: Some(early_heat_w),
                 },
+                // Nothing heats the opposing gas: the insulated cavity.
                 Face {
                     gas: gas(0.25, 0.001),
                     signed_area_m2: -opposing_area,
-                    heat_w: no_heat_w,
+                    heat_w: None,
                 },
             ],
             0.0,

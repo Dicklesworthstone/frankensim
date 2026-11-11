@@ -10138,8 +10138,36 @@ Its trajectory is compared with an independent adiabatic ODE and checked for
 time refinement and combined energy closure. They were written without being
 compiled; they first compiled and ran on 2026-11-11 (233aa70285) and pass.
 
-A single-acting piston about its rest volume (the cavity on one face of a
-1 kg mass of 0.01 m2, a constant force `p0 A` on the other, no heat) is
+`GasCavity::insulated()` is the same cavity behind an insulating wall: its
+one port is `p`, and a step is the two-port cavity's with a heat rate of
+exactly zero. Its one relation, work pressure against compression flow, is
+scalar and rising, so its class is `Monotone1d`, with the 1 by 1 tangent
+taken from the two-port cavity's analytic one. The two-port cavity stays
+`Smooth`: with a heat partner in a loop its map has two inputs, and a scalar
+class would be a false claim there. An insulated cavity takes no stream
+port, and a streaming cavity cannot be insulated. The kernel does not yet
+solve a `Monotone1d` component differently from a smooth one with a tangent
+(bead `.5.5`), and the class carries no bracket: a driver that brackets it
+must get its admissible interval from the cavity, because the gas owner
+refuses a step that compresses beyond `R ln(V0 / V1) = cv_min T_min / T0`.
+Tests: for two mixtures and seven flows either way, the insulated cavity
+passes the conformance and tangent checks, its endpoint and pressure are the
+two-port cavity's with no heat to the bit, its slope in both directions is
+that cavity's entry for pressure against flow to the bit and positive, and
+the pressure rises from each flow to the next; wrong widths, a value that is
+not a number, a stream port and insulating a streaming cavity are refused
+with candidate and outputs untouched. A piston on the insulated cavity and
+the same piston on the two-port cavity with its heat port held at zero are
+equal to the bit in position, velocity and gas state at every one of 400
+steps (401 iterations each, the same plan, the same ledger residual to the
+bit): the kernel sees the same unknowns, slopes and proposals, so nothing is
+allowed for. In `crates/fs-couple/tests/gas_piston_graph.rs` every face that
+nothing heats is the insulated cavity (two of the three single-acting cases
+and the opposing gas of the double-acting one), against the hand-written
+piston module within the bounds those comparisons already had.
+
+A single-acting piston about its rest volume (the insulated cavity on one
+face of a 1 kg mass of 0.01 m2, a constant force `p0 A` on the other) is
 compared with the closed form of the adiabatic gas spring,
 `omega0^2 = gamma p A^2 / (m V)`, with `gamma` and `p` read from the parcel:
 118.3216 rad/s. The frequency is taken over four periods from the zeros of
