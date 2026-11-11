@@ -205,6 +205,16 @@ mod finite_pair_material {
         .unwrap()
     }
 
+    // The default 1e-8 relative tolerance, over these 0.1 s steps of a full
+    // triplet inventory, needs more midpoint substeps than the default budget
+    // of 1024 allows; the fixture states 4096 and keeps the default tolerance.
+    fn pair_limits() -> AnnihilationLimits {
+        AnnihilationLimits {
+            maximum_substeps: 4096,
+            ..AnnihilationLimits::default()
+        }
+    }
+
     fn authored(
         heating: SaturableLuminescentHeating<2>,
         temperature: f64,
@@ -216,7 +226,7 @@ mod finite_pair_material {
                     grid_cell: 0,
                     law: TripletAnnihilation::try_new(k, 1.0, probability).unwrap(),
                 }],
-                AnnihilationLimits::default(),
+                pair_limits(),
             )
             .unwrap()
     }
@@ -232,12 +242,7 @@ mod finite_pair_material {
             let binding =
                 EmitterTripletAnnihilation::from_material(0, card.clone(), source, 1.0).unwrap();
             let material = prepare(&medium, &thermal, card.clone(), initial)
-                .with_triplet_annihilation_sources(
-                    &[binding],
-                    &thermal,
-                    AnnihilationLimits::default(),
-                    || Ok(()),
-                )
+                .with_triplet_annihilation_sources(&[binding], &thermal, pair_limits(), || Ok(()))
                 .unwrap();
             let control = authored(prepare(&medium, &thermal, card.clone(), initial), 300.0);
             let (warm, accepted, _) = thermal

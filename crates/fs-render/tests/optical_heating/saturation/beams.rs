@@ -81,10 +81,15 @@ pub(super) fn ray(
     }
 }
 
+// A pumped pair history takes the smaller of the column's and the pair law's
+// substep budgets (fs-thermal CONTRACT). The pair fixtures that share these
+// limits author 4096 and 2048 pair substeps, so the column states 4096 rather
+// than its default 1024, which would silently cap both.
 pub(super) fn limits() -> PumpBeamsLimits {
     PumpBeamsLimits {
         column: PumpColumnLimits {
             relative_tolerance: 2e-5,
+            maximum_substeps: 4096,
             maximum_cell_evaluations: 2_000_000,
             ..PumpColumnLimits::default()
         },

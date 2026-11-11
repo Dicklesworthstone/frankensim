@@ -585,5 +585,5 @@ pub(super) fn preserve_checkpoint<T>(
     if let Some(error) = refused {
         return Err(error.into());
     }
-    result.map_err(|_| invalid("coupled singlet/triplet evolution refused"))
+    result.map_err(OpticalHeatingError::SingletTriplet)
 }

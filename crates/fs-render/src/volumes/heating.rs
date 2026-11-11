@@ -106,6 +106,8 @@ pub enum OpticalHeatingError {
     InactiveCell(CellId),
     /// Source-owned thermal domain, conservation, work-budget or cancellation error.
     Thermal(DepositionError),
+    /// The coupled singlet/triplet evolution owner's own refusal, unchanged.
+    SingletTriplet(fs_thermal::luminescence::transfer::SingletTripletError),
 }
 
 impl From<DepositionError> for OpticalHeatingError {
@@ -122,6 +124,7 @@ impl std::error::Error for OpticalHeatingError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Thermal(error) => Some(error),
+            Self::SingletTriplet(error) => Some(error),
             _ => None,
         }
     }
