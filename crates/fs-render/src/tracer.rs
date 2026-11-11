@@ -1382,6 +1382,7 @@ pub use crate::lighting::RectLight;
 
 /// Pinhole camera. `half_tan` is tan(fov/2) supplied directly — the
 /// library takes no trig on its API surface.
+#[derive(Clone, Copy)]
 pub struct Camera {
     /// Eye point.
     pub eye: Point3,

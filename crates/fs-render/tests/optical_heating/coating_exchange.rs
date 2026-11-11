@@ -16,11 +16,17 @@ use fs_render::thermal_surface::heating::{
 use fs_thermal::enthalpy::{Reservoir, ThermalLink};
 use std::sync::Arc;
 
+#[path = "coating_exchange/external.rs"]
 mod external;
+#[path = "coating_exchange/gap.rs"]
 mod gap;
+#[path = "coating_exchange/infrared.rs"]
 mod infrared;
+#[path = "coating_exchange/radiative_stack.rs"]
 mod radiative_stack;
+#[path = "coating_exchange/transmitting_pair.rs"]
 mod transmitting_pair;
+#[path = "coating_exchange/transmitting_pair_states.rs"]
 mod transmitting_pair_states;
 
 struct Hot;

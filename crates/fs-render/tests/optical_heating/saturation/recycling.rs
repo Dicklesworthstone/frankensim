@@ -10,6 +10,7 @@ use fs_render::volumes::heating::luminescence::saturation::recycling::{
     PhotonRecyclingGeometry, RecyclingEmitterCrossSections, SaturableRecyclingLimits,
 };
 
+#[path = "recycling/scattering.rs"]
 mod scattering;
 
 // This fixture emits at 800 nm, beyond the legacy visible constant spectrum.

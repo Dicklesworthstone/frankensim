@@ -2408,7 +2408,7 @@ fn material_lens_keeps_layered_sources_separate_during_a_focus_rack() {
     let frames = [(0.0, 0.0, 0.9), (1.0, 1.0e-4, 1.1)]
         .into_iter()
         .map(|(time, x, focus)| {
-            let mut shifted = scene.clone();
+            let mut shifted = separated_diffraction_planes();
             shifted.camera.eye.x = x;
             let physical = material_dispersion_camera(
                 &shifted,
@@ -2429,9 +2429,9 @@ fn material_lens_keeps_layered_sources_separate_during_a_focus_rack() {
     with_cx(|cx| {
         let combined =
             render_cinematic(&scene, &camera, CutSide::After, cx, &settings, shutter).unwrap();
-        let mut near = scene.clone();
+        let mut near = separated_diffraction_planes();
         near.primitives[1].emission = None;
-        let mut far = scene.clone();
+        let mut far = separated_diffraction_planes();
         far.primitives[0].emission = None;
         let near_image =
             render_cinematic(&near, &camera, CutSide::After, cx, &settings, shutter).unwrap();
@@ -2498,9 +2498,9 @@ fn layered_diffraction_adds_separated_sources_and_replays_lateral_focus_racks() 
             let camera = layered_patch_camera(&scene, aperture, 1.0e-4, 0.0);
             let combined =
                 render_cinematic(&scene, &camera, CutSide::After, cx, &settings, shutter).unwrap();
-            let mut near = scene.clone();
+            let mut near = separated_diffraction_planes();
             near.primitives[1].emission = None;
-            let mut far = scene.clone();
+            let mut far = separated_diffraction_planes();
             far.primitives[0].emission = None;
             let near_image =
                 render_cinematic(&near, &camera, CutSide::After, cx, &settings, shutter).unwrap();
@@ -2544,7 +2544,7 @@ fn layered_diffraction_adds_separated_sources_and_replays_lateral_focus_racks() 
 #[test]
 fn layered_diffraction_refuses_partial_pupil_clipping_and_invalid_motion_atomically() {
     let scene = separated_diffraction_planes();
-    let mut hidden_edge = scene.clone();
+    let mut hidden_edge = separated_diffraction_planes();
     hidden_edge.primitives[0].shape = Shape::Mesh(quad(
         [2.0e-4, -0.003, 1.0],
         [3.5e-4, -0.003, 1.0],

@@ -331,19 +331,24 @@ fn g1_oblique_submicron_refraction_matches_snell_fresnel_and_beer() {
 
 #[test]
 fn g1_rough_submicron_slab_blocks_unrefracted_thermal_connections() {
-    let glass = material(1.5, 0.0, DielectricSurface::try_rough(0.2).unwrap());
-    let mut slab = scene_with_boundaries(&[(0.0, -2.5e-7, glass, false)], -1.0, 2.0);
-    let surface = fs_render::thermal_surface::GrayDiffuseThermalSurface::try_new(
-        1800.0,
-        0.8,
-        fs_blake3::hash_domain("org.frankensim.test.thin-thermal-refraction", b"fixture"),
-    )
-    .unwrap();
-    slab.lights.clear();
-    let emitter = slab.primitives.last_mut().unwrap();
-    emitter.material = Material::GrayDiffuseThermal { surface };
-    emitter.emission = None;
-    let mut bare = slab.clone();
+    // Scene holds boxed charts and is not Clone: build the same scene twice.
+    let thermal_slab = || {
+        let glass = material(1.5, 0.0, DielectricSurface::try_rough(0.2).unwrap());
+        let mut slab = scene_with_boundaries(&[(0.0, -2.5e-7, glass, false)], -1.0, 2.0);
+        let surface = fs_render::thermal_surface::GrayDiffuseThermalSurface::try_new(
+            1800.0,
+            0.8,
+            fs_blake3::hash_domain("org.frankensim.test.thin-thermal-refraction", b"fixture"),
+        )
+        .unwrap();
+        slab.lights.clear();
+        let emitter = slab.primitives.last_mut().unwrap();
+        emitter.material = Material::GrayDiffuseThermal { surface };
+        emitter.emission = None;
+        slab
+    };
+    let slab = thermal_slab();
+    let mut bare = thermal_slab();
     bare.primitives.remove(0);
     with_cx(|cx| {
         let settings = settings(DirectStrategy::NeeOnly, 8, 1);

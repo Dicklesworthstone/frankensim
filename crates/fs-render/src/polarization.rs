@@ -108,7 +108,7 @@ impl Mueller {
     /// This is only for the native coherent interface matrices (including a
     /// scalar transport weight). Arbitrary or depolarizing Mueller matrices
     /// must use `apply`; their U/V block does not determine s/p powers.
-    pub(crate) fn apply_diagonal_jones(self, input: Stokes) -> Stokes {
+    pub fn apply_diagonal_jones(self, input: Stokes) -> Stokes {
         let mean = self.0[0][0];
         let difference = self.0[0][1];
         let large = mean + difference.abs();

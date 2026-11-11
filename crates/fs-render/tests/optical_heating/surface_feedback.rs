@@ -825,7 +825,7 @@ fn infrared_diffuse_state_retains_its_band_through_native_latent_heat_feedback()
             temperature_bounds_k: (300.0, 500.0), wavelengths_nm: wavelengths,
             optics: Arc::clone(&law),
             power: SpectralPowerSchedule::try_new(&[segment(0.0, 1.0, [10.0, 20.0], [10.0, 20.0])], 1).unwrap(),
-        }], &native, budget(), tolerance(), || Ok(()),
+        }], &native, budget(), law.row_count(), tolerance(), || Ok(()),
     ).unwrap();
     let (hot, accepted, audit) = native.advance_observed(&input, 0.5, config(0.125), || Ok(())).unwrap();
     let absorbed = accepted.energy().thermal_input_j;

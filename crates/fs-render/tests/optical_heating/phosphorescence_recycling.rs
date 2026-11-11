@@ -1,5 +1,6 @@
 //! Coupled phosphorescent photon return, receiver heat and dark persistence.
 
+#[path = "phosphorescence_recycling/annihilation.rs"]
 mod annihilation;
 
 use super::*;

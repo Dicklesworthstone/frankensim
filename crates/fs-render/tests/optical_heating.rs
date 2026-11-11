@@ -62,7 +62,9 @@ mod fluorescence;
 #[path = "optical_heating/luminescence.rs"]
 mod luminescence;
 
+#[path = "optical_heating/coating_emission.rs"]
 mod coating_emission;
+#[path = "optical_heating/coating_exchange.rs"]
 mod coating_exchange;
 #[path = "optical_heating/diffuse_exchange.rs"]
 mod diffuse_exchange;
