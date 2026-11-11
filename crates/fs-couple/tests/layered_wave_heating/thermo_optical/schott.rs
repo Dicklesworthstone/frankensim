@@ -196,6 +196,44 @@ fn phase(wavelength_m: f64, t: f64) -> f64 {
         * (1e-4 + 2e-5 / ((wavelength_m * 1e6).powi(2) - 0.1_f64.powi(2)))
 }
 
+/// Every f64 a refresh must reproduce: the actual state's coordinates, each
+/// resolved property value, and each current wavelength with its absorption.
+fn physical_bits(source: &SchottThermoOpticalSource) -> Vec<u64> {
+    let resolved = source.resolved();
+    let mut values: Vec<f64> = resolved
+        .query_point()
+        .iter()
+        .map(|(_, value)| *value)
+        .collect();
+    values.extend(resolved.properties().iter().map(|p| p.value_si()));
+    if let Some(current) = source.current_absorption() {
+        for sample in current.absorption_samples() {
+            values.extend([sample.wavelength_m, sample.absorption_per_m]);
+        }
+    }
+    values.into_iter().map(f64::to_bits).collect()
+}
+
+/// A hot source returned to 300 K. The refresh pins each selected claim;
+/// `source` was resolved with SingleClaimOnly. "A refresh records
+/// pinned-claim selection; an independent resolution records
+/// SingleClaimOnly. Their physical tuples, not policy receipts, must agree
+/// exactly" (fs-material src/liquid/density/tests.rs:298-300). So the
+/// restored source equals the original refreshed through the same path at
+/// its own point, whole, and every physical value equals the original's bit
+/// for bit.
+fn assert_restored(
+    hot: &SchottThermoOpticalSource,
+    source: &SchottThermoOpticalSource,
+    card: &MaterialCard,
+) {
+    let start = point(300.0);
+    let restored = hot.at_query_point(card, &start).unwrap();
+    assert_eq!(restored, source.at_query_point(card, &start).unwrap());
+    assert_eq!(restored.resolved().query(), source.resolved().query());
+    assert_eq!(physical_bits(&restored), physical_bits(source));
+}
+
 #[test]
 fn reference_only_optics_survive_hot_cells_without_discarding_actual_source_admission() {
     let card = reference_card(ALPHA);
@@ -229,7 +267,7 @@ fn reference_only_optics_survive_hot_cells_without_discarding_actual_source_admi
         -ALPHA * 550e-9 / (2.0 * core::f64::consts::TAU),
         2e-17,
     );
-    assert_eq!(hot.at_query_point(&card, &point(300.0)).unwrap(), source);
+    assert_restored(&hot, &source, &card);
     assert!(
         SchottThermoOpticalSource::try_lossless(
             optical(&card),
@@ -657,7 +695,7 @@ fn current_alpha_refresh_keeps_reference_phase_and_original_actual_requirements_
         -alpha_at(330.0) * 550e-9 / (4.0 * core::f64::consts::PI),
         3e-17,
     );
-    assert_eq!(hot.at_query_point(&card, &point(300.0)).unwrap(), source);
+    assert_restored(&hot, &source, &card);
     assert!(source.at_query_point(&card, &point(361.0)).is_err());
     let wrong = current_alpha_card(340.0);
     assert!(source.at_query_point(&wrong, &point(330.0)).is_err());

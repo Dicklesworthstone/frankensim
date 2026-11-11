@@ -8,11 +8,11 @@ use common::*;
 use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyError,
     magnetic::{MagneticRegion, MagneticThermalError},
-    material::MaterialNetwork,
+    material::{MaterialNetwork, MaterialNetworkError},
 };
 use fs_em::planar::eddy::hysteretic::PlanarHystereticEddy;
-use fs_matdb::{MaterialCard, MaterialStateId};
-use fs_material::conductor::ElectricalPropertyBasis;
+use fs_matdb::MaterialCard;
+use fs_material::{conductor::ElectricalPropertyBasis, thermal::source::ThermalMaterialError};
 
 struct Reference {
     t: f64,
@@ -298,29 +298,40 @@ fn unsupported_temperature_fit_card_and_late_cancellation_publish_neither_histor
                 retry.field().magnetic_state().cell_states(),
                 accepted.field().magnetic_state().cell_states()
             );
-            let wrong = MaterialCard::assemble(
-                MaterialStateId {
-                    revision: 1,
-                    ..card.id().clone()
-                },
-                card.claims().clone(),
-                vec![],
-            )
-            .unwrap();
+            // A stale card: the same claims as revision 1, built the only way a
+            // revision-1 card exists (`assemble` admits revision 0 alone, fs-matdb
+            // CONTRACT.md:286-288). The heat and the field were resolved from
+            // `card`, so the network must refuse the stale card's binding when it
+            // first evaluates the cell: the enthalpy chart and the property
+            // binding name different cards (fs-material thermal/source.rs:63-67).
+            let wrong = MaterialCard::supersede(&card, card.claims().clone(), vec![]).unwrap();
+            assert_eq!(wrong.id().revision, 1);
+            assert_eq!(wrong.supersedes(), Some(card.content_hash()));
             let wrong_cells = self::cells(&wrong, &curve, &context);
+            let refusal = network(&wrong_cells, &routes)
+                .step_hysteretic_eddy_candidate(
+                    &heat,
+                    DT,
+                    &state,
+                    &[0.0; 4],
+                    controls(),
+                    field_controls(),
+                    &[0.0],
+                    || false,
+                )
+                .err();
             assert!(
-                network(&wrong_cells, &routes)
-                    .step_hysteretic_eddy_candidate(
-                        &heat,
-                        DT,
-                        &state,
-                        &[0.0; 4],
-                        controls(),
-                        field_controls(),
-                        &[0.0],
-                        || false
-                    )
-                    .is_err()
+                matches!(
+                    refusal,
+                    Some(CircuitEnthalpyError::Source(
+                        MagneticThermalError::Material(MaterialNetworkError::Material(
+                            ThermalMaterialError::Invalid(
+                                "property and enthalpy must use the same material card"
+                            )
+                        ))
+                    ))
+                ),
+                "{refusal:?}"
             );
         }
         assert_eq!(heat.cells(), &before.0);

@@ -334,6 +334,18 @@ fn close(actual: f64, expected: f64, tolerance: f64) {
     );
 }
 
+/// Every f64 a refresh must reproduce: the held state coordinates and each
+/// resolved property value.
+fn physical_bits(state: &ResolvedMaterialStatePoint) -> Vec<u64> {
+    let mut values: Vec<f64> = state
+        .query_point()
+        .iter()
+        .map(|(_, value)| *value)
+        .collect();
+    values.extend(state.properties().iter().map(|p| p.value_si()));
+    values.into_iter().map(f64::to_bits).collect()
+}
+
 // Independent physical oracle: direct native two-port fields, no angular FFT,
 // no spectral-product contraction and no PoleTransfer helper. The original
 // Debye ODE supplies Pdot = i*omega*Delta*E/(1+i*omega*tau). Enumerating eight
@@ -647,7 +659,22 @@ fn g1_hot_lorentz_refraction_and_mixed_heat_follow_the_original_reservoir_ode() 
             .heat_load(owner.initial_state(Dd::ZERO, 20.0 * CP).unwrap(), || false)
             .unwrap();
         assert_eq!(hot.response().material(), warm.material());
-        assert_eq!(cold.response().material(), &material);
+        // A heat load refreshes the film through at_query_point, which pins
+        // each selected claim; `material` was resolved with SingleClaimOnly.
+        // "A refresh records pinned-claim selection; an independent
+        // resolution records SingleClaimOnly. Their physical tuples, not
+        // policy receipts, must agree exactly" (fs-material
+        // src/liquid/density/tests.rs:298-300). So the cold load equals the
+        // original refreshed through the same path at its own point, whole,
+        // and every physical value equals the original's bit for bit.
+        assert_eq!(
+            cold.response().material(),
+            &material.at_query_point(&card, &material.query()).unwrap()
+        );
+        assert_eq!(
+            physical_bits(cold.response().material()),
+            physical_bits(&material)
+        );
         if let DielectricResponse::LorentzWithOhmic { dielectric, conductor } = hot.response() {
             assert_eq!(dielectric.material(), conductor.material());
         }
