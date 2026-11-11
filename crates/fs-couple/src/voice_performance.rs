@@ -64,6 +64,7 @@
 //! glottal_orifice <area_m2>                               (optional; a fixed hole in place of the folds: a flow rig)
 //! subglottal_tube <area_m2> <length_m>                    (repeat, optional; a tube below the glottis, glottis end first)
 //! fricative_noise <seed> <k> <j> [stevens [<m>]]          (optional; turbulence after section k, or the obstacle m)
+//! fricative_throat <area_m2> <source without spaces>      (optional, needs fricative_noise; the constriction's measured throat)
 //! receiver free_field_monopole                            (optional; the mouth flow as a monopole in free space)
 //! rest_gap <time_s> <gap_m>                               (repeat, optional, two_mass only; the fold's rest gap over time)
 //! fold_tension <time_s> <stiffness_scale> <vibrato_scale> <flutter_scale>
@@ -132,7 +133,18 @@
 //! no correspondence built. The printed source is the source in Shadle's 5.067 cm^2 tube; the law carries Shadle's eq. 3.3
 //! duct-area factor (MB 18252; [`crate::turbulence_noise::shadle_duct_area_factor`]): at the junction after section `m`
 //! the source is the printed one times `A_tube / A_m`, `A_m` the area of section `m` (on a moving tract, where `m = k`,
-//! each shape's own `A_k`). `receiver free_field_monopole` observes
+//! each shape's own `A_k`). `fricative_throat <area_m2> <source>` (MB 25440 ruling A, 25482) gives the constriction laws
+//! the throat measured on the tract's own surface by a flat-section route, the route and its read named in the source
+//! field: the tract's sections are an acoustic-equivalent area function (a level cut keeps each section's volume and
+//! energy), which is not the geometric throat the jet passes, and one number cannot serve both. The row moves `A_k` in
+//! the constriction laws only: the island's Borda-Carnot factor `(1/A_k - 1/A_j)^2` and Shadle's K3 at `A_k`
+//! ([`GlottalIsland::with_constriction`]), so the rig's held flow with them, and the source's `A_k` and `sigma = A_k /
+//! A_j` (Oldham and Ukpoho's jet speed, Stevens' level). The line's sections, section `k` included, the Poiseuille
+//! resistance taken out of K3 over the line's span, `A_j` and `A_m` stay the tract's. It is refused without
+//! `fricative_noise`, with `tract_move` (a moving shape has no measured throat), and for an area that is not finite and
+//! positive, not narrower than section `j`, or more than 1.5 times section `k` (a stated sanity bound on a measured
+//! value, not a fit); without the row a card is bit-identical to one written before it existed.
+//! `receiver free_field_monopole` observes
 //! the mouth flow as a point monopole in free space, `rho dQ/dt / (4 pi R)` at the microphone's distance, through the
 //! baffled receiver's own differentiator and travel-time kernel (half a point source on the rigid baffle, whose image
 //! doubles it); the microphone row's rings and points are not read by it, the mouth's size and the directivity of its
@@ -475,6 +487,9 @@ pub struct VoiceDescription {
     pub subglottal_tube: Vec<TractSection>,
     /// Opt-in `fricative_noise` (module doc); `None` adds nothing.
     pub fricative_noise: Option<FricativeNoiseCard>,
+    /// Opt-in `fricative_throat` (module doc; MB 25440 ruling A): the constriction laws' measured `A_k`; `None` keeps
+    /// section `k`'s own area.
+    pub fricative_throat: Option<FricativeThroat>,
     /// Opt-in `receiver free_field_monopole` (module doc); `false` keeps the infinite baffle.
     pub free_field_receiver: bool,
     /// Opt-in `rest_gap` rows `(time_s, gap_m)` in strictly increasing time (module doc); empty keeps the `fold` row's gap.
@@ -515,6 +530,17 @@ pub struct FricativeNoiseCard {
     pub law: FricativeLaw,
     /// The section after which the source's junction lines sit: the fifth field, else `constriction`.
     pub obstacle: usize,
+}
+
+/// The `fricative_throat <area_m2> <source>` row (module doc; MB 25440 ruling A, 25482): the geometric throat of the
+/// `fricative_noise` constriction, measured on the tract's own surface, and the route and read that measured it. The card
+/// names both; this code chooses neither.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FricativeThroat {
+    /// The throat's area [m^2]: the constriction laws' `A_k`.
+    pub area_m2: f64,
+    /// The route and its read (an identifier without spaces).
+    pub source: String,
 }
 
 /// The printed law of the `fricative_noise` source (module doc).
@@ -816,6 +842,7 @@ impl VoiceDescription {
         let mut glottal_orifice = None;
         let mut subglottal_tube: Vec<TractSection> = Vec::new();
         let mut fricative_noise = None;
+        let mut fricative_throat = None;
         let mut free_field_receiver = None;
         let mut rest_gap: Vec<(f64, f64)> = Vec::new();
         let mut fold_tension: Vec<FoldTensionPoint> = Vec::new();
@@ -995,6 +1022,12 @@ impl VoiceDescription {
                         obstacle: if rest.len() == 5 { index(4, "fricative_noise m")? } else { constriction },
                     };
                     once(&mut fricative_noise, card, key)?;
+                }
+                "fricative_throat" => {
+                    arity(&rest, 2, key)?;
+                    let throat =
+                        FricativeThroat { area_m2: field(&rest, 0, "fricative_throat area")?, source: rest[1].to_string() };
+                    once(&mut fricative_throat, throat, key)?;
                 }
                 "receiver" => {
                     arity(&rest, 1, key)?;
@@ -1436,6 +1469,29 @@ impl VoiceDescription {
                     .into());
             }
         }
+        // `fricative_throat` (MB 25440 ruling A, 25482): the measured throat of the card's constriction, for its laws only.
+        if let Some(throat) = &fricative_throat {
+            let Some(card) = fricative_noise else {
+                return Err("fricative_throat needs fricative_noise: it is that row's constriction's throat".into());
+            };
+            if !tract_moves.is_empty() {
+                return Err("fricative_throat is refused with tract_move: a moving shape has no measured throat".into());
+            }
+            let (area, a_k, a_j) =
+                (throat.area_m2, sections[card.constriction].area_m2, sections[card.expansion].area_m2);
+            if !(area.is_finite() && area > 0.0) {
+                return Err("fricative_throat area must be finite and positive".into());
+            }
+            if !(area < a_j) {
+                return Err("fricative_throat: the Borda-Carnot loss needs the throat narrower than section j".into());
+            }
+            if !(area <= 1.5 * a_k) {
+                return Err(format!(
+                    "fricative_throat {area:e} m^2 is more than 1.5 times section k ({a_k:e} m^2): the sanity bound on a \
+                     measured throat"
+                ));
+            }
+        }
         if free_field_receiver.is_some() && (head_sphere.is_some() || observer_law.is_some()) {
             return Err("receiver free_field_monopole is refused with head_sphere and observer_law: both observe the baffle".into());
         }
@@ -1496,6 +1552,7 @@ impl VoiceDescription {
             glottal_orifice,
             subglottal_tube,
             fricative_noise,
+            fricative_throat,
             free_field_receiver: free_field_receiver.is_some(),
             rest_gap,
             fold_tension,
@@ -1519,6 +1576,12 @@ impl VoiceDescription {
     #[must_use]
     pub fn tract_gas(&self) -> &GasState {
         self.tract_gas.as_ref().map_or_else(|| self.gas.state(), GasRecord::state)
+    }
+
+    /// The constriction laws' `A_k` [m^2] for `card` (MB 25440 ruling A): the `fricative_throat` row's measured throat,
+    /// else section `k`'s own area, the value every card took before the row existed.
+    fn constriction_law_area_m2(&self, card: FricativeNoiseCard) -> f64 {
+        self.fricative_throat.as_ref().map_or(self.sections[card.constriction].area_m2, |throat| throat.area_m2)
     }
 
     /// The `tract_gas` row's record with its source receipts; `None` when the tract holds the exterior's gas.
@@ -1718,12 +1781,13 @@ impl VoiceDescription {
             None => Ok(island),
         })
         // A moving tract takes every shape's constriction below (with_constriction_keyframes), shape 0's among them.
-        // K3 is less the line's own Poiseuille resistance over the sections the constriction spans (MB 18484).
+        // K3 is less the line's own Poiseuille resistance over the sections the constriction spans (MB 18484). `A_k` is
+        // the `fricative_throat` row's measured throat when the card has one (ruling A); the span stays the line's.
         .and_then(|island| match self.fricative_noise {
             Some(card) if self.tract_moves.is_empty() => {
                 let span = line_span(chart.sections(), card.constriction);
                 island
-                    .with_constriction(self.sections[card.constriction].area_m2, self.sections[card.expansion].area_m2)
+                    .with_constriction(self.constriction_law_area_m2(card), self.sections[card.expansion].area_m2)
                     .and_then(|island| island.with_constriction_spans(&[span.as_slice()]))
             }
             _ => Ok(island),
@@ -1769,8 +1833,10 @@ impl VoiceDescription {
             // tract line; a shape with no expansion after its `k` takes none.
             let island = match self.fricative_noise {
                 Some(card) => {
+                    // Shape 0's `A_k` by the same rule as the source's shape 0 (`fricative_throat` is refused with
+                    // `tract_move` at parse, so this is section `k`'s own area).
                     let mut shapes =
-                        vec![(self.sections[card.constriction].area_m2, self.sections[card.expansion].area_m2)];
+                        vec![(self.constriction_law_area_m2(card), self.sections[card.expansion].area_m2)];
                     shapes.extend(motion.fricative.iter().map(|f| (f.area_k_m2, f.area_j_m2)));
                     // Each shape's K3 less the line's own Poiseuille resistance over that shape's span (MB 18484).
                     let first = line_span(chart.sections(), card.constriction);
@@ -1912,8 +1978,8 @@ impl VoiceDescription {
         // (`shape_taps`), switched with the island's.
         let fricative = match self.fricative_noise {
             Some(card) => {
-                let (area_k, area_j) =
-                    (self.sections[card.constriction].area_m2, self.sections[card.expansion].area_m2);
+                // `A_k` the `fricative_throat` row's throat when the card has one (ruling A); `A_j` and `A_m` the tract's.
+                let (area_k, area_j) = (self.constriction_law_area_m2(card), self.sections[card.expansion].area_m2);
                 let noise = ConstrictionNoise::new_fricative(
                     ConstrictionNoiseCard { seed: card.seed, duct_radius_m: (area_j / core::f64::consts::PI).sqrt() },
                     1.0 / f64::from(mechanics_rate),
@@ -5391,6 +5457,121 @@ mod tests {
         let downstream = render(&fixture(&format!("{base}fricative_noise 5 1 4 stevens 3\n")));
         assert!(downstream.iter().all(|x| x.is_finite()));
         assert_ne!(bits(&downstream), bits(&stevens), "the source at an obstacle downstream is not the source at k");
+    }
+
+    /// `fricative_throat` (MB 25440 ruling A, 25482) parses with its source, and each refusal names what it meets: no
+    /// `fricative_noise`, `tract_move`, an area that is not a finite positive number, a throat not narrower than section
+    /// `j` or more than 1.5 times section `k`, a field missing or extra, and the row twice.
+    #[test]
+    fn fricative_throat_parses_and_is_refused_by_name() {
+        let rig = "glottal_orifice 4.0e-5\nfricative_noise 5 1 4 stevens 3\n";
+        let ok = VoiceDescription::from_bytes(fixture(&format!("{rig}fricative_throat 6.5e-5 route-read\n")).as_bytes())
+            .expect("the row parses");
+        assert_eq!(ok.fricative_throat, Some(FricativeThroat { area_m2: 6.5e-5, source: "route-read".into() }));
+        assert!(VoiceDescription::from_bytes(fixture(rig).as_bytes()).expect("parses").fricative_throat.is_none());
+        VoiceDescription::from_bytes(fixture(&format!("{rig}fricative_throat 8.9e-5 src\n")).as_bytes())
+            .expect("a throat inside 1.5 times section k (6e-5) parses");
+        let cases: Vec<(String, &str)> = vec![
+            ("fricative_throat 6.5e-5 src\n".into(), "needs fricative_noise"),
+            (format!("{rig}fricative_throat 0 src\n"), "finite and positive"),
+            (format!("{rig}fricative_throat -6.5e-5 src\n"), "finite and positive"),
+            (format!("{rig}fricative_throat nan src\n"), "must be finite"),
+            (format!("{rig}fricative_throat inf src\n"), "must be finite"),
+            (format!("{rig}fricative_throat x src\n"), "not a number"),
+            (format!("{rig}fricative_throat 3e-4 src\n"), "narrower than section j"),
+            (format!("{rig}fricative_throat 9.1e-5 src\n"), "more than 1.5 times section k"),
+            (format!("{rig}fricative_throat 6.5e-5\n"), "takes 2 fields"),
+            (format!("{rig}fricative_throat 6.5e-5 src more\n"), "takes 2 fields"),
+            (format!("{rig}fricative_throat 6.5e-5 src\nfricative_throat 6.5e-5 src\n"), "only appear once"),
+        ];
+        for (rows, word) in &cases {
+            let error = VoiceDescription::from_bytes(fixture(rows).as_bytes()).unwrap_err();
+            assert!(error.contains(word), "{rows:?}: {error}");
+        }
+        let keyframes = [0.5e-4, 0.7e-4, 1.5e-4, 2.5e-4, 3.0e-4, 3.0e-4, 2.5e-4, 2.0e-4]
+            .iter()
+            .map(|a| format!("keyframe_section b {a:e} 0.02\n"))
+            .collect::<String>();
+        let moving = |rows: &str| {
+            fixture(&format!(
+                "glottal_orifice 4.0e-5\nfricative_noise 5 1 4\n{rows}keyframe b source src\nkeyframe b licence test\n\
+                 {keyframes}tract_move 0.01 0.02 b 2\n"
+            ))
+        };
+        VoiceDescription::from_bytes(moving("").as_bytes()).expect("the moving card without the row parses");
+        let error = VoiceDescription::from_bytes(moving("fricative_throat 6.5e-5 src\n").as_bytes()).unwrap_err();
+        assert!(error.contains("refused with tract_move"), "{error}");
+    }
+
+    /// `fricative_throat` moves the constriction laws' `A_k` and nothing else (MB 25440 ruling A, 25482). The row at section
+    /// `k`'s own area renders bit for bit the card without it. With a measured throat, the rig's held flow through the
+    /// orifice and the constriction is the closed form at the throat to 1e-12: the root of `P = rho K U^2 / 2 + K3_eff U`,
+    /// `K = K_o + (1/A_t - 1/A_j)^2` with the orifice's eq 6 factor `K_o`, `K3_eff` Shadle's K3 at the throat less the
+    /// line's own Poiseuille resistance over section `k`'s span (a quantity the row does not give), and it is not the flow
+    /// at section `k`'s area (the same closed form at section `k` is the card without the row, to 1e-12). The source's
+    /// shape takes the throat's `A_k` and `sigma` and keeps the tract's obstacle `A_m` and `A_j`'s radius, and the throat
+    /// reaches the radiated pressure.
+    #[test]
+    fn fricative_throat_moves_only_the_constriction_laws_area() {
+        let bits = |xs: &[f64]| xs.iter().map(|x| x.to_bits()).collect::<Vec<u64>>();
+        // Test chart, not data: section k = 1 narrowed to 0.2 cm^2, inside Shadle's printed rows, so K3 is read between two
+        // rows and the line's span through k is section k alone.
+        let narrow = |rows: &str| {
+            let text = fixture(rows).replace("section 6e-5 0.02\n", "section 2e-5 0.02\n");
+            assert_ne!(text, fixture(rows), "the replacement must change the card");
+            text
+        };
+        let rig = "glottal_orifice 4.0e-5\nsubglottal_tube 2.5e-4 0.08\nreceiver free_field_monopole\n\
+                   fricative_noise 5 1 4 stevens 3\n";
+        let without = render(&narrow(rig));
+        assert!(without.iter().all(|x| x.is_finite()));
+        let at_k = render(&narrow(&format!("{rig}fricative_throat 2e-5 the-level-cut-itself\n")));
+        assert_eq!(bits(&without), bits(&at_k), "the row at section k's own area is the card without it, bit for bit");
+        let throat = 2.5e-5;
+        let card = narrow(&format!("{rig}fricative_throat {throat:e} flat-section-test-chart\n"));
+        let description = VoiceDescription::from_bytes(card.as_bytes()).expect("parses");
+        let measured = description.build().expect("builds");
+        let plain = VoiceDescription::from_bytes(narrow(rig).as_bytes()).expect("parses").build().expect("builds");
+        let gas = description.tract_gas();
+        let (rho, mu) = (gas.density, gas.dynamic_viscosity);
+        let span = line_span(&description.sections, 1);
+        assert_eq!(span, vec![(2.0e-5, 0.02)], "the span through k is section k alone");
+        let k3_line = crate::glottis::line_poiseuille_resistance(mu, &span);
+        let held = |a_t: f64, p: f64| {
+            let (a_o, a_1, a_j) = (4.0e-5, 0.5e-4, 3.0e-4);
+            let n = a_o / a_1;
+            let gap = 1.0 / a_t - 1.0 / a_j;
+            let kinetic = (1.0 - 2.0 * n * (1.0 - n)) / (a_o * a_o) + gap * gap;
+            let k3 = (crate::glottis::shadle_constriction_k3(a_t).expect("K3") - k3_line).max(0.0);
+            // The root of rho K U^2 / 2 + K3 U = P, rationalized: 2 P / (K3 + sqrt(K3^2 + 2 rho K P)).
+            2.0 * p / (k3 + (k3 * k3 + 2.0 * rho * kinetic * p).sqrt())
+        };
+        for p in [100.0, 900.0] {
+            let at_throat = measured.island.orifice_held_flow_m3_s(p).expect("the rig's held flow");
+            let closed = held(throat, p);
+            assert!((at_throat / closed - 1.0).abs() < 1.0e-12, "{p} Pa: island {at_throat:e}, closed form {closed:e}");
+            let at_section = plain.island.orifice_held_flow_m3_s(p).expect("the rig's held flow");
+            let closed_k = held(2.0e-5, p);
+            assert!((at_section / closed_k - 1.0).abs() < 1.0e-12, "{p} Pa: island {at_section:e}, closed {closed_k:e}");
+            assert!((at_throat / at_section - 1.0).abs() > 1.0e-3, "{p} Pa: the throat, not section k, sets the flow");
+        }
+        let (shape, own) = (
+            measured.fricative.as_ref().expect("the source").shapes[0],
+            plain.fricative.as_ref().expect("the source").shapes[0],
+        );
+        assert_eq!(shape.section, 1);
+        assert_eq!(shape.area_k_m2.to_bits(), throat.to_bits(), "A_k: the throat");
+        assert_eq!(shape.open_area_ratio.to_bits(), (throat / 3.0e-4).to_bits(), "sigma: the throat over A_j");
+        assert_eq!(own.area_k_m2.to_bits(), 2.0e-5_f64.to_bits(), "without the row A_k is section k's");
+        assert_eq!(
+            [shape.area_m_m2, shape.duct_radius_m].map(f64::to_bits),
+            [own.area_m_m2, own.duct_radius_m].map(f64::to_bits),
+            "A_m and A_j's radius stay the tract's"
+        );
+        assert_eq!(shape.area_m_m2.to_bits(), 2.5e-4_f64.to_bits(), "A_m: the obstacle section 3");
+        let spoken = render(&card);
+        assert!(spoken.iter().all(|x| x.is_finite()));
+        assert_ne!(bits(&spoken), bits(&without), "the throat reaches the radiated pressure");
     }
 
     /// The fricative source on the folds (MB 16735 piece 1): it renders finite, reaches the radiated pressure, one seed

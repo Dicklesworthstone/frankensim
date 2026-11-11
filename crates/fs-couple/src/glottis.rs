@@ -2307,8 +2307,10 @@ impl GlottalIsland {
     /// ([`shadle_constriction_k3`] at `A_k`; MB 18431). The junction solve then takes `1/a_eff = 1/a + 1/a_k` with `a_k =
     /// 2 / (rho (1/A_k - 1/A_j)^2)`, and `K3` in series with its load `Z`, on every valve: the line's small-signal
     /// resistance at the junction becomes `rho K U + K3`, Shadle's incremental resistance (TR 506, p. 39). The tract line
-    /// is unchanged: the constriction's area is already a section of it, and only the jet's kinetic loss and the viscous
-    /// term there are added. Without this call every junction solve takes its old arithmetic.
+    /// is unchanged: the constriction is already a section of it, and only the jet's kinetic loss and the viscous term
+    /// there are added. `A_k` is that section's area unless the caller passes a measured geometric throat in its place
+    /// (the voice card's `fricative_throat` row, MB 25440 ruling A), which the line's sections never take. Without this
+    /// call every junction solve takes its old arithmetic.
     ///
     /// # Errors
     /// An island that has stepped or already has a constriction, or areas that are not finite with `0 < A_k < A_j` (an
