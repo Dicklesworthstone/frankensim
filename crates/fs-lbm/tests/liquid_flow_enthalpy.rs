@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use fs_conduction::observers::CoupledObservers;
 use fs_conduction::transient::deposition::*;
 use fs_evidence::ValidityDomain;
 use fs_exec::CancelGate;
@@ -271,6 +272,39 @@ fn sourced_native_duct_matches_upwind_energy_and_retains_endpoint_receipts() {
     assert!(observer.advection().inner().samples().is_empty());
     near(old.time_s(), 0.0);
     near(old.energy_j(), 0.0);
+}
+
+#[test]
+fn liquid_source_visit_streams_each_composite_owner_term_as_the_inner_emits_it() {
+    let card = card(claims(2.0, 0.1, false));
+    let liquid = liquid(&card);
+    let caloric = liquid_caloric(&card);
+    let domain = VoxelDomain::new(4, 1, 1, 1.0).unwrap();
+    let gate = CancelGate::new();
+    let fluid = MaterialChtFluid::try_new(liquid.reference_state()).unwrap();
+    let solved = fluid.solve_flow(&domain, &throughflow(), &gate).unwrap();
+    let old = initial(&domain, 2.0, &caloric);
+    let ids: Vec<_> = (0..4).map(|c| Some(CellId(c))).collect();
+    let owners = CoupledObservers::new(Heater::default(), Heater::default());
+    let coupled = solved.advect_liquid_enthalpy(
+        &old, input(&ids, &liquid, &caloric), owners, &gate,
+    ).unwrap();
+    // The wrapper runs samples_at on `old`, then visits its inner owner.
+    let mut wrapper = coupled.advection().inner().clone();
+    let mut wrapped = Vec::new();
+    wrapper.visit_sources(&old, &mut |id, watts| {
+        wrapped.push((id, watts.to_bits()));
+        Ok(())
+    }, &mut || Ok(())).unwrap();
+    let mut inner = wrapper.inner().clone();
+    let mut own = Vec::new();
+    inner.visit_sources(&old, &mut |id, watts| {
+        own.push((id, watts.to_bits()));
+        Ok(())
+    }, &mut || Ok(())).unwrap();
+    // Each Heater's 100 W is its own term; a rounded per-cell total would be one 200 W term.
+    assert_eq!(own, vec![(CellId(1), 100.0_f64.to_bits()); 2]);
+    assert_eq!(wrapped, own);
 }
 
 #[test]

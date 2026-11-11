@@ -442,6 +442,23 @@ impl<O: DepositionObserver> DepositionObserver for LiquidEnthalpyObserver<'_, O>
             .map_err(LiquidEnthalpyObserverError::Observer)
     }
 
+    // This hook and visit_sources hand the inner owner's terms to the native sum
+    // unrounded. The trait defaults would emit a composite inner's per-cell
+    // totals after rounding them into one rate.
+    fn visit_step_sources(
+        &mut self,
+        thermal_start: &DepositionSimulation<'_>,
+        start_s: f64,
+        dt_s: f64,
+        end_s: f64,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
+        self.inner
+            .visit_step_sources(thermal_start, start_s, dt_s, end_s, emit, check)
+            .map_err(LiquidEnthalpyObserverError::Observer)
+    }
+
     fn begin(&mut self) -> Result<(), Self::Error> {
         self.inner
             .begin()
@@ -459,6 +476,19 @@ impl<O: DepositionObserver> DepositionObserver for LiquidEnthalpyObserver<'_, O>
             .map_err(LiquidEnthalpyObserverError::Binding)?;
         self.inner
             .sources(thermal, check)
+            .map_err(LiquidEnthalpyObserverError::Observer)
+    }
+
+    fn visit_sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
+        self.samples_at(thermal, check)
+            .map_err(LiquidEnthalpyObserverError::Binding)?;
+        self.inner
+            .visit_sources(thermal, emit, check)
             .map_err(LiquidEnthalpyObserverError::Observer)
     }
 

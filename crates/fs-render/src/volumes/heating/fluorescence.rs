@@ -362,6 +362,17 @@ impl<const N: usize, const M: usize> DepositionObserver for FluorescentOpticalHe
         self.check_temperatures(thermal, checkpoint)?;
         self.heating.sources(thermal, checkpoint)
     }
+    // visit_sources reaches the heating owner's own, as sources() does. The step path stays
+    // all-default while the owner has no step sources; its three hooks are forwarded together.
+    fn visit_sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
+        self.check_temperatures(thermal, checkpoint)?;
+        self.heating.visit_sources(thermal, emit, checkpoint)
+    }
     fn event(
         &mut self,
         event: &Event,
