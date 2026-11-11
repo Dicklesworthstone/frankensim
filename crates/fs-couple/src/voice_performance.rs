@@ -171,12 +171,14 @@
 //! crossfade starts at `start + (k - 1) (end - start) / steps` and lasts `(end - start) / steps`, so the tract is
 //! exactly the target from `end`. Every shape's island line and mouth-flow line are realized at build time by the same
 //! ladder, load, wall and gases as the card's own shape, and the render switches them with the outgoing history carried
-//! ([`crate::keyframe_line`]). Three limits, not hidden: the glottal section is held constant, so a keyframe whose
-//! first-section area is not the card's is refused by name and every intermediate shape takes the card's first area
-//! (the island's `zc` and fold law read it); the microphone, the receiver and the head sphere keep the card's mouth
-//! radius; and the shapes are frozen linear tracts crossfaded, coefficient interpolation with no volume source from the
-//! moving walls a real tract has. A keyframe that no move names is refused. Without the rows the build and the render
-//! are bit for bit what they were.
+//! ([`crate::keyframe_line`]). The glottal (first) section moves with the rest (MB 25468): a keyframe's first area is
+//! its own, every shape's is the morph's (with unequal section counts the length-weighted mean over the first of the
+//! common spans, which can take in part of the second section), and each shape's island line, mouth-flow line and
+//! fricative junction lines are referenced to that shape's own `rho c / A_1`. Three limits, not hidden: the island's `zc` and the two-mass exit's
+//! `A_1` (eq 6) step to the new shape's at its switch while the reflected wave crossfades, so they are not faded; the
+//! microphone, the receiver and the head sphere keep the card's mouth radius; and the shapes are frozen linear tracts
+//! crossfaded, coefficient interpolation with no volume source from the moving walls a real tract has. A keyframe that
+//! no move names is refused. Without the rows the build and the render are bit for bit what they were.
 //!
 //! `tract_gas` fills the tract with its own gas (breath) while `ambient` stays the exterior (the room). The island's
 //! line, the mouth-flow line, the passive formants and the glottal flow's density and viscosity take the tract gas; the
@@ -533,7 +535,7 @@ pub struct TractKeyframe {
     pub source: String,
     /// Licence or terms the data were admitted under.
     pub licence: String,
-    /// Area function, glottis first; the first area is the card's own (the glottal section is held).
+    /// Area function, glottis first; the first area is the keyframe's own (the glottal section moves with the tract).
     pub sections: Vec<TractSection>,
 }
 
@@ -628,9 +630,8 @@ fn keyframe_draft<'a>(drafts: &'a mut Vec<KeyframeDraft>, name: &str) -> Result<
     Ok(&mut drafts[at])
 }
 
-/// Check the keyframes and movements against the card's own tract (module doc).
+/// Check the keyframes and movements (module doc).
 fn admit_motion(
-    card_sections: &[TractSection],
     drafts: Vec<KeyframeDraft>,
     moves: Vec<(f64, f64, String, u64)>,
     duration_s: f64,
@@ -645,11 +646,6 @@ fn admit_motion(
         }
         TractChart::try_new(draft.sections.clone(), &source, &licence)
             .map_err(|e| format!("keyframe {name:?} chart refused: {e:?}"))?;
-        if draft.sections[0].area_m2.to_bits() != card_sections[0].area_m2.to_bits() {
-            return Err(format!(
-                "keyframe {name:?}: the first section's area must be the card's own, the glottal section is held constant"
-            ));
-        }
         keyframes.push(TractKeyframe {
             name,
             source,
@@ -1461,7 +1457,6 @@ impl VoiceDescription {
             }
         }
         let (keyframes, tract_moves) = admit_motion(
-            &sections,
             keyframe_drafts,
             tract_moves,
             samples as f64 / f64::from(output_rate_hz),
@@ -1763,7 +1758,7 @@ impl VoiceDescription {
         let (island, mut motion) = if self.tract_moves.is_empty() {
             (island, TractMotion::default())
         } else {
-            let mut motion = self.realize_motion(&chart, mechanics_rate, island.port_impedance(), workers)?;
+            let mut motion = self.realize_motion(&chart, mechanics_rate, workers)?;
             mouth = mouth
                 .to_moving(core::mem::take(&mut motion.mouth_taps))
                 .map_err(|e| format!("moving mouth-flow line refused: {e}"))?;
@@ -2046,20 +2041,13 @@ impl VoiceDescription {
     }
 
     /// Every further shape of the moving tract, in the order the render reaches them, with the step each starts at
-    /// (module doc). A shape is the morph at `k / steps` from the shape the tract holds to the move's target, with the
-    /// card's own first-section area (the glottal section is held); `k = steps` is the target as written.
+    /// (module doc). A shape is the morph at `k / steps` from the shape the tract holds to the move's target, its first
+    /// section among the rest (MB 25468); `k = steps` is the target as written.
     ///
     /// The shapes and switch steps come first, in one serial pass; each shape's lines are then built on up to `workers`
     /// threads ([`build_shapes`]). A refusal is the one a shape-by-shape build would meet first: a build refusal of an
     /// earlier shape before a later shape's morph or step refusal.
-    fn realize_motion(&self, chart: &TractChart, mechanics_rate: u32, zc: f64, workers: usize) -> Result<TractMotion, String> {
-        let glottal_area = chart.sections()[0].area_m2;
-        let held = |shape: TractChart| -> Result<TractChart, String> {
-            let mut sections = shape.sections().to_vec();
-            sections[0].area_m2 = glottal_area;
-            TractChart::try_new(sections, shape.source_id(), shape.license())
-                .map_err(|e| format!("moving tract shape refused: {e:?}"))
-        };
+    fn realize_motion(&self, chart: &TractChart, mechanics_rate: u32, workers: usize) -> Result<TractMotion, String> {
         let keyframes = self
             .keyframes
             .iter()
@@ -2087,8 +2075,7 @@ impl VoiceDescription {
             for k in 1..=steps {
                 let shape = holding
                     .log_area_morph(&target, k as f64 / steps as f64)
-                    .map_err(|e| format!("moving tract morph refused: {e:?}"))
-                    .and_then(&held);
+                    .map_err(|e| format!("moving tract morph refused: {e:?}"));
                 match shape {
                     Ok(shape) => shapes.push(shape),
                     Err(e) => {
@@ -2107,7 +2094,7 @@ impl VoiceDescription {
             targets.push((shapes.len() - 1, name.to_string()));
             holding = target;
         }
-        let built = build_shapes(shapes.len(), workers, |i| self.shape_taps(&shapes[i], mechanics_rate, zc))?;
+        let built = build_shapes(shapes.len(), workers, |i| self.shape_taps(&shapes[i], mechanics_rate))?;
         if let Some(e) = cut {
             return Err(e);
         }
@@ -2125,15 +2112,14 @@ impl VoiceDescription {
         Ok(motion)
     }
 
-    /// The island's line taps, the mouth-flow line taps and the passive formants of one further shape, realized with
-    /// the card's mouth load, wall and gases exactly as `build` realizes the card's own shape. A shape whose `zc` is
-    /// not the card's is refused: one glottal section for every shape.
+    /// The island's line taps with the shape's own `rho c / S` and first section, the mouth-flow line taps and the
+    /// passive formants of one further shape, realized with the card's mouth load, wall and gases exactly as `build`
+    /// realizes the card's own shape. Every line of the shape is referenced to the shape's own first section (MB 25468).
     #[allow(clippy::type_complexity)]
     fn shape_taps(
         &self,
         chart: &TractChart,
         mechanics_rate: u32,
-        zc: f64,
     ) -> Result<ShapeLines, String> {
         let gas = self.tract_gas();
         let exterior = self.ambient_gas();
@@ -2155,16 +2141,15 @@ impl VoiceDescription {
         let mouth_load = lips_table.map_or(MouthLoad::Analytic(self.termination), MouthLoad::Tabulated);
         let split = if self.tract_gas.is_some() { lips_table } else { None };
         let wall = self.wall.as_ref();
-        let (island_taps, shape_zc) = match split {
+        // This shape's own `rho c / S` and first section: the island steps to them at the shape's switch, and its
+        // mouth-flow and fricative junction lines below are referenced to this `zc`.
+        let (island_taps, zc, inlet_area_m2) = match split {
             None => glottal_tract_line_taps(&duct, gas, None, mouth_load, mechanics_rate, wall),
             Some(table) => {
                 glottal_tract_line_taps(&duct, gas, Some(exterior), MouthLoad::Tabulated(table), mechanics_rate, wall)
             }
         }
         .map_err(|e| format!("moving tract line refused: {e:?}"))?;
-        if shape_zc.to_bits() != zc.to_bits() {
-            return Err("every shape of a moving tract needs the card's glottal section: one zc for the island".into());
-        }
         let (mouth, _) = match split {
             None => mouth_flow_line(&duct, gas, mouth_load, mechanics_rate, zc, wall, &LineLadder::default()),
             Some(table) => mouth_flow_line_exterior(
@@ -2215,13 +2200,13 @@ impl VoiceDescription {
             }
             None => None,
         };
-        Ok((island_taps, mouth_taps.to_vec(), formants, fricative))
+        Ok(((island_taps, zc, inlet_area_m2), mouth_taps.to_vec(), formants, fricative))
     }
 }
 
-/// One further shape's island taps, mouth-flow taps, passive formants and, with `fricative_noise`, its fricative lines
-/// (`VoiceDescription::shape_taps`).
-type ShapeLines = (Vec<f64>, Vec<f64>, Result<Vec<f64>, String>, Option<FricativeShapeLines>);
+/// One further shape's island taps with its `rho c / S` and first section, mouth-flow taps, passive formants and, with
+/// `fricative_noise`, its fricative lines (`VoiceDescription::shape_taps`).
+type ShapeLines = ((Vec<f64>, f64, f64), Vec<f64>, Result<Vec<f64>, String>, Option<FricativeShapeLines>);
 
 /// One further shape's `fricative_noise` (MB 16735 piece 2): its junction lines' taps and its constriction.
 struct FricativeShapeLines {
@@ -2271,8 +2256,8 @@ where
 /// A moving tract as realized at build time.
 #[derive(Default)]
 struct TractMotion {
-    /// The island's line taps of shapes 1.. (shape 0 is the island's own).
-    island_taps: Vec<Vec<f64>>,
+    /// The island's line taps, `rho c / S` and first section of shapes 1.. (shape 0 is the island's own).
+    island_taps: Vec<(Vec<f64>, f64, f64)>,
     /// The mouth-flow line taps of shapes 1...
     mouth_taps: Vec<Vec<f64>>,
     /// With `fricative_noise`, the fricative lines and constriction of shapes 1.. (empty without the row).
@@ -4922,7 +4907,6 @@ mod tests {
         };
         refused(keyframe_i(), "named by no tract_move");
         refused(keyframe_i() + "tract_move 0.05 0.1 u 8\n", "unknown keyframe");
-        refused(keyframe_i().replacen("keyframe_section i 5e-5", "keyframe_section i 6e-5", 1) + "tract_move 0.05 0.1 i 8\n", "glottal section is held constant");
         refused(keyframe_i().replace("keyframe i source test-i\n", "") + "tract_move 0.05 0.1 i 8\n", "needs a `source` row");
         refused(keyframe_i().replace("keyframe i licence test fixture, not data\n", "") + "tract_move 0.05 0.1 i 8\n", "needs a `licence` row");
         refused("keyframe card source x\n".into(), "cannot be a keyframe");
@@ -5025,6 +5009,64 @@ mod tests {
         );
     }
 
+    /// The ratio of the `i2` keyframe's first section to the card's in
+    /// `a_moving_tract_plays_the_keyframes_own_note_on_its_own_glottal_section`.
+    const I2_FIRST_RATIO: f64 = 1.5;
+
+    /// A moving tract's glottal section moves with it (MB 25412 step 1, MB 25468). The /a/-like card moves over 0.10 to
+    /// 0.18 s to `i2`, the /i/-like keyframe with its first section `I2_FIRST_RATIO` times the card's, and from 0.30
+    /// to 0.60 s it plays the static `i2` card's note: the mean f0 (`f0_track` on the prior of `steady_f0_hz`) within 3
+    /// cents. The /i/-like shape with the card's first section, which is the tract a held glottal section left after
+    /// the move, must play a note more than 6 cents from `i2`'s, twice the tolerance, so that a tract that held the
+    /// card's section could not pass. The move's largest curvature against the larger of the held windows' (before
+    /// the move from 0.06 s, and the read window) is printed, not asserted: the island's `zc` and `A_1` step at each
+    /// switch, a stated limit, and this is its measure on the fixture.
+    #[test]
+    fn a_moving_tract_plays_the_keyframes_own_note_on_its_own_glottal_section() {
+        let (seconds, rate) = (0.6, 48_000.0);
+        let i2: Vec<f64> =
+            SHAPE_I.iter().enumerate().map(|(k, &area)| if k == 0 { I2_FIRST_RATIO * area } else { area }).collect();
+        let mut rows = String::from("keyframe i2 source test-i2\nkeyframe i2 licence test fixture, not data\n");
+        for area in &i2 {
+            rows.push_str(&format!("keyframe_section i2 {area:e} 1.7e-2\n"));
+        }
+        rows.push_str("tract_move 0.10 0.18 i2 8\n");
+        let render = |text: String| {
+            let description = VoiceDescription::from_bytes(text.as_bytes()).expect("parses");
+            render_performance(description.build().expect("builds"), (seconds * rate) as usize)
+        };
+        let mean_f0 = |pcm: &[f64]| {
+            let window = &pcm[(0.30 * rate) as usize..(0.60 * rate) as usize];
+            let track = f0_track(window, rate, steady_f0_hz(window, rate));
+            assert!(!track.is_empty(), "the read window holds no f0 frame");
+            track.iter().map(|(_, f)| f).sum::<f64>() / track.len() as f64
+        };
+        let cents = |a: f64, b: f64| 1200.0 * (a / b).log2();
+        let moving_p = render(moving_card(&SHAPE_A, 0.02, seconds, &rows));
+        let held_curvature = largest_curvature(&moving_p, 2_880..4_800).max(largest_curvature(&moving_p, 14_400..28_799));
+        let moved_over_held = largest_curvature(&moving_p, 4_800..8_640) / held_curvature;
+        let moved = mean_f0(&moving_p);
+        let own = mean_f0(&render(moving_card(&i2, 0.017, seconds, "")));
+        let held = mean_f0(&render(moving_card(&SHAPE_I, 0.017, seconds, "")));
+        println!(
+            "{{\"suite\":\"fs-couple\",\"case\":\"voice-moving-tract-glottal-section\",\"first_ratio\":{I2_FIRST_RATIO},\
+             \"f0_moved_hz\":{moved:.4},\"f0_own_hz\":{own:.4},\"f0_held_hz\":{held:.4},\"moved_c\":{:.3},\"held_c\":{:.3},\
+             \"moved_over_held_curvature\":{moved_over_held:.3}}}",
+            cents(moved, own),
+            cents(held, own)
+        );
+        assert!(
+            cents(held, own).abs() > 6.0,
+            "the card's first section moves the keyframe's note by {:.2} c, not more than 6: the test cannot fail",
+            cents(held, own)
+        );
+        assert!(
+            cents(moved, own).abs() <= 3.0,
+            "after the move {moved:.3} Hz against the keyframe's own {own:.3} Hz ({:.2} c)",
+            cents(moved, own)
+        );
+    }
+
     /// The further shapes built on one thread and on three (blocks of 3, 3 and 3 over two moves) give the same switches,
     /// the same targets' formants and the same samples, bit for bit.
     #[test]
@@ -5054,8 +5096,8 @@ mod tests {
 
     /// `tract_gas` with no head on a moving tract (MB 24424): `shape_taps` makes each further shape's own flanged table
     /// across the gas interface, from that shape's duct. The keyframe target's passive formants are, bit for bit, the
-    /// tract gas's TMM against that table made by hand on the shape `build` makes (the log-area morph at fraction 1,
-    /// the card's glottal section held), and not the TMM with the flanged load evaluated in the tract's gas.
+    /// tract gas's TMM against that table made by hand on the shape `build` makes (the log-area morph at fraction 1, the
+    /// keyframe as written), and not the TMM with the flanged load evaluated in the tract's gas.
     #[test]
     fn a_moving_tract_with_tract_gas_and_no_head_reads_each_shapes_own_flanged_table() {
         let rows = keyframe_i() + "tract_move 0.05 0.1 i 3\ntract_gas moist_air 290.15 101325 0.5\n";
@@ -5071,10 +5113,7 @@ mod tests {
         let k = &description.keyframes[0];
         let keyframe = TractChart::try_new(k.sections.clone(), &k.source, &k.licence).expect("keyframe chart");
         // The move's last step: `k / steps` with k = steps = 3 is exactly 1.
-        let morph = card.log_area_morph(&keyframe, 1.0).expect("morph");
-        let mut sections = morph.sections().to_vec();
-        sections[0].area_m2 = card.sections()[0].area_m2;
-        let shape = TractChart::try_new(sections, morph.source_id(), morph.license()).expect("held shape");
+        let shape = card.log_area_morph(&keyframe, 1.0).expect("morph");
         let (tract, exterior, wall) = (description.tract_gas(), description.ambient_gas(), description.wall.as_ref());
         let rate = description.output_rate_hz * description.mechanics_per_output;
         let table = flanged_mouth_load(&shape.to_duct(), tract, exterior, rate, GLOTTAL_LINE_MAX_TAPS).expect("table");

@@ -445,7 +445,8 @@ pub(super) fn tract_motion_json(
     format!(
         ",\"tract_motion\":{{\"shapes\":{},\"moves\":[{moves}],\"keyframes\":[{keyframes}],\"targets\":[{formants}],\
          \"limits\":\"frozen linear shapes crossfaded with the outgoing history carried (no volume source from moving \
-         walls); the glottal section held at the card's first area; the card's mouth radius at the microphone\"}}",
+         walls); the island's zc and A_1 stepped to each shape's at its switch, not faded; the card's mouth radius \
+         at the microphone\"}}",
         info.tract_shapes
     )
 }

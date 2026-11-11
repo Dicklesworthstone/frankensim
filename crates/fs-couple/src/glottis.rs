@@ -750,6 +750,10 @@ pub struct GlottalIsland {
     /// puts the new shape's in [`Self::constriction_kinetic`] and [`Self::constriction_viscous`]. `None` keeps the one
     /// constriction for the whole render.
     constriction_shapes: Option<Vec<Option<(f64, f64)>>>,
+    /// A moving tract's glottal end of every shape, shape 0 (the island's own) first, as `(rho c / S, S)` with `S` the
+    /// shape's first section ([`GlottalIsland::with_tract_keyframes`]); [`GlottalIsland::switch_tract`] puts the new
+    /// shape's in [`Self::zc_flow`] and [`Self::tract_inlet_area_m2`]. `None` keeps the one line's for the whole render.
+    tract_inlets: Option<Vec<(f64, f64)>>,
     /// Whether [`GlottalIsland::with_constriction_spans`] has taken the line's own Poiseuille resistance out of K3.
     constriction_spans_taken: bool,
 }
@@ -1582,11 +1586,11 @@ fn glottal_tract_line(
     Ok((line, zc_flow, area))
 }
 
-/// The taps of the island's tract line for a further shape of a moving tract, and that shape's `rho c / S`: the line
-/// [`GlottalIsland::new_with_wall`] (with `exterior` `None`) or [`GlottalIsland::new_with_wall_exterior`] would
-/// realize for `tract`. The shape's first section must be the island's own, so that both share one `zc` (the caller
-/// checks the returned value against [`GlottalIsland::port_impedance`]; [`GlottalIsland::with_tract_keyframes`] takes
-/// the taps).
+/// The taps of the island's tract line for a further shape of a moving tract, that shape's `rho c / S` and its first
+/// section's area `S`: the line [`GlottalIsland::new_with_wall`] (with `exterior` `None`) or
+/// [`GlottalIsland::new_with_wall_exterior`] would realize for `tract`, referenced to the shape's own first section.
+/// [`GlottalIsland::with_tract_keyframes`] takes all three; at the shape's switch the island's `zc` and the two-mass
+/// exit's `A_1` become the shape's.
 ///
 /// # Errors
 /// As the island's own line, or a line that is not a plain FIR.
@@ -1597,12 +1601,12 @@ pub fn glottal_tract_line_taps(
     termination: MouthLoad<'_>,
     sample_rate_hz: u32,
     wall: Option<&WallPin>,
-) -> Result<(Vec<f64>, f64), GlottisError> {
-    let (line, zc_flow, _) = glottal_tract_line(tract, gas, exterior, termination, sample_rate_hz, wall)?;
+) -> Result<(Vec<f64>, f64, f64), GlottisError> {
+    let (line, zc_flow, area) = glottal_tract_line(tract, gas, exterior, termination, sample_rate_hz, wall)?;
     let (_, taps) = line.quiescent_fir().ok_or(GlottisError::Invalid {
         what: "a moving tract needs every shape's line to be a plain FIR",
     })?;
-    Ok((taps.to_vec(), zc_flow))
+    Ok((taps.to_vec(), zc_flow, area))
 }
 
 /// A keyframe-line refusal as an island refusal: its name, or one for the FIR's own refusal.
@@ -1778,6 +1782,7 @@ impl GlottalIsland {
             constriction_kinetic: None,
             constriction_viscous: 0.0,
             constriction_shapes: None,
+            tract_inlets: None,
             constriction_spans_taken: false,
         })
     }
@@ -1865,29 +1870,51 @@ impl GlottalIsland {
     }
 
     /// Give a new island the further shapes of a tract that moves during the render (pexfp.327.1). Shape 0 is the
-    /// island's own line; `taps` are the lines of shapes 1.., each from [`glottal_tract_line_taps`] for a tract with
-    /// the island's glottal section (the caller checks that each shape's `zc` is [`GlottalIsland::port_impedance`]).
-    /// [`GlottalIsland::switch_tract`] then moves the line. With no call the island keeps its one line on its own path,
-    /// and a call with no further shapes plays bit for bit as that line does (the module doc of `keyframe_line`).
+    /// island's own line; `shapes` are shapes 1.., each `(taps, rho c / S, S)` from [`glottal_tract_line_taps`] for
+    /// that shape's tract, its own first section `S` included (MB 25468): the line is referenced to that section, and
+    /// from the shape's switch [`GlottalIsland::switch_tract`] puts its `rho c / S` in the junction solve and its `S` in
+    /// the two-mass exit's recovery (`A_1` of eq 6). With no call the island keeps its one line on its own path, and a
+    /// call with no further shapes plays bit for bit as that line does (the module doc of `keyframe_line`).
     ///
     /// # Errors
-    /// An island that has already stepped or already has keyframes, an own line that is not a plain FIR, or a refused
-    /// shape, by name.
-    pub fn with_tract_keyframes(mut self, taps: Vec<Vec<f64>>) -> Result<Self, GlottisError> {
+    /// An island that has already stepped or already has keyframes, an own line that is not a plain FIR, a shape whose
+    /// `rho c / S` or `S` is not finite and positive, a shape whose first section is narrower than the island's
+    /// [`Self::with_orifice`] hole (no eq 6 expansion), or a refused shape, by name.
+    pub fn with_tract_keyframes(mut self, shapes: Vec<(Vec<f64>, f64, f64)>) -> Result<Self, GlottisError> {
         if self.force_passes.1 != 0 || self.tension != 1.0 {
             return Err(GlottisError::Invalid {
                 what: "tract keyframes are set before the island's first step",
             });
         }
+        let mut inlets = Vec::with_capacity(shapes.len() + 1);
+        inlets.push((self.zc_flow, self.tract_inlet_area_m2));
+        let mut taps = Vec::with_capacity(shapes.len());
+        for (line, zc_flow, area) in shapes {
+            if !(zc_flow.is_finite() && zc_flow > 0.0 && area.is_finite() && area > 0.0) {
+                return Err(GlottisError::Invalid {
+                    what: "a tract keyframe's rho c / S and first section must be finite and positive",
+                });
+            }
+            if self.orifice_area_m2.is_some_and(|hole| hole > area) {
+                return Err(GlottisError::Invalid {
+                    what: "a tract keyframe's first section is narrower than the glottal orifice: eq 6 needs A <= A_1",
+                });
+            }
+            inlets.push((zc_flow, area));
+            taps.push(line);
+        }
         self.line = self
             .line
             .to_moving(taps)
             .map_err(|e| keyframe_refusal(e, "a tract keyframe line was refused"))?;
+        self.tract_inlets = Some(inlets);
         Ok(self)
     }
 
     /// Move the tract line to shape `index` of [`GlottalIsland::with_tract_keyframes`], crossfading the reflected wave
-    /// over `fade_samples` steps with the outgoing history carried (`keyframe_line`).
+    /// over `fade_samples` steps with the outgoing history carried (`keyframe_line`). The junction solve's `rho c / S`
+    /// and the two-mass exit's `A_1` become the new shape's from this step on: they step, and are not faded with the
+    /// reflected wave.
     ///
     /// # Errors
     /// An island without keyframes, an unknown shape, or a switch during a running crossfade, by name.
@@ -1898,6 +1925,12 @@ impl GlottalIsland {
             })?),
             None => None,
         };
+        let inlet = match &self.tract_inlets {
+            Some(menu) => Some(*menu.get(index).ok_or(GlottisError::Invalid {
+                what: "a tract keyframe switch names a shape the tract line does not have",
+            })?),
+            None => None,
+        };
         self.line
             .switch(index, fade_samples)
             .map_err(|e| keyframe_refusal(e, "a tract keyframe switch was refused"))?;
@@ -1905,6 +1938,11 @@ impl GlottalIsland {
         if let Some(shape) = constriction {
             self.constriction_kinetic = shape.map(|(kinetic, _)| kinetic);
             self.constriction_viscous = shape.map_or(0.0, |(_, viscous)| viscous);
+        }
+        // The new shape's glottal end (with_tract_keyframes): its rho c / S and first section, from this step on.
+        if let Some((zc_flow, area)) = inlet {
+            self.zc_flow = zc_flow;
+            self.tract_inlet_area_m2 = area;
         }
         Ok(())
     }
@@ -2056,7 +2094,7 @@ impl GlottalIsland {
     }
 
     /// Wave incident on the tract during the last `step`, referenced to
-    /// [`GlottalIsland::port_impedance`] (`p_supra = p+ + p-`,
+    /// [`GlottalIsland::port_impedance`] (the present shape's on a moving tract; `p_supra = p+ + p-`,
     /// `U = (p+ - p-) / Zc`). Any other linear observer of the same tract
     /// (flow at its mouth) is a causal filter of this one signal.
     #[must_use]
@@ -2065,7 +2103,7 @@ impl GlottalIsland {
     }
 
     /// Volume-normalized port impedance `rho c / S` [Pa s/m^3] the tract line
-    /// is referenced to.
+    /// is referenced to: on a moving tract, the present shape's ([`Self::switch_tract`]).
     #[must_use]
     pub fn port_impedance(&self) -> f64 {
         self.zc_flow
@@ -2230,7 +2268,8 @@ impl GlottalIsland {
     ///
     /// # Errors
     /// An island that has stepped or already has an orifice, an area that is not finite and positive, or a hole wider
-    /// than the tract's first section (no expansion, so no eq 6 recovery), by name.
+    /// than the tract's first section, or than any shape's of a moving tract ([`Self::with_tract_keyframes`]) (no
+    /// expansion, so no eq 6 recovery), by name.
     pub fn with_orifice(mut self, area_m2: f64) -> Result<Self, GlottisError> {
         if self.force_passes.1 != 0 || self.tension != 1.0 || self.orifice_area_m2.is_some() {
             return Err(GlottisError::Invalid {
@@ -2242,7 +2281,11 @@ impl GlottalIsland {
                 what: "a glottal orifice needs a finite positive area",
             });
         }
-        if area_m2 > self.tract_inlet_area_m2 {
+        let narrowest = self
+            .tract_inlets
+            .as_ref()
+            .map_or(self.tract_inlet_area_m2, |menu| menu.iter().fold(f64::INFINITY, |a, &(_, area)| a.min(area)));
+        if area_m2 > narrowest {
             return Err(GlottisError::Invalid {
                 what: "a glottal orifice wider than the tract's first section is no expansion: eq 6 needs A <= A_1",
             });
@@ -5781,7 +5824,12 @@ mod glottis_tests {
             ShapeLine::Fixed(line) => line.quiescent_fir().expect("a plain FIR").1.to_vec(),
             ShapeLine::Moving(_) => panic!("a new island's line is fixed"),
         };
-        let keyed = || rig().with_tract_keyframes(vec![taps.clone(), taps.clone()]).expect("keyframes");
+        let own = {
+            let i = rig();
+            (i.zc_flow, i.tract_inlet_area_m2)
+        };
+        let shape = || (taps.clone(), own.0, own.1);
+        let keyed = || rig().with_tract_keyframes(vec![shape(), shape()]).expect("keyframes");
         let menu = [(plug, tube), (tube, tube), (plug, tube)];
         let no_span: &[(f64, f64)] = &[];
         let mut moving = keyed()
@@ -5835,7 +5883,12 @@ mod glottis_tests {
             ShapeLine::Fixed(line) => line.quiescent_fir().expect("a plain FIR").1.to_vec(),
             ShapeLine::Moving(_) => panic!("a new island's line is fixed"),
         };
-        let keyed = || rig().with_tract_keyframes(vec![taps.clone(), taps.clone()]).expect("keyframes");
+        let own = {
+            let i = rig();
+            (i.zc_flow, i.tract_inlet_area_m2)
+        };
+        let shape = || (taps.clone(), own.0, own.1);
+        let keyed = || rig().with_tract_keyframes(vec![shape(), shape()]).expect("keyframes");
         let mut moving = keyed().with_constriction_keyframes(&[(a_k, a_j), (2.0 * a_k, a_j), (a_j, a_j)]).expect("menu");
         assert_eq!(held(&moving), alone(Some((a_k, a_j))), "shape 0: its factor from the first step");
         assert!(moving.switch_tract(3, 0).is_err(), "an unknown shape is refused");
@@ -5870,6 +5923,71 @@ mod glottis_tests {
             keyed().with_constriction_keyframes(&[(a_j, a_j), (a_k, a_j), (a_k, a_j)]).and_then(|i| i.with_constriction(a_k, a_j)),
             "set once",
         );
+    }
+
+    /// A moving tract's glottal end (MB 25468): every shape's `rho c / S` and first section `S`, shape 0's (the island's
+    /// own) from the first step, then each new shape's from its switch, read through the port impedance and through the
+    /// orifice's held flow, whose eq 6 factor takes `A_1` (`N = A / A_1`): a wider first section moves the held flow to
+    /// its closed form, and back to the island's own bit for bit. A refused switch changes nothing. A shape narrower than
+    /// the orifice, one whose `zc` or `S` is not finite and positive, and an orifice wider than any shape's first
+    /// section are refused by name. The further shapes' lines here are the island's own taps, so only the glottal end
+    /// moves.
+    #[test]
+    fn a_moving_tract_takes_each_shapes_glottal_end_at_its_switch() {
+        let hole = core::f64::consts::PI * 0.005 * 0.005;
+        let drive = 1000.0;
+        let rig = || island(false, 1.0).with_orifice(hole).expect("orifice");
+        let own = rig();
+        let (zc, inlet) = (own.zc_flow, own.tract_inlet_area_m2);
+        let taps = match &own.line {
+            ShapeLine::Fixed(line) => line.quiescent_fir().expect("a plain FIR").1.to_vec(),
+            ShapeLine::Moving(_) => panic!("a new island's line is fixed"),
+        };
+        let held = |i: &GlottalIsland| i.orifice_held_flow_m3_s(drive).expect("held flow");
+        // The held flow's closed form through the hole into a first section `a1`: sqrt(2 P / (rho K_o)).
+        let closed = |a1: f64| {
+            let n = hole / a1;
+            let k_o = (1.0 - 2.0 * n * (1.0 - n)) / (hole * hole);
+            (2.0 * drive / (air().density * k_o)).sqrt()
+        };
+        let wide = 2.0 * inlet;
+        let mut moving = rig()
+            .with_tract_keyframes(vec![(taps.clone(), zc * inlet / wide, wide), (taps.clone(), zc, inlet)])
+            .expect("keyframes");
+        assert_eq!(moving.port_impedance().to_bits(), zc.to_bits(), "shape 0: the island's own zc");
+        assert_eq!(held(&moving).to_bits(), held(&own).to_bits(), "shape 0: the island's own A_1");
+        assert!((held(&own) / closed(inlet) - 1.0).abs() < 1.0e-12, "the island's own A_1: {}", held(&own));
+        assert!(moving.switch_tract(3, 0).is_err(), "an unknown shape is refused");
+        assert_eq!(moving.port_impedance().to_bits(), zc.to_bits(), "a refused switch changes nothing");
+        assert_eq!(held(&moving).to_bits(), held(&own).to_bits(), "a refused switch keeps A_1");
+        moving.switch_tract(1, 0).expect("switch to shape 1");
+        assert_eq!(moving.port_impedance().to_bits(), (zc * inlet / wide).to_bits(), "shape 1: its own zc");
+        let wider = held(&moving);
+        assert!((wider / closed(wide) - 1.0).abs() < 1.0e-12, "shape 1: its own A_1: {wider}");
+        assert!((wider / held(&own) - 1.0).abs() > 1.0e-3, "a doubled A_1 must move the held flow: the test cannot fail");
+        moving.switch_tract(2, 0).expect("switch to shape 2");
+        assert_eq!(moving.port_impedance().to_bits(), zc.to_bits(), "shape 2: the island's own zc again");
+        assert_eq!(held(&moving).to_bits(), held(&own).to_bits(), "shape 2: the island's own A_1 again");
+        // A switch refused by the line during a running crossfade keeps the shape it is fading to.
+        let mut fading = rig()
+            .with_tract_keyframes(vec![(taps.clone(), zc * inlet / wide, wide), (taps.clone(), zc, inlet)])
+            .expect("keyframes");
+        fading.switch_tract(1, 8).expect("fade to shape 1");
+        assert!(fading.switch_tract(2, 0).is_err(), "a switch during a running crossfade is refused");
+        assert_eq!(fading.port_impedance().to_bits(), (zc * inlet / wide).to_bits(), "still shape 1's zc");
+        assert_eq!(held(&fading).to_bits(), wider.to_bits(), "still shape 1's A_1");
+        let named = |result: Result<GlottalIsland, GlottisError>, word: &str| match result {
+            Err(GlottisError::Invalid { what }) => assert!(what.contains(word), "{what}"),
+            Err(other) => panic!("refused by another error: {other:?}"),
+            Ok(_) => panic!("admitted, but must be refused naming {word}"),
+        };
+        named(rig().with_tract_keyframes(vec![(taps.clone(), zc, 0.5 * hole)]), "narrower than the glottal orifice");
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            named(island(false, 1.0).with_tract_keyframes(vec![(taps.clone(), bad, inlet)]), "finite and positive");
+            named(island(false, 1.0).with_tract_keyframes(vec![(taps.clone(), zc, bad)]), "finite and positive");
+        }
+        let narrow_shape = island(false, 1.0).with_tract_keyframes(vec![(taps.clone(), zc, 0.5 * hole)]);
+        named(narrow_shape.and_then(|i| i.with_orifice(hole)), "eq 6 needs A <= A_1");
     }
 
     /// The rest-gap gesture (MB 16735, the first word's piece 4). Setting the card's own gap before every step leaves

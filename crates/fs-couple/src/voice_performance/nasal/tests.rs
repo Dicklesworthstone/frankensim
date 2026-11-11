@@ -116,7 +116,7 @@ fn a_shut_port_is_the_series_tract() {
         let lines = nasal_lines(&description.sections, &card, &gas, wall.as_ref(), exterior, rate, Velum::Shut)
             .expect("shut-port lines");
         assert!(lines.nostrils.is_none());
-        let (series_taps, zc) = glottal_tract_line_taps(
+        let (series_taps, zc, _) = glottal_tract_line_taps(
             &duct, &gas, None, MouthLoad::Analytic(Termination::FlangedOpen), rate, wall.as_ref(),
         )
         .expect("series line");
@@ -179,7 +179,7 @@ fn shut_port_on_the_head(rows: &str) {
         let lines = nasal_lines(&description.sections, &card, &gas, wall.as_ref(), outside, rate, Velum::Shut)
             .expect("shut-port lines on the head");
         assert!(lines.nostrils.is_none());
-        let (series_taps, zc) = glottal_tract_line_taps(
+        let (series_taps, zc, _) = glottal_tract_line_taps(
             &duct, &gas, Some(&exterior), MouthLoad::Tabulated(&table), rate, wall.as_ref(),
         )
         .expect("series line on the head");
