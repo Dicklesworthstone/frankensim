@@ -1470,7 +1470,42 @@ fn load_with_all_sources(
     if reed_file && matches!(flow_tap, Some((_, true))) {
         return Err("--labium adds the labium jet displacement to the flue aperture flows; a reed file has no labium".into());
     }
+    // Exact versioned source header selects the existing owner; filenames and
+    // instrument labels never choose geometry or material constants.
+    // Each file format is read by its own function below. A debug build gives every local and every `?` temporary of a
+    // function its own stack slot, so one function holding the large performance objects of all formats had a frame of
+    // about 1 MB and a flue card overflowed the 2 MiB test thread; a call now pays only its own format's frame. The
+    // checks above and the order of the formats are unchanged.
     if bytes.starts_with(b"frankensim-resolved-dg-performance-v1\n") {
+        return load_resolved_dg_branch(bytes, block, policy, sources, load_material);
+    }
+    if bytes.starts_with(b"frankensim-material-modal-dg-valve-v1\n") {
+        return load_material_modal_dg_branch(bytes, block, policy, sources, load_material);
+    }
+    if bytes.starts_with(b"frankensim-material-modal-valve-v1\n") {
+        return load_material_modal_branch(bytes, block, policy, sources, load_material, load_radiation);
+    }
+    if bytes.starts_with(b"frankensim-flue-dg-performance-v1\n") {
+        return load_flue_dg_branch(bytes, block, policy, sources, load_material, flow_tap.as_ref());
+    }
+    if bytes.starts_with(b"frankensim-flue-performance-v1\n") {
+        load_flue_branch(bytes, block, policy, sources, load_material, load_radiation, flow_tap)
+    } else if bytes.starts_with(b"frankensim-plate-valve-performance-v1\n") {
+        load_plate_valve_branch(bytes, block, policy, sources, load_material)
+    } else {
+        load_reed_branch(bytes, block, policy, sources, load_material, outlet_latency, flow_tap)
+    }
+}
+
+/// The resolved DG file format (see `load_with_all_sources`). The branch functions keep their bodies' indentation.
+#[inline(never)]
+fn load_resolved_dg_branch(
+    bytes: &[u8],
+    block: usize,
+    policy: ObservationPolicy,
+    sources: Option<&ThermochemicalSources<'_>>,
+    load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
+) -> Result<Loaded, String> {
         if policy == ObservationPolicy::Acceptance {
             return Err("resolved flow still requires source geometry, boundary and coupling convergence plus measured specimen qualification before --acceptance".into());
         }
@@ -1479,13 +1514,22 @@ fn load_with_all_sources(
         ).map_err(|e| e.to_string())?;
         let info = p.info();
         let source_json = resolved_provenance(&p);
-        return Ok(Loaded {
+        Ok(Loaded {
             source: Box::new(p.into_renderer()), rate: info.sample_rate_hz, samples: info.samples,
             full_scale_pa: info.full_scale_pa, hash: info.input_hash,
             fixture: "resolved-dg-input", source_json, observation_json: None, airway: None,
-        });
-    }
-    if bytes.starts_with(b"frankensim-material-modal-dg-valve-v1\n") {
+        })
+}
+
+/// The material-modal DG valve file format (see `load_with_all_sources`).
+#[inline(never)]
+fn load_material_modal_dg_branch(
+    bytes: &[u8],
+    block: usize,
+    policy: ObservationPolicy,
+    sources: Option<&ThermochemicalSources<'_>>,
+    load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
+) -> Result<Loaded, String> {
         if policy == ObservationPolicy::Acceptance {
             return Err("material-modal DG files retain flat DKT plates and a finite modal interface; exact propagation does not qualify a measured instrument".into());
         }
@@ -1494,13 +1538,23 @@ fn load_with_all_sources(
         ).map_err(|e| e.to_string())?;
         let i = p.info();
         let source_json = material_modal_dg_provenance(&p);
-        return Ok(Loaded {
+        Ok(Loaded {
             source: Box::new(p.into_renderer()), rate: i.output_rate_hz,
             samples: i.samples, full_scale_pa: i.full_scale_pa, hash: i.input_hash,
             fixture: "material-modal-dg-input", source_json, observation_json: None, airway: None,
-        });
-    }
-    if bytes.starts_with(b"frankensim-material-modal-valve-v1\n") {
+        })
+}
+
+/// The material-modal valve file format (see `load_with_all_sources`).
+#[inline(never)]
+fn load_material_modal_branch(
+    bytes: &[u8],
+    block: usize,
+    policy: ObservationPolicy,
+    sources: Option<&ThermochemicalSources<'_>>,
+    load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
+    load_radiation: impl FnMut(&str) -> Result<Vec<u8>, String>,
+) -> Result<Loaded, String> {
         if policy == ObservationPolicy::Acceptance {
             return Err("material-modal files retain flat DKT walls and a finite modal interface; matched baffled observation is not a measured instrument qualification".into());
         }
@@ -1516,15 +1570,22 @@ fn load_with_all_sources(
         let observation_json = format!("{{\"mechanics_sample_rate_hz\":{},\"mechanics_samples\":{},\"output_sample_rate_hz\":{},\"ratio\":{ratio},\"filter\":\"shared multirate differentiating Rayleigh receiver with bandlimited propagation\",\"delay_output_samples\":{:e},\"propagation_fir_support_output_samples\":[{},{}],\"initial_history\":\"zero\",\"delay_compensated\":false,\"tail\":\"no-flush-declared-window\"}}",
             i.mechanics_rate_hz, i.samples * u64::from(ratio), i.output_rate_hz,
             microphone.filter_delay_samples(), microphone.delay_samples.0, microphone.delay_samples.1);
-        return Ok(Loaded { source: Box::new(p.into_renderer()), rate: i.output_rate_hz,
+        Ok(Loaded { source: Box::new(p.into_renderer()), rate: i.output_rate_hz,
             samples: i.samples, full_scale_pa: i.full_scale_pa, hash: i.input_hash,
-            fixture: "material-modal-valve-input", source_json, observation_json: Some(observation_json), airway: None });
-    }
-    // Exact versioned source header selects the existing owner; filenames and
-    // instrument labels never choose geometry or material constants.
-    // The exact DG source reuses the same jet and material input owners. Its
-    // selected same-clock pressure follows the explicit decimation path below.
-    if bytes.starts_with(b"frankensim-flue-dg-performance-v1\n") {
+            fixture: "material-modal-valve-input", source_json, observation_json: Some(observation_json), airway: None })
+}
+
+/// The exact DG flue file format (see `load_with_all_sources`). The exact DG source reuses the same jet and material
+/// input owners. Its selected same-clock pressure follows the explicit decimation path. `flow_tap` is only inspected.
+#[inline(never)]
+fn load_flue_dg_branch(
+    bytes: &[u8],
+    block: usize,
+    policy: ObservationPolicy,
+    sources: Option<&ThermochemicalSources<'_>>,
+    load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
+    flow_tap: Option<&(Box<dyn Write + Send>, bool)>,
+) -> Result<Loaded, String> {
         use fs_couple::flue_loop::dg::performance::file::FlueDgFilePerformance;
         if policy == ObservationPolicy::Acceptance {
             return Err("DG flue files retain an exploration-only jet card; --acceptance requires resolved qualified source flow".into());
@@ -1536,11 +1597,22 @@ fn load_with_all_sources(
             bytes, block, &CancelGate::new(), sources, load_material).map_err(|e| e.to_string())?;
         let i = p.info();
         let source_json = flue_dg_provenance(&p);
-        return Ok(Loaded { source: Box::new(p.into_renderer()), rate: i.sample_rate_hz,
+        Ok(Loaded { source: Box::new(p.into_renderer()), rate: i.sample_rate_hz,
             samples: i.samples, full_scale_pa: i.full_scale_pa, hash: i.input_hash,
-            fixture: "flue-dg-input", source_json, observation_json: None, airway: None });
-    }
-    if bytes.starts_with(b"frankensim-flue-performance-v1\n") {
+            fixture: "flue-dg-input", source_json, observation_json: None, airway: None })
+}
+
+/// The flue file format (see `load_with_all_sources`).
+#[inline(never)]
+fn load_flue_branch(
+    bytes: &[u8],
+    block: usize,
+    policy: ObservationPolicy,
+    sources: Option<&ThermochemicalSources<'_>>,
+    load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
+    load_radiation: impl FnMut(&str) -> Result<Vec<u8>, String>,
+    flow_tap: Option<(Box<dyn Write + Send>, bool)>,
+) -> Result<Loaded, String> {
         if policy == ObservationPolicy::Acceptance {
             return Err("flue files retain an explicitly estimated tonal-jet/cylindrical-graph image; --acceptance requires an independently qualified physical model".into());
         }
@@ -1569,7 +1641,17 @@ fn load_with_all_sources(
         Ok(Loaded { source,rate:i.sample_rate_hz,samples:i.samples,
             full_scale_pa:i.full_scale_pa,hash:i.input_hash,fixture:"flue-input",source_json,
             observation_json:Some(observation_json),airway })
-    } else if bytes.starts_with(b"frankensim-plate-valve-performance-v1\n") {
+}
+
+/// The plate-valve file format (see `load_with_all_sources`).
+#[inline(never)]
+fn load_plate_valve_branch(
+    bytes: &[u8],
+    block: usize,
+    policy: ObservationPolicy,
+    sources: Option<&ThermochemicalSources<'_>>,
+    load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
+) -> Result<Loaded, String> {
         if policy == ObservationPolicy::Acceptance {
             return Err("--acceptance selects the explicit ReedPerformance flanged-development path; plate-valve files require explicit matched-load builder admission".into());
         }
@@ -1614,7 +1696,19 @@ fn load_with_all_sources(
             requested,i.represented_tube_length_m,plate.mass_kg(),plate.stiffness_n_m(),plate.pressure_area_m2());
         Ok(Loaded{source:Box::new(p.into_renderer()),rate:i.sample_rate_hz,samples:i.samples,
             full_scale_pa:i.full_scale_pa,hash:i.input_hash,fixture:"plate-valve-input",source_json,observation_json:None,airway:None})
-    } else {
+}
+
+/// The reed file format, which is also what every file without another format's header is read as (see `load_with_all_sources`).
+#[inline(never)]
+fn load_reed_branch(
+    bytes: &[u8],
+    block: usize,
+    policy: ObservationPolicy,
+    sources: Option<&ThermochemicalSources<'_>>,
+    load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
+    outlet_latency: OutletLatency,
+    flow_tap: Option<(Box<dyn Write + Send>, bool)>,
+) -> Result<Loaded, String> {
         let mut p=ReedPerformance::from_bytes_with_sources_and_outlet_latency(bytes,block,policy,sources,load_material,outlet_latency).map_err(|e|e.to_string())?;
         if let Some((tap, _)) = flow_tap { p.record_reed_opening(tap).map_err(|e| e.to_string())?; }
         let i=p.info();
@@ -1635,7 +1729,6 @@ fn load_with_all_sources(
             i.input_hash.to_hex(),i.segments,i.tone_holes,i.massive_reed,i.gesture_events,i.compiled_controls);
         Ok(Loaded{source:Box::new(p),rate:i.sample_rate_hz,samples:i.samples,
             full_scale_pa:i.full_scale_pa,hash:i.input_hash,fixture:"reed-input",source_json,observation_json:None,airway:None})
-    }
 }
 
 pub(super) fn run(args: &[String]) -> Result<(), String> {

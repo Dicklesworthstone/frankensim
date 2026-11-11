@@ -42,7 +42,7 @@
 //! row preserves the original lossless observer; bore and source physics stay
 //! unchanged by this observation-only selection.
 
-use super::{FlueMouthRadiation, FlueOutletConfig, FlueOutletPerformance, FlueRadiationInput};
+use super::{FlueMouthRadiation, FlueOutletConfig, FlueOutletPerformance, FlueRadiatingOutlet, FlueRadiationInput};
 use crate::bernoulli_aperture::fractional::FractionalTubePolicy;
 use crate::bernoulli_aperture::network::{NetworkNode, TubeNetworkSpec, TubeSection};
 use crate::bernoulli_aperture::radiation::environment::BaffledOutletBinding;
@@ -784,118 +784,28 @@ impl FlueFilePerformance {
                 .map_err(FlueInputError::Physics)?, Vec::new())
         };
         let held_pressure_pa = held_blowing_pressure(&schedule, control_source.as_ref());
-        let voice = flow_input.attach(voice, held_pressure_pa)?;
-        let voice = jet_input.attach(voice, held_pressure_pa, gate)?;
-        let voice = match jet_noise {
-            Some(spec) => voice.with_jet_noise(spec).map_err(FlueInputError::Physics)?,
-            None => voice,
-        };
-        // After every windway and jet row, so the rows held on the held pressure refuse it by name.
-        let voice = match &upstream_airway {
-            Some(record) => {
-                let voice = voice.with_upstream_airway(&record.chain, &airway::ladder()).map_err(FlueInputError::Physics)?;
-                if record.two_way { voice.with_two_way_windway().map_err(FlueInputError::Physics)? } else { voice }
-            }
-            None => voice,
-        };
-        let voice = match &window {
-            Some(record) => voice.with_window_mass(record.mass_per_density(),
-                record.riser_mass_per_density).map_err(FlueInputError::Physics)?,
-            None => voice,
-        };
-        let voice = match jet_forcing_area_m2 {
-            Some(area) => voice.with_jet_forcing_area(area).map_err(FlueInputError::Physics)?,
-            None => voice,
-        };
-        let voice = match jet_forcing_area_m2 {
-            Some(area) if jet_source_on_strip => voice.with_jet_source_area(area).map_err(FlueInputError::Physics)?,
-            _ => voice,
-        };
-        let voice = match (window_reaction, &window) {
-            (Some((flux, sampling)), Some(record)) => {
-                // The finest rung's outer face carries the flux distribution.
-                let face = &record.ladder.rungs[record.ladder.rungs.len() - 1].outer_cells;
-                let piston = [cut_up_piston(face, record.window.axial_length)];
-                let cells = match flux {
-                    WindowFlux::WallWindow => face.as_slice(),
-                    WindowFlux::CutUpPiston => &piston[..],
-                };
-                let load = WindowRadiationLoad::new_with_sampling(
-                    record.window.bore_radius + record.window.wall_thickness, cells, flux,
-                    exterior, voice.sample_period_s(), sampling, gate).map_err(FlueInputError::Physics)?;
-                voice.with_window_radiation(load).map_err(FlueInputError::Physics)?
-            }
-            _ => voice,
-        };
-        let mechanical_samples = samples.checked_mul(u64::from(mechanics_rate_hz / sample_rate_hz))
-            .ok_or_else(|| bad(0, "moving boundary step window overflows"))?;
-        let (voice, boundary_records) = boundaries.bind(voice, mechanical_samples,
-            &mut material_sources, &mut load_material, gate)?;
-        let voice = match control_source {
-            Some(paths) => voice.with_source_control_paths(paths).map_err(FlueInputError::Physics)?,
-            None => voice,
-        };
-        let (voice, mimo_radiation_record, computed_radiation_record) = match mimo_input {
-            Some((line, input)) => {
-                let context = radiation();
-                let original = voice.network().expect("constructed physical flue graph").source();
-                let (model, record) = input.build(&original.graph, &original.gases, &context,
-                    &exterior_record, sources, &mut load_radiation, gate)
-                    .map_err(|source| FlueInputError::RadiationSource { line, source })?;
-                let voice = voice.with_mimo_environment(model, context, input.limits(), gate)
-                    .map_err(FlueInputError::Physics)?;
-                match record {
-                    MimoSourceRecord::Artifact(record) => (voice, Some(record), None),
-                    MimoSourceRecord::ComputedBaffled(record) => (voice, None, Some(record)),
-                }
-            }
-            None => (voice, None, None),
-        };
-        let voice = if opening_losses.is_empty() { voice } else {
-            voice.with_opening_losses(opening_losses, gate).map_err(FlueInputError::Physics)?
-        };
-        let voice = match outlet_mutual {
-            Some((line, form)) => {
-                // The self loads' own exterior gas, one for every outlet.
-                let Some(first) = radiation_bindings.first().map(|b| *b.load()) else {
-                    return Err(bad(line, "outlet_mutual requires installed compact outlet loads"));
-                };
-                let (density, sound_speed) = (first.density_kg_m3(), first.sound_speed_m_s());
-                if radiation_bindings.iter().any(|b| b.load().density_kg_m3().to_bits() != density.to_bits()
-                    || b.load().sound_speed_m_s().to_bits() != sound_speed.to_bits())
-                {
-                    return Err(bad(line, "outlet_mutual needs one exterior gas for every outlet load"));
-                }
-                let mut outlets = vec![(outlet_node, [0.0; 2])];
-                outlets.extend(additional_outlets.iter().map(|outlet| (outlet.node, outlet.center_m)));
-                voice.with_outlet_mutual_form(form, &outlets, density, sound_speed, receiver.maximum_frequency_hz, gate)
-                    .map_err(|error| match error {
-                        FlueError::Invalid { what } => bad(line, what),
-                        other => FlueInputError::Physics(other),
-                    })?
-            }
-            None => voice,
-        };
+        // The stages that act on the built voice run in calls of their own. A debug build gives every `Result` temporary
+        // of every stage its own stack slot, and the 7 KB voice passed through about sixteen stages made this one function a
+        // frame of about 1 MB, which overflowed the 2 MiB test thread. The stages and their order are unchanged.
+        let voice = apply_jet_rows(voice, flow_input, jet_input, held_pressure_pa, jet_noise, upstream_airway.as_ref(), gate)?;
+        let voice = apply_window_rows(voice, window.as_ref(), jet_forcing_area_m2, jet_source_on_strip, window_reaction, exterior, gate)?;
+        // Each stage that moves the voice or the renderer by value runs in a call of its own, so its stack slots die at the
+        // return (see the note above `apply_jet_rows`). The stages and their order are unchanged.
+        let (voice, boundary_records) = bind_boundary_rows(voice, boundaries, samples, mechanics_rate_hz, sample_rate_hz,
+            &mut material_sources, &mut load_material, control_source, gate)?;
+        let (voice, mimo_radiation_record, computed_radiation_record) = bind_mimo_environment(voice, mimo_input, &radiation,
+            &exterior_record, sources, &mut load_radiation, gate)?;
+        let voice = apply_opening_rows(voice, opening_losses, outlet_mutual, &radiation_bindings, outlet_node,
+            &additional_outlets, receiver.maximum_frequency_hz, gate)?;
         // After every jet row: the voice names the jet law that refuses a length track.
         let voice = if jet_length_track {
             voice.admit_jet_length().map_err(FlueInputError::Physics)?
         } else { voice };
-        let mut renderer = FlueOutletPerformance::with_multirate_radiation(voice, schedule,
+        let renderer = build_outlet_renderer(voice, schedule,
             FlueOutletConfig { sample_rate_hz, samples, max_block, max_controls, max_compile_work,
                 outlet_node, receiver, maximum_abs_pressure_pa },
-            FlueRadiationInput { exterior, additional_outlets }, mechanics_rate_hz)
-            .map_err(FlueInputError::Performance)?;
-        if let Some(mouth) = mouth_radiation {
-            renderer = renderer.with_mouth_radiation(mouth).map_err(FlueInputError::Performance)?;
-        }
-        if mouth_reaction {
-            renderer = renderer.with_mouth_reaction(gate).map_err(FlueInputError::Performance)?;
-        }
-        if let Some(propagation) = observer_gas {
-            renderer = renderer
-                .with_observer_gas(&propagation, gate)
-                .map_err(FlueInputError::Performance)?;
-        }
+            FlueRadiationInput { exterior, additional_outlets }, mechanics_rate_hz,
+            mouth_radiation, mouth_reaction, observer_gas, gate)?;
         poll(gate)?;
         let info = FluePerformanceInfo { input_hash: hash_domain("org.frankensim.fs-couple.flue-performance.v1",bytes),
             mechanics_rate_hz, sample_rate_hz, samples, full_scale_pa,
@@ -943,6 +853,209 @@ impl FlueFilePerformance {
     #[must_use] pub const fn upstream_airway(&self) -> Option<&FlueAirwayRecord> { self.upstream_airway.as_ref() }
     /// Move the original physical pressure producer into streaming/PCM output.
     #[must_use] pub fn into_renderer(self) -> FlueOutletPerformance { self.renderer }
+}
+
+/// The windway and jet inputs, the opt-in breath noise and the player's airway, applied to the built voice in that order
+/// (a stage of `FlueFilePerformance::from_bytes_with_all_sources`, kept in a call of its own for the frame size noted there).
+#[inline(never)]
+fn apply_jet_rows(
+    voice: FlueVoice,
+    flow_input: FlueFlowInput,
+    jet_input: FlueJetInput,
+    held_pressure_pa: f64,
+    jet_noise: Option<JetNoiseSpec>,
+    upstream_airway: Option<&FlueAirwayRecord>,
+    gate: &CancelGate,
+) -> Result<FlueVoice, FlueInputError> {
+    let voice = flow_input.attach(voice, held_pressure_pa)?;
+    let voice = jet_input.attach(voice, held_pressure_pa, gate)?;
+    let voice = match jet_noise {
+        Some(spec) => voice.with_jet_noise(spec).map_err(FlueInputError::Physics)?,
+        None => voice,
+    };
+    // After every windway and jet row, so the rows held on the held pressure refuse it by name.
+    let voice = match upstream_airway {
+        Some(record) => {
+            let voice = voice.with_upstream_airway(&record.chain, &airway::ladder()).map_err(FlueInputError::Physics)?;
+            if record.two_way { voice.with_two_way_windway().map_err(FlueInputError::Physics)? } else { voice }
+        }
+        None => voice,
+    };
+    Ok(voice)
+}
+
+/// The window's mass, the jet forcing and source areas and the window's radiation load, applied to the voice in that order
+/// (a stage of `FlueFilePerformance::from_bytes_with_all_sources`, kept in a call of its own for the frame size noted there).
+#[inline(never)]
+fn apply_window_rows(
+    voice: FlueVoice,
+    window: Option<&FlueWindowRecord>,
+    jet_forcing_area_m2: Option<f64>,
+    jet_source_on_strip: bool,
+    window_reaction: Option<(WindowFlux, WindowRadiationSampling)>,
+    exterior: GasState,
+    gate: &CancelGate,
+) -> Result<FlueVoice, FlueInputError> {
+    let voice = match window {
+        Some(record) => voice.with_window_mass(record.mass_per_density(),
+            record.riser_mass_per_density).map_err(FlueInputError::Physics)?,
+        None => voice,
+    };
+    let voice = match jet_forcing_area_m2 {
+        Some(area) => voice.with_jet_forcing_area(area).map_err(FlueInputError::Physics)?,
+        None => voice,
+    };
+    let voice = match jet_forcing_area_m2 {
+        Some(area) if jet_source_on_strip => voice.with_jet_source_area(area).map_err(FlueInputError::Physics)?,
+        _ => voice,
+    };
+    let voice = match (window_reaction, window) {
+        (Some((flux, sampling)), Some(record)) => {
+            // The finest rung's outer face carries the flux distribution.
+            let face = &record.ladder.rungs[record.ladder.rungs.len() - 1].outer_cells;
+            let piston = [cut_up_piston(face, record.window.axial_length)];
+            let cells = match flux {
+                WindowFlux::WallWindow => face.as_slice(),
+                WindowFlux::CutUpPiston => &piston[..],
+            };
+            let load = WindowRadiationLoad::new_with_sampling(
+                record.window.bore_radius + record.window.wall_thickness, cells, flux,
+                exterior, voice.sample_period_s(), sampling, gate).map_err(FlueInputError::Physics)?;
+            voice.with_window_radiation(load).map_err(FlueInputError::Physics)?
+        }
+        _ => voice,
+    };
+    Ok(voice)
+}
+
+/// The moving chimney boundaries bound to the voice (their step window checked first), then the source control paths
+/// (stages of `FlueFilePerformance::from_bytes_with_all_sources`, in a call of their own for the frame size noted at `apply_jet_rows`).
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn bind_boundary_rows(
+    voice: FlueVoice,
+    boundaries: boundary::ParsedBoundaries,
+    samples: u64,
+    mechanics_rate_hz: u32,
+    sample_rate_hz: u32,
+    material_sources: &mut material::Sources,
+    load_material: &mut impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
+    control_source: Option<FlueSourcePaths>,
+    gate: &CancelGate,
+) -> Result<(FlueVoice, Vec<FlueBoundaryRecord>), FlueInputError> {
+    let mechanical_samples = samples.checked_mul(u64::from(mechanics_rate_hz / sample_rate_hz))
+        .ok_or_else(|| bad(0, "moving boundary step window overflows"))?;
+    let (voice, boundary_records) = boundaries.bind(voice, mechanical_samples,
+        material_sources, load_material, gate)?;
+    let voice = match control_source {
+        Some(paths) => voice.with_source_control_paths(paths).map_err(FlueInputError::Physics)?,
+        None => voice,
+    };
+    Ok((voice, boundary_records))
+}
+
+/// The shared terminal model of a `radiation mimo` or `computed-baffled` row built from the voice's graph and attached to it
+/// (a stage of `FlueFilePerformance::from_bytes_with_all_sources`, in a call of its own for the frame size noted at `apply_jet_rows`).
+#[inline(never)]
+fn bind_mimo_environment(
+    voice: FlueVoice,
+    mimo_input: Option<(usize, MimoSourceInput)>,
+    radiation: &impl Fn() -> DuctRadiationSpec,
+    exterior_record: &GasRecord,
+    sources: Option<&ThermochemicalSources<'_>>,
+    load_radiation: &mut impl FnMut(&str) -> Result<Vec<u8>, String>,
+    gate: &CancelGate,
+) -> Result<(FlueVoice, Option<MimoRadiationRecord>, Option<ComputedBaffledRecord>), FlueInputError> {
+    let (voice, mimo_radiation_record, computed_radiation_record) = match mimo_input {
+        Some((line, input)) => {
+            let context = radiation();
+            let original = voice.network().expect("constructed physical flue graph").source();
+            let (model, record) = input.build(&original.graph, &original.gases, &context,
+                exterior_record, sources, load_radiation, gate)
+                .map_err(|source| FlueInputError::RadiationSource { line, source })?;
+            let voice = voice.with_mimo_environment(model, context, input.limits(), gate)
+                .map_err(FlueInputError::Physics)?;
+            match record {
+                MimoSourceRecord::Artifact(record) => (voice, Some(record), None),
+                MimoSourceRecord::ComputedBaffled(record) => (voice, None, Some(record)),
+            }
+        }
+        None => (voice, None, None),
+    };
+    Ok((voice, mimo_radiation_record, computed_radiation_record))
+}
+
+/// The separation losses of the `opening_losses` rows, then the delayed mutual radiation between the compact outlets
+/// (stages of `FlueFilePerformance::from_bytes_with_all_sources`, in a call of their own for the frame size noted at `apply_jet_rows`).
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn apply_opening_rows(
+    voice: FlueVoice,
+    opening_losses: Vec<crate::bernoulli_aperture::opening_loss::OpeningLossInput>,
+    outlet_mutual: Option<(usize, crate::flue_loop::network::outlet_mutual::OutletMutualForm)>,
+    radiation_bindings: &[BaffledOutletBinding],
+    outlet_node: usize,
+    additional_outlets: &[FlueRadiatingOutlet],
+    receiver_maximum_frequency_hz: f64,
+    gate: &CancelGate,
+) -> Result<FlueVoice, FlueInputError> {
+    let voice = if opening_losses.is_empty() { voice } else {
+        voice.with_opening_losses(opening_losses, gate).map_err(FlueInputError::Physics)?
+    };
+    let voice = match outlet_mutual {
+        Some((line, form)) => {
+            // The self loads' own exterior gas, one for every outlet.
+            let Some(first) = radiation_bindings.first().map(|b| *b.load()) else {
+                return Err(bad(line, "outlet_mutual requires installed compact outlet loads"));
+            };
+            let (density, sound_speed) = (first.density_kg_m3(), first.sound_speed_m_s());
+            if radiation_bindings.iter().any(|b| b.load().density_kg_m3().to_bits() != density.to_bits()
+                || b.load().sound_speed_m_s().to_bits() != sound_speed.to_bits())
+            {
+                return Err(bad(line, "outlet_mutual needs one exterior gas for every outlet load"));
+            }
+            let mut outlets = vec![(outlet_node, [0.0; 2])];
+            outlets.extend(additional_outlets.iter().map(|outlet| (outlet.node, outlet.center_m)));
+            voice.with_outlet_mutual_form(form, &outlets, density, sound_speed, receiver_maximum_frequency_hz, gate)
+                .map_err(|error| match error {
+                    FlueError::Invalid { what } => bad(line, what),
+                    other => FlueInputError::Physics(other),
+                })?
+        }
+        None => voice,
+    };
+    Ok(voice)
+}
+
+/// The physical outlet renderer around the voice, then its optional mouth radiation, mouth reaction and observer gas
+/// (stages of `FlueFilePerformance::from_bytes_with_all_sources`, in a call of their own for the frame size noted at `apply_jet_rows`).
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn build_outlet_renderer(
+    voice: FlueVoice,
+    schedule: GestureSchedule,
+    config: FlueOutletConfig,
+    radiation_input: FlueRadiationInput,
+    mechanics_rate_hz: u32,
+    mouth_radiation: Option<FlueMouthRadiation>,
+    mouth_reaction: bool,
+    observer_gas: Option<GasPropagation>,
+    gate: &CancelGate,
+) -> Result<FlueOutletPerformance, FlueInputError> {
+    let mut renderer = FlueOutletPerformance::with_multirate_radiation(voice, schedule, config, radiation_input, mechanics_rate_hz)
+        .map_err(FlueInputError::Performance)?;
+    if let Some(mouth) = mouth_radiation {
+        renderer = renderer.with_mouth_radiation(mouth).map_err(FlueInputError::Performance)?;
+    }
+    if mouth_reaction {
+        renderer = renderer.with_mouth_reaction(gate).map_err(FlueInputError::Performance)?;
+    }
+    if let Some(propagation) = observer_gas {
+        renderer = renderer
+            .with_observer_gas(&propagation, gate)
+            .map_err(FlueInputError::Performance)?;
+    }
+    Ok(renderer)
 }
 
 /// Network acoustic aperture record; no change to the flue source.
