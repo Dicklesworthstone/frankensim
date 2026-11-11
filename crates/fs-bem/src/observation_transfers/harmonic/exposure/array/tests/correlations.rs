@@ -1,10 +1,19 @@
 use super::*;
 
+// The query ceiling is the admitted query-product count of the mixed fixture below (5 pairs, 3 banks of 2 lines,
+// 4 distinct first channels), derived from correlation.rs `query_products`:
+//   (banks - 1) pairs                                  = 2 * 5                     = 10
+//   readout::admission per bank, max(count pairs 4, linear::admission(count, first + pairs)) with
+//     linear::admission(2, 9) = (2 + 1) (4 + 2 * 36) 9 + (2 (36 + 4) + 16 * 36 + 4) = 2052 + 660 = 2712,
+//     times 3 banks                                                                  = 8136
+//   band::admission per bank, max(count^2 pairs, ((first + pairs) count + pairs + columns) 17), columns 2 count
+//     (Real) or count (ProperComplex): Real 459 (reference and first factor), ProperComplex 425 = 1343
+//   total 10 + 8136 + 1343 = 9489. The readout term arrived with 45b7a27b85, after this fixture's 8192.
 fn correlation_limits() -> HarmonicPressureCorrelationLimits {
     HarmonicPressureCorrelationLimits {
         maximum_channel_pairs: 32,
         maximum_prepare_products: 8192,
-        maximum_query_products: 8192,
+        maximum_query_products: 9489,
         maximum_workspace_bytes: 1_000_000,
     }
 }

@@ -366,8 +366,13 @@ fn microphone_admission_budgets_and_cancellation_leave_reusable_inputs() {
         Err(TransferError::Cap { .. })
     ));
     budget = limits();
-    // Old pressure-only preparation is admitted; the full p/u work is not free.
-    budget.maximum_prepare_products = 128;
+    // Pressure-only preparation is admitted at exactly its own product count; the full p/u work is not free.
+    // array.rs `prepare_products` = 3 lines taps + nonempty_banks taps + lines bank_count + microphone_products.
+    // Here lines 6 (three banks of two), taps 7 (2 + 2 + 3), nonempty banks 3, bank_count 3 (two factors and
+    // the reference) and no microphone term without patterns: 3*6*7 + 3*7 + 6*3 = 165. The p/u preparation adds
+    // 2 microphones * (4 lines + 8) = 64, so it needs 229. (54a084112a moved the per-tap factor from 2 to 3 and
+    // added the bank term; the earlier literal 128 sat between the previous 102 and 166.)
+    budget.maximum_prepare_products = 165;
     assert!(PreparedHarmonicPressureArray::new(&exposure, &channels, budget).is_ok());
     assert!(matches!(
         PreparedHarmonicPressureArray::new_with_microphones(
