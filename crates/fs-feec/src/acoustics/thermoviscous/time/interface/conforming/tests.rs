@@ -1,5 +1,31 @@
 use super::*;
 
+// Full matching P2 vector/thermal traces add many independent work observations: the fs-phs admission reserves
+// d^3 * 224 * count multiply terms (prepared.rs:287-298), and for the two-tet pair below that exceeds the default
+// 20_000_000_000. The same override and the same reason as volume_source/interface/tests.rs:6-12 (b39b02159a):
+// admit the native cold work without dropping any field. `quadratic_work` computes the reservation from the pair's
+// own dimensions for the planted negative in the first test.
+fn full_trace_limits() -> ThermoviscousTimeLimits {
+    let mut limits = ThermoviscousTimeLimits::default();
+    limits.preparation.max_multiply_terms = 80_000_000_000;
+    limits
+}
+
+fn quadratic_work(
+    left: &PreparedThermoviscousTime<'_, '_>,
+    right: &PreparedThermoviscousTime<'_, '_>,
+    pair: &PreparedConformingThermoviscousTimePair<'_, '_, '_>,
+) -> u64 {
+    // d = n + ports + 1; count = the quadratic forms plus every linear observation (the two original port rows and, for
+    // each of the interface columns, two interface flows and one reaction row), as built in interface.rs:207-294.
+    let d = (pair.system().state_dim() + pair.system().port_dim() + 1) as u64;
+    let count = (super::super::QUADRATIC_FORMS
+        + left.system.port_dim()
+        + right.system.port_dim()
+        + 3 * pair.inner.interface_count) as u64;
+    d.pow(3) * 224 * count
+}
+
 fn geometry(right: bool, permuted: bool) -> (TetComplex, Vec<[f64; 3]>) {
     let (mesh, points) = super::super::tests::geometry(right);
     if !permuted {
@@ -113,14 +139,24 @@ fn complete_original_dae_matches_independent_primal_trace_elimination() {
     let l = prepared(&left, 1e-6);
     let r = prepared(&right, 1e-6);
     let pair = l
-        .connect_conforming(
-            &r,
-            &[lf],
-            &[rf],
-            ThermoviscousTimeLimits::default(),
-            &mut || false,
-        )
+        .connect_conforming(&r, &[lf], &[rf], full_trace_limits(), &mut || false)
         .unwrap();
+    // The reservation exceeds the default cap and fits the override; one term below it, the same pair is refused.
+    let work = quadratic_work(&l, &r, &pair);
+    let default_cap = ThermoviscousTimeLimits::default()
+        .preparation
+        .max_multiply_terms;
+    assert!(default_cap < work && work <= full_trace_limits().preparation.max_multiply_terms);
+    let mut tight = full_trace_limits();
+    tight.preparation.max_multiply_terms = work - 1;
+    assert!(matches!(
+        l.connect_conforming(&r, &[lf], &[rf], tight, &mut || false),
+        Err(
+            crate::acoustics::thermoviscous::time::ThermoviscousTimeError::Propagation(
+                fs_phs::PhsError::LinearSplitBudget { .. }
+            )
+        )
+    ));
     let sizes = [l.system.state_dim(), r.system.state_dim()];
     let n = sizes.iter().sum::<usize>();
     assert_eq!(pair.system().state_dim(), n);
@@ -248,13 +284,7 @@ fn full_trace_transmits_shear_and_heat_with_separate_same_trajectory_work() {
     let l = prepared(&left, 4e-6);
     let r = prepared(&right, 4e-6);
     let pair = l
-        .connect_conforming(
-            &r,
-            &[lf],
-            &[rf],
-            ThermoviscousTimeLimits::default(),
-            &mut || false,
-        )
+        .connect_conforming(&r, &[lf], &[rf], full_trace_limits(), &mut || false)
         .unwrap();
     let mut states = pair.zero_states();
     let apex = lp.iter().position(|p| p[0] > 0.0).unwrap();
@@ -379,7 +409,7 @@ fn incompatible_trace_geometry_clock_and_cancelled_candidates_never_update_sourc
     let l = prepared(&left, 1e-6);
     let r = prepared(&right, 1e-6);
     let half = prepared(&right, 0.5e-6);
-    let limits = ThermoviscousTimeLimits::default();
+    let limits = full_trace_limits();
     assert!(
         l.connect_conforming(&l, &[lf], &[lf], limits, &mut || false)
             .is_err()

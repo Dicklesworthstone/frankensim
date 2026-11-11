@@ -191,7 +191,11 @@ fn nonaxisymmetric_cylinder_fields_and_bessel_mode_frequencies_converge_in_h() {
             let derivative = 0.5 * k * (bessel_j(m - 1, k) - bessel_j(m + 1, k));
             let mut previous = [f64::INFINITY; 2];
             for nr in [4, 8, 16] {
-                let mesh = rectangle(0.0, 1.0, 0.4, nr, 2, false);
+                // h-refinement in BOTH directions. With nz fixed at 2 the axial cell size stays 0.2 while nr doubles, and
+                // the first run of this test measured a rate of 1.22 at nr = 8 (band 1.5..2.5 below). nz = nr / 2 refines
+                // the axial direction with the radial one and keeps the cell aspect h_z / h_r = 0.8 of the nr = 4 mesh at
+                // every level.
+                let mesh = rectangle(0.0, 1.0, 0.4, nr, nr / 2, false);
                 let model = AxisymmetricPressureFe::new_fourier(
                     &mesh,
                     &materials(&mesh),

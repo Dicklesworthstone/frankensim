@@ -155,58 +155,73 @@ fn a_density_jump_reflects_even_when_sound_speed_is_unchanged() {
         density_kg_m3: 4.8,
         sound_speed_m_s: 2.0,
     };
-    let (complex, positions) = brick([8, 1, 1], [1.0, 0.2, 0.2]);
-    let geometry = HelmholtzFe::new(&complex, &positions, 2, UNIFORM).unwrap();
-    let model = HeterogeneousHelmholtzFe::new(
-        &geometry,
-        4,
-        &mut |_, point| Ok::<_, AcousticFeError>(if point[0] < 0.5 { left } else { right }),
-        &mut || false,
-    )
-    .unwrap();
-    let inlet = plane(&geometry, 0, 0.0);
-    let outlet = plane(&geometry, 0, 1.0);
     let z1 = left.density_kg_m3 * left.sound_speed_m_s;
     let z2 = right.density_kg_m3 * right.sound_speed_m_s;
     let reflection = (z2 - z1) / (z2 + z1);
+    assert!((reflection - 0.6).abs() < 1e-15);
     let omega = 2.0;
     let k = omega / left.sound_speed_m_s;
-    let prepared = model
-        .prepare(
-            omega / core::f64::consts::TAU,
-            &[
-                BoundaryAdmittance {
-                    faces: inlet.clone(),
-                    admittance_m_pa_s: C64::from_re(1.0 / z1),
-                },
-                BoundaryAdmittance {
-                    faces: outlet,
-                    admittance_m_pa_s: C64::from_re(1.0 / z2),
-                },
-            ],
-            HarmonicLimits::default(),
+    // The interface at x = 0.5 is a cell face at both resolutions. At 8 cells the P2 field error is 6.6e-5 (measured
+    // on the first run of this test), above the 5e-5 gate: the gate is met by the finer mesh, and the error ratio
+    // between the two meshes is checked so that the test proves the second-order convergence the gate relies on.
+    let mut errors = Vec::new();
+    for nx in [8, 16] {
+        let (complex, positions) = brick([nx, 1, 1], [1.0, 0.2, 0.2]);
+        let geometry = HelmholtzFe::new(&complex, &positions, 2, UNIFORM).unwrap();
+        let model = HeterogeneousHelmholtzFe::new(
+            &geometry,
+            4,
+            &mut |_, point| Ok::<_, AcousticFeError>(if point[0] < 0.5 { left } else { right }),
             &mut || false,
         )
         .unwrap();
-    // Matched source boundary: incident pressure is exactly one pascal.
-    let field = prepared
-        .solve(
-            &constant_velocity(&inlet, C64::from_re(2.0 / z1)),
-            &mut || false,
-        )
-        .unwrap();
-    let error = max_field_error(&model, &field, |point| {
-        if point[0] <= 0.5 {
-            wave(k * point[0]) + wave(k * (1.0 - point[0])).scale(reflection)
-        } else {
-            wave(k * point[0]).scale(1.0 + reflection)
-        }
-    });
-    let recovered = (mean_pressure(&geometry, &field.pressure_pa, &inlet) - C64::ONE) * wave(-k);
-    assert!((reflection - 0.6).abs() < 1e-15);
-    assert!(error < 5e-5, "density-interface field error {error:e}");
-    assert!((recovered - C64::from_re(reflection)).abs() < 3e-5);
-    assert!(field.power_balance_residual_w().abs() < 1e-11);
+        let inlet = plane(&geometry, 0, 0.0);
+        let outlet = plane(&geometry, 0, 1.0);
+        let prepared = model
+            .prepare(
+                omega / core::f64::consts::TAU,
+                &[
+                    BoundaryAdmittance {
+                        faces: inlet.clone(),
+                        admittance_m_pa_s: C64::from_re(1.0 / z1),
+                    },
+                    BoundaryAdmittance {
+                        faces: outlet,
+                        admittance_m_pa_s: C64::from_re(1.0 / z2),
+                    },
+                ],
+                HarmonicLimits::default(),
+                &mut || false,
+            )
+            .unwrap();
+        // Matched source boundary: incident pressure is exactly one pascal.
+        let field = prepared
+            .solve(
+                &constant_velocity(&inlet, C64::from_re(2.0 / z1)),
+                &mut || false,
+            )
+            .unwrap();
+        let error = max_field_error(&model, &field, |point| {
+            if point[0] <= 0.5 {
+                wave(k * point[0]) + wave(k * (1.0 - point[0])).scale(reflection)
+            } else {
+                wave(k * point[0]).scale(1.0 + reflection)
+            }
+        });
+        let recovered =
+            (mean_pressure(&geometry, &field.pressure_pa, &inlet) - C64::ONE) * wave(-k);
+        errors.push(error);
+        assert!((recovered - C64::from_re(reflection)).abs() < 3e-5);
+        assert!(field.power_balance_residual_w().abs() < 1e-11);
+    }
+    assert!(
+        errors[1] < 5e-5,
+        "density-interface field errors {errors:?}"
+    );
+    assert!(
+        errors[0] > 3.5 * errors[1],
+        "density-interface refinement {errors:?}"
+    );
 }
 
 #[test]
@@ -497,7 +512,10 @@ fn continuous_coefficients_have_a_live_independent_quadrature_axis() {
     let exact_k = -det::expm1(-5.0) / 5.0;
     let exact_m = -det::expm1(-6.6) / 6.6;
     let mut errors = Vec::new();
-    for quadrature in [3, 5, 8] {
+    // The quadrature error of the analytic exponential integrands (exp(-5x), exp(-6.6x)) is Gauss truncation, and it falls
+    // geometrically with the order: the first run of this test read 5.9e-3, 1.1e-5 and 5.0e-11 at orders 3, 5 and 8, so
+    // order 8 stops short of the 3e-12 gate below and the third order is raised to 9.
+    for quadrature in [3, 5, 9] {
         let mut calls = 0;
         let model = HeterogeneousHelmholtzFe::new(
             &geometry,

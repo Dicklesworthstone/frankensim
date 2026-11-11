@@ -254,10 +254,18 @@ fn original_curved_geometry_sets_actual_volume_mass_and_physical_gradients() {
             &cx,
         )
         .unwrap();
+        // A port needs a planar face (`boundary_geometry` refuses a nonaffine one, pinned by `curved.rs`): the two faces
+        // this map bends are no-slip walls, the two that stay planar carry the port. The element observations below
+        // take their fields as arguments and do not depend on the boundary data.
+        let (planar, bent): (Vec<_>, Vec<_>) = geometry
+            .boundary_faces()
+            .into_iter()
+            .partition(|&face| geometry.boundary_geometry(face).is_ok());
+        assert_eq!((planar.len(), bent.len()), (2, 2));
         let boundary = ThermoviscousBoundary {
-            no_slip_faces: vec![],
+            no_slip_faces: bent,
             isothermal_faces: vec![],
-            ports: vec![BoundaryMode::uniform(&geometry.boundary_faces())],
+            ports: vec![BoundaryMode::uniform(&planar)],
         };
         let model =
             ThermoviscousFe::from_geometry(geometry, medium, &boundary, limits(), &mut || false)

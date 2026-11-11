@@ -126,10 +126,19 @@ fn g1_curved_force_projection_uses_original_positions_and_variable_measure() {
             &cx,
         )
         .unwrap();
+        // A port needs a planar face (`boundary_geometry` refuses a nonaffine one, pinned by `curved.rs`): the two faces
+        // this map bends are no-slip walls, the two that stay planar carry the port. The volume-force integrals below
+        // do not depend on the boundary data.
+        let (planar, bent): (Vec<_>, Vec<_>) = mesh
+            .faces
+            .iter()
+            .copied()
+            .partition(|&face| geometry.boundary_geometry(face).is_ok());
+        assert_eq!((planar.len(), bent.len()), (2, 2));
         let boundary = ThermoviscousBoundary {
-            no_slip_faces: vec![],
+            no_slip_faces: bent,
             isothermal_faces: vec![],
-            ports: vec![BoundaryMode::uniform(&mesh.faces)],
+            ports: vec![BoundaryMode::uniform(&planar)],
         };
         let model =
             ThermoviscousFe::from_geometry(geometry, gas, &boundary, limits(), &mut || false)

@@ -390,7 +390,12 @@ fn applied_force_crosses_a_local_lossless_impedance_zero_with_finite_tangent() {
             -result.response.walls[0].displacement_m[local].scale(2.0) - slope.scale(SHAPE[local]),
         );
     }
-    let h = 1e-5;
+    // Central difference: truncation ~ h^2 |f'''| / 6, roundoff ~ eps |f| / h (f = the solved field as a function of
+    // omega). With h = 1e-5 the displacement block below (the pressure block, checked first, passed) missed the 2e-7
+    // tolerance on the first run of this test. h = 3e-6 divides the truncation term by (1e-5 / 3e-6)^2 = 11 and
+    // multiplies the roundoff term by 3.3; the tolerance is unchanged, and the planted slope error below must still
+    // be refused by it.
+    let h = 3e-6;
     let mut sides = Vec::new();
     for delta in [-h, h] {
         let at = prepare(&model, 1.0 + delta, &wall, &[]);
@@ -417,6 +422,22 @@ fn applied_force_crosses_a_local_lossless_impedance_zero_with_finite_tangent() {
             .scale(0.5 / h);
         assert!((difference - result.wall_derivatives[0].displacement_m_per_rad_s[i]).abs() < 2e-7);
     }
+    // Planted negative: the same comparison refuses a tangent whose traction slope is 0.1 % off.
+    let off = prepared
+        .solve_with_wall_tractions_frequency_derivative(
+            &[],
+            None,
+            &[],
+            &[],
+            &[(&source, amplitude, slope.scale(1.001))],
+            &mut || false,
+        )
+        .unwrap();
+    assert!((0..model.ndof()).any(|i| {
+        let difference =
+            (sides[1].acoustic.pressure_pa[i] - sides[0].acoustic.pressure_pa[i]).scale(0.5 / h);
+        (difference - off.pressure_derivative_pa_per_rad_s[i]).abs() >= 2e-7
+    }));
     assert_eq!(result.response.wall_accounting.dissipation_w(), 0.0);
     real_close(result.response.power_balance_residual_w(), 0.0);
 }
