@@ -90,7 +90,19 @@ impl StepWork {
 }
 
 impl IntervalFailure for MolecularError {
+    /// A cancellation, an operator work limit, or a refused subgrid transport ratio ends the
+    /// interval with its own error. The ratio refusals (`SubgridViscosityRatio`,
+    /// `SubgridThermalDiffusivityRatio`) compare the fitted eddy transport with the molecular
+    /// transport; the held coefficient and the face strain set that ratio, not the step length,
+    /// so halving the step cannot admit it and every coupling retry would be futile work.
     fn is_terminal(&self) -> bool {
+        #[cfg(feature = "experimental-sgs")]
+        if matches!(
+            self,
+            Self::SubgridViscosityRatio { .. } | Self::SubgridThermalDiffusivityRatio { .. }
+        ) {
+            return true;
+        }
         matches!(
             self,
             Self::Cancelled
