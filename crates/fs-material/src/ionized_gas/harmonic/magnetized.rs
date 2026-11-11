@@ -86,7 +86,8 @@ pub struct IonizedGasMagnetizedHarmonicResponse<'a> {
     pub mean_drift_kinetic_energy_j_m3: f64,
     /// Re(sum(E*conj(J)))/2, equal to total physical friction heat.
     pub mean_electrical_power_w_m3: f64,
-    /// Im(sum(E*conj(J)))/2. Can have either sign under gyromotion.
+    /// Im(sum(E*conj(J)))/2, computed per circular mode as
+    /// -sum_m Im(sigma_m)*|P_m E|^2/2. Can have either sign under gyromotion.
     pub reactive_power_var_m3: f64,
     /// Signed imaginary power of nq*(B cross u) on the LEFT of momentum balance.
     /// Reactive electrical power = 2*omega*kinetic storage + this term.
@@ -482,16 +483,47 @@ impl<'a> IonizedGasMagnetizedHarmonic<'a> {
             ));
         }
         let inertial = 2.0 * self.omega_rad_s * kinetic;
-        let reactive_scale = electrical.im.abs().max(inertial.abs()).max(gyro.im.abs());
+        // Reactive power from the circular modes. The projections P_m E of
+        // `project` are Hermitian-orthogonal and J = sum_m sigma_m P_m E, so
+        // Im(E.conj(J))/2 = -sum_m Im(sigma_m)*|P_m E|^2/2. Each term is one
+        // mode's own conductivity times its own field power. The Cartesian
+        // E.conj(J) instead forms each Im(E_d conj(J_d)) as a difference of
+        // products as large as |E_d||J_d|; when collisions dominate
+        // (|Im sigma| << Re sigma, as at omega = 1e-6 rad/s) the rounding of that
+        // difference is larger than 2*omega*U itself.
+        let modal_reactive = -0.5
+            * sum((0..3)
+                .map(|m| self.conductivity[m].im * sum(projection[m].iter().map(|v| v.norm_sq()))));
+        let reactive_scale = modal_reactive.abs().max(inertial.abs()).max(gyro.im.abs());
         let reactive_residual = if reactive_scale == 0.0 {
             0.0
         } else {
-            (electrical.im / reactive_scale - inertial / reactive_scale - gyro.im / reactive_scale)
+            (modal_reactive / reactive_scale - inertial / reactive_scale - gyro.im / reactive_scale)
                 .abs()
         };
+        // Second, independent check of the current built from the carrier
+        // velocities: E.conj(J) closes the same balance to the tolerance plus its
+        // own rounding floor. Each Im(E_d conj(J_d)) = Im(E_d)Re(J_d) -
+        // Re(E_d)Im(J_d) is a difference of two products bounded by |E_d||J_d|;
+        // the products, the difference and the compensated sum each round by at
+        // most eps of that bound, and J_d carries a few eps of |J_d| from its mode
+        // and carrier sums when those sums do not cancel. 8 eps*sum_d |E_d||J_d|
+        // bounds the floor of the halved sum with margin. Under cancellation that
+        // floor, not the relative tolerance, sets the allowance.
+        let electrical_scale = electrical.im.abs().max(inertial.abs()).max(gyro.im.abs());
+        let electrical_floor = 8.0
+            * f64::EPSILON
+            * sum((0..3).map(|d| electric_field_v_m[d].abs() * current[d].abs()));
+        let electrical_closes = electrical_scale == 0.0
+            || (electrical.im / electrical_scale
+                - inertial / electrical_scale
+                - gyro.im / electrical_scale)
+                .abs()
+                <= BALANCE_TOLERANCE + electrical_floor / electrical_scale;
         if !inertial.is_finite()
             || !reactive_residual.is_finite()
             || reactive_residual > BALANCE_TOLERANCE
+            || !electrical_closes
         {
             return Err(invalid(
                 "magnetized reactive power, gyromotion and kinetic storage disagree",
@@ -511,7 +543,7 @@ impl<'a> IonizedGasMagnetizedHarmonic<'a> {
             mean_heating_w_m3: heat,
             mean_drift_kinetic_energy_j_m3: kinetic,
             mean_electrical_power_w_m3: electrical.re,
-            reactive_power_var_m3: electrical.im,
+            reactive_power_var_m3: modal_reactive,
             gyroscopic_reactive_power_var_m3: gyro.im,
             mean_magnetic_power_w_m3: -gyro.re,
             force_balance_relative_residual: force_residual,

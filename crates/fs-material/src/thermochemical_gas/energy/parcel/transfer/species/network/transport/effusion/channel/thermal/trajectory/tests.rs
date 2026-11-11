@@ -47,6 +47,7 @@ fn adaptive_finite_wall_converges_to_small_fixed_steps_and_closes_window_energy(
         9,
         FixedVolumeChannelWall::try_new_isochoric(&law, 2.0e-7, 500.0).unwrap(),
     )]);
+    let wall_temperature_k = walls[&9].temperature_k();
     let links = [link(&path)];
     let solve = endpoints(&gases);
     let physical = controls();
@@ -114,7 +115,11 @@ fn adaptive_finite_wall_converges_to_small_fixed_steps_and_closes_window_energy(
         2.0e-3,
     );
     assert_eq!(gases[&0].state().state().temperature, 650.0);
-    assert_eq!(walls[&9].temperature_k(), 500.0);
+    // The original wall is unchanged. try_new_isochoric stores the law's own
+    // inverse of the stored energy (T to e to T), so the requested 500 K comes
+    // back within rounding, not necessarily bit for bit.
+    assert_eq!(walls[&9].temperature_k(), wall_temperature_k);
+    assert!((wall_temperature_k - 500.0).abs() <= 2.0 * (500.0_f64.next_up() - 500.0));
 }
 
 #[test]

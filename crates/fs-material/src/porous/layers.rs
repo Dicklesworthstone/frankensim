@@ -257,19 +257,22 @@ fn divided(z: C64, scale: f64) -> C64 {
 
 // One source may occur as the incident fluid, several finite layers and the
 // receiving half-space. Reuse its snapshot by original identity in every role.
+// Identity is the data address alone (`addr_eq`): a `&dyn FluidAcoustics`
+// upcast from `&dyn ThermoviscousFluid` carries another vtable than one coerced
+// directly from the same source, so `ptr::eq` would count one source twice.
 fn retained_fluid_snapshot(
     original: &dyn FluidAcoustics,
     incident: &dyn FluidAcoustics,
     exterior: FluidAcousticState,
     layers: &[PreparedLayer<'_>],
 ) -> Option<FluidAcousticState> {
-    if core::ptr::eq(original, incident) {
+    if core::ptr::addr_eq(original, incident) {
         Some(exterior)
     } else {
         layers.iter().find_map(|layer| match layer.source {
-            Layer::FluidLayer { fluid, .. } if core::ptr::eq(original, fluid) => layer.fluid,
+            Layer::FluidLayer { fluid, .. } if core::ptr::addr_eq(original, fluid) => layer.fluid,
             Layer::RelaxingFluid { relaxation, .. }
-                if core::ptr::eq(original, relaxation.gas() as &dyn FluidAcoustics) =>
+                if core::ptr::addr_eq(original, relaxation.gas() as &dyn FluidAcoustics) =>
             {
                 layer
                     .fluid

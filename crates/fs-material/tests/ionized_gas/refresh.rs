@@ -222,6 +222,54 @@ fn common_temperature_source_remains_common_temperature_only() {
     );
 }
 
+/// Every f64 a refresh must reproduce: the source's own values, each carrier,
+/// its relaxation, and the resolved values or contributions behind that rate.
+fn physical_bits(source: &IonizedGasConductivity) -> Vec<u64> {
+    let mut values = vec![
+        source.conductivity_s_m(),
+        source.charged_mole_fraction(),
+        source.coulomb_coupling(),
+        source.maximum_thermal_phase_space_density(),
+        source.maximum_electric_field_v_m(),
+    ];
+    for carrier in source.carriers() {
+        let relaxation = carrier.relaxation();
+        values.extend([
+            carrier.number_density_per_m3(),
+            carrier.mass_kg(),
+            carrier.temperature_k(),
+            carrier.drift_mobility_m2_v_s(),
+            carrier.conductivity_s_m(),
+            carrier.maximum_electric_field_v_m(),
+            relaxation.rate_per_s(),
+            relaxation.heavy_temperature_k(),
+            relaxation.electron_temperature_k(),
+            relaxation.pressure_pa(),
+        ]);
+        match relaxation.source() {
+            CarrierMomentumSource::Material { material, .. } => {
+                values.extend(material.query_point().iter().map(|(_, value)| *value));
+                values.extend(material.properties().iter().map(|p| p.value_si()));
+            }
+            CarrierMomentumSource::ElectronNeutral {
+                contributions,
+                maximum_target_thermal_speed_ratio,
+                ..
+            } => {
+                values.push(*maximum_target_thermal_speed_ratio);
+                for c in contributions {
+                    values.extend([
+                        c.number_density_per_m3(),
+                        c.rate_per_s(),
+                        c.target_thermal_speed_ratio(),
+                    ]);
+                }
+            }
+        }
+    }
+    values.into_iter().map(f64::to_bits).collect()
+}
+
 #[test]
 fn reacting_refresh_uses_changed_carrier_and_neutral_densities_without_lte_reset() {
     let state = frozen_state(0.001, 6000.0, 12000.0, 1.0);
@@ -291,7 +339,22 @@ fn reacting_refresh_uses_changed_carrier_and_neutral_densities_without_lte_reset
     let recovered = refreshed
         .at_reacting_state(&state, &[&card], || false)
         .unwrap();
-    assert_eq!(recovered, original);
+    // A refresh pins each selected claim; `original` was resolved with
+    // SingleClaimOnly. The library states the rule in
+    // src/liquid/density/tests.rs:283-287: "A refresh records pinned-claim
+    // selection; an independent resolution records SingleClaimOnly. Their
+    // physical tuples, not policy receipts, must agree exactly." So the whole
+    // struct equals the original refreshed through the same pinned path, and
+    // every physical value equals the single-claim original bit for bit; only
+    // the receipt policy, its provenance and the identity binding them differ.
+    assert_eq!(
+        recovered,
+        original
+            .at_reacting_state(&state, &[&card], || false)
+            .unwrap()
+    );
+    assert_eq!(recovered.state(), original.state());
+    assert_eq!(physical_bits(&recovered), physical_bits(&original));
     assert!(original.at_frozen_state(&next, &[&card], || false).is_err());
 }
 
