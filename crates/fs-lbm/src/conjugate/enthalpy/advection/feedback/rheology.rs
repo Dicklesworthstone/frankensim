@@ -67,6 +67,26 @@ fn relative_difference(a: f64, b: f64) -> f64 {
     }
 }
 
+/// Smallest nonzero shear-rate magnitude a source's surface query admits: 2^-200,
+/// the lower bound of fs-matdb's surface coordinate domain (`MIN_COORDINATE` in its
+/// `surface.rs`). A rate of exactly zero is admitted separately.
+const MIN_QUERY_RATE_PER_S: f64 = f64::from_bits((1023 - 200) << 52);
+
+/// The rate a source is queried at for the native rate `rate`. The strain quadrature
+/// can leave a nonzero tail far below any physical rate (8.3e-162 1/s in a cell of
+/// the buoyancy fixture), which the surface guard refuses because it is under 2^-200.
+/// Such a rate is queried as exactly 0, which is a legal query (cold starts and solids
+/// are queried there): the law's value at 8e-162 differs from its value at 0 by about
+/// (lambda x 8e-162)^a, far below any tolerance. Only the query changes: the stored
+/// native rate keeps its value.
+fn query_rate(rate: f64) -> f64 {
+    if rate.abs() < MIN_QUERY_RATE_PER_S {
+        0.0
+    } else {
+        rate
+    }
+}
+
 /// Immutable constitutive source on actual caloric and kinematic coordinates.
 /// Implementations must retain original source claims and refuse unsupported
 /// states. They must not mutate shared external physical history. Exact solids
@@ -225,7 +245,7 @@ where
                     rates[voxel] = 0.0;
                 }
             }
-            source.resolve(voxel, cell, temperature, rates[voxel])
+            source.resolve(voxel, cell, temperature, query_rate(rates[voxel]))
         };
         let samples = sample(
             thermal,
@@ -332,5 +352,29 @@ where
             self.rheology.as_mut().expect("binding retained").report = Some(report);
         }
         Ok((report, closed, observed))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MIN_QUERY_RATE_PER_S, query_rate};
+
+    #[test]
+    fn a_rate_tail_under_the_surface_domain_queries_as_zero_and_a_rate_inside_it_is_unchanged() {
+        assert_eq!(MIN_QUERY_RATE_PER_S, 2.0_f64.powi(-200));
+        // 8.3e-162 is the tail the buoyancy fixture's strain quadrature leaves (measured).
+        for tail in [
+            1e-161,
+            8.316801694027249e-162,
+            2.0_f64.powi(-201),
+            f64::MIN_POSITIVE,
+        ] {
+            assert_eq!(query_rate(tail).to_bits(), 0.0_f64.to_bits(), "{tail}");
+        }
+        // 2^-200 is the smallest admitted magnitude; 2^-199 and everything above pass unchanged.
+        for kept in [2.0_f64.powi(-200), 2.0_f64.powi(-199), 1e-12, 0.5, 300.0] {
+            assert_eq!(query_rate(kept).to_bits(), kept.to_bits(), "{kept}");
+        }
+        assert_eq!(query_rate(0.0).to_bits(), 0.0_f64.to_bits());
     }
 }
