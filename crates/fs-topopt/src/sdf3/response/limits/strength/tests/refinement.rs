@@ -19,13 +19,22 @@ fn g3_joint_enrichment_reuses_response_primals_and_replays_coarse_stress() {
         ReferenceResponseLimit3{response:ReferenceBoundedResponse3::Displacement(ReferenceLoad3::body(&observe)),
         sense:limits[1].sense,bound:limits[1].bound,scale:limits[1].scale}];
     let refs=[ReferenceResponseLimitCase3{load:ReferenceLoad3::body(&body),prescribed:Some(&motion),limits:&reference}];
-    let before=coarse.operator.scales().to_vec();let mut fine_primals=0;
-    drop(c);let mut p=|w:SolveProgress|{if w.stage=="response-limit-goal-primal"{fine_primals+=1;}ControlFlow::Continue(())};
+    let before=coarse.operator.scales().to_vec();
+    // One fine primal solve, read from the work counter: the stage's first event reports linear_solves before its solve is counted, its last after it.
+    // The number of events is not the number of solves: SolveControl::solve_preconditioned (control.rs) polls at the start, at every loop turn and
+    // after each batch of at most 32 iterations, so one solve reports at least three events.
+    let mut goal_primal_solves:Option<(usize,usize)>=None;
+    drop(c);let mut p=|w:SolveProgress|{if w.stage=="response-limit-goal-primal"{
+        let n=w.work.linear_solves;goal_primal_solves=Some(goal_primal_solves.map_or((n,n),|(first,_)|(first,n)));}
+        ControlFlow::Continue(())};
     let mut c=SolveControl::new(SolveBudget::default(),&mut p);
-    let report=coarse.estimate_response_stress_enrichment(fine.operator,&accepted,&refs,
-        ResponseStressRefinementOptions3::default(),&mut c).unwrap();
-    assert_eq!(fine_primals,1);assert_eq!(report.response.cases.len(),1);
-    assert_eq!(report.coarse_stress.aggregate,accepted.stress.aggregate);
+    let options=ResponseStressRefinementOptions3::default();let tol=options.numerical.identity_tolerance;
+    let report=coarse.estimate_response_stress_enrichment(fine.operator,&accepted,&refs,options,&mut c).unwrap();
+    let (first,last)=goal_primal_solves.expect("the fine primal stage reports progress");
+    assert_eq!(last-first,1);assert_eq!(report.response.cases.len(),1);
+    // The retained coarse stress is replayed within the options' identity tolerance, the check the code itself makes (strength/refinement.rs `near`), not bit for bit:
+    // the replay differs from the accepted aggregate by three units in the last place, 1.0e-17 (0.029471428621175858 against 0.02947142862117587), about a billionth of the 1e-8 tolerance.
+    assert!((report.coarse_stress.aggregate-accepted.stress.aggregate).abs()<=tol*accepted.stress.aggregate.abs().max(1.0));
     assert!(report.fine_stress.aggregate>=report.fine_stress.sampled_relaxed_max);
     assert!(report.fine_stress.aggregate>=report.fine_stress.sampled_physical_max);
     assert!(report.fine_stress.point_count>0);assert_eq!(coarse.operator.scales(),before);
