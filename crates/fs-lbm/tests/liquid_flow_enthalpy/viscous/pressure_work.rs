@@ -311,6 +311,10 @@ const K: [&str; 3] = ["pressure_k1", "pressure_k2", "pressure_k3"];
 const BETA: [&str; 3] = ["pressure_beta1", "pressure_beta2", "pressure_beta3"];
 const BETA_DIMS: Dims = Dims([-1, 0, 0, 0, 0, 0]);
 
+fn typed_pressure() -> QuantitySpec {
+    QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static))
+}
+
 fn porous_card(beta: f64) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (names, dims, values) in [
@@ -318,7 +322,14 @@ fn porous_card(beta: f64) -> MaterialCard {
         (BETA, BETA_DIMS, [beta; 3]),
     ] {
         for (name, value) in names.into_iter().zip(values) {
-            claims.insert_claim(scalar(name, dims, value)).unwrap();
+            let mut claim = scalar(name, dims, value);
+            // A permeability or Forchheimer claim must be static at fixed TYPED external coordinates (the check in
+            // fs-material permeability/temperature.rs, 9c7c3647a5, 2026-10-31 00:22): the root `scalar` declares `pressure`
+            // and `lot` untyped. This is the validity of `viscous/porous.rs::skeleton`, which passes.
+            claim.validity = ValidityDomain::unconstrained()
+                .with_quantity("T", absolute(), 300.0, 810.0)
+                .with_quantity("pressure", typed_pressure(), 100000.0, 200000.0);
+            claims.insert_claim(claim).unwrap();
         }
     }
     card(claims)
@@ -334,9 +345,14 @@ fn porous_law(card: &MaterialCard) -> PermeabilityTemperatureLaw<'_> {
             ScalarPropertyRequirement::try_with_key(key, ScalarAdmissibility::NonNegative).unwrap()
         })
         .collect();
+    let typed_point = QueryPoint::new()
+        .with_quantity("T", absolute(), 300.0)
+        .unwrap()
+        .with_quantity("pressure", typed_pressure(), 1e5)
+        .unwrap();
     let resolved = resolve_material_state_point(
         card,
-        &point(300.0, 1e5),
+        &typed_point,
         &requirements,
         MaterialPropertySelection::SingleClaimOnly,
     )

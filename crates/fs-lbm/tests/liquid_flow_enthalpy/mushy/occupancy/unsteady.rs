@@ -206,8 +206,11 @@ fn melting_opens_zero_speed_faces_without_restarting_the_moving_mushy_ring() {
         near(melted.cells()[&CellId(4)].specific_h_j_kg, 180.0);
         assert!(first.endpoint()[4].transport.mobile_transport().is_some());
         let retained = flow.clone();
+        // A step limit equal to the 0.01 s interval is cut by the harmonic advection CFL (52457eb93a) while the retained
+        // circulation is nonzero, which splits the interval in two and applies the flow after the first substep; a limit above
+        // the interval gives the one step this test asserts on.
         let (next, second, _) = melted
-            .advance_observed(&first, 0.11, step(0.01), || Ok(()))
+            .advance_observed(&first, 0.11, step(10.0), || Ok(()))
             .unwrap();
         assert_eq!(&second.applied().unwrap().flow, &retained);
         assert_eq!(second.momentum_solves(), 1);
@@ -358,10 +361,12 @@ fn freezing_a_moving_face_refuses(rheology: bool) {
             .values()
             .all(|cell| cell.specific_h_j_kg >= 150.0)
     );
-    // A shorter mobile-only retry retains the same initial kinetic state.
+    // A shorter mobile-only retry retains the same initial kinetic state. The step limit is above the 0.01 s interval: at
+    // the interval itself the harmonic advection CFL (52457eb93a) splits it while the retained circulation is nonzero.
     let (next, accepted, _) = moving
-        .advance_observed(&coast, 0.02, step(0.01), || Ok(()))
+        .advance_observed(&coast, 0.02, step(10.0), || Ok(()))
         .unwrap();
+    assert_eq!(accepted.momentum_solves(), 1);
     assert_eq!(&accepted.applied().unwrap().flow, &native);
     assert_eq!(
         accepted

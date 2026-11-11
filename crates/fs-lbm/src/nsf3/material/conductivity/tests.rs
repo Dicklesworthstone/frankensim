@@ -193,7 +193,9 @@ fn g1_characteristic_inflow_carries_upstream_enthalpy_once_with_source_integrate
         .unwrap()
         .with_characteristic_axis(NsfCharacteristicAxis {
             axis: 0,
-            maximum_relative_perturbation: 0.2,
+            // The linear characteristic bound must lie in (0, 0.1] (open_boundary.rs, c2d1f74449, 2026-10-24); the fixture's
+            // 0.2 has been refused since the test was written (5b7be2124b, 2026-11-09). 0.1 is the largest admitted value.
+            maximum_relative_perturbation: 0.1,
             faces: [NsfCharacteristicBoundary {
                 reference_pressure_pa: 100000.0,
                 reference_temperature_k: 300.0,

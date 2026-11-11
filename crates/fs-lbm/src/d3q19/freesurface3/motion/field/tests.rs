@@ -386,7 +386,9 @@ fn g4_field_shape_resource_cancel_and_late_moment_refusals_preserve_exact_retry(
             .is_err()
     );
     let mut fast = velocities.clone();
-    fast[31] = [0.1, 0.0];
+    // The wall field is refused at `speed / sqrt(1/3) >= MACH_LIMIT` (field.rs, 9c14315625, 2026-11-03), i.e. from
+    // 0.3 x sqrt(1/3) = 0.173; the old literal 0.1 is below it. Twice the limit follows it if it ever changes.
+    fast[31] = [2.0 * MACH_LIMIT * CS2_3.sqrt(), 0.0];
     assert!(
         surface
             .step_with_planar_wall_velocity_field(

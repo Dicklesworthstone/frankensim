@@ -100,7 +100,17 @@ fn trt_material_roots_drive_actual_even_and_odd_forced_collision() {
             [0.002, 0.001, 0.002],
         ]
         .map(|row| row.map(|s| s * (1.0 + 0.02 * lane as f64)));
-        let rate = (2.0 * strain.iter().flatten().map(|s| s * s).sum::<f64>()).sqrt();
+        // The material shear rate is sqrt(2 dev(D):dev(D)) and leaves out the trace, which is dilation (445f820cba,
+        // 2026-11-05, separated material shear rheology from volumetric strain); this strain has trace 0.001 x (1 + 0.02 lane).
+        let mean = (strain[0][0] + strain[1][1] + strain[2][2]) / 3.0;
+        let mut rate_squared = 0.0;
+        for a in 0..3 {
+            for b in 0..3 {
+                let deviator = strain[a][b] - if a == b { mean } else { 0.0 };
+                rate_squared += 2.0 * deviator * deviator;
+            }
+        }
+        let rate = rate_squared.sqrt();
         field[lane] = families[(x + y + z) % families.len()];
         expected_tau[lane] = 0.5 + field[lane].viscosity(rate) / crate::CS2;
         let rho = 0.9 + 0.01 * x as f64 + 0.02 * z as f64;
@@ -321,7 +331,7 @@ fn actual_moving_wall_stress_refreshes_carreau_viscosity_and_exchange_together()
             let f = run.lattice.grid.populations(slot, lane);
             let eq = equilibrium3(sample.density, sample.velocity);
             let tau = run.relaxation_at([3, 3, 0]).unwrap();
-            let mut rate_squared = 0.0;
+            let mut strain = [[0.0_f64; 3]; 3];
             for a in 0..3 {
                 for b in 0..3 {
                     let stress: f64 = (0..Q3)
@@ -330,8 +340,16 @@ fn actual_moving_wall_stress_refreshes_carreau_viscosity_and_exchange_together()
                             (f[q] - eq[q]) * f64::from(e[a] * e[b])
                         })
                         .sum();
-                    let strain = -stress / (2.0 * sample.density * crate::CS2 * tau);
-                    rate_squared += 2.0 * strain * strain;
+                    strain[a][b] = -stress / (2.0 * sample.density * crate::CS2 * tau);
+                }
+            }
+            // The material shear rate is sqrt(2 dev(D):dev(D)) without the trace (445f820cba, 2026-11-05).
+            let mean = (strain[0][0] + strain[1][1] + strain[2][2]) / 3.0;
+            let mut rate_squared = 0.0;
+            for a in 0..3 {
+                for b in 0..3 {
+                    let deviator = strain[a][b] - if a == b { mean } else { 0.0 };
+                    rate_squared += 2.0 * deviator * deviator;
                 }
             }
             let rate = rate_squared.sqrt();

@@ -1822,7 +1822,15 @@ mod tests {
         let core_edge_u = grid2.moments(grid2.idx(0, mid + 2)).u[0];
         assert!((center_u - core_edge_u) / center_u < 0.005);
         assert!(center_u < 0.6 * g * half_height * half_height / (2.0 * k));
-        assert!((grid2.total_mass() - (2 * (ny + 2)) as f64).abs() < 1e-9);
+        // `Grid::total_mass` skips Gas and Wall cells (core2.rs:1074, b835c8ff91) and `channel_flow` makes its two wall rows
+        // Wall, so the 2-D mass is the fluid cells at density 1, not `2 (ny + 2)` (6cf66ee60e, 2026-11-02, counted the walls).
+        let fluid_cells = grid2
+            .flags
+            .iter()
+            .filter(|flag| !matches!(flag, Cell::Gas | Cell::Wall))
+            .count();
+        assert_eq!(fluid_cells, 2 * ny);
+        assert!((grid2.total_mass() - fluid_cells as f64).abs() < 1e-9);
         assert!((grid3.total_mass() - (2 * (ny + 2)) as f64).abs() < 1e-9);
         println!(
             "regularized Bingham: 2D={steps2} steps, 3D={steps3} steps, relative profile errors={:?}",

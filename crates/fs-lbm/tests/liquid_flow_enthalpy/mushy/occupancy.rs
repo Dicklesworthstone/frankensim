@@ -171,8 +171,11 @@ fn a_mushy_ring_uses_exact_solid_faces_then_reopens_them_when_the_same_cell_melt
         .with_body_force_heating(corner_force(), controls())
         .unwrap();
 
+        // The original harmonic advection CFL (52457eb93a, 2026-10-15) is active, so a step limit equal to the interval is
+        // cut below it as soon as a face flux is nonzero and the interval splits in two. A step limit above the interval
+        // lets the interval select the one accepted step, as `heating.rs::thermal` does with 10.0.
         let (melted, accepted, audit) = old
-            .advance_observed(&observer, 0.1, step(0.1), || Ok(()))
+            .advance_observed(&observer, 0.1, step(10.0), || Ok(()))
             .unwrap();
         assert_eq!(accepted.momentum_solves(), 1);
         let epoch = accepted.applied().unwrap();

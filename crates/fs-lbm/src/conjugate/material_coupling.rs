@@ -565,8 +565,17 @@ mod tests {
     fn flowing_conductor_advects_its_joule_heat_in_the_existing_energy_solver() {
         use crate::conjugate::FlowFace;
         let domain = VoxelDomain::new(3, 1, 1, 1.0).unwrap();
-        let (_, mut electric, thermal) = fixture();
+        let (_, mut electric, _) = fixture();
         electric.conductors.clear();
+        // Flow crosses the two x faces, so they must be open thermal faces: the energy solver refuses flow through a face
+        // that is not an inflow or outflow (`FlowThroughClosedFace`, energy.rs, 6723c2d794, 2026-10-06). `fixture()` closes
+        // them with fixed temperatures, which is right for the solid-domain tests and wrong for this one.
+        let mut thermal_faces = [ThermalFace::Adiabatic; 6];
+        thermal_faces[0] = ThermalFace::Inflow { temperature: 300.0 };
+        thermal_faces[1] = ThermalFace::Outflow {
+            backflow_temperature: 300.0,
+        };
+        let thermal = ThermalSetup::new(thermal_faces);
         let gate = CancelGate::new();
         let fluid = FluidProperties { density_kg_m3: 1.0, specific_heat_j_kg_k: 1.0,
             conductivity_w_m_k: 1.0, kinematic_viscosity_m2_s: 1.0 };

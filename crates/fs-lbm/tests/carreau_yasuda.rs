@@ -2,7 +2,7 @@
 //! All material numbers are synthetic declarations, not measured data.
 
 use fs_lbm::rheology::{Rheology, RheologyField, TAU_CAP, TAU_FLOOR, channel_flow, update_tau};
-use fs_lbm::{CS2, Grid, Q, equilibrium};
+use fs_lbm::{CS2, Cell, Grid, Q, equilibrium};
 use fs_material::fluid_transport::rheology::CarreauYasuda;
 
 // The D2Q9 lattice velocities and weights, in the order of `fs_lbm::equilibrium`. The crate keeps its own `E` and `W` crate-private (they have been since the
@@ -282,7 +282,16 @@ fn yasuda_channel_matches_continuum_in_both_native_dimensions() {
         "relative errors={:?}",
         errors.map(|error| error / peak)
     );
-    assert!((grid2.total_mass() - (2 * (height + 2)) as f64).abs() < 1e-9);
+    // `Grid::total_mass` sums the populations of the cells that are neither Gas nor Wall (core2.rs:1074, b835c8ff91,
+    // 2026-07-08), and `channel_flow` makes its two wall rows Wall, so the 2-D mass is the fluid cells at density 1, not
+    // `2 (height + 2)` (f782efa44f, 2026-11-08, counted the wall rows).
+    let fluid_cells = grid2
+        .flags
+        .iter()
+        .filter(|flag| !matches!(flag, Cell::Gas | Cell::Wall))
+        .count();
+    assert_eq!(fluid_cells, 2 * height);
+    assert!((grid2.total_mass() - fluid_cells as f64).abs() < 1e-9);
     assert!((grid3.total_mass() - (2 * (height + 2)) as f64).abs() < 1e-9);
     println!(
         "Carreau-Yasuda a={a}: 2D={steps2}, 3D={steps3} steps, relative profile errors={:?}",

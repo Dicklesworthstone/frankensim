@@ -435,9 +435,12 @@ fn g3_finite_wall_trials_keep_dynamic_transport_and_rollback_filter_scratch() {
             accepted
         );
         {
+            // Since ef5ab372af (2026-11-07 01:58, nine minutes after dc7e920856 wrote this test) a trial shares the grid's
+            // already-admitted filter scratch instead of copying it (`shared_for_trial`, dynamic.rs: "each combined
+            // preparation overwrites its deterministic filter scratch"), so a cancelled trial may leave the scratch VALUES
+            // overwritten. What this block checks: the physical history is unchanged (asserted just above) and the scratch
+            // is the same two allocations, with no second filter allocation (`scratch.2` and `scratch.3`).
             let work = workspace(&grid);
-            assert_eq!(work.momentum.viscosities(), scratch.0);
-            assert_eq!(work.heat.diffusivities(), scratch.1);
             assert_eq!(work.momentum.viscosities().as_ptr(), scratch.2);
             assert_eq!(work.heat.diffusivities().as_ptr(), scratch.3);
         }

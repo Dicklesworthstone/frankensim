@@ -586,7 +586,8 @@ mod tests {
                 assert!(
                     expected_tau > super::super::TAU_FLOOR && expected_tau < super::super::TAU_CAP
                 );
-                let mut planar = crate::Grid::uniform(2, 2, 1.7);
+                let density = 1.7;
+                let mut planar = crate::Grid::uniform(2, 2, density);
                 planar.f.fill(strained_populations(
                     crate::E.map(|(x, y)| [x, y]),
                     crate::W,
@@ -595,7 +596,7 @@ mod tests {
                     expected_tau,
                 ));
                 planar.fext.fill([0.0002, -0.0003]);
-                let mut spatial = PlatesGrid3::plates(1, 1, 2, 1.7);
+                let mut spatial = PlatesGrid3::plates(1, 1, 2, density);
                 spatial.f.fill(strained_populations(
                     E3.map(|(x, y, z)| [x, y, z]),
                     W3,
@@ -606,17 +607,41 @@ mod tests {
                 spatial.fext.fill([0.0002, -0.0003, 0.0]);
                 let planar_stats = update_tau(&mut planar, law);
                 let spatial_stats = update_tau3(&mut spatial, law);
-                for stats in [planar_stats, spatial_stats] {
+                // The law is compared at the rate the populations carry, not at the oracle's rate. A rigid
+                // rotation has exactly zero strain, so what its populations carry is roundoff (measured
+                // 1.55e-14 1/s), and a law whose slope at 0 is infinite (Carreau-Yasuda with a < 1, where
+                // the viscosity moves with (lambda x rate)^a) turns that roundoff into a tau offset of
+                // 1.08e-11 (measured, a = 0.7): a zero-rate oracle cannot be met to 4e-12 by a correct
+                // update. The rate itself is still held to the oracle, and for a rotation to roundoff size.
+                let tau_at = |at_rate: f64| {
+                    0.5 + viscosity_si(model, at_rate) / 800.0 * dt / (dx * dx) / crate::CS2
+                };
+                let mut carried = [0.0; 2];
+                for (index, stats) in [planar_stats, spatial_stats].into_iter().enumerate() {
+                    let carried_rate = stats.max_shear / dt;
+                    carried[index] = carried_rate;
                     assert!(
-                        (stats.max_shear / dt - rate).abs() < 2e-10,
-                        "{model:?}, {gradient:?}: {} != {rate}",
-                        stats.max_shear / dt
+                        (carried_rate - rate).abs() < 2e-10,
+                        "{model:?}, {gradient:?}: {carried_rate} != {rate}"
                     );
-                    assert!((stats.tau_range.0 - expected_tau).abs() < 4e-12);
-                    assert!((stats.tau_range.1 - expected_tau).abs() < 4e-12);
+                    if rate == 0.0 {
+                        // Roundoff size: at most c = 16 units of eps times the population scale (the
+                        // density), 16 x 2.2e-16 x 1.7 = 6.0e-15 per step, which is 3.0e-12 1/s at this dt.
+                        assert!(
+                            carried_rate <= 16.0 * f64::EPSILON * density / dt,
+                            "{model:?}, {gradient:?}: carried rate {carried_rate}"
+                        );
+                    }
+                    assert!((stats.tau_range.0 - tau_at(carried_rate)).abs() < 4e-12);
+                    assert!((stats.tau_range.1 - tau_at(carried_rate)).abs() < 4e-12);
                     assert_eq!((stats.floored, stats.capped), (0, 0));
                 }
-                assert!((planar.tau[0] - spatial.tau[1]).abs() < 4e-12);
+                // The two grids carry their own roundoff, so their taus agree to what the law makes of the
+                // difference of the rates they carry (for a rotation), and to 4e-12 otherwise.
+                assert!(
+                    (planar.tau[0] - spatial.tau[1]).abs()
+                        < 4e-12 + (tau_at(carried[0]) - tau_at(carried[1])).abs()
+                );
             }
         }
     }

@@ -273,7 +273,10 @@ impl FreeSurface3 {
                     && ((2..7).contains(&x) || (17..22).contains(&x))
             },
         )
-        .unwrap();
+        .unwrap()
+        // The fixture (f2a3b7c7e1, 2026-10-28) predates the default conversion `ConservativeLocal` (7392daaba3, 2026-11-04)
+        // and was written for the historical mass-only `Local` conversion; it states that policy.
+        .with_conversion_redistribution(ConversionRedistribution3::Local);
         let locate = |p: [i64; 3]| {
             let (slot, lane) = surface.grid.resolve_source(p[0], p[1], p[2]).unwrap();
             (surface.grid.active_keys()[slot], lane)
@@ -471,7 +474,10 @@ mod tests {
             ContactModel3::Neutral,
             |_, _, z| z < 6,
         )
-        .unwrap();
+        .unwrap()
+        // The fixture (f2a3b7c7e1, 2026-10-28) predates the default conversion `ConservativeLocal` (7392daaba3, 2026-11-04)
+        // and was written for the historical mass-only `Local` conversion; it states that policy.
+        .with_conversion_redistribution(ConversionRedistribution3::Local);
         for (&key, tile) in &mut surface.tiles {
             let slot = surface.grid.slot_of(key).unwrap();
             for lane in 0..TILE_CELLS {

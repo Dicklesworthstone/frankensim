@@ -52,6 +52,9 @@ fn accepted_freezing_retains_small_kinetic_heat_beside_large_surviving_circulati
         source_w,
     };
     let mut events = Vec::new();
+    // `DepositionSimulation::new` refuses events that are not ordered in absolute seconds (38f3c07f01): every cell's Birth is at
+    // t = 0 and the small cells' Boundary at t = dt, so the Boundary events are collected here and appended after all Births.
+    let mut boundary_events = Vec::new();
     let mut ids = vec![None; domain.cell_count()];
     let mut supported = Vec::new();
     let mut drive = vec![[0.0; 3]; domain.cell_count()];
@@ -99,7 +102,7 @@ fn accepted_freezing_retains_small_kinetic_heat_beside_large_surviving_circulati
         drive[c] = circulation(if small { (49.0 / 8.0) * mu } else { 0.5 * mu });
         if small {
             supported.push(id);
-            events.push(TimedEvent {
+            boundary_events.push(TimedEvent {
                 time_s: dt,
                 event: Event::Boundary(id, boundary(-128.0 * mu)),
             });
@@ -107,6 +110,7 @@ fn accepted_freezing_retains_small_kinetic_heat_beside_large_surviving_circulati
             hold[c] = circulation(3.0 * mu / (scale * scale));
         }
     }
+    events.extend(boundary_events);
     let original = DepositionSimulation::new(
         events,
         &[(MAT, &curve as &dyn ThermalLaw)],

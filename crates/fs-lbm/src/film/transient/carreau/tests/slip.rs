@@ -56,8 +56,17 @@ fn original_carreau_stress_selects_the_wall_jump_and_separate_loss() {
         );
         near(heat.iter().sum(), report.flow.viscous_heat_j_m2, 2e-13);
         near(report.flow.work_residual_j_m2, 0.0, 2e-12);
-        // A constant beta based on mu(0) would be a different boundary law.
-        assert!((b * wall_rate - b * tau_wall / 2.0).abs() > 0.04);
+        // A constant beta based on mu(0) would be a different boundary law: its slip speed is b tau_wall / mu(0) with
+        // mu(0) = 2 Pa s, where the nonlinear law's is b wall_rate. With these inputs (printed by a run, n = 8):
+        // tau_wall = 0.15 + 1 x 0.8 = 0.95 Pa, wall_rate = 0.5680108 1/s, so the nonlinear slip is 0.4 x 0.5680108 = 0.22720
+        // m/s against 0.4 x 0.95 / 2 = 0.19 m/s, a difference of 0.0372 m/s, 16.4 % of the nonlinear slip. The threshold is
+        // derived from that law, not a literal: the two boundary laws must differ by at least a tenth of the nonlinear slip.
+        let nonlinear_slip = b * wall_rate;
+        let constant_beta_slip = b * tau_wall / 2.0;
+        assert!(
+            (nonlinear_slip - constant_beta_slip).abs() > 0.1 * nonlinear_slip,
+            "{nonlinear_slip} against {constant_beta_slip}"
+        );
         let error = film
             .velocities_m_s()
             .iter()

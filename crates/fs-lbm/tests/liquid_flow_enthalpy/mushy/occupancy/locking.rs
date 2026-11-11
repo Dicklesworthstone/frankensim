@@ -437,8 +437,10 @@ fn capture_heating_that_remelts_the_proposed_solid_refuses_without_clipping() {
         .with_unsteady_body_force_heating(forces(0.0), controls())
         .unwrap();
     let old_flow = coast.unsteady_flow().unwrap().clone();
+    // The step limit is above the 0.01 s interval. At the interval itself the harmonic advection CFL (52457eb93a) splits it
+    // in two while the circulation is nonzero.
     let error = coast
-        .advance_with_supported_freezing(&moving, &support, 0.02, step(0.01), capture(), || Ok(()))
+        .advance_with_supported_freezing(&moving, &support, 0.02, step(1.0), capture(), || Ok(()))
         .err()
         .unwrap()
         .to_string();

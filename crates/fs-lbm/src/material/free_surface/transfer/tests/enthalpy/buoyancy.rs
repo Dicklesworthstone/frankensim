@@ -336,9 +336,13 @@ fn buoyancy_and_rheology_share_source_state_without_replacing_reference_inertia(
             assert!(heat > 0.0);
             close(liquid.total_enthalpy_j().unwrap(), energy + heat, 1e-8);
             let rho = liquid.material_at([3, 3, 3]).unwrap().density_kg_m3();
+            // Since 3b51adb3ae (2026-11-06, "apply material gravity to current free-surface mass") the body force is the
+            // lattice density of the cell times the material factor rho(T) / rho0 times the lattice gravity, so the oracle
+            // carries the cell's own lattice density as well as rho(T) / rho0 (rho0 = 1000 kg/m3 here).
+            let lattice_density = liquid.flow().lattice().sample_at(3, 3, 3).unwrap().density;
             close(
                 liquid.flow().lattice().force_density_at(3, 3, 3).unwrap()[2],
-                gravity[2] * 0.00025 * rho / 1000.0,
+                gravity[2] * 0.00025 * lattice_density * (rho / 1000.0),
                 1e-13,
             );
             (

@@ -14,6 +14,15 @@ use fs_material::thermal::interface::{
     ThermalInterfacePoint,
 };
 use fs_qty::Pressure;
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+
+// The contact response gate admits a fixed external coordinate only when it is typed (`is_fixed_external_coordinate`,
+// fs-material state_point.rs, d21f10ea46, 2026-10-22): a pressure axis declared as a plain dimensional pascal is refused
+// ("contact response requires declared thermal/phase or typed fixed external coordinates"), as the passing fs-couple
+// fixtures do by declaring `typed(QuantityKind::Pressure)`.
+fn typed_pressure() -> QuantitySpec {
+    QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static))
+}
 
 fn interface(wall: &MaterialCard, fluid: &MaterialCard) -> InterfaceSystemCard {
     let mut claims = ClaimSet::new();
@@ -47,7 +56,7 @@ fn interface(wall: &MaterialCard, fluid: &MaterialCard) -> InterfaceSystemCard {
                 )
                 .with_quantity("fa", QuantitySpec::dimensional(Dims::NONE), 0.0, 1.0)
                 .with_quantity("fb", QuantitySpec::dimensional(Dims::NONE), 0.0, 1.0)
-                .with_quantity("p", QuantitySpec::dimensional(Pressure::DIMS), 1e5, 1.5e5),
+                .with_quantity("p", typed_pressure(), 1e5, 1.5e5),
             interpolation: InterpolationPolicy::LinearInside,
             uncertainty: UncertaintyModel::Unstated,
             observations: vec![],
@@ -210,7 +219,7 @@ fn source_phase_contact_preserves_order_pressure_and_finite_wall_energy() {
         .unwrap()
         .with_quantity("fb", QuantitySpec::dimensional(Dims::NONE), 1.0)
         .unwrap()
-        .with_quantity("p", QuantitySpec::dimensional(Pressure::DIMS), 1e5)
+        .with_quantity("p", typed_pressure(), 1e5)
         .unwrap();
     let binding = binding(
         [&fluid_card, &wall_card],
@@ -316,7 +325,7 @@ fn source_phase_contact_preserves_order_pressure_and_finite_wall_energy() {
     // bridge never substitutes fluid projection pressure or evolves this axis.
     let compressed_context = context
         .clone()
-        .with_quantity("p", QuantitySpec::dimensional(Pressure::DIMS), 1.5e5)
+        .with_quantity("p", typed_pressure(), 1.5e5)
         .unwrap();
     let compressed = PreparedMaterialContact::new(
         &old,

@@ -379,7 +379,9 @@ fn hot_column<'a>(
         &[(MAT, caloric.curve() as &dyn ThermalLaw)],
         DepositionBudget {
             max_cells: 4,
-            max_links: 0,
+            // The advected donor transfers of a nonzero circulation count against `max_links` (`add_step_transfers`,
+            // observe.rs:411, since 52457eb93a); a budget of 0 refuses every leg after the first. 64 is the root `initial()`'s.
+            max_links: 64,
             max_events: 4,
             max_substeps: 100,
         },

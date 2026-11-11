@@ -231,8 +231,15 @@ fn molten_native_shear_response_survives_release_and_drives_vof_heat_and_motion(
                     near(state.axes()["rate"], rate);
                     let mu = 100.0 - 0.05 * (state.axes()["T"] - 550.0) + slope * rate;
                     near(sample.material.dynamic_viscosity_pa_s(), mu);
-                    independently_summed_heat +=
-                        mu * rate * rate * sample.liquid_volume_m3 * 0.0001;
+                    // The molecular power is 2 mu dev(D):dev(D) + zeta (div u)^2 (a2451c2975, 2026-11-06, added the
+                    // volumetric term to the free-surface molecular power; 81cc91c0ac its independent bulk model), as in the
+                    // twin oracle `transfer/tests/enthalpy/rheology.rs`, which carries mu x dilation^2 for the tied
+                    // zeta = 2 mu / 3. Here zeta is the sample's own `bulk_viscosity_pa_s` and (div u)^2 its own
+                    // `divergence_magnitude_per_s`, both public fields of the sample.
+                    independently_summed_heat += (mu * rate * rate
+                        + sample.bulk_viscosity_pa_s * sample.divergence_magnitude_per_s.powi(2))
+                        * sample.liquid_volume_m3
+                        * 0.0001;
                 }
                 assert!(independently_summed_heat > 0.0);
                 near(

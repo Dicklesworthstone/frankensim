@@ -10,7 +10,7 @@ use fs_lbm::conjugate::{ChtError, ElectricalContact, ElectricSetup, Electrode, E
 use fs_material::MaterialError;
 use fs_material::conductor::{ElectricalPropertyBasis, ResolvedConductorState};
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
-use fs_material::phase::EquilibriumPhaseState;
+use fs_material::phase::{EquilibriumPhaseState, SolidLiquidPhase};
 use fs_material::state_point::{ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point};
 use fs_material::thermal::source::ThermalMaterialPoint;
 
@@ -210,7 +210,10 @@ fn the_same_samples_conduct_heat_and_zero_voltage_recovers_the_original_flow_own
     let mut outputs = Vec::new();
     for conductivity in [0.01,5.0] {
         let card = source_card(1.0,1.0,conductivity);
-        let curve = EquilibriumEnthalpyPhaseCurve::try_new(card.content_hash(),[
+        // The fixture is a pure liquid over 300 to 400 K: every knot has liquid fraction 1. `try_new` is the two-phase
+        // constructor and has required a curve that begins fully solid and ends fully liquid since ed91555935 (2026-08-08);
+        // the single-phase ingress (6602674343) takes this curve, as in 8d74da9b2d for the other crates' fixtures.
+        let curve = EquilibriumEnthalpyPhaseCurve::try_single_phase(card.content_hash(),SolidLiquidPhase::Liquid,[
             EnthalpyPhaseKnot { specific_enthalpy_j_kg:0.0,temperature_k:300.0,
                 liquid_mass_fraction:1.0,bulk_density_kg_m3:1.0 },
             EnthalpyPhaseKnot { specific_enthalpy_j_kg:200.0,temperature_k:400.0,
