@@ -51,7 +51,9 @@ pub struct ExchangerInletResponse {
     /// d h_second,out / d h_second,in, with the other inlet and UA fixed.
     pub second_outlet_enthalpy_gain: f64,
     /// Absolute allowance on both the retained own gain and its heat-transfer
-    /// fraction. Multiplication by that stream's mass flow gives kg/s allowance.
+    /// fraction, and on the identity they obey, loss + gain = 1: that identity
+    /// holds to the loss error plus the gain error, so the allowance is that
+    /// sum. Multiplication by that stream's mass flow gives kg/s allowance.
     pub first_enthalpy_gain_error_allowance: f64,
     pub second_enthalpy_gain_error_allowance: f64,
     pub conductance_response_error_allowance_k: f64,
@@ -248,7 +250,7 @@ impl ExchangerResponseConfig {
 }
 
 impl ExchangerInletResponse {
-    fn check(
+    pub(super) fn check(
         self,
         exchanger: &CaloricHeatExchanger,
         accuracy: ExchangerResponseConfig,
@@ -437,11 +439,16 @@ fn moment_response(
     let ey = moments.errors[1] * end + relative * y.abs();
     let ratio = end / start;
     let ratio_error = 2.0 * relative * ratio.abs();
+    // `errors[i]` bounds loss[i] + gain[i] - 1, which the response gate enforces and which is
+    // exactly zero in exact arithmetic. The loss and the gain are built from moment errors that
+    // are independent of each other, so the identity holds to the loss error PLUS the gain error:
+    // the larger of the two is not a bound on their sum (at the first measured refusal the
+    // identity missed by 1.4125e-10 against allowances of 8.12e-11 and 8.14e-11).
     let (losses, gains, errors, conductance, conductance_error) = match arrangement {
         FlowArrangement::CoCurrent => (
             [x, y],
             [ratio + y, ratio + x],
-            [ex.max(ratio_error + ey), ey.max(ratio_error + ex)],
+            [ex + (ratio_error + ey), ey + (ratio_error + ex)],
             end,
             gap_error,
         ),
@@ -462,7 +469,8 @@ fn moment_response(
                 gains[1].abs() * error / lower,
             ];
             let errors = [0, 1].map(|i| {
-                loss_errors[i].max(gain_errors[i])
+                loss_errors[i]
+                    + gain_errors[i]
                     + 16.0 * f64::EPSILON * losses[i].abs().max(gains[i].abs())
             });
             let conductance = end / denominator;

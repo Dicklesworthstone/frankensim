@@ -320,6 +320,41 @@ fn response_crosses_original_cp_kinks_and_matches_independent_perturbed_solves()
 }
 
 #[test]
+fn a_response_that_misses_unity_by_three_summed_allowances_is_still_refused() {
+    with_cx(|cx| {
+        for arrangement in [FlowArrangement::CoCurrent, FlowArrangement::Counterflow] {
+            let exchanger = CaloricHeatExchanger::new(
+                stream(620.0, 0.8, affine(600.0, 2.0, 250.0, 100_000.0)),
+                stream(280.0, 1.1, affine(1800.0, -1.0, 700.0, 300_000.0)),
+                arrangement,
+                900.0,
+            )
+            .unwrap();
+            let (_, response) = exchanger
+                .solve_with_inlet_response(cx, ExchangerConfig::default(), response_config())
+                .unwrap();
+            // The response the solver returned passes its own gate.
+            response.check(&exchanger, response_config()).unwrap();
+            // loss + gain - 1 holds to the summed allowance (loss error + gain error); moving the
+            // gain by three of them leaves the identity at least twice that allowance out.
+            let mut first = response;
+            first.first_outlet_enthalpy_gain += 3.0 * response.first_enthalpy_gain_error_allowance;
+            assert!(matches!(
+                first.check(&exchanger, response_config()),
+                Err(ExchangerError::Unresolved("exchanger enthalpy-response gate"))
+            ));
+            let mut second = response;
+            second.second_outlet_enthalpy_gain +=
+                3.0 * response.second_enthalpy_gain_error_allowance;
+            assert!(matches!(
+                second.check(&exchanger, response_config()),
+                Err(ExchangerError::Unresolved("exchanger enthalpy-response gate"))
+            ));
+        }
+    });
+}
+
+#[test]
 fn zero_ua_and_refusals_preserve_original_admission_and_cancellation() {
     let first = stream(620.0, 0.8, affine(600.0, 2.0, 250.0, 100_000.0));
     let second = stream(280.0, 1.1, affine(1800.0, -1.0, 700.0, 300_000.0));
