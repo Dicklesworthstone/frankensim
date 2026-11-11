@@ -10159,7 +10159,23 @@ the owner sums; the mass rate is not read), then the same discrete-gradient
 heat and volume step on what the cavity then holds. So the stream side is
 explicit and first order in the step, while heat and wall work keep their
 rule. The reference's model is the catalog: a species the cavity runs out of
-may come back.
+may come back, and a cavity holding none of a species returns a zero fraction
+for it and takes it in.
+
+A species increment too small to change the mass held is dropped (the owner
+refuses one, and a flow dying away would end there). A step that would draw
+more of a species than is held, or all of the gas, is not an error: the
+cavity asks for half the step. The exchange's energy tolerance is the
+controls' per-kilogram tolerance times the larger of the masses before and
+after. With nothing crossing, the step is the closed cavity's to the bit.
+
+Two things are not checked. The total mass rate is not compared with the sum
+of the species rates: a system differences this cavity one input at a time,
+which such a guard would refuse. And cavities joined through their stream
+ports must have references with the same species, in the same order, from
+the same sources, because the rates are read by position and the enthalpy in
+this cavity's datum; the accounts close either way, so nothing in the kernel
+notices a mismatch.
 
 A streaming cavity's stored energy is its internal energy in the species'
 datum (mass times specific internal energy), not the increment from the
@@ -10170,18 +10186,43 @@ offers no port tangent (`jvp` and `vjp` refuse): add it to a system without
 one, and the kernel differences it. Entropy carried by the stream and made by
 mixing is not accounted.
 
-`tests/component.rs`, 2 tests: two litres of different two-species mixtures
-at 2 bar and 1 bar, each a streaming cavity, joined by the kernel's ideal
-`Restriction`, against the owner's own `ClosedGasParcel::transfer_mass_to`
-moving `dt * conductance * (p_a - p_b)` between the two parcels a step at a
-time: over 40 steps the masses and the heavy species' masses are equal to the
-bit, the temperatures within 5.7e-13 K and the pressures within 1.3e-15; the
-donor cools to 399.07 K and keeps its composition, the receiver warms to
-402.52 K; the graph's ledger closes to 2.5e-16 J. A streaming cavity passes
-the mandatory conformance check with compression, heat and a stream in each
-direction, returns its start-of-step values on the stream side, and refuses
-a bad tolerance, a tangent request, short or non-finite inputs and a draw of
-more of a species than it holds, leaving the candidate alone.
+`tests/component.rs`, 3 tests. The two species have formation energies of
+opposite sign, 7.1e6 and -1.25e7 J/kg, each far above the thermal part, so a
+datum mistake shows. Two litres of different mixtures, each a streaming
+cavity, are joined by the kernel's ideal `Restriction` and compared a step at
+a time with the owner's own calls on two parcels:
+`ClosedGasParcel::transfer_mass_to` moving `dt * conductance * |p_a - p_b|`
+from the side at the higher pressure, then `discrete_gradient_heat_volume` on
+the second.
+
+- 2 bar against 1 bar, no heat or wall work, 40 steps: masses and heavy
+  masses within 8e-16 of the mass, temperatures within 1.7e-11 K, pressures
+  within 4.3e-14 (bounds 1e-13, 1e-8 K, 1e-10; each side solves the owner's
+  energy equation to 1e-7 J/kg, about 1e-10 K a solve, through a different
+  entry point). The donor cools to 399.07 K and keeps its composition, the
+  receiver warms to 402.52 K; the graph's ledger closes to 2.4e-15 J.
+- 1.05 bar against 1 bar with the second cavity heated at 400 W and
+  compressed at 0.2 l/s, 80 steps: the gas goes in for 20 steps and back out
+  for 60, and the second cavity ends at 472 K. Masses within 5.5e-14,
+  temperatures within 9.0e-10 K, pressures within 2.2e-12; the second
+  cavity's heat port returns the heat-and-volume step's mean temperature
+  within 4.6e-10 K and its wall port the work pressure within 1.1e-12
+  (bounds 1e-12, 5e-8 K, 2e-10). The ledger closes to 9.1e-13 J of 32 J of
+  heat. The same reference in the other order (heat and wall work, then the
+  transfer) is 3.7e-3 K and, in the returned temperature, 2.0e-2 K away, and
+  the test requires more than 1e-4 K: the bounds tell the order.
+- One cavity alone: it passes the mandatory conformance check with
+  compression, heat and a stream in each direction, returns its start-of-step
+  values on the stream side and moves its mass and species by what the
+  species rates carried; with nothing crossing it is the closed cavity to the
+  bit; a 1e-22 kg/s stream leaves the mass unchanged to the bit and the step
+  is taken; `jvp` and `vjp` refuse with the no-tangent message; a draw of
+  more light gas than is held, or of all the gas, returns `Shorten` with half
+  the step; a bad tolerance, short or non-finite inputs, a wall that would
+  take the whole volume (refused after the exchange) and cancellation are
+  refused; every refusal and shortening leaves the candidate and outputs
+  alone; a cavity of light gas alone returns fractions 0 and 1 and takes
+  heavy gas in.
 
 Not done: a stream law from the owner (the restriction here is the kernel's
 linear element; the native nozzle is not a Component); the comparison with

@@ -391,12 +391,15 @@ fn source_refusals_bad_inputs_and_cancellation_leave_candidate_outputs_untouched
     });
 }
 
-/// One authored species for the mixtures: Cp/R = cp_r + slope T, no
-/// formation energy.
-fn authored_species(name: &str, molar_mass: f64, cp_r: f64, slope: f64) -> Nasa9StandardStateModelV1 {
+/// One authored species for the mixtures: Cp/R = cp_r + slope T, with a
+/// formation energy, so that a stream's enthalpy is mostly datum.
+fn authored_species(
+    name: &str, molar_mass: f64, cp_r: f64, slope: f64, formation_j_mol: f64,
+) -> Nasa9StandardStateModelV1 {
     let mut coefficients = [0.0; 9];
     coefficients[2] = cp_r;
     coefficients[3] = slope;
+    coefficients[7] = formation_j_mol / R;
     let mut parameters = std::collections::BTreeMap::new();
     for ((key, dims), value) in required_nasa9_parameter_dims().into_iter().take(9).zip(coefficients) {
         parameters.insert(key.to_owned(), LawParameter { value, dims });
@@ -463,21 +466,36 @@ const LIGHT_KG_MOL: f64 = 0.004;
 /// a gas whose heat capacity rises with temperature, the rest a light
 /// monatomic one.
 fn mixture(heavy: f64, pressure: f64) -> ClosedGasParcel {
+    let (mut species, mut transport, mut fractions) = (Vec::new(), Vec::new(), Vec::new());
+    // Formation energies of opposite sign, each far above the thermal part
+    // (about 4e5 J/kg at 400 K): 7.1e6 and -1.25e7 J/kg.
+    if heavy > 0.0 {
+        species.push(authored_species("heavy", HEAVY_KG_MOL, 3.5, 0.001, 2.0e5));
+        transport.push(authored_transport("heavy"));
+        fractions.push(heavy);
+    }
+    species.push(authored_species("light", LIGHT_KG_MOL, 2.5, 0.0, -5.0e4));
+    transport.push(authored_transport("light"));
+    fractions.push(1.0 - heavy);
     let model = ThermochemicalGasModel::new(
         FrozenIdealGasMixtureModelV1::new(
-            vec![
-                authored_species("heavy", HEAVY_KG_MOL, 3.5, 0.001),
-                authored_species("light", LIGHT_KG_MOL, 2.5, 0.0),
-            ],
-            Composition::new(CompositionBasis::MoleFraction, vec![heavy, 1.0 - heavy]).unwrap(),
+            species,
+            Composition::new(CompositionBasis::MoleFraction, fractions).unwrap(),
         ).unwrap(),
-        vec![authored_transport("heavy"), authored_transport("light")],
+        transport,
         None,
     ).unwrap();
     let point = QueryPoint::new()
         .with_quantity("temperature", quantity(QuantityKind::AbsoluteTemperature), T0).unwrap()
         .with_quantity("pressure", quantity(QuantityKind::Pressure), pressure).unwrap();
     ClosedGasParcel::new(model, point, V0).unwrap()
+}
+
+/// `|a - b|`, which must be a number: a NaN would pass a `max`.
+fn gap(a: f64, b: f64) -> f64 {
+    let difference = (a - b).abs();
+    assert!(difference.is_finite(), "{a} against {b}");
+    difference
 }
 
 /// Mass [kg] of the heavy species in a mixture.
@@ -487,16 +505,39 @@ fn heavy_kg(gas: &ClosedGasParcel) -> f64 {
     gas.mass_kg() * heavy / (heavy + (1.0 - moles) * LIGHT_KG_MOL)
 }
 
-#[test]
-fn two_streaming_cavities_exchange_gas_as_the_owners_pair_transfer_does() {
-    // Two litres of different mixtures at 2 bar and 1 bar, joined by a
-    // linear restriction. In the graph each is the gas owner's cavity with a
-    // stream port, and the restriction is the kernel's ideal element, which
-    // carries the enthalpy and the species of the side the gas leaves. The
-    // reference moves the same mass between the two parcels with the
-    // owner's own pair transfer, a step at a time.
-    let (conductance, dt, steps) = (2.0e-9, 1.0e-3, 40_u32);
-    let start = [mixture(0.75, 2.0e5), mixture(0.25, 1.0e5)];
+/// What a run of [`exchange`] found.
+struct Exchange {
+    /// Largest differences between graph and reference: mass and heavy mass
+    /// (relative to the mass), temperature [K], pressure (relative), and,
+    /// for the second cavity, the temperature and pressure its heat and
+    /// wall ports returned [K, relative].
+    worst: [f64; 6],
+    /// Steps in which gas went from the first cavity to the second, and
+    /// the other way.
+    steps: [u32; 2],
+    start: [ClosedGasParcel; 2],
+    reference: [ClosedGasParcel; 2],
+    ledger_j: f64,
+}
+
+/// Two litres of mixtures joined by a linear restriction, the second heated
+/// at `heat_w` and its wall taking `compression_m3_s` of volume from it.
+///
+/// In the graph each is the gas owner's cavity with a stream port, and the
+/// restriction is the kernel's ideal element, which carries the enthalpy
+/// and the species of the side the gas leaves. The reference does the same
+/// with the owner's own calls on two parcels, a step at a time: the pair
+/// transfer of `dt * conductance * (p_a - p_b)` from the side at the higher
+/// pressure, then the heat and volume step on the second; with `heat_first`
+/// the reference takes them in the other order, which the cavity does not.
+fn exchange(
+    start: [ClosedGasParcel; 2],
+    heat_w: f64,
+    compression_m3_s: f64,
+    steps: u32,
+    heat_first: bool,
+) -> Exchange {
+    let (conductance, dt) = (2.0e-9, 1.0e-3);
     let mass_tolerance_kg = 1.0e-15;
 
     let mut builder = SystemBuilder::new();
@@ -504,7 +545,7 @@ fn two_streaming_cavities_exchange_gas_as_the_owners_pair_transfer_does() {
         .add_with_tangent("pipe", Restriction::new(conductance, 2).unwrap(), ())
         .unwrap();
     let mut nodes = Vec::new();
-    for (name, gas) in ["a", "b"].into_iter().zip(&start) {
+    for (index, (name, gas)) in ["a", "b"].into_iter().zip(&start).enumerate() {
         let cavity = GasCavity::new(gas.clone(), controls()).unwrap()
             .streaming(mass_tolerance_kg).unwrap();
         let ports: Vec<&str> = cavity.ports().iter().map(|port| port.id().as_str()).collect();
@@ -515,14 +556,18 @@ fn two_streaming_cavities_exchange_gas_as_the_owners_pair_transfer_does() {
         builder.bond(
             builder.port(node, "stream").unwrap(), builder.port(pipe, name).unwrap(),
         ).unwrap();
-        for held in ["p", "heat"] {
+        let held = if index == 1 { [compression_m3_s, heat_w] } else { [0.0, 0.0] };
+        for (port, value) in ["p", "heat"].into_iter().zip(held) {
             builder.boundary(
-                builder.port(node, held).unwrap(), Box::new(|_, _, values| values[0] = 0.0),
+                builder.port(node, port).unwrap(), Box::new(move |_, _, values| values[0] = value),
             ).unwrap();
         }
         nodes.push(node);
     }
     let mut system = builder.seal().unwrap();
+    let returned = |system: &fs_system::System, port: &str| {
+        system.last_output(system.port(nodes[1], port).unwrap())[0]
+    };
 
     let solve = GasMassTransferSolve {
         donor: controls(),
@@ -533,50 +578,132 @@ fn two_streaming_cavities_exchange_gas_as_the_owners_pair_transfer_does() {
     let pressure = |gas: &ClosedGasParcel| gas.state().state().pressure;
     let kelvin = |gas: &ClosedGasParcel| gas.state().state().temperature;
     let mut reference = start.clone();
-    // Largest differences: mass, heavy mass (both relative to the mass),
-    // temperature [K], pressure (relative).
-    let mut worst = [0.0_f64; 4];
+    let mut worst = [0.0_f64; 6];
+    let mut directions = [0_u32; 2];
     with_cx(&CancelGate::new_clock_free(), |cx| {
         for step in 0..steps {
             let rate = conductance * (pressure(&reference[0]) - pressure(&reference[1]));
-            assert!(rate > 0.0, "step {step}");
-            let moved = reference[0]
-                .transfer_mass_to(&reference[1], dt * rate, solve, || false)
-                .unwrap();
-            let (donor, receiver, _) = moved.into_parts();
-            reference = [donor, receiver];
+            let (from, to) = if rate >= 0.0 { (0, 1) } else { (1, 0) };
+            directions[from] += u32::from(rate != 0.0);
+            let cross = |reference: &mut [ClosedGasParcel; 2]| {
+                let moved = reference[from]
+                    .transfer_mass_to(&reference[to], dt * rate.abs(), solve, || false)
+                    .unwrap();
+                let (donor, receiver, _) = moved.into_parts();
+                reference[from] = donor;
+                reference[to] = receiver;
+            };
+            // Heat and wall work on what the second cavity holds.
+            let heat_and_wall = |reference: &mut [ClosedGasParcel; 2]| {
+                let trial = reference[1]
+                    .discrete_gradient_heat_volume(
+                        reference[1].volume_m3() - dt * compression_m3_s,
+                        dt * heat_w,
+                        controls(),
+                        || false,
+                    )
+                    .unwrap();
+                let returned = (
+                    trial.thermodynamic_mean().state().temperature,
+                    trial.step().work_pressure_pa,
+                );
+                reference[1] = trial.into_parts().0;
+                returned
+            };
+            let (mean_k, work_pa) = if heat_first {
+                let returned = heat_and_wall(&mut reference);
+                cross(&mut reference);
+                returned
+            } else {
+                cross(&mut reference);
+                heat_and_wall(&mut reference)
+            };
+
             system.step(dt, cx).unwrap_or_else(|error| panic!("step {step}: {error}"));
             for (node, expected) in nodes.iter().zip(&reference) {
                 let held = system.state::<ClosedGasParcel>(*node).unwrap();
                 let mass = expected.mass_kg();
-                worst[0] = worst[0].max((held.mass_kg() - mass).abs() / mass);
-                worst[1] = worst[1].max((heavy_kg(held) - heavy_kg(expected)).abs() / mass);
-                worst[2] = worst[2].max((kelvin(held) - kelvin(expected)).abs());
-                worst[3] = worst[3]
-                    .max((pressure(held) - pressure(expected)).abs() / pressure(expected));
+                worst[0] = worst[0].max(gap(held.mass_kg(), mass) / mass);
+                worst[1] = worst[1].max(gap(heavy_kg(held), heavy_kg(expected)) / mass);
+                worst[2] = worst[2].max(gap(kelvin(held), kelvin(expected)));
+                worst[3] = worst[3].max(gap(pressure(held), pressure(expected)) / pressure(expected));
             }
+            worst[4] = worst[4].max(gap(returned(&system, "heat"), mean_k));
+            worst[5] = worst[5].max(gap(returned(&system, "p"), work_pa) / work_pa);
         }
     });
-    // Measured: the masses equal to the bit, 5.7e-13 K and 1.3e-15 of the
-    // pressure. Both sides solve the owner's energy equation to its
-    // 1e-7 J/kg, through different entry points.
-    assert!(worst[0] <= 1.0e-15 && worst[1] <= 1.0e-15, "{worst:?}");
-    assert!(worst[2] <= 1.0e-10 && worst[3] <= 1.0e-13, "{worst:?}");
+    Exchange {
+        worst,
+        steps: directions,
+        ledger_j: system.ledger().energy_residual_j(),
+        start,
+        reference,
+    }
+}
+
+#[test]
+fn two_streaming_cavities_exchange_gas_as_the_owners_pair_transfer_does() {
+    // 2 bar and 1 bar, nothing else: no heat, no wall work.
+    let run = exchange([mixture(0.75, 2.0e5), mixture(0.25, 1.0e5)], 0.0, 0.0, 40, false);
+    let Exchange { worst, start, reference, .. } = &run;
+    assert_eq!(run.steps, [40, 0]);
+    // Both sides solve the owner's energy equation to its 1e-7 J/kg, which
+    // is about 1e-10 K a solve, through different entry points: the cavity
+    // from the stream's enthalpy in the species' datum, where the
+    // formation energies dominate, the pair transfer relative to the
+    // sources. Measured over the 40 steps: masses within 8e-16, 1.7e-11 K
+    // and 4.3e-14 of the pressure. The bounds are what 40 solves may leave.
+    assert!(worst[0] <= 1.0e-13 && worst[1] <= 1.0e-13, "{worst:?}");
+    assert!(worst[2] <= 1.0e-8 && worst[3] <= 1.0e-10, "{worst:?}");
 
     // What happened, from the reference alone: the donor cooled as it
-    // expanded (to 399.07 K) and kept its composition; the receiver warmed
-    // (to 402.52 K) and gained heavy gas; mass and each species are
-    // conserved.
+    // expanded and kept its composition; the receiver warmed and gained
+    // heavy gas; mass and each species are conserved.
+    let kelvin = |gas: &ClosedGasParcel| gas.state().state().temperature;
     assert!(kelvin(&reference[0]) < T0 - 0.9 && kelvin(&reference[1]) > T0 + 2.5);
     let fraction = |gas: &ClosedGasParcel| heavy_kg(gas) / gas.mass_kg();
     close(fraction(&reference[0]), fraction(&start[0]), 1.0e-13);
     assert!(fraction(&reference[1]) > fraction(&start[1]) + 1.0e-3);
     let total = |gases: &[ClosedGasParcel; 2], of: fn(&ClosedGasParcel) -> f64| of(&gases[0]) + of(&gases[1]);
-    close(total(&reference, ClosedGasParcel::mass_kg), total(&start, ClosedGasParcel::mass_kg), 1.0e-18);
-    close(total(&reference, heavy_kg), total(&start, heavy_kg), 1.0e-17);
-    // The graph's own accounts: no heat, no wall work, what one cavity lost
-    // in enthalpy the other gained. Measured 2.5e-16 J.
-    close(system.ledger().energy_residual_j(), 0.0, 1.0e-12);
+    close(total(reference, ClosedGasParcel::mass_kg), total(start, ClosedGasParcel::mass_kg), 1.0e-18);
+    close(total(reference, heavy_kg), total(start, heavy_kg), 1.0e-17);
+    // The graph's own accounts: what one cavity lost in enthalpy the other
+    // gained. Measured 2.4e-15 J.
+    close(run.ledger_j, 0.0, 1.0e-11);
+}
+
+#[test]
+fn a_heated_and_compressed_cavity_turns_the_flow_round_and_keeps_the_owners_order() {
+    // The second cavity starts 5 kPa below the first, is heated at 400 W
+    // and loses a fifth of a litre a second to its wall, so the gas goes
+    // into it and then, as its pressure passes the first's, back out. Each
+    // step it first takes what crossed and then the heat and the wall
+    // work: the reference does them in that order.
+    let start = || [mixture(0.75, 1.05e5), mixture(0.25, 1.0e5)];
+    let run = exchange(start(), 400.0, 2.0e-4, 80, false);
+    let Exchange { worst, reference, .. } = &run;
+    // Twenty steps in, sixty back out; the second cavity ends at 472 K.
+    assert!(run.steps[0] > 10 && run.steps[1] > 10, "{:?}", run.steps);
+    assert!(reference[1].state().state().temperature > T0 + 60.0);
+    // Measured: masses within 5.5e-14, 9.0e-10 K and 2.2e-12 of the
+    // pressure, after 160 of the owner's solves at about 1e-10 K each.
+    assert!(worst[0] <= 1.0e-12 && worst[1] <= 1.0e-12, "{worst:?}");
+    assert!(worst[2] <= 5.0e-8 && worst[3] <= 2.0e-10, "{worst:?}");
+    // The heat port returned the heat-and-volume step's mean temperature
+    // and the wall port its work pressure: measured 4.6e-10 K and 1.1e-12.
+    assert!(worst[4] <= 5.0e-8 && worst[5] <= 2.0e-10, "{worst:?}");
+    // These bounds tell the order: a reference that heats and compresses
+    // first and transfers after is another trajectory. Measured against
+    // it: 3.7e-3 K in the state and 2.0e-2 K in the returned temperature.
+    let other = exchange(start(), 400.0, 2.0e-4, 80, true);
+    assert!(other.worst[2] > 1.0e-4 && other.worst[4] > 1.0e-4, "{:?}", other.worst);
+    // After the turn the first cavity holds some of the second's lighter
+    // mixture.
+    let fraction = |gas: &ClosedGasParcel| heavy_kg(gas) / gas.mass_kg();
+    assert!(fraction(&reference[0]) < fraction(&run.start[0]) - 1.0e-6);
+    // The ledger closes on the heat supplied and the wall's work. Measured
+    // 9.1e-13 J of the 32 J of heat.
+    close(run.ledger_j, 0.0, 1.0e-10);
 }
 
 #[test]
@@ -614,19 +741,84 @@ fn a_streaming_cavity_conforms_with_gas_entering_and_leaving_and_refuses_what_it
             close(heavy_kg(&next), heavy_kg(&gas) + 1.0e-3 * rate * heavy, 1.0e-18);
             close(next.volume_m3(), V0 - 2.0e-7, 1.0e-18);
         }
-        // No tangent is offered, and the refusals leave the candidate alone.
+        // With nothing crossing it is the closed cavity: the same endpoint
+        // and the same pressure and temperature, to the bit.
+        let closed = GasCavity::new(gas.clone(), controls()).unwrap();
+        let (mut alone, mut shut) = (stale.clone(), stale.clone());
+        let (mut six, mut two) = ([0.0; 6], [0.0; 2]);
+        cavity.propose(&gas, 1.0e-3, &[2.0e-4, 15.0, 0.0, 0.0, 0.0, 0.0], &mut alone, &mut six, cx).unwrap();
+        closed.propose(&gas, 1.0e-3, &[2.0e-4, 15.0], &mut shut, &mut two, cx).unwrap();
+        assert_eq!(alone, shut);
+        assert_eq!([six[0].to_bits(), six[1].to_bits()], two.map(f64::to_bits));
+        // An increment too small to change what is held is none: the mass
+        // is the same to the bit and the step is taken. (The owner refuses
+        // such an increment; a flow dying away would end there.)
+        let faint = 1.0e-22;
         let mut next = stale.clone();
+        let step = cavity.propose(
+            &gas, 1.0e-3,
+            &[0.0, 0.0, faint, faint * enthalpy, faint * fraction, faint * (1.0 - fraction)],
+            &mut next, &mut six, cx,
+        ).unwrap();
+        assert!(matches!(step, Proposal::Step(_)));
+        assert_eq!(next.mass_kg().to_bits(), gas.mass_kg().to_bits());
+
+        // No tangent is offered, in either direction, and it says so.
         let mut outputs = [7.0; 6];
-        assert!(cavity.jvp(&gas, 1.0e-3, &[0.0; 6], &[1.0; 6], &mut outputs, cx).is_err());
+        let no_tangent = |result: Result<(), GasEnergyError>| {
+            matches!(result, Err(GasEnergyError::Invalid(why)) if why.contains("no port tangent"))
+        };
+        assert!(no_tangent(cavity.jvp(&gas, 1.0e-3, &[0.0; 6], &[1.0; 6], &mut outputs, cx)));
+        assert!(no_tangent(cavity.vjp(&gas, 1.0e-3, &[0.0; 6], &[1.0; 6], &mut outputs, cx)));
+        // A step that would draw more light gas than the cavity holds, or
+        // all of its gas, is shortened; the candidate is left alone.
+        let mut next = stale.clone();
+        for inputs in [
+            [0.0, 0.0, -10.0, -10.0 * enthalpy, 0.0, -10.0],
+            [0.0, 0.0, -10.0, -10.0 * enthalpy, -10.0 * fraction, -10.0 * (1.0 - fraction)],
+        ] {
+            let asked = cavity.propose(&gas, 1.0e-3, &inputs, &mut next, &mut outputs, cx).unwrap();
+            let Proposal::Shorten { dt_s } = asked else { panic!("not shortened: {inputs:?}") };
+            assert_eq!(dt_s.to_bits(), 0.5e-3_f64.to_bits(), "{inputs:?}");
+            assert_eq!(next, stale);
+            assert_eq!(outputs.map(f64::to_bits), [7.0_f64.to_bits(); 6]);
+        }
+        // Refusals, before the exchange and after it (a wall that would
+        // take more than the whole volume), leave the candidate alone too.
         for inputs in [
             vec![0.0; 5],
             vec![0.0, 0.0, 0.0, f64::NAN, 0.0, 0.0],
-            // More light gas drawn than the cavity holds.
-            vec![0.0, 0.0, -10.0, -10.0 * enthalpy, 0.0, -10.0],
+            vec![2.0, 0.0, 1.0e-4, 1.0e-4 * enthalpy, 1.0e-4 * fraction, 1.0e-4 * (1.0 - fraction)],
         ] {
             assert!(cavity.propose(&gas, 1.0e-3, &inputs, &mut next, &mut outputs, cx).is_err());
             assert_eq!(next, stale);
             assert_eq!(outputs.map(f64::to_bits), [7.0_f64.to_bits(); 6]);
         }
+
+        // A cavity that holds none of a species of its reference returns a
+        // zero fraction for it and takes it in: the reference is the
+        // catalog. Pure light gas, with heavy gas arriving.
+        let light = mixture(0.0, 1.0e5);
+        assert_eq!(light.model().thermodynamics().components().len(), 1);
+        let arriving = [0.0, 0.0, 2.0e-4, 2.0e-4 * enthalpy, 2.0e-4, 0.0];
+        let case = Case { state: &light, stale: &stale, dt_s: 1.0e-3, inputs: &arriving };
+        let Ok(Observed::Stepped { outputs: held, .. }) = check_component(&cavity, &case, cx) else {
+            panic!("no conforming step from light gas alone");
+        };
+        assert_eq!([held[4].to_bits(), held[5].to_bits()], [0.0_f64.to_bits(), 1.0_f64.to_bits()]);
+        let mut mixed = stale.clone();
+        cavity.propose(&light, 1.0e-3, &arriving, &mut mixed, &mut six, cx).unwrap();
+        assert_eq!(mixed.model().thermodynamics().components().len(), 2);
+        close(heavy_kg(&mixed), 2.0e-7, 1.0e-20);
+        close(mixed.mass_kg(), light.mass_kg() + 2.0e-7, 1.0e-18);
+
+        // Cancellation, last: the gate stays requested.
+        cx.cancel_gate().request();
+        assert!(matches!(
+            cavity.propose(&gas, 1.0e-3, &arriving, &mut next, &mut outputs, cx),
+            Err(GasEnergyError::Cancelled)
+        ));
+        assert_eq!(next, stale);
+        assert_eq!(outputs.map(f64::to_bits), [7.0_f64.to_bits(); 6]);
     });
 }

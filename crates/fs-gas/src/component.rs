@@ -84,6 +84,10 @@ struct StreamPlan {
     mass_tolerance_kg: f64,
 }
 
+/// What a streaming cavity answers a tangent request with.
+const NO_TANGENT: &str =
+    "a streaming gas cavity offers no port tangent; add it to a system without one";
+
 /// Internal energy [J] of `parcel` in its species' own datum.
 fn absolute_energy_j(parcel: &ClosedGasParcel) -> f64 {
     parcel.mass_kg() * parcel.state().specific_internal_energy_j_kg()
@@ -155,7 +159,15 @@ impl GasCavity {
     /// species' own datum and each species' mass rate [kg/s], and returns
     /// the pressure [Pa], specific enthalpy [J/kg] and species mass
     /// fractions the cavity had when the step began. The species rates are
-    /// what changes the inventory; the mass rate is not read.
+    /// what changes the inventory; the mass rate is not read, and nothing
+    /// checks that it is their sum. A species increment too small to change
+    /// what is held is dropped. A step that would draw more of a species
+    /// than is held, or all of the gas, is shortened.
+    ///
+    /// Cavities joined through their stream ports must have references
+    /// with the same species, in the same order, from the same sources:
+    /// the rates are read by position and the enthalpy in this cavity's
+    /// datum. Nothing checks it, and the accounts close either way.
     ///
     /// The stored energy of a streaming cavity is its internal energy in
     /// that datum, not the increment from the reference, so a large
@@ -238,7 +250,12 @@ impl GasCavity {
 
     /// What `old` holds once `entered_j` of enthalpy and the species masses
     /// `dt_s * rates` have crossed at its volume, and the owner's account
-    /// of that; `old` itself when nothing crossed.
+    /// of that; `old` itself when nothing crossed. `Ok(None)` when the step
+    /// would draw more of a species than the cavity holds, or all of its
+    /// gas: a shorter step is wanted.
+    ///
+    /// `fractions` are `old`'s species mass fractions, formed as the owner
+    /// forms its inventory, so the two tests below are the owner's own.
     #[allow(clippy::too_many_arguments)]
     fn crossed(
         &self,
@@ -247,35 +264,54 @@ impl GasCavity {
         dt_s: f64,
         entered_j: f64,
         rates: &[f64],
-        budget_j: f64,
+        fractions: &[f64],
         cx: &Cx<'_>,
-    ) -> Result<(ClosedGasParcel, Option<GasSpeciesBoundaryStep>), GasEnergyError> {
-        if entered_j == 0.0 && rates.iter().all(|rate| *rate == 0.0) {
-            return Ok((old.clone(), None));
-        }
-        // The owner sums the rows' energies, so the whole of the stream's
-        // enthalpy goes on the first one.
-        let rows: Vec<SpeciesBoundaryTransfer> = stream
-            .species
-            .iter()
-            .zip(rates)
-            .enumerate()
-            .map(|(index, (species, rate))| SpeciesBoundaryTransfer {
+    ) -> Result<Option<(ClosedGasParcel, Option<GasSpeciesBoundaryStep>)>, GasEnergyError> {
+        let mut rows = Vec::with_capacity(rates.len());
+        let mut entering_kg = 0.0;
+        for (index, ((species, rate), fraction)) in
+            stream.species.iter().zip(rates).zip(fractions).enumerate()
+        {
+            let held_kg = old.mass_kg() * fraction;
+            let mut mass_kg = dt_s * rate;
+            // An increment too small to change the inventory is none. The
+            // owner refuses one, and a flow that dies away would otherwise
+            // end the run when it reached the rounding of what is held.
+            #[allow(clippy::float_cmp)]
+            if held_kg + mass_kg == held_kg {
+                mass_kg = 0.0;
+            }
+            if held_kg + mass_kg < 0.0 {
+                return Ok(None);
+            }
+            entering_kg += mass_kg;
+            // The owner sums the rows' energies, so the whole of the
+            // stream's enthalpy goes on the first one.
+            rows.push(SpeciesBoundaryTransfer {
                 species: species.clone(),
-                mass_into_gas_kg: dt_s * rate,
+                mass_into_gas_kg: mass_kg,
                 energy_into_gas_j: if index == 0 { entered_j } else { 0.0 },
-            })
-            .collect();
+            });
+        }
+        if entered_j == 0.0 && rows.iter().all(|row| row.mass_into_gas_kg == 0.0) {
+            return Ok(Some((old.clone(), None)));
+        }
+        if !(old.mass_kg() + entering_kg > 0.0) {
+            return Ok(None);
+        }
+        // The owner's inversion is gated per kilogram of what the cavity
+        // holds afterwards.
         let solve = GasSpeciesBoundarySolve {
             gas: self.controls,
             mass_tolerance_kg: stream.mass_tolerance_kg,
-            energy_tolerance_j: budget_j,
+            energy_tolerance_j: old.mass_kg().max(old.mass_kg() + entering_kg)
+                * self.controls.energy_tolerance_j_kg,
         };
         let candidate = old.exchange_species_boundary(self.reference.model(), &rows, solve, || {
             cx.is_cancel_requested()
         })?;
         let (gas, _, step) = candidate.into_parts();
-        Ok((gas, Some(step)))
+        Ok(Some((gas, Some(step))))
     }
 
     /// One step of a streaming cavity: what crossed, at the old volume,
@@ -315,8 +351,12 @@ impl GasCavity {
 
         // What crossed.
         let entered_j = dt_s * crossing[STREAM_ENTHALPY_RATE];
-        let budget_j = old.mass_kg() * self.controls.energy_tolerance_j_kg;
-        let (held, exchange) = self.crossed(stream, old, dt_s, entered_j, rates, budget_j, cx)?;
+        let Some((held, exchange)) =
+            self.crossed(stream, old, dt_s, entered_j, rates, &fractions, cx)?
+        else {
+            return Ok(Proposal::Shorten { dt_s: 0.5 * dt_s });
+        };
+        let budget_j = old.mass_kg().max(held.mass_kg()) * self.controls.energy_tolerance_j_kg;
 
         // Heat and wall work on what it then holds.
         let displaced = dt_s * compression;
@@ -391,11 +431,6 @@ impl GasCavity {
         inputs: &[f64],
         cx: &Cx<'_>,
     ) -> Result<[[f64; 2]; 2], GasEnergyError> {
-        if self.stream.is_some() {
-            return Err(invalid(
-                "a streaming gas cavity offers no port tangent; add it to a system without one",
-            ));
-        }
         let (trial, _) = self.trial(old, dt_s, inputs, cx)?;
         let step = trial.step();
         let theta = trial.thermodynamic_mean().state().temperature;
@@ -524,6 +559,9 @@ impl PortTangent for GasCavity {
         d_outputs: &mut [f64],
         cx: &Cx<'_>,
     ) -> Result<(), GasEnergyError> {
+        if self.stream.is_some() {
+            return Err(invalid(NO_TANGENT));
+        }
         let direction = pair(d_inputs)?;
         if d_outputs.len() != 2 {
             return Err(invalid("gas cavity requires two scalar tangent outputs"));
@@ -548,6 +586,9 @@ impl PortTangent for GasCavity {
         bar_inputs: &mut [f64],
         cx: &Cx<'_>,
     ) -> Result<(), GasEnergyError> {
+        if self.stream.is_some() {
+            return Err(invalid(NO_TANGENT));
+        }
         let weights = pair(bar_outputs)?;
         if bar_inputs.len() != 2 {
             return Err(invalid("gas cavity requires two scalar tangent inputs"));
