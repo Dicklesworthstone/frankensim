@@ -161,11 +161,12 @@ fn shut_port_on_the_head(rows: &str) {
         .expect("chart")
         .to_duct();
     let head = nasal_head(&description);
-    // The series card's own head load (`build`'s), in the exterior form, which with one gas is the plain form exactly.
+    // The series card's own head load (`build`'s), in the exterior form, which with one gas is the plain form exactly;
+    // its flanged term's duct modes in the tract's gas, as `build` makes it.
     let table = match head.torso {
-        None => head_mouth_load(head.radius_m, &duct, &exterior, rate, GLOTTAL_LINE_MAX_TAPS),
+        None => head_mouth_load(head.radius_m, &duct, &gas, &exterior, rate, GLOTTAL_LINE_MAX_TAPS),
         Some((torso, band)) => {
-            head_torso_mouth_load(head.radius_m, torso, band, &duct, &exterior, rate, GLOTTAL_LINE_MAX_TAPS)
+            head_torso_mouth_load(head.radius_m, torso, band, &duct, &gas, &exterior, rate, GLOTTAL_LINE_MAX_TAPS)
         }
     }
     .expect("the series card's head load");

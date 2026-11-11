@@ -35,8 +35,9 @@
 //! nostrils row's source states by how much) is not modeled in front of it, and the openings do not load one another.
 //!
 //! The head rows (N3b; owner order MB 15368, design 18805 and 18806, rulings MB 18809 and 18822). `tract_gas`: every
-//! edge holds the tract's gas and the network's exterior is the ambient, so each port's load is evaluated in the
-//! exterior, as the series lips' is. `head_load` (with `head_sphere`, and the torso's change with `torso_sphere`): each
+//! edge holds the tract's gas and the network's exterior is the ambient, so each port's load is bound to the exterior,
+//! as the series lips' is, and its flanged term's eliminated duct modes are in the tract's gas, the gas of the path that
+//! ends at the port (MB 25423). `head_load` (with `head_sphere`, and the torso's change with `torso_sphere`): each
 //! radiating port's load is its own opening's cap on the head (`head_opening_load`; the head module doc, "Openings off
 //! the pole"), the lips' cap at the pole and each nostril's on the ray from the head's centre through its place on the
 //! baffle, a modelling choice; each table holds the flow lines' finest bins, so every line reads its own rows, and below
@@ -422,12 +423,14 @@ pub(super) struct NasalLines {
 /// With `head_load` (N3b): each radiating port's load is its opening's cap on the head ([`head_opening_load`]), the lips
 /// at the origin and the nostrils at `(x, y)` and `(-x, y)`, at each port's own radius; each table on the flow lines'
 /// finest bins ([`NASAL_FLOW_MAX_TAPS`]), so every rung of every line reads its own row, bound to the port's plane (its
-/// path's length from the glottis), radius and the exterior gas, and checked against them.
+/// path's length from the glottis), radius and the exterior gas, and checked against them; each flanged term's
+/// eliminated duct modes are in `gas`, the tract's gas that fills every edge.
 fn head_loads(
     oral: &[TractSection],
     card: &NasalCard,
     terminations: Vec<PortTermination>,
     head: NasalHead,
+    gas: &GasState,
     exterior: &GasState,
     sample_rate_hz: u32,
 ) -> Result<Vec<PortTermination>, String> {
@@ -449,7 +452,7 @@ fn head_loads(
                 other => return Err(format!("nasal port {other} has no opening on the head")),
             };
             let opening = CircularOpening { center_m, radius_m: radius };
-            let table = head_opening_load(head.radius_m, opening, head.torso, axial_m, exterior, sample_rate_hz,
+            let table = head_opening_load(head.radius_m, opening, head.torso, axial_m, gas, exterior, sample_rate_hz,
                 NASAL_FLOW_MAX_TAPS)
                 .map_err(|e| format!("nasal {} head load refused: {e}", port.label))?;
             table
@@ -477,7 +480,7 @@ pub(super) fn nasal_lines(
     let (network, terminations, nostril_radius_m) = nasal_graph(oral, card, exterior.termination, velum);
     let terminations = match exterior.head {
         None => terminations,
-        Some(head) => head_loads(oral, card, terminations, head, exterior.gas, sample_rate_hz)?,
+        Some(head) => head_loads(oral, card, terminations, head, gas, exterior.gas, sample_rate_hz)?,
     };
     let gases = network.edges.iter().map(|e| (e.id.clone(), GasRecord::Legacy(*gas))).collect();
     let media = NetworkMedia::new(&network, gases, GasRecord::Legacy(*exterior.gas))

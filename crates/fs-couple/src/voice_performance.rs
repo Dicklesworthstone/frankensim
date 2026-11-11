@@ -180,11 +180,13 @@
 //!
 //! `tract_gas` fills the tract with its own gas (breath) while `ambient` stays the exterior (the room). The island's
 //! line, the mouth-flow line, the passive formants and the glottal flow's density and viscosity take the tract gas; the
-//! lips' load table, the receiver and the head and torso spheres take `ambient`. The table is an absolute impedance
-//! (Pa s/m^3) computed in the exterior and checked against it, so nothing is converted at the lips: pressure and volume
-//! flow are continuous there. Without `head_load` the table is the declared flanged load across the gas interface, on
-//! the same bins: fs-duct's two-gas law, whose radiation is in the exterior and whose eliminated higher duct modes are
-//! in the tract's gas ([`crate::pcm_wav::baffled::head::flanged_mouth_load`]; MB 23833, 24424). That needs
+//! receiver and the head and torso spheres take `ambient`. The lips' load table is an absolute impedance (Pa s/m^3)
+//! bound to the exterior and checked against it, so nothing is converted at the lips: pressure and volume flow are
+//! continuous there. Its flanged part is fs-duct's two-gas law, whose radiation is in the exterior and whose eliminated
+//! higher duct modes are in the tract's gas. Without `head_load` the table is that flanged load alone, on the same bins
+//! ([`crate::pcm_wav::baffled::head::flanged_mouth_load`]; MB 23833, 24424); with it the head's cap, piston and torso
+//! terms, all in the exterior, are added to that flanged load, and each nostril's table takes the tract's gas the same
+//! way ([`crate::pcm_wav::baffled::head::head_mouth_load`]; MB 25423). Without `head_load` the row needs
 //! `termination flanged`; a nasal card with a tract gas and no head is untried and refused. The two gases share one
 //! static pressure (mean flow is not modeled). The medium is stationary: the breath does not
 //! mix with the room or replace the tract's air over a note. Without the row the one `ambient` gas fills the tract and the
@@ -1587,7 +1589,8 @@ impl VoiceDescription {
         }
         // `head_load`: one table on the finest rung's bins, read by the island's line, the mouth-flow line and the
         // passive formants alike, with the torso's change when there is a torso (one geometry for the lips and the
-        // microphone). Without the row each takes the declared termination exactly as before.
+        // microphone), its flanged term's duct modes in the tract's gas. Without the row each takes the declared
+        // termination exactly as before.
         let head_load = match (self.head_load, &self.head_sphere) {
             (false, _) => None,
             (true, None) => return Err(HEAD_LOAD_NEEDS_SPHERE.into()),
@@ -1598,9 +1601,9 @@ impl VoiceDescription {
             (true, Some(_)) if self.nasal.is_some() => None,
             (true, Some(card)) => Some(
                 match &self.torso_sphere {
-                    None => head_mouth_load(card.radius_m, &duct, exterior, mechanics_rate, GLOTTAL_LINE_MAX_TAPS),
+                    None => head_mouth_load(card.radius_m, &duct, gas, exterior, mechanics_rate, GLOTTAL_LINE_MAX_TAPS),
                     Some(t) => head_torso_mouth_load(card.radius_m, t.torso, self.microphone.maximum_frequency_hz, &duct,
-                        exterior, mechanics_rate, GLOTTAL_LINE_MAX_TAPS),
+                        gas, exterior, mechanics_rate, GLOTTAL_LINE_MAX_TAPS),
                 }
                 .map_err(|e| format!("head load refused: {e}"))?,
             ),
@@ -2139,9 +2142,9 @@ impl VoiceDescription {
         let head_load = match (self.head_load, &self.head_sphere) {
             (true, Some(card)) => Some(
                 match &self.torso_sphere {
-                    None => head_mouth_load(card.radius_m, &duct, exterior, mechanics_rate, GLOTTAL_LINE_MAX_TAPS),
+                    None => head_mouth_load(card.radius_m, &duct, gas, exterior, mechanics_rate, GLOTTAL_LINE_MAX_TAPS),
                     Some(t) => head_torso_mouth_load(card.radius_m, t.torso, self.microphone.maximum_frequency_hz,
-                        &duct, exterior, mechanics_rate, GLOTTAL_LINE_MAX_TAPS),
+                        &duct, gas, exterior, mechanics_rate, GLOTTAL_LINE_MAX_TAPS),
                 }
                 .map_err(|e| format!("moving tract head load refused: {e}"))?,
             ),
@@ -4443,8 +4446,9 @@ mod tests {
     }
 
     /// A tract gas apart from the exterior: the tract's lines and formants take its sound speed, so each passive formant
-    /// moves by the ratio of the two sound speeds to within 1 % (the lips' load stays the exterior's absolute impedance,
-    /// so the end correction seen from the tract scales with the density ratio instead), and the receiver and the head
+    /// moves by the ratio of the two sound speeds to within 1 % (the lips' load is an absolute impedance whose radiation
+    /// stays in the exterior gas, only its flanged term's eliminated duct modes taking the tract's, so the end correction
+    /// seen from the tract does not follow the sound speed ratio), and the receiver and the head's cap, piston and torso
     /// stay the exterior's.
     #[test]
     fn tract_gas_moves_the_formants_by_the_sound_speed_ratio() {

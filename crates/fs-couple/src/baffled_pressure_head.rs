@@ -69,7 +69,11 @@
 //! Z_L = Z_flanged + (conj(Z_cap) - Z_piston)          (fs-duct's e^{-i w t}; the conjugate carries Z_cap over)
 //! ```
 //!
-//! `Z_flanged` is the declared flanged pipe's own multimodal load (`fs_duct::compact_radiation_impedance`), `Z_piston`
+//! `Z_flanged` is the declared flanged pipe's own multimodal load across the gas interface
+//! (`fs_duct::flanged_pipe_impedance_with_exterior` with `fs_duct::FLANGED_MODES`): its radiation in the exterior gas,
+//! its eliminated higher duct modes in the gas inside the duct (the tract's; a voice card's `tract_gas`, or the ambient
+//! without one). With one gas it is `fs_duct::compact_radiation_impedance`'s flanged load bit for bit. Everything else in
+//! the table is in the exterior gas: the cap, the piston, the torso and the mouth record. `Z_piston` is
 //! the closed-form baffled piston of the same radius (`fs_phs::baffled_piston_impedance`). Both added terms have uniform
 //! velocity, so their singular near fields cancel and what is added is the smooth change in the exterior: the
 //! flanged load's own velocity-profile part stays. As the sphere grows, `Z_L` returns to `Z_flanged`. The table's rows
@@ -90,11 +94,13 @@
 //! after their FIRs: the openings do not load one another, and no cap scatters another's field. With a torso the cap's
 //! change takes `P_n^m(cos theta_c)` (the `torso` child module). The cap's own load `Z_cap(b_i)` does not depend on where
 //! the cap sits (the sphere is the same in every direction); only the torso's change does. An opening at `(0, 0)` is
-//! the lips' cap at the pole, and every path above is taken unchanged.
+//! the lips' cap at the pole, and every path above is taken unchanged. An opening's flanged term takes the gas inside the
+//! path that ends at it: the nasal rows fill every edge with the tract's gas, so a nostril's eliminated duct modes are in
+//! the tract's gas, as the lips' are.
 
 use super::openings::CircularOpening;
 use super::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
-use fs_duct::{Duct, Segment, TabulatedLoad, TabulatedMouth, Termination};
+use fs_duct::{Duct, Segment, TabulatedLoad, TabulatedMouth};
 use fs_material::gas::GasState;
 use fs_math::det;
 
@@ -596,15 +602,17 @@ impl CapLoad {
 /// The lips' radiation load with the head (module doc, "The lips' load"): `Z_flanged + (conj(Z_cap) - Z_piston)`
 /// [Pa s/m^3, `e^{-i w t}`] for a cap of the mouth's area on a rigid sphere of radius `radius_m`, on the bins
 /// `w_k = 2 pi k / (max_taps dt)`, `k = 1..=max_taps / 2`, of the finest rung of the lines that will read it, bound to
-/// the duct's own mouth plane, radius and gas with DC 0.
+/// the duct's own mouth plane and radius and to `gas`, the exterior, with DC 0. `tract` is the gas inside the duct: only
+/// `Z_flanged`'s eliminated duct modes take it (module doc); with `tract` equal to `gas` the table is the one-gas table.
 ///
 /// # Errors
 /// A non-physical head, an empty duct or a mouth not smaller than the head, a zero rate or a tap count that is not a
-/// power of two of at least 2, a series beyond [`LOAD_MAX_ORDER`] or not converged, a flanged or piston refusal, or a
-/// row the table refuses (not finite or not passive within 1e-12).
-pub fn head_mouth_load(radius_m: f64, duct: &Duct, gas: &GasState, sample_rate_hz: u32, max_taps: usize)
-    -> Result<TabulatedLoad, String> {
-    mouth_load(radius_m, None, duct, gas, sample_rate_hz, max_taps)
+/// power of two of at least 2, a series beyond [`LOAD_MAX_ORDER`] or not converged, a flanged refusal (unequal static
+/// pressures, or `ka` above the flanged ceiling in either gas) or a piston refusal, or a row the table refuses (not
+/// finite or not passive within 1e-12).
+pub fn head_mouth_load(radius_m: f64, duct: &Duct, tract: &GasState, gas: &GasState, sample_rate_hz: u32,
+    max_taps: usize) -> Result<TabulatedLoad, String> {
+    mouth_load(radius_m, None, duct, tract, gas, sample_rate_hz, max_taps)
 }
 
 /// [`head_mouth_load`] with the snowman's torso under the head (module doc, "The torso"): the cap's self-impedance gains
@@ -615,22 +623,26 @@ pub fn head_mouth_load(radius_m: f64, duct: &Duct, gas: &GasState, sample_rate_h
 /// # Errors
 /// Every refusal of [`head_mouth_load`], a torso refusal, a band that is not finite and positive, or a band needing more
 /// than [`TORSO_MAX_ORDER`] orders.
-pub fn head_torso_mouth_load(radius_m: f64, torso: TorsoSphere, band_hz: f64, duct: &Duct, gas: &GasState,
-    sample_rate_hz: u32, max_taps: usize) -> Result<TabulatedLoad, String> {
-    mouth_load(radius_m, Some((torso, band_hz)), duct, gas, sample_rate_hz, max_taps)
+#[allow(clippy::too_many_arguments)]
+pub fn head_torso_mouth_load(radius_m: f64, torso: TorsoSphere, band_hz: f64, duct: &Duct, tract: &GasState,
+    gas: &GasState, sample_rate_hz: u32, max_taps: usize) -> Result<TabulatedLoad, String> {
+    mouth_load(radius_m, Some((torso, band_hz)), duct, tract, gas, sample_rate_hz, max_taps)
 }
 
 /// The radiation load of one opening of the baffle with the head (module doc, "Openings off the pole"): the
 /// [`head_mouth_load`] law for a cap of the opening's area centred on the ray from the head's centre through the
 /// opening's centre, with the torso's change at that cap (weighted as [`head_torso_mouth_load`] weights it) when `torso`
 /// is given as `(torso, band_hz)`; on the same bins, bound to `axial_position_m` (the opening's plane, from the inlet of
-/// the path that reads it), the opening's radius and `gas` with DC 0. An opening at `(0, 0)` of a duct's mouth radius,
-/// bound to that duct's length, is [`head_mouth_load`] (or [`head_torso_mouth_load`]) bit for bit.
+/// the path that reads it), the opening's radius and `gas`, the exterior, with DC 0; `tract` is the gas inside that
+/// path, which only `Z_flanged`'s eliminated duct modes take. An opening at `(0, 0)` of a duct's mouth radius, bound to
+/// that duct's length, is [`head_mouth_load`] (or [`head_torso_mouth_load`]) bit for bit.
 ///
 /// # Errors
 /// Every refusal of [`head_mouth_load`] and [`head_torso_mouth_load`], or a binding the table refuses.
+#[allow(clippy::too_many_arguments)]
 pub fn head_opening_load(radius_m: f64, opening: CircularOpening, torso: Option<(TorsoSphere, f64)>,
-    axial_position_m: f64, gas: &GasState, sample_rate_hz: u32, max_taps: usize) -> Result<TabulatedLoad, String> {
+    axial_position_m: f64, tract: &GasState, gas: &GasState, sample_rate_hz: u32, max_taps: usize)
+    -> Result<TabulatedLoad, String> {
     if !radius_m.is_finite() || radius_m <= 0.0 {
         return Err("the head radius must be finite and positive".into());
     }
@@ -638,7 +650,7 @@ pub fn head_opening_load(radius_m: f64, opening: CircularOpening, torso: Option<
         return Err("the opening's centre must be finite".into());
     }
     let axis = cap_axis(radius_m, opening.center_m);
-    cap_load(radius_m, opening.radius_m, axis, torso, axial_position_m, gas, sample_rate_hz, max_taps)
+    cap_load(radius_m, opening.radius_m, axis, torso, axial_position_m, tract, gas, sample_rate_hz, max_taps)
 }
 
 /// The lips' declared flanged load with no head, for `tract_gas` without `head_load` (MB 23833, 24424): fs-duct's
@@ -681,20 +693,22 @@ pub fn flanged_mouth_load(duct: &Duct, tract: &GasState, exterior: &GasState, sa
         .map_err(|e| format!("the flanged load table refused: {e:?}"))
 }
 
-fn mouth_load(radius_m: f64, torso: Option<(TorsoSphere, f64)>, duct: &Duct, gas: &GasState, sample_rate_hz: u32,
-    max_taps: usize) -> Result<TabulatedLoad, String> {
+#[allow(clippy::too_many_arguments)]
+fn mouth_load(radius_m: f64, torso: Option<(TorsoSphere, f64)>, duct: &Duct, tract: &GasState, gas: &GasState,
+    sample_rate_hz: u32, max_taps: usize) -> Result<TabulatedLoad, String> {
     if !radius_m.is_finite() || radius_m <= 0.0 {
         return Err("the head radius must be finite and positive".into());
     }
     let mouth = duct.segments.last().ok_or("the head's load needs a duct with segments")?.outlet_radius();
     let length: f64 = duct.segments.iter().map(Segment::axial_length).sum();
-    cap_load(radius_m, mouth, POLE, torso, length, gas, sample_rate_hz, max_taps)
+    cap_load(radius_m, mouth, POLE, torso, length, tract, gas, sample_rate_hz, max_taps)
 }
 
-/// The table of a cap of radius `mouth` on `axis` (module doc, "The lips' load" and "Openings off the pole").
+/// The table of a cap of radius `mouth` on `axis` (module doc, "The lips' load" and "Openings off the pole"): `gas` is
+/// the exterior, `tract` the gas inside the path, which only the flanged term's eliminated duct modes take.
 #[allow(clippy::too_many_arguments)]
-fn cap_load(radius_m: f64, mouth: f64, axis: [f64; 3], torso: Option<(TorsoSphere, f64)>, length: f64, gas: &GasState,
-    sample_rate_hz: u32, max_taps: usize) -> Result<TabulatedLoad, String> {
+fn cap_load(radius_m: f64, mouth: f64, axis: [f64; 3], torso: Option<(TorsoSphere, f64)>, length: f64, tract: &GasState,
+    gas: &GasState, sample_rate_hz: u32, max_taps: usize) -> Result<TabulatedLoad, String> {
     if !(mouth > 0.0 && mouth < radius_m) {
         return Err("the mouth must be smaller than the head".into());
     }
@@ -731,7 +745,8 @@ fn cap_load(radius_m: f64, mouth: f64, axis: [f64; 3], torso: Option<(TorsoSpher
     // Each row is solved alone (the first refusal in row order is returned), so the table is the same on any thread count.
     let rows = torso::par_map(omegas.len(), |i| {
         let omega = omegas[i];
-        let flanged = fs_duct::compact_radiation_impedance(Termination::FlangedOpen, gas, mouth, omega)
+        // Radiation in the exterior, the eliminated duct modes in the tract (module doc); one gas gives the one-gas load.
+        let flanged = fs_duct::flanged_pipe_impedance_with_exterior(tract, gas, mouth, omega, fs_duct::FLANGED_MODES)
             .map_err(|e| format!("the flanged load refused at {omega} rad/s: {e:?}"))?;
         let (r_piston, x_piston) = fs_phs::baffled_piston_impedance(gas.density, gas.sound_speed, mouth, omega)
             .map_err(|e| format!("the baffled piston refused at {omega} rad/s: {e:?}"))?;
@@ -769,6 +784,7 @@ fn cap_load(radius_m: f64, mouth: f64, axis: [f64; 3], torso: Option<(TorsoSpher
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fs_duct::Termination;
 
     const AIR: RayleighMedium = RayleighMedium { density: 1.1336, sound_speed: 356.53 };
     const MIC: [f64; 3] = [0.212_132, 0.0, 0.212_132];
@@ -902,10 +918,10 @@ mod tests {
     fn the_torso_adds_its_change_to_the_lips_load() {
         let gas = air_state();
         let (b, band) = (0.013_548, 4000.0);
-        let head = head_mouth_load(0.087, &tube(b), &gas, 48_000, 4096).unwrap();
-        let snow = head_torso_mouth_load(0.087, KEMAR, band, &tube(b), &gas, 48_000, 4096).unwrap();
+        let head = head_mouth_load(0.087, &tube(b), &gas, &gas, 48_000, 4096).unwrap();
+        let snow = head_torso_mouth_load(0.087, KEMAR, band, &tube(b), &gas, &gas, 48_000, 4096).unwrap();
         let far = head_torso_mouth_load(0.087, TorsoSphere { radius_m: 0.169, neck_gap_m: 500.0 }, band, &tube(b), &gas,
-            48_000, 4096).unwrap();
+            &gas, 48_000, 4096).unwrap();
         let s = torso::Snowman::new(0.087, b, KEMAR, None, gas.density, gas.sound_speed, 1.25 * band).unwrap();
         let dt = 1.0 / 48_000.0;
         let mut rows = 0;
@@ -1095,12 +1111,12 @@ mod tests {
         let opening = HeadSphere::for_opening(a, pole, rx, AIR, 48_000, Some(KEMAR)).unwrap();
         assert_eq!(taps(&head), taps(&opening));
         let gas = air_state();
-        let mouth = head_mouth_load(a, &tube(b), &gas, 48_000, 4096).unwrap();
-        let cap = head_opening_load(a, pole, None, 0.17, &gas, 48_000, 4096).unwrap();
+        let mouth = head_mouth_load(a, &tube(b), &gas, &gas, 48_000, 4096).unwrap();
+        let cap = head_opening_load(a, pole, None, 0.17, &gas, &gas, 48_000, 4096).unwrap();
         assert_eq!(bits(&mouth, 48_000, 4096), bits(&cap, 48_000, 4096));
         assert_eq!((mouth.mouth(), mouth.source_id()), (cap.mouth(), cap.source_id()));
-        let mouth = head_torso_mouth_load(a, KEMAR, band, &tube(b), &gas, 48_000, 4096).unwrap();
-        let cap = head_opening_load(a, pole, Some((KEMAR, band)), 0.17, &gas, 48_000, 4096).unwrap();
+        let mouth = head_torso_mouth_load(a, KEMAR, band, &tube(b), &gas, &gas, 48_000, 4096).unwrap();
+        let cap = head_opening_load(a, pole, Some((KEMAR, band)), 0.17, &gas, &gas, 48_000, 4096).unwrap();
         assert_eq!(bits(&mouth, 48_000, 4096), bits(&cap, 48_000, 4096));
         assert_eq!((mouth.mouth(), mouth.source_id()), (cap.mouth(), cap.source_id()));
     }
@@ -1121,11 +1137,11 @@ mod tests {
         let gas = air_state();
         let nostril = CircularOpening { center_m: NOSTRIL, radius_m: NOSTRIL_RADII[0] };
         let pole = CircularOpening { center_m: [0.0, 0.0], ..nostril };
-        let alone = head_opening_load(a, nostril, None, 0.2, &gas, 48_000, 4096).unwrap();
-        let alone_pole = head_opening_load(a, pole, None, 0.2, &gas, 48_000, 4096).unwrap();
+        let alone = head_opening_load(a, nostril, None, 0.2, &gas, &gas, 48_000, 4096).unwrap();
+        let alone_pole = head_opening_load(a, pole, None, 0.2, &gas, &gas, 48_000, 4096).unwrap();
         assert_eq!(bits(&alone, 48_000, 4096), bits(&alone_pole, 48_000, 4096));
-        let snow = head_opening_load(a, nostril, Some((KEMAR, 4000.0)), 0.2, &gas, 48_000, 4096).unwrap();
-        let snow_pole = head_opening_load(a, pole, Some((KEMAR, 4000.0)), 0.2, &gas, 48_000, 4096).unwrap();
+        let snow = head_opening_load(a, nostril, Some((KEMAR, 4000.0)), 0.2, &gas, &gas, 48_000, 4096).unwrap();
+        let snow_pole = head_opening_load(a, pole, Some((KEMAR, 4000.0)), 0.2, &gas, &gas, 48_000, 4096).unwrap();
         let (off, on) = (bits(&snow, 48_000, 4096), bits(&snow_pole, 48_000, 4096));
         assert_ne!(off, on, "the torso's change depends on where the cap sits");
         snow.validate_mouth(0.2, NOSTRIL_RADII[0], &gas).unwrap();
@@ -1162,7 +1178,8 @@ mod tests {
         let gas = air_state();
         let nostril = CircularOpening { center_m: NOSTRIL, radius_m: NOSTRIL_RADII[0] };
         let started = std::time::Instant::now();
-        let table = head_opening_load(0.087, nostril, Some((KEMAR, 8000.0)), 0.2, &gas, 192_000, 262_144).unwrap();
+        let table =
+            head_opening_load(0.087, nostril, Some((KEMAR, 8000.0)), 0.2, &gas, &gas, 192_000, 262_144).unwrap();
         let wall = started.elapsed().as_secs_f64();
         let hwm = std::fs::read_to_string("/proc/self/status")
             .ok()
@@ -1186,7 +1203,7 @@ mod tests {
     fn the_lips_load_is_the_flanged_load_plus_the_spheres_change() {
         let gas = air_state();
         let b = 0.013_548;
-        let table = head_mouth_load(0.0875, &tube(b), &gas, 48_000, 4096).unwrap();
+        let table = head_mouth_load(0.0875, &tube(b), &gas, &gas, 48_000, 4096).unwrap();
         let dt = 1.0 / 48_000.0;
         assert_eq!(table.support(), (TAU * 1.0 / (4096.0 * dt), TAU * 2048.0 / (4096.0 * dt)));
         table.validate_mouth(0.17, b, &gas).unwrap();
@@ -1199,7 +1216,7 @@ mod tests {
         assert!((0.69..0.76).contains(&end), "end correction {end} radii");
         // At 2 kHz, so the 1.6 m head's table (top k a 29) stays within LOAD_MAX_ORDER; bin 120 is 937.5 Hz.
         let back = |a: f64| -> f64 {
-            let far = head_mouth_load(a, &tube(0.05), &gas, 2_000, 256).unwrap();
+            let far = head_mouth_load(a, &tube(0.05), &gas, &gas, 2_000, 256).unwrap();
             let omega = TAU * 120.0 / (256.0 / 2_000.0);
             let flanged = fs_duct::compact_radiation_impedance(Termination::FlangedOpen, &gas, 0.05, omega).unwrap();
             let z = far.z_at(omega).unwrap();
@@ -1223,7 +1240,7 @@ mod tests {
         let (rate, taps) = (48_000_u32, 4096_usize);
         let one = flanged_mouth_load(&tube(b), &gas, &gas, rate, taps).unwrap();
         let two = flanged_mouth_load(&tube(b), &warm, &gas, rate, taps).unwrap();
-        let head = head_mouth_load(0.0875, &tube(b), &gas, rate, taps).unwrap();
+        let head = head_mouth_load(0.0875, &tube(b), &gas, &gas, rate, taps).unwrap();
         for table in [&one, &two] {
             assert_eq!(table.support(), head.support());
             let mouth = table.validate_mouth(0.17, b, &gas).unwrap();
@@ -1252,6 +1269,74 @@ mod tests {
         assert!(err.contains("refused"), "{err}");
     }
 
+    /// The head's table with a tract gas (MB 24424, 25423): its flanged term is fs-duct's two-gas load, the radiation in
+    /// the exterior and the eliminated duct modes in the tract, and nothing else in the table moves. Without a torso,
+    /// for the lips' cap and a nostril's cap off the pole, every row is `cap_load`'s row expression on the same cap and
+    /// piston terms: with one gas on today's flanged load (`compact_radiation_impedance`), bit for bit, and with a tract
+    /// gas unlike the exterior on `flanged_pipe_impedance_with_exterior` called directly, bit for bit; no row is the
+    /// one-gas row. With the torso each row moves by the direct flanged term's change to within 1e-12 of the row (the
+    /// row is a floating-point sum, so the change is not exact there) and every row moves. Both tables stay bound to the
+    /// exterior, and unequal static pressures are refused by the flanged load.
+    #[test]
+    fn the_head_tables_flanged_term_carries_the_duct_modes_in_the_tract_gas() {
+        let gas = air_state();
+        let warm = GasState::try_new(&fs_material::gas::GasSpec::dry_air_ussa1976(), 310.15, 101_325.0).unwrap();
+        assert_ne!(warm.sound_speed.to_bits(), gas.sound_speed.to_bits(), "the test needs two gases");
+        let (a, lips, rate, taps) = (0.0875, 0.013_548, 48_000_u32, 4096_usize);
+        let dt = 1.0 / f64::from(rate);
+        let omegas: Vec<f64> = (1..=taps / 2).map(|k| TAU * k as f64 / (taps as f64 * dt)).collect();
+        let nostril = CircularOpening { center_m: NOSTRIL, radius_m: NOSTRIL_RADII[0] };
+        let cases = [
+            ("lips", lips, head_mouth_load(a, &tube(lips), &gas, &gas, rate, taps).unwrap(),
+                head_mouth_load(a, &tube(lips), &warm, &gas, rate, taps).unwrap()),
+            ("nostril", nostril.radius_m, head_opening_load(a, nostril, None, 0.2, &gas, &gas, rate, taps).unwrap(),
+                head_opening_load(a, nostril, None, 0.2, &warm, &gas, rate, taps).unwrap()),
+        ];
+        for (name, b, one, two) in &cases {
+            let cap = CapLoad::new(a, *b, gas.density, gas.sound_speed, omegas[omegas.len() - 1]).unwrap();
+            let (one, two) = (bits(one, rate, taps), bits(two, rate, taps));
+            for (k, &omega) in omegas.iter().enumerate() {
+                let c = cap.impedance(omega).unwrap();
+                let (r_piston, x_piston) =
+                    fs_phs::baffled_piston_impedance(gas.density, gas.sound_speed, *b, omega).unwrap();
+                // `cap_load`'s row on a given flanged term.
+                let row = |f: fs_math::c64::C64| {
+                    let z = Cx::new(f.re + (c.re - r_piston), f.im + (-c.im - x_piston));
+                    (z.re.to_bits(), z.im.to_bits())
+                };
+                let today = fs_duct::compact_radiation_impedance(Termination::FlangedOpen, &gas, *b, omega).unwrap();
+                let law = fs_duct::flanged_pipe_impedance_with_exterior(&warm, &gas, *b, omega, fs_duct::FLANGED_MODES)
+                    .unwrap();
+                assert_eq!(one[k], row(today), "{name}, one gas, bin {}", k + 1);
+                assert_eq!(two[k], row(law), "{name}, two gases, bin {}", k + 1);
+                assert_ne!(two[k], one[k], "{name}, two gases, bin {}: the tract's gas moved nothing", k + 1);
+            }
+        }
+        let band = 4000.0;
+        let one = head_torso_mouth_load(a, KEMAR, band, &tube(lips), &gas, &gas, rate, taps).unwrap();
+        let two = head_torso_mouth_load(a, KEMAR, band, &tube(lips), &warm, &gas, rate, taps).unwrap();
+        for (k, &omega) in omegas.iter().enumerate() {
+            let (z1, z2) = (one.z_at(omega).unwrap(), two.z_at(omega).unwrap());
+            let today = fs_duct::compact_radiation_impedance(Termination::FlangedOpen, &gas, lips, omega).unwrap();
+            let law = fs_duct::flanged_pipe_impedance_with_exterior(&warm, &gas, lips, omega, fs_duct::FLANGED_MODES)
+                .unwrap();
+            let moved = Cx::new(z2.re - z1.re, z2.im - z1.im);
+            let direct = Cx::new(law.re - today.re, law.im - today.im);
+            let miss = moved.sub(direct).abs();
+            let bound = 1e-12 * Cx::new(z2.re, z2.im).abs();
+            assert!(miss <= bound, "torso, bin {}: moved {moved:?}, direct {direct:?}", k + 1);
+            assert!(moved.abs() > 0.0, "torso, bin {}: the tract's gas moved nothing", k + 1);
+        }
+        for table in [&cases[0].3, &two] {
+            table.validate_mouth(0.17, lips, &gas).unwrap();
+            let tract_bound = table.validate_mouth(0.17, lips, &warm);
+            assert!(tract_bound.is_err(), "the table is bound to the exterior, not the tract");
+        }
+        let thin = GasState::try_new(&fs_material::gas::GasSpec::dry_air_ussa1976(), 293.15, 90_000.0).unwrap();
+        let err = head_mouth_load(a, &tube(lips), &thin, &gas, 48_000, 256).unwrap_err();
+        assert!(err.contains("flanged load refused"), "{err}");
+    }
+
     #[test]
     fn non_physical_lip_loads_are_refused() {
         let gas = air_state();
@@ -1264,10 +1349,10 @@ mod tests {
             // 2N = 175,000 orders at 48 kHz, over LOAD_MAX_ORDER (2^17 since N3b; 2 mm needs 87,500 and is admitted).
             (0.0875, 0.001, 48_000, 256, "more than"),
         ] {
-            let err = head_mouth_load(a, &tube(r), &gas, rate, taps).unwrap_err();
+            let err = head_mouth_load(a, &tube(r), &gas, &gas, rate, taps).unwrap_err();
             assert!(err.contains(why), "{err}");
         }
-        let err = head_mouth_load(0.0875, &Duct { segments: vec![] }, &gas, 48_000, 256).unwrap_err();
+        let err = head_mouth_load(0.0875, &Duct { segments: vec![] }, &gas, &gas, 48_000, 256).unwrap_err();
         assert!(err.contains("segments"), "{err}");
     }
 
