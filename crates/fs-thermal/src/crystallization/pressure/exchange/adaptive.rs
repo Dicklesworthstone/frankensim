@@ -4,6 +4,7 @@
 //! spends work but supplies no heat, phase history or pressure work. This is
 //! separate from each parcel's adaptive kinetics on a prescribed heat path.
 
+use fs_math::clock::clock_endpoint;
 use fs_math::dd::Dd;
 
 use super::super::{
@@ -19,6 +20,10 @@ use super::{
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IsobaricExchangeAdaptivity {
     pub initial_dt_s: f64,
+    /// A comparison that would leave the target only the clock's own rounding
+    /// away runs on to it, exceeding this bound by at most (k + 2) u times the
+    /// larger of the start and target times after k accepted comparisons,
+    /// u = 2^-53 (`fs_math::clock`).
     pub maximum_dt_s: f64,
     /// Bounds full comparison spans. Accepted half steps can be shorter; an
     /// exact final remainder below this floor can pass its first comparison.
@@ -281,12 +286,17 @@ fn advance_exchange_to_impl<'ll, 'ls, 'rl, 'rs>(
             return Err(CrystallizationError::NonConverged);
         }
         let time = current_left.time_s();
-        let remaining = finite(target_s - time)?;
-        let endpoint = if requested_dt >= remaining {
-            target_s
-        } else {
-            finite(time + requested_dt)?
-        };
+        finite(target_s - time)?;
+        // Each accepted comparison is one rounded clock addition from the
+        // parcels' common start time; a leftover within their rounding bound
+        // joins this comparison (`fs_math::clock`).
+        let endpoint = clock_endpoint(
+            left.time_s(),
+            time,
+            requested_dt,
+            target_s,
+            report.attempted_trials - report.rejected_trials,
+        );
         let dt = finite(endpoint - time)?;
         let midpoint = finite(time + 0.5 * dt)?;
         if midpoint <= time || midpoint >= endpoint {

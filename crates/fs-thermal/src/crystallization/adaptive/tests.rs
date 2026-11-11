@@ -583,3 +583,39 @@ fn g0_irreversible_stationary_hold_keeps_both_signs_of_admitted_caloric_residual
         assert_eq!(cooled.state.specific_enthalpy_j_kg(), h - 10_000.0);
     }
 }
+
+#[test]
+fn g1_ten_maximum_trials_reach_the_end_time_their_rounded_sum_misses() {
+    // Ten accepted 0.05 s trials sum to 0.49999999999999994, one spacing short
+    // of 0.5. The tenth trial now runs on to 0.5 (`fs_math::clock`); before,
+    // it stopped one spacing short and the eleventh trial's midpoint rounded
+    // onto its own end, which refused the whole interval as NonConverged.
+    let parent = Affine {
+        cp: 1000.0,
+        datum: 0.0,
+    };
+    let crystal = Affine {
+        cp: 1000.0,
+        datum: -100_000.0,
+    };
+    let rate = |t: f64| Ok(0.002 * (500.0 - t).max(0.0));
+    let law = CrystallizationLaw::new(&parent, &crystal, &rate, config()).unwrap();
+    let initial = law.state_at_temperature(350.0, f64::MAX).unwrap();
+    let adaptivity = controls(0.05);
+    let step = law
+        .advance_specific_enthalpy_adaptive(
+            initial,
+            initial.specific_enthalpy_j_kg(),
+            0.5,
+            CrystallizationSolve::default(),
+            adaptivity,
+            None,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(step.state, initial);
+    assert_eq!(step.duration_s, 0.5);
+    assert_eq!(step.attempted_trials, 10);
+    assert_eq!(step.rejected_trials, 0);
+    evidence(step, adaptivity);
+}

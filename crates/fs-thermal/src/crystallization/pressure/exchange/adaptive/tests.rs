@@ -374,3 +374,42 @@ fn endpoint_dependent_conductance_follows_the_nonlinear_cooling_oracle() {
     assert_eq!(fixed_right.state(), queried_right.state());
     assert_eq!(fixed, queried);
 }
+
+#[test]
+fn ten_maximum_contact_trials_reach_the_target_time_their_rounded_sum_misses() {
+    // Ten accepted 0.05 s comparisons sum to 0.49999999999999994, one spacing
+    // short of 0.5. The tenth comparison runs on to 0.5; before, it stopped one
+    // spacing short and the eleventh comparison's midpoint rounded onto its own
+    // end, which refused the whole contact as NonConverged. Equal temperatures
+    // and a zero rate make every candidate exchange zero heat, so every
+    // comparison is accepted.
+    let law = law(700.0);
+    let left = parcel(&law, 300.0, 0.0, 2.0);
+    let right = parcel(&law, 300.0, 0.0, 3.0);
+    let accuracy = IsobaricExchangeAdaptivity {
+        initial_dt_s: 0.05,
+        maximum_dt_s: 0.05,
+        ..controls(0.01)
+    };
+    let (held_left, held_right, report) = advance_exchange_to(
+        &left,
+        &right,
+        500.0,
+        0.5,
+        side(),
+        side(),
+        exchange(),
+        accuracy,
+        || false,
+    )
+    .unwrap();
+    assert_eq!(report.final_time_s, 0.5);
+    assert_eq!(held_left.time_s(), 0.5);
+    assert_eq!(held_right.time_s(), 0.5);
+    assert_eq!(report.attempted_trials, 10);
+    assert_eq!(report.rejected_trials, 0);
+    assert_eq!(report.accepted_substeps, 20);
+    assert_eq!(report.heat_left_to_right_j, 0.0);
+    assert_eq!(held_left.state(), left.state());
+    assert_eq!(held_right.state(), right.state());
+}

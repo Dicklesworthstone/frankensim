@@ -5,6 +5,7 @@ use crate::crystallization::{
     CrystallizationAdaptivity, CrystallizationError, CrystallizationSolve, check_cancelled,
     check_duration, check_solve, finite, positive,
 };
+use fs_math::clock::clock_endpoint;
 
 /// Complete accepted population interval and its local time-resolution evidence.
 ///
@@ -100,11 +101,15 @@ impl CrystallizationPopulation<'_> {
             if report.attempted_trials == adaptivity.maximum_trials {
                 return Err(CrystallizationError::NonConverged);
             }
-            let endpoint = if requested_dt >= duration_s - elapsed {
-                duration_s
-            } else {
-                elapsed + requested_dt
-            };
+            // Each accepted trial is one rounded clock addition; a leftover
+            // within their rounding bound joins this trial (`fs_math::clock`).
+            let endpoint = clock_endpoint(
+                0.0,
+                elapsed,
+                requested_dt,
+                duration_s,
+                report.attempted_trials - report.rejected_trials,
+            );
             let dt = endpoint - elapsed;
             let midpoint = elapsed + 0.5 * dt;
             if !positive(dt) || midpoint <= elapsed || midpoint >= endpoint {

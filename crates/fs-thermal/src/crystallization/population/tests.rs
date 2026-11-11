@@ -795,3 +795,46 @@ fn g0_population_stationary_hold_preserves_accepted_caloric_residual() {
         );
     }
 }
+
+#[test]
+fn g1_population_ten_maximum_trials_reach_the_end_time_their_rounded_sum_misses() {
+    // Ten accepted 0.05 s trials sum to 0.49999999999999994, one spacing short
+    // of 0.5. The tenth trial runs on to 0.5; before, it stopped one spacing
+    // short and the eleventh trial's midpoint rounded onto its own end, which
+    // refused the whole interval as NonConverged. A zero rate at unchanged
+    // enthalpy holds every candidate, so every trial is accepted.
+    let rate = |_: f64| Ok(0.0);
+    let law = law(&rate);
+    let solve = CrystallizationSolve::default();
+    let initial = CrystallizationPopulation::new(
+        law,
+        &[(2.0, law.state_at_temperature(330.0, 0.3).unwrap())],
+        1,
+        solve,
+        || false,
+    )
+    .unwrap();
+    let h = initial.specific_enthalpy_j_kg();
+    let controls = CrystallizationAdaptivity {
+        maximum_dt_s: 0.05,
+        ..CrystallizationAdaptivity::default()
+    };
+    let (held, report) = initial
+        .advance_specific_enthalpy_adaptive(h, 0.5, solve, controls, || false)
+        .unwrap();
+    assert_eq!(report.duration_s, 0.5);
+    assert_eq!(report.attempted_trials, 10);
+    assert_eq!(report.rejected_trials, 0);
+    assert_eq!(report.accepted_substeps, 20);
+    assert_eq!(report.specific_heat_j_kg, 0.0);
+    assert_eq!(report.crystallized_mass_kg, 0.0);
+    assert_eq!(held.specific_enthalpy_j_kg().to_bits(), h.to_bits());
+    assert_eq!(
+        held.temperature_k().to_bits(),
+        initial.temperature_k().to_bits()
+    );
+    assert_eq!(
+        held.cohort_state(0).unwrap(),
+        initial.cohort_state(0).unwrap()
+    );
+}

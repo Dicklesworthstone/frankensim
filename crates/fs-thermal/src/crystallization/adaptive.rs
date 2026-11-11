@@ -12,12 +12,16 @@ use super::{
     CrystallizationStep, EquivalentAgeRemelting, check_cancelled, check_duration, check_solve,
     finite, positive,
 };
+use fs_math::clock::clock_endpoint;
 
 /// Explicit local time-accuracy and work controls, independent of caloric inversion.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CrystallizationAdaptivity {
     /// Upper bound on each trial interval. This is also the caller's resolution
     /// bound for features of the original temperature-dependent kinetic source.
+    /// A trial that would leave the end time only the clock's own rounding
+    /// away runs on to it, exceeding this bound by at most (k + 2) u times the
+    /// duration after k accepted trials, u = 2^-53 (`fs_math::clock`).
     pub maximum_dt_s: f64,
     /// A rejected interval may not be bisected below this duration. A shorter
     /// final remainder can still be accepted if its first trial satisfies all tests.
@@ -161,12 +165,16 @@ impl CrystallizationLaw<'_> {
             if result.attempted_trials == adaptivity.maximum_trials {
                 return Err(CrystallizationError::NonConverged);
             }
-            let remaining = duration_s - elapsed;
-            let endpoint = if requested_dt >= remaining {
-                duration_s
-            } else {
-                elapsed + requested_dt
-            };
+            // Each accepted trial is one rounded clock addition. A leftover
+            // within their rounding bound could not be resolved by any later
+            // trial (ten 0.05 s trials end one spacing short of 0.5 s).
+            let endpoint = clock_endpoint(
+                0.0,
+                elapsed,
+                requested_dt,
+                duration_s,
+                result.attempted_trials - result.rejected_trials,
+            );
             let dt = endpoint - elapsed;
             let midpoint = elapsed + 0.5 * dt;
             if !positive(dt) || midpoint <= elapsed || midpoint >= endpoint {

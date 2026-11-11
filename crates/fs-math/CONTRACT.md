@@ -33,6 +33,20 @@ floating-point POLICY: FMA contraction, subnormals, NaN, ULP budgets
   owners retain units, rate admission and model validity. G0/G3 regressions
   compare half-life landmarks, a separate libm/log-domain tail oracle, and
   interval composition. No correctly-rounded or interval claim is added.
+- `clock::clock_endpoint(start, elapsed, step, target, additions)` — the
+  endpoint of one rounded clock step toward an end time. It returns `target`
+  when the step reaches it, or when the interval the step would leave is at
+  most `(additions + 2) u max(|start|, |target|)`: the clock's own rounding
+  after `additions` round-to-nearest additions plus one float spacing of the
+  target (Higham, 2nd ed., §2.2 model, §4.2 recursive summation). Otherwise
+  it returns the rounded `elapsed + step`. A final step therefore exceeds its
+  request by at most that clock-rounding amount. Unordered or nonfinite input
+  returns canonical NaN. Physical owners keep their step-error control and
+  state the stretch beside their step bounds. Seven native tests replay the
+  measured stranded leftovers of the fs-thermal crystallization, fs-material
+  sublimation and cyanide-aeration schedulers (1.0, 1.25, 257.5 and 3.0 u
+  times the end time), a clock from below zero, the one-spacing case at zero
+  additions and a resolvable planted leftover that keeps its own endpoint.
 - `STRICT_CORE_SEMANTICS_VERSION = 1` and
   `STRICT_CORE_GOLDEN_HASH = 0xeb79cab7a01643e5` — package-version-independent
   certificate identity for the strict core. Downstream interval, neural, and

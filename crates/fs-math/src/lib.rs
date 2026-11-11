@@ -25,6 +25,7 @@
 //!   double-double oracle battery arrives with fs-ivl).
 
 pub mod c64;
+pub mod clock;
 pub mod dd;
 pub mod decay;
 pub mod det;

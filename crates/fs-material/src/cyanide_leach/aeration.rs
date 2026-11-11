@@ -25,6 +25,7 @@
 use super::gas_transfer::{OxygenHenrySource, OxygenPartition};
 use super::*;
 use fs_matdb::MaterialAnswer;
+use fs_math::clock::clock_endpoint;
 use fs_qty::{Frequency, Pressure};
 use fs_thermochem::stoichiometry::thermodynamics::{
     StandardReactionGibbs, gas_liquid::IdealGasLiquidPartition,
@@ -260,6 +261,10 @@ impl AerationErrors {
 /// Explicit local-estimate allowances and bounded work for one atomic call.
 #[derive(Clone, Copy, Debug)]
 pub struct AerationNumerics {
+    /// A step that would leave the end time only the clock's own rounding away
+    /// runs on to it, exceeding this bound by at most (k + 2) u times the
+    /// larger of the start and end times after k accepted steps, u = 2^-53
+    /// (`fs_math::clock`).
     pub maximum_step: Time,
     pub absolute_gold_error: Amount,
     pub absolute_oxygen_error: Amount,
@@ -615,6 +620,7 @@ impl AeratedGoldCyanidationBatch {
         let mut largest = [0.0_f64; 4];
         let mut accumulated = self.accumulated_errors;
         let mut balance_allowance = self.balance_allowance;
+        let origin = self.state.elapsed.value();
         while current.chemistry.elapsed.value() < end {
             work.tick()?;
             if accepted + rejected >= numerics.maximum_attempts {
@@ -623,7 +629,10 @@ impl AeratedGoldCyanidationBatch {
             let start = current.chemistry.elapsed.value();
             let remaining = end - start;
             step = step.min(remaining);
-            let finish = if step == remaining { end } else { start + step };
+            // Each accepted step is one rounded clock addition from the call's
+            // start. A leftover within their rounding bound joins this step: no
+            // RK stage on a few-spacing sliver can resolve any Au progress.
+            let finish = clock_endpoint(origin, start, step, end, accepted);
             let middle = start + 0.5 * (finish - start);
             if middle <= start || finish <= middle {
                 return Err(CyanidationError::Arithmetic(

@@ -47,6 +47,7 @@ use super::chamber::{
 };
 use super::{GasSurfaceBinding, GasSurfaceError};
 use crate::thermochemical_gas::{ThermochemicalGasModel, energy::parcel::ClosedGasParcel};
+use fs_math::clock::clock_endpoint;
 use fs_thermal::enthalpy::{
     CellId, DepositedCell, DepositionError, DepositionObserver, DepositionSimulation, EnergyAudit,
     Event, StepConfig, sublimation::external::{CondensedCellExchange, SolidCellExchange},
@@ -787,6 +788,8 @@ fn advance_deposition_observed_mode<'thermal, 'catalog, O: DepositionObserver>(
     let mut phase_steps = 0usize;
     let mut gas_iterations = 0usize;
     let mut last_step = None;
+    let origin_s = next.time_s();
+    let mut clock_steps = 0usize;
     while next.time_s() < target_s {
         checkpoint()?;
         let start_s = next.time_s();
@@ -816,10 +819,22 @@ fn advance_deposition_observed_mode<'thermal, 'catalog, O: DepositionObserver>(
         }
         // Empty pre-birth time carries no thermal or phase work. Jump to the
         // next event/target instead of spending unbudgeted max-dt iterations.
+        // Each clock advance in this call is at most one rounded addition from
+        // the window origin. A max-dt step that would leave the target only
+        // their rounding away runs on to it (`fs_math::clock`), exceeding
+        // max-dt by at most (k + 2) u max(|origin|, |target|): no phase
+        // increment on such a sliver is resolvable (2000 steps of 1e-4 s end
+        // 5.7e-15 s short of 0.2 s).
         let mut stop_s = if next.cells().is_empty() {
             target_s
         } else {
-            (start_s + thermal_config.max_dt_s).min(target_s)
+            clock_endpoint(
+                origin_s,
+                start_s,
+                thermal_config.max_dt_s,
+                target_s,
+                clock_steps,
+            )
         };
         if let Some(event) = next.pending_events().first() {
             stop_s = stop_s.min(event.time_s);
@@ -994,6 +1009,7 @@ fn advance_deposition_observed_mode<'thermal, 'catalog, O: DepositionObserver>(
             break (heated, accepted_observer, report, Some(candidate), completed);
         };
         next = heated;
+        clock_steps = clock_steps.saturating_add(1);
         observed = accepted_observer;
         heat.add(report)?;
         let Some(candidate) = candidate else { continue };
