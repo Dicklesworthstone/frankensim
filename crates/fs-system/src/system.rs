@@ -1147,6 +1147,7 @@ impl SystemBuilder {
         let mut input_group = vec![0_usize; inputs];
         let mut input_label = vec![String::new(); inputs];
         let mut input_is_temperature = vec![false; inputs];
+        let mut input_is_energy_rate = vec![false; inputs];
         for node in 0..count {
             for (port, spec) in self.nodes[node].ports().iter().enumerate() {
                 let reference = PortRef { node, port };
@@ -1159,6 +1160,11 @@ impl SystemBuilder {
                     input_label[index] = self.label(reference);
                     input_is_temperature[index] =
                         spec.carrier() == Carrier::Heat && spec.role() == PortRole::EffortIn;
+                    input_is_energy_rate[index] = match (spec.carrier(), spec.role()) {
+                        (Carrier::Heat, PortRole::FlowIn) => true,
+                        (Carrier::Stream, PortRole::FlowIn) => offset == STREAM_ENTHALPY_RATE,
+                        _ => false,
+                    };
                 }
             }
         }
@@ -1276,6 +1282,7 @@ impl SystemBuilder {
             input_group,
             input_label,
             input_is_temperature,
+            input_is_energy_rate,
             group_count,
             inputs: vec![0.0; inputs],
             outputs: vec![0.0; outputs],
@@ -1331,6 +1338,10 @@ pub struct System {
     input_group: Vec<usize>,
     input_label: Vec<String>,
     input_is_temperature: Vec<bool>,
+    /// Inputs that are a heat rate or a stream's enthalpy rate into a
+    /// storage: energy per second, made by other components from products
+    /// of their efforts and flows.
+    input_is_energy_rate: Vec<bool>,
     group_count: usize,
     inputs: Vec<f64>,
     outputs: Vec<f64>,
@@ -1635,6 +1646,29 @@ impl System {
         }
     }
 
+    /// The largest power [W] crossing a power port of `nodes` at the current
+    /// inputs and outputs: the sum over a port's coefficients of
+    /// `|effort * flow|`.
+    fn block_power_scale(&self, nodes: &[usize]) -> f64 {
+        let mut largest = 0.0_f64;
+        for &node in nodes {
+            let (inputs, outputs) = (self.node_inputs(node), self.node_outputs(node));
+            for (port, spec) in self.nodes[node].ports().iter().enumerate() {
+                if !matches!(spec.carrier(), Carrier::Power(_)) {
+                    continue;
+                }
+                let received = self.layouts[node].input_range(port);
+                let returned = self.layouts[node].output_range(port);
+                let power: f64 = received
+                    .zip(returned)
+                    .map(|(i, o)| (self.inputs[inputs.start + i] * self.outputs[outputs.start + o]).abs())
+                    .sum();
+                largest = largest.max(power);
+            }
+        }
+        largest
+    }
+
     /// Solve one looped block by Newton iteration on its interface inputs.
     #[allow(clippy::too_many_lines)]
     fn solve_block(
@@ -1692,6 +1726,19 @@ impl System {
             // one temperature, a spring force between two ends that move
             // together), that rounding is set by the inputs, not by the
             // output, and no tolerance relative to the output covers it.
+            //
+            // That estimate is first order. A heat rate that a component
+            // forms as a product of an effort and a flow (a damper's force
+            // times its rate) is rounded at second order when both factors
+            // are themselves rounding: a body held at rest by forces that
+            // cancel moves at the rounding of those forces, and its damper
+            // then reports the square of that. No first-order estimate sees
+            // it, and the heat has no size of its own to be relative to. The
+            // largest power crossing a power port of the block bounds it (it
+            // has the same rounding-sized flow against an effort that is not
+            // rounding), so an energy rate is also allowed rounding in units
+            // of that power.
+            let power_scale = self.block_power_scale(&nodes);
             let mut worst = (0_usize, 0.0_f64);
             let mut converged = true;
             for (row, &index) in unknowns.iter().enumerate() {
@@ -1700,6 +1747,9 @@ impl System {
                 // still caught there.
                 allowance[row] =
                     self.config.absolute_tolerance + ROUNDING_UNITS * f64::EPSILON * rounding[row];
+                if self.input_is_energy_rate[index] {
+                    allowance[row] += ROUNDING_UNITS * f64::EPSILON * power_scale;
+                }
                 let allowed = self.config.relative_tolerance * group_scale[self.input_group[index]]
                     + allowance[row];
                 let excess = residual[row].abs() - allowed;
@@ -1914,6 +1964,7 @@ impl System {
         let mut connection_rows = Vec::with_capacity(self.connections.len());
         let mut sink_heat = vec![0.0; self.ledger.sinks.len()];
         let (mut generated, mut entropy_scale) = (0.0_f64, 0.0_f64);
+        let mut entropy_slack = 0.0_f64;
         for receipt in &self.receipts {
             generated += receipt.entropy_generated_j_per_k;
             entropy_scale += receipt.entropy_generated_j_per_k;
@@ -1977,7 +2028,14 @@ impl System {
                         (Carrier::Power(_), _) => self.outputs[outputs.start + offset].abs(),
                         _ => 0.0,
                     };
-                    solve_slack_j += dt_s * self.input_allowance[index] * weight;
+                    let slack_j = dt_s * self.input_allowance[index] * weight;
+                    solve_slack_j += slack_j;
+                    // The same heat, left uncancelled at the temperature
+                    // its receiver returned, is entropy the solve was
+                    // allowed to leave unaccounted.
+                    if spec.carrier() == Carrier::Heat && spec.role() == PortRole::FlowIn {
+                        entropy_slack += slack_j / self.outputs[outputs.start + offset];
+                    }
                 }
             }
             let tolerance_j = self.config.interface_energy_tolerance * magnitude
@@ -1993,7 +2051,7 @@ impl System {
             generated += entropy;
             connection_rows.push((energy, entropy));
         }
-        if !(generated >= -1.0e-9 * entropy_scale) {
+        if !(generated >= -1.0e-9 * entropy_scale - entropy_slack) {
             return Err(SystemError::SecondLaw {
                 generated_j_per_k: generated,
             });

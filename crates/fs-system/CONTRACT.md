@@ -262,6 +262,20 @@ Tarjan, index order).
   relative tolerance, so a solve accepted too loosely is still refused there.
   Inputs the block does not solve for (boundaries, earlier blocks) are not in
   the estimate.
+- An energy-rate unknown (a heat rate into a receiver, a stream's enthalpy
+  rate into a storage) is also allowed 16 units of `eps` times the largest
+  power crossing a power port of its block. The first-order estimate above
+  misses a heat rate that is a product of two rounding-sized factors: a mass
+  held at rest by forces that cancel moves at the rounding of those forces,
+  and its damper reports the square of that, which has no size of its own to
+  converge relative to. The interface audit and the second-law check are
+  told the same allowance (as energy, and as that energy over the receiver's
+  temperature). The allowance is an absolute floor of about 4e-15 of the
+  block's largest power; a heat rate smaller than that is not resolved.
+  `tests/step_cost.rs`: a mass held by a spring against a constant force,
+  its damper sharing a body's temperature, steps 40,000 times to rest (it
+  used to be refused after about 20 s at a residual of 4.6e-37 W), ends at
+  `F / k`, and the body holds `F² / (2 k)` to 1e-10.
 - Once cancellation has been requested, any refusal during a trial is
   reported as `SystemError::Cancelled`.
 - A graph without loops is evaluated once per component per step, in
@@ -890,8 +904,22 @@ the refused calls change nothing.
   durable snapshot encoding, process restart or fork; no adjoint. These are beads `.5.2` to
   `.5.10` of the epic.
 - The interface solve is dense and re-derives the Jacobian every iteration. It
-  allocates per looped block and per step. No performance claim is made; the
-  static plan and allocation-free stepping are beads `.5.7` and `.15.1`.
+  allocates per looped block and per step. It is slow: measured by
+  `tests/step_cost.rs` (ignored by default; `cargo test --release -p
+  fs-system --test step_cost -- --ignored --nocapture`) on a line of masses
+  joined by springs and dampers, against a hand-written loop for the same
+  midpoint equations (one tridiagonal solve a step), which the graph
+  reproduces to 1e-12. On an Apple M5 Ultra under other load, 2026-11-11:
+
+  | masses | components | kernel ns/step | hand ns/step | ratio | allocations/step |
+  |---|---|---|---|---|---|
+  | 1 | 5 | 1,145 | 8.0 | 143 | 12 |
+  | 4 | 14 | 9,401 | 40 | 234 | 14 |
+  | 16 | 50 | 112,718 | 146 | 770 | 18 |
+  | 48 | 146 | 1,109,593 | 486 | 2,282 | 19 |
+
+  Two Newton iterations a step. The static plan and allocation-free stepping
+  are beads `.5.7` and `.15.1`.
 - Entropy is accounted as generation and as flow through heat ports. Stored
   entropy of components is not tracked, so the second-law check is narrow: it
   refuses a step in which the entropy components say they generated, plus the
