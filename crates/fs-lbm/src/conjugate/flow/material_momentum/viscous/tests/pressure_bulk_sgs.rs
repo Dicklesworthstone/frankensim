@@ -70,7 +70,7 @@ fn reservoir_normal_mode_preserves_authored_bulk_heat_and_actual_density_sgs() {
     let cs: f64 = 0.2;
     let low_source = FluidTransportState::try_new(0.001, 2.0, 1.0, 1.0).unwrap();
     let high_source = FluidTransportState::try_new(50_000.0, 2.0, 1.0, 1.0).unwrap();
-    for bulk in [0.0, 0.7, 3.0] {
+    for bulk in [0.0_f64, 0.7, 3.0] {
         // Native velocities [a,0,-a], with physical mouth masses 1 kg:
         // 2(a-1) + (4mu/3+zeta)*a + (4rho/3)*Cs^2*sqrt(2)*a^2 = 0.
         // Molecular bulk enters only the linear stiffness and physical heat.
@@ -149,6 +149,7 @@ fn independent_bulk_does_not_change_solenoidal_mouth_shear_or_heat_transport() {
     let h = [10.0; 2];
     let p = [[2.0, 0.0, 0.0], [-2.0, 0.0, 0.0]];
     let source = liquid(1.0);
+    let sources: [Option<&dyn FluidTransport>; 2] = [Some(&source); 2];
     let cs: f64 = 0.2;
     let speed = 4.0 / (3.0 + (9.0 + 32.0 * cs.powi(2)).sqrt());
     let heat = 2.0 * speed.powi(2);
@@ -167,7 +168,7 @@ fn independent_bulk_does_not_change_solenoidal_mouth_shear_or_heat_transport() {
                 },
                 data,
                 MaterialMomentumViscosityInput {
-                    sources: &[Some(&source); 2],
+                    sources: &sources,
                     boundaries: reservoir_boundaries(),
                 },
                 &[bulk; 2],

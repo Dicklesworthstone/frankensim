@@ -14,6 +14,7 @@ const AXES: [[f64; 3]; 3] = [
     [-2.0 / 3.0, -1.0 / 3.0, 2.0 / 3.0],
 ];
 
+#[path = "resistance/endpoint.rs"]
 mod endpoint;
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {

@@ -234,6 +234,9 @@ impl DepositionObserver for Intervals {
         self.prepared.push(dt);
         Ok(BTreeMap::new())
     }
+    fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
+        Ok(())
+    }
     fn step(
         &mut self,
         _: f64,
@@ -618,4 +621,5 @@ fn late_current_budget_and_nonconvergent_transfer_publish_no_history() {
     assert_eq!(old.energy_j(), 0.0);
 }
 
+#[path = "mhd/interfaces.rs"]
 mod interfaces;

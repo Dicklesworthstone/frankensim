@@ -1,8 +1,10 @@
 //! Moving liquid carries its phase enthalpy through the original solid skeleton.
 use super::*;
 use fs_lbm::conjugate::ViscousHeatControls;
+#[cfg(feature = "implicit-enthalpy-coupling")]
 use fs_lbm::conjugate::enthalpy::advection::feedback::implicit::ImplicitFlowControls;
 
+#[path = "liquid_carrier/open.rs"]
 mod open;
 
 fn state<'a>(domain: &VoxelDomain, curve: &'a EquilibriumEnthalpyPhaseCurve) -> DepositionSimulation<'a> {
@@ -106,6 +108,7 @@ fn native_liquid_circulation_only_melts_stationary_solid_by_physical_wall_heat()
 }
 
 #[test]
+#[cfg(feature = "implicit-enthalpy-coupling")]
 fn implicit_phase_transport_retains_liquid_carriage_at_every_flow_endpoint() {
     let card = continuity::source(100.0);
     let curve = continuity::chart(&card);

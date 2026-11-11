@@ -419,7 +419,14 @@ fn gradient_sgs_advances_original_bgk_and_trt_with_exact_zero_control() {
             zero.step_with_gradient_sgs(&gate, controls(disabled), &mut cache, &mut sgs)
                 .unwrap();
             assert_eq!(zero.grid().state_bits(), baseline.grid().state_bits());
-            assert_eq!(zero.mass_snapshot(), baseline.mass_snapshot());
+            // The crate-private `mass_snapshot` (the mass of every fluid and interface cell, and the carry) is read through the public accessors: the mass of each of the 64 cells and the carry.
+            let masses = |sim: &FreeSurface3| {
+                let cells: Vec<f64> = (0..64)
+                    .map(|index| sim.region_mass(|x, y, z| (x, y, z) == (index % 4, index / 4 % 4, index / 16)))
+                    .collect();
+                (cells, sim.carry())
+            };
+            assert_eq!(masses(&zero), masses(&baseline));
             let mut active = owner.clone();
             let report = active
                 .step_with_gradient_sgs(&gate, controls(enabled), &mut cache, &mut sgs)

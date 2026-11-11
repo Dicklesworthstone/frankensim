@@ -392,15 +392,16 @@ impl StageContext<'_, '_> {
         self.prepare(x)?;
         let n = self.work.cells.len();
         let dx = self.jet.flow.spacing_m;
-        let dv = |i| self.controls.velocity_scale_m_s * direction[i];
-        let dt =
-            |i| self.controls.specific_energy_scale_j_kg * direction[n + i] / self.work.cells[i].cv;
-        let strain = |i| (dv(i) - dv(previous(i, n))) / dx;
-        let stress = |i| {
+        let dv = |i: usize| self.controls.velocity_scale_m_s * direction[i];
+        let dt = |i: usize| {
+            self.controls.specific_energy_scale_j_kg * direction[n + i] / self.work.cells[i].cv
+        };
+        let strain = |i: usize| (dv(i) - dv(previous(i, n))) / dx;
+        let stress = |i: usize| {
             self.work.cells[i].stress_rate * strain(i)
                 + self.work.cells[i].stress_temperature * dt(i)
         };
-        let heat_flux = |i| {
+        let heat_flux = |i: usize| {
             let r = next(i, n);
             let face = self.work.faces[i];
             face.conductance * (dt(i) - dt(r))

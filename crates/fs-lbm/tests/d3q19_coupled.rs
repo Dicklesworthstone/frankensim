@@ -267,7 +267,7 @@ fn lbm3x_007_forced_rheology_recovers_physical_strain_and_viscosity() {
                     [0.002, 0.001, 0.005],
                 ],
             ] {
-                let mean = (strain[0][0] + strain[1][1] + strain[2][2]) / 3.0;
+                let mean: f64 = (strain[0][0] + strain[1][1] + strain[2][2]) / 3.0;
                 let rate = (2.0_f64 * (0..3).flat_map(|i| (0..3).map(move |j| {
                     (strain[i][j] - if i == j { mean } else { 0.0 }).powi(2)
                 })).sum::<f64>()).sqrt();

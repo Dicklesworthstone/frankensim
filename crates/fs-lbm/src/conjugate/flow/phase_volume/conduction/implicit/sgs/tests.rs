@@ -220,7 +220,7 @@ fn conservative_flux_feedback_counts_opposing_links_and_refuses_bad_fields() {
     };
     // Both physical face changes are equal/opposite around the warm middle
     // cell. A signed domain sum would hide them; 2|deltaQ| per face cannot.
-    let expected = 4.0 * 0.2 * ((4.0 / 3.0) * (1.16 - 1.08)) * 100.0;
+    let expected: f64 = 4.0 * 0.2 * ((4.0 / 3.0) * (1.16 - 1.08)) * 100.0;
     let actual_bound = run(&actual, &samples, 2, &gate).unwrap();
     // Outward rounding bounds the native rounded conductances; the closed
     // form uses a different operation order, admitted within a few ulps here.

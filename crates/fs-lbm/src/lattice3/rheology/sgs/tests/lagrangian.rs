@@ -283,8 +283,7 @@ fn moving_material_walls_and_history_share_one_force_epoch() {
         )
         .unwrap(),
         ViscosityShiftMode::VerticalAndRate,
-    )
-    .unwrap();
+    );
     let source = |point: RheologyPoint3, _: &FluidTransportState| {
         law.evaluate(300.0 + point.time_s, point.shear_rate_per_s)?
             .bind(material)

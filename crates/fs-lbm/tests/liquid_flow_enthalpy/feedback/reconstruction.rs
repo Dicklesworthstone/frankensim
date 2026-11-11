@@ -7,6 +7,7 @@ use fs_conduction::transient::deposition::advection::reconstruction::{
 use std::sync::Arc;
 
 #[cfg(feature = "implicit-enthalpy-coupling")]
+#[path = "reconstruction/implicit.rs"]
 mod implicit;
 
 fn plan(thermal: &DepositionSimulation<'_>) -> Arc<LimitedEnthalpyReconstruction> {

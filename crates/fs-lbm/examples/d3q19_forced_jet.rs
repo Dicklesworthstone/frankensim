@@ -345,7 +345,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // trapezoidal source history; the temporal error is second order. Matching
     // raw population momentum instead would leave a spurious half-force shift.
     let amplitude = omega * v_ac;
-    let acoustic_force = |[x, _, _]| {
+    let acoustic_force = |[x, _, _]: [usize; 3]| {
         if x >= exit && x + 3 <= nx {
             [0.0, amplitude, 0.0]
         } else {

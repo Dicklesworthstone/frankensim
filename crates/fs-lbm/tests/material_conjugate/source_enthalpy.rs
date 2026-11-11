@@ -186,7 +186,7 @@ fn g0_source_caloric_endpoint_preserves_imposed_and_compact_temperatures() {
         scheme: ConvectionScheme::Upwind,
         ..EnergyConfig::default()
     };
-    let evaluate = |temperature| {
+    let evaluate = |temperature: &[f64]| {
         config.evaluate_with_enthalpy(
             &domain,
             &fluid,

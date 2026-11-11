@@ -182,7 +182,7 @@ fn spatial_reservoir_pressure_is_applied_once_after_the_sgs_predictor() {
     let speed = mouth_speed(0.2);
     let heated_h = 10.0 + 0.5 * speed.powi(2);
     let data = reservoirs(&mass, &h, &p, heated_h, [0.0; 2]);
-    let run = |profile| {
+    let run = |profile: StaggeredBoundaryPressure<'_>| {
         field
             .advance_material_momentum_with_viscosity_sgs_and_pressure_profile(
                 &domain,

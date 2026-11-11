@@ -5,7 +5,7 @@ use crate::lattice3::{D3q19, Grid3, GridBudget3};
 use crate::sgs3::{SgsConfig, SgsModel, SgsUse, eddy_viscosity};
 use crate::thermal::boundary::FiniteThermalWall;
 use crate::thermal::boundary::conduction::WallCell;
-use crate::thermal::open::ThermalOpenLimits3;
+use crate::thermal::open::{ThermalOpenBoundaries3, ThermalOpenLimits3};
 use fs_exec::CancelGate;
 
 const DIMS: [usize; 3] = [6, 4, 3];

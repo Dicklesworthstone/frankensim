@@ -9,7 +9,9 @@ use fs_lbm::conjugate::enthalpy::advection::feedback::rheology::QuasisteadyRheol
 use fs_material::phase::mushy::MushyPhaseLaw;
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve};
 
+#[path = "implicit/adaptive.rs"]
 mod adaptive;
+#[path = "implicit/unsteady.rs"]
 mod unsteady;
 
 fn implicit_controls() -> ImplicitFlowControls {

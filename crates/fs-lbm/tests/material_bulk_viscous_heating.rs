@@ -243,7 +243,7 @@ fn local_shear_and_bulk_sources_recover_pure_limits_and_mixed_tensor_power() {
         ] {
             let mut actual = slab();
             let mut reference = slab();
-            let mean = (strain[0][0] + strain[1][1] + strain[2][2]) / 3.0;
+            let mean: f64 = (strain[0][0] + strain[1][1] + strain[2][2]) / 3.0;
             let gamma = (2.0 * (0..3).flat_map(|a| (0..3).map(move |b| {
                 (strain[a][b] - if a == b { mean } else { 0.0 }).powi(2)
             })).sum::<f64>()).sqrt();

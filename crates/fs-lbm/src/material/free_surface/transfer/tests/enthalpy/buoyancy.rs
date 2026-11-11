@@ -2,6 +2,7 @@
 //! Synthetic material curves isolate native force and storage, not calibration.
 
 use super::*;
+use crate::d3q19::freesurface3::FreeSurface3;
 use crate::material::free_surface::enthalpy::FreeSurfaceCellHeat;
 use crate::material::free_surface::enthalpy::rheology::RheologySolve;
 use crate::material::transport::boussinesq::BoussinesqConfig;

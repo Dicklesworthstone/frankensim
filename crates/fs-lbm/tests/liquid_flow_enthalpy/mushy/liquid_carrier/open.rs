@@ -94,6 +94,7 @@ fn pressure_driven_liquid_superheat_and_physical_drag_melt_cells_without_double_
 }
 
 #[test]
+#[cfg(feature = "implicit-enthalpy-coupling")]
 fn implicit_open_liquid_flow_uses_its_own_melt_dependent_pressure_and_outlet_enthalpy() {
     let card = card(claims(1.0, 100.0, false));
     let liquid = liquid(&card);
@@ -137,6 +138,7 @@ fn implicit_open_liquid_flow_uses_its_own_melt_dependent_pressure_and_outlet_ent
 }
 
 #[test]
+#[cfg(feature = "implicit-enthalpy-coupling")]
 fn live_reconstruction_carries_liquid_h_without_transporting_stationary_latent_inventory() {
     use fs_conduction::transient::deposition::advection::reconstruction::{
         AxialCellStencil, LimitedEnthalpyReconstruction,

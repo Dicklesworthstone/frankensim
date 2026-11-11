@@ -6,13 +6,13 @@ use fs_conduction::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionSimulation, Event,
     MaterialId, StepConfig, ThermalLaw, ThermalLink, TimedEvent,
 };
-use fs_conduction::transient::deposition::contact::implicit::PreparedMaterialContact;
-use fs_conduction::transient::deposition::contact::{ContactCell, MaterialContactLink};
-use fs_conduction::{
-    AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS as RD, AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY as RP,
-};
+use fs_conduction_full::transient::deposition::contact::implicit::PreparedMaterialContact;
+use fs_conduction_full::transient::deposition::contact::{ContactCell, MaterialContactLink};
 use fs_matdb::{InterfaceSystemCard, SurfaceSpec, SystemContext};
-use fs_material::thermal::interface::ThermalInterfacePoint;
+use fs_material::thermal::interface::{
+    AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS as RD, AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY as RP,
+    ThermalInterfacePoint,
+};
 use fs_qty::Pressure;
 
 fn interface(wall: &MaterialCard, fluid: &MaterialCard) -> InterfaceSystemCard {

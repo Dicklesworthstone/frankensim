@@ -5,6 +5,7 @@ use super::*;
 
 #[cfg(feature = "enthalpy-coupling")]
 mod source_bulk_feedback;
+use crate::d3q19::freesurface3::FreeSurface3;
 use crate::material::free_surface::enthalpy::FreeSurfaceEnthalpyError;
 use crate::material::free_surface::enthalpy::rheology::RheologySolve;
 use fs_qty::Frequency;

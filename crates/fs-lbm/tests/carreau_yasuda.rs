@@ -2,8 +2,25 @@
 //! All material numbers are synthetic declarations, not measured data.
 
 use fs_lbm::rheology::{Rheology, RheologyField, TAU_CAP, TAU_FLOOR, channel_flow, update_tau};
-use fs_lbm::{CS2, E, Grid, W, equilibrium};
+use fs_lbm::{CS2, Grid, Q, equilibrium};
 use fs_material::fluid_transport::rheology::CarreauYasuda;
+
+// The D2Q9 lattice velocities and weights, in the order of `fs_lbm::equilibrium`. The crate keeps its own `E` and `W` crate-private (they have been since the
+// crate's first commit), so this test carries them; `the_local_lattice_follows_the_crates_equilibrium_order` pins the order against the public `equilibrium`.
+const E: [(i32, i32); Q] = [(0, 0), (1, 0), (0, 1), (-1, 0), (0, -1), (1, 1), (-1, 1), (-1, -1), (1, -1)];
+const W: [f64; Q] = [4.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0];
+
+#[test]
+fn the_local_lattice_follows_the_crates_equilibrium_order() {
+    for (rho, ux, uy) in [(1.0, 0.0, 0.0), (1.3, 0.04, -0.02), (0.8, -0.03, 0.05)] {
+        let f = equilibrium(rho, ux, uy);
+        for (q, e) in E.iter().enumerate() {
+            let eu = f64::from(e.0) * ux + f64::from(e.1) * uy;
+            let expected = W[q] * rho * (1.0 + 3.0 * eu + 4.5 * eu * eu - 1.5 * (ux * ux + uy * uy));
+            assert!((f[q] - expected).abs() <= 1e-14, "population {q}: {} against {expected}", f[q]);
+        }
+    }
+}
 
 fn solve_stress(law: Rheology, rate: f64, expected_tau: f64, previous: f64) -> (f64, f64) {
     let mut grid = Grid::uniform(2, 2, previous);

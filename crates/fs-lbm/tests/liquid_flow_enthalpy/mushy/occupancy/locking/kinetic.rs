@@ -89,7 +89,7 @@ fn accepted_freezing_retains_small_kinetic_heat_beside_large_surviving_circulati
         });
         let local_x = if small { x } else { x - 3 };
         let local_y = if small { y } else { y - 3 };
-        let circulation = |force| {
+        let circulation = |force: f64| {
             [
                 if local_y == 0 { -force } else { force },
                 if local_x == 0 { force } else { -force },

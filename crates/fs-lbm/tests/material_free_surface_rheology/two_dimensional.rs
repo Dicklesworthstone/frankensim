@@ -1,5 +1,6 @@
 //! Dense source-rheology regressions reuse the existing original-source fixture.
 
+#[path = "two_dimensional/bulk.rs"]
 mod bulk;
 
 use super::{DT, DX, card, law, near, solve};
