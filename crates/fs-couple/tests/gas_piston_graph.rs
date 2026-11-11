@@ -1046,9 +1046,12 @@ impl Apart {
 
 /// The module's exchange controls with the caller's heat bracket. The
 /// module's own fixture has 100 J either way, and its solve tries the far
-/// end of the bracket on the side of the root; a few steps on, the gas or
-/// the body of these runs can no longer give or take that much inside its
-/// source's range. The tolerances are the fixture's.
+/// end of the bracket on the side of the root. The moving run takes that
+/// bracket. With it the module refuses the second step of the fixed
+/// sensible run and the tenth of the latent one (observed: `OutsideBracket`
+/// from the gas's own temperature solve, which cannot give or take 100 J
+/// inside its source's range by then), so those two have a narrower one.
+/// The tolerances are the fixture's.
 fn exchange(bracket_j: f64) -> HeatExchangeSolve {
     HeatExchangeSolve {
         heat_bracket_j: [-bracket_j, bracket_j],
@@ -1251,7 +1254,7 @@ fn a_moving_wall_a_gas_and_a_finite_body_in_contact_match_the_modules_thermal_st
     // The module's moving fixture: the wall thrown at 2 m/s either way, a
     // gas whose heat capacity varies, the body at 650 K, 2000 W/K.
     let curve = sensible();
-    let (conductance, bracket, steps) = (2000.0, 60.0, 12);
+    let (conductance, bracket, steps) = (2000.0, 100.0, 12);
     for velocity in [-2.0, 2.0] {
         let allowed = Apart::allowed(&gas(0.75, 0.001), 500.0, conductance, bracket, steps);
         let run = contact_against_the_module(

@@ -81,7 +81,7 @@ owner's 1e-7 J/kg, summed over the steps). Measured against allowed:
 |---|---|---|---|---|---|
 | fixed walls, body from 300 K, 4000 W/K | 12 | 2.3e-11 K (4.8e-9) | 2.1e-11 K (7.8e-9) | 1.2e-11 J (2.7e-9) | 4.7e-15 J/K (3.9e-10) |
 | fixed walls, body from 650 K, 4000 W/K | 12 | 5.2e-11 K (4.8e-9) | 4.6e-11 K (7.8e-9) | 2.6e-11 J (2.7e-9) | 9.3e-16 J/K (3.9e-10) |
-| wall thrown at -2 and 2 m/s, 2000 W/K | 12 | 6.3e-11 K (4.8e-9) | 4.9e-11 K (6.9e-9) | 3.1e-11 J (1.4e-9) | 3.3e-14 J/K (2.9e-10) |
+| wall thrown at -2 and 2 m/s, 2000 W/K | 12 | 1.1e-10 K (4.8e-9) | 8.0e-11 K (6.9e-9) | 5.2e-11 J (1.4e-9) | 6.9e-15 J/K (4.3e-10) |
 | melting through a plateau at 350 K, 2000 W/K | 40 | 4.1e-8 J/kg (8.0e-6) | 6.5e-11 K (2.3e-8) | 4.1e-11 J (4.3e-9) | 3.3e-15 J/K (1.7e-9) |
 | freezing through a plateau at 500 K, 2000 W/K | 40 | 1.0e-7 J/kg (8.0e-6) | 1.5e-10 K (2.3e-8) | 7.5e-11 J (4.9e-9) | 1.7e-15 J/K (1.9e-9) |
 
@@ -97,10 +97,14 @@ more than a million times the bounds, as the test requires.
 
 In those comparisons the conductance is constant (the module's own latent
 test makes it depend on the liquid fraction, which the kernel's element does
-not), and the module's heat bracket is 60 J or 20 J either way where its
-fixture has 100 J, because its solve tries the far end of the bracket and a
-few steps on the gas or the body can no longer supply that inside its
-source's range. The module's midpoint thermal step, a conductance that
+not). The moving run uses the module fixture's heat bracket of 100 J either
+way; the fixed sensible runs use 60 J and the latent runs 20 J, because with
+100 J the module refuses the second step of the first and the tenth of the
+second (observed: `OutsideBracket` from the gas's own temperature solve at
+the far end of the bracket, which its solve tries). The module's answer
+depends a little on its bracket: with 60 J the moving run's row read
+6.3e-11 K, 4.9e-11 K, 3.1e-11 J and 3.3e-14 J/K. The module's midpoint
+thermal step, a conductance that
 depends on state, and its real-gas and reactive thermal variants are not
 compared.
 
