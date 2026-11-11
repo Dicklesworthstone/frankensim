@@ -655,7 +655,11 @@ fn native_film_preserves_spectral_paths_camera_weights_aovs_and_replay() {
             progressive.xyz[0].map(f64::to_bits)
         );
         // Axial depth remains defined even though this lens has no pinhole
-        // inverse projection. An instance also exercises unavailable motion.
+        // inverse projection. Since b0e26775bf the film exports previous motion
+        // through the lens's native inverse; for this static camera and identity
+        // instance it is exactly zero. Clipped seeds and camera cuts that leave
+        // motion unavailable are covered by sequential_motion.rs's
+        // native_clipping_missing_witness_local_inverse_and_camera_cut_have_distinct_outcomes.
         let identity = fs_blake3::hash_domain("org.frankensim.test.sequential-lens", b"plane");
         let plane = TriMesh::new(
             vec![
@@ -720,7 +724,10 @@ fn native_film_preserves_spectral_paths_camera_weights_aovs_and_replay() {
             mask & (validity::PRIMARY | validity::ALBEDO),
             validity::PRIMARY | validity::ALBEDO
         );
-        assert_eq!(mask & validity::PREVIOUS_MOTION, 0);
+        assert_eq!(mask & validity::PREVIOUS_MOTION, validity::PREVIOUS_MOTION);
+        let guides = hit.denoise_guides().unwrap();
+        assert_eq!(guides.motion_prev_x()[0].to_bits(), 0.0_f32.to_bits());
+        assert_eq!(guides.motion_prev_y()[0].to_bits(), 0.0_f32.to_bits());
     });
 }
 

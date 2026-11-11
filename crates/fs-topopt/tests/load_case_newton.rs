@@ -212,6 +212,9 @@ fn zero_weight_aggregate_allows_volume_objective_with_only_case_constraints() {
     let before = model.work();
     assert_eq!(aggregate.hessian_vector_product(&x,&vec![1.0;n],None).unwrap(),vec![0.0;n]);
     assert_eq!(model.work(),before,"zero weighted aggregate must not spend tangent solves");
+    case0.hessian_vector_product(&x,&vec![1.0;n],None).unwrap();
+    assert!(model.work().started_solves > before.started_solves,
+        "a positive per-case Hessian product still spends its tangent solves");
 
     let mut builder = ProblemBuilder::new();
     let var = builder.var("raw density",Manifold::Rn {dim:n as u32},Dims::NONE).unwrap();

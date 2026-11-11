@@ -2592,6 +2592,42 @@ fn layered_diffraction_refuses_partial_pupil_clipping_and_invalid_motion_atomica
     });
 }
 
+/// A primitive's own finite positive emission is a finite emitter, so the
+/// lightless separated planes render above. Without any emission, or with
+/// only zero-scale emission, the same scene still has no emitter and refuses.
+#[test]
+fn lightless_planes_without_positive_emission_still_refuse_no_finite_emitter() {
+    use fs_render::lighting::LightingError;
+    let camera = layered_patch_camera(
+        &separated_diffraction_planes(),
+        Aperture::try_circular(1.0e-3).unwrap(),
+        0.0,
+        0.0,
+    );
+    let mut settings = motion_settings(1);
+    settings.strategy = DirectStrategy::BsdfOnly;
+    let shutter = motion_shutter(0.5, 0.0);
+    let mut dark = separated_diffraction_planes();
+    for primitive in &mut dark.primitives {
+        primitive.emission = None;
+    }
+    let mut zero_scale = separated_diffraction_planes();
+    for primitive in &mut zero_scale.primitives {
+        primitive.emission = primitive.emission.map(|(spectrum, _)| (spectrum, 0.0));
+    }
+    with_cx(|cx| {
+        for (scene, reason) in [(&dark, "no emission"), (&zero_scale, "zero-scale emission")] {
+            assert!(
+                matches!(
+                    render_cinematic(scene, &camera, CutSide::After, cx, &settings, shutter),
+                    Err(TracerError::Lighting(LightingError::NoFiniteEmitter))
+                ),
+                "{reason}"
+            );
+        }
+    });
+}
+
 /// The bead's 64-spp Sobol claim, release lane:
 /// `cargo test -p fs-render --release --features tracer --test tracer_battery -- --ignored --nocapture`
 #[test]

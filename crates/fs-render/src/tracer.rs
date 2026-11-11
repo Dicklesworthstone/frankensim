@@ -17131,6 +17131,7 @@ fn validate_scene_with_medium_emission<'scene>(
     has_medium_emission: bool,
 ) -> Result<SceneLighting<'scene>, TracerError> {
     let mut thermal_emission = false;
+    let mut hit_only_emission = false;
     let mut has_dielectric_materials = false;
     for primitive in &scene.primitives {
         cx.checkpoint()?;
@@ -17141,6 +17142,8 @@ fn validate_scene_with_medium_emission<'scene>(
             }
             thermal_emission |= surface.is_emitting();
         }
+        hit_only_emission |=
+            matches!(primitive.emission, Some((_, scale)) if scale.is_finite() && scale > 0.0);
     }
     let lighting = if thermal_emission || has_medium_emission {
         AdmittedLighting::with_thermal_surface_emission(
@@ -17148,6 +17151,15 @@ fn validate_scene_with_medium_emission<'scene>(
             &scene.lights,
             scene.environment.as_ref(),
             thermal_lighting::triangles(scene, cx)?,
+            true,
+        )?
+    } else if hit_only_emission {
+        // The flag also carries non-thermal, hit-only emission that camera and BSDF hits add.
+        AdmittedLighting::with_thermal_surface_emission(
+            cx,
+            &scene.lights,
+            scene.environment.as_ref(),
+            Vec::new(),
             true,
         )?
     } else {

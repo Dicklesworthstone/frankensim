@@ -431,6 +431,8 @@ impl PhysicsHessian for SimpNewtonGoal<'_, '_> {
             if direction.iter().all(|&v| v == 0.0) { return Ok(vec![0.0; direction.len()]); }
             match self.output {
                 Output::Compliance => {
+                    // Every aggregate weight is zero: sum_i w_i C_i is identically zero, so is its curvature.
+                    if !self.model.loads.iter().any(|(_, w)| *w > 0.0) { return Ok(vec![0.0; direction.len()]); }
                     let slots = 2 + self.model.loads.iter().filter(|(_, w)| *w > 0.0).count();
                     self.model.controlled(slots, cx, |control| c.goal.hessian_vector_product(direction, control))
                 }
