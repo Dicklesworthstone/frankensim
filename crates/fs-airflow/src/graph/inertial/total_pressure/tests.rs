@@ -76,6 +76,17 @@ fn paths() -> [PipeLoadGeometry; 2] {
 fn near(a: f64, b: f64) {
     assert!((a - b).abs() < 2e-11, "{a} != {b}");
 }
+// Flows are stored as impulses p = L*q and read back as p/L (inertial.rs, volume_flows_m3_s), so a flow
+// returns to two roundings, not bit for bit (0.4 reads back as 0.4000000000000001): 2 eps relative.
+fn assert_flows_round_trip(flows: &[f64], expected: f64) {
+    assert_eq!(flows.len(), 2);
+    for q in flows {
+        assert!(
+            (q - expected).abs() <= 2.0 * f64::EPSILON * expected.abs(),
+            "{q} != {expected}"
+        );
+    }
+}
 
 #[test]
 fn typed_owner_retains_native_solve_and_uses_actual_static_port_loads() {
@@ -186,7 +197,7 @@ fn typed_owner_retains_native_solve_and_uses_actual_static_port_loads() {
             report.boundary_static_pressure_work_j + report.boundary_kinetic_energy_inflow_j,
             report.momentum().supplied,
         );
-        assert_eq!(owner.volume_flows_m3_s(), vec![0.4; 2]);
+        assert_flows_round_trip(&owner.volume_flows_m3_s(), 0.4);
     });
 }
 
@@ -314,6 +325,6 @@ fn total_pressure_final_cancellation_never_publishes_history_or_loads() {
                 .is_err()
         );
         assert_eq!(owner.accepted_time_s(), 0.0);
-        assert_eq!(owner.volume_flows_m3_s(), vec![0.4; 2]);
+        assert_flows_round_trip(&owner.volume_flows_m3_s(), 0.4);
     });
 }

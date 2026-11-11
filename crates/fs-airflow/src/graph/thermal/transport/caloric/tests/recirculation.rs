@@ -216,7 +216,14 @@ fn complete_exhaust_recovery_uses_mass_independently_of_reference_cp() {
             close(report.supplies[0].fresh_mass_flow_kg_per_s, large, 1e-14);
             assert_eq!(report.supplies[0].return_mass_flow_kg_per_s, small);
             assert_eq!(report.streams[0].mass_flow_kg_per_s, small);
-            close(report.streams[0].capacity_w_per_k, small * cp, 1e-14);
+            // The stream capacity and small * cp are one product reached through different
+            // roundings; 1 ulp at 180 W/K is 2.8e-14, so 1e-14 absolute could only be met bit for
+            // bit. Two eps relative names the allowance.
+            close(
+                report.streams[0].capacity_w_per_k,
+                small * cp,
+                2.0 * f64::EPSILON * (small * cp).abs(),
+            );
             assert_eq!(report.external_heat_gain_w, 0.0);
             assert_eq!(report.heat_imbalance_w, 0.0);
             // Admit the complete draw exactly, without an overdraw tolerance
@@ -469,9 +476,16 @@ fn changing_only_cp_away_from_the_reference_changes_return_cooling_capacity() {
                 > 30.0
         );
         assert!(variable.wall_heat_rate_w - frozen.wall_heat_rate_w > 40_000.0);
-        assert_eq!(
+        // Both laws reach the same reference Cp (900) through different arithmetic, so the two
+        // reference capacities agree to a rounding, not bit for bit (225 and 225.00000000000003):
+        // 2 eps relative.
+        let capacities = [
             variable.recirculation.as_ref().unwrap().supplies[0].fresh_capacity_w_per_k,
             frozen.recirculation.as_ref().unwrap().supplies[0].fresh_capacity_w_per_k,
+        ];
+        assert!(
+            (capacities[0] - capacities[1]).abs()
+                <= 2.0 * f64::EPSILON * capacities[0].abs().max(capacities[1].abs())
         );
     });
 }

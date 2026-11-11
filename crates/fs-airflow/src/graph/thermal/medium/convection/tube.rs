@@ -159,7 +159,11 @@ mod tests {
         ).unwrap();
         let nu = 1.86 * 800.0_f64.cbrt() * 2.0_f64.powf(0.14);
         assert_eq!(result.bulk().nusselt().card().id, CorrelationId::SiederTateLaminar);
-        assert_eq!(result.bulk().nusselt().groups()["Re"], 1000.0);
+        // Re = rho*u*D/mu is formed from 0.1, 0.01 and 0.001, none exactly representable, so it is
+        // 1000 to rounding (1000.0000000000001 here), not bit for bit: 4 eps relative.
+        assert!(
+            (result.bulk().nusselt().groups()["Re"] / 1000.0 - 1.0).abs() <= 4.0 * f64::EPSILON
+        );
         assert_eq!(result.bulk().nusselt().groups()["Pr"], 8.0);
         assert_eq!(result.bulk().nusselt().groups()["mu_bulk_over_surface"], 2.0);
         assert!((result.bulk().coefficient().value.value() / (50.0 * nu) - 1.0).abs() < 3e-13);

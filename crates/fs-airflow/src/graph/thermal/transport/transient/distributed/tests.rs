@@ -93,6 +93,15 @@ fn cells(
     (data, path)
 }
 fn simulation<'a>(law: &'a Caloric, cells: &[DepositedCell]) -> DepositionSimulation<'a> {
+    simulation_linked(law, cells, 8)
+}
+// Every internal transfer counts against DepositionBudget::max_links (fs-thermal), so a pipe of n
+// cells, which carries n - 1 axial transfers, needs a budget of n - 1.
+fn simulation_linked<'a>(
+    law: &'a Caloric,
+    cells: &[DepositedCell],
+    max_links: usize,
+) -> DepositionSimulation<'a> {
     let events = cells
         .iter()
         .cloned()
@@ -106,7 +115,7 @@ fn simulation<'a>(law: &'a Caloric, cells: &[DepositedCell]) -> DepositionSimula
         &[(MaterialId(1), law as &dyn ThermalLaw)],
         DepositionBudget {
             max_cells: cells.len(),
-            max_links: 8,
+            max_links,
             max_events: cells.len() + 2,
             max_substeps: 2000,
         },
@@ -379,7 +388,14 @@ fn g2_axial_refinement_sharpens_residence_without_changing_hydraulic_inertia_or_
         let mut inertias = Vec::new();
         for n in [4, 16] {
             let (data, path) = cells(&law, n, 0.96, 0.02);
-            let old = simulation(&law, &data);
+            // The thermal owner counts one HeatTransfer per directed advective flow
+            // (fs-thermal enthalpy/advection.rs, heat_transfers), the binding makes one flow per
+            // consecutive native mass link of the branch (distributed.rs, bind), and every transfer
+            // counts against DepositionBudget::max_links (observe.rs, add_step_transfers). `data`
+            // holds the n interior cells and the two junction cells, so the pipe passes
+            // data.len() - 1 transfers (5 at n = 4, 17 at n = 16 when measured).
+            let links = data.len() - 1;
+            let old = simulation_linked(&law, &data, links);
             let layout = DistributedGraphInventory::new(
                 cx,
                 &graph,
@@ -424,6 +440,24 @@ fn g2_axial_refinement_sharpens_residence_without_changing_hydraulic_inertia_or_
                 max_dt_s: 1.0 / 512.0,
                 energy_tolerance_j: 1e-5,
             };
+            // One link fewer than the count above is refused at the first step.
+            let short = simulation_linked(&law, &data, links - 1);
+            let tight = layout
+                .bind(
+                    cx,
+                    &graph,
+                    &[1.0],
+                    &short,
+                    streams(&law, 1.0, NODES[0], NODES[1], 60.0),
+                    64,
+                )
+                .unwrap();
+            assert!(matches!(
+                tight.advance_to(cx, &short, 0.5, config),
+                Err(TransientTransportError::Thermal(DepositionError::Budget(
+                    "internal heat transfers"
+                )))
+            ));
             let (early, early_energy, _) = binding.advance_to(cx, &old, 0.5, config).unwrap();
             let (late, late_energy, _) = binding.advance_to(cx, &early, 1.5, config).unwrap();
             assert!(early_energy.residual_j.abs() < 1e-5);

@@ -686,7 +686,9 @@ fn spectral_reactive_coupling_and_refusals_reuse_original_owners() {
             || false,
         )
         .unwrap();
-    assert!(result.report.work.wavelength_evaluations > 0);
+    // Fixed bands integrate analytically and report no wavelength samples (ca2f2ac1cf, which made
+    // the same change in spectral/tests.rs).
+    assert_eq!(result.report.work.wavelength_evaluations, 0);
     assert!(result.report.combined_energy_residual_j.abs() <= 1e-4);
     assert!(matches!(
         model.candidate_surfaces(

@@ -430,7 +430,10 @@ fn native_events_and_accepted_storage_budget_remain_original_owner_limits() {
                 &[(MaterialId(1), &law as &dyn ThermalLaw)],
                 DepositionBudget {
                     max_cells: 2,
-                    max_links: 0,
+                    // The pipe passes one internal transfer between its two cells, and every
+                    // transfer counts against max_links (fs-thermal); no assertion here is about
+                    // the link budget.
+                    max_links: 1,
                     max_events: 3,
                     max_substeps: limit,
                 },

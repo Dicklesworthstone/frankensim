@@ -525,8 +525,11 @@ fn spectral_feedback_retains_original_reports_and_endpoint_checks() {
         panic!("spectral result lost");
     };
     assert_eq!(report.optics, band);
-    assert!(report.wavelength_evaluations > 0);
-    assert!(result.report.work.wavelength_evaluations > report.wavelength_evaluations);
+    // Fixed bands integrate analytically and report no wavelength samples (ca2f2ac1cf, which made
+    // the same change in spectral/tests.rs).
+    assert_eq!(report.wavelength_evaluations, 0);
+    // The whole work counts no wavelength samples either: every band of this fixture is fixed.
+    assert_eq!(result.report.work.wavelength_evaluations, 0);
     assert!(result.report.work.spectral_factorizations > report.factorizations);
     assert!(result.report.gas_heat_power[1].value() < 0.0);
     for (source, t) in report
