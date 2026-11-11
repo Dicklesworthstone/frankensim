@@ -14,6 +14,20 @@ fn controls() -> DoublePistonSolve {
         volume_tolerance_m3: 1e-18,
     }
 }
+/// For equal faces. The solve tries both ends of the primary bracket, and at
+/// the far end of the one-gas bracket (1.5 litres) the opposing litre would
+/// be halved in one step, which its gas owner refuses for this mixture
+/// ("discrete gas compression exceeds positive-tangent branch"). Both ends
+/// of this bracket are admitted by both gases.
+fn equal_face_controls() -> DoublePistonSolve {
+    DoublePistonSolve {
+        piston: super::super::super::PistonSolve {
+            volume_bracket_m3: [0.0008, 0.0012],
+            ..single_controls()
+        },
+        ..controls()
+    }
+}
 fn input(heat_j: [f64; 2]) -> DoublePistonInput {
     DoublePistonInput {
         duration_s: drive(0.0).duration_s,
@@ -57,7 +71,7 @@ fn adiabatic_motion_preserves_both_nonlinear_source_entropies() {
                         external_force_n: if i < 20 { -0.5 } else { 0.0 },
                         ..input([0.0, 0.0])
                     },
-                    controls(),
+                    equal_face_controls(),
                     || false,
                 )
                 .unwrap();
@@ -213,7 +227,7 @@ fn equilibrium_and_failed_proposals_preserve_both_gases_momentum_and_port_window
     let mut probe = before.clone();
     let mut polls = 0;
     probe
-        .step_discrete_gradient(input([20.0, 5.0]), controls(), || {
+        .step_discrete_gradient(input([20.0, 5.0]), equal_face_controls(), || {
             polls += 1;
             false
         })
@@ -221,7 +235,7 @@ fn equilibrium_and_failed_proposals_preserve_both_gases_momentum_and_port_window
     for cancel_at in [1, polls / 2, polls] {
         let mut current = 0;
         assert!(matches!(
-            piston.step_discrete_gradient(input([20.0, 5.0]), controls(), || {
+            piston.step_discrete_gradient(input([20.0, 5.0]), equal_face_controls(), || {
                 current += 1;
                 current == cancel_at
             }),
