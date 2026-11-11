@@ -1,5 +1,6 @@
 //! G1/G3 prescribed harmonic supports: cross inertia, phase, reactions and work.
 
+#[path = "harmonic_supports/impedance.rs"]
 mod impedance;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
