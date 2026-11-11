@@ -1,0 +1,193 @@
+# Voice performance: the DVTD stationary flow rig on subject 1's /sh/ (s1-12-schoen-sh) at the printed 2.4987 W
+#   level: P_sub 2814.4 Pa at the tap; printed comparison values U 0.00088781 m^3/s and SPL 76.2 dB (the file's
+#   reference reads 2*10e-5 Pa; its printed PSD integrates to 96.18 dB re 20 uPa).
+# Card by OliveDove, fric1 (owner order MB 15368; GO 19580, clock 19667; the /s/ rig card's rulings 15490, 15773,
+#   15828, 15902, 16025, 16735, 17645, 17712, 18252; NavyTower 15491, 15765, 16041). Every number below is read
+#   from a cited file; none is fitted to a recording.
+#
+# SOURCE OF THE RIG: P. Birkholz et al. (2020), Sci. Data 7:255, doi 10.1038/s41597-020-00597-w (CC BY 4.0), and
+#   its dataset (the DVTD archive, CC0, figshare 11897187). The printed values and the PSD comparison file are
+#   s1-12-schoen-sh-noise-metadata.txt and s1-12-schoen-sh-noise-psd.txt of that archive.
+# TRACT: s1-12-schoen-sh-inner-surface-closed.stl cut by the level route (slice3d.py, NavyTower): 102 sections
+#   of about 2 mm, glottis first. Section 0 = 1.179573e-04 m^2. Rigid (no tract_wall row): a printed solid.
+# FRICATIVE SOURCE: Stevens' printed source at an obstacle (K. N. Stevens, Acoustic Phonetics, Fig. 2.33(a), on
+#   Shadle's 1985 data; read on MIT OCW 6.541J handout 03/02/04, p. 6; MB 17645, 17712): in 300 Hz bands
+#   L = C(f) + 20 log10(U^3 A^-2.5) - 212 dB re 1 dyn/cm^2, U in cm^3/s and A in cm^2, C(f) the upper curve as
+#   digitized in fs-couple's turbulence_noise.rs (0.55-10 kHz). The caption's U^3 rule is used as printed: the
+#   figure's own two curves imply U^1.89 to U^2.78, and no exponent is refit. A is the constriction k = 78
+#   (9.343011e-06 m^2, the cut's minimum), opening into j = 101 (7.787694e-04 m^2, the largest section between k
+#   and the lips, MB 15828), whose Borda-Carnot drop is solved in the glottal junction with Shadle's measured K3
+#   less the line's own Poiseuille resistance over the sections the constriction spans (MB 18650, 19370); seed 1.
+#   The source sits at the obstacle m = 92, the junction after section 92, 28.7 mm downstream of k along
+#   the cut: the incisors' gap, measured on the same surface as the waist between the cavity behind the teeth and
+#   the cavity behind the lips on 11 midsagittal slices (its edges lie in sections 91 to 94, their median in
+#   section 92). The printed curve is the source in Shadle's tube (2.54 cm across, 5.067 cm^2; RLE TR 506, p. 27);
+#   Shadle's eq. 3.3 (p. 67) makes the same dipole a pressure source inversely proportional to its duct's area:
+#   the law multiplies it by A_tube / A_m, A_m section 92's 1.678607e-04 m^2, +9.60 dB (MB 18252). The
+#   figure's rig had one 0.0804 cm^2 constriction, its obstacle 3 cm downstream, a 5.0 cm^2 tube and flows of
+#   160 and 420 cm^3/s; this rig's printed 466 to 964 cm^3/s through 0.093 cm^2 lie above
+#   those flows: the gap is stated on the page.
+# GLOTTIS: the model's own adapter hole (the article: a 4 mm ring, inner diameter 10 mm, flush with the glottal
+#   plane). The printable file's bore measures 78.096 mm^2 (9.97 mm), the mean of 9 plane
+#   sections, over 3.77 mm: its bottom face meets the bore 3.773 mm below the glottal plane on
+#   average. glottal_orifice takes Ishizaka and Flanagan (1972) eq 6 recovery into section 0, N = 0.6621
+#   (MB 16025). The fold rows are unread (the grammar needs them; glottal_orifice replaces the folds).
+# SUBGLOTTAL TUBE, glottis end first, from the printed misc parts by plane sections: the 3.77 mm hole;
+#   trachea.stl's bore, 253.852 mm^2 (18 mm), 82.0 mm (its 5.0 mm spigot fills the horn's 5.0 mm
+#   thread socket); bronchial_horn.stl's bore from the socket floor down 17 slices of 2.0 mm and one of
+#   0.23 mm, each at its midpoint's area, to 120.0 mm below the glottal plane, the article's pressure tap (no
+#   tap port is in either printed part). The article's 18 to 10 mm taper is in no printed part; the card follows
+#   the files (MB 15828). Below the tap the horn and the tank are replaced by the held pressure.
+# SUBGLOTTAL PRESSURE: the printed P_sub, held at the tube's far end (the tap). The 0.1 s ramp is authored and
+#   lies before the reads (the last 2 s).
+# AMBIENT: 22 C, 1007 hPa, 46 % relative humidity, as the article prints for the anechoic chamber.
+# TERMINATION: the Levine-Schwinger exact unflanged thin-wall load, 256 quadrature nodes (MB 15902). The printed
+#   wall is 4 mm thick: the real load lies between the unflanged and flanged limits.
+# RECEIVER: the mouth flow as a free-field monopole at the rig microphone, 0.30 m in front of and 0.30 m beside the
+#   mouth (0.424 m), as the article prints; the 45-degree directivity is not modelled.
+# AUDIO: 26 kHz (MB 19667), 3.0 s, one mechanics step per output sample. The lip section (7.787694e-04
+#   m^2, a = 15.745 mm) has its Levine-Schwinger cut-on (ka 3.8317) at 13370 Hz (c 345.19 m/s, Cramer
+#   1993), so Nyquist must lie below it; the /s/ rig cards run at 40 kHz. Microphone band 10400 Hz, 0.4 of the clock.
+# FULL SCALE: full_scale_pa 4.0 Pa scales the PCM16 WAV only and enters no physics (MB 25233). The value is set
+#   from the measured peaks of the first renders (2.273 Pa at 3005 mW, about 4.9 dB of headroom), not from the
+#   recording. The first cards carried the /s/ rig cards' 1.0 and clipped from 1.5 W: samples at the PCM16 rails, of
+#   78000, on voice_rig-549e2a (ts2, 2026-11-11): 501 mW 0, 1000 mW 0, 1501 mW 28, 2002 mW 601, 2499 mW 2344,
+#   3005 mW 5092.
+frankensim-voice-performance-v1
+audio 26000 78000 1
+full_scale_pa 4.0
+ambient moist_air 295.15 100700 0.46
+fold two_mass 1.25e-4 2.5e-5 80 8 25 0.1 3.57e-4 1.4e-2 2.5e-3
+fold_damping_upper 0.6
+termination unflanged_thin_wall 256
+tract_source dvtd-2020-s1-12-schoen-sh-inner-surface-closed-level-cut
+tract_licence DVTD archive CC0 (figshare 11897187); article CC BY 4.0, doi 10.1038/s41597-020-00597-w
+section 1.179572602e-04 2.037814370e-03
+section 7.109522683e-05 2.006112173e-03
+section 9.023718142e-05 2.026603636e-03
+section 1.007902653e-04 2.031446185e-03
+section 1.024488553e-04 2.005878928e-03
+section 1.012507075e-04 2.040726481e-03
+section 1.013425449e-04 2.042577480e-03
+section 1.048814885e-04 2.053508232e-03
+section 1.123602452e-04 2.005825099e-03
+section 1.240500381e-04 2.000200918e-03
+section 1.445051077e-04 2.080376291e-03
+section 1.751015096e-04 2.016687354e-03
+section 2.232266978e-04 2.056765631e-03
+section 2.938331265e-04 2.030489234e-03
+section 4.081493745e-04 2.115340740e-03
+section 7.847391683e-04 2.259508728e-03
+section 1.027709941e-03 2.367277869e-03
+section 1.247948106e-03 2.155939006e-03
+section 1.116127412e-03 2.570943039e-03
+section 9.482016556e-04 2.184134554e-03
+section 8.111800948e-04 2.335640399e-03
+section 7.451829496e-04 2.145614041e-03
+section 7.163706239e-04 2.062654373e-03
+section 6.763089049e-04 2.336765032e-03
+section 6.440876072e-04 2.225434838e-03
+section 6.215632518e-04 2.147609268e-03
+section 6.163906521e-04 2.129737035e-03
+section 6.247562844e-04 2.158641752e-03
+section 6.466382372e-04 2.234247709e-03
+section 6.961576602e-04 2.405345938e-03
+section 7.933224223e-04 2.284222592e-03
+section 9.849748303e-04 2.268839702e-03
+section 1.689244354e-03 2.918316695e-03
+section 1.347848546e-03 2.328525715e-03
+section 1.051847984e-03 2.422878628e-03
+section 9.468844298e-04 2.181100391e-03
+section 8.942428425e-04 2.059843157e-03
+section 8.406163670e-04 2.420396604e-03
+section 7.995908271e-04 2.302271284e-03
+section 7.669168041e-04 2.208192585e-03
+section 7.439876942e-04 2.142172528e-03
+section 7.366870531e-04 2.121151707e-03
+section 7.259124190e-04 2.090128176e-03
+section 6.271548117e-04 2.166929081e-03
+section 5.759674476e-04 2.321745796e-03
+section 5.449274817e-04 2.196622560e-03
+section 5.258134270e-04 2.119573109e-03
+section 5.214608126e-04 2.102027561e-03
+section 5.240116286e-04 2.112309994e-03
+section 5.118880563e-04 2.063439432e-03
+section 4.591569664e-04 2.115289696e-03
+section 3.974311492e-04 2.059790738e-03
+section 3.411549708e-04 2.161041354e-03
+section 2.928155996e-04 2.023457769e-03
+section 2.512053294e-04 2.025235696e-03
+section 2.156162759e-04 2.110810040e-03
+section 1.862692893e-04 2.038043960e-03
+section 1.611488698e-04 2.041590489e-03
+section 1.371175931e-04 2.052982361e-03
+section 1.191777507e-04 2.058899405e-03
+section 1.067056034e-04 2.027775422e-03
+section 9.682992786e-05 2.007385571e-03
+section 8.769010528e-05 2.019897222e-03
+section 8.184589377e-05 2.026674673e-03
+section 7.546199306e-05 2.042418889e-03
+section 7.214671397e-05 2.035782254e-03
+section 6.870310212e-05 2.017740040e-03
+section 6.681453899e-05 2.039226822e-03
+section 6.585757077e-05 2.010019478e-03
+section 6.582646920e-05 2.009070236e-03
+section 6.478120639e-05 2.014473136e-03
+section 6.490518968e-05 2.018328591e-03
+section 5.955362105e-05 2.023386620e-03
+section 4.864791618e-05 2.017044258e-03
+section 3.684063284e-05 2.015437691e-03
+section 2.564335330e-05 2.008317688e-03
+section 1.704362232e-05 2.002215219e-03
+section 1.086413859e-05 2.001999498e-03
+section 9.343011333e-06 2.006847614e-03
+section 9.368160803e-06 2.001460094e-03
+section 1.162027858e-05 2.000812617e-03
+section 1.667485840e-05 2.016508878e-03
+section 2.521073263e-05 2.017989749e-03
+section 3.948324740e-05 2.000848593e-03
+section 6.493614851e-05 2.019291304e-03
+section 1.089021755e-04 2.069517887e-03
+section 1.785084133e-04 2.055925506e-03
+section 2.949084853e-04 2.037920338e-03
+section 5.817574221e-04 2.010073195e-03
+section 6.301760141e-04 2.177367861e-03
+section 3.751026872e-04 2.160075168e-03
+section 2.392039599e-04 2.066228336e-03
+section 1.678606654e-04 2.029957400e-03
+section 1.727764749e-04 2.089404823e-03
+section 2.213652986e-04 2.039615075e-03
+section 2.485371472e-04 2.003724617e-03
+section 3.015501033e-04 2.083816232e-03
+section 3.322169059e-04 2.104423308e-03
+section 3.089866615e-04 2.135205439e-03
+section 3.337576989e-04 2.114183440e-03
+section 4.018968079e-04 2.082935180e-03
+section 7.787693719e-04 1.345391894e-03
+microphone 0.30 0 0.30 16 64 10400
+subglottal 0 0
+subglottal 0.1 2814.4
+subglottal 3.0 2814.4
+glottal_orifice 7.809555556e-05
+subglottal_tube 7.809555556e-05 3.770000000e-03
+subglottal_tube 2.538520000e-04 8.200000000e-02
+subglottal_tube 2.632670000e-04 2.000000000e-03
+subglottal_tube 3.018470000e-04 2.000000000e-03
+subglottal_tube 3.450330000e-04 2.000000000e-03
+subglottal_tube 3.919590000e-04 2.000000000e-03
+subglottal_tube 4.444240000e-04 2.000000000e-03
+subglottal_tube 5.025040000e-04 2.000000000e-03
+subglottal_tube 5.658820000e-04 2.000000000e-03
+subglottal_tube 6.368500000e-04 2.000000000e-03
+subglottal_tube 7.143800000e-04 2.000000000e-03
+subglottal_tube 7.986840000e-04 2.000000000e-03
+subglottal_tube 8.922950000e-04 2.000000000e-03
+subglottal_tube 9.938840000e-04 2.000000000e-03
+subglottal_tube 1.104095000e-03 2.000000000e-03
+subglottal_tube 1.225724000e-03 2.000000000e-03
+subglottal_tube 1.357506000e-03 2.000000000e-03
+subglottal_tube 1.499638000e-03 2.000000000e-03
+subglottal_tube 1.655512000e-03 2.000000000e-03
+subglottal_tube 1.747390000e-03 2.300000000e-04
+fricative_noise 1 78 101 stevens 92
+receiver free_field_monopole
