@@ -8,6 +8,7 @@
 //! finite-time stability certificate.
 
 use super::*;
+use crate::miscibility::adaptive::trial_endpoint;
 use super::super::adaptive::{
     MulticomponentMiscibilityTimeControl, admit_time, count_evaluations, count_step,
     error_ratio as composition_error_ratio, factor, retryable,
@@ -133,11 +134,7 @@ impl MulticomponentPhaseField {
                 });
             }
             let remaining = target - field.elapsed_s();
-            let endpoint = if dt >= remaining {
-                target
-            } else {
-                (field.elapsed_s() + dt).min(target)
-            };
+            let endpoint = trial_endpoint(field.elapsed_s(), dt, target);
             dt = endpoint - field.elapsed_s();
             let floor = t.minimum_step_s.min(remaining);
             let half = 0.5 * dt;

@@ -12,7 +12,9 @@
 //! entire requested interval. No failed interval publishes a partial result.
 
 use super::{BinaryMiscibilityTransportCandidate, BinaryMiscibilityTransportStep};
-use crate::miscibility::adaptive::{BinaryMiscibilityAdvanceError, BinaryMiscibilityTimeControl};
+use crate::miscibility::adaptive::{
+    BinaryMiscibilityAdvanceError, BinaryMiscibilityTimeControl, trial_endpoint,
+};
 use crate::miscibility::advection::{
     BinaryMiscibilityAdvection, BinaryMiscibilityAdvectionControls,
 };
@@ -189,11 +191,7 @@ impl BinaryMiscibilityNetwork {
                 });
             }
             attempts += 1;
-            let endpoint = if next_step >= target - state.elapsed_s {
-                target
-            } else {
-                (state.elapsed_s + next_step).min(target)
-            };
+            let endpoint = trial_endpoint(state.elapsed_s, next_step, target);
             let step = endpoint - state.elapsed_s;
             if !positive(step) {
                 return Err(Error::Arithmetic("adaptive transport cannot advance time").into());

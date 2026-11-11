@@ -2,6 +2,7 @@
 
 use super::super::adaptive::{self as composition, MulticomponentMiscibilityTimeControl};
 use super::*;
+use crate::miscibility::adaptive::trial_endpoint;
 
 /// Independent composition and Kelvin accuracy for the same complete step.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -143,11 +144,7 @@ impl MulticomponentNonisothermalField {
                 });
             }
             let remaining = target - field.elapsed_s();
-            let endpoint = if dt >= remaining {
-                target
-            } else {
-                (field.elapsed_s() + dt).min(target)
-            };
+            let endpoint = trial_endpoint(field.elapsed_s(), dt, target);
             dt = endpoint - field.elapsed_s();
             let floor = time.composition.minimum_step_s.min(remaining);
             let half = 0.5 * dt;

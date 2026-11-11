@@ -7,6 +7,7 @@
 //! total bulk-plus-interface energy, caloric precision and original entropy.
 
 use super::*;
+use crate::miscibility::adaptive::trial_endpoint;
 use crate::miscibility::multicomponent::nonnegative;
 use crate::miscibility::multicomponent::adaptive::factor;
 use crate::miscibility::multicomponent::nonisothermal::adaptive::{
@@ -142,11 +143,7 @@ impl MulticomponentNonisothermalPhaseField {
                 });
             }
             let remaining = target - field.elapsed_s();
-            let endpoint = if dt >= remaining {
-                target
-            } else {
-                (field.elapsed_s() + dt).min(target)
-            };
+            let endpoint = trial_endpoint(field.elapsed_s(), dt, target);
             dt = endpoint - field.elapsed_s();
             let floor = t.minimum_step_s.min(remaining);
             let half = 0.5 * dt;

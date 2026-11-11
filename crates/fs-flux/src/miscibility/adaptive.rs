@@ -153,12 +153,7 @@ impl BinaryMiscibilityNetwork {
                 });
             }
             attempts += 1;
-            let remaining = target - state.elapsed_s;
-            let endpoint = if next_step >= remaining {
-                target
-            } else {
-                (state.elapsed_s + next_step).min(target)
-            };
+            let endpoint = trial_endpoint(state.elapsed_s, next_step, target);
             let step = endpoint - state.elapsed_s;
             if !positive(step) {
                 return Err(

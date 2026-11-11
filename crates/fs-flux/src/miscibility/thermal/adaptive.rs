@@ -11,6 +11,7 @@ use super::{
     BinaryMiscibilityThermalSolve, Result as ThermalResult, total,
 };
 use crate::miscibility::{BinaryMiscibilityError, BinaryMiscibilitySolve, Sum, finite, nonnegative, poll, positive};
+use crate::miscibility::adaptive::trial_endpoint;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BinaryMiscibilityThermalTimeControl {
@@ -120,8 +121,7 @@ impl BinaryMiscibilityThermalField {
                 });
             }
             attempts += 1;
-            let remaining = target - field.state.elapsed_s;
-            let endpoint = if next_step >= remaining { target } else { (field.state.elapsed_s + next_step).min(target) };
+            let endpoint = trial_endpoint(field.state.elapsed_s, next_step, target);
             let step = endpoint - field.state.elapsed_s;
             if !positive(step) {
                 return Err(Error::Solver(BinaryMiscibilityError::Arithmetic("adaptive thermal step cannot advance represented time")).into());

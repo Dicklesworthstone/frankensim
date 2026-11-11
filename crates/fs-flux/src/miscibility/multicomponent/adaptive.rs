@@ -6,6 +6,7 @@
 //! and compensated changes smaller than one ulp of the stored amount.
 
 use super::*;
+use crate::miscibility::adaptive::trial_endpoint;
 
 /// First-order local composition accuracy and finite physical/work bounds.
 /// A final remainder below the minimum step is admitted only if it passes the
@@ -147,11 +148,7 @@ impl MulticomponentMiscibilityField {
                 });
             }
             let remaining = target - field.elapsed_s;
-            let endpoint = if dt >= remaining {
-                target
-            } else {
-                (field.elapsed_s + dt).min(target)
-            };
+            let endpoint = trial_endpoint(field.elapsed_s, dt, target);
             dt = endpoint - field.elapsed_s;
             let floor = time.minimum_step_s.min(remaining);
             let half = 0.5 * dt;
