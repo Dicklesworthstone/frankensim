@@ -23,9 +23,25 @@ fn make(cx: &Cx<'_>, mu: f64) -> LaminarPipe<FluidTransportState> {
     LaminarPipe::try_new(cx, fluid(mu), spec(), &ZkDiffusiveBasis::new(16).unwrap()).unwrap()
 }
 
+// Closure of one prepared exact step's energy balance, in units of the step's own scale. The fs-phs
+// admission (linear_exact.rs, balance_allowance; bead rc-1109 .1.5, ruling R1) is max(1e-12, 2 * 2^s * eps)
+// of the scale, where s is the number of doublings of the plain-f64 positive-heat chain that builds the
+// dissipated side: that chain carries about 2^s eps of rounding (measured at most 1.18 * 2^s eps over 57
+// chains with s = 14..19), and 2 is the leading factor of 2 (2^s - 1) gamma_n with gamma_n -> u.
+// The viscosity-continuation test closes the same quantity, so they carry the same allowance. s is READ from each fixture's run
+// (the chain's doublings printed by a diagnostic build), not derived: a change to a fixture that adds
+// doublings must move its s with it.
+fn closure_tolerance(doublings: i32) -> f64 {
+    2.0 * 2f64.powi(doublings) * f64::EPSILON
+}
+
+fn closes(actual: f64, expected: f64, scale: f64, tolerance: f64) -> bool {
+    (actual - expected).abs() <= tolerance * scale
+}
+
 fn near(actual: f64, expected: f64, scale: f64, tolerance: f64) {
     assert!(
-        (actual - expected).abs() <= tolerance * scale,
+        closes(actual, expected, scale, tolerance),
         "{actual:e} != {expected:e}, scale {scale:e}"
     );
 }
@@ -548,12 +564,20 @@ fn viscosity_continuation_changes_decay_time_without_changing_profile_energy() {
             initial_flow,
             3e-10,
         );
-        near(
-            rapid.native.dissipated,
-            initial_energy - state.kinetic_energy_j(),
-            initial_energy,
-            3e-12,
-        );
+        // The energy the 0.1 s interval dissipated closes with the kinetic energy it removed to the rounding of
+        // its dissipated chain. s = 19: the positive-heat chain of this interval (n = 34, dt = 0.1 s). Measured
+        // 1.3476528819268556e-11 of the energy scale against the 2.3283064365386963e-10 allowed here (the gate's
+        // scale for this step is about twice this one).
+        let (closed, scale) = (initial_energy - state.kinetic_energy_j(), initial_energy);
+        let tolerance = closure_tolerance(19);
+        near(rapid.native.dissipated, closed, scale, tolerance);
+        // Planted negative: a dissipated energy moved by three tolerances is refused.
+        assert!(!closes(
+            rapid.native.dissipated + 3.0 * tolerance * scale,
+            closed,
+            scale,
+            tolerance
+        ));
         assert_eq!(rapid.native.supplied, 0.0);
     });
 }

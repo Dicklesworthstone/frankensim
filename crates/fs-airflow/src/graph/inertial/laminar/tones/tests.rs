@@ -32,9 +32,25 @@ fn tone(cosine: f64, sine: f64) -> LaminarPressureTone {
     }
 }
 
+// Closure of one prepared exact step's energy balance, in units of the step's own scale. The fs-phs
+// admission (linear_exact.rs, balance_allowance; bead rc-1109 .1.5, ruling R1) is max(1e-12, 2 * 2^s * eps)
+// of the scale, where s is the number of doublings of the plain-f64 positive-heat chain that builds the
+// dissipated side: that chain carries about 2^s eps of rounding (measured at most 1.18 * 2^s eps over 57
+// chains with s = 14..19), and 2 is the leading factor of 2 (2^s - 1) gamma_n with gamma_n -> u.
+// The pulsatile-start-up test closes the same quantity, so they carry the same allowance. s is READ from each fixture's run
+// (the chain's doublings printed by a diagnostic build), not derived: a change to a fixture that adds
+// doublings must move its s with it.
+fn closure_tolerance(doublings: i32) -> f64 {
+    2.0 * 2f64.powi(doublings) * f64::EPSILON
+}
+
+fn closes(actual: f64, expected: f64, scale: f64, tolerance: f64) -> bool {
+    (actual - expected).abs() <= tolerance * scale
+}
+
 fn near(actual: f64, expected: f64, scale: f64, tolerance: f64) {
     assert!(
-        (actual - expected).abs() <= tolerance * scale,
+        closes(actual, expected, scale, tolerance),
         "{actual:e} != {expected:e} (scale {scale:e})"
     );
 }
@@ -101,12 +117,20 @@ fn pulsatile_startup_matches_independent_radial_stokes_modes() {
                 2e-6,
             );
             assert!(report.native.dissipated > 0.0);
-            near(
-                report.native.balance_residual(),
+            // The balance residual of the 0.25 s tone step, in the gate's own scale (supplied or dissipated, the
+            // larger). s = 19: the larger of the work chain (n = 23, 18 doublings) and the heat chain (n = 38,
+            // 19 doublings) of this step, the value the tone gate takes. Measured 5.730560851424842e-12 of the
+            // scale against the 2.3283064365386963e-10 allowed here.
+            let scale = report.native.supplied.abs().max(report.native.dissipated);
+            let tolerance = closure_tolerance(19);
+            near(report.native.balance_residual(), 0.0, scale, tolerance);
+            // Planted negative: a residual moved by three tolerances is refused.
+            assert!(!closes(
+                report.native.balance_residual() + 3.0 * tolerance * scale,
                 0.0,
-                report.native.supplied.abs().max(report.native.dissipated),
-                2e-12,
-            );
+                scale,
+                tolerance
+            ));
             let (sn, cs) = (omega * 0.25).sin_cos();
             near(source[0].cosine.value(), c * cs + s * sn, 20.0, 1e-14);
             near(source[0].sine.value(), s * cs - c * sn, 20.0, 1e-14);
