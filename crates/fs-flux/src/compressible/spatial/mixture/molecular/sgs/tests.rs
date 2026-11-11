@@ -517,9 +517,17 @@ fn sgs_mixture_no_slip_walls_keep_molecular_heat_stress_and_impermeability() {
     let x = flow.grid.cell_center(flow.grid.index(c)).unwrap();
     let offset = 7 * flow.grid.cell_face(2, c);
     let lower_z = &modeled.work.flux[2][offset..offset + 7];
-    assert_eq!(
-        lower_z[5], 0.0,
-        "no fictitious normal traction from interior tangential divergence"
+    // The compatible wall traction keeps the adjacent cell's tangential divergence in its normal
+    // component (`stress.rs::no_slip_traction`: both cross terms belong to the discrete adjoint,
+    // and replacing them by the derivatives of a constant boundary trace breaks the energy
+    // balance). Here d_x u_x = a*z_c = 0.2 * dz/2 at the adjacent cell centre although the wall's
+    // physical value is zero, so the z-momentum flux is -(bulk - 2/3 mu) * a * z_c with
+    // mu = 0.02 (the x-shear flux below) and bulk = 0.003 (`original`).
+    let adjacent_divergence = 0.2 * (0.5 * flow.grid.spacing[2]);
+    close(
+        lower_z[5],
+        -(0.003 - (2.0 / 3.0) * 0.02) * adjacent_divergence,
+        2e-15,
     );
     close(lower_z[3], -0.02 * 0.2 * x[0], 2e-15);
     let temperature = modeled.work.primitive[flow.grid.index(c)].temperature;

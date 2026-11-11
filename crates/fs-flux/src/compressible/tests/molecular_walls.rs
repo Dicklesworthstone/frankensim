@@ -206,8 +206,15 @@ fn native_couette_flow_preserves_momentum_and_turns_wall_power_into_original_gas
     }
 }
 
+/// The compatible wall traction keeps the adjacent cell's tangential divergence in its normal
+/// component: `stress.rs::no_slip_traction` states that both cross terms belong to the discrete
+/// adjoint, even for constant viscosity, and that replacing them by the derivatives of a constant
+/// boundary trace breaks the energy balance. The wall's own tangential derivative is zero, so the
+/// term is the compatible operator's limitation, kept visible here (it approaches the physical
+/// trace under refinement). The expected value is the formula, `-sign * (bulk - 2/3 mu) * d_t u_t`
+/// of the adjacent cell, from the fixture's own numbers.
 #[test]
-fn constant_no_slip_wall_has_zero_transverse_derivative_in_its_normal_traction() {
+fn constant_no_slip_wall_normal_traction_carries_the_adjacent_cells_tangential_divergence() {
     for side in SIDES {
         let axis = side.axis();
         let tangent = 1 - axis;
@@ -222,7 +229,8 @@ fn constant_no_slip_wall_has_zero_transverse_derivative_in_its_normal_traction()
             velocity[tangent] = 0.05 * x[tangent] * distance;
             [1.0, velocity[0], velocity[1], 2.0]
         });
-        let mut op = MolecularTransport2d::new(&flow, law(&flow, 0.02, 0.003, 0.0), || false)
+        let (mu, bulk) = (0.02, 0.003);
+        let mut op = MolecularTransport2d::new(&flow, law(&flow, mu, bulk, 0.0), || false)
             .unwrap()
             .with_wall(side, no_slip(axis, 0.0, WallThermalCondition::Adiabatic))
             .unwrap();
@@ -235,9 +243,17 @@ fn constant_no_slip_wall_has_zero_transverse_derivative_in_its_normal_traction()
         )
         .unwrap();
         let middle = op.boundary_impulses(side)[1];
-        // Adjacent-cell d_t u_t is nonzero; the physical constant wall's is
-        // zero. Only an O(dt) induced normal velocity may enter the mean stress.
-        assert!((middle.momentum[axis] / (duration * grid.face_area(side))).abs() < 1e-10);
+        // The adjacent cell's d_t u_t = 0.05 * (its distance from the wall) is nonzero while the
+        // constant wall's is zero; the compatible traction carries (bulk - 2/3 mu) times it. The
+        // 1e-10 allowance is the O(dt) normal velocity the wall traction induces during the step
+        // (about 1e-13 here), far below the term itself (6.5e-5).
+        let adjacent_divergence = 0.05 * (0.5 * grid.spacing[axis]);
+        let expected = -side.sign() * (bulk - (2.0 / 3.0) * mu) * adjacent_divergence;
+        let traction = middle.momentum[axis] / (duration * grid.face_area(side));
+        assert!(
+            (traction - expected).abs() < 1e-10,
+            "{traction:e} against the compatible formula {expected:e}"
+        );
         assert!(middle.momentum[tangent] > 0.0);
         assert_eq!(middle.energy, 0.0);
     }
