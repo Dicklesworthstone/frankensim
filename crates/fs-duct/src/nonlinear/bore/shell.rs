@@ -45,7 +45,7 @@
 
 use super::super::{NonlinearDuctError, positive, radius, unsupported};
 use crate::{Duct, Segment};
-use fs_gas::dynamics::{Conserved, Error as GasError, Euler1d};
+use fs_gas::dynamics::{Conserved, Error as GasError, Euler1d, FrozenGas};
 use fs_math::det;
 use fs_phs::linear_exact::exponential;
 
@@ -447,4 +447,141 @@ fn cell_band(
         }
     }
     Ok(band)
+}
+
+// ---- a wall that couples the cells: any set of wall modes (the modal bell wall of fs-couple), one `WallDriver` ----
+
+/// What a [`WallDriver`] is given at the start of each accepted step.
+#[derive(Debug, Clone, Copy)]
+pub struct WallStepInput<'a> {
+    /// Gas pressure of every cell [Pa].
+    pub pressure: &'a [f64],
+    /// `rho c^2` of every cell [Pa]: the gas's stiffness against a volume change (adiabatic, frozen composition).
+    pub gas_stiffness: &'a [f64],
+    /// Physical volume of every cell before the step [m^3].
+    pub volume: &'a [f64],
+    /// The rest (room) pressure [Pa].
+    pub room_pressure: f64,
+}
+
+/// A wall that moves under the pressures of ALL the cells at once and sweeps volume from each. The ring oscillator of
+/// [`NonlinearBore::bind_shell`](super::NonlinearBore::bind_shell) is the case where each cell has its own; a driver
+/// covers walls whose motion is shared (the modes of a shell). The bore keeps the gas side: the rescale of every
+/// cell's average for the volume it now fills, the work `p_mid dV`, and the account.
+///
+/// A driver stages a step, and the bore commits it only after the gas field accepted the update, so a refused update
+/// changes nothing.
+pub trait WallDriver {
+    /// The number of bore cells it covers.
+    fn cells(&self) -> usize;
+    /// Stage one step (the bore's fixed step) under `input`: write into `swept[i]` the change of cell `i`'s swept
+    /// volume over the step [m^3] and into `mean_pressure[i]` the pressure that cell's work is paid at [Pa] (the
+    /// mean of its pressure before and after the step). The staged state is not published.
+    ///
+    /// # Errors
+    /// A named refusal; nothing is changed.
+    fn stage(
+        &mut self,
+        input: &WallStepInput<'_>,
+        swept: &mut [f64],
+        mean_pressure: &mut [f64],
+    ) -> Result<(), NonlinearDuctError>;
+    /// Publish the staged step.
+    fn commit(&mut self);
+    /// Energy stored in the wall now [J].
+    fn stored_energy_j(&self) -> f64;
+    /// Work its dampers have dissipated so far [J].
+    fn dissipated_j(&self) -> f64;
+}
+
+pub(super) struct DrivenWall {
+    driver: Box<dyn WallDriver>,
+    nominal: Vec<f64>,
+    swept: Vec<f64>,
+    gas_work: f64,
+    room_work: f64,
+    pressure: Vec<f64>,
+    stiffness: Vec<f64>,
+    volume: Vec<f64>,
+    change: Vec<f64>,
+    mean: Vec<f64>,
+}
+
+impl DrivenWall {
+    pub(super) fn new(driver: Box<dyn WallDriver>, nominal: Vec<f64>) -> Result<Self, NonlinearDuctError> {
+        let n = nominal.len();
+        if driver.cells() != n {
+            return Err(unsupported("the wall driver covers a different number of cells than the bore"));
+        }
+        Ok(Self {
+            driver,
+            swept: vec![0.0; n],
+            gas_work: 0.0,
+            room_work: 0.0,
+            pressure: vec![0.0; n],
+            stiffness: vec![0.0; n],
+            volume: nominal.clone(),
+            change: vec![0.0; n],
+            mean: vec![0.0; n],
+            nominal,
+        })
+    }
+
+    /// Advance the wall one step under the cell pressures and rescale every cell for the volume it now fills. A refusal
+    /// (the driver's, a cell swept to no volume, or the gas owner's) leaves the field, the wall and the account unchanged.
+    pub(super) fn apply(
+        &mut self,
+        solver: &mut Euler1d,
+        gas: &FrozenGas,
+        room_pressure: f64,
+    ) -> Result<(), NonlinearDuctError> {
+        let states: Vec<Conserved> = solver.states().to_vec();
+        for (i, q) in states.iter().enumerate() {
+            let p = gas.primitive(*q, || false)?;
+            self.pressure[i] = p.pressure;
+            self.stiffness[i] = p.density * p.sound_speed * p.sound_speed;
+            self.volume[i] = self.nominal[i] + self.swept[i];
+        }
+        let input = WallStepInput {
+            pressure: &self.pressure,
+            gas_stiffness: &self.stiffness,
+            volume: &self.volume,
+            room_pressure,
+        };
+        self.driver.stage(&input, &mut self.change, &mut self.mean)?;
+        let mut next = Vec::with_capacity(states.len());
+        let (mut work, mut room) = (0.0, 0.0);
+        for (i, q) in states.iter().enumerate() {
+            let (before, dv, mid) = (self.volume[i], self.change[i], self.mean[i]);
+            let after = before + dv;
+            if !(dv.is_finite() && mid.is_finite() && after.is_finite() && after > 0.0) {
+                return Err(GasError::Invalid("wall displacement left the bore volume").into());
+            }
+            let ratio = before / after;
+            next.push(Conserved {
+                density: q.density * ratio,
+                momentum: q.momentum * ratio,
+                energy: (q.energy * before - mid * dv) / after,
+            });
+            work += mid * dv;
+            room += room_pressure * dv;
+        }
+        solver.apply_cell_sources(|i, _, _| Ok(next[i]), || false)?;
+        self.driver.commit();
+        for (s, dv) in self.swept.iter_mut().zip(&self.change) {
+            *s += dv;
+        }
+        self.gas_work += work;
+        self.room_work += room;
+        Ok(())
+    }
+
+    pub(super) fn ledger(&self) -> ShellLedger {
+        ShellLedger {
+            gas_work_j: self.gas_work,
+            room_work_j: self.room_work,
+            dissipated_j: self.driver.dissipated_j(),
+            stored_j: self.driver.stored_energy_j(),
+        }
+    }
 }

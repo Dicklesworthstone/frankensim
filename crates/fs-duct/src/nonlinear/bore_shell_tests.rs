@@ -826,3 +826,243 @@ fn o3_the_coupled_scheme_gives_no_energy_back_even_at_a_very_high_quality() {
         assert!(highest <= 1.0 + 1.0e-9 && lowest >= lower, "{lowest} {highest}");
     }
 }
+
+// ---- the wall driver: a wall that couples the cells (the modal bell wall of fs-couple is one) ----
+
+// The ring shell written as a driver: the same per-cell step and midpoint force, handed the cell pressures by the bore.
+struct RingDriver {
+    cells: Vec<shell::ShellCell>,
+    state: Vec<[f64; 2]>,
+    staged: Vec<[f64; 2]>,
+    staged_lost: f64,
+    dissipated: f64,
+    commits: usize,
+}
+
+impl RingDriver {
+    fn new(cells: Vec<shell::ShellCell>) -> Self {
+        let n = cells.len();
+        Self {
+            cells,
+            state: vec![[0.0, 0.0]; n],
+            staged: vec![[0.0, 0.0]; n],
+            staged_lost: 0.0,
+            dissipated: 0.0,
+            commits: 0,
+        }
+    }
+}
+
+impl WallDriver for RingDriver {
+    fn cells(&self) -> usize {
+        self.cells.len()
+    }
+
+    fn stage(
+        &mut self,
+        input: &WallStepInput<'_>,
+        swept: &mut [f64],
+        mean_pressure: &mut [f64],
+    ) -> Result<(), NonlinearDuctError> {
+        let mut lost = 0.0;
+        for (i, cell) in self.cells.iter().enumerate() {
+            let force = cell.midpoint_force(
+                self.state[i],
+                input.pressure[i],
+                input.room_pressure,
+                input.gas_stiffness[i],
+                input.volume[i],
+            );
+            let [s1, v1] = cell.advance(self.state[i], force);
+            let ds = s1 - self.state[i][0];
+            swept[i] = cell.lateral * ds;
+            mean_pressure[i] = input.room_pressure + force / cell.lateral;
+            let stored = |s: f64, v: f64| 0.5 * (cell.mass * v * v + cell.stiffness * s * s);
+            lost += force * ds - (stored(s1, v1) - stored(self.state[i][0], self.state[i][1]));
+            self.staged[i] = [s1, v1];
+        }
+        self.staged_lost = lost;
+        Ok(())
+    }
+
+    fn commit(&mut self) {
+        core::mem::swap(&mut self.state, &mut self.staged);
+        self.dissipated += self.staged_lost;
+        self.commits += 1;
+    }
+
+    fn stored_energy_j(&self) -> f64 {
+        self.cells
+            .iter()
+            .zip(&self.state)
+            .map(|(c, [s, v])| 0.5 * (c.mass * v * v + c.stiffness * s * s))
+            .sum()
+    }
+
+    fn dissipated_j(&self) -> f64 {
+        self.dissipated
+    }
+}
+
+struct Refusing {
+    cells: usize,
+    swept: f64,
+    commits: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
+impl WallDriver for Refusing {
+    fn cells(&self) -> usize {
+        self.cells
+    }
+
+    fn stage(&mut self, _: &WallStepInput<'_>, swept: &mut [f64], mean: &mut [f64]) -> Result<(), NonlinearDuctError> {
+        if self.swept.is_nan() {
+            return Err(unsupported("the driver refuses this step"));
+        }
+        swept.iter_mut().for_each(|x| *x = self.swept);
+        mean.iter_mut().for_each(|x| *x = 1.0e5);
+        Ok(())
+    }
+
+    fn commit(&mut self) {
+        self.commits.set(self.commits.get() + 1);
+    }
+
+    fn stored_energy_j(&self) -> f64 {
+        0.0
+    }
+
+    fn dissipated_j(&self) -> f64 {
+        0.0
+    }
+}
+
+#[test]
+fn d1_a_ring_driver_is_the_ring_shell() {
+    let duct = Duct {
+        segments: vec![
+            Segment::Cylinder {
+                radius: 6.0e-3,
+                length: 0.5,
+            },
+            Segment::Cone {
+                inlet_radius: 6.0e-3,
+                outlet_radius: 60.0e-3,
+                length: 0.3,
+            },
+        ],
+    };
+    let mut shelled = junction_bore(&duct);
+    let mut driven = junction_bore(&duct);
+    shelled.bind_shell(&duct, &BRASS, 100.0).unwrap();
+    let (positions, volumes) = {
+        let mesh = driven.solver().mesh();
+        (mesh.positions().to_vec(), mesh.volumes().to_vec())
+    };
+    let (shell, _) = Shell::new(&duct, &positions, &volumes, &BRASS, 100.0, STEP_S, 0.0).unwrap();
+    driven.bind_wall_driver(Box::new(RingDriver::new(shell.cells))).unwrap();
+    let flow = |t: f64| half_cosine(t, 2.0e-4, 2.0e-5);
+    let p_shell = drive_and_record(&mut shelled, 3000, flow);
+    let p_driven = drive_and_record(&mut driven, 3000, flow);
+    let scale = p_shell.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+    let gap = p_shell
+        .iter()
+        .zip(&p_driven)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0, f64::max);
+    println!("d1 pressure gap {gap:.3e} of {scale:.3e}");
+    assert!(gap <= 1.0e-9 * scale, "{gap} {scale}");
+    let (a, b) = (shelled.shell_ledger().unwrap(), driven.shell_ledger().unwrap());
+    for (x, y) in [
+        (a.gas_work_j, b.gas_work_j),
+        (a.room_work_j, b.room_work_j),
+        (a.dissipated_j, b.dissipated_j),
+        (a.stored_j, b.stored_j),
+    ] {
+        assert!((x - y).abs() <= 1.0e-8 * x.abs().max(1e-30), "{a:?} {b:?}");
+    }
+    assert!(b.closing_error() <= 1e-9, "{b:?}");
+    let worst = shelled
+        .solver()
+        .states()
+        .iter()
+        .zip(driven.solver().states())
+        .map(|(x, y)| ((x.energy - y.energy) / x.energy).abs().max(((x.density - y.density) / x.density).abs()))
+        .fold(0.0, f64::max);
+    assert!(worst <= 1.0e-9, "{worst}");
+}
+
+#[test]
+fn d2_a_refused_driver_step_leaves_the_field_the_walls_and_the_commit_untouched() {
+    let duct = cylinder(7.0e-3, 0.3);
+    let mut bore = junction_bore(&duct);
+    drive_and_record(&mut bore, 200, |t| half_cosine(t, 2.0e-4, 2.0e-5));
+    let gas = bore.gas().clone();
+    let room = bore.room().pressure;
+    let nominal = bore.solver().mesh().volumes().to_vec();
+    let n = nominal.len();
+    let states = bore.solver().states().to_vec();
+    let same = |a: &[Conserved], b: &[Conserved]| {
+        a.iter().zip(b).all(|(x, y)| {
+            x.density.to_bits() == y.density.to_bits()
+                && x.momentum.to_bits() == y.momentum.to_bits()
+                && x.energy.to_bits() == y.energy.to_bits()
+        })
+    };
+    for (swept, needle) in [(f64::NAN, "the driver refuses this step"), (-1.0, "left the bore volume")] {
+        let commits = std::rc::Rc::new(std::cell::Cell::new(0));
+        let driver = Refusing {
+            cells: n,
+            swept,
+            commits: commits.clone(),
+        };
+        let mut driven = DrivenWall::new(Box::new(driver), nominal.clone()).unwrap();
+        let error = driven.apply(&mut bore.solver, &gas, room).unwrap_err().to_string();
+        assert!(error.contains(needle), "{error}");
+        assert!(same(&states, bore.solver().states()), "the field changed");
+        assert_eq!(commits.get(), 0, "a refused step must not be committed");
+    }
+    // An accepted step is committed once.
+    let commits = std::rc::Rc::new(std::cell::Cell::new(0));
+    let mut driven = DrivenWall::new(
+        Box::new(Refusing {
+            cells: n,
+            swept: 1.0e-12,
+            commits: commits.clone(),
+        }),
+        nominal,
+    )
+    .unwrap();
+    driven.apply(&mut bore.solver, &gas, room).unwrap();
+    assert_eq!(commits.get(), 1);
+    assert!(!same(&states, bore.solver().states()));
+}
+
+#[test]
+fn d3_binding_a_driver_refuses_by_name() {
+    let duct = cylinder(15.0e-3, 0.1);
+    let cells = plain_bore(&duct, 0.01).solver().mesh().cell_count();
+    let driver = |n: usize| -> Box<dyn WallDriver> {
+        Box::new(Refusing {
+            cells: n,
+            swept: 0.0,
+            commits: std::rc::Rc::new(std::cell::Cell::new(0)),
+        })
+    };
+    let mut bore = plain_bore(&duct, 0.01);
+    assert!(bore
+        .bind_wall_driver(driver(cells + 1))
+        .unwrap_err()
+        .to_string()
+        .contains("different number of cells"));
+    bore.bind_wall_driver(driver(cells)).unwrap();
+    assert!(bore.bind_wall_driver(driver(cells)).unwrap_err().to_string().contains("binds one breathing wall"));
+    assert!(bore.bind_shell(&duct, &BRASS, 10.0).unwrap_err().to_string().contains("binds its shell once"));
+    let mut shelled = plain_bore(&duct, 0.01);
+    shelled.bind_shell(&duct, &BRASS, 10.0).unwrap();
+    assert!(shelled.bind_wall_driver(driver(cells)).unwrap_err().to_string().contains("binds one breathing wall"));
+    let mut stepped = plain_bore(&duct, 0.01);
+    stepped.step(|_| Ok(None)).unwrap();
+    assert!(stepped.bind_wall_driver(driver(cells)).unwrap_err().to_string().contains("before the first step"));
+    assert!(plain_bore(&duct, 0.01).shell_ledger().is_none());
+}

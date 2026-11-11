@@ -48,8 +48,8 @@ use fs_phs::ZkDiffusiveBasis;
 use fs_qty::{Pressure, Temperature, Time};
 
 mod shell;
-use shell::Shell;
-pub use shell::{ShellLaw, ShellLedger, ShellReceipt, ShellStrip};
+use shell::{DrivenWall, Shell};
+pub use shell::{ShellLaw, ShellLedger, ShellReceipt, ShellStrip, WallDriver, WallStepInput};
 
 /// Zwikker–Kosten wall-memory admission for every cell.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -218,6 +218,7 @@ pub struct NonlinearBore {
     radiation: PistonRadiation,
     walls: Option<Walls>,
     shell: Option<Shell>,
+    driven: Option<DrivenWall>,
     inlet_volume_m3: f64,
     step_s: f64,
     cfl: f64,
@@ -313,6 +314,7 @@ impl NonlinearBore {
             radiation,
             walls,
             shell: None,
+            driven: None,
             inlet_volume_m3: spec.inlet_volume_m3,
             step_s: spec.step_s,
             cfl: spec.cfl,
@@ -387,6 +389,9 @@ impl NonlinearBore {
         }
         if let Some(shell) = self.shell.as_mut() {
             shell.apply(&mut self.solver, self.room.pressure)?;
+        }
+        if let Some(driven) = self.driven.as_mut() {
+            driven.apply(&mut self.solver, &self.gas, self.room.pressure)?;
         }
         let outlet_mass_flow_kg_s = -report.right_boundary_change.mass / self.step_s;
         Ok(BoreStep {
@@ -468,7 +473,7 @@ impl NonlinearBore {
         law: &dyn ShellLaw,
         quality: f64,
     ) -> Result<ShellReceipt, NonlinearDuctError> {
-        if self.shell.is_some() {
+        if self.shell.is_some() || self.driven.is_some() {
             return Err(unsupported("a bore binds its shell once"));
         }
         if self.solver.time().value() != 0.0 {
@@ -494,10 +499,31 @@ impl NonlinearBore {
         self.shell.as_ref().map(|shell| shell.receipt)
     }
 
-    /// The breathing wall's energy account so far, or `None` without a shell.
+    /// The breathing wall's energy account so far, or `None` without a shell or a wall driver.
     #[must_use]
     pub fn shell_ledger(&self) -> Option<ShellLedger> {
-        self.shell.as_ref().map(Shell::ledger)
+        self.shell
+            .as_ref()
+            .map(Shell::ledger)
+            .or_else(|| self.driven.as_ref().map(DrivenWall::ledger))
+    }
+
+    /// Bind a wall that couples the cells (a modal shell, a [`WallDriver`]), before the first step. It covers every
+    /// cell of this bore; the bore keeps the gas side (the rescale for the volume swept, the work, the account).
+    /// A bore binds one wall, a ring shell ([`Self::bind_shell`]) or a driver.
+    ///
+    /// # Errors
+    /// A bore that already stepped or already has a wall, or a driver that covers a different number of cells.
+    pub fn bind_wall_driver(&mut self, driver: Box<dyn WallDriver>) -> Result<(), NonlinearDuctError> {
+        if self.shell.is_some() || self.driven.is_some() {
+            return Err(unsupported("a bore binds one breathing wall"));
+        }
+        if self.solver.time().value() != 0.0 {
+            return Err(unsupported("a wall driver binds before the first step"));
+        }
+        let nominal = self.solver.mesh().volumes().to_vec();
+        self.driven = Some(DrivenWall::new(driver, nominal)?);
+        Ok(())
     }
 }
 
