@@ -252,7 +252,10 @@ fn accepted_frozen_history_reaches_one_joint_transform_and_complete_vector_field
     let volume_start = 4 * surface.faces().len();
     assert!((0..volume_start).any(|s| {
         (volume_start..measured.channel_count())
-            .any(|v| measured.cross_spectrum(1, s, v).unwrap().abs() > 0.0)
+            .any(|v| {
+                let cross = measured.cross_spectrum(1, s, v).unwrap();
+                cross.re.hypot(cross.im) > 0.0
+            })
     }));
     let (compact, quadrupole) = recorded
         .prepare_observers([1.1, -0.7, 0.9], 1, || false)
