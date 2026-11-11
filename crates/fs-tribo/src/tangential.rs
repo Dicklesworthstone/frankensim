@@ -31,6 +31,11 @@ pub mod multiple;
 /// Objective transport of supported two-axis retained histories.
 pub mod transport;
 
+/// A sliding interface under a prescribed slip rate on the composition
+/// contract of `fs-ports`.
+#[cfg(feature = "component")]
+pub mod component;
+
 fn finite(value: f64, field: &'static str) -> Result<f64, TriboError> {
     crate::finite(value, field)?;
     Ok(value)

@@ -3079,3 +3079,60 @@ atomic foreign-state/invalid-coefficient refusal. All 20 production angular
 leaf tests passed using the actual moment/rolling/torsion modules and existing
 real `fs-math` artifact. This isolated execution does not claim a full workspace
 build, coupled thermal validation or experimental calibration.
+
+## A sliding interface under prescribed slip on the composition contract
+
+`fs_tribo::tangential::component` (feature `component`, off by default; it
+brings in `fs-ports` and `fs-exec`) puts a `TangentialLaw` on the
+composition contract of `fs-ports` as `SlidingInterface`. The law still owns
+traction, solved slip, regime, reversible storage and the dissipation it
+exports. The adapter drives it with a released slip increment of
+`rate * dt` at zero compliance and with the interface temperature its heat
+port receives, and hands the dissipation to that port. It adds no heat
+fraction, heat capacity or flash temperature.
+
+- Port `heat` receives the interface temperature [K] and returns the heat
+  rate into the interface [W], minus the dissipation rate. Port `traction`
+  is a signal output of two values [N].
+- Friction that depends on temperature enters as the caller's source
+  `law_at(T)`; a law bounded in temperature also receives `T` as its
+  thermal boundary. The source is called at every evaluation of a step and
+  must be pure.
+- No mechanical port: a dry law is set-valued in the slip rate, and a kernel
+  that differences smooth port maps cannot solve for the slip through one.
+  The work the prescribed motion does against the traction is the
+  component's own account (stored energy = the law's reversible energy less
+  the work received), and the law's closure residual
+  `storage + dissipation - work` is booked as numerical loss.
+- Entropy generated: the dissipation over the interface temperature. Class
+  `Smooth`; no tangent is offered. `cx` is not polled: one call is one law
+  step within the law's root budget, and `TriboError` has no cancellation
+  value.
+- Refused: a temperature or step that is not positive and finite; the
+  source's or the law's own refusal, unchanged; a step whose work balance is
+  off by more than `work_tolerance_j`, or whose reported stored change
+  disagrees with the law's stored energies by more than it (the admission of
+  fs-couple's `tangential_heat_candidate`); a source whose law gives the
+  held state another stored energy than it was left with.
+
+`tests/sliding_interface.rs` (five tests, `cargo test -p fs-tribo --features
+component --test sliding_interface`): with a Coulomb coefficient
+`0.8 - 0.01 (T - 300 K)` the interface passes the contract's conformance
+check at three slip rates (one oblique, one reversed), three temperatures
+and three steps, with heat `-mu N |v|`, traction `mu N` along the slip, the
+law's own slip and thermal boundary in the state, and the work as the
+account; fifty steps book 2.775 J; at rest it makes no heat. A synthetic
+spring (not a material) shows storage in the account (1.28 J in the spring,
+1.28 J of work, nothing net), the refusal of a stiffness that follows the
+temperature, and the refusal of heat no work pays for. The refusals are
+each checked by the field they name.
+
+Against the hand-written coupling: `crates/fs-couple/tests/friction_heat/
+graph.rs` declares fs-couple's friction-heat module from this component, a
+thermal node and a thermal timeline, and the module accepts every step of
+it at its own tests' tolerances (the record is in
+`crates/fs-system/CONTRACT.md`).
+
+Not offered: a slip port (it needs a non-smooth solve tier in the kernel);
+any law's analytic tangent in temperature; a thermoelastic account for a
+reversible law whose stiffness depends on temperature.

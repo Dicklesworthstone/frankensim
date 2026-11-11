@@ -96,6 +96,9 @@ fs-fmm = { path = "../fs-fmm" }
 fs-system = { path = "../fs-system", features = ["slices"] }
 # The gas cavity on the composition contract, for the same comparison.
 fs-gas = { path = "../fs-gas", features = ["component"] }
+# The sliding interface on the composition contract, for the comparison of a
+# declared graph with the friction-heat module.
+fs-tribo = { path = "../fs-tribo", features = ["component"] }
 [lints]
 workspace = true
 

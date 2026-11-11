@@ -17,6 +17,11 @@ mod entropy;
 #[path = "friction_heat/cohesive.rs"]
 mod cohesive;
 
+/// The same six cases declared as a graph on the composition kernel, with
+/// every kernel step handed to this module for its own verdict.
+#[path = "friction_heat/graph.rs"]
+mod graph;
+
 #[cfg(feature = "experimental-solid-contact-heat")]
 #[path = "friction_heat/solid.rs"]
 mod solid;
@@ -71,6 +76,28 @@ fn network_with_law(
     initial_rise: [f64; 2],
     law: &'static dyn ThermalLaw,
 ) -> DepositionSimulation<'static> {
+    network_of(
+        n,
+        lengths,
+        k,
+        capacity_per_volume,
+        cooling,
+        initial_rise,
+        &[(MaterialId(1), law)],
+    )
+}
+/// The same network with each side of the contact in its own material when
+/// two are given (side 0 first), so that a conduction binding can give the
+/// two sides their own conductivities; with one, both sides are of it.
+fn network_of(
+    n: usize,
+    lengths: [f64; 2],
+    k: [f64; 2],
+    capacity_per_volume: [f64; 2],
+    cooling: [f64; 2],
+    initial_rise: [f64; 2],
+    materials: &[(MaterialId, &'static dyn ThermalLaw)],
+) -> DepositionSimulation<'static> {
     let mut events = Vec::new();
     for side in 0..2 {
         let dx = lengths[side] / n as f64;
@@ -89,7 +116,7 @@ fn network_with_law(
                     id,
                     segment_id: id.0,
                     body_id: side as u64,
-                    material_id: MaterialId(1),
+                    material_id: materials[side.min(materials.len() - 1)].0,
                     mass_kg: capacity_per_volume[side] * dx,
                     specific_h_j_kg: initial_rise[side],
                     geometry: CellGeometry {
@@ -143,7 +170,7 @@ fn network_with_law(
     });
     DepositionSimulation::new(
         events,
-        &[(MaterialId(1), law)],
+        materials,
         DepositionBudget {
             max_cells: 2 * n,
             max_links: 2 * n,

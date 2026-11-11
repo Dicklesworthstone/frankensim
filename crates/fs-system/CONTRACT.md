@@ -918,6 +918,62 @@ bracket. Not reproduced by a graph: the module's time-resolution admission
 its real-gas, reactive, nozzle-exchange, thermal-body and electrical
 variants. Nothing in the module is deleted.
 
+Friction heat, `crates/fs-couple/tests/friction_heat/graph.rs` (run with
+`cargo test -p fs-couple --test friction_heat graph::`): the hand-written
+`fs_couple::friction_heat`, which solves the temperature of a massless
+plane between two cells inside one backward-Euler thermal step with the
+friction work generated on the plane, against a graph with no pairing code.
+The cells are the module tests' own network on a backward-Euler
+`ThermalTimeline` with end-of-step ports and the contact link named as
+carried outside (fs-thermal); the plane is `elements::HeatNode` with the
+route's two half conductances; the friction is fs-tribo's
+`tangential::component::SlidingInterface` under the tests' prescribed slip,
+its heat port on the plane's `source`. The criterion is the module's own
+verdict: the endpoint of every kernel step (each cell's energy increment and
+the temperature the interface was given) is handed to
+`FrictionHeatStep::evaluate` with the module tests' law callback and must be
+accepted at the tests' 1e-10 J; the cells, tangential state and traction the
+module then publishes must be the graph's (the state and traction exactly,
+the cells to the rounding of an increment added back). The six base cases:
+- one cell a side with unequal half cells, 10 W for 0.2 s: accepted, the
+  module's largest residual at the graph's endpoint 2.2e-13 J; the plane's
+  temperature and the cells' energies equal the tests' own LU solve in
+  temperature coordinates to 1e-12; the share of the first body is the
+  tests' closed form, on the module's report and on the graph's own wires;
+  the ledger has 2 J dissipated by the interface, 2 J stored in the cells,
+  and the interface's entropy is the heat over the plane's temperature;
+- no slip, the first cell 10 K warmer: accepted (6.8e-14 J), the exchange is
+  the tests' closed form and nothing is dissipated;
+- a coefficient `0.8 - 0.01 (T - 300 K)` with films to a 300 K room, 80
+  steps of 0.25 s: every step accepted (1.6e-12 J at worst); the plane is
+  1.0e-12 K at worst from the module's own run from its LU endpoints, and
+  3.4e-13 K from the analytic steady temperature at the end; 153.562 J are
+  in the room's sink, as the module's reports have them;
+- a law that refuses during the step, and cancellation: the kernel's step
+  fails and cells, clock and interface are as they were; the same graph
+  with the timeline's default mean-temperature ports is taken by the kernel
+  and refused by the module (`EnergyBalance(-0.276)` J): end-of-step ports
+  are what make the two one discrete rule;
+- one owner for the contact: the conduction binding refuses a contact both
+  conducted and carried outside, and the implicit solve refuses one left
+  unsaid;
+- 16, 32 and 64 cells a side, 512 steps: every step accepted (1.7e-13 J at
+  worst); the partition and plane-temperature errors against the half-space
+  solution agree with the module's own run to nine digits or more
+  (5.20833182e-3 and 4.31961554e-3 at 16 cells, 3.25520296e-4 and
+  1.38133321e-4 at 64) and fall with the grid as the module's test
+  requires.
+The kernel's loop is closed to a relative 1e-14 in this test. At the
+default 1e-12 of the largest temperature in the block (3e-10 K near 300 K),
+the module refused the third case's ninth step with 2.4e-10 J: a tolerance
+relative to an absolute temperature is loose for heat that moves on small
+temperature differences. The wire between the plane and the interface is
+then open by 1.1e-13 K at worst. Not reproduced by a graph: conductances
+that follow the materials' conductivities at the endpoint (the plane's are
+constants, as the six cases' conductivities are), a contact resistance split
+about the plane, the module's entropy audit, and its area, moving-patch,
+third-body, rigid and other variants. Nothing in the module is deleted.
+
 Two source-backed cavities exchanging gas, `crates/fs-gas/tests/component.rs`
 (`cargo test -p fs-gas --features component --test component`): the fs-gas
 cavity with a stream port (`GasCavity::streaming`, crates/fs-gas/CONTRACT.md)

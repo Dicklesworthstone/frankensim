@@ -9,16 +9,23 @@ description = "Typed dry-contact and tribology baseline for FrankenSim"
 layer = "L3"
 
 [dependencies]
+fs-exec = { path = "../fs-exec", optional = true }
 fs-material = { path = "../fs-material" }
 fs-math = { path = "../fs-math" }
+fs-ports = { path = "../fs-ports", optional = true }
 fs-qty = { path = "../fs-qty" }
 fs-rand = { path = "../fs-rand" }
 
 [dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
 fs-matdb = { path = "../fs-matdb" }
 fs-evidence = { path = "../fs-evidence" }
 
 [features]
+# `tangential::component`: a sliding interface under a prescribed slip rate
+# on the composition contract of fs-ports. Off by default, so the crate's
+# ordinary build takes no kernel-facing dependency.
+component = ["dep:fs-ports", "dep:fs-exec"]
 # Benchmark tangential laws (M4.2-W4). Only dev-dependencies may enable it;
 # tests/benchmark_laws.rs asserts that no crate does so in [dependencies].
 benchmark-laws = []
@@ -26,6 +33,10 @@ benchmark-laws = []
 [[test]]
 name = "benchmark_laws"
 required-features = ["benchmark-laws"]
+
+[[test]]
+name = "sliding_interface"
+required-features = ["component"]
 
 [lints]
 workspace = true
