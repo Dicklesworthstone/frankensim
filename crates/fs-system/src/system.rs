@@ -38,8 +38,9 @@ pub struct SolveConfig {
     ///
     /// The same tolerance is applied a second time to what the residuals
     /// do: carried once through the components that read them, by the
-    /// slopes of the block's most recent Jacobian, they may not move any
-    /// wire's target by more than that wire's own tolerance. A temperature
+    /// slopes of the block's Jacobian formed in the same step, they may
+    /// not move any wire's target by more than that wire's own tolerance.
+    /// A temperature
     /// is thereby closed to what the heat it drives requires, not to a
     /// fraction of its absolute value. Only the part of a residual above
     /// its own rounding floor is carried.
@@ -114,7 +115,9 @@ pub enum SystemError {
         nodes: Vec<String>,
         /// Iterations spent.
         iterations: u32,
-        /// The input with the largest scaled residual, as `node.port`.
+        /// As `node.port`: the input whose residual is furthest beyond its
+        /// own tolerance; or, when every residual passes its own test, the
+        /// open input that moves another wire's target the most.
         worst: String,
         /// Its residual.
         residual: f64,
@@ -1155,10 +1158,13 @@ impl SystemBuilder {
         let block_work = blocks
             .iter()
             .map(|block| {
-                let affine = block
-                    .nodes
-                    .iter()
-                    .all(|&node| self.nodes[node].class() == Class::ExactLinear);
+                // A part without a declared tangent is differenced, and a
+                // difference quotient is rounded at the point it is taken
+                // at: its slopes are not the same numbers from one step to
+                // the next, so factors made from them are not kept.
+                let affine = block.nodes.iter().all(|&node| {
+                    self.nodes[node].class() == Class::ExactLinear && self.nodes[node].has_tangent()
+                });
                 BlockWork::plan(block, &drivers, &input_owner, &output_start, affine)
             })
             .collect();
@@ -1380,8 +1386,11 @@ struct BlockWork {
     /// this block; a heat route's receivers are always in its source's).
     varying: Vec<(usize, Range<usize>)>,
     varying_terms: Vec<usize>,
-    /// Every component is exactly linear and every driver is linear, so the
-    /// Jacobian depends on the step length and on nothing else.
+    /// Every component is exactly linear and declares its tangent, and
+    /// every driver is linear, so the Jacobian is taken to depend on the
+    /// step length and on nothing else: the kept factors and slopes are
+    /// then the numbers a fresh assembly would form, and using them does
+    /// not let an earlier step decide a later one.
     affine: bool,
     /// Of an affine block: the step its factors were made for (NaN if it
     /// has none).
@@ -1389,11 +1398,10 @@ struct BlockWork {
     /// The Jacobian's entries off the identity as `(row, column, value)`,
     /// in the order the most recent assembly formed them: how the target
     /// of wire `row` moves with input `column`. An affine block reuses
-    /// them with its factors; every block's convergence test reads them.
+    /// them with its factors at an unchanged step length. The second
+    /// convergence test reads them, and only once the step it is judging
+    /// has assembled or adopted them: nothing else crosses a step.
     slopes: Vec<(usize, usize, f64)>,
-    /// The step `slopes` were formed at (NaN if there are none, or if the
-    /// assembly that was forming them did not finish).
-    slopes_dt_s: f64,
     /// Per wire, for the second convergence test: the rounding floor of
     /// its residual at the current inputs, and what the residuals of the
     /// other wires make of its target when carried once through `slopes`.
@@ -1403,7 +1411,7 @@ struct BlockWork {
 
 impl BlockWork {
     /// Workspaces and reader lists of `block`. `affine` says whether every
-    /// component of it is exactly linear.
+    /// component of it is exactly linear and declares its tangent.
     fn plan(
         block: &Block,
         drivers: &[Driver],
@@ -1484,6 +1492,7 @@ impl BlockWork {
                 readers[range.clone()].iter().map(|&(row, _, _)| condensed.slot(row, column)),
             );
         }
+        let entries = slots.len();
         Self {
             residual: vec![0.0; m],
             rounding: vec![0.0; m],
@@ -1499,8 +1508,8 @@ impl BlockWork {
             varying,
             varying_terms,
             kept_dt_s: f64::NAN,
-            slopes: Vec::new(),
-            slopes_dt_s: f64::NAN,
+            // One entry per Jacobian entry: an assembly never grows it.
+            slopes: Vec::with_capacity(entries),
             floor: vec![0.0; m],
             carried: vec![0.0; m],
         }
@@ -1881,6 +1890,97 @@ impl System {
         largest
     }
 
+    /// The second convergence test of a block: the residuals carried once
+    /// through `slopes`. `None` when no wire's target moves by more than
+    /// its own tolerance,
+    /// `sum_j |t_ij| max(0, |r_j| - f_j) <= rel S_i + f_i` for every wire
+    /// `i`; otherwise the open input (a column) that contributes most to
+    /// the wire that is furthest beyond it.
+    ///
+    /// `f` is a wire's rounding floor at the current inputs: the absolute
+    /// tolerance plus `ROUNDING_UNITS` of `eps` times the larger of the
+    /// wire's own value and the terms its driver sums, plus the size of
+    /// the inputs its target depends on through the slopes (for an energy
+    /// rate also the block's largest power). `floor` and `carried` are
+    /// scratch of the block's size.
+    #[allow(clippy::too_many_arguments)]
+    fn carried_beyond(
+        &self,
+        unknowns: &[usize],
+        residual: &[f64],
+        slopes: &[(usize, usize, f64)],
+        group_scale: &[f64],
+        power_scale: f64,
+        floor: &mut [f64],
+        carried: &mut [f64],
+    ) -> Option<usize> {
+        floor.fill(0.0);
+        carried.fill(0.0);
+        for &(row, column, through) in slopes {
+            floor[row] += (through * self.inputs[unknowns[column]]).abs();
+        }
+        for (row, &index) in unknowns.iter().enumerate() {
+            let own = self.inputs[index]
+                .abs()
+                .max(self.drivers[index].magnitude(&self.outputs, &self.boundary_values));
+            floor[row] =
+                self.config.absolute_tolerance + ROUNDING_UNITS * f64::EPSILON * (floor[row] + own);
+            if self.input_is_energy_rate[index] {
+                floor[row] += ROUNDING_UNITS * f64::EPSILON * power_scale;
+            }
+        }
+        for &(row, column, through) in slopes {
+            let above = residual[column].abs() - floor[column];
+            if above > 0.0 {
+                carried[row] += through.abs() * above;
+            }
+        }
+        // The wire whose target is moved furthest beyond its tolerance. A
+        // value that is not a number fails the comparison and is taken.
+        let mut moved = None;
+        let mut furthest = 0.0_f64;
+        for (row, &index) in unknowns.iter().enumerate() {
+            let allowed =
+                self.config.relative_tolerance * group_scale[self.input_group[index]] + floor[row];
+            let excess = carried[row] - allowed;
+            if !(excess <= 0.0) && !(excess <= furthest) {
+                moved = Some(row);
+                furthest = excess;
+            }
+        }
+        let moved = moved?;
+        // The open input that does most of it; the moved wire itself if
+        // nothing can be ranked.
+        let mut open = moved;
+        let mut largest = 0.0_f64;
+        for &(row, column, through) in slopes {
+            let part = through.abs() * (residual[column].abs() - floor[column]);
+            if row == moved && part > largest {
+                largest = part;
+                open = column;
+            }
+        }
+        Some(open)
+    }
+
+    /// The refusal of a block that did not converge, naming input `row` of
+    /// its unknowns.
+    fn not_converged(
+        &self,
+        nodes: &[usize],
+        unknowns: &[usize],
+        residual: &[f64],
+        iterations: u32,
+        row: usize,
+    ) -> SystemError {
+        SystemError::NotConverged {
+            nodes: self.names_of(nodes),
+            iterations,
+            worst: self.input_label[unknowns[row]].clone(),
+            residual: residual[row],
+        }
+    }
+
     /// Solve one looped block by Newton iteration on its interface inputs.
     fn solve_block(
         &mut self,
@@ -1938,7 +2038,6 @@ impl System {
             affine,
             kept_dt_s,
             slopes,
-            slopes_dt_s,
             floor,
             carried,
         } = work;
@@ -1946,6 +2045,9 @@ impl System {
         // Whether this step has already used the factors an affine block
         // kept from an earlier one.
         let mut kept_used = false;
+        // Whether this step has assembled the block's Jacobian yet, so that
+        // `slopes` are this step's own.
+        let mut assembled = false;
         let mut iterations = 0_u32;
         loop {
             cx.checkpoint().map_err(|_| SystemError::Cancelled)?;
@@ -2015,8 +2117,9 @@ impl System {
             // its conductance, while the heat wire agrees with what the
             // conductance returned and passes too. So the residuals are
             // also carried once through the components that read them, by
-            // the slopes of the most recent assembly, and may not move any
-            // wire's target by more than that wire's own tolerance.
+            // the slopes of the block's Jacobian (`carried_beyond`), and
+            // may not move any wire's target by more than that wire's own
+            // tolerance.
             //
             // Only the part of a residual above its own rounding floor is
             // carried. A force balance near rest sits at the rounding of
@@ -2033,48 +2136,29 @@ impl System {
             // first-order image of the residuals under one more pass
             // through the block. It does not bound the whole first-order
             // error `(I - T)^-1 r` of a loop whose gain exceeds one.
-            let mut open = None;
+            //
+            // The slopes are always this step's own. What a block keeps
+            // from an earlier step may not decide a step: a checkpoint does
+            // not carry it and a discarded trial does not roll it back, so
+            // a verdict that read it would differ between a run and its
+            // replay. At a step's first check there are none yet, and they
+            // are formed below at the iterate being judged; at a later
+            // check they are those of the assembly that produced the
+            // update, one iterate earlier.
+            let mut judged_below = false;
             if converged {
-                if slopes_dt_s.to_bits() == dt_s.to_bits() {
-                    floor.fill(0.0);
-                    carried.fill(0.0);
-                    for &(row, column, through) in slopes.iter() {
-                        floor[row] += (through * self.inputs[unknowns[column]]).abs();
-                    }
-                    for (row, &index) in unknowns.iter().enumerate() {
-                        let own = self.inputs[index].abs().max(
-                            self.drivers[index].magnitude(&self.outputs, &self.boundary_values),
-                        );
-                        floor[row] = self.config.absolute_tolerance
-                            + ROUNDING_UNITS * f64::EPSILON * (floor[row] + own);
-                        if self.input_is_energy_rate[index] {
-                            floor[row] += ROUNDING_UNITS * f64::EPSILON * power_scale;
-                        }
-                    }
-                    for &(row, column, through) in slopes.iter() {
-                        let above = residual[column].abs() - floor[column];
-                        if above > 0.0 {
-                            carried[row] += through.abs() * above;
-                        }
-                    }
-                    for (row, &index) in unknowns.iter().enumerate() {
-                        let allowed = self.config.relative_tolerance
-                            * group_scale[self.input_group[index]]
-                            + floor[row];
-                        let excess = carried[row] - allowed;
-                        if !(excess <= 0.0) {
-                            converged = false;
-                            if !(excess <= worst.1) {
-                                worst = (row, excess);
-                                open = Some(row);
-                            }
-                        }
+                if residual.iter().all(|value| *value == 0.0) {
+                    // An exact fixed point needs no slopes.
+                } else if assembled {
+                    if let Some(open) = self.carried_beyond(
+                        unknowns, residual, slopes, group_scale, power_scale, floor, carried,
+                    ) {
+                        converged = false;
+                        worst.0 = open;
                     }
                 } else {
-                    // No slopes at this step length yet. Without them only
-                    // an exact fixed point is taken; anything else is
-                    // assembled once.
-                    converged = residual.iter().all(|value| *value == 0.0);
+                    converged = false;
+                    judged_below = true;
                 }
             }
             if converged {
@@ -2083,28 +2167,9 @@ impl System {
                 }
                 return Ok(Ok(iterations));
             }
-            if iterations >= self.config.max_iterations {
-                // Named: the wire whose own residual is too large, or, when
-                // every residual passed, the open input that moves another
-                // wire's target the most.
-                if let Some(moved) = open {
-                    let mut largest = 0.0_f64;
-                    for &(row, column, through) in slopes.iter() {
-                        let above = residual[column].abs() - floor[column];
-                        if row == moved && through.abs() * above > largest {
-                            largest = through.abs() * above;
-                            worst.0 = column;
-                        }
-                    }
-                }
-                return Err(SystemError::NotConverged {
-                    nodes: self.names_of(nodes),
-                    iterations,
-                    worst: self.input_label[unknowns[worst.0]].clone(),
-                    residual: residual[worst.0],
-                });
+            if iterations >= self.config.max_iterations && !judged_below {
+                return Err(self.not_converged(nodes, unknowns, residual, iterations, worst.0));
             }
-            iterations += 1;
 
             // J = I - (d driver / d outputs) (d outputs / d inputs).
             rounding.fill(0.0);
@@ -2120,7 +2185,6 @@ impl System {
                 }
             } else {
                 *kept_dt_s = f64::NAN;
-                *slopes_dt_s = f64::NAN;
                 slopes.clear();
                 condensed.clear();
                 // The slopes of the drivers that are not linear, at the
@@ -2155,11 +2219,41 @@ impl System {
                         nodes: self.names_of(nodes),
                     });
                 }
-                *slopes_dt_s = dt_s;
                 if affine {
                     *kept_dt_s = dt_s;
                 }
             }
+            assembled = true;
+            if judged_below {
+                // The step's first check, judged with the slopes just
+                // formed at its own iterate.
+                let Some(open) = self.carried_beyond(
+                    unknowns, residual, slopes, group_scale, power_scale, floor, carried,
+                ) else {
+                    // Taken with no update. Differencing a component wrote
+                    // a perturbed proposal to its candidate slot, so each
+                    // component without a declared tangent is proposed
+                    // once more at the accepted inputs. (A declared
+                    // tangent writes to scratch only, and kept factors
+                    // call no component.)
+                    for &node in nodes {
+                        if self.nodes[node].has_tangent() {
+                            continue;
+                        }
+                        if let Some(shorter) = self.propose(node, dt_s, cx)? {
+                            return Ok(Err(shorter));
+                        }
+                    }
+                    for (row, &index) in unknowns.iter().enumerate() {
+                        self.input_allowance[index] = allowance[row];
+                    }
+                    return Ok(Ok(iterations));
+                };
+                if iterations >= self.config.max_iterations {
+                    return Err(self.not_converged(nodes, unknowns, residual, iterations, open));
+                }
+            }
+            iterations += 1;
             for value in residual.iter_mut() {
                 *value = -*value;
             }

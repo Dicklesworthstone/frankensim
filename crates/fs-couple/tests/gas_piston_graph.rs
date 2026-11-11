@@ -1292,7 +1292,7 @@ fn a_gas_in_contact_with_a_finite_body_matches_the_modules_thermal_step_in_both_
         assert!(run.ledger_j.abs() <= 1.0e-10, "{}", run.ledger_j);
         // The states above do not depend on the tangents the graph is
         // given, only its iterations do: with the owners' own, two or
-        // three a step (measured 27 and 28 in the 12).
+        // three a step (measured 28 and 28 in the 12).
         assert!(run.iterations <= 3 * steps, "{}", run.iterations);
 
         // The same graph with the kernel's ideal heat capacity for the
@@ -1362,7 +1362,7 @@ fn a_moving_wall_a_gas_and_a_finite_body_in_contact_match_the_modules_thermal_st
         assert!((run.gas_m3 - 0.001) * velocity > 2.0e-6, "{}", run.gas_m3);
         assert!(run.apart.within(&allowed), "{:?} against {allowed:?}", run.apart);
         assert!(run.ledger_j.abs() <= 1.0e-10, "{}", run.ledger_j);
-        // Measured 25 in the 12 steps.
+        // Measured 27 in the 12 steps, either way.
         assert!(run.iterations <= 3 * steps, "{}", run.iterations);
     }
 }
@@ -1416,7 +1416,7 @@ fn a_body_that_melts_or_freezes_in_contact_with_the_gas_matches_the_modules_ther
         assert!(run.moved_j > 30.0 && run.produced_j_k > 1.0e-3);
         assert!(run.apart.within(&allowed), "{:?} against {allowed:?}", run.apart);
         assert!(run.ledger_j.abs() <= 1.0e-10, "{}", run.ledger_j);
-        // Measured 77 and 69 in the 40 steps.
+        // Measured 81 and 73 in the 40 steps.
         assert!(run.iterations <= 3 * steps, "{}", run.iterations);
     }
 }

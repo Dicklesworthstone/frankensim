@@ -19,7 +19,8 @@ use fs_system::elements::{
     HeatNode, Heater, Mass, Motion, Restriction, SourceAccount, Spring, Waveform,
 };
 use fs_system::{
-    AdmissionError, NodeId, RouteTemperature, System, SystemBuilder, heat_sink,
+    AdmissionError, NodeId, RouteTemperature, SolveConfig, System, SystemBuilder, SystemError,
+    heat_sink,
 };
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
@@ -2463,42 +2464,43 @@ impl Component for FadingSource {
     }
 }
 
-#[test]
-fn a_loop_is_closed_in_the_heat_its_temperatures_drive_at_the_default_tolerance() {
-    // Two bodies of 1 J/K on a plane of 2 and 4 W/K that carries a heat
-    // source falling with the plane's temperature, each body also losing
-    // heat to a 300 K room through a film (3 and 5 W/K). The kernel's
-    // default solve settings, 80 steps of 0.25 s towards the steady state.
-    //
-    // After every step the test solves the step's own equations for the
-    // states the kernel published and measures, in joules, how far each
-    // body is from its balance: with m_k the mean of a body's two end
-    // temperatures (what a heat capacity returns on its port) and T the
-    // plane temperature that satisfies sum G_k (T - m_k) = P(T),
-    //   C_k (T_k' - T_k) = dt (G_k (T - m_k) + F_k (300 - m_k)).
-    // No wire value of the kernel enters: only the bodies' states.
-    //
-    // A loop test that judges a temperature against 300 K lets it stay
-    // open by 3e-10 K, which through 4 W/K over 0.25 s is 3e-10 J. Judged
-    // by the heat they drive, the residuals leave about 1e-11 J.
-    let (capacity, plane_w_k, film_w_k) = ([1.0_f64; 2], [2.0_f64, 4.0], [3.0_f64, 5.0]);
-    let (power_w, scale_k, room_k) = (8.0_f64, 40.0_f64, 300.0_f64);
-    let (dt, steps) = (0.25_f64, 80_u32);
-    let law = FadingSource::new(power_w, scale_k);
+/// Heat capacities of the two bodies of [`warming_plane`] [J/K], their
+/// conductances to the plane and to the room [W/K], the source's power at
+/// 300 K [W] and the temperature scale it falls with [K], and the room [K].
+const WARMING_J_K: [f64; 2] = [1.0; 2];
+const WARMING_PLANE_W_K: [f64; 2] = [2.0, 4.0];
+const WARMING_FILM_W_K: [f64; 2] = [3.0, 5.0];
+const WARMING_POWER_W: f64 = 8.0;
+const WARMING_SCALE_K: f64 = 40.0;
+const WARMING_ROOM_K: f64 = 300.0;
 
+/// Two bodies on a plane that carries a heat source falling with the
+/// plane's temperature, each body also losing heat to a room through a
+/// film; everything at the room's temperature. The kernel's default solve
+/// settings. Returns the system and the two bodies.
+fn warming_plane() -> (System, Vec<NodeId>) {
+    let room_k = WARMING_ROOM_K;
     let mut builder = SystemBuilder::new();
     let port = |builder: &SystemBuilder, node, name: &str| builder.port(node, name).unwrap();
     let plane = builder
-        .add_with_tangent("plane", HeatNode::new(&plane_w_k).unwrap(), ())
+        .add_with_tangent("plane", HeatNode::new(&WARMING_PLANE_W_K).unwrap(), ())
         .unwrap();
     let mut bodies = Vec::new();
     let mut starts = Vec::new();
     for side in 0..2 {
         let body = builder
-            .add_with_tangent(&format!("body{side}"), HeatCapacity::new(capacity[side]).unwrap(), room_k)
+            .add_with_tangent(
+                &format!("body{side}"),
+                HeatCapacity::new(WARMING_J_K[side]).unwrap(),
+                room_k,
+            )
             .unwrap();
         let film = builder
-            .add_with_tangent(&format!("film{side}"), Conductance::new(film_w_k[side]).unwrap(), ())
+            .add_with_tangent(
+                &format!("film{side}"),
+                Conductance::new(WARMING_FILM_W_K[side]).unwrap(),
+                (),
+            )
             .unwrap();
         let (on_plane, on_film) =
             (port(&builder, plane, &format!("body{side}")), port(&builder, film, "a"));
@@ -2512,7 +2514,7 @@ fn a_loop_is_closed_in_the_heat_its_temperatures_drive_at_the_default_tolerance(
         starts.extend([on_plane, on_film]);
     }
     let source = builder
-        .add("source", FadingSource::new(power_w, scale_k), 0.0)
+        .add("source", FadingSource::new(WARMING_POWER_W, WARMING_SCALE_K), 0.0)
         .unwrap();
     let at_source = port(&builder, source, "heat");
     builder
@@ -2523,14 +2525,89 @@ fn a_loop_is_closed_in_the_heat_its_temperatures_drive_at_the_default_tolerance(
     for start in starts {
         assert!(system.guess(start, &[room_k]));
     }
+    (system, bodies)
+}
 
+#[test]
+fn what_a_solve_keeps_between_steps_does_not_decide_a_step() {
+    // The warming plane settles, and near its steady state steps are taken
+    // at their first check, with no Newton update. A copy takes a step of
+    // another length and is restored before every step. A checkpoint
+    // carries the states, the clock and the accounts, and nothing of the
+    // solve's workspace; so if anything the workspace keeps decided whether
+    // a step is taken at its first check, the copy would take other
+    // iterations and reach other bits.
+    let (mut straight, bodies) = warming_plane();
+    let (mut detoured, _) = warming_plane();
+    let (dt, steps) = (0.25_f64, 80_u32);
+    let mut taken_at_first_check = 0_u32;
+    with_cx(|cx| {
+        for step in 0..steps {
+            let report = straight.step(dt, cx).unwrap();
+            let before = detoured.checkpoint().unwrap();
+            detoured.step(0.37 * dt, cx).unwrap();
+            detoured.restore(&before).unwrap();
+            let again = detoured.step(dt, cx).unwrap();
+            assert_eq!(report.iterations, again.iterations, "step {step}");
+            for body in &bodies {
+                let (a, b) = (
+                    straight.state::<f64>(*body).unwrap(),
+                    detoured.state::<f64>(*body).unwrap(),
+                );
+                assert_eq!(a.to_bits(), b.to_bits(), "step {step}: {a} against {b}");
+            }
+            taken_at_first_check += u32::from(report.iterations == 0);
+        }
+    });
+    // The comparison covered steps taken at their first check.
+    assert!(taken_at_first_check >= 10, "{taken_at_first_check}");
+    assert_eq!(straight.time_s().to_bits(), detoured.time_s().to_bits());
+    assert_eq!(
+        straight.ledger().energy_residual_j().to_bits(),
+        detoured.ledger().energy_residual_j().to_bits()
+    );
+}
+
+/// What [`balance_of_the_warming_plane`] measured over a run: the defect
+/// of a body's balance that is largest against its allowance [J], the step
+/// it was found at and that allowance [J]; the iterations spent, the
+/// steps taken with none, and the bodies' temperatures at the end [K].
+struct Balance {
+    worst_j: f64,
+    worst_step: u32,
+    allowed_at_worst_j: f64,
+    iterations: u64,
+    taken_at_first_check: u32,
+    ended_k: [f64; 2],
+}
+
+/// Steps [`warming_plane`] `steps` times, step `n` over `length_s(n)`, at
+/// the kernel's default solve settings.
+///
+/// After every step it solves the step's own equations for the states the
+/// kernel published and measures, in joules, how far each body is from its
+/// balance: with m_k the mean of a body's two end temperatures (what a
+/// heat capacity returns on its port) and T the plane temperature that
+/// satisfies sum G_k (T - m_k) = P(T),
+///   C_k (T_k' - T_k) = dt (G_k (T - m_k) + F_k (300 - m_k)).
+/// No wire value of the kernel enters: only the bodies' states. A body is
+/// allowed 1e-12 of the energy that crossed the plane in the step, and the
+/// rounding of the terms its balance is formed from.
+fn balance_of_the_warming_plane(steps: u32, length_s: impl Fn(u32) -> f64) -> Balance {
+    let (capacity, plane_w_k, film_w_k) = (WARMING_J_K, WARMING_PLANE_W_K, WARMING_FILM_W_K);
+    let (power_w, scale_k, room_k) = (WARMING_POWER_W, WARMING_SCALE_K, WARMING_ROOM_K);
+    let law = FadingSource::new(power_w, scale_k);
+    let (mut system, bodies) = warming_plane();
     let total_w_k: f64 = plane_w_k.iter().sum();
     let (mut worst_j, mut worst_step, mut allowed_at_worst_j) = (0.0_f64, 0_u32, 0.0_f64);
-    let mut iterations = 0_u64;
+    let (mut iterations, mut taken_at_first_check) = (0_u64, 0_u32);
     let mut before = [room_k; 2];
     with_cx(|cx| {
         for step in 0..steps {
-            iterations += u64::from(system.step(dt, cx).unwrap().iterations);
+            let dt = length_s(step);
+            let spent = system.step(dt, cx).unwrap().iterations;
+            iterations += u64::from(spent);
+            taken_at_first_check += u32::from(spent == 0);
             let after = [0, 1].map(|side: usize| *system.state::<f64>(bodies[side]).unwrap());
             let mean = [0, 1].map(|side: usize| 0.5 * (before[side] + after[side]));
             // The plane's balance for these means, by Newton on a function
@@ -2547,8 +2624,6 @@ fn a_loop_is_closed_in_the_heat_its_temperatures_drive_at_the_default_tolerance(
                     * (plane_w_k[side] * (plane_k - mean[side])
                         + film_w_k[side] * (room_k - mean[side]));
                 let defect_j = capacity[side] * (after[side] - before[side]) - received_j;
-                // 1e-12 of the energy that crossed the plane in the step,
-                // and the rounding of the terms the balance is formed from.
                 let allowed_j = 1.0e-12 * crossed_j
                     + 64.0
                         * f64::EPSILON
@@ -2561,9 +2636,150 @@ fn a_loop_is_closed_in_the_heat_its_temperatures_drive_at_the_default_tolerance(
             before = after;
         }
     });
-    // The run is not trivial: the bodies warmed by kelvins and the source
-    // weakened with them.
-    assert!(before[0] > room_k + 0.5 && before[1] > room_k + 0.5, "{before:?}");
+    Balance {
+        worst_j,
+        worst_step,
+        allowed_at_worst_j,
+        iterations,
+        taken_at_first_check,
+        ended_k: before,
+    }
+}
+
+#[test]
+fn a_loop_is_closed_when_the_step_length_changes_at_every_step() {
+    // The warming plane from the room's temperature, 240 steps whose length
+    // cycles through 0.25, 0.125, 0.0925 and 0.5 s, so no step has the
+    // length of the one before it. Each body's balance is measured after
+    // every step as in the test below.
+    //
+    // The slopes that judge a residual are formed in the step that is
+    // judged, so a new step length needs nothing from an earlier step. Two
+    // things are asked. The balance holds at every step: judged against
+    // 300 K alone, a settled step leaves a temperature open and a body
+    // about 1e-9 J out here. And a settled step is still taken with no
+    // update: a solve that judged by slopes kept from the step before has
+    // none at a new length and updates at every one of these steps.
+    let steps = 240_u32;
+    let balance =
+        balance_of_the_warming_plane(steps, |step| 0.25 * [1.0, 0.5, 0.37, 2.0][step as usize % 4]);
+    // The run is not trivial: the bodies warmed by most of a kelvin, and
+    // the question is asked of steps taken with no update as well as of
+    // steps that iterated.
+    let Balance {
+        worst_j,
+        worst_step,
+        allowed_at_worst_j,
+        iterations,
+        taken_at_first_check,
+        ended_k,
+    } = balance;
+    assert!(ended_k[0] > WARMING_ROOM_K + 0.5 && ended_k[1] > WARMING_ROOM_K + 0.5, "{ended_k:?}");
+    assert!(taken_at_first_check >= 40 && iterations >= 40, "{taken_at_first_check} {iterations}");
+    eprintln!(
+        "a loop whose step length changes at every step: a body's balance is off by \
+         {worst_j:.3e} J at worst (step {worst_step}, allowed {allowed_at_worst_j:.3e} J); \
+         {iterations} iterations in {steps} steps, {taken_at_first_check} steps taken with none"
+    );
+    assert!(
+        worst_j <= allowed_at_worst_j,
+        "step {worst_step}: {worst_j:e} J against {allowed_at_worst_j:e} J"
+    );
+}
+
+#[test]
+fn a_block_that_fails_only_the_second_test_names_the_open_input() {
+    // Two bodies 1e-10 K apart through a wall of 1e6 W/K. At the start the
+    // wall's two temperature inputs hold the guess, 300 K on both sides, so
+    // one of them is open by 1e-10 K: inside the first test, which allows
+    // 1e-12 of 300 K. Through the wall that is 1e-4 W of heat the wall has
+    // not been told of, against bodies that exchange nothing yet. With no
+    // iteration allowed the block is refused, and the refusal names the
+    // open temperature, not a wire whose own residual is too large (none
+    // is).
+    let apart_k = 1.0e-10_f64;
+    let build = || {
+        let mut builder = SystemBuilder::new();
+        let port = |builder: &SystemBuilder, node, name: &str| builder.port(node, name).unwrap();
+        let wall = builder
+            .add_with_tangent("wall", Conductance::new(1.0e6).unwrap(), ())
+            .unwrap();
+        let mut bodies = Vec::new();
+        let mut ends = Vec::new();
+        for (name, end, kelvin) in [("cool", "a", 300.0), ("warm", "b", 300.0 + apart_k)] {
+            let body = builder
+                .add_with_tangent(name, HeatCapacity::new(1.0).unwrap(), kelvin)
+                .unwrap();
+            let at_wall = port(&builder, wall, end);
+            builder
+                .common_effort(port(&builder, body, "heat"), &[at_wall])
+                .unwrap();
+            bodies.push(body);
+            ends.push(at_wall);
+        }
+        let mut system = builder.seal().unwrap();
+        for end in ends {
+            assert!(system.guess(end, &[300.0]));
+        }
+        (system, bodies)
+    };
+    let (mut refused, _) = build();
+    refused.set_config(SolveConfig {
+        max_iterations: 0,
+        ..SolveConfig::default()
+    });
+    let error = with_cx(|cx| refused.step(1.0e-3, cx)).expect_err("not converged");
+    let SystemError::NotConverged {
+        iterations,
+        worst,
+        residual,
+        ..
+    } = error
+    else {
+        panic!("expected NotConverged, got {error}");
+    };
+    assert_eq!((iterations, worst.as_str()), (0, "wall.b"));
+    // Its own residual is inside the first test's 1e-12 of 300 K.
+    assert!(residual.abs() <= 3.0e-10 && (residual.abs() - apart_k).abs() <= 1.0e-12, "{residual}");
+    assert_eq!(refused.steps(), 0);
+
+    // With the default settings the same block is solved: the wall is told
+    // the temperatures and the bodies exchange what a millisecond allows.
+    let (mut solved, bodies) = build();
+    let report = with_cx(|cx| solved.step(1.0e-3, cx)).unwrap();
+    assert!(report.iterations >= 1, "{}", report.iterations);
+    let gap = solved.state::<f64>(bodies[1]).unwrap() - solved.state::<f64>(bodies[0]).unwrap();
+    // The midpoint rule's factor (1 - a) / (1 + a) with a = dt G = 1000:
+    // the bodies overshoot to nearly the opposite gap.
+    let factor = (1.0 - 1000.0) / (1.0 + 1000.0);
+    assert!((gap - factor * apart_k).abs() <= 2.0e-12, "{gap}");
+}
+
+#[test]
+fn a_loop_is_closed_in_the_heat_its_temperatures_drive_at_the_default_tolerance() {
+    // Two bodies of 1 J/K on a plane of 2 and 4 W/K that carries a heat
+    // source falling with the plane's temperature, each body also losing
+    // heat to a 300 K room through a film (3 and 5 W/K). The kernel's
+    // default solve settings, 80 steps of 0.25 s towards the steady state.
+    //
+    // After every step the balance of each body is measured from the
+    // bodies' states alone, by [`balance_of_the_warming_plane`].
+    //
+    // A loop test that judges a temperature against 300 K lets it stay
+    // open by 3e-10 K, which through 4 W/K over 0.25 s is 3e-10 J. Judged
+    // by the heat they drive, the residuals leave about 1e-11 J.
+    let steps = 80_u32;
+    let Balance {
+        worst_j,
+        worst_step,
+        allowed_at_worst_j,
+        iterations,
+        ended_k,
+        ..
+    } = balance_of_the_warming_plane(steps, |_| 0.25);
+    // The run is not trivial: the bodies warmed by most of a kelvin and
+    // the source weakened with them.
+    assert!(ended_k[0] > WARMING_ROOM_K + 0.5 && ended_k[1] > WARMING_ROOM_K + 0.5, "{ended_k:?}");
     eprintln!(
         "a loop at the default tolerance: a body's balance is off by {worst_j:.3e} J at worst \
          (step {worst_step}, allowed {allowed_at_worst_j:.3e} J); {iterations} iterations in \

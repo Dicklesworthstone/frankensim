@@ -295,18 +295,29 @@ Tarjan, index order).
   times its conductance, while the heat wire agrees with what the
   conductance returned and passes too. So the residuals are carried once
   through the components that read them, by the slopes
-  `t_ij = d(target of wire i) / d(input j)` of the block's most recent
-  Jacobian assembly, and for every wire `i`
+  `t_ij = d(target of wire i) / d(input j)` of an assembly of the block's
+  Jacobian made in the same step, and for every wire `i`
 
       sum_j |t_ij| max(0, |r_j| - f_j)  <=  rel S_i + f_i
 
-  with `S_i` the scale of the first test. Only the part of a residual above
-  its own rounding floor `f_j` is carried. The floor is the absolute
-  tolerance plus 16 units of `eps` times three sizes: the terms the wire's
-  driver sums, the wire's own value, and `sum_k |t_jk u_k|` (for an energy
-  rate also the block's largest power). Without the floor a force balance
-  near rest, which sits at the rounding of forces that cancel, would keep a
-  body's velocity wire from ever closing.
+  - The first test is `|r_i| <= rel S_i + a_i`. `S_i` is the largest, over
+    the block's inputs of the wire's kind (a carrier and side; each
+    coefficient of a stream port; each scalar signal alone), of an input's
+    own value and the terms its driver sums. `a_i` is the absolute
+    tolerance, plus 16 units of `eps` times `sum_k |t_ik u_k|` from the
+    step's most recent assembly (nothing before the step's first), plus for
+    an energy rate 16 units of `eps` times the block's largest power.
+  - Only the part of a residual above its own rounding floor `f_j` is
+    carried. The floor is the absolute tolerance plus 16 units of `eps`
+    times the sum of two sizes: the larger of the wire's own value and the
+    terms its driver sums, and `sum_k |t_jk u_k|` (for an energy rate also
+    the block's largest power). Without the floor a force balance near
+    rest, which sits at the rounding of forces that cancel, would keep a
+    body's velocity wire from ever closing.
+  - Both sums over slopes run over the stored entries of the assembly, one
+    per term of a driver that reads an output of the component an input
+    belongs to. Where two terms of one driver read the same component,
+    their magnitudes add, in what is carried and in the floor alike.
   - What it bounds, for every wire: its residual, and the first-order image
     of all residuals under one more pass through the block, by
     `rel S_i + f_i` plus each in-floor input's floor carried once,
@@ -314,38 +325,77 @@ Tarjan, index order).
     the energy a step can leave between a component and what it is joined
     to; for a power port, times the conjugate effort too.
   - What it does not bound: the whole first-order error `(I - T)^-1 r` of a
-    loop whose gain exceeds one. Measured at the accepted iterates of every
-    existing graph, in an instrumented scratch copy that is not in the tree
-    (73 tests and 13 scenes with a looped block): the full correction
-    `J^-1 r` exceeds a wire's tolerance in six tests and one scene. Once it
-    is on a wire with a physical size, 1.8 times (2.9e-11 W on a heat wire
-    of the friction graph's sixth case). The others are systems at or near
-    rest whose wires are below 1e-15 in absolute terms, where the ratio
-    reaches 4e10 with a correction of 2.8e-21.
-  - The slopes are those of the most recent assembly: this step's, the kept
-    ones of an affine block, or, at the first check of a step, the last
-    step's if the step length is the same. With none at that step length a
-    block is taken without assembling only at an exact fixed point;
-    otherwise it assembles once. A check is one pass over the stored
+    loop whose gain exceeds one. Measured on the kernel of f5db075f3b at
+    the accepted iterates of every graph that existed then, in an
+    instrumented scratch copy that is not in the tree (73 tests and 13
+    scenes with a looped block): the full correction `J^-1 r` exceeds a
+    wire's tolerance in six tests and one scene. Once it is on a wire with
+    a physical size, 1.8 times (2.9e-11 W on a heat wire of the friction
+    graph's sixth case). The others are systems at or near rest whose
+    wires are below 1e-15 in absolute terms, where the ratio reaches 4e10
+    with a correction of 2.8e-21.
+  - The slopes are the step's own. At a step's first check they are formed
+    at the iterate being judged: the block is assembled once, and if the
+    test passes the step is taken with no update and counts no iteration.
+    At a later check of the same step they are those of the assembly that
+    produced the update, one iterate earlier. A block whose residuals are
+    all exactly zero is taken without assembling. An affine block that
+    holds kept factors for the step length (below) adopts them and their
+    slopes in place of an assembly. A check is one pass over the stored
     entries and calls no component.
+  - Differencing a component writes a perturbed proposal to its candidate.
+    A block taken at its first check therefore proposes each component
+    that has no declared tangent once more at the accepted inputs. A
+    declared tangent writes to scratch only.
+  - What it costs: a block that is not affine and is taken at its first
+    check pays one assembly in that step, and one more proposal of each
+    differenced component, where the first test alone paid neither. An
+    affine block pays neither after its first step at a step length.
+  - What a block keeps from an earlier step does not decide a step. A
+    checkpoint does not carry a block's workspace and a discarded trial
+    does not roll it back, so a verdict or an update that read it would
+    differ between a run and its replay. Two things did. f5db075f3b judged
+    a step's first check by the last step's slopes; and since 20c8e96867
+    an affine block with a differenced part kept factors made from
+    difference quotients, which are rounded at the point they are taken at
+    and are not the numbers a fresh assembly forms (see the bullet on
+    affine blocks below). `tests/elements.rs` and `tests/step_cost.rs`
+    compare a run with a copy that takes a step of another length and is
+    restored before every step, in iterations and in bits: the warming
+    plane below over 80 steps, of which more than ten are taken at their
+    first check (against f5db075f3b the run took 0 iterations at step 27
+    where the copy took 1); a loaded mass to rest over 12,000 steps; and a
+    mass pushed against a spring that is added without its tangent, over
+    2,000 steps (against 42f2803e8d and against f5db075f3b the copy took 2
+    iterations at step 1 where the run took 1).
   - `tests/elements.rs`, at the default settings: two bodies on a
     `HeatNode` whose source falls with temperature, each losing heat to a
-    room through a film, 80 steps. After each step the test solves the
-    step's own equations for the states the kernel published and measures
-    each body's balance in joules: 6.6e-12 J at worst (allowed 1.6e-11 J).
-    The same test against the kernel of 42f2803e8d: 5.2e-10 J at step 73.
+    room through a film (the warming plane), 80 steps of 0.25 s. After each
+    step the test solves the step's own equations for the states the
+    kernel published and measures each body's balance in joules: 6.6e-12 J
+    at worst (allowed 1.6e-11 J). The same test against the kernel of
+    42f2803e8d: 5.2e-10 J at step 73. The same measure over 240 steps
+    whose length changes at every step (0.25, 0.125, 0.0925 and 0.5 s in
+    turn): 1.3e-11 J at worst (allowed 2.7e-11 J), with 150 steps taken at
+    their first check and 101 iterations; against 42f2803e8d 1.1e-9 J at
+    step 139; f5db075f3b, which had no slopes at a new step length, took
+    none of those steps at its first check and spent 251 iterations.
     `crates/fs-couple/tests/friction_heat/graph.rs` runs at the default
     settings: the hand-written module, which accepts 1e-10 J, refused the
-    third case's ninth step with 2.4e-10 J before and sees 4.1e-12 J at
-    worst now.
-  - What changed for existing graphs (A/B on 42f2803e8d, every target that
-    uses the kernel): the 14 example scenes give byte-identical reports
-    with the same iteration counts; no test that pins an iteration count
-    changed; the gas piston's six thermal runs take 28, 28, 81, 73, 27 and
-    27 iterations where they took 27, 28, 77, 69, 25 and 25. One test of a
-    deliberately loose solve was rewritten: a block's first step no longer
-    accepts a wrong guess at any tolerance, so the test takes a first step
-    before it loosens the solve.
+    third case's ninth step with 2.4e-10 J before the second test and sees
+    4.1e-12 J at worst with it.
+  - A block refused through this test alone names the open input that
+    moves the furthest-moved wire most, with that input's residual
+    (`NotConverged::worst`). `tests/elements.rs`: two bodies 1e-10 K apart
+    through a wall of 1e6 W/K, both of the wall's temperatures guessed at
+    300 K, no iteration allowed: the refusal names `wall.b` with a
+    residual of 1e-10 K, inside the first test's 3e-10 K. 42f2803e8d takes
+    that step with no iteration; f5db075f3b refuses it and names `wall.a`,
+    whose residual is zero.
+  - What changed for existing graphs when the test came in (A/B of
+    f5db075f3b on 42f2803e8d, every target that uses the kernel): the 14
+    example scenes gave byte-identical reports with the same iteration
+    counts; no test that pins an iteration count changed.
 - A looped block keeps its workspaces between steps, and an accepted step
   allocates nothing (`tests/step_cost.rs`, counted per thread, damped and
   undamped lines). A refused step may: it drops the step's lists and builds
@@ -391,16 +441,24 @@ Tarjan, index order).
   length while it refuses (the refusal names the spring, and clock and step
   count stay), and every step of the usual length that follows equals a
   line never interrupted to the bit, in one iteration. Cut short by a
-  refusal only: an assembly ended by a request to shorten (a differenced
-  component) or by a singular matrix takes the same exit in the code and is
-  not run by a test.
-- A block whose components are all `Class::ExactLinear` and whose drivers
-  are all linear is affine, so its interface Jacobian depends on the step
-  length only. Its factors are kept and used for the first update of every
-  later step of the same length; the rounding estimate is remade from the
-  kept entries at the current inputs, in the order it was first formed. If
-  that update does not converge (a component whose slopes moved with its
-  state after all), the next iteration derives the Jacobian as before. The
+  refusal only: an assembly ended by a singular matrix takes the same exit
+  in the code and is not run by a test. (A request to shorten can end an
+  assembly only through a differenced component, and a block with one keeps
+  no factors.)
+- A block whose components are all `Class::ExactLinear` and declare their
+  tangents, and whose drivers are all linear, is affine: its interface
+  Jacobian is taken to depend on the step length only. Its factors are kept
+  and used for the first update of every later step of the same length, and
+  their slopes for that step's second convergence test; the rounding
+  estimate is remade from the kept entries at the current inputs, in the
+  order it was first formed. A block with a component that has no declared
+  tangent keeps nothing, whatever its class: the kernel differences that
+  component, and a difference quotient is rounded at the point it is taken
+  at, so factors made from it in one step are not those of another. If
+  the first update does not converge (a component whose slopes moved with
+  its state after all), the next iteration derives the Jacobian as before;
+  such a component is solved correctly, but its run and a replay of it need
+  not agree in bits, and it should declare `Class::Smooth`. The
   kept factors solve to the bit of the elimination they replace (unit test
   in `src/solve.rs`, against an elimination that carries the right-hand side
   along), and a line of masses and springs stepped with them equals, bit

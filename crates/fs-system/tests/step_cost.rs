@@ -632,6 +632,110 @@ fn factors_kept_for_an_affine_block_change_no_bit() {
 }
 
 #[test]
+fn a_detour_through_another_step_length_and_a_checkpoint_changes_no_bit_at_rest() {
+    // The loaded mass of `a_loaded_mass_that_has_come_to_rest_keeps_stepping`
+    // comes to rest, where its residuals are rounding-sized and not zero. A
+    // copy takes a step of another length and is restored before every
+    // step. What a solve keeps from one step to the next may not decide a
+    // step: the two systems take the same iterations and reach the same
+    // bits, while they move and at rest. (This block is never taken at its
+    // first check, at rest either; `tests/elements.rs` has the same
+    // comparison on a graph that is.)
+    let (mut straight, masses, _) = chain(1);
+    let (mut detoured, _, _) = chain(1);
+    with_cx(|cx| {
+        for step in 0..12_000 {
+            let report = straight.step(DT_S, cx).unwrap();
+            let before = detoured.checkpoint().unwrap();
+            detoured.step(0.37 * DT_S, cx).unwrap();
+            detoured.restore(&before).unwrap();
+            let again = detoured.step(DT_S, cx).unwrap();
+            assert_eq!(report.iterations, again.iterations, "step {step}");
+            let a = straight.state::<Motion>(masses[0]).unwrap();
+            let b = detoured.state::<Motion>(masses[0]).unwrap();
+            assert_eq!(a.position_m.to_bits(), b.position_m.to_bits(), "step {step}");
+            assert_eq!(a.velocity_m_s.to_bits(), b.velocity_m_s.to_bits(), "step {step}");
+        }
+    });
+    // The run reached rest: the spring holds the force.
+    let motion = straight.state::<Motion>(masses[0]).unwrap();
+    let rest = FORCE_N / STIFFNESS_N_M;
+    assert!((motion.position_m - rest).abs() <= 1.0e-12, "{}", motion.position_m);
+    assert!(motion.velocity_m_s.abs() <= 1.0e-12, "{}", motion.velocity_m_s);
+    assert_eq!(straight.time_s().to_bits(), detoured.time_s().to_bits());
+    assert_eq!(
+        straight.ledger().energy_residual_j().to_bits(),
+        detoured.ledger().energy_residual_j().to_bits()
+    );
+}
+
+#[test]
+fn a_linear_block_with_a_differenced_part_replays_to_the_bit() {
+    // A mass pushed against a spring: every part exactly linear, and the
+    // spring added without its tangent, so the kernel differences it. A
+    // difference quotient is rounded at the point it is taken at, so the
+    // slopes of this block are not the same numbers from one step to the
+    // next, and factors made from them in one step are not those of
+    // another. The run and its replay through a step of another length and
+    // a checkpoint take the same iterations and reach the same bits.
+    let build = || {
+        let mut builder = SystemBuilder::new();
+        let mass = builder
+            .add_with_tangent(
+                "mass",
+                Mass::new(MASS_KG).unwrap(),
+                Motion {
+                    position_m: 0.0,
+                    velocity_m_s: 0.0,
+                },
+            )
+            .unwrap();
+        let push = builder
+            .add_with_tangent(
+                "push",
+                Force::new(Waveform::constant(FORCE_N).unwrap()),
+                SourceAccount::default(),
+            )
+            .unwrap();
+        let spring = builder
+            .add("spring", Spring::new(STIFFNESS_N_M, 0.0).unwrap(), 0.0)
+            .unwrap();
+        let members = [builder.port(push, "p").unwrap(), builder.port(spring, "a").unwrap()];
+        builder
+            .boundary(
+                builder.port(spring, "b").unwrap(),
+                Box::new(|_, _, values| values[0] = 0.0),
+            )
+            .unwrap();
+        builder
+            .common_flow(builder.port(mass, "p").unwrap(), &members)
+            .unwrap();
+        (builder.seal().unwrap(), mass)
+    };
+    let (mut straight, mass) = build();
+    let (mut detoured, _) = build();
+    let mut iterations = 0_u64;
+    with_cx(|cx| {
+        for step in 0..2_000 {
+            let report = straight.step(DT_S, cx).unwrap();
+            iterations += u64::from(report.iterations);
+            let before = detoured.checkpoint().unwrap();
+            detoured.step(0.37 * DT_S, cx).unwrap();
+            detoured.restore(&before).unwrap();
+            let again = detoured.step(DT_S, cx).unwrap();
+            assert_eq!(report.iterations, again.iterations, "step {step}");
+            let a = straight.state::<Motion>(mass).unwrap();
+            let b = detoured.state::<Motion>(mass).unwrap();
+            assert_eq!(a.position_m.to_bits(), b.position_m.to_bits(), "step {step}");
+            assert_eq!(a.velocity_m_s.to_bits(), b.velocity_m_s.to_bits(), "step {step}");
+        }
+    });
+    // The mass moved: it swings about the extension that holds the force.
+    let motion = straight.state::<Motion>(mass).unwrap();
+    assert!(motion.position_m.is_finite() && iterations >= 2_000, "{iterations}");
+}
+
+#[test]
 fn an_affine_assembly_cut_short_by_a_refusal_leaves_no_factors_behind() {
     // An affine block keeps the factors of its interface Jacobian for one
     // step length. Here the fourth spring of a line of six refuses to give

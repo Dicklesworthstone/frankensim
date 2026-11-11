@@ -1744,35 +1744,24 @@ fn solver_failures_are_typed_and_name_what_failed() {
     assert!(residual != 0.0);
     assert_eq!(system.steps(), 0);
 
-    // A tolerance so loose that a wrong first guess passes its own test.
-    // On a block's first step the kernel has no slopes yet to judge what
-    // the residuals drive, and without them it takes nothing but an exact
-    // fixed point: it assembles once, and the step is solved.
+    // A tolerance so loose that a wrong first guess is accepted leaves the
+    // two sides of the bond with different energies; the interface check
+    // refuses what the solver let through.
     let (mut system, mass, spring) = oscillator();
     system.set_config(SolveConfig {
         relative_tolerance: 10.0,
         ..SolveConfig::default()
     });
-    let wrong_guess = |system: &mut System| {
-        for node in [mass, spring] {
-            let port = system.port(node, "p").expect("port");
-            assert!(system.guess(port, &[1.0]));
-        }
-    };
-    wrong_guess(&mut system);
-    let first = with_cx(&gate, |cx| system.step(1.0e-3, cx)).expect("solved");
-    assert_eq!((first.iterations, system.steps()), (1, 1));
-    // From the second step on it has them. At this tolerance the wrong
-    // guess passes both tests, the two sides of the bond are left with
-    // different energies, and the interface check refuses what the solver
-    // let through.
-    wrong_guess(&mut system);
+    for node in [mass, spring] {
+        let port = system.port(node, "p").expect("port");
+        assert!(system.guess(port, &[1.0]));
+    }
     let error = with_cx(&gate, |cx| system.step(1.0e-3, cx)).expect_err("interface");
     assert!(
         matches!(error, SystemError::Interface { connection: 0, .. }),
         "{error}"
     );
-    assert_eq!(system.steps(), 1);
+    assert_eq!(system.steps(), 0);
 
     // A conductance of 2 against a resistance of -1/2: the interface
     // Jacobian [[1, 1/2], [2, 1]] is singular. Exact tangents make it so
