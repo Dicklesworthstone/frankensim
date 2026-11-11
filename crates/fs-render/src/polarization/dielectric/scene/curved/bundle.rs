@@ -533,9 +533,17 @@ impl CurvedPolarizedScene<'_> {
                 .ok_or(SceneError::InvalidInitialMedium)?;
         }
         let initial = bundle.propagation();
+        // The direction is compared within one renormalization, not bit for bit.
+        // In a uniform medium the launch direction a = unit(d) is normalized again
+        // by gradient_index::propagate, so a zero-distance launch carries b = unit(a)
+        // (see renormalized_direction_matches).
         if initial.propagation().distance_m != 0.0
             || initial.interface_events() != 0
-            || initial.initial_ray() != initial.propagation().ray
+            || initial.initial_ray().origin != initial.propagation().ray.origin
+            || !renormalized_direction_matches(
+                initial.initial_ray().dir,
+                initial.propagation().ray.dir,
+            )
         {
             return Err(CurvedBundleSceneError::InvalidInitialBundle);
         }
@@ -1243,6 +1251,38 @@ impl<O: BoundaryOracle + ?Sized> BoundaryOracle for TargetSectionOracle<'_, O> {
     ) -> Result<SignedBoundaryDistance, GradientIndexError> {
         self.native.signed_departure(contact, position)
     }
+}
+
+/// Whether `b` is `a` normalized once more, within that renormalization's
+/// rounding.
+///
+/// propagate_bundle normalizes the caller's direction once, giving a = unit(d)
+/// (gradient_index/bundle.rs, propagate_bundle_with_control). For a uniform
+/// medium its segment reuses the public gradient_index::propagate, which
+/// normalizes again: b = unit(a) (gradient_index.rs, propagate_with_control).
+/// A second normalization of a unit vector is not idempotent in floating point.
+///
+/// Error model of unit() (gradient_index.rs, `unit`) with u = eps/2:
+/// - w_i = fl(a_i / s), with s = max |a_j| exact, has relative error <= u;
+/// - fl(w.w), three squares summed, has relative error <= 3u;
+/// - the correctly rounded sqrt halves that and adds u, and the reciprocal adds
+///   u, so the shared factor r = fl(1 / |w|) has relative error <= 3.5u;
+/// - fl(w_i * r) adds u;
+/// - the input a = unit(d) has ||a| - 1| <= 3.5u + 2u = 5.5u by the same steps.
+///
+/// So b_i = a_i (1 + t_i) with |t_i| <= 5.5u + u + 3.5u + u = 11u = 5.5 eps, to
+/// first order. The check admits 6 eps |a_i| plus two subnormal units; the
+/// latter matter only for a component below 2^-1022, where the division and
+/// the product round absolutely. A zero component stays exactly zero. A Mac
+/// Python replay of unit() over 200000 directions measured at most 2.0 eps
+/// relative. A non-finite component never matches.
+fn renormalized_direction_matches(a: Vec3, b: Vec3) -> bool {
+    let subnormal_units = 2.0 * f64::from_bits(1);
+    [(a.x, b.x), (a.y, b.y), (a.z, b.z)]
+        .into_iter()
+        .all(|(first, second)| {
+            (second - first).abs() <= 6.0 * f64::EPSILON * first.abs() + subnormal_units
+        })
 }
 
 fn require_medium(

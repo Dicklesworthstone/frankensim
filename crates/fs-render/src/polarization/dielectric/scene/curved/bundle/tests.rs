@@ -849,3 +849,165 @@ fn g4_automatic_scene_accumulates_step_and_query_budgets_and_cancels_after_inter
         assert_eq!(input.interface_state(), Stokes::unpolarized(1.0));
     });
 }
+
+/// One uniform medium and a small detector far up the z axis, which every
+/// launch below misses, so each trace escapes.
+fn far_detector_scene_parts() -> (InstanceScene, DielectricGlass) {
+    let geometry =
+        InstanceScene::try_new(vec![plane(9, Point3::new(0.0, 0.0, 50.0), 0.1)]).unwrap();
+    (geometry, glass(1.0, 0.0))
+}
+
+fn far_detector_binding() -> Vec<SurfaceBinding> {
+    vec![SurfaceBinding {
+        object_id: 9,
+        interaction: Interaction::Detector {
+            reference_axis: Vec3::new(0.0, 1.0, 0.0),
+        },
+    }]
+}
+
+#[test]
+fn g1_uniform_launches_renormalized_in_their_last_bit_trace_as_original_launches() {
+    // In a uniform medium a zero-distance launch carries initial_ray().dir = unit(d)
+    // and propagation().ray.dir = unit(unit(d)), and the two can differ in the last
+    // bit. Before the bounded check, every such launch refused with
+    // InvalidInitialBundle. A Mac Python replay of unit() predicts 14 of these 343
+    // directions differ. The test counts them on the engine's own launches and
+    // requires at least one, so the scan exercises the renormalized case.
+    with_cx(|cx, _| {
+        let (geometry, air) = far_detector_scene_parts();
+        let media = [SceneMedium::Homogeneous(&air)];
+        let scene =
+            CurvedPolarizedScene::try_new(cx, &geometry, &media, far_detector_binding(), 100_000)
+                .unwrap();
+        let mut renormalized = 0;
+        for i in -3..=3 {
+            for j in -3..=3 {
+                for k in -3..=3 {
+                    let ray = Ray {
+                        origin: Point3::new(0.0, 0.0, 0.0),
+                        dir: Vec3::new(f64::from(i) + 0.1, f64::from(j) + 0.2, f64::from(k) + 0.3),
+                    };
+                    let launch = scene
+                        .launch_bundle(
+                            ray,
+                            Vec3::new(1.0, 0.0, 0.0),
+                            550.0,
+                            Stokes::unpolarized(1.0),
+                            0,
+                        )
+                        .unwrap();
+                    let propagation = launch.propagation();
+                    if propagation.initial_ray().dir != propagation.propagation().ray.dir {
+                        renormalized += 1;
+                    }
+                    let path = scene
+                        .trace_bundle_with_branches(cx, launch, 0, settings(), |_, _| {
+                            DielectricEvent::Transmission
+                        })
+                        .unwrap_or_else(|error| panic!("direction {:?}: {error:?}", ray.dir));
+                    assert_eq!(path.termination(), PathTermination::Escaped);
+                    assert_eq!(path.surface_events(), 0);
+                }
+            }
+        }
+        assert!(
+            renormalized > 0,
+            "the scan must contain launches whose second normalization moved a bit"
+        );
+    });
+}
+
+#[test]
+fn g0_continued_bundle_is_not_an_original_launch() {
+    with_cx(|cx, _| {
+        let (geometry, air) = far_detector_scene_parts();
+        let media = [SceneMedium::Homogeneous(&air)];
+        let scene =
+            CurvedPolarizedScene::try_new(cx, &geometry, &media, far_detector_binding(), 100_000)
+                .unwrap();
+        let launch = scene
+            .launch_bundle(
+                Ray {
+                    origin: Point3::new(0.0, 0.0, 0.0),
+                    dir: Vec3::new(0.1, 0.2, 1.0),
+                },
+                Vec3::new(1.0, 0.0, 0.0),
+                550.0,
+                Stokes::unpolarized(1.0),
+                0,
+            )
+            .unwrap();
+        let continued = launch
+            .continue_in(
+                &crate::gradient_index::HomogeneousIndexField::new(&air),
+                0.5,
+                BundleOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(continued.propagation().interface_events(), 0);
+        assert!(matches!(
+            scene.trace_bundle_with_branches(cx, continued, 0, settings(), |_, _| {
+                DielectricEvent::Transmission
+            }),
+            Err(CurvedBundleSceneError::InvalidInitialBundle)
+        ));
+        assert!(
+            scene
+                .trace_bundle_with_branches(cx, launch, 0, settings(), |_, _| {
+                    DielectricEvent::Transmission
+                })
+                .is_ok()
+        );
+    });
+}
+
+#[test]
+fn g0_renormalized_direction_admits_one_renormalization_and_refuses_seven_eps() {
+    let bits =
+        |x: u64, y: u64, z: u64| Vec3::new(f64::from_bits(x), f64::from_bits(y), f64::from_bits(z));
+    // R-c printed these launches (initial, propagated): the molecular fixture ray
+    // and the coating area-emission ray, each b = unit(a) exactly.
+    let molecular = (
+        bits(
+            0xbfe3_c1aa_0689_dff8,
+            0xbfbb_89c6_1262_166a,
+            0x3fe8_efc1_a214_0d40,
+        ),
+        bits(
+            0xbfe3_c1aa_0689_dff8,
+            0xbfbb_89c6_1262_1669,
+            0x3fe8_efc1_a214_0d3f,
+        ),
+    );
+    let coating = (
+        bits(0x3fe9_35fd_eba9_579c, 0, 0x3fe3_b547_bec7_7728),
+        bits(0x3fe9_35fd_eba9_579d, 0, 0x3fe3_b547_bec7_7728),
+    );
+    for (a, b) in [molecular, coating] {
+        assert!(renormalized_direction_matches(a, a));
+        assert!(renormalized_direction_matches(a, b));
+        assert!(renormalized_direction_matches(b, a));
+    }
+    let a = molecular.0;
+    let moved = |relative: f64| Vec3::new(a.x, a.y + relative * f64::EPSILON * a.y.abs(), a.z);
+    // The sum rounds by at most half an ulp of a.y, under eps/2 relative, so a
+    // 5 eps move stays inside the 6 eps bound and a 7 eps move stays outside.
+    assert!(renormalized_direction_matches(a, moved(5.0)));
+    assert!(!renormalized_direction_matches(a, moved(7.0)));
+    // A zero component must stay exactly zero, up to two subnormal units.
+    let zero = coating.0;
+    assert!(renormalized_direction_matches(
+        zero,
+        Vec3::new(zero.x, 2.0 * f64::from_bits(1), zero.z)
+    ));
+    assert!(!renormalized_direction_matches(
+        zero,
+        Vec3::new(zero.x, 1e-300, zero.z)
+    ));
+    assert!(!renormalized_direction_matches(
+        a,
+        Vec3::new(f64::NAN, a.y, a.z)
+    ));
+}
