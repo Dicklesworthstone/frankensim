@@ -2,7 +2,7 @@
 #![cfg(feature = "thermal-verification")]
 #[path = "../src/json_read.rs"] mod json_read;
 use json_read::JsonValue as J;
-use fs_cli::cards::{CardPackKind, CardPackSet, RawCardPack};
+use fs_cli::{CardPackKind, CardPackSet, RawCardPack};
 use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedMaterialCardPack,
     NormalizedPack, ObservationDataset, PropertyClaim, PropertyKey, PropertyValue,
     Provenance, UncertaintyModel};

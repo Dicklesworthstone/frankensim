@@ -241,7 +241,7 @@ fn contact_pack(resistance: f64, bounded: bool) -> (Vec<u8>, String) {
     let source = fs_blake3::hash_bytes(b"declared-constant-contact-mean-fixture");
     let provenance = || Provenance {
         source: "explicit constant contact PDE; not experimental data".into(),
-        license: "CC-BY-4.0; redistribution permitted",
+        license: "CC-BY-4.0; redistribution permitted".into(),
         artifact: Some(source),
     };
     let mut claims = ClaimSet::new();
