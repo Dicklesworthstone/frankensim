@@ -491,6 +491,9 @@ pub mod isobaric {
     }
 }
 
+/// A uniform body of one chart as a Component of the composition contract.
+#[cfg(feature = "component")]
+pub mod component;
 // Relative equilibrium entropy uses this same admitted h -> T chart.
 mod entropy;
 pub use entropy::EnthalpyEntropyMean;

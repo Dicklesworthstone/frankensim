@@ -2116,14 +2116,17 @@ name = "fs-material"
 version = "0.0.1"
 dependencies = [
  "fs-ad",
+ "fs-alloc",
  "fs-blake3",
  "fs-casebook",
  "fs-evidence",
+ "fs-exec",
  "fs-fft",
  "fs-la",
  "fs-matdb",
  "fs-math",
  "fs-modal",
+ "fs-ports",
  "fs-qty",
  "fs-rand",
  "fs-solver",

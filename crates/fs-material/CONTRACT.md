@@ -17,6 +17,93 @@
 
 ## New sections (newest first)
 
+## A uniform enthalpy body on the composition contract
+
+`phase::component::UniformEnthalpyBody`, behind the feature `component`
+(optional dependencies `fs-ports` and `fs-exec`; the default build has
+neither as a direct dependency and is unchanged), is a fixed mass of the
+material of one `EquilibriumEnthalpyPhaseCurve` as a `Component` of the
+composition contract. Its state is the chart's own `EquilibriumPhaseState`.
+It adds no physics: no heat capacity, no apparent latent heat, no transport
+law, no geometry. Its error is `PhaseStateError`.
+
+Its one port, `heat`, receives the heat rate [W] into the body and returns
+the chart's entropy-conjugate temperature of the step that heat makes,
+`thermodynamic_mean_temperature(h0, h0 + dt Q / m)`: the logarithmic mean
+over an interval of constant heat capacity, the transition temperature on a
+latent plateau. The heat over that temperature is the body's entropy change
+exactly, so the body generates no entropy and a conductance given this
+temperature produces `G (theta_a - theta_b)^2 / (theta_a theta_b) dt` and no
+more. The state reached is `state_at_specific_enthalpy` of the new enthalpy.
+The receipt stores `m (h1 - h0)` as represented and books the remainder of
+the heat as numerical loss; heat too small to move the enthalpy is not
+refused. Stored energy is `m h` in the chart's datum.
+
+Its class is `Monotone1d`: one input, one output, and the mean never falls
+as the heat rises (it is flat across a plateau). The tangent is the chart's
+derivative of the mean in the final enthalpy times `dt / m`. That derivative
+is continuous in the heat even where a step ends on a corner of the chart;
+only at no heat on a corner is it the chart's one-sided choice (half the
+right derivative, the left one at the upper end of the chart).
+
+Refused, with candidate and outputs untouched: a mass that is not positive
+and finite; widths other than one; a heat rate that is not a number
+(`NonFiniteSpecificEnergyIncrement`); a step that is not positive and
+finite; a state of another chart (`StateCurveMismatch`); a step that leaves
+the chart (`OutsideEnthalpyDomain`, the chart's own); cancellation
+(`EntropyEvaluationCancelled`). It does not shorten a step.
+
+Not here: the body's volume, surface and density, a conductance law, heat
+generated inside the body, expansion work, and any limit on the step for
+accuracy. The enumeration ratchet is unchanged: no new `*_with_*` function,
+`*Error` or `*Candidate` type, or trait.
+
+Tests. `tests/phase_temperature_derivative.rs`, module `body`, 2 tests with
+the feature (`cargo test -p fs-material --features component --test
+phase_temperature_derivative`): the conformance kit and the tangent check
+on nine steps of a melting chart (within the solid; ending on, starting on
+and crossing each corner of the plateau; along the plateau; back down across
+both), with state and temperature equal to the chart's own answers to the
+bit, heat over temperature equal to the chart's entropy change to 1e-13, the
+slope equal to the chart's derivative to the bit; the mean rising with nine
+heats from one state; the one-sided slope at rest on each corner, confirmed
+from the right by a difference and exactly zero from the left; a heat of
+1e-30 W taken and booked as lost; and every refusal above.
+`crates/fs-couple/tests/gas_piston_graph.rs`, 3 tests: the body, the
+kernel's `Conductance` and the fs-gas cavity as a declared graph against the
+piston module's own finite-body step
+(`GasPiston::thermal_discrete_gradient_candidate`) on that module's
+fixtures, a step at a time, with every bound computed from the two solves'
+tolerances before the run (the module's 1e-10 J source tolerance and the gas
+owner's 1e-7 J/kg, summed over the steps). Measured against allowed:
+
+| fixture | steps | body | gas | heat a step | entropy |
+|---|---|---|---|---|---|
+| fixed walls, body from 300 K, 4000 W/K | 12 | 2.3e-11 K (4.8e-9) | 2.1e-11 K (7.8e-9) | 1.2e-11 J (2.7e-9) | 4.7e-15 J/K (3.9e-10) |
+| fixed walls, body from 650 K, 4000 W/K | 12 | 5.2e-11 K (4.8e-9) | 4.6e-11 K (7.8e-9) | 2.6e-11 J (2.7e-9) | 9.3e-16 J/K (3.9e-10) |
+| wall thrown at -2 and 2 m/s, 2000 W/K | 12 | 6.3e-11 K (4.8e-9) | 4.9e-11 K (6.9e-9) | 3.1e-11 J (1.4e-9) | 3.3e-14 J/K (2.9e-10) |
+| melting through a plateau at 350 K, 2000 W/K | 40 | 4.1e-8 J/kg (8.0e-6) | 6.5e-11 K (2.3e-8) | 4.1e-11 J (4.3e-9) | 3.3e-15 J/K (1.7e-9) |
+| freezing through a plateau at 500 K, 2000 W/K | 40 | 1.0e-7 J/kg (8.0e-6) | 1.5e-10 K (2.3e-8) | 7.5e-11 J (4.9e-9) | 1.7e-15 J/K (1.9e-9) |
+
+With the wall moving, its velocity agrees to 9.4e-13 m/s (1.2e-10) and the
+gas volume to 3.0e-18 m3 (7.2e-16). These are not small steps: in its twelve
+the body from 650 K gives 66 J and cools by 132 K, and the bodies on a
+plateau leave it, one molten at 351.5 K and one frozen at 464.8 K. With the
+kernel's ideal `HeatCapacity` in the body's
+place, which returns the arithmetic mean of its end temperatures, the same
+comparison is off by 0.065 K and 0.21 K in the body, 0.032 J and 0.10 J in a
+step's heat and 0.19 K and 0.61 K in the temperature the contact was given:
+more than a million times the bounds, as the test requires.
+
+In those comparisons the conductance is constant (the module's own latent
+test makes it depend on the liquid fraction, which the kernel's element does
+not), and the module's heat bracket is 60 J or 20 J either way where its
+fixture has 100 J, because its solve tries the far end of the bracket and a
+few steps on the gas or the body can no longer supply that inside its
+source's range. The module's midpoint thermal step, a conductance that
+depends on state, and its real-gas and reactive thermal variants are not
+compared.
+
 ## Causal pressure-driven molecular compressibility
 
 `RelaxationState::compressibility_relaxation` retains the original evaluated

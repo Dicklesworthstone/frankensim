@@ -15,22 +15,30 @@ fs-ad = { path = "../fs-ad" }
 fs-blake3 = { path = "../fs-blake3" }
 fs-casebook = { path = "../fs-casebook" }
 fs-evidence = { path = "../fs-evidence" }
+fs-exec = { path = "../fs-exec", optional = true }
 fs-fft = { path = "../fs-fft" }
 fs-la = { path = "../fs-la" }
 fs-matdb = { path = "../fs-matdb" }
 fs-math = { path = "../fs-math" }
 fs-modal = { path = "../fs-modal" }
+fs-ports = { path = "../fs-ports", optional = true }
 fs-qty = { path = "../fs-qty" }
 fs-solver = { path = "../fs-solver" }
 fs-thermal = { path = "../fs-thermal" }
 fs-thermochem = { path = "../fs-thermochem" }
 
 [dev-dependencies]
+# The execution context of the composition contract's conformance kit.
+fs-alloc = { path = "../fs-alloc" }
 fs-rand = { path = "../fs-rand" }
 
 [features]
 # Explicit fitted polarization memory; no microscopic or measured-data claim.
 experimental-dielectric-hysteresis = []
+# Physics owners of this crate as Components of the composition contract
+# (fs-ports): `phase::component`. Off by default; the default build has no
+# dependency on fs-ports or fs-exec.
+component = ["dep:fs-ports", "dep:fs-exec"]
 
 [lints]
 workspace = true

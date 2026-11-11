@@ -83,7 +83,9 @@ fs-ladder = { path = "../fs-ladder" }
 fs-io = { path = "../fs-io" }
 fs-psycho = { path = "../fs-psycho" }
 fs-substrate = { path = "../fs-substrate" }
-fs-material = { path = "../fs-material" }
+# With the phase-chart body on the composition contract, for the comparison
+# of a declared graph with the piston module's thermal contact.
+fs-material = { path = "../fs-material", features = ["component"] }
 fs-modal = { path = "../fs-modal" }
 fs-plate = { path = "../fs-plate" }
 fs-solver = { path = "../fs-solver" }

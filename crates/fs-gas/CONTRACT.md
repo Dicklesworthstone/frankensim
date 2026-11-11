@@ -10194,7 +10194,11 @@ timestep admission. Exterior pressure and other loads on the same wall are
 members of one ratio junction in the kernel
 (`SystemBuilder::common_flow_ratios`); the comparisons with the native piston
 family are in `crates/fs-couple/tests/gas_piston_graph.rs` and do not replace
-that family.
+that family. Heat through the wall is a connection too: the cavity's `heat`
+port, the kernel's `Conductance`, and a finite body from fs-material's phase
+chart (`fs_material::phase::component::UniformEnthalpyBody`) agree with the
+piston module's finite-body step on that module's sensible, moving and
+latent fixtures; the numbers are in fs-material's contract.
 
 **Stream port.** `GasCavity::streaming(mass_tolerance_kg)` adds a third port,
 `stream`, a storage's stream port (crates/fs-ports/CONTRACT.md) carrying one
