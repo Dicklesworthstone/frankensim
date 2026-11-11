@@ -407,7 +407,10 @@ impl PortLayout {
 /// How a component's port map behaves, which decides how a block is solved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Class {
-    /// Outputs are an affine function of inputs at a fixed state and step.
+    /// Outputs are an affine function of inputs at a fixed state and step,
+    /// and the slopes of that function depend on the step length alone,
+    /// not on the state or the inputs. A component whose slopes move with
+    /// its state declares [`Class::Smooth`].
     ExactLinear,
     /// Outputs are a differentiable function of inputs.
     Smooth,
