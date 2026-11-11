@@ -13,7 +13,15 @@ use fs_material::phase::{
 };
 use fs_material::state_point::THERMAL_CONDUCTIVITY_DIMS as KD;
 use fs_material::thermal::source::ThermalMaterialPoint;
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Dims, QuantitySpec, Temperature};
+
+fn absolute_temperature() -> QuantitySpec {
+    QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature,
+        ValueForm::Static,
+    ))
+}
 
 fn card(insulating: bool) -> MaterialCard {
     let mut claims = ClaimSet::new();
@@ -26,7 +34,12 @@ fn card(insulating: bool) -> MaterialCard {
                 else { vec![(300.0, 1.0), (500.0, 3.0)] },
             dims: KD,
         },
-        validity: ValidityDomain::unconstrained(),
+        validity: ValidityDomain::unconstrained().with_quantity(
+            "T",
+            absolute_temperature(),
+            300.0,
+            500.0,
+        ),
         interpolation: InterpolationPolicy::LinearInside,
         uncertainty: UncertaintyModel::Unstated,
         observations: vec![],
@@ -67,7 +80,7 @@ fn prepare_source<'a>(
     bounds: [f64; 2],
 ) -> PreparedPhaseConductivity<'a> {
     let context = QueryPoint::new()
-        .with_quantity("T", QuantitySpec::dimensional(Temperature::DIMS), 300.0).unwrap()
+        .with_quantity("T", absolute_temperature(), 300.0).unwrap()
         .with_quantity("f", QuantitySpec::dimensional(Dims::NONE), 0.0).unwrap();
     PreparedPhaseConductivity::new(
         curve,
