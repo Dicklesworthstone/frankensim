@@ -7,14 +7,17 @@
 
 use std::alloc::{GlobalAlloc, Layout, System as SystemAllocator};
 use std::cell::Cell;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_ports::component::{Class, Component, PortSpec, PortTangent, Proposal};
 use fs_system::elements::{
-    Damper, Force, HeatCapacity, Mass, Motion, SourceAccount, Spring, Waveform,
+    Damper, ElementError, Force, HeatCapacity, Mass, Motion, SourceAccount, Spring, Waveform,
 };
-use fs_system::{NodeId, RouteTemperature, System, SystemBuilder};
+use fs_system::{NodeId, RouteTemperature, System, SystemBuilder, SystemError};
 
 struct Counting;
 
@@ -113,7 +116,7 @@ fn chain(n: usize) -> (System, Vec<NodeId>, NodeId) {
 /// is then alone and receives nothing.
 fn line(n: usize, damped: bool) -> (System, Vec<NodeId>, NodeId) {
     let heat = if damped { Heat::Shared } else { Heat::None };
-    let (system, masses, bodies) = build(n, heat);
+    let (system, masses, bodies) = build(n, heat, None);
     (system, masses, bodies[0])
 }
 
@@ -130,9 +133,80 @@ enum Heat {
     Routed,
 }
 
+/// A spring that refuses to give its tangent while its flag is set, and is
+/// otherwise the element it wraps: exactly linear, with the same ports,
+/// steps and slopes.
+struct Balky {
+    spring: Spring,
+    balk: Arc<AtomicBool>,
+}
+
+impl Component for Balky {
+    type State = f64;
+    type Error = ElementError;
+
+    fn ports(&self) -> &[PortSpec] {
+        self.spring.ports()
+    }
+
+    fn class(&self) -> Class {
+        self.spring.class()
+    }
+
+    fn stored_energy_j(&self, state: &f64) -> Result<f64, ElementError> {
+        self.spring.stored_energy_j(state)
+    }
+
+    fn propose(
+        &self,
+        old: &f64,
+        dt_s: f64,
+        inputs: &[f64],
+        new: &mut f64,
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<Proposal, ElementError> {
+        self.spring.propose(old, dt_s, inputs, new, outputs, cx)
+    }
+}
+
+impl PortTangent for Balky {
+    fn jvp(
+        &self,
+        old: &f64,
+        dt_s: f64,
+        inputs: &[f64],
+        d_inputs: &[f64],
+        d_outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        if self.balk.load(Ordering::Relaxed) {
+            return Err(ElementError::Input { value: f64::NAN });
+        }
+        self.spring.jvp(old, dt_s, inputs, d_inputs, d_outputs, cx)
+    }
+
+    fn vjp(
+        &self,
+        old: &f64,
+        dt_s: f64,
+        inputs: &[f64],
+        bar_outputs: &[f64],
+        bar_inputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        self.spring.vjp(old, dt_s, inputs, bar_outputs, bar_inputs, cx)
+    }
+}
+
 /// The line of [`chain`], its dampers' heat going where `heat` says, and
-/// the body and (with [`Heat::Routed`]) the second body.
-fn build(n: usize, heat: Heat) -> (System, Vec<NodeId>, Vec<NodeId>) {
+/// the body and (with [`Heat::Routed`]) the second body. With `balky`, the
+/// spring of that index is a [`Balky`] one on that flag.
+fn build(
+    n: usize,
+    heat: Heat,
+    balky: Option<(usize, &Arc<AtomicBool>)>,
+) -> (System, Vec<NodeId>, Vec<NodeId>) {
     let damped = heat != Heat::None;
     let mut builder = SystemBuilder::new();
     let masses: Vec<NodeId> = (0..n)
@@ -163,13 +237,16 @@ fn build(n: usize, heat: Heat) -> (System, Vec<NodeId>, Vec<NodeId>) {
     ends[0].push(builder.port(push, "p").unwrap());
     let mut heats = Vec::new();
     for index in 0..n {
-        let spring = builder
-            .add_with_tangent(
-                &format!("spring{index}"),
-                Spring::new(STIFFNESS_N_M, 0.0).unwrap(),
-                0.0,
-            )
-            .unwrap();
+        let name = format!("spring{index}");
+        let spring = Spring::new(STIFFNESS_N_M, 0.0).unwrap();
+        let spring = match balky {
+            Some((at, balk)) if at == index => {
+                let balk = Arc::clone(balk);
+                builder.add_with_tangent(&name, Balky { spring, balk }, 0.0)
+            }
+            _ => builder.add_with_tangent(&name, spring, 0.0),
+        }
+        .unwrap();
         let mut between = vec![spring];
         if damped {
             let damper = builder
@@ -464,8 +541,8 @@ fn heat_routed_at_an_equivalent_temperature_costs_no_iteration_more() {
     // temperature the dampers are given. (An estimate; no defect was
     // planted to see it fail.)
     for n in [1_usize, 4, 9] {
-        let (mut routed, masses, bodies) = build(n, Heat::Routed);
-        let (mut shared, _, _) = build(n, Heat::Shared);
+        let (mut routed, masses, bodies) = build(n, Heat::Routed, None);
+        let (mut shared, _, _) = build(n, Heat::Shared, None);
         // Kept: the force sums and the two bodies' heat sums; with one
         // damper, its temperature in place of the two sums it feeds.
         let kept = n + if n == 1 { 1 } else { 2 };
@@ -551,6 +628,64 @@ fn factors_kept_for_an_affine_block_change_no_bit() {
     assert_eq!(
         kept.ledger().energy_residual_j().to_bits(),
         fresh.ledger().energy_residual_j().to_bits()
+    );
+}
+
+#[test]
+fn an_affine_assembly_cut_short_by_a_refusal_leaves_no_factors_behind() {
+    // An affine block keeps the factors of its interface Jacobian for one
+    // step length. Here the fourth spring of a line of six refuses to give
+    // its tangent on demand. Before every third step the line is asked for
+    // a step of another length while the spring refuses: that assembly has
+    // cleared the kept matrix and written the columns before the spring's
+    // when it stops. The step of the usual length that follows must be the
+    // one a line that was never interrupted takes, to the bit and in the
+    // same single iteration: nothing half-written may be used as factors.
+    // (By reading the solve, not by a run with it broken: had the kept
+    // step length survived the refusal, that step's first update would
+    // come from the old factors over entries of another step length and
+    // of none, and a second iteration would be needed.)
+    let n = 6;
+    let (balk, quiet) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let (mut cut, masses, _) = build(n, Heat::None, Some((3, &balk)));
+    let (mut whole, _, _) = build(n, Heat::None, Some((3, &quiet)));
+    assert_eq!(cut.plan_loops(), [(3 * n, n)]);
+    let mut refusals = 0_u32;
+    with_cx(|cx| {
+        for step in 0..90 {
+            if step % 3 == 1 {
+                let before = (cut.time_s().to_bits(), cut.steps());
+                balk.store(true, Ordering::Relaxed);
+                let refused = cut.step(0.37 * DT_S, cx);
+                balk.store(false, Ordering::Relaxed);
+                assert!(
+                    matches!(&refused, Err(SystemError::Component { node, .. }) if node == "spring3"),
+                    "step {step}: {refused:?}"
+                );
+                assert_eq!((cut.time_s().to_bits(), cut.steps()), before);
+                refusals += 1;
+            }
+            let interrupted = cut.step(DT_S, cx).unwrap();
+            let steady = whole.step(DT_S, cx).unwrap();
+            assert_eq!((interrupted.iterations, steady.iterations), (1, 1), "step {step}");
+            for mass in &masses {
+                let a = cut.state::<Motion>(*mass).unwrap();
+                let b = whole.state::<Motion>(*mass).unwrap();
+                assert_eq!(a.position_m.to_bits(), b.position_m.to_bits(), "step {step}");
+                assert_eq!(a.velocity_m_s.to_bits(), b.velocity_m_s.to_bits(), "step {step}");
+            }
+        }
+    });
+    // Thirty assemblies were cut short, and the line moved meanwhile.
+    assert_eq!(refusals, 30);
+    assert!(cut.state::<Motion>(masses[0]).unwrap().position_m.abs() > 1.0e-4);
+    assert_eq!(cut.time_s().to_bits(), whole.time_s().to_bits());
+    assert_eq!(
+        cut.ledger().energy_residual_j().to_bits(),
+        whole.ledger().energy_residual_j().to_bits()
     );
 }
 

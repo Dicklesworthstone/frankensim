@@ -315,9 +315,17 @@ Tarjan, index order).
   on outside its ring, would give others; its refusal of a singular matrix;
   and that a plan refused or factored without a solve is as good as new
   once cleared. The rule that picks the kept inputs is not a search for the
-  fewest: keeping more than needed costs time only. Not tested: an affine
-  block whose assembly is cut short by a component's refusal and then
-  stepped again (the kept step length is voided before the first write).
+  fewest: keeping more than needed costs time only.
+- An assembly that is cut short leaves no factors behind: the kept step
+  length is voided before the first entry is written. `tests/step_cost.rs`:
+  in a line of six masses one spring refuses to give its tangent on demand;
+  thirty times in ninety steps the line is asked for a step of another
+  length while it refuses (the refusal names the spring, and clock and step
+  count stay), and every step of the usual length that follows equals a
+  line never interrupted to the bit, in one iteration. Cut short by a
+  refusal only: an assembly ended by a request to shorten (a differenced
+  component) or by a singular matrix takes the same exit in the code and is
+  not run by a test.
 - A block whose components are all `Class::ExactLinear` and whose drivers
   are all linear is affine, so its interface Jacobian depends on the step
   length only. Its factors are kept and used for the first update of every
