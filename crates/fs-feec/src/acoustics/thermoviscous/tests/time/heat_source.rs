@@ -504,3 +504,65 @@ fn g0_heat_preparation_and_steps_refuse_foreign_nonfinite_and_cancelled_data() {
     ));
     assert_eq!(initial, original);
 }
+
+// The wall shape is antisymmetric about the centre of the cell and the one free velocity dof (the interior diagonal edge) is
+// symmetric about it, so their exact cross entries are 0. `congruence` sums each pair in a different order per triangle; on
+// this fixture one triangle held 1.98e-17 and the other exactly 0, and the mass inverse check refused the matrix.
+#[test]
+fn the_moving_wall_mass_is_exactly_symmetric_on_the_breathing_wall_fixture() {
+    let size = [0.004, 0.002, 0.002];
+    let volume = size.iter().product::<f64>();
+    let (mesh, positions) = box_mesh([1, 1, 1], size);
+    let gas = air();
+    let boundary = sealed(&mesh, &positions, size);
+    let amplitude = 1.0 / det::sqrt(gas.density_kg_m3 * volume);
+    let mut shape = vec![[0.0; 3]; SimplexSpace::new(&mesh, 2).ndof];
+    for (coefficient, position) in shape.iter_mut().take(mesh.vertex_count).zip(&positions) {
+        for axis in 0..3 {
+            coefficient[axis] = amplitude * (position[axis] / size[axis] - 0.5);
+        }
+    }
+    let structure = ModalAcousticTimeModel::try_new_with_free_coordinates(
+        48_000,
+        vec![ModalAcousticMode {
+            angular_frequency_rad_s: 600.0 * std::f64::consts::TAU,
+            damping_ratio: 0.1,
+            pressure_per_modal_velocity: C64::ZERO,
+        }],
+        ModalAcousticTimeBudget::audible_reference(),
+    )
+    .unwrap();
+    let model = ThermoviscousFe::new_with_moving_wall(
+        &mesh,
+        &positions,
+        gas,
+        ThermoviscousThermodynamics::ideal_gas(gas).unwrap(),
+        &boundary,
+        MovingWall {
+            faces: boundary.no_slip_faces.clone(),
+            velocity_shapes: vec![shape],
+            structure,
+        },
+        limits(),
+        &mut || false,
+    )
+    .unwrap();
+    let n = model.n;
+    assert_eq!(
+        (
+            model.velocity_count,
+            model.pressure_start - 3 * model.velocity_count
+        ),
+        (1, 1)
+    );
+    for i in 0..n {
+        for j in 0..i {
+            assert!(
+                model.mass[i * n + j] == model.mass[j * n + i],
+                "mass pair ({i}, {j}): {:e} against {:e}",
+                model.mass[i * n + j],
+                model.mass[j * n + i]
+            );
+        }
+    }
+}

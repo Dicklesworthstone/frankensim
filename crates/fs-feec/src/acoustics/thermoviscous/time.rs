@@ -29,7 +29,7 @@
 //! phase change, nonlinear mechanics or acoustic-resolution claim is inferred.
 
 use super::*;
-use fs_la::factor::{FactorError, cholesky};
+use fs_la::factor::{Cholesky, FactorError, cholesky};
 use fs_phs::linear_exact::{
     DenseExponentialBudget, LinearSplitBudget, MAX_LINEAR_EXPONENTIAL_BLOCK_DIM,
     prepared::PreparedQuadraticFlow, split_quadratic,
@@ -469,26 +469,10 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
         }
         // Cholesky reads the lower triangle. Checking the full inverse against
         // ALL original entries makes an inconsistent upper triangle a refusal.
-        for i in 0..base {
-            poll(cancelled)?;
-            for j in 0..base {
-                let mut value = 0.0;
-                let mut bound = 0.0;
-                for k in 0..base {
-                    let term = mass[i * base + k] * inverse[k * n + j];
-                    value += term;
-                    bound += term.abs();
-                }
-                let expected: f64 = if i == j { 1.0 } else { 0.0 };
-                if !value.is_finite()
-                    || (value - expected).abs()
-                        > 512.0 * f64::EPSILON * base as f64 * bound.max(expected)
-                {
-                    return Err(invalid(
-                        "original full mixed mass inverse failed its residual",
-                    ));
-                }
-            }
+        if !mass_inverse_residual_is_small(&mass, &inverse, &factor, base, n, cancelled)? {
+            return Err(invalid(
+                "original full mixed mass inverse failed its residual",
+            ));
         }
         let mut physical_j = vec![0.0; n * n];
         let mut heat: [Vec<f64>; HEAT_CHANNELS] = std::array::from_fn(|_| vec![0.0; n * n]);
@@ -1100,6 +1084,55 @@ fn admit_work(work: ThermoviscousTimeWork, integrals: &[f64], relative: f64)
     Ok(())
 }
 
+/// Is `inverse` (row stride `n`, formed column by column from `factor`) the inverse of the symmetric `mass` to the accuracy
+/// a Cholesky solve delivers?
+///
+/// Each column is the solution of `M x_j = e_j` by the Cholesky factors L of M, which is Method A of Du Croz and Higham,
+/// IMA J. Numer. Anal. 12 (1992), section 3.1. Their eq. (3.2) states the LU form of the right residual,
+/// `|A X - I| <= c_n u |L||U||X|`; the Cholesky form, `|M X - I| <= c_n u (|L||L^T||X|)_ij`, follows by the same derivation
+/// from the Cholesky backward error (derived here by analogy, not read in the paper). The majorant is the factors', not
+/// M's: wherever L L^T fills a structural zero of M, the rounding error of that fill is a residual entry that |M||X| does
+/// not contain. `512 eps n` stands for `c_n u`. The residual is formed with BOTH triangles of `mass`, so an
+/// inconsistent upper triangle (one the factorization never read) is refused.
+fn mass_inverse_residual_is_small(
+    mass: &[f64],
+    inverse: &[f64],
+    factor: &Cholesky,
+    base: usize,
+    n: usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<bool, ThermoviscousTimeError> {
+    let mut factors = vec![0.0; base * base];
+    for i in 0..base {
+        poll(cancelled)?;
+        for k in 0..=i {
+            let mut sum = 0.0;
+            for m in 0..=k {
+                sum += factor.l(i, m).abs() * factor.l(k, m).abs();
+            }
+            factors[i * base + k] = sum;
+            factors[k * base + i] = sum;
+        }
+    }
+    let allowance = 512.0 * f64::EPSILON * base as f64;
+    for i in 0..base {
+        poll(cancelled)?;
+        for j in 0..base {
+            let mut value = 0.0;
+            let mut bound = 0.0;
+            for k in 0..base {
+                value += mass[i * base + k] * inverse[k * n + j];
+                bound += factors[i * base + k] * inverse[k * n + j].abs();
+            }
+            let expected: f64 = if i == j { 1.0 } else { 0.0 };
+            if !value.is_finite() || (value - expected).abs() > allowance * bound.max(expected) {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
 // Standard congruence T^T A T; never average or repair the source matrix.
 fn congruence(
     a: &[f64],
@@ -1131,3 +1164,6 @@ fn congruence(
     }
     Ok(result)
 }
+
+#[cfg(test)]
+mod inverse_residual_tests;

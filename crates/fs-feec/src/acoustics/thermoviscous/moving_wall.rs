@@ -418,7 +418,19 @@ impl<'c> ThermoviscousFe<'c> {
             projection[i].push((pressure_start + i - self.pressure_start, 1.0));
         }
         let constant = congruence(&self.constant, self.n, n, &projection, cancelled)?;
-        let mass = congruence(&self.mass, self.n, n, &projection, cancelled)?;
+        let mut mass = congruence(&self.mass, self.n, n, &projection, cancelled)?;
+        // P^T M P is symmetric in exact arithmetic when M is, and the two sparse passes of `congruence` sum the pair (a, b) and
+        // the pair (b, a) in different orders, so the computed triangles are two roundings of one value: a pair whose exact
+        // value is 0 (a wall shape that is antisymmetric about the centre against a symmetric interior function) came out as
+        // a residue of 2e-22 in one triangle (2e-17 after the normalization by the diagonal) and exactly 0 in the other.
+        // Keeping the lower triangle, the one the Cholesky factorization of this matrix reads, is exact bookkeeping of one
+        // symmetric value, not a tolerance: the stored and the factored matrix are the same. `constant` is not symmetric and
+        // keeps the plain product.
+        for i in 0..n {
+            for j in 0..i {
+                mass[j * n + i] = mass[i * n + j];
+            }
+        }
         let mut loads = Vec::with_capacity(self.loads.len());
         for old in &self.loads {
             poll(cancelled)?;
