@@ -3,7 +3,7 @@ use crate::sdf3::robust::envelope::tests::fixture;
 use crate::{EvaluationStop, SolveBudget, SolveProgress};
 use std::ops::ControlFlow;
 
-fn loose() -> LoadSpaceCap3 { LoadSpaceCap3::new(2, 1e9, 0.02).unwrap() }
+fn loose() -> LoadSpaceCap3 { LoadSpaceCap3::new(2, 1e9 / 1048576.0, 0.02).unwrap() }
 
 #[test]
 fn scan_replays_each_full_load_set_and_uses_one_source_filter() {

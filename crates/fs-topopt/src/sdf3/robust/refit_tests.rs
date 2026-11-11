@@ -23,7 +23,7 @@ fn build(tree: &Octree3) -> AdaptiveElasticity3 {
     let mut poll = |_| ControlFlow::Continue(());
     let mut q = QuadratureControl3::new(QuadratureOptions3 { depth: 1, ..Default::default() }, &mut poll).unwrap();
     AdaptiveElasticity3::build(HexCell::try_new([0.0; 3], [1.0; 3]).unwrap(), tree, &Slab,
-        &IsotropicElastic::new(1.0, 0.3, 1.0).unwrap(), &|p| p[0] == 0.0,
+        &IsotropicElastic::new(1048576.0, 0.3, 1.0).unwrap(), &|p| p[0] == 0.0,
         ElasticityOptions3::default(), &mut q).unwrap()
 }
 fn y(_: [f64; 3]) -> [f64; 3] { [0.0, -1.0, 0.0] }
@@ -37,7 +37,7 @@ fn policy(steps: usize) -> RobustRefitOptions3 {
     let mut options = RobustRefitOptions3::default();
     options.continuation.steps_per_stage = steps;
     options.continuation.design.volume_limit = 0.4;
-    options.continuation.design.compliance_scale = 1000.0;
+    options.continuation.design.compliance_scale = 1000.0 / 1048576.0;
     options.continuation.design.density_floor = 1e-5;
     options
 }

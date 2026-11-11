@@ -6,7 +6,7 @@ use crate::{SolveBudget, SolveProgress};
 fn cap_for<O: Sdf3Elasticity>(study: &mut CutDensityStudy3<O>, basis: &[&[f64]],
     control: &mut SolveControl<'_>) -> LoadSpaceCap3 {
     let e = study.evaluate_robust_load_space(&vec![1.0; study.cells()], basis,
-        RobustOptions3::default(), &LoadSpace3::new(basis.len(), 1.0, 0.02).unwrap(), control).unwrap();
+        RobustOptions3::default(), &LoadSpace3::new(basis.len(), 1.0 / 1048576.0, 0.02).unwrap(), control).unwrap();
     LoadSpaceCap3::new(basis.len(), 2.0*e.worst_compliance, 0.02).unwrap()
 }
 
@@ -76,7 +76,7 @@ fn full_refusal_invalid_policy_and_shared_budget_do_not_authorize_a_false_seed()
         LoadSpaceStartOptions3 { max_bisections: 65, ..Default::default() }, &mut control).is_err());
     assert_eq!(control.work(), before);
     let refused = controlled_load_space_feasible_start(&mut study, &basis, &raw,
-        &LoadSpaceCap3::new(2, 1e-20, 0.02).unwrap(), design, LoadSpaceStartOptions3::default(), &mut control).unwrap();
+        &LoadSpaceCap3::new(2, 1e-20 / 1048576.0, 0.02).unwrap(), design, LoadSpaceStartOptions3::default(), &mut control).unwrap();
     assert_eq!(refused.stop, LoadSpaceStartStop3::FullDensityRejected);
     assert!(refused.point.is_none());
     let mut poll = |_| ControlFlow::Continue(());

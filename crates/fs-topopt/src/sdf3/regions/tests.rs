@@ -24,7 +24,7 @@ fn fixture(radius: f64, beta: f64) -> (CutDensityStudy3, Vec<f64>, Vec<f64>) {
     let mut poll = |_| ControlFlow::Continue(());
     let mut q = QuadratureControl3::new(QuadratureOptions3 { depth: 1, ..Default::default() }, &mut poll).unwrap();
     let op = CutElasticity3::build(HexCell::try_new([0.0; 3], [1.0; 3]).unwrap(), [2; 3], &Slab,
-        &IsotropicElastic::new(1.0, 0.3, 1.0).unwrap(), &|p| p[0] == 0.0,
+        &IsotropicElastic::new(1048576.0, 0.3, 1.0).unwrap(), &|p| p[0] == 0.0,
         ElasticityOptions3::default(), &mut q).unwrap();
     let y = op.body_load(&|_| [0.0, -1.0, 0.0], || ControlFlow::Continue(())).unwrap();
     let z = op.body_load(&|_| [0.0, 0.0, -1.0], || ControlFlow::Continue(())).unwrap();
@@ -62,7 +62,7 @@ fn physical_zero_and_one_survive_projection_and_have_full_chain_gradients() {
             assert_eq!((a.projected_rho[0], a.projected_rho[n - 1]), (1.0, 0.0));
             let fd = (a.objective.compliance - b.objective.compliance) / (2.0 * h);
             let vd = (a.volume_fraction - b.volume_fraction) / (2.0 * h);
-            assert!((fd - base.objective.gradient[i]).abs() <= 5e-4 * fd.abs().max(1e-8), "compliance beta={beta} cell={i}");
+            assert!((fd - base.objective.gradient[i]).abs() <= 5e-4 * fd.abs().max(1e-8 / 1048576.0), "compliance beta={beta} cell={i}");
             assert!((vd - base.volume_gradient[i]).abs() <= 5e-5 * vd.abs().max(1e-8), "volume beta={beta} cell={i}");
         }
     }

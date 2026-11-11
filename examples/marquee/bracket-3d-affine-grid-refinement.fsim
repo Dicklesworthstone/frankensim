@@ -26,7 +26,7 @@
     :initial-level 1
     :maximum-level 3
     :maximum-leaves 512
-    :youngs-modulus-pa 1000.0
+    :youngs-modulus-pa 1024000.0
     :poissons-ratio 0.3)
   (scenario
     :fixed-boundary (embedded :axis x :fraction (0.0 0.5) :penalty 32.0)
@@ -40,7 +40,7 @@
     :filter-radius-m 0.15
     :max-updates 80
     :density-floor 0.05
-    :compliance-limit-j 0.1
+    :compliance-limit-j 0.00009765625
     :threshold-offset 0.1
     :max-optimizer-evaluations 2000
     :max-backtracks 40
@@ -62,9 +62,9 @@
     :joint-sharpness 40.0
     :limits (
       (mean-displacement :name "tip-z-lower" :axis z
-        :x-fraction (0.5 1.0) :sense at-least :bound-m -0.02 :scale-m 0.02)
+        :x-fraction (0.5 1.0) :sense at-least :bound-m -0.00001953125 :scale-m 0.00001953125)
       (mean-displacement :name "tip-z-upper" :axis z
-        :x-fraction (0.5 1.0) :sense at-most :bound-m 0.02 :scale-m 0.02)
+        :x-fraction (0.5 1.0) :sense at-most :bound-m 0.00001953125 :scale-m 0.00001953125)
       (support-force :name "support-z-lower" :axis z
         :sense at-least :bound-n -2.0 :scale-n 2.0)
       (support-force :name "support-z-upper" :axis z

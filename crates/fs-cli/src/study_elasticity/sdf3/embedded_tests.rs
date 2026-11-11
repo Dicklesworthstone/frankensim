@@ -53,6 +53,9 @@ fn embedded_support_grammar_identity_and_translated_axis_selection_are_explicit(
 #[test]
 fn interior_surface_support_reproduces_affine_extension_without_any_box_clamp() {
     let mut spec = fixture();
+    // The extension below (u = x - 0.17, compliance 0.66) is the unit-modulus,
+    // zero-Poisson solution; this oracle builds and solves the operator directly.
+    spec.youngs = 1.0;
     spec.poisson = 0.0;
     for level in [1, 2] {
         let mut poll = |_| ControlFlow::Continue(());

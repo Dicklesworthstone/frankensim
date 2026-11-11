@@ -5,7 +5,7 @@ use crate::sdf3::PhysicalRegion3;
 
 fn measured_cap<O: Sdf3Elasticity>(study: &mut CutDensityStudy3<O>, basis: &[&[f64]],
     rho: &[f64], factor: f64, control: &mut SolveControl<'_>) -> LoadSpaceCap3 {
-    let p = LoadSpace3::new(basis.len(), 1.0, 0.02).unwrap();
+    let p = LoadSpace3::new(basis.len(), 1.0 / 1048576.0, 0.02).unwrap();
     let e = study.evaluate_robust_load_space(rho, basis, RobustOptions3::default(), &p, control).unwrap();
     LoadSpaceCap3::new(basis.len(), factor*e.worst_compliance, 0.02).unwrap()
 }
@@ -18,7 +18,7 @@ fn basis_caps_cannot_hide_a_failed_simultaneous_combination() {
     let mut poll = |_| ControlFlow::Continue(());
     let mut control = SolveControl::new(SolveBudget::default(), &mut poll);
     let e = study.evaluate_robust_load_space(&rho, &basis, RobustOptions3::default(),
-        &LoadSpace3::new(2, 1.0, 0.02).unwrap(), &mut control).unwrap();
+        &LoadSpace3::new(2, 1.0 / 1048576.0, 0.02).unwrap(), &mut control).unwrap();
     let cap = LoadSpaceCap3::new(2, 1.1*e.physical.eroded.objective.case_compliances[0], 0.02).unwrap();
     let mut e = study.evaluate_robust_load_space(&rho, &basis, RobustOptions3::default(), cap.policy(), &mut control).unwrap();
     assert!(e.physical.eroded.objective.case_compliances.iter().all(|c| *c < cap.cap()));

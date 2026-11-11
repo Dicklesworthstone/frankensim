@@ -22,7 +22,7 @@ fn build(tree: &Octree3) -> AdaptiveElasticity3 {
     let mut p = |_| ControlFlow::Continue(());
     let mut q = QuadratureControl3::new(QuadratureOptions3 { depth: 1, ..Default::default() }, &mut p).unwrap();
     AdaptiveElasticity3::build(HexCell::try_new([0.0; 3], [1.0; 3]).unwrap(), tree, &Slab,
-        &IsotropicElastic::new(1.0, 0.3, 1.0).unwrap(), &|p| p[0] == 0.0,
+        &IsotropicElastic::new(1048576.0, 0.3, 1.0).unwrap(), &|p| p[0] == 0.0,
         ElasticityOptions3::default(), &mut q).unwrap()
 }
 fn fine(tree: &Octree3) -> AdaptiveElasticity3 {

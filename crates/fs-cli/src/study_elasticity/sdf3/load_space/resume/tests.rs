@@ -41,9 +41,9 @@ fn g3_load_space_checkpoint_pins_original_physics_and_executable() {
     let producer = checkpoint::producer_identity(&gate).unwrap();
     recover(&spec, &ledger, &old, producer).unwrap();
     for source in [
-        FIXTURE.replace(":compliance-limit-j 10.0", ":compliance-limit-j 11.0"),
+        FIXTURE.replace(":compliance-limit-j 0.0000095367431640625", ":compliance-limit-j 0.00001049041748046875"),
         FIXTURE.replace("(0.0 -1.0 -0.5)", "(0.0 -1.0 -0.6)"),
-        FIXTURE.replace(":youngs-modulus-pa 1.0", ":youngs-modulus-pa 1.1"),
+        FIXTURE.replace(":youngs-modulus-pa 1048576.0", ":youngs-modulus-pa 1153433.6"),
         FIXTURE.replace(":threshold-offset 0.1", ":threshold-offset 0.2"),
         FIXTURE.replace(":max-optimizer-evaluations 2000", ":max-optimizer-evaluations 3000"),
         FIXTURE.replace(":linear-iterations 250000", ":linear-iterations 300000"),

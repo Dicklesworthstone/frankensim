@@ -31,7 +31,7 @@ fn build(tree: &Octree3, checkpoint: &mut dyn FnMut() -> ControlFlow<()>)
     ).map_err(ElasticityError3::from)?;
     Ok(AdaptiveElasticity3::build(
         HexCell::try_new([0.0; 3], [1.0; 3]).unwrap(), tree, &Slab,
-        &IsotropicElastic::new(1.0, 0.3, 1.0).unwrap(), &|p| p[0] == 0.0,
+        &IsotropicElastic::new(1048576.0, 0.3, 1.0).unwrap(), &|p| p[0] == 0.0,
         ElasticityOptions3::default(), &mut q,
     )?)
 }

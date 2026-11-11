@@ -11,8 +11,11 @@ This frontier feature uses the existing `fs-topopt` adaptive continuation driver
 The separate `fsim-sdf3-study :version 1` input preserves the existing 2-D
 free-boundary study format. Every section and field shown in the example is
 required, in the shown order; unknown and repeated fields refuse before work.
-All quantities use SI units. The example's modulus is **1 Pa**, deliberately a
-numerical mechanics example rather than a physical bracket material card.
+All quantities use SI units. The example's modulus is **1048576 Pa** (2^20 Pa),
+deliberately a numerical mechanics example rather than a physical bracket
+material card. It keeps the strains of the unit body-force densities inside the
+native material's small-strain domain; at 1 Pa the study refuses at
+`sdf3-material-domain` before its first stage.
 
 The domain is the part of the explicit one-metre cube below
 `z = height-m + curvature-per-m * x * (1 m - x)`. This scalar field is an

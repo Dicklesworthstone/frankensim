@@ -22,7 +22,7 @@ pub(super) fn fixture(beta: f64) -> (CutDensityStudy3, Vec<f64>, Vec<f64>) {
     let mut poll = |_| ControlFlow::Continue(());
     let mut q = QuadratureControl3::new(QuadratureOptions3 { depth: 1, ..Default::default() }, &mut poll).unwrap();
     let op = CutElasticity3::build(HexCell::try_new([0.0;3], [1.0;3]).unwrap(), [2;3], &Slab,
-        &IsotropicElastic::new(1.0, 0.3, 1.0).unwrap(), &|p| p[0] == 0.0,
+        &IsotropicElastic::new(1048576.0, 0.3, 1.0).unwrap(), &|p| p[0] == 0.0,
         ElasticityOptions3::default(), &mut q).unwrap();
     let y = op.body_load(&|p| [0.0, -1.0 - p[1], 0.0], || ControlFlow::Continue(())).unwrap();
     let z = op.body_load(&|p| [0.0, 0.0, -1.0 - p[0]], || ControlFlow::Continue(())).unwrap();
@@ -36,7 +36,7 @@ pub(super) fn native_body_operator() -> CutElasticity3 {
     let mut q = QuadratureControl3::new(QuadratureOptions3 { depth: 1, ..Default::default() }, &mut poll).unwrap();
     let field = |cell: HexCell| {
         let density = if cell.lo()[0] < 0.5 { 2_u8 } else { 9_u8 };
-        let tensor = std::array::from_fn(|i| std::array::from_fn(|j| if i == j { 1.0 } else { 0.0 }));
+        let tensor = std::array::from_fn(|i| std::array::from_fn(|j| if i == j { 1048576.0 } else { 0.0 }));
         Ok(ElasticAcousticState::try_new_mandel(tensor, f64::from(density), ContentHash([density; 32]), 1.0).unwrap())
     };
     CutElasticity3::build_with_material_field(HexCell::try_new([0.0; 3], [1.0; 3]).unwrap(), [2; 3], &Slab,
@@ -70,13 +70,13 @@ fn single_case_and_duplicate_loads_keep_actual_independent_fields() {
     let mut poll = |_| ControlFlow::Continue(());
     let mut c = SolveControl::new(SolveBudget::default(), &mut poll);
     let robust = study.evaluate_robust(&rho, &[LoadCase { force: &z, weight: 1.0 }], RobustOptions3::default(), &mut c).unwrap();
-    let policy = LoadEnvelope3::new(vec![1000.0], 0.1, 1).unwrap();
+    let policy = LoadEnvelope3::new(vec![1000.0 / 1048576.0], 0.1, 1).unwrap();
     let one = study.evaluate_robust_envelope(&rho, &[&z], RobustOptions3::default(), &policy, &mut c).unwrap();
-    close(one.envelope.value, robust.eroded.objective.compliance/1000.0, 1e-13);
-    for (g, reference) in one.gradient.iter().zip(&robust.eroded.objective.gradient) { close(*g, reference/1000.0, 1e-9); }
+    close(one.envelope.value, robust.eroded.objective.compliance/(1000.0 / 1048576.0), 1e-13);
+    for (g, reference) in one.gradient.iter().zip(&robust.eroded.objective.gradient) { close(*g, reference/(1000.0 / 1048576.0), 1e-9); }
     let opposite: Vec<_> = z.iter().map(|v| -v).collect();
     let two = study.evaluate_robust_envelope(&rho, &[&z, &opposite], RobustOptions3::default(),
-        &LoadEnvelope3::new(vec![1000.0;2], 0.1, 2).unwrap(), &mut c).unwrap();
+        &LoadEnvelope3::new(vec![1000.0 / 1048576.0; 2], 0.1, 2).unwrap(), &mut c).unwrap();
     close(two.envelope.value, one.envelope.value + 0.1*fs_math::det::ln(2.0), 1e-13);
     assert!(two.envelope.maximum > 0.0);
     assert_eq!(two.physical.eroded.objective.displacements.len(), 2);
@@ -88,7 +88,7 @@ fn exact_design_gradient_and_dilated_volume_match_each_coordinate() {
     for beta in [1.0, 4.0] {
         let (mut study, y, z) = fixture(beta);
         let rho: Vec<_> = (0..study.cells()).map(|i| 0.37 + 0.025*i as f64).collect();
-        let p = LoadEnvelope3::new(vec![1200.0, 1700.0], 0.08, 2).unwrap();
+        let p = LoadEnvelope3::new(vec![1200.0 / 1048576.0, 1700.0 / 1048576.0], 0.08, 2).unwrap();
         let mut poll = |_| ControlFlow::Continue(());
         let mut c = SolveControl::new(SolveBudget::default(), &mut poll);
         let e = study.evaluate_robust_envelope(&rho, &[&y,&z], RobustOptions3::default(), &p, &mut c).unwrap();
@@ -116,7 +116,7 @@ fn protected_regions_and_cancelled_pullback_leave_the_nominal_solution_unchanged
     let mut c = SolveControl::new(SolveBudget::default(), &mut poll);
     study.evaluate(&rho, &[LoadCase { force: &z, weight: 1.0 }], &mut c).unwrap();
     let scales = study.operator().scales().to_vec();
-    let p = LoadEnvelope3::new(vec![1000.0;2], 0.1, 2).unwrap();
+    let p = LoadEnvelope3::new(vec![1000.0 / 1048576.0; 2], 0.1, 2).unwrap();
     let e = study.evaluate_robust_envelope(&rho, &[&y,&z], RobustOptions3::default(), &p, &mut c).unwrap();
     for field in [&e.physical.eroded.projected_rho, &e.physical.nominal_rho, &e.physical.dilated_rho] {
         assert_eq!(field[0], 1.0); assert_eq!(field[1], 0.0);

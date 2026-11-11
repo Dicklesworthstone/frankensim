@@ -23,7 +23,7 @@ pub(super) fn build(tree: &Octree3) -> AdaptiveElasticity3 {
     let mut poll = |_| ControlFlow::Continue(());
     let mut q = QuadratureControl3::new(QuadratureOptions3 { depth: 1, ..Default::default() }, &mut poll).unwrap();
     AdaptiveElasticity3::build(HexCell::try_new([0.0;3],[1.0;3]).unwrap(), tree, &Slab,
-        &IsotropicElastic::new(1.0,0.3,1.0).unwrap(), &|p| p[0]==0.0,
+        &IsotropicElastic::new(1048576.0,0.3,1.0).unwrap(), &|p| p[0]==0.0,
         ElasticityOptions3::default(), &mut q).unwrap()
 }
 pub(super) fn params() -> SimpParams { SimpParams { penal: 2.0, beta: 2.0, e_min: 1e-3, ..Default::default() } }
@@ -46,7 +46,7 @@ fn fine_worst_combination_replays_inherited_eroded_material_without_raw_refilter
     let mut study=CutDensityStudy3::new(build(&tree),0.15,SimpParams::default());
     let raw: Vec<_>=(0..study.cells()).map(|i|0.35+0.04*i as f64).collect();
     let original=study.params(); let scales=study.operator().scales().to_vec();
-    let cap=LoadSpaceCap3::new(2,1e9,0.02).unwrap();
+    let cap=LoadSpaceCap3::new(2,1e9 / 1048576.0,0.02).unwrap();
     let robust=RobustOptions3::default();
     let mut poll=|_|ControlFlow::Continue(());
     let mut control=SolveControl::new(SolveBudget::default(),&mut poll);
@@ -88,7 +88,7 @@ fn individually_passing_refined_basis_loads_do_not_pass_the_combined_cap() {
     let laws=[ReferenceLoad3::body(&y),ReferenceLoad3::body(&y)];
     let mut poll=|_|ControlFlow::Continue(());
     let mut control=SolveControl::new(SolveBudget::default(),&mut poll);
-    let cap=LoadSpaceCap3::new(2,1e9,0.02).unwrap();
+    let cap=LoadSpaceCap3::new(2,1e9 / 1048576.0,0.02).unwrap();
     let first=study.estimate_load_space_cap_enrichment(build(&fine),&laws,&raw,params(),RobustOptions3::default(),
         &cap,options(),&mut control).unwrap();
     let individual=first.basis_assessment.cases[0].fine_value;
@@ -118,7 +118,7 @@ fn invalid_or_unenriched_requests_refuse_before_any_load_callback() {
     let raw=vec![0.5;study.cells()];
     let forbidden=|_: [f64;3]| -> [f64;3] { panic!("refused request invoked load law") };
     let laws=[ReferenceLoad3::body(&forbidden),ReferenceLoad3::body(&forbidden)];
-    let cap=LoadSpaceCap3::new(2,1e9,0.02).unwrap();
+    let cap=LoadSpaceCap3::new(2,1e9 / 1048576.0,0.02).unwrap();
     let mut poll=|_|ControlFlow::Continue(());
     let mut control=SolveControl::new(SolveBudget::default(),&mut poll);
     assert!(study.estimate_load_space_cap_enrichment(build(&tree),&laws,&raw,params(),RobustOptions3::default(),
@@ -137,7 +137,7 @@ fn late_cancellation_and_shared_budget_restore_the_incoming_nonunit_state() {
     let (tree,fine)=trees();
     let mut study=CutDensityStudy3::new(build(&tree),0.15,params());
     let raw=vec![0.5;study.cells()];
-    let cap=LoadSpaceCap3::new(2,1e9,0.02).unwrap();
+    let cap=LoadSpaceCap3::new(2,1e9 / 1048576.0,0.02).unwrap();
     let mut poll=|_|ControlFlow::Continue(());
     let mut control=SolveControl::new(SolveBudget::default(),&mut poll);
     let force=study.operator().reference_load(laws()[0],||ControlFlow::Continue(())).unwrap();
@@ -169,7 +169,7 @@ fn protected_regions_and_original_reference_estimator_match_without_extra_state_
     regions[0]=PhysicalRegion3::Solid;regions[1]=PhysicalRegion3::Void;
     let mut study=study.with_physical_regions(regions).unwrap();
     let raw=vec![0.55;study.cells()];let scales=study.operator().scales().to_vec();
-    let cap=LoadSpaceCap3::new(2,1e9,0.02).unwrap();
+    let cap=LoadSpaceCap3::new(2,1e9 / 1048576.0,0.02).unwrap();
     let mut poll=|_|ControlFlow::Continue(());
     let mut control=SolveControl::new(SolveBudget::default(),&mut poll);
     let report=study.estimate_load_space_cap_enrichment(build(&fine),&laws(),&raw,params(),RobustOptions3::default(),

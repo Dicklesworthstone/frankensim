@@ -26,7 +26,7 @@ fn build(tree: &Octree3, cp: &mut dyn FnMut() -> ControlFlow<()>) -> Result<Adap
     let mut q = QuadratureControl3::new(QuadratureOptions3 { depth: 1, ..Default::default() }, &mut poll)
         .map_err(ElasticityError3::from)?;
     let op = AdaptiveElasticity3::build(HexCell::try_new([0.0;3], [1.0;3]).unwrap(), tree, &Slab,
-        &IsotropicElastic::new(1.0,0.3,1.0).unwrap(), &|p| p[0] == 0.0,
+        &IsotropicElastic::new(1048576.0,0.3,1.0).unwrap(), &|p| p[0] == 0.0,
         ElasticityOptions3::default(), &mut q)?;
     Ok(AdaptiveSolveSpace3::jacobi(op, 100_000_000))
 }
@@ -40,7 +40,7 @@ fn initial(control: &mut SolveControl<'_>) -> (Octree3, LoadSpaceCapRefit3<Adapt
     let raw = vec![0.3; study.cells()];
     let options = LoadSpaceCapRefitOptions3 { accepted_steps:0, ..Default::default() };
     let result = study.solve_reference_load_space_cap(&raw,&laws(),
-        &LoadSpaceCap3::new(2,1e12,0.03).unwrap(),options,control).unwrap();
+        &LoadSpaceCap3::new(2,1e12 / 1048576.0,0.03).unwrap(),options,control).unwrap();
     assert!(result.completed_and_rechecked());
     (tree,result)
 }

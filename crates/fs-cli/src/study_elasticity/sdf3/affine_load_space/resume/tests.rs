@@ -92,9 +92,15 @@ fn g3_affine_checkpoint_pins_self_weight_uncertainty_source_and_executable() {
         Some(recovery.checkpoint.binding.to_hex().as_str())
     );
     for source in [
-        FIXTURE.replace(":compliance-limit-j 0.01", ":compliance-limit-j 0.02"),
+        FIXTURE.replace(
+            ":compliance-limit-j 0.000009765625",
+            ":compliance-limit-j 0.00001953125",
+        ),
         FIXTURE.replace("(0.0 -1.0 -0.5)", "(0.0 -1.0 -0.6)"),
-        FIXTURE.replace(":youngs-modulus-pa 1000.0", ":youngs-modulus-pa 1100.0"),
+        FIXTURE.replace(
+            ":youngs-modulus-pa 1024000.0",
+            ":youngs-modulus-pa 1126400.0",
+        ),
         FIXTURE.replace(":density-kg-m3 0.2", ":density-kg-m3 0.3"),
         FIXTURE.replace(
             ":acceleration-m-s2 (0.0 0.0 -1.0)",

@@ -23,7 +23,10 @@ fn numbers(value: &J) -> Vec<f64> {
 fn report_exports_selected_robust_fields_from_ledger_after_source_is_relocated() {
     let source = include_str!("../../../../examples/marquee/bracket-3d-load-space.fsim")
         .replace(":max-updates 80", ":max-updates 2")
-        .replace(":compliance-limit-j 10.0", ":compliance-limit-j 10000.0");
+        .replace(
+            ":compliance-limit-j 0.0000095367431640625",
+            ":compliance-limit-j 0.0095367431640625",
+        );
     let dir = scratch("load-space-vtu");
     let (ledger, result) = run(&dir, "robust", &source, 6);
     let design = data(&ledger, &result, "design");

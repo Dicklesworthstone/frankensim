@@ -16,10 +16,10 @@ fn builder(tree: &Octree3, cp: &mut dyn FnMut() -> ControlFlow<()>)
     let mut q = QuadratureControl3::new(QuadratureOptions3 { depth: 1, ..Default::default() }, &mut poll)
         .map_err(fs_cutfem::elastic3::ElasticityError3::from)?;
     Ok(AdaptiveElasticity3::build(HexCell::try_new([0.0; 3], [1.0; 3]).unwrap(), tree, &Slab,
-        &IsotropicElastic::new(1.0, 0.3, 1.0).unwrap(), &|p| p[0] == 0.0,
+        &IsotropicElastic::new(1048576.0, 0.3, 1.0).unwrap(), &|p| p[0] == 0.0,
         ElasticityOptions3::default(), &mut q)?)
 }
-fn requirements() -> ComplianceCaps3 { ComplianceCaps3::new(vec![1e6, 2e6], 0.02, 2).unwrap() }
+fn requirements() -> ComplianceCaps3 { ComplianceCaps3::new(vec![1e6 / 1048576.0, 2e6 / 1048576.0], 0.02, 2).unwrap() }
 
 #[test]
 fn split_refits_match_uninterrupted_grids_fields_probes_and_work() {

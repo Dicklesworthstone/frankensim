@@ -34,7 +34,7 @@ fn fixture(level: u8, hanging: bool) -> (CutDensityStudy3<AdaptiveSolveSpace3>, 
     let mut geometry = QuadratureControl3::new(
         QuadratureOptions3 { depth: 1, ..Default::default() }, &mut poll).unwrap();
     let op = AdaptiveElasticity3::build(HexCell::try_new([0.0; 3], [1.0; 3]).unwrap(),
-        &tree, &Slab, &IsotropicElastic::new(3.0, 0.27, 1.0).unwrap(), &|p| p[0] == 0.0,
+        &tree, &Slab, &IsotropicElastic::new(3145728.0, 0.27, 1.0).unwrap(), &|p| p[0] == 0.0,
         ElasticityOptions3::default(), &mut geometry).unwrap();
     let y = op.body_load(&|p| [0.0, -(0.4 + p[0]), 0.0], || ControlFlow::Continue(())).unwrap();
     let z = op.body_load(&|p| [0.1 * p[1], 0.0, -1.0], || ControlFlow::Continue(())).unwrap();

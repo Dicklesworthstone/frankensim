@@ -90,8 +90,20 @@ fn g1_g3_g5_affine_response_cli_preserves_all_signed_bounds_and_exports_each_adv
     assert!(number(response, "worst_residual") <= 0.0);
     let limits = response.get("limits").and_then(J::as_array).unwrap();
     let expected = [
-        ("tip-z-lower", "mean-displacement", "m", "at-least", -0.02),
-        ("tip-z-upper", "mean-displacement", "m", "at-most", 0.02),
+        (
+            "tip-z-lower",
+            "mean-displacement",
+            "m",
+            "at-least",
+            -0.02 / 1024.0,
+        ),
+        (
+            "tip-z-upper",
+            "mean-displacement",
+            "m",
+            "at-most",
+            0.02 / 1024.0,
+        ),
         ("support-z-lower", "support-force", "N", "at-least", -2.0),
         ("support-z-upper", "support-force", "N", "at-most", 2.0),
         ("support-y-upper", "support-moment", "N*m", "at-most", 1.0),

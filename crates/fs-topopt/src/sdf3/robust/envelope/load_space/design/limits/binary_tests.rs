@@ -7,7 +7,7 @@ use std::ops::ControlFlow;
 fn close(a: f64, b: f64) {
     assert!((a-b).abs() <= 1e-8*a.abs().max(b.abs()).max(1e-12), "{a} != {b}");
 }
-fn loose() -> LoadSpaceCap3 { LoadSpaceCap3::new(2, 1e9, 0.02).unwrap() }
+fn loose() -> LoadSpaceCap3 { LoadSpaceCap3::new(2, 1e9 / 1048576.0, 0.02).unwrap() }
 
 #[test]
 fn separately_feasible_binary_basis_cases_do_not_admit_an_unsafe_combination() {
@@ -48,7 +48,7 @@ fn binary_worst_force_replays_its_own_material_with_protected_regions() {
         &ComplianceCaps3::new(vec![loose().cap()], 0.02, 1).unwrap(), options, &mut control).unwrap();
     close(direct.case_compliances[0], checked.worst_compliance);
     for (&a, &b) in direct.displacements[0].iter().zip(&checked.worst_displacement) {
-        assert!((a-b).abs() <= 1e-8*checked.worst_displacement.iter().map(|x| x.abs()).fold(1.0, f64::max));
+        assert!((a-b).abs() <= 1e-8*checked.worst_displacement.iter().map(|x| x.abs()).fold(1.0 / 1048576.0, f64::max));
     }
     assert_eq!(direct.eroded, checked.physical.eroded);
     for mask in [&checked.physical.eroded, &checked.physical.nominal, &checked.physical.dilated] {

@@ -31,7 +31,7 @@
     :initial-level 1
     :maximum-level 5
     :maximum-leaves 2048
-    :youngs-modulus-pa 1.0
+    :youngs-modulus-pa 1048576.0
     :poissons-ratio 0.3)
   (scenario
     :fixed-boundary left

@@ -5,7 +5,7 @@ use std::ops::ControlFlow;
 fn close(a: f64, b: f64, tolerance: f64) {
     assert!((a-b).abs() <= tolerance*a.abs().max(b.abs()).max(1e-10), "{a} != {b}");
 }
-fn policy() -> LoadSpace3 { LoadSpace3::new(2, 1000.0, 0.05).unwrap() }
+fn policy() -> LoadSpace3 { LoadSpace3::new(2, 1000.0 / 1048576.0, 0.05).unwrap() }
 
 #[test]
 fn repeated_eigenvalues_have_a_smooth_objective_and_bad_grams_refuse() {
@@ -100,7 +100,7 @@ fn dependent_opposite_columns_are_a_larger_load_set_not_cancelling_scenarios() {
     let mut poll = |_| ControlFlow::Continue(());
     let mut control = SolveControl::new(SolveBudget::default(), &mut poll);
     let one = study.evaluate_robust_load_space(&rho, &[&z], RobustOptions3::default(),
-        &LoadSpace3::new(1, 1000.0, 0.05).unwrap(), &mut control).unwrap();
+        &LoadSpace3::new(1, 1000.0 / 1048576.0, 0.05).unwrap(), &mut control).unwrap();
     let two = study.evaluate_robust_load_space(&rho, &[&z,&negative], RobustOptions3::default(), &policy(), &mut control).unwrap();
     close(two.spectrum.maximum, 2.0*one.spectrum.maximum, 1e-10);
     let zeros = vec![0.0; z.len()];

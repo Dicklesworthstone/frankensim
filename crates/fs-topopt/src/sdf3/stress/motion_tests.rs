@@ -116,7 +116,7 @@ fn g0_motion_case_with_zero_weight_still_enters_sampled_peak_constraint() {
 
 #[test]
 fn g5_none_motions_preserve_the_original_path_and_work_exactly() {
-    let op=build(true); let f=op.elasticity().body_load(&|_|[0.0,0.0,-1.0],||ControlFlow::Continue(())).unwrap();
+    let op=build(true); let f=op.elasticity().body_load(&|_|[0.0,0.0,-1.0/1024.0],||ControlFlow::Continue(())).unwrap();
     let loads=[LoadCase{force:&f,weight:1.0}]; let mut s=CutDensityStudy3::new(op,0.15,params());
     let rho=vec![0.5;s.cells()];
     let mut p=|_|ControlFlow::Continue(());let mut a=SolveControl::new(SolveBudget::default(),&mut p);

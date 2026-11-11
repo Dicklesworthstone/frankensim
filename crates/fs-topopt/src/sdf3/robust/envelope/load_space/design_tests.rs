@@ -3,7 +3,7 @@ use crate::sdf3::robust::envelope::tests::fixture;
 use crate::{SolveBudget, SolveProgress};
 fn normalized_policy(study: &mut CutDensityStudy3, raw: &[f64], basis: &[&[f64]], control: &mut SolveControl<'_>) -> LoadSpace3 {
     let reference = study.evaluate_robust_load_space(raw, basis, RobustOptions3::default(),
-        &LoadSpace3::new(basis.len(), 1.0, 0.05).unwrap(), control).unwrap().worst_compliance;
+        &LoadSpace3::new(basis.len(), 1.0 / 1048576.0, 0.05).unwrap(), control).unwrap().worst_compliance;
     LoadSpace3::new(basis.len(), reference, 0.05).unwrap()
 }
 

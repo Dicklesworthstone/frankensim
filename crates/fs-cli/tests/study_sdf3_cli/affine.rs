@@ -18,7 +18,10 @@ fn affine_cli_reduces_feasible_material_and_exports_the_complete_physical_witnes
     let dir = scratch("affine-load-space");
     // Leave enough physical headroom for a material reduction in two updates.
     // The report must still demonstrate feasibility against this explicit cap.
-    let source = SOURCE.replace(":compliance-limit-j 0.01", ":compliance-limit-j 0.1");
+    let source = SOURCE.replace(
+        ":compliance-limit-j 0.000009765625",
+        ":compliance-limit-j 0.00009765625",
+    );
     let source_path = dir.join("affine.fsim");
     let ledger = dir.join("affine.db");
     fs::write(&source_path, &source).unwrap();
@@ -59,7 +62,7 @@ fn affine_cli_reduces_feasible_material_and_exports_the_complete_physical_witnes
     assert_eq!(report.get("selected_feasible"), Some(&J::Bool(true)));
     let selected = report.get("selected").unwrap();
     let cap = number(report.get("model").unwrap(), "compliance_limit_j");
-    assert_eq!(cap, 0.1);
+    assert_eq!(cap, 0.1 / 1024.0);
     assert!(number(selected, "worst_compliance_j") > 0.0);
     assert!(number(selected, "worst_compliance_j") <= cap);
     assert!(number(selected, "maximum_ratio") <= 1.0);

@@ -170,7 +170,7 @@ fn invalid_caps_and_force_shapes_refuse_before_any_solve() {
         assert!(ComplianceCaps3::new(vec![cap], 0.03, 1).is_err());
     }
     let (mut study, _, z) = fixture(1.0); let raw = vec![0.65; study.cells()];
-    let limits = ComplianceCaps3::new(vec![1000.0], 0.03, 1).unwrap();
+    let limits = ComplianceCaps3::new(vec![1000.0 / 1048576.0], 0.03, 1).unwrap();
     let bad_forces = [&z[..z.len()-1]];
     let mut poll = |_| ControlFlow::Continue(());
     let mut control = SolveControl::new(SolveBudget::default(), &mut poll);

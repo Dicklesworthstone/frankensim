@@ -2,7 +2,7 @@ use super::*;
 use crate::sdf3::robust::envelope::tests::fixture;
 use crate::{SolveBudget, SolveProgress};
 use std::ops::ControlFlow;
-fn caps() -> ComplianceCaps3 { ComplianceCaps3::new(vec![1e9; 2], 0.02, 2).unwrap() }
+fn caps() -> ComplianceCaps3 { ComplianceCaps3::new(vec![1e9 / 1048576.0; 2], 0.02, 2).unwrap() }
 
 #[test]
 fn scan_matches_independent_endpoints_and_filters_only_once() {
@@ -76,7 +76,7 @@ fn whole_schedule_is_admitted_before_work_and_unmet_caps_do_not_fall_back_to_gra
     assert!(study.scan_binary_compliance_caps(&raw, &[&y, &z], &caps(), &[0.2, 0.3],
         BinaryComplianceScanOptions3 { max_candidates: 1, ..options }, &mut control).is_err());
     assert_eq!(control.work().linear_solves, 0);
-    let impossible = ComplianceCaps3::new(vec![1e-10; 2], 0.02, 2).unwrap();
+    let impossible = ComplianceCaps3::new(vec![1e-10 / 1048576.0; 2], 0.02, 2).unwrap();
     let report = study.scan_binary_compliance_caps(&raw, &[&y, &z], &impossible, &[0.1, 0.5], options, &mut control).unwrap();
     assert_eq!(report.stop, BinaryComplianceScanStop3::ScheduleComplete);
     assert!(report.best.is_none()); assert!(report.candidates.iter().all(|c| !c.physical_caps_satisfied));

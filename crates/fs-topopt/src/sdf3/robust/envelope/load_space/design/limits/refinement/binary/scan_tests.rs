@@ -12,7 +12,7 @@ fn g1_selection_matches_independent_two_grid_checks_and_retains_matching_fields(
     let mut study = CutDensityStudy3::new(build(&tree),0.15,SimpParams::default());
     let raw: Vec<_> = (0..study.cells()).map(|i|0.35+0.05*i as f64).collect();
     let incoming = study.params(); let scales = study.operator().scales().to_vec();
-    let cap = LoadSpaceCap3::new(2,1e9,0.02).unwrap();
+    let cap = LoadSpaceCap3::new(2,1e9 / 1048576.0,0.02).unwrap();
     let thresholds = [0.2,0.5,0.65,0.65];
     let mut poll = |_| ControlFlow::Continue(());
     let mut control = SolveControl::new(SolveBudget::default(),&mut poll);
@@ -50,7 +50,7 @@ fn g0_coarse_feasibility_cannot_waive_grid_change_or_material_limits() {
     let (tree,fine) = trees();
     let mut study = CutDensityStudy3::new(build(&tree),0.15,params());
     let raw = vec![0.8;study.cells()];
-    let cap = LoadSpaceCap3::new(2,1e9,0.02).unwrap();
+    let cap = LoadSpaceCap3::new(2,1e9 / 1048576.0,0.02).unwrap();
     let mut poll = |_| ControlFlow::Continue(());
     let mut control = SolveControl::new(SolveBudget::default(),&mut poll);
     let mut p = policy(); p.change_tolerance = 0.0;
@@ -72,7 +72,7 @@ fn g4_late_stops_and_failed_builds_keep_only_completed_two_grid_endpoints() {
     let (tree,fine) = trees();
     let mut study = CutDensityStudy3::new(build(&tree),0.15,params());
     let raw = vec![0.8;study.cells()]; let scales = study.operator().scales().to_vec();
-    let cap = LoadSpaceCap3::new(2,1e9,0.02).unwrap();
+    let cap = LoadSpaceCap3::new(2,1e9 / 1048576.0,0.02).unwrap();
     let mut poll = |p:SolveProgress| if p.stage == "sdf3-binary-refined-scan-accepted" {
         ControlFlow::Break(())
     } else { ControlFlow::Continue(()) };
@@ -103,7 +103,7 @@ fn g4_invalid_schedules_refuse_before_builds_and_shared_work_is_never_reset() {
     let (tree,fine) = trees();
     let mut study = CutDensityStudy3::new(build(&tree),0.15,params());
     let raw = vec![0.8;study.cells()];
-    let cap = LoadSpaceCap3::new(2,1e9,0.02).unwrap();
+    let cap = LoadSpaceCap3::new(2,1e9 / 1048576.0,0.02).unwrap();
     let mut poll = |_| ControlFlow::Continue(());
     let mut control = SolveControl::new(SolveBudget::default(),&mut poll);
     for thresholds in [vec![],vec![0.2,f64::NAN],vec![0.0]] {
@@ -126,7 +126,7 @@ fn g1_exhaustive_refined_scan_matches_every_distinct_source_state() {
     let (tree,fine) = trees();
     let mut study = CutDensityStudy3::new(build(&tree),0.15,SimpParams::default());
     let raw: Vec<_> = (0..study.cells()).map(|i|0.31+0.052*i as f64).collect();
-    let cap = LoadSpaceCap3::new(2,1e9,0.02).unwrap();
+    let cap = LoadSpaceCap3::new(2,1e9 / 1048576.0,0.02).unwrap();
     let mut p = policy(); p.selection.max_candidates = 128;
     let mut poll = |_| ControlFlow::Continue(());
     let mut control = SolveControl::new(SolveBudget::default(),&mut poll);
@@ -164,7 +164,7 @@ fn g4_exhaustive_state_limit_refuses_before_any_enriched_build() {
     let (tree,fine) = trees();
     let mut study = CutDensityStudy3::new(build(&tree),0.15,params());
     let raw: Vec<_> = (0..study.cells()).map(|i|0.31+0.052*i as f64).collect();
-    let cap = LoadSpaceCap3::new(2,1e9,0.02).unwrap();
+    let cap = LoadSpaceCap3::new(2,1e9 / 1048576.0,0.02).unwrap();
     let mut p = policy(); p.selection.max_candidates = 1;
     let mut poll = |_| ControlFlow::Continue(());
     let mut control = SolveControl::new(SolveBudget::default(),&mut poll);

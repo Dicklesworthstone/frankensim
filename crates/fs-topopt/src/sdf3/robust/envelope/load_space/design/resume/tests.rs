@@ -13,7 +13,7 @@ fn g5_restored_load_space_search_matches_uninterrupted_accepted_designs() {
         let mut poll = |_| ControlFlow::Continue(());
         let mut control = SolveControl::new(SolveBudget::default(), &mut poll);
         let initial = study.evaluate_robust_load_space(&rho, &basis, options.robustness,
-            &LoadSpace3::new(2, 1.0, 0.02).unwrap(), &mut control).unwrap();
+            &LoadSpace3::new(2, 1.0 / 1048576.0, 0.02).unwrap(), &mut control).unwrap();
         let cap = LoadSpaceCap3::new(2, 1.8 * initial.worst_compliance, 0.02).unwrap();
         let mut session = LoadSpaceLimitedDesign3::new(&mut study, &basis, &rho,
             cap.clone(), options, &mut control).unwrap();
@@ -55,7 +55,7 @@ fn g3_restore_refuses_changed_response_history_and_missing_incumbent() {
     let mut control = SolveControl::new(SolveBudget::default(), &mut poll);
     let options = LoadSpaceLimitedOptions3::default();
     let baseline = study.evaluate_robust_load_space(&raw, &basis, options.robustness,
-        &LoadSpace3::new(2, 1.0, 0.02).unwrap(), &mut control).unwrap();
+        &LoadSpace3::new(2, 1.0 / 1048576.0, 0.02).unwrap(), &mut control).unwrap();
     let cap = LoadSpaceCap3::new(2, 1.8 * baseline.worst_compliance, 0.02).unwrap();
     let checkpoint = {
         let mut run = LoadSpaceLimitedDesign3::new(&mut study, &basis, &raw,
@@ -87,7 +87,7 @@ fn g4_restore_charges_endpoints_and_cannot_renew_exhausted_allowances() {
     let (mut study, y, z) = fixture(2.0);
     let basis = [&y[..], &z[..]];
     let raw = vec![0.7; study.cells()];
-    let cap = LoadSpaceCap3::new(2, 1e8, 0.02).unwrap();
+    let cap = LoadSpaceCap3::new(2, 1e8 / 1048576.0, 0.02).unwrap();
     let options = LoadSpaceLimitedOptions3::default();
     let mut poll = |_| ControlFlow::Continue(());
     let mut control = SolveControl::new(SolveBudget::default(), &mut poll);

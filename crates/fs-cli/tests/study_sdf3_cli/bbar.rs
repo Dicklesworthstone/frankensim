@@ -5,7 +5,10 @@ fn bbar_cli_solves_nearly_incompressible_material_updates_density_and_exports_re
     let dir = scratch("bbar");
     let legacy = FIXTURE
         .replace(":updates-per-stage 3", ":updates-per-stage 1")
-        .replace(":youngs-modulus-pa 1.0", ":youngs-modulus-pa 1000000.0")
+        .replace(
+            ":youngs-modulus-pa 1048576.0",
+            ":youngs-modulus-pa 1000000.0",
+        )
         .replace(":poissons-ratio 0.3", ":poissons-ratio 0.49")
         .replace(
             ":schedule ((1.0 1.0) (2.0 2.0) (3.0 8.0))",

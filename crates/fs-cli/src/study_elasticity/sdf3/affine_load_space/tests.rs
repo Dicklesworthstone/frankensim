@@ -4,10 +4,7 @@ const FIXTURE: &str =
     include_str!("../../../../../../examples/marquee/bracket-3d-affine-load-space.fsim");
 
 fn fixture() -> Spec {
-    let mut spec = spec::parse(FIXTURE).unwrap();
-    // Keep the numerical experiment inside the native material strain domain.
-    spec.youngs = 1000.0;
-    spec
+    spec::parse(FIXTURE).unwrap()
 }
 
 fn compute(spec: &Spec, updates: usize) -> Computation {

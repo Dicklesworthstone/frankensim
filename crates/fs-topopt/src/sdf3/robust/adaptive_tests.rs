@@ -22,7 +22,7 @@ fn build(tree: &Octree3, cp: &mut dyn FnMut() -> ControlFlow<()>) -> Result<Adap
     let mut q = QuadratureControl3::new(QuadratureOptions3 { depth: 1, ..Default::default() }, &mut poll)
         .map_err(ElasticityError3::from)?;
     Ok(AdaptiveElasticity3::build(HexCell::try_new([0.0; 3], [1.0; 3]).unwrap(), tree, &Slab,
-        &IsotropicElastic::new(1.0, 0.3, 1.0).unwrap(), &pinned,
+        &IsotropicElastic::new(1048576.0, 0.3, 1.0).unwrap(), &pinned,
         ElasticityOptions3::default(), &mut q)?)
 }
 fn pinned(p: [f64; 3]) -> bool { p[0] == 0.0 }
@@ -41,7 +41,7 @@ fn fixture() -> (Octree3, CutDensityStudy3<AdaptiveElasticity3>, Vec<f64>) {
 fn policy(refinements: usize) -> RobustAdaptiveOptions3 {
     let mut options = RobustAdaptiveOptions3 { max_refinements: refinements, max_marks: 1, ..Default::default() };
     options.refit.continuation.steps_per_stage = 3;
-    options.refit.continuation.design.compliance_scale = 1000.0;
+    options.refit.continuation.design.compliance_scale = 1000.0 / 1048576.0;
     options.refit.continuation.design.volume_limit = 0.4;
     options
 }

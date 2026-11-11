@@ -15,7 +15,10 @@ fn g0_load_space_schema_binds_the_force_set_and_physical_cap() {
     assert!(ir_for(LOAD_SPACE3_DRIVER, spec.id, 0).contains("\"objective\":\"1\""));
     for source in [
         FIXTURE.replace(":weight 1.0", ":weight 0.5"),
-        FIXTURE.replace(":compliance-limit-j 10.0", ":compliance-limit-j 0.0"),
+        FIXTURE.replace(
+            ":compliance-limit-j 0.0000095367431640625",
+            ":compliance-limit-j 0.0",
+        ),
         FIXTURE.replace(":spectral-temperature 0.05", ":spectral-temperature 0.0"),
         FIXTURE.replace(":threshold-offset 0.1", ":threshold-offset 0.5"),
         FIXTURE.replace(":maximum-level 1", ":maximum-level 2"),
@@ -33,7 +36,10 @@ fn g0_load_space_schema_binds_the_force_set_and_physical_cap() {
         );
     }
     for source in [
-        FIXTURE.replace(":compliance-limit-j 10.0", ":compliance-limit-j 11.0"),
+        FIXTURE.replace(
+            ":compliance-limit-j 0.0000095367431640625",
+            ":compliance-limit-j 0.00001049041748046875",
+        ),
         FIXTURE.replace(":threshold-offset 0.1", ":threshold-offset 0.2"),
         FIXTURE.replace("(0.0 -1.0 -0.5)", "(0.0 1.0 -0.5)"),
     ] {

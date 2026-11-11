@@ -126,7 +126,7 @@ fn g1_g3_g5_self_weight_cli_retains_mass_loading_through_refinement_and_resume()
     let schedule = ":schedule ((3.0 0.0) (3.0 1.0))";
     let source = FIXTURE
         .replace(":updates-per-stage 3", ":updates-per-stage 1")
-        .replace(":youngs-modulus-pa 1.0", ":youngs-modulus-pa 1000000.0")
+        .replace(":youngs-modulus-pa 1048576.0", ":youngs-modulus-pa 1000000.0")
         .replace(":schedule ((1.0 1.0) (2.0 2.0) (3.0 8.0))", schedule);
     // OC needs nonpositive local compliance sensitivities. Keep its real
     // adaptive/replay trajectory in that admitted regime with a modest

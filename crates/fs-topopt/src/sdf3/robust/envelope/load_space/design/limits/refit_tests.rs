@@ -23,7 +23,7 @@ fn build(tree: &Octree3) -> AdaptiveElasticity3 {
     let mut poll = |_| ControlFlow::Continue(());
     let mut q = QuadratureControl3::new(QuadratureOptions3 { depth:1, ..Default::default() }, &mut poll).unwrap();
     AdaptiveElasticity3::build(HexCell::try_new([0.0;3],[1.0;3]).unwrap(), tree, &Slab,
-        &IsotropicElastic::new(1.0,0.3,1.0).unwrap(), &|p| p[0] == 0.0,
+        &IsotropicElastic::new(1048576.0,0.3,1.0).unwrap(), &|p| p[0] == 0.0,
         ElasticityOptions3::default(), &mut q).unwrap()
 }
 fn y(p: [f64;3]) -> [f64;3] { [0.0,-1.0-p[1],0.0] }
@@ -49,7 +49,7 @@ fn cap_for(tree: &Octree3, control: &mut SolveControl<'_>) -> LoadSpaceCap3 {
     let basis: Vec<_> = forces.iter().map(Vec::as_slice).collect();
     let raw = vec![0.75;reference.cells()];
     let e = reference.evaluate_robust_load_space(&raw,&basis,policy(0).design.robustness,
-        &LoadSpace3::new(2,1.0,0.02).unwrap(),control).unwrap();
+        &LoadSpace3::new(2,1.0 / 1048576.0,0.02).unwrap(),control).unwrap();
     LoadSpaceCap3::new(2,1.8*e.worst_compliance,0.02).unwrap()
 }
 
@@ -95,7 +95,7 @@ fn raw_parent_map_preserves_tiny_controls_and_authored_solid_void_regions() {
     let parents = AdaptiveTransfer3::new(source.operator(),&operator,2_000_000,
         ||ControlFlow::Continue(())).unwrap().parents().to_vec();
     let mut options = policy(0); options.design.density_floor = 1e-5;
-    let cap = LoadSpaceCap3::new(2,1e12,0.02).unwrap();
+    let cap = LoadSpaceCap3::new(2,1e12 / 1048576.0,0.02).unwrap();
     let mut poll = |_| ControlFlow::Continue(());
     let mut control = SolveControl::new(SolveBudget::default(),&mut poll);
     let result = source.refit_load_space_cap(operator,&rho,params(),&laws(),&cap,options,&mut control).unwrap();
@@ -135,7 +135,7 @@ fn unchanged_space_and_invalid_policy_refuse_before_load_callbacks() {
     let (tree,fine,source,rho) = fixture();
     let forbidden = |_: [f64;3]| -> [f64;3] { panic!("invalid refit invoked a load law") };
     let laws = [ReferenceLoad3::body(&forbidden);2];
-    let cap = LoadSpaceCap3::new(2,1e12,0.02).unwrap();
+    let cap = LoadSpaceCap3::new(2,1e12 / 1048576.0,0.02).unwrap();
     let mut poll = |_| ControlFlow::Continue(());
     let mut control = SolveControl::new(SolveBudget::default(),&mut poll);
     assert!(source.refit_load_space_cap(build(&tree),&rho,params(),&laws,&cap,policy(0),&mut control).is_err());
@@ -175,7 +175,7 @@ fn accepted_and_recheck_cancellation_preserve_distinct_solved_prefixes() {
 fn exhaustion_and_rejected_full_density_do_not_claim_a_completed_refit() {
     let (_,fine,source,rho) = fixture();
     let scales = source.operator().scales().to_vec();
-    let cap = LoadSpaceCap3::new(2,1e12,0.02).unwrap();
+    let cap = LoadSpaceCap3::new(2,1e12 / 1048576.0,0.02).unwrap();
     let mut options = policy(4); options.design.optimizer.max_evaluations = 1;
     let mut poll = |_| ControlFlow::Continue(());
     let mut control = SolveControl::new(SolveBudget::default(),&mut poll);
@@ -184,7 +184,7 @@ fn exhaustion_and_rejected_full_density_do_not_claim_a_completed_refit() {
     assert_eq!(limited.outcome.as_ref().unwrap().as_ref().unwrap().stop,ProjectedAlStop::EvaluationLimit);
     assert!(limited.best.is_some() && limited.recheck.is_none());
     let refused = source.refit_load_space_cap(build(&fine),&rho,params(),&laws(),
-        &LoadSpaceCap3::new(2,1e-20,0.02).unwrap(),policy(0),&mut control).unwrap();
+        &LoadSpaceCap3::new(2,1e-20 / 1048576.0,0.02).unwrap(),policy(0),&mut control).unwrap();
     assert_eq!(refused.restoration.stop,LoadSpaceStartStop3::FullDensityRejected);
     assert!(refused.best.is_none() && refused.outcome.is_none());
     let mut poll = |_| ControlFlow::Continue(());

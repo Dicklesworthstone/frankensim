@@ -23,7 +23,7 @@ pub(super) fn build(tree: &Octree3) -> AdaptiveElasticity3 {
     let mut poll = |_| ControlFlow::Continue(());
     let mut q = QuadratureControl3::new(QuadratureOptions3 { depth: 1, ..Default::default() }, &mut poll).unwrap();
     AdaptiveElasticity3::build(HexCell::try_new([0.0; 3], [1.0; 3]).unwrap(), tree, &Slab,
-        &IsotropicElastic::new(1.0, 0.3, 1.0).unwrap(), &|p| p[0] == 0.0,
+        &IsotropicElastic::new(1048576.0, 0.3, 1.0).unwrap(), &|p| p[0] == 0.0,
         ElasticityOptions3::default(), &mut q).unwrap()
 }
 fn y(_: [f64; 3]) -> [f64; 3] { [0.0, -1.0, 0.0] }
@@ -37,7 +37,7 @@ pub(super) fn fixture() -> (Octree3, Octree3, CutDensityStudy3<AdaptiveElasticit
     let rho = vec![0.45; study.cells()];
     (tree, fine, study, rho)
 }
-fn caps() -> ComplianceCaps3 { ComplianceCaps3::new(vec![1e6, 2e6], 0.02, 2).unwrap() }
+fn caps() -> ComplianceCaps3 { ComplianceCaps3::new(vec![1e6 / 1048576.0, 2e6 / 1048576.0], 0.02, 2).unwrap() }
 
 #[test]
 fn real_eroded_enrichment_checks_each_case_and_normalizes_absolute_marking() {

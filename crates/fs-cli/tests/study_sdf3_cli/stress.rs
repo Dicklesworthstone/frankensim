@@ -7,7 +7,7 @@ const STRESS: &str = include_str!("../../../../examples/marquee/bracket-3d-stres
 fn g1_g5_stress_self_weight_cli_restarts_the_same_material_load_and_design() {
     let dir = scratch("stress-self-weight");
     let base = STRESS.replace(":max-updates 80", ":max-updates 2")
-        .replace(":youngs-modulus-pa 1.0", ":youngs-modulus-pa 1000000.0");
+        .replace(":youngs-modulus-pa 1048576.0", ":youngs-modulus-pa 1000000.0");
     let source = with_material_acceleration(&base, 1.0);
     let (reference_ledger, reference) = run(&dir, "reference", &source, 6);
     let report = data(&reference_ledger, &reference, "report_json");

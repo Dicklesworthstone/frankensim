@@ -100,7 +100,7 @@ mod tests {
         let original = study.operator().scales().to_vec();
         let mut poll = |_| ControlFlow::Continue(());
         let mut control = SolveControl::new(SolveBudget::default(),&mut poll);
-        for reference in [1e6,1e12,1e100] {
+        for reference in [1e6 / 1048576.0, 1e12 / 1048576.0, 1e100 / 1048576.0] {
             let policy = LoadSpace3::new(2,reference,0.02).unwrap();
             let baseline = study.evaluate_robust_load_space(&rho,&[&y,&z],RobustOptions3::default(),
                 &policy,&mut control).unwrap();

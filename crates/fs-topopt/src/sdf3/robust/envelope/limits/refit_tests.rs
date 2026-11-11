@@ -102,7 +102,7 @@ fn late_refit_cancellation_preserves_a_solved_prefix_and_source_grid() {
 fn impossible_caps_and_budget_stops_never_become_successful_refits() {
     let (_, fine, source, rho) = fixture();
     let scales = source.operator().scales().to_vec();
-    let caps = ComplianceCaps3::new(vec![1e-12; 2], 0.02, 2).unwrap();
+    let caps = ComplianceCaps3::new(vec![1e-12 / 1048576.0; 2], 0.02, 2).unwrap();
     let mut poll = |_| ControlFlow::Continue(());
     let mut control = SolveControl::new(SolveBudget::default(), &mut poll);
     let result = source.refit_compliance_caps(build(&fine), &rho, params(), &laws(), &caps, policy(), &mut control).unwrap();
@@ -123,7 +123,7 @@ fn impossible_caps_and_budget_stops_never_become_successful_refits() {
 fn initial_reference_solve_uses_the_same_cap_optimizer_and_fresh_fields() {
     use crate::sdf3::robust::envelope::limits::ComplianceLimitedDesign3;
     let (_, _, source, rho) = fixture();
-    let caps = ComplianceCaps3::new(vec![1e6, 2e6], 0.02, 2).unwrap();
+    let caps = ComplianceCaps3::new(vec![1e6 / 1048576.0, 2e6 / 1048576.0], 0.02, 2).unwrap();
     let mut options = policy(); options.accepted_steps = 2;
     let mut poll = |_| ControlFlow::Continue(());
     let mut control = SolveControl::new(SolveBudget::default(), &mut poll);
@@ -146,7 +146,7 @@ fn initial_reference_solve_uses_the_same_cap_optimizer_and_fresh_fields() {
 #[test]
 fn initial_reference_solve_keeps_restoration_when_optimizer_is_cancelled() {
     let (_, _, source, rho) = fixture();
-    let caps = ComplianceCaps3::new(vec![1e6, 2e6], 0.02, 2).unwrap();
+    let caps = ComplianceCaps3::new(vec![1e6 / 1048576.0, 2e6 / 1048576.0], 0.02, 2).unwrap();
     let mut poll = |p: SolveProgress| if p.stage == "sdf3-compliance-limited-accepted" {
         ControlFlow::Break(())
     } else { ControlFlow::Continue(()) };
@@ -165,7 +165,7 @@ fn initial_reference_admission_precedes_load_callbacks() {
     let (_, _, source, rho) = fixture();
     let forbidden = |_: [f64; 3]| -> [f64; 3] { panic!("invalid policy reached load assembly") };
     let laws = [ReferenceLoad3::body(&forbidden)];
-    let caps = ComplianceCaps3::new(vec![1e6, 2e6], 0.02, 2).unwrap();
+    let caps = ComplianceCaps3::new(vec![1e6 / 1048576.0, 2e6 / 1048576.0], 0.02, 2).unwrap();
     let mut poll = |_| ControlFlow::Continue(());
     let mut control = SolveControl::new(SolveBudget::default(), &mut poll);
     assert!(source.solve_reference_compliance_caps(&rho, &laws, &caps, policy(), &mut control).is_err());

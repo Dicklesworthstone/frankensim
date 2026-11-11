@@ -252,7 +252,7 @@ mod tests {
         let family = spec.affine_responses.as_ref().unwrap();
         assert_eq!(family.limits.len(), 5);
         assert_eq!(family.limits[0].sense, ResponseLimitSense3::AtLeast);
-        assert_eq!(family.limits[0].bound, -0.02);
+        assert_eq!(family.limits[0].bound, -0.02 / 1024.0);
         assert_eq!(family.limits[0].observation.unit(), "m");
         assert_eq!(family.limits[2].observation.unit(), "N");
         assert_eq!(family.limits[4].observation.unit(), "N*m");
@@ -262,7 +262,7 @@ mod tests {
         );
         assert_eq!(super::super::parse(&spec.canonical).unwrap().id, spec.id);
         for source in [
-            SOURCE.replace(":bound-m -0.02", ":bound-m 0.0"),
+            SOURCE.replace(":bound-m -0.00001953125", ":bound-m 0.0"),
             SOURCE.replace(":about-m (0.0 0.0 0.0)", ":about-m (0.5 0.0 0.0)"),
         ] {
             assert_ne!(super::super::parse(&source).unwrap().id, spec.id);
@@ -276,8 +276,8 @@ mod tests {
             ("tip-z-lower", "not a scalar identifier"),
             (":axis z", ":axis diagonal"),
             (":x-fraction (0.5 1.0)", ":x-fraction (0.3 1.0)"),
-            (":bound-m -0.02", ":bound-n -0.02"),
-            (":scale-m 0.02", ":scale-m 0.0"),
+            (":bound-m -0.00001953125", ":bound-n -0.00001953125"),
+            (":scale-m 0.00001953125", ":scale-m 0.0"),
             (":sense at-least", ":sense absolute"),
             (":about-m (0.0 0.0 0.0)", ":about-m (0.0 0.0)"),
             (":sharpness 40.0", ":sharpness 0.0"),

@@ -103,7 +103,7 @@ fn evaluation_limit_does_not_renew_work_or_publish_a_trial() {
 fn exhausted_physics_and_invalid_case_shapes_refuse_without_mutation() {
     let (mut study,y,z) = fixture(1.0); let rho = vec![0.3;study.cells()];
     let scales = study.operator().scales().to_vec();
-    let p = LoadEnvelope3::new(vec![1000.0;2],0.05,2).unwrap();
+    let p = LoadEnvelope3::new(vec![1000.0 / 1048576.0; 2],0.05,2).unwrap();
     let forces = [&y[..],&z[..]];
     let mut poll = |_| ControlFlow::Continue(());
     let mut control = SolveControl::new(SolveBudget { total_iterations: 1, ..Default::default() }, &mut poll);

@@ -5,8 +5,8 @@ use crate::sdf3::robust::envelope::tests::fixture;
 use crate::{SolveBudget, SolveProgress};
 use std::ops::ControlFlow;
 
-fn caps() -> ComplianceCaps3 { ComplianceCaps3::new(vec![1e6, 2e6], 0.02, 2).unwrap() }
-fn close(a: f64, b: f64) { assert!((a-b).abs() <= 1e-8 * a.abs().max(b.abs()).max(1.0), "{a} != {b}"); }
+fn caps() -> ComplianceCaps3 { ComplianceCaps3::new(vec![1e6 / 1048576.0, 2e6 / 1048576.0], 0.02, 2).unwrap() }
+fn close(a: f64, b: f64) { assert!((a-b).abs() <= 1e-8 * a.abs().max(b.abs()).max(1.0 / 1048576.0), "{a} != {b}"); }
 
 #[test]
 fn binary_material_body_force_matches_native_density_and_exact_occupancy() {
@@ -46,7 +46,7 @@ fn binary_material_body_force_matches_native_density_and_exact_occupancy() {
         close(binary.case_compliances[case], solution.compliance());
         for (&a, &b) in binary.displacements[case].iter().zip(solution.coefficients()) { close(a, b); }
     }
-    assert!((binary.case_compliances[0] - binary.case_compliances[1]).abs() > 1e-6,
+    assert!((binary.case_compliances[0] - binary.case_compliances[1]).abs() > 1e-6 / 1048576.0,
         "a common body force must not be negated with each authored dead load");
 }
 
@@ -70,10 +70,10 @@ fn affine_body_force_refuses_continuous_spectral_endpoints_and_scans_before_work
     let mut callback = |_| { polls.set(polls.get() + 1); ControlFlow::Continue(()) };
     let mut control = SolveControl::new(SolveBudget::default(), &mut callback);
     let work = control.work();
-    let policy = LoadSpace3::new(2, 1e6, 0.02).unwrap();
+    let policy = LoadSpace3::new(2, 1e6 / 1048576.0, 0.02).unwrap();
     assert!(matches!(study.evaluate_robust_load_space(&raw, &basis,
         RobustOptions3::default(), &policy, &mut control), Err(EvaluationStop::Breakdown { .. })));
-    let cap = LoadSpaceCap3::new(2, 1e6, 0.02).unwrap();
+    let cap = LoadSpaceCap3::new(2, 1e6 / 1048576.0, 0.02).unwrap();
     assert!(matches!(study.evaluate_binary_load_space_cap(&raw, &basis, &cap,
         BinaryComplianceOptions3::default(), &mut control), Err(BinaryComplianceError3::Invalid(_))));
     assert!(matches!(study.scan_binary_load_space_cap(&raw, &basis, &cap, &[0.4, 0.6],
@@ -237,7 +237,7 @@ fn adaptive_preconditioned_endpoint_matches_its_prescribed_binary_material() {
         let mut poll = |_| ControlFlow::Continue(());
         let mut q = QuadratureControl3::new(QuadratureOptions3 { depth: 1, ..Default::default() }, &mut poll).unwrap();
         AdaptiveElasticity3::build(HexCell::try_new([0.0; 3], [1.0; 3]).unwrap(), &tree, &Slab,
-            &IsotropicElastic::new(1.0, 0.3, 1.0).unwrap(), &|p| p[0] == 0.0,
+            &IsotropicElastic::new(1048576.0, 0.3, 1.0).unwrap(), &|p| p[0] == 0.0,
             ElasticityOptions3::default(), &mut q).unwrap()
     };
     let op = build();
@@ -246,7 +246,7 @@ fn adaptive_preconditioned_endpoint_matches_its_prescribed_binary_material() {
     let mut study = CutDensityStudy3::new(AdaptiveSolveSpace3::jacobi(op, 100_000_000), 0.15, params);
     let raw: Vec<_> = (0..study.cells()).map(|i| 0.3 + 0.4*(i as f64)/(study.cells() as f64)).collect();
     let scales = study.operator().scales().to_vec();
-    let caps = ComplianceCaps3::new(vec![1e6], 0.02, 1).unwrap();
+    let caps = ComplianceCaps3::new(vec![1e6 / 1048576.0], 0.02, 1).unwrap();
     let mut poll = |_| ControlFlow::Continue(());
     let mut control = SolveControl::new(SolveBudget::default(), &mut poll);
     let binary = study.evaluate_binary_compliance_caps(&raw, &[&force], &caps,

@@ -413,7 +413,7 @@ fn g3_g5_affine_response_resume_preserves_joint_policy_and_original_signed_evide
             ":name \"tip-z-lower\" :axis z",
             ":name \"tip-z-lower\" :axis y",
         ),
-        FIXTURE.replace(":bound-m -0.02", ":bound-m -0.03"),
+        FIXTURE.replace(":bound-m -0.00001953125", ":bound-m -0.000029296875"),
         FIXTURE.replace(":penalty 32.0", ":penalty 64.0"),
         FIXTURE.replace(":about-m (0.0 0.0 0.0)", ":about-m (0.25 0.0 0.0)"),
     ] {

@@ -12,7 +12,7 @@ fn fine_binary_witness_replays_exact_parent_stiffness_and_protected_masks() {
     let mut study=study.with_physical_regions(regions).unwrap();
     let original=study.params();let scales=study.operator().scales().to_vec();
     let raw:Vec<_>=(0..study.cells()).map(|i|0.35+0.05*i as f64).collect();
-    let cap=LoadSpaceCap3::new(2,1e9,0.02).unwrap();
+    let cap=LoadSpaceCap3::new(2,1e9 / 1048576.0,0.02).unwrap();
     let binary=BinaryComplianceOptions3 { threshold:0.45,void_stiffness:0.005,..Default::default() };
     let mut poll=|_|ControlFlow::Continue(());
     let mut control=SolveControl::new(SolveBudget::default(),&mut poll);
@@ -47,7 +47,7 @@ fn binary_enrichment_checks_combinations_instead_of_passing_basis_cases() {
     let mut control=SolveControl::new(SolveBudget::default(),&mut poll);
     let endpoint=BinaryComplianceOptions3::default();
     let first=study.estimate_binary_load_space_cap_enrichment(build(&fine),&laws,&raw,params(),
-        &LoadSpaceCap3::new(2,1e9,0.02).unwrap(),endpoint,options(),&mut control).unwrap();
+        &LoadSpaceCap3::new(2,1e9 / 1048576.0,0.02).unwrap(),endpoint,options(),&mut control).unwrap();
     let individual=first.basis_assessment.cases[0].fine_value;
     let cap=LoadSpaceCap3::new(2,1.25*individual,0.02).unwrap();
     let report=study.estimate_binary_load_space_cap_enrichment(build(&fine),&laws,&raw,params(),
@@ -61,7 +61,7 @@ fn binary_enrichment_checks_combinations_instead_of_passing_basis_cases() {
 fn binary_refinement_restores_state_after_fine_cancellation_and_work_exhaustion() {
     let (tree,fine)=trees();let mut study=CutDensityStudy3::new(build(&tree),0.15,params());
     let raw=vec![0.6;study.cells()];let scales=study.operator().scales().to_vec();
-    let cap=LoadSpaceCap3::new(2,1e9,0.02).unwrap();
+    let cap=LoadSpaceCap3::new(2,1e9 / 1048576.0,0.02).unwrap();
     let mut poll=|p:SolveProgress| if p.stage=="sdf3-goal-elasticity" && p.solve_iterations>0 {
         ControlFlow::Break(())
     } else {ControlFlow::Continue(())};
@@ -81,7 +81,7 @@ fn binary_refinement_restores_state_after_fine_cancellation_and_work_exhaustion(
 #[test]
 fn invalid_binary_options_refuse_before_reference_load_callbacks() {
     let (tree,fine)=trees();let mut study=CutDensityStudy3::new(build(&tree),0.15,params());
-    let raw=vec![0.6;study.cells()];let cap=LoadSpaceCap3::new(2,1e9,0.02).unwrap();
+    let raw=vec![0.6;study.cells()];let cap=LoadSpaceCap3::new(2,1e9 / 1048576.0,0.02).unwrap();
     let forbidden=|_:[f64;3]|->[f64;3]{panic!("invalid binary request invoked a load")};
     let laws=[ReferenceLoad3::body(&forbidden),ReferenceLoad3::body(&forbidden)];
     let mut poll=|_|ControlFlow::Continue(());

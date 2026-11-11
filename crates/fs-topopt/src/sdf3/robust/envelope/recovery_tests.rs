@@ -76,7 +76,7 @@ fn recovery_cancellation_preserves_cached_fields_model_and_nominal_stiffness() {
         } else { ControlFlow::Continue(()) };
         let mut control = SolveControl::new(SolveBudget::default(), &mut poll);
         let forces = [&y[..], &z[..]];
-        let p = LoadEnvelope3::new(vec![1000.0; 2], 0.05, 2).unwrap();
+        let p = LoadEnvelope3::new(vec![1000.0 / 1048576.0; 2], 0.05, 2).unwrap();
         let mut session = EnvelopeDesignStudy3::new(&mut study, &forces, &raw, p, options(), &mut control).unwrap();
         let checkpoint = session.state.checkpoint();
         let fields = session.accepted().evaluation.physical.eroded.objective.displacements.clone();
@@ -97,7 +97,7 @@ fn recovery_cannot_renew_the_original_physical_iteration_budget() {
     let (mut study, y, z) = fixture(2.0);
     let raw = vec![0.8; study.cells()];
     let forces = [&y[..], &z[..]];
-    let p = LoadEnvelope3::new(vec![1000.0; 2], 0.05, 2).unwrap();
+    let p = LoadEnvelope3::new(vec![1000.0 / 1048576.0; 2], 0.05, 2).unwrap();
     let mut poll = |_| ControlFlow::Continue(());
     let mut control = SolveControl::new(SolveBudget::default(), &mut poll);
     let session = EnvelopeDesignStudy3::new(&mut study, &forces, &raw, p.clone(), options(), &mut control).unwrap();
@@ -120,7 +120,7 @@ fn a_rejected_declared_floor_does_not_publish_a_feasible_point() {
     let (mut study, y, z) = fixture(2.0);
     let raw = vec![0.9; study.cells()];
     let forces = [&y[..], &z[..]];
-    let p = LoadEnvelope3::new(vec![1000.0; 2], 0.05, 2).unwrap();
+    let p = LoadEnvelope3::new(vec![1000.0 / 1048576.0; 2], 0.05, 2).unwrap();
     let opts = EnvelopeDesignOptions3 { density_floor: 0.8, ..options() };
     let mut poll = |_| ControlFlow::Continue(());
     let mut control = SolveControl::new(SolveBudget::default(), &mut poll);
