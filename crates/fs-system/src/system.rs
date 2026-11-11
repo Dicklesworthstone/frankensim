@@ -1368,7 +1368,8 @@ struct BlockWork {
     slot_start: Vec<usize>,
     /// Rows whose driver's slopes depend on the outputs it reads, each with
     /// its part of `varying_terms`: per term of the driver, the reader that
-    /// carries its slope (`usize::MAX` for a term read from another block).
+    /// carries its slope (`usize::MAX` for a term that reads no output of
+    /// this block; a heat route's receivers are always in its source's).
     varying: Vec<(usize, Range<usize>)>,
     varying_terms: Vec<usize>,
     /// Every component is exactly linear and every driver is linear, so the

@@ -298,12 +298,26 @@ Tarjan, index order).
   place in the audit. For a line of masses, springs and dampers the kept
   inputs are the force sum on each mass and the body's heat sum; for modes
   that meet at one contact, the contact's rate alone, which is the scalar a
-  hand-written impact loop solves for (`tests/step_cost.rs` asserts both
-  shapes through `plan_loops` and compares each graph with a hand-written
-  loop to 1e-12; `src/solve.rs` tests the elimination against dense
-  elimination on lines, stars, rings, chains and full patterns, and its
-  refusal of a singular matrix). The rule that picks the kept inputs is not
-  a search for the fewest: keeping more than needed costs time only.
+  hand-written impact loop solves for. `tests/step_cost.rs` asserts those
+  counts through `plan_loops` (counts, not which inputs: with one damper
+  the tie between its temperature and the body's heat sum goes to the
+  lower index) and compares each graph with a hand-written loop to 1e-12.
+  It also pins the iterations: one a step for the undamped line and the
+  modes, at most two for the damped line, and for a damped line whose heat
+  is routed to two bodies at their entropy-equivalent temperature (a driver
+  that is not linear, its slopes remade for every assembly) exactly the
+  iterations of the line whose dampers share one body's temperature.
+  `src/solve.rs` tests the elimination against dense elimination on named
+  patterns (lines, a star, rings, a chain, a full pattern, a follower
+  reached both directly and through others) and on 600 drawn at random,
+  half of them shaped as the kernel makes them; the counts the rule gives
+  where keeping every candidate at once, or counting what an input depends
+  on outside its ring, would give others; its refusal of a singular matrix;
+  and that a plan refused or factored without a solve is as good as new
+  once cleared. The rule that picks the kept inputs is not a search for the
+  fewest: keeping more than needed costs time only. Not tested: an affine
+  block whose assembly is cut short by a component's refusal and then
+  stepped again (the kept step length is voided before the first write).
 - A block whose components are all `Class::ExactLinear` and whose drivers
   are all linear is affine, so its interface Jacobian depends on the step
   length only. Its factors are kept and used for the first update of every
@@ -457,10 +471,11 @@ way (momentum and conformance), the damper's heat tangent without its factor 2
 Unit tests cover the block ordering (including a 200,000-node chain without
 recursion), the equivalent-temperature gradient, the dense solve, the
 condensed solve (which inputs are kept for a line, a star, a chain, a plain
-cycle and an input that depends on itself; agreement with dense elimination
-to 1e-13 on eight patterns; the same bits from kept factors; refusal of a
-singular kept matrix and of a solution that overflows) and the compensated
-sum.
+cycle, an input that depends on itself, full patterns and a cycle fed from
+another ring; agreement with dense elimination to 1e-13 on nine named
+patterns and to 1e-12 on 600 drawn at random; the same bits from kept
+factors; refusal of a singular kept matrix and of a solution that
+overflows; reuse after a refusal) and the compensated sum.
 
 Power conversions, `tests/power_maps.rs`:
 - positive and negative gear ratios give the reflected stiffness `ratio² k`
@@ -1000,13 +1015,16 @@ the refused calls change nothing.
   (no loop, or one component) and seven moved, the fixed-step ones by at
   most 8.9e-15 in any number, the adaptive one by 2.8e-13 s in the times its
   controller chose and 9.3e-12 in its last normalized error; no step or
-  iteration count changed. The cost is now linear in the number of
-  components in these cases, at 100 to 140 ns a component a step with one
-  iteration and about 260 ns with two.
+  iteration count changed. The cost is now close to linear in the number of
+  components in these cases: 81 to 136 ns a component a step with one
+  iteration, 166 to 258 ns with two.
 
   What is left, and what bead `.5.7` still has to remove: the kept inputs
-  are eliminated densely (49 by 49 twice a step for 48 damped masses; that
-  part grows with the cube); a damper makes a block not
+  are eliminated densely (49 by 49 twice a step for 48 damped masses; the
+  elimination skips zero multipliers, so for a line, whose kept matrix is
+  tridiagonal plus the heat sum's row and column, that part grows with the
+  square, and with the cube where the kept inputs all depend on each
+  other; not measured apart); a damper makes a block not
   affine, because its heat is quadratic in its rate, so a damped line
   assembles and factors twice a step although its mechanics are linear;
   every component is proposed once more than it is iterated, audited and

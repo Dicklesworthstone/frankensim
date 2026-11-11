@@ -14,7 +14,7 @@ use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_system::elements::{
     Damper, Force, HeatCapacity, Mass, Motion, SourceAccount, Spring, Waveform,
 };
-use fs_system::{NodeId, System, SystemBuilder};
+use fs_system::{NodeId, RouteTemperature, System, SystemBuilder};
 
 struct Counting;
 
@@ -112,6 +112,28 @@ fn chain(n: usize) -> (System, Vec<NodeId>, NodeId) {
 /// masses, springs and the force, every part of it exactly linear. The body
 /// is then alone and receives nothing.
 fn line(n: usize, damped: bool) -> (System, Vec<NodeId>, NodeId) {
+    let heat = if damped { Heat::Shared } else { Heat::None };
+    let (system, masses, bodies) = build(n, heat);
+    (system, masses, bodies[0])
+}
+
+/// Where the dampers of [`build`] give up their heat.
+#[derive(Clone, Copy, PartialEq)]
+enum Heat {
+    /// No dampers.
+    None,
+    /// Every damper shares the body's temperature (a common-effort junction).
+    Shared,
+    /// Every damper's heat is routed half to the body and half to a second
+    /// one of a thousandth of its heat capacity that starts 20 K warmer, at
+    /// their entropy-equivalent temperature: a driver that is not linear.
+    Routed,
+}
+
+/// The line of [`chain`], its dampers' heat going where `heat` says, and
+/// the body and (with [`Heat::Routed`]) the second body.
+fn build(n: usize, heat: Heat) -> (System, Vec<NodeId>, Vec<NodeId>) {
+    let damped = heat != Heat::None;
     let mut builder = SystemBuilder::new();
     let masses: Vec<NodeId> = (0..n)
         .map(|index| {
@@ -178,19 +200,31 @@ fn line(n: usize, damped: bool) -> (System, Vec<NodeId>, NodeId) {
             .unwrap();
     }
     let warmth = builder.port(body, "heat").unwrap();
-    if damped {
-        builder.common_effort(warmth, &heats).unwrap();
-    } else {
-        builder
+    let mut bodies = vec![body];
+    match heat {
+        Heat::None => builder
             .boundary(warmth, Box::new(|_, _, values| values[0] = 0.0))
-            .unwrap();
+            .unwrap(),
+        Heat::Shared => builder.common_effort(warmth, &heats).unwrap(),
+        Heat::Routed => {
+            let other = builder
+                .add_with_tangent("other", HeatCapacity::new(1.0e-3 * BODY_J_K).unwrap(), 320.0)
+                .unwrap();
+            let shares = [(warmth, 0.5), (builder.port(other, "heat").unwrap(), 0.5)];
+            for &source in &heats {
+                builder
+                    .heat_route(source, &shares, None, RouteTemperature::SinkEquivalent)
+                    .unwrap();
+            }
+            bodies.push(other);
+        }
     }
     let mut system = builder.seal().unwrap();
     // The dampers' temperature inputs are in the loop and need a start.
     for heat in heats {
         assert!(system.guess(heat, &[300.0]));
     }
-    (system, masses, body)
+    (system, masses, bodies)
 }
 
 /// The same chain by the implicit midpoint rule in its own unknowns: one
@@ -388,8 +422,14 @@ fn the_chain_from_elements_is_the_hand_written_midpoint_rule() {
         let (mut system, masses, body) = line(n, damped);
         let mut hand = Hand::new(n, damped);
         with_cx(|cx| {
-            for _ in 0..300 {
-                system.step(DT_S, cx).unwrap();
+            for step in 0..300 {
+                // Everything but a damper's heat is linear: one update, and
+                // with dampers at most one more for the square of the rate.
+                let iterations = system.step(DT_S, cx).unwrap().iterations;
+                assert!(
+                    if damped { iterations <= 2 } else { iterations == 1 },
+                    "{n} masses, step {step}: {iterations} iterations"
+                );
                 hand.step();
             }
         });
@@ -408,6 +448,53 @@ fn the_chain_from_elements_is_the_hand_written_midpoint_rule() {
         );
         // The chain is moving, and with dampers it has warmed its body.
         assert!(hand.velocity[0].abs() > 1.0e-4 && (hand.kelvin > 300.0) == damped);
+    }
+}
+
+#[test]
+fn heat_routed_at_an_equivalent_temperature_costs_no_iteration_more() {
+    // The dampers' heat goes half to each of two bodies at different
+    // temperatures, and each damper is given their entropy-equivalent
+    // temperature: a driver whose slopes depend on the bodies and are remade
+    // for every assembly. With those slopes right, a step takes exactly the
+    // iterations of the line whose dampers share one body's temperature.
+    // The second body is small so that a slope left out would show: in one
+    // update the heat rate moves by about 1e-4 W, which warms that body by
+    // about 5e-7 K within the step, against a tolerance of 3e-10 K on the
+    // temperature the dampers are given. (An estimate; no defect was
+    // planted to see it fail.)
+    for n in [1_usize, 4, 9] {
+        let (mut routed, masses, bodies) = build(n, Heat::Routed);
+        let (mut shared, _, _) = build(n, Heat::Shared);
+        // Kept: the force sums and the two bodies' heat sums; with one
+        // damper, its temperature in place of the two sums it feeds.
+        let kept = n + if n == 1 { 1 } else { 2 };
+        assert_eq!(routed.plan_loops(), [(6 * n + 1, kept)], "{n} masses");
+        let mut hand = Hand::new(n, true);
+        with_cx(|cx| {
+            for step in 0..300 {
+                let iterations = routed.step(DT_S, cx).unwrap().iterations;
+                assert_eq!(
+                    iterations,
+                    shared.step(DT_S, cx).unwrap().iterations,
+                    "{n} masses, step {step}"
+                );
+                hand.step();
+            }
+        });
+        for (mass, expected) in masses.iter().zip(&hand.velocity) {
+            let velocity = routed.state::<Motion>(*mass).unwrap().velocity_m_s;
+            assert!((velocity - expected).abs() <= 1.0e-12, "{n} masses: {velocity} vs {expected}");
+        }
+        // Each body has half of the heat the hand-written loop made; the
+        // second warms a thousand times as much with it.
+        let half = 0.5 * (hand.kelvin - 300.0);
+        assert!(half > 0.0);
+        for (body, (start, rise)) in bodies.iter().zip([(300.0, half), (320.0, 1.0e3 * half)]) {
+            let kelvin = *routed.state::<f64>(*body).unwrap();
+            assert!((kelvin - start - rise).abs() <= 1.0e-9 * (1.0 + rise), "{kelvin} vs {start} + {rise}");
+        }
+        assert!(routed.ledger().energy_residual_j().abs() <= 1.0e-12);
     }
 }
 

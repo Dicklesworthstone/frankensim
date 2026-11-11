@@ -463,6 +463,69 @@ mod tests {
     }
 
     #[test]
+    fn the_rule_keeps_no_two_neighbours_in_a_round_and_counts_within_a_ring() {
+        // Every unknown depends on every other. One is kept and the rest,
+        // its neighbours, wait for the next round; in the end one follows.
+        // Keeping every unknown of the largest count at once would keep all.
+        for m in [3_usize, 6] {
+            let full: Vec<Vec<usize>> =
+                (0..m).map(|column| (0..m).filter(|&row| row != column).collect()).collect();
+            assert_eq!(Condensed::plan(&full).kept(), m - 1, "{m} unknowns");
+        }
+        // A pair that depend on each other, and a cycle of four of which
+        // two also depend on the pair. The cycle is a plain cycle whatever
+        // feeds it from outside, so one of it is kept: two in all. Counting
+        // what an unknown depends on outside its own ring would keep both
+        // of the fed ones.
+        let fed = vec![vec![1, 2, 4], vec![0, 2, 4], vec![3], vec![4], vec![5], vec![2]];
+        let plan = Condensed::plan(&fed);
+        assert_eq!(plan.kept(), 2);
+        assert!(plan.place[0] >= plan.follow && plan.place[2] >= plan.follow);
+    }
+
+    #[test]
+    fn patterns_drawn_at_random_solve_what_dense_elimination_solves() {
+        let mut next = values(0x1234_5678_9ABC_DEF1);
+        let mut kept_some = 0_u32;
+        let mut followed_some = 0_u32;
+        for trial in 0..600_usize {
+            let m = 1 + trial % 14;
+            let pattern: Vec<Vec<usize>> = if trial % 2 == 0 {
+                // Any entry, about one in four.
+                (0..m).map(|_| (0..m).filter(|_| next() > 0.25).collect()).collect()
+            } else {
+                // As the kernel makes them: each unknown is an input of a
+                // component, each row reads one or two components, and a
+                // column has an entry in every row that reads its owner.
+                let components = 1 + trial % 5;
+                let pick = |value: f64| ((value + 0.5) * components as f64) as usize % components;
+                let owner: Vec<usize> = (0..m).map(|_| pick(next())).collect();
+                let reads: Vec<[usize; 2]> = (0..m).map(|_| [pick(next()), pick(next())]).collect();
+                (0..m)
+                    .map(|column| (0..m).filter(|&row| reads[row].contains(&owner[column])).collect())
+                    .collect()
+            };
+            let (mut condensed, matrix) = filled(&pattern, 0.1, &mut next);
+            kept_some += u32::from(condensed.kept() > 0);
+            followed_some += u32::from(condensed.follow > 0);
+            let mut factors = matrix.clone();
+            let mut pivots = vec![0; m];
+            assert!(factor_dense(&mut factors, &mut pivots, m), "trial {trial}");
+            assert!(condensed.factor(), "trial {trial}");
+            let right: Vec<f64> = (0..m).map(|_| next()).collect();
+            let mut got = right.clone();
+            assert!(condensed.solve(&mut got));
+            let mut want = right;
+            assert!(solve_factored(&factors, &pivots, &mut want, m));
+            for (a, b) in got.iter().zip(&want) {
+                assert!((a - b).abs() <= 1.0e-12 * (1.0 + b.abs()), "trial {trial}: {a} vs {b}");
+            }
+        }
+        // Both parts of the solve were exercised.
+        assert!(kept_some > 200 && followed_some > 200, "{kept_some} {followed_some}");
+    }
+
+    #[test]
     fn substitution_and_the_kept_factors_solve_what_dense_elimination_solves() {
         let mut next = values(0x2545_F491_4F6C_DD1D);
         // Every unknown depends on every other: nearly all are kept.
@@ -474,9 +537,14 @@ mod tests {
         ];
         let cycle: Vec<Vec<usize>> = (0..7).map(|at| vec![(at + 1) % 7]).collect();
         let chain: Vec<Vec<usize>> = (0..6).map(|at| if at < 5 { vec![at + 1] } else { vec![] }).collect();
+        // One kept unknown that reaches a follower both directly and
+        // through two others: what they pass on has to arrive before that
+        // follower passes its own value on.
+        let rejoined = vec![vec![1, 3, 4], vec![2], vec![3], vec![0], vec![0]];
+        assert_eq!(Condensed::plan(&rejoined).kept(), 1);
         for (pattern, size) in [
             (line(2), 0.5), (line(12), 0.5), (star(30), 0.15), (full, 0.15), (mixed, 0.4),
-            (cycle, 0.5), (chain, 0.5), (Vec::new(), 0.5),
+            (cycle, 0.5), (chain, 0.5), (rejoined, 0.5), (Vec::new(), 0.5),
         ] {
             let m = pattern.len();
             let (mut condensed, matrix) = filled(&pattern, size, &mut next);
@@ -532,6 +600,39 @@ mod tests {
         let mut b = vec![0.0, 3.0];
         assert!(condensed.solve(&mut b));
         assert_eq!(b, [0.0, 3.0]);
+
+        // A plan that refused a singular matrix, or was factored and never
+        // solved, is as good as new once cleared and filled again.
+        let pattern = line(5);
+        let mut next = values(0x0DDB_A11C_0FFE_E123);
+        let (mut fresh, _) = filled(&pattern, 0.4, &mut next);
+        let mut next = values(0x0DDB_A11C_0FFE_E123);
+        let mut used = Condensed::plan(&pattern);
+        for (column, rows) in pattern.iter().enumerate() {
+            for &row in rows {
+                // Entries that are not numbers reach every workspace.
+                used.subtract(used.slot(row, column), f64::NAN);
+            }
+        }
+        assert!(!used.factor());
+        for _ in 0..2 {
+            used.clear();
+            for (column, rows) in pattern.iter().enumerate() {
+                for &row in rows {
+                    used.subtract(used.slot(row, column), 0.8 * next());
+                }
+            }
+            assert!(used.factor());
+            next = values(0x0DDB_A11C_0FFE_E123);
+        }
+        assert!(fresh.factor());
+        let right: Vec<f64> = (0..pattern.len()).map(|at| 0.3 + at as f64).collect();
+        let (mut a, mut b) = (right.clone(), right);
+        assert!(used.solve(&mut a) && fresh.solve(&mut b));
+        assert_eq!(
+            a.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            b.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+        );
     }
 
     /// Factor and solve in one call; `a` is replaced by its factors.
