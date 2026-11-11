@@ -365,3 +365,17 @@ fn full_lns_refuses_invalid_partition_material_budgets_and_cancellation() {
             .is_err()
     );
 }
+
+#[test]
+fn a_cancelled_complex_lu_is_a_cancellation_and_only_a_singular_one_is_a_factor_refusal() {
+    use fs_la::eigen_complex::LuComplexError;
+    assert_eq!(
+        ThermoviscousError::from(LuComplexError::Cancelled),
+        ThermoviscousError::Cancelled
+    );
+    // Planted negative: a numerically singular factorization is still reported as such.
+    assert_eq!(
+        ThermoviscousError::from(LuComplexError::Singular { index: 3 }),
+        ThermoviscousError::Factor(LuComplexError::Singular { index: 3 })
+    );
+}

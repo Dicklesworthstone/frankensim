@@ -167,9 +167,46 @@ fn g1_relative_memory_preserves_common_fluid_inertia_and_its_nullspace() {
             b.moving_wall.fluid_force_n_per_sqrt_kg[i],
         );
     }
-    assert!(b.power.structural_relaxation_w < 1e-20);
-    assert!(b.moving_wall.relaxation_mean_energy_j < 1e-20);
-    assert_work(&b);
+    // With no structural damping and a memory channel that is relative only, a common-mode force F moves both
+    // coordinates with the purely reactive velocity u = F / (i omega M), M the real total modal mass, so its real input
+    // power Re(conj(F) u) / 2 is zero in exact arithmetic and the fluid moves as a rigid body. What the solver reports
+    // is roundoff: on the first run of this test input 4.6e-21 W next to viscous plus bulk dissipation of 7.4e-21 W.
+    // `assert_work` scales the balance by the larger of those two, which is itself that roundoff, and cannot certify it.
+    // Here the balance is scaled by the apparent power sum(|u| / 2), as `viscosity.rs:108-109` does for its common-mode
+    // case, and the viscous and bulk power are pinned to the memory-free model `a`.
+    let apparent = b
+        .moving_wall
+        .modal_velocity_m_sqrt_kg_per_s
+        .iter()
+        .map(|v| 0.5 * v.abs())
+        .sum::<f64>();
+    let consistent = |m: &ThermoviscousField| {
+        let p = m.power;
+        p.viscous_w >= 0.0
+            && p.bulk_w >= 0.0
+            && p.balance_residual_w().abs() < 2e-8 * apparent
+            && (p.viscous_w - a.power.viscous_w).abs() < 2e-8 * a.power.viscous_w
+            && (p.bulk_w - a.power.bulk_w).abs() < 2e-8 * a.power.bulk_w
+            && p.structural_relaxation_w < 1e-20
+            && m.moving_wall.relaxation_mean_energy_j < 1e-20
+    };
+    assert!(consistent(&b), "{:?}", b.power);
+    // Planted negative: a channel that couples the common mode (rows [c, c]) stores and dissipates energy in it, and the
+    // same checks refuse it.
+    let c = det::sqrt(STIFFNESS);
+    let coupled = two_coordinates(&mesh, &pos)
+        .with_moving_wall_relaxation_channels(
+            vec![vec![c, c]],
+            vec![TAU],
+            memory_limits(),
+            &mut || false,
+        )
+        .unwrap()
+        .prepare(30.0, &mut || false)
+        .unwrap()
+        .response_with_wall_forces(&[], &[C64::ONE; 2], &mut || false)
+        .unwrap();
+    assert!(!consistent(&coupled), "{:?}", coupled.power);
 }
 
 #[test]

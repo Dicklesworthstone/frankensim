@@ -288,8 +288,13 @@ impl From<AcousticFeError> for ThermoviscousError {
     }
 }
 impl From<LuComplexError> for ThermoviscousError {
+    /// A cancelled factorization or substitution is a cancellation (as `HybridError` maps it, hybrid.rs:94); only a
+    /// numerically singular one is a `Factor` refusal.
     fn from(e: LuComplexError) -> Self {
-        Self::Factor(e)
+        match e {
+            LuComplexError::Cancelled => Self::Cancelled,
+            LuComplexError::Singular { .. } => Self::Factor(e),
+        }
     }
 }
 
