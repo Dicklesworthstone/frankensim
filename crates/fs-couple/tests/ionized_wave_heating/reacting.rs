@@ -4,7 +4,8 @@ use fs_couple::ionized_wave_heating::IonizedGasReactingHeatControls;
 use fs_gas::chemistry::collisional_radiative::CollisionalRadiativeSolve;
 use fs_gas::chemistry::ionization_network::IonizationNetworkSolve;
 use fs_material::ionized_gas::{
-    CarrierMomentumSource, IonizedGasMomentumSource, IonizedGasTransportBank,
+    CarrierMomentumRelaxation, CarrierMomentumSource, IonizedGasMomentumSource,
+    IonizedGasTransportBank,
 };
 use fs_qty::{Area, Energy};
 use fs_thermochem::electron_collision::{
@@ -364,14 +365,193 @@ fn g4_both_reacting_entries_refuse_directly_ionizing_coherent_drive() {
                 ))
             ));
             assert_eq!(heating.source(), original.source());
+            // The bank answers through the pinned refresh path, whose material
+            // receipt records the pinned-claim policy; the wave's ion source
+            // was resolved with SingleClaimOnly. As the library's bank check
+            // does (contracts/part-08.md:5854-5855), compare like with like:
+            // the whole answer equals the original refreshed at its own state
+            // through the same pinned path, and every physical value equals
+            // the original's bit for bit. Only the receipt policy, its
+            // provenance and the identity binding them differ.
+            let evaluated = bank
+                .evaluate(heating.source().state(), || false)
+                .unwrap()
+                .unwrap();
             assert_eq!(
-                bank.evaluate(heating.source().state(), || false)
+                evaluated,
+                original
+                    .source()
+                    .at_reacting_state(original.source().state(), &[ion_card], || false)
                     .unwrap()
-                    .unwrap(),
-                *original.source()
+            );
+            assert_eq!(physical_bits(&evaluated), physical_bits(original.source()));
+        },
+    );
+}
+
+#[test]
+fn g4_a_bank_from_another_ion_card_refuses_at_a_new_or_an_equal_rate() {
+    with_heating(
+        false,
+        8000.0,
+        8000.0,
+        true,
+        |heating, ion_card, background_card| {
+            let sources = [source(heating)];
+            let bank = transport_bank(heating, ion_card, 1.0);
+            let retained_source = heating.source().clone();
+            let ion = heating
+                .source()
+                .carriers()
+                .iter()
+                .find(|carrier| !carrier.is_electron())
+                .unwrap()
+                .relaxation();
+            let CarrierMomentumSource::Material { material, property } = ion.source() else {
+                unreachable!()
+            };
+            // (a) The same authored card form at another rate: 1.1e9 against
+            // the wave's 1e9 per s.
+            let state = heating.source().state();
+            let (faster, faster_card) = fixture::collision_source_and_card(
+                "H+",
+                &[
+                    ("T_h", state.heavy_temperature().value()),
+                    ("T_e", state.electron_temperature().value()),
+                ],
+                state.pressure().value(),
+                1.1e9,
+            );
+            // (b) The wave's own claim and rate under another provenance: a
+            // second card whose rate equals the wave's bit for bit. A
+            // comparison of rate values alone would admit it.
+            let mut claims = ClaimSet::new();
+            for (_, claim) in ion_card.claims_for(property.name()) {
+                let mut claim = claim.clone();
+                claim.provenance.source =
+                    "independent synthetic H+/fixed-neutral-background momentum relaxation".into();
+                claims.insert_claim(claim).unwrap();
+            }
+            let other_card = MaterialCard::assemble(ion_card.id().clone(), claims, vec![]).unwrap();
+            assert_ne!(other_card.content_hash(), ion_card.content_hash());
+            let other = CarrierMomentumRelaxation::new_two_temperature(
+                ion.species().clone(),
+                resolve_material_state_point(
+                    &other_card,
+                    &material.query(),
+                    &[ScalarPropertyRequirement::try_with_key(
+                        property,
+                        ScalarAdmissibility::StrictlyPositive,
+                    )
+                    .unwrap()],
+                    MaterialPropertySelection::SingleClaimOnly,
+                )
+                .unwrap(),
+                property.clone(),
+            )
+            .unwrap();
+            assert_eq!(other.rate_per_s().to_bits(), ion.rate_per_s().to_bits());
+            for (template, card) in [(faster, &faster_card), (other, &other_card)] {
+                let laws = bank
+                    .sources()
+                    .map(|(_, law)| match law {
+                        IonizedGasMomentumSource::Material { .. } => {
+                            IonizedGasMomentumSource::Material {
+                                template: template.clone(),
+                                original_card: card.clone(),
+                            }
+                        }
+                        law => law.clone(),
+                    })
+                    .collect();
+                let foreign = IonizedGasTransportBank::new(
+                    bank.reference_state(),
+                    laws,
+                    bank.coulomb_source().cloned(),
+                    bank.limits(),
+                    || false,
+                )
+                .unwrap();
+                let retained_foreign = foreign.clone();
+                assert!(matches!(
+                    heating.advance_reacting(
+                        Time::new(1e-9),
+                        &sources,
+                        &foreign,
+                        reaction_controls(),
+                        background_card,
+                        || false
+                    ),
+                    Err(IonizedWaveHeatingError::Invalid(
+                        "transport bank must reproduce the original wave carrier laws and limits"
+                    ))
+                ));
+                assert_eq!(foreign, retained_foreign);
+                assert_eq!(heating.source(), &retained_source);
+            }
+            assert!(
+                heating
+                    .advance_reacting(
+                        Time::new(1e-9),
+                        &sources,
+                        &bank,
+                        reaction_controls(),
+                        background_card,
+                        || false
+                    )
+                    .is_ok()
             );
         },
     );
+}
+
+/// Every f64 a refresh must reproduce: the source's own values, each carrier,
+/// its relaxation, and the resolved values or contributions behind that rate.
+/// The same tuple as fs-material tests/ionized_gas/refresh.rs `physical_bits`.
+fn physical_bits(source: &IonizedGasConductivity) -> Vec<u64> {
+    let mut values = vec![
+        source.conductivity_s_m(),
+        source.charged_mole_fraction(),
+        source.coulomb_coupling(),
+        source.maximum_thermal_phase_space_density(),
+        source.maximum_electric_field_v_m(),
+    ];
+    for carrier in source.carriers() {
+        let relaxation = carrier.relaxation();
+        values.extend([
+            carrier.number_density_per_m3(),
+            carrier.mass_kg(),
+            carrier.temperature_k(),
+            carrier.drift_mobility_m2_v_s(),
+            carrier.conductivity_s_m(),
+            carrier.maximum_electric_field_v_m(),
+            relaxation.rate_per_s(),
+            relaxation.heavy_temperature_k(),
+            relaxation.electron_temperature_k(),
+            relaxation.pressure_pa(),
+        ]);
+        match relaxation.source() {
+            CarrierMomentumSource::Material { material, .. } => {
+                values.extend(material.query_point().iter().map(|(_, value)| *value));
+                values.extend(material.properties().iter().map(|p| p.value_si()));
+            }
+            CarrierMomentumSource::ElectronNeutral {
+                contributions,
+                maximum_target_thermal_speed_ratio,
+                ..
+            } => {
+                values.push(*maximum_target_thermal_speed_ratio);
+                for c in contributions {
+                    values.extend([
+                        c.number_density_per_m3(),
+                        c.rate_per_s(),
+                        c.target_thermal_speed_ratio(),
+                    ]);
+                }
+            }
+        }
+    }
+    values.into_iter().map(f64::to_bits).collect()
 }
 
 #[test]

@@ -186,13 +186,51 @@ impl<'w, 'a> MagnetizedIonizedGasHeating<'w, 'a> {
             .ok_or(Invalid(
                 "transport bank cannot remove the original wave carriers",
             ))?;
-        if bound.carriers() != source.carriers()
-            || bound.limits() != source.limits()
-            || bound.coulomb_model() != source.coulomb_model()
+        // The bank must reproduce the wave's current carrier sources, Coulomb
+        // law and constitutive limits exactly (contracts/part-08.md:5854-5855).
+        // The bank answers through the pinned refresh path, whose material
+        // receipt records the pinned-claim policy. The wave's source may hold
+        // an independent SingleClaimOnly resolution of the same claim, with its
+        // own provenance and state-point identity. So like is compared with
+        // like: the wave's source is refreshed at its own state through that
+        // same pinned path, from the bank's cards for the wave's current
+        // carriers. The whole carriers, limits and Coulomb law must then equal
+        // the bank's. The refresh takes each material carrier's card by its
+        // content hash, which must equal the card identity that carrier's own
+        // source recorded (`card_identity`, fs-material
+        // src/ionized_gas/refresh.rs:131-132 and :211-212), and it refuses a
+        // repeated or unused card (:120, :172). So a bank built from any other
+        // card, even one with equal rates, cannot refresh the wave's sources,
+        // and that is the same mismatch: the bank is never compared with
+        // itself.
+        let mismatch = "transport bank must reproduce the original wave carrier laws and limits";
+        let mut cards: Vec<&MaterialCard> = Vec::new();
+        for (species, law) in transport_bank.sources() {
+            let IonizedGasMomentumSource::Material { original_card, .. } = law else {
+                continue;
+            };
+            if source
+                .carriers()
+                .iter()
+                .any(|carrier| carrier.species() == species)
+                && !cards
+                    .iter()
+                    .any(|card| card.content_hash() == original_card.content_hash())
+            {
+                cards.push(original_card);
+            }
+        }
+        let pinned = source
+            .at_reacting_state(initial, &cards, &mut cancelled)
+            .map_err(|error| match error {
+                IonizedGasRefreshError::Invalid(_) => Invalid(mismatch),
+                error => transport_error(error),
+            })?;
+        if bound.carriers() != pinned.carriers()
+            || bound.limits() != pinned.limits()
+            || bound.coulomb_model() != pinned.coulomb_model()
         {
-            return Err(Invalid(
-                "transport bank must reproduce the original wave carrier laws and limits",
-            ));
+            return Err(Invalid(mismatch));
         }
         let electron_index = initial
             .electron_index()
