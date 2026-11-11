@@ -19,8 +19,9 @@
 #
 # Mouth pressure is a CITED player input. Fletcher and Tarnopolsky (1999, JASA 105:874) measured the threshold
 # blowing pressure of trumpet players as p0 = K f (their Eq. 1 and Fig 4, p.877: K = 7 Pa/Hz for the professional
-# GC, 8 and 4 for two amateurs) and found loud playing at 3.3 to 3.9 times threshold (their Fig 6: C4 2.0 / 3.9 /
-# 6.6 kPa, C5 3.3 / 6.3 / 13.0, C6 6.7 / 11.0 / 24.0 kPa). The held notes use 3.5 x 7 Pa/Hz x f: Bb3 (233.08 Hz)
+# GC, 8 and 4 for two amateurs) and plotted the spectra of C4, C5 and C6 at three blowing pressures each (their Fig 6:
+# C4 2.0 / 3.9 / 6.6 kPa, C5 3.3 / 6.3 / 13.0, C6 6.7 / 11.0 / 24.0 kPa): the highest is 3.3 to 3.9 times threshold and
+# the paper labels no dynamic. The held notes use 3.5 x 7 Pa/Hz x f: Bb3 (233.08 Hz)
 # 5.71 kPa, F4 (349.23 Hz) 8.56, Bb4 (466.16 Hz) 11.42, D5 (587.33 Hz) 14.39 kPa. The 25 kPa ramp peak is the
 # highest blowing pressure they measured (Fig 1, p.875).
 # Earlier revisions held all four notes at 14 kPa, which gave radiated levels near the measured ones but a
