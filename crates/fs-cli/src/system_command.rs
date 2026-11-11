@@ -191,6 +191,12 @@ Connections, ports written element.port:
   {\"transformer\": [effort_in_port, flow_in_port], \"ratio\": r}
                           lossless signed flow ratio r; effort returns with
                           the same factor; endpoints may be in different domains
+  A member of a join or common_effort may be written
+  {\"port\": element.port, \"ratio\": r}: it then sits behind its own
+  transformer of ratio r, so one node carries several loads at different
+  ratios and in different domains (a pinion's inertia with a motor torque
+  and a rack's spring, damper and load at the pinion radius). Power ports
+  only; the node port takes no ratio.
   {\"route\": port, \"to\": [[port, fraction], ...],
    \"rest\": {\"sink\": name, \"temperature_k\": T},
    \"temperature\": \"sink-equivalent\" | {\"fixed_k\": T}}
@@ -1475,17 +1481,34 @@ fn port_text(value: &J, what: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{what}: a port is a string element.port"))
 }
 
+/// One entry of a junction: `"element.port"`, or
+/// `{"port": "element.port", "ratio": r}` for a member that sits behind an
+/// ideal transformer of that ratio.
+fn member(value: &J, what: &str) -> Result<(String, Option<f64>), String> {
+    if value.as_object().is_some() {
+        fields(value, &["port", "ratio"], what)?;
+        let port = value
+            .get("port")
+            .ok_or_else(|| format!("{what}: a member with a ratio names its port"))?;
+        Ok((port_text(port, what)?, Some(number(value, "ratio", what)?)))
+    } else {
+        Ok((port_text(value, what)?, None))
+    }
+}
+
 /// Starting values for temperature inputs inside loops.
 type Guesses = Vec<(PortRef, f64)>;
 
 fn join(
     builder: &mut SystemBuilder,
     elements: &[Element],
-    ports: &[Resolved],
+    ports: &[(Resolved, Option<f64>)],
     guesses: &mut Guesses,
     common_effort: bool,
     what: &str,
 ) -> Result<(), Refusal> {
+    let ratios: Vec<Option<f64>> = ports.iter().map(|(_, ratio)| *ratio).collect();
+    let ports: Vec<&Resolved> = ports.iter().map(|(port, _)| port).collect();
     if ports.len() < 2 {
         return Err(format!("{what}: a join needs at least two ports").into());
     }
@@ -1519,15 +1542,36 @@ fn join(
         )
         .into());
     }
-    let setter = ports.iter().position(is_node).unwrap_or_default();
+    let setter = ports.iter().position(|port| is_node(port)).unwrap_or_default();
     let setter_role = ports[setter].role;
+    if ratios[setter].is_some() {
+        return Err(format!(
+            "{what}: the node port sets what the others share; a ratio belongs to a member"
+        )
+        .into());
+    }
     let members: Vec<PortRef> = ports
         .iter()
         .enumerate()
         .filter(|&(index, _)| index != setter)
         .map(|(_, p)| p.port)
         .collect();
-    let result = if setter_role == PortRole::EffortIn {
+    let result = if ratios.iter().any(Option::is_some) {
+        // Members behind ratios: power ports of any domain, each through
+        // its own ideal transformer.
+        let geared: Vec<(PortRef, f64)> = ports
+            .iter()
+            .zip(&ratios)
+            .enumerate()
+            .filter(|&(index, _)| index != setter)
+            .map(|(_, (p, ratio))| (p.port, ratio.unwrap_or(1.0)))
+            .collect();
+        if setter_role == PortRole::EffortIn {
+            builder.common_flow_ratios(ports[setter].port, &geared)
+        } else {
+            builder.common_effort_ratios(ports[setter].port, &geared)
+        }
+    } else if setter_role == PortRole::EffortIn {
         builder.common_flow(ports[setter].port, &members)
     } else {
         builder.common_effort(ports[setter].port, &members)
@@ -1902,8 +1946,11 @@ fn load(path: &Path) -> Result<Device, Refusal> {
                 .as_array()
                 .ok_or_else(|| format!("{what}: {operation} is an array of ports"))?
                 .iter()
-                .map(|port| resolve(&builder, &elements, &port_text(port, &what)?))
-                .collect::<Result<Vec<_>, _>>()?;
+                .map(|entry| {
+                    let (text, ratio) = member(entry, &what)?;
+                    Ok((resolve(&builder, &elements, &text)?, ratio))
+                })
+                .collect::<Result<Vec<_>, Refusal>>()?;
             join(&mut builder, &elements, &ports, &mut guesses, common_effort, &what)?;
         } else if connection.get("transformer").is_some() {
             transformer(&mut builder, &elements, connection, &what)?;

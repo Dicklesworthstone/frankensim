@@ -21,6 +21,7 @@ is the kernel's state and its energy and entropy ledger.
 | `parallel_rlc.json` | a current source drives a capacitor, inductor and resistor in parallel; all Joule heat warms the case | independent coupled voltage/current equations, source work, electrical storage and heat |
 | `nonlinear_rlc.json` | the same topology with voltage-dependent capacitance and flux-dependent inductance, crossing both curves' knees | independent charge/flux differential equations, original constitutive energies and Joule heat |
 | `geared_oscillator.json` | an ideal 2.5:1 transformer couples a mass to an anchored spring | reflected stiffness `ratio² × stiffness`, the midpoint oscillation phase and conserved energy |
+| `rack_and_pinion.json` | one pinion inertia carrying a motor torque and a bearing directly, and a rack's spring, friction and load through the pinion radius: three members of one join, each behind its own ratio | the midpoint rule for the pinion's one equation with the reflected stiffness and friction; motor work, the load's received work and the heat |
 | `damped_pair.json` | two rigid bodies in three dimensions closing at 2 m/s on a viscous connector, stepped by the fs-mbd network owner (`rigid_network`); a quarter of the connector's heat warms a shell, half an oil bath, the rest goes to the air | the closed form: each momentum decays as `exp(-0.7 t)`, the heat is `2 (1 - exp(-1.4 t))` J, split 25 / 50 / 25 |
 | `viscoelastic_mount.json` | two rigid bodies at rest on a mount with viscous damping and one Maxwell branch stretched by 0.5 m (`viscoelastic_network`, the fs-mbd relaxation owner): the stored 0.21 J sets the bodies moving and heats the casing | the pair's own two equations integrated independently: relative speed, branch energy and heat |
 | `self_heating_damper.json` | the damped pair with all of its heat in 1 J/K of damper fluid, whose temperature thins the damper by an Arrhenius shift: the damping falls to 0.81 of its value as the fluid warms by 0.93 K | the exact recursion of the scheme (damping held over each step at the temperature the step began with) to 1e-11, and first-order convergence to the coupled differential equations |
@@ -184,3 +185,23 @@ flow-input port. A ratio `n` enforces `flow_b = -n × flow_a` and
 spring's stiffness by `n²`. The initial spring extension is `-n` times the
 mass position, and reversing the signed ratio reverses that extension.
 This ideal transformer has no losses, backlash or contact dynamics.
+
+A transformer joins two ports. When one node carries several loads at
+different ratios, write the ratio on the member of the join instead:
+
+```json
+{"join": ["pinion.p", "motor.p", "bearing.a",
+          {"port": "rack_spring.a", "ratio": 0.02},
+          {"port": "rack_friction.a", "ratio": 0.02},
+          {"port": "load.p", "ratio": 0.02}]}
+```
+
+`rack_and_pinion.json` is this join. The pinion's inertia sets the angular
+velocity `w`. A member with ratio `r` receives the flow `-r w` (here the
+rack's velocity for a radius of 0.02 m) and its effort returns to the node
+multiplied by `r`, so a 4000 N/m spring is felt as `r² k = 1.6` N m/rad
+and a -12 N load as -0.24 N m. Members without a ratio share the node's
+flow unchanged. Members may be in other power domains than the node; heat
+ports take no ratio, and neither does the node port. The pinion settles at
+`(0.6 - 0.24) / 1.6 = 0.225` rad, 4.5 mm of rack travel. The same form
+works in a `common_effort` list.

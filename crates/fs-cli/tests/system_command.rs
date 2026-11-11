@@ -1316,3 +1316,86 @@ fn temperature_feedback_that_cannot_run_is_refused_with_the_reason() {
     assert!(stderr.contains("component `pair` refused"), "{stderr}");
     assert!(stderr.contains("temperature leaves the declared shift calibration band"), "{stderr}");
 }
+
+#[test]
+fn the_rack_and_pinion_scene_carries_a_motor_and_a_rack_at_the_pinion_radius_on_one_inertia() {
+    let (code, json, stderr) = run_binary(&["--json", "system", &example("rack_and_pinion.json")]);
+    assert_eq!(code, 0, "{stderr}");
+
+    // J w' = T + r F - (b + r² c) w - r² k a and a' = w, by the midpoint
+    // rule: the rack's spring, friction and load reach the pinion through
+    // its radius, the motor and the bearing directly.
+    let (inertia, torque, bearing) = (2.0e-3_f64, 0.6_f64, 1.0e-3_f64);
+    let (radius, stiffness, friction, load) = (0.02_f64, 4000.0_f64, 40.0_f64, -12.0_f64);
+    let (dt, steps) = (5.0e-4_f64, 2_000_u32);
+    let drive = torque + radius * load;
+    let damping = bearing + radius * radius * friction;
+    let reflected = radius * radius * stiffness;
+    let (mut angle, mut speed) = (0.0_f64, 0.0_f64);
+    let (mut motor_work, mut heat) = (0.0_f64, 0.0_f64);
+    for _ in 0..steps {
+        let mean = (drive - reflected * angle + 2.0 * inertia * speed / dt)
+            / (2.0 * inertia / dt + damping + 0.5 * reflected * dt);
+        angle += dt * mean;
+        speed = 2.0 * mean - speed;
+        motor_work += dt * torque * mean;
+        heat += dt * damping * mean * mean;
+    }
+    let reached_angle = value(&json, &element("pinion"), "angle_rad");
+    let reached_speed = value(&json, &element("pinion"), "angular_velocity_rad_s");
+    assert!((reached_angle - angle).abs() <= 1.0e-10 * angle, "{reached_angle} vs {angle}");
+    assert!((reached_speed - speed).abs() <= 1.0e-10, "{reached_speed} vs {speed}");
+    // Close to rest at (T + r F) / (r² k) after four decay times.
+    let rest = drive / reflected;
+    assert!((reached_angle - rest).abs() <= 0.03 * rest, "{reached_angle} vs {rest}");
+
+    // The spring is stretched by minus the rack's travel. The motor
+    // delivers its work; the load, pushed back along the rack, receives
+    // -F r a; both dampers warm the housing.
+    let extension = value(&json, &element("rack_spring"), "extension_m");
+    assert!((extension + radius * reached_angle).abs() <= 1.0e-13, "{extension}");
+    let delivered = -value(&json, &element("motor"), "energy_in_j");
+    assert!((delivered - motor_work).abs() <= 1.0e-10 * motor_work, "{delivered} vs {motor_work}");
+    let lifted = value(&json, &element("load"), "energy_in_j");
+    let expected = -load * radius * reached_angle;
+    assert!((lifted - expected).abs() <= 1.0e-10 * expected, "{lifted} vs {expected}");
+    let warmed = value(&json, &element("housing"), "stored_change_j");
+    assert!((warmed - heat).abs() <= 1.0e-10 * motor_work, "{warmed} vs {heat}");
+    assert!(value(&json, "\"totals\"", "energy_residual_j").abs() <= 1.0e-11 * motor_work);
+
+    let scene = std::fs::read_to_string(example("rack_and_pinion.json")).unwrap();
+    let geared_load = "{\"port\": \"load.p\", \"ratio\": 0.02}";
+    let check = |name: &str, from: &str, to: &str, code: i32, needle: &str| {
+        let changed = scene.replace(from, to);
+        assert_ne!(changed, scene, "{name}");
+        let (got, stderr) = refused(name, &changed);
+        assert_eq!(got, code, "{name}: {stderr}");
+        assert!(stderr.contains(needle), "{name}: {stderr}");
+    };
+    // The node sets the shared velocity; only a member sits behind a ratio.
+    check(
+        "rack_node.json",
+        "\"pinion.p\",",
+        "{\"port\": \"pinion.p\", \"ratio\": 2.0},",
+        3,
+        "a ratio belongs to a member",
+    );
+    check("rack_zero.json", geared_load, "{\"port\": \"load.p\", \"ratio\": 0}", 4, "ratio");
+    check(
+        "rack_field.json",
+        geared_load,
+        "{\"port\": \"load.p\", \"ratio\": 0.02, \"gain\": 1}",
+        3,
+        "unsupported field \"gain\"",
+    );
+    check("rack_missing.json", geared_load, "{\"port\": \"load.p\"}", 3, "missing ratio");
+    // With no ratio anywhere the join is a plain one, and the rack's ports
+    // are not the pinion's kind.
+    let plain = scene
+        .replace("{\"port\": \"rack_spring.a\", \"ratio\": 0.02}", "\"rack_spring.a\"")
+        .replace("{\"port\": \"rack_friction.a\", \"ratio\": 0.02}", "\"rack_friction.a\"")
+        .replace(geared_load, "\"load.p\"");
+    let (code, stderr) = refused("rack_plain.json", &plain);
+    assert_eq!(code, 4, "{stderr}");
+    assert!(stderr.contains("rack_spring.a"), "{stderr}");
+}

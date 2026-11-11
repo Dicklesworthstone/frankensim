@@ -934,6 +934,21 @@ Parallel RLC and geared-oscillator scenes in `examples/system/` exercise these
 paths; `tests/system_command.rs` compares them to independent midpoint
 references, including source work, resistor heat and reflected stiffness.
 
+A member of a `join` or `common_effort` list may be written
+`{"port": element.port, "ratio": r}`. If any member is, the list lowers to
+the kernel's `common_flow_ratios` (or `common_effort_ratios`), with ratio one
+for the members written as plain ports: each member sits behind its own
+ideal transformer, so one node carries several loads at different ratios and
+in different power domains. The node port takes no ratio; a zero ratio, a
+heat port or a wrong role is refused by the kernel. Scene:
+`examples/system/rack_and_pinion.json`, a pinion inertia with a motor torque
+and a bearing directly and a rack's spring, friction and load at the pinion
+radius. `tests/system_command.rs` compares it with the midpoint rule for the
+pinion's one equation with reflected stiffness and friction (angle to 1e-10
+of itself), the motor's work, the load's received work and the heat, and
+checks the refusals (a ratio on the node port, a zero ratio, an unknown or
+missing field, the same list without ratios).
+
 A heat receiver may be named by several routes. Temperature
 inputs joined to a heat capacity, and route sources, start from the initial
 temperatures. Examples and their checks: `examples/system/README.md`; tests:

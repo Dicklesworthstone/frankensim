@@ -1,0 +1,30 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 1.0,
+  "step_s": 5.0e-4,
+  "sample_every_s": 0.01,
+  "elements": {
+    "pinion": {"kind": "inertia", "inertia_kg_m2": 2.0e-3},
+    "motor": {"kind": "torque", "torque_n_m": 0.6},
+    "bearing": {"kind": "rotary_damper", "damping_n_m_s_rad": 1.0e-3},
+    "rack_spring": {"kind": "spring", "stiffness_n_m": 4000.0},
+    "rack_friction": {"kind": "damper", "damping_n_s_m": 40.0},
+    "load": {"kind": "force", "force_n": -12.0},
+    "housing": {"kind": "heat_capacity", "capacity_j_k": 50.0, "temperature_k": 293.15}
+  },
+  "connections": [
+    {"join": [
+      "pinion.p",
+      "motor.p",
+      "bearing.a",
+      {"port": "rack_spring.a", "ratio": 0.02},
+      {"port": "rack_friction.a", "ratio": 0.02},
+      {"port": "load.p", "ratio": 0.02}
+    ]},
+    {"prescribe": "bearing.b", "angular_velocity_rad_s": 0},
+    {"prescribe": "rack_spring.b", "velocity_m_s": 0},
+    {"prescribe": "rack_friction.b", "velocity_m_s": 0},
+    {"route": "bearing.heat", "to": [["housing.heat", 1.0]]},
+    {"route": "rack_friction.heat", "to": [["housing.heat", 1.0]]}
+  ]
+}
