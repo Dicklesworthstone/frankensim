@@ -1,5 +1,6 @@
 //! Original FE volume moments, complete histories and work-conjugate sources.
 use super::*;
+use crate::acoustics::helmholtz::pressure_release::EmptyFreePressure;
 use crate::acoustics::helmholtz::{HelmholtzFe, Medium};
 use fs_rep_mesh::TetComplex;
 
@@ -153,7 +154,7 @@ fn high_order_pressure_release_preserves_all_volume_memory_coordinates() {
         .unwrap();
     assert_eq!(owner.arm_dofs(0).unwrap().len(), 10);
     let fixed = g
-        .pressure_release_constraints(&[face], &mut || false)
+        .pressure_release_constraints(&[face], EmptyFreePressure::Refuse, &mut || false)
         .unwrap();
     assert_eq!(fixed.constrained.iter().filter(|&&v| v).count(), 6);
     let q: Vec<_> = (0..10).map(|j| 0.2 * (j as f64 + 1.0)).collect();

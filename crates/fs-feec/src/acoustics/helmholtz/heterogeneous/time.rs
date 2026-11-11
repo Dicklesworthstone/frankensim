@@ -28,7 +28,7 @@
 //! those existing owners have no internal cancellation callback. Returned
 //! states are candidates: a refusal never mutates the caller's accepted state.
 
-use super::super::pressure_release::PressureReleaseConstraints;
+use super::super::pressure_release::{EmptyFreePressure, PressureReleaseConstraints};
 use super::{
     AcousticFeError, BoundaryAdmittance, HeterogeneousError, HeterogeneousHelmholtzFe,
     SpatialResistiveBoundary, invalid, poll,
@@ -283,9 +283,11 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 maximum: limits.max_dofs,
             });
         }
-        let pressure_release = self
-            .geometry
-            .pressure_release_constraints(pressure_release_faces, cancelled)?;
+        let pressure_release = self.geometry.pressure_release_constraints(
+            pressure_release_faces,
+            EmptyFreePressure::Refuse,
+            cancelled,
+        )?;
         let n = pressure_release.free_dofs.len();
         if n > limits.max_dofs {
             return Err(HeterogeneousError::Limit {

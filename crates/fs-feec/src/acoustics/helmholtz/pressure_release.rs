@@ -47,10 +47,23 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), AcousticFeError> {
     }
 }
 
+/// What an exact pressure-release elimination does when it leaves no free pressure degree of freedom.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum EmptyFreePressure {
+    /// A fluid-only solve has nothing left to solve: refuse.
+    Refuse,
+    /// The caller carries wall states of its own, so its complete pencil is not empty: admit the empty set. The coupled
+    /// pencil refuses only when the pressure and the wall states together are 0.
+    AdmitWithWallStates,
+}
+
 impl HelmholtzFe<'_> {
+    /// The free and the constrained pressure coordinates of the released faces; see [`EmptyFreePressure`] for the case in
+    /// which no free coordinate remains.
     pub(super) fn pressure_release_constraints(
         &self,
         faces: &[[u32; 3]],
+        empty: EmptyFreePressure,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PressureReleaseConstraints, AcousticFeError> {
         poll(cancelled)?;
@@ -82,7 +95,7 @@ impl HelmholtzFe<'_> {
                 free_dofs.push(global);
             }
         }
-        if free_dofs.is_empty() {
+        if free_dofs.is_empty() && empty == EmptyFreePressure::Refuse {
             return Err(AcousticFeError::InvalidInput {
                 what: "pressure-release boundary leaves no free pressure degrees of freedom",
             });
@@ -118,7 +131,11 @@ impl HelmholtzFe<'_> {
         options: &SliceOptions,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PressureReleaseModes, AcousticFeError> {
-        let constraints = self.pressure_release_constraints(pressure_release_faces, cancelled)?;
+        let constraints = self.pressure_release_constraints(
+            pressure_release_faces,
+            EmptyFreePressure::Refuse,
+            cancelled,
+        )?;
         let eigenpairs = if constraints.faces.is_empty() {
             self.modes(window_hz, options)?
         } else {

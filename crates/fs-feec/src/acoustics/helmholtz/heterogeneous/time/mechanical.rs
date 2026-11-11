@@ -38,6 +38,7 @@ use super::{
     PreparedHeterogeneousTime, RealVelocityTrace, ResistiveBoundary, SpatialResistiveBoundary,
     energy_change, invalid, poll, positive_form, relative,
 };
+use crate::acoustics::helmholtz::pressure_release::EmptyFreePressure;
 use fs_phs::acoustic_outlet::AcousticWallRelaxation;
 use fs_phs::{RelaxationBranch, WallPin};
 use std::collections::BTreeSet;
@@ -410,9 +411,11 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 }
             }
         }
-        let pressure_release = self
-            .geometry
-            .pressure_release_constraints(pressure_release_faces, cancelled)?;
+        let pressure_release = self.geometry.pressure_release_constraints(
+            pressure_release_faces,
+            EmptyFreePressure::Refuse,
+            cancelled,
+        )?;
         let physical_fields = spatial_boundaries
             .iter()
             .copied()

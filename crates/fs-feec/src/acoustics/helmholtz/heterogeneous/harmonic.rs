@@ -7,6 +7,7 @@ use super::{
     BoundaryVelocitySource, HeterogeneousError, HeterogeneousHelmholtzFe,
     SpatialBoundaryAdmittance, VolumeVelocitySource, finite, invalid, poll,
 };
+use crate::acoustics::helmholtz::pressure_release::EmptyFreePressure;
 use fs_la::eigen_complex::{LuComplex, LuComplexError, lu_complex_with_cancel};
 use fs_math::{c64::C64, dd::Dd, det};
 use fs_sparse::{Coo, Csr};
@@ -268,9 +269,11 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 maximum: cap,
             });
         }
-        let pressure_release = self
-            .geometry
-            .pressure_release_constraints(pressure_release_faces, cancelled)?;
+        let pressure_release = self.geometry.pressure_release_constraints(
+            pressure_release_faces,
+            EmptyFreePressure::Refuse,
+            cancelled,
+        )?;
         let n = pressure_release.free_dofs.len();
         if n > cap {
             return Err(HeterogeneousError::Limit {

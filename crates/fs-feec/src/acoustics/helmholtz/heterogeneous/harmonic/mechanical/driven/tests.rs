@@ -316,3 +316,28 @@ fn coherent_volume_and_wall_drive_cancel_pressure_without_erasing_wall_heat() {
     assert!(field.wall_accounting.total_energy_j() > 0.0);
     assert!(field.power_balance_residual_w().abs() < 3e-11);
 }
+
+// Planted negative of the admission that the traction test above relies on: the same total release with NO wall leaves a complete
+// pencil with no state at all, and is still refused.
+#[test]
+fn releasing_every_pressure_coordinate_without_a_wall_is_still_refused() {
+    let mesh = TetComplex::from_tets(4, vec![[0, 1, 2, 3]]);
+    let geometry = HelmholtzFe::new(&mesh, &POINTS, 1, MEDIUM).unwrap();
+    let model = uniform(&geometry);
+    let release = [[0, 1, 2], [1, 2, 3]];
+    let refused = model
+        .prepare_with_coupled_mechanical_walls(
+            1.0,
+            &[],
+            &[],
+            &release,
+            MechanicalHarmonicLimits::default(),
+            &mut || false,
+        )
+        .err()
+        .expect("no free pressure and no wall must be refused");
+    assert!(
+        format!("{refused:?}").contains("no free pressure degrees of freedom"),
+        "{refused:?}"
+    );
+}

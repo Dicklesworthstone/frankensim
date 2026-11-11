@@ -5,6 +5,7 @@ use super::{
     VelocityTrace, VolumeVelocitySource, finite, invalid, poll,
 };
 
+use crate::acoustics::helmholtz::pressure_release::EmptyFreePressure;
 use fs_math::c64::C64;
 
 impl HeterogeneousHelmholtzFe<'_, '_> {
@@ -39,9 +40,11 @@ impl HeterogeneousHelmholtzFe<'_, '_> {
         volume_sources: &[(&VolumeVelocitySource<'_, '_, '_>, C64)],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<C64>, HeterogeneousError> {
-        let constraints = self
-            .geometry
-            .pressure_release_constraints(pressure_release_faces, cancelled)?;
+        let constraints = self.geometry.pressure_release_constraints(
+            pressure_release_faces,
+            EmptyFreePressure::Refuse,
+            cancelled,
+        )?;
         let load = PreparedHeterogeneous::project_sources_for(
             self,
             &constraints,

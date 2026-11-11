@@ -32,6 +32,7 @@
 //! or molecular bulk losses, or infer wall properties from bulk fluid data.
 
 use super::{AcousticFeError, HelmholtzFe, MAX_MODES, Medium};
+use crate::acoustics::helmholtz::pressure_release::EmptyFreePressure;
 use crate::highorder::simplex::duffy_quadrature;
 use fs_la::eigen_complex::LuComplexError;
 use fs_math::{c64::C64, det};
@@ -472,9 +473,11 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         options: &SliceOptions,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<HeterogeneousPressureReleaseModes, HeterogeneousError> {
-        let constraints = self
-            .geometry
-            .pressure_release_constraints(pressure_release_faces, cancelled)?;
+        let constraints = self.geometry.pressure_release_constraints(
+            pressure_release_faces,
+            EmptyFreePressure::Refuse,
+            cancelled,
+        )?;
         let eigenpairs = if constraints.faces.is_empty() {
             self.modes(window_hz, options, cancelled)?
         } else {

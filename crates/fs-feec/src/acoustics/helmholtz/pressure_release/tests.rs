@@ -95,7 +95,7 @@ fn pressure_release_duct_modes_converge_to_quarter_and_half_waves() {
                 assert!(errors.iter().all(|error| *error < 2e-3));
                 normalized(fe.mass(), &modes.shapes);
                 let constraint = fe
-                    .pressure_release_constraints(&faces, &mut || false)
+                    .pressure_release_constraints(&faces, EmptyFreePressure::Refuse, &mut || false)
                     .unwrap();
                 for shape in &modes.shapes {
                     for (dof, &fixed) in constraint.constrained.iter().enumerate() {
@@ -219,7 +219,7 @@ fn every_hierarchical_trace_dof_is_released_independently_of_face_winding() {
     for order in 1..=4 {
         let fe = HelmholtzFe::new(&complex, &positions, order, MEDIUM).unwrap();
         let constraints = fe
-            .pressure_release_constraints(&[[0, 1, 2]], &mut || false)
+            .pressure_release_constraints(&[[0, 1, 2]], EmptyFreePressure::Refuse, &mut || false)
             .unwrap();
         assert_eq!(
             constraints
@@ -248,7 +248,7 @@ fn every_hierarchical_trace_dof_is_released_independently_of_face_winding() {
         }
         for face in [[2, 1, 0], [1, 2, 0], [0, 2, 1]] {
             let permuted = fe
-                .pressure_release_constraints(&[face], &mut || false)
+                .pressure_release_constraints(&[face], EmptyFreePressure::Refuse, &mut || false)
                 .unwrap();
             assert_eq!(permuted.free_dofs, constraints.free_dofs);
             assert_eq!(permuted.constrained, constraints.constrained);
@@ -294,7 +294,7 @@ fn release_refusals_are_transactional_and_empty_faces_preserve_rigid_modes() {
     ));
     let mut checkpoints = 0;
     assert!(matches!(
-        fe.pressure_release_constraints(&faces, &mut || {
+        fe.pressure_release_constraints(&faces, EmptyFreePressure::Refuse, &mut || {
             checkpoints += 1;
             checkpoints == 4
         }),
@@ -302,23 +302,52 @@ fn release_refusals_are_transactional_and_empty_faces_preserve_rigid_modes() {
     ));
     let face = faces[0];
     assert!(matches!(
-        fe.pressure_release_constraints(&[face, [face[2], face[1], face[0]]], &mut || false),
+        fe.pressure_release_constraints(
+            &[face, [face[2], face[1], face[0]]],
+            EmptyFreePressure::Refuse,
+            &mut || false
+        ),
         Err(AcousticFeError::InvalidInput { .. })
     ));
     let (complex, positions) = two_tets();
     let fe = HelmholtzFe::new(&complex, &positions, 2, MEDIUM).unwrap();
     assert!(matches!(
-        fe.pressure_release_constraints(&[[1, 2, 3]], &mut || false),
+        fe.pressure_release_constraints(&[[1, 2, 3]], EmptyFreePressure::Refuse, &mut || false),
         Err(AcousticFeError::FaceNotOnBoundary { .. })
     ));
     assert!(matches!(
-        fe.pressure_release_constraints(&[[0, 1, 999]], &mut || false),
+        fe.pressure_release_constraints(&[[0, 1, 999]], EmptyFreePressure::Refuse, &mut || false),
         Err(AcousticFeError::FaceNotInMesh { .. })
     ));
     let (complex, positions) = single_tet();
     let fe = HelmholtzFe::new(&complex, &positions, 1, MEDIUM).unwrap();
     assert!(matches!(
-        fe.pressure_release_constraints(&fe.boundary_faces(), &mut || false),
+        fe.pressure_release_constraints(
+            &fe.boundary_faces(),
+            EmptyFreePressure::Refuse,
+            &mut || false
+        ),
+        Err(AcousticFeError::InvalidInput { .. })
+    ));
+}
+
+// The empty free pressure set is admitted only for a caller that carries wall states of its own; every other caller, and the
+// default of the helper before this variant existed, still refuses it.
+#[test]
+fn an_empty_free_set_is_admitted_only_when_the_caller_names_wall_states() {
+    let (complex, positions) = single_tet();
+    let fe = HelmholtzFe::new(&complex, &positions, 1, MEDIUM).unwrap();
+    let all = fe.boundary_faces();
+    let admitted = fe
+        .pressure_release_constraints(&all, EmptyFreePressure::AdmitWithWallStates, &mut || false)
+        .unwrap();
+    assert!(admitted.free_dofs.is_empty());
+    assert_eq!(
+        admitted.constrained.iter().filter(|&&c| c).count(),
+        fe.ndof()
+    );
+    assert!(matches!(
+        fe.pressure_release_constraints(&all, EmptyFreePressure::Refuse, &mut || false),
         Err(AcousticFeError::InvalidInput { .. })
     ));
 }

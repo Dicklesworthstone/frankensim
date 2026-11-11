@@ -1,6 +1,7 @@
 use super::super::tests::{MEDIUM, brick, p2, plane};
 use super::super::{AcousticFeError, HeterogeneousTimeLimits};
 use super::*;
+use crate::acoustics::helmholtz::pressure_release::EmptyFreePressure;
 use crate::acoustics::helmholtz::{HelmholtzFe, Medium};
 use crate::fixtures::single_tet;
 use fs_modal::SliceOptions;
@@ -254,7 +255,7 @@ fn pressure_release_exact_caps_free_states_and_refuses_conflicting_laws_without_
     let release = geometry.boundary_faces();
     assert!(model.ndof() > ExactTimeLimits::default().max_dofs);
     let constraints = geometry
-        .pressure_release_constraints(&release, &mut || false)
+        .pressure_release_constraints(&release, EmptyFreePressure::Refuse, &mut || false)
         .unwrap();
     let free = constraints.free_dofs.len();
     let limits = ExactTimeLimits {

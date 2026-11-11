@@ -19,6 +19,7 @@ use super::{
     HeterogeneousError, HeterogeneousHelmholtzFe, HeterogeneousTimeState, RealVelocityTrace,
     ResistiveBoundary, SpatialResistiveBoundary,
 };
+use crate::acoustics::helmholtz::pressure_release::EmptyFreePressure;
 use crate::highorder::simplex::duffy_quadrature;
 use fs_math::dd::Dd;
 use fs_sparse::Coo;
@@ -101,9 +102,11 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         poll(cancelled)?;
         bound("pressure coordinates", self.ndof(), limits.maximum_dofs)?;
         bound("memory regions", regions.len(), limits.maximum_regions)?;
-        let constraints = self
-            .geometry()
-            .pressure_release_constraints(pressure_release_faces, cancelled)?;
+        let constraints = self.geometry().pressure_release_constraints(
+            pressure_release_faces,
+            EmptyFreePressure::Refuse,
+            cancelled,
+        )?;
         let conductance = self.resistive_matrix(boundaries, spatial, &constraints, cancelled)?;
         let geometry = self.geometry();
         let n = self.ndof();

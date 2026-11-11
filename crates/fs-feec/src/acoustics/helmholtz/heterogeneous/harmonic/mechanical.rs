@@ -14,6 +14,7 @@ use super::{
     PressureReleaseConstraints, ResonanceSurvey, ResonanceSurveyControls, ResonanceSurveyError,
     VelocityTrace, VolumeVelocitySource, frequency, invalid, poll,
 };
+use crate::acoustics::helmholtz::pressure_release::EmptyFreePressure;
 use frequency::coupled::{CoupledPencil, Wall, WallTraction};
 pub use frequency::coupled::{
     MechanicalHarmonicLimits, MechanicalWallAccounting, MechanicalWallFrequencyDerivative,
@@ -168,9 +169,15 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 maximum: limits.max_states,
             });
         }
-        let pressure_release = self
-            .geometry
-            .pressure_release_constraints(pressure_release_faces, cancelled)?;
+        let pressure_release = self.geometry.pressure_release_constraints(
+            pressure_release_faces,
+            if boundaries.is_empty() {
+                EmptyFreePressure::Refuse
+            } else {
+                EmptyFreePressure::AdmitWithWallStates
+            },
+            cancelled,
+        )?;
         let states = pressure_release.free_dofs.len();
         if states > limits.max_states {
             return Err(HeterogeneousError::Limit {

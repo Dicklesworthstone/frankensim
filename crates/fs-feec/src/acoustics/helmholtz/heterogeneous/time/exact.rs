@@ -28,6 +28,7 @@ use super::{
     HeterogeneousTimeState, PressureReleaseConstraints, RealVelocityTrace, ResistiveBoundary, det,
     energy_change, invalid, poll, positive_form,
 };
+use crate::acoustics::helmholtz::pressure_release::EmptyFreePressure;
 use fs_la::factor::cholesky;
 use fs_phs::linear_exact::{
     DenseExponentialBudget, LinearSplitBudget, MAX_LINEAR_EXPONENTIAL_BLOCK_DIM,
@@ -336,9 +337,11 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         if pressure_release_faces.is_empty() {
             canonical_extent(self.ndof(), port_count, limits.max_dofs)?;
         }
-        let pressure_release = self
-            .geometry
-            .pressure_release_constraints(pressure_release_faces, cancelled)?;
+        let pressure_release = self.geometry.pressure_release_constraints(
+            pressure_release_faces,
+            EmptyFreePressure::Refuse,
+            cancelled,
+        )?;
         let n = pressure_release.free_dofs.len();
         let states = canonical_extent(n, port_count, limits.max_dofs)?;
         for source in boundary_sources {

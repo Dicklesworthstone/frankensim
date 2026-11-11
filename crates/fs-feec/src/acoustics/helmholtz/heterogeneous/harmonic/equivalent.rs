@@ -30,6 +30,7 @@ use super::{
     MAX_HARMONIC_DOFS, PreparedHeterogeneous, VelocityTrace, finite, invalid, poll,
     quadratic_nonnegative,
 };
+use crate::acoustics::helmholtz::pressure_release::EmptyFreePressure;
 use crate::highorder::simplex::duffy_quadrature;
 use fs_math::{c64::C64, dd::Dd};
 use fs_sparse::{Coo, Csr};
@@ -344,7 +345,11 @@ impl<'f, 'c> PreparedEquivalentFluid<'f, 'c> {
             )?;
         }
         let pressure_release = geometry
-            .pressure_release_constraints(pressure_release_faces, cancelled)
+            .pressure_release_constraints(
+                pressure_release_faces,
+                EmptyFreePressure::Refuse,
+                cancelled,
+            )
             .map_err(HeterogeneousError::from)?;
         let n = pressure_release.free_dofs.len();
         admit_limit("unconstrained pressure degrees of freedom", n, cap)?;

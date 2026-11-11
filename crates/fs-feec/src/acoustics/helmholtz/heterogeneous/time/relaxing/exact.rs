@@ -33,6 +33,7 @@ use super::{
     ResistiveBoundary, SpatialRelaxingBoundary, SpatialResistiveBoundary,
     VolumeVelocitySource, energy_change, invalid, poll, positive_form,
 };
+use crate::acoustics::helmholtz::pressure_release::EmptyFreePressure;
 use fs_math::det;
 use fs_phs::linear_exact::{
     DenseExponentialBudget, LinearSplitBudget, MAX_LINEAR_EXPONENTIAL_BLOCK_DIM,
@@ -247,7 +248,11 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         if pressure_release_faces.is_empty() {
             admit_extent(self.ndof().checked_mul(2).ok_or_else(|| invalid("exact fluid state extent overflow"))?, source_count, limits)?;
         }
-        let pressure_release = self.geometry.pressure_release_constraints(pressure_release_faces, cancelled)?;
+        let pressure_release = self.geometry.pressure_release_constraints(
+            pressure_release_faces,
+            EmptyFreePressure::Refuse,
+            cancelled,
+        )?;
         let n = pressure_release.free_dofs.len();
         let base_states = 2*n;
         let mut states = base_states;

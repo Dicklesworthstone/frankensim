@@ -1,6 +1,7 @@
 use super::*;
 use crate::acoustics::helmholtz::HelmholtzFe;
 use crate::acoustics::helmholtz::heterogeneous::time::tests::{MEDIUM, brick, p2, plane, uniform};
+use crate::acoustics::helmholtz::pressure_release::EmptyFreePressure;
 use fs_math::det;
 
 fn restricted(prepared: &PreparedMechanicalTime<'_, '_, '_>, field: &[f64]) -> Vec<f64> {
@@ -263,7 +264,7 @@ fn pressure_release_wall_admission_is_transactional_and_empty_faces_preserve_bit
         }],
     };
     let free = geometry
-        .pressure_release_constraints(&release, &mut || false)
+        .pressure_release_constraints(&release, EmptyFreePressure::Refuse, &mut || false)
         .unwrap()
         .free_dofs
         .len();
