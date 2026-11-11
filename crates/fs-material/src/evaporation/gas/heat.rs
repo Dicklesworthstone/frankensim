@@ -283,6 +283,45 @@ pub(super) fn sensible_heat(
         iterations,
         residual_temperature_k: near.residual,
     })?;
+    // The first midpoint inside the equation band is some point of that band,
+    // not the root: an ulp of the duration moves one midpoint across the band's
+    // edge, the bisection stops one or three steps later, and the published heat
+    // jumps by up to the band's width (printed at the freezing event: 31 against
+    // 34 iterations, 9.7e-14 kg of phase mass across one ulp of the duration).
+    // One interpolation inside the final bracket removes that dependence on the
+    // path: the root lies between the accepted midpoint and the bracket end of
+    // the opposite sign, the residual is smooth there, and the secant's error is
+    // O(w^2) in the bracket width w, which is below the band by the factor
+    // w*|F''/F'|/2. It is kept only if it is itself converged and strictly
+    // closer to the root; otherwise the accepted midpoint stays, so the
+    // endpoint is continuous in the duration except where that one step fails.
+    // An endpoint that is already the far limit (no midpoint was taken) is an
+    // admitted source bound and is never moved. The iteration count of the
+    // receipt stays the bisection's.
+    let endpoint = if iterations > 0 {
+        let other = if sign * endpoint.residual > 0.0 {
+            far
+        } else {
+            near
+        };
+        let mut polished = endpoint;
+        if endpoint.residual * other.residual < 0.0 {
+            let weight = endpoint.residual / (endpoint.residual - other.residual);
+            let t = endpoint.gas_t + weight * (other.gas_t - endpoint.gas_t);
+            match energy(t).and_then(|q| evaluate(t, q, None)) {
+                Ok(candidate)
+                    if converged(candidate)
+                        && candidate.residual.abs() < endpoint.residual.abs() =>
+                {
+                    polished = candidate;
+                }
+                _ => {}
+            }
+        }
+        polished
+    } else {
+        endpoint
+    };
     // Debit the SAME represented liquid heat, then let the original gas owner
     // reconstruct every gas property once. No model/card cloning occurs in trials.
     let q = finite(liquid.mass_kg * (endpoint.h - liquid.specific_enthalpy_j_kg))?;

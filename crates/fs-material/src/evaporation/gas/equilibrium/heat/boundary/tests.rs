@@ -180,6 +180,53 @@ fn evaporative_freezing_replays_both_owners_at_one_common_duration() {
 }
 
 #[test]
+fn the_published_heat_is_continuous_across_the_ulp_where_the_bisection_path_flipped() {
+    // At the event of the test above the heat solve of two ADJACENT durations,
+    // 5554.513257088766 s (0x40b5b28364d10ab1) and the next double, took 31 and
+    // 34 bisection steps and published heats that differ by about 2.8e-8 J: the
+    // first midpoint inside the 5e-9 K band was a different point of the band.
+    // That jump moves the phase owner's mass by 9.7e-14 kg, nine times its
+    // 1e-14 kg completion window, which is 2.9e-9 J of heat. The published heat
+    // is the root to the secant's accuracy, so it follows the true rate
+    // (about 0.07 W, 6e-14 J per ulp of the duration) and the two agree to
+    // far less than that window.
+    let source = catalog(0.0);
+    let chart = curve();
+    let inventory = EquilibriumEvaporation::new(&chart).unwrap();
+    let initial = bulk(&chart, 0.5);
+    let original_gas = gas(&source, 280.0, 0.0, 1.0);
+    let mut native = heat_controls(&chart)
+        .original_controls(inventory, initial.specific_enthalpy_j_kg)
+        .unwrap();
+    native.pure_liquid_enthalpy_range_j_kg[0] = inventory.solid_at_melting_h_j_kg;
+    let heat_at = |duration: f64| {
+        sensible_heat(
+            initial,
+            &original_gas,
+            MELTING,
+            &|h| {
+                chart
+                    .temperature_at_specific_enthalpy(h)
+                    .map_err(|_| EvaporationError::Invalid("test source"))
+            },
+            1.0,
+            duration,
+            phase_controls(),
+            native,
+            &mut || false,
+        )
+        .unwrap()
+        .2
+        .heat_into_liquid_j
+    };
+    let before = f64::from_bits(0x40b5_b283_64d1_0ab1);
+    let after = before.next_up();
+    assert_eq!(before, 5554.513257088766);
+    let jump = (heat_at(after) - heat_at(before)).abs();
+    assert!(jump < 1e-9, "{jump:e} J across one ulp of the duration");
+}
+
+#[test]
 fn reciprocal_heat_alone_completes_isothermal_freezing_conservatively() {
     let source = catalog(0.0);
     let chart = curve();
