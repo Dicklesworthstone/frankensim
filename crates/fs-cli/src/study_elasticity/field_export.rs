@@ -502,21 +502,32 @@ pub(super) fn render(driver: &str, bytes: &[u8]) -> Result<Projection> {
             affine_responses(&design, fields, &mut grid, &mut remaining)?;
         }
     } else if driver == STRESS3_DRIVER {
+        // The stress study retains one per-cell array per load case
+        // (fs-topopt StressEvaluation3::cell_relaxed_max); the export shows
+        // each cell's maximum over the retained cases.
         let stress = array(fields, "cell_relaxed_max_pa")?;
-        if stress.len() != cells.len() {
-            return Err(bad("retained sampled stress does not cover every cell"));
+        if stress.len() != cases.len() {
+            return Err(bad(
+                "retained sampled stress does not cover every load case",
+            ));
         }
-        charge(&mut remaining, stress.len())?;
-        let values = stress
-            .iter()
-            .map(|v| {
+        charge(&mut remaining, cells.len())?;
+        let mut values = vec![0.0_f64; cells.len()];
+        for case in stress {
+            let case = case
+                .as_array()
+                .ok_or_else(|| bad("retained sampled stress case is not an array"))?;
+            if case.len() != cells.len() {
+                return Err(bad("retained sampled stress does not cover every cell"));
+            }
+            for (maximum, v) in values.iter_mut().zip(case) {
                 let value = finite(v)?;
                 if value < 0.0 {
                     return Err(bad("retained sampled stress is negative"));
                 }
-                Ok(value)
-            })
-            .collect::<Result<Vec<_>>>()?;
+                *maximum = maximum.max(value);
+            }
+        }
         grid.add_array(
             DataArray::new_cell_scalar("sampled_relaxed_max_stress", values).with_unit("Pa"),
         );

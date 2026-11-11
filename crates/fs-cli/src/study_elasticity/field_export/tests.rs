@@ -23,7 +23,7 @@ fn fields(load_space: bool) -> String {
         )
     } else {
         format!(
-            "\"displacement_layout\":\"load-case then node-major xyz\",\"displacements_m\":[{:?},{:?}],\"cell_relaxed_max_pa\":[120.5]",
+            "\"displacement_layout\":\"load-case then node-major xyz\",\"displacements_m\":[{:?},{:?}],\"cell_relaxed_max_pa\":[[120.5],[80.0]]",
             displacement(0.0),
             displacement(0.1)
         )
@@ -121,6 +121,45 @@ fn stress_export_uses_selected_incumbent_and_sampled_stress() {
     assert_eq!(values(&grid, "raw_density"), [0.7]);
     assert_eq!(values(&grid, "sampled_relaxed_max_stress"), [120.5]);
     assert_eq!(grid.arrays.len(), 6);
+}
+
+#[test]
+fn stress_export_keeps_each_cells_maximum_over_the_load_cases() {
+    // A second voxel beside the first in x; the first cell's larger stress
+    // sits in case 0, the second cell's in case 1.
+    let wide = |offset: f64| {
+        let values: Vec<f64> = (0..36).map(|i| offset + f64::from(i) / 1000.0).collect();
+        format!("{values:?}")
+    };
+    let two_cells = incumbent(false)
+        .replace(NODES, "[[1,2,3],[2,2,3],[1,4,3],[2,4,3],[1,2,6],[2,2,6],[1,4,6],[2,4,6],[3,2,3],[3,4,3],[3,2,6],[3,4,6]]")
+        .replace(CORNERS, "[[0,1,2,3,4,5,6,7],[1,8,3,9,5,10,7,11]]")
+        .replace(
+            "\"cut_volume_m3\":2.5}]",
+            "\"cut_volume_m3\":2.5},{\"raw_density\":0.5,\"projected_density\":0.4,\"cut_volume_m3\":1.5}]",
+        )
+        .replace(&format!("{:?}", displacement(0.0)), &wide(0.0))
+        .replace(&format!("{:?}", displacement(0.1)), &wide(0.1));
+    let stress = |cases: &str| {
+        two_cells.replace(
+            "\"cell_relaxed_max_pa\":[[120.5],[80.0]]",
+            &format!("\"cell_relaxed_max_pa\":{cases}"),
+        )
+    };
+    let grid = grid(STRESS3_DRIVER, &stress("[[120.5,10.0],[80.0,50.0]]"));
+    assert_eq!(values(&grid, "raw_density"), [0.7, 0.5]);
+    assert_eq!(values(&grid, "sampled_relaxed_max_stress"), [120.5, 50.0]);
+    for malformed in [
+        "[120.5,50.0]",
+        "[[120.5,10.0]]",
+        "[[120.5,10.0],[80.0]]",
+        "[[120.5,10.0],[80.0,-1.0]]",
+    ] {
+        assert!(
+            render(STRESS3_DRIVER, stress(malformed).as_bytes()).is_err(),
+            "accepted malformed sampled stress: {malformed}"
+        );
+    }
 }
 
 #[test]
@@ -381,7 +420,7 @@ fn malformed_shape_nonfinite_values_and_wrong_driver_refuse() {
     }
     assert!(render(LOAD_SPACE3_DRIVER, original.as_bytes()).is_err());
     let missing_stress = incumbent(false).replace(
-        "\"cell_relaxed_max_pa\":[120.5]",
+        "\"cell_relaxed_max_pa\":[[120.5],[80.0]]",
         "\"cell_relaxed_max_pa\":[]",
     );
     assert!(render(STRESS3_DRIVER, missing_stress.as_bytes()).is_err());

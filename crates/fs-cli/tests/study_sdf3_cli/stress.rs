@@ -176,9 +176,11 @@ fn g4_stress_resume_cannot_renew_an_exhausted_evaluation_allowance() {
     assert_eq!(first.path(&["receipt", "iterations_completed"]).and_then(J::as_f64), Some(0.0));
     let old = retained(&ledger, &first, "checkpoint");
     let stopped = command("study").arg("--resume").arg(first.str_field("run_id").unwrap())
-        .arg(&ledger).args(["--budget", "80"]).output().unwrap();
-    document(&stopped, 6);
-    assert!(String::from_utf8_lossy(&stopped.stdout).contains("cli-study-sdf3-resume-budget"));
+        .arg(&ledger).args(["--budget", "32"]).output().unwrap();
+    // A study refusal writes no result document; its diagnostic goes to stderr,
+    // where affine.rs:218 reads it. This test read stdout since 4ef154198b.
+    assert_eq!(stopped.status.code(), Some(6), "{}", String::from_utf8_lossy(&stopped.stderr));
+    assert!(String::from_utf8_lossy(&stopped.stderr).contains("cli-study-sdf3-resume-budget"));
     assert_eq!(retained(&ledger, &first, "checkpoint"), old);
 }
 
