@@ -338,7 +338,7 @@ pub fn incident_maxwellian(
             moments: None,
         });
     }
-    let sigma = represented(sqrt(specific_gas_constant_j_kg_k) * sqrt(gas_temperature_k))?;
+    let sigma = thermal_speed(specific_gas_constant_j_kg_k, gas_temperature_k)?;
     let normal_velocity = dot(relative_bulk_velocity_m_s, outward_unit_normal)?;
     let mut tangent = [0.0; 3];
     for i in 0..3 {
@@ -358,6 +358,55 @@ pub fn incident_maxwellian(
             ));
         }
     }
+    let correction = crossing_correction(&normal, tangent)?;
+    Ok(MaxwellianIncidence {
+        incoming_mass_flux_kg_m2_s: normal.mass,
+        incoming_mass_flux_change_from_zero_drift_kg_m2_s: normal.mass_change,
+        moments: Some(IncidentMolecularMoments {
+            mean_relative_velocity_m_s: velocity,
+            crossing_energy_minus_enthalpy_j_kg: correction,
+        }),
+    })
+}
+
+/// Crossing energy minus enthalpy, per kilogram, of the molecules that a
+/// Maxwellian at rest relative to the surface sends across it: -R_i*T/2. A
+/// half-range Maxwellian emitted at the surface temperature carries the same
+/// value. It is the evaluation `incident_maxwellian` makes at zero relative
+/// drift, bit for bit and at any partial density: the same thermal speed, the
+/// same normal moments and the same rounding. So an owner that subtracts a
+/// stationary incident beam from an emitted one at the same temperature gets
+/// exactly 0, not the gap of an ulp or more between 0.5*R_i*T and
+/// (sqrt(R_i)*sqrt(T))^2/2.
+pub fn stationary_crossing_energy_minus_enthalpy(
+    specific_gas_constant_j_kg_k: f64,
+    temperature_k: f64,
+) -> Result<f64, SublimationError> {
+    if !positive(specific_gas_constant_j_kg_k) || !positive(temperature_k) {
+        return Err(invalid(
+            "positive finite specific gas constant and temperature required",
+        ));
+    }
+    let sigma = thermal_speed(specific_gas_constant_j_kg_k, temperature_k)?;
+    // normal_incidence's energy scale and factor do not read the density; a
+    // unit density only sizes the mass moments, which are not used here.
+    let normal = normal_incidence(1.0, sigma, 0.0)?;
+    crossing_correction(&normal, [0.0; 3])
+}
+
+fn thermal_speed(
+    specific_gas_constant_j_kg_k: f64,
+    temperature_k: f64,
+) -> Result<f64, SublimationError> {
+    represented(sqrt(specific_gas_constant_j_kg_k) * sqrt(temperature_k))
+}
+
+// The normal second-moment factor and the tangential slip halves, scaled by a
+// power of two and rounded once.
+fn crossing_correction(
+    normal: &NormalIncidence,
+    tangent: [f64; 3],
+) -> Result<f64, SublimationError> {
     let largest = tangent
         .into_iter()
         .map(f64::abs)
@@ -375,14 +424,7 @@ pub fn incident_maxwellian(
             "incoming molecular crossing energy correction is unrepresentable",
         ));
     }
-    Ok(MaxwellianIncidence {
-        incoming_mass_flux_kg_m2_s: normal.mass,
-        incoming_mass_flux_change_from_zero_drift_kg_m2_s: normal.mass_change,
-        moments: Some(IncidentMolecularMoments {
-            mean_relative_velocity_m_s: velocity,
-            crossing_energy_minus_enthalpy_j_kg: correction,
-        }),
-    })
+    Ok(correction)
 }
 
 #[cfg(test)]

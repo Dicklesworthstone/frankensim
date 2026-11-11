@@ -746,6 +746,10 @@ evaluated independently, preserving small net deposition near saturation even
 when the gross beams round equally. Energy includes tangential slip and the
 flux-weighted normal second moment; adding bulk kinetic energy to a stationary
 beam would not give these moments.
+`stationary_crossing_energy_minus_enthalpy` returns that crossing energy at
+zero relative drift, -R_i*T/2, from the same evaluation, bit for bit, so an
+owner that subtracts a stationary incident beam from a beam emitted at the same
+temperature gets exactly zero.
 
 The kernel adds no state, thermochemical datum, film resistance, continuum
 stress, velocity-dependent sticking or Knudsen-layer model. Original material

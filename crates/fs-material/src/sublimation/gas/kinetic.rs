@@ -27,7 +27,9 @@ use super::{
 use crate::thermochemical_gas::energy::parcel::transfer::species::boundary::admit_catalog;
 use fs_qty::Temperature;
 use fs_thermal::sublimation::molecular::{
-    drift::incident_maxwellian, molecular_mass_flux, momentum::flux_weighted_normal_speed,
+    drift::{incident_maxwellian, stationary_crossing_energy_minus_enthalpy},
+    molecular_mass_flux,
+    momentum::flux_weighted_normal_speed,
 };
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
 use std::collections::BTreeMap;
@@ -427,7 +429,14 @@ pub fn evaluate_molecular_interface(
                     .value()
                     / source.molar_mass().value(),
             )?;
-            let outgoing_beyond_h = sum([delta_h, -product(0.5 * r, surface_temperature)?])?;
+            // The emitted beam's crossing energy below h(Ts), -R_i*Ts/2, is
+            // fs-thermal's evaluation for a stationary incident beam, so at
+            // Ts = Tg and zero drift the diffuse term below is exactly 0, as
+            // accommodation.rs forms it.
+            let outgoing_beyond_h = sum([
+                delta_h,
+                stationary_crossing_energy_minus_enthalpy(r, surface_temperature)?,
+            ])?;
             let crossing_difference = sum([outgoing_beyond_h, -incident_correction])?;
             sum([
                 product(net, outgoing_beyond_h)?,

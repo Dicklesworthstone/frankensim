@@ -357,3 +357,51 @@ fn three_factor_product_rounds_its_exact_value_once() {
         assert_eq!(rounded.to_bits(), (a * x).to_bits());
     }
 }
+
+// An owner that subtracts a stationary incident beam's crossing energy from an
+// emitted beam's at the same temperature must get exactly 0 (bead rc-1109 .1.5
+// S1: 0.5*r*T and (sqrt(r)*sqrt(T))^2/2 differ by an ulp at r = R/0.02897,
+// T = 400 K, and that ulp times a 46.6 kg/m2/s diffuse flux was the residual).
+#[test]
+fn stationary_crossing_energy_is_the_zero_drift_incident_value_bit_for_bit() {
+    let universal = 8.314_462_618_153_24;
+    for molar_mass in [0.02897, 0.018015, 0.004_002_602] {
+        let r = universal / molar_mass;
+        for t in [250.0, 400.0, 700.0, 3000.0] {
+            let stationary = stationary_crossing_energy_minus_enthalpy(r, t).unwrap();
+            for density in [1e-9, 0.1, 1.0, 37.0] {
+                for normal in [NORMAL, [0.0, 0.0, -1.0], [0.6, 0.0, -0.8]] {
+                    let incident = incident_maxwellian(density, r, t, [0.0; 3], normal)
+                        .unwrap()
+                        .moments
+                        .unwrap()
+                        .crossing_energy_minus_enthalpy_j_kg;
+                    assert_eq!(stationary.to_bits(), incident.to_bits());
+                }
+            }
+            // The value is -r*t/2. The two square roots, their product and the
+            // final rounding give at most 7u + O(u^2) relative error, u = 2^-53;
+            // the reference 0.5*r*t adds u. 8 EPSILON = 16u covers both.
+            let half = 0.5 * r * t;
+            assert!(
+                (stationary + half).abs() <= 8.0 * f64::EPSILON * half,
+                "{stationary:e} != {:e}",
+                -half
+            );
+        }
+        // Planted: a 1 m/s tangential slip adds |v_t|^2/2 = 0.5 J/kg, so the
+        // bit comparison above can fail.
+        let stationary = stationary_crossing_energy_minus_enthalpy(r, 400.0).unwrap();
+        let slipping = incident_maxwellian(1.0, r, 400.0, [0.0, 1.0, 0.0], NORMAL)
+            .unwrap()
+            .moments
+            .unwrap()
+            .crossing_energy_minus_enthalpy_j_kg;
+        assert_ne!(slipping.to_bits(), stationary.to_bits());
+        relative(slipping - stationary, 0.5, 1e-9);
+    }
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(stationary_crossing_energy_minus_enthalpy(bad, 300.0).is_err());
+        assert!(stationary_crossing_energy_minus_enthalpy(287.0, bad).is_err());
+    }
+}

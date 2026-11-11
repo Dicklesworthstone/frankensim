@@ -121,6 +121,11 @@ fn stationary_limit_matches_original_phase_beams_pressure_and_reflected_heat() {
                 je * (hs - 0.5 * r * ts) - beta * ji * (hg - 0.5 * r * tg)
                     + (1.0 - beta) * chi * ji * ((hs - hg) - 0.5 * r * (ts - tg)),
             );
+            if ts == tg && !volatile {
+                // A carrier at the wall temperature: its diffuse re-emission
+                // returns exactly the energy it brought (bead rc-1109 .1.5 S1).
+                assert_eq!(row.laboratory_energy_flux_into_gas_w_m2, 0.0);
+            }
             assert_eq!(row.mechanical_power_into_gas_w_m2, 0.0);
         }
         near(
