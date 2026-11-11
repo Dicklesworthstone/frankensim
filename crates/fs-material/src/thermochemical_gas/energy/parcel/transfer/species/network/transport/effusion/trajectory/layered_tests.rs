@@ -415,7 +415,24 @@ fn every_laminate_reads_one_snapshot_and_later_steps_transport_arrivals() {
     let bounds = endpoints(&gases);
     let stack = medium(0.0);
     let context = point(T, P);
-    let card = card(2e-5, (1000.0, 1e7));
+    // Onward transport of an arrival needs molecular friction weak against B's
+    // Knudsen back-flow. Step 1 is isobaric Graham flux, g = |N_B/N_A| = sqrt 7:
+    // parcel 20 gains A, loses g - 1 = 1.65 times as many net moles, and cools
+    // about 3 mK, tau/eps = -(g - 1)/(sum x_i cv_i/R) = -0.94 (eps the relative
+    // A gain, tau the relative temperature change). In the later step B returns
+    // 30 -> 20 and drags A with it, uphill (contracts/part-03.md:3210-3211),
+    // unless D_AB exceeds
+    //     D* = D0 R_AB x_A ((g - 1) - tau/eps) / (K_B (1 + x_A tau/eps)) = 8.36e-5 m2/s,
+    // with K_B and R_AB the laminate's Knudsen and molecular resistances at any
+    // D0 (D0 R_AB does not depend on D0); D* is 4.07e-5 if parcel 20 stayed
+    // isothermal. An independent binary dusty-gas oracle gives link 8 in the
+    // later step N_A = -1.01e-7 and N_B = -7.66e-7 mol/m2/s at 2e-5, and
+    // N_A = +1.75e-7 and N_B = -3.86e-6 mol/m2/s at 2e-4, where 4.9e-13 kg of A
+    // moves 20 -> 30. 2e-4 is a fixture input chosen 2.39 times above D*, not a
+    // pass threshold and not a measured card: it sits at the high end of binary
+    // gas diffusivities at 1 bar (light-gas pairs are about 0.6e-4 to 0.7e-4
+    // m2/s at room temperature).
+    let card = card(2e-4, (1000.0, 1e7));
     let pairs = [binding(["A", "B"], &card, &context)];
     let first = link(&stack, &pairs, &context);
     let second = LayeredDustyGasNetworkLink {
