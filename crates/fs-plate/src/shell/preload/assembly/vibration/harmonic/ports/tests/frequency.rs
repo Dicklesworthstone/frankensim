@@ -20,21 +20,25 @@ fn frequency_budget() -> AssemblyPortFrequencyBudget {
 
 #[test]
 fn maxwell_loaded_shell_tangent_and_physical_receiver_resonances_match_analytic_response() {
-    let mut part = Part::rectangle(0.0, 2.0, 2, 0.0, true);
+    let mut part = Part::rectangle(0, 2, 2, 0.0, true);
     for (node, force) in [(2, 25.0), (5, 50.0), (8, 25.0)] {
         part.loads[6 * node] = force;
     }
     let tip = 6 * 8 + 2;
     part.loads[tip] = -0.01;
-    let body = solve(&part, &[]);
+    let body = solve(&[part.input()]);
     let before = body.displacements.clone();
+    let reference = dense_reference(&body);
     with_cx(&CancelGate::new_clock_free(), |cx| {
-        let (lambda, _) = dense_reference(&body, cx);
         let vibration = eigen_windows(
             &body,
             &WindowPlan {
-                windows: vec![(0.0, 0.5 * (lambda[0] + lambda[1]))],
-                ..plan(&body, 1)
+                windows: vec![(0.0, 0.5 * (reference[0].lambda + reference[1].lambda))],
+                threads: 1,
+                maximum_windows: 1,
+                maximum_bytes: 64 << 20,
+                maximum_relative_halfwidth: 1e-8,
+                coordinates: None,
             },
             &modal_options(),
             output_budget(),
@@ -42,7 +46,7 @@ fn maxwell_loaded_shell_tangent_and_physical_receiver_resonances_match_analytic_
         )
         .unwrap();
         let model = AssemblyHarmonicModel::new(&vibration, model_budget(), cx).unwrap();
-        let shape_tip = vibration.mode_displacements(0, cx).unwrap()[0][tip];
+        let shape_tip = vibration.expand_mode(0, cx).unwrap()[0][tip];
         let mut weights = vec![0.0; part.loads.len()];
         weights[0] = 2.0;
         weights[tip] = 1.3;
@@ -257,13 +261,14 @@ fn maxwell_loaded_shell_tangent_and_physical_receiver_resonances_match_analytic_
 
 #[test]
 fn mutual_port_and_phased_source_tangents_preserve_nonmatching_slave_work() {
-    let left = Part::rectangle(0.0, 2.0, 2, 0.0, true);
-    let mut right = Part::rectangle(2.0, 2.0, 3, 0.0, false);
+    let left = Part::rectangle(0, 2, 2, 0.0, true);
+    let mut right = Part::rectangle(2, 2, 3, 0.0, false);
     let last = right.loads.len() - 4;
     right.loads[last] = -0.1;
     let body = equilibrate_shell_assembly(
-        &[left.component(), right.component()],
+        &[left.input(), right.input()],
         &[seam(3, TieOffset::Midsurface)],
+        &[],
         tie_budget(),
         options(),
         &mut reference_newton,

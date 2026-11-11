@@ -1,6 +1,7 @@
 //! G0/G3: signed beam tangents through the original nonmatching, eccentric mortar.
 use super::*;
 use crate::shell::stiffened::timoshenko::ShearAreas;
+use crate::shell::stiffened::timoshenko::{assemble_beam_chain, assemble_prestressed_beam_chain};
 
 fn fixture() -> (ShellMesh, ShellModel, TieBudget) {
     let mesh = ShellMesh::new(
