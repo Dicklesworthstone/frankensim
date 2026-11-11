@@ -258,8 +258,8 @@ fn g3_actual_heat_recheck_exposes_equal_and_opposite_local_defects() {
             .unwrap();
         assert_endpoint(&next, [0., 0.]);
         let mut actual_heat = heat;
-        actual_heat[0] += Dd::from_f64(0.5);
-        actual_heat[4] -= Dd::from_f64(0.5);
+        actual_heat[0] = actual_heat[0] + Dd::from_f64(0.5);
+        actual_heat[4] = actual_heat[4] - Dd::from_f64(0.5);
         let measured = engine
             .evaluate_endpoint_with_nodal_heat_and_temperature_contacts(
                 cx,
