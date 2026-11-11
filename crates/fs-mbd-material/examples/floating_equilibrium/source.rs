@@ -17,7 +17,11 @@ use fs_mbd_material::{RegionBinding, ResolvedBody, VolumeMoments, resolve_body};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Density, DynViscosity, QuantitySpec, Temperature};
 
-pub(super) const SIDES_M: Vec3 = Vec3::new(2.0, 2.0, 1.0);
+pub(super) const SIDES_M: Vec3 = Vec3 {
+    x: 2.0,
+    y: 2.0,
+    z: 1.0,
+};
 
 fn card(phase: &str, properties: Vec<(PropertyKey, f64)>) -> Result<MaterialCard> {
     let mut claims = ClaimSet::new();
