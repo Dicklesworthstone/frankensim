@@ -292,6 +292,7 @@ pub(super) fn numerical(error: GoalRefinementError3, gate: &CancelGate, expired:
                     | EvaluationStop::TotalBudget { .. }
                     | EvaluationStop::Breakdown {
                         stage: "sdf3-material-body-load-budget"
+                            | "sdf3-affine-stress-point-budget"
                     }
             ) | GoalRefinementError3::Background(
                 OctreeError3::LeafBudget | OctreeError3::LevelBudget

@@ -615,6 +615,53 @@ impl LinearOp for AdaptiveElasticity3 {
             }
         }
     }
+    // The absolute-term action of `apply`, in the same three stages: expand with |w| and |x|, the raw operator's absolute-term action, restrict with |w|, fixed masters copy |x|.
+    // The roundings of the stages compose (Higham, 2nd ed., Lemma 3.3 multiplies the (1 + theta_k) factors), so `m` is the sum of the stage chains: expanding a node is a dot over its
+    // `rows[node]` entries, the raw action states its own, and restricting adds one product and at most `refs - 1` sums into each master that `refs` rows reference.
+    fn apply_abs(&self, x: &[f64], y: &mut [f64]) -> Option<usize> {
+        assert_eq!(x.len(), self.n());
+        assert_eq!(y.len(), self.n());
+        let full: Vec<f64> = (0..self.rows.len())
+            .flat_map(|node| {
+                (0..3).map(move |component| {
+                    self.rows[node]
+                        .iter()
+                        .map(|&(m, w)| {
+                            if self.fixed[m] {
+                                0.0
+                            } else {
+                                w.abs() * x[3 * m + component].abs()
+                            }
+                        })
+                        .sum::<f64>()
+                })
+            })
+            .collect();
+        let mut result = vec![0.0; full.len()];
+        let raw_chain = self.raw.apply_abs(&full, &mut result)?;
+        y.fill(0.0);
+        let mut references = vec![0_usize; self.fixed.len()];
+        for (i, row) in self.rows.iter().enumerate() {
+            for &(m, w) in row {
+                if !self.fixed[m] {
+                    references[m] += 1;
+                    for c in 0..3 {
+                        y[3 * m + c] += w.abs() * result[3 * i + c];
+                    }
+                }
+            }
+        }
+        for (m, &fixed) in self.fixed.iter().enumerate() {
+            if fixed {
+                for c in 0..3 {
+                    y[3 * m + c] = x[3 * m + c].abs();
+                }
+            }
+        }
+        let expand_chain = self.rows.iter().map(Vec::len).max().unwrap_or(0);
+        let restrict_chain = references.into_iter().max().unwrap_or(0);
+        Some(expand_chain + raw_chain + restrict_chain)
+    }
 }
 #[allow(clippy::too_many_arguments)]
 fn patch_ghosts(
@@ -755,3 +802,5 @@ impl AdaptiveElasticity3 {
         )
     }
 }
+#[cfg(test)]
+mod apply_abs_tests;

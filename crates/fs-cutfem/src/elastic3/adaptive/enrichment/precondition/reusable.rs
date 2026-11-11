@@ -123,6 +123,7 @@ impl LinearOp for AdaptiveSolveSpace3 {
     fn n(&self) -> usize { self.operator.n() }
     fn apply(&self, x: &[f64], y: &mut [f64]) { self.operator.apply(x, y); }
     fn apply_transpose(&self, x: &[f64], y: &mut [f64]) { self.operator.apply_transpose(x, y); }
+    fn apply_abs(&self, x: &[f64], y: &mut [f64]) -> Option<usize> { self.operator.apply_abs(x, y) }
 }
 
 /// One immutable-density numerical action, reusable across an RHS family.

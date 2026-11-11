@@ -128,8 +128,25 @@ fn bytes(ledger: &Ledger, outcome: &Outcome, key: &str, kind: &str) -> Vec<u8> {
 }
 
 #[test]
-fn pressure_and_shear_studies_refine_check_gradients_and_resume_exact_physical_fields() {
+fn a_refused_study_names_the_cause_of_its_stop() {
+    // E = 1 Pa puts the first displacement outside the material's small-strain domain. The stop names its stage, and the report carries the refusal behind it.
     let spec = spec::parse(&unit_source()).unwrap();
+    let gate = CancelGate::new_clock_free();
+    let db = Ledger::open(":memory:").unwrap();
+    let run = checkpoint::drive(&spec, &db, None, &gate, None, |_, _| Ok(())).unwrap();
+    assert_eq!(run.status, "numerical-failure");
+    let summary = JsonValue::parse(std::str::from_utf8(&bytes(&db, &run, "report_json", "study-report-json")).unwrap()).unwrap();
+    let stop = summary.get("stop").unwrap();
+    assert_eq!(stop.str_field("evaluation"), Some("Breakdown { stage: \"sdf3-material-domain\" }"));
+    let cause = stop.str_field("cause").expect("the refusal behind the stop is reported");
+    assert!(cause.contains("affine bulk strain ball exceeds retained material domain"), "{cause}");
+}
+
+#[test]
+fn pressure_and_shear_studies_refine_check_gradients_and_resume_exact_physical_fields() {
+    // E = 2^20 Pa. At the 1 Pa of `unit_source` the unit pressure puts the first displacement outside the material's small-strain domain and the study is refused
+    // (`a_refused_study_names_the_cause_of_its_stop` pins that refusal); the checks below are relative, so no other literal moves with the modulus.
+    let spec = spec::parse(&unit_source().replace(":youngs-modulus-pa 1.0", ":youngs-modulus-pa 1048576.0")).unwrap();
     let gate = CancelGate::new_clock_free();
     let whole_db = Ledger::open(":memory:").unwrap();
     let whole = checkpoint::drive(&spec, &whole_db, None, &gate, None, |_, _| Ok(())).unwrap();

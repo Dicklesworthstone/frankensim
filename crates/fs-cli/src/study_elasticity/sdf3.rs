@@ -93,6 +93,8 @@ struct Computation {
     completed_stages: usize,
     requested_stages: usize,
     status: &'static str,
+    // The text of the physics refusal behind a final `Breakdown`, when the solve control recorded one for that stage.
+    cause: Option<String>,
 }
 
 /// A borrowed accepted state avoids copying the operator just to persist it.
@@ -104,6 +106,7 @@ struct View<'a> {
     completed_stages: usize,
     requested_stages: usize,
     status: &'static str,
+    cause: Option<&'a str>,
 }
 impl Computation {
     fn view(&self) -> View<'_> {
@@ -111,6 +114,7 @@ impl Computation {
             study: &self.study, report: &self.report, tree: &self.tree,
             spent: self.spent, completed_stages: self.completed_stages,
             requested_stages: self.requested_stages, status: self.status,
+            cause: self.cause.as_deref(),
         }
     }
 }
@@ -279,11 +283,18 @@ fn compute_observed(
             accepted(&View {
                 study, tree, report,
                 spent: prior.add(report.continuation.work, geometry.get(), start.elapsed().as_secs_f64())?,
-                completed_stages, requested_stages, status,
+                completed_stages, requested_stages, status, cause: None,
             })
         },
     ))?;
     let result = &report.continuation;
+    let cause = match &result.evaluation_stop {
+        Some(EvaluationStop::Breakdown { stage }) => control
+            .refusal()
+            .filter(|(recorded, _)| recorded == stage)
+            .map(|(_, text)| text.to_owned()),
+        _ => None,
+    };
     let status = if result.termination == ContinuationTermination::ScheduleComplete {
         if completed_stages == spec.schedule.len() { "completed" } else { "budget-exhausted" }
     } else if gate.is_requested() {
@@ -301,7 +312,7 @@ fn compute_observed(
     };
     Ok(Computation {
         spent: prior.add(report.continuation.work, geometry.get(), start.elapsed().as_secs_f64())?,
-        study, report, tree, completed_stages, requested_stages, status,
+        study, report, tree, completed_stages, requested_stages, status, cause,
     })
 }
 

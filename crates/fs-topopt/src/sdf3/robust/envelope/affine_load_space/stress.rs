@@ -178,7 +178,15 @@ fn controlled<T>(
     if let Some(error) = stopped {
         return Err(error);
     }
-    result.map_err(|_| failure("sdf3-affine-stress-physics"))
+    result.map_err(|error| {
+        // A point-field allowance is a budget, as the material body-load allowance is (`sdf3/body.rs`): the status classifiers of the CLI read the stage.
+        let stage = match error {
+            ElasticityError3::Invalid("affine bulk stress point-field allowance exhausted") => "sdf3-affine-stress-point-budget",
+            _ => "sdf3-affine-stress-physics",
+        };
+        control.record_refusal(stage, format!("{error:?}"));
+        failure(stage)
+    })
 }
 
 fn oracle(

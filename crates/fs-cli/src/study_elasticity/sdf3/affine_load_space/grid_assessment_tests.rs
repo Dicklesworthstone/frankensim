@@ -40,6 +40,16 @@ fn near(a: f64, b: f64) {
     );
 }
 
+// A basis response of a limit is compared on that limit's own response scale. `radius` is the norm of all of the limit's basis responses, so it bounds every one of them: a direction
+// whose response is at rounding level beside its neighbours' is read against the size of its neighbours (here 0.36) and not against the unitless 1e-12 of `near`, which no response of any size
+// beats. In the rows that failed, the stored and the re-measured response differ by 2.5 and 4.2 eps of the radius (a reaction, so no sum of absolute terms exists to scale by).
+fn near_to_radius(a: f64, b: f64, radius: f64) {
+    assert!(
+        (a - b).abs() <= 2e-7 * a.abs().max(b.abs()).max(radius),
+        "{a:e} != {b:e} on the response scale {radius:e}"
+    );
+}
+
 fn difference(a: &[f64], b: &[f64]) -> f64 {
     assert_eq!(a.len(), b.len());
     a.iter()
@@ -273,7 +283,7 @@ fn g1_affine_grid_assessment_rebuilds_full_models_and_keeps_fine_physical_caps_s
                 .iter()
                 .zip(&witness.basis_responses)
             {
-                near(*value, measure(u));
+                near_to_radius(*value, measure(u), witness.radius);
             }
         }
     });

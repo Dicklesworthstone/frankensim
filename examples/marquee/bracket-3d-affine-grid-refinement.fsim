@@ -55,7 +55,9 @@
     :stress-limit-pa 400.0
     :relaxation-power 1.0
     :aggregation-power 8.0
-    :max-stress-point-fields 100000
+    ; Point-fields are stress points x (basis directions + 1). The grids of this study have 3564, 16416 and 57024 stress points and 2 basis directions,
+    ; so they need 10692, 49248 and 171072 point-fields. 200000 is a declared budget above the 171072 that the fine grid of the final assessment needs.
+    :max-stress-point-fields 200000
     :joint-sharpness 40.0)
   (affine-responses
     :sharpness 40.0

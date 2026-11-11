@@ -144,6 +144,30 @@ pub trait LinearOp {
         }
         Ok(())
     }
+
+    /// Absolute-term action, for accounting the rounding error of [`Self::apply`].
+    ///
+    /// Writes into `y[i]` the sum of the absolute values of the terms that
+    /// `apply` adds into output `i`, each product or cell or face contribution
+    /// taken with `|x|` in place of `x`. Then `|apply(x)| <= y` entrywise in
+    /// exact arithmetic, and `y >= |A| |x|` for the matrix `A` the operator
+    /// represents (equality unless two terms of one entry cancel).
+    ///
+    /// Returns `Some(m)`, where `m` is the longest chain of floating-point
+    /// roundings between an input of `apply` and any one output, counted from
+    /// the same loops as `apply`. The computed `apply(x)` then differs from the
+    /// exact value by at most `gamma_m * y` entrywise, `gamma_m = m u / (1 - m u)`
+    /// with `u = 2^-53` (Higham, Accuracy and Stability of Numerical Algorithms,
+    /// 2nd ed., §3.1 for sums and products, §3.5 for the matrix-vector product),
+    /// and the residual `fl(b - A x)` by at most `gamma_{m+1} (|b| + y)`.
+    ///
+    /// The default returns `None`: the operator makes no such claim, `y` is not
+    /// written, and a caller keeps the gate it had without this action. An
+    /// override must keep its loops in step with `apply`; its test compares
+    /// both against a dense probe of the operator.
+    fn apply_abs(&self, _x: &[f64], _y: &mut [f64]) -> Option<usize> {
+        None
+    }
 }
 
 /// Assembled-matrix adapter. For nonsymmetric matrices the transpose
@@ -213,5 +237,24 @@ impl LinearOp for CsrOp {
             .unwrap_or(&self.a)
             .spmv_with_checkpoint(x, y, || if cancelled() { Err(()) } else { Ok(()) })
             .map_err(OperatorApplyError::from)
+    }
+
+    // `Csr::spmv` accumulates each row in ascending column order with one fused
+    // multiply-add per stored entry, so the chain from any product to `y[r]` is
+    // the row's stored-entry count; the longest row is `m` (Higham 2nd ed. §3.5).
+    fn apply_abs(&self, x: &[f64], y: &mut [f64]) -> Option<usize> {
+        assert_eq!(x.len(), self.a.ncols(), "apply_abs: x length must equal ncols");
+        assert_eq!(y.len(), self.a.nrows(), "apply_abs: y length must equal nrows");
+        let mut longest = 0_usize;
+        for (r, out) in y.iter_mut().enumerate() {
+            let (columns, values) = self.a.row(r);
+            let mut sum = 0.0_f64;
+            for (&column, &value) in columns.iter().zip(values) {
+                sum = value.abs().mul_add(x[column].abs(), sum);
+            }
+            *out = sum;
+            longest = longest.max(columns.len());
+        }
+        Some(longest)
     }
 }

@@ -126,6 +126,30 @@ fn assert_charged_after(spec: &Spec, before: &Loaded, after: &Loaded) {
 }
 
 #[test]
+fn an_exhausted_stress_point_field_allowance_stops_the_final_assessment_as_a_budget() {
+    // 100000 clears the source and candidate grids (10692 and 49248 point-fields) and not the finer grid of the final assessment (171072): the allowance runs out there, and that is a budget,
+    // named by its stage, not a numerical failure.
+    let spec = spec::parse(&source().replace(":max-stress-point-fields 200000", ":max-stress-point-fields 100000")).unwrap();
+    let ledger = Ledger::open(":memory:").unwrap();
+    let gate = CancelGate::new_clock_free();
+    let first = drive(&spec, &ledger, Some(1), &gate).unwrap();
+    let preparing = load(&ledger, &first.pointer).unwrap();
+    let second = resume(&ledger, &preparing, Some(1), &gate).unwrap();
+    let candidate = load(&ledger, &second.pointer).unwrap();
+    let third = resume(&ledger, &candidate, Some(1), &gate).unwrap();
+    let promoted = load(&ledger, &third.pointer).unwrap();
+    assert_eq!(phase(&promoted), "promoted");
+    let promoted_report = report(&ledger, &promoted);
+    let assessment = field(&promoted_report, "grid_assessment");
+    assert_eq!(assessment.str_field("status"), Some("budget-exhausted"), "{:?}", assessment.str_field("reason"));
+    assert!(
+        assessment.str_field("reason").is_some_and(|reason| reason.contains("sdf3-affine-stress-point-budget")),
+        "{:?}",
+        assessment.str_field("reason")
+    );
+}
+
+#[test]
 fn g3_g5_affine_grid_refinement_resumes_candidate_without_replaying_or_installing_it_early() {
     let spec = spec::parse(&source()).unwrap();
     assert_eq!(spec.updates, 1);

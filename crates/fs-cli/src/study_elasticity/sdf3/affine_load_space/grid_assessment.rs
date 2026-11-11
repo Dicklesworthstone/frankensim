@@ -124,6 +124,7 @@ fn budget(error: &GoalRefinementError3) -> bool {
                     | EvaluationStop::TotalBudget { .. }
                     | EvaluationStop::Breakdown {
                         stage: "sdf3-material-body-load-budget"
+                            | "sdf3-affine-stress-point-budget"
                     }
             ) | GoalRefinementError3::Background(
                 OctreeError3::LeafBudget | OctreeError3::LevelBudget

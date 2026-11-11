@@ -29,6 +29,12 @@ diagnoses, never timeout mysteries).
   temporary-allocation refusal. Callers must discard output on any refusal from
   an arbitrary operator; only adapters documenting staging promise unchanged
   output. Ordinary `apply` remains allocation-free for CSR.
+  `apply_abs(x, y) -> Option<usize>` (provided; default `None`) writes the
+  entrywise sum of the absolute terms `apply` adds, `y >= |A||x|`, and returns
+  the longest rounding chain `m` counted from `apply`'s own loops, so that
+  `|fl(apply(x)) - apply(x)| <= gamma_m y` (Higham 2nd ed. §3.1, §3.5). `None`
+  means the operator makes no such claim and its callers keep their plain
+  residual gate bit for bit; `CsrOp` returns its longest stored row.
   **NO-CLAIM: the crate does not verify operator symmetry.** There is
   no symmetry probe anywhere in fs-solver, so nothing detects a client
   `LinearOp` that inherits the default `apply_transpose` on a

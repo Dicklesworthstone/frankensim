@@ -401,5 +401,8 @@ pub(super) fn native_controlled<T>(
     if let Some(stop) = stopped {
         return Err(stop);
     }
-    result.map_err(|_| super::failure(stage))
+    result.map_err(|error| {
+        control.record_refusal(stage, format!("{error:?}"));
+        super::failure(stage)
+    })
 }

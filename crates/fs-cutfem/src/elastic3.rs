@@ -888,6 +888,83 @@ impl LinearOp for CutElasticity3 {
             }
         }
     }
+    // The absolute-term action of `apply` (see `LinearOp::apply_abs`): the loops are those of `apply`, every term enters with its absolute value and |x|.
+    // `m` is the longest chain of roundings from an input to an output (Higham, 2nd ed., sections 3.1 and 3.5). A cell term is a 24-term dot (24 roundings: the products and the
+    // sums) times the cell scale (1), so 25; a ghost-face term is an `n_f`-term dot (`n_f`), `weight * j` (1) and `* jump` (1), so `n_f + 2`. Each term then enters its row after at most
+    // `terms - 1` further sums, `terms` being the cells and faces that add into that node. Fixed rows are copies and add none. The count is read off the same loops that sum.
+    fn apply_abs(&self, x: &[f64], y: &mut [f64]) -> Option<usize> {
+        assert_eq!(x.len(), self.n());
+        assert_eq!(y.len(), self.n());
+        y.fill(0.0);
+        let mut terms = vec![0_usize; self.nodes.len()];
+        let mut chain = vec![0_usize; self.nodes.len()];
+        for (id, cell) in self.cells.iter().enumerate() {
+            let local: [f64; 24] = std::array::from_fn(|j| {
+                if self.fixed[cell.nodes[j / 3]] {
+                    0.0
+                } else {
+                    x[3 * cell.nodes[j / 3] + j % 3].abs()
+                }
+            });
+            let scale = self.scales[id].abs();
+            for i in 0..24 {
+                if !self.fixed[cell.nodes[i / 3]] {
+                    let value: f64 = cell.stiffness[i]
+                        .iter()
+                        .zip(local)
+                        .map(|(k, u)| k.abs() * u)
+                        .sum();
+                    y[3 * cell.nodes[i / 3] + i % 3] += scale * value;
+                }
+            }
+            for &node in &cell.nodes {
+                if !self.fixed[node] {
+                    terms[node] += 1;
+                    chain[node] = chain[node].max(25);
+                }
+            }
+        }
+        for face in &self.ghosts {
+            let weight = face.scaled_weight(&self.scales).abs();
+            for c in 0..3 {
+                let jump: f64 = face
+                    .nodes
+                    .iter()
+                    .zip(&face.jump)
+                    .map(|(&node, &j)| {
+                        if self.fixed[node] {
+                            0.0
+                        } else {
+                            j.abs() * x[3 * node + c].abs()
+                        }
+                    })
+                    .sum();
+                for (&node, &j) in face.nodes.iter().zip(&face.jump) {
+                    if !self.fixed[node] {
+                        y[3 * node + c] += weight * j.abs() * jump;
+                    }
+                }
+            }
+            for &node in &face.nodes {
+                if !self.fixed[node] {
+                    terms[node] += 1;
+                    chain[node] = chain[node].max(face.nodes.len() + 2);
+                }
+            }
+        }
+        for (node, &fixed) in self.fixed.iter().enumerate() {
+            if fixed {
+                for c in 0..3 {
+                    y[3 * node + c] = x[3 * node + c].abs();
+                }
+            }
+        }
+        (0..self.nodes.len())
+            .filter(|&node| terms[node] > 0)
+            .map(|node| chain[node] + terms[node] - 1)
+            .max()
+            .or(Some(0))
+    }
 }
 struct Diagonal3(Vec<f64>);
 impl Precond for Diagonal3 {
@@ -1109,3 +1186,5 @@ pub use eigenstrain::PreparedPrestress3;
 
 /// Weak prescribed displacement on selected zero-level surface patches.
 pub mod dirichlet;
+#[cfg(test)]
+mod apply_abs_tests;

@@ -96,6 +96,8 @@ impl std::error::Error for EvaluationStop {}
 pub struct SolveControl<'a> {
     budget: SolveBudget,
     work: SolveWork,
+    // The physics refusal behind the latest mapped `Breakdown`: its stage and its text. A checkpoint does not carry it.
+    refusal: Option<(&'static str, String)>,
     callback: &'a mut dyn FnMut(SolveProgress) -> ControlFlow<()>,
 }
 
@@ -105,7 +107,7 @@ impl<'a> SolveControl<'a> {
         budget: SolveBudget,
         callback: &'a mut dyn FnMut(SolveProgress) -> ControlFlow<()>,
     ) -> Self {
-        Self { budget, work: SolveWork::default(), callback }
+        Self { budget, work: SolveWork::default(), refusal: None, callback }
     }
 
     /// Rebind a completed public-phase checkpoint to a new callback while
@@ -116,7 +118,7 @@ impl<'a> SolveControl<'a> {
         checkpoint: SolveControlCheckpoint,
         callback: &'a mut dyn FnMut(SolveProgress) -> ControlFlow<()>,
     ) -> Self {
-        Self { budget: checkpoint.budget, work: checkpoint.work, callback }
+        Self { budget: checkpoint.budget, work: checkpoint.work, refusal: None, callback }
     }
 
     /// Immutable receipt suitable for handing the computation to another
@@ -134,6 +136,18 @@ impl<'a> SolveControl<'a> {
     /// Work consumed so far, also available after a stopped evaluation.
     #[must_use]
     pub fn work(&self) -> SolveWork { self.work }
+
+    /// The stage and text of the physics refusal behind the latest `EvaluationStop::Breakdown` this context mapped from one (an `ElasticityError3`, for example a strain-domain or
+    /// point-allowance refusal). `Breakdown` names only its stage, so a caller that reports a final `Breakdown` reads this too, and only when its stage is the recorded one: an earlier refusal
+    /// that an optimizer backtracked from must not be named as the cause of a later, different stop.
+    #[must_use]
+    pub fn refusal(&self) -> Option<(&'static str, &str)> {
+        self.refusal.as_ref().map(|(stage, cause)| (*stage, cause.as_str()))
+    }
+
+    pub(crate) fn record_refusal(&mut self, stage: &'static str, cause: String) {
+        self.refusal = Some((stage, cause));
+    }
 
     /// Poll the original cancellation/wall-time callback between public pipeline
     /// phases, including caller-owned geometry construction. This does not run a

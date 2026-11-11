@@ -326,14 +326,34 @@ fn checked_solve_preconditioned(op:&impl LinearOp,preconditioner:&impl Precond,r
     let mut applied = vec![0.0;rhs.len()]; op.apply(&x,&mut applied);
     let scale = rhs.iter().map(|v|v.abs()).fold(0.0_f64,f64::max);
     if scale > 0.0 {
-        let mut nr = 0.0; let mut nb = 0.0;
-        for (&b,a) in rhs.iter().zip(applied) {
-            let r = (b-a)/scale; nr += r*r; nb += (b/scale)*(b/scale);
-        }
-        if !nr.is_finite() || !(nr <= tol*tol*nb) { return Err(failure("sdf3-true-residual")); }
+        if !admits_true_residual(op,rhs,&x,&applied,scale,tol) { return Err(failure("sdf3-true-residual")); }
     } else if applied.iter().any(|a|*a != 0.0) { return Err(failure("sdf3-zero-residual")); }
     control.checkpoint("sdf3-true-residual-publish")?;
     Ok(x)
+}
+// The gate's decision on one returned iterate. `nr <= tol^2 nb` is the plain test, `||b - Ax|| <= tol ||b||`, unchanged bit for bit. It is the whole rule unless it refuses.
+fn admits_true_residual(op:&impl LinearOp,rhs:&[f64],x:&[f64],applied:&[f64],scale:f64,tol:f64) -> bool {
+    let mut nr = 0.0; let mut nb = 0.0;
+    for (&b,a) in rhs.iter().zip(applied) {
+        let r = (b-a)/scale; nr += r*r; nb += (b/scale)*(b/scale);
+    }
+    if !nr.is_finite() { return false; }
+    nr <= tol*tol*nb || evaluation_floor(op,rhs,x,scale).is_some_and(|floor| nr.sqrt() <= tol*nb.sqrt() + floor)
+}
+// A residual that is no larger than the rounding error of computing it cannot be told from the residual of an exact solution, so the plain test would then refuse a measurement
+// noise, not a solve. On the refusal path the gate adds that floor: `||fl(b - Ax)|| <= tol ||b|| + gamma_{m+1} (||b|| + || |A||x| ||)`, with `gamma_k = k u / (1 - k u)`, u = 2^-53
+// (Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed., section 3.5 for the residual of a matrix-vector product; the form follows Arioli, Demmel and Duff, SIMAX 10(2), 1989,
+// as used by the fs-feec refined-solve gates, ad5130ea05). `m` and `|A||x|` are the operator's own: `LinearOp::apply_abs` counts the rounding chain from the same loops as `apply`.
+// Nothing is estimated; an operator that returns None keeps the plain test, so its solves behave exactly as before. The value is `gamma_{m+1} (||b|| + || |A||x| ||)` in units of `scale`.
+fn evaluation_floor(op:&impl LinearOp,rhs:&[f64],x:&[f64],scale:f64) -> Option<f64> {
+    let mut abs = vec![0.0;rhs.len()];
+    let m = op.apply_abs(x,&mut abs)?;
+    let mu = (m as f64 + 1.0) * (f64::EPSILON / 2.0);
+    if !(mu < 1.0) { return None; }
+    let (mut b2,mut a2) = (0.0,0.0);
+    for (&b,&t) in rhs.iter().zip(&abs) { b2 += (b/scale)*(b/scale); a2 += (t/scale)*(t/scale); }
+    let floor = mu / (1.0 - mu) * (b2.sqrt() + a2.sqrt());
+    floor.is_finite().then_some(floor)
 }
 
 fn trial(rho:&[f64],ratios:&[Option<f64>],lambda:f64,step:f64)->Vec<f64> {
@@ -428,3 +448,5 @@ fn retain(report:&mut MultiLoadOcReport,current:&CutDensityEvaluation3,iteration
     report.history.push(MultiLoadOcIteration {iteration,compliance:current.objective.compliance,
         case_compliances:current.objective.case_compliances.clone(),volume_fraction:current.volume_fraction,max_change:change});
 }
+#[cfg(test)]
+mod true_residual_tests;

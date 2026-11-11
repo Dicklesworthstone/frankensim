@@ -215,7 +215,8 @@ fn g4_affine_strength_charges_all_point_fields_and_original_evaluation_allowance
     );
     let error = refused.err().unwrap();
     assert_eq!(error.exit, exit::REFUSED);
-    assert!(error.message.contains("sdf3-affine-stress-physics"));
+    // A point-field overrun is a budget stage of the affine stress physics (fs-topopt `controlled`), not a physics failure.
+    assert!(error.message.contains("sdf3-affine-stress-point-budget"));
 
     let mut spec = fixture();
     spec.affine_load_space

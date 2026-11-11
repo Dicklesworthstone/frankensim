@@ -253,7 +253,7 @@ pub(super) fn persist(spec: &Spec, ledger: &Ledger, run: &View<'_>, retained: &c
     } else { format!("{:?}", report.termination) };
     let refinement = refinements(run, false);
     let stop = format!(
-        "{{\"termination\":{},\"stopped_stage\":{},\"evaluation\":{},\"refinement\":{},\"rejected_gradient_check\":{}}}",
+        "{{\"termination\":{},\"stopped_stage\":{},\"evaluation\":{},\"refinement\":{},\"rejected_gradient_check\":{}{}}}",
         quoted(&termination),
         report
             .stopped_stage
@@ -266,7 +266,8 @@ pub(super) fn persist(spec: &Spec, ledger: &Ledger, run: &View<'_>, retained: &c
             .refinement_error
             .as_ref()
             .map_or("null".into(), |reason| quoted(&format!("{reason:?}"))),
-        rejected_gradient(run)
+        rejected_gradient(run),
+        run.cause.map_or(String::new(), |cause| format!(",\"cause\":{}", quoted(cause)))
     );
     let summary = format!(
         "{{\"driver\":{SDF3_DRIVER:?},\"study_id\":\"{}\",\"status\":{:?}{progress},\"iterations_completed\":{updates},\"stage_models_retained\":{},\"final_compliance_j\":{compliance},\"final_volume_fraction\":{volume},\"active_cells\":{},\"background_cells\":{},\"work\":{work},\"stop\":{stop},\"refinements\":{refinement},\"stage_evidence\":{rows},\"authority\":\"Estimated\",\"no_claim\":{}}}",

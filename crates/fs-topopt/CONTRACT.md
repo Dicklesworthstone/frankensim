@@ -402,6 +402,18 @@ Completed probes and a freshly rechecked pending candidate move with the state a
 not replayed after resume. This is an in-memory ownership handoff, not durable byte
 serialization or a cross-process source-identity claim.
 
+Every linear solve of the sdf3 evaluators ends at one true-residual gate (`checked_solve_preconditioned`): the returned iterate is admitted when `||b - Ax|| <= tol ||b||`, with the residual
+recomputed from the iterate and not taken from the recurrence. When that test refuses and the operator states its rounding chain through `LinearOp::apply_abs`, the gate admits a residual inside the
+evaluation floor of `fl(b - Ax)`: `||b - Ax|| <= tol ||b|| + gamma_{m+1} (||b|| + || |A||x| ||)`, `gamma_k = k u / (1 - k u)`, `u = 2^-53`, `m` the operator's longest rounding chain counted from the
+loops of its `apply` (Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed., sections 3.1 and 3.5; the form of the fs-feec refined-solve gates, after Arioli, Demmel and Duff). An operator
+without `apply_abs` keeps the plain test bit for bit, and a solve that passes the plain test is unchanged. No-claim: a residual under the floor cannot be told from the residual of an exact solution, so
+the floor admits what double precision cannot resolve for that system; it is not a bound on the error of the returned displacement.
+
+`SolveControl::refusal()` returns the stage and the text of the physics refusal (an `ElasticityError3`) behind the latest `Breakdown` that the sdf3 evaluators mapped from one (the material-domain
+admission and the affine stress physics). It is the only place that text survives, since `EvaluationStop::Breakdown` names its stage alone; the 3-D adaptive study driver reads it when its final stop is a
+`Breakdown` of the recorded stage and carries it as `stop.cause` of the study report. The affine load-space paths do not read it yet. An affine stress point-field overrun is a budget, the stage
+`sdf3-affine-stress-point-budget`, as the material body-load allowance is `sdf3-material-body-load-budget`; the CLI status of a grid assessment that meets it is `budget-exhausted` (the refinement classifier reads the same stage).
+
 Run the bounded native minimum-kg example with
 `cargo run -p fs-topopt --features cutfem-marquee --example adaptive_material_modal_sdf3`.
 It reports its actual stopping reason, current-grid mass change, freshly

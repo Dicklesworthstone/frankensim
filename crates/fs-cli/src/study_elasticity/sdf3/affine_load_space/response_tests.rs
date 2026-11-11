@@ -35,6 +35,16 @@ fn near(a: f64, b: f64) {
     );
 }
 
+// A basis response of a limit is compared on that limit's own response scale. `radius` is the norm of all of the limit's basis responses, so it bounds every one of them: a direction
+// whose response is at rounding level beside its neighbours' is read against the size of its neighbours (here 0.36) and not against the unitless 1e-12 of `near`, which no response of any size
+// beats. In the rows that failed, the stored and the re-measured response differ by 2.5 and 4.2 eps of the radius (a reaction, so no sum of absolute terms exists to scale by).
+fn near_to_radius(a: f64, b: f64, radius: f64) {
+    assert!(
+        (a - b).abs() <= 2e-7 * a.abs().max(b.abs()).max(radius),
+        "{a:e} != {b:e} on the response scale {radius:e}"
+    );
+}
+
 fn sign(sense: ResponseLimitSense3) -> f64 {
     match sense {
         ResponseLimitSense3::AtMost => 1.0,
@@ -160,8 +170,9 @@ fn g1_affine_response_windows_use_native_displacement_force_and_moment_witnesses
                 .zip(&basis)
                 .zip(&witness.coefficients)
             {
-                near(*actual, *expected);
-                near(*coefficient, sign(limit.sense) * expected / radius);
+                near_to_radius(*actual, *expected, radius);
+                // Coefficients are components of a unit vector (asserted below), so their scale is 1.
+                near_to_radius(*coefficient, sign(limit.sense) * expected / radius, 1.0);
             }
             near(dot(&witness.coefficients, &witness.coefficients), 1.0);
             near(witness.worst_value, baseline + sign(limit.sense) * radius);

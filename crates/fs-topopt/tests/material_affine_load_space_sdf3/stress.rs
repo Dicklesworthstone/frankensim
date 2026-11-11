@@ -361,7 +361,7 @@ fn affine_stress_counts_all_point_fields_and_restores_material_state_on_stops() 
             &mut control,
         ),
         Err(EvaluationStop::Breakdown {
-            stage: "sdf3-affine-stress-physics"
+            stage: "sdf3-affine-stress-point-budget"
         })
     ));
     assert_eq!(study.operator().scales(), scales);
