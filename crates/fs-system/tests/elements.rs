@@ -13,8 +13,8 @@ use fs_ports::component::conformance::{Case, Observed, check_component, check_po
 use fs_ports::component::{Component, PortTangent, Proposal, Receipt};
 use fs_ports::PortKind;
 use fs_system::elements::{
-    Conductance, Damper, ElementError, Force, Gyrator, HeatCapacity, Heater, Mass, Motion,
-    SourceAccount, Spring, Waveform,
+    Conductance, Damper, ElementError, Force, GasContents, GasVolume, Gyrator, HeatCapacity,
+    Heater, Mass, Motion, Restriction, SourceAccount, Spring, Waveform,
 };
 use fs_system::{
     AdmissionError, NodeId, RouteTemperature, System, SystemBuilder, heat_sink,
@@ -1342,4 +1342,638 @@ fn a_publishing_heat_capacity_reports_the_temperature_its_step_began_with() {
         );
         assert_eq!(conforms(&plain, &start, &1.0, dt, &[heat_w]), [outputs[0]]);
     }
+}
+
+// Streams: gas volumes joined by restrictions.
+
+const AIR_J_KG_K: f64 = 287.0;
+const RATIO: f64 = 1.4;
+
+fn air(carried: usize) -> GasVolume {
+    GasVolume::new(AIR_J_KG_K, RATIO, carried).unwrap()
+}
+
+#[test]
+fn gas_volumes_and_restrictions_conform_and_carry_what_the_upstream_side_holds() {
+    let mut n = Numbers(20_261_112);
+    let closed = air(2);
+    let walled = air(2).with_wall();
+    let pipe = Restriction::new(3.0e-8, 2).unwrap();
+    let stale = closed.contents(1.0e5, 300.0, 1.0, &[0.5, 0.5]).unwrap();
+    for _ in 0..100 {
+        let dt = n.next(1.0e-5, 2.0e-4);
+        let (pressure, volume) = (n.next(5.0e4, 5.0e5), n.next(0.05, 0.5));
+        let fractions = [n.next(0.05, 0.4), n.next(0.05, 0.4)];
+        let state = closed
+            .contents(pressure, n.next(250.0, 900.0), volume, &fractions)
+            .unwrap();
+        let rate = n.next(-2.0e-3, 2.0e-3);
+        let (enthalpy_w, heat_w) = (rate * n.next(2.0e5, 9.0e5), n.next(-50.0, 50.0));
+        let mut inputs = vec![
+            rate,
+            enthalpy_w,
+            rate * n.next(0.0, 1.0),
+            rate * n.next(0.0, 1.0),
+            heat_w,
+        ];
+        let out = conforms(&closed, &state, &stale, dt, &inputs);
+        // Independent: at a fixed volume p = (ratio - 1) U / V, and U moves
+        // by the enthalpy and heat that entered, so the mean pressure is
+        let mean = pressure + 0.5 * (RATIO - 1.0) * dt * (enthalpy_w + heat_w) / volume;
+        within(out[0], mean, 1.0e-13);
+        // The specific enthalpy is c_p times the temperature the heat port
+        // returns.
+        within(out[1], RATIO * closed.heat_capacity_j_kg_k() * out[4], 1.0e-15);
+
+        // Behind a wall the stream and the wall see one pressure.
+        inputs.push(n.next(-1.0e-2, 1.0e-2));
+        let out = conforms(&walled, &state, &stale, dt, &inputs);
+        assert_eq!(out[0], out[5]);
+
+        let mut side = || {
+            [
+                n.next(5.0e4, 5.0e5),
+                n.next(2.0e5, 9.0e5),
+                n.next(0.0, 1.0),
+                n.next(0.0, 1.0),
+            ]
+        };
+        let (a, b) = (side(), side());
+        let both: Vec<f64> = a.iter().chain(&b).copied().collect();
+        let out = conforms(&pipe, &(), &(), dt, &both);
+        // What crosses is the mass rate times the values of the side the
+        // mass leaves, and it enters one port as it leaves the other.
+        let upstream = if a[0] >= b[0] { a } else { b };
+        within(out[0], 3.0e-8 * (a[0] - b[0]), 1.0e-15);
+        for index in 1..4 {
+            assert_eq!(out[index], out[0] * upstream[index]);
+        }
+        for index in 0..4 {
+            assert_eq!(out[4 + index], -out[index]);
+        }
+    }
+    // At equal pressures nothing crosses, whatever the two sides hold. The
+    // port map has a kink there, so only the mandatory checks apply.
+    let level = [2.0e5, 3.0e5, 0.2, 0.7, 2.0e5, 8.0e5, 0.9, 0.1];
+    let case = Case {
+        state: &(),
+        stale: &(),
+        dt_s: 1.0e-3,
+        inputs: &level,
+    };
+    with_cx(|cx| match check_component(&pipe, &case, cx) {
+        Ok(Observed::Stepped { outputs, .. }) => {
+            assert!(outputs.iter().all(|value| *value == 0.0), "{outputs:?}");
+        }
+        other => panic!("no step at equal pressures: {other:?}"),
+    });
+}
+
+#[test]
+fn gas_volumes_and_restrictions_refuse_what_they_cannot_represent() {
+    for (gas_constant, ratio) in [(0.0, 1.4), (-287.0, 1.4), (287.0, 1.0), (287.0, 0.9), (f64::NAN, 1.4), (287.0, f64::INFINITY)] {
+        assert!(matches!(
+            GasVolume::new(gas_constant, ratio, 0),
+            Err(ElementError::Parameter { .. })
+        ));
+    }
+    for conductance in [0.0, -1.0e-8, f64::NAN, f64::INFINITY] {
+        assert!(matches!(
+            Restriction::new(conductance, 0),
+            Err(ElementError::Parameter { .. })
+        ));
+    }
+    let vessel = air(1);
+    assert!(vessel.contents(1.0e5, 300.0, 0.01, &[]).is_err());
+    assert!(vessel.contents(1.0e5, 300.0, 0.01, &[1.5]).is_err());
+    assert!(vessel.contents(0.0, 300.0, 0.01, &[0.5]).is_err());
+    assert!(vessel.contents(1.0e5, -1.0, 0.01, &[0.5]).is_err());
+    assert!(vessel.contents(1.0e5, 300.0, 0.0, &[0.5]).is_err());
+    let names: Vec<&str> = vessel.ports().iter().map(|port| port.id().as_str()).collect();
+    assert_eq!(names, ["stream", "heat"]);
+    // Asking twice adds the wall once.
+    assert_eq!(vessel.clone().with_wall().with_wall().ports().len(), 3);
+
+    // A step that would empty the volume, or draw more of a carried
+    // quantity than it holds, is too long: the element asks for a shorter
+    // one and leaves the candidate alone.
+    let state = vessel.contents(1.0e5, 300.0, 0.01, &[0.25]).unwrap();
+    let stale = vessel.contents(2.0e5, 400.0, 0.02, &[0.5]).unwrap();
+    let enthalpy = RATIO * vessel.heat_capacity_j_kg_k() * 300.0;
+    with_cx(|cx| {
+        for inputs in [
+            [-2.0 * state.mass_kg, -2.0 * state.mass_kg * enthalpy, -0.5 * state.mass_kg, 0.0],
+            [-0.5 * state.mass_kg, -0.5 * state.mass_kg * enthalpy, -0.3 * state.mass_kg, 0.0],
+            [0.0, 0.0, 0.0, -2.0 * state.energy_j],
+        ] {
+            let mut next = stale.clone();
+            let mut outputs = [7.0; 4];
+            let proposal = vessel
+                .propose(&state, 1.0, &inputs, &mut next, &mut outputs, cx)
+                .unwrap();
+            assert!(matches!(proposal, Proposal::Shorten { dt_s } if dt_s == 0.5), "{inputs:?}");
+            assert_eq!(next, stale);
+            assert_eq!(outputs, [7.0; 4]);
+        }
+        // Contents that are not a gas are refused, by name.
+        let mut next = stale.clone();
+        let empty = GasContents { mass_kg: 0.0, ..state.clone() };
+        assert!(matches!(
+            vessel.propose(&empty, 1.0e-3, &[0.0; 4], &mut next, &mut [0.0; 4], cx),
+            Err(ElementError::Parameter { name: "mass_kg", .. })
+        ));
+        let short = GasContents { carried_kg: vec![], ..state.clone() };
+        assert!(vessel.propose(&short, 1.0e-3, &[0.0; 4], &mut next, &mut [0.0; 4], cx).is_err());
+        assert!(matches!(
+            vessel.propose(&state, 1.0e-3, &[0.0, f64::NAN, 0.0, 0.0], &mut next, &mut [0.0; 4], cx),
+            Err(ElementError::Input { .. })
+        ));
+        assert_eq!(next, stale);
+    });
+}
+
+/// Two vessels `[m, U, c0, c1]` each, joined by one restriction and heated
+/// at `heat(t)` [W] each, integrated by classical RK4 with the heat of each
+/// step taken at its midpoint (the heats used here are constant between
+/// whole seconds). Independent of the elements: the gas law, the
+/// restriction and the donor rule are written out here.
+fn vessels_reference(
+    mut y: [f64; 8],
+    volumes: [f64; 2],
+    conductance: f64,
+    heat: fn(f64) -> [f64; 2],
+    t_end: f64,
+    steps: u32,
+) -> [f64; 8] {
+    let rhs = |q: [f64; 2], y: &[f64; 8]| {
+        let pressure = |side: usize| (RATIO - 1.0) * y[4 * side + 1] / volumes[side];
+        let rate = conductance * (pressure(0) - pressure(1));
+        let from = if rate >= 0.0 { 0 } else { 4 };
+        // c_p T = ratio U / m, and each carried mass goes with its fraction.
+        let per_mass = [
+            1.0,
+            RATIO * y[from + 1] / y[from],
+            y[from + 2] / y[from],
+            y[from + 3] / y[from],
+        ];
+        let mut d = [0.0; 8];
+        for index in 0..4 {
+            d[index] = -rate * per_mass[index];
+            d[4 + index] = rate * per_mass[index];
+        }
+        d[1] += q[0];
+        d[5] += q[1];
+        d
+    };
+    let h = t_end / f64::from(steps);
+    let moved = |y: &[f64; 8], d: &[f64; 8], by: f64| {
+        let mut out = *y;
+        for (value, slope) in out.iter_mut().zip(d) {
+            *value += by * slope;
+        }
+        out
+    };
+    for step in 0..steps {
+        let q = heat((f64::from(step) + 0.5) * h);
+        let k1 = rhs(q, &y);
+        let k2 = rhs(q, &moved(&y, &k1, 0.5 * h));
+        let k3 = rhs(q, &moved(&y, &k2, 0.5 * h));
+        let k4 = rhs(q, &moved(&y, &k3, h));
+        for index in 0..8 {
+            y[index] += h * (k1[index] + 2.0 * k2[index] + 2.0 * k3[index] + k4[index]) / 6.0;
+        }
+    }
+    y
+}
+
+struct Vessels {
+    system: System,
+    nodes: [NodeId; 2],
+    pipe: NodeId,
+}
+
+impl Vessels {
+    /// Two vessels of air carrying two quantities, joined by a restriction,
+    /// each heated at the step's midpoint value of `heat`.
+    fn new(start: [GasContents; 2], conductance: f64, heat: fn(f64) -> [f64; 2]) -> Self {
+        let mut builder = SystemBuilder::new();
+        let pipe = builder
+            .add_with_tangent("pipe", Restriction::new(conductance, 2).unwrap(), ())
+            .unwrap();
+        let mut nodes = Vec::new();
+        for (side, (name, contents)) in ["a", "b"].into_iter().zip(start).enumerate() {
+            let node = builder.add_with_tangent(name, air(2), contents).unwrap();
+            builder
+                .bond(
+                    builder.port(node, "stream").unwrap(),
+                    builder.port(pipe, name).unwrap(),
+                )
+                .unwrap();
+            let port = builder.port(node, "heat").unwrap();
+            builder
+                .boundary(
+                    port,
+                    Box::new(move |t0, dt, values| values[0] = heat(t0 + 0.5 * dt)[side]),
+                )
+                .unwrap();
+            nodes.push(node);
+        }
+        Self {
+            system: builder.seal().unwrap(),
+            nodes: [nodes[0], nodes[1]],
+            pipe,
+        }
+    }
+
+    fn contents(&self, side: usize) -> &GasContents {
+        self.system.state::<GasContents>(self.nodes[side]).unwrap()
+    }
+
+    /// `[m, U, c0, c1]` of both vessels.
+    fn numbers(&self) -> [f64; 8] {
+        let mut out = [0.0; 8];
+        for side in 0..2 {
+            let held = self.contents(side);
+            out[4 * side..4 * side + 4].copy_from_slice(&[
+                held.mass_kg,
+                held.energy_j,
+                held.carried_kg[0],
+                held.carried_kg[1],
+            ]);
+        }
+        out
+    }
+
+    /// Mass rate [kg/s] from `a` to `b` during the last step.
+    fn rate(&self) -> f64 {
+        self.system.last_output(self.system.port(self.pipe, "a").unwrap())[0]
+    }
+}
+
+/// Largest differences between two sets of vessel numbers: of mass and
+/// energy, relative to the reference's value, and of the carried masses,
+/// relative to their vessel's mass.
+fn vessel_errors(got: &[f64; 8], want: &[f64; 8]) -> [f64; 2] {
+    (0..8).fold([0.0_f64; 2], |mut worst, index| {
+        let (kind, scale) = if index % 4 >= 2 {
+            (1, want[index - index % 4])
+        } else {
+            (0, want[index])
+        };
+        worst[kind] = worst[kind].max((got[index] - want[index]).abs() / scale);
+        worst
+    })
+}
+
+fn no_heat(_: f64) -> [f64; 2] {
+    [0.0, 0.0]
+}
+
+#[test]
+fn two_vessels_through_a_restriction_equalize_and_the_donor_keeps_its_composition() {
+    let start = || {
+        [
+            air(2).contents(5.0e5, 350.0, 0.01, &[0.2, 0.0]).unwrap(),
+            air(2).contents(1.0e5, 290.0, 0.03, &[0.0, 0.5]).unwrap(),
+        ]
+    };
+    let conductance = 2.0e-8;
+    let initial = Vessels::new(start(), conductance, no_heat).numbers();
+    let reference = vessels_reference(initial, [0.01, 0.03], conductance, no_heat, 2.0, 2_000);
+    let mut errors = Vec::new();
+    for steps in [100_u32, 200] {
+        let mut vessels = Vessels::new(start(), conductance, no_heat);
+        let dt = 2.0 / f64::from(steps);
+        with_cx(|cx| {
+            for _ in 0..steps {
+                vessels.system.step(dt, cx).unwrap();
+                // Mass leaves `a` for the whole run, so `a` keeps the
+                // composition it started with and receives none of what only
+                // `b` holds. Nothing in either element says so.
+                assert!(vessels.rate() > 0.0);
+                let a = vessels.contents(0);
+                within(a.carried_kg[0] / a.mass_kg, 0.2, 1.0e-11);
+                assert_eq!(a.carried_kg[1], 0.0);
+            }
+        });
+        let now = vessels.numbers();
+        // Mass, each carried quantity and energy: what one vessel lost the
+        // other gained.
+        for index in 0..4 {
+            within(now[index] + now[4 + index], initial[index] + initial[4 + index], 4.0e-15);
+        }
+        assert!(vessels.system.ledger().energy_residual_j().abs() <= 1.0e-10);
+        let [flow, carried] = vessel_errors(&now, &reference);
+        errors.push(flow.max(carried));
+    }
+    // Second order against the independent integration: measured 1.35e-6
+    // and 3.37e-7.
+    let ratio = errors[0] / errors[1];
+    assert!(errors[1] < 5.0e-7 && (3.8..4.2).contains(&ratio), "{errors:?}");
+
+    // Left alone the pressures meet at (p_a V_a + p_b V_b) / (V_a + V_b),
+    // which is 2 bar here: the energy is conserved and p V = (ratio - 1) U.
+    // The temperatures do not meet: nothing conducts heat between them.
+    let mut vessels = Vessels::new(start(), conductance, no_heat);
+    step(&mut vessels.system, 0.05, 3_200);
+    let volume = air(2);
+    for side in 0..2 {
+        within(volume.pressure_pa(vessels.contents(side)), 2.0e5, 1.0e-7);
+    }
+    let (cold, warm) = (
+        volume.temperature_k(vessels.contents(0)),
+        volume.temperature_k(vessels.contents(1)),
+    );
+    assert!(cold < 290.0 && warm > 330.0, "{cold} K and {warm} K");
+}
+
+/// 800 W into `a` for the first second, then 4 kW into `b` for the next.
+fn alternate_heat(t: f64) -> [f64; 2] {
+    if t < 1.0 {
+        [800.0, 0.0]
+    } else if t < 2.0 {
+        [0.0, 4_000.0]
+    } else {
+        [0.0, 0.0]
+    }
+}
+
+#[test]
+fn a_flow_that_turns_round_carries_back_what_the_other_vessel_holds() {
+    let start = || {
+        [
+            air(2).contents(2.0e5, 300.0, 0.01, &[0.3, 0.0]).unwrap(),
+            air(2).contents(2.0e5, 300.0, 0.03, &[0.0, 0.6]).unwrap(),
+        ]
+    };
+    let conductance = 2.0e-8;
+    let initial = Vessels::new(start(), conductance, alternate_heat).numbers();
+    let reference =
+        vessels_reference(initial, [0.01, 0.03], conductance, alternate_heat, 3.0, 30_000);
+    let mut errors = Vec::new();
+    for steps in [300_u32, 600] {
+        let mut vessels = Vessels::new(start(), conductance, alternate_heat);
+        let dt = 3.0 / f64::from(steps);
+        let (mut forward, mut backward, mut turns) = (0_u32, 0_u32, 0_u32);
+        let mut last = 0.0_f64;
+        with_cx(|cx| {
+            for index in 0..steps {
+                vessels.system.step(dt, cx).unwrap();
+                let rate = vessels.rate();
+                if rate > 0.0 {
+                    forward += 1;
+                    // Until the flow turns, `a` has received nothing.
+                    if backward == 0 {
+                        assert_eq!(vessels.contents(0).carried_kg[1], 0.0, "step {index}");
+                    }
+                } else if rate < 0.0 {
+                    backward += 1;
+                }
+                if rate * last < 0.0 {
+                    turns += 1;
+                }
+                last = rate;
+            }
+        });
+        // Out of `a` while it is heated, and back into it once `b` is.
+        assert!(forward > steps / 4 && backward > steps / 4 && turns == 1, "{forward} {backward} {turns}");
+        let now = vessels.numbers();
+        // After the turn `a` holds some of what only `b` had.
+        assert!(now[3] > 1.0e-6, "{}", now[3]);
+        // Mass and both carried quantities are conserved through the turn;
+        // the energy rose by the heat supplied, 800 J and 4 kJ.
+        for index in [0, 2, 3] {
+            within(now[index] + now[4 + index], initial[index] + initial[4 + index], 4.0e-15);
+        }
+        within(now[1] + now[5], initial[1] + initial[5] + 4_800.0, 1.0e-13);
+        assert!(vessels.system.ledger().energy_residual_j().abs() <= 1.0e-9);
+        let [flow, carried] = vessel_errors(&now, &reference);
+        // At the turn the supplier of the carried values changes, and they
+        // differ between the vessels by their whole size. The step in which
+        // that happens costs up to its length squared, depending on where
+        // in it the turn falls, so this error is bounded and has no clean
+        // ratio. Measured 1.2e-7 and 6.4e-8.
+        assert!(carried <= 5.0e-3 * dt * dt, "{carried} at {steps} steps");
+        errors.push(flow);
+    }
+    // Mass and energy stay second order through the turn: measured 6.5e-8
+    // and 1.5e-8.
+    let ratio = errors[0] / errors[1];
+    assert!(errors[1] < 3.0e-8 && (3.8..4.6).contains(&ratio), "{errors:?}");
+}
+
+#[test]
+fn a_vessel_filled_from_a_line_ends_hotter_than_the_line() {
+    // m c_v dT = (c_p T_line - c_v T) dm: the gas pushed in does flow work.
+    // The energy balance is exact for any step, so the end state is
+    // (m0 c_v T0 + m_in c_p T_line) / ((m0 + m_in) c_v) to rounding.
+    let vessel = air(1);
+    let start = vessel.contents(1.0e5, 300.0, 0.02, &[0.0]).unwrap();
+    let (rate, line_k, seconds) = (5.0e-3, 300.0, 4.0);
+    let capacity = vessel.heat_capacity_j_kg_k();
+    let enthalpy = RATIO * capacity * line_k;
+    let mut builder = SystemBuilder::new();
+    let node = builder.add_with_tangent("vessel", air(1), start.clone()).unwrap();
+    let inlet = builder.port(node, "stream").unwrap();
+    // The line is all of the carried quantity.
+    builder
+        .boundary(
+            inlet,
+            Box::new(move |_, _, values| values.copy_from_slice(&[rate, rate * enthalpy, rate])),
+        )
+        .unwrap();
+    anchored(&mut builder, node, "heat");
+    let mut system = builder.seal().unwrap();
+    step(&mut system, 0.01, 400);
+    let end = system.state::<GasContents>(node).unwrap();
+    // Four hundred additions round by about 1e-14 of the total.
+    let added = rate * seconds;
+    within(end.mass_kg, start.mass_kg + added, 1.0e-12);
+    within(end.carried_kg[0] / end.mass_kg, added / (start.mass_kg + added), 1.0e-12);
+    let expected = (start.mass_kg * capacity * 300.0 + added * enthalpy)
+        / ((start.mass_kg + added) * capacity);
+    within(vessel.temperature_k(end), expected, 1.0e-12);
+    // Between the line's temperature and ratio times it, which is the
+    // limit of filling an empty vessel.
+    assert!(expected > 330.0 && expected < RATIO * line_k, "{expected}");
+    within(system.ledger().boundary_energy_in_j(), added * enthalpy, 1.0e-12);
+    assert!(system.ledger().energy_residual_j().abs() <= 1.0e-9);
+}
+
+#[test]
+fn a_mass_on_a_gas_volume_rings_at_the_adiabatic_gas_spring_frequency() {
+    // A wall of area A and mass M on a volume V at pressure p, the outside
+    // pressure carried by a constant force: for small motion
+    // w^2 = ratio p A^2 / (M V).
+    let (area, mass_kg, pressure, volume_m3) = (0.01, 1.0, 1.0e5, 1.0e-3);
+    let gas = air(0).with_wall();
+    let start = gas.contents(pressure, 300.0, volume_m3, &[]).unwrap();
+    let mut builder = SystemBuilder::new();
+    let wall = builder
+        .add_with_tangent(
+            "wall",
+            Mass::new(mass_kg).unwrap(),
+            Motion {
+                position_m: volume_m3 / area,
+                velocity_m_s: 0.01,
+            },
+        )
+        .unwrap();
+    let cavity = builder.add_with_tangent("gas", gas.clone(), start.clone()).unwrap();
+    let outside = builder
+        .add_with_tangent(
+            "outside",
+            Force::new(Waveform::constant(-pressure * area).unwrap()),
+            SourceAccount::default(),
+        )
+        .unwrap();
+    builder
+        .common_flow_ratios(
+            builder.port(wall, "p").unwrap(),
+            &[
+                (builder.port(cavity, "p").unwrap(), area),
+                (builder.port(outside, "p").unwrap(), 1.0),
+            ],
+        )
+        .unwrap();
+    anchored(&mut builder, cavity, "heat");
+    let closed = builder.port(cavity, "stream").unwrap();
+    builder
+        .boundary(closed, Box::new(|_, _, values| values.fill(0.0)))
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+
+    let dt = 1.0e-4;
+    let omega = (RATIO * pressure * area * area / (mass_kg * volume_m3)).sqrt();
+    let mut crossings = Vec::new();
+    let mut invariant = 0.0_f64;
+    with_cx(|cx| {
+        let mut before = 0.01_f64;
+        for index in 0..1_400_u32 {
+            system.step(dt, cx).unwrap();
+            let velocity = system.state::<Motion>(wall).unwrap().velocity_m_s;
+            if before < 0.0 && velocity >= 0.0 {
+                crossings.push((f64::from(index) + before / (before - velocity)) * dt);
+            }
+            before = velocity;
+            // No heat and no stream: p V^ratio stays what it was.
+            let held = system.state::<GasContents>(cavity).unwrap();
+            let adiabat = gas.pressure_pa(held) * held.volume_m3.powf(RATIO)
+                / (pressure * volume_m3.powf(RATIO));
+            invariant = invariant.max((adiabat - 1.0).abs());
+            // The wall's position is the gas's length.
+            within(area * system.state::<Motion>(wall).unwrap().position_m, held.volume_m3, 1.0e-12);
+        }
+    });
+    assert!(crossings.len() >= 2, "{crossings:?}");
+    let period = crossings[1] - crossings[0];
+    // The trapezoidal rule turns a linear oscillator by 2 atan(w dt / 2) a
+    // step, which lengthens the period by (w dt)^2 / 12, 1.2e-5 here. The
+    // measured period is within 7e-8 of that and 1.2e-5 from 2 pi / w.
+    within(period, PI * dt / (0.5 * omega * dt).atan(), 1.0e-6);
+    within(period, 2.0 * PI / omega, 2.0e-5);
+    // Measured 8e-15 and 5e-19 J.
+    assert!(invariant <= 1.0e-12, "{invariant}");
+    assert!(system.ledger().energy_residual_j().abs() <= 1.0e-13);
+}
+
+#[test]
+fn streams_meet_at_storages_and_other_wirings_are_refused() {
+    // Three vessels in a line: the middle one is the node two restrictions
+    // meet at.
+    let mut builder = SystemBuilder::new();
+    let mut vessels = Vec::new();
+    for (name, pressure) in [("left", 4.0e5), ("middle", 1.0e5), ("right", 2.5e5)] {
+        let contents = air(0).contents(pressure, 300.0, 0.02, &[]).unwrap();
+        let node = builder.add_with_tangent(name, air(0), contents).unwrap();
+        anchored(&mut builder, node, "heat");
+        vessels.push(node);
+    }
+    let mut pipes = Vec::new();
+    for name in ["first", "second"] {
+        pipes.push(
+            builder
+                .add_with_tangent(name, Restriction::new(5.0e-8, 0).unwrap(), ())
+                .unwrap(),
+        );
+    }
+    let stream = |builder: &SystemBuilder, index: usize| builder.port(vessels[index], "stream").unwrap();
+    let end = |builder: &SystemBuilder, pipe: usize, side: &str| builder.port(pipes[pipe], side).unwrap();
+    let wide = builder
+        .add_with_tangent("wide", Restriction::new(5.0e-8, 2).unwrap(), ())
+        .unwrap();
+    let mass = builder
+        .add_with_tangent("mass", Mass::new(1.0).unwrap(), Motion { position_m: 0.0, velocity_m_s: 0.0 })
+        .unwrap();
+    let body = builder.add_with_tangent("body", HeatCapacity::new(10.0).unwrap(), 300.0).unwrap();
+
+    // One flow cannot be handed whole to two storages.
+    assert!(matches!(
+        builder.common_flow(end(&builder, 0, "a"), &[stream(&builder, 0), stream(&builder, 1)]),
+        Err(AdmissionError::StreamCommonFlow { port }) if port == "first.a"
+    ));
+    // Two storages, or two restrictions, have nothing between them.
+    assert!(matches!(
+        builder.bond(stream(&builder, 0), stream(&builder, 1)),
+        Err(AdmissionError::Role { .. })
+    ));
+    assert!(matches!(
+        builder.bond(end(&builder, 0, "b"), end(&builder, 1, "a")),
+        Err(AdmissionError::Role { .. })
+    ));
+    // Streams that carry different things, and other carriers, do not join.
+    assert!(matches!(
+        builder.bond(stream(&builder, 0), builder.port(wide, "a").unwrap()),
+        Err(AdmissionError::Mismatch { .. })
+    ));
+    assert!(matches!(
+        builder.bond(builder.port(body, "heat").unwrap(), end(&builder, 0, "a")),
+        Err(AdmissionError::Mismatch { .. })
+    ));
+    // A stream is not a power pair: no ratio, transformer or heat route.
+    let velocity = builder.port(mass, "p").unwrap();
+    assert!(matches!(
+        builder.common_flow_ratios(velocity, &[(stream(&builder, 0), 2.0)]),
+        Err(AdmissionError::Role { .. })
+    ));
+    assert!(matches!(
+        builder.transformer(velocity, stream(&builder, 0), 2.0),
+        Err(AdmissionError::Role { .. })
+    ));
+    assert!(builder
+        .heat_route(end(&builder, 0, "a"), &[(builder.port(body, "heat").unwrap(), 1.0)], None, RouteTemperature::SinkEquivalent)
+        .is_err());
+
+    // Every refusal above named these ports, and none was claimed.
+    builder.bond(stream(&builder, 0), end(&builder, 0, "a")).unwrap();
+    builder
+        .common_effort(stream(&builder, 1), &[end(&builder, 0, "b"), end(&builder, 1, "a")])
+        .unwrap();
+    builder.bond(end(&builder, 1, "b"), stream(&builder, 2)).unwrap();
+    for (node, port) in [(wide, "a"), (wide, "b")] {
+        let port = builder.port(node, port).unwrap();
+        builder
+            .boundary(port, Box::new(|_, _, values| values.copy_from_slice(&[1.0e5, 3.0e5, 0.5, 0.5])))
+            .unwrap();
+    }
+    anchored(&mut builder, mass, "p");
+    anchored(&mut builder, body, "heat");
+    let mut system = builder.seal().unwrap();
+    let total = |system: &System| {
+        vessels.iter().fold([0.0, 0.0], |sum, node| {
+            let held = system.state::<GasContents>(*node).unwrap();
+            [sum[0] + held.mass_kg, sum[1] + held.energy_j]
+        })
+    };
+    let before = total(&system);
+    step(&mut system, 0.05, 4_000);
+    let after = total(&system);
+    within(after[0], before[0], 4.0e-15);
+    within(after[1], before[1], 1.0e-13);
+    // Equal volumes of one gas: the mean of the three pressures.
+    for node in &vessels {
+        let held = system.state::<GasContents>(*node).unwrap();
+        within(air(0).pressure_pa(held), 2.5e5, 1.0e-7);
+    }
+    assert!(system.ledger().energy_residual_j().abs() <= 1.0e-9);
 }

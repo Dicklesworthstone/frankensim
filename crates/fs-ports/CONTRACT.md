@@ -114,6 +114,20 @@ temperature [K] and heat rate [W] and books `dt * flow`, with entropy
 port energy from the wire values (`PortSpec::energy_in_j`), so both ends of a
 lossless connection book the same number.
 
+`Carrier::Stream` (`PortSpec::stream(id, role, carried)`, width `2 + carried`)
+carries material between a storage and a transport element. The storage
+(`FlowIn`) returns what it holds is like: pressure [Pa], specific enthalpy
+[J/kg], then one value per unit mass for each carried quantity. The transport
+element (`EffortIn`) returns what crosses the port, positive into itself: mass
+rate [kg/s], enthalpy rate [W], then the rate of each carried quantity. The
+port books `dt * enthalpy rate` as energy and `PortSpec::mass_in_kg` gives
+`dt * mass rate`; neither is a product of the two sides. A transport element
+multiplies its mass rate by the values of the side the mass leaves (the donor
+rule), which is its law and not the kernel's. Entropy carried by a stream is
+not on the wire. `tests/component_reference.rs` checks widths, both roles'
+energy and mass, the refusal of a signal role and of slices of the wrong
+length.
+
 **First law.** `audit_step` is the one place a step's energy is tested:
 `sum(port energy in) = stored_change_j + numerical_loss_j` within the receipt's
 `energy_tolerance_j`; the receipt's stored change against re-measured endpoint
@@ -141,7 +155,7 @@ leak, a read of the candidate slot and a wrong VJP sign each fail the law they
 break; cancellation returns the owner's error; an audit given a port list
 longer or shorter than its layout is refused.
 
-**No claim.** v0 has no stream ports with flow reversal, no field ports with a
+**No claim.** v0 has no entropy on stream ports, no field ports with a
 duality matrix, no multistage port values and no snapshot identity. The kit
 does not yet check `StageResidual`, unit rescaling, time reversal or temporal
 order. A passing conformance check says a component keeps its own accounts; it

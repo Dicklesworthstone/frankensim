@@ -372,3 +372,41 @@ fn layout_orders_ports_and_refuses_duplicates() {
     assert_eq!((mixed.input_len(), mixed.output_len()), (1, 2));
     assert!(mixed.input_range(1).is_empty());
 }
+
+#[test]
+fn a_stream_port_books_the_enthalpy_and_mass_that_cross_it_on_either_side() {
+    let id = || StableId::new("s").expect("id");
+    let storage = PortSpec::stream(id(), PortRole::FlowIn, 2).expect("storage side");
+    let transport = PortSpec::stream(id(), PortRole::EffortIn, 2).expect("transport side");
+    assert_eq!((storage.width(), storage.carrier()), (4, Carrier::Stream));
+    assert_eq!(
+        PortSpec::stream(id(), PortRole::FlowIn, 0).expect("bare stream").width(),
+        2
+    );
+    assert!(matches!(
+        PortSpec::stream(id(), PortRole::SignalIn, 0),
+        Err(ContractViolation::PortRole { .. })
+    ));
+    let layout = PortLayout::new(core::slice::from_ref(&storage)).expect("layout");
+    assert_eq!((layout.input_len(), layout.output_len()), (4, 4));
+
+    // What the storage is like, and what crosses into the transport element
+    // (3 g/s out of it here): mass, enthalpy and two carried rates.
+    let contents = [2.0e5, 3.0e5, 0.25, 0.75];
+    let crossing = [-3.0e-3, -900.0, -7.5e-4, -2.25e-3];
+    // Half a second, so the products below are exact.
+    let dt = 0.5;
+    let same = |got: f64, want: f64| assert!((got - want).abs() <= 0.0, "{got} vs {want}");
+    // The storage receives the crossing; the transport element returns it.
+    // The energy is the enthalpy rate, not a product of the two sides.
+    same(storage.energy_in_j(dt, &crossing, &contents), -450.0);
+    same(storage.mass_in_kg(dt, &crossing, &contents), -1.5e-3);
+    same(transport.energy_in_j(dt, &contents, &crossing), -450.0);
+    same(transport.mass_in_kg(dt, &contents, &crossing), -1.5e-3);
+    // A stream's entropy is not on the wire, and only streams carry mass.
+    same(storage.entropy_in_j_per_k(dt, &crossing, &contents), 0.0);
+    let heat = PortSpec::heat(id(), PortRole::FlowIn).expect("heat");
+    same(heat.mass_in_kg(dt, &[5.0], &[300.0]), 0.0);
+    assert!(storage.energy_in_j(dt, &crossing[..3], &contents).is_nan());
+    assert!(transport.mass_in_kg(dt, &contents, &crossing[..3]).is_nan());
+}

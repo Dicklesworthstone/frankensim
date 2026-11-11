@@ -9,7 +9,7 @@ use fs_exec::Cx;
 use fs_ports::StableId;
 use fs_ports::component::{
     Carrier, Class, Component, ContractViolation, PortLayout, PortRole, PortSpec, PortTangent,
-    Proposal, Receipt, audit_step,
+    Proposal, Receipt, STREAM_ENTHALPY_RATE, audit_step,
 };
 
 use crate::erased::{Node, OwnerError, Plain, Tangent};
@@ -545,13 +545,24 @@ impl SystemBuilder {
         // Heat rate is power itself, so handing the same heat rate to several
         // members would multiply the energy. Heat ports share a temperature
         // (common effort) or go through a heat route.
-        if setter_role == PortRole::EffortIn
-            && members.len() > 1
-            && self.spec(setter).carrier() == Carrier::Heat
-        {
-            return Err(AdmissionError::HeatCommonFlow {
-                port: self.label(setter),
-            });
+        // A stream's rates are what crosses, in the same way: several
+        // storages cannot each be handed the whole of one flow, and a
+        // transport element has no use for the sum of their pressures. A
+        // storage is the node that streams meet at (common effort).
+        if setter_role == PortRole::EffortIn && members.len() > 1 {
+            match self.spec(setter).carrier() {
+                Carrier::Heat => {
+                    return Err(AdmissionError::HeatCommonFlow {
+                        port: self.label(setter),
+                    });
+                }
+                Carrier::Stream => {
+                    return Err(AdmissionError::StreamCommonFlow {
+                        port: self.label(setter),
+                    });
+                }
+                Carrier::Power(_) | Carrier::Signal => {}
+            }
         }
         let mut all = Vec::with_capacity(members.len() + 1);
         all.push(setter);
@@ -1126,8 +1137,11 @@ impl SystemBuilder {
 
         // Tolerance group and label of every input. Power and heat inputs of
         // one carrier and side are compared with the largest of their kind in
-        // the block. A signal has no kind, so each scalar signal input is a
-        // group of its own and is judged against its own size only.
+        // the block. The coefficients of a stream port are different
+        // quantities (a pressure, an enthalpy, a mass fraction), so each
+        // position is a kind of its own. A signal has no kind, so each scalar
+        // signal input is a group of its own and is judged against its own
+        // size only.
         let mut groups = Vec::new();
         let mut signal_inputs = Vec::new();
         let mut input_group = vec![0_usize; inputs];
@@ -1136,11 +1150,11 @@ impl SystemBuilder {
         for node in 0..count {
             for (port, spec) in self.nodes[node].ports().iter().enumerate() {
                 let reference = PortRef { node, port };
-                for index in input_of(reference) {
+                for (offset, index) in input_of(reference).enumerate() {
                     if spec.carrier() == Carrier::Signal {
                         signal_inputs.push(index);
                     } else {
-                        input_group[index] = tolerance_group(&mut groups, spec);
+                        input_group[index] = tolerance_group(&mut groups, spec, offset);
                     }
                     input_label[index] = self.label(reference);
                     input_is_temperature[index] =
@@ -1948,19 +1962,21 @@ impl System {
             // What rounding and the configured absolute tolerance let the
             // block solve leave in each input, as energy: a power port's
             // input pairs with its output, a heat receiver's input is the
-            // heat rate itself.
+            // heat rate itself, and of the rates a storage receives from a
+            // stream the enthalpy rate is the energy.
             let mut solve_slack_j = 0.0_f64;
             for port in &members {
                 let spec = &self.nodes[port.node].ports()[port.port];
-                let weight_one = match (spec.carrier(), spec.role()) {
-                    (Carrier::Heat, PortRole::FlowIn) => Some(1.0),
-                    (Carrier::Power(_), _) => None,
-                    _ => Some(0.0),
-                };
                 let outputs = self.output_range(*port);
                 for (offset, index) in self.input_range(*port).enumerate() {
-                    let weight =
-                        weight_one.unwrap_or_else(|| self.outputs[outputs.start + offset].abs());
+                    let weight = match (spec.carrier(), spec.role()) {
+                        (Carrier::Heat, PortRole::FlowIn) => 1.0,
+                        (Carrier::Stream, PortRole::FlowIn) if offset == STREAM_ENTHALPY_RATE => {
+                            1.0
+                        }
+                        (Carrier::Power(_), _) => self.outputs[outputs.start + offset].abs(),
+                        _ => 0.0,
+                    };
                     solve_slack_j += dt_s * self.input_allowance[index] * weight;
                 }
             }

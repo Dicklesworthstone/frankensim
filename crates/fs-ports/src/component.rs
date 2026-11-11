@@ -26,11 +26,11 @@
 //! the step average must book the difference as numerical loss in its
 //! [`Receipt`]; the kernel checks that the receipt explains the defect.
 //!
-//! Sign: flow and heat rate are positive into the owner.
+//! Sign: flow, heat rate and a stream's rates are positive into the owner.
 //!
 //! # What v0 does not cover
 //!
-//! Stream ports with flow reversal, field ports with a duality matrix,
+//! Entropy carried by streams, field ports with a duality matrix,
 //! multistage port values, and snapshot identity are later beads
 //! (`frankensim-rc-1109-root-3gc12.5.2`, `.5.4`). The contract stays v0 until
 //! the five kernel slices pass on it.
@@ -61,7 +61,40 @@ pub enum Carrier {
     Heat,
     /// A one-way signal. It carries no power and no conserved quantity.
     Signal,
+    /// A material stream between a storage and a transport element.
+    ///
+    /// The side that receives flow (a storage: a vessel, a cavity) returns
+    /// what its contents are like: pressure [Pa] at [`STREAM_PRESSURE`],
+    /// specific enthalpy [J/kg] at [`STREAM_SPECIFIC_ENTHALPY`], then one
+    /// value per unit mass for each carried quantity (a species' mass
+    /// fraction). The side that receives those (a transport element: a
+    /// restriction, a valve, a pump) returns what crosses the port, positive
+    /// into itself: mass rate [kg/s] at [`STREAM_MASS_RATE`], enthalpy rate
+    /// [W] at [`STREAM_ENTHALPY_RATE`], then the rate of each carried
+    /// quantity.
+    ///
+    /// Power into the owner is the enthalpy rate itself, as the heat rate is
+    /// for [`Carrier::Heat`]; it is not a product of the two sides. What a
+    /// stream delivers is set by where it comes from, so a transport element
+    /// multiplies its mass rate by the values of the side the mass leaves
+    /// (the donor rule). Both directions and zero flow are then one law, and
+    /// what leaves one storage is what enters the other.
+    ///
+    /// Entropy carried by a stream is not on the wire in v0, so entropy
+    /// accounts do not include it.
+    Stream,
 }
+
+/// Index of the pressure [Pa] on the storage side of a stream port.
+pub const STREAM_PRESSURE: usize = 0;
+/// Index of the specific enthalpy [J/kg] on the storage side of a stream port.
+pub const STREAM_SPECIFIC_ENTHALPY: usize = 1;
+/// Index of the mass rate [kg/s] on the transport side of a stream port.
+pub const STREAM_MASS_RATE: usize = 0;
+/// Index of the enthalpy rate [W] on the transport side of a stream port.
+pub const STREAM_ENTHALPY_RATE: usize = 1;
+/// Index of the first carried quantity on either side of a stream port.
+pub const STREAM_CARRIED: usize = 2;
 
 /// Which side of a port the component receives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +157,26 @@ impl PortSpec {
             carrier: Carrier::Heat,
             role,
             width: NonZeroUsize::MIN,
+        })
+    }
+
+    /// A stream port that carries `carried` quantities besides mass and
+    /// enthalpy (see [`Carrier::Stream`]). A storage has `PortRole::FlowIn`,
+    /// a transport element `PortRole::EffortIn`.
+    ///
+    /// # Errors
+    /// [`ContractViolation::PortRole`] if `role` is a signal role.
+    pub fn stream(id: StableId, role: PortRole, carried: usize) -> Result<Self, ContractViolation> {
+        if !matches!(role, PortRole::EffortIn | PortRole::FlowIn) {
+            return Err(ContractViolation::PortRole {
+                port: id.as_str().to_owned(),
+            });
+        }
+        Ok(Self {
+            id,
+            carrier: Carrier::Stream,
+            role,
+            width: NonZeroUsize::MIN.saturating_add(STREAM_CARRIED - 1 + carried),
         })
     }
 
@@ -222,7 +275,35 @@ impl PortSpec {
                 }
                 dt_s * flow.iter().sum::<f64>()
             }
+            (Carrier::Stream, _) => match self.stream_flow(input, output) {
+                Some(flow) => dt_s * flow[STREAM_ENTHALPY_RATE],
+                None => f64::NAN,
+            },
         }
+    }
+
+    /// The side of a stream port that holds what crosses it, positive into
+    /// the owner; `None` for another carrier or slices of the wrong length.
+    fn stream_flow<'a>(&self, input: &'a [f64], output: &'a [f64]) -> Option<&'a [f64]> {
+        let flow = match (self.carrier, self.role) {
+            (Carrier::Stream, PortRole::FlowIn) => input,
+            (Carrier::Stream, PortRole::EffortIn) => output,
+            _ => return None,
+        };
+        (flow.len() == self.width.get()).then_some(flow)
+    }
+
+    /// Mass [kg] that entered the owner through this port during a step.
+    ///
+    /// Only streams carry mass; every other carrier returns zero. A stream
+    /// port given slices of the wrong length yields NaN.
+    #[must_use]
+    pub fn mass_in_kg(&self, dt_s: f64, input: &[f64], output: &[f64]) -> f64 {
+        if self.carrier != Carrier::Stream {
+            return 0.0;
+        }
+        self.stream_flow(input, output)
+            .map_or(f64::NAN, |flow| dt_s * flow[STREAM_MASS_RATE])
     }
 
     /// Entropy [J/K] that entered the owner through this port during a step.

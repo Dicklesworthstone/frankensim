@@ -42,6 +42,14 @@
 //! temperature and returns the heat rate into itself, which is negative when
 //! heat leaves it.
 //!
+//! Stream ports carry material. A [`GasVolume`] is a storage: it returns
+//! what it holds is like (pressure, specific enthalpy, the mass fraction of
+//! each carried quantity) and receives what crosses into it (mass rate,
+//! enthalpy rate, the rate of each carried quantity). A [`Restriction`]
+//! between two storages receives both sides' values and returns what crosses
+//! into itself at each port; the enthalpy and carried quantities are those
+//! of the side the mass leaves. Storages are the nodes streams meet at.
+//!
 //! # Integration
 //!
 //! Every element is the trapezoidal (implicit midpoint) rule on its own state
@@ -64,6 +72,8 @@ use crate::ledger::Sum;
 
 mod resistance;
 pub use resistance::Resistance;
+mod stream;
+pub use stream::{GasContents, GasVolume, Restriction};
 
 /// Why an element was not built or refused a step.
 #[derive(Debug, Clone, PartialEq)]

@@ -130,6 +130,13 @@ pub enum AdmissionError {
         /// The setter port, as `node.port`.
         port: String,
     },
+    /// A common-flow junction of stream ports with more than one member. A
+    /// stream's rates are what crosses, so several storages cannot each
+    /// receive the whole of one flow. Streams meet at a storage.
+    StreamCommonFlow {
+        /// The setter port, as `node.port`.
+        port: String,
+    },
     /// An ideal transformer's ratio is zero or not finite.
     TransformerRatio {
         /// The rejected signed ratio.
@@ -193,6 +200,11 @@ impl fmt::Display for AdmissionError {
                 f,
                 "heat port `{port}` cannot set a common flow for several members: heat ports \
                  share a temperature (common effort) or use a heat route"
+            ),
+            Self::StreamCommonFlow { port } => write!(
+                f,
+                "stream port `{port}` cannot set a common flow for several members: streams \
+                 meet at a storage, which sets what they share (common effort)"
             ),
             Self::TransformerRatio { ratio } => {
                 write!(
@@ -467,9 +479,20 @@ pub(crate) fn blocks_in_dependency_order(successors: &[Vec<usize>]) -> Vec<Vec<u
 }
 
 /// A tolerance group: unknowns of the same carrier and side are compared with
-/// the largest of their kind.
-pub(crate) fn tolerance_group(groups: &mut Vec<(Carrier, PortRole)>, port: &PortSpec) -> usize {
-    let key = (port.carrier(), port.role());
+/// the largest of their kind. `offset` is the coefficient's position in its
+/// port; it tells the quantities of a stream port apart and is ignored for
+/// the other carriers, whose coefficients are all one quantity.
+pub(crate) fn tolerance_group(
+    groups: &mut Vec<(Carrier, PortRole, usize)>,
+    port: &PortSpec,
+    offset: usize,
+) -> usize {
+    let position = if port.carrier() == Carrier::Stream {
+        offset
+    } else {
+        0
+    };
+    let key = (port.carrier(), port.role(), position);
     if let Some(position) = groups.iter().position(|known| *known == key) {
         position
     } else {

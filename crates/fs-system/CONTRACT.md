@@ -67,6 +67,19 @@ physics owners below fs-couple can be composed without it.
     the others' rows stay zero. A source belongs to one route, and a
     receiver of a route takes no other connection.
   - `signal(from, to)`: one-way copy.
+  - Streams (`Carrier::Stream`, crates/fs-ports/CONTRACT.md) need no
+    connection of their own. A storage's stream port is the setter of a
+    `common_effort` (or one end of a `bond`): every transport element joined
+    to it receives what the storage holds is like, and the storage receives
+    minus the sum of what crosses into them. Mass, enthalpy and each carried
+    quantity therefore cancel across the junction by the same linear
+    equations as a power junction's flows. A `common_flow` of stream ports
+    with more than one member is refused (`StreamCommonFlow`): one flow
+    cannot be handed whole to several storages. Two storages, or two
+    transport elements, do not join directly. Ratios, transformers, power
+    maps and heat routes refuse stream ports. Each position of a stream port
+    is a tolerance group of its own in the interface solve, because its
+    coefficients are different quantities.
 - `boundary(port, f)`: the input side of a port prescribed as `f(t0, dt)`.
 - `System::step(dt_max, cx) -> StepReport`, `state`, `last_input`,
   `last_output`, `guess`, `plan_shape`, `time_s`, `steps`, `ledger`,
@@ -788,6 +801,48 @@ heat, the gyrator's account is zero, and a rotor port joined into the current
 loop is refused. Two planted gyrator defects were each caught (both efforts
 with the same sign; the transpose with the wrong sign).
 
+Streams, `tests/elements.rs`: `elements::GasVolume` (a well-mixed volume of
+perfect gas with constant heat capacities: a stream port, a heat port and,
+with `with_wall`, a pressure-volume port; trapezoidal, energy-exact for any
+step) and `elements::Restriction` (mass rate `conductance (p_a - p_b)`, the
+enthalpy and carried quantities those of the side the mass leaves).
+- Both pass the conformance and tangent checks at 100 generated points, the
+  restriction on both sides of zero flow; at equal pressures nothing crosses
+  (the mandatory check only: the port map has a kink there). Steps that would
+  empty a volume, overdraw a carried quantity or take more energy than it
+  holds are shortened with the candidate untouched.
+- Two vessels (5 bar at 350 K in 10 l, 1 bar at 290 K in 30 l, each holding a
+  quantity the other lacks) through one restriction against an independent
+  RK4 integration of the same equations: errors 1.35e-6 and 3.37e-7 at 100
+  and 200 steps, a ratio of 4.0. While mass leaves the first vessel it keeps
+  its composition to 1e-11 and receives none of the other's quantity, which
+  no element states. Mass, each carried quantity and energy are conserved
+  (4e-15 relative; ledger residual zero). Left alone the pressures meet at
+  2 bar, `(p_a V_a + p_b V_b) / (V_a + V_b)`, and the temperatures do not.
+- Reversal: the vessels start level; the first is heated for a second, then
+  the second at five times the power. The flow turns once. Until the turn
+  the first vessel holds none of the second's quantity; afterwards it does.
+  Mass and both carried quantities are conserved through the turn and the
+  energy rises by the 4.8 kJ supplied. Mass and energy are second order
+  against RK4 (6.5e-8 and 1.5e-8, ratio 4.3). The carried quantities' error
+  (1.2e-7 and 6.4e-8) is bounded by 5e-3 of the step squared and has no
+  clean ratio: the step in which the supplier changes costs up to its length
+  squared, depending on where in it the turn falls.
+- A vessel filled from a line through a prescribed stream boundary ends at
+  `(m0 c_v T0 + m_in c_p T_line) / ((m0 + m_in) c_v)`, 355 K from a 300 K
+  line, to 1e-12.
+- A 1 kg wall on a litre of gas at 1 bar (the outside pressure a constant
+  force, all on one ratio junction) rings at the adiabatic gas-spring
+  frequency `w² = ratio p A² / (M V)`: the period is within 1e-6 of the
+  trapezoidal rule's for that frequency and 1.2e-5 from `2 pi / w`;
+  `p V^ratio` holds to 8e-15.
+- Three vessels in a line: the middle one is the node two restrictions meet
+  at; mass and energy are conserved and the pressures meet at their mean.
+  Refused, claiming nothing: a common flow to two storages, two storages or
+  two restrictions joined directly, streams carrying different numbers of
+  quantities, a stream with a heat port, a ratio, a transformer and a heat
+  route on a stream port.
+
 Shared receivers, `tests/elements.rs`: two heaters routed into one body (one
 of them also into a second body and a named sink) deliver the sum of their
 shares, the pair is audited in the first route's row, and the ledger closes;
@@ -803,7 +858,7 @@ the refused calls change nothing.
   ulp of that temperature each step; its ledger account, a compensated sum of
   receipts, does not lose it.
 - No mapped transfer for arbitrary field duality metrics, and no gyrator as a
-  connection (the `Gyrator` element is a component); no stream or field ports;
+  connection (the `Gyrator` element is a component); no field ports;
   no non-smooth tier (contact, stick-slip); no multirate stepping; no
   monolithic solve through `StageResidual`; no embedded error estimator or
   PI controller (step doubling and proportional control are available); no
