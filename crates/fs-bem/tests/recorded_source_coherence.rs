@@ -81,11 +81,16 @@ fn recorded_source_coherence_reaches_original_boundary_fields_microphones_and_ra
         },
     ];
     let owner = BemObservation::new(&surface, medium, &sources, &traces, &receivers, 1e-3).unwrap();
+    // The boundary solve takes complex normal-velocity fields; the recorded traces are real amplitudes.
+    let velocity_fields: Vec<Vec<C64>> = traces
+        .iter()
+        .map(|trace| trace.iter().map(|&value| C64::new(value, 0.0)).collect())
+        .collect();
     let solutions = helmholtz::solve_radiation_batch(
         &surface,
         omega / medium.sound_speed,
         medium,
-        &traces.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+        &velocity_fields.iter().map(Vec::as_slice).collect::<Vec<_>>(),
         Formulation::BurtonMiller,
     )
     .unwrap();

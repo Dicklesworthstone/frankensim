@@ -69,6 +69,10 @@ fn g0_g3_coherent_incidents_retain_a_weak_field_between_cancelling_sources() {
                 source.force_on_fluid_n = source.force_on_fluid_n.map(|v| v.scale(gain));
                 IncidentSource::ForceDipole(source)
             }
+            IncidentSource::StressQuadrupole(mut source) => {
+                source.stress_moment_n_m = source.stress_moment_n_m.map(|v| v.scale(gain));
+                IncidentSource::StressQuadrupole(source)
+            }
         }
     }
     let sources = [

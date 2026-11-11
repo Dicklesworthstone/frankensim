@@ -156,4 +156,5 @@ impl PreparedMolecularIncident<'_> {
 }
 
 #[cfg(test)]
+#[path = "incident/tests.rs"]
 mod tests;

@@ -209,4 +209,5 @@ impl MolecularApertureResponse {
 }
 
 #[cfg(test)]
+#[path = "near_field/tests.rs"]
 mod tests;

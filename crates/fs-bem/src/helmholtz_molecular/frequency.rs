@@ -160,4 +160,5 @@ impl MolecularExterior {
 }
 
 #[cfg(test)]
+#[path = "frequency/tests.rs"]
 mod tests;
