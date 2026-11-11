@@ -1,0 +1,5 @@
+frankensim.specimen-frames.v1
+part	origin	axis_x	axis_y	axis_z	note
+reed	reed tip on the bore axis (the flattened end where the player's lips close the reed)	+x along the bore axis toward the body	unstated	unstated	the impedance is seen at this plane
+bore	reed tip on the bore axis	+x along the bore axis toward the open end	unstated	unstated	stations and hole positions are measured from the reed tip: hole positions are the paper's (from the body's top plane) plus 0.088 m
+tone-holes	reed tip on the bore axis	+x along the bore axis toward the open end	unstated	unstated	azimuth of the holes is not modelled: two are on the back (u-back-holes)

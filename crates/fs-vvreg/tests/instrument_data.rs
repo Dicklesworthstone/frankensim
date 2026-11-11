@@ -946,7 +946,6 @@ fn committed_ledger_seed_covers_existing_music_sources() {
         "dvtd",
         "goettingen-brass-mri",
         "fraunhofer-musices",
-        "maugeais-dalmont-2024",
         "davies-pinho-english-2006",
         "dequand-2003",
         "fletcher-2005",
@@ -973,6 +972,18 @@ fn committed_ledger_seed_covers_existing_music_sources() {
     assert!(uiowa.artifacts.contains(&ArtifactRef::Table(
         "data/instruments/references.json".to_owned()
     )));
+    // The duduk lead was acquired on 2026-11-11 (a CC BY 4.0 paper, the plain-bore card): admitted
+    // with its specimen directory, and its simulator pole files stay a pending permission with no artifacts.
+    let duduk = ledger.by_source("maugeais-dalmont-2024").expect("maugeais-dalmont-2024 row");
+    assert_eq!(duduk.decision, Decision::Admit);
+    assert!(duduk.artifacts.contains(&ArtifactRef::Geometry(
+        "duduk-a-simon-maugeais-dalmont2024".to_owned()
+    )));
+    let poles = ledger
+        .by_source("maugeais-dalmont-yapsmi-simulator-poles")
+        .expect("simulator poles row");
+    assert_eq!(poles.decision, Decision::PendingPermission);
+    assert!(poles.artifacts.is_empty(), "unacquired lead must not provide artifacts");
     let jawari = ledger.for_artifact(&ArtifactRef::Matdb("contact-jawari-bone-bridge".to_owned()));
     assert!(
         jawari[0]

@@ -1,0 +1,5 @@
+frankensim.specimen-parts.v1
+part	material	state	joins	note
+reed	cane per the text; the interior of Figure 6 (a cylinder 18 mm in diameter and 60 mm long, then a cone of 43 mm narrowing to 10 mm) is recorded in dimensions.tsv and NOT used by this card	assembled	bore	the ghamish, 105 mm (Figure 2 text) or 103 mm (Figure 6), flattened at the blowing end and conical at the end that fits the body; 15 mm of it sit inside the body; its lumped dynamics are the description's reed rows, its interior volume is not modelled (u-reed-interior)
+bore	unstated (apricot wood is the usual body)	assembled	reed;tone-holes	air column from the reed tip to the open end: a plain 12 mm bore of 0.442 m (0.103 m reed region carried as bore of the body's diameter, plus 0.339 m of body below the reed end, Figure 1 and Figure 6)
+tone-holes	unstated	assembled	bore	ten holes, undercut, all of one size; no pads or keys
