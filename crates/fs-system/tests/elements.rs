@@ -6,6 +6,8 @@
 #![allow(clippy::float_cmp)]
 
 use std::f64::consts::PI;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -2397,11 +2399,13 @@ fn streams_meet_at_storages_and_other_wirings_are_refused() {
 /// interface warms. Its one heat port receives the temperature and returns
 /// the heat rate into the source, `-P`. Smooth, and added without a
 /// tangent, so the kernel differences it. Its state is the energy it has
-/// delivered, as a negative stored energy.
+/// delivered, as a negative stored energy. It counts how often it is asked
+/// to propose.
 struct FadingSource {
     power_w: f64,
     scale_k: f64,
     ports: [PortSpec; 1],
+    proposals: Arc<AtomicU32>,
 }
 
 impl FadingSource {
@@ -2410,6 +2414,7 @@ impl FadingSource {
             power_w,
             scale_k,
             ports: [PortSpec::heat(StableId::new("heat").unwrap(), PortRole::EffortIn).unwrap()],
+            proposals: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -2444,6 +2449,7 @@ impl Component for FadingSource {
         cx: &Cx<'_>,
     ) -> Result<Proposal, ElementError> {
         cx.checkpoint()?;
+        self.proposals.fetch_add(1, Ordering::Relaxed);
         let kelvin = inputs[0];
         if !(kelvin.is_finite() && kelvin > 0.0) {
             return Err(ElementError::Temperature { kelvin });
@@ -2479,6 +2485,13 @@ const WARMING_ROOM_K: f64 = 300.0;
 /// film; everything at the room's temperature. The kernel's default solve
 /// settings. Returns the system and the two bodies.
 fn warming_plane() -> (System, Vec<NodeId>) {
+    let (system, bodies, _, _) = warming_plane_counted();
+    (system, bodies)
+}
+
+/// [`warming_plane`], and with it the source and the count of the
+/// proposals the source has been asked for.
+fn warming_plane_counted() -> (System, Vec<NodeId>, NodeId, Arc<AtomicU32>) {
     let room_k = WARMING_ROOM_K;
     let mut builder = SystemBuilder::new();
     let port = |builder: &SystemBuilder, node, name: &str| builder.port(node, name).unwrap();
@@ -2513,9 +2526,9 @@ fn warming_plane() -> (System, Vec<NodeId>) {
         bodies.push(body);
         starts.extend([on_plane, on_film]);
     }
-    let source = builder
-        .add("source", FadingSource::new(WARMING_POWER_W, WARMING_SCALE_K), 0.0)
-        .unwrap();
+    let law = FadingSource::new(WARMING_POWER_W, WARMING_SCALE_K);
+    let proposals = Arc::clone(&law.proposals);
+    let source = builder.add("source", law, 0.0).unwrap();
     let at_source = port(&builder, source, "heat");
     builder
         .common_effort(port(&builder, plane, "source"), &[at_source])
@@ -2525,7 +2538,193 @@ fn warming_plane() -> (System, Vec<NodeId>) {
     for start in starts {
         assert!(system.guess(start, &[room_k]));
     }
-    (system, bodies)
+    (system, bodies, source, proposals)
+}
+
+#[test]
+fn a_step_taken_at_its_first_check_was_judged_and_its_differenced_part_proposed_again() {
+    // The warming plane's source has no declared tangent, so an assembly
+    // differences it: one more proposal, at a perturbed temperature, into
+    // its candidate. The source counts its proposals, which says what the
+    // solve did in a step:
+    //   k >= 1 updates: k + 1 checks and k assemblies, 2 k + 1 proposals;
+    //   taken at the first check: that check, the assembly that judges
+    //   it, and one more at the accepted inputs, 3 proposals;
+    //   an exact fixed point, taken without assembling: 1.
+    // So a step with no iteration and three proposals was judged by slopes
+    // formed in that step, and its source was proposed again afterwards.
+    // What the source then publishes is its proposal at the temperature
+    // the step accepted, to the bit, not the perturbed one.
+    let (mut system, _, source, proposals) = warming_plane_counted();
+    let law = FadingSource::new(WARMING_POWER_W, WARMING_SCALE_K);
+    let at_source = system.port(source, "heat").unwrap();
+    let dt = 0.25_f64;
+    let mut taken_at_first_check = 0_u32;
+    with_cx(|cx| {
+        for step in 0..80_u32 {
+            let asked_before = proposals.load(Ordering::Relaxed);
+            let delivered_before_j = *system.state::<f64>(source).unwrap();
+            let spent = system.step(dt, cx).unwrap().iterations;
+            let asked = proposals.load(Ordering::Relaxed) - asked_before;
+            if spent == 0 {
+                assert_eq!(asked, 3, "step {step}");
+                taken_at_first_check += 1;
+            } else {
+                assert_eq!(asked, 2 * spent + 1, "step {step}");
+            }
+            let accepted_k = system.last_input(at_source)[0];
+            let expected_j = delivered_before_j - dt * law.power_at(accepted_k);
+            let delivered_j = *system.state::<f64>(source).unwrap();
+            assert_eq!(delivered_j.to_bits(), expected_j.to_bits(), "step {step}");
+        }
+    });
+    assert!(taken_at_first_check >= 10, "{taken_at_first_check}");
+}
+
+/// A body whose heat capacity rises with its temperature,
+/// `C(T) = c0 + c1 (T - 300 K)`. The temperature it returns on its port,
+/// the mean of its two end temperatures, is therefore not linear in the
+/// heat rate it receives. Smooth, and added without a tangent.
+struct StiffeningBody {
+    c0_j_k: f64,
+    c1_j_k2: f64,
+    ports: [PortSpec; 1],
+}
+
+impl StiffeningBody {
+    fn new(c0_j_k: f64, c1_j_k2: f64) -> Self {
+        Self {
+            c0_j_k,
+            c1_j_k2,
+            ports: [PortSpec::heat(StableId::new("heat").unwrap(), PortRole::FlowIn).unwrap()],
+        }
+    }
+
+    /// Stored energy above 300 K [J].
+    fn energy_j(&self, kelvin: f64) -> f64 {
+        let above = kelvin - 300.0;
+        self.c0_j_k * above + 0.5 * self.c1_j_k2 * above * above
+    }
+}
+
+impl Component for StiffeningBody {
+    type State = f64;
+    type Error = ElementError;
+
+    fn ports(&self) -> &[PortSpec] {
+        &self.ports
+    }
+
+    fn class(&self) -> Class {
+        Class::Smooth
+    }
+
+    fn stored_energy_j(&self, kelvin: &f64) -> Result<f64, ElementError> {
+        Ok(self.energy_j(*kelvin))
+    }
+
+    fn propose(
+        &self,
+        old: &f64,
+        dt_s: f64,
+        inputs: &[f64],
+        new: &mut f64,
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<Proposal, ElementError> {
+        cx.checkpoint()?;
+        let heat_j = dt_s * inputs[0];
+        // The end temperature holds the energy the step began with and the
+        // heat received: the root of c0 x + c1 x^2 / 2 = E above 300 K.
+        let energy_j = self.energy_j(*old) + heat_j;
+        let under = self.c0_j_k * self.c0_j_k + 2.0 * self.c1_j_k2 * energy_j;
+        if !(under > 0.0) {
+            return Ok(Proposal::Shorten { dt_s: 0.5 * dt_s });
+        }
+        let next = 300.0 + (under.sqrt() - self.c0_j_k) / self.c1_j_k2;
+        *new = next;
+        outputs[0] = 0.5 * (old + next);
+        Ok(Proposal::Step(Receipt {
+            stored_change_j: heat_j,
+            dissipated_j: 0.0,
+            numerical_loss_j: 0.0,
+            entropy_generated_j_per_k: 0.0,
+            energy_tolerance_j: 64.0
+                * f64::EPSILON
+                * (self.energy_j(*old).abs()
+                    + self.energy_j(next).abs()
+                    + heat_j.abs()
+                    + self.c0_j_k * (old.abs() + next.abs()))
+                + f64::MIN_POSITIVE,
+            residual: 0.0,
+            tolerance: 0.0,
+        }))
+    }
+}
+
+#[test]
+fn a_block_refused_by_the_second_test_after_updates_names_the_open_input() {
+    // A body whose heat capacity rises with temperature (1 J/K at 300 K,
+    // 0.01 J/K more per kelvin) behind a wall of 1e5 W/K, the far side 3 K
+    // warmer, one step of 1 ms from a guess of 300 K at the wall. The
+    // body's temperature is not linear in its heat, so Newton needs four
+    // updates. Allowed three, the block stands at its fourth check with
+    // the wall's temperature input open by about 4e-11 K: inside the first
+    // test's 3e-10 K, and through the wall about 4e-6 W of heat the body
+    // has not been told of. The refusal comes from the second test, at a
+    // check after updates, and names that input and its residual; the
+    // body's heat input, first among the block's unknowns, is closed.
+    let build = |max_iterations: Option<u32>| {
+        let mut builder = SystemBuilder::new();
+        let body = builder
+            .add("body", StiffeningBody::new(1.0, 0.01), 300.0)
+            .unwrap();
+        let wall = builder
+            .add_with_tangent("wall", Conductance::new(1.0e5).unwrap(), ())
+            .unwrap();
+        let near = builder.port(wall, "a").unwrap();
+        builder
+            .common_effort(builder.port(body, "heat").unwrap(), &[near])
+            .unwrap();
+        builder
+            .boundary(
+                builder.port(wall, "b").unwrap(),
+                Box::new(|_, _, values| values[0] = 303.0),
+            )
+            .unwrap();
+        let mut system = builder.seal().unwrap();
+        assert!(system.guess(near, &[300.0]));
+        if let Some(max_iterations) = max_iterations {
+            system.set_config(SolveConfig {
+                max_iterations,
+                ..SolveConfig::default()
+            });
+        }
+        (system, body)
+    };
+    let (mut solved, body) = build(None);
+    let report = with_cx(|cx| solved.step(1.0e-3, cx)).unwrap();
+    assert_eq!(report.iterations, 4);
+    // The step is stiff (dt G / C is 100): the body's mean temperature
+    // over it comes within 0.2 K of the far side.
+    let mean_k = 0.5 * (300.0 + *solved.state::<f64>(body).unwrap());
+    assert!(mean_k > 302.8 && mean_k < 303.0, "{mean_k}");
+
+    let (mut refused, _) = build(Some(3));
+    let error = with_cx(|cx| refused.step(1.0e-3, cx)).expect_err("not converged");
+    let SystemError::NotConverged {
+        iterations,
+        worst,
+        residual,
+        ..
+    } = error
+    else {
+        panic!("expected NotConverged, got {error}");
+    };
+    assert_eq!((iterations, worst.as_str()), (3, "wall.a"));
+    // Open, and inside the first test's 1e-12 of 300 K.
+    assert!(residual.abs() > 1.0e-11 && residual.abs() < 2.0e-10, "{residual}");
+    assert_eq!(refused.steps(), 0);
 }
 
 #[test]

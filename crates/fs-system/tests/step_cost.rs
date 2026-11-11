@@ -715,6 +715,7 @@ fn a_linear_block_with_a_differenced_part_replays_to_the_bit() {
     let (mut straight, mass) = build();
     let (mut detoured, _) = build();
     let mut iterations = 0_u64;
+    let mut furthest_m = 0.0_f64;
     with_cx(|cx| {
         for step in 0..2_000 {
             let report = straight.step(DT_S, cx).unwrap();
@@ -728,11 +729,13 @@ fn a_linear_block_with_a_differenced_part_replays_to_the_bit() {
             let b = detoured.state::<Motion>(mass).unwrap();
             assert_eq!(a.position_m.to_bits(), b.position_m.to_bits(), "step {step}");
             assert_eq!(a.velocity_m_s.to_bits(), b.velocity_m_s.to_bits(), "step {step}");
+            furthest_m = furthest_m.max(a.position_m);
         }
     });
-    // The mass moved: it swings about the extension that holds the force.
-    let motion = straight.state::<Motion>(mass).unwrap();
-    assert!(motion.position_m.is_finite() && iterations >= 2_000, "{iterations}");
+    // The mass moved, and every step iterated: undamped, it swings about
+    // the extension that holds the force and passes it.
+    assert!(furthest_m > FORCE_N / STIFFNESS_N_M, "{furthest_m}");
+    assert!(iterations >= 2_000, "{iterations}");
 }
 
 #[test]

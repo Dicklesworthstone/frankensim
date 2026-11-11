@@ -1837,7 +1837,8 @@ impl System {
             });
         }
         // Forward difference of the port map. The candidate slot is free to
-        // overwrite: the block is evaluated again before it can be accepted.
+        // overwrite: a component without a declared tangent is proposed
+        // again, at the accepted inputs, before its block can be accepted.
         let index = inputs.start + local;
         let base = self.inputs[index];
         let scale = base.abs().max(group_scale[self.input_group[index]]);
@@ -1894,8 +1895,8 @@ impl System {
     /// through `slopes`. `None` when no wire's target moves by more than
     /// its own tolerance,
     /// `sum_j |t_ij| max(0, |r_j| - f_j) <= rel S_i + f_i` for every wire
-    /// `i`; otherwise the open input (a column) that contributes most to
-    /// the wire that is furthest beyond it.
+    /// `i`; otherwise the open input (a column) that contributes most,
+    /// over all its entries, to the wire that is furthest beyond it.
     ///
     /// `f` is a wire's rounding floor at the current inputs: the absolute
     /// tolerance plus `ROUNDING_UNITS` of `eps` times the larger of the
@@ -1949,13 +1950,19 @@ impl System {
             }
         }
         let moved = moved?;
-        // The open input that does most of it; the moved wire itself if
-        // nothing can be ranked.
+        // The open input that does most of it, all its entries on the
+        // moved wire together; the moved wire itself if nothing can be
+        // ranked. `carried` is free again and is now per input.
+        carried.fill(0.0);
+        for &(row, column, through) in slopes {
+            if row == moved {
+                carried[column] += through.abs() * (residual[column].abs() - floor[column]);
+            }
+        }
         let mut open = moved;
         let mut largest = 0.0_f64;
-        for &(row, column, through) in slopes {
-            let part = through.abs() * (residual[column].abs() - floor[column]);
-            if row == moved && part > largest {
+        for (column, &part) in carried.iter().enumerate() {
+            if part > largest {
                 largest = part;
                 open = column;
             }

@@ -341,8 +341,8 @@ Tarjan, index order).
     produced the update, one iterate earlier. A block whose residuals are
     all exactly zero is taken without assembling. An affine block that
     holds kept factors for the step length (below) adopts them and their
-    slopes in place of an assembly. A check is one pass over the stored
-    entries and calls no component.
+    slopes in place of an assembly. A check is two passes over the stored
+    entries, a third when it refuses, and calls no component.
   - Differencing a component writes a perturbed proposal to its candidate.
     A block taken at its first check therefore proposes each component
     that has no declared tangent once more at the accepted inputs. A
@@ -350,7 +350,18 @@ Tarjan, index order).
   - What it costs: a block that is not affine and is taken at its first
     check pays one assembly in that step, and one more proposal of each
     differenced component, where the first test alone paid neither. An
-    affine block pays neither after its first step at a step length.
+    affine block pays neither while its step length stays the same; it
+    keeps the factors of one length, so a run that alternates lengths
+    assembles at every change. `tests/elements.rs` counts the proposals
+    asked of the warming plane's differenced source in each of 80 steps:
+    three in a step taken at its first check (the check, the assembly that
+    judges it, and one more at the accepted inputs), `2 k + 1` in a step
+    of `k` updates; and the source publishes, to the bit, its proposal at
+    the temperature the step accepted. An exact fixed point would ask one.
+    Run against a scratch kernel that judges a first check by slopes left
+    in the workspace without assembling, that test fails at step 27 with
+    one proposal; the replay tests below pass on that kernel, so they do
+    not tell which slopes made a verdict, and this count does.
   - What a block keeps from an earlier step does not decide a step. A
     checkpoint does not carry a block's workspace and a discarded trial
     does not roll it back, so a verdict or an update that read it would
@@ -364,10 +375,12 @@ Tarjan, index order).
     restored before every step, in iterations and in bits: the warming
     plane below over 80 steps, of which more than ten are taken at their
     first check (against f5db075f3b the run took 0 iterations at step 27
-    where the copy took 1); a loaded mass to rest over 12,000 steps; and a
-    mass pushed against a spring that is added without its tangent, over
-    2,000 steps (against 42f2803e8d and against f5db075f3b the copy took 2
-    iterations at step 1 where the run took 1).
+    where the copy took 1); and a mass pushed against a spring that is
+    added without its tangent, over 2,000 steps (against 42f2803e8d and
+    against f5db075f3b the copy took 2 iterations at step 1 where the run
+    took 1). A third, a loaded mass to rest over 12,000 steps, is a block
+    that is never taken at its first check and is not affine: it passes on
+    those older kernels too and guards neither defect.
   - `tests/elements.rs`, at the default settings: two bodies on a
     `HeatNode` whose source falls with temperature, each losing heat to a
     room through a film (the warming plane), 80 steps of 0.25 s. After each
@@ -391,7 +404,13 @@ Tarjan, index order).
     300 K, no iteration allowed: the refusal names `wall.b` with a
     residual of 1e-10 K, inside the first test's 3e-10 K. 42f2803e8d takes
     that step with no iteration; f5db075f3b refuses it and names `wall.a`,
-    whose residual is zero.
+    whose residual is zero. And at a check after updates: a body whose heat
+    capacity rises with temperature behind a wall of 1e5 W/K, the far side
+    3 K warmer, needs four updates; allowed three, the refusal names
+    `wall.a`, open by about 4e-11 K. A scratch kernel that does not carry
+    the open input to the refusal at a later check names `body.heat`
+    there, the block's first unknown, which is closed. An input is ranked
+    by all its entries on the moved wire together.
   - What changed for existing graphs when the test came in (A/B of
     f5db075f3b on 42f2803e8d, every target that uses the kernel): the 14
     example scenes gave byte-identical reports with the same iteration
@@ -454,11 +473,18 @@ Tarjan, index order).
   order it was first formed. A block with a component that has no declared
   tangent keeps nothing, whatever its class: the kernel differences that
   component, and a difference quotient is rounded at the point it is taken
-  at, so factors made from it in one step are not those of another. If
-  the first update does not converge (a component whose slopes moved with
-  its state after all), the next iteration derives the Jacobian as before;
-  such a component is solved correctly, but its run and a replay of it need
-  not agree in bits, and it should declare `Class::Smooth`. The
+  at, so factors made from it in one step are not those of another. A
+  component whose slopes move with its state must declare `Class::Smooth`.
+  If one declares `ExactLinear` all the same, what the block keeps is
+  stale: an update that falls short is caught, and the next iteration
+  derives the Jacobian as before, but the second convergence test judges
+  by the stale slopes, so a step can be taken outside that test's bound,
+  and a run and its replay need not agree. No component in the tree is
+  like that: of the ten `ExactLinear` elements of `src/elements.rs` and
+  `src/elements/node.rs`, nine have tangents that take neither the state
+  nor the inputs, and the spring, which is `ExactLinear` only with a zero
+  cubic coefficient, reads them in a term multiplied by that coefficient.
+  Nothing checks it for a component from elsewhere. The
   kept factors solve to the bit of the elimination they replace (unit test
   in `src/solve.rs`, against an elimination that carries the right-hand side
   along), and a line of masses and springs stepped with them equals, bit
