@@ -17,6 +17,24 @@
 
 ## New sections (newest first)
 
+### The nonlinear bore with its own gas (`bore_gas` beside `mouth_load`)
+
+A card may now give the nonlinear bore (`bore nonlinear`) a gas of its own inside and a different room outside (MB 24783). `bore_gas`, the gas the bore, cup and lip hold,
+stands beside `mouth_load modal` on `bore nonlinear` (it used to be refused there, as it needs the room named by the flanged load): the record must be `thermochemical` with its
+packs, because the nonlinear bore evolves the `bore_gas` row's own NASA-9 laws (the gas source, the wall gas, the duct fill state); the `ambient` row is then the room, which the
+kernel of `mouth_load` names as its exterior (the two-gas flanged law of fs-duct, with the BORE gas's characteristic impedance as the kernel's reference, which is the bore end's
+own), and which the receiver and the observer keep; the `ambient` row may be any gas. Refused by name: `bore_gas` on `bore nonlinear` without `mouth_load` (a baffled-piston end would
+radiate into the bore gas), a `bore_gas` that is not `thermochemical` on `bore nonlinear`, a static pressure other than the ambient's, and `modal_baffle` beside `bore nonlinear`
+(the multimodal bank is the linear route's). Without the row nothing changes: equal gases give the same kernel bit for bit (fs-duct tests, digests read on the unchanged builder), and
+a card without `bore_gas` renders the same bytes (the digest of a 2400-sample nonlinear render, piston end and `mouth_load` end, was read on the unchanged sources and on the changed ones
+on one host and compiler; the values are in the commit message).
+
+What it does not do, and what it costs: the receiver is still the baffled-piston integral of the plane mouth flow (not the finite-distance integral over every mouth mode of the linear
+route); the load is the plane-mode equivalent of the flanged load, which sits sharp of the multimodal bore above about 400 Hz on the tenor trombone (fs-duct contract); above the evaluated
+top the realized load is the bore gas's characteristic impedance where the radiation resistance tends to the exterior's: 1.3 % for the 27 C saturated breath state against dry 20 C air
+(`rho c` 408.03 against 413.28 Pa s/m, a reflection of 0.64 % in amplitude), and the realized load's worst error against the two-gas load between its bins is 3.98e-4 `Z_inf` up to
+3.6 kHz of a 4 kHz claim (fs-duct test, gases of that `rho c` ratio); and the walls carry their own 128-pole memory, not the linear bore's.
+
 ### Reed opening tap
 
 `ReedBoreVoice::record_reed_opening` and `ReedPerformance::record_reed_opening` give a massive reed an opt-in tap: at the end of every solver sample one text line `y v` (the blade's opening in metres and velocity in m/s, as the closure stop and the lay see them) goes to a caller-supplied writer. It reads state after the step and changes no audio sample (test `reed_trace_tests`: the pressure bits with and without the tap are equal, and with the stop on `y` never goes below zero, with `closure_stop off` it can). The `music_render wind` command routes the existing `--aperture-flows FILE` to it on a `frankensim-reed-performance-v1` file (`--labium` stays flue-only); on any other file type the flag keeps its earlier meaning and refusals.

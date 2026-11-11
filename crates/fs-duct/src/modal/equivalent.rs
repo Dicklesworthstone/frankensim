@@ -115,7 +115,9 @@ pub struct MouthKernelSpec {
 pub struct MouthKernel {
     /// Time step of the weights [s].
     pub step_s: f64,
-    /// `rho c / (pi a^2)` of the exterior gas at the actual mouth radius [Pa s/m^3].
+    /// `rho c / (pi a^2)` of the BORE gas (`state`) at the actual mouth radius [Pa s/m^3]: the characteristic impedance the time-domain bore end is matched to
+    /// (`NonlinearBore::with_mouth_kernel` checks it against the gas the bore holds). With one gas for bore and exterior it is the exterior's, as it always was, bit
+    /// for bit; with two it differs from the exterior's `rho c / (pi a^2)` by their `rho c` ratio.
     pub z_inf: f64,
     /// The actual last staircase station radius the load was built for [m].
     pub mouth_radius_m: f64,
@@ -160,6 +162,11 @@ impl MouthKernel {
 /// is within a few percent of `Z_inf` and oscillating, keeps that error far below
 /// the claim (offline on a bell bore: 5e-5 of `Z_inf` at a claim a third of the top).
 ///
+/// `state` is the bore gas and `exterior` the room (one static pressure). `Re Z_eq` is the two-gas flanged law of [`equivalent_plane_mouth_impedance`]; its reference
+/// impedance `Z_inf` is the BORE gas's, because the time-domain bore end is matched to the gas it holds. Above the evaluated top the realized load is therefore the
+/// bore gas's `Z_inf` where the flanged radiation resistance tends to the exterior's: a mismatch of `(rho c)_exterior / (rho c)_bore - 1` in a band beyond the claim
+/// (1.3 % for the 27 C saturated breath state against dry 20 C air). With equal gases nothing differs from the one-gas builder, bit for bit.
+///
 /// # Errors
 /// A bad spec, any frequency's refusal from the multimodal solve, or a grid
 /// whose band reaches the Nyquist frequency.
@@ -196,7 +203,8 @@ pub fn plane_mouth_kernel(
     let bin_hz = 1.0 / (n as f64 * spec.step_s);
     let geometry = PreparedModalDuct::new(duct, n_modes, extra_slices)?;
     let mouth_radius_m = geometry.mouth_radius_m();
-    let z_inf = exterior.density * exterior.sound_speed
+    // The bore end is matched to the gas the bore holds: the bore gas's characteristic impedance, which is the exterior's when the two gases are one.
+    let z_inf = state.density * state.sound_speed
         / (core::f64::consts::PI * mouth_radius_m * mouth_radius_m);
     if !(z_inf.is_finite() && z_inf > 0.0) {
         return Err(DuctError::Singular);

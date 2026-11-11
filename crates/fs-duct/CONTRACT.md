@@ -3383,6 +3383,19 @@ Measured on a cylinder with a Bessel bell to 40 mm (claim 4 kHz, bins 10 Hz): a
 12.5 us step matches `Z_eq` at off-grid midpoints to 3.5e-5 `Z_inf`; the 25 us step
 that stops at 19.6 kHz missed 1e-3 (1.36e-3) and is therefore refused.
 
+Two gases (MB 24783): `state` is the bore gas and `exterior` the room, at one static pressure. `Z_eq` is the two-gas flanged law: on a
+uniform pipe of radius 50 mm at 60 to 900 Hz it equals `flanged_pipe_impedance_with_exterior(bore gas, exterior)` to 3.5e-16 (the one-gas
+law at the exterior differs from it by 3.5e-4 to 5.2e-4, so the gases matter), and the plane transfer matrix of the bore gas closed by it is
+`mm_input_impedance_flanged(duct, bore gas, exterior)` to 1e-6. The kernel's `z_inf` is the BORE gas's `rho c / (pi a^2)`: the time-domain
+bore end is matched to the gas it holds, and `NonlinearBore::with_mouth_kernel` checks that to 1e-6; the flanged radiation limit stays the
+exterior's. With equal gases `z_inf` is the exterior's as before, bit for bit: the digest of the realized kernel (every field and weight bit)
+of a Bessel bell bore (181 taps) and of the trombone-like bore with Lossless propagation (525 taps) was read on the unchanged builder and is
+pinned in the tests (0xdc680437c3927380 and 0xe87b717913be4757, same values after the change). Above the evaluated top the realized load is the
+bore gas's `Z_inf` where the flanged radiation resistance tends to the exterior's, a mismatch of `(rho c)_exterior / (rho c)_bore - 1`: for the
+27 C saturated breath state against dry 20 C air 1.3 % (a reflection of 0.64 % in amplitude, computed from the two gas states by a test in
+fs-couple); the realized load's worst error against the two-gas load between its bins, inside the claim, is measured at 3.98e-4 `Z_inf` at 3525 Hz (bell bore,
+bins 10 Hz, 12.5 us step, claim 4 kHz, Bessel loss, 301 K against 293.15 K dry air, whose `rho c` ratio is 0.98687), against 3.5e-5 for one gas.
+
 Passivity is measured, not certified: `Re Z_eq / Z_inf` stays above +3e-3 from 40 to
 3000 Hz on the tenor-trombone slide and bell. On a uniform cylinder the plane
 transfer matrix terminated with `Z_eq` is the multimodal input impedance to

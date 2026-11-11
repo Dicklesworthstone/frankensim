@@ -1698,13 +1698,42 @@ fn a_mouth_kernel_that_does_not_fit_the_bore_is_refused() {
     not_finite.weights[1] = f64::NAN;
     for (name, bad) in [
         ("step", wrong_step),
-        ("exterior gas", wrong_gas),
+        ("gas", wrong_gas),
         ("one tap", short),
         ("a NaN weight", not_finite),
     ] {
         assert!(mouth_bore(Some(&bad)).is_err(), "a kernel with the wrong {name} was admitted");
     }
     assert!(mouth_bore(Some(&kernel)).is_ok());
+}
+
+#[test]
+fn a_kernel_naming_a_distinct_exterior_is_admitted_by_the_bore_that_holds_its_bore_gas() {
+    // B2 (MB 24783): the bore end is matched to the gas the bore holds, so a kernel built with that gas as its bore gas and ANOTHER gas as the exterior fits it; the kernel
+    // built the other way round (the room's gas as bore gas) names another characteristic impedance and is refused by that bore, and fits a bore that holds the room's gas.
+    use crate::modal::{MouthKernelSpec, plane_mouth_kernel};
+    let room = air();
+    let bore_gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 301.0, 101_325.0).unwrap();
+    let spec = MouthKernelSpec { step_s: STEP_S, bin_hz: 20.0, band_hz: 6000.0, tail_tolerance: 1.0e-10 };
+    let build = |state: &GasState, kernel: &MouthKernel| {
+        NonlinearBore::with_mouth_kernel(
+            &mouth_duct(),
+            air_source(state),
+            state.temperature,
+            state.pressure,
+            None,
+            BoreSpec { maximum_cell_m: 2.4e-3, inlet_volume_m3: 0.0, step_s: STEP_S, cfl: 0.45, wall: None },
+            Some(kernel),
+        )
+    };
+    let right = plane_mouth_kernel(&mouth_duct(), &bore_gas, &room, LossModel::Lossless, 1, 1, spec).unwrap();
+    let wrong = plane_mouth_kernel(&mouth_duct(), &room, &bore_gas, LossModel::Lossless, 1, 1, spec).unwrap();
+    assert!(build(&bore_gas, &wrong).is_err(), "a kernel referenced to the room's gas was admitted by a bore of another gas");
+    assert!(build(&room, &wrong).is_ok(), "a kernel referenced to the room's gas must fit a bore that holds it");
+    let mut bore = build(&bore_gas, &right).expect("a kernel referenced to the bore's own gas must fit");
+    let drive = |t: f64| half_cosine(t, 2.0e-4, 2.0e-5);
+    let recorded = drive_and_record(&mut bore, 2000, &drive);
+    assert!(recorded.iter().all(|p| p.is_finite()) && recorded.iter().any(|p| *p != 0.0));
 }
 
 #[test]

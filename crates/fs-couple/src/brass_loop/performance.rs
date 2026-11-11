@@ -19,7 +19,7 @@
 //! ambient moist_air <temperature_k> <pressure_pa> <relative_humidity>
 //! ambient mixture <temperature_k> <pressure_pa> <mole|mass> <count> <species fraction>...
 //! ambient thermochemical <temperature_k> <pressure_pa> <mole|mass> <count> <id fraction>...
-//! bore_gas <the same legacy, mixture or pack record as ambient>  optional; the gas the bore, cup and lip hold (needs modal_baffle)
+//! bore_gas <the same legacy, mixture or pack record as ambient>  optional; the gas the bore, cup and lip hold (needs modal_baffle, or on bore nonlinear a thermochemical record and mouth_load)
 //! lip_response <f_hz> <q> <inverse_mu_m2_per_kg> <width_m> <rest_gap_m> <face_area_m2>
 //! lip_response_mode2 <f_hz> <q> <inverse_mu_m2_per_kg>      optional; the lip's second, inward-striking mode (a negative 1/mu)
 //! lip_area_exponent <q>                                    optional; flow area w h (h/H0)^(q-1), 1 <= q <= 4 (q = 1 is the plain w h)
@@ -98,6 +98,10 @@
 //! flanged modal radiation load, the receiver and the observer stay in the `ambient` room gas. It takes the grammar of
 //! `ambient` (so `pack` names a sourced seed gas), needs `modal_baffle` (whose exterior load names the room gas explicitly;
 //! the analytic mouth loads would radiate into the bore gas), and refuses a different static pressure (mean flow is not modeled).
+//! On `bore nonlinear` it stands beside `mouth_load modal` instead (MB 24783): the bore evolves the `bore_gas` row's own NASA-9 laws, so the record must be `thermochemical`
+//! with its packs; the kernel of the mouth load names the `ambient` room as its exterior (the two-gas flanged law, with the BORE gas's characteristic impedance as its
+//! reference, which is the bore end's own), and the receiver and the observer stay in the room; the `ambient` row may then be any gas. A baffled-piston end would radiate
+//! into the bore gas, so a nonlinear `bore_gas` without `mouth_load` is refused. Without the row nothing changes, bit for bit.
 //! It is one uniform gas: no axial temperature or composition profile, no condensation. A file without the row is
 //! bit-identical to one written before it existed.
 //!
@@ -601,6 +605,7 @@ impl LipDescription {
         let mut jet_noise: Option<JetNoiseCard> = None;
         let mut constriction_noise: Option<ConstrictionNoiseCard> = None;
         let mut ambient_words = None;
+        let mut bore_gas_words = None;
         let mut segments: Vec<Segment> = Vec::new();
         for (index, raw) in lines {
             let line = index + 1;
@@ -646,11 +651,12 @@ impl LipDescription {
                     f.finish()?;
                 }
                 "bore_gas" => {
-                    // The grammar of `ambient`, including its optional legacy keyword; a thermochemical bore gas needs
-                    // the nonlinear bore, which this row refuses below (it needs `modal_baffle`, a linear bore).
+                    // The grammar of `ambient`, including its optional legacy keyword. A thermochemical bore gas is the record a nonlinear bore evolves
+                    // (beside `mouth_load`, below); its words are kept for that, as the ambient's are.
                     if f.words.clone().next() == Some("moist_air") {
                         f.words.next();
                     }
+                    bore_gas_words = Some(f.words.clone());
                     let record = read_gas_record(&mut f.words, None, sources)
                         .map_err(|e| format!("line {line}: bore_gas refused: {e}"))?;
                     once(&mut bore_gas, record, &f)?;
@@ -1041,8 +1047,9 @@ impl LipDescription {
         }
         let gas = gas.ok_or_else(|| missing("ambient"))?;
         if let Some(bore) = &bore_gas {
-            if modal_baffle.is_none() {
-                return Err("bore_gas needs modal_baffle: its flanged exterior load names the room gas, whereas the analytic mouth loads would radiate into the bore gas".into());
+            // A linear bore names the room in `modal_baffle`'s flanged load, a nonlinear bore in `mouth_load`'s kernel (the two-gas flanged law).
+            if modal_baffle.is_none() && !(nonlinear.is_some() && mouth_load.is_some()) {
+                return Err("bore_gas needs modal_baffle (or, on bore nonlinear, mouth_load): its flanged exterior load names the room gas, whereas the analytic mouth loads would radiate into the bore gas".into());
             }
             if bore.state().pressure != gas.state().pressure {
                 return Err("bore_gas and ambient need one static pressure; mean flow is not modeled".into());
@@ -1144,16 +1151,28 @@ impl LipDescription {
                 );
             }
             Some(record) => {
-                // The bore evolves the ambient gas's own laws, never a snapshot.
-                let model = match (ambient_words, sources) {
+                // The bore evolves its own gas's laws, never a snapshot: the `bore_gas` row's when the file declares one (the room is then only the exterior
+                // of the mouth load, the receiver and the observer), else the ambient's.
+                let (words, bore_row) = match bore_gas_words {
+                    Some(words) => (Some(words), true),
+                    None => (ambient_words, false),
+                };
+                let model = match (words, sources) {
                     (Some(mut words), Some(sources))
                         if words.clone().next() == Some("thermochemical") =>
                     {
+                        let which = if bore_row { "bore_gas" } else { "ambient" };
                         read_frozen_thermochemical_model(&mut words, sources)
                             .map_err(|e| {
-                                format!("bore nonlinear: ambient gas source refused: {e}")
+                                format!("bore nonlinear: {which} gas source refused: {e}")
                             })?
                             .0
+                    }
+                    _ if bore_row => {
+                        return Err(
+                            "bore nonlinear evolves the bore gas's own NASA-9 laws: its bore_gas row needs a thermochemical record and its packs"
+                                .into(),
+                        );
                     }
                     _ => {
                         return Err(
@@ -1569,7 +1588,10 @@ impl LipDescription {
         use fs_duct::nonlinear::bore::{WallGas, WallMemory};
         use fs_duct::nonlinear::{CaloricDomain, FrozenGas};
         use fs_qty::Temperature;
-        let gas = self.ambient_gas();
+        // What the bore, cup and lip hold. The room (the exterior of the mouth load; `scalar_receiver` reads it for the receiver and the observer) is the same state
+        // unless a `bore_gas` row separates them, so every operand below is then the one it always was.
+        let gas = self.bore_gas();
+        let room = self.ambient_gas();
         if self.lip_rim_stop.is_some() {
             return Err("lip_rim_stop acts on the linear loop only and is refused with bore nonlinear".to_string());
         }
@@ -1597,14 +1619,14 @@ impl LipDescription {
             gamma: gas.gamma,
             prandtl: gas.prandtl,
         };
-        // The bore's load: the plane-mode equivalent of the flanged multimodal mouth, on the bore's own gas step, or the baffled piston.
+        // The bore's load: the plane-mode equivalent of the flanged multimodal mouth (the bore gas inside, the room outside), on the bore's own gas step, or the baffled piston.
         let mouth = match self.mouth_load {
             None => None,
             Some(load) => Some(
                 fs_duct::modal::plane_mouth_kernel(
                     &self.duct,
                     gas,
-                    gas,
+                    room,
                     LossModel::Lossless,
                     load.n_modes,
                     load.extra_slices,
@@ -3608,6 +3630,112 @@ mod tests {
         assert!(rms(&piston) > 0.0 && rms(&modal) > 0.0);
         assert!(modal_taps >= 2);
         assert!(relative > 1.0e-6 && relative < 1.0, "relative difference {relative}");
+    }
+
+    // B2 (MB 24783): the nonlinear bore holds its own gas inside and the room outside, through `bore_gas` beside `mouth_load`.
+    #[test]
+    fn the_breath_bore_differs_from_the_room_in_characteristic_impedance_by_the_card_figures() {
+        let parse = |extra: &str| LipDescription::from_bytes(fixture(extra).as_bytes());
+        let description = parse(&format!("{MODAL}{BREATH}")).expect("parses");
+        let (room, bore) = (description.ambient_gas(), description.bore_gas());
+        let ratio = bore.density * bore.sound_speed / (room.density * room.sound_speed);
+        let reflection = (1.0 - ratio) / (1.0 + ratio);
+        println!(
+            "B2: rho c breath {:.2} room {:.2} Pa s/m, ratio {ratio:.5}, reflection {reflection:.5}, sound speed ratio {:.5}",
+            bore.density * bore.sound_speed,
+            room.density * room.sound_speed,
+            bore.sound_speed / room.sound_speed
+        );
+        assert!((0.985..=0.989).contains(&ratio), "{ratio}");
+        assert!((0.005..=0.008).contains(&reflection), "{reflection}");
+    }
+
+    #[cfg(feature = "nonlinear-brass")]
+    const BORE_GAS_ROW: &str = "bore_gas thermochemical 300.15 101325 mole 1 bore-gas 1\n";
+
+    #[cfg(feature = "nonlinear-brass")]
+    const STEADY_3KPA: &str = "frankensim-gesture-schedule-v1\n\
+        control_rate_hz\t700\n\
+        tracks\t1\n\
+        track\tblow\tblowing-pressure\n\
+        initial\tpressure-pa\t0e0\n\
+        events\t1\n\
+        event\t0e0\t1e-2\tpressure-pa\t3e3\n";
+
+    #[cfg(feature = "nonlinear-brass")]
+    fn two_gas_description(rows: &str, bore_molar_mass: f64) -> Result<LipDescription, String> {
+        use fs_material::gas_species::input::ThermochemicalPhase;
+        let room = gas_test_support::packs("specimen-gas", 0.029, 3.5, 200.0);
+        let bore = gas_test_support::packs("bore-gas", bore_molar_mass, 3.5, 200.0);
+        let bindings = [room.binding(), bore.binding()];
+        let sources = ThermochemicalSources { species: &bindings, water_species: None, phase: ThermochemicalPhase::FrozenGas };
+        let text = fixture(&format!("{NONLINEAR_RECORD}{rows}")).replace("moist_air 293.15 101325 0", SPECIMEN).replace(SCHEDULE, STEADY_3KPA);
+        LipDescription::from_bytes_with_gas_sources(text.as_bytes(), Some(&sources))
+    }
+
+    #[cfg(feature = "nonlinear-brass")]
+    fn short_render(description: &LipDescription) -> Vec<f64> {
+        let mut performance = description.build().unwrap();
+        performance.record_mouthpiece();
+        let mut radiated = vec![0.0; 2400];
+        for block in radiated.chunks_mut(600) {
+            performance.block(block).unwrap();
+        }
+        radiated
+    }
+
+    #[cfg(feature = "nonlinear-brass")]
+    #[test]
+    fn a_bore_gas_equal_to_the_room_changes_no_bit_on_the_nonlinear_bore() {
+        let plain = two_gas_description(MOUTH_LOAD_RECORD, 0.029).unwrap();
+        let equal = two_gas_description(&format!("{MOUTH_LOAD_RECORD}bore_gas thermochemical 293.15 101325 mole 1 specimen-gas 1\n"), 0.029).unwrap();
+        assert!(plain.bore_gas_record().is_none() && equal.bore_gas_record().is_some());
+        let (a, b) = (short_render(&plain), short_render(&equal));
+        assert!(a.iter().any(|x| *x != 0.0), "the fixture must sound");
+        assert_eq!(a.len(), b.len());
+        assert!(a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()), "equal gases must be bit-identical");
+    }
+
+    #[cfg(feature = "nonlinear-brass")]
+    #[test]
+    fn a_distinct_bore_gas_reaches_the_nonlinear_bore_and_the_kernel_names_the_room_as_its_exterior() {
+        let equal = two_gas_description(MOUTH_LOAD_RECORD, 0.029).unwrap();
+        let distinct = two_gas_description(&format!("{MOUTH_LOAD_RECORD}{BORE_GAS_ROW}"), 0.0265).unwrap();
+        let (room, bore) = (distinct.ambient_gas(), distinct.bore_gas());
+        assert_eq!(room.temperature, 293.15);
+        assert_eq!(bore.temperature, 300.15);
+        assert!(bore.sound_speed > 1.04 * room.sound_speed, "{} against {}", bore.sound_speed, room.sound_speed);
+        let performance = distinct.build().unwrap();
+        let LipBoreInfo::Nonlinear(info) = &performance.info().bore else {
+            panic!("nonlinear fixture");
+        };
+        let load = info.mouth_load.as_ref().expect("the kernel");
+        let area = core::f64::consts::PI * load.mouth_radius_m * load.mouth_radius_m;
+        let rho_c = |gas: &GasState| gas.density * gas.sound_speed;
+        println!("B2: kernel z_inf x area {:.4} Pa s/m, bore rho c {:.4}, room rho c {:.4}", load.z_inf * area, rho_c(bore), rho_c(room));
+        assert!((load.z_inf * area - rho_c(bore)).abs() <= 1e-12 * rho_c(bore), "the kernel's reference is not the bore gas's");
+        assert!((load.z_inf * area - rho_c(room)).abs() > 1e-3 * rho_c(room), "the kernel's reference is the room's");
+        let (a, b) = (short_render(&equal), short_render(&distinct));
+        let rms = |x: &[f64]| (x.iter().map(|v| v * v).sum::<f64>() / x.len() as f64).sqrt();
+        let difference: Vec<f64> = a.iter().zip(&b).map(|(x, y)| x - y).collect();
+        let relative = rms(&difference) / rms(&a);
+        println!("B2: equal-gas render rms {:.4e}, distinct-gas render rms {:.4e}, relative rms difference {relative:.3e}", rms(&a), rms(&b));
+        assert!(a.iter().chain(&b).all(|p| p.is_finite()) && rms(&a) > 0.0 && rms(&b) > 0.0);
+        assert!(relative > 1e-3, "the bore gas did not reach the render: {relative}");
+    }
+
+    #[cfg(feature = "nonlinear-brass")]
+    #[test]
+    fn a_nonlinear_bore_gas_is_refused_by_name_lacking_mouth_load_on_another_pressure_or_as_a_mixture() {
+        for (rows, needle) in [
+            (BORE_GAS_ROW.to_string(), "bore_gas needs modal_baffle (or, on bore nonlinear, mouth_load)"),
+            (format!("{MOUTH_LOAD_RECORD}bore_gas thermochemical 300.15 90000 mole 1 bore-gas 1\n"), "one static pressure"),
+            (format!("{MOUTH_LOAD_RECORD}bore_gas mixture 300.15 101325 mole 1 N2 1\n"), "its bore_gas row needs a thermochemical record"),
+            (format!("{MOUTH_LOAD_RECORD}{MODAL}{BORE_GAS_ROW}"), "modal_baffle requires a linear bore"),
+        ] {
+            let error = two_gas_description(&rows, 0.0265).unwrap_err();
+            assert!(error.contains(needle), "{needle}: {error}");
+        }
     }
 
     #[cfg(not(feature = "nonlinear-brass"))]

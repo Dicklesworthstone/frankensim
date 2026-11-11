@@ -154,7 +154,8 @@ impl NonlinearLip {
 
     /// As [`Self::new`], with the bore's radiating end optionally the plane-mode equivalent of the complete flanged multimodal
     /// mouth (the `mouth_load modal` row): `mouth` is the causal kernel [`fs_duct::modal::plane_mouth_kernel`] built on this
-    /// bore's own duct, with the room gas as bore and exterior, on this clock's gas step. `None` is [`Self::new`] bit for bit.
+    /// bore's own duct, with this bore's gas as the bore gas and the exterior it names (the same gas unless the card declares a `bore_gas` row), on this clock's gas
+    /// step. `None` is [`Self::new`] bit for bit.
     ///
     /// # Errors
     /// As [`Self::new`], or a kernel that does not fit the bore.

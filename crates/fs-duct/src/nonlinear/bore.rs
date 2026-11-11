@@ -247,8 +247,8 @@ impl NonlinearBore {
     }
 
     /// As [`Self::new`], with the radiating end optionally the plane-mode equivalent of the flanged multimodal mouth.
-    /// `None` is [`Self::new`] bit for bit. A kernel must have been built for the bore's own gas as the exterior
-    /// (`z_inf x pi a^2 = rho c` of `room`, to 1e-6), on the bore's own fixed step, and be at least two taps long.
+    /// `None` is [`Self::new`] bit for bit. A kernel must have been built with this bore's own gas as its bore gas (`z_inf x pi a^2 = rho c` of `room`, the gas the bore
+    /// is filled with, to 1e-6; the exterior of the flanged load may be another gas), on the bore's own fixed step, and be at least two taps long.
     ///
     /// # Errors
     /// As [`Self::new`], or a kernel that does not fit this bore.
@@ -759,7 +759,7 @@ impl PistonRadiation {
         let kernel_rho_c =
             kernel.z_inf * core::f64::consts::PI * kernel.mouth_radius_m * kernel.mouth_radius_m;
         if !(positive(kernel.z_inf) && (kernel_rho_c - rho_c).abs() <= 1e-6 * rho_c) {
-            return Err(unsupported("mouth kernel was not built for this bore's exterior gas"));
+            return Err(unsupported("mouth kernel was not built for this bore's gas"));
         }
         let weights = kernel.weights.clone();
         let mut history = reserved(weights.len())?;
