@@ -193,6 +193,12 @@ impl ImplicitConductionChain<'_> {
         // scheduled sampler changes only rates/h; it never reorders its IDs.
         let mut powers: Vec<Sum> = (0..self.ids.len()).map(|_| Sum::default()).collect();
         if let Some(flow) = &endpoint.stationary_advection {
+            // The stream powers come beside the transport (flow.sources), and
+            // equilibrium.rs reads them the same way; sources_w is empty here.
+            flow.sources.visit(&mut |id, watts| {
+                checkpoint()?;
+                powers[self.index[&id]].add(watts)
+            })?;
             for (&id, &power) in &flow.transport.heat.bulk.sources_w {
                 checkpoint()?;
                 powers[self.index[&id]].add(power)?;

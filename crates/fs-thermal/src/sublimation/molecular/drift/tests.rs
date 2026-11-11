@@ -331,3 +331,29 @@ fn vacuum_stays_empty_but_invalid_or_unrepresentable_active_inputs_refuse() {
     assert!(incident_maxwellian(1.0, 1.0, 1.0, [f64::from_bits(1), 0.0, 0.0], NORMAL).is_err());
     assert!(incident_maxwellian(1e200, 1e-200, 1e-200, [0.0; 3], NORMAL).is_err());
 }
+
+#[test]
+fn three_factor_product_rounds_its_exact_value_once() {
+    let quantum = f64::from_bits(1); // 2^-1074
+    // Exactly half of 2^-1074: ties to even give 0, so the nonzero product refuses.
+    assert!(product(1.0, quantum, 0.5).is_err());
+    // 3 * 2^-1076 = 0.75 * 2^-1074 rounds to 2^-1074 and is admitted.
+    assert_eq!(product(3.0, quantum, 0.25).unwrap().to_bits(), 1);
+    // A normal a*b with a normal result is the earlier (a*b)*c, bit for bit.
+    let (a, b, c) = (1.1, 3.3e-5, 0.7);
+    assert_eq!(product(a, b, c).unwrap().to_bits(), ((a * b) * c).to_bits());
+    // With c = 1 the exact product is a*b, which one IEEE multiply rounds
+    // correctly onto the subnormal grid. 2^-1055 is 2^19 quanta; the first two
+    // factors put the product exactly half-way, and ties go to the even neighbour.
+    let x = f64::from_bits(1 << 19);
+    let step = 1.0 / 1_048_576.0; // 2^-20
+    for (a, bits) in [
+        (1.0 + step, 1 << 19),
+        (1.0 + 3.0 * step, (1 << 19) + 2),
+        (1.0 + f64::EPSILON, 1 << 19),
+    ] {
+        let rounded = product(a, x, 1.0).unwrap();
+        assert_eq!(rounded.to_bits(), bits);
+        assert_eq!(rounded.to_bits(), (a * x).to_bits());
+    }
+}

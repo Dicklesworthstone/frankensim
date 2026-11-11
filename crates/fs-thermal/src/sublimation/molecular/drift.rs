@@ -95,13 +95,94 @@ fn from_log(value: Dd) -> Result<f64, SublimationError> {
     represented((half * exp(value.lo)) * half)
 }
 
+// A normal a*b with a normal positive result keeps (a*b)*c: two roundings,
+// relative error at most 2u + u^2 (u = 2^-53), bit-equal to the earlier code.
+// Every other case is correctly rounded by exact_product, so a nonzero exact
+// product that rounds to 0 refuses through represented(). A factor that is not
+// finite and positive has no such product and refuses as well.
 fn product(a: f64, b: f64, c: f64) -> Result<f64, SublimationError> {
     let ab = a * b;
     let direct = ab * c;
-    if ab.is_normal() && positive(direct) {
+    if ab.is_normal() && positive(direct) && direct.is_normal() {
         return Ok(direct);
     }
-    from_log(Dd::from_f64(ln(a)) + Dd::from_f64(ln(b)) + Dd::from_f64(ln(c)))
+    if !(positive(a) && positive(b) && positive(c)) {
+        return represented(f64::NAN);
+    }
+    represented(exact_product(a, b, c))
+}
+
+// A finite positive value as m * 2^e exactly, with an integer m < 2^53.
+fn binary_parts(value: f64) -> (u64, i32) {
+    let bits = value.to_bits();
+    let field = ((bits >> 52) & 0x7ff) as i32;
+    let fraction = bits & ((1 << 52) - 1);
+    if field == 0 {
+        (fraction, -1074)
+    } else {
+        (fraction | (1 << 52), field - 1075)
+    }
+}
+
+// 2^k for -1074 <= k <= 1023.
+fn power_of_two(k: i32) -> f64 {
+    if k >= -1022 {
+        f64::from_bits(((k + 1023) as u64) << 52)
+    } else {
+        f64::from_bits(1 << (k + 1074))
+    }
+}
+
+// The exact product of three finite positive values, rounded once to nearest
+// with ties to even, on the f64 grid down to the subnormal quantum 2^-1074:
+// the result is correctly rounded. Each factor is m * 2^e with an integer
+// m < 2^53, so the product is the integer ma*mb*mc < 2^159 times
+// 2^(ea+eb+ec). An fma two-product holds only the 106 bits of a*b, so this
+// integer is formed exactly in 192 bits. Bits past the top 128 fold into one
+// sticky bit at least 74 places below the half-way bit, so the comparison
+// with half the last place stays exact. The last place follows from the
+// exact exponent: 53 significant bits for a normal result, 2^-1074 below
+// 2^-1022. No intermediate is rounded, so a subnormal result is not rounded
+// twice, and the final scaling by a power of two is exact.
+fn exact_product(a: f64, b: f64, c: f64) -> f64 {
+    let (ma, ea) = binary_parts(a);
+    let (mb, eb) = binary_parts(b);
+    let (mc, ec) = binary_parts(c);
+    let mut exponent = ea + eb + ec;
+    let ab = u128::from(ma) * u128::from(mb);
+    let low = (ab & u128::from(u64::MAX)) * u128::from(mc);
+    // The product is high * 2^64 + (low mod 2^64), with high < 2^96.
+    let high = (ab >> 64) * u128::from(mc) + (low >> 64);
+    let low = low as u64;
+    let high_bits = 128 - high.leading_zeros() as i32;
+    let m = if high_bits <= 64 {
+        (high << 64) | u128::from(low)
+    } else {
+        let k = high_bits - 64;
+        exponent += k;
+        let sticky = (low & ((1 << k) - 1)) != 0;
+        (high << (64 - k)) | u128::from(low >> k) | u128::from(sticky)
+    };
+    let width = 128 - m.leading_zeros() as i32;
+    // The exact product lies in [2^top, 2^(top + 1)).
+    let top = exponent + width - 1;
+    if top > 1023 {
+        return f64::INFINITY;
+    }
+    let quantum = (top - 52).max(-1074);
+    let shift = quantum - exponent;
+    let q = if shift <= 0 {
+        m << -shift
+    } else if shift > width {
+        0
+    } else {
+        let kept = m.checked_shr(shift as u32).unwrap_or(0);
+        let rest = m & (u128::MAX >> (128 - shift));
+        let half = 1 << (shift - 1);
+        kept + u128::from(rest > half || (rest == half && (kept & 1) == 1))
+    };
+    // q <= 2^53 converts exactly.
+    q as f64 * power_of_two(quantum)
 }
 
 // For z >= 2, I_k(z) = integral_0^inf y^k exp(-z*y-y²/2)dy and

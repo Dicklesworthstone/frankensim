@@ -342,7 +342,43 @@ fn stopped_and_closed_flows_do_not_invent_an_energy_reference() {
         2,
     )
     .unwrap();
-    for flow in [throughflow(2, 0.0, 300.0), circulation] {
+    // A zero-rate inlet or outlet is refused, which keeps a stopped port from
+    // anchoring energy. A stopped duct is therefore a zero interior flow alone.
+    let stopped = || {
+        Advected::new(
+            (),
+            vec![MassFlow {
+                id: 0,
+                a: CellId(0),
+                b: CellId(1),
+                kg_s: 0.0,
+            }],
+            2,
+        )
+        .unwrap()
+    };
+    for port in [
+        MassBoundary::Inlet {
+            id: 1,
+            cell: CellId(0),
+            kg_s: 0.0,
+            material_id: MaterialId(0),
+            specific_h_j_kg: 300.0,
+        },
+        MassBoundary::Outlet {
+            id: 1,
+            cell: CellId(1),
+            kg_s: 0.0,
+        },
+    ] {
+        assert!(matches!(
+            stopped().with_boundaries(vec![port], 2),
+            Err(DepositionError::InvalidInput(
+                "invalid or duplicate mass-flow boundary"
+            ))
+        ));
+    }
+    for flow in [stopped(), circulation] {
         let system = ImplicitConductionChain::new(
             &thermal,
             &conduction,
