@@ -386,8 +386,29 @@ fn g1_propagation_scales_match_the_original_complex_wave_number_and_fields() {
             let one_cycle = wave.field(wavelength).unwrap();
             let axis = entrance.electric_v_m.iter().position(|e| e.abs() > 0.0).unwrap();
             let ratio = one_cycle.electric_v_m[axis] / entrance.electric_v_m[axis];
-            near(ratio.im, 0.0, 2e-12);
-            near(ratio.re, (kz.im * wavelength).exp(), 2e-12);
+            // Over one normal wavelength the outgoing factor exp(-i kz z) is
+            // exp(kz.im lambda) exp(-i 2 pi): real. A nonzero imaginary part is
+            // rounding alone, so it is judged against |ratio|, not against 0.
+            // The bound counts the operations that build the ratio, in units
+            // of u = 2^-53 times |ratio|:
+            // - lambda = fl(TAU / kz.re) moves the exact DD phase kz.re lambda
+            //   from 2 pi by at most u TAU + |TAU - 2 pi| < 8.5u;
+            // - sin_cos_dd's cosine and sine round to f64 within u/2;
+            // - the two products by the attenuation add u;
+            // - the complex product with the surface field (Kahan's FMA form,
+            //   componentwise 2u, Jeannerod et al., Math. Comp. 86, 2017) 2u;
+            // - Smith's quotient as fs-math's C64 evaluates it with FMAs,
+            //   under 8u to first order (3u in the denominator, 2u per
+            //   numerator component plus 2u from its r-products, u per final
+            //   division);
+            // - det::exp against the libm exp of the same rounded argument,
+            //   its declared 3 ulp budget, at most 6u.
+            // That is 26u; 32u covers the second-order terms.
+            complex_near(
+                ratio,
+                C64::new((kz.im * wavelength).exp(), 0.0),
+                32.0 * (f64::EPSILON / 2.0),
+            );
 
             let one_intensity = wave.field(intensity_depth).unwrap();
             near(
