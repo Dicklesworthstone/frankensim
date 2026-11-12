@@ -43,7 +43,8 @@ use fs_material::state_point::{ScalarPropertyRequirement,ScalarAdmissibility,Mat
     resolve_material_state_point,SPECIFIC_HEAT_CAPACITY_DIMS};
 use fs_material::phase::{ResolvedHeatCapacityCurve,HeatCapacitySourceQuery,SolidLiquidPhase};
 use fs_phs::RelaxationBranch;
-use fs_qty::{Density,Pressure,Time,Temperature,QuantitySpec};
+use fs_qty::{Density,Dims,Pressure,Time,Temperature,QuantitySpec};
+use fs_qty::semantic::{QuantityKind,SemanticType,ValueForm};
 use fs_couple::frame_vibration::{Frame2d,FrameMassFormulation,Geometry};
 use fs_thermal::enthalpy::*;
 use fs_solver::NewtonKrylovConfig;
@@ -51,6 +52,12 @@ use fs_solver::NewtonKrylovConfig;
 const CP:f64=2000.0; // Manufactured heat capacity, NOT measured material data.
 const RADII:[f64;2]=[0.06,0.1];
 fn point(t:f64)->QueryPoint {QueryPoint::new().with_quantity("T",QuantitySpec::dimensional(Temperature::DIMS),t).unwrap().with("omega",1.0).unwrap()}
+/// The coolant's temperature axis as the liquid thermal reservoir asks for it (fs-material fluid_transport/thermal.rs):
+/// a semantic absolute temperature, not a bare temperature dimension. The solid cards keep `point`.
+fn absolute_temperature()->QuantitySpec {
+    QuantitySpec::semantic(SemanticType::new(QuantityKind::AbsoluteTemperature,ValueForm::Static))
+}
+fn fluid_point(t:f64)->QueryPoint {QueryPoint::new().with_quantity("T",absolute_temperature(),t).unwrap().with("omega",1.0).unwrap()}
 fn source(layer:usize,varying:bool)->(MaterialCard,ResolvedHeatCapacityCurve) {
     let mut claims=ClaimSet::new();let tau=[0.025,0.12][layer];
     for (name,dims,value) in [("density",Density::DIMS,[3.0,5.0][layer]),
@@ -167,16 +174,23 @@ fn fixture<R>(powered:bool,run:impl FnOnce(&MaterialFluidFrame<'_,FluidTransport
         let prepared=assembly.prepare(&cx,&heat).unwrap();run(&m,&plain,&electric,circuit,heat,&prepared,&cx)
     })
 }
+/// A liquid-transport key as the law asks for it (fs-material liquid.rs): conductivity carries its static
+/// semantic type, every other transport role is dimension-only.
+fn transport_key(name:&str,dims:Dims)->PropertyKey {
+    PropertyKey::with_quantity(name,if name=="thermal_conductivity" {
+        QuantitySpec::semantic(SemanticType::new(QuantityKind::ThermalConductivity,ValueForm::Static))
+    } else {QuantitySpec::dimensional(dims)})
+}
 fn coolant(scale:f64)->MaterialCard {
     let mut claims=ClaimSet::new();
     for (name,dims,value,slope) in [("density",Density::DIMS,1000.0,-0.5),
         ("specific_heat_capacity",SPECIFIC_HEAT_CAPACITY_DIMS,4000.0,2.0),
         ("thermal_conductivity",THERMAL_CONDUCTIVITY_DIMS,scale*0.5,scale*0.002),
         ("dynamic_viscosity",DYNAMIC_VISCOSITY_DIMS,0.001,-0.00001)] {
-        claims.insert_claim(PropertyClaim {key:PropertyKey::new(name,dims),
+        claims.insert_claim(PropertyClaim {key:transport_key(name,dims),
             value:PropertyValue::Curve {abscissa:"T".into(),abscissa_dims:Temperature::DIMS,
                 knots:vec![(280.0,value-20.0*slope),(340.0,value+40.0*slope)],dims},
-            validity:ValidityDomain::unconstrained().with_quantity("T",QuantitySpec::dimensional(Temperature::DIMS),280.0,340.0).with("p",100000.0,100000.0),
+            validity:ValidityDomain::unconstrained().with_quantity("T",absolute_temperature(),280.0,340.0).with("p",100000.0,100000.0),
             interpolation:InterpolationPolicy::LinearInside,uncertainty:UncertaintyModel::Unstated,
             observations:vec![],provenance:Provenance {source:"synthetic coolant substitution".into(),license:"test-only".into(),artifact:None},
         }).unwrap();
@@ -185,7 +199,7 @@ fn coolant(scale:f64)->MaterialCard {
         process:"authored transport".into(),revision:0},claims,vec![]).unwrap()
 }
 fn coolant_law(card:&MaterialCard)->LiquidTemperatureLaw<'_> {
-    LiquidTemperatureLaw::try_new(card,&QueryPoint::new().with_quantity("T",QuantitySpec::dimensional(Temperature::DIMS),300.0)
+    LiquidTemperatureLaw::try_new(card,&QueryPoint::new().with_quantity("T",absolute_temperature(),300.0)
         .unwrap().with("p",100000.0).unwrap(),"T",LiquidViscosityBasis::Dynamic,MaterialPropertySelection::SingleClaimOnly).unwrap()
 }
 fn boundaries()->[SourceConvectiveCell;2] {

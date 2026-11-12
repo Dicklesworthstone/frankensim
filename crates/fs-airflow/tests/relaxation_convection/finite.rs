@@ -18,22 +18,22 @@ fn finite_source(s:Spec)->(MaterialCard,ResolvedHeatCapacityCurve) {
             PropertyValue::Curve {abscissa:"T".into(),abscissa_dims:Temperature::DIMS,
                 knots:vec![(280.0,value-20.0*s.density_slope),(340.0,value+40.0*s.density_slope)],dims}
             }else{PropertyValue::Scalar {value,dims}},
-            validity:ValidityDomain::unconstrained().with_quantity("T",QuantitySpec::dimensional(Temperature::DIMS),280.0,340.0).with("p",100000.0,100000.0),
+            validity:ValidityDomain::unconstrained().with_quantity("T",absolute_temperature(),280.0,340.0).with("p",100000.0,100000.0),
             interpolation:if varying {InterpolationPolicy::LinearInside}else{InterpolationPolicy::ConstantWithinValidity},
             uncertainty:UncertaintyModel::Unstated,observations:vec![],
             provenance:Provenance {source:"manufactured finite coolant".into(),license:"test-only".into(),artifact:None}}).unwrap();
     }
     for (name,dims,value,slope) in [("thermal_conductivity",THERMAL_CONDUCTIVITY_DIMS,s.k*0.5,s.k*0.002),
         ("dynamic_viscosity",DYNAMIC_VISCOSITY_DIMS,s.viscosity*0.001,-s.viscosity*0.00001)] {
-        claims.insert_claim(PropertyClaim {key:PropertyKey::new(name,dims),value:PropertyValue::Curve {
+        claims.insert_claim(PropertyClaim {key:transport_key(name,dims),value:PropertyValue::Curve {
             abscissa:"T".into(),abscissa_dims:Temperature::DIMS,knots:vec![(280.0,value-20.0*slope),(340.0,value+40.0*slope)],dims},
-            validity:ValidityDomain::unconstrained().with_quantity("T",QuantitySpec::dimensional(Temperature::DIMS),280.0,340.0).with("p",100000.0,100000.0),
+            validity:ValidityDomain::unconstrained().with_quantity("T",absolute_temperature(),280.0,340.0).with("p",100000.0,100000.0),
             interpolation:InterpolationPolicy::LinearInside,uncertainty:UncertaintyModel::Unstated,observations:vec![],
             provenance:Provenance {source:"manufactured finite coolant transport".into(),license:"test-only".into(),artifact:None}}).unwrap();
     }
     let card=MaterialCard::assemble(MaterialStateId {chemistry:"finite coolant".into(),phase:"liquid".into(),
         process:"authored test law".into(),revision:0},claims,vec![]).unwrap();
-    let query=|t|point(t).with("p",100000.0).unwrap();
+    let query=|t|fluid_point(t).with("p",100000.0).unwrap();
     let curve=ResolvedHeatCapacityCurve::try_new(&card,HeatCapacitySourceQuery {
         heat_capacity:&PropertyKey::new("specific_heat_capacity",SPECIFIC_HEAT_CAPACITY_DIMS),density:&PropertyKey::new("density",Density::DIMS),
         temperature_axis:"T",lower:&query(280.0),upper:&query(340.0),selection:SelectionPolicy::SingleClaimOnly},
@@ -55,7 +55,7 @@ fn fixture<R>(s:Spec,run:impl FnOnce(&MaterialFluidFrame<'_,FluidTransportState>
     &LiquidTemperatureLaw<'_>,&BTreeMap<u64,f64>,&Cx<'_>)->R)->R {
     let (a,ac)=source(0,true);let (b,bc)=source(1,true);let (fluid,fc)=finite_source(s);
     let cards=[a,b];let curves=[ac,bc];let f=frame(&cards);let m=model(&f);
-    let solid_query=point(300.0);let fluid_query=point(310.0).with("p",100000.0).unwrap();
+    let solid_query=point(300.0);let fluid_query=fluid_point(310.0).with("p",100000.0).unwrap();
     let law=LiquidTemperatureLaw::try_new(&fluid,&fluid_query,"T",LiquidViscosityBasis::Dynamic,
         MaterialPropertySelection::SingleClaimOnly).unwrap();
     let mut cells:Vec<_>=(0..2).map(|i|MaterialCell {cell:CellId(i as u64),material_id:MaterialId(i as u64),curve:curves[i].curve(),
