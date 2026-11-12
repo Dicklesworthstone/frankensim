@@ -729,7 +729,7 @@ fn a_mass_on_a_spring_turns_at_the_closed_forms_points_and_stays_in_the_dead_ban
 }
 
 #[test]
-fn a_block_on_a_belt_sticks_and_slips_with_the_closed_forms_period() {
+fn a_block_on_a_belt_sticks_and_slips_within_a_step_of_the_closed_forms_period() {
     // Stuck, the block rides the belt until the spring pulls with the
     // static limit, at x_s = 5 N / k. Sliding, it swings about
     // x_k = 3 N / k as a free oscillator, from x_k + d at the belt's speed
@@ -737,57 +737,138 @@ fn a_block_on_a_belt_sticks_and_slips_with_the_closed_forms_period() {
     // the belt catches it. One period is the ride 2 d / V and the swing
     // 2 (pi - atan(d w / V)) / w.
     //
-    // The catch is a stop of the slip: the interface cuts the step there
-    // (the spring is not a body under a held force: two or three cuts a
-    // catch). The break-away is not located inside its step: the static
-    // map lets go in the first step whose force on the line is beyond the
-    // limit. Asserted: the period is off by less than a step. Measured, and
-    // printed: 3.4 dt^2 at each of the four step lengths.
-    let (belt, stiffness) = (0.1_f64, 100.0_f64);
+    // The catch is a stop of the slip, and the interface cuts the step
+    // there (the spring is not a body under a held force: up to four cuts
+    // a catch). The break-away is NOT located. The static map decides for
+    // a whole step from the step's line, which for a block riding the
+    // belt is the spring's force at mid-step: the block lets go at the
+    // start of the first step whose middle is beyond the limit, within
+    // half a step of the instant the spring reaches it, early or late.
+    // So one period is within a step of the closed form's, and differs
+    // from cycle to cycle.
+    //
+    // The belt's speeds are chosen so that the ride is not a whole number
+    // of steps. (At 0.1 m/s it is 0.4 s, every break-away fell on a step's
+    // end at each of these step lengths, and the period came out second
+    // order, 3.4 dt^2: an accident of the numbers, which the first version
+    // of this test printed as its result.)
+    //
+    // At 0.137 m/s and 0.25 ms the third catch is the regression of the
+    // stop's own row: the interface as first landed returned there the
+    // force that ends the step at no slip exactly, stiff in the released
+    // flow and only inside a band the kernel's differencing does not see,
+    // and the step was refused after 9009 steps (`did not converge in 25
+    // iterations; worst input block.p has residual -1.4865e-11`). A catch
+    // is now taken under the kinetic 3 N, and leaves a slip inside the
+    // impulse tolerance that the first step at rest takes out: both are
+    // measured below, at every catch.
+    let stiffness = 100.0_f64;
     let (omega, d) = (stiffness.sqrt(), (5.0 - 3.0) / stiffness);
-    let period = 2.0 * d / belt + 2.0 * (std::f64::consts::PI - (d * omega / belt).atan()) / omega;
-    for halvings in 0..4 {
-        let dt = 2.0e-3 / f64::from(1_u32 << halvings);
-        let mut graph = on_a_side(thrown(belt), Some((stiffness, 0.0)), move |_| belt);
-        let (mut caught, mut cuts, mut slivers, mut taken) = (Vec::new(), 0, 0, 0_u32);
-        let mut worked_j = 0.0;
-        with_cx(|cx| {
-            let (at_a, at_b) = (
-                graph.system.port(graph.rubbing, "a").unwrap(),
-                graph.system.port(graph.rubbing, "b").unwrap(),
+    for belt in [0.0937_f64, 0.137] {
+        let period =
+            2.0 * d / belt + 2.0 * (std::f64::consts::PI - (d * omega / belt).atan()) / omega;
+        for halvings in 0..4 {
+            let dt = 2.0e-3 / f64::from(1_u32 << halvings);
+            let mut graph = on_a_side(thrown(belt), Some((stiffness, 0.0)), move |_| belt);
+            // The instant and place of each catch (the start counts as
+            // one), and the start of each step that breaks away.
+            let (mut caught, mut broke) = (vec![(0.0, 0.0)], Vec::new());
+            let (mut cuts, mut most_cuts, mut slivers, mut taken) = (0, 0, 0, 0_u32);
+            let mut worked_j = 0.0;
+            // The largest slip a catch leaves [m/s], and the most the first
+            // step at rest holds with beside the spring's force [N].
+            let (mut left_m_s, mut beside_n) = (0.0_f64, 0.0_f64);
+            with_cx(|cx| {
+                let (at_a, at_b) = (
+                    graph.system.port(graph.rubbing, "a").unwrap(),
+                    graph.system.port(graph.rubbing, "b").unwrap(),
+                );
+                let mut after_a_catch = false;
+                while graph.system.time_s() < 6.0 {
+                    let was_at_rest = graph.at_rest();
+                    let before_m = graph.block().position_m;
+                    let report = graph
+                        .system
+                        .step(dt, cx)
+                        .unwrap_or_else(|error| panic!("belt {belt}, dt {dt}: {error}"));
+                    let record = graph.system.state::<Rubbed>(graph.rubbing).unwrap().slip_m_s();
+                    if after_a_catch {
+                        // Riding the belt, the block needs the spring's
+                        // force at mid-step. This one step also takes out
+                        // what the catch left, and then nothing is left.
+                        let spring_n = stiffness * 0.5 * (before_m + graph.block().position_m);
+                        let held_n = graph.system.last_output(at_a)[0].abs();
+                        beside_n = beside_n.max((held_n - spring_n.abs()).abs());
+                        assert_eq!(record, 0.0);
+                        after_a_catch = false;
+                    }
+                    if graph.at_rest() && !was_at_rest {
+                        left_m_s = left_m_s.max(record.abs());
+                        after_a_catch = true;
+                    }
+                    taken += 1;
+                    cuts += report.shortenings;
+                    most_cuts = most_cuts.max(report.shortenings);
+                    if report.dt_s < 1e-3 * dt {
+                        slivers += 1;
+                    }
+                    // What the two ends gave up in the step.
+                    let slip = graph.system.last_input(at_a)[0] - graph.system.last_input(at_b)[0];
+                    worked_j += report.dt_s * graph.system.last_output(at_a)[0] * slip;
+                    if was_at_rest && !graph.at_rest() {
+                        broke.push(report.time_s - report.dt_s);
+                    }
+                    if graph.at_rest() && !was_at_rest {
+                        caught.push((report.time_s, graph.block().position_m));
+                    }
+                }
+            });
+            assert!(caught.len() >= 7, "{caught:?}");
+            // Riding from its catch at the belt's speed, the block is where
+            // the spring pulls with 5 N after (0.05 m - x) / V.
+            let late: Vec<f64> = broke
+                .iter()
+                .zip(&caught)
+                .map(|(broke, (at_s, at_m))| (broke - (at_s + (0.05 - at_m) / belt)) / dt)
+                .collect();
+            // Catch to catch, after the first cycle, which starts from
+            // another place.
+            let off: Vec<f64> =
+                caught[1..].windows(2).map(|pair| (pair[1].0 - pair[0].0 - period) / dt).collect();
+            let range = |values: &[f64]| {
+                values.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(least, most), value| {
+                    (least.min(*value), most.max(*value))
+                })
+            };
+            let (heat_j, rounding_j) = graph.heat_j();
+            println!(
+                "a block on a belt at {belt} m/s, dt {dt}: {} catches in {taken} steps, {cuts} cut \
+                 ({most_cuts} at most in a step); the break-away is taken from {:+.3} to {:+.3} of \
+                 a step off the instant the limit is reached; a period is from {:+.3} to {:+.3} of \
+                 a step off {period} s",
+                caught.len() - 1,
+                range(&late).0,
+                range(&late).1,
+                range(&off).0,
+                range(&off).1,
             );
-            while graph.system.time_s() < 6.0 {
-                let was_at_rest = graph.at_rest();
-                let report = graph.system.step(dt, cx).unwrap_or_else(|error| panic!("{error}"));
-                taken += 1;
-                cuts += report.shortenings;
-                if report.dt_s < 1e-3 * dt {
-                    slivers += 1;
-                }
-                // What the two ends gave up in the step.
-                let slip = graph.system.last_input(at_a)[0] - graph.system.last_input(at_b)[0];
-                worked_j += report.dt_s * graph.system.last_output(at_a)[0] * slip;
-                if graph.at_rest() && !was_at_rest {
-                    caught.push(report.time_s);
-                }
-            }
-        });
-        assert!(caught.len() >= 6, "{caught:?}");
-        // Over the cycles after the first, which starts from another place.
-        let cycles = (caught.len() - 1) as f64;
-        let measured = (caught[caught.len() - 1] - caught[0]) / cycles;
-        let error = (measured - period).abs();
-        // The work of the two ends is the heat in the body, to rounding.
-        let (heat_j, rounding_j) = graph.heat_j();
-        println!(
-            "a block on a belt through the interface, dt {dt}: period {measured} s against \
-             {period}, off by {error:e}; {} catches in {taken} steps, {cuts} cut, {slivers} \
-             under a thousandth of a step; work {worked_j} J, heat {heat_j} J",
-            caught.len()
-        );
-        assert!(error < dt, "dt {dt}: period {measured} against {period}");
-        assert!((worked_j - heat_j).abs() <= rounding_j, "{worked_j} {heat_j}");
-        assert!(cuts <= 3 * caught.len() as u32 && slivers == 0, "{cuts} {slivers}");
+            assert!(late.iter().all(|late| late.abs() <= 0.5 + 1e-6), "{late:?}");
+            assert!(off.iter().all(|off| off.abs() < 1.0), "{off:?}");
+            // What a catch leaves is inside the impulse tolerance of
+            // 1e-10 N s on the block of 1 kg, and the one step that takes
+            // it out holds with at most that tolerance over the step
+            // beside the spring's force.
+            println!(
+                "   a catch leaves a slip of {left_m_s:e} m/s at most; the first step at rest \
+                 holds with {beside_n:e} N at most beside the spring's force (the tolerance \
+                 over the step: {:e} N)",
+                1e-10 / dt
+            );
+            assert!(left_m_s <= 1e-10 && beside_n <= 1e-10 / dt, "{left_m_s} {beside_n}");
+            // The work of the two ends is the heat in the body, to rounding.
+            assert!((worked_j - heat_j).abs() <= rounding_j, "{worked_j} {heat_j}");
+            assert!(most_cuts <= 4 && slivers == 0, "{most_cuts} {slivers}");
+        }
     }
 }
 
@@ -967,53 +1048,57 @@ fn a_stop_of_two_bodies_beside_that_spring_is_left_to_three_short_steps() {
     assert!((velocities[0] - velocities[1]).abs() <= 1e-9, "{velocities:?}");
     // Four cut steps, the first near the full length and the others far
     // shorter; five cuts in all; the slip falls by more than ten from each
-    // to the next and ends at none.
+    // to the next, and the last is at rest with a slip inside the impulse
+    // tolerance of 1e-10 N s on the reduced mass of 1.2 kg.
     assert_eq!((lengths.len(), cuts), (4, 5), "{lengths:?}");
     assert!(lengths[0] > 0.06 && lengths[1..].iter().all(|length| *length < 1e-6), "{lengths:?}");
     assert!(slips.windows(2).all(|pair| pair[1].abs() < 0.1 * pair[0].abs()), "{slips:?}");
-    assert_eq!(slips[3], 0.0);
+    assert!(slips[3].abs() <= 1e-10 / 1.2, "{slips:?}");
 }
 
 #[test]
 fn a_side_that_accelerates_is_outside_the_claim() {
-    // Not covered, and how it fails. A side that speeds up at 1 m/s2 under
-    // a block of 1 kg, which 1 N of the 5 N held would carry. A prescribed
-    // end is held over its step, so the side is a staircase, and each step
-    // of it is a jump: the block is dragged under the 3 N of sliding until
-    // it is caught, which takes a third of the step before (the jump is
-    // the acceleration times that step, and 3 N on 1 kg make up 3 m/s in a
-    // second), and the step is cut there. The steps fall by three from
-    // each to the next, and the run ends in a step that does not converge
-    // long before the time asked for.
+    // Not covered, and what it costs. A side that speeds up at 1 m/s2
+    // under a block of 1 kg, which 1 N of the 5 N held would carry. A
+    // prescribed end is held over its step, so the side is a staircase,
+    // and each step of it is a jump: the block is dragged under the 3 N
+    // of sliding until it is caught, which takes a third of the step
+    // before (the jump is the acceleration times that step, and 3 N on
+    // 1 kg make up 3 m/s in a second), and the step is cut there. Then
+    // the side has moved again, by a third as much. So every step asked
+    // for is followed by a train of steps, each a third of the one before,
+    // until what is left is inside the impulse tolerance: more than ten
+    // steps for each one asked, and for each train 1.125 times
+    // m (a dt)^2 / 2 of heat (the squares of the thirds add up to 1.125)
+    // where a carried block makes none. The block ends a step behind the
+    // side. (As first landed, with the stop's stiff row, such a run ended
+    // in a step that did not converge.)
     for dt in [0.01_f64, 0.001] {
         let mut graph = on_a_side(thrown(0.0), None, |t0| t0);
-        let (mut lengths, mut refusal) = (Vec::new(), None);
+        let mut lengths = Vec::new();
         with_cx(|cx| {
-            while graph.system.time_s() < 0.2 && lengths.len() < 1000 {
-                match graph.system.step(dt, cx) {
-                    Ok(report) => lengths.push(report.dt_s),
-                    Err(error) => {
-                        refusal = Some(error);
-                        break;
-                    }
-                }
+            while graph.system.time_s() < 0.2 {
+                let report = graph.system.step(dt, cx).unwrap_or_else(|error| panic!("{error}"));
+                lengths.push(report.dt_s);
             }
         });
         for pair in lengths[..8].windows(2) {
             assert!((pair[1] / pair[0] - 1.0 / 3.0).abs() <= 1e-9, "dt {dt}: {lengths:?}");
         }
-        assert!(
-            matches!(refusal, Some(fs_system::SystemError::NotConverged { .. })),
-            "dt {dt}: {refusal:?} after {} steps",
-            lengths.len()
-        );
-        assert!(graph.system.time_s() < 0.1, "dt {dt}: {}", graph.system.time_s());
+        let whole = lengths.iter().filter(|length| **length == dt).count();
+        let (heat_j, _) = graph.heat_j();
+        let per_step_j = 0.5 * dt * dt;
+        let (time_s, block_m_s) = (graph.system.time_s(), graph.block().velocity_m_s);
         println!(
-            "a side that accelerates, dt {dt}: {} steps reach {} s, then the step does not \
-             converge",
+            "a side that accelerates, dt {dt}: {} steps reach {time_s} s, {whole} of them whole; \
+             the block at {block_m_s} m/s; heat {heat_j:e} J, {:.3} of m (a dt)^2 / 2 for each \
+             whole step",
             lengths.len(),
-            graph.system.time_s()
+            heat_j / (whole as f64 * per_step_j)
         );
+        assert!(lengths.len() as f64 > 10.0 * 0.2 / dt, "dt {dt}: {}", lengths.len());
+        assert!(heat_j > whole as f64 * per_step_j && heat_j < 1.2 * whole as f64 * per_step_j);
+        assert!((block_m_s - time_s).abs() <= 1.5 * dt, "dt {dt}: {block_m_s} at {time_s}");
     }
 }
 

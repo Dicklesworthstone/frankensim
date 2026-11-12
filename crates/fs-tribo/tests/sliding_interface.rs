@@ -678,9 +678,11 @@ fn a_sliding_pair_slides_on_or_is_cut_at_the_stop_and_the_cut_step_ends_at_rest(
             else {
                 panic!("{start} m/s, {push_n} N: the located step is cut again");
             };
-            assert_eq!(state.slip_m_s(), 0.0);
+            // At rest, under the law's own kinetic traction to the last
+            // digit; what the stop left of the slip is rounding here.
             assert!(state.at_rest());
-            close(force_n, 3.0 * way, 1e-9);
+            assert!(state.slip_m_s().abs() <= 4.0 * f64::EPSILON, "{}", state.slip_m_s());
+            assert_eq!(force_n, SLIDES * LOAD_N * way);
             close(heat_w, -1.5 * start.abs(), 1e-9);
             close(receipt.dissipated_j, stop_s * 1.5 * start.abs(), 1e-9);
             close(state.tangential().slip_m()[0], 0.5 * stop_s * start, 1e-15);
@@ -689,6 +691,7 @@ fn a_sliding_pair_slides_on_or_is_cut_at_the_stop_and_the_cut_step_ends_at_rest(
             else {
                 panic!("{start} m/s, {push_n} N: a step short of the stop is cut");
             };
+            assert!(!state.at_rest());
             assert!(state.slip_m_s() * way > 0.0, "{}", state.slip_m_s());
             close(state.slip_m_s(), 1.0e-3 * start, 1.0e-12);
         }
@@ -724,8 +727,9 @@ fn a_slip_below_the_impulse_tolerance_is_rest() {
     // body of 2 kg stops after 2/3 s against 3 N. A step longer than that
     // by 1e-11 of itself ends beyond the stop by 2e-11 N s of momentum:
     // inside the tolerance, outside the law's force tolerance of 4e-12 N
-    // alone. It is taken to end at rest, with the force that ends it
-    // there, 3 N less 3e-11, and the heat of that force.
+    // alone. It is taken to end at rest under the law's own 3 N, to the
+    // last digit, and what is left of the slip, 1e-11 m/s the other way,
+    // is kept.
     let sliding = interface.start(300.0, 1.0).expect("start");
     let dt_s = 2.0 / 3.0 * (1.0 + 1.0e-11);
     let Answer::Took {
@@ -738,11 +742,44 @@ fn a_slip_below_the_impulse_tolerance_is_rest() {
         panic!("a step that ends 2e-11 N s beyond the stop was cut");
     };
     assert!(state.at_rest());
-    close(force_n - 3.0, -3.0e-11, 1.0e-13);
-    close(heat_w, -0.5 * force_n, 2.0 * f64::EPSILON);
-    close(receipt.dissipated_j, dt_s * 0.5 * force_n, 2.0 * f64::EPSILON);
+    assert_eq!(force_n, SLIDES * LOAD_N);
+    close(state.slip_m_s(), -1.0e-11, 1.0e-15);
+    let mean = 0.5 * (1.0 + state.slip_m_s());
+    close(heat_w, -force_n * mean, 2.0 * f64::EPSILON);
+    close(receipt.dissipated_j, dt_s * force_n * mean, 2.0 * f64::EPSILON);
     // The law's own accounts close for the step it was asked for.
     assert_eq!((receipt.residual, receipt.numerical_loss_j), (0.0, 0.0));
+    // The first step at rest takes the rest of the slip out: the pair is
+    // held with the force that ends that step at none, the push of 1 N and
+    // half the leftover over `c`, and the record is then exactly zero.
+    let (later_s, c) = (0.01_f64, 0.25 * 0.01);
+    let Answer::Took {
+        state: held,
+        force_n,
+        ..
+    } = on_a_body(&interface, &state, later_s, 2.0, 1.0)
+    else {
+        panic!("the step after the stop was cut");
+    };
+    assert!(held.at_rest());
+    assert_eq!(held.slip_m_s(), 0.0);
+    close(force_n - 1.0, 0.5 * state.slip_m_s() / c, 1.0e-12);
+    // The band of a stop is the impulse tolerance and the law's force
+    // tolerance over the step, so a stop can leave a hair more than the
+    // tolerance alone: here 1.015e-10 N s. The pair is at rest by the
+    // state's mark, not by measuring that slip again, and the next step
+    // holds it.
+    let dt_s = 2.0 / 3.0 * (1.0 + 5.075e-11);
+    let Answer::Took { state, .. } = on_a_body(&interface, &sliding, dt_s, 2.0, 0.0) else {
+        panic!("a step that ends 1.015e-10 N s beyond the stop was cut");
+    };
+    assert!(state.at_rest());
+    assert!(2.0 * state.slip_m_s().abs() > 1.0e-10, "{}", state.slip_m_s());
+    let Answer::Took { state: held, .. } = on_a_body(&interface, &state, later_s, 2.0, 1.0) else {
+        panic!("the step after that stop was cut");
+    };
+    assert!(held.at_rest());
+    assert_eq!(held.slip_m_s(), 0.0);
     // And the step is the kernel's to audit: the work of the two ends is
     // the heat, at the flows on the line.
     let c = 0.25 * dt_s;
@@ -811,6 +848,15 @@ fn a_given_end_that_jumps_starts_the_step_with_that_much_more_slip() {
         panic!("not taken");
     };
     assert!(kept.at_rest());
+    // A jump ends the rest, whatever its size: after one of 0.01 m/s,
+    // which 2 N of the 5 N held could make up within the step, the pair
+    // slides against 3 N, and the step is cut where the side is caught,
+    // after two thirds of it.
+    let Ok(Answer::Cut(asked_s)) = on_line(&interface, &state, dt_s, &[0.2, 0.21, 300.0], &line)
+    else {
+        panic!("a small jump was held");
+    };
+    close(asked_s, dt_s * 2.0 / 3.0, 1.0e-15);
 }
 
 #[test]

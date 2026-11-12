@@ -3175,9 +3175,11 @@ is never changed: it is asked in two ways.
   that flow. Class `NonSmooth`.
 - A step. The kernel's bodies step on the midpoint rule, so a port carries
   the mean velocity of a step and the slip ends at twice its mean less its
-  start `s0`. From rest the law is asked for its own return map on the line
-  (released increment `dt released`, compliance `dt c`): it holds with no
-  slip, or slides at the traction it solves. Sliding, it is asked for its
+  start `s0`. From rest the law is asked for its own return map on the
+  line, for the slip that ends the step at none (released increment
+  `dt (released - s0 / 2)`, compliance `dt c`; `s0` is zero, or what a stop
+  left): it holds and the step ends with no slip, or it slides at the
+  traction it solves. Sliding, it is asked for its
   kinetic traction `K` at a prescribed mean slip, and the mean solves
   `m = released - c K(m)`, bracketed between `s0 / 2` and the released
   speed. The static map is never asked of a sliding pair: it would hold the
@@ -3193,27 +3195,45 @@ is never changed: it is asked in two ways.
   under held forces, for which it is exact (one cut). Beside anything else
   the located instant is only as good as the step it is located from: the
   cut step ends near the stop, and is cut again if beyond it, or taken,
-  sliding, if short of it, the stop being left to the next step.
+  sliding, if short of it, the stop being left to the next step. The step
+  that ends at the stop, to the band below, is taken under the law's own
+  kinetic traction and marked at rest; what it leaves of the slip, inside
+  the tolerance, is kept in the state, and the first step at rest takes it
+  out, after which the slip is exactly zero.
+- Every row is wide or has its neighbours' slope. The kernel differences
+  the component at a flow moved by `sqrt(eps)` of its scale, far more than
+  the stop's band is wide. The force that ends a step at exactly no slip
+  is stiff in the released flow (slope `1 / c`); returned only inside the
+  band, it is differenced as the sliding rows' slope of zero, and a step
+  that needs one more update at such an iterate does not converge. As
+  landed in 1441d587a2 the stop had that force: a block on a belt at
+  0.137 m/s in steps of 0.25 ms was refused at its third catch, after 9009
+  steps (`did not converge in 25 iterations; worst input block.p has
+  residual -1.4865e-11`), where `elements::Slider`, whose arrest row is as
+  wide as its kinetic force, took 160000. The stiff force is now returned
+  only at rest, where its row is as wide as the static limit.
 - `InterfaceLoad`: the normal load (a constant of the component), the
   nominal pressure for a law bounded in it, the law's solve budgets, the
   work tolerance of the law's own accounts (as for the prescribed
   interface), and `impulse_tolerance_n_s`, which stands next to the law's
   force tolerance: `dt / (2 c)` is the inertia the slip moves against, and
   a relative momentum below the tolerance is none. A starting slip below it
-  is rest; a step is taken to end at rest when the kinetic traction would
-  leave less, that is, when the force that ends it at zero slip is within
-  the law's force tolerance plus `impulse_tolerance_n_s / dt` of `K`. It
+  is rest; a step is taken to end at the stop when the kinetic traction
+  leaves less, that is, when the force that would end it at zero slip is
+  within the law's force tolerance plus `impulse_tolerance_n_s / dt` of
+  `K`. It
   has the meaning of the `impulse_tolerance_n_s` of fs-couple's
   `CollinearMotionSolve`. (With the force tolerance alone, 1e-12, a run of
   47 steps ended its cut step with a slip of 7e-15 m/s outside the band,
   and the step after it could not be located.)
 - Heat. What the two ends give up, the force times the mean slip that
   crossed, less what the law stores, leaves through `heat`; entropy
-  generated is that heat over the interface temperature. Where a step ends
-  at rest the force is the one that ends it there, within the stop's band
-  of `K`, so the heat is what the ports carried and not the law's
-  dissipation to the last digit. The law's own accounts for the step it was
-  asked for must close within `work_tolerance_j`.
+  generated is that heat over the interface temperature. It is the law's
+  own dissipation to the tolerance of the row. The step at rest that takes
+  out what a stop left moves the pair by that much against the holding
+  force; where that work is negative it is booked as numerical loss, not
+  as heat. The law's own accounts for the step it was asked for must close
+  within `work_tolerance_j`.
 - A prescribed end (its row of the line is zero) is held over the step. A
   change of its flow from one step to the next is a jump: the step starts
   with that much more slip. With both ends prescribed there is no line and
@@ -3235,11 +3255,14 @@ is never changed: it is asked in two ways.
 Not covered: a second tangent axis (the law's is given no slip); a
 prescribed side that accelerates (held over each step it is a staircase of
 jumps: a pair static friction would carry is dragged after every jump and
-the step cut where it is caught, the steps shrink by `m a / K` from each
-to the next, and the run ends in a step that does not converge, as a test
-of the graph file below shows; the kernel's ideal slider can be told the
-span of such a side, this component cannot); the instant of a break-away inside its step (the static
-map decides for the whole step); a second root of the sliding relation for
+the step cut where it is caught, so each step asked for is followed by a
+train of steps that shrink by `m a / K`, more than ten for one, with heat
+where a carried pair makes none, as a test of the graph file below
+measures; the kernel's ideal slider can be told the span of such a side,
+this component cannot); the instant of a break-away inside its step (the
+static map decides for the whole step: under a load that rises through
+the step the pair lets go within half a step of the instant the limit is
+reached, early or late); a second root of the sliding relation for
 a traction that falls with speed (a sign bracket is not a proof that the
 root is the only one); a normal load that changes.
 
@@ -3248,19 +3271,23 @@ Coulomb law (5 N held, 3 N sliding) holds pushes up to 4.999 N with no slip
 and no heat and slides beyond; a sliding pair slides on against 3 N, and
 asked for any step that ends beyond its stop (1.0001 to 1000 times as
 long) it asks for the step that ends there, the same from every step
-length to 64 units in the last place, and that step ends at rest exactly
-with the heat of the stopping distance; the impulse tolerance decides what
+length to 64 units in the last place, and that step ends at rest under
+the law's 3 N with the heat of the stopping distance; the impulse
+tolerance decides what
 is rest (a slip of 4e-11 m/s on 2 kg is, one of 6e-11 m/s is cut at its
-stop; a step that ends 2e-11 N s beyond a stop is taken to end at rest
-with 3 N less 3e-11, one that ends 4e-10 N s beyond is cut); a given end
+stop; a step that ends 2e-11 N s beyond a stop is taken to end there under
+the law's 3 N to the last digit, the 1e-11 m/s it leaves kept and taken
+out by the next step, whose record is then exactly zero; one that ends
+4e-10 N s beyond is cut); a given end
 that jumps by 0.3 m/s starts the step with that slip; with both ends given
 the force and the law's checkpoint are `SlidingInterface`'s, to the bit;
 the conformance check of the load-line tier passes at 120 points and
 answers `Shortened` at 72 more; a traction that falls with speed (the
 hyperbolic law) is solved on the line to the root a bisection in the test
 finds, to 1e-13 m/s; the refusals, by field, a root budget of two
-evaluations among them. Fifteen planted defects in a scratch copy each
-fail one of these tests or more.
+evaluations among them. Eighteen planted defects in a scratch copy each
+fail one of these tests or more, the stop's row as first landed among
+them.
 
 Against the hand-written module: `crates/fs-couple/tests/tribothermal/
 dynamics/collinear/graph.rs` declares fs-couple's collinear stop and

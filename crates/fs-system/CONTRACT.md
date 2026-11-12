@@ -2071,9 +2071,13 @@ partition. The module is the reference and stays.
   spring loses two friction offsets a half cycle and its eight turning
   points are the closed form's to 5.3e-16 m at steps of 1 ms and 0.7 ms,
   with all it was thrown with, less what the spring keeps, as heat; a
-  block on a belt sticks and slips with the closed form's period to
-  1.4e-5, 3.4e-6, 8.5e-7 and 2.1e-7 s at 2 ms and three halvings (asserted:
-  less than a step), the work of the two ends being the heat; a side that
+  block on a belt sticks and slips with every period within 0.54 of a step
+  of the closed form's, at belt speeds of 0.0937 and 0.137 m/s and steps
+  of 2 ms and three halvings (asserted: within a step), the work of the
+  two ends being the heat: the catch is located, and the break-away is
+  taken at the start of the first step whose middle is beyond the limit,
+  from 0.48 of a step before the instant the limit is reached to 0.50
+  after (asserted: half a step); a side that
   jumps from 0.1 to 0.3 m/s drags the block under the kinetic force and
   catches it 0.2 / 3 s later, with one cut; the time mean of the interface
   temperature between two lumped bodies behind two conductances, and the
@@ -2087,10 +2091,37 @@ partition. The module is the reference and stays.
   case.
 - Outside the claim, asserted: a prescribed side that accelerates. Under
   a side that speeds up at 1 m/s2, which the block could ride with 1 N of
-  the 5 N held, each step is cut to a third of the one before (the first
-  eight to 1e-9), and the run ends in a step that does not converge: after
-  83 steps and 0.075 s at a step of 0.01 s, after 303 steps and 0.027 s at
-  0.001 s. `elements::Slider` can be told the span of such a side.
+  the 5 N held, every step asked for is followed by a train of steps, each
+  a third of the one before (the first eight to 1e-9), until what is left
+  is inside the impulse tolerance: 235 steps to reach 0.2 s at a step of
+  0.01 s and 2129 at 0.001 s, with 1.045 and 1.117 times m (a dt)^2 / 2 of
+  heat for each whole step where a carried block makes none, and the block
+  a step behind the side. `elements::Slider` can be told the span of such
+  a side.
+- Two things in 1441d587a2's record of this graph were wrong, and are
+  corrected above. The belt ran at 0.1 m/s, where the ride of 0.4 s is a
+  whole number of steps at each step length: every break-away fell on a
+  step's end, and the period came out at 1.4e-5 to 2.1e-7 s, second order,
+  an accident of the numbers that the record gave as the result. And the
+  interface returned, at a stop, the force that ends the step at exactly
+  no slip, in a row narrower than the kernel's perturbation (next
+  paragraph): the belt at 0.137 m/s in steps of 0.25 ms was refused at its
+  third catch after 9009 steps, and the accelerating side above ended in a
+  step that did not converge. Both are tests now.
+
+A rule for a component on a load line follows from the second, and is the
+component's to keep, not the kernel's to check. The kernel differences
+the component at a flow moved by `sqrt(eps)` of its scale. A row of the
+component's relation that is narrower than that is not seen: the column
+is the neighbouring rows'. So in such a row the component must return an
+effort with the slope of its neighbours. `elements::Slider` meets the rule
+(its arrest row is as wide as its kinetic force). fs-tribo's interface as
+first landed did not: at a stop it returned a force of slope `1 / c` in a
+band of 5e-11 m/s between rows of slope zero, and a step that needed one
+more update at such an iterate ran Newton with a slope of zero against a
+row of slope 8000 N per m/s and never closed its force wire below
+1e-11 N. A tangent the component declares for the row it takes would
+remove the rule; the load-line tier has none yet.
 
 Not in the graph: coefficients that follow a material card at the trial
 temperatures and speed (the module's third test), the thermal step as a
