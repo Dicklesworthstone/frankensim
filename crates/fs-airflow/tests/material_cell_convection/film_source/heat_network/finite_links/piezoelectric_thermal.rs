@@ -33,6 +33,19 @@ fn ceramic_material(scale: f64) -> (MaterialCard, ResolvedHeatCapacityCurve) {
                 dims: claim.key.quantity().dims(),
             };
             claim.interpolation = InterpolationPolicy::ConstantWithinValidity;
+            if claim.key.name() == DENSITY_PROPERTY {
+                // LongitudinalPiezoelectric::resolve reads the density role too, and admits only fixed physical
+                // external coordinates as applicability bounds (fs-material state_point.rs
+                // is_fixed_external_coordinate): this claim drops body_material()'s `lot` bound; the point keeps lot = 7.
+                let kept = claim.validity.bounds().iter().filter(|(axis, _)| axis.as_str() != "lot")
+                    .fold(ValidityDomain::unconstrained(), |validity, (axis, &(lo, hi))| {
+                        match claim.validity.axis_quantities().get(axis) {
+                            Some(quantity) => validity.with_quantity(axis.clone(), *quantity, lo, hi),
+                            None => validity.with(axis.clone(), lo, hi),
+                        }
+                    });
+                claim.validity = kept;
+            }
         }
         claims.insert_claim(claim).unwrap();
     }
@@ -63,9 +76,10 @@ fn ceramic_material(scale: f64) -> (MaterialCard, ResolvedHeatCapacityCurve) {
                     ],
                     dims,
                 },
+                // No `lot` bound: the piezoelectric coefficients admit only fixed physical external coordinates as
+                // applicability bounds (fs-material state_point.rs is_fixed_external_coordinate); the point keeps lot = 7.
                 validity: ValidityDomain::unconstrained()
-                    .with_quantity("T", temperature_quantity(), 280.0, 320.0)
-                    .with("lot", 7.0, 7.0),
+                    .with_quantity("T", temperature_quantity(), 280.0, 320.0),
                 uncertainty: UncertaintyModel::Unstated,
                 interpolation: InterpolationPolicy::LinearInside,
                 observations: vec![],

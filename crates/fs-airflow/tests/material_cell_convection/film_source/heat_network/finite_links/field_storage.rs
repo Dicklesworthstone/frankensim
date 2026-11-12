@@ -33,9 +33,10 @@ fn field_body(magnetic: bool, alpha: f64) -> (MaterialCard, ResolvedHeatCapacity
                 ],
                 dims,
             },
+            // No `lot` bound: the field-storage law admits only fixed physical external coordinates as
+            // applicability bounds (fs-material state_point.rs is_fixed_external_coordinate); the point keeps lot = 7.
             validity: ValidityDomain::unconstrained()
-                .with_quantity("T", temperature_quantity(), 280.0, 320.0)
-                .with("lot", 7.0, 7.0),
+                .with_quantity("T", temperature_quantity(), 280.0, 320.0),
             interpolation: InterpolationPolicy::LinearInside,
             uncertainty: UncertaintyModel::Unstated,
             observations: vec![],

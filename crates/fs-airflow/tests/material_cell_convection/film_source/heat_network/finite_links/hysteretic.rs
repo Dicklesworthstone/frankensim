@@ -57,9 +57,10 @@ fn core_material(pinning: f64) -> (MaterialCard, ResolvedHeatCapacityCurve) {
             .insert_claim(PropertyClaim {
                 key,
                 value: PropertyValue::Scalar { value, dims },
+                // No `lot` bound: hysteretic memory admits only fixed physical external coordinates as
+                // applicability bounds (fs-material state_point.rs is_fixed_external_coordinate); the point keeps lot = 7.
                 validity: ValidityDomain::unconstrained()
-                    .with_quantity("T", temperature_quantity(), 280.0, 320.0)
-                    .with("lot", 7.0, 7.0),
+                    .with_quantity("T", temperature_quantity(), 280.0, 320.0),
                 uncertainty: UncertaintyModel::Unstated,
                 interpolation: InterpolationPolicy::ConstantWithinValidity,
                 observations: vec![],

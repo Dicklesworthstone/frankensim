@@ -35,6 +35,17 @@ fn frame_material() -> (MaterialCard, ResolvedHeatCapacityCurve) {
         if claim.key.name() == DENSITY_PROPERTY {
             claim.value = PropertyValue::Scalar { value: 1000.0, dims: Density::DIMS };
             claim.interpolation = InterpolationPolicy::ConstantWithinValidity;
+            // The axial loss admits only fixed physical external coordinates as applicability bounds
+            // (fs-material state_point.rs is_fixed_external_coordinate): this claim drops body_material()'s `lot`
+            // bound; the point keeps lot = 7.
+            let kept = claim.validity.bounds().iter().filter(|(axis, _)| axis.as_str() != "lot")
+                .fold(ValidityDomain::unconstrained(), |validity, (axis, &(lo, hi))| {
+                    match claim.validity.axis_quantities().get(axis) {
+                        Some(quantity) => validity.with_quantity(axis.clone(), *quantity, lo, hi),
+                        None => validity.with(axis.clone(), lo, hi),
+                    }
+                });
+            claim.validity = kept;
         }
         claims.insert_claim(claim).unwrap();
     }
