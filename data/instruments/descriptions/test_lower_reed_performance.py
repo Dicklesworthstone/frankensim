@@ -192,6 +192,90 @@ class SpecimenInputsWithoutClarinetNames(unittest.TestCase):
 
     def test_declared_absent_mouthpiece_adds_no_segments(self):
         self.assertEqual(lower.mouthpiece_segments({"mouthpiece.part": "-"}, self.DIMS), [])
+        with self.assertRaisesRegex(SystemExit, "barrel_pull_m needs a mouthpiece"):
+            lower.mouthpiece_segments({"mouthpiece.part": "-", "mouthpiece.barrel_pull_m": "0.001"}, self.DIMS)
+
+
+class OptionalCardRows(unittest.TestCase):
+    """The optional rows, the per-note replacements and the extra fingerings, on manufactured values."""
+
+    def test_rows_appear_only_with_their_keys_and_a_per_note_dash_removes_one(self):
+        desc = description()
+        plain = lower.performance(desc, SEGMENTS, 1800, "x")
+        for prefix in ("slit_length", "gas_field", "open_hole_interaction", "tonehole_lengths", "constriction_noise", "open_hole_orifice"):
+            self.assertNotIn(f"\n{prefix} ", plain)
+        desc.update({
+            "reed.lay_stiffness": "5e6", "reed.lay_exponent": "2.0", "reed.lay_onset_m": "1e-4", "reed.lay_loss_s_per_m": "0.0",
+            "reed.channel_length_m": "0.0014", "tonehole.interaction_law": "tmmi", "tonehole.interaction_epsilon": "2",
+            "tonehole.lengths": "lefebvre-scavone-2012", "reed.constriction_noise_seed": "7",
+            "reed.constriction_noise_duct_radius_m": "0.0069", "tonehole.orifice_holes": "open",
+            "at.y.tonehole.lengths": "-", "at.y.reed.channel_length_m": "0.025",
+        })
+        full = lower.performance(desc, SEGMENTS, 1800, "x")
+        self.assertTrue(line_starting(full, "reed ").endswith(" 5e6 2.0 1e-4 0.0"))
+        self.assertIn(f"\n{line_starting(full, 'reed ')}\nslit_length 0.0014\nbaffled_outlet ", full)
+        tail = full.split("cylinder 0.0073 0.37\n", 1)[1].split("compile_limits", 1)[0]
+        self.assertEqual(tail, "open_hole_interaction tmmi 2\ntonehole_lengths lefebvre-scavone-2012\n"
+                               "constriction_noise 7 0.0069\nopen_hole_orifice 1\n")
+        other = lower.performance(desc, SEGMENTS, 1800, "y")
+        self.assertNotIn("\ntonehole_lengths", other)
+        self.assertIn("\nslit_length 0.025\n", other)
+
+    def test_an_orifice_row_needs_an_open_hole_and_a_lay_needs_all_four_fields(self):
+        desc = description()
+        desc["tonehole.orifice_holes"] = "open"
+        with self.assertRaisesRegex(SystemExit, "opens no hole"):
+            lower.performance(desc, ["cylinder 0.0073 0.2", "hole 0.002 0.004 0.0073 0", "cylinder 0.0073 0.37"], 1800, "x")
+        desc = description()
+        desc["reed.lay_stiffness"] = "5e6"
+        with self.assertRaisesRegex(SystemExit, "missing reed.lay_exponent"):
+            lower.reed_record(desc, "x")
+
+    def test_gas_field_counts_its_stations_and_refuses_a_short_station(self):
+        desc = description()
+        desc.update({
+            "bore.gas_field_mode": "continuous", "bore.gas_field_steps": "8", "bore.gas_field_basis": "mole",
+            "bore.gas_field_species": "N2 CO2", "bore.gas_station.01": "0 300 1 0", "bore.gas_station.02": "0.57 310 0.5 0.5",
+        })
+        self.assertIn("\ngas_field continuous 8 2 mole 2 N2 CO2\ngas_station 0 300 1 0\ngas_station 0.57 310 0.5 0.5\n",
+                      lower.performance(desc, SEGMENTS, 1800, "x"))
+        desc["bore.gas_station.02"] = "0.57 310 0.5"
+        with self.assertRaisesRegex(SystemExit, "one fraction per species"):
+            lower.performance(desc, SEGMENTS, 1800, "x")
+
+    def test_per_note_keys_must_name_a_declared_fingering_and_a_per_note_key(self):
+        chart = [{"fingering": "e3", "written": "E3"}, {"fingering": "a3", "written": "A3"}]
+        rows = lower.extra_fingerings({"fingering.gs3": "G#3 F#3 first 1,3,4"}, chart)
+        self.assertEqual([r["fingering"] for r in rows], ["e3", "gs3", "a3"])
+        self.assertEqual(rows[1]["open_holes"], "1,3,4")
+        with self.assertRaisesRegex(SystemExit, "repeats a fingering"):
+            lower.extra_fingerings({"fingering.e3": "E3 D3 first -"}, chart)
+        with self.assertRaisesRegex(SystemExit, "names fingering zz"):
+            lower.check_per_note_keys({"at.zz.tonehole.lengths": "-"}, {"e3"})
+        with self.assertRaisesRegex(SystemExit, "is not one of the per-note keys"):
+            lower.check_per_note_keys({"at.e3.observer.law": "none"}, {"e3"})
+
+
+class ClarinetCardsAreGenerated(unittest.TestCase):
+    """The committed clarinet cards and their index are what the description lowers to, byte for byte."""
+
+    def test_the_description_lowers_to_every_committed_card(self):
+        import os
+        import subprocess
+        import sys
+        import tempfile
+        root = Path(__file__).resolve().parents[3]
+        committed = root / "data/instruments/descriptions/clarinet/performances"
+        with tempfile.TemporaryDirectory() as out:
+            subprocess.run(
+                [sys.executable, "-I", str(Path(__file__).with_name("lower_reed_performance.py")),
+                 "data/instruments/descriptions/clarinet/description.tsv", out],
+                cwd=root, check=True, capture_output=True,
+            )
+            written = sorted(os.listdir(out))
+            self.assertEqual(written, sorted(p.name for p in committed.iterdir()))
+            for name in written:
+                self.assertEqual((Path(out) / name).read_bytes(), (committed / name).read_bytes(), name)
 
 
 if __name__ == "__main__":

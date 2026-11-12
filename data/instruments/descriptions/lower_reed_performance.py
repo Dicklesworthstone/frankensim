@@ -27,6 +27,18 @@ and tonehole.omit lists holes left out unless a fingering opens them, when a hol
 that prints no height takes tonehole.height_unprinted_m. A bore row at-hole-NN is a diameter at that
 hole's position. mouthpiece.part - declares a reed with no mouthpiece, whose bore
 stations start at the reed tip.
+
+Optional card rows, each written only when its key is present (values are copied as written):
+reed.lay_stiffness with reed.lay_exponent, reed.lay_onset_m and reed.lay_loss_s_per_m (the reed
+row's four lay fields), reed.channel_length_m (slit_length), mouthpiece.barrel_pull_m (one cylinder
+at the mouthpiece exit radius before the bore), bore.gas_field_mode with bore.gas_field_steps,
+bore.gas_field_basis, bore.gas_field_species and the bore.gas_station.NN rows (the gas_field block),
+tonehole.interaction_law with tonehole.interaction_epsilon (open_hole_interaction), tonehole.lengths,
+reed.constriction_noise_seed with reed.constriction_noise_duct_radius_m, and tonehole.orifice_holes
+`open` (open_hole_orifice N, N = the fingering's open-hole count).
+A row `at.<fingering>.<key>` replaces one of PER_NOTE_KEYS for that fingering; the value `-` there
+leaves the row out. A row `fingering.<name>` WRITTEN CONCERT REGISTER OPEN_HOLES adds a fingering the
+chart does not print, placed before the first chart row of higher written pitch.
 """
 import csv
 import math
@@ -37,10 +49,46 @@ from decimal import Decimal
 CM_H2O_PA = 98.0665
 PITCH_CLASS = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
 FLAT_NAME = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
+PER_NOTE_KEYS = ("reed.lay_stiffness", "reed.channel_length_m", "tonehole.lengths", "tonehole.orifice_holes")
 
 
 def refuse(what):
     sys.exit(f"REFUSED: {what}")
+
+
+def option(desc, key, fingering):
+    """An optional row's value for one fingering: `at.<fingering>.<key>` replaces KEY, and `-` means no row."""
+    value = desc.get(f"at.{fingering}.{key}", desc.get(key))
+    if value is None or value == "-":
+        return None
+    if value in ("", "UNKNOWN"):
+        refuse(f"description key {key} is empty or UNKNOWN and cannot be lowered")
+    return value
+
+
+def check_per_note_keys(desc, fingerings):
+    for key in desc:
+        if key.startswith("at."):
+            name, _, rest = key[3:].partition(".")
+            if name not in fingerings:
+                refuse(f"{key} names fingering {name}, which neither the chart nor a fingering.* row declares")
+            if rest not in PER_NOTE_KEYS:
+                refuse(f"{key}: {rest} is not one of the per-note keys {', '.join(PER_NOTE_KEYS)}")
+
+
+def extra_fingerings(desc, chart):
+    """Chart rows plus each `fingering.<name>` row, inserted before the first chart row of higher written pitch."""
+    rows = list(chart)
+    for key in sorted(k for k in desc if k.startswith("fingering.")):
+        fields = desc[key].split()
+        if len(fields) != 4:
+            refuse(f"{key} needs WRITTEN CONCERT REGISTER OPEN_HOLES")
+        row = dict(zip(("written", "concert", "register", "open_holes"), fields), fingering=key[len("fingering."):])
+        if any(r["fingering"] == row["fingering"] for r in rows):
+            refuse(f"{key} repeats a fingering the chart already prints")
+        at = next((i for i, r in enumerate(rows) if midi(r["written"]) > midi(row["written"])), len(rows))
+        rows.insert(at, row)
+    return rows
 
 
 def table(path, schema):
@@ -156,6 +204,8 @@ def radius_at(knots, x):
 def mouthpiece_segments(desc, dims):
     part = need(desc, "mouthpiece.part")
     if part == "-":  # a double reed has no mouthpiece: the bore stations start at the reed tip
+        if "mouthpiece.barrel_pull_m" in desc:
+            refuse("mouthpiece.barrel_pull_m needs a mouthpiece")
         return []
     near_name, exit_name = need(desc, "mouthpiece.exit_cone_features").split(",")
     volume_feature = need(desc, "mouthpiece.volume_feature")
@@ -169,10 +219,13 @@ def mouthpiece_segments(desc, dims):
     if interior_length <= 0 or interior_volume <= 0:
         refuse("mouthpiece total length or volume does not exceed its exit cone")
     l_eq = interior_volume / (math.pi * r_in**2)
-    return [
+    records = [
         f"cylinder {num(r_in)} {num(l_eq)}",
         f"cone {num(r_in)} {num(r_out)} {num(cone_length)}",
     ]
+    if "mouthpiece.barrel_pull_m" in desc:  # the gap a pulled barrel opens, at the mouthpiece's exit radius
+        records.append(f"cylinder {num(r_out)} {need(desc, 'mouthpiece.barrel_pull_m')}")
+    return records
 
 
 def axial_record(xa, ra, xb, rb):
@@ -278,7 +331,18 @@ def tongue_record(desc):
     return f"tongue_contact {num(area_t)} {num(area_r)} {num(force_n)} {num(release_start)} {num(release_s)}\n"
 
 
-def reed_record(desc):
+def reed_record(desc, fingering=None):
+    """The reed row: the record below plus, with reed.lay_stiffness, the four lay fields as written."""
+    record = reed_values(desc)
+    if option(desc, "reed.lay_stiffness", fingering) is None:
+        return record
+    lay = [option(desc, "reed.lay_stiffness", fingering)] + [
+        need(desc, key) for key in ("reed.lay_exponent", "reed.lay_onset_m", "reed.lay_loss_s_per_m")
+    ]
+    return f"{record} {' '.join(lay)}"
+
+
+def reed_values(desc):
     """The `reed` header values from the authored geometry and constitutive response.
 
     Per-area mode (reed.stiffness_per_area_pa_m present): at the published operating point
@@ -330,10 +394,55 @@ def gas_record(desc, prefix):
     )
 
 
-def performance(desc, records, pressure):
+def gas_field_rows(desc):
+    """The gas_field block: its header from the bore.gas_field_* keys, then the bore.gas_station.NN rows as written."""
+    if "bore.gas_field_mode" not in desc:
+        return ""
+    species = need(desc, "bore.gas_field_species").split()
+    stations = [need(desc, key) for key in sorted(k for k in desc if k.startswith("bore.gas_station."))]
+    if len(stations) < 2:
+        refuse("bore.gas_field_mode needs at least two bore.gas_station.NN rows")
+    for station in stations:
+        if len(station.split()) != 2 + len(species):
+            refuse(f"gas station '{station}' needs X_M T_K and one fraction per species ({len(species)})")
+    head = (
+        f"gas_field {need(desc, 'bore.gas_field_mode')} {need(desc, 'bore.gas_field_steps')} {len(stations)} "
+        f"{need(desc, 'bore.gas_field_basis')} {len(species)} {' '.join(species)}"
+    )
+    return "\n".join([head] + [f"gas_station {s}" for s in stations]) + "\n"
+
+
+def tail_rows(desc, records, fingering):
+    """The rows between the bore and compile_limits, in the order the reed parser reads them."""
+    rows = gas_field_rows(desc)
+    if "tonehole.interaction_law" in desc:
+        rows += f"open_hole_interaction {need(desc, 'tonehole.interaction_law')} {need(desc, 'tonehole.interaction_epsilon')}\n"
+    lengths = option(desc, "tonehole.lengths", fingering)
+    if lengths is not None:
+        rows += f"tonehole_lengths {lengths}\n"
+    if "reed.constriction_noise_seed" in desc:
+        rows += (
+            f"constriction_noise {need(desc, 'reed.constriction_noise_seed')} "
+            f"{need(desc, 'reed.constriction_noise_duct_radius_m')}\n"
+        )
+    orifice = option(desc, "tonehole.orifice_holes", fingering)
+    if orifice is not None:
+        if orifice != "open":
+            refuse(f"tonehole.orifice_holes is '{orifice}'; the lowerer takes 'open' (every open hole) or '-'")
+        count = sum(1 for r in records if r.startswith("hole ") and r.endswith(" 1"))
+        if count == 0:
+            refuse(f"tonehole.orifice_holes open on fingering {fingering}, which opens no hole")
+        rows += f"open_hole_orifice {count}\n"
+    return rows
+
+
+def performance(desc, records, pressure, fingering=None):
     rate = int(need(desc, "audio.rate_hz"))
     samples = round(float(need(desc, "audio.duration_s")) * rate)
-    reed = reed_record(desc)
+    reed = reed_record(desc, fingering)
+    channel = option(desc, "reed.channel_length_m", fingering)
+    if channel is not None:
+        reed += f"\nslit_length {channel}"
     ambient = gas_record(desc, "ambient")
     exterior = (
         f"exterior {gas_record(desc, 'exterior')}\n"
@@ -346,7 +455,10 @@ def performance(desc, records, pressure):
         f"ambient {ambient}\nreed {reed}\n{tongue_record(desc)}{need(desc, 'observer.record')}\n"
         f"{exterior}{observer_law}termination {need(desc, 'observer.termination')}\nsegments {len(records)}\n"
     )
-    return head + "\n".join(records) + f"\ncompile_limits {need(desc, 'compile_limits')}\nschedule\n" + gesture(desc, pressure)
+    return (
+        head + "\n".join(records) + "\n" + tail_rows(desc, records, fingering)
+        + f"compile_limits {need(desc, 'compile_limits')}\nschedule\n" + gesture(desc, pressure)
+    )
 
 
 def main(argv):
@@ -359,6 +471,8 @@ def main(argv):
     specimen = os.path.join(root, need(desc, "specimen_dir"))
     dims = dimensions(specimen)
     chart = table(os.path.join(root, need(desc, "fingering_chart")), "frankensim.specimen-fingerings.v1")
+    chart = extra_fingerings(desc, chart)
+    check_per_note_keys(desc, {row["fingering"] for row in chart})
     curve = pressure_curve(desc, root)
     reach = int(need(desc, "player.extrapolation_semitones_max"))
     step = float(need(desc, "player.pressure_round_pa"))
@@ -375,7 +489,7 @@ def main(argv):
         records = duct_records(desc, dims, open_holes)
         name = f"{prefix}.{level}.{uiowa_name(note)}.performance"
         with open(os.path.join(out_dir, name), "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(performance(desc, records, pressure))
+            handle.write(performance(desc, records, pressure, row["fingering"]))
         holes = sum(1 for r in records if r.startswith("hole "))
         index.append(
             f"{row['fingering']}\t{row['written']}\t{uiowa_name(note)}\t{row['register']}\t"
