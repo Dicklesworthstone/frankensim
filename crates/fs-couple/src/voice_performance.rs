@@ -1612,7 +1612,10 @@ impl VoiceDescription {
     /// that does not converge or is not passive, or an under-resolved band.
     pub fn build(&self) -> Result<VoicePerformance, String> {
         let workers = std::thread::available_parallelism().map_or(1, |p| p.get()).clamp(1, MAX_SHAPE_WORKERS);
-        self.build_with_shape_workers(workers)
+        // The card's own lines, formants and fricative lines sample the same sections at shared bins: each viscothermal
+        // section pair is computed once on this thread and served by its exact input bits (MB 27387). Each further
+        // shape opens its own scope on its worker thread (`build_shapes` below).
+        fs_duct::section_memo(|| self.build_with_shape_workers(workers))
     }
 
     /// [`Self::build`] with a moving tract's further shapes built on `workers` threads; every count gives the same
@@ -2159,7 +2162,10 @@ impl VoiceDescription {
             targets.push((shapes.len() - 1, name.to_string()));
             holding = target;
         }
-        let built = build_shapes(shapes.len(), workers, |i| self.shape_taps(&shapes[i], mechanics_rate))?;
+        // One section store per shape build, dropped when that shape's lines are made (MB 27387).
+        let built = build_shapes(shapes.len(), workers, |i| {
+            fs_duct::section_memo(|| self.shape_taps(&shapes[i], mechanics_rate))
+        })?;
         if let Some(e) = cut {
             return Err(e);
         }

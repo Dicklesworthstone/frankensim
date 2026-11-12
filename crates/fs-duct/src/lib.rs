@@ -127,6 +127,9 @@ pub mod hole_lengths;
 mod interaction;
 pub use interaction::OpenHoleInteraction;
 
+mod section_memo;
+pub use section_memo::{section_memo, section_memo_counts};
+
 use fs_la::eigen_complex::lu_complex;
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_material::gas::GasState;
@@ -804,7 +807,16 @@ fn bessel_telegraph_pair(state: &GasState, radius: f64, omega: f64) -> Result<(C
     bessel_telegraph_pair_from_inputs(&WallDiffusionInputs::from_gas(state), radius, omega)
 }
 
+// Inside a `section_memo` scope the pair is served by the exact bits of these seven inputs, which are every value
+// `bessel_telegraph_pair_fresh` reads (MB 27387 item 2); outside a scope it is the fresh evaluation.
 fn bessel_telegraph_pair_from_inputs(state: &WallDiffusionInputs, radius: f64, omega: f64) -> Result<(C64, C64, f64), DuctError> {
+    section_memo::served_or_computed(
+        [radius, omega, state.density, state.sound_speed, state.dynamic_viscosity, state.gamma, state.prandtl],
+        || bessel_telegraph_pair_fresh(state, radius, omega),
+    )
+}
+
+fn bessel_telegraph_pair_fresh(state: &WallDiffusionInputs, radius: f64, omega: f64) -> Result<(C64, C64, f64), DuctError> {
     if ![radius,omega,state.density,state.sound_speed,state.dynamic_viscosity,state.prandtl]
         .iter().all(|v|v.is_finite() && *v>0.0)
         || !(state.gamma>=1.0 && state.gamma.is_finite()) {

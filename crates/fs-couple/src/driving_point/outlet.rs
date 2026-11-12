@@ -513,13 +513,19 @@ fn junction_lines_in(
         }
         MouthLoad::Matched => return Err(super::baked::matched_refusal()),
     };
-    let transfer = |omega: f64| match load {
-        MouthLoad::Analytic(termination) => junction_source_transfer(&up, &down, gas, omega, termination, wall, zc),
-        MouthLoad::Tabulated(table) => {
-            let z = table.z_at(omega).map_err(DrivingPointError::Duct)?;
-            junction_source_transfer_against_load(&up, &down, gas, omega, z, wall, zc)
-        }
-        MouthLoad::Matched => Err(super::baked::matched_refusal()),
+    // The inlet ladder's bins and the second DC probe list are frequencies the mouth ladder and the first list have
+    // already evaluated, with the same bits (`TAU k / (n dt)` on power-of-two `n`): each `(to_mouth, to_inlet)` is kept
+    // by the bits of `omega` and served again (MB 27387 item 1).
+    let kept = OmegaPairs::default();
+    let transfer = |omega: f64| {
+        kept.served_or_computed(omega, || match load {
+            MouthLoad::Analytic(termination) => junction_source_transfer(&up, &down, gas, omega, termination, wall, zc),
+            MouthLoad::Tabulated(table) => {
+                let z = table.z_at(omega).map_err(DrivingPointError::Duct)?;
+                junction_source_transfer_against_load(&up, &down, gas, omega, z, wall, zc)
+            }
+            MouthLoad::Matched => Err(super::baked::matched_refusal()),
+        })
     };
     let to_mouth = |omega: f64| transfer(omega).map(|t| t.0);
     let to_inlet = |omega: f64| transfer(omega).map(|t| t.1);
@@ -538,6 +544,30 @@ fn junction_lines_in(
         to_inlet_wave: DelayedFilter::from_impulse_response(dt, inlet_ir).map_err(DrivingPointError::Discrete)?,
         receipts: [mouth_receipt, inlet_receipt],
     })
+}
+
+/// One junction's `(U_mouth / p_s, p-_inlet / p_s)` pairs by the bits of `omega` (MB 27387 item 1): a pair is computed
+/// once and served again to the other ladder, so a served pair is the computed one, bit for bit. A refusal is not kept.
+#[derive(Default)]
+struct OmegaPairs {
+    pairs: core::cell::RefCell<std::collections::HashMap<u64, (C64, C64)>>,
+}
+
+impl OmegaPairs {
+    fn served_or_computed(
+        &self,
+        omega: f64,
+        compute: impl FnOnce() -> Result<(C64, C64), DrivingPointError>,
+    ) -> Result<(C64, C64), DrivingPointError> {
+        let key = omega.to_bits();
+        let kept = self.pairs.borrow().get(&key).copied();
+        if let Some(pair) = kept {
+            return Ok(pair);
+        }
+        let pair = compute()?;
+        self.pairs.borrow_mut().insert(key, pair);
+        Ok(pair)
+    }
 }
 
 #[cfg(test)]
@@ -837,5 +867,73 @@ mod tests {
         let mut coned = duct.clone();
         coned.segments[5] = Segment::Cone { inlet_radius: radius, outlet_radius: 1.2 * radius, length: 0.017 };
         assert!(refused(&coned, 3).contains("cylinders"));
+    }
+
+    /// `(FIR delay bits, tap bits)` of a line.
+    fn fir_bits(line: &DelayedFilter) -> (u64, Vec<u64>) {
+        let (delay, taps) = line.quiescent_fir().expect("a plain FIR");
+        (delay.to_bits(), taps.iter().map(|t| t.to_bits()).collect())
+    }
+
+    /// MB 27387: the junction lines, whose inlet ladder and second DC list are served from the mouth ladder's pairs, have
+    /// the bits of the two ladders run here on fresh `junction_source_transfer` evaluations, as `junction_lines_in` ran
+    /// them before; and the same lines built inside an `fs_duct::section_memo` scope (the shape build's) have those bits
+    /// too, with pairs served.
+    #[test]
+    fn junction_lines_served_from_one_ladder_equal_two_fresh_ladders_bit_for_bit() {
+        let gas = air();
+        let radii = [0.009, 0.006, 0.0021, 0.0042, 0.011, 0.008];
+        let duct = Duct { segments: radii.iter().map(|&radius| Segment::Cylinder { radius, length: 0.027 }).collect() };
+        let zc = gas.density * gas.sound_speed / (core::f64::consts::PI * radii[0] * radii[0]);
+        let (k, termination, ladder) = (2, Termination::FlangedOpen, LineLadder::default());
+        let lines = junction_source_lines(&duct, k, &gas, termination, RATE, zc, None, &ladder).expect("junction lines");
+        let (up, down) = split_at_junction(&duct, k).expect("split");
+        let dt = 1.0 / f64::from(RATE);
+        let transit = duct_axial_length(&duct) / gas.sound_speed / dt;
+        let max_taps = validate_ladder(&ladder).expect("ladder");
+        let fresh_mouth = |omega: f64| junction_source_transfer(&up, &down, &gas, omega, termination, None, zc).map(|t| t.0);
+        let fresh_inlet = |omega: f64| junction_source_transfer(&up, &down, &gas, omega, termination, None, zc).map(|t| t.1);
+        let line_of = |response: &dyn Fn(f64) -> Result<C64, DrivingPointError>| {
+            let dc = dc_limit(&|omega| response(omega), &DC_PROBE_RAD_S).expect("DC limit");
+            let (ir, receipt) = transfer_ladder(&|omega| response(omega), dc, transit, dt, max_taps, &ladder).expect("ladder");
+            (DelayedFilter::from_impulse_response(dt, ir).expect("filter"), receipt.n_fft)
+        };
+        let (mouth, mouth_n) = line_of(&fresh_mouth);
+        let (inlet, inlet_n) = line_of(&fresh_inlet);
+        assert_eq!((lines.receipts[0].n_fft, lines.receipts[1].n_fft), (mouth_n, inlet_n), "rungs");
+        assert_eq!(fir_bits(&lines.to_mouth_flow), fir_bits(&mouth), "mouth line against a fresh ladder");
+        assert_eq!(fir_bits(&lines.to_inlet_wave), fir_bits(&inlet), "inlet line against a fresh ladder");
+        let (scoped, counts) = fs_duct::section_memo(|| {
+            let lines = junction_source_lines(&duct, k, &gas, termination, RATE, zc, None, &ladder).expect("junction lines");
+            (lines, fs_duct::section_memo_counts().expect("scope"))
+        });
+        assert!(counts.0 > 0 && counts.1 > 0, "pairs served and computed in the scope: {counts:?}");
+        assert_eq!(fir_bits(&scoped.to_mouth_flow), fir_bits(&mouth), "mouth line in a section scope");
+        assert_eq!(fir_bits(&scoped.to_inlet_wave), fir_bits(&inlet), "inlet line in a section scope");
+    }
+
+    /// The planted negative of MB 27387 item 1: `omega` one ulp up is not served the pair kept at `omega`; it is computed.
+    #[test]
+    fn a_junction_pair_one_ulp_away_in_omega_is_computed_not_served() {
+        let kept = OmegaPairs::default();
+        let calls = core::cell::Cell::new(0_u32);
+        let at = |omega: f64| {
+            kept.served_or_computed(omega, || {
+                calls.set(calls.get() + 1);
+                Ok((C64::new(omega, 0.0), C64::new(0.0, omega)))
+            })
+        };
+        let omega = 2.0e4;
+        let first = at(omega).expect("pair");
+        let again = at(omega).expect("pair");
+        assert_eq!(calls.get(), 1, "the same omega is served");
+        assert_eq!((again.0.re.to_bits(), again.1.im.to_bits()), (first.0.re.to_bits(), first.1.im.to_bits()));
+        let near = at(omega.next_up()).expect("pair");
+        assert_eq!(calls.get(), 2, "omega one ulp up was served the kept pair");
+        assert_eq!(near.0.re.to_bits(), omega.next_up().to_bits(), "the computed pair is the one at its own omega");
+        let refused = kept.served_or_computed(3.0e4, || Err(DrivingPointError::Invalid { what: "planted refusal" }));
+        assert!(refused.is_err());
+        let after = at(3.0e4).expect("pair");
+        assert_eq!((calls.get(), after.0.re.to_bits()), (3, 3.0e4_f64.to_bits()), "a refusal is not kept");
     }
 }
