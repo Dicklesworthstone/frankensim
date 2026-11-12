@@ -588,6 +588,70 @@ pub trait PortTangent: Component {
     ) -> Result<(), Self::Error>;
 }
 
+/// Optional tier: a relation at power ports that is not a function of the
+/// flow, solved on the load line its neighbours present.
+///
+/// Dry friction holds any force up to its limit at zero slip, and a closed
+/// contact pushes with whatever keeps its gap closed: the effort such a
+/// component returns is not a function of the flow it receives, so a solver
+/// cannot iterate on that flow. What its neighbours do with an effort is a
+/// function, and frozen at an iterate it is affine:
+///
+/// ```text
+/// flow = released - compliance * effort
+/// ```
+///
+/// `released` is the flow the ports would have if the component returned no
+/// effort, and `compliance` says how much of it each unit of effort takes
+/// away. The component finds the point of that line its own relation
+/// allows, and steps there.
+///
+/// A type cannot offer this tier without the mandatory one:
+///
+/// ```compile_fail
+/// use fs_exec::Cx;
+/// use fs_ports::component::{LoadLine, Proposal};
+/// struct NotAComponent;
+/// impl LoadLine for NotAComponent {
+///     fn line_ports(&self) -> &[usize] { &[] }
+///     fn propose_on_line(&self, _: &(), _: f64, _: &[f64], _: &[f64], _: &mut (),
+///         _: &mut [f64], _: &Cx<'_>) -> Result<Proposal, ()> { unimplemented!() }
+/// }
+/// ```
+pub trait LoadLine: Component {
+    /// The ports the line spans, as indices into [`Component::ports`], in
+    /// increasing order and at least one. Each is a power port of role
+    /// [`PortRole::FlowIn`]: it receives a flow and returns an effort. Their
+    /// coefficients, in port order, are the line's flows and efforts.
+    fn line_ports(&self) -> &[usize];
+
+    /// [`Component::propose`] on the load line.
+    ///
+    /// `inputs` is as for `propose`, except that at the line's ports it
+    /// holds the released flows. `compliance` is the square matrix of the
+    /// line, row-major over the line's coefficients, so that
+    /// `flow[i] = released[i] - sum(compliance[i][j] * effort[j])`. It need
+    /// not be symmetric; its symmetric part is not negative. A coefficient
+    /// whose flow is prescribed has a zero row and column.
+    ///
+    /// The efforts the component settles on are its outputs at the line's
+    /// ports. The candidate, the other outputs and the receipt are those of
+    /// the step at the flows on the line, not at the released ones. With
+    /// `compliance` all zero the call is `propose`, to the bit. The purity
+    /// rules of `propose` hold.
+    #[allow(clippy::too_many_arguments)]
+    fn propose_on_line(
+        &self,
+        old: &Self::State,
+        dt_s: f64,
+        inputs: &[f64],
+        compliance: &[f64],
+        new: &mut Self::State,
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<Proposal, Self::Error>;
+}
+
 /// Optional tier: the step as a residual in the component's own unknowns.
 ///
 /// `residual(z) = 0` defines the step for held `inputs`. A monolithic solve

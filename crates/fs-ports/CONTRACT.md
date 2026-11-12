@@ -29,9 +29,9 @@ behavior or whole-system passivity claims.
 - Lossless relations: `ConservativeJunction`, `JunctionSchema`, `JunctionLaw`,
   and the adoption trait `PortedModule`.
 - Iteration weight: `BoundedAitkenRelaxation`.
-- Executable contract: `component::{Component, PortTangent, StageResidual,
-  PortSpec, PortLayout, Class, Receipt, Proposal, audit_step}` and
-  `component::conformance`.
+- Executable contract: `component::{Component, PortTangent, LoadLine,
+  StageResidual, PortSpec, PortLayout, Class, Receipt, Proposal, audit_step}`
+  and `component::conformance`.
 
 The sections after the ten required ones give the semantics of each group.
 
@@ -75,7 +75,8 @@ None.
 ## Conformance tests
 
 - `adoption::tests`, `surface/tests.rs` and `relaxation::tests`.
-- `tests/component_reference.rs` for the Component contract, with the two
+- `tests/component_reference.rs` for the Component contract and
+  `tests/load_line_reference.rs` for its load-line tier, with the three
   `compile_fail` doctests in `component`.
 - The fs-couple and fs-feec batteries named under "Purpose and layer".
 
@@ -96,8 +97,25 @@ crate is `fs_mbd::component::RigidBody`.
 **Tiers.** `Component` is mandatory: ports, class, `stored_energy_j`,
 `limit_dt_s`, `next_event_s`, `propose`, `admit`. `PortTangent` adds the JVP and
 VJP of the port map. `StageResidual` adds a residual in the component's own
-unknowns. Both optional tiers require `Component`; two `compile_fail` doctests
-pin that.
+unknowns. `LoadLine` is for a relation at power ports that is not a function of
+the flow (dry friction holds any force up to its limit at zero slip). The
+optional tiers require `Component`; three `compile_fail` doctests pin that.
+
+**The load line.** A component of class `NonSmooth` cannot be iterated on the
+flow it receives, because its effort is not a function of it. What its
+neighbours do with an effort is a function, and frozen at an iterate it is
+affine: `flow = released - compliance * effort`. `LoadLine::line_ports` names
+the power ports of role `FlowIn` the line spans (one or more, in increasing
+order: a pad on one body, a link between two). `propose_on_line(old, dt,
+inputs, compliance, new, outputs, cx)` is `propose` with the released flows in
+`inputs` at those ports and the line's square matrix `compliance`, row-major
+over the line's coefficients. The component returns the efforts its relation
+allows on that line; its candidate, its other outputs and its receipt are for
+the flows on the line, not the released ones. The matrix need not be symmetric;
+its symmetric part is not negative; a coefficient whose flow is prescribed has
+a zero row and column. With a zero matrix the call is `propose`, to the bit.
+The solver that supplies the line is the system kernel's; this crate fixes the
+call and checks an implementation of it.
 
 **State.** The system owns every state. `propose(old, dt, inputs, new, outputs,
 cx)` reads the accepted state and writes a candidate slot whose content on entry
@@ -153,7 +171,18 @@ Components poll `Cx::checkpoint` and return their own cancellation error.
 heat port passes; 20,000 driven steps close energy to 1e-11 relative; a heat
 leak, a read of the candidate slot and a wrong VJP sign each fail the law they
 break; cancellation returns the owner's error; an audit given a port list
-longer or shorter than its layout is refused.
+longer or shorter than its layout is refused. `check_load_line` checks the
+load-line tier at one point: the line's ports, the size of the matrix, purity
+(including the stale candidate slot), the step audit at the flows on the line,
+`admit`, and that a zero matrix gives `propose` to the bit. G0 tests in
+`tests/load_line_reference.rs`: a dry pad on one port conforms over 81 released
+flows, held (zero flow, zero loss, the force the line asks) and sliding (at its
+limit, the way it was released); a dry link conforms on a line over two ports
+with a matrix that is not symmetric; a loss accounted at the released flow
+fails the energy balance, a mandatory tier that differs from the line tier at
+a zero matrix fails that law, a line on a heat port and a matrix of the wrong
+size are refused. The kit cannot check that the efforts satisfy the
+component's own relation; only the component can state it.
 
 **No claim.** v0 has no entropy on stream ports, no field ports with a
 duality matrix, no multistage port values and no snapshot identity. The kit

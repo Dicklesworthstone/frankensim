@@ -8,6 +8,8 @@
 //! (first law, endpoint energy, non-negative dissipation and entropy
 //! production, residual), `admit`, and for [`PortTangent`] the JVP against
 //! central differences and the VJP against the JVP by the dot-product test.
+//! For [`LoadLine`]: the line's ports, purity, the audit at the flows on the
+//! line, and that a zero compliance gives `propose`.
 //!
 //! Not covered yet (bead `frankensim-rc-1109-root-3gc12.5.11`):
 //! [`StageResidual`](super::StageResidual) checks, unit rescaling, time
@@ -18,7 +20,8 @@ use core::fmt;
 use fs_exec::Cx;
 
 use super::{
-    Component, ContractViolation, PortLayout, PortTangent, Proposal, Receipt, StepAudit, audit_step,
+    Carrier, Component, ContractViolation, LoadLine, PortLayout, PortRole, PortTangent, Proposal,
+    Receipt, StepAudit, audit_step,
 };
 
 /// One operating point at which a component is checked.
@@ -226,6 +229,224 @@ where
         receipt,
         audit,
         outputs: first_out,
+    })
+}
+
+/// What a passing [`check_load_line`] observed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OnLine {
+    /// The step, audited at the flows on the line.
+    pub observed: Observed,
+    /// Those flows, `released - compliance * effort`, in the order of the
+    /// line's coefficients. Empty if the component asked to shorten.
+    pub flows: Vec<f64>,
+}
+
+/// One call of a step function into a fresh copy of `slot`.
+fn stepped<S, E, F>(
+    slot: &S,
+    len: usize,
+    fill: f64,
+    step: &F,
+) -> Result<(Proposal, S, Vec<f64>), Failure<E>>
+where
+    S: Clone,
+    F: Fn(&mut S, &mut [f64]) -> Result<Proposal, E>,
+{
+    let mut state = slot.clone();
+    let mut outputs = vec![fill; len];
+    let proposal = step(&mut state, &mut outputs).map_err(Failure::Owner)?;
+    Ok((proposal, state, outputs))
+}
+
+/// Check the load-line tier at one operating point.
+///
+/// `case.inputs` holds the released flows at the line's ports, and
+/// `compliance` is the line's matrix, as [`LoadLine::propose_on_line`] takes
+/// them.
+///
+/// Covered: the line's ports are power ports that receive a flow, listed in
+/// increasing order; the size of `compliance`; purity of `propose_on_line`
+/// (including independence from the stale candidate slot); the step audit
+/// at the flows on the line; `admit`; and that with a zero compliance the
+/// call is `propose`, to the bit. Not covered: that the efforts satisfy the
+/// component's own relation, which only the component can state.
+///
+/// # Errors
+/// The first [`Failure`] found.
+#[allow(clippy::too_many_lines)]
+pub fn check_load_line<C>(
+    component: &C,
+    case: &Case<'_, C::State>,
+    compliance: &[f64],
+    cx: &Cx<'_>,
+) -> Result<OnLine, Failure<C::Error>>
+where
+    C: LoadLine,
+    C::State: PartialEq + fmt::Debug,
+{
+    let ports = component.ports();
+    let layout = PortLayout::new(ports).map_err(Failure::Contract)?;
+    if case.inputs.len() != layout.input_len() {
+        return Err(Failure::Contract(ContractViolation::VectorLength {
+            vector: "inputs",
+            expected: layout.input_len(),
+            actual: case.inputs.len(),
+        }));
+    }
+
+    // Per coefficient of the line: where its flow is received and where its
+    // effort is returned.
+    let line = component.line_ports();
+    if line.is_empty() {
+        return Err(law("the line spans at least one port", "it lists none".to_owned()));
+    }
+    let mut places: Vec<(usize, usize)> = Vec::new();
+    let mut last = None;
+    for &port in line {
+        if port >= ports.len() || last.is_some_and(|before| port <= before) {
+            return Err(law(
+                "the line's ports are indices of the component's ports, in increasing order",
+                format!("{line:?} with {} ports", ports.len()),
+            ));
+        }
+        let spec = &ports[port];
+        if !matches!(spec.carrier(), Carrier::Power(_)) || spec.role() != PortRole::FlowIn {
+            return Err(law(
+                "the line's ports are power ports that receive a flow",
+                format!("port {port} is {:?} with role {:?}", spec.carrier(), spec.role()),
+            ));
+        }
+        places.extend(layout.input_range(port).zip(layout.output_range(port)));
+        last = Some(port);
+    }
+    let width = places.len();
+    if compliance.len() != width * width {
+        return Err(Failure::Contract(ContractViolation::VectorLength {
+            vector: "compliance",
+            expected: width * width,
+            actual: compliance.len(),
+        }));
+    }
+
+    let before = case.state.clone();
+    let given = |state: &mut C::State, outputs: &mut [f64]| {
+        component.propose_on_line(
+            case.state,
+            case.dt_s,
+            case.inputs,
+            compliance,
+            state,
+            outputs,
+            cx,
+        )
+    };
+    let (first, first_state, first_out) = stepped(case.state, layout.output_len(), 0.0, &given)?;
+    let (second, second_state, second_out) =
+        stepped(case.stale, layout.output_len(), f64::NAN, &given)?;
+    if *case.state != before {
+        return Err(law(
+            "propose_on_line does not change the accepted state",
+            format!("before {before:?}, after {:?}", case.state),
+        ));
+    }
+    let receipt = match (first, second) {
+        (Proposal::Step(receipt), Proposal::Step(_)) => receipt,
+        (Proposal::Shorten { dt_s }, Proposal::Shorten { dt_s: again })
+            if dt_s.to_bits() == again.to_bits() =>
+        {
+            if !(dt_s > 0.0 && dt_s < case.dt_s) {
+                return Err(law(
+                    "a shortened step is positive and below the proposal",
+                    format!("proposed {} s, offered {dt_s} s", case.dt_s),
+                ));
+            }
+            return Ok(OnLine {
+                observed: Observed::Shortened { dt_s },
+                flows: Vec::new(),
+            });
+        }
+        _ => {
+            return Err(law(
+                "propose_on_line is pure: equal arguments give equal proposals",
+                format!("first {first:?}, second {second:?}"),
+            ));
+        }
+    };
+    if first_state != second_state {
+        return Err(law(
+            "propose_on_line reads nothing from the candidate slot",
+            format!("clean slot gave {first_state:?}, stale slot gave {second_state:?}"),
+        ));
+    }
+    let same_bits = |a: &[f64], b: &[f64]| a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits());
+    if !same_bits(&first_out, &second_out) || first != second {
+        return Err(law(
+            "propose_on_line is pure: outputs and proposals are equal on repetition",
+            format!("first {first:?} {first_out:?}, second {second:?} {second_out:?}"),
+        ));
+    }
+
+    // The step is audited where it was taken: at the flows on the line.
+    let mut at_line = case.inputs.to_vec();
+    let mut flows = Vec::with_capacity(width);
+    for (row, &(input, _)) in places.iter().enumerate() {
+        let mut flow = case.inputs[input];
+        for (column, &(_, output)) in places.iter().enumerate() {
+            flow -= compliance[row * width + column] * first_out[output];
+        }
+        at_line[input] = flow;
+        flows.push(flow);
+    }
+    let stored_old = component
+        .stored_energy_j(case.state)
+        .map_err(Failure::Owner)?;
+    let stored_new = component
+        .stored_energy_j(&first_state)
+        .map_err(Failure::Owner)?;
+    let audit = audit_step(
+        ports,
+        &layout,
+        case.dt_s,
+        &at_line,
+        &first_out,
+        &receipt,
+        stored_old,
+        stored_new,
+    )
+    .map_err(Failure::Contract)?;
+    component
+        .admit(case.state, &first_state, &receipt)
+        .map_err(Failure::Owner)?;
+
+    // With nothing taken away by an effort the line is the released flows
+    // themselves, and the call is the mandatory tier's.
+    let zero = vec![0.0; width * width];
+    let unloaded = |state: &mut C::State, outputs: &mut [f64]| {
+        component.propose_on_line(case.state, case.dt_s, case.inputs, &zero, state, outputs, cx)
+    };
+    let (flat, flat_state, flat_out) = stepped(case.state, layout.output_len(), 0.0, &unloaded)?;
+    let plain = |state: &mut C::State, outputs: &mut [f64]| {
+        component.propose(case.state, case.dt_s, case.inputs, state, outputs, cx)
+    };
+    let (held, held_state, held_out) = stepped(case.state, layout.output_len(), 0.0, &plain)?;
+    if flat != held || flat_state != held_state || !same_bits(&flat_out, &held_out) {
+        return Err(law(
+            "with a zero compliance propose_on_line is propose, to the bit",
+            format!(
+                "on the line {flat:?} {flat_state:?} {flat_out:?}, held {held:?} {held_state:?} \
+                 {held_out:?}"
+            ),
+        ));
+    }
+
+    Ok(OnLine {
+        observed: Observed::Stepped {
+            receipt,
+            audit,
+            outputs: first_out,
+        },
+        flows,
     })
 }
 
