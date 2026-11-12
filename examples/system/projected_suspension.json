@@ -1,0 +1,21 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 1.0,
+  "step_s": 0.01,
+  "sample_every_s": 0.1,
+  "elements": {
+    "carriage": {
+      "kind": "rigid_network",
+      "bodies": [
+        {"mass_kg": 2.0, "principal_inertia_kg_m2": [2.0, 3.0, 4.0],
+         "position_m": [0.2, -0.1, 0.4], "velocity_m_s": [0.3, 0.2, -0.15]}
+      ],
+      "connectors": []
+    },
+    "spring": {"kind": "spring", "stiffness_n_m": 18.0, "extension_m": -0.2}
+  },
+  "connections": [
+    {"power_map": ["carriage.force0", "spring.a"], "matrix": [[0.6, -0.8, 0.0]]},
+    {"prescribe": "spring.b", "velocity_m_s": 0}
+  ]
+}

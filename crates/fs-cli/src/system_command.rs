@@ -40,8 +40,8 @@ use fs_system::constitutive::{
 };
 use fs_system::elements::{
     Admittance, Conductance, Damper, FlowSource, Force, GasContents, GasVolume, Gyrator,
-    HeatCapacity, HeatNode, Heater, Mass, Motion, Restriction, SourceAccount, Spring, Storage,
-    Waveform,
+    HeatCapacity, HeatNode, Heater, Mass, Motion, Resistance, Restriction, SourceAccount, Spring,
+    Storage, Waveform,
 };
 use fs_system::{
     AdaptiveConfig, AdaptiveError, AdaptiveReport, Checkpoint, ErrorNorm, ErrorTolerance,
@@ -70,6 +70,8 @@ const MAX_NETWORK_CONNECTORS: usize = 256;
 const MAX_CARRIED: usize = 16;
 /// Bodies one `heat_node` may join.
 const MAX_NODE_BODIES: usize = 64;
+/// Coordinates in one dense, positive-definite resistance law.
+const MAX_RESISTANCE_COORDINATES: usize = 64;
 const ADAPTIVE_NO_CLAIM: &str = "step-doubling estimates control the declared state coordinates and source-work increments under the selected order assumption; they are local numerical estimates, not global error bounds or physical validation; dissipated heat and interface balances retain the kernel's separate ledger audits; no material-card resolution, contact, friction or phase change";
 
 const HELP: &str = "Usage: frankensim [--json] system <scene.json>
@@ -104,6 +106,11 @@ Elements (ports in brackets; SI units in every field name):
   mass           mass_kg, position_m = 0, velocity_m_s = 0            [p]
   spring         stiffness_n_m, cubic_n_m3 = 0, extension_m = 0       [a, b]
   damper         damping_n_s_m                                        [a, b, heat]
+  resistance_matrix domain, matrix (square, 1 to 64 rows)              [u, heat]
+                 domain is translation, rotation or electrical; matrix
+                 is symmetric positive definite, in SI effort/flow units
+                 (N s/m, N m s/rad or ohm). u receives a flow vector and
+                 returns matrix times that vector; heat must be connected.
   force          force_n (waveform)                                   [p]
   heat_capacity  capacity_j_k, temperature_k                          [heat]
                  (and a signal output, temperature: its temperature at the
@@ -219,6 +226,15 @@ Connections, ports written element.port:
   {\"transformer\": [effort_in_port, flow_in_port], \"ratio\": r}
                           lossless signed flow ratio r; effort returns with
                           the same factor; endpoints may be in different domains
+  {\"power_map\": [effort_in_port, flow_in_port], \"matrix\": [[...], ...]}
+                          a constant rectangular power map P: one row per
+                          coefficient of the second port, one column per
+                          coefficient of the first. Flow passes as -P f;
+                          effort returns by the metric adjoint (P transpose
+                          for ordinary ports). For a 3-D body's force port
+                          and a scalar spring: matrix = [[nx, ny, nz]].
+                          Entries carry the SI conversion and orientation;
+                          heat, stream and signal ports are not power maps.
   A member of a join or common_effort may be written
   {\"port\": element.port, \"ratio\": r}: it then sits behind its own
   transformer of ratio r, so one node carries several loads at different
@@ -451,6 +467,8 @@ enum Kind {
     Compliance(Domain),
     /// Effort from flow, with a heat port (damper, rotary damper, resistor).
     Resistance(Domain),
+    /// A positive-definite resistance over several coordinates of one domain.
+    ResistanceMatrix,
     /// A prescribed effort (force, torque, voltage).
     Source(Domain),
     /// Charge storage setting the voltage of a parallel electrical node.
@@ -481,10 +499,11 @@ enum Kind {
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 26] = [
+    const TABLE: [(&'static str, Self); 27] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
+        ("resistance_matrix", Self::ResistanceMatrix),
         ("force", Self::Source(Domain::Translation)),
         ("inertia", Self::Inertance(Domain::Rotation)),
         ("torsion_spring", Self::Compliance(Domain::Rotation)),
@@ -788,6 +807,65 @@ fn compliance(
         format!("{what}: {} must be positive and the cubic term finite", names.stiffness)
     })?;
     add(builder, name, spring, extension)
+}
+
+/// A finite matrix in the row-major order used by the kernel's owners.
+fn coefficient_matrix(
+    value: Option<&J>,
+    row_count: usize,
+    column_count: usize,
+    what: &str,
+) -> Result<Vec<f64>, String> {
+    let rows = value
+        .and_then(J::as_array)
+        .filter(|rows| rows.len() == row_count)
+        .ok_or_else(|| format!("{what}: matrix row count must be {row_count}"))?;
+    let entries = row_count
+        .checked_mul(column_count)
+        .ok_or_else(|| format!("{what}: matrix dimensions are too large"))?;
+    let mut matrix = Vec::with_capacity(entries);
+    for (row_index, row) in rows.iter().enumerate() {
+        let values = row
+            .as_array()
+            .filter(|values| values.len() == column_count)
+            .ok_or_else(|| {
+                format!("{what}: matrix[{row_index}] column count must be {column_count}")
+            })?;
+        for (column, value) in values.iter().enumerate() {
+            let coefficient = value
+                .as_f64()
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| {
+                    format!("{what}: matrix[{row_index}][{column}] must be a finite number")
+                })?;
+            matrix.push(coefficient);
+        }
+    }
+    Ok(matrix)
+}
+
+fn resistance_matrix(
+    builder: &mut SystemBuilder,
+    name: &str,
+    definition: &J,
+    what: &str,
+) -> Result<(NodeId, Vec<PortSpec>), Refusal> {
+    fields(definition, &["kind", "domain", "matrix"], what)?;
+    let domain = definition
+        .str_field("domain")
+        .and_then(Domain::parse)
+        .ok_or_else(|| format!("{what}: domain is one of translation, rotation, electrical"))?;
+    let rows = definition
+        .get("matrix")
+        .and_then(J::as_array)
+        .filter(|rows| (1..=MAX_RESISTANCE_COORDINATES).contains(&rows.len()))
+        .ok_or_else(|| {
+            format!("{what}: matrix must have 1 to {MAX_RESISTANCE_COORDINATES} square rows")
+        })?;
+    let matrix = coefficient_matrix(definition.get("matrix"), rows.len(), rows.len(), what)?;
+    let resistance = Resistance::new(domain.port_kind(), matrix)
+        .map_err(|error| Refusal::Input(format!("{what}: {error}")))?;
+    add(builder, name, resistance, ())
 }
 
 fn gyrator(
@@ -1351,6 +1429,7 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
                 .map_err(|_| format!("{what}: {} must be positive", names.resistance))?;
             add(builder, name, damper, ())?
         }
+        Kind::ResistanceMatrix => resistance_matrix(builder, name, definition, &what)?,
         Kind::Source(domain) => {
             let names = domain.names();
             fields(definition, &["kind", names.effort], &what)?;
@@ -1760,6 +1839,25 @@ fn transformer(
         .map_err(|e| Refusal::Admission(format!("{what}: {e}")))
 }
 
+/// A rectangular virtual-work map, with the adjoint owned by the kernel.
+fn power_map(
+    builder: &mut SystemBuilder,
+    elements: &[Element],
+    connection: &J,
+    what: &str,
+) -> Result<(), Refusal> {
+    fields(connection, &["power_map", "matrix"], what)?;
+    let Some([a, b]) = connection.get("power_map").and_then(J::as_array) else {
+        return Err(format!("{what}: power_map is [effort_in_port, flow_in_port]").into());
+    };
+    let a = resolve(builder, elements, &port_text(a, what)?)?;
+    let b = resolve(builder, elements, &port_text(b, what)?)?;
+    let map = coefficient_matrix(connection.get("matrix"), b.width, a.width, what)?;
+    builder
+        .power_map(a.port, b.port, map)
+        .map_err(|error| Refusal::Admission(format!("{what}: {error}")))
+}
+
 fn route(
     builder: &mut SystemBuilder,
     elements: &[Element],
@@ -2001,6 +2099,7 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             Kind::HeatCapacity => vec![("temperature_k", Coordinate::Scalar)],
             Kind::Source(_) | Kind::CurrentSource | Kind::Heater => vec![("energy_in_j", Coordinate::SourceWork)],
             Kind::Resistance(_)
+            | Kind::ResistanceMatrix
             | Kind::ResistorBranch
             | Kind::Gyrator
             | Kind::Conductance
@@ -2123,6 +2222,8 @@ fn load(path: &Path) -> Result<Device, Refusal> {
             join(&mut builder, &elements, &ports, &mut guesses, common_effort, &what)?;
         } else if connection.get("transformer").is_some() {
             transformer(&mut builder, &elements, connection, &what)?;
+        } else if connection.get("power_map").is_some() {
+            power_map(&mut builder, &elements, connection, &what)?;
         } else if connection.get("route").is_some() {
             route(&mut builder, &elements, connection, &mut guesses, &what)?;
         } else if connection.get("signal").is_some() {
@@ -2131,7 +2232,8 @@ fn load(path: &Path) -> Result<Device, Refusal> {
             prescribe(&mut builder, &elements, connection, &what)?;
         } else {
             return Err(format!(
-                "{what}: expected join, common_effort, transformer, route, signal or prescribe"
+                "{what}: expected join, common_effort, transformer, power_map, route, \
+                 signal or prescribe"
             )
             .into());
         }
@@ -2256,6 +2358,9 @@ impl Device {
         if element.kind == Kind::GasVolume {
             return self.gas_values(element);
         }
+        if element.kind == Kind::ResistanceMatrix {
+            return self.resistance_values(element);
+        }
         self.lumped_values(element)
             .into_iter()
             .map(|(key, value)| (key.to_owned(), value))
@@ -2327,6 +2432,42 @@ impl Device {
         values
     }
 
+    /// A resistance has no state: these are its last-step mean efforts and heat.
+    fn resistance_values(&self, element: &Element) -> Vec<(String, f64)> {
+        let Some(port) = element.ports.iter().find(|port| port.id().as_str() == "u") else {
+            return Vec::new();
+        };
+        let Carrier::Power(kind) = port.carrier() else {
+            return Vec::new();
+        };
+        let Some(domain) = Domain::of(kind) else {
+            return Vec::new();
+        };
+        let output = |name: &str| {
+            self.system
+                .port(element.node, name)
+                .filter(|_| self.system.steps() > 0)
+                .map(|port| self.system.last_output(port))
+        };
+        let efforts = output("u");
+        let mut values: Vec<_> = (0..port.width())
+            .map(|row| {
+                (
+                    format!("u{row}.{}", domain.names().effort),
+                    efforts
+                        .and_then(|values| values.get(row))
+                        .copied()
+                        .unwrap_or(f64::NAN),
+                )
+            })
+            .collect();
+        let heat_w = output("heat")
+            .and_then(|values| values.first())
+            .map_or(f64::NAN, |value| -value);
+        values.push(("heat_w".to_owned(), heat_w));
+        values
+    }
+
     fn lumped_values(&self, element: &Element) -> Vec<(&'static str, f64)> {
         let system = &self.system;
         // Before the first step there is no last step: those values are null.
@@ -2394,8 +2535,11 @@ impl Device {
                 };
                 vec![("mass_rate_kg_s", crossing[0]), ("enthalpy_rate_w", crossing[1])]
             }
-            // Read by `network_values` and `gas_values`.
-            Kind::RigidNetwork | Kind::ViscoelasticNetwork | Kind::GasVolume => Vec::new(),
+            // Read by their vector-valued report functions.
+            Kind::RigidNetwork
+            | Kind::ViscoelasticNetwork
+            | Kind::GasVolume
+            | Kind::ResistanceMatrix => Vec::new(),
         }
     }
 

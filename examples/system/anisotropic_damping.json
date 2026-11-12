@@ -1,0 +1,26 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 1.0,
+  "step_s": 0.01,
+  "sample_every_s": 0.1,
+  "elements": {
+    "carriage": {
+      "kind": "rigid_network",
+      "bodies": [
+        {"mass_kg": 2.0, "principal_inertia_kg_m2": [2.0, 3.0, 4.0],
+         "position_m": [0.0, 0.0, 0.0], "velocity_m_s": [1.0, 0.0, 0.5]}
+      ],
+      "connectors": []
+    },
+    "damping": {
+      "kind": "resistance_matrix",
+      "domain": "translation",
+      "matrix": [[4.0, 1.0, 0.0], [1.0, 4.0, 0.0], [0.0, 0.0, 2.0]]
+    },
+    "case": {"kind": "heat_capacity", "capacity_j_k": 10.0, "temperature_k": 300.0}
+  },
+  "connections": [
+    {"power_map": ["carriage.force0", "damping.u"], "matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]},
+    {"route": "damping.heat", "to": [["case.heat", 1.0]]}
+  ]
+}

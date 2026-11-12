@@ -824,9 +824,9 @@ at that step); a falling body spun by a prescribed torque against `v = -g t`,
 `z = z0 - g t^2 / 2`, `omega = tau t / I` and the torque's work; refusals. No
 claim: a body's principal axes are its own axes and its centre of mass its
 origin; damping is constant and diagonal; no Maxwell branches, actuators or
-temperature-dependent damping in a `rigid_network`; a force port cannot be
-joined to a lumped element; `adaptive` refuses a scene that holds a network
-of rigid bodies.
+temperature-dependent damping in a `rigid_network`; `adaptive` refuses a
+scene that holds a network of rigid bodies. Scalar loads use an explicit
+`power_map` to connect to the three-component force ports.
 
 A `viscoelastic_network` takes the same fields and lowers to
 `fs_mbd::component::relaxation::RelaxationNetwork` (the fs-mbd relaxation
@@ -969,6 +969,35 @@ It may connect distinct power domains and obeys `f_b = -ratio * f_a` and
 Parallel RLC and geared-oscillator scenes in `examples/system/` exercise these
 paths; `tests/system_command.rs` compares them to independent midpoint
 references, including source work, resistor heat and reflected stiffness.
+
+A `power_map: [effort_in_port, flow_in_port]` takes a nested `matrix` with
+one row per coefficient of the second port and one column per coefficient
+of the first. Exact rectangular shape and finite coefficients are required.
+The row-major values lower to `SystemBuilder::power_map`, which owns the
+metric adjoint, port admission and power audit. Ordinary ports obey
+`f_b = -P f_a` and `e_a = P^T e_b`; coefficients retain their SI conversion
+and sign. Heat, stream and signal ports refuse. Rank-deficient maps leave
+unmapped directions free. The projected-suspension scene and binary tests
+check the three-dimensional owner against an independent oscillator solution,
+free transverse motion, signed/scaled maps, energy closure and refusals.
+A constant map does not infer geometry or follow a rotating attachment.
+
+A `resistance_matrix` element takes `domain` (`translation`, `rotation` or
+`electrical`) and a finite square `matrix` of 1 to 64 coordinates, in SI
+effort per flow (N s/m, N m s/rad or ohm). It lowers to the existing
+`fs_system::elements::Resistance` with its analytic tangent; the owner
+requires exact symmetry and positive definiteness. Its vector port `u`
+receives flow and returns `R u`; all absorbed `u^T R u` leaves its mandatory
+`heat` port. Prescribed flows follow the existing attachment-flow sign
+convention. It has no state or adaptive error account. Last-step probes are
+`u<i>.force_n`, `u<i>.torque_n_m` or `u<i>.voltage_v`, plus `heat_w`; before
+the first step these are null. `examples/system/anisotropic_damping.json`
+connects a full off-diagonal damping tensor to a 3-D rigid body through a
+power map and sends its heat to a case. Binary regressions check independently
+diagonalized decay modes, position, cross-axis motion, last-step efforts and
+all lost kinetic energy against stored heat, all three power domains with
+adaptive stepping, matrix admission and mandatory heat wiring. This is a
+constant linear resistance; no temperature or geometry dependence is inferred.
 
 A member of a `join` or `common_effort` list may be written
 `{"port": element.port, "ratio": r}`. If any member is, the list lowers to

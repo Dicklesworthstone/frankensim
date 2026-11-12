@@ -22,6 +22,8 @@ is the kernel's state and its energy and entropy ledger.
 | `parallel_rlc.json` | a current source drives a capacitor, inductor and resistor in parallel; all Joule heat warms the case | independent coupled voltage/current equations, source work, electrical storage and heat |
 | `nonlinear_rlc.json` | the same topology with voltage-dependent capacitance and flux-dependent inductance, crossing both curves' knees | independent charge/flux differential equations, original constitutive energies and Joule heat |
 | `geared_oscillator.json` | an ideal 2.5:1 transformer couples a mass to an anchored spring | reflected stiffness `ratio² × stiffness`, the midpoint oscillation phase and conserved energy |
+| `projected_suspension.json` | a real 3-D rigid body suspended by a scalar spring along an oblique direction through a rectangular power map | the projected oscillator, free transverse motion, signed/scaled transmissions and energy closure |
+| `anisotropic_damping.json` | a 3-D rigid body slowed by a full damping tensor; off-diagonal terms induce transverse motion and every lost joule heats the case | independently diagonalized decay modes, position, last-step forces and kinetic-to-thermal energy transfer |
 | `rack_and_pinion.json` | one pinion inertia carrying a motor torque and a bearing directly, and a rack's spring, friction and load through the pinion radius: three members of one join, each behind its own ratio | the midpoint rule for the pinion's one equation with the reflected stiffness and friction; motor work, the load's received work and the heat |
 | `pneumatic_cylinder.json` | a 2 l tank of air at 6 bar feeds a cylinder through a valve; the piston pushes a spring and the outside pressure out by 104 mm; the tank cools to 281 K as it empties, the chamber warms to 325 K as it fills and gives heat to the barrel, which also takes the seal's friction | an independent RK4 integration of the cylinder's seven equations (4.9e-9 at 3 s, second order in mid-stroke), conservation of the gas, and the force balance at rest |
 | `damped_pair.json` | two rigid bodies in three dimensions closing at 2 m/s on a viscous connector, stepped by the fs-mbd network owner (`rigid_network`); a quarter of the connector's heat warms a shell, half an oil bath, the rest goes to the air | the closed form: each momentum decays as `exp(-0.7 t)`, the heat is `2 (1 - exp(-1.4 t))` J, split 25 / 50 / 25 |
@@ -275,3 +277,41 @@ flow unchanged. Members may be in other power domains than the node; heat
 ports take no ratio, and neither does the node port. The pinion settles at
 `(0.6 - 0.24) / 1.6 = 0.225` rad, 4.5 mm of rack travel. The same form
 works in a `common_effort` list.
+
+## Rectangular power maps
+
+`projected_suspension.json` connects a 2 kg rigid body to an 18 N/m scalar
+spring along the fixed world direction `[0.6, -0.8, 0]`:
+
+```json
+{"power_map": ["carriage.force0", "spring.a"], "matrix": [[0.6, -0.8, 0.0]]}
+```
+
+Rows follow the second port and columns the first. The spring receives minus
+the projected velocity; its force returns through the transpose, preserving
+virtual work. Its initial extension is minus the projected position. The
+body oscillates along that direction and moves freely in the perpendicular
+plane. Doubling the map reflects four times the stiffness; entries are not
+normalized. Matrices must have the exact port widths and finite entries.
+Heat, stream and signal ports refuse. A fixed matrix neither tracks a
+rotating attachment direction nor infers geometry.
+
+## Matrix resistance and damping
+
+`anisotropic_damping.json` starts a 2 kg body moving in the x-z plane and
+applies the damping matrix `[[4, 1, 0], [1, 4, 0], [0, 0, 2]]` N s/m through
+an identity power map. The off-diagonal terms produce a y velocity despite
+zero initial y motion. Its independent decay rates are 2.5/s and 1.5/s along
+the two diagonals in the x-y plane, and 1/s along z. Every joule removed from
+motion warms the 10 J/K case, starting at 300 K.
+
+The `resistance_matrix` element declares `domain` as `translation`,
+`rotation` or `electrical` and a square `matrix` of 1 to 64 coordinates.
+Coefficients are respectively in N s/m, N m s/rad or ohm. The existing
+resistance owner requires finite entries, exact symmetry and positive
+definiteness. Its `u` port receives the vector flow and returns the vector
+effort; its `heat` port must be routed or prescribed. Last-step probes
+`u0.force_n`, `u1.force_n`, ... (or `torque_n_m` / `voltage_v` for the other
+domains) and `heat_w` report the accepted mean response. The element stores
+no energy and needs no adaptive state tolerance. These are authored constant
+coefficients, with no material or temperature law inferred.

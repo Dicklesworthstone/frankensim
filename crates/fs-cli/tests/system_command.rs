@@ -548,6 +548,404 @@ fn the_transformer_scene_has_reflected_stiffness_with_either_signed_ratio() {
 }
 
 #[test]
+fn a_rectangular_power_map_suspends_a_rigid_body_without_constraining_transverse_motion() {
+    let scene = std::fs::read_to_string(example("projected_suspension.json")).unwrap();
+    let (mass, stiffness, dt, steps) = (2.0_f64, 18.0_f64, 0.01_f64, 100_u32);
+    let direction = [0.6_f64, -0.8, 0.0];
+    let initial_x = [0.2_f64, -0.1, 0.4];
+    let initial_v = [0.3_f64, 0.2, -0.15];
+    let (q0, u0) = (0.2_f64, 0.02_f64);
+    for (name, ratio) in [("forward", 1.0_f64), ("reversed", -1.0), ("scaled", 2.0)] {
+        let changed = scene
+            .replace(
+                "[[0.6, -0.8, 0.0]]",
+                &format!(
+                    "[[{}, {}, 0.0]]",
+                    ratio * direction[0],
+                    ratio * direction[1]
+                ),
+            )
+            .replace(
+                "\"extension_m\": -0.2",
+                &format!("\"extension_m\": {}", -ratio * q0),
+            );
+        let path = scratch(&format!("projection_{name}.json"), &changed);
+        let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+        assert_eq!(code, 0, "{name}: {stderr}");
+        assert!(stderr.is_empty());
+        let time = f64::from(steps) * dt;
+        assert!((value(&json, "\"schema\"", "time_s") - time).abs() <= 1.0e-12);
+
+        // With n a unit vector, x = n q + x_perp and q'' = -k r^2 q / m.
+        // The native body under a held force and the spring's discrete
+        // gradient give the midpoint phase; transverse motion stays free.
+        let omega = (stiffness * ratio * ratio / mass).sqrt();
+        let phase = f64::from(steps) * 2.0 * (0.5 * omega * dt).atan();
+        let q = q0 * phase.cos() + u0 / omega * phase.sin();
+        let u = u0 * phase.cos() - omega * q0 * phase.sin();
+        let mut kinetic = 0.0;
+        for (axis, suffix) in ["x", "y", "z"].into_iter().enumerate() {
+            let transverse_v = initial_v[axis] - direction[axis] * u0;
+            let expected_x = initial_x[axis] + time * transverse_v + direction[axis] * (q - q0);
+            let expected_v = transverse_v + direction[axis] * u;
+            let position = value(
+                &json,
+                &element("carriage"),
+                &format!("body0.position_{suffix}_m"),
+            );
+            let velocity = value(
+                &json,
+                &element("carriage"),
+                &format!("body0.velocity_{suffix}_m_s"),
+            );
+            assert!(
+                (position - expected_x).abs() <= 1.0e-9,
+                "{name} {suffix}: {position} vs {expected_x}"
+            );
+            assert!(
+                (velocity - expected_v).abs() <= 1.0e-9,
+                "{name} {suffix}: {velocity} vs {expected_v}"
+            );
+            kinetic += 0.5 * mass * velocity * velocity;
+        }
+        let extension = value(&json, &element("spring"), "extension_m");
+        assert!(
+            (extension + ratio * q).abs() <= 1.0e-9,
+            "{name}: {extension} vs {}",
+            -ratio * q
+        );
+        let initial_energy = 0.5 * mass * initial_v.iter().map(|v| v * v).sum::<f64>()
+            + 0.5 * stiffness * (ratio * q0).powi(2);
+        assert!(
+            (kinetic + 0.5 * stiffness * extension * extension - initial_energy).abs() <= 1.0e-9
+        );
+        assert!(value(&json, "\"totals\"", "energy_residual_j").abs() <= 1.0e-9);
+    }
+}
+
+#[test]
+fn power_map_scenes_require_rectangular_finite_matrices_and_valid_ports() {
+    let scene = std::fs::read_to_string(example("projected_suspension.json")).unwrap();
+    let matrix = "[[0.6, -0.8, 0.0]]";
+    for (name, changed, reason) in [
+        ("scalar", "0.6", "matrix row count must be 1"),
+        ("empty", "[]", "matrix row count must be 1"),
+        (
+            "transposed",
+            "[[0.6], [-0.8], [0.0]]",
+            "matrix row count must be 1",
+        ),
+        ("short", "[[0.6, -0.8]]", "matrix[0] column count must be 3"),
+        ("row_scalar", "[0.6]", "matrix[0] column count must be 3"),
+        (
+            "text",
+            "[[0.6, \"west\", 0.0]]",
+            "matrix[0][1] must be a finite number",
+        ),
+        ("nonfinite", "[[0.6, 1e999, 0.0]]", "not finite"),
+    ] {
+        let (code, stderr) = refused(&format!("map_{name}.json"), &scene.replace(matrix, changed));
+        assert_eq!(code, 3, "{name}: {stderr}");
+        assert!(stderr.contains(reason), "{name}: {stderr}");
+    }
+    for (name, from, to, reason) in [
+        (
+            "missing_matrix",
+            ", \"matrix\": [[0.6, -0.8, 0.0]]",
+            "",
+            "matrix row count must be 1",
+        ),
+        (
+            "unknown_field",
+            "\"matrix\":",
+            "\"weights\":",
+            "unsupported field",
+        ),
+        (
+            "missing_port",
+            "[\"carriage.force0\", \"spring.a\"]",
+            "[\"carriage.force0\"]",
+            "power_map is",
+        ),
+        (
+            "port_type",
+            "\"carriage.force0\"",
+            "7",
+            "a port is a string",
+        ),
+        (
+            "port_spelling",
+            "\"carriage.force0\"",
+            "\"carriage\"",
+            "write it as element.port",
+        ),
+        (
+            "unknown_element",
+            "\"carriage.force0\"",
+            "\"missing.force0\"",
+            "no element named",
+        ),
+        (
+            "unknown_port",
+            "\"carriage.force0\"",
+            "\"carriage.force1\"",
+            "a rigid_network has ports",
+        ),
+    ] {
+        assert!(scene.contains(from), "{name}: {from:?}");
+        let (code, stderr) = refused(&format!("map_{name}.json"), &scene.replace(from, to));
+        assert_eq!(code, 3, "{name}: {stderr}");
+        assert!(stderr.contains(reason), "{name}: {stderr}");
+    }
+    // Valid matrix syntax still goes through the kernel's role, carrier
+    // and connection-ownership checks.
+    let backwards = scene
+        .replace(
+            "[\"carriage.force0\", \"spring.a\"]",
+            "[\"spring.a\", \"carriage.force0\"]",
+        )
+        .replace(matrix, "[[0.6], [-0.8], [0.0]]");
+    let (code, stderr) = refused("map_roles.json", &backwards);
+    assert_eq!(code, 4, "{stderr}");
+    assert!(stderr.contains("spring.a"), "{stderr}");
+    let heat = scene
+        .replace(
+            "\"spring\": {",
+            "\"case\": {\"kind\": \"heat_capacity\", \"capacity_j_k\": 5, \"temperature_k\": 300},\n    \"spring\": {",
+        )
+        .replace("[\"carriage.force0\", \"spring.a\"]", "[\"carriage.force0\", \"case.heat\"]");
+    let (code, stderr) = refused("map_heat.json", &heat);
+    assert_eq!(code, 4, "{stderr}");
+    assert!(stderr.contains("case.heat"), "{stderr}");
+    let duplicate = scene.replace(
+        "{\"prescribe\": \"spring.b\"",
+        "{\"prescribe\": \"carriage.force0\", \"force_n\": [0, 0, 0]},\n    {\"prescribe\": \"spring.b\"",
+    );
+    let (code, stderr) = refused("map_connected_twice.json", &duplicate);
+    assert_eq!(code, 4, "{stderr}");
+    assert!(stderr.contains("carriage.force0"), "{stderr}");
+}
+
+#[test]
+fn a_resistance_matrix_couples_rigid_body_motion_and_routes_all_lost_energy_to_heat() {
+    let (code, json, stderr) =
+        run_binary(&["--json", "system", &example("anisotropic_damping.json")]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.is_empty());
+    let (dt, steps) = (0.01_f64, 100_i32);
+    // R/m has the independent modes (x+y), (x-y), z with rates 2.5, 1.5, 1.
+    // The held-force body and the resistance close at midpoint velocity.
+    let decay = |rate: f64| ((1.0 - 0.5 * rate * dt) / (1.0 + 0.5 * rate * dt)).powi(steps);
+    let (fast, slow, vertical) = (decay(2.5), decay(1.5), decay(1.0));
+    let expected_v = [0.5 * (fast + slow), 0.5 * (fast - slow), 0.5 * vertical];
+    let expected_x = [
+        0.5 * ((1.0 - fast) / 2.5 + (1.0 - slow) / 1.5),
+        0.5 * ((1.0 - fast) / 2.5 - (1.0 - slow) / 1.5),
+        0.5 * (1.0 - vertical),
+    ];
+    assert!(
+        expected_v[1] < 0.0,
+        "off-diagonal damping excites transverse motion"
+    );
+    let mut kinetic = 0.0;
+    for (axis, suffix) in ["x", "y", "z"].into_iter().enumerate() {
+        let position = value(
+            &json,
+            &element("carriage"),
+            &format!("body0.position_{suffix}_m"),
+        );
+        let velocity = value(
+            &json,
+            &element("carriage"),
+            &format!("body0.velocity_{suffix}_m_s"),
+        );
+        assert!(
+            (position - expected_x[axis]).abs() <= 1.0e-9,
+            "{suffix}: {position} vs {}",
+            expected_x[axis]
+        );
+        assert!(
+            (velocity - expected_v[axis]).abs() <= 1.0e-9,
+            "{suffix}: {velocity} vs {}",
+            expected_v[axis]
+        );
+        kinetic += velocity * velocity; // m = 2 kg
+    }
+    let heat = 1.25 - expected_v.iter().map(|v| v * v).sum::<f64>();
+    let dissipated = value(&json, &element("damping"), "dissipated_j");
+    let stored_heat = value(&json, &element("case"), "stored_change_j");
+    let temperature = value(&json, &element("case"), "temperature_k");
+    assert!(
+        (dissipated - heat).abs() <= 1.0e-9,
+        "{dissipated} vs {heat}"
+    );
+    assert!(
+        (stored_heat - heat).abs() <= 1.0e-9,
+        "{stored_heat} vs {heat}"
+    );
+    assert!((temperature - 300.0 - heat / 10.0).abs() <= 1.0e-9);
+    assert!((kinetic + stored_heat - 1.25).abs() <= 1.0e-9);
+    assert!(value(&json, "\"totals\"", "energy_residual_j").abs() <= 1.0e-9);
+    assert!(value(&json, "\"totals\"", "entropy_generated_j_per_k") > 0.0);
+
+    // Probes are means of the last step, not the final endpoint force.
+    let fast_mean = fast / (1.0 - 0.5 * 2.5 * dt);
+    let slow_mean = slow / (1.0 - 0.5 * 1.5 * dt);
+    let mean = [
+        0.5 * (fast_mean + slow_mean),
+        0.5 * (fast_mean - slow_mean),
+        0.5 * vertical / (1.0 - 0.5 * dt),
+    ];
+    let force = [
+        -4.0 * mean[0] - mean[1],
+        -mean[0] - 4.0 * mean[1],
+        -2.0 * mean[2],
+    ];
+    for (row, expected) in force.into_iter().enumerate() {
+        assert!(
+            (value(&json, &element("damping"), &format!("u{row}.force_n")) - expected).abs()
+                <= 1.0e-9
+        );
+    }
+    let heat_w: f64 = force
+        .iter()
+        .zip(mean)
+        .map(|(force, flow)| -force * flow)
+        .sum();
+    assert!((value(&json, &element("damping"), "heat_w") - heat_w).abs() <= 1.0e-9);
+}
+
+#[test]
+fn resistance_matrices_use_the_declared_domain_and_need_no_adaptive_state_account() {
+    let scene = r#"{
+  "schema": "frankensim.system.v0", "duration_s": 0.25, "step_s": 0.25,
+  "adaptive": {"order": 2, "tolerances": {
+    "case.temperature_k": {"absolute": 1e-8, "relative": 0}
+  }},
+  "elements": {
+    "loss": {"kind": "resistance_matrix", "domain": "translation", "matrix": [[3.0]]},
+    "case": {"kind": "heat_capacity", "capacity_j_k": 10, "temperature_k": 300}
+  },
+  "connections": [
+    {"prescribe": "loss.u", "velocity_m_s": 2},
+    {"route": "loss.heat", "to": [["case.heat", 1]]}
+  ]
+}"#;
+    for (domain, flow, effort) in [
+        ("translation", "velocity_m_s", "force_n"),
+        ("rotation", "angular_velocity_rad_s", "torque_n_m"),
+        ("electrical", "current_a", "voltage_v"),
+    ] {
+        let changed = scene
+            .replace("translation", domain)
+            .replace("velocity_m_s", flow);
+        let path = scratch(&format!("resistance_{domain}.json"), &changed);
+        let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+        assert_eq!(code, 0, "{domain}: {stderr}");
+        // A prescribed attachment flow enters the element with the opposite sign.
+        assert!((value(&json, &element("loss"), &format!("u0.{effort}")) + 6.0).abs() <= 1.0e-12);
+        assert!((value(&json, &element("loss"), "heat_w") - 12.0).abs() <= 1.0e-12);
+        assert!((value(&json, &element("loss"), "dissipated_j") - 3.0).abs() <= 1.0e-12);
+        assert!((value(&json, &element("case"), "temperature_k") - 300.3).abs() <= 1.0e-11);
+        assert!(value(&json, "\"totals\"", "energy_residual_j").abs() <= 1.0e-10);
+    }
+}
+
+#[test]
+fn resistance_matrix_scenes_refuse_invalid_laws_and_unconnected_heat() {
+    let scene = std::fs::read_to_string(example("anisotropic_damping.json")).unwrap();
+    let matrix = "[[4.0, 1.0, 0.0], [1.0, 4.0, 0.0], [0.0, 0.0, 2.0]]";
+    for (name, changed, reason) in [
+        ("empty", "[]", "matrix must have 1 to 64 square rows"),
+        ("scalar", "2", "matrix must have 1 to 64 square rows"),
+        (
+            "ragged",
+            "[[4, 1], [1, 4, 0], [0, 0, 2]]",
+            "matrix[0] column count must be 3",
+        ),
+        (
+            "row_scalar",
+            "[4, 4, 2]",
+            "matrix[0] column count must be 3",
+        ),
+        (
+            "text",
+            "[[4, 1, 0], [1, \"four\", 0], [0, 0, 2]]",
+            "matrix[1][1] must be a finite number",
+        ),
+        (
+            "nonfinite",
+            "[[4, 1, 0], [1, 1e999, 0], [0, 0, 2]]",
+            "not finite",
+        ),
+        (
+            "asymmetric",
+            "[[4, 1, 0], [2, 4, 0], [0, 0, 2]]",
+            "differs from its mirror",
+        ),
+        (
+            "semidefinite",
+            "[[1, 1, 0], [1, 1, 0], [0, 0, 2]]",
+            "not positive definite",
+        ),
+        (
+            "indefinite",
+            "[[1, 2, 0], [2, 1, 0], [0, 0, 2]]",
+            "not positive definite",
+        ),
+    ] {
+        let (code, stderr) = refused(
+            &format!("resistance_{name}.json"),
+            &scene.replace(matrix, changed),
+        );
+        assert_eq!(code, 3, "{name}: {stderr}");
+        assert!(stderr.contains(reason), "{name}: {stderr}");
+    }
+    let oversized = format!("[{}]", vec!["[1]"; 65].join(","));
+    let (code, stderr) = refused(
+        "resistance_oversized.json",
+        &scene.replace(matrix, &oversized),
+    );
+    assert_eq!(code, 3, "{stderr}");
+    assert!(
+        stderr.contains("matrix must have 1 to 64 square rows"),
+        "{stderr}"
+    );
+    for (name, from, to, reason) in [
+        (
+            "domain",
+            "\"domain\": \"translation\"",
+            "\"domain\": \"heat\"",
+            "domain is one of",
+        ),
+        (
+            "missing_domain",
+            "\"domain\": \"translation\",",
+            "",
+            "domain is one of",
+        ),
+        (
+            "unknown_field",
+            "\"domain\":",
+            "\"units\":",
+            "unsupported field",
+        ),
+    ] {
+        assert!(scene.contains(from));
+        let (code, stderr) = refused(&format!("resistance_{name}.json"), &scene.replace(from, to));
+        assert_eq!(code, 3, "{name}: {stderr}");
+        assert!(stderr.contains(reason), "{name}: {stderr}");
+    }
+    let no_heat = scene.replace(
+        "{\"route\": \"damping.heat\", \"to\": [[\"case.heat\", 1.0]]}",
+        "{\"prescribe\": \"case.heat\", \"heat_rate_w\": 0}",
+    );
+    let (code, stderr) = refused("resistance_unconnected_heat.json", &no_heat);
+    assert_eq!(code, 4, "{stderr}");
+    assert!(stderr.contains("damping.heat"), "{stderr}");
+}
+
+#[test]
 fn library_and_binary_give_the_same_bytes_and_text_mode_reports_the_ledger() {
     let scene = example("quarter_car.json");
     let library = fs_cli::run(["--json", "system", &scene].map(str::to_owned));
