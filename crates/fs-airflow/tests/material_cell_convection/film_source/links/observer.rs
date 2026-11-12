@@ -93,11 +93,14 @@ fn g1_g3_one_heat_capacity_source_drives_both_transport_and_storage_on_native_st
                 law.at_temperature(t)
             },
         );
-        let reference = exact(cp, 0.2);
+        // Dyadic target and steps tile exactly in binary, so the last accepted substep is a
+        // whole dt with distinct start and endpoint states. Ten 0.02 s steps end one ulp short
+        // of 0.2 s, and the native stepper's last substep was then 2.8e-17 s long.
+        let reference = exact(cp, 0.25);
         let mut errors = Vec::new();
-        for dt in [0.02, 0.01, 0.005] {
+        for dt in [0.03125, 0.015625, 0.0078125] {
             let (next, accepted, audit) = thermal
-                .advance_observed(&observer, 0.2, controls(dt), || Ok(()))
+                .advance_observed(&observer, 0.25, controls(dt), || Ok(()))
                 .unwrap();
             let actual = IDS.map(|id| next.temperature_k(id).unwrap());
             errors.push((actual[0] - reference[0]).abs());

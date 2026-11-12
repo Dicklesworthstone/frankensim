@@ -277,7 +277,12 @@ fn sourced_network_laws_close_sensible_latent_and_two_chamber_energy_together() 
             }
             near(balance, 0.0, 1e-6);
             assert!(next.step().total_energy_residual_j.abs() <= controls.total_energy_tolerance_j);
-            assert_eq!(next.circuit().charges_c(), circuit.charges_c());
+            // The network publishes the circuit's own native step bit for bit
+            // (no resistor, no port, the same controls and interval).
+            let native = circuit
+                .step_candidate(vec![], &[], DT, controls.network.circuit, || false)
+                .unwrap();
+            assert_eq!(next.circuit().charges_c(), native.circuit().charges_c());
             assert_eq!(gas, saved);
             assert_eq!(thermal.time_s(), 0.0);
         })

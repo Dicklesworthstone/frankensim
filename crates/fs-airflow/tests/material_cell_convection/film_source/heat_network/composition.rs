@@ -230,14 +230,18 @@ fn initial_with_contact_geometry<'a>(
             }),
         });
     }
+    // The owner bounds its material table by max_cells (fs-thermal DepositionSimulation::new):
+    // the two contact materials are registered only with the two contact cells that use them.
+    let materials = [
+        (MaterialId(0), body.curve() as &dyn ThermalLaw),
+        (MaterialId(1), fluid.curve() as &dyn ThermalLaw),
+        (MaterialId(2), body.curve() as &dyn ThermalLaw),
+        (MaterialId(3), fluid.curve() as &dyn ThermalLaw),
+    ];
+    let used = if separate_contact { 4 } else { 2 };
     DepositionSimulation::new(
         events,
-        &[
-            (MaterialId(0), body.curve() as &dyn ThermalLaw),
-            (MaterialId(1), fluid.curve() as &dyn ThermalLaw),
-            (MaterialId(2), body.curve() as &dyn ThermalLaw),
-            (MaterialId(3), fluid.curve() as &dyn ThermalLaw),
-        ],
+        &materials[..used],
         DepositionBudget {
             max_cells: if separate_contact { 4 } else { 2 },
             max_links: if pressure_contact { 2 } else { 1 },

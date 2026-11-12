@@ -25,6 +25,7 @@ use fs_em::spatial::{
 };
 use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_material::conductor::ResolvedConductorState;
+use fs_material::field_storage::{MAGNETIC_PERMEABILITY_DIMS, MAGNETIC_PERMEABILITY_PROPERTY};
 use fs_solver::CheckedCgConfig;
 
 const AMPLITUDE: f64 = 3.0;
@@ -680,13 +681,33 @@ fn g1_complete_coolant_keeps_nonlinear_field_numerical_loss_out_of_heat() {
     // heat; the latter also closes magnetic parameter work and field entropy.
     let run = |viscosity, slope| {
         let (rho, cp) = (0.2, 4000.0);
-        let card = source::absolute_affine_magnetic_card(
+        let affine = source::absolute_affine_magnetic_card(
             rho,
             0.005,
             1.0,
             slope,
             ElectricalPropertyBasis::Resistivity,
         );
+        // The fixed limit's permeability has no temperature axis: the fixed-storage refresh
+        // (fs-material field_storage admit_fixed_magnetic_refresh) refuses any temperature
+        // change along a mu(T) source, a flat one included. The value is the same 1.0.
+        let card = if slope == 0.0 {
+            let mut claims = ClaimSet::new();
+            for (_, claim) in affine.claims().claims_ordered() {
+                let mut claim = claim.clone();
+                if claim.key.name() == MAGNETIC_PERMEABILITY_PROPERTY {
+                    claim.value = PropertyValue::Scalar {
+                        value: 1.0,
+                        dims: MAGNETIC_PERMEABILITY_DIMS,
+                    };
+                    claim.interpolation = InterpolationPolicy::ConstantWithinValidity;
+                }
+                claims.insert_claim(claim).unwrap();
+            }
+            MaterialCard::assemble(affine.id().clone(), claims, vec![]).unwrap()
+        } else {
+            affine
+        };
         let solid = solid_curve(&card);
         let (fluid_card, fluid_curve) = fluid_material(viscosity, cp);
         let fluid = liquid_law(&fluid_card);

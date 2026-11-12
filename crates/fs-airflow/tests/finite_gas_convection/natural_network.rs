@@ -137,7 +137,12 @@ fn mixed_patches_share_actual_sources_and_conserve_finite_stores_under_material_
             let kinetic = 0.5 * gas.mass_kg() * accepted.piston.velocity_m_s().powi(2);
             let exterior = input().exterior_pressure_pa * (accepted.piston.gas().volume_m3() - gas.gas().volume_m3());
             near(next.thermal().energy_j() - thermal.energy_j() + du + kinetic + exterior, 0.0, 1e-6);
-            assert_eq!(next.circuit().charges_c(), circuit.charges_c());
+            // The network publishes the circuit's own native step bit for bit
+            // (no resistor, no port, the same controls and interval).
+            let native = circuit
+                .step_candidate(vec![], &[], DT, network_controls().network.circuit, || false)
+                .unwrap();
+            assert_eq!(next.circuit().charges_c(), native.circuit().charges_c());
             assert_eq!(thermal.time_s(), 0.0);
             result = Some([next.thermal().temperature_k(HOT).unwrap(), next.thermal().temperature_k(COLD).unwrap()]);
         });
@@ -428,7 +433,12 @@ fn developing_tube_sections_share_native_network_heat_without_resetting_the_entr
         let kinetic = 0.5 * old.mass_kg() * accepted.piston.velocity_m_s().powi(2);
         let outside = input().exterior_pressure_pa * (accepted.piston.gas().volume_m3() - old.gas().volume_m3());
         near(next.thermal().energy_j() - thermal.energy_j() + gas_energy + kinetic + outside, 0.0, 1e-6);
-        assert_eq!(next.circuit().charges_c(), circuit.charges_c());
+        // The network publishes the circuit's own native step bit for bit
+        // (no resistor, no port, the same controls and interval).
+        let native = circuit
+            .step_candidate(vec![], &[], DT, network_controls().network.circuit, || false)
+            .unwrap();
+        assert_eq!(next.circuit().charges_c(), native.circuit().charges_c());
         assert_eq!(old, saved);
     }));
 }

@@ -316,7 +316,14 @@ fn evolving_saturation_rebinds_the_live_pressure_heat_operating_point() {
     let pl = 150000.0 - pc;
     let candidate = column.step_candidate(
         LiquidSaturationStepInput {
-            duration_s: 0.02,
+            // Explicit step: only the left face carries flux (both cells and the right boundary
+            // sit at pl), k kr / mu * 2000 Pa / (half of 3 mm) = 2.546e-8 * 0.02807 / 0.002 *
+            // 1.333e6 = 0.4765 m/s, into cell 0 of capacity 0.4 * 0.003 = 1.2e-3 m. 0.02 s moved
+            // its saturation by 7.94, out of the (0, 1) calibration. 5e-5 s moves it by 0.0199
+            // (0.600 to 0.620); with dPc/dS = -42 kPa the cell's liquid pressure then rises 0.41
+            // of the 2000 Pa push, so the explicit step stays below the boundary that fills it.
+            // The later operating point carries 5.4 % more flow (1.365e-4 to 1.440e-4 kg/s).
+            duration_s: 5e-5,
             temperature_k: 300.0,
             gas_pressure_pa: 150000.0,
             dynamic_viscosity_pa_s: 0.002,

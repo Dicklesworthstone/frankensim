@@ -317,8 +317,11 @@ fn finite_coolant_and_ceramic_sources_share_temperature_motion_and_internal_ener
                 cell: BODY,
             },
             selection: MaterialPropertySelection::SingleClaimOnly,
-            length_m: 0.1,
-            area_m2: 1e-5,
+            // A cell resistor spans its whole cell (length * area = cell volume, fs-couple
+            // CellResistor): this cell is the 1 m^3 ceramic rod. L/A stays 1e4 1/m, so the
+            // resistance 1 + 0.02 (T - 300) ohm of the reference is unchanged.
+            length_m: 100.0,
+            area_m2: 0.01,
         }];
         let bulk = MaterialNetwork {
             cells: &cells,

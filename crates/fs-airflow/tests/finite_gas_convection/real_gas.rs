@@ -224,11 +224,19 @@ fn reciprocal_storage_does_not_lose_heat_beside_large_formation_references() {
             .isochoric_body_candidate(cx, &environment(&shifted, &boundary), thermal)
             .unwrap();
         assert!(a.report.solid_to_gas_heat_j > 1.0);
-        // Absolute subtraction really has erased the increment in this fixture.
-        assert_eq!(
-            b.report.next_gas.state().specific_internal_energy_j_kg()
-                - shifted.state().specific_internal_energy_j_kg(),
-            0.0
+        // Absolute subtraction cannot carry the increment in this fixture: the
+        // physical increment (the unshifted run's) is below half an ulp of the
+        // shifted absolute energy, about 3.8e26 J/kg, so an absolute difference
+        // returns rounding alone. The NASA-9 tree evaluates a7 as R*T*(a7/T),
+        // whose last bits move with T (two ulp, -2^37 J/kg, in the first run).
+        let increment = a.report.next_gas.state().specific_internal_energy_j_kg()
+            - baseline.state().specific_internal_energy_j_kg();
+        let absolute = shifted.state().specific_internal_energy_j_kg();
+        let ulp = f64::from_bits(absolute.to_bits() + 1) - absolute;
+        assert!(increment > 0.0 && increment < 0.5 * ulp);
+        assert_ne!(
+            b.report.next_gas.state().specific_internal_energy_j_kg() - absolute,
+            increment
         );
         assert_eq!(a.state, b.state);
         assert_eq!(

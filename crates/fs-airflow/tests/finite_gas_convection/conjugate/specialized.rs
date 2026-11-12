@@ -256,7 +256,12 @@ fn whitaker_surface_and_radial_material_share_isochoric_energy_and_entropy() {
             .unwrap()
             .with_conducting_layer(&wall, geometry, config())
             .unwrap();
-        let volume = 4.0 * core::f64::consts::PI * (0.5 * SPHERE_D).powi(3) / 3.0;
+        // A hollow sphere with a 10 mm wall. The solid sphere has V/A = 16.7 mm
+        // and a convection Biot h(V/A)/k_min = 7.67 * 0.0167 / 0.8 = 0.160,
+        // above the lumped body's ceiling of 0.1; this shell has V/A = 8.13 mm
+        // and Biot 0.078. The radial layer and film are unchanged.
+        let volume = 4.0 * core::f64::consts::PI
+            * ((0.5 * SPHERE_D).powi(3) - 0.04_f64.powi(3)) / 3.0;
         let body = UniformEnthalpyStepInput {
             mass_kg: 1000.0 * volume,
             volume_m3: volume,

@@ -102,7 +102,9 @@ fn initial<'a>(
                         start_m: [i as f64, 0.0, 0.0],
                         end_m: [i as f64 + 0.1, 0.0, 0.0],
                         volume_m3: 1e-6,
-                        surface_area_m2: SURFACE,
+                        // HOT carries the 1e-5 m^2 conduction contact and the SURFACE film
+                        // link; contacts may not exceed a cell's surface.
+                        surface_area_m2: if id == HOT { 2.0 * SURFACE } else { SURFACE },
                     },
                     boundary: Boundary {
                         ambient_k: 300.0,

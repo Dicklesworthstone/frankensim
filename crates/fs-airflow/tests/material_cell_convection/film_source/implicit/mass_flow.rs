@@ -144,7 +144,9 @@ fn original_liquid_bulk_density_and_all_forced_section_rate_partials_are_retaine
                 end: Length::new(2.0),
             },
             ConvectionPropertyTemperature::Reservoir,
-            1.0,
+            // GnielinskiDeveloping admits Re 1e4 to 1e6: (m/A) D / mu is 18182 to 22222 over
+            // the three baths here; 1.0 kg/s gave 9091 at 290 K.
+            2.0,
         ),
         (
             SourceCellConvectionLaw::ForcedLaminarTubeSection {

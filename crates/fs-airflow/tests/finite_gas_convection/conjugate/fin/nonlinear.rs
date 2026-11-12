@@ -110,7 +110,12 @@ fn check_local_balance(
 
 #[test]
 fn original_local_sources_and_conservative_spatial_heat_survive_both_directions_and_equilibrium() {
-    let model = source::model_transport(1.0, true);
+    // Affine transport claims, value*(T+100)/500. With claims exactly
+    // proportional to T, the prescribed-mass-flux flat-plate h is the same at
+    // every film temperature (rho/mu ~ T^-2, so Nu ~ 1/T and h = Nu k/L is
+    // constant), and root and tip could differ only by rounding. With the
+    // intercept h ~ sqrt((T+100)/T): about 1 % from root to tip here.
+    let model = source::model_transport_affine(1.0);
     let gas = model.evaluate(&source::point(350.0, 100000.0)).unwrap();
     let card = solid(true, 5.0);
     let curve = caloric(&card);

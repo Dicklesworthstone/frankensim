@@ -54,6 +54,16 @@ fn finite_controls() -> FiniteLoopControls {
         solver: NewtonKrylovConfig {
             absolute_tolerance: 1e-10,
             relative_tolerance: 0.0,
+            // forcing_minimum 1e-6: each inner linear solve is asked for that relative residual at
+            // least, never less. In the second advance of actual_midpoint_transport_survives_...,
+            // Newton reached 2.08e-10 in three steps (forcing 0.5, 2.93e-3, 6.36e-6); the fourth
+            // asked 0.9 (2.08e-10 / 1.33e-3)^1.5 = 5.6e-11, clamped up to the default 1e-10, and the
+            // finite-difference operator could not reach it: LinearSolveFailed(BudgetExhausted) one
+            // step short of the 1e-10 target. The third solve reached 1.567e-7 in 3 inner
+            // iterations; 1e-6 is 6.4 times above that and does not bind on the first three steps.
+            // Stop target and refusals unchanged. The gap is fs-solver's (nonlinear.rs:1451-1487: no
+            // forcing safeguard at target / residual), recorded in 65f3397d4c, not fixed here.
+            forcing_minimum: 1e-6,
             ..NewtonKrylovConfig::default()
         },
         maximum_newton_iterations: 32,

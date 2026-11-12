@@ -105,6 +105,17 @@ fn finite_positive(value: f64) -> Result<f64, DepositionError> {
         Err(DepositionError::Arithmetic)
     }
 }
+// True when a cell surface holds both axial faces and its lateral face in
+// every order the native owner can subtract or sum them (it subtracts in
+// link-ID order on admission and sums per cell in its step).
+fn holds_full_cover(surface: f64, face: f64, side: f64) -> bool {
+    [[face, face, side], [face, side, face], [side, face, face]]
+        .iter()
+        .all(|order| {
+            order.iter().fold(surface, |free, &covered| free - covered) >= 0.0
+                && surface - order.iter().fold(0.0, |sum, &covered| sum + covered) >= 0.0
+        })
+}
 
 impl TransientFinTopology {
     /// Construct bounded native geometry without changing an accepted state.
@@ -196,7 +207,19 @@ impl TransientFinTopology {
             let half = finite_positive(0.5 * dx)?;
             let volume = finite_positive(area * dx)?;
             let side_area = finite_positive(perimeter * dx)?;
-            let surface_area = finite_positive(side_area + 2.0 * area)?;
+            // The native owner admits coverage with no rounding allowance, and a
+            // cell can be covered on its lateral face and both axial faces. The
+            // stored surface is the smallest represented value that holds them.
+            let mut surface_area = finite_positive(side_area + 2.0 * area)?;
+            for _ in 0..8 {
+                if holds_full_cover(surface_area, area, side_area) {
+                    break;
+                }
+                surface_area = finite_positive(surface_area.next_up())?;
+            }
+            if !holds_full_cover(surface_area, area, side_area) {
+                return Err(DepositionError::Arithmetic);
+            }
             let at = |x: f64| {
                 std::array::from_fn(|axis| {
                     placement.direction[axis].mul_add(x, placement.root_m[axis])

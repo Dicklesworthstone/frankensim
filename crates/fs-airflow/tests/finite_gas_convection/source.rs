@@ -34,6 +34,16 @@ fn packs(name: &str, mass: f64, cp_r: f64, mu: f64, k: f64,
 }
 fn packs_with_heat_capacity_slope(name: &str, mass: f64, cp_r: f64, mu: f64, k: f64,
     variable_transport: bool, energy_reference_k: f64, cp_r_slope_per_k: f64) -> Packs {
+    packs_with_transport_knots(name, mass, cp_r, mu, k,
+        variable_transport.then_some(PROPORTIONAL_TRANSPORT), energy_reference_k, cp_r_slope_per_k)
+}
+/// Transport claim multipliers at the 200 K and 1000 K knots. (0.5, 2.5) is
+/// exactly value*T/400. (0.6, 2.2) is value*(T+100)/500: the same claim at
+/// 400 K, but affine, so it is not proportional to T.
+const PROPORTIONAL_TRANSPORT: [f64; 2] = [0.5, 2.5];
+const AFFINE_TRANSPORT: [f64; 2] = [0.6, 2.2];
+fn packs_with_transport_knots(name: &str, mass: f64, cp_r: f64, mu: f64, k: f64,
+    transport_knots: Option<[f64; 2]>, energy_reference_k: f64, cp_r_slope_per_k: f64) -> Packs {
     let artifact = hash(name);
     let provenance = Provenance { source: format!("synthetic {name}; not measured"),
         license: "CC0-1.0".into(), artifact: Some(artifact) };
@@ -79,16 +89,16 @@ fn packs_with_heat_capacity_slope(name: &str, mass: f64, cp_r: f64, mu: f64, k: 
     for (name, dims, value) in [("dynamic_viscosity", DynViscosity::DIMS, mu),
         ("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS, k)] {
         claims.insert_claim(PropertyClaim { key: PropertyKey::new(name, dims),
-            value: if variable_transport {
+            value: if let Some([low, high]) = transport_knots {
                 PropertyValue::Curve { abscissa: "temperature".into(),
                     abscissa_dims: Temperature::DIMS,
-                    knots: vec![(200.0, 0.5 * value), (1000.0, 2.5 * value)], dims }
+                    knots: vec![(200.0, low * value), (1000.0, high * value)], dims }
             } else { PropertyValue::Scalar { value, dims } },
             validity: ValidityDomain::unconstrained()
                 .with_quantity("temperature", typed(QuantityKind::AbsoluteTemperature), 200.0, 1000.0)
                 .with_quantity("pressure", typed(QuantityKind::Pressure), 1000.0, 1e7),
             uncertainty: UncertaintyModel::Unstated,
-            interpolation: if variable_transport { InterpolationPolicy::LinearInside }
+            interpolation: if transport_knots.is_some() { InterpolationPolicy::LinearInside }
                 else { InterpolationPolicy::ConstantWithinValidity },
             observations: vec![observation.clone()], provenance: provenance.clone() }).unwrap();
     }
@@ -135,10 +145,26 @@ fn model_transport_with_calorics(
     fraction: f64, variable_transport: bool, energy_reference_k: f64,
     cp_r_slope_per_k: f64,
 ) -> ThermochemicalGasModel {
-    let a = packs_with_heat_capacity_slope("A", 0.028, 3.5, 1.8e-5, 0.026,
-        variable_transport, energy_reference_k, cp_r_slope_per_k);
-    let b = packs_with_heat_capacity_slope("B", 0.004, 2.5, 2.0e-5, 0.08,
-        variable_transport, energy_reference_k, cp_r_slope_per_k);
+    model_with_transport_knots(fraction, variable_transport.then_some(PROPORTIONAL_TRANSPORT),
+        energy_reference_k, cp_r_slope_per_k)
+}
+
+/// Manufactured transport claims value*(T+100)/500 (0.6 and 2.2 times the
+/// value at the 200 K and 1000 K knots). They equal the proportional claims at
+/// 400 K but have a nonzero intercept, so a prescribed-mass-flux flat-plate
+/// film coefficient changes with film temperature, as sqrt((T+100)/T).
+pub fn model_transport_affine(fraction: f64) -> ThermochemicalGasModel {
+    model_with_transport_knots(fraction, Some(AFFINE_TRANSPORT), 0.0, 0.0)
+}
+
+fn model_with_transport_knots(
+    fraction: f64, transport_knots: Option<[f64; 2]>, energy_reference_k: f64,
+    cp_r_slope_per_k: f64,
+) -> ThermochemicalGasModel {
+    let a = packs_with_transport_knots("A", 0.028, 3.5, 1.8e-5, 0.026,
+        transport_knots, energy_reference_k, cp_r_slope_per_k);
+    let b = packs_with_transport_knots("B", 0.004, 2.5, 2.0e-5, 0.08,
+        transport_knots, energy_reference_k, cp_r_slope_per_k);
     let composition = Composition::new(
         CompositionBasis::MoleFraction, vec![fraction, 1.0-fraction]).unwrap();
     // The mixture owner admits active species only, as in with_composition.
