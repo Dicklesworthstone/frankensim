@@ -4426,3 +4426,82 @@ fn a_differenced_component_shortens_a_step_only_if_it_asks_on_both_sides_of_the_
         assert!((second - (sum - difference)).abs() <= 1.0e-15, "{either_side}: {second}");
     }
 }
+
+#[test]
+fn a_push_that_creeps_up_to_the_static_limit_lets_go_a_hair_inside_it_one_way() {
+    // A stated limit of differencing a relation that jumps. The slider
+    // holds 9.8 N and slides against 5.88 N. The kernel differences it at
+    // a released flow moved UP by sqrt(eps) of it, which is worth
+    // sqrt(eps) of the force: 1.46e-7 N near the limit. Within that of
+    // the limit, with the held force on the side the move goes to, the
+    // moved proposal has broken away: the column is the difference across
+    // the jump from the held force to the sliding one, not the held row's
+    // slope, and the update it makes leaves the force wire with far more
+    // than rounding.
+    //
+    // A mass of 2 kg at rest under a push that rises to 2e-7 N inside the
+    // limit in 0.1 s and creeps on to 5e-8 N inside it in 150 steps of
+    // 1 ms. Pushed one way, the move goes away from the limit: the mass
+    // is held to rounding all the way. Pushed the other way: outside the
+    // window it is held to rounding; inside it the slider's force is off
+    // the push by up to 8.4e-8 N, alternating, the mass creeps at up to
+    // 2.1e-11 m/s, and it lets go with the push still 6.65e-8 N inside
+    // the limit: 7e-9 of the limit. No step is refused.
+    let dt = 1.0e-3_f64;
+    let hold = HOLDS * NORMAL_N;
+    let window = f64::EPSILON.sqrt() * hold;
+    for way in [1.0_f64, -1.0] {
+        let knots = vec![
+            (0.0, 0.0),
+            (0.1, way * (hold - 2.0e-7)),
+            (0.25, way * (hold - 5.0e-8)),
+        ];
+        let wave = Waveform::table(knots.clone()).unwrap();
+        let (mut system, mass, rubbing) = pushed_by(Waveform::table(knots).unwrap(), None);
+        let at = system.port(rubbing, "a").unwrap();
+        // Outside and inside the window: the most the force is off the
+        // push, and the mass's largest speed, while it is held.
+        let (mut off, mut speed) = ([0.0_f64; 2], [0.0_f64; 2]);
+        let mut let_go = None;
+        with_cx(|cx| {
+            for step in 0..250 {
+                let t0 = system.time_s();
+                system
+                    .step(dt, cx)
+                    .unwrap_or_else(|error| panic!("way {way}, step {step}: {error}"));
+                let push = wave.mean(t0, dt);
+                if !system.state::<Slip>(rubbing).unwrap().is_stuck() {
+                    let_go = Some(hold - push.abs());
+                    break;
+                }
+                let inside = usize::from(hold - push.abs() < window);
+                off[inside] = off[inside].max((system.last_output(at)[0].abs() - push.abs()).abs());
+                speed[inside] =
+                    speed[inside].max(system.state::<Motion>(mass).unwrap().velocity_m_s.abs());
+            }
+        });
+        println!(
+            "a push creeping to the static limit, way {way}: outside the window of {window:e} N the \
+             force is off the push by {:e} N at most and the mass at {:e} m/s at most; inside it \
+             {:e} N and {:e} m/s; let go with the push {let_go:?} N inside the limit",
+            off[0], speed[0], off[1], speed[1]
+        );
+        // Held to rounding outside the window, either way.
+        assert!(off[0] <= 1.0e-12 && speed[0] <= 1.0e-15, "way {way}: {off:?} {speed:?}");
+        if way > 0.0 {
+            // And inside it, to the end: 5e-8 N inside the limit.
+            assert!(off[1] <= 1.0e-12 && speed[1] <= 1.0e-15, "{off:?} {speed:?}");
+            assert_eq!(let_go, None);
+        } else {
+            // Inside the window the force is off by a part of what the
+            // kernel's move is worth, the mass creeps by what that force
+            // makes of it in a step, and it lets go inside the limit by
+            // less than the window.
+            let c = 0.5 * dt / MASS_KG;
+            assert!(off[1] > 1.0e-9 && off[1] <= window, "{off:?}");
+            assert!(speed[1] <= c * window, "{speed:?}");
+            let early = let_go.expect("it lets go inside the limit");
+            assert!(early > 0.0 && early < window, "{early}");
+        }
+    }
+}

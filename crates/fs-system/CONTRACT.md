@@ -408,6 +408,24 @@ relation allows there.
   away does not converge (asserted, below; with the tangent declared it
   breaks away in that step). (74529fda7f said `C` is exact for every
   neighbour that is linear within the step. Found wrong by its review.)
+- Where the component's relation jumps, the differenced column is not a
+  slope. The kernel differences the line component at a released flow
+  moved up by `sqrt(eps)` of it. In the window that wide below a jump, on
+  the side the move goes to, the moved proposal is on the other row, and
+  the column is the difference across the jump. A slider that holds 9.8 N
+  and slides against 5.88 N, under a push that creeps up to the limit at
+  1e-9 N a step of 1 ms on a mass of 2 kg: outside the window (1.46e-7 N,
+  `sqrt(eps)` of the limit) the mass is held to rounding (the force
+  within 1.1e-14 N of the push); inside it, pushed the way the move goes,
+  the slider's force is off the push by up to 8.4e-8 N, alternating in
+  sign, the mass creeps at up to 2.1e-11 m/s, and it lets go with the
+  push still 6.65e-8 N inside the limit, 7e-9 of the limit. Pushed the
+  other way it is held to rounding up to the push's end, 5e-8 N inside
+  the limit. No step is refused, and the kernel is not changed for it:
+  it is the remainder of differencing, largest here. A tangent the
+  component declares for the row it takes would remove it; the tier has
+  none yet. (Found on 2026-11-12 by a probe written to show a stall there,
+  which there is not. Asserted in `tests/load_line.rs`.)
 - `C` need not be symmetric. The step is refused (`SystemError::LoadLine`,
   naming the component and the reason, nothing published) when the other
   components do not determine a line (their Jacobian, with the component's
