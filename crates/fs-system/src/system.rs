@@ -30,6 +30,54 @@ pub type BoundaryFn = Box<dyn Fn(f64, f64, &mut [f64])>;
 /// input and a residual and the inputs a block does not solve for.
 const ROUNDING_UNITS: f64 = 16.0;
 
+/// Absolute term sum of a power pairing, before cancellation. Ordinary
+/// power ports retain their original component-wise arithmetic.
+fn power_pairing_scale(spec: &PortSpec, input: &[f64], output: &[f64]) -> f64 {
+    if let Some(metric) = spec.field_metric() {
+        let (effort, flow) = if spec.role() == PortRole::EffortIn {
+            (input, output)
+        } else {
+            (output, input)
+        };
+        let mut scale = 0.0;
+        for (i, &e) in effort.iter().enumerate() {
+            for (j, &f) in flow.iter().enumerate() {
+                scale += e.abs() * (metric.entries()[i * metric.width() + j] * f).abs();
+            }
+        }
+        scale
+    } else {
+        input.iter().zip(output).map(|(e, f)| (e * f).abs()).sum()
+    }
+}
+
+/// Energy allowed by one input coefficient's solve error. Both roles use
+/// the same metric because it is symmetric. Apply the small allowance
+/// before the metric so an unrepresentable conjugate need not overflow a
+/// finite energy allowance.
+fn power_input_slack_j(
+    spec: &PortSpec,
+    output: &[f64],
+    coefficient: usize,
+    dt_s: f64,
+    allowance: f64,
+) -> f64 {
+    if allowance == 0.0 {
+        return 0.0;
+    }
+    let scale = dt_s * allowance;
+    if let Some(metric) = spec.field_metric() {
+        metric.entries()[coefficient * metric.width()..(coefficient + 1) * metric.width()]
+            .iter()
+            .zip(output)
+            .map(|(m, value)| m * (scale * value))
+            .sum::<f64>()
+            .abs()
+    } else {
+        scale * output[coefficient].abs()
+    }
+}
+
 /// Limits of the step driver.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SolveConfig {
@@ -501,6 +549,33 @@ impl SystemBuilder {
     fn need_match(&self, a: PortRef, b: PortRef) -> Result<(), AdmissionError> {
         let (left, right) = (self.spec(a), self.spec(b));
         if left.carrier() == right.carrier() && left.width() == right.width() {
+            self.need_pairing_match(a, b)
+        } else {
+            Err(AdmissionError::Mismatch {
+                a: self.label(a),
+                b: self.label(b),
+            })
+        }
+    }
+
+    /// Direct copies and scalar ratios preserve power only in the same
+    /// pairing. An explicit identity also matches an ordinary power port.
+    fn need_pairing_match(&self, a: PortRef, b: PortRef) -> Result<(), AdmissionError> {
+        let equal = match (self.spec(a).field_metric(), self.spec(b).field_metric()) {
+            (None, None) => true,
+            (Some(left), Some(right)) => left == right,
+            (Some(metric), None) | (None, Some(metric)) => {
+                metric.entries().iter().enumerate().all(|(index, &value)| {
+                    value
+                        == if index / metric.width() == index % metric.width() {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                })
+            }
+        };
+        if equal {
             Ok(())
         } else {
             Err(AdmissionError::Mismatch {
@@ -534,6 +609,7 @@ impl SystemBuilder {
                         b: self.label(member),
                     });
                 }
+                self.need_pairing_match(setter, member)?;
             }
             if let Some(&(_, ratio)) = members
                 .iter()
@@ -594,7 +670,13 @@ impl SystemBuilder {
         members: &[PortRef],
     ) -> Result<(), AdmissionError> {
         let members: Vec<_> = members.iter().map(|&port| (port, 1.0)).collect();
-        self.junction(setter, &members, PortRole::FlowIn, PortRole::EffortIn, false)?;
+        self.junction(
+            setter,
+            &members,
+            PortRole::FlowIn,
+            PortRole::EffortIn,
+            false,
+        )?;
         self.connections
             .push(Connection::CommonEffort { setter, members });
         Ok(())
@@ -612,7 +694,13 @@ impl SystemBuilder {
         members: &[PortRef],
     ) -> Result<(), AdmissionError> {
         let members: Vec<_> = members.iter().map(|&port| (port, 1.0)).collect();
-        self.junction(setter, &members, PortRole::EffortIn, PortRole::FlowIn, false)?;
+        self.junction(
+            setter,
+            &members,
+            PortRole::EffortIn,
+            PortRole::FlowIn,
+            false,
+        )?;
         self.connections
             .push(Connection::CommonFlow { setter, members });
         Ok(())
@@ -737,6 +825,7 @@ impl SystemBuilder {
                 b: self.label(b),
             });
         }
+        self.need_pairing_match(a, b)?;
         if !ratio.is_finite() || ratio == 0.0 {
             return Err(AdmissionError::TransformerRatio { ratio });
         }
@@ -751,18 +840,18 @@ impl SystemBuilder {
     ///
     /// `a` receives effort; `b` receives flow. `map` is the row-major matrix
     /// `P` with `b.width()` rows and `a.width()` columns. The kernel generates
-    /// `f_b = -P f_a` and `e_a = P^T e_b` from the same coefficients, so their
-    /// Euclidean power pairings cancel, including for rectangular or
-    /// rank-deficient maps. Different power domains are explicitly allowed;
+    /// `f_b = -P f_a` and `e_a = M_a^-1 P^T M_b e_b`, so the declared
+    /// power pairings cancel, including for rectangular or rank-deficient
+    /// maps. Ordinary ports use the identity metric. The effort map is
+    /// computed at admission using the metrics' cached Cholesky factors;
+    /// a step performs no metric solve. Different power domains are allowed;
     /// coefficients must supply the conversion in the ports' SI units.
-    ///
-    /// These are the executable contract's power-normalized coefficients.
-    /// An arbitrary field duality `e^T M f` needs an owner-side normalization;
-    /// this method does not infer a trace metric or a conservative heat map.
+    /// This does not infer a trace metric or a conservative heat map.
     ///
     /// # Errors
     /// Wrong roles or carriers, a matrix of the wrong size, a non-finite
-    /// coefficient, or a port already connected. Refusal changes nothing.
+    /// coefficient, an unrepresentable metric adjoint, or a port already
+    /// connected. Refusal changes nothing.
     pub fn power_map(
         &mut self,
         a: PortRef,
@@ -782,9 +871,63 @@ impl SystemBuilder {
             return Err(AdmissionError::MapCoefficient { index, value });
         }
         self.check_free(&[a, b])?;
+        let effort_map = self.field_effort_map(a, b, &map)?;
         self.take(&[a, b]);
-        self.connections.push(Connection::PowerMap { a, b, map });
+        self.connections.push(Connection::PowerMap {
+            a,
+            b,
+            map,
+            effort_map,
+        });
         Ok(())
+    }
+
+    /// Construct the metric adjoint once; ordinary ports keep their exact
+    /// existing transpose path and do not allocate another matrix.
+    fn field_effort_map(
+        &self,
+        a: PortRef,
+        b: PortRef,
+        map: &[f64],
+    ) -> Result<Option<Vec<f64>>, AdmissionError> {
+        let (left, right) = (self.spec(a), self.spec(b));
+        if left.field_metric().is_none() && right.field_metric().is_none() {
+            return Ok(None);
+        }
+        let (columns, rows) = (left.width(), right.width());
+        let mut result = vec![0.0; map.len()];
+        let mut rhs = vec![0.0; columns];
+        let mut solved = vec![0.0; columns];
+        let refusal = |violation| AdmissionError::MapAdjoint {
+            a: self.label(a),
+            b: self.label(b),
+            violation,
+        };
+        for j in 0..rows {
+            for i in 0..columns {
+                rhs[i] = if let Some(metric) = right.field_metric() {
+                    (0..rows)
+                        .map(|k| map[k * columns + i] * metric.entries()[k * rows + j])
+                        .sum()
+                } else {
+                    map[j * columns + i]
+                };
+            }
+            if rhs.iter().any(|value| !value.is_finite()) {
+                return Err(refusal(ContractViolation::NonFinite {
+                    quantity: "field effort adjoint",
+                }));
+            }
+            if let Some(metric) = left.field_metric() {
+                metric.solve(&rhs, &mut solved).map_err(&refusal)?;
+            } else {
+                solved.copy_from_slice(&rhs);
+            }
+            for i in 0..columns {
+                result[i * rows + j] = solved[i];
+            }
+        }
+        Ok(Some(result))
     }
 
     /// Deliver the heat leaving `source` to `sinks` by fraction. Fractions
@@ -1018,13 +1161,22 @@ impl SystemBuilder {
                             Driver::Linear(vec![(output_of(*a).start + offset, -*ratio)]);
                     }
                 }
-                Connection::PowerMap { a, b, map } => {
+                Connection::PowerMap {
+                    a,
+                    b,
+                    map,
+                    effort_map,
+                } => {
                     let columns = self.spec(*a).width();
                     let rows = self.spec(*b).width();
                     for (column, index) in input_of(*a).enumerate() {
                         let terms = (0..rows)
                             .filter_map(|row| {
-                                let coefficient = map[row * columns + column];
+                                let coefficient = effort_map
+                                    .as_ref()
+                                    .map_or(map[row * columns + column], |adjoint| {
+                                        adjoint[column * rows + row]
+                                    });
                                 (coefficient != 0.0)
                                     .then_some((output_of(*b).start + row, coefficient))
                             })
@@ -1476,8 +1628,10 @@ impl BlockWork {
         let pattern: Vec<Vec<usize>> = column_readers
             .iter()
             .map(|range| {
-                let mut rows: Vec<usize> =
-                    readers[range.clone()].iter().map(|&(row, _, _)| row).collect();
+                let mut rows: Vec<usize> = readers[range.clone()]
+                    .iter()
+                    .map(|&(row, _, _)| row)
+                    .collect();
                 rows.sort_unstable();
                 rows.dedup();
                 rows
@@ -1489,7 +1643,9 @@ impl BlockWork {
         for (column, range) in column_readers.iter().enumerate() {
             slot_start.push(slots.len());
             slots.extend(
-                readers[range.clone()].iter().map(|&(row, _, _)| condensed.slot(row, column)),
+                readers[range.clone()]
+                    .iter()
+                    .map(|&(row, _, _)| condensed.slot(row, column)),
             );
         }
         let entries = slots.len();
@@ -1869,8 +2025,7 @@ impl System {
     }
 
     /// The largest power [W] crossing a power port of `nodes` at the current
-    /// inputs and outputs: the sum over a port's coefficients of
-    /// `|effort * flow|`.
+    /// inputs and outputs: the absolute term sum of its power pairing.
     fn block_power_scale(&self, nodes: &[usize]) -> f64 {
         let mut largest = 0.0_f64;
         for &node in nodes {
@@ -1881,10 +2036,11 @@ impl System {
                 }
                 let received = self.layouts[node].input_range(port);
                 let returned = self.layouts[node].output_range(port);
-                let power: f64 = received
-                    .zip(returned)
-                    .map(|(i, o)| (self.inputs[inputs.start + i] * self.outputs[outputs.start + o]).abs())
-                    .sum();
+                let power = power_pairing_scale(
+                    spec,
+                    &self.inputs[inputs.start + received.start..inputs.start + received.end],
+                    &self.outputs[outputs.start + returned.start..outputs.start + returned.end],
+                );
                 largest = largest.max(power);
             }
         }
@@ -2158,7 +2314,13 @@ impl System {
                     // An exact fixed point needs no slopes.
                 } else if assembled {
                     if let Some(open) = self.carried_beyond(
-                        unknowns, residual, slopes, group_scale, power_scale, floor, carried,
+                        unknowns,
+                        residual,
+                        slopes,
+                        group_scale,
+                        power_scale,
+                        floor,
+                        carried,
                     ) {
                         converged = false;
                         worst.0 = open;
@@ -2198,7 +2360,9 @@ impl System {
                 // outputs of this iterate.
                 for (row, terms) in varying.iter() {
                     self.drivers[unknowns[*row]].gradient(&self.outputs, gradient);
-                    for (&reader, &(_, slope)) in varying_terms[terms.clone()].iter().zip(gradient.iter()) {
+                    for (&reader, &(_, slope)) in
+                        varying_terms[terms.clone()].iter().zip(gradient.iter())
+                    {
                         if reader != usize::MAX {
                             readers[reader].2 = slope;
                         }
@@ -2207,14 +2371,17 @@ impl System {
                 for (column, &index) in unknowns.iter().enumerate() {
                     let node = self.input_owner[index];
                     let local = index - self.input_start[node];
-                    if let Some(shorter) = self.tangent_column(node, local, dt_s, group_scale, cx)?
+                    if let Some(shorter) =
+                        self.tangent_column(node, local, dt_s, group_scale, cx)?
                     {
                         return Ok(Err(shorter));
                     }
                     // Every row that reads this component's outputs, where
                     // the plan keeps its entry in this column.
                     let reading = &readers[column_readers[column].clone()];
-                    for (&(row, offset, slope), &slot) in reading.iter().zip(&slots[slot_start[column]..]) {
+                    for (&(row, offset, slope), &slot) in
+                        reading.iter().zip(&slots[slot_start[column]..])
+                    {
                         let through = slope * self.scratch_outputs[offset];
                         condensed.subtract(slot, through);
                         rounding[row] += (through * self.inputs[index]).abs();
@@ -2235,7 +2402,13 @@ impl System {
                 // The step's first check, judged with the slopes just
                 // formed at its own iterate.
                 let Some(open) = self.carried_beyond(
-                    unknowns, residual, slopes, group_scale, power_scale, floor, carried,
+                    unknowns,
+                    residual,
+                    slopes,
+                    group_scale,
+                    power_scale,
+                    floor,
+                    carried,
                 ) else {
                     // Taken with no update. Differencing a component wrote
                     // a perturbed proposal to its candidate slot, so each
@@ -2470,7 +2643,16 @@ impl System {
             for port in &members {
                 let global = self.port_start[port.node] + port.port;
                 energy += self.port_energy[global];
-                magnitude += self.port_energy[global].abs();
+                let spec = &self.nodes[port.node].ports()[port.port];
+                magnitude += if spec.field_metric().is_some() {
+                    dt_s * power_pairing_scale(
+                        spec,
+                        &self.inputs[self.input_range(*port)],
+                        &self.outputs[self.output_range(*port)],
+                    )
+                } else {
+                    self.port_energy[global].abs()
+                };
                 entropy += self.port_entropy[global];
                 entropy_scale += self.port_entropy[global].abs();
             }
@@ -2500,15 +2682,20 @@ impl System {
                 let spec = &self.nodes[port.node].ports()[port.port];
                 let outputs = self.output_range(*port);
                 for (offset, index) in self.input_range(*port).enumerate() {
-                    let weight = match (spec.carrier(), spec.role()) {
-                        (Carrier::Heat, PortRole::FlowIn) => 1.0,
+                    let slack_j = match (spec.carrier(), spec.role()) {
+                        (Carrier::Heat, PortRole::FlowIn) => dt_s * self.input_allowance[index],
                         (Carrier::Stream, PortRole::FlowIn) if offset == STREAM_ENTHALPY_RATE => {
-                            1.0
+                            dt_s * self.input_allowance[index]
                         }
-                        (Carrier::Power(_), _) => self.outputs[outputs.start + offset].abs(),
+                        (Carrier::Power(_), _) => power_input_slack_j(
+                            spec,
+                            &self.outputs[outputs.clone()],
+                            offset,
+                            dt_s,
+                            self.input_allowance[index],
+                        ),
                         _ => 0.0,
                     };
-                    let slack_j = dt_s * self.input_allowance[index] * weight;
                     solve_slack_j += slack_j;
                     // The same heat, left uncancelled at the temperature
                     // its receiver returned, is entropy the solve was
@@ -2521,7 +2708,7 @@ impl System {
             let tolerance_j = self.config.interface_energy_tolerance * magnitude
                 + solve_slack_j
                 + f64::MIN_POSITIVE;
-            if !(energy.abs() <= tolerance_j) {
+            if !(energy.is_finite() && tolerance_j.is_finite() && energy.abs() <= tolerance_j) {
                 return Err(SystemError::Interface {
                     connection: index,
                     defect_j: energy,

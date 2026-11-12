@@ -34,7 +34,7 @@
 //! component's port tangent when it offers one and a forward difference
 //! otherwise; the inputs that are copies are substituted and the ones that
 //! close the loops are eliminated together. It has no
-//! metric field transfer, no non-smooth tier, no multirate
+//! non-smooth tier, no multirate
 //! stepping, no monolithic solve through `StageResidual` and no snapshot
 //! encoding. Step-doubling error control uses an explicitly supplied state
 //! norm and convergence order. The remaining work is in beads `.5.3`, `.5.5` and

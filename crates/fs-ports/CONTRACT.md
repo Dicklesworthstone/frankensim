@@ -30,8 +30,8 @@ behavior or whole-system passivity claims.
   and the adoption trait `PortedModule`.
 - Iteration weight: `BoundedAitkenRelaxation`.
 - Executable contract: `component::{Component, PortTangent, LoadLine,
-  StageResidual, PortSpec, PortLayout, Class, Receipt, Proposal, audit_step}`
-  and `component::conformance`.
+  StageResidual, PortSpec, DualityMetric, PortLayout, Class, Receipt, Proposal,
+  audit_step}` and `component::conformance`.
 
 The sections after the ten required ones give the semantics of each group.
 
@@ -78,6 +78,8 @@ None.
 - `tests/component_reference.rs` for the Component contract and
   `tests/load_line_reference.rs` for its load-line tier, with the three
   `compile_fail` doctests in `component`.
+- `tests/field_ports.rs` for field duality and independently computed traction
+  work on an inertial surface.
 - The fs-couple and fs-feec batteries named under "Purpose and layer".
 
 ## No-claim boundaries
@@ -132,6 +134,22 @@ temperature [K] and heat rate [W] and books `dt * flow`, with entropy
 port energy from the wire values (`PortSpec::energy_in_j`), so both ends of a
 lossless connection book the same number.
 
+`PortSpec::field_power` declares a field power port whose effort and flow
+vectors have the same width and whose energy is `dt * e^T M f`.
+`DualityMetric::new(width, entries)` takes row-major, finite, exactly symmetric
+coefficients (signed zeros compare equal), requiring positive Cholesky pivots
+and finite factors. It retains the factor; `multiply` and `solve` use caller
+buffers without allocation. Shape, coefficient, asymmetric pair, pivot and
+factorization refusals are structured; vector actions refuse wrong lengths or
+nonfinite arithmetic. Ordinary power-port arithmetic is unchanged.
+The metric does not infer a physical basis, spatial accuracy, units or
+conditioning, and Cholesky admission is not an interval certificate of positive
+definiteness. Rectangular and indefinite pairings are outside this API.
+Connections must preserve the declared metric; matching carrier and width
+alone is insufficient. Six G0/G3 tests cover off-diagonal work in both roles,
+identity pairing, independent multiplication and solve, admission and arithmetic
+refusals, and a field component whose Euclidean energy account is rejected.
+
 `Carrier::Stream` (`PortSpec::stream(id, role, carried)`, width `2 + carried`)
 carries material between a storage and a transport element. The storage
 (`FlowIn`) returns what it holds is like: pressure [Pa], specific enthalpy
@@ -184,8 +202,8 @@ a zero matrix fails that law, a line on a heat port and a matrix of the wrong
 size are refused. The kit cannot check that the efforts satisfy the
 component's own relation; only the component can state it.
 
-**No claim.** v0 has no entropy on stream ports, no field ports with a
-duality matrix, no multistage port values and no snapshot identity. The kit
+**No claim.** v0 has no entropy on stream ports, no multistage port values
+and no snapshot identity. The kit
 does not yet check `StageResidual`, unit rescaling, time reversal or temporal
 order. A passing conformance check says a component keeps its own accounts; it
 says nothing about the accuracy of its physics.

@@ -52,10 +52,19 @@ physics owners below fs-couple can be composed without it.
     ports of equal width and finite nonzero ratios.
   - `power_map(a, b, P)`: the same roles, with `P` a finite row-major matrix
     of `b.width()` rows and `a.width()` columns. The kernel generates
-    `f_b = -P f_a` and `e_a = P^T e_b`; rectangular and rank-deficient maps
-    are allowed. The two directions share their coefficients. These are
-    Euclidean power-normalized coefficients, not arbitrary field duality
-    metrics. Heat-rate and signal ports are refused by both APIs.
+    `f_b = -P f_a` and `e_a = M_a^-1 P^T M_b e_b`; rectangular and
+    rank-deficient maps are allowed. A `PortSpec::field_power` declares a
+    fixed dense symmetric positive-definite metric for `e^T M f`; ordinary
+    ports use the identity. The builder computes the effort adjoint with
+    the metrics' admitted Cholesky factors; stepping performs no metric
+    solve. Non-finite adjoint arithmetic refuses as `MapAdjoint` before any
+    port is claimed. With two ordinary ports the original shared-coefficient
+    transpose path is retained. Heat, stream and signal ports are refused.
+    Bonds, ordinary junctions, ratio junctions and scalar transformers need
+    equal power metrics; an explicit identity matches an ordinary port.
+    Unequal metrics require `power_map`. Interface power magnitudes and
+    input-error energy allowances use the declared metric, and a non-finite
+    interface energy allowance refuses the step.
   - `heat_route(source, sinks, remainder, temperature)`: heat leaving the
     source is delivered to the sinks by fraction; a remainder goes to a named
     `HeatSink` outside the system. `RouteTemperature::SinkEquivalent` gives the
@@ -707,6 +716,17 @@ Power conversions, `tests/power_maps.rs`:
   role, a heat or signal port, unequal widths and a member named twice,
   claiming nothing; the same ports then join and the system seals and steps.
 
+Field conversions, `tests/field_maps.rs`:
+- nonmatching 2-to-3 field oscillators with distinct off-diagonal metrics,
+  full-rank and rank-one transfers, compared for 600 steps with independently
+  condensed midpoint equations and physical energy;
+- metric mismatch refusals for all direct junction and transformer forms,
+  mixed ordinary/field maps in both directions, and explicit identity bonds;
+- non-finite metric-adjoint refusal without claiming ports, then repair;
+- finite extreme-scale work, and atomic refusal when an infinite
+  absolute-term power magnitude cannot supply a finite audit allowance.
+These are discrete connection oracles, not a field-discretization error bound.
+
 Owner slice, `tests/rigid_body_slice.rs` (`--features slices`): the native
 fs-mbd rigid body (`fs_mbd::component::RigidBody`), the first physics owner on
 the kernel.
@@ -1253,8 +1273,10 @@ the refused calls change nothing.
   through it, so a small volume between restrictions sets the step; a
   prescribed draw of a quantity a volume holds none of ends in step
   underflow. Stream inputs inside a loop start from zero on the first step.
-- No mapped transfer for arbitrary field duality metrics, and no gyrator as a
-  connection (the `Gyrator` element is a component); no field ports;
+- Field metrics are fixed, dense and symmetric positive definite; indefinite,
+  nonsymmetric and state-varying pairings are not admitted. No conditioning
+  bound or continuum trace-map accuracy is inferred from metric admission.
+  No gyrator as a connection (the `Gyrator` element is a component);
   no non-smooth tier (contact, stick-slip); no multirate stepping; no
   monolithic solve through `StageResidual`; no embedded error estimator or
   PI controller (step doubling and proportional control are available); no

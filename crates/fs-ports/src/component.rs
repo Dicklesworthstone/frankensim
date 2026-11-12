@@ -30,8 +30,8 @@
 //!
 //! # What v0 does not cover
 //!
-//! Entropy carried by streams, field ports with a duality matrix,
-//! multistage port values, and snapshot identity are later beads
+//! Entropy carried by streams, multistage port values, and snapshot identity
+//! are later beads
 //! (`frankensim-rc-1109-root-3gc12.5.2`, `.5.4`). The contract stays v0 until
 //! the five kernel slices pass on it.
 
@@ -52,7 +52,8 @@ pub const COMPONENT_CONTRACT_VERSION: u16 = 0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Carrier {
     /// A power-conjugate pair of the given kind; power into the owner is the
-    /// component-wise product of effort and flow, summed.
+    /// component-wise product of effort and flow, summed, or `e^T M f` when
+    /// the port declares a [`DualityMetric`].
     Power(PortKind),
     /// Heat. Effort is absolute temperature [K]; flow is heat rate [W] into
     /// the owner. Power into the owner is the flow itself, and entropy flow is
@@ -109,6 +110,201 @@ pub enum PortRole {
     SignalOut,
 }
 
+/// A symmetric positive-definite duality matrix for field coefficients.
+///
+/// A field port uses the same number of effort and flow coefficients, with
+/// power `e^T M f`. Entries are row-major. Construction validates a finite,
+/// exactly symmetric matrix and retains its Cholesky factor for connection
+/// admission; multiplication and solves allocate nothing. This covers trace
+/// mass matrices in one basis, not rectangular or indefinite dual pairings.
+#[derive(Debug, Clone)]
+pub struct DualityMetric {
+    width: NonZeroUsize,
+    entries: Vec<f64>,
+    lower: Vec<f64>,
+}
+
+impl PartialEq for DualityMetric {
+    fn eq(&self, other: &Self) -> bool {
+        self.width == other.width && self.entries == other.entries
+    }
+}
+
+// Construction excludes NaN. Equality concerns the metric, not its cached
+// factor, and ordinary floating-point equality equates signed zeros.
+impl Eq for DualityMetric {}
+
+impl DualityMetric {
+    /// Admit a square field metric and retain its Cholesky factor.
+    ///
+    /// Positive finite pivots and finite factors are required. This is a
+    /// floating-point Cholesky admission, not an interval proof of positive
+    /// definiteness or a bound on conditioning.
+    ///
+    /// # Errors
+    /// Refuses the wrong shape, nonfinite coefficients, unequal mirrored
+    /// entries, nonpositive pivots, or an unrepresentable factorization.
+    #[allow(clippy::float_cmp)] // Symmetry is an exact admission rule.
+    pub fn new(width: NonZeroUsize, entries: Vec<f64>) -> Result<Self, ContractViolation> {
+        let n = width.get();
+        if n.checked_mul(n) != Some(entries.len()) {
+            return Err(ContractViolation::MetricShape {
+                width: n,
+                entries: entries.len(),
+            });
+        }
+        for (index, &value) in entries.iter().enumerate() {
+            if !value.is_finite() {
+                return Err(ContractViolation::MetricCoefficient { index, value });
+            }
+        }
+        for row in 0..n {
+            for column in 0..row {
+                if entries[row * n + column] != entries[column * n + row] {
+                    return Err(ContractViolation::MetricAsymmetric { row, column });
+                }
+            }
+        }
+        let mut lower = vec![0.0; entries.len()];
+        for row in 0..n {
+            for column in 0..=row {
+                let mut value = entries[row * n + column];
+                for k in 0..column {
+                    value -= lower[row * n + k] * lower[column * n + k];
+                }
+                if !value.is_finite() {
+                    return Err(ContractViolation::MetricFactorization { row, column, value });
+                }
+                let factor = if row == column {
+                    if value <= 0.0 {
+                        return Err(ContractViolation::MetricPivot { index: row, value });
+                    }
+                    value.sqrt()
+                } else {
+                    value / lower[column * n + column]
+                };
+                if !factor.is_finite() {
+                    return Err(ContractViolation::MetricFactorization {
+                        row,
+                        column,
+                        value: factor,
+                    });
+                }
+                lower[row * n + column] = factor;
+            }
+        }
+        Ok(Self {
+            width,
+            entries,
+            lower,
+        })
+    }
+
+    /// Number of effort and flow coefficients.
+    #[must_use]
+    pub const fn width(&self) -> usize {
+        self.width.get()
+    }
+
+    /// Matrix coefficients in row-major order.
+    #[must_use]
+    pub fn entries(&self) -> &[f64] {
+        &self.entries
+    }
+
+    fn check_vectors(&self, input: &[f64], output: &[f64]) -> Result<(), ContractViolation> {
+        for (vector, actual) in [
+            ("metric input", input.len()),
+            ("metric output", output.len()),
+        ] {
+            if actual != self.width() {
+                return Err(ContractViolation::VectorLength {
+                    vector,
+                    expected: self.width(),
+                    actual,
+                });
+            }
+        }
+        if !input.iter().all(|value| value.is_finite()) {
+            return Err(ContractViolation::NonFinite {
+                quantity: "metric input",
+            });
+        }
+        Ok(())
+    }
+
+    /// Write `M * input` into a caller-owned buffer without allocation.
+    ///
+    /// # Errors
+    /// Refuses wrong vector lengths, nonfinite input, or a nonfinite result.
+    /// The output buffer is unspecified after an arithmetic refusal.
+    pub fn multiply(&self, input: &[f64], output: &mut [f64]) -> Result<(), ContractViolation> {
+        self.check_vectors(input, output)?;
+        let n = self.width();
+        for (row, slot) in output.iter_mut().enumerate() {
+            let mut value = 0.0;
+            for (column, &coefficient) in input.iter().enumerate() {
+                value += self.entries[row * n + column] * coefficient;
+            }
+            if !value.is_finite() {
+                return Err(ContractViolation::NonFinite {
+                    quantity: "metric product",
+                });
+            }
+            *slot = value;
+        }
+        Ok(())
+    }
+
+    /// Solve `M * solution = rhs` using the retained factor without allocation.
+    ///
+    /// # Errors
+    /// Refuses wrong vector lengths, nonfinite input, or a nonfinite solve.
+    /// The solution buffer is unspecified after an arithmetic refusal.
+    pub fn solve(&self, rhs: &[f64], solution: &mut [f64]) -> Result<(), ContractViolation> {
+        self.check_vectors(rhs, solution)?;
+        let n = self.width();
+        for (row, &right) in rhs.iter().enumerate() {
+            let mut value = right;
+            for (column, &solved) in solution[..row].iter().enumerate() {
+                value -= self.lower[row * n + column] * solved;
+            }
+            solution[row] = value / self.lower[row * n + row];
+            if !solution[row].is_finite() {
+                return Err(ContractViolation::NonFinite {
+                    quantity: "metric forward solve",
+                });
+            }
+        }
+        for row in (0..n).rev() {
+            let mut value = solution[row];
+            for (column, &solved) in solution.iter().enumerate().skip(row + 1) {
+                value -= self.lower[column * n + row] * solved;
+            }
+            solution[row] = value / self.lower[row * n + row];
+            if !solution[row].is_finite() {
+                return Err(ContractViolation::NonFinite {
+                    quantity: "metric backward solve",
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn pairing(&self, effort: &[f64], flow: &[f64]) -> f64 {
+        let n = self.width();
+        let mut power = 0.0;
+        for (row, &e) in effort.iter().enumerate() {
+            let mut dual_flow = 0.0;
+            for (column, &f) in flow.iter().enumerate() {
+                dual_flow += self.entries[row * n + column] * f;
+            }
+            power += e * dual_flow;
+        }
+        power
+    }
+}
+
 /// Executable description of one port of a component.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortSpec {
@@ -116,6 +312,7 @@ pub struct PortSpec {
     carrier: Carrier,
     role: PortRole,
     width: NonZeroUsize,
+    field_metric: Option<DualityMetric>,
 }
 
 impl PortSpec {
@@ -139,7 +336,25 @@ impl PortSpec {
             carrier: Carrier::Power(kind),
             role,
             width,
+            field_metric: None,
         })
+    }
+
+    /// A field power port with energy `dt * effort^T * metric * flow`.
+    ///
+    /// Effort and flow have the same width, given by the admitted metric.
+    ///
+    /// # Errors
+    /// [`ContractViolation::PortRole`] if `role` is a signal role.
+    pub fn field_power(
+        id: StableId,
+        kind: PortKind,
+        role: PortRole,
+        metric: DualityMetric,
+    ) -> Result<Self, ContractViolation> {
+        let mut port = Self::power(id, kind, role, metric.width)?;
+        port.field_metric = Some(metric);
+        Ok(port)
     }
 
     /// A scalar heat port: temperature [K] and heat rate [W] into the owner.
@@ -157,6 +372,7 @@ impl PortSpec {
             carrier: Carrier::Heat,
             role,
             width: NonZeroUsize::MIN,
+            field_metric: None,
         })
     }
 
@@ -177,6 +393,7 @@ impl PortSpec {
             carrier: Carrier::Stream,
             role,
             width: NonZeroUsize::MIN.saturating_add(STREAM_CARRIED - 1 + carried),
+            field_metric: None,
         })
     }
 
@@ -188,6 +405,7 @@ impl PortSpec {
             carrier: Carrier::Signal,
             role: PortRole::SignalIn,
             width,
+            field_metric: None,
         }
     }
 
@@ -199,6 +417,7 @@ impl PortSpec {
             carrier: Carrier::Signal,
             role: PortRole::SignalOut,
             width,
+            field_metric: None,
         }
     }
 
@@ -224,6 +443,12 @@ impl PortSpec {
     #[must_use]
     pub fn width(&self) -> usize {
         self.width.get()
+    }
+
+    /// The explicit field pairing, or `None` for an ordinary port.
+    #[must_use]
+    pub fn field_metric(&self) -> Option<&DualityMetric> {
+        self.field_metric.as_ref()
     }
 
     /// Coefficients this port contributes to the input vector.
@@ -257,6 +482,14 @@ impl PortSpec {
             (Carrier::Power(_), _) => {
                 if input.len() != width || output.len() != width {
                     return f64::NAN;
+                }
+                if let Some(metric) = &self.field_metric {
+                    let (effort, flow) = if self.role == PortRole::EffortIn {
+                        (input, output)
+                    } else {
+                        (output, input)
+                    };
+                    return dt_s * metric.pairing(effort, flow);
                 }
                 let mut sum = 0.0;
                 for (a, b) in input.iter().zip(output) {
@@ -753,12 +986,49 @@ pub enum ContractViolation {
         /// The offending port.
         port: String,
     },
+    /// A field metric does not have one entry per row and column.
+    MetricShape {
+        /// Number of rows and columns.
+        width: usize,
+        /// Number of supplied coefficients.
+        entries: usize,
+    },
+    /// A field metric coefficient is not finite.
+    MetricCoefficient {
+        /// Row-major coefficient index.
+        index: usize,
+        /// Rejected coefficient.
+        value: f64,
+    },
+    /// Mirrored coefficients of a field metric differ.
+    MetricAsymmetric {
+        /// Row of the lower-triangular entry.
+        row: usize,
+        /// Column of the lower-triangular entry.
+        column: usize,
+    },
+    /// A field metric has a nonpositive Cholesky pivot.
+    MetricPivot {
+        /// Diagonal index.
+        index: usize,
+        /// Rejected pivot before taking its square root.
+        value: f64,
+    },
+    /// A field metric's Cholesky factorization is not representable.
+    MetricFactorization {
+        /// Factor row.
+        row: usize,
+        /// Factor column.
+        column: usize,
+        /// Nonfinite residual or factor.
+        value: f64,
+    },
     /// The port list or an input or output vector has the wrong length for
-    /// the layout.
+    /// the layout or field metric.
     VectorLength {
-        /// Which one: "ports", "inputs" or "outputs".
+        /// Which list or vector has the wrong length.
         vector: &'static str,
-        /// Length the layout requires.
+        /// Required length.
         expected: usize,
         /// Length supplied.
         actual: usize,
@@ -819,6 +1089,28 @@ impl fmt::Display for ContractViolation {
                     "port `{port}` has a carrier that disagrees with its role"
                 )
             }
+            Self::MetricShape { width, entries } => write!(
+                f,
+                "field metric of width {width} has {entries} entries, expected a square matrix"
+            ),
+            Self::MetricCoefficient { index, value } => {
+                write!(
+                    f,
+                    "field metric coefficient {index} = {value} is not finite"
+                )
+            }
+            Self::MetricAsymmetric { row, column } => write!(
+                f,
+                "field metric entries ({row}, {column}) and ({column}, {row}) differ"
+            ),
+            Self::MetricPivot { index, value } => write!(
+                f,
+                "field metric Cholesky pivot {index} = {value} is not positive"
+            ),
+            Self::MetricFactorization { row, column, value } => write!(
+                f,
+                "field metric Cholesky factor ({row}, {column}) = {value} is not finite"
+            ),
             Self::VectorLength {
                 vector,
                 expected,

@@ -80,7 +80,7 @@ pub enum AdmissionError {
         /// What the connection needs there.
         needs: &'static str,
     },
-    /// Two connected ports carry different things or have different widths.
+    /// Connected ports differ in carrier, width or power-pairing metric.
     Mismatch {
         /// First port, as `node.port`.
         a: String,
@@ -158,6 +158,15 @@ pub enum AdmissionError {
         /// The rejected value.
         value: f64,
     },
+    /// A field map's weighted effort adjoint could not be represented.
+    MapAdjoint {
+        /// Effort-receiving port, as `node.port`.
+        a: String,
+        /// Flow-receiving port, as `node.port`.
+        b: String,
+        /// The rejected metric operation or non-finite intermediate.
+        violation: ContractViolation,
+    },
 }
 
 impl fmt::Display for AdmissionError {
@@ -170,7 +179,10 @@ impl fmt::Display for AdmissionError {
             Self::Layout { node, violation } => write!(f, "component `{node}`: {violation}"),
             Self::Role { port, needs } => write!(f, "port `{port}` must be {needs} here"),
             Self::Mismatch { a, b } => {
-                write!(f, "ports `{a}` and `{b}` differ in carrier or width")
+                write!(
+                    f,
+                    "ports `{a}` and `{b}` differ in carrier, width or power metric"
+                )
             }
             Self::SinkTemperature {
                 name,
@@ -226,6 +238,12 @@ impl fmt::Display for AdmissionError {
                     "power-map coefficient {index} must be finite (got {value})"
                 )
             }
+            Self::MapAdjoint { a, b, violation } => {
+                write!(
+                    f,
+                    "power map `{a}` to `{b}` has no representable effort adjoint: {violation}"
+                )
+            }
         }
     }
 }
@@ -252,12 +270,15 @@ pub(crate) enum Connection {
     /// `b` receives `-ratio * flow_a`; `a` receives `ratio * effort_b`.
     /// A signed scalar ratio acts independently on each coefficient.
     Transformer { a: PortRef, b: PortRef, ratio: f64 },
-    /// `b` receives `-P flow_a`; `a` receives `P^T effort_b`. The matrix is
-    /// row-major, with `b.width()` rows and `a.width()` columns.
+    /// `b` receives `-P flow_a`; `a` receives the metric adjoint times
+    /// `effort_b`. `map` has `b.width()` rows and `a.width()` columns.
     PowerMap {
         a: PortRef,
         b: PortRef,
         map: Vec<f64>,
+        /// Row-major `M_a^-1 P^T M_b`, with `a.width()` rows. `None`
+        /// retains the original shared coefficients for ordinary ports.
+        effort_map: Option<Vec<f64>>,
     },
     /// Heat leaving `source` is delivered to `sinks` by fraction; the rest
     /// goes to the declared sink outside the system.
