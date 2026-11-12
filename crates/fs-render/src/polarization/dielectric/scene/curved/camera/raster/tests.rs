@@ -63,6 +63,52 @@ pub(super) fn geometry() -> InstanceScene {
     .unwrap()
 }
 
+/// geometry() closed below: object 8 is an open-top box, x and y in [-2, 2] and z in
+/// [-1, 2], whose top edges lie in the plane. The camera, the fixture point sources and
+/// every receiver point the tests' cameras see lie inside it; bind it Interaction::Opaque.
+/// A trace that samples a volume flight is never certified to escape (curved.rs: Escaped
+/// requires no volume flight), so in the open scene a diffuse continuation from the plane
+/// into a participating medium runs on to the distance limit, which the camera refuses as
+/// Unresolved(DistanceLimit). Inside the box it ends on the box. Every straight segment
+/// inside the box is at most its diagonal, sqrt(41) m.
+#[cfg(feature = "volumes")]
+pub(super) fn enclosed_geometry() -> InstanceScene {
+    let mut instances = geometry().instances().to_vec();
+    instances.push(
+        GeometryInstance::try_new(
+            8,
+            hash_domain("curved-camera-raster-test", b"black-enclosure"),
+            SharedGeometry::mesh(TriMesh::new(
+                vec![
+                    [-2.0, -2.0, -1.0],
+                    [2.0, -2.0, -1.0],
+                    [2.0, 2.0, -1.0],
+                    [-2.0, 2.0, -1.0],
+                    [-2.0, -2.0, 2.0],
+                    [2.0, -2.0, 2.0],
+                    [2.0, 2.0, 2.0],
+                    [-2.0, 2.0, 2.0],
+                ],
+                vec![
+                    [0, 2, 1],
+                    [0, 3, 2],
+                    [0, 1, 5],
+                    [0, 5, 4],
+                    [1, 2, 6],
+                    [1, 6, 5],
+                    [2, 3, 7],
+                    [2, 7, 6],
+                    [3, 0, 4],
+                    [3, 4, 7],
+                ],
+            )),
+            RigidTransform::identity(),
+        )
+        .unwrap(),
+    );
+    InstanceScene::try_new(instances).unwrap()
+}
+
 pub(super) fn bindings() -> Vec<SurfaceBinding> {
     vec![SurfaceBinding {
         object_id: 7,

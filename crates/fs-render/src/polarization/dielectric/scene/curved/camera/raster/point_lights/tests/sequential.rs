@@ -443,19 +443,53 @@ fn g1_steady_active_coating_keeps_point_radiometry_detector_order_and_native_wor
             use crate::polarization::dielectric::scene::curved::participating::{CurvedRayleighMedium, CurvedRayleighScene};
             use crate::polarization::dielectric::scene::curved::participating::transmittance::images::CurvedTransmittanceImageWorkspace;
             use crate::volumes::transport::scattering::{MassScatteringSpectrum, PhaseFunction};
+            use crate::polarization::dielectric::scene::curved::camera::raster::tests::{
+                distance_budget_m, enclosed_geometry,
+            };
+
+            // In the open plane scene the camera's diffuse continuation from the receiver
+            // runs down into unbounded scattering medium, is never certified to escape, and
+            // ends at the distance limit: Camera(Unresolved(DistanceLimit)). The scattering
+            // block closes the scene below with the black box of enclosed_geometry(). The
+            // continuation ends on the box with no radiance, so the expected point radiance
+            // is unchanged. The camera path's trace budget is the scene's own
+            // (distance_budget_m, as in the area-light raster tests): 4 m does not reach from
+            // the camera past the receiver to the box's far corners.
+            let geometry = enclosed_geometry();
+            let mut enclosed_bindings = bindings();
+            enclosed_bindings.push(SurfaceBinding {
+                object_id: 8,
+                interaction: Interaction::Opaque,
+            });
+            let native = CurvedPolarizedScene::try_new_with_materials(
+                cx,
+                &geometry,
+                &media,
+                &[],
+                &[],
+                &reflectances,
+                enclosed_bindings,
+                100_000,
+            )
+            .unwrap();
+            let surface = CurvedCameraScene::try_new(cx, &native, &[], None).unwrap();
+            let lights = CurvedPointLightCameraScene::try_new(cx, &surface, &branches).unwrap();
+            let mut point_lights = point_settings();
+            point_lights.surfaces.max_distance_m =
+                distance_budget_m(&geometry, physical.eye(), point_lights.surfaces);
 
             // Choose a positive homogeneous rate whose first two original
-            // camera flights exceed the complete path budget in every lane.
-            // Only the independent source segment then has explicit survival.
+            // camera flights exceed twice the box diagonal in every lane. The
+            // camera path's two segments (camera to receiver, receiver to box)
+            // lie in the box, so neither collides. Only the independent source
+            // segment then has explicit survival.
+            let diagonal = (4.0_f64 * 4.0 + 4.0 * 4.0 + 3.0 * 3.0).sqrt();
             let mut rate = 0.01_f64;
             for lane in 0..4 {
                 for flight in 0..2 {
                     let draw =
                         philox4x32_10([0, SAMPLE, flight, 0x6372_7350 + lane], [SEED as u32, 0]);
-                    rate = rate.min(
-                        -(1.0 - unit(draw[0])).ln()
-                            / (2.0 * point_settings().surfaces.max_distance_m),
-                    );
+                    rate = rate.min(-(1.0 - unit(draw[0])).ln() / (2.0 * diagonal));
                 }
             }
             assert!(rate > 0.0);
@@ -491,7 +525,7 @@ fn g1_steady_active_coating_keeps_point_radiometry_detector_order_and_native_wor
                 CurvedRayleighImageLightCameraScene::try_new(cx, &unbound, &groups).unwrap();
             let mut workspace = CurvedTransmittanceImageWorkspace::try_new(2, 2).unwrap();
             let settings = RayleighPointLightCameraSettings {
-                point_lights: point_settings(),
+                point_lights,
                 max_volume_events: 8,
                 max_source_free_flight_draws: 256,
                 max_source_candidates: 128,

@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::gradient_index::AffineIndexField;
+use crate::polarization::dielectric::scene::curved::camera::raster::tests::enclosed_geometry;
 use crate::polarization::dielectric::scene::curved::camera::CameraAnalyzer;
 use crate::polarization::dielectric::scene::curved::camera::raster::point_lights::tests::transient::sequential::{
     SAMPLE, SEED, packet, physical_camera,
@@ -40,7 +41,14 @@ impl CurvedRayleighField for EmptyCell {
 #[test]
 fn g1_molecular_lens_point_images_replay_all_native_domains_and_share_qe_shutter_work() {
     with_cx(|cx, _| {
-        let geometry = geometry();
+        // In the open plane scene the camera's diffuse continuation from the receiver runs
+        // down through the empty cell's positive majorant, is never certified to escape, and
+        // ends at the distance limit: Camera(Unresolved(DistanceLimit)). The black box of
+        // enclosed_geometry() closes the scene below; the continuation ends on it with no
+        // radiance, so the expected radiance is unchanged. The 10 m trace budget covers
+        // every camera path: about 2 m to the receiver, then at most the box diagonal,
+        // sqrt(41) = 6.4 m.
+        let geometry = enclosed_geometry();
         let material = DielectricGlass::new(
             CauchyIor::try_constant(1.0).unwrap(),
             BeerLambertAbsorption::try_constant(0.2).unwrap(),
@@ -68,13 +76,19 @@ fn g1_molecular_lens_point_images_replay_all_native_domains_and_share_qe_shutter
             &[],
             &[],
             &reflectances,
-            vec![SurfaceBinding {
-                object_id: 7,
-                interaction: Interaction::DepolarizingDiffuse {
-                    medium: 0,
-                    reflectance: 0,
+            vec![
+                SurfaceBinding {
+                    object_id: 7,
+                    interaction: Interaction::DepolarizingDiffuse {
+                        medium: 0,
+                        reflectance: 0,
+                    },
                 },
-            }],
+                SurfaceBinding {
+                    object_id: 8,
+                    interaction: Interaction::Opaque,
+                },
+            ],
             100_000,
         )
         .unwrap();
