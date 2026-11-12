@@ -2437,3 +2437,23 @@ outside this adapter. Temperature sets the entropy account only; it does not
 rebind the owner's fixed resistance or infer a material law. Numerical
 conformance does not establish physical validity of the supplied model, and
 the remaining exact-linear and other adapter work in bead `.5.12` stays open.
+
+### Source-owned endpoint evaluation allowance
+
+The PHS adapter reads the original storage's optional
+`energy_evaluation_error_bound_j` at both endpoints. A declared bound must be
+finite and nonnegative; their receipt allowance must remain finite. `None`
+retains the existing ordinary arithmetic allowance. An owner whose Hamiltonian
+evaluation cancels large internal terms or an arbitrary energy datum must
+declare its complete absolute evaluation error from the source arithmetic.
+The adapter adds both endpoint bounds to `Receipt::energy_tolerance_j` only;
+its independent native work/heat/storage check retains the original arithmetic
+and equation-work allowance. Thus endpoint measurement roundoff cannot grant
+permission for unphysical work or be converted into physical heat.
+
+The regression sources in `tests/phs.rs` retain the native 100000000.5 J stored
+change when a shifted quadratic's rounded endpoint subtraction gives
+100000000 J, exercise the source bound after cold sharing, refuse negative or
+nonfinite bounds at either endpoint and an overflowing combined allowance
+without changing caller outputs, and retain the invalid-structure refusal even
+when the source declares a much larger endpoint bound.

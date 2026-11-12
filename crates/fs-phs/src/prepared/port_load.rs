@@ -8,6 +8,9 @@ impl Storage for SharedStorage {
         Some(Box::new(Self(self.0.clone())))
     }
     fn hamiltonian(&self, x: &[f64]) -> f64 { self.0.hamiltonian(x) }
+    fn energy_evaluation_error_bound_j(&self, state: &[f64]) -> Option<f64> {
+        self.0.energy_evaluation_error_bound_j(state)
+    }
     fn gradient(&self, x: &[f64], out: &mut [f64]) { self.0.gradient(x, out); }
     fn continuous_tangent(&self) -> Option<&dyn crate::ContinuousStorageTangent> {
         self.0.continuous_tangent()

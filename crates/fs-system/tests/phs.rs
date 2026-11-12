@@ -10,6 +10,7 @@ use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_phs::{
     PortHamiltonian, PreparedStepError, QuadraticStorage, SolveBudget, StepWorkspace, Storage,
+    arithmetic_rounding_floor,
 };
 use fs_ports::component::conformance::{Case, Observed, check_component};
 use fs_ports::component::{Class, Component, PortRole, PortSpec, Proposal};
@@ -433,15 +434,16 @@ fn metadata_native_refusals_and_unphysical_energy_are_not_hidden() {
         );
     });
     // Deliberately bypass the native structure gate: positive J creates
-    // energy while the state equation itself solves perfectly. The adapter
-    // must not launder that energy creation as signed numerical loss.
+    // energy while the state equation itself solves perfectly. Even a large
+    // declared endpoint-evaluation bound must not launder that creation as
+    // signed numerical loss.
     let mutant = PortHamiltonian::from_raw_parts(
         1,
         1,
         vec![1.0],
         vec![0.0],
         vec![1.0],
-        Box::new(QuadraticStorage::new(vec![1.0], 1).unwrap()),
+        Box::new(ShiftedQuadratic::new(0.0, Some((0.0, 1.0e6)))),
     );
     let component =
         PortHamiltonianComponent::new(mutant, vec![power("p", PortRole::EffortIn)]).unwrap();
@@ -454,4 +456,142 @@ fn metadata_native_refusals_and_unphysical_energy_are_not_hidden() {
         assert_eq!(next, vec![17.0]);
         assert_eq!(output, [23.0, 29.0]);
     });
+}
+
+/// A smooth physical quadratic with an arbitrary energy datum. The optional
+/// override injects a malformed or deliberately loose bound at/above one state.
+struct ShiftedQuadratic {
+    inner: QuadraticStorage,
+    datum_j: f64,
+    bound_override: Option<(f64, f64)>,
+}
+
+impl ShiftedQuadratic {
+    fn new(datum_j: f64, bound_override: Option<(f64, f64)>) -> Self {
+        Self {
+            inner: QuadraticStorage::new(vec![1.0], 1).unwrap(),
+            datum_j,
+            bound_override,
+        }
+    }
+}
+
+impl Storage for ShiftedQuadratic {
+    fn hamiltonian(&self, state: &[f64]) -> f64 {
+        self.inner.hamiltonian(state) - self.datum_j
+    }
+
+    fn energy_evaluation_error_bound_j(&self, state: &[f64]) -> Option<f64> {
+        if let Some((threshold, bound)) = self.bound_override {
+            if state[0] >= threshold {
+                return Some(bound);
+            }
+        }
+        // This is a source-arithmetic bound for the quadratic evaluation and
+        // datum subtraction, independent of work and any observed energy defect.
+        Some(arithmetic_rounding_floor(
+            4,
+            self.inner.hamiltonian(state).abs() + self.datum_j.abs(),
+        ))
+    }
+
+    fn gradient(&self, state: &[f64], output: &mut [f64]) {
+        self.inner.gradient(state, output);
+    }
+
+    fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], midpoint: &[f64]) -> Option<f64> {
+        self.inner.midpoint_energy_remainder(a, b, midpoint)
+    }
+}
+
+fn shifted_scalar_owner(bound_override: Option<(f64, f64)>) -> PortHamiltonian {
+    PortHamiltonian::new(
+        1,
+        1,
+        vec![0.0],
+        vec![0.0],
+        vec![1.0],
+        Box::new(ShiftedQuadratic::new(5.0e15, bound_override)),
+    )
+    .unwrap()
+}
+
+#[test]
+fn source_energy_roundoff_preserves_conformance_under_a_cancelling_datum() {
+    let old = vec![1.0e8];
+    let mut native = shifted_scalar_owner(None);
+    let bound = native.energy_evaluation_error_bound_j(&old);
+    assert!(bound.unwrap() > 0.0);
+    // Cold sharing must retain the source capability on both handles, as the
+    // exact native preparation factory also shares the original storage law.
+    let shared = native.share_storage();
+    assert_eq!(native.energy_evaluation_error_bound_j(&old), bound);
+    assert_eq!(shared.energy_evaluation_error_bound_j(&old), bound);
+    let component =
+        PortHamiltonianComponent::new(shared, vec![power("p", PortRole::EffortIn)]).unwrap();
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        let Observed::Stepped {
+            receipt,
+            audit,
+            outputs,
+        } = check_component(
+            &component,
+            &Case {
+                state: &old,
+                stale: &vec![17.0],
+                dt_s: 1.0,
+                inputs: &[1.0, 300.0],
+            },
+            cx,
+        )
+        .unwrap()
+        else {
+            panic!("fixed native duration");
+        };
+        // x' = 1 gives x1 = 100000001. Native constitutive work is exactly
+        // 100000000.5 J; subtracting rounded endpoint energies loses 0.5 J.
+        assert_eq!(receipt.stored_change_j, 100000000.5);
+        assert_eq!(receipt.numerical_loss_j, 0.0);
+        assert_eq!(receipt.dissipated_j, 0.0);
+        assert_eq!(outputs, vec![100000000.5, 0.0]);
+        assert_eq!(audit.endpoint_defect_j, -0.5);
+        assert!(receipt.energy_tolerance_j >= 0.5);
+        let (mut next, mut output) = (vec![17.0], [23.0, 29.0]);
+        component
+            .propose(&old, 1.0, &[1.0, 300.0], &mut next, &mut output, cx)
+            .unwrap();
+        assert_eq!(next, vec![100000001.0]);
+        assert_eq!(component.stored_energy_j(&old).unwrap(), 0.0);
+        assert_eq!(component.stored_energy_j(&next).unwrap(), 100000000.0);
+    });
+}
+
+#[test]
+fn malformed_source_energy_bounds_at_either_endpoint_preserve_caller_outputs() {
+    // The later threshold is reached only by the proposed state. MAX is
+    // individually finite, but the two-endpoint allowance cannot be represented.
+    for (bound, threshold) in [
+        (-1.0, 1.0e8),
+        (-1.0, 100000000.5),
+        (f64::NAN, 1.0e8),
+        (f64::NAN, 100000000.5),
+        (f64::INFINITY, 1.0e8),
+        (f64::INFINITY, 100000000.5),
+        (f64::MAX, 1.0e8),
+    ] {
+        let component = PortHamiltonianComponent::new(
+            shifted_scalar_owner(Some((threshold, bound))),
+            vec![power("p", PortRole::EffortIn)],
+        )
+        .unwrap();
+        with_cx(&CancelGate::new_clock_free(), |cx| {
+            let (mut next, mut output) = (vec![17.0], [23.0, 29.0]);
+            assert!(matches!(
+                component.propose(&vec![1.0e8], 1.0, &[1.0, 300.0], &mut next, &mut output, cx,),
+                Err(PhsComponentError::Invalid { .. })
+            ));
+            assert_eq!(next, vec![17.0]);
+            assert_eq!(output, [23.0, 29.0]);
+        });
+    }
 }

@@ -175,6 +175,16 @@ impl PortHamiltonianComponent {
         }
         Ok(energy)
     }
+
+    fn energy_error_bound_j(&self, state: &[f64]) -> Result<f64, PhsComponentError> {
+        match self.system.energy_evaluation_error_bound_j(state) {
+            None => Ok(0.0),
+            Some(bound) if bound.is_finite() && bound >= 0.0 => Ok(bound),
+            Some(_) => Err(invalid(
+                "source energy evaluation error bound must be finite and nonnegative",
+            )),
+        }
+    }
 }
 
 impl Component for PortHamiltonianComponent {
@@ -217,6 +227,7 @@ impl Component for PortHamiltonianComponent {
             ));
         }
         let energy_old = self.energy(old)?;
+        let energy_old_error_j = self.energy_error_bound_j(old)?;
         let mut scratch = self
             .scratch
             .try_borrow_mut()
@@ -232,6 +243,7 @@ impl Component for PortHamiltonianComponent {
             })
             .map_err(PhsComponentError::Owner)?;
         let energy_new = self.energy(next)?;
+        let energy_new_error_j = self.energy_error_bound_j(next)?;
         let effort = solver
             .last_step_discrete_effort()
             .ok_or_else(|| invalid("native accepted discrete effort is unavailable"))?;
@@ -285,6 +297,15 @@ impl Component for PortHamiltonianComponent {
                 tolerance_j: tolerance,
             });
         }
+        // Endpoint evaluations may cancel large physical terms or a datum.
+        // Their source-owned bounds do not enlarge the independent native
+        // balance allowance above or turn unphysical work into numerical loss.
+        let energy_tolerance_j = rounding + energy_old_error_j + energy_new_error_j;
+        if !energy_tolerance_j.is_finite() {
+            return Err(invalid(
+                "combined energy evaluation error bound is not finite",
+            ));
+        }
         cx.checkpoint().map_err(|_| cancelled())?;
         new.clone_from(next);
         outputs[..m].copy_from_slice(output);
@@ -294,7 +315,7 @@ impl Component for PortHamiltonianComponent {
             dissipated_j: record.dissipated,
             numerical_loss_j: numerical_loss,
             entropy_generated_j_per_k: entropy,
-            energy_tolerance_j: rounding,
+            energy_tolerance_j,
             residual: record.solver_residual,
             tolerance: certificate.effective_budget,
         }))

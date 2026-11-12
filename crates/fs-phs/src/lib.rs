@@ -154,6 +154,25 @@ pub trait Storage {
 
     /// `H(x)` — total stored energy, joules.
     fn hamiltonian(&self, x: &[f64]) -> f64;
+
+    /// Optional absolute roundoff error bound [J] for evaluating `hamiltonian`
+    /// at this state, including every stored-energy term and any energy datum.
+    ///
+    /// A declared bound must be finite and nonnegative. It comes from the
+    /// source's evaluation arithmetic and absolute term magnitudes, never an
+    /// observed energy-balance defect, source work or solver residual. Consumers
+    /// must validate the bound before using it. It does not relax independent
+    /// physical energy or passivity admission.
+    ///
+    /// `None` supplies no additional allowance beyond a consumer's ordinary
+    /// arithmetic bound. Owners whose Hamiltonian evaluation cancels large
+    /// internal terms must declare a sufficient bound for endpoint audits.
+    /// Like the storage law, this callback is deterministic and read-only;
+    /// prepared execution retains the owner's allocation behavior.
+    fn energy_evaluation_error_bound_j(&self, _state: &[f64]) -> Option<f64> {
+        None
+    }
+
     /// `grad H(x)` into `out` (efforts).
     fn gradient(&self, x: &[f64], out: &mut [f64]);
 
@@ -1167,6 +1186,16 @@ impl PortHamiltonian {
     #[must_use]
     pub fn hamiltonian(&self, x: &[f64]) -> f64 {
         self.storage.hamiltonian(x)
+    }
+
+    /// Original storage's optional absolute Hamiltonian evaluation error [J].
+    ///
+    /// Forwarded unchanged from [`Storage::energy_evaluation_error_bound_j`].
+    /// A consumer must validate that a declared bound is finite and nonnegative
+    /// and must not use it to relax independent physical energy admission.
+    #[must_use]
+    pub fn energy_evaluation_error_bound_j(&self, state: &[f64]) -> Option<f64> {
+        self.storage.energy_evaluation_error_bound_j(state)
     }
 
     /// Port output `y = G^T grad H(x)`.

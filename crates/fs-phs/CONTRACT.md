@@ -4512,3 +4512,27 @@ beside opposing 2^54 contributions; and incomplete source actions, action limits
 active-loss refusal, cancellation and reuse. These are local smooth parameter
 derivatives; they do not establish global material validity or physical
 admissibility of a finite parameter update.
+
+### Source-owned Hamiltonian evaluation roundoff
+
+`Storage::energy_evaluation_error_bound_j(state) -> Option<f64>` optionally
+declares an absolute error bound [J] for evaluating the original Hamiltonian at
+that state. The source computes it from its arithmetic and absolute stored-term
+magnitudes, including any energy datum or internally cancelling terms. It is
+independent of an observed balance defect, supplied work and solver residual.
+A declared bound must be finite and nonnegative; the consumer validates it.
+`None` supplies no additional allowance beyond the consumer's ordinary
+arithmetic bound. Owners whose internal terms cancel must declare a sufficient
+bound when their endpoint evaluations are audited. Other composed storage laws
+must own the bound for their complete evaluation; a child bound alone does not
+certify added terms or arithmetic.
+
+`PortHamiltonian::energy_evaluation_error_bound_j` forwards the capability
+unchanged. `share_storage` retains it on both immutable handles. This capability
+does not change the Hamiltonian, native constitutive energy difference, step
+equation, heat or physical balance admission. Component adapters may add the
+two endpoint bounds to their receipt's evaluation allowance; they must not use
+them to admit unphysical generation as numerical loss. The regression source in
+`fs-system/tests/phs.rs` covers a shifted scalar quadratic whose rounded endpoint
+subtraction loses 0.5 J, preservation through shared storage, invalid bounds at
+either endpoint and overflow of their combined allowance.
