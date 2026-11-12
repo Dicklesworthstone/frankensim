@@ -17,11 +17,30 @@
 //! slip a step starts and ends with, and for a prescribed end a mean does
 //! not say where the side ends its step.
 //!
-//! The slider takes the mean for the end: a prescribed side is HELD over
-//! its step, so its start, its mean and its end are that one value, and it
-//! jumps from one step to the next. That is the truth for a side at a
-//! constant speed and for one that does jump. It is not for a side that
-//! accelerates: see "Not covered" below.
+//! Left to itself, the slider takes the mean for the end: a prescribed
+//! side is HELD over its step, so its start, its mean and its end are
+//! that one value, and it jumps from one step to the next. That is the
+//! truth for a side at a constant speed and for one that does jump. It is
+//! not for a side that accelerates: see "Not covered" below.
+//!
+//! A side that accelerates is TOLD its span. [`Slider::told`] gives an end
+//! a signal input of width two, `span_a` or `span_b`: the velocities of
+//! what moves that end at the start and at the end of the step, as the
+//! mover returns them (`FlowSource::publishing` puts them out; a boundary
+//! can prescribe them). Nothing is inferred. The sign is the mover's: the
+//! flow the port itself receives is the mean with the OTHER sign, because
+//! every connection hands a port minus the flow of what it is joined to.
+//! Then the end's step is no longer the midpoint relation's by
+//! `2 mean - from - end`, with `from` where its last step ended (the
+//! span's start, in the first step), and the step's start slip is the
+//! last end slip and that, for `a` less that for `b`. An end that is held
+//! is the case `end = mean`, where this is the jump. The rows of the law
+//! below are the same either way: only the start slip they are handed
+//! differs.
+//!
+//! A span on an end that answers the slider's force is refused, and so is
+//! a span that lies on one side of zero while the flow the port receives
+//! lies on the same side: the sign of the port given for the mover's.
 //!
 //! The load line says which end is which. An end whose row of the line's
 //! matrix is zero does not answer the slider's force at all: its flow is
@@ -93,10 +112,10 @@
 //!
 //! # Not covered
 //!
-//! A prescribed side that ACCELERATES. Taken as held, it is off by half a
-//! step of its acceleration at every step, and no smaller step mends what
-//! follows (the numbers are in the crate's contract and asserted in
-//! `tests/load_line.rs`):
+//! A prescribed side that ACCELERATES and is not told its span. Taken as
+//! held, it is off by half a step of its acceleration at every step, and
+//! no smaller step mends what follows (the numbers are in the crate's
+//! contract and asserted in `tests/load_line.rs`):
 //!
 //! - A side that leaves rest in the first step has a first mean that is
 //!   not the mass's velocity, a slip the slider is not told. A pair that
@@ -108,9 +127,19 @@
 //!   pair loses nothing.
 //!
 //! The slider cannot refuse such a side: it cannot tell a side that
-//! accelerates from one that jumps. Until it is told the velocities a
-//! prescribed end starts and ends its step with, a prescribed side is to
-//! be kept at a constant speed.
+//! accelerates from one that jumps. A prescribed side that does not stay
+//! at one speed is to be told its span.
+//!
+//! A change of the side's acceleration INSIDE a step, with the span told.
+//! The slider is told the step's two ends and its mean, no more. In the
+//! step of the change, the force that would end the step on the side has
+//! a negative loss where the side speeds up more, and the slider holds
+//! on the mean instead; the mass ends that step behind and the next step
+//! makes it up, with a force above the needed one by `m` times a quarter
+//! of the change of acceleration at most, for one step. A pair that is
+//! within that of its static limit breaks away there though the side
+//! never asks for more than it holds. A change of acceleration at the
+//! end of a step is followed exactly.
 //!
 //! A starting slip that contradicts the ports. Nothing can check it. A
 //! pair declared stuck on a side that already moves keeps a record that
@@ -120,9 +149,11 @@
 //! The slider's record of an end that answers is only as good as the
 //! midpoint relation is for what is attached there.
 
+use core::num::NonZeroUsize;
+
 use fs_exec::Cx;
-use fs_ports::PortKind;
 use fs_ports::component::{Class, Component, LoadLine, PortRole, PortSpec, Proposal, Receipt};
+use fs_ports::{PortKind, StableId};
 
 use super::{ElementError, heat, inputs_finite, port, positive, roundoff, temperature};
 
@@ -140,12 +171,24 @@ pub struct Slider {
     hold_n: f64,
     /// Force while sliding [N].
     slide_n: f64,
-    ports: [PortSpec; 3],
+    ports: Vec<PortSpec>,
+    /// Per end that is told its span, where the span starts among the
+    /// inputs.
+    spans: [Option<usize>; 2],
+}
+
+/// An end of a [`Slider`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SliderEnd {
+    /// Port `a`.
+    A,
+    /// Port `b`.
+    B,
 }
 
 /// What a [`Slider`] keeps between steps: the slip its last step ended
 /// with [m/s], whether that step ended stuck, and, for each end whose flow
-/// was given in that step, the flow it was given.
+/// was given in that step, the flow that end ended the step with.
 ///
 /// The slip is the flow port `a` receives less the flow port `b` receives,
 /// with the signs the ports receive them in. A member of a common-flow
@@ -159,9 +202,10 @@ pub struct Slip {
     /// Flow at `a` less flow at `b` at the end of the last step.
     ended_m_s: f64,
     stuck: bool,
-    /// Per end, the flow it was given in the last step, if it was given
-    /// one: a given end that comes back with another value has jumped by
-    /// the difference, and the next step starts with that much more slip.
+    /// Per end whose flow was given in the last step, the flow it ended
+    /// that step with, as the port receives it: the flow it was given if
+    /// it is held, minus the end of its span if it is told one. The next
+    /// step takes it up there.
     given_m_s: [Option<f64>; 2],
 }
 
@@ -251,12 +295,38 @@ impl Slider {
         Ok(Self {
             hold_n: positive("static friction force", holds * normal_n)?,
             slide_n: positive("kinetic friction force", slides * normal_n)?,
-            ports: [
+            ports: vec![
                 port("a", kind, PortRole::FlowIn),
                 port("b", kind, PortRole::FlowIn),
                 heat("heat", PortRole::EffortIn),
             ],
+            spans: [None; 2],
         })
+    }
+
+    /// The same slider with a signal input `span_a` or `span_b` of width
+    /// two for `end`: the velocities [m/s] of what moves that end at the
+    /// start and at the end of the step, as the mover returns them (a
+    /// `FlowSource::publishing` puts them out). The flow the port itself
+    /// receives is the mean, and with the other sign: every connection
+    /// hands a port minus the flow of what it is joined to. For an end
+    /// that is prescribed and does not stay at one speed; see the module's
+    /// "What a port tells the slider". Asking twice adds it once.
+    #[must_use]
+    pub fn told(mut self, end: SliderEnd) -> Self {
+        let (index, name) = match end {
+            SliderEnd::A => (0, "span_a"),
+            SliderEnd::B => (1, "span_b"),
+        };
+        if self.spans[index].is_none() {
+            // After `a`, `b`, `heat` and the span that is there already.
+            let at = 3 + 2 * self.spans.iter().flatten().count();
+            let id = StableId::new(name).expect("element port names are valid stable ids");
+            self.ports
+                .push(PortSpec::signal_in(id, NonZeroUsize::MIN.saturating_add(1)));
+            self.spans[index] = Some(at);
+        }
+        self
     }
 
     /// The force, the mean slip and the row of one step: `start` the slip
@@ -326,6 +396,44 @@ impl Slider {
     }
 }
 
+impl Slider {
+    /// The span of end `end` (0 for `a`) in the sign the port receives its
+    /// flow in: where it starts and ends the step. `from` and `to` are the
+    /// mover's velocities as the signal gives them, `flow` what the port
+    /// receives, `given` whether the end's row of the line is zero.
+    ///
+    /// # Errors
+    /// A span on an end that answers the slider's force, or one that has
+    /// the sign of the port's flow.
+    fn told_span(
+        end: usize,
+        given: bool,
+        flow: f64,
+        from: f64,
+        to: f64,
+    ) -> Result<(f64, f64), ElementError> {
+        let name = if end == 0 { "a" } else { "b" };
+        if !given {
+            return Err(ElementError::Span {
+                end: name,
+                what: "the end answers the slider's force, so where it ends its step follows \
+                       from its mean; a span is for an end that is prescribed",
+            });
+        }
+        // The port receives minus what its mover returns. Where the span
+        // lies on one side of zero the flow lies on the other; a span
+        // that reverses within the step says nothing either way.
+        if from * to > 0.0 && from * flow > 0.0 {
+            return Err(ElementError::Span {
+                end: name,
+                what: "it has the sign of the flow the port receives; a span is given as the \
+                       mover returns it, which is the other sign",
+            });
+        }
+        Ok((-from, -to))
+    }
+}
+
 impl Component for Slider {
     type State = Slip;
     type Error = ElementError;
@@ -382,31 +490,46 @@ impl LoadLine for Slider {
             compliance[0] == 0.0 && compliance[1] == 0.0,
             compliance[2] == 0.0 && compliance[3] == 0.0,
         ];
-        let jumped = |end: usize| match (given[end], old.given_m_s[end]) {
-            (true, Some(before)) => inputs[end] - before,
-            _ => 0.0,
-        };
+        // Per given end: the flow it ends the step with, and by how much
+        // its step is not the midpoint relation's, `2 mean - from - end`
+        // with `from` where its last step ended. Held, it ends with the
+        // flow it is given, and that is the jump from the last step's.
+        // Told its span, it ends where the span ends.
+        let mut ends = [None; 2];
+        let mut moved = [0.0_f64; 2];
+        for end in 0..2 {
+            if let Some(at) = self.spans[end] {
+                let (starts, finishes) =
+                    Self::told_span(end, given[end], inputs[end], inputs[at], inputs[at + 1])?;
+                let from = old.given_m_s[end].unwrap_or(starts);
+                moved[end] = 2.0 * inputs[end] - from - finishes;
+                ends[end] = Some(finishes);
+            } else if given[end] {
+                if let Some(before) = old.given_m_s[end] {
+                    moved[end] = inputs[end] - before;
+                }
+                ends[end] = Some(inputs[end]);
+            }
+        }
         // The force acts as (e, -e) on the two ends, so a unit of it takes
         // (1, -1) C (1, -1)^T away from the slip.
         let c = compliance[0] - compliance[1] - compliance[2] + compliance[3];
         let released = inputs[0] - inputs[1];
-        // With both ends given the slip is the given one from start to end.
-        let start = if given[0] && given[1] {
-            released
-        } else {
-            old.ended_m_s + jumped(0) - jumped(1)
+        // With both ends given the slip ends where the two ends end (held:
+        // at the given slip, from start to end). Else it goes on from
+        // where the last step left it.
+        let start = match ends {
+            [Some(a), Some(b)] => 2.0 * released - (a - b),
+            _ => old.ended_m_s + moved[0] - moved[1],
         };
         let (force, mean, row) = self.on_line(start, released, c, old.stuck);
-        // An end that answers follows the midpoint relation and a given
-        // end keeps its flow, so the slip ends at twice its mean less its
-        // start either way.
+        // An end that answers follows the midpoint relation, and what a
+        // given end does besides is in the start slip, so the slip ends
+        // at twice its mean less that start.
         *new = Slip {
             ended_m_s: 2.0 * mean - start,
             stuck: matches!(row, SliderRow::Held | SliderRow::Arrested),
-            given_m_s: [
-                given[0].then_some(inputs[0]),
-                given[1].then_some(inputs[1]),
-            ],
+            given_m_s: ends,
         };
         let loss_w = force * mean;
         outputs[0] = force;

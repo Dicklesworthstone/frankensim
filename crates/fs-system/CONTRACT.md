@@ -242,6 +242,11 @@ physics owners below fs-couple can be composed without it.
     returns the prescribed step-mean flow. Flow is positive into the source:
     a negative electrical waveform supplies positive current to the node.
     It shares the validated waveform and compensated clock of effort sources.
+    `publishing()` adds the signal output `span` of width two: the
+    waveform's value at the two ends of the interval the mean is taken
+    over, `t0` and `t0 + dt`, in the waveform's own sign. A mean does not
+    say where a flow ends its step; a `Slider` on a side the source moves
+    is told through it.
   Each supplies analytic port JVPs and VJPs. `Storage` and `FlowSource`
   are exact-linear; `Admittance` is smooth because its heat output is
   quadratic. The `new` constructors use the mechanical translation domain.
@@ -1495,7 +1500,31 @@ material, a surface card, a temperature or a slip history stays in `fs-tribo`.
   for no jump: after a prescribed side jumped its record alternated in
   sign for ever, friction acted every other step, and every audit passed.
   Found by the independent review of 6ad46a38fd.)
-- Not covered: a prescribed side that accelerates. Held is the truth for a
+- A prescribed side that is told its span. `Slider::told(SliderEnd)` gives
+  an end the signal input `span_a` or `span_b` of width two: the
+  velocities of what moves that end at the start and at the end of the
+  step, as the mover returns them. `FlowSource::publishing` puts them
+  out; a boundary can prescribe them. Nothing is inferred (three ways of
+  inferring the end of a step from the means were emulated, and each
+  fails a basic case). The sign is the mover's: every connection hands a
+  port minus the flow of what it is joined to, so the flow the port
+  receives is the mean with the other sign. The end's step then differs
+  from the midpoint relation's by `2 mean - from - end` (in the port's
+  sign; `from` is where its last step ended, the span's start in the
+  first step), and the step's start slip is the last end slip and that,
+  for `a` less that for `b`. A held end is the case `end = mean`, where
+  this is the jump, in the arithmetic it had. `Slider::on_line` and its
+  rows are untouched: only the start slip they are handed differs. With
+  both ends given the slip ends where the two ends end.
+  Refused by name (`ElementError::Span`, nothing published): a span on an
+  end that answers the slider's force (its row of the matrix is not
+  zero); and a span that lies on one side of zero while the flow the port
+  receives lies on that same side, the port's sign given for the mover's.
+  The second is checked only where the span does not reach or cross zero,
+  so a reversal inside a step is never refused, and a span of the wrong
+  sign that starts at rest is refused one step late.
+- Not covered: a prescribed side that accelerates and is not told its
+  span. Held is the truth for a
   side at a constant speed and for one that does jump. For a side that
   accelerates at `a` it is off by `a dt / 2` at every step, and what
   follows does not get better with a smaller step (2 kg, `mu_s N` = 9.8 N,
@@ -1538,12 +1567,23 @@ material, a surface card, a temperature or a slip history stays in `fs-tribo`.
     scratch run of the kernel, not a test). That is no claim: nothing
     tells a caller which of these cases a run is in.
   The slider cannot refuse such a side by name: it cannot tell a side that
-  accelerates from one that jumps. A caller keeps prescribed sides at a
-  constant speed until the slider is told the velocities a prescribed end
-  starts and ends its step with (MB 29738; three ways of inferring them
-  from the means were emulated and each fails a basic case). The record of an
-  end that answers is as good as the midpoint relation is for what is
-  attached there.
+  accelerates from one that jumps. A prescribed side that does not stay at
+  one speed is to be told its span. The record of an end that answers is
+  as good as the midpoint relation is for what is attached there.
+- Not covered: a change of the side's acceleration inside a step, with
+  the span told. The slider is told the step's two ends and its mean, no
+  more. In the step of the change, where the side speeds up more, the
+  force that would end the step on the side has a negative loss (the mass
+  would move faster than the side on the mean while being pulled along),
+  and the slider holds on the mean; the mass ends that step behind, and
+  the next step makes it up with a force above the needed one by `m` times
+  a quarter of the change of acceleration at most, for one step. After a
+  rest of 2.5 steps and then 3.5 m/s² (7 N needed): 1.75 N, 8.75 N, then
+  7 N, stuck throughout, the mass a quarter of a step's gain behind after
+  the first of them and on the side from the second. With 4 m/s² (8 N of
+  the 9.8 N held): 2 N, and the 10 N the next step wants break the pair
+  away, though the side never asks for more than 8 N. A change of
+  acceleration at the end of a step is followed exactly.
 - Not covered: a starting slip that contradicts the ports. A mass at rest
   on a belt that already moves at 0.2 m/s slips at 0.2 m/s; declared
   `Slip::stuck()`, the slider's record is off by that slip for ever and
@@ -1671,6 +1711,66 @@ material, a surface card, a temperature or a slip history stays in `fs-tribo`.
   1e-12. This is the stuck slider's hold on the mean with a start slip,
   reached through the kernel.
 - A side that accelerates: the numbers of "Not covered" above.
+- A side told its span (2 kg, 9.8 N held, the sides of "Not covered"):
+  - It leaves rest at 4 m/s² at `t = 0`; it rests one step first; and that
+    under a push of 15 N on the mass from the moment it moves. At steps of
+    1, 0.5, 0.25, 0.9 and 0.7 ms the force is the needed one at every step
+    (8, 8 and -7 N; to 1.3e-10, 1.5e-10 and 7.5e-9 N, the last being the
+    billionth of a step in which the push rises), the pair never slips,
+    the slider's record is the slip the two end each step with to 1e-12
+    m/s (asserted in every test of a told side that has a mass), the mass
+    ends on the side to 1e-12 m/s, and the heat booked is at most 2.7e-17
+    J. Taken as held: broken away within a few steps.
+  - It swings from rest at 2 Hz, at most 6.32 N needed, for 1 s at 1, 0.5
+    and 0.25 ms: it never slips. The force is `m` times the side's
+    acceleration at the middle of the step to 1.3e-2, 6.6e-3 and 3.3e-3 N
+    (first order: the midpoint relation on a speed that is curved within
+    the step); the mass's end speed is the side's to 6.6e-6, 1.7e-6 and
+    4.1e-7 m/s (second order); the heat booked for a pair that never slips
+    is 3.4e-6, 8.4e-7 and 2.1e-7 J (second order). Asserted: the first of
+    each within a bound, and each halving or quartering. And the 40 sides
+    whose means are moved by a unit in the last place, of which 24 break
+    away when taken as held: told their span, none does in 4 s.
+  - It speeds up as `(rate / 2) u²` after a step at rest: the force is
+    `m rate u` at the middle of the step to 0.02 N a millisecond of step,
+    and it breaks away in the step that contains `u*` or the one after
+    (at step 103, 205 and 410 at 1, 0.5 and 0.25 ms; `u*` lies in steps
+    103, 205 and 409).
+  - It jumps, held over each step, its span that one value twice: the
+    numbers of the side that jumps above, at either end of the slider.
+  - A standing property: 60 drawn sides, piecewise linear with one to five
+    changes of slope anywhere in 0.4 s and slopes within 2 m/s², under
+    drawn pushes, the needed friction within 0.7 of the static limit. None
+    breaks away; the force is above the largest needed by at most `m`
+    times a quarter of the largest change of acceleration (0.250 of it at
+    worst); from three steps after the side's last change the mass is on
+    the side to 1e-12 m/s; the heat is at most 3.5e-6 J.
+  - A change of slope inside a step: the numbers of "Not covered" above.
+  - The sign of the span, pinned: the same side told its span by its
+    `FlowSource` and by boundaries (minus the mean on the port, the
+    waveform's values on the span), a side that swings and one that
+    accelerates under a push. What the slider receives, the flow and the
+    two velocities of the span, is the same to the bit at every one of
+    1000 steps. The forces agree to 4.0e-10 N and the mass's velocity to
+    1.0e-13 m/s (asserted to 1e-9 and 1e-12), not to the bit: the source
+    is a component of the block, the solve has other unknowns, and a held
+    slider's force is the mass's velocity change over `c`.
+  - The two refusals, planted: a slider told the span of the end its mass
+    is on, and a side at 0.2 m/s and faster whose span is given with the
+    port's sign, are refused at the first step by name and nothing is
+    published; with the mover's sign the step is taken.
+  - Both ends prescribed and told (no line): the slider slides, its loss
+    is its sliding force times the mean slip to 1e-12, and its record
+    after each step is the slip the two sides end the step with, to 1e-15.
+  - Controls on scratch sliders, each failing the tests named and no other
+    of this file: the span ignored and the end taken as held (seven of the
+    tests of a told side: all but the refusals and the jump, which is
+    held); the span taken in the port's sign (seven: all but the refusals
+    and the test of the two ways, which agree with each other in any
+    sign); a span on an answering end not refused, and a span of the
+    port's sign not refused (the test of the refusals, each); the first
+    step started from the mean and not from the span's start (the side
+    that accelerates, the side that swings, the 60 drawn sides).
 - A side that speeds up: its speed `(rate / 2) u²` given as step means, a
   staircase. Stuck, the slider gives `m (V_n - V_(n-1)) / dt`, which is
   `m rate u` at the start of the step, to 1e-9 N, and the mass has the

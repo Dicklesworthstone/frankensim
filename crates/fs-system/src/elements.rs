@@ -75,7 +75,7 @@ pub use node::HeatNode;
 mod resistance;
 pub use resistance::Resistance;
 mod slider;
-pub use slider::{Slider, SliderRow, Slip};
+pub use slider::{Slider, SliderEnd, SliderRow, Slip};
 mod stream;
 pub use stream::{GasContents, GasVolume, Restriction};
 
@@ -119,6 +119,14 @@ pub enum ElementError {
         /// The pivot's value.
         value: f64,
     },
+    /// The span a slider was given for one of its ends cannot be that
+    /// end's.
+    Span {
+        /// The end, `a` or `b`.
+        end: &'static str,
+        /// What is wrong with it.
+        what: &'static str,
+    },
     /// Cancellation was requested.
     Cancelled,
 }
@@ -139,6 +147,7 @@ impl fmt::Display for ElementError {
                 f,
                 "matrix is not positive definite: Cholesky pivot {pivot} is {value}"
             ),
+            Self::Span { end, what } => write!(f, "the span given for end `{end}`: {what}"),
             Self::Cancelled => write!(f, "cancelled"),
         }
     }
@@ -1188,10 +1197,15 @@ impl PortTangent for Force {
 /// Its [`SourceAccount`] stores the work received (negative when delivered),
 /// closing the energy account of a device driven through a common-effort
 /// junction. This is the dual of [`Force`].
+///
+/// [`FlowSource::publishing`] adds a signal output `span` of width two:
+/// the waveform's value at the start and at the end of the step. A mean
+/// does not say where a flow ends its step; what has to know (a
+/// [`Slider`] on a side this source moves) is told through this signal.
 #[derive(Debug, Clone)]
 pub struct FlowSource {
     flow: Waveform,
-    ports: [PortSpec; 1],
+    ports: Vec<PortSpec>,
 }
 
 impl FlowSource {
@@ -1207,8 +1221,21 @@ impl FlowSource {
     pub fn in_domain(kind: PortKind, flow: Waveform) -> Self {
         Self {
             flow,
-            ports: [port("p", Some(kind), PortRole::EffortIn)],
+            ports: vec![port("p", Some(kind), PortRole::EffortIn)],
         }
+    }
+
+    /// The same source with the signal output `span`: its flow at the
+    /// start and at the end of each step, in the waveform's own sign. It
+    /// carries no power. Asking twice adds it once.
+    #[must_use]
+    pub fn publishing(mut self) -> Self {
+        if self.ports.len() == 1 {
+            let id = StableId::new("span").expect("element port names are valid stable ids");
+            self.ports
+                .push(PortSpec::signal_out(id, NonZeroUsize::MIN.saturating_add(1)));
+        }
+        self
     }
 }
 
@@ -1242,6 +1269,17 @@ impl Component for FlowSource {
         let flow = prescribed(&self.flow, old, dt_s)?;
         outputs[0] = flow;
         let (next, receipt) = source_step(old, dt_s, dt_s * inputs[0] * flow);
+        if self.ports.len() > 1 {
+            // At the two ends of the interval the mean was taken over.
+            let start_s = old.time_s();
+            for (slot, time_s) in [start_s, start_s + dt_s].into_iter().enumerate() {
+                let value = self.flow.value_at(time_s);
+                if !value.is_finite() {
+                    return Err(ElementError::Input { value });
+                }
+                outputs[1 + slot] = value;
+            }
+        }
         *new = next;
         Ok(Proposal::Step(receipt))
     }
@@ -1257,7 +1295,7 @@ impl PortTangent for FlowSource {
         d_outputs: &mut [f64],
         _cx: &Cx<'_>,
     ) -> Result<(), ElementError> {
-        d_outputs[0] = 0.0;
+        d_outputs.fill(0.0);
         Ok(())
     }
 
