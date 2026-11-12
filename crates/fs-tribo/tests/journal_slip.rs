@@ -92,15 +92,30 @@ fn g1_g3_thinning_source_crosses_knots_and_matches_independent_volume_dissipatio
         }
         0.5 * (low + high)
     };
-    let dr = (g.outer_radius_m - g.inner_radius_m) / 20_000.;
+    // Composite Simpson on the three radial pieces between the walls and the
+    // radii of the 8/s and 3/s source knots, where gamma(r)/r is smooth. With
+    // the 20,000-cell midpoint rule this replaces, the library's inner-wall
+    // loss at the reference speed was 9.8e-9 below the loss at the chosen
+    // stress, beyond the 6e-9 checked below. By a replay of both computations
+    // the library's bulk speed matches the closed form to an ulp, the midpoint
+    // sum left it 8.1e-9 low (its h^2 error on the steep inner-wall
+    // integrand), and 2,000 intervals per piece leave about 4e-13.
+    let knot_radius = |stress: f64| g.inner_radius_m * (tau_i / stress).sqrt();
+    let radii = [g.inner_radius_m, knot_radius(8. * 0.14), knot_radius(3. * 0.2), g.outer_radius_m];
     let mut bulk_speed = 0.;
     let mut bulk_heat = 0.;
-    for i in 0..20_000 {
-        let r = g.inner_radius_m + (f64::from(i) + 0.5) * dr;
-        let stress = tau_i * (g.inner_radius_m / r).powi(2);
-        let rate = inverse(stress);
-        bulk_speed += rate * dr / r;
-        bulk_heat += 2. * core::f64::consts::PI * g.length_m * stress * rate * r * dr;
+    for piece in radii.windows(2) {
+        let n = 2_000_u32;
+        let dr = (piece[1] - piece[0]) / f64::from(n);
+        for i in 0..=n {
+            let r = piece[0] + f64::from(i) * dr;
+            let simpson = if i == 0 || i == n { 1. } else if i % 2 == 1 { 4. } else { 2. };
+            let weight = simpson * dr / 3.;
+            let stress = tau_i * (g.inner_radius_m / r).powi(2);
+            let rate = inverse(stress);
+            bulk_speed += weight * rate / r;
+            bulk_heat += weight * 2. * core::f64::consts::PI * g.length_m * stress * rate * r;
+        }
     }
     let rates = [inverse(tau_i), inverse(tau_i * (g.inner_radius_m / g.outer_radius_m).powi(2))];
     let omega = bulk_speed + slip.inner_m * rates[0] / g.inner_radius_m

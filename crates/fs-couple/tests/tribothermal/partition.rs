@@ -175,13 +175,20 @@ fn endpoint_conductivity_feedback_uses_the_same_temperature_as_heat_storage() {
         InputAuthority::SyntheticFixture,
     )
     .unwrap();
+    // The source's 300 K knot is the initial temperature itself. From a zero
+    // guess the first Newton point sits on that kink: a one-sided difference
+    // that raises A's energy sees A's residual slope 1 - 1.25 = -0.25, one that
+    // lowers it sees 1, so no linearized step can raise A's residual to zero
+    // and the inner solve refuses the first step. The guess is the 4 J of
+    // drive work at the initial equal split (0.5 K above the knot); the
+    // endpoint feedback must still move that split to the one solved below.
     let candidate = contact
         .step_candidate(
             &thermal,
             0.2,
             drive(0.2),
             controls(),
-            &[0.0; 2],
+            &[2.0; 2],
             other,
             || false,
         )
