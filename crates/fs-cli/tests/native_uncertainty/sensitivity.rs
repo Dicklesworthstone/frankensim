@@ -121,7 +121,18 @@ fn native_sensitivity_resumes_a_partial_hybrid_row_without_original_sources() {
 fn native_sensitivity_rejects_invalid_designs_before_work_and_keeps_physics_refusal_terminal() {
     let f = fixture();
     std::fs::write(f.sources.join("study.fsim"), source().replace(":samples 8", ":samples 7")).unwrap();
-    f.study(None, fs_cli::exit::REFUSED);
+    // An admission refusal publishes no result document; its diagnostic is on stderr, as
+    // the qmc, copula and fan-speed admission tests read it.
+    let output = fs_cli::run(vec![
+        "--json".into(),
+        "study".into(),
+        f.sources.join("study.fsim").to_str().unwrap().into(),
+        f.ledger.to_str().unwrap().into(),
+    ]);
+    assert_eq!(output.exit_code, fs_cli::exit::REFUSED, "{}", output.stderr);
+    assert!(output.stdout.is_empty(), "admission refusal must publish no result");
+    let diagnostic = JsonValue::parse(output.stderr.trim()).unwrap();
+    assert_eq!(diagnostic.str_field("schema"), Some("frankensim.cli.diagnostic.v1"));
     assert!(!f.ledger.exists(), "incomplete row budget must be refused before ledger/physics");
     std::fs::write(f.sources.join("study.fsim"), source().replace(
         ":materials (\"aa6061.fsmcdpk\")", ":materials ()")).unwrap();
