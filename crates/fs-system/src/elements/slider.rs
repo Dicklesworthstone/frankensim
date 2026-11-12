@@ -38,9 +38,16 @@
 //! below are the same either way: only the start slip they are handed
 //! differs.
 //!
-//! A span on an end that answers the slider's force is refused, and so is
-//! a span that lies on one side of zero while the flow the port receives
-//! lies on the same side: the sign of the port given for the mover's.
+//! A span on an end that answers the slider's force is refused. So is a
+//! span of the port's sign, at its third step: a span on one side of zero
+//! belongs to a flow on the other, but one step cannot say that a span on
+//! the flow's side is wrong (a side that reverses twice within a step has
+//! both its ends on one side and its mean on the other), and the slider
+//! may not decide by a step's inputs at all, because the kernel also
+//! proposes at inputs it has perturbed. It counts the steps taken in a
+//! row with the span on the flow's side and refuses the step after two:
+//! the port's sign given for the mover's, or a motion the step does not
+//! resolve.
 //!
 //! The load line says which end is which. An end whose row of the line's
 //! matrix is zero does not answer the slider's force at all: its flow is
@@ -138,8 +145,9 @@
 //! makes it up, with a force above the needed one by `m` times a quarter
 //! of the change of acceleration at most, for one step. A pair that is
 //! within that of its static limit breaks away there though the side
-//! never asks for more than it holds. A change of acceleration at the
-//! end of a step is followed exactly.
+//! never asks for more than it holds. Changes in consecutive steps add
+//! up, each by its own quarter at most as far as measured. A change of
+//! acceleration at the end of a step is followed exactly.
 //!
 //! A starting slip that contradicts the ports. Nothing can check it. A
 //! pair declared stuck on a side that already moves keeps a record that
@@ -207,6 +215,10 @@ pub struct Slip {
     /// it is held, minus the end of its span if it is told one. The next
     /// step takes it up there.
     given_m_s: [Option<f64>; 2],
+    /// Per end that is told its span: how many steps in a row, up to the
+    /// last, had the span on one side of zero and the flow the port
+    /// receives on that same side.
+    mirrored: [u8; 2],
 }
 
 impl Slip {
@@ -217,6 +229,7 @@ impl Slip {
             ended_m_s: 0.0,
             stuck: true,
             given_m_s: [None; 2],
+            mirrored: [0; 2],
         }
     }
 
@@ -227,6 +240,7 @@ impl Slip {
             ended_m_s: slip_m_s,
             stuck: false,
             given_m_s: [None; 2],
+            mirrored: [0; 2],
         }
     }
 
@@ -396,19 +410,23 @@ impl Slider {
     }
 }
 
+/// How many steps in a row a span may lie on the side of zero of its port's
+/// flow before the next step is refused.
+const MIRRORED_STEPS: u8 = 2;
+
 impl Slider {
     /// The span of end `end` (0 for `a`) in the sign the port receives its
     /// flow in: where it starts and ends the step. `from` and `to` are the
-    /// mover's velocities as the signal gives them, `flow` what the port
-    /// receives, `given` whether the end's row of the line is zero.
+    /// two velocities of the signal, `given` whether the end's row of the
+    /// line is zero, `mirrored` the end's count of the state.
     ///
     /// # Errors
-    /// A span on an end that answers the slider's force, or one that has
-    /// the sign of the port's flow.
+    /// A span on an end that answers the slider's force, or one that had
+    /// the sign of the port's flow in the last [`MIRRORED_STEPS`] steps.
     fn told_span(
         end: usize,
         given: bool,
-        flow: f64,
+        mirrored: u8,
         from: f64,
         to: f64,
     ) -> Result<(f64, f64), ElementError> {
@@ -420,14 +438,16 @@ impl Slider {
                        from its mean; a span is for an end that is prescribed",
             });
         }
-        // The port receives minus what its mover returns. Where the span
-        // lies on one side of zero the flow lies on the other; a span
-        // that reverses within the step says nothing either way.
-        if from * to > 0.0 && from * flow > 0.0 {
+        // Decided by the steps that were taken, never by this step's
+        // inputs: the kernel also proposes at inputs it has perturbed to
+        // difference the slider, and a perturbed flow of a slow side
+        // changes sign.
+        if mirrored >= MIRRORED_STEPS {
             return Err(ElementError::Span {
                 end: name,
-                what: "it has the sign of the flow the port receives; a span is given as the \
-                       mover returns it, which is the other sign",
+                what: "in its last two steps it lay on the side of zero of the flow the port \
+                       received; a span is minus that flow at the step's two ends, so it is \
+                       given in the port's sign, or the step does not resolve the motion",
             });
         }
         Ok((-from, -to))
@@ -497,10 +517,19 @@ impl LoadLine for Slider {
         // Told its span, it ends where the span ends.
         let mut ends = [None; 2];
         let mut moved = [0.0_f64; 2];
+        let mut mirrored = [0_u8; 2];
         for end in 0..2 {
             if let Some(at) = self.spans[end] {
+                let (from, to) = (inputs[at], inputs[at + 1]);
                 let (starts, finishes) =
-                    Self::told_span(end, given[end], inputs[end], inputs[at], inputs[at + 1])?;
+                    Self::told_span(end, given[end], old.mirrored[end], from, to)?;
+                // The port receives minus what its mover returns: where
+                // the span lies on one side of zero, the flow lies on the
+                // other. One step in which it does not can be a side that
+                // reverses twice within it; steps in a row are counted.
+                if from * to > 0.0 && from * inputs[end] > 0.0 {
+                    mirrored[end] = old.mirrored[end] + 1;
+                }
                 let from = old.given_m_s[end].unwrap_or(starts);
                 moved[end] = 2.0 * inputs[end] - from - finishes;
                 ends[end] = Some(finishes);
@@ -530,6 +559,7 @@ impl LoadLine for Slider {
             ended_m_s: 2.0 * mean - start,
             stuck: matches!(row, SliderRow::Held | SliderRow::Arrested),
             given_m_s: ends,
+            mirrored,
         };
         let loss_w = force * mean;
         outputs[0] = force;
