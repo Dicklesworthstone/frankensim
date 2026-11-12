@@ -478,18 +478,21 @@ fn g0_missing_connection_group_delay_or_source_failure_refuses_the_whole_observa
     impl GradientIndexField for Field {
         fn sample(
             &self,
-            position: Point3,
+            _: Point3,
             _: f64,
         ) -> Result<GradientIndexSample, GradientIndexError> {
+            // A trace that starts with a group index and then loses it is refused
+            // (GradientIndexError::GroupIndexUnavailable, gradient_index.rs rhs). A field
+            // without one only below z = 0 therefore refused even the steady baseline: the
+            // camera's first leg (z = 0 to the receiver at z = 1) keeps one, and its diffuse
+            // continuation from the receiver runs back down into z < 0. The missing field has no
+            // group index anywhere, so neither the camera leg nor the source connection carries
+            // a group delay.
             GradientIndexSample::try_new(
                 1.3,
                 Vec3::new(0.0, 0.0, 0.0),
                 0.0,
-                if self.missing_group && position.z < 0.0 {
-                    None
-                } else {
-                    Some(1.4)
-                },
+                if self.missing_group { None } else { Some(1.4) },
             )
         }
     }
