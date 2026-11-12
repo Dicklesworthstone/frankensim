@@ -22,7 +22,8 @@ use fs_system::elements::{
     SliderEnd, SliderRow, Slip, SourceAccount, Spring, Waveform,
 };
 use fs_system::{
-    AdmissionError, Checkpoint, NodeId, SolveConfig, System, SystemBuilder, SystemError,
+    AdmissionError, Checkpoint, NodeId, RouteTemperature, SolveConfig, System, SystemBuilder,
+    SystemError,
 };
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
@@ -4053,3 +4054,375 @@ fn what_the_tier_cannot_solve_is_refused_by_name() {
     );
 }
 
+
+/// Dry friction to the ground with one constant force, which does not
+/// arrest inside a step: where its slip would pass zero it asks for the
+/// step that ends there, as a product's friction component does (the event
+/// path). Port `a` receives a velocity and returns the force; the loss
+/// leaves through `heat`. Its state is the slip its last step ended with,
+/// zero at rest.
+struct CutsAtAStop {
+    force_n: f64,
+    ports: [PortSpec; 2],
+}
+
+/// How near the sliding force the force that ends a step at rest has to
+/// be [N] for [`CutsAtAStop`] to end the step there.
+const STOP_BAND_N: f64 = 1.0e-9;
+
+impl CutsAtAStop {
+    fn new(force_n: f64) -> Self {
+        Self {
+            force_n,
+            ports: [
+                PortSpec::power(
+                    StableId::new("a").unwrap(),
+                    PortKind::MechanicalForceVelocity,
+                    PortRole::FlowIn,
+                    core::num::NonZeroUsize::MIN,
+                )
+                .unwrap(),
+                PortSpec::heat(StableId::new("heat").unwrap(), PortRole::EffortIn).unwrap(),
+            ],
+        }
+    }
+}
+
+impl Component for CutsAtAStop {
+    type State = f64;
+    type Error = ElementError;
+
+    fn ports(&self) -> &[PortSpec] {
+        &self.ports
+    }
+
+    fn class(&self) -> Class {
+        Class::NonSmooth
+    }
+
+    fn stored_energy_j(&self, _slip: &f64) -> Result<f64, ElementError> {
+        Ok(0.0)
+    }
+
+    fn propose(
+        &self,
+        old: &f64,
+        dt_s: f64,
+        inputs: &[f64],
+        new: &mut f64,
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<Proposal, ElementError> {
+        self.propose_on_line(old, dt_s, inputs, &[0.0], new, outputs, cx)
+    }
+}
+
+impl LoadLine for CutsAtAStop {
+    fn line_ports(&self) -> &[usize] {
+        &[0]
+    }
+
+    fn propose_on_line(
+        &self,
+        old: &f64,
+        dt_s: f64,
+        inputs: &[f64],
+        compliance: &[f64],
+        new: &mut f64,
+        outputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<Proposal, ElementError> {
+        let (start, released, c, hold) = (*old, inputs[0], compliance[0], self.force_n);
+        let slides = |way: f64| {
+            let force = hold * way;
+            (force, released - c * force)
+        };
+        let (force, mean, ends) = if !(c > 0.0) {
+            (if released == 0.0 { 0.0 } else { hold * released.signum() }, released, released)
+        } else if start == 0.0 {
+            if released.abs() <= c * hold {
+                ((released / c).clamp(-hold, hold), 0.0, 0.0)
+            } else {
+                let (force, mean) = slides(released.signum());
+                (force, mean, 2.0 * mean)
+            }
+        } else {
+            // `along` is the force that ends the step at zero slip.
+            let way = start.signum();
+            let along = way * (released - 0.5 * start) / c;
+            if along > hold + STOP_BAND_N {
+                let (force, mean) = slides(way);
+                (force, mean, 2.0 * mean - start)
+            } else {
+                if along < hold - STOP_BAND_N {
+                    // The slip passes zero inside the step: where, by the
+                    // line of a body under a held force.
+                    let shorter = dt_s * (0.5 * start.abs()) / (c * hold - way * (released - start));
+                    if shorter > 0.0 && shorter < dt_s {
+                        return Ok(Proposal::Shorten { dt_s: shorter });
+                    }
+                }
+                let force = way * along.max(0.0);
+                (force, released - c * force, 0.0)
+            }
+        };
+        *new = ends;
+        let loss_w = force * mean;
+        outputs[0] = force;
+        outputs[1] = -loss_w;
+        let dissipated_j = dt_s * loss_w.max(0.0);
+        let scale = dt_s * force.abs() * (released.abs() + force.abs() * c.abs()) + dissipated_j;
+        Ok(Proposal::Step(Receipt {
+            stored_change_j: 0.0,
+            dissipated_j,
+            numerical_loss_j: 0.0,
+            entropy_generated_j_per_k: dissipated_j / inputs[1],
+            energy_tolerance_j: 64.0 * f64::EPSILON * scale + f64::MIN_POSITIVE,
+            residual: 0.0,
+            tolerance: 0.0,
+        }))
+    }
+}
+
+/// A mass of 2 kg thrown at 1 m/s along a surface that brakes it with 3 N
+/// through [`CutsAtAStop`]: it stops after 2/3 s and 1/3 m. The brake's
+/// heat warms a body whose temperature it is handed back, so the block
+/// needs a second update in every step. `told`: whether the brake's port is
+/// given the flow it starts with.
+fn thrown_onto_a_brake(told: bool) -> (System, NodeId, NodeId) {
+    let mut builder = SystemBuilder::new();
+    let mass = builder
+        .add_with_tangent(
+            "mass",
+            Mass::new(MASS_KG).unwrap(),
+            Motion {
+                position_m: 0.0,
+                velocity_m_s: 1.0,
+            },
+        )
+        .unwrap();
+    // The port receives minus the mass's velocity.
+    let brake = builder.add_on_line("brake", CutsAtAStop::new(3.0), -1.0).unwrap();
+    builder
+        .common_flow(port(&builder, mass, "p"), &[port(&builder, brake, "a")])
+        .unwrap();
+    let body = builder
+        .add_with_tangent("body", HeatCapacity::new(BODY_J_K).unwrap(), 300.0)
+        .unwrap();
+    builder
+        .heat_route(
+            port(&builder, brake, "heat"),
+            &[(port(&builder, body, "heat"), 1.0)],
+            None,
+            RouteTemperature::SinkEquivalent,
+        )
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    assert!(system.guess(system.port(brake, "heat").unwrap(), &[300.0]));
+    if told {
+        let at = system.port(brake, "a").unwrap();
+        assert!(system.guess(at, &[-1.0]));
+    }
+    (system, mass, brake)
+}
+
+#[test]
+fn a_component_that_cuts_at_a_stop_is_first_asked_at_the_released_flows_of_the_step() {
+    // A block's solve starts from the flows of the last step, and before
+    // the first step from none. A component that enters a step with a slip
+    // of 1 m/s its port shows nothing of sees, at those flows, a stop
+    // inside the step, and asks for a shorter one; the shorter trial starts
+    // from the same flows and asks again. Before the kernel released the
+    // line first, the first step of this mass was refused after 64
+    // shortenings (`the step was shortened too often`). Now the other
+    // components take one update with the brake's force held, which gives
+    // the released flow of the step, and the brake is asked again there:
+    // the step is taken whole.
+    let dt = 0.05_f64;
+    let (mut system, mass, brake) = thrown_onto_a_brake(false);
+    let report = with_cx(|cx| system.step(dt, cx)).unwrap();
+    assert_eq!((report.shortenings, report.dt_s), (0, dt));
+    let after = system.state::<Motion>(mass).unwrap().velocity_m_s;
+    assert!((after - (1.0 - 1.5 * dt)).abs() <= 1.0e-15, "{after}");
+    assert_eq!(*system.state::<f64>(brake).unwrap(), -after);
+    assert_eq!(system.last_output(system.port(brake, "a").unwrap()), [-3.0]);
+}
+
+#[test]
+fn a_perturbed_proposal_that_asks_to_shorten_does_not_shorten_the_step() {
+    // The mass stops at 2/3 s, between two steps of 0.05 s: the step from
+    // 0.65 s is cut once, to end there, and ends at rest. At the iterate of
+    // that cut step the kernel differences the brake at a flow moved by
+    // sqrt(eps), and the moved flow lies beyond the stop, where the brake
+    // asks for a shorter step. That proposal is the kernel's own, not the
+    // step's. Taken as a request, it cut the step a second time, a hair
+    // short of the stop (slip -1.3e-8 m/s in the first product run), and
+    // the step after that was refused. The column is now differenced on
+    // the other side of the iterate.
+    let dt = 0.05_f64;
+    for told in [true, false] {
+        let (mut system, mass, brake) = thrown_onto_a_brake(told);
+        let mut cuts = 0;
+        let mut stopped_at = None;
+        with_cx(|cx| {
+            for step in 0..20 {
+                let was_moving = *system.state::<f64>(brake).unwrap() != 0.0;
+                let report =
+                    system.step(dt, cx).unwrap_or_else(|error| panic!("step {step}: {error}"));
+                cuts += report.shortenings;
+                let slip = *system.state::<f64>(brake).unwrap();
+                if was_moving && slip == 0.0 {
+                    // The one cut step, and it ends at the stop.
+                    assert_eq!(report.shortenings, 1, "step {step}");
+                    assert!(stopped_at.is_none());
+                    stopped_at = Some(report.time_s);
+                } else {
+                    assert_eq!((report.shortenings, report.dt_s), (0, dt), "step {step}");
+                    assert_eq!(was_moving, slip != 0.0, "step {step}");
+                }
+            }
+        });
+        let stopped_at = stopped_at.expect("the mass stops");
+        assert!((stopped_at - 2.0 / 3.0).abs() <= 1.0e-14, "{stopped_at}");
+        assert_eq!(cuts, 1);
+        // At rest, a third of a metre on, to the rounding of the run.
+        let ends = *system.state::<Motion>(mass).unwrap();
+        assert!(ends.velocity_m_s.abs() <= 1.0e-14, "{}", ends.velocity_m_s);
+        assert!((ends.position_m - 1.0 / 3.0).abs() <= 1.0e-14, "{}", ends.position_m);
+        if told {
+            println!(
+                "a mass thrown onto a brake that cuts at the stop: stopped at {stopped_at:e} s, \
+                 {cuts} shortening, velocity {:e} m/s, position {:e} m",
+                ends.velocity_m_s, ends.position_m
+            );
+        }
+    }
+}
+
+/// A damper of 1 N s/m between two junctions, differenced by the kernel,
+/// with nowhere for its heat to go: the loss is booked as lost. With a step
+/// above an eighth of a second it asks for half the step where the flow at
+/// `b` is within a micrometre per second of zero and not zero: above zero,
+/// or (`either_side`) on either side. No iterate of a solve lies there,
+/// only the kernel's perturbed proposals about a flow of zero.
+struct Touchy {
+    either_side: bool,
+    ports: [PortSpec; 2],
+}
+
+impl Component for Touchy {
+    type State = ();
+    type Error = ElementError;
+
+    fn ports(&self) -> &[PortSpec] {
+        &self.ports
+    }
+
+    fn class(&self) -> Class {
+        Class::Smooth
+    }
+
+    fn stored_energy_j(&self, (): &()) -> Result<f64, ElementError> {
+        Ok(0.0)
+    }
+
+    fn propose(
+        &self,
+        _old: &(),
+        dt_s: f64,
+        inputs: &[f64],
+        _new: &mut (),
+        outputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<Proposal, ElementError> {
+        let beside_zero = inputs[1] != 0.0 && inputs[1].abs() < 1.0e-6;
+        if dt_s > 0.125 && beside_zero && (self.either_side || inputs[1] > 0.0) {
+            return Ok(Proposal::Shorten { dt_s: 0.5 * dt_s });
+        }
+        let force = inputs[0] - inputs[1];
+        outputs[0] = force;
+        outputs[1] = -force;
+        let lost_j = dt_s * force * force;
+        Ok(Proposal::Step(Receipt {
+            numerical_loss_j: lost_j,
+            ..Receipt::lossless(0.0, 64.0 * f64::EPSILON * lost_j + f64::MIN_POSITIVE)
+        }))
+    }
+}
+
+#[test]
+fn a_differenced_component_shortens_a_step_only_if_it_asks_on_both_sides_of_the_iterate() {
+    // No load line here. A mass pushed with 1 N drags a second one through
+    // a damper that is differenced. Both start at rest, so the damper is
+    // first differenced with no flow at its `b`, and the kernel's perturbed
+    // proposals move that flow off zero by 1.5e-8 m/s, either way. That is
+    // where the damper asks to shorten. No iterate lies there: the flow is
+    // zero before the update and four hundredths of a metre per second
+    // after it.
+    //
+    // Where the damper asks above zero only, the column is differenced
+    // below it, and the step of one second is taken whole in one update:
+    // the column is the damper's slope, with its sign. (The step was
+    // halved three times, down to an eighth of a second.) Where it asks on
+    // both sides it cannot be differenced at this step length at all, and
+    // the step is halved until it can.
+    //
+    // The two masses of 2 kg from rest on the midpoint rule: their mean
+    // velocities add up to dt / 4 and differ by 1 / (4 / dt + 2).
+    for (either_side, shortenings, taken_s) in [(false, 0, 1.0_f64), (true, 3, 0.125)] {
+        let at_rest = Motion {
+            position_m: 0.0,
+            velocity_m_s: 0.0,
+        };
+        let end = |name: &str| {
+            PortSpec::power(
+                StableId::new(name).unwrap(),
+                PortKind::MechanicalForceVelocity,
+                PortRole::FlowIn,
+                core::num::NonZeroUsize::MIN,
+            )
+            .unwrap()
+        };
+        let mut builder = SystemBuilder::new();
+        let pushed = builder.add_with_tangent("pushed", Mass::new(MASS_KG).unwrap(), at_rest).unwrap();
+        let dragged = builder.add_with_tangent("dragged", Mass::new(MASS_KG).unwrap(), at_rest).unwrap();
+        let pusher = builder
+            .add_with_tangent(
+                "push",
+                Force::new(Waveform::constant(1.0).unwrap()),
+                SourceAccount::default(),
+            )
+            .unwrap();
+        let touchy = builder
+            .add(
+                "touchy",
+                Touchy {
+                    either_side,
+                    ports: [end("a"), end("b")],
+                },
+                (),
+            )
+            .unwrap();
+        builder
+            .common_flow(
+                port(&builder, pushed, "p"),
+                &[port(&builder, pusher, "p"), port(&builder, touchy, "a")],
+            )
+            .unwrap();
+        builder
+            .common_flow(port(&builder, dragged, "p"), &[port(&builder, touchy, "b")])
+            .unwrap();
+        let mut system = builder.seal().unwrap();
+        let report = with_cx(|cx| system.step(1.0, cx)).unwrap();
+        assert_eq!(
+            (report.shortenings, report.dt_s, report.iterations),
+            (shortenings, taken_s, 1),
+            "{either_side}"
+        );
+        let (sum, difference) = (0.25 * taken_s, 1.0 / (4.0 / taken_s + 2.0));
+        let first = system.state::<Motion>(pushed).unwrap().velocity_m_s;
+        let second = system.state::<Motion>(dragged).unwrap().velocity_m_s;
+        assert!((first - (sum + difference)).abs() <= 1.0e-15, "{either_side}: {first}");
+        assert!((second - (sum - difference)).abs() <= 1.0e-15, "{either_side}: {second}");
+    }
+}

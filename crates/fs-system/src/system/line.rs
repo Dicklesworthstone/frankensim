@@ -24,10 +24,18 @@
 //!   on a map that is a function: released flow in, effort out.
 //! - When the block is accepted, the actual flows are written back, so the
 //!   ports, the audit and the ledger see what crossed.
+//! - The solve starts from the flows the last step ended with, which are
+//!   not the released flows of this one. A component that locates an event
+//!   (it asks for the step that ends at a stop) would locate it from the
+//!   wrong flows there, and ask again in every shorter trial. The first
+//!   time it asks before any update of a trial, the other components take
+//!   one update with its efforts held, by the factors of the line's search
+//!   ([`System::release`]), and it is asked again.
 
 use fs_exec::Cx;
 
 use super::{BlockWork, ROUNDING_UNITS, System, SystemError};
+use crate::solve::Condensed;
 use crate::wiring::Driver;
 
 /// A symmetric part with an eigenvalue below this fraction of the matrix's
@@ -260,6 +268,47 @@ impl System {
             }
         }
         Ok(None)
+    }
+
+    /// One update of `block`'s unknowns with the efforts of its line's
+    /// component held at what the last step accepted, by the factors
+    /// [`Self::find_line`] left in `condensed`: the block's Jacobian with
+    /// the component's own columns left out. Where the other components
+    /// are affine, the line's inputs then hold the released flows of this
+    /// step, and every other unknown what goes with the held efforts.
+    ///
+    /// For the step's starting values only, before the block's own first
+    /// assembly replaces those factors.
+    pub(super) fn release(
+        &mut self,
+        block: usize,
+        unknowns: &[usize],
+        residual: &mut [f64],
+        condensed: &mut Condensed,
+    ) -> Result<(), SystemError> {
+        let node = self.lines[block]
+            .as_ref()
+            .expect("a block asked to release its line has one")
+            .node;
+        // The component asked to shorten, which leaves its outputs
+        // unspecified.
+        let held = self.node_outputs(node);
+        self.outputs[held.clone()].copy_from_slice(&self.accepted_outputs[held]);
+        for (row, &index) in unknowns.iter().enumerate() {
+            residual[row] =
+                self.drivers[index].value(&self.outputs, &self.boundary_values) - self.inputs[index];
+        }
+        if !condensed.solve(residual) {
+            return Err(SystemError::LoadLine {
+                node: self.names[node].clone(),
+                reason: "the other components of its block do not determine the flows its held \
+                         efforts release: their Jacobian is singular or not finite",
+            });
+        }
+        for (row, &index) in unknowns.iter().enumerate() {
+            self.inputs[index] += residual[row];
+        }
+        Ok(())
     }
 
     /// For unknown `row` of `block`, if it is a flow on the block's load

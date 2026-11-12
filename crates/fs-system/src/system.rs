@@ -2184,45 +2184,64 @@ impl System {
         // Forward difference of the port map. The candidate slot is free to
         // overwrite: a component without a declared tangent is proposed
         // again, at the accepted inputs, before its block can be accepted.
+        //
+        // A perturbed proposal that asks for a shorter step is not the
+        // step's: the component took the step at the iterate itself, and
+        // the perturbation, the kernel's own, has carried one input over
+        // the edge of an event (a slip that passes zero just beyond where
+        // this step ends at rest). The column is then differenced on the
+        // other side of the iterate, where the component still takes the
+        // step. Only if it asks on both sides is the step shortened, to
+        // the shorter of the two.
         let index = inputs.start + local;
         let base = self.inputs[index];
         let scale = base.abs().max(group_scale[self.input_group[index]]);
         let step = f64::EPSILON.sqrt() * if scale > 0.0 { scale } else { 1.0 };
-        self.inputs[index] = base + step;
-        let proposal = if let Some(line) = line {
-            self.nodes[node].propose_on_line(
-                self.accepted[node].as_ref(),
-                dt_s,
-                &self.inputs[inputs],
-                &line.compliance,
-                self.candidate[node].as_mut(),
-                &mut self.scratch_outputs[..width],
-                cx,
-            )
-        } else {
-            self.nodes[node].propose(
-                self.accepted[node].as_ref(),
-                dt_s,
-                &self.inputs[inputs],
-                self.candidate[node].as_mut(),
-                &mut self.scratch_outputs[..width],
-                cx,
-            )
-        };
-        self.inputs[index] = base;
-        match proposal {
-            Err(error) => Err(self.refused(node, error, cx)),
-            Ok(Proposal::Shorten { dt_s: shorter }) => self.shorter(node, dt_s, shorter),
-            Ok(Proposal::Step(_)) => {
-                for (column, current) in self.scratch_outputs[..width]
-                    .iter_mut()
-                    .zip(&self.outputs[outputs])
-                {
-                    *column = (*column - current) / step;
+        let mut asked: Option<f64> = None;
+        for side in [step, -step] {
+            self.inputs[index] = base + side;
+            let proposal = if let Some(line) = line {
+                self.nodes[node].propose_on_line(
+                    self.accepted[node].as_ref(),
+                    dt_s,
+                    &self.inputs[inputs.clone()],
+                    &line.compliance,
+                    self.candidate[node].as_mut(),
+                    &mut self.scratch_outputs[..width],
+                    cx,
+                )
+            } else {
+                self.nodes[node].propose(
+                    self.accepted[node].as_ref(),
+                    dt_s,
+                    &self.inputs[inputs.clone()],
+                    self.candidate[node].as_mut(),
+                    &mut self.scratch_outputs[..width],
+                    cx,
+                )
+            };
+            self.inputs[index] = base;
+            match proposal {
+                Err(error) => return Err(self.refused(node, error, cx)),
+                Ok(Proposal::Shorten { dt_s: shorter }) => {
+                    let shorter = self.shorter(node, dt_s, shorter)?;
+                    asked = match (asked, shorter) {
+                        (Some(first), Some(second)) => Some(first.min(second)),
+                        (first, second) => first.or(second),
+                    };
                 }
-                Ok(None)
+                Ok(Proposal::Step(_)) => {
+                    for (column, current) in self.scratch_outputs[..width]
+                        .iter_mut()
+                        .zip(&self.outputs[outputs])
+                    {
+                        *column = (*column - current) / side;
+                    }
+                    return Ok(None);
+                }
             }
         }
+        Ok(asked)
     }
 
     /// The largest power [W] crossing a power port of `nodes` at the current
@@ -2429,13 +2448,41 @@ impl System {
         // Whether this step has assembled the block's Jacobian yet, so that
         // `slopes` are this step's own.
         let mut assembled = false;
+        // Whether the line's component has already been asked again at
+        // released flows of this step (below).
+        let mut asked_again = false;
         let mut iterations = 0_u32;
         loop {
             cx.checkpoint().map_err(|_| SystemError::Cancelled)?;
+            let mut at_stale_flows = false;
             for &node in nodes {
                 if let Some(shorter) = self.propose(node, dt_s, cx)? {
+                    // A step starts from the values the last one ended
+                    // with. For the component on a load line those are the
+                    // flows of the last step, not the released flows of
+                    // this one, and an event it locates there is located
+                    // from the wrong flows: a slider that enters a step
+                    // with a slip its ports were not told of sees a stop
+                    // inside every step, and the shorter step it asks for
+                    // starts from the same values and asks again, without
+                    // end. So the first time it asks before any update of
+                    // this trial, the step is not shortened. The other
+                    // components take one update with its efforts held,
+                    // which is exact where they are affine, and it is
+                    // asked again there.
+                    let on_the_line =
+                        self.lines[block].as_ref().is_some_and(|line| line.node == node);
+                    if on_the_line && !assembled && !asked_again {
+                        at_stale_flows = true;
+                        break;
+                    }
                     return Ok(Err(shorter));
                 }
+            }
+            if at_stale_flows {
+                asked_again = true;
+                self.release(block, unknowns, residual, condensed)?;
+                continue;
             }
             // The scale of an unknown is the size of the terms its driver
             // sums, not of their total: a force balance near rest is a small

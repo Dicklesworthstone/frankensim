@@ -279,7 +279,10 @@ physics owners below fs-couple can be composed without it.
 `next_event_s` allow. (2) Blocks are evaluated in dependency order; a block
 without a loop is proposed once; a looped block is solved by Newton iteration
 on its interface inputs. (3) A component may answer `Proposal::Shorten`; the
-whole trial restarts with the shorter step. (4) Every candidate is audited with
+whole trial restarts with the shorter step. Inside a looped block that holds
+for a proposal at an iterate of the solve, not for the kernel's own perturbed
+proposals, and with one exception for a component on a load line ("Requests
+to shorten inside a loop" below). (4) Every candidate is audited with
 `fs_ports::component::audit_step`, with stored energy re-measured from the
 states, and any measured mass inventory is audited against the stream
 transfer. (5) Each connection must cancel interface energy and stream mass
@@ -431,9 +434,61 @@ relation allows there.
 - Nothing of the line crosses a step: the matrix, the drivers' extra terms and
   the released flows are all formed in the step that uses them, so a run and
   its replay from a checkpoint agree (test below).
-- No event is located. A step in which a relation switches (a slider
-  arrested, a break-away, a reversal) is first-order accurate, and what
-  happens in it is the component's own law of a step.
+- The kernel locates no event. A component on a line may: it answers a
+  proposal with `Proposal::Shorten` and the step that ends at the event, as
+  a friction component does whose slip would pass zero inside the step
+  (`fs_tribo::tangential::component::FrictionInterface`). `elements::Slider`
+  does not: a step in which its relation switches (an arrest, a break-away,
+  a reversal) is first-order accurate, and what happens in it is its own
+  law of a step.
+
+**Requests to shorten inside a loop.** A component of a looped block is
+proposed at every iterate of the block's solve, and, if it declares no
+tangent, at inputs the kernel has moved to difference it. Not all of these
+proposals are the step's. Both rules below were found by the first component
+that locates an event (a friction interface that cuts the step at a stop,
+2026-11-12); on the kernel before them it could not take a step.
+
+- A perturbed proposal that asks to shorten does not shorten the step. A
+  column of a component's tangent is a forward difference: one input moved
+  by `sqrt(eps)` of its scale. Where the component takes the step at the
+  iterate and asks to shorten at the moved input (the iterate ends a step
+  at rest, and the moved input lies beyond the stop), the request is about
+  the kernel's probe, not about the step. The column is then differenced on
+  the other side of the iterate, `base - step`, where the component takes
+  the step. Only if it asks on both sides is the step shortened, to the
+  shorter of the two. Where the forward proposal takes the step the
+  arithmetic is what it was. (Taken as a request, the probe cut a step
+  that ended at a stop a second time, 5e-10 s short of it; the step ended
+  with a slip of 1.3e-8 m/s where it should have ended at rest, and the
+  step after it was refused, `StepUnderflow`.)
+- The component on a load line is first asked at the released flows of the
+  step. A block's solve starts from the flows the last step ended with, and
+  before the first step from none; for the line's component those are not
+  the released flows of this step. A component that enters a step with a
+  slip those flows show nothing of (a body thrown onto it with no starting
+  flows given, a prescribed side that has jumped) sees a stop inside the
+  step at them, and the shorter trial it asks for starts from the same
+  values and asks again: the first step of a mass of 2 kg thrown at 1 m/s
+  onto 3 N of friction was refused after 64 shortenings. So the first time
+  the line's component asks to shorten before any update of a trial, the
+  step is not shortened. The other components take one update with its
+  efforts held at what the last step accepted, by the factors the search
+  for the line has just made (the block's Jacobian without the component's
+  own columns), and the component is asked again there. That update gives
+  the released flows of the step exactly where the other components are
+  affine, and their first Newton iterate where they are not. An
+  `elements::Slider`, which never asks, is not affected: at the starting
+  values it takes some row of its law and the block's first update corrects
+  it.
+- What a component asks at any later proposal of a trial, at an iterate,
+  shortens the step at once. An event located at an iterate that has not
+  converged is located from flows that are off by what the solve has left
+  there; the shorter step is taken or cut again, and the component locates
+  from there. Not covered: a bound on how often.
+- A block in which no component asks to shorten from a perturbed proposal,
+  and whose line component does not ask at the starting values, runs as it
+  did, to the bit (the example scenes and every test that was there).
 
 ## Invariants
 
@@ -1941,8 +1996,39 @@ material, a surface card, a temperature or a slip history stays in `fs-tribo`.
   inertia, whose answer is not finite (the first step, the slider named
   with the reason, nothing published). A slider with both ends prescribed
   and no loop is stepped by its mandatory tier with no iteration.
-- Not exercised by a test: a neighbour that is not linear (the line is then
-  its slope at the step's start).
+- Requests to shorten inside a loop, with a test component that cuts the
+  step at a stop (`CutsAtAStop`: one constant force to the ground, the stop
+  located from the line as for a body under a held force; its heat warms a
+  body whose temperature it is handed back, so every step takes a second
+  update). A mass of 2 kg thrown at 1 m/s onto 3 N stops after 2/3 s and
+  1/3 m.
+  - With no starting flow given to the port, the first step of 0.05 s is
+    taken whole, with no shortening, and leaves the mass at 0.925 m/s (to
+    1e-15). Before: `StepUnderflow { dt_s: 1.26e-21 }`.
+  - Through the stop, with the starting flow given and without: 13 steps
+    of 0.05 s, then the step from 0.65 s cut once, ending at
+    0.6666666666666669 s at rest (slip exactly zero, the mass at
+    2.2e-16 m/s and 0.3333333333333335 m), then six whole steps at rest;
+    one shortening in the run. Before, with the starting flow given: that
+    step cut twice, to 0.016666666169961288 s, and not at rest.
+  - No load line: a damper that the kernel differences, between a pushed
+    mass and one it drags, asks to shorten where the flow at one end is
+    within a micrometre per second of zero and not zero, which no iterate
+    is and the kernel's perturbed proposal about a flow of zero is. Asking
+    above zero only, the step of 1 s is taken whole in one update, and the
+    two masses end where the midpoint rule puts them (to 1e-15): the
+    column from the other side is the damper's slope with its sign.
+    Before: halved three times, to 0.125 s. Asking on both sides, the step
+    is halved three times, until the damper can be differenced.
+  Planted in a scratch kernel, each failing these tests and no other of
+  the file: a perturbed request shortening the step at once (the second
+  and third test); the line not released before its component is asked
+  again (the first and second); a request on both sides ignored (the
+  third); the other side's column divided by the forward step (the third).
+- Not exercised by a test here: a neighbour that is not linear (the line is
+  then its slope at the step's start). `crates/fs-couple/tests/tribothermal/
+  dynamics/collinear/graph.rs` has a friction component beside springs
+  with a cubic term.
 
 ## No-claim boundaries
 
@@ -1967,8 +2053,9 @@ material, a surface card, a temperature or a slip history stays in `fs-tribo`.
   bound or continuum trace-map accuracy is inferred from metric admission.
   No gyrator as a connection (the `Gyrator` element is a component);
   the non-smooth tier solves one component on a load line per block, with a
-  line frozen at the step's start, and locates no event (a step in which
-  friction switches is first order); two such components in one loop (two
+  line frozen at the step's start, and locates no event itself (a component
+  on the line may ask for the step that ends at one; `Slider` does not, and
+  a step in which its friction switches is first order); two such components in one loop (two
   rubbing surfaces on one body, a contact with friction) are refused; no
   multirate stepping; no
   monolithic solve through `StageResidual`; no embedded error estimator or
