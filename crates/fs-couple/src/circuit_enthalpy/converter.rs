@@ -92,11 +92,21 @@ enum ChannelSource {
 }
 
 /// Original source snapshot retained with the exact receiving channel.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ConverterChannelMaterial {
     cell: CellId,
     resistance_ohm: f64,
     source: ChannelSource,
+}
+
+/// Equal as `same_channel` says: the same receiver, resistance bits and source (for a material
+/// source: card, material, axes, query point, requirement, source axes, selected claim, value
+/// bits). The receipt's selection-policy tag and hash are left out on purpose, because a refresh
+/// at the same state re-resolves under `PinnedByProperty`.
+impl PartialEq for ConverterChannelMaterial {
+    fn eq(&self, other: &Self) -> bool {
+        same_channel(self, other)
+    }
 }
 impl ConverterChannelMaterial {
     pub const fn cell(&self) -> CellId {

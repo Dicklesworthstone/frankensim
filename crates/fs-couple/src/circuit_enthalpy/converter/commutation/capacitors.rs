@@ -19,12 +19,25 @@ pub struct DeviceCapacitanceBinding<'a> {
 }
 
 /// The original constant capacitance claim and its current domain admission.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct DeviceCapacitanceMaterial {
     cell: CellId,
     key: PropertyKey,
     source: ResolvedMaterialStatePoint,
     capacitance_f: f64,
+}
+
+/// Equal = the same material state (card, material, axes, query point, requirement, source
+/// axes, selected claim, value bits) behind the same cell, key and capacitance. The receipt's
+/// selection-policy tag and hash are left out on purpose, because a refresh at the same state
+/// re-resolves under `PinnedByProperty`.
+impl PartialEq for DeviceCapacitanceMaterial {
+    fn eq(&self, other: &Self) -> bool {
+        self.cell == other.cell
+            && self.key == other.key
+            && self.capacitance_f == other.capacitance_f
+            && same_material(&self.source, &other.source)
+    }
 }
 
 impl DeviceCapacitanceMaterial {

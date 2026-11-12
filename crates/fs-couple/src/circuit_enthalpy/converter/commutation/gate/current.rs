@@ -63,11 +63,22 @@ impl PartialEq for CurrentSurfaceData {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 struct ScaleSource {
     key: PropertyKey,
     source: ResolvedMaterialStatePoint,
     value: f64,
+}
+/// Equal = the same material state (card, material, axes, query point, requirement, source
+/// axes, selected claim, value bits) behind the same key and multiplier. The receipt's
+/// selection-policy tag and hash are left out on purpose, because a refresh at the same state
+/// re-resolves under `PinnedByProperty`.
+impl PartialEq for ScaleSource {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+            && self.value == other.value
+            && same_material(&self.source, &other.source)
+    }
 }
 
 /// Fresh original source receipts plus one immutable prepared source surface.
@@ -83,11 +94,15 @@ pub struct GateCurrentSurfaceMaterial {
     scale: Option<ScaleSource>,
     law: GateChannelLaw,
 }
+/// Equal = the same material state (card, material, axes, query point, requirement, source
+/// axes, selected claim, value bits) behind the same cell, key, support, multiplier source and
+/// surface data. The receipt's selection-policy tag and hash are left out of the source on
+/// purpose, because a refresh at the same state re-resolves under `PinnedByProperty`.
 impl PartialEq for GateCurrentSurfaceMaterial {
     fn eq(&self, other: &Self) -> bool {
         self.cell == other.cell
             && self.key == other.key
-            && self.source == other.source
+            && same_material(&self.source, &other.source)
             && self.support == other.support
             && self.scale == other.scale
             && (Arc::ptr_eq(&self.data, &other.data) || self.data == other.data)

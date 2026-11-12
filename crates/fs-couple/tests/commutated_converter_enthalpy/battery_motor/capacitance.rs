@@ -27,7 +27,8 @@ fn capacitive_fixture(cp: f64, threshold_slope: f64, cap_upper_k: f64, variable:
             validity: ValidityDomain::unconstrained()
                 .with_quantity("T", QuantitySpec::dimensional(Temperature::DIMS), 299.0, cap_upper_k),
             uncertainty: UncertaintyModel::Unstated,
-            interpolation: InterpolationPolicy::LinearInside,
+            // The Scalar is a constant law: LinearInside has no knot span on a scalar.
+            interpolation: if variable { InterpolationPolicy::LinearInside } else { InterpolationPolicy::ConstantWithinValidity },
             observations: vec![],
             provenance: Provenance {
                 source: "synthetic constant device capacitor fixture, not qualified device data".into(),
@@ -364,4 +365,67 @@ fn capacitive_drive_heat_assembly_retains_both_finite_thermal_inventories() {
         assert_eq!(next.report().source.capacitances.len(), 4);
         for value in next.report().electrical.converter.device_capacitor_energy_change_j { near(value, 0.0); }
     });
+}
+
+// Constant capacitors bound under SingleClaimOnly are refreshed under a pin of the same claim by the
+// first step, which must be accepted; different capacitors are different sources.
+#[test]
+fn capacitors_bound_under_single_claim_only_take_their_first_step_and_differ_from_each_other() {
+    let f = capacitive_fixture(1.0, 0.0, 350.0, false, 1.0);
+    let thermal = f.base.thermal();
+    let context = common::point(300.0);
+    let cells = f.base.cells(&context);
+    let resistors = drive_resistors(&f.base);
+    let devices = f.base.devices();
+    let caps = f.bindings();
+    let network = coupled(&cells, &resistors, &devices, &caps);
+    let steady = steady_drive(false);
+    let state = initial(&steady, [0.0; 2]);
+    let drive = network.bind(&thermal, &steady.native, COSS, state, || false).unwrap();
+    let dt = 1.0 / 64.0;
+    match network.step_candidate(
+        &thermal, dt, &drive,
+        &[CommutationInterval { gates: steady.gates, duration_s: dt }], &[steady.command],
+        4, Some(IDS[3]), power_controls(), cycle_controls(), drive_controls(7), &[0.0; 7], || false,
+    ) {
+        Ok(_) => {}
+        Err(error) => panic!("a step from the bound state is refused: {error:?}"),
+    }
+    // (Sources refreshed by the step sit at the stepped state, so their query point differs from the
+    // bound one by design; the accepted step above is the positive.)
+    // Four capacitors of four packages: another key, cell and value is another source.
+    assert_ne!(drive.capacitances()[0], drive.capacitances()[1]);
+}
+
+// Planted negative on the same check (see the converter's): the drive stays bound at 300 K while the
+// accepted heat state is another one at the same time, and the diode threshold depends on temperature.
+#[test]
+fn capacitive_drive_bound_at_one_state_refuses_a_step_from_another_accepted_state() {
+    let f = capacitive_fixture(1.0, 0.02, 350.0, false, 1.0);
+    let thermal = f.base.thermal();
+    let hot = f.base.thermal_at(320.0);
+    assert!((hot.temperature_k(IDS[1]).unwrap() - 320.0).abs() < 1e-5);
+    let context = common::point(300.0);
+    let cells = f.base.cells(&context);
+    let resistors = drive_resistors(&f.base);
+    let devices = f.base.devices();
+    let caps = f.bindings();
+    let network = coupled(&cells, &resistors, &devices, &caps);
+    let steady = steady_drive(false);
+    let state = initial(&steady, [0.0; 2]);
+    let drive = network.bind(&thermal, &steady.native, COSS, state, || false).unwrap();
+    let dt = 1.0 / 64.0;
+    let attempt = |at: &DepositionSimulation<'_>| {
+        network.step_candidate(
+            at, dt, &drive,
+            &[CommutationInterval { gates: steady.gates, duration_s: dt }], &[steady.command],
+            4, Some(IDS[3]), power_controls(), cycle_controls(), drive_controls(7), &[0.0; 7], || false,
+        ).map(|_| ()).map_err(|error| format!("{error:?}"))
+    };
+    assert_eq!(attempt(&thermal), Ok(()));
+    let Err(text) = attempt(&hot) else { panic!("a step from another accepted state was taken"); };
+    assert!(
+        text.contains("commutated drive must retain every accepted resistance, conduction and capacitance source"),
+        "{text}"
+    );
 }

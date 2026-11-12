@@ -704,3 +704,129 @@ fn commutated_battery_drive_and_finite_liquid_coolant_share_the_original_heat_as
         assert!(next.thermal().temperature_k(COOLANT).unwrap() > 299.5);
     });
 }
+
+// The accepted-state check compares every source a step resolves with the bound one. The bound ones
+// come from the binding's selection (SingleClaimOnly), the resolved ones from a refresh pinned to the
+// claim already selected; the same sources at the same state must compare equal.
+#[test]
+fn a_drive_bound_under_single_claim_only_takes_its_first_step_and_another_claim_is_another_source() {
+    let f = fixture(1.0, 0.0, 350.0, 100.0);
+    let thermal = f.thermal();
+    let context = common::point(300.0);
+    let cells = f.cells(&context);
+    let resistors = drive_resistors(&f);
+    let devices = f.devices();
+    let network = CommutatedBatteryMotorThermalNetwork {
+        cells: &cells,
+        links: &[],
+        resistors: &resistors,
+        devices: &devices,
+        bearing_cell: IDS[0],
+    };
+    let steady = steady_drive(false);
+    let drive = network
+        .bind(&thermal, &steady.native, steady.state, || false)
+        .unwrap();
+    let dt = 1.0 / 64.0;
+    let intervals = [CommutationInterval {
+        gates: steady.gates,
+        duration_s: dt,
+    }];
+    match network.step_candidate(
+        &thermal,
+        dt,
+        &drive,
+        &intervals,
+        &[steady.command],
+        4,
+        None,
+        power_controls(),
+        cycle_controls(),
+        drive_controls(7),
+        &[0.0; 7],
+        || false,
+    ) {
+        Ok(_) => {}
+        Err(error) => panic!("a step from the bound state is refused: {error:?}"),
+    }
+    // The comparison is not vacuous: another claim value is another source.
+    // (Sources refreshed by the step sit at the stepped state, so their query point differs from the
+    // bound one by design; the accepted step above is the positive.)
+    let other = fixture(1.0, 0.0, 350.0, 50.0);
+    let other_thermal = other.thermal();
+    let other_cells = other.cells(&context);
+    let other_resistors = drive_resistors(&other);
+    let other_devices = other.devices();
+    let other_network = CommutatedBatteryMotorThermalNetwork {
+        cells: &other_cells,
+        links: &[],
+        resistors: &other_resistors,
+        devices: &other_devices,
+        bearing_cell: IDS[0],
+    };
+    let bound_other = other_network
+        .bind(&other_thermal, &steady.native, steady.state, || false)
+        .unwrap();
+    assert_ne!(bound_other.devices(), drive.devices());
+}
+
+// Planted negative: the drive stays bound at 300 K, the accepted heat state is another one at the same
+// time, and the diode threshold depends on temperature, so the resolved sources differ in their value
+// bits. The step must still refuse with the retained-source message.
+#[test]
+fn a_drive_bound_at_one_state_refuses_a_step_from_another_accepted_state_at_the_same_time() {
+    let f = fixture(1.0, 0.02, 350.0, 100.0);
+    let thermal = f.thermal();
+    let hot = f.thermal_at(320.0);
+    assert!((hot.temperature_k(IDS[1]).unwrap() - 320.0).abs() < 1e-5);
+    assert_eq!(hot.time_s().to_bits(), thermal.time_s().to_bits());
+    let context = common::point(300.0);
+    let cells = f.cells(&context);
+    let resistors = drive_resistors(&f);
+    let devices = f.devices();
+    let network = CommutatedBatteryMotorThermalNetwork {
+        cells: &cells,
+        links: &[],
+        resistors: &resistors,
+        devices: &devices,
+        bearing_cell: IDS[0],
+    };
+    let steady = steady_drive(false);
+    let drive = network
+        .bind(&thermal, &steady.native, steady.state, || false)
+        .unwrap();
+    let dt = 1.0 / 64.0;
+    let intervals = [CommutationInterval {
+        gates: steady.gates,
+        duration_s: dt,
+    }];
+    let attempt = |at: &DepositionSimulation<'_>| {
+        network
+            .step_candidate(
+                at,
+                dt,
+                &drive,
+                &intervals,
+                &[steady.command],
+                4,
+                None,
+                power_controls(),
+                cycle_controls(),
+                drive_controls(7),
+                &[0.0; 7],
+                || false,
+            )
+            .map(|_| ())
+            .map_err(|error| format!("{error:?}"))
+    };
+    assert_eq!(attempt(&thermal), Ok(()));
+    let Err(text) = attempt(&hot) else {
+        panic!("a step from another accepted state was taken");
+    };
+    assert!(
+        text.contains(
+            "commutated drive must retain every accepted resistance, conduction and capacitance source"
+        ),
+        "{text}"
+    );
+}

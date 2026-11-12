@@ -142,6 +142,10 @@ fn fixture(cp: f64, threshold_slope: f64, upper_k: f64, channel_limit: f64) -> F
 
 impl Fixture {
     fn thermal(&self) -> DepositionSimulation<'_> {
+        self.thermal_at(300.0)
+    }
+    /// The seven bodies born at one common temperature (the caloric curve starts at 299 K), time 0.
+    fn thermal_at(&self, kelvin: f64) -> DepositionSimulation<'_> {
         let events = IDS
             .into_iter()
             .enumerate()
@@ -153,7 +157,7 @@ impl Fixture {
                     body_id: i as u64,
                     material_id: MaterialId(0),
                     mass_kg: 1.0,
-                    specific_h_j_kg: self.cp,
+                    specific_h_j_kg: self.cp * (kelvin - 299.0),
                     geometry: CellGeometry {
                         start_m: [i as f64, 0.0, 0.0],
                         end_m: [i as f64 + 1.0, 0.0, 0.0],
@@ -546,4 +550,122 @@ fn source_limits_quantity_domains_budget_and_cancellation_preserve_joint_state()
         assert_eq!(thermal.energy_j(), energy);
         assert_eq!(converter.state(), &initial);
     }
+}
+
+// The accepted-state check compares the sources a step resolves at the accepted heat state with
+// the bound ones. The bound ones come from the binding's selection (SingleClaimOnly), the
+// resolved ones from a refresh pinned to the claim already selected; equal sources must pass.
+#[test]
+fn a_converter_bound_under_single_claim_only_takes_its_first_step_and_another_claim_is_another_source() {
+    let f = fixture(1.0, 0.0, 350.0, 100.0);
+    let thermal = f.thermal();
+    let context = common::point(300.0);
+    let cells = f.cells(&context);
+    let devices = f.devices();
+    let resistors = resistors();
+    let network = CommutatedConverterThermalNetwork {
+        cells: &cells,
+        links: &[],
+        resistors: &resistors,
+        devices: &devices,
+    };
+    let (initial, command, _, _) = steady(0.0);
+    let converter = network
+        .bind(&thermal, parameters(), [1.0; 2], initial, || false)
+        .unwrap();
+    let dt = 1.0 / 1024.0;
+    match network.step_candidate(
+        &thermal,
+        dt,
+        &converter,
+        &interval(dt),
+        &[command],
+        1,
+        [None; 2],
+        power_controls(),
+        cycle_controls(),
+        controls(),
+        &[0.0; 7],
+        || false,
+    ) {
+        Ok(_) => {}
+        Err(error) => panic!("a step from the bound state is refused: {error:?}"),
+    }
+    // The comparison is not vacuous: another claim value is another source.
+    // (Sources refreshed by the step sit at the stepped state, so their query point differs from the
+    // bound one by design; the accepted step above is the positive.)
+    let other = fixture(1.0, 0.0, 350.0, 50.0);
+    let other_thermal = other.thermal();
+    let other_cells = other.cells(&context);
+    let other_devices = other.devices();
+    let other_network = CommutatedConverterThermalNetwork {
+        cells: &other_cells,
+        links: &[],
+        resistors: &resistors,
+        devices: &other_devices,
+    };
+    let bound_other = other_network
+        .bind(&other_thermal, parameters(), [1.0; 2], initial, || false)
+        .unwrap();
+    assert_ne!(bound_other.devices(), converter.devices());
+}
+
+// Planted negative: the converter stays bound at 300 K and the accepted heat state is another one at
+// the same time. Temperature is a coordinate of every device and resistor source's query point, so
+// the sources resolved at the accepted state differ from the bound ones even with a constant diode
+// threshold. The step must still refuse with the accepted-state message. (The threshold is constant
+// so that the step from the bound state is the dead-time test's own, which fs-phs accepts; a
+// temperature-dependent threshold meets the solve-budget refusal of
+// temperature_dependent_diode_threshold_refreshes_when_every_resistance_is_constant.)
+#[test]
+fn a_converter_bound_at_one_state_refuses_a_step_from_another_accepted_state_at_the_same_time() {
+    let f = fixture(1.0, 0.0, 350.0, 100.0);
+    let thermal = f.thermal();
+    let hot = f.thermal_at(320.0);
+    assert!((hot.temperature_k(IDS[1]).unwrap() - 320.0).abs() < 1e-5);
+    assert_eq!(hot.time_s().to_bits(), thermal.time_s().to_bits());
+    let context = common::point(300.0);
+    let cells = f.cells(&context);
+    let devices = f.devices();
+    let resistors = resistors();
+    let network = CommutatedConverterThermalNetwork {
+        cells: &cells,
+        links: &[],
+        resistors: &resistors,
+        devices: &devices,
+    };
+    let (initial, command, _, _) = steady(0.5);
+    let converter = network
+        .bind(&thermal, parameters(), [1.0; 2], initial, || false)
+        .unwrap();
+    let dt = 1.0 / 64.0;
+    let attempt = |at: &DepositionSimulation<'_>| {
+        network
+            .step_candidate(
+                at,
+                dt,
+                &converter,
+                &interval(dt),
+                &[command],
+                4,
+                [None; 2],
+                power_controls(),
+                cycle_controls(),
+                controls(),
+                &[0.0; 7],
+                || false,
+            )
+            .map(|_| ())
+            .map_err(|error| format!("{error:?}"))
+    };
+    assert_eq!(attempt(&thermal), Ok(()));
+    let Err(text) = attempt(&hot) else {
+        panic!("a step from another accepted state was taken");
+    };
+    assert!(
+        text.contains(
+            "all commutated device and resistor sources must match the accepted heat state"
+        ),
+        "{text}"
+    );
 }

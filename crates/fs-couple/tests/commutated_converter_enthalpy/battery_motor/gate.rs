@@ -107,13 +107,19 @@ fn gate_fixture(
         claims.insert_claim(claim.clone()).unwrap();
     }
     let mut add = |key: &PropertyKey, value, validity| {
+        // A scalar is a constant law: LinearInside has no knot span to interpolate inside on it.
+        let interpolation = if matches!(value, PropertyValue::Scalar { .. }) {
+            InterpolationPolicy::ConstantWithinValidity
+        } else {
+            InterpolationPolicy::LinearInside
+        };
         claims
             .insert_claim(PropertyClaim {
                 key: key.clone(),
                 value,
                 validity,
                 uncertainty: UncertaintyModel::Unstated,
-                interpolation: InterpolationPolicy::LinearInside,
+                interpolation,
                 observations: vec![],
                 provenance: Provenance {
                     source:
@@ -251,9 +257,13 @@ fn gate_fixture(
 }
 impl GateFixture {
     fn thermal(&self) -> DepositionSimulation<'_> {
+        self.thermal_at(300.0)
+    }
+    /// All eleven bodies born at one common temperature (the caloric curve starts at 299 K), time 0.
+    fn thermal_at(&self, kelvin: f64) -> DepositionSimulation<'_> {
         let mut events: Vec<_> = self
             .base
-            .thermal()
+            .thermal_at(kelvin)
             .cells()
             .values()
             .map(|cell| TimedEvent {
@@ -270,7 +280,7 @@ impl GateFixture {
                     body_id: 7 + i as u64,
                     material_id: MaterialId(0),
                     mass_kg: 1.0,
-                    specific_h_j_kg: 1.0,
+                    specific_h_j_kg: kelvin - 299.0,
                     geometry: CellGeometry {
                         start_m: [20.0 + i as f64, 0.0, 0.0],
                         end_m: [21.0 + i as f64, 0.0, 0.0],
@@ -1109,4 +1119,137 @@ fn source_bound_driver_heat_and_finite_liquid_coolant_use_the_same_heat_assembly
             );
         }
     });
+}
+
+// Planted negative on the accepted-state check (see the converter's): the drive stays bound at 300 K
+// while the accepted heat state is another one at the same time, and a driver resistance depends on
+// temperature, so the gate material resolved at the accepted state differs in its value bits from the
+// bound one. The first attempt at the bound state is the positive: bound under SingleClaimOnly, stepped
+// once, accepted.
+#[test]
+fn gate_drive_bound_at_one_state_refuses_a_step_from_another_accepted_state() {
+    let f = gate_fixture(0.0, false, 0.125, false, false);
+    let thermal = f.thermal();
+    let hot = f.thermal_at(320.0);
+    assert!((hot.temperature_k(DRIVER[0]).unwrap() - 320.0).abs() < 1e-5);
+    let context = gate_context();
+    let cells = f.cells(&context);
+    let resistors = drive_resistors(&f.base);
+    let devices = f.base.devices();
+    let q = f.charges();
+    let cgs = f.caps(false);
+    let cgd = f.caps(true);
+    let conductance = f.conductances();
+    let driver_r = f.driver_resistors();
+    let network = coupled(
+        &cells,
+        &resistors,
+        &devices,
+        gate_bindings(&q, &cgs, &cgd, &conductance, &driver_r),
+    );
+    let steady = steady_drive(false);
+    let p = authored(0.0, false);
+    let state = initial(&steady, &p);
+    let drive = network
+        .bind(&thermal, &steady.native, &p, state, || false)
+        .unwrap();
+    let attempt = |at: &DepositionSimulation<'_>| {
+        network
+            .step_candidate(
+                at,
+                1.0,
+                &drive,
+                &[CommutationInterval {
+                    gates: steady.gates,
+                    duration_s: 1.0,
+                }],
+                &[steady.command],
+                1,
+                None,
+                power_controls(),
+                cycle_controls(),
+                drive_controls(11),
+                &[0.0; 11],
+                || false,
+            )
+            .map(|_| ())
+            .map_err(|error| format!("{error:?}"))
+    };
+    assert_eq!(attempt(&thermal), Ok(()));
+    let Err(text) = attempt(&hot) else {
+        panic!("a step from another accepted state was taken");
+    };
+    assert!(
+        text.contains(
+            "commutated drive must retain every accepted resistance, conduction and capacitance source"
+        ),
+        "{text}"
+    );
+}
+
+// Planted negative on the accepted-state check for the gate-conductance line itself: the only
+// temperature-dependent source of this fixture is the conductance surface G(Vgs, T) (driver
+// resistances and devices have slope 0), so the line resolved at another accepted state at the same
+// time differs in its value bits from the bound one. The first attempt at the bound state is the
+// positive: bound under SingleClaimOnly, stepped once, accepted.
+#[test]
+fn gate_conductance_bound_at_one_state_refuses_a_step_from_another_accepted_state() {
+    let f = gate_fixture(0.05, true, 0.0, false, false);
+    let thermal = f.thermal();
+    let hot = f.thermal_at(320.0);
+    assert!((hot.temperature_k(DRIVER[0]).unwrap() - 320.0).abs() < 1e-5);
+    let context = gate_context();
+    let cells = f.cells(&context);
+    let resistors = drive_resistors(&f.base);
+    let devices = f.base.devices();
+    let q = f.charges();
+    let cgs = f.caps(false);
+    let cgd = f.caps(true);
+    let conductance = f.conductances();
+    let driver_r = f.driver_resistors();
+    let network = coupled(
+        &cells,
+        &resistors,
+        &devices,
+        gate_bindings(&q, &cgs, &cgd, &conductance, &driver_r),
+    );
+    let steady = steady_drive(false);
+    let p = authored(0.05, true);
+    let state = initial(&steady, &p);
+    let drive = network
+        .bind(&thermal, &steady.native, &p, state, || false)
+        .unwrap();
+    let h = 0.125;
+    let attempt = |at: &DepositionSimulation<'_>| {
+        network
+            .step_candidate(
+                at,
+                h,
+                &drive,
+                &[CommutationInterval {
+                    gates: steady.gates,
+                    duration_s: h,
+                }],
+                &[steady.command],
+                1,
+                None,
+                power_controls(),
+                cycle_controls(),
+                drive_controls(11),
+                &[0.0; 11],
+                || false,
+            )
+            .map(|_| ())
+            .map_err(|error| format!("{error:?}"))
+    };
+    assert_eq!(attempt(&thermal), Ok(()));
+    let Err(text) = attempt(&hot) else {
+        panic!("a step from another accepted state was taken");
+    };
+    assert!(
+        text.contains(
+            "commutated drive must retain every accepted resistance, conduction and capacitance source"
+        ),
+        "{text}"
+    );
 }

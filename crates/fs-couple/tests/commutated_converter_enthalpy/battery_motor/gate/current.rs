@@ -695,3 +695,65 @@ fn current_surface_thermal_feedback_uses_the_original_generic_heat_assembly() {
         assert_eq!(next.report().source.drive.network.material.cells.len(), 11);
     });
 }
+
+// Planted negative on the accepted-state check (see the converter's): the drive stays bound at 300 K
+// while the accepted heat state is another one at the same time, and every channel current carries an
+// explicit thermal multiplier (slope 0.2 per K), so the current-surface material resolved at the
+// accepted state differs in its multiplier bits from the bound one. The first attempt at the bound
+// state is the positive: bound under SingleClaimOnly, stepped once, accepted.
+#[test]
+fn current_surface_drive_bound_at_one_state_refuses_a_step_from_another_accepted_state() {
+    let f = current_fixture(0.05, 0.2, Defect::None);
+    let thermal = f.gate.thermal();
+    let hot = f.gate.thermal_at(320.0);
+    assert!((hot.temperature_k(DRIVER[0]).unwrap() - 320.0).abs() < 1e-5);
+    let context = gate_context();
+    let cells = f.gate.cells(&context);
+    let r = drive_resistors(&f.gate.base);
+    let d = f.gate.base.devices();
+    let q = f.gate.charges();
+    let cgs = f.gate.caps(false);
+    let cgd = f.gate.caps(true);
+    let current = f.bindings();
+    let driver = f.gate.driver_resistors();
+    let bindings = material_bindings(&q, &cgs, &cgd, &current, &driver);
+    let network = current_network(&cells, &r, &d, bindings);
+    let steady = steady_drive(false);
+    let p = authored(0.05, false);
+    let state = current_initial(&steady, &p);
+    let drive = network
+        .bind(&thermal, &steady.native, &p, state, || false)
+        .unwrap();
+    let h = 1.0 / 1024.0;
+    let deck = interval(h);
+    let cmd = command(&steady);
+    let attempt = |at: &DepositionSimulation<'_>| {
+        network
+            .step_candidate(
+                at,
+                h,
+                &drive,
+                &deck,
+                &[cmd],
+                1,
+                None,
+                power_controls(),
+                cycle_controls(),
+                drive_controls(11),
+                &[0.0; 11],
+                || false,
+            )
+            .map(|_| ())
+            .map_err(|error| format!("{error:?}"))
+    };
+    assert_eq!(attempt(&thermal), Ok(()));
+    let Err(text) = attempt(&hot) else {
+        panic!("a step from another accepted state was taken");
+    };
+    assert!(
+        text.contains(
+            "commutated drive must retain every accepted resistance, conduction and capacitance source"
+        ),
+        "{text}"
+    );
+}

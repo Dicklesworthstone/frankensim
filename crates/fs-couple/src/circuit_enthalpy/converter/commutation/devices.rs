@@ -43,12 +43,26 @@ pub struct DeviceConductionBinding<'a> {
 }
 
 /// Complete admitted device source and its original material/thermal binding.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct DeviceConductionMaterial {
     cell: CellId,
     keys: [PropertyKey; 7],
     source: ResolvedMaterialStatePoint,
     parameters: SwitchDevice,
+}
+
+/// Equal = the same material state (card, material, axes, query point, requirement, source
+/// axes, selected claim, value bits; `same_material`) behind the same cell, keys and device
+/// parameters. The receipt's selection-policy tag and hash are left out on purpose, because a
+/// refresh at the same state re-resolves under `PinnedByProperty`: a source bound under
+/// `SingleClaimOnly` and the same claim refreshed at the same state differ in exactly those two.
+impl PartialEq for DeviceConductionMaterial {
+    fn eq(&self, other: &Self) -> bool {
+        self.cell == other.cell
+            && self.keys == other.keys
+            && self.parameters == other.parameters
+            && same_material(&self.source, &other.source)
+    }
 }
 
 impl DeviceConductionMaterial {

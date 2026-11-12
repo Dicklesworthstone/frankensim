@@ -960,3 +960,111 @@ fn nonlinear_charge_drive_uses_the_original_two_inventory_heat_assembly() {
         }
     });
 }
+
+// Charge laws bound under SingleClaimOnly are refreshed under a pin of the same claim by the first
+// step, which must be accepted; different charge laws are different sources. Both source forms
+// step: an authored 0 V knot, and a law whose 0 V knot the library inserts into the path.
+#[test]
+fn charge_laws_bound_under_single_claim_only_take_their_first_step_and_differ_from_each_other() {
+    for explicit_zero in [true, false] {
+        let f = charge_fixture_reference(1.0, 0.0, 350.0, false, 1.0, explicit_zero);
+        let thermal = f.base.thermal();
+        let ctx = context(300.0);
+        let cells = f.base.cells(&ctx);
+        let r = drive_resistors(&f.base);
+        let d = f.base.devices();
+        let charges = f.bindings();
+        let network = coupled(&cells, &r, &d, &charges);
+        let steady = steady_drive(false);
+        let state = initial(&steady, [0.0; 2]);
+        let authored = curves(1.0);
+        let drive = network
+            .bind(&thermal, &steady.native, &authored, state, || false)
+            .unwrap();
+        for charge in drive.charges() {
+            assert_eq!(charge.source_path().knots.len(), VOLTAGE.len());
+        }
+        let dt = 1.0 / 64.0;
+        match network.step_candidate(
+            &thermal,
+            dt,
+            &drive,
+            &[CommutationInterval {
+                gates: steady.gates,
+                duration_s: dt,
+            }],
+            &[steady.command],
+            4,
+            Some(IDS[3]),
+            power_controls(),
+            cycle_controls(),
+            drive_controls(7),
+            &[0.0; 7],
+            || false,
+        ) {
+            Ok(_) => {}
+            Err(error) => panic!(
+                "a step from the bound state is refused (explicit 0 V knot: {explicit_zero}): {error:?}"
+            ),
+        }
+        // (Sources refreshed by the step sit at the stepped state, so their query point differs
+        // from the bound one by design; the accepted step above is the positive.)
+        // Four charge laws of four packages: another key, cell and curve is another source.
+        assert_ne!(drive.charges()[0], drive.charges()[1]);
+    }
+}
+
+// Planted negative on the same check (see the converter's): the drive stays bound at 300 K while the
+// accepted heat state is another one at the same time, and the diode threshold depends on temperature.
+#[test]
+fn charge_drive_bound_at_one_state_refuses_a_step_from_another_accepted_state() {
+    let f = charge_fixture(1.0, 0.02, 350.0, false, 1.0);
+    let thermal = f.base.thermal();
+    let hot = f.base.thermal_at(320.0);
+    assert!((hot.temperature_k(IDS[1]).unwrap() - 320.0).abs() < 1e-5);
+    let ctx = context(300.0);
+    let cells = f.base.cells(&ctx);
+    let r = drive_resistors(&f.base);
+    let d = f.base.devices();
+    let charges = f.bindings();
+    let network = coupled(&cells, &r, &d, &charges);
+    let steady = steady_drive(false);
+    let state = initial(&steady, [0.0; 2]);
+    let authored = curves(1.0);
+    let drive = network
+        .bind(&thermal, &steady.native, &authored, state, || false)
+        .unwrap();
+    let dt = 1.0 / 64.0;
+    let attempt = |at: &DepositionSimulation<'_>| {
+        network
+            .step_candidate(
+                at,
+                dt,
+                &drive,
+                &[CommutationInterval {
+                    gates: steady.gates,
+                    duration_s: dt,
+                }],
+                &[steady.command],
+                4,
+                Some(IDS[3]),
+                power_controls(),
+                cycle_controls(),
+                drive_controls(7),
+                &[0.0; 7],
+                || false,
+            )
+            .map(|_| ())
+            .map_err(|error| format!("{error:?}"))
+    };
+    assert_eq!(attempt(&thermal), Ok(()));
+    let Err(text) = attempt(&hot) else {
+        panic!("a step from another accepted state was taken");
+    };
+    assert!(
+        text.contains(
+            "commutated drive must retain every accepted resistance, conduction and capacitance source"
+        ),
+        "{text}"
+    );
+}

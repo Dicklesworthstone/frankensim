@@ -64,7 +64,7 @@ pub struct GateConductanceBinding<'a> {
 }
 
 /// Complete original source, current thermal slice and native positive law.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct GateConductanceMaterial {
     cell: CellId,
     key: PropertyKey,
@@ -73,6 +73,23 @@ pub struct GateConductanceMaterial {
     source: ResolvedMaterialStatePoint,
     path: PropertyLineSlice,
     curve: GateConductanceCurve,
+}
+
+/// Equal = the same material state (card, material, axes, query point, requirement, source
+/// axes, selected claim, value bits) behind the same cell, key, gate-voltage axis, support, path
+/// and conductance curve. The receipt's selection-policy tag and hash are left out of the source
+/// on purpose, because a refresh at the same state re-resolves under `PinnedByProperty`; the path
+/// is always queried under a pin of the selected claim, so it compares as it is.
+impl PartialEq for GateConductanceMaterial {
+    fn eq(&self, other: &Self) -> bool {
+        self.cell == other.cell
+            && self.key == other.key
+            && self.gate_voltage_axis == other.gate_voltage_axis
+            && self.gate_voltage_range_v == other.gate_voltage_range_v
+            && same_material(&self.source, &other.source)
+            && self.path == other.path
+            && self.curve == other.curve
+    }
 }
 impl GateConductanceMaterial {
     pub const fn cell(&self) -> CellId {

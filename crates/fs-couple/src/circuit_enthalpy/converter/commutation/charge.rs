@@ -25,7 +25,7 @@ pub struct DeviceChargeBinding<'a> {
 /// Original Q(V) source, complete voltage support and exact native charge law.
 /// The scalar source is the zero-voltage reference at the actual caloric state;
 /// the retained source path qualifies every voltage used by the native owner.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct DeviceChargeMaterial {
     cell: CellId,
     key: PropertyKey,
@@ -34,6 +34,23 @@ pub struct DeviceChargeMaterial {
     source: ResolvedMaterialStatePoint,
     path: PropertyLineSlice,
     curve: CapacitorChargeCurve,
+}
+
+/// Equal = the same material state (card, material, axes, query point, requirement, source
+/// axes, selected claim, value bits) behind the same cell, key, voltage axis, support, path and
+/// charge curve. The receipt's selection-policy tag and hash are left out of the source on
+/// purpose, because a refresh at the same state re-resolves under `PinnedByProperty`; the path is
+/// always queried under a pin of the selected claim, so it compares as it is.
+impl PartialEq for DeviceChargeMaterial {
+    fn eq(&self, other: &Self) -> bool {
+        self.cell == other.cell
+            && self.key == other.key
+            && self.voltage_axis == other.voltage_axis
+            && self.voltage_range_v == other.voltage_range_v
+            && same_material(&self.source, &other.source)
+            && self.path == other.path
+            && self.curve == other.curve
+    }
 }
 impl DeviceChargeMaterial {
     pub const fn cell(&self) -> CellId {
@@ -223,13 +240,35 @@ pub(super) fn resolve_charge_curves(
             })?;
         // Inserting the exact original zero answer splits one affine source
         // segment without changing its law, integral, slope or source identity.
+        // It is queried under the line's pin, as every other knot is: the state
+        // point's own answer carries the bind's single-claim receipt, so a
+        // refresh at the same state would not equal its bound path.
         if !path.knots.iter().any(|(voltage, _)| *voltage == 0.0) {
             if path.knots.len() >= MAX_CAPACITOR_KNOTS {
                 return Err(invalid(
                     "device charge reference exceeds the native knot budget",
                 ));
             }
-            path.knots.push((0.0, property.answer().clone()));
+            let zero = body
+                .point
+                .material
+                .claims()
+                .query_pinned_typed(binding.key, &query, property.answer().receipt.selected)
+                .map_err(|error| {
+                    source(fs_material::state_point::MaterialStatePointError::Support {
+                        property: binding.key.name().to_owned(),
+                        source: Box::new(fs_matdb::PropertySupportError::Evaluation {
+                            point: query.clone(),
+                            error: Box::new(error),
+                        }),
+                    })
+                })?;
+            if zero.evidence.value.value.to_bits() != property.value_si().to_bits() {
+                return Err(invalid(
+                    "device charge zero knot differs from its original zero answer",
+                ));
+            }
+            path.knots.push((0.0, zero));
             path.knots.sort_by(|a, b| a.0.total_cmp(&b.0));
         }
         if !(3..=MAX_CAPACITOR_KNOTS).contains(&path.knots.len()) {

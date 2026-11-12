@@ -2643,6 +2643,18 @@ voltage-dependent capacitance is refused. All storage coefficients remain fixed;
 variable charge laws and their reversible parameter/entropy work require a
 separate coupled model.
 
+Equality of the retained source snapshots (`DeviceConductionMaterial`,
+`DeviceCapacitanceMaterial`, `DeviceChargeMaterial`, `GateConductanceMaterial`,
+`GateCurrentSurfaceMaterial` with its thermal multiplier, and
+`ConverterChannelMaterial`) means the same material state: card, material, axes,
+query point, requirement, source axes, selected claim and value bits. The
+receipt's selection-policy tag and hash are left out on purpose, because a
+refresh at the same state re-resolves under `PinnedByProperty`, so a source bound
+under `SingleClaimOnly` still equals its own refresh; a changed claim or value
+bit still refuses the step. Every knot of a retained charge or gate source path,
+including a 0 V charge knot the library inserts into an authored law without
+one, is queried under a pin of the selected claim, so a path compares as it is.
+
 The actual eleven-state receipt retains four signed device-capacitor energy
 changes and the original bus/inductor storage. Their independently summed
 partition precedes the seven-constituent and fourteen-loss physical balances.
