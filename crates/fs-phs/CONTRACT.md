@@ -4536,3 +4536,61 @@ them to admit unphysical generation as numerical loss. The regression source in
 `fs-system/tests/phs.rs` covers a shifted scalar quadratic whose rounded endpoint
 subtraction loses 0.5 J, preservation through shared storage, invalid bounds at
 either endpoint and overflow of their combined allowance.
+
+### Controlled exact ZOH and original physical-heat input derivatives
+
+`PreparedExactZoh::new_controlled` and `new_owned_controlled` retain the
+original complete quadratic owner, fixed duration, split admission and dense
+capacity limits. They call the existing controlled quadratic-flow preparation.
+Cancellation polls additionally bracket the original split and positive-heat
+construction and occur between mean-output rows. The split, storage callbacks
+and one complete positive-heat construction remain bounded atomic operations;
+the new wrappers do not promise interruption inside them or hard real time.
+They return `PreparedStepError::Cancelled` without publishing a partial cache.
+Existing constructors use the same arithmetic with cancellation disabled.
+
+`step_with_workspace_into_controlled` evaluates the original exact transition,
+retained port integrals, independent positive heat and physical balance gate.
+It polls around the bounded matrix-vector/work, heat and energy-admission
+blocks and before publishing both caller buffers. Refusal or cancellation
+leaves both outputs unchanged and reusable scratch may serve another state,
+input or admitted duration with the same complete state/port dimensions.
+The original unpolled APIs retain their numerical behavior and error types.
+
+`heat_input_gradient_into_controlled` returns that same physical resistance
+heat and fills every derivative with respect to the original held inputs, at
+fixed initial state and duration. It differentiates the retained positive
+factor directly: for `D = ||L z||²`, `dD = 2 (L z)^T (L dz)`. Initial loss
+effort is fixed; only the original force-imbalance block varies, through
+`forward * G[:,p] / rate`. No expanded heat matrix, finite difference,
+equilibrium subtraction, new trajectory or energy deficit supplies the
+derivative. The native weak-loss coordinates and all original input columns
+remain. Zero duration or identically zero resistance gives exact zero heat
+and derivative. Nonfinite or unrepresentable contractions refuse.
+
+The derivative reuses existing workspace arrays, allocating nothing on warm
+calls when original storage callbacks do not allocate. Polls bracket native
+heat evaluation and occur per derivative column and factor row. Public gradient
+output changes only after the final cancellation check. It is a source
+observation; consumers still run the native step's independent physical and
+source-support admission for the trajectory they linearize. Together with
+`average_output_map`, it supplies the complete heat-bearing port tangent.
+That complete map is generally nonlinear even though its trajectory is exact
+for the retained held-input linear system.
+
+`PreparedExactZoh::port_work_magnitude(workspace, input)` is an immutable view of the
+retained two-word port-integral magnitudes before opposing works cancel. Call
+the method on the same owner immediately after its successful step with the
+same input, before reusing the workspace for another owner or duration. Layout
+and finiteness are checked; scratch stores no physical history or provenance.
+This magnitude can scale arithmetic allowance for native-integral/mean-output
+wire conversion; it is neither an integration-error bound nor permission to
+weaken the original physical balance gate.
+
+Six regressions in `tests/prepared_exact_tangent.rs` cover independent scalar
+two-port exponential state, work, heat and every input derivative; analytic
+oscillator heat and derivatives for 1e-10 motion about force-supported silence;
+coupled storage and off-diagonal resistance; exact zero-duration/loss limits;
+all exposed cancellation boundaries and atomic refusal/reuse; and cancellation
+requested inside original storage callbacks. Compilation and native execution
+remain separate validation requirements.

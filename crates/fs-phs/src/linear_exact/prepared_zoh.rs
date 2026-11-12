@@ -1,9 +1,28 @@
 //! Complete held-input dynamics cached through the existing quadratic owner.
-use super::{DenseExponentialBudget, LinearSplitBudget, MAX_LINEAR_EXPONENTIAL_BLOCK_DIM,
-    balance_admitted, finite, positive_heat::PositiveHeat, prepared::PreparedQuadraticFlow, refuse,
-    split_quadratic};
-use crate::{PhsError, PortHamiltonian, PreparedStepRecord, StepRecord, storage_energy_change};
+use super::{
+    DenseExponentialBudget, LinearSplitBudget, MAX_LINEAR_EXPONENTIAL_BLOCK_DIM, balance_admitted,
+    finite, positive_heat::PositiveHeat, prepared::PreparedQuadraticFlow, refuse, split_quadratic,
+};
 use crate::interconnection::accumulation::Sum;
+use crate::{
+    PhsError, PortHamiltonian, PreparedStepError, PreparedStepRecord, StepRecord,
+    storage_energy_change,
+};
+
+fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), PreparedStepError> {
+    if cancelled() {
+        Err(PreparedStepError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+fn uncancelled(error: PreparedStepError) -> PhsError {
+    match error {
+        PreparedStepError::Solver(error) => error,
+        PreparedStepError::Cancelled => refuse("uncancelled exact ZOH operation interrupted"),
+    }
+}
 
 /// Conservative numerical energy scale, invariant under adding a constant to H.
 /// This coordinate-dependent norm is not itself thermodynamic stored energy.
@@ -88,6 +107,20 @@ impl PreparedExactZoh<'static> {
         budget: LinearSplitBudget) -> Result<Self, PhsError> {
         Self::prepare(System::Owned(Box::new(system)), duration, budget)
     }
+
+    /// Own the same complete fixed-duration cache with cooperative cancellation.
+    /// The original split/augmented dimension and work admissions remain. Polls
+    /// bracket native splitting and positive-heat preparation and run inside the
+    /// quadratic-flow preparation. Splitting, storage callbacks and one original
+    /// positive-heat construction remain bounded, indivisible operations.
+    pub fn new_owned_controlled(
+        system: PortHamiltonian,
+        duration: f64,
+        budget: LinearSplitBudget,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, PreparedStepError> {
+        Self::prepare_controlled(System::Owned(Box::new(system)), duration, budget, cancelled)
+    }
 }
 impl<'a> PreparedExactZoh<'a> {
     /// Prepare the original quadratic system for one fixed nonnegative duration.
@@ -96,44 +129,84 @@ impl<'a> PreparedExactZoh<'a> {
         budget: LinearSplitBudget) -> Result<Self, PhsError> {
         Self::prepare(System::Borrowed(system), duration, budget)
     }
-    fn prepare(owner: System<'a>, duration: f64, budget: LinearSplitBudget) -> Result<Self, PhsError> {
+
+    /// Borrow the original owner with the same cancellation scope and admission
+    /// as [`Self::new_owned_controlled`]. No partial cache is returned.
+    pub fn new_controlled(
+        system: &'a PortHamiltonian,
+        duration: f64,
+        budget: LinearSplitBudget,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, PreparedStepError> {
+        Self::prepare_controlled(System::Borrowed(system), duration, budget, cancelled)
+    }
+
+    fn prepare(
+        owner: System<'a>,
+        duration: f64,
+        budget: LinearSplitBudget,
+    ) -> Result<Self, PhsError> {
+        Self::prepare_controlled(owner, duration, budget, || false).map_err(uncancelled)
+    }
+
+    fn prepare_controlled(
+        owner: System<'a>,
+        duration: f64,
+        budget: LinearSplitBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, PreparedStepError> {
+        poll(&mut cancelled)?;
         let system = owner.get();
         if !duration.is_finite() || duration < 0.0 {
-            return Err(refuse("prepared ZOH requires a finite nonnegative duration"));
+            return Err(refuse("prepared ZOH requires a finite nonnegative duration").into());
         }
         let split = split_quadratic(system, budget)?;
+        poll(&mut cancelled)?;
         if !split.quadratic.exact {
-            return Err(refuse("prepared ZOH requires identically quadratic storage"));
+            return Err(refuse("prepared ZOH requires identically quadratic storage").into());
         }
         let (n, m) = (system.n, system.m);
         let scratch = Scratch::new(n, m);
         let q = split.quadratic_matrix();
-        let outputs: Vec<Vec<f64>> = (0..m).map(|p| (0..n).map(|j|
-            crate::port_output_component(&system.g, m, p, |k| q[k*n+j])
-                .ok_or_else(|| refuse("prepared port observation map is unrepresentable")))
-            .collect::<Result<_, _>>()).collect::<Result<_, _>>()?;
+        let mut outputs = Vec::with_capacity(m);
+        for p in 0..m {
+            poll(&mut cancelled)?;
+            outputs.push(
+                (0..n)
+                    .map(|j| {
+                        crate::port_output_component(&system.g, m, p, |k| q[k * n + j]).ok_or_else(
+                            || refuse("prepared port observation map is unrepresentable"),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+        }
         if duration == 0.0 {
             let mean_state: Vec<f64> = outputs.into_iter().flatten().collect();
             if !finite(&mean_state) {
-                return Err(refuse("prepared ZOH instantaneous output map is nonfinite"));
+                return Err(refuse("prepared ZOH instantaneous output map is nonfinite").into());
             }
+            poll(&mut cancelled)?;
             return Ok(Self { system: owner, duration, flow: None, heat: None,
                 mean_state, mean_input: Vec::new(), scratch });
         }
-        let flow = PreparedQuadraticFlow::new(system, &split, duration, &[], &outputs,
+        let flow = PreparedQuadraticFlow::new_controlled(system, &split, duration, &[], &outputs,
             DenseExponentialBudget { max_dimension: MAX_LINEAR_EXPONENTIAL_BLOCK_DIM,
-                max_dense_bytes: usize::MAX, max_multiply_terms: u64::MAX })?;
+                max_dense_bytes: usize::MAX, max_multiply_terms: u64::MAX }, &mut cancelled)?;
         let mut mean_state = Vec::with_capacity(m*n);
         let mut mean_input = Vec::with_capacity(m*m);
         for p in 0..m {
+            poll(&mut cancelled)?;
             let (state, input) = flow.linear_integral_map(p)?;
             mean_state.extend(state.into_iter().map(|value| value/duration));
             mean_input.extend(input.into_iter().map(|value| value/duration));
         }
         if !finite(&mean_state) || !finite(&mean_input) {
-            return Err(refuse("prepared ZOH mean output map is nonfinite"));
+            return Err(refuse("prepared ZOH mean output map is nonfinite").into());
         }
+        poll(&mut cancelled)?;
         let heat = PositiveHeat::new(system, &split, duration, &system.r)?;
+        poll(&mut cancelled)?;
         Ok(Self { system: owner, duration, flow: Some(flow), heat: Some(heat),
             mean_state, mean_input, scratch })
     }
@@ -158,21 +231,156 @@ impl<'a> PreparedExactZoh<'a> {
     /// Both state AND port dimensions must match the workspace. All caller
     /// outputs remain unchanged on every refusal; scratch is reusable afterward.
     pub fn step_with_workspace_into(
-        &self, workspace: &mut ExactZohWorkspace, initial: &[f64], input: &[f64],
-        next: &mut [f64], average_output: &mut [f64],
+        &self,
+        workspace: &mut ExactZohWorkspace,
+        initial: &[f64],
+        input: &[f64],
+        next: &mut [f64],
+        average_output: &mut [f64],
     ) -> Result<PreparedStepRecord, PhsError> {
+        self.step_with_workspace_into_controlled(
+            workspace,
+            initial,
+            input,
+            next,
+            average_output,
+            || false,
+        )
+        .map_err(uncancelled)
+    }
+
+    /// The same exact flow with cancellation before and after the original
+    /// matrix-vector/port-work block, positive-heat block and energy admission.
+    /// Those bounded blocks and storage callbacks are not preemptible. Caller
+    /// outputs publish together only after the final poll; refused scratch is
+    /// reusable with any admitted clock having the same complete layout.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_workspace_into_controlled(
+        &self,
+        workspace: &mut ExactZohWorkspace,
+        initial: &[f64],
+        input: &[f64],
+        next: &mut [f64],
+        average_output: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedStepRecord, PreparedStepError> {
+        poll(&mut cancelled)?;
         let system = self.system();
         if workspace.scratch.endpoint.len() != system.n
             || workspace.scratch.output.len() != system.m
             || next.len() != system.n || average_output.len() != system.m
         {
-            return Err(refuse("prepared ZOH workspace and outputs must match complete state and ports"));
+            return Err(refuse("prepared ZOH workspace and outputs must match complete state and ports").into());
         }
-        let record = evaluate_step(system, self.duration, self.flow.as_ref(), self.heat.as_ref(),
-            initial, input, &mut workspace.scratch)?;
+        let (record, _) = evaluate_step_with_work_inputs_controlled(
+            system,
+            self.duration,
+            self.flow.as_ref(),
+            self.heat.as_ref(),
+            initial,
+            input,
+            [],
+            &mut workspace.scratch,
+            &mut cancelled,
+        )?;
+        poll(&mut cancelled)?;
         next.copy_from_slice(&workspace.scratch.endpoint);
         average_output.copy_from_slice(&workspace.scratch.output);
         Ok(record)
+    }
+
+    /// Original physical resistance heat and its derivative with respect to
+    /// every held input at FIXED initial state and duration. `gradient` has one
+    /// entry per original port. This differentiates the retained positive factor
+    /// directly; it forms no expanded Gramian, heat difference or new trajectory.
+    /// `average_output_map` supplies the separate conjugate-output derivatives.
+    ///
+    /// Warm work uses existing scratch and allocates nothing. Polls bracket the
+    /// original heat evaluation, then occur per derivative column/factor row.
+    /// Both dimensions and source support are checked; output publishes only on
+    /// success. This observation is not a replacement for the step's independent
+    /// physical balance admission. Zero duration/resistance gives exact zeros.
+    pub fn heat_input_gradient_into_controlled(
+        &self,
+        workspace: &mut ExactZohWorkspace,
+        initial: &[f64],
+        input: &[f64],
+        gradient: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<f64, PreparedStepError> {
+        poll(&mut cancelled)?;
+        let system = self.system();
+        if workspace.scratch.endpoint.len() != system.n
+            || workspace.scratch.output.len() != system.m
+            || initial.len() != system.n
+            || input.len() != system.m
+            || gradient.len() != system.m
+            || !finite(initial)
+            || !finite(input)
+            || !system.hamiltonian(initial).is_finite()
+        {
+            return Err(refuse(
+                "prepared heat derivative requires complete finite state, ports and workspace",
+            )
+            .into());
+        }
+        let scratch = &mut workspace.scratch;
+        let heat = if let Some(heat) = &self.heat {
+            heat.input_gradient_into_controlled(
+                system,
+                initial,
+                input,
+                &mut scratch.effort,
+                &mut scratch.balanced,
+                &mut scratch.heat_state,
+                &mut scratch.output,
+                &mut cancelled,
+            )?
+        } else {
+            scratch.output.fill(0.0);
+            0.0
+        };
+        poll(&mut cancelled)?;
+        gradient.copy_from_slice(&scratch.output);
+        Ok(heat)
+    }
+
+    /// Magnitude of the retained original port-work factors, before opposing
+    /// ports cancel: `sum |u_p| * (|integral_high_p| + |integral_low_p|)` [J].
+    /// A consumer can scale arithmetic allowance for converting those native
+    /// integrals to rounded mean outputs and back to wire work. This is not an
+    /// integration-error bound or a replacement physical balance tolerance.
+    ///
+    /// Call immediately after a SUCCESSFUL step of this owner into `workspace`,
+    /// with that step's same `input`, before any other owner/clock uses scratch.
+    /// Layout is checked; workspace intentionally retains no owner/input history.
+    pub fn port_work_magnitude(
+        &self,
+        workspace: &ExactZohWorkspace,
+        input: &[f64],
+    ) -> Result<f64, PhsError> {
+        let system = self.system();
+        if workspace.scratch.endpoint.len() != system.n
+            || workspace.scratch.output.len() != system.m
+            || input.len() != system.m
+            || !finite(input)
+        {
+            return Err(refuse(
+                "port work magnitude requires complete matching workspace and input",
+            ));
+        }
+        let mut magnitude = 0.0;
+        for (integral, &u) in workspace.scratch.port_integrals.iter().zip(input) {
+            let (high, low) = integral
+                .components()
+                .ok_or_else(|| refuse("retained port integral is unrepresentable"))?;
+            magnitude += u.abs() * high.abs();
+            magnitude += u.abs() * low.abs();
+        }
+        if !magnitude.is_finite() {
+            return Err(refuse("port work magnitude is unrepresentable"));
+        }
+        Ok(magnitude)
     }
 
     /// Original cached coefficients of one actual interval-mean output:
@@ -291,32 +499,62 @@ fn evaluate_step_with_work_inputs<const K: usize>(
     sys: &PortHamiltonian, duration: f64, flow: Option<&PreparedQuadraticFlow>,
     heat: Option<&PositiveHeat>, initial: &[f64], input: &[f64],
     work_inputs: [&[f64]; K], scratch: &mut Scratch,
-) -> Result<(PreparedStepRecord, [f64; K]), PhsError> {
+) -> Result<(PreparedStepRecord, [f64; K]), PhsError>{
+    evaluate_step_with_work_inputs_controlled(
+        sys,
+        duration,
+        flow,
+        heat,
+        initial,
+        input,
+        work_inputs,
+        scratch,
+        || false,
+    )
+    .map_err(uncancelled)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_step_with_work_inputs_controlled<const K: usize>(
+    sys: &PortHamiltonian,
+    duration: f64,
+    flow: Option<&PreparedQuadraticFlow>,
+    heat: Option<&PositiveHeat>,
+    initial: &[f64],
+    input: &[f64],
+    work_inputs: [&[f64]; K],
+    scratch: &mut Scratch,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<(PreparedStepRecord, [f64; K]), PreparedStepError> {
+    poll(&mut cancelled)?;
     if initial.len() != sys.n || input.len() != sys.m || !finite(initial) || !finite(input) {
-        return Err(refuse("prepared ZOH requires complete finite state and input"));
+        return Err(refuse("prepared ZOH requires complete finite state and input").into());
     }
     if work_inputs.iter().any(|values| values.len() != sys.m || !finite(values)) {
-        return Err(refuse("prepared ZOH work observations require complete finite inputs"));
+        return Err(refuse("prepared ZOH work observations require complete finite inputs").into());
     }
     let Some(flow) = flow else {
         scratch.effort.fill(0.0);
         sys.storage.gradient(initial, &mut scratch.effort);
         sys.output_from_effort_into(&scratch.effort, &mut scratch.output)?;
         if !finite(&scratch.output) || !sys.hamiltonian(initial).is_finite() {
-            return Err(refuse("prepared ZOH initial energy/output is nonfinite"));
+            return Err(refuse("prepared ZOH initial energy/output is nonfinite").into());
         }
         scratch.endpoint.copy_from_slice(initial);
         scratch.port_integrals.fill(Sum::default());
+        poll(&mut cancelled)?;
         return Ok((PreparedStepRecord { delta_h: 0.0, dissipated: 0.0, supplied: 0.0,
             newton_iters: 0, solver_residual: 0.0, solver_certificate: None }, [0.0; K]));
     };
     let (supplied, observed_work) = flow.evaluate_port_work_observed_into(initial, input,
         work_inputs, &mut scratch.augmented, &mut scratch.balanced,
         &mut scratch.endpoint, &mut scratch.integrals, Some(&mut scratch.port_integrals))?;
+    poll(&mut cancelled)?;
     for (out, value) in scratch.output.iter_mut().zip(&scratch.integrals) { *out = value/duration; }
     let heat = heat.ok_or_else(||refuse("prepared positive heat is missing"))?;
     let dissipated = heat.evaluate_into(sys,initial,input,&mut scratch.effort,&mut scratch.balanced,
             &mut scratch.heat_state)?;
+    poll(&mut cancelled)?;
     let delta_h = storage_energy_change(sys.storage.as_ref(), initial, &scratch.endpoint,
         &mut scratch.midpoint, &mut scratch.effort);
     let scale = energetic_scale_into(sys, initial, &mut scratch.effort)
@@ -327,8 +565,9 @@ fn evaluate_step_with_work_inputs<const K: usize>(
         || !finite(&[delta_h, supplied, dissipated, scale, residual])
         || dissipated < -1e-12*scale
         || !balance_admitted(delta_h, dissipated, supplied, scale, heat.doublings()) {
-        return Err(refuse("prepared ZOH physical energy balance refused"));
+        return Err(refuse("prepared ZOH physical energy balance refused").into());
     }
+    poll(&mut cancelled)?;
     Ok((PreparedStepRecord { delta_h, dissipated, supplied,
         newton_iters: 0, solver_residual: 0.0, solver_certificate: None }, observed_work))
 }

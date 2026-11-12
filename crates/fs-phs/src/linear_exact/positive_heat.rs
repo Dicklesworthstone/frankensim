@@ -6,7 +6,8 @@
 //! coordinates. Positive Gauss weights on a norm-bounded short interval and
 //! QR doubling preserve this factor without clipping heat or resistance modes.
 use super::{LinearSplit, checked_eigh, exponential, finite, product, refuse};
-use crate::{PhsError, PortHamiltonian};
+use crate::interconnection::accumulation::Sum;
+use crate::{PhsError, PortHamiltonian, PreparedStepError};
 use fs_la::factor::qr;
 use fs_math::{det, eft::two_sum};
 
@@ -145,6 +146,81 @@ impl PositiveHeat {
         coordinates: &mut [f64],
     ) -> Result<f64, PhsError> {
         self.evaluate_shifted_into(sys, state, input, 0.0, effort, derivative, coordinates)
+    }
+
+    // Differentiate the SAME retained positive factor, at fixed initial state.
+    // Only the original force-imbalance coordinates depend on the held input:
+    // dz/du_p = [0; forward * G[:,p] / rate]. Do not expand L^T L or obtain this
+    // derivative from two heats; both erase weak losses near static support.
+    // `gradient` is private candidate scratch and may change on refusal.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn input_gradient_into_controlled(
+        &self,
+        sys: &PortHamiltonian,
+        state: &[f64],
+        input: &[f64],
+        effort: &mut [f64],
+        derivative: &mut [f64],
+        coordinates: &mut [f64],
+        gradient: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<f64, PreparedStepError> {
+        let mut poll = || {
+            if cancelled() {
+                Err(PreparedStepError::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
+        poll()?;
+        if gradient.len() != self.m {
+            return Err(refuse("positive heat derivative requires every input column").into());
+        }
+        let heat = self.evaluate_into(sys, state, input, effort, derivative, coordinates)?;
+        poll()?;
+        if self.root.is_empty() {
+            gradient.fill(0.0);
+            return Ok(heat);
+        }
+        let n = self.n;
+        for (port, value) in gradient.iter_mut().enumerate() {
+            poll()?;
+            for (i, delta) in derivative.iter_mut().enumerate() {
+                *delta = (0..n)
+                    .map(|j| self.forward[i * n + j] * sys.g[j * self.m + port])
+                    .sum::<f64>()
+                    / self.rate;
+            }
+            if !finite(derivative) {
+                return Err(refuse("positive heat input direction is unrepresentable").into());
+            }
+            let mut contraction = Sum::default();
+            for row in self.root.chunks_exact(self.d) {
+                poll()?;
+                let loss = row
+                    .iter()
+                    .zip(coordinates.iter())
+                    .map(|(a, z)| a * z)
+                    .sum::<f64>();
+                let delta = row[n..]
+                    .iter()
+                    .zip(derivative.iter())
+                    .map(|(a, z)| a * z)
+                    .sum::<f64>();
+                contraction.product(loss, delta).ok_or_else(|| {
+                    refuse("positive heat derivative contraction is unrepresentable")
+                })?;
+            }
+            *value = 2.0
+                * contraction
+                    .value()
+                    .ok_or_else(|| refuse("positive heat input derivative is unrepresentable"))?;
+            if !value.is_finite() {
+                return Err(refuse("positive heat input derivative is unrepresentable").into());
+            }
+        }
+        poll()?;
+        Ok(heat)
     }
 
     // Integrate the same positive square after subtracting one HELD scalar
