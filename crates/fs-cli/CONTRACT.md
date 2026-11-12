@@ -1076,6 +1076,25 @@ and from a supply held at 2 bar through a restriction (2 bar to 1e-9 and
 volumes, unchecked; constant heat capacities; no source-backed gas, which
 is the fs-gas cavity and is not reachable from a scene.
 
+Stream reports expose the kernel's independently measured inventory accounts.
+Each element ledger adds `has_streams`, optional `mass`, and an ordinal
+`carried_kg` array of optional accounts. Accounts contain `port_in_kg`,
+`stored_change_kg`, `balance_defect_kg` and `audited_steps`; compare that
+coverage with the result's `ledger_steps`. Boundaries add signed
+`mass_in_kg` and `carried_in_kg`. The `connections` array reports energy,
+mass and carried defects under `kernel_index` (kernel declaration order,
+excluding prescribed boundaries). Totals add `mass_residual_kg` and the
+ordinal `carried_residual_kg` array, directly from the kernel's closure
+queries. An unavailable measurement or residual is JSON `null`, never
+zero; text reports explicitly say unavailable. A partial account retains
+its measured steps but cannot prove whole-window closure. No-stream scenes
+have null mass closure and an empty carried array. The kg units apply to
+this CLI's gas mass-fraction coordinates; arbitrary kernel coordinates
+may use other units. Matching ordinals does not establish species identity.
+Binary regressions check a prescribed vessel fill, two distinct carried
+fractions through a restriction, boundary delivery, interface defects,
+coverage and the absence of a mass claim for a mechanical-only scene.
+
 A heat receiver may be named by several routes. Temperature
 inputs joined to a heat capacity, and route sources, start from the initial
 temperatures. Examples and their checks: `examples/system/README.md`; tests:

@@ -2470,3 +2470,139 @@ fn slider_scenes_refuse_invalid_laws_missing_spans_and_unsupported_error_control
         assert!(stderr.contains(reason), "{name}: {stderr}");
     }
 }
+
+fn array_values(json: &str, anchor: &str, key: &str) -> Vec<f64> {
+    let tail = &json[json.find(anchor).unwrap()..];
+    let field = format!("\"{key}\":[");
+    let entries = tail
+        .split_once(&field)
+        .unwrap()
+        .1
+        .split_once(']')
+        .unwrap()
+        .0;
+    if entries.is_empty() {
+        Vec::new()
+    } else {
+        entries
+            .split(',')
+            .map(|entry| entry.parse().unwrap())
+            .collect()
+    }
+}
+
+#[test]
+fn a_gas_boundary_reports_measured_mass_and_constituent_transport_with_full_coverage() {
+    // G1: 5 g/s for four seconds delivers 20 g of gas and of its sole
+    // constituent. This checks measured storage and transport, not a
+    // residual synthesized from the receipt's energy account.
+    let path = scratch("vessel_accounts.json", FILLED_VESSEL);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    let steps = value(&json, "\"ledger_steps\"", "ledger_steps");
+    assert!(steps > 0.0);
+    assert_eq!(steps, value(&json, "\"steps\"", "steps"));
+    let mass = &json[json.find("\"mass\":{").unwrap()..];
+    let carried = &json[json.find("\"carried_kg\":[{").unwrap()..];
+    for account in [mass, carried] {
+        for field in ["port_in_kg", "stored_change_kg"] {
+            assert!(
+                (value(account, "", field) - 0.02).abs() < 1.0e-12,
+                "{field}: {account}"
+            );
+        }
+        assert!(value(account, "", "balance_defect_kg").abs() < 1.0e-12);
+        assert_eq!(value(account, "", "audited_steps"), steps);
+    }
+    let boundary = "{\"port\":\"vessel.stream\"";
+    assert!((value(&json, boundary, "mass_in_kg") - 0.02).abs() < 1.0e-12);
+    let carried_in = array_values(&json, boundary, "carried_in_kg");
+    assert_eq!(carried_in.len(), 1);
+    assert!((carried_in[0] - 0.02).abs() < 1.0e-12);
+    assert!(value(&json, "\"totals\"", "mass_residual_kg").abs() < 1.0e-12);
+    let residuals = array_values(&json, "\"totals\"", "carried_residual_kg");
+    assert_eq!(residuals.len(), 1);
+    assert!(residuals[0].abs() < 1.0e-12);
+
+    let (code, text, stderr) = run_binary(&["system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    for expected in [
+        "stream ledger [kg]",
+        "vessel mass:",
+        "vessel carried[0]:",
+        "boundary vessel.stream: mass in",
+        "stream mass residual:",
+        "carried[0] residual:",
+    ] {
+        assert!(text.contains(expected), "missing {expected}: {text}");
+    }
+    assert!(text.contains(&format!("{steps:.0}/{steps:.0} steps")));
+}
+
+#[test]
+fn a_restriction_reports_each_carried_coordinate_and_the_connection_defect() {
+    // G0/G3: two differently weighted inlet constituents retain their
+    // coordinate order and separately close through the stateless valve.
+    let scene = FILLED_VESSEL
+        .replace("\"carried\": [0.0]}",
+            "\"carried\": [0.0, 0.0]},\n    \"inlet\": {\"kind\": \"restriction\", \"conductance_kg_s_pa\": 2.0e-7, \"carried\": 2}")
+        .replace("{\"prescribe\": \"vessel.stream\", \"stream\": [5.0e-3, 1506.75, 5.0e-3]}",
+            "{\"join\": [\"vessel.stream\", \"inlet.b\"]},\n    {\"prescribe\": \"inlet.a\", \"contents\": [2.0e5, 301350.0, 0.25, 0.75]}");
+    let path = scratch("constituent_accounts.json", &scene);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    let initial_mass = 1.0e5 * 0.02 / (287.0 * 300.0);
+    let added = value(&json, &element("vessel"), "mass_kg") - initial_mass;
+    assert!(added > 0.0);
+    let boundary = "{\"port\":\"inlet.a\"";
+    assert!((value(&json, boundary, "mass_in_kg") - added).abs() < 1.0e-12);
+    let crossing = array_values(&json, boundary, "carried_in_kg");
+    assert_eq!(crossing.len(), 2);
+    let vessel = &json[json.find(&element("vessel")).unwrap()..];
+    let accounts = vessel
+        .split_once("\"carried_kg\":[")
+        .unwrap()
+        .1
+        .split_once(']')
+        .unwrap()
+        .0
+        .split("},{")
+        .collect::<Vec<_>>();
+    assert_eq!(accounts.len(), 2);
+    for (index, fraction) in [0.25, 0.75].into_iter().enumerate() {
+        assert!((crossing[index] - fraction * added).abs() < 1.0e-12);
+        let stored = value(&json, &element("vessel"), &format!("carried{index}"))
+            * value(&json, &element("vessel"), "mass_kg");
+        assert!((stored - crossing[index]).abs() < 1.0e-12);
+        assert!((value(accounts[index], "", "stored_change_kg") - crossing[index]).abs() < 1.0e-12);
+        assert_eq!(
+            value(accounts[index], "", "audited_steps"),
+            value(&json, "\"ledger_steps\"", "ledger_steps")
+        );
+    }
+    let inlet = &json[json.find(&element("inlet")).unwrap()..];
+    assert!(value(inlet, "\"mass\"", "stored_change_kg").abs() < 1.0e-12);
+    assert_eq!(
+        value(inlet, "\"mass\"", "audited_steps"),
+        value(&json, "\"ledger_steps\"", "ledger_steps")
+    );
+    let connection = "{\"kernel_index\":0,";
+    assert!(value(&json, connection, "mass_defect_kg").abs() < 1.0e-12);
+    let defects = array_values(&json, connection, "carried_defect_kg");
+    assert_eq!(defects.len(), 2);
+    assert!(defects.iter().all(|value| value.abs() < 1.0e-12));
+    let residuals = array_values(&json, "\"totals\"", "carried_residual_kg");
+    assert_eq!(residuals.len(), 2);
+    assert!(residuals.iter().all(|value| value.abs() < 1.0e-12));
+    assert!(value(&json, "\"totals\"", "mass_residual_kg").abs() < 1.0e-12);
+}
+
+#[test]
+fn a_scene_without_stream_measurements_never_reports_zero_mass_residual() {
+    let (code, json, stderr) =
+        run_binary(&["--json", "system", &example("driven_oscillator.json")]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(json.contains("\"mass_residual_kg\":null"));
+    assert!(json.contains("\"has_streams\":false,\"mass\":null,\"carried_kg\":[]"));
+    assert!(array_values(&json, "\"totals\"", "carried_residual_kg").is_empty());
+}

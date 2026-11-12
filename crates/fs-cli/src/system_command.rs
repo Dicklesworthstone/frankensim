@@ -4,8 +4,8 @@
 //! The scene names elements from [`fs_system::elements`] and the connections
 //! between their ports; this module lowers it to a [`SystemBuilder`], steps
 //! the sealed [`System`] for the requested duration, and reports the final
-//! states, sampled states and the energy and entropy ledger. Nothing here
-//! integrates anything: every number comes from the kernel and its elements.
+//! states, sampled states and the energy, entropy and stream-inventory ledger.
+//! Nothing here integrates anything: every number comes from the kernel and its elements.
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
@@ -43,6 +43,7 @@ use fs_system::elements::{
     HeatCapacity, HeatNode, Heater, Mass, Motion, Resistance, Restriction, Slider, SliderEnd, Slip,
     SourceAccount, Spring, Storage, Waveform,
 };
+use fs_system::ledger::{CarriedAccount, Ledger, Sum};
 use fs_system::{
     AdaptiveConfig, AdaptiveError, AdaptiveReport, Checkpoint, ErrorNorm, ErrorTolerance, NodeId,
     PortRef, RouteTemperature, SolveConfig, System, SystemBuilder, SystemError, heat_sink,
@@ -76,9 +77,9 @@ const ADAPTIVE_NO_CLAIM: &str = "step-doubling estimates control the declared st
 
 const HELP: &str = "Usage: frankensim [--json] system <scene.json>
 
-Run a lumped mechanical, rotational, electrical and thermal device described
+Run a lumped mechanical, rotational, electrical, gas and thermal device described
 as data on the composition kernel, and report its final state, sampled states
-and the energy and entropy ledger of the run.
+and the energy, entropy and measured stream-inventory ledger of the run.
 
 Scene schema: frankensim.system.v0. Top-level fields:
   duration_s        simulated time
@@ -2793,6 +2794,7 @@ impl Device {
             "second law: entropy generated {:.6e} J/K",
             ledger.entropy_generated_j_per_k()
         );
+        stream_ledger_text(&mut out, ledger);
         if !self.samples.is_empty() {
             let _ = writeln!(out, "\n{} samples (use --json to read them)", self.samples.len());
         }
@@ -2807,21 +2809,33 @@ impl Device {
         let mut out = String::new();
         let _ = write!(
             out,
-            "{{\"schema\":{},\"scene\":{},\"time_s\":{},\"steps\":{},\"iterations\":{},\"shortenings\":{},\"plan\":{{\"blocks\":{blocks},\"loops\":{loops}}},\"elements\":[",
+            "{{\"schema\":{},\"scene\":{},\"time_s\":{},\"steps\":{},\"iterations\":{},\"shortenings\":{},\"ledger_steps\":{},\"plan\":{{\"blocks\":{blocks},\"loops\":{loops}}},\"elements\":[",
             quote(RESULT_SCHEMA),
             quote(&path.display().to_string()),
             num(system.time_s()),
             system.steps(),
             self.iterations,
-            self.shortenings
+            self.shortenings,
+            ledger.steps
         );
         for (index, (element, account)) in self.elements.iter().zip(&ledger.nodes).enumerate() {
             if index > 0 {
                 out.push(',');
             }
+            let mass = account.mass.as_ref().map_or_else(
+                || "null".into(),
+                |mass| {
+                    inventory_json(
+                        mass.port_mass_in_kg.value(),
+                        mass.stored_change_kg.value(),
+                        mass.balance_defect_kg.value(),
+                        mass.audited_steps,
+                    )
+                },
+            );
             let _ = write!(
                 out,
-                "{{\"name\":{},\"kind\":{},\"state\":{},\"ledger\":{{\"port_energy_in_j\":{},\"stored_change_j\":{},\"dissipated_j\":{},\"numerical_loss_j\":{},\"entropy_generated_j_per_k\":{},\"balance_defect_j\":{}}}}}",
+                "{{\"name\":{},\"kind\":{},\"state\":{},\"ledger\":{{\"port_energy_in_j\":{},\"stored_change_j\":{},\"dissipated_j\":{},\"numerical_loss_j\":{},\"entropy_generated_j_per_k\":{},\"balance_defect_j\":{},\"has_streams\":{},\"mass\":{},\"carried_kg\":{}}}}}",
                 quote(&element.name),
                 quote(element.kind.name()),
                 object(self.values(element).into_iter()),
@@ -2830,7 +2844,10 @@ impl Device {
                 num(account.dissipated_j.value()),
                 num(account.numerical_loss_j.value()),
                 num(account.entropy_generated_j_per_k.value()),
-                num(account.balance_defect_j.value())
+                num(account.balance_defect_j.value()),
+                account.has_streams,
+                mass,
+                carried_accounts_json(&account.carried)
             );
         }
         out.push_str("],\"boundaries\":[");
@@ -2840,10 +2857,25 @@ impl Device {
             }
             let _ = write!(
                 out,
-                "{{\"port\":{},\"energy_in_j\":{},\"entropy_in_j_per_k\":{}}}",
+                "{{\"port\":{},\"energy_in_j\":{},\"entropy_in_j_per_k\":{},\"mass_in_kg\":{},\"carried_in_kg\":{}}}",
                 quote(&boundary.port),
                 num(boundary.energy_in_j.value()),
-                num(boundary.entropy_in_j_per_k.value())
+                num(boundary.entropy_in_j_per_k.value()),
+                num(boundary.mass_in_kg.value()),
+                sums_json(&boundary.carried_in)
+            );
+        }
+        out.push_str("],\"connections\":[");
+        for (index, connection) in ledger.connections.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            let _ = write!(
+                out,
+                "{{\"kernel_index\":{index},\"energy_defect_j\":{},\"mass_defect_kg\":{},\"carried_defect_kg\":{}}}",
+                num(connection.energy_defect_j.value()),
+                num(connection.mass_defect_kg.value()),
+                sums_json(&connection.carried_defect)
             );
         }
         out.push_str("],\"sinks\":[");
@@ -2858,16 +2890,21 @@ impl Device {
                 num(sink.heat_j.value())
             );
         }
+        let carried_residuals = (0..carried_count(ledger))
+            .map(|index| optional_num(ledger.carried_residual(index)))
+            .collect::<Vec<_>>()
+            .join(",");
         let _ = write!(
             out,
-            "],\"totals\":{{\"stored_change_j\":{},\"boundary_energy_in_j\":{},\"sink_heat_j\":{},\"numerical_loss_j\":{},\"energy_residual_j\":{},\"connection_defect_j\":{},\"entropy_generated_j_per_k\":{}}},\"samples\":[",
+            "],\"totals\":{{\"stored_change_j\":{},\"boundary_energy_in_j\":{},\"sink_heat_j\":{},\"numerical_loss_j\":{},\"energy_residual_j\":{},\"connection_defect_j\":{},\"entropy_generated_j_per_k\":{},\"mass_residual_kg\":{},\"carried_residual_kg\":[{carried_residuals}]}},\"samples\":[",
             num(ledger.stored_change_j()),
             num(ledger.boundary_energy_in_j()),
             num(ledger.sink_heat_j()),
             num(ledger.numerical_loss_j()),
             num(ledger.energy_residual_j()),
             num(ledger.connection_defect_j()),
-            num(ledger.entropy_generated_j_per_k())
+            num(ledger.entropy_generated_j_per_k()),
+            optional_num(ledger.mass_residual_kg())
         );
         for (index, (time_s, values)) in self.samples.iter().enumerate() {
             if index > 0 {
@@ -2885,12 +2922,157 @@ impl Device {
             let _ = write!(
                 out,
                 ",\"adaptive\":{{\"order\":{},\"attempts\":{},\"trial_steps\":{},\"last_error_norm\":{},\"max_error_norm\":{},\"suggested_dt_s\":{}}}",
-                adaptive.config.order, adaptive.attempts, adaptive.trial_steps,
-                num(adaptive.last_error_norm), num(adaptive.max_error_norm), num(adaptive.suggested_dt_s)
+                adaptive.config.order,
+                adaptive.attempts,
+                adaptive.trial_steps,
+                num(adaptive.last_error_norm),
+                num(adaptive.max_error_norm),
+                num(adaptive.suggested_dt_s)
             );
         }
         let _ = writeln!(out, ",\"no_claim\":{}}}", quote(&self.no_claim()));
         out
+    }
+}
+
+// Scene stream coordinates are gas mass fractions, so their inventories
+// and transports are kg. The kernel's generic carried coordinates do not
+// imply these units or attach a species identity to an ordinal.
+fn inventory_json(port_in: f64, stored_change: f64, defect: f64, audited_steps: u64) -> String {
+    format!(
+        "{{\"port_in_kg\":{},\"stored_change_kg\":{},\"balance_defect_kg\":{},\"audited_steps\":{audited_steps}}}",
+        num(port_in),
+        num(stored_change),
+        num(defect)
+    )
+}
+
+fn carried_accounts_json(accounts: &[Option<CarriedAccount>]) -> String {
+    let entries = accounts
+        .iter()
+        .map(|account| {
+            account.as_ref().map_or_else(
+                || "null".into(),
+                |account| {
+                    inventory_json(
+                        account.port_in.value(),
+                        account.stored_change.value(),
+                        account.balance_defect.value(),
+                        account.audited_steps,
+                    )
+                },
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{entries}]")
+}
+
+fn sums_json(sums: &[Sum]) -> String {
+    format!(
+        "[{}]",
+        sums.iter()
+            .map(|sum| num(sum.value()))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn carried_count(ledger: &Ledger) -> usize {
+    ledger
+        .nodes
+        .iter()
+        .map(|node| node.carried.len())
+        .max()
+        .unwrap_or(0)
+}
+
+fn optional_num(value: Option<f64>) -> String {
+    value.map_or_else(|| "null".into(), num)
+}
+
+fn stream_ledger_text(out: &mut String, ledger: &Ledger) {
+    if !ledger.nodes.iter().any(|node| node.has_streams) {
+        return;
+    }
+    let _ = writeln!(
+        out,
+        "\nstream ledger [kg]: measured/accepted steps; carried ordinals are gas constituent masses"
+    );
+    for node in ledger.nodes.iter().filter(|node| node.has_streams) {
+        if let Some(mass) = &node.mass {
+            let _ = writeln!(
+                out,
+                "{} mass: port in {:.6e}, stored change {:.6e}, defect {:.3e}; {}/{} steps",
+                node.name,
+                mass.port_mass_in_kg.value(),
+                mass.stored_change_kg.value(),
+                mass.balance_defect_kg.value(),
+                mass.audited_steps,
+                ledger.steps
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "{} mass: unavailable; 0/{} steps",
+                node.name, ledger.steps
+            );
+        }
+        for (index, account) in node.carried.iter().enumerate() {
+            if let Some(account) = account {
+                let _ = writeln!(
+                    out,
+                    "{} carried[{index}]: port in {:.6e}, stored change {:.6e}, defect {:.3e}; {}/{} steps",
+                    node.name,
+                    account.port_in.value(),
+                    account.stored_change.value(),
+                    account.balance_defect.value(),
+                    account.audited_steps,
+                    ledger.steps
+                );
+            } else {
+                let _ = writeln!(
+                    out,
+                    "{} carried[{index}]: unavailable; 0/{} steps",
+                    node.name, ledger.steps
+                );
+            }
+        }
+    }
+    for boundary in &ledger.boundaries {
+        let _ = writeln!(
+            out,
+            "boundary {}: mass in {:.6e} kg, carried in {} kg",
+            boundary.port,
+            boundary.mass_in_kg.value(),
+            sums_json(&boundary.carried_in)
+        );
+    }
+    for (index, connection) in ledger.connections.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "kernel connection {index}: mass defect {:.3e} kg, carried defects {} kg",
+            connection.mass_defect_kg.value(),
+            sums_json(&connection.carried_defect)
+        );
+    }
+    let residual = |value: Option<f64>| {
+        value.map_or_else(
+            || "unavailable (incomplete measurement coverage)".into(),
+            |value| format!("{value:.3e} kg"),
+        )
+    };
+    let _ = writeln!(
+        out,
+        "stream mass residual: {}",
+        residual(ledger.mass_residual_kg())
+    );
+    for index in 0..carried_count(ledger) {
+        let _ = writeln!(
+            out,
+            "carried[{index}] residual: {}",
+            residual(ledger.carried_residual(index))
+        );
     }
 }
 
