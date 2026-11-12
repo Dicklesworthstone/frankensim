@@ -72,11 +72,16 @@ thin heater between two parts, or a glue line.
 
 - Join each `body<k>` to a `heat_capacity` (or prescribe its
   `temperature_k`), and join a `heater` to `source` or prescribe
-  `heat_rate_w` there.
+  `heat_rate_w` there. With `plane.body1` prescribed at 300 K in place of
+  the disc, the pad settles at `300 K + P / G1 = 305 K`, where it exchanges
+  nothing, and goes on stepping there.
 - `temperature_k` on the element is optional and is not a state. With a
   heater on `source` the node's temperature is solved in a loop, and this is
-  where that solve starts; the result does not depend on it. Without it such
-  a scene is refused, naming the heater's port.
+  where that solve starts. Every part of this scene's loop is linear, and
+  its report is the same to the byte from 250, 301, 325, 600 and 5000 K; in
+  a loop with a part that is not linear the result would depend on the
+  start within the solve's tolerance. Without it such a scene is admitted
+  and its first step refused (exit 4), naming the heater's port.
 - The node reports `temperature_k`: what its balance gave in the last step.
 
 ## Temperature feedback

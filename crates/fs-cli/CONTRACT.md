@@ -889,15 +889,28 @@ solved in a loop, and this is where that solve starts. G1, same test file:
 400 K and a 120 J/K disc at 300 K, 2 and 6 W/K, 400 steps of 0.5 s) against
 the midpoint rule for the two bodies with the plane's balance solved
 independently each step: both temperatures and the plane's to 1e-9, every
-joule of the source in the two bodies, the pad cooling in the first step
-(it gives heat up through the plane) and the disc taking its share of the
-heat capacity to 2e-3 at the end; the same device with the heat rate
+joule of the source in the two bodies; the same device with the heat rate
 prescribed on `source`, no heater and no starting temperature, to the same
-numbers; nine refusals, among them a body port left unconnected (the
-kernel's, by name) and a heater on `source` with no starting temperature
-(the kernel's, naming the heater's port). No claim: the conductances are
-constants; nothing reports the heat each body received (it is in the
-ledger's accounts of the bodies).
+numbers. Two observations are read from the binary, on the scene cut to one
+step and to its last two, and agree with that reference to 1e-9: the pad
+cools in the first step (it gives heat up through the plane), and in the
+last step the disc takes its share of the heat capacity, 120 / 170, to
+2e-3. With `temperature_k` prescribed on `plane.body1` in place of the
+disc, the pad at 200 s equals the midpoint rule's closed form for the rate
+`G0 G1 / (G0 + G1) / C = 0.03 /s` towards `300 K + P / G1 = 305 K` to
+1e-12, the plane between it and 305 K; over 2000 s pad and plane are at
+305 K to 1e-9 K after 4000 steps (the kernel refused that run at step 1661
+until b96d080056: a junction at rest). The starting temperature: the
+scene's reports from 250, 301, 325, 600 and 5000 K, written to one path,
+are the same bytes; its loop is linear, and nothing is claimed for a loop
+that is not. Nine refusals: seven on reading (exit 3: a scalar, an empty
+list, text or a negative number for `conductances_w_k`, an unsupported
+field, a starting temperature of zero, two bodies at one body port), a
+body port left unconnected (the kernel's, by name, exit 4), and a heater
+on `source` with no starting temperature (the scene is admitted and its
+first step refused, exit 4, naming the heater's port). No claim: the
+conductances are constants; nothing reports the heat each body received
+(it is in the ledger's accounts of the bodies).
 
 `nonlinear_capacitor` takes `charge_voltage_curve` as `[charge_c, voltage_v]`
 knots and an optional initial `charge_c`; `nonlinear_inductor` takes
