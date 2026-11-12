@@ -24,7 +24,7 @@ use fs_material::state_point::{
     ScalarPropertyRequirement, resolve_material_state_point,
     resolve_orthotropic_elastic_state_point_from_reference_ratios,
 };
-use fs_qty::Dims;
+use fs_qty::{Dims, QuantitySpec};
 
 /// The process of every authored-fixture card.
 pub const AUTHORED_FIXTURE: &str = "authored-fixture";
@@ -134,6 +134,7 @@ impl MaterialPack {
     /// A missing, ambiguous, out-of-domain or dimensionally wrong property
     /// refuses, naming the pack and the property.
     pub fn scalar(&self, property: &str, dims: Dims, point: &QueryPoint) -> Result<f64, String> {
+        let point = &self.in_pack_schema(point)?;
         let requirement =
             ScalarPropertyRequirement::try_new(property, dims, ScalarAdmissibility::Finite)
                 .map_err(|e| format!("pack {} property '{property}': {e:?}", self.id))?;
@@ -212,6 +213,7 @@ impl MaterialPack {
     /// # Errors
     /// Any missing ratio, modulus or density refuses by name.
     pub fn plane_lr(&self, point: &QueryPoint) -> Result<(f64, OrthotropicPlaneElastic), String> {
+        let point = &self.in_pack_schema(point)?;
         match resolve_orthotropic_elastic_state_point_from_reference_ratios(
             self.card(),
             point,
@@ -231,11 +233,42 @@ impl MaterialPack {
             )),
         }
     }
+
+    /// `point` in this pack's own axis schema. A v3 manifest types its
+    /// validity axes and a v1 manifest (every authored fixture) does not, and
+    /// a query must match the claim's descriptor exactly. So an axis that no
+    /// claim of this pack types is queried untyped, and an axis the pack
+    /// types keeps the caller's quantity, so a different quantity still
+    /// refuses by name. No coordinate is converted.
+    fn in_pack_schema(&self, point: &QueryPoint) -> Result<QueryPoint, String> {
+        let typed = |axis: &str| {
+            self.card()
+                .claims()
+                .claims_ordered()
+                .any(|(_, claim)| claim.validity.axis_quantities().contains_key(axis))
+        };
+        let mut out = QueryPoint::new();
+        for (axis, &value) in point.axes() {
+            out = match point.axis_quantities().get(axis) {
+                Some(quantity) if typed(axis) => out.with_quantity(axis.as_str(), *quantity, value),
+                _ => out.with(axis.as_str(), value),
+            }
+            .map_err(|e| format!("pack {} axis {axis}: {e:?}", self.id))?;
+        }
+        Ok(out)
+    }
 }
 
-/// An untyped moisture-content query point (v1 packs).
+/// A moisture-content query point: a dimensionless fraction (the compiler
+/// normalizes '%' by 0.01), typed as the v3 seed manifests declare the axis
+/// (`axis moisture_content moisture_content dimensional`). [`MaterialPack`]
+/// queries it untyped in a pack that does not type the axis.
 pub fn at_moisture_content(fraction: f64) -> QueryPoint {
     QueryPoint::new()
-        .with("moisture_content", fraction)
+        .with_quantity(
+            "moisture_content",
+            QuantitySpec::dimensional(Dims::NONE),
+            fraction,
+        )
         .expect("moisture point")
 }
