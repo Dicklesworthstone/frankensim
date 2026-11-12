@@ -2390,3 +2390,50 @@ solved together. Nothing in the module is deleted.
   shared between several bodies goes through `common_effort` or `heat_route`.
 - Momentum, charge and per-species inventories are not in the ledger yet
   (bead `.5.6`). Total stream mass accounting does not establish those balances.
+
+## Original port-Hamiltonian Component
+
+The optional `phs` feature exposes `phs::PortHamiltonianComponent` (bead
+`frankensim-rc-1109-root-3gc12.5.12`). It owns an existing `fs-phs`
+`PortHamiltonian`, retaining its complete operators, source storage and state
+order. Each native input/output pair has one caller-declared scalar power port;
+`EffortIn` and `FlowIn` specify which conjugate the native input represents.
+The adapter validates count, scalar ordinary-power shape and unique identity;
+`heat` is reserved. It infers no coordinate, orientation or unit conversion.
+
+Every proposal delegates its actual negotiated duration to
+`StepWorkspace::step_into_controlled`: the original variable-step
+discrete-gradient equation, native Newton admission and original source laws.
+The final mandatory heat port receives positive temperature and emits the
+native resistance work as `-D/dt`. Physical heat is never reconstructed from
+the energy deficit. The receipt retains that heat and its entropy `D/T`, the
+native stored change, and the signed native work-minus-heat-minus-storage
+defect as numerical loss. The latter must fit the accepted discrete effort's
+L1 norm times the equation residual, plus an arithmetic allowance from endpoint
+energies and the original absolute port-work contractions. Negative heat or
+unrepresentable accounts refuse. The native effective residual budget is kept;
+an explicit `set_solve_budget` retains below-rounding-floor refusals.
+
+Private `RefCell` scratch contains no accepted physical state or clock. The
+native solver refreshes its inputs, trial state, structure and iterations on
+every proposal; a reentrant call refuses instead of panicking. Adapter outputs
+publish only after native and physical admission and the final cancellation
+check. Warm calls reuse allocated buffers when the candidate has the original
+shape, conditional on the source storage's allocation behavior. Cancellation
+polls occur inside native Newton/Jacobian work; individual storage callbacks
+and the native dense solve are not preemptible.
+
+G0/G1/G4 tests in `tests/phs.rs` cover multiport native equivalence and
+conformance across different states, inputs and durations; nonlinear source
+storage; a driven storage depositing its actual loss in a thermal body against
+independent midpoint and continuous exponential references; adaptive
+coarse/half trials and rollback/retry; cancellation inside a native storage
+callback; typed native refusals; and refusal of energy created by an invalid
+raw structure. This is not an exact-exponential adapter or a `PortTangent`:
+the complete heat-bearing map is `Class::Smooth`. The caller must supply
+differentiable source storage on its admitted support and a smooth port map;
+switching or contact laws that require their original event treatment are
+outside this adapter. Temperature sets the entropy account only; it does not
+rebind the owner's fixed resistance or infer a material law. Numerical
+conformance does not establish physical validity of the supplied model, and
+the remaining exact-linear and other adapter work in bead `.5.12` stays open.

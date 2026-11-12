@@ -49,6 +49,8 @@ pub mod constitutive;
 pub mod elements;
 mod erased;
 pub mod ledger;
+#[cfg(feature = "phs")]
+pub mod phs;
 mod solve;
 mod system;
 mod wiring;

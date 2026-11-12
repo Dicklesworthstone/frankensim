@@ -16,6 +16,8 @@ layer = "L3"
 slices = ["dep:fs-mbd", "dep:fs-thermal"]
 # Source-owned nonlinear electrical storage; keeps the default kernel small.
 constitutive = ["dep:fs-phs"]
+# Complete source-owned port-Hamiltonian blocks with a physical heat outlet.
+phs = ["dep:fs-phs"]
 # Owner slice for the linear modal structure of fs-nlmodal, kept apart from `slices` so that
 # neither build pulls in the other's owners.
 modal-slices = ["dep:fs-nlmodal"]
@@ -58,6 +60,10 @@ required-features = ["modal-slices"]
 [[test]]
 name = "constitutive"
 required-features = ["constitutive"]
+
+[[test]]
+name = "phs"
+required-features = ["phs"]
 
 [lints]
 workspace = true
