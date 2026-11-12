@@ -51,6 +51,8 @@ mod erased;
 pub mod ledger;
 #[cfg(feature = "phs")]
 pub mod phs;
+#[cfg(feature = "phs")]
+pub mod phs_exact;
 mod solve;
 mod system;
 mod wiring;

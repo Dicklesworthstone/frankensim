@@ -2473,8 +2473,9 @@ differentiable source storage on its admitted support and a smooth port map;
 switching or contact laws that require their original event treatment are
 outside this adapter. Temperature sets the entropy account only; it does not
 rebind the owner's fixed resistance or infer a material law. Numerical
-conformance does not establish physical validity of the supplied model, and
-the remaining exact-linear and other adapter work in bead `.5.12` stays open.
+conformance does not establish physical validity of the supplied model. The
+exact-quadratic companion is described below; other adapter work in bead
+`.5.12` stays open.
 
 ### Source-owned endpoint evaluation allowance
 
@@ -2495,3 +2496,52 @@ change when a shifted quadratic's rounded endpoint subtraction gives
 nonfinite bounds at either endpoint and an overflowing combined allowance
 without changing caller outputs, and retain the invalid-structure refusal even
 when the source declares a much larger endpoint bound.
+
+## Exact port-Hamiltonian Component and complete tangent
+
+The same optional `phs` feature exposes
+`phs_exact::ExactPortHamiltonianComponent`. It accepts the original owner,
+the same ordered scalar power-port declarations, and a native
+`LinearSplitBudget`. Native zero-clock preparation admits the declared exact
+quadratic storage, structure and dimensions during construction. Each positive
+negotiated duration uses `PreparedExactZoh::new_owned_controlled` over
+`share_storage`; the original operators, source law and state order are retained.
+The adapter retains at most two duration caches, keyed by exact IEEE bits,
+evicting the least recently used. Cold misses prepare before eviction, so failed
+preparation preserves the existing cache. Caches and reusable scratch carry no accepted state or clock;
+adaptive coarse/half trials, refusal, restore and retry require no cache rollback.
+
+Every proposal uses the original controlled exact step and its independent
+resistance heat integral and physical balance gate. The mandatory `heat` outlet
+returns `-D/dt`, the receipt records `D/T` at the supplied positive temperature,
+and the signed native supplied-minus-heat-minus-storage defect remains numerical
+loss. The arithmetic allowance includes the original retained two-word port-work
+magnitudes before opposing ports cancel, read immediately after that same native
+step. The source's checked endpoint evaluation bounds are added only for the
+Component's energy remeasurement, as above; neither allowance weakens native
+physical admission or turns numerical error into heat.
+
+`PortTangent` uses the cached original mean-input response rows and the native
+analytic gradient of the independently integrated resistance heat. Its JVP
+includes the full `-dD/du / dt` heat row; its VJP includes that row's output
+weight. The temperature column is zero, since temperature sets entropy only.
+The complete heat-bearing map stays `Class::Smooth`. Tangent calls first run
+the same complete native trial and source-support admission as proposals;
+derivatives cannot succeed outside the original physical map's support.
+There are no finite-difference derivatives or substitute integration formulas.
+
+Caller state, outputs and derivative buffers publish only after complete
+admission and the final cancellation check. Reentrant workspace use refuses.
+Native controlled preparation and evaluation retain their bounded polling
+boundaries; a storage callback and each documented indivisible dense/heat block
+remain non-preemptible. The adapter retains the original dense limits; it
+neither supplies a sparse path nor admits nonlinear storage by approximation.
+
+`tests/phs_exact.rs` covers bitwise agreement with the original exact owner,
+Component and tangent conformance including transpose duality, independent
+driven scalar exponentials and heat/heat-derivative integrals, variable-duration
+thermal composition, exact-bit cache identity and bounded eviction, atomic
+source/cancellation refusals, adaptive discard/restore/retry, native structural
+and metadata refusals, and shifted-Hamiltonian endpoint evaluation allowances.
+These numerical checks do not establish physical validity of an authored model;
+the other numerical adapters and sparse work in bead `.5.12` remain open.

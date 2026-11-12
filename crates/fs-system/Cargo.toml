@@ -65,5 +65,9 @@ required-features = ["constitutive"]
 name = "phs"
 required-features = ["phs"]
 
+[[test]]
+name = "phs_exact"
+required-features = ["phs"]
+
 [lints]
 workspace = true
