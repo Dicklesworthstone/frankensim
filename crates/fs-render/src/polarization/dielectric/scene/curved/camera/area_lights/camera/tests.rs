@@ -239,7 +239,13 @@ fn g1_rough_area_connection_preserves_non_coplanar_polarized_camera_prefix() {
             (cosine + (alpha * alpha + (1.0 - alpha * alpha) * cosine * cosine).sqrt());
         let distance2 = receiver.delta_from(source).dot(receiver.delta_from(source));
         let p_light = distance2 / AREA;
-        let p_bsdf = d / 4.0;
+        // The prefix reaches the receiver along its normal (camera ray, mirror at 45 degrees), so
+        // the view is normal: the bounded spherical-cap proposal (6a13950eae; tracer.rs
+        // ggx_vndf_reflection_pdf) has density D / 4 divided by its cap mass
+        // 1 - (1 - k) G1(wo) / 2 = 1 / (1 + a^2) at c = 1, s = 1, G1(wo) = 1. The BRDF is unchanged.
+        let k = (1.0 - alpha * alpha) / (1.0 + alpha * alpha);
+        let cap_mass = 1.0 - 0.5 * (1.0 - k);
+        let p_bsdf = d / 4.0 / cap_mass;
         let weight = p_light * p_light / (p_light * p_light + p_bsdf * p_bsdf);
         let irradiance = LE * AREA * cosine / distance2 * (-0.1 * distance2.sqrt()).exp();
         let expected = reflected.power().i * d * masking / (4.0 * cosine) * irradiance * weight;

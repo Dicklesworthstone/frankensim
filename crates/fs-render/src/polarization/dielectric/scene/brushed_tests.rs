@@ -114,9 +114,16 @@ fn g0_brushed_scene_refuses_invalid_detail_and_does_not_retry_rejected_samples()
         let media=[glass(1.0,0.1)]; let metals=[ConductorOptics::representative_tungsten()];
         let bindings=|d| vec![SurfaceBinding { object_id:1,interaction:Interaction::BrushedConductor { optics:0,medium:0,detail:d } }];
         assert!(matches!(PolarizedScene::try_new_with_conductors(&geometry,&media,&metals,bindings(SurfaceDetail::none(f64::NAN))),Err(SceneError::InvalidBindings)));
-        let scene=PolarizedScene::try_new_with_conductors(&geometry,&media,&metals,bindings(SurfaceDetail::none(1.0))).unwrap();
+        // The bounded GGX reflection proposal (6a13950eae) rejects no facet at an isotropic normal
+        // view: its spherical cap is exact there, so a SurfaceDetail::none(1.0) draw always reflects.
+        // The cap is bounded by the smaller slope, so the anisotropic pair (0.3, 0.9) keeps a residual
+        // rejected set at this normal view: the draw [0.98, 0.25] reflects to a local cosine of
+        // -0.757 (the warp of tracer.rs sample_ggx_bounded_normal, replayed), whichever way the
+        // tangent points (0.25 and 0.75 give the same cosine).
+        let brushed=SurfaceDetail::try_new(0.3,3.0,BrushingPattern::Radial,0.0,None).unwrap();
+        let scene=PolarizedScene::try_new_with_conductors(&geometry,&media,&metals,bindings(brushed)).unwrap();
         let mut calls=0;
-        let out=scene.trace_with_samples(cx,source(media[0],t),0,settings(),|_| { calls+=1; [0.9,0.2,0.5] }).unwrap();
+        let out=scene.trace_with_samples(cx,source(media[0],t),0,settings(),|_| { calls+=1; [0.98,0.25,0.5] }).unwrap();
         assert_eq!(calls,1); assert_eq!(out.termination(),PathTermination::RejectedMicrofacet);
         near(out.traveled_m(),1.0); near(out.beam().power().i,fs_math::det::exp(-0.1));
     });

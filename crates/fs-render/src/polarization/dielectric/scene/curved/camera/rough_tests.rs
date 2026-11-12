@@ -304,17 +304,33 @@ fn g0_native_rejected_facets_are_exact_zero_camera_samples_without_resampling() 
             SceneMedium::Homogeneous(&inside),
         ];
         let optics = [metal()];
-        for interaction in [
-            Interaction::RoughConductor {
-                optics: 0,
-                medium: 0,
-                surface: ConductorSurface::try_rough(1.0).unwrap(),
-            },
-            Interaction::Dielectric {
-                outside: 0,
-                inside: 1,
-                surface: DielectricSurface::try_rough(1.0).unwrap(),
-            },
+        // The bounded GGX reflection proposal (6a13950eae) rejects no conductor facet at alpha 1
+        // (every cap draw reflects above the horizon) nor at any alpha at the normal view (the cap
+        // is exact there). At alpha 0.5 and a 45-degree view a residual rejected set remains: the
+        // ray runs along (1, 0, -1)/sqrt 2 onto plane 1, whose normal facing wo is (0, 0, 1);
+        // basis_all_sphere gives the local wo (-1, 0, 1)/sqrt 2, and the draw [0.98, 0] reflects to
+        // a local cosine of -0.301 (the warp of tracer.rs sample_ggx_bounded_normal, replayed).
+        // A transmitting dielectric keeps the original full VNDF, so its normal-view draw stays.
+        let c = core::f64::consts::FRAC_1_SQRT_2;
+        for (interaction, dir, draw) in [
+            (
+                Interaction::RoughConductor {
+                    optics: 0,
+                    medium: 0,
+                    surface: ConductorSurface::try_rough(0.5).unwrap(),
+                },
+                Vec3::new(c, 0.0, -c),
+                [0.98, 0.0, 0.0],
+            ),
+            (
+                Interaction::Dielectric {
+                    outside: 0,
+                    inside: 1,
+                    surface: DielectricSurface::try_rough(1.0).unwrap(),
+                },
+                Vec3::new(0.0, 0.0, -1.0),
+                [0.9, 0.2, 0.0],
+            ),
         ] {
             let native = CurvedPolarizedScene::try_new_with_conductors(
                 cx,
@@ -331,13 +347,13 @@ fn g0_native_rejected_facets_are_exact_zero_camera_samples_without_resampling() 
             let camera = CurvedCameraScene::try_new(cx, &native, &[], None).unwrap();
             let ray = Ray {
                 origin: Point3::new(0.0, 0.0, 1.0),
-                dir: Vec3::new(0.0, 0.0, -1.0),
+                dir,
             };
             let mut draws = 0;
             let sample = camera
                 .sample_ray_with_samples(cx, ray, 550.0, 0, settings(), |_| {
                     draws += 1;
-                    [0.9, 0.2, 0.0]
+                    draw
                 })
                 .unwrap();
             assert_eq!(draws, 1);
@@ -360,8 +376,8 @@ fn g0_native_rejected_facets_are_exact_zero_camera_samples_without_resampling() 
                 camera
                     .sample_ray_with_samples(cx, ray, 550.0, 0, settings(), |_| [
                         f64::NAN,
-                        0.2,
-                        0.0
+                        draw[1],
+                        draw[2]
                     ])
                     .is_err()
             );

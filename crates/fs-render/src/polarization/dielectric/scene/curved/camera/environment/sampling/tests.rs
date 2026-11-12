@@ -382,8 +382,20 @@ fn rough_metal_environment_nee_retains_linear_extinction_and_circular_handedness
                 )
                 .unwrap();
             let le = source.evaluate(Z.scale(-1.0), 550.0).unwrap();
+            // NEE at the normal view: f cos / p_env = F D(n) / (4 p_env) = F Le / a^2, with
+            // D(n) = 1 / (pi a^2) and the uniform map's p_env = 1 / (4 pi), times the power
+            // heuristic against the reflection proposal. The bounded spherical-cap proposal
+            // (6a13950eae; tracer.rs ggx_vndf_reflection_pdf) has density D(n) / 4 divided by its
+            // cap mass 1 - (1 - k) G1(wo) / 2, which at this view (c = 1, s = 1, G1(wo) = 1,
+            // k = (1 - a^2) / (1 + a^2)) is 1 / (1 + a^2).
+            let a2 = alpha * alpha;
+            let k = (1.0 - a2) / (1.0 + a2);
+            let cap_mass = 1.0 - 0.5 * (1.0 - k);
+            let p_env = 1.0 / (4.0 * core::f64::consts::PI);
+            let p_proposal = 1.0 / (4.0 * core::f64::consts::PI * a2) / cap_mass;
+            let weight = p_env * p_env / (p_env * p_env + p_proposal * p_proposal);
             let expected = if selected {
-                reflection * le * alpha * alpha / (1.0 + alpha.powi(4))
+                reflection * le / a2 * weight
             } else {
                 0.0
             };

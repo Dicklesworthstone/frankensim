@@ -1030,19 +1030,29 @@ mod conductor_tests {
         with_cx(|cx| {
             let geometry=geometry(); let media=[glass(0.1)]; let metals=[metal()];
             let mut bindings=bindings(0);
+            // The bounded GGX reflection proposal (6a13950eae) rejects no facet at alpha 1 (every
+            // cap draw reflects above the horizon) nor at any alpha at the normal view (the cap is
+            // exact there). At alpha 0.5 and a 45-degree view a residual rejected set remains. The
+            // beam runs along (1, 0, 1)/sqrt 2 onto plane 1, whose normal facing wo is (0, 0, -1);
+            // basis_all_sphere gives the local wo (-1, 0, 1)/sqrt 2, and the draw [0.98, 0] reflects
+            // to a local cosine of -0.301 (the warp of tracer.rs sample_ggx_bounded_normal, replayed).
             bindings[0].interaction=Interaction::RoughConductor {
-                optics:0,medium:0,surface:ConductorSurface::try_rough(1.0).unwrap(),
+                optics:0,medium:0,surface:ConductorSurface::try_rough(0.5).unwrap(),
             };
             assert!(matches!(PolarizedScene::try_new(&geometry,&media,bindings.clone()),Err(SceneError::InvalidBindings)));
             let scene=PolarizedScene::try_new_with_conductors(&geometry,&media,&metals,bindings).unwrap();
+            let c=core::f64::consts::FRAC_1_SQRT_2;
+            let tilted=PolarizedBeam::try_new(Point3::new(0.0,0.0,0.0),
+                PolarizationFrame::try_new(Vec3::new(c,0.0,c),Vec3::new(c,0.0,-c)).unwrap(),
+                550.0,media[0],Stokes::try_new(1.0,0.0,0.0,1.0).unwrap()).unwrap();
             let mut calls=0;
-            let out=scene.trace_with_samples(cx,beam(media[0],550.0),0,settings(),|_| {
-                calls+=1; [0.9,0.2,0.5]
+            let out=scene.trace_with_samples(cx,tilted,0,settings(),|_| {
+                calls+=1; [0.98,0.0,0.5]
             }).unwrap();
             assert_eq!(calls,1); assert_eq!(out.termination(),PathTermination::RejectedMicrofacet);
             assert_eq!(out.surface_events(),1); assert_eq!(out.medium_index(),0);
-            close(out.traveled_m(),1.0);
-            close(out.beam().power().i,fs_math::det::exp(-0.1));
+            close(out.traveled_m(),1.0/c);
+            close(out.beam().power().i,fs_math::det::exp(-0.1/c));
         });
     }
 }
