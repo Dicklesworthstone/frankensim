@@ -761,12 +761,48 @@
      ]
     },
     {
+     "path": "U4/drskit/DRSKit/Crash_right_shank/samples/10-Crash_right_shank.wav",
+     "archive_member": "DRSKit/Crash_right_shank/samples/10-Crash_right_shank.wav",
+     "sha256": "72f4b7a4bc5fd438899a185fcfc1ee54fcc0ff12771abb353700deb8f8667ca9",
+     "bytes": 21928056,
+     "clips": [
+      {"id": "kit-drskit-crash_right_shank-10", "family": "kit", "piece": "crash", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 0.642866: the power high third of the instrument's 12 hits", "articulation": "Crash_right_shank; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 8.350998, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 368279, "clip_sha256": "3bc92f651a6047e41f8abc4263c1b551c0566591652258e3fdfdc423fbfbc7e5", "status": "VALID", "failed": [], "screen": {"onset_s": 0.0, "noise_db": -88.76, "noise_method": "tail", "peak_db": -28.78, "snr_db": 59.98, "reattack_db": 1.39, "tail_db": -91.85, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
+     "path": "U4/drskit/DRSKit/Crash_right_shank/samples/11-Crash_right_shank.wav",
+     "archive_member": "DRSKit/Crash_right_shank/samples/11-Crash_right_shank.wav",
+     "sha256": "f730139eb9c85b3e2d339038b96f3016ae8f036ee8b627b502c74f8acb4aa97f",
+     "bytes": 22916472,
+     "clips": [
+      {"id": "kit-drskit-crash_right_shank-11", "family": "kit", "piece": "crash", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 0.838427: the power high third of the instrument's 12 hits", "articulation": "Crash_right_shank; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 8.890998, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 392093, "clip_sha256": "b055d5875602fe6f89f7f1e21aa9929bbe39c1b814ecfdd58983d8f0611ce505", "status": "VALID", "failed": [], "screen": {"onset_s": 0.0, "noise_db": -88.01, "noise_method": "tail", "peak_db": -28.26, "snr_db": 59.75, "reattack_db": 2.79, "tail_db": -89.85, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
      "path": "U4/drskit/DRSKit/Crash_right_shank/samples/12-Crash_right_shank.wav",
      "archive_member": "DRSKit/Crash_right_shank/samples/12-Crash_right_shank.wav",
      "sha256": "352a419aab9bd5b02b8352c0bbebdba99ddfd2df32004b5bb92ed9c0b4f22135",
      "bytes": 21004432,
      "clips": [
       {"id": "kit-drskit-crash_right_shank-12", "family": "kit", "piece": "crash", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 1.068260: the power high third of the instrument's 12 hits", "articulation": "Crash_right_shank; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 8.050998, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 355049, "clip_sha256": "0cc31de2f08d05553b829c376c41234ec523b01a3e2f8121af65d36a19bb60a1", "status": "VALID", "failed": [], "screen": {"onset_s": 0.0, "noise_db": -86.95, "noise_method": "tail", "peak_db": -23.67, "snr_db": 63.28, "reattack_db": 2.32, "tail_db": -88.22, "clipped_runs": 0}, "source_channels": [7, 6]}
+     ]
+    },
+    {
+     "path": "U4/drskit/DRSKit/Crash_right_shank/samples/2-Crash_right_shank.wav",
+     "archive_member": "DRSKit/Crash_right_shank/samples/2-Crash_right_shank.wav",
+     "sha256": "6f42d19ab5dfcfc906120466d7e54c4e3d443303d4d7d7e04cb2d5e34652ba14",
+     "bytes": 16318556,
+     "clips": [
+      {"id": "kit-drskit-crash_right_shank-2", "family": "kit", "piece": "crash", "dynamic": "power-low-third", "dynamic_from": "DrumGizmo sample power 0.014062: the power low third of the instrument's 12 hits", "articulation": "Crash_right_shank; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 6.530998, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 288017, "clip_sha256": "6b3f82f5e0e4655db0507752c73e3b2bedf71749cf9eabfb55948b2e1fcc4a2c", "status": "VALID", "failed": [], "screen": {"onset_s": 0.0, "noise_db": -90.98, "noise_method": "tail", "peak_db": -50.1, "snr_db": 40.88, "reattack_db": 1.68, "tail_db": -91.72, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
+     "path": "U4/drskit/DRSKit/Crash_right_shank/samples/3-Crash_right_shank.wav",
+     "archive_member": "DRSKit/Crash_right_shank/samples/3-Crash_right_shank.wav",
+     "sha256": "56f7dde4b9f7ac556f9bea29482499976099f4d56df8a7e13ae633e32548f524",
+     "bytes": 20543088,
+     "clips": [
+      {"id": "kit-drskit-crash_right_shank-3", "family": "kit", "piece": "crash", "dynamic": "power-low-third", "dynamic_from": "DrumGizmo sample power 0.035845: the power low third of the instrument's 12 hits", "articulation": "Crash_right_shank; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 8.210998, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 362105, "clip_sha256": "ef72b557e96e538837cc579afc163a33af7251b279abc5db25298b20f1a7f4bf", "status": "VALID", "failed": [], "screen": {"onset_s": 0.0, "noise_db": -91.87, "noise_method": "tail", "peak_db": -42.28, "snr_db": 49.59, "reattack_db": 2.22, "tail_db": -93.53, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
      ]
     },
     {
@@ -785,6 +821,24 @@
      "bytes": 19934272,
      "clips": [
       {"id": "kit-drskit-crash_right_shank-5", "family": "kit", "piece": "crash", "dynamic": "power-middle-third", "dynamic_from": "DrumGizmo sample power 0.113492: the power middle third of the instrument's 12 hits", "articulation": "Crash_right_shank; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 7.810998, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 344465, "clip_sha256": "5d47a5cea9d29cf8e91b363268104191f18adf615e365717970cc05a4bd09eca", "status": "VALID", "failed": [], "screen": {"onset_s": 0.0, "noise_db": -86.78, "noise_method": "tail", "peak_db": -38.07, "snr_db": 48.7, "reattack_db": 0.72, "tail_db": -88.07, "clipped_runs": 0}, "source_channels": [7, 6]}
+     ]
+    },
+    {
+     "path": "U4/drskit/DRSKit/Crash_right_shank/samples/6-Crash_right_shank.wav",
+     "archive_member": "DRSKit/Crash_right_shank/samples/6-Crash_right_shank.wav",
+     "sha256": "105a53311766b76fcc09f6f76009bd8c35d21f555f267cd9cbb0a309250c516d",
+     "bytes": 22973672,
+     "clips": [
+      {"id": "kit-drskit-crash_right_shank-6", "family": "kit", "piece": "crash", "dynamic": "power-middle-third", "dynamic_from": "DrumGizmo sample power 0.177332: the power middle third of the instrument's 12 hits", "articulation": "Crash_right_shank; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 8.950998, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 394739, "clip_sha256": "cabc9a21d09e0cce696614bfe4d687482923940ae7dc88a07be5e8e39e1393dd", "status": "VALID", "failed": [], "screen": {"onset_s": 0.0, "noise_db": -89.36, "noise_method": "tail", "peak_db": -35.31, "snr_db": 54.06, "reattack_db": 2.34, "tail_db": -91.29, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
+     "path": "U4/drskit/DRSKit/Crash_right_shank/samples/7-Crash_right_shank.wav",
+     "archive_member": "DRSKit/Crash_right_shank/samples/7-Crash_right_shank.wav",
+     "sha256": "5f1fdcf589e0eb8a0dd3b749b5c32f95db784dfdda28e15dfeed86b4a71f42e3",
+     "bytes": 20547248,
+     "clips": [
+      {"id": "kit-drskit-crash_right_shank-7", "family": "kit", "piece": "crash", "dynamic": "power-middle-third", "dynamic_from": "DrumGizmo sample power 0.258774: the power middle third of the instrument's 12 hits", "articulation": "Crash_right_shank; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 8.030998, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 354167, "clip_sha256": "18b57ab702cedb0a41ff11736f598a3354cbcf12552c85545a0f175205190d3f", "status": "VALID", "failed": [], "screen": {"onset_s": 0.0, "noise_db": -87.1, "noise_method": "tail", "peak_db": -34.21, "snr_db": 52.88, "reattack_db": 1.28, "tail_db": -88.83, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
      ]
     },
     {
@@ -1252,7 +1306,8 @@
      "sha256": "4f9867674659f423c304e7dc349f95676fa44afa8fcc29fc27f5eacbc617fe04",
      "bytes": 17135840,
      "clips": [
-      {"id": "kit-drskit-ride_tip-10", "family": "kit", "piece": "ride", "dynamic": "power-middle-third", "dynamic_from": "DrumGizmo sample power 0.157213: the power middle third of the instrument's 15 hits", "articulation": "Ride_tip; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 6.710998, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 295955, "clip_sha256": "f18433cb340d7bffe4e38f4aa6692238680c12c5f5ee71c949ebd9ac037aec08", "status": "VALID", "failed": [], "screen": {"onset_s": 0.0, "noise_db": -90.39, "noise_method": "tail", "peak_db": -37.24, "snr_db": 53.15, "reattack_db": 0.98, "tail_db": -91.36, "clipped_runs": 0}, "source_channels": [7, 6]}
+      {"id": "kit-drskit-ride_tip-10", "family": "kit", "piece": "ride", "dynamic": "power-middle-third", "dynamic_from": "DrumGizmo sample power 0.157213: the power middle third of the instrument's 15 hits", "articulation": "Ride_tip; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 6.710998, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 295955, "clip_sha256": "f18433cb340d7bffe4e38f4aa6692238680c12c5f5ee71c949ebd9ac037aec08", "status": "VALID", "failed": [], "screen": {"onset_s": 0.0, "noise_db": -90.39, "noise_method": "tail", "peak_db": -37.24, "snr_db": 53.15, "reattack_db": 0.98, "tail_db": -91.36, "clipped_runs": 0}, "source_channels": [7, 6]},
+      {"id": "kit-drskit-ride_tip-10-ohl", "family": "kit", "piece": "ride", "dynamic": "power-middle-third", "dynamic_from": "DrumGizmo sample power 0.157213: the power middle third of the instrument's 15 hits", "articulation": "Ride_tip; overheads OHL+OHR (file channels 6,7)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 6.890998, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 303893, "clip_sha256": "7dd66230e66047fe2aeb9597779b77026956a05e55ff7c26aa3ccfa9829c873c", "status": "VALID", "failed": [], "screen": {"onset_s": 0.001, "noise_db": -93.69, "noise_method": "tail", "peak_db": -42.14, "snr_db": 51.55, "reattack_db": 0.12, "tail_db": -95.58, "clipped_runs": 0}, "source_channels": [6, 7], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
      ]
     },
     {
@@ -1261,7 +1316,35 @@
      "sha256": "10aa980dfdebd603145761bac591492f09c005ced6757eb9919ac5fa239a1462",
      "bytes": 17726560,
      "clips": [
-      {"id": "kit-drskit-ride_tip-11", "family": "kit", "piece": "ride", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 0.162296: the power high third of the instrument's 15 hits", "articulation": "Ride_tip; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 6.910998, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 304775, "clip_sha256": "45e4cd84341acb503b9b7bea450fc59f69cea43359690f789067a2558cafb4af", "status": "VALID", "failed": [], "screen": {"onset_s": 0.001, "noise_db": -87.45, "noise_method": "tail", "peak_db": -36.36, "snr_db": 51.08, "reattack_db": 1.26, "tail_db": -85.12, "clipped_runs": 0}, "source_channels": [7, 6]}
+      {"id": "kit-drskit-ride_tip-11", "family": "kit", "piece": "ride", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 0.162296: the power high third of the instrument's 15 hits", "articulation": "Ride_tip; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 6.910998, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 304775, "clip_sha256": "45e4cd84341acb503b9b7bea450fc59f69cea43359690f789067a2558cafb4af", "status": "VALID", "failed": [], "screen": {"onset_s": 0.001, "noise_db": -87.45, "noise_method": "tail", "peak_db": -36.36, "snr_db": 51.08, "reattack_db": 1.26, "tail_db": -85.12, "clipped_runs": 0}, "source_channels": [7, 6]},
+      {"id": "kit-drskit-ride_tip-11-ohl", "family": "kit", "piece": "ride", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 0.162296: the power high third of the instrument's 15 hits", "articulation": "Ride_tip; overheads OHL+OHR (file channels 6,7)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 7.010998, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 309185, "clip_sha256": "e599d209ed08f19bc24504d09915b3d8b7f0ffb918fd5fe344a391ff5cc61f4d", "status": "VALID", "failed": [], "screen": {"onset_s": 0.001, "noise_db": -91.01, "noise_method": "tail", "peak_db": -42.32, "snr_db": 48.69, "reattack_db": 0.82, "tail_db": -92.22, "clipped_runs": 0}, "source_channels": [6, 7], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
+     "path": "U4/drskit/DRSKit/Ride_tip/samples/12-Ride_tip.wav",
+     "archive_member": "DRSKit/Ride_tip/samples/12-Ride_tip.wav",
+     "sha256": "e63c8bd5ecde1b30f583c8342a8d01ee4726765c3012db91a32cb7180fa4f0f0",
+     "bytes": 17951876,
+     "clips": [
+      {"id": "kit-drskit-ride_tip-12", "family": "kit", "piece": "ride", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 0.269840: the power high third of the instrument's 15 hits", "articulation": "Ride_tip; overheads OHL+OHR (file channels 6,7)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 6.970998, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 307421, "clip_sha256": "8eb7319d8461a500c66ebeb97faa53c83c69d2a472cf2231ee4132ad2cf42069", "status": "VALID", "failed": [], "screen": {"onset_s": 0.001, "noise_db": -88.77, "noise_method": "tail", "peak_db": -40.31, "snr_db": 48.46, "reattack_db": 0.91, "tail_db": -90.96, "clipped_runs": 0}, "source_channels": [6, 7], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
+     "path": "U4/drskit/DRSKit/Ride_tip/samples/13-Ride_tip.wav",
+     "archive_member": "DRSKit/Ride_tip/samples/13-Ride_tip.wav",
+     "sha256": "06b98e0e41452ed1b941eb46554dcce533f9ba62a68e378b05b8dfec28ac9f9f",
+     "bytes": 20970216,
+     "clips": [
+      {"id": "kit-drskit-ride_tip-13", "family": "kit", "piece": "ride", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 0.354940: the power high third of the instrument's 15 hits", "articulation": "Ride_tip; overheads OHL+OHR (file channels 6,7)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 8.550998, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 377099, "clip_sha256": "9b9b22e011ddf0ece42395716524ab6d1e735e0d1866555b3f62492d28e9096c", "status": "VALID", "failed": [], "screen": {"onset_s": 0.0, "noise_db": -95.25, "noise_method": "tail", "peak_db": -38.08, "snr_db": 57.17, "reattack_db": 0.71, "tail_db": -98.95, "clipped_runs": 0}, "source_channels": [6, 7], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
+     "path": "U4/drskit/DRSKit/Ride_tip/samples/14-Ride_tip.wav",
+     "archive_member": "DRSKit/Ride_tip/samples/14-Ride_tip.wav",
+     "sha256": "44477fca1731a616fec776c104804887108bbaf08df3b8f6ac33a992f934f883",
+     "bytes": 19673180,
+     "clips": [
+      {"id": "kit-drskit-ride_tip-14", "family": "kit", "piece": "ride", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 0.451930: the power high third of the instrument's 15 hits", "articulation": "Ride_tip; overheads OHL+OHR (file channels 6,7)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 7.630998, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 336527, "clip_sha256": "7dfe6f4fe1afa50b0f2ed8855a3d61d8ec8acbfee5ed1f2516a91f0730585f74", "status": "VALID", "failed": [], "screen": {"onset_s": 0.0, "noise_db": -89.76, "noise_method": "tail", "peak_db": -38.41, "snr_db": 51.34, "reattack_db": 0.48, "tail_db": -89.87, "clipped_runs": 0}, "source_channels": [6, 7], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
      ]
     },
     {
@@ -1270,7 +1353,8 @@
      "sha256": "011bea0a2abbfd67ffb1c1165b3a781f37df25abfb9c2d42489510b953cba985",
      "bytes": 19352340,
      "clips": [
-      {"id": "kit-drskit-ride_tip-15", "family": "kit", "piece": "ride", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 0.481729: the power high third of the instrument's 15 hits", "articulation": "Ride_tip; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 7.610998, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 335645, "clip_sha256": "7d4287d188bc37933733fe56127b5e95ef0a2f7a73a49a2a0eec981310d23de6", "status": "VALID", "failed": [], "screen": {"onset_s": 0.001, "noise_db": -88.99, "noise_method": "tail", "peak_db": -34.44, "snr_db": 54.55, "reattack_db": 0.59, "tail_db": -91.47, "clipped_runs": 0}, "source_channels": [7, 6]}
+      {"id": "kit-drskit-ride_tip-15", "family": "kit", "piece": "ride", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 0.481729: the power high third of the instrument's 15 hits", "articulation": "Ride_tip; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 7.610998, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 335645, "clip_sha256": "7d4287d188bc37933733fe56127b5e95ef0a2f7a73a49a2a0eec981310d23de6", "status": "VALID", "failed": [], "screen": {"onset_s": 0.001, "noise_db": -88.99, "noise_method": "tail", "peak_db": -34.44, "snr_db": 54.55, "reattack_db": 0.59, "tail_db": -91.47, "clipped_runs": 0}, "source_channels": [7, 6]},
+      {"id": "kit-drskit-ride_tip-15-ohl", "family": "kit", "piece": "ride", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 0.481729: the power high third of the instrument's 15 hits", "articulation": "Ride_tip; overheads OHL+OHR (file channels 6,7)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 7.670998, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 338291, "clip_sha256": "cf8d58bd5c427ca33f2aafed047677dd2b368e62351f46e01ca7c6590de59376", "status": "VALID", "failed": [], "screen": {"onset_s": 0.0, "noise_db": -88.59, "noise_method": "tail", "peak_db": -38.4, "snr_db": 50.19, "reattack_db": 1.57, "tail_db": -90.69, "clipped_runs": 0}, "source_channels": [6, 7], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
      ]
     },
     {
@@ -1288,7 +1372,17 @@
      "sha256": "b83f409ba1cb03670f00487950ac40d7a263562d7c461140cad64ddbb86c0bd1",
      "bytes": 14283848,
      "clips": [
-      {"id": "kit-drskit-ride_tip-6", "family": "kit", "piece": "ride", "dynamic": "power-middle-third", "dynamic_from": "DrumGizmo sample power 0.025654: the power middle third of the instrument's 15 hits", "articulation": "Ride_tip; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 5.710998, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 251855, "clip_sha256": "4df6344d92c68b1cab9318f8ddf4810825a2f851a69acd19afbfec93f6e337aa", "status": "VALID", "failed": [], "screen": {"onset_s": 0.001, "noise_db": -94.41, "noise_method": "tail", "peak_db": -43.02, "snr_db": 51.39, "reattack_db": 0.38, "tail_db": -97.66, "clipped_runs": 0}, "source_channels": [7, 6]}
+      {"id": "kit-drskit-ride_tip-6", "family": "kit", "piece": "ride", "dynamic": "power-middle-third", "dynamic_from": "DrumGizmo sample power 0.025654: the power middle third of the instrument's 15 hits", "articulation": "Ride_tip; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 5.710998, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 251855, "clip_sha256": "4df6344d92c68b1cab9318f8ddf4810825a2f851a69acd19afbfec93f6e337aa", "status": "VALID", "failed": [], "screen": {"onset_s": 0.001, "noise_db": -94.41, "noise_method": "tail", "peak_db": -43.02, "snr_db": 51.39, "reattack_db": 0.38, "tail_db": -97.66, "clipped_runs": 0}, "source_channels": [7, 6]},
+      {"id": "kit-drskit-ride_tip-6-ohl", "family": "kit", "piece": "ride", "dynamic": "power-middle-third", "dynamic_from": "DrumGizmo sample power 0.025654: the power middle third of the instrument's 15 hits", "articulation": "Ride_tip; overheads OHL+OHR (file channels 6,7)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 5.752993, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 253707, "clip_sha256": "0326484a61086481225e8bd1b7cc1e11f3c5b45323c3ed5f06f1449090844bad", "status": "VALID", "failed": [], "screen": {"onset_s": 0.003, "noise_db": -95.81, "noise_method": "tail", "peak_db": -50.14, "snr_db": 45.67, "reattack_db": 0.17, "tail_db": -97.31, "clipped_runs": 0}, "source_channels": [6, 7], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
+     "path": "U4/drskit/DRSKit/Ride_tip/samples/9-Ride_tip.wav",
+     "archive_member": "DRSKit/Ride_tip/samples/9-Ride_tip.wav",
+     "sha256": "f016baab311da0b74af3d5a77a57f51fb4071763c3d5f95910f52788c05c303b",
+     "bytes": 16550788,
+     "clips": [
+      {"id": "kit-drskit-ride_tip-9", "family": "kit", "piece": "ride", "dynamic": "power-middle-third", "dynamic_from": "DrumGizmo sample power 0.091793: the power middle third of the instrument's 15 hits", "articulation": "Ride_tip; overheads OHL+OHR (file channels 6,7)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 6.490998, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 286253, "clip_sha256": "64f08d097140b42b327d4dc7b4b37ed882efc8286f1f4f86f8c088f9ea21d427", "status": "VALID", "failed": [], "screen": {"onset_s": 0.003, "noise_db": -92.68, "noise_method": "tail", "peak_db": -44.27, "snr_db": 48.41, "reattack_db": 0.66, "tail_db": -93.78, "clipped_runs": 0}, "source_channels": [6, 7], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
      ]
     },
     {
@@ -1418,12 +1512,22 @@
      ]
     },
     {
+     "path": "U4/drskit/DRSKit/Tom1/samples/11-Tom1.wav",
+     "archive_member": "DRSKit/Tom1/samples/11-Tom1.wav",
+     "sha256": "13f1f51feeca9f12939bb925b488762ec68034a3fb397173f29cb80b86a88f04",
+     "bytes": 6466688,
+     "clips": [
+      {"id": "kit-drskit-tom1-11", "family": "kit", "piece": "tom", "dynamic": "power-middle-third", "dynamic_from": "DrumGizmo sample power 4.445320: the power middle third of the instrument's 27 hits", "articulation": "Tom1; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 2.571995, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 113425, "clip_sha256": "8ab9876a375f8712cf462eeb777e0ce3b4ce22e38706e8d768de1977b5f8602b", "status": "VALID", "failed": [], "screen": {"onset_s": 0.002, "noise_db": -98.31, "noise_method": "tail", "peak_db": -30.05, "snr_db": 68.26, "reattack_db": 0.0, "tail_db": -102.91, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
      "path": "U4/drskit/DRSKit/Tom1/samples/18-Tom1.wav",
      "archive_member": "DRSKit/Tom1/samples/18-Tom1.wav",
      "sha256": "d5bb2f19951a8ea563dcc86db67a08c5db92caee91093a88d6e9d6bfe1c37a8d",
      "bytes": 5199604,
      "clips": [
-      {"id": "kit-drskit-tom1-18", "family": "kit", "piece": "tom", "dynamic": "power-middle-third", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 2.111995, "status": "INVALID", "failed": ["snr"]}
+      {"id": "kit-drskit-tom1-18", "family": "kit", "piece": "tom", "dynamic": "power-middle-third", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 2.111995, "status": "INVALID", "failed": ["snr"]},
+      {"id": "kit-drskit-tom1-18-ohr", "family": "kit", "piece": "tom", "dynamic": "power-middle-third", "dynamic_from": "DrumGizmo sample power 11.805400: the power middle third of the instrument's 27 hits", "articulation": "Tom1; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 2.131995, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 94021, "clip_sha256": "e8e39ad78ea588427dbb101b256739c210b5a1f934aacfbd3d8db5701615f24b", "status": "VALID", "failed": [], "screen": {"onset_s": 0.002, "noise_db": -94.49, "noise_method": "tail", "peak_db": -25.36, "snr_db": 69.13, "reattack_db": 8.29, "tail_db": -99.83, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
      ]
     },
     {
@@ -1436,12 +1540,67 @@
      ]
     },
     {
+     "path": "U4/drskit/DRSKit/Tom1/samples/20-Tom1.wav",
+     "archive_member": "DRSKit/Tom1/samples/20-Tom1.wav",
+     "sha256": "9a379d4728d06f1e57f0c2a33510062457786ac11e3b0739b1d11e814d8dc614",
+     "bytes": 6432888,
+     "clips": [
+      {"id": "kit-drskit-tom1-20", "family": "kit", "piece": "tom", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 14.329500: the power high third of the instrument's 27 hits", "articulation": "Tom1; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 2.571995, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 113425, "clip_sha256": "b8de9a3535e0405d3449b5d1978e5f0e77e629c2514ed4ed056b0e706dce668c", "status": "VALID", "failed": [], "screen": {"onset_s": 0.002, "noise_db": -95.75, "noise_method": "tail", "peak_db": -23.13, "snr_db": 72.61, "reattack_db": 3.13, "tail_db": -97.24, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
+     "path": "U4/drskit/DRSKit/Tom1/samples/22-Tom1.wav",
+     "archive_member": "DRSKit/Tom1/samples/22-Tom1.wav",
+     "sha256": "3a5d744e7564e03cfc1f5cbcb73001afaac7f03049701250a638048574729d8c",
+     "bytes": 4002772,
+     "clips": [
+      {"id": "kit-drskit-tom1-22", "family": "kit", "piece": "tom", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 18.407200: the power high third of the instrument's 27 hits", "articulation": "Tom1; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 1.611995, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 71089, "clip_sha256": "4dfef253b21f16ca582e46deed8ec1cb48c18cf5a521c33a7eabc1b2397fa314", "status": "VALID", "failed": [], "screen": {"onset_s": 0.002, "noise_db": -83.77, "noise_method": "tail", "peak_db": -22.91, "snr_db": 60.87, "reattack_db": 1.7, "tail_db": -90.9, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
+     "path": "U4/drskit/DRSKit/Tom1/samples/26-Tom1.wav",
+     "archive_member": "DRSKit/Tom1/samples/26-Tom1.wav",
+     "sha256": "7dc555eacf471a07df311d48b740b5d24dfe052aa92b557e9ef4d5faaae1fddb",
+     "bytes": 4339784,
+     "clips": [
+      {"id": "kit-drskit-tom1-26", "family": "kit", "piece": "tom", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 28.632400: the power high third of the instrument's 27 hits", "articulation": "Tom1; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 1.771995, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 78145, "clip_sha256": "a0d9164af2a0b33d5b68713d366604157a366402b1320616b0fd08b78cb9dfbf", "status": "VALID", "failed": [], "screen": {"onset_s": 0.002, "noise_db": -87.59, "noise_method": "tail", "peak_db": -21.12, "snr_db": 66.47, "reattack_db": 0.57, "tail_db": -93.64, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
      "path": "U4/drskit/DRSKit/Tom1/samples/27-Tom1.wav",
      "archive_member": "DRSKit/Tom1/samples/27-Tom1.wav",
      "sha256": "310aaeca506d92525ff73a664da8844b6936bc411e9a446f66cf31a138936ce0",
      "bytes": 5615916,
      "clips": [
-      {"id": "kit-drskit-tom1-27", "family": "kit", "piece": "tom", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 32.537800: the power high third of the instrument's 27 hits", "articulation": "Tom1; overheads OHL+OHR (file channels 6,7)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 2.291995, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 101077, "clip_sha256": "6a5f0c65c45faf9efe16cff63833ed71b0450953a53d91efb9da3b2597909c36", "status": "VALID", "failed": [], "screen": {"onset_s": 0.002, "noise_db": -89.61, "noise_method": "tail", "peak_db": -17.37, "snr_db": 72.24, "reattack_db": 0.0, "tail_db": -95.06, "clipped_runs": 0}, "source_channels": [6, 7]}
+      {"id": "kit-drskit-tom1-27", "family": "kit", "piece": "tom", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 32.537800: the power high third of the instrument's 27 hits", "articulation": "Tom1; overheads OHL+OHR (file channels 6,7)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 2.291995, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 101077, "clip_sha256": "6a5f0c65c45faf9efe16cff63833ed71b0450953a53d91efb9da3b2597909c36", "status": "VALID", "failed": [], "screen": {"onset_s": 0.002, "noise_db": -89.61, "noise_method": "tail", "peak_db": -17.37, "snr_db": 72.24, "reattack_db": 0.0, "tail_db": -95.06, "clipped_runs": 0}, "source_channels": [6, 7]},
+      {"id": "kit-drskit-tom1-27-ohr", "family": "kit", "piece": "tom", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 32.537800: the power high third of the instrument's 27 hits", "articulation": "Tom1; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 2.211995, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 97549, "clip_sha256": "155a631ab2c101c74540de21bdb4ed400706023b1fa88269b65142aa05f31958", "status": "VALID", "failed": [], "screen": {"onset_s": 0.002, "noise_db": -88.4, "noise_method": "tail", "peak_db": -20.0, "snr_db": 68.4, "reattack_db": 0.0, "tail_db": -90.38, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
+     "path": "U4/drskit/DRSKit/Tom1/samples/6-Tom1.wav",
+     "archive_member": "DRSKit/Tom1/samples/6-Tom1.wav",
+     "sha256": "2d8d57faa1b5ee6ae066e4098d4223bfacf4370d1ed3ca857cb2dec6013f842d",
+     "bytes": 5959220,
+     "clips": [
+      {"id": "kit-drskit-tom1-6", "family": "kit", "piece": "tom", "dynamic": "power-low-third", "dynamic_from": "DrumGizmo sample power 1.579680: the power low third of the instrument's 27 hits", "articulation": "Tom1; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 2.391995, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 105487, "clip_sha256": "5c34c409b4ce926c571c57c4ba686729f79073d0c2ecea60af44ad0df85fb184", "status": "VALID", "failed": [], "screen": {"onset_s": 0.002, "noise_db": -101.35, "noise_method": "tail", "peak_db": -36.59, "snr_db": 64.76, "reattack_db": 0.0, "tail_db": -103.99, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
+     "path": "U4/drskit/DRSKit/Tom1/samples/7-Tom1.wav",
+     "archive_member": "DRSKit/Tom1/samples/7-Tom1.wav",
+     "sha256": "e5b29c1b50a8dedf7b4646ddbad3111dbb13072547edcce810eebcf080321b98",
+     "bytes": 5780912,
+     "clips": [
+      {"id": "kit-drskit-tom1-7", "family": "kit", "piece": "tom", "dynamic": "power-low-third", "dynamic_from": "DrumGizmo sample power 2.028310: the power low third of the instrument's 27 hits", "articulation": "Tom1; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 2.391995, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 105487, "clip_sha256": "3b92ef7f68d01f6f56981191bc713fdab8d4c3e9dc12131f14b5ff3caf580d02", "status": "VALID", "failed": [], "screen": {"onset_s": 0.002, "noise_db": -103.4, "noise_method": "tail", "peak_db": -35.49, "snr_db": 67.9, "reattack_db": 0.0, "tail_db": -111.43, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
+     "path": "U4/drskit/DRSKit/Tom1/samples/8-Tom1.wav",
+     "archive_member": "DRSKit/Tom1/samples/8-Tom1.wav",
+     "sha256": "ad37a81b40fd7a825bc80097c1633f314534d36a122e82ab21534c07f470d585",
+     "bytes": 6725596,
+     "clips": [
+      {"id": "kit-drskit-tom1-8", "family": "kit", "piece": "tom", "dynamic": "power-low-third", "dynamic_from": "DrumGizmo sample power 2.646720: the power low third of the instrument's 27 hits", "articulation": "Tom1; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 2.651995, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 116953, "clip_sha256": "0ad9765918cf5c24124f9541b82d3276c77e55c6481db3b58417e98b31fa7599", "status": "VALID", "failed": [], "screen": {"onset_s": 0.002, "noise_db": -99.74, "noise_method": "tail", "peak_db": -33.54, "snr_db": 66.19, "reattack_db": 0.0, "tail_db": -103.33, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
      ]
     },
     {
@@ -1535,6 +1694,51 @@
      ]
     },
     {
+     "path": "U4/drskit/DRSKit/Tom3/samples/15-Tom3.wav",
+     "archive_member": "DRSKit/Tom3/samples/15-Tom3.wav",
+     "sha256": "c8862f6a4c61dab35aea86bd8728dc9eff4870e92df314e69232cc0e959bf84a",
+     "bytes": 8059136,
+     "clips": [
+      {"id": "kit-drskit-tom3-15", "family": "kit", "piece": "tom", "dynamic": "power-middle-third", "dynamic_from": "DrumGizmo sample power 42.551200: the power middle third of the instrument's 30 hits", "articulation": "Tom3; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 3.152993, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 139047, "clip_sha256": "f469a99687cc5d38564b62be44c013396cfc3d06c10312db1159f84134a01c8e", "status": "VALID", "failed": [], "screen": {"onset_s": 0.003, "noise_db": -88.79, "noise_method": "tail", "peak_db": -31.78, "snr_db": 57.01, "reattack_db": 0.0, "tail_db": -92.6, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
+     "path": "U4/drskit/DRSKit/Tom3/samples/16-Tom3.wav",
+     "archive_member": "DRSKit/Tom3/samples/16-Tom3.wav",
+     "sha256": "9c58992ad07720c3cb90ca6f3941cc4d85c2498c91342f2d06ed76ffac4966ae",
+     "bytes": 6956320,
+     "clips": [
+      {"id": "kit-drskit-tom3-16", "family": "kit", "piece": "tom", "dynamic": "power-middle-third", "dynamic_from": "DrumGizmo sample power 50.216200: the power middle third of the instrument's 30 hits", "articulation": "Tom3; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 2.751995, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 121363, "clip_sha256": "c556ee163cb9d56e29212bef5cf33fc9078196658593ce800c75c4713043da8f", "status": "VALID", "failed": [], "screen": {"onset_s": 0.002, "noise_db": -83.12, "noise_method": "tail", "peak_db": -31.13, "snr_db": 51.99, "reattack_db": 0.0, "tail_db": -85.88, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
+     "path": "U4/drskit/DRSKit/Tom3/samples/17-Tom3.wav",
+     "archive_member": "DRSKit/Tom3/samples/17-Tom3.wav",
+     "sha256": "742c0c34fef6df4959bcac83e1fe7397cf24f210bc12dbcd4af296c726c1a42e",
+     "bytes": 5948768,
+     "clips": [
+      {"id": "kit-drskit-tom3-17", "family": "kit", "piece": "tom", "dynamic": "power-middle-third", "dynamic_from": "DrumGizmo sample power 57.236600: the power middle third of the instrument's 30 hits", "articulation": "Tom3; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 2.332993, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 102885, "clip_sha256": "9b656d95816c9d2b09eed3a55ef6e3c423c27e15221c26830986dbbc6abab6ee", "status": "VALID", "failed": [], "screen": {"onset_s": 0.003, "noise_db": -78.28, "noise_method": "tail", "peak_db": -31.09, "snr_db": 47.19, "reattack_db": 0.0, "tail_db": -81.31, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
+     "path": "U4/drskit/DRSKit/Tom3/samples/18-Tom3.wav",
+     "archive_member": "DRSKit/Tom3/samples/18-Tom3.wav",
+     "sha256": "bfae7ba368da4d310fb932a7c45fe4fac26ec7601ca4105e6dcfac2c858b2c19",
+     "bytes": 8521676,
+     "clips": [
+      {"id": "kit-drskit-tom3-18", "family": "kit", "piece": "tom", "dynamic": "power-middle-third", "dynamic_from": "DrumGizmo sample power 63.370700: the power middle third of the instrument's 30 hits", "articulation": "Tom3; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 3.412993, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 150513, "clip_sha256": "66a285dbefe167a2c971f96ce0b787a27cbca71e542344096ce2b33484ae8ce9", "status": "VALID", "failed": [], "screen": {"onset_s": 0.003, "noise_db": -89.51, "noise_method": "tail", "peak_db": -29.72, "snr_db": 59.79, "reattack_db": 0.0, "tail_db": -90.1, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
+     "path": "U4/drskit/DRSKit/Tom3/samples/19-Tom3.wav",
+     "archive_member": "DRSKit/Tom3/samples/19-Tom3.wav",
+     "sha256": "c23d8daf91a418c3813d74fef5b7ea026e77b801463846b1310b75956a4a2a93",
+     "bytes": 7196716,
+     "clips": [
+      {"id": "kit-drskit-tom3-19", "family": "kit", "piece": "tom", "dynamic": "power-middle-third", "dynamic_from": "DrumGizmo sample power 69.256300: the power middle third of the instrument's 30 hits", "articulation": "Tom3; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 2.892993, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 127581, "clip_sha256": "3ba44a0f84da5ac8000c5dd84bb6b4ab833775778c7639f8d83910a915ea7480", "status": "VALID", "failed": [], "screen": {"onset_s": 0.003, "noise_db": -82.69, "noise_method": "tail", "peak_db": -28.1, "snr_db": 54.6, "reattack_db": 0.0, "tail_db": -86.4, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
      "path": "U4/drskit/DRSKit/Tom3/samples/20-Tom3.wav",
      "archive_member": "DRSKit/Tom3/samples/20-Tom3.wav",
      "sha256": "5c5667e4c72f9133a6337e46f5ddd00486efe6ecf7ad300bb299bc289cb3d863",
@@ -1550,6 +1754,78 @@
      "bytes": 6342304,
      "clips": [
       {"id": "kit-drskit-tom3-21", "family": "kit", "piece": "tom", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 84.267600: the power high third of the instrument's 30 hits", "articulation": "Tom3; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 2.552993, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 112587, "clip_sha256": "31857ac3100fc5f28dee43d2b179c8de584c42202feaf92c11cd9717ccd8b07c", "status": "VALID", "failed": [], "screen": {"onset_s": 0.003, "noise_db": -78.09, "noise_method": "tail", "peak_db": -27.29, "snr_db": 50.8, "reattack_db": 1.12, "tail_db": -82.47, "clipped_runs": 0}, "source_channels": [7, 6]}
+     ]
+    },
+    {
+     "path": "U4/drskit/DRSKit/Tom3/samples/22-Tom3.wav",
+     "archive_member": "DRSKit/Tom3/samples/22-Tom3.wav",
+     "sha256": "84c7fe91117faca9b8ee135503c517f0355d0abaccdaf183f4717aa24a80a44b",
+     "bytes": 7773760,
+     "clips": [
+      {"id": "kit-drskit-tom3-22", "family": "kit", "piece": "tom", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 89.418000: the power high third of the instrument's 30 hits", "articulation": "Tom3; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 3.091995, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 136357, "clip_sha256": "7ac9dc7f82c75217e6b5edd8e24254421bb1d12aba5543375feaeaf53622a0ec", "status": "VALID", "failed": [], "screen": {"onset_s": 0.002, "noise_db": -77.74, "noise_method": "tail", "peak_db": -25.88, "snr_db": 51.85, "reattack_db": 0.0, "tail_db": -79.65, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
+     "path": "U4/drskit/DRSKit/Tom3/samples/23-Tom3.wav",
+     "archive_member": "DRSKit/Tom3/samples/23-Tom3.wav",
+     "sha256": "80a4e6a8e6d3772d483f4ae882c76d99ea0753c9ef910d05cf1831f57df22836",
+     "bytes": 8136928,
+     "clips": [
+      {"id": "kit-drskit-tom3-23", "family": "kit", "piece": "tom", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 94.628400: the power high third of the instrument's 30 hits", "articulation": "Tom3; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 3.272993, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 144339, "clip_sha256": "9f045818c78cfec92c1b2369436510f4765a07d9d4e01fee834650d0bdcf8b2b", "status": "VALID", "failed": [], "screen": {"onset_s": 0.003, "noise_db": -81.01, "noise_method": "tail", "peak_db": -24.97, "snr_db": 56.04, "reattack_db": 1.56, "tail_db": -83.64, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
+     "path": "U4/drskit/DRSKit/Tom3/samples/24-Tom3.wav",
+     "archive_member": "DRSKit/Tom3/samples/24-Tom3.wav",
+     "sha256": "230ff59d3e8b96202efc666b1092042d73799974ef9a3f6ee1327d3229ae6e73",
+     "bytes": 9004392,
+     "clips": [
+      {"id": "kit-drskit-tom3-24", "family": "kit", "piece": "tom", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 102.520000: the power high third of the instrument's 30 hits", "articulation": "Tom3; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 3.612993, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 159333, "clip_sha256": "4a637ec49d83333c3f168c7b1d94e8e8e6bd702e48f58d993fe06d1db0a13da9", "status": "VALID", "failed": [], "screen": {"onset_s": 0.003, "noise_db": -82.15, "noise_method": "tail", "peak_db": -25.21, "snr_db": 56.94, "reattack_db": 1.98, "tail_db": -84.53, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
+     "path": "U4/drskit/DRSKit/Tom3/samples/25-Tom3.wav",
+     "archive_member": "DRSKit/Tom3/samples/25-Tom3.wav",
+     "sha256": "a9cc86cf6e42805549e1310b4a4d3ce3e07285eb8c92551f497b0e7fc937d4f5",
+     "bytes": 9660580,
+     "clips": [
+      {"id": "kit-drskit-tom3-25", "family": "kit", "piece": "tom", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 112.041000: the power high third of the instrument's 30 hits", "articulation": "Tom3; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 3.852993, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 169917, "clip_sha256": "16bea1722a8a475c94189d8118c373cba4b4f36d26cb7d811ccf6973d51600cf", "status": "VALID", "failed": [], "screen": {"onset_s": 0.003, "noise_db": -81.65, "noise_method": "tail", "peak_db": -24.66, "snr_db": 56.98, "reattack_db": 0.0, "tail_db": -84.49, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
+     "path": "U4/drskit/DRSKit/Tom3/samples/26-Tom3.wav",
+     "archive_member": "DRSKit/Tom3/samples/26-Tom3.wav",
+     "sha256": "65376d33304629c4ac227634e1e70f7e52b1e4db076410a47f3f77229c478977",
+     "bytes": 8303120,
+     "clips": [
+      {"id": "kit-drskit-tom3-26", "family": "kit", "piece": "tom", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 125.255000: the power high third of the instrument's 30 hits", "articulation": "Tom3; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 3.352993, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 147867, "clip_sha256": "9eb118e0afd7f8b86e399ab0b717823e7bccf1bf590dbdb25c41fd19b380b937", "status": "VALID", "failed": [], "screen": {"onset_s": 0.003, "noise_db": -77.57, "noise_method": "tail", "peak_db": -23.8, "snr_db": 53.77, "reattack_db": 0.06, "tail_db": -80.84, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
+     "path": "U4/drskit/DRSKit/Tom3/samples/27-Tom3.wav",
+     "archive_member": "DRSKit/Tom3/samples/27-Tom3.wav",
+     "sha256": "6b2ad7f89f14aed46e8b780eb3659be63bd3ca73a58c5cdd3e730ba6c3daeb6e",
+     "bytes": 6884560,
+     "clips": [
+      {"id": "kit-drskit-tom3-27", "family": "kit", "piece": "tom", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 134.170000: the power high third of the instrument's 30 hits", "articulation": "Tom3; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 2.752993, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 121407, "clip_sha256": "78636d3cc6e27dfb24b93c6865fa162eca4968e3a4a2c37e1887298a8065b105", "status": "VALID", "failed": [], "screen": {"onset_s": 0.003, "noise_db": -76.66, "noise_method": "tail", "peak_db": -23.35, "snr_db": 53.31, "reattack_db": 0.0, "tail_db": -81.28, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
+     "path": "U4/drskit/DRSKit/Tom3/samples/28-Tom3.wav",
+     "archive_member": "DRSKit/Tom3/samples/28-Tom3.wav",
+     "sha256": "605c0814db45c879bd2bb33f50ce83db037b82543b76c8fece6ad54eb4d743e8",
+     "bytes": 9560116,
+     "clips": [
+      {"id": "kit-drskit-tom3-28", "family": "kit", "piece": "tom", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 145.062000: the power high third of the instrument's 30 hits", "articulation": "Tom3; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 3.852993, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 169917, "clip_sha256": "60e64bd84e6229bdd2786dcad638b1f75de9a5a54b7ad49222c5d4d84c402489", "status": "VALID", "failed": [], "screen": {"onset_s": 0.003, "noise_db": -79.93, "noise_method": "tail", "peak_db": -22.87, "snr_db": 57.06, "reattack_db": 1.64, "tail_db": -82.12, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
+     ]
+    },
+    {
+     "path": "U4/drskit/DRSKit/Tom3/samples/29-Tom3.wav",
+     "archive_member": "DRSKit/Tom3/samples/29-Tom3.wav",
+     "sha256": "872ce9e2720e2261b3585ef0d88b53a3ea444957728ef4dfe6a37aeda0422b6d",
+     "bytes": 12285800,
+     "clips": [
+      {"id": "kit-drskit-tom3-29", "family": "kit", "piece": "tom", "dynamic": "power-high-third", "dynamic_from": "DrumGizmo sample power 158.862000: the power high third of the instrument's 30 hits", "articulation": "Tom3; overheads OHR+OHL (file channels 7,6)", "kind": "decaying", "trim_start_s": 0.0, "trim_end_s": 4.952993, "channels": 2, "sample_rate_hz": 44100, "clip_frames": 218427, "clip_sha256": "95f515c57d57e7696716ba541bbba3280f2c59d83cff7df55321dc785a980609", "status": "VALID", "failed": [], "screen": {"onset_s": 0.003, "noise_db": -93.6, "noise_method": "tail", "peak_db": -22.21, "snr_db": 71.39, "reattack_db": 2.54, "tail_db": -96.4, "clipped_runs": 0}, "source_channels": [7, 6], "cut_at": "refscreen-4 at frankensim f692b32c0b; decompose.py, which its cut and screen call, changed after 4778d99eb2"}
      ]
     },
     {
@@ -21602,8 +21878,8 @@
    }
   },
   "kit": {
-   "rows": 233,
-   "valid": 82,
+   "rows": 269,
+   "valid": 118,
    "dynamics_with_valid": 14,
    "most_pitches_in_one_dynamic": 5,
    "distinct_valid": 8,
