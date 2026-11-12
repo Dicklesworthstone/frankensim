@@ -52,6 +52,11 @@
 //! Inline physical data and the shared gas laws are unchanged; gas declarations
 //! remain in the performance, not in an external `--gas-record` file.
 //!
+//! `music_render instrument DESCRIPTION.tsv FINGERING OUT.wav [wind options]` lowers one
+//! fingering of a wind description to its reed card, writes it as OUT.performance and renders it
+//! with `wind`; `music_render instrument DESCRIPTION.tsv --lower OUTDIR` writes every card and
+//! index.tsv. See `music_render/instrument_input.rs`.
+//!
 //! `music_render resolved INPUT.performance OUT.wav [--block N] [--decimate]`
 //! assembles the original resolved NSF volume and live material DG bore from
 //! physical grid, solid-cell, initial-state and finite boundary-history data.
@@ -131,6 +136,8 @@ mod stream_output;
 mod ensemble_input;
 #[path = "music_render/thermochemical.rs"]
 mod thermochemical;
+#[path = "music_render/instrument_input.rs"]
+mod instrument_input;
 use fs_couple::modal_acoustic_time::{
     ModalAcousticMode, ModalAcousticState, ModalAcousticTimeBudget, ModalAcousticTimeModel,
 };
@@ -372,6 +379,10 @@ fn main() {
     let (args, gas_options) = thermochemical::Options::extract(&args).unwrap_or_else(|e| fail(&e));
     if args.first().is_some_and(|arg| arg == "wind") {
         wind_input::run_with_gas_options(&args[1..], &gas_options).unwrap_or_else(|e| fail(&e));
+        return;
+    }
+    if args.first().is_some_and(|arg| arg == "instrument") {
+        instrument_input::run_with_gas_options(&args[1..], &gas_options).unwrap_or_else(|e| fail(&e));
         return;
     }
     if args.first().is_some_and(|arg| arg == "resolved") {
