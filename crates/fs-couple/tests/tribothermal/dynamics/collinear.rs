@@ -2,6 +2,9 @@
 use super::*;
 use fs_couple::tribothermal::dynamics::collinear::CollinearMotionSolve;
 
+#[path = "collinear/graph.rs"]
+mod graph;
+
 fn event_controls(axis: usize) -> CollinearMotionSolve {
     CollinearMotionSolve { sliding: motion_controls().sliding, tangent_axis: axis,
         maximum_segments: 3, maximum_motion_trials: 200, maximum_bisections: 80,

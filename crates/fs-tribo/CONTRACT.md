@@ -3122,8 +3122,8 @@ fraction, heat capacity or flash temperature.
   `EndpointEnergy` with 5.0e-13 J measured against 3.7e-15 J allowed. Found
   by review.)
 
-`tests/sliding_interface.rs` (six tests, `cargo test -p fs-tribo --features
-component --test sliding_interface`): with a Coulomb coefficient
+`tests/sliding_interface.rs` (six of its tests, `cargo test -p fs-tribo
+--features component --test sliding_interface`): with a Coulomb coefficient
 `0.8 - 0.01 (T - 300 K)` the interface passes the contract's conformance
 check at three slip rates (one oblique, one reversed), three temperatures
 and three steps, with heat `-mu N |v|`, traction `mu N` along the slip, the
@@ -3149,6 +3149,123 @@ thermal node and a thermal timeline, and the module accepts every step of
 it at its own tests' tolerances (the record is in
 `crates/fs-system/CONTRACT.md`).
 
-Not offered: a slip port (it needs a non-smooth solve tier in the kernel);
-any law's analytic tangent in temperature; a thermoelastic account for a
-reversible law whose stiffness depends on temperature.
+Not offered by this adapter: a slip port (`FrictionInterface`, next, has
+the mechanical ports); any law's analytic tangent in temperature; a
+thermoelastic account for a reversible law whose stiffness depends on
+temperature.
+
+## A friction interface between two bodies on the composition contract
+
+`FrictionInterface` (same module, same feature) puts a `TangentialLaw`
+between two mechanical ports, behind the non-smooth tier of the composition
+contract (`fs_ports::component::LoadLine`; `add_on_line` in `fs-system`). A
+dry law holds any force up to its limit at zero slip, so its force is not a
+function of the slip; the kernel hands the component the line its neighbours
+present, `mean slip = released - c force`, and the component settles on it.
+The law still owns its traction, its regime, its state and its storage, and
+is never changed: it is asked in two ways.
+
+- Ports `a` and `b` receive the velocities of the two sides [m/s] and
+  return the friction force [N] and its opposite; the slip rate is the flow
+  at `a` less the flow at `b`. Port `heat` receives the interface
+  temperature [K] and returns the heat rate into the interface [W]. The law
+  comes from `law_at(T)`, as for the prescribed interface. The state is the
+  law's checkpoint, its reversible energy, the slip rate the last step
+  ended with (exactly zero is rest) and, for an end whose flow was given,
+  that flow. Class `NonSmooth`.
+- A step. The kernel's bodies step on the midpoint rule, so a port carries
+  the mean velocity of a step and the slip ends at twice its mean less its
+  start `s0`. From rest the law is asked for its own return map on the line
+  (released increment `dt released`, compliance `dt c`): it holds with no
+  slip, or slides at the traction it solves. Sliding, it is asked for its
+  kinetic traction `K` at a prescribed mean slip, and the mean solves
+  `m = released - c K(m)`, bracketed between `s0 / 2` and the released
+  speed. The static map is never asked of a sliding pair: it would hold the
+  mean slip at zero, end the slip at `-s0` and lose the heat of the
+  stopping distance.
+- A stop. A step never carries the slip through zero. Where the kinetic
+  traction would do so, the component answers `Proposal::Shorten` with the
+  step that ends at the stop, and the next step starts at rest, where the
+  static map decides whether the pair holds or slides the other way. A
+  step that ends at zero slip has the mean `s0 / 2` whatever its length, so
+  the traction of the stop is known before the stop is; the stop is located
+  from the line of the step asked for as if the neighbours were bodies
+  under held forces, for which it is exact (one cut). Beside anything else
+  the located instant is only as good as the step it is located from: the
+  cut step ends near the stop, and is cut again if beyond it, or taken,
+  sliding, if short of it, the stop being left to the next step.
+- `InterfaceLoad`: the normal load (a constant of the component), the
+  nominal pressure for a law bounded in it, the law's solve budgets, the
+  work tolerance of the law's own accounts (as for the prescribed
+  interface), and `impulse_tolerance_n_s`, which stands next to the law's
+  force tolerance: `dt / (2 c)` is the inertia the slip moves against, and
+  a relative momentum below the tolerance is none. A starting slip below it
+  is rest; a step is taken to end at rest when the kinetic traction would
+  leave less, that is, when the force that ends it at zero slip is within
+  the law's force tolerance plus `impulse_tolerance_n_s / dt` of `K`. It
+  has the meaning of the `impulse_tolerance_n_s` of fs-couple's
+  `CollinearMotionSolve`. (With the force tolerance alone, 1e-12, a run of
+  47 steps ended its cut step with a slip of 7e-15 m/s outside the band,
+  and the step after it could not be located.)
+- Heat. What the two ends give up, the force times the mean slip that
+  crossed, less what the law stores, leaves through `heat`; entropy
+  generated is that heat over the interface temperature. Where a step ends
+  at rest the force is the one that ends it there, within the stop's band
+  of `K`, so the heat is what the ports carried and not the law's
+  dissipation to the last digit. The law's own accounts for the step it was
+  asked for must close within `work_tolerance_j`.
+- A prescribed end (its row of the line is zero) is held over the step. A
+  change of its flow from one step to the next is a jump: the step starts
+  with that much more slip. With both ends prescribed there is no line and
+  the component is the prescribed interface with its force on two ports.
+- Refused, besides what the prescribed interface refuses, each by the field
+  it names: a law that holds a slip it is prescribed, or keeps slip where
+  it holds a pair at rest (the rows above are for laws that are set-valued
+  at rest and slide at any prescribed slip, the dry laws; a law with a
+  compliance of its own is a function of the slip and needs no line); a
+  traction against the slip; a sliding root not found within the law's
+  budget (`TriboError::TangentialSolve`).
+- It needs two things of the kernel, both in `fs-system` since 7af293b67e
+  ("Requests to shorten inside a loop"): a perturbed proposal that asks to
+  shorten must not shorten the step, and the component must first be asked
+  at the released flows of a step. On the kernel before, a stop was cut a
+  second time, short of itself, and a pair that started sliding was cut
+  without end.
+
+Not covered: a second tangent axis (the law's is given no slip); a
+prescribed side that accelerates (held over each step it is a staircase of
+jumps: a pair static friction would carry is dragged after every jump and
+the step cut where it is caught, the steps shrink by `m a / K` from each
+to the next, and the run ends in a step that does not converge, as a test
+of the graph file below shows; the kernel's ideal slider can be told the
+span of such a side, this component cannot); the instant of a break-away inside its step (the static
+map decides for the whole step); a second root of the sliding relation for
+a traction that falls with speed (a sign bracket is not a proof that the
+root is the only one); a normal load that changes.
+
+`tests/sliding_interface.rs` (eight of its fourteen tests): at rest the
+Coulomb law (5 N held, 3 N sliding) holds pushes up to 4.999 N with no slip
+and no heat and slides beyond; a sliding pair slides on against 3 N, and
+asked for any step that ends beyond its stop (1.0001 to 1000 times as
+long) it asks for the step that ends there, the same from every step
+length to 64 units in the last place, and that step ends at rest exactly
+with the heat of the stopping distance; the impulse tolerance decides what
+is rest (a slip of 4e-11 m/s on 2 kg is, one of 6e-11 m/s is cut at its
+stop; a step that ends 2e-11 N s beyond a stop is taken to end at rest
+with 3 N less 3e-11, one that ends 4e-10 N s beyond is cut); a given end
+that jumps by 0.3 m/s starts the step with that slip; with both ends given
+the force and the law's checkpoint are `SlidingInterface`'s, to the bit;
+the conformance check of the load-line tier passes at 120 points and
+answers `Shortened` at 72 more; a traction that falls with speed (the
+hyperbolic law) is solved on the line to the root a bisection in the test
+finds, to 1e-13 m/s; the refusals, by field, a root budget of two
+evaluations among them. Fifteen planted defects in a scratch copy each
+fail one of these tests or more.
+
+Against the hand-written module: `crates/fs-couple/tests/tribothermal/
+dynamics/collinear/graph.rs` declares fs-couple's collinear stop and
+reversal from this component, two masses and two enthalpy bodies, and
+agrees with the module's own report of three of its cases to 1.3e-11, with
+one cut for a stop inside a step; the closed forms of a spring's turning
+points, a belt's stick-slip period, a jumping side and two lumped bodies
+are checked there too (the record is in `crates/fs-system/CONTRACT.md`).

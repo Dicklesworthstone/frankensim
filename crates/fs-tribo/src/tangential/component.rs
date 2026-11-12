@@ -1,5 +1,7 @@
-//! A sliding interface under a prescribed slip rate, on the composition
-//! contract.
+//! Friction laws on the composition contract: a sliding interface under a
+//! prescribed slip rate, and a friction interface between two bodies.
+//!
+//! # Under a prescribed slip
 //!
 //! A [`TangentialLaw`] owns the traction, the solved slip, the regime, any
 //! reversible storage and the dissipation it exports. This adapter drives
@@ -22,9 +24,10 @@
 //! source is called at every evaluation of a step and must be a pure
 //! function.
 //!
-//! Work. No mechanical port is offered. A dry law is set-valued in the slip
-//! rate, and a kernel that differences smooth port maps cannot solve for the
-//! slip through a port. The motion is prescribed, so the work it does
+//! Work. No mechanical port is offered here. A dry law is set-valued in the
+//! slip rate, and a kernel that differences smooth port maps cannot solve
+//! for the slip through a port ([`FrictionInterface`], below, has the ports,
+//! on the kernel's non-smooth tier). The motion is prescribed, so the work it does
 //! against the traction is the component's own account, as a prescribed
 //! force's is: the stored energy is the law's reversible energy less the
 //! work received so far, and a step's receipt books the law's closure
@@ -48,17 +51,134 @@
 //!
 //! One call does a bounded amount of work (the law's own root budget), and
 //! [`TriboError`] has no cancellation value, so `cx` is not polled here.
+//!
+//! # Between two bodies
+//!
+//! [`FrictionInterface`] puts the same kind of law between two mechanical
+//! ports. `a` and `b` receive the velocities [m/s] of the two sides and
+//! return the friction force [N] and its opposite; the slip rate is the flow
+//! at `a` less the flow at `b`. `heat` receives the interface temperature
+//! [K] and returns the heat rate into the interface [W], minus the loss. The
+//! law comes from `law_at(T)`, as above.
+//!
+//! A dry law holds any force up to its limit at zero slip, so its force is
+//! not a function of the slip. The component is therefore added on the
+//! kernel's non-smooth tier (`fs_ports::component::LoadLine`, `add_on_line`
+//! in `fs-system`), which hands it the line its neighbours present:
+//! `mean slip = released - c force`.
+//!
+//! The bodies of a kernel step on the midpoint rule: a port carries the MEAN
+//! velocity of a step, and the slip a step ends with is twice its mean less
+//! the slip it started with. With `s0` the slip a step starts with, `K` the
+//! law's kinetic traction, and `along` the force that would end the step at
+//! zero slip, `(released - s0 / 2) / c` taken along `s0`:
+//!
+//! | the step starts | condition | what the law is asked | the step |
+//! |---|---|---|---|
+//! | at rest | | its own return map on the line: released increment `dt released`, compliance `dt c` | holds with no slip, or slides at the traction the law solves and ends with twice its mean slip |
+//! | sliding | `along > K` | its traction at a prescribed mean slip; the mean solves `m = released - c K(m)` | slides on the same way |
+//! | sliding | `along = K`, to the stop's band | its traction at the mean `s0 / 2` | ends at rest, exactly, with the force `along` |
+//! | sliding | `along < K` | its traction at the mean `s0 / 2` | is not taken: the slip would pass zero inside it, and the component asks for the step that ends at the stop (`Proposal::Shorten`) |
+//!
+//! - The law's static map is asked only of a pair at rest. Asked of a
+//!   sliding pair it would hold the MEAN slip of the step at zero: the slip
+//!   would end at `-s0`, and the heat of the stopping distance would be
+//!   lost. (The hand-written `tribothermal::dynamics::collinear` of
+//!   `fs-couple` says the same of its static probe.)
+//! - A step never carries the slip through zero. Arrest and reversal go
+//!   through the kernel's event path: the step is cut at the stop, and the
+//!   next one starts at rest, where the static map decides whether the pair
+//!   holds or slides the other way.
+//! - Rest is a slip of exactly zero in the state. What is near enough to
+//!   rest is decided by momentum: `dt / (2 c)` is the inertia the slip
+//!   moves against, and [`InterfaceLoad::impulse_tolerance_n_s`] is the
+//!   relative momentum below which there is none. A starting slip below it
+//!   is rest, and the stop's band is the law's own force tolerance plus
+//!   that tolerance over `dt`. (It is the impulse tolerance of the
+//!   hand-written module. With the law's force tolerance alone, 1e-12, a
+//!   run of 47 steps ended its cut step with a slip of 7e-15 m/s that the
+//!   band did not take, and the step after it could not be located.)
+//! - The heat is the work of the two ends: the force times the mean slip
+//!   that crossed, less what the law stores. Where a step ends at rest the
+//!   force is the one that ends it there, within the band of the law's
+//!   traction, so the heat is what the ports carried and not the law's
+//!   dissipation to the last digit. The law's own accounts for the step it
+//!   was asked for are admitted as above, within `work_tolerance_j`.
+//!
+//! Where the stop is found. A step that ends at zero slip has the mean
+//! `s0 / 2` whatever its length, so the kinetic traction of the stop is
+//! known before the stop is. The stop is then located from the line of the
+//! step that was asked for, at `dt (abs(s0) / 2) / (c K - (released - s0))`
+//! with the last term taken along `s0`, as if what the interface is joined
+//! to were bodies under held forces: for those `released - s0` and `c` grow
+//! in proportion to the step. For those it is exact: one cut, and the cut
+//! step ends at rest. Beside anything else (a spring) the located instant is
+//! only as good as the step it is located from. The cut step ends near the
+//! stop. Beyond it, it is cut again, from a line that is now close. Short of
+//! it, it is taken, sliding, and the stop is left to the next step, which is
+//! asked at full length again. Measured, in
+//! `crates/fs-couple/tests/tribothermal/dynamics/collinear/graph.rs`: beside
+//! a linear spring two or three cuts in the step that holds the stop; beside
+//! springs with a cubic term in steps of 0.07 s, up to five cuts in that
+//! step, or, with two bodies, three further steps of 4e-7 s and less. The
+//! stop is reached in every case, at rest exactly.
+//!
+//! What it needs of the kernel. A perturbed proposal that asks to shorten
+//! must not shorten the step, and the component must first be asked at the
+//! released flows of a step (`fs-system`, "Requests to shorten inside a
+//! loop"). Without the first a stop was cut a second time, short of itself;
+//! without the second a pair that starts sliding with no starting flows
+//! given to its ports was cut without end.
+//!
+//! A prescribed end (its row of the line is zero) is held over the step,
+//! and a change of its flow from one step to the next is a jump: the step
+//! starts with that much more slip, and the pair slides until the other
+//! side is caught. With both ends prescribed there is no line, and the
+//! component is the prescribed interface above with its force on two ports.
+//!
+//! Class `NonSmooth`. Entropy generated: the heat over the interface
+//! temperature. `cx` is not polled, as above.
+//!
+//! Refused, besides what the prescribed interface refuses: a law that holds
+//! a slip it is prescribed, or that keeps slip where it holds a pair at rest
+//! (`friction_interface_law_holds_a_prescribed_slip`,
+//! `friction_interface_static_map_kept_slip`). The rows above are for laws
+//! that are set-valued at rest and slide at any prescribed slip, the dry
+//! laws; a law with a compliance of its own is a function of the slip and
+//! needs no line. Also refused: a traction against the slip it is asked at,
+//! and a sliding root not found within the law's budget
+//! (`TriboError::TangentialSolve`).
+//!
+//! Not covered:
+//!
+//! - One tangent axis. The law's second axis is given no slip.
+//! - A prescribed side that ACCELERATES. Held over each step it is a
+//!   staircase of jumps: a pair that static friction would carry is
+//!   dragged under the kinetic traction after every jump and the step is
+//!   cut where it is caught, a fraction `m a / K` of the step before. The
+//!   steps shrink by that fraction from each to the next and the run ends
+//!   in a step that does not converge (a test of the graph file above
+//!   shows it). The kernel's ideal slider can be told the span of such a
+//!   side; this component cannot.
+//! - Break-away inside a step. The static map decides for the whole step
+//!   from the line of that step: a pair lets go in the first step whose
+//!   force is beyond the static limit, and the instant is not located.
+//! - A traction that falls with speed can meet the line at more than one
+//!   speed. While sliding, the root is bracketed between half the starting
+//!   slip and the released speed, and a sign bracket is not a proof that it
+//!   is the only one. From rest the law's own map chooses.
+//! - The normal load is a constant of the component.
 
 use core::fmt;
 use core::marker::PhantomData;
 use core::num::NonZeroUsize;
 
 use fs_exec::Cx;
-use fs_ports::StableId;
-use fs_ports::component::{Class, Component, PortRole, PortSpec, Proposal, Receipt};
+use fs_ports::component::{Class, Component, LoadLine, PortRole, PortSpec, Proposal, Receipt};
+use fs_ports::{PortKind, StableId};
 
-use super::{TangentialLaw, TangentialSolveConfig, TangentialStepInput};
-use crate::TriboError;
+use super::{TangentialLaw, TangentialSolveConfig, TangentialStep, TangentialStepInput};
+use crate::{FrictionRegime, TriboError};
 
 /// The load and motion a [`SlidingInterface`] is held to.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -327,5 +447,583 @@ where
         *heat_w = heat;
         traction_n.copy_from_slice(&traction);
         Ok(Proposal::Step(receipt))
+    }
+}
+
+/// The load a [`FrictionInterface`] is pressed with, and the law's budgets.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InterfaceLoad {
+    /// Compressive normal load [N], non-negative.
+    pub normal_n: f64,
+    /// Nominal pressure [Pa], for a law that is bounded in it.
+    pub nominal_pressure_pa: Option<f64>,
+    /// The law's numerical and effort budgets.
+    pub solve: TangentialSolveConfig,
+    /// Relative momentum [N s] below which the pair is at rest: a slip
+    /// whose removal over the step needs less than this is none, and a
+    /// step is taken to end at rest when the kinetic traction would leave
+    /// less. Positive.
+    pub impulse_tolerance_n_s: f64,
+    /// Largest admitted defect of the law's own work balance for a step
+    /// [J], as for [`PrescribedSlip`].
+    pub work_tolerance_j: f64,
+}
+
+/// State of a [`FrictionInterface`]: the law's own checkpoint, its
+/// reversible energy, the slip rate the last step ended with, and, for each
+/// end whose flow was given in that step, the flow it was given.
+///
+/// The slip rate is the flow port `a` receives less the flow port `b`
+/// receives, with the signs the ports receive them in: a member of a
+/// common-flow junction receives MINUS the flow of the port that sets it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrictionState<S> {
+    tangential: S,
+    /// The law's reversible energy at `tangential` [J].
+    reversible_j: f64,
+    /// Flow at `a` less flow at `b` at the end of the last step [m/s].
+    /// Exactly zero is rest.
+    slip_m_s: f64,
+    given_m_s: [Option<f64>; 2],
+}
+
+impl<S> FrictionState<S> {
+    /// The law's checkpoint: its slip, its thermal boundary, its layers.
+    #[must_use]
+    pub const fn tangential(&self) -> &S {
+        &self.tangential
+    }
+
+    /// The slip rate the last step ended with: flow at `a` less flow at
+    /// `b` [m/s].
+    #[must_use]
+    pub const fn slip_m_s(&self) -> f64 {
+        self.slip_m_s
+    }
+
+    /// Whether the last step ended at rest: a slip rate of exactly zero.
+    #[must_use]
+    pub fn at_rest(&self) -> bool {
+        self.slip_m_s == 0.0
+    }
+}
+
+/// A friction interface between two mechanical ports, with the law `law_at`
+/// returns for the interface temperature of each step. See the module's
+/// "Between two bodies".
+pub struct FrictionInterface<L, F> {
+    law_at: F,
+    load: InterfaceLoad,
+    ports: [PortSpec; 3],
+    law: PhantomData<fn() -> L>,
+}
+
+impl<L, F> fmt::Debug for FrictionInterface<L, F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FrictionInterface")
+            .field("load", &self.load)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What a step on the line comes to.
+enum OnLine<S> {
+    /// The step is taken: the force returned at `a` [N], the mean slip
+    /// rate [m/s], the slip rate the step ends with [m/s], and the law's
+    /// own step.
+    Taken {
+        force_n: f64,
+        mean_m_s: f64,
+        ends_m_s: f64,
+        law: TangentialStep<S>,
+    },
+    /// The slip reaches zero inside the step, this long after its start [s].
+    StopsAfter(f64),
+}
+
+impl<L, F> FrictionInterface<L, F>
+where
+    L: TangentialLaw,
+    F: Fn(f64) -> Result<L, TriboError>,
+{
+    /// An interface pressed with `load`, with the law `law_at` gives at an
+    /// interface temperature [K].
+    ///
+    /// # Errors
+    /// A normal load or nominal pressure that is negative or not finite, a
+    /// work tolerance that is negative or not finite, or solve budgets the
+    /// law's owner refuses.
+    pub fn new(law_at: F, load: InterfaceLoad) -> Result<Self, TriboError> {
+        load.solve.validate()?;
+        crate::nonnegative_finite(load.normal_n, "normal_force")?;
+        if let Some(pressure_pa) = load.nominal_pressure_pa {
+            crate::nonnegative_finite(pressure_pa, "contact_pressure_pa")?;
+        }
+        crate::nonnegative_finite(load.work_tolerance_j, "work_tolerance_j")?;
+        crate::positive_finite(load.impulse_tolerance_n_s, "impulse_tolerance_n_s")?;
+        let name = |id: &str| StableId::new(id).map_err(|_| refused("port_identifier"));
+        let mechanical = |id: &str| {
+            PortSpec::power(
+                name(id)?,
+                PortKind::MechanicalForceVelocity,
+                PortRole::FlowIn,
+                NonZeroUsize::MIN,
+            )
+            .map_err(|_| refused("mechanical_port"))
+        };
+        Ok(Self {
+            law_at,
+            load,
+            ports: [
+                mechanical("a")?,
+                mechanical("b")?,
+                PortSpec::heat(name("heat")?, PortRole::EffortIn)
+                    .map_err(|_| refused("heat_port"))?,
+            ],
+            law: PhantomData,
+        })
+    }
+
+    /// The load this interface is pressed with.
+    #[must_use]
+    pub const fn load(&self) -> &InterfaceLoad {
+        &self.load
+    }
+
+    /// The unloaded state of the law at `interface_temperature_k`, sliding
+    /// at `slip_m_s` (the flow port `a` receives less the flow port `b`
+    /// receives; zero is rest): the state to hand to a kernel with this
+    /// component.
+    ///
+    /// # Errors
+    /// A temperature that is not positive and finite, a slip rate that is
+    /// not finite, the source's refusal, or a reversible energy that is not
+    /// finite.
+    pub fn start(
+        &self,
+        interface_temperature_k: f64,
+        slip_m_s: f64,
+    ) -> Result<FrictionState<L::State>, TriboError> {
+        let law = self.law_at_k(interface_temperature_k)?;
+        let tangential = law.initial_state();
+        let reversible_j = finite(law.stored_energy_j(&tangential), "stored_energy_j")?;
+        Ok(FrictionState {
+            tangential,
+            reversible_j,
+            slip_m_s: finite(slip_m_s, "slip_m_s")?,
+            given_m_s: [None; 2],
+        })
+    }
+
+    fn law_at_k(&self, interface_temperature_k: f64) -> Result<L, TriboError> {
+        if !(interface_temperature_k.is_finite() && interface_temperature_k > 0.0) {
+            return Err(refused("interface_temperature_k"));
+        }
+        (self.law_at)(interface_temperature_k)
+    }
+
+    /// The law's step from `old` over `dt_s` at a mean slip rate, as the
+    /// law resolves it against a compliance [m/N] (zero: the slip is
+    /// prescribed).
+    fn advance(
+        &self,
+        law: &L,
+        old: &L::State,
+        dt_s: f64,
+        kelvin: f64,
+        released_m_s: f64,
+        compliance_m_per_n: f64,
+    ) -> Result<TangentialStep<L::State>, TriboError> {
+        law.advance(
+            old,
+            &TangentialStepInput {
+                normal_n: self.load.normal_n,
+                slip_increment_m: [dt_s * released_m_s, 0.0],
+                dt_s,
+                contact_temperature_k: Some(kelvin),
+                nominal_pressure_pa: self.load.nominal_pressure_pa,
+                compliance_m_per_n,
+                solve: self.load.solve,
+            },
+        )
+    }
+
+    /// The law's kinetic step at a prescribed mean slip rate that is not
+    /// zero.
+    fn sliding(
+        &self,
+        law: &L,
+        old: &L::State,
+        dt_s: f64,
+        kelvin: f64,
+        mean_m_s: f64,
+    ) -> Result<TangentialStep<L::State>, TriboError> {
+        let step = self.advance(law, old, dt_s, kelvin, mean_m_s, 0.0)?;
+        if step.regime != FrictionRegime::Sliding {
+            return Err(refused("friction_interface_law_holds_a_prescribed_slip"));
+        }
+        Ok(step)
+    }
+
+    /// One step on the load line `mean = released - c force`, from the slip
+    /// rate `start`. See the module's table.
+    #[allow(clippy::too_many_arguments)]
+    fn on_line(
+        &self,
+        law: &L,
+        old: &L::State,
+        dt_s: f64,
+        kelvin: f64,
+        start: f64,
+        released: f64,
+        c: f64,
+    ) -> Result<OnLine<L::State>, TriboError> {
+        if !(c > 0.0) {
+            // No compliance: both flows are given, or what the interface is
+            // joined to is rigid to within rounding. The slip is what it
+            // is. With none at all nothing says what the pair holds, and
+            // the law returns no traction.
+            let step = if released == 0.0 {
+                self.advance(law, old, dt_s, kelvin, 0.0, 0.0)?
+            } else {
+                self.sliding(law, old, dt_s, kelvin, released)?
+            };
+            let force_n = step.traction_n[0];
+            let mean_m_s = released - c * force_n;
+            return Ok(OnLine::Taken {
+                force_n,
+                mean_m_s,
+                ends_m_s: 2.0 * mean_m_s - start,
+                law: step,
+            });
+        }
+        // `dt / (2 c)` is the inertia the slip moves against, so a force
+        // times `dt` is the relative momentum it gives or takes. A slip
+        // below the tolerance in that measure is rest.
+        let impulse_n_s = self.load.impulse_tolerance_n_s;
+        if dt_s * (0.5 * start.abs() / c) <= impulse_n_s {
+            // At rest: the law's own static return map on the line. It
+            // holds with no slip, or it slides at the traction it solves.
+            let step = self.advance(law, old, dt_s, kelvin, released, dt_s * c)?;
+            let force_n = step.traction_n[0];
+            return match step.regime {
+                FrictionRegime::Sticking => {
+                    // Exact on purpose: held is no slip at all.
+                    #[allow(clippy::float_cmp)]
+                    if step.slip_increment_m != [0.0; 2] {
+                        return Err(refused("friction_interface_static_map_kept_slip"));
+                    }
+                    Ok(OnLine::Taken {
+                        force_n,
+                        mean_m_s: 0.0,
+                        ends_m_s: 0.0,
+                        law: step,
+                    })
+                }
+                FrictionRegime::Sliding => {
+                    let mean_m_s = released - c * force_n;
+                    Ok(OnLine::Taken {
+                        force_n,
+                        mean_m_s,
+                        ends_m_s: 2.0 * mean_m_s,
+                        law: step,
+                    })
+                }
+            };
+        }
+        // Sliding. A step that ends at zero slip has the mean `start / 2`
+        // whatever its length, so the kinetic traction of the stop is the
+        // law's at that mean, and `along` is the force that would end this
+        // step there.
+        let way = start.signum();
+        let stop = self.sliding(law, old, dt_s, kelvin, 0.5 * start)?;
+        let kinetic_n = way * stop.traction_n[0];
+        if !(kinetic_n >= 0.0) {
+            return Err(refused("friction_interface_traction_drives_the_slip"));
+        }
+        let along_n = way * (released - 0.5 * start) / c;
+        let band_n = self.load.solve.tolerance(along_n, kinetic_n)? + impulse_n_s / dt_s;
+        if along_n > kinetic_n + band_n {
+            return self.slides_on(law, old, dt_s, kelvin, start, released, c, kinetic_n);
+        }
+        if along_n < kinetic_n - band_n {
+            // The kinetic traction stops the slip inside the step. Where,
+            // by the line of this step: for bodies under held forces what
+            // the released flow adds to the starting slip, and the
+            // compliance, both grow in proportion to the step.
+            let shorter_s = dt_s * (0.5 * start.abs()) / (c * kinetic_n - way * (released - start));
+            if shorter_s > 0.0 && shorter_s < dt_s {
+                return Ok(OnLine::StopsAfter(shorter_s));
+            }
+        }
+        // The step ends at rest, with the force that ends it there: the
+        // kinetic traction to within the stop's band.
+        let force_n = way * along_n.max(0.0);
+        Ok(OnLine::Taken {
+            force_n,
+            mean_m_s: released - c * force_n,
+            ends_m_s: 0.0,
+            law: stop,
+        })
+    }
+
+    /// A step that slides on the way it started: the mean speed along the
+    /// slip solves `speed = way released - c K(speed)`, with `K` the law's
+    /// kinetic traction. It is bracketed between `abs(start) / 2`, where the
+    /// traction falls short of what the line needs, and the released speed,
+    /// where the line needs none.
+    #[allow(clippy::too_many_arguments)]
+    fn slides_on(
+        &self,
+        law: &L,
+        old: &L::State,
+        dt_s: f64,
+        kelvin: f64,
+        start: f64,
+        released: f64,
+        c: f64,
+        kinetic_n: f64,
+    ) -> Result<OnLine<L::State>, TriboError> {
+        let way = start.signum();
+        let taken = |step: TangentialStep<L::State>| {
+            let force_n = step.traction_n[0];
+            let mean_m_s = released - c * force_n;
+            OnLine::Taken {
+                force_n,
+                mean_m_s,
+                ends_m_s: 2.0 * mean_m_s - start,
+                law: step,
+            }
+        };
+        let solve = self.load.solve;
+        // The law's traction at a speed less what the line needs there.
+        let at = |speed: f64, needed_n: f64| -> Result<_, TriboError> {
+            let step = self.sliding(law, old, dt_s, kelvin, way * speed)?;
+            let traction_n = way * step.traction_n[0];
+            let residual_n = finite(traction_n - needed_n, "constitutive_residual_n")?;
+            Ok((step, residual_n, solve.tolerance(traction_n, needed_n)?))
+        };
+        // First the speed the stop's traction leaves: the answer wherever
+        // the traction does not depend on the speed.
+        let (mut lower, mut upper) = (0.5 * start.abs(), way * released);
+        let first = way * released - c * kinetic_n;
+        let (step, mut residual_n, mut tolerance_n) = at(first, kinetic_n)?;
+        if residual_n.abs() <= tolerance_n {
+            return Ok(taken(step));
+        }
+        let along_n = (way * released - lower) / c;
+        let (mut lower_n, mut upper_n) = (kinetic_n - along_n, f64::NAN);
+        if residual_n < 0.0 {
+            (lower, lower_n) = (first, residual_n);
+        } else {
+            (upper, upper_n) = (first, residual_n);
+        }
+        let mut used = 1_usize;
+        if upper_n.is_nan() {
+            // At the released speed the line needs no force.
+            let (step, residual, tolerance) = at(upper, 0.0)?;
+            used += 1;
+            if residual.abs() <= tolerance {
+                return Ok(taken(step));
+            }
+            (upper_n, residual_n, tolerance_n) = (residual, residual, tolerance);
+        }
+        while used < solve.max_iterations {
+            used += 1;
+            let width = upper - lower;
+            // A secant step where it keeps a sixteenth of the bracket on
+            // either side; else the middle.
+            let secant = lower - lower_n * width / (upper_n - lower_n);
+            let speed = if secant.is_finite()
+                && secant > lower + width / 16.0
+                && secant < upper - width / 16.0
+            {
+                secant
+            } else {
+                lower + 0.5 * width
+            };
+            if !(speed > lower && speed < upper) {
+                break;
+            }
+            let (step, residual, tolerance) = at(speed, (way * released - speed) / c)?;
+            if residual.abs() <= tolerance {
+                return Ok(taken(step));
+            }
+            (residual_n, tolerance_n) = (residual, tolerance);
+            if residual < 0.0 {
+                (lower, lower_n) = (speed, residual);
+            } else {
+                (upper, upper_n) = (speed, residual);
+            }
+        }
+        Err(TriboError::TangentialSolve {
+            residual_n,
+            tolerance_n,
+            iterations: used,
+        })
+    }
+}
+
+impl<L, F> Component for FrictionInterface<L, F>
+where
+    L: TangentialLaw,
+    F: Fn(f64) -> Result<L, TriboError>,
+{
+    type State = FrictionState<L::State>;
+    type Error = TriboError;
+
+    fn ports(&self) -> &[PortSpec] {
+        &self.ports
+    }
+
+    fn class(&self) -> Class {
+        Class::NonSmooth
+    }
+
+    fn stored_energy_j(&self, state: &Self::State) -> Result<f64, TriboError> {
+        finite(state.reversible_j, "stored_energy_j")
+    }
+
+    fn propose(
+        &self,
+        old: &Self::State,
+        dt_s: f64,
+        inputs: &[f64],
+        new: &mut Self::State,
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<Proposal, TriboError> {
+        self.propose_on_line(old, dt_s, inputs, &[0.0; 4], new, outputs, cx)
+    }
+}
+
+impl<L, F> LoadLine for FrictionInterface<L, F>
+where
+    L: TangentialLaw,
+    F: Fn(f64) -> Result<L, TriboError>,
+{
+    fn line_ports(&self) -> &[usize] {
+        &[0, 1]
+    }
+
+    fn propose_on_line(
+        &self,
+        old: &Self::State,
+        dt_s: f64,
+        inputs: &[f64],
+        compliance: &[f64],
+        new: &mut Self::State,
+        outputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<Proposal, TriboError> {
+        let (&[flow_a, flow_b, kelvin], &[c_aa, c_ab, c_ba, c_bb]) = (inputs, compliance) else {
+            return Err(refused("friction_interface_inputs"));
+        };
+        let [force_a, force_b, heat_w] = outputs else {
+            return Err(refused("friction_interface_outputs"));
+        };
+        if !(dt_s.is_finite() && dt_s > 0.0) {
+            return Err(refused("dt_s"));
+        }
+        for value in [flow_a, flow_b, c_aa, c_ab, c_ba, c_bb] {
+            finite(value, "friction_interface_inputs")?;
+        }
+        let law = self.law_at_k(kelvin)?;
+        // As for the prescribed interface: the held state must be worth to
+        // this law exactly what it was left worth.
+        let before_j = law.stored_energy_j(&old.tangential);
+        #[allow(clippy::float_cmp)]
+        if before_j != old.reversible_j {
+            return Err(refused("friction_interface_law_changed_stored_energy"));
+        }
+        // An end whose row of the line is zero does not answer the force:
+        // its flow is given, and held over the step. Given another value
+        // than in the last step, it has jumped, and the step starts with
+        // that much more slip than the last one ended with.
+        let flows = [flow_a, flow_b];
+        let given = [c_aa == 0.0 && c_ab == 0.0, c_ba == 0.0 && c_bb == 0.0];
+        let mut ends = [None; 2];
+        let mut jumped = [0.0_f64; 2];
+        for end in 0..2 {
+            if given[end] {
+                if let Some(before) = old.given_m_s[end] {
+                    jumped[end] = flows[end] - before;
+                }
+                ends[end] = Some(flows[end]);
+            }
+        }
+        // The force acts as (e, -e) on the two ends, so a unit of it takes
+        // (1, -1) C (1, -1)^T away from the slip.
+        let c = c_aa - c_ab - c_ba + c_bb;
+        let released = flow_a - flow_b;
+        let start = if given[0] && given[1] {
+            released
+        } else {
+            old.slip_m_s + jumped[0] - jumped[1]
+        };
+        let (force_n, mean_m_s, ends_m_s, step) =
+            match self.on_line(&law, &old.tangential, dt_s, kelvin, start, released, c)? {
+                OnLine::StopsAfter(shorter_s) => return Ok(Proposal::Shorten { dt_s: shorter_s }),
+                OnLine::Taken {
+                    force_n,
+                    mean_m_s,
+                    ends_m_s,
+                    law,
+                } => (force_n, mean_m_s, ends_m_s, law),
+            };
+        // The law's own accounts for the step it was asked for, admitted
+        // as the prescribed interface admits them: its storage, its
+        // dissipation and the work of its traction over its slip close, and
+        // its reported stored change is that of its stored energies.
+        let after_j = law.stored_energy_j(&step.state);
+        let storage_j = after_j - before_j;
+        let law_work_j = step.traction_n[0] * step.slip_increment_m[0]
+            + step.traction_n[1] * step.slip_increment_m[1];
+        let closure_j = storage_j + step.dissipated_j - law_work_j;
+        let tolerance_j = self.load.work_tolerance_j;
+        // What the two ends give up is the force times the mean slip that
+        // crossed; what the law does not store of it leaves through `heat`.
+        // (Where a step ends at rest the force is the one that ends it
+        // there, within the stop's band of the law's traction, so this is
+        // not the law's dissipation to the last digit; it is what the ports
+        // carried.)
+        let work_j = dt_s * force_n * mean_m_s;
+        let heat_j = work_j - storage_j;
+        if !(after_j.is_finite()
+            && work_j.is_finite()
+            && ends_m_s.is_finite()
+            && step.dissipated_j >= 0.0
+            && closure_j.abs() <= tolerance_j
+            && (storage_j - step.stored_change_j).abs() <= tolerance_j
+            && heat_j >= -tolerance_j)
+        {
+            return Err(refused("friction_interface_work_balance"));
+        }
+        let dissipated_j = heat_j.max(0.0);
+        *new = FrictionState {
+            tangential: step.state,
+            reversible_j: after_j,
+            slip_m_s: ends_m_s,
+            given_m_s: ends,
+        };
+        *force_a = force_n;
+        *force_b = -force_n;
+        *heat_w = -dissipated_j / dt_s;
+        // The two ends' powers are each as large as their own velocities
+        // make them; their sum is rounded at that size, not at the loss's.
+        let at_ends = flow_a.abs()
+            + flow_b.abs()
+            + force_n.abs() * (c_aa.abs() + c_ab.abs() + c_ba.abs() + c_bb.abs());
+        let scale = dt_s * force_n.abs() * at_ends + dissipated_j + before_j.abs() + after_j.abs();
+        Ok(Proposal::Step(Receipt {
+            stored_change_j: storage_j,
+            dissipated_j,
+            // A loss that rounding left below zero is no heat.
+            numerical_loss_j: heat_j - dissipated_j,
+            entropy_generated_j_per_k: dissipated_j / kelvin,
+            energy_tolerance_j: 64.0 * f64::EPSILON * scale + f64::MIN_POSITIVE,
+            residual: closure_j.abs(),
+            tolerance: tolerance_j,
+        }))
     }
 }

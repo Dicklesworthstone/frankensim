@@ -467,10 +467,14 @@ that locates an event (a friction interface that cuts the step at a stop,
   before the first step from none; for the line's component those are not
   the released flows of this step. A component that enters a step with a
   slip those flows show nothing of (a body thrown onto it with no starting
-  flows given, a prescribed side that has jumped) sees a stop inside the
-  step at them, and the shorter trial it asks for starts from the same
-  values and asks again: the first step of a mass of 2 kg thrown at 1 m/s
-  onto 3 N of friction was refused after 64 shortenings. So the first time
+  flows given) sees a stop inside the step at them, and the shorter trial
+  it asks for starts from the same values and asks again: the first step
+  of a mass of 2 kg thrown at 1 m/s onto 3 N of friction was refused after
+  64 shortenings. (7af293b67e named a prescribed side that has jumped as a
+  second such case, here and in its message. It is not one: the new flow
+  of a prescribed end is among the step's inputs from the start, and a
+  block on a side that jumps is dragged and caught on the kernel before
+  that commit as after it. Not run before it was written.) So the first time
   the line's component asks to shorten before any update of a trial, the
   step is not shortened. The other components take one update with its
   efforts held at what the last step accepted, by the factors the search
@@ -2029,6 +2033,69 @@ material, a surface card, a temperature or a slip history stays in `fs-tribo`.
   then its slope at the step's start). `crates/fs-couple/tests/tribothermal/
   dynamics/collinear/graph.rs` has a friction component beside springs
   with a cubic term.
+
+The first product on the tier, `crates/fs-couple/tests/tribothermal/
+dynamics/collinear/graph.rs` (run with `cargo test -p fs-couple --test
+tribothermal collinear::graph`): the hand-written
+`fs_couple::tribothermal::dynamics::collinear`, which advances two
+translating bodies under held forces through a stop (each sliding segment
+on the midpoint relation, a segment that would reverse cut at zero relative
+velocity, from rest the friction law's own static map), against a graph
+with no pairing code. The bodies are `Mass`es under `Force`s, one pair
+along the tangent axis of the case and one across it; between the pair of
+the axis is fs-tribo's `tangential::component::FrictionInterface` on the
+load line, with the Coulomb coefficients the tests' interface card holds;
+the finite bodies are fs-material's `UniformEnthalpyBody` on the tests' own
+caloric charts; a heat route divides the friction heat by the tests'
+partition. The module is the reference and stays.
+
+- Three of the module's own cases (a stop that lasts, a stop left the
+  other way under the drive, a pair that never slides), each at steps of
+  0.05, 0.07, 0.013 and 0.2 s: the instant of the stop, the velocities and
+  displacements of both bodies on both axes, the kinetic energy, the
+  external work, the heat each body took and its temperature are within
+  1.3e-11 of the module's report, each in its own unit (asserted: 1e-10,
+  the module's own event tolerance); the graph's first law over the run is
+  off by at most 2.2e-12 J (the module's own residual: 2.0e-11 J). A stop
+  inside a step cuts that step once; a stop at a step's end cuts nothing;
+  nothing else is cut.
+- Which element gives which arrest. `elements::Slider` with the same force
+  in the same graph takes the stop inside its step, and on the second case
+  it ends body `a` at -1.42 m/s at 0.07 s and at -1.396 m/s at 0.013 s where
+  the module has -1.4 (heat 0.4366 J and 0.4131 J against 0.42 J): first
+  order in the step, with its own first law exact. Those are the numbers
+  an emulation of the two arrests gave before either graph was run. The
+  interface, which asks for the step that ends at the stop, is within
+  1e-10 at both.
+- Closed forms through the interface (not the module's): a mass on a
+  spring loses two friction offsets a half cycle and its eight turning
+  points are the closed form's to 5.3e-16 m at steps of 1 ms and 0.7 ms,
+  with all it was thrown with, less what the spring keeps, as heat; a
+  block on a belt sticks and slips with the closed form's period to
+  1.4e-5, 3.4e-6, 8.5e-7 and 2.1e-7 s at 2 ms and three halvings (asserted:
+  less than a step), the work of the two ends being the heat; a side that
+  jumps from 0.1 to 0.3 m/s drags the block under the kinetic force and
+  catches it 0.2 / 3 s later, with one cut; the time mean of the interface
+  temperature between two lumped bodies behind two conductances, and the
+  bodies' end temperatures, are the closed form's to 1.1e-7 K and 3.6e-7 K
+  at 0.05 s, second order in the step.
+- Beside a spring the stop is not located in one cut (fs-tribo's contract,
+  "Where the stop is found"): two or three cuts in the step that holds it
+  beside a linear spring; 2 to 5 beside a spring with a cubic term; with
+  two bodies and that spring at 0.07 s the cut step ends short of the stop
+  and three steps of 3.6e-7, 9.1e-9 and 2.3e-10 s follow. At rest in every
+  case.
+- Outside the claim, asserted: a prescribed side that accelerates. Under
+  a side that speeds up at 1 m/s2, which the block could ride with 1 N of
+  the 5 N held, each step is cut to a third of the one before (the first
+  eight to 1e-9), and the run ends in a step that does not converge: after
+  83 steps and 0.075 s at a step of 0.01 s, after 303 steps and 0.027 s at
+  0.001 s. `elements::Slider` can be told the span of such a side.
+
+Not in the graph: coefficients that follow a material card at the trial
+temperatures and speed (the module's third test), the thermal step as a
+backward-Euler solve of a cell network with other sources, two tangent axes
+solved together. Nothing in the module is deleted.
 
 ## No-claim boundaries
 
