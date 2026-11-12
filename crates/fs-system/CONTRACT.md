@@ -274,6 +274,34 @@ Tarjan, index order).
   relative tolerance, so a solve accepted too loosely is still refused there.
   Inputs the block does not solve for (boundaries, earlier blocks) are not in
   the estimate.
+  - A step taken at its first check tells the audit the estimate of the
+    assembly that judged it, made at its own iterate (see the second test
+    below). It used to tell the audit the allowance formed before any
+    assembly, which has no rounding in it, and then a junction whose flow
+    had gone to zero was refused for a rounding-sized difference of large
+    terms: the audit's relative tolerance goes to zero with the energy
+    that crosses. `tests/elements.rs`: a pad of 50 J/K at 400 K on a
+    `HeatNode` of 2 and 6 W/K whose other body port is held at 300 K, with
+    30 W on the node, 4000 steps of 0.5 s. The pad follows the midpoint
+    rule's closed form to 1e-11 of 305 K at every step, settles at
+    `300 K + P / G`, and more than a thousand steps are then taken at
+    their first check. Before the change it was refused at step 1660
+    (2.5e-14 J uncancelled against 2.2e-18 J); the kernels of 42f2803e8d
+    and f5db075f3b refuse it too, at steps 1485 and 1660.
+  - What such a step tells the audit is that estimate and nothing looser.
+    A second test brings the same graph to rest, plants a heat rate on the
+    pad's input and loosens the solve to 1e-6 so that the step is taken at
+    its first check and the verdict is the audit's. The audit's tolerance,
+    read from the refusal of a planted microwatt, is between 1 and 1.5
+    times 16 units of `eps` times the terms the pad's heat depends on
+    through the plane (1.5 W/K of 305 K and a quarter of 30 W, 1.65e-12 W
+    in all); a hundred times that is refused by that junction's audit by
+    a factor between 80 and 120; a quarter of it is taken with no update.
+    Against a scratch kernel that tells the audit a thousand times the
+    estimate the test fails.
+  - Not covered: a junction at rest whose large terms all come from inputs
+    the block does not solve for has nothing in the estimate and can still
+    be refused there.
 - An energy-rate unknown (a heat rate into a receiver, a stream's enthalpy
   rate into a storage) is also allowed 16 units of `eps` times the largest
   power crossing a power port of its block. The first-order estimate above

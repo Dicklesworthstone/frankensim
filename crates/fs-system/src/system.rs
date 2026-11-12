@@ -2251,8 +2251,20 @@ impl System {
                             return Ok(Err(shorter));
                         }
                     }
+                    // The audit is told the rounding of this iterate, which
+                    // the assembly above has just estimated. The allowance
+                    // the first test used was formed before it and has
+                    // none; told that, the audit of a junction whose flow
+                    // has gone to zero (a body come to the temperature of
+                    // what it touches) would allow a rounding-sized
+                    // difference of large terms nothing at all.
                     for (row, &index) in unknowns.iter().enumerate() {
-                        self.input_allowance[index] = allowance[row];
+                        let mut told = self.config.absolute_tolerance
+                            + ROUNDING_UNITS * f64::EPSILON * rounding[row];
+                        if self.input_is_energy_rate[index] {
+                            told += ROUNDING_UNITS * f64::EPSILON * power_scale;
+                        }
+                        self.input_allowance[index] = told;
                     }
                     return Ok(Ok(iterations));
                 };

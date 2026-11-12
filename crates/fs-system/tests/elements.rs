@@ -491,6 +491,167 @@ fn a_heat_node_keeps_its_balance_and_refuses_what_leaves_it_no_temperature() {
     });
 }
 
+/// The pad's heat capacity [J/K], the plane's conductances to the pad and
+/// to the held side [W/K], the held temperature [K], the power generated
+/// on the plane [W] and the step [s] of [`held_plane`].
+const HELD_PAD_J_K: f64 = 50.0;
+const HELD_PLANE_W_K: [f64; 2] = [2.0, 6.0];
+const HELD_ROOM_K: f64 = 300.0;
+const HELD_POWER_W: f64 = 30.0;
+const HELD_DT_S: f64 = 0.5;
+
+/// A pad at 400 K on a plane whose other side is held at a fixed
+/// temperature, with a heater on the plane. The pad and the plane meet in
+/// the first connection made, a junction of two ports. Returns the system,
+/// the pad and the pad's heat port.
+fn held_plane() -> (System, NodeId, fs_system::PortRef) {
+    let room_k = HELD_ROOM_K;
+    let mut builder = SystemBuilder::new();
+    let port = |builder: &SystemBuilder, node, name| builder.port(node, name).unwrap();
+    let pad = builder
+        .add_with_tangent("pad", HeatCapacity::new(HELD_PAD_J_K).unwrap(), 400.0)
+        .unwrap();
+    let plane = builder
+        .add_with_tangent("plane", HeatNode::new(&HELD_PLANE_W_K).unwrap(), ())
+        .unwrap();
+    let rubbing = heater(&mut builder, "rubbing", HELD_POWER_W);
+    let (at_pad, at_room) = (port(&builder, plane, "body0"), port(&builder, plane, "body1"));
+    let at_source = port(&builder, rubbing, "heat");
+    let pad_heat = port(&builder, pad, "heat");
+    builder.common_effort(pad_heat, &[at_pad]).unwrap();
+    builder
+        .boundary(at_room, Box::new(move |_, _, values| values[0] = room_k))
+        .unwrap();
+    builder
+        .common_effort(port(&builder, plane, "source"), &[at_source])
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    assert!(system.guess(at_pad, &[400.0]));
+    assert!(system.guess(at_source, &[325.0]));
+    (system, pad, pad_heat)
+}
+
+#[test]
+fn a_residual_planted_on_a_junction_at_rest_is_still_refused_at_a_first_check() {
+    // The counterpart of the test below. A step taken at its first check
+    // tells the junction's audit the rounding of the terms its heat is a
+    // difference of, and no more than that. The held plane is brought to
+    // rest; then a heat rate is planted on the pad's input, where the
+    // solve starts, and the solve is loosened to 1e-6 (of the 30 W the
+    // block carries: 3e-5 W) so that it takes the step at its first check
+    // all the same. The audit is not told the solve's relative tolerance.
+    let dt = HELD_DT_S;
+    let (mut system, pad, pad_heat) = held_plane();
+    with_cx(|cx| {
+        for _ in 0..2_500 {
+            system.step(dt, cx).unwrap();
+        }
+    });
+    let rest_k = HELD_ROOM_K + HELD_POWER_W / HELD_PLANE_W_K[1];
+    assert!((*system.state::<f64>(pad).unwrap() - rest_k).abs() <= 1.0e-11 * rest_k);
+    let at_rest = system.checkpoint().unwrap();
+    let settled_w = system.last_input(pad_heat)[0];
+    // What the solve holds on the junction at rest is inside its own
+    // tolerance for a heat rate of this block, 1e-12 of the 30 W it
+    // carries.
+    assert!(settled_w.abs() <= 1.0e-10, "{settled_w}");
+    let loose = SolveConfig {
+        relative_tolerance: 1.0e-6,
+        ..SolveConfig::default()
+    };
+    let planted = |system: &mut System, extra_w: f64| {
+        system.restore(&at_rest).unwrap();
+        system.set_config(loose);
+        assert!(system.guess(pad_heat, &[settled_w + extra_w]));
+        with_cx(|cx| system.step(dt, cx))
+    };
+
+    // The audit's tolerance for this junction at rest, read from a refusal
+    // of a microwatt: the relative part of it is 1e-9 of half a microjoule.
+    let Err(SystemError::Interface {
+        connection: 0,
+        tolerance_j,
+        ..
+    }) = planted(&mut system, 1.0e-6)
+    else {
+        panic!("a planted microwatt is refused by the audit of the first connection");
+    };
+    let allowed_w = tolerance_j / dt;
+    // It is the rounding of the terms and nothing looser: 16 units of eps
+    // times the sizes the pad's heat depends on through the plane, 1.5 W/K
+    // of the pad's temperature and a quarter of the source's power.
+    let reach = HELD_PLANE_W_K[0] / (HELD_PLANE_W_K[0] + HELD_PLANE_W_K[1]);
+    let terms_w = HELD_PLANE_W_K[1] * reach * rest_k + reach * HELD_POWER_W;
+    let estimate_w = 16.0 * f64::EPSILON * terms_w;
+    assert!(
+        allowed_w >= estimate_w && allowed_w <= 1.5 * estimate_w,
+        "{allowed_w} against {estimate_w}"
+    );
+
+    // A hundred times what is allowed: the solve takes the step at its
+    // first check (the refusal comes from the audit, not from the solve),
+    // and the audit refuses it by that factor.
+    let refusal = planted(&mut system, 100.0 * allowed_w).expect_err("refused");
+    let SystemError::Interface {
+        connection,
+        defect_j,
+        tolerance_j,
+    } = refusal
+    else {
+        panic!("expected the audit's refusal, got {refusal}");
+    };
+    assert_eq!(connection, 0);
+    let ratio = defect_j.abs() / tolerance_j;
+    assert!(ratio > 80.0 && ratio < 120.0, "{ratio}");
+    assert_eq!(system.steps(), 2_500);
+
+    // A quarter of what is allowed: taken, with no update.
+    let report = planted(&mut system, 0.25 * allowed_w).unwrap();
+    assert_eq!(report.iterations, 0);
+    assert_eq!(system.steps(), 2_501);
+}
+
+#[test]
+fn a_body_that_has_come_to_its_plane_s_temperature_keeps_stepping() {
+    // A pad of 50 J/K at 400 K on a plane of 2 and 6 W/K whose other side
+    // is held at 300 K, with 30 W generated on the plane. The pad settles
+    // where it exchanges nothing, at 300 K + P / G1 = 305 K, by the
+    // midpoint rule's factor for the rate 2 * 6 / (2 + 6) / 50 per second.
+    //
+    // At rest the heat between pad and plane is a rounding-sized difference
+    // of terms G T, while the energy that crosses their junction goes to
+    // zero: the junction's audit has nothing left to be relative to and
+    // must be told the rounding of those terms, in a step taken at its
+    // first check as in one that iterated.
+    let (capacity, conductances, room_k, power_w) =
+        (HELD_PAD_J_K, HELD_PLANE_W_K, HELD_ROOM_K, HELD_POWER_W);
+    let dt = HELD_DT_S;
+    let (mut system, pad, _) = held_plane();
+
+    let rest_k = room_k + power_w / conductances[1];
+    let rate = conductances[0] * conductances[1] / (conductances[0] + conductances[1]) / capacity;
+    let factor = (1.0 - 0.5 * dt * rate) / (1.0 + 0.5 * dt * rate);
+    let (mut expected_k, mut taken_at_first_check) = (400.0_f64, 0_u32);
+    with_cx(|cx| {
+        for step in 0..4_000_u32 {
+            let report = system
+                .step(dt, cx)
+                .unwrap_or_else(|error| panic!("step {step}: {error}"));
+            taken_at_first_check += u32::from(report.iterations == 0);
+            expected_k = rest_k + factor * (expected_k - rest_k);
+            let pad_k = *system.state::<f64>(pad).unwrap();
+            assert!(
+                (pad_k - expected_k).abs() <= 1.0e-11 * rest_k,
+                "step {step}: {pad_k} against {expected_k}"
+            );
+        }
+    });
+    // It reached rest, and went on stepping there without an update.
+    let pad_k = *system.state::<f64>(pad).unwrap();
+    assert!((pad_k - rest_k).abs() <= 1.0e-11 * rest_k, "{pad_k}");
+    assert!(taken_at_first_check >= 1_000, "{taken_at_first_check}");
+}
+
 #[test]
 fn two_bodies_through_a_heat_node_are_joined_by_its_conductances_in_series() {
     // The node with 2 and 6 W/K and nothing on its source is one
