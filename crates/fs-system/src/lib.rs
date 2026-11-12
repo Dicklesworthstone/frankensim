@@ -54,7 +54,7 @@ mod system;
 mod wiring;
 
 pub use adaptive::{AdaptiveConfig, AdaptiveError, AdaptiveReport, ErrorNorm, ErrorTolerance};
-pub use erased::{OwnerError, StateTypeMismatch, TangentNotOffered};
+pub use erased::{LineNotOffered, OwnerError, StateTypeMismatch, TangentNotOffered};
 pub use ledger::Ledger;
 pub use system::{
     BoundaryFn, Checkpoint, CheckpointError, Phase, SolveConfig, StepReport, System, SystemBuilder,

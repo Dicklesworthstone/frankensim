@@ -8,18 +8,22 @@ use std::rc::Rc;
 use fs_exec::Cx;
 use fs_ports::StableId;
 use fs_ports::component::{
-    Carrier, Class, Component, ContractViolation, MassStepAudit, PortLayout, PortRole, PortSpec,
-    PortTangent, Proposal, Receipt, STREAM_ENTHALPY_RATE, STREAM_MASS_RATE, audit_mass_step,
-    audit_step,
+    Carrier, Class, Component, ContractViolation, LoadLine, MassStepAudit, PortLayout, PortRole,
+    PortSpec, PortTangent, Proposal, Receipt, STREAM_ENTHALPY_RATE, STREAM_MASS_RATE,
+    audit_mass_step, audit_step,
 };
 
-use crate::erased::{Node, OwnerError, Plain, Tangent};
+use crate::erased::{Node, OnLine, OwnerError, Plain, Tangent};
 use crate::ledger::{BoundaryAccount, ConnectionAccount, Ledger, NodeAccount, SinkAccount, Sum};
 use crate::solve::Condensed;
 use crate::wiring::{
     AdmissionError, Block, Connection, Driver, HeatSink, NodeId, PortRef, RouteTemperature,
     blocks_in_dependency_order, tolerance_group,
 };
+
+mod line;
+
+use line::Line;
 
 /// A prescribed port input: `(t0, dt, values)` fills the value held over the
 /// step that starts at `t0` and lasts `dt`.
@@ -183,6 +187,13 @@ pub enum SystemError {
         /// What the driver would need.
         needs: &'static str,
     },
+    /// The load line of a component could not be used.
+    LoadLine {
+        /// Component name.
+        node: String,
+        /// Why.
+        reason: &'static str,
+    },
     /// A temperature inside a loop has no positive starting value.
     GuessRequired {
         /// The input, as `node.port`.
@@ -255,6 +266,9 @@ impl fmt::Display for SystemError {
             }
             Self::Unsupported { node, needs } => {
                 write!(f, "component `{node}` is inside a loop and needs {needs}")
+            }
+            Self::LoadLine { node, reason } => {
+                write!(f, "component `{node}` cannot be put on its load line: {reason}")
             }
             Self::GuessRequired { port } => write!(
                 f,
@@ -493,6 +507,46 @@ impl SystemBuilder {
             Box::new(state),
             candidate,
         )
+    }
+
+    /// Add a component whose relation at its power ports is not a function
+    /// of the flow, to be stepped on the load line its neighbours present
+    /// ([`LoadLine`]): dry friction, a contact.
+    ///
+    /// Inside a loop the solve finds the line once per step and the
+    /// component settles on it; one such component per loop. Where every
+    /// flow of its line is prescribed or comes from an earlier block, there
+    /// is no line to find and the component is stepped by its mandatory
+    /// tier.
+    ///
+    /// # Errors
+    /// A repeated name, an invalid port list, or a line that is not over
+    /// power ports that receive a flow, in increasing order.
+    pub fn add_on_line<C>(
+        &mut self,
+        name: &str,
+        component: C,
+        state: C::State,
+    ) -> Result<NodeId, AdmissionError>
+    where
+        C: LoadLine + 'static,
+        C::State: 'static,
+    {
+        let ports = component.ports();
+        let line = component.line_ports();
+        let increasing = line.windows(2).all(|pair| pair[0] < pair[1]);
+        let receive_flow = line.iter().all(|&port| {
+            ports.get(port).is_some_and(|spec| {
+                matches!(spec.carrier(), Carrier::Power(_)) && spec.role() == PortRole::FlowIn
+            })
+        });
+        if line.is_empty() || !increasing || !receive_flow {
+            return Err(AdmissionError::LinePorts {
+                node: name.to_owned(),
+            });
+        }
+        let candidate = Box::new(state.clone());
+        self.insert(name, Box::new(OnLine(component)), Box::new(state), candidate)
     }
 
     /// The port of `node` with identifier `id`.
@@ -1325,13 +1379,63 @@ impl SystemBuilder {
                 }
             }
         }
+        // A component on a load line whose flows are solved in a loop: the
+        // drivers of those flows gain a term per effort of the component,
+        // for the line's compliance, and the block keeps the line.
+        let mut lines: Vec<Option<Line>> = Vec::new();
+        lines.resize_with(blocks.len(), || None);
+        let mut line_of = vec![usize::MAX; count];
+        for node in 0..count {
+            let Some(ports) = self.nodes[node].line_ports() else {
+                continue;
+            };
+            let block = block_of[node];
+            let mut places = Vec::new();
+            for &port in ports {
+                let flows = self.layouts[node].input_range(port);
+                let efforts = self.layouts[node].output_range(port);
+                for (flow, effort) in flows.zip(efforts) {
+                    let input = input_start[node] + flow;
+                    let unknown = blocks[block]
+                        .unknowns
+                        .iter()
+                        .position(|&index| index == input)
+                        .unwrap_or(usize::MAX);
+                    places.push((input, output_start[node] + effort, unknown));
+                }
+            }
+            if places.iter().all(|&(_, _, unknown)| unknown == usize::MAX) {
+                continue;
+            }
+            if let Some(first) = &lines[block] {
+                return Err(AdmissionError::TwoLines {
+                    first: self.names[first.node].clone(),
+                    second: self.names[node].clone(),
+                });
+            }
+            let own = places.len();
+            for &(input, _, unknown) in &places {
+                if unknown == usize::MAX {
+                    continue;
+                }
+                if let Driver::Linear(terms) = &mut drivers[input] {
+                    let mut terms = core::mem::take(terms);
+                    terms.extend(places.iter().map(|&(_, effort, _)| (effort, 0.0)));
+                    drivers[input] = Driver::OnLine { terms, own };
+                }
+            }
+            line_of[node] = block;
+            lines[block] = Some(Line::new(node, places));
+        }
         let block_work = blocks
             .iter()
             .map(|block| {
                 // A part without a declared tangent is differenced, and a
                 // difference quotient is rounded at the point it is taken
                 // at: its slopes are not the same numbers from one step to
-                // the next, so factors made from them are not kept.
+                // the next, so factors made from them are not kept. (A
+                // component on a load line has no declared tangent, so a
+                // block with one keeps none either.)
                 let affine = block.nodes.iter().all(|&node| {
                     self.nodes[node].class() == Class::ExactLinear && self.nodes[node].has_tangent()
                 });
@@ -1485,6 +1589,8 @@ impl SystemBuilder {
             drivers,
             blocks,
             block_work,
+            lines,
+            line_of,
             step_scratch: StepScratch::default(),
             input_start,
             output_start,
@@ -1723,6 +1829,11 @@ pub struct System {
     blocks: Vec<Block>,
     /// Per block, what its solve keeps between steps.
     block_work: Vec<BlockWork>,
+    /// Per block, its component on a load line, if its flows are solved
+    /// there; and per component, the block whose line it is on
+    /// (`usize::MAX` for none).
+    lines: Vec<Option<Line>>,
+    line_of: Vec<usize>,
     step_scratch: StepScratch,
     input_start: Vec<usize>,
     output_start: Vec<usize>,
@@ -1965,14 +2076,29 @@ impl System {
     /// Propose `node` at the current inputs. `Ok(Some(dt))` asks to shorten.
     fn propose(&mut self, node: usize, dt_s: f64, cx: &Cx<'_>) -> Result<Option<f64>, SystemError> {
         let (inputs, outputs) = (self.node_inputs(node), self.node_outputs(node));
-        let proposal = self.nodes[node].propose(
-            self.accepted[node].as_ref(),
-            dt_s,
-            &self.inputs[inputs],
-            self.candidate[node].as_mut(),
-            &mut self.outputs[outputs],
-            cx,
-        );
+        // A component on a load line is stepped there: its flow inputs
+        // hold the released flows of this step's line.
+        let line = self.lines.get(self.line_of[node]).and_then(Option::as_ref);
+        let proposal = if let Some(line) = line {
+            self.nodes[node].propose_on_line(
+                self.accepted[node].as_ref(),
+                dt_s,
+                &self.inputs[inputs],
+                &line.compliance,
+                self.candidate[node].as_mut(),
+                &mut self.outputs[outputs],
+                cx,
+            )
+        } else {
+            self.nodes[node].propose(
+                self.accepted[node].as_ref(),
+                dt_s,
+                &self.inputs[inputs],
+                self.candidate[node].as_mut(),
+                &mut self.outputs[outputs],
+                cx,
+            )
+        };
         match proposal {
             Ok(Proposal::Step(receipt)) => {
                 self.receipts[node] = receipt;
@@ -2012,7 +2138,16 @@ impl System {
                 Err(error) => Err(self.refused(node, error, cx)),
             };
         }
-        if !matches!(self.nodes[node].class(), Class::ExactLinear | Class::Smooth) {
+        // A component added on a load line is a function of what it is
+        // given, whatever its class, and is differenced as one: of the
+        // released flows where the block solves for its line, and of its
+        // other inputs where the line's flows are all given from outside
+        // the block (a slider between prescribed velocities whose heat
+        // warms a body).
+        let line = self.lines.get(self.line_of[node]).and_then(Option::as_ref);
+        if self.nodes[node].line_ports().is_none()
+            && !matches!(self.nodes[node].class(), Class::ExactLinear | Class::Smooth)
+        {
             return Err(SystemError::Unsupported {
                 node: self.names[node].clone(),
                 needs: "a port tangent or the non-smooth solve tier",
@@ -2026,14 +2161,26 @@ impl System {
         let scale = base.abs().max(group_scale[self.input_group[index]]);
         let step = f64::EPSILON.sqrt() * if scale > 0.0 { scale } else { 1.0 };
         self.inputs[index] = base + step;
-        let proposal = self.nodes[node].propose(
-            self.accepted[node].as_ref(),
-            dt_s,
-            &self.inputs[inputs],
-            self.candidate[node].as_mut(),
-            &mut self.scratch_outputs[..width],
-            cx,
-        );
+        let proposal = if let Some(line) = line {
+            self.nodes[node].propose_on_line(
+                self.accepted[node].as_ref(),
+                dt_s,
+                &self.inputs[inputs],
+                &line.compliance,
+                self.candidate[node].as_mut(),
+                &mut self.scratch_outputs[..width],
+                cx,
+            )
+        } else {
+            self.nodes[node].propose(
+                self.accepted[node].as_ref(),
+                dt_s,
+                &self.inputs[inputs],
+                self.candidate[node].as_mut(),
+                &mut self.scratch_outputs[..width],
+                cx,
+            )
+        };
         self.inputs[index] = base;
         match proposal {
             Err(error) => Err(self.refused(node, error, cx)),
@@ -2182,10 +2329,15 @@ impl System {
         let unknowns = core::mem::take(&mut self.blocks[block].unknowns);
         let nodes = core::mem::take(&mut self.blocks[block].nodes);
         let mut work = core::mem::take(&mut self.block_work[block]);
-        let result = self.solve_lent(&unknowns, &nodes, &mut work, dt_s, cx);
+        let result = self.solve_lent(block, &unknowns, &nodes, &mut work, dt_s, cx);
         self.blocks[block].unknowns = unknowns;
         self.blocks[block].nodes = nodes;
         self.block_work[block] = work;
+        if matches!(result, Ok(Ok(_))) {
+            // The flow inputs of a load line held released flows during
+            // the solve; what is published is what crossed.
+            self.line_flows(block);
+        }
         result
     }
 
@@ -2193,6 +2345,7 @@ impl System {
     #[allow(clippy::too_many_lines)]
     fn solve_lent(
         &mut self,
+        block: usize,
         unknowns: &[usize],
         nodes: &[usize],
         work: &mut BlockWork,
@@ -2211,6 +2364,13 @@ impl System {
         work.group_scale.resize(self.group_count, 0.0);
         work.rounding.fill(0.0);
         work.allowance.fill(0.0);
+        // A block with a component on a load line: the line of this step,
+        // found from the starting values, before anything is judged.
+        if self.lines[block].is_some()
+            && let Some(shorter) = self.find_line(block, unknowns, nodes, work, dt_s, cx)?
+        {
+            return Ok(Err(shorter));
+        }
         let BlockWork {
             residual,
             rounding,

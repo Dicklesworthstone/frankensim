@@ -10,7 +10,7 @@ use core::any::Any;
 use core::fmt;
 
 use fs_exec::Cx;
-use fs_ports::component::{Class, Component, PortSpec, PortTangent, Proposal, Receipt};
+use fs_ports::component::{Class, Component, LoadLine, PortSpec, PortTangent, Proposal, Receipt};
 
 /// A value that is both printable and recoverable by its concrete type.
 trait DebugAny: Any + fmt::Debug {
@@ -37,6 +37,12 @@ pub struct StateTypeMismatch;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TangentNotOffered;
 
+/// Marker error for a load line asked of a component that was not added on
+/// one. The driver checks before it asks, so this means the kernel itself
+/// is wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LineNotOffered;
+
 impl OwnerError {
     fn new<E: fmt::Debug + 'static>(error: E) -> Self {
         Self(Box::new(error))
@@ -48,6 +54,10 @@ impl OwnerError {
 
     fn tangent_not_offered() -> Self {
         Self(Box::new(TangentNotOffered))
+    }
+
+    fn line_not_offered() -> Self {
+        Self(Box::new(LineNotOffered))
     }
 
     /// The owner's error, if it is of type `E`.
@@ -95,6 +105,24 @@ pub(crate) trait Node {
         d_outputs: &mut [f64],
         cx: &Cx<'_>,
     ) -> Result<(), OwnerError>;
+    /// The ports of its load line, for a component added on one.
+    fn line_ports(&self) -> Option<&[usize]> {
+        None
+    }
+    /// Only called when [`Node::line_ports`] is `Some`.
+    #[allow(clippy::too_many_arguments)]
+    fn propose_on_line(
+        &self,
+        _old: &dyn Any,
+        _dt_s: f64,
+        _inputs: &[f64],
+        _compliance: &[f64],
+        _new: &mut dyn Any,
+        _outputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<Proposal, OwnerError> {
+        Err(OwnerError::line_not_offered())
+    }
 }
 
 fn state_of<S: 'static>(state: &dyn Any) -> Result<&S, OwnerError> {
@@ -106,6 +134,9 @@ pub(crate) struct Plain<C>(pub(crate) C);
 
 /// A component that also offers [`PortTangent`].
 pub(crate) struct Tangent<C>(pub(crate) C);
+
+/// A component stepped on its [`LoadLine`].
+pub(crate) struct OnLine<C>(pub(crate) C);
 
 macro_rules! mandatory_tier {
     () => {
@@ -196,6 +227,53 @@ where
         _cx: &Cx<'_>,
     ) -> Result<(), OwnerError> {
         Err(OwnerError::tangent_not_offered())
+    }
+}
+
+impl<C> Node for OnLine<C>
+where
+    C: LoadLine + 'static,
+    C::State: 'static,
+{
+    mandatory_tier!();
+
+    fn has_tangent(&self) -> bool {
+        false
+    }
+
+    fn jvp(
+        &self,
+        _old: &dyn Any,
+        _dt_s: f64,
+        _inputs: &[f64],
+        _d_inputs: &[f64],
+        _d_outputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<(), OwnerError> {
+        Err(OwnerError::tangent_not_offered())
+    }
+
+    fn line_ports(&self) -> Option<&[usize]> {
+        Some(self.0.line_ports())
+    }
+
+    fn propose_on_line(
+        &self,
+        old: &dyn Any,
+        dt_s: f64,
+        inputs: &[f64],
+        compliance: &[f64],
+        new: &mut dyn Any,
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<Proposal, OwnerError> {
+        let old = state_of::<C::State>(old)?;
+        let new = new
+            .downcast_mut::<C::State>()
+            .ok_or_else(OwnerError::state_type)?;
+        self.0
+            .propose_on_line(old, dt_s, inputs, compliance, new, outputs, cx)
+            .map_err(OwnerError::new)
     }
 }
 

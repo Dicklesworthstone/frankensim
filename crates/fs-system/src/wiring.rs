@@ -167,6 +167,20 @@ pub enum AdmissionError {
         /// The rejected metric operation or non-finite intermediate.
         violation: ContractViolation,
     },
+    /// Two components on a load line are in one loop. The solve finds one
+    /// line per loop.
+    TwoLines {
+        /// The first of them, by name.
+        first: String,
+        /// The second.
+        second: String,
+    },
+    /// A component's load line is not over power ports that receive a flow,
+    /// listed in increasing order.
+    LinePorts {
+        /// Component name.
+        node: String,
+    },
 }
 
 impl fmt::Display for AdmissionError {
@@ -244,6 +258,16 @@ impl fmt::Display for AdmissionError {
                     "power map `{a}` to `{b}` has no representable effort adjoint: {violation}"
                 )
             }
+            Self::TwoLines { first, second } => write!(
+                f,
+                "components `{first}` and `{second}` are both on a load line in one loop; the \
+                 solve finds one line per loop"
+            ),
+            Self::LinePorts { node } => write!(
+                f,
+                "the load line of component `{node}` must span power ports that receive a flow, \
+                 in increasing order"
+            ),
         }
     }
 }
@@ -322,6 +346,15 @@ pub(crate) enum Driver {
     Unset,
     /// `sum(coefficient * outputs[index])`.
     Linear(Vec<(usize, f64)>),
+    /// The same sum, for a flow on a load line. The last `own` terms read
+    /// the line component's own efforts, and their coefficients are the
+    /// line's compliance, which the solve sets anew in every step; with
+    /// them the value is the released flow, the flow the port would have
+    /// if the component returned no effort.
+    OnLine {
+        terms: Vec<(usize, f64)>,
+        own: usize,
+    },
     /// Entropy-equivalent temperature of a heat route's receivers:
     /// `total / (sum(fraction / outputs[index]) + fixed)`.
     EquivalentTemperature {
@@ -341,7 +374,7 @@ impl Driver {
     pub(crate) fn value(&self, outputs: &[f64], boundaries: &[Vec<f64>]) -> f64 {
         match self {
             Self::Unset => f64::NAN,
-            Self::Linear(terms) => {
+            Self::Linear(terms) | Self::OnLine { terms, .. } => {
                 let mut sum = 0.0;
                 for &(index, coefficient) in terms {
                     sum += coefficient * outputs[index];
@@ -372,7 +405,7 @@ impl Driver {
     /// test scaled by the value alone cannot be met when the terms cancel.
     pub(crate) fn magnitude(&self, outputs: &[f64], boundaries: &[Vec<f64>]) -> f64 {
         match self {
-            Self::Linear(terms) => {
+            Self::Linear(terms) | Self::OnLine { terms, .. } => {
                 let mut sum = 0.0;
                 for &(index, coefficient) in terms {
                     sum += (coefficient * outputs[index]).abs();
@@ -390,7 +423,7 @@ impl Driver {
     pub(crate) fn gradient(&self, outputs: &[f64], out: &mut Vec<(usize, f64)>) {
         out.clear();
         match self {
-            Self::Linear(terms) => out.extend_from_slice(terms),
+            Self::Linear(terms) | Self::OnLine { terms, .. } => out.extend_from_slice(terms),
             Self::EquivalentTemperature {
                 terms,
                 fixed,
@@ -412,7 +445,9 @@ impl Driver {
     /// Indices of the outputs this driver reads.
     pub(crate) fn sources(&self, out: &mut Vec<usize>) {
         match self {
-            Self::Linear(terms) | Self::EquivalentTemperature { terms, .. } => {
+            Self::Linear(terms)
+            | Self::OnLine { terms, .. }
+            | Self::EquivalentTemperature { terms, .. } => {
                 out.extend(terms.iter().map(|(index, _)| *index));
             }
             Self::Unset | Self::Boundary { .. } | Self::Fixed(_) => {}

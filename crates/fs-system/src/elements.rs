@@ -74,6 +74,8 @@ mod node;
 pub use node::HeatNode;
 mod resistance;
 pub use resistance::Resistance;
+mod slider;
+pub use slider::{Slider, SliderRow, Slip};
 mod stream;
 pub use stream::{GasContents, GasVolume, Restriction};
 
