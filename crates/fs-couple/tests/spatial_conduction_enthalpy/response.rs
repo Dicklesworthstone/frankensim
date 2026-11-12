@@ -478,9 +478,13 @@ fn mixed_current_electrodes_close_actual_source_heat_and_preserve_shared_budget(
             300.0 + theta[i],
         );
     }
+    // The recovered field's nodal voltages are relative to terminal zero (fs-em
+    // spatial/conduction/matrix.rs field_at_voltages: "a common potential is removed
+    // before all field and power arithmetic"). Terminal zero is the voltage terminal held
+    // at 13 V, so the far electrode reads the two slabs' drop, not 13 V plus it.
     near(
         next.report().electrical.field.field.voltage_v[12],
-        13.0 + e[0] + e[1],
+        e[0] + e[1],
     );
     near(
         next.report().electrical.supplied_work_j,

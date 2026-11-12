@@ -303,7 +303,7 @@ fn tet10_quadrature_heat_reaches_one_original_element_without_duplication() {
         let mat=material(0.01,0.);
         let (nodes,tets)=promote_p1_to_p2(&NODES,&TETS,None,cx).unwrap();
         let source=source(SolidMeshRef::Tet10 {nodes_m:&nodes,elements:&tets,
-            quadrature:TetQuadrature {stiffness_points_per_dir:2,mass_points_per_dir:4}},
+            quadrature:TetQuadrature {stiffness_points_per_dir:3,mass_points_per_dir:4}},
             TetViscoField::Uniform(&mat),&[],cx);
         let basis=vec![nodes.iter().flat_map(|p|[0.,0.,p[2]]).collect()];
         let body=body(&source,&basis,cx,gate);

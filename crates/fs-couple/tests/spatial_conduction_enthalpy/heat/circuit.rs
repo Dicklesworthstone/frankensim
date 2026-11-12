@@ -151,7 +151,9 @@ fn with_circuit_heat<R>(
             let electrical = ElectricalContactNetwork {
                 bulk: &bulk,
                 contacts: &[],
-                electrical_bases: &[],
+                // One basis per resistor branch: the plan refuses a missing one. Resistivity is
+                // what this fixture's bulk.resolve takes for branch 2.
+                electrical_bases: &[(2, ElectricalPropertyBasis::Resistivity)],
             };
             let heat = MaterialHeatNetwork {
                 electrical: &electrical,
@@ -521,7 +523,8 @@ fn unsupported_complete_heat_and_late_refusal_publish_no_circuit_or_caloric_hist
                     let electrical = ElectricalContactNetwork {
                         bulk: &bulk,
                         contacts: &[],
-                        electrical_bases: &[],
+                        // One basis for the one resistor, branch 2, as in the fixture.
+                        electrical_bases: &[(2, ElectricalPropertyBasis::Resistivity)],
                     };
                     let changed = MaterialHeatNetwork {
                         electrical: &electrical,

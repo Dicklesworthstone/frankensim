@@ -21,6 +21,20 @@ fn narrow_current_domain_and_floating_electrode_close_heat_and_continue_under_hu
                     claim
                         .validity
                         .with_quantity("operating", coordinate.quantity(), 1.5, 2.5);
+                // A claim's validity must enclose every source sample of its surface (fs-matdb
+                // insert_claim), so the surface is cut to the same range. It is affine in T and
+                // the current density, so every value inside [1.5, 2.5] is unchanged.
+                let basis = ElectricalPropertyBasis::Resistivity;
+                claim.value = PropertyValue::Surface2D {
+                    axes: ["T".into(), "operating".into()],
+                    axis_dims: [Temperature::DIMS, coordinate.quantity().dims()],
+                    samples: [[200.0, 1.5], [2000.0, 1.5], [200.0, 2.5], [2000.0, 2.5]]
+                        .into_iter()
+                        .map(|p| (p, r[i] + ALPHA[i] * (p[0] - 300.0) + beta[i] * p[1]))
+                        .collect(),
+                    triangles: vec![[0, 1, 2], [1, 3, 2]],
+                    dims: basis.dimensions(),
+                };
             }
             claims.insert_claim(claim).unwrap();
         }

@@ -177,7 +177,7 @@ fn bbar_brick_runs_through_original_material_dynamics_and_heat_ownership() {
 fn original_tet4_and_tet10_quadrature_preserves_shear_mass_and_virtual_work() {
     with_cx(|cx,gate| {
         let material=material(0.01,0.25);
-        let quadrature=TetQuadrature {stiffness_points_per_dir:2,mass_points_per_dir:4};
+        let quadrature=TetQuadrature {stiffness_points_per_dir:3,mass_points_per_dir:4};
         let (qnodes,qtets)=promote_p1_to_p2(&NODES,&TETS,None,cx).unwrap();
         let cases=[
             (NODES.as_slice(),SolidMeshRef::Tet4 {nodes_m:&NODES,elements:&TETS}),
