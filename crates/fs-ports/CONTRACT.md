@@ -310,3 +310,26 @@ uniqueness or passivity certificate. Original scalar relaxation is unchanged.
 Five G0/G1/G3 unit regressions cover the exact oscillating affine map, a passive
 resistor's independent operating point, independent unit/polarity changes,
 zero/stagnant/extreme coordinates, and atomic invalid-input refusal.
+
+## Independently measured carried inventories
+
+`Component::stored_carried_quantity(state, carried)` optionally measures the
+inventory of a zero-based stream coordinate after mass and enthalpy. `None`
+means unknown, and zero storage is explicit `Some(0.0)`. Finite signed values
+are admitted because a coordinate can represent momentum as well as species
+mass. Declaring an inventory claims it is conserved under the declared stream
+transfers; reactions and internal production are not silently inferred.
+
+`PortSpec::carried_quantities` names the count and `carried_quantity_in` reads
+the integrated signed transfer. `audit_carried_step` independently closes each
+coordinate using scaled compensated sums and its own 128-epsilon rounding
+allowance. Both endpoint measurements must be available or both unavailable.
+Nonfinite transfers still refuse when measurements are unavailable. The
+conformance kit performs the same audit. Calls allocate nothing.
+
+The owner declares corresponding coordinate order and units across its stream
+ports; an absent coordinate contributes zero. This does not match chemical
+identities, balance reactions, or certify a mechanical momentum law. Three
+G0/G3 regressions in `tests/carried_ports.rs` cover both port roles, signed and
+small independent coordinates, missing/nonfinite inventories, invalid wires,
+unrepresentable transfers, and compensated cancellation at extreme scales.

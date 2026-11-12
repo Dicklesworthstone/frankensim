@@ -539,6 +539,35 @@ impl PortSpec {
             .map_or(f64::NAN, |flow| dt_s * flow[STREAM_MASS_RATE])
     }
 
+    /// Number of transported coordinates after mass and enthalpy.
+    #[must_use]
+    pub fn carried_quantities(&self) -> usize {
+        if self.carrier == Carrier::Stream {
+            self.width.get() - STREAM_CARRIED
+        } else {
+            0
+        }
+    }
+
+    /// Signed amount of carried coordinate `carried` entering the owner.
+    ///
+    /// Other carriers and absent coordinates contribute zero. Coordinate
+    /// identity and units belong to the owner; this does not infer a species.
+    #[must_use]
+    pub fn carried_quantity_in(
+        &self,
+        dt_s: f64,
+        input: &[f64],
+        output: &[f64],
+        carried: usize,
+    ) -> f64 {
+        if carried >= self.carried_quantities() {
+            return 0.0;
+        }
+        self.stream_flow(input, output)
+            .map_or(f64::NAN, |flow| dt_s * flow[STREAM_CARRIED + carried])
+    }
+
     /// Entropy [J/K] that entered the owner through this port during a step.
     ///
     /// Only heat ports carry entropy on the wire; every other carrier returns
@@ -746,6 +775,22 @@ pub trait Component {
     /// `None` means unavailable, not zero. A stateless stream transport may
     /// return `Some(0.0)`. Available inventories must be finite and nonnegative.
     fn stored_mass_kg(&self, _state: &Self::State) -> Result<Option<f64>, Self::Error> {
+        Ok(None)
+    }
+
+    /// Independently measured inventory of one carried stream coordinate.
+    ///
+    /// `carried` is zero-based after mass and enthalpy, in the same order on
+    /// every stream of this owner. `None` is unavailable; stateless transport
+    /// can declare `Some(0.0)`. Finite signed inventories are allowed (for
+    /// example a momentum coordinate). Declaring one opts into conservation:
+    /// reactions or internal production must not masquerade as transport.
+    /// Coordinate meaning and units must agree between connected owners.
+    fn stored_carried_quantity(
+        &self,
+        _state: &Self::State,
+        _carried: usize,
+    ) -> Result<Option<f64>, Self::Error> {
         Ok(None)
     }
 
@@ -984,6 +1029,35 @@ pub trait StageResidual: Component {
 /// A step that broke the contract, named by the law it broke.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContractViolation {
+    /// A carried inventory is available at only one endpoint.
+    CarriedAvailability {
+        /// Zero-based carried coordinate.
+        carried: usize,
+        /// Inventory availability before the step.
+        old_available: bool,
+        /// Inventory availability after the step.
+        new_available: bool,
+    },
+    /// A declared carried inventory is not finite.
+    StoredCarried {
+        /// Zero-based carried coordinate.
+        carried: usize,
+        /// Accepted or candidate endpoint.
+        endpoint: &'static str,
+        /// Rejected inventory, in its declared unit.
+        value: f64,
+    },
+    /// Transport does not close an independently measured carried inventory.
+    CarriedBalance {
+        /// Zero-based carried coordinate.
+        carried: usize,
+        /// Signed transported amount into the owner.
+        port_in: f64,
+        /// Change in the measured inventory.
+        stored_change: f64,
+        /// Roundoff allowance in the inventory's unit.
+        tolerance: f64,
+    },
     /// Two ports of one component share an identifier.
     DuplicatePort {
         /// The repeated identifier.
@@ -1113,6 +1187,12 @@ pub enum ContractViolation {
 impl fmt::Display for ContractViolation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::CarriedAvailability { carried, old_available, new_available } => write!(f,
+                "carried inventory {carried} availability changed: accepted {old_available}, candidate {new_available}"),
+            Self::StoredCarried { carried, endpoint, value } => write!(f,
+                "carried inventory {carried} at {endpoint} is not finite: {value}"),
+            Self::CarriedBalance { carried, port_in, stored_change, tolerance } => write!(f,
+                "carried inventory {carried}: port input {port_in} != stored change {stored_change} within {tolerance}"),
             Self::DuplicatePort { port } => write!(f, "port identifier `{port}` is used twice"),
             Self::PortRole { port } => {
                 write!(
@@ -1341,6 +1421,146 @@ fn mass_sum(values: impl IntoIterator<Item = f64>) -> Result<f64, ContractViolat
     crate::fixed_order_window_sum("mass account", values).map_err(|_| {
         ContractViolation::NonFinite {
             quantity: "mass account",
+        }
+    })
+}
+
+/// Independent closure of one conserved carried stream coordinate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CarriedStepAudit {
+    /// Net transported amount entering the owner, in the coordinate's unit.
+    pub port_in: f64,
+    /// Candidate inventory minus accepted inventory.
+    pub stored_change: f64,
+    /// Port input minus inventory change, retaining compensated small terms.
+    pub balance_defect: f64,
+    /// Applied floating-point rounding allowance.
+    pub tolerance: f64,
+}
+
+/// Audit one carried coordinate against independent endpoint measurements.
+///
+/// Coordinates are zero-based after mass and enthalpy. Owners declare the
+/// correspondence across their ports; missing coordinates contribute no
+/// transfer. Signed inventories are allowed, and both `None` means unknown.
+/// No allocation; the scaled compensated sum uses the same 128-epsilon
+/// rounding model as the mass audit, independently for every coordinate.
+///
+/// # Errors
+/// Refuses malformed/nonfinite wires, a missing endpoint, nonfinite inventory
+/// or account, and a conservation defect beyond floating-point rounding.
+#[allow(clippy::too_many_arguments)]
+pub fn audit_carried_step(
+    ports: &[PortSpec],
+    layout: &PortLayout,
+    dt_s: f64,
+    inputs: &[f64],
+    outputs: &[f64],
+    carried: usize,
+    stored_old: Option<f64>,
+    stored_new: Option<f64>,
+) -> Result<Option<CarriedStepAudit>, ContractViolation> {
+    if !(dt_s.is_finite() && dt_s > 0.0) {
+        return Err(ContractViolation::Step { dt_s });
+    }
+    for (vector, expected, actual) in [
+        ("ports", layout.ports(), ports.len()),
+        ("inputs", layout.input_len(), inputs.len()),
+        ("outputs", layout.output_len(), outputs.len()),
+    ] {
+        if expected != actual {
+            return Err(ContractViolation::VectorLength {
+                vector,
+                expected,
+                actual,
+            });
+        }
+    }
+    if !inputs.iter().chain(outputs).all(|value| value.is_finite()) {
+        return Err(ContractViolation::NonFinite {
+            quantity: "carried port values",
+        });
+    }
+    let transfers = ports.iter().enumerate().map(|(index, port)| {
+        port.carried_quantity_in(
+            dt_s,
+            &inputs[layout.input_range(index)],
+            &outputs[layout.output_range(index)],
+            carried,
+        )
+    });
+    let mut scale = 0.0_f64;
+    for transfer in transfers.clone() {
+        if !transfer.is_finite() {
+            return Err(ContractViolation::NonFinite {
+                quantity: "carried port transfer",
+            });
+        }
+        scale = scale.max(transfer.abs());
+    }
+    for (endpoint, inventory) in [("accepted", stored_old), ("candidate", stored_new)] {
+        if let Some(value) = inventory {
+            if !value.is_finite() {
+                return Err(ContractViolation::StoredCarried {
+                    carried,
+                    endpoint,
+                    value,
+                });
+            }
+            scale = scale.max(value.abs());
+        }
+    }
+    let (old, new) = match (stored_old, stored_new) {
+        (Some(old), Some(new)) => (old, new),
+        (None, None) => return Ok(None),
+        _ => {
+            return Err(ContractViolation::CarriedAvailability {
+                carried,
+                old_available: stored_old.is_some(),
+                new_available: stored_new.is_some(),
+            });
+        }
+    };
+    let scale = if scale == 0.0 { 1.0 } else { scale };
+    let transfers = transfers.map(|value| value / scale);
+    let net = carried_sum(transfers.clone())?;
+    let absolute = carried_sum(transfers.clone().map(f64::abs))?;
+    let defect = carried_sum(transfers.chain([old / scale, -new / scale]))?;
+    let tolerance = 128.0 * f64::EPSILON * absolute.max(old.abs() / scale).max(new.abs() / scale);
+    let audit = CarriedStepAudit {
+        port_in: net * scale,
+        stored_change: carried_sum([new / scale, -old / scale])? * scale,
+        balance_defect: defect * scale,
+        tolerance: tolerance * scale,
+    };
+    if ![
+        audit.port_in,
+        audit.stored_change,
+        audit.balance_defect,
+        audit.tolerance,
+    ]
+    .iter()
+    .all(|value| value.is_finite())
+    {
+        return Err(ContractViolation::NonFinite {
+            quantity: "carried inventory account",
+        });
+    }
+    if !(defect.abs() <= tolerance) {
+        return Err(ContractViolation::CarriedBalance {
+            carried,
+            port_in: audit.port_in,
+            stored_change: audit.stored_change,
+            tolerance: audit.tolerance,
+        });
+    }
+    Ok(Some(audit))
+}
+
+fn carried_sum(values: impl IntoIterator<Item = f64>) -> Result<f64, ContractViolation> {
+    crate::fixed_order_window_sum("carried inventory account", values).map_err(|_| {
+        ContractViolation::NonFinite {
+            quantity: "carried inventory account",
         }
     })
 }

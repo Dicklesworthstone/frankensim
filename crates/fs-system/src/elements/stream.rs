@@ -359,6 +359,14 @@ impl Component for GasVolume {
         Ok(Some(contents.mass_kg))
     }
 
+    fn stored_carried_quantity(
+        &self,
+        contents: &GasContents,
+        carried: usize,
+    ) -> Result<Option<f64>, ElementError> {
+        Ok(contents.carried_kg.get(carried).copied())
+    }
+
     fn propose(
         &self,
         old: &GasContents,
@@ -375,15 +383,20 @@ impl Component for GasVolume {
         let Some(trial) = self.trial(old, dt_s, inputs) else {
             return Ok(shorter);
         };
-        // A carried quantity cannot be drawn below nothing. A result within
-        // rounding below nothing is nothing.
+        // A carried quantity cannot be drawn below nothing. Its rounding
+        // scale is its own inventory and transfer, never the bulk gas mass:
+        // otherwise an entire trace constituent can disappear as roundoff.
         let rates = &inputs[STREAM_CARRIED..STREAM_CARRIED + self.carried];
-        let nothing = -roundoff(old.mass_kg + trial.mass_kg);
         if old
             .carried_kg
             .iter()
             .zip(rates)
-            .any(|(held, rate)| !(held + dt_s * rate >= nothing))
+            .any(|(held, rate)| {
+                let transfer = dt_s * rate;
+                let remaining = held + transfer;
+                let rounding = 64.0 * f64::EPSILON * held.abs().max(transfer.abs());
+                !(transfer.is_finite() && remaining.is_finite() && remaining >= -rounding)
+            })
         {
             return Ok(shorter);
         }
@@ -515,6 +528,14 @@ impl Component for Restriction {
 
     fn stored_mass_kg(&self, (): &()) -> Result<Option<f64>, ElementError> {
         Ok(Some(0.0))
+    }
+
+    fn stored_carried_quantity(
+        &self,
+        (): &(),
+        carried: usize,
+    ) -> Result<Option<f64>, ElementError> {
+        Ok((carried < self.ports[0].carried_quantities()).then_some(0.0))
     }
 
     fn propose(

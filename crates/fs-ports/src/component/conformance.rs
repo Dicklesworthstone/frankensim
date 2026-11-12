@@ -21,8 +21,8 @@ use core::fmt;
 use fs_exec::Cx;
 
 use super::{
-    Carrier, Component, ContractViolation, LoadLine, PortLayout, PortRole, PortTangent, Proposal,
-    Receipt, StepAudit, audit_mass_step, audit_step,
+    Carrier, Component, ContractViolation, LoadLine, PortLayout, PortRole, PortSpec, PortTangent,
+    Proposal, Receipt, StepAudit, audit_carried_step, audit_mass_step, audit_step,
 };
 
 /// One operating point at which a component is checked.
@@ -239,6 +239,30 @@ where
         mass_new,
     )
     .map_err(Failure::Contract)?;
+    for carried in 0..ports
+        .iter()
+        .map(PortSpec::carried_quantities)
+        .max()
+        .unwrap_or(0)
+    {
+        let old = component
+            .stored_carried_quantity(case.state, carried)
+            .map_err(Failure::Owner)?;
+        let new = component
+            .stored_carried_quantity(&first_state, carried)
+            .map_err(Failure::Owner)?;
+        audit_carried_step(
+            ports,
+            &layout,
+            case.dt_s,
+            case.inputs,
+            &first_out,
+            carried,
+            old,
+            new,
+        )
+        .map_err(Failure::Contract)?;
+    }
     component
         .admit(case.state, &first_state, &receipt)
         .map_err(Failure::Owner)?;

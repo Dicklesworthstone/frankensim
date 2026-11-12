@@ -8,9 +8,9 @@ use std::rc::Rc;
 use fs_exec::Cx;
 use fs_ports::StableId;
 use fs_ports::component::{
-    Carrier, Class, Component, ContractViolation, LoadLine, MassStepAudit, PortLayout, PortRole,
-    PortSpec, PortTangent, Proposal, Receipt, STREAM_ENTHALPY_RATE, STREAM_MASS_RATE,
-    audit_mass_step, audit_step,
+    CarriedStepAudit, Carrier, Class, Component, ContractViolation, LoadLine, MassStepAudit,
+    PortLayout, PortRole, PortSpec, PortTangent, Proposal, Receipt, STREAM_CARRIED,
+    STREAM_ENTHALPY_RATE, STREAM_MASS_RATE, audit_carried_step, audit_mass_step, audit_step,
 };
 
 use crate::erased::{Node, OnLine, OwnerError, Plain, Tangent};
@@ -201,6 +201,17 @@ pub enum Phase {
 /// Why a step was not taken. Nothing is published when a step fails.
 #[derive(Debug)]
 pub enum SystemError {
+    /// A connection failed to cancel a carried stream coordinate.
+    InterfaceCarried {
+        /// Connection in declaration order.
+        connection: usize,
+        /// Zero-based carried coordinate.
+        carried: usize,
+        /// Uncancelled transported amount.
+        defect: f64,
+        /// Allowance in the coordinate's declared unit.
+        tolerance: f64,
+    },
     /// A component refused with its own error.
     Component {
         /// Component name.
@@ -303,6 +314,8 @@ pub enum SystemError {
 impl fmt::Display for SystemError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InterfaceCarried { connection, carried, defect, tolerance } => write!(f,
+                "connection {connection} left carried coordinate {carried} uncancelled by {defect} (tolerance {tolerance})"),
             Self::Component { node, phase, error } => {
                 write!(f, "component `{node}` refused in {phase:?}: {error:?}")
             }
@@ -1578,6 +1591,8 @@ impl SystemBuilder {
                 .enumerate()
                 .map(|(index, name)| NodeAccount {
                     name: name.clone(),
+                    carried: vec![None; self.nodes[index].ports().iter()
+                        .map(PortSpec::carried_quantities).max().unwrap_or(0)],
                     has_streams: self.nodes[index]
                         .ports()
                         .iter()
@@ -1585,12 +1600,22 @@ impl SystemBuilder {
                     ..NodeAccount::default()
                 })
                 .collect(),
-            connections: vec![ConnectionAccount::default(); self.connections.len()],
+            connections: self.connections.iter().map(|connection| {
+                let mut members = Vec::new();
+                connection.energy_members(&mut members);
+                let carried = members.iter().map(|port| self.spec(*port).carried_quantities())
+                    .max().unwrap_or(0);
+                ConnectionAccount {
+                    carried_defect: vec![Sum::default(); carried],
+                    ..ConnectionAccount::default()
+                }
+            }).collect(),
             boundaries: self
                 .boundaries
                 .iter()
                 .map(|(port, _)| BoundaryAccount {
                     port: self.label(*port),
+                    carried_in: vec![Sum::default(); self.spec(*port).carried_quantities()],
                     ..BoundaryAccount::default()
                 })
                 .collect(),
@@ -1654,6 +1679,25 @@ impl SystemBuilder {
             }
         }
 
+        let port_carried = self
+            .nodes
+            .iter()
+            .flat_map(|node| {
+                node.ports()
+                    .iter()
+                    .map(|port| vec![0.0; port.carried_quantities()])
+            })
+            .collect();
+        let carried_audits = ledger
+            .nodes
+            .iter()
+            .map(|node| vec![None; node.carried.len()])
+            .collect();
+        let connection_carried = ledger
+            .connections
+            .iter()
+            .map(|connection| vec![0.0; connection.carried_defect.len()])
+            .collect();
         Ok(System {
             identity: Rc::new(()),
             names: self.names,
@@ -1690,6 +1734,9 @@ impl SystemBuilder {
             port_energy: vec![0.0; ports],
             port_entropy: vec![0.0; ports],
             port_mass: vec![0.0; ports],
+            port_carried,
+            carried_audits,
+            connection_carried,
             scratch_outputs: vec![0.0; widest_output],
             scratch_direction: vec![0.0; widest_input],
             scratch_first: vec![0.0; widest_output],
@@ -1957,6 +2004,10 @@ pub struct System {
     port_energy: Vec<f64>,
     port_entropy: Vec<f64>,
     port_mass: Vec<f64>,
+    /// Carried-account workspaces are allocated at seal, never per step.
+    port_carried: Vec<Vec<f64>>,
+    carried_audits: Vec<Vec<Option<CarriedStepAudit>>>,
+    connection_carried: Vec<Vec<f64>>,
     scratch_outputs: Vec<f64>,
     scratch_direction: Vec<f64>,
     /// A line's differenced column as the first step left it, as its
@@ -3133,6 +3184,9 @@ impl System {
                 self.port_energy[global] = spec.energy_in_j(dt_s, input, output);
                 self.port_entropy[global] = spec.entropy_in_j_per_k(dt_s, input, output);
                 self.port_mass[global] = spec.mass_in_kg(dt_s, input, output);
+                for (carried, value) in self.port_carried[global].iter_mut().enumerate() {
+                    *value = spec.carried_quantity_in(dt_s, input, output, carried);
+                }
             }
             if self.ledger.nodes[node].has_streams {
                 let measure_mass = |state: &dyn Any| {
@@ -3150,14 +3204,29 @@ impl System {
                     ports,
                     &self.layouts[node],
                     dt_s,
-                    &self.inputs[inputs],
-                    &self.outputs[outputs],
+                    &self.inputs[inputs.clone()],
+                    &self.outputs[outputs.clone()],
                     old_mass,
                     new_mass,
                 )
                 .map_err(|violation| SystemError::Contract {
                     node: self.names[node].clone(),
                     violation,
+                })?;
+            }
+            for carried in 0..self.carried_audits[node].len() {
+                let measure = |state: &dyn Any| self.nodes[node]
+                    .stored_carried_quantity(state, carried)
+                    .map_err(|error| SystemError::Component {
+                        node: self.names[node].clone(), phase: Phase::Measure, error,
+                    });
+                let old = measure(self.accepted[node].as_ref())?;
+                let new = measure(self.candidate[node].as_ref())?;
+                self.carried_audits[node][carried] = audit_carried_step(
+                    ports, &self.layouts[node], dt_s,
+                    &self.inputs[inputs.clone()], &self.outputs[outputs.clone()], carried, old, new,
+                ).map_err(|violation| SystemError::Contract {
+                    node: self.names[node].clone(), violation,
                 })?;
             }
         }
@@ -3257,6 +3326,7 @@ impl System {
             // audited in that one's row.
             if group.is_empty() {
                 connection_rows.push((0.0, 0.0, 0.0));
+                self.connection_carried[index].fill(0.0);
                 continue;
             }
             members.clear();
@@ -3379,6 +3449,36 @@ impl System {
                 });
             }
             connection_rows.push((energy, entropy, mass_defect_kg));
+            for carried in 0..self.connection_carried[index].len() {
+                let amount = |port: &PortRef| self.port_carried[self.port_start[port.node] + port.port]
+                    .get(carried).copied().unwrap_or(0.0);
+                let scale = members.iter().map(|port| amount(port).abs()).fold(0.0_f64, f64::max);
+                let mut sum = Sum::default();
+                let mut magnitude = 0.0;
+                let mut slack = 0.0;
+                for port in &members {
+                    if scale > 0.0 {
+                        let value = amount(port) / scale;
+                        sum.add(value);
+                        magnitude += value.abs();
+                    }
+                    let spec = &self.nodes[port.node].ports()[port.port];
+                    if spec.role() == PortRole::FlowIn && carried < spec.carried_quantities() {
+                        slack += dt_s * self.input_allowance[
+                            self.input_range(*port).start + STREAM_CARRIED + carried
+                        ];
+                    }
+                }
+                let defect = sum.value() * scale;
+                let tolerance = (128.0 * f64::EPSILON + self.config.relative_tolerance)
+                    * magnitude * scale + slack;
+                if !(defect.is_finite() && tolerance.is_finite() && defect.abs() <= tolerance) {
+                    return Err(SystemError::InterfaceCarried {
+                        connection: index, carried, defect, tolerance,
+                    });
+                }
+                self.connection_carried[index][carried] = defect;
+            }
         }
         if !(generated >= -1.0e-9 * entropy_scale - entropy_slack) {
             return Err(SystemError::SecondLaw {
@@ -3432,6 +3532,15 @@ impl System {
                 mass.balance_defect_kg.add(audit.balance_defect_kg);
                 mass.audited_steps += 1;
             }
+            for (account, audit) in account.carried.iter_mut().zip(&self.carried_audits[node]) {
+                if let Some(audit) = audit {
+                    let account = account.get_or_insert_with(Default::default);
+                    account.port_in.add(audit.port_in);
+                    account.stored_change.add(audit.stored_change);
+                    account.balance_defect.add(audit.balance_defect);
+                    account.audited_steps += 1;
+                }
+            }
         }
         for (account, &(energy, entropy, mass)) in
             self.ledger.connections.iter_mut().zip(&connection_rows)
@@ -3439,6 +3548,16 @@ impl System {
             account.energy_defect_j.add(energy);
             account.entropy_generated_j_per_k.add(entropy);
             account.mass_defect_kg.add(mass);
+        }
+        for (account, row) in self
+            .ledger
+            .connections
+            .iter_mut()
+            .zip(&self.connection_carried)
+        {
+            for (total, &value) in account.carried_defect.iter_mut().zip(row) {
+                total.add(value);
+            }
         }
         for (account, &heat) in self.ledger.sinks.iter_mut().zip(&sink_heat) {
             account.heat_j.add(heat);
@@ -3456,6 +3575,9 @@ impl System {
             account.energy_in_j.add(self.port_energy[global]);
             account.entropy_in_j_per_k.add(self.port_entropy[global]);
             account.mass_in_kg.add(self.port_mass[global]);
+            for (total, &value) in account.carried_in.iter_mut().zip(&self.port_carried[global]) {
+                total.add(value);
+            }
         }
         Ok(StepReport {
             dt_s,

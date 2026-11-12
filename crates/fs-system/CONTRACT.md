@@ -2277,8 +2277,9 @@ solved together. Nothing in the module is deleted.
   each measured owner's total mass balance. An owner returning `None` has no
   inventory verdict, and the system mass residual stays unavailable without
   complete measured coverage. Carried species or constituent inventories are
-  not audited or ledgered; their rates still cancel across a junction by its
-  equations. Entropy carried by streams and made by mixing or throttling is
+  audited only when the owner exposes their inventories, as described under
+  "Carried stream inventory conservation" below. Entropy carried by streams
+  and made by mixing or throttling is
   not accounted. Nothing checks that joined volumes hold the same gas. A
   `GasVolume` shortens a step that passes more than about twice its mass
   through it, so a small volume between restrictions sets the step; a
@@ -2388,8 +2389,45 @@ solved together. Nothing in the module is deleted.
   `energy_residual_j`, not refused.
 - `common_flow` on heat ports is admitted for one member only (a bond). Heat
   shared between several bodies goes through `common_effort` or `heat_route`.
-- Momentum, charge and per-species inventories are not in the ledger yet
-  (bead `.5.6`). Total stream mass accounting does not establish those balances.
+- Momentum and charge outside carried stream coordinates are not in the ledger
+  yet (bead `.5.6`). Coordinate accounting alone supplies no chemical identity,
+  reaction balance or mechanical momentum theorem.
+
+## Carried stream inventory conservation
+
+`Component::stored_carried_quantity(state, carried)` opts an owner into an
+independent inventory audit for one zero-based coordinate after mass and
+enthalpy. Both endpoints must be available or both unavailable. Inventories
+are finite and may be signed; their declared units and coordinate meaning
+belong to the owners. Every stream of an owner uses the same coordinate order.
+An available inventory declares conservation under transport: internal
+reactions or sources are not silently booked as incoming material.
+
+The kernel audits each coordinate separately with scaled, compensated sums
+and a roundoff allowance based on its own endpoint inventories and transfers.
+Total mass or energy closure cannot hide an unreported species conversion.
+Each connection also closes its carried transfers within the interface solve's
+coordinate allowance. Failures identify the owner or connection and ordinal,
+and refuse the entire step before any state, clock or account publishes.
+
+`NodeAccount::carried` keeps optional measured accounts; boundary `carried_in`
+and connection `carried_defect` retain the transported amounts independently.
+`Ledger::carried_residual(i)` is available only after a step and complete
+measurement coverage of every owner carrying coordinate `i` over the window.
+Later measurements cannot fill an earlier unaudited step. Checkpoint restore
+rewinds these compensated sums and coverage counts with the other accounts.
+All added per-port, per-owner and per-connection workspaces are sized at seal.
+`GasVolume` measures its `carried_kg`; `Restriction` declares zero storage.
+An attempted draw past a constituent's inventory shortens the step using that
+constituent's own rounding scale, so bulk gas mass cannot erase a trace species.
+
+G0/G3 tests in `tests/carried_accounting.rs` check distinct gas mixtures through
+flow reversal, boundary delivery, exact checkpoint replay, an unreported
+conversion that preserves mass and energy, atomic refusal and missing coverage.
+They also drain a trace constituent at a mass fraction of `1e-30`: its inventory
+limits the accepted interval even when bulk mass and energy barely change.
+No species-name matching, equation of state compatibility, reaction chemistry
+or entropy of mixing is inferred from this ordinal-coordinate accounting.
 
 ## Original port-Hamiltonian Component
 

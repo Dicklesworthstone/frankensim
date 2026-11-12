@@ -43,6 +43,19 @@ pub struct MassAccount {
     pub audited_steps: u64,
 }
 
+/// Independently measured account for one carried stream coordinate.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CarriedAccount {
+    /// Net transported amount entering the owner, in the coordinate's unit.
+    pub port_in: Sum,
+    /// Change in independently measured inventory.
+    pub stored_change: Sum,
+    /// Accepted transport-minus-inventory defects.
+    pub balance_defect: Sum,
+    /// Steps with both endpoint measurements.
+    pub audited_steps: u64,
+}
+
 /// Accounts of one component over the window.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct NodeAccount {
@@ -53,6 +66,9 @@ pub struct NodeAccount {
     /// Measured stream mass, or unavailable. A partial account has fewer
     /// audited steps than the ledger and never proves window closure.
     pub mass: Option<MassAccount>,
+    /// One account per carried coordinate; unavailable measurements remain
+    /// `None`. Ordinals are transport coordinates, not inferred species names.
+    pub carried: Vec<Option<CarriedAccount>>,
     /// Net energy that entered through its ports [J].
     pub port_energy_in_j: Sum,
     /// Change of stored energy, from receipts [J].
@@ -70,6 +86,8 @@ pub struct NodeAccount {
 /// Accounts of one connection over the window.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ConnectionAccount {
+    /// Uncancelled transport per carried coordinate, in its declared unit.
+    pub carried_defect: Vec<Sum>,
     /// Net stream mass entering the connection's members [kg].
     pub mass_defect_kg: Sum,
     /// Sum of the energies that entered the members, plus heat sent to the
@@ -85,6 +103,8 @@ pub struct ConnectionAccount {
 /// Accounts of one boundary over the window.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct BoundaryAccount {
+    /// Signed transported amounts per carried coordinate.
+    pub carried_in: Vec<Sum>,
     /// The driven port, as `node.port`.
     pub port: String,
     /// Mass entering the system through this stream boundary [kg].
@@ -122,6 +142,39 @@ pub struct Ledger {
 }
 
 impl Ledger {
+    /// Closure of one carried coordinate over the accepted window.
+    ///
+    /// Returns `None` before a step, for an absent coordinate, or if any owner
+    /// carrying it omitted a measurement on any step. Owners must agree on
+    /// the meaning and units of the ordinal; no chemistry is inferred here.
+    #[must_use]
+    pub fn carried_residual(&self, carried: usize) -> Option<f64> {
+        if self.steps == 0 || !self.nodes.iter().any(|node| carried < node.carried.len()) {
+            return None;
+        }
+        let mut total = Sum::default();
+        for node in &self.nodes {
+            if let Some(account) = node.carried.get(carried) {
+                let account = account.as_ref()?;
+                if account.audited_steps != self.steps {
+                    return None;
+                }
+                total.add(account.stored_change.value());
+            }
+        }
+        for boundary in &self.boundaries {
+            if let Some(input) = boundary.carried_in.get(carried) {
+                total.add(-input.value());
+            }
+        }
+        for connection in &self.connections {
+            if let Some(defect) = connection.carried_defect.get(carried) {
+                total.add(-defect.value());
+            }
+        }
+        Some(total.value())
+    }
+
     /// Stream-mass residual [kg]: measured storage change minus boundary
     /// inflow and connection defect, or minus the accepted component defects.
     ///
