@@ -56,17 +56,22 @@ fn cyclic_fixture(revision: u32) -> Fixture {
             .insert_claim(claim(&names.recovery, Dims::NONE, GAMMA[i], 0.0))
             .unwrap();
     }
-    let card = MaterialCard::assemble(
+    let mut card = MaterialCard::assemble(
         MaterialStateId {
             chemistry: "cyclic frame fixture".into(),
             phase: "solid".into(),
             process: "manufactured two-branch calibration".into(),
-            revision,
+            revision: 0,
         },
         claims,
         vec![],
     )
     .unwrap();
+    // A lineage starts at revision 0; a later revision is its successor.
+    for _ in 0..revision {
+        card =
+            MaterialCard::supersede(&card, card.claims().clone(), card.models().to_vec()).unwrap();
+    }
     let caloric = ResolvedHeatCapacityCurve::try_new(
         &card,
         HeatCapacitySourceQuery {

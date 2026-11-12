@@ -2,7 +2,7 @@
 use fs_evidence::ValidityDomain;
 use fs_matdb::{ClaimSet,InterpolationPolicy,MaterialCard,MaterialStateId,PropertyClaim,
     PropertyKey,PropertyValue,Provenance,QueryPoint};
-use fs_qty::Dims;
+use fs_qty::{Dims,QuantitySpec};
 use fs_material::sheet::{SheetCapabilities,SheetLaw,resolve_sheet,ResolvedSheet,MEMBRANE_DIMS};
 use fs_material::sheet::tabulated::{CURVE_PROPERTIES,COUPLING_PROPERTY,STRAIN_AXIS};
 use fs_material::state_point::MaterialPropertySelection;
@@ -27,7 +27,11 @@ fn card(hardening:f64, mass:f64, policy:InterpolationPolicy, restrict:bool)->Mat
     for (i,key) in CURVE_PROPERTIES.iter().enumerate() {
         let knots=if i==2 {vec![(-0.2,-800.0),(0.0,0.0),(0.2,800.0)]}
             else {vec![(-0.2,-1600.0),(0.0,0.0),(0.025,200.0),(0.1,200.0+0.075*hardening)]};
-        let validity=if restrict {valid.clone().with(STRAIN_AXIS,-0.02,0.035)} else {valid.clone()};
+        // The sheet law is resolved at a typed, dimensionless zero-strain query, and a curve's
+        // abscissa must carry that same quantity in its claim's validity. Unrestricted, the
+        // bounds are the knots' own span, so the curve's support is unchanged.
+        let (lo,hi)=if restrict {(-0.02,0.035)} else {(knots[0].0,knots[knots.len()-1].0)};
+        let validity=valid.clone().with_quantity(STRAIN_AXIS,QuantitySpec::dimensional(Dims::NONE),lo,hi);
         add(key,PropertyValue::Curve {abscissa:STRAIN_AXIS.into(),abscissa_dims:Dims::NONE,knots,dims:MEMBRANE_DIMS},policy,validity);
     }
     MaterialCard::assemble(MaterialStateId {chemistry:"synthetic characterized sheet".into(),phase:"solid".into(),

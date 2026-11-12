@@ -83,17 +83,22 @@ impl Fixture {
         for property in properties {
             claims.insert_claim(property).unwrap();
         }
-        let card = MaterialCard::assemble(
+        let mut card = MaterialCard::assemble(
             MaterialStateId {
                 chemistry: "synthetic thermal cyclic frame".into(),
                 phase: "solid".into(),
                 process: "independent branch fixture".into(),
-                revision,
+                revision: 0,
             },
             claims,
             vec![],
         )
         .unwrap();
+        // A lineage starts at revision 0; a later revision is its successor.
+        for _ in 0..revision {
+            card = MaterialCard::supersede(&card, card.claims().clone(), card.models().to_vec())
+                .unwrap();
+        }
         let caloric = ResolvedHeatCapacityCurve::try_new(
             &card,
             HeatCapacitySourceQuery {

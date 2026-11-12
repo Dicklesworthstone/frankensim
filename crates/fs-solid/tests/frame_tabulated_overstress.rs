@@ -116,17 +116,22 @@ fn fixture(
     ] {
         claims.insert_claim(claim).unwrap();
     }
-    let card = MaterialCard::assemble(
+    let mut card = MaterialCard::assemble(
         MaterialStateId {
             chemistry: "synthetic tabulated Perzyna frame".into(),
             phase: "solid".into(),
             process: "numerical regression".into(),
-            revision,
+            revision: 0,
         },
         claims,
         vec![],
     )
     .unwrap();
+    // A lineage starts at revision 0; a later revision is its successor.
+    for _ in 0..revision {
+        card =
+            MaterialCard::supersede(&card, card.claims().clone(), card.models().to_vec()).unwrap();
+    }
     let mut requirements =
         tabulated_overstress_requirements(TabulatedKinematicHardening::Prager, kinetics).unwrap();
     requirements.push(

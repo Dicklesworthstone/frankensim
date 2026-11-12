@@ -87,8 +87,20 @@ fn patch_with_source_bands(
             } else {
                 InterpolationPolicy::ConstantWithinValidity
             },
-            validity: ValidityDomain::unconstrained()
-                .with("T", 290.0, 310.0).with("omega", lo, hi),
+            validity: {
+                let validity = ValidityDomain::unconstrained()
+                    .with("T", 290.0, 310.0).with("omega", lo, hi);
+                // The sheet law is resolved at a typed, dimensionless zero-strain query, and a
+                // curve's abscissa must carry that same quantity in its claim's validity. The
+                // bounds are the knots' own span, so the curve's support is unchanged.
+                if curve {
+                    validity.with_quantity(
+                        STRAIN_AXIS, QuantitySpec::dimensional(Dims::NONE), -0.2, 0.2,
+                    )
+                } else {
+                    validity
+                }
+            },
             uncertainty: UncertaintyModel::Unstated,
             observations: vec![],
             provenance: Provenance {
