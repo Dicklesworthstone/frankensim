@@ -1726,9 +1726,105 @@ fn the_heated_plane_scene_divides_its_heat_by_where_the_bodies_put_it() {
     // No fraction is prescribed. In the first step the hot pad cools: it
     // gives heat up through the plane, which is at 328.75 K before any of
     // it warms. By the end the two warm at nearly one rate and the disc
-    // takes nearly its share of the heat capacity, 120 / 170.
-    assert!(pad_after_one_step < 400.0, "{pad_after_one_step}");
-    assert!((disc_share - 120.0 / 170.0).abs() < 2.0e-3, "{disc_share}");
+    // takes nearly its share of the heat capacity, 120 / 170. Both are
+    // read from the binary, on the scene cut to one step and to its last
+    // two, and agree with the recursion above.
+    let stopped_after = |duration_s: &str| {
+        let cut = scene
+            .replace("\"duration_s\": 200.0", &format!("\"duration_s\": {duration_s}"))
+            .replace("\"sample_every_s\": 20.0", "\"sample_every_s\": 0.5");
+        assert!(cut.contains(&format!("\"duration_s\": {duration_s},")), "{cut}");
+        let path = scratch(&format!("stopped_{duration_s}.json"), &cut);
+        let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+        assert_eq!(code, 0, "{stderr}");
+        [
+            value(&json, &element("pad"), "temperature_k"),
+            value(&json, &element("disc"), "temperature_k"),
+        ]
+    };
+    let [pad_then, _] = stopped_after("0.5");
+    assert!(pad_then < 400.0, "{pad_then}");
+    assert!((pad_then - pad_after_one_step).abs() <= 1.0e-9 * pad_then, "{pad_then}");
+    let ([_, disc_before], [_, disc_last]) = (stopped_after("199.5"), stopped_after("200.0"));
+    let share = c[1] * (disc_last - disc_before) / (power * dt);
+    assert!((share - 120.0 / 170.0).abs() < 2.0e-3, "{share}");
+    assert!((share - disc_share).abs() <= 1.0e-9, "{share} vs {disc_share}");
+}
+
+#[test]
+fn a_heat_node_with_a_held_side_brings_its_body_to_where_it_exchanges_nothing() {
+    // The heated plane with its disc taken away and that side of the plane
+    // held at 300 K: `temperature_k` prescribed on a body port. The pad
+    // then relaxes to the temperature at which it exchanges nothing,
+    // 300 K + P / G1 = 305 K, at the rate G0 G1 / (G0 + G1) / C = 0.03 /s,
+    // by the midpoint rule's factor each step.
+    let scene = std::fs::read_to_string(example("heated_plane.json")).unwrap();
+    let held = scene
+        .replace(
+            "    \"disc\": {\"kind\": \"heat_capacity\", \"capacity_j_k\": 120.0, \"temperature_k\": 300.0},\n",
+            "",
+        )
+        .replace(
+            "{\"join\": [\"disc.heat\", \"plane.body1\"]}",
+            "{\"prescribe\": \"plane.body1\", \"temperature_k\": 300.0}",
+        );
+    assert!(!held.contains("disc") && held.contains("\"prescribe\": \"plane.body1\""), "{held}");
+    let (rest_k, half_rate_step) = (300.0 + 30.0 / 6.0, 0.5 * 0.5 * (2.0 * 6.0 / 8.0 / 50.0));
+    let factor: f64 = (1.0 - half_rate_step) / (1.0 + half_rate_step);
+
+    let path = scratch("held.json", &held);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    let pad = value(&json, &element("pad"), "temperature_k");
+    let expected = rest_k + (400.0 - rest_k) * factor.powi(400);
+    assert!((pad - expected).abs() <= 1.0e-12 * expected, "{pad} vs {expected}");
+    // Still cooling at 200 s: the plane sits between the pad and where
+    // both are going.
+    let plane = value(&json, &element("plane"), "temperature_k");
+    assert!(plane > rest_k && plane < pad, "{plane} {pad}");
+
+    // Ten times as long, the pad has arrived and goes on stepping there.
+    // (At rest the heat between pad and plane is a rounding-sized
+    // difference of large terms across a junction that carries nothing;
+    // the kernel refused that at step 1661 until its audit was told the
+    // rounding of a step taken with no update.)
+    let long = held
+        .replace("\"duration_s\": 200.0", "\"duration_s\": 2000.0")
+        .replace("\"sample_every_s\": 20.0", "\"sample_every_s\": 200.0");
+    assert!(long.contains("\"duration_s\": 2000.0,"), "{long}");
+    let path = scratch("held_long.json", &long);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(json.contains("\"steps\":4000,"), "{json}");
+    for name in ["pad", "plane"] {
+        let reached = value(&json, &element(name), "temperature_k");
+        assert!((reached - rest_k).abs() <= 1.0e-9, "{name}: {reached}");
+    }
+}
+
+#[test]
+fn where_a_heat_node_s_solve_starts_does_not_change_the_heated_plane_s_report() {
+    // `temperature_k` on a heat node is where the solve of its loop
+    // starts, not a state. Every part of this scene's loop is linear, so
+    // one update lands on the same numbers from any start: the reports
+    // from five starts between 250 K and 5000 K are the same bytes. (A
+    // loop with a part that is not linear would agree to the solve's
+    // tolerance only.) Each is written to the same path, which the report
+    // names.
+    let scene = std::fs::read_to_string(example("heated_plane.json")).unwrap();
+    let report_from = |start_k: &str| {
+        let moved = scene.replace("\"temperature_k\": 325.0", &format!("\"temperature_k\": {start_k}"));
+        assert!(moved.contains(&format!("\"temperature_k\": {start_k}}}")), "{moved}");
+        let path = scratch("start.json", &moved);
+        let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+        assert_eq!(code, 0, "{stderr}");
+        json
+    };
+    let usual = report_from("325.0");
+    assert!(usual.contains("\"steps\":400,"), "{usual}");
+    for start_k in ["250.0", "301.0", "600.0", "5000.0"] {
+        assert_eq!(report_from(start_k), usual, "from {start_k} K");
+    }
 }
 
 #[test]
@@ -1761,10 +1857,14 @@ fn heat_node_scenes_that_cannot_run_are_refused_with_the_reason() {
     );
     // With a heater on its source the temperature there is solved in a
     // loop, and the solve needs somewhere to start.
+    // The scene is admitted and its first step fails: exit 4, the step's
+    // code, where a scene refused on reading exits 3.
     let (exit, stderr) = refused("node_start.json", &scene.replace(", \"temperature_k\": 325.0}", "}"));
-    assert_ne!(exit, 0, "{stderr}");
+    assert_eq!(exit, 4, "{stderr}");
     assert!(
-        stderr.contains("rubbing.heat") && stderr.contains("needs a positive starting value"),
+        stderr.contains("system-step")
+            && stderr.contains("rubbing.heat")
+            && stderr.contains("needs a positive starting value"),
         "{stderr}"
     );
 }
