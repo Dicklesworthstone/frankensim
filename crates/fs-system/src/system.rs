@@ -2409,15 +2409,31 @@ impl System {
             // sums, not of their total: a force balance near rest is a small
             // difference of large efforts, and its residual cannot be driven
             // below the roundoff of those efforts.
+            //
+            // A flow on a load line is the exception. Its input holds the
+            // released flow and its driver sums what the line component's
+            // own efforts take away, so by those sizes a slider that holds
+            // a mass at rest would be judged against the flow it would
+            // have if it let go. It is judged like every other flow, by
+            // what crosses and by what the other components give; the
+            // rounding of the difference is in its allowance below.
             group_scale.fill(0.0);
             for (row, &index) in unknowns.iter().enumerate() {
                 let driver = &self.drivers[index];
                 let target = driver.value(&self.outputs, &self.boundary_values);
                 residual[row] = self.inputs[index] - target;
                 let group = self.input_group[index];
-                group_scale[group] = group_scale[group]
-                    .max(self.inputs[index].abs())
-                    .max(driver.magnitude(&self.outputs, &self.boundary_values));
+                let (own, terms) = match self.crossing(block, row) {
+                    Some((flow, _)) => (
+                        flow.abs(),
+                        driver.magnitude_of_others(&self.outputs, &self.boundary_values),
+                    ),
+                    None => (
+                        self.inputs[index].abs(),
+                        driver.magnitude(&self.outputs, &self.boundary_values),
+                    ),
+                };
+                group_scale[group] = group_scale[group].max(own).max(terms);
             }
             // A residual cannot be driven below the rounding of the values
             // it is computed from. When a component's output is a small
@@ -2448,6 +2464,11 @@ impl System {
                     self.config.absolute_tolerance + ROUNDING_UNITS * f64::EPSILON * rounding[row];
                 if self.input_is_energy_rate[index] {
                     allowance[row] += ROUNDING_UNITS * f64::EPSILON * power_scale;
+                }
+                // A flow on a load line: the rounding of the difference it
+                // is, which no assembly estimates.
+                if let Some((_, rounding)) = self.crossing(block, row) {
+                    allowance[row] += rounding;
                 }
                 let allowed = self.config.relative_tolerance * group_scale[self.input_group[index]]
                     + allowance[row];
@@ -2622,6 +2643,9 @@ impl System {
                             + ROUNDING_UNITS * f64::EPSILON * rounding[row];
                         if self.input_is_energy_rate[index] {
                             told += ROUNDING_UNITS * f64::EPSILON * power_scale;
+                        }
+                        if let Some((_, rounding)) = self.crossing(block, row) {
+                            told += rounding;
                         }
                         self.input_allowance[index] = told;
                     }

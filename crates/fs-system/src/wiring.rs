@@ -419,6 +419,22 @@ impl Driver {
         }
     }
 
+    /// [`Self::magnitude`] without a load line's own terms: the size of the
+    /// flow the other components give a port on a line, which is what
+    /// crosses there together with what the line component takes away.
+    pub(crate) fn magnitude_of_others(&self, outputs: &[f64], boundaries: &[Vec<f64>]) -> f64 {
+        match self {
+            Self::OnLine { terms, own } => {
+                let mut sum = 0.0;
+                for &(index, coefficient) in &terms[..terms.len() - own] {
+                    sum += (coefficient * outputs[index]).abs();
+                }
+                sum
+            }
+            _ => self.magnitude(outputs, boundaries),
+        }
+    }
+
     /// Derivative of the value with respect to each output it reads.
     pub(crate) fn gradient(&self, outputs: &[f64], out: &mut Vec<(usize, f64)>) {
         out.clear();

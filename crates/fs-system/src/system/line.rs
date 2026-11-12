@@ -262,15 +262,49 @@ impl System {
         Ok(None)
     }
 
-    /// Replace the released flows of `block`'s line by the flows on the
-    /// line at the efforts just accepted.
+    /// For unknown `row` of `block`, if it is a flow on the block's load
+    /// line: the flow that crosses at the current iterate, and the rounding
+    /// that flow carries.
     ///
-    /// A flow on the line is a difference of the released flow and what
-    /// the efforts take away, and it carries the rounding of those terms,
-    /// not of its own size: a held slider's flow is `r - c (r / c)`, zero
-    /// or a unit in the last place of `r`. The interface audit is told
-    /// that rounding, in the units the solve allows everywhere else; told
-    /// nothing, it refused a mass held at rest for one push in seven.
+    /// During the solve the input holds the released flow; what crosses is
+    /// that less what the efforts take away. It is a difference, and it
+    /// carries the rounding of its terms, not of its own size: a held
+    /// slider's flow is `r - c (r / c)`, zero or a unit in the last place
+    /// of `r`. The rounding is given in the units the solve allows
+    /// everywhere else, `ROUNDING_UNITS` of `eps` times the sum of the
+    /// terms' magnitudes.
+    ///
+    /// The solve judges the row by the crossing flow, as it judges every
+    /// other flow by its own size, and allows it that rounding; the
+    /// interface audit is told the same rounding. (Judged by the released
+    /// flow, a mass held under a push that changed from step to step was
+    /// accepted with a flow inside the solve's relative tolerance of the
+    /// released flow, far above the rounding the audit is told at a
+    /// junction at rest, and the audit refused it. Told no rounding, the
+    /// audit refused a mass held under a constant push for one push in
+    /// seven.)
+    pub(super) fn crossing(&self, block: usize, row: usize) -> Option<(f64, f64)> {
+        let line = self.lines[block].as_ref()?;
+        let width = line.places.len();
+        let (flow, &(input, _, _)) = line
+            .places
+            .iter()
+            .enumerate()
+            .find(|(_, place)| place.2 == row)?;
+        let mut crossing = self.inputs[input];
+        let mut terms = crossing.abs();
+        for (effort, &(_, output, _)) in line.places.iter().enumerate() {
+            let taken = line.compliance[flow * width + effort] * self.outputs[output];
+            crossing -= taken;
+            terms += taken.abs();
+        }
+        Some((crossing, ROUNDING_UNITS * f64::EPSILON * terms))
+    }
+
+    /// Replace the released flows of `block`'s line by the flows on the
+    /// line at the efforts just accepted: the ports, the audit and the
+    /// ledger see what crossed. The rounding of these flows is already in
+    /// what the solve told the audit ([`Self::crossing`]).
     pub(super) fn line_flows(&mut self, block: usize) {
         let Some(line) = &self.lines[block] else {
             return;
@@ -280,13 +314,9 @@ impl System {
             if unknown == usize::MAX {
                 continue;
             }
-            let mut terms = self.inputs[input].abs();
             for (effort, &(_, output, _)) in line.places.iter().enumerate() {
-                let taken = line.compliance[flow * width + effort] * self.outputs[output];
-                self.inputs[input] -= taken;
-                terms += taken.abs();
+                self.inputs[input] -= line.compliance[flow * width + effort] * self.outputs[output];
             }
-            self.input_allowance[input] += ROUNDING_UNITS * f64::EPSILON * terms;
         }
     }
 }

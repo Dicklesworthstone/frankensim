@@ -305,22 +305,46 @@ relation allows there.
   the flow that crosses, and Newton runs as for any block, on a map that is a
   function: released flow in, effort out. The line component is differenced
   through `propose_on_line`. Both convergence tests, the rounding allowances
-  and the refusals are the ones above.
+  and the refusals are the ones above, with one difference for a flow on
+  the line: it is judged by the flow that crosses and by what the other
+  components give, like every other flow, not by the released flow its
+  input holds or by the terms `C * own effort` of its driver. A slider that
+  holds a mass lets nothing cross while the released flow is `c` times the
+  push; judged against that, a mass held under a push that changed from step
+  to step was accepted with a flow inside the solve's relative tolerance of
+  the released flow and refused by the audit, which allows a junction at
+  rest its rounding only (4.9 N rising to 4.9196 N in 0.4 s: -3.2258e-19 J
+  against 6.3977e-20 J at the second step. Found by the independent review
+  of ef1631e0d2).
 - When the block is accepted, the flows on the line, `released - C effort`,
   are written to the line's inputs. The audits, the ledger, `last_input` and
   the next step's start see what crossed, not what the solve iterated on.
 - Such a flow is a difference of two terms and carries their rounding, not
   that of its own size: a held slider's flow is `r - c (r / c)`, zero for
-  some numbers and a unit in the last place of `r` for others. The
-  interface audit is told `16 eps (|released| + sum |C effort|)` for a line
-  input, on top of what the solve allows that wire. (Told nothing, it
-  refused a mass held at rest for 282 of 2000 pushes: 6.8e-24 J against
-  6.8e-33 J.)
-- The step a block accepts does not depend on `C`: the component settles
-  where the flow on the line is the flow its neighbours give, whatever
-  passive matrix it was told, and only the path of the iteration differs.
-  So no closed form of a motion can show a wrong `C`; a test reads the
-  matrix directly (below).
+  some numbers and a unit in the last place of `r` for others. That
+  rounding, `16 eps (|released| + sum |C effort|)`, is in the allowance of
+  the flow's wire in the solve, and so in what the interface audit is told
+  for a line input, on top of what the solve allows every wire. (Told
+  nothing, the audit refused a mass held at rest for 282 of 2000 pushes:
+  6.8e-24 J against 6.8e-33 J.)
+- Within a row of the component's relation the step a block accepts does
+  not depend on `C`: the component settles where the flow on the line is
+  the flow its neighbours give, whatever passive matrix it was told, and
+  only the path of the iteration differs. So no closed form of a motion
+  within a row can show a wrong `C`; a test reads the matrix directly
+  (below), and another publishes flows through its off-diagonal entries.
+  Where the relation jumps, `C` decides: a slider whose static limit is
+  above its sliding force breaks away when the released slip exceeds
+  `C mu_s N`, and slides only where `released - C mu_k N` is still along
+  it. With the neighbours' true matrix the two meet. A `C` larger than
+  that leaves a band of released slips with no point to settle on, where
+  the solve cannot converge; a smaller one leaves a band with two, and the
+  iteration's path picks. (Read off the two conditions of
+  `Slider::on_line`; no test runs a wrong `C`.) `C` is exact for
+  neighbours that are linear within the step, and the slope at the step's
+  start otherwise.
+  (ef1631e0d2 and this file said the accepted step does not depend on `C`
+  at all. Found wrong by the independent review of ef1631e0d2.)
 - `C` need not be symmetric. The step is refused (`SystemError::LoadLine`,
   naming the component and the reason, nothing published) when the other
   components do not determine a line (their Jacobian, with the component's
@@ -1413,23 +1437,64 @@ material, a surface card, a temperature or a slip history stays in `fs-tribo`.
   its setter's flow, so a slider joined to a mass moving at `v` starts with a
   slip of `-v`, and nothing checks a starting slip against the ports; a
   pair that starts stuck (`Slip::stuck()`) needs none.
-- What a port tells the slider. A mean alone does not say whether an end is
-  a mass (its end velocity is twice the mean less its start) or prescribed
-  (held over the step, free to jump between steps). The line does: an end
-  whose row of the matrix is zero is given. The slider keeps the slip its
-  last step ended with, which goes to twice its mean less its start within
-  a step either way, and the flow each given end was given; a given end
-  that comes back with another value has jumped, and the step starts with
-  that much more slip. It also keeps whether it ended stuck. Stuck with
-  such a start slip, it gives the force that ends the step at zero slip, up
-  to `mu_s N`, where that has no negative loss; else it holds on the mean,
-  up to `mu_s N`; else it breaks away. (The first version looked for no
-  jump: after a prescribed side jumped its record alternated in sign for
-  ever, friction acted every other step, and every audit passed. Found by
-  the independent review of 6ad46a38fd.) Not covered: a prescribed side
-  that varies within a step is seen as its step mean, a staircase; and the
-  record of an end that answers is as good as the midpoint relation is for
-  what is attached there.
+- What a port tells the slider. What an end receives is a step mean: a
+  mass returns its mean velocity, and a prescribed end gets the mean of
+  what is prescribed (`FlowSource` delivers `Waveform::mean`, a boundary is
+  handed `(t0, dt)`). Friction needs the slip a step starts and ends with.
+  For an end that answers, the end velocity is twice the mean less the
+  start. For a prescribed end a mean does not say where the side ends its
+  step, and the slider takes the mean for the end: the side is held over
+  the step and jumps between steps. The line says which end is which: an
+  end whose row of the matrix is zero is given. The slider keeps the slip
+  its last step ended with, which goes to twice its mean less its start
+  within a step either way, and the flow each given end was given; a given
+  end that comes back with another value has jumped, and the step starts
+  with that much more slip. It also keeps whether it ended stuck. Stuck
+  with such a start slip, it gives the force that ends the step at zero
+  slip, up to `mu_s N`, where that has no negative loss; else it holds on
+  the mean, up to `mu_s N`; else it breaks away. (The first version looked
+  for no jump: after a prescribed side jumped its record alternated in
+  sign for ever, friction acted every other step, and every audit passed.
+  Found by the independent review of 6ad46a38fd.)
+- Not covered: a prescribed side that accelerates. Held is the truth for a
+  side at a constant speed and for one that does jump. For a side that
+  accelerates at `a` it is off by `a dt / 2` at every step, and what
+  follows does not get better with a smaller step (2 kg, `mu_s N` = 9.8 N,
+  `mu_k N` = 5.88 N, a side at 4 m/s² that needs 8 N; asserted at steps of
+  1, 0.5 and 0.25 ms):
+  - A side that leaves rest at `t = 0`, through a `FlowSource` or through a
+    boundary that gives the same means. Its first mean is `a dt / 2` with
+    the mass at rest, a slip the slider is not told. The steps give 8 N,
+    nothing, and then break away, at the third step at every step length;
+    at 0.2 s the mass has 0.586 m/s of the side's 0.8 and 0.127 J of heat
+    are booked for a pair that in truth never slips.
+  - A side that rests one step and then accelerates. Every change of the
+    mean is then the jump the slider takes it for: the mass is carried with
+    the right force after the first step (which gets half), but one mean
+    behind, `a dt / 2`, and every step books the catch of its jump as heat,
+    `m a² dt² / 2`: 3.172e-3, 1.593e-3 and 7.98e-4 J in 0.2 s, first order
+    in the step, where a stuck pair loses nothing.
+  - A side that swings from rest at 2 Hz and needs at most 6.32 N. The
+    slider survives on holding on the mean until, at one of the side's
+    reversals, it breaks away. Whether it does, and at which reversal,
+    hangs on the last digit of the side's means: of the side as it is and
+    39 more with every mean left or moved by a unit in the last place, 24
+    break away within 4 s and 16 never do (1 ms; through a `FlowSource`
+    the side as it is broke away at 0.751 s, and at 0.251 s on
+    ef1631e0d2). Asserted: some of the 40 break away, each in the step of
+    a reversal or the one after.
+  - With a force on the mass that exceeds `m a` along the acceleration the
+    slider falls back on holding on the mean, which for the step means of
+    a ramp happens to be the exact answer (-7 N under a push of 15 N in a
+    scratch run of the kernel, not a test). That is no claim: nothing
+    tells a caller which of these cases a run is in.
+  The slider cannot refuse such a side by name: it cannot tell a side that
+  accelerates from one that jumps. A caller keeps prescribed sides at a
+  constant speed until the slider is told the velocities a prescribed end
+  starts and ends its step with (MB 29738; three ways of inferring them
+  from the means were emulated and each fails a basic case). The record of an
+  end that answers is as good as the midpoint relation is for what is
+  attached there.
 - The table, row by row: over six start slips, three compliances and 801
   released slips each, every row is reached more than a thousand times, the
   three claims hold at every point, and 4806 of the points pass
@@ -1454,16 +1519,29 @@ material, a surface card, a temperature or a slip history stays in `fs-tribo`.
   distance.
 - Held under 2000 pushes between 0.05 and 0.92 of the static limit: none is
   refused, and the mass is at rest to the rounding of the released flow
-  (282 of them with a flow or a velocity that is not exactly zero, 5.3e-18
-  m/s at worst). The planted negative for what the audit is told: with the
-  solve loosened to 1e-2, a net force planted on a held mass leaves the
-  junction `c dt F²`; the audit's tolerance, read from a refusal, is 1.31e-17
-  m/s at the slider's port, 1.5 times `16 eps (|released| + |C effort|)`
-  (that term and the `16 eps |released|` a step taken at its first check is
-  told for the wire); a hundred times that is refused by the junction's
-  audit by a factor between 80 and 120, a quarter is taken. Against a
-  scratch kernel that tells the audit a thousand times the rounding, this
-  test alone fails.
+  (282 of them with a flow or a velocity that is not exactly zero, 1.6e-18
+  m/s at worst). The planted negative for what the audit is told: a net
+  force planted on a held mass, with the solve told to take a wire that is
+  open by four times its own size, leaves the junction `c dt F²`. (Up to
+  ef1631e0d2 a tolerance of 1e-2 planted it. The solve now judges a line
+  flow by what crosses, makes an update at 1e-2 and the plant is gone.)
+  The audit's tolerance, read from a refusal, is 1.31e-17 m/s at the
+  slider's port, 1.5 times `16 eps (|released| + |C effort|)` (that term and
+  the `16 eps |released|` a step taken at its first check is told for the
+  wire); a hundred times that is refused by the junction's audit by a
+  factor between 80 and 120, a quarter is taken. At the solve's ordinary
+  tolerance the force that was refused a hundred times over never reaches
+  the audit: it is corrected in one update, and the mass is back on its
+  held state to the rounding of the released flow. Against a scratch
+  kernel that tells the audit a thousand times the rounding, this test
+  alone fails.
+- Held under a push that changes: 4.9 N rising to 4.9196 N in 0.4 s,
+  nothing rising by 2 N/s, and 4 N sin(2 pi 3.14 t). All 400 steps of each
+  are taken (before: 1, 222 and 35, then refused by the junction's audit
+  for ever), with 749, 797 and 799 updates, two at most in a step; the flow
+  left at the slider's port is inside the rounding the audit is told for
+  it at every step (0.03 of it at most). Against the kernel of ef1631e0d2
+  this test alone fails, with that kernel's refusal.
 - A side that jumps: a mass at rest stuck to a side prescribed at 0 and
   then at 0.5 m/s. In the step of the jump it breaks away (0.5 m/s cannot
   be caught within a step by 9.8 N); it is dragged at exactly 5.88 N in
@@ -1471,7 +1549,18 @@ material, a surface card, a temperature or a slip history stays in `fs-tribo`.
   0.4 N that needs; then it rides with no force. The slider's slip equals
   the slip of the two sides to 1e-12 at every step. The side's work is
   `m V²` = 0.5 J, half of it the mass's kinetic energy and half the heat,
-  each to 1e-12.
+  each to 1e-12. The same with the slider's ends exchanged (the mass at
+  `b`, the side prescribed at `a`): the same motion and force on the mass,
+  the record with the other sign.
+- A small jump under a push: a mass held against 6 N on a side that jumps
+  by 1 mm/s along the push. Ending the step of the jump at zero slip would
+  be a force against the push with a slip that asks for one along it, a
+  negative loss; the slider holds on the mean instead (-2 N, the mass ends
+  1 mm/s ahead), and catches that slip in the next step (-8 N, 4e-6 J
+  lost); then -6 N. Forces to 1e-9 N, velocities to 1e-15 m/s, the heat to
+  1e-12. This is the stuck slider's hold on the mean with a start slip,
+  reached through the kernel.
+- A side that accelerates: the numbers of "Not covered" above.
 - A side that speeds up: its speed `(rate / 2) u²` given as step means, a
   staircase. Stuck, the slider gives `m (V_n - V_(n-1)) / dt`, which is
   `m rate u` at the start of the step, to 1e-9 N, and the mass has the
@@ -1480,25 +1569,57 @@ material, a surface card, a temperature or a slip history stays in `fs-tribo`.
   having been carried with more than 1.6 times the sliding force.
 - Stuck to a side that moved, the three rows over 9612 points: carried
   2410, held 2304, broken away 4898; the loss is not negative and the force
-  is inside `mu_s N` at every point. At a threshold: `on_line` returns
-  exactly the limit where the quotient would be 3.0000000000000004; with no
-  compliance the slip is the given one and the force the sliding one.
+  is inside `mu_s N` at every point; a carried force is the one that ends
+  the step at zero slip, to the bit, and reaches above 1.6 times the
+  sliding force; a held one is `r / c` inside the limit, to the bit. At a
+  threshold: `on_line` returns exactly the limit where the quotient would
+  be 3.0000000000000004; with no compliance the slip is the given one and
+  the force the sliding one. With unequal coefficients (3 N static, 1.5 N
+  sliding): held with exactly 3 N at `c mu_s N`, the sliding 1.5 N a hair
+  beyond; sliding, turned with exactly -1.5 N at `-c mu_k N` and reversed a
+  hair beyond; a start slip that 2 N end is carried when stuck and slid
+  over when sliding.
 - A mass on a spring with friction (1 kg, 100 N/m, 3 N sliding, 5 N
   static, thrown at sqrt(22) m/s): the turning points 0.44, -0.38, 0.32,
   -0.26, 0.20, -0.14, 0.08 fall by `2 mu_k N / k` a half cycle, and it
   stops at -0.02 inside the dead band. Off the closed form by 4.3e-6 m at a
   step of 1 ms and 1.1e-6 m at 0.5 ms at most; asserted: within
   `8 (mu_k N / m) dt²`. What it was thrown with is in the spring and in the
-  heat to 1e-12. These are the reversal rows of the law in the kernel.
+  heat to 1e-12. Every one of its steps is a point of `Slider::on_line` on
+  the line the mass and the spring present (`c = g / (1 + g k dt / 2)`,
+  `g = dt / (2 m)`): the force to 1e-9 N and the slip to 1e-12 m/s for the
+  released slip that crossed. The rows reached are, at 1 ms, slid 2342,
+  held 1648, released 4, reversed 2, turned 1, arrested 2, broken away 1,
+  and at 0.5 ms 4693, 3298, 4, 3, 1, 1, 0: the three reversal rows are
+  asserted to be among them.
 - The matrix a component is handed, read by a probe that returns no effort:
   `dt / (2 m)` per mass with nothing between two masses; the closed form
   with a damper between them (symmetric, off-diagonal entries not small);
   with a gyrator between them (`[[g1, -g1 g2 G], [g1 g2 G, g2]] /
   (1 + g1 g2 G²)`, not symmetric); a zero row and column for a prescribed
   side. Each entry to 1e-12.
+- The slider's forces through such a matrix: the two masses (2 kg thrown at
+  1 m/s, 0.5 kg at rest) rub on each other beside the damper and beside
+  the gyrator, so every flow of the line is the released flow less what
+  both forces take away, one through an off-diagonal entry. Beside the
+  damper, with 30 N on the first mass: the momentum is the 2 kg m/s and
+  the push's impulse to 1e-12 at every step; the second mass needs 6 N to
+  go along, more than the sliding 5.88 N, so the slider slides at every
+  one of the 80 steps, at the difference at which the damper gives the
+  missing 0.12 N (0.171 mm/s, to 1e-12); the push's work is what the two
+  gain and the slider and the damper lose, to 1e-12. Beside the gyrator
+  (not symmetric): the two lose exactly the slider's heat at every one of
+  6000 steps of 0.1 ms (to 1e-12 J of 1 J); they rub in 2346 steps and are
+  stuck in 3616; they end moving as one at 5.96 mm/s, held with the
+  5.36 N the gyrator pushes them apart with (`G v`, to 1e-9 N). Against a
+  scratch kernel that publishes the line's flows through the transposed
+  matrix this test alone fails, at the gyrator's first step
+  (1.55e-8 J against 1.74e-11 J).
 - A refused step leaves nothing of its line behind: with a spring that the
   kernel differences beside the slider, a step asked with no iteration
-  allowed is refused after the line was found, three times in 60 steps, and
+  allowed is refused after the line was found, and a step asked with one
+  iteration allowed is refused after an assembly and an update (the slider
+  differenced, proposed at a perturbed flow), three times each in 60 steps;
   every step that follows equals, in iterations and bits, the step of a
   system never refused.
 - The row without friction, planted: a mass sliding at 1 mm/s pushed back with

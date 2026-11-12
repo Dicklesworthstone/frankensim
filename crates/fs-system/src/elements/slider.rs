@@ -11,14 +11,21 @@
 //! The elements of this crate use the midpoint rule: a mass returns its
 //! MEAN velocity over the step on its port, and its velocity at the end of
 //! the step is twice that mean less the velocity it started with. A
-//! prescribed flow is another thing: a boundary's value is held over the
-//! step, so its start, its mean and its end are that one value, and it may
-//! jump from one step to the next. Friction has to know the slip a step
-//! starts with, and a mean alone does not say which of the two an end is.
+//! prescribed end receives a mean too, the mean of what is prescribed
+//! (`FlowSource` delivers the exact step mean of its waveform, and a
+//! boundary is handed the step to do the same). Friction has to know the
+//! slip a step starts and ends with, and for a prescribed end a mean does
+//! not say where the side ends its step.
 //!
-//! The load line does. An end whose row of the line's matrix is zero does
-//! not answer the slider's force at all: its flow is given, and held over
-//! the step. The slider keeps the slip its last step ended with. Within a
+//! The slider takes the mean for the end: a prescribed side is HELD over
+//! its step, so its start, its mean and its end are that one value, and it
+//! jumps from one step to the next. That is the truth for a side at a
+//! constant speed and for one that does jump. It is not for a side that
+//! accelerates: see "Not covered" below.
+//!
+//! The load line says which end is which. An end whose row of the line's
+//! matrix is zero does not answer the slider's force at all: its flow is
+//! given. The slider keeps the slip its last step ended with. Within a
 //! step that slip goes to twice its mean less its start, whether an end
 //! answers (the midpoint relation) or is held (it does not move). What a
 //! given end can add is a jump between two steps: the slider remembers the
@@ -84,10 +91,29 @@
 //! thing) the slip is what it is and the force is `mu_k N sign(r)`, none at
 //! exactly zero slip.
 //!
-//! Not covered: a prescribed side whose velocity varies WITHIN a step is
-//! seen as its step mean held over the step, so a stuck block follows a
-//! ramp as a staircase; and the slider's record of an end that answers is
-//! only as good as the midpoint relation is for what is attached there.
+//! # Not covered
+//!
+//! A prescribed side that ACCELERATES. Taken as held, it is off by half a
+//! step of its acceleration at every step, and no smaller step mends what
+//! follows (the numbers are in the crate's contract and asserted in
+//! `tests/load_line.rs`):
+//!
+//! - A side that leaves rest in the first step has a first mean that is
+//!   not the mass's velocity, a slip the slider is not told. A pair that
+//!   needs 8 N of the 9.8 N it holds gets 8 N, then nothing, and breaks
+//!   away at the third step, at every step length.
+//! - A side that changes speed after a step at rest is followed as a
+//!   staircase: with the right force, one mean behind, and with the catch
+//!   of every step booked as heat, `m a^2 dt^2 / 2` a step, where a stuck
+//!   pair loses nothing.
+//!
+//! The slider cannot refuse such a side: it cannot tell a side that
+//! accelerates from one that jumps. Until it is told the velocities a
+//! prescribed end starts and ends its step with, a prescribed side is to
+//! be kept at a constant speed.
+//!
+//! The slider's record of an end that answers is only as good as the
+//! midpoint relation is for what is attached there.
 
 use fs_exec::Cx;
 use fs_ports::PortKind;
