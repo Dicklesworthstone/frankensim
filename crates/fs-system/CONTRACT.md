@@ -213,6 +213,18 @@ physics owners below fs-couple can be composed without it.
   `mean(t0, dt)` is the step average in closed form, over the interval the
   two floating-point ends span, and NaN at a time that is not finite, which
   `Force`, `FlowSource` and `Heater` refuse.
+  These sources advertise every future table knot as their next event, so
+  the coupled driver ends a step at each change of slope, including the
+  transitions to and from held endpoint values. The interval retains the
+  source clock's compensation. If a requested cap would leave only clock
+  rounding before the next knot, the source halves the remaining interval
+  instead of creating a vanishing follow-up step; the cap remains strict
+  and genuinely distinct adjacent knots remain distinct events. A motion
+  source publishing its span can therefore carry a stuck slider across a change of
+  acceleration without an artificial catch-up force or friction heat.
+  Constants, sine waves and one-knot tables have no scheduled event.
+  Raw boundary closures still require the caller to cap steps at their
+  own input events; a span alone does not locate an interior change.
   `Mass`, `Spring`, `Damper` and `Force` have `in_domain(kind, ..)`
   constructors that give the same four laws in another power domain of
   `PortKind`: inertia, torsion spring, rotary damper and torque about a

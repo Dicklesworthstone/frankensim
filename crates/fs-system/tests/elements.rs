@@ -12,13 +12,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_ports::component::conformance::{Case, Observed, check_component, check_port_tangent};
-use fs_ports::component::{
-    Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt,
-};
+use fs_ports::component::{Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt};
 use fs_ports::{PortKind, StableId};
 use fs_system::elements::{
-    Conductance, Damper, ElementError, Force, GasContents, GasVolume, Gyrator, HeatCapacity,
-    HeatNode, Heater, Mass, Motion, Restriction, SourceAccount, Spring, Waveform,
+    Conductance, Damper, ElementError, FlowSource, Force, GasContents, GasVolume, Gyrator,
+    HeatCapacity, HeatNode, Heater, Mass, Motion, Restriction, SourceAccount, Spring, Waveform,
 };
 use fs_system::{
     AdmissionError, NodeId, RouteTemperature, SolveConfig, System, SystemBuilder, SystemError,
@@ -240,6 +238,128 @@ fn waveform_means_are_exact_averages_over_the_step() {
     assert_eq!(still.lowest(), 1.0 + 2.0 * 0.5_f64.sin());
     assert_eq!(table.lowest(), -1.0);
     assert_eq!(sine.lowest(), 1.25 - 2.5);
+}
+
+#[test]
+fn tabulated_sources_schedule_every_future_knot_on_their_accepted_clock() {
+    let wave = Waveform::table(vec![(0.25, 1.0), (0.625, 3.0), (1.0, 2.0)]).unwrap();
+    let force = Force::new(wave.clone());
+    let flow = FlowSource::new(wave.clone()).publishing();
+    let heater = Heater::new(wave).unwrap();
+    for (time, expected) in [
+        (-0.25, Some(0.5)),
+        (0.0, Some(0.25)),
+        (0.25, Some(0.375)),
+        (0.5, Some(0.125)),
+        (0.625, Some(0.375)),
+        (1.0, None),
+        (2.0, None),
+    ] {
+        let state = SourceAccount::starting_at(time);
+        assert_eq!(force.next_event_s(&state), expected);
+        assert_eq!(flow.next_event_s(&state), expected);
+        assert_eq!(heater.next_event_s(&state), expected);
+    }
+    for wave in [
+        Waveform::constant(2.0).unwrap(),
+        Waveform::sine(1.0, 2.0, 0.0, 2.0).unwrap(),
+        Waveform::table(vec![(0.25, 2.0)]).unwrap(),
+    ] {
+        assert_eq!(
+            Force::new(wave).next_event_s(&SourceAccount::default()),
+            None
+        );
+    }
+    assert!(
+        flow.next_event_s(&SourceAccount::starting_at(f64::NAN))
+            .unwrap()
+            .is_nan()
+    );
+}
+
+#[test]
+fn source_events_keep_clock_compensation_and_distinct_adjacent_knots() {
+    let next = f64::from_bits(1.0_f64.to_bits() + 1);
+    let wave = Waveform::table(vec![(1.0, 1.0), (next, 2.0), (2.0, 1.0)]).unwrap();
+    let force = Force::new(wave.clone());
+    let flow = FlowSource::new(wave.clone());
+    let heater = Heater::new(wave).unwrap();
+    let mut state = SourceAccount::starting_at(1.0);
+    state.clock_s.add(1.0e-16);
+    assert_eq!(state.time_s(), 1.0);
+    // The next knot is a distinct representable time, even though less
+    // than a clock's rounding allowance away. Its distance retains the
+    // low bits of the clock instead of discarding them through time_s().
+    let interval = f64::EPSILON - 1.0e-16;
+    for event in [
+        force.next_event_s(&state),
+        flow.next_event_s(&state),
+        heater.next_event_s(&state),
+    ] {
+        assert_eq!(event, Some(interval));
+    }
+    for limit in [
+        force.limit_dt_s(&state, interval * 0.75),
+        flow.limit_dt_s(&state, interval * 0.75),
+        heater.limit_dt_s(&state, interval * 0.75),
+    ] {
+        let limited = limit.unwrap();
+        assert!(limited > 0.0 && limited <= interval * 0.75);
+    }
+    state.clock_s.add(interval);
+    assert_eq!(state.time_s(), next);
+    assert_eq!(force.next_event_s(&state), Some(2.0 - next));
+}
+
+#[test]
+fn heater_knots_split_coupled_steps_and_replay_with_the_same_energy() {
+    let mut builder = SystemBuilder::new();
+    let body = builder
+        .add_with_tangent("body", HeatCapacity::new(10.0).unwrap(), 300.0)
+        .unwrap();
+    let source = builder
+        .add_with_tangent(
+            "heater",
+            Heater::new(Waveform::table(vec![(0.25, 0.0), (0.625, 8.0), (1.0, 8.0)]).unwrap())
+                .unwrap(),
+            SourceAccount::default(),
+        )
+        .unwrap();
+    builder
+        .bond(
+            builder.port(body, "heat").unwrap(),
+            builder.port(source, "heat").unwrap(),
+        )
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    with_cx(|cx| {
+        let checkpoint = system.checkpoint().unwrap();
+        let mut reference = None;
+        for _ in 0..2 {
+            for end in [0.25, 0.625, 1.0, 2.0] {
+                let report = system.step(1.0, cx).unwrap();
+                assert_eq!(report.time_s, end);
+                assert_eq!(system.state::<SourceAccount>(source).unwrap().time_s(), end);
+            }
+            // A triangle of 1.5 J, then 8 W for 1.375 s: 12.5 J.
+            assert!((*system.state::<f64>(body).unwrap() - 301.25).abs() < 1.0e-12);
+            assert_eq!(
+                system.state::<SourceAccount>(source).unwrap().energy_in_j,
+                -12.5
+            );
+            assert!(system.ledger().energy_residual_j().abs() < 1.0e-11);
+            let current = (
+                *system.state::<f64>(body).unwrap(),
+                *system.state::<SourceAccount>(source).unwrap(),
+            );
+            if let Some(expected) = reference {
+                assert_eq!(current, expected);
+            } else {
+                reference = Some(current);
+            }
+            system.restore(&checkpoint).unwrap();
+        }
+    });
 }
 
 fn step(system: &mut System, dt_s: f64, steps: u32) {

@@ -350,6 +350,49 @@ impl Waveform {
         }
     }
 
+    /// Time to the next table knot, strictly after the accepted source
+    /// clock. Each knot may change the slope, including where a held
+    /// endpoint joins a ramp. The driver must resolve that change before
+    /// a coupled law interprets the step's mean and endpoint values.
+    fn next_event_s(&self, clock_s: Sum) -> Option<f64> {
+        let t_s = clock_s.value();
+        if !t_s.is_finite() {
+            return Some(f64::NAN);
+        }
+        match &self.0 {
+            Shape::Table(knots) if knots.len() > 1 => {
+                let next = knots.partition_point(|knot| knot.0 <= t_s);
+                knots.get(next).map(|knot| {
+                    // Subtract from the full clock, retaining the low bits
+                    // that `value()` rounded. Adding this interval then
+                    // lands on the knot on the accepted clock too.
+                    let mut from_knot = clock_s;
+                    from_knot.add(-knot.0);
+                    -from_knot.value()
+                })
+            }
+            Shape::Constant(_) | Shape::Sine { .. } | Shape::Table(_) => None,
+        }
+    }
+
+    /// Avoid leaving just clock rounding between a requested cap and a
+    /// knot. Halving the remaining interval preserves the strict cap and
+    /// leaves a useful final step. Distinct nearby knots are still events.
+    fn limit_dt_s(&self, clock_s: Sum, proposed_s: f64) -> f64 {
+        if let Some(event_s) = self.next_event_s(clock_s) {
+            let mut at_event = clock_s;
+            at_event.add(event_s);
+            let mut after_cap = clock_s;
+            after_cap.add(proposed_s);
+            let leftover_s = at_event.value() - after_cap.value();
+            let roundoff_s = 8.0 * f64::EPSILON * clock_s.value().abs().max(at_event.value().abs());
+            if event_s > proposed_s && leftover_s > 0.0 && leftover_s <= roundoff_s {
+                return proposed_s.min(0.5 * event_s);
+            }
+        }
+        proposed_s
+    }
+
     /// The exact mean over `[t0_s, t0_s + dt_s]`; the value at `t0_s` when
     /// `dt_s` is not positive.
     #[must_use]
@@ -1142,6 +1185,14 @@ impl Component for Force {
         Ok(state.energy_in_j)
     }
 
+    fn next_event_s(&self, state: &SourceAccount) -> Option<f64> {
+        self.force_n.next_event_s(state.clock_s)
+    }
+
+    fn limit_dt_s(&self, state: &SourceAccount, proposed_s: f64) -> Result<f64, ElementError> {
+        Ok(self.force_n.limit_dt_s(state.clock_s, proposed_s))
+    }
+
     fn propose(
         &self,
         old: &SourceAccount,
@@ -1253,6 +1304,14 @@ impl Component for FlowSource {
 
     fn stored_energy_j(&self, state: &SourceAccount) -> Result<f64, ElementError> {
         Ok(state.energy_in_j)
+    }
+
+    fn next_event_s(&self, state: &SourceAccount) -> Option<f64> {
+        self.flow.next_event_s(state.clock_s)
+    }
+
+    fn limit_dt_s(&self, state: &SourceAccount, proposed_s: f64) -> Result<f64, ElementError> {
+        Ok(self.flow.limit_dt_s(state.clock_s, proposed_s))
     }
 
     fn propose(
@@ -1567,6 +1626,14 @@ impl Component for Heater {
 
     fn stored_energy_j(&self, state: &SourceAccount) -> Result<f64, ElementError> {
         Ok(state.energy_in_j)
+    }
+
+    fn next_event_s(&self, state: &SourceAccount) -> Option<f64> {
+        self.power_w.next_event_s(state.clock_s)
+    }
+
+    fn limit_dt_s(&self, state: &SourceAccount, proposed_s: f64) -> Result<f64, ElementError> {
+        Ok(self.power_w.limit_dt_s(state.clock_s, proposed_s))
     }
 
     fn propose(

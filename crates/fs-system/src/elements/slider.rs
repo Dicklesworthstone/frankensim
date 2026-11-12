@@ -148,6 +148,9 @@
 //! never asks for more than it holds. Changes in consecutive steps add
 //! up, each by its own quarter at most as far as measured. A change of
 //! acceleration at the end of a step is followed exactly.
+//! Tabulated `FlowSource`s advertise their knots through `next_event_s`,
+//! so the system resolves these changes at step boundaries. A raw
+//! prescribed boundary must arrange that step cap itself.
 //!
 //! A starting slip that contradicts the ports. Nothing can check it. A
 //! pair declared stuck on a side that already moves keeps a record that
