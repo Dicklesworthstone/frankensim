@@ -124,6 +124,29 @@ receive clear, written permission before deleting a file or folder of any kind.
 
 ---
 
+## RULE 1.1: NO MACHINE-HOGGING RUNS. EVER.
+
+The owner, 2026-11-12, after a vibraphone BEM law-check (lc4) held about 65 GiB
+of RAM and 16 workers on ts2 for hours:
+
+> no more vibraphone simulations that crash my machine by using 60+ gb of RAM for
+> 10+ hours and all my cores!!! NOTHING EVEN REMOTELY LIKE THAT, EVER!!!
+
+- No run on any host (Mac, ts1, ts2, hz4 or any other) may use more than
+  **16 GiB of RAM, 8 cores, or 1 hour of wall time**. Builds and test runs count.
+- Bigger runs need the owner's explicit approval, in writing, before they start.
+  No agent can give it, the orchestrator included. A gate that waits for free
+  memory, and a "GO" in agent mail, are not approval.
+- Every run longer than a few minutes starts under `timeout` with a limit of
+  one hour or less. No `--no-time-limit` reruns.
+- When a check would need more than this, the answer is a cheaper method (fewer
+  nodes, a coarser mesh, a smaller solver, a read of existing results), not a
+  bigger run.
+- When an agent stops (usage limit, crash, end of session), its running jobs are
+  stopped too. Nobody is left to read their output.
+
+---
+
 ## Irreversible Git & Filesystem Actions - DO NOT EVER BREAK GLASS
 
 1. **Absolutely forbidden commands:** `git reset --hard`, `git clean -fd`,
