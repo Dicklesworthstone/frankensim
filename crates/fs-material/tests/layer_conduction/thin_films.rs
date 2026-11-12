@@ -1,6 +1,8 @@
 //! Thin-layer heat continuity must retain the solved relative material drop.
 use super::*;
-use fs_material::thermal::conduction::LayerStackConduction;
+use fs_material::thermal::conduction::{
+    ConvectiveLayerError, LayerStackConduction, ReservoirLayerGeometry,
+};
 
 #[test]
 fn thin_conducting_film_and_insulation_recover_series_heat_in_both_directions() {
@@ -190,4 +192,59 @@ fn three_layer_stack_conserves_heat_through_an_internal_metal_film() {
             assert_eq!(got.power_a_to_b_w, -reversed.power_a_to_b_w);
         }
     }
+}
+
+#[test]
+fn sub_resolution_convective_face_drop_returns_the_cell_face_only_when_its_power_closes() {
+    // One ulp from a 300 K bath, a 0.05 W/K film carries about 2.8e-15 W.
+    // Through this 2e5 W/K layer (k 200, 0.1 m2, 0.1 mm) the face would move
+    // by about 1.4e-20 K, below half an ulp of 300 K, so the inverse refuses
+    // that drop. The cell face, the power-zero end of the one-bath solve's
+    // bracket, closes within the declared 1e-12 W and is returned with its
+    // actual residual and no interior trial.
+    let curve = constant(200.0);
+    let controls = LayerConductionConfig {
+        absolute_heat_tolerance_w: 1e-12,
+        ..config()
+    };
+    let layer = ReservoirLayerGeometry::planar(0.1, 0.0001).unwrap();
+    let bulk: f64 = 300.0;
+    for cell in [bulk.next_up(), bulk.next_down()] {
+        let film_power = 0.05 * (cell - bulk);
+        assert_eq!(
+            curve.temperature_after_integral_w_m(cell, -film_power / 1000.0),
+            Err(DepositionError::Arithmetic)
+        );
+        let response = layer
+            .evaluate_convective_material_to_bath(
+                &curve,
+                [cell, bulk],
+                controls,
+                |surface| Ok::<_, ()>((0.05 * (surface - bulk), 0.05, surface)),
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(response.surface_temperature_k, cell);
+        assert_eq!(response.film, cell);
+        assert_eq!(response.solid_power_to_bath_w, 0.0);
+        assert_eq!(response.power_to_bath_w, film_power);
+        assert_eq!(response.heat_residual_w, -film_power);
+        assert_eq!(response.conductance_w_k, film_power / (cell - bulk));
+        assert_eq!(response.iterations, 0);
+    }
+    // A 1e12 m multiplier cannot represent a 3 mK cell's face drop either,
+    // but omitting it would leave 1.5e-4 W unclosed: that stays refused.
+    let unclosed = ReservoirLayerGeometry::planar(1.0, 1e-12)
+        .unwrap()
+        .evaluate_convective_material_to_bath(
+            &curve,
+            [300.003, bulk],
+            controls,
+            |surface| Ok::<_, ()>((0.05 * (surface - bulk), 0.05, ())),
+            || Ok(()),
+        );
+    assert!(matches!(
+        unclosed,
+        Err(ConvectiveLayerError::Thermal(DepositionError::Arithmetic))
+    ));
 }

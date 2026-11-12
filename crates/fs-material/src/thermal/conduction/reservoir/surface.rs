@@ -219,6 +219,12 @@ impl ReservoirLayerGeometry {
     /// it does not establish uniqueness or monotonicity of an arbitrary source
     /// film. The layer is homogeneous, pure-phase, source-free and quasi-steady;
     /// the consuming solver still owns storage, time and reciprocal heat.
+    ///
+    /// A face drop below Kelvin resolution is never floored; the original
+    /// inverse refuses it. Only when the first power trial is refused that way
+    /// and the cell face itself (zero solid power, its film already evaluated)
+    /// closes within the declared power tolerance is that face returned, with
+    /// zero iterations and its actual residual.
     pub fn evaluate_convective_material_to_bath<F, E>(
         self,
         curve: &ConductivityCurve,
@@ -275,7 +281,6 @@ impl ReservoirLayerGeometry {
         }
         let low_residual = -sign * first.power;
         let guess = self.slope(conductivity, 1.0 / first.conductance)? * difference.abs();
-        drop(first);
         // Use the exact source-limit face, avoiding a multiply/divide round trip
         // that could place an otherwise valid boundary query outside the chart.
         let end = evaluate(limit, bulk, &mut evaluate_film, &mut checkpoint)?;
@@ -290,6 +295,26 @@ impl ReservoirLayerGeometry {
             return finish(limit, sign * maximum, difference, end, 0);
         }
         drop(end);
+        // The cell face is the power-zero end of this bracket; its film was
+        // evaluated above. A few ulp from the bath, the series guess can move
+        // the face by less than half an ulp, and the original inverse refuses
+        // that unrepresentable drop. Return the cell face only when that first
+        // trial (the same start and inverse call as power_root's) would be
+        // refused AND the face closes under the declared power tolerance, the
+        // residual rule every accepted trial passes. A drop whose omission
+        // leaves an unclosed power residual stays refused.
+        if guess.is_finite()
+            && guess > 0.0
+            && guess < maximum
+            && closed(0.0, first.power, config)?
+            && matches!(
+                curve.temperature_after_integral_w_m(cell, -sign * (guess / self.multiplier_m)),
+                Err(DepositionError::Arithmetic)
+            )
+        {
+            return finish(cell, 0.0, difference, first, 0);
+        }
+        drop(first);
         let (power, (surface, film), iterations) = power_root(
             [0.0, maximum],
             [low_residual, high_residual],
