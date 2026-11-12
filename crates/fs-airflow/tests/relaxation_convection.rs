@@ -134,7 +134,9 @@ fn thermal<'a>(curves:&'a [ResolvedHeatCapacityCurve;2],mass_scale:f64)->Deposit
 fn budget()->MaterialHeatBudget {MaterialHeatBudget {max_groups:4,max_dimension:256,max_dense_bytes:64*1024*1024,max_multiply_terms:100_000_000_000}}
 fn controls()->FrameThermalSolve {FrameThermalSolve {maximum_cells:2,maximum_material_trials:128,maximum_newton_iterations:12,
     difference_step_j:1e-4,cell_energy_tolerance_j:1e-8,thermal_energy_tolerance_j:1e-8,total_energy_tolerance_j:1e-8,
-    newton:NewtonKrylovConfig {absolute_tolerance:1e-11,relative_tolerance:1e-12,..NewtonKrylovConfig::default()}}}
+    // 1e-9 J: ten times under the 1e-8 J audits above and above the floor of the finite-difference Jacobian (difference
+    // noise eps |F| / difference_step_j times the last Newton step, 1e-10 to 4e-10 J at |F| of 2e3 to 4e3 J); 1e-11 J was below it.
+    newton:NewtonKrylovConfig {absolute_tolerance:1e-9,relative_tolerance:1e-12,..NewtonKrylovConfig::default()}}}
 const DEST:[FrameLayerCell;2]=[FrameLayerCell {element:0,layer:0,cell:CellId(0)},FrameLayerCell {element:0,layer:1,cell:CellId(1)}];
 
 fn area(i:usize)->f64 {core::f64::consts::PI*(RADII[i].powi(2)-if i==0 {0.0}else{RADII[i-1].powi(2)})}

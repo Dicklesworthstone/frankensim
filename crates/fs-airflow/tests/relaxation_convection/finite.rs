@@ -6,6 +6,11 @@ use fs_airflow::graph::thermal::medium::convection::deposition::source::links::{
 use std::collections::BTreeMap;
 const COOLANT:CellId=CellId(7);
 const PATCHES:[f64;2]=[0.01,0.04];
+/// The manufactured coolant's conductivity law, k(T) = s.k * (COOLANT_K + COOLANT_K_SLOPE * (T - 300 K)) W/(m K): the card
+/// and every closed form below read these two numbers, so Pr = mu cp / k is 2.0 for the default spec (and 1.0, 4.0 and 4.0
+/// for the k 2.0, cp 200 and viscosity 2.0 variants), inside the 0.6 to 50 domain of the flat-plate laminar correlation.
+const COOLANT_K:f64=0.05;
+const COOLANT_K_SLOPE:f64=0.0002;
 #[derive(Clone,Copy)] struct Spec {powered:bool,k:f64,cp:f64,mass:f64,reversed:bool,reservoir:bool,circulating:bool,
     viscosity:f64,density_slope:f64,coolant_initial_k:[f64;2],adiabatic:bool}
 fn spec()->Spec {Spec {powered:true,k:1.0,cp:100.0,mass:0.5,reversed:false,reservoir:false,circulating:false,
@@ -23,7 +28,7 @@ fn finite_source(s:Spec)->(MaterialCard,ResolvedHeatCapacityCurve) {
             uncertainty:UncertaintyModel::Unstated,observations:vec![],
             provenance:Provenance {source:"manufactured finite coolant".into(),license:"test-only".into(),artifact:None}}).unwrap();
     }
-    for (name,dims,value,slope) in [("thermal_conductivity",THERMAL_CONDUCTIVITY_DIMS,s.k*0.5,s.k*0.002),
+    for (name,dims,value,slope) in [("thermal_conductivity",THERMAL_CONDUCTIVITY_DIMS,s.k*COOLANT_K,s.k*COOLANT_K_SLOPE),
         ("dynamic_viscosity",DYNAMIC_VISCOSITY_DIMS,s.viscosity*0.001,-s.viscosity*0.00001)] {
         claims.insert_claim(PropertyClaim {key:transport_key(name,dims),value:PropertyValue::Curve {
             abscissa:"T".into(),abscissa_dims:Temperature::DIMS,knots:vec![(280.0,value-20.0*slope),(340.0,value+40.0*slope)],dims},
@@ -46,7 +51,7 @@ fn links()->[SourceConvectiveLink;2] {
             correlation:CorrelationId::FlatPlateLaminarAverage,speed_m_s:1.0,settings:ForcedConvectionSettings::default()}})
 }
 fn h(s:Spec,wall:f64,fluid:f64)->f64 {
-    let d=0.5*(wall+fluid)-300.0;let k=s.k*(0.5+0.002*d);let mu=s.viscosity*0.001*(1.0-0.01*d);
+    let d=0.5*(wall+fluid)-300.0;let k=s.k*(COOLANT_K+COOLANT_K_SLOPE*d);let mu=s.viscosity*0.001*(1.0-0.01*d);
     0.664*(1000.0*0.1/mu).sqrt()*(mu*s.cp/k).cbrt()*k/0.1
 }
 fn solve()->FrameThermalSolve {FrameThermalSolve {maximum_cells:3,maximum_material_trials:256,..controls()}}

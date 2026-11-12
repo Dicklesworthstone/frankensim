@@ -138,7 +138,7 @@ fn evolving_source_temperatures_drive_circulation_reversal_and_one_conservative_
                         let film = 0.5 * (wall + t[0]);
                         let rho = 1000.0 + s.density_slope * (film - 300.0);
                         let mu = s.viscosity * 0.001 * (1.0 - 0.01 * (film - 300.0));
-                        let k = s.k * (0.5 + 0.002 * (film - 300.0));
+                        let k = s.k * (COOLANT_K + COOLANT_K_SLOPE * (film - 300.0));
                         let h =
                             0.664 * (rho * speed * 0.1 / mu).sqrt() * (mu * s.cp / k).cbrt() * k
                                 / 0.1;
