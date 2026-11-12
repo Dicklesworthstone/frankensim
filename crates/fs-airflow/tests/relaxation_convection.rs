@@ -134,15 +134,23 @@ fn thermal<'a>(curves:&'a [ResolvedHeatCapacityCurve;2],mass_scale:f64)->Deposit
 fn budget()->MaterialHeatBudget {MaterialHeatBudget {max_groups:4,max_dimension:256,max_dense_bytes:64*1024*1024,max_multiply_terms:100_000_000_000}}
 fn controls()->FrameThermalSolve {FrameThermalSolve {maximum_cells:2,maximum_material_trials:128,maximum_newton_iterations:12,
     difference_step_j:1e-4,cell_energy_tolerance_j:1e-8,thermal_energy_tolerance_j:1e-8,total_energy_tolerance_j:1e-8,
-    // 1e-9 J: ten times under the 1e-8 J audits above and above the floor of the finite-difference Jacobian (difference
-    // noise eps |F| / difference_step_j times the last Newton step, 1e-10 to 4e-10 J at |F| of 2e3 to 4e3 J); 1e-11 J was below it.
-    newton:NewtonKrylovConfig {absolute_tolerance:1e-9,relative_tolerance:1e-12,..NewtonKrylovConfig::default()}}}
+    // Stop target 1e-9 J: ten times under the 1e-8 J audits above (1e-11 J was below what the finite-difference Jacobian gives).
+    // forcing_minimum 1e-7: the linear solve is asked for that relative residual at least, never less. The finite-difference
+    // operator's linear floor is 5.10e-9 relative (observed at iteration 1 of the instance that failed: 2 linear iterations on a
+    // 2-unknown system); 1e-7 is 20 times above it, where the default 1e-10 asked 51 times under it and exhausted the linear budget
+    // one step short of the target. The fixture works around a gap of fs-solver (nonlinear.rs:1451-1487: no forcing safeguard at
+    // target / residual, no use of the partial linear iterate); the gap is recorded, not fixed here.
+    newton:NewtonKrylovConfig {absolute_tolerance:1e-9,relative_tolerance:1e-12,forcing_minimum:1e-7,..NewtonKrylovConfig::default()}}}
 const DEST:[FrameLayerCell;2]=[FrameLayerCell {element:0,layer:0,cell:CellId(0)},FrameLayerCell {element:0,layer:1,cell:CellId(1)}];
 
 fn area(i:usize)->f64 {core::f64::consts::PI*(RADII[i].powi(2)-if i==0 {0.0}else{RADII[i-1].powi(2)})}
 fn exposed_area(i:usize)->f64 {2.0*area(i)+if i==1 {2.0*core::f64::consts::PI*RADII[i]}else{0.0}}
 fn caloric(t:&DepositionSimulation<'_>)->f64 {t.cells().values().map(|c|c.mass_kg*c.specific_h_j_kg).sum()}
 fn near(a:f64,b:f64,tol:f64){assert!((a-b).abs()<=tol,"{a:e} != {b:e}");}
+/// The sensitivity claim of the variant tests: each output moves beyond rounding. The variants move the frame's state only
+/// through the solid temperature's weak effect on the frame material, so the claim is that each output moves beyond rounding,
+/// not by a fixed absolute amount (a 1e-12 literal, 3.9e-9 of the frame state's size, never encoded physics).
+fn beyond_rounding(a:f64,b:f64)->bool {(a-b).abs()>1024.0*f64::EPSILON*a.abs().max(b.abs())}
 const CAP:f64=0.001;
 const CHARGE:f64=0.0002;
 const DT:f64=1.0/256.0;

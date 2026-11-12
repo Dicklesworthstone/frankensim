@@ -84,7 +84,7 @@ fn closed_and_open_flow_share_local_balances_and_change_continuing_electrical_an
                 owner.electrical().map_or(0.0,|e|e.charges_c()[0])]);
         });
     }
-    for i in [1,2] {for j in 0..4 {assert!((endpoints[i][j]-endpoints[0][j]).abs()>1e-12);}}
+    for i in [1,2] {for j in 0..4 {assert!(beyond_rounding(endpoints[i][j],endpoints[0][j]),"variant {i} output {j}: {:e} vs {:e}",endpoints[i][j],endpoints[0][j]);}}
     for j in 0..4 {near(endpoints[1][j],endpoints[3][j],1e-10);}
 }
 

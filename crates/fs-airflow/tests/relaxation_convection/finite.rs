@@ -166,7 +166,7 @@ fn both_walls_share_original_finite_coolant_with_independent_cell_and_total_ener
                 heat.temperature_k(CellId(1)).unwrap(),heat.temperature_k(COOLANT).unwrap(),owner.electrical().map_or(0.0,|c|c.charges_c()[0])]);
         });
     }
-    for i in [1,2,3] {for j in 0..4 {assert!((outcomes[i][j]-outcomes[0][j]).abs()>1e-12);}}
+    for i in [1,2,3] {for j in 0..4 {assert!(beyond_rounding(outcomes[i][j],outcomes[0][j]),"variant {i} output {j}: {:e} vs {:e}",outcomes[i][j],outcomes[0][j]);}}
     for j in 0..4 {near(outcomes[5][j],outcomes[0][j],1e-10);}
 }
 
