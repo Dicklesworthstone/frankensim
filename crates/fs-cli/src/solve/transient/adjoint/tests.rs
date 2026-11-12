@@ -79,8 +79,12 @@ fn run(cx: &Cx<'_>, input: Inputs, output: Option<&str>) -> (String, Vec<f64>) {
     let spec = project(input, output);
     let (complex, positions) = box_grid([1, 1, 1], [1.0, 1.0, 1.0]);
     let mesh = ConductionMesh::new(complex, positions).unwrap();
+    // Lower the declared row as the CLI does: the heat-flux boundary on
+    // "solid" is a named Neumann region carrying its declared zero flux, so
+    // the adjoint binds the declared control to its physical trace.
     let boundary = if input.htc == 0.0 {
-        ThermalBoundaryBuilder::new(&mesh).adiabatic_remainder().finish().unwrap()
+        ThermalBoundaryBuilder::new(&mesh).region("solid", |_| true,
+            ThermalBc::neumann(0.0).unwrap()).unwrap().finish().unwrap()
     } else {
         ThermalBoundaryBuilder::new(&mesh).region("solid", |_| true,
             ThermalBc::robin(input.htc, 293.15).unwrap()).unwrap().finish().unwrap()

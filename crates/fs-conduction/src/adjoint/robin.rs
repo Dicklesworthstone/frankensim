@@ -21,7 +21,7 @@ pub use flux::{PrescribedFluxControls, PrescribedFluxGradient};
 use std::collections::BTreeSet;
 
 use fs_exec::Cx;
-use fs_solver::{CgState, CsrOp, norm2};
+use fs_solver::{CheckedCgConfig, CheckedCgError, CsrOp, checked_cg, norm2};
 use fs_sparse::Csr;
 
 use crate::assemble::{DofMap, assemble_operator_scaled_with_interfaces, reduce};
@@ -308,23 +308,29 @@ impl RobinResponse {
         let normalized: Vec<f64> = rhs.iter().map(|v| v / scale).collect();
         let op = CsrOp::symmetric(self.matrix.clone());
         let pre = crate::solve::spd_preconditioner(&self.matrix);
-        let mut state = CgState::new(&op, &pre, &normalized);
-        while state.rel_residual() >= self.linear.tolerance && state.iters < self.linear.max_iterations {
-            poll(cx, state.iters)?;
-            let before = state.iters;
-            let batch = (self.linear.max_iterations - before).min(16);
-            state.run(&op, &pre, self.linear.tolerance, batch);
-            if state.iters == before { break; }
-        }
-        poll(cx, state.iters)?;
-        let residual = true_residual(&self.matrix, &state.x, &normalized)?;
-        if residual >= self.linear.tolerance { return Err(failed(state.iters, residual, self.linear)); }
+        // A recursive CG stop can miss the recomputed gate below by roundoff
+        // with budget left. Backward Euler and the theta adjoint repair that
+        // defect with the shared checked driver; so does this response. Its
+        // first attempt is the former CG run, at most two defect solves share
+        // the original iteration budget, and the gate and tolerance are unchanged.
+        let solved = checked_cg(&op, &pre, &normalized, CheckedCgConfig {
+            tolerance: self.linear.tolerance,
+            max_iterations: self.linear.max_iterations,
+            max_corrections: 2,
+        }, |at| poll(cx, at)).map_err(|error| match error {
+            CheckedCgError::Interrupted(reason) => reason,
+            CheckedCgError::InvalidInput(what) => invalid(what),
+        })?;
+        let iterations = solved.report.iters;
+        poll(cx, iterations)?;
+        let residual = true_residual(&self.matrix, &solved.x, &normalized)?;
+        if residual >= self.linear.tolerance { return Err(failed(iterations, residual, self.linear)); }
         let mut full = vec![0.0; self.temperature.len()];
         for (i, &vertex) in self.dofs.free().iter().enumerate() {
             poll(cx, i)?;
-            full[vertex] = checked(state.x[i] * scale)?;
+            full[vertex] = checked(solved.x[i] * scale)?;
         }
-        Ok((full, residual, state.iters))
+        Ok((full, residual, iterations))
     }
 }
 
