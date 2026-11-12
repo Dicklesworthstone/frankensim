@@ -3382,7 +3382,11 @@ mod tests {
             .unwrap();
             assert_eq!(paths.len(), 1);
             let vertices = &paths[0].vertices;
-            assert_eq!(vertices.len(), 2);
+            // Since e97bf69fb9 (bidirectional semantics 10) an emitting surface stays a
+            // scattering vertex: the camera walk leaves the white Lambertian source through its
+            // BSDF and stops at the closed slab's wall, at the walk's max_depth + 2 vertex cap.
+            // Before, the walk ended at the source. Vertex 1 is still that source hit.
+            assert_eq!(vertices.len(), settings.max_depth as usize + 2);
             assert_eq!(
                 vertices[0]
                     .medium_toward(scene.camera.forward)

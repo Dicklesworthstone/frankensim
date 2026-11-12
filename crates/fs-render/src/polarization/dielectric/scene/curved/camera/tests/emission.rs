@@ -214,18 +214,31 @@ fn g0_reflective_emission_survives_null_proposals_and_uses_original_geometric_si
         let host = glass(1.0, 0.1);
         let media = [SceneMedium::Homogeneous(&host)];
         let metals = [coated_metal()];
-        for interaction in [
-            Interaction::RoughConductor {
-                optics: 0,
-                medium: 0,
-                surface: ConductorSurface::try_rough(1.0).unwrap(),
-            },
-            Interaction::BrushedConductor {
-                optics: 0,
-                medium: 0,
-                detail: SurfaceDetail::try_new(0.5, 2.0, BrushingPattern::Radial, 0.2, None)
-                    .unwrap(),
-            },
+        // The bounded GGX reflection proposal (6a13950eae) rejects no isotropic facet at alpha
+        // 1, nor at any alpha at the normal view: there the draw [0.999999, 0.3] reflects to a
+        // local cosine of +1e-6, a departure the plane refuses. At alpha 0.5 and 45 degrees the
+        // same draw is rejected (local cosine -0.033; basis_all_sphere gives the local wo
+        // (-1, 0, 1)/sqrt 2 from either side). The brushed pair (0.5, 1.0) with its 0.2 rad
+        // tilt still rejects it at the normal view (local cosine -0.59), so that case keeps its
+        // ray. (The warp of tracer.rs sample_ggx_bounded_normal, replayed.)
+        for (interaction, tilt) in [
+            (
+                Interaction::RoughConductor {
+                    optics: 0,
+                    medium: 0,
+                    surface: ConductorSurface::try_rough(0.5).unwrap(),
+                },
+                core::f64::consts::FRAC_PI_4,
+            ),
+            (
+                Interaction::BrushedConductor {
+                    optics: 0,
+                    medium: 0,
+                    detail: SurfaceDetail::try_new(0.5, 2.0, BrushingPattern::Radial, 0.2, None)
+                        .unwrap(),
+                },
+                0.0,
+            ),
         ] {
             let native = CurvedPolarizedScene::try_new_with_conductors(
                 cx,
@@ -239,16 +252,18 @@ fn g0_reflective_emission_survives_null_proposals_and_uses_original_geometric_si
                 100_000,
             )
             .unwrap();
+            // A tilted ray crosses the host's 0.1 /m absorption over 1/cos(tilt) of each gap.
+            let (sine, cosine) = tilt.sin_cos();
             for (sides, z, direction, expected) in [
-                (EmissionSides::Both, 0.0, 1.0, 2.0 * (-0.04_f64).exp()),
+                (EmissionSides::Both, 0.0, 1.0, 2.0 * (-0.04_f64 / cosine).exp()),
                 (EmissionSides::Front, 0.0, 1.0, 0.0),
-                (EmissionSides::Front, 1.0, -1.0, 2.0 * (-0.06_f64).exp()),
+                (EmissionSides::Front, 1.0, -1.0, 2.0 * (-0.06_f64 / cosine).exp()),
             ] {
                 let sources = [emitter(1, 2.0, sides)];
                 let camera = CurvedCameraScene::try_new(cx, &native, &sources, None).unwrap();
                 let input = Ray {
                     origin: Point3::new(0.4, 0.0, z),
-                    dir: Vec3::new(0.0, 0.0, direction),
+                    dir: Vec3::new(sine, 0.0, direction * cosine),
                 };
                 let mut calls = 0;
                 let sample = camera

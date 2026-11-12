@@ -462,7 +462,13 @@ mod tests {
         let mut bytes = Vec::new();
         value.write_csv_row(&mut bytes).unwrap();
         let csv = String::from_utf8(bytes).unwrap();
-        assert!(csv.contains(",importance-cdf,8,6,13,"));
+        // The path-semantics column is the current PHOTOMETRIC_PATH_SEMANTICS_VERSION (13 when
+        // this test was written; fb4b2683e2 advanced it to 14). The fixture's photometry version
+        // stays 6.
+        assert!(csv.contains(&format!(
+            ",importance-cdf,8,6,{},",
+            super::super::PHOTOMETRIC_PATH_SEMANTICS_VERSION
+        )));
         assert!(csv.contains(",estimated-iid-standard-error,0,no-claim,unknown,unknown,"));
         assert!(value.total_error_bound.is_none());
     }

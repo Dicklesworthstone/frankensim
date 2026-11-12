@@ -85,7 +85,13 @@ fn uncertain_vertex_widens_lux_and_csv_without_losing_a_later_blocker() {
         assert!(report.estimate.total_error_bound_lux.is_none());
         let mut csv = Vec::new();
         report.write_csv_row(0,&mut csv).unwrap();
-        assert!(String::from_utf8(csv).unwrap().ends_with(",2,1\n"));
+        // The row ends with the enclosure version and the one uncertain source. The version is
+        // the current DIRECT_ENCLOSURE_SEMANTICS_VERSION: 2 when this test was written
+        // (eb5dc4b824), 5 since 7acd1a0dfb, da0e7b36da and c0a3d10a70.
+        assert!(String::from_utf8(csv).unwrap().ends_with(&format!(
+            ",{},1\n",
+            super::super::DIRECT_ENCLOSURE_SEMANTICS_VERSION
+        )));
         // Add a triangle centered on a subsequent point of that same segment.
         let mut blocker = screen(1.0);
         if let Shape::Mesh(mesh) = &mut blocker.shape {

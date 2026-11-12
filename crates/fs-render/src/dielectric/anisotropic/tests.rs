@@ -412,10 +412,15 @@ fn absorbing_coating_retains_survival_and_reversed_order_on_anisotropic_facets()
             let fresnel = interface.fresnel(wo.dot(m), eta_i, eta_t).unwrap();
             let survival = fresnel.reflectance + fresnel.transmittance;
             assert!(survival > 0.0 && survival < 0.99);
+            // Height-correlated Smith visibility (4d5123920d): the VNDF sample keeps
+            // G2/G1(wo) = (1 + lambda(wo)) / (1 + lambda(wo) + lambda(wi)), as the uncoated tests
+            // of this file expect; this test still expected G1(wi) = 1 / (1 + lambda(wi)).
             let wi = sample.direction;
-            let mask = 2.0
-                / (1.0
-                    + (1.0 + ((0.2 * wi.x).powi(2) + (0.6 * wi.y).powi(2)) / wi.z.powi(2)).sqrt());
+            let lambda = |v: Vec3| {
+                0.5 * ((1.0 + ((0.2 * v.x).powi(2) + (0.6 * v.y).powi(2)) / v.z.powi(2)).sqrt()
+                    - 1.0)
+            };
+            let mask = (1.0 + lambda(wo)) / (1.0 + lambda(wo) + lambda(wi));
             close(
                 sample.radiance_weight * ratio * ratio,
                 survival * mask,

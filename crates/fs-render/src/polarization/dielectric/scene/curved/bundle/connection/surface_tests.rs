@@ -1,7 +1,7 @@
 use super::super::super::SceneMedium;
 use super::super::tests::{
-    ball_reference, bindings, close, close_vec, glass, plane, reference_columns, settings, sphere,
-    unit, with_cx,
+    ball_reference, bindings, close, close_vec, glass, launch_basis, plane, reference_columns,
+    settings, sphere, unit, with_cx,
 };
 use super::*;
 use super::images::{BundleImageOptions, BundleImageSeed};
@@ -328,12 +328,35 @@ fn g1_smooth_ball_lens_connection_retains_two_interfaces_before_rough_receiver()
             .receiver_projection(receiver, options().projection)
             .unwrap();
         close(projection.area_per_solid_angle_m2(), area, 5e-5);
+        // The connection ends within the receiver's 2e-7 m endpoint tolerance
+        // (received.residual_m()), not at the analytic endpoint, and the expected irradiance
+        // moves with the endpoint: by up to 8.1e-5 over a 2e-7 m circle at this ray. Allow that
+        // motion: the reference's own endpoint gradient (the angular derivative of the reference
+        // irradiance through the inverse of the endpoint columns) times the actual residual.
+        // 5e-6 stays the allowance for the arithmetic.
+        let reference_irradiance = |dir: Vec3| {
+            let displaced = Ray { dir, ..ray };
+            let (_, _, inside, transfer) = ball_reference(displaced, 1.5);
+            let c = reference_columns(displaced, |r| ball_reference(r, 1.5).0.origin);
+            transfer * (-0.2 * inside).exp() / cross(c[0], c[1]).z.abs()
+        };
+        let h = 1e-5;
+        let slope = launch_basis(ray.dir).map(|axis| {
+            (reference_irradiance(unit(add(ray.dir, axis.scale(h))))
+                - reference_irradiance(unit(add(ray.dir, axis.scale(-h)))))
+                / (2.0 * h)
+        });
+        let det = columns[0].x * columns[1].y - columns[0].y * columns[1].x;
+        let gradient_x = (slope[0] * columns[1].y - slope[1] * columns[0].y) / det;
+        let gradient_y = (slope[1] * columns[0].x - slope[0] * columns[1].x) / det;
+        let endpoint_allowance =
+            (gradient_x * gradient_x + gradient_y * gradient_y).sqrt() * received.residual_m();
         close(
             path.bundle()
                 .point_source_irradiance(projection.normal(), options().projection, 1.0)
                 .unwrap(),
             transfer * (-0.2 * inside).exp() / area,
-            5e-6,
+            5e-6 + endpoint_allowance,
         );
     });
 }
