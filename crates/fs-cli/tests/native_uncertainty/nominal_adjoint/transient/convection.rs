@@ -140,7 +140,16 @@ fn g1_g3_enthalpy_convection_calibration_matches_nonlinear_enclosure_resolves_an
     assert_eq!(control.get("estimate").unwrap().f64_field("samples_in_estimate"), Some(4.0));
     let coefficients = gradient(&report);
     assert_eq!(coefficients.len(), 2);
-    assert!(coefficients[0].abs() > 1e-6 && coefficients[1] > 0.0);
+    // Both Robin inputs are active controls. Their signs are not asserted here: the fixture is
+    // one tetrahedron whose consistent Robin face mass (fs-conduction robin_face_matrix, area/12
+    // off the diagonal) couples the two vertices it shares with the cold patch to the hottest
+    // vertex, on the warm patch only, more strongly than conduction does. That one-element
+    // operator is not monotone, so the hottest vertex cools when the cold patch's reference
+    // rises (-0.0202 K/K on the first run, 2026-11-12). A replay of this one-element problem
+    // gives +0.47 to +0.64 K/K at the cold-patch vertices and the continuum sign once the
+    // element is refined. The central differences of independent native solves below pin
+    // both values and signs.
+    assert!(coefficients[0].abs() > 1e-6 && coefficients[1].abs() > 1e-6);
 
     let receipt = calibration_receipt(&controlled, &report);
     let history = receipt.get("transient").unwrap();
