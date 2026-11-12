@@ -325,13 +325,15 @@ fn heater_knots_split_coupled_steps_and_replay_with_the_same_energy() {
             SourceAccount::default(),
         )
         .unwrap();
+    let heat = builder.port(source, "heat").unwrap();
     builder
-        .bond(
-            builder.port(body, "heat").unwrap(),
-            builder.port(source, "heat").unwrap(),
-        )
+        .bond(builder.port(body, "heat").unwrap(), heat)
         .unwrap();
     let mut system = builder.seal().unwrap();
+    // The bond is a loop, so the heater's temperature input needs a starting
+    // value before the first step (`System::guess`). The checkpoint below
+    // carries it, so the replay starts from it too.
+    assert!(system.guess(heat, &[300.0]));
     with_cx(|cx| {
         let checkpoint = system.checkpoint().unwrap();
         let mut reference = None;
