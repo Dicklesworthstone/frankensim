@@ -4,6 +4,7 @@ use crate::camera::{
 };
 use crate::charts::TriMesh;
 use crate::dielectric::{BeerLambertAbsorption, CauchyIor, DielectricGlass, GlassProvenance};
+use crate::gradient_index::GradientIndexOptions;
 use crate::gradient_index::event::GradientEventOptions;
 use crate::instances::{GeometryInstance, InstanceScene, RigidTransform, SharedGeometry};
 use crate::polarization::dielectric::scene::curved::camera::{RadianceSpectrum, SurfaceEmitter};
@@ -88,7 +89,15 @@ fn settings() -> CurvedTraceSettings {
         max_distance_m: 2.0,
         max_total_steps: 16384,
         max_query_work: 1000000,
+        // GradientEventOptions::validate admits a surface tolerance only at eight or more
+        // integration position tolerances (gradient_index/event.rs); the default 1e-9 m position
+        // tolerance with this 1e-9 m surface tolerance was refused as InvalidOptions before any
+        // trace. 1e-10 m keeps that ratio at ten.
         event: GradientEventOptions {
+            integration: GradientIndexOptions {
+                position_tolerance_m: 1e-10,
+                ..GradientIndexOptions::default()
+            },
             surface_tolerance_m: 1e-9,
             ..GradientEventOptions::default()
         },
