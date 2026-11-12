@@ -330,7 +330,12 @@ fn pressure_and_temperature_close_around_the_actual_fem_solid_solver() {
         }).unwrap();
         assert_eq!(callbacks,answer.total_solid_solves);
         assert!(callbacks<=controls.max_total_solid_solves);
-        close(answer.operating_point.hydraulics.total_pressure_drop_pa,50.0);
+        // The pressure root returns a trial with |dp - 50| <= max(1e-9 Pa, 1e-7 * max(50, dp)),
+        // the closure relaxed to 1e-7 above (pressure.rs solve_pressure_root_with_gravity,
+        // `closed`): up to 5e-6 Pa, where close() asked 1.53e-6 Pa.
+        let dp = answer.operating_point.hydraulics.total_pressure_drop_pa;
+        assert!((dp-50.0).abs() <= controls.pressure.pressure_absolute_tolerance_pa
+            .max(controls.pressure.pressure_relative_tolerance*dp.abs().max(50.0)),"{dp} != 50");
         let result = answer.operating_point.thermal;
         assert!((result.fluid.total_heat_rate_w-20.0).abs()<2e-5);
         assert!((result.solid.state.report.energy.robin_out_w-20.0).abs()<2e-5);

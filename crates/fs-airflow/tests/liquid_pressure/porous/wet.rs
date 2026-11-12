@@ -33,7 +33,12 @@ fn liquid_kr(saturation: f64) -> f64 {
 }
 fn wet_budget() -> PressureDrivenBudget {
     PressureDrivenBudget {
-        mass_flow_bracket_kg_per_s: (1e-7, 0.008),
+        // Every flow trial, the lower bracket end first, compiles the laminar thermal card,
+        // which admits Re in [1, 2300] (fs-convection CircularDuctLaminarCwt). At 5e-5 kg/s,
+        // Re = 5e-5 * 0.01 / (pi 0.01^2 / 4 * 0.002) = 3.18 at the largest viscosity these
+        // fixtures reach (0.002 Pa s at 300 K); 1e-7 kg/s was Re 0.0064. The smallest root
+        // here, saturation 0.6 in both layers, is 1.37e-4 kg/s.
+        mass_flow_bracket_kg_per_s: (5e-5, 0.008),
         maximum_neglected_hydraulic_power_w: 1.0,
         ..pressure_budget()
     }

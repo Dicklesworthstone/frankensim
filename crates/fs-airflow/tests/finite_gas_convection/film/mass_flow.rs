@@ -295,7 +295,10 @@ fn g3_prescribed_stream_rebinds_piston_trials_and_keeps_closed_mass_and_energy()
     let saved = old.clone();
     let curve = source::body_curve();
     let thermal = UniformEnthalpyStepInput {
-        duration_s: 0.005,
+        // The free piston's gas spring, sqrt(rho c^2 A^2 / (m V)) = 118.3 rad/s
+        // (1 kg, 0.01 m2, 1 L of ideal gas at 1 bar, gamma 1.4), is admitted by fs-phs only for
+        // rate*dt <= 0.04 (MIDPOINT_ONE_CENT_ANGULAR_STEP): dt <= 3.38e-4 s. 0.3 ms gives 0.0355.
+        duration_s: 0.0003,
         ..body(&curve, 260000.0)
     };
     let forcing = PistonInput {

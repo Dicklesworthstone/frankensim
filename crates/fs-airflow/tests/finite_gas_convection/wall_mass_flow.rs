@@ -143,7 +143,10 @@ fn tube_mass_flux_keeps_both_original_cards_wall_sources_and_piston_energy() {
     let authored = tube(&bank);
     let thermal = UniformEnthalpyStepInput {
         surface_area_m2: authored.area_m2,
-        duration_s: 0.002,
+        // The free piston's gas spring, sqrt(rho c^2 A^2 / (m V)) = 118.3 rad/s
+        // (1 kg, 0.01 m2, 1 L of ideal gas at 1 bar, gamma 1.4), is admitted by fs-phs only for
+        // rate*dt <= 0.04 (MIDPOINT_ONE_CENT_ANGULAR_STEP): dt <= 3.38e-4 s. 0.3 ms gives 0.0355.
+        duration_s: 0.0003,
         ..body(&curve, 120000.0)
     };
     let piston_input = PistonInput {
@@ -331,7 +334,10 @@ fn sphere_stream_area_and_bulk_density_preserve_whitaker_and_latent_piston_balan
         core::f64::consts::PI * SPHERE_D * SPHERE_D / 4.0
     );
     let thermal = UniformEnthalpyStepInput {
-        duration_s: 0.002,
+        // The free piston's gas spring, sqrt(rho c^2 A^2 / (m V)) = 118.3 rad/s
+        // (1 kg, 0.01 m2, 1 L of ideal gas at 1 bar, gamma 1.4), is admitted by fs-phs only for
+        // rate*dt <= 0.04 (MIDPOINT_ONE_CENT_ANGULAR_STEP): dt <= 3.38e-4 s. 0.3 ms gives 0.0355.
+        duration_s: 0.0003,
         ..body(&curve, 180000.0)
     };
     let resolved = flow.resolve(old.gas().state(), thermal.initial).unwrap();

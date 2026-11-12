@@ -99,8 +99,15 @@ fn pressure_heating_and_fem_wall_heat_close_on_the_same_material_trajectory() {
                 .zip(&result.fluid.regions).zip(&result.solid.regions)
                 .zip(&operating.hydraulics.regions)
             {
-                assert_eq!(sent.boundary.reference_temperature().value(),
-                    solid.mean_reference_temperature_k.unwrap());
+                // The solid reports the area-weighted mean of the reference it was sent
+                // (fs-conduction solve.rs: (3T)/3 per face, one fma per face, times 1/area),
+                // equal to the sent value to rounding only: within (n + 2) eps relative for
+                // the n = 2 Kuhn triangles of each region's top face. 16 eps keeps the pairing
+                // check far below the 1e-7 K by which successive coupling iterates may differ.
+                let reference = sent.boundary.reference_temperature().value();
+                let reported = solid.mean_reference_temperature_k.unwrap();
+                assert!((reference - reported).abs() <= 16.0 * f64::EPSILON * reference.abs(),
+                    "{reference} != {reported}");
                 assert!((solid.heat_rate_w - fluid.heat_rate_w).abs() <= 1e-5);
                 close(fluid.heat_rate_w + hydraulic.loss.dissipated_power_w, mass *
                     (fluid.outlet.specific_enthalpy_j_kg() - fluid.inlet.specific_enthalpy_j_kg()));

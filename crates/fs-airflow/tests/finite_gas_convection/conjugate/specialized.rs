@@ -70,7 +70,10 @@ fn both_original_tube_cards_sample_eliminated_surface_and_close_piston_energy() 
     let authored = tube(&bank, area);
     let body = UniformEnthalpyStepInput {
         surface_area_m2: area,
-        duration_s: 0.002,
+        // The free piston's gas spring, sqrt(rho c^2 A^2 / (m V)) = 118.3 rad/s
+        // (1 kg, 0.01 m2, 1 L of ideal gas at 1 bar, gamma 1.4), is admitted by fs-phs only for
+        // rate*dt <= 0.04 (MIDPOINT_ONE_CENT_ANGULAR_STEP): dt <= 3.38e-4 s. 0.3 ms gives 0.0355.
+        duration_s: 0.0003,
         ..thermal(&curve, 420.0)
     };
     let piston_input = PistonInput {

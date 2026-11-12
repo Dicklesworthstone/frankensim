@@ -179,7 +179,14 @@ fn orientation_search_exposes_ambiguity_and_counts_both_pressure_brackets() {
 
 #[test]
 fn unsupported_orientation_is_not_mistaken_for_an_absent_circulation_root() {
-    let card = card_with_transport_ceiling(false, 1.0, 320.0);
+    // A region's local outlet solve also tries the wall itself as an outlet guess, and
+    // every property trial must be inside the source (LiquidHeatPath), so BulkMean asks
+    // (inlet + wall) / 2. Heating first from the 300 K inlet against 400 K asks 350 K.
+    // Cooling first against 250 K leaves at most 295.63 K at the 0.003 kg/s bracket end
+    // (UA 0.549 W/K, cp 2000 J/kg/K), so the later 400 K region asks at most 347.81 K.
+    // A 349 K ceiling admits every reverse trial and refuses the forward one; the
+    // reverse root, 50 Pa over 2e4 Pa s/kg, is 0.0025 kg/s, inside the bracket.
+    let card = card_with_transport_ceiling(false, 1.0, 349.0);
     with_card_path(&card, LiquidPropertyTemperature::BulkMean, |cx, path| {
         let solve = |selection| {
             path.solve_gravity_circulation(
@@ -190,12 +197,15 @@ fn unsupported_orientation_is_not_mistaken_for_an_absent_circulation_root() {
                 &closed_gravity(),
                 selection,
                 local(),
-                circulation_budget(),
+                PressureDrivenBudget {
+                    mass_flow_bracket_kg_per_s: (0.0002, 0.003),
+                    ..circulation_budget()
+                },
             )
         };
-        // Cooling first keeps reverse-flow bulk states inside the source domain.
+        // Cooling first keeps every reverse-flow property trial inside the source domain.
         assert!(solve(LiquidFlowSelection::Direction(LiquidFlowDirection::Reverse)).is_ok());
-        // Heating first at the low-flow endpoint exceeds the same pinned source.
+        // Heating first, the first wall-temperature trial exceeds the same pinned source.
         assert!(matches!(
             solve(LiquidFlowSelection::OnlyBracketed),
             Err(PressureDrivenError::Thermal(_))
