@@ -143,7 +143,29 @@ fn g1_curved_scene_brushing_uses_local_phase_index_without_changing_field_identi
         assert_eq!(out.termination(),PathTermination::Detected); assert_eq!(out.medium_snapshot_identity(),Some(identity));
         assert!((out.traveled_m()-3.0).abs()<3e-6); assert!((out.optical_path_length_m()-3.61).abs()<4e-6);
         assert!((out.optical_depth()-0.3).abs()<1e-6);
-        let expected=metals[0].fresnel(550.0,1.22,1.0).unwrap()*fs_math::det::exp(-0.3);
+        // The detected power is the event-local Fresnel times the cap mass times Beer,
+        // each factor derived from the code:
+        // - Cap: the bounded spherical-cap VNDF proposal leaves its mass
+        //   1 - (1 - k) G1(wo) / 2 in the weight, with k = (1 - a^2) s^2 / (s^2 + a^2 c^2),
+        //   a = min(ax, ay, 1), c = cos_o and s = 1 + sin_o (tracer.rs
+        //   ggx_reflection_cap_scale and ggx_reflection_cap_mass). The launch runs along the
+        //   index gradient, so the ray meets plane 1 at the normal view: c = 1, s = 1 and
+        //   G1(wo) = 1. The [0, 0] draw reflects back along the normal, so G2/G1 = 1 and the
+        //   mass is 1 / (1 + a^2). The hit at local (0.4, 0, 1) lies at azimuth 0, inside the
+        //   radial mark, so the pair is the mark's.
+        // - Stops: the reflection stops d1 short of plane 1, and detection stops d2 short of
+        //   the detector. The detector is approached at cosine 1, so d2 is its witness's
+        //   distance bound. The path is 3 - (2 d1 + d2), and Beer exceeds exp(-0.3) by the
+        //   factor 1 + expm1(0.1 (2 d1 + d2)).
+        // - Index: the reflection takes the event-local index 1.2 + 0.02 (1 - d1), not 1.22.
+        let (ax,ay)=detail(0.0).alpha_pair_for_mark(detail(0.0).mark_covers(Point3::new(0.4,0.0,1.0)));
+        let a=ax.min(ay).min(1.0); let (c,s)=(1.0_f64,1.0_f64);
+        let k=(1.0-a*a)*s*s/(s*s+a*a*c*c); let cap_mass=1.0-0.5*(1.0-k);
+        let stops=3.0-out.traveled_m();
+        let d1=0.5*(stops-out.last_contact().unwrap().witness.distance_upper_m);
+        let fresnel=metals[0].fresnel(550.0,1.22,1.0).unwrap();
+        let fresnel_ratio=metals[0].fresnel(550.0,1.2+0.02*(1.0-d1),1.0).unwrap()/fresnel;
+        let expected=fresnel*fs_math::det::exp(-0.3)*cap_mass*(1.0+fs_math::det::expm1(0.1*stops))*fresnel_ratio;
         assert!((out.beam().power().i-expected).abs()<2e-6); assert!((out.beam().power().v+expected).abs()<2e-6);
     });
 }
