@@ -3279,53 +3279,48 @@ fn on_a_spring_to_a_wall(
 }
 
 #[test]
-fn break_away_beside_a_differenced_neighbour_at_rest_is_not_solved() {
-    // A stated limit. The line's matrix is what the neighbours answer at
-    // the step's start as the kernel knows it. A neighbour without a
-    // declared tangent is differenced, and while the mass is at rest to
-    // rounding the differencing step is lost in the neighbour's state: a
-    // spring of 400 N/m then gives the line no slope, and the slider is
-    // handed the mass's dt / (2 m) = 0.00125 where the mass and the spring
-    // answer with 0.0012484. With a matrix too large there is a band of
-    // released slips at break-away with no point to settle on (the
-    // contract, "The load line"), and the first step that should break
-    // away lies in it.
+fn break_away_beside_a_differenced_neighbour_at_rest_is_solved() {
+    // The line's matrix is what the neighbours answer at the step's start
+    // as the kernel knows it, and a neighbour without a declared tangent
+    // is differenced. While the mass was at rest to rounding, the step of
+    // that difference, `sqrt(eps)` of a velocity at rounding, moved the
+    // spring's force by less than its own rounding: a spring of 400 N/m
+    // gave the line no slope, the slider was handed the mass's dt / (2 m)
+    // = 0.00125 where the mass and the spring answer with 0.0012484, and
+    // the first step that should break away did not converge (the force
+    // wire flipped by the static limit less the sliding force, 3.92 N: with
+    // a matrix too large there is a band of released slips at break-away
+    // with no point to settle on). A stated limit until a differenced
+    // column was resolved against the rounding of its outputs. (Found by
+    // the independent review of 74529fda7f.)
     //
     // The spring holds 2 N of the push; the push rises from 11.7 N to
     // 11.9 N in 4 s and passes the 11.8 N the slider and the spring hold
-    // together in step 400 (5 ms). With the spring's tangent declared the
-    // mass breaks away in that step and slides on. With the spring
-    // differenced that step does not converge: the force wire flips by the
-    // static limit less the sliding force, 3.92 N.
-    // (Found by the independent review of 74529fda7f.)
+    // together in step 400 (5 ms). The spring declared or differenced, the
+    // mass breaks away in that step and slides on.
     let dt = 5.0e-3;
     let push = || Waveform::table(vec![(0.0, 11.7), (4.0, 11.9)]).unwrap();
+    let mut ends = Vec::new();
     for declared in [true, false] {
-        let (mut system, _, rubbing) =
+        let (mut system, mass, rubbing) =
             on_a_spring_to_a_wall(declared, 400.0, -0.005, 0.0, Slip::stuck(), Some(push()));
         with_cx(|cx| {
             for step in 0..400 {
                 system.step(dt, cx).unwrap();
                 assert!(system.state::<Slip>(rubbing).unwrap().is_stuck(), "step {step}");
             }
-            if declared {
+            system.step(dt, cx).unwrap();
+            assert!(
+                !system.state::<Slip>(rubbing).unwrap().is_stuck(),
+                "declared {declared}"
+            );
+            for _ in 401..1000 {
                 system.step(dt, cx).unwrap();
-                assert!(!system.state::<Slip>(rubbing).unwrap().is_stuck());
-                for _ in 401..1000 {
-                    system.step(dt, cx).unwrap();
-                }
-            } else {
-                let refusal = system.step(dt, cx).expect_err("no point to settle on");
-                let SystemError::NotConverged { worst, residual, .. } = &refusal else {
-                    panic!("expected a block that did not converge, got {refusal}");
-                };
-                assert_eq!(worst, "mass.p");
-                let jump_n = (HOLDS - SLIDES) * NORMAL_N;
-                assert!((residual.abs() - jump_n).abs() <= 1.0e-3, "{residual} against {jump_n}");
-                assert_eq!(system.steps(), 400);
             }
         });
+        ends.push(*system.state::<Motion>(mass).unwrap());
     }
+    eprintln!("after 1000 steps, the spring declared and differenced: {ends:?}");
 }
 
 #[test]
@@ -4504,4 +4499,461 @@ fn a_push_that_creeps_up_to_the_static_limit_lets_go_a_hair_inside_it_one_way() 
             assert!(early > 0.0 && early < window, "{early}");
         }
     }
+}
+
+/// The matrix a probe on a line is handed whose `a` is on a mass of 2 kg
+/// that is DIFFERENCED (added without its tangent), moving at
+/// `velocity_m_s` under a push of `push_n`, in a step of `dt`; `b` is given.
+/// With it, the entries the step left unresolved.
+fn handed_beside_a_differenced_mass(push_n: f64, velocity_m_s: f64, dt: f64) -> ([f64; 4], u32) {
+    let mut builder = SystemBuilder::new();
+    let moving = Motion {
+        position_m: 0.0,
+        velocity_m_s,
+    };
+    let one = builder.add("one", Mass::new(2.0).unwrap(), moving).unwrap();
+    let probe = builder
+        .add_on_line("probe", Probe::new(), [f64::NAN; 4])
+        .unwrap();
+    let push = builder
+        .add_with_tangent(
+            "push",
+            Force::new(Waveform::constant(push_n).unwrap()),
+            SourceAccount::default(),
+        )
+        .unwrap();
+    builder
+        .common_flow(
+            port(&builder, one, "p"),
+            &[port(&builder, probe, "a"), port(&builder, push, "p")],
+        )
+        .unwrap();
+    builder
+        .boundary(
+            port(&builder, probe, "b"),
+            Box::new(|_, _, values| values[0] = 0.3),
+        )
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    let report = with_cx(|cx| system.step(dt, cx)).unwrap();
+    (*system.state::<[f64; 4]>(probe).unwrap(), report.unresolved)
+}
+
+#[test]
+fn a_differenced_neighbour_is_handed_its_mobility_whatever_the_force_on_it() {
+    // A mass that moves needs no force to keep moving, and the kernel
+    // differences a component that declares no tangent at a step of
+    // `sqrt(eps)` of the force on it, or of the largest force of its block.
+    // Under a small force that step moved the mass's mean velocity by less
+    // than its rounding: the line was handed no mobility at all at 1 m/s
+    // under 1e-6 N and at 100 m/s under 1e-3 N, and 1.3e-2 too much at 1
+    // m/s under 1e-3 N; 12 of these 18 cases were off by more than 1e-6,
+    // 7 handed nothing. A differenced column is resolved against the
+    // rounding of its outputs, and no entry is left unresolved.
+    let dt = 1.0e-3_f64;
+    let own = 0.5 * dt / 2.0;
+    let mut worst = 0.0_f64;
+    for velocity in [0.0_f64, 1.0, 100.0] {
+        for push in [1.0_f64, 1.0e-3, 1.0e-6, 1.0e-9, 1.0e-12, 0.0] {
+            let (matrix, unresolved) = handed_beside_a_differenced_mass(push, velocity, dt);
+            let off = (matrix[0] / own - 1.0).abs();
+            assert!(
+                off <= 1.0e-6,
+                "{velocity} m/s under {push:e} N: handed {:e} for {own:e}",
+                matrix[0]
+            );
+            assert_eq!(&matrix[1..], &[0.0; 3][..], "`b` is given");
+            assert_eq!(unresolved, 0, "{velocity} m/s under {push:e} N");
+            worst = worst.max(off);
+        }
+    }
+    eprintln!(
+        "a differenced mass of 2 kg at 0, 1 and 100 m/s under 1 N down to 1e-12 N and none: \
+         its mobility handed within {worst:.3e} of dt / (2 m), no entry unresolved"
+    );
+}
+
+/// What a [`Lopsided`] port `a` moves at under no force [m/s].
+const LOPSIDED_SPEED_M_S: f64 = 100.0;
+/// How a [`Lopsided`] port `a` answers the force on it, where it does
+/// [m/(N s)].
+const LOPSIDED_MOBILITY_A: f64 = 2.5e-4;
+/// How a [`Lopsided`] port `b` answers the force on it [m/(N s)].
+const LOPSIDED_MOBILITY_B: f64 = 1.0;
+
+/// A two-port component that declares no tangent, so that the kernel
+/// differences it, whose outputs answer the force at `a` on two scales:
+/// `a` moves at [`LOPSIDED_SPEED_M_S`] plus `mobility_a` times that force,
+/// plus `kink_mobility` times its excess over `kink_above_n`, plus `cubic`
+/// times the cube of its departure from `cubic_about_n` [m/(N^3 s)], and
+/// `jump_m_s` faster once the force is above `jump_above_n`, as much slower
+/// once it is below `jump_below_n`; `b` at `curve` times its square [m/(N^2
+/// s)], plus [`LOPSIDED_MOBILITY_B`] times the force at `b` (without it the
+/// line would not be passive). Under a force at `a` above
+/// `shortens_above_n` it asks to shorten the step, as a component that
+/// locates an event does. What work its ports do it stores.
+struct Lopsided {
+    ports: [PortSpec; 2],
+    mobility_a: f64,
+    curve: f64,
+    kink_above_n: f64,
+    kink_mobility: f64,
+    cubic: f64,
+    cubic_about_n: f64,
+    jump_above_n: f64,
+    jump_below_n: f64,
+    jump_m_s: f64,
+    shortens_above_n: f64,
+}
+
+impl Lopsided {
+    /// Without a kink, a cube, a jump or an event.
+    fn new(mobility_a: f64, curve: f64) -> Self {
+        let end = |name: &str| {
+            PortSpec::power(
+                StableId::new(name).unwrap(),
+                PortKind::MechanicalForceVelocity,
+                PortRole::EffortIn,
+                core::num::NonZeroUsize::MIN,
+            )
+            .unwrap()
+        };
+        Self {
+            ports: [end("a"), end("b")],
+            mobility_a,
+            curve,
+            kink_above_n: f64::INFINITY,
+            kink_mobility: 0.0,
+            cubic: 0.0,
+            cubic_about_n: 0.0,
+            jump_above_n: f64::INFINITY,
+            jump_below_n: f64::NEG_INFINITY,
+            jump_m_s: 0.0,
+            shortens_above_n: f64::INFINITY,
+        }
+    }
+}
+
+impl Component for Lopsided {
+    type State = f64;
+    type Error = ElementError;
+
+    fn ports(&self) -> &[PortSpec] {
+        &self.ports
+    }
+
+    fn class(&self) -> Class {
+        Class::Smooth
+    }
+
+    fn stored_energy_j(&self, stored_j: &f64) -> Result<f64, ElementError> {
+        Ok(*stored_j)
+    }
+
+    fn propose(
+        &self,
+        old: &f64,
+        dt_s: f64,
+        inputs: &[f64],
+        new: &mut f64,
+        outputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<Proposal, ElementError> {
+        let (at_a, at_b) = (inputs[0], inputs[1]);
+        if at_a > self.shortens_above_n {
+            return Ok(Proposal::Shorten { dt_s: 0.5 * dt_s });
+        }
+        let kink_m_s = self.kink_mobility * (at_a - self.kink_above_n).max(0.0);
+        let cubic_m_s = self.cubic * (at_a - self.cubic_about_n).powi(3);
+        let jump_m_s = if at_a > self.jump_above_n {
+            self.jump_m_s
+        } else if at_a < self.jump_below_n {
+            -self.jump_m_s
+        } else {
+            0.0
+        };
+        outputs[0] = LOPSIDED_SPEED_M_S + self.mobility_a * at_a + kink_m_s + cubic_m_s + jump_m_s;
+        outputs[1] = self.curve * at_a * at_a + LOPSIDED_MOBILITY_B * at_b;
+        let work_j = dt_s * (at_a * outputs[0] + at_b * outputs[1]);
+        *new = old + work_j;
+        let tolerance_j = 1.0e-12 * (old.abs() + new.abs() + work_j.abs()) + f64::MIN_POSITIVE;
+        Ok(Proposal::Step(Receipt::lossless(*new - old, tolerance_j)))
+    }
+}
+
+/// The matrix a probe on a line is handed beside `lopsided`, its `a` under
+/// `push_n`, in the second step of 1 ms, and the entries that step left
+/// unresolved. The line is formed where its step starts: in the first step
+/// the force at `a` is still the none it started with, in the second it is
+/// the push.
+fn handed_beside_a_lopsided(lopsided: Lopsided, push_n: f64) -> ([f64; 4], u32) {
+    let mut builder = SystemBuilder::new();
+    let lopsided = builder.add("lopsided", lopsided, 0.0).unwrap();
+    let probe = builder
+        .add_on_line("probe", Probe::new(), [f64::NAN; 4])
+        .unwrap();
+    let push = builder
+        .add_with_tangent(
+            "push",
+            Force::new(Waveform::constant(push_n).unwrap()),
+            SourceAccount::default(),
+        )
+        .unwrap();
+    builder
+        .common_flow(
+            port(&builder, lopsided, "a"),
+            &[port(&builder, probe, "a"), port(&builder, push, "p")],
+        )
+        .unwrap();
+    builder
+        .common_flow(port(&builder, lopsided, "b"), &[port(&builder, probe, "b")])
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    let report = with_cx(|cx| {
+        system.step(1.0e-3, cx).unwrap();
+        system.step(1.0e-3, cx).unwrap()
+    });
+    (*system.state::<[f64; 4]>(probe).unwrap(), report.unresolved)
+}
+
+#[test]
+fn each_entry_of_a_differenced_column_keeps_the_step_that_resolved_it() {
+    // One input of a component can move one of its outputs past the
+    // output's rounding and leave another inside it. Under 1e3 N the
+    // `sqrt(eps)` step of the force at `a` of a `Lopsided` moves `b`, 1e-5
+    // m/(N^2 s) times its square, at once, and `a`, 100 m/s and a mobility,
+    // by 2^18 units in its last place, under the 2^20 of a resolved entry.
+    // The column is differenced again at a step 401 times longer, 6.0e-3 N;
+    // `b` differenced there would be its secant over that step, 3.0e-6 off
+    // its slope, where the first step leaves it 7.5e-9 off. Each entry keeps
+    // the difference that first resolved it. The force at `b` moves `b` and
+    // not `a`: that entry is nothing at every step, and is the one counted.
+    let (push_n, curve) = (1.0e3, 1.0e-5);
+    let (matrix, unresolved) =
+        handed_beside_a_lopsided(Lopsided::new(LOPSIDED_MOBILITY_A, curve), push_n);
+    let slope_b = 2.0 * curve * push_n;
+    eprintln!(
+        "a lopsided neighbour: handed {matrix:?} for its own [{LOPSIDED_MOBILITY_A:e}, 0, \
+         {slope_b:e}, {LOPSIDED_MOBILITY_B:e}], {unresolved} unresolved"
+    );
+    assert!(
+        (matrix[0] / LOPSIDED_MOBILITY_A - 1.0).abs() <= 1.0e-6,
+        "{matrix:?}"
+    );
+    assert_eq!(matrix[1], 0.0, "{matrix:?}");
+    assert!((matrix[2] / slope_b - 1.0).abs() <= 1.0e-6, "{matrix:?}");
+    assert!(
+        (matrix[3] / LOPSIDED_MOBILITY_B - 1.0).abs() <= 1.0e-6,
+        "{matrix:?}"
+    );
+    assert_eq!(unresolved, 1);
+}
+
+#[test]
+fn a_longer_step_does_not_difference_across_a_jump() {
+    // An output that does not answer an input changes under no step, and
+    // the kernel cannot tell it from one whose change rounds away: it takes
+    // the step longer. Where the output jumps further on, the longer step
+    // differences across the jump; where it jumps the other way as far on
+    // the other side of the iterate, the step there agrees. (Found while
+    // the block solve's columns were resolved too, on a scratch kernel: a
+    // sliding slider's force, which does not answer its released flow, was
+    // given columns of 120.5 and 25.2 once the longer step carried it to
+    // sticking, and the drawn graphs of this file took 13.6 per cent more
+    // updates.) A longer step that changes an output by more than 2^-13 of
+    // it is not taken for that output. Here `a` does not answer the force on
+    // it within 1e-4 N of the push of 1e-6 N, and is 1 m/s faster above and
+    // slower below; the longest step, 2^-10 N, crosses. That entry and the
+    // nothing of `a` under the force at `b` are left unresolved.
+    let (push_n, curve) = (1.0e-6, 10.0);
+    let mut lopsided = Lopsided::new(0.0, curve);
+    lopsided.jump_above_n = push_n + 1.0e-4;
+    lopsided.jump_below_n = push_n - 1.0e-4;
+    lopsided.jump_m_s = 1.0;
+    let (matrix, unresolved) = handed_beside_a_lopsided(lopsided, push_n);
+    eprintln!(
+        "a lopsided neighbour that jumps 1e-4 N off its push: handed {matrix:?}, {unresolved} unresolved"
+    );
+    assert_eq!(matrix[0], 0.0, "{matrix:?}");
+    assert!(
+        (matrix[2] / (2.0 * curve * push_n) - 1.0).abs() <= 1.0e-6,
+        "{matrix:?}"
+    );
+    assert_eq!(unresolved, 2);
+}
+
+#[test]
+fn a_longer_step_across_a_kink_is_not_taken() {
+    // An output whose slope changes inside the longer step, beyond the
+    // first: the difference at the longer step is the secant across the
+    // kink, resolved against the output's rounding all the same. It is
+    // differenced at that step on the other side of the iterate as well,
+    // where it has its slope, and the two do not agree: the entry is left
+    // as the first step had it, and counted. Here `a`, 2.5e-4 m/(N s) under
+    // a push of 1e-6 N, answers ten times that beyond 1e-4 N more; the
+    // first step is 1.5e-14 N, the longest 2^-10 N, and the secant there is
+    // 9.08 times the slope. The first step's change rounded away: the
+    // entry is nothing. Counted with it, the nothing of `a` under the force
+    // at `b`.
+    let push_n = 1.0e-6;
+    let mut lopsided = Lopsided::new(LOPSIDED_MOBILITY_A, 10.0);
+    lopsided.kink_above_n = push_n + 1.0e-4;
+    lopsided.kink_mobility = 9.0 * LOPSIDED_MOBILITY_A;
+    let (matrix, unresolved) = handed_beside_a_lopsided(lopsided, push_n);
+    let widest = 1.0_f64 / 1024.0;
+    let secant = LOPSIDED_MOBILITY_A + 9.0 * LOPSIDED_MOBILITY_A * (1.0 - 1.0e-4 / widest);
+    eprintln!(
+        "a lopsided neighbour with a kink 1e-4 N off its push: handed {matrix:?}, \
+         {unresolved} unresolved; its slope {LOPSIDED_MOBILITY_A:e}, the secant {secant:e}"
+    );
+    assert_eq!(matrix[0], 0.0, "{matrix:?}");
+    assert_eq!(unresolved, 2);
+}
+
+#[test]
+fn a_longer_step_is_no_longer_than_2_10_of_the_input_scale() {
+    // An output curved the same way on both sides of the iterate (odd about
+    // it) gives two differences that agree, and only the step's length
+    // bounds the secant's error. Here `a`, 2.5e-4 m/(N s) under a push of
+    // 1e-6 N, has 5e-5 m/(N^3 s) times the cube of the force's departure
+    // from the push as well. The step aimed at its rounding is some 6e-3 N,
+    // and there the entry would be 7.1e-6 off its slope; no step is longer
+    // than 2^-10 of the force's scale or of one newton. At 2^-10 N the cube
+    // puts it 1.9e-7 off, and it is handed 1.6e-7 off, the rest the
+    // rounding of the 100 m/s that `a` moves at.
+    let push_n = 1.0e-6;
+    let mut lopsided = Lopsided::new(LOPSIDED_MOBILITY_A, 10.0);
+    lopsided.cubic = 5.0e-5;
+    lopsided.cubic_about_n = push_n;
+    let (matrix, unresolved) = handed_beside_a_lopsided(lopsided, push_n);
+    eprintln!(
+        "a lopsided neighbour with a cube about its push: handed {matrix:?}, {unresolved} \
+         unresolved"
+    );
+    assert!(
+        (matrix[0] / LOPSIDED_MOBILITY_A - 1.0).abs() <= 1.0e-6,
+        "{matrix:?}"
+    );
+    assert_eq!(unresolved, 1);
+}
+
+#[test]
+fn a_longer_step_is_as_long_as_its_entry_needs() {
+    // A longer step is aimed at `2^-26` of the output it resolves; it is not
+    // taken as long as it may be. Here `a` of a `Lopsided` under 1e3 N, 100
+    // m/s and 2.5e-4 m/(N s), has 1e-8 m/(N^3 s) times the cube of the
+    // force's departure from the push as well (odd about it, so the other
+    // side agrees). Aimed, the step is some 6.0e-3 N, and the entry 1.4e-9
+    // off its slope; at the longest step, 2^-10 of the push, 0.98 N, it
+    // would be 3.8e-5 off.
+    let push_n = 1.0e3;
+    let mut lopsided = Lopsided::new(LOPSIDED_MOBILITY_A, 1.0e-5);
+    lopsided.cubic = 1.0e-8;
+    lopsided.cubic_about_n = push_n;
+    let (matrix, unresolved) = handed_beside_a_lopsided(lopsided, push_n);
+    eprintln!(
+        "a lopsided neighbour under 1e3 N with a cube about its push: handed {matrix:?}, \
+         {unresolved} unresolved"
+    );
+    assert!(
+        (matrix[0] / LOPSIDED_MOBILITY_A - 1.0).abs() <= 1.0e-6,
+        "{matrix:?}"
+    );
+    assert_eq!(unresolved, 1);
+}
+
+#[test]
+fn a_column_the_component_does_not_take_on_both_sides_is_left_and_counted() {
+    // A component that locates an event asks to shorten a step whose input
+    // carries it past one, and where the kernel's own move does that the
+    // column is differenced on the other side of the iterate (the contract,
+    // "Requests to shorten inside a loop"). Its longer steps are taken on
+    // that side, but the kernel cannot difference the other to check them:
+    // the entry is left as the first step had it, and counted. Here a force
+    // at `a` of 1e-6 N asks to shorten anywhere above itself and a
+    // femtonewton; the first step's change at `a` rounded away, and the
+    // entry is nothing. Counted with it, the nothing of `a` under the force
+    // at `b`.
+    let push_n = 1.0e-6;
+    let mut lopsided = Lopsided::new(LOPSIDED_MOBILITY_A, 10.0);
+    lopsided.shortens_above_n = push_n + 1.0e-15;
+    let (matrix, unresolved) = handed_beside_a_lopsided(lopsided, push_n);
+    eprintln!(
+        "a lopsided neighbour that shortens above its push: handed {matrix:?}, {unresolved} \
+         unresolved"
+    );
+    assert_eq!(matrix[0], 0.0, "{matrix:?}");
+    assert_eq!(unresolved, 2);
+}
+
+/// The matrix a probe on a line is handed, in a step of 1 ms, whose `a` is
+/// on a mass of 2 kg at 100 m/s under 1e-6 N, added without its tangent
+/// unless `declared`, and whose `b` is on a mass of 3 kg at 1 m/s under
+/// 1e-6 N added with its tangent; with the entries left unresolved.
+fn handed_beside_two_masses(declared: bool) -> ([f64; 4], u32) {
+    let mut builder = SystemBuilder::new();
+    let moving = |velocity_m_s| Motion {
+        position_m: 0.0,
+        velocity_m_s,
+    };
+    let one = if declared {
+        builder.add_with_tangent("one", Mass::new(2.0).unwrap(), moving(100.0))
+    } else {
+        builder.add("one", Mass::new(2.0).unwrap(), moving(100.0))
+    }
+    .unwrap();
+    let two = builder
+        .add_with_tangent("two", Mass::new(3.0).unwrap(), moving(1.0))
+        .unwrap();
+    let probe = builder
+        .add_on_line("probe", Probe::new(), [f64::NAN; 4])
+        .unwrap();
+    let mut push = |name: &str| {
+        builder
+            .add_with_tangent(
+                name,
+                Force::new(Waveform::constant(1.0e-6).unwrap()),
+                SourceAccount::default(),
+            )
+            .unwrap()
+    };
+    let (push_one, push_two) = (push("push_one"), push("push_two"));
+    builder
+        .common_flow(
+            port(&builder, one, "p"),
+            &[port(&builder, probe, "a"), port(&builder, push_one, "p")],
+        )
+        .unwrap();
+    builder
+        .common_flow(
+            port(&builder, two, "p"),
+            &[port(&builder, probe, "b"), port(&builder, push_two, "p")],
+        )
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    let report = with_cx(|cx| system.step(1.0e-3, cx)).unwrap();
+    (*system.state::<[f64; 4]>(probe).unwrap(), report.unresolved)
+}
+
+#[test]
+fn a_neighbour_that_declares_its_tangent_is_handed_to_the_bit_beside_a_differenced_one() {
+    // The columns of a neighbour that declares its tangent are its tangent;
+    // a differenced neighbour's are resolved, and that touches no other.
+    // Beside a differenced mass, a mass added with its tangent hands the
+    // line the bits it hands beside the same mass added with its own.
+    let (beside, unresolved) = handed_beside_two_masses(false);
+    let (declared, none) = handed_beside_two_masses(true);
+    eprintln!(
+        "beside a differenced mass: handed {beside:?} ({:#018x} at `b`), {unresolved} \
+         unresolved; beside a declared one {declared:?} ({:#018x})",
+        beside[3].to_bits(),
+        declared[3].to_bits()
+    );
+    assert_eq!(beside[3].to_bits(), declared[3].to_bits());
+    assert_eq!(&beside[1..3], &[0.0; 2][..]);
+    assert!(
+        (beside[0] / (0.5 * 1.0e-3 / 2.0) - 1.0).abs() <= 1.0e-6,
+        "{beside:?}"
+    );
+    assert_eq!((unresolved, none), (0, 0));
 }

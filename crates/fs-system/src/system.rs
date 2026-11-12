@@ -35,6 +35,70 @@ pub type BoundaryFn = Box<dyn Fn(f64, f64, &mut [f64])>;
 /// input and a residual and the inputs a block does not solve for.
 const ROUNDING_UNITS: f64 = 16.0;
 
+/// A differenced entry of a line's column is resolved when the change it is
+/// the quotient of is at least this share of its output, `2^-32`, some
+/// `2^20` units in the output's last place: the output's rounding then
+/// leaves the entry within about 1e-6 of itself. Numerical policy.
+const RESOLVED: f64 = 1_048_576.0 * f64::EPSILON;
+
+/// What a longer step aims an unresolved entry's change at: `2^-26` of its
+/// output, `sqrt(eps)`, some `2^26` units in its last place, `2^6` times
+/// what resolves it. Numerical policy.
+const AIMED: f64 = 67_108_864.0 * f64::EPSILON;
+
+/// A longer step that changes an output by more than this share of it,
+/// `2^-13`, `2^13` times what the step aimed at, has gone past where the
+/// output answers the input in proportion: across a jump. The entry keeps
+/// what it had.
+const LOCAL: f64 = 8_192.0 * AIMED;
+
+/// The longest step a differenced column of a line is taken at, as a share
+/// of the input's scale, or of one unit where that is less: `2^-10`.
+const WIDEST: f64 = 1.0 / 1_024.0;
+
+/// How far an entry taken at a longer step may lie from the same entry
+/// differenced at that step on the other side of the iterate, as a share of
+/// it, and be kept: `2^-10`. Further apart, the output does not answer in
+/// proportion over the two steps (it has a kink there), and the entry is
+/// left as the first step had it.
+const AGREED: f64 = 1.0 / 1_024.0;
+
+/// How many times a differenced column of a line is differenced again at a
+/// longer step, at most, besides the step on the other side.
+const LONGER_STEPS: usize = 4;
+
+/// Whether a differenced entry whose output `current` changed by `change`
+/// (a magnitude) is resolved: by at least [`RESOLVED`] of the output, or
+/// the output is zero.
+fn resolved(change: f64, current: f64) -> bool {
+    current == 0.0 || change >= RESOLVED * current.abs()
+}
+
+/// How many times longer a step has to be to aim an unresolved change at
+/// [`AIMED`] of its output; a change that rounded to nothing is taken
+/// `2^26` times longer.
+fn aimed(change: f64, current: f64) -> f64 {
+    if change > 0.0 {
+        AIMED * current.abs() / change
+    } else {
+        1.0 / AIMED
+    }
+}
+
+/// Where an entry of a line's differenced column stands while the column is
+/// resolved (`System::resolve_column`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Entry {
+    /// Resolved by the first step: the entry it was.
+    First,
+    /// Not resolved yet: the difference at the latest step.
+    Open,
+    /// Resolved at a longer step, kept if the other side agrees.
+    Taken,
+    /// Left unresolved.
+    Left,
+}
+
 /// Absolute term sum of a power pairing, before cancellation. Ordinary
 /// power ports retain their original component-wise arithmetic.
 fn power_pairing_scale(spec: &PortSpec, input: &[f64], output: &[f64]) -> f64 {
@@ -416,6 +480,21 @@ pub struct StepReport {
     pub iterations: u32,
     /// Times the step was shortened before it was taken.
     pub shortenings: u32,
+    /// Entries of the load lines' differenced columns left unresolved
+    /// against the rounding of their outputs, over the trials of the step
+    /// (the contract, "Differenced columns of a line"). The step is taken
+    /// and its balance audited all the same: the count says that a line
+    /// component's relation was solved on a matrix some of whose entries
+    /// are a count of rounding units, the first step's difference, or
+    /// nothing. An output of a neighbour that does not answer an input at
+    /// all (a port of a two-port neighbour that the force at its other port
+    /// does not move) is counted at every step, and its entry, nothing, is
+    /// right. Above that, a caller that needs the line component's answer
+    /// to more than the step's balance (whether a pair sticks or slips, and
+    /// when) declares the neighbour's tangent
+    /// ([`SystemBuilder::add_with_tangent`]), which the line is handed as
+    /// declared.
+    pub unresolved: u32,
 }
 
 /// Collects components and connections, then seals them into a [`System`].
@@ -1613,6 +1692,10 @@ impl SystemBuilder {
             port_mass: vec![0.0; ports],
             scratch_outputs: vec![0.0; widest_output],
             scratch_direction: vec![0.0; widest_input],
+            scratch_first: vec![0.0; widest_output],
+            scratch_kept: vec![0.0; widest_output],
+            scratch_entries: vec![Entry::First; widest_output],
+            unresolved: 0,
             time: Sum::default(),
             steps: 0,
             ledger,
@@ -1876,6 +1959,14 @@ pub struct System {
     port_mass: Vec<f64>,
     scratch_outputs: Vec<f64>,
     scratch_direction: Vec<f64>,
+    /// A line's differenced column as the first step left it, as its
+    /// entries are resolved, and where each stands.
+    scratch_first: Vec<f64>,
+    scratch_kept: Vec<f64>,
+    scratch_entries: Vec<Entry>,
+    /// Entries of the lines' differenced columns left unresolved in this
+    /// step.
+    unresolved: u32,
     time: Sum,
     steps: u64,
     ledger: Ledger,
@@ -2138,13 +2229,18 @@ impl System {
     }
 
     /// Column `local` of the port-map tangent of `node`, into
-    /// `scratch_outputs`. `Ok(Some(dt))` asks to shorten.
+    /// `scratch_outputs`. `Ok(Some(dt))` asks to shorten. A differenced
+    /// column that `resolve`s is one of a load line's matrix, and is
+    /// resolved against the rounding of its outputs (`resolve_column`): the
+    /// line component's relation is solved on that matrix. The block
+    /// solve's columns are not: an update there is judged by its residual.
     fn tangent_column(
         &mut self,
         node: usize,
         local: usize,
         dt_s: f64,
         group_scale: &[f64],
+        resolve: bool,
         cx: &Cx<'_>,
     ) -> Result<Option<f64>, SystemError> {
         let (inputs, outputs) = (self.node_inputs(node), self.node_outputs(node));
@@ -2172,7 +2268,6 @@ impl System {
         // other inputs where the line's flows are all given from outside
         // the block (a slider between prescribed velocities whose heat
         // warms a body).
-        let line = self.lines.get(self.line_of[node]).and_then(Option::as_ref);
         if self.nodes[node].line_ports().is_none()
             && !matches!(self.nodes[node].class(), Class::ExactLinear | Class::Smooth)
         {
@@ -2184,6 +2279,9 @@ impl System {
         // Forward difference of the port map. The candidate slot is free to
         // overwrite: a component without a declared tangent is proposed
         // again, at the accepted inputs, before its block can be accepted.
+        // The step is `sqrt(eps)` of the input's scale; where that moves an
+        // output of a line's column by less than its rounding, the column is
+        // differenced again at a longer step (`resolve_column`).
         //
         // A perturbed proposal that asks for a shorter step is not the
         // step's: the component took the step at the iterate itself, and
@@ -2200,26 +2298,7 @@ impl System {
         let mut asked: Option<f64> = None;
         for side in [step, -step] {
             self.inputs[index] = base + side;
-            let proposal = if let Some(line) = line {
-                self.nodes[node].propose_on_line(
-                    self.accepted[node].as_ref(),
-                    dt_s,
-                    &self.inputs[inputs.clone()],
-                    &line.compliance,
-                    self.candidate[node].as_mut(),
-                    &mut self.scratch_outputs[..width],
-                    cx,
-                )
-            } else {
-                self.nodes[node].propose(
-                    self.accepted[node].as_ref(),
-                    dt_s,
-                    &self.inputs[inputs.clone()],
-                    self.candidate[node].as_mut(),
-                    &mut self.scratch_outputs[..width],
-                    cx,
-                )
-            };
+            let proposal = self.propose_perturbed(node, dt_s, cx);
             self.inputs[index] = base;
             match proposal {
                 Err(error) => return Err(self.refused(node, error, cx)),
@@ -2237,11 +2316,198 @@ impl System {
                     {
                         *column = (*column - current) / side;
                     }
+                    // No step longer than `2^-10` of the input's scale, or
+                    // of one unit where that is less.
+                    if resolve {
+                        let widest = scale.max(1.0) * WIDEST;
+                        self.resolve_column(node, index, side, widest, dt_s, cx)?;
+                    }
                     return Ok(None);
                 }
             }
         }
         Ok(asked)
+    }
+
+    /// Propose `node` at the current inputs into `scratch_outputs`, on its
+    /// load line if it is on one: a proposal at an input the kernel has
+    /// moved, whose outputs difference a column of its port map.
+    fn propose_perturbed(
+        &mut self,
+        node: usize,
+        dt_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Proposal, OwnerError> {
+        let (inputs, width) = (self.node_inputs(node), self.node_outputs(node).len());
+        let line = self.lines.get(self.line_of[node]).and_then(Option::as_ref);
+        if let Some(line) = line {
+            self.nodes[node].propose_on_line(
+                self.accepted[node].as_ref(),
+                dt_s,
+                &self.inputs[inputs],
+                &line.compliance,
+                self.candidate[node].as_mut(),
+                &mut self.scratch_outputs[..width],
+                cx,
+            )
+        } else {
+            self.nodes[node].propose(
+                self.accepted[node].as_ref(),
+                dt_s,
+                &self.inputs[inputs],
+                self.candidate[node].as_mut(),
+                &mut self.scratch_outputs[..width],
+                cx,
+            )
+        }
+    }
+
+    /// Propose `node` with input `index` moved by `moved`, into
+    /// `scratch_outputs`, and put the input back: whether the component
+    /// takes the step there. One that asks to shorten or refuses there does
+    /// not (the move is the kernel's own), unless the step is cancelled.
+    fn steps_at(
+        &mut self,
+        node: usize,
+        index: usize,
+        moved: f64,
+        dt_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<bool, SystemError> {
+        let base = self.inputs[index];
+        self.inputs[index] = base + moved;
+        let proposal = self.propose_perturbed(node, dt_s, cx);
+        self.inputs[index] = base;
+        match proposal {
+            Ok(Proposal::Step(_)) => Ok(true),
+            Err(_) if cx.is_cancel_requested() => Err(SystemError::Cancelled),
+            Ok(Proposal::Shorten { .. }) | Err(_) => Ok(false),
+        }
+    }
+
+    /// Resolve the column of `node` that `scratch_outputs` holds,
+    /// differenced at `side` of input `index`, against the rounding of its
+    /// outputs, the input moved no further than `widest`; the entries left
+    /// unresolved are counted in the step's report.
+    ///
+    /// A step of `sqrt(eps)` of an input's scale can move an output by less
+    /// than the output's rounding: the input is small where the output is
+    /// not (a mass that moves with little force on it; a spring at rest
+    /// that holds a load). The entry is then a count of rounding units, or
+    /// zero: beside a 2 kg mass at 1 m/s under 1e-6 N a load line was
+    /// handed no mobility at all. An entry is resolved when its change is
+    /// at least [`RESOLVED`] of its output, or its output is zero. While one
+    /// is not, the column is differenced again on the same side, at the step
+    /// that aims the least resolved change at [`AIMED`] of its output (the
+    /// change of a linear answer is in proportion to the step), at most
+    /// [`LONGER_STEPS`] times. Each entry keeps the difference that first
+    /// resolved it, so a column the first step resolves is the column it
+    /// was, and an entry of a curved answer is not taken at a step longer
+    /// than its own needs.
+    ///
+    /// An entry resolved at a longer step is differenced at the longest of
+    /// them on the other side of the iterate, and kept if the two agree
+    /// within [`AGREED`] of it: an output with a kink inside the longer step
+    /// on either side gives two that do not, and the entry is left as the
+    /// first step had it, never the secant across the kink. So is one that
+    /// the component does not take on the other side (it asks to shorten
+    /// there, or refuses). A longer step that changes an output by more than
+    /// [`LOCAL`] of it has jumped, and the entry keeps what it had. An entry
+    /// still unresolved at `widest`, or when the component does not take a
+    /// longer step, keeps its latest difference. Each entry left unresolved
+    /// is counted: an output that does not answer the input at all among
+    /// them, its entry nothing.
+    fn resolve_column(
+        &mut self,
+        node: usize,
+        index: usize,
+        side: f64,
+        widest: f64,
+        dt_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<(), SystemError> {
+        let outputs = self.node_outputs(node);
+        let width = outputs.len();
+        let mut longer = 1.0_f64;
+        for ((entry, &column), &current) in self.scratch_entries[..width]
+            .iter_mut()
+            .zip(&self.scratch_outputs[..width])
+            .zip(&self.outputs[outputs.clone()])
+        {
+            let change = (column * side).abs();
+            *entry = if resolved(change, current) {
+                Entry::First
+            } else {
+                longer = longer.max(aimed(change, current));
+                Entry::Open
+            };
+        }
+        if !self.scratch_entries[..width].contains(&Entry::Open) {
+            return Ok(());
+        }
+        self.scratch_first[..width].copy_from_slice(&self.scratch_outputs[..width]);
+        self.scratch_kept[..width].copy_from_slice(&self.scratch_outputs[..width]);
+        let mut step = side.abs();
+        let mut moved = 0.0_f64;
+        for _ in 0..LONGER_STEPS {
+            if step >= widest || !self.scratch_entries[..width].contains(&Entry::Open) {
+                break;
+            }
+            step = (step * longer).min(widest);
+            if !self.steps_at(node, index, step.copysign(side), dt_s, cx)? {
+                break;
+            }
+            moved = step.copysign(side);
+            longer = 1.0;
+            for (((kept, entry), &there), &current) in self.scratch_kept[..width]
+                .iter_mut()
+                .zip(&mut self.scratch_entries[..width])
+                .zip(&self.scratch_outputs[..width])
+                .zip(&self.outputs[outputs.clone()])
+            {
+                if *entry != Entry::Open {
+                    continue;
+                }
+                let change = there - current;
+                if change.abs() > LOCAL * current.abs() {
+                    *entry = Entry::Left;
+                    continue;
+                }
+                *kept = change / moved;
+                if resolved(change.abs(), current) {
+                    *entry = Entry::Taken;
+                } else {
+                    longer = longer.max(aimed(change.abs(), current));
+                }
+            }
+        }
+        if self.scratch_entries[..width].contains(&Entry::Taken) {
+            let stepped = self.steps_at(node, index, -moved, dt_s, cx)?;
+            for ((((kept, entry), &first), &there), &current) in self.scratch_kept[..width]
+                .iter_mut()
+                .zip(&mut self.scratch_entries[..width])
+                .zip(&self.scratch_first[..width])
+                .zip(&self.scratch_outputs[..width])
+                .zip(&self.outputs[outputs.clone()])
+            {
+                if *entry == Entry::Taken
+                    && !(stepped
+                        && ((there - current) / -moved - *kept).abs() <= AGREED * kept.abs())
+                {
+                    *kept = first;
+                    *entry = Entry::Left;
+                }
+            }
+        }
+        let left = self.scratch_entries[..width]
+            .iter()
+            .filter(|&&entry| matches!(entry, Entry::Open | Entry::Left))
+            .count();
+        self.unresolved = self
+            .unresolved
+            .saturating_add(u32::try_from(left).unwrap_or(u32::MAX));
+        self.scratch_outputs[..width].copy_from_slice(&self.scratch_kept[..width]);
+        Ok(())
     }
 
     /// The largest power [W] crossing a power port of `nodes` at the current
@@ -2694,7 +2960,7 @@ impl System {
                     let node = self.input_owner[index];
                     let local = index - self.input_start[node];
                     if let Some(shorter) =
-                        self.tangent_column(node, local, dt_s, group_scale, cx)?
+                        self.tangent_column(node, local, dt_s, group_scale, false, cx)?
                     {
                         return Ok(Err(shorter));
                     }
@@ -2942,6 +3208,7 @@ impl System {
             dt_s = next;
         }
 
+        self.unresolved = 0;
         let mut shortenings = 0_u32;
         let iterations = loop {
             match self.trial(dt_s, cx)? {
@@ -3195,6 +3462,7 @@ impl System {
             time_s: self.time.value(),
             iterations,
             shortenings,
+            unresolved: self.unresolved,
         })
     }
 }

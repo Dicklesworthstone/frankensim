@@ -400,14 +400,16 @@ relation allows there.
   has it. It is exact for neighbours that are linear within the step and
   declare their tangent, and the slope at the step's start for others that
   declare one. A neighbour that is differenced gives it to the accuracy of
-  the difference, and, not covered, none at all while it is at rest to
-  rounding: the differencing step is then lost in the neighbour's state.
-  Beside a spring of 400 N/m added without its tangent, a mass at rest
-  hands the slider `dt / (2 m)` = 0.00125 where the two answer with
+  the difference, each entry resolved against the rounding of its output or
+  counted (below, "Differenced columns of a line"). (74529fda7f said `C` is
+  exact for every neighbour that is linear within the step. Found wrong by
+  its review. Until 2026-11-12 an entry whose change the output's rounding
+  took was handed as it came, a count of rounding units or nothing, a stated
+  limit: beside a spring of 400 N/m added without its tangent, a mass at
+  rest handed the slider `dt / (2 m)` = 0.00125 where the two answer with
   0.0012484, a `C` too large, and the step in which the mass should break
-  away does not converge (asserted, below; with the tangent declared it
-  breaks away in that step). (74529fda7f said `C` is exact for every
-  neighbour that is linear within the step. Found wrong by its review.)
+  away did not converge; a mass of 2 kg moving at 1 m/s under 1e-6 N handed
+  a line no mobility at all.)
 - Where the component's relation jumps, the differenced column is not a
   slope. The kernel differences the line component at a released flow
   moved up by `sqrt(eps)` of it. In the window that wide below a jump, on
@@ -447,8 +449,10 @@ relation allows there.
   is not over power ports that receive a flow, in increasing order
   (`AdmissionError::LinePorts`), and claims no name.
 - A block with a component on a line keeps no factors between steps and
-  costs, per step, one assembly of the neighbours' columns, one
-  factorization and one back-substitution per effort, on top of its solve.
+  costs, per step, one assembly of the neighbours' columns (a differenced
+  column one proposal of its component, and up to five more where it is
+  resolved, below), one factorization and one back-substitution per effort,
+  on top of its solve.
 - Nothing of the line crosses a step: the matrix, the drivers' extra terms and
   the released flows are all formed in the step that uses them, so a run and
   its replay from a checkpoint agree (test below).
@@ -459,6 +463,61 @@ relation allows there.
   does not: a step in which its relation switches (an arrest, a break-away,
   a reversal) is first-order accurate, and what happens in it is its own
   law of a step.
+
+**Differenced columns of a line.** A component that declares no tangent is
+differenced: one input moved by `sqrt(eps)` of its scale (its own size or
+the largest of its group in the block, one unit where both are nothing), the
+column the change of its outputs over the move. Where the input is small and
+an output is not (a mass that moves with little force on it, a spring at
+rest that holds a load), the move changes the output by less than its
+rounding, and the entry is a count of rounding units, or nothing. The
+columns that form a load line's matrix, the neighbours' at the step's start,
+are resolved against that rounding. The shares below are numerical policy of
+the differenced branch:
+
+- An entry is resolved when its change is at least `2^-32` of its output,
+  `2^20` units in its last place: a change of `2^20` units puts the column's
+  rounding under about 1e-6 of the entry. An entry whose output is nothing
+  is resolved.
+- While one is not, the column is differenced again on the same side of the
+  iterate, at the step that aims the least resolved change at `2^-26` of its
+  output, `2^26` units, `2^6` times what resolves it (the change of a linear
+  answer is in proportion to the step; for a change that rounded to nothing,
+  `2^26` times the step), at most four times, and never at a step longer
+  than `2^-10` of the input's scale, or of one unit where that is less. Each
+  longer step is one more proposal of the component.
+- Each entry keeps the difference that first resolved it: a column that the
+  first move resolves is the column it was, to the bit, and an entry of a
+  curved answer is not taken at a step longer than its own needs.
+- An entry resolved at a longer step is differenced at the longest of them
+  on the other side of the iterate as well, one more proposal, and kept if
+  the two agree within `2^-10` of it. Where they do not, the output does not
+  answer in proportion over the two steps (a kink inside one of them), and
+  the entry is left as the first step had it: never the secant across the
+  kink. So is an entry that the component does not take on the other side
+  (it asks to shorten there, or refuses). A kink whose secant lies within
+  `2^-10` of the slope on the other side is taken that close to it. An
+  output that rounds by large terms differs on the two sides by its rounding
+  as well, and can be left by this (below, "No-claim boundaries").
+- A longer step that changes an output by more than `2^-13` of it has gone
+  past where the output answers in proportion (a jump), and the entry keeps
+  what it had: a jump the other way as far on the other side would agree.
+- An entry still unresolved at the longest step, or where the component does
+  not take a longer step, keeps its latest difference.
+- Each entry left unresolved is counted in the step's report
+  (`StepReport::unresolved`, the trials of the step summed). An output that
+  does not answer the input at all is among them, at every step: the kernel
+  cannot tell it from one whose change rounds away, and its entry, nothing,
+  is right. The step is taken and audited all the same; a caller that needs
+  the line component's answer to more than the step's balance declares the
+  neighbour's tangent, which the line is handed as declared, to the bit.
+- The block solve's own columns are differenced once, as before: an update
+  there is judged by its residual. (Resolved as well, on a scratch kernel of
+  2026-11-12, they took the drawn graphs below from 695778 updates to 674215
+  on a Mac; before longer steps were kept off jumps they gave a sliding
+  slider's force, which does not answer its released flow, columns of 120.5
+  and 25.2 once a longer step carried it to sticking, and the drawn graphs
+  took 790554.)
 
 **Requests to shorten inside a loop.** A component of a looped block is
 proposed at every iterate of the block's solve, and, if it declares no
@@ -1795,9 +1854,11 @@ material, a surface card, a temperature or a slip history stays in `fs-tribo`.
   with drawn velocities, the slider to the ground or between two of them,
   springs (a quarter of them differenced) and dampers between neighbours
   and to a wall, a push up to 14 N on one, steps of 3e-6 to 1e-2 s. No
-  step is refused; the slider slides at some step in 208 of them; 695778
-  updates in their 450000 steps (691915 on b47fe4f2a8, which also took
-  them all: this family did not show the defect, the carts did).
+  step is refused; the slider slides at some step in 208 of them; 695720
+  updates in their 450000 steps on a Linux host (695799 there before the
+  columns of a line were resolved, 2026-11-12; 695778 on a Mac before, the
+  two hosts' libm apart; 691915 on b47fe4f2a8, which also took them all:
+  this family did not show the defect, the carts did).
 - The planted negative for the rounding of the largest wire of its kind:
   three masses in a row on two springs, the first held by the slider with
   half the static limit, the other two at rest. The third mass's force
@@ -1821,13 +1882,59 @@ material, a surface card, a temperature or a slip history stays in `fs-tribo`.
   each); a line flow taken at all of its allowance (held beside another;
   the slow push; the 160 pairs; the carts and graphs); a restore that
   keeps the last allowance (the held planted negative).
-- Break-away beside a differenced neighbour at rest, a stated limit: the
-  mass on a spring of 400 N/m that holds 2 N of a push rising through the
-  11.8 N the slider and the spring hold together. With the spring's
-  tangent declared the mass breaks away in step 400 and the run goes on.
-  With the spring differenced step 400 is refused as not converged, the
-  mass's force wire flipping by the static limit less the sliding force
-  (3.92 N, to 1e-3), and nothing of it is published.
+- Break-away beside a differenced neighbour at rest (break-away): the mass
+  on a spring of 400 N/m that holds 2 N of a push rising through the 11.8 N
+  the slider and the spring hold together. The spring's tangent declared or
+  differenced, the mass breaks away in step 400 and the run goes on to 1000
+  steps; the two end 1e-17 m apart. (Until 2026-11-12 a stated limit: with
+  the spring differenced, step 400 was refused as not converged, the mass's
+  force wire flipping by the static limit less the sliding force, 3.92 N.)
+- Differenced columns of a line (`tests/load_line.rs`):
+  - The 18 masses: a probe on a line beside a 2 kg mass added without its
+    tangent, at 0, 1 and 100 m/s under 1 N, 1e-3 N, 1e-6 N, 1e-9 N, 1e-12 N
+    and none, in a step of 1 ms: handed `dt / (2 m)` within 1e-6 in all 18
+    (8.3e-8 at worst), no entry left unresolved. Before, 7 of the 18 were
+    handed nothing and 12 were off by more than 1e-6 (1.3e-2 too much at 1
+    m/s under 1e-3 N).
+  - The two-port neighbour: one under 1e3 N at `a`, whose force at `a` moves
+    `b` (1e-5 m/(N^2 s) times its square) at once and `a` (100 m/s and
+    2.5e-4 m/(N s)) only at a step 401 times longer: each entry within 1e-6
+    of its slope, where `b` taken at the longer step would be 3.0e-6 off;
+    one entry counted, `a` under the force at `b`, which does not answer it.
+  - The jump: the same neighbour under 1e-6 N, with no mobility at `a`
+    within 1e-4 N of it and 1 m/s faster above, as much slower below: `a` is
+    handed nothing, not the 1024 of the difference across the jump that the
+    longest step, `2^-10` N, crosses (a jump the other way as far on the
+    other side agrees); two entries counted.
+  - The kink: the same, with ten times the mobility at `a` beyond 1e-4 N
+    more: `a` is handed what the first step had, nothing, not the secant
+    across the kink inside the longest step (2.27e-3 where the slope is
+    2.5e-4); two entries counted.
+  - The cube: the same, with 5e-5 m/(N^3 s) times the cube of the departure
+    from the push at `a` (the two sides agree): within 1e-6 (1.6e-7, the
+    cube's 1.9e-7 less the rounding of the 100 m/s) where the step aimed at
+    the rounding, some 6.0e-3 N without the bound, gives 7.1e-6.
+  - The aimed step: under 1e3 N, with 1e-8 m/(N^3 s) times that cube: within
+    1e-6 at the aimed step, where the longest step, 0.98 N, gives 3.8e-5.
+  - The side not taken: the same neighbour asking to shorten above its push
+    of 1e-6 N: its longer steps taken on the side it steps, but not checked
+    on the other; `a` is handed what the first step had, nothing; two
+    entries counted.
+  - The declared neighbour: beside a differenced mass, a mass added with its
+    tangent hands the line the bits it hands it beside a declared one
+    (0x3f25d867c3ece2a5).
+  - Controls on scratch kernels, each failing the tests named and no other
+    of these nine: no fix at all, and no longer step (all nine); every entry
+    taking the last step (the two-port neighbour, the jump, the kink, the
+    cube, the aimed step, the side not taken); no jump guard (the jump); no
+    check on the other side, or the check made on the same side (the kink,
+    the side not taken); a check that compares at the wrong sign and so
+    rejects every entry (the 18 masses, the two-port neighbour, the cube,
+    the aimed step, the declared neighbour, break-away); two longer steps
+    (the 18 masses: one entry counted at 100 m/s under 1e-12 N); no bound,
+    or a bound by the count alone (the cube); every longer step `2^26` times
+    the last, not aimed (the aimed step). Not pinned by a test: the cap of
+    four longer steps (with three all nine pass).
 - A side that jumps: a mass at rest stuck to a side prescribed at 0 and
   then at 0.5 m/s. In the step of the jump it breaks away (0.5 m/s cannot
   be caught within a step by 9.8 N); it is dragged at exactly 5.88 N in
@@ -2191,6 +2298,23 @@ solved together. Nothing in the module is deleted.
   PI controller (step doubling and proportional control are available); no
   durable snapshot encoding, process restart or fork; no adjoint. These are beads `.5.2` to
   `.5.10` of the epic.
+- An entry of a differenced column of a line is resolved against the
+  rounding of its output, `eps` of its size. An output that is a small sum
+  of large terms (a modal structure's velocity at a port, a sum over its
+  modes) rounds by the terms: its entries can be further off than 1e-6, and
+  its two sides can differ by more than `2^-10` with no kink. On a bowed
+  string of 64 modes at 48 kHz, a fixture outside this repository, run to
+  its refusal at step 784 (it is refused there with the columns resolved or
+  not, the step shortened too often): 998 columns differenced again in its
+  784 steps, each at one longer step and once on the other side; 1053
+  entries taken, their two sides within 9.7e-4 of the entry (657 of them
+  within 7.6e-6); 60 left unresolved, 47 of them because the sides differed
+  by 1.005e-3 of the entry to more than half of it. The line's mobility as
+  the friction law had it: off the string's own by 1e-5 to 1e-4 in 636 of
+  its calls at the full step at worst, where before 27 calls had it 13 per
+  cent off (2.976e-1 for 3.428e-1; 3.7 per cent on a Mac). A component that
+  declares its tangent is handed to the line as declared, and none of this
+  applies to it.
 - A step is slow against hand-written code: 21 to 160 times in the cases
   measured. Measured by `tests/step_cost.rs` (ignored by default; `cargo
   test --release -p fs-system --test step_cost -- --ignored --nocapture`)

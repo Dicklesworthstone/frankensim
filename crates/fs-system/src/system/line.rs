@@ -202,7 +202,9 @@ impl System {
                 continue;
             }
             let local = index - self.input_start[node];
-            if let Some(shorter) = self.tangent_column(node, local, dt_s, &work.group_scale, cx)? {
+            if let Some(shorter) =
+                self.tangent_column(node, local, dt_s, &work.group_scale, true, cx)?
+            {
                 return Ok(Some(shorter));
             }
             let reading = &work.readers[work.column_readers[column].clone()];
