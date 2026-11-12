@@ -3216,7 +3216,21 @@ is never changed: it is asked in two ways.
   is asked of the law, by bisection on its own static verdict inside its
   root budget (`solve.max_iterations`); no static capacity is added to
   `TangentialLaw`, so a law whose holding depends on its state or load is
-  asked the same way. An instant within the impulse tolerance of either
+  asked the same way. How near its limit the law is asked depends on what
+  its verdicts cost it, by its own count (`TangentialStep::iterations`).
+  Where they cost nothing, as Coulomb's closed form, the instant is
+  narrowed to rounding (52 calls). A law that searches for its verdict is
+  asked no nearer than the impulse tolerance needs: the halving stops once
+  letting go anywhere in the bracket is inside the tolerance, half the
+  load's rate times the bracket's time squared. The reason was measured on
+  a bowed string (the stable-branch law `HystereticFriction` with a
+  Gaussian drop, behind the kernel's line on a modal string): narrowed to
+  rounding as first landed (b0cfb4b3e6), the interface asked the law 51
+  times in one step; just beyond what the law holds its sliding root is
+  next to zero (4e-16 m/s), its own search for it took 123 and 125 of the
+  128 iterations it may spend, 27 of them to prepare its line, and the
+  next call was refused. Stopped at the tolerance the same step takes 10
+  calls of at most 61 iterations. An instant within the impulse tolerance of either
   end of the step is that end: letting go a time `t` early or late is a
   momentum of half the load's rate times `t` squared. Under a load that
   curves the first cut lands near the instant and the cut step is located
@@ -3288,7 +3302,7 @@ step before it to draw the line through, and one under a load that jumps
 a traction that falls with speed (a sign bracket is not a proof that the
 root is the only one); a normal load that changes.
 
-`tests/sliding_interface.rs` (nine of its fifteen tests): at rest the
+`tests/sliding_interface.rs` (ten of its sixteen tests): at rest the
 Coulomb law (5 N held, 3 N sliding) holds pushes up to 4.999 N with no slip
 and no heat and slides beyond; a sliding pair slides on against 3 N, and
 asked for any step that ends beyond its stop (1.0001 to 1000 times as
@@ -3306,16 +3320,24 @@ held, and the next lets go against 3 N; the same after a shorter step,
 whose length is in the line, and with the other sign; a load held at both
 ends is held whole and one beyond the limit from the start lets go; a
 line that ends 5e-5 N beyond the limit is inside the impulse tolerance of
-the step's end and held, one that ends 1e-3 N beyond is cut; a given end
+the step's end and held, one that ends 1e-3 N beyond is cut; under a law
+that searches for its verdict (the stable-branch law, the bowed string's
+step above, the step before it on another mobility so that no line is
+prepared) the instant is located in 10 calls, 2 for the step's ends and 8
+halvings, under impulse tolerances of 1e-10 and of 2e-10 N s, each verdict
+in 27 to 61 of the law's 128 iterations, short of the instant by less than
+the bracket, and under Coulomb in 52 calls that cost the law nothing, to
+1e-15 s; a given end
 that jumps by 0.3 m/s starts the step with that slip; with both ends given
 the force and the law's checkpoint are `SlidingInterface`'s, to the bit;
 the conformance check of the load-line tier passes at 120 points and
 answers `Shortened` at 72 more; a traction that falls with speed (the
 hyperbolic law) is solved on the line to the root a bisection in the test
 finds, to 1e-13 m/s; the refusals, by field, a root budget of two
-evaluations among them. Twenty-three planted defects in a scratch copy
-each fail one of these tests or more, the stop's row as first landed and
-the break-away not located among them.
+evaluations among them. Twenty-eight planted defects in a scratch copy
+each fail one of these tests or more, the stop's row as first landed, the
+break-away not located and the instant narrowed to rounding whatever the
+law (refused, as on the string) among them.
 
 Against the hand-written module: `crates/fs-couple/tests/tribothermal/
 dynamics/collinear/graph.rs` declares fs-couple's collinear stop and

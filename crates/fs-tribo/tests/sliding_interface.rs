@@ -17,6 +17,7 @@ use fs_ports::component::conformance::{
     Case, Failure, Observed, check_component, check_load_line,
 };
 use fs_ports::component::{Class, Component, LoadLine, Proposal, Receipt};
+use fs_tribo::stribeck_friction::HystereticFriction;
 use fs_tribo::tangential::component::{
     FrictionInterface, FrictionState, InterfaceLoad, PrescribedSlip, SlidingInterface, SlidingState,
 };
@@ -1023,6 +1024,212 @@ fn the_friction_interface_conforms_on_its_line_and_its_heat_is_the_work_of_its_e
     }
     assert!(stepped > 100 && cut > 10, "{stepped} stepped, {cut} cut");
     println!("the friction interface on its line: {stepped} points stepped and audited, {cut} cut");
+}
+
+/// A law with every verdict on record: the free slip rate it was asked at
+/// [m/s] and what it says the answer cost it (its own count of iterations),
+/// or `None` where it refused.
+struct Counted<L>(L);
+
+thread_local! {
+    static VERDICTS: core::cell::RefCell<Vec<(f64, Option<usize>)>> =
+        const { core::cell::RefCell::new(Vec::new()) };
+}
+
+impl<L: TangentialLaw> TangentialLaw for Counted<L> {
+    type State = L::State;
+
+    fn model_id(&self) -> &str {
+        self.0.model_id()
+    }
+
+    fn initial_state(&self) -> Self::State {
+        self.0.initial_state()
+    }
+
+    fn stored_energy_j(&self, state: &Self::State) -> f64 {
+        self.0.stored_energy_j(state)
+    }
+
+    fn requires_physical_scalar_compliance(&self) -> bool {
+        self.0.requires_physical_scalar_compliance()
+    }
+
+    fn advance(
+        &self,
+        state: &Self::State,
+        input: &TangentialStepInput,
+    ) -> Result<TangentialStep<Self::State>, TriboError> {
+        let result = self.0.advance(state, input);
+        let cost = result.as_ref().ok().map(|step| step.iterations);
+        VERDICTS.with(|verdicts| {
+            verdicts.borrow_mut().push((input.slip_increment_m[0] / input.dt_s, cost));
+        });
+        result
+    }
+}
+
+type CountedAt<L> = fn(f64) -> Result<Counted<L>, TriboError>;
+
+fn counted_dry(kelvin: f64) -> Result<Counted<FrictionLaw>, TriboError> {
+    dry(kelvin).map(Counted)
+}
+
+/// The friction of the bowed-string fixture, with the branch memory of the
+/// module: static 1.2, kinetic 0.35 with a Gaussian drop over 0.05 m/s. Its
+/// verdict on a line is a search: it prepares the line, then finds a root.
+fn searching(_: f64) -> Result<Counted<HystereticFriction>, TriboError> {
+    HystereticFriction::new(FrictionLaw::Stribeck {
+        static_mu: 1.2,
+        kinetic_mu: 0.35,
+        characteristic_speed: 0.05,
+        viscous_per_speed: 0.0,
+    })
+    .map(Counted)
+}
+
+/// What an interface answered to one proposal: the step it asks for
+/// instead, if it cuts; its candidate; the force it takes the step with.
+type Asked<S> = (Option<f64>, FrictionState<S>, f64);
+
+/// One proposal of a counted law's interface from `state`, with port `a` on
+/// a line of compliance `c` under a load of `load_n` and `b` on nothing
+/// that answers.
+fn asked_under<L: TangentialLaw>(
+    interface: &FrictionInterface<Counted<L>, CountedAt<L>>,
+    state: &FrictionState<L::State>,
+    dt_s: f64,
+    c: f64,
+    load_n: f64,
+) -> Result<Asked<L::State>, TriboError> {
+    let released = state.slip_m_s() + c * load_n;
+    let mut next = state.clone();
+    let mut outputs = vec![f64::NAN; 3];
+    let proposal = with_cx(|cx| {
+        interface.propose_on_line(
+            state,
+            dt_s,
+            &[released, 0.0, 300.0],
+            &[c, 0.0, 0.0, 0.0],
+            &mut next,
+            &mut outputs,
+            cx,
+        )
+    })?;
+    Ok(match proposal {
+        Proposal::Step(_) => (None, next, outputs[0]),
+        Proposal::Shorten { dt_s } => (Some(dt_s), next, f64::NAN),
+    })
+}
+
+#[test]
+fn the_instant_of_a_break_away_is_narrowed_as_far_as_the_tolerance_needs_of_a_law_that_searches() {
+    // The step is cut where the law's verdict changes, and the verdict is
+    // asked of the law at loads between the step's two ends. How near the
+    // instant it is asked is the question here.
+    //
+    // A law that searches for its verdict cannot be asked arbitrarily near
+    // what it holds: just beyond its limit its sliding root is next to
+    // zero, and its own search for it grows with every halving. The step
+    // below is the one in which this was found, on a bowed string (the
+    // string's mobility over a step cut to 1.0063e-5 s, the bow's force,
+    // the fixture's friction): narrowed to rounding, the interface asked
+    // this law 51 times, the last answers cost it 123 and 125 of the 128
+    // iterations it may spend, and the 51st was refused. So such a law is
+    // asked no nearer than the impulse tolerance needs: letting go a time
+    // `t` early is a momentum of half the load's rate times `t` squared.
+    let normal_n = 0.455_417_220_019_903_76;
+    // Under two tolerances, 1e-10 and 2e-10 N s. Eight halvings bring the
+    // bracket inside either: letting go where it then stands leaves
+    // 8.0e-11 N s at most, and 3.2e-10 one halving before. So a rule that
+    // stopped at half the tolerance, or at twice it, is a call off under
+    // one of the two.
+    for tolerance_n_s in [1e-10, 2e-10] {
+        let load = InterfaceLoad {
+            normal_n,
+            nominal_pressure_pa: None,
+            solve: TangentialSolveConfig {
+                max_iterations: 128,
+                maximum_force_n: 1e6,
+                force_absolute_tolerance_n: 1e-12,
+                force_relative_tolerance: 1e-12,
+            },
+            impulse_tolerance_n_s: tolerance_n_s,
+            work_tolerance_j: 1e-12,
+        };
+        let interface = FrictionInterface::new(searching as CountedAt<HystereticFriction>, load)
+            .expect("interface");
+        let (dt_s, c) = (1.006_301_376e-5, 0.170_996_036_286_401_67);
+        // The step before, 8.7808e-6 s long on a mobility of 0.149559, is held
+        // under -0.32449 N, and this one has a mean of 0.64796 N: on the line
+        // through the two the load goes from 0.12865 N to 1.16727 N in this
+        // step and passes the 0.5465 N the law holds. The step before was on
+        // another mobility, so the law's state carries no line prepared for
+        // this one, and every verdict prepares it again (27 iterations here).
+        let (last_s, last_c, last_n, load_n) = (8.7808e-6, 0.149_559, -0.324_485_3, 0.647_96);
+        let rest = interface.start(300.0, 0.0).expect("start");
+        let (cut, first, force_n) =
+            asked_under(&interface, &rest, last_s, last_c, last_n).expect("held");
+        assert!(cut.is_none() && first.at_rest());
+        close(force_n, last_n, 1e-12);
+
+        VERDICTS.with(|verdicts| verdicts.borrow_mut().clear());
+        let answer = asked_under(&interface, &first, dt_s, c, load_n);
+        let verdicts = VERDICTS.with(|verdicts| verdicts.borrow().clone());
+        let costs: Vec<usize> = verdicts.iter().filter_map(|(_, cost)| *cost).collect();
+        let refused = verdicts.len() - costs.len();
+        let rate_n_s = (load_n - last_n) / (0.5 * (dt_s + last_s));
+        let (from_n, to_n) = (load_n - 0.5 * dt_s * rate_n_s, load_n + 0.5 * dt_s * rate_n_s);
+        let swing_n_s = dt_s * (to_n - from_n);
+        // The halvings after which the bracket is inside the tolerance's time.
+        let (mut halvings, mut width) = (0_usize, 1.0_f64);
+        while 0.5 * width * width * swing_n_s > tolerance_n_s {
+            width *= 0.5;
+            halvings += 1;
+        }
+        println!(
+            "a break-away under a law that searches: asked {} times ({halvings} halvings bring the \
+             bracket inside the tolerance's time), {refused} refused, its iterations from {:?} to \
+             {:?} of the 128 it may spend",
+            verdicts.len(),
+            costs.iter().min(),
+            costs.iter().max()
+        );
+        let (cut, ..) = answer.expect("the instant is located, not refused");
+        let asked_s = cut.expect("the step is cut at the instant");
+        assert_eq!(verdicts.len(), 2 + halvings);
+        // Every verdict was a search, and each left a quarter of the law's cap
+        // unspent (61 of 128 at most, measured).
+        assert!(costs.iter().all(|cost| (1..=96).contains(cost)), "{costs:?}");
+        // The instant, by the law's static capacity mu_s N: the cut is short of
+        // it by less than the bracket, and by less than the tolerance allows.
+        let instant = (1.2 * normal_n - from_n) / (to_n - from_n);
+        let short = instant - asked_s / dt_s;
+        assert!(short >= 0.0 && short <= width, "{short} of the step, bracket {width}");
+        assert!(0.5 * short * short * swing_n_s <= tolerance_n_s);
+        assert_eq!(halvings, 8);
+    }
+
+    // A law whose verdict costs it nothing is narrowed to rounding, as it
+    // was: Coulomb, 5 N held, the load rising from 4 N to a mean of 4.9 N
+    // over two steps of 0.01 s, cut 0.55 / 0.9 of the way through.
+    let interface =
+        FrictionInterface::new(counted_dry as CountedAt<FrictionLaw>, pressed()).expect("interface");
+    let (dt_s, c) = (0.01_f64, 0.5 * 0.01 / 2.0);
+    let rest = interface.start(300.0, 0.0).expect("start");
+    let (cut, first, _) = asked_under(&interface, &rest, dt_s, c, 4.0).expect("held");
+    assert!(cut.is_none() && first.at_rest());
+    VERDICTS.with(|verdicts| verdicts.borrow_mut().clear());
+    let (cut, ..) = asked_under(&interface, &first, dt_s, c, 4.9).expect("answer");
+    let verdicts = VERDICTS.with(|verdicts| verdicts.borrow().clone());
+    println!(
+        "the same under Coulomb: asked {} times, every verdict free: {}",
+        verdicts.len(),
+        verdicts.iter().all(|(_, cost)| *cost == Some(0))
+    );
+    close(cut.expect("cut"), (5.0 - 4.45) / 0.9 * dt_s, 1e-15);
+    assert!(verdicts.iter().all(|(_, cost)| *cost == Some(0)), "{verdicts:?}");
+    assert!(verdicts.len() > 40, "{}", verdicts.len());
 }
 
 /// `mu(v) = 0.2 + 0.3 / (1 + v / 0.1 m/s)`: 5 N at rest, falling to 2 N.

@@ -117,7 +117,14 @@
 //!   What the law holds is asked of the law, by bisection on its own
 //!   static verdict inside its root budget: no capacity is restated here,
 //!   so a law whose holding depends on its state or its load is asked the
-//!   same way. An instant within the impulse tolerance of either end of
+//!   same way. How near its limit it is asked depends on what its verdicts
+//!   cost it, by its own count of iterations. Where they cost nothing (a
+//!   closed form, as Coulomb's) the instant is narrowed to rounding. A
+//!   law that searches for its verdict is asked no nearer than the impulse
+//!   tolerance needs: just beyond what it holds its sliding root is next
+//!   to zero, its search for that root takes more with every halving, and
+//!   narrowed to rounding it was refused by the law's own budget (found
+//!   on a bowed string). An instant within the impulse tolerance of either end of
 //!   the step is that end (half the load's rate times the time squared is
 //!   the momentum of letting go that much early or late). Under a load
 //!   that curves the first cut lands near the instant and the cut step is
@@ -771,30 +778,55 @@ where
         let (last_n, last_s) = last;
         let rate_n_s = (load_n - last_n) / (0.5 * (dt_s + last_s));
         let (from_n, to_n) = (load_n - 0.5 * dt_s * rate_n_s, load_n + 0.5 * dt_s * rate_n_s);
-        let holds = |force_n: f64| -> Result<bool, TriboError> {
+        // The law's verdict at a load, and what the law says it cost: its
+        // own count of iterations, none where the verdict is a closed form.
+        let holds = |force_n: f64| -> Result<(bool, usize), TriboError> {
             let step = self.advance(law, old, dt_s, kelvin, c * force_n, dt_s * c)?;
-            Ok(step.regime == FrictionRegime::Sticking)
+            Ok((step.regime == FrictionRegime::Sticking, step.iterations))
         };
-        if !holds(from_n)? || holds(to_n)? {
+        let (held_at_start, mut cost) = holds(from_n)?;
+        if !held_at_start {
             return Ok(None);
         }
-        // The largest fraction of the step at which the law still holds.
+        let (held_at_end, at_end) = holds(to_n)?;
+        if held_at_end {
+            return Ok(None);
+        }
+        cost = cost.max(at_end);
+        // The load passes the limit at a constant rate, so letting go a
+        // time `t` early or late is a momentum of half the rate times
+        // `t` squared.
+        let swing_n_s = dt_s * (to_n - from_n).abs();
+        let tolerance_n_s = self.load.impulse_tolerance_n_s;
+        // The largest fraction of the step at which the law still holds,
+        // narrowed by halving. How far: the instant matters to the impulse
+        // tolerance and no further, and a law that searches for its
+        // verdict is asked no nearer its limit than that. Just beyond what
+        // such a law holds its sliding root is next to zero, and its own
+        // search for it takes more with every halving: narrowed to
+        // rounding, the stable-branch law on a bowed string's line was
+        // asked 51 times in one step, answered the last of them in 123 and
+        // 125 of the 128 iterations it may spend, and refused the next. A
+        // law whose verdicts cost it nothing is narrowed to rounding,
+        // which then costs nothing either.
         let (mut held, mut gone) = (0.0_f64, 1.0_f64);
         let mut asked = 2_usize;
         while gone - held > 4.0 * f64::EPSILON && asked < self.load.solve.max_iterations {
+            let width = gone - held;
+            if cost > 0 && 0.5 * width * width * swing_n_s <= tolerance_n_s {
+                break;
+            }
             asked += 1;
             let middle = 0.5 * (held + gone);
-            if holds(from_n + middle * (to_n - from_n))? {
+            let (held_there, there) = holds(from_n + middle * (to_n - from_n))?;
+            cost = cost.max(there);
+            if held_there {
                 held = middle;
             } else {
                 gone = middle;
             }
         }
-        // The load passes the limit at a constant rate, so letting go a
-        // time `t` early or late is a momentum of half the rate times
-        // `t` squared. An instant that near a step's end is that end.
-        let swing_n_s = dt_s * (to_n - from_n).abs();
-        let tolerance_n_s = self.load.impulse_tolerance_n_s;
+        // An instant within the tolerance of a step's end is that end.
         let (early, late) = (0.5 * held * held * swing_n_s, 0.5 * (1.0 - held) * (1.0 - held) * swing_n_s);
         Ok((early > tolerance_n_s && late > tolerance_n_s).then_some(held))
     }
