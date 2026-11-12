@@ -603,8 +603,8 @@ fn source_surface_energy_with_wall_correction(
     corrected: bool,
     reference: impl Fn(f64) -> (f64, [f64; 2]),
 ) {
-    let card = liquid_card(0.3, 0.01, 320.0);
-    let liquid = liquid_law(&card)
+    let card = isobaric_liquid_card(0.3, 0.01, 320.0);
+    let liquid = isobaric_liquid_law(&card)
         .with_density_expansion(Temperature::new(280.0), Temperature::new(320.0))
         .unwrap();
     let point = |t| {

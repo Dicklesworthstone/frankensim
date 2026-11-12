@@ -50,8 +50,8 @@ pub(super) fn advance_with(
     corrected_air: bool,
     reference: impl Fn(&IsobaricGasLaw, f64) -> (f64, [f64; 2]),
 ) -> f64 {
-    let card = liquid_card(0.0, 0.01, 320.0);
-    let material = liquid_law(&card);
+    let card = isobaric_liquid_card(0.0, 0.01, 320.0);
+    let material = isobaric_liquid_law(&card);
     let point = |temperature| {
         material
             .reference_point()

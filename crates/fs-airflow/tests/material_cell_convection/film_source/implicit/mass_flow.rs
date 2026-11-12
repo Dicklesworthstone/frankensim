@@ -272,8 +272,8 @@ fn prescribed_flow_refuses_unowned_geometry_sources_and_stagnant_regimes_without
 
 #[test]
 fn prescribed_mass_flow_drives_the_original_conducting_surface_and_heat_tangent() {
-    let card = liquid_card(0.0, 0.01, 320.0);
-    let material = liquid_law(&card);
+    let card = isobaric_liquid_card(0.0, 0.01, 320.0);
+    let material = isobaric_liquid_law(&card);
     let point = |temperature| {
         material
             .reference_point()

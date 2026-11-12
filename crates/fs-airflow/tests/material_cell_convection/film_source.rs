@@ -37,6 +37,29 @@ fn temperature_quantity() -> QuantitySpec {
 
 // Synthetic source curves, deliberately not presented as measured fluid data.
 fn liquid_card(density_slope: f64, viscosity_slope: f64, upper_k: f64) -> MaterialCard {
+    liquid_card_on(None, density_slope, viscosity_slope, upper_k)
+}
+/// The same card with its pressure axis declared in pascals. The isobaric Cp API (fs-material
+/// thermal/transport/isobaric.rs) refuses a pressure it does not find typed, and a typed point
+/// is refused by an untyped claim axis, so the helpers that call it read this card and the law
+/// below; every other helper keeps the untyped pressure axis of `liquid_card`.
+fn isobaric_liquid_card(density_slope: f64, viscosity_slope: f64, upper_k: f64) -> MaterialCard {
+    liquid_card_on(
+        Some(isobaric_pressure_quantity()),
+        density_slope,
+        viscosity_slope,
+        upper_k,
+    )
+}
+fn isobaric_pressure_quantity() -> QuantitySpec {
+    QuantitySpec::dimensional(fs_qty::Pressure::DIMS)
+}
+fn liquid_card_on(
+    pressure: Option<QuantitySpec>,
+    density_slope: f64,
+    viscosity_slope: f64,
+    upper_k: f64,
+) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (name, dims, value, slope) in [
         (DENSITY_PROPERTY, Density::DIMS, 1000.0, -density_slope),
@@ -78,10 +101,17 @@ fn liquid_card(density_slope: f64, viscosity_slope: f64, upper_k: f64) -> Materi
                         .to_vec(),
                     dims,
                 },
-                validity: ValidityDomain::unconstrained()
-                    .with_quantity("T", temperature_quantity(), 280.0, upper_k)
-                    .with("p", 100000.0, 100000.0)
-                    .with("solute_mass_fraction", 0.2, 0.2),
+                validity: {
+                    let temperature = ValidityDomain::unconstrained()
+                        .with_quantity("T", temperature_quantity(), 280.0, upper_k);
+                    let pressured = match pressure {
+                        Some(quantity) => {
+                            temperature.with_quantity("p", quantity, 100000.0, 100000.0)
+                        }
+                        None => temperature.with("p", 100000.0, 100000.0),
+                    };
+                    pressured.with("solute_mass_fraction", 0.2, 0.2)
+                },
                 interpolation: InterpolationPolicy::LinearInside,
                 uncertainty: UncertaintyModel::Unstated,
                 observations: vec![],
@@ -106,13 +136,23 @@ fn liquid_card(density_slope: f64, viscosity_slope: f64, upper_k: f64) -> Materi
     .unwrap()
 }
 fn liquid_law(card: &MaterialCard) -> LiquidTemperatureLaw<'_> {
+    liquid_law_on(card, None)
+}
+/// The law of [`isobaric_liquid_card`]: the same reference point with its pressure typed in pascals.
+fn isobaric_liquid_law(card: &MaterialCard) -> LiquidTemperatureLaw<'_> {
+    liquid_law_on(card, Some(isobaric_pressure_quantity()))
+}
+fn liquid_law_on(card: &MaterialCard, pressure: Option<QuantitySpec>) -> LiquidTemperatureLaw<'_> {
     let point = QueryPoint::new()
         .with_quantity("T", temperature_quantity(), 300.0)
-        .unwrap()
-        .with("p", 100000.0)
-        .unwrap()
-        .with("solute_mass_fraction", 0.2)
         .unwrap();
+    let point = match pressure {
+        Some(quantity) => point.with_quantity("p", quantity, 100000.0),
+        None => point.with("p", 100000.0),
+    }
+    .unwrap()
+    .with("solute_mass_fraction", 0.2)
+    .unwrap();
     LiquidTemperatureLaw::try_new(
         card,
         &point,
