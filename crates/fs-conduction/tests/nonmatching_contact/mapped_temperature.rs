@@ -44,10 +44,17 @@ fn card(reverse: bool) -> InterfaceSystemCard {
                     triangles: vec![[0, 1, 2], [1, 3, 2]],
                     dims,
                 },
+                // Typed as point() queries them, as source_card() declares:
+                // fs-matdb compares an axis's quantity with the query's exactly.
                 validity: ValidityDomain::unconstrained()
-                    .with("TA", 256.0, 384.0)
-                    .with("TB", 256.0, 384.0)
-                    .with("normal_pressure", pressure, pressure),
+                    .with_quantity("TA", temperature::kelvin(), 256.0, 384.0)
+                    .with_quantity("TB", temperature::kelvin(), 256.0, 384.0)
+                    .with_quantity(
+                        "normal_pressure",
+                        fs_qty::QuantitySpec::dimensional(fs_qty::Pressure::DIMS),
+                        pressure,
+                        pressure,
+                    ),
                 uncertainty: UncertaintyModel::Unstated,
                 interpolation: InterpolationPolicy::LinearInside,
                 observations: Vec::new(),

@@ -88,10 +88,21 @@ fn fixture(circular: bool) -> (DgPortLoad, ClosedGasParcel) {
     fixture_with_composition(circular, composition(0.8))
 }
 
-fn fixture_with_composition(circular: bool, mixture: Composition) -> (DgPortLoad, ClosedGasParcel) {
+/// Both synthetic source species, bound at the fixture's positive reference
+/// composition. The mixture owner refuses a listed zero fraction (absent
+/// species are omitted, never held at x = 0), so every gas here is this
+/// source replaced by `with_composition`, which omits exact zeros: a pure-A
+/// gas holds A alone, and B can still enter it from this source set.
+fn source_model() -> fs_material::thermochemical_gas::ThermochemicalGasModel {
     let a = gas_support::packs("A", 0.028, 3.5, 200.0);
     let b = gas_support::packs("B", 0.044, 4.5, 200.0);
-    let model = from_packs(&[a.binding(), b.binding()], mixture.clone(), None).unwrap();
+    from_packs(&[a.binding(), b.binding()], composition(0.8), None).unwrap()
+}
+
+fn fixture_with_composition(circular: bool, mixture: Composition) -> (DgPortLoad, ClosedGasParcel) {
+    let source = source_model();
+    let model = source.with_composition(mixture.clone()).unwrap();
+    // Field stations keep the complete source order; zero means locally absent.
     let field = AxialGasField::new(
         vec![0.0, LENGTH],
         101325.0,
@@ -102,7 +113,7 @@ fn fixture_with_composition(circular: bool, mixture: Composition) -> (DgPortLoad
             };
             2
         ],
-        model.clone(),
+        source,
         QueryPoint::new(),
         ThermochemicalPhase::FrozenGas,
     )

@@ -411,11 +411,11 @@ fn g3_equal_composition_transport_pays_molecular_and_channel_work_once() {
     assert!(transferred > 0.0);
     assert!((parcels[&10].mass_kg() - old_gas[&10].mass_kg() - transferred).abs() < 1e-16);
     assert!((old_gas[&90].mass_kg() - parcels[&90].mass_kg() - transferred).abs() < 1e-16);
+    // Still exactly pure A: the source at composition(1.0) holds the single
+    // component A with x_A = 1.0 bit-exactly; B is absent, not listed at zero.
+    let pure = source_model().with_composition(composition(1.0)).unwrap();
     for gas in parcels.values() {
-        assert_eq!(
-            gas.model().thermodynamics().mole_composition(),
-            &composition(1.0)
-        );
+        assert_eq!(gas.model().thermodynamics(), pure.thermodynamics());
     }
     assert!(
         report
@@ -481,11 +481,9 @@ fn g4_composition_refusal_invalid_accuracy_and_final_cancel_preserve_every_owner
         unchanged(&nodes[&10], &original_load);
     }
     inputs.get_mut(&10).unwrap().acoustic = Some(solve(true));
+    // The pure-A reservoir model holds A alone; B comes from the source set.
     let foreign = ClosedGasParcel::new(
-        parcels[&90]
-            .model()
-            .with_composition(composition(0.1))
-            .unwrap(),
+        source_model().with_composition(composition(0.1)).unwrap(),
         parcels[&90].point().clone(),
         parcels[&90].volume_m3(),
     )

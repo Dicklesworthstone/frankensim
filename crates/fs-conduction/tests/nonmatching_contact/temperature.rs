@@ -10,7 +10,7 @@ fn source_value(a: f64, b: f64) -> f64 {
     0.5 + (a - 320.0) / 1024.0 + 3.0 * (b - 320.0) / 1024.0
 }
 
-fn kelvin() -> fs_qty::QuantitySpec {
+pub(super) fn kelvin() -> fs_qty::QuantitySpec {
     use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
     fs_qty::QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature, ValueForm::Static,
