@@ -153,6 +153,10 @@ impl LinearOp for Scalar {
     fn apply(&self, x: &[f64], y: &mut [f64]) {
         y[0] = self.0 * x[0];
     }
+    // A 1x1 scalar, so its transpose is itself.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
 }
 
 fn system<'a>(
@@ -436,6 +440,10 @@ fn smooth_friction_uses_original_path_jacobian_independently_of_difference_scale
             for i in 0..3 {
                 y[i] = self.0[i] * x[i];
             }
+        }
+        // Diagonal, so its transpose is itself.
+        fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+            self.apply(x, y);
         }
     }
     let source = resolve(&card([0.3; 2], false), false, true);

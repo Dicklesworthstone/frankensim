@@ -191,6 +191,11 @@ impl LinearOp for Matrix {
             y[b] -= q;
         }
     }
+    // A diagonal plus symmetric edge conductances, so its transpose is itself
+    // (qualified: Matrix is also a Precond with an `apply`).
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        LinearOp::apply(self, x, y);
+    }
 }
 impl Precond for Matrix {
     fn apply(&self, r: &[f64], z: &mut [f64]) {

@@ -448,4 +448,10 @@ impl LinearOp for PrincipalCompliance<'_, '_> {
             y.fill(f64::NAN);
         }
     }
+
+    // A principal block of a compliance, which is symmetric (reciprocity);
+    // checked_cg solves it on that premise.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
 }

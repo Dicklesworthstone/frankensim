@@ -615,6 +615,11 @@ impl LinearOp for AdaptiveElasticity3 {
             }
         }
     }
+    // Wᵀ K W on the free masters (expand drops fixed masters as their rows
+    // become identity), with K the symmetric raw stiffness; CG solves it.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
     // The absolute-term action of `apply`, in the same three stages: expand with |w| and |x|, the raw operator's absolute-term action, restrict with |w|, fixed masters copy |x|.
     // The roundings of the stages compose (Higham, 2nd ed., Lemma 3.3 multiplies the (1 + theta_k) factors), so `m` is the sum of the stage chains: expanding a node is a dot over its
     // `rows[node]` entries, the raw action states its own, and restricting adds one product and at most `refs - 1` sums into each master that `refs` rows reference.

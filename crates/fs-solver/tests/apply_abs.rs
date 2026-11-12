@@ -15,6 +15,10 @@ impl LinearOp for Unaware {
     fn apply(&self, x: &[f64], y: &mut [f64]) {
         y.copy_from_slice(x);
     }
+    // The identity, so its transpose is itself.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
 }
 
 #[test]

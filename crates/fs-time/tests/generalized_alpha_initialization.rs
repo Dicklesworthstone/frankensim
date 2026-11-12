@@ -314,6 +314,10 @@ fn consistent_acceleration_preserves_damping_against_large_preload() {
         fn apply(&self, x: &[f64], out: &mut [f64]) {
             out.copy_from_slice(&multiply(self.0, x));
         }
+        // Every instance here (mass, damping, stiffness) is a symmetric matrix, so its transpose is itself.
+        fn apply_transpose(&self, x: &[f64], out: &mut [f64]) {
+            self.apply(x, out);
+        }
     }
     let mass = Matrix([2.0, 0.5, 0.5, 1.5]);
     let damping = Matrix([0.5, 0.125, 0.125, 0.75]);

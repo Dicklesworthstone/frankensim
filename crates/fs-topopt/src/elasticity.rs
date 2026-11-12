@@ -368,6 +368,12 @@ impl LinearOp for DensityElasticity {
             }
         }
     }
+
+    // SPD on the full space (fixed columns are dropped as their rows are
+    // replaced by identity), so the transpose is the operator itself.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
 }
 
 impl DensityElasticity {

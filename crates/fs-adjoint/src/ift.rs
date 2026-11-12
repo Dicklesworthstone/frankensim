@@ -211,4 +211,9 @@ impl LinearOp for DensityOp<'_, '_> {
     fn apply(&self, x: &[f64], y: &mut [f64]) {
         self.problem.apply_k(&self.problem.rho, x, y);
     }
+
+    // K(ρ) is symmetric (see the type's doc).
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
 }

@@ -36,6 +36,11 @@ impl LinearOp for Mass {
         y[0] = self.entries[0][0] * x[0] + self.entries[0][1] * x[1];
         y[1] = self.entries[1][0] * x[0] + self.entries[1][1] * x[1];
     }
+
+    // Every instance (coupled, identity) is a symmetric matrix, so its transpose is itself; through apply, the count is unchanged.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
 }
 
 fn controls() -> ImpulseControls {

@@ -81,7 +81,7 @@ fn prescribed_and_free_motions_reconstruct_the_identical_full_jump() {
 #[test]
 fn fully_prescribed_faces_still_fracture_and_keep_compressive_reclosure() {
     struct Identity;
-    impl LinearOp for Identity { fn n(&self)->usize { 6 } fn apply(&self,x:&[f64],y:&mut[f64]) { y.copy_from_slice(x); } }
+    impl LinearOp for Identity { fn n(&self)->usize { 6 } fn apply(&self,x:&[f64],y:&mut[f64]) { y.copy_from_slice(x); } /* The identity, so its transpose is itself. */ fn apply_transpose(&self,x:&[f64],y:&mut[f64]) { self.apply(x,y); } }
     let (nodes,tets) = mesh(); let law = law();
     let faces = build(&nodes,&tets,&[9,10,11,21,22,23],&[pair(&law)]).unwrap();
     assert!(faces.patches().iter().all(|p| p.terms.is_empty()));

@@ -179,6 +179,12 @@ impl LinearOp for Operator<'_> {
             }
         }
     }
+
+    // The scaled tangent of an energy (cell Hessians assembled and scaled by
+    // the same diagonal on both sides): symmetric; checked_cg solves it.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
 }
 
 pub(super) fn direction(

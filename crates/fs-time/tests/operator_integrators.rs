@@ -114,6 +114,11 @@ impl LinearOp for DiagonalOp {
             *output = *diagonal * *input;
         }
     }
+
+    // Diagonal, so its transpose is itself.
+    fn apply_transpose(&self, input: &[f64], output: &mut [f64]) {
+        self.apply(input, output);
+    }
 }
 
 struct CountingIdentity<'a>(&'a Cell<usize>);
@@ -126,6 +131,11 @@ impl LinearOp for CountingIdentity<'_> {
     fn apply(&self, input: &[f64], output: &mut [f64]) {
         self.0.set(self.0.get() + 1);
         output.copy_from_slice(input);
+    }
+
+    // A counting identity, so its transpose is itself; through apply, the count is unchanged.
+    fn apply_transpose(&self, input: &[f64], output: &mut [f64]) {
+        self.apply(input, output);
     }
 }
 

@@ -238,6 +238,11 @@ impl<F: FnMut(&[f64], &mut [f64])> LinearOp for NewtonOp<'_, F> {
             }
         }
     }
+
+    // I + sqrt(P) C sqrt(P) with a symmetric compliance C: symmetric.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
 }
 
 struct Diagonal<'a>(&'a [f64]);

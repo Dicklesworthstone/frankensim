@@ -277,4 +277,10 @@ impl LinearOp for InverseMass {
             }
         }
     }
+
+    // The inverse of a symmetric mass (lumped, or D^-1/2 M~^-1 D^-1/2 for the
+    // consistent one) is symmetric.
+    fn apply_transpose(&self, momentum: &[f64], velocity: &mut [f64]) {
+        self.apply(momentum, velocity);
+    }
 }

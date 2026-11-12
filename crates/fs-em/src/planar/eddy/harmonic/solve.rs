@@ -33,6 +33,9 @@ impl LinearOp for ReducedMagnetic<'_> {
         }
     }
     // The admitted constitutive Hessian and homogeneous restriction are symmetric.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
 }
 
 struct ReducedConduction<'a> {
@@ -62,6 +65,9 @@ impl LinearOp for ReducedConduction<'_> {
     }
     // -omega times a symmetric PSD projected mass. The existing real-equivalent
     // wrapper supplies the nonsymmetric block's CORRECT signed transpose.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
 }
 
 struct HarmonicJacobi(MovingJacobi);

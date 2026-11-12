@@ -14,7 +14,7 @@ use fs_adjoint::{
 };
 use fs_feec::{element_geometry, kuhn_cube};
 use fs_rand::StreamKey;
-use fs_solver::{CgState, CsrOp, LinearOp};
+use fs_solver::{CgState, CsrOp, GmresState, LinearOp};
 use fs_sparse::precond::IdentityPrecond;
 
 fn log(case: &str, verdict: &str, detail: &str) {
@@ -984,4 +984,105 @@ fn hessian_refuses_a_vacuous_solve_tolerance() {
     let u_star = rand_vec(n, 96);
     let v = rand_vec(nt, 97);
     let _ = fs_adjoint::density_misfit_hvp(&problem, &b, &u_star, &v, 2.0);
+}
+
+/// `A` in place of `Aᵀ`: what `LinearOp::apply_transpose` gave every
+/// operator that did not state a transpose before bead rc-1109 .14.4.
+struct ApplyAsTranspose<'a>(&'a CsrOp);
+impl LinearOp for ApplyAsTranspose<'_> {
+    fn n(&self) -> usize {
+        self.0.n()
+    }
+    fn apply(&self, x: &[f64], y: &mut [f64]) {
+        self.0.apply(x, y);
+    }
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.0.apply(x, y);
+    }
+}
+
+#[test]
+fn ift_gradient_through_a_nonsymmetric_jacobian() {
+    // Bead rc-1109 .14.4. R(u; p) = A·u − M·p with A = K + S, S skew
+    // (S_ij = ±0.5|K_ij| above/below the diagonal): an advection-diffusion
+    // Jacobian, nonsymmetric, with an SPD symmetric part. J = ½|u − t|².
+    // Through the operator's stated transpose (CsrOp::general) the adjoint
+    // gradient passes the FD triangle; the same solve with A in place of
+    // Aᵀ converges and is refused by the same check.
+    let (m0, k0, n) = poisson_pair(4);
+    let mut coo = fs_sparse::Coo::new(n, n);
+    for i in 0..n {
+        let (cols, vals) = k0.row(i);
+        for (&j, &v) in cols.iter().zip(vals) {
+            let skew = if j > i {
+                0.5 * v.abs()
+            } else if j < i {
+                -0.5 * v.abs()
+            } else {
+                0.0
+            };
+            coo.push(i, j, v + skew);
+        }
+    }
+    let a_op = CsrOp::general(coo.assemble());
+    let p0 = rand_vec(n, 31);
+    let target = rand_vec(n, 32);
+    let solve_u = |p: &[f64]| -> Vec<f64> {
+        let mut b = vec![0.0f64; n];
+        m0.spmv(p, &mut b);
+        let mut st = GmresState::new(&b, 60);
+        let rep = st.run(&a_op, &b, 1e-13, 400, false);
+        assert!(rep.converged, "forward solve failed: {rep:?}");
+        st.x
+    };
+    let j = |p: &[f64]| -> f64 {
+        let u = solve_u(p);
+        0.5 * u
+            .iter()
+            .zip(&target)
+            .map(|(a, b)| (a - b) * (a - b))
+            .sum::<f64>()
+    };
+    let u = solve_u(&p0);
+    let djdu: Vec<f64> = u.iter().zip(&target).map(|(a, b)| a - b).collect();
+    let pullback = |lam: &[f64]| {
+        let mut out = vec![0.0f64; n];
+        m0.spmv(lam, &mut out); // M symmetric
+        for v in &mut out {
+            *v = -*v;
+        }
+        out
+    };
+    let dirs: Vec<Vec<f64>> = (0..3).map(|k| rand_vec(n, 40 + k)).collect();
+
+    let (g, rep) = ift_gradient_matfree(&a_op, &djdu, &[], &pullback, 1e-12, 400);
+    assert!(rep.converged, "adjoint solve failed: {rep:?}");
+    let verdict = verify_gradient(&j, &p0, &g, &dirs, 1e-5, 1e-6);
+
+    let wrong_op = ApplyAsTranspose(&a_op);
+    let (g_wrong, rep_wrong) = ift_gradient_matfree(&wrong_op, &djdu, &[], &pullback, 1e-12, 400);
+    let wrong = verify_gradient(&j, &p0, &g_wrong, &dirs, 1e-5, 1e-6);
+    log(
+        "ift-nonsymmetric",
+        if verdict.pass && !wrong.pass {
+            "pass"
+        } else {
+            "fail"
+        },
+        &format!(
+            "n={n} rel_err={:.2e} adjoint_iters={} | A in place of A^T: converged={} rel_err={:.2e}",
+            verdict.max_rel_err, rep.iters, rep_wrong.converged, wrong.max_rel_err
+        ),
+    );
+    assert!(
+        verdict.pass,
+        "nonsymmetric IFT gradient failed FD check: {:?}",
+        verdict.max_rel_err
+    );
+    assert!(
+        rep_wrong.converged && !wrong.pass,
+        "A in place of A^T should converge and fail the FD check: converged {}, rel_err {:e}",
+        rep_wrong.converged,
+        wrong.max_rel_err
+    );
 }

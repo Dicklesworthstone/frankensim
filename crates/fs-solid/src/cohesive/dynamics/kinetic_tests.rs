@@ -13,6 +13,11 @@ impl LinearOp for Mass {
             *value = row[0] * x[0] + row[1] * x[1];
         }
     }
+
+    // Every instance in this file is a symmetric matrix, so its transpose is itself.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
 }
 
 #[test]

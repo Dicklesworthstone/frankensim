@@ -2299,6 +2299,9 @@ impl LinearOp for ZeroOp {
     fn apply(&self, _: &[f64], y: &mut [f64]) {
         y.fill(0.0);
     }
+    fn apply_transpose(&self, _: &[f64], y: &mut [f64]) {
+        y.fill(0.0);
+    }
 }
 fn finite(v: C64) -> bool {
     v.re.is_finite() && v.im.is_finite()

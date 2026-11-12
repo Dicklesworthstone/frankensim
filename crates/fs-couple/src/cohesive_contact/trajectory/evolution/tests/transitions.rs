@@ -12,6 +12,10 @@ impl LinearOp for CoupledMass {
         y[2] = 2.0 * x[2];
         y[3] = 2.0 * x[3];
     }
+    // A fixed symmetric matrix (the 0-1 coupling is 1 both ways), so its transpose is itself.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
 }
 fn coupled_motion<'m, 'a>(
     system: &'m CohesiveSystem<'a>,

@@ -238,6 +238,42 @@ impl LinearOp for StokesOp<'_> {
                 y[comp * nv + i] = if sys.vmask[i] { au[i] } else { u[i] };
             }
         }
+        self.add_pressure_couplings(x, y);
+    }
+
+    // The velocity block is diag(vmask) A + diag(!vmask): a Dirichlet row
+    // is an identity row, while an interior row of the stiffness A reads
+    // every column, Dirichlet ones included. So the operator is symmetric
+    // only on the subspace with zero Dirichlet velocity that MINRES works
+    // in. The block's transpose is A diag(vmask) + diag(!vmask) (A is
+    // symmetric). The pressure couplings Bᵀ P and P B are each other's
+    // transpose (P is an orthogonal projection) and are added as in
+    // `apply`.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        let sys = self.sys;
+        let nv = sys.nv;
+        for comp in 0..3 {
+            let u = &x[comp * nv..(comp + 1) * nv];
+            let interior: Vec<f64> = u
+                .iter()
+                .zip(&sys.vmask)
+                .map(|(&value, &free)| if free { value } else { 0.0 })
+                .collect();
+            let au = sys.space.apply_stiffness(&interior);
+            for i in 0..nv {
+                y[comp * nv + i] = if sys.vmask[i] { au[i] } else { au[i] + u[i] };
+            }
+        }
+        self.add_pressure_couplings(x, y);
+    }
+}
+
+impl StokesOp<'_> {
+    /// Adds Bᵀ P p to the velocity rows of `y` and writes P B u into its
+    /// pressure rows.
+    fn add_pressure_couplings(&self, x: &[f64], y: &mut [f64]) {
+        let sys = self.sys;
+        let nv = sys.nv;
         // + Bᵀ p (projected input; Bᵀ rows for Dirichlet dofs are empty
         // by construction, so identity rows stay clean).
         let mut p_proj = x[3 * nv..].to_vec();

@@ -13,6 +13,8 @@ impl LinearOp for Counted {
     fn apply(&self, x: &[f64], y: &mut [f64]) {
         self.applications.set(self.applications.get()+1); self.a.spmv(x,y);
     }
+    // Every instance in this file is poisson(n, scale), a symmetric matrix, so its transpose is itself; through apply, the count is unchanged.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) { self.apply(x,y); }
 }
 fn poisson(n: usize, scale: f64) -> Csr {
     let mut a = Coo::new(n,n);

@@ -174,6 +174,10 @@ fn unchanged_inertial_mode_cannot_hide_native_bond_heat_from_the_finite_layer() 
             y[0] = self.0[0] * x[0];
             y[1] = self.0[1] * x[1];
         }
+        // Diagonal, so its transpose is itself.
+        fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+            self.apply(x, y);
+        }
     }
     let (source, card) = material_and_card(true, Some(ADHESIVE));
     let elastic = TwoModes([1000.0, 0.0]);

@@ -182,6 +182,10 @@ impl LinearOp for Pair {
             y[d] = self.0 * x[d];
         }
     }
+    // A scalar multiple of the identity, so its transpose is itself.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
 }
 
 #[test]

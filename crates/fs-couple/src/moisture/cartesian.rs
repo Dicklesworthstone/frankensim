@@ -840,6 +840,10 @@ impl LinearOp for CartesianOperator {
             }
         }
     }
+    // A diagonal plus pairwise conductances: symmetric.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        LinearOp::apply(self, x, y);
+    }
 }
 impl Precond for CartesianOperator {
     fn apply(&self, r: &[f64], z: &mut [f64]) {

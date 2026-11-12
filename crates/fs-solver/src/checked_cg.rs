@@ -199,6 +199,8 @@ mod tests {
                 *yi = crate::dot(row, x);
             }
         }
+        // Every matrix these tests build is symmetric.
+        fn apply_transpose(&self, x: &[f64], y: &mut [f64]) { self.apply(x, y); }
     }
     fn config() -> CheckedCgConfig {
         CheckedCgConfig { tolerance: 1e-12, max_iterations: 64, max_corrections: 2 }
@@ -272,6 +274,7 @@ mod tests {
         impl LinearOp for Never {
             fn n(&self) -> usize { 2 }
             fn apply(&self, _: &[f64], _: &mut [f64]) { panic!("unfunded work"); }
+            fn apply_transpose(&self, _: &[f64], _: &mut [f64]) { panic!("unfunded work"); }
         }
         let zero = checked_cg(&Never, &IdentityPrecond, &[0.0, 0.0], config(),
             |_| Ok::<_, Infallible>(())).unwrap();

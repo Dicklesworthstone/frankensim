@@ -33,6 +33,10 @@ impl LinearOp for Dense {
             y[i] = sum;
         }
     }
+    // Every instance in this file (stiff_chain, tridiagonal) is a symmetric matrix, so its transpose is itself.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
     fn apply_abs(&self, x: &[f64], y: &mut [f64]) -> Option<usize> {
         if !self.stated {
             return None;

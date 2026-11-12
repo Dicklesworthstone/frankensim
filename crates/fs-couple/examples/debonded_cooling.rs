@@ -21,6 +21,8 @@ struct Actuator;
 impl LinearOp for Actuator {
     fn n(&self) -> usize { 1 }
     fn apply(&self, x: &[f64], y: &mut [f64]) { y[0] = 1e6*x[0]; }
+    // A 1x1 scalar, so its transpose is itself.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) { self.apply(x, y); }
 }
 fn birth(id: u64, temperature: f64) -> TimedEvent {
     TimedEvent { time_s: 0.0, event: Event::Birth(DepositedCell {

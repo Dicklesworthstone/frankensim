@@ -888,6 +888,12 @@ impl LinearOp for CutElasticity3 {
             }
         }
     }
+    // Symmetric cell stiffnesses plus jump-penalty (j jᵀ) ghost faces on the
+    // free nodes, identity on fixed ones whose columns are dropped: symmetric;
+    // CG solves it.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
     // The absolute-term action of `apply` (see `LinearOp::apply_abs`): the loops are those of `apply`, every term enters with its absolute value and |x|.
     // `m` is the longest chain of roundings from an input to an output (Higham, 2nd ed., sections 3.1 and 3.5). A cell term is a 24-term dot (24 roundings: the products and the
     // sums) times the cell scale (1), so 25; a ghost-face term is an `n_f`-term dot (`n_f`), `weight * j` (1) and `* jump` (1), so `n_f + 2`. Each term then enters its row after at most

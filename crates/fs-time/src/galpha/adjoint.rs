@@ -180,6 +180,13 @@ impl<M: FirstOrderVjp + ?Sized> LinearOp for EffectiveTranspose<'_, M> {
             *self.error.borrow_mut() = Some(FirstOrderAdjointError::NonFiniteAccumulation);
         }
     }
+
+    // This operator is already the transpose of the effective matrix, and
+    // the adjoint solve uses it forward only. Its transpose (the forward
+    // effective matrix) is not provided: NaN, which no solve converges on.
+    fn apply_transpose(&self, _seed: &[f64], output: &mut [f64]) {
+        output.fill(f64::NAN);
+    }
 }
 
 impl OperatorFirstOrderGeneralizedAlpha {

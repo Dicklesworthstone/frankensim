@@ -13,6 +13,10 @@ impl LinearOp for Scalar {
     fn apply(&self, x: &[f64], y: &mut [f64]) {
         y[0] = self.0 * x[0];
     }
+    // A 1x1 scalar, so its transpose is itself.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
 }
 
 fn controls() -> ResponseControls {
@@ -113,6 +117,10 @@ impl LinearOp for Coupled {
     fn apply(&self, x: &[f64], y: &mut [f64]) {
         y[0] = 2.0 * x[0] + 0.5 * x[1];
         y[1] = 0.5 * x[0] + x[1];
+    }
+    // A fixed symmetric matrix (off-diagonal 0.5 both ways), so its transpose is itself.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
     }
 }
 
@@ -236,6 +244,10 @@ impl LinearOp for Counted {
     fn apply(&self, x: &[f64], y: &mut [f64]) {
         self.0.set(self.0.get() + 1);
         y[0] = 2.0 * x[0];
+    }
+    // A counting 1x1 scalar, so its transpose is itself; through apply, the count is unchanged.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
     }
 }
 

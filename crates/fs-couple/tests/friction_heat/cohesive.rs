@@ -151,6 +151,10 @@ impl LinearOp for Scalar {
     fn apply(&self, x: &[f64], y: &mut [f64]) {
         y[0] = self.0 * x[0];
     }
+    // A 1x1 scalar, so its transpose is itself.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
 }
 fn system<'a>(
     elastic: &'a dyn LinearOp,

@@ -979,6 +979,10 @@ impl LinearOp for ConductanceLaplacian<'_, '_> {
     fn apply(&self, x: &[f64], y: &mut [f64]) {
         self.publish(self.apply_laplacian(x, y), y);
     }
+    // A grounded conductance-weighted graph Laplacian: symmetric.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        LinearOp::apply(self, x, y);
+    }
 }
 impl Precond for ConductanceLaplacian<'_, '_> {
     fn apply(&self, r: &[f64], z: &mut [f64]) {

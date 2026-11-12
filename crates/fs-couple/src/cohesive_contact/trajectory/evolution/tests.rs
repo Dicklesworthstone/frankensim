@@ -31,6 +31,10 @@ impl LinearOp for HeldElastic {
         y.fill(0.0);
         y[3] = 10.0 * x[3];
     }
+    // Diagonal, so its transpose is itself.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
 }
 struct Mass;
 impl LinearOp for Mass {
@@ -41,6 +45,10 @@ impl LinearOp for Mass {
         for i in 0..4 {
             y[i] = 2.0 * x[i];
         }
+    }
+    // Diagonal, so its transpose is itself.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
     }
 }
 fn newton() -> NewtonKrylovConfig {

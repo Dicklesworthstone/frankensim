@@ -628,6 +628,11 @@ impl LinearOp for Graph<'_, '_> {
             }
         }
     }
+    // A weighted graph Laplacian with gauge rows and columns replaced by
+    // identity (see above): symmetric.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
 }
 struct Jacobi<'a>(&'a [f64]);
 impl Precond for Jacobi<'_> {

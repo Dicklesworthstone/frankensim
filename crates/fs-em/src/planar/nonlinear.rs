@@ -249,6 +249,12 @@ impl LinearOp for Tangent<'_> {
             }
         }
     }
+
+    // The magnetic stiffness plus the quadratic term's tangent, the Hessian
+    // of an energy: symmetric; checked_cg solves it.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
 }
 
 fn weighted_error(error: WeightedError) -> MagneticError {

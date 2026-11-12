@@ -175,6 +175,12 @@ impl<F: Fn(&[f64], &mut [f64]) -> Result<(), String>> LinearOp for MassAction<'_
             *self.error.borrow_mut() = Some(InitialSolveError::NonFiniteOutput);
         }
     }
+    // The action is the caller's M or Mᵀ (the transposed solve passes
+    // `mass_transpose_apply` as its own action), and `solve` runs it forward
+    // only. Its transpose is not provided: NaN, which no solve converges on.
+    fn apply_transpose(&self, _x: &[f64], out: &mut [f64]) {
+        out.fill(f64::NAN);
+    }
 }
 
 pub(super) fn solve<F, P, C>(

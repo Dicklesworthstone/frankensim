@@ -150,6 +150,8 @@ impl LinearOp for Operator<'_, '_> {
             y[i] = value;
         }
     }
+    // A combination of the symmetric mass and stiffness; solved with CG.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) { self.apply(x, y); }
 }
 struct Diagonal(Vec<f64>);
 impl Precond for Diagonal {

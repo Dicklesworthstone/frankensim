@@ -213,6 +213,13 @@ impl<M: SecondOrderVjp + ?Sized> LinearOp for StructuralTranspose<'_, M> {
             *self.error.borrow_mut() = Some(SecondOrderAdjointError::NonFiniteAccumulation);
         }
     }
+
+    // This operator is already the transpose of the structural matrix, and
+    // the adjoint solve uses it forward only. Its transpose (the forward
+    // structural matrix) is not provided: NaN, which no solve converges on.
+    fn apply_transpose(&self, _seed: &[f64], output: &mut [f64]) {
+        output.fill(f64::NAN);
+    }
 }
 
 impl OperatorGeneralizedAlpha {

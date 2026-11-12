@@ -17,6 +17,10 @@ impl LinearOp for Isotropic3 {
             y[i] = self.0 * x[i];
         }
     }
+    // A scalar multiple of the identity, so its transpose is itself.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
 }
 
 fn friction_controls() -> FrictionalImpactControls {

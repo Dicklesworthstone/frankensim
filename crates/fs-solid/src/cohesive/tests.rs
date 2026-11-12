@@ -6,6 +6,8 @@ impl LinearOp for Diagonal {
     fn apply(&self, x: &[f64], y: &mut [f64]) {
         for ((out, &k), &u) in y.iter_mut().zip(&self.0).zip(x) { *out = k*u; }
     }
+    // Diagonal, so its transpose is itself.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) { self.apply(x, y); }
 }
 fn law() -> BilinearCohesive { BilinearCohesive::new(1e9,1e6,2000.0,2e9,0.02).unwrap() }
 fn patch<'a>(id: u64, area: f64, law: &'a BilinearCohesive) -> CohesivePatch<'a> {

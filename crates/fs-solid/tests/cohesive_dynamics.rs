@@ -234,6 +234,10 @@ fn complete_native_interval_retains_small_kinetic_exchange_beside_unchanged_moti
             y[0] = self.0[0] * x[0];
             y[1] = self.0[1] * x[1];
         }
+        // Diagonal, so its transpose is itself.
+        fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+            self.apply(x, y);
+        }
     }
     let mass = Modes([0.1, 2.0_f64.powi(80)]);
     let elastic = Modes([10.0, 0.0]);

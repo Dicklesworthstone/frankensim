@@ -75,6 +75,10 @@ impl LinearOp for BorrowedMass<'_> {
     fn apply(&self, x: &[f64], y: &mut [f64]) {
         self.0.spmv(x, y);
     }
+    // The consistent mass matrix is symmetric.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
 }
 
 fn finite_dd(value: Dd) -> Result<Dd, ViscoElementError> {

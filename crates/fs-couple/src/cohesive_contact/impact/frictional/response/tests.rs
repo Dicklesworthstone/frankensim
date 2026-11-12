@@ -16,6 +16,10 @@ impl LinearOp for Mass3 {
             *value = (0..3).map(|col| self.0[3 * row + col] * x[col]).sum();
         }
     }
+    // Every instance in this file (isotropic, and the 0.4-coupled mass) is a symmetric matrix, so its transpose is itself.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
 }
 fn isotropic(mass: f64) -> Mass3 {
     Mass3([mass, 0.0, 0.0, 0.0, mass, 0.0, 0.0, 0.0, mass])
@@ -321,6 +325,10 @@ impl LinearOp for CountedMass {
         for axis in 0..3 {
             y[axis] = 2.0 * x[axis];
         }
+    }
+    // A counting diagonal, so its transpose is itself; through apply, the count is unchanged.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
     }
 }
 

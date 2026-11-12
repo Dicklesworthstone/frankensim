@@ -15,6 +15,10 @@ impl LinearOp for UncalledMass {
     fn apply(&self, _: &[f64], _: &mut [f64]) {
         panic!("refused state reached the mass action");
     }
+
+    fn apply_transpose(&self, _: &[f64], _: &mut [f64]) {
+        panic!("refused state reached the mass action");
+    }
 }
 
 #[test]

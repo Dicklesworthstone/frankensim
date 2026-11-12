@@ -202,6 +202,10 @@ fn nonmatching_force_controlled_pull_softens_fractures_and_recloses() {
                 y[i] = 1e9 * self.0[i] * x[i];
             }
         }
+        // Diagonal, so its transpose is itself.
+        fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+            self.apply(x, y);
+        }
     }
     let (nodes, tets, a, b) = mesh();
     let law = law();

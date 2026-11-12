@@ -520,6 +520,10 @@ fn conductivity_contrast_uses_fewer_iterations_without_changing_field_or_heat() 
                 *value = row.iter().zip(x).map(|(a, b)| a * b).sum();
             }
         }
+        // Its one instance below is a symmetric matrix (stiffness, mass and the moment outer product are each assembled symmetrically), so its transpose is itself.
+        fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+            self.apply(x, y);
+        }
     }
 
     // A connected conductor with five decades of source-resolved conductivity

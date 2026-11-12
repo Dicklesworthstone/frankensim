@@ -793,4 +793,21 @@ impl LinearOp for MaskedTensorOp {
             y[i] = if self.mask[i] { ax[i] } else { x[i] };
         }
     }
+
+    // The operator is diag(mask) A + diag(!mask): a boundary row is an
+    // identity row, while an interior row of the stiffness A reads every
+    // column, boundary ones included, so it is not symmetric (CG runs it
+    // on vectors that are zero on the boundary, where it is). Its
+    // transpose is A diag(mask) + diag(!mask), A being symmetric.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        let interior: Vec<f64> = x
+            .iter()
+            .zip(&self.mask)
+            .map(|(&value, &free)| if free { value } else { 0.0 })
+            .collect();
+        let ax = self.space.apply_stiffness(&interior);
+        for i in 0..y.len() {
+            y[i] = if self.mask[i] { ax[i] } else { ax[i] + x[i] };
+        }
+    }
 }

@@ -427,6 +427,11 @@ impl LinearOp for FreeMass<'_, '_> {
             output[row] = value;
         }
     }
+
+    // The free-free block of the symmetric mass; checked_cg solves it.
+    fn apply_transpose(&self, input: &[f64], output: &mut [f64]) {
+        self.apply(input, output);
+    }
 }
 
 struct MassDiagonal<'a, 'cx> {

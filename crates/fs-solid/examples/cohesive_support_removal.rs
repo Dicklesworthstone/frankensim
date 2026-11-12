@@ -12,6 +12,10 @@ impl LinearOp for Actuator {
         y[0] = 0.0;
         y[1] = self.stiffness_n_m*x[1];
     }
+    // Diagonal, so its transpose is itself.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
 }
 fn main() -> Result<(),Box<dyn Error>> {
     let weak = BilinearCohesive::new(1e9,2e5,100.0,2e9,0.01)?;

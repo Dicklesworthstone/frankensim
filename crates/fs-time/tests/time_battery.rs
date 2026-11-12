@@ -164,6 +164,10 @@ mod momentum_verlet {
                 out[i] = self.0[i] * x[i];
             }
         }
+        // Diagonal, so its transpose is itself.
+        fn apply_transpose(&self, x: &[f64], out: &mut [f64]) {
+            self.apply(x, out);
+        }
     }
     struct Matrix([[f64; 2]; 2]);
     impl LinearOp for Matrix {
@@ -683,6 +687,10 @@ mod momentum_verlet {
                 out[0] = (m2 * p[0] - coupling * p[1]) / determinant;
                 out[1] = (m1 * p[1] - coupling * p[0]) / determinant;
             }
+            // The inverse of a symmetric 2x2 mass (the same coupling off both diagonals) for every parameter set, so its transpose is itself.
+            fn apply_transpose(&self, p: &[f64], out: &mut [f64]) {
+                self.apply(p, out);
+            }
         }
 
         impl SpringDesign {
@@ -864,6 +872,10 @@ mod momentum_verlet {
             fn apply(&self, p: &[f64], out: &mut [f64]) {
                 out[0] = p[0] / self.mass;
             }
+            // A 1x1 scalar, so its transpose is itself.
+            fn apply_transpose(&self, p: &[f64], out: &mut [f64]) {
+                self.apply(p, out);
+            }
         }
         impl MomentumVerletParameterVjp for Ballistic {
             fn parameter_count(&self) -> usize {
@@ -946,6 +958,10 @@ mod momentum_verlet {
                 fn apply(&self, x: &[f64], out: &mut [f64]) {
                     self.applications.set(self.applications.get() + 1);
                     self.model.apply(x, out);
+                }
+                fn apply_transpose(&self, x: &[f64], out: &mut [f64]) {
+                    self.applications.set(self.applications.get() + 1);
+                    self.model.apply_transpose(x, out);
                 }
             }
             let model = SpringDesign([2.0, 3.0, 0.4, 4.0, 0.7]);

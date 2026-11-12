@@ -528,3 +528,31 @@ fn mixed_precision_reaches_f64_accuracy() {
     assert_eq!(rep.inner_iters, rep2.inner_iters);
     assert!(x.iter().zip(&x2).all(|(p, q)| p.to_bits() == q.to_bits()));
 }
+
+/// Bead rc-1109 .14.4: `MaskedTensorOp` is diag(mask) A + diag(!mask), not
+/// symmetric on vectors with boundary entries. Its stated transpose passes
+/// the dot-product test <A v, w> = <v, Aᵀ w>; `apply` in its place (what the
+/// trait's former default gave) does not.
+#[test]
+fn masked_tensor_operator_states_its_true_transpose() {
+    let op = MaskedTensorOp::new(2, 3);
+    let n = op.n();
+    let (v, w) = (rand_vec(n, 21), rand_vec(n, 22));
+    let (mut av, mut atw, mut aw) = (vec![0.0; n], vec![0.0; n], vec![0.0; n]);
+    op.apply(&v, &mut av);
+    op.apply_transpose(&w, &mut atw);
+    op.apply(&w, &mut aw);
+    let scale = (norm2(&av) * norm2(&w)).max(norm2(&v) * norm2(&atw));
+    let transpose_gap = (dot(&av, &w) - dot(&v, &atw)).abs() / scale;
+    let apply_gap = (dot(&av, &w) - dot(&v, &aw)).abs() / scale;
+    log(
+        "masked_tensor_transpose",
+        "measured",
+        &format!("n {n} transpose_gap {transpose_gap:.3e} apply_in_its_place_gap {apply_gap:.3e}"),
+    );
+    assert!(transpose_gap < 1e-13, "transpose gap {transpose_gap:e}");
+    assert!(
+        apply_gap > 1e-6,
+        "apply passes the test too ({apply_gap:e}): the probe has no teeth"
+    );
+}

@@ -990,4 +990,8 @@ impl LinearOp for DiffusionStep {
             y[i + 1] -= flux;
         }
     }
+    // A diagonal plus pairwise conductances: symmetric.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
 }

@@ -106,6 +106,10 @@ impl LinearOp for WeightedOp<'_> {
             }
         }
     }
+    // Weighted symmetric element stiffnesses on the free dofs (gather drops
+    // constrained columns as the free test drops their rows), with zero or
+    // identity constrained rows: symmetric.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) { self.apply(x, y); }
 }
 struct Diagonal<'a>(&'a [f64]);
 impl Precond for Diagonal<'_> {

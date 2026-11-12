@@ -58,6 +58,9 @@ impl LinearOp for MidpointOperator<'_, '_> {
             *out = value;
         }
     }
+    // A combination of the mass and two stiffness matrices, each symmetric;
+    // the step solves it with CG.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) { self.apply(x, y); }
 }
 
 impl TetTransientRun3<'_, '_, '_, '_> {

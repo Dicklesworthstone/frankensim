@@ -104,24 +104,55 @@ pub trait LinearOp {
         }
         Ok(())
     }
-    /// y = Aᵀ·x. The default forwards to `apply` — CORRECT ONLY for
-    /// symmetric operators; nonsymmetric implementations MUST override.
+    /// y = Aᵀ·x. Required: every operator states its own transpose, and
+    /// there is no default.
     ///
-    /// NOT CHECKED. This crate has no symmetry probe: nothing at compile
-    /// time or run time detects a nonsymmetric operator that inherited
-    /// this default. The transposed-solve battery pins the crate's own
-    /// adapters (`CsrOp::general`, which materializes a real transpose,
-    /// and one nonsymmetric fs-opdsl fixture that does override); it
-    /// cannot cover a client operator it never sees. An implementor who
-    /// inherits the default on a nonsymmetric operator gets a transposed
-    /// solve of A instead of Aᵀ that converges normally, and the
-    /// reported residual is measured against the operator supplied —
-    /// not against its transpose — so a small residual is no evidence
-    /// that the adjoint system was the one solved. Verify with an
-    /// explicit ⟨Av, w⟩ = ⟨v, Aᵀw⟩ probe before relying on it.
-    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
-        self.apply(x, y);
-    }
+    /// - A nonsymmetric operator computes Aᵀ·x.
+    /// - A symmetric operator may return `self.apply(x, y)`, with a comment
+    ///   at that line saying why it is symmetric.
+    /// - An operator with no transpose fills `y` with NaN. The trait has no
+    ///   error return, and NaN is the refusal its implementations already
+    ///   use for an interrupted or failed `apply`, so a transposed solve of
+    ///   such an operator does not converge rather than solve with A.
+    ///
+    /// Nothing checks a symmetry claim at run time. A transposed solve run
+    /// with a nonsymmetric A in place of Aᵀ converges normally, and its
+    /// residual is measured against the operator supplied, so a small
+    /// residual is no evidence that the adjoint system was the one solved.
+    /// Test a claim with an explicit ⟨Av, w⟩ = ⟨v, Aᵀw⟩ probe
+    /// (`fs_adjoint::check_transpose`).
+    ///
+    /// An operator that leaves this method out does not compile:
+    ///
+    /// ```compile_fail
+    /// use fs_solver::LinearOp;
+    /// // y = (x1, 0): nonsymmetric, and no transpose stated.
+    /// struct Shift;
+    /// impl LinearOp for Shift {
+    ///     fn n(&self) -> usize { 2 }
+    ///     fn apply(&self, x: &[f64], y: &mut [f64]) { y[0] = x[1]; y[1] = 0.0; }
+    /// }
+    /// ```
+    ///
+    /// The same operator with its transpose stated:
+    ///
+    /// ```
+    /// use fs_solver::LinearOp;
+    /// struct Shift;
+    /// impl LinearOp for Shift {
+    ///     fn n(&self) -> usize { 2 }
+    ///     fn apply(&self, x: &[f64], y: &mut [f64]) { y[0] = x[1]; y[1] = 0.0; }
+    ///     fn apply_transpose(&self, x: &[f64], y: &mut [f64]) { y[0] = 0.0; y[1] = x[0]; }
+    /// }
+    /// let (v, w) = ([2.0, 3.0], [5.0, 7.0]);
+    /// let (mut av, mut atw) = ([0.0; 2], [0.0; 2]);
+    /// Shift.apply(&v, &mut av);
+    /// Shift.apply_transpose(&w, &mut atw);
+    /// let left: f64 = av.iter().zip(&w).map(|(a, b)| a * b).sum();
+    /// let right: f64 = v.iter().zip(&atw).map(|(a, b)| a * b).sum();
+    /// assert_eq!(left, right);
+    /// ```
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]);
 
     /// Cooperative transpose action, with the contract of
     /// [`Self::apply_controlled`]. The default preserves an implementation's

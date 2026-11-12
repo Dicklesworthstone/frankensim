@@ -22,6 +22,10 @@ impl LinearOp for ObservedCsr {
         self.operator.apply(x, output);
     }
 
+    fn apply_transpose(&self, x: &[f64], output: &mut [f64]) {
+        self.operator.apply_transpose(x, output);
+    }
+
     fn apply_controlled(
         &self,
         x: &[f64],
@@ -89,6 +93,10 @@ fn controlled_operator_faults_are_not_reported_as_cancellation() {
         }
         fn apply(&self, _: &[f64], _: &mut [f64]) {
             panic!("controlled solver skipped the fallible operator hook");
+        }
+        // Never called (apply panics); the transpose is the same refusal.
+        fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+            self.apply(x, y);
         }
         fn apply_controlled(
             &self,

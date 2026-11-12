@@ -121,6 +121,11 @@ impl LinearOp for PrestressedOp<'_, '_> {
             }
         }
     }
+    // The symmetric weighted stiffness plus symmetric geometric blocks on
+    // the free dofs (gather drops constrained columns): symmetric.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
 }
 
 struct Pencil<'g, 'a, 'c, 'callback> {

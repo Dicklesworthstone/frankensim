@@ -1262,6 +1262,13 @@ impl<P: NonlinearProblem> LinearOp for JacobianAt<'_, P> {
     fn apply(&self, direction: &[f64], output: &mut [f64]) {
         self.problem.jacobian_apply(self.x, direction, output);
     }
+
+    // A Jacobian is nonsymmetric in general and `NonlinearProblem` states
+    // no transpose action. The Newton step solves only with J (FGMRES), so
+    // a transpose is refused: NaN, which no solve converges on.
+    fn apply_transpose(&self, _direction: &[f64], output: &mut [f64]) {
+        output.fill(f64::NAN);
+    }
 }
 
 struct PreconditionerAt<'a, P> {

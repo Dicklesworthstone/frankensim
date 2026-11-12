@@ -33,6 +33,11 @@ impl fs_solver::LinearOp for Diag {
             *yi = self.0[i] * x[i];
         }
     }
+
+    // Diagonal, so its transpose is itself (qualified: LinearOp is not imported in this file).
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        fs_solver::LinearOp::apply(self, x, y);
+    }
 }
 
 /// A diagonal preconditioner. `diag = [1.0, 0.0]` is positive

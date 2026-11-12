@@ -224,6 +224,12 @@ impl LinearOp for Operator<'_, '_> {
             }
         }
     }
+
+    // A sum of member stiffnesses k d dᵀ on the free dofs: symmetric;
+    // checked_cg solves it.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        LinearOp::apply(self, x, y);
+    }
 }
 
 impl Precond for Operator<'_, '_> {

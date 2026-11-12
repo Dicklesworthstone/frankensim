@@ -282,3 +282,34 @@ fn stokes_golden_hash() {
         "Stokes bits changed: 0x{acc:016x} vs 0x{STOKES_GOLDEN:016x} — bump only with semantic justification"
     );
 }
+
+/// Bead rc-1109 .14.4: the saddle operator is diag(vmask) A + diag(!vmask)
+/// in its velocity block, so it is not symmetric on vectors with Dirichlet
+/// velocity. Its stated transpose passes the dot-product test
+/// <A v, w> = <v, Aᵀ w>; `apply` in its place (what the trait's former
+/// default gave) does not.
+#[test]
+fn stokes_operator_states_its_true_transpose() {
+    let sys = StokesSystem::new(2, 2);
+    let op = StokesOp::new(&sys);
+    let n = sys.n();
+    let (v, w) = (rand_vec(n, 11), rand_vec(n, 12));
+    let (mut av, mut atw, mut aw) = (vec![0.0; n], vec![0.0; n], vec![0.0; n]);
+    op.apply(&v, &mut av);
+    op.apply_transpose(&w, &mut atw);
+    op.apply(&w, &mut aw);
+    let inner = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f64>();
+    let scale = (norm2(&av) * norm2(&w)).max(norm2(&v) * norm2(&atw));
+    let transpose_gap = (inner(&av, &w) - inner(&v, &atw)).abs() / scale;
+    let apply_gap = (inner(&av, &w) - inner(&v, &aw)).abs() / scale;
+    log(
+        "stokes_transpose",
+        "measured",
+        &format!("n {n} transpose_gap {transpose_gap:.3e} apply_in_its_place_gap {apply_gap:.3e}"),
+    );
+    assert!(transpose_gap < 1e-13, "transpose gap {transpose_gap:e}");
+    assert!(
+        apply_gap > 1e-6,
+        "apply passes the test too ({apply_gap:e}): the probe has no teeth"
+    );
+}

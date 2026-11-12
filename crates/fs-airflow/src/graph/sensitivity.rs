@@ -464,6 +464,10 @@ impl LinearOp for LinearizedOperator<'_, '_, '_> {
     fn apply(&self, x: &[f64], y: &mut [f64]) {
         self.publish(self.apply_laplacian(x, y), y);
     }
+    // A grounded weighted graph Laplacian (module doc): symmetric.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        LinearOp::apply(self, x, y);
+    }
 }
 
 impl Precond for LinearizedOperator<'_, '_, '_> {

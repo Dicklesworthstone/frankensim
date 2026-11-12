@@ -305,6 +305,12 @@ impl LinearOp for Increment<'_> {
             y[row] = 0.5 * k + conduction[v] / self.dt;
         }
     }
+
+    // Half the symmetric stiffness plus the symmetric conduction mass over
+    // dt, on the free dofs; checked_cg solves it.
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.apply(x, y);
+    }
 }
 
 fn bind(

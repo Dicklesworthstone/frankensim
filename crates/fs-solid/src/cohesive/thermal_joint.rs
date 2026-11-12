@@ -129,6 +129,8 @@ struct SeriesStiffness(f64);
 impl LinearOp for SeriesStiffness {
     fn n(&self) -> usize { 1 }
     fn apply(&self,x: &[f64],y: &mut [f64]) { y[0]=self.0*x[0]; }
+    // 1x1: its own transpose.
+    fn apply_transpose(&self,x: &[f64],y: &mut [f64]) { self.apply(x, y); }
 }
 
 impl<'a> Joint<'a> {

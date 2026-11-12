@@ -1071,6 +1071,11 @@ impl<P: LinearOp> LinearOp for Observed<'_, P> {
         self.inner.apply(x, output);
         self.probe.observe(SolverCallback::Operator);
     }
+
+    fn apply_transpose(&self, x: &[f64], output: &mut [f64]) {
+        self.inner.apply_transpose(x, output);
+        self.probe.observe(SolverCallback::Operator);
+    }
 }
 
 impl<P: FlexiblePreconditioner> FlexiblePreconditioner for Observed<'_, P> {
