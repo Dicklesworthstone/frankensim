@@ -638,7 +638,11 @@ fn source_domain_overshoots_backtrack_without_extrapolating_the_physical_source(
     let curve = EquilibriumEnthalpyPhaseCurve::try_single_phase(
         card.content_hash(),
         SolidLiquidPhase::Solid,
-        [(-1.0, 399.0), (5.0, 405.0)]
+        // T = 400 + h, with the 400 K bath at an exactly representable
+        // fraction (1/8), so the caloric inverse gives h = 0 exactly. On
+        // (-1, 399)..(5, 405) it is 6.mul_add(fl(1/6), -1) = -5.55e-17, below
+        // the prepared range [0, 1], and the bath vertex is refused.
+        [(-1.0, 399.0), (7.0, 407.0)]
             .into_iter()
             .map(|(h, t)| EnthalpyPhaseKnot {
                 specific_enthalpy_j_kg: h,
