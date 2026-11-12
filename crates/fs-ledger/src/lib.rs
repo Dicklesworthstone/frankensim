@@ -2313,7 +2313,7 @@ fn is_retryable(e: &FrankenError) -> bool {
 fn is_duplicate_key(e: &FrankenError) -> bool {
     matches!(
         e,
-        FrankenError::PrimaryKeyViolation | FrankenError::UniqueViolation { .. }
+        FrankenError::PrimaryKeyViolation { .. } | FrankenError::UniqueViolation { .. }
     )
 }
 
