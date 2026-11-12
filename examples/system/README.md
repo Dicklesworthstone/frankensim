@@ -18,6 +18,7 @@ is the kernel's state and its energy and entropy ledger.
 | `adaptive_oscillator.json` | a loaded oscillator chooses shorter intervals to meet explicit coordinate and source-work tolerances | the analytic oscillation phase, tolerance refinement and work from the accepted displacement |
 | `heated_body.json` | a 30 W heater in a body that loses heat through a wall to 293.15 K | the closed-form discrete approach to 308.15 K |
 | `heated_plane.json` | 30 W generated on a plane of no heat capacity (`heat_node`) between a 50 J/K pad at 400 K and a 120 J/K disc at 300 K, joined to the plane by 2 and 6 W/K: no fraction is given, the heat divides by where the two temperatures put the plane | the midpoint rule for the two bodies and the plane's balance, solved independently each step: both temperatures and the plane's to 1e-9, every joule in the two bodies; the same device with the heat rate prescribed on the plane |
+| `friction_belt.json` | a block follows a slowly accelerating belt by static friction, breaks away when the acceleration exceeds the static limit, and catches it again as the lining warms | independent constant-acceleration segments: 3 m/s final speed, 2.875 m travel, 3 J of frictional heat and 12 J supplied by the belt |
 | `dc_motor.json` | a DC motor across three domains: a 12 V supply, winding inductance and resistance in a current loop, a gyrator to a rotor with a viscous bearing, and both heats into one case | the monolithic midpoint rule for the two coupled equations, the supply's energy against stored energy plus heat |
 | `parallel_rlc.json` | a current source drives a capacitor, inductor and resistor in parallel; all Joule heat warms the case | independent coupled voltage/current equations, source work, electrical storage and heat |
 | `nonlinear_rlc.json` | the same topology with voltage-dependent capacitance and flux-dependent inductance, crossing both curves' knees | independent charge/flux differential equations, original constitutive energies and Joule heat |
@@ -30,6 +31,37 @@ is the kernel's state and its energy and entropy ledger.
 | `viscoelastic_mount.json` | two rigid bodies at rest on a mount with viscous damping and one Maxwell branch stretched by 0.5 m (`viscoelastic_network`, the fs-mbd relaxation owner): the stored 0.21 J sets the bodies moving and heats the casing | the pair's own two equations integrated independently: relative speed, branch energy and heat |
 | `self_heating_damper.json` | the damped pair with all of its heat in 1 J/K of damper fluid, whose temperature thins the damper by an Arrhenius shift: the damping falls to 0.81 of its value as the fluid warms by 0.93 K | the exact recursion of the scheme (damping held over each step at the temperature the step began with) to 1e-11, and first-order convergence to the coupled differential equations |
 | `quarter_car.json` | a car body and wheel on a suspension spring and shock absorber, a tyre spring driven over a 30 mm bump; 70 % of the shock's heat warms it, the rest goes to the air | the ledger: road work = mechanical energy + heat, and the 70/30 split |
+
+## Dry friction and prescribed motion
+
+`friction_belt.json` puts a 2 kg block on a belt under 20 N of normal
+force. The static coefficient is 0.5 and the kinetic coefficient is 0.2.
+At first the belt accelerates at 4 m/s², requiring 8 N, so the block stays
+stuck. The second ramp needs 16 N, exceeding the 10 N static limit; the
+block slips with 4 N of friction. Once the belt holds 3 m/s, the block
+catches it at 1.25 s. At 1.5 s the block has travelled 2.875 m, the lining
+has received 3 J and warmed by 0.06 K, and the belt has supplied 12 J.
+These are outputs of the coupled equations, not inputs in the scene.
+
+The `slider` has power ports `a` and `b` and a thermal port `heat`.
+`slip_m_s`, when needed initially, is velocity at `a` minus velocity at
+`b`; it must agree with the connected bodies' initial velocities. Zero
+starts stuck. The report gives the same physical slip, a numeric `stuck`
+flag (1 or 0), force on side `a`, and the last step's heat rate.
+
+An accelerating prescribed end needs both its step mean and endpoints.
+`velocity_source` publishes those through `p` and the signal `span`.
+The slider declares `"prescribed_ends": ["b"]`, creating `span_b`, and
+the scene connects the belt to `friction.b` and its signal to `span_b`.
+A direct boundary can instead prescribe `velocity_m_s` on the end and
+the same waveform on its span; the span takes endpoint values. A direct
+boundary publishes no event schedule, so its table knots must align with
+steps; `velocity_source` lets the kernel land on those knots. An untold
+prescribed end is held during each step. Error-controlled stepping does
+not cover sliders; use a fixed `step_s`. Coefficients and normal force
+are constant authored inputs. This is ideal dry friction without contact
+geometry, impact or material-card claims, and switching steps are first
+order.
 
 ## Rigid bodies from a physics owner
 

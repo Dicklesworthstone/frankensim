@@ -765,6 +765,40 @@ binary, including `system`, `cooling-cht`, `electrothermal`, `cooling-network`,
 
 ### Devices described as data (`system <scene.json>`)
 
+`slider` lowers to `fs_system::elements::Slider` through the kernel's
+`add_on_line` tier, with positive constant `normal_n`, `static_coefficient`
+and `kinetic_coefficient` (kinetic no greater than static). The scene's
+initial `slip_m_s` is velocity at `a` minus velocity at `b`; admission
+negates it for the kernel's incoming-port convention. Zero starts stuck.
+The author must match this slip to the connected bodies' initial motion;
+the lowering does not infer it. Reports expose physical `slip_m_s`,
+`stuck` (numeric 1 or 0), force on `a` in N and last-step `heat_w`.
+The heat port joins or routes to the existing thermal elements and sinks.
+
+`velocity_source` takes a `velocity_m_s` waveform and lowers to
+`FlowSource::publishing`: `p` sets the velocity and `span` publishes its
+two endpoint values in the mover's sign. A slider's `prescribed_ends`
+array selects `"a"` and/or `"b"` once each, adding `span_a`/`span_b`;
+wire the source's `span` to the matching input with `signal`. A span may
+instead be prescribed with `velocity_m_s`: that boundary evaluates the
+waveform at the step's endpoints, while the power-port boundary uses its
+negated mean. Direct boundaries publish no event schedule; a table-driven
+boundary needs steps aligned with its knots. Prefer `velocity_source`,
+whose waveform events let the kernel align the steps. Every accelerating
+prescribed end needs its span; an untold end is treated as held during
+the step. A span on an end that answers the slider's force is refused by
+the kernel. `adaptive` refuses a slider because it has no error account
+for the discrete slip state.
+
+G1/G3 binary tests in `tests/system_command.rs` check analytic hold,
+break-away and catch motion, source-work and frictional-heat closure, a
+thrown block arrested in either direction, oscillatory motion provided
+through a source or direct endpoint boundaries, and input refusals.
+`examples/system/friction_belt.json` is the file-driven slice. Friction
+coefficients and normal force are authored constants, not resolved cards;
+no geometric contact, impact or material-dependent tribology is claimed.
+Switching steps retain the kernel's first-order limitation.
+
 `frankensim [--json] system <scene.json>` reads a `frankensim.system.v0` scene
 (at most 1 MiB, 2,000 elements, 1e7 planned steps and twice that many
 kernel steps if the kernel shortens them, 1e5 samples; unknown fields
@@ -1055,8 +1089,9 @@ monolithic midpoint rule through the binary, the heated body against its discret
 closed form, the quarter car's road work against motion plus heat and its
 70/30 heat split, library and binary byte-identical, eight refusals). No
 claim beyond the kernel's: lumped elements with constant parameters or authored
-nonlinear electrical storage curves, no material-card resolution, contact,
-friction or phase change; fixed mode has no step-size error control, while
+nonlinear electrical storage curves and constant-coefficient dry friction;
+no material-card resolution, geometric contact, impact or phase change;
+fixed mode has no step-size error control, while
 adaptive mode has the scoped numerical estimate described above. The experimental
 workflows keep their existing request/result schemas, numerical limits and
 exit classes; dispatch does not turn them into ledger-backed `.fsim` solves.

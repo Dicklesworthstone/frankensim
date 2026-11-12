@@ -26,11 +26,11 @@ use fs_mbd::spatial_loads::internal_impulse::viscous::network::relaxation::{
 use fs_mbd::spatial_loads::internal_impulse::viscous::network::{
     ViscousNetworkLimits, ViscousNetworkLink,
 };
-use fs_mbd::spatial_loads::internal_motion::viscous::network::relaxation::RelaxationNetworkMotionControls;
 use fs_mbd::spatial_loads::internal_impulse::viscous::{
     BushingCoordinateScales, PassiveBushingMatrix, ViscousConnectorControls,
 };
 use fs_mbd::spatial_loads::internal_motion::viscous::network::ViscousNetworkMotionControls;
+use fs_mbd::spatial_loads::internal_motion::viscous::network::relaxation::RelaxationNetworkMotionControls;
 use fs_mbd::{Gravity, MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 use fs_ports::PortKind;
 use fs_ports::component::{Carrier, Component, PortRole, PortSpec, PortTangent};
@@ -40,12 +40,12 @@ use fs_system::constitutive::{
 };
 use fs_system::elements::{
     Admittance, Conductance, Damper, FlowSource, Force, GasContents, GasVolume, Gyrator,
-    HeatCapacity, HeatNode, Heater, Mass, Motion, Resistance, Restriction, SourceAccount, Spring,
-    Storage, Waveform,
+    HeatCapacity, HeatNode, Heater, Mass, Motion, Resistance, Restriction, Slider, SliderEnd, Slip,
+    SourceAccount, Spring, Storage, Waveform,
 };
 use fs_system::{
-    AdaptiveConfig, AdaptiveError, AdaptiveReport, Checkpoint, ErrorNorm, ErrorTolerance,
-    NodeId, PortRef, RouteTemperature, SolveConfig, System, SystemBuilder, SystemError, heat_sink,
+    AdaptiveConfig, AdaptiveError, AdaptiveReport, Checkpoint, ErrorNorm, ErrorTolerance, NodeId,
+    PortRef, RouteTemperature, SolveConfig, System, SystemBuilder, SystemError, heat_sink,
 };
 
 use crate::json_read::JsonValue as J;
@@ -112,6 +112,18 @@ Elements (ports in brackets; SI units in every field name):
                  (N s/m, N m s/rad or ohm). u receives a flow vector and
                  returns matrix times that vector; heat must be connected.
   force          force_n (waveform)                                   [p]
+  velocity_source velocity_m_s (waveform)                             [p, span]
+                 (prescribed motion: span publishes its start/end velocities;
+                 join p to a slider end and signal span to that end's span input)
+  slider         normal_n, static_coefficient, kinetic_coefficient,
+                 slip_m_s = 0, prescribed_ends = []                  [a, b, heat]
+                 (ideal dry friction; 0 < kinetic <= static; slip_m_s is
+                 velocity at a minus velocity at b, matching the connected
+                 bodies' initial velocities; zero starts stuck. Each named
+                 prescribed end, \"a\" or \"b\", adds a signal input span_a or
+                 span_b. Tell every accelerating prescribed end its span.
+                 Reports slip_m_s, stuck (1 or 0), force_n on a, and heat_w;
+                 requires fixed step_s and the kernel's load-line solve.)
   heat_capacity  capacity_j_k, temperature_k                          [heat]
                  (and a signal output, temperature: its temperature at the
                  start of the step; it may stay unconnected)
@@ -246,9 +258,10 @@ Connections, ports written element.port:
    \"temperature\": \"sink-equivalent\" | {\"fixed_k\": T}}
                           send the heat leaving a port by fraction
   {\"signal\": port, \"to\": [ports]}
-                          copy a signal output (heat_capacity.temperature) to
-                          signal inputs (a network's temperature<e>); it
-                          carries no energy
+                          copy a signal output (heat_capacity.temperature or
+                          velocity_source.span) to matching signal inputs
+                          (a network's temperature<e> or slider.span_a/span_b);
+                          it carries no energy
   {\"prescribe\": port, <quantity>: waveform}
                           hold a port's input from outside: velocity_m_s for a
                           spring, damper or force end (0 anchors it), force_n
@@ -271,6 +284,10 @@ Connections, ports written element.port:
                           restriction's end held from outside, contents
                           (pressure [Pa], specific enthalpy [J/kg], then each
                           carried mass fraction)
+  On slider.span_a/span_b, prescribe velocity_m_s as the same waveform
+  moving that end; its two endpoint values are supplied, not its step mean.
+  Direct boundaries publish no event schedule: align steps with table knots,
+  or use velocity_source to let the kernel land on those knots automatically.
 
 Each element's port a is the end at mass A and b the end at mass B; the
 extension of a spring is x_B - x_A less its unloaded length; a series
@@ -471,6 +488,10 @@ enum Kind {
     ResistanceMatrix,
     /// A prescribed effort (force, torque, voltage).
     Source(Domain),
+    /// Prescribed translation, publishing the velocities at the step's ends.
+    VelocitySource,
+    /// Constant-coefficient dry friction on the kernel's load line.
+    Slider,
     /// Charge storage setting the voltage of a parallel electrical node.
     NodeCapacitor,
     /// Current from a voltage difference, with a heat port.
@@ -499,12 +520,14 @@ enum Kind {
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 27] = [
+    const TABLE: [(&'static str, Self); 29] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
         ("resistance_matrix", Self::ResistanceMatrix),
         ("force", Self::Source(Domain::Translation)),
+        ("velocity_source", Self::VelocitySource),
+        ("slider", Self::Slider),
         ("inertia", Self::Inertance(Domain::Rotation)),
         ("torsion_spring", Self::Compliance(Domain::Rotation)),
         ("rotary_damper", Self::Resistance(Domain::Rotation)),
@@ -1442,6 +1465,16 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
             );
             add(builder, name, source, SourceAccount::default())?
         }
+        Kind::VelocitySource => {
+            fields(definition, &["kind", "velocity_m_s"], &what)?;
+            let wave = definition
+                .get("velocity_m_s")
+                .ok_or_else(|| format!("{what}: missing velocity_m_s"))?;
+            let source = FlowSource::new(waveform(wave, &format!("{what}.velocity_m_s"))?)
+                .publishing();
+            add(builder, name, source, SourceAccount::default())?
+        }
+        Kind::Slider => slider(builder, name, definition, &what)?,
         Kind::NodeCapacitor => {
             fields(definition, &["kind", "capacitance_f", "charge_c"], &what)?;
             let capacity = positive(definition, "capacitance_f", &what)?;
@@ -1586,9 +1619,74 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
     })
 }
 
+fn slider(
+    builder: &mut SystemBuilder,
+    name: &str,
+    definition: &J,
+    what: &str,
+) -> Result<(NodeId, Vec<PortSpec>), Refusal> {
+    fields(
+        definition,
+        &[
+            "kind",
+            "normal_n",
+            "static_coefficient",
+            "kinetic_coefficient",
+            "slip_m_s",
+            "prescribed_ends",
+        ],
+        what,
+    )?;
+    let mut law = Slider::new(
+        number(definition, "normal_n", what)?,
+        number(definition, "static_coefficient", what)?,
+        number(definition, "kinetic_coefficient", what)?,
+    )
+    .map_err(|error| format!("{what}: {error}"))?;
+    if let Some(ends) = definition.get("prescribed_ends") {
+        let ends = ends
+            .as_array()
+            .filter(|ends| ends.len() <= 2)
+            .ok_or_else(|| format!("{what}.prescribed_ends: an array containing a and/or b"))?;
+        let mut seen = [false; 2];
+        for end in ends {
+            let (index, end) = match end.as_str() {
+                Some("a") => (0, SliderEnd::A),
+                Some("b") => (1, SliderEnd::B),
+                _ => return Err(format!("{what}.prescribed_ends: each end must be a or b").into()),
+            };
+            if seen[index] {
+                return Err(format!("{what}.prescribed_ends: an end appears twice").into());
+            }
+            seen[index] = true;
+            law = law.told(end);
+        }
+    }
+    let slip = number_or(definition, "slip_m_s", 0.0, what)?;
+    if !slip.is_finite() {
+        return Err(format!("{what}.slip_m_s must be finite").into());
+    }
+    // Scene velocities use the mover's sign. Each slider end receives
+    // minus its mover's flow, so the owner's slip has the opposite sign.
+    let state = if slip == 0.0 {
+        Slip::stuck()
+    } else {
+        Slip::sliding(-slip)
+    };
+    let ports = law.ports().to_vec();
+    let node = builder
+        .add_on_line(name, law, state)
+        .map_err(|error| Refusal::Admission(error.to_string()))?;
+    Ok((node, ports))
+}
+
 /// A `restriction` between gas volumes.
 fn restriction(definition: &J, what: &str) -> Result<Restriction, Refusal> {
-    fields(definition, &["kind", "conductance_kg_s_pa", "carried"], what)?;
+    fields(
+        definition,
+        &["kind", "conductance_kg_s_pa", "carried"],
+        what,
+    )?;
     let carried = number_or(definition, "carried", 0.0, what)?;
     if !(0.0..=MAX_CARRIED as f64).contains(&carried) || carried.fract() != 0.0 {
         return Err(format!(
@@ -1971,14 +2069,37 @@ fn prescribe(
     connection: &J,
     what: &str,
 ) -> Result<(), Refusal> {
-    let target = resolve(builder, elements, &port_text(connection.get("prescribe").unwrap_or(&J::Null), what)?)?;
+    let target = resolve(
+        builder,
+        elements,
+        &port_text(connection.get("prescribe").unwrap_or(&J::Null), what)?,
+    )?;
+    if target.carrier == Carrier::Signal
+        && target.role == PortRole::SignalIn
+        && elements[target.element].kind == Kind::Slider
+    {
+        fields(connection, &["prescribe", "velocity_m_s"], what)?;
+        let wave = connection
+            .get("velocity_m_s")
+            .ok_or_else(|| format!("{what}: a slider span takes velocity_m_s"))?;
+        let wave = waveform(wave, &format!("{what}.velocity_m_s"))?;
+        return builder
+            .boundary(
+                target.port,
+                Box::new(move |start, dt, values| {
+                    values[0] = wave.value_at(start);
+                    values[1] = wave.value_at(start + dt);
+                }),
+            )
+            .map_err(|error| Refusal::Admission(format!("{what}: {error}")));
+    }
     let domain = match target.carrier {
         Carrier::Power(kind) => Domain::of(kind),
         _ => None,
     };
     let quantity = match (target.carrier, target.role, domain) {
-        // The only signal inputs of a scene are the temperatures a network's
-        // shift is read at.
+        // Slider motion spans were handled above; remaining signal inputs
+        // are the temperatures a network's shift is read at.
         (Carrier::Heat, PortRole::EffortIn, _) | (Carrier::Signal, PortRole::SignalIn, _) => {
             "temperature_k"
         }
@@ -2097,7 +2218,7 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             Kind::NodeCapacitor | Kind::NonlinearCapacitor => vec![("charge_c", Coordinate::Scalar)],
             Kind::NonlinearInductor => vec![("flux_wb", Coordinate::Scalar)],
             Kind::HeatCapacity => vec![("temperature_k", Coordinate::Scalar)],
-            Kind::Source(_) | Kind::CurrentSource | Kind::Heater => vec![("energy_in_j", Coordinate::SourceWork)],
+            Kind::Source(_) | Kind::VelocitySource | Kind::CurrentSource | Kind::Heater => vec![("energy_in_j", Coordinate::SourceWork)],
             Kind::Resistance(_)
             | Kind::ResistanceMatrix
             | Kind::ResistorBranch
@@ -2105,7 +2226,7 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             | Kind::Conductance
             | Kind::HeatNode
             | Kind::Restriction => Vec::new(),
-            Kind::RigidNetwork | Kind::ViscoelasticNetwork | Kind::GasVolume => {
+            Kind::RigidNetwork | Kind::ViscoelasticNetwork | Kind::GasVolume | Kind::Slider => {
                 return Err(format!(
                     "adaptive: {} is a {}, whose state has no error account here; \
                      run it with a fixed step_s",
@@ -2264,13 +2385,32 @@ fn load(path: &Path) -> Result<Device, Refusal> {
 }
 
 impl Device {
-    fn no_claim(&self) -> &'static str {
-        if self.adaptive.is_some() {
+    fn no_claim(&self) -> std::borrow::Cow<'static, str> {
+        let base = if self.adaptive.is_some() {
             ADAPTIVE_NO_CLAIM
-        } else if self.elements.iter().any(|element| !element.bodies.is_empty()) {
+        } else if self
+            .elements
+            .iter()
+            .any(|element| !element.bodies.is_empty())
+        {
             NETWORK_NO_CLAIM
         } else {
             NO_CLAIM
+        };
+        if self
+            .elements
+            .iter()
+            .any(|element| element.kind == Kind::Slider)
+        {
+            // Keep existing scene reports unchanged; only a scene with a
+            // slider replaces the former blanket friction exclusion.
+            let base = base.replace("contact, friction,", "geometric contact, impact,");
+            std::borrow::Cow::Owned(format!(
+                "{base}; dry friction uses constant static/kinetic coefficients and normal force, \
+                 with first-order switching steps and explicitly declared initial slip"
+            ))
+        } else {
+            std::borrow::Cow::Borrowed(base)
         }
     }
 
@@ -2511,7 +2651,7 @@ impl Device {
                 "temperature_k",
                 system.state::<f64>(element.node).copied().unwrap_or(f64::NAN),
             )],
-            Kind::Source(_) | Kind::CurrentSource | Kind::Heater => vec![(
+            Kind::Source(_) | Kind::VelocitySource | Kind::CurrentSource | Kind::Heater => vec![(
                 "energy_in_j",
                 system
                     .state::<SourceAccount>(element.node)
@@ -2519,6 +2659,15 @@ impl Device {
             )],
             Kind::Resistance(domain) => {
                 vec![(domain.names().effort, output("a")), ("heat_w", -output("heat"))]
+            }
+            Kind::Slider => {
+                let state = system.state::<Slip>(element.node);
+                vec![
+                    ("slip_m_s", state.map_or(f64::NAN, |state| -state.slip_m_s())),
+                    ("stuck", state.map_or(f64::NAN, |state| if state.is_stuck() { 1.0 } else { 0.0 })),
+                    ("force_n", output("a")),
+                    ("heat_w", -output("heat")),
+                ]
             }
             Kind::ResistorBranch => {
                 vec![("current_a", output("a")), ("heat_w", -output("heat"))]
@@ -2740,7 +2889,7 @@ impl Device {
                 num(adaptive.last_error_norm), num(adaptive.max_error_norm), num(adaptive.suggested_dt_s)
             );
         }
-        let _ = writeln!(out, ",\"no_claim\":{}}}", quote(self.no_claim()));
+        let _ = writeln!(out, ",\"no_claim\":{}}}", quote(&self.no_claim()));
         out
     }
 }

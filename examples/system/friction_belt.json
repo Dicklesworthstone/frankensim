@@ -1,0 +1,18 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 1.5,
+  "step_s": 0.005,
+  "sample_every_s": 0.25,
+  "elements": {
+    "block": {"kind": "mass", "mass_kg": 2.0},
+    "belt": {"kind": "velocity_source", "velocity_m_s": {"table": [[0.0, 0.0], [0.25, 1.0], [0.5, 3.0], [1.5, 3.0]]}},
+    "friction": {"kind": "slider", "normal_n": 20.0, "static_coefficient": 0.5, "kinetic_coefficient": 0.2, "prescribed_ends": ["b"]},
+    "lining": {"kind": "heat_capacity", "capacity_j_k": 50.0, "temperature_k": 300.0}
+  },
+  "connections": [
+    {"join": ["block.p", "friction.a"]},
+    {"join": ["belt.p", "friction.b"]},
+    {"signal": "belt.span", "to": ["friction.span_b"]},
+    {"join": ["lining.heat", "friction.heat"]}
+  ]
+}

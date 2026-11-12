@@ -2266,3 +2266,207 @@ fn heat_node_scenes_that_cannot_run_are_refused_with_the_reason() {
         "{stderr}"
     );
 }
+
+#[test]
+fn the_friction_belt_holds_breaks_away_and_catches_with_the_heat_in_its_lining() {
+    // G1: piecewise constant acceleration, independent of the discrete law.
+    // A 2 kg block needs 8 N to follow the first ramp (below the 10 N
+    // static limit), then 16 N on the second. It slides at 4 N, hence
+    // 2 m/s2, and catches the 3 m/s belt at 1.25 s. Its final displacement
+    // is 2.875 m; the belt travelled 3.625 m. The 0.75 m of slip makes
+    // 3 J of heat, while 9 J becomes kinetic energy: 12 J from the belt.
+    let scene = std::fs::read_to_string(example("friction_belt.json")).unwrap();
+    for (name, duration, position, velocity, slip, stuck, heat) in [
+        ("held.json", "0.25", 0.125, 1.0, 0.0, 1.0, 0.0),
+        ("sliding.json", "0.5", 0.4375, 1.5, -1.5, 0.0, 0.75),
+        ("caught.json", "1.5", 2.875, 3.0, 0.0, 1.0, 3.0),
+    ] {
+        let path = scratch(
+            name,
+            &scene.replace(
+                "\"duration_s\": 1.5",
+                &format!("\"duration_s\": {duration}"),
+            ),
+        );
+        let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+        assert_eq!(code, 0, "{name}: {stderr}");
+        assert!(stderr.is_empty());
+        for (owner, field, expected, tolerance) in [
+            ("block", "position_m", position, 2.0e-8),
+            ("block", "velocity_m_s", velocity, 2.0e-9),
+            ("friction", "slip_m_s", slip, 2.0e-9),
+            ("friction", "stuck", stuck, 0.0),
+            ("friction", "dissipated_j", heat, 2.0e-8),
+            ("lining", "temperature_k", 300.0 + heat / 50.0, 1.0e-9),
+            ("belt", "energy_in_j", -(velocity * velocity + heat), 4.0e-8),
+        ] {
+            let found = value(&json, &element(owner), field);
+            assert!(
+                (found - expected).abs() <= tolerance,
+                "{name} {owner}.{field}: {found} vs {expected}"
+            );
+        }
+        assert!(
+            value(&json, "\"totals\"", "energy_residual_j").abs() < 1.0e-9,
+            "{json}"
+        );
+        assert!(json.contains("dry friction uses constant static/kinetic coefficients"));
+    }
+}
+
+#[test]
+fn a_slider_arrests_a_thrown_block_in_either_direction_and_returns_its_energy_as_heat() {
+    // G1/G3: v^2/(2 mu_k N/m) is the stopping distance and m v^2/2
+    // is the heat, unchanged when the motion is reversed. Initial slip
+    // uses the scene's mover sign, not the opposite kernel port sign.
+    for sign in [-1.0, 1.0] {
+        let scene = format!(
+            r#"{{
+  "schema": "frankensim.system.v0", "duration_s": 2.0, "step_s": 0.005,
+  "elements": {{
+    "block": {{"kind": "mass", "mass_kg": 2.0, "velocity_m_s": {velocity}}},
+    "friction": {{"kind": "slider", "normal_n": 20.0, "static_coefficient": 0.5,
+                 "kinetic_coefficient": 0.2, "slip_m_s": {velocity}}},
+    "lining": {{"kind": "heat_capacity", "capacity_j_k": 50.0, "temperature_k": 300.0}}
+  }},
+  "connections": [
+    {{"join": ["block.p", "friction.a"]}},
+    {{"prescribe": "friction.b", "velocity_m_s": 0.0}},
+    {{"join": ["lining.heat", "friction.heat"]}}
+  ]
+}}"#,
+            velocity = sign * 3.0
+        );
+        let path = scratch(
+            if sign > 0.0 {
+                "forward.json"
+            } else {
+                "backward.json"
+            },
+            &scene,
+        );
+        let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+        assert_eq!(code, 0, "{stderr}");
+        assert!((value(&json, &element("block"), "position_m") - sign * 2.25).abs() < 1.0e-8);
+        assert!(value(&json, &element("block"), "velocity_m_s").abs() < 1.0e-10);
+        assert!(value(&json, &element("friction"), "slip_m_s").abs() < 1.0e-10);
+        assert_eq!(value(&json, &element("friction"), "stuck"), 1.0);
+        assert!((value(&json, &element("friction"), "dissipated_j") - 9.0).abs() < 1.0e-9);
+        assert!((value(&json, &element("lining"), "temperature_k") - 300.18).abs() < 1.0e-9);
+        assert!(value(&json, "\"totals\"", "energy_residual_j").abs() < 1.0e-9);
+    }
+}
+
+#[test]
+fn a_prescribed_slider_span_uses_the_waveform_endpoints_and_can_reverse() {
+    // A sine's step mean is not either endpoint. Both ways of supplying
+    // the same motion must carry the block through its reversals (max
+    // force 2 * 0.4 * 2 pi < 10 N). The curved velocity retains the
+    // kernel's finite-step position, endpoint-speed and heat errors.
+    let scene = std::fs::read_to_string(example("friction_belt.json")).unwrap();
+    let wave = r#"{"sine": {"amplitude": 0.4, "frequency_hz": 1.0}}"#;
+    let table = r#"{"table": [[0.0, 0.0], [0.25, 1.0], [0.5, 3.0], [1.5, 3.0]]}"#;
+    let source = scene.replace(table, wave);
+    let boundary = source
+        .replace(
+            &format!(
+                "    \"belt\": {{\"kind\": \"velocity_source\", \"velocity_m_s\": {wave}}},\n"
+            ),
+            "",
+        )
+        .replace(
+            r#"{"join": ["belt.p", "friction.b"]}"#,
+            &format!(r#"{{"prescribe": "friction.b", "velocity_m_s": {wave}}}"#),
+        )
+        .replace(
+            r#"{"signal": "belt.span", "to": ["friction.span_b"]}"#,
+            &format!(r#"{{"prescribe": "friction.span_b", "velocity_m_s": {wave}}}"#),
+        );
+    let mut projections = Vec::new();
+    for (name, scene) in [("source.json", source), ("boundary.json", boundary)] {
+        let path = scratch(name, &scene);
+        let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+        assert_eq!(code, 0, "{name}: {stderr}");
+        let position = value(&json, &element("block"), "position_m");
+        assert!(
+            (position - 0.4 / std::f64::consts::PI).abs() < 2.0e-5,
+            "{name}: {position}"
+        );
+        let velocity = value(&json, &element("block"), "velocity_m_s");
+        let heat = value(&json, &element("friction"), "dissipated_j");
+        assert!(velocity.abs() < 1.0e-4, "{name}: {velocity}");
+        assert_eq!(value(&json, &element("friction"), "stuck"), 1.0);
+        for sample in json.split("{\"time_s\":").skip(1) {
+            assert_eq!(value(sample, "\"values\"", "friction.stuck"), 1.0, "{name}");
+        }
+        assert!((0.0..1.0e-3).contains(&heat), "{name}: {heat}");
+        projections.push([position, velocity, heat]);
+    }
+    for (source, boundary) in projections[0].iter().zip(&projections[1]) {
+        assert!(
+            (source - boundary).abs() < 1.0e-10,
+            "{source} vs {boundary}"
+        );
+    }
+}
+
+#[test]
+fn slider_scenes_refuse_invalid_laws_missing_spans_and_unsupported_error_control() {
+    let scene = std::fs::read_to_string(example("friction_belt.json")).unwrap();
+    for (name, from, to, wanted, reason) in [
+        (
+            "normal.json",
+            "\"normal_n\": 20.0",
+            "\"normal_n\": 0.0",
+            3,
+            "normal_n",
+        ),
+        (
+            "coefficients.json",
+            "\"kinetic_coefficient\": 0.2",
+            "\"kinetic_coefficient\": 0.6",
+            3,
+            "kinetic_coefficient",
+        ),
+        (
+            "slip.json",
+            "\"prescribed_ends\": [\"b\"]",
+            "\"prescribed_ends\": [\"b\"], \"slip_m_s\": \"moving\"",
+            3,
+            "slip_m_s must be a number",
+        ),
+        (
+            "repeat.json",
+            "\"prescribed_ends\": [\"b\"]",
+            "\"prescribed_ends\": [\"b\", \"b\"]",
+            3,
+            "an end appears twice",
+        ),
+        (
+            "end.json",
+            "\"prescribed_ends\": [\"b\"]",
+            "\"prescribed_ends\": [\"c\"]",
+            3,
+            "each end must be a or b",
+        ),
+        (
+            "missing_span.json",
+            "    {\"signal\": \"belt.span\", \"to\": [\"friction.span_b\"]},\n",
+            "",
+            4,
+            "friction.span_b",
+        ),
+        (
+            "adaptive.json",
+            "\"duration_s\": 1.5",
+            "\"adaptive\": {\"tolerances\": {}}, \"duration_s\": 1.5",
+            3,
+            "friction is a slider",
+        ),
+    ] {
+        assert!(scene.contains(from), "{name}: test fixture changed");
+        let (code, stderr) = refused(name, &scene.replace(from, to));
+        assert_eq!(code, wanted, "{name}: {stderr}");
+        assert!(stderr.contains(reason), "{name}: {stderr}");
+    }
+}
