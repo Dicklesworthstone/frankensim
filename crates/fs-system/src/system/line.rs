@@ -27,7 +27,7 @@
 
 use fs_exec::Cx;
 
-use super::{BlockWork, System, SystemError};
+use super::{BlockWork, ROUNDING_UNITS, System, SystemError};
 use crate::wiring::Driver;
 
 /// A symmetric part with an eigenvalue below this fraction of the matrix's
@@ -84,10 +84,11 @@ impl Line {
     /// [`NEGATIVE_FRACTION`] of the largest entry has a Cholesky factor.
     fn passive(&mut self) -> bool {
         let width = self.places.len();
-        let largest = self.compliance.iter().fold(0.0_f64, |seen, value| seen.max(value.abs()));
-        if !largest.is_finite() {
+        // Checked entry by entry: a maximum would pass over a NaN.
+        if !self.compliance.iter().all(|value| value.is_finite()) {
             return false;
         }
+        let largest = self.compliance.iter().fold(0.0_f64, |seen, value| seen.max(value.abs()));
         if largest == 0.0 {
             return true;
         }
@@ -203,10 +204,17 @@ impl System {
                 work.condensed.subtract(slot, slope * self.scratch_outputs[offset]);
             }
         }
+        // Singular or not finite: the other components do not say what
+        // flow answers an effort, so there is no line. The refusal names
+        // the component that needed one.
+        let component = line.node;
+        let no_line = |system: &Self| SystemError::LoadLine {
+            node: system.names[component].clone(),
+            reason: "the other components of its block do not determine how the flows at its \
+                     ports answer an effort: their Jacobian is singular or not finite",
+        };
         if !work.condensed.factor() {
-            return Err(SystemError::Singular {
-                nodes: self.names_of(nodes),
-            });
+            return Err(no_line(self));
         }
         // Every row that reads an output of the line component, whichever
         // of its inputs the column is.
@@ -221,9 +229,7 @@ impl System {
                 }
             }
             if !work.condensed.solve(&mut work.residual) {
-                return Err(SystemError::Singular {
-                    nodes: self.names_of(nodes),
-                });
+                return Err(no_line(self));
             }
             for (flow, &(_, _, unknown)) in line.places.iter().enumerate() {
                 line.compliance[flow * width + effort] = if unknown == usize::MAX {
@@ -258,6 +264,13 @@ impl System {
 
     /// Replace the released flows of `block`'s line by the flows on the
     /// line at the efforts just accepted.
+    ///
+    /// A flow on the line is a difference of the released flow and what
+    /// the efforts take away, and it carries the rounding of those terms,
+    /// not of its own size: a held slider's flow is `r - c (r / c)`, zero
+    /// or a unit in the last place of `r`. The interface audit is told
+    /// that rounding, in the units the solve allows everywhere else; told
+    /// nothing, it refused a mass held at rest for one push in seven.
     pub(super) fn line_flows(&mut self, block: usize) {
         let Some(line) = &self.lines[block] else {
             return;
@@ -267,9 +280,13 @@ impl System {
             if unknown == usize::MAX {
                 continue;
             }
+            let mut terms = self.inputs[input].abs();
             for (effort, &(_, output, _)) in line.places.iter().enumerate() {
-                self.inputs[input] -= line.compliance[flow * width + effort] * self.outputs[output];
+                let taken = line.compliance[flow * width + effort] * self.outputs[output];
+                self.inputs[input] -= taken;
+                terms += taken.abs();
             }
+            self.input_allowance[input] += ROUNDING_UNITS * f64::EPSILON * terms;
         }
     }
 }
