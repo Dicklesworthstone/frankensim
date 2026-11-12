@@ -1606,6 +1606,9 @@ impl SystemBuilder {
             accepted_inputs: vec![0.0; inputs],
             accepted_outputs: vec![0.0; outputs],
             input_allowance: vec![0.0; inputs],
+            block_rounding_w: vec![0.0; inputs],
+            accepted_allowance: vec![0.0; inputs],
+            accepted_block_rounding_w: vec![0.0; inputs],
             receipts: vec![Receipt::lossless(0.0, 0.0); count],
             port_energy: vec![0.0; ports],
             port_entropy: vec![0.0; ports],
@@ -1690,6 +1693,9 @@ struct BlockWork {
     /// other wires make of its target when carried once through `slopes`.
     floor: Vec<f64>,
     carried: Vec<f64>,
+    /// Per wire, the size its residual is relative to: that of its
+    /// tolerance group, or its own for a flow on a load line.
+    scale: Vec<f64>,
 }
 
 impl BlockWork {
@@ -1799,6 +1805,7 @@ impl BlockWork {
             slopes: Vec::with_capacity(entries),
             floor: vec![0.0; m],
             carried: vec![0.0; m],
+            scale: vec![0.0; m],
         }
     }
 }
@@ -1856,6 +1863,18 @@ pub struct System {
     /// rounding estimate and the configured absolute tolerance. Zero for an
     /// input copied from its driver.
     input_allowance: Vec<f64>,
+    /// Per scalar input that a block with a load line solved for in the
+    /// current trial: the rounding of that block's largest power [W]. The
+    /// line component is differenced, so an update leaves every wire of
+    /// the block with what the differencing left of the step's change, and
+    /// the block's unknowns are solved together: a junction that carries
+    /// next to nothing beside one that holds much cannot be closed to its
+    /// own size. The audit allows a junction this once. Zero in every
+    /// other block, whose junctions are audited as they were.
+    block_rounding_w: Vec<f64>,
+    /// `input_allowance` and `block_rounding_w` of the last accepted step.
+    accepted_allowance: Vec<f64>,
+    accepted_block_rounding_w: Vec<f64>,
     receipts: Vec<Receipt>,
     port_energy: Vec<f64>,
     port_entropy: Vec<f64>,
@@ -2018,6 +2037,28 @@ impl System {
     #[must_use]
     pub fn last_output(&self, port: PortRef) -> &[f64] {
         &self.accepted_outputs[self.output_range(port)]
+    }
+
+    /// What the solve of the last accepted step told the interface audit
+    /// it had left in each input of `port`, in the input's unit: its
+    /// rounding estimate and the configured absolute tolerance, and for a
+    /// flow on a load line the rounding of the difference it is. Zero for
+    /// an input that no block solved for. A restored checkpoint does not
+    /// carry it.
+    #[must_use]
+    pub fn last_allowance(&self, port: PortRef) -> &[f64] {
+        &self.accepted_allowance[self.input_range(port)]
+    }
+
+    /// The rounding of its block's largest power [W] that the last
+    /// accepted step told the audit for the junction of `port`, on top of
+    /// [`Self::last_allowance`]: nonzero only where a block with a
+    /// component on a load line solved for an input of the port.
+    #[must_use]
+    pub fn last_block_rounding_w(&self, port: PortRef) -> f64 {
+        self.accepted_block_rounding_w[self.input_range(port)]
+            .iter()
+            .fold(0.0, |most, &rounding| most.max(rounding))
     }
 
     /// Starting value for the input side of `port` in the next step's
@@ -2220,6 +2261,17 @@ impl System {
         largest
     }
 
+    /// What the audit is told for every junction of `block` besides the
+    /// allowances of its inputs: the rounding of the block's largest power
+    /// if the block has a component on a load line, nothing otherwise.
+    fn block_rounding(&self, block: usize, power_scale: f64) -> f64 {
+        if self.lines[block].is_some() {
+            ROUNDING_UNITS * f64::EPSILON * power_scale
+        } else {
+            0.0
+        }
+    }
+
     /// The second convergence test of a block: the residuals carried once
     /// through `slopes`. `None` when no wire's target moves by more than
     /// its own tolerance,
@@ -2239,7 +2291,7 @@ impl System {
         unknowns: &[usize],
         residual: &[f64],
         slopes: &[(usize, usize, f64)],
-        group_scale: &[f64],
+        scale: &[f64],
         power_scale: f64,
         floor: &mut [f64],
         carried: &mut [f64],
@@ -2269,9 +2321,8 @@ impl System {
         // value that is not a number fails the comparison and is taken.
         let mut moved = None;
         let mut furthest = 0.0_f64;
-        for (row, &index) in unknowns.iter().enumerate() {
-            let allowed =
-                self.config.relative_tolerance * group_scale[self.input_group[index]] + floor[row];
+        for row in 0..unknowns.len() {
+            let allowed = self.config.relative_tolerance * scale[row] + floor[row];
             let excess = carried[row] - allowed;
             if !(excess <= 0.0) && !(excess <= furthest) {
                 moved = Some(row);
@@ -2389,6 +2440,7 @@ impl System {
             slopes,
             floor,
             carried,
+            scale,
         } = work;
         let affine = *affine;
         // Whether this step has already used the factors an affine block
@@ -2414,9 +2466,9 @@ impl System {
             // released flow and its driver sums what the line component's
             // own efforts take away, so by those sizes a slider that holds
             // a mass at rest would be judged against the flow it would
-            // have if it let go. It is judged like every other flow, by
-            // what crosses and by what the other components give; the
-            // rounding of the difference is in its allowance below.
+            // have if it let go. Its size is what crosses and what the
+            // other components give: that is what it adds to the scale of
+            // its group here, and what it is itself relative to below.
             group_scale.fill(0.0);
             for (row, &index) in unknowns.iter().enumerate() {
                 let driver = &self.drivers[index];
@@ -2465,13 +2517,25 @@ impl System {
                 if self.input_is_energy_rate[index] {
                     allowance[row] += ROUNDING_UNITS * f64::EPSILON * power_scale;
                 }
-                // A flow on a load line: the rounding of the difference it
-                // is, which no assembly estimates.
-                if let Some((_, rounding)) = self.crossing(block, row) {
+                // A flow on a load line. It is relative to its own size,
+                // what crosses and what the other components give, not to
+                // the largest flow of the block: the audit of its junction
+                // knows that junction only, and a mass held beside one
+                // that moves is at rest all the same. Its allowance has
+                // the rounding of the difference it is, which no assembly
+                // estimates. And the solve takes it only at half of what
+                // the audit is then told, so that a step taken at the edge
+                // of the one is not refused at the edge of the other.
+                scale[row] = group_scale[self.input_group[index]];
+                let mut taken_at = allowance[row];
+                if let Some((flow, rounding)) = self.crossing(block, row) {
+                    scale[row] = flow.abs().max(
+                        self.drivers[index].magnitude_of_others(&self.outputs, &self.boundary_values),
+                    );
                     allowance[row] += rounding;
+                    taken_at = 0.5 * allowance[row];
                 }
-                let allowed = self.config.relative_tolerance * group_scale[self.input_group[index]]
-                    + allowance[row];
+                let allowed = self.config.relative_tolerance * scale[row] + taken_at;
                 let excess = residual[row].abs() - allowed;
                 if !(excess <= 0.0) {
                     converged = false;
@@ -2524,7 +2588,7 @@ impl System {
                         unknowns,
                         residual,
                         slopes,
-                        group_scale,
+                        scale,
                         power_scale,
                         floor,
                         carried,
@@ -2538,8 +2602,10 @@ impl System {
                 }
             }
             if converged {
+                let block_rounding_w = self.block_rounding(block, power_scale);
                 for (row, &index) in unknowns.iter().enumerate() {
                     self.input_allowance[index] = allowance[row];
+                    self.block_rounding_w[index] = block_rounding_w;
                 }
                 return Ok(Ok(iterations));
             }
@@ -2612,7 +2678,7 @@ impl System {
                     unknowns,
                     residual,
                     slopes,
-                    group_scale,
+                    scale,
                     power_scale,
                     floor,
                     carried,
@@ -2638,6 +2704,7 @@ impl System {
                     // has gone to zero (a body come to the temperature of
                     // what it touches) would allow a rounding-sized
                     // difference of large terms nothing at all.
+                    let block_rounding_w = self.block_rounding(block, power_scale);
                     for (row, &index) in unknowns.iter().enumerate() {
                         let mut told = self.config.absolute_tolerance
                             + ROUNDING_UNITS * f64::EPSILON * rounding[row];
@@ -2648,6 +2715,7 @@ impl System {
                             told += rounding;
                         }
                         self.input_allowance[index] = told;
+                        self.block_rounding_w[index] = block_rounding_w;
                     }
                     return Ok(Ok(iterations));
                 };
@@ -2673,6 +2741,7 @@ impl System {
     /// Fill every candidate for a step of `dt_s`.
     fn trial(&mut self, dt_s: f64, cx: &Cx<'_>) -> Result<Trial, SystemError> {
         self.input_allowance.fill(0.0);
+        self.block_rounding_w.fill(0.0);
         let t0 = self.time.value();
         for ((_, value), slot) in self.boundaries.iter().zip(&mut self.boundary_values) {
             value(t0, dt_s, slot);
@@ -2935,10 +3004,12 @@ impl System {
             // stream the enthalpy rate is the energy.
             let mut solve_slack_j = 0.0_f64;
             let mut mass_slack_kg = 0.0_f64;
+            let mut block_rounding_w = 0.0_f64;
             for port in &members {
                 let spec = &self.nodes[port.node].ports()[port.port];
                 let outputs = self.output_range(*port);
                 for (offset, index) in self.input_range(*port).enumerate() {
+                    block_rounding_w = block_rounding_w.max(self.block_rounding_w[index]);
                     if spec.carrier() == Carrier::Stream
                         && spec.role() == PortRole::FlowIn
                         && offset == STREAM_MASS_RATE
@@ -2970,6 +3041,7 @@ impl System {
             }
             let tolerance_j = self.config.interface_energy_tolerance * magnitude
                 + solve_slack_j
+                + dt_s * block_rounding_w
                 + f64::MIN_POSITIVE;
             if !(energy.is_finite() && tolerance_j.is_finite() && energy.abs() <= tolerance_j) {
                 return Err(SystemError::Interface {
@@ -3023,6 +3095,8 @@ impl System {
         }
         self.accepted_inputs.copy_from_slice(&self.inputs);
         self.accepted_outputs.copy_from_slice(&self.outputs);
+        self.accepted_allowance.copy_from_slice(&self.input_allowance);
+        self.accepted_block_rounding_w.copy_from_slice(&self.block_rounding_w);
         self.time.add(dt_s);
         self.steps += 1;
         self.ledger.steps += 1;

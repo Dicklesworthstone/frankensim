@@ -116,9 +116,18 @@ fn on_the_ground(velocity_m_s: f64, push_n: Option<f64>) -> (System, NodeId, Nod
     (system, mass, rubbing, body)
 }
 
-/// A mass at rest on the ground under a push that follows `push`: the
-/// system, the mass and the slider.
-fn pushed_by(push: Waveform) -> (System, NodeId, NodeId) {
+/// What a held mass is joined to besides, in [`pushed_by`]: a second mass
+/// of 2 kg with the given velocity [m/s], through a spring [N/m] or a
+/// damper [N s/m].
+#[derive(Clone, Copy)]
+enum Beside {
+    Spring(f64, f64),
+    Damper(f64, f64),
+}
+
+/// A mass at rest on the ground under a push that follows `push`, alone or
+/// joined to a second mass: the system, the mass and the slider.
+fn pushed_by(push: Waveform, beside: Option<Beside>) -> (System, NodeId, NodeId) {
     let mut builder = SystemBuilder::new();
     let mass = builder
         .add_with_tangent(
@@ -134,12 +143,39 @@ fn pushed_by(push: Waveform) -> (System, NodeId, NodeId) {
     let pusher = builder
         .add_with_tangent("push", Force::new(push), SourceAccount::default())
         .unwrap();
-    builder
-        .common_flow(
-            port(&builder, mass, "p"),
-            &[port(&builder, rubbing, "a"), port(&builder, pusher, "p")],
-        )
-        .unwrap();
+    let mut members = vec![port(&builder, rubbing, "a"), port(&builder, pusher, "p")];
+    if let Some(beside) = beside {
+        let (Beside::Spring(_, velocity_m_s) | Beside::Damper(_, velocity_m_s)) = beside;
+        let other = builder
+            .add_with_tangent(
+                "other",
+                Mass::new(2.0).unwrap(),
+                Motion {
+                    position_m: 0.0,
+                    velocity_m_s,
+                },
+            )
+            .unwrap();
+        let link = match beside {
+            Beside::Spring(stiffness, _) => builder
+                .add_with_tangent("link", Spring::new(stiffness, 0.0).unwrap(), 0.0)
+                .unwrap(),
+            Beside::Damper(damping, _) => {
+                let link = builder
+                    .add_with_tangent("link", Damper::new(damping).unwrap(), ())
+                    .unwrap();
+                builder
+                    .boundary(port(&builder, link, "heat"), Box::new(|_, _, values| values[0] = 300.0))
+                    .unwrap();
+                link
+            }
+        };
+        members.push(port(&builder, link, "a"));
+        builder
+            .common_flow(port(&builder, other, "p"), &[port(&builder, link, "b")])
+            .unwrap();
+    }
+    builder.common_flow(port(&builder, mass, "p"), &members).unwrap();
     builder
         .boundary(port(&builder, rubbing, "b"), Box::new(|_, _, values| values[0] = 0.0))
         .unwrap();
@@ -147,6 +183,33 @@ fn pushed_by(push: Waveform) -> (System, NodeId, NodeId) {
         .boundary(port(&builder, rubbing, "heat"), Box::new(|_, _, values| values[0] = 300.0))
         .unwrap();
     (builder.seal().unwrap(), mass, rubbing)
+}
+
+/// What a step that held the mass has left, with `c` the mass's answer to
+/// a force, `dt / (2 m)`. Returns the larger of the flow at the slider's
+/// port and the mass's mean velocity, as a part of the rounding the audit
+/// was told for the wire.
+fn held_to_rounding(system: &System, mass: NodeId, rubbing: NodeId, c: f64, at: &str) -> f64 {
+    let (at_slider, at_mass) = (system.port(rubbing, "a").unwrap(), system.port(mass, "p").unwrap());
+    assert!(system.state::<Slip>(rubbing).unwrap().is_stuck(), "{at}");
+    // What the audit is told for the wire, read back and by name: the
+    // rounding of the published flow, 16 eps of the released flow and of
+    // what the force takes away (c |force| each), and, where the step was
+    // taken with slopes, the wire's own, 16 eps of what its target
+    // depends on (the released flow once more). No more than the two.
+    let force = system.last_output(at_slider)[0].abs();
+    let told = system.last_allowance(at_slider)[0];
+    let published = 16.0 * f64::EPSILON * 2.0 * c * force;
+    assert!(
+        told >= 0.95 * published && told <= 1.05 * 1.5 * published,
+        "{at}: told {told}, the published flow's rounding {published}"
+    );
+    // The solve took the wire at half of that, so the flow that is
+    // published and the mass's mean velocity are both well inside it.
+    let flow = system.last_input(at_slider)[0].abs();
+    let mean = system.last_output(at_mass)[0].abs();
+    assert!(flow <= told && mean <= told, "{at}: {flow} and {mean} against {told}");
+    if told > 0.0 { flow.max(mean) / told } else { 0.0 }
 }
 
 #[test]
@@ -165,9 +228,10 @@ fn a_mass_held_under_a_push_that_changes_is_taken_at_every_step() {
     //   4 N sin(2 pi 3.14 t): 35 steps, 8.4391e-19 J against 1.7584e-20 J.
     // (Found by the independent review of ef1631e0d2. The landed test held
     // the mass under a constant push, where the first check takes the step
-    // with no update.) A flow on the line is now judged by what crosses.
-    // Every step is taken, and what is left at the slider's port is inside
-    // the rounding the audit is told for it.
+    // with no update.) A flow on the line is judged by what crosses, and
+    // taken at half of what the audit is told for it. Every step is taken;
+    // what the audit is told is the named rounding; the flow left at the
+    // slider's port and the mass's mean velocity are inside it.
     let dt = 1.0e-3_f64;
     let c = 0.5 * dt / MASS_KG;
     let cases: [(&str, Waveform); 3] = [
@@ -176,8 +240,7 @@ fn a_mass_held_under_a_push_that_changes_is_taken_at_every_step() {
         ("4 N sin(2 pi 3.14 t)", Waveform::sine(4.0, 2.0 * PI * 0.5, 0.0, 0.0).unwrap()),
     ];
     for (name, push) in cases {
-        let (mut system, mass, rubbing) = pushed_by(push);
-        let at_slider = system.port(rubbing, "a").unwrap();
+        let (mut system, mass, rubbing) = pushed_by(push, None);
         let (mut iterations, mut most, mut worst) = (0_u32, 0_u32, 0.0_f64);
         with_cx(|cx| {
             for step in 0..400 {
@@ -186,31 +249,228 @@ fn a_mass_held_under_a_push_that_changes_is_taken_at_every_step() {
                     .unwrap_or_else(|error| panic!("{name}, step {step}: {error}"));
                 iterations += report.iterations;
                 most = most.max(report.iterations);
-                assert!(system.state::<Slip>(rubbing).unwrap().is_stuck(), "{name}, step {step}");
-                // The published flow is the released flow less what the
-                // force takes away, c |force| each: its rounding is what
-                // the audit is told, 16 eps of the two together.
-                let force = system.last_output(at_slider)[0];
-                let flow = system.last_input(at_slider)[0];
-                let told = 16.0 * f64::EPSILON * 2.0 * c * force.abs();
-                assert!(flow.abs() <= told, "{name}, step {step}: {flow} against {told}");
-                if told > 0.0 {
-                    worst = worst.max(flow.abs() / told);
-                }
+                let at = format!("{name}, step {step}");
+                worst = worst.max(held_to_rounding(&system, mass, rubbing, c, &at));
             }
         });
         assert_eq!(system.steps(), 400);
-        let moved = *system.state::<Motion>(mass).unwrap();
         eprintln!(
-            "held under {name}: 400 steps taken, {iterations} iterations ({most} at most in a step); \
-             the flow left at the slider's port is at most {worst:.3} of the rounding the audit is \
-             told; the mass ends at {:e} m/s, {:e} m from where it was",
-            moved.velocity_m_s, moved.position_m
+            "held under {name}: 400 steps taken, {iterations} updates ({most} at most in a step); \
+             the flow left at the slider's port and the mass's mean velocity are at most \
+             {worst:.3} of the rounding the audit is told"
         );
         // Two updates at most: one for the push that changed, one that
         // closes what the differenced slider left of it.
         assert!(most <= 2, "{name}: {most}");
     }
+}
+
+#[test]
+fn a_mass_held_under_a_slow_push_is_taken_for_as_long_as_it_lasts() {
+    // The solve took a line's wire at exactly the allowance the audit was
+    // then told for it. The residual it judges is formed from the released
+    // flow and what the force takes away, which swamp the mass's own
+    // velocity, so a step taken at 0.995 of that allowance was over it by
+    // 0.08 % where the audit adds up the junction, and was refused:
+    //   3 N rising to 3.3 N in 20 s: 1728 steps taken, then connection 0
+    //     left -2.4416e-20 J uncancelled (tolerance 2.4397e-20 J);
+    //   6 N + 2 N sin(2 pi 0.05 t): 14939 steps, -4.2666e-20 J against
+    //     4.2640e-20 J.
+    // (Found by the independent review of 74529fda7f, whose test ran 400
+    // steps.) The solve now takes such a wire at half of what the audit
+    // is told.
+    let dt = 1.0e-3_f64;
+    let c = 0.5 * dt / MASS_KG;
+    let cases: [(&str, Waveform, u32); 2] = [
+        ("3 N rising to 3.3 N in 20 s", Waveform::table(vec![(0.0, 3.0), (20.0, 3.3)]).unwrap(), 2000),
+        ("6 N + 2 N sin(2 pi 0.05 t)", Waveform::sine(2.0, 0.05, 0.0, 6.0).unwrap(), 16000),
+    ];
+    for (name, push, steps) in cases {
+        let (mut system, mass, rubbing) = pushed_by(push, None);
+        let mut worst = 0.0_f64;
+        with_cx(|cx| {
+            for step in 0..steps {
+                system
+                    .step(dt, cx)
+                    .unwrap_or_else(|error| panic!("{name}, step {step}: {error}"));
+                let at = format!("{name}, step {step}");
+                worst = worst.max(held_to_rounding(&system, mass, rubbing, c, &at));
+            }
+        });
+        eprintln!(
+            "held under {name}: {steps} steps taken; the flow at the slider's port and the \
+             mass's mean velocity are at most {worst:.3} of the rounding the audit is told"
+        );
+        // Half the allowance, and the rounding of forming the residual.
+        assert!(worst <= 0.6, "{name}: {worst}");
+    }
+}
+
+#[test]
+fn a_mass_held_beside_another_that_moves_is_taken_at_every_step() {
+    // The solve judged every flow of a block against the largest flow of
+    // its kind in the block. A held mass joined to another that moves was
+    // then judged against the other's velocity, and the audit of its own
+    // junction, which is at rest, refused what the solve had taken (4.9 N
+    // rising to 4.9196 N in 0.4 s on the held mass, a second mass of 2 kg):
+    //   at 0.2 m/s on a spring of 100 N/m: 1 step, then connection 1 left
+    //     1.7830e-19 J uncancelled (tolerance 6.4675e-20 J);
+    //   at 0.2 m/s on a damper of 5 N s/m: refused at the first step,
+    //     1.4487e-19 J against 6.1732e-20 J;
+    //   at rest on the spring: 68 steps, then the second mass's own
+    //     junction, 1.9347e-50 J against 6.8756e-52 J.
+    // (Found by the independent review of 74529fda7f.) A flow on the line
+    // is now relative to its own size, and the audit allows every junction
+    // of a block with a line the rounding of the block's largest power:
+    // the second mass's junction carries 1e-43 J beside one that holds 5 N
+    // and is solved together with it.
+    let dt = 1.0e-3_f64;
+    let c = 0.5 * dt / MASS_KG;
+    let cases = [
+        ("a mass at 0.2 m/s on a spring of 100 N/m", Beside::Spring(100.0, 0.2)),
+        ("a mass at 0.2 m/s on a damper of 5 N s/m", Beside::Damper(5.0, 0.2)),
+        ("a mass at rest on a spring of 100 N/m", Beside::Spring(100.0, 0.0)),
+    ];
+    for (name, beside) in cases {
+        let push = Waveform::table(vec![(0.0, 4.9), (0.4, 4.9196)]).unwrap();
+        let (mut system, mass, rubbing) = pushed_by(push, Some(beside));
+        let (mut updates, mut worst) = (0_u32, 0.0_f64);
+        with_cx(|cx| {
+            for step in 0..2000 {
+                let report = system
+                    .step(dt, cx)
+                    .unwrap_or_else(|error| panic!("{name}, step {step}: {error}"));
+                updates += report.iterations;
+                let at = format!("{name}, step {step}");
+                worst = worst.max(held_to_rounding(&system, mass, rubbing, c, &at));
+            }
+        });
+        eprintln!(
+            "held beside {name}: 2000 steps taken, {updates} updates; the flow at the slider's \
+             port and the held mass's mean velocity are at most {worst:.3} of the rounding the \
+             audit is told"
+        );
+    }
+}
+
+/// A small generator of the same numbers on every build (splitmix64).
+struct Draw(u64);
+
+impl Draw {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn pick(&mut self, of: &[f64]) -> f64 {
+        of[(self.next() % of.len() as u64) as usize]
+    }
+
+    fn between(&mut self, low: f64, high: f64) -> f64 {
+        low + (high - low) * (self.next() >> 11) as f64 / 9_007_199_254_740_992.0
+    }
+}
+
+/// A first mass on the ground through the slider, pushed or not, joined by
+/// a spring, a damper or both to a second mass that moves or not.
+fn drawn_pair(draw: &mut Draw) -> (System, NodeId, f64) {
+    let first_kg = draw.pick(&[0.5, 2.0]);
+    let second_kg = draw.pick(&[0.5, 2.0, 30.0]);
+    let (spring, damper) = match draw.next() % 3 {
+        0 => (Some(draw.pick(&[30.0, 100.0, 800.0])), None),
+        1 => (None, Some(draw.pick(&[2.0, 5.0, 60.0]))),
+        _ => (Some(draw.pick(&[30.0, 800.0])), Some(draw.pick(&[2.0, 60.0]))),
+    };
+    let push = match draw.next() % 4 {
+        0 => None,
+        1 => Some(Waveform::constant(draw.between(-8.0, 8.0)).unwrap()),
+        2 => Some(Waveform::sine(draw.between(1.0, 8.0), draw.between(0.2, 9.0), 0.0, 0.0).unwrap()),
+        _ => {
+            let from = draw.between(-6.0, 6.0);
+            let to = from + draw.between(-3.0, 3.0);
+            Some(Waveform::table(vec![(0.0, from), (draw.between(0.5, 30.0), to)]).unwrap())
+        }
+    };
+    let dt = draw.pick(&[1.0e-3, 1.0e-4]);
+    let second_m_s = draw.pick(&[0.0, 0.0, 0.05, 0.5]);
+    let at = |velocity_m_s: f64| Motion {
+        position_m: 0.0,
+        velocity_m_s,
+    };
+    let mut builder = SystemBuilder::new();
+    let mass = builder.add_with_tangent("mass", Mass::new(first_kg).unwrap(), at(0.0)).unwrap();
+    let rubbing = builder.add_on_line("slider", slider(), Slip::stuck()).unwrap();
+    let other = builder
+        .add_with_tangent("other", Mass::new(second_kg).unwrap(), at(second_m_s))
+        .unwrap();
+    let mut members = vec![port(&builder, rubbing, "a")];
+    let mut theirs = Vec::new();
+    if let Some(push) = push {
+        let pusher = builder
+            .add_with_tangent("push", Force::new(push), SourceAccount::default())
+            .unwrap();
+        members.push(port(&builder, pusher, "p"));
+    }
+    if let Some(stiffness) = spring {
+        let link = builder
+            .add_with_tangent("spring", Spring::new(stiffness, 0.0).unwrap(), 0.0)
+            .unwrap();
+        members.push(port(&builder, link, "a"));
+        theirs.push(port(&builder, link, "b"));
+    }
+    if let Some(damping) = damper {
+        let link = builder
+            .add_with_tangent("damper", Damper::new(damping).unwrap(), ())
+            .unwrap();
+        builder
+            .boundary(port(&builder, link, "heat"), Box::new(|_, _, values| values[0] = 300.0))
+            .unwrap();
+        members.push(port(&builder, link, "a"));
+        theirs.push(port(&builder, link, "b"));
+    }
+    builder.common_flow(port(&builder, mass, "p"), &members).unwrap();
+    builder.common_flow(port(&builder, other, "p"), &theirs).unwrap();
+    builder
+        .boundary(port(&builder, rubbing, "b"), Box::new(|_, _, values| values[0] = 0.0))
+        .unwrap();
+    builder
+        .boundary(port(&builder, rubbing, "heat"), Box::new(|_, _, values| values[0] = 300.0))
+        .unwrap();
+    (builder.seal().unwrap(), rubbing, dt)
+}
+
+#[test]
+fn no_step_of_160_drawn_pairs_on_the_ground_is_refused() {
+    // A standing property: a mass on the ground through the slider, joined
+    // to a second mass that moves or rests, under a push that is constant,
+    // a sine, a ramp or none, 2500 steps each. Whatever the slider does,
+    // hold or slide, no step is refused. (On ef1631e0d2 a junction's audit
+    // refused 121 of these 160 graphs, on 74529fda7f 76.)
+    let mut draw = Draw(20_261_112);
+    let (mut held, mut slid) = (0_u32, 0_u32);
+    for case in 0..160 {
+        let (mut system, rubbing, dt) = drawn_pair(&mut draw);
+        let mut let_go = false;
+        with_cx(|cx| {
+            for step in 0..2500 {
+                system
+                    .step(dt, cx)
+                    .unwrap_or_else(|error| panic!("pair {case}, step {step}: {error}"));
+                let_go |= !system.state::<Slip>(rubbing).unwrap().is_stuck();
+            }
+        });
+        if let_go {
+            slid += 1;
+        } else {
+            held += 1;
+        }
+    }
+    eprintln!("160 drawn pairs, 2500 steps each, none refused: held throughout in {held}, sliding at some step in {slid}");
+    // The draw covers both.
+    assert!(held >= 8 && slid >= 8, "{held} {slid}");
 }
 
 /// How the side of [`carried`] is moved.
@@ -294,18 +554,62 @@ fn leaving_rest_at(from_s: f64) -> Waveform {
 }
 
 #[test]
-fn a_side_that_leaves_rest_accelerating_breaks_the_pair_away_at_the_third_step() {
+fn a_side_that_leaves_rest_accelerating_breaks_the_pair_away_within_a_few_steps() {
     // The side leaves rest at t = 0. Its first mean is a dt / 2 and the
     // mass is at rest, so the pair that was declared stuck starts with a
-    // slip the slider is not told. The first step holds on the mean, with
-    // the 8 N; the second sees a jump of a dt, twice what there is, and
-    // gives nothing; the third is asked for 16 N and breaks away. The mass
-    // is left behind under the sliding force: at 0.2 s it has 0.586 m/s of
-    // the side's 0.8, and 0.127 J of heat are booked for a pair that in
-    // truth never slips. At every step length, through the source and
-    // through a boundary that gives the same means.
+    // slip the slider is not told, and its record is off by a dt / 2 from
+    // the first step on. The first step holds on the mean, with the 8 N.
+    // What follows hangs on the sign of a rounding residue: either the
+    // slider goes on holding on the mean for a while, exactly, or it sees
+    // a jump of a dt, twice what there is, gives nothing in that step, is
+    // asked for 16 N in the next and breaks away. It breaks away within a
+    // few steps at every step length tried, the mass is left behind under
+    // the sliding force, at 0.2 s it has about 0.73 of the side's 0.8 m/s,
+    // and about 0.12 J of heat are booked for a pair that in truth never
+    // slips.
     let (needed_n, slide_n) = (MASS_KG * SIDE_M_S2, SLIDES * NORMAL_N);
     assert!(needed_n < 0.82 * HOLDS * NORMAL_N);
+    // At step lengths that are not powers of two apart: 8 N or nothing
+    // until it breaks away, within 20 steps (seen: at the third, fifth,
+    // seventh and seventeenth), then the sliding force.
+    let mut broke = Vec::new();
+    for dt in [0.9e-3_f64, 0.7e-3, 0.6e-3, 0.3e-3, 1.5e-3, 1.0e-3 / 3.0] {
+        let wave = leaving_rest_at(0.0);
+        let (mut system, mass, rubbing, body) = carried(Moved::Source(wave.clone()), None);
+        let at_mass = system.port(rubbing, "a").unwrap();
+        let steps = (0.2 / dt).round() as u32;
+        let mut at = None;
+        with_cx(|cx| {
+            for step in 0..steps {
+                system.step(dt, cx).unwrap();
+                let force = system.last_output(at_mass)[0];
+                if at.is_none() && !system.state::<Slip>(rubbing).unwrap().is_stuck() {
+                    at = Some(step);
+                }
+                if at.is_some() {
+                    assert_eq!(force, slide_n, "dt {dt}, step {step}");
+                } else {
+                    let holds = (force - needed_n).abs() <= 1.0e-6;
+                    assert!(holds || force.abs() <= 1.0e-6, "dt {dt}, step {step}: {force}");
+                }
+            }
+        });
+        let at = at.expect("it breaks away");
+        assert!(at <= 20, "dt {dt}: {at}");
+        broke.push(at);
+        let part = system.state::<Motion>(mass).unwrap().velocity_m_s / wave.value_at(system.time_s());
+        assert!(part > 0.72 && part < 0.76, "dt {dt}: {part}");
+        let heat_j = received_j(&system, body);
+        assert!(heat_j > 0.11 && heat_j < 0.14, "dt {dt}: {heat_j}");
+    }
+    eprintln!(
+        "a side that leaves rest at 4 m/s2: broken away at step index {broke:?} at 0.9, 0.7, \
+         0.6, 0.3, 1.5 and 1/3 ms"
+    );
+    // At 1, 0.5 and 0.25 ms, powers of two apart and so the same
+    // arithmetic rescaled: 8 N, nothing, and broken away at the third
+    // step, through the source and through a boundary that gives the same
+    // means.
     for dt in [1.0e-3_f64, 0.5e-3, 0.25e-3] {
         for through_source in [true, false] {
             let wave = leaving_rest_at(0.0);
@@ -546,16 +850,20 @@ fn a_held_mass_is_taken_under_any_push_and_a_planted_flow_is_still_refused() {
         other => panic!("a planted force is refused by the first connection's audit: {other:?}"),
     };
     let allowed_m_s = tolerance_j / (dt * held_n);
-    // Two terms, each 16 units of eps: the published flow's own (the
-    // released flow and what the effort takes away, c * push each) and the
-    // one a step taken at its first check is told for the wire's residual
-    // (the released flow). Three times 16 eps c push in all.
+    // Three terms by name, each 16 units of eps. The published flow's own
+    // rounding: the released flow and what the effort takes away, c * push
+    // each. The wire's rounding: what its target depends on, the released
+    // flow. And the rounding of the block's largest power, which the audit
+    // allows every junction of a block with a line: at a held slider that
+    // power is the released flow against the force, c * push * push. As a
+    // flow at the slider's port, four times 16 eps c push in all.
     let published = 16.0 * f64::EPSILON * (2.0 * c * push);
-    let residual = 16.0 * f64::EPSILON * (c * push);
-    assert!(
-        allowed_m_s >= published && allowed_m_s <= 1.05 * (published + residual),
-        "{allowed_m_s} against {published} and {residual}"
-    );
+    let wire = 16.0 * f64::EPSILON * (c * push);
+    let power_w = 16.0 * f64::EPSILON * (c * push * push);
+    let within = |got: f64, named: f64| (got - named).abs() <= 0.05 * named;
+    // The audit's tolerance is their sum.
+    let sum = published + wire + power_w / held_n;
+    assert!(within(allowed_m_s, sum), "{allowed_m_s} against {published}, {wire}, {power_w} W");
     eprintln!(
         "the audit allows a held slider's port {allowed_m_s:e} m/s: {:.3} of the published \
          flow's own rounding term",
@@ -577,10 +885,16 @@ fn a_held_mass_is_taken_under_any_push_and_a_planted_flow_is_still_refused() {
     let ratio = defect_j.abs() / tolerance_j;
     assert!(ratio > 80.0 && ratio < 120.0, "{ratio}");
     assert_eq!(system.steps(), 3);
-    // A quarter of it is taken, with no update.
+    // A quarter of it is taken, with no update. Of that step, the first
+    // two terms are what the solve told for the wire and the third what it
+    // told for the block, read back.
     let report = planted(&mut system, leaving(0.25)).unwrap();
     assert_eq!(report.iterations, 0);
     assert_eq!(system.steps(), 4);
+    let told = system.last_allowance(at_slider)[0];
+    assert!(within(told, published + wire), "{told} against {published} and {wire}");
+    let told_w = system.last_block_rounding_w(at_slider);
+    assert!(within(told_w, power_w), "{told_w} against {power_w}");
 
     // At the solve's ordinary tolerance the plant never reaches the audit:
     // the force that was refused a hundred times over is corrected in one
@@ -1373,6 +1687,9 @@ fn a_slider_between_given_velocities_warms_a_body_through_a_loop() {
     let warmed_j = received_j(&system, body);
     assert!((warmed_j - loss_j).abs() <= 1.0e-12 * loss_j, "{warmed_j} vs {loss_j}");
     assert_eq!(system.state::<Slip>(rubbing).unwrap().slip_m_s(), slip);
+    // The block has no line, so its junction is audited as that of every
+    // block without one: the rounding of the block's power is not told.
+    assert_eq!(system.last_block_rounding_w(warmth), 0.0);
 }
 
 #[test]
@@ -1419,8 +1736,17 @@ fn a_run_with_a_line_and_its_replay_agree_to_the_bit() {
 /// The row of `law` that a step of the kernel is a point of. The slider
 /// started the step as `last`, on a line of compliance `answered`, and the
 /// step published `force` and `flow` at its port `a`. The released slip is
-/// the slip that crossed and what the force took away, and the law gives
-/// that force (to 1e-9 N) and that slip (to 1e-12 m/s) for it.
+/// rebuilt from those two, the slip that crossed and what the force took
+/// away, and the law must give that force (to 1e-9 N) and that slip (to
+/// 1e-12 m/s) for it.
+///
+/// This checks the rows and their forces: held with no slip and a force
+/// inside the limit, sliding with the sliding force along the slip, each
+/// reversal row's own force. It does not check `answered`: a released
+/// slip rebuilt from a held step satisfies the law for any compliance, and
+/// only the thresholds between rows move with it. The compliance is
+/// pinned by the probe test, where a mass on a spring is one of the
+/// cases.
 fn row_of_the_step(law: &Slider, last: Slip, answered: f64, force: f64, flow: f64) -> SliderRow {
     let released = flow + answered * force;
     let (wanted, mean, row) = law.on_line(last.slip_m_s(), released, answered, last.is_stuck());
@@ -1622,6 +1948,255 @@ fn a_small_jump_under_a_push_is_held_on_the_mean_and_caught_in_the_next_step() {
     assert!((lost_j - 4.0e-6).abs() <= 1.0e-18);
 }
 
+#[test]
+fn a_leak_at_a_small_junction_of_a_block_with_a_line_is_still_refused() {
+    // The audit allows every junction of a block with a line, once, the
+    // rounding of the block's largest power: 16 eps of it. The planted
+    // negative for that term. Three masses in a row on two springs; the
+    // first is held by the slider with half the static limit, the other
+    // two are at rest and their junctions carry nothing. A net force F is
+    // planted on the third mass's input, where the solve starts, with the
+    // solve told to take a wire that is open by four times its own size.
+    // The third mass then moves by c F with a force on it that nothing
+    // returns: its junction, the farthest from the line, is left with
+    // c dt F^2, and the verdict is the audit's.
+    let (dt, push) = (1.0e-3_f64, 0.5 * HOLDS * NORMAL_N);
+    let c = 0.5 * dt / MASS_KG;
+    let at_rest = Motion {
+        position_m: 0.0,
+        velocity_m_s: 0.0,
+    };
+    let mut builder = SystemBuilder::new();
+    let masses: Vec<NodeId> = ["mass", "second", "third"]
+        .iter()
+        .map(|name| builder.add_with_tangent(name, Mass::new(MASS_KG).unwrap(), at_rest).unwrap())
+        .collect();
+    let rubbing = builder.add_on_line("slider", slider(), Slip::stuck()).unwrap();
+    let pusher = builder
+        .add_with_tangent(
+            "push",
+            Force::new(Waveform::constant(push).unwrap()),
+            SourceAccount::default(),
+        )
+        .unwrap();
+    let springs: Vec<NodeId> = ["near", "far"]
+        .iter()
+        .map(|name| builder.add_with_tangent(name, Spring::new(100.0, 0.0).unwrap(), 0.0).unwrap())
+        .collect();
+    let end = |builder: &SystemBuilder, spring: usize, name: &str| port(builder, springs[spring], name);
+    builder
+        .common_flow(
+            port(&builder, masses[0], "p"),
+            &[port(&builder, rubbing, "a"), port(&builder, pusher, "p"), end(&builder, 0, "a")],
+        )
+        .unwrap();
+    builder
+        .common_flow(port(&builder, masses[1], "p"), &[end(&builder, 0, "b"), end(&builder, 1, "a")])
+        .unwrap();
+    builder
+        .common_flow(port(&builder, masses[2], "p"), &[end(&builder, 1, "b")])
+        .unwrap();
+    builder
+        .boundary(port(&builder, rubbing, "b"), Box::new(|_, _, values| values[0] = 0.0))
+        .unwrap();
+    builder
+        .boundary(port(&builder, rubbing, "heat"), Box::new(|_, _, values| values[0] = 300.0))
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    with_cx(|cx| {
+        for _ in 0..3 {
+            system.step(dt, cx).unwrap();
+        }
+    });
+    // The term by name: the block's largest power is that of the held
+    // slider's port, the released flow c * push against the push.
+    let far = system.port(masses[2], "p").unwrap();
+    let power_w = 16.0 * f64::EPSILON * c * push * push;
+    let told_w = system.last_block_rounding_w(far);
+    assert!((told_w - power_w).abs() <= 0.05 * power_w, "{told_w} against {power_w}");
+    let settled = system.checkpoint().unwrap();
+    let settled_n = system.last_input(far)[0];
+    let loose = SolveConfig {
+        relative_tolerance: 4.0,
+        ..SolveConfig::default()
+    };
+    let planted = |system: &mut System, extra_n: f64| {
+        system.restore(&settled).unwrap();
+        system.set_config(loose);
+        assert!(system.guess(far, &[settled_n + extra_n]));
+        with_cx(|cx| system.step(dt, cx))
+    };
+    // The audit's tolerance for the third mass's junction, read from the
+    // refusal of a planted 10 micronewtons: the new term and next to
+    // nothing else, since the junction carries nothing of its own.
+    let tolerance_j = match planted(&mut system, 1.0e-5) {
+        Err(SystemError::Interface {
+            connection: 2,
+            tolerance_j,
+            ..
+        }) => tolerance_j,
+        other => panic!("a planted force is refused by the third junction's audit: {other:?}"),
+    };
+    assert!(
+        (tolerance_j - dt * power_w).abs() <= 0.05 * dt * power_w,
+        "{tolerance_j} against {}",
+        dt * power_w
+    );
+    // A hundred times what is allowed is refused by that junction's audit,
+    // by that factor; a quarter is taken, with no update.
+    let leaving = |times: f64| (times * tolerance_j / (c * dt)).sqrt();
+    let refusal = planted(&mut system, leaving(100.0)).expect_err("refused");
+    let SystemError::Interface {
+        connection,
+        defect_j,
+        tolerance_j: allowed_j,
+    } = refusal
+    else {
+        panic!("expected the audit's refusal, got {refusal}");
+    };
+    assert_eq!(connection, 2);
+    let ratio = defect_j.abs() / allowed_j;
+    assert!(ratio > 80.0 && ratio < 120.0, "{ratio}");
+    assert_eq!(system.steps(), 3);
+    let report = planted(&mut system, leaving(0.25)).unwrap();
+    assert_eq!(report.iterations, 0);
+    assert_eq!(system.steps(), 4);
+    eprintln!(
+        "a junction at rest beside a held slider is allowed {tolerance_j:e} J a step, {:.3} of \
+         the rounding of the block's largest power; a leak of 100 times that is refused by a \
+         factor of {ratio:.1}",
+        tolerance_j / (dt * power_w)
+    );
+}
+
+/// A mass at rest on the ground, or on a belt that moves at `belt_m_s`
+/// (as the slider's `b` receives it), on a spring to a wall that starts
+/// stretched by `stretch_m`; the spring with its tangent declared or
+/// left to be differenced. Returns the system, the mass and the slider.
+fn on_a_spring_to_a_wall(
+    declared: bool,
+    stiffness: f64,
+    stretch_m: f64,
+    belt_m_s: f64,
+    slip: Slip,
+    push: Option<Waveform>,
+) -> (System, NodeId, NodeId) {
+    let mut builder = SystemBuilder::new();
+    let mass = builder
+        .add_with_tangent(
+            "mass",
+            Mass::new(MASS_KG).unwrap(),
+            Motion {
+                position_m: 0.0,
+                velocity_m_s: 0.0,
+            },
+        )
+        .unwrap();
+    let rubbing = builder.add_on_line("slider", slider(), slip).unwrap();
+    let law = Spring::new(stiffness, 0.0).unwrap();
+    let spring = if declared {
+        builder.add_with_tangent("spring", law, stretch_m).unwrap()
+    } else {
+        builder.add("spring", law, stretch_m).unwrap()
+    };
+    let mut members = vec![port(&builder, rubbing, "a"), port(&builder, spring, "a")];
+    if let Some(push) = push {
+        let pusher = builder
+            .add_with_tangent("push", Force::new(push), SourceAccount::default())
+            .unwrap();
+        members.push(port(&builder, pusher, "p"));
+    }
+    builder.common_flow(port(&builder, mass, "p"), &members).unwrap();
+    builder
+        .boundary(port(&builder, rubbing, "b"), Box::new(move |_, _, values| values[0] = belt_m_s))
+        .unwrap();
+    builder
+        .boundary(port(&builder, spring, "b"), Box::new(|_, _, values| values[0] = 0.0))
+        .unwrap();
+    builder
+        .boundary(port(&builder, rubbing, "heat"), Box::new(|_, _, values| values[0] = 300.0))
+        .unwrap();
+    (builder.seal().unwrap(), mass, rubbing)
+}
+
+#[test]
+fn break_away_beside_a_differenced_neighbour_at_rest_is_not_solved() {
+    // A stated limit. The line's matrix is what the neighbours answer at
+    // the step's start as the kernel knows it. A neighbour without a
+    // declared tangent is differenced, and while the mass is at rest to
+    // rounding the differencing step is lost in the neighbour's state: a
+    // spring of 400 N/m then gives the line no slope, and the slider is
+    // handed the mass's dt / (2 m) = 0.00125 where the mass and the spring
+    // answer with 0.0012484. With a matrix too large there is a band of
+    // released slips at break-away with no point to settle on (the
+    // contract, "The load line"), and the first step that should break
+    // away lies in it.
+    //
+    // The spring holds 2 N of the push; the push rises from 11.7 N to
+    // 11.9 N in 4 s and passes the 11.8 N the slider and the spring hold
+    // together in step 400 (5 ms). With the spring's tangent declared the
+    // mass breaks away in that step and slides on. With the spring
+    // differenced that step does not converge: the force wire flips by the
+    // static limit less the sliding force, 3.92 N.
+    // (Found by the independent review of 74529fda7f.)
+    let dt = 5.0e-3;
+    let push = || Waveform::table(vec![(0.0, 11.7), (4.0, 11.9)]).unwrap();
+    for declared in [true, false] {
+        let (mut system, _, rubbing) =
+            on_a_spring_to_a_wall(declared, 400.0, -0.005, 0.0, Slip::stuck(), Some(push()));
+        with_cx(|cx| {
+            for step in 0..400 {
+                system.step(dt, cx).unwrap();
+                assert!(system.state::<Slip>(rubbing).unwrap().is_stuck(), "step {step}");
+            }
+            if declared {
+                system.step(dt, cx).unwrap();
+                assert!(!system.state::<Slip>(rubbing).unwrap().is_stuck());
+                for _ in 401..1000 {
+                    system.step(dt, cx).unwrap();
+                }
+            } else {
+                let refusal = system.step(dt, cx).expect_err("no point to settle on");
+                let SystemError::NotConverged { worst, residual, .. } = &refusal else {
+                    panic!("expected a block that did not converge, got {refusal}");
+                };
+                assert_eq!(worst, "mass.p");
+                let jump_n = (HOLDS - SLIDES) * NORMAL_N;
+                assert!((residual.abs() - jump_n).abs() <= 1.0e-3, "{residual} against {jump_n}");
+                assert_eq!(system.steps(), 400);
+            }
+        });
+    }
+}
+
+#[test]
+fn a_starting_slip_that_contradicts_the_ports_is_outside_the_claim() {
+    // A stated limit. Nothing can check a starting slip against what is
+    // attached. A mass at rest on a belt that already moves at 0.2 m/s
+    // slips at 0.2 m/s; declared `Slip::stuck()`, the slider's record is
+    // off by that slip for ever and alternates in sign, and its force is a
+    // difference of flows of 0.2 m/s divided by c, which moves in steps of
+    // 1.1e-13 N. Up to ef1631e0d2 such a run went on with its wrong
+    // record. Since the solve judges a flow on the line by what crosses,
+    // it ends when the mass has come to rest on its spring and those
+    // steps are more than its wires may be left with: not converged. (At
+    // step 3569 of 6000 on the build this was written on; found by the
+    // independent review of 74529fda7f.) With the slip it has, the run is
+    // taken to its end.
+    let dt = 1.0e-3;
+    let run = |slip: Slip| {
+        let (mut system, _, _) = on_a_spring_to_a_wall(true, 2000.0, 0.0, -0.2, slip, None);
+        let refusal = with_cx(|cx| (0..6000).find_map(|_| system.step(dt, cx).err()));
+        (system.steps(), refusal)
+    };
+    let (steps, refusal) = run(Slip::sliding(0.2));
+    assert!(refusal.is_none() && steps == 6000, "{refusal:?}");
+    let (steps, refusal) = run(Slip::stuck());
+    let refusal = refusal.expect("a record that contradicts the ports does not last");
+    assert!(matches!(refusal, SystemError::NotConverged { .. }), "{refusal}");
+    eprintln!("a mass at rest declared stuck on a belt at 0.2 m/s: {steps} steps, then {refusal}");
+}
+
 /// A component on a load line that returns no effort and keeps the matrix
 /// it was handed: what the kernel says its neighbours answer.
 struct Probe {
@@ -1702,6 +2277,8 @@ enum Between {
     Gyrator(f64),
     /// No second mass: the probe's `b` is prescribed.
     GivenSide,
+    /// Nothing between the masses; the first is on a spring to a wall.
+    SpringToAWall(f64),
 }
 
 /// The matrix the kernel hands a probe whose `a` is on a mass of 2 kg and
@@ -1719,6 +2296,15 @@ fn handed(between: &Between, dt: f64) -> [f64; 4] {
     let mut at_two = vec![port(&builder, probe, "b")];
     match between {
         Between::Nothing | Between::GivenSide => {}
+        Between::SpringToAWall(stiffness) => {
+            let spring = builder
+                .add_with_tangent("spring", Spring::new(*stiffness, 0.0).unwrap(), 0.0)
+                .unwrap();
+            builder
+                .boundary(port(&builder, spring, "b"), Box::new(|_, _, values| values[0] = 0.0))
+                .unwrap();
+            at_one.push(port(&builder, spring, "a"));
+        }
         Between::Damper(damping) => {
             let damper = builder
                 .add_with_tangent("damper", Damper::new(*damping).unwrap(), ())
@@ -1765,10 +2351,12 @@ fn the_line_a_component_is_handed_is_what_its_neighbours_answer() {
     //   a damper d:                [[g1 (1 + g2 d), g1 g2 d], [g1 g2 d, g2 (1 + g1 d)]] / (1 + (g1 + g2) d);
     //   a gyrator G (e_a = G f_b, e_b = -G f_a):
     //                              [[g1, -g1 g2 G], [g1 g2 G, g2]] / (1 + g1 g2 G^2), not symmetric;
-    //   the second side prescribed: [[g1, 0], [0, 0]].
+    //   the second side prescribed: [[g1, 0], [0, 0]];
+    //   the first mass on a spring k to a wall, which answers a velocity
+    //   with k dt / 2 of force: diag(g1 / (1 + g1 k dt / 2), g2).
     let dt = 1.0e-3_f64;
     let (g1, g2) = (0.5 * dt / 2.0, 0.5 * dt / 0.5);
-    let (d, ratio) = (700.0_f64, 900.0_f64);
+    let (d, ratio, stiffness) = (700.0_f64, 900.0_f64, 3.0e6_f64);
     let damped = 1.0 + (g1 + g2) * d;
     let turned = 1.0 + g1 * g2 * ratio * ratio;
     let cases = [
@@ -1787,6 +2375,10 @@ fn the_line_a_component_is_handed_is_what_its_neighbours_answer() {
             [g1 / turned, -g1 * g2 * ratio / turned, g1 * g2 * ratio / turned, g2 / turned],
         ),
         (Between::GivenSide, [g1, 0.0, 0.0, 0.0]),
+        (
+            Between::SpringToAWall(stiffness),
+            [g1 / (1.0 + g1 * stiffness * 0.5 * dt), 0.0, 0.0, g2],
+        ),
     ];
     for (case, (between, expected)) in cases.iter().enumerate() {
         let got = handed(between, dt);
@@ -1801,6 +2393,8 @@ fn the_line_a_component_is_handed_is_what_its_neighbours_answer() {
     // The damper's and the gyrator's off-diagonal entries are not small:
     // the cases tell an entry from its transpose and from zero.
     assert!(g1 * g2 * d / damped > 0.1 * g1 && g1 * g2 * ratio / turned > 0.1 * g1);
+    // And the spring takes more than a fifth off the mass's own answer.
+    assert!(g1 * stiffness * 0.5 * dt > 0.25);
 }
 
 /// Two masses that rub on each other through the slider and are joined by
@@ -1845,7 +2439,9 @@ fn rubbing_beside(
             at_one.push(port(&builder, gyrator, "a"));
             at_two.push(port(&builder, gyrator, "b"));
         }
-        Between::Nothing | Between::GivenSide => panic!("something joins the masses here"),
+        Between::Nothing | Between::GivenSide | Between::SpringToAWall(_) => {
+            panic!("something joins the masses here")
+        }
     }
     if let Some(push_n) = push_n {
         let push = builder

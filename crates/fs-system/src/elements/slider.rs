@@ -100,8 +100,8 @@
 //!
 //! - A side that leaves rest in the first step has a first mean that is
 //!   not the mass's velocity, a slip the slider is not told. A pair that
-//!   needs 8 N of the 9.8 N it holds gets 8 N, then nothing, and breaks
-//!   away at the third step, at every step length.
+//!   needs 8 N of the 9.8 N it holds breaks away within a few steps, at
+//!   every step length (which step hangs on a rounding residue).
 //! - A side that changes speed after a step at rest is followed as a
 //!   staircase: with the right force, one mean behind, and with the catch
 //!   of every step booked as heat, `m a^2 dt^2 / 2` a step, where a stuck
@@ -111,6 +111,11 @@
 //! accelerates from one that jumps. Until it is told the velocities a
 //! prescribed end starts and ends its step with, a prescribed side is to
 //! be kept at a constant speed.
+//!
+//! A starting slip that contradicts the ports. Nothing can check it. A
+//! pair declared stuck on a side that already moves keeps a record that
+//! is off by that slip and alternates in sign, and its run can end not
+//! converged.
 //!
 //! The slider's record of an end that answers is only as good as the
 //! midpoint relation is for what is attached there.
