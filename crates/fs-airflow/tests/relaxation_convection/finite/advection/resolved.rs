@@ -79,7 +79,7 @@ fn final_flow_and_source_receipt_use_the_actual_accepted_caloric_endpoint() {
             assert_eq!(temperature.to_bits(),heat.temperature_k(COOLANT).unwrap().to_bits());
             assert_eq!(temperature.to_bits(),final_query.get().to_bits());
             let other=heat.temperature_k(CellId(8)).unwrap();
-            let transfer=mass*4000.0*(temperature-other)*DT;
+            let transfer=mass*spec().cp*(temperature-other)*DT;
             let cell=&heat.cells()[&CellId(8)];
             near(cell.mass_kg*(cell.specific_h_j_kg-before[&CellId(8)].specific_h_j_kg),transfer,3e-8);
             assert_eq!(report.enthalpy_flow.as_ref().unwrap().external_enthalpy_j,0.0);

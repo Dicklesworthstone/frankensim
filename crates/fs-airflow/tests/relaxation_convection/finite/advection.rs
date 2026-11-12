@@ -11,7 +11,10 @@ fn flow(rate:f64,closed:bool,reverse:bool,cp:f64)->Advected<()> {
             MassFlow {id:2,a:pair[1],b:pair[0],kg_s:sign*rate}],2).unwrap()
     } else {
         Advected::new((),vec![],2).unwrap().with_boundaries(vec![
-            MassBoundary::Inlet {id:1,cell:COOLANT,material_id:MaterialId(7),kg_s:rate,specific_h_j_kg:5.0*cp},
+            // The stream that enters the open coolant is the one the closed loop returns: the second cell's initial
+            // temperature (295 K), at the 280 K enthalpy datum of the cells' own initial enthalpies (finite.rs).
+            MassBoundary::Inlet {id:1,cell:COOLANT,material_id:MaterialId(7),kg_s:rate,
+                specific_h_j_kg:(spec().coolant_initial_k[1]-280.0)*cp},
             MassBoundary::Outlet {id:2,cell:COOLANT,kg_s:rate}],2).unwrap()
     }
 }
@@ -42,7 +45,7 @@ fn closed_and_open_flow_share_local_balances_and_change_continuing_electrical_an
                 let report=network.step_advected_relaxation_with_links(cx,&mut owner,&mut heat,&force,
                     powered.then_some(input()),controls,&guesses,&gate,&links(),2,|_,_,t|law.at_temperature(t),&graph).unwrap();
                 let t=heat.temperature_k(COOLANT).unwrap();
-                let other=if closed {heat.temperature_k(CellId(8)).unwrap()}else{295.0};
+                let other=if closed {heat.temperature_k(CellId(8)).unwrap()}else{s.coolant_initial_k[1]};
                 let carried=rate*s.cp*(other-t);
                 let advected=report.enthalpy_flow.as_ref().unwrap();
                 near(advected.external_enthalpy_j,if closed {0.0}else{DT*carried},1e-9);
