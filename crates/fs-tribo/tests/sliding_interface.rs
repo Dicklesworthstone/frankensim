@@ -805,6 +805,85 @@ fn a_slip_below_the_impulse_tolerance_is_rest() {
 }
 
 #[test]
+fn a_load_that_reaches_the_static_limit_inside_a_step_is_cut_there() {
+    // At rest the law's static map decides for a whole step from the
+    // step's mean load. Where the load reaches what the law holds inside
+    // the step, the interface asks for the step that ends there first.
+    // The load at a step's two ends is read off the straight line through
+    // the means of the last step and of this one.
+    let interface = rubbing(dry);
+    let (dt_s, mass_kg) = (0.01_f64, 2.0);
+    let rest = interface.start(300.0, 0.0).expect("start");
+    let held_under = |state: &Rubbed, step_s: f64, push_n: f64| -> Rubbed {
+        let Answer::Took { state, force_n, .. } = on_a_body(&interface, state, step_s, mass_kg, push_n)
+        else {
+            panic!("{push_n} N over {step_s} s was cut");
+        };
+        assert!(state.at_rest(), "{push_n} N over {step_s} s");
+        close(force_n, push_n, 1e-12);
+        state
+    };
+    // A run's first step has no step before it: by its mean, as before.
+    let first = held_under(&rest, dt_s, 4.0);
+
+    // From 4 N to a mean of 4.9 N over two steps of 0.01 s the load rises
+    // at 90 N/s: 4.45 N at this step's start, 5.35 N at its end, and the
+    // 5 N held are reached after 0.55 / 0.9 of it.
+    let fraction = (5.0 - 4.45) / 0.9;
+    let Answer::Cut(asked_s) = on_a_body(&interface, &first, dt_s, mass_kg, 4.9) else {
+        panic!("a load that passes the limit inside the step was not cut");
+    };
+    close(asked_s, fraction * dt_s, 1e-15);
+    // The step of that length has the mean of its own stretch of the
+    // line: it is held, and ends at the limit.
+    let at_the_limit = held_under(&first, asked_s, 4.45 + 0.5 * fraction * 0.9);
+    // The load rises on: the next step starts at the limit, and the law's
+    // map lets go from its start, against 3 N.
+    let Answer::Took { state, force_n, .. } =
+        on_a_body(&interface, &at_the_limit, dt_s, mass_kg, 5.0 + 90.0 * 0.5 * dt_s)
+    else {
+        panic!("the step at the limit was cut again");
+    };
+    assert!(!state.at_rest());
+    assert_eq!(force_n, SLIDES * LOAD_N);
+
+    // The last step's length is in the line: after 0.004 s at 4 N, a mean
+    // of 4.9 N over 0.01 s is a rise of 0.9 N in 0.007 s.
+    let short = held_under(&rest, 0.004, 4.0);
+    let rate = 0.9 / 0.007;
+    let (from, to) = (4.9 - 0.005 * rate, 4.9 + 0.005 * rate);
+    let Answer::Cut(asked_s) = on_a_body(&interface, &short, dt_s, mass_kg, 4.9) else {
+        panic!("not cut after a shorter step");
+    };
+    close(asked_s, (5.0 - from) / (to - from) * dt_s, 1e-15);
+
+    // Inside the limit at both ends: held whole. Beyond it from the
+    // step's start: the law's map on the mean, which lets go.
+    held_under(&first, dt_s, 4.4);
+    let Answer::Took { state, .. } = on_a_body(&interface, &first, dt_s, mass_kg, 7.0) else {
+        panic!("a load beyond the limit from the start was cut");
+    };
+    assert!(!state.at_rest());
+    // Falling through the limit the other way is the same event with the
+    // other sign.
+    let pulled = held_under(&rest, dt_s, -4.0);
+    let Answer::Cut(asked_s) = on_a_body(&interface, &pulled, dt_s, mass_kg, -4.9) else {
+        panic!("a load that passes minus the limit was not cut");
+    };
+    close(asked_s, fraction * dt_s, 1e-15);
+
+    // An instant within the impulse tolerance of a step's end is that
+    // end. The load passes the limit at a constant rate, so letting go a
+    // time t late is a momentum of half the rate times t squared: with
+    // 1e-10 N s and 90 N/s, 1.5e-6 s. A line that ends 5e-5 N beyond the
+    // limit reaches it 5.6e-7 s before the end and is held whole; one
+    // that ends 1e-3 N beyond, 1.1e-5 s before the end, is cut.
+    let ending = |beyond_n: f64| on_a_body(&interface, &first, dt_s, mass_kg, (7.0 + beyond_n) / 1.5);
+    assert!(matches!(ending(5.0e-5), Answer::Took { ref state, .. } if state.at_rest()));
+    assert!(matches!(ending(1.0e-3), Answer::Cut(_)));
+}
+
+#[test]
 fn a_given_end_that_jumps_starts_the_step_with_that_much_more_slip() {
     // `a` on a body of 2 kg, `b` prescribed: its row and column of the
     // line are zero. Both move at 0.2 m/s and the pair is at rest. The

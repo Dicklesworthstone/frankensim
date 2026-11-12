@@ -580,6 +580,13 @@ fn dry(_: f64) -> Result<FrictionLaw, TriboError> {
     })
 }
 
+/// The least and the largest of some values.
+fn range(values: &[f64]) -> (f64, f64) {
+    values.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(least, most), value| {
+        (least.min(*value), most.max(*value))
+    })
+}
+
 /// A block that starts at the spring's rest point, at this velocity.
 fn thrown(velocity_m_s: f64) -> Motion {
     Motion {
@@ -729,7 +736,7 @@ fn a_mass_on_a_spring_turns_at_the_closed_forms_points_and_stays_in_the_dead_ban
 }
 
 #[test]
-fn a_block_on_a_belt_sticks_and_slips_within_a_step_of_the_closed_forms_period() {
+fn a_block_on_a_belt_sticks_and_slips_with_the_closed_forms_period() {
     // Stuck, the block rides the belt until the spring pulls with the
     // static limit, at x_s = 5 N / k. Sliding, it swings about
     // x_k = 3 N / k as a free oscillator, from x_k + d at the belt's speed
@@ -737,21 +744,23 @@ fn a_block_on_a_belt_sticks_and_slips_within_a_step_of_the_closed_forms_period()
     // the belt catches it. One period is the ride 2 d / V and the swing
     // 2 (pi - atan(d w / V)) / w.
     //
-    // The catch is a stop of the slip, and the interface cuts the step
-    // there (the spring is not a body under a held force: up to four cuts
-    // a catch). The break-away is NOT located. The static map decides for
-    // a whole step from the step's line, which for a block riding the
-    // belt is the spring's force at mid-step: the block lets go at the
-    // start of the first step whose middle is beyond the limit, within
-    // half a step of the instant the spring reaches it, early or late.
-    // So one period is within a step of the closed form's, and differs
-    // from cycle to cycle.
+    // Both events are located. The catch is a stop of the slip, and the
+    // interface cuts the step there (the spring is not a body under a
+    // held force: up to three cuts a catch). The break-away is the
+    // spring's force reaching the 5 N held, inside a step: the step is
+    // cut there, once, and the next one lets go from its start. So every
+    // period is the closed form's to second order in the step (the swing
+    // is a midpoint oscillator), 3.4 dt^2 measured, and the same from
+    // cycle to cycle.
     //
     // The belt's speeds are chosen so that the ride is not a whole number
-    // of steps. (At 0.1 m/s it is 0.4 s, every break-away fell on a step's
-    // end at each of these step lengths, and the period came out second
-    // order, 3.4 dt^2: an accident of the numbers, which the first version
-    // of this test printed as its result.)
+    // of steps. (At 0.1 m/s it is 0.4 s and every break-away falls on a
+    // step's end at each of these step lengths, located or not. The first
+    // version of this test ran there, with a break-away that was not
+    // located, and printed 3.4 dt^2 as its result: an accident of the
+    // numbers. Not located, at these speeds, the break-away was taken up
+    // to half a step early or late and one period was up to 0.54 of a
+    // step off, different from cycle to cycle: 9f4fd342b2.)
     //
     // At 0.137 m/s and 0.25 ms the third catch is the regression of the
     // stop's own row: the interface as first landed returned there the
@@ -774,6 +783,8 @@ fn a_block_on_a_belt_sticks_and_slips_within_a_step_of_the_closed_forms_period()
             // one), and the start of each step that breaks away.
             let (mut caught, mut broke) = (vec![(0.0, 0.0)], Vec::new());
             let (mut cuts, mut most_cuts, mut slivers, mut taken) = (0, 0, 0, 0_u32);
+            // Cuts of steps that start at rest: the break-aways'.
+            let mut cuts_at_rest = 0;
             let mut worked_j = 0.0;
             // The largest slip a catch leaves [m/s], and the most the first
             // step at rest holds with beside the spring's force [N].
@@ -809,6 +820,9 @@ fn a_block_on_a_belt_sticks_and_slips_within_a_step_of_the_closed_forms_period()
                     taken += 1;
                     cuts += report.shortenings;
                     most_cuts = most_cuts.max(report.shortenings);
+                    if was_at_rest {
+                        cuts_at_rest += report.shortenings;
+                    }
                     if report.dt_s < 1e-3 * dt {
                         slivers += 1;
                     }
@@ -829,31 +843,34 @@ fn a_block_on_a_belt_sticks_and_slips_within_a_step_of_the_closed_forms_period()
             let late: Vec<f64> = broke
                 .iter()
                 .zip(&caught)
-                .map(|(broke, (at_s, at_m))| (broke - (at_s + (0.05 - at_m) / belt)) / dt)
+                .map(|(broke, (at_s, at_m))| broke - (at_s + (0.05 - at_m) / belt))
                 .collect();
             // Catch to catch, after the first cycle, which starts from
             // another place.
             let off: Vec<f64> =
-                caught[1..].windows(2).map(|pair| (pair[1].0 - pair[0].0 - period) / dt).collect();
-            let range = |values: &[f64]| {
-                values.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(least, most), value| {
-                    (least.min(*value), most.max(*value))
-                })
-            };
+                caught[1..].windows(2).map(|pair| pair[1].0 - pair[0].0 - period).collect();
             let (heat_j, rounding_j) = graph.heat_j();
+            // The spring's force passes the limit at k V, so the impulse
+            // tolerance is this much time either way.
+            let within_s = (2.0 * pressed().impulse_tolerance_n_s / (stiffness * belt)).sqrt();
             println!(
                 "a block on a belt at {belt} m/s, dt {dt}: {} catches in {taken} steps, {cuts} cut \
-                 ({most_cuts} at most in a step); the break-away is taken from {:+.3} to {:+.3} of \
-                 a step off the instant the limit is reached; a period is from {:+.3} to {:+.3} of \
-                 a step off {period} s",
+                 ({most_cuts} at most in a step, {cuts_at_rest} for {} break-aways); the \
+                 break-away is taken from {:+.2e} to {:+.2e} s off the instant the limit is \
+                 reached (within {within_s:.1e} s); a period is from {:.4} to {:.4} dt^2 off \
+                 {period} s, {:.1e} s apart",
                 caught.len() - 1,
+                broke.len(),
                 range(&late).0,
                 range(&late).1,
-                range(&off).0,
-                range(&off).1,
+                range(&off).0 / (dt * dt),
+                range(&off).1 / (dt * dt),
+                range(&off).1 - range(&off).0,
             );
-            assert!(late.iter().all(|late| late.abs() <= 0.5 + 1e-6), "{late:?}");
-            assert!(off.iter().all(|off| off.abs() < 1.0), "{off:?}");
+            assert!(late.iter().all(|late| late.abs() <= within_s), "{late:?}");
+            assert_eq!(cuts_at_rest as usize, broke.len());
+            assert!(off.iter().all(|off| *off > 0.0 && *off < 4.0 * dt * dt), "{off:?}");
+            assert!(range(&off).1 - range(&off).0 <= 1e-7 * dt, "{off:?}");
             // What a catch leaves is inside the impulse tolerance of
             // 1e-10 N s on the block of 1 kg, and the one step that takes
             // it out holds with at most that tolerance over the step
@@ -867,7 +884,7 @@ fn a_block_on_a_belt_sticks_and_slips_within_a_step_of_the_closed_forms_period()
             assert!(left_m_s <= 1e-10 && beside_n <= 1e-10 / dt, "{left_m_s} {beside_n}");
             // The work of the two ends is the heat in the body, to rounding.
             assert!((worked_j - heat_j).abs() <= rounding_j, "{worked_j} {heat_j}");
-            assert!(most_cuts <= 4 && slivers == 0, "{most_cuts} {slivers}");
+            assert!(most_cuts <= 3 && slivers == 0, "{most_cuts} {slivers}");
         }
     }
 }
@@ -1236,4 +1253,139 @@ fn coulomb_03(_: f64) -> Result<FrictionLaw, TriboError> {
         static_mu: 0.3,
         kinetic_mu: 0.3,
     })
+}
+
+/// A block of 1 kg at rest on the ground under a push, with the interface
+/// (5 N held, 3 N sliding) or the kernel's slider with the same forces
+/// between it and the ground, and the heat left at 300 K.
+fn pushed_on_the_ground(push: Waveform, kind: Rubbing) -> (System, NodeId, NodeId) {
+    let mut builder = SystemBuilder::new();
+    let port = |builder: &SystemBuilder, node, name: &str| builder.port(node, name).unwrap();
+    let block = builder.add_with_tangent("block", Mass::new(1.0).unwrap(), thrown(0.0)).unwrap();
+    let pusher = builder
+        .add_with_tangent("push", Force::new(push), SourceAccount::default())
+        .unwrap();
+    let rubbing = match kind {
+        Rubbing::Interface => {
+            let interface = FrictionInterface::new(dry as LawAt, pressed()).unwrap();
+            let start = interface.start(300.0, 0.0).unwrap();
+            builder.add_on_line("rubbing", interface, start).unwrap()
+        }
+        Rubbing::Slider => builder
+            .add_on_line("rubbing", Slider::new(LOAD_N, 0.5, 0.3).unwrap(), Slip::stuck())
+            .unwrap(),
+    };
+    builder
+        .common_flow(
+            port(&builder, block, "p"),
+            &[port(&builder, rubbing, "a"), port(&builder, pusher, "p")],
+        )
+        .unwrap();
+    builder
+        .boundary(port(&builder, rubbing, "b"), Box::new(|_, _, values| values[0] = 0.0))
+        .unwrap();
+    builder
+        .boundary(port(&builder, rubbing, "heat"), Box::new(|_, _, values| values[0] = 300.0))
+        .unwrap();
+    (builder.seal().unwrap(), block, rubbing)
+}
+
+/// Steps of `dt` until `until_s` is passed: the start of the step that
+/// lets go, the cuts, and the block and the time at the end.
+fn let_go(push: Waveform, kind: Rubbing, dt: f64, until_s: f64) -> (Option<f64>, u32, Motion, f64) {
+    let (mut system, block, rubbing) = pushed_on_the_ground(push, kind);
+    let at_rest = |system: &System| match kind {
+        Rubbing::Interface => system.state::<Rubbed>(rubbing).unwrap().at_rest(),
+        Rubbing::Slider => system.state::<Slip>(rubbing).unwrap().is_stuck(),
+    };
+    let (mut broke, mut cuts) = (None, 0);
+    with_cx(|cx| {
+        while system.time_s() < until_s {
+            let was_at_rest = at_rest(&system);
+            let report = system.step(dt, cx).unwrap_or_else(|error| panic!("dt {dt}: {error}"));
+            cuts += report.shortenings;
+            if was_at_rest && !at_rest(&system) && broke.is_none() {
+                broke = Some(report.time_s - report.dt_s);
+            }
+        }
+    });
+    (broke, cuts, *system.state::<Motion>(block).unwrap(), system.time_s())
+}
+
+#[test]
+fn a_push_that_rises_through_the_limit_lets_go_at_the_instant_it_reaches_it() {
+    // The break-away is located. A block of 1 kg at rest under a push
+    // that rises at 10 N/s: the 5 N the interface holds are reached at
+    // 0.5 s, inside a step at each of these step lengths. The step is cut
+    // there, once; the cut step is held; the next one lets go from its
+    // start. From then on the block slides against 3 N under a push that
+    // goes on rising, so its velocity is 2 tau + 5 tau^2 and its place
+    // tau^2 + 5/3 tau^3 after a time tau. The midpoint rule gives the
+    // velocity of a linearly rising force exactly, and the place to
+    // second order (a quarter of dt^2 here, measured and asserted).
+    //
+    // The planted negative: the kernel's slider with the same forces in
+    // the same graph decides each step by its mean, and lets go at the
+    // start of the first step whose middle is beyond the limit: a third
+    // to nearly half a step off at these three lengths, with no cut, and
+    // the velocity off by about twice that lateness.
+    for dt in [0.03_f64, 0.007, 0.0011] {
+        let rising = || Waveform::table(vec![(0.0, 0.0), (2.0, 20.0)]).unwrap();
+        let (broke, cuts, ends, time_s) = let_go(rising(), Rubbing::Interface, dt, 0.8);
+        let broke = broke.expect("it lets go");
+        let tau = time_s - 0.5;
+        let (v, x) = (2.0 * tau + 5.0 * tau * tau, tau * tau + 5.0 / 3.0 * tau * tau * tau);
+        assert!((broke - 0.5).abs() <= 1e-12, "dt {dt}: {broke}");
+        assert_eq!(cuts, 1, "dt {dt}");
+        assert!((ends.velocity_m_s - v).abs() <= 1e-12, "dt {dt}: {} {v}", ends.velocity_m_s);
+        let behind = (ends.position_m - x) / (dt * dt);
+        assert!(behind > 0.2 && behind < 0.3, "dt {dt}: {behind}");
+
+        let (late, cuts, slid, time_s) = let_go(rising(), Rubbing::Slider, dt, 0.8);
+        let late = (late.expect("it lets go") - 0.5) / dt;
+        let tau = time_s - 0.5;
+        let off = slid.velocity_m_s - (2.0 * tau + 5.0 * tau * tau);
+        println!(
+            "a push rising through the limit, dt {dt}: the interface lets go {:+.1e} s off 0.5 s \
+             with one cut, its velocity {:+.1e} m/s off the closed form and its place {behind:.3} \
+             dt^2; the kernel's slider lets go {late:+.3} of a step off, its velocity {off:+.3e} m/s",
+            broke - 0.5,
+            ends.velocity_m_s - v
+        );
+        assert_eq!(cuts, 0, "dt {dt}");
+        assert!(late.abs() <= 0.5 && late.abs() > 0.3, "dt {dt}: {late}");
+        assert!(off.abs() > 0.5 * dt, "dt {dt}: {off}");
+    }
+}
+
+#[test]
+fn a_push_that_curves_is_let_go_within_the_impulse_tolerance_of_the_instant() {
+    // The load at a step's two ends is read off the straight line through
+    // the means of the last step and of this one, which is exact only for
+    // a load that is straight in time. Under 8 N sin(pi t), which reaches
+    // the 5 N held at asin(5 / 8) / pi, the first cut lands near the
+    // instant; the cut step is located again from its own, shorter, line,
+    // and so on until what letting go there leaves is inside the impulse
+    // tolerance: three to five cuts at these step lengths. The load
+    // passes the limit at 19.6 N/s, so a tolerance of 1e-10 N s is 3.2e-6 s
+    // either way (half the rate times the time squared), and the instant
+    // is within that. The kernel's slider is within half a step.
+    let instant = (5.0_f64 / 8.0).asin() / std::f64::consts::PI;
+    let rate = 8.0 * std::f64::consts::PI * (1.0 - (5.0_f64 / 8.0).powi(2)).sqrt();
+    let within_s = (2.0 * pressed().impulse_tolerance_n_s / rate).sqrt();
+    for dt in [0.03_f64, 0.015, 0.0075, 0.00375] {
+        let curving = || Waveform::sine(8.0, 0.5, 0.0, 0.0).unwrap();
+        let (broke, cuts, ..) = let_go(curving(), Rubbing::Interface, dt, 0.4);
+        let off_s = broke.expect("it lets go") - instant;
+        let (late, none, ..) = let_go(curving(), Rubbing::Slider, dt, 0.4);
+        let late = (late.expect("it lets go") - instant) / dt;
+        println!(
+            "a push that curves, dt {dt}: the interface lets go {off_s:+.3e} s off the instant \
+             (within {within_s:.2e} s) after {cuts} cuts; the kernel's slider {late:+.3} of a step off"
+        );
+        assert!(off_s.abs() <= within_s, "dt {dt}: {off_s}");
+        assert!((1..=5).contains(&cuts), "dt {dt}: {cuts}");
+        assert_eq!(none, 0);
+        assert!(late.abs() <= 0.5 && late.abs() > 0.1, "dt {dt}: {late}");
+    }
 }

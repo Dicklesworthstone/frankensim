@@ -3200,6 +3200,29 @@ is never changed: it is asked in two ways.
   kinetic traction and marked at rest; what it leaves of the slip, inside
   the tolerance, is kept in the state, and the first step at rest takes it
   out, after which the slip is exactly zero.
+- A break-away. The static map decides for a whole step from the step's
+  mean, so alone it lets go at the start of the first step whose middle is
+  beyond the limit, up to half a step early or late (measured in
+  9f4fd342b2: 0.48 before to 0.50 after, and periods of a belt up to 0.54
+  of a step off, different from cycle to cycle). It is located as a stop
+  is. The line gives the mean load on the slip in every step,
+  `(released - s0) / c`; the state keeps the last step's and that step's
+  length; the load at this step's two ends is read off the straight line
+  through the two means (exact for a load linear in time whatever the two
+  lengths). Where the law holds the load at the step's start and not at
+  its end, the component answers `Proposal::Shorten` with the step that
+  ends where the law's verdict changes; that step is held, and the next
+  one starts at the limit and lets go from its start. What the law holds
+  is asked of the law, by bisection on its own static verdict inside its
+  root budget (`solve.max_iterations`); no static capacity is added to
+  `TangentialLaw`, so a law whose holding depends on its state or load is
+  asked the same way. An instant within the impulse tolerance of either
+  end of the step is that end: letting go a time `t` early or late is a
+  momentum of half the load's rate times `t` squared. Under a load that
+  curves the first cut lands near the instant and the cut step is located
+  again from its own line. (Carrying the load's end from step to step as
+  `end = 2 mean - start` was rejected: where the load curves its error
+  changes sign every step and never decays.)
 - Every row is wide or has its neighbours' slope. The kernel differences
   the component at a flow moved by `sqrt(eps)` of its scale, far more than
   the stop's band is wide. The force that ends a step at exactly no slip
@@ -3259,14 +3282,13 @@ the step cut where it is caught, so each step asked for is followed by a
 train of steps that shrink by `m a / K`, more than ten for one, with heat
 where a carried pair makes none, as a test of the graph file below
 measures; the kernel's ideal slider can be told the span of such a side,
-this component cannot); the instant of a break-away inside its step (the
-static map decides for the whole step: under a load that rises through
-the step the pair lets go within half a step of the instant the limit is
-reached, early or late); a second root of the sliding relation for
+this component cannot); a break-away in a run's first step, which has no
+step before it to draw the line through, and one under a load that jumps
+(both are decided by the step's mean); a second root of the sliding relation for
 a traction that falls with speed (a sign bracket is not a proof that the
 root is the only one); a normal load that changes.
 
-`tests/sliding_interface.rs` (eight of its fourteen tests): at rest the
+`tests/sliding_interface.rs` (nine of its fifteen tests): at rest the
 Coulomb law (5 N held, 3 N sliding) holds pushes up to 4.999 N with no slip
 and no heat and slides beyond; a sliding pair slides on against 3 N, and
 asked for any step that ends beyond its stop (1.0001 to 1000 times as
@@ -3278,21 +3300,28 @@ is rest (a slip of 4e-11 m/s on 2 kg is, one of 6e-11 m/s is cut at its
 stop; a step that ends 2e-11 N s beyond a stop is taken to end there under
 the law's 3 N to the last digit, the 1e-11 m/s it leaves kept and taken
 out by the next step, whose record is then exactly zero; one that ends
-4e-10 N s beyond is cut); a given end
+4e-10 N s beyond is cut); a load that rises from 4 N to a mean of 4.9 N
+is cut 0.55 / 0.9 of the way through its step, to 1e-15 s, the cut step is
+held, and the next lets go against 3 N; the same after a shorter step,
+whose length is in the line, and with the other sign; a load held at both
+ends is held whole and one beyond the limit from the start lets go; a
+line that ends 5e-5 N beyond the limit is inside the impulse tolerance of
+the step's end and held, one that ends 1e-3 N beyond is cut; a given end
 that jumps by 0.3 m/s starts the step with that slip; with both ends given
 the force and the law's checkpoint are `SlidingInterface`'s, to the bit;
 the conformance check of the load-line tier passes at 120 points and
 answers `Shortened` at 72 more; a traction that falls with speed (the
 hyperbolic law) is solved on the line to the root a bisection in the test
 finds, to 1e-13 m/s; the refusals, by field, a root budget of two
-evaluations among them. Eighteen planted defects in a scratch copy each
-fail one of these tests or more, the stop's row as first landed among
-them.
+evaluations among them. Twenty-three planted defects in a scratch copy
+each fail one of these tests or more, the stop's row as first landed and
+the break-away not located among them.
 
 Against the hand-written module: `crates/fs-couple/tests/tribothermal/
 dynamics/collinear/graph.rs` declares fs-couple's collinear stop and
 reversal from this component, two masses and two enthalpy bodies, and
 agrees with the module's own report of three of its cases to 1.3e-11, with
 one cut for a stop inside a step; the closed forms of a spring's turning
-points, a belt's stick-slip period, a jumping side and two lumped bodies
-are checked there too (the record is in `crates/fs-system/CONTRACT.md`).
+points, a belt's stick-slip period, a jumping side, two lumped bodies and
+a push that rises or curves through the static limit are checked there
+too (the record is in `crates/fs-system/CONTRACT.md`).

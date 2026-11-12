@@ -2089,18 +2089,28 @@ partition. The module is the reference and stays.
   spring loses two friction offsets a half cycle and its eight turning
   points are the closed form's to 5.3e-16 m at steps of 1 ms and 0.7 ms,
   with all it was thrown with, less what the spring keeps, as heat; a
-  block on a belt sticks and slips with every period within 0.54 of a step
-  of the closed form's, at belt speeds of 0.0937 and 0.137 m/s and steps
-  of 2 ms and three halvings (asserted: within a step), the work of the
-  two ends being the heat: the catch is located, and the break-away is
-  taken at the start of the first step whose middle is beyond the limit,
-  from 0.48 of a step before the instant the limit is reached to 0.50
-  after (asserted: half a step); a side that
+  block on a belt sticks and slips with both events located, at belt
+  speeds of 0.0937 and 0.137 m/s and steps of 2 ms and three halvings:
+  every break-away within 5e-11 s of the instant the spring reaches the
+  limit, with one cut, every period 3.35 and 3.62 dt^2 off the closed
+  form's (asserted: under 4 dt^2), the same from cycle to cycle to
+  5.3e-11 s, the work of the two ends being the heat; a push that rises
+  at 10 N/s through the 5 N held lets go at 0.5 s to 7e-16 s with one cut
+  at steps of 0.03, 0.007 and 0.0011 s, the velocity after it the closed
+  form's to 1.8e-15 m/s and the place a quarter of dt^2 behind; a push of
+  8 N sin(pi t) lets go within 1.8e-6 s of the instant after three to five
+  cuts (asserted: within the impulse tolerance's 3.2e-6 s); a side that
   jumps from 0.1 to 0.3 m/s drags the block under the kinetic force and
   catches it 0.2 / 3 s later, with one cut; the time mean of the interface
   temperature between two lumped bodies behind two conductances, and the
   bodies' end temperatures, are the closed form's to 1.1e-7 K and 3.6e-7 K
   at 0.05 s, second order in the step.
+- Which element locates a break-away. `elements::Slider` with the same
+  forces under the same pushes decides each step by its mean: it lets go
+  0.33, 0.43 and 0.45 of a step off the instant on the rising push (its
+  velocity then off by 2.1e-2, 6.0e-3 and 1.0e-3 m/s) and 0.16 to 0.35 of
+  a step off on the sine, with no cut. The interface with its location
+  planted out does the same.
 - Beside a spring the stop is not located in one cut (fs-tribo's contract,
   "Where the stop is found"): two or three cuts in the step that holds it
   beside a linear spring; 2 to 5 beside a spring with a cubic term; with
@@ -2120,7 +2130,10 @@ partition. The module is the reference and stays.
   corrected above. The belt ran at 0.1 m/s, where the ride of 0.4 s is a
   whole number of steps at each step length: every break-away fell on a
   step's end, and the period came out at 1.4e-5 to 2.1e-7 s, second order,
-  an accident of the numbers that the record gave as the result. And the
+  an accident of the numbers that the record gave as the result. (At the
+  speeds above, before the break-away was located, it was taken from 0.48
+  of a step before the instant to 0.50 after and a period was up to 0.54
+  of a step off, different from cycle to cycle: 9f4fd342b2.) And the
   interface returned, at a stop, the force that ends the step at exactly
   no slip, in a row narrower than the kernel's perturbation (next
   paragraph): the belt at 0.137 m/s in steps of 0.25 ms was refused at its
