@@ -592,8 +592,16 @@ fn polarized_response(
     if response.bare_equivalent {
         return Ok(bare);
     }
-    let tolerance = 512.0 * f64::EPSILON * (layer_count + 1) as f64;
+    let flat = 512.0 * f64::EPSILON * (layer_count + 1) as f64;
     for pol in 0..2 {
+        // A lossless solve carries the first-order allowance derived for its
+        // own rounding where that derivation applies (multilayer.rs
+        // ClosureBound). It grows toward grazing incidence with the stack's
+        // matrices and states. Every other case keeps the flat allowance.
+        let tolerance = match response.closure_allowance[pol] {
+            Some(allowance) if response.lossless => allowance,
+            _ => flat,
+        };
         let reflected = response.reflected[pol];
         let transmitted = response.transmitted[pol];
         let closure = reflected[0] * reflected[0]

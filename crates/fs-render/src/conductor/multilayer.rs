@@ -307,6 +307,12 @@ pub(crate) struct CoherentTransmission {
     pub(crate) transmitted: [[f64; 2]; 2],
     pub(crate) bare_equivalent: bool,
     pub(crate) lossless: bool,
+    /// First-order rounding bound on |R + T - 1| of this solve, per
+    /// polarization (`ClosureBound`). `None` where its derivation does not
+    /// apply: an evanescent exit, a step that is not a propagating lossless
+    /// layer with the exact conjugate matrix structure, or a state past the
+    /// first-order gate u kappa <= 2^-10.
+    pub(crate) closure_allowance: [Option<f64>; 2],
 }
 
 /// Native transmitted/reflected fields plus positive work in finite films.
@@ -733,6 +739,161 @@ struct Reflection {
     amplitudes: [Complex; 2],
     bare_equivalent: bool,
     transmission: [Complex; 2],
+    closure_allowance: [Option<f64>; 2],
+}
+
+/// The lossless closure allowance, accumulated along the transmitting solve
+/// of one polarization.
+///
+/// It applies where every active step is a propagating lossless layer
+/// (`propagation_log_scale == 0`) whose computed matrix keeps the exact
+/// conjugate structure [[A, B], [conj B, conj A]], and the exit wave
+/// propagates. Then J = |field|^2 - |flux|^2 is conserved in exact
+/// arithmetic, and to first order in u = eps / 2
+///   |R + T - 1| <= |t|^2 u [18 S(|A|^2 + |B|^2)
+///       + 20 S(|A| + |B|) sqrt(kappa_{k-1} kappa_k) + 8 / |t_0|^2
+///       + 2 (Lambda + N max_j |L_j|)] + 16 u,
+/// with kappa = (|field|^2 + |flux|^2) / J of the stored state.
+/// - 18: each computed matrix's defect |A|^2 - |B|^2 - 1. D and m each
+///   carry at most 7u, and c and the sine at most 4u on terms <= 1.
+/// - 20: one step's arithmetic. A complex product with its add is within
+///   3.83u (|A| + |B|) |v| per component. Cauchy-Schwarz against the
+///   computed output norm gives 2 sqrt 2 x 3.83 = 10.83u (|A| + |B|)
+///   sqrt(kappa_{k-1} kappa_k) J. The rescale division adds at most
+///   4u kappa_k <= 4u (|A| + |B|) sqrt(kappa_{k-1} kappa_k). That makes
+///   14.83, kept at 20.
+/// - 8 / |t_0|^2: the seed's cancellation in 1 - |r_0|^2.
+/// - 2 (Lambda + N max |L_j|): the logarithmic scale. Lambda is the sum of
+///   |ln s_k|, and L_j are its N partial sums.
+/// - 16u: the final divisions and the four-square closure sum.
+///
+/// The bound is first order. It is derived only while
+/// u (|A_k| + |B_k|)^2 kappa_{k-1} <= 2^-10 at every step, the a-priori bound
+/// on kappa_k from the previous computed state, and u kappa_0 <= 2^-10 at
+/// the seed. Inside that gate the dropped terms are O(u kappa) relative to
+/// the kept ones, and the 20 kept against 14.83 absorbs a second-order
+/// constant up to 356. Rounding in kappa itself is O(u kappa) relative,
+/// also second order. Past the gate the stored J has no resolution left (a
+/// deep reflector reaches u kappa ~ 1e14), the allowance is None and the
+/// caller keeps the flat check. Inside the gate a stored J <= 0 can only
+/// come from a defect, and the solve refuses. A seed with J <= 0 has lost J
+/// to rounding (|r_0| rounds to 1 only for an admittance ratio beyond 1 / u)
+/// and gives None.
+#[derive(Clone, Copy)]
+struct ClosureBound {
+    derived: bool,
+    nonpositive: bool,
+    kappa: f64,
+    entries: f64,
+    pending: f64,
+    states: f64,
+    logs: f64,
+    partial: f64,
+    steps: f64,
+}
+
+impl ClosureBound {
+    /// The first-order regime: u kappa <= 2^-10.
+    const REGIME: f64 = 1.0 / 1024.0;
+
+    fn resolved(kappa: f64) -> bool {
+        0.5 * f64::EPSILON * kappa <= Self::REGIME
+    }
+
+    fn seed(field: Complex, flux: Complex, propagating: bool) -> Self {
+        let mut bound = Self {
+            derived: false,
+            nonpositive: false,
+            kappa: 0.0,
+            entries: 0.0,
+            pending: 0.0,
+            states: 0.0,
+            logs: 0.0,
+            partial: 0.0,
+            steps: 0.0,
+        };
+        let (field_squared, flux_squared) = (field.norm_squared(), flux.norm_squared());
+        let conserved = field_squared - flux_squared;
+        if propagating && conserved > 0.0 {
+            bound.kappa = (field_squared + flux_squared) / conserved;
+            bound.derived = Self::resolved(bound.kappa);
+        }
+        bound
+    }
+
+    fn condition(&mut self, field: Complex, flux: Complex) -> f64 {
+        let (field_squared, flux_squared) = (field.norm_squared(), flux.norm_squared());
+        let conserved = field_squared - flux_squared;
+        if conserved.is_nan() || conserved <= 0.0 {
+            self.nonpositive = true;
+            return f64::INFINITY;
+        }
+        (field_squared + flux_squared) / conserved
+    }
+
+    fn matrix(
+        &mut self,
+        upper: Complex,
+        lower: Complex,
+        mixing: Complex,
+        propagation_log_scale: f64,
+    ) {
+        self.derived &= propagation_log_scale == 0.0
+            && lower.re == upper.re
+            && lower.im == -upper.im
+            && mixing.re == 0.0;
+        if self.derived {
+            let (upper_squared, mixing_squared) = (upper.norm_squared(), mixing.norm_squared());
+            self.entries += upper_squared + mixing_squared;
+            self.pending = det::sqrt(upper_squared) + det::sqrt(mixing_squared);
+            self.derived = Self::resolved(self.pending * self.pending * self.kappa);
+        }
+    }
+
+    fn state(
+        &mut self,
+        field: Complex,
+        flux: Complex,
+        boundary_scale: f64,
+        logarithmic_scale: f64,
+    ) {
+        if !self.derived {
+            return;
+        }
+        let kappa = self.condition(field, flux);
+        self.states += self.pending * det::sqrt(self.kappa * kappa);
+        self.kappa = kappa;
+        self.logs += boundary_scale.abs();
+        self.partial = self.partial.max(logarithmic_scale.abs());
+        self.steps += 1.0;
+    }
+
+    fn finish(
+        self,
+        transmitted: f64,
+        seed_transmitted: f64,
+    ) -> Result<Option<f64>, ConductorError> {
+        // A J <= 0 found inside the gate refuses even though the next step's
+        // gate then fails on its infinite kappa.
+        if self.nonpositive {
+            return Err(ConductorError::NumericalFailure);
+        }
+        if !self.derived {
+            return Ok(None);
+        }
+        let u = 0.5 * f64::EPSILON;
+        let allowance = transmitted
+            * u
+            * (18.0 * self.entries
+                + 20.0 * self.states
+                + 8.0 / seed_transmitted
+                + 2.0 * (self.logs + self.steps * self.partial))
+            + 16.0 * u;
+        if !allowance.is_finite() {
+            return Err(ConductorError::NumericalFailure);
+        }
+        Ok(Some(allowance))
+    }
 }
 
 // Static output selection leaves the existing reflected/transmitted paths
@@ -799,6 +960,7 @@ impl Reflection {
             transmitted: self.transmission.map(|value| [value.re, value.im]),
             bare_equivalent: self.bare_equivalent,
             lossless,
+            closure_allowance: self.closure_allowance,
         }
     }
 
@@ -848,6 +1010,7 @@ fn response_as<const TRANSMISSION: bool, Kind: ResponseKind>(
                 amplitudes: [Complex::new(-1.0, 0.0); 2],
                 bare_equivalent: true,
                 transmission: [Complex::new(0.0, 0.0); 2],
+                closure_allowance: [None; 2],
             },
             [Complex::new(1.0, 0.0); 2],
             [Complex::new(0.0, 0.0); 2],
@@ -894,6 +1057,9 @@ fn response_as<const TRANSMISSION: bool, Kind: ResponseKind>(
             }
         }
     }
+    let mut closure: [ClosureBound; 2] = core::array::from_fn(|pol| {
+        ClosureBound::seed(field[pol], flux[pol], TRANSMISSION && exit[pol].re > 0.0)
+    });
     let mut logarithmic_scale = [0.0; 2];
     let mut bare_equivalent = true;
     let mut inside_incident = false;
@@ -918,8 +1084,13 @@ fn response_as<const TRANSMISSION: bool, Kind: ResponseKind>(
                 let diagonal = (transfer.upper[pol] * incident[pol]
                     + transfer.lower[pol] * (1.0 / incident[pol])) * 0.5;
                 let mixing = transfer.wave_mixing[pol];
-                ((transfer.cosine + diagonal) * field[pol] - mixing * flux[pol],
-                    mixing * field[pol] + (transfer.cosine - diagonal) * flux[pol])
+                let upper_entry = transfer.cosine + diagonal;
+                let lower_entry = transfer.cosine - diagonal;
+                closure[pol].matrix(
+                    upper_entry, lower_entry, mixing, transfer.propagation_log_scale,
+                );
+                (upper_entry * field[pol] - mixing * flux[pol],
+                    mixing * field[pol] + lower_entry * flux[pol])
             } else {
                 (transfer.cosine * field[pol] + transfer.upper[pol] * flux[pol],
                     transfer.lower[pol] * field[pol] + transfer.cosine * flux[pol])
@@ -946,6 +1117,11 @@ fn response_as<const TRANSMISSION: bool, Kind: ResponseKind>(
                     logarithmic_scale[pol] += boundary_scale[pol];
                 }
             }
+            if TRANSMISSION {
+                closure[pol].state(
+                    field[pol], flux[pol], boundary_scale[pol], logarithmic_scale[pol],
+                );
+            }
         }
         Kind::record(&mut history, index, field, flux, boundary_scale);
     }
@@ -960,6 +1136,7 @@ fn response_as<const TRANSMISSION: bool, Kind: ResponseKind>(
                 ),
                 bare_equivalent,
                 transmission: [Complex::new(0.0, 0.0); 2],
+                closure_allowance: [None; 2],
             },
             [Complex::new(1.0, 0.0); 2],
             exit,
@@ -977,13 +1154,19 @@ fn response_as<const TRANSMISSION: bool, Kind: ResponseKind>(
         amplitudes[1] = Complex::new(-amplitudes[0].re, -amplitudes[0].im);
     }
     let mut transmission = [Complex::new(0.0, 0.0); 2];
+    let mut closure_allowance = [None; 2];
     if TRANSMISSION {
         for pol in 0..2 {
             transmission[pol] = initial_transmission[pol] * det::exp(-logarithmic_scale[pol])
                 / field[pol];
+            closure_allowance[pol] = closure[pol].finish(
+                transmission[pol].norm_squared(),
+                initial_transmission[pol].norm_squared(),
+            )?;
         }
         if geometry.cosine == 1.0 {
             transmission[1] = transmission[0];
+            closure_allowance[1] = closure_allowance[0];
         }
     }
     Kind::finish(
@@ -992,6 +1175,7 @@ fn response_as<const TRANSMISSION: bool, Kind: ResponseKind>(
             amplitudes,
             bare_equivalent,
             transmission,
+            closure_allowance,
         },
         field,
         flux,

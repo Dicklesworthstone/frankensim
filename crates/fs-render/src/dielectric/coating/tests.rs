@@ -860,3 +860,82 @@ fn g0_absorbing_dielectric_films_retain_loss_and_work_is_bounded() {
         core::mem::size_of::<CoherentPeriodicCoating>()
     );
 }
+
+#[test]
+fn g1_lossless_closure_allowance_is_derived_for_the_solve_and_refuses_planted_excess() {
+    // g3's lossless 1.3/2.0 x 32 stack between 1.0 and 1.5 at 550 nm. A
+    // lossless solve is checked against its own derived first-order allowance
+    // (multilayer.rs ClosureBound), not the flat 512 eps (N + 1).
+    let coating = DielectricCoating::try_new(
+        CoherentPeriodicCoating::try_new(&[layer(1.3, 90.0), layer(2.0, 50.0)], 32, source())
+            .unwrap(),
+    )
+    .unwrap();
+    let layers = coating.0.layer_count();
+    let flat = 512.0 * f64::EPSILON * (layers + 1) as f64;
+    let solve = |cosine: f64| {
+        let bare = fresnel_dielectric_polarized(cosine, 1.0, 1.5).unwrap();
+        let exit = exit_normal_wave(bare.scalar, cosine, 1.0, 1.5);
+        (coating.0.transmission(550.0, 1.0, 1.5, cosine, false, exit).unwrap(), bare)
+    };
+    // Rescale pol 0's transmitted amplitude so that its closure is 1 + error.
+    let planted = |cosine: f64, error: f64| {
+        let (mut response, bare) = solve(cosine);
+        let [r, t] = [response.reflected[0], response.transmitted[0]];
+        let reflected = r[0] * r[0] + r[1] * r[1];
+        let scale = ((1.0 + error - reflected) / (t[0] * t[0] + t[1] * t[1])).sqrt();
+        response.transmitted[0] = t.map(|component| component * scale);
+        (response, bare)
+    };
+    // The facet cosine of g3's refused call. Its closure error, 7.99e-12, was
+    // above the flat allowance; the derived allowance there is larger and
+    // admits it. Planted errors of twice the allowance are refused on either
+    // side; half of it is admitted.
+    let grazing = 4.39970846435952696e-3;
+    let (response, bare) = solve(grazing);
+    assert!(response.lossless && !response.bare_equivalent);
+    assert!(response.closure_allowance.iter().all(Option::is_some));
+    let allowance = response.closure_allowance[0].unwrap();
+    assert!(allowance > flat, "{allowance:e}");
+    assert!(polarized_response(response, bare, layers).is_ok());
+    for (factor, admitted) in [(2.0, false), (-2.0, false), (0.5, true), (-0.5, true)] {
+        let (response, bare) = planted(grazing, factor * allowance);
+        assert_eq!(
+            polarized_response(response, bare, layers).is_ok(),
+            admitted,
+            "{factor} x {allowance:e}"
+        );
+    }
+    // Normal incidence: the derived allowance is below 1e-12 and the flat one
+    // above it. A planted 1e-12 is refused, and admitted on the flat path.
+    let (response, _) = solve(1.0);
+    let allowance = response.closure_allowance[0].unwrap();
+    assert!(allowance < 1.0e-12 && 1.0e-12 < flat, "{allowance:e}");
+    let (response, bare) = planted(1.0, 1.0e-12);
+    assert!(matches!(
+        polarized_response(response, bare, layers),
+        Err(DielectricError::InvalidInterface)
+    ));
+    let (mut response, bare) = planted(1.0, 1.0e-12);
+    response.closure_allowance = [None; 2];
+    assert!(polarized_response(response, bare, layers).is_ok());
+    // A deep reflector leaves the first-order regime. The quarter-wave
+    // 3.0/1.0 x 32 stack between 1.5 and 1.5 has T ~ 1.2e-30 and reaches
+    // u kappa ~ 1e14, where the stored J has no resolution left. Its
+    // allowance is None, and the flat check, the one applied before the
+    // derived allowance existed, admits it.
+    let deep = DielectricCoating::try_new(
+        CoherentPeriodicCoating::try_new(
+            &[layer(3.0, 550.0 / 12.0), layer(1.0, 550.0 / 4.0)],
+            32,
+            source(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let bare = fresnel_dielectric_polarized(1.0, 1.5, 1.5).unwrap();
+    let exit = exit_normal_wave(bare.scalar, 1.0, 1.5, 1.5);
+    let response = deep.0.transmission(550.0, 1.5, 1.5, 1.0, false, exit).unwrap();
+    assert!(response.lossless && response.closure_allowance == [None; 2]);
+    assert!(polarized_response(response, bare, deep.0.layer_count()).is_ok());
+}

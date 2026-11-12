@@ -500,3 +500,55 @@ fn g0_bounded_compact_storage_and_identity_bind_authored_optics() {
         assert_ne!(original, changed);
     }
 }
+
+#[test]
+fn g0_closure_bound_refuses_a_nonpositive_flux_and_applies_only_inside_its_derivation() {
+    let one = Complex::new(1.0, 0.0);
+    let half = Complex::new(0.5, 0.0);
+    // A propagating seed with |field| = |flux| has J = 0, lost to rounding:
+    // outside the derivation. So is a seed past the gate u kappa_0 <= 2^-10.
+    assert!(matches!(ClosureBound::seed(one, one, true).finish(0.5, 0.5), Ok(None)));
+    let past = Complex::new(1.0 - 2.0_f64.powi(-50), 0.0);
+    assert!(matches!(ClosureBound::seed(one, past, true).finish(0.5, 0.5), Ok(None)));
+    // An evanescent exit is outside the derivation, whatever its state.
+    assert!(matches!(ClosureBound::seed(one, one, false).finish(0.5, 0.5), Ok(None)));
+    // A step without the exact conjugate structure, or with a propagation
+    // log scale, also leaves it; the caller then keeps the flat allowance.
+    let mut skewed = ClosureBound::seed(one, half, true);
+    skewed.matrix(Complex::new(1.0, 0.25), Complex::new(1.0, 0.25), Complex::new(0.0, 0.1), 0.0);
+    assert!(matches!(skewed.finish(0.5, 0.75), Ok(None)));
+    let mut scaled = ClosureBound::seed(one, half, true);
+    scaled.matrix(Complex::new(1.0, 0.25), Complex::new(1.0, -0.25), Complex::new(0.0, 0.1), 0.5);
+    assert!(matches!(scaled.finish(0.5, 0.75), Ok(None)));
+    // One identity step on the state (1, 1/2): J = 3/4 and kappa = 5/3 before
+    // and after; |A| + |B| = 1; one log term 0.25. The assembled allowance is
+    // |t|^2 u [18 x 1 + 20 x 5/3 + 8 / |t_0|^2 + 2 (0.25 + 1 x 0.25)] + 16 u.
+    let mut identity = ClosureBound::seed(one, half, true);
+    identity.matrix(one, one, Complex::new(0.0, 0.0), 0.0);
+    identity.state(one, half, 0.25, 0.25);
+    let allowance = identity.finish(0.5, 0.75).unwrap().unwrap();
+    let u = 0.5 * f64::EPSILON;
+    let bracket = 18.0 + 20.0 * (5.0 / 3.0) + 8.0 / 0.75 + 2.0 * (0.25 + 0.25);
+    let expected = 0.5 * u * bracket + 16.0 * u;
+    assert!((allowance / expected - 1.0).abs() < 1.0e-14, "{allowance:e} against {expected:e}");
+    // A nonpositive J mid-solve inside the gate is refused, typed, even
+    // after a later step.
+    let mut collapsed = ClosureBound::seed(one, half, true);
+    collapsed.matrix(one, one, Complex::new(0.0, 0.0), 0.0);
+    collapsed.state(half, half, 0.0, 0.0);
+    collapsed.matrix(one, one, Complex::new(0.0, 0.0), 0.0);
+    assert!(matches!(collapsed.finish(0.5, 0.75), Err(ConductorError::NumericalFailure)));
+    // The seed (1, 1 - 2^-30) has kappa_0 = 2^30 - 1, inside the gate. An
+    // identity step keeps u kappa_1 ~ 1.2e-7 inside it. A step with
+    // |A| + |B| ~ 128 bounds u kappa_1 by ~ 1.95e-3, past 2^-10 ~ 9.8e-4: no
+    // allowance, and a J = 0 after it is not refused.
+    let near = Complex::new(1.0 - 2.0_f64.powi(-30), 0.0);
+    let mut inside = ClosureBound::seed(one, near, true);
+    inside.matrix(one, one, Complex::new(0.0, 0.0), 0.0);
+    inside.state(one, near, 0.0, 0.0);
+    assert!(matches!(inside.finish(0.5, 0.5), Ok(Some(_))));
+    let mut beyond = ClosureBound::seed(one, near, true);
+    beyond.matrix(Complex::new(1.0, 64.0), Complex::new(1.0, -64.0), Complex::new(0.0, 64.0), 0.0);
+    beyond.state(half, half, 0.0, 0.0);
+    assert!(matches!(beyond.finish(0.5, 0.5), Ok(None)));
+}
