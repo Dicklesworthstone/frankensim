@@ -380,11 +380,16 @@ fn nonlinear_films_integrate_calorics_through_host_melting_in_both_integrators()
             let mut old = vec![20.0; 4];
             let mut previous_t = 290.0;
             let mut previous_time = 0.0;
+            // Each time is the 10 W source's cumulative inventory from
+            // (h=20, T=290): (h-20) + nonlinear_film_energy(290, T), over 10 W.
+            // To (40, 300): 20 + 10*(4 - 0.4) = 56 J, t = 5.6 (not 5.8, which
+            // asks the step to store both 29 J and 31 J below); the plateau
+            // then takes 30 J per 3 s, and (130, 310) needs 110 + 80 = 190 J.
             for (time, expected_h, expected_t) in [
                 (2.7, 30.0, 295.0),
-                (5.8, 40.0, 300.0),
-                (8.8, 70.0, 300.0),
-                (11.8, 100.0, 300.0),
+                (5.6, 40.0, 300.0),
+                (8.6, 70.0, 300.0),
+                (11.6, 100.0, 300.0),
                 (19.0, 130.0, 310.0),
                 (31.6, 175.0, 325.0),
             ] {

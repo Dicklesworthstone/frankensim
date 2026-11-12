@@ -154,7 +154,6 @@ impl<'t, 'm> FractureCooling<'t, 'm> {
             }
             previous = frame.time_s;
         }
-        let initial_energy = self.thermal.energy_j();
         let mut next = self.clone();
         let mut report = Report { thermal: EnergyAudit { incoming_mass_kg: 0.0,incoming_energy_j: 0.0,
             external_heat_j: 0.0,stored_energy_change_j: 0.0,residual_j: 0.0,substeps: 0,events: 0 },
@@ -175,7 +174,7 @@ impl<'t, 'm> FractureCooling<'t, 'm> {
             report.crossings.extend(part.crossings);
             next = state;
         }
-        report.thermal.stored_energy_change_j = finite_value(next.thermal.energy_j()-initial_energy)?;
+        report.thermal.stored_energy_change_j = stored_change_j(&self.thermal,&next.thermal,&mut checkpoint)?;
         report.thermal.residual_j = finite_value(report.thermal.stored_energy_change_j
             -report.thermal.incoming_energy_j-report.thermal.external_heat_j)?;
         if report.thermal.residual_j.abs() > config.thermal.energy_tolerance_j {
@@ -260,7 +259,6 @@ impl<'t, 'm> FractureCooling<'t, 'm> {
         let mut cuts: Vec<_> = located.iter().map(|c| c.high).collect();
         cuts.push(1.0);
         cuts.dedup(); // Already sorted; the last crossing may be the final endpoint.
-        let initial_energy = self.thermal.energy_j();
         let mut next = self.clone();
         let mut report = Report { thermal: EnergyAudit { incoming_mass_kg: 0.0,incoming_energy_j: 0.0,
             external_heat_j: 0.0,stored_energy_change_j: 0.0,residual_j: 0.0,substeps: 0,events: 0 },
@@ -287,7 +285,7 @@ impl<'t, 'm> FractureCooling<'t, 'm> {
             add_contacts(&mut report.contacts,contact)?;
             next = updated;
         }
-        report.thermal.stored_energy_change_j = finite_value(next.thermal.energy_j()-initial_energy)?;
+        report.thermal.stored_energy_change_j = stored_change_j(&self.thermal,&next.thermal,&mut checkpoint)?;
         report.thermal.residual_j = finite_value(report.thermal.stored_energy_change_j
             -report.thermal.incoming_energy_j-report.thermal.external_heat_j)?;
         if report.thermal.residual_j.abs() > config.thermal.energy_tolerance_j {
@@ -300,6 +298,31 @@ impl<'t, 'm> FractureCooling<'t, 'm> {
 
 fn finite_value(value: f64) -> Result<f64, Error> {
     if value.is_finite() { Ok(value) } else { Err(Error::Thermal(DepositionError::Arithmetic)) }
+}
+// Whole-path storage change by the thermal owner's own account (fs-thermal
+// `admit_advance_energy`, 492f281ea4): subtract each cell's starting enthalpy
+// BEFORE reducing, in cell-ID order, with a compensated sum; a cell born on the
+// path enters with its whole m*h. Differencing two absolute `energy_j()` totals
+// rounds at the inventory's ulp, not the heat moved, so a path without
+// crossings would report a different number than the ordinary `advance_to`.
+// `HeatSum` (TwoSum high + accumulated low) is the owner's Neumaier sum.
+fn stored_change_j(start: &DepositionSimulation<'_>, end: &DepositionSimulation<'_>,
+    checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+) -> Result<f64, Error> {
+    if start.cells().keys().any(|id| !end.cells().contains_key(id)) {
+        return Err(Error::Thermal(DepositionError::Arithmetic));
+    }
+    let mut stored = HeatSum::default();
+    for (index, (id, cell)) in end.cells().iter().enumerate() {
+        if index % 256 == 0 { checkpoint()?; }
+        let change = match start.cells().get(id) {
+            Some(old) => cell.mass_kg*finite_value(cell.specific_h_j_kg-old.specific_h_j_kg)?,
+            None => cell.mass_kg*cell.specific_h_j_kg,
+        };
+        stored.add(finite_value(change)?)?;
+    }
+    finite_value(end.energy_j())?;
+    stored.value()
 }
 fn add_count(a: usize,b: usize) -> Result<usize, Error> {
     a.checked_add(b).ok_or(Error::Thermal(DepositionError::Budget("prescribed path count overflow")))
