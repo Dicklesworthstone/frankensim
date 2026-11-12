@@ -72,7 +72,7 @@ fn material(
             chemistry: name.into(),
             phase: "solid".into(),
             process: "manufactured relaxing joint".into(),
-            revision: 1,
+            revision: 0,
         },
         claims,
         vec![],

@@ -57,7 +57,7 @@ fn material(name: &str, modulus: f64, branch: bool) -> ResolvedThermoMaxwell {
             chemistry: name.into(),
             phase: "solid".into(),
             process: "manufactured thermal joint fixture".into(),
-            revision: 1,
+            revision: 0,
         },
         claims,
         vec![],

@@ -523,11 +523,8 @@ fn zero_temperature_change_preserves_original_force_heat_and_modal_arithmetic() 
 fn endpoint_binding_keeps_original_card_axes_context_band_and_atomic_cancellation() {
     let fixture = fixture(340.0, false, false, 330.0);
     let p = patch_from_sheet(fixture.thermal);
-    let foreign = MaterialCard::assemble(
-        MaterialStateId {
-            revision: 1,
-            ..fixture.card.id().clone()
-        },
+    let foreign = MaterialCard::supersede(
+        &fixture.card,
         fixture.card.claims().clone(),
         fixture.card.models().to_vec(),
     )
