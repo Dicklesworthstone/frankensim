@@ -398,6 +398,14 @@ fn g3_untilted_brushing_moves_with_its_body_and_tilted_shading_is_admitted() {
         let local_frame = shading_frame(&detail, Point3::new(0.4, 0.0, 0.0), normal).unwrap();
         assert!(local_frame.mark_covered);
         let (ax, ay) = detail.alpha_pair_for_mark(true);
+        // The bounded spherical-cap VNDF proposal (6a13950eae) leaves its mass
+        // 1 - (1 - k) G1(wo) / 2 in the weight, with k = (1 - a^2) s^2 / (s^2 + a^2 c^2),
+        // a = min(ax, ay, 1), c = cos_o and s = 1 + sin_o (tracer.rs ggx_reflection_cap_scale and
+        // ggx_reflection_cap_mass). The camera looks straight down the untilted normal, so
+        // c = 1, s = 1, G1(wo) = 1 and the mass is 1 / (1 + a^2).
+        let a = ax.min(ay).min(1.0);
+        let k = (1.0 - a * a) / (1.0 + a * a);
+        let cap_mass = 1.0 - 0.5 * (1.0 - k);
         let mut baseline = None;
         for placement in [RigidTransform::identity(), moved] {
             let geometry =
@@ -448,7 +456,7 @@ fn g3_untilted_brushing_moves_with_its_body_and_tilted_shading_is_admitted() {
             let distance = 0.5 + 1.0 / wi.z;
             close(
                 sample.radiance_w_m2_sr_nm(),
-                4.0 * fresnel * masking * (-0.2 * distance).exp(),
+                4.0 * fresnel * cap_mass * masking * (-0.2 * distance).exp(),
                 3e-6,
             );
             if let Some(value) = baseline {

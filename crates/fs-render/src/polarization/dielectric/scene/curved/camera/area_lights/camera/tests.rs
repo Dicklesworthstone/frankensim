@@ -303,13 +303,26 @@ fn g1_rough_and_brushed_receivers_share_native_continuation_and_complementary_mi
             // D(0), flat receiving geometry, Beer law and power partition.
             let fresnel = ((1.0_f64 - 0.2).powi(2) + 9.0) / ((1.0_f64 + 0.2).powi(2) + 9.0);
             let p_bsdf = 1.0 / (4.0 * core::f64::consts::PI * alpha_x * alpha_y);
+            // The bounded spherical-cap VNDF proposal (6a13950eae) keeps the BRDF and divides
+            // the proposal density by the cap mass 1 - (1 - k) G1(wo) / 2, with
+            // k = (1 - a^2) s^2 / (s^2 + a^2 c^2) and a = min(ax, ay, 1) (tracer.rs
+            // ggx_reflection_cap_scale, ggx_reflection_cap_mass, ggx_vndf_reflection_pdf and
+            // its _aniso form). At this normal view c = 1, s = 1 and G1(wo) = 1, so the mass is
+            // 1 / (1 + a^2). The sampled weight keeps the mass, both MIS weights use the bounded
+            // density, and the NEE term's BRDF is unchanged.
+            let a = alpha_x.min(alpha_y).min(1.0);
+            let k = (1.0 - a * a) / (1.0 + a * a);
+            let cap_mass = 1.0 - 0.5 * (1.0 - k);
+            let p_proposal = p_bsdf / cap_mass;
             let p_light = 4.0 / AREA;
-            let light_weight = p_light * p_light / (p_light * p_light + p_bsdf * p_bsdf);
-            let hit_weight = p_bsdf * p_bsdf / (p_light * p_light + p_bsdf * p_bsdf);
+            let light_weight =
+                p_light * p_light / (p_light * p_light + p_proposal * p_proposal);
+            let hit_weight =
+                p_proposal * p_proposal / (p_light * p_light + p_proposal * p_proposal);
             let attenuation = (-0.3_f64).exp();
             let expected_nee = fresnel * p_bsdf * LE * AREA / 4.0 * attenuation * light_weight;
-            let expected_hit = fresnel * LE * attenuation * hit_weight;
-            near(baseline.radiance_w_m2_sr_nm(), fresnel * LE * attenuation, 2e-6);
+            let expected_hit = fresnel * cap_mass * LE * attenuation * hit_weight;
+            near(baseline.radiance_w_m2_sr_nm(), fresnel * cap_mass * LE * attenuation, 2e-6);
             near(result.area_radiance_w_m2_sr_nm(), expected_nee, 3e-6);
             near(result.radiance_sample().radiance_w_m2_sr_nm(), expected_nee + expected_hit, 3e-6);
             assert_eq!(result.radiance_sample().path(), baseline.path());

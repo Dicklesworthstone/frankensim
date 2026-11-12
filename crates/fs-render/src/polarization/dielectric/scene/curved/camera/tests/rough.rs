@@ -89,10 +89,18 @@ fn g1_rough_camera_coated_metal_matches_fresnel_masking_and_physical_beer_path()
                         let half = Vec3::new(wo.x + wi.x, wo.y + wi.y, wo.z + wi.z);
                         let half = half.scale(1.0 / half.norm());
                         let fresnel = metals[0].fresnel(550.0, index, wo.dot(half)).unwrap();
-                        // The unchanged VNDF proposal cancels to F*G2/G1(wo).
+                        // The bounded spherical-cap VNDF proposal (6a13950eae) cancels to
+                        // cap_mass * F * G2/G1(wo). The mass is 1 - (1 - k) G1(wo) / 2, with
+                        // k = (1 - a^2) s^2 / (s^2 + a^2 c^2), c = cos_o and s = 1 + sin_o
+                        // (tracer.rs ggx_reflection_cap_scale and ggx_reflection_cap_mass).
                         let lambda_o = smith_lambda(alpha, cosine);
                         let lambda_i = smith_lambda(alpha, -wi.z);
+                        let s = 1.0 + (1.0 - cosine * cosine).sqrt();
+                        let k = (1.0 - alpha * alpha) * s * s
+                            / (s * s + alpha * alpha * cosine * cosine);
+                        let cap_mass = 1.0 - 0.5 * (1.0 - k) / (1.0 + lambda_o);
                         let expected = fresnel
+                            * cap_mass
                             * (1.0 + lambda_o) / (1.0 + lambda_o + lambda_i)
                             * (-0.12 * result.path().traveled_m()).exp();
                         near(result.transport_weight(), expected, 3e-6);
@@ -254,7 +262,14 @@ fn g1_rough_camera_grin_reflection_uses_contact_index_and_one_endpoint_radiance_
         // The gradient is parallel to this chosen facet path: z=0 -> 0.4 -> -0.6.
         let fresnel = metals[0].fresnel(550.0, 1.208, 1.0).unwrap();
         let ratio = 1.2_f64 / 1.188;
-        let expected = fresnel * (-0.1_f64 * 1.4).exp() * ratio * ratio;
+        // The bounded spherical-cap VNDF proposal (6a13950eae) leaves its mass
+        // 1 - (1 - k) G1(wo) / 2 in the weight (tracer.rs ggx_reflection_cap_mass). At this
+        // normal view c = 1, s = 1 and G1(wo) = 1, so k = (1 - a^2) / (1 + a^2) and the mass
+        // is 1 / (1 + a^2).
+        let a = 0.3_f64;
+        let k = (1.0 - a * a) / (1.0 + a * a);
+        let cap_mass = 1.0 - 0.5 * (1.0 - k);
+        let expected = fresnel * cap_mass * (-0.1_f64 * 1.4).exp() * ratio * ratio;
         near(result.transport_weight(), expected, 3e-6);
         near(result.radiance_w_m2_sr_nm(), 3.0 * expected, 9e-6);
         near(result.path().traveled_m(), 1.4, 2e-6);

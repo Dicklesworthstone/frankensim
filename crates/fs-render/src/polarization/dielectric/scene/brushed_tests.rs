@@ -92,7 +92,17 @@ fn g1_nested_dielectric_brushed_mirror_exit_retains_material_and_handedness() {
         assert_eq!(calls,3); assert_eq!(out.surface_events(),4);
         assert_eq!(out.termination(),PathTermination::Detected); assert_eq!(out.medium_index(),0);
         near(out.traveled_m(),5.0);
-        let expected=metals[0].fresnel(550.0,1.33,1.0).unwrap()*fs_math::det::exp(-0.7);
+        // The bounded spherical-cap VNDF proposal (6a13950eae) leaves its mass
+        // 1 - (1 - k) G1(wo) / 2 in the weight, with k = (1 - a^2) s^2 / (s^2 + a^2 c^2),
+        // a = min(ax, ay, 1), c = cos_o and s = 1 + sin_o (tracer.rs ggx_reflection_cap_scale and
+        // ggx_reflection_cap_mass). The mirror is met at the normal view (c = 1, s = 1,
+        // G1(wo) = 1) and the [0, 0] draw reflects back along the normal, so the mass is
+        // 1 / (1 + a^2). The hit at (0.4, 0, 2) lies at azimuth 0, inside the radial mark, so the
+        // pair is the mark's.
+        let (ax,ay)=detail(0.0).alpha_pair_for_mark(detail(0.0).mark_covers(Point3::new(0.4,0.0,2.0)));
+        let a=ax.min(ay).min(1.0); let (c,s)=(1.0_f64,1.0_f64);
+        let k=(1.0-a*a)*s*s/(s*s+a*a*c*c); let cap_mass=1.0-0.5*(1.0-k);
+        let expected=metals[0].fresnel(550.0,1.33,1.0).unwrap()*fs_math::det::exp(-0.7)*cap_mass;
         same(out.beam().power(),Stokes { i:expected,q:0.0,u:0.0,v:-expected });
     });
 }
