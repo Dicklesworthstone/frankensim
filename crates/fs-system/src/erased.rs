@@ -72,6 +72,7 @@ pub(crate) trait Node {
     fn has_tangent(&self) -> bool;
     fn clone_state(&self, state: &dyn Any) -> Result<Box<dyn Any>, OwnerError>;
     fn stored_energy_j(&self, state: &dyn Any) -> Result<f64, OwnerError>;
+    fn stored_mass_kg(&self, state: &dyn Any) -> Result<Option<f64>, OwnerError>;
     fn limit_dt_s(&self, state: &dyn Any, proposed_s: f64) -> Result<f64, OwnerError>;
     fn next_event_s(&self, state: &dyn Any) -> Option<f64>;
     fn propose(
@@ -123,6 +124,12 @@ macro_rules! mandatory_tier {
         fn stored_energy_j(&self, state: &dyn Any) -> Result<f64, OwnerError> {
             self.0
                 .stored_energy_j(state_of::<C::State>(state)?)
+                .map_err(OwnerError::new)
+        }
+
+        fn stored_mass_kg(&self, state: &dyn Any) -> Result<Option<f64>, OwnerError> {
+            self.0
+                .stored_mass_kg(state_of::<C::State>(state)?)
                 .map_err(OwnerError::new)
         }
 

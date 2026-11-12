@@ -14,7 +14,7 @@ Layer: L3. The composition kernel: a system of `fs_ports::component::Component`s
 joined by connections and stepped as one. It owns what each coupled pairing
 used to write for itself: the state store with atomic publication, the
 equations of the connections, the order of evaluation, the interface solve,
-step negotiation, and the energy and entropy ledger.
+step negotiation, and the energy, measured mass and entropy ledger.
 
 Direct dependencies: fs-ports (the contract) and fs-exec (`Cx`). It sits
 outside fs-couple so that the kernel compiles and tests in seconds and so that
@@ -88,7 +88,18 @@ physics owners below fs-couple can be composed without it.
     transport elements, do not join directly. Ratios, transformers, power
     maps and heat routes refuse stream ports. Each position of a stream port
     is a tolerance group of its own in the interface solve, because its
-    coefficients are different quantities.
+    coefficients are different quantities. Stream connections are audited
+    separately for mass cancellation as well as enthalpy balance.
+- `Component::stored_mass_kg(state)` optionally measures total stored mass
+  [kg] from the typed state. A measured inventory is finite and nonnegative;
+  `Some(0.0)` declares zero storage, while the default `None` means unknown.
+  For measured owners the driver checks the change between accepted and
+  candidate inventories against signed mass entering through stream ports.
+  This check is independent of the energy receipt and uses the mass
+  contract's rounding allowance, not a component-supplied mass tolerance.
+  `elements::GasVolume` validates its contents and reports `mass_kg`;
+  `elements::Restriction` reports zero. Other owners must opt in before the
+  kernel can claim their inventory balance.
 - `boundary(port, f)`: the input side of a port prescribed as `f(t0, dt)`.
 - `System::step(dt_max, cx) -> StepReport`, `state`, `last_input`,
   `last_output`, `guess`, `plan_shape`, `plan_loops`, `time_s`, `steps`,
@@ -119,6 +130,8 @@ physics owners below fs-couple can be composed without it.
 - `System::checkpoint() -> Result<Checkpoint, CheckpointError>` captures
   accepted typed states, interface warm starts and outputs, the exact
   compensated clock, step count, complete ledger and solve configuration.
+  Mass accounts, coverage counts and the compensation in their sums are part
+  of that ledger and rewind with the other accepted accounts.
   `restore(&checkpoint)` atomically rewinds the originating sealed system;
   the same checkpoint may be reused. A checkpoint from another system is
   refused before anything changes, even when the graphs have the same names
@@ -132,6 +145,18 @@ physics owners below fs-couple can be composed without it.
   (energy defect, entropy generated), per boundary (energy and entropy in), per
   heat sink (heat), all compensated sums; `energy_residual_j()` is the
   first-law residual of the window.
+  `NodeAccount::has_streams` records whether a node participates in stream
+  transport, and `NodeAccount::mass: Option<MassAccount>` carries measured
+  inventory accounting. `MassAccount` has compensated `port_mass_in_kg`,
+  `stored_change_kg` and `balance_defect_kg` sums, plus `audited_steps`.
+  `BoundaryAccount::mass_in_kg` records signed mass entering through a stream
+  boundary, and `ConnectionAccount::mass_defect_kg` records the accepted
+  uncancelled mass at a connection; non-stream rows contribute zero.
+  `mass_residual_kg() -> Option<f64>` returns stored mass change minus boundary
+  mass in minus connection mass defect when every stream owner has measured
+  coverage for every accepted step in the window. Missing or incomplete
+  coverage returns `None`, rather than a zero conservation residual. The
+  known boundary and connection accounts remain available in that case.
 - `SystemError`, `AdmissionError`, `OwnerError` (the component's own error,
   recoverable with `downcast_ref`).
 - With the `constitutive` feature, `constitutive::NonlinearCapacitor` and
@@ -242,10 +267,12 @@ without a loop is proposed once; a looped block is solved by Newton iteration
 on its interface inputs. (3) A component may answer `Proposal::Shorten`; the
 whole trial restarts with the shorter step. (4) Every candidate is audited with
 `fs_ports::component::audit_step`, with stored energy re-measured from the
-states. (5) Each connection must cancel interface energy within tolerance and
-the step must not destroy entropy. (6) Every `admit` is called. (7) All states
-are published by swapping the two generations, then the clock and the ledger
-advance.
+states, and any measured mass inventory is audited against the stream
+transfer. (5) Each connection must cancel interface energy and stream mass
+within their respective tolerances, and the step must not destroy entropy.
+(6) Every `admit` is called. (7) All states are published by swapping the two
+generations, then the clock and the ledger advance. Mass rows advance only
+with this accepted publication.
 
 **Plan.** `seal` gives every scalar input one driver, builds the dependency
 graph between components, and orders its strongly connected blocks (iterative
@@ -257,6 +284,12 @@ Tarjan, index order).
   admitted. A failed step leaves every accepted state, the clock, the ledger
   and the warm-start values bitwise unchanged.
 - A step repeated after a failure is bitwise equal to a first attempt.
+- Mass measurement and both owner and connection mass audits precede every
+  publication. Unaccounted measured mass beyond the allowed roundoff is
+  refused by name as `Contract` with `ContractViolation::MassBalance`, even
+  when energy balances. Uncancelled connection mass beyond tolerance is
+  `InterfaceMass`. Either refusal leaves all states, clock, warm starts and
+  ledger rows unchanged, including nodes audited before the failing one.
 - Junction equations use coefficients of exactly plus or minus one, so the
   connection itself adds no rounding. A junction always closes a loop between
   its setter and its members, so its interface energy cancels to the solver
@@ -549,8 +582,9 @@ step: the component's own error unchanged (`Component`, with the phase), a
 contract breach (`Contract`), a bad negotiation answer, `NotConverged` naming
 the block and the worst input, `Singular`, `Unsupported` naming a component
 that is in a loop without a tangent and is not smooth, `GuessRequired` for a
-temperature in a loop without a positive starting value, `Interface`,
-`SecondLaw`, `StepUnderflow`, `Step`, `Cancelled`. An invalid description or a
+temperature in a loop without a positive starting value, `Interface` for
+uncancelled energy, `InterfaceMass` for uncancelled stream mass, `SecondLaw`,
+`StepUnderflow`, `Step`, `Cancelled`. An invalid description or a
 failed step never panics. A `PortRef` or `NodeId` taken from a different system
 is a caller error and is not checked.
 
@@ -1196,7 +1230,9 @@ Streams, `tests/elements.rs`: `elements::GasVolume` (a well-mixed volume of
 perfect gas with constant heat capacities: a stream port, a heat port and,
 with `with_wall`, a pressure-volume port; trapezoidal, energy-exact for any
 step) and `elements::Restriction` (mass rate `conductance (p_a - p_b)`, the
-enthalpy and carried quantities those of the side the mass leaves).
+enthalpy and carried quantities those of the side the mass leaves). Both
+supply measured mass: the volume's validated inventory and the restriction's
+zero storage, so their mass balances are checked before publication.
 - Both pass the conformance and tangent checks at 100 generated points, the
   restriction on both sides of zero flow; at equal pressures nothing crosses
   (the mandatory check only: the port map has a kink there). The kit's
@@ -1248,6 +1284,21 @@ enthalpy and carried quantities those of the side the mass leaves).
   quantities, a stream with a heat port, a ratio, a transformer and a heat
   route on a stream port.
 
+Mass accounting, `tests/mass_accounting.rs`:
+
+- two `GasVolume`s and a `Restriction`, heated in turn for a flow reversal,
+  conserve their measured total over 300 steps; per-node inventory changes,
+  port transfers, audit coverage and connection defects agree;
+- a prescribed filling boundary books the independently known added mass;
+  restoring a checkpoint and replaying restores every mass account exactly;
+- an energy-neutral fixture creates mass in the last node: the named
+  `MassBalance` refusal publishes no node, clock or ledger change, and a
+  corrected retry succeeds with only the accepted audits counted;
+- an owner that supplies no inventory still records boundary transport but
+  has no mass account or system mass-conservation verdict;
+- a finite balanced transfer of `1e308` kg succeeds with zero mass defect and
+  residual even though the unscaled sum of its absolute transfers overflows.
+
 Shared receivers, `tests/elements.rs`: two heaters routed into one body (one
 of them also into a second body and a named sink) deliver the sum of their
 shares, the pair is audited in the first route's row, and the ledger closes;
@@ -1262,13 +1313,13 @@ the refused calls change nothing.
   stores its absolute temperature, so a small heat increment is rounded to an
   ulp of that temperature each step; its ledger account, a compensated sum of
   receipts, does not lose it.
-- Streams: the kernel audits a stream port's enthalpy and nothing else.
-  Mass and carried quantities cancel across a junction by its equations, but
-  no audit checks that a component keeps them (a transport element that
-  returned the same mass rate at both ports would pass the kernel and the
-  kit; only its own tests would catch it), and the ledger has no mass row.
-  Entropy carried by streams and made by mixing or throttling is not
-  accounted. Nothing checks that joined volumes hold the same gas. A
+- Streams: the kernel audits enthalpy, connection mass cancellation and
+  each measured owner's total mass balance. An owner returning `None` has no
+  inventory verdict, and the system mass residual stays unavailable without
+  complete measured coverage. Carried species or constituent inventories are
+  not audited or ledgered; their rates still cancel across a junction by its
+  equations. Entropy carried by streams and made by mixing or throttling is
+  not accounted. Nothing checks that joined volumes hold the same gas. A
   `GasVolume` shortens a step that passes more than about twice its mass
   through it, so a small volume between restrictions sets the step; a
   prescribed draw of a quantity a volume holds none of ends in step
@@ -1355,5 +1406,5 @@ the refused calls change nothing.
   `energy_residual_j`, not refused.
 - `common_flow` on heat ports is admitted for one member only (a bond). Heat
   shared between several bodies goes through `common_effort` or `heat_route`.
-- Conserved inventories other than energy (mass, momentum, charge) are not in
-  the ledger yet (bead `.5.6`).
+- Momentum, charge and per-species inventories are not in the ledger yet
+  (bead `.5.6`). Total stream mass accounting does not establish those balances.

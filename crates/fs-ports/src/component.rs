@@ -741,6 +741,14 @@ pub trait Component {
     /// The kernel uses it to re-measure endpoints independently of receipts.
     fn stored_energy_j(&self, state: &Self::State) -> Result<f64, Self::Error>;
 
+    /// Stored mass [kg], measured from the state when this owner exposes it.
+    ///
+    /// `None` means unavailable, not zero. A stateless stream transport may
+    /// return `Some(0.0)`. Available inventories must be finite and nonnegative.
+    fn stored_mass_kg(&self, _state: &Self::State) -> Result<Option<f64>, Self::Error> {
+        Ok(None)
+    }
+
     /// Largest step not above `proposed_s` the component accepts from `state`.
     fn limit_dt_s(&self, _state: &Self::State, proposed_s: f64) -> Result<f64, Self::Error> {
         Ok(proposed_s)
@@ -1050,6 +1058,29 @@ pub enum ContractViolation {
         /// The reported value.
         value: f64,
     },
+    /// Stored mass is available at only one endpoint of a step.
+    MassAvailability {
+        /// Whether the accepted endpoint exposes its inventory.
+        old_available: bool,
+        /// Whether the candidate endpoint exposes its inventory.
+        new_available: bool,
+    },
+    /// An available mass inventory is negative or nonfinite.
+    StoredMass {
+        /// The accepted or candidate endpoint.
+        endpoint: &'static str,
+        /// Rejected mass [kg].
+        value_kg: f64,
+    },
+    /// Net port mass does not equal the measured inventory change.
+    MassBalance {
+        /// Net mass into the component through its ports [kg].
+        port_mass_in_kg: f64,
+        /// Measured inventory change [kg].
+        stored_change_kg: f64,
+        /// Roundoff allowance [kg].
+        tolerance_kg: f64,
+    },
     /// Port energy does not equal stored change plus numerical loss.
     EnergyBalance {
         /// Net energy into the component through its ports [J].
@@ -1124,6 +1155,28 @@ impl fmt::Display for ContractViolation {
             Self::NegativeProduction { quantity, value } => {
                 write!(f, "{quantity} = {value} is negative")
             }
+            Self::MassAvailability {
+                old_available,
+                new_available,
+            } => write!(
+                f,
+                "stored mass availability changed: accepted={old_available}, candidate={new_available}"
+            ),
+            Self::StoredMass { endpoint, value_kg } => {
+                write!(
+                    f,
+                    "{endpoint} stored mass {value_kg} kg is not finite and nonnegative"
+                )
+            }
+            Self::MassBalance {
+                port_mass_in_kg,
+                stored_change_kg,
+                tolerance_kg,
+            } => write!(
+                f,
+                "mass balance: port mass in {port_mass_in_kg} kg != stored change \
+                 {stored_change_kg} kg within {tolerance_kg} kg"
+            ),
             Self::EnergyBalance {
                 port_energy_in_j,
                 stored_change_j,
@@ -1155,6 +1208,142 @@ impl fmt::Display for ContractViolation {
 }
 
 impl std::error::Error for ContractViolation {}
+
+/// Measured inventory closure for an owner that exposes its stored mass.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MassStepAudit {
+    /// Net mass into the component through all stream ports [kg].
+    pub port_mass_in_kg: f64,
+    /// Candidate inventory minus accepted inventory [kg].
+    pub stored_change_kg: f64,
+    /// `port_mass_in_kg - stored_change_kg`, using compensated reduction [kg].
+    pub balance_defect_kg: f64,
+    /// Roundoff allowance applied to the balance [kg].
+    pub tolerance_kg: f64,
+}
+
+/// Audit stream mass against independently measured endpoint inventories.
+///
+/// No allocation. `None` at both endpoints means unavailable, not a passing
+/// mass balance. Even then, the step, vectors and individual transfers must
+/// be valid. Available inventories use a fixed-order compensated reduction
+/// scaled before summation, with tolerance `128 * EPSILON` times the largest
+/// of the two inventories and the sum of absolute port transfers.
+///
+/// # Errors
+/// Refuses invalid step/vector data, nonfinite transfers, negative or nonfinite
+/// inventories, changing inventory availability, and a mass balance defect.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn audit_mass_step(
+    ports: &[PortSpec],
+    layout: &PortLayout,
+    dt_s: f64,
+    inputs: &[f64],
+    outputs: &[f64],
+    stored_old_kg: Option<f64>,
+    stored_new_kg: Option<f64>,
+) -> Result<Option<MassStepAudit>, ContractViolation> {
+    if !(dt_s.is_finite() && dt_s > 0.0) {
+        return Err(ContractViolation::Step { dt_s });
+    }
+    for (vector, expected, actual) in [
+        ("ports", layout.ports(), ports.len()),
+        ("inputs", layout.input_len(), inputs.len()),
+        ("outputs", layout.output_len(), outputs.len()),
+    ] {
+        if expected != actual {
+            return Err(ContractViolation::VectorLength {
+                vector,
+                expected,
+                actual,
+            });
+        }
+    }
+    if !inputs.iter().chain(outputs).all(|value| value.is_finite()) {
+        return Err(ContractViolation::NonFinite {
+            quantity: "mass port values",
+        });
+    }
+    let mut scale = 0.0_f64;
+    for (index, port) in ports.iter().enumerate() {
+        let transfer = port.mass_in_kg(
+            dt_s,
+            &inputs[layout.input_range(index)],
+            &outputs[layout.output_range(index)],
+        );
+        if !transfer.is_finite() {
+            return Err(ContractViolation::NonFinite {
+                quantity: "port mass transfer",
+            });
+        }
+        scale = scale.max(transfer.abs());
+    }
+    for (endpoint, inventory) in [("accepted", stored_old_kg), ("candidate", stored_new_kg)] {
+        if let Some(value_kg) = inventory {
+            if !(value_kg.is_finite() && value_kg >= 0.0) {
+                return Err(ContractViolation::StoredMass { endpoint, value_kg });
+            }
+            scale = scale.max(value_kg);
+        }
+    }
+    let (old, new) = match (stored_old_kg, stored_new_kg) {
+        (Some(old), Some(new)) => (old, new),
+        (None, None) => return Ok(None),
+        _ => {
+            return Err(ContractViolation::MassAvailability {
+                old_available: stored_old_kg.is_some(),
+                new_available: stored_new_kg.is_some(),
+            });
+        }
+    };
+    // All-zero accounts need no special arithmetic and have zero tolerance.
+    let scale = if scale == 0.0 { 1.0 } else { scale };
+    let transfers = ports.iter().enumerate().map(|(index, port)| {
+        port.mass_in_kg(
+            dt_s,
+            &inputs[layout.input_range(index)],
+            &outputs[layout.output_range(index)],
+        ) / scale
+    });
+    let net = mass_sum(transfers.clone())?;
+    let absolute = mass_sum(transfers.clone().map(f64::abs))?;
+    let defect = mass_sum(transfers.chain([old / scale, -new / scale]))?;
+    let tolerance = 128.0 * f64::EPSILON * absolute.max(old / scale).max(new / scale);
+    let audit = MassStepAudit {
+        port_mass_in_kg: net * scale,
+        stored_change_kg: new - old,
+        balance_defect_kg: defect * scale,
+        tolerance_kg: tolerance * scale,
+    };
+    if ![
+        audit.port_mass_in_kg,
+        audit.balance_defect_kg,
+        audit.tolerance_kg,
+    ]
+    .iter()
+    .all(|value| value.is_finite())
+    {
+        return Err(ContractViolation::NonFinite {
+            quantity: "mass account",
+        });
+    }
+    if !(defect.abs() <= tolerance) {
+        return Err(ContractViolation::MassBalance {
+            port_mass_in_kg: audit.port_mass_in_kg,
+            stored_change_kg: audit.stored_change_kg,
+            tolerance_kg: audit.tolerance_kg,
+        });
+    }
+    Ok(Some(audit))
+}
+
+fn mass_sum(values: impl IntoIterator<Item = f64>) -> Result<f64, ContractViolation> {
+    crate::fixed_order_window_sum("mass account", values).map_err(|_| {
+        ContractViolation::NonFinite {
+            quantity: "mass account",
+        }
+    })
+}
 
 /// Energy and entropy that crossed a component's ports in one step.
 #[derive(Debug, Clone, Copy, PartialEq)]

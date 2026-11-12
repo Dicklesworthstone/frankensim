@@ -8,8 +8,9 @@ use std::rc::Rc;
 use fs_exec::Cx;
 use fs_ports::StableId;
 use fs_ports::component::{
-    Carrier, Class, Component, ContractViolation, PortLayout, PortRole, PortSpec, PortTangent,
-    Proposal, Receipt, STREAM_ENTHALPY_RATE, audit_step,
+    Carrier, Class, Component, ContractViolation, MassStepAudit, PortLayout, PortRole, PortSpec,
+    PortTangent, Proposal, Receipt, STREAM_ENTHALPY_RATE, STREAM_MASS_RATE, audit_mass_step,
+    audit_step,
 };
 
 use crate::erased::{Node, OwnerError, Plain, Tangent};
@@ -123,7 +124,7 @@ pub enum Phase {
     Negotiate,
     /// `propose`, or the tangent of its port map.
     Propose,
-    /// `stored_energy_j`, during the audit.
+    /// Stored energy or mass measurement during the audit.
     Measure,
     /// `admit`.
     Admit,
@@ -196,6 +197,15 @@ pub enum SystemError {
         /// Tolerance applied [J].
         tolerance_j: f64,
     },
+    /// A connection failed to cancel stream mass within its solve allowance.
+    InterfaceMass {
+        /// Connection index, in declaration order.
+        connection: usize,
+        /// Mass that failed to cancel [kg].
+        defect_kg: f64,
+        /// Tolerance applied [kg].
+        tolerance_kg: f64,
+    },
     /// The step would destroy entropy.
     SecondLaw {
         /// Entropy generated in the step [J/K].
@@ -257,6 +267,14 @@ impl fmt::Display for SystemError {
             } => write!(
                 f,
                 "connection {connection} left {defect_j} J uncancelled (tolerance {tolerance_j} J)"
+            ),
+            Self::InterfaceMass {
+                connection,
+                defect_kg,
+                tolerance_kg,
+            } => write!(
+                f,
+                "connection {connection} left {defect_kg} kg uncancelled (tolerance {tolerance_kg} kg)"
             ),
             Self::SecondLaw { generated_j_per_k } => {
                 write!(
@@ -1374,8 +1392,13 @@ impl SystemBuilder {
             nodes: self
                 .names
                 .iter()
-                .map(|name| NodeAccount {
+                .enumerate()
+                .map(|(index, name)| NodeAccount {
                     name: name.clone(),
+                    has_streams: self.nodes[index]
+                        .ports()
+                        .iter()
+                        .any(|port| port.carrier() == Carrier::Stream),
                     ..NodeAccount::default()
                 })
                 .collect(),
@@ -1480,6 +1503,7 @@ impl SystemBuilder {
             receipts: vec![Receipt::lossless(0.0, 0.0); count],
             port_energy: vec![0.0; ports],
             port_entropy: vec![0.0; ports],
+            port_mass: vec![0.0; ports],
             scratch_outputs: vec![0.0; widest_output],
             scratch_direction: vec![0.0; widest_input],
             time: Sum::default(),
@@ -1499,9 +1523,10 @@ enum Trial {
 #[derive(Default)]
 struct StepScratch {
     defects: Vec<f64>,
+    mass_audits: Vec<Option<MassStepAudit>>,
     members: Vec<PortRef>,
     group_members: Vec<PortRef>,
-    connection_rows: Vec<(f64, f64)>,
+    connection_rows: Vec<(f64, f64, f64)>,
     sink_heat: Vec<f64>,
 }
 
@@ -1723,6 +1748,7 @@ pub struct System {
     receipts: Vec<Receipt>,
     port_energy: Vec<f64>,
     port_entropy: Vec<f64>,
+    port_mass: Vec<f64>,
     scratch_outputs: Vec<f64>,
     scratch_direction: Vec<f64>,
     time: Sum,
@@ -2496,7 +2522,12 @@ impl System {
     /// Audit every candidate and fill the per-port energies.
     // `node` indexes six parallel per-component tables, not only `defects`.
     #[allow(clippy::needless_range_loop)]
-    fn audit(&mut self, dt_s: f64, defects: &mut [f64]) -> Result<(), SystemError> {
+    fn audit(
+        &mut self,
+        dt_s: f64,
+        defects: &mut [f64],
+        mass_audits: &mut [Option<MassStepAudit>],
+    ) -> Result<(), SystemError> {
         for node in 0..self.nodes.len() {
             let measure = |state: &dyn Any| {
                 self.nodes[node]
@@ -2534,6 +2565,33 @@ impl System {
                 let global = self.port_start[node] + port;
                 self.port_energy[global] = spec.energy_in_j(dt_s, input, output);
                 self.port_entropy[global] = spec.entropy_in_j_per_k(dt_s, input, output);
+                self.port_mass[global] = spec.mass_in_kg(dt_s, input, output);
+            }
+            if self.ledger.nodes[node].has_streams {
+                let measure_mass = |state: &dyn Any| {
+                    self.nodes[node]
+                        .stored_mass_kg(state)
+                        .map_err(|error| SystemError::Component {
+                            node: self.names[node].clone(),
+                            phase: Phase::Measure,
+                            error,
+                        })
+                };
+                let old_mass = measure_mass(self.accepted[node].as_ref())?;
+                let new_mass = measure_mass(self.candidate[node].as_ref())?;
+                mass_audits[node] = audit_mass_step(
+                    ports,
+                    &self.layouts[node],
+                    dt_s,
+                    &self.inputs[inputs],
+                    &self.outputs[outputs],
+                    old_mass,
+                    new_mass,
+                )
+                .map_err(|violation| SystemError::Contract {
+                    node: self.names[node].clone(),
+                    violation,
+                })?;
             }
         }
         Ok(())
@@ -2603,6 +2661,7 @@ impl System {
         // them. A refused step drops them and the next one makes new ones.
         let StepScratch {
             mut defects,
+            mut mass_audits,
             mut members,
             mut group_members,
             mut connection_rows,
@@ -2610,7 +2669,9 @@ impl System {
         } = core::mem::take(&mut self.step_scratch);
         defects.clear();
         defects.resize(self.nodes.len(), 0.0);
-        self.audit(dt_s, &mut defects)?;
+        mass_audits.clear();
+        mass_audits.resize(self.nodes.len(), None);
+        self.audit(dt_s, &mut defects, &mut mass_audits)?;
 
         // Connection and boundary rows of this step.
         members.clear();
@@ -2627,7 +2688,7 @@ impl System {
             // A heat route that shares a receiver with an earlier one is
             // audited in that one's row.
             if group.is_empty() {
-                connection_rows.push((0.0, 0.0));
+                connection_rows.push((0.0, 0.0, 0.0));
                 continue;
             }
             members.clear();
@@ -2639,10 +2700,21 @@ impl System {
                     }
                 }
             }
+            let mass_scale = members
+                .iter()
+                .map(|port| self.port_mass[self.port_start[port.node] + port.port].abs())
+                .fold(0.0_f64, f64::max);
             let (mut energy, mut magnitude, mut entropy) = (0.0_f64, 0.0_f64, 0.0_f64);
+            let mut mass = Sum::default();
+            let mut mass_magnitude = 0.0_f64;
             for port in &members {
                 let global = self.port_start[port.node] + port.port;
                 energy += self.port_energy[global];
+                if mass_scale > 0.0 {
+                    let scaled_mass = self.port_mass[global] / mass_scale;
+                    mass.add(scaled_mass);
+                    mass_magnitude += scaled_mass.abs();
+                }
                 let spec = &self.nodes[port.node].ports()[port.port];
                 magnitude += if spec.field_metric().is_some() {
                     dt_s * power_pairing_scale(
@@ -2678,10 +2750,17 @@ impl System {
             // heat rate itself, and of the rates a storage receives from a
             // stream the enthalpy rate is the energy.
             let mut solve_slack_j = 0.0_f64;
+            let mut mass_slack_kg = 0.0_f64;
             for port in &members {
                 let spec = &self.nodes[port.node].ports()[port.port];
                 let outputs = self.output_range(*port);
                 for (offset, index) in self.input_range(*port).enumerate() {
+                    if spec.carrier() == Carrier::Stream
+                        && spec.role() == PortRole::FlowIn
+                        && offset == STREAM_MASS_RATE
+                    {
+                        mass_slack_kg += dt_s * self.input_allowance[index];
+                    }
                     let slack_j = match (spec.carrier(), spec.role()) {
                         (Carrier::Heat, PortRole::FlowIn) => dt_s * self.input_allowance[index],
                         (Carrier::Stream, PortRole::FlowIn) if offset == STREAM_ENTHALPY_RATE => {
@@ -2716,7 +2795,22 @@ impl System {
                 });
             }
             generated += entropy;
-            connection_rows.push((energy, entropy));
+            let mass_defect_kg = mass.value() * mass_scale;
+            let mass_tolerance_kg = ((128.0 * f64::EPSILON + self.config.relative_tolerance)
+                * mass_magnitude)
+                * mass_scale
+                + mass_slack_kg;
+            if !(mass_defect_kg.is_finite()
+                && mass_tolerance_kg.is_finite()
+                && mass_defect_kg.abs() <= mass_tolerance_kg)
+            {
+                return Err(SystemError::InterfaceMass {
+                    connection: index,
+                    defect_kg: mass_defect_kg,
+                    tolerance_kg: mass_tolerance_kg,
+                });
+            }
+            connection_rows.push((energy, entropy, mass_defect_kg));
         }
         if !(generated >= -1.0e-9 * entropy_scale - entropy_slack) {
             return Err(SystemError::SecondLaw {
@@ -2762,18 +2856,27 @@ impl System {
                 .entropy_generated_j_per_k
                 .add(receipt.entropy_generated_j_per_k);
             account.balance_defect_j.add(defects[node]);
+            if let Some(audit) = &mass_audits[node] {
+                let mass = account.mass.get_or_insert_with(Default::default);
+                mass.port_mass_in_kg.add(audit.port_mass_in_kg);
+                mass.stored_change_kg.add(audit.stored_change_kg);
+                mass.balance_defect_kg.add(audit.balance_defect_kg);
+                mass.audited_steps += 1;
+            }
         }
-        for (account, &(energy, entropy)) in
+        for (account, &(energy, entropy, mass)) in
             self.ledger.connections.iter_mut().zip(&connection_rows)
         {
             account.energy_defect_j.add(energy);
             account.entropy_generated_j_per_k.add(entropy);
+            account.mass_defect_kg.add(mass);
         }
         for (account, &heat) in self.ledger.sinks.iter_mut().zip(&sink_heat) {
             account.heat_j.add(heat);
         }
         self.step_scratch = StepScratch {
             defects,
+            mass_audits,
             members,
             group_members,
             connection_rows,
@@ -2783,6 +2886,7 @@ impl System {
             let global = self.port_start[port.node] + port.port;
             account.energy_in_j.add(self.port_energy[global]);
             account.entropy_in_j_per_k.add(self.port_entropy[global]);
+            account.mass_in_kg.add(self.port_mass[global]);
         }
         Ok(StepReport {
             dt_s,

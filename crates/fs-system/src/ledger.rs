@@ -30,11 +30,29 @@ impl Sum {
     }
 }
 
+/// Independently measured mass accounts of one stream component.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MassAccount {
+    /// Net mass entering the component through stream ports [kg].
+    pub port_mass_in_kg: Sum,
+    /// Change in independently measured stored mass [kg].
+    pub stored_change_kg: Sum,
+    /// Sum of accepted port-transfer minus stored-change defects [kg].
+    pub balance_defect_kg: Sum,
+    /// Accepted steps for which the component supplied both measurements.
+    pub audited_steps: u64,
+}
+
 /// Accounts of one component over the window.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct NodeAccount {
     /// Component name.
     pub name: String,
+    /// Whether this component has a material stream port.
+    pub has_streams: bool,
+    /// Measured stream mass, or unavailable. A partial account has fewer
+    /// audited steps than the ledger and never proves window closure.
+    pub mass: Option<MassAccount>,
     /// Net energy that entered through its ports [J].
     pub port_energy_in_j: Sum,
     /// Change of stored energy, from receipts [J].
@@ -52,6 +70,8 @@ pub struct NodeAccount {
 /// Accounts of one connection over the window.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ConnectionAccount {
+    /// Net stream mass entering the connection's members [kg].
+    pub mass_defect_kg: Sum,
     /// Sum of the energies that entered the members, plus heat sent to the
     /// connection's sink [J]. Zero for an exact connection; it is the
     /// interface residual of an iterative solve otherwise. Heat routes that
@@ -67,6 +87,8 @@ pub struct ConnectionAccount {
 pub struct BoundaryAccount {
     /// The driven port, as `node.port`.
     pub port: String,
+    /// Mass entering the system through this stream boundary [kg].
+    pub mass_in_kg: Sum,
     /// Energy that entered the system through it [J].
     pub energy_in_j: Sum,
     /// Entropy that entered the system through it [J/K].
@@ -82,7 +104,7 @@ pub struct SinkAccount {
     pub heat_j: Sum,
 }
 
-/// Energy and entropy accounts of every accepted step since the window began.
+/// Energy, entropy and declared stream-mass accounts of accepted steps.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Ledger {
     /// One account per component, in index order.
@@ -100,6 +122,38 @@ pub struct Ledger {
 }
 
 impl Ledger {
+    /// Stream-mass residual [kg]: measured storage change minus boundary
+    /// inflow and connection defect, or minus the accepted component defects.
+    ///
+    /// Returns None before any accepted step, without stream components, or
+    /// when any stream component omitted an inventory on any accepted step.
+    /// Missing measurements are never interpreted as zero. Species,
+    /// momentum, charge and mass of non-stream components are outside this
+    /// account.
+    #[must_use]
+    pub fn mass_residual_kg(&self) -> Option<f64> {
+        if self.steps == 0 || !self.nodes.iter().any(|node| node.has_streams) {
+            return None;
+        }
+        let mut total = Sum::default();
+        for node in &self.nodes {
+            if node.has_streams {
+                let account = node.mass.as_ref()?;
+                if account.audited_steps != self.steps {
+                    return None;
+                }
+                total.add(account.stored_change_kg.value());
+            }
+        }
+        for boundary in &self.boundaries {
+            total.add(-boundary.mass_in_kg.value());
+        }
+        for connection in &self.connections {
+            total.add(-connection.mass_defect_kg.value());
+        }
+        Some(total.value())
+    }
+
     /// Energy that entered the system through its boundaries [J].
     #[must_use]
     pub fn boundary_energy_in_j(&self) -> f64 {

@@ -6,7 +6,8 @@
 //! Covered here: port layout, step-limit bounds, purity of `propose`
 //! (including independence from the stale candidate slot), the step audit
 //! (first law, endpoint energy, non-negative dissipation and entropy
-//! production, residual), `admit`, and for [`PortTangent`] the JVP against
+//! production, residual), available mass inventories, `admit`, and for
+//! [`PortTangent`] the JVP against
 //! central differences and the VJP against the JVP by the dot-product test.
 //! For [`LoadLine`]: the line's ports, purity, the audit at the flows on the
 //! line, and that a zero compliance gives `propose`.
@@ -21,7 +22,7 @@ use fs_exec::Cx;
 
 use super::{
     Carrier, Component, ContractViolation, LoadLine, PortLayout, PortRole, PortTangent, Proposal,
-    Receipt, StepAudit, audit_step,
+    Receipt, StepAudit, audit_mass_step, audit_step,
 };
 
 /// One operating point at which a component is checked.
@@ -222,6 +223,22 @@ where
         stored_new,
     )
     .map_err(Failure::Contract)?;
+    let mass_old = component
+        .stored_mass_kg(case.state)
+        .map_err(Failure::Owner)?;
+    let mass_new = component
+        .stored_mass_kg(&first_state)
+        .map_err(Failure::Owner)?;
+    audit_mass_step(
+        ports,
+        &layout,
+        case.dt_s,
+        case.inputs,
+        &first_out,
+        mass_old,
+        mass_new,
+    )
+    .map_err(Failure::Contract)?;
     component
         .admit(case.state, &first_state, &receipt)
         .map_err(Failure::Owner)?;
@@ -299,7 +316,10 @@ where
     // effort is returned.
     let line = component.line_ports();
     if line.is_empty() {
-        return Err(law("the line spans at least one port", "it lists none".to_owned()));
+        return Err(law(
+            "the line spans at least one port",
+            "it lists none".to_owned(),
+        ));
     }
     let mut places: Vec<(usize, usize)> = Vec::new();
     let mut last = None;
@@ -314,7 +334,11 @@ where
         if !matches!(spec.carrier(), Carrier::Power(_)) || spec.role() != PortRole::FlowIn {
             return Err(law(
                 "the line's ports are power ports that receive a flow",
-                format!("port {port} is {:?} with role {:?}", spec.carrier(), spec.role()),
+                format!(
+                    "port {port} is {:?} with role {:?}",
+                    spec.carrier(),
+                    spec.role()
+                ),
             ));
         }
         places.extend(layout.input_range(port).zip(layout.output_range(port)));
@@ -405,14 +429,7 @@ where
         .stored_energy_j(&first_state)
         .map_err(Failure::Owner)?;
     let audit = audit_step(
-        ports,
-        &layout,
-        case.dt_s,
-        &at_line,
-        &first_out,
-        &receipt,
-        stored_old,
-        stored_new,
+        ports, &layout, case.dt_s, &at_line, &first_out, &receipt, stored_old, stored_new,
     )
     .map_err(Failure::Contract)?;
     component
@@ -423,7 +440,15 @@ where
     // themselves, and the call is the mandatory tier's.
     let zero = vec![0.0; width * width];
     let unloaded = |state: &mut C::State, outputs: &mut [f64]| {
-        component.propose_on_line(case.state, case.dt_s, case.inputs, &zero, state, outputs, cx)
+        component.propose_on_line(
+            case.state,
+            case.dt_s,
+            case.inputs,
+            &zero,
+            state,
+            outputs,
+            cx,
+        )
     };
     let (flat, flat_state, flat_out) = stepped(case.state, layout.output_len(), 0.0, &unloaded)?;
     let plain = |state: &mut C::State, outputs: &mut [f64]| {

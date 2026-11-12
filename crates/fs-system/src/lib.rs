@@ -4,7 +4,7 @@
 //! connections between their ports. This crate owns what every pairing used
 //! to write for itself: the state store with atomic publication, the
 //! equations of the connections, the order of evaluation, the interface
-//! solve, step negotiation, and the energy and entropy ledger.
+//! solve, step negotiation, and the energy, entropy and declared stream-mass ledger.
 //!
 //! ```text
 //! SystemBuilder::add / add_with_tangent      components and initial states

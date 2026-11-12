@@ -319,8 +319,7 @@ impl GasVolume {
         for column in 0..n {
             let mut kelvin = 0.5 * energy[column] / (trial.mass_kg * capacity);
             if column == STREAM_MASS_RATE {
-                kelvin -=
-                    0.5 * trial.energy_j * dt_s / (trial.mass_kg * trial.mass_kg * capacity);
+                kelvin -= 0.5 * trial.energy_j * dt_s / (trial.mass_kg * trial.mass_kg * capacity);
             }
             matrix[STREAM_PRESSURE * n + column] = 0.5 * pressure[column];
             matrix[STREAM_SPECIFIC_ENTHALPY * n + column] = self.ratio * capacity * kelvin;
@@ -333,8 +332,7 @@ impl GasVolume {
             let row = (STREAM_CARRIED + index) * n;
             let new = held + dt_s * inputs[STREAM_CARRIED + index];
             matrix[row + STREAM_CARRIED + index] = 0.5 * dt_s / trial.mass_kg;
-            matrix[row + STREAM_MASS_RATE] =
-                -0.5 * new * dt_s / (trial.mass_kg * trial.mass_kg);
+            matrix[row + STREAM_MASS_RATE] = -0.5 * new * dt_s / (trial.mass_kg * trial.mass_kg);
         }
         Ok(matrix)
     }
@@ -354,6 +352,11 @@ impl Component for GasVolume {
 
     fn stored_energy_j(&self, contents: &GasContents) -> Result<f64, ElementError> {
         Ok(contents.energy_j)
+    }
+
+    fn stored_mass_kg(&self, contents: &GasContents) -> Result<Option<f64>, ElementError> {
+        self.admit(contents)?;
+        Ok(Some(contents.mass_kg))
     }
 
     fn propose(
@@ -391,8 +394,7 @@ impl Component for GasVolume {
         for (index, (held, rate)) in old.carried_kg.iter().zip(rates).enumerate() {
             let carried = (held + dt_s * rate).max(0.0);
             new.carried_kg.push(carried);
-            outputs[STREAM_CARRIED + index] =
-                0.5 * (held / old.mass_kg + carried / trial.mass_kg);
+            outputs[STREAM_CARRIED + index] = 0.5 * (held / old.mass_kg + carried / trial.mass_kg);
         }
         outputs[STREAM_PRESSURE] = trial.pressure_pa;
         outputs[STREAM_SPECIFIC_ENTHALPY] =
@@ -421,7 +423,9 @@ impl PortTangent for GasVolume {
         let matrix = self.jacobian(old, dt_s, inputs)?;
         let n = d_inputs.len();
         for (row, slot) in d_outputs.iter_mut().enumerate() {
-            *slot = (0..n).map(|column| matrix[row * n + column] * d_inputs[column]).sum();
+            *slot = (0..n)
+                .map(|column| matrix[row * n + column] * d_inputs[column])
+                .sum();
         }
         Ok(())
     }
@@ -438,7 +442,9 @@ impl PortTangent for GasVolume {
         let matrix = self.jacobian(old, dt_s, inputs)?;
         let n = bar_outputs.len();
         for (column, slot) in bar_inputs.iter_mut().enumerate() {
-            *slot = (0..n).map(|row| matrix[row * n + column] * bar_outputs[row]).sum();
+            *slot = (0..n)
+                .map(|row| matrix[row * n + column] * bar_outputs[row])
+                .sum();
         }
         Ok(())
     }
@@ -505,6 +511,10 @@ impl Component for Restriction {
 
     fn stored_energy_j(&self, (): &()) -> Result<f64, ElementError> {
         Ok(0.0)
+    }
+
+    fn stored_mass_kg(&self, (): &()) -> Result<Option<f64>, ElementError> {
+        Ok(Some(0.0))
     }
 
     fn propose(

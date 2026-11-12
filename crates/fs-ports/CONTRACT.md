@@ -31,7 +31,7 @@ behavior or whole-system passivity claims.
 - Iteration weight: `BoundedAitkenRelaxation`.
 - Executable contract: `component::{Component, PortTangent, LoadLine,
   StageResidual, PortSpec, DualityMetric, PortLayout, Class, Receipt, Proposal,
-  audit_step}` and `component::conformance`.
+  MassStepAudit, audit_step, audit_mass_step}` and `component::conformance`.
 
 The sections after the ten required ones give the semantics of each group.
 
@@ -80,6 +80,8 @@ None.
   `compile_fail` doctests in `component`.
 - `tests/field_ports.rs` for field duality and independently computed traction
   work on an inertial surface.
+- `tests/mass_ports.rs` for optional inventory closure, stream signs, an
+  energy-balanced mass leak, cancellation and unrepresentable input refusals.
 - The fs-couple and fs-feec batteries named under "Purpose and layer".
 
 ## No-claim boundaries
@@ -164,6 +166,20 @@ not on the wire. `tests/component_reference.rs` checks widths, both roles'
 energy and mass, the refusal of a signal role and of slices of the wrong
 length.
 
+**Mass.** `Component::stored_mass_kg` optionally measures mass from a state.
+Its default is `None` (unavailable); zero storage must be declared as
+`Some(0.0)`. `audit_mass_step` checks finite, nonnegative available inventories
+against signed stream transfers. Step, vector and individual `dt * mass rate`
+validation applies even when both inventories are unavailable. Availability
+at only one endpoint is refused. The audit reduces scaled terms in a fixed,
+compensated order with tolerance `128 * EPSILON * max(old, new,
+sum(abs(port transfers)))`, avoiding overflow in balanced large transfers.
+`MassStepAudit` reports net port input, inventory change, balance defect and
+tolerance. Unavailable inventories return `None`, never a conservation claim.
+The existing conformance check measures both endpoints and runs this audit;
+energy receipts do not supply its tolerance. This adds no species, element,
+momentum or charge audit to the Component contract.
+
 **First law.** `audit_step` is the one place a step's energy is tested:
 `sum(port energy in) = stored_change_j + numerical_loss_j` within the receipt's
 `energy_tolerance_j`; the receipt's stored change against re-measured endpoint
@@ -180,7 +196,7 @@ does not fit the layout is refused, not indexed.
 unchanged. Contract breaches are `ContractViolation`.
 
 **Determinism and cancellation.** The contract code is sequential. `audit_step`
-does not allocate; `PortLayout::new` allocates its two offset vectors.
+and `audit_mass_step` do not allocate; `PortLayout::new` allocates its two offset vectors.
 Components poll `Cx::checkpoint` and return their own cancellation error.
 
 **Conformance.** `component::conformance::check_component` and
