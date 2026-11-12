@@ -443,7 +443,8 @@ fn sourced_member_accumulates_time_dependent_flow_relaxes_and_retains_permanent_
         accepted = step.frame;
         old = next;
     }
-    accepted.fix(1, [false, true, true]);
+    // Remove the axial support added for the hold; fix() can only add supports.
+    accepted.release(1, [true, false, false]);
     let released = force_endpoint(old, 0.0, 0.2, 1.0);
     let step = accepted
         .solve_creep_step(&axial_load(0.0), controls(), || false)

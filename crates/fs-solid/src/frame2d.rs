@@ -763,6 +763,22 @@ impl Frame2d {
         }
     }
 
+    /// Remove the supports of the requested DOFs (`[ux, uy, θ]`), the
+    /// counterpart of [`Self::fix`], which only adds them.
+    ///
+    /// A released DOF keeps its accepted displacement, velocity and
+    /// acceleration; [`Self::fix`] set the last two to zero when the support
+    /// was added. Its support reaction is not carried over, so the next step
+    /// resolves the new equilibrium; removing a support is a boundary change,
+    /// not a work receipt. False entries retain existing support conditions.
+    pub fn release(&mut self, node: usize, dofs: [bool; 3]) {
+        for (k, &free) in dofs.iter().enumerate() {
+            if free {
+                self.fixed[3 * node + k] = false;
+            }
+        }
+    }
+
     /// Add a lumped mass to a node's translational DOFs.
     pub fn add_mass(&mut self, node: usize, mass: f64) {
         self.nodal_mass[3 * node] += mass;

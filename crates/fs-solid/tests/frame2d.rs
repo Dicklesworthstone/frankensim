@@ -57,6 +57,37 @@ fn frame_g1_elastic_cantilever_matches_euler_bernoulli_exactly() {
 }
 
 #[test]
+fn release_frees_a_supported_tip_where_false_entries_of_fix_keep_it() {
+    let (l, p) = (3.0, 1.0e4);
+    let (mut f, tip) = cantilever(Geometry::Linear, l, 1);
+    let mut load = vec![0.0; f.ndof()];
+    load[3 * tip + 1] = p;
+    load[3 * tip] = 5.0 * p;
+    f.fix(tip, [true; 3]);
+    f.static_load(&load, 1).unwrap();
+    assert_eq!(&f.displacements()[3 * tip..], &[0.0; 3]);
+    // fix() only adds supports: false entries keep the tip held.
+    f.fix(tip, [false; 3]);
+    f.static_load(&load, 1).unwrap();
+    assert_eq!(&f.displacements()[3 * tip..], &[0.0; 3]);
+    // Releasing the axial DOF alone frees only it: the tip stretches as a bar.
+    f.release(tip, [true, false, false]);
+    f.static_load(&load, 1).unwrap();
+    let ax_exact = 5.0 * p * l / (E * A);
+    assert!((f.displacements()[3 * tip] - ax_exact).abs() < 1e-14);
+    assert_eq!(&f.displacements()[3 * tip + 1..3 * tip + 3], &[0.0; 2]);
+    // Releasing the rest gives the free cantilever of the test above.
+    f.release(tip, [false, true, true]);
+    f.static_load(&load, 1).unwrap();
+    let u = f.displacements();
+    let v_exact = p * l.powi(3) / (3.0 * E * I);
+    let th_exact = p * l * l / (2.0 * E * I);
+    assert!((u[3 * tip + 1] - v_exact).abs() < 1e-12 * v_exact.abs().max(1.0));
+    assert!((u[3 * tip + 2] - th_exact).abs() < 1e-12);
+    assert!((u[3 * tip] - ax_exact).abs() < 1e-14);
+}
+
+#[test]
 fn frame_g1_portal_lateral_stiffness_matches_closed_form() {
     // Fixed-base portal: K = (24 E I_c / h³)(6ρ + 1)/(6ρ + 4), ρ = (I_b/L)/(I_c/h).
     let (h, span) = (4.0, 6.0);
