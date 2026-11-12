@@ -66,8 +66,11 @@ fn capacity_newton_accepts_the_actual_pointwise_residual_and_preserves_closed_en
             linear,
             energy_tolerance_j: 1e-8,
         };
+        // NonlinearStepConfig::validate admits rtol only in (0,1). The stop is
+        // atol + rtol * |R0|: rtol 1e-12 adds 1e-12 of the initial residual to
+        // the 1e-11 J floor.
         let nonlinear = NonlinearStepConfig {
-            residual_rtol: 0.,
+            residual_rtol: 1e-12,
             residual_atol_j: 1e-11,
             ..Default::default()
         };

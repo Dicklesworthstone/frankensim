@@ -144,13 +144,16 @@ fn g0_contact_derivatives_refuse_source_corners_domains_shapes_and_budget() {
     });
 }
 
-fn two_sided_point() -> QueryPoint {
+fn absolute_kelvin() -> fs_qty::QuantitySpec {
     use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
-    let kelvin = fs_qty::QuantitySpec::semantic(SemanticType::new(
-        QuantityKind::AbsoluteTemperature, ValueForm::Static));
-    QueryPoint::new().with_quantity("TA",kelvin,320.).unwrap()
-        .with_quantity("TB",kelvin,320.).unwrap()
-        .with_quantity("normal_pressure",fs_qty::QuantitySpec::dimensional(fs_qty::Pressure::DIMS),1e6).unwrap()
+    fs_qty::QuantitySpec::semantic(SemanticType::new(QuantityKind::AbsoluteTemperature, ValueForm::Static))
+}
+fn pascal() -> fs_qty::QuantitySpec { fs_qty::QuantitySpec::dimensional(fs_qty::Pressure::DIMS) }
+fn metre() -> fs_qty::QuantitySpec { fs_qty::QuantitySpec::dimensional(fs_qty::Length::DIMS) }
+fn two_sided_point() -> QueryPoint {
+    QueryPoint::new().with_quantity("TA",absolute_kelvin(),320.).unwrap()
+        .with_quantity("TB",absolute_kelvin(),320.).unwrap()
+        .with_quantity("normal_pressure",pascal(),1e6).unwrap()
 }
 fn two_sided_contacts<'m, 'c>(cx: &Cx<'_>, mesh: &'m ConductionMesh, bc: &ThermalBoundary,
     card: &'c InterfaceSystemCard, point: &QueryPoint) -> TemperatureContacts<'m, 'c> {
@@ -163,9 +166,13 @@ fn two_sided_contacts<'m, 'c>(cx: &Cx<'_>, mesh: &'m ConductionMesh, bc: &Therma
         SelectionPolicy::SingleClaimOnly).unwrap();
     TemperatureContacts::new(cx,mesh,bc,vec![],vec![law],1).unwrap()
 }
+// The claim declares the quantity of every axis two_sided_point() queries
+// typed: fs-matdb compares them exactly, and an untyped axis is legacy, not a
+// wildcard (only an axis named T admits an untyped query).
 fn two_sided_validity() -> ValidityDomain {
-    ValidityDomain::unconstrained().with("TA",256.,384.).with("TB",256.,384.)
-        .with("normal_pressure",1e6,2e6)
+    ValidityDomain::unconstrained().with_quantity("TA",absolute_kelvin(),256.,384.)
+        .with_quantity("TB",absolute_kelvin(),256.,384.)
+        .with_quantity("normal_pressure",pascal(),1e6,2e6)
 }
 
 #[test]
@@ -231,13 +238,13 @@ fn g0_surface_tangents_keep_external_pressure_fixed_and_all_thermal_validity_axe
 
         // R depends only on two fixed external coordinates. Its exact sample
         // needs no fabricated source triangle to have zero thermal partials.
-        let point=point.with_quantity("roughness",fs_qty::QuantitySpec::dimensional(fs_qty::Length::DIMS),0.001).unwrap();
+        let point=point.with_quantity("roughness",metre(),0.001).unwrap();
         let external=card_with_response(PropertyValue::Surface2D {
             axes:["normal_pressure".into(),"roughness".into()],
             axis_dims:[fs_qty::Pressure::DIMS,fs_qty::Length::DIMS],
             samples:vec![([1e6,0.001],0.5)],triangles:vec![],
             dims:fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
-        },two_sided_validity().with("roughness",0.001,0.001));
+        },two_sided_validity().with_quantity("roughness",metre(),0.001,0.001));
         let constant=two_sided_contacts(cx,&mesh,&bc,&external,&point)
             .linearize_temperature(cx,&bc,&t,1).unwrap();
         for actual in constant.apply(cx,&[1.;8]).unwrap() { near(actual,0.,1e-13); }

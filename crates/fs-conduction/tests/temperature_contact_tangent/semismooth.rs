@@ -198,7 +198,7 @@ fn g1_enthalpy_newton_heats_and_cools_from_a_source_corner_and_inward_from_its_e
     use fs_conduction::transient::enthalpy::heterogeneous::{
         HeterogeneousEnthalpyBackwardEuler, ReferenceEnthalpyMaterial,
     };
-    use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve};
+    use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, SolidLiquidPhase};
     use fs_solver::NewtonKrylovConfig;
 
     context(&CancelGate::new_clock_free(), |cx| {
@@ -208,7 +208,10 @@ fn g1_enthalpy_newton_heats_and_cools_from_a_source_corner_and_inward_from_its_e
         let contacts = contacts(cx, &mesh, &bc, &card, false);
         // The caloric chart extends beyond contact support, so an outward
         // trial must be refused by the pinned contact source, not this chart.
-        let chart = EquilibriumEnthalpyPhaseCurve::try_new(ContentHash([181; 32]),
+        // It is one solid phase (liquid fraction 0 throughout): try_new admits
+        // only a curve that owns both transitions, solid to liquid.
+        let chart = EquilibriumEnthalpyPhaseCurve::try_single_phase(ContentHash([181; 32]),
+            SolidLiquidPhase::Solid,
             [(0.0, 240.0), (1600.0, 400.0)].into_iter().map(|(h, temperature)| EnthalpyPhaseKnot {
                 specific_enthalpy_j_kg: h, temperature_k: temperature,
                 liquid_mass_fraction: 0.0, bulk_density_kg_m3: 1.0,
