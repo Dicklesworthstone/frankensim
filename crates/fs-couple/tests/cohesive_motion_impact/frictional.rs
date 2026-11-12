@@ -163,7 +163,7 @@ fn sliding_and_sticking_impacts_retain_actual_damaged_owners_and_momentum() {
             // The next original material step unloads the normal opening;
             // the impact has neither erased damage nor consumed physical time.
             let next = event.motions[0]
-                .advance_controlled(&[0.0; 3], &[[0.0; 3]], 1e-4, &mut || false)
+                .advance_controlled(&[0.0; 3], &[[0.0; 3]], STEP_AFTER_IMPACT_S, &mut || false)
                 .unwrap();
             assert_eq!(next.motion.steps(), 1);
             assert_eq!(next.motion.state().points()[0].damage(), old_point.damage());

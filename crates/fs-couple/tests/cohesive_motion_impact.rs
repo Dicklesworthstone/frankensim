@@ -29,6 +29,16 @@ impl LinearOp for Scalar {
     }
 }
 
+/// The ordinary step taken after an impact. The step residual's inertial term,
+/// 2 M (u1 - u0) / dt^2, moves only by whole ulps of the trial displacement u1.
+/// At u = 0.002 m (ulp 4.34e-19 m) and M = 1 kg, one ulp is 8.7e-11 N at
+/// dt = 1e-4 s. That is above the 1e-11 N stop target of `dynamics()`, so the
+/// nearest representable displacement could miss it. It did: Newton stopped
+/// at 3.16e-11 N and 2.72e-11 N, after corrections of 1.6e-19 m and 1.4e-19 m
+/// that its line search rejected. At 1e-3 s one ulp is 8.7e-13 N, 11.5 times
+/// under the unchanged target.
+const STEP_AFTER_IMPACT_S: f64 = 1e-3;
+
 fn dynamics() -> DynamicsConfig {
     DynamicsConfig {
         solve: Config {
@@ -212,7 +222,7 @@ fn unequal_damaged_bodies_restitute_with_original_masses_and_continue_natively()
         }
         if restitution == 0.0 {
             let next = event.motions[0]
-                .advance_controlled(&[0.0], &[[0.0; 3]], 1e-4, &mut || false)
+                .advance_controlled(&[0.0], &[[0.0; 3]], STEP_AFTER_IMPACT_S, &mut || false)
                 .unwrap();
             assert_eq!(next.motion.steps(), 1);
             assert_eq!(next.motion.state().points()[0].damage(), old_point.damage());
