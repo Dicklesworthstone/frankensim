@@ -496,12 +496,18 @@ fn rotating_material_point_closure_and_finite_bushing_share_the_nonlinear_stage(
             &result.state_after.joint_velocity,
         )
         .unwrap();
-        let gap = actual.world_from_link[4].translation()
-            - actual.world_from_link[1].transform_point(AXES[0]).unwrap();
+        let end = actual.world_from_link[4].translation();
+        let start = actual.world_from_link[1].transform_point(AXES[0]).unwrap();
+        let gap = end - start;
+        // The solver forms this gap in the base frame and rotates it into the
+        // world; here it is the difference of two world positions about 1.07 m
+        // from the origin. Each path rounds two such positions, each to within
+        // about two ulp, so the paths agree to 8 ulp of that scale, not to a
+        // fixed 4e-16 (1.8 ulp): a step's rounding alone can exceed that.
         vector(
             gap,
             result.point_residual_after[0].separation_world_m,
-            4e-16,
+            8.0 * f64::EPSILON * end.norm().max(start.norm()),
         );
         maximum_gap = maximum_gap.max(gap.norm());
         loss += result.midpoint.dissipated_energy;

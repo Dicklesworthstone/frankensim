@@ -416,6 +416,34 @@ impl SpatialInertia {
         Ok(momentum)
     }
 
+    /// Velocity-product bias `v ×* (I v)`: the wrench that keeps this body
+    /// moving with twist `v` and no spatial acceleration.
+    ///
+    /// It equals `v ×* momentum(v)`, evaluated at the COM as the gyroscopic
+    /// couple of the spin plus the force `ω × p` acting at the COM:
+    /// `(ω × I_c ω + c × (ω × p), ω × p)` with `p = m (v + ω × c)`. This form
+    /// never builds the COM velocity's self-product `u × m u`, which is
+    /// identically zero. Built directly, it is the exact cross product of `u`
+    /// with the rounded `m u`. That is rounding noise of order `eps m |u|^2`,
+    /// which a joint on the body reads as torque and which grows with a
+    /// common translation that should not change the couple at all.
+    ///
+    /// # Errors
+    /// Refuses non-finite velocity or an unrepresentable derived wrench.
+    fn velocity_bias(self, velocity: Twist) -> Result<Wrench, ArticulatedError> {
+        validate_twist(velocity, "spatial_inertia.velocity")?;
+        let center_velocity = velocity.linear + velocity.angular.cross(self.center_of_mass);
+        let linear_momentum = center_velocity.scale(self.mass);
+        let force = velocity.angular.cross(linear_momentum);
+        let torque = velocity
+            .angular
+            .cross(self.inertia_com.apply(velocity.angular))
+            + self.center_of_mass.cross(force);
+        let bias = Wrench::new(torque, force);
+        validate_wrench(bias, "spatial_inertia.velocity_bias")?;
+        Ok(bias)
+    }
+
     /// Kinetic energy `0.5 * velocityᵀ I velocity`, evaluated at the COM.
     ///
     /// Splitting translation and spin at the centre of mass avoids subtracting
@@ -1201,11 +1229,10 @@ pub fn inverse_dynamics(
             acceleration[link_index],
             "inverse_dynamics.body_acceleration",
         )?;
-        let momentum = link.inertia.momentum(velocity[link_index])?;
         wrench[link_index] = wrench_minus(
             wrench_plus(
                 link.inertia.momentum(acceleration[link_index])?,
-                cross_force(velocity[link_index], momentum),
+                link.inertia.velocity_bias(velocity[link_index])?,
             ),
             external_body_wrench[link_index],
         );
@@ -1876,10 +1903,7 @@ fn articulated_body_pass(
         validate_twist(velocity[link_index], fields.body_velocity)?;
         validate_twist(bias_acceleration[link_index], fields.bias_acceleration)?;
         articulated_inertia[link_index] = link.inertia.matrix()?;
-        let velocity_bias = cross_force(
-            velocity[link_index],
-            link.inertia.momentum(velocity[link_index])?,
-        );
+        let velocity_bias = link.inertia.velocity_bias(velocity[link_index])?;
         let bias_without_gravity = wrench_minus(velocity_bias, external_body_wrench[link_index]);
         articulated_bias[link_index] =
             match (gravity_acceleration_base, gravity_acceleration.as_mut()) {
@@ -2362,6 +2386,7 @@ fn hat(vector: Vec3) -> Mat3 {
     }
 }
 
+#[cfg(test)]
 fn cross_force(motion: Twist, force: Wrench) -> Wrench {
     Wrench::new(
         motion.angular.cross(force.torque) + motion.linear.cross(force.force),
@@ -2910,6 +2935,38 @@ mod tests {
         assert_twist_close(result.base_spatial_acceleration_body, expected, EPSILON);
         assert_twist_close(result.body_spatial_acceleration[0], expected, EPSILON);
         assert!(result.generalized_acceleration.is_empty());
+    }
+
+    #[test]
+    fn velocity_bias_is_the_momentum_cross_product_without_its_self_product_noise() {
+        // About an offset COM with a full inertia, the COM form equals the
+        // directly built v x* (I v) to rounding; the force is the same product.
+        let general = SpatialInertia::new(
+            2.5,
+            Vec3::new(0.3, -0.2, 0.1),
+            Mat3 {
+                m: [1.2, 0.1, -0.05, 0.1, 0.9, 0.02, -0.05, 0.02, 1.4],
+            },
+        )
+        .unwrap();
+        let velocity = Twist::new(Vec3::new(0.7, -0.4, 0.2), Vec3::new(1.0, -0.5, 0.3));
+        let direct = cross_force(velocity, general.momentum(velocity).unwrap());
+        let bias = general.velocity_bias(velocity).unwrap();
+        assert_eq!(bias.force, direct.force);
+        for (value, expected) in bias.to_array().into_iter().zip(direct.to_array()) {
+            assert_close(value, expected, 1.0e-14);
+        }
+
+        // A centred isotropic body spinning about z while it translates in its
+        // x-y plane needs no couple. Built directly, u x (m u) is the exact
+        // cross product of u with the rounded m u, here 1.67e-16 N m about z.
+        let centred = centered_inertia(5.0, 2.0, 2.0, 2.0);
+        let velocity = Twist::new(Vec3::new(0.0, 0.0, 0.85), Vec3::new(0.7, -0.4, 0.0));
+        let direct = cross_force(velocity, centred.momentum(velocity).unwrap());
+        assert!(direct.torque.z.abs() > 1.0e-16, "{direct:?}");
+        let bias = centred.velocity_bias(velocity).unwrap();
+        assert_eq!(bias.torque, Vec3::new(0.0, 0.0, 0.0));
+        assert_eq!(bias.force, direct.force);
     }
 
     #[test]
