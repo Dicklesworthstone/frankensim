@@ -37,25 +37,30 @@ fn resistance([a, b]: [f64; 2]) -> f64 {
     0.5 + (a - 320.0) / 1024.0 + 3.0 * (b - 320.0) / 1024.0
 }
 
-fn point() -> QueryPoint {
-    let kelvin = QuantitySpec::semantic(SemanticType::new(
+fn kelvin() -> QuantitySpec {
+    QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature,
         ValueForm::Static,
-    ));
-    let pressure =
-        QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static));
+    ))
+}
+
+fn pressure() -> QuantitySpec {
+    QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static))
+}
+
+fn separation() -> QuantitySpec {
+    QuantitySpec::dimensional(fs_qty::Length::DIMS)
+}
+
+fn point() -> QueryPoint {
     QueryPoint::new()
-        .with_quantity("TA", kelvin, 350.0)
+        .with_quantity("TA", kelvin(), 350.0)
         .unwrap()
-        .with_quantity("TB", kelvin, 320.0)
+        .with_quantity("TB", kelvin(), 320.0)
         .unwrap()
-        .with_quantity("normal_pressure", pressure, 1e6)
+        .with_quantity("normal_pressure", pressure(), 1e6)
         .unwrap()
-        .with_quantity(
-            "normal_separation",
-            QuantitySpec::dimensional(fs_qty::Length::DIMS),
-            1e-6,
-        )
+        .with_quantity("normal_separation", separation(), 1e-6)
         .unwrap()
 }
 
@@ -88,11 +93,13 @@ fn contact(a: [f64; 2], b: [f64; 2], reverse: bool, response: Response) -> Sourc
         .insert_claim(PropertyClaim {
             key: PropertyKey::new(RP, RD),
             value,
+            // Each validity axis carries the quantity that point() gives it: a query
+            // axis typed differently from its claim's axis is outside the claim's domain.
             validity: ValidityDomain::unconstrained()
-                .with("TA", a[0], a[1])
-                .with("TB", b[0], b[1])
-                .with("normal_pressure", 1e6, 1e6)
-                .with("normal_separation", 1e-6, 1e-6),
+                .with_quantity("TA", kelvin(), a[0], a[1])
+                .with_quantity("TB", kelvin(), b[0], b[1])
+                .with_quantity("normal_pressure", pressure(), 1e6, 1e6)
+                .with_quantity("normal_separation", separation(), 1e-6, 1e-6),
             uncertainty: UncertaintyModel::Unstated,
             interpolation: if matches!(response, Response::Constant) {
                 InterpolationPolicy::ConstantWithinValidity

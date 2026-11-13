@@ -246,6 +246,12 @@ fn source_card(a: [f64; 2], b: [f64; 2], reverse: bool) -> std::sync::Arc<fs_mat
         PropertyClaim, PropertyKey, PropertyValue, Provenance, SurfaceSpec, SystemContext, UncertaintyModel};
     use fs_material::thermal::interface::{AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS as DIMS,
         AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY as PROPERTY};
+    use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+    let kelvin = fs_qty::QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature,
+        ValueForm::Static,
+    ));
+    let pascal = fs_qty::QuantitySpec::dimensional(fs_qty::Pressure::DIMS);
     let mut claims = ClaimSet::new();
     claims.insert_claim(PropertyClaim {
         key: PropertyKey::new(PROPERTY, DIMS),
@@ -255,8 +261,10 @@ fn source_card(a: [f64; 2], b: [f64; 2], reverse: bool) -> std::sync::Arc<fs_mat
                 .into_iter().map(|p| (p, source_resistance(p[0],p[1]))).collect(),
             triangles: vec![[0,1,2],[1,3,2]], dims: DIMS,
         },
-        validity: ValidityDomain::unconstrained().with("TA",a[0],a[1])
-            .with("TB",b[0],b[1]).with("normal_pressure",1e6,1e6),
+        // Each validity axis carries the quantity that source_point() gives it: a query
+        // axis typed differently from its claim's axis is outside the claim's domain.
+        validity: ValidityDomain::unconstrained().with_quantity("TA",kelvin,a[0],a[1])
+            .with_quantity("TB",kelvin,b[0],b[1]).with_quantity("normal_pressure",pascal,1e6,1e6),
         uncertainty: UncertaintyModel::Unstated, interpolation: InterpolationPolicy::LinearInside,
         observations: vec![], provenance: Provenance {
             source: "manufactured ordered surface-resistance law; not measured material data".into(),
