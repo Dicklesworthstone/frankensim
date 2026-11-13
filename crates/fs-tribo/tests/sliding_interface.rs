@@ -17,7 +17,7 @@ use fs_ports::component::conformance::{
     Case, Failure, Observed, check_component, check_load_line,
 };
 use fs_ports::component::{Class, Component, LoadLine, Proposal, Receipt};
-use fs_tribo::stribeck_friction::HystereticFriction;
+use fs_tribo::stribeck_friction::{HystereticFriction, HystereticFrictionState};
 use fs_tribo::tangential::component::{
     FrictionInterface, FrictionState, InterfaceLoad, PrescribedSlip, SlidingInterface, SlidingState,
 };
@@ -1937,7 +1937,8 @@ fn the_told_interface_refuses_what_it_cannot_take() {
     close(state.slip_m_s(), 1.0 - 3.0 * c, 1e-15);
     close(heat_w, -3.0 * (0.01 - 3.0 * c), 1e-15);
     // At 4 N along, which the law holds, the stop step's mean would still
-    // run against the slip: nothing says what that step is.
+    // run against the slip, and the law's traction at the starting slip,
+    // 3 N, is below `along`: nothing says what that step is.
     let refused = asked(
         &sliding,
         &[0.004, 0.0, 300.0, 4.0 * c],
@@ -1948,6 +1949,137 @@ fn the_told_interface_refuses_what_it_cannot_take() {
     // runs against the force: the ends would take heat out of it.
     let refused = asked(&rest, &[3.0 * c - 0.5, 0.0, 300.0, 6.0 * TOLD * c], &line);
     assert_eq!(refused, "friction_interface_let_go_heat");
+}
+
+/// One proposal of the bow's interface from `state` beside a told end: `a`
+/// on the line `(released, c)` and the end line `(released_end, c_end)`, `b`
+/// given at no flow.
+fn bowed_on_the_end_line(
+    interface: &FrictionInterface<Counted<HystereticFriction>, CountedAt<HystereticFriction>>,
+    state: &FrictionState<HystereticFrictionState>,
+    dt_s: f64,
+    (released, c): (f64, f64),
+    (released_end, c_end): (f64, f64),
+) -> Result<Asked<HystereticFrictionState>, TriboError> {
+    let mut next = state.clone();
+    let mut outputs = vec![f64::NAN; 3];
+    let proposal = with_cx(|cx| {
+        interface.propose_on_line(
+            state,
+            dt_s,
+            &[released, 0.0, 300.0, released_end],
+            &[c, 0.0, 0.0, 0.0, c_end, 0.0],
+            &mut next,
+            &mut outputs,
+            cx,
+        )
+    })?;
+    Ok(match proposal {
+        Proposal::Step(_) => (None, next, outputs[0]),
+        Proposal::Shorten { dt_s } => (Some(dt_s), next, f64::NAN),
+    })
+}
+
+#[test]
+fn a_stop_whose_mean_runs_back_is_cut_where_its_end_line_stops_under_the_starting_traction() {
+    // The bow's 7th capture, step 2158 of the kernel's bowed string (48 kHz,
+    // 64 modes, beta 0.1; bead rc-1109 .12.5), with its numbers as the probe
+    // printed them. The pair slides at s0 and slows. `along`, the force that
+    // ends the step at no slip, is 0.1411 N, which the law holds (0.5465 N),
+    // but at that force the step's mean would run back, at -2.29e-3 m/s. The
+    // law's kinetic traction at s0 is 0.4985 N, and the end line stops under
+    // it 0.0719 of the way through the step: the step is cut there (MB 33098,
+    // row (A)).
+    let normal_n = 0.455_417_220_019_903_76;
+    let load = InterfaceLoad {
+        normal_n,
+        nominal_pressure_pa: None,
+        solve: TangentialSolveConfig {
+            max_iterations: 128,
+            maximum_force_n: 1e6,
+            force_absolute_tolerance_n: 1e-12,
+            force_relative_tolerance: 1e-12,
+        },
+        impulse_tolerance_n_s: 1e-10,
+        work_tolerance_j: 1e-12,
+    };
+    let interface = FrictionInterface::new(searching as CountedAt<HystereticFriction>, load)
+        .expect("interface")
+        .reading_ends([true, false])
+        .expect("ends");
+    let dt_s = 1.0 / 48_000.0;
+    let s0 = 1.819_672_5e-2;
+    let line = (4.607_271_1e-2, 0.342_848_04);
+    let end_line = (9.271_905_8e-2, 0.657_277_56);
+    let along_n = end_line.0 / end_line.1;
+    close(along_n, 0.141_065_30, 1e-8);
+    close(line.0 - line.1 * along_n, -2.291_252e-3, 1e-9);
+    // The law's kinetic traction at s0, asked of the law (0.4284 N in the
+    // commit that first met this step was a formula's slip: the law's decay
+    // is `exp(-(v / v0)^2)`).
+    let stribeck = FrictionLaw::Stribeck {
+        static_mu: 1.2,
+        kinetic_mu: 0.35,
+        characteristic_speed: 0.05,
+        viscous_per_speed: 0.0,
+    };
+    let starting_n = normal_n * stribeck.kinetic_coefficient(s0).expect("coefficient");
+    close(starting_n, 0.498_480, 1e-6);
+    let sliding = interface.start(300.0, s0).expect("start");
+    let (cut, ..) = bowed_on_the_end_line(&interface, &sliding, dt_s, line, end_line)
+        .expect("the step is cut, not refused");
+    let asked_s = cut.expect("the step is cut");
+    let fraction = s0 / (end_line.1 * starting_n - (end_line.0 - s0));
+    close(asked_s, fraction * dt_s, 1e-12 * asked_s);
+    close(asked_s / dt_s, 0.071_891, 1e-6);
+
+    // On from there as a kernel goes: each answer that cuts is proposed again
+    // at its length, and each step taken is the next one's start, at the full
+    // step. The neighbour's released slips drift, and its compliances grow,
+    // in proportion to the step, at this step's rates (a string's lines are
+    // not exactly that over a cut step; the cut above is placed by the full
+    // step's lines, which are the probe's). The shorter steps are taken by
+    // the rows that ask the law at their own means.
+    let (drift, drift_end) = ((line.0 - s0) / dt_s, (end_line.0 - s0) / dt_s);
+    let (per_s, per_s_end) = (line.1 / dt_s, end_line.1 / dt_s);
+    let lines = |slip: f64, t_s: f64| {
+        (
+            (slip + drift * t_s, per_s * t_s),
+            (slip + drift_end * t_s, per_s_end * t_s),
+        )
+    };
+    let (mut state, mut length_s, mut elapsed_s) = (sliding, asked_s, 0.0);
+    let mut answers = Vec::new();
+    while !state.at_rest() {
+        assert!(answers.len() < 12, "no rest after {answers:?}");
+        let (mean, end) = lines(state.slip_m_s(), length_s);
+        let (cut, next, _) = bowed_on_the_end_line(&interface, &state, length_s, mean, end)
+            .unwrap_or_else(|error| panic!("{error:?} after {answers:?}"));
+        answers.push((length_s / dt_s, cut.is_some(), next.slip_m_s()));
+        if let Some(shorter_s) = cut {
+            length_s = shorter_s;
+        } else {
+            elapsed_s += length_s;
+            state = next;
+            length_s = dt_s;
+        }
+    }
+    println!(
+        "the 7th capture: cut at {:.6} of the step; then (step / dt, cut, slip): {answers:?}; at \
+         rest {:.6} of a step after the start",
+        asked_s / dt_s,
+        elapsed_s / dt_s
+    );
+    assert!(state.slip_m_s().abs() <= 1e-9, "{}", state.slip_m_s());
+    // The step after it starts at rest and is held, at no slip, with the
+    // force on its end line.
+    let (mean, end) = lines(0.0, dt_s);
+    let (cut, held, force_n) =
+        bowed_on_the_end_line(&interface, &state, dt_s, mean, end).expect("held");
+    assert!(cut.is_none());
+    assert!(held.at_rest());
+    assert_eq!(held.slip_m_s(), 0.0);
+    close(force_n, end.0 / end.1, 1e-12);
 }
 
 #[test]

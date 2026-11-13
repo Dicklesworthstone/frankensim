@@ -247,6 +247,7 @@
 //! | at rest | the load is held at the step's start and not at its end | its static verdict at loads between the two | is not taken: the component asks for the step that ends where the load reaches what the law holds |
 //! | sliding | `along > K` | its traction at a prescribed mean slip; the mean solves `m = r - c K(m)` | slides on, and ends at `r_e - c_e K` |
 //! | sliding | the stop step's mean is not along the slip, and the law does not hold `along` | its own return map on the END line, for its verdict at `along`; then its traction at a prescribed mean slip, from a mean at rest | slides on, and ends at `r_e - c_e K` |
+//! | sliding | the stop step's mean is not along the slip, the law holds `along`, and `along < K(s0)` | its own return map on the END line, for its verdict at `along`; then its traction `K(s0)` at the starting slip | is not taken: the component asks for the step that ends where the end line stops under `K(s0)`, which only places the cut |
 //! | sliding | `along = K`, to the stop's band | its traction at the stop step's mean | ends at the stop under that traction, at rest; the leftover `r_e - c_e K`, inside the tolerance, is kept |
 //! | sliding | `along < K` | its traction at the stop step's mean | is not taken: the component asks for the step that ends at the stop |
 //!
@@ -281,8 +282,9 @@
 //!   ends its step by the midpoint relation would need a start of its own,
 //!   which the state does not keep); an end line that takes nothing from the
 //!   slip where the mean line does (`friction_interface_end_compliance`); a
-//!   sliding pair whose stop step's mean is not along its slip while its law
-//!   holds `along`, or whose law's traction there would stop the mean
+//!   sliding pair whose stop step's mean is not along its slip, while its law
+//!   holds `along` and `along` is not below `K(s0)` by the stop's band, or
+//!   whose law's traction on the end line would stop the mean
 //!   (`friction_interface_stop_against_the_slip`); a step that lets go from
 //!   rest with a heat below minus the work tolerance
 //!   (`friction_interface_let_go_heat`).
@@ -1200,21 +1202,7 @@ where
         let along_n = way * released_end / c_end;
         let stop_m_s = way * released - c * along_n;
         if !(stop_m_s > 0.0) {
-            // The stop step's mean would run against the slip. The law's
-            // own return map on the end line says whether it holds `along`
-            // at all; where it does not, the end cannot stop in this step
-            // and the step slides on, its mean bracketed from rest. Seen on
-            // a bowed string, `along` 0.726 N against the 0.5465 N its law
-            // holds, and on a mode on a belt, 5.0094 N against 5 N, with
-            // stop speeds of -0.0208 and -3.1e-6 m/s. Where the law holds
-            // `along`, nothing here says what the step is.
-            let reach = self.advance(law, old, dt_s, kelvin, released_end, dt_s * c_end)?;
-            let kinetic_n = way * reach.traction_n[0];
-            let slides = reach.regime == FrictionRegime::Sliding && kinetic_n > 0.0;
-            if !(slides && way * released - c * kinetic_n > 0.0) {
-                return Err(refused("friction_interface_stop_against_the_slip"));
-            }
-            return self.slides_on(
+            return self.against_the_slip(
                 law,
                 old,
                 dt_s,
@@ -1222,9 +1210,7 @@ where
                 start,
                 released,
                 c,
-                kinetic_n,
-                0.0,
-                Some((released_end, c_end)),
+                (released_end, c_end),
             );
         }
         let stop = self.sliding(law, old, dt_s, kelvin, way * stop_m_s)?;
@@ -1266,6 +1252,71 @@ where
             law: stop,
             booked: Booked::Heat,
         })
+    }
+
+    /// A sliding step beside a told end whose stop step's mean would run
+    /// against the slip: `way r - c along <= 0`.
+    ///
+    /// The law's own return map on the end line says whether it holds `along`
+    /// at all. Where it does not, the end cannot stop in this step, and the
+    /// step slides on, its mean bracketed from rest. Seen on a bowed string,
+    /// `along` 0.726 N against the 0.5465 N its law holds, and on a mode on a
+    /// belt, 5.0094 N against 5 N, with stop speeds of -0.0208 and -3.1e-6 m/s.
+    ///
+    /// Where the law holds `along`, its kinetic traction at the STARTING slip,
+    /// which is along the slip, says where the end line stops. Below that
+    /// traction, `along` cannot hold the step whole, and the step is cut there.
+    /// The starting traction only places the cut: the shorter step the
+    /// kernel proposes next is a step of its own, taken by the rows of
+    /// [`Self::on_end_line`], which ask the law at that step's mean. Seen on
+    /// the bow at its 7th capture: `along` 0.1411 N, which the law holds; a
+    /// stop speed of -2.29e-3 m/s; a traction of 0.4985 N at the starting
+    /// 0.0182 m/s; and an end line that stops 0.0719 of the way through the
+    /// step. Anything else is refused.
+    #[allow(clippy::too_many_arguments)]
+    fn against_the_slip(
+        &self,
+        law: &L,
+        old: &L::State,
+        dt_s: f64,
+        kelvin: f64,
+        start: f64,
+        released: f64,
+        c: f64,
+        (released_end, c_end): (f64, f64),
+    ) -> Result<OnLine<L::State>, TriboError> {
+        let way = start.signum();
+        let along_n = way * released_end / c_end;
+        let reach = self.advance(law, old, dt_s, kelvin, released_end, dt_s * c_end)?;
+        if reach.regime == FrictionRegime::Sliding {
+            let kinetic_n = way * reach.traction_n[0];
+            if !(kinetic_n > 0.0 && way * released - c * kinetic_n > 0.0) {
+                return Err(refused("friction_interface_stop_against_the_slip"));
+            }
+            return self.slides_on(
+                law,
+                old,
+                dt_s,
+                kelvin,
+                start,
+                released,
+                c,
+                kinetic_n,
+                0.0,
+                Some((released_end, c_end)),
+            );
+        }
+        let starting_n = way * self.sliding(law, old, dt_s, kelvin, start)?.traction_n[0];
+        let band_n = self.load.solve.tolerance(along_n, starting_n)?
+            + self.load.impulse_tolerance_n_s / dt_s;
+        if along_n < starting_n - band_n {
+            let shorter_s =
+                dt_s * start.abs() / (c_end * starting_n - way * (released_end - start));
+            if shorter_s > 0.0 && shorter_s < dt_s {
+                return Ok(OnLine::EventAfter(shorter_s));
+            }
+        }
+        Err(refused("friction_interface_stop_against_the_slip"))
     }
 
     /// A step that slides on the way it started: the mean speed along the

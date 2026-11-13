@@ -3326,7 +3326,15 @@ that changed sign every step and did not decay, 5e-3 m/s from the start and
   it does not hold `along`, the end cannot stop in the step, and the step
   slides on, its mean bracketed from rest under the traction that map
   returned (a bowed string, `along` 0.726 N against the 0.5465 N its law
-  holds, and a mode on a belt, 5.0094 N against 5 N).
+  holds, and a mode on a belt, 5.0094 N against 5 N). Where the law holds
+  `along`, its kinetic traction `K(s0)` at the starting slip, which is along
+  the slip, says where the end line stops: with `along` below it by more
+  than the stop's band, the step is cut at
+  `dt abs(s0) / (c_e K(s0) - way (r_e - s0))`. `K(s0)` only places the cut:
+  it enters no force and no heat, and the shorter step is a step of its
+  own, taken by the rows above, which ask the law at its own mean (the
+  bowed string's 7th capture: `along` 0.1411 N, held; a stop speed of
+  -2.29e-3 m/s; `K(s0)` 0.4985 N; the cut 0.0719 of the step).
 - Booking. A pair at rest is held at no END slip, as `fs-couple`'s
   hand-written bowed string holds it. The step's mean slip is then not
   zero, and the work of the two ends, `dt F (r - c F)`, of either sign, is
@@ -3346,8 +3354,9 @@ that changed sign every step and did not decay, 5e-3 m/s from the start and
   its own, which the state does not keep); an end line that takes nothing
   from the slip, or adds to it, where the mean line takes from it
   (`friction_interface_end_compliance`); a sliding pair whose stop step's
-  mean is not along its slip while its law holds `along`, or whose law's
-  traction there would stop the mean
+  mean is not along its slip, while its law holds `along` and `along` is
+  not below `K(s0)` by the stop's band, or whose law's traction on the end
+  line would stop the mean
   (`friction_interface_stop_against_the_slip`);
   a step that lets go from rest with a heat below minus the work tolerance
   (`friction_interface_let_go_heat`). No other row is chosen in their place.
@@ -3365,7 +3374,7 @@ step before it to draw the line through, and one under a load that jumps
 a traction that falls with speed (a sign bracket is not a proof that the
 root is the only one); a normal load that changes.
 
-`tests/sliding_interface.rs` (seventeen of its twenty-three tests): at rest the
+`tests/sliding_interface.rs` (seventeen of its twenty-four tests): at rest the
 Coulomb law (5 N held, 3 N sliding) holds pushes up to 4.999 N with no slip
 and no heat and slides beyond; a sliding pair slides on against 3 N, and
 asked for any step that ends beyond its stop (1.0001 to 1000 times as
@@ -3402,7 +3411,7 @@ each fail one of these tests or more, the stop's row as first landed, the
 break-away not located and the instant narrowed to rounding whatever the
 law (refused, as on the string) among them.
 
-Seven of them beside a told end, on a neighbour whose end moves 1.917 times
+Eight of them beside a told end, on a neighbour whose end moves 1.917 times
 what its mean does per newton: at rest it holds pushes up to 4.999 N and
 ends with no slip at all; a mean line 1e-3 m/s off either way is held with
 the end line's 4 N, its work booked as signed numerical loss with no heat;
@@ -3417,7 +3426,16 @@ rule gives the midpoint table's verdicts, forces, records and instants to
 rounding at 54 steps and 23 cuts; both ends told make one
 end line of the difference of their rows; a sliding pair whose end line
 has 400 N along and whose mean line barely moves slides on under 3 N; the
-refusals, by field, 4 N along with that mean line among them; and the
+refusals, by field, 4 N along with that mean line among them (the law's
+3 N at the starting slip is below it); the bowed string's 7th capture,
+with that step's own lines and the fixture's Stribeck law under 0.4554 N,
+cut 0.071891 of the way through the step, to 1e-12 of where the end line
+stops under the traction the law gives at the starting slip; on a
+neighbour whose lines grow in proportion to the step, the rows that ask
+the law at each step's own mean take it on: a second cut, to 0.0654 of the
+step; a step that slides on and leaves 7.8e-6 m/s; a cut to 2.7e-5 of a
+step; and a step that ends at rest, 0.0654 of a step after the start. It
+is held at no slip in the step after; and the
 conformance check of the load-line tier with an end row passes at
 54 points and answers `Shortened` at 6 more, the
 receipt booking the work of the two ends as heat or as defect.
