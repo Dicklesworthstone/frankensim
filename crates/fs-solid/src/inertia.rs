@@ -127,7 +127,10 @@ pub(crate) struct P1DensityMass {
 
 /// Integrate the cubic polynomial `rho * N_a * N_b` on a reference tetrahedron.
 /// Normalize before summing density so a representable mass does not overflow
-/// merely because the four positive density samples have a large sum.
+/// merely because the four positive density samples have a large sum. The
+/// cell mean is the direct nodal average whenever that sum is finite: dividing
+/// each sample by the largest first rounds every term, so (3 + 15 + 3 + 3) / 4
+/// came out 5.999999999999999, not 6.
 pub(crate) fn p1_tet_nodal_mass(
     volume_m3: f64,
     rho: [f64; 4],
@@ -144,8 +147,11 @@ pub(crate) fn p1_tet_nodal_mass(
     let scale = rho.into_iter().fold(0.0_f64, f64::max);
     let normalized = rho.map(|value| value / scale);
     let total: f64 = normalized.iter().sum();
+    let direct_sum: f64 = rho.iter().sum();
     let mean_density_kg_m3 = if uniform {
         rho[0]
+    } else if direct_sum.is_finite() {
+        0.25 * direct_sum
     } else {
         scale * (0.25 * total)
     };
