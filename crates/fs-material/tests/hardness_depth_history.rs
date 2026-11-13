@@ -170,7 +170,7 @@ fn plastic(card: &MaterialCard) -> ResolvedJ2Plasticity {
         &query(),
         SELECT,
         HardeningPropertyBasis::PlasticStrainModulus,
-        0.1,
+        0.05,
     )
     .unwrap()
 }
@@ -301,9 +301,20 @@ fn g0_scalar_alpha_invalid_history_and_interior_source_failures_are_not_admitted
         ),
         Err(DepthHardnessHistoryError::NativeJ2(_))
     ));
+    // The law's small-strain bound is 0.05 (Frobenius norm of the strain), so the history
+    // leaves the surface's alpha range (0 to 0.04) by a reversal at 0.045, not one 0.09 step.
+    let loaded = native
+        .law()
+        .advance_with_energy(&[0.0; 6], &state, &[0.045, 0.0, 0.0, 0.0, 0.0, 0.0], GATES)
+        .unwrap();
     let outside = native
         .law()
-        .advance_with_energy(&[0.0; 6], &state, &[0.09, 0.0, 0.0, 0.0, 0.0, 0.0], GATES)
+        .advance_with_energy(
+            &loaded.strain,
+            &loaded.state,
+            &[-0.045, 0.0, 0.0, 0.0, 0.0, 0.0],
+            GATES,
+        )
         .unwrap();
     assert!(outside.state.alpha > 0.04);
     assert!(
@@ -367,7 +378,7 @@ fn g3_full_cyclic_backstresses_are_admitted_before_the_depth_profile() {
         &query(),
         SELECT,
         HardeningPropertyBasis::MixedPlasticStrainModuli,
-        0.1,
+        0.05,
         [
             BackstressProperties::new("fast_C", "fast_gamma"),
             BackstressProperties::new("slow_C", "slow_gamma"),
