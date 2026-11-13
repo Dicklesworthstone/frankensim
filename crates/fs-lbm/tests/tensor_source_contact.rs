@@ -227,7 +227,12 @@ fn check_source(solution: &TensorConductionSolution, surfaces: [f64; 2], heat: f
 
 #[test]
 fn full_tensor_contact_retains_supported_surfaces_and_original_order() {
-    // Adiabatic tangential faces imply K_eff=1/(K^-1)_xx, not K_xx.
+    // Adiabatic tangential faces imply K_eff=1/(K^-1)_xx, not K_xx, in a cell
+    // that heat crosses: it enters each cell through the domain's outer x face
+    // and leaves through the contact, so each cell's field is affine and the
+    // hybrid scheme reproduces it exactly. A held cell centre with every other
+    // face adiabatic is no such field (the heat enters at the centre), and
+    // there the scheme's half cell also depends on its stabilization.
     let tensors = [
         ConductivityTensor::new([[3.0, 1.0, 0.0], [1.0, 2.0, 0.0], [0.0, 0.0, 1.0]]).unwrap(),
         ConductivityTensor::new([[4.0, -0.5, 0.0], [-0.5, 1.5, 0.0], [0.0, 0.0, 2.0]]).unwrap(),
@@ -235,11 +240,13 @@ fn full_tensor_contact_retains_supported_surfaces_and_original_order() {
     let surfaces = [350.0, 320.0];
     let q = 30.0 / resistance(surfaces);
     let centers = [surfaces[0] + 0.2 * q, surfaces[1] - 3.0 * q / 23.0];
+    let ends = [surfaces[0] + 0.4 * q, surfaces[1] - 6.0 * q / 23.0];
     assert!(centers[0] > 352.0 && centers[1] < 318.0);
     let mut previous = None::<TensorConductionSolution>;
     for reverse in [false, true] {
         let mut setup = setup(Response::Surface);
-        setup.fixed_temperature = vec![(0, centers[0]), (1, centers[1])];
+        setup.faces[0] = ThermalFace::Temperature(ends[0]);
+        setup.faces[1] = ThermalFace::Temperature(ends[1]);
         setup.source_face_contacts[0] =
             contact([348.0, 352.0], [318.0, 322.0], reverse, Response::Surface);
         let before = setup.clone();
@@ -248,7 +255,7 @@ fn full_tensor_contact_retains_supported_surfaces_and_original_order() {
             &solids(),
             &setup,
             &[&tensors[0], &tensors[1]],
-            &centers,
+            &surfaces,
             &controls(),
             &CancelGate::new(),
         )
