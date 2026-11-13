@@ -459,6 +459,40 @@ fn material_error(error: FiniteJ2Error) -> MaterialError {
     }
 }
 
+/// The increment of a frozen-history potential, for the mechanical and the
+/// thermal frozen points. Endpoint subtraction keeps its bits wherever it
+/// resolves the change. Below 2^20 ulps of the larger endpoint potential, the
+/// subtraction is rounding of two large potentials, while a static line search
+/// compares the increment with a slope that falls quadratically near
+/// equilibrium. There the increment is the work of the conjugate stress along
+/// the straight path (Simpson's rule, exact for a cubic potential).
+/// `evaluate` returns the stress and potential of the held history, or `None`
+/// where the law refuses the gradient.
+fn frozen_potential_increment(
+    before: &[f64; 9],
+    after: &[f64; 9],
+    evaluate: impl Fn(&[f64; 9]) -> Option<([f64; 9], f64)>,
+) -> f64 {
+    let (Some((stress_before, potential_before)), Some((stress_after, potential_after))) =
+        (evaluate(before), evaluate(after))
+    else {
+        return f64::NAN;
+    };
+    let difference = potential_after - potential_before;
+    let resolution = 1_048_576.0 * f64::EPSILON * potential_after.abs().max(potential_before.abs());
+    if !(difference.abs() < resolution) {
+        return difference;
+    }
+    let middle: [f64; 9] = core::array::from_fn(|i| 0.5 * (before[i] + after[i]));
+    let Some((stress_middle, _)) = evaluate(&middle) else {
+        return difference;
+    };
+    (0..9).fold(0.0, |work, i| {
+        (stress_before[i] + 4.0 * stress_middle[i] + stress_after[i])
+            .mul_add(after[i] - before[i], work)
+    }) / 6.0
+}
+
 impl<L: FiniteInelasticMaterial> FiniteStrainPotential for FrozenPoint<'_, L> {
     fn energy_density(&self, deformation: &[f64; 9]) -> f64 {
         self.law
@@ -466,34 +500,12 @@ impl<L: FiniteInelasticMaterial> FiniteStrainPotential for FrozenPoint<'_, L> {
             .map_or(f64::NAN, |(_, potential)| potential)
     }
 
-    /// The increment of the same frozen-history potential. Endpoint
-    /// subtraction keeps its bits wherever it resolves the change. Below 2^20
-    /// ulps of the larger endpoint potential, the subtraction is rounding of
-    /// two large potentials, while a static line search compares the increment
-    /// with a slope that falls quadratically near equilibrium. There the
-    /// increment is the work of the conjugate stress along the straight path
-    /// (Simpson's rule, exact for a cubic potential).
     fn energy_density_increment(&self, before: &[f64; 9], after: &[f64; 9]) -> f64 {
-        let (Ok((stress_before, potential_before)), Ok((stress_after, potential_after))) = (
-            self.law.stress_and_potential(before, self.accepted),
-            self.law.stress_and_potential(after, self.accepted),
-        ) else {
-            return f64::NAN;
-        };
-        let difference = potential_after - potential_before;
-        let resolution =
-            1_048_576.0 * f64::EPSILON * potential_after.abs().max(potential_before.abs());
-        if !(difference.abs() < resolution) {
-            return difference;
-        }
-        let middle: [f64; 9] = core::array::from_fn(|i| 0.5 * (before[i] + after[i]));
-        let Ok((stress_middle, _)) = self.law.stress_and_potential(&middle, self.accepted) else {
-            return difference;
-        };
-        (0..9).fold(0.0, |work, i| {
-            (stress_before[i] + 4.0 * stress_middle[i] + stress_after[i])
-                .mul_add(after[i] - before[i], work)
-        }) / 6.0
+        frozen_potential_increment(before, after, |deformation| {
+            self.law
+                .stress_and_potential(deformation, self.accepted)
+                .ok()
+        })
     }
 
     fn first_piola(&self, deformation: &[f64; 9]) -> Result<[f64; 9], MaterialError> {

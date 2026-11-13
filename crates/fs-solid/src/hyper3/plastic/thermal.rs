@@ -251,6 +251,11 @@ impl<L: FiniteThermalInelasticPoint> FiniteStrainPotential for FrozenThermalPoin
             .stress_and_potential(f, self.accepted)
             .map_or(f64::NAN, |(_, value)| value)
     }
+    fn energy_density_increment(&self, before: &[f64; 9], after: &[f64; 9]) -> f64 {
+        super::frozen_potential_increment(before, after, |f| {
+            self.law.stress_and_potential(f, self.accepted).ok()
+        })
+    }
     fn first_piola(&self, f: &[f64; 9]) -> Result<[f64; 9], MaterialError> {
         self.law
             .stress_and_potential(f, self.accepted)
