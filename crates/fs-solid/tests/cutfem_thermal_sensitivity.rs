@@ -293,7 +293,10 @@ fn full_temperature_pullback_matches_each_refreshed_cell_with_nitsche_and_ghosts
         ),
         (
             ElasticityFormulation3::BBar,
-            [0.49, -2.0, 0.00002, 0.0001, 0.000002],
+            // Poisson slope 2^-16: the knots 0.49 - 20 s and 0.49 + 60 s
+            // are then exact, so the path is affine in binary as the source
+            // check requires (one ulp off the line is a kink; 2e-5 was).
+            [0.49, -2.0, 1.525_878_906_25e-5, 0.0001, 0.000002],
         ),
     ] {
         for with_motion in [false, true] {
