@@ -531,6 +531,7 @@ impl EigenService {
     /// contract; it uses exactly the same native backend, admissions, rollback
     /// and final publication poll as [`Self::tick`]. Each operator application
     /// remains responsible for bounding its own work.
+    #[allow(clippy::too_many_lines)]
     pub fn tick_cancellable(
         &mut self,
         op: &dyn SymmetricOp,
@@ -601,6 +602,13 @@ impl EigenService {
                 Err(_) if operator_fault.get() => {
                     self.state = snapshot;
                     return Err(ServiceError::OperatorFault);
+                }
+                // A backend may stop on the non-finite action it was handed
+                // instead of returning (LOBPCG's QR refuses a non-finite
+                // column). The step already owes the rolled-back refusal.
+                Err(_) if nonfinite.get() => {
+                    self.state = snapshot;
+                    return Err(ServiceError::NonFiniteOperator);
                 }
                 Err(payload) => {
                     self.state = snapshot;
