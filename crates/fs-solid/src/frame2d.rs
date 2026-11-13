@@ -383,7 +383,14 @@ impl FrameElement {
         v
     }
 
-    /// Neuenhofer–Filippou iteration from a given element state.
+    /// Neuenhofer–Filippou iteration from a given element state: Newton on
+    /// section equilibrium `b(ξ) q = s(d)` and compatibility `v = ∫ bᵀ d`.
+    /// The basic-force correction removes the residual deformations
+    /// `r = ∫ bᵀ f_s (b q − s)` of the current section unbalance, so every
+    /// corrected state is compatible and the section corrections are the
+    /// Newton ones. The start need not be balanced: after a law change (a new
+    /// temperature) the committed `q` no longer equals the sections' forces.
+    #[allow(clippy::too_many_lines)]
     fn iterate(
         &self,
         q0: [f64; 3],
@@ -449,15 +456,23 @@ impl FrameElement {
             let kb = inv3(f).ok_or_else(|| SolidError::InternalInvariant {
                 what: "singular element flexibility".into(),
             })?;
-            // Section unbalance at the current q.
+            // Section unbalance at the current q, and its residual
+            // deformations integrated over the element.
             let mut unbal = 0.0f64;
             let mut dscale = 1.0f64;
             let mut roundoff_scale = 0.0f64;
+            let mut residual = [0.0; 3];
             for p in 0..np {
                 let b = Self::b(self.xi[p]);
                 let dn = b[0][0] * q[0];
                 let dm = b[1][1] * q[1] + b[1][2] * q[2];
-                let (s, _) = resp[p];
+                let (s, fs) = resp[p];
+                let (rn, rm) = (dn - s.n, dm - s.m);
+                let (re, rk) = (fs[0][0] * rn + fs[0][1] * rm, fs[1][0] * rn + fs[1][1] * rm);
+                let wl = self.w[p] * l;
+                for a in 0..3 {
+                    residual[a] += wl * (b[0][a] * re + b[1][a] * rk);
+                }
                 unbal = unbal.max((dn - s.n).abs()).max((dm - s.m).abs());
                 dscale = dscale.max(dn.abs()).max(dm.abs());
                 for row in s.tangent {
@@ -479,9 +494,12 @@ impl FrameElement {
             {
                 return Ok((q, kb, d));
             }
-            // Compatibility correction, then section corrections.
+            // Compatibility correction net of the residual deformations, then
+            // section corrections: Σ wL bᵀ d + shear rotation then equals v.
             for a in 0..3 {
-                q[a] += (0..3).map(|c| kb[a][c] * dv[c]).sum::<f64>();
+                q[a] += (0..3)
+                    .map(|c| kb[a][c] * (dv[c] - residual[c]))
+                    .sum::<f64>();
             }
             for p in 0..np {
                 let b = Self::b(self.xi[p]);
