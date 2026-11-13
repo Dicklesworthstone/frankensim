@@ -28,6 +28,14 @@ use crate::{MaterialAdmissibility, MaterialError, SmallStrainLaw, Tangent6, Voig
 use fs_evidence::{Ambition, ModelCard};
 use fs_math::det;
 
+/// Relative rounding admitted in a retained backstress's bounds.
+const BACKSTRESS_ROUNDOFF: f64 = 128.0 * f64::EPSILON;
+
+/// A retained backstress is deviatoric to rounding at its own magnitude.
+fn deviatoric_to_roundoff(a: &Voigt) -> bool {
+    trace(a).abs() <= BACKSTRESS_ROUNDOFF * det::sqrt(contract(a, a)).max(f64::MIN_POSITIVE)
+}
+
 /// Exact free-sided axial restriction using the same scalar consistency solve.
 pub mod axial;
 /// Joint linear/power-law kinetics with the native multi-branch history owner.
@@ -260,10 +268,10 @@ impl<const N: usize> ChabocheJ2<N> {
                 return Err(ChabocheError::Invalid("nonfinite independent backstress"));
             }
             let norm = det::sqrt(contract(a, a));
-            let roundoff = 128.0 * f64::EPSILON;
+            let roundoff = BACKSTRESS_ROUNDOFF;
             let q = det::sqrt(1.5) * norm;
             if !q.is_finite()
-                || trace(a).abs() > roundoff * norm.max(f64::MIN_POSITIVE)
+                || !deviatoric_to_roundoff(a)
                 || (branch.modulus_pa == 0.0 && a.iter().any(|x| *x != 0.0))
                 || q > branch.modulus_pa * state.plastic.alpha * (1.0 + roundoff)
                 || q * branch.recovery_per_strain > branch.modulus_pa * (1.0 + roundoff)
@@ -453,6 +461,14 @@ impl<const N: usize> ChabocheJ2<N> {
             let divisor = 1.0 + branch.recovery_per_strain * solution.delta_alpha;
             for i in 0..6 {
                 a[i] = (a[i] + (2.0 / 3.0) * branch.modulus_pa * increment[i]) / divisor;
+            }
+            // The update is deviatoric in exact arithmetic, but at a reversal
+            // the old backstress and the plastic increment nearly cancel: the
+            // trace keeps the rounding of the larger operands while the result
+            // is much smaller. Only then is the result re-projected, so every
+            // update whose trace is already at its own rounding keeps its bits.
+            if !deviatoric_to_roundoff(a) {
+                *a = deviator(a);
             }
         }
         next
