@@ -208,7 +208,13 @@ fn plane_reductions_use_full_physical_stress_and_native_point_histories() {
             let prescribed: Vec<_> = mesh.nodes.iter().enumerate()
                 .flat_map(|(node, x)| [(2 * node, 0.004 * x[0]), (2 * node + 1, 0.0)])
                 .collect();
-            let count = if mesh.elems[0].len() == 4 { 4 * mesh.elems.len() } else { mesh.elems.len() };
+            // 2x2 Gauss points per quadrilateral; the degree-2 rule's three
+            // edge midpoints per triangle (mesh2::quad_points).
+            let count = if mesh.elems[0].len() == 4 {
+                4 * mesh.elems.len()
+            } else {
+                3 * mesh.elems.len()
+            };
             for plane in [PlaneKind::Stress, PlaneKind::Strain] {
                 let states = vec![ReducedState { strain: [0.0; 6], history: law.initial_state() }; count];
                 let history = DuctileHistory::virgin(DuctileLawField::Uniform(&calibration), count, count).unwrap();
