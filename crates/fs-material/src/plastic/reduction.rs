@@ -564,8 +564,22 @@ impl<L: SmallStrainLaw> PlaneStressReduction<L> {
                 "in-plane strain exceeds the declared small-strain domain",
             ));
         }
+        let mut first = self.law.stress(&strain, &old.history);
+        // The retained transverse strain is only a guess. From the initial
+        // state it is the plane-strain one, where a damage locus can be outside
+        // its triaxiality domain although the plane-stress solution is inside.
+        // Only when that guess has no finite stress, start from another one.
+        if first.iter().any(|v| !v.is_finite())
+            && let Some((predicted, stress)) = self.fallback_start(in_plane, &strain, old, workspace)
+        {
+            strain = predicted;
+            first = stress;
+        }
+        let mut first = Some(first);
         for iteration in 0..=self.config.max_iterations {
-            let stress = self.law.stress(&strain, &old.history);
+            let stress = first
+                .take()
+                .unwrap_or_else(|| self.law.stress(&strain, &old.history));
             let residual = transverse_residual(&stress)?;
             let tangent = self.law.tangent(&strain, &old.history);
             if tangent.iter().flatten().any(|v| !v.is_finite()) {
@@ -648,6 +662,82 @@ impl<L: SmallStrainLaw> PlaneStressReduction<L> {
             }
         }
         unreachable!("bounded Newton exits on its final iteration")
+    }
+
+    /// Starts tried, in order, when the retained guess has no finite native
+    /// stress; the first one in domain with a finite native stress is used:
+    /// 1. the tangent plane-stress predictor of the old accepted point, i.e.
+    ///    the transverse strain that zeroes its constrained stress linearized
+    ///    to the new in-plane strain;
+    /// 2. the isochoric thickness strain -(e_xx + e_yy), with the guess's
+    ///    transverse shears. A large return from the elastic predictor keeps
+    ///    its whole trial pressure, so a triaxiality-bounded law can refuse it
+    ///    too; the isochoric start has no trial pressure.
+    fn fallback_start(
+        &self,
+        in_plane: [f64; 3],
+        guess: &Voigt,
+        old: &ReducedState<L::State>,
+        workspace: &mut PlaneStressWorkspace,
+    ) -> Option<(Voigt, Voigt)> {
+        let finite = |strain: Voigt| {
+            if !self.admitted_strain(&strain) {
+                return None;
+            }
+            let stress = self.law.stress(&strain, &old.history);
+            stress
+                .iter()
+                .all(|v| v.is_finite())
+                .then_some((strain, stress))
+        };
+        self.tangent_predictor(in_plane, old, workspace)
+            .and_then(finite)
+            .or_else(|| {
+                let mut strain = *guess;
+                strain[TRANSVERSE[0]] = -(in_plane[0] + in_plane[1]);
+                finite(strain)
+            })
+    }
+
+    /// The transverse strain that zeroes the constrained stress of the old
+    /// accepted point linearized to the new in-plane strain. None when the old
+    /// point has no finite stress or tangent or its transverse block is
+    /// singular.
+    fn tangent_predictor(
+        &self,
+        in_plane: [f64; 3],
+        old: &ReducedState<L::State>,
+        workspace: &mut PlaneStressWorkspace,
+    ) -> Option<Voigt> {
+        let old_stress = self.law.stress(&old.strain, &old.history);
+        let tangent = self.law.tangent(&old.strain, &old.history);
+        if old_stress
+            .iter()
+            .chain(tangent.iter().flatten())
+            .any(|v| !v.is_finite())
+        {
+            return None;
+        }
+        let block: [f64; 9] =
+            core::array::from_fn(|k| tangent[TRANSVERSE[k / 3]][TRANSVERSE[k % 3]]);
+        workspace.transverse.factor(&block).ok()?;
+        let rhs: [f64; 3] = core::array::from_fn(|i| {
+            (0..3).fold(-old_stress[TRANSVERSE[i]], |r, j| {
+                tangent[TRANSVERSE[i]][IN_PLANE[j]]
+                    .mul_add(-(in_plane[j] - old.strain[IN_PLANE[j]]), r)
+            })
+        });
+        let mut correction = [0.0; 3];
+        workspace
+            .transverse
+            .solve_factored_into(&rhs, &mut correction)
+            .ok()?;
+        let mut strain = old.strain;
+        for i in 0..3 {
+            strain[IN_PLANE[i]] = in_plane[i];
+            strain[TRANSVERSE[i]] += correction[i];
+        }
+        Some(strain)
     }
 
     fn admitted_strain(&self, strain: &Voigt) -> bool {
