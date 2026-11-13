@@ -261,7 +261,30 @@ pub(crate) fn solve_with_inertia<O: IncrementOperator>(
         let mut history = Vec::new();
         let mut fallbacks = 0usize;
         let mut converged = false;
-        let (mut f_int, mut stress_force_cap) = operator.internal(&states, &u, scale_rows, cx)?;
+        // The start is the accepted configuration evaluated under this
+        // increment's laws. A law over an interval dt sees there no total
+        // chord against the interval's whole free-strain change, and may
+        // refuse that rate although the increment, which ends on its targets,
+        // lies inside its domain. With every coordinate prescribed the targets
+        // are the endpoint and the start decides nothing, so such a refusal
+        // moves the start to the targets. Every other refusal, and any refusal
+        // at the targets, still propagates.
+        let (mut f_int, mut stress_force_cap) = match operator.internal(&states, &u, scale_rows, cx)
+        {
+            Ok(value) => value,
+            Err(error)
+                if free.is_empty()
+                    && error != SmallStrainTetError::Cancelled
+                    && operator.recoverable_trial_error(&error)
+                    && target.iter().any(|&(dof, value)| value - u[dof] != 0.0) =>
+            {
+                for &(dof, value) in &target {
+                    u[dof] = value;
+                }
+                operator.internal(&states, &u, scale_rows, cx)?
+            }
+            Err(error) => return Err(error),
+        };
         let mut elastic_free_norm = free.iter().fold(0.0_f64, |n, &d| n.hypot(f_int[d]));
         let mut static_force_scale = elastic_free_norm.max(external_free_norm);
         let mut increment_reference = 0.0_f64;
