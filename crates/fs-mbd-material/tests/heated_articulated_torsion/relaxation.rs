@@ -56,6 +56,13 @@ fn definition<'a>(
     cards: &[&'a MaterialCard],
     twists: Vec<f64>,
 ) -> (TorsionalJointShaft<'a>, ShaftRelaxation) {
+    definition_at(cards, twists, 300.0)
+}
+fn definition_at<'a>(
+    cards: &[&'a MaterialCard],
+    twists: Vec<f64>,
+    temperature_k: f64,
+) -> (TorsionalJointShaft<'a>, ShaftRelaxation) {
     let extra = [
         ScalarPropertyRequirement::try_new(DELTA, Pressure::DIMS, ScalarAdmissibility::NonNegative)
             .unwrap(),
@@ -63,7 +70,7 @@ fn definition<'a>(
             .unwrap(),
     ];
     (
-        shaft_with_requirements(cards, 300.0, &extra),
+        shaft_with_requirements(cards, temperature_k, &extra),
         ShaftRelaxation {
             properties: cards
                 .iter()
@@ -270,16 +277,26 @@ fn finite_heat_refreshes_original_relaxation_coefficients_without_resetting_memo
     near(audit.viscous_heat_j, heat, 3e-9);
     near(audit.combined_residual_j, 0.0, 3e-9);
     let (continued, continued_audit) = next.advance_to(2.0 * dt, step(), || Ok(())).unwrap();
+    // A restart binds its heated cell to a mechanism and a shaft resolved at that
+    // cell's own temperature, as the cooling test does: the 300 K reference only
+    // admits a cell that is solid at 300 K.
+    let restart_h = next.thermal().cells()[&CellId(1)].specific_h_j_kg;
+    let restart_t = curve
+        .curve()
+        .state_at_specific_enthalpy(restart_h)
+        .unwrap()
+        .temperature_k();
+    let restart_reference = mechanism_at_temperature(&refs, restart_t);
     let restart = motion_at_enthalpy(
-        &reference,
+        &restart_reference,
         &refs,
         &[&curve],
         &[10.0],
         next.joint_position()[0],
         next.joint_velocity()[0],
-        next.thermal().cells()[&CellId(1)].specific_h_j_kg,
+        restart_h,
     )
-    .with_relaxing_torsional_joint_shafts(vec![definition(&refs, vec![z])], || Ok(()))
+    .with_relaxing_torsional_joint_shafts(vec![definition_at(&refs, vec![z], restart_t)], || Ok(()))
     .unwrap();
     let (replayed, _) = restart.advance_to(dt, step(), || Ok(())).unwrap();
     near(
@@ -294,15 +311,17 @@ fn finite_heat_refreshes_original_relaxation_coefficients_without_resetting_memo
     );
     near(continued_audit.combined_residual_j, 0.0, 3e-9);
     let erased = motion_at_enthalpy(
-        &reference,
+        &restart_reference,
         &refs,
         &[&curve],
         &[10.0],
         next.joint_position()[0],
         next.joint_velocity()[0],
-        next.thermal().cells()[&CellId(1)].specific_h_j_kg,
+        restart_h,
     )
-    .with_relaxing_torsional_joint_shafts(vec![definition(&refs, vec![0.0])], || Ok(()))
+    .with_relaxing_torsional_joint_shafts(vec![definition_at(&refs, vec![0.0], restart_t)], || {
+        Ok(())
+    })
     .unwrap();
     let (erased, _) = erased.advance_to(dt, step(), || Ok(())).unwrap();
     assert!((continued.joint_velocity()[0] - erased.joint_velocity()[0]).abs() > 1e-5);
