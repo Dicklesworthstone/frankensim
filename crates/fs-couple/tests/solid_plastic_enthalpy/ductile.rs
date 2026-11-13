@@ -803,10 +803,11 @@ fn original_johnson_cook_fit_tracks_heated_native_endpoint_without_repartitionin
             .with_quantity(PLASTIC_STRAIN_RATE_AXIS, rate, 1.0)
             .unwrap();
         let law = resolve_johnson_cook_initiation(&fixture.card, pin, &point, "T").unwrap();
-        let mut foreign_id = fixture.card.id().clone();
-        foreign_id.revision += 1;
+        // A lineage starts at revision 0, so the next revision of the same
+        // material comes from supersede.
         let foreign_card =
-            MaterialCard::assemble(foreign_id, fixture.card.claims().clone(), vec![model]).unwrap();
+            MaterialCard::supersede(&fixture.card, fixture.card.claims().clone(), vec![model])
+                .unwrap();
         let foreign = resolve_johnson_cook_initiation(&foreign_card, pin, &point, "T").unwrap();
         let pressure =
             QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static));
