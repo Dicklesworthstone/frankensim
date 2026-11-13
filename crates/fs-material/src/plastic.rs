@@ -182,18 +182,30 @@ impl J2Plasticity {
         }
         let norm_s = det::sqrt(contract(&s_trial, &s_trial));
         let q_trial = det::sqrt(1.5) * norm_s;
-        let f = q_trial - (self.yield_stress + self.hardening * state.alpha);
+        let yield_value = self.yield_stress + self.hardening * state.alpha;
+        let f = q_trial - yield_value;
+        let elastic = Update {
+            stress: stress_trial,
+            dgamma: 0.0,
+            n_hat: [0.0; 6],
+            q_trial,
+            plastic: false,
+        };
         if f <= 0.0 || norm_s == 0.0 {
-            return Update {
-                stress: stress_trial,
-                dgamma: 0.0,
-                n_hat: [0.0; 6],
-                q_trial,
-                plastic: false,
-            };
+            return elastic;
         }
         let (_, mu) = self.elastic.lame();
         let dgamma = f / (3.0 * mu + self.combined_hardening() + overstress_modulus);
+        // An accepted state re-evaluated at its own strain assembles its trial
+        // stress independently of the yield value and can land a few ulps above
+        // it. That return is below the resolution of `alpha`: the nearest
+        // representable history is the accepted one, with no increment. Admit
+        // only yield-value roundoff (32 eps, the tabulated law's factor); every
+        // return that changes `alpha` keeps its increment. (dgamma > 0, so
+        // `alpha + dgamma <= alpha` holds only when the sum rounds to alpha.)
+        if state.alpha + dgamma <= state.alpha && f <= 32.0 * f64::EPSILON * yield_value {
+            return elastic;
+        }
         let mut n_hat = s_trial;
         for c in &mut n_hat {
             *c /= norm_s;

@@ -109,3 +109,67 @@ fn nonfinite_traceful_unreachable_or_large_strain_history_refuses() {
     assert!(material.validate_committed_history(&shear(0.01),
         &material.initial_state(), TOL.yield_pa).is_err());
 }
+
+#[test]
+fn an_accepted_state_re_evaluated_at_its_own_strain_is_accepted_again() {
+    // The law of fs-solid's plastic_hex_thermal_hardness fixture (E 1200 Pa,
+    // nu 0.3, yield 1 Pa, isotropic 30 Pa, Prager 20 Pa) and its isotropic part
+    // alone. Each strain is loaded from the virgin state and then held: the
+    // same strain again from the accepted state. The held trial is assembled
+    // independently of the yield value and can land a few ulps above it.
+    let tolerances = EnergyTolerances {
+        energy_j_m3: 1e-8,
+        yield_pa: 1e-7,
+    };
+    let directions: [Voigt; 3] = [
+        [1.0, -0.4, -0.35, 0.3, 0.0, 0.1],
+        [1.0, -0.5, -0.5, 0.0, 0.0, 0.0],
+        [0.2, 0.1, -0.3, 0.5, -0.25, 0.15],
+    ];
+    for kinematic in [20.0, 0.0] {
+        let material = J2Plasticity::new_mixed(
+            IsotropicElastic::new(1200.0, 0.3, 0.04).unwrap(),
+            1.0,
+            30.0,
+            kinematic,
+        )
+        .unwrap();
+        let mut refused = Vec::new();
+        for direction in directions {
+            for i in 0..200 {
+                for sign in [1.0, -1.0] {
+                    let magnitude = sign * (0.001 + 0.005 * f64::from(i) / 199.0);
+                    let strain = direction.map(|x| magnitude * x);
+                    let loaded = material
+                        .advance_with_energy(
+                            &[0.0; 6],
+                            &material.initial_state(),
+                            &strain,
+                            tolerances,
+                        )
+                        .unwrap();
+                    assert!(loaded.state.alpha > 0.0);
+                    match material.advance_with_energy(&strain, &loaded.state, &strain, tolerances)
+                    {
+                        Ok(held) => {
+                            // A roundoff excess returns by at most a few ulps of alpha.
+                            let advance = held.state.alpha - loaded.state.alpha;
+                            assert!((0.0..=1e-17).contains(&advance), "{magnitude}: {advance:e}");
+                            if advance == 0.0 {
+                                assert_eq!(held.state, loaded.state);
+                            }
+                            assert_eq!(held.energy.mechanical_work_j_m3, 0.0);
+                        }
+                        Err(error) => refused.push((magnitude, error)),
+                    }
+                }
+            }
+        }
+        assert!(
+            refused.is_empty(),
+            "Prager {kinematic} Pa: {} of 1200 holds refused, first {:?}",
+            refused.len(),
+            refused.first()
+        );
+    }
+}
