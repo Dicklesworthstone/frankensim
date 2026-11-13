@@ -26,9 +26,28 @@ use fs_mbd_material::thermal::heating::motion::damping::{
     DampedRigidPair, DamperAttachment, DampingError, DampingSolve, MaterialDamper,
 };
 use fs_mbd_material::thermal::heating::motion::{HeatedMotionControls, HeatedRigidBody};
-use fs_qty::Temperature;
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+use fs_qty::{QuantitySpec, Temperature};
 use fs_solver::NewtonKrylovConfig;
 use fs_thermal::enthalpy::{CellId, DepositionError};
+
+// Pressure is a fixed external condition only as a typed static pressure. A linear
+// interface's coefficients must be constant at fixed external conditions, and that rule
+// refuses an untyped extra axis as a possibly evolving coordinate (only the legacy untyped
+// "T" is exempt). The interface claims and every query of them type it the same way.
+fn static_pressure() -> QuantitySpec {
+    QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static))
+}
+
+fn interface_point() -> QueryPoint {
+    QueryPoint::new()
+        .with("T", 300.)
+        .unwrap()
+        .with_quantity("pressure", static_pressure(), 1e5)
+        .unwrap()
+        .with("omega", 0.)
+        .unwrap()
+}
 
 fn interface(solid: &MaterialCard, slope: f64, upper: f64, stiffness: f64) -> InterfaceSystemCard {
     interface_with_damping(solid, 1., slope, upper, stiffness)
@@ -61,7 +80,7 @@ fn interface_with_damping(
                 },
                 validity: ValidityDomain::unconstrained()
                     .with("T", 300., upper)
-                    .with("pressure", 1e5, 2e5)
+                    .with_quantity("pressure", static_pressure(), 1e5, 2e5)
                     .with("omega", 0., 1e4),
                 interpolation: InterpolationPolicy::LinearInside,
                 uncertainty: UncertaintyModel::Unstated,
@@ -118,7 +137,7 @@ fn pair<'a>(
     ];
     let source = resolve_interface_state_point(
         interface,
-        &point(300., 1e5).with("omega", 0.).unwrap(),
+        &interface_point(),
         &requirements,
         MaterialPropertySelection::SingleClaimOnly,
     )
@@ -489,7 +508,7 @@ fn late_cancellation_and_material_or_solver_refusals_leave_both_histories_intact
     damper.source = ResolvedLinearInterface::new(
         resolve_interface_state_point(
             &spring,
-            &point(300., 1e5).with("omega", 0.).unwrap(),
+            &interface_point(),
             &requirements,
             MaterialPropertySelection::SingleClaimOnly,
         )
@@ -533,7 +552,7 @@ fn conducting_interface(
             },
             validity: ValidityDomain::unconstrained()
                 .with(second_axis, 300., upper)
-                .with("pressure", 1e5, 2e5),
+                .with_quantity("pressure", static_pressure(), 1e5, 2e5),
             interpolation: InterpolationPolicy::LinearInside,
             uncertainty: UncertaintyModel::Unstated,
             observations: vec![],
@@ -560,9 +579,7 @@ fn conducting_interface(
 }
 
 fn contact_context(side: usize) -> QueryPoint {
-    point(300., 1e5)
-        .with("omega", 0.)
-        .unwrap()
+    interface_point()
         .with(if side == 0 { "T_b" } else { "T_a" }, 300.)
         .unwrap()
 }
