@@ -217,7 +217,10 @@ fn frame_g2_rc_pushover_equilibrium_and_capacity() {
     f.add_element(base, top, 5, 0.0, &rc).unwrap();
     let mut pattern = vec![0.0; f.ndof()];
     pattern[3 * top] = 1.0;
-    let targets: Vec<f64> = (1..=60).map(|k| 0.03 * l * f64::from(k) / 60.0).collect();
+    // Drift steps of 0.05 % to 2.5 %. The cover concrete's crushing strain (Mander eps_cu 0.005,
+    // which the law refuses to pass) is reached in the base section's extreme cover fiber near
+    // 2.55 % drift; the push stays inside the range its materials declare.
+    let targets: Vec<f64> = (1..=50).map(|k| 0.025 * l * f64::from(k) / 50.0).collect();
     let steps = f.displacement_control(&pattern, 3 * top, &targets).unwrap();
     let base_kappa = f.section_deformations(0)[0].1.abs();
     let cap = section_capacity(1.01 * base_kappa);
