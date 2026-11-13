@@ -137,7 +137,15 @@ fn sub_stress_roundoff_creep_still_solves_its_history_and_tiny_hardening_remains
         )
         .unwrap()
     };
-    let tiny = combined(1e-320);
+    // At 1e-316, H/(3G+H) still rounds to zero while the stored hardening energy
+    // H alpha^2 / 2 stays representable. At 1e-320 that energy underflowed as well, and the
+    // energy account refuses a nonzero energy that underflows (plastic/energy.rs, product).
+    let tiny_hardening = 1e-316;
+    assert_eq!(
+        tiny_hardening / (3.0 * elastic().lame().1 + tiny_hardening),
+        0.0
+    );
+    let tiny = combined(tiny_hardening);
     let perfect = combined(0.0);
     let p = perfect
         .advance_with_energy(
@@ -227,7 +235,11 @@ fn nonproportional_primary_flow_has_exact_tangent_and_rotates_with_history() {
             );
         }
     }
-    let rotation = rotation([0.4, -0.3, 0.8], 0.71);
+    // rotation() takes a unit axis. [0.4, -0.3, 0.8] has length 0.943, and the matrix it gave
+    // was not orthogonal: it moved the creep strain's trace to -1.2e-7, which the law refuses.
+    let axis: [f64; 3] = [0.4, -0.3, 0.8];
+    let length = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+    let rotation = rotation(axis.map(|a| a / length), 0.71);
     let rotated = CreepState {
         creep_strain: rotate(&old.creep_strain, &rotation),
         equivalent_creep_strain: old.equivalent_creep_strain,
