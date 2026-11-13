@@ -37,6 +37,7 @@ pub struct RotorTransientStep {
     pub state_after: RotorTransientState,
     /// Relative residual of the ORIGINAL impulse balance after diagonal mass
     /// scaling; zero-force rows retain the complete vector's roundoff scale.
+    /// Only the part beyond the endpoint's rounding counts (see [`RotorMidpoint::step`]).
     pub relative_residual: f64,
     /// Signed generalized load work at the actual midpoint.
     pub input_work_j: f64,
@@ -295,6 +296,15 @@ impl RotorMidpoint<'_> {
     /// Advance the actual rotor coordinates under a force/torque sampled at
     /// the temporal midpoint. All returned work uses actual endpoint midpoints.
     /// No input is changed if the solve, original balance or cancellation refuses.
+    ///
+    /// The balance is admitted with its endpoint's rounding: the returned
+    /// velocities are rounded, so the change the solve made is known only to
+    /// their last places, and each force term only to the rounding of its
+    /// products. Per row, 16 eps of `sum_j |M_ij| (|v0_j| + |v1_j|)` plus the
+    /// same of each term's absolute products and of the input is the
+    /// representation's, not the solve's; only what exceeds it is measured
+    /// against `relative_tolerance`. A step whose change is small beside the
+    /// velocity it changes is therefore not refused for that alone.
     pub fn step(
         &self,
         state: &RotorTransientState,
@@ -354,9 +364,17 @@ impl RotorMidpoint<'_> {
             input[i] = h * midpoint_force[i];
         }
         self.admit_vector(&input[..n])?;
+        let floor = self.endpoint_floor(
+            [&state.velocity, &state_after.velocity],
+            &midpoint_velocity[..n],
+            &midpoint_position[..n],
+            &input[..n],
+            &mut cancelled,
+        )?;
         let relative_residual = self.admit_balance(
             &[&inertial[..n], &damping[..n], &gyro[..n], &stiffness[..n]],
             &input[..n],
+            &floor[..n],
         )?;
         let input_work_j = pairing(&input[..n], &midpoint_velocity[..n])?;
         let velocity_force_work_j = pairing(&damping[..n], &midpoint_velocity[..n])?;
@@ -638,7 +656,9 @@ impl RotorMidpoint<'_> {
             *value = state_after.velocity[i] - state.velocity[i];
         }
         let momentum = action(&self.model.mass, &delta[..n], &mut cancelled)?;
-        let relative_residual = self.admit_balance(&[&momentum[..n]], impulse)?;
+        // An impulse lost to the velocity's rounding refuses (no floor).
+        let relative_residual =
+            self.admit_balance(&[&momentum[..n]], impulse, &[0.0; MAX_ROTOR_DOFS][..n])?;
         let midpoint_velocity = midpoint(&state.velocity, &state_after.velocity);
         let impulse_work_j = pairing(impulse, &midpoint_velocity[..n])?;
         let kinetic_energy_change_j = pairing(&momentum[..n], &midpoint_velocity[..n])?;
@@ -649,6 +669,42 @@ impl RotorMidpoint<'_> {
             impulse_work_j,
             kinetic_energy_change_j,
         })
+    }
+
+    // Each row of `step`'s balance is known only to ENDPOINT_ROUNDING of its
+    // absolute products: the mass on both endpoint velocities, each force term
+    // on its midpoint, and the input.
+    fn endpoint_floor(
+        &self,
+        endpoints: [&[f64]; 2],
+        midpoint_velocity: &[f64],
+        midpoint_position: &[f64],
+        input: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<[f64; MAX_ROTOR_DOFS], RotorError> {
+        let n = self.model.n;
+        let h = self.duration_seconds;
+        let mut speeds = [0.0; MAX_ROTOR_DOFS];
+        for (j, value) in speeds.iter_mut().enumerate().take(n) {
+            *value = finite(endpoints[0][j].abs() + endpoints[1][j].abs())?;
+        }
+        let rounding = [
+            absolute_action(&self.model.mass, &speeds[..n], 1.0, cancelled)?,
+            absolute_action(&self.model.damping, midpoint_velocity, h, cancelled)?,
+            absolute_action(
+                &self.model.gyro,
+                midpoint_velocity,
+                finite(h * self.spin_rad_s)?,
+                cancelled,
+            )?,
+            absolute_action(&self.stiffness_operator, midpoint_position, h, cancelled)?,
+        ];
+        let mut floor = [0.0; MAX_ROTOR_DOFS];
+        for (i, value) in floor.iter_mut().enumerate().take(n) {
+            let products = rounding.iter().map(|row| row[i]).sum::<f64>() + input[i].abs();
+            *value = finite(ENDPOINT_ROUNDING * products)?;
+        }
+        Ok(floor)
     }
 
     fn velocity_increment(
@@ -706,7 +762,14 @@ impl RotorMidpoint<'_> {
         }
     }
 
-    fn admit_balance(&self, terms: &[&[f64]], rhs: &[f64]) -> Result<f64, RotorError> {
+    // `floor` is each row's admitted rounding, in force-impulse units; only the
+    // residual beyond it is measured against the relative tolerance.
+    fn admit_balance(
+        &self,
+        terms: &[&[f64]],
+        rhs: &[f64],
+        floor: &[f64],
+    ) -> Result<f64, RotorError> {
         let mut residual_norm = 0.0_f64;
         let mut rhs_norm = 0.0_f64;
         let mut norms = [0.0_f64; 4];
@@ -719,8 +782,8 @@ impl RotorMidpoint<'_> {
                 term_norms[index] =
                     term_norms[index].max(finite(term[i].abs() / self.mass_scale[i])?);
             }
-            residual_norm =
-                residual_norm.max(finite(residual.to_f64().abs() / self.mass_scale[i])?);
+            let beyond = (residual.to_f64().abs() - floor[i]).max(0.0);
+            residual_norm = residual_norm.max(finite(beyond / self.mass_scale[i])?);
         }
         let scale = term_norms.iter().copied().fold(rhs_norm, f64::max);
         let relative = if scale == 0.0 {
@@ -864,6 +927,28 @@ fn scaled_action(
     let mut result = action(matrix, vector, cancelled)?;
     for value in &mut result[..vector.len()] {
         *value = finite(*value * scale)?;
+    }
+    Ok(result)
+}
+
+/// Rounding allowed per absolute product of a rotor balance row.
+const ENDPOINT_ROUNDING: f64 = 16.0 * f64::EPSILON;
+
+// Row sums of |A_ij| |x_j| times |scale|: the size of the products an action adds.
+fn absolute_action(
+    matrix: &[f64],
+    vector: &[f64],
+    scale: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<[f64; MAX_ROTOR_DOFS], RotorError> {
+    let n = vector.len();
+    let mut result = [0.0_f64; MAX_ROTOR_DOFS];
+    for i in 0..n {
+        poll(cancelled)?;
+        for j in 0..n {
+            result[i] = matrix[i * n + j].abs().mul_add(vector[j].abs(), result[i]);
+        }
+        result[i] = finite(result[i] * scale.abs())?;
     }
     Ok(result)
 }

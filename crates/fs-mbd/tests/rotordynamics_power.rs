@@ -85,7 +85,18 @@ fn zero_net_reversal_cannot_hide_positive_and_negative_power_peaks() {
         .step_peak_power_limited(&input, &[2.0], peak_limits(0.0, 0.0), || false)
         .unwrap();
     assert_eq!(peak.average.effort_fraction, 0.0);
-    assert_eq!(peak.average.motion.state_after, input);
+    // No effort: the rotor coasts through the step at its own speed.
+    assert_eq!(
+        peak.average.motion,
+        stepper.step(&input, &[0.0], || false).unwrap()
+    );
+    assert_eq!(
+        peak.average.motion.state_after,
+        RotorTransientState {
+            displacement: vec![-1.0],
+            velocity: vec![-1.0],
+        }
+    );
 
     // Starting regeneration limits alpha before final motoring is considered.
     let peak = stepper
