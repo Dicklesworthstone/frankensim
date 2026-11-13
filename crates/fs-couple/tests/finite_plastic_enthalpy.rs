@@ -1184,18 +1184,18 @@ fn foreign_caloric_identity_replaced_objects_and_nonpositive_total_capacity_are_
         let variable = Fixture::with_density(CP, 0, density);
         let material = FiniteThermoplasticMaterial::try_new(variable.query(), 0.0).unwrap();
         close(material.reference_density_kg_m3(), RHO, 1.0e-9);
-        // The caloric chart interpolates specific-volume metadata, so even its
-        // reference density need not equal the original density claim exactly.
-        assert!(
-            (variable
+        // A source-derived sensible caloric segment keeps the claim's affine
+        // rho(T) law (e838056254), so the chart's reference density is the
+        // claim's value at the reference temperature, as the material's is.
+        close(
+            variable
                 .caloric
                 .curve()
                 .state_at_specific_enthalpy(0.0)
                 .unwrap()
-                .bulk_density_kg_m3()
-                - RHO)
-                .abs()
-                > 0.01
+                .bulk_density_kg_m3(),
+            RHO,
+            1.0e-9,
         );
         let endpoints = path(&variable, true);
         let thermal = initial(&variable, &endpoints);
