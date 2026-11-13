@@ -228,20 +228,27 @@ fn str_003_helical_family() {
 
 // ------------------------------------------------------------------ str-004
 
-/// N = 0 section state at prescribed curvature (1D Newton on ε₀).
-fn balanced_moment(section: &mut fs_solid::Section, kappa: f64, commit: bool) -> f64 {
-    let mut e0 = 0.0f64;
+/// N = 0 section state at prescribed curvature (1D Newton on ε₀), started
+/// from the balanced ε₀ of the previous path point. The Mander cards refuse
+/// strain beyond their crushing bound eps_cu, so every iterate is a checked
+/// response. A cold start at ε₀ = 0 puts the outer cover fiber at
+/// 0.024 × 0.2375 = 0.0057 > 0.005 for the largest κ, a trial no balanced
+/// state of the path needs.
+fn balanced_moment(section: &mut fs_solid::Section, kappa: f64, e0: &mut f64) -> f64 {
     for _ in 0..80 {
-        let r = section.respond(e0, kappa);
+        let r = section
+            .try_respond(*e0, kappa)
+            .expect("balance iterate within the fiber laws' domains");
         if r.n.abs() < 1e-3 * (1.0 + r.tangent[0][0].abs() * 1e-6) {
             break;
         }
-        e0 -= 0.8 * r.n / r.tangent[0][0].max(1e3);
+        *e0 -= 0.8 * r.n / r.tangent[0][0].max(1e3);
     }
-    let m = section.respond(e0, kappa).m;
-    if commit {
-        section.commit(e0, kappa);
-    }
+    let m = section
+        .try_respond(*e0, kappa)
+        .expect("balanced state within the fiber laws' domains")
+        .m;
+    section.commit(*e0, kappa);
     m
 }
 
@@ -250,6 +257,7 @@ fn str_004_rc_hysteresis() {
     let run = || {
         let mut section = rc_section(0.5, 0.3, 20, 1e-3);
         let amplitudes = [0.006f64, 0.012, 0.024];
+        let mut e0 = 0.0f64;
         let mut dissipated = Vec::new();
         let mut peak_m = 0.0f64;
         let mut all_m = Vec::new();
@@ -269,7 +277,7 @@ fn str_004_rc_hysteresis() {
             let mut work = 0.0;
             let mut prev: Option<(f64, f64)> = None;
             for &kap in &path {
-                let m = balanced_moment(&mut section, kap, true);
+                let m = balanced_moment(&mut section, kap, &mut e0);
                 peak_m = peak_m.max(m.abs());
                 all_m.push(m);
                 if let Some((kp, mp)) = prev {
@@ -362,14 +370,16 @@ fn str_005_batched_consistency_and_throughput() {
 fn str_006_forcebased_pushover_and_resume() {
     let make = || rc_section(0.5, 0.3, 16, 1e-3);
     let mut elem = ForceBasedElement::new(3.0, &make);
-    // Pushover: ramp tip shear well past section yield.
+    // Pushover: ramp tip shear well past section yield, to 1.2 steel couples at
+    // the base. A ramp to 1.4 stops at the Mander card's refusal of cover strain
+    // past its crushing bound eps_cu = 0.005; the card does not extrapolate.
     let vy_est = 1e-3 * 450e6 * 0.4 / 3.0; // steel couple / length
     let mut rows = String::new();
     let mut curve: Vec<(f64, f64)> = Vec::new();
     let steps = 14i32;
     let mut checkpoint: Option<(ForceBasedElement, i32)> = None;
     for k in 1..=steps {
-        let v = 1.4 * vy_est * f64::from(k) / f64::from(steps);
+        let v = 1.2 * vy_est * f64::from(k) / f64::from(steps);
         let d = elem.tip_deflection_under_shear(v).expect("pushover step");
         curve.push((v, d));
         let (_, kap) = elem.base_committed();
@@ -411,7 +421,7 @@ fn str_006_forcebased_pushover_and_resume() {
     let (mut resumed, from) = checkpoint.expect("checkpoint stored");
     let mut resumed_match = true;
     for k in (from + 1)..=steps {
-        let v = 1.4 * vy_est * f64::from(k) / f64::from(steps);
+        let v = 1.2 * vy_est * f64::from(k) / f64::from(steps);
         let d = resumed.tip_deflection_under_shear(v).expect("resume step");
         #[allow(clippy::cast_sign_loss)]
         if d.to_bits() != curve[k as usize - 1].1.to_bits() {
