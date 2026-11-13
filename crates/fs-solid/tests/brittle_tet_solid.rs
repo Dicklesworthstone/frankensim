@@ -116,8 +116,15 @@ fn source_card(strength: f64, tag: &str, thermal: bool) -> MaterialCard {
                 } else {
                     PropertyValue::Scalar { value, dims }
                 },
+                // Typed like every query of this card: an untyped "T" axis
+                // cannot answer a query that types it in kelvin.
                 validity: if varied {
-                    ValidityDomain::unconstrained().with("T", 300.0, 600.0)
+                    ValidityDomain::unconstrained().with_quantity(
+                        "T",
+                        QuantitySpec::dimensional(Temperature::DIMS),
+                        300.0,
+                        600.0,
+                    )
                 } else {
                     ValidityDomain::unconstrained()
                 },

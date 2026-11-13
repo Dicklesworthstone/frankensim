@@ -16,7 +16,14 @@ fn density_curve_card(tag: &str) -> MaterialCard {
                 knots: vec![(300.0, 2000.0), (600.0, 1000.0)],
                 dims: Density::DIMS,
             },
-            validity: ValidityDomain::unconstrained().with("T", 300.0, 600.0),
+            // Typed like every query of this card: an untyped "T" axis cannot
+            // answer a query that types it in kelvin.
+            validity: ValidityDomain::unconstrained().with_quantity(
+                "T",
+                QuantitySpec::dimensional(Temperature::DIMS),
+                300.0,
+                600.0,
+            ),
             interpolation: InterpolationPolicy::LinearInside,
             uncertainty: UncertaintyModel::Unstated,
             observations: vec![],

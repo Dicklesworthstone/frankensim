@@ -426,7 +426,14 @@ fn temperature_continuation_keeps_rate_source_work_and_original_reference_mass()
                     knots: vec![(300.0, value), (600.0, factor * value)],
                     dims,
                 };
-                claim.validity = ValidityDomain::unconstrained().with("T", 300.0, 600.0);
+                // Typed like every query of this card: an untyped "T" axis
+                // cannot answer a query that types it in kelvin.
+                claim.validity = ValidityDomain::unconstrained().with_quantity(
+                    "T",
+                    QuantitySpec::dimensional(Temperature::DIMS),
+                    300.0,
+                    600.0,
+                );
                 claim.interpolation = InterpolationPolicy::LinearInside;
             }
             claims.insert_claim(claim).unwrap();
