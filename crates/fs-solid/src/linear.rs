@@ -11,7 +11,7 @@
 use crate::SolidError;
 use crate::mesh2::{Mesh2, Patch, quad_points, shapes_at};
 use fs_solver::checked_cg::{CheckedCgConfig, CheckedCgError, checked_cg};
-use fs_solver::op::CsrOp;
+use fs_solver::op::{CsrOp, LinearOp};
 use fs_sparse::precond::Precond;
 use fs_sparse::{Coo, Csr};
 use std::collections::BTreeMap;
@@ -193,7 +193,7 @@ impl LinearProblem<'_> {
             CheckedCgError::Interrupted(error) => error,
         })?;
         let rr = solved.report.rel_residual;
-        if !rr.is_finite() || rr > 1e-8 {
+        if !rr.is_finite() || (rr > 1e-8 && !within_rounding_floor(&op, &rhs, &solved.x, 1e-8)) {
             return Err(SolidError::SolveFailed {
                 iters: solved.report.iters,
                 rel_residual: rr,
@@ -401,6 +401,42 @@ impl LinearProblem<'_> {
         }
         (k, fl)
     }
+}
+
+/// The plain gate `||b - Ax|| <= tol ||b||` can ask a stiff, nearly incompressible
+/// system for less than the rounding error of computing `b - Ax`. On its refusal
+/// path a residual inside `tol ||b|| + gamma_{m+1} (||b|| + || |A||x| ||)`,
+/// `gamma_k = k u / (1 - k u)` (Higham, 2nd ed., section 3.5; the gate of
+/// fs-topopt's sdf3 solves since f834daca9d), cannot be told from the residual of
+/// an exact solution and is admitted. `m` and `|A||x|` are the operator's own
+/// (`LinearOp::apply_abs`); an operator that states neither keeps the plain gate.
+/// This is not a bound on the error of the displacement.
+fn within_rounding_floor(op: &impl LinearOp, rhs: &[f64], x: &[f64], tol: f64) -> bool {
+    let mut applied = vec![0.0; rhs.len()];
+    op.apply(x, &mut applied);
+    let mut absolute = vec![0.0; rhs.len()];
+    let Some(chain) = op.apply_abs(x, &mut absolute) else {
+        return false;
+    };
+    #[allow(clippy::cast_precision_loss)]
+    let unit = (chain as f64 + 1.0) * (f64::EPSILON / 2.0);
+    let scale = rhs
+        .iter()
+        .chain(&absolute)
+        .fold(0.0_f64, |s, v| s.max(v.abs()));
+    if unit >= 1.0 || !(scale > 0.0 && scale.is_finite()) {
+        return false;
+    }
+    let norm = |values: &mut dyn Iterator<Item = f64>| {
+        values
+            .map(|v| (v / scale) * (v / scale))
+            .sum::<f64>()
+            .sqrt()
+    };
+    let residual = norm(&mut rhs.iter().zip(&applied).map(|(b, a)| b - a));
+    let load = norm(&mut rhs.iter().copied());
+    let floor = unit / (1.0 - unit) * (load + norm(&mut absolute.iter().copied()));
+    residual.is_finite() && floor.is_finite() && residual <= tol * load + floor
 }
 
 // Engineering-shear column [epsilon_xx, epsilon_yy, gamma_xy].
