@@ -111,7 +111,7 @@ impl<M: DgMedium> DgDuct<M> {
             ),
             Some(ViscothermalMemory::Spatial(wall)) => {
                 wall.viscous_channels(m)
-                    .try_fold(0usize, |count, (_, drag, terms, _)| {
+                    .try_fold(0usize, |count, (_, _, drag, terms, _)| {
                         count.checked_add(terms.len() + usize::from(drag > 0.0))
                     })
             }
@@ -147,13 +147,14 @@ impl<M: DgMedium> DgDuct<M> {
                 }
             }
             Some(ViscothermalMemory::Spatial(wall)) => {
-                for (projection, drag, terms, memory_start) in wall.viscous_channels(m) {
+                for (field_start, projection, drag, terms, memory_start) in wall.viscous_channels(m)
+                {
                     if drag > 0.0 {
                         poll(cancelled)?;
                         let row = next_source_row(&mut rows, n);
                         let root = det::sqrt(drag);
                         for (i, weight) in projection.iter().enumerate() {
-                            row[m + i] = root * weight;
+                            row[field_start + i] = root * weight;
                         }
                     }
                     for (arm, term) in terms.iter().enumerate() {
@@ -161,7 +162,7 @@ impl<M: DgMedium> DgDuct<M> {
                         let row = next_source_row(&mut rows, n);
                         let root = det::sqrt(term.gain_per_s);
                         for (i, weight) in projection.iter().enumerate() {
-                            row[m + i] = root * weight;
+                            row[field_start + i] = root * weight;
                         }
                         row[memory_start + arm] = -det::sqrt(term.rate_per_s);
                     }
