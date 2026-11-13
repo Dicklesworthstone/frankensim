@@ -1687,9 +1687,23 @@ fn g1_native_events_preserve_an_open_crack_cycle_and_all_failure_boundaries() {
         assert!(jump.acceleration_change_l2_m_s2 > 0.0);
         assert_eq!(observed.states(), initial_cracks);
         assert_eq!(observed.observed_samples(), 1);
+        // The jump changes only the acceleration. The recovered stress field is
+        // the same; the report names the motion it was recovered from, whose
+        // acceleration is new.
+        let jumped_stress = observed.recover_response(cx).unwrap().stress;
+        assert_eq!(jumped_stress.elements(), initial_stress.elements());
         assert_eq!(
-            observed.recover_response(cx).unwrap().stress,
-            initial_stress
+            jumped_stress.nodal_internal_force_n(),
+            initial_stress.nodal_internal_force_n()
+        );
+        assert_eq!(
+            jumped_stress.elastic_energy_j().to_bits(),
+            initial_stress.elastic_energy_j().to_bits()
+        );
+        assert_eq!(jumped_stress.mesh_frame(), initial_stress.mesh_frame());
+        assert_ne!(
+            jumped_stress.solution_identity(),
+            initial_stress.solution_identity()
         );
         assert_eq!(observed.mechanics().state().time_s, 0.0);
         assert_eq!(observed.mechanics().state().step, 0);
@@ -1754,7 +1768,20 @@ fn g1_native_events_preserve_an_open_crack_cycle_and_all_failure_boundaries() {
                     observed.mechanics().state().total_energy_j,
                     before.total_energy_j
                 );
-                assert_eq!(observed.recover_response(cx).unwrap().stress, stress);
+                // The support jumps re-solve the acceleration for the original force;
+                // the recovered report names that motion. Its stress field is the one
+                // from before the jumps.
+                let jumped_stress = observed.recover_response(cx).unwrap().stress;
+                assert_eq!(jumped_stress.elements(), stress.elements());
+                assert_eq!(
+                    jumped_stress.nodal_internal_force_n(),
+                    stress.nodal_internal_force_n()
+                );
+                assert_eq!(
+                    jumped_stress.elastic_energy_j().to_bits(),
+                    stress.elastic_energy_j().to_bits()
+                );
+                assert_eq!(jumped_stress.mesh_frame(), stress.mesh_frame());
                 assert_eq!(observed.states(), initial_cracks);
                 assert_eq!(observed.observed_samples(), 9);
 
