@@ -426,17 +426,22 @@ fn ambiguous_support_work_duplicate_ids_and_late_cancellation_refuse_atomically(
         },
         ..c
     };
-    assert_eq!(
-        resolve(
-            &systems,
-            &[c, other],
-            FrictionalContactConfig::default(),
-            |_, map| fluid(RHO, 0, map),
-            || false
-        )
-        .unwrap_err()
-        .code,
-        "articulated-friction-support-work"
+    // Planes moving at different speeds under one redundant contact pair leave
+    // the total work undetermined. Since a9ccb190af the contact core proves or
+    // refuses that work itself, so its UnresolvedWork refuses before this
+    // adapter's own common-translation check.
+    let unresolved = resolve(
+        &systems,
+        &[c, other],
+        FrictionalContactConfig::default(),
+        |_, map| fluid(RHO, 0, map),
+        || false,
+    )
+    .unwrap_err();
+    assert_eq!(unresolved.code, "articulated-friction-law");
+    assert!(
+        unresolved.message.contains("UnresolvedWork"),
+        "{unresolved:?}"
     );
     assert_eq!(
         resolve(
