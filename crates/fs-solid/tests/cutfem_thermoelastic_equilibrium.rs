@@ -315,12 +315,18 @@ fn changed_temperature_equilibrates_on_both_spaces_and_reaches_original_vibratio
             let modes = CutPrestressModes3::new(model.source(),
                 accepted.prestress.as_ref().unwrap(), &accepted.mass, &occupancy,
                 Default::default(), &gate).unwrap();
+            // The two lowest eigenvalues are close (110.7 and 119.1; the
+            // largest is near 5.1e4). A single LOBPCG vector converges to the
+            // lowest at the rate that close pair sets, in 150 to 1250 ticks
+            // depending on its start; a block of both takes 100 to 200.
             let report = modes.lowest_modes(CutPrestressModeOptions3 {
-                modes: 1, max_ticks: 768, spectral_tolerance: 2e-7,
+                modes: 2, max_ticks: 768, spectral_tolerance: 2e-7,
                 residual_absolute_tolerance: 2e-7, ..Default::default()
             }).unwrap();
-            assert_eq!(report.modes.len(), 1);
-            assert!(report.modes[0].eigenvalue.is_finite() && report.modes[0].eigenvalue > 0.0);
+            assert_eq!(report.modes.len(), 2);
+            for mode in &report.modes {
+                assert!(mode.eigenvalue.is_finite() && mode.eigenvalue > 0.0);
+            }
         }
     }
 }
