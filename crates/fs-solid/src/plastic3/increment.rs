@@ -400,8 +400,15 @@ pub(crate) fn solve_with_inertia<O: IncrementOperator>(
                 let (mut f_trial, trial_scale) =
                     match operator.internal(&states, &trial, scale_rows, cx) {
                         Ok(value) => value,
+                        // A shorter trial can repair a Newton proposal that left
+                        // the law's domain. With every coordinate prescribed there
+                        // is no proposal: the trial is the targets, the endpoint of
+                        // the increment, and the accepted history is frozen until
+                        // commit, so a shorter lift can only be refused there again
+                        // or stall. Its refusal is the answer and propagates.
                         Err(error)
                             if error != SmallStrainTetError::Cancelled
+                                && !free.is_empty()
                                 && operator.recoverable_trial_error(&error) =>
                         {
                             alpha *= 0.5;
