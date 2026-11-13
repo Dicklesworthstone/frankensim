@@ -26,7 +26,7 @@ use fs_material::plastic::section::{
     LayeredPlaneStressSection, PlaneStressLayer, SectionBudget, ThicknessQuadrature,
 };
 use fs_material::plastic::source::{
-    HardeningPropertyBasis, ResolvedJ2Plasticity, resolve_j2_plasticity,
+    HardeningPropertyBasis, J2SourceError, ResolvedJ2Plasticity, resolve_j2_plasticity,
 };
 use fs_material::state_point::MaterialPropertySelection;
 use fs_plate::shell::{DRILLING_ALPHA, ShellMesh};
@@ -724,18 +724,19 @@ fn source_receipts_absolute_temperature_and_actual_layer_point_are_required() {
                 Err(ShellFatigueError::Invalid(_))
             ));
         }
+        // A "T" axis typed as a pressure is not an absolute temperature. The J2
+        // source admits only fixed external conditions, so it refuses this card
+        // before any shell section or gauge can bind it.
         let pressure = QuantitySpec::dimensional(Pressure::DIMS);
-        let mislabeled = material(&card(0, pressure), pressure);
-        let wrong_section = self::section(mislabeled.clone());
-        let wrong_p = problem(&mesh, &wrong_section, &fixed, &[], &[0.0005]);
         assert!(matches!(
-            ShellFatiguePath::new(
-                &wrong_p,
-                vec![gauge(&mislabeled, 0, StrainLifeMeanStress::Uncorrected)],
-                config(),
-                cx
+            resolve_j2_plasticity(
+                &card(0, pressure),
+                &point(pressure),
+                MaterialPropertySelection::SingleClaimOnly,
+                HardeningPropertyBasis::MixedPlasticStrainModuli,
+                0.05,
             ),
-            Err(ShellFatigueError::SourceMismatch { .. })
+            Err(J2SourceError::Invalid(reason)) if reason.contains("fixed external conditions")
         ));
     });
 }
