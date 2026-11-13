@@ -393,10 +393,12 @@ fn capacity_floor_covers_separate_histories_and_original_source_admission() {
         ExpandingCreepSource::new(&card, mechanical(&card), &reference(&card), || true),
         Err(CreepSourceError::Cancelled)
     ));
+    // A continuous piecewise-affine expansion coefficient (here kinked at 400 K) is admitted
+    // since 273f716cd3 (tabulated CTE through the shared thermoelastic potential).
     let kinked = source_card(SLOPE, true);
     assert!(
         ExpandingCreepSource::new(&kinked, mechanical(&kinked), &reference(&kinked), || false)
-            .is_err()
+            .is_ok()
     );
 }
 
