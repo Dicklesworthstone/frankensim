@@ -3440,7 +3440,7 @@ conformance check of the load-line tier with an end row passes at
 54 points and answers `Shortened` at 6 more, the
 receipt booking the work of the two ends as heat or as defect.
 
-Against the hand-written module: `crates/fs-couple/tests/tribothermal/
+Against the hand-written module: `crates/fs-couple/tests/legacy/tribothermal/
 dynamics/collinear/graph.rs` declares fs-couple's collinear stop and
 reversal from this component, two masses and two enthalpy bodies, and
 agrees with the module's own report of three of its cases to 1.3e-11, with

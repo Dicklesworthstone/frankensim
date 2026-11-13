@@ -1103,7 +1103,7 @@ charges must transfer their momentum to the mechanical material. This term
 does not supply electrode/sheet/polarization/interface forces, charge transport,
 electrostriction or moving-field feedback; it must not overlap an enclosing
 Maxwell load on the same body. The four direct integration regressions in
-`fs-couple/tests/electrostatic_loads.rs` cover SI resultant/torque/virtual work,
+`fs-couple/tests/legacy/electrostatic_loads.rs` cover SI resultant/torque/virtual work,
 an actual supported solid solve, selection and geometry/cancellation refusals.
 They are included but remain unexecuted under the same build resource limit.
 

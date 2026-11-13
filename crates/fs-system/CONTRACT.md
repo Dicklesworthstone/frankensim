@@ -1309,7 +1309,7 @@ twenty-three in the implicit driver; none was planted for the end-of-step
 option or for the contact carried outside.
 
 Against the hand-written coupling,
-`crates/fs-couple/tests/rigid_damping_heat/graph.rs` (run with
+`crates/fs-couple/tests/legacy/rigid_damping_heat/graph.rs` (run with
 `cargo test -p fs-couple --test rigid_damping_heat`): the same graph, built
 from that module's own test fixtures (four bodies, two connectors, both
 routed to both cells, nonlinear calorics, cells on a bed), against
@@ -1372,7 +1372,7 @@ complete elastic memory are one state, and the memory is stored energy). The
 list of what it shows is in `crates/fs-mbd/CONTRACT.md`.
 
 Against the hand-written Maxwell-memory coupling,
-`crates/fs-couple/tests/rigid_damping_heat/relaxation/graph.rs`: the module's
+`crates/fs-couple/tests/legacy/rigid_damping_heat/relaxation/graph.rs`: the module's
 own pair (Kelvin viscosity 0.4, one Maxwell branch preloaded to 0.6 sqrt(J),
 closing at 2 m/s, no actuator), its connector's heat routed 70 % and 20 % to
 two timeline cells and the rest to a sink.
@@ -1391,7 +1391,7 @@ Component's `drive0` port; the module's signed actuator work is then the
 energy that entered through that boundary, to 1e-11 of the dissipated energy.
 
 Against the hand-written driven couplings,
-`crates/fs-couple/tests/rigid_damping_heat/driven_graph.rs`: the same
+`crates/fs-couple/tests/legacy/rigid_damping_heat/driven_graph.rs`: the same
 Component with no Maxwell branch and an actuator on every connector.
 - `driven::network::advance_candidate` and `advance_implicit_candidate`
   (backward Euler and SDIRK2): the module's cycle of three bodies and three
@@ -2239,11 +2239,11 @@ material, a surface card, a temperature or a slip history stays in `fs-tribo`.
   again (the first and second); a request on both sides ignored (the
   third); the other side's column divided by the forward step (the third).
 - Not exercised by a test here: a neighbour that is not linear (the line is
-  then its slope at the step's start). `crates/fs-couple/tests/tribothermal/
+  then its slope at the step's start). `crates/fs-couple/tests/legacy/tribothermal/
   dynamics/collinear/graph.rs` has a friction component beside springs
   with a cubic term.
 
-The first product on the tier, `crates/fs-couple/tests/tribothermal/
+The first product on the tier, `crates/fs-couple/tests/legacy/tribothermal/
 dynamics/collinear/graph.rs` (run with `cargo test -p fs-couple --test
 tribothermal collinear::graph`): the hand-written
 `fs_couple::tribothermal::dynamics::collinear`, which advances two

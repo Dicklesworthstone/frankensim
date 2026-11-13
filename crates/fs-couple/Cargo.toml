@@ -145,105 +145,521 @@ nonlinear-brass = ["dep:fs-gas", "fs-duct/nonlinear-euler"]
 
 [[example]]
 name = "rod_motion"
+path = "examples/legacy/rod_motion.rs"
 required-features = ["rod-dynamics"]
 
 [[example]]
 name = "cavitation"
+path = "examples/legacy/cavitation.rs"
 required-features = ["cavitation"]
 
 [[example]]
 name = "caloric_cavitation"
+path = "examples/legacy/caloric_cavitation.rs"
 required-features = ["caloric-cavitation"]
 
 [[example]]
 name = "cavitating_reservoir"
+path = "examples/legacy/cavitating_reservoir.rs"
 required-features = ["cavitation"]
 
 [[example]]
 name = "cavitating_water_piston"
+path = "examples/legacy/cavitating_water_piston.rs"
 required-features = ["cavitation"]
 
 [[example]]
 name = "vapor_cavitation"
+path = "examples/legacy/vapor_cavitation.rs"
 required-features = ["cavitation"]
 
 [[example]]
 name = "conducting_vapor_cavitation"
+path = "examples/legacy/conducting_vapor_cavitation.rs"
 required-features = ["cavitation"]
 
 [[example]]
 name = "gas_vapor_cavitation"
+path = "examples/legacy/gas_vapor_cavitation.rs"
 required-features = ["caloric-cavitation"]
 
 [[test]]
 name = "cavitation"
+path = "tests/legacy/cavitation.rs"
 required-features = ["cavitation"]
 
 [[test]]
 name = "caloric_bubble"
+path = "tests/legacy/caloric_bubble.rs"
 required-features = ["caloric-cavitation"]
 
 [[test]]
 name = "vapor_bubble"
+path = "tests/legacy/vapor_bubble.rs"
 required-features = ["cavitation"]
 
 [[test]]
 name = "conducting_vapor_bubble"
+path = "tests/legacy/conducting_vapor_bubble.rs"
 required-features = ["cavitation"]
 
 [[test]]
 name = "stokes_motion"
+path = "tests/legacy/stokes_motion.rs"
 required-features = ["experimental-stokes-motion"]
 
 [[test]]
 name = "stokes_motion_heat"
+path = "tests/legacy/stokes_motion_heat.rs"
 required-features = ["experimental-stokes-motion"]
 
 [[test]]
 name = "superfluid_heat"
+path = "tests/legacy/superfluid_heat.rs"
 required-features = ["superfluid"]
 
 [[test]]
 name = "superfluid_counterflow"
+path = "tests/legacy/superfluid_counterflow.rs"
 required-features = ["superfluid"]
 
 [[test]]
 name = "superfluid_piston"
+path = "tests/legacy/superfluid_piston.rs"
 required-features = ["superfluid"]
 
 [[example]]
 name = "superfluid_piston"
+path = "examples/legacy/superfluid_piston.rs"
 required-features = ["superfluid"]
 
 [[test]]
 name = "superfluid_piston_pair"
+path = "tests/legacy/superfluid_piston_pair.rs"
 required-features = ["superfluid"]
 
 [[example]]
 name = "superfluid_piston_pair"
+path = "examples/legacy/superfluid_piston_pair.rs"
 required-features = ["superfluid"]
 
 [[example]]
 name = "superfluid_heater"
+path = "examples/legacy/superfluid_heater.rs"
 required-features = ["superfluid"]
 
 [[test]]
 name = "superfluid_counterflow_pair"
+path = "tests/legacy/superfluid_counterflow_pair.rs"
 required-features = ["superfluid"]
 
 [[example]]
 name = "superfluid_heat_link"
+path = "examples/legacy/superfluid_heat_link.rs"
 required-features = ["superfluid"]
 
 [[test]]
 name = "superfluid_transport_dissipation"
+path = "tests/legacy/superfluid_transport_dissipation.rs"
 required-features = ["superfluid"]
 
 [[test]]
 name = "superfluid_caloric"
+path = "tests/legacy/superfluid_caloric.rs"
 required-features = ["superfluid"]
 
 
 [[test]]
 name = "superfluid_connection"
+path = "tests/legacy/superfluid_connection.rs"
 required-features = ["superfluid"]
+
+# Regression references (src/legacy/README.md): these targets live under tests/legacy/ and
+# examples/legacy/; their names are unchanged.
+[[test]]
+name = "bem_pole_response"
+path = "tests/legacy/bem_pole_response.rs"
+
+[[test]]
+name = "body_prestress"
+path = "tests/legacy/body_prestress.rs"
+
+[[test]]
+name = "bridge_electrical_contacts"
+path = "tests/legacy/bridge_electrical_contacts.rs"
+
+[[test]]
+name = "bridge_electrical_growth"
+path = "tests/legacy/bridge_electrical_growth.rs"
+
+[[test]]
+name = "bridge_electrothermal"
+path = "tests/legacy/bridge_electrothermal.rs"
+
+[[test]]
+name = "bridge_enthalpy"
+path = "tests/legacy/bridge_enthalpy.rs"
+
+[[test]]
+name = "bridge_enthalpy_growth"
+path = "tests/legacy/bridge_enthalpy_growth.rs"
+
+[[test]]
+name = "bridge_heat_growth"
+path = "tests/legacy/bridge_heat_growth.rs"
+
+[[test]]
+name = "bridge_heat_network"
+path = "tests/legacy/bridge_heat_network.rs"
+
+[[test]]
+name = "bubble_compact_source"
+path = "tests/legacy/bubble_compact_source.rs"
+
+[[test]]
+name = "cavitation_cluster"
+path = "tests/legacy/cavitation_cluster.rs"
+
+[[test]]
+name = "cut_thermoelastic"
+path = "tests/legacy/cut_thermoelastic.rs"
+
+[[test]]
+name = "elastic_reflection"
+path = "tests/legacy/elastic_reflection.rs"
+
+[[test]]
+name = "electrostatic_loads"
+path = "tests/legacy/electrostatic_loads.rs"
+
+[[test]]
+name = "electrostatic_motion"
+path = "tests/legacy/electrostatic_motion.rs"
+
+[[test]]
+name = "equilibrium_rocket"
+path = "tests/legacy/equilibrium_rocket.rs"
+
+[[test]]
+name = "evaporating_liquid_gas"
+path = "tests/legacy/evaporating_liquid_gas.rs"
+
+[[test]]
+name = "frame_enthalpy"
+path = "tests/legacy/frame_enthalpy.rs"
+
+[[test]]
+name = "frame_laminate_enthalpy"
+path = "tests/legacy/frame_laminate_enthalpy.rs"
+
+[[test]]
+name = "free_surface_wall"
+path = "tests/legacy/free_surface_wall.rs"
+
+[[test]]
+name = "incandescent"
+path = "tests/legacy/incandescent.rs"
+
+[[test]]
+name = "interference_film_heating"
+path = "tests/legacy/interference_film_heating.rs"
+
+[[test]]
+name = "ionized_wave_heating"
+path = "tests/legacy/ionized_wave_heating.rs"
+
+[[test]]
+name = "laminate_harmonic_heat"
+path = "tests/legacy/laminate_harmonic_heat.rs"
+
+[[test]]
+name = "laminate_thermal"
+path = "tests/legacy/laminate_thermal.rs"
+
+[[test]]
+name = "laminate_thermal_dynamic"
+path = "tests/legacy/laminate_thermal_dynamic.rs"
+
+[[test]]
+name = "laminate_thermal_dynamic_softening"
+path = "tests/legacy/laminate_thermal_dynamic_softening.rs"
+
+[[test]]
+name = "laminate_thermoelastic"
+path = "tests/legacy/laminate_thermoelastic.rs"
+
+[[test]]
+name = "laminate_thermoelastic_softening"
+path = "tests/legacy/laminate_thermoelastic_softening.rs"
+
+[[test]]
+name = "layered_wave_heating"
+path = "tests/legacy/layered_wave_heating.rs"
+
+[[test]]
+name = "layered_wave_photoelectric"
+path = "tests/legacy/layered_wave_photoelectric.rs"
+
+[[test]]
+name = "liquid_transfer"
+path = "tests/legacy/liquid_transfer.rs"
+
+[[test]]
+name = "material_immersed"
+path = "tests/legacy/material_immersed.rs"
+
+[[test]]
+name = "material_immersed_ellipsoid"
+path = "tests/legacy/material_immersed_ellipsoid.rs"
+
+[[test]]
+name = "material_immersed_settling"
+path = "tests/legacy/material_immersed_settling.rs"
+
+[[test]]
+name = "membrane_thermal"
+path = "tests/legacy/membrane_thermal.rs"
+
+[[test]]
+name = "moisture"
+path = "tests/legacy/moisture.rs"
+
+[[test]]
+name = "molecular_heating"
+path = "tests/legacy/molecular_heating.rs"
+
+[[test]]
+name = "molecular_shear"
+path = "tests/legacy/molecular_shear.rs"
+
+[[test]]
+name = "moving_gas_boundary"
+path = "tests/legacy/moving_gas_boundary.rs"
+
+[[test]]
+name = "phs_feedback_harmonics"
+path = "tests/legacy/phs_feedback_harmonics.rs"
+
+[[test]]
+name = "phs_forced_branch"
+path = "tests/legacy/phs_forced_branch.rs"
+
+[[test]]
+name = "phs_forced_feedback_harmonics"
+path = "tests/legacy/phs_forced_feedback_harmonics.rs"
+
+[[test]]
+name = "phs_forced_frequency"
+path = "tests/legacy/phs_forced_frequency.rs"
+
+[[test]]
+name = "phs_forced_parameter"
+path = "tests/legacy/phs_forced_parameter.rs"
+
+[[test]]
+name = "phs_forced_resonance"
+path = "tests/legacy/phs_forced_resonance.rs"
+
+[[test]]
+name = "phs_harmonic_impedance"
+path = "tests/legacy/phs_harmonic_impedance.rs"
+
+[[test]]
+name = "phs_impedance_sideband"
+path = "tests/legacy/phs_impedance_sideband.rs"
+
+[[test]]
+name = "phs_power_resonance"
+path = "tests/legacy/phs_power_resonance.rs"
+
+[[test]]
+name = "phs_rational_boundary"
+path = "tests/legacy/phs_rational_boundary.rs"
+
+[[test]]
+name = "phs_rational_sideband"
+path = "tests/legacy/phs_rational_sideband.rs"
+
+[[test]]
+name = "phs_sideband"
+path = "tests/legacy/phs_sideband.rs"
+
+[[test]]
+name = "phs_variational_feedback"
+path = "tests/legacy/phs_variational_feedback.rs"
+
+[[test]]
+name = "phs_variational_shooting"
+path = "tests/legacy/phs_variational_shooting.rs"
+
+[[test]]
+name = "planar_induction"
+path = "tests/legacy/planar_induction.rs"
+
+[[test]]
+name = "plate_impact"
+path = "tests/legacy/plate_impact.rs"
+
+[[test]]
+name = "plate_sustained"
+path = "tests/legacy/plate_sustained.rs"
+
+[[test]]
+name = "porous_coherent_heating"
+path = "tests/legacy/porous_coherent_heating.rs"
+
+[[test]]
+name = "porous_feedback_covariance"
+path = "tests/legacy/porous_feedback_covariance.rs"
+
+[[test]]
+name = "porous_feedback_spectrum"
+path = "tests/legacy/porous_feedback_spectrum.rs"
+
+[[test]]
+name = "porous_heating"
+path = "tests/legacy/porous_heating.rs"
+
+[[test]]
+name = "porous_heating_feedback"
+path = "tests/legacy/porous_heating_feedback.rs"
+
+[[test]]
+name = "porous_momentum"
+path = "tests/legacy/porous_momentum.rs"
+
+[[test]]
+name = "porous_oblique_heating"
+path = "tests/legacy/porous_oblique_heating.rs"
+
+[[test]]
+name = "porous_rotor"
+path = "tests/legacy/porous_rotor.rs"
+
+[[test]]
+name = "port_spectrum"
+path = "tests/legacy/port_spectrum.rs"
+
+[[test]]
+name = "preloaded_harmonics"
+path = "tests/legacy/preloaded_harmonics.rs"
+
+[[test]]
+name = "reactive_liquid_gas"
+path = "tests/legacy/reactive_liquid_gas.rs"
+
+[[test]]
+name = "rigid_caloric_contact"
+path = "tests/legacy/rigid_caloric_contact.rs"
+
+[[test]]
+name = "rigid_caloric_network"
+path = "tests/legacy/rigid_caloric_network.rs"
+
+[[test]]
+name = "rigid_damping_heat"
+path = "tests/legacy/rigid_damping_heat.rs"
+
+[[test]]
+name = "rigid_liquid_release"
+path = "tests/legacy/rigid_liquid_release.rs"
+
+[[test]]
+name = "rod_axial_relaxation"
+path = "tests/legacy/rod_axial_relaxation.rs"
+
+[[test]]
+name = "rod_motion"
+path = "tests/legacy/rod_motion.rs"
+
+[[test]]
+name = "rod_motion_fatigue"
+path = "tests/legacy/rod_motion_fatigue.rs"
+
+[[test]]
+name = "scenario_magnetic"
+path = "tests/legacy/scenario_magnetic.rs"
+
+[[test]]
+name = "scenario_open_boundary"
+path = "tests/legacy/scenario_open_boundary.rs"
+
+[[test]]
+name = "scenario_pressure"
+path = "tests/legacy/scenario_pressure.rs"
+
+[[test]]
+name = "scenario_sensor"
+path = "tests/legacy/scenario_sensor.rs"
+
+[[test]]
+name = "scenario_velocity"
+path = "tests/legacy/scenario_velocity.rs"
+
+[[test]]
+name = "scenario_wall_velocity"
+path = "tests/legacy/scenario_wall_velocity.rs"
+
+[[test]]
+name = "solid_plastic_enthalpy"
+path = "tests/legacy/solid_plastic_enthalpy.rs"
+
+[[test]]
+name = "solid_rational"
+path = "tests/legacy/solid_rational.rs"
+
+[[test]]
+name = "spatial_induction_vibration"
+path = "tests/legacy/spatial_induction_vibration.rs"
+
+[[test]]
+name = "strip_enthalpy"
+path = "tests/legacy/strip_enthalpy.rs"
+
+[[test]]
+name = "strip_enthalpy_growth"
+path = "tests/legacy/strip_enthalpy_growth.rs"
+
+[[test]]
+name = "strip_material_transport"
+path = "tests/legacy/strip_material_transport.rs"
+
+[[test]]
+name = "sublimating_solid_gas"
+path = "tests/legacy/sublimating_solid_gas.rs"
+
+[[test]]
+name = "thermovisco_dynamics"
+path = "tests/legacy/thermovisco_dynamics.rs"
+
+[[test]]
+name = "tribothermal"
+path = "tests/legacy/tribothermal.rs"
+
+[[test]]
+name = "visco_membrane_thermal"
+path = "tests/legacy/visco_membrane_thermal.rs"
+
+[[example]]
+name = "atmospheric_rocket"
+path = "examples/legacy/atmospheric_rocket.rs"
+
+[[example]]
+name = "coherent_porous_heating"
+path = "examples/legacy/coherent_porous_heating.rs"
+
+[[example]]
+name = "effusion_feed"
+path = "examples/legacy/effusion_feed.rs"
+
+[[example]]
+name = "effusion_recoil"
+path = "examples/legacy/effusion_recoil.rs"
+
+[[example]]
+name = "molecular_exchange"
+path = "examples/legacy/molecular_exchange.rs"
+
+[[example]]
+name = "rocket_flight"
+path = "examples/legacy/rocket_flight.rs"

@@ -97,13 +97,17 @@ pub mod radioactive {
 
 pub mod acoustic_realize;
 /// Original local support mechanics coupled to coherent elastic-wave reflection.
+#[path = "legacy/elastic_reflection/mod.rs"]
 pub mod elastic_reflection;
 /// Compact outlet radiation reaction through the original impedance-wall field.
+#[path = "legacy/compact_wall_radiation/mod.rs"]
 pub mod compact_wall_radiation;
 pub mod air_path;
 /// Original admitted frequency-dependent loads on accepted shell assemblies.
+#[path = "legacy/assembly_harmonic/mod.rs"]
 pub mod assembly_harmonic;
 /// Joint native shear-shell equilibrium, signed membrane prestress and modes.
+#[path = "legacy/body_assembly.rs"]
 pub mod body_assembly;
 /// Original-coordinate tensor-Prony shell loading and coherent acoustic receivers.
 pub mod tensor_shell_radiation;
@@ -111,6 +115,7 @@ pub mod bakeoff;
 /// Source-owned shell resonances retaining the original complex BEM pressure equations.
 pub mod bem_loaded_modes;
 /// Prepared force participation and analytic gas/material pole derivatives.
+#[path = "legacy/bem_pole_response.rs"]
 pub mod bem_pole_response;
 pub mod bernoulli_aperture;
 pub mod bowed_string;
@@ -119,9 +124,11 @@ pub mod brass_loop;
 pub mod brass_sequence;
 pub mod broadband_radiation;
 /// Bulk acoustic viscous heat on original fixed-volume internal-energy cells.
+#[path = "legacy/bulk_viscous_heating.rs"]
 pub mod bulk_viscous_heating;
 pub mod cavity_phs;
 /// Shared material-bound cavitating films and opt-in bubble acoustic histories.
+#[path = "legacy/cavitation/mod.rs"]
 pub mod cavitation;
 /// Shared Helmholtz storage and neck flow in the reciprocal modal network.
 pub mod cavity_modal;
@@ -133,12 +140,14 @@ pub mod constitutive_graph;
 /// Full opening/shear path work coupled to the actual mechanical compliance.
 pub mod cohesive_contact;
 /// Original hereditary material history coupled to inertia and finite self-heating.
+#[path = "legacy/thermovisco_dynamics.rs"]
 pub mod thermovisco_dynamics;
 pub mod description;
 /// Shared transactional inlet load on the original material DG propagator.
 pub mod dg_port;
 pub mod driving_point;
 /// Solved electrostatic free-volume-charge loads on the native solid mesh.
+#[path = "legacy/electrostatic/mod.rs"]
 pub mod electrostatic;
 /// Material-derived axial and transverse continuum of a tensioned fiber ribbon.
 pub mod fiber_ribbon;
@@ -146,6 +155,7 @@ pub mod fiber_ribbon;
 pub mod finite_gas_thermal;
 /// Closed-channel superfluid dissipation on original finite thermal cells.
 #[cfg(feature = "superfluid")]
+#[path = "legacy/superfluid/mod.rs"]
 pub mod superfluid;
 pub mod finite_solid;
 /// Native rigid impacts on finite plastic or viscoelastic material histories.
@@ -153,8 +163,10 @@ pub mod inelastic_impact;
 /// Original signed frame modes and power-conjugate physical vibration ports.
 pub mod frame_vibration;
 /// Retained nonlinear frame fibers with source-bound finite caloric feedback.
+#[path = "legacy/frame_enthalpy/mod.rs"]
 pub mod frame_enthalpy;
 /// Finite-inertia guided walls coupled to native free-surface liquid momentum.
+#[path = "legacy/free_surface_wall/mod.rs"]
 pub mod free_surface_wall;
 pub mod flue_loop;
 pub mod gesture_path;
@@ -164,39 +176,52 @@ pub mod iqn_ils;
 /// Characteristic lines whose taps move between frozen shapes in one render, with the outgoing history carried.
 pub mod keyframe_line;
 /// Source-bound incandescent heating on the original finite enthalpy owner.
+#[path = "legacy/incandescent/mod.rs"]
 pub mod incandescent;
 /// Shared native impulse and work stage for finite-inertia induction rotors.
 pub mod induction_rotor;
 /// Reciprocal three-dimensional eddy-current and finite rotor-inertia feedback.
 pub mod spatial_induction;
 /// Source-bound mean and twice-frequency induction forcing of native linear solids.
+#[path = "legacy/spatial_induction_vibration.rs"]
 pub mod spatial_induction_vibration;
 /// Implicit guided-body motion driven by original material Stokes reactions.
 #[cfg(any(feature = "experimental-stokes-motion", feature = "laminar-enthalpy"))]
+#[path = "legacy/stokes_motion/mod.rs"]
 pub mod stokes_motion;
 /// Original BDM laminar momentum and source rheology on native finite enthalpy cells.
 #[cfg(feature = "laminar-enthalpy")]
+#[path = "legacy/laminar_enthalpy/mod.rs"]
 pub mod laminar_enthalpy;
 /// Declared gas chemistry, finite atmospheric heat and native moving liquid.
+#[path = "legacy/liquid_gas/mod.rs"]
 pub mod liquid_gas;
 /// Exact reciprocal drag sources on native liquid and finite rigid momenta.
+#[path = "legacy/liquid_momentum/mod.rs"]
 pub mod liquid_momentum;
 /// Conservative matter and momentum transfer between original finite liquid owners.
+#[path = "legacy/liquid_transfer/mod.rs"]
 pub mod liquid_transfer;
 /// Reciprocal molecular streams on original finite gas inventories and bulk momenta.
+#[path = "legacy/molecular_exchange/mod.rs"]
 pub mod molecular_exchange;
 /// Molecular acoustic volume absorption on original finite gas internal energy.
+#[path = "legacy/molecular_heating/mod.rs"]
 pub mod molecular_heating;
 /// Finite gas and rigid-wall molecular shear with original caloric feedback.
+#[path = "legacy/molecular_shear.rs"]
 pub mod molecular_shear;
 pub mod material_assembly;
 /// Nonlinear membrane material loss deposited in original source-bound caloric cells.
+#[path = "legacy/membrane_thermal/mod.rs"]
 pub mod membrane_thermal;
 /// Moving rigid damper networks and their actual heat on the finite thermal timeline.
+#[path = "legacy/rigid_damping_heat/mod.rs"]
 pub mod rigid_damping_heat;
 /// Material-resolved branch heat and finite charge/flux storage on Kirchhoff circuits.
 pub mod material_circuit;
 /// One fluid source for native immersed motion, sourced additional inertia and gap films.
+#[path = "legacy/material_immersed/mod.rs"]
 pub mod material_immersed;
 /// Pack-backed material records and fixture labels for file-driven render inputs.
 pub mod material_source;
@@ -204,6 +229,7 @@ pub mod material_source;
 pub mod modal_mouth;
 pub mod mm_line;
 /// Finite material moisture transport and its native mechanical consumers.
+#[path = "legacy/moisture/mod.rs"]
 pub mod moisture;
 /// Time-domain modal realization. The exact zero-order-hold core is owned by `fs_modal::time` (IRP M1.1-W1a, owner decision OD10) and
 /// every former name of this path still resolves. The opt-in broadband observer stays here: it needs `fs-vfit`, `fs-phs` and the
@@ -216,6 +242,7 @@ pub mod modal_acoustic_time {
 /// Original resolved compressible flow coupled to the original causal DG bore.
 pub mod nsf_dg;
 /// Resolved fluid wall heat coupled to original finite spatial solid storage.
+#[path = "legacy/nsf_thermal/mod.rs"]
 pub mod nsf_thermal;
 pub mod pcm_wav;
 pub mod piano_vertical;
@@ -223,60 +250,79 @@ pub mod pickup;
 /// Source-bound reciprocal longitudinal piezoelectric sensors and actuators.
 pub mod piezoelectric;
 /// Native field/finite-inertia feedback for invariant circular planar conductors.
+#[path = "legacy/planar_induction.rs"]
 pub mod planar_induction;
 /// Finite-amplitude periodic regimes of complete nonlinear pHS ODEs via fs-orbit.
+#[path = "legacy/phs_orbit/mod.rs"]
 pub mod phs_orbit;
 /// Actual heat, port-work and wave-flux resonance of complete pHS models.
+#[path = "legacy/phs_power_resonance/mod.rs"]
 pub mod phs_power_resonance;
 /// Material-driven biased magnetostrictive coil/core motion on the shared stepper.
 pub mod magnetostrictive;
 /// Full source-derived viscous tensors on the shared DKT and modal runtime.
 pub mod plate_viscosity;
 /// Reciprocal point impacts between a spatial plate and a finite rigid body.
+#[path = "legacy/plate_impact.rs"]
 pub mod plate_impact;
 /// Sustained normal forces on two original linear plate trajectories.
+#[path = "legacy/plate_sustained.rs"]
 pub mod plate_sustained;
 /// Accepted-step port schemas and physical accounting adapters.
 pub mod port_adoption;
 pub mod reed_bore;
 pub mod render;
 /// Finite propellant storage and nozzle impulse on the original variable-mass vehicle.
+#[path = "legacy/rocket_blowdown/mod.rs"]
 pub mod rocket_blowdown;
 /// Typed scenario potentials and normal currents on native material fields.
+#[path = "legacy/scenario_electric.rs"]
 pub mod scenario_electric;
 /// Canonical magnetic histories on the original material field owners.
+#[path = "legacy/scenario_magnetic/mod.rs"]
 pub mod scenario_magnetic;
 /// Typed SI pressure histories on the original open-boundary owners.
+#[path = "legacy/scenario_pressure/mod.rs"]
 pub mod scenario_pressure;
 /// Atomic mixed velocity-inlet and pressure-outlet control updates.
+#[path = "legacy/scenario_open_boundary/mod.rs"]
 pub mod scenario_open_boundary;
 /// Scenario instrument response on the original accepted finite-cell heat path.
+#[path = "legacy/scenario_sensor.rs"]
 pub mod scenario_sensor;
+#[path = "legacy/scenario_velocity/mod.rs"]
 pub mod scenario_velocity;
+#[path = "legacy/scenario_wall_velocity.rs"]
 pub mod scenario_wall_velocity;
 pub mod selector;
 /// Independent characterized sheet bending and inertia on the original DKT owner.
 pub mod sheet_plate;
 /// Retained plastic shell histories with reciprocal source-bound layer heat.
+#[path = "legacy/shell_plastic_enthalpy/mod.rs"]
 pub mod shell_plastic_enthalpy;
 /// Accepted Euler wall impulses on the original structural pressure surfaces.
 #[cfg(feature = "experimental-shock-loading")]
+#[path = "legacy/shock_loading/mod.rs"]
 pub mod shock_loading;
 pub mod speaker;
 /// Shared enthalpy and material fields driving native three-dimensional solid equilibrium.
 pub mod solid_enthalpy;
 /// Reciprocal native CutFEM elasticity and the original finite caloric timeline.
+#[path = "legacy/cut_thermoelastic/mod.rs"]
 pub mod cut_thermoelastic;
 /// Finite sublimation, deposition and reciprocal molecular recoil on original caloric stores.
+#[path = "legacy/solid_gas/mod.rs"]
 pub mod solid_gas;
 /// Shared conservative gravity and its analytic derivatives on deforming solids.
 pub mod solid_gravity;
 /// Original admitted rational radiation on the complete hereditary solid equations.
+#[path = "legacy/solid_rational/mod.rs"]
 pub mod solid_rational;
 /// Original stationary operating points on the shared Newton--Krylov owner.
 pub mod stationary_equilibrium;
 pub mod stribeck_friction;
 pub mod string_specimen;
+#[path = "legacy/strip_enthalpy/mod.rs"]
 pub mod strip_enthalpy;
 /// Full tensor material memory coupled to structural inertia and force ports.
 pub mod tensor_material;
@@ -284,21 +330,27 @@ pub mod thin_plate;
 /// Material-bound curved shear shells with shared mechanical and pressure ports.
 pub mod shear_shell;
 /// Source-resolved layer temperatures driving compatible native shell deformation.
+#[path = "legacy/laminate_thermal/mod.rs"]
 pub mod laminate_thermal;
 /// Coherent finite-film absorption deposited once into original thermal cells.
 #[cfg(feature = "layered-wave-heating")]
+#[path = "legacy/layered_wave_heating/mod.rs"]
 pub mod layered_wave_heating;
 /// Original circular-wave absorption evolving source-bound electron/heavy gas energy.
 #[cfg(feature = "ionized-wave-heating")]
+#[path = "legacy/ionized_wave_heating/mod.rs"]
 pub mod ionized_wave_heating;
 /// Analytic porous acoustic absorption deposited once into existing thermal cells.
+#[path = "legacy/porous_heating/mod.rs"]
 pub mod porous_heating;
 /// Finite dry-skeleton recoil under native periodic Darcy--Forchheimer resistance.
+#[path = "legacy/porous_momentum.rs"]
 pub mod porous_momentum;
 pub mod tract;
 /// Seeded turbulence noise: shared generator and filter, and the voice's opt-in glottal aspiration source.
 pub mod turbulence_noise;
 /// Source-bound dry sliding work and finite-body temperature feedback.
+#[path = "legacy/tribothermal/mod.rs"]
 pub mod tribothermal;
 /// Physical friction heat through a common interface in the existing enthalpy network.
 pub mod friction_heat;
@@ -320,4 +372,5 @@ pub mod prescribed_gas;
 
 /// Source-bound large-rotation rod dynamics on the existing mechanical/time owners.
 #[cfg(feature = "rod-dynamics")]
+#[path = "legacy/rod_motion/mod.rs"]
 pub mod rod_motion;

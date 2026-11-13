@@ -108,7 +108,7 @@ generated at the heat ports' temperatures, not the damping ones; the network
 without the law moves differently; a temperature outside the law and signals
 of 0, -5, infinity and NaN are refused. Compared with the hand-written
 temperature feedback of fs-couple in
-`crates/fs-couple/tests/rigid_damping_heat/graph.rs`.
+`crates/fs-couple/tests/legacy/rigid_damping_heat/graph.rs`.
 
 A body torque is opt-in: `torqued(body)` appends a power port `torque<body>`,
 the torque held on that body in its own frame [N m], three components. It
@@ -149,7 +149,7 @@ owner's accuracy statements are unchanged by the wrapping; the thermal side
 in the test is the kernel's ideal `HeatCapacity`. The pairing with the
 fs-thermal deposition timeline that `fs-couple::rigid_damping_heat` drives is
 in `crates/fs-system/tests/thermal_timeline_slice.rs` and, against that
-module itself, in `crates/fs-couple/tests/rigid_damping_heat/graph.rs`.
+module itself, in `crates/fs-couple/tests/legacy/rigid_damping_heat/graph.rs`.
 
 ## A rigid-body network with Maxwell memory as a composition-kernel Component
 
@@ -204,7 +204,7 @@ heat is the Kelvin viscosity's alone; without branches the outputs agree with
 fraction to two thermal bodies and a named sink, bit-identical to the owner
 marched alone, with the ledger closed. Twenty planted defects were each
 caught. Compared with the hand-written Maxwell-memory coupling of fs-couple
-in `crates/fs-couple/tests/rigid_damping_heat/relaxation/graph.rs`.
+in `crates/fs-couple/tests/legacy/rigid_damping_heat/relaxation/graph.rs`.
 
 G0 for the actuators, in the same test file: conformance with both
 connectors driven (one in material axes, one in world axes, force and couple,
@@ -229,7 +229,7 @@ owner's actuator work (force and couple ports, material and world axes) and
 the ledger closed. Twenty-nine planted defects in the drive ports were each
 caught (twenty-seven by this file, two by the comparison with the module).
 Compared with the hand-written driven couplings of fs-couple in
-`crates/fs-couple/tests/rigid_damping_heat/driven_graph.rs`.
+`crates/fs-couple/tests/legacy/rigid_damping_heat/driven_graph.rs`.
 
 Following temperature is opt-in too, one way or the other, and appends one
 signal input `temperature<e>` [K] per connector. `temperature_dependent(law)`

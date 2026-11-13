@@ -164,7 +164,7 @@
 //! stop. Beyond it, it is cut again, from a line that is now close. Short of
 //! it, it is taken, sliding, and the stop is left to the next step, which is
 //! asked at full length again. Measured, in
-//! `crates/fs-couple/tests/tribothermal/dynamics/collinear/graph.rs`: beside
+//! `crates/fs-couple/tests/legacy/tribothermal/dynamics/collinear/graph.rs`: beside
 //! a linear spring two or three cuts in the step that holds the stop; beside
 //! springs with a cubic term in steps of 0.07 s, up to five cuts in that
 //! step, or, with two bodies, three further steps of 4e-7 s and less. The

@@ -226,7 +226,7 @@ fn richer_thermal_checkpoint_errors_and_invalid_energy_allowances_are_not_erased
     });
 }
 
-#[path = "../bridge_heat_network/common.rs"]
+#[path = "../legacy/bridge_heat_network/common.rs"]
 mod powered;
 #[test]
 fn thermal_observation_refuses_to_drop_an_actual_electrical_network() {
