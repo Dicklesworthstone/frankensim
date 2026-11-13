@@ -157,10 +157,30 @@ fn single_axis_spin_keeps_the_exact_exponential_at_large_elapsed_time() {
     let step = RigidBodyIntegrator::new(Gravity::ZERO)
         .step(initial, properties, Wrench::ZERO, 25.4)
         .unwrap();
-    let expected = UnitQuaternion::IDENTITY
-        .right_exp(Vec3::new(0.0, 0.0, 15.0 * 25.4))
-        .unwrap();
-    assert_eq!(step.state_after.pose().orientation(), expected);
+    // 25.4 is not a binary fraction: the spin turns through 15 h, which is
+    // 381 - 2.13e-14 rad and rounds to 381.0 in f64. The default step keeps
+    // that tail in its phase (9bd546f8d6), so the exact flow is exp(381.0)
+    // turned a further `tail` about the same axis; tail^2 is below 1e-27.
+    let tail = 15.0_f64.mul_add(25.4, -381.0);
+    let rounded = UnitQuaternion::IDENTITY
+        .right_exp(Vec3::new(0.0, 0.0, 381.0))
+        .unwrap()
+        .components();
+    let exact = [
+        rounded[0] - rounded[3] * (0.5 * tail),
+        0.0,
+        0.0,
+        rounded[3] + rounded[0] * (0.5 * tail),
+    ];
+    let after = step.state_after.pose().orientation().components();
+    for (component, value) in after.iter().enumerate() {
+        assert!(
+            (value - exact[component]).abs() <= 4.0 * f64::EPSILON,
+            "{after:?} against {exact:?}"
+        );
+    }
+    // The rounded angle's attitude is some forty ulps away: the tail is kept.
+    assert!((after[0] - rounded[0]).abs() > 16.0 * f64::EPSILON);
     assert_eq!(
         step.state_after.angular_momentum_body(),
         initial.angular_momentum_body()
