@@ -1474,6 +1474,224 @@ fn source_knots_keep_a_belt_stuck_across_changes_of_acceleration() {
     }
 }
 
+/// One step of [`the_friction_belt`]: when it ended, the force the slider
+/// gave the block, the slider's record of the slip, whether the slider
+/// ended stuck, and the block's own slip, the belt's speed less the
+/// block's.
+#[derive(Debug, Clone, Copy)]
+struct OnTheBelt {
+    time_s: f64,
+    force_n: f64,
+    record_m_s: f64,
+    stuck: bool,
+    slip_m_s: f64,
+}
+
+/// fs-cli's `examples/system/friction_belt.json`, built in the order and
+/// with the joins its `system` command builds it: a 2 kg block at rest, a
+/// belt whose speed is tabulated (0, 0) (0.25, 1) (0.5, `last_m_s`) (1.5,
+/// `last_m_s`) with its span told to the slider's `b`, a slider under 20 N
+/// with coefficients 0.5 and 0.2 (it holds 10 N and slides at 4 N), and
+/// its loss in a lining of 50 J/K at 300 K. Run for 1.5 s in steps of 5 ms
+/// as the command runs it; every step is returned.
+///
+/// The block follows the first ramp with 8 N, held, and breaks away on the
+/// second, which needs 16 N at a last speed of 3 m/s. It then slides at
+/// 2 m/s2 from 1 m/s at 0.25 s and catches the belt at 0.25 + (last - 1) / 2
+/// s. A step that starts sliding with slip `s0` and no other force on the
+/// block is ended at no slip by the force `s0 / (2 c)`, where c = dt / (2 m)
+/// = 1.25e-3 m/s per N: 400 s0.
+fn the_friction_belt(last_m_s: f64) -> Vec<OnTheBelt> {
+    let wave = Waveform::table(vec![
+        (0.0, 0.0),
+        (0.25, 1.0),
+        (0.5, last_m_s),
+        (1.5, last_m_s),
+    ])
+    .unwrap();
+    let mut builder = SystemBuilder::new();
+    let rest = Motion {
+        position_m: 0.0,
+        velocity_m_s: 0.0,
+    };
+    let block = builder
+        .add_with_tangent("block", Mass::new(2.0).unwrap(), rest)
+        .unwrap();
+    let belt = builder
+        .add_with_tangent(
+            "belt",
+            FlowSource::new(wave.clone()).publishing(),
+            SourceAccount::default(),
+        )
+        .unwrap();
+    let law = Slider::new(20.0, 0.5, 0.2).unwrap().told(SliderEnd::B);
+    let friction = builder.add_on_line("friction", law, Slip::stuck()).unwrap();
+    let lining = builder
+        .add_with_tangent(
+            "lining",
+            HeatCapacity::new(50.0).unwrap().publishing(),
+            300.0,
+        )
+        .unwrap();
+    builder
+        .common_flow(port(&builder, block, "p"), &[port(&builder, friction, "a")])
+        .unwrap();
+    builder
+        .common_flow(port(&builder, belt, "p"), &[port(&builder, friction, "b")])
+        .unwrap();
+    builder
+        .signal(
+            port(&builder, belt, "span"),
+            port(&builder, friction, "span_b"),
+        )
+        .unwrap();
+    let warmth = port(&builder, friction, "heat");
+    builder
+        .common_effort(port(&builder, lining, "heat"), &[warmth])
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    assert!(system.guess(warmth, &[300.0]));
+    let at_block = system.port(friction, "a").unwrap();
+    let mut steps = Vec::new();
+    with_cx(|cx| {
+        while 1.5 - system.time_s() > 1.5e-12 {
+            assert!(steps.len() < 600, "the clock did not advance");
+            let report = system
+                .step(0.005_f64.min(1.5 - system.time_s()), cx)
+                .unwrap();
+            let slip = *system.state::<Slip>(friction).unwrap();
+            let block_m_s = system.state::<Motion>(block).unwrap().velocity_m_s;
+            steps.push(OnTheBelt {
+                time_s: report.time_s,
+                force_n: system.last_output(at_block)[0],
+                record_m_s: slip.slip_m_s(),
+                stuck: slip.is_stuck(),
+                slip_m_s: wave.value_at(report.time_s) - block_m_s,
+            });
+        }
+    });
+    steps
+}
+
+/// Prints steps 248 to 256 of `steps`, about the catches.
+fn shown(label: &str, steps: &[OnTheBelt]) {
+    use std::fmt::Write as _;
+    let mut rows = String::new();
+    for (step, number) in steps[247..256].iter().zip(248..) {
+        write!(
+            rows,
+            "\n  step {number}, to {:.6} s: {:e} N, record {:e}, stuck {}, slip {:e} m/s",
+            step.time_s, step.force_n, step.record_m_s, step.stuck, step.slip_m_s
+        )
+        .unwrap();
+    }
+    eprintln!("the friction belt, {label}:{rows}");
+}
+
+/// What the catches of [`the_friction_belt`] share before them: 300 steps,
+/// the block held to the belt in steps 1 to 50 (the first ramp needs 8 N of
+/// the 10 N the slider holds), and sliding at 4 N from the break-away in
+/// step 51 (the second needs 16 N) through step `sliding_to`.
+fn carried_then_sliding(steps: &[OnTheBelt], sliding_to: usize) {
+    assert_eq!(steps.len(), 300);
+    for (index, step) in steps.iter().enumerate() {
+        let number = index + 1;
+        if number <= 50 {
+            assert!(step.stuck, "step {number}: {step:?}");
+        } else if number <= sliding_to {
+            let sliding = !step.stuck && (step.force_n - 4.0).abs() <= 1.0e-12;
+            assert!(sliding, "step {number}: {step:?}");
+        }
+    }
+}
+
+/// Step `number` of `steps` arrests the block: it ends stuck, with the
+/// slider's record at exactly zero and a force inside the sliding limit,
+/// and every step after it is stuck with the block on the belt.
+fn arrested_at(steps: &[OnTheBelt], number: usize) {
+    let arrest = steps[number - 1];
+    assert!(
+        arrest.stuck && arrest.record_m_s == 0.0,
+        "step {number}: {arrest:?}"
+    );
+    assert!(
+        arrest.force_n > 0.0 && arrest.force_n <= 4.0,
+        "step {number}: {arrest:?}"
+    );
+    for (index, step) in steps.iter().enumerate().skip(number) {
+        assert!(step.stuck, "step {}: {step:?}", index + 1);
+        assert!(
+            step.slip_m_s.abs() < 1.0e-12,
+            "step {}: {step:?}",
+            index + 1
+        );
+    }
+}
+
+#[test]
+fn a_belt_caught_at_the_end_of_a_step_holds_the_block_from_two_steps_after() {
+    // The catch falls at 1.25 s, the end of step 250, where the force that
+    // ends the step at no slip is 400 * 0.01 m/s = 4 N, the sliding force,
+    // in exact arithmetic: rounding decides whether that step slides or is
+    // arrested, and neither is asserted. Sliding, it leaves a slip of
+    // rounding size, and the slider's record of it and the block's own
+    // differ by their rounding. Step 251 is then arrested; or released,
+    // where the block's slip is below half the record, which leaves the
+    // record on the other side of it; or turned, where it already was. A
+    // step that starts with the record on the other side of the slip is
+    // turned, the slip being far inside c mu_k N: it ends with no mean slip
+    // under a force inside the limit, a hold, stuck from whichever state
+    // it came. So the pair is stuck from step 252 (catch + 2), and held
+    // after, to 1.5 s: breaking away takes 12.5 mm/s of released slip.
+    // While turned was recorded as sliding, the record and the block's slip
+    // kept opposite signs, every step from 252 was turned, and the pair was
+    // never stuck again: fs-cli's belt ended with stuck 0.
+    let steps = the_friction_belt(3.0);
+    shown("caught at the end of step 250", &steps);
+    assert!(
+        (steps[249].time_s - 1.25).abs() < 1.0e-12,
+        "{:?}",
+        steps[249]
+    );
+    carried_then_sliding(&steps, 249);
+    for (index, step) in steps.iter().enumerate().skip(251) {
+        assert!(step.stuck, "step {}: {step:?}", index + 1);
+        assert!(
+            step.slip_m_s.abs() < 1.0e-12,
+            "step {}: {step:?}",
+            index + 1
+        );
+    }
+}
+
+#[test]
+fn a_belt_caught_inside_a_step_arrests_the_block_there_at_exactly_no_slip() {
+    // A last speed of 3.005 m/s moves the catch to 1.2525 s, half way
+    // through step 251. Step 250 starts with 15 mm/s of slip, 6 N to stop
+    // it, and slides at 4 N; step 251 starts with 5 mm/s, 2 N, and is
+    // arrested there, its record at exactly zero, and every step after it
+    // is held from that zero. No step is turned, so it passes whether
+    // turned is recorded stuck or sliding.
+    let steps = the_friction_belt(3.005);
+    shown("caught inside step 251", &steps);
+    carried_then_sliding(&steps, 250);
+    arrested_at(&steps, 251);
+}
+
+#[test]
+fn a_belt_caught_just_after_a_step_slides_through_it_and_arrests_in_the_next() {
+    // A last speed of 3.000000002 m/s moves the catch 1e-9 s past the end
+    // of step 250. That step starts with 0.010000002 m/s of slip, which
+    // takes 4.0000008 N to stop: over the sliding limit by 8e-7 N, far
+    // above any rounding, so it slides at 4 N. Step 251 starts with 2e-9
+    // m/s and is arrested by 8e-7 N, its record at exactly zero. No step is
+    // turned, so it passes whether turned is recorded stuck or sliding.
+    let steps = the_friction_belt(3.000_000_002);
+    shown("caught 1e-9 s after the end of step 250", &steps);
+    carried_then_sliding(&steps, 250);
+    arrested_at(&steps, 251);
+}
+
 #[test]
 fn no_drawn_side_told_its_span_breaks_a_pair_away_that_holds() {
     // A standing property. 60 drawn sides, piecewise linear with one to
@@ -3005,6 +3223,7 @@ fn tally(rows: HashMap<SliderRow, u32>) -> Vec<(String, u32)> {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn a_mass_on_a_spring_loses_two_friction_offsets_a_half_cycle_and_stops_in_the_dead_band() {
     // 1 kg on a spring of 100 N/m, sliding on the ground under 10 N with
     // coefficients 0.5 and 0.3, thrown from the spring's rest point at
@@ -3070,13 +3289,20 @@ fn a_mass_on_a_spring_loses_two_friction_offsets_a_half_cycle_and_stops_in_the_d
             velocity_m_s: v0,
         };
         with_cx(|cx| {
-            for _ in 0..(4_000_u32 << halvings) {
+            for step in 0..(4_000_u32 << halvings) {
                 system.step(dt, cx).unwrap();
                 // Every step is a point of the slider's law on the line
                 // its neighbours present, the reversals among them.
                 let (force, flow) = (system.last_output(at_block)[0], system.last_input(at_block)[0]);
-                *rows.entry(row_of_the_step(&law, last, answered, force, flow)).or_default() += 1;
+                let row = row_of_the_step(&law, last, answered, force, flow);
+                *rows.entry(row).or_default() += 1;
                 last = *system.state::<Slip>(rubbing).unwrap();
+                // A released step has no friction in it: the slider ends it
+                // sliding, and the next step is judged from sliding.
+                assert!(
+                    row != SliderRow::Released || !last.is_stuck(),
+                    "dt {dt}, step {step}"
+                );
                 let now = *system.state::<Motion>(block).unwrap();
                 if before.velocity_m_s != 0.0 && now.velocity_m_s * before.velocity_m_s <= 0.0 {
                     let turned = if now.position_m.abs() > before.position_m.abs() {

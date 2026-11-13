@@ -1675,7 +1675,11 @@ material, a surface card, a temperature or a slip history stays in `fs-tribo`.
   in `src/elements/slider.rs`): stuck and held (`e = r / c`), stuck and broken
   away (`mu_k N` along `r`); sliding and arrested at exactly zero end slip
   (`e = (r - s0/2) / c`, when that lies between zero and `mu_k N` along the
-  slip), sliding on, and three rows for a step that reverses. The loss
+  slip), sliding on, and three rows for a step that reverses, of which
+  turned holds the mean slip at zero (`e = r / c`, inside `mu_k N`) and so
+  ends stuck, as held does: a hold is stuck from whichever state it came
+  (before, turned ended sliding, and a belt caught on the boundary of a
+  step stayed turned at every step after). The loss
   `e * mean` is not negative in any row, the force is inside `mu_s N` stuck and
   `mu_k N` sliding, and in the sliding state the force does not decrease with
   `r`. One row trades the friction of a step for first-law exactness: where
@@ -1910,8 +1914,10 @@ material, a surface card, a temperature or a slip history stays in `fs-tribo`.
   with drawn velocities, the slider to the ground or between two of them,
   springs (a quarter of them differenced) and dampers between neighbours
   and to a wall, a push up to 14 N on one, steps of 3e-6 to 1e-2 s. No
-  step is refused; the slider slides at some step in 208 of them; 695720
-  updates in their 450000 steps on a Linux host (695799 there before the
+  step is refused; the slider slides at some step in 208 of them; 697264
+  updates in their 450000 steps on a Linux host (ts2 at 3075f215f3, with
+  turned recorded stuck; 697206 there before it; 695720 at 3a42d0c16d;
+  695799 there before the
   columns of a line were resolved, 2026-11-12; 695778 on a Mac before, the
   two hosts' libm apart; 691915 on b47fe4f2a8, which also took them all:
   this family did not show the defect, the carts did).
@@ -2122,7 +2128,26 @@ material, a surface card, a temperature or a slip history stays in `fs-tribo`.
   compliance (the probe pins `c`). The rows reached are, at 1 ms, slid 2342,
   held 1648, released 4, reversed 2, turned 1, arrested 2, broken away 1,
   and at 0.5 ms 4693, 3298, 4, 3, 1, 1, 0: the three reversal rows are
-  asserted to be among them.
+  asserted to be among them. (The same rows and turning points to the
+  digit whether turned ends stuck or sliding.) Each released step is
+  asserted to end sliding, as a step with no friction in it does; recorded
+  stuck, the step after each one would be judged from stuck and break away
+  (at 1 ms: broken away 5, slid 2338).
+- fs-cli's friction belt, built as its command builds it (2 kg, 10 N held,
+  4 N sliding, a belt tabulated to its last speed at 0.5 s, steps of 5 ms):
+  held through step 50, broken away in 51, sliding at 4 N. At a last speed
+  of 3 m/s the belt catches the block at 1.25 s, the end of step 250, where
+  the force that ends the step at no slip is the sliding force in exact
+  arithmetic. On ts2 at 3075f215f3 step 250 slides (the slider's record
+  4.26e-14 m/s, the block's slip 2.09e-14), 251 is released, and from 252
+  each step holds the mean slip at zero, at a force of 1.67e-11 N growing
+  to 5.01e-11 N by step 300, the two records on opposite sides of zero:
+  turned at 252 and held after it, stuck in every one of those 49 steps.
+  While turned ended sliding, all 49 were turned and none stuck. At
+  3.005 m/s the catch is inside step 251, arrested there at exactly zero
+  by 2.0 N; at 3.000000002 m/s step 250 slides and 251 is arrested at
+  exactly zero by 8.0e-7 N. Asserted: stuck from step 252 (catch + 2) to
+  1.5 s in the first; the arrest and stuck after it in the other two.
 - The matrix a component is handed, read by a probe that returns no effort:
   `dt / (2 m)` per mass with nothing between two masses; the closed form
   with a damper between them (symmetric, off-diagonal entries not small);
@@ -2141,9 +2166,12 @@ material, a surface card, a temperature or a slip history stays in `fs-tribo`.
   missing 0.12 N (0.171 mm/s, to 1e-12); the push's work is what the two
   gain and the slider and the damper lose, to 1e-12. Beside the gyrator
   (not symmetric): the two lose exactly the slider's heat at every one of
-  6000 steps of 0.1 ms (to 1e-12 J of 1 J); they rub in 2346 steps and are
-  stuck in 3616; they end moving as one at 5.96 mm/s, held with the
-  5.36 N the gyrator pushes them apart with (`G v`, to 1e-9 N). Against a
+  6000 steps of 0.1 ms (to 1e-12 J of 1 J); they rub in 2343 steps and are
+  stuck in 3625; they end moving as one at 5.98 mm/s, held with the
+  5.38 N the gyrator pushes them apart with (`G v`, to 1e-9 N). (On ts2 at
+  3075f215f3. While turned ended sliding, the step after a reversal held
+  at no mean slip could take only `mu_k N`: 2346, 3616, 5.96 mm/s and
+  5.36 N.) Against a
   scratch kernel that publishes the line's flows through the transposed
   matrix this test alone fails, at the gyrator's first step
   (1.55e-8 J against 1.74e-11 J).

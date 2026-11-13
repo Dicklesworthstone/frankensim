@@ -105,7 +105,7 @@
 //! | sliding | `0 <= sg ea <= mu_k N` | `ea` | stuck, at zero slip exactly (arrested) |
 //! | sliding | `sg ea > mu_k N` | `mu_k N sg` | sliding the same way (slid) |
 //! | sliding | `0 <= sg r < abs(s0)/2` | `0` | reversed, slowly (released) |
-//! | sliding | `-c mu_k N <= sg r < 0` | `r / c` | reversed (turned) |
+//! | sliding | `-c mu_k N <= sg r < 0` | `r / c` | stuck, zero mean slip (turned) |
 //! | sliding | `sg r < -c mu_k N` | `-mu_k N sg` | reversed |
 //!
 //! - The loss `e * mean` is not negative in any row, and the first law is
@@ -115,6 +115,18 @@
 //!   exactly zero and all of its kinetic energy given up as heat. (The
 //!   mass's own velocity is then zero to the rounding its loop was closed
 //!   to: the mass and the slider each keep their own record.)
+//! - A pair held at zero mean slip is stuck from whichever state it came.
+//!   A turned step holds the mean with a force inside `mu_k N`, so inside
+//!   `mu_s N`, as a held one does, and the step after it reads the stuck
+//!   rows: carried, held, or broken away at `mu_s N`. The two records
+//!   differ by their rounding, alternating in sign (2.2e-14 m/s on the
+//!   friction belt of fs-cli), so where the slip is within that rounding
+//!   of zero the slider's start slip and the released slip can have
+//!   opposite signs, step after step. Each such step holds the mean at
+//!   zero: turned from the sliding state, held from the stuck one. While
+//!   turned was recorded as sliding, every such step stayed turned, and a
+//!   belt caught on the boundary of a step was never stuck again (none of
+//!   49 steps there).
 //! - Stuck, the force that carries the body with a side that moved is taken
 //!   up to the STATIC limit: a belt that speeds up step by step carries a
 //!   block until the force it needs exceeds `mu_s N`, and a jump is caught
@@ -296,7 +308,9 @@ pub enum SliderRow {
     Slid,
     /// Sliding, reversed by the drive alone; no friction in the step.
     Released,
-    /// Sliding, reversed with zero mean slip.
+    /// Sliding, reversed with zero mean slip: held from sliding, with a
+    /// force inside the sliding limit, and recorded stuck as a held step
+    /// is.
     Turned,
     /// Sliding, reversed against friction of the new direction.
     Reversed,
@@ -576,7 +590,11 @@ impl LoadLine for Slider {
         // at twice its mean less that start.
         *new = Slip {
             ended_m_s: 2.0 * mean - start,
-            stuck: matches!(row, SliderRow::Held | SliderRow::Arrested),
+            // Held at zero mean slip, from either state, is stuck.
+            stuck: matches!(
+                row,
+                SliderRow::Held | SliderRow::Arrested | SliderRow::Turned
+            ),
             given_m_s: ends,
             mirrored,
         };
