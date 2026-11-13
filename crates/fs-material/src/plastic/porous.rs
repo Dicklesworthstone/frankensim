@@ -197,7 +197,17 @@ impl PorousPlasticity {
     ) -> Result<PorousResponse, MaterialError> {
         let m = self.moduli()?;
         let elastic = self.admit(strain, state, m)?;
-        let returned = m.response(&elastic, state.alpha, 0.0)?;
+        // Roundoff of the elastic strain (total minus plastic) and its stress at
+        // yield must not create flow on an accepted state: a flow below the
+        // spacing of alpha cannot advance the history and is refused. The band
+        // is the one finite::porous passes to the same return; it is not a
+        // physical overstress law.
+        let zero = 64.0
+            * f64::EPSILON
+            * (2.0 * m.shear)
+                .max(m.bulk)
+                .max(self.yield_stress + self.hardening * state.alpha);
+        let returned = m.response(&elastic, state.alpha, zero)?;
         let candidate = if returned.multiplier == 0.0 {
             state.clone()
         } else {
