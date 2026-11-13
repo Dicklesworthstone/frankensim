@@ -167,12 +167,14 @@ fn section(
                 .unwrap(),
             );
         }
+        // Each layer is its own material state at revision 0; a revision is
+        // a superseding version of one state, not a layer index.
         let card = MaterialCard::assemble(
             MaterialStateId {
                 chemistry: "synthetic circular material".into(),
                 phase: "solid".into(),
-                process: "synthetic shear test".into(),
-                revision: index as u32,
+                process: format!("synthetic shear test layer {index}"),
+                revision: 0,
             },
             claims,
             vec![],
