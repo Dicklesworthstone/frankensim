@@ -291,6 +291,15 @@ fn loaded_joint_member_retains_plastic_hardening_while_dwell_renews_creep() {
 fn joint_motion_shares_the_recovery_clock_and_preserves_all_histories_on_retiming() {
     let yield_stress = 0.3e6;
     let member_mass = 1e4;
+    // The checks below hold the displacement to 2e-11 m. On this path the free
+    // residual's stiffness is 6.2e5 N/m at the consistent-mass steps (member
+    // 2.9e5 N/m plus m/dt^2 3.3e5 N/m), so the shared 1e-5 N allowance admits
+    // 1.6e-11 m in one step, and the next step carries that error on. The solve
+    // asks for 1e-8 N here, which puts its own stopping error well below the checks.
+    let tolerances = FrameCreepTolerances {
+        force_n: 1e-8,
+        ..controls()
+    };
     for (formulation, mass) in [
         (FrameMassFormulation::Lumped, member_mass / 2.0),
         (FrameMassFormulation::ConsistentReference, member_mass / 3.0),
@@ -355,7 +364,7 @@ fn joint_motion_shares_the_recovery_clock_and_preserves_all_histories_on_retimin
             let next_v = v + dt * acceleration;
             let (dc, dp) = increments(stress);
             let step = prepared
-                .advance_creep_backward_euler(&load(force), dt, controls(), || false)
+                .advance_creep_backward_euler(&load(force), dt, tolerances, || false)
                 .unwrap();
             assert_eq!(
                 prepared.creep_recovery_plastic_fiber(0, 0, 0).unwrap().1,
@@ -384,7 +393,7 @@ fn joint_motion_shares_the_recovery_clock_and_preserves_all_histories_on_retimin
                 step.energy.material.physical_dissipation_j,
                 0.0,
             );
-            close(step.energy.balance_residual_j, 0.0, controls().energy_j);
+            close(step.energy.balance_residual_j, 0.0, tolerances.energy_j);
             creep += stress.signum() * dc;
             alpha_c += dc;
             plastic += stress.signum() * dp;
