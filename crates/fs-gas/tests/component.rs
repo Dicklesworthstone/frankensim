@@ -17,9 +17,9 @@ use fs_material::thermochemical_gas::{SpeciesTransportMaterial, ThermochemicalGa
 use fs_ports::component::conformance::{Case, Observed, check_component, check_port_tangent};
 use fs_ports::component::{Class, Component, PortTangent, Proposal};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
-use fs_qty::{DynViscosity, MolarMass, Pressure, QuantitySpec};
+use fs_qty::{DynViscosity, MolarMass, Pressure, QuantitySpec, Temperature};
 use fs_system::elements::{Force, Mass, Motion, Restriction, SourceAccount, Waveform};
-use fs_system::{NodeId, SolveConfig, System, SystemBuilder, SystemError};
+use fs_system::{AdmissionError, NodeId, SolveConfig, System, SystemBuilder, SystemError};
 use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
 use fs_thermochem::{
     Composition, CompositionBasis, ElementalReferenceIdV1, NASA9_LAW_ID_V1, NASA9_LAW_VERSION_V1,
@@ -775,28 +775,46 @@ const LIGHT_KG_MOL: f64 = 0.004;
 /// a gas whose heat capacity rises with temperature, the rest a light
 /// monatomic one.
 fn mixture(heavy: f64, pressure: f64) -> ClosedGasParcel {
-    let (mut species, mut transport, mut fractions) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut species, mut fractions) = (Vec::new(), Vec::new());
     // Formation energies of opposite sign, each far above the thermal part
     // (about 4e5 J/kg at 400 K): 7.1e6 and -1.25e7 J/kg.
     if heavy > 0.0 {
         species.push(authored_species("heavy", HEAVY_KG_MOL, 3.5, 0.001, 2.0e5));
-        transport.push(authored_transport("heavy"));
         fractions.push(heavy);
     }
     species.push(authored_species("light", LIGHT_KG_MOL, 2.5, 0.0, -5.0e4));
-    transport.push(authored_transport("light"));
     fractions.push(1.0 - heavy);
+    catalog_parcel(species, fractions, pressure)
+}
+
+fn catalog_parcel(
+    species: Vec<Nasa9StandardStateModelV1>,
+    fractions: Vec<f64>,
+    pressure: f64,
+) -> ClosedGasParcel {
+    let transport = species
+        .iter()
+        .map(|model| authored_transport(model.species().as_str()))
+        .collect();
     let model = ThermochemicalGasModel::new(
         FrozenIdealGasMixtureModelV1::new(
             species,
             Composition::new(CompositionBasis::MoleFraction, fractions).unwrap(),
-        ).unwrap(),
+        )
+        .unwrap(),
         transport,
         None,
-    ).unwrap();
+    )
+    .unwrap();
     let point = QueryPoint::new()
-        .with_quantity("temperature", quantity(QuantityKind::AbsoluteTemperature), T0).unwrap()
-        .with_quantity("pressure", quantity(QuantityKind::Pressure), pressure).unwrap();
+        .with_quantity(
+            "temperature",
+            quantity(QuantityKind::AbsoluteTemperature),
+            T0,
+        )
+        .unwrap()
+        .with_quantity("pressure", quantity(QuantityKind::Pressure), pressure)
+        .unwrap();
     ClosedGasParcel::new(model, point, V0).unwrap()
 }
 
@@ -850,8 +868,10 @@ fn exchange(
     let mass_tolerance_kg = 1.0e-15;
 
     let mut builder = SystemBuilder::new();
+    let catalog = GasCavity::new(start[0].clone(), controls()).unwrap()
+        .streaming(mass_tolerance_kg).unwrap();
     let pipe = builder
-        .add_with_tangent("pipe", Restriction::new(conductance, 2).unwrap(), ())
+        .add_with_tangent("pipe", Restriction::for_stream(conductance, &catalog.ports()[2]).unwrap(), ())
         .unwrap();
     let mut nodes = Vec::new();
     for (index, (name, gas)) in ["a", "b"].into_iter().zip(&start).enumerate() {
@@ -1130,4 +1150,144 @@ fn a_streaming_cavity_conforms_with_gas_entering_and_leaving_and_refuses_what_it
         assert_eq!(next, stale);
         assert_eq!(outputs.map(f64::to_bits), [7.0_f64.to_bits(); 6]);
     });
+}
+
+fn connect_streams(a: GasCavity, b: GasCavity) -> Result<(), AdmissionError> {
+    let mut builder = SystemBuilder::new();
+    let pipe = Restriction::for_stream(2.0e-9, &a.ports()[2]).unwrap();
+    let pipe = builder.add_with_tangent("pipe", pipe, ()).unwrap();
+    for (name, cavity) in [("a", a), ("b", b)] {
+        let old = cavity.reference().clone();
+        let node = builder.add(name, cavity, old).unwrap();
+        builder.bond(
+            builder.port(node, "stream").unwrap(),
+            builder.port(pipe, name).unwrap(),
+        )?;
+    }
+    Ok(())
+}
+
+fn streaming(gas: ClosedGasParcel) -> GasCavity {
+    GasCavity::new(gas, controls())
+        .unwrap()
+        .streaming(1.0e-15)
+        .unwrap()
+}
+
+#[test]
+fn stream_catalog_identity_ignores_live_mixture_and_state() {
+    let a = streaming(mixture(0.75, 1.0e5));
+    let b = mixture(0.25, 1.5e5)
+        .discrete_gradient_heat_volume(1.1 * V0, 2.0, controls(), || false)
+        .unwrap()
+        .into_parts()
+        .0;
+    assert_ne!(b.state().state().temperature, T0);
+    let b = streaming(b);
+    assert_eq!(a.ports()[2].stream_basis(), b.ports()[2].stream_basis());
+    connect_streams(a, b).unwrap();
+}
+
+#[test]
+fn equal_width_streams_refuse_different_species_sources_and_molar_masses() {
+    let model = authored_species("fixture", MOLAR_MASS, 3.5, 0.001, 100.0);
+    let original = || streaming(catalog_parcel(vec![model.clone()], vec![1.0], P0));
+    let different_mass = Nasa9StandardStateModelV1::new(
+        model.species().clone(),
+        MolarMass::new(2.0 * MOLAR_MASS),
+        model.convention().clone(),
+        model.regions().to_vec(),
+    )
+    .unwrap();
+    let different_reference = Nasa9StandardStateModelV1::new(
+        model.species().clone(),
+        model.molar_mass(),
+        StandardStateConventionV1::new(
+            StandardStatePhaseV1::Gas,
+            ReferenceEquationOfStateV1::IdealGas,
+            Pressure::new(P0),
+            ElementalReferenceIdV1::new("different-energy-reference").unwrap(),
+        )
+        .unwrap(),
+        model.regions().to_vec(),
+    )
+    .unwrap();
+    for other in [
+        authored_species("other", MOLAR_MASS, 3.5, 0.001, 100.0),
+        authored_species("fixture", MOLAR_MASS, 3.5, 0.001, 300.0),
+        different_mass,
+        different_reference,
+    ] {
+        let changed_state = catalog_parcel(vec![other], vec![1.0], P0);
+        let cavity = original();
+        assert!(cavity.stored_energy_j(&changed_state).is_err());
+        with_cx(&CancelGate::new_clock_free(), |cx| {
+            let mut next = cavity.reference().clone();
+            let stale = next.clone();
+            let mut outputs = [17.0; 5];
+            assert!(
+                cavity
+                    .propose(
+                        &changed_state,
+                        1.0e-3,
+                        &[0.0; 5],
+                        &mut next,
+                        &mut outputs,
+                        cx,
+                    )
+                    .is_err()
+            );
+            assert_eq!(next, stale);
+            assert_eq!(outputs, [17.0; 5]);
+        });
+        let other = streaming(changed_state);
+        assert_eq!(original().ports()[2].width(), other.ports()[2].width());
+        assert!(matches!(
+            connect_streams(original(), other),
+            Err(AdmissionError::StreamBasis { .. })
+        ));
+    }
+}
+
+#[test]
+fn the_same_source_cards_with_another_caloric_datum_do_not_connect() {
+    let model = authored_species("fixture", MOLAR_MASS, 3.5, 0.0, 100.0);
+    let mut lower = model.regions()[0].card().clone();
+    let mut upper = lower.clone();
+    lower.validity = ValidityDomain::unconstrained().with("T", 200.0, 600.0);
+    upper.validity = ValidityDomain::unconstrained().with("T", 600.0, 2000.0);
+    upper.parameters.get_mut("a7").unwrap().value += 75.0 / R;
+    let raw = Nasa9StandardStateModelV1::new(
+        model.species().clone(),
+        model.molar_mass(),
+        model.convention().clone(),
+        vec![
+            Nasa9RegionV1::from_card(lower).unwrap(),
+            Nasa9RegionV1::from_card(upper).unwrap(),
+        ],
+    )
+    .unwrap();
+    let corrected = raw
+        .with_caloric_continuity(
+            Temperature::new(800.0),
+            fs_thermochem::MolarEnergyQuantityV1::new(100.0),
+            fs_thermochem::MolarThermalQuantityV1::new(1.0),
+        )
+        .unwrap();
+    assert!(
+        corrected.caloric_reference().unwrap().regions()[0]
+            .enthalpy_offset()
+            .value()
+            > 74.0
+    );
+    let raw = streaming(catalog_parcel(vec![raw], vec![1.0], P0));
+    let corrected = streaming(catalog_parcel(vec![corrected], vec![1.0], P0));
+    let a = raw.ports()[2].stream_basis().unwrap();
+    let b = corrected.ports()[2].stream_basis().unwrap();
+    assert_eq!(a.medium(), b.medium());
+    assert_ne!(a.enthalpy_reference(), b.enthalpy_reference());
+    assert!(matches!(
+        connect_streams(raw, corrected),
+        Err(AdmissionError::StreamBasis { .. })
+    ));
 }

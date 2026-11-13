@@ -10243,13 +10243,30 @@ cavity asks for half the step. The exchange's energy tolerance is the
 controls' per-kilogram tolerance times the larger of the masses before and
 after. With nothing crossing, the step is the closed cavity's to the bit.
 
-Two things are not checked. The total mass rate is not compared with the sum
-of the species rates: a system differences this cavity one input at a time,
-which such a guard would refuse. And cavities joined through their stream
-ports must have references with the same species, in the same order, from
-the same sources, because the rates are read by position and the enthalpy in
-this cavity's datum; the accounts close either way, so nothing in the kernel
-notices a mismatch.
+The total mass rate is not compared with the sum of the species rates inside
+the component: a system differences this cavity one input at a time, which
+such a guard would refuse. The stream does declare an explicit `StreamBasis`.
+It binds the ordered species masses, molar masses, phase/EOS/reference
+conventions and original NASA-9 card identities, including every retained
+region. The enthalpy reference binds the raw/reconciled policy and exact
+caloric correction metadata and offset bits. Identifiers use deterministic
+hex encoding of these immutable fields, not display/debug text. Composition,
+mass, pressure, temperature and volume do not enter the identity. Different
+mixtures of the same catalog therefore connect; a same-width catalog with a
+different species, source card, molar mass or energy datum is refused by the
+kernel before any exchange. A transport element copies the basis on both
+ports (`Restriction::for_stream`); an unidentified transport is not a
+wildcard. These identities retain the source owner's declarations; they do
+not authenticate the source data or convert a mismatched energy datum.
+Accepted streaming states must retain the declared active caloric models,
+including on a step with no transfer. Species depletion is allowed; source
+substitution refuses before the candidate or port outputs change.
+
+Three focused admission regressions exercise changed live mixtures/states,
+equal-width species/source/molar-mass/reference mismatches, and identical
+source cards with different caloric reconciliation. The existing finite
+exchange and flow-reversal comparisons use the identified restriction and
+retain their original physical reference and numerical tolerances.
 
 A streaming cavity's stored energy is its internal energy in the species'
 datum (mass times specific internal energy), not the increment from the

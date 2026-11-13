@@ -32,6 +32,7 @@
 //! certificate or a claim to replace the complete native piston solver.
 
 use core::num::NonZeroUsize;
+use std::fmt::Write;
 
 use fs_exec::Cx;
 use fs_material::thermochemical_gas::energy::parcel::discrete_gradient::GasDiscreteGradientCandidate;
@@ -40,7 +41,7 @@ use fs_material::thermochemical_gas::energy::parcel::transfer::species::boundary
 };
 use fs_ports::component::{
     Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt, STREAM_CARRIED,
-    STREAM_ENTHALPY_RATE, STREAM_PRESSURE, STREAM_SPECIFIC_ENTHALPY,
+    STREAM_ENTHALPY_RATE, STREAM_PRESSURE, STREAM_SPECIFIC_ENTHALPY, StreamBasis, StreamQuantity,
 };
 use fs_ports::{PortKind, StableId};
 use fs_qty::MolarMass;
@@ -97,6 +98,83 @@ const NO_TANGENT: &str =
 /// Internal energy [J] of `parcel` in its species' own datum.
 fn absolute_energy_j(parcel: &ClosedGasParcel) -> f64 {
     parcel.mass_kg() * parcel.state().specific_internal_energy_j_kg()
+}
+
+/// Hex keeps arbitrary species/convention text unambiguous inside a StableId.
+fn identity_bytes(identity: &mut String, bytes: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for &byte in bytes {
+        identity.push(char::from(HEX[usize::from(byte >> 4)]));
+        identity.push(char::from(HEX[usize::from(byte & 15)]));
+    }
+}
+
+/// Bind the immutable thermodynamic catalog, never its live composition/state.
+/// Region card identities already cover the retained coefficients and ranges.
+fn stream_basis(parcel: &ClosedGasParcel) -> StreamBasis {
+    let mut medium = String::from("nasa9-gas-v1");
+    let mut datum = String::from("nasa9-caloric-reference-v1");
+    let mut quantities = Vec::new();
+    for model in parcel.model().thermodynamics().components() {
+        quantities.push(StreamQuantity::SpeciesMass(model.species().clone()));
+        medium.push('/');
+        identity_bytes(&mut medium, model.species().as_str().as_bytes());
+        let convention = model.convention();
+        match (convention.phase(), convention.eos()) {
+            (
+                fs_thermochem::StandardStatePhaseV1::Gas,
+                fs_thermochem::ReferenceEquationOfStateV1::IdealGas,
+            ) => medium.push_str("/gas/ideal"),
+        }
+        write!(
+            &mut medium,
+            "/{:016x}/{:016x}/",
+            model.molar_mass().value().to_bits(),
+            convention.reference_pressure().value().to_bits(),
+        )
+        .expect("writing to a String");
+        identity_bytes(
+            &mut medium,
+            convention.elemental_reference().as_str().as_bytes(),
+        );
+        for region in model.regions() {
+            medium.push_str("/region/");
+            identity_bytes(&mut medium, region.card_identity());
+        }
+
+        datum.push('/');
+        identity_bytes(&mut datum, model.species().as_str().as_bytes());
+        if let Some(reference) = model.caloric_reference() {
+            write!(
+                &mut datum,
+                "/continuous/{}/{:016x}/{}/{:016x}/{:016x}",
+                reference.evaluator_version(),
+                reference.anchor_temperature().value().to_bits(),
+                reference.anchor_region(),
+                reference.maximum_enthalpy_correction().value().to_bits(),
+                reference.maximum_entropy_correction().value().to_bits(),
+            )
+            .expect("writing to a String");
+            for region in reference.regions() {
+                datum.push_str("/region/");
+                identity_bytes(&mut datum, region.card_identity());
+                write!(
+                    &mut datum,
+                    "/{:016x}/{:016x}",
+                    region.enthalpy_offset().value().to_bits(),
+                    region.entropy_offset().value().to_bits(),
+                )
+                .expect("writing to a String");
+            }
+        } else {
+            datum.push_str("/raw");
+        }
+    }
+    StreamBasis::new(
+        StableId::new(medium).expect("hex catalog identity is a stable id"),
+        StableId::new(datum).expect("hex caloric identity is a stable id"),
+        quantities,
+    ).expect("the admitted mixture has distinct species")
 }
 
 impl StreamPlan {
@@ -198,10 +276,11 @@ impl GasCavity {
     /// what is held is dropped. A step that would draw more of a species
     /// than is held, or all of the gas, is shortened.
     ///
-    /// Cavities joined through their stream ports must have references
-    /// with the same species, in the same order, from the same sources:
-    /// the rates are read by position and the enthalpy in this cavity's
-    /// datum. Nothing checks it, and the accounts close either way.
+    /// The stream declares its ordered species, source cards, molar masses
+    /// and caloric conventions. Connections refuse a different catalog or
+    /// energy reference, even at equal width. Composition and live state do
+    /// not enter the identity, so compatible mixtures may exchange gas.
+    /// A transport element must retain this basis on both ports.
     ///
     /// The stored energy of a streaming cavity is its internal energy in
     /// that datum, not the increment from the reference, so a large
@@ -228,10 +307,10 @@ impl GasCavity {
             .collect();
         if self.stream.is_none() {
             self.ports.push(
-                PortSpec::stream(
+                PortSpec::identified_stream(
                     StableId::new("stream").expect("static port name"),
                     PortRole::FlowIn,
-                    species.len(),
+                    stream_basis(&self.reference),
                 )
                 .expect("stream storage port"),
             );
@@ -253,6 +332,23 @@ impl GasCavity {
     #[must_use]
     pub const fn controls(&self) -> GasEnergySolve {
         self.controls
+    }
+
+    /// Depletion may remove species; it may not replace a retained source.
+    fn admit_stream_state(&self, state: &ClosedGasParcel) -> Result<(), GasEnergyError> {
+        let catalog = self.reference.model().thermodynamics().components();
+        for active in state.model().thermodynamics().components() {
+            if catalog
+                .iter()
+                .find(|model| model.species() == active.species())
+                != Some(active)
+            {
+                return Err(invalid(
+                    "streaming state differs from the declared gas catalog",
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Compression flow and heat rate of a step: as received, or for an
@@ -391,6 +487,7 @@ impl GasCavity {
             return Err(invalid("gas cavity requires a positive finite timestep"));
         }
         let (compression, heat_rate) = (inputs[0], inputs[1]);
+        self.admit_stream_state(old)?;
         let crossing = &inputs[2..];
         let rates = &crossing[STREAM_CARRIED..];
         // What the cavity holds is like when the step begins.
@@ -552,6 +649,7 @@ impl Component for GasCavity {
 
     fn stored_energy_j(&self, state: &ClosedGasParcel) -> Result<f64, GasEnergyError> {
         if self.stream.is_some() {
+            self.admit_stream_state(state)?;
             // The inventory changes, so there is no one reference to
             // measure an increment from.
             let energy = absolute_energy_j(state);
