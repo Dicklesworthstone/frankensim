@@ -352,7 +352,11 @@ fn adjoint(receipt: &J) -> &J { receipt.get("transient").unwrap().get("adjoint")
 fn same_history(plain: &J, plain_field: &J, differentiated: &J, field: &J) {
     assert_eq!(plain_field.get("temperature"), field.get("temperature"));
     for key in ["energy", "interfaces", "radiation", "conjugate", "natural"] {
-        assert_eq!(plain.get(key), differentiated.get(key), "changed forward {key}");
+        assert_eq!(
+            forward_section(plain, key),
+            forward_section(differentiated, key),
+            "changed forward {key}"
+        );
     }
     for key in ["coarse", "fine", "energy", "temperature_contact", "sampled_peak"] {
         assert_eq!(plain.get("transient").unwrap().get(key),

@@ -505,7 +505,11 @@ fn live_contact_fixed_temperature_controls_include_ambient_and_radiosity_feedbac
         assert_eq!(boundary_field.get("temperature"), field.get("temperature"));
         for receipt in [&combined, &boundary] {
             for key in ["energy", "interfaces", "temperature_contact", "radiation", "conjugate"] {
-                assert_eq!(plain.get(key), receipt.get(key), "adjoint changed primal {key}");
+                assert_eq!(
+                    forward_section(&plain, key),
+                    forward_section(receipt, key),
+                    "adjoint changed primal {key}"
+                );
             }
         }
         let report = combined.get("nominal_adjoint").unwrap();

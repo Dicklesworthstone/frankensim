@@ -36,7 +36,7 @@ fn native_prescribed_controls_include_contact_material_and_cooling_feedback() {
         assert_eq!(original.get("temperature"),field.get("temperature"));
         assert_eq!(legacy_field.get("temperature"),field.get("temperature"));
         for key in ["energy","interfaces","conjugate","radiation","natural_convection"] {
-            assert_eq!(plain.get(key),extended.get(key),"{key}");
+            assert_eq!(forward_section(&plain,key),forward_section(&extended,key),"{key}");
         }
         let report = extended.get("nominal_adjoint").unwrap();
         let legacy = legacy.get("nominal_adjoint").unwrap();
@@ -91,7 +91,11 @@ fn native_cooled_walls_keep_inward_heat_and_complete_boundary_sensitivities() {
         let (nominal, field, _) = f.solve(0.13, Some(BOUNDARY_OUTPUT), 21);
         assert_eq!(original.get("temperature"), field.get("temperature"));
         for key in ["energy", "interfaces", "natural_convection"] {
-            assert_eq!(plain.get(key), nominal.get(key), "{key}");
+            assert_eq!(
+                forward_section(&plain, key),
+                forward_section(&nominal, key),
+                "{key}"
+            );
         }
         let law = &nominal.get("natural_convection").unwrap()
             .get("laws").unwrap().as_array().unwrap()[0];

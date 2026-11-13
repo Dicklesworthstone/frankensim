@@ -103,8 +103,8 @@ fn unchanged(plain: &J, plain_field: &J, differentiated: &J, field: &J) {
     assert_eq!(plain_field.get("temperature"), field.get("temperature"));
     for key in ["energy", "interfaces", "solver"] {
         assert_eq!(
-            plain.get(key),
-            differentiated.get(key),
+            forward_section(plain, key),
+            forward_section(differentiated, key),
             "forward {key} changed"
         );
     }

@@ -21,7 +21,11 @@ fn live_contact_fixed_temperature_and_volume_mean_controls_match_physical_resolv
     assert_eq!(boundary_field.get("temperature"), field.get("temperature"));
     for receipt in [&combined, &boundary] {
         for key in ["energy", "interfaces", "temperature_contact", "solver"] {
-            assert_eq!(plain.get(key), receipt.get(key), "adjoint changed primal {key}");
+            assert_eq!(
+                forward_section(&plain, key),
+                forward_section(receipt, key),
+                "adjoint changed primal {key}"
+            );
         }
     }
     let report = combined.get("nominal_adjoint").unwrap();

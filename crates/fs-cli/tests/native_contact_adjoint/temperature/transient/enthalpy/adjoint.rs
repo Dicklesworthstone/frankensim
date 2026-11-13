@@ -104,7 +104,11 @@ fn source_multiplier(report: &J) -> f64 {
 fn unchanged(plain: &J, plain_field: &J, differentiated: &J, field: &J) {
     assert_eq!(plain_field.get("temperature"), field.get("temperature"));
     for key in ["energy", "solver", "interfaces"] {
-        assert_eq!(plain.get(key), differentiated.get(key), "forward {key} changed");
+        assert_eq!(
+            forward_section(plain, key),
+            forward_section(differentiated, key),
+            "forward {key} changed"
+        );
     }
     let plain = plain.get("transient").unwrap();
     let differentiated = differentiated.get("transient").unwrap();

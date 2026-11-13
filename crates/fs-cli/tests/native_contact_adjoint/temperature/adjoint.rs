@@ -91,7 +91,11 @@ fn live_contact_and_power_controls_match_physical_resolves_without_changing_the_
         let (nominal, field) = solve(&f, &[1.0], surface, Some(OUTPUT), 1);
         assert_eq!(plain_field.get("temperature"), field.get("temperature"));
         for key in ["energy", "interfaces", "temperature_contact", "solver"] {
-            assert_eq!(plain.get(key), nominal.get(key), "{key}");
+            assert_eq!(
+                forward_section(&plain, key),
+                forward_section(&nominal, key),
+                "{key}"
+            );
         }
         assert_eq!(nominal.get("temperature_contact").unwrap().str_field("algorithm"),
             Some(if surface { "bounded-contact-picard" } else { "coupled-newton" }));

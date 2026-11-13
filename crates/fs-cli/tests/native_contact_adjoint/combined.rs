@@ -31,7 +31,11 @@ fn combined_controls_equal_the_separate_reports_and_joint_physical_resolves() {
         assert_eq!(report.str_field("authority"), Some("Estimated"));
         assert_eq!(original.get("temperature"), field.get("temperature"));
         for key in ["energy", "interfaces", "conjugate", "radiation", "natural_convection"] {
-            assert_eq!(plain.get(key), combined.get(key), "{key}");
+            assert_eq!(
+                forward_section(&plain, key),
+                forward_section(&combined, key),
+                "{key}"
+            );
         }
         let parameters = report.get("parameters").unwrap().as_array().unwrap();
         for (i, (output, omit)) in [(OUTPUT, FIXED), (BOUNDARY_OUTPUT, CONTACT)].into_iter().enumerate() {

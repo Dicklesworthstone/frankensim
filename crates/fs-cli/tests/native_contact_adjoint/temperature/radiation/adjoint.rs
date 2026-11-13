@@ -118,7 +118,11 @@ fn ambient_live_contact_controls_match_physical_resolves_in_vacuum_and_mixed_coo
         let (nominal, field) = solve(&f, 221, Some(OUTPUT), mixed, 1.0, 1.0, 0.73);
         assert_eq!(plain_field.get("temperature"), field.get("temperature"));
         for key in ["energy", "interfaces", "temperature_contact", "radiation", "conjugate", "natural_convection"] {
-            assert_eq!(plain.get(key), nominal.get(key), "adjoint changed primal {key}");
+            assert_eq!(
+                forward_section(&plain, key),
+                forward_section(&nominal, key),
+                "adjoint changed primal {key}"
+            );
         }
         let report = nominal.get("nominal_adjoint").unwrap();
         assert_eq!(report.str_field("output"), Some(OUTPUT));

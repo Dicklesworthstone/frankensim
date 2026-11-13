@@ -39,6 +39,29 @@ fn artifact(ledger: &Path, identity: &str) -> J {
     let bytes = fs_ledger::Ledger::open(ledger.to_str().unwrap()).unwrap().get_artifact(&hash).unwrap().unwrap();
     J::parse(std::str::from_utf8(&bytes).unwrap()).unwrap()
 }
+/// A receipt section as the forward solve fixes it. The interfaces' evidence
+/// artifact hashes bytes that name their own run (deliberate provenance), and a
+/// derivative request is its own project and run, so that hash is the one field
+/// a plain and a differentiated solve of the same physics cannot share. Each side
+/// must still carry a nonempty one; every other field compares exactly.
+fn forward_section(receipt: &J, key: &str) -> Option<J> {
+    let mut section = receipt.get(key)?.clone();
+    if key == "interfaces" {
+        let J::Object(fields) = &mut section else {
+            panic!("interfaces is an object")
+        };
+        let evidence = fields
+            .iter()
+            .position(|(name, _)| name == "evidence_artifact")
+            .expect("interfaces carry an evidence_artifact");
+        let (_, artifact) = fields.remove(evidence);
+        assert!(
+            artifact.as_str().is_some_and(|hash| !hash.is_empty()),
+            "evidence_artifact is a nonempty hash: {artifact:?}"
+        );
+    }
+    Some(section)
+}
 fn pack(name: &str, property: &str, dims: fs_qty::Dims,
     value: PropertyValue, interpolation: InterpolationPolicy) -> NormalizedPack {
     let source = fs_blake3::hash_bytes(name.as_bytes());
@@ -184,7 +207,7 @@ fn native_contact_controls_preserve_the_accepted_field_and_match_card_resolves()
         let (nominal,field,run) = f.solve(0.13,Some(OUTPUT),1);
         assert_ne!(plain_run,run,"explicit derivative request has a different project/run identity");
         assert_eq!(plain_field.get("temperature"),field.get("temperature"));
-        for key in ["energy","conjugate","radiation","interfaces"] {assert_eq!(plain.get(key),nominal.get(key),"{key}");}
+        for key in ["energy","conjugate","radiation","interfaces"] {assert_eq!(forward_section(&plain,key),forward_section(&nominal,key),"{key}");}
         let report = nominal.get("nominal_adjoint").unwrap();
         assert_eq!(report.str_field("output"),Some(OUTPUT));
         assert_eq!(report.str_field("authority"),Some("Estimated"));
