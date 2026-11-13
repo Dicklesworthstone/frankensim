@@ -773,7 +773,12 @@ fn no_source_role_may_freeze_an_evolving_plastic_strain_or_rate_coordinate() {
         ));
     }
     let mut data = properties(5.0, false);
-    data[4].validity = ValidityDomain::unconstrained().with("drive", 0.0, 10.0);
+    data[4].validity = ValidityDomain::unconstrained().with_quantity(
+        "drive",
+        QuantitySpec::dimensional(Frequency::DIMS),
+        0.0,
+        10.0,
+    );
     let rate_context = QueryPoint::new()
         .with("T", 300.0)
         .unwrap()
@@ -816,7 +821,8 @@ fn renamed_temperature_requires_semantics_and_retains_the_typed_source_context()
     for property in &mut data {
         if let PropertyValue::Curve { abscissa, .. } = &mut property.value {
             *abscissa = axis.into();
-            property.validity = ValidityDomain::unconstrained().with(axis, 280.0, 320.0);
+            property.validity =
+                ValidityDomain::unconstrained().with_quantity(axis, absolute, 280.0, 320.0);
         }
     }
     let fixture = Fixture::from_properties(data, 5.0, point_context, axis, SolidLiquidPhase::Solid);

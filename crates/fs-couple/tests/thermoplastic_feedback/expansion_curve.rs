@@ -157,6 +157,8 @@ fn a_surface_path_uses_its_crossed_cells_and_explicit_temperature_axis() {
         QuantityKind::AbsoluteTemperature,
         ValueForm::Static,
     ));
+    let pressure =
+        QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static));
     let mut data = properties(500.0, false);
     let mut expansion = scalar(ALPHA, INVERSE_TEMPERATURE_DIMS, 0.0);
     pressure_surface(&mut expansion, [1e-5, 4e-5, 2e-5, 6e-5]);
@@ -165,13 +167,14 @@ fn a_surface_path_uses_its_crossed_cells_and_explicit_temperature_axis() {
         match &mut property.value {
             PropertyValue::Curve { abscissa, .. } => {
                 *abscissa = axis.into();
-                property.validity = ValidityDomain::unconstrained().with(axis, 280.0, 320.0);
+                property.validity =
+                    ValidityDomain::unconstrained().with_quantity(axis, absolute, 280.0, 320.0);
             }
             PropertyValue::Surface2D { axes, .. } => {
                 axes[0] = axis.into();
                 property.validity = ValidityDomain::unconstrained()
-                    .with(axis, 280.0, 320.0)
-                    .with("pressure", 1e5, 3e5);
+                    .with_quantity(axis, absolute, 280.0, 320.0)
+                    .with_quantity("pressure", pressure, 1e5, 3e5);
             }
             _ => {}
         }
@@ -179,11 +182,7 @@ fn a_surface_path_uses_its_crossed_cells_and_explicit_temperature_axis() {
     let point_context = QueryPoint::new()
         .with_quantity(axis, absolute, 300.0)
         .unwrap()
-        .with_quantity(
-            "pressure",
-            QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static)),
-            2e5,
-        )
+        .with_quantity("pressure", pressure, 2e5)
         .unwrap();
     let fixture =
         Fixture::from_properties(data, 500.0, point_context, axis, SolidLiquidPhase::Solid);
