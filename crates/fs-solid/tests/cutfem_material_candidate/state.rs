@@ -178,11 +178,16 @@ macro_rules! refuse_wrong_owner {
         assert!($op.recover_thermoelastic_state(
             &u, other_free, $op.prepare_material_mass(POINTS, poll).unwrap(), controls, poll,
         ).is_err());
+        // Surface points come from height_cut's bisection, which stops once
+        // its bracket is narrower than the root tolerance of the 0.5-high cut
+        // cells, so they lie within that tolerance of z = 0.73, not on it.
+        // Bulk Gauss points lie well inside the cut cells.
+        let surface_window = 0.5 * QuadratureOptions3::default().root_relative_tolerance;
         let changed_surface = Cell::new(false);
         let surface_only = $op.prepare_eigenstrain(&|cell, position| {
             let source = $op.cell_thermoelastic_state(cell).unwrap().source();
             let mut free = from_mandel(&source.free_strain_mandel());
-            if (position[2] - 0.73).abs() < 1e-12 {
+            if (position[2] - 0.73).abs() <= surface_window {
                 free[0] += 0.00001;
                 changed_surface.set(true);
             }
