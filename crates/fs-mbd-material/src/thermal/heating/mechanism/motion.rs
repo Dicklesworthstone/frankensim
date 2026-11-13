@@ -937,34 +937,68 @@ impl Motion<'_> {
                 Ok(())
             })();
             if let Err(error) = result {
+                // A trial stage is not an accepted state. The refusal is kept and the
+                // stage gets a finite placeholder that is never used: the controller
+                // polls `cancelled` before its next stage and before committing, and
+                // that poll discards this trial (below).
                 *source_error.borrow_mut() = Some(error);
-                out.fill(f64::NAN);
+                out.fill(0.0);
             }
         };
+        // A law refusing a stage of a trial that is never accepted does not refuse the
+        // motion: an oversized step's stages can probe states that no accepted state
+        // reaches. Such a trial is discarded and retried from the last accepted state
+        // with the step cut by the controller's rejection clamp, within the same
+        // attempt budget. The refusal stands only if the budget runs out or the step
+        // can no longer shrink; accepted endpoints are still checked below.
+        let controller = PiController::default();
+        let budget = self.controls.maximum_rk_attempts_per_substep;
+        let mut attempts = 0usize;
         let mut checkpoint_error = None;
-        let result = rk45_adaptive_controlled(
-            &mut state,
-            &rhs,
-            end_s,
-            self.controls.relative_state_tolerance,
-            1.0,
-            &PiController::default(),
-            self.controls.maximum_rk_attempts_per_substep,
-            &mut || match checkpoint() {
-                Ok(()) => false,
-                Err(error) => {
-                    checkpoint_error = Some(error);
-                    true
+        let report = loop {
+            let result = rk45_adaptive_controlled(
+                &mut state,
+                &rhs,
+                end_s,
+                self.controls.relative_state_tolerance,
+                1.0,
+                &controller,
+                budget - attempts,
+                &mut || {
+                    if source_error.borrow().is_some() {
+                        return true;
+                    }
+                    match checkpoint() {
+                        Ok(()) => false,
+                        Err(error) => {
+                            checkpoint_error = Some(error);
+                            true
+                        }
+                    }
+                },
+            );
+            if let Some(error) = checkpoint_error.take() {
+                return Err(error.into());
+            }
+            let refused = source_error.borrow_mut().take();
+            let report = match (result, refused) {
+                (Ok(report), None) => report,
+                (Ok(report), Some(error)) if report.status == AdaptiveStatus::Cancelled => {
+                    attempts = attempts.saturating_add(report.attempts);
+                    let tried = state.h.min(end_s - state.t);
+                    let shorter = tried * controller.max_shrink;
+                    if attempts >= budget || !positive(shorter) || state.t + shorter <= state.t {
+                        return Err(error);
+                    }
+                    state.h = shorter;
+                    continue;
                 }
-            },
-        );
-        if let Some(error) = checkpoint_error {
-            return Err(error.into());
-        }
-        if let Some(error) = source_error.into_inner() {
-            return Err(error);
-        }
-        let report = result?;
+                (_, Some(error)) => return Err(error),
+                (Err(error), None) => return Err(error.into()),
+            };
+            attempts = attempts.saturating_add(report.attempts);
+            break report;
+        };
         if report.status != AdaptiveStatus::ReachedEnd {
             return Err(Error::Budget("mechanical RK45 attempts exhausted"));
         }
@@ -1054,7 +1088,7 @@ impl Motion<'_> {
             shaft_memories,
             heat_w,
             numerical,
-            attempts: report.attempts,
+            attempts,
         })
     }
 }
