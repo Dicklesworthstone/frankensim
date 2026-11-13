@@ -411,8 +411,10 @@ fn original_composed_waves_and_slants_reach_cone_and_profile_fields() {
         for n in [16, 32] {
             let segment = if profile {
                 Segment::Profile {
+                    // exponential() takes the area flare, r(x) = r0 exp(area_flare x / 2), so the
+                    // reference's radius growth ln(r1/r0)/L is half of it and the bore ends at r1.
                     profile: Arc::new(crate::RadiusProfile::exponential(
-                        radii[0], (radii[1] / radii[0]).ln() / length, length,
+                        radii[0], 2.0 * (radii[1] / radii[0]).ln() / length, length,
                     ).unwrap()),
                     steps: crate::profile::RiccatiSteps(n),
                 }
