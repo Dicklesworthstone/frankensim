@@ -187,7 +187,14 @@ fn invalid_regional_spectra_and_budget_or_cancellation_never_publish_history() {
         GeneralizedMaxwell { e_inf: 0.0, terms: vec![] },
         GeneralizedMaxwell { e_inf: 1e6, terms: vec![(1e6, 0.0)] },
         GeneralizedMaxwell { e_inf: 1e6, terms: vec![(1e6, 1e-320)] },
-        GeneralizedMaxwell::new(1e6, vec![(1e6, 0.001); 400]).unwrap(),
+        // A regional spectrum binds one element, whose order + 1 nodes each arm adds, so one
+        // arm more than that element can hold under the dense cap (the uniform test's 400 arms
+        // span the whole wall).
+        GeneralizedMaxwell::new(
+            1e6,
+            vec![(1e6, 0.001); MAX_DG_PROPAGATOR_DOFS / (original.mesh.order + 1) + 1],
+        )
+        .unwrap(),
     ] {
         assert!(original.clone().with_compliant_wall_relaxation_regions(
             &pins, &[None, Some(&bad)],
