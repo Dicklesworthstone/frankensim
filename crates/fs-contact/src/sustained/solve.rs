@@ -728,8 +728,12 @@ pub fn solve<E>(
         if normal < 0.0 {
             // This is a new force trial, never a modification of an accepted
             // body or a returned path. The following complete response decides
-            // whether zero normal force is physically admissible.
-            candidate[3 * index] = 0.0;
+            // whether zero normal force is physically admissible. At zero
+            // normal force the Coulomb capacity mu*max(n, 0) is zero, so the
+            // trial carries no tangential force either. Keeping Newton's
+            // tangent would leave a friction force with no normal force,
+            // which only the residual tolerance admits.
+            candidate[3 * index..3 * index + 3].fill(0.0);
             feasibility_refinements += 1;
             continue;
         }

@@ -2727,7 +2727,9 @@ requires nonnegative actual normal gaps and normal forces, and independently
 checks the unchanged force residual. If numerical Newton convergence leaves a
 candidate on the penetrating side, bounded force-space refinement measures the
 original response's diagonal normal sensitivity and updates one violating
-normal-force coordinate. Every correction reevaluates all contacts through the
+normal-force coordinate. A negative normal force is replaced by a detached
+trial: zero normal force and, since the Coulomb capacity is then zero, zero
+tangential force. Every correction reevaluates all contacts through the
 complete coupled response. Natural-map conditioning scales are not substituted
 for mechanical mobility; no state, velocity or returned gap is projected.
 

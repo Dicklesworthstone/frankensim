@@ -399,7 +399,15 @@ fn detachment_removes_normal_and_tangent_force_without_adhesion() {
     )
     .unwrap();
     assert_eq!(step.solve.forces_n[0], [0.0; 3]);
-    assert!(step.total_response_evaluations > step.solve.response_evaluations);
+    // The sustained solve replaces a negative normal force by a detached trial
+    // itself (fs-contact 85b28f8a7f), so it never returns one and the step's
+    // warm restart is not needed: one solve, with its feasibility pass, ends
+    // the contact.
+    assert!(step.solve.feasibility_refinements >= 1);
+    assert_eq!(
+        step.total_response_evaluations,
+        step.solve.response_evaluations
+    );
     assert!(step.total_response_evaluations <= controls().solve.maximum_response_evaluations);
     assert!(step.total_nonlinear_iterations <= controls().solve.maximum_iterations);
     close(step.solve.paths_m[0][0], 0.03125);
