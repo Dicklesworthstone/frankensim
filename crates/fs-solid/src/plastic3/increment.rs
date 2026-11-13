@@ -288,6 +288,10 @@ pub(crate) fn solve_with_inertia<O: IncrementOperator>(
         let mut elastic_free_norm = free.iter().fold(0.0_f64, |n, &d| n.hypot(f_int[d]));
         let mut static_force_scale = elastic_free_norm.max(external_free_norm);
         let mut increment_reference = 0.0_f64;
+        // The inertial gate's scale is recomputed from each accepted iterate.
+        // Like the static scale it never falls within an increment: an
+        // iterate that approaches rest must not shrink its own reference.
+        let mut inertial_force_scale = 0.0_f64;
         if let Some(inertia) = inertia {
             inertia.add_force(&u, &mut f_int, cx)?;
         }
@@ -300,7 +304,14 @@ pub(crate) fn solve_with_inertia<O: IncrementOperator>(
                 .collect();
             let pending_any = pending.iter().any(|&(_, dp)| dp != 0.0);
             let scale = if let Some(inertia) = inertia {
-                inertia.force_scale(&u, &free, elastic_free_norm, external_free_norm, cx)?
+                inertial_force_scale = inertial_force_scale.max(inertia.force_scale(
+                    &u,
+                    &free,
+                    elastic_free_norm,
+                    external_free_norm,
+                    cx,
+                )?);
+                inertial_force_scale
             } else {
                 static_force_scale.max(f64::MIN_POSITIVE)
             };
