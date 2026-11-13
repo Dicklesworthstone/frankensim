@@ -18,6 +18,26 @@
 //!   identity is the modal port itself.
 //! - `heat`, a heat port receiving effort: the temperature [K] at which the modal damping releases
 //!   its heat. It returns minus the mean heat rate of the step, `-D / dt` [W].
+//! - With [`ModalStructure::publishing_ends`], one signal output per attachment after `heat`,
+//!   `<id>.end`, of the attachment's width: row `r` returns `sum_k s_rk v1_k`, the flow at the end
+//!   of the step.
+//!
+//! The end of a step. The owner's step is exact for a held force, not the midpoint rule, so the
+//! flow does not end its step at twice the mean less its start. An attachment's port says so
+//! ([`Component::end_of_step`]): it answers [`EndOfStep::Told`] with its end output when the ends
+//! are published, and [`EndOfStep::Untold`] otherwise, so that a system joins the structure to a
+//! load line only where the line is told the end.
+//!
+//! The port map's tangent ([`PortTangent`]). Each mode's step is affine in its held force `f_k`:
+//! a unit force adds the owner's unit-force response to its displacement and velocity
+//! ([`ModalAcousticTimeModel::unit_force_response_into`], the mobility the owner's held-force
+//! solve inverts). The mean flows' rows are `sum_k s_rk s_ck G_q,k / dt` and the ends' rows
+//! `sum_k s_rk s_ck G_v,k`, the same at every state. The heat row is minus the derivative of the
+//! step's heat over `dt`: per mode, `d(W - dE)/df_k = dq_k + f_k G_q,k - v1_k G_v,k - w_k^2 q1_k
+//! G_q,k`, from the step at the iterate (0 for a mode with no damping). That row is a difference
+//! of terms the size of the work, and its relative error grows as the damping shrinks: it is
+//! measured in `tests/modal_structure.rs`, and nothing beyond that measurement is claimed. The
+//! temperature's column is zero. `vjp` is the transpose of the same pieces.
 //!
 //! Receipt: the stored change is the modal mechanical energy `sum 1/2 (v^2 + w^2 q^2)` measured at
 //! both ends by the owner's law ([`ModalAcousticTimeModel::energy_j`]); the dissipation is the
@@ -26,10 +46,10 @@
 //! is `D / T`.
 //!
 //! No claim: the narrow-band observer transfers of the owner are not used (an observer is a probe of
-//! its own), so a model carrying one is refused; the port map's tangent is not offered, so a kernel
-//! loop differences it, although the mechanical rows are affine in the efforts (the heat row is
-//! quadratic, so the class is [`Class::Smooth`]); one propose clones the owner's model and allocates
-//! its workspace and the force bank; the owner's statements (exact for a held force, the Nyquist
+//! its own), so a model carrying one is refused; the heat row is quadratic in the efforts, so the
+//! class is [`Class::Smooth`]; one propose clones the owner's model and allocates its workspace and
+//! the force bank, and one tangent call allocates the gains and takes each damped mode's step once
+//! more; the owner's statements (exact for a held force, the Nyquist
 //! admission of its nominal clock, its budgets) are unchanged by the wrapping. The port flows are
 //! endpoint differences `q1 - q0`, while the owner books its work on the increment it added (which
 //! it keeps because a subtraction of endpoints can erase a small work); the owner does not publish
@@ -43,7 +63,8 @@ use core::num::NonZeroUsize;
 use fs_exec::Cx;
 use fs_modal::time::{ModalAcousticTimeError, ModalAcousticWorkspace};
 use fs_ports::component::{
-    Class, Component, ContractViolation, PortRole, PortSpec, Proposal, Receipt,
+    Class, Component, ContractViolation, EndOfStep, PortRole, PortSpec, PortTangent, Proposal,
+    Receipt,
 };
 use fs_ports::{PortKind, StableId};
 
@@ -213,6 +234,18 @@ pub struct ModalStructure {
     weights: Vec<f64>,
     rows: usize,
     ports: Vec<PortSpec>,
+    /// Each attachment's width, in port order: ports `0..widths.len()` are theirs.
+    widths: Vec<NonZeroUsize>,
+    /// Whether each attachment's end flow is returned on a signal output after `heat`.
+    tells_ends: bool,
+}
+
+/// The step's gains in each mode's held force, at one iterate.
+struct Gains {
+    /// Per mode: the displacement and velocity a unit held force adds to the step.
+    unit: Vec<ModalAcousticState>,
+    /// Per mode: the derivative of the step's heat in its held force [J sqrt(kg)/N].
+    heat: Vec<f64>,
 }
 
 impl ModalStructure {
@@ -236,6 +269,7 @@ impl ModalStructure {
         }
         let mut weights = Vec::new();
         let mut ports = Vec::with_capacity(attachments.len() + 1);
+        let mut widths = Vec::with_capacity(attachments.len());
         let mut rows = 0_usize;
         for (index, attachment) in attachments.into_iter().enumerate() {
             let expected = attachment.width.get() * modes;
@@ -251,6 +285,7 @@ impl ModalStructure {
             }
             weights.extend_from_slice(&attachment.weights);
             rows += attachment.width.get();
+            widths.push(attachment.width);
             ports.push(
                 PortSpec::power(
                     attachment.id,
@@ -269,7 +304,31 @@ impl ModalStructure {
             weights,
             rows,
             ports,
+            widths,
+            tells_ends: false,
         })
+    }
+
+    /// The same structure telling the end of each attachment's flow: one signal output per
+    /// attachment after `heat`, `<id>.end`, of the attachment's width, whose row `r` returns
+    /// `sum_k s_rk v1_k`. An attachment's port then answers [`EndOfStep::Told`] with that output.
+    /// Asking twice adds them once.
+    ///
+    /// # Errors
+    /// [`ModalStructureRefusal::Port`] when an end's name repeats a port of the structure (an
+    /// attachment named `a.end` beside one named `a`).
+    pub fn publishing_ends(mut self) -> Result<Self, ModalStructureRefusal> {
+        if self.tells_ends {
+            return Ok(self);
+        }
+        for (attachment, &width) in self.widths.iter().enumerate() {
+            let id = StableId::new(format!("{}.end", self.ports[attachment].id().as_str()))
+                .map_err(ModalStructureRefusal::Identifier)?;
+            self.ports.push(PortSpec::signal_out(id, width));
+        }
+        fs_ports::component::PortLayout::new(&self.ports).map_err(ModalStructureRefusal::Port)?;
+        self.tells_ends = true;
+        Ok(self)
     }
 
     /// Admit the owner's model for `modes`, each `(angular frequency [rad/s], viscous damping
@@ -329,6 +388,61 @@ impl ModalStructure {
             })
         }
     }
+
+    /// Each mode's generalized force under the rows' efforts: `f_k = sum_r s_rk e_r`.
+    fn forces(&self, efforts: &[f64]) -> Vec<f64> {
+        let modes = self.modes();
+        let mut force = vec![0.0_f64; modes];
+        for (row, &effort) in efforts[..self.rows].iter().enumerate() {
+            let weights = &self.weights[row * modes..(row + 1) * modes];
+            for (f, &w) in force.iter_mut().zip(weights) {
+                *f += w * effort;
+            }
+        }
+        force
+    }
+
+    /// The step's gains at the iterate `inputs` from `old` over `dt_s`.
+    fn gains(
+        &self,
+        old: &[ModalAcousticState],
+        dt_s: f64,
+        inputs: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<Gains, ModalStructureRefusal> {
+        cx.checkpoint()
+            .map_err(|_| ModalStructureRefusal::Cancelled)?;
+        self.check_states(old)?;
+        let kelvin = inputs[self.rows];
+        if !(kelvin.is_finite() && kelvin > 0.0) {
+            return Err(ModalStructureRefusal::Temperature { kelvin });
+        }
+        let modes = self.modes();
+        let mut unit = vec![ModalAcousticState::default(); modes];
+        self.model.unit_force_response_into(dt_s, &mut unit)?;
+        let force = self.forces(inputs);
+        let mut heat = vec![0.0_f64; modes];
+        for k in 0..modes {
+            if self.model.damping_rate_per_s(k) == 0.0 {
+                continue;
+            }
+            // The step itself, without the owner's budgets: those are the proposal's to apply.
+            let end = self
+                .model
+                .advance_exact_zoh_duration_step(k, old[k], force[k], dt_s)?;
+            let omega = self.model.modes()[k].angular_frequency_rad_s;
+            let (q1, v1) = (end.displacement_m_sqrt_kg, end.velocity_m_sqrt_kg_per_s);
+            let (gq, gv) = (
+                unit[k].displacement_m_sqrt_kg,
+                unit[k].velocity_m_sqrt_kg_per_s,
+            );
+            // `W = f (q1 - q0)` and `dE = (v1^2 + w^2 q1^2) / 2 - E0`; the exact step's heat is
+            // `W - dE`, and each of `q1` and `v1` moves by its gain per unit force.
+            let moved = q1 - old[k].displacement_m_sqrt_kg;
+            heat[k] = moved + force[k] * gq - v1 * gv - omega * omega * q1 * gq;
+        }
+        Ok(Gains { unit, heat })
+    }
 }
 
 impl Component for ModalStructure {
@@ -351,6 +465,14 @@ impl Component for ModalStructure {
         Ok(self.model.energy_j(state)?)
     }
 
+    fn end_of_step(&self, port: usize) -> EndOfStep {
+        if self.tells_ends && port < self.widths.len() {
+            EndOfStep::Told(self.widths.len() + 1 + port)
+        } else {
+            EndOfStep::Untold
+        }
+    }
+
     fn propose(
         &self,
         old: &Vec<ModalAcousticState>,
@@ -368,13 +490,7 @@ impl Component for ModalStructure {
         if !(kelvin.is_finite() && kelvin > 0.0) {
             return Err(ModalStructureRefusal::Temperature { kelvin });
         }
-        let mut force = vec![0.0_f64; modes];
-        for (row, &effort) in inputs[..rows].iter().enumerate() {
-            let weights = &self.weights[row * modes..(row + 1) * modes];
-            for (f, &w) in force.iter_mut().zip(weights) {
-                *f += w * effort;
-            }
-        }
+        let force = self.forces(inputs);
 
         let mut model = self.model.clone();
         model.restore_states(old)?;
@@ -408,6 +524,16 @@ impl Component for ModalStructure {
             paired_j += inputs[row].abs() * size;
         }
         outputs[rows] = -heat_j / dt_s;
+        if self.tells_ends {
+            for row in 0..rows {
+                let weights = &self.weights[row * modes..(row + 1) * modes];
+                let mut end = 0.0_f64;
+                for (w, reached) in weights.iter().zip(new.iter()) {
+                    end += w * reached.velocity_m_sqrt_kg_per_s;
+                }
+                outputs[rows + 1 + row] = end;
+            }
+        }
         let mut endpoints_j = 0.0_f64;
         for k in 0..modes {
             endpoints_j += force[k].abs()
@@ -430,5 +556,76 @@ impl Component for ModalStructure {
             residual: 0.0,
             tolerance: 0.0,
         }))
+    }
+}
+
+impl PortTangent for ModalStructure {
+    fn jvp(
+        &self,
+        old: &Vec<ModalAcousticState>,
+        dt_s: f64,
+        inputs: &[f64],
+        d_inputs: &[f64],
+        d_outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ModalStructureRefusal> {
+        let gains = self.gains(old, dt_s, inputs, cx)?;
+        let (modes, rows) = (self.modes(), self.rows);
+        let d_force = self.forces(d_inputs);
+        let mut heat = 0.0_f64;
+        for (slope, d) in gains.heat.iter().zip(&d_force) {
+            heat += slope * d;
+        }
+        for row in 0..rows {
+            let weights = &self.weights[row * modes..(row + 1) * modes];
+            let (mut mean, mut end) = (0.0_f64, 0.0_f64);
+            for ((w, unit), d) in weights.iter().zip(&gains.unit).zip(&d_force) {
+                mean += w * (unit.displacement_m_sqrt_kg * d);
+                end += w * (unit.velocity_m_sqrt_kg_per_s * d);
+            }
+            d_outputs[row] = mean / dt_s;
+            if self.tells_ends {
+                d_outputs[rows + 1 + row] = end;
+            }
+        }
+        d_outputs[rows] = -heat / dt_s;
+        Ok(())
+    }
+
+    fn vjp(
+        &self,
+        old: &Vec<ModalAcousticState>,
+        dt_s: f64,
+        inputs: &[f64],
+        bar_outputs: &[f64],
+        bar_inputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ModalStructureRefusal> {
+        let gains = self.gains(old, dt_s, inputs, cx)?;
+        let (modes, rows) = (self.modes(), self.rows);
+        let mut bar_force = vec![0.0_f64; modes];
+        for (k, bar) in bar_force.iter_mut().enumerate() {
+            let (mut mean, mut end) = (0.0_f64, 0.0_f64);
+            for row in 0..rows {
+                let weight = self.weights[row * modes + k];
+                mean += weight * bar_outputs[row];
+                if self.tells_ends {
+                    end += weight * bar_outputs[rows + 1 + row];
+                }
+            }
+            *bar = gains.unit[k].displacement_m_sqrt_kg * mean / dt_s
+                - gains.heat[k] * bar_outputs[rows] / dt_s
+                + gains.unit[k].velocity_m_sqrt_kg_per_s * end;
+        }
+        for (row, bar_input) in bar_inputs[..rows].iter_mut().enumerate() {
+            let weights = &self.weights[row * modes..(row + 1) * modes];
+            let mut sum = 0.0_f64;
+            for (w, b) in weights.iter().zip(&bar_force) {
+                sum += w * b;
+            }
+            *bar_input = sum;
+        }
+        bar_inputs[rows] = 0.0;
+        Ok(())
     }
 }

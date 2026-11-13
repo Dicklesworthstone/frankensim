@@ -4,7 +4,9 @@
 //! Component contract: attachments through which efforts act on the modes, and a heat port for
 //! the modal damping. Here it passes the conformance check, is shown to add nothing to the
 //! owner's step, and is run by the kernel through a strike and a free decay whose heat goes to a
-//! sink, with the ledger closing on the owner's work and heat.
+//! sink, with the ledger closing on the owner's work and heat. Beside a load line, a 64-mode string
+//! added with its tangent hands the line its own mobilities, and joins a line only where the line
+//! is told how its step ends.
 //! Run with `cargo test -p fs-system --features modal-slices --test modal_structure_slice`.
 
 // Exact float comparisons here assert bitwise agreement with the owner.
@@ -437,4 +439,273 @@ fn the_structure_refuses_what_it_cannot_represent() {
     })
     .unwrap_err();
     assert_eq!(refused, ModalStructureRefusal::Cancelled);
+}
+
+// A string beside a load line (bead rc-1109 .12.5, commit 2): the line it is handed, and how
+// its step ends.
+
+/// A load-line component of one port, `a`, that takes the end of the step on the signal input
+/// `a.end` or takes none: it returns no effort and keeps what it is handed.
+struct LineProbe {
+    ports: Vec<fs_ports::component::PortSpec>,
+    takes_end: bool,
+}
+
+impl LineProbe {
+    fn new(takes_end: bool) -> Self {
+        use fs_ports::component::{PortRole, PortSpec};
+        let mut ports = vec![
+            PortSpec::power(
+                StableId::new("a").expect("id"),
+                PortKind::MechanicalForceVelocity,
+                PortRole::FlowIn,
+                NonZeroUsize::MIN,
+            )
+            .expect("port"),
+        ];
+        if takes_end {
+            ports.push(PortSpec::signal_in(
+                StableId::new("a.end").expect("id"),
+                NonZeroUsize::MIN,
+            ));
+        }
+        Self { ports, takes_end }
+    }
+}
+
+impl Component for LineProbe {
+    type State = Vec<f64>;
+    // It refuses nothing (`fs_system::elements` is behind the `constitutive` feature).
+    type Error = core::convert::Infallible;
+
+    fn ports(&self) -> &[fs_ports::component::PortSpec] {
+        &self.ports
+    }
+
+    fn class(&self) -> fs_ports::component::Class {
+        fs_ports::component::Class::NonSmooth
+    }
+
+    fn stored_energy_j(&self, _handed: &Vec<f64>) -> Result<f64, Self::Error> {
+        Ok(0.0)
+    }
+
+    fn propose(
+        &self,
+        old: &Vec<f64>,
+        dt_s: f64,
+        inputs: &[f64],
+        new: &mut Vec<f64>,
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<Proposal, Self::Error> {
+        let zero = vec![0.0; if self.takes_end { 2 } else { 1 }];
+        fs_ports::component::LoadLine::propose_on_line(
+            self, old, dt_s, inputs, &zero, new, outputs, cx,
+        )
+    }
+}
+
+impl fs_ports::component::LoadLine for LineProbe {
+    fn line_ports(&self) -> &[usize] {
+        &[0]
+    }
+
+    fn line_ends(&self) -> &[Option<usize>] {
+        if self.takes_end { &[Some(1)] } else { &[] }
+    }
+
+    fn propose_on_line(
+        &self,
+        _old: &Vec<f64>,
+        _dt_s: f64,
+        _inputs: &[f64],
+        compliance: &[f64],
+        new: &mut Vec<f64>,
+        outputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<Proposal, Self::Error> {
+        new.clear();
+        new.extend_from_slice(compliance);
+        outputs.fill(0.0);
+        Ok(Proposal::Step(fs_ports::component::Receipt::lossless(
+            0.0,
+            f64::MIN_POSITIVE,
+        )))
+    }
+}
+
+const STRING_RATE_HZ: u32 = 48_000;
+const STRING_MODES: usize = 64;
+const STRING_HZ: f64 = 196.0;
+const STRING_RATIO: f64 = 2.0e-4;
+/// A string of 1 g bowed at a tenth of its length: mode shapes `sqrt(2 / m) sin(n pi x / L)`.
+const STRING_KG: f64 = 1.0e-3;
+const BOW_AT: f64 = 0.1;
+
+fn string_modes() -> Vec<(f64, f64)> {
+    (1..=STRING_MODES)
+        .map(|n| (TAU * STRING_HZ * n as f64, STRING_RATIO))
+        .collect()
+}
+
+fn bow_shapes() -> Vec<f64> {
+    (1..=STRING_MODES)
+        .map(|n| (2.0 / STRING_KG).sqrt() * (core::f64::consts::PI * n as f64 * BOW_AT).sin())
+        .collect()
+}
+
+fn string(telling: bool) -> ModalStructure {
+    let structure = ModalStructure::from_modes(
+        STRING_RATE_HZ,
+        &string_modes(),
+        ModalAcousticTimeBudget::audible_reference(),
+        vec![ModalAttachment {
+            id: StableId::new("bow").expect("id"),
+            kind: PortKind::MechanicalForceVelocity,
+            width: NonZeroUsize::MIN,
+            weights: bow_shapes(),
+        }],
+    )
+    .expect("string");
+    if telling {
+        structure.publishing_ends().expect("ends")
+    } else {
+        structure
+    }
+}
+
+fn ringing() -> Vec<ModalAcousticState> {
+    (1..=STRING_MODES)
+        .map(|n| ModalAcousticState {
+            displacement_m_sqrt_kg: 1.0e-6 / n as f64,
+            velocity_m_sqrt_kg_per_s: 1.0e-3 / (n * n) as f64,
+        })
+        .collect()
+}
+
+/// How the string joins the line.
+#[derive(Clone, Copy, PartialEq)]
+enum Joined {
+    /// Added with its tangent.
+    Declared,
+    /// Added without it: the kernel differences it.
+    Differenced,
+}
+
+/// A system of the string beside a probe on a line, sealed; its heat goes to a sink.
+fn beside(
+    telling: bool,
+    joined: Joined,
+    takes_end: bool,
+) -> Result<(fs_system::System, fs_system::NodeId), fs_system::AdmissionError> {
+    let mut builder = SystemBuilder::new();
+    let structure = string(telling);
+    let node = match joined {
+        Joined::Declared => builder.add_with_tangent("string", structure, ringing()),
+        Joined::Differenced => builder.add("string", structure, ringing()),
+    }
+    .expect("string");
+    let probe = builder
+        .add_on_line("probe", LineProbe::new(takes_end), Vec::new())
+        .expect("probe");
+    let bow = builder.port(node, "bow").expect("bow");
+    let a = builder.port(probe, "a").expect("a");
+    builder.common_flow(bow, &[a]).expect("bow on the line");
+    builder
+        .heat_route(
+            builder.port(node, "heat").expect("heat"),
+            &[],
+            Some(heat_sink("air", AIR_K).expect("sink")),
+            RouteTemperature::Fixed(AIR_K),
+        )
+        .expect("heat route");
+    builder.seal().map(|system| (system, probe))
+}
+
+#[test]
+fn a_line_beside_a_string_with_its_tangent_is_handed_the_strings_own_mobilities() {
+    let dt_s = 1.0 / f64::from(STRING_RATE_HZ);
+    let structure = string(true);
+    let mut gains = vec![ModalAcousticState::default(); STRING_MODES];
+    structure
+        .model()
+        .unit_force_response_into(dt_s, &mut gains)
+        .expect("gains");
+    // The line's two entries from the owner's gains: the mean flow's and the end's mobility.
+    let (mut mean, mut end) = (0.0_f64, 0.0_f64);
+    for (shape, gain) in bow_shapes().iter().zip(&gains) {
+        mean += shape * shape * gain.displacement_m_sqrt_kg;
+        end += shape * shape * gain.velocity_m_sqrt_kg_per_s;
+    }
+    mean /= dt_s;
+    // The gains against the closed form of a damped oscillator's response from rest to a unit
+    // force: an independent check that they are the modes' own.
+    let mut closed_worst = 0.0_f64;
+    for (&(omega, zeta), gain) in string_modes().iter().zip(&gains) {
+        let rate = zeta * omega;
+        let damped = omega * (1.0 - zeta * zeta).sqrt();
+        let decay = (-rate * dt_s).exp();
+        let (sine, cosine) = (damped * dt_s).sin_cos();
+        let velocity = decay * sine / damped;
+        let displacement = (1.0 - decay * (cosine + rate / damped * sine)) / (omega * omega);
+        closed_worst = closed_worst
+            .max(((gain.velocity_m_sqrt_kg_per_s - velocity) / velocity).abs())
+            .max(((gain.displacement_m_sqrt_kg - displacement) / displacement).abs());
+    }
+    eprintln!("the owner's gains against the closed form: worst relative {closed_worst:e}");
+    assert!(closed_worst <= 1.0e-9, "{closed_worst:e}");
+
+    for joined in [Joined::Declared, Joined::Differenced] {
+        let (mut system, probe) = beside(true, joined, true).expect("sealed");
+        let report =
+            with_cx(&CancelGate::new_clock_free(), |cx| system.step(dt_s, cx)).expect("step");
+        let handed = system.state::<Vec<f64>>(probe).expect("probe").clone();
+        let (off_mean, off_end) = ((handed[0] - mean) / mean, (handed[1] - end) / end);
+        eprintln!(
+            "{}: handed {:e} and {:e} for {mean:e} and {end:e}: relative {off_mean:e} and {off_end:e}, {} unresolved",
+            if joined == Joined::Declared {
+                "declared"
+            } else {
+                "differenced"
+            },
+            handed[0],
+            handed[1],
+            report.unresolved
+        );
+        if joined == Joined::Declared {
+            assert!(off_mean.abs() <= 1.0e-14 && off_end.abs() <= 1.0e-14);
+            assert_eq!(report.unresolved, 0);
+        }
+    }
+}
+
+#[test]
+fn a_string_joins_a_line_only_where_the_line_is_told_how_its_step_ends() {
+    let refused =
+        |result: Result<(fs_system::System, fs_system::NodeId), fs_system::AdmissionError>,
+         says: &str| match result {
+            Err(fs_system::AdmissionError::LineEnd { port, reason }) => {
+                assert!(reason.contains(says), "{port}: {reason}");
+                assert!(port.contains("probe"), "{port}");
+            }
+            Err(other) => panic!("{other}"),
+            Ok(_) => panic!("sealed: expected a refusal that says `{says}`"),
+        };
+    assert!(
+        beside(true, Joined::Declared, true).is_ok(),
+        "told, beside a port that takes it"
+    );
+    refused(
+        beside(true, Joined::Declared, false),
+        "the port takes no end input",
+    );
+    refused(
+        beside(false, Joined::Declared, true),
+        "does not tell its end",
+    );
+    refused(
+        beside(false, Joined::Declared, false),
+        "does not tell its end",
+    );
 }

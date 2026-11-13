@@ -1438,6 +1438,23 @@ and demonstrates the old pinning error; G3 checks mixed-sign multimode ports
 in all damping regimes and full/half/subsample durations. This enforces only
 endpoint velocity: continuous no-slip motion, exact within-step event times,
 and a passive contact discretization are not claimed.
+
+`unit_force_response_into` returns that unit-force response for every mode at
+any duration: the displacement and velocity each mode reaches from rest under
+a unit held generalized force, through the transition `step_duration_into`
+takes for that duration (cached for the full and half sample, prepared
+otherwise, explicit damping rates included). One private function forms the
+response for it, for the held-force solve's mobility and for
+`probe_linear_map`'s force column, so the gains it returns are the numbers the
+solve inverts. A step is affine in its held force, so these are its gains in
+that force from any state, to the rounding of the response itself; fs-nlmodal's
+`ModalStructure` builds its port map's tangent from them. No budget is
+checked: a unit force is a direction, not a load. A nonpositive or nonfinite
+duration and a slice not of one state per mode are refused, and no state
+changes. `tests/unit_force_response.rs` pins the response to the solve's
+mobility to the bit at the full and half sample and an off-clock duration, for
+a bank of ratios and one of explicit rates, and to the step's own change under
+a held force.
 Each frame retains independent mode-local integrals of physical viscous power
 `2*zeta*omega*v(t)^2`, with scale-aware contraction roundoff allowances. Their
 sum supplies the aggregate heat. Undamped and free modes report exactly zero;

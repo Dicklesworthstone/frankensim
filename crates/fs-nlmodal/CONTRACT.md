@@ -451,7 +451,9 @@ because an observer is a probe of its own.
   rows of mode shapes at the points, a mouth pressure on an air column is a row of `1/sqrt(M_k)`
   (`M_k` the mode's acoustic mass per unit volume flow [kg/m^4]), and identity weights are the
   modal port. The heat port returns
-  `-D / dt`, where `D` is the owner's viscous heat of the step.
+  `-D / dt`, where `D` is the owner's viscous heat of the step. With `publishing_ends`, one
+  signal output per attachment follows `heat`, `<id>.end`, of the attachment's width: row `r`
+  returns `sum_k s_rk v1_k`, the flow at the end of the step.
 - State: `Vec<ModalAcousticState>`, one entry per mode, owned by the system.
   `stored_energy_j` is `ModalAcousticTimeModel::energy_j`, the owner's per-mode law and
   compensated sum.
@@ -463,8 +465,23 @@ because an observer is a probe of its own.
   `4 (rows + modes + 16)` units in the last place of their sizes. The owner's heat allowance
   is not in it: the same `D` enters the audit through the heat port and the numerical loss, so
   its error cancels.
-- Class `Smooth`: the mechanical rows are affine in the efforts, the heat row is quadratic. No
-  tangent tier.
+- Class `Smooth`: the mechanical rows are affine in the efforts, the heat row is quadratic.
+- The end of a step (`Component::end_of_step`): the owner's step is exact for a held force, not
+  the midpoint rule, so an attachment's flow does not end its step at twice its mean less its
+  start. An attachment's port answers `EndOfStep::Told` with its end output when the ends are
+  published, and `EndOfStep::Untold` otherwise; the fs-system kernel then joins it to a load
+  line only where the line takes the end (fs-system contract). No landed graph joined a
+  `ModalStructure` to a line when this was ruled (MB 30980).
+- Tangent tier (`PortTangent`). Each mode's step is affine in its held force: a unit force adds
+  the owner's unit-force response `(G_q,k, G_v,k)`
+  (`ModalAcousticTimeModel::unit_force_response_into`, the mobility the owner's held-force
+  solve inverts) to the mode's displacement and velocity. The mean flows' rows are
+  `sum_k s_rk s_ck G_q,k / dt` and the ends' rows `sum_k s_rk s_ck G_v,k`, the same at every
+  state. The heat row is `-(1/dt) sum_k s_ck dD_k/df_k`, with `dD_k/df_k = dq_k + f_k G_q,k -
+  v1_k G_v,k - w_k^2 q1_k G_q,k`, the derivative of `W - dE` (the exact step's heat), from the
+  step at the iterate (`advance_exact_zoh_duration_step`, which applies no budget), and 0 for a
+  mode whose damping rate is 0. The temperature's column is zero. `vjp` is the transpose of the
+  same pieces.
 - `ModalStructureRefusal`: the owner's error unchanged, an observer transfer, weights of the
   wrong count or not finite, a refused identifier or port list, a state of the wrong length, a
   temperature that is not positive and finite, cancellation.
@@ -674,7 +691,23 @@ modal energies, leaked fractions, tensor size); typed refusals.
 
 `tests/modal_structure.rs` refuses a model that carries an observer transfer and admits the
 same model without it (an integration test: the crate's lib test target does not compile at
-origin, where `fd_probe` imports `fd_coupling`, removed in ca7b47dbf8). The composition-kernel slice of `ModalStructure` is
+origin, where `fd_probe` imports `fd_coupling`, removed in ca7b47dbf8). On a damped mode, an
+undamped one and a damped free coordinate under two rows of unequal weights, at the full and
+half sample and an off-clock step, it also checks:
+- each mean and end column of the tangent against the difference of two proposals 1 N apart
+  (exact for an affine row), within 1e-12 of the size the endpoints round at; every proposal
+  compared is a step the structure took, its candidates under 1e-5 of the displacement budget,
+  1e-7 of the velocity budget and 1e-14 of the energy budget of the reference budget;
+- the heat column against a central difference of the owner's heat (the row is quadratic),
+  within 9e-11 relative, a regression guard of the measured 4.007e-11 (see the no-claim
+  boundaries);
+- `vjp` against `jvp` as its transpose, `<w, J u> = <J^T w, u>` within `20 eps` of the
+  products' sizes, for seeded directions;
+- the temperature's column zero, and the heat column of an undamped structure exactly 0;
+- the end outputs as `sum_k s_rk v1_k` of the candidate to the bit, the other outputs and the
+  candidate unchanged by telling them, `Told` and `Untold` as above, and an end's name that
+  repeats a port refused.
+The composition-kernel slice of `ModalStructure` is
 `crates/fs-system/tests/modal_structure_slice.rs` (`--features modal-slices`); see the
 fs-system contract.
 
@@ -706,8 +739,9 @@ Its composition-kernel slice is `crates/fs-system/tests/loaded_modal_slice.rs`
 
 ## No-claim boundaries
 
-- `ModalStructure` offers no port tangent, clones the owner's model and allocates its
-  workspace in every proposal, and claims nothing the owner's step does not: exact for a held
+- `ModalStructure` clones the owner's model and allocates its workspace in every proposal,
+  allocates its gains and takes each damped mode's step once more in every tangent call, and
+  claims nothing the owner's step does not: exact for a held
   force, modes admitted below the Nyquist guard of the model's nominal clock, the owner's
   budgets. It adds no observer, radiation or contact law.
 - Its port flows are endpoint differences `q1 - q0`; the owner books work on the increment it
@@ -715,6 +749,17 @@ Its composition-kernel slice is `crates/fs-system/tests/loaded_modal_slice.rs`
   Under a statically held load or a free coordinate drifting under a constant force that
   tolerance is wide against the step's work, and a leak below it shows only in the ledger's
   accepted-defect account.
+- The heat row of its tangent is a difference of terms the size of the work, and its relative
+  error grows as the damping shrinks. It is measured in `tests/modal_structure.rs` against a
+  central difference of the owner's heat: over that test's three steps and two columns the
+  worst relative difference was 4.007e-11 (ts2, ca204c7b16, 2026-11-13; the 0.37-sample step,
+  column 1). The test's bound, 9e-11 (twice that, rounded up to one digit), guards against a
+  regression of that measured value; it is not an accuracy claim. The step is exact for a held
+  force and the central difference is exact for a quadratic row, so the measured difference is
+  roundoff. The owner's frame bounds the roundoff of its heat `D`
+  (`dissipation_roundoff_tolerance_j`, not passed on in the structure's receipt), not of this
+  row, which the structure forms from terms the size of the work; so no bound is derived from
+  the integrator. Nothing beyond that measurement is claimed.
 - The opt-in SAV API does not migrate existing render consumers or close the
   full M1.1-W3/M5.2-W1 work items. Conserving auxiliary energy alone certifies
   neither physical nonlinear energy nor accurate harmonics. The caller must

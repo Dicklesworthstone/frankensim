@@ -920,7 +920,10 @@ impl ModalAcousticTimeModel {
             },
             0.0,
         );
-        let s_f = self.advance_exact_zoh_step(mode_index, ModalAcousticState::default(), 1.0);
+        let s_f = unit_force_response(
+            self.modes[mode_index],
+            self.transition_kernel.full[mode_index].transition,
+        );
         (
             qq,
             s_v.displacement_m_sqrt_kg,
@@ -1405,18 +1408,12 @@ impl ModalAcousticTimeModel {
         let mut port_mobility_m_s_per_n = 0.0;
         for (mode_index, (mode, state)) in self.modes.iter().zip(&self.states).enumerate() {
             let phi = port_shapes[mode_index];
-            let transition = match transition_coefficients {
-                Some(coefficients) => coefficients[mode_index].transition,
-                None => self
-                    .transition_kernel
-                    .transition(mode_index, *mode, duration_s),
-            };
+            let transition =
+                self.duration_transition(transition_coefficients, mode_index, *mode, duration_s);
             let free = advance_exact_zoh_cached(*mode, *state, 0.0, transition);
-            let unit =
-                advance_exact_zoh_cached(*mode, ModalAcousticState::default(), 1.0, transition);
             // Mobility is the force response from rest, independent of the
             // accepted state. Subtracting two large free velocities can erase it.
-            let mode_mobility = unit.velocity_m_sqrt_kg_per_s;
+            let mode_mobility = unit_force_response(*mode, transition).velocity_m_sqrt_kg_per_s;
             free_port_velocity_m_s += phi * free.velocity_m_sqrt_kg_per_s;
             port_mobility_m_s_per_n += phi * phi * mode_mobility;
         }
@@ -1438,6 +1435,64 @@ impl ModalAcousticTimeModel {
             });
         }
         Ok(held_force_n)
+    }
+
+    /// Every mode's response from rest to a unit held generalized force over
+    /// `duration_s`: `responses[k]` is the displacement and the velocity mode
+    /// `k` reaches. A step is affine in its held force, so these are its gains
+    /// in that force from any state, to the rounding of the response itself.
+    ///
+    /// The transition is that of [`Self::step_duration_into`] for the same
+    /// duration (cached for the full and half sample, prepared otherwise,
+    /// explicit damping rates included). The response is formed by the code
+    /// that forms the mobility [`Self::held_force_for_port_velocity`] inverts,
+    /// so the two are the same numbers. No budget is checked: a unit force is
+    /// a direction, not a load, and may move a mode further than a budget
+    /// admits.
+    ///
+    /// # Errors
+    /// A nonpositive or nonfinite duration, or `responses` not of one entry
+    /// per mode. Never mutates state.
+    pub fn unit_force_response_into(
+        &self,
+        duration_s: f64,
+        responses: &mut [ModalAcousticState],
+    ) -> Result<(), ModalAcousticTimeError> {
+        if !(duration_s > 0.0 && duration_s.is_finite()) {
+            return Err(ModalAcousticTimeError::InvalidInput {
+                what: "unit-force response duration must be positive and finite",
+            });
+        }
+        if responses.len() != self.modes.len() {
+            return Err(ModalAcousticTimeError::StateCountMismatch {
+                expected: self.modes.len(),
+                found: responses.len(),
+            });
+        }
+        let transition_coefficients = self.transition_kernel.for_duration(&self.modes, duration_s);
+        for (mode_index, (mode, response)) in self.modes.iter().zip(responses).enumerate() {
+            let transition =
+                self.duration_transition(transition_coefficients, mode_index, *mode, duration_s);
+            *response = unit_force_response(*mode, transition);
+        }
+        Ok(())
+    }
+
+    // Mode `mode_index`'s transition for `duration_s`: the cached one where
+    // the duration is the full or half sample, prepared otherwise.
+    fn duration_transition(
+        &self,
+        cached: Option<&[PreparedZohCoefficients]>,
+        mode_index: usize,
+        mode: ModalAcousticMode,
+        duration_s: f64,
+    ) -> ExactZohCoefficients {
+        match cached {
+            Some(coefficients) => coefficients[mode_index].transition,
+            None => self
+                .transition_kernel
+                .transition(mode_index, mode, duration_s),
+        }
     }
 }
 
@@ -1892,6 +1947,16 @@ fn advance_exact_zoh_cached(
     coefficients: ExactZohCoefficients,
 ) -> ModalAcousticState {
     advance_exact_zoh_increment(mode, state, force, coefficients).0
+}
+
+// A mode's response from rest to a unit held force under `coefficients`: the
+// one place the unit-force response is formed, for the held-force solve's
+// mobility, the linear-map probe and `unit_force_response_into`.
+fn unit_force_response(
+    mode: ModalAcousticMode,
+    coefficients: ExactZohCoefficients,
+) -> ModalAcousticState {
+    advance_exact_zoh_cached(mode, ModalAcousticState::default(), 1.0, coefficients)
 }
 
 // The same transition, bit for bit in q and v, that also returns the displacement
