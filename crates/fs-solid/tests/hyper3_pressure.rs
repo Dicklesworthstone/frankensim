@@ -1288,6 +1288,10 @@ fn g1_patch_pressure_equilibrium_retains_the_nonsymmetric_free_tangent() {
             near(reaction, internal[dof] - applied[dof] - dead[dof].1, 3.0e-9);
         }
         near(solution.min_det_f, jacobian, 3.0e-9);
+        // The accepted equilibrium solved its free nonsymmetric system in every
+        // load step. A solve allowed no linear iterations is a vacuous setting,
+        // refused before it starts (9f58b134bc).
+        assert!(solution.steps.iter().all(|step| step.linear_iterations > 0));
         let blocked = HyperTetProblem {
             settings: HyperTetSettings {
                 max_linear_iterations: 0,
@@ -1297,7 +1301,7 @@ fn g1_patch_pressure_equilibrium_retains_the_nonsymmetric_free_tangent() {
         };
         assert!(matches!(
             blocked.solve_with_face_pressures(&surface, &values, cx),
-            Err(HyperTetError::LinearSolveFailed { .. })
+            Err(HyperTetError::InvalidInput { .. })
         ));
     });
 }
