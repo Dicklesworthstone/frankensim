@@ -147,12 +147,14 @@ fn with_case_and_original_law(
         MaterialPropertySelection::SingleClaimOnly,
     )
     .unwrap();
-    let endpoint_source = resolve_liquid_surface_state(
-        &card,
-        &point(t1),
+    // The endpoint is the surface state of the endpoint law's whole source
+    // bundle, as the library's caloric endpoint builds it: the slab advance
+    // requires the endpoint to keep every original claim, heat capacity and
+    // conductivity included, which a density and viscosity resolution lacks.
+    let endpoint_source = ResolvedLiquidSurfaceState::try_from_material(
+        endpoint_law.reference_state().material().clone(),
         LiquidViscosityBasis::Dynamic,
         LiquidCapillarity::Neglected,
-        MaterialPropertySelection::SingleClaimOnly,
     )
     .unwrap();
     let axis = case.face as usize / 2;
@@ -697,7 +699,14 @@ fn g3_retained_native_motion_repeats_heating_and_cooling_with_actual_pressure_wo
                 ..Case::default()
             },
             |old, hot_source, hot_law, cold_law, gate, cx| {
-                let cold_source = old.flow().scaling().material();
+                // Back at the original temperature, the endpoint is again the
+                // law's whole source bundle, not the flow's own surface state.
+                let cold_source = &ResolvedLiquidSurfaceState::try_from_material(
+                    cold_law.reference_state().material().clone(),
+                    LiquidViscosityBasis::Dynamic,
+                    LiquidCapillarity::Neglected,
+                )
+                .unwrap();
                 let before_bits = old.flow().lattice().grid().state_bits();
                 let first = old
                     .advance_uniform_slab_volume(
