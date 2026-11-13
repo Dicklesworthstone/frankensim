@@ -26,7 +26,7 @@ use fs_material::plastic::source::{
     HardeningPropertyBasis, ResolvedJ2Plasticity, resolve_j2_plasticity,
 };
 use fs_material::state_point::MaterialPropertySelection;
-use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+use fs_qty::semantic::{MoistureBasis, QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Dims, Pressure, QuantitySpec};
 use fs_solid::plastic2::fatigue::{
     PlaneFatemiSocieGauge, PlaneFatigueConfig, PlaneFatigueError, PlaneFatigueGauge,
@@ -86,9 +86,15 @@ fn fixture(
         QuantityKind::AbsoluteTemperature,
         ValueForm::Static,
     ));
+    // Humidity is a fixed external condition only as a typed static relative humidity; J2 and
+    // every other source law refuse an untyped extra axis as a possibly evolving coordinate.
+    let humidity_quantity = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::Moisture(MoistureBasis::RelativeHumidity),
+        ValueForm::Static,
+    ));
     let domain = ValidityDomain::unconstrained()
         .with_quantity("T", temperature, 300.0, 300.0)
-        .with_quantity("humidity", QuantitySpec::dimensional(Dims::NONE), 0.0, 1.0);
+        .with_quantity("humidity", humidity_quantity, 0.0, 1.0);
     let request = FatemiSocieSourceRequest {
         power_basis: FatemiSociePowerBasis::Reversals,
         normal_stress: FatemiSocieNormalStress::Signed,
@@ -174,7 +180,7 @@ fn fixture(
     let point = QueryPoint::new()
         .with_quantity("T", temperature, 300.0)
         .unwrap()
-        .with_quantity("humidity", QuantitySpec::dimensional(Dims::NONE), humidity)
+        .with_quantity("humidity", humidity_quantity, humidity)
         .unwrap();
     let law = resolve_j2_plasticity(
         &card,
