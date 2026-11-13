@@ -414,18 +414,20 @@ fn original_shape_capacity_thin_layer_and_cancellation_refusals_remain_explicit(
             .with_viscothermal(resolution, budget(), || false)
             .is_err()
     );
-    let medium = fs_material::relaxation::RelaxingMedium::new(
-        gas,
-        vec![(
-            fs_thermochem::SpeciesId::new("authored-empty-law").unwrap(),
-            1.0,
-        )],
-    )
+    // A present species without data is refused; a non-relaxing one is declared with zero
+    // reservoirs, which gives a molecular state with no relaxation processes.
+    let species = fs_thermochem::SpeciesId::new("authored-empty-law").unwrap();
+    let medium =
+        fs_material::relaxation::RelaxingMedium::new(gas, vec![(species.clone(), 1.0)]).unwrap();
+    let molecular = fs_material::relaxation::RelaxationAbsorption::new(vec![
+        fs_material::relaxation::SpeciesRelaxation {
+            species,
+            processes: Vec::new(),
+        },
+    ])
+    .unwrap()
+    .evaluate(&medium)
     .unwrap();
-    let molecular = fs_material::relaxation::RelaxationAbsorption::new(vec![])
-        .unwrap()
-        .evaluate(&medium)
-        .unwrap();
     let molecular_budget = ModalMolecularBudget {
         maximum_states: 124,
         maximum_payload_bytes: 32 * 1024 * 1024,
