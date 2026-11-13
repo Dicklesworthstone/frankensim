@@ -13,8 +13,9 @@
 
 use fs_exec::Cx;
 use fs_ports::component::{
-    Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt, STREAM_CARRIED,
-    STREAM_ENTHALPY_RATE, STREAM_MASS_RATE, STREAM_PRESSURE, STREAM_SPECIFIC_ENTHALPY,
+    Carrier, Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt, STREAM_CARRIED,
+    STREAM_ENTHALPY_RATE, STREAM_MASS_RATE, STREAM_PRESSURE, STREAM_SPECIFIC_ENTHALPY, StreamBasis,
+    StreamQuantity,
 };
 use fs_ports::{PortKind, StableId};
 
@@ -64,8 +65,10 @@ pub struct GasContents {
 /// mass cannot pass through it in one. A prescribed draw of a quantity the
 /// volume holds none of is never satisfied and ends in step underflow.
 ///
-/// Volumes joined by streams must hold the same gas. Nothing checks it: a
-/// volume reads what enters as its own gas, and mass and energy still close.
+/// [`Self::identified`] binds gas constants, the energy datum and named
+/// carried masses to the port, so incompatible streams fail admission.
+/// [`Self::new`] leaves these identities unspecified: its caller must ensure
+/// every joined volume holds the same gas and agrees on coordinate meanings.
 #[derive(Debug, Clone)]
 pub struct GasVolume {
     gas_constant_j_kg_k: f64,
@@ -88,6 +91,54 @@ struct Trial {
 }
 
 impl GasVolume {
+    /// The same perfect-gas law with identified carried masses. Gas constants
+    /// and the zero-at-absolute-zero energy datum are bound automatically;
+    /// the supplied quantities retain their order. Composition and live
+    /// temperature do not change the basis. Named quantities must be masses.
+    ///
+    /// To connect it through a restriction, construct that restriction with
+    /// [`Restriction::for_stream`] from this volume's `stream` port. A volume
+    /// with different gas constants or quantity meanings cannot share it.
+    ///
+    /// # Errors
+    /// The refusals of [`Self::new`], duplicate quantity identities, or a
+    /// carried inventory whose dimensions are not mass.
+    pub fn identified(
+        gas_constant_j_kg_k: f64,
+        heat_capacity_ratio: f64,
+        quantities: Vec<StreamQuantity>,
+    ) -> Result<Self, ElementError> {
+        let mut volume = Self::new(gas_constant_j_kg_k, heat_capacity_ratio, quantities.len())?;
+        if let Some(index) = quantities
+            .iter()
+            .position(|q| q.dimensions().0 != [0, 1, 0, 0, 0, 0])
+        {
+            return Err(ElementError::Parameter {
+                name: "stream quantity must be a mass [kg]",
+                value: index as f64,
+            });
+        }
+        let medium = StableId::new(format!(
+            "perfect-gas-v1/{:016x}/{:016x}",
+            gas_constant_j_kg_k.to_bits(),
+            heat_capacity_ratio.to_bits()
+        ))
+        .expect("finite gas constants encoded as hexadecimal");
+        let basis = StreamBasis::new(
+            medium,
+            StableId::new("ideal-gas-u-zero-at-absolute-zero-v1").expect("static reference"),
+            quantities,
+        )
+        .map_err(ElementError::StreamBasis)?;
+        volume.ports[0] = PortSpec::identified_stream(
+            StableId::new("stream").expect("static port name"),
+            PortRole::FlowIn,
+            basis,
+        )
+        .map_err(ElementError::StreamBasis)?;
+        Ok(volume)
+    }
+
     /// A volume of gas with specific gas constant `gas_constant_j_kg_k`
     /// [J/(kg K)] and heat capacity ratio `heat_capacity_ratio`, whose stream
     /// port carries `carried` quantities besides mass and enthalpy.
@@ -480,6 +531,33 @@ pub struct Restriction {
 }
 
 impl Restriction {
+    /// A restriction that preserves the exact stream basis and width of
+    /// `port` at both ends. This works for identified source-backed streams
+    /// and for unidentified streams; it never erases an existing identity.
+    ///
+    /// # Errors
+    /// A non-stream port, or the conductance refusal of [`Self::new`].
+    pub fn for_stream(conductance_kg_s_pa: f64, port: &PortSpec) -> Result<Self, ElementError> {
+        if port.carrier() != Carrier::Stream {
+            return Err(ElementError::Parameter {
+                name: "restriction requires a stream port",
+                value: port.width() as f64,
+            });
+        }
+        let mut restriction = Self::new(conductance_kg_s_pa, port.carried_quantities())?;
+        if let Some(basis) = port.stream_basis() {
+            for (spec, name) in restriction.ports.iter_mut().zip(["a", "b"]) {
+                *spec = PortSpec::identified_stream(
+                    StableId::new(name).expect("static port name"),
+                    PortRole::EffortIn,
+                    basis.clone(),
+                )
+                .map_err(ElementError::StreamBasis)?;
+            }
+        }
+        Ok(restriction)
+    }
+
     /// A restriction that passes `conductance_kg_s_pa` [kg/(s Pa)] between
     /// stream ports with `carried` quantities.
     ///

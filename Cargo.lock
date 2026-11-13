@@ -2981,6 +2981,7 @@ dependencies = [
  "fs-nlmodal",
  "fs-phs",
  "fs-ports",
+ "fs-qty",
  "fs-thermal",
 ]
 

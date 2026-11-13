@@ -92,6 +92,20 @@ physics owners below fs-couple can be composed without it.
     is a tolerance group of its own in the interface solve, because its
     coefficients are different quantities. Stream connections are audited
     separately for mass cancellation as well as enthalpy balance.
+    Identified stream ports additionally require the same medium/source laws,
+    enthalpy reference, and ordered quantity identities and dimensions. A
+    mismatch (including an unidentified peer) refuses as `StreamBasis` before
+    claiming any port. An explicit adapter is needed to change basis or datum.
+    `GasVolume::identified` binds its gas-constant and heat-capacity-ratio bits,
+    its absolute-zero energy datum, and the caller's named carried masses;
+    `Restriction::for_stream` retains a source port's exact basis on both ends.
+    Anonymous constructors remain available with their original caller
+    obligations. Basis declarations authenticate no physical source law, and
+    the ledger's ordinal `carried_residual` still requires corresponding
+    meanings across all devices being summed, including disconnected devices.
+    The identified/unidentified flow-reversal runs in `carried_accounting.rs`
+    agree bitwise in trajectory and have equal ledgers; admission regressions
+    cover species, order, units, material and energy-reference mismatch.
 - `Component::stored_mass_kg(state)` optionally measures total stored mass
   [kg] from the typed state. A measured inventory is finite and nonnegative;
   `Some(0.0)` declares zero storage, while the default `None` means unknown.
@@ -2557,3 +2571,54 @@ source/cancellation refusals, adaptive discard/restore/retry, native structural
 and metadata refusals, and shifted-Hamiltonian endpoint evaluation allowances.
 These numerical checks do not establish physical validity of an authored model;
 the other numerical adapters and sparse work in bead `.5.12` remain open.
+
+## Signal-controlled power sources
+
+`elements::ControlledSource::effort(kind)` and `flow(kind)` connect controller
+signals to an ideal physical source. Port `p` receives the conjugate value and
+returns the scalar `command` signal in that power domain's SI effort or flow
+unit. The command is held over the step. Both signs are accepted, with every
+physical port value positive into its owner: a negative electrical flow command
+supplies positive current to a connected capacitor. A command signal carries
+zero power; all exchanged work enters the existing `SourceAccount`, negative
+when the source delivers energy. Its compensated clock advances with the step.
+
+The complete port derivative is `[0, 1]` in input order `[conjugate, command]`;
+JVP and VJP preserve that signal-to-power response. Wrong extents, nonfinite
+inputs, invalid steps and unrepresentable work/accounts refuse before publishing
+state or outputs. Proposals and both tangent actions poll cancellation before
+work and before publication, allocate nothing, and retain deterministic order.
+
+`tests/controlled_sources.rs` checks Component/tangent conformance in four power
+domains, signed capacitor charging and recovery against independent charge/work
+equations, and an actual Mass driven and braked by a signal feedback component
+against its independent discrete recurrence and the full energy ledger. Invalid
+inputs and cancellation preserve caller state, port and derivative buffers.
+Sampling, event scheduling, control policy, gains, limits, delay, source
+impedance and finite supply physics belong to the caller or their own
+Components. This ideal source makes no control stability or hardware claim.
+
+## Executable general Dirac junctions
+
+`elements::DiracJunction::new(schema)` executes the admitted scalar
+`fs_ports::JunctionLaw::Dirac` relation as a stateless, exact-linear Component.
+Its ports retain the schema's identifiers and order, receive effort, and return
+`J * effort`. The schema endpoints denote attached owners: their outward flows
+enter the junction, and ordinary bonds negate those flows into the owners.
+No matrix inversion, storage, dissipation or integration rule is introduced;
+odd-dimensional, singular and zero skew matrices are valid.
+
+The existing `JunctionSchema` owns structural admission. The adapter refuses
+other junction laws and non-scalar endpoints. JVP applies `J`; VJP applies
+`J^T = -J`. Finite vector extents, positive steps and representable arithmetic
+are checked, and evaluation polls cancellation by row. The energy allowance
+uses the magnitudes of the individual work terms before cancellation.
+
+`tests/dirac_junction.rs` checks exact relations and tangent duality, and a
+three-capacitor network against an independent midpoint rotation, total charge,
+energy and the kernel ledger. It also covers malformed source laws, unsupported
+shapes, invalid calls and cancellation. The retained schema exposes the common
+coordinate/frame/clock declarations, but runtime `PortSpec` power ports do not
+enforce those labels: attached owners must already use the same coordinates.
+This scalar relation supplies no field metric, coordinate conversion, material
+law or hardware validity claim.

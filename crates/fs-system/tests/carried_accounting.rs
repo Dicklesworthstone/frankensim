@@ -11,10 +11,13 @@ use fs_exec::{Budget, CancelGate, Cancelled, Cx, ExecMode, StreamKey};
 use fs_ports::StableId;
 use fs_ports::component::conformance::{Case, Failure, check_component};
 use fs_ports::component::{
-    Class, Component, ContractViolation, PortRole, PortSpec, Proposal, Receipt,
+    Class, Component, ContractViolation, PortRole, PortSpec, Proposal, Receipt, StreamBasis,
+    StreamQuantity,
 };
+use fs_qty::chemistry::SpeciesId;
+use fs_qty::{Dims, Mass};
 use fs_system::elements::{GasContents, GasVolume, Restriction};
-use fs_system::{SystemBuilder, SystemError};
+use fs_system::{AdmissionError, SystemBuilder, SystemError};
 
 fn with_cx(f: impl FnOnce(&Cx<'_>)) {
     let gate = CancelGate::new_clock_free();
@@ -44,9 +47,24 @@ fn close(actual: f64, expected: f64, tolerance: f64) {
 
 #[test]
 fn different_mixtures_conserve_each_inventory_when_the_donor_reverses() {
+    assert_eq!(mixture_trajectory(false), mixture_trajectory(true));
+}
+
+fn species(name: &str) -> StreamQuantity {
+    StreamQuantity::SpeciesMass(SpeciesId::new(name).unwrap())
+}
+
+fn mixture_trajectory(identified: bool) -> (Vec<u64>, fs_system::Ledger) {
+    let gas = || {
+        if identified {
+            GasVolume::identified(287.0, 1.4, vec![species("N2"), species("O2")]).unwrap()
+        } else {
+            GasVolume::new(287.0, 1.4, 2).unwrap()
+        }
+    };
     let mut builder = SystemBuilder::new();
     let pipe = builder
-        .add_with_tangent("pipe", Restriction::new(2.0e-8, 2).unwrap(), ())
+        .add_with_tangent("pipe", Restriction::for_stream(2.0e-8, &gas().ports()[0]).unwrap(), ())
         .unwrap();
     let mut nodes = Vec::new();
     let mut initial = [0.0; 2];
@@ -54,7 +72,7 @@ fn different_mixtures_conserve_each_inventory_when_the_donor_reverses() {
         .into_iter()
         .enumerate()
     {
-        let gas = GasVolume::new(287.0, 1.4, 2).unwrap();
+        let gas = gas();
         let contents = gas.contents(2.0e5, 300.0, volume, &fractions).unwrap();
         for i in 0..2 {
             initial[i] += contents.carried_kg[i];
@@ -86,12 +104,18 @@ fn different_mixtures_conserve_each_inventory_when_the_donor_reverses() {
     let port = builder.port(pipe, "a").unwrap();
     let mut system = builder.seal().unwrap();
     let (mut forward, mut reverse) = (false, false);
+    let mut trajectory = Vec::new();
     with_cx(|cx| {
         for _ in 0..300 {
             system.step(0.01, cx).unwrap();
             let rate = system.last_output(port)[0];
             forward |= rate > 1e-8;
             reverse |= rate < -1e-8;
+            for &node in &nodes {
+                let state = system.state::<GasContents>(node).unwrap();
+                trajectory.extend([state.mass_kg, state.energy_j, state.volume_m3]
+                    .into_iter().chain(state.carried_kg.iter().copied()).map(f64::to_bits));
+            }
             for i in 0..2 {
                 let total: f64 = nodes
                     .iter()
@@ -115,6 +139,119 @@ fn different_mixtures_conserve_each_inventory_when_the_donor_reverses() {
         }
     }
     assert_eq!(system.ledger().carried_residual(2), None);
+    (trajectory, system.ledger().clone())
+}
+
+#[test]
+fn stream_connections_refuse_wrong_species_units_materials_and_energy_datums() {
+    let volume = GasVolume::identified(287.0, 1.4, vec![species("N2"), species("O2")]).unwrap();
+    let original = volume.ports()[0].stream_basis().unwrap();
+    let make =
+        |medium, reference, quantities| StreamBasis::new(medium, reference, quantities).unwrap();
+    let cases = [
+        None,
+        Some(make(
+            original.medium().clone(),
+            original.enthalpy_reference().clone(),
+            vec![species("O2"), species("N2")],
+        )),
+        Some(make(
+            original.medium().clone(),
+            original.enthalpy_reference().clone(),
+            vec![species("N2"), species("Ar")],
+        )),
+        Some(make(
+            original.medium().clone(),
+            StableId::new("other-enthalpy-datum").unwrap(),
+            original.quantities().to_vec(),
+        )),
+        Some(make(
+            StableId::new("other-gas").unwrap(),
+            original.enthalpy_reference().clone(),
+            original.quantities().to_vec(),
+        )),
+    ];
+    for (case, basis) in cases.into_iter().enumerate() {
+        let port = match basis {
+            Some(basis) => {
+                PortSpec::identified_stream(StableId::new("s").unwrap(), PortRole::FlowIn, basis)
+                    .unwrap()
+            }
+            None => PortSpec::stream(StableId::new("s").unwrap(), PortRole::FlowIn, 2).unwrap(),
+        };
+        for junction in 0..3 {
+            let mut builder = SystemBuilder::new();
+            let contents = volume.contents(1e5, 300.0, 0.01, &[0.8, 0.2]).unwrap();
+            let gas = builder
+                .add_with_tangent("gas", volume.clone(), contents)
+                .unwrap();
+            let pipe = builder
+                .add_with_tangent("pipe", Restriction::for_stream(1e-8, &port).unwrap(), ())
+                .unwrap();
+            let a = builder.port(gas, "stream").unwrap();
+            let b = builder.port(pipe, "a").unwrap();
+            let result = match junction {
+                0 => builder.bond(a, b),
+                1 => builder.common_effort(a, &[b]),
+                _ => builder.common_flow(b, &[a]),
+            };
+            assert!(
+                matches!(result, Err(AdmissionError::StreamBasis { .. })),
+                "case {case}, junction {junction}: {result:?}"
+            );
+            // A rejected connection must not claim either endpoint.
+            builder
+                .boundary(a, Box::new(|_, _, values| values.fill(0.0)))
+                .unwrap();
+            builder
+                .boundary(b, Box::new(|_, _, values| values.fill(0.0)))
+                .unwrap();
+        }
+    }
+    // Same named coordinate with different SI inventory units is incompatible.
+    let quantity = |dimensions| StreamQuantity::Named {
+        id: StableId::new("inventory").unwrap(),
+        dimensions,
+    };
+    let declared = |dimensions| {
+        PortSpec::identified_stream(
+            StableId::new("s").unwrap(),
+            PortRole::FlowIn,
+            make(
+                original.medium().clone(),
+                original.enthalpy_reference().clone(),
+                vec![quantity(dimensions)],
+            ),
+        )
+        .unwrap()
+    };
+    let mass = GasVolume::identified(287.0, 1.4, vec![quantity(Mass::DIMS)]).unwrap();
+    let mut builder = SystemBuilder::new();
+    let contents = mass.contents(1e5, 300.0, 0.01, &[1.0]).unwrap();
+    let gas = builder.add_with_tangent("gas", mass, contents).unwrap();
+    let pipe = builder
+        .add_with_tangent(
+            "pipe",
+            Restriction::for_stream(1e-8, &declared(Dims::NONE)).unwrap(),
+            (),
+        )
+        .unwrap();
+    assert!(matches!(
+        builder.bond(
+            builder.port(gas, "stream").unwrap(),
+            builder.port(pipe, "a").unwrap()
+        ),
+        Err(AdmissionError::StreamBasis { .. })
+    ));
+    assert!(GasVolume::identified(287.0, 1.4, vec![quantity(Dims::NONE)]).is_err());
+    // Even with no extra coordinates, changing the gas changes its stream basis.
+    let a = GasVolume::identified(287.0, 1.4, vec![]).unwrap();
+    for b in [
+        GasVolume::identified(300.0, 1.4, vec![]).unwrap(),
+        GasVolume::identified(287.0, 1.5, vec![]).unwrap(),
+    ] {
+        assert_ne!(a.ports()[0].stream_basis(), b.ports()[0].stream_basis());
+    }
 }
 
 #[test]

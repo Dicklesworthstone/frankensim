@@ -32,6 +32,7 @@ fs-thermal = { path = "../fs-thermal", optional = true }
 
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }
+fs-qty = { path = "../fs-qty" }
 
 [[test]]
 name = "rigid_body_slice"

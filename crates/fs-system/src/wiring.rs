@@ -87,6 +87,15 @@ pub enum AdmissionError {
         /// Second port, as `node.port`.
         b: String,
     },
+    /// Stream ports disagree on their declared material, enthalpy reference,
+    /// or ordered quantity identities/dimensions. An unidentified stream
+    /// also cannot be joined to an identified stream.
+    StreamBasis {
+        /// First port, as `node.port`.
+        a: String,
+        /// Second port, as `node.port`.
+        b: String,
+    },
     /// Two heat routes name the same sink at different temperatures.
     SinkTemperature {
         /// The sink's name.
@@ -198,6 +207,10 @@ impl fmt::Display for AdmissionError {
                     "ports `{a}` and `{b}` differ in carrier, width or power metric"
                 )
             }
+            Self::StreamBasis { a, b } => write!(
+                f,
+                "stream ports `{a}` and `{b}` differ in declared medium, enthalpy reference or conserved coordinates"
+            ),
             Self::SinkTemperature {
                 name,
                 declared_k,

@@ -713,6 +713,12 @@ impl SystemBuilder {
     fn need_match(&self, a: PortRef, b: PortRef) -> Result<(), AdmissionError> {
         let (left, right) = (self.spec(a), self.spec(b));
         if left.carrier() == right.carrier() && left.width() == right.width() {
+            if left.carrier() == Carrier::Stream && left.stream_basis() != right.stream_basis() {
+                return Err(AdmissionError::StreamBasis {
+                    a: self.label(a),
+                    b: self.label(b),
+                });
+            }
             self.need_pairing_match(a, b)
         } else {
             Err(AdmissionError::Mismatch {

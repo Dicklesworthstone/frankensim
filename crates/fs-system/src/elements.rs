@@ -65,13 +65,19 @@ use core::fmt;
 use core::num::NonZeroUsize;
 
 use fs_exec::{Cancelled, Cx};
-use fs_ports::component::{Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt};
+use fs_ports::component::{
+    Class, Component, ContractViolation, PortRole, PortSpec, PortTangent, Proposal, Receipt,
+};
 use fs_ports::{PortKind, StableId};
 
 use crate::ledger::Sum;
 
 mod node;
 pub use node::HeatNode;
+mod controlled_source;
+pub use controlled_source::ControlledSource;
+mod dirac;
+pub use dirac::{DiracError, DiracJunction};
 mod resistance;
 pub use resistance::Resistance;
 mod slider;
@@ -82,6 +88,8 @@ pub use stream::{GasContents, GasVolume, Restriction};
 /// Why an element was not built or refused a step.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ElementError {
+    /// An identified stream basis violates the shared port contract.
+    StreamBasis(ContractViolation),
     /// A parameter is not finite or is outside its admitted range.
     Parameter {
         /// Parameter name, with its unit.
@@ -134,6 +142,7 @@ pub enum ElementError {
 impl fmt::Display for ElementError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::StreamBasis(violation) => write!(f, "stream basis: {violation}"),
             Self::Parameter { name, value } => write!(f, "parameter {name} = {value} is not admitted"),
             Self::Table { what } => write!(f, "waveform table: {what}"),
             Self::Temperature { kelvin } => {
