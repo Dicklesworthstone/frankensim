@@ -214,6 +214,14 @@ fn sol_002_mms_orders_families_and_frontends() {
         center: [0.5, 0.5],
         radius: 0.3,
     };
+    // Since 6934b5e35f the cut solve recovers the strain of its solution and refuses
+    // one beyond the material's small-strain limit (1 here); the unit-amplitude
+    // field's strains reach pi. This linear problem's error orders do not depend on
+    // the field's amplitude, so the cut frontend solves the same field at 1e-3.
+    let amplitude = 1e-3;
+    let cut_u = |x: f64, y: f64| mms_u(x, y).map(|v| amplitude * v);
+    let cut_f = |x: f64, y: f64| mms_f(x, y).map(|v| amplitude * v);
+    let cut_grad = |x: f64, y: f64| mms_grad(x, y).map(|row| row.map(|v| amplitude * v));
     let mut cut_errs = Vec::new();
     for level in [4u32, 5, 6] {
         let grid = Quadtree::uniform(level);
@@ -229,10 +237,8 @@ fn sol_002_mms_orders_families_and_frontends() {
             boundary_traction: None,
             traction_free_interface: false,
         };
-        let sol = cut
-            .solve(&|x, y| mms_f(x, y), &|x, y| mms_u(x, y))
-            .expect("cut mms solves");
-        cut_errs.push(cut.l2_h1_error(&sol, &|x, y| mms_u(x, y), &|x, y| mms_grad(x, y)));
+        let sol = cut.solve(&cut_f, &cut_u).expect("cut mms solves");
+        cut_errs.push(cut.l2_h1_error(&sol, &cut_u, &cut_grad));
     }
     let cut_l2_order = (cut_errs[1].0 / cut_errs[2].0).log2();
     let cut_h1_order = (cut_errs[1].1 / cut_errs[2].1).log2();
@@ -352,7 +358,9 @@ fn cutfront_typed_edge_band_delegates_bitwise_to_canonical_cutfem() {
         offset: 2.0,
     };
     let clamp = |x: f64, _: f64| x == 0.0;
-    let traction = |_: f64, _: f64| [0.0, -1.0];
+    // A traction of 1 on E = 1 strains the body to 3.5, beyond the strain limit 1
+    // that both solves check since 6934b5e35f; parity needs only an admitted load.
+    let traction = |_: f64, _: f64| [0.0, -1e-3];
     let zero = |_: f64, _: f64| [0.0, 0.0];
     let support =
         EdgeBand::new(DesignBoxEdge::Right, 0.25, 0.75).expect("valid typed right-edge support");
@@ -487,7 +495,13 @@ fn cutfront_maps_canonical_refusals_fail_closed() {
     let error = unsupported_regime
         .solve(&|_, _| [0.0, 0.0], &|_, _| [0.0, 0.0])
         .expect_err("uncertified near-incompressible regime must be refused");
-    assert!(invalid_what(error).contains("certified compressible-regime limit"));
+    // The canonical refusal's wording since dad2abbe63 (it was "exceeds the certified
+    // compressible-regime limit").
+    let what = invalid_what(error);
+    assert!(
+        what.contains("plane stiffness ratio") && what.contains("exceeds the admitted limit 4"),
+        "{what}"
+    );
 
     let empty_sdf = Circle {
         center: [2.0, 2.0],
