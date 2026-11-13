@@ -351,7 +351,7 @@ fn unresolved_gas_history_budget_stale_state_and_late_cancellation_preserve_the_
     for mut unsupported in [
         original
             .clone()
-            .with_viscothermal(8, [50.0, 2000.0], 0.01)
+            .with_viscothermal(24, [50.0, 2000.0], 0.01)
             .unwrap(),
         DgDuct::new_with_gas_field(
             &cylinder(0.57),

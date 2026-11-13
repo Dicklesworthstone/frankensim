@@ -116,7 +116,7 @@ fn sealed_pressure_drives_the_analytic_material_wall_oscillator() {
 #[test]
 fn wall_and_gas_losses_share_the_native_operator_and_pressure_ports() {
     let gas_only = duct(DgBoundary::Port(PortId(0)))
-        .with_viscothermal(8, [50.0, 2000.0], 0.01)
+        .with_viscothermal(24, [50.0, 2000.0], 0.01)
         .unwrap();
     let original = gas_only.total_dofs();
     let dg = gas_only.clone().with_compliant_wall(wall(300.0)).unwrap();
@@ -319,7 +319,7 @@ fn maxwell_wall_follows_an_independent_relaxing_eigenmotion() {
 #[test]
 fn maxwell_wall_preserves_gas_memory_ports_and_total_passivity() {
     let gas = duct(DgBoundary::Port(PortId(0)))
-        .with_viscothermal(8, [50.0, 2000.0], 0.01)
+        .with_viscothermal(24, [50.0, 2000.0], 0.01)
         .unwrap();
     let pin = wall(300.0);
     let base = gas.clone().with_compliant_wall(pin).unwrap();

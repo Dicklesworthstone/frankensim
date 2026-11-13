@@ -121,7 +121,7 @@ fn original_element_laws_drive_local_motion_and_physical_energy() {
 #[test]
 fn regional_wall_keeps_gas_memories_and_conjugate_ports_in_the_same_step() {
     let gas = duct(DgBoundary::Port(PortId(0)))
-        .with_viscothermal(8, [50.0, 2000.0], 0.01)
+        .with_viscothermal(24, [50.0, 2000.0], 0.01)
         .unwrap();
     let original = gas.total_dofs();
     let dg = gas

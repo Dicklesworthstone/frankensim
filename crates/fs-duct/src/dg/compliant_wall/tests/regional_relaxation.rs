@@ -97,7 +97,7 @@ fn each_original_arm_obeys_its_local_equation_and_physical_storage() {
 #[test]
 fn regional_histories_retain_gas_memory_ports_and_change_actual_pressure() {
     let gas = duct(DgBoundary::Port(PortId(0)))
-        .with_viscothermal(8, [50.0, 2000.0], 0.01).unwrap();
+        .with_viscothermal(24, [50.0, 2000.0], 0.01).unwrap();
     let pins = pins();
     let base = gas.clone().with_compliant_wall_regions(&pins).unwrap();
     let spectra = spectra();

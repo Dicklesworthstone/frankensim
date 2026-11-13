@@ -133,7 +133,7 @@ fn reordered_regional_histories_preserve_extensions_momentum_and_physical_work()
             base(true)
         } else {
             duct(DgBoundary::Port(PortId(0)))
-                .with_viscothermal(8, [50.0, 2000.0], 0.01)
+                .with_viscothermal(24, [50.0, 2000.0], 0.01)
                 .unwrap()
         };
         let mut dg = gas

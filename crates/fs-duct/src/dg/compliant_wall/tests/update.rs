@@ -127,7 +127,7 @@ fn regional_update_retains_wave_and_diffusion_history_and_measures_physical_work
         },
     ];
     let mut dg = duct(DgBoundary::Port(PortId(0)))
-        .with_viscothermal(8, [50.0, 2000.0], 0.01)
+        .with_viscothermal(24, [50.0, 2000.0], 0.01)
         .unwrap()
         .with_compliant_wall_regions(&old)
         .unwrap();
