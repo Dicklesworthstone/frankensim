@@ -42,6 +42,8 @@ use core::num::NonZeroUsize;
 use core::ops::Range;
 
 use fs_exec::Cx;
+use fs_qty::chemistry::SpeciesId;
+use fs_qty::{Dims, Mass};
 
 use crate::{PortKind, StableId};
 
@@ -96,6 +98,107 @@ pub const STREAM_MASS_RATE: usize = 0;
 pub const STREAM_ENTHALPY_RATE: usize = 1;
 /// Index of the first carried quantity on either side of a stream port.
 pub const STREAM_CARRIED: usize = 2;
+
+/// Identity and SI dimensions of a conserved stream coordinate.
+///
+/// Dimensions describe the inventory, not its rate or its value per unit
+/// mass. Coordinate order is significant: a connection does not permute it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamQuantity {
+    /// Mass [kg] of the named chemical species, including its phase/charge
+    /// whenever those are part of the owner's species identifier.
+    SpeciesMass(SpeciesId),
+    /// Another conserved inventory, such as a tracer mass or a component of
+    /// momentum in a declared frame. The identity includes its physical
+    /// meaning; dimensions alone do not identify a quantity.
+    Named {
+        /// Shared semantic identity, including any coordinate convention.
+        id: StableId,
+        /// SI dimensions of the conserved inventory.
+        dimensions: Dims,
+    },
+}
+
+impl StreamQuantity {
+    /// SI dimensions of the conserved inventory.
+    #[must_use]
+    pub fn dimensions(&self) -> Dims {
+        match self {
+            Self::SpeciesMass(_) => Mass::DIMS,
+            Self::Named { dimensions, .. } => *dimensions,
+        }
+    }
+
+    fn same_identity(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::SpeciesMass(a), Self::SpeciesMass(b)) => a == b,
+            (Self::Named { id: a, .. }, Self::Named { id: b, .. }) => a == b,
+            _ => false,
+        }
+    }
+}
+
+/// The physical meaning of a material stream's coefficients.
+///
+/// `medium` identifies the compatible material/source laws, independently of
+/// composition and live state. `enthalpy_reference` identifies the energy
+/// datum and convention. The ordered quantities identify every coordinate
+/// after mass and enthalpy. A connection requires exact equality of all three;
+/// changing basis or energy datum requires an explicit physical adapter.
+/// These are owner declarations, not authentication of the underlying laws.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamBasis {
+    medium: StableId,
+    enthalpy_reference: StableId,
+    quantities: Vec<StreamQuantity>,
+}
+
+impl StreamBasis {
+    /// Declare a stream basis, preserving the supplied coordinate order.
+    /// An empty coordinate list is valid for a stream carrying only mass
+    /// and enthalpy; its medium and enthalpy reference still matter.
+    ///
+    /// # Errors
+    /// Refuses a repeated quantity identity, including the same named
+    /// identity declared twice with different dimensions.
+    pub fn new(
+        medium: StableId,
+        enthalpy_reference: StableId,
+        quantities: Vec<StreamQuantity>,
+    ) -> Result<Self, ContractViolation> {
+        for (index, quantity) in quantities.iter().enumerate() {
+            if let Some(first) = quantities[..index]
+                .iter()
+                .position(|earlier| earlier.same_identity(quantity))
+            {
+                return Err(ContractViolation::DuplicateStreamQuantity { first, index });
+            }
+        }
+        Ok(Self {
+            medium,
+            enthalpy_reference,
+            quantities,
+        })
+    }
+
+    /// Identity of the compatible material/source laws.
+    #[must_use]
+    pub fn medium(&self) -> &StableId {
+        &self.medium
+    }
+
+    /// Identity of the enthalpy datum and convention.
+    #[must_use]
+    pub fn enthalpy_reference(&self) -> &StableId {
+        &self.enthalpy_reference
+    }
+
+    /// Conserved coordinates in their wire order, after mass and enthalpy.
+    #[must_use]
+    pub fn quantities(&self) -> &[StreamQuantity] {
+        &self.quantities
+    }
+}
 
 /// Which side of a port the component receives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -313,6 +416,7 @@ pub struct PortSpec {
     role: PortRole,
     width: NonZeroUsize,
     field_metric: Option<DualityMetric>,
+    stream_basis: Option<StreamBasis>,
 }
 
 impl PortSpec {
@@ -337,6 +441,7 @@ impl PortSpec {
             role,
             width,
             field_metric: None,
+            stream_basis: None,
         })
     }
 
@@ -373,6 +478,7 @@ impl PortSpec {
             role,
             width: NonZeroUsize::MIN,
             field_metric: None,
+            stream_basis: None,
         })
     }
 
@@ -380,21 +486,46 @@ impl PortSpec {
     /// enthalpy (see [`Carrier::Stream`]). A storage has `PortRole::FlowIn`,
     /// a transport element `PortRole::EffortIn`.
     ///
+    /// This constructor declares no identities or energy datum. Such ports
+    /// can connect only to other unidentified streams. Prefer
+    /// [`Self::identified_stream`] for material exchange between owners.
+    ///
     /// # Errors
-    /// [`ContractViolation::PortRole`] if `role` is a signal role.
+    /// [`ContractViolation::PortRole`] if `role` is a signal role, or
+    /// [`ContractViolation::StreamWidth`] if the width cannot be represented.
     pub fn stream(id: StableId, role: PortRole, carried: usize) -> Result<Self, ContractViolation> {
         if !matches!(role, PortRole::EffortIn | PortRole::FlowIn) {
             return Err(ContractViolation::PortRole {
                 port: id.as_str().to_owned(),
             });
         }
+        let width = carried
+            .checked_add(STREAM_CARRIED)
+            .and_then(NonZeroUsize::new)
+            .ok_or(ContractViolation::StreamWidth { carried })?;
         Ok(Self {
             id,
             carrier: Carrier::Stream,
             role,
-            width: NonZeroUsize::MIN.saturating_add(STREAM_CARRIED - 1 + carried),
+            width,
             field_metric: None,
+            stream_basis: None,
         })
+    }
+
+    /// A material stream with explicit medium, energy datum and conserved
+    /// coordinate identities. Width is derived from the basis.
+    ///
+    /// # Errors
+    /// The same role and width refusals as [`Self::stream`].
+    pub fn identified_stream(
+        id: StableId,
+        role: PortRole,
+        basis: StreamBasis,
+    ) -> Result<Self, ContractViolation> {
+        let mut port = Self::stream(id, role, basis.quantities.len())?;
+        port.stream_basis = Some(basis);
+        Ok(port)
     }
 
     /// A signal input of `width` coefficients.
@@ -406,6 +537,7 @@ impl PortSpec {
             role: PortRole::SignalIn,
             width,
             field_metric: None,
+            stream_basis: None,
         }
     }
 
@@ -418,6 +550,7 @@ impl PortSpec {
             role: PortRole::SignalOut,
             width,
             field_metric: None,
+            stream_basis: None,
         }
     }
 
@@ -449,6 +582,13 @@ impl PortSpec {
     #[must_use]
     pub fn field_metric(&self) -> Option<&DualityMetric> {
         self.field_metric.as_ref()
+    }
+
+    /// Declared stream meaning, or `None` for an unidentified stream or a
+    /// non-stream port. `None` is not a wildcard for an identified stream.
+    #[must_use]
+    pub fn stream_basis(&self) -> Option<&StreamBasis> {
+        self.stream_basis.as_ref()
     }
 
     /// Coefficients this port contributes to the input vector.
@@ -605,7 +745,8 @@ impl PortLayout {
     /// # Errors
     /// [`ContractViolation::DuplicatePort`] for a repeated identifier and
     /// [`ContractViolation::PortRole`] for a carrier that disagrees with its
-    /// role.
+    /// role. Identified stream ports of one owner must assign the same
+    /// quantity to each shared ordinal, as required by its inventory audit.
     pub fn new(ports: &[PortSpec]) -> Result<Self, ContractViolation> {
         let mut input_offsets = Vec::with_capacity(ports.len() + 1);
         let mut output_offsets = Vec::with_capacity(ports.len() + 1);
@@ -621,6 +762,21 @@ impl PortLayout {
                 return Err(ContractViolation::PortRole {
                     port: port.id.as_str().to_owned(),
                 });
+            }
+            if let Some(basis) = port.stream_basis() {
+                for earlier in &ports[..index] {
+                    if let Some(other) = earlier.stream_basis() {
+                        if let Some(carried) = basis.quantities().iter()
+                            .zip(other.quantities()).position(|(a, b)| a != b)
+                        {
+                            return Err(ContractViolation::StreamCoordinate {
+                                a: earlier.id.as_str().to_owned(),
+                                b: port.id.as_str().to_owned(),
+                                carried,
+                            });
+                        }
+                    }
+                }
             }
             input_offsets.push(input);
             output_offsets.push(output);
@@ -1029,6 +1185,28 @@ pub trait StageResidual: Component {
 /// A step that broke the contract, named by the law it broke.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContractViolation {
+    /// An owner's identified stream ports disagree on a conserved coordinate
+    /// used by the same ordinal inventory measurement.
+    StreamCoordinate {
+        /// Earlier port.
+        a: String,
+        /// Conflicting port.
+        b: String,
+        /// Zero-based carried coordinate.
+        carried: usize,
+    },
+    /// Two conserved stream coordinates use the same semantic identity.
+    DuplicateStreamQuantity {
+        /// Earlier coordinate, zero-based after mass and enthalpy.
+        first: usize,
+        /// Repeated coordinate.
+        index: usize,
+    },
+    /// Adding mass and enthalpy to the carried coordinates overflows a width.
+    StreamWidth {
+        /// Number of carried coordinates requested.
+        carried: usize,
+    },
     /// A carried inventory is available at only one endpoint.
     CarriedAvailability {
         /// Zero-based carried coordinate.
@@ -1187,6 +1365,15 @@ pub enum ContractViolation {
 impl fmt::Display for ContractViolation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::StreamCoordinate { a, b, carried } => write!(
+                f, "stream ports `{a}` and `{b}` disagree on conserved coordinate {carried}"
+            ),
+            Self::DuplicateStreamQuantity { first, index } => write!(
+                f, "stream coordinates {first} and {index} repeat a quantity identity"
+            ),
+            Self::StreamWidth { carried } => write!(
+                f, "stream with {carried} carried coordinates has an unrepresentable width"
+            ),
             Self::CarriedAvailability { carried, old_available, new_available } => write!(f,
                 "carried inventory {carried} availability changed: accepted {old_available}, candidate {new_available}"),
             Self::StoredCarried { carried, endpoint, value } => write!(f,

@@ -166,6 +166,22 @@ not on the wire. `tests/component_reference.rs` checks widths, both roles'
 energy and mass, the refusal of a signal role and of slices of the wrong
 length.
 
+`PortSpec::identified_stream` additionally binds a `StreamBasis`: an immutable
+medium/source-law identity, an enthalpy-reference identity, and an ordered
+`StreamQuantity` list. Species masses use the existing `SpeciesId`; other
+conserved quantities have a stable semantic identity and SI inventory dimensions
+(the dimensions of the amount, not its rate). Duplicate identities refuse even
+when declared with different units. Empty lists still retain the medium and
+energy datum. `PortLayout` rejects identified ports of one owner that disagree
+on a shared inventory ordinal. It does not reorder or convert coordinates.
+
+Connections must compare the entire basis. An unidentified `stream` is not a
+wildcard for an identified port; two unidentified ports retain their original
+width-only contract and its caller obligations. Width overflow is a structured
+refusal. Basis admission does not authenticate source declarations, implement
+reactions, or change wire arithmetic. `tests/carried_ports.rs` checks ordering,
+dimensions, empty bases, unchanged signed transfers and declaration refusals.
+
 **Mass.** `Component::stored_mass_kg` optionally measures mass from a state.
 Its default is `None` (unavailable); zero storage must be declared as
 `Some(0.0)`. `audit_mass_step` checks finite, nonnegative available inventories
