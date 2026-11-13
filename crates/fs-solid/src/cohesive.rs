@@ -298,14 +298,19 @@ impl<'m, 'a> CohesiveState<'m, 'a> {
             for &value in offset { finite(value)?; }
         }
         let problem = Equilibrium { state: self, force: force_n, offsets: prescribed_jumps_m, dt_s, config,
-            cancelled: RefCell::new(cancelled), fault: RefCell::new(None), evaluations: Cell::new(0) };
+            cancelled: RefCell::new(cancelled), fault: RefCell::new(None), outside: RefCell::new(None),
+            evaluations: Cell::new(0) };
         let solver = NewtonKrylovState::new(&problem, self.displacements.clone(), config.newton);
         problem.poll()?;
-        let mut solver = solver.map_err(|e| Error::Solver(e.to_string()))?;
+        let mut solver = solver.map_err(|e| problem.outside_or(Error::Solver(e.to_string())))?;
         let run = solver.run_controlled(&problem, config.max_newton_iterations, &mut || problem.poll().is_err());
         problem.poll()?;
-        if run.progress != SolverRunProgress::Complete { return Err(Error::Solver(format!("{:?}", run.progress))); }
-        if !run.report.converged { return Err(Error::NotConverged(run.report)); }
+        if run.progress != SolverRunProgress::Complete {
+            return Err(problem.outside_or(Error::Solver(format!("{:?}", run.progress))));
+        }
+        if !run.report.converged {
+            return Err(problem.outside_or(Error::NotConverged(run.report)));
+        }
         let mut residual = vec![0.0; system.n];
         problem.action(&solver.x, None, &mut residual)?;
         let maximum_force_residual_n = residual.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
@@ -341,11 +346,30 @@ struct Equilibrium<'p, 'm, 'a> {
     config: Config,
     cancelled: RefCell<&'p mut dyn FnMut() -> bool>,
     fault: RefCell<Option<Error>>,
+    /// The last refusal of a patch's declared separation range at a trial
+    /// point. It rejects that trial only (its residual is NaN, so the line
+    /// search shortens the step); it is the solve's error only if the solve
+    /// then does not converge.
+    outside: RefCell<Option<Error>>,
     evaluations: Cell<usize>,
 }
 impl<'p, 'm, 'a> Equilibrium<'p, 'm, 'a> {
     fn fail(&self, error: Error) {
         if self.fault.borrow().is_none() { *self.fault.borrow_mut() = Some(error); }
+    }
+    // A Newton trial can pass a patch's separation range on its way to a
+    // root inside it: from the softening branch, whose tangent knows nothing
+    // of the zero traction past failure, it overshoots. That refusal is the
+    // trial's, not the interval's; every other error ends the solve.
+    fn reject(&self, error: Error) {
+        if matches!(error, Error::Material { error: CohesiveError::SeparationLimit, .. }) {
+            *self.outside.borrow_mut() = Some(error);
+        } else {
+            self.fail(error);
+        }
+    }
+    fn outside_or(&self, error: Error) -> Error {
+        self.outside.borrow_mut().take().unwrap_or(error)
     }
     fn poll(&self) -> Result<(), Error> {
         if let Some(error) = self.fault.borrow().as_ref() { return Err(error.clone()); }
@@ -408,10 +432,10 @@ impl<'p, 'm, 'a> Equilibrium<'p, 'm, 'a> {
 impl NonlinearProblem for Equilibrium<'_, '_, '_> {
     fn dimension(&self) -> usize { self.state.system.n }
     fn residual(&self, x: &[f64], residual: &mut [f64]) {
-        if let Err(error) = self.action(x, None, residual) { self.fail(error); residual.fill(f64::NAN); }
+        if let Err(error) = self.action(x, None, residual) { self.reject(error); residual.fill(f64::NAN); }
     }
     fn jacobian_apply(&self, x: &[f64], direction: &[f64], output: &mut [f64]) {
-        if let Err(error) = self.action(x, Some(direction), output) { self.fail(error); output.fill(f64::NAN); }
+        if let Err(error) = self.action(x, Some(direction), output) { self.reject(error); output.fill(f64::NAN); }
     }
 }
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 { a[0]*b[0]+a[1]*b[1]+a[2]*b[2] }

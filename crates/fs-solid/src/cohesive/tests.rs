@@ -112,7 +112,8 @@ fn sparse_jump_scatter_is_work_conjugate_and_structural_tangent_is_consistent() 
     let state = system.bonded_state();
     let mut cancel = || false;
     let problem = Equilibrium { state: &state, force: &[0.0;6], offsets: &[[0.0;3]], dt_s: None, config: config(),
-        cancelled: RefCell::new(&mut cancel), fault: RefCell::new(None), evaluations: Cell::new(0) };
+        cancelled: RefCell::new(&mut cancel), fault: RefCell::new(None), outside: RefCell::new(None),
+        evaluations: Cell::new(0) };
     let x = [0.0,0.0,0.0,0.002,0.001,0.0004];
     let mut jac = [0.0;6]; problem.action(&x,Some(&direction),&mut jac).unwrap();
     let h = 1e-8;
@@ -144,6 +145,32 @@ fn failed_cancelled_and_budgeted_trials_never_commit_damage_and_replay_is_identi
     let b = saved.solve_controlled(&[18000.0],&[[0.0;3]],config(),&mut || false).unwrap();
     assert_eq!(a.state.points(),b.state.points()); assert_eq!(a.state.displacements_m(),b.state.displacements_m());
     assert_eq!(a.cohesive_energy_j,b.cohesive_energy_j);
+}
+
+#[test]
+fn a_newton_trial_past_the_separation_range_is_shortened_when_the_root_is_inside_it() {
+    // Bulk 4e4 N/m sits just above the patch's softening stiffness, area*s =
+    // 1e-4*1e6/0.003 = 3.33e4 N/m. From the bonded start Newton lands on the
+    // softening branch at 1/350 m, where the tangent is 6.67e3 N/m and the
+    // residual -247.6 N: the full step reaches 0.040 m and the half step
+    // 0.0214 m, both past the 0.02 m range; the quarter step, 0.0121 m, is
+    // failed and inside it. The root is the failed one, 400/4e4 = 0.01 m.
+    let law = law();
+    let (stiffness, area) = (4e4, 1e-4);
+    let elastic = Diagonal(vec![stiffness]);
+    let system = CohesiveSystem::new(&elastic,vec![patch(1,area,&law)],budget()).unwrap();
+    let initial = system.bonded_state();
+    let wide = Config { maximum_displacement_m: 1.0, ..config() };
+    let solved = initial.solve_controlled(&[400.0],&[[0.0;3]],wide,&mut || false).unwrap();
+    assert!(solved.nonlinear.history.iter().any(|step| step.step_length == 0.25), "{:?}", solved.nonlinear.history);
+    close(solved.state.displacements_m()[0],0.01,1e-12);
+    assert!(solved.state.points()[0].failed());
+    close(solved.state.points()[0].traction_pa()[0],0.0,1e-9);
+    close(solved.cohesive_energy_j.work,area*law.fracture_energy_j_m2(),1e-9);
+    // A root past the range is still refused, for the material's reason.
+    let refused = initial.solve_controlled(&[1000.0],&[[0.0;3]],wide,&mut || false);
+    assert!(matches!(refused,Err(Error::Material { error: CohesiveError::SeparationLimit, .. })), "{:?}", refused.as_ref().err());
+    assert_eq!(initial.displacements_m(),&[0.0]); assert_eq!(initial.points()[0].damage(),0.0);
 }
 
 #[test]
