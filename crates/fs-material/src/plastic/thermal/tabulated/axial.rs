@@ -444,6 +444,11 @@ impl UniaxialThermalTabulated {
                 old_derivative,
             )?;
         }
+        // A free-sided member's lateral faces carry no traction, so its stress
+        // is uniaxial. The solve's lateral residual, refused above beyond the
+        // yield tolerance, does no work on the member and enters no account.
+        let mut mechanical = mechanical;
+        mechanical.stress_pa = [mechanical.stress_pa[0], 0.0, 0.0, 0.0, 0.0, 0.0];
         let thermal = self.prepared.energy.finish(
             &old_total,
             &old_state,

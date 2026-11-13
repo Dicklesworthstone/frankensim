@@ -213,10 +213,13 @@ fn linear_and_power_thermal_holds_use_actual_duration_and_keep_viscous_heat_sepa
             let rate = hot.tensor_law().rate_law().unwrap();
             let viscosity = 9.25e6;
             near(rate.viscosity_pa_s(), viscosity, 1e-7);
-            let slope = 4.5e8;
+            // The 315 K segment of the table between its 0.006 and 0.012 knots.
+            let hot_yield = ordinates(315.0);
+            let slope = (hot_yield[3] - hot_yield[2]) / (KNOTS[3].0 - KNOTS[2].0);
             let stiffness = E + HK + slope;
-            let excess =
-                E * (strain - 15.0 * expansion) - stiffness * old_alpha - (3.7e6 - slope * 0.006);
+            let excess = E * (strain - 15.0 * expansion)
+                - stiffness * old_alpha
+                - (hot_yield[2] - slope * KNOTS[2].0);
             // The endpoint lies beyond .006, so its original affine segment
             // gives an independent linear or quadratic equation in sqrt(delta).
             let delta = if power {
