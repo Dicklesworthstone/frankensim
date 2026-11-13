@@ -84,8 +84,21 @@ fn graded_gravity_drives_native_finite_stretch_pressure_and_supported_weight() {
                     2e-10,
                 );
             }
+            // Node 1 carries the graded row moments M_1* = 0.325 and M_11 = 0.15. The
+            // cell-mean density 6 kg/m3 holds the same 1 kg with moments 0.25 and 0.1,
+            // and the graded node-1 force exceeds its force by 0.075 a - 0.05 k stretch
+            // (-2.5e-3 N and +5.2e-3 N here). Both rules integrate these fields exactly.
+            near(
+                gravity.force_n[3],
+                0.325 * a - 0.15 * gradient * stretch,
+                2e-10,
+            );
             let averaged = p.gravity_load(&[6.0], &u, &field, cx).unwrap();
-            assert!((averaged.force_n[3] - gravity.force_n[3]).abs() > 0.01);
+            near(
+                averaged.force_n[3],
+                0.25 * a - 0.1 * gradient * stretch,
+                2e-10,
+            );
         }
     });
 }
