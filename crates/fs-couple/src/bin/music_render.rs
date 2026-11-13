@@ -382,7 +382,7 @@ fn main() {
         return;
     }
     if args.first().is_some_and(|arg| arg == "instrument") {
-        instrument_input::run_with_gas_options(&args[1..], &gas_options).unwrap_or_else(|e| fail(&e));
+        instrument_input::run(&args[1..], &gas_options).unwrap_or_else(|e| fail(&e));
         return;
     }
     if args.first().is_some_and(|arg| arg == "resolved") {

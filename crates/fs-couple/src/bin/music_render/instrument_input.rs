@@ -1007,10 +1007,7 @@ fn write_new(path: &Path, bytes: &[u8]) -> Lowered<()> {
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
-pub(super) fn run_with_gas_options(
-    args: &[String],
-    gas_options: &super::thermochemical::Options,
-) -> Lowered<()> {
+pub(super) fn run(args: &[String], gas_options: &super::thermochemical::Options) -> Lowered<()> {
     let usage = "usage: music_render instrument DESCRIPTION.tsv FINGERING OUT.wav [wind options] | DESCRIPTION.tsv --lower OUTDIR";
     let (Some(description), Some(second), Some(third)) = (args.first(), args.get(1), args.get(2))
     else {
