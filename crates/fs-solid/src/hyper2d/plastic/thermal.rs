@@ -459,6 +459,34 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticSheet<'a, L> {
         )
     }
 
+    /// Equilibrium displacement of the accepted histories at intermediate
+    /// point temperatures over the step's own duration. It is only a Newton
+    /// start for the endpoint solve; nothing here is committed or published.
+    fn stage_equilibrium(
+        &self,
+        temperatures_k: &[f64],
+        start: &[f64],
+        controls: IncrementControls<'_>,
+        dt_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<f64>, FiniteThermoplasticSheetError> {
+        let laws = self.freeze(temperatures_k, dt_s, cx)?;
+        let operator = SheetOperator {
+            mesh: self.mesh,
+            elements: &self.elements,
+            states: &self.states,
+            response: |e, q, u: &[f64], states: &[FiniteJ2State]| {
+                self.response(&laws, e, q, u, states).map_err(|error| {
+                    invalid(format!("thermal sheet element {e} point {q}: {error}"))
+                })
+            },
+        };
+        Ok(
+            increment::solve(&operator, controls, Some((start, &self.states)), None, cx)?
+                .displacement_m,
+        )
+    }
+
     /// Frozen-history evaluation at one endpoint temperature per element and
     /// one actual duration. Accepted temperature, history and time are unchanged.
     pub fn evaluate_trial(
@@ -592,19 +620,78 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticSheet<'a, L> {
                 })
             },
         };
-        let solved = increment::solve(
+        let controls_from = || IncrementControls {
+            dofs: 2 * self.mesh.nodes.len(),
+            prescribed_m,
+            nodal_forces_n,
+            load_path: &[1.0],
+            settings,
+        };
+        let accepted_u = self.displacement_m.as_flattened();
+        let solved = match increment::solve(
             &operator,
-            IncrementControls {
-                dofs: 2 * self.mesh.nodes.len(),
-                prescribed_m,
-                nodal_forces_n,
-                load_path: &[1.0],
-                settings,
-            },
-            Some((self.displacement_m.as_flattened(), &self.states)),
+            controls_from(),
+            Some((accepted_u, &self.states)),
             None,
             cx,
-        )?;
+        ) {
+            Ok(solved) => solved,
+            // A large temperature change can leave no admissible frozen-history
+            // plane-stress return at the accepted in-plane geometry (the
+            // transverse strain needs more plastic flow than the card admits),
+            // so the solve is refused at its start, before any Newton step.
+            // Only then: reach intermediate point temperatures through
+            // equilibria of the same accepted histories, and start this same
+            // endpoint solve from the first admitted one. A step whose start
+            // is admitted keeps its original path and bits.
+            Err(error)
+                if error != SmallStrainTetError::Cancelled
+                    && operator
+                        .assemble(&self.states, accepted_u, None, false, cx)
+                        .is_err() =>
+            {
+                let mut start = accepted_u.to_vec();
+                let mut reached = 0.0_f64;
+                let mut fraction = 0.5_f64;
+                let mut stages = 0;
+                loop {
+                    checkpoint(cx)?;
+                    if reached > 0.0
+                        && operator
+                            .assemble(&self.states, &start, None, false, cx)
+                            .is_ok()
+                    {
+                        break increment::solve(
+                            &operator,
+                            controls_from(),
+                            Some((&start, &self.states)),
+                            None,
+                            cx,
+                        )?;
+                    }
+                    if stages == 16 || fraction < 1.0 / 64.0 {
+                        return Err(error.into());
+                    }
+                    stages += 1;
+                    let s = fraction.mul_add(1.0 - reached, reached);
+                    let temperatures: Vec<f64> = self
+                        .quadrature_temperatures_k
+                        .iter()
+                        .zip(new_temperatures_k)
+                        .map(|(&old, &new)| (new - old).mul_add(s, old))
+                        .collect();
+                    match self.stage_equilibrium(&temperatures, &start, controls_from(), dt_s, cx) {
+                        Ok(displacement) => {
+                            start = displacement;
+                            reached = s;
+                            fraction = 0.5;
+                        }
+                        Err(_) => fraction *= 0.5,
+                    }
+                }
+            }
+            Err(error) => return Err(error.into()),
+        };
         let equilibrium = solved
             .increments
             .into_iter()
