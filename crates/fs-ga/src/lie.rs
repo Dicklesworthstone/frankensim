@@ -30,6 +30,9 @@ const FORBIDDEN_COMPONENT_TOLERANCE: f64 = 0.0;
 const PURE_ROTATION_TRANSLATION_TOLERANCE: f64 = 0.0;
 const DEGENERATE_NORM_SQUARED: f64 = f64::MIN_POSITIVE;
 const SMALL_ANGLE_SQUARED: f64 = 1.0e-12;
+// The SO(3) Jacobian's coefficients take their Taylor series below this
+// theta^2, as the directional differentials in `lie_differential` do.
+const JACOBIAN_SERIES_ANGLE_SQUARED: f64 = 0.01;
 const JACOBIAN_SINGULAR_SINE: f64 = 1.0e-12;
 const SE3_SERIES_MAX_TERMS: usize = 96;
 const SE3_SERIES_TOLERANCE: f64 = 64.0 * f64::EPSILON;
@@ -959,11 +962,19 @@ pub fn so3_right_jacobian_inverse(phi: So3Tangent) -> Result<Mat3, GaError> {
 fn so3_jacobian(phi: Vec3, handedness: f64) -> Result<Mat3, GaError> {
     validate_vec3(phi, "SO(3) Jacobian")?;
     let theta_squared = phi.dot(phi);
-    let (a, b) = if theta_squared < SMALL_ANGLE_SQUARED {
-        let theta_fourth = theta_squared * theta_squared;
+    // a = (1 - cos theta)/theta^2 and b = (theta - sin theta)/theta^3. Their
+    // closed forms cancel at small angles: 1 - cos theta keeps only about
+    // log10(theta^2/eps) digits, so a carried a relative error near 1e-4 just
+    // above theta = 1e-6, where a series that stopped at theta^2 = 1e-12 handed
+    // over. Below theta^2 = 0.01 the series are exact to rounding (the first
+    // omitted terms are below 5e-19 of a and b).
+    let (a, b) = if theta_squared < JACOBIAN_SERIES_ANGLE_SQUARED {
+        let z = theta_squared;
         (
-            0.5 - theta_squared / 24.0 + theta_fourth / 720.0,
-            1.0 / 6.0 - theta_squared / 120.0 + theta_fourth / 5040.0,
+            0.5 + z * (-1.0 / 24.0 + z * (1.0 / 720.0 + z * (-1.0 / 40_320.0 + z / 3_628_800.0))),
+            1.0 / 6.0
+                + z * (-1.0 / 120.0
+                    + z * (1.0 / 5040.0 + z * (-1.0 / 362_880.0 + z / 39_916_800.0))),
         )
     } else {
         let theta = det::sqrt(theta_squared);
@@ -1401,6 +1412,25 @@ mod tests {
             let right_inverse = so3_right_jacobian_inverse(tangent).unwrap();
             assert!(matrix3_identity_error(left.compose(left_inverse)) < 2.0e-11);
             assert!(matrix3_identity_error(right.compose(right_inverse)) < 2.0e-11);
+        }
+    }
+
+    #[test]
+    fn g1_so3_jacobian_first_order_coefficient_is_exact_at_small_angles() {
+        // J_r = I - a [phi] + b [phi]^2 and [phi]^2 is symmetric, so the
+        // antisymmetric part of J_r is a [phi]. The reference is the
+        // cancellation-free a = 2 sin^2(theta/2) / theta^2.
+        for theta in [
+            0.99e-6, 1.01e-6, 2.0e-6, 1.0e-5, 1.0e-4, 1.0e-3, 0.05, 0.0999, 0.1001, 0.5, 3.0,
+        ] {
+            let right = so3_right_jacobian(So3Tangent::new(Vec3::new(0.0, 0.0, theta))).unwrap();
+            let measured = (right.m[1] - right.m[3]) / (2.0 * theta);
+            let half = det::sin(0.5 * theta) / theta;
+            let reference = 2.0 * half * half;
+            assert!(
+                (measured - reference).abs() < 1.0e-13 * reference,
+                "theta {theta}: a = {measured}, reference {reference}"
+            );
         }
     }
 
