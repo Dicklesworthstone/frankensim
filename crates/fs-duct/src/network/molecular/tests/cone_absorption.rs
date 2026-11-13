@@ -47,8 +47,9 @@ fn cone(
     let mut edges = bindings(
         &network,
         &[state.clone()],
+        // 12 poles: at 8, a 3.2 mm cone end's slice (2.95 mm) is refused at 2 % on this band.
         diffusion.then_some(MolecularWallResolution {
-            poles_per_field: 8,
+            poles_per_field: 12,
             band_rad_s: [0.1, 7000.0],
             maximum_relative_error: 0.02,
         }),
