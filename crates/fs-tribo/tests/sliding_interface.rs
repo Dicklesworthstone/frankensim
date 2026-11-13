@@ -1434,3 +1434,591 @@ fn the_friction_interface_refuses_what_it_cannot_take() {
     assert_eq!(field(built(|load| load.solve.force_relative_tolerance = 1.0)), "force_relative_tolerance");
     assert!(built(|load| load.normal_n = 0.0).is_ok());
 }
+
+/// What the end of a step moves per newton beside the told neighbour of the
+/// tests below, as a multiple of what its mean moves: for a body under a
+/// held force on the midpoint rule it is 2, for a modal string neither.
+const TOLD: f64 = 1.917;
+
+/// One proposal of an interface that reads `a`'s end, with `b` given at no
+/// flow: the mean line `(released, c)` and the end line
+/// `(released_end, c_end)` of the slip.
+fn on_the_end_line(
+    interface: &Rubbing,
+    state: &Rubbed,
+    dt_s: f64,
+    (released, c): (f64, f64),
+    (released_end, c_end): (f64, f64),
+) -> Result<Answer, TriboError> {
+    on_line(
+        interface,
+        state,
+        dt_s,
+        &[released, 0.0, 300.0, released_end],
+        &[c, 0.0, 0.0, 0.0, c_end, 0.0],
+    )
+}
+
+/// One proposal beside a neighbour at `a` that a force of `push_n` drives
+/// along the slip and whose step is exact under a held force. From the slip
+/// the last step ended with, a newton moves the step's mean slip by
+/// `c = dt / (2 m)` and its end by `ratio c`.
+fn beside(
+    interface: &Rubbing,
+    state: &Rubbed,
+    dt_s: f64,
+    mass_kg: f64,
+    push_n: f64,
+    ratio: f64,
+) -> Answer {
+    let c = 0.5 * dt_s / mass_kg;
+    let start = state.slip_m_s();
+    on_the_end_line(
+        interface,
+        state,
+        dt_s,
+        (start + c * push_n, c),
+        (start + ratio * c * push_n, ratio * c),
+    )
+    .expect("answer")
+}
+
+#[test]
+fn an_interface_that_reads_an_end_holds_a_pair_at_rest_at_no_end_slip_and_lets_go_on_its_line() {
+    // `a` reads the end its neighbour tells; `b` is given. The end input
+    // comes after `heat`, and the line names it.
+    let interface = rubbing(dry).reading_ends([true, false]).expect("ends");
+    let names: Vec<&str> = interface
+        .ports()
+        .iter()
+        .map(|port| port.id().as_str())
+        .collect();
+    assert_eq!(names, ["a", "b", "heat", "a.end"]);
+    assert_eq!(interface.line_ports(), [0, 1]);
+    assert_eq!(interface.line_ends(), [Some(3), None]);
+    assert_eq!(rubbing(dry).line_ends(), [None, None]);
+    let rest = interface.start(300.0, 0.0).expect("start");
+    let (dt_s, mass_kg) = (0.01, 2.0);
+    let c = 0.5 * dt_s / mass_kg;
+    // Up to 5 N the pair is held with the force the push needs, and the
+    // step ends with no slip at all.
+    for push_n in [0.0, 1.0, -4.0, 4.999, -4.999] {
+        let Answer::Took {
+            state,
+            receipt,
+            force_n,
+            heat_w,
+        } = beside(&interface, &rest, dt_s, mass_kg, push_n, TOLD)
+        else {
+            panic!("{push_n} N cut the step");
+        };
+        close(force_n, push_n, 8.0 * f64::EPSILON * 5.0);
+        assert!(state.at_rest(), "{push_n} N");
+        assert_eq!(state.slip_m_s(), 0.0);
+        assert_eq!(state.tangential().slip_m(), [0.0; 2]);
+        assert_eq!(
+            (heat_w, receipt.dissipated_j, receipt.stored_change_j),
+            (0.0, 0.0, 0.0)
+        );
+        close(receipt.numerical_loss_j, 0.0, 1e-18);
+    }
+    // A neighbour whose mean does not pass through the end line's rest, as
+    // on a string, where a step's mean is not where its end is. The pair is
+    // held with the end line's force all the same, the mean slip `r - c F`
+    // is what the neighbour's mean does, and the work of the two ends,
+    // either way, is the step's numerical loss: no heat, no entropy.
+    for off_m_s in [1.0e-3, -1.0e-3] {
+        let released = 4.0 * c + off_m_s;
+        let end_line = (4.0 * TOLD * c, TOLD * c);
+        let Ok(Answer::Took {
+            state,
+            receipt,
+            force_n,
+            heat_w,
+        }) = on_the_end_line(&interface, &rest, dt_s, (released, c), end_line)
+        else {
+            panic!("{off_m_s} m/s: not taken");
+        };
+        close(force_n, 4.0, 8.0 * f64::EPSILON * 4.0);
+        assert!(state.at_rest());
+        assert_eq!(state.slip_m_s(), 0.0);
+        let work_j = dt_s * force_n * (released - c * force_n);
+        assert_eq!(receipt.numerical_loss_j, work_j);
+        assert!(work_j * off_m_s > 0.0, "{work_j}");
+        assert_eq!(
+            (
+                heat_w,
+                receipt.dissipated_j,
+                receipt.entropy_generated_j_per_k
+            ),
+            (0.0, 0.0, 0.0)
+        );
+    }
+    // Beyond 5 N it lets go against 3 N, the traction the law solves on the
+    // end line. The step ends where the neighbour says, `r_e - c_e F` (on
+    // the midpoint rule, twice the mean less the start), and its heat is
+    // the work of the two ends at the mean slip.
+    for push_n in [6.0_f64, -8.0, 50.0] {
+        let Answer::Took {
+            state,
+            receipt,
+            force_n,
+            heat_w,
+        } = beside(&interface, &rest, dt_s, mass_kg, push_n, TOLD)
+        else {
+            panic!("{push_n} N cut the step");
+        };
+        let way = push_n.signum();
+        assert!(!state.at_rest());
+        assert_eq!(force_n, SLIDES * LOAD_N * way);
+        let (mean, ends) = (c * (push_n - 3.0 * way), TOLD * c * (push_n - 3.0 * way));
+        close(state.slip_m_s(), ends, 8.0 * f64::EPSILON * ends.abs());
+        close(
+            state.tangential().slip_m()[0],
+            dt_s * ends,
+            16.0 * f64::EPSILON * dt_s * ends.abs(),
+        );
+        close(
+            heat_w,
+            -3.0 * mean.abs(),
+            16.0 * f64::EPSILON * 3.0 * mean.abs(),
+        );
+        let heat_j = dt_s * 3.0 * mean.abs();
+        close(receipt.dissipated_j, heat_j, 16.0 * f64::EPSILON * heat_j);
+        assert_eq!(receipt.numerical_loss_j, 0.0);
+    }
+}
+
+#[test]
+fn beside_a_told_end_a_sliding_pair_ends_its_steps_on_the_end_line_and_is_cut_where_it_stops() {
+    let interface = rubbing(dry).reading_ends([true, false]).expect("ends");
+    let mass_kg = 2.0;
+    for start in [1.0_f64, -0.4] {
+        let way = start.signum();
+        let sliding = interface.start(300.0, start).expect("start");
+        // Sliding on against 3 N: the law is asked at the step's mean slip,
+        // `start + c (push - 3)`, and the step ends at
+        // `start + c_e (push - 3)`.
+        for (dt_s, push_n) in [(0.01, 5.0 * way), (0.01, 0.0), (0.05, -2.0 * way)] {
+            let Answer::Took {
+                state,
+                receipt,
+                force_n,
+                heat_w,
+            } = beside(&interface, &sliding, dt_s, mass_kg, push_n, TOLD)
+            else {
+                panic!("{start} m/s, {push_n} N cut the step");
+            };
+            let c = 0.5 * dt_s / mass_kg;
+            assert_eq!(force_n, SLIDES * LOAD_N * way);
+            let mean = start + c * (push_n - 3.0 * way);
+            close(
+                state.slip_m_s(),
+                start + TOLD * c * (push_n - 3.0 * way),
+                8.0 * f64::EPSILON,
+            );
+            close(
+                state.tangential().slip_m()[0],
+                dt_s * mean,
+                8.0 * f64::EPSILON * dt_s,
+            );
+            close(heat_w, -3.0 * mean.abs(), 16.0 * f64::EPSILON * 3.0);
+            close(
+                receipt.dissipated_j,
+                dt_s * 3.0 * mean.abs(),
+                16.0 * f64::EPSILON * 3.0 * dt_s,
+            );
+            assert_eq!(receipt.numerical_loss_j, 0.0);
+        }
+        // The end slip reaches zero after `2 m abs(start) / (TOLD (3 - way
+        // push))`, by the end line, which for this neighbour grows with the
+        // step: the same instant from every step length that ends beyond
+        // it. That step ends at rest under the law's own 3 N, asked at the
+        // step's mean, `start (1 - 1 / TOLD)` (half the start on the
+        // midpoint rule). A step that ends short of it slides on.
+        for push_n in [0.0, 2.0 * way, -7.0 * way] {
+            let stop_s = 2.0 * mass_kg * start.abs() / (TOLD * (3.0 - way * push_n));
+            let mut found_s = f64::NAN;
+            for beyond in [1.0001, 1.5, 4.0, 1000.0] {
+                let Answer::Cut(asked_s) =
+                    beside(&interface, &sliding, beyond * stop_s, mass_kg, push_n, TOLD)
+                else {
+                    panic!("{start} m/s, {push_n} N, {beyond}: not cut");
+                };
+                close(asked_s, stop_s, 64.0 * f64::EPSILON * stop_s);
+                found_s = asked_s;
+            }
+            let Answer::Took {
+                state,
+                receipt,
+                force_n,
+                heat_w,
+            } = beside(&interface, &sliding, found_s, mass_kg, push_n, TOLD)
+            else {
+                panic!("{start} m/s, {push_n} N: the located step is cut again");
+            };
+            assert!(state.at_rest());
+            assert!(
+                state.slip_m_s().abs() <= 8.0 * f64::EPSILON,
+                "{}",
+                state.slip_m_s()
+            );
+            assert_eq!(force_n, SLIDES * LOAD_N * way);
+            let mean = start * (1.0 - 1.0 / TOLD);
+            close(heat_w, -3.0 * mean.abs(), 1e-9);
+            close(receipt.dissipated_j, found_s * 3.0 * mean.abs(), 1e-9);
+            close(state.tangential().slip_m()[0], found_s * mean, 1e-15);
+            // The next step at rest holds the pair at no slip at all: what
+            // the stop left is in the neighbour's released end.
+            let Answer::Took {
+                state: held,
+                force_n,
+                ..
+            } = beside(&interface, &state, 0.01, mass_kg, way, TOLD)
+            else {
+                panic!("{start} m/s, {push_n} N: the step after the stop was cut");
+            };
+            assert!(held.at_rest());
+            assert_eq!(held.slip_m_s(), 0.0);
+            close(force_n, way, 1e-12);
+            let Answer::Took { state, .. } =
+                beside(&interface, &sliding, 0.999 * stop_s, mass_kg, push_n, TOLD)
+            else {
+                panic!("{start} m/s, {push_n} N: a step short of the stop is cut");
+            };
+            assert!(!state.at_rest());
+            close(state.slip_m_s(), 1.0e-3 * start, 1.0e-12);
+        }
+    }
+}
+
+#[test]
+fn beside_a_told_end_a_break_away_is_located_from_the_load_on_the_end_line() {
+    // As on the midpoint rule: from 4 N to a mean of 4.9 N over two steps
+    // of 0.01 s the load rises at 90 N/s, and the 5 N held are reached
+    // after 0.55 / 0.9 of the step. The load is read off the end line,
+    // `(r_e - s0) / c_e`. The neighbour's mean line passes 0.3 N beyond it
+    // (on the midpoint rows a load of 4.3 N and then 5.2 N, which lets go
+    // from the step's start) and moves nothing.
+    let interface = rubbing(dry).reading_ends([true, false]).expect("ends");
+    let mass_kg = 2.0;
+    let pushed = |state: &Rubbed, dt_s: f64, push_n: f64| {
+        let c = 0.5 * dt_s / mass_kg;
+        let end_line = (TOLD * c * push_n, TOLD * c);
+        on_the_end_line(&interface, state, dt_s, (c * (push_n + 0.3), c), end_line).expect("answer")
+    };
+    let dt_s = 0.01;
+    let rest = interface.start(300.0, 0.0).expect("start");
+    let Answer::Took {
+        state: first,
+        force_n,
+        ..
+    } = pushed(&rest, dt_s, 4.0)
+    else {
+        panic!("4 N cut the step");
+    };
+    assert!(first.at_rest());
+    close(force_n, 4.0, 1e-12);
+    let fraction = (5.0 - 4.45) / 0.9;
+    let Answer::Cut(asked_s) = pushed(&first, dt_s, 4.9) else {
+        panic!("a load that passes the limit inside the step was not cut");
+    };
+    close(asked_s, fraction * dt_s, 1e-15);
+    // The step of that length is held and ends at the limit; the next one
+    // lets go from its start, against 3 N.
+    let Answer::Took {
+        state: at_the_limit,
+        ..
+    } = pushed(&first, asked_s, 4.45 + 0.5 * fraction * 0.9)
+    else {
+        panic!("the located step was cut again");
+    };
+    assert!(at_the_limit.at_rest());
+    let Answer::Took { state, force_n, .. } = pushed(&at_the_limit, dt_s, 5.0 + 90.0 * 0.5 * dt_s)
+    else {
+        panic!("the step at the limit was cut");
+    };
+    assert!(!state.at_rest());
+    assert_eq!(force_n, SLIDES * LOAD_N);
+}
+
+#[test]
+fn a_told_end_that_ends_its_steps_by_the_midpoint_rule_is_the_midpoint_interface() {
+    // A body under a held force, told: its end moves twice what its mean
+    // does. Every verdict, force, slip record and located instant is then
+    // the midpoint table's, to rounding: from rest, sliding, and after a
+    // step whose load the next one is located from.
+    let told = rubbing(dry).reading_ends([true, false]).expect("ends");
+    let midpoint = rubbing(dry);
+    let mass_kg = 2.0;
+    let (mut taken, mut cut) = (0, 0);
+    let mut compare = |from: (&Rubbed, &Rubbed), dt_s: f64, push_n: f64| match (
+        beside(&told, from.0, dt_s, mass_kg, push_n, 2.0),
+        on_a_body(&midpoint, from.1, dt_s, mass_kg, push_n),
+    ) {
+        (Answer::Cut(asked_s), Answer::Cut(expected_s)) => {
+            close(asked_s, expected_s, 64.0 * f64::EPSILON * expected_s);
+            cut += 1;
+            None
+        }
+        (
+            Answer::Took { state, force_n, .. },
+            Answer::Took {
+                state: expected,
+                force_n: expected_n,
+                ..
+            },
+        ) => {
+            close(force_n, expected_n, 1e-12);
+            close(state.slip_m_s(), expected.slip_m_s(), 1e-13);
+            assert_eq!(state.at_rest(), expected.at_rest(), "{dt_s} s, {push_n} N");
+            taken += 1;
+            Some((state, expected))
+        }
+        (told, expected) => panic!("{dt_s} s, {push_n} N: told {told:?}, midpoint {expected:?}"),
+    };
+    for start in [0.0, 1.0, -0.4, 1.0e-3] {
+        let from = (
+            told.start(300.0, start).expect("start"),
+            midpoint.start(300.0, start).expect("start"),
+        );
+        for dt_s in [0.01, 0.05, 0.5] {
+            for push_n in [0.0, 1.0, -4.9, 6.0, -8.0, 2.0] {
+                compare((&from.0, &from.1), dt_s, push_n);
+            }
+        }
+    }
+    let rest = (
+        told.start(300.0, 0.0).expect("start"),
+        midpoint.start(300.0, 0.0).expect("start"),
+    );
+    let (held, expected) = compare((&rest.0, &rest.1), 0.01, 4.0).expect("held");
+    for push_n in [4.4, 4.9, 7.0, -4.9] {
+        compare((&held, &expected), 0.01, push_n);
+    }
+    assert!(taken > 40 && cut > 10, "{taken} taken, {cut} cut");
+    println!("a told end on the midpoint rule: {taken} steps taken and {cut} cut as on that rule");
+}
+
+#[test]
+fn with_both_ends_told_the_end_line_is_the_difference_of_their_rows() {
+    // `a` and `b` each read their end, and neither is given. The line hands
+    // a row per end; taken along the efforts (F, -F) they are
+    // `E_a = 4.8e-3 + 1.5e-3` and `E_b = -2.0e-3 - 1.9e-2`, so the end slip
+    // moves by `c_e = E_a - E_b = 2.73e-2` per newton, and its released
+    // value is that of `a`'s end less `b`'s.
+    let interface = rubbing(dry).reading_ends([true, true]).expect("ends");
+    let names: Vec<&str> = interface
+        .ports()
+        .iter()
+        .map(|port| port.id().as_str())
+        .collect();
+    assert_eq!(names, ["a", "b", "heat", "a.end", "b.end"]);
+    assert_eq!(interface.line_ends(), [Some(3), Some(4)]);
+    let line = [
+        2.5e-3, -1.0e-3, -1.0e-3, 1.0e-2, 4.8e-3, -1.5e-3, -2.0e-3, 1.9e-2,
+    ];
+    let (c, c_end, dt_s) = (1.45e-2, 2.73e-2, 0.01);
+    // Both ends move at 0.1 m/s, and `a` by the slip besides.
+    let asked = |state: &Rubbed, released: f64, released_end: f64| {
+        let inputs = [0.1 + released, 0.1, 300.0, 0.1 + released_end, 0.1];
+        on_line(&interface, state, dt_s, &inputs, &line).expect("answer")
+    };
+    let rest = interface.start(300.0, 0.0).expect("start");
+    let Answer::Took { state, force_n, .. } = asked(&rest, 4.0 * c, 4.0 * c_end) else {
+        panic!("4 N cut the step");
+    };
+    assert!(state.at_rest());
+    assert_eq!(state.slip_m_s(), 0.0);
+    close(force_n, 4.0, 1e-13);
+    let Answer::Took {
+        state,
+        force_n,
+        heat_w,
+        ..
+    } = asked(&rest, 6.0 * c, 6.0 * c_end)
+    else {
+        panic!("6 N cut the step");
+    };
+    assert!(!state.at_rest());
+    assert_eq!(force_n, SLIDES * LOAD_N);
+    close(state.slip_m_s(), 3.0 * c_end, 1e-15);
+    close(heat_w, -3.0 * 3.0 * c, 1e-14);
+    // Sliding at 0.5 m/s under a push of 1 N it slides on, and ends at
+    // `0.5 + c_e (1 - 3)`.
+    let sliding = interface.start(300.0, 0.5).expect("start");
+    let Answer::Took {
+        state,
+        force_n,
+        heat_w,
+        ..
+    } = asked(&sliding, 0.5 + c, 0.5 + c_end)
+    else {
+        panic!("sliding on was cut");
+    };
+    assert_eq!(force_n, SLIDES * LOAD_N);
+    close(state.slip_m_s(), 0.5 - 2.0 * c_end, 1e-15);
+    close(heat_w, -3.0 * (0.5 - 2.0 * c), 1e-14);
+}
+
+#[test]
+fn the_told_interface_refuses_what_it_cannot_take() {
+    assert_eq!(
+        field(rubbing(dry).reading_ends([false; 2])),
+        "friction_interface_end_inputs"
+    );
+    let twice = rubbing(dry)
+        .reading_ends([true, false])
+        .and_then(|told| told.reading_ends([false, true]));
+    assert_eq!(field(twice), "friction_interface_end_inputs");
+    let interface = rubbing(dry).reading_ends([true, false]).expect("ends");
+    let rest = interface.start(300.0, 0.0).expect("start");
+    let (dt_s, c) = (0.01, 2.5e-3);
+    let line = [c, 0.0, 0.0, 0.0, TOLD * c, 0.0];
+    let asked = |state: &Rubbed, inputs: &[f64], compliance: &[f64]| {
+        field(on_line(&interface, state, dt_s, inputs, compliance))
+    };
+    // The end input and its row are counted, and finite.
+    let miscounted: [(&[f64], &[f64]); 6] = [
+        (&[0.01, 0.0, 300.0], &line),
+        (&[0.01, 0.0, 300.0, 0.01, 0.0], &line),
+        (&[0.01, 0.0, 300.0, 0.01], &line[..4]),
+        (
+            &[0.01, 0.0, 300.0, 0.01],
+            &[c, 0.0, 0.0, 0.0, TOLD * c, 0.0, 0.0, 0.0],
+        ),
+        (&[0.01, 0.0, 300.0, f64::NAN], &line),
+        (
+            &[0.01, 0.0, 300.0, 0.01],
+            &[c, 0.0, 0.0, 0.0, f64::INFINITY, 0.0],
+        ),
+    ];
+    for (inputs, compliance) in miscounted {
+        let refused = asked(&rest, inputs, compliance);
+        assert_eq!(
+            refused, "friction_interface_inputs",
+            "{inputs:?} {compliance:?}"
+        );
+    }
+    // `b` neither reads an end nor is given: its row of the line is not zero.
+    let untold = [c, 0.0, 0.0, 1.0e-3, TOLD * c, 0.0];
+    assert_eq!(
+        asked(&rest, &[0.01, 0.0, 300.0, 0.01], &untold),
+        "friction_interface_untold_end"
+    );
+    // An end line that takes nothing from the slip, or adds to it, where
+    // the mean line takes from it.
+    for c_end in [0.0, -TOLD * c] {
+        let end_line = [c, 0.0, 0.0, 0.0, c_end, 0.0];
+        let refused = asked(&rest, &[0.01, 0.0, 300.0, 0.01], &end_line);
+        assert_eq!(refused, "friction_interface_end_compliance");
+    }
+    // A sliding pair that the end line has 400 N along and the mean line
+    // barely moving: the stop step's mean would run against the slip. The
+    // law holds 5 N, so the end cannot stop, and the step slides on under
+    // its 3 N.
+    let sliding = interface.start(300.0, 1.0).expect("start");
+    let Ok(Answer::Took {
+        state,
+        force_n,
+        heat_w,
+        ..
+    }) = on_line(
+        &interface,
+        &sliding,
+        dt_s,
+        &[0.01, 0.0, 300.0, 1.0],
+        &[c, 0.0, 0.0, 0.0, c, 0.0],
+    )
+    else {
+        panic!("400 N along was refused or cut");
+    };
+    assert_eq!(force_n, SLIDES * LOAD_N);
+    close(state.slip_m_s(), 1.0 - 3.0 * c, 1e-15);
+    close(heat_w, -3.0 * (0.01 - 3.0 * c), 1e-15);
+    // At 4 N along, which the law holds, the stop step's mean would still
+    // run against the slip: nothing says what that step is.
+    let refused = asked(
+        &sliding,
+        &[0.004, 0.0, 300.0, 4.0 * c],
+        &[c, 0.0, 0.0, 0.0, c, 0.0],
+    );
+    assert_eq!(refused, "friction_interface_stop_against_the_slip");
+    // A pair that lets go from rest on the end line while its mean slip
+    // runs against the force: the ends would take heat out of it.
+    let refused = asked(&rest, &[3.0 * c - 0.5, 0.0, 300.0, 6.0 * TOLD * c], &line);
+    assert_eq!(refused, "friction_interface_let_go_heat");
+}
+
+#[test]
+fn the_told_interface_conforms_on_its_line_and_books_the_work_of_its_ends() {
+    // On its line it is pure, its step is audited at the flows on the line
+    // (the work of the two ends is what the receipt books, as heat or as a
+    // defect), and with a zero line it is `propose`. Neighbours told at the
+    // ratio of these tests and at the midpoint rule's, and at rest mean
+    // lines that pass off the end line's rest.
+    let interface = rubbing(dry).reading_ends([true, false]).expect("ends");
+    let rest = interface.start(300.0, 0.0).expect("start");
+    let (dt_s, c) = (0.01, 2.5e-3);
+    let stale = {
+        let inputs = [0.4, 0.1, 310.0, 0.4];
+        let Ok(Answer::Took { state, .. }) = on_line(&interface, &rest, 0.01, &inputs, &[0.0; 6])
+        else {
+            panic!("stale");
+        };
+        state
+    };
+    let (mut stepped, mut cut) = (0, 0);
+    for start in [0.0, 0.3, -0.3, 1.0e-3] {
+        let state = interface.start(300.0, start).expect("start");
+        let offs: &[f64] = if start == 0.0 {
+            &[-1.0e-3, 0.0, 1.0e-3]
+        } else {
+            &[0.0]
+        };
+        let points = offs.iter().flat_map(|&off_m_s| {
+            [TOLD, 2.0].into_iter().flat_map(move |ratio| {
+                [0.0, 1.0, 4.9, -6.0, 12.0].map(|push_n| (ratio, push_n, off_m_s))
+            })
+        });
+        for (ratio, push_n, off_m_s) in points {
+            let inputs = [
+                start + c * push_n + off_m_s,
+                0.0,
+                300.0,
+                start + ratio * c * push_n,
+            ];
+            let case = Case {
+                state: &state,
+                stale: &stale,
+                dt_s,
+                inputs: &inputs,
+            };
+            let compliance = [c, 0.0, 0.0, 0.0, ratio * c, 0.0];
+            let audited = with_cx(|cx| check_load_line(&interface, &case, &compliance, cx))
+                .unwrap_or_else(|failure| {
+                    panic!("{start} {ratio} {push_n} {off_m_s}: {failure:?}")
+                });
+            match audited.observed {
+                Observed::Shortened { .. } => cut += 1,
+                Observed::Stepped {
+                    receipt, outputs, ..
+                } => {
+                    stepped += 1;
+                    let work_j = dt_s * outputs[0] * (audited.flows[0] - audited.flows[1]);
+                    close(
+                        receipt.dissipated_j + receipt.numerical_loss_j,
+                        work_j,
+                        1e-16,
+                    );
+                    assert!(
+                        outputs[0].abs() <= HOLDS * LOAD_N * (1.0 + 1e-12),
+                        "{outputs:?}"
+                    );
+                }
+            }
+        }
+    }
+    assert!(stepped > 40 && cut >= 6, "{stepped} stepped, {cut} cut");
+    println!("the told interface on its line: {stepped} points stepped and audited, {cut} cut");
+}

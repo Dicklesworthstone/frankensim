@@ -3289,6 +3289,69 @@ is never changed: it is asked in two ways.
   second time, short of itself, and a pair that started sliding was cut
   without end.
 
+Beside a neighbour that tells the end of its flow. The rows above rest on
+the midpoint rule. A neighbour whose step is exact under a held force (a
+modal string: `ModalStructure::publishing_ends` in `fs-nlmodal`) ends its
+step elsewhere and tells where (`fs_ports::component::EndOfStep::Told`).
+Beside it the midpoint record is not the neighbour's own: on a bowed string
+(48 kHz, 64 modes) a pair held at no mean slip ended its steps with a slip
+that changed sign every step and did not decay, 5e-3 m/s from the start and
+0.045 m/s through a stick.
+
+- `FrictionInterface::reading_ends([a, b])` gives each marked end a signal
+  input of width one after `heat`, `a.end` or `b.end`, which
+  `LoadLine::line_ends` names. The kernel wires the told ends to it and
+  hands the component one more row of the line per end input. With `R_k`
+  the released end flow of end `k` and `E_k` its row taken along the
+  efforts `(F, -F)`, the slip ends the step at `r_e - c_e F`, where
+  `r_e = R_a - R_b` and `c_e = E_a - E_b`. An end that reads none must be
+  given (its row of the line zero) and ends the step at its flow. The mean
+  line is the one above.
+- A step from rest asks the law for its return map on the END line
+  (released increment `dt r_e`, compliance `dt c_e`). Held, the step ends
+  with no slip at all; let go, it ends at `r_e - c_e F`. Rest is a starting
+  slip below the impulse tolerance in `dt abs(s0) / c_e`, and a break-away
+  is located as above from the loads `(r_e - s0) / c_e`.
+- A sliding step asks the law for its kinetic traction at a prescribed MEAN
+  slip, as above, and ends at `r_e - c_e K`. The force that ends the step
+  at no slip is `along = way r_e / c_e`, and the stop step's mean speed
+  `way r - c along` (half the start for a body on the midpoint rule) is the
+  lower end of the root's bracket and where the stop's `K` is asked. A
+  stop is located at `dt abs(s0) / (c_e K - way (r_e - s0))`, exact for
+  bodies under held forces; a stop's leftover is in the neighbour's own
+  released end, which the next step at rest takes out. A neighbour told by
+  the midpoint rule (`r_e = 2 r - s0`, `c_e = 2 c`) gives the rows above,
+  to rounding. Where the stop step's mean is not along the slip, the law's
+  own return map on the end line is asked for its verdict at `along`; where
+  it does not hold `along`, the end cannot stop in the step, and the step
+  slides on, its mean bracketed from rest under the traction that map
+  returned (a bowed string, `along` 0.726 N against the 0.5465 N its law
+  holds, and a mode on a belt, 5.0094 N against 5 N).
+- Booking. A pair at rest is held at no END slip, as `fs-couple`'s
+  hand-written bowed string holds it. The step's mean slip is then not
+  zero, and the work of the two ends, `dt F (r - c F)`, of either sign, is
+  booked as `numerical_loss_j`, signed, with no heat and no entropy: a
+  defect of the step, which the ledger shows on the component. A step that
+  lets go from rest has the traction the law solves on the end line, and
+  its heat is the work of the two ends, not the law's dissipation at its
+  end slip. A sliding step's heat is the law's own dissipation at its mean.
+- Against the hand-written module. The module asks its law at the END
+  slip; the component, sliding, at the MEAN, so the two differ in every
+  sliding step, and a graph is compared with the module by its verdicts
+  and figures (Helmholtz motion or not, the slip fraction, the period), not
+  to rounding. The law is not asked a second time to make them agree.
+- Refused, each by the field it names: an end that reads no end input and
+  is not given, beside one that does (`friction_interface_untold_end`; a
+  body that ends its step by the midpoint relation would need a start of
+  its own, which the state does not keep); an end line that takes nothing
+  from the slip, or adds to it, where the mean line takes from it
+  (`friction_interface_end_compliance`); a sliding pair whose stop step's
+  mean is not along its slip while its law holds `along`, or whose law's
+  traction there would stop the mean
+  (`friction_interface_stop_against_the_slip`);
+  a step that lets go from rest with a heat below minus the work tolerance
+  (`friction_interface_let_go_heat`). No other row is chosen in their place.
+
 Not covered: a second tangent axis (the law's is given no slip); a
 prescribed side that accelerates (held over each step it is a staircase of
 jumps: a pair static friction would carry is dragged after every jump and
@@ -3302,7 +3365,7 @@ step before it to draw the line through, and one under a load that jumps
 a traction that falls with speed (a sign bracket is not a proof that the
 root is the only one); a normal load that changes.
 
-`tests/sliding_interface.rs` (ten of its sixteen tests): at rest the
+`tests/sliding_interface.rs` (seventeen of its twenty-three tests): at rest the
 Coulomb law (5 N held, 3 N sliding) holds pushes up to 4.999 N with no slip
 and no heat and slides beyond; a sliding pair slides on against 3 N, and
 asked for any step that ends beyond its stop (1.0001 to 1000 times as
@@ -3339,6 +3402,26 @@ each fail one of these tests or more, the stop's row as first landed, the
 break-away not located and the instant narrowed to rounding whatever the
 law (refused, as on the string) among them.
 
+Seven of them beside a told end, on a neighbour whose end moves 1.917 times
+what its mean does per newton: at rest it holds pushes up to 4.999 N and
+ends with no slip at all; a mean line 1e-3 m/s off either way is held with
+the end line's 4 N, its work booked as signed numerical loss with no heat;
+6, -8 and 50 N let go against 3 N to the end line's record; a sliding pair
+slides on to the end line's record with the law asked at its mean, is cut
+where the end line stops from 1.0001 to 1000 times that step to 64 units in
+the last place, ends the cut step at rest under 3 N at the mean
+`s0 (1 - 1 / 1.917)`, and is held at no slip in the next step; a
+break-away is located 0.55 / 0.9 of the way through its step from the end
+line's load, with a mean line 0.3 N off; a neighbour told by the midpoint
+rule gives the midpoint table's verdicts, forces, records and instants to
+rounding at 54 steps and 23 cuts; both ends told make one
+end line of the difference of their rows; a sliding pair whose end line
+has 400 N along and whose mean line barely moves slides on under 3 N; the
+refusals, by field, 4 N along with that mean line among them; and the
+conformance check of the load-line tier with an end row passes at
+54 points and answers `Shortened` at 6 more, the
+receipt booking the work of the two ends as heat or as defect.
+
 Against the hand-written module: `crates/fs-couple/tests/tribothermal/
 dynamics/collinear/graph.rs` declares fs-couple's collinear stop and
 reversal from this component, two masses and two enthalpy bodies, and
@@ -3346,4 +3429,12 @@ agrees with the module's own report of three of its cases to 1.3e-11, with
 one cut for a stop inside a step; the closed forms of a spring's turning
 points, a belt's stick-slip period, a jumping side, two lumped bodies and
 a push that rises or curves through the static limit are checked there
-too (the record is in `crates/fs-system/CONTRACT.md`).
+too (the record is in `crates/fs-system/CONTRACT.md`). There too, the belt
+with the block and its spring one undamped mode of `fs-nlmodal`'s
+`ModalStructure`, beside the end it tells: every held step ends at the
+belt's speed to 7.6e-15 m/s, the ledger's numerical loss on the
+interface is the work of the held steps (at most 3.4e-5 J and 1.75e-5 of
+the heat, falling as dt^2, all of it against the force), the heat is the
+work of the others, and a period is the closed form's to 3.6 dt^2 (-3.56
+dt^2 at 0.0937 m/s and -2.43 dt^2 at 0.137 m/s, at every step from 2e-3
+to 2.5e-4 s).

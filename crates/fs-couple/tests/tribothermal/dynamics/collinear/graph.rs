@@ -37,14 +37,20 @@
 // was not cut.
 #![allow(clippy::float_cmp)]
 
+use core::num::NonZeroUsize;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::phase::EquilibriumPhaseState;
 use fs_material::phase::component::UniformEnthalpyBody;
+use fs_nlmodal::component::{
+    ModalAcousticState, ModalAcousticTimeBudget, ModalAttachment, ModalStructure,
+};
+use fs_ports::{PortKind, StableId};
 use fs_system::elements::{
     Force, HeatCapacity, HeatNode, Mass, Motion, Slider, Slip, SourceAccount, Spring, Waveform,
 };
-use fs_system::{NodeId, RouteTemperature, System, SystemBuilder};
+use fs_system::{NodeId, PortRef, RouteTemperature, System, SystemBuilder};
 use fs_tribo::tangential::component::{FrictionInterface, FrictionState, InterfaceLoad};
 use fs_tribo::{DryTangentialState, FrictionLaw, TriboError};
 
@@ -885,6 +891,182 @@ fn a_block_on_a_belt_sticks_and_slips_with_the_closed_forms_period() {
             // The work of the two ends is the heat in the body, to rounding.
             assert!((worked_j - heat_j).abs() <= rounding_j, "{worked_j} {heat_j}");
             assert!(most_cuts <= 3 && slivers == 0, "{most_cuts} {slivers}");
+        }
+    }
+}
+
+/// The block on the belt as one undamped mode of `fs-nlmodal`'s
+/// `ModalStructure` of `omega` [rad/s], unit modal mass, at a port of weight
+/// 1: a block of 1 kg on a spring of `omega^2` N/m from its rest point, at
+/// the belt's speed. The structure tells the end of its flow and the
+/// interface reads it. The heat of both goes into the body; the end
+/// output's port comes beside the graph.
+fn on_a_modal_belt(omega: f64, belt: f64) -> (OnASide, PortRef) {
+    let mut builder = SystemBuilder::new();
+    let port = |builder: &SystemBuilder, node, name: &str| builder.port(node, name).unwrap();
+    let mode = ModalStructure::from_modes(
+        48_000,
+        &[(omega, 0.0)],
+        ModalAcousticTimeBudget::audible_reference(),
+        vec![ModalAttachment {
+            id: StableId::new("block").unwrap(),
+            kind: PortKind::MechanicalForceVelocity,
+            width: NonZeroUsize::MIN,
+            weights: vec![1.0],
+        }],
+    )
+    .unwrap()
+    .publishing_ends()
+    .unwrap();
+    let riding = vec![ModalAcousticState {
+        displacement_m_sqrt_kg: 0.0,
+        velocity_m_sqrt_kg_per_s: belt,
+    }];
+    let block = builder.add_with_tangent("block", mode, riding).unwrap();
+    let interface = FrictionInterface::new(dry as LawAt, pressed())
+        .unwrap()
+        .reading_ends([true, false])
+        .unwrap();
+    let stuck = interface.start(300.0, 0.0).unwrap();
+    let rubbing = builder.add_on_line("rubbing", interface, stuck).unwrap();
+    builder
+        .common_flow(
+            port(&builder, block, "block"),
+            &[port(&builder, rubbing, "a")],
+        )
+        .unwrap();
+    builder
+        .boundary(
+            port(&builder, rubbing, "b"),
+            Box::new(move |_, _, values| values[0] = -belt),
+        )
+        .unwrap();
+    let body = builder
+        .add_with_tangent("body", HeatCapacity::new(BODY_J_K).unwrap(), 300.0)
+        .unwrap();
+    let warmth = [
+        port(&builder, rubbing, "heat"),
+        port(&builder, block, "heat"),
+    ];
+    builder
+        .common_effort(port(&builder, body, "heat"), &warmth)
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    for heat in warmth {
+        assert!(system.guess(heat, &[300.0]));
+    }
+    let end = system.port(block, "block.end").unwrap();
+    (
+        OnASide {
+            system,
+            block,
+            rubbing,
+            body,
+        },
+        end,
+    )
+}
+
+#[test]
+fn a_mode_on_a_belt_rides_at_the_belts_speed_and_sticks_and_slips_with_the_closed_forms_period() {
+    // The block on the belt above, where the block and its spring are a
+    // mode whose step is exact under a held force and which tells where its
+    // flow ends (fs-tribo's component, "Beside a neighbour that tells the
+    // end of its flow"). Held, the pair is held at no END slip: the mode's
+    // velocity at the end of every held step is the belt's, and the step's
+    // mean slip is not zero: inside the step the mode's velocity, which
+    // curves in time, runs ahead of the belt. The work of the two ends in a
+    // held step is the interface's numerical loss, signed, in the ledger
+    // (here against the force); only the steps that slide make heat.
+    // Sliding, the force is the kinetic 3 N,
+    // held, so the swing is the mode's own. The catch is located on the end
+    // line (a mode is not a body under a held force, so it may be cut more
+    // than once) and the break-away from the load on the end line.
+    let omega = 10.0_f64;
+    let d = (5.0 - 3.0) / (omega * omega);
+    for belt in [0.0937_f64, 0.137] {
+        let period =
+            2.0 * d / belt + 2.0 * (std::f64::consts::PI - (d * omega / belt).atan()) / omega;
+        for halvings in 0..4 {
+            let dt = 2.0e-3 / f64::from(1_u32 << halvings);
+            let (mut graph, end) = on_a_modal_belt(omega, belt);
+            let (at_a, at_b) = (
+                graph.system.port(graph.rubbing, "a").unwrap(),
+                graph.system.port(graph.rubbing, "b").unwrap(),
+            );
+            let mut caught = vec![0.0];
+            let (mut cuts, mut most_cuts, mut taken) = (0, 0, 0_u32);
+            // The work of the two ends in held steps, net and against the
+            // force, and in the others [J]; the most a held step's end
+            // misses the belt's speed by [m/s].
+            let (mut held_j, mut held_against_j, mut slid_j) = (0.0, 0.0_f64, 0.0);
+            let mut missed_m_s = 0.0_f64;
+            // Each step is checked as it is taken, so that a defect stops the
+            // run where it first shows rather than after six seconds of it.
+            with_cx(|cx| {
+                while graph.system.time_s() < 6.0 {
+                    let was_at_rest = graph.at_rest();
+                    let report = graph
+                        .system
+                        .step(dt, cx)
+                        .unwrap_or_else(|error| panic!("belt {belt}, dt {dt}: {error}"));
+                    taken += 1;
+                    cuts += report.shortenings;
+                    most_cuts = most_cuts.max(report.shortenings);
+                    assert!(
+                        report.dt_s >= 1e-3 * dt && f64::from(taken) * dt < 12.0,
+                        "belt {belt}, dt {dt}: step {taken} of {} s at {} s",
+                        report.dt_s,
+                        report.time_s
+                    );
+                    let slip = graph.system.last_input(at_a)[0] - graph.system.last_input(at_b)[0];
+                    let work_j = report.dt_s * graph.system.last_output(at_a)[0] * slip;
+                    if was_at_rest && graph.at_rest() {
+                        held_j += work_j;
+                        held_against_j += work_j.min(0.0);
+                        let ends_m_s = graph.system.last_output(end)[0];
+                        missed_m_s = missed_m_s.max((ends_m_s - belt).abs());
+                        assert!(
+                            missed_m_s <= 1e-12,
+                            "belt {belt}, dt {dt}: held step {taken} ends at {ends_m_s} m/s"
+                        );
+                    } else {
+                        slid_j += work_j;
+                    }
+                    if graph.at_rest() && !was_at_rest {
+                        caught.push(report.time_s);
+                    }
+                }
+            });
+            assert!(caught.len() >= 7, "{caught:?}");
+            let off: Vec<f64> = caught[1..]
+                .windows(2)
+                .map(|pair| pair[1] - pair[0] - period)
+                .collect();
+            let defect_j = graph.system.ledger().nodes[graph.rubbing.index()]
+                .numerical_loss_j
+                .value();
+            let (heat_j, rounding_j) = graph.heat_j();
+            println!(
+                "a mode on a belt at {belt} m/s, dt {dt}: {} catches in {taken} steps, {cuts} cut \
+                 ({most_cuts} at most in a step); a period is from {:.4} to {:.4} dt^2 off {period} \
+                 s; a held step's end misses the belt by {missed_m_s:e} m/s at most; held work \
+                 {held_j:e} J net ({held_against_j:e} J against the force), {:.3e} of the heat \
+                 {slid_j} J; the ledger's numerical loss {defect_j:e} J",
+                caught.len() - 1,
+                range(&off).0 / (dt * dt),
+                range(&off).1 / (dt * dt),
+                held_j / slid_j,
+            );
+            assert!(held_against_j < 0.0, "{held_against_j}");
+            assert!((defect_j - held_j).abs() <= 1e-12, "{defect_j} {held_j}");
+            assert!(
+                (slid_j - heat_j).abs() <= rounding_j + 1e-12,
+                "{slid_j} {heat_j}"
+            );
+            // Measured: -3.5613 to -3.5579 dt^2 at 0.0937 m/s and -2.4388 to
+            // -2.4332 dt^2 at 0.137 m/s, the same at each of the four steps.
+            assert!(off.iter().all(|off| off.abs() < 3.6 * dt * dt), "{off:?}");
         }
     }
 }
