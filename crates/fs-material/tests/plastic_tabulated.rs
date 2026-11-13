@@ -87,9 +87,12 @@ fn g1_table_interpolation_slopes_and_exact_piecewise_integrals() {
     let da = 0.009;
     let integral = c.hardening_energy_increment_j_m3(0.001, da).unwrap();
     near(integral, 0.00075 + 0.004 + 0.008, 1e-17);
+    // R(end) times the width, less the integral, over the interval the
+    // history moves: 0.001 + 0.009 rounds to 0.009999999999999998, not 0.01.
+    let end = 0.001 + da;
     near(
         c.numerical_loss_j_m3(0.001, da).unwrap(),
-        3.0 * da - integral,
+        (c.yield_stress_pa(end).unwrap() - 3.0) * (end - 0.001) - integral,
         1e-17,
     );
     assert!(c.yield_stress_pa(0.040001).is_err());
