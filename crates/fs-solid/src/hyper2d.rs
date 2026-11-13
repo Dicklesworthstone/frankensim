@@ -116,7 +116,9 @@ fn checkpoint(projection: Projection<'_, '_>) -> Result<(), SolidError> {
 pub struct NewtonSettings {
     /// Relative free-force residual tolerance, strictly between zero and one.
     /// Each static load step uses the largest of its initial free residual,
-    /// applied free load and linearized prescribed-motion force norms.
+    /// applied free load and linearized prescribed-motion force norms and the
+    /// force its starting deformation carries (stiffness times motion relative
+    /// to each unsupported row's node, as hyper3's static gate).
     /// There is no implicit force-unit floor.
     pub tol: f64,
     /// Iteration cap per load step.
@@ -649,7 +651,10 @@ impl HyperProblem<'_> {
                 if let Some(scale) = momentum_scale {
                     force_scale = scale;
                 } else if history.is_empty() {
-                    force_scale = force_scale.max(rnorm).max(drive_norm);
+                    force_scale = force_scale
+                        .max(rnorm)
+                        .max(drive_norm)
+                        .max(self.deformation_force(&u, load, &fixed, projection)?);
                 }
                 let relative = if rnorm == 0.0 {
                     0.0
@@ -850,6 +855,48 @@ impl HyperProblem<'_> {
             }
             None => self.assemble(u, load, fixed),
         }
+    }
+
+    /// The force a deformed state already carries: on each unsupported row,
+    /// stiffness times motion relative to the row's node, from the
+    /// unconstrained tangent (the deformation term of hyper3's
+    /// `static_force_scale`). A state at rest carries none and is not assembled
+    /// again. Without it an equilibrium start under no load and no pending
+    /// motion had only its own rounding-level residual as its scale.
+    fn deformation_force(
+        &self,
+        u: &[f64],
+        load: f64,
+        fixed: &BTreeMap<usize, f64>,
+        projection: Projection<'_, '_>,
+    ) -> Result<f64, SolidError> {
+        if u.iter().all(|&value| value == 0.0) {
+            return Ok(0.0);
+        }
+        let (_, tangent) = self.assemble_with_projection(u, load, &BTreeMap::new(), projection)?;
+        let mut total = 0.0_f64;
+        for row in 0..u.len() {
+            if row % 256 == 0 {
+                checkpoint(projection)?;
+            }
+            if fixed.contains_key(&row) {
+                continue;
+            }
+            let origin = 2 * (row / 2);
+            let (columns, coefficients) = tangent.row(row);
+            let mut row_force = 0.0_f64;
+            for (&column, &coefficient) in columns.iter().zip(coefficients) {
+                let relative = u[column] - u[origin + column % 2];
+                row_force = coefficient.abs().mul_add(relative.abs(), row_force);
+            }
+            total = total.hypot(row_force);
+        }
+        if !total.is_finite() {
+            return Err(SolidError::InvalidInput {
+                what: "connected deformation force scale is not representable".into(),
+            });
+        }
+        Ok(total)
     }
 
     fn try_energy_with_projection(
