@@ -220,7 +220,9 @@ fn source_owned_wall_closes_native_molecular_fields_and_separate_physical_work()
             // from the wall velocity rather than a pressure-work residual.
             let mechanical_resistance = resistance + arm * tau / (1.0 + (omega * tau).powi(2));
             let mut integrated = [0.0; 2];
-            let panels = 512;
+            // Simpson converges as panels^-4 onto the native integral; at 4000 rad/s 512 panels
+            // are 3.1e-8 short of it and 2048 1.2e-10, so 4096 keeps the reference well inside 3e-8.
+            let panels = 4096;
             for j in 0..=panels {
                 let [p, u] = at(length * j as f64 / panels as f64);
                 let weight = if j == 0 || j == panels { 1.0 } else if j % 2 == 0 { 2.0 } else { 4.0 };
