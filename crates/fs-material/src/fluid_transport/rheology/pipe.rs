@@ -15,6 +15,10 @@ use fs_math::det;
 /// Radially resolved nonlinear viscous startup, relaxation and reversal.
 pub mod transient;
 
+/// The original steady pipe as a pressure/flow/heat Component.
+#[cfg(feature = "component")]
+pub mod component;
+
 #[cfg(test)]
 mod tests;
 
@@ -462,6 +466,19 @@ impl LaminarCarreauPipe {
         pressure_drop_pa: f64,
         controls: CarreauPipeControls,
     ) -> Result<CarreauPipeProfile, MaterialError> {
+        self.profile_at_pressure_poll(pressure_drop_pa, controls, || Ok(()))
+    }
+
+    // The Component uses the same arithmetic and source admissions, with
+    // cancellation at every quadrature sample. The constitutive inverse has
+    // its existing hard limit of 128 evaluations between polls.
+    fn profile_at_pressure_poll(
+        &self,
+        pressure_drop_pa: f64,
+        controls: CarreauPipeControls,
+        mut poll: impl FnMut() -> Result<(), MaterialError>,
+    ) -> Result<CarreauPipeProfile, MaterialError> {
+        poll()?;
         controls.admit()?;
         if !pressure_drop_pa.is_finite() {
             return Err(parameters("Carreau pipe pressure drop must be finite"));
@@ -477,7 +494,7 @@ impl LaminarCarreauPipe {
         let (wall, iterations) = self
             .prepared
             .inverse(target, self.prepared.ceiling, controls)?;
-        self.profile_from_wall(wall, pressure_drop_pa, iterations, controls)
+        self.profile_from_wall_poll(wall, pressure_drop_pa, iterations, controls, &mut poll)
     }
 
     /// Resolve a steady profile at an authored signed wall shear rate.
@@ -623,6 +640,18 @@ impl LaminarCarreauPipe {
         iterations: u32,
         controls: CarreauPipeControls,
     ) -> Result<CarreauPipeProfile, MaterialError> {
+        self.profile_from_wall_poll(wall, pressure_drop_pa, iterations, controls, &mut || Ok(()))
+    }
+
+    fn profile_from_wall_poll(
+        &self,
+        wall: RateState,
+        pressure_drop_pa: f64,
+        iterations: u32,
+        controls: CarreauPipeControls,
+        poll: &mut impl FnMut() -> Result<(), MaterialError>,
+    ) -> Result<CarreauPipeProfile, MaterialError> {
+        poll()?;
         let transition = self.prepared.transition_rate(wall.rate);
         let (integral, change) = if wall.rate == 0.0 {
             (0.25, 0.0)
@@ -631,6 +660,7 @@ impl LaminarCarreauPipe {
         } else {
             integrate(
                 &mut |t| {
+                    poll()?;
                     if t == 0.0 {
                         return Ok(0.0);
                     }
@@ -646,6 +676,7 @@ impl LaminarCarreauPipe {
                 controls,
             )?
         };
+        poll()?;
         let (pressure, volume, heat) = if wall.rate == 0.0 {
             (0.0, 0.0, 0.0)
         } else {
@@ -732,6 +763,33 @@ impl CarreauPipeProfile {
             ],
             &[2.0, self.pipe.length_m, self.wall.viscosity],
         )
+    }
+
+    /// Analytic dQ/dT [m³/(s K)] at fixed frictional pressure and geometry.
+    ///
+    /// This retains the original shift calibration and accepted radial
+    /// profile. For a vertical viscosity shift, changing temperature is
+    /// equivalent to dividing pressure by `a_T`, so the derivative is
+    /// `-d(log a_T)/dT * pressure * dQ/dpressure`. For a vertical-and-rate
+    /// shift, the inverse stress profile scales as `1/a_T`, giving
+    /// `-d(log a_T)/dT * Q`. No perturbed source solve or quadrature is needed.
+    /// The derivative is odd under pressure reversal and exactly zero at rest.
+    pub fn temperature_flow_derivative_m3_s_k(&self) -> Result<f64, MaterialError> {
+        let pressure = self.flow.pressure_drop_pa;
+        if pressure == 0.0 {
+            return Ok(0.0);
+        }
+        let rate = -self.pipe.prepared.temperature.log_derivative_per_k();
+        let magnitude = match self.pipe.prepared.law.mode() {
+            ViscosityShiftMode::Vertical => product_ratio(
+                &[rate, pressure.abs(), self.pressure_conductance_m3_s_pa()?],
+                &[],
+            )?,
+            ViscosityShiftMode::VerticalAndRate => {
+                product_ratio(&[rate, self.flow.volumetric_flow_m3_s.abs()], &[])?
+            }
+        };
+        Ok(magnitude.copysign(pressure))
     }
 
     fn wall_rate_flow_derivative(&self) -> Result<f64, MaterialError> {

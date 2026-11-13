@@ -31,13 +31,15 @@ fs-thermochem = { path = "../fs-thermochem" }
 # The execution context of the composition contract's conformance kit.
 fs-alloc = { path = "../fs-alloc" }
 fs-rand = { path = "../fs-rand" }
+# Native flow and enthalpy owners exercised together on the default kernel.
+fs-system = { path = "../fs-system" }
 
 [features]
 # Explicit fitted polarization memory; no microscopic or measured-data claim.
 experimental-dielectric-hysteresis = []
 # Physics owners of this crate as Components of the composition contract
-# (fs-ports): `phase::component`. Off by default; the default build has no
-# dependency on fs-ports or fs-exec.
+# (fs-ports): `phase::component` and `fluid_transport::rheology::pipe::component`.
+# Off by default; the default build has no dependency on fs-ports or fs-exec.
 component = ["dep:fs-ports", "dep:fs-exec"]
 
 [lints]

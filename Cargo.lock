@@ -2130,6 +2130,7 @@ dependencies = [
  "fs-qty",
  "fs-rand",
  "fs-solver",
+ "fs-system",
  "fs-thermal",
  "fs-thermochem",
 ]

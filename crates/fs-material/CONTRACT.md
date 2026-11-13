@@ -17,6 +17,53 @@
 
 ## New sections (newest first)
 
+## Thermal Carreau pipes on the composition contract
+
+`fluid_transport::rheology::pipe::component::CarreauPipeComponent`, behind
+the existing `component` feature, exposes the original `LaminarCarreauPipe`
+through two pressure/volume-flow terminals (`a`, `b`) and one heat port.
+Inputs are the two pressures and the uniform material temperature; outputs
+are the original signed radial flow, its opposite, and negative original
+viscous power. The state is `()`. Its temperature comes from the connected
+thermal owner, and `at_temperature` retains the source law, geometry and
+authored physical wall-rate ceiling at every trial. The full reduced-rate
+support, including the zero-shear core, must still be admitted after shifting.
+
+The `Smooth` port map and its full three-by-three JVP/VJP use the original
+pressure conductance and `CarreauPipeProfile::temperature_flow_derivative_m3_s_k`.
+For a vertical shift, `Q_T = -(log a_T)' p Q_p`; for a vertical-and-rate
+shift, `Q_T = -(log a_T)' Q`. These identities use the already accepted
+radial profile and original analytic shift derivative, with no perturbed
+source solves or additional quadrature. Both pressure terminals and the
+heat row participate in the tangent. Equal pressure offsets change nothing.
+
+Physical dissipation leaves as heat once, and entropy generated is that heat
+over the supplied temperature. The native reconstructed pressure residual
+remains the receipt's residual and contributes its measured work defect to
+the energy allowance; the adapter neither replaces native heat by requested
+pressure times flow nor books that difference as numerical loss. Endpoint
+flow is `Untold`, since this algebraic response has no midpoint flow history.
+Success uses stack storage. The native stress inverse retains its hard work
+bound, quadrature polls cancellation at every sample, and any refusal leaves
+caller outputs unchanged. The error remains `MaterialError`.
+
+`tests/carreau_pipe_component.rs` exercises Poiseuille limits, reversal and
+pressure-reference invariance; an independent analytic stress-inverse radial
+oracle for a nonlinear Carreau law; both thermal shift conventions and the
+complete analytic tangent; source residuals; work/support/cancellation
+refusals; and two native pipes, a declared hydraulic compliance and a shared
+`UniformEnthalpyBody` on the actual `fs-system` kernel. The R-C-R fixture
+compares pressure, thermal storage, delivered work and viscous heat over
+60 steps against independent elimination of Poiseuille flow, midpoint
+compliance and logarithmic mean temperature. `fs-system` is a development
+dependency only; production composition uses `fs-ports`.
+
+This is fully developed, incompressible, quasisteady no-slip resistance at
+uniform temperature. It supplies no fluid inertia, entrance or turbulent
+correction, cavitation, pressure-dependent constitutive law, advected
+enthalpy or species, or thermal spatial resolution. Its wall-rate ceiling
+remains an authored envelope, not a Reynolds-number transition certificate.
+
 ## Tabulated hardening: a roundoff trial on the yield surface
 
 `TabulatedHardening::solve_increment` returns no increment when the trial
