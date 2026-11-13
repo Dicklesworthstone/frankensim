@@ -4,7 +4,7 @@ use fs_duct::modal::time_domain::{ModalMolecularBudget, assemble_lossless_field}
 use fs_matdb::QueryPoint;
 use fs_material::gas_field::{AxialGasField, PrimitiveGasState};
 use fs_material::gas_species::input::ThermochemicalPhase;
-use fs_material::relaxation::{RelaxationAbsorption, RelaxingMedium};
+use fs_material::relaxation::{RelaxationAbsorption, RelaxingMedium, SpeciesRelaxation};
 use fs_material::thermochemical_gas::packs::from_packs;
 use fs_thermochem::{Composition, CompositionBasis, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K};
 
@@ -24,6 +24,22 @@ fn primitive(temperature_k: f64, fraction_a: f64) -> PrimitiveGasState {
         )
         .unwrap(),
     }
+}
+
+// The fixture's two species, declared non-relaxing (zero reservoirs). A present
+// species without relaxation data is refused, so the empty molecular law names
+// them; it gives a molecular state with no relaxation processes.
+fn no_relaxation() -> RelaxationAbsorption {
+    RelaxationAbsorption::new(
+        ["A", "B"]
+            .into_iter()
+            .map(|name| SpeciesRelaxation {
+                species: fs_thermochem::SpeciesId::new(name).unwrap(),
+                processes: Vec::new(),
+            })
+            .collect(),
+    )
+    .unwrap()
 }
 
 fn field(
@@ -463,10 +479,7 @@ fn primitive_field_refuses_unresolved_interfaces_capacity_cancellation_and_unifo
     // as one uniform gas; that separate physical extension remains explicit.
     let inlet = original.state_at(0.0).unwrap();
     let medium = RelaxingMedium::from_thermochemical(&inlet).unwrap();
-    let molecular = RelaxationAbsorption::new(vec![])
-        .unwrap()
-        .evaluate(&medium)
-        .unwrap();
+    let molecular = no_relaxation().evaluate(&medium).unwrap();
     let result = make(12, 124).unwrap().with_molecular_relaxation(
         molecular,
         ModalMolecularBudget {
@@ -479,10 +492,7 @@ fn primitive_field_refuses_unresolved_interfaces_capacity_cancellation_and_unifo
     assert!(matches!(result, Err(ModalTimeError::Invalid(_))));
     let uniform = field(vec![0.0, length], &[300.0, 300.0], &[0.8, 0.8], false);
     let medium = RelaxingMedium::from_thermochemical(uniform.uniform_state().unwrap()).unwrap();
-    let molecular = RelaxationAbsorption::new(vec![])
-        .unwrap()
-        .evaluate(&medium)
-        .unwrap();
+    let molecular = no_relaxation().evaluate(&medium).unwrap();
     assert!(
         assemble_lossless_field(
             &profile,
