@@ -568,11 +568,13 @@ fn g4_closed_gap_geometry_budget_and_late_cancellation_preserve_all_accepted_sta
         .with_expanding_journal_bearings(vec![expanding_bearing(&oil)], || Ok(()))
         .unwrap();
     let snapshot = old.journal_bearings().next().unwrap().clone();
+    // fs-tribo's journal geometry refuses the closed gap (since 7811bdab71 the
+    // expanding bearing sizes itself through it), with its own typed field.
     assert!(matches!(
         old.advance_to(0.0625, config(), || Ok(())),
-        Err(Error::Invalid(
-            "journal needs positive dimensions and an open radial gap"
-        ))
+        Err(Error::Tribo(fs_tribo::TriboError::InvalidInput {
+            field: "journal_open_radial_gap"
+        }))
     ));
     assert_eq!(old.thermal().time_s(), 0.);
     assert_eq!(old.joint_position(), &[0.]);
