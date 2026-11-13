@@ -116,7 +116,8 @@ fn gauge(correction: MeanStressCorrection) -> RodFatigueGauge {
         SnCurve::new(
             FatigueScope {
                 source_reference: "synthetic implementation calibration".into(),
-                material: "synthetic rod".into(),
+                // An S-N scope names the material "chemistry; phase".
+                material: "synthetic rod; solid".into(),
                 process: "test".into(),
                 surface_and_geometry: "synthetic shaft".into(),
                 environment: "synthetic".into(),

@@ -2923,7 +2923,10 @@ point currently has the largest stress. Fixed thermal expansion is removed at
 each original layer, preserving residual stress from incompatible expansion.
 
 Signed normal-stress gauges feed the shared bounded S-N/rainflow owner with the
-declared mean-stress policy. Findley gauges retain the full local tensor and
+declared mean-stress policy. An S-N scope names the layer material
+"chemistry; phase", as fs-material's S-N source writes it and as the plate
+and frame S-N gauges read it; a Findley scope names the chemistry. Findley
+gauges retain the full local tensor and
 both shear-vector directions over an explicitly closed representative cycle.
 Findley reports a calibrated fatigue-limit utilization, not an invented cycle
 life. Its finite plane search and enclosing-circle work remain bounded by the

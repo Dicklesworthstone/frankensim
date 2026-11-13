@@ -345,11 +345,13 @@ impl RodFatigueObservation {
             finished: false,
         };
         for (index, gauge) in gauges.into_iter().enumerate() {
-            let material = admit_scope(
-                rod,
-                gauge.point,
+            let material = layer_material(rod, gauge.point)?;
+            let named = material.material();
+            admit_scope(
+                material,
                 &gauge.temperature_axis,
                 gauge.curve.scope(),
+                &format!("{}; {}", named.chemistry, named.phase),
                 index,
             )?;
             if let Some(source) = gauge.curve.source() {
@@ -375,11 +377,12 @@ impl RodFatigueObservation {
         }
         for (index, gauge) in findley.into_iter().enumerate() {
             let source_index = bank.normal.len() + index;
-            let material = admit_scope(
-                rod,
-                gauge.point,
+            let material = layer_material(rod, gauge.point)?;
+            admit_scope(
+                material,
                 &gauge.temperature_axis,
                 gauge.calibration.scope(),
+                &material.material().chemistry,
                 source_index,
             )?;
             if let Some(source) = gauge.calibration.source() {
@@ -1008,21 +1011,31 @@ impl SpatialRodFatiguePath {
     }
 }
 
-fn admit_scope<'a>(
-    rod: &'a SpatialMaterialRod,
+fn layer_material(
+    rod: &SpatialMaterialRod,
     point: RodFatiguePoint,
-    axis: &str,
-    scope: &FatigueScope,
-    index: usize,
-) -> Result<&'a ResolvedMaterialStatePoint, RodFatigueError> {
-    let material = &rod
+) -> Result<&ResolvedMaterialStatePoint, RodFatigueError> {
+    Ok(&rod
         .sections
         .get(point.segment)
         .and_then(|s| s.elastic().layers().get(point.layer))
         .ok_or(RodFatigueError::Invalid(
             "fatigue segment/layer is outside the original rod",
         ))?
-        .material;
+        .material)
+}
+
+/// `scope_material` is the name the calibration's source gives this layer's
+/// material: an S-N source writes "chemistry; phase" (fs-material
+/// `fatigue::source`, as the plate and frame S-N gauges read it); a Findley
+/// source writes the chemistry.
+fn admit_scope(
+    material: &ResolvedMaterialStatePoint,
+    axis: &str,
+    scope: &FatigueScope,
+    scope_material: &str,
+    index: usize,
+) -> Result<(), RodFatigueError> {
     let absolute_temperature = material
         .axis_quantities()
         .get(axis)
@@ -1036,7 +1049,7 @@ fn admit_scope<'a>(
     if axis.trim().is_empty()
         || !absolute_temperature
         || material.state_coordinate(axis) != Some(scope.temperature_k)
-        || material.material().chemistry != scope.material
+        || scope.material != scope_material
         || material.material().process != scope.process
     {
         return Err(source_error(
@@ -1044,7 +1057,7 @@ fn admit_scope<'a>(
             "fatigue needs the original layer material/process and typed absolute temperature",
         ));
     }
-    Ok(material)
+    Ok(())
 }
 fn valid_strain_limit(value: f64) -> bool {
     value.is_finite() && value > 0.0 && value <= 0.05

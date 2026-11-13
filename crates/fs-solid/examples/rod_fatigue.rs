@@ -91,7 +91,8 @@ fn run(cycles: usize) -> Result<(), Box<dyn std::error::Error>> {
     let curve = Arc::new(SnCurve::new(
         FatigueScope {
             source_reference: "authored synthetic table; not measured".into(),
-            material: "synthetic elastic metal".into(),
+            // An S-N scope names the material "chemistry; phase".
+            material: "synthetic elastic metal; solid".into(),
             process: "authored demonstration".into(),
             surface_and_geometry: "smooth synthetic circular shaft".into(),
             environment: "synthetic fixed atmosphere".into(),

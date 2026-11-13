@@ -28,13 +28,14 @@ use fs_material::state_point::{
     ResolvedMaterialStatePoint, ScalarAdmissibility, ScalarPropertyRequirement,
     integrate_isotropic_thermal_expansion, resolve_material_state_point,
 };
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Density, Dims, Pressure, QuantitySpec, Temperature};
-use fs_solid::rod::material_field::SpatialMaterialRod;
 use fs_solid::rod::material_field::fatigue::{
     RodFatigueConfig, RodFatigueError, RodFatigueGauge, RodFatiguePoint, RodFindleyGauge,
     SpatialRodFatiguePath,
 };
 use fs_solid::rod::material_field::reference::RodReferenceGeometry;
+use fs_solid::rod::material_field::{SpatialMaterialRod, SpatialRodError};
 use fs_solid::rod::{TipLoad, WorldTipLoad};
 
 const E: f64 = 1e6;
@@ -61,7 +62,12 @@ fn scope(temperature: f64) -> FatigueScope {
 fn curve(temperature: f64, maximum_amplitude: f64) -> Arc<SnCurve> {
     Arc::new(
         SnCurve::new(
-            scope(temperature),
+            // An S-N scope names the material "chemistry; phase", as an S-N source
+            // writes it; a Findley scope names the chemistry.
+            FatigueScope {
+                material: "synthetic rod alloy; solid".into(),
+                ..scope(temperature)
+            },
             vec![
                 SnPoint {
                     amplitude_pa: 1.0,
@@ -139,17 +145,22 @@ fn card(young: f64, alpha: f64, revision: u32, quantity: QuantitySpec) -> Materi
             provenance: provenance(),
         })
         .unwrap();
-    MaterialCard::assemble(
+    // A lineage starts at revision 0; each later revision supersedes the one before.
+    let mut card = MaterialCard::assemble(
         MaterialStateId {
             chemistry: "synthetic rod alloy".into(),
             phase: "solid".into(),
             process: "synthetic fatigue coupon".into(),
-            revision,
+            revision: 0,
         },
-        claims,
+        claims.clone(),
         vec![],
     )
-    .unwrap()
+    .unwrap();
+    for _ in 0..revision {
+        card = MaterialCard::supersede(&card, claims.clone(), vec![]).unwrap();
+    }
+    card
 }
 fn provenance() -> Provenance {
     Provenance {
@@ -765,13 +776,14 @@ fn source_identity_temperature_quantity_and_annulus_cannot_be_substituted() {
     let temperature = QuantitySpec::dimensional(Temperature::DIMS);
     let original = card(E, 0.0, 0, temperature);
     let request = source_request();
+    // A tabulated-only S-N source is selected at one of its own knots (1 and 1e8 cycles).
     let query = point(300.0, temperature)
         .with_quantity("R", QuantitySpec::dimensional(Dims::NONE), -1.0)
         .unwrap()
         .with_quantity(
             request.life_measure.axis_name(),
             QuantitySpec::dimensional(Dims::NONE),
-            100.0,
+            1.0,
         )
         .unwrap();
     let sourced = |card: &MaterialCard| {
@@ -819,7 +831,23 @@ fn source_identity_temperature_quantity_and_annulus_cannot_be_substituted() {
     wrong.point.coordinates_yz_m = [1.1 * R, 0.0];
     assert!(SpatialRodFatiguePath::new(rod, vec![wrong], vec![], config(), &gate).is_err());
 
-    let pressure = QuantitySpec::dimensional(Pressure::DIMS);
+    // "T" typed as an untyped pressure is a sampled stress, which a rod layer refuses
+    // as a frozen elastic coordinate before any gauge exists.
+    let untyped = QuantitySpec::dimensional(Pressure::DIMS);
+    let untyped_card = card(E, 0.0, 0, untyped);
+    assert!(matches!(
+        SpatialMaterialRod::try_straight(
+            0.5,
+            vec![section(vec![material(&untyped_card, 300.0, untyped)])],
+        ),
+        Err(SpatialRodError::Solid(
+            fs_solid::SolidError::MaterialRefused { .. }
+        ))
+    ));
+    // A static typed pressure is a fixed external condition the rod admits; the
+    // gauge refuses it as a temperature coordinate.
+    let pressure =
+        QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static));
     let wrong_card = card(E, 0.0, 0, pressure);
     let wrong_rod = SpatialMaterialRod::try_straight(
         0.5,
