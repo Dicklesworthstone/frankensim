@@ -268,6 +268,7 @@ fn g1_actual_caloric_temperature_and_native_accumulation_share_the_original_hard
         .answer()
         .receipt
         .selected;
+    let mut heat_j = 0.0;
     for (axial, external_heat) in [(0.012, 6.0), (0.0118, -3.0), (-0.009, -3.0)] {
         let strain = [axial, -0.5 * axial, -0.5 * axial, 0.001, 0.0, 0.0];
         let previous = binding.at_accepted(&point).unwrap();
@@ -342,10 +343,23 @@ fn g1_actual_caloric_temperature_and_native_accumulation_share_the_original_hard
         assert_eq!(step.hardness.property().answer(), &expected);
         let second_test = other.at_accepted(&native.next).unwrap();
         assert_eq!(second_test.hardness_pa(), 2.0 * step.hardness.hardness_pa());
+        heat_j += external_heat + step.feedback.physical_heat_j + step.feedback.reversible_heat_j;
         point = step.feedback.next;
     }
     assert!(point.history().alpha > 0.01);
-    assert!(point.caloric_state().temperature_k() > 300.0);
+    // The external heat sums to zero. The isotropic hardening modulus falls by
+    // 1 % per K, so the stored hardening carries entropy: its reversible heat,
+    // about -T |dH/dT| alpha^2 / 2 per volume (-0.074 J at alpha = 0.022),
+    // outweighs the plastic heat (about Y alpha, 0.066 J). The specimen ends
+    // a few hundredths of a kelvin below 300 K. Its actual caloric temperature
+    // is the first-law endpoint of the reported heats on the constant-Cp chart
+    // (h = Cp (T - 300 K)).
+    let expected = 300.0 + heat_j / (point.mass_kg() * CP);
+    let temperature = point.caloric_state().temperature_k();
+    assert!(
+        (temperature - expected).abs() <= 1e-9,
+        "caloric temperature {temperature} K, first-law endpoint {expected} K"
+    );
 }
 
 #[test]
