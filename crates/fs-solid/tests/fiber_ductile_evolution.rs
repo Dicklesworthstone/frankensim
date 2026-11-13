@@ -313,17 +313,22 @@ mod source {
             sources: vec![artifact],
             provenance,
         };
-        MaterialCard::assemble(
+        // A lineage starts at revision 0; each later revision supersedes the one before.
+        let mut card = MaterialCard::assemble(
             MaterialStateId {
                 chemistry: "synthetic progressive frame alloy".into(),
                 phase: "solid".into(),
                 process: "synthetic fixed condition".into(),
-                revision,
+                revision: 0,
             },
-            claims,
-            vec![model],
+            claims.clone(),
+            vec![model.clone()],
         )
-        .unwrap()
+        .unwrap();
+        for _ in 0..revision {
+            card = MaterialCard::supersede(&card, claims.clone(), vec![model.clone()]).unwrap();
+        }
+        card
     }
     fn resolve(card: &MaterialCard, point: &QueryPoint) -> FiberMaterial {
         FiberMaterial::resolve_j2(

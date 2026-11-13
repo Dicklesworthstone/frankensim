@@ -168,17 +168,21 @@ mod elastic_layers {
                 })
                 .unwrap();
         }
-        let card = MaterialCard::assemble(
+        // A lineage starts at revision 0; each later revision supersedes the one before.
+        let mut card = MaterialCard::assemble(
             MaterialStateId {
                 chemistry: "synthetic layered alloy".into(),
                 phase: "solid".into(),
                 process: "synthetic coupon".into(),
-                revision,
+                revision: 0,
             },
-            claims,
+            claims.clone(),
             vec![],
         )
         .unwrap();
+        for _ in 0..revision {
+            card = MaterialCard::supersede(&card, claims.clone(), vec![]).unwrap();
+        }
         let fit = point
             .clone()
             .with_quantity(&request.stress_ratio_axis, dimensionless, -1.0)
@@ -867,9 +871,10 @@ mod source_binding {
         CmbPowerBasis, CmbProperty, CmbSourceRequest, resolve_cmb,
     };
     use fs_material::plastic::source::HardeningPropertyBasis;
-    use fs_material::state_point::MaterialPropertySelection;
+    use fs_material::state_point::{MaterialPropertySelection, MaterialStatePointError};
+    use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
     use fs_qty::{Density, Dims, Pressure, QuantitySpec, Temperature};
-    use fs_solid::fiber::material::FiberMaterial;
+    use fs_solid::fiber::material::{FiberMaterial, RcSectionError};
 
     fn request() -> CmbSourceRequest {
         CmbSourceRequest {
@@ -962,17 +967,22 @@ mod source_binding {
                 })
                 .unwrap();
         }
-        MaterialCard::assemble(
+        // A lineage starts at revision 0; each later revision supersedes the one before.
+        let mut card = MaterialCard::assemble(
             MaterialStateId {
                 chemistry: "synthetic frame alloy".into(),
                 phase: "solid".into(),
                 process: "synthetic cyclic coupon".into(),
-                revision,
+                revision: 0,
             },
-            claims,
+            claims.clone(),
             vec![],
         )
-        .unwrap()
+        .unwrap();
+        for _ in 0..revision {
+            card = MaterialCard::supersede(&card, claims.clone(), vec![]).unwrap();
+        }
+        card
     }
     fn material(card: &MaterialCard) -> Arc<FiberMaterial> {
         Arc::new(
@@ -991,8 +1001,35 @@ mod source_binding {
     #[test]
     fn authored_curve_requires_a_native_absolute_temperature_quantity() {
         with_cx(&CancelGate::new(), |cx| {
-            for (dims, accepted) in [(Temperature::DIMS, true), (Pressure::DIMS, false)] {
-                let quantity = QuantitySpec::dimensional(dims);
+            // An untyped pressure axis is a sampled stress, so the J2 source
+            // refuses to freeze the density on it before any gauge exists
+            // (fiber/material.rs, since e628b0746c). A static typed pressure is
+            // a fixed external condition: the source resolves at it, and the
+            // gauge must refuse it as the curve's temperature.
+            let untyped = QuantitySpec::dimensional(Pressure::DIMS);
+            assert!(matches!(
+                FiberMaterial::resolve_j2(
+                    &card_with_temperature_quantity(0, untyped),
+                    &QueryPoint::new()
+                        .with_quantity("T", untyped, 300.0)
+                        .unwrap(),
+                    "density",
+                    HardeningPropertyBasis::MixedPlasticStrainModuli,
+                    0.04,
+                    MaterialPropertySelection::SingleClaimOnly,
+                ),
+                Err(RcSectionError::Source(
+                    MaterialStatePointError::InvalidRequirement { .. }
+                ))
+            ));
+            let typed_pressure = QuantitySpec::semantic(SemanticType::new(
+                QuantityKind::Pressure,
+                ValueForm::Static,
+            ));
+            for (quantity, accepted) in [
+                (QuantitySpec::dimensional(Temperature::DIMS), true),
+                (typed_pressure, false),
+            ] {
                 let card = card_with_temperature_quantity(0, quantity);
                 let point = QueryPoint::new()
                     .with_quantity("T", quantity, 300.0)

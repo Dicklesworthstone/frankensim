@@ -95,6 +95,7 @@ pub(super) fn prepare(
             material,
             &binding.temperature_axis,
             binding.calibration.scope(),
+            &material.material().chemistry,
             source_index,
         )?;
         if let Some(source) = binding.calibration.source() {

@@ -152,10 +152,15 @@ impl ElasticPoint {
     }
 }
 
+/// `scope_material` is the name the calibration's source gives this layer's
+/// material: an S-N source writes "chemistry; phase" (fs-material
+/// `fatigue::source`, as fs-plate's S-N gauge reads it); a Findley source writes
+/// the chemistry.
 pub(super) fn admit_scope(
     material: &ResolvedMaterialStatePoint,
     temperature_axis: &str,
     scope: &FatigueScope,
+    scope_material: &str,
     index: usize,
 ) -> Result<(), FrameFatigueError> {
     let mismatch = |what| FrameFatigueError::SourceMismatch { gauge: index, what };
@@ -177,9 +182,7 @@ pub(super) fn admit_scope(
             "fatigue needs the layer's actual dimensioned absolute-temperature coordinate",
         ));
     }
-    if scope.material != material.material().chemistry
-        || scope.process != material.material().process
-    {
+    if scope.material != scope_material || scope.process != material.material().process {
         return Err(mismatch(
             "fatigue material/process differs from the original layer",
         ));
@@ -205,10 +208,12 @@ impl ElasticGaugeState {
             maximum_strain,
         )?;
         let material = point.material.as_ref();
+        let named = material.material();
         admit_scope(
             material,
             &gauge.temperature_axis,
             gauge.curve.scope(),
+            &format!("{}; {}", named.chemistry, named.phase),
             index,
         )?;
         if let Some(source) = gauge.curve.source() {
