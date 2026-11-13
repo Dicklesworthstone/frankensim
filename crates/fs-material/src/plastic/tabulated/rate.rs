@@ -150,6 +150,9 @@ impl TabulatedOverstressJ2 {
     /// Exact scalar restriction for native tensor or free-sided axial returns.
     /// Supply 3 mu or E respectively; the original Prager modulus is added here.
     /// The measured domain is enforced even if an unconstrained root exists.
+    /// The power-law root is bracketed in log(delta); a bracket whose ends
+    /// are adjacent floats, both with finite residuals, is resolved, and the
+    /// end with the smaller residual is returned.
     pub fn plastic_increment(
         &self,
         trial_pa: f64,
@@ -292,6 +295,9 @@ impl TabulatedOverstressJ2 {
         let end_log = det::ln(end);
         let mut upper = end_log;
         let mut position = upper;
+        // The evaluated ends of the bracket, as (delta, residual).
+        let mut lower_end = (lower_delta, evaluate(lower_delta).0);
+        let mut upper_end = None;
         for _ in 0..96 {
             let delta = if position == end_log {
                 end
@@ -307,11 +313,28 @@ impl TabulatedOverstressJ2 {
             }
             if residual > 0.0 {
                 upper = position;
+                upper_end = Some((delta, residual));
             } else {
                 lower = position;
+                lower_end = (delta, residual);
             }
             let middle = 0.5 * lower + 0.5 * upper;
             if middle == lower || middle == upper {
+                // Adjacent logarithms: the root lies between two neighbouring
+                // values of the solve's variable. At a tiny increment one ulp
+                // of log(delta) moves the inverse rate by more than the
+                // residual tolerance, so this is the resolution of the solve.
+                // A non-finite end (an overflowing rate) is still refused.
+                if let Some((upper_delta, upper_residual)) = upper_end {
+                    let (lower_value, lower_residual) = lower_end;
+                    if upper_residual.is_finite() && lower_residual.is_finite() {
+                        return finish(if upper_residual < -lower_residual {
+                            upper_delta
+                        } else {
+                            lower_value
+                        });
+                    }
+                }
                 break;
             }
             let newton = position - residual / derivative;
