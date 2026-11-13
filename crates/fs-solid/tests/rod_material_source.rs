@@ -8,17 +8,25 @@ use fs_material::section::LayerIsotropicParameters;
 use fs_material::state_point::{INVERSE_TEMPERATURE_DIMS, IsotropicElasticParameters,
     LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY as ALPHA, MaterialPropertySelection,
     ScalarAdmissibility, ScalarPropertyRequirement};
-use fs_qty::{Density, Dims, Pressure, Temperature};
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+use fs_qty::{Density, Dims, Pressure, QuantitySpec, Temperature};
 use fs_solid::rod::TipLoad;
 use fs_solid::rod::material_field::thermal::source::{RodLayerSource, RodMaterialSource, RodSegmentSource};
 
+// Pressure is a fixed external condition only as a typed static pressure. Every rod layer
+// property must be constant at fixed environment, and that rule refuses an untyped extra axis
+// as a possibly evolving coordinate (only the legacy untyped "T" is exempt).
+fn pressure_quantity() -> QuantitySpec {
+    QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static))
+}
 fn claim(name: &str, dims: Dims, knots: Vec<(f64, f64)>) -> PropertyClaim {
     let lo = knots[0].0;
     let hi = knots.last().unwrap().0;
     PropertyClaim {
         key: PropertyKey::new(name, dims),
         value: PropertyValue::Curve { abscissa: "T".into(), abscissa_dims: Temperature::DIMS, knots, dims },
-        validity: ValidityDomain::unconstrained().with("T", lo, hi).with("p", 100_000.0, 100_000.0),
+        validity: ValidityDomain::unconstrained().with("T", lo, hi)
+            .with_quantity("p", pressure_quantity(), 100_000.0, 100_000.0),
         uncertainty: UncertaintyModel::Unstated,
         interpolation: InterpolationPolicy::LinearInside, observations: vec![],
         provenance: Provenance { source: "synthetic heated rod".into(), license: "test-only".into(), artifact: None },
@@ -43,7 +51,8 @@ fn card(alpha_scale: f64, split_modulus: bool) -> MaterialCard {
         process: "test".into(), revision: 0 }, claims, vec![]).unwrap()
 }
 fn point() -> QueryPoint {
-    QueryPoint::new().with("T", 300.0).unwrap().with("p", 100_000.0).unwrap()
+    QueryPoint::new().with("T", 300.0).unwrap()
+        .with_quantity("p", pressure_quantity(), 100_000.0).unwrap()
 }
 fn segment(card: &MaterialCard, radius: f64) -> RodSegmentSource<'_> {
     RodSegmentSource { inner_radius_m: 0.0, shear_correction: 0.8,
