@@ -236,7 +236,11 @@ fn full_tensor_capture_is_covariant_and_conserves_independent_world_totals() {
         velocity_world_m_s: Vec3::new(-0.7, 1.2, 0.5),
     };
     let out = capture(&b, p, incoming);
-    assert!(out.properties.inertia_tensor_body().m[1].abs() > 0.05);
+    // The captured central tensor is far from diagonal in the body axes. By an
+    // independent parallel-axis sum, I_xz = -0.517 and I_yz = -0.463; I_xy is
+    // only 0.026 for this fixture, so it is not the entry to check.
+    let tensor = out.properties.inertia_tensor_body().m;
+    assert!(tensor[2].abs() > 0.4 && tensor[5].abs() > 0.4, "{tensor:?}");
     check_conservation(b, p, incoming, out);
     let turn = rotation(Vec3::new(0.4, -0.2, 0.9), 1.1);
     let offset = Vec3::new(4.0, -2.0, 3.0);
