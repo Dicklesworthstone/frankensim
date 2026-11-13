@@ -63,6 +63,9 @@ impl Frame2d {
     /// Every timed fiber must carry exactly `duration_s`; retime the native laws
     /// explicitly with [`Self::with_creep_laws`] before a different interval.
     /// The old acceleration only seeds Newton and does not age the material.
+    /// Newton ends when every free residual is within its force or moment
+    /// allowance and the work those residuals do over the step is within
+    /// `energy_j`.
     /// Stationary supports, small linear geometry and the native Euler–Bernoulli
     /// fiber members are admitted. Attached viscosity, transverse shear and a
     /// retained Rayleigh reference require their own dynamic work owner.
@@ -184,7 +187,17 @@ impl Frame2d {
                     let r = residual(&acceleration, &force);
                     let rn = norm(&r);
                     history.push(rn);
-                    if rn <= 1.0 {
+                    // The force allowance alone does not end the solve: the
+                    // work the free residual does over the step enters the
+                    // equilibrium-work gate below, and at the allowance it can
+                    // exceed the energy tolerance (1e-5 N over 2.6 mm is 2.6e-8
+                    // J against 1e-8 J). Iterate until both are met.
+                    let rate = velocity(&acceleration);
+                    let residual_work: f64 = (0..n)
+                        .filter(|&d| !self.fixed[d])
+                        .map(|d| (r[d] * (duration_s * rate[d])).abs())
+                        .sum();
+                    if rn <= 1.0 && residual_work <= tolerances.energy_j {
                         return Ok((
                             iteration,
                             acceleration.clone(),
