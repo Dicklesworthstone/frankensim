@@ -278,14 +278,26 @@ fn native_prony_contact_uses_consistent_mass_and_full_inertia_without_resetting_
         assert_eq!(initial.steps(), 1);
         for restitution in [0.0, 0.35, 1.0] {
             let mut solid = initial.clone();
-            let mut rigid = rigid_at(point(&solid, 1), solid.velocity_mps()[3] - 0.4);
+            // The native gap is formed exactly, (pose + arm) - (reference
+            // node + displacement), so the rigid point is placed on the
+            // node itself: the pose takes the reference x and the arm the
+            // displacement x. point() rounds their sum, which the exact gap
+            // sees open by that rounding (1.1e-16 m) at zero activation
+            // tolerance. An arm along the normal moves neither the moment
+            // arm nor the mobility.
+            let at = point(&solid, 1);
+            let displacement_x = solid.material_history().displacement_m()[3];
+            let mut rigid = rigid_at([NODES[1][0], at[1], at[2]], solid.velocity_mps()[3] - 0.4);
             let before_rigid = rigid;
             let before_momenta = momenta(&solid, rigid, ORIGIN);
             let report = apply_linear_visco_rigid_impact(
                 &mut solid,
                 &mut rigid,
                 properties(),
-                request(restitution),
+                InelasticRigidContact {
+                    rigid_arm_body_m: Vec3::new(displacement_x, 0.0, 0.2),
+                    ..request(restitution)
+                },
                 ORIGIN,
                 impact_controls(),
                 cx,
