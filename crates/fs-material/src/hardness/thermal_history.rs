@@ -175,6 +175,10 @@ where
     /// No return map, coefficient refresh or caloric solve is repeated. The
     /// complete original mechanical selection and actual state context are
     /// checked before querying the independently selected indentation test.
+    /// A state whose hardness query is the original one, bit for bit, observes
+    /// the original source itself, with its selection receipt and identity, as
+    /// a depth profile does at its own temperature; any other state records a
+    /// pinned-claim requery.
     pub fn at_native_state(
         &self,
         original: &ThermoplasticSource<'a>,
@@ -191,6 +195,10 @@ where
         }
         let query = hardness_query(original, material, caloric, history)?;
         let thermal = original.thermal_material_point();
+        if same_query_bits(&self.source.resolved().query(), &query) {
+            admit(thermal, &query, &self.source)?;
+            return Ok(self.source.clone());
+        }
         let source = self.source.at_query_point(thermal.material, &query)?;
         admit(thermal, &query, &source)?;
         Ok(source)
@@ -277,6 +285,18 @@ fn hardness_query(
         ));
     }
     Ok(query.with_quantity(ALPHA, QuantitySpec::dimensional(Dims::NONE), alpha)?)
+}
+
+/// The same axes with the same quantities and the same coordinate bits.
+fn same_query_bits(a: &QueryPoint, b: &QueryPoint) -> bool {
+    a.axis_quantities() == b.axis_quantities()
+        && a.axes().len() == b.axes().len()
+        && a.axes()
+            .iter()
+            .zip(b.axes())
+            .all(|((name_a, value_a), (name_b, value_b))| {
+                name_a == name_b && value_a.to_bits() == value_b.to_bits()
+            })
 }
 
 fn admit(
