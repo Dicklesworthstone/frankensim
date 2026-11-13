@@ -39,6 +39,9 @@ fn source_with_constraint(
         license: "test-only".into(),
         artifact: None,
     };
+    // "T" is typed in kelvin. A thermal reference binds the sheet's mass, thickness and model
+    // at a typed temperature context, and a typed query matches only typed validity.
+    let kelvin = QuantitySpec::dimensional(Temperature::DIMS);
     let pa = Dims([-1, 1, -2, 0, 0, 0]);
     let mut parameters = vec![("stretch_limit", 5.0, Dims::NONE)];
     if fibres {
@@ -77,7 +80,7 @@ fn source_with_constraint(
             .collect(),
         state_schema_version: 1,
         initial_state: InitialStatePolicy::ZeroInternalState,
-        validity: ValidityDomain::unconstrained().with("T", 290.0, 310.0),
+        validity: ValidityDomain::unconstrained().with_quantity("T", kelvin, 290.0, 310.0),
         sources: vec![],
         provenance: provenance.clone(),
     };
@@ -91,7 +94,7 @@ fn source_with_constraint(
                 key: PropertyKey::new(name, dims),
                 value: PropertyValue::Scalar { value, dims },
                 interpolation: InterpolationPolicy::ConstantWithinValidity,
-                validity: ValidityDomain::unconstrained().with("T", 290.0, 310.0),
+                validity: ValidityDomain::unconstrained().with_quantity("T", kelvin, 290.0, 310.0),
                 uncertainty: UncertaintyModel::Unstated,
                 observations: vec![],
                 provenance: provenance.clone(),
@@ -111,7 +114,7 @@ fn source_with_constraint(
     .unwrap();
     let sheet = resolve_sheet(
         &card,
-        &QueryPoint::new().with("T", 300.0).unwrap(),
+        &QueryPoint::new().with_quantity("T", kelvin, 300.0).unwrap(),
         SheetCapabilities {
             membrane: false,
             bending: false,
