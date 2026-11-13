@@ -56,9 +56,13 @@ fn shape(field: &AxialGasField, cone: bool) -> Duct {
     }
 }
 
+// Near the cone's 2 mm end this mixture's wall memory is above the 5 % band budget at 8 poles
+// ("pole count does not resolve the declared band"); 12 are admitted at every point.
+const POLES: usize = 12;
+
 fn resolution(points: usize) -> DgWallResolution {
     DgWallResolution {
-        poles_per_field: 8,
+        poles_per_field: POLES,
         quadrature_points: points,
         band_rad_s: [50.0, 2000.0].map(|v| core::f64::consts::TAU * v),
         maximum_relative_error: 0.05,
@@ -193,7 +197,7 @@ fn field_molecular_schur_uses_local_material_and_exact_frozen_mass() {
     for points in [2, 4, 8] {
         let original = base(&field, true, 1, points);
         let total = original.molecular_relaxation_field_dofs(&law).unwrap();
-        assert_eq!(total, original.total_dofs() + points * 8);
+        assert_eq!(total, original.total_dofs() + points * POLES);
         let duct = original
             .with_molecular_relaxation_field(law.clone())
             .unwrap();
@@ -364,7 +368,7 @@ fn field_molecular_counts_local_zero_reservoirs_and_refuses_invalid_domains() {
     )
     .unwrap();
     let original = base(&field, false, 3, 2);
-    let expected = original.total_dofs() + 2 * 2 * 8;
+    let expected = original.total_dofs() + 2 * 2 * POLES;
     assert_eq!(
         original
             .molecular_relaxation_field_dofs(&material(true))
@@ -379,7 +383,7 @@ fn field_molecular_counts_local_zero_reservoirs_and_refuses_invalid_domains() {
     let memory = duct.molecular.as_ref().unwrap();
     assert_eq!(
         memory.modes.iter().filter(|m| m.rates.is_empty()).count(),
-        2 * 8
+        2 * POLES
     );
     assert!(memory.modes.iter().all(|m| m.heat_rate > 0.0));
     assert!(
