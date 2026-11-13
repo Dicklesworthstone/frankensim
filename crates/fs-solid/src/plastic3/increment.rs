@@ -264,6 +264,7 @@ pub(crate) fn solve_with_inertia<O: IncrementOperator>(
         let (mut f_int, mut stress_force_cap) = operator.internal(&states, &u, scale_rows, cx)?;
         let mut elastic_free_norm = free.iter().fold(0.0_f64, |n, &d| n.hypot(f_int[d]));
         let mut static_force_scale = elastic_free_norm.max(external_free_norm);
+        let mut increment_reference = 0.0_f64;
         if let Some(inertia) = inertia {
             inertia.add_force(&u, &mut f_int, cx)?;
         }
@@ -339,7 +340,14 @@ pub(crate) fn solve_with_inertia<O: IncrementOperator>(
                 // A large tangent by itself (e.g. an unused bulk penalty) must
                 // not weaken the actual-force gate. Conversely, a large stress
                 // unrelated to this equation cannot provide the reference.
-                static_force_scale = static_force_scale.max(connected_scale.min(stress_force_cap));
+                // The prescribed lift is this increment's physical force
+                // reference. Once the targets are reached the remaining lift is
+                // zero, and a homogeneous field cancels the connected
+                // deformation scale, so the largest reference of the increment
+                // is kept; the accepted stress bound still caps it.
+                increment_reference = increment_reference.max(connected_scale);
+                static_force_scale =
+                    static_force_scale.max(increment_reference.min(stress_force_cap));
                 let relative = before / static_force_scale.max(f64::MIN_POSITIVE);
                 *history.last_mut().expect("current residual was recorded") = relative;
                 if !pending_any && relative <= settings.relative_tolerance {

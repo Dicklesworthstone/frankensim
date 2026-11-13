@@ -770,6 +770,7 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
             let mut history = Vec::new();
             let mut fallbacks = 0;
             let mut converged = false;
+            let mut increment_reference = 0.0_f64;
             for iteration in 0..=self.settings.max_newton_iterations {
                 checkpoint(cx)?;
                 let residual: Vec<f64> =
@@ -833,7 +834,13 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
                 // may loosen equilibrium by itself. Actual free forces remain
                 // the primary scale; this bounded fallback only supplies a
                 // reference for cancellation at zero-load equilibrium.
-                scale = scale.max(connected_scale.min(trial.force_scale));
+                // The prescribed lift is this increment's physical force
+                // reference. Once the targets are reached the remaining lift is
+                // zero, and a homogeneous field cancels the connected
+                // deformation scale, so the largest reference of the increment
+                // is kept; the accepted stress bound still caps it.
+                increment_reference = increment_reference.max(connected_scale);
+                scale = scale.max(increment_reference.min(trial.force_scale));
                 *history.last_mut().expect("current residual was recorded") = before / scale;
                 if !pending && before <= self.settings.relative_tolerance * scale {
                     converged = true;
