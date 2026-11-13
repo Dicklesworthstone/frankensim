@@ -212,8 +212,12 @@ fn tabulated_compression_solves_free_sides_and_retains_permanent_set_after_relea
             TetAssemblyBudget::standard(), cx,
         ).unwrap();
         let mut physical_heat = 0.0;
-        for index in 1..=6 {
-            let a = -0.03 * f64::from(index);
+        // controls() bounds each step's endpoint-work defect by 20 kJ, about half
+        // the step's stress rise times its strain step. This table rises at
+        // 75 MPa per unit plastic strain, so a 0.03 step from rest leaves
+        // 33 kJ; 0.015 steps reach the same stretch inside that gate.
+        for index in 1..=12 {
+            let a = -0.015 * f64::from(index);
             let step = solid.advance(
                 &rollers(&nodes, Some(a.exp())), &[], [0.0;3],
                 HyperTetSettings::default(), controls(), cx,
@@ -229,15 +233,37 @@ fn tabulated_compression_solves_free_sides_and_retains_permanent_set_after_relea
             + 0.5 * (3e6 + 4e6) * 0.06 + 4e6 * (alpha - 0.1);
         check_uniaxial_with_hardening(&solid, -0.18, -alpha, alpha, hardening_storage);
         close(physical_heat, YIELD * alpha, 0.005);
-        let released = solid.advance(
-            &rollers(&nodes, None), &[], [0.0;3],
-            HyperTetSettings::default(), controls(), cx,
-        ).unwrap();
-        check_uniaxial_with_hardening(&released.solid, -alpha, -alpha, alpha, hardening_storage);
-        close(released.energy.plastic_dissipation_j, 0.0, 0.005);
+        // Release the right face and unload its actual dead traction in four
+        // parts, as the Voce coupon does: one free release from 6 MPa would put
+        // the whole elastic recovery, about 87.5 kJ, into one endpoint step.
+        let loaded_nominal = E * (-0.18 + alpha) / (-0.18_f64).exp();
+        let mut release_heat = 0.0;
+        for fraction in [0.75, 0.5, 0.25, 0.0] {
+            let nominal = fraction * loaded_nominal;
+            let forces = [
+                (3, nominal / 3.0),
+                (9, nominal / 6.0),
+                (21, nominal / 3.0),
+                (15, nominal / 6.0),
+            ];
+            let step = solid
+                .advance(
+                    &rollers(&nodes, None),
+                    &forces,
+                    [0.0; 3],
+                    HyperTetSettings::default(),
+                    controls(),
+                    cx,
+                )
+                .unwrap();
+            release_heat += step.energy.plastic_dissipation_j;
+            solid = step.solid;
+        }
+        check_uniaxial_with_hardening(&solid, -alpha, -alpha, alpha, hardening_storage);
+        close(release_heat, 0.0, 0.005);
         for (node, x) in nodes.iter().enumerate() {
-            close(released.solid.displacement_m()[node][0], ((-alpha).exp()-1.0)*x[0], 3e-8);
-            close(released.solid.displacement_m()[node][1], ((0.5*alpha).exp()-1.0)*x[1], 3e-8);
+            close(solid.displacement_m()[node][0], ((-alpha).exp()-1.0)*x[0], 3e-8);
+            close(solid.displacement_m()[node][1], ((0.5*alpha).exp()-1.0)*x[1], 3e-8);
         }
     });
 }
