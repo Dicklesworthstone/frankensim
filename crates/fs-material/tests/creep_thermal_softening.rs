@@ -365,7 +365,6 @@ fn varying_elasticity_requires_its_thermal_owner_and_full_smooth_source_support(
     for (property, offset) in [
         (YOUNG_MODULUS_PROPERTY, 1.0e8),
         (POISSON_RATIO_PROPERTY, 0.01),
-        (LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY, 1.0e-6),
         (CREEP_REFERENCE_RATE_PROPERTY, 1.0e-5),
         (CREEP_HARDENING_EXPONENT_PROPERTY, 0.2),
     ] {
@@ -374,6 +373,21 @@ fn varying_elasticity_requires_its_thermal_owner_and_full_smooth_source_support(
             &altered, query(&lower, &upper), &expansion_reference(&altered), || false,
         ).is_err(), "unexpected admission of {property}");
     }
+    // E and nu must stay affine, but a continuous piecewise-affine expansion coefficient is
+    // admitted (tabulated CTE through the shared thermoelastic potential, since 273f716cd3).
+    let kinked_alpha = self::card(
+        0.0,
+        Some((LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY, 1.0e-6)),
+    );
+    assert!(
+        ExpandingCreepSource::from_norton_with_strain_hardening(
+            &kinked_alpha,
+            query(&lower, &upper),
+            &expansion_reference(&kinked_alpha),
+            || false,
+        )
+        .is_ok()
+    );
     let altered = self::card(0.0, Some((ISOTROPIC_HARDENING_MODULUS_PROPERTY, 1.0e6)));
     assert!(ExpandingCreepSource::from_norton_j2(
         &altered, query(&lower, &upper), HardeningPropertyBasis::PlasticStrainModulus,
