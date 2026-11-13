@@ -20,7 +20,7 @@ pub enum Voxel {
 }
 
 /// Cartesian voxel domain, uniform or graded per axis.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct VoxelDomain {
     nx: usize,
     ny: usize,
@@ -31,6 +31,20 @@ pub struct VoxelDomain {
     /// graded domain; `None` when uniform.
     faces: Option<Box<[Vec<f64>; 3]>>,
     voxels: Vec<Voxel>,
+}
+
+// A graded domain stores its spacing as NaN, so a derived comparison would make it
+// unequal to itself. The spacing compares by bits: the same as `==` for the positive
+// finite spacing of a uniform domain, and reflexive for the graded sentinel.
+impl PartialEq for VoxelDomain {
+    fn eq(&self, other: &Self) -> bool {
+        self.nx == other.nx
+            && self.ny == other.ny
+            && self.nz == other.nz
+            && self.dx.to_bits() == other.dx.to_bits()
+            && self.faces == other.faces
+            && self.voxels == other.voxels
+    }
 }
 
 impl VoxelDomain {

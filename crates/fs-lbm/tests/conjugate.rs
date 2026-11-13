@@ -821,6 +821,28 @@ fn projection_of_balanced_fixed_faces_preserves_isothermal_convection() {
     }
 }
 
+// A graded domain stores its uniform spacing as NaN. Equality is still an
+// equivalence: a solve that leaves a graded domain untouched compares equal to the
+// domain it started from (thermal_face_contacts g1_g3), while spacing, faces and
+// occupancy each still tell domains apart.
+#[test]
+fn graded_domain_equals_its_clone_and_spacing_faces_and_voxels_still_differ() {
+    let widths = [vec![0.5, 1.0, 2.0, 0.5], vec![2.0], vec![3.0]];
+    let graded = VoxelDomain::graded(widths.clone()).unwrap();
+    assert!(graded.dx().is_nan());
+    assert_eq!(graded, graded.clone());
+    let other_faces = [vec![0.5, 1.0, 2.0, 0.25], vec![2.0], vec![3.0]];
+    assert_ne!(graded, VoxelDomain::graded(other_faces).unwrap());
+    assert_ne!(
+        graded,
+        VoxelDomain::graded_from_fn(widths, |_| Voxel::Solid(0)).unwrap()
+    );
+    assert_ne!(graded, VoxelDomain::new(4, 1, 1, 0.5).unwrap());
+    let uniform = VoxelDomain::new(4, 1, 1, 1.0).unwrap();
+    assert_eq!(uniform, VoxelDomain::new(4, 1, 1, 1.0).unwrap());
+    assert_ne!(uniform, VoxelDomain::new(4, 1, 1, 2.0).unwrap());
+}
+
 #[test]
 fn graded_cell_projection_preserves_linear_face_interpolation_and_fixed_inflow() {
     let gate = CancelGate::new();
