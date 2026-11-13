@@ -150,7 +150,11 @@ fn ambiguous_elastic_pressure_gauge(mobility: f64, mu: f64, slip: f64) -> Fricti
     let maximum_loss = mu * slip * total;
     assert!(maximum_loss > 1e-4);
     let mut config = FrictionalContactConfig::default();
-    config.newton.relative_tolerance = 1e-18;
+    // The finest relative tolerance a residual can meet. The natural map adds
+    // W*p to the free motion in compensated arithmetic, so near a root its
+    // residual is about one ulp of the pressure, not zero. Below eps, only a
+    // residual that happens to round to exactly zero would converge.
+    config.newton.relative_tolerance = f64::EPSILON;
     solve_frictional_contacts(&contacts, &matrix, config, || false)
         .expect_err("a finite same-motion loss gauge must not publish arbitrary work")
 }
