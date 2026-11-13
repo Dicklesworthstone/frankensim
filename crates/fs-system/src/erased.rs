@@ -10,7 +10,9 @@ use core::any::Any;
 use core::fmt;
 
 use fs_exec::Cx;
-use fs_ports::component::{Class, Component, LoadLine, PortSpec, PortTangent, Proposal, Receipt};
+use fs_ports::component::{
+    Class, Component, EndOfStep, LoadLine, PortSpec, PortTangent, Proposal, Receipt,
+};
 
 /// A value that is both printable and recoverable by its concrete type.
 trait DebugAny: Any + fmt::Debug {
@@ -79,6 +81,7 @@ impl fmt::Debug for OwnerError {
 pub(crate) trait Node {
     fn ports(&self) -> &[PortSpec];
     fn class(&self) -> Class;
+    fn end_of_step(&self, port: usize) -> EndOfStep;
     fn has_tangent(&self) -> bool;
     fn clone_state(&self, state: &dyn Any) -> Result<Box<dyn Any>, OwnerError>;
     fn stored_energy_j(&self, state: &dyn Any) -> Result<f64, OwnerError>;
@@ -113,6 +116,11 @@ pub(crate) trait Node {
     /// The ports of its load line, for a component added on one.
     fn line_ports(&self) -> Option<&[usize]> {
         None
+    }
+    /// The end inputs of its load line's ports, for a component added on
+    /// one that names any.
+    fn line_ends(&self) -> &[Option<usize>] {
+        &[]
     }
     /// Only called when [`Node::line_ports`] is `Some`.
     #[allow(clippy::too_many_arguments)]
@@ -151,6 +159,10 @@ macro_rules! mandatory_tier {
 
         fn class(&self) -> Class {
             self.0.class()
+        }
+
+        fn end_of_step(&self, port: usize) -> EndOfStep {
+            self.0.end_of_step(port)
         }
 
         fn clone_state(&self, state: &dyn Any) -> Result<Box<dyn Any>, OwnerError> {
@@ -265,6 +277,10 @@ where
 
     fn line_ports(&self) -> Option<&[usize]> {
         Some(self.0.line_ports())
+    }
+
+    fn line_ends(&self) -> &[Option<usize>] {
+        self.0.line_ends()
     }
 
     fn propose_on_line(

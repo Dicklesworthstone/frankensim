@@ -53,19 +53,30 @@ pub(super) struct Line {
     /// block's unknowns (`usize::MAX` for a flow the block does not solve
     /// for, which has a zero row and column in the matrix).
     pub(super) places: Vec<(usize, usize, usize)>,
-    /// The line's matrix of this step, row-major over the coefficients.
+    /// Per coefficient of the line's end inputs, if the component names
+    /// any: the global index of the input and its row among the block's
+    /// unknowns (`usize::MAX` for one the block does not solve for).
+    pub(super) ends: Vec<(usize, usize)>,
+    /// The line's matrix of this step, row-major over the coefficients,
+    /// followed by one row per end input: how the flow at the END of the
+    /// step answers each effort.
     pub(super) compliance: Vec<f64>,
     /// Room for the factor of the symmetric-part test.
     factor: Vec<f64>,
 }
 
 impl Line {
-    pub(super) fn new(node: usize, places: Vec<(usize, usize, usize)>) -> Self {
+    pub(super) fn new(
+        node: usize,
+        places: Vec<(usize, usize, usize)>,
+        ends: Vec<(usize, usize)>,
+    ) -> Self {
         let width = places.len();
         Self {
             node,
+            compliance: vec![0.0; (width + ends.len()) * width],
             places,
-            compliance: vec![0.0; width * width],
+            ends,
             factor: vec![0.0; width * width],
         }
     }
@@ -84,6 +95,31 @@ impl Line {
                     term.1 = self.compliance[row * width + column];
                 }
             }
+        }
+        for (end, &(input, unknown)) in self.ends.iter().enumerate() {
+            if unknown == usize::MAX {
+                continue;
+            }
+            if let Driver::OnLine { terms, own } = &mut drivers[input] {
+                let first = terms.len() - *own;
+                for (column, term) in terms[first..].iter_mut().enumerate() {
+                    term.1 = self.compliance[(width + end) * width + column];
+                }
+            }
+        }
+    }
+
+    /// Column `effort` of the rows of the end inputs, from the
+    /// back-substitution that gave that column of the line: how the END of
+    /// each flow answers the effort. `answer` is over the block's unknowns.
+    fn end_answers(&mut self, effort: usize, answer: &[f64]) {
+        let width = self.places.len();
+        for (end, &(_, unknown)) in self.ends.iter().enumerate() {
+            self.compliance[(width + end) * width + effort] = if unknown == usize::MAX {
+                0.0
+            } else {
+                -answer[unknown]
+            };
         }
     }
 
@@ -248,6 +284,7 @@ impl System {
                     -work.residual[unknown]
                 };
             }
+            line.end_answers(effort, &work.residual);
         }
         if !line.passive() {
             return Err(SystemError::LoadLine {
@@ -260,6 +297,16 @@ impl System {
         // On the line: the drivers carry the matrix, and the flow inputs
         // become the released flows of the efforts accepted last.
         line.write_drivers(&mut self.drivers);
+        self.released_flows(line);
+        Ok(None)
+    }
+
+    /// The flow inputs of `line` become the released flows of the efforts
+    /// accepted last, and its end inputs the released ends: what the
+    /// component is handed at its first proposal of the step goes together.
+    /// The counterpart of [`Self::line_flows`].
+    fn released_flows(&mut self, line: &Line) {
+        let width = line.places.len();
         for (flow, &(input, _, unknown)) in line.places.iter().enumerate() {
             if unknown == usize::MAX {
                 continue;
@@ -269,7 +316,15 @@ impl System {
                     line.compliance[flow * width + effort] * self.accepted_outputs[output];
             }
         }
-        Ok(None)
+        for (end, &(input, unknown)) in line.ends.iter().enumerate() {
+            if unknown == usize::MAX {
+                continue;
+            }
+            for (effort, &(_, output, _)) in line.places.iter().enumerate() {
+                self.inputs[input] +=
+                    line.compliance[(width + end) * width + effort] * self.accepted_outputs[output];
+            }
+        }
     }
 
     /// One update of `block`'s unknowns with the efforts of its line's
@@ -337,11 +392,14 @@ impl System {
     pub(super) fn crossing(&self, block: usize, row: usize) -> Option<(f64, f64)> {
         let line = self.lines[block].as_ref()?;
         let width = line.places.len();
-        let (flow, &(input, _, _)) = line
-            .places
-            .iter()
-            .enumerate()
-            .find(|(_, place)| place.2 == row)?;
+        // A flow of the line, or the end of one: the same difference.
+        let (flow, input) = if let Some(flow) = line.places.iter().position(|place| place.2 == row)
+        {
+            (flow, line.places[flow].0)
+        } else {
+            let end = line.ends.iter().position(|end| end.1 == row)?;
+            (width + end, line.ends[end].0)
+        };
         let mut crossing = self.inputs[input];
         let mut terms = crossing.abs();
         for (effort, &(_, output, _)) in line.places.iter().enumerate() {
@@ -367,6 +425,15 @@ impl System {
             }
             for (effort, &(_, output, _)) in line.places.iter().enumerate() {
                 self.inputs[input] -= line.compliance[flow * width + effort] * self.outputs[output];
+            }
+        }
+        for (end, &(input, unknown)) in line.ends.iter().enumerate() {
+            if unknown == usize::MAX {
+                continue;
+            }
+            for (effort, &(_, output, _)) in line.places.iter().enumerate() {
+                self.inputs[input] -=
+                    line.compliance[(width + end) * width + effort] * self.outputs[output];
             }
         }
     }

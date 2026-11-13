@@ -190,6 +190,15 @@ pub enum AdmissionError {
         /// Component name.
         node: String,
     },
+    /// The end of a step at a port of a load line: what the port's
+    /// neighbours say of how their flow ends the step does not go with what
+    /// the component on the line takes there.
+    LineEnd {
+        /// The port of the load line.
+        port: String,
+        /// What does not go together.
+        reason: &'static str,
+    },
 }
 
 impl fmt::Display for AdmissionError {
@@ -281,6 +290,12 @@ impl fmt::Display for AdmissionError {
                 "the load line of component `{node}` must span power ports that receive a flow, \
                  in increasing order"
             ),
+            Self::LineEnd { port, reason } => {
+                write!(
+                    f,
+                    "the end of a step at port `{port}` of a load line: {reason}"
+                )
+            }
         }
     }
 }

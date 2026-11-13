@@ -8,8 +8,8 @@ use std::rc::Rc;
 use fs_exec::Cx;
 use fs_ports::StableId;
 use fs_ports::component::{
-    CarriedStepAudit, Carrier, Class, Component, ContractViolation, LoadLine, MassStepAudit,
-    PortLayout, PortRole, PortSpec, PortTangent, Proposal, Receipt, STREAM_CARRIED,
+    CarriedStepAudit, Carrier, Class, Component, ContractViolation, EndOfStep, LoadLine,
+    MassStepAudit, PortLayout, PortRole, PortSpec, PortTangent, Proposal, Receipt, STREAM_CARRIED,
     STREAM_ENTHALPY_RATE, STREAM_MASS_RATE, audit_carried_step, audit_mass_step, audit_step,
 };
 
@@ -1269,7 +1269,14 @@ impl SystemBuilder {
         for (node, used) in self.used.iter().enumerate() {
             for (port, &taken) in used.iter().enumerate() {
                 let spec = &self.nodes[node].ports()[port];
-                if !taken && spec.role() != PortRole::SignalOut {
+                // The end inputs of a load line are wired below, by the
+                // kernel.
+                let wired_below = self.nodes[node]
+                    .line_ends()
+                    .iter()
+                    .flatten()
+                    .any(|&end| end == port);
+                if !taken && !wired_below && spec.role() != PortRole::SignalOut {
                     return Err(AdmissionError::Unconnected {
                         port: self.label(PortRef { node, port }),
                     });
@@ -1427,6 +1434,126 @@ impl SystemBuilder {
         let output_owner = owner(&output_start, outputs);
         let input_owner = owner(&input_start, inputs);
 
+        // The end of a step at the ports of a load line. A port that names
+        // an end input is driven there by the sum that drives its flow,
+        // taken over what its neighbours return as the END of their flows:
+        // the same outputs' companions, with the same signs and ratios. A
+        // port that names none is joined only to neighbours whose flow ends
+        // the step by the midpoint relation.
+        for node in 0..count {
+            let Some(line_ports) = self.nodes[node].line_ports() else {
+                continue;
+            };
+            let ends = self.nodes[node].line_ends();
+            for (position, &port) in line_ports.iter().enumerate() {
+                let refuse = |reason: &'static str| AdmissionError::LineEnd {
+                    port: self.label(PortRef { node, port }),
+                    reason,
+                };
+                let flows = input_of(PortRef { node, port });
+                let end_inputs = match ends.get(position).copied().flatten() {
+                    Some(end_port) => {
+                        let fits = self.nodes[node].ports().get(end_port).is_some_and(|spec| {
+                            spec.carrier() == Carrier::Signal && spec.role() == PortRole::SignalIn
+                        });
+                        if !fits || self.used[node][end_port] {
+                            return Err(refuse(
+                                "its end input must be a signal input that nothing is connected \
+                                 to: the kernel makes that wire",
+                            ));
+                        }
+                        let range = input_of(PortRef {
+                            node,
+                            port: end_port,
+                        });
+                        if range.len() != flows.len() {
+                            return Err(refuse("its end input has not the width of the port"));
+                        }
+                        Some(range)
+                    }
+                    None => None,
+                };
+                for (offset, flow) in flows.enumerate() {
+                    let Driver::Linear(terms) = &drivers[flow] else {
+                        // A flow prescribed from outside ends its step as
+                        // it is held, or by the span the component is told.
+                        if end_inputs.is_some() {
+                            return Err(refuse(
+                                "its flow is prescribed, and a prescribed flow has no end to \
+                                 tell: the port takes no end input",
+                            ));
+                        }
+                        continue;
+                    };
+                    let terms = terms.clone();
+                    let mut end_terms = Vec::with_capacity(terms.len());
+                    let (mut told, mut midpoint) = (0_usize, 0_usize);
+                    for (source, coefficient) in terms {
+                        let from = output_owner[source];
+                        let local = source - output_start[from];
+                        let from_port = (0..self.nodes[from].ports().len())
+                            .find(|&port| self.layouts[from].output_range(port).contains(&local))
+                            .expect("every output belongs to a port of its component");
+                        let within = local - self.layouts[from].output_range(from_port).start;
+                        match self.nodes[from].end_of_step(from_port) {
+                            EndOfStep::Midpoint => midpoint += 1,
+                            EndOfStep::Untold => {
+                                return Err(refuse(
+                                    "a neighbour's flow does not end its step by the midpoint \
+                                     relation, and it does not tell its end",
+                                ));
+                            }
+                            EndOfStep::Told(companion) => {
+                                let fits =
+                                    self.nodes[from].ports().get(companion).is_some_and(|spec| {
+                                        spec.carrier() == Carrier::Signal
+                                            && spec.role() == PortRole::SignalOut
+                                    });
+                                let range = if fits {
+                                    self.layouts[from].output_range(companion)
+                                } else {
+                                    0..0
+                                };
+                                if range.len() != self.layouts[from].output_range(from_port).len() {
+                                    return Err(refuse(
+                                        "a neighbour names, for the end of its flow, a port \
+                                         that is not a signal output of the flow's width",
+                                    ));
+                                }
+                                told += 1;
+                                end_terms
+                                    .push((output_start[from] + range.start + within, coefficient));
+                            }
+                        }
+                    }
+                    match (&end_inputs, told, midpoint) {
+                        (None, 0, _) => {}
+                        (None, _, _) => {
+                            return Err(refuse(
+                                "a neighbour tells the end of its flow, which does not end its \
+                                 step by the midpoint relation, and the port takes no end input",
+                            ));
+                        }
+                        (Some(_), 0, _) => {
+                            return Err(refuse(
+                                "it takes an end input, and no neighbour tells the end of its \
+                                 flow: they end their steps by the midpoint relation",
+                            ));
+                        }
+                        (Some(range), _, 0) => {
+                            drivers[range.start + offset] = Driver::Linear(end_terms);
+                        }
+                        (Some(_), _, _) => {
+                            return Err(refuse(
+                                "some of its neighbours tell the end of their flow and others \
+                                 do not",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
         let mut successors: Vec<Vec<usize>> = vec![Vec::new(); count];
         let mut sources = Vec::new();
         for (index, driver) in drivers.iter().enumerate() {
@@ -1522,8 +1649,37 @@ impl SystemBuilder {
                     drivers[input] = Driver::OnLine { terms, own };
                 }
             }
+            // The end inputs wired above are unknowns of the block like
+            // the flows, and the line has a row for each.
+            let mut ends = Vec::new();
+            for (position, _) in ports.iter().enumerate() {
+                let Some(end_port) = self.nodes[node]
+                    .line_ends()
+                    .get(position)
+                    .copied()
+                    .flatten()
+                else {
+                    continue;
+                };
+                for end in self.layouts[node].input_range(end_port) {
+                    let input = input_start[node] + end;
+                    let unknown = blocks[block]
+                        .unknowns
+                        .iter()
+                        .position(|&index| index == input)
+                        .unwrap_or(usize::MAX);
+                    if unknown != usize::MAX
+                        && let Driver::Linear(terms) = &mut drivers[input]
+                    {
+                        let mut terms = core::mem::take(terms);
+                        terms.extend(places.iter().map(|&(_, effort, _)| (effort, 0.0)));
+                        drivers[input] = Driver::OnLine { terms, own };
+                    }
+                    ends.push((input, unknown));
+                }
+            }
             line_of[node] = block;
-            lines[block] = Some(Line::new(node, places));
+            lines[block] = Some(Line::new(node, places, ends));
         }
         let block_work = blocks
             .iter()

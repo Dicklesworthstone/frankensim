@@ -904,6 +904,27 @@ pub enum Proposal {
     },
 }
 
+/// How the flow a power port returns ends its step.
+///
+/// A port that returns a flow returns the MEAN of it over the step: that is
+/// what a held effort does its work on. What the flow is at the END of the
+/// step the mean does not say, and a relation that depends on it has to be
+/// told: dry friction holds a pair that ends its step with no slip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndOfStep {
+    /// The midpoint relation: the flow ends the step at twice the mean the
+    /// port returns less the flow it began the step with. The default
+    /// promise, and exact for a component stepped by the midpoint rule.
+    Midpoint,
+    /// The flow at the step's end is returned on the signal output with
+    /// this index into [`Component::ports`], coefficient for coefficient.
+    Told(usize),
+    /// Neither: the flow does not end its step by the midpoint relation and
+    /// its end is not returned. A system does not join such a port to a
+    /// load line.
+    Untold,
+}
+
 /// The mandatory tier: a pure step from an accepted state to a candidate.
 ///
 /// The system owns every state. `propose` reads the accepted state and writes
@@ -959,6 +980,17 @@ pub trait Component {
     /// has one. The driver never steps past it.
     fn next_event_s(&self, _state: &Self::State) -> Option<f64> {
         None
+    }
+
+    /// How the flow that power port `port` returns ends its step. Asked
+    /// only of a port that returns a flow.
+    ///
+    /// The default is the midpoint relation. A component whose step is not
+    /// the midpoint rule's (one that is exact for a held effort, say) must
+    /// not keep the default: it returns the end of the flow on a signal
+    /// output and names it, or answers [`EndOfStep::Untold`].
+    fn end_of_step(&self, _port: usize) -> EndOfStep {
+        EndOfStep::Midpoint
     }
 
     /// Propose one step of `dt_s` from `old` under held `inputs`.
@@ -1067,6 +1099,23 @@ pub trait LoadLine: Component {
     /// coefficients, in port order, are the line's flows and efforts.
     fn line_ports(&self) -> &[usize];
 
+    /// Per port of [`Self::line_ports`], in that order: the signal input
+    /// that receives the flow of that port at the END of the step, as an
+    /// index into [`Component::ports`], or `None`. Where the list is
+    /// shorter than the line (the default is empty) the other ports have
+    /// none.
+    ///
+    /// A port with none takes the flow it is given to end the step by the
+    /// midpoint relation ([`EndOfStep::Midpoint`]), and a system joins it
+    /// only to neighbours that promise that. A port with an end input is
+    /// joined only to neighbours that tell the end of their flow
+    /// ([`EndOfStep::Told`]); the system makes the wire, with the signs and
+    /// ratios of the port's own junction, and nothing else is connected to
+    /// the input. It has the width of its port.
+    fn line_ends(&self) -> &[Option<usize>] {
+        &[]
+    }
+
     /// [`Component::propose`] on the load line.
     ///
     /// `inputs` is as for `propose`, except that at the line's ports it
@@ -1075,6 +1124,13 @@ pub trait LoadLine: Component {
     /// `flow[i] = released[i] - sum(compliance[i][j] * effort[j])`. It need
     /// not be symmetric; its symmetric part is not negative. A coefficient
     /// whose flow is prescribed has a zero row and column.
+    ///
+    /// For a component that names end inputs ([`Self::line_ends`]) the
+    /// square matrix is followed by one more row per coefficient of those
+    /// inputs, in port order, and `inputs` holds the released END flows
+    /// there: with `n` the line's coefficients,
+    /// `end[k] = released_end[k] - sum(compliance[n + k][j] * effort[j])`.
+    /// A component that names none is handed the square matrix alone.
     ///
     /// The efforts the component settles on are its outputs at the line's
     /// ports. The candidate, the other outputs and the receipt are those of

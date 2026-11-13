@@ -121,6 +121,31 @@ a zero row and column. With a zero matrix the call is `propose`, to the bit.
 The solver that supplies the line is the system kernel's; this crate fixes the
 call and checks an implementation of it.
 
+**The end of a step.** A port that returns a flow returns its MEAN over the
+step: that is what a held effort does its work on. What the flow is at the END
+of the step the mean does not say, and a relation that depends on it has to be
+told (dry friction holds a pair that ends its step with no slip).
+`Component::end_of_step(port)` is what a component promises about it, per power
+port that returns a flow:
+- `EndOfStep::Midpoint`, the default: the flow ends the step at twice the mean
+  less the flow it began the step with. Exact for a component stepped by the
+  midpoint rule. A component whose step is not that rule's must not keep the
+  default.
+- `EndOfStep::Told(q)`: the flow at the step's end is returned on signal
+  output `q`, coefficient for coefficient, by the same proposal.
+- `EndOfStep::Untold`: neither.
+
+`LoadLine::line_ends` names, per port of the line, the signal input that
+receives that port's flow at the step's end, or none (the default: none). A
+port with none takes its flow to end the step by the midpoint relation. A port
+with an end input is handed, after the line's square matrix, one more row of
+`compliance` per coefficient of the input: `end[k] = released_end[k] -
+sum(compliance[n + k][j] * effort[j])`, with the released end flows in
+`inputs` there. A component that names none is handed the square matrix alone,
+as before. Who makes the wire, and which pairings are refused, is the
+kernel's (`crates/fs-system/CONTRACT.md`). `check_load_line` takes the matrix
+with those rows and refuses another length.
+
 **State.** The system owns every state. `propose(old, dt, inputs, new, outputs,
 cx)` reads the accepted state and writes a candidate slot whose content on entry
 is unspecified. It is pure: equal arguments give bitwise-equal results and

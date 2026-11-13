@@ -474,6 +474,36 @@ relation allows there.
   (`AdmissionError::TwoLines`, both named). `add_on_line` refuses a line that
   is not over power ports that receive a flow, in increasing order
   (`AdmissionError::LinePorts`), and claims no name.
+- The end of a step on the line. A port's flow is its mean over the step,
+  and the elements of this crate end a step at twice that mean less its
+  start (the midpoint rule); a component that is exact for a held effort
+  does not. What a component promises is `Component::end_of_step`
+  (crates/fs-ports/CONTRACT.md), and at sealing the kernel holds every port
+  of a load line to it:
+  - A line port that names no end input (`LoadLine::line_ends`) is joined
+    only to neighbours whose flow ends the step by the midpoint relation.
+    `Slider` names none.
+  - A line port that names one is joined only to neighbours that tell the
+    end of their flow. The kernel makes the wire: the end input is driven
+    by the sum that drives the port's flow, taken over the neighbours' end
+    outputs, with the same signs and ratios. Nothing else is connected to
+    it.
+  - The end input is an unknown of the block like the flow, so the factors
+    and back-substitutions that give the line also say how it answers each
+    effort. The line keeps that as one more row per end coefficient, after
+    its square matrix; the input's driver carries the row as the flows'
+    drivers carry theirs, the component is handed the released end flow,
+    and the end that crossed is written back when the block is accepted. No
+    proposal is made that was not made before, and a block without end
+    inputs runs the code it ran.
+  - Refused (`AdmissionError::LineEnd`, the port named, and what does not
+    go together): a neighbour that answers `Untold`; a neighbour that tells
+    its end beside a port that takes none; an end input beside neighbours
+    that all keep the midpoint promise; neighbours of both kinds in one
+    port's flow; an end input that is already connected, or is not a signal
+    input of the port's width; an end input on a port whose flow is
+    prescribed (a prescribed flow is held over its step, or the component
+    is told its span).
 - A block with a component on a line keeps no factors between steps and
   costs, per step, one assembly of the neighbours' columns (a differenced
   column one proposal of its component, and up to five more where it is
@@ -896,7 +926,7 @@ that locates an event (a friction interface that cuts the step at a stop,
 
 `AdmissionError` for descriptions that cannot run, including
 `TransformerRatio`, `MapShape` and `MapCoefficient` for invalid power maps,
-and `LinePorts` and `TwoLines` for load lines.
+and `LinePorts`, `TwoLines` and `LineEnd` for load lines.
 `SystemError` for a failed
 step: the component's own error unchanged (`Component`, with the phase), a
 contract breach (`Contract`), a bad negotiation answer, `NotConverged` naming
@@ -2295,6 +2325,26 @@ solved together. Nothing in the module is deleted.
 ## No-claim boundaries
 
 - No accuracy claim for any component; the kernel checks accounts, not physics.
+- The end of a flow that is held at exactly zero. A wire is solved relative
+  to its size and to the rounding of the terms its driver sums. An end held
+  at nothing has no size, and its rounding is not in those terms: a modal
+  neighbour forms it as a sum over its modes, which cancel at the port and
+  do not vanish in themselves. The kernel is not told that sum, and with no
+  absolute tolerance the block is refused within a few steps (asserted in
+  `tests/load_line.rs`; on ts2 at 3a42d0c16d, step 33 of the test's graph, a
+  residual of 1.4e-17 m/s). The solve's absolute tolerance has to cover it.
+  An end carried at a speed that is not zero (a bow) has a size and is
+  taken.
+- A component that keeps the default promise of `end_of_step` and does not
+  have it. Nothing can check the promise from outside: the kernel sees the
+  mean. Beside the slider such a neighbour is held at no mean slip and
+  never brought to rest (asserted in `tests/load_line.rs`).
+- The rows of a line found by differencing are known to what a forward
+  difference leaves. Beside two exact oscillators the mean and the end row
+  were within 1.4e-6 and 1.3e-6 of the closed form at a step of 1 ms and
+  within 2.1e-7 and 4.5e-7 at 4 ms (measured there on ts2 at 3a42d0c16d,
+  each column resolved against the rounding of its outputs; asserted within
+  1e-4).
 - The elements are ideal and their parameters constant. A `HeatCapacity`
   stores its absolute temperature, so a small heat increment is rounded to an
   ulp of that temperature each step; its ledger account, a compensated sum of

@@ -38,6 +38,22 @@
 //! below are the same either way: only the start slip they are handed
 //! differs.
 //!
+//! An end that ANSWERS the slider's force is taken to end its step by
+//! the midpoint relation. Beside a mass the end of a step and twice its
+//! mean less its start are one number, and every row below rests on that.
+//! Beside a neighbour whose step is not the midpoint rule's they are not:
+//! a modal structure, exact for a held force, returns the mean velocity of
+//! its step and ends it elsewhere. Held at no mean slip such a neighbour is
+//! never brought to rest; its velocity at the port changes sign from step
+//! to step and does not decay (`tests/load_line.rs` shows it on two exact
+//! oscillators: 0.5 m/s, 200 steps on). So the kernel does not seal one
+//! beside the slider. A component says how the flow of a port ends its
+//! step (`fs_ports::component::EndOfStep`; the default is the midpoint
+//! relation), and one on a load line that needs the end names an input for
+//! it (`LoadLine::line_ends`), which the kernel wires and gives a row of
+//! the line. The slider names none: it is for neighbours on the midpoint
+//! rule.
+//!
 //! A span on an end that answers the slider's force is refused. So is a
 //! span of the port's sign, at its third step: a span on one side of zero
 //! belongs to a flow on the other, but one step cannot say that a span on

@@ -369,10 +369,18 @@ where
         last = Some(port);
     }
     let width = places.len();
-    if compliance.len() != width * width {
+    // A component that names end inputs is handed one more row per
+    // coefficient of them.
+    let end_rows: usize = component
+        .line_ends()
+        .iter()
+        .flatten()
+        .map(|&port| layout.input_range(port).len())
+        .sum();
+    if compliance.len() != (width + end_rows) * width {
         return Err(Failure::Contract(ContractViolation::VectorLength {
             vector: "compliance",
-            expected: width * width,
+            expected: (width + end_rows) * width,
             actual: compliance.len(),
         }));
     }
@@ -462,7 +470,7 @@ where
 
     // With nothing taken away by an effort the line is the released flows
     // themselves, and the call is the mandatory tier's.
-    let zero = vec![0.0; width * width];
+    let zero = vec![0.0; (width + end_rows) * width];
     let unloaded = |state: &mut C::State, outputs: &mut [f64]| {
         component.propose_on_line(
             case.state,

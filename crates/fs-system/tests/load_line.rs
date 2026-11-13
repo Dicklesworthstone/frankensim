@@ -4621,6 +4621,790 @@ fn a_push_that_creeps_up_to_the_static_limit_lets_go_a_hair_inside_it_one_way() 
     }
 }
 
+// The end of a step on the load line.
+
+/// What an [`ExactOscillator`] says of how its flow ends a step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ends {
+    /// It keeps the default promise, the midpoint relation, which it does
+    /// not have.
+    Promised,
+    /// It returns the end of its flow on the signal output `p_end`.
+    Told,
+    /// It says that it is neither.
+    Untold,
+}
+
+/// A neighbour that is NOT stepped by the midpoint rule: two undamped
+/// oscillators of unit modal mass driven through one port, each stepped
+/// exactly under the held force, as a modal structure is. Port `p` receives
+/// the force [N] and returns the mean velocity of the step [m/s], which is
+/// the displacement the force did its work on; the velocity at the step's
+/// end is in the state, and is not twice that mean less the start.
+struct ExactOscillator {
+    ends: Ends,
+    ports: Vec<PortSpec>,
+}
+
+/// Angular frequencies [rad/s] and shapes at the port [1/sqrt(kg)].
+const OMEGAS: [f64; 2] = [40.0, 170.0];
+const SHAPES: [f64; 2] = [0.8, -1.3];
+
+/// Per mode: displacement and velocity.
+type Modes = [(f64, f64); 2];
+
+impl ExactOscillator {
+    fn new(ends: Ends) -> Self {
+        let mut ports = vec![
+            PortSpec::power(
+                StableId::new("p").unwrap(),
+                PortKind::MechanicalForceVelocity,
+                PortRole::EffortIn,
+                core::num::NonZeroUsize::MIN,
+            )
+            .unwrap(),
+        ];
+        if ends == Ends::Told {
+            ports.push(PortSpec::signal_out(
+                StableId::new("p_end").unwrap(),
+                core::num::NonZeroUsize::MIN,
+            ));
+        }
+        Self { ends, ports }
+    }
+
+    /// The velocity at the port [m/s] in `modes`.
+    fn velocity(modes: &Modes) -> f64 {
+        SHAPES[0] * modes[0].1 + SHAPES[1] * modes[1].1
+    }
+
+    /// The port's mean and end velocity over a step of `dt_s` from rest
+    /// under a held newton: its two mobilities [m/(N s)].
+    fn mobilities(dt_s: f64) -> (f64, f64) {
+        let (mut mean, mut end) = (0.0, 0.0);
+        for (omega, shape) in OMEGAS.iter().zip(SHAPES) {
+            mean += shape * shape * (1.0 - (omega * dt_s).cos()) / (omega * omega * dt_s);
+            end += shape * shape * (omega * dt_s).sin() / omega;
+        }
+        (mean, end)
+    }
+}
+
+impl Component for ExactOscillator {
+    type State = Modes;
+    type Error = ElementError;
+
+    fn ports(&self) -> &[PortSpec] {
+        &self.ports
+    }
+
+    fn class(&self) -> Class {
+        Class::ExactLinear
+    }
+
+    fn stored_energy_j(&self, modes: &Modes) -> Result<f64, ElementError> {
+        Ok(modes
+            .iter()
+            .zip(OMEGAS)
+            .map(|((q, v), omega)| 0.5 * (v * v + omega * omega * q * q))
+            .sum())
+    }
+
+    fn end_of_step(&self, _port: usize) -> fs_ports::component::EndOfStep {
+        match self.ends {
+            Ends::Promised => fs_ports::component::EndOfStep::Midpoint,
+            Ends::Told => fs_ports::component::EndOfStep::Told(1),
+            Ends::Untold => fs_ports::component::EndOfStep::Untold,
+        }
+    }
+
+    fn propose(
+        &self,
+        old: &Modes,
+        dt_s: f64,
+        inputs: &[f64],
+        new: &mut Modes,
+        outputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<Proposal, ElementError> {
+        let force = inputs[0];
+        let (mut moved, mut size) = (0.0_f64, 0.0_f64);
+        for mode in 0..2 {
+            let (omega, shape, (q, v)) = (OMEGAS[mode], SHAPES[mode], old[mode]);
+            let (sin, cos) = (omega * dt_s).sin_cos();
+            // The modal force is held: the exact step of an oscillator of
+            // unit mass about its shifted rest point. The displacement is
+            // advanced by its increment, formed without subtracting the
+            // two ends (`1 - cos` as twice the squared sine of half the
+            // angle): a difference of ends would round at the size of the
+            // displacement, which a port held at rest cannot be solved
+            // below.
+            let rest = shape * force / (omega * omega);
+            let half = (0.5 * omega * dt_s).sin();
+            let step = (rest - q) * 2.0 * half * half + v * sin / omega;
+            let v1 = -(q - rest) * omega * sin + v * cos;
+            new[mode] = (q + step, v1);
+            moved += shape * step;
+            size += (shape * step).abs();
+        }
+        outputs[0] = moved / dt_s;
+        if self.ends == Ends::Told {
+            outputs[1] = Self::velocity(new);
+        }
+        // The force's work is the change of the modes' energy, exactly.
+        let work_j = force * moved;
+        let energies = self.stored_energy_j(old)? + self.stored_energy_j(new)?;
+        Ok(Proposal::Step(Receipt::lossless(
+            work_j,
+            64.0 * f64::EPSILON * (force.abs() * size + energies) + f64::MIN_POSITIVE,
+        )))
+    }
+}
+
+/// What a [`Holder`] was handed in its last step, and what it did with it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Held {
+    /// The line's two rows for end `a`: how its mean flow and how its flow
+    /// at the step's end answer the effort.
+    compliance: [f64; 2],
+    /// The effort returned at `a` [N].
+    effort: f64,
+    /// The slip on the line at that effort: its mean over the step, and at
+    /// the step's end.
+    mean: f64,
+    end: f64,
+    /// The work of the effort on the mean slip so far [J], signed.
+    work_j: f64,
+}
+
+thread_local! {
+    /// What every proposal of a [`Holder`] was handed for end `a`: the
+    /// released end flow, and the effort it settled on.
+    static HANDED: core::cell::RefCell<Vec<(f64, f64)>> =
+        const { core::cell::RefCell::new(Vec::new()) };
+}
+
+/// The smallest component that needs the end of a step: two ends that it
+/// holds together at the END of every step, as a side carries what sticks
+/// to it. Ports `a` and `b` receive flows (minus the movers', as every
+/// member of a junction does) and return the effort and its opposite;
+/// `a_end` is the end input of `a`. End `b` is for a side whose flow is
+/// given: it is held over its step, so it ends the step with its mean.
+///
+/// Held at no END slip, the mean slip of a step is not zero where a mover's
+/// mean and end differ, and the effort does a work on it of either sign.
+/// That work is a defect of the step, not heat, and is booked as one.
+struct Holder {
+    ports: [PortSpec; 3],
+}
+
+impl Holder {
+    fn new() -> Self {
+        let end = |name: &str| {
+            PortSpec::power(
+                StableId::new(name).unwrap(),
+                PortKind::MechanicalForceVelocity,
+                PortRole::FlowIn,
+                core::num::NonZeroUsize::MIN,
+            )
+            .unwrap()
+        };
+        Self {
+            ports: [
+                end("a"),
+                end("b"),
+                PortSpec::signal_in(
+                    StableId::new("a_end").unwrap(),
+                    core::num::NonZeroUsize::MIN,
+                ),
+            ],
+        }
+    }
+}
+
+impl Component for Holder {
+    type State = Held;
+    type Error = ElementError;
+
+    fn ports(&self) -> &[PortSpec] {
+        &self.ports
+    }
+
+    fn class(&self) -> Class {
+        Class::NonSmooth
+    }
+
+    fn stored_energy_j(&self, _held: &Held) -> Result<f64, ElementError> {
+        Ok(0.0)
+    }
+
+    fn propose(
+        &self,
+        old: &Held,
+        dt_s: f64,
+        inputs: &[f64],
+        new: &mut Held,
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<Proposal, ElementError> {
+        self.propose_on_line(old, dt_s, inputs, &[0.0; 6], new, outputs, cx)
+    }
+}
+
+impl LoadLine for Holder {
+    fn line_ports(&self) -> &[usize] {
+        &[0, 1]
+    }
+
+    fn line_ends(&self) -> &[Option<usize>] {
+        &[Some(2)]
+    }
+
+    fn propose_on_line(
+        &self,
+        old: &Held,
+        dt_s: f64,
+        inputs: &[f64],
+        compliance: &[f64],
+        new: &mut Held,
+        outputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<Proposal, ElementError> {
+        // The efforts are (e, -e) on the two ends. The line's square
+        // matrix is its first two rows; the third is the end of `a`.
+        let (flow_a, flow_b, end_a) = (inputs[0], inputs[1], inputs[2]);
+        let c = compliance[0] - compliance[1] - compliance[2] + compliance[3];
+        let c_end = compliance[4] - compliance[5];
+        // The effort that ends the step with no slip: `b` ends it with its
+        // mean.
+        let effort = if c_end > 0.0 {
+            (end_a - flow_b) / c_end
+        } else {
+            0.0
+        };
+        let mean = flow_a - flow_b - c * effort;
+        let work_j = dt_s * effort * mean;
+        *new = Held {
+            compliance: [c, c_end],
+            effort,
+            mean,
+            end: end_a - flow_b - c_end * effort,
+            work_j: old.work_j + work_j,
+        };
+        HANDED.with(|handed| handed.borrow_mut().push((end_a, effort)));
+        outputs[0] = effort;
+        outputs[1] = -effort;
+        let scale = dt_s * effort.abs() * (flow_a.abs() + flow_b.abs() + (c * effort).abs());
+        Ok(Proposal::Step(Receipt {
+            stored_change_j: 0.0,
+            dissipated_j: 0.0,
+            numerical_loss_j: work_j,
+            entropy_generated_j_per_k: 0.0,
+            energy_tolerance_j: 64.0 * f64::EPSILON * scale + f64::MIN_POSITIVE,
+            residual: 0.0,
+            tolerance: 0.0,
+        }))
+    }
+}
+
+/// Both modes moving, so that the port moves at 0.5 m/s.
+fn moving() -> Modes {
+    [(0.0, 0.3), (0.0, (0.3 * SHAPES[0] - 0.5) / -SHAPES[1])]
+}
+
+/// The oscillator on end `a` of a [`Holder`] whose end `b` is a side at
+/// `carried_m_s`.
+fn held_at_its_end(start: Modes, carried_m_s: f64) -> (System, NodeId, NodeId) {
+    let mut builder = SystemBuilder::new();
+    let modes = builder
+        .add("modes", ExactOscillator::new(Ends::Told), start)
+        .unwrap();
+    let holder = builder
+        .add_on_line("holder", Holder::new(), Held::default())
+        .unwrap();
+    let held = port(&builder, holder, "a");
+    builder
+        .common_flow(port(&builder, modes, "p"), &[held])
+        .unwrap();
+    // A port receives minus the velocity of what moves it.
+    builder
+        .boundary(
+            port(&builder, holder, "b"),
+            Box::new(move |_, _, values| values[0] = -carried_m_s),
+        )
+        .unwrap();
+    (builder.seal().unwrap(), modes, holder)
+}
+
+#[test]
+fn the_end_row_of_the_line_is_the_neighbours_end_mobility_and_carries_it_at_the_steps_end() {
+    // A neighbour that is exact for a held force returns the mean velocity
+    // of its step, and tells the velocity it ends the step with on a
+    // signal. The kernel wires that to the end input of the component on
+    // the line, with the sign of the port's own junction, and finds how it
+    // answers the effort by the factors that give the line itself: the
+    // line's second row. The holder's effort then ends every step with the
+    // port at the carried speed, which the mean row alone cannot say.
+    //
+    // Both rows against the closed form of two exact oscillators. The
+    // neighbour is differenced, so they are known to what a forward
+    // difference leaves: 1.4e-6 of themselves at worst here (measured on
+    // ts2 at 3a42d0c16d), where the block's efforts are of the size of the
+    // step it is differenced by. Their ratio is not the 2 of a mass.
+    for dt in [1.0e-3_f64, 4.0e-3] {
+        let (mut system, modes, holder) = held_at_its_end(moving(), 0.1);
+        let (mean_mobility, end_mobility) = ExactOscillator::mobilities(dt);
+        let mut most_off = 0.0_f64;
+        let mut worst_row = [0.0_f64; 2];
+        let (mut iterations, mut most_iterations) = (0_u32, 0_u32);
+        let mut before = Held::default();
+        with_cx(|cx| {
+            for step in 0..400 {
+                HANDED.with(|handed| handed.borrow_mut().clear());
+                let report = system
+                    .step(dt, cx)
+                    .unwrap_or_else(|error| panic!("dt {dt}, step {step}: {error}"));
+                iterations += report.iterations;
+                most_iterations = most_iterations.max(report.iterations);
+                // The first proposal of a step is handed the RELEASED end
+                // of the efforts accepted last, as it is handed the
+                // released flow: the end that crossed (the side's, -0.1,
+                // since the last step ended with no slip) and what the
+                // last effort took away of it.
+                if step > 0 {
+                    let first = HANDED.with(|handed| handed.borrow()[0].0);
+                    let released = -0.1 + before.compliance[1] * before.effort;
+                    assert!(
+                        (first - released).abs() <= 1e-4 * released.abs(),
+                        "dt {dt}, step {step}: handed {first}, the released end is {released}"
+                    );
+                }
+                before = *system.state::<Held>(holder).unwrap();
+                let held = *system.state::<Held>(holder).unwrap();
+                let end = ExactOscillator::velocity(system.state::<Modes>(modes).unwrap());
+                most_off = most_off.max((end - 0.1).abs());
+                for (row, closed) in [mean_mobility, end_mobility].into_iter().enumerate() {
+                    let off = (held.compliance[row] / closed - 1.0).abs();
+                    worst_row[row] = worst_row[row].max(off);
+                    assert!(
+                        off <= 1e-4,
+                        "dt {dt}, step {step}: {held:?} against {closed}"
+                    );
+                }
+                // What the port's end input shows after the step is the
+                // end flow that crossed, in the port's sign.
+                let shown = system.last_input(system.port(holder, "a_end").unwrap())[0];
+                assert!(
+                    (shown + end).abs() <= 1e-12,
+                    "dt {dt}, step {step}: {shown} and {end}"
+                );
+                assert!(
+                    held.end.abs() <= 1e-9,
+                    "dt {dt}, step {step}: {held:?}, {end}"
+                );
+            }
+        });
+        let held = *system.state::<Held>(holder).unwrap();
+        println!(
+            "carried at 0.1 m/s at the end of every step, dt {dt}: the port ends its steps within \
+             {most_off:.3e} m/s of that (it started at 0.5); the line's rows are {:?} against the \
+             closed form's ({mean_mobility}, {end_mobility}), off by {worst_row:?} at most \
+             (relative); end over mean {:.6} (a mass: 2); the holder's work on the mean slip, \
+             its defect, is {:+.6e} J in all; ledger residual {:.3e} J; {iterations} kernel \
+             iterations in 400 steps, {most_iterations} at most in one",
+            held.compliance,
+            end_mobility / mean_mobility,
+            held.work_j,
+            system.ledger().energy_residual_j()
+        );
+        assert!(most_off <= 1e-12, "dt {dt}: {most_off}");
+        assert!(
+            end_mobility / mean_mobility < 1.999,
+            "the neighbour is not a midpoint one"
+        );
+    }
+}
+
+#[test]
+fn carried_at_its_port_two_exact_modes_swing_at_the_constrained_frequency() {
+    // With the port's velocity given, what is left of two modes is one.
+    // The combination `u = s2 q1 - s1 q2` swings at
+    // `Omega^2 = (s2^2 w1^2 + s1^2 w2^2) / (s1^2 + s2^2)` about a motion
+    // that is linear in time: each mode is drawn out at `a_k = s_k l / w_k^2`
+    // with `l = v / sum(s_k^2 / w_k^2)`, so `u` drifts at `s2 a1 - s1 a2`.
+    // The discrete motion, carried at the END of every step, has that
+    // period to second order in the step: 2.7e-3, 6.8e-4 and 1.7e-4 of it
+    // short at steps of 2, 1 and 0.5 ms (measured; asserted as a ratio
+    // between 3.5 and 4.5 from one to the next).
+    let (s1, s2) = (SHAPES[0], SHAPES[1]);
+    let (w1, w2) = (OMEGAS[0] * OMEGAS[0], OMEGAS[1] * OMEGAS[1]);
+    let omega = ((s2 * s2 * w1 + s1 * s1 * w2) / (s1 * s1 + s2 * s2)).sqrt();
+    let period = 2.0 * PI / omega;
+    let carried = 0.1;
+    let pull = carried / (s1 * s1 / w1 + s2 * s2 / w2);
+    let drift = s2 * (s1 * pull / w1) - s1 * (s2 * pull / w2);
+    let mut errors = Vec::new();
+    for dt in [2.0e-3_f64, 1.0e-3, 5.0e-4] {
+        let (mut system, modes, _) = held_at_its_end(moving(), carried);
+        let swing = |system: &System| {
+            let state = system.state::<Modes>(modes).unwrap();
+            s2 * state[0].1 - s1 * state[1].1 - drift
+        };
+        // Upward zero crossings of the free combination's velocity about
+        // its drift.
+        let mut crossings = Vec::new();
+        let mut before = (0.0, swing(&system));
+        let mut taken = 0_u32;
+        with_cx(|cx| {
+            while crossings.len() < 12 {
+                taken += 1;
+                assert!(
+                    taken < 20_000,
+                    "dt {dt}: {} crossings in {taken} steps",
+                    crossings.len()
+                );
+                let report = system.step(dt, cx).unwrap();
+                let now = (report.time_s, swing(&system));
+                if before.1 < 0.0 && now.1 >= 0.0 {
+                    crossings.push(before.0 + (now.0 - before.0) * before.1 / (before.1 - now.1));
+                }
+                before = now;
+            }
+        });
+        let measured = (crossings[11] - crossings[1]) / 10.0;
+        errors.push((measured - period) / period);
+        println!(
+            "two exact modes carried at the port, dt {dt}: period {measured:.9} s against \
+             {period:.9} s, {:+.3e} of it",
+            (measured - period) / period
+        );
+    }
+    assert!(errors[0].abs() < 5e-3, "{errors:?}");
+    for pair in errors.windows(2) {
+        let ratio = pair[0] / pair[1];
+        assert!(ratio > 3.5 && ratio < 4.5, "{errors:?}");
+    }
+}
+
+#[test]
+fn an_end_held_at_exactly_nothing_has_no_size_and_is_solved_to_what_the_solve_is_told() {
+    // A stated limit. A wire is solved relative to its size, and to the
+    // rounding of the terms its driver sums. The end of a flow that is
+    // held at exactly zero has no size, and its rounding is not in those
+    // terms: the neighbour forms it as a sum over its modes, which cancel
+    // at the port and do not vanish in themselves (0.24 and 0.26 m/s
+    // here). The kernel is not told that sum. With the solve's default,
+    // no absolute tolerance, the block is refused within a few steps
+    // (which step hangs on the rounding of that sum); told an absolute
+    // tolerance above the rounding of those terms, it is taken, and the
+    // port ends its steps at rest to that tolerance.
+    let dt = 1.0e-3;
+    let (mut system, _, _) = held_at_its_end(moving(), 0.0);
+    let refused = with_cx(|cx| {
+        (0..400).find_map(|step| match system.step(dt, cx) {
+            Ok(_) => None,
+            Err(SystemError::NotConverged {
+                worst, residual, ..
+            }) => Some((step, worst, residual)),
+            Err(other) => panic!("step {step}: {other}"),
+        })
+    });
+    let (step, worst, residual) = refused.expect("refused within 400 steps");
+    println!(
+        "an end held at exactly nothing, default tolerances: refused at step {step} on `{worst}` \
+         with a residual of {residual:.3e} m/s"
+    );
+    assert_eq!(worst, "holder.a_end");
+    assert!(residual.abs() < 1e-15, "{residual}");
+
+    let (mut system, modes, _) = held_at_its_end(moving(), 0.0);
+    system.set_config(SolveConfig {
+        absolute_tolerance: 1.0e-15,
+        ..SolveConfig::default()
+    });
+    let mut most_end = 0.0_f64;
+    with_cx(|cx| {
+        for step in 0..400 {
+            system
+                .step(dt, cx)
+                .unwrap_or_else(|error| panic!("step {step}: {error}"));
+            let end = ExactOscillator::velocity(system.state::<Modes>(modes).unwrap());
+            most_end = most_end.max(end.abs());
+        }
+    });
+    println!(
+        "the same with an absolute tolerance of 1e-15: taken for 400 steps, the port ends them \
+         at {most_end:.3e} m/s at most"
+    );
+    assert!(most_end <= 1e-13, "{most_end}");
+}
+
+#[test]
+fn a_neighbour_that_keeps_the_midpoint_promise_it_does_not_have_is_never_brought_to_rest() {
+    // What the end row is for. The exact oscillator that keeps the default
+    // promise seals beside the slider, and the slider, which takes the
+    // step's end for twice the mean less the start, arrests it and holds
+    // it at no MEAN slip. Its record says at rest. The port's own velocity
+    // at the end of each step changes sign from step to step and does not
+    // decay, and the force that holds it alternates with it.
+    let mut builder = SystemBuilder::new();
+    let modes = builder
+        .add("modes", ExactOscillator::new(Ends::Promised), moving())
+        .unwrap();
+    // Pressed with 10 kN, so that it arrests the port within its first
+    // step and holds whatever the modes then ask of it.
+    let strong = Slider::new(1.0e4, HOLDS, SLIDES).unwrap();
+    let rubbing = builder
+        .add_on_line("rubbing", strong, Slip::default())
+        .unwrap();
+    builder
+        .common_flow(port(&builder, modes, "p"), &[port(&builder, rubbing, "a")])
+        .unwrap();
+    builder
+        .boundary(
+            port(&builder, rubbing, "b"),
+            Box::new(|_, _, values| values[0] = 0.0),
+        )
+        .unwrap();
+    builder
+        .boundary(
+            port(&builder, rubbing, "heat"),
+            Box::new(|_, _, values| values[0] = 300.0),
+        )
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    let dt = 1.0e-3;
+    let mut ends = Vec::new();
+    with_cx(|cx| {
+        for step in 0..200 {
+            system
+                .step(dt, cx)
+                .unwrap_or_else(|error| panic!("step {step}: {error}"));
+            ends.push(ExactOscillator::velocity(
+                system.state::<Modes>(modes).unwrap(),
+            ));
+        }
+    });
+    let flips = ends[20..]
+        .windows(2)
+        .filter(|pair| pair[0] * pair[1] < 0.0)
+        .count();
+    let (early, late) = (
+        ends[20..40]
+            .iter()
+            .fold(0.0_f64, |most, end| most.max(end.abs())),
+        ends[180..]
+            .iter()
+            .fold(0.0_f64, |most, end| most.max(end.abs())),
+    );
+    println!(
+        "an exact oscillator that keeps the midpoint promise, beside the slider: the port's end \
+         velocity changes sign in {flips} of 179 steps; it is up to {early:.3e} m/s in steps 21 \
+         to 40 and {late:.3e} m/s in steps 181 to 200"
+    );
+    assert!(flips >= 170, "{flips}");
+    assert!(late > 0.5 * early && early > 1e-3, "{early} {late}");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn a_line_port_and_its_neighbours_must_agree_on_how_a_step_ends() {
+    let refused = |builder: SystemBuilder, says: &str| match builder.seal() {
+        Err(AdmissionError::LineEnd { port, reason }) => {
+            assert!(reason.contains(says), "{port}: {reason}");
+        }
+        Err(other) => panic!("{other}"),
+        Ok(_) => panic!("sealed: expected a refusal that says `{says}`"),
+    };
+    let on_the_ground = |builder: &mut SystemBuilder, rubbing: NodeId| {
+        builder
+            .boundary(
+                port(builder, rubbing, "b"),
+                Box::new(|_, _, values| values[0] = 0.0),
+            )
+            .unwrap();
+        builder
+            .boundary(
+                port(builder, rubbing, "heat"),
+                Box::new(|_, _, values| values[0] = 300.0),
+            )
+            .unwrap();
+    };
+
+    // A neighbour that says it is neither, beside the slider.
+    let mut builder = SystemBuilder::new();
+    let modes = builder
+        .add("modes", ExactOscillator::new(Ends::Untold), moving())
+        .unwrap();
+    let rubbing = builder
+        .add_on_line("rubbing", slider(), Slip::default())
+        .unwrap();
+    builder
+        .common_flow(port(&builder, modes, "p"), &[port(&builder, rubbing, "a")])
+        .unwrap();
+    on_the_ground(&mut builder, rubbing);
+    refused(builder, "does not tell its end");
+
+    // One that tells its end, beside a port that takes none.
+    let mut builder = SystemBuilder::new();
+    let modes = builder
+        .add("modes", ExactOscillator::new(Ends::Told), moving())
+        .unwrap();
+    let rubbing = builder
+        .add_on_line("rubbing", slider(), Slip::default())
+        .unwrap();
+    builder
+        .common_flow(port(&builder, modes, "p"), &[port(&builder, rubbing, "a")])
+        .unwrap();
+    on_the_ground(&mut builder, rubbing);
+    refused(builder, "the port takes no end input");
+
+    // A port that takes an end, beside a mass, which is midpoint.
+    let mut builder = SystemBuilder::new();
+    let mass = builder
+        .add_with_tangent(
+            "mass",
+            Mass::new(MASS_KG).unwrap(),
+            Motion {
+                position_m: 0.0,
+                velocity_m_s: 0.5,
+            },
+        )
+        .unwrap();
+    let holder = builder
+        .add_on_line("holder", Holder::new(), Held::default())
+        .unwrap();
+    builder
+        .common_flow(port(&builder, mass, "p"), &[port(&builder, holder, "a")])
+        .unwrap();
+    builder
+        .boundary(
+            port(&builder, holder, "b"),
+            Box::new(|_, _, values| values[0] = 0.0),
+        )
+        .unwrap();
+    refused(builder, "no neighbour tells the end");
+
+    // A port whose flow is the sum of one that tells and one that does not.
+    let mut builder = SystemBuilder::new();
+    let modes = builder
+        .add("modes", ExactOscillator::new(Ends::Told), moving())
+        .unwrap();
+    let mass = builder
+        .add_with_tangent(
+            "mass",
+            Mass::new(MASS_KG).unwrap(),
+            Motion {
+                position_m: 0.0,
+                velocity_m_s: 0.0,
+            },
+        )
+        .unwrap();
+    let holder = builder
+        .add_on_line("holder", Holder::new(), Held::default())
+        .unwrap();
+    builder
+        .common_effort(
+            port(&builder, holder, "a"),
+            &[port(&builder, modes, "p"), port(&builder, mass, "p")],
+        )
+        .unwrap();
+    builder
+        .boundary(
+            port(&builder, holder, "b"),
+            Box::new(|_, _, values| values[0] = 0.0),
+        )
+        .unwrap();
+    refused(builder, "others do not");
+
+    // An end input that something is connected to.
+    let mut builder = SystemBuilder::new();
+    let modes = builder
+        .add("modes", ExactOscillator::new(Ends::Told), moving())
+        .unwrap();
+    let holder = builder
+        .add_on_line("holder", Holder::new(), Held::default())
+        .unwrap();
+    builder
+        .boundary(
+            port(&builder, holder, "b"),
+            Box::new(|_, _, values| values[0] = 0.0),
+        )
+        .unwrap();
+    let body = builder
+        .add_with_tangent(
+            "body",
+            HeatCapacity::new(BODY_J_K).unwrap().publishing(),
+            300.0,
+        )
+        .unwrap();
+    builder
+        .common_flow(port(&builder, modes, "p"), &[port(&builder, holder, "a")])
+        .unwrap();
+    builder
+        .signal(
+            port(&builder, body, "temperature"),
+            port(&builder, holder, "a_end"),
+        )
+        .unwrap();
+    builder
+        .boundary(
+            port(&builder, body, "heat"),
+            Box::new(|_, _, values| values[0] = 0.0),
+        )
+        .unwrap();
+    refused(builder, "the kernel makes that wire");
+}
+
+#[test]
+fn a_component_with_an_end_row_conforms_on_its_line_and_is_handed_the_row() {
+    // The conformance check of the load-line tier takes the line's square
+    // matrix followed by the rows of the end inputs, as the kernel hands
+    // them over, and refuses the square matrix alone by its length.
+    let holder = Holder::new();
+    // `a` answers at 0.004 for its mean and 0.0078 for its end; `b` is
+    // given. Released: `a` at -0.3 (mean) and -0.31 (end), `b` at -0.1.
+    let matrix = [0.004, 0.0, 0.0, 0.0, 0.0078, 0.0];
+    let inputs = [-0.3, -0.1, -0.31];
+    let state = Held::default();
+    let stale = Held {
+        work_j: 7.0,
+        ..Held::default()
+    };
+    let case = Case {
+        state: &state,
+        stale: &stale,
+        dt_s: 1.0e-3,
+        inputs: &inputs,
+    };
+    let seen = with_cx(|cx| check_load_line(&holder, &case, &matrix, cx)).unwrap();
+    let Observed::Stepped { outputs, .. } = seen.observed else {
+        panic!("the holder takes the step");
+    };
+    // No slip at the step's end: `(-0.31 + 0.1) / 0.0078`.
+    let effort = (-0.31 + 0.1) / 0.0078;
+    assert_eq!(outputs, [effort, -effort]);
+    assert!(
+        (seen.flows[0] - (-0.3 - 0.004 * effort)).abs() <= 1e-15,
+        "{:?}",
+        seen.flows
+    );
+    let short = with_cx(|cx| check_load_line(&holder, &case, &matrix[..4], cx));
+    assert!(
+        matches!(
+            short,
+            Err(fs_ports::component::conformance::Failure::Contract(
+                fs_ports::component::ContractViolation::VectorLength {
+                    expected: 6,
+                    actual: 4,
+                    ..
+                }
+            ))
+        ),
+        "the square matrix alone was not refused by its length"
+    );
+}
+
 /// The matrix a probe on a line is handed whose `a` is on a mass of 2 kg
 /// that is DIFFERENCED (added without its tangent), moving at
 /// `velocity_m_s` under a push of `push_n`, in a step of `dt`; `b` is given.
