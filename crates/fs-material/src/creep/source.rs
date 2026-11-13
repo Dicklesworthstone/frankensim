@@ -398,6 +398,19 @@ impl<'a> NortonCreepSource<'a> {
         self.elastic.strain_limit
     }
 
+    /// The source's material context at a temperature, resolved the way its
+    /// own constructor admitted it: through the thermoelastic potential when
+    /// its elasticity depends on temperature, otherwise exactly as
+    /// `at_temperature`. Admission checks that read only the material context
+    /// use it, so a fixed-storage refusal never stands in for theirs.
+    pub(crate) fn admission_context(
+        &self,
+        temperature_k: f64,
+        duration_s: f64,
+    ) -> Result<ResolvedNortonCreep, CreepSourceError> {
+        self.resolve_temperature(temperature_k, duration_s, self.thermal_elasticity)
+    }
+
     pub(crate) fn admit_fixed_storage(&self) -> Result<(), CreepSourceError> {
         if self.thermal_elasticity {
             Err(CreepSourceError::Invalid(

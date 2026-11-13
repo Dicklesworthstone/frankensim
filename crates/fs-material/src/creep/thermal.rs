@@ -447,8 +447,11 @@ pub fn admit_zero_expansion_caloric(
         receipts.len() >= 4 && receipts.len() % 2 == 0,
         "caloric chart lacks paired source Cp/density receipts",
     )?;
+    // Only the material context is read here; the consumer resolves its own
+    // law. A temperature-dependent-elasticity source is read through its
+    // thermoelastic potential, as its constructor admitted it.
     let context = source
-        .at_temperature(knots[0].temperature_k, 1.0)
+        .admission_context(knots[0].temperature_k, 1.0)
         .map_err(FeedbackError::Source)?;
     let point = context.material().query();
     let axis = source.temperature_axis();

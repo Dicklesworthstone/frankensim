@@ -940,12 +940,17 @@ fn recovering_joint_reference(softening: bool) {
     with_gate(&CancelGate::new(), |cx| {
         let mut thermal = fixture.thermal();
         let (lower, upper) = (point(280.0), point(380.0));
+        // CreepSolid admits a softening source only if its conservative
+        // mechanical capacity bound, taken over the source span and three
+        // strain fields at this limit, leaves rho*cp positive. At 0.05 that
+        // bound is about -7.0e5 J/m3/K against 5e5; at 0.02 it is -1.1e5.
+        // The trajectory stays inside 0.02, which the law's domain enforces.
         let query = NortonSourceQuery {
             lower: &lower,
             upper: &upper,
             temperature_axis: "T",
             selection: MaterialPropertySelection::SingleClaimOnly,
-            strain_limit: 0.05,
+            strain_limit: 0.02,
         };
         let source = if softening {
             ExpandingCreepSource::from_recovering_norton_j2(
