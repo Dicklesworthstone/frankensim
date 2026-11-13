@@ -30,7 +30,7 @@ use fs_material::state_point::{
     MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
     resolve_material_state_point,
 };
-use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+use fs_qty::semantic::{MoistureBasis, QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Density, Dims, Pressure, QuantitySpec};
 use fs_solid::plastic3::dynamics::fatigue::{
     J2DynamicFatigueConfig, J2DynamicFatigueRun, J2DynamicFatigueTarget,
@@ -68,13 +68,14 @@ fn fixture(plastic: bool, revision: u32) -> Fixture {
         ValueForm::Static,
     ));
     let scalar = QuantitySpec::dimensional(Dims::NONE);
+    let humidity = humidity_quantity();
     let domain = ValidityDomain::unconstrained()
         .with_quantity("T", temperature, 290.0, 330.0)
-        .with_quantity("humidity", scalar, 0.0, 1.0);
+        .with_quantity("humidity", humidity, 0.0, 1.0);
     let point = QueryPoint::new()
         .with_quantity("T", temperature, 300.0)
         .unwrap()
-        .with_quantity("humidity", scalar, 0.2)
+        .with_quantity("humidity", humidity, 0.2)
         .unwrap();
     let fit_domain = domain
         .clone()
@@ -192,6 +193,14 @@ fn fixture(plastic: bool, revision: u32) -> Fixture {
         point,
         request,
     }
+}
+// Humidity is a fixed external condition only as a typed static relative humidity; J2 and every
+// other source law refuse an untyped extra axis as a possibly evolving coordinate.
+fn humidity_quantity() -> QuantitySpec {
+    QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::Moisture(MoistureBasis::RelativeHumidity),
+        ValueForm::Static,
+    ))
 }
 fn scope(law: &ResolvedJ2Plasticity) -> FatigueScope {
     FatigueScope {
@@ -596,7 +605,7 @@ fn source_card_context_initial_yield_and_native_shear_modulus_cannot_be_rebound(
         let changed_context = f
             .point
             .clone()
-            .with_quantity("humidity", scalar, 0.8)
+            .with_quantity("humidity", humidity_quantity(), 0.8)
             .unwrap()
             .with_quantity(&f.request.shear_stress_ratio_axis, scalar, -1.0)
             .unwrap()
