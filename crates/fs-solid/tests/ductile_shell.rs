@@ -106,8 +106,9 @@ fn resolve(card: &MaterialCard) -> ResolvedJ2Plasticity {
 }
 
 fn locus(card: &MaterialCard) -> ResolvedDuctileLocus {
+    // The resolver selects the claim at one of its original knots (-2 and 2), never between them.
     let query = fixed_point()
-        .with_quantity(STRESS_TRIAXIALITY_AXIS, QuantitySpec::dimensional(Dims::NONE), 0.0).unwrap()
+        .with_quantity(STRESS_TRIAXIALITY_AXIS, QuantitySpec::dimensional(Dims::NONE), 2.0).unwrap()
         .with_quantity(PLASTIC_STRAIN_RATE_AXIS,
             QuantitySpec::dimensional(Dims([0, 0, -1, 0, 0, 0])), 0.01).unwrap();
     resolve_ductile_locus(card, &query,
