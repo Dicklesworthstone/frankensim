@@ -135,3 +135,53 @@ fn measured_limit_is_retained_during_elastic_unloading_and_refuses_further_flow(
     assert!(law.response(f64::NAN, &virgin).is_err());
     assert_eq!(law.initial_state(), virgin);
 }
+
+#[test]
+fn an_accepted_state_re_evaluated_at_its_own_strain_is_accepted_again() {
+    // Steel-scale coefficients (those of fs-solid's frame_ductile fibers): E
+    // 200 GPa, Prager 18 GPa, a table rising 2 GPa from 200 MPa. At the same
+    // strain the re-evaluated trial stress is assembled apart from the yield
+    // value and can land an ulp above it; where its exact return is below the
+    // resolution of the accumulated plastic strain, the accepted history is
+    // the nearest representable one.
+    let (e, kinematic) = (200e9, 18e9);
+    let base = J2Plasticity::new_mixed(
+        IsotropicElastic::new(e, 0.3, 0.04).unwrap(),
+        200e6,
+        0.0,
+        kinematic,
+    )
+    .unwrap();
+    let law = UniaxialTabulated::new(
+        TabulatedJ2::new(base, curve(&[(0.0, 200e6), (0.05, 300e6)])).unwrap(),
+    )
+    .unwrap();
+    let virgin = law.initial_state();
+    let mut kept = 0;
+    for k in 1..=400 {
+        let strain = 0.001 + 0.005 * f64::from(k) / 400.0;
+        for sign in [-1.0, 1.0] {
+            let loaded = law.response(sign * strain, &virgin).unwrap();
+            let alpha = loaded.state.equivalent_plastic_strain();
+            let plastic = loaded.state.plastic_strain();
+            let again = law.response(sign * strain, &loaded.state).unwrap();
+            near(
+                again.stress_pa,
+                loaded.stress_pa,
+                32.0 * f64::EPSILON * loaded.stress_pa.abs(),
+            );
+            let advance = again.state.equivalent_plastic_strain() - alpha;
+            assert!((0.0..=1e-18).contains(&advance), "{advance:e}");
+            let trial = e * (sign * strain - plastic) - kinematic * plastic;
+            let radius = law.backbone().hardening().yield_stress_pa(alpha).unwrap();
+            if trial.abs() > radius && advance == 0.0 {
+                assert_eq!(again.state, loaded.state);
+                kept += 1;
+            }
+        }
+    }
+    assert!(
+        kept > 0,
+        "no re-evaluated trial landed above its yield value"
+    );
+}

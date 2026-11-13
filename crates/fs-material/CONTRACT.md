@@ -17,6 +17,20 @@
 
 ## New sections (newest first)
 
+## Tabulated hardening: a roundoff trial on the yield surface
+
+`TabulatedHardening::solve_increment` returns no increment when the trial
+exceeds the yield value by at most 32 machine epsilons of it and the exact
+return is below the resolution of the accumulated plastic strain
+(`alpha + delta == alpha`): the nearest representable history is the
+accepted one. An accepted state re-evaluated at its own strain assembles its
+trial stress apart from the yield value and can land that close above it;
+the law had refused its own state there ("plastic consistency return is not
+representable"). A larger unrepresentable return is still refused, and every
+return that solved before keeps its value. `TabulatedJ2` and the tabulated
+rate law take a zero increment from a plastic trial as no hardening
+increment, the native radial return at the current yield value.
+
 ## A uniform enthalpy body on the composition contract
 
 `phase::component::UniformEnthalpyBody`, behind the feature `component`

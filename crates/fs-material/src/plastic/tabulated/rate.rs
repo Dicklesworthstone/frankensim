@@ -361,6 +361,10 @@ impl TabulatedOverstressJ2 {
         }
         let (_, mu) = shifted.elastic.lame();
         let delta = self.plastic_increment(trial.q_trial, state.alpha, 3.0 * mu)?;
+        if delta == 0.0 {
+            // A roundoff excess with no representable hardening increment.
+            return Ok((shifted, 0.0, trial));
+        }
         let hardening = self
             .backbone
             .hardening()

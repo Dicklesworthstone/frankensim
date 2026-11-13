@@ -308,6 +308,9 @@ impl TabulatedHardening {
     /// linear segment. Binary search selects the segment; no iterative tensor
     /// solve or material-point allocation is needed. `correction` is 3 mu
     /// for finite J2, or 3 mu plus the Prager modulus for small-strain J2.
+    /// A trial within the yield value's roundoff whose return is below the
+    /// resolution of `alpha` gets no increment, so an accepted state
+    /// re-evaluated at its own strain keeps its history.
     pub fn solve_increment(
         &self,
         trial_pa: f64,
@@ -373,7 +376,22 @@ impl TabulatedHardening {
         if alpha + delta > self.points[segment + 1].plastic_strain {
             delta = delta.next_down();
         }
-        if !modulus.is_finite() || !delta.is_finite() || delta <= 0.0 || alpha + delta == alpha {
+        // An accepted state re-evaluated at its own strain assembles its trial
+        // stress independently of the yield value and can land an ulp above
+        // it. That return is below the resolution of `alpha`: the nearest
+        // representable history is the accepted one, with no increment. Admit
+        // only yield-stress roundoff; any larger unrepresentable return is
+        // refused below.
+        let unrepresentable = alpha + delta == alpha;
+        if modulus.is_finite()
+            && delta.is_finite()
+            && delta > 0.0
+            && unrepresentable
+            && excess <= 32.0 * f64::EPSILON * yield_old
+        {
+            return Ok(0.0);
+        }
+        if !modulus.is_finite() || !delta.is_finite() || delta <= 0.0 || unrepresentable {
             return Err(TabulatedError::Numerical(
                 "plastic consistency return is not representable",
             ));
@@ -520,6 +538,10 @@ impl TabulatedJ2 {
         }
         let (_, mu) = shifted.elastic.lame();
         let delta = self.plastic_increment(trial.q_trial, state.alpha, 3.0 * mu)?;
+        if delta == 0.0 {
+            // A roundoff excess with no representable hardening increment.
+            return Ok((shifted, 0.0));
+        }
         let secant = self.hardening.strength_increment_pa(state.alpha, delta)? / delta;
         if !secant.is_finite() {
             return Err(TabulatedError::Numerical(
