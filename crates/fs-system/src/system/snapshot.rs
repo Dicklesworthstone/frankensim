@@ -81,6 +81,29 @@ pub struct SystemImage {
     ledger: Vec<u64>,
 }
 
+impl SystemImage {
+    /// Accepted physical time carried by this image, in seconds.
+    #[must_use]
+    pub fn time_s(&self) -> f64 {
+        self.time.value()
+    }
+
+    /// Accepted kernel steps carried by this image.
+    #[must_use]
+    pub fn steps(&self) -> u64 {
+        self.steps
+    }
+
+    /// Coupled-solve configuration retained with the accepted state.
+    ///
+    /// A containing runtime can validate its driver state before admitting
+    /// this image through [`System::resume`].
+    #[must_use]
+    pub fn config(&self) -> SolveConfig {
+        self.config
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MemberImage {
     /// State type, schema and codec identities of the member's charter.

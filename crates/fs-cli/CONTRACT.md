@@ -769,9 +769,8 @@ binary, including `system`, `cooling-cht`, `electrothermal`, `cooling-network`,
 projection to native callers. `from_text` and `from_bytes` admit a retained
 UTF-8 snapshot under the existing 1 MiB scene limit and keep an explicit
 `source_path` as its label and location. They do not reopen the scene file.
-The input format remains `frankensim.system.v0`; this is not canonical
-assembly lowering, durable execution, a serialized checkpoint or a browser
-binding.
+The input format remains `frankensim.system.v0`; canonical assembly lowering
+and browser bindings remain separate work.
 
 The caller supplies `Cx` to `advance(max_interval_s, cx)` and `run(cx)`.
 `advance` accepts at most one driver interval, capped by the caller's finite
@@ -801,6 +800,35 @@ class without printing; cancellation has class 130. Native parity tests in
 `tests/system_command.rs` compare whole and incremental mechanical, phase
 and adaptive runs to the real CLI, exercise caller-owned cancellation and
 source-domain refusal, and check input, probe and final-horizon limits.
+
+`checkpoint()` returns the canonical v2 envelope bytes and the independently
+retained 32-byte resume root. `resume_checkpoint(bytes, trusted_root)` restores
+the accepted kernel state and ledger together with source-clock compensation,
+driver work counters, the next sample time, the complete ordered sample history,
+and adaptive attempts, norms and next-step suggestion. The scene image embeds
+the existing `SystemImage` codec; it does not define a second physical-state
+format. Exact source bytes bind prescribed boundary responses and solver/run
+settings, prepared material reports bind retained sources, and the executable
+content identity binds the implementation. The source label may differ.
+Every driver and sample field is checked before the kernel's atomic restore;
+rejected input leaves the whole report unchanged. The envelope and reconstructed
+sample storage each have a 64 MiB cap. Components without native codecs refuse
+checkpoint creation by name.
+
+The CLI accepts `--until <time_s>` to pause at an absolute simulated horizon,
+including zero, and `--checkpoint <new-file>` to save that accepted prefix.
+The destination is created without overwriting an existing file; the file is
+synced before its root is reported. JSON output adds
+`checkpoint: {path, resume_root}`; text output prints the same path and root.
+`--resume <file> --resume-root <hex>` resumes under the independently supplied
+root and continues to the original scene duration, or a later `--until`.
+Missing roots, changed scene/boundary contents, changed executables, corruption,
+and horizons before the saved time or beyond the declared duration refuse.
+A pause inside a proposed numerical interval adds a step boundary; continuation
+matches the same accepted prefix and subsequent stepping schedule.
+`tests/system_command/checkpoints.rs` exercises fixed and adaptive saves and
+resumes through separate real CLI processes, full-report parity, foreign roots,
+corruption, changed prescribed boundaries and preservation of existing files.
 
 `slider` lowers to `fs_system::elements::Slider` through the kernel's
 `add_on_line` tier, with positive constant `normal_n`, `static_coefficient`

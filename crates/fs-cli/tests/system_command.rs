@@ -6,6 +6,9 @@ use std::process::Command;
 
 use fs_system::elements::Waveform;
 
+#[path = "system_command/checkpoints.rs"]
+mod checkpoints;
+
 fn example(name: &str) -> String {
     format!(
         "{}/../../examples/system/{name}",

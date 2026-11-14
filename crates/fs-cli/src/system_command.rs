@@ -8,10 +8,12 @@
 //! Nothing here integrates anything: every number comes from the kernel and its elements.
 
 mod materials;
+mod snapshot;
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::io::Read as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use std::rc::Rc;
@@ -87,11 +89,24 @@ const MAX_RESISTANCE_COORDINATES: usize = 64;
 const MAX_ENTHALPY_KNOTS: usize = 4096;
 const ADAPTIVE_NO_CLAIM: &str = "step-doubling estimates control the declared state coordinates and source-work increments under the selected order assumption; they are local numerical estimates, not global error bounds or physical validation; dissipated heat and interface balances retain the kernel's separate ledger audits; no material-card resolution, contact, friction or phase change";
 
-const HELP: &str = "Usage: frankensim [--json] system <scene.json>
+const HELP: &str = "Usage: frankensim [--json] system <scene.json> [--until <time_s>]
+       [--checkpoint <new-file>] [--resume <file> --resume-root <hex>]
 
 Run a lumped mechanical, rotational, electrical, gas and thermal device described
 as data on the composition kernel, and report its final state, sampled states
 and the energy, entropy and measured stream-inventory ledger of the run.
+
+--until stops at an absolute simulated time within the scene's duration; zero
+can save the admitted initial state. --checkpoint saves the accepted kernel
+state, sampled history and adaptive driver state to a new file, and reports
+its resume_root. Existing files are never overwritten. To continue in another
+process, supply --resume together with that independently retained 64-digit
+hex root. The scene contents and executable must match the saved run. A scene
+whose components lack native state codecs refuses checkpoint creation.
+
+For example:
+  frankensim --json system scene.json --until 0.5 --checkpoint prefix.fssnap
+  frankensim --json system scene.json --resume prefix.fssnap --resume-root <root>
 
 Scene schema: frankensim.system.v0. Top-level fields:
   duration_s        simulated time
@@ -383,10 +398,11 @@ pub fn run(args: &[OsString], json: bool) -> CommandOutput {
             stderr: String::new(),
         };
     }
-    if args.len() != 1 {
-        return refusal(exit::USAGE, "system-usage", HELP, json);
-    }
-    let path = Path::new(&args[0]);
+    let options = match SceneOptions::parse(args) {
+        Ok(options) => options,
+        Err(message) => return refusal(exit::USAGE, "system-usage", &message, json),
+    };
+    let path = options.scene;
     let text = match read(path) {
         Ok(text) => text,
         Err(message) => return refusal(exit::INPUT, "system-input", &message, json),
@@ -395,6 +411,30 @@ pub fn run(args: &[OsString], json: bool) -> CommandOutput {
         Ok(scene) => scene,
         Err(error) => return refusal(error.exit_code, error.code, &error.message, json),
     };
+    if let Some((resume, root)) = options.resume.zip(options.resume_root) {
+        let bytes = match read_checkpoint(resume) {
+            Ok(bytes) => bytes,
+            Err(message) => {
+                return refusal(exit::INPUT, "system-checkpoint-file", &message, json);
+            }
+        };
+        if let Err(error) = scene.resume_checkpoint(&bytes, root) {
+            return refusal(error.exit_code, error.code, &error.message, json);
+        }
+    }
+    let until_s = options.until_s.unwrap_or(scene.duration_s());
+    if until_s < scene.time_s() || until_s > scene.duration_s() {
+        return refusal(
+            exit::INPUT,
+            "system-until",
+            &format!(
+                "--until must be between the accepted time {} s and scene duration {} s",
+                scene.time_s(),
+                scene.duration_s()
+            ),
+            json,
+        );
+    }
     let gate = CancelGate::new();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     let result = pool.scope(|arena| {
@@ -405,20 +445,154 @@ pub fn run(args: &[OsString], json: bool) -> CommandOutput {
             iteration: 0,
         };
         let cx = Cx::new(&gate, arena, key, Budget::INFINITE, ExecMode::Deterministic);
-        scene.run(&cx)
+        while !scene.is_finished() && scene.time_s() < until_s {
+            scene.advance(until_s - scene.time_s(), &cx)?;
+        }
+        Ok::<(), SystemSceneError>(())
     });
-    match result {
-        Ok(()) => CommandOutput {
-            exit_code: exit::SUCCESS,
-            stdout: if json {
-                scene.render_json()
-            } else {
-                scene.render_text()
-            },
-            stderr: String::new(),
-        },
-        Err(error) => refusal(error.exit_code, error.code, &error.message, json),
+    if let Err(error) = result {
+        return refusal(error.exit_code, error.code, &error.message, json);
     }
+    let saved_root = if let Some(destination) = options.checkpoint {
+        let (bytes, root) = match scene.checkpoint() {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => return refusal(error.exit_code, error.code, &error.message, json),
+        };
+        if let Err(message) = write_checkpoint(destination, &bytes) {
+            return refusal(exit::INPUT, "system-checkpoint-file", &message, json);
+        }
+        Some(fs_blake3::ContentHash(root).to_hex())
+    } else {
+        None
+    };
+    let saved = options.checkpoint.zip(saved_root.as_deref());
+    let stdout = if json {
+        scene.device.render_json(path, saved)
+    } else {
+        let mut report = scene.render_text();
+        if let Some((destination, root)) = saved {
+            let _ = writeln!(
+                report,
+                "\nCheckpoint: {}\nResume root: {root}",
+                destination.display()
+            );
+        }
+        report
+    };
+    CommandOutput {
+        exit_code: exit::SUCCESS,
+        stdout,
+        stderr: String::new(),
+    }
+}
+
+struct SceneOptions<'a> {
+    scene: &'a Path,
+    until_s: Option<f64>,
+    checkpoint: Option<&'a Path>,
+    resume: Option<&'a Path>,
+    resume_root: Option<[u8; 32]>,
+}
+
+impl<'a> SceneOptions<'a> {
+    fn parse(args: &'a [OsString]) -> Result<Self, String> {
+        let Some(scene) = args.first() else {
+            return Err(HELP.into());
+        };
+        if scene.to_str().is_some_and(|text| text.starts_with('-')) {
+            return Err(HELP.into());
+        }
+        let mut options = Self {
+            scene: Path::new(scene),
+            until_s: None,
+            checkpoint: None,
+            resume: None,
+            resume_root: None,
+        };
+        let mut rest = args[1..].chunks_exact(2);
+        for pair in &mut rest {
+            match pair[0].to_str() {
+                Some("--until") if options.until_s.is_none() => {
+                    let value = pair[1]
+                        .to_str()
+                        .and_then(|value| value.parse::<f64>().ok())
+                        .filter(|value| value.is_finite() && *value >= 0.0)
+                        .ok_or("--until must be a finite, nonnegative time in seconds")?;
+                    options.until_s = Some(value);
+                }
+                Some("--checkpoint") if options.checkpoint.is_none() => {
+                    options.checkpoint = Some(Path::new(&pair[1]));
+                }
+                Some("--resume") if options.resume.is_none() => {
+                    options.resume = Some(Path::new(&pair[1]));
+                }
+                Some("--resume-root") if options.resume_root.is_none() => {
+                    options.resume_root = Some(
+                        pair[1]
+                            .to_str()
+                            .and_then(fs_blake3::ContentHash::from_hex)
+                            .ok_or("--resume-root must contain exactly 64 hexadecimal digits")?
+                            .0,
+                    );
+                }
+                _ => {
+                    return Err(format!(
+                        "unknown or repeated system option {:?}\n{HELP}",
+                        pair[0]
+                    ));
+                }
+            }
+        }
+        if !rest.remainder().is_empty() {
+            return Err(format!("every system option requires a value\n{HELP}"));
+        }
+        if options.resume.is_some() != options.resume_root.is_some() {
+            return Err("--resume and --resume-root must be supplied together".into());
+        }
+        Ok(options)
+    }
+}
+
+fn read_checkpoint(path: &Path) -> Result<Vec<u8>, String> {
+    let read = || -> std::io::Result<Vec<u8>> {
+        let file = std::fs::File::open(path)?;
+        let mut bytes = Vec::new();
+        file.take(snapshot::MAX_CHECKPOINT_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        Ok(bytes)
+    };
+    let bytes = read().map_err(|error| format!("checkpoint {}: {error}", path.display()))?;
+    if bytes.len() > snapshot::MAX_CHECKPOINT_BYTES {
+        return Err(format!(
+            "checkpoint {} exceeds {} bytes",
+            path.display(),
+            snapshot::MAX_CHECKPOINT_BYTES
+        ));
+    }
+    Ok(bytes)
+}
+
+fn write_checkpoint(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let write = || -> std::io::Result<()> {
+        // A failed write cannot truncate a previous accepted checkpoint or
+        // the scene itself. The caller receives a root only after sync succeeds.
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        #[cfg(unix)]
+        {
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+        Ok(())
+    };
+    write().map_err(|error| format!("checkpoint {}: {error}", path.display()))
 }
 
 /// A scene admission, probe or execution refusal, using the CLI's diagnostics.
@@ -459,13 +633,16 @@ impl From<Refusal> for SystemSceneError {
 /// Construction consumes a bounded snapshot of the scene's UTF-8 contents;
 /// the scene file is never reopened. `source_path` is retained as the source
 /// label and base location for relative material packs, which are read once
-/// during admission. This v0 runtime is not the
-/// canonical assembly schema, a durable checkpoint or a browser binding.
+/// during admission. Checkpoints retain the accepted kernel generation,
+/// adaptive driver memory and report samples, and bind the exact source and
+/// executable. This v0 runtime is not the canonical assembly schema or a
+/// browser binding.
 /// The host supplies the cancellation gate and arena through `Cx`; this
 /// facade adds no wall-clock or memory governor beyond the existing owners.
 pub struct SystemScene {
     device: Device,
     source_path: PathBuf,
+    source_identity: [u8; 32],
 }
 
 impl SystemScene {
@@ -489,6 +666,10 @@ impl SystemScene {
         Ok(Self {
             device: load_text(text, source_path.as_ref())?,
             source_path: source_path.as_ref().to_owned(),
+            source_identity: *fs_blake3::hash_domain(
+                "org.frankensim.fs-cli.system-scene.source.v1",
+                text.as_bytes(),
+            ).as_bytes(),
         })
     }
 
@@ -589,7 +770,7 @@ impl SystemScene {
     /// Project the existing JSON report, including accepted samples and ledger accounts.
     #[must_use]
     pub fn render_json(&self) -> String {
-        self.device.render_json(&self.source_path)
+        self.device.render_json(&self.source_path, None)
     }
 
     /// Project the existing human-readable report from the same accepted state.
@@ -3578,7 +3759,7 @@ impl Device {
         out
     }
 
-    fn render_json(&self, path: &Path) -> String {
+    fn render_json(&self, path: &Path, checkpoint: Option<(&Path, &str)>) -> String {
         let system = &self.system;
         let ledger = system.ledger();
         let (blocks, loops) = system.plan_shape();
@@ -3734,6 +3915,14 @@ impl Device {
             let _ = write!(
                 out,
                 ",\"materials\":[{reports}],\"material_bindings\":{{{bindings}}}"
+            );
+        }
+        if let Some((destination, root)) = checkpoint {
+            let _ = write!(
+                out,
+                ",\"checkpoint\":{{\"path\":{},\"resume_root\":{}}}",
+                quote(&destination.display().to_string()),
+                quote(root)
             );
         }
         let _ = writeln!(out, ",\"no_claim\":{}}}", quote(&self.no_claim()));

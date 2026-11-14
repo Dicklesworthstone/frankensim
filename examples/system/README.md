@@ -12,6 +12,26 @@ connections. Nothing in the CLI integrates anything: the scene is lowered to
 a `fs_system::System` and stepped by the composition kernel, and the report
 is the kernel's state and its energy and entropy ledger.
 
+## Pause and resume a run
+
+Save an accepted prefix, including sampled history and adaptive step memory:
+
+    frankensim --json system examples/system/adaptive_oscillator.json --until 0.5 --checkpoint prefix.fssnap
+
+Keep the `checkpoint.resume_root` from that report independently of the saved
+file. Continue with the same scene contents and executable:
+
+    frankensim --json system examples/system/adaptive_oscillator.json --resume prefix.fssnap --resume-root <saved-root>
+
+`--until` is an absolute simulated time within the scene's original duration;
+zero saves the admitted initial state. A resumed run can stop and save another
+prefix by adding a later `--until` and a new `--checkpoint` destination. Existing
+files are never overwritten. Stopping inside a proposed step adds a numerical
+step boundary; resuming preserves the accepted state and its continuation.
+Checkpoint files and restored sample histories are each bounded to 64 MiB.
+An element whose owner does not provide a native state codec refuses saving
+instead of omitting its state.
+
 | scene | what it shows | checked against (crates/fs-cli/tests/system_command.rs) |
 |---|---|---|
 | `driven_oscillator.json` | a mass on a spring and damper, driven by a sine force; the damper heats a housing that loses heat to a fixed ambient | the monolithic midpoint rule for the same oscillator |
