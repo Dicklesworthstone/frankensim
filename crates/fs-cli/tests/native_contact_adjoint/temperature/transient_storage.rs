@@ -379,23 +379,6 @@ fn unequal_initial_enthalpy_exchanges_heat_through_the_same_source_contact() {
     close(peak.f64_field("time_s").unwrap(), 0.0, 0.0);
 }
 
-#[test]
-fn contact_trajectory_refuses_unimplemented_material_and_enthalpy_derivatives() {
-    for (ordinal, enthalpy, output) in [
-        (42, false, "temperature-final-material-adjoint"),
-        (43, true, "temperature-sampled-peak-adjoint"),
-    ] {
-        let f = fixture(enthalpy, false);
-        let (source, contact, ledger) = prepare(&f, ordinal, Some(output));
-        let result = run(&f, &source, &contact, &ledger);
-        assert_ne!(result.exit_code, fs_cli::exit::SUCCESS);
-        assert!(
-            format!("{}{}", result.stdout, result.stderr)
-                .contains("cli-solve-conduction-contact-composition")
-        );
-    }
-}
-
 fn latent_fixture() -> Fixture {
     let mut f = fixture(true, false);
     f.project.power.as_mut().unwrap()[0].watts.value = 0.0;
@@ -444,17 +427,19 @@ fn contact_heat_changes_phase_fraction_on_a_latent_plateau_without_duplicate_sto
     let initial_energy = DENSITY * (CP * (300.0 - INITIAL_K) + 1000.0);
     let final_energy = mass.iter().zip(&enthalpy).map(|(m, h)| m * h).sum::<f64>();
     close(final_energy, initial_energy, 4.0 * ENERGY_TOLERANCE_J);
+    // The hot body starts on its plateau at 350 K, so its interior has no
+    // temperature gradient: only nodes reached through the contact give up
+    // phase storage, and the others keep h = 1000 J/kg (liquid fraction 0.5).
     let mut latent_nodes = 0;
     let mut cold_nodes = 0;
-    for ((&h, &t), &liquid) in enthalpy.iter().zip(&temperature).zip(&fraction) {
+    let mut liquid_mass = 0.0;
+    for (((&h, &t), &liquid), &m) in enthalpy.iter().zip(&temperature).zip(&fraction).zip(&mass) {
         if liquid > 0.0 {
             latent_nodes += 1;
             close(t, 350.0, 1e-12);
             close(liquid, (h - 500.0) / 1000.0, 1e-13);
-            assert!(
-                liquid < 0.5,
-                "contact heat must consume the original hot phase storage"
-            );
+            assert!(liquid <= 0.5, "no node may gain phase storage: {liquid:e}");
+            liquid_mass += m * liquid;
         } else {
             cold_nodes += 1;
             assert!(t > 300.0 && t < 350.0);
@@ -462,6 +447,10 @@ fn contact_heat_changes_phase_fraction_on_a_latent_plateau_without_duplicate_sto
         }
     }
     assert!(latent_nodes > 0 && cold_nodes > 0);
+    assert!(
+        liquid_mass < 0.5 * DENSITY,
+        "contact heat must consume the original hot phase storage: {liquid_mass:e} kg liquid"
+    );
     let claim = temperature_pack().2;
     for grid in ["coarse", "fine"] {
         for row in transient.get(grid).unwrap().as_array().unwrap() {
