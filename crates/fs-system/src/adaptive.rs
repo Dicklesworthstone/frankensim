@@ -16,7 +16,7 @@ use crate::{Checkpoint, CheckpointError, StepReport, System, SystemError};
 pub struct ErrorTolerance {
     /// Error floor in the coordinate's units.
     pub absolute: f64,
-    /// Dimensionless error relative to the initial and refined values.
+    /// Dimensionless error relative to the chosen reference scale.
     pub relative: f64,
 }
 
@@ -46,20 +46,36 @@ impl ErrorNorm {
 
     /// Include `|coarse - refined| / (absolute + relative * scale)`, with
     /// `scale = max(|initial|, |refined|)`.
-    pub fn include(
-        &mut self,
-        initial: f64,
-        coarse: f64,
-        refined: f64,
-        tolerance: ErrorTolerance,
-    ) {
+    pub fn include(&mut self, initial: f64, coarse: f64, refined: f64, tolerance: ErrorTolerance) {
+        // f64::max can hide a NaN, so validate every original scalar before
+        // reducing the initial/refined pair to one reference scale.
+        if !(initial.is_finite() && coarse.is_finite() && refined.is_finite()) {
+            self.include_error(f64::NAN, 0.0, tolerance);
+            return;
+        }
+        self.include_error(
+            (coarse - refined).abs(),
+            initial.abs().max(refined.abs()),
+            tolerance,
+        );
+    }
+
+    /// Include `error / (absolute + relative * scale)` for an already
+    /// computed nonnegative error and reference magnitude in the same units.
+    ///
+    /// This admits vector differences and rotation distances without reducing
+    /// them to a difference of scalar magnitudes. Neither value may be
+    /// nonfinite or negative. Invalid inputs, tolerances or arithmetic poison
+    /// the whole norm. The adaptive driver still owns the Richardson divisor.
+    pub fn include_error(&mut self, error: f64, scale: f64, tolerance: ErrorTolerance) {
         self.count = self.count.saturating_add(1);
         if !self.maximum.is_finite() {
             return;
         }
-        if !(initial.is_finite()
-            && coarse.is_finite()
-            && refined.is_finite()
+        if !(error.is_finite()
+            && error >= 0.0
+            && scale.is_finite()
+            && scale >= 0.0
             && tolerance.absolute.is_finite()
             && tolerance.absolute > 0.0
             && tolerance.relative.is_finite()
@@ -68,10 +84,9 @@ impl ErrorNorm {
             self.maximum = f64::NAN;
             return;
         }
-        let scale = tolerance.absolute
-            + tolerance.relative * initial.abs().max(refined.abs());
-        let ratio = (coarse - refined).abs() / scale;
-        if !(scale.is_finite() && ratio.is_finite()) {
+        let denominator = tolerance.absolute + tolerance.relative * scale;
+        let ratio = error / denominator;
+        if !(denominator.is_finite() && ratio.is_finite()) {
             self.maximum = f64::NAN;
         } else {
             self.maximum = self.maximum.max(ratio);

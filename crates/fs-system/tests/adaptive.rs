@@ -565,11 +565,18 @@ fn invalid_norm_coordinates_and_tolerances_remain_poisoned_after_valid_data() {
         ErrorTolerance { relative: f64::INFINITY, ..valid },
     ];
     for tolerance in invalid_tolerances {
-        let mut norm = ErrorNorm::new();
-        norm.include(0.0, 2.0, 1.0, valid);
-        norm.include(0.0, 2.0, 1.0, tolerance);
-        norm.include(0.0, 3.0, 1.0, valid);
-        assert!(norm.value().is_nan(), "{tolerance:?}");
+        for precomputed in [false, true] {
+            let mut norm = ErrorNorm::new();
+            norm.include(0.0, 2.0, 1.0, valid);
+            if precomputed {
+                norm.include_error(1.0, 1.0, tolerance);
+            } else {
+                norm.include(0.0, 2.0, 1.0, tolerance);
+            }
+            norm.include(0.0, 3.0, 1.0, valid);
+            norm.include_error(4.0, 0.0, valid);
+            assert!(norm.value().is_nan(), "{tolerance:?}");
+        }
     }
     for (initial, coarse, refined) in [
         (f64::NAN, 1.0, 0.0),
@@ -581,5 +588,133 @@ fn invalid_norm_coordinates_and_tolerances_remain_poisoned_after_valid_data() {
         norm.include(initial, coarse, refined, valid);
         norm.include(0.0, 1.0, 0.0, valid);
         assert!(norm.value().is_nan());
+    }
+}
+
+#[test]
+fn supplied_geometric_error_keeps_direction_and_uses_the_declared_scale_once() {
+    // Opposite vectors (3, 4) and (-3, -4) have equal lengths and differ by 10.
+    let error = 6.0_f64.hypot(8.0);
+    let scale = 3.0_f64.hypot(4.0);
+    let tolerance = ErrorTolerance {
+        absolute: 1.0,
+        relative: 0.2,
+    };
+    let mut norm = ErrorNorm::new();
+    assert!(norm.value().is_nan());
+    norm.include_error(error, scale, tolerance);
+    assert_eq!(norm.value(), 5.0); // 10 / (1 + 0.2 * 5), no Richardson division.
+    norm.include(
+        2.0,
+        6.0,
+        2.0,
+        ErrorTolerance {
+            absolute: 1.0,
+            relative: 0.0,
+        },
+    );
+    assert_eq!(norm.value(), 5.0);
+    norm.include_error(
+        2.0,
+        0.0,
+        ErrorTolerance {
+            absolute: 0.25,
+            relative: 0.5,
+        },
+    );
+    assert_eq!(norm.value(), 8.0);
+
+    let mut rescaled = ErrorNorm::new();
+    rescaled.include_error(
+        1000.0 * error,
+        1000.0 * scale,
+        ErrorTolerance {
+            absolute: 1000.0,
+            ..tolerance
+        },
+    );
+    assert_eq!(rescaled.value(), 5.0);
+    let mut zero = ErrorNorm::new();
+    zero.include_error(
+        0.0,
+        0.0,
+        ErrorTolerance {
+            absolute: f64::from_bits(1),
+            relative: 0.0,
+        },
+    );
+    assert_eq!(zero.value(), 0.0);
+}
+
+#[test]
+fn supplied_error_poison_survives_valid_entries_and_arithmetic_overflow() {
+    let tolerance = ErrorTolerance {
+        absolute: 1.0,
+        relative: 0.0,
+    };
+    for (error, scale, tolerance) in [
+        (-1.0, 0.0, tolerance),
+        (1.0, -1.0, tolerance),
+        (f64::NAN, 1.0, tolerance),
+        (1.0, f64::NAN, tolerance),
+        (f64::INFINITY, 1.0, tolerance),
+        (1.0, f64::INFINITY, tolerance),
+        // Overflow of the relative product, denominator sum, and ratio.
+        (
+            1.0,
+            f64::MAX,
+            ErrorTolerance {
+                relative: 2.0,
+                ..tolerance
+            },
+        ),
+        (
+            1.0,
+            f64::MAX,
+            ErrorTolerance {
+                absolute: f64::MAX,
+                relative: 1.0,
+            },
+        ),
+        (
+            1.0,
+            0.0,
+            ErrorTolerance {
+                absolute: f64::from_bits(1),
+                relative: 0.0,
+            },
+        ),
+    ] {
+        let mut norm = ErrorNorm::new();
+        norm.include_error(
+            0.0,
+            0.0,
+            ErrorTolerance {
+                absolute: 1.0,
+                relative: 0.0,
+            },
+        );
+        norm.include_error(error, scale, tolerance);
+        norm.include_error(
+            0.0,
+            0.0,
+            ErrorTolerance {
+                absolute: 1.0,
+                relative: 0.0,
+            },
+        );
+        norm.include(
+            0.0,
+            1.0,
+            0.0,
+            ErrorTolerance {
+                absolute: 1.0,
+                relative: 0.0,
+            },
+        );
+        assert!(
+            norm.value().is_nan(),
+            "error={error}, scale={scale}, tolerance={tolerance:?}"
+        );
     }
 }
