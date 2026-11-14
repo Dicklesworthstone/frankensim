@@ -260,7 +260,11 @@ fn translating_unbalance(steps: usize, speed0: f64, alpha: f64) -> RotorTransien
 
 #[test]
 fn g1_unbalance_startup_braking_and_reversal_match_exact_inertial_translation() {
-    for (speed0, alpha) in [(0.0, 4.0), (2.0, -5.0)] {
+    // Each case's bound sits just above the midpoint rule's own error for its
+    // force history at 80 steps: v += h a(t_mid), q += h (v0 + v1) / 2 run
+    // independently against the closed form below gives 1.0934e-6 and
+    // 1.3934e-6. One bound of 1.2e-6 lay below the second case's.
+    for (speed0, alpha, fine_bound) in [(0.0, 4.0, 1.1e-6), (2.0, -5.0, 1.4e-6)] {
         let duration = 0.8;
         let phase0 = 0.1_f64;
         let phase = phase0 + speed0 * duration + 0.5 * alpha * duration * duration;
@@ -295,7 +299,7 @@ fn g1_unbalance_startup_braking_and_reversal_match_exact_inertial_translation() 
         let fine = error(80);
         assert!(coarse / medium > 3.95, "{coarse:e} / {medium:e}");
         assert!(medium / fine > 3.98, "{medium:e} / {fine:e}");
-        assert!(fine < 1.2e-6, "{fine:e}");
+        assert!(fine < fine_bound, "{fine:e}");
     }
 }
 
