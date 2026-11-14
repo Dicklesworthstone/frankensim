@@ -252,12 +252,12 @@ fn authority(bytes: &[u8], root: [u8; 32]) -> Result<Subject<Admitted>, SystemSc
         receipt,
         ExternalAnchorRef::presented(ContentId::of_bytes(&root)),
         VerifierId::<KeptRootSchema>::parse_slice(&hash(KeptRootSchema::DOMAIN, b"version 1"))
-            .map_err(refused)?,
+            .ok_or_else(|| refused("checkpoint verifier identity is not 32 bytes"))?,
         KeyPolicyId::<ResumePolicySchema>::parse_slice(&hash(
             ResumePolicySchema::DOMAIN,
             b"version 1",
         ))
-        .map_err(refused)?,
+        .ok_or_else(|| refused("checkpoint resume policy identity is not 32 bytes"))?,
     )
     .verify(&KeptRoot(root))
     .map_err(refused)?

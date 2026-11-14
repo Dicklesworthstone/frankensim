@@ -1182,7 +1182,7 @@ fn native_element_snapshots_bind_every_physical_parameter() {
 
 #[test]
 fn source_snapshot_identity_includes_waveform_shape_and_every_coefficient() {
-    let base = [0.8, 1.3, 0.2, 2.0];
+    let base: [f64; 4] = [0.8, 1.3, 0.2, 2.0];
     let sine = |p: [f64; 4]| Waveform::sine(p[0], p[1], p[2], p[3]).unwrap();
     for index in 0..4 {
         let mut changed = base;
