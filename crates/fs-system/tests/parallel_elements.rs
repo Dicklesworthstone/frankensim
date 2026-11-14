@@ -8,7 +8,10 @@ use std::f64::consts::PI;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_ports::PortKind;
-use fs_ports::component::conformance::{Case, Observed, check_component, check_port_tangent};
+use fs_ports::component::conformance::{
+    Case, Failure, Observed, Reversal, ReversalAllowance, check_component, check_port_tangent,
+    check_time_reversal,
+};
 use fs_ports::component::{Component, PortTangent};
 use fs_system::elements::{
     Admittance, ElementError, FlowSource, HeatCapacity, Mass, Motion, SourceAccount, Storage,
@@ -50,8 +53,58 @@ where
     })
 }
 
+/// Unit roundoff of f64.
+const U: f64 = f64::EPSILON / 2.0;
+
+/// `n u / (1 - n u)`: a product of `n` factors `(1 + d)`, `|d| <= u`, lies
+/// within it of 1.
+fn gamma(n: u32) -> f64 {
+    let nu = f64::from(n) * U;
+    nu / (1.0 - nu)
+}
+
+/// A storage element there and back under `reverse`. Its state (displacement,
+/// twist, charge or volume) is even, so the physical `R` is the identity; the
+/// flow is odd and the effort even. The increment `t = fl(dt f)` flips exactly
+/// with the flow, so the backward step ends at `q2 = fl(fl(q0 + t) - t)`.
+/// Counted from `Storage::propose` and `stored_energy_j` (halving is exact):
+/// - State: within `gamma(2) (|q0| + |q1|)` of `q0`.
+/// - Effort `fl(fl(q0 / 2 + q1 / 2) / C)`, two roundings each way: within
+///   the state's gap over `2 C`, plus `gamma(2) (|q0| + 2 |q1| + |q2|) / 2 C`.
+/// - Energy `fl(q / 2 fl(q / C))`, two roundings each: within the state's gap
+///   times `(|q0| + |q2|) / 2 C`, plus `gamma(2) (q0^2 + q2^2) / 2 C`.
+fn storage_reverses(
+    storage: &Storage,
+    capacity: f64,
+    state: f64,
+    dt_s: f64,
+    flow: f64,
+    reverse: &dyn Fn(&f64) -> f64,
+) -> Result<Reversal, Failure<ElementError>> {
+    let observe = |state: &f64| vec![*state];
+    let allowance = |start: &f64, forward_end: &f64, back_end: &f64| {
+        let [q0, q1, q2] = [start, forward_end, back_end].map(|state| state.abs());
+        let travel = gamma(2) * (q0 + q1);
+        ReversalAllowance {
+            outputs: vec![(travel + gamma(2) * (q0 + 2.0 * q1 + q2)) / (2.0 * capacity)],
+            observed: vec![travel],
+            energy_j: (travel * (q0 + q2) + gamma(2) * (q0 * q0 + q2 * q2)) / (2.0 * capacity),
+        }
+    };
+    let inputs = [flow];
+    let case = Case {
+        state: &state,
+        stale: &9.0,
+        dt_s,
+        inputs: &inputs,
+    };
+    with_cx(|cx| check_time_reversal(storage, &case, reverse, &observe, &allowance, cx))
+}
+
 #[test]
 fn dual_elements_conform_in_each_power_domain_and_match_their_laws() {
+    // The largest gap / allowance of the storage reversals, per law, and their count.
+    let (mut worst, mut reversals) = ([0.0_f64; 3], 0);
     for kind in [
         PortKind::MechanicalForceVelocity,
         PortKind::RotationalTorqueAngularVelocity,
@@ -68,6 +121,17 @@ fn dual_elements_conform_in_each_power_domain_and_match_their_laws() {
             let flow = 2.0 * (0.3 * x).cos();
             let out = conforms(&storage, &state, &9.0, dt, &[flow]);
             close(out[0], (state + 0.5 * dt * flow) / 0.25, 1.0e-14);
+            let reversal = storage_reverses(&storage, 0.25, state, dt, flow, &|q: &f64| *q)
+                .unwrap_or_else(|failure| {
+                    panic!("{kind:?} storage reversal at {state}, {dt} s, {flow}: {failure}")
+                });
+            // A gap of zero is no part of its allowance, also of an allowance of zero.
+            let ratio = |gap: f64, bound: f64| if gap > 0.0 { gap / bound } else { 0.0 };
+            let allowance = &reversal.allowance;
+            worst[0] = worst[0].max(ratio(reversal.output_gaps[0], allowance.outputs[0]));
+            worst[1] = worst[1].max(ratio(reversal.observed_gaps[0], allowance.observed[0]));
+            worst[2] = worst[2].max(ratio(reversal.energy_gap_j, allowance.energy_j));
+            reversals += 1;
 
             let (a, b, temperature) = (7.0 * (0.4 * x).sin(), 4.0 * (0.6 * x).cos(), 250.0 + x);
             let out = conforms(&branch, &(), &(), dt, &[a, b, temperature]);
@@ -89,9 +153,33 @@ fn dual_elements_conform_in_each_power_domain_and_match_their_laws() {
             close(out[0], expected, 2.0e-13);
         }
     }
+    // The storage element reversed in time at every point, in every domain.
+    println!(
+        "storage: {reversals} reversals; largest gap / allowance: outputs {:.3e}, observed {:.3e}, energy {:.3e}",
+        worst[0], worst[1], worst[2]
+    );
+    assert_eq!(reversals, 400);
     assert_eq!(Storage::new(0.25).unwrap().ports()[0].carrier(), Storage::in_domain(PortKind::MechanicalForceVelocity, 0.25).unwrap().ports()[0].carrier());
     assert_eq!(Admittance::new(0.4).unwrap().ports()[0].carrier(), Admittance::in_domain(PortKind::MechanicalForceVelocity, 0.4).unwrap().ports()[0].carrier());
     assert_eq!(FlowSource::new(Waveform::constant(1.0).unwrap()).ports()[0].carrier(), FlowSource::in_domain(PortKind::MechanicalForceVelocity, Waveform::constant(1.0).unwrap()).ports()[0].carrier());
+}
+
+#[test]
+fn a_storage_reversal_that_negates_the_state_is_refused_at_the_outputs() {
+    // Taking the state for odd sends the backward step from -q1 under -f, so
+    // it ends near -(q0 + 2 dt f) and its effort has the wrong sign.
+    let storage = Storage::new(0.25).unwrap();
+    let failure = storage_reverses(&storage, 0.25, 0.2, 0.01, 1.0, &|q: &f64| -*q)
+        .expect_err("the state is even");
+    let Failure::Law { law, detail } = failure else {
+        panic!("expected a law failure, got {failure}");
+    };
+    println!("refused: {law} ({detail})");
+    assert_eq!(
+        law,
+        "the backward outputs are the forward outputs times their parity"
+    );
+    assert!(detail.starts_with("output 0:"), "{detail}");
 }
 
 #[test]

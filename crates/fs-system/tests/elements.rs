@@ -238,6 +238,44 @@ fn spring_reverses(
         })
 }
 
+/// A body of heat capacity there and back. Its temperature is even, so `R` is
+/// the identity; the heat rate is odd and the mean temperature even. The
+/// increment `t = fl(fl(dt Q) / C)` flips exactly with the heat rate, so the
+/// backward step ends at `T2 = fl(fl(T0 + t) - t)`. Counted from
+/// `HeatCapacity::propose` and `stored_energy_j`:
+/// - Temperature: within `gamma(2) (|T0| + |T1|)` of `T0`.
+/// - Output `0.5 fl(T0 + T1)`, one rounding each way: within half the
+///   temperature's gap, plus `u / 2 (|T0| + 2 |T1| + |T2|)`.
+/// - Energy `fl(C T)`, one rounding each: within `C` times the temperature's
+///   gap, plus `u C (|T0| + |T2|)`.
+fn body_reverses(
+    body: &HeatCapacity,
+    capacity_j_k: f64,
+    temperature_k: f64,
+    dt_s: f64,
+    heat_rate_w: f64,
+) -> Result<Reversal, Failure<ElementError>> {
+    let unchanged = |state: &f64| *state;
+    let observe = |state: &f64| vec![*state];
+    let allowance = |start: &f64, forward_end: &f64, back_end: &f64| {
+        let [t0, t1, t2] = [start, forward_end, back_end].map(|kelvin| kelvin.abs());
+        let travel = gamma(2) * (t0 + t1);
+        ReversalAllowance {
+            outputs: vec![0.5 * travel + 0.5 * U * (t0 + 2.0 * t1 + t2)],
+            observed: vec![travel],
+            energy_j: capacity_j_k * (travel + U * (t0 + t2)),
+        }
+    };
+    let inputs = [heat_rate_w];
+    let case = Case {
+        state: &temperature_k,
+        stale: &1.0,
+        dt_s,
+        inputs: &inputs,
+    };
+    with_cx(|cx| check_time_reversal(body, &case, &unchanged, &observe, &allowance, cx))
+}
+
 #[test]
 fn every_element_conforms_across_a_sweep_of_states_and_inputs() {
     let mut n = Numbers(20_261_110);
@@ -251,6 +289,7 @@ fn every_element_conforms_across_a_sweep_of_states_and_inputs() {
     let wall = Conductance::new(0.8).unwrap();
     let heater = Heater::new(Waveform::table(vec![(0.0, 0.0), (1.0, 12.0), (2.0, 4.0)]).unwrap()).unwrap();
     let (mut mass_reversals, mut spring_reversals) = (Reversals::default(), Reversals::default());
+    let mut body_reversals = Reversals::default();
     for _ in 0..200 {
         let dt = n.next(1.0e-5, 2.0e-2);
         let (f_a, f_b) = (n.next(-3.0, 3.0), n.next(-3.0, 3.0));
@@ -299,22 +338,50 @@ fn every_element_conforms_across_a_sweep_of_states_and_inputs() {
         let temperature = n.next(250.0, 900.0);
         let heat_rate = n.next(-500.0, 500.0);
         conforms(&body, &temperature, &1.0, dt, &[heat_rate]);
+        let reversal =
+            body_reverses(&body, 40.0, temperature, dt, heat_rate).unwrap_or_else(|failure| {
+                panic!("body reversal at {temperature} K, {dt} s, {heat_rate} W: {failure}")
+            });
+        body_reversals.record(&reversal);
 
         let out = conforms(&wall, &(), &(), dt, &[t_a, t_b]);
         assert_eq!(out[0], -out[1], "a conductance stores nothing");
         assert_eq!(out[0], 0.8 * (t_a - t_b));
     }
     // The lossless elements reversed in time at every point of the sweep.
-    for (name, reversals) in [("mass", &mass_reversals), ("springs", &spring_reversals)] {
+    for (name, reversals) in [
+        ("mass", &mass_reversals),
+        ("springs", &spring_reversals),
+        ("body", &body_reversals),
+    ] {
         println!(
             "{name}: {} reversals; largest gap / allowance: outputs {:.3e}, observed {:.3e}, energy {:.3e}",
             reversals.checked, reversals.outputs, reversals.observed, reversals.energy
         );
     }
     assert_eq!(
-        (mass_reversals.checked, spring_reversals.checked),
-        (200, 600)
+        (
+            mass_reversals.checked,
+            spring_reversals.checked,
+            body_reversals.checked
+        ),
+        (200, 600, 200)
     );
+}
+
+#[test]
+fn a_body_that_publishes_its_temperature_is_refused_at_the_port_law() {
+    // The published temperature is a signal: it has no parity under time
+    // reversal, so the check refuses the body before it steps.
+    let publishing = HeatCapacity::new(40.0).unwrap().publishing();
+    let failure = body_reverses(&publishing, 40.0, 300.0, 1.0e-3, 50.0)
+        .expect_err("a signal port has no parity");
+    let Failure::Law { law, detail } = failure else {
+        panic!("expected a law failure, got {failure}");
+    };
+    println!("refused: {law} ({detail})");
+    assert_eq!(law, "time reversal is checked on power and heat ports only");
+    assert!(detail.starts_with("port `temperature`"), "{detail}");
 }
 
 #[test]

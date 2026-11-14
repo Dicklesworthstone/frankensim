@@ -403,6 +403,10 @@ physics owners below fs-couple can be composed without it.
     equals the kinetic energy lost and warms the body on its heat port. The
     kernel test has one row.
   `tests/parallel_elements.rs` checks component conformance and tangents,
+  time reversal of the storage element at each of its 400 points in the four
+  domains (`R` the identity on the state, bounds derived from the rounding of
+  `Storage::propose` and its stored energy; a reversal that negates the state
+  is refused at the outputs),
   floating capacitor nodes with parallel resistor branches, lossless LC
   oscillation, and a driven parallel RLC circuit including source work,
   shared heat and the total energy ledger.
@@ -1114,7 +1118,14 @@ None. The crate denies `unsafe_code`.
   optional `fs-phs` dependency. Off by default. `tests/constitutive.rs`
   checks conformance and tangent action away from knots, named support
   refusals, nonlinear RC relaxation with heat, and nonlinear LC exchange
-  against independent piecewise or continuous-equation references.
+  against independent piecewise or continuous-equation references. At its
+  five conformance points both adapters pass `check_time_reversal`: `R` is
+  the identity on charge and negates flux linkage. The bounds are derived in
+  the test from the rounding of fs-phs's scalar curve, for a curve whose
+  knots, slopes and knot energies are exact in binary. A capacitor reversal
+  that negates the charge is refused at the outputs, and so is an inductor
+  whose curve is not odd: reversed, its motion follows `-I(-flux)`, which is
+  another law.
 
 `slices` (off by default) adds fs-mbd and fs-thermal as dependencies and
 enables the owner slice tests, which compose real physics owners on the
@@ -1219,15 +1230,18 @@ Elements, `tests/elements.rs`:
   generated operating points (three spring laws), with outputs compared to
   independent formulas (mean velocity, linear spring force, damper heat equal
   to absorbed power, conductance antisymmetry);
-- time reversal: at each of those 200 points the mass and the three springs
-  pass `check_time_reversal`, 800 checks in all, a count the test asserts.
+- time reversal: at each of those 200 points the mass, the three springs and
+  the heat capacity pass `check_time_reversal`, 1,000 checks in all, a count
+  the test asserts.
   - For the mass, `R` negates the velocity. For the springs, `R` is the
-    identity on the extension.
+    identity on the extension, and for the heat capacity on the temperature.
   - The bounds are derived in the test from the rounding of `Mass::propose`,
-    `Spring::propose` and their stored energies.
+    `Spring::propose`, `HeatCapacity::propose` and their stored energies.
   - A reversal that also negates the mass's position is refused, and only
     through the test's view of the state: the position reaches neither the
-    output nor the stored energy;
+    output nor the stored energy.
+  - A heat capacity that publishes its temperature is refused before it
+    steps: a signal port has no parity under time reversal;
 - refusals: non-finite or out-of-range parameters, empty or non-increasing
   tables, a heater whose power could turn negative, a temperature input that
   is not positive, a step that would cool a body below 0 K (`Shorten`);
