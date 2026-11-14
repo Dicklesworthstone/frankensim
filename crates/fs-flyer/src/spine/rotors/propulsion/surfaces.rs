@@ -474,8 +474,15 @@ mod load_admission_tests {
             evaluate(1.225, [12.0, 0.0, 0.0], &[]).unwrap_err().code,
             "lifting-surfaces-invalid"
         );
+        // Induced drag is taken from the load's part transverse to the CG flow.
+        // A streamwise load has none, so even the largest finite one adds no
+        // induced drag; a transverse one of that size is unrepresentable.
         assert_eq!(
-            evaluate(1.225, [12.0, 0.0, 0.0], &[Vec3::new(f64::MAX, 0.0, 0.0)])
+            evaluate(1.225, [12.0, 0.0, 0.0], &[Vec3::new(f64::MAX, 0.0, 0.0)]).unwrap(),
+            evaluate(1.225, [12.0, 0.0, 0.0], &[Vec3::default()]).unwrap()
+        );
+        assert_eq!(
+            evaluate(1.225, [12.0, 0.0, 0.0], &[Vec3::new(0.0, 0.0, f64::MAX)])
                 .unwrap_err()
                 .code,
             "lifting-surfaces-invalid"
