@@ -179,7 +179,12 @@ fn moving_upwind_split_retains_the_discrete_boundary_trace_jacobian() {
     let mesh = mesh(2);
     let system = FluxSystem::new(&mesh);
     let params = FluxParams::default();
-    let mut state = moments(&mesh, &|x| [0.4 + 0.3 * x[1], -0.1 + 0.2 * x[0]]);
+    // The y-component vanishes at x = 0.55: inside three more faces, two of
+    // them on the boundary, and off the mesh line x = 0.5. Where w.n vanishes
+    // at a face's endpoint, the residual is once but not twice differentiable,
+    // so centred differences are only first order there: -0.1 + 0.2 x put
+    // that zero on five face endpoints, and its error was 8.5e-6 at h = 2e-5.
+    let mut state = moments(&mesh, &|x| [0.4 + 0.3 * x[1], -0.11 + 0.2 * x[0]]);
     let boundary_edge = mesh
         .edges
         .iter()
