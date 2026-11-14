@@ -3105,9 +3105,10 @@ fraction, heat capacity or flash temperature.
   the work received), and the law's closure residual
   `storage + dissipation - work` is booked as numerical loss.
 - Entropy generated: the dissipation over the interface temperature. Class
-  `Smooth`; no tangent is offered. `cx` is not polled: one call is one law
-  step within the law's root budget, and `TriboError` has no cancellation
-  value.
+  `Smooth`; no tangent is offered. One call is one law step within the
+  law's root budget. `cx` is polled once, on entry, before the law is asked
+  for; `TriboError` has no cancellation value, so a cancelled step is
+  refused as `sliding_interface_cancelled`.
 - Refused: a temperature or step that is not positive and finite; the
   source's or the law's own refusal, unchanged; a step whose work balance is
   off by more than `work_tolerance_j`, or whose reported stored change
@@ -3122,7 +3123,7 @@ fraction, heat capacity or flash temperature.
   `EndpointEnergy` with 5.0e-13 J measured against 3.7e-15 J allowed. Found
   by review.)
 
-`tests/sliding_interface.rs` (six of its tests, `cargo test -p fs-tribo
+`tests/sliding_interface.rs` (seven of its tests, `cargo test -p fs-tribo
 --features component --test sliding_interface`): with a Coulomb coefficient
 `0.8 - 0.01 (T - 300 K)` the interface passes the contract's conformance
 check at three slip rates (one oblique, one reversed), three temperatures
@@ -3140,7 +3141,9 @@ start. Also checked by field: temperatures and steps that are not positive
 and finite, a wrong number of inputs, an output slice of the wrong length
 (with nothing written), the source's own refusal and the dry law's
 (`static_mu` at a negative coefficient) carried unchanged, and seven things
-an interface cannot be held to. Not tested: a stored energy that becomes
+an interface cannot be held to. A step asked under a cancelled context is
+refused as `sliding_interface_cancelled` before its law is asked for, with
+nothing written. Not tested: a stored energy that becomes
 non-finite when re-measured from a state.
 
 Against the hand-written coupling: `crates/fs-couple/tests/friction_heat/
@@ -3360,6 +3363,9 @@ that changed sign every step and did not decay, 5e-3 m/s from the start and
   (`friction_interface_stop_against_the_slip`);
   a step that lets go from rest with a heat below minus the work tolerance
   (`friction_interface_let_go_heat`). No other row is chosen in their place.
+  `cx` is polled once, on entry, as for the prescribed interface: a step
+  asked under a cancelled context, on a line or off any line, is refused as
+  `friction_interface_cancelled` before the law is asked for.
 
 Not covered: a second tangent axis (the law's is given no slip); a
 prescribed side that accelerates (held over each step it is a staircase of
@@ -3374,7 +3380,7 @@ step before it to draw the line through, and one under a load that jumps
 a traction that falls with speed (a sign bracket is not a proof that the
 root is the only one); a normal load that changes.
 
-`tests/sliding_interface.rs` (seventeen of its twenty-four tests): at rest the
+`tests/sliding_interface.rs` (eighteen of its twenty-six tests): at rest the
 Coulomb law (5 N held, 3 N sliding) holds pushes up to 4.999 N with no slip
 and no heat and slides beyond; a sliding pair slides on against 3 N, and
 asked for any step that ends beyond its stop (1.0001 to 1000 times as
@@ -3408,7 +3414,8 @@ tier passes at all 48 of that sweep's starts, end flows and temperatures,
 each a step taken; a traction that falls with speed (the
 hyperbolic law) is solved on the line to the root a bisection in the test
 finds, to 1e-13 m/s; the refusals, by field, a root budget of two
-evaluations among them. Twenty-eight planted defects in a scratch copy
+evaluations among them, and a step asked under a cancelled context, on the
+line and off it (`friction_interface_cancelled`). Twenty-eight planted defects in a scratch copy
 each fail one of these tests or more, the stop's row as first landed, the
 break-away not located and the instant narrowed to rounding whatever the
 law (refused, as on the string) among them.

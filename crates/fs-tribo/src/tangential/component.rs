@@ -49,8 +49,10 @@
 //! reversible law whose stiffness depends on temperature needs a
 //! thermoelastic account that this adapter does not have.
 //!
-//! One call does a bounded amount of work (the law's own root budget), and
-//! [`TriboError`] has no cancellation value, so `cx` is not polled here.
+//! One call does a bounded amount of work (the law's own root budget). It
+//! polls `cx` once, on entry, before the law is asked for or advanced; since
+//! [`TriboError`] has no cancellation value, a cancelled step is refused as
+//! `sliding_interface_cancelled`.
 //!
 //! # Between two bodies
 //!
@@ -184,7 +186,8 @@
 //! component is the prescribed interface above with its force on two ports.
 //!
 //! Class `NonSmooth`. Entropy generated: the heat over the interface
-//! temperature. `cx` is not polled, as above.
+//! temperature. `cx` is polled once, on entry, as above; a cancelled step is
+//! refused as `friction_interface_cancelled`.
 //!
 //! Refused, besides what the prescribed interface refuses: a law that holds
 //! a slip it is prescribed, or that keeps slip where it holds a pair at rest
@@ -554,8 +557,10 @@ where
         inputs: &[f64],
         new: &mut Self::State,
         outputs: &mut [f64],
-        _cx: &Cx<'_>,
+        cx: &Cx<'_>,
     ) -> Result<Proposal, TriboError> {
+        cx.checkpoint()
+            .map_err(|_| refused("sliding_interface_cancelled"))?;
         let [heat_w, traction_n @ ..] = outputs else {
             return Err(refused("sliding_interface_outputs"));
         };
@@ -1485,8 +1490,10 @@ where
         compliance: &[f64],
         new: &mut Self::State,
         outputs: &mut [f64],
-        _cx: &Cx<'_>,
+        cx: &Cx<'_>,
     ) -> Result<Proposal, TriboError> {
+        cx.checkpoint()
+            .map_err(|_| refused("friction_interface_cancelled"))?;
         // After the temperature, the end inputs; after the line's square
         // matrix, their rows.
         let (

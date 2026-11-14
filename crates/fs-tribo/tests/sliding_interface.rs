@@ -27,7 +27,11 @@ use fs_tribo::{
 };
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
-    let gate = CancelGate::new_clock_free();
+    under(&CancelGate::new_clock_free(), f)
+}
+
+/// `f` with a context on `gate`.
+fn under<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let pool = ArenaPool::new(ArenaConfig::default());
     pool.scope(|arena| {
         let key = StreamKey {
@@ -36,9 +40,21 @@ fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
             tile: 3,
             iteration: 4,
         };
-        let cx = Cx::new(&gate, arena, key, Budget::INFINITE, ExecMode::Deterministic);
+        let cx = Cx::new(gate, arena, key, Budget::INFINITE, ExecMode::Deterministic);
         f(&cx)
     })
+}
+
+/// A gate whose cancellation is requested before any call.
+fn cancelled() -> CancelGate {
+    let gate = CancelGate::new_clock_free();
+    gate.request();
+    gate
+}
+
+/// A law source that must not be asked: a cancelled step is refused first.
+fn unasked(_: f64) -> Result<FrictionLaw, TriboError> {
+    panic!("the law was asked for under a cancelled context")
 }
 
 const LOAD_N: f64 = 10.0;
@@ -465,6 +481,25 @@ fn it_refuses_what_it_cannot_take() {
     assert_eq!(field(built(|d| d.solve.max_iterations = 0)), "max_iterations");
     assert!(built(|d| d.work_tolerance_j = 0.0).is_ok());
     assert!(built(|d| d.nominal_pressure_pa = None).is_ok());
+}
+
+/// A step asked under a cancelled context is refused before the law is
+/// asked for, with nothing written to the candidate or the outputs.
+#[test]
+fn a_step_asked_under_a_cancelled_context_is_refused() {
+    let start = SlidingInterface::new(weakening, drive([1.0, 0.0]))
+        .expect("interface")
+        .start(300.0)
+        .expect("start");
+    let interface = SlidingInterface::new(unasked, drive([1.0, 0.0])).expect("interface");
+    let mut candidate = start.clone();
+    let mut outputs = [f64::NAN; 3];
+    let answered = under(&cancelled(), |cx| {
+        interface.propose(&start, 0.2, &[300.0], &mut candidate, &mut outputs, cx)
+    });
+    assert_eq!(field(answered), "sliding_interface_cancelled");
+    assert_eq!(candidate, start);
+    assert!(outputs.iter().all(|value| value.is_nan()), "{outputs:?}");
 }
 
 /// The state type is nameable by a caller that stores it.
@@ -1462,6 +1497,35 @@ fn the_friction_interface_refuses_what_it_cannot_take() {
     assert_eq!(field(built(|load| load.impulse_tolerance_n_s = f64::INFINITY)), "impulse_tolerance_n_s");
     assert_eq!(field(built(|load| load.solve.force_relative_tolerance = 1.0)), "force_relative_tolerance");
     assert!(built(|load| load.normal_n = 0.0).is_ok());
+}
+
+/// A step asked under a cancelled context, on a line or off any line, is
+/// refused before the law is asked for, with nothing written.
+#[test]
+fn a_friction_step_asked_under_a_cancelled_context_is_refused() {
+    let rest = rubbing(dry).start(300.0, 0.0).expect("start");
+    let interface = rubbing(unasked);
+    let gate = cancelled();
+    let mut next = rest.clone();
+    let mut outputs = [f64::NAN; 3];
+    let on_its_line = under(&gate, |cx| {
+        interface.propose_on_line(
+            &rest,
+            0.01,
+            &[0.0, 0.0, 300.0],
+            &[2.5e-3, 0.0, 0.0, 0.0],
+            &mut next,
+            &mut outputs,
+            cx,
+        )
+    });
+    assert_eq!(field(on_its_line), "friction_interface_cancelled");
+    let off_any_line = under(&gate, |cx| {
+        interface.propose(&rest, 0.01, &[0.0, 0.0, 300.0], &mut next, &mut outputs, cx)
+    });
+    assert_eq!(field(off_any_line), "friction_interface_cancelled");
+    assert_eq!(next, rest);
+    assert!(outputs.iter().all(|value| value.is_nan()), "{outputs:?}");
 }
 
 /// What the end of a step moves per newton beside the told neighbour of the
