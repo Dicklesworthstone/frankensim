@@ -12,13 +12,14 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_ports::component::conformance::{
-    Case, Failure, Observed, Reversal, ReversalAllowance, check_component, check_port_tangent,
-    check_time_reversal,
+    Case, Failure, Observed, Reversal, ReversalAllowance, UnitExponents, check_component,
+    check_port_tangent, check_time_reversal, check_unit_rescaling, unit_factor,
 };
 use fs_ports::component::{
     Class, Component, ContractViolation, PortRole, PortSpec, PortTangent, Proposal, Receipt,
 };
 use fs_ports::{PortKind, StableId};
+use fs_qty::Dims;
 use fs_system::elements::{
     Conductance, Damper, ElementError, FlowSource, Force, GasContents, GasVolume, Gyrator,
     HeatCapacity, HeatNode, Heater, Mass, Motion, Restriction, SourceAccount, Spring, Waveform,
@@ -276,6 +277,61 @@ fn body_reverses(
     with_cx(|cx| check_time_reversal(body, &case, &unchanged, &observe, &allowance, cx))
 }
 
+/// Each base dimension alone, then all six together, as base-2 exponents in
+/// the order `[m, kg, s, K, A, mol]`.
+const UNIT_CHANGES: [UnitExponents; 7] = [
+    [3, 0, 0, 0, 0, 0],
+    [0, -2, 0, 0, 0, 0],
+    [0, 0, 5, 0, 0, 0],
+    [0, 0, 0, 2, 0, 0],
+    [0, 0, 0, 0, -3, 0],
+    [0, 0, 0, 0, 0, 1],
+    [3, -2, 5, 2, -3, 1],
+];
+
+/// The factor of dimensions `[m, kg, s, K, A, mol]` in the units `exponents`
+/// name.
+fn in_units(dimensions: [i8; 6], exponents: &UnitExponents) -> f64 {
+    unit_factor(Dims(dimensions), exponents)
+}
+
+/// The 0.75 kg mass of the sweep, in the units `exponents` name.
+fn mass_in_units(exponents: &UnitExponents) -> Mass {
+    Mass::new(0.75 * in_units([0, 1, 0, 0, 0, 0], exponents)).unwrap()
+}
+
+/// The 2.5 N s/m damper of the sweep in those units: damping is kg/s.
+fn damper_in_units(exponents: &UnitExponents) -> Damper {
+    Damper::new(2.5 * in_units([0, 1, -1, 0, 0, 0], exponents)).unwrap()
+}
+
+/// A mass's motion in those units: position [m], velocity [m/s].
+fn motion_in_units(state: &Motion, exponents: &UnitExponents) -> Motion {
+    Motion {
+        position_m: state.position_m * in_units([1, 0, 0, 0, 0, 0], exponents),
+        velocity_m_s: state.velocity_m_s * in_units([1, 0, -1, 0, 0, 0], exponents),
+    }
+}
+
+/// `check_unit_rescaling` of the component `build` makes, at one point, in
+/// each of the unit changes.
+fn rescales<C>(
+    build: &dyn Fn(&UnitExponents) -> C,
+    case: &Case<'_, C::State>,
+    scale_state: &dyn Fn(&C::State, &UnitExponents) -> C::State,
+) -> usize
+where
+    C: Component,
+    C::State: PartialEq + core::fmt::Debug,
+{
+    for exponents in &UNIT_CHANGES {
+        with_cx(|cx| check_unit_rescaling(build, case, scale_state, exponents, cx)).unwrap_or_else(
+            |failure| panic!("units {exponents:?} at {:?}: {failure}", case.inputs),
+        );
+    }
+    UNIT_CHANGES.len()
+}
+
 #[test]
 fn every_element_conforms_across_a_sweep_of_states_and_inputs() {
     let mut n = Numbers(20_261_110);
@@ -290,6 +346,8 @@ fn every_element_conforms_across_a_sweep_of_states_and_inputs() {
     let heater = Heater::new(Waveform::table(vec![(0.0, 0.0), (1.0, 12.0), (2.0, 4.0)]).unwrap()).unwrap();
     let (mut mass_reversals, mut spring_reversals) = (Reversals::default(), Reversals::default());
     let mut body_reversals = Reversals::default();
+    // Unit changes the mass and the damper kept to the bit.
+    let (mut mass_rescalings, mut damper_rescalings) = (0, 0);
     for _ in 0..200 {
         let dt = n.next(1.0e-5, 2.0e-2);
         let (f_a, f_b) = (n.next(-3.0, 3.0), n.next(-3.0, 3.0));
@@ -310,6 +368,13 @@ fn every_element_conforms_across_a_sweep_of_states_and_inputs() {
         let reversal = mass_reverses(&mass, &motion, &stale, dt, force, &reversed_motion)
             .unwrap_or_else(|failure| panic!("mass reversal at {motion:?}, {dt} s: {failure}"));
         mass_reversals.record(&reversal);
+        let case = Case {
+            state: &motion,
+            stale: &stale,
+            dt_s: dt,
+            inputs: &[force],
+        };
+        mass_rescalings += rescales(&mass_in_units, &case, &motion_in_units);
 
         let extension = n.next(-0.02, 0.02);
         for (spring, cubic) in [(&linear, 0.0), (&hardening, 2.0e6), (&softening, -1.0e5)] {
@@ -326,6 +391,13 @@ fn every_element_conforms_across_a_sweep_of_states_and_inputs() {
         assert_eq!(out[0], -out[1]);
         assert_eq!(out[0], 2.5 * (f_a - f_b));
         assert_eq!(out[2], -(out[0] * (f_a - f_b)), "all absorbed power leaves as heat");
+        let case = Case {
+            state: &(),
+            stale: &(),
+            dt_s: dt,
+            inputs: &[f_a, f_b, t_a],
+        };
+        damper_rescalings += rescales(&damper_in_units, &case, &|(): &(), _: &UnitExponents| ());
 
         let mut account = SourceAccount::starting_at(n.next(0.0, 3.0));
         account.energy_in_j = n.next(-10.0, 10.0);
@@ -367,6 +439,70 @@ fn every_element_conforms_across_a_sweep_of_states_and_inputs() {
         ),
         (200, 600, 200)
     );
+    println!("unit changes kept to the bit: mass {mass_rescalings}, damper {damper_rescalings}");
+    assert_eq!((mass_rescalings, damper_rescalings), (1400, 1400));
+}
+
+#[test]
+fn a_mass_at_rest_and_a_damper_with_both_ends_together_keep_their_law_in_other_units() {
+    // Each step stores, dissipates and exchanges nothing, so every energy in
+    // its receipt is zero, and stays zero in any other units.
+    let rest = Motion {
+        position_m: 0.05,
+        velocity_m_s: 0.0,
+    };
+    let stale = Motion {
+        position_m: 9.0,
+        velocity_m_s: -9.0,
+    };
+    let case = Case {
+        state: &rest,
+        stale: &stale,
+        dt_s: 1.0e-3,
+        inputs: &[0.0],
+    };
+    let mass_rescalings = rescales(&mass_in_units, &case, &motion_in_units);
+    let case = Case {
+        state: &(),
+        stale: &(),
+        dt_s: 1.0e-3,
+        inputs: &[0.5, 0.5, 300.0],
+    };
+    let damper_rescalings = rescales(&damper_in_units, &case, &|(): &(), _: &UnitExponents| ());
+    assert_eq!((mass_rescalings, damper_rescalings), (7, 7));
+}
+
+#[test]
+fn a_damper_built_with_its_damping_in_the_old_units_is_refused_at_the_outputs() {
+    // Damping is kg/s. Left unscaled where the kilogram is 2^-2 and the
+    // second 2^5 of the old ones, it is 2^7 times too large, and so is the
+    // force.
+    let kept = |_: &UnitExponents| Damper::new(2.5).unwrap();
+    let case = Case {
+        state: &(),
+        stale: &(),
+        dt_s: 1.0e-3,
+        inputs: &[1.5, -0.5, 300.0],
+    };
+    let failure = with_cx(|cx| {
+        check_unit_rescaling(
+            &kept,
+            &case,
+            &|(): &(), _: &UnitExponents| (),
+            &UNIT_CHANGES[6],
+            cx,
+        )
+    })
+    .expect_err("damping has units");
+    let Failure::Law { law, detail } = failure else {
+        panic!("expected a law failure, got {failure}");
+    };
+    println!("refused: {law} ({detail})");
+    assert_eq!(
+        law,
+        "the rescaled outputs are the base outputs in the new units"
+    );
+    assert!(detail.starts_with("output 0:"), "the force: {detail}");
 }
 
 #[test]

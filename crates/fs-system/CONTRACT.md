@@ -1245,6 +1245,15 @@ Elements, `tests/elements.rs`:
     output nor the stored energy.
   - A heat capacity that publishes its temperature is refused before it
     steps: a signal port has no parity under time reversal;
+- unit rescaling: at each of those 200 points the mass and the damper pass
+  `check_unit_rescaling` in units changed in each base dimension alone and in
+  all six together, 2,800 checks to the bit, a count the test asserts.
+  - So do a mass at rest under no force and a damper with both ends moving
+    together, steps whose every energy is zero.
+  - The test builds the mass (kg) and the damping (kg/s) in the new units, and
+    scales the mass's position (m) and velocity (m/s).
+  - A damper built with its damping left in the old units is refused at the
+    outputs;
 - subnormal energies: a mass and a damper at speeds of 1e-175 to 1e-155 m/s,
   where the energies of a step lie below the normal range of f64, pass
   `check_component` at 2,000 steps each, a count the test asserts. An
