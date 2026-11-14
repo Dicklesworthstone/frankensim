@@ -2055,9 +2055,13 @@ the shared filesystem is full.
 against the existing `HydrostaticReservoir::load_frame` at fixed attitude and
 lateral position. It uses a declared translation bracket along the direction
 opposite gravity, an absolute force allowance and at most 128 load evaluations.
-Safeguarded secant steps and periodic bisection retain the bracket; an accepted
-endpoint may terminate immediately. No new force law or time integrator is
-introduced, and frozen material snapshots are not resolved again.
+ITP steps (Oliveira and Takahashi 2020: a secant point truncated toward the
+midpoint and projected toward it as far as needed) retain the bracket. After k
+interior evaluations it is no wider than bisection's after k - 1, so a residual
+with a slope kink at its root, where a face crosses a waterline or a density
+interface, cannot stall the solve on one side. An accepted endpoint may
+terminate immediately. No new force law or time integrator is introduced, and
+frozen material snapshots are not resolved again.
 
 Uniform, layered, continuous-density and conserved finite-tank reservoirs use
 the same entry point. Finite waterlines and interfaces are solved by their

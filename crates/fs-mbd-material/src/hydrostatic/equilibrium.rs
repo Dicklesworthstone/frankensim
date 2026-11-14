@@ -94,9 +94,11 @@ impl From<HydrostaticError> for HeaveEquilibriumError {
 /// Finite tanks solve their conserved inventories at every candidate pose.
 ///
 /// The bracket is a translation along `-gravity / |gravity|` relative to
-/// `reference.pose()`. Safeguarded secant steps with periodic bisection retain
-/// an opposite-sign bracket; an endpoint already meeting the allowance may be
-/// returned directly. No uniqueness, roll/pitch balance or stability is inferred.
+/// `reference.pose()`. ITP steps (a secant point truncated toward the midpoint
+/// and projected so the bracket shrinks at least as fast as bisection, with
+/// one step of slack) retain an opposite-sign bracket; an endpoint already
+/// meeting the allowance may be returned directly. No uniqueness, roll/pitch
+/// balance or stability is inferred.
 /// Reported holding torque must be supplied by the caller's actual constraint
 /// if the body is to remain at the chosen attitude after initialization.
 ///
@@ -186,6 +188,15 @@ pub fn solve_heave_equilibrium<R: HydrostaticReservoir + ?Sized, C: FnMut() -> b
         f_high
     };
     let mut evaluations = 2;
+    // ITP steps (Oliveira and Takahashi, ACM TOMS 47(1), 2020). After the k-th
+    // interior evaluation the bracket is at most `initial_span * 2^(1 - k)`,
+    // bisection's width one evaluation earlier. At a slope kink on the root
+    // (a face crossing a waterline or density interface) plain secant steps
+    // keep replacing one end; the projection bounds that. The first step is
+    // the untruncated secant point, exact for an affine residual. Truncation
+    // uses the paper's kappa1 = 0.2 / initial_span and kappa2 = 2.
+    let initial_span = high - low;
+    let mut bracket_bound = initial_span;
     for evaluation in 3..=controls.maximum_evaluations {
         poll(&mut cancelled)?;
         let span = high - low;
@@ -194,12 +205,25 @@ pub fn solve_heave_equilibrium<R: HydrostaticReservoir + ?Sized, C: FnMut() -> b
         let scale = f_low.abs().max(f_high.abs());
         let left = f_low.abs() / scale;
         let right = f_high.abs() / scale;
-        let fraction = left / (left + right);
+        let secant = low + left / (left + right) * span;
         let midpoint = low + 0.5 * span;
-        let mut offset = if evaluation % 4 == 0 || !(0.01..0.99).contains(&fraction) {
-            midpoint
+        let toward_midpoint = if midpoint >= secant { 1.0 } else { -1.0 };
+        let truncation = if evaluation == 3 {
+            0.0
         } else {
-            low + fraction * span
+            0.2 * span * (span / initial_span)
+        };
+        let truncated = if truncation <= (midpoint - secant).abs() {
+            secant + toward_midpoint * truncation
+        } else {
+            midpoint
+        };
+        let reach = (bracket_bound - 0.5 * span).max(0.0);
+        bracket_bound *= 0.5;
+        let mut offset = if (truncated - midpoint).abs() <= reach {
+            truncated
+        } else {
+            midpoint - toward_midpoint * reach
         };
         if offset <= low || offset >= high {
             offset = midpoint;
