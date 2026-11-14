@@ -14,7 +14,7 @@ use std::f64::consts::PI;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
-use fs_ports::component::conformance::{Case, Observed, check_load_line};
+use fs_ports::component::conformance::{Case, Observed, check_component, check_load_line};
 use fs_ports::component::{Class, Component, LoadLine, PortRole, PortSpec, Proposal, Receipt};
 use fs_ports::{PortKind, StableId};
 use fs_system::elements::{
@@ -2707,7 +2707,7 @@ fn the_slider_s_law_holds_row_by_row_and_conforms_on_its_line() {
     // the sliding one when sliding; and within the sliding state the force
     // does not decrease as the released slip grows. A third of the points
     // also go through the conformance kit on a matrix that is not
-    // symmetric.
+    // symmetric, and through its check of the mandatory tier, off any line.
     let law = slider();
     let (hold, slide) = (HOLDS * NORMAL_N, SLIDES * NORMAL_N);
     let mut rows: HashMap<SliderRow, u32> = HashMap::new();
@@ -2786,6 +2786,9 @@ fn the_slider_s_law_holds_row_by_row_and_conforms_on_its_line() {
                     "{:?} against {mean}",
                     seen.flows
                 );
+                // The mandatory tier at the same point, off any line.
+                with_cx(|cx| check_component(&law, &case, cx))
+                    .unwrap_or_else(|failure| panic!("{start} {released} {c}: {failure}"));
                 checked += 1;
             }
         }

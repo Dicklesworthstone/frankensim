@@ -1,8 +1,8 @@
 //! Owner slice: the linear modal structure of fs-nlmodal on the composition kernel.
 //!
 //! `fs_nlmodal::component::ModalStructure` puts fs-modal's exact held-force step behind the
-//! Component contract: attachments through which efforts act on the modes, and a heat port for
-//! the modal damping. Here it passes the conformance check, is shown to add nothing to the
+//! Component contract: attachments through which efforts act on the modes, and a heat port for the
+//! modal damping. Here it passes the conformance and tangent checks, is shown to add nothing to the
 //! owner's step, and is run by the kernel through a strike and a free decay whose heat goes to a
 //! sink, with the ledger closing on the owner's work and heat. Beside a load line, a 64-mode string
 //! added with its tangent hands the line its own mobilities, and joins a line only where the line
@@ -20,7 +20,7 @@ use fs_nlmodal::component::{
     ModalAcousticState, ModalAcousticTimeBudget, ModalAttachment, ModalStructure,
     ModalStructureRefusal,
 };
-use fs_ports::component::conformance::{Case, Observed, check_component};
+use fs_ports::component::conformance::{Case, Observed, check_component, check_port_tangent};
 use fs_ports::component::{Component, Proposal};
 use fs_ports::{PortKind, StableId};
 use fs_system::{RouteTemperature, SystemBuilder, heat_sink};
@@ -168,6 +168,17 @@ fn the_modal_structure_conforms_and_books_the_owners_work_and_heat() {
         else {
             panic!("the structure takes the step");
         };
+        // The port map's tangent through the kit, as tests/elements.rs takes
+        // it: its central difference steps by h = max(1, |inputs|) eps^(1/3),
+        // and an output loses about 2 eps |output| / (2 h) of its slope to
+        // roundoff there.
+        let largest = |values: &[f64]| values.iter().fold(1.0_f64, |m, v| m.max(v.abs()));
+        let h = largest(&inputs) * f64::EPSILON.cbrt();
+        let absolute = 1.0e-12_f64.max(8.0 * f64::EPSILON * largest(&outputs) / h);
+        with_cx(&gate, |cx| {
+            check_port_tangent(&component, &case, 1.0e-6, absolute, cx)
+        })
+        .unwrap_or_else(|failure| panic!("tangent at {dt_s} s, {inputs:?}: {failure}"));
         let force = generalized(&inputs);
         let (_, _, work_j, heat_j, _) = owner_step(&component, &start, &force, dt_s);
         assert!(heat_j > 0.0, "the modes dissipate");

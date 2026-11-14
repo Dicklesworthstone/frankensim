@@ -1374,7 +1374,9 @@ fs-modal's exact held-force step behind the contract), three modes with one
 loss factor, a one-row strike attachment of mode shapes and a three-row
 identity (modal) attachment.
 - At a full sample, a half sample and an uncached duration it passes the
-  conformance check; the energy the kernel books equals the owner's work minus
+  conformance check, and the tangent check at relative 1e-6 with the absolute
+  allowance of `tests/elements.rs` (the roundoff of an output at the kit's
+  difference step); the energy the kernel books equals the owner's work minus
   its viscous heat to 1e-12 of the exchanged magnitudes; the heat output,
   dissipation and entropy `D / T` are the owner's numbers; the numerical loss
   is below 1e-12 of the exchanged magnitudes plus the stored change.
@@ -2081,7 +2083,8 @@ material, a surface card, a temperature or a slip history stays in `fs-tribo`.
 - The table, row by row: over six start slips, three compliances and 801
   released slips each, every row is reached more than a thousand times, the
   three claims hold at every point, and 4806 of the points pass
-  `check_load_line` on a matrix that is not symmetric.
+  `check_load_line` on a matrix that is not symmetric and `check_component`
+  off any line.
 - A mass thrown at 1.3 m/s against 5.88 N stops, and the step it stops in ends
   at zero slip: the arrest is late against `v0 / a` = 0.4422 s by 7.8e-3,
   2.8e-3 and 3.2e-4 s at steps of 10, 5 and 2.5 ms. What is asserted is the
