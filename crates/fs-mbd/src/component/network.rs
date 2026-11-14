@@ -55,6 +55,7 @@ use core::num::NonZeroUsize;
 use std::rc::Rc;
 
 use fs_exec::Cx;
+use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::component::{
     Class, Component, ContractViolation, PortRole, PortSpec, Proposal, Receipt,
 };
@@ -166,6 +167,16 @@ pub enum ViscousNetworkRefusal {
 /// The network declares itself `Smooth`, which holds only as far as the law
 /// is differentiable in temperature.
 pub trait DampingLaw: core::fmt::Debug {
+    /// Stable identity of the complete original law, including its parameters,
+    /// support, coordinate conventions and refusal behavior. The identity must
+    /// not depend on callback addresses or sampled evaluations.
+    ///
+    /// The default keeps existing laws usable for stepping, but refuses durable
+    /// checkpoint encoding and decoding until their owner supplies an identity.
+    fn checkpoint_identity(&self) -> Option<[u8; 32]> {
+        None
+    }
+
     /// The passive form of `connector` at `temperature_k`, from `reference`,
     /// the form the network was built with (never an already shifted one).
     ///
@@ -390,6 +401,83 @@ impl ViscousNetwork {
 impl Component for ViscousNetwork {
     type State = Vec<RigidBodyState>;
     type Error = ViscousNetworkRefusal;
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-mbd::component::network::ViscousNetwork",
+        state_family: "rigid-body-bank",
+        schema_grammar: "one native rigid body per admitted mass property: position xyz, canonical unit quaternion wxyz, world linear momentum xyz, body angular momentum xyz; finite total energy and allowance terms",
+        codec_grammar: "13 u64 exact f64 bit words per body, in original body order, no count prefix or quaternion renormalization",
+        codec_version: 1,
+    });
+
+    fn encode_state(&self, state: &Vec<RigidBodyState>, words: &mut Vec<u64>) -> bool {
+        if self
+            .law
+            .as_ref()
+            .is_some_and(|law| law.checkpoint_identity().is_none())
+            || !self
+                .energy(state)
+                .is_ok_and(|(energy, terms)| energy.is_finite() && terms.is_finite())
+        {
+            return false;
+        }
+        super::snapshot::encode_bodies(state, words)
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<Vec<RigidBodyState>> {
+        if self
+            .law
+            .as_ref()
+            .is_some_and(|law| law.checkpoint_identity().is_none())
+        {
+            return None;
+        }
+        let state = super::snapshot::decode_bodies(words, self.properties.len())?;
+        let (energy, terms) = self.energy(&state).ok()?;
+        (energy.is_finite() && terms.is_finite()).then_some(state)
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        use super::snapshot::{
+            push_matrix, push_properties, push_source_controls, push_torques, push_vec3,
+        };
+        push_properties(&self.properties, words);
+        push_vec3(self.gravity.acceleration_world(), words);
+        words.push(self.links.len() as u64);
+        for link in &self.links {
+            words.extend(link.bodies.map(|body| body as u64));
+            for arm in link.arms_body_m {
+                push_vec3(arm, words);
+            }
+            push_matrix(&link.damping, words);
+        }
+        push_source_controls(self.controls.source, words);
+        let limits = self.controls.limits;
+        words.extend([
+            self.controls.source_substeps as u64,
+            limits.maximum_bodies as u64,
+            limits.maximum_connectors as u64,
+            limits.maximum_pair_relaxations as u64,
+            limits.maximum_live_bytes as u64,
+        ]);
+        push_torques(&self.torques, words);
+        match &self.law {
+            None => words.push(0),
+            Some(law) => match law.checkpoint_identity() {
+                None => words.push(1),
+                Some(identity) => {
+                    words.push(2);
+                    words.extend(
+                        identity
+                            .as_chunks::<8>()
+                            .0
+                            .iter()
+                            .map(|word| u64::from_le_bytes(*word)),
+                    );
+                }
+            },
+        }
+    }
 
     fn ports(&self) -> &[PortSpec] {
         &self.ports

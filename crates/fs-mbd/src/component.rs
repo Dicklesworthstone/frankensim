@@ -35,10 +35,12 @@
 pub mod network;
 /// A rigid-body network with Maxwell memory behind the Component contract.
 pub mod relaxation;
+pub(crate) mod snapshot;
 
 use core::num::NonZeroUsize;
 
 use fs_exec::Cx;
+use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::component::{
     Class, Component, ContractViolation, PortRole, PortSpec, Proposal, Receipt,
 };
@@ -282,6 +284,32 @@ pub(crate) fn potential_terms_j(
 impl Component for RigidBody {
     type State = RigidBodyState;
     type Error = RigidBodyRefusal;
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-mbd::component::RigidBody",
+        state_family: "rigid-body",
+        schema_grammar: "position xyz; canonical unit quaternion wxyz; world linear momentum xyz; body angular momentum xyz; all f64 with finite native energy",
+        codec_grammar: "13 u64 words holding the exact f64 bits in schema order; no quaternion renormalization",
+        codec_version: 1,
+    });
+
+    fn encode_state(&self, state: &RigidBodyState, words: &mut Vec<u64>) -> bool {
+        self.stored_energy_j(state).is_ok_and(f64::is_finite)
+            && snapshot::encode_bodies(core::slice::from_ref(state), words)
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<RigidBodyState> {
+        let state = snapshot::decode_bodies(words, 1)?.pop()?;
+        self.stored_energy_j(&state)
+            .ok()?
+            .is_finite()
+            .then_some(state)
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        snapshot::push_properties(core::slice::from_ref(&self.properties), words);
+        snapshot::push_vec3(self.integrator.gravity().acceleration_world(), words);
+    }
 
     fn ports(&self) -> &[PortSpec] {
         &self.ports

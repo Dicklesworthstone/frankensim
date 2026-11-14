@@ -268,6 +268,20 @@ impl PassiveBushingMatrix {
         }
     }
 
+    /// Bind the complete retained numerical law for native Component replay.
+    /// Original Gram factors are not reconstructible from the rounded native
+    /// matrix, and the evaluation modes choose different arithmetic paths.
+    pub(crate) fn append_checkpoint_identity(&self, words: &mut Vec<u64>) {
+        words.extend(self.native.iter().flatten().map(|value| value.to_bits()));
+        words.extend(self.scales.map(f64::to_bits));
+        words.extend(self.gram.iter().flatten().map(|value| value.to_bits()));
+        words.extend([
+            u64::from(self.physical_gram),
+            u64::from(self.diagonal),
+            self.reconstruction_residual.to_bits(),
+        ]);
+    }
+
     /// Multiply this admitted form by a finite nonnegative physical coefficient.
     ///
     /// The original Gram directions are retained and scaled by the square root

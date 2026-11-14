@@ -11,6 +11,9 @@
 // Exact float comparisons here assert bitwise agreement with the owner.
 #![allow(clippy::float_cmp)]
 
+#[path = "viscous_network_slice/checkpoints.rs"]
+mod checkpoints;
+
 use std::rc::Rc;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
