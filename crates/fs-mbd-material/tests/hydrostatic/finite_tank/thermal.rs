@@ -10,6 +10,7 @@ use fs_material::{
     phase::{HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, SolidLiquidPhase},
 };
 use fs_mbd_material::hydrostatic::{FiniteTankThermalControls, FiniteTankThermalError};
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Density, Dims, Pressure, QuantitySpec, Temperature};
 use fs_thermal::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
@@ -48,9 +49,19 @@ fn liquid_card(short_viscosity: bool) -> MaterialCard {
         } else {
             400.0
         };
+        // LiquidTemperatureLaw requires thermal conductivity as a static semantic
+        // quantity, not by its dimensions alone; the other properties are dimensional.
+        let quantity = if name == "thermal_conductivity" {
+            QuantitySpec::semantic(SemanticType::new(
+                QuantityKind::ThermalConductivity,
+                ValueForm::Static,
+            ))
+        } else {
+            QuantitySpec::dimensional(dims)
+        };
         claims
             .insert_claim(PropertyClaim {
-                key: PropertyKey::new(name, dims),
+                key: PropertyKey::with_quantity(name, quantity),
                 value: PropertyValue::Curve {
                     abscissa: "T".into(),
                     abscissa_dims: Temperature::DIMS,
@@ -405,10 +416,26 @@ fn cooling_cancellation_and_work_refusal_roll_back_both_native_and_source_candid
     close(observed.audit().caloric_storage_change_j, 0.0);
     close(heat.external_heat_j, 0.0);
     assert_eq!(observed.audit().source_updates, 8);
-    assert_eq!(
-        observed.current_tank().unwrap().source(),
-        law.reference_state()
-    );
+    // Back at 300 K the tank holds a refreshed source, whose receipts record
+    // pinned-claim selection, while the law's reference was resolved under
+    // SingleClaimOnly; fs-material's rule is that their physical tuples, not
+    // their policy receipts, agree. The card, the query and every selected
+    // claim and value are the reference's.
+    let source = observed.current_tank().unwrap().source().material();
+    let reference = law.reference_state().material();
+    assert_eq!(source.card_identity(), reference.card_identity());
+    assert_eq!(source.query(), reference.query());
+    assert_eq!(source.properties().len(), reference.properties().len());
+    for (refreshed, original) in source.properties().iter().zip(reference.properties()) {
+        assert_eq!(
+            refreshed.answer().receipt.selected,
+            original.answer().receipt.selected
+        );
+        assert_eq!(
+            refreshed.value_si().to_bits(),
+            original.value_si().to_bits()
+        );
+    }
     let limited = tank
         .thermal_density_observer(
             &before,
@@ -515,8 +542,12 @@ fn source_support_tank_overflow_and_foreign_bindings_publish_no_replacement() {
             .is_err()
         );
         let initial = caloric.curve().state_at_specific_enthalpy(0.0).unwrap();
-        let other = fs_material::phase::EquilibriumEnthalpyPhaseCurve::try_new(
+        // The same liquid knots in a chart of another identity: try_new admits
+        // only a curve from fully solid to fully liquid, so a liquid chart is
+        // built by the single-phase ingress.
+        let other = fs_material::phase::EquilibriumEnthalpyPhaseCurve::try_single_phase(
             card.content_hash(),
+            SolidLiquidPhase::Liquid,
             caloric.curve().knots().to_vec(),
         )
         .unwrap();

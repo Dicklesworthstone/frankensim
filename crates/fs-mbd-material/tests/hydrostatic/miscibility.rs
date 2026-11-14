@@ -82,7 +82,14 @@ fn liquid_card() -> MaterialCard {
                         0.0,
                         1.0,
                     )
-                    .with("pressure", 100_000.0, 100_000.0),
+                    // Typed as mixture_point() types it: a query axis typed differently
+                    // from its claim's axis is outside the claim's domain.
+                    .with_quantity(
+                        "pressure",
+                        quantity(QuantityKind::Pressure),
+                        100_000.0,
+                        100_000.0,
+                    ),
                 interpolation: InterpolationPolicy::LinearInside,
                 uncertainty: UncertaintyModel::Unstated,
                 observations: vec![],
