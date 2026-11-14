@@ -24,6 +24,7 @@
 //! it with the tangent it offers.
 
 use fs_exec::Cx;
+use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::StableId;
 use fs_ports::component::{Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt};
 
@@ -207,6 +208,52 @@ impl Component for UniformEnthalpyBody {
             Err(refused(
                 "a uniform enthalpy body's stored energy is unrepresentable",
             ))
+        }
+    }
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-material::phase::component::UniformEnthalpyBody",
+        state_family: "EquilibriumPhaseState",
+        schema_grammar: "specific enthalpy on the original identity-bound equilibrium curve",
+        codec_grammar: "one u64 word: specific enthalpy f64 bits; all native fields resolved by the original curve",
+        codec_version: 1,
+    });
+
+    fn encode_state(&self, state: &EquilibriumPhaseState, words: &mut Vec<u64>) -> bool {
+        if state.phase_curve_identity() != self.curve.identity() {
+            return false;
+        }
+        let bits = state.specific_enthalpy_j_kg().to_bits();
+        let Some(resolved) = self.decode_state(&[bits]) else {
+            return false;
+        };
+        // The native identity binds every numeric field, its sign bits and
+        // phase topology. No independent state is replaced by a reconstruction.
+        if resolved.identity() != state.identity() {
+            return false;
+        }
+        words.push(bits);
+        true
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<EquilibriumPhaseState> {
+        let &[bits] = words else { return None };
+        let state = self
+            .curve
+            .state_at_specific_enthalpy(f64::from_bits(bits))
+            .ok()?;
+        self.stored_energy_j(&state).ok()?;
+        Some(state)
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        words.push(self.mass_kg.to_bits());
+        // This original identity includes the card, every knot, retained
+        // caloric/density interpolation laws and any source receipts.
+        for bytes in self.curve.identity().as_bytes().chunks_exact(8) {
+            words.push(u64::from_le_bytes(
+                bytes.try_into().expect("eight identity bytes"),
+            ));
         }
     }
 

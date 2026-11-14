@@ -71,6 +71,108 @@ fn response(
 }
 
 #[test]
+fn layer_codec_is_stateless_and_binds_both_original_conductivity_charts() {
+    let curves = [
+        ConductivityCurve::new(vec![[250.0, 5.0], [400.0, 7.0], [700.0, 9.0]]).unwrap(),
+        ConductivityCurve::new(vec![[250.0, 10.0], [400.0, 12.0], [700.0, 14.0]]).unwrap(),
+    ];
+    let geometry = LayerGeometry::planar([0.03, 0.04], 0.2).unwrap();
+    let identity = |curves| {
+        let conductor = LayerConductor::new(curves, geometry, 0.08, config()).unwrap();
+        let mut words = Vec::new();
+        conductor.identity_words(&mut words);
+        words
+    };
+    let conductor = LayerConductor::new(curves.clone(), geometry, 0.08, config()).unwrap();
+    assert!(LayerConductor::STATE_CHARTER.is_some());
+    let mut state = vec![17];
+    assert!(conductor.encode_state(&(), &mut state));
+    assert_eq!(state, [17]);
+    assert_eq!(conductor.decode_state(&[]), Some(()));
+    assert_eq!(conductor.decode_state(&[0]), None);
+    let original = identity(curves.clone());
+    assert_eq!(original, identity(curves.clone()));
+    for side in 0..2 {
+        for knot in 0..curves[side].knots().len() {
+            for coordinate in 0..2 {
+                let mut changed = curves.clone();
+                let mut knots = changed[side].knots().to_vec();
+                knots[knot][coordinate] = knots[knot][coordinate].next_up();
+                changed[side] = ConductivityCurve::new(knots).unwrap();
+                assert_ne!(
+                    original,
+                    identity(changed),
+                    "side {side}, knot {knot}, coordinate {coordinate}"
+                );
+            }
+        }
+    }
+    assert_ne!(original, identity([curves[1].clone(), curves[0].clone()]));
+}
+
+#[test]
+fn layer_identity_retains_geometry_kind_original_metrics_contact_and_solve_controls() {
+    let curve = ConductivityCurve::new(vec![[250.0, 5.0], [700.0, 5.0]]).unwrap();
+    let identity = |geometry, contact, config| {
+        let conductor =
+            LayerConductor::new([curve.clone(), curve.clone()], geometry, contact, config).unwrap();
+        let mut words = Vec::new();
+        conductor.identity_words(&mut words);
+        words
+    };
+    let planar = LayerGeometry::planar([0.03, 0.04], 0.2).unwrap();
+    let original = identity(planar, 0.08, config());
+    for geometry in [
+        LayerGeometry::planar([0.031, 0.04], 0.2).unwrap(),
+        LayerGeometry::planar([0.03, 0.041], 0.2).unwrap(),
+        LayerGeometry::planar([0.03, 0.04], 0.21).unwrap(),
+    ] {
+        assert_ne!(original, identity(geometry, 0.08, config()));
+    }
+    assert_ne!(original, identity(planar, 0.09, config()));
+    for config in [
+        LayerConductionConfig {
+            max_iterations: 81,
+            ..config()
+        },
+        LayerConductionConfig {
+            absolute_heat_tolerance_w: 2e-12,
+            ..config()
+        },
+        LayerConductionConfig {
+            relative_heat_tolerance: 3e-13,
+            ..config()
+        },
+    ] {
+        assert_ne!(original, identity(planar, 0.08, config));
+    }
+    for radial in [
+        LayerGeometry::cylindrical([0.1, 0.3], 0.2, 0.4).unwrap(),
+        LayerGeometry::spherical([0.1, 0.3], 0.2).unwrap(),
+    ] {
+        let equivalent =
+            LayerGeometry::planar(radial.equivalent_distances_m(), radial.contact_area_m2())
+                .unwrap();
+        assert_ne!(
+            identity(radial, 0.08, config()),
+            identity(equivalent, 0.08, config())
+        );
+    }
+    let cylinder = LayerGeometry::cylindrical([0.1, 0.3], 0.2, 0.4).unwrap();
+    for changed in [
+        LayerGeometry::cylindrical([0.11, 0.3], 0.2, 0.4).unwrap(),
+        LayerGeometry::cylindrical([0.1, 0.31], 0.2, 0.4).unwrap(),
+        LayerGeometry::cylindrical([0.1, 0.3], 0.21, 0.4).unwrap(),
+        LayerGeometry::cylindrical([0.1, 0.3], 0.2, 0.41).unwrap(),
+    ] {
+        assert_ne!(
+            identity(cylinder, 0.08, config()),
+            identity(changed, 0.08, config())
+        );
+    }
+}
+
+#[test]
 fn constant_layers_reproduce_series_resistance_reversal_and_equilibrium() {
     let curves = [
         ConductivityCurve::new(vec![[250.0, 5.0], [700.0, 5.0]]).unwrap(),

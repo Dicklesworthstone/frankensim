@@ -829,6 +829,13 @@ matches the same accepted prefix and subsequent stepping schedule.
 `tests/system_command/checkpoints.rs` exercises fixed and adaptive saves and
 resumes through separate real CLI processes, full-report parity, foreign roots,
 corruption, changed prescribed boundaries and preservation of existing files.
+The same path covers authored latent-heat storage and temperature-dependent
+layer conduction, and the material-card-backed body and conductor owners.
+Their native codecs retain the original caloric or conductivity laws. Reopening
+an unchanged scene against a changed material pack refuses the old checkpoint;
+the pack's filename alone never establishes source identity. Rigid and
+viscoelastic network owners still require their own native codecs before these
+scenes can be checkpointed.
 
 `slider` lowers to `fs_system::elements::Slider` through the kernel's
 `add_on_line` tier, with positive constant `normal_n`, `static_coefficient`

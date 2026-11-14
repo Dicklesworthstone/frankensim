@@ -8,6 +8,7 @@
 //! owners; these source-free, quasisteady layers have no independent state.
 
 use fs_exec::Cx;
+use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::StableId;
 use fs_ports::component::{
     Class, Component, EndOfStep, PortRole, PortSpec, PortTangent, Proposal, Receipt,
@@ -191,6 +192,56 @@ impl Component for LayerConductor {
 
     fn stored_energy_j(&self, _state: &()) -> Result<f64, DepositionError> {
         Ok(0.0)
+    }
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-material::thermal::conduction::component::LayerConductor",
+        state_family: "stateless-layer-conduction",
+        schema_grammar: "unit state on the original conductivity charts and geometry",
+        codec_grammar: "zero u64 words",
+        codec_version: 1,
+    });
+
+    fn encode_state(&self, _state: &(), _words: &mut Vec<u64>) -> bool {
+        true
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<()> {
+        words.is_empty().then_some(())
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        for curve in &self.curves {
+            words.push(curve.knots().len() as u64);
+            for knot in curve.knots() {
+                words.extend(knot.map(f64::to_bits));
+            }
+        }
+        words.extend(self.geometry.equivalent_distances_m().map(f64::to_bits));
+        words.push(self.geometry.contact_area_m2().to_bits());
+        // Equal resistance coordinates do not make different original
+        // geometries interchangeable. Retain the geometry kind and inputs.
+        match self.geometry.radial_coordinates_m() {
+            None => words.push(0),
+            Some((radii, contact)) => {
+                words.push(if self.geometry.cylinder_length_m().is_some() {
+                    1
+                } else {
+                    2
+                });
+                words.extend(radii.map(f64::to_bits));
+                words.push(contact.to_bits());
+                if let Some(length) = self.geometry.cylinder_length_m() {
+                    words.push(length.to_bits());
+                }
+            }
+        }
+        words.extend([
+            self.contact_resistance_m2_k_w.to_bits(),
+            self.config.max_iterations as u64,
+            self.config.absolute_heat_tolerance_w.to_bits(),
+            self.config.relative_heat_tolerance.to_bits(),
+        ]);
     }
 
     fn end_of_step(&self, _port: usize) -> EndOfStep {

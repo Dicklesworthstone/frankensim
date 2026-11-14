@@ -46,10 +46,17 @@ trajectory. Proposals and tangent actions poll cancellation, keep the
 original bounded scalar iteration, allocate no heap on success, and leave
 outputs unchanged on refusal. Errors remain `DepositionError`.
 
+The native Component snapshot codec writes no state words. Its parameter
+identity retains both complete ordered conductivity knot sequences, the
+original geometry kind and coordinates as well as its resistance metrics,
+contact resistance, and all local iteration/tolerance controls. Equivalent
+planar resistance coordinates do not erase the original radial geometry.
+
 `tests/thermal_conduction_component.rs` checks the mandatory conformance kit,
 constant-conductivity series/contact resistance and reversal, the independent
 Kirchhoff integral for affine conductivity, both tangent actions and their
 finite differences, disjoint supports, and input/domain/cancellation refusals.
+Direct codec tests retain both charts, original geometry and solve controls.
 Two owned enthalpy bodies and this conductor run on the actual generic kernel
 against an independent scalar caloric/integrated-conductivity oracle; their
 energy, entropy and temperature feedback are checked. A source-domain exit
@@ -160,6 +167,14 @@ A state that does not move (no heat, or heat too small to change the
 enthalpy) is returned as it is, sign of a zero enthalpy and identity
 included, as the chart's own `advance_specific_energy` returns it.
 
+The native Component snapshot codec stores the exact specific-enthalpy bits
+and resolves the complete state through the same original curve. Encoding
+checks the reconstructed native state identity; decoding refuses malformed
+word counts, nonfinite or unsupported enthalpy, and unrepresentable stored
+energy. The parameter identity binds mass and the complete curve identity,
+including its original card, knots, caloric/density laws and retained source
+context. The codec adds no independent thermal history or replacement law.
+
 Refused, with candidate and outputs untouched: a mass that is not positive
 and finite; widths other than one; a heat rate that is not a number
 (`NonFiniteSpecificEnergyIncrement`); a step that is not positive and
@@ -174,7 +189,7 @@ generated inside the body, expansion work, and any limit on the step for
 accuracy. The enumeration ratchet is unchanged: no new `*_with_*` function,
 `*Error` or `*Candidate` type, or trait.
 
-Tests. `tests/phase_temperature_derivative.rs`, module `body`, 2 tests with
+Tests. `tests/phase_temperature_derivative.rs`, module `body`, 4 tests with
 the feature (`cargo test -p fs-material --features component --test
 phase_temperature_derivative`): the conformance kit and the tangent check
 on ten steps of a melting chart (within the solid; ending on and starting
@@ -186,6 +201,8 @@ mean rising with nine heats from one state; the one-sided slope at rest on
 each corner, confirmed from the right by a difference and exactly zero from
 the left; a heat of 1e-30 W taken and booked as lost; a state at an enthalpy
 of minus zero kept as it is under no heat; and every refusal above.
+Codec tests round-trip every native state field through latent and original
+affine-capacity charts, and check malformed/foreign states and parameter identity.
 `crates/fs-couple/tests/gas_piston_graph.rs`, 3 tests: the body, the
 kernel's `Conductance` and the fs-gas cavity as a declared graph against the
 piston module's own finite-body step

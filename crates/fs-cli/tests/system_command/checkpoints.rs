@@ -13,48 +13,90 @@ fn saved_root(report: &str) -> String {
     root.to_owned()
 }
 
+fn checkpoint_continuation(scene: &std::path::Path, text: &str) -> String {
+    let checkpoint = scene.with_extension("fssnap");
+    let scene_path = scene.to_str().unwrap();
+    let checkpoint_path = checkpoint.to_str().unwrap();
+    let (code, prefix, stderr) = run_binary(&[
+        "--json",
+        "system",
+        scene_path,
+        "--until",
+        "0.125",
+        "--checkpoint",
+        checkpoint_path,
+    ]);
+    assert_eq!(code, 0, "{}: {stderr}", scene.display());
+    assert!(stderr.is_empty(), "{stderr}");
+    assert_eq!(value(&prefix, "\"schema\"", "time_s"), 0.125);
+    let root = saved_root(&prefix);
+    assert!(!std::fs::read(&checkpoint).unwrap().is_empty());
+
+    let (code, resumed, stderr) = run_binary(&[
+        "--json",
+        "system",
+        scene_path,
+        "--resume",
+        checkpoint_path,
+        "--resume-root",
+        &root,
+    ]);
+    assert_eq!(code, 0, "{}: {stderr}", scene.display());
+    assert!(stderr.is_empty(), "{stderr}");
+    let mut reference = fs_cli::SystemScene::from_text(text, scene).unwrap();
+    scene_context(|cx, _| {
+        while reference.time_s() < 0.125 {
+            reference.advance(0.125 - reference.time_s(), cx).unwrap();
+        }
+        reference.run(cx).unwrap();
+    });
+    assert_eq!(resumed, reference.render_json(), "{}", scene.display());
+    root
+}
+
 #[test]
-fn saved_fixed_and_adaptive_scenes_continue_in_another_process_with_identical_reports() {
-    for name in ["variable_transmission.json", "adaptive_oscillator.json"] {
+fn saved_fixed_adaptive_and_material_scenes_continue_with_identical_reports() {
+    for name in [
+        "variable_transmission.json",
+        "adaptive_oscillator.json",
+        "phase_change_store.json",
+        "phase_change_conduction.json",
+    ] {
         let text = std::fs::read_to_string(example(name)).unwrap();
         let scene = scratch(name, &text);
-        let checkpoint = scene.with_extension("fssnap");
-        let scene_path = scene.to_str().unwrap();
-        let checkpoint_path = checkpoint.to_str().unwrap();
-        let (code, prefix, stderr) = run_binary(&[
-            "--json",
-            "system",
-            scene_path,
-            "--until",
-            "0.125",
-            "--checkpoint",
-            checkpoint_path,
-        ]);
-        assert_eq!(code, 0, "{name}: {stderr}");
-        assert!(stderr.is_empty(), "{stderr}");
-        assert_eq!(value(&prefix, "\"schema\"", "time_s"), 0.125);
-        let root = saved_root(&prefix);
-        assert!(!std::fs::read(&checkpoint).unwrap().is_empty());
+        checkpoint_continuation(&scene, &text);
+    }
+}
 
-        let (code, resumed, stderr) = run_binary(&[
+#[test]
+fn material_card_checkpoints_resume_original_laws_and_refuse_changed_source_packs() {
+    for (name, text) in [
+        ("card_body.json", source_body_scene(0.0, 2000.0, 2.0)),
+        ("card_layer.json", source_layer_scene()),
+    ] {
+        let pack = system_material_pack(2.0, false, false);
+        let scene = source_scene_file(name, &text, &pack);
+        let root = checkpoint_continuation(&scene, &text);
+        let checkpoint = scene.with_extension("fssnap");
+        // The JSON stays byte-identical. Re-admission must bind the actual
+        // prepared source, including material receipts, rather than its path.
+        std::fs::write(
+            scene.parent().unwrap().join("material.fsmcdpk"),
+            system_material_pack(3.0, false, false),
+        )
+        .unwrap();
+        let (code, stdout, stderr) = run_binary(&[
             "--json",
             "system",
-            scene_path,
+            scene.to_str().unwrap(),
             "--resume",
-            checkpoint_path,
+            checkpoint.to_str().unwrap(),
             "--resume-root",
             &root,
         ]);
-        assert_eq!(code, 0, "{name}: {stderr}");
-        assert!(stderr.is_empty(), "{stderr}");
-        let mut reference = fs_cli::SystemScene::from_text(&text, &scene).unwrap();
-        scene_context(|cx, _| {
-            while reference.time_s() < 0.125 {
-                reference.advance(0.125 - reference.time_s(), cx).unwrap();
-            }
-            reference.run(cx).unwrap();
-        });
-        assert_eq!(resumed, reference.render_json(), "{name}");
+        assert_ne!(code, 0);
+        assert!(stdout.is_empty());
+        assert!(stderr.contains("system-checkpoint"), "{stderr}");
     }
 }
 

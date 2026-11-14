@@ -209,14 +209,14 @@ fn admitted_but_malformed_driver_and_sample_states_refuse_atomically() {
 
 #[test]
 fn unsupported_owners_and_excessive_sample_storage_are_named_refusals() {
-    let phase = scene(include_str!(
-        "../../../../../examples/system/phase_change_store.json"
+    let network = scene(include_str!(
+        "../../../../../examples/system/damped_pair.json"
     ));
-    let before = phase.render_json();
-    let error = phase.checkpoint().unwrap_err();
-    assert!(error.message.contains("store"), "{error}");
+    let before = network.render_json();
+    let error = network.checkpoint().unwrap_err();
+    assert!(error.message.contains("pair"), "{error}");
     assert!(error.message.contains("codec"), "{error}");
-    assert_eq!(phase.render_json(), before);
+    assert_eq!(network.render_json(), before);
 
     assert!(sample_storage(&["coordinate".repeat(1024)], MAX_SAMPLES).is_err());
     assert!(sample_storage(&["x".into()], usize::MAX).is_err());

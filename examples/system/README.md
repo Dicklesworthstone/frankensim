@@ -31,6 +31,10 @@ step boundary; resuming preserves the accepted state and its continuation.
 Checkpoint files and restored sample histories are each bounded to 64 MiB.
 An element whose owner does not provide a native state codec refuses saving
 instead of omitting its state.
+This includes support for authored or material-card-backed `enthalpy_body`
+and `layer_conductor` laws; keep referenced material packs unchanged when
+resuming. The `rigid_network` and `viscoelastic_network` owners do not yet
+provide native checkpoint codecs.
 
 | scene | what it shows | checked against (crates/fs-cli/tests/system_command.rs) |
 |---|---|---|
