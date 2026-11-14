@@ -25,6 +25,14 @@ fn natural_fixture(enthalpy: bool) -> Fixture {
     let policy = time(&mut f);
     policy.initial_temperature = TransientInitialTemperature::Uniform(
         QtyAny::new(START_K, dims::TEMPERATURE));
+    // The enthalpy materials start at the same temperature: their chart's zero
+    // is INITIAL_K, and the project refuses an initial enthalpy that does not
+    // resolve to the declared uniform start.
+    if let Some(storage) = policy.enthalpy.as_mut() {
+        for material in &mut storage.materials {
+            material.initial_specific_enthalpy.value = CP * (START_K - INITIAL_K);
+        }
+    }
     policy.boundary_schedules[0].target = "hot".into();
     f
 }

@@ -269,6 +269,9 @@ fn live_contact_sampled_peak_adjoint_uses_scheduled_boundaries_and_zero_future_c
             })
             .collect(),
     }];
+    // The project refuses a reservoir history that leaves the declared ambient
+    // envelope; contact-pair.fsim declares 293.15 to 313.15 K.
+    f.project.envelope.as_mut().unwrap().ambient_lo.value = 290.15;
     let (plain, plain_field) = solve(&f, 110, None, false);
     let (receipt, field) = solve(&f, 111, Some(PEAK), false);
     unchanged(&plain, &plain_field, &receipt, &field);

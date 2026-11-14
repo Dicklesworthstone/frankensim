@@ -31,6 +31,14 @@ fn airflow_fixture(enthalpy: bool, mixed: bool) -> Fixture {
     let policy = setup.transient.as_mut().unwrap();
     policy.initial_temperature = TransientInitialTemperature::Uniform(
         QtyAny::new(START_K, dims::TEMPERATURE));
+    // The enthalpy materials start at the same temperature: their chart's zero
+    // is INITIAL_K, and the project refuses an initial enthalpy that does not
+    // resolve to the declared uniform start.
+    if let Some(storage) = policy.enthalpy.as_mut() {
+        for material in &mut storage.materials {
+            material.initial_specific_enthalpy.value = CP * (START_K - INITIAL_K);
+        }
+    }
     // Preserve the existing event times and 10 J input. Both exterior targets
     // now cool, so the 20/5/10 W holds are authored as a volume workload.
     policy.power_schedules = vec![TransientRegionPower {

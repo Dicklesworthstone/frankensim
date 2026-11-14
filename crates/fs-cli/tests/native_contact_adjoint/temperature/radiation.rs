@@ -54,9 +54,27 @@ fn number(row: &J, key: &str) -> f64 {
 fn fixture(vacuum: bool) -> Fixture {
     let mut f = Fixture::new(true, true);
     // This is a nominal physical-composition fixture, with one fixed ambient.
+    // Where the transported air is kept, that ambient is its inlet: the project
+    // refuses an inlet outside the envelope's ambient range, and the envelope's
+    // ambient also sets the air density. In vacuum it is the radiation
+    // reservoir's 300 K.
+    let setup = f
+        .project
+        .cooling
+        .as_ref()
+        .unwrap()
+        .conduction
+        .as_ref()
+        .unwrap();
+    let ambient = match &setup.boundaries[0].condition {
+        fs_project::ThermalBoundaryCondition::AirflowConvection {
+            inlet_temperature, ..
+        } if !vacuum => inlet_temperature.value,
+        _ => 300.0,
+    };
     let envelope = f.project.envelope.as_mut().unwrap();
-    envelope.ambient_lo.value = 300.0;
-    envelope.ambient_hi.value = 300.0;
+    envelope.ambient_lo.value = ambient;
+    envelope.ambient_hi.value = ambient;
     if vacuum {
         f.project
             .cooling
