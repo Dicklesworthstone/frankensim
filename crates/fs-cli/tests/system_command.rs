@@ -49,6 +49,219 @@ fn element(name: &str) -> String {
     format!("{{\"name\":\"{name}\"")
 }
 
+fn scene_context(body: impl FnOnce(&fs_exec::Cx<'_>, &fs_exec::CancelGate)) {
+    let gate = fs_exec::CancelGate::new_clock_free();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let key = fs_exec::StreamKey {
+            seed: 0,
+            kernel_id: 0x5953,
+            tile: 0,
+            iteration: 0,
+        };
+        let cx = fs_exec::Cx::new(
+            &gate,
+            arena,
+            key,
+            fs_exec::Budget::INFINITE,
+            fs_exec::ExecMode::Deterministic,
+        );
+        body(&cx, &gate);
+    });
+}
+
+#[test]
+fn native_scene_runs_match_cli_and_incremental_mechanical_and_phase_runs() {
+    for name in ["variable_transmission.json", "phase_change_store.json"] {
+        let path = example(name);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let mut whole = fs_cli::SystemScene::from_bytes(&bytes, &path).unwrap();
+        let mut incremental =
+            fs_cli::SystemScene::from_text(std::str::from_utf8(&bytes).unwrap(), &path).unwrap();
+        assert_eq!(whole.source_path(), std::path::Path::new(&path));
+        assert_eq!(whole.time_s(), 0.0);
+        assert_eq!(whole.steps(), 0);
+        assert!(!whole.is_finished());
+        if name == "variable_transmission.json" {
+            assert_eq!(whole.probe("transmission.effort_a").unwrap(), None);
+            assert_eq!(
+                whole.probe("rotor.angular_velocity_rad_s").unwrap(),
+                Some(1.0)
+            );
+        }
+        // All runtime input is owned after admission; caller bytes are reusable.
+        bytes.fill(b'?');
+        scene_context(|cx, _| {
+            whole.run(cx).unwrap();
+            while incremental.advance(f64::MAX, cx).unwrap() {}
+            let finished = incremental.render_json();
+            incremental.run(cx).unwrap();
+            assert!(!incremental.advance(1.0, cx).unwrap());
+            assert_eq!(incremental.render_json(), finished);
+        });
+        let (code, json, stderr) = run_binary(&["--json", "system", &path]);
+        assert_eq!(code, 0, "{name}: {stderr}");
+        assert_eq!(whole.render_json(), json, "{name}");
+        assert_eq!(incremental.render_json(), json, "{name}");
+        assert_eq!(whole.render_text(), incremental.render_text());
+        assert_eq!(whole.time_s(), whole.duration_s());
+        assert!(whole.is_finished());
+        if name == "phase_change_store.json" {
+            assert!(
+                (whole
+                    .probe("store.specific_enthalpy_j_kg")
+                    .unwrap()
+                    .unwrap()
+                    - 240_000.0)
+                    .abs()
+                    < 1e-7
+            );
+            assert!(
+                (whole.probe("store.liquid_mass_fraction").unwrap().unwrap() - 1.0).abs() < 1e-12
+            );
+            assert!(whole.ledger().energy_residual_j().abs() < 1e-7);
+        }
+    }
+}
+
+#[test]
+fn native_adaptive_scene_resumes_the_same_step_and_sample_policy_as_cli() {
+    let path = example("adaptive_oscillator.json");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut scene = fs_cli::SystemScene::from_text(&text, &path).unwrap();
+    scene_context(|cx, _| {
+        for _ in 0..3 {
+            assert!(scene.advance(f64::MAX, cx).unwrap());
+        }
+        assert!(scene.time_s() > 0.0 && scene.time_s() < scene.duration_s());
+        scene.run(cx).unwrap();
+        let finished = scene.render_json();
+        scene.run(cx).unwrap();
+        assert_eq!(scene.render_json(), finished);
+    });
+    let (code, json, stderr) = run_binary(&["--json", "system", &path]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(scene.render_json(), json);
+}
+
+#[test]
+fn native_scene_cancellation_preserves_the_initial_and_accepted_reports() {
+    for adaptive in [false, true] {
+        let text = phase_boundary_scene(0.0, 10_000.0);
+        let text = if adaptive {
+            text.replace(
+                "\"step_s\": 0.25",
+                r#""step_s": 0.25,
+              "adaptive": {"tolerances": {
+                "store.specific_enthalpy_j_kg": {"absolute": 1e-6, "relative": 0}
+              }}"#,
+            )
+        } else {
+            text
+        };
+        let path = std::path::Path::new("retained/native-scene.json");
+        let mut scene = fs_cli::SystemScene::from_text(&text, path).unwrap();
+        let initial = scene.render_json();
+        scene_context(|cx, gate| {
+            gate.request();
+            let error = scene.advance(0.25, cx).unwrap_err();
+            assert_eq!(error.exit_code, fs_cli::exit::CANCELLED);
+            assert_eq!(scene.render_json(), initial);
+        });
+        scene_context(|cx, gate| {
+            assert!(scene.advance(0.25, cx).unwrap());
+            let prefix = scene.render_json();
+            gate.request();
+            let error = scene.run(cx).unwrap_err();
+            assert_eq!(error.exit_code, fs_cli::exit::CANCELLED);
+            assert_eq!(scene.render_json(), prefix);
+        });
+        let mut reference = fs_cli::SystemScene::from_text(&text, path).unwrap();
+        scene_context(|cx, _| {
+            scene.run(cx).unwrap();
+            reference.run(cx).unwrap();
+        });
+        assert_eq!(scene.render_json(), reference.render_json());
+        assert_eq!(scene.render_json().matches("{\"time_s\":").count(), 13);
+    }
+    let text = phase_boundary_scene(239_999.0, 10_000.0);
+    let mut refused = fs_cli::SystemScene::from_text(&text, "retained/outside-chart.json").unwrap();
+    let original = refused.render_json();
+    scene_context(|cx, _| {
+        let error = refused.advance(0.25, cx).unwrap_err();
+        assert_eq!(error.exit_code, fs_cli::exit::REFUSED);
+        assert!(error.message.contains("OutsideEnthalpyDomain"), "{error}");
+        assert_eq!(refused.render_json(), original);
+    });
+}
+
+#[test]
+fn native_scene_admission_probes_and_caller_horizons_are_bounded() {
+    let oversized = vec![b' '; 1024 * 1024 + 1];
+    for bytes in [&b"{"[..], &b"\xff"[..], &oversized[..]] {
+        let error = fs_cli::SystemScene::from_bytes(bytes, "never-read.json")
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "system-input");
+        assert_eq!(error.exit_code, fs_cli::exit::INPUT);
+    }
+    let text =
+        phase_boundary_scene(0.0, 10_000.0).replace("\"duration_s\": 24.0", "\"duration_s\": 0.3");
+    for adaptive in [false, true] {
+        let text = if adaptive {
+            text.replace(
+                "\"step_s\": 0.25",
+                r#""step_s": 0.25,
+              "adaptive": {"min_step_s": 0.125, "tolerances": {
+                "store.specific_enthalpy_j_kg": {"absolute": 1e-6, "relative": 0}
+              }}"#,
+            )
+        } else {
+            text.clone()
+        };
+        let mut scene = fs_cli::SystemScene::from_text(&text, "never-read.json").unwrap();
+        for path in ["store", "missing.temperature_k", "store.unsupported"] {
+            let error = scene.probe(path).unwrap_err();
+            assert_eq!(error.code, "system-probe");
+            assert!(error.message.contains(path));
+        }
+        let initial = scene.render_json();
+        scene_context(|cx, _| {
+            for interval in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+                assert_eq!(
+                    scene.advance(interval, cx).unwrap_err().code,
+                    "system-interval"
+                );
+                assert_eq!(scene.render_json(), initial);
+            }
+            // A caller ceiling smaller than the adaptive floor is a requested
+            // physical horizon, not a failed accuracy retry.
+            assert!(scene.advance(0.03125, cx).unwrap());
+            assert_eq!(scene.time_s(), 0.03125);
+            assert_eq!(
+                scene.probe("store.specific_enthalpy_j_kg").unwrap(),
+                Some(312.5)
+            );
+            while scene.advance(f64::MAX, cx).unwrap() {
+                assert!(scene.time_s() <= 0.3);
+            }
+            assert_eq!(scene.time_s(), 0.3);
+            assert!(
+                (scene
+                    .probe("store.specific_enthalpy_j_kg")
+                    .unwrap()
+                    .unwrap()
+                    - 3000.0)
+                    .abs()
+                    < 1e-9
+            );
+        });
+        assert!(scene.is_finished());
+        assert_eq!(scene.render_json().matches("{\"time_s\":").count(), 2);
+        assert!(scene.ledger().energy_residual_j().abs() < 1e-9);
+    }
+}
+
 #[test]
 fn the_driven_oscillator_matches_the_monolithic_midpoint_rule() {
     let (code, json, stderr) = run_binary(&["--json", "system", &example("driven_oscillator.json")]);

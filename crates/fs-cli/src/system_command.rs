@@ -10,7 +10,7 @@
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::io::Read as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use std::rc::Rc;
 
@@ -358,58 +358,259 @@ pub fn run(args: &[OsString], json: bool) -> CommandOutput {
         return refusal(exit::USAGE, "system-usage", HELP, json);
     }
     let path = Path::new(&args[0]);
-    let mut device = match load(path) {
-        Ok(device) => device,
-        Err(Refusal::Input(message)) => return refusal(exit::INPUT, "system-input", &message, json),
-        Err(Refusal::Admission(message)) => {
-            return refusal(exit::REFUSED, "system-admission", &message, json);
-        }
+    let text = match read(path) {
+        Ok(text) => text,
+        Err(message) => return refusal(exit::INPUT, "system-input", &message, json),
     };
-    match device.run() {
+    let mut scene = match SystemScene::from_text(&text, path) {
+        Ok(scene) => scene,
+        Err(error) => return refusal(error.exit_code, error.code, &error.message, json),
+    };
+    let gate = CancelGate::new();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    let result = pool.scope(|arena| {
+        let key = StreamKey {
+            seed: 0,
+            kernel_id: 0x5953,
+            tile: 0,
+            iteration: 0,
+        };
+        let cx = Cx::new(&gate, arena, key, Budget::INFINITE, ExecMode::Deterministic);
+        scene.run(&cx)
+    });
+    match result {
         Ok(()) => CommandOutput {
             exit_code: exit::SUCCESS,
             stdout: if json {
-                device.render_json(path)
+                scene.render_json()
             } else {
-                device.render_text(path)
+                scene.render_text()
             },
             stderr: String::new(),
         },
-        Err(RunError::Step(error)) => {
-            let code = if matches!(error, SystemError::Cancelled) {
-                exit::CANCELLED
-            } else {
-                exit::REFUSED
-            };
-            let message = format!(
-                "step {} at t = {} s: {error}",
-                device.system.steps() + 1,
-                device.system.time_s()
-            );
-            refusal(code, "system-step", &message, json)
+        Err(error) => refusal(error.exit_code, error.code, &error.message, json),
+    }
+}
+
+/// A scene admission, probe or execution refusal, using the CLI's diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemSceneError {
+    /// Stable process class, including [`exit::CANCELLED`] for cancellation.
+    pub exit_code: u8,
+    /// Stable diagnostic code; no output is printed by the library API.
+    pub code: &'static str,
+    /// Named input or execution detail in SI units where applicable.
+    pub message: String,
+}
+
+impl std::fmt::Display for SystemSceneError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for SystemSceneError {}
+
+impl From<Refusal> for SystemSceneError {
+    fn from(error: Refusal) -> Self {
+        let (exit_code, code, message) = match error {
+            Refusal::Input(message) => (exit::INPUT, "system-input", message),
+            Refusal::Admission(message) => (exit::REFUSED, "system-admission", message),
+        };
+        Self {
+            exit_code,
+            code,
+            message,
         }
-        Err(RunError::Adaptive(error)) => {
-            let code = if matches!(error, AdaptiveError::Step(SystemError::Cancelled)) {
-                exit::CANCELLED
-            } else {
-                exit::REFUSED
-            };
-            let message = format!(
-                "step {} at t = {} s: {error}",
-                device.system.steps() + 1,
-                device.system.time_s()
-            );
-            refusal(code, "system-adaptive", &message, json)
+    }
+}
+
+/// An admitted native scene driven by the same kernel path as `system`.
+///
+/// Construction consumes a bounded snapshot of the scene's UTF-8 contents;
+/// the scene file is never reopened. `source_path` is retained as the source
+/// label and base location for relative assets. This v0 runtime is not the
+/// canonical assembly schema, a durable checkpoint or a browser binding.
+/// The host supplies the cancellation gate and arena through `Cx`; this
+/// facade adds no wall-clock or memory governor beyond the existing owners.
+pub struct SystemScene {
+    device: Device,
+    source_path: PathBuf,
+}
+
+impl SystemScene {
+    /// Admit at most 1 MiB of UTF-8 scene data without reading its source path.
+    pub fn from_bytes(
+        bytes: &[u8],
+        source_path: impl AsRef<Path>,
+    ) -> Result<Self, SystemSceneError> {
+        if bytes.len() as u64 > MAX_SCENE_BYTES {
+            return Err(Refusal::Input(format!("scene: at most {MAX_SCENE_BYTES} bytes")).into());
         }
-        Err(RunError::TooManySteps) => {
-            let message = format!(
-                "the kernel took {} steps and reached t = {} s of {} s; components keep \
-                 shortening the step",
-                device.system.steps(),
-                device.system.time_s(),
-                device.duration_s
-            );
-            refusal(exit::REFUSED, "system-steps", &message, json)
+        let text = std::str::from_utf8(bytes).map_err(|error| Refusal::Input(error.to_string()))?;
+        Self::from_text(text, source_path)
+    }
+
+    /// Admit a retained text snapshot with the same bounds and rules as the CLI.
+    pub fn from_text(text: &str, source_path: impl AsRef<Path>) -> Result<Self, SystemSceneError> {
+        if text.len() as u64 > MAX_SCENE_BYTES {
+            return Err(Refusal::Input(format!("scene: at most {MAX_SCENE_BYTES} bytes")).into());
+        }
+        Ok(Self {
+            device: load_text(text)?,
+            source_path: source_path.as_ref().to_owned(),
+        })
+    }
+
+    /// The caller's source label and location; admission does not canonicalize it.
+    #[must_use]
+    pub fn source_path(&self) -> &Path {
+        &self.source_path
+    }
+
+    /// Accepted physical time, never the time of an unpublished trial.
+    #[must_use]
+    pub fn time_s(&self) -> f64 {
+        self.device.system.time_s()
+    }
+
+    /// The scene's declared final horizon.
+    #[must_use]
+    pub fn duration_s(&self) -> f64 {
+        self.device.duration_s
+    }
+
+    /// Accepted kernel steps, including refinements accepted by the adaptive driver.
+    #[must_use]
+    pub fn steps(&self) -> u64 {
+        self.device.system.steps()
+    }
+
+    /// Whether the existing final-horizon rounding allowance has been reached.
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.device.is_finished()
+    }
+
+    /// Read the accepted energy, entropy and stream-inventory accounts.
+    #[must_use]
+    pub fn ledger(&self) -> &Ledger {
+        self.device.system.ledger()
+    }
+
+    /// Publish at most one driver interval, capped by the caller, scene and horizon.
+    ///
+    /// Returns true after acceptance and false when already finished. The
+    /// caller's ceiling must be positive and finite. Adaptive retries and
+    /// component events may shorten it further. A refusal leaves the accepted
+    /// state, ledger, samples and driver statistics unchanged.
+    pub fn advance(&mut self, max_interval_s: f64, cx: &Cx<'_>) -> Result<bool, SystemSceneError> {
+        if !max_interval_s.is_finite() || max_interval_s <= 0.0 {
+            return Err(SystemSceneError {
+                exit_code: exit::INPUT,
+                code: "system-interval",
+                message: "maximum interval [s] must be positive and finite".into(),
+            });
+        }
+        self.device
+            .advance(max_interval_s, cx)
+            .map_err(|error| self.run_error(error))
+    }
+
+    /// Continue from the accepted state to the declared horizon using the caller's context.
+    pub fn run(&mut self, cx: &Cx<'_>) -> Result<(), SystemSceneError> {
+        while self.advance(self.device.step_s, cx)? {}
+        Ok(())
+    }
+
+    /// Read one report coordinate, e.g. `store.liquid_mass_fraction`.
+    ///
+    /// Unknown or ambiguous names refuse. `None` is the report's `null`:
+    /// a stateless last-step output has no value before the first step.
+    pub fn probe(&self, path: &str) -> Result<Option<f64>, SystemSceneError> {
+        let refused = |reason| SystemSceneError {
+            exit_code: exit::INPUT,
+            code: "system-probe",
+            message: format!("probe {path:?}: {reason}"),
+        };
+        let mut found = None;
+        for element in &self.device.elements {
+            let Some(field) = path
+                .strip_prefix(element.name.as_str())
+                .and_then(|tail| tail.strip_prefix('.'))
+            else {
+                continue;
+            };
+            if let Some((_, value)) = self
+                .device
+                .values(element)
+                .into_iter()
+                .find(|(name, _)| name == field)
+            {
+                if found.is_some() {
+                    return Err(refused("ambiguous report coordinate"));
+                }
+                found = Some(value.is_finite().then_some(value));
+            }
+        }
+        found.ok_or_else(|| refused("unknown report coordinate"))
+    }
+
+    /// Project the existing JSON report, including accepted samples and ledger accounts.
+    #[must_use]
+    pub fn render_json(&self) -> String {
+        self.device.render_json(&self.source_path)
+    }
+
+    /// Project the existing human-readable report from the same accepted state.
+    #[must_use]
+    pub fn render_text(&self) -> String {
+        self.device.render_text(&self.source_path)
+    }
+
+    fn run_error(&self, error: RunError) -> SystemSceneError {
+        let (exit_code, code, message) = match error {
+            RunError::Step(error) => (
+                if matches!(error, SystemError::Cancelled) {
+                    exit::CANCELLED
+                } else {
+                    exit::REFUSED
+                },
+                "system-step",
+                format!(
+                    "step {} at t = {} s: {error}",
+                    self.steps() + 1,
+                    self.time_s()
+                ),
+            ),
+            RunError::Adaptive(error) => (
+                if matches!(error, AdaptiveError::Step(SystemError::Cancelled)) {
+                    exit::CANCELLED
+                } else {
+                    exit::REFUSED
+                },
+                "system-adaptive",
+                format!(
+                    "step {} at t = {} s: {error}",
+                    self.steps() + 1,
+                    self.time_s()
+                ),
+            ),
+            RunError::TooManySteps => (
+                exit::REFUSED,
+                "system-steps",
+                format!(
+                    "the kernel took {} steps and reached t = {} s of {} s; components keep shortening the step",
+                    self.steps(),
+                    self.time_s(),
+                    self.duration_s(),
+                ),
+            ),
+        };
+        SystemSceneError {
+            exit_code,
+            code,
+            message,
         }
     }
 }
@@ -657,6 +858,7 @@ struct Device {
     step_s: f64,
     sample_every_s: Option<f64>,
     samples: Vec<(f64, Vec<(String, f64)>)>,
+    next_sample_s: f64,
     iterations: u64,
     shortenings: u64,
     adaptive: Option<AdaptiveSettings>,
@@ -2620,9 +2822,8 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
     })
 }
 
-fn load(path: &Path) -> Result<Device, Refusal> {
-    let text = read(path)?;
-    let root = J::parse(&text).map_err(|e| e.to_string())?;
+fn load_text(text: &str) -> Result<Device, Refusal> {
+    let root = J::parse(text).map_err(|e| e.to_string())?;
     fields(
         &root,
         &[
@@ -2719,7 +2920,7 @@ fn load(path: &Path) -> Result<Device, Refusal> {
     }
     let adaptive = root.get("adaptive")
         .map(|definition| adaptive(definition, &elements, step_s)).transpose()?;
-    Ok(Device {
+    let mut device = Device {
         system,
         elements,
         connections: connections.len(),
@@ -2727,10 +2928,15 @@ fn load(path: &Path) -> Result<Device, Refusal> {
         step_s,
         sample_every_s,
         samples: Vec::new(),
+        next_sample_s: sample_every_s.unwrap_or(f64::INFINITY),
         iterations: 0,
         shortenings: 0,
         adaptive,
-    })
+    };
+    // The initial sample belongs to admission, so a cancelled first advance
+    // does not mutate the accepted report or duplicate its initial row.
+    device.sample();
+    Ok(device)
 }
 
 impl Device {
@@ -2807,63 +3013,63 @@ impl Device {
         description
     }
 
-    fn run(&mut self) -> Result<(), RunError> {
-        let gate = CancelGate::new();
-        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
-        pool.scope(|arena| {
-            let key = StreamKey {
-                seed: 0,
-                kernel_id: 0x5953,
-                tile: 0,
-                iteration: 0,
-            };
-            let cx = Cx::new(&gate, arena, key, Budget::INFINITE, ExecMode::Deterministic);
+    fn is_finished(&self) -> bool {
+        self.duration_s - self.system.time_s() <= 1.0e-12 * self.duration_s
+    }
+
+    fn advance(&mut self, max_interval_s: f64, cx: &Cx<'_>) -> Result<bool, RunError> {
+        if self.is_finished() {
+            return Ok(false);
+        }
+        cx.checkpoint()
+            .map_err(|_| RunError::Step(SystemError::Cancelled))?;
+        if self.system.steps() as f64 >= 2.0 * MAX_STEPS {
+            return Err(RunError::TooManySteps);
+        }
+        let remaining = (self.duration_s - self.system.time_s()).min(max_interval_s);
+        let time_s = if let Some(adaptive) = &mut self.adaptive {
+            let proposed = adaptive.suggested_dt_s.min(self.step_s).min(remaining);
+            let mut config = adaptive.config;
+            // A caller-imposed horizon is not an accuracy retry. Its own
+            // retries must still respect this smaller floor.
+            config.min_step_s = config.min_step_s.min(remaining);
+            let report = self
+                .system
+                .step_adaptive(
+                    proposed,
+                    config,
+                    |initial, coarse, refined| adaptive.metric(initial, coarse, refined),
+                    cx,
+                )
+                .map_err(RunError::Adaptive)?;
+            self.iterations += report.iterations;
+            self.shortenings += report.shortenings;
+            adaptive.record(&report);
+            report.time_s
+        } else {
+            let report = self
+                .system
+                .step(self.step_s.min(remaining), cx)
+                .map_err(RunError::Step)?;
+            self.iterations += u64::from(report.iterations);
+            self.shortenings += u64::from(report.shortenings);
+            report.time_s
+        };
+        let slack = 1.0e-12 * self.duration_s;
+        if time_s >= self.next_sample_s - slack {
             self.sample();
-            let mut next_sample = self.sample_every_s.unwrap_or(f64::INFINITY);
-            // A step shorter than this would only round the end time.
-            let slack = 1.0e-12 * self.duration_s;
-            while self.duration_s - self.system.time_s() > slack {
-                if self.system.steps() as f64 >= 2.0 * MAX_STEPS {
-                    return Err(RunError::TooManySteps);
-                }
-                let remaining = self.duration_s - self.system.time_s();
-                let time_s = if let Some(adaptive) = &mut self.adaptive {
-                    let proposed = adaptive.suggested_dt_s.min(self.step_s).min(remaining);
-                    let mut config = adaptive.config;
-                    // A caller-imposed final horizon is not an accuracy retry.
-                    // Its own retries must still respect this smaller floor.
-                    config.min_step_s = config.min_step_s.min(remaining);
-                    let report = self.system.step_adaptive(
-                        proposed, config,
-                        |initial, coarse, refined| adaptive.metric(initial, coarse, refined),
-                        &cx,
-                    ).map_err(RunError::Adaptive)?;
-                    self.iterations += report.iterations;
-                    self.shortenings += report.shortenings;
-                    adaptive.record(&report);
-                    report.time_s
-                } else {
-                    let report = self.system.step(self.step_s.min(remaining), &cx)
-                        .map_err(RunError::Step)?;
-                    self.iterations += u64::from(report.iterations);
-                    self.shortenings += u64::from(report.shortenings);
-                    report.time_s
-                };
-                if time_s >= next_sample - slack {
-                    self.sample();
-                    let every = self.sample_every_s.unwrap_or(f64::INFINITY);
-                    while next_sample <= time_s + slack {
-                        next_sample += every;
-                    }
-                }
+            let every = self.sample_every_s.unwrap_or(f64::INFINITY);
+            while self.next_sample_s <= time_s + slack {
+                self.next_sample_s += every;
             }
-            if self.sample_every_s.is_some()
-                && self.samples.last().is_none_or(|(t, _)| *t < self.system.time_s())
-            {
-                self.sample();
-            }
-            Ok(())
-        })
+        }
+        if self.is_finished()
+            && self.sample_every_s.is_some()
+            && self.samples.last().is_none_or(|(t, _)| *t < time_s)
+        {
+            self.sample();
+        }
+        Ok(true)
     }
 
     fn sample(&mut self) {

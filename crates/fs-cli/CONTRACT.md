@@ -765,6 +765,43 @@ binary, including `system`, `cooling-cht`, `electrothermal`, `cooling-network`,
 
 ### Devices described as data (`system <scene.json>`)
 
+`fs_cli::SystemScene` exposes the same scene lowering, step driver and report
+projection to native callers. `from_text` and `from_bytes` admit a retained
+UTF-8 snapshot under the existing 1 MiB scene limit and keep an explicit
+`source_path` as its label and location. They do not reopen the scene file.
+The input format remains `frankensim.system.v0`; this is not canonical
+assembly lowering, durable execution, a serialized checkpoint or a browser
+binding.
+
+The caller supplies `Cx` to `advance(max_interval_s, cx)` and `run(cx)`.
+`advance` accepts at most one driver interval, capped by the caller's finite
+positive interval, the authored step and remaining duration. It returns true
+only after acceptance, or false at the existing final-horizon tolerance.
+Adaptive retries and component events retain their existing kernel owners.
+A caller interval below the adaptive floor is a requested horizon, so its
+own accuracy retries use that smaller floor. The facade adds no separate
+integrator, wall-clock budget or memory governor. `run` repeatedly calls the
+same `advance` path, continuing any accepted prefix.
+
+Initial samples are retained once during admission; the next sample time
+persists across calls, and the final sample is published once at completion.
+Repeated `run` or valid `advance` after completion changes nothing. A
+cancelled or refused advance publishes no state, ledger, driver statistics
+or sample change. Reports remain available for the accepted prefix, including
+after a refusal. The CLI supplies its historical deterministic context to
+this same facade, preserving its existing final output.
+
+`time_s`, `duration_s`, `steps`, `is_finished`, and read-only `ledger` expose
+accepted progress. `probe("element.coordinate")` uses the existing report
+coordinates, including nested network fields; unknown or ambiguous names
+refuse, while `None` matches a report's `null` for a stateless output before
+the first step. `render_json` and `render_text` project the original report
+formats. `SystemSceneError` retains the diagnostic code, message and exit
+class without printing; cancellation has class 130. Native parity tests in
+`tests/system_command.rs` compare whole and incremental mechanical, phase
+and adaptive runs to the real CLI, exercise caller-owned cancellation and
+source-domain refusal, and check input, probe and final-horizon limits.
+
 `slider` lowers to `fs_system::elements::Slider` through the kernel's
 `add_on_line` tier, with positive constant `normal_n`, `static_coefficient`
 and `kinetic_coefficient` (kinetic no greater than static). The scene's

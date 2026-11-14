@@ -51,6 +51,7 @@ pub use solve::{
     SolveRunId, SolveRunStatus, SolveStage, StageSummary, resume_solve,
     resume_solve_with_cancellation_plan, run_solve, run_solve_with_cancellation_plan,
 };
+pub use system_command::{SystemScene, SystemSceneError};
 
 /// Maximum project source accepted by the CLI.
 pub const MAX_PROJECT_BYTES: u64 = 16 * 1024 * 1024;
