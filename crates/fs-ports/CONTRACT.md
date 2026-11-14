@@ -253,9 +253,13 @@ Components poll `Cx::checkpoint` and return their own cancellation error.
 `check_port_tangent` are the checks every implementation runs. G0 tests in
 `tests/component_reference.rs`: a spring-mass-damper with a mechanical and a
 heat port passes; 20,000 driven steps close energy to 1e-11 relative; a heat
-leak, a read of the candidate slot and a wrong VJP sign each fail the law they
-break; cancellation returns the owner's error; an audit given a port list
-longer or shorter than its layout is refused. `check_load_line` checks the
+leak, a read of the candidate slot, a count kept in a `Cell` through `&self`
+that moves an output by units in its last place, and a wrong VJP sign each
+fail the law they break; a cache kept in a `Cell` under the bits of the
+accepted state, the step and the force, which `propose` never shows, passes
+and observes what the reference observes; cancellation returns the owner's
+error; an audit given a port list longer or shorter than its layout is
+refused. `check_load_line` checks the
 load-line tier at one point: the line's ports, the size of the matrix, purity
 (including the stale candidate slot), the step audit at the flows on the line,
 `admit`, and that a zero matrix gives `propose` to the bit. G0 tests in
@@ -271,8 +275,11 @@ component's own relation; only the component can state it.
 **No claim.** v0 has no entropy on stream ports and no multistage port
 values. The kernel cannot check that a component's `identity_words` name every parameter of its physics; only the component knows them. The kit
 does not yet check `StageResidual`, unit rescaling, time reversal or temporal
-order. A passing conformance check says a component keeps its own accounts; it
-says nothing about the accuracy of its physics.
+order. The kit proposes twice with equal arguments, so it sees a change made
+through interior mutability only where that change alters what a call
+returns; it cannot prove that a cache is keyed by the accepted state, which
+stays the component's claim. A passing conformance check says a component
+keeps its own accounts; it says nothing about the accuracy of its physics.
 
 The existing fs-couple/tests/couple.rs battery continues to exercise this owner
 through its public reexports. fs-couple/tests/port_identity.rs pins type and

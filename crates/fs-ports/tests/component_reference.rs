@@ -4,9 +4,12 @@
 //! heat port, stepped by the implicit midpoint rule. For a linear system that
 //! rule balances energy exactly: the work of the held force on the mean
 //! velocity equals the stored change plus the damper loss, and the loss
-//! leaves through the heat port. Three deliberately broken variants each fail
-//! the law they break.
+//! leaves through the heat port. Four deliberately broken variants each fail
+//! the law they break. A fifth keeps a cache in a `Cell`, keyed by the bits of
+//! what it is proposed from, that `propose` never shows; it passes, as a cache
+//! may.
 
+use core::cell::Cell;
 use core::num::NonZeroUsize;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
@@ -50,7 +53,21 @@ enum Fault {
     ReadsCandidate,
     /// Returns the VJP with the wrong sign.
     VjpSign,
+    /// Counts its proposals in a `Cell` through `&self`, and moves the mean
+    /// velocity it returns by that many units in its last place. It stands
+    /// for anything a component carries between calls that reaches what a
+    /// call returns, such as a warm start.
+    CountsIntoOutput,
+    /// Not a fault: keeps, in a `Cell` through `&self`, the mean velocity of
+    /// its last proposal under the bits of the accepted state, the step and
+    /// the force, and returns it when all of them repeat. What it returns is
+    /// what it would have computed, so `propose` never shows the cache.
+    CachesItsLastMean,
 }
+
+/// The bits a cached mean velocity is keyed by: the accepted state's
+/// position and velocity, the step and the force.
+type MeanKey = [u64; 4];
 
 #[derive(Debug)]
 struct SpringMassDamper {
@@ -59,6 +76,12 @@ struct SpringMassDamper {
     damping_n_s_m: f64,
     ports: [PortSpec; 2],
     fault: Fault,
+    /// Proposals made, kept only by `CountsIntoOutput`.
+    proposals: Cell<u32>,
+    /// The last mean velocity and its key, kept only by `CachesItsLastMean`.
+    cache: Cell<Option<(MeanKey, f64)>>,
+    /// Proposals that took their mean velocity from `cache`.
+    cache_hits: Cell<u32>,
 }
 
 impl SpringMassDamper {
@@ -78,7 +101,30 @@ impl SpringMassDamper {
             damping_n_s_m: 1.5,
             ports: [drive, heat],
             fault,
+            proposals: Cell::new(0),
+            cache: Cell::new(None),
+            cache_hits: Cell::new(0),
         }
+    }
+
+    /// `mean_velocity`'s mean, taken from the cache when the accepted state,
+    /// the step and the force are those it was kept for, bit for bit.
+    fn cached_mean(&self, old: &Oscillator, dt_s: f64, force_n: f64) -> f64 {
+        let key = [
+            old.position_m.to_bits(),
+            old.velocity_m_s.to_bits(),
+            dt_s.to_bits(),
+            force_n.to_bits(),
+        ];
+        if let Some((kept, mean)) = self.cache.get()
+            && kept == key
+        {
+            self.cache_hits.set(self.cache_hits.get() + 1);
+            return mean;
+        }
+        let (mean, _) = self.mean_velocity(old, dt_s, force_n);
+        self.cache.set(Some((key, mean)));
+        mean
     }
 
     /// Mean velocity over the step and its derivative with respect to force.
@@ -120,7 +166,11 @@ impl Component for SpringMassDamper {
         cx.checkpoint()?;
         let (force_n, temperature_k) = (inputs[0], inputs[1]);
         let stale_position = new.position_m;
-        let (mean, _) = self.mean_velocity(old, dt_s, force_n);
+        let mean = if self.fault == Fault::CachesItsLastMean {
+            self.cached_mean(old, dt_s, force_n)
+        } else {
+            self.mean_velocity(old, dt_s, force_n).0
+        };
         let mid_position = old.position_m + 0.5 * dt_s * mean;
         new.position_m = old.position_m + dt_s * mean;
         new.velocity_m_s = 2.0 * mean - old.velocity_m_s;
@@ -134,6 +184,12 @@ impl Component for SpringMassDamper {
             loss_w
         };
         outputs[0] = mean;
+        if self.fault == Fault::CountsIntoOutput {
+            let count = self.proposals.get() + 1;
+            self.proposals.set(count);
+            // `count` units in the last place of a finite, nonzero mean.
+            outputs[0] = f64::from_bits(mean.to_bits() + u64::from(count));
+        }
         outputs[1] = -heat_out_w;
         // Stored change without cancellation: m v_mean dv + k x_mid dx.
         let stored_change_j = self.mass_kg * mean * (new.velocity_m_s - old.velocity_m_s)
@@ -303,6 +359,46 @@ fn reading_the_candidate_slot_fails_purity() {
         panic!("expected a law failure, got {failure}");
     };
     assert_eq!(law, "propose reads nothing from the candidate slot");
+}
+
+#[test]
+fn a_component_that_mutates_itself_through_a_cell_fails_purity() {
+    let gate = CancelGate::new_clock_free();
+    let component = SpringMassDamper::new(Fault::CountsIntoOutput);
+    let failure = with_cx(&gate, |cx| check_component(&component, &case(), cx))
+        .expect_err("a count that reaches the output");
+    let Failure::Law { law, detail } = failure else {
+        panic!("expected a law failure, got {failure}");
+    };
+    let proposals = component.proposals.get();
+    eprintln!("refused after {proposals} proposals: {law} ({detail})");
+    assert_eq!(
+        law,
+        "propose is pure: outputs are bitwise equal on repetition"
+    );
+    // The kit refuses at its repetition: the first two proposals.
+    assert_eq!(proposals, 2);
+}
+
+#[test]
+fn an_interior_cache_that_propose_never_shows_passes_the_kit() {
+    let gate = CancelGate::new_clock_free();
+    let component = SpringMassDamper::new(Fault::CachesItsLastMean);
+    let observed = with_cx(&gate, |cx| check_component(&component, &case(), cx))
+        .expect("a cache that propose never shows conforms");
+    let hits = component.cache_hits.get();
+    let reference = SpringMassDamper::new(Fault::None);
+    let expected = with_cx(&gate, |cx| check_component(&reference, &case(), cx)).expect("conforms");
+    // Debug prints each float as its shortest round trip, so equal text is
+    // equal bits for every value here (none is NaN).
+    let (observed, expected) = (format!("{observed:?}"), format!("{expected:?}"));
+    eprintln!(
+        "cache hits {hits}; observed equals the reference's text: {}",
+        observed == expected
+    );
+    // The kit's repeated proposal read the cache, and saw nothing of it.
+    assert!(hits >= 1, "the repeated proposal took the kept mean");
+    assert_eq!(observed, expected);
 }
 
 #[test]
