@@ -6,6 +6,7 @@ use core::ops::Range;
 use std::rc::Rc;
 
 use fs_exec::Cx;
+use fs_exec::solver::snapshot_v2::SnapshotV2Error;
 use fs_ports::StableId;
 use fs_ports::component::{
     CarriedStepAudit, Carrier, Class, Component, ContractViolation, EndOfStep, LoadLine,
@@ -22,6 +23,9 @@ use crate::wiring::{
 };
 
 mod line;
+mod snapshot;
+
+pub use snapshot::SystemImage;
 
 use line::Line;
 
@@ -398,6 +402,29 @@ pub enum CheckpointError {
         /// The type-erasure error, recoverable with `downcast_ref`.
         source: OwnerError,
     },
+    /// A durable snapshot, or the context it is sealed under, is of another
+    /// problem than this system's ([`System::problem_id`]): another graph,
+    /// or a member with another codec or other parameters. Nothing was
+    /// sealed or resumed.
+    ForeignProblem,
+    /// A component declares no state codec, so the system cannot be written
+    /// to or resumed from a durable snapshot. Nothing was sealed or resumed.
+    NoCodec {
+        /// Component name.
+        node: String,
+    },
+    /// A component refused the words of its state in a durable snapshot.
+    /// Nothing was resumed.
+    Decode {
+        /// Component name.
+        node: String,
+    },
+    /// A durable snapshot of this problem does not have this system's
+    /// shape: its member, wire or ledger counts or its members' codec
+    /// identities differ. Nothing was resumed.
+    Image,
+    /// The snapshot envelope refused to seal. Nothing was sealed.
+    Envelope(SnapshotV2Error),
 }
 
 impl fmt::Display for CheckpointError {
@@ -410,6 +437,13 @@ impl fmt::Display for CheckpointError {
                     "component `{node}` cannot clone its accepted state: {source:?}"
                 )
             }
+            Self::ForeignProblem => write!(f, "snapshot is of another problem"),
+            Self::NoCodec { node } => write!(f, "component `{node}` has no state codec"),
+            Self::Decode { node } => {
+                write!(f, "component `{node}` refused the words of its state")
+            }
+            Self::Image => write!(f, "snapshot does not have this system's shape"),
+            Self::Envelope(error) => write!(f, "snapshot envelope refused: {error}"),
         }
     }
 }

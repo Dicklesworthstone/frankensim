@@ -152,6 +152,15 @@ is unspecified. It is pure: equal arguments give bitwise-equal results and
 nothing else changes. `admit` is the last refusal, after every partner proposed.
 A component may answer `Proposal::Shorten { dt_s }` instead of stepping.
 
+**Snapshot codec.** A component may declare a codec of its state (bead
+`frankensim-rc-1109-root-3gc12.5.4`):
+- `Component::STATE_CHARTER`, an fs-exec `StateIdentityCharterV2`, `None` by default.
+- `encode_state(state, words)`, which appends the state as plain 64-bit words (an `f64` as its bits). It returns `false` by default, for no codec.
+- `decode_state(words)`, which returns the state those exact words hold, or `None` to refuse them.
+- `identity_words(words)`, which appends the bits of the parameters that fix the component's physics. It appends nothing by default.
+
+All four are defaulted, so a component that declares none is unchanged. A system is written to a durable snapshot only when every member has a codec. It refuses a snapshot whose members have other charter identities or other identity words (`crates/fs-system/CONTRACT.md`). `cargo run -p xtask -- check-state-charters` scans every charter literal for collisions.
+
 **Port values.** One representative pair per port and step. The side the
 component receives is held over the step; the side it returns is the step
 average of the conjugate. Flow and heat rate are positive into the owner.
@@ -259,8 +268,8 @@ a zero matrix fails that law, a line on a heat port and a matrix of the wrong
 size are refused. The kit cannot check that the efforts satisfy the
 component's own relation; only the component can state it.
 
-**No claim.** v0 has no entropy on stream ports, no multistage port values
-and no snapshot identity. The kit
+**No claim.** v0 has no entropy on stream ports and no multistage port
+values. The kernel cannot check that a component's `identity_words` name every parameter of its physics; only the component knows them. The kit
 does not yet check `StageResidual`, unit rescaling, time reversal or temporal
 order. A passing conformance check says a component keeps its own accounts; it
 says nothing about the accuracy of its physics.

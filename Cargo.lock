@@ -2977,6 +2977,7 @@ name = "fs-system"
 version = "0.0.1"
 dependencies = [
  "fs-alloc",
+ "fs-blake3",
  "fs-exec",
  "fs-mbd",
  "fs-nlmodal",

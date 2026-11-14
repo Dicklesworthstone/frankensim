@@ -63,6 +63,6 @@ pub use erased::{LineNotOffered, OwnerError, StateTypeMismatch, TangentNotOffere
 pub use ledger::Ledger;
 pub use system::{
     BoundaryFn, Checkpoint, CheckpointError, Phase, SolveConfig, StepReport, System, SystemBuilder,
-    SystemError, heat_sink,
+    SystemError, SystemImage, heat_sink,
 };
 pub use wiring::{AdmissionError, HeatSink, NodeId, PortRef, RouteTemperature};

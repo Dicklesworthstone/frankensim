@@ -177,6 +177,58 @@ physics owners below fs-couple can be composed without it.
   or cancelled step still describes the last accepted state. Boundary
   closures and their captured external data are not copied: deterministic
   replay requires identical boundary responses and pure component proposals.
+- Durable snapshots (bead `.5.4`, item 4):
+  `System::snapshot(&context, limits, cancellation) -> Result<SealedSnapshotV2, CheckpointError>`
+  seals the accepted generation in fs-exec's v2 envelope.
+  `System::resume(&opened)` makes an `OpenedSnapshotV2<SystemImage>` the
+  accepted generation of a system, in the process that sealed it or in another.
+  - `SystemImage` is the envelope's state type. It is one state family of this
+    crate; its charter's identities are pinned and checked by every seal.
+  - Per member, the image holds the identities of the member's codec charter
+    and the plain words of its state (`Component::encode_state`). It also
+    holds the accepted wire values, the compensated clock, the step count, the
+    solve configuration and every number of the ledger. Names are not in it;
+    they come from the resuming system.
+  - The context names the problem. `System::problem_id()` hashes:
+    - the `Debug` text of the description the system was sealed from: names,
+      ports, classes and tiers, load lines, connections, driven ports and heat
+      sinks;
+    - each member's charter identities;
+    - the words of each member's `Component::identity_words`, its parameters.
+
+    Every float in a description is admitted finite and printed exactly by
+    the derived `Debug`, so the text tells descriptions apart. A toolchain
+    that prints one differently gives another identity: it refuses older
+    snapshots and never makes two descriptions one. Boundary functions are
+    not in the identity, so a resumed run follows the same trajectory only
+    under the same boundary responses.
+  - `snapshot` refuses a context of another problem (`ForeignProblem`) and a
+    member without a codec (`NoCodec`).
+  - `resume` decodes every member and the ledger before it changes anything.
+    It refuses:
+    - a snapshot of another problem (`ForeignProblem`): another graph, another
+      member charter, or a parameter one ulp away;
+    - a member that refuses its words (`Decode`);
+    - an image of another shape (`Image`).
+  - One opened snapshot resumes into several systems, which then go on alone
+    (a fork). It also rewinds the system that wrote it.
+  - As after `restore`, the allowance of the last step is zero until a step
+    is taken.
+  - Opening belongs to fs-exec. In the process that sealed, use the root it
+    kept (`unseal_v2_expected`). In another process, use an admitted
+    authority over the envelope's subject (`unseal_v2_authorized`), with the
+    caller's verifier and policy.
+  - `fs-blake3` is a normal `[dependencies]` entry of this crate, not a
+    dev-dependency: `problem_id` hashes with it.
+  - Codecs of the kernel's elements:
+    - `GasVolume`: `3 + carried` words. A decode runs the volume's contents
+      check. Identity: gas constant, ratio, carried count.
+    - `Restriction`: no words. Identity: conductance, carried count, and its
+      gas's identity if it has one.
+
+    No other element has a codec, and a system holding one cannot be
+    sealed. `ledger::Sum::to_words` and `from_words` give a sum's two words
+    exactly, for the codec of a state that holds one.
 - `Ledger`: per component (port energy in, stored change, dissipation,
   numerical loss, entropy generated, accepted balance defect), per connection
   (energy defect, entropy generated), per boundary (energy and entropy in), per
@@ -1049,6 +1101,28 @@ graph, source and kernel clocks, interface warm starts, every ledger field
 and solver configuration; restore after failed or cancelled trials; and
 foreign-system refusal without mutation. Checkpoints are in memory and bind
 to one sealed system's allocation identity; they are not durable snapshots.
+
+`tests/snapshots.rs` (bead `.5.4`, item 4) seals two graphs and drops the
+sealing system: the device of `tests/checkpoints.rs` at step 73 (a sine force
+whose account holds a clock, a moving support, damper heat routed to a body,
+a recorder whose words grow with the run, and a window), and the two vessels
+of `tests/elements.rs` with their restriction at step 250. A child process
+of the same test binary receives only the envelope bytes (3,328 and 2,632
+bytes, measured on ts2 2026-11-14) and the subject id the sealer kept, on its
+stdin. The child first refuses a wrong subject and a flipped byte with
+nothing changed. It then shows, to the bit, what the uninterrupted run shows
+after the split and after each of the 184 and 350 later steps: time, step
+count, every state, the last values on each port, and the ledger. In one
+process, one snapshot resumes into two systems that then go on alone, and
+it rewinds the system that wrote it. These refusals each leave the system
+showing what it showed before: another graph, a spring stiffer by one ulp, a
+member under another charter, a member without a codec (which also cannot
+be sealed: `NoCodec`), a last member whose decode refuses another width
+(`Decode`, after the members before it decoded), and a context of another
+problem at sealing. Truncated bytes, and a byte flipped at the start, middle
+or end, never open. A gas constant one ulp lower or a
+conductance one ulp higher is another problem. The image charter derives its
+pinned ids.
 
 G0, `tests/system_g0.rs`, on one-port elements defined in the test:
 
@@ -2552,9 +2626,11 @@ solved together. Nothing in the module is deleted.
   rubbing surfaces on one body, a contact with friction) are refused; no
   multirate stepping; no
   monolithic solve through `StageResidual`; no embedded error estimator or
-  PI controller (step doubling and proportional control are available); no
-  durable snapshot encoding, process restart or fork; no adjoint. These are beads `.5.2` to
-  `.5.10` of the epic.
+  PI controller (step doubling and proportional control are available); of
+  the elements, only `GasVolume` and `Restriction` have a state codec, so
+  only systems of those and of components with their own codecs can be
+  snapshotted; no fork lineage, SoA buffers or double-double accounts
+  (bead `.5.4`); no adjoint. These are beads `.5.2` to `.5.10` of the epic.
 - An entry of a differenced column, a line's or a block's, is resolved
   against the rounding of its output, `eps` of its size. An output that is a small sum
   of large terms (a modal structure's velocity at a port, a sum over its

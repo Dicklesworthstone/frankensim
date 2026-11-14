@@ -14,6 +14,7 @@
 //! sources belongs to its physics owner (`fs_gas::component::GasCavity`).
 
 use fs_exec::Cx;
+use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::component::{
     Carrier, Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt, STREAM_CARRIED,
     STREAM_ENTHALPY_RATE, STREAM_MASS_RATE, STREAM_PRESSURE, STREAM_SPECIFIC_ENTHALPY, StreamBasis,
@@ -495,6 +496,55 @@ impl Component for GasVolume {
             roundoff(trial.scale_j),
         )))
     }
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-system::elements::GasVolume",
+        state_family: "gas-contents",
+        schema_grammar: "mass_kg f64; energy_j f64; volume_m3 f64; carried_kg: one f64 per \
+            carried quantity of the volume",
+        codec_grammar: "u64 words, the bits of mass_kg, energy_j, volume_m3 and each carried \
+            mass in that order: 3 + carried words",
+        codec_version: 1,
+    });
+
+    fn encode_state(&self, contents: &GasContents, words: &mut Vec<u64>) -> bool {
+        let held = [contents.mass_kg, contents.energy_j, contents.volume_m3];
+        words.extend(
+            held.iter()
+                .chain(&contents.carried_kg)
+                .map(|value| value.to_bits()),
+        );
+        true
+    }
+
+    /// Refuses another count than `3 + carried`, and contents no volume
+    /// holds (the checks of every step's old state).
+    fn decode_state(&self, words: &[u64]) -> Option<GasContents> {
+        if words.len() != 3 + self.carried {
+            return None;
+        }
+        let value = |index: usize| f64::from_bits(words[index]);
+        let contents = GasContents {
+            mass_kg: value(0),
+            energy_j: value(1),
+            volume_m3: value(2),
+            carried_kg: words[3..]
+                .iter()
+                .map(|&word| f64::from_bits(word))
+                .collect(),
+        };
+        self.admit(&contents).ok().map(|()| contents)
+    }
+
+    /// The gas constant and heat capacity ratio, as bits, and the number of
+    /// carried quantities.
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        words.extend([
+            self.gas_constant_j_kg_k.to_bits(),
+            self.ratio.to_bits(),
+            self.carried as u64,
+        ]);
+    }
 }
 
 impl PortTangent for GasVolume {
@@ -724,6 +774,35 @@ impl Component for Restriction {
                 Self::throttled(gas, dt_s, rate, upstream, n - upstream, inputs)?;
         }
         Ok(Proposal::Step(receipt))
+    }
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-system::elements::Restriction",
+        state_family: "no-state",
+        schema_grammar: "(): a restriction holds nothing",
+        codec_grammar: "no words",
+        codec_version: 1,
+    });
+
+    fn encode_state(&self, (): &(), _words: &mut Vec<u64>) -> bool {
+        true
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<()> {
+        words.is_empty().then_some(())
+    }
+
+    /// The conductance, as bits, and the number of carried quantities;
+    /// then 0, or 1 and the words of the gas whose entropy it reports.
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        words.extend([self.conductance_kg_s_pa.to_bits(), self.carried as u64]);
+        match &self.gas {
+            None => words.push(0),
+            Some(gas) => {
+                words.push(1);
+                gas.identity_words(words);
+            }
+        }
     }
 }
 

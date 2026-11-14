@@ -10,6 +10,7 @@ use core::any::Any;
 use core::fmt;
 
 use fs_exec::Cx;
+use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::component::{
     Class, Component, EndOfStep, LoadLine, PortSpec, PortTangent, Proposal, Receipt,
 };
@@ -84,6 +85,12 @@ pub(crate) trait Node {
     fn end_of_step(&self, port: usize) -> EndOfStep;
     fn has_tangent(&self) -> bool;
     fn clone_state(&self, state: &dyn Any) -> Result<Box<dyn Any>, OwnerError>;
+    /// The charter of the component's state codec, if it declares one.
+    fn state_charter(&self) -> Option<StateIdentityCharterV2>;
+    /// `Ok(false)` if the component has no codec; it then wrote nothing.
+    fn encode_state(&self, state: &dyn Any, words: &mut Vec<u64>) -> Result<bool, OwnerError>;
+    fn decode_state(&self, words: &[u64]) -> Option<Box<dyn Any>>;
+    fn identity_words(&self, words: &mut Vec<u64>);
     fn stored_energy_j(&self, state: &dyn Any) -> Result<f64, OwnerError>;
     fn stored_mass_kg(&self, state: &dyn Any) -> Result<Option<f64>, OwnerError>;
     fn stored_carried_quantity(
@@ -167,6 +174,24 @@ macro_rules! mandatory_tier {
 
         fn clone_state(&self, state: &dyn Any) -> Result<Box<dyn Any>, OwnerError> {
             Ok(Box::new(state_of::<C::State>(state)?.clone()))
+        }
+
+        fn state_charter(&self) -> Option<StateIdentityCharterV2> {
+            C::STATE_CHARTER
+        }
+
+        fn encode_state(&self, state: &dyn Any, words: &mut Vec<u64>) -> Result<bool, OwnerError> {
+            Ok(self.0.encode_state(state_of::<C::State>(state)?, words))
+        }
+
+        fn decode_state(&self, words: &[u64]) -> Option<Box<dyn Any>> {
+            self.0
+                .decode_state(words)
+                .map(|state| Box::new(state) as Box<dyn Any>)
+        }
+
+        fn identity_words(&self, words: &mut Vec<u64>) {
+            self.0.identity_words(words);
         }
 
         fn stored_energy_j(&self, state: &dyn Any) -> Result<f64, OwnerError> {

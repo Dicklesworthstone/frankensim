@@ -28,6 +28,72 @@ impl Sum {
     pub fn value(&self) -> f64 {
         self.sum + self.compensation
     }
+
+    /// The running sum and its compensation, as bits: the whole sum, for
+    /// the codec of a state that holds one.
+    #[must_use]
+    pub fn to_words(&self) -> [u64; 2] {
+        [self.sum.to_bits(), self.compensation.to_bits()]
+    }
+
+    /// The sum whose [`Self::to_words`] are `words`, to the bit.
+    #[must_use]
+    pub fn from_words(words: [u64; 2]) -> Self {
+        Self {
+            sum: f64::from_bits(words[0]),
+            compensation: f64::from_bits(words[1]),
+        }
+    }
+
+    fn push_words(&self, words: &mut Vec<u64>) {
+        words.extend(self.to_words());
+    }
+
+    fn read(words: &mut Words<'_>) -> Option<Self> {
+        Some(Self::from_words([words.u64()?, words.u64()?]))
+    }
+}
+
+/// Plain 64-bit words read from the front, as a snapshot holds them.
+pub(crate) struct Words<'a>(pub(crate) &'a [u64]);
+
+impl Words<'_> {
+    pub(crate) fn u64(&mut self) -> Option<u64> {
+        let (&first, rest) = self.0.split_first()?;
+        self.0 = rest;
+        Some(first)
+    }
+
+    /// A count written as a word, refused above the words that are left,
+    /// since every counted item takes at least one.
+    pub(crate) fn count(&mut self) -> Option<usize> {
+        let count = usize::try_from(self.u64()?).ok()?;
+        (count <= self.0.len()).then_some(count)
+    }
+
+    fn flag(&mut self) -> Option<bool> {
+        match self.u64()? {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        }
+    }
+
+    fn sums(&mut self) -> Option<Vec<Sum>> {
+        let count = self.count()?;
+        (0..count).map(|_| Sum::read(self)).collect()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+fn push_sums(sums: &[Sum], words: &mut Vec<u64>) {
+    words.push(sums.len() as u64);
+    for sum in sums {
+        sum.push_words(words);
+    }
 }
 
 /// Independently measured mass accounts of one stream component.
@@ -142,6 +208,177 @@ pub struct Ledger {
 }
 
 impl Ledger {
+    /// Every number of the ledger as plain words, which is what a snapshot
+    /// holds of it. Names come from the graph and are not written.
+    pub(crate) fn push_words(&self, words: &mut Vec<u64>) {
+        words.push(self.nodes.len() as u64);
+        for node in &self.nodes {
+            match &node.mass {
+                None => words.push(0),
+                Some(mass) => {
+                    words.push(1);
+                    for sum in [
+                        &mass.port_mass_in_kg,
+                        &mass.stored_change_kg,
+                        &mass.balance_defect_kg,
+                    ] {
+                        sum.push_words(words);
+                    }
+                    words.push(mass.audited_steps);
+                }
+            }
+            words.push(node.carried.len() as u64);
+            for account in &node.carried {
+                match account {
+                    None => words.push(0),
+                    Some(account) => {
+                        words.push(1);
+                        for sum in [
+                            &account.port_in,
+                            &account.stored_change,
+                            &account.balance_defect,
+                        ] {
+                            sum.push_words(words);
+                        }
+                        words.push(account.audited_steps);
+                    }
+                }
+            }
+            for sum in [
+                &node.port_energy_in_j,
+                &node.stored_change_j,
+                &node.dissipated_j,
+                &node.numerical_loss_j,
+                &node.entropy_generated_j_per_k,
+                &node.balance_defect_j,
+            ] {
+                sum.push_words(words);
+            }
+        }
+        words.push(self.connections.len() as u64);
+        for connection in &self.connections {
+            push_sums(&connection.carried_defect, words);
+            for sum in [
+                &connection.mass_defect_kg,
+                &connection.energy_defect_j,
+                &connection.entropy_generated_j_per_k,
+            ] {
+                sum.push_words(words);
+            }
+        }
+        words.push(self.boundaries.len() as u64);
+        for boundary in &self.boundaries {
+            push_sums(&boundary.carried_in, words);
+            for sum in [
+                &boundary.mass_in_kg,
+                &boundary.energy_in_j,
+                &boundary.entropy_in_j_per_k,
+            ] {
+                sum.push_words(words);
+            }
+        }
+        words.push(self.sinks.len() as u64);
+        for sink in &self.sinks {
+            sink.heat_j.push_words(words);
+        }
+        words.push(self.steps);
+        self.duration_s.push_words(words);
+    }
+
+    /// The ledger that [`Self::push_words`] wrote as exactly `words`, named
+    /// as `self`, which must have as many accounts of each kind. `None`
+    /// refuses the words.
+    pub(crate) fn read(&self, words: &[u64]) -> Option<Self> {
+        let words = &mut Words(words);
+        if words.count()? != self.nodes.len() {
+            return None;
+        }
+        let mut nodes = Vec::with_capacity(self.nodes.len());
+        for shape in &self.nodes {
+            let mass = if words.flag()? {
+                Some(MassAccount {
+                    port_mass_in_kg: Sum::read(words)?,
+                    stored_change_kg: Sum::read(words)?,
+                    balance_defect_kg: Sum::read(words)?,
+                    audited_steps: words.u64()?,
+                })
+            } else {
+                None
+            };
+            let count = words.count()?;
+            let carried = (0..count)
+                .map(|_| {
+                    if words.flag()? {
+                        Some(Some(CarriedAccount {
+                            port_in: Sum::read(words)?,
+                            stored_change: Sum::read(words)?,
+                            balance_defect: Sum::read(words)?,
+                            audited_steps: words.u64()?,
+                        }))
+                    } else {
+                        Some(None)
+                    }
+                })
+                .collect::<Option<Vec<_>>>()?;
+            nodes.push(NodeAccount {
+                name: shape.name.clone(),
+                has_streams: shape.has_streams,
+                mass,
+                carried,
+                port_energy_in_j: Sum::read(words)?,
+                stored_change_j: Sum::read(words)?,
+                dissipated_j: Sum::read(words)?,
+                numerical_loss_j: Sum::read(words)?,
+                entropy_generated_j_per_k: Sum::read(words)?,
+                balance_defect_j: Sum::read(words)?,
+            });
+        }
+        if words.count()? != self.connections.len() {
+            return None;
+        }
+        let mut connections = Vec::with_capacity(self.connections.len());
+        for _ in &self.connections {
+            connections.push(ConnectionAccount {
+                carried_defect: words.sums()?,
+                mass_defect_kg: Sum::read(words)?,
+                energy_defect_j: Sum::read(words)?,
+                entropy_generated_j_per_k: Sum::read(words)?,
+            });
+        }
+        if words.count()? != self.boundaries.len() {
+            return None;
+        }
+        let mut boundaries = Vec::with_capacity(self.boundaries.len());
+        for shape in &self.boundaries {
+            boundaries.push(BoundaryAccount {
+                carried_in: words.sums()?,
+                port: shape.port.clone(),
+                mass_in_kg: Sum::read(words)?,
+                energy_in_j: Sum::read(words)?,
+                entropy_in_j_per_k: Sum::read(words)?,
+            });
+        }
+        if words.count()? != self.sinks.len() {
+            return None;
+        }
+        let mut sinks = Vec::with_capacity(self.sinks.len());
+        for shape in &self.sinks {
+            sinks.push(SinkAccount {
+                name: shape.name.clone(),
+                heat_j: Sum::read(words)?,
+            });
+        }
+        let ledger = Self {
+            nodes,
+            connections,
+            boundaries,
+            sinks,
+            steps: words.u64()?,
+            duration_s: Sum::read(words)?,
+        };
+        words.is_empty().then_some(ledger)
+    }
+
     /// Closure of one carried coordinate over the accepted window.
     ///
     /// Returns `None` before a step, for an absent coordinate, or if any owner

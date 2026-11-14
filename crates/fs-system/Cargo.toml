@@ -23,6 +23,7 @@ phs = ["dep:fs-phs"]
 modal-slices = ["dep:fs-nlmodal"]
 
 [dependencies]
+fs-blake3 = { path = "../fs-blake3" }
 fs-exec = { path = "../fs-exec" }
 fs-mbd = { path = "../fs-mbd", optional = true }
 fs-nlmodal = { path = "../fs-nlmodal", optional = true }

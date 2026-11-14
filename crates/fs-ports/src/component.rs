@@ -42,6 +42,7 @@ use core::num::NonZeroUsize;
 use core::ops::Range;
 
 use fs_exec::Cx;
+use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_qty::chemistry::SpeciesId;
 use fs_qty::{Dims, Mass};
 
@@ -1020,6 +1021,37 @@ pub trait Component {
     ) -> Result<(), Self::Error> {
         Ok(())
     }
+
+    /// The charter of the codec of this component's state, if it has one.
+    ///
+    /// A system can be written to a durable snapshot only when every member
+    /// declares one. The identities derived from it name the state's type,
+    /// its schema and its codec in the snapshot's identity. `None`, the
+    /// default, has no codec: [`Self::encode_state`] and
+    /// [`Self::decode_state`] then refuse.
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = None;
+
+    /// Append `state` to `words` as plain 64-bit words, an `f64` as its
+    /// bits, in the grammar [`Self::STATE_CHARTER`] declares. Returns false,
+    /// the default, for a component without a codec; it then appends
+    /// nothing.
+    fn encode_state(&self, _state: &Self::State, _words: &mut Vec<u64>) -> bool {
+        false
+    }
+
+    /// The state that [`Self::encode_state`] wrote as exactly `words`, or
+    /// `None` to refuse them: a count this component does not write, or
+    /// values its states never hold. The default refuses everything.
+    fn decode_state(&self, _words: &[u64]) -> Option<Self::State> {
+        None
+    }
+
+    /// Append the bits of what fixes this component's physics, its
+    /// parameters, to `words`. A durable snapshot is refused by a system
+    /// whose member appends other words than the system that wrote it, so a
+    /// state is not resumed into other physics under the same graph. The
+    /// default appends nothing.
+    fn identity_words(&self, _words: &mut Vec<u64>) {}
 }
 
 /// Optional tier: derivative of the port map of [`Component::propose`].
