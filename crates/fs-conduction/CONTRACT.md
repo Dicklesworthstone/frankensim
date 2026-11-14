@@ -588,6 +588,16 @@ Robin/flux feedback. It checks the direct prescribed-node term and explicitly
 omitted contact/feedback columns. Native execution remains required; the lift
 does not certify the provenance of an arbitrary caller-supplied dual.
 
+The transient contact linearization, `ContactTemperatureLinearization`, gives
+the same lift through `prescribed_temperature_lift`. The caller supplies the
+problem; the temperature must equal the linearization's own field bit for bit,
+and any other field refuses. As in the steady lift, the frozen contact
+interfaces enter the bulk/Robin assembly, which therefore declares the
+contact's coincident faces, and the retained source-law correction is added
+once, at the fixed-node trace temperatures as well. A material-state contact
+refuses: its transpose needs the original enthalpy coordinates. No primal or
+dual solve occurs.
+
 ## Fully prescribed steady fields
 
 The steady spatial solver and its initial-field preparation accept meshes with

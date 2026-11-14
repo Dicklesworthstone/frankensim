@@ -573,20 +573,22 @@ pub(in crate::solve::transient) fn finish(
             // C is row-sum lumped: C_FD is zero, so the spatial lift is exactly
             // the endpoint lift. The complete physical dual already contains
             // C/dt and every feedback term; never multiply this partial by dt.
-            let mut bars = RobinResponse::prescribed_temperature_pullback_with_flux_feedback(
-                cx, ConductionProblem { boundary, ..convection_problem }, interfaces,
-                expected, &carry, &gradient.nodal_load, &ports, h_slopes,
-                reference_slopes, reference_feedback, flux_feedback, prescribed_entries,
-            ).map_err(lower)?;
-            if let Some(response) = &contact_step {
-                // This bulk/Robin lift received no frozen interfaces. The
-                // original contact owner supplies its full K + K'(T)T action
-                // once, including fixed-node trace temperatures.
-                contact::add_prescribed_lift(
-                    cx, convection_problem, response.contact(), &gradient.nodal_load,
-                    &mut bars, deadline,
-                )?;
-            }
+            let problem = ConductionProblem { boundary, ..convection_problem };
+            let bars = if let Some(response) = &contact_step {
+                // As the steady contact lift does: the contact's frozen
+                // interfaces enter the bulk/Robin assembly, which declares its
+                // coincident faces, and its source-law correction is added
+                // once, at the fixed-node trace temperatures as well.
+                response.contact().prescribed_temperature_lift(
+                    cx, problem, expected, &carry, &gradient.nodal_load, &ports, h_slopes,
+                    reference_slopes, reference_feedback, flux_feedback, prescribed_entries,
+                )
+            } else {
+                RobinResponse::prescribed_temperature_pullback_with_flux_feedback(
+                    cx, problem, interfaces, expected, &carry, &gradient.nodal_load, &ports,
+                    h_slopes, reference_slopes, reference_feedback, flux_feedback, prescribed_entries,
+                )
+            }.map_err(lower)?;
             prescribed_controls.add(cx, &bars, deadline)?;
         } else {
             // Retain the exact selected-prefix accounting for an empty set.

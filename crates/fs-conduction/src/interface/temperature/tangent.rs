@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 use fs_exec::Cx;
 use fs_matdb::{InterpolationPolicy, PreparedSurfaceResponse, PropertyValue};
 use fs_sparse::{Coo, Csr, ops};
-use crate::{ConductionError, ThermalBoundary};
+use crate::{ConductionError, ConductionProblem, ThermalBoundary};
+use crate::adjoint::robin::{MeanFluxFeedback, RobinResponse};
 use super::{InterfaceResistance, TemperatureContact, TemperatureContactCoordinates,
     TemperatureContactEvaluation, TemperatureContacts, finite, invalid, poll};
 use crate::transient::backward_euler::StepLinearization;
@@ -286,6 +287,33 @@ impl ContactTemperatureLinearization {
             return Err(invalid("<contact-tangent>", "material contact transpose requires its original enthalpy coordinates"));
         }
         self.action(cx, weights, true)
+    }
+    /// Prescribed-temperature lift `w_D - J_FD^T lambda_F` through this
+    /// contact, for a caller-supplied problem at this linearization's field
+    /// (bit for bit). As the steady contact lift does, the frozen contact
+    /// interfaces enter the bulk/Robin assembly, which therefore declares the
+    /// contact's coincident faces, and the retained source-law correction is
+    /// added once. A material-state contact refuses: its transpose needs the
+    /// original enthalpy coordinates. No primal or dual solve occurs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prescribed_temperature_lift(
+        &self, cx: &Cx<'_>, problem: ConductionProblem<'_>, temperature: &[f64],
+        nodal_weights: &[f64], nodal_load_adjoint: &[f64], regions: &[&str],
+        h_slopes: &[f64], reference_slopes: &[f64], reference_feedback: &[f64],
+        flux_feedback: Option<&MeanFluxFeedback>, max_entries: usize,
+    ) -> Result<Vec<f64>, ConductionError> {
+        if self.phase_feedback.is_some() {
+            return Err(invalid("<contact-tangent>", "material contact lift requires its original enthalpy coordinates"));
+        }
+        if temperature.len() != self.temperature.len()
+            || temperature.iter().zip(&self.temperature).any(|(a, b)| a.to_bits() != b.to_bits())
+        {
+            return Err(invalid("<contact-tangent>", "prescribed-temperature lift field differs from the contact linearization"));
+        }
+        RobinResponse::prescribed_temperature_pullback_with_contact_feedback(cx, problem,
+            Some(self.physical.frozen_interfaces()), Some(&self.feedback), temperature,
+            nodal_weights, nodal_load_adjoint, regions, h_slopes, reference_slopes,
+            reference_feedback, flux_feedback, max_entries)
     }
     fn action(&self, cx: &Cx<'_>, input: &[f64], transpose: bool) -> Result<Vec<f64>, ConductionError> {
         poll(cx, 0)?;

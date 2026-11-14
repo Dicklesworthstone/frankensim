@@ -1,8 +1,6 @@
 //! Compose the original live-contact tangent with native capacity controls.
 
-use super::{Cx, Instant, SolveRefusal, bad, finite, lower, poll};
-use fs_conduction::ConductionProblem;
-use fs_conduction::interface::temperature::tangent::ContactTemperatureLinearization;
+use super::{SolveRefusal, bad};
 
 /// Additional sparse contact operators, complete capacity tangent and bounded
 /// FGMRES workspace at one accepted endpoint. The native contact owner admits
@@ -43,32 +41,6 @@ pub(in crate::solve::transient) fn storage_bytes(
         .and_then(|bytes| bytes.checked_add(2048))
         .filter(|&bytes| isize::try_from(bytes).is_ok())
         .ok_or_else(|| bad("capacity contact adjoint workspace overflows"))
-}
-
-/// The ordinary lift has already subtracted bulk and Robin contributions,
-/// with no frozen contact matrix. Subtract the SAME complete contact transpose
-/// at prescribed vertices; K and dK/dT are therefore each counted once. The
-/// row-sum-lumped capacity has no free-to-fixed block and adds no endpoint lift.
-pub(super) fn add_prescribed_lift(
-    cx: &Cx<'_>,
-    problem: ConductionProblem<'_>,
-    contact: &ContactTemperatureLinearization,
-    nodal_load: &[f64],
-    bars: &mut [f64],
-    deadline: Option<(Instant, f64)>,
-) -> Result<(), SolveRefusal> {
-    poll(cx, deadline)?;
-    if bars.len() != problem.mesh.vertex_count() || nodal_load.len() != bars.len() {
-        return Err(bad(
-            "capacity contact prescribed lift lost its full nodal layout",
-        ));
-    }
-    let contact_bars = contact.apply_transpose(cx, nodal_load).map_err(lower)?;
-    for &(vertex, _) in problem.boundary.dirichlet() {
-        poll(cx, deadline)?;
-        bars[vertex] = finite(bars[vertex] - contact_bars[vertex])?;
-    }
-    poll(cx, deadline)
 }
 
 pub(super) fn fragment(steps: usize, max_pairs: usize, workspace: usize) -> String {
