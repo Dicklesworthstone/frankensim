@@ -64,7 +64,12 @@ mod tests {
     #[test]
     fn strict_default_does_not_ignore_a_small_but_relatively_large_correction() {
         let update = VelocityUpdate::measure([3e-16, 4e-16], 5e-16).unwrap();
-        assert!((update.relative - 1.0).abs() < 2e-16);
+        // The quotient is 1 to within three parts: the decimal inputs, whose
+        // exact ratio hypot(3e-16, 4e-16) / 5e-16 is 1 - 9.9e-17; `f64::hypot`,
+        // which Rust leaves to the platform's libm, within one ulp of its result
+        // (macOS returns 4.999999999999999e-16 here, one ulp under glibc's
+        // 5e-16); and the division's half ulp.
+        assert!((update.relative - 1.0).abs() <= 9.9e-17 + 1.5 * f64::EPSILON);
         assert!(!update.converged(1e-9, 0.0));
         assert!(update.converged(1e-9, 1e-14));
     }

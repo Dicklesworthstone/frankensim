@@ -739,7 +739,17 @@ impl PreparedDensityTransport<'_> {
                 old_mass + scratch.mass_change[cell].value()?,
                 "positive updated cell mass",
             )?;
-            let density = positive_value(new_mass / self.volumes[cell], "updated density")?;
+            // A cell whose mass the step leaves unchanged keeps its density's bits:
+            // `old_mass` is that density times the volume, and dividing back need
+            // not return it (3 kg/m3 in a 0.175 m3 cell comes back as
+            // 2.9999999999999996, which represents the same mass). A step that
+            // moves no mass through a cell does not move its state. Both masses
+            // are positive and finite, so equal bits are equal values.
+            let density = if new_mass.to_bits() == old_mass.to_bits() {
+                state.density_kg_m3
+            } else {
+                positive_value(new_mass / self.volumes[cell], "updated density")?
+            };
             // Report the inventory represented by the output density, including
             // its conversion roundoff rather than a hidden higher-precision mass.
             let represented_mass =
