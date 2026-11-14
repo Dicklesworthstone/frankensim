@@ -853,16 +853,22 @@ fn a_side_that_leaves_rest_accelerating_breaks_the_pair_away_within_a_few_steps(
     // What follows hangs on the sign of a rounding residue: either the
     // slider goes on holding on the mean for a while, exactly, or it sees
     // a jump of a dt, twice what there is, gives nothing in that step, is
-    // asked for 16 N in the next and breaks away. It breaks away within a
-    // few steps at every step length tried, the mass is left behind under
-    // the sliding force, at 0.2 s it has about 0.73 of the side's 0.8 m/s,
-    // and about 0.12 J of heat are booked for a pair that in truth never
-    // slips.
+    // asked for 16 N in the next and breaks away. It breaks away within 27
+    // steps at every step length tried, the mass is left behind under the
+    // sliding force, at 0.2 s it has about 0.73 of the side's 0.8 m/s, and
+    // about 0.12 J of heat are booked for a pair that in truth never slips.
     let (needed_n, slide_n) = (MASS_KG * SIDE_M_S2, SLIDES * NORMAL_N);
     assert!(needed_n < 0.82 * HOLDS * NORMAL_N);
     // At step lengths that are not powers of two apart: 8 N or nothing
-    // until it breaks away, within 20 steps (seen: at the third, fifth,
-    // seventh and seventeenth), then the sliding force.
+    // until it breaks away, then the sliding force. The step it breaks away
+    // at is not derived, since it hangs on the sign of a rounding residue,
+    // and its bound is read off a run: step index 26 at 1/3 ms and at most
+    // 20 at the five others on ts2 chain fsz (2026-11-14), the kernel that
+    // releases every input of the line's component before its first ask.
+    // The kernel before that broke away at step index 4, 2, 16, 16, 6 and 6
+    // (chain fsx). The motion and the heat are asserted at every step
+    // length before the bound.
+    let latest_break = 26_u32;
     let mut broke = Vec::new();
     for dt in [0.9e-3_f64, 0.7e-3, 0.6e-3, 0.3e-3, 1.5e-3, 1.0e-3 / 3.0] {
         let wave = leaving_rest_at(0.0);
@@ -885,9 +891,7 @@ fn a_side_that_leaves_rest_accelerating_breaks_the_pair_away_within_a_few_steps(
                 }
             }
         });
-        let at = at.expect("it breaks away");
-        assert!(at <= 20, "dt {dt}: {at}");
-        broke.push(at);
+        broke.push(at.expect("it breaks away"));
         let part = system.state::<Motion>(mass).unwrap().velocity_m_s / wave.value_at(system.time_s());
         assert!(part > 0.72 && part < 0.76, "dt {dt}: {part}");
         let heat_j = received_j(&system, body);
@@ -897,6 +901,7 @@ fn a_side_that_leaves_rest_accelerating_breaks_the_pair_away_within_a_few_steps(
         "a side that leaves rest at 4 m/s2: broken away at step index {broke:?} at 0.9, 0.7, \
          0.6, 0.3, 1.5 and 1/3 ms"
     );
+    assert!(broke.iter().all(|&at| at <= latest_break), "{broke:?}");
     // At 1, 0.5 and 0.25 ms, powers of two apart and so the same
     // arithmetic rescaled: 8 N, nothing, and broken away at the third
     // step, through the source and through a boundary that gives the same
@@ -2212,7 +2217,8 @@ fn a_held_mass_is_taken_under_any_push_and_a_planted_flow_is_still_refused() {
     // r - c (r / c): zero for some numbers and a unit in the last place of
     // r for others. The junction's audit has to be told that rounding;
     // told nothing, it refused 282 of these 2000 pushes at their first
-    // step. Here none is refused, and the mass is at rest to that rounding.
+    // step, on an earlier kernel. Here none is refused, and the mass is at
+    // rest to that rounding.
     let dt = 1.0e-3_f64;
     let c = 0.5 * dt / MASS_KG;
     let (mut uneven, mut worst) = (0_u32, 0.0_f64);
@@ -2238,8 +2244,15 @@ fn a_held_mass_is_taken_under_any_push_and_a_planted_flow_is_still_refused() {
         "held under 2000 pushes: none refused; {uneven} with a flow or a velocity that is not \
          exactly zero, {worst:e} m/s at worst"
     );
-    // The sweep covers the pushes whose flow does not come out at zero.
-    assert!(uneven >= 100, "{uneven}");
+    // Since every input of the line's component is released before its
+    // first ask, each of these flows and velocities comes out at exactly
+    // zero (none of the 2000 is otherwise on ts2 chain fsz, 2026-11-14;
+    // 282 were on the kernel before it, chain fsx), so the sweep no longer
+    // reaches a push whose flow carries the rounding. That the audit is
+    // told the rounding, and no more, rests on the planted half below: the
+    // refusal of a hundred times what is allowed, and the two terms read
+    // back from the step that takes a quarter of it.
+    assert_eq!(uneven, 0, "{worst:e} m/s at worst");
 
     // The planted negative: what the audit is told is the rounding of that
     // flow and no more. A mass held with half the static limit is brought
@@ -3897,6 +3910,206 @@ fn the_line_a_component_is_handed_is_what_its_neighbours_answer() {
     assert!(g1 * stiffness * 0.5 * dt > 0.25);
 }
 
+/// The slider, with a record of the step and the two flows it is handed at
+/// every call on its line; while `cut` holds a length, it asks to cut any
+/// longer step to it.
+struct Recorded {
+    slider: Slider,
+    calls: std::sync::Arc<std::sync::Mutex<Vec<[f64; 3]>>>,
+    cut: std::sync::Arc<std::sync::Mutex<Option<f64>>>,
+}
+
+impl Component for Recorded {
+    type State = Slip;
+    type Error = ElementError;
+
+    fn ports(&self) -> &[PortSpec] {
+        self.slider.ports()
+    }
+
+    fn class(&self) -> Class {
+        self.slider.class()
+    }
+
+    fn stored_energy_j(&self, slip: &Slip) -> Result<f64, ElementError> {
+        self.slider.stored_energy_j(slip)
+    }
+
+    fn propose(
+        &self,
+        old: &Slip,
+        dt_s: f64,
+        inputs: &[f64],
+        new: &mut Slip,
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<Proposal, ElementError> {
+        self.slider.propose(old, dt_s, inputs, new, outputs, cx)
+    }
+}
+
+impl LoadLine for Recorded {
+    fn line_ports(&self) -> &[usize] {
+        self.slider.line_ports()
+    }
+
+    fn propose_on_line(
+        &self,
+        old: &Slip,
+        dt_s: f64,
+        inputs: &[f64],
+        compliance: &[f64],
+        new: &mut Slip,
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<Proposal, ElementError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push([dt_s, inputs[0], inputs[1]]);
+        if let Some(cut_s) = *self.cut.lock().unwrap()
+            && dt_s > cut_s
+        {
+            return Ok(Proposal::Shorten { dt_s: cut_s });
+        }
+        self.slider
+            .propose_on_line(old, dt_s, inputs, compliance, new, outputs, cx)
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn a_component_on_a_line_is_first_asked_at_the_released_flows_of_every_trial() {
+    // 2 kg thrown at 1 m/s and pushed with 3 N rubs through the slider on
+    // 0.5 kg at rest, and the slider's loss warms a body. The two slide for
+    // about 76 steps of 1 ms, then go on together, held. Three steps are
+    // cut to half by the slider's asking, two while they slide and one
+    // while they are held. Whatever it answers, the slider is first asked
+    // in every trial at the released flows of that trial: what each mass
+    // does over the trial's dt with no force from the slider, its velocity
+    // plus the push's share for the first, and its velocity for the second,
+    // each port receiving minus its mass's. The masses are affine, so the
+    // update before the first ask gives them to rounding. (Asked at the
+    // last step's crossing flows plus the line times the slider's last
+    // forces, as before that update, the first ask of the run is off by the
+    // 1 m/s of the throw, and later ones by what a step of the slider's
+    // force changes.)
+    let (dt, push_n) = (1.0e-3_f64, 3.0_f64);
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let cut = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let mut builder = SystemBuilder::new();
+    let moving = |velocity_m_s: f64| Motion {
+        position_m: 0.0,
+        velocity_m_s,
+    };
+    let one = builder
+        .add_with_tangent("one", Mass::new(2.0).unwrap(), moving(1.0))
+        .unwrap();
+    let two = builder
+        .add_with_tangent("two", Mass::new(0.5).unwrap(), moving(0.0))
+        .unwrap();
+    let recorded = Recorded {
+        slider: slider(),
+        calls: std::sync::Arc::clone(&calls),
+        cut: std::sync::Arc::clone(&cut),
+    };
+    // The slider's `a` receives minus the first mass's velocity.
+    let rubbing = builder
+        .add_on_line("slider", recorded, Slip::sliding(-1.0))
+        .unwrap();
+    let body = builder
+        .add_with_tangent("body", HeatCapacity::new(BODY_J_K).unwrap(), 300.0)
+        .unwrap();
+    let push = builder
+        .add_with_tangent(
+            "push",
+            Force::new(Waveform::constant(push_n).unwrap()),
+            SourceAccount::default(),
+        )
+        .unwrap();
+    let at_one = [port(&builder, rubbing, "a"), port(&builder, push, "p")];
+    let at_two = [port(&builder, rubbing, "b")];
+    builder
+        .common_flow(port(&builder, one, "p"), &at_one)
+        .unwrap();
+    builder
+        .common_flow(port(&builder, two, "p"), &at_two)
+        .unwrap();
+    let warmth = port(&builder, rubbing, "heat");
+    builder
+        .common_effort(port(&builder, body, "heat"), &[warmth])
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    assert!(system.guess(warmth, &[300.0]));
+
+    let cut_steps = [10_u32, 50, 150];
+    let (mut trials, mut cuts, mut sliding, mut held) = (0_u32, 0_u32, 0_u32, 0_u32);
+    // Over every step and over the steps after the first: the largest
+    // offset of a first ask from the released flows [m/s], its step, its
+    // trial's dt, and what it was handed against the released flows.
+    let mut worst = [(0.0_f64, 0_u32, 0.0_f64, [0.0_f64; 2], [0.0_f64; 2]); 2];
+    with_cx(|cx| {
+        for step in 1..=200_u32 {
+            let first = system.state::<Motion>(one).unwrap().velocity_m_s;
+            let second = system.state::<Motion>(two).unwrap().velocity_m_s;
+            *cut.lock().unwrap() = cut_steps.contains(&step).then_some(0.5 * dt);
+            let report = system
+                .step(dt, cx)
+                .unwrap_or_else(|error| panic!("step {step}: {error}"));
+            *cut.lock().unwrap() = None;
+            cuts += u32::from(report.dt_s < dt);
+            if system.state::<Slip>(rubbing).unwrap().is_stuck() {
+                held += 1;
+            } else {
+                sliding += 1;
+            }
+            let asked: Vec<[f64; 3]> = core::mem::take(&mut *calls.lock().unwrap());
+            for (k, call) in asked.iter().enumerate() {
+                // A trial is a run of asks for one dt; its first is checked.
+                if k > 0 && asked[k - 1][0] == call[0] {
+                    continue;
+                }
+                trials += 1;
+                let released = [-(first + push_n * call[0] / (2.0 * 2.0)), -second];
+                let handed = [call[1], call[2]];
+                let offset = handed
+                    .iter()
+                    .zip(&released)
+                    .map(|(handed, released)| (handed - released).abs())
+                    .fold(0.0_f64, f64::max);
+                let spans = if step > 1 { 2 } else { 1 };
+                for slot in &mut worst[..spans] {
+                    if offset > slot.0 {
+                        *slot = (offset, step, call[0], handed, released);
+                    }
+                }
+            }
+        }
+    });
+    let shown = |(offset, step, dt_s, handed, released): (f64, u32, f64, [f64; 2], [f64; 2])| {
+        format!(
+            "{offset:.3e} m/s (step {step}, a trial of {dt_s:e} s: handed {handed:?}, released \
+             {released:?})"
+        )
+    };
+    eprintln!(
+        "first asks of {trials} trials ({cuts} cut steps; {sliding} steps end sliding, {held} \
+         held): off the released flows by {} over every step, by {} over the steps after the first",
+        shown(worst[0]),
+        shown(worst[1])
+    );
+    assert_eq!(cuts, 3);
+    assert_eq!(trials, 200 + 3);
+    assert!(sliding > 20 && held > 20, "{sliding} sliding, {held} held");
+    assert!(
+        worst[0].0 <= 1.0e-13,
+        "the first ask of a trial is off the released flows by {} over every step, by {} over \
+         the steps after the first",
+        shown(worst[0]),
+        shown(worst[1])
+    );
+}
+
 /// Two masses that rub on each other through the slider and are joined by
 /// `between` besides: 2 kg thrown at 1 m/s at the slider's `a`, 0.5 kg at
 /// rest at its `b`, the slider's loss collected in a body at 300 K, and
@@ -4769,25 +4982,25 @@ fn a_differenced_component_shortens_a_step_only_if_it_asks_on_both_sides_of_the_
 }
 
 #[test]
-fn a_push_that_creeps_up_to_the_static_limit_lets_go_a_hair_inside_it_one_way() {
-    // A stated limit of differencing a relation that jumps. The slider
-    // holds 9.8 N and slides against 5.88 N. The kernel differences it at
-    // a released flow moved UP by sqrt(eps) of it, which is worth
-    // sqrt(eps) of the force: 1.46e-7 N near the limit. Within that of
-    // the limit, with the held force on the side the move goes to, the
-    // moved proposal has broken away: the column is the difference across
-    // the jump from the held force to the sliding one, not the held row's
-    // slope, and the update it makes leaves the force wire with far more
-    // than rounding.
+fn a_push_that_creeps_up_to_the_static_limit_is_held_either_way() {
+    // A stated limit of differencing a relation that jumps (the CONTRACT
+    // states it). The slider holds 9.8 N and slides against 5.88 N. The
+    // kernel differences it at a released flow moved UP by sqrt(eps) of
+    // it, which is worth sqrt(eps) of the force: 1.46e-7 N near the limit.
+    // Within that of the limit, with the held force on the side the move
+    // goes to, the moved proposal has broken away: the column is the
+    // difference across the jump from the held force to the sliding one,
+    // not the held row's slope, and an update made with it leaves the
+    // force wire with far more than rounding.
     //
     // A mass of 2 kg at rest under a push that rises to 2e-7 N inside the
     // limit in 0.1 s and creeps on to 5e-8 N inside it in 150 steps of
-    // 1 ms. Pushed one way, the move goes away from the limit: the mass
-    // is held to rounding all the way. Pushed the other way: outside the
-    // window it is held to rounding; inside it the slider's force is off
-    // the push by up to 8.4e-8 N, alternating, the mass creeps at up to
-    // 2.1e-11 m/s, and it lets go with the push still 6.65e-8 N inside
-    // the limit: 7e-9 of the limit. No step is refused.
+    // 1 ms, one way and the other. Every input of the slider is released
+    // before its first ask, so it is first asked at the flow the mass
+    // gives it, and this scene no longer reaches the limit: the mass is
+    // held to rounding both ways, inside the window and out, to the end.
+    // No step is refused. The most updates a held step takes inside the
+    // window is printed.
     let dt = 1.0e-3_f64;
     let hold = HOLDS * NORMAL_N;
     let window = f64::EPSILON.sqrt() * hold;
@@ -4803,11 +5016,11 @@ fn a_push_that_creeps_up_to_the_static_limit_lets_go_a_hair_inside_it_one_way() 
         // Outside and inside the window: the most the force is off the
         // push, and the mass's largest speed, while it is held.
         let (mut off, mut speed) = ([0.0_f64; 2], [0.0_f64; 2]);
-        let mut let_go = None;
+        let (mut let_go, mut updates) = (None, 0_u32);
         with_cx(|cx| {
             for step in 0..250 {
                 let t0 = system.time_s();
-                system
+                let report = system
                     .step(dt, cx)
                     .unwrap_or_else(|error| panic!("way {way}, step {step}: {error}"));
                 let push = wave.mean(t0, dt);
@@ -4819,31 +5032,23 @@ fn a_push_that_creeps_up_to_the_static_limit_lets_go_a_hair_inside_it_one_way() 
                 off[inside] = off[inside].max((system.last_output(at)[0].abs() - push.abs()).abs());
                 speed[inside] =
                     speed[inside].max(system.state::<Motion>(mass).unwrap().velocity_m_s.abs());
+                if inside == 1 {
+                    updates = updates.max(report.iterations);
+                }
             }
         });
         println!(
             "a push creeping to the static limit, way {way}: outside the window of {window:e} N the \
              force is off the push by {:e} N at most and the mass at {:e} m/s at most; inside it \
-             {:e} N and {:e} m/s; let go with the push {let_go:?} N inside the limit",
+             {:e} N and {:e} m/s, {updates} updates at most in a step; let go with the push \
+             {let_go:?} N inside the limit",
             off[0], speed[0], off[1], speed[1]
         );
-        // Held to rounding outside the window, either way.
+        // Held to rounding, either way, outside the window and inside it,
+        // to the end: 5e-8 N inside the limit.
         assert!(off[0] <= 1.0e-12 && speed[0] <= 1.0e-15, "way {way}: {off:?} {speed:?}");
-        if way > 0.0 {
-            // And inside it, to the end: 5e-8 N inside the limit.
-            assert!(off[1] <= 1.0e-12 && speed[1] <= 1.0e-15, "{off:?} {speed:?}");
-            assert_eq!(let_go, None);
-        } else {
-            // Inside the window the force is off by a part of what the
-            // kernel's move is worth, the mass creeps by what that force
-            // makes of it in a step, and it lets go inside the limit by
-            // less than the window.
-            let c = 0.5 * dt / MASS_KG;
-            assert!(off[1] > 1.0e-9 && off[1] <= window, "{off:?}");
-            assert!(speed[1] <= c * window, "{speed:?}");
-            let early = let_go.expect("it lets go inside the limit");
-            assert!(early > 0.0 && early < window, "{early}");
-        }
+        assert!(off[1] <= 1.0e-12 && speed[1] <= 1.0e-15, "way {way}: {off:?} {speed:?}");
+        assert_eq!(let_go, None, "way {way}");
     }
 }
 
@@ -5187,24 +5392,35 @@ fn the_end_row_of_the_line_is_the_neighbours_end_mobility_and_carries_it_at_the_
         with_cx(|cx| {
             for step in 0..400 {
                 HANDED.with(|handed| handed.borrow_mut().clear());
+                let start = *system.state::<Modes>(modes).unwrap();
                 let report = system
                     .step(dt, cx)
                     .unwrap_or_else(|error| panic!("dt {dt}, step {step}: {error}"));
                 iterations += report.iterations;
                 most_iterations = most_iterations.max(report.iterations);
-                // The first proposal of a step is handed the RELEASED end
-                // of the efforts accepted last, as it is handed the
-                // released flow: the end that crossed (the side's, -0.1,
-                // since the last step ended with no slip) and what the
-                // last effort took away of it.
-                if step > 0 {
-                    let first = HANDED.with(|handed| handed.borrow()[0].0);
-                    let released = -0.1 + before.compliance[1] * before.effort;
-                    assert!(
-                        (first - released).abs() <= 1e-4 * released.abs(),
-                        "dt {dt}, step {step}: handed {first}, the released end is {released}"
-                    );
-                }
+                // The first proposal of every step, the first step's
+                // included, is handed the RELEASED end of this step, as it
+                // is handed the released flow: the end the oscillator
+                // reaches over the step with no force, in the port's sign,
+                // the closed form from the modes the step starts with. The
+                // kernel holds the last effort and its end row puts back
+                // what that effort takes away, so it is known to what the
+                // row's difference leaves of that part (the row is asserted
+                // to 1e-4 below) and to rounding.
+                let free_end: f64 = (0..2)
+                    .map(|mode| {
+                        let (omega, (q, v)) = (OMEGAS[mode], start[mode]);
+                        let (sin, cos) = (omega * dt).sin_cos();
+                        SHAPES[mode] * (-q * omega * sin + v * cos)
+                    })
+                    .sum();
+                let (first, released) = (HANDED.with(|handed| handed.borrow()[0].0), -free_end);
+                let taken = before.compliance[1] * before.effort;
+                let rounding = 64.0 * f64::EPSILON * (released.abs() + taken.abs());
+                assert!(
+                    (first - released).abs() <= 1e-4 * taken.abs() + rounding,
+                    "dt {dt}, step {step}: handed {first}, the released end is {released}"
+                );
                 before = *system.state::<Held>(holder).unwrap();
                 let held = *system.state::<Held>(holder).unwrap();
                 let end = ExactOscillator::velocity(system.state::<Modes>(modes).unwrap());

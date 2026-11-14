@@ -327,12 +327,15 @@ impl System {
         }
     }
 
-    /// One update of `block`'s unknowns with the efforts of its line's
-    /// component held at what the last step accepted, by the factors
-    /// [`Self::find_line`] left in `condensed`: the block's Jacobian with
-    /// the component's own columns left out. Where the other components
-    /// are affine, the line's inputs then hold the released flows of this
-    /// step, and every other unknown what goes with the held efforts.
+    /// Every input of the component on `block`'s line (the line's flows, the
+    /// ends of its flows, and any other input, such as the span of a side
+    /// it is told) takes one update of `block`'s unknowns with that
+    /// component's efforts held at what the last step accepted, by the
+    /// factors [`Self::find_line`] left in `condensed`: the block's Jacobian
+    /// with the component's own columns left out. Where the other
+    /// components are affine, its inputs then hold what they give this step
+    /// at those efforts; where they are not, their first Newton iterate.
+    /// Every other unknown keeps its starting value.
     ///
     /// For the step's starting values only, before the block's own first
     /// assembly replaces those factors.
@@ -347,8 +350,8 @@ impl System {
             .as_ref()
             .expect("a block asked to release its line has one")
             .node;
-        // The component asked to shorten, which leaves its outputs
-        // unspecified.
+        // The efforts the last step accepted, whatever an earlier trial of
+        // this step left in the outputs.
         let held = self.node_outputs(node);
         self.outputs[held.clone()].copy_from_slice(&self.accepted_outputs[held]);
         for (row, &index) in unknowns.iter().enumerate() {
@@ -363,7 +366,9 @@ impl System {
             });
         }
         for (row, &index) in unknowns.iter().enumerate() {
-            self.inputs[index] += residual[row];
+            if self.input_owner[index] == node {
+                self.inputs[index] += residual[row];
+            }
         }
         Ok(())
     }

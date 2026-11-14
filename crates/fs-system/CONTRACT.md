@@ -401,7 +401,8 @@ relation allows there.
   rounding, `16 eps (|released| + sum |C effort|)`, is in the allowance of
   the flow's wire in the solve, and so in what the interface audit is told
   for a line input, on top of what the solve allows every wire. (Told
-  nothing, the audit refused a mass held at rest for 282 of 2000 pushes:
+  nothing, on an earlier kernel, the audit refused a mass held at rest for
+  282 of 2000 pushes:
   6.8e-24 J against 6.8e-33 J.)
 - Within a row of the component's relation the step a block accepts does
   not depend on `C`: the component settles where the flow on the line is
@@ -440,20 +441,24 @@ relation allows there.
   slope. The kernel differences the line component at a released flow
   moved up by `sqrt(eps)` of it. In the window that wide below a jump, on
   the side the move goes to, the moved proposal is on the other row, and
-  the column is the difference across the jump. A slider that holds 9.8 N
-  and slides against 5.88 N, under a push that creeps up to the limit at
-  1e-9 N a step of 1 ms on a mass of 2 kg: outside the window (1.46e-7 N,
-  `sqrt(eps)` of the limit) the mass is held to rounding (the force
-  within 1.1e-14 N of the push); inside it, pushed the way the move goes,
-  the slider's force is off the push by up to 8.4e-8 N, alternating in
-  sign, the mass creeps at up to 2.1e-11 m/s, and it lets go with the
-  push still 6.65e-8 N inside the limit, 7e-9 of the limit. Pushed the
-  other way it is held to rounding up to the push's end, 5e-8 N inside
-  the limit. No step is refused, and the kernel is not changed for it:
-  it is the remainder of differencing, largest here. A tangent the
-  component declares for the row it takes would remove it; the tier has
-  none yet. (Found on 2026-11-12 by a probe written to show a stall there,
-  which there is not. Asserted in `tests/load_line.rs`.)
+  the column is the difference across the jump, and an update made with
+  it leaves the force wire with far more than rounding. It is the
+  remainder of differencing, largest here; no step is refused for it, and
+  the kernel is not changed for it. A tangent the component declares for
+  the row it takes would remove it; the tier has none yet. (Found on
+  2026-11-12 by a probe written to show a stall there, which there is
+  not: a slider that holds 9.8 N and slides against 5.88 N, under a push
+  that creeps up to the limit at 1e-9 N a step of 1 ms on a mass of 2 kg.
+  While the component was first asked at the released flows of the step
+  before, inside the window (1.46e-7 N, `sqrt(eps)` of the limit), pushed
+  the way the move goes, the slider's force was off the push by up to
+  8.4e-8 N, alternating in sign, the mass crept at up to 2.1e-11 m/s, and
+  it let go with the push still 6.65e-8 N inside the limit, 7e-9 of the
+  limit. Since every input of the component is released before its first
+  ask, it is first asked at the flow the mass gives it, and that scene no
+  longer reaches the limit: the mass is held both ways, inside the window
+  and out, to the push's end, 5e-8 N inside the limit, the force within
+  1.8e-15 N of the push. Asserted in `tests/load_line.rs`.)
 - `C` need not be symmetric. The step is refused (`SystemError::LoadLine`,
   naming the component and the reason, nothing published) when the other
   components do not determine a line (their Jacobian, with the component's
@@ -600,25 +605,31 @@ that locates an event (a friction interface that cuts the step at a stop,
   before the first step from none; for the line's component those are not
   the released flows of this step. A component that enters a step with a
   slip those flows show nothing of (a body thrown onto it with no starting
-  flows given) sees a stop inside the step at them, and the shorter trial
-  it asks for starts from the same values and asks again: the first step
-  of a mass of 2 kg thrown at 1 m/s onto 3 N of friction was refused after
-  64 shortenings. (7af293b67e named a prescribed side that has jumped as a
-  second such case, here and in its message. It is not one: the new flow
-  of a prescribed end is among the step's inputs from the start, and a
-  block on a side that jumps is dragged and caught on the kernel before
-  that commit as after it. Not run before it was written.) So the first time
-  the line's component asks to shorten before any update of a trial, the
-  step is not shortened. The other components take one update with its
-  efforts held at what the last step accepted, by the factors the search
-  for the line has just made (the block's Jacobian without the component's
-  own columns), and the component is asked again there. That update gives
-  the released flows of the step exactly where the other components are
-  affine, and their first Newton iterate where they are not. An
-  `elements::Slider`, which never asks, is not affected: at the starting
-  values it takes some row of its law and the block's first update corrects
-  it.
-- What a component asks at any later proposal of a trial, at an iterate,
+  flows given) would see a stop inside the step at them, and the shorter
+  trial it asks for would start from the same values and ask again: the
+  first step of a mass of 2 kg thrown at 1 m/s onto 3 N of friction was
+  refused after 64 shortenings. (7af293b67e named a prescribed side that
+  has jumped as a second such case, here and in its message. It is not one:
+  the new flow of a prescribed end is among the step's inputs from the
+  start, and a block on a side that jumps is dragged and caught on the
+  kernel before that commit as after it. Not run before it was written.) So
+  before the component is first asked in a trial, every input of it (the
+  line's flows, the ends of its flows, and any other, such as the span of a
+  side it is told) takes one update with its efforts held at what the last
+  step accepted, by the factors the search for the line has just made (the
+  block's Jacobian without the component's own columns). That update gives
+  the released flows of the step, and what the others give its other
+  inputs, exactly where the other components are affine, and their first
+  Newton iterate where they are not. Every other unknown of the block keeps
+  its starting value, a `guess` included. An `elements::Slider`, which
+  never asks, takes the first row of its law at those flows as well.
+  (Until this rule the update was made only after the component asked to
+  shorten at the starting values. A component that answered there was
+  answered at the last step's crossing flows plus the line times its last
+  efforts, and the block's first update corrected it: in a bowed string's
+  run every trial's first ask was there to the bit, and a held step took
+  1.998 iterations on average. With the rule it takes 1.000, chain fsv.)
+- What a component asks at any proposal of a trial, the first included,
   shortens the step at once. An event located at an iterate that has not
   converged is located from flows that are off by what the solve has left
   there; the shorter step is taken or cut again, and the component locates
@@ -1757,15 +1768,21 @@ material, a surface card, a temperature or a slip history stays in `fs-tribo`.
     by that from the first step on. The first step gives 8 N. Then, by the
     sign of a rounding residue, the slider either goes on holding on the
     mean for a while, or sees a jump twice what there is, gives nothing in
-    that step and breaks away in the next. It breaks away within a few
-    steps at every step length tried: at step index 2 at 1, 0.5 and
-    0.25 ms (powers of two apart, the same arithmetic rescaled) and at 0.7
-    ms, at 4 at 0.9 ms, at 6 at 1.5 and 1/3 ms, at 16 at 0.6 and 0.3 ms.
-    At 0.2 s the mass has between 0.72 and 0.76 of the side's 0.8 m/s, and
-    between 0.11 and 0.14 J of heat are booked for a pair that in truth
-    never slips. Asserted: 8 N or nothing until it breaks away, within 20
-    steps, at the six step lengths that are not powers of two apart; the
-    three forces and the end speed to 1e-12 at the other three.
+    that step and breaks away in the next. It breaks away within 27 steps
+    at every step length tried: at step index 2 at 1, 0.5 and 0.25 ms
+    (powers of two apart, the same arithmetic rescaled), and at the six
+    others at step index [4, 4, 4, 4, 8, 26] at 0.9, 0.7, 0.6, 0.3, 1.5
+    and 1/3 ms (ts2 chain fsv, 2026-11-14; the 26 first on chain fsz).
+    While the component was first asked at the released flows of the
+    step before, they were [4, 2, 16, 16, 6, 6] (chain fsx). At 0.2 s
+    the mass has between 0.72 and 0.76 of the side's 0.8 m/s, and between
+    0.11 and 0.14 J of heat are booked for a pair that in truth never
+    slips.
+    Asserted: 8 N or nothing until it breaks away, at the six step lengths
+    that are not powers of two apart, the motion and the heat at each, and
+    then the step index it breaks away at to 26 at most, a bound read off
+    chain fsz, not derived (it hangs on the sign of a rounding residue);
+    the three forces and the end speed to 1e-12 at the other three.
     (74529fda7f said "at the third step at every step length", having run
     only those three. Found wrong by its review.)
   - A side that rests one step and then accelerates. Every change of the
@@ -1853,9 +1870,11 @@ material, a surface card, a temperature or a slip history stays in `fs-tribo`.
   (velocity and distance to 1e-12) and the loss is `mu_k N` times the
   distance.
 - Held under 2000 pushes between 0.05 and 0.92 of the static limit: none is
-  refused, and the mass is at rest to the rounding of the released flow
-  (282 of them with a flow or a velocity that is not exactly zero, 1.6e-18
-  m/s at worst). The planted negative for what the audit is told: a net
+  refused, and the mass is at rest to the rounding of the released flow.
+  Since every input of the component is released before its first ask,
+  none of them ends with a flow or a velocity that is not exactly zero
+  (282 did before, 1.6e-18 m/s at worst), so that the audit is told the
+  rounding rests on the planted negative. The planted negative: a net
   force planted on a held mass, with the solve told to take a wire that is
   open by four times its own size, leaves the junction `c dt F²`. (Up to
   ef1631e0d2 a tolerance of 1e-2 planted it. The solve now judges a line
@@ -2025,7 +2044,8 @@ material, a surface card, a temperature or a slip history stays in `fs-tribo`.
     the slider's record is the slip the two end each step with to 1e-12
     m/s (asserted in every test of a told side that has a mass), the mass
     ends on the side to 1e-12 m/s, and the heat booked is at most 2.7e-17
-    J. Taken as held: broken away within a few steps.
+    J. Taken as held: broken away within 27 steps at the step lengths
+    tried.
   - It swings from rest at 2 Hz, at most 6.32 N needed, for 1 s at 1, 0.5
     and 0.25 ms: it never slips. The force is `m` times the side's
     acceleration at the middle of the step to 1.3e-2, 6.6e-3 and 3.3e-3 N
@@ -2060,10 +2080,17 @@ material, a surface card, a temperature or a slip history stays in `fs-tribo`.
     waveform's values on the span), a side that swings and one that
     accelerates under a push. What the slider receives, the flow and the
     two velocities of the span, is the same to the bit at every one of
-    1000 steps. The forces agree to 4.0e-10 N and the mass's velocity to
-    1.0e-13 m/s (asserted to 1e-9 and 1e-12), not to the bit: the source
-    is a component of the block, the solve has other unknowns, and a held
-    slider's force is the mass's velocity change over `c`.
+    1000 steps. The forces of the side that swings differ in 770 of the
+    1000 steps, by 5.2e-12 N at most, and the mass's velocity by 1.4e-15
+    m/s at most; those of the side under a push differ in none (asserted
+    to 1e-9 N and 1e-12 m/s). Not to the bit throughout: the source is a
+    component of the block, the solve has other unknowns, and a held
+    slider's force is the mass's velocity change over `c`. The bits of
+    the flow at the slider's `b`, an unknown of the block when the source
+    tells the span, rest on the LU residue of its Newton update staying
+    below half a unit in the last place (at most 3.9e-5 of it
+    over the updates traced on ts2 chain fsz, 2026-11-14), so they are not
+    guaranteed by construction.
   - The two refusals, planted: a slider told the span of the end its mass
     is on is refused at the first step by name and nothing is published. A
     side at 0.2 m/s and faster whose span is given with the port's sign is

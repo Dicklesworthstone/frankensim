@@ -2927,41 +2927,27 @@ impl System {
         // Whether this step has assembled the block's Jacobian yet, so that
         // `slopes` are this step's own.
         let mut assembled = false;
-        // Whether the line's component has already been asked again at
-        // released flows of this step (below).
-        let mut asked_again = false;
+        // A trial starts from the values the last step ended with. For the
+        // component on a load line those are the flows of the last step, not
+        // the released flows of this one, and whatever it answers there is
+        // answered from the wrong flows: a slider that enters a step with a
+        // slip its ports were not told of would see a stop inside every
+        // step, and the shorter step it asks for would start from the same
+        // values and ask again, without end. So before it is first asked in
+        // a trial, its inputs (the line's flows and ends, and any other,
+        // such as a span) take one update with its efforts held, which is
+        // exact where the other components are affine; every other unknown
+        // keeps its start.
+        if self.lines[block].is_some() {
+            self.release(block, unknowns, residual, condensed)?;
+        }
         let mut iterations = 0_u32;
         loop {
             cx.checkpoint().map_err(|_| SystemError::Cancelled)?;
-            let mut at_stale_flows = false;
             for &node in nodes {
                 if let Some(shorter) = self.propose(node, dt_s, cx)? {
-                    // A step starts from the values the last one ended
-                    // with. For the component on a load line those are the
-                    // flows of the last step, not the released flows of
-                    // this one, and an event it locates there is located
-                    // from the wrong flows: a slider that enters a step
-                    // with a slip its ports were not told of sees a stop
-                    // inside every step, and the shorter step it asks for
-                    // starts from the same values and asks again, without
-                    // end. So the first time it asks before any update of
-                    // this trial, the step is not shortened. The other
-                    // components take one update with its efforts held,
-                    // which is exact where they are affine, and it is
-                    // asked again there.
-                    let on_the_line =
-                        self.lines[block].as_ref().is_some_and(|line| line.node == node);
-                    if on_the_line && !assembled && !asked_again {
-                        at_stale_flows = true;
-                        break;
-                    }
                     return Ok(Err(shorter));
                 }
-            }
-            if at_stale_flows {
-                asked_again = true;
-                self.release(block, unknowns, residual, condensed)?;
-                continue;
             }
             // The scale of an unknown is the size of the terms its driver
             // sums, not of their total: a force balance near rest is a small
