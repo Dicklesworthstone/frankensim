@@ -324,16 +324,22 @@ fn quantized_physical_stencils_and_erased_scaled_directions_are_refused() {
         world_points: &[],
         connections: &[],
     };
-    let state = seed(vec![1e15]);
+    // The slider sits where its locked inertia is still representable. At
+    // q = 1e15 the composite inertia about the system centre holds 2 kg m^2
+    // against 1.2e30, below what f64 can certify, and prepare refuses it as
+    // NonPhysicalInertia before any stencil is formed.
+    let state = seed(vec![1.5e6]);
     let response = prepare(
         &model, &state, loads, EquilibriumBushings::Diagonal(&[]),
-        response_controls(&[128.0], &[1.0], &[1.0]), || false,
+        response_controls(&[2.0], &[1.0], &[1.0]), || false,
     ).unwrap();
-    // Requested displacement 128*0.001=0.128 rounds to 0.125 at q=1e15.
+    // Requested displacement 2*0.001 = 0.002 is represented at q = 1.5e6, whose
+    // spacing is 2.3e-10, as 0.002 + 9.5e-11: a relative distortion of 4.75e-8,
+    // beyond the relative allowance of 1e-8.
     // Both stencils could still return identical zero forces for this neutral
     // slider. That agreement cannot admit a materially distorted physical chart.
     assert!(matches!(
-        response.stiffness_action(&[128.0], || false),
+        response.stiffness_action(&[2.0], || false),
         Err(LinearizationError::Difference(CentralDifferenceError::Source(
             EquilibriumError::Invalid("physical tangent stencil exceeds representation allowance")
         )))
