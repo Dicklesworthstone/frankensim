@@ -23,8 +23,9 @@ fs-evidence = { path = "../fs-evidence" }
 
 [features]
 # `tangential::component`: a sliding interface under a prescribed slip rate
-# and a friction interface between two bodies, on the composition contract
-# of fs-ports. Off by default, so the crate's ordinary build takes no
+# and a friction interface between two bodies; `sliding_patch::component`:
+# a Hertz patch between two bodies. All on the composition contract of
+# fs-ports. Off by default, so the crate's ordinary build takes no
 # kernel-facing dependency.
 component = ["dep:fs-ports", "dep:fs-exec"]
 # Benchmark tangential laws (M4.2-W4). Only dev-dependencies may enable it;
@@ -37,6 +38,10 @@ required-features = ["benchmark-laws"]
 
 [[test]]
 name = "sliding_interface"
+required-features = ["component"]
+
+[[test]]
+name = "hertz_patch_interface"
 required-features = ["component"]
 
 [lints]

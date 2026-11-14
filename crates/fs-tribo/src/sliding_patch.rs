@@ -35,6 +35,11 @@ pub mod rate_dependent;
 /// Elliptical Hertz footprints with the original orthotropic Coulomb traction.
 pub mod elliptic;
 
+/// One Hertz patch between two bodies, with its slip and spin friction and
+/// its heat, on the composition contract of `fs-ports`.
+#[cfg(feature = "component")]
+pub mod component;
+
 fn finite(value: f64, field: &'static str) -> Result<f64, TriboError> {
     crate::finite(value, field)?;
     Ok(value)
