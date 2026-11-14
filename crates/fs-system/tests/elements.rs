@@ -503,6 +503,7 @@ fn waveform_means_are_exact_averages_over_the_step() {
 #[test]
 fn tabulated_sources_schedule_every_future_knot_on_their_accepted_clock() {
     let wave = Waveform::table(vec![(0.25, 1.0), (0.625, 3.0), (1.0, 2.0)]).unwrap();
+    assert_eq!(wave.event_times_s().collect::<Vec<_>>(), [0.25, 0.625, 1.0]);
     let force = Force::new(wave.clone());
     let flow = FlowSource::new(wave.clone()).publishing();
     let heater = Heater::new(wave).unwrap();
@@ -525,6 +526,7 @@ fn tabulated_sources_schedule_every_future_knot_on_their_accepted_clock() {
         Waveform::sine(1.0, 2.0, 0.0, 2.0).unwrap(),
         Waveform::table(vec![(0.25, 2.0)]).unwrap(),
     ] {
+        assert_eq!(wave.event_times_s().count(), 0);
         assert_eq!(
             Force::new(wave).next_event_s(&SourceAccount::default()),
             None

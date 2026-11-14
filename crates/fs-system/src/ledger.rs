@@ -38,6 +38,29 @@ impl Sum {
         self.sum + self.compensation
     }
 
+    /// Distance to an absolute time, retaining the clock's low bits.
+    pub(crate) fn interval_to(self, time_s: f64) -> f64 {
+        let mut from_event = self;
+        from_event.add(-time_s);
+        -from_event.value()
+    }
+
+    /// Preserve a strict cap without leaving only clock rounding before
+    /// an event. Used by both source clocks and scheduled boundaries.
+    pub(crate) fn limit_before_event(self, proposed_s: f64, event_s: f64) -> f64 {
+        let mut at_event = self;
+        at_event.add(event_s);
+        let mut after_cap = self;
+        after_cap.add(proposed_s);
+        let leftover_s = at_event.value() - after_cap.value();
+        let roundoff_s = 8.0 * f64::EPSILON * self.value().abs().max(at_event.value().abs());
+        if event_s > proposed_s && leftover_s > 0.0 && leftover_s <= roundoff_s {
+            proposed_s.min(0.5 * event_s)
+        } else {
+            proposed_s
+        }
+    }
+
     /// The running sum and its compensation, as bits: the whole sum, for
     /// the codec of a state that holds one.
     #[must_use]

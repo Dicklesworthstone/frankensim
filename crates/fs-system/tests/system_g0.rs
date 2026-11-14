@@ -1900,6 +1900,186 @@ fn a_bad_answer_in_the_step_negotiation_is_refused_and_names_the_component() {
     }
 }
 
+#[test]
+fn scheduled_boundaries_split_steps_preserve_input_work_and_replay_after_refusal() {
+    use fs_system::elements::Waveform;
+
+    let first_wave = Waveform::table(vec![(0.25, 0.0), (0.75, 4.0), (1.0, 4.0)]).unwrap();
+    let second_wave = Waveform::table(vec![(0.5, 0.0), (1.5, 2.0)]).unwrap();
+    let fail = Rc::new(Cell::new(false));
+    let mut builder = SystemBuilder::new();
+    let first = builder
+        .add_with_tangent("first", Inertia::new(2.0), 0.0)
+        .unwrap();
+    let second = builder
+        .add_with_tangent("second", Inertia::new(4.0), 0.0)
+        .unwrap();
+    let first_port = builder.port(first, "p").unwrap();
+    let second_port = builder.port(second, "p").unwrap();
+    let events = first_wave.event_times_s().collect();
+    let requested_failure = Rc::clone(&fail);
+    builder
+        .scheduled_boundary(
+            first_port,
+            Box::new(move |start, dt, values| {
+                values[0] = if requested_failure.get() {
+                    f64::NAN
+                } else {
+                    first_wave.mean(start, dt)
+                };
+            }),
+            events,
+        )
+        .unwrap();
+    let events = second_wave.event_times_s().collect();
+    builder
+        .scheduled_boundary(
+            second_port,
+            Box::new(move |start, dt, values| {
+                values[0] = second_wave.mean(start, dt);
+            }),
+            events,
+        )
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    let initial = system.checkpoint().unwrap();
+    let mut expected_ledger = None;
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        for _ in 0..2 {
+            for end in [0.25_f64, 0.5, 0.75, 1.0, 1.5, 2.0] {
+                if end == 0.75 {
+                    let before = system.checkpoint().unwrap();
+                    let input = system.last_input(first_port).to_vec();
+                    let output = system.last_output(first_port).to_vec();
+                    fail.set(true);
+                    assert!(system.step(2.0, cx).is_err());
+                    fail.set(false);
+                    assert_eq!(system.time_s(), before.time_s());
+                    assert_eq!(system.steps(), before.steps());
+                    assert_eq!(system.state::<f64>(first), before.state::<f64>(first));
+                    assert_eq!(system.state::<f64>(second), before.state::<f64>(second));
+                    assert_eq!(system.ledger(), before.ledger());
+                    assert_eq!(system.last_input(first_port), input);
+                    assert_eq!(system.last_output(first_port), output);
+                }
+                let report = system.step((2.0 - system.time_s()).min(2.0), cx).unwrap();
+                assert_eq!(report.time_s, end);
+                // Independent force integrals: the first ramp has slope
+                // 8 N/s, the second 2 N/s; momentum is their integral.
+                let impulse_a = if end <= 0.25 {
+                    0.0
+                } else if end <= 0.75 {
+                    4.0 * (end - 0.25).powi(2)
+                } else {
+                    1.0 + 4.0 * (end - 0.75)
+                };
+                let impulse_b = if end <= 0.5 {
+                    0.0
+                } else if end <= 1.5 {
+                    (end - 0.5).powi(2)
+                } else {
+                    1.0 + 2.0 * (end - 1.5)
+                };
+                let (va, vb) = (impulse_a / 2.0, impulse_b / 4.0);
+                assert_eq!(*system.state::<f64>(first).unwrap(), va);
+                assert_eq!(*system.state::<f64>(second).unwrap(), vb);
+                assert_eq!(
+                    system.ledger().boundary_energy_in_j(),
+                    va * va + 2.0 * vb * vb
+                );
+                assert_eq!(system.ledger().energy_residual_j(), 0.0);
+            }
+            assert_eq!(system.ledger().boundary_energy_in_j(), 9.5);
+            if let Some(expected) = &expected_ledger {
+                assert_eq!(system.ledger(), expected);
+            } else {
+                expected_ledger = Some(system.ledger().clone());
+            }
+            system.restore(&initial).unwrap();
+        }
+    });
+}
+
+fn scheduled_resting_inertia(events: Option<Vec<f64>>) -> System {
+    let mut builder = SystemBuilder::new();
+    let node = builder
+        .add_with_tangent("body", Inertia::new(1.0), 0.0)
+        .unwrap();
+    let port = builder.port(node, "p").unwrap();
+    let value = Box::new(|_: f64, _: f64, values: &mut [f64]| values[0] = 0.0);
+    match events {
+        Some(events) => builder.scheduled_boundary(port, value, events).unwrap(),
+        None => builder.boundary(port, value).unwrap(),
+    }
+    builder.seal().unwrap()
+}
+
+#[test]
+fn boundary_events_retain_clock_compensation_and_distinct_adjacent_times() {
+    let adjacent = f64::from_bits(1.0_f64.to_bits() + 1);
+    let before_one = f64::from_bits(1.0_f64.to_bits() - 1);
+    let mut system = scheduled_resting_inertia(Some(vec![1.0, adjacent, 2.0]));
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        // Taking the cap itself would strand a rounding-sized last step.
+        // The source-clock policy instead takes half the interval, always
+        // at or below the caller's cap.
+        let report = system.step(before_one, cx).unwrap();
+        assert_eq!(report.dt_s, 0.5);
+        assert!(report.dt_s <= before_one);
+        assert_eq!(system.step(1.0, cx).unwrap().time_s, 1.0);
+        assert_eq!(system.step(1.0e-16, cx).unwrap().time_s, 1.0);
+        let report = system.step(1.0, cx).unwrap();
+        assert_eq!(report.dt_s, f64::EPSILON - 1.0e-16);
+        assert_eq!(report.time_s, adjacent);
+        assert_eq!(system.step(1.0, cx).unwrap().time_s, 2.0);
+    });
+}
+
+#[test]
+fn invalid_boundary_schedules_claim_nothing_and_valid_schedules_bind_problem_identity() {
+    for events in [
+        vec![f64::NAN],
+        vec![f64::INFINITY],
+        vec![f64::NEG_INFINITY],
+        vec![0.5, 0.5],
+        vec![1.0, 0.5],
+    ] {
+        let mut builder = SystemBuilder::new();
+        let node = builder
+            .add_with_tangent("body", Inertia::new(1.0), 0.0)
+            .unwrap();
+        let port = builder.port(node, "p").unwrap();
+        let error = builder
+            .scheduled_boundary(port, Box::new(|_, _, values| values[0] = 0.0), events)
+            .unwrap_err();
+        assert!(
+            matches!(error, AdmissionError::BoundarySchedule { ref port, .. } if port == "body.p")
+        );
+        // Refusal must not reserve the port or retain a partial schedule.
+        builder
+            .boundary(port, Box::new(|_, _, values| values[0] = 0.0))
+            .unwrap();
+        assert_eq!(
+            builder.seal().unwrap().problem_id(),
+            scheduled_resting_inertia(None).problem_id()
+        );
+    }
+    let raw = scheduled_resting_inertia(None);
+    assert_eq!(
+        raw.problem_id(),
+        scheduled_resting_inertia(Some(vec![])).problem_id()
+    );
+    let first = scheduled_resting_inertia(Some(vec![-1.0, 0.0, 0.25]));
+    let changed = scheduled_resting_inertia(Some(vec![-1.0, 0.0, 0.5]));
+    assert_ne!(first.problem_id(), raw.problem_id());
+    assert_ne!(first.problem_id(), changed.problem_id());
+    let mut first = first;
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        // An absolute schedule may include events from before this state.
+        assert_eq!(first.step(1.0, cx).unwrap().time_s, 0.25);
+    });
+}
+
 /// Gives off a fixed heat rate from a finite store and claims to generate no
 /// entropy doing so.
 struct Heater {

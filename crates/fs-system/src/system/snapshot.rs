@@ -213,8 +213,9 @@ impl System {
     /// ports, classes and tiers, load lines, connections with their ratios,
     /// maps and heat routes, the driven ports and the heat sinks, as their
     /// `Debug` text) and, per member, the identities of its state codec's
-    /// charter and the words of `Component::identity_words`. Boundary
-    /// functions are not in it: a resumed run follows the same trajectory
+    /// charter and the words of `Component::identity_words`. Scheduled
+    /// boundary event times are included. Boundary functions are not in it:
+    /// a resumed run follows the same trajectory
     /// only under the same boundary responses. A toolchain that prints a
     /// description differently gives another identity, so it refuses older
     /// snapshots; it never makes two descriptions one.
@@ -262,10 +263,17 @@ impl System {
             let _ = write!(text, "{connection:?}");
             field(&mut preimage, text.as_bytes());
         }
-        for (port, _) in &self.boundaries {
+        for ((port, _), events) in self.boundaries.iter().zip(&self.boundary_events) {
             text.clear();
             let _ = write!(text, "boundary {port:?}");
             field(&mut preimage, text.as_bytes());
+            // Preserve identities of existing unscheduled graphs. A new
+            // schedule is part of this problem, not external closure state.
+            if !events.is_empty() {
+                field(&mut preimage, b"boundary-event-times-v0");
+                let bytes: Vec<u8> = events.iter().flat_map(|time| time.to_le_bytes()).collect();
+                field(&mut preimage, &bytes);
+            }
         }
         for sink in &self.ledger.sinks {
             field(&mut preimage, sink.name.as_bytes());

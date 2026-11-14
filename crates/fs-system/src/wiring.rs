@@ -110,6 +110,15 @@ pub enum AdmissionError {
         /// The port, as `node.port`.
         port: String,
     },
+    /// A boundary schedule contains a nonfinite or non-increasing time.
+    BoundarySchedule {
+        /// The prescribed port, as `node.port`.
+        port: String,
+        /// Position of the invalid event in the supplied schedule.
+        index: usize,
+        /// The invalid absolute time [s].
+        time_s: f64,
+    },
     /// A port that exchanges power or needs an input is connected to nothing.
     Unconnected {
         /// The port, as `node.port`.
@@ -229,6 +238,10 @@ impl fmt::Display for AdmissionError {
                 "sink `{name}` was declared at {declared_k} K and is named again at {repeated_k} K"
             ),
             Self::AlreadyConnected { port } => write!(f, "port `{port}` is already connected"),
+            Self::BoundarySchedule { port, index, time_s } => write!(
+                f,
+                "port `{port}`: boundary event {index} is {time_s} s; event times must be finite and strictly increasing"
+            ),
             Self::Unconnected { port } => write!(f, "port `{port}` is connected to nothing"),
             Self::Fractions { sum } => {
                 write!(

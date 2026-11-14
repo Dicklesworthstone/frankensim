@@ -5,6 +5,7 @@
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cancelled, Cx, ExecMode, StreamKey};
 use fs_ports::component::{Class, Component, PortSpec, Proposal, Receipt};
+use fs_system::elements::HeatCapacity;
 use fs_system::elements::{Damper, Force, Mass, Motion, SourceAccount, Spring, Waveform};
 use fs_system::{
     AdaptiveConfig, AdaptiveError, Checkpoint, ErrorNorm, ErrorTolerance, Ledger, NodeId, PortRef,
@@ -36,6 +37,70 @@ fn controller() -> AdaptiveConfig {
         min_step_s: 1.0e-12,
         max_attempts: 16,
     }
+}
+
+#[test]
+fn scheduled_heat_boundaries_end_adaptive_intervals_at_knots_and_rewind_rejected_trials() {
+    let wave = Waveform::table(vec![(0.25, 0.0), (0.75, 8.0), (1.0, 8.0)]).unwrap();
+    let events = wave.event_times_s().collect();
+    let mut builder = SystemBuilder::new();
+    let body = builder
+        .add_with_tangent("body", HeatCapacity::new(8.0).unwrap(), 300.0)
+        .unwrap();
+    let heat = builder.port(body, "heat").unwrap();
+    builder
+        .scheduled_boundary(
+            heat,
+            Box::new(move |start, dt, values| {
+                values[0] = wave.mean(start, dt);
+            }),
+            events,
+        )
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    let initial = system.checkpoint().unwrap();
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        let refused = system.step_adaptive(2.0, controller(), |_, _, _| f64::NAN, cx);
+        assert!(matches!(
+            refused,
+            Err(AdaptiveError::InvalidEstimate { .. })
+        ));
+        assert_eq!(system.time_s(), initial.time_s());
+        assert_eq!(system.steps(), initial.steps());
+        assert_eq!(system.state::<f64>(body), initial.state::<f64>(body));
+        assert_eq!(system.ledger(), initial.ledger());
+
+        for (end, energy_j) in [(0.25, 0.0), (0.75, 2.0), (1.0, 4.0), (2.0, 12.0)] {
+            let report = system
+                .step_adaptive(
+                    2.0 - system.time_s(),
+                    controller(),
+                    |old, coarse, fine| {
+                        let mut norm = ErrorNorm::new();
+                        norm.include(
+                            *old.state::<f64>(body).unwrap(),
+                            *coarse.state::<f64>(body).unwrap(),
+                            *fine.state::<f64>(body).unwrap(),
+                            ErrorTolerance {
+                                absolute: 1.0e-9,
+                                relative: 0.0,
+                            },
+                        );
+                        norm.value()
+                    },
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(report.time_s, end);
+            assert_eq!(report.attempts, 1);
+            assert_eq!(report.trial_steps, 3);
+            // Independent integral: a 2 J triangle, then 8 W after 0.75 s.
+            assert_eq!(*system.state::<f64>(body).unwrap(), 300.0 + energy_j / 8.0);
+            assert_eq!(system.ledger().boundary_energy_in_j(), energy_j);
+            assert_eq!(system.ledger().energy_residual_j(), 0.0);
+        }
+        assert_eq!(system.steps(), 8);
+    });
 }
 
 struct Device {

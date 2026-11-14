@@ -560,6 +560,7 @@ pub struct SystemBuilder {
     route_receiver: Vec<Vec<bool>>,
     connections: Vec<Connection>,
     boundaries: Vec<(PortRef, BoundaryFn)>,
+    boundary_events: Vec<Vec<f64>>,
     sinks: Vec<HeatSink>,
 }
 
@@ -1308,15 +1309,46 @@ impl SystemBuilder {
     /// # Errors
     /// A port with no input side, or a port already connected.
     pub fn boundary(&mut self, port: PortRef, value: BoundaryFn) -> Result<(), AdmissionError> {
+        self.scheduled_boundary(port, value, Vec::new())
+    }
+
+    /// Prescribe a port input and the absolute times [s] at which its law
+    /// may change. The immutable schedule must be finite and strictly
+    /// increasing; events at or before the accepted clock are skipped.
+    ///
+    /// The ordinary step negotiation ends at the next event, including
+    /// during adaptive trials and checkpoint replay. The closure still
+    /// supplies the value for the admitted interval. Smooth inputs need
+    /// no events; scheduling a knot does not bound error between knots.
+    ///
+    /// # Errors
+    /// A port with no input side, an already connected port, or an invalid
+    /// schedule. A refusal claims no port and retains no part of the schedule.
+    pub fn scheduled_boundary(
+        &mut self,
+        port: PortRef,
+        value: BoundaryFn,
+        event_times_s: Vec<f64>,
+    ) -> Result<(), AdmissionError> {
         if self.spec(port).input_width() == 0 {
             return Err(AdmissionError::Role {
                 port: self.label(port),
                 needs: "a port with an input side",
             });
         }
+        for (index, &time_s) in event_times_s.iter().enumerate() {
+            if !time_s.is_finite() || (index > 0 && time_s <= event_times_s[index - 1]) {
+                return Err(AdmissionError::BoundarySchedule {
+                    port: self.label(port),
+                    index,
+                    time_s,
+                });
+            }
+        }
         self.check_free(&[port])?;
         self.take(&[port]);
         self.boundaries.push((port, value));
+        self.boundary_events.push(event_times_s);
         Ok(())
     }
 
@@ -1959,6 +1991,7 @@ impl SystemBuilder {
             connections: self.connections,
             audit_groups,
             boundaries: self.boundaries,
+            boundary_events: self.boundary_events,
             boundary_values,
             drivers,
             blocks,
@@ -2336,6 +2369,7 @@ pub struct System {
     /// connection's row holds it.
     audit_groups: Vec<Vec<usize>>,
     boundaries: Vec<(PortRef, BoundaryFn)>,
+    boundary_events: Vec<Vec<f64>>,
     boundary_values: Vec<Vec<f64>>,
     drivers: Vec<Driver>,
     blocks: Vec<Block>,
@@ -3623,10 +3657,10 @@ impl System {
 
     /// Advance by at most `dt_max_s`.
     ///
-    /// The step is the largest that every component's `limit_dt_s` and
-    /// `next_event_s` allow, shortened further if a component asks during the
-    /// trial. All candidates are audited and admitted before any is
-    /// published.
+    /// The step respects every component's `limit_dt_s` and `next_event_s`
+    /// and every scheduled boundary event, shortened further if a component
+    /// asks during the trial. All candidates are audited and admitted before
+    /// any is published.
     ///
     /// # Errors
     /// Any [`SystemError`]; the system is unchanged when a step fails.
@@ -3663,6 +3697,30 @@ impl System {
                 next = next.min(event);
             }
             dt_s = next;
+        }
+
+        // Schedules are immutable: lookup from the accepted clock needs no
+        // cursor to advance, restore or serialize. Reuse the source-clock
+        // policy so a strict cap cannot strand a rounding-sized remainder.
+        let next_boundary = self
+            .boundary_events
+            .iter()
+            .enumerate()
+            .filter_map(|(boundary, events)| {
+                let next = events.partition_point(|&event| event <= self.time.value());
+                events.get(next).map(|&time_s| (boundary, time_s))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((boundary, time_s)) = next_boundary {
+            let event_s = self.time.interval_to(time_s);
+            if !(event_s > 0.0) {
+                return Err(SystemError::Negotiation {
+                    node: self.ledger.boundaries[boundary].port.clone(),
+                    proposed_s: dt_s,
+                    returned_s: event_s,
+                });
+            }
+            dt_s = self.time.limit_before_event(dt_s, event_s).min(event_s);
         }
 
         self.unresolved = 0;

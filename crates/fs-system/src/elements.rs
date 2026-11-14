@@ -361,6 +361,20 @@ impl Waveform {
         }
     }
 
+    /// Absolute times at which a table's slope may change, in increasing
+    /// order. Constants, sine waves and one-knot tables have no such events.
+    ///
+    /// A prescribed input can pass these times to
+    /// [`crate::SystemBuilder::scheduled_boundary`]. For a vector of
+    /// waveforms, pass their sorted, deduplicated union.
+    pub fn event_times_s(&self) -> impl Iterator<Item = f64> + '_ {
+        let knots = match &self.0 {
+            Shape::Table(knots) if knots.len() > 1 => knots.as_slice(),
+            _ => &[],
+        };
+        knots.iter().map(|knot| knot.0)
+    }
+
     /// Time to the next table knot, strictly after the accepted source
     /// clock. Each knot may change the slope, including where a held
     /// endpoint joins a ramp. The driver must resolve that change before
@@ -373,14 +387,7 @@ impl Waveform {
         match &self.0 {
             Shape::Table(knots) if knots.len() > 1 => {
                 let next = knots.partition_point(|knot| knot.0 <= t_s);
-                knots.get(next).map(|knot| {
-                    // Subtract from the full clock, retaining the low bits
-                    // that `value()` rounded. Adding this interval then
-                    // lands on the knot on the accepted clock too.
-                    let mut from_knot = clock_s;
-                    from_knot.add(-knot.0);
-                    -from_knot.value()
-                })
+                knots.get(next).map(|knot| clock_s.interval_to(knot.0))
             }
             Shape::Constant(_) | Shape::Sine { .. } | Shape::Table(_) => None,
         }
@@ -391,15 +398,7 @@ impl Waveform {
     /// leaves a useful final step. Distinct nearby knots are still events.
     fn limit_dt_s(&self, clock_s: Sum, proposed_s: f64) -> f64 {
         if let Some(event_s) = self.next_event_s(clock_s) {
-            let mut at_event = clock_s;
-            at_event.add(event_s);
-            let mut after_cap = clock_s;
-            after_cap.add(proposed_s);
-            let leftover_s = at_event.value() - after_cap.value();
-            let roundoff_s = 8.0 * f64::EPSILON * clock_s.value().abs().max(at_event.value().abs());
-            if event_s > proposed_s && leftover_s > 0.0 && leftover_s <= roundoff_s {
-                return proposed_s.min(0.5 * event_s);
-            }
+            return clock_s.limit_before_event(proposed_s, event_s);
         }
         proposed_s
     }

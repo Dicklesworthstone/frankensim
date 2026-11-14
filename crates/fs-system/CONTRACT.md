@@ -132,6 +132,9 @@ physics owners below fs-couple can be composed without it.
   `elements::Restriction` reports zero. Other owners must opt in before the
   kernel can claim their inventory balance.
 - `boundary(port, f)`: the input side of a port prescribed as `f(t0, dt)`.
+- `scheduled_boundary(port, f, event_times_s)`: the same input with immutable,
+  finite, strictly increasing absolute event times. The step negotiation
+  respects the next future event using the kernel's compensated clock.
 - `System::step(dt_max, cx) -> StepReport`, `state`, `last_input`,
   `last_output`, `last_allowance`, `guess`, `plan_shape`, `plan_loops`,
   `time_s`, `steps`, `ledger`, `set_config`. `plan_loops` lists, per loop
@@ -3046,3 +3049,39 @@ inertias still need a constraint solve or lowering. Only a mean flow is returned
 at `b` (`EndOfStep::Untold`), so endpoint-dependent load lines are not admitted
 there. This component advances the variable-ratio part of bead `.5.3`; the
 other connection and kinematics work remains open.
+
+## Scheduled boundary events
+
+`SystemBuilder::scheduled_boundary(port, value, event_times_s)` lets any
+prescribed port declare the absolute times [s] at which its input law may
+change. A schedule is finite and strictly increasing; an invalid entry is
+`AdmissionError::BoundarySchedule`, naming the port and entry, and the builder
+claims no port. Empty schedules retain the behavior of `boundary(port, value)`.
+The callback still fills the values for the admitted interval, so this works
+for power, heat, signal, field and stream inputs and for endpoint spans.
+
+The ordinary step driver finds the earliest future boundary event after the
+component limits and events have been checked. Events at or before the accepted
+clock are ignored. Its interval retains the clock's compensation and uses the
+same near-knot cap policy as `Force`, `FlowSource` and `Heater`: a strict cap
+that would strand only clock rounding leaves half the remaining interval.
+Distinct adjacent representable event times remain distinct. Lookup allocates
+nothing and advances no cursor. Failed proposals, checkpoint restore and
+adaptive coarse/half-step trials therefore see the same immutable schedule.
+Scheduled times participate in the durable problem identity; existing graphs
+with no scheduled boundaries retain their previous identities. Boundary
+callback captures remain external to snapshots and must reproduce on replay.
+
+`Waveform::event_times_s` exposes all knots of a table with at least two rows,
+including its transitions to and from held endpoint values. Constants, sines
+and one-knot tables expose none. A vector input uses the sorted, deduplicated
+union of its waveforms' event times. Raw unscheduled callbacks remain supported;
+the kernel does not infer their events, and knowing event times supplies no
+accuracy bound between them or guarantee that the declared schedule is complete.
+
+`tests/system_g0.rs` exercises coarse requests across two boundary schedules,
+independent ramp-force integrals and input work, refusal/retry and exact
+checkpoint replay, compensated near-knot steps and adjacent times, atomic
+schedule admission and problem identity. `tests/adaptive.rs` exercises the same
+negotiation through step doubling, an invalid-estimate rewind and independently
+integrated heat input. The waveform-event assertions remain in `tests/elements.rs`.
