@@ -81,7 +81,9 @@ pub struct NonlinearStepSolution {
     pub initial_residual_j: f64,
     /// Recomputed norm of F(T_new) on the published field, joules.
     pub residual_j: f64,
-    /// Fixed atol + rtol * initial_residual_j gate, joules.
+    /// Fixed atol + rtol * initial_residual_j gate, joules. `residual_j`
+    /// exceeds it only when a contact Newton stopped at the field's
+    /// resolution (`advance_nonlinear_prescribed_with_temperature_contacts`).
     pub threshold_j: f64,
 }
 
@@ -289,7 +291,13 @@ impl BackwardEuler<'_> {
     /// the separate strict two-sided contact linearization.
     ///
     /// The accepted endpoint is returned only after the original nonlinear
-    /// residual and energy gates pass. Geometry, pressure and all nonthermal
+    /// residual and energy gates pass, with one exception for the residual
+    /// gate: a final line search rejected with its smallest trial equal to the
+    /// field bit for bit. The Newton step then moves no free temperature (the
+    /// field's floating-point resolution along the Newton direction), so that
+    /// field goes to the unchanged energy gate, and its `residual_j` stays
+    /// above `threshold_j` in the report. Every other stall refuses. Callers
+    /// keep their own physical gates. Geometry, pressure and all nonthermal
     /// source coordinates remain fixed for the step.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub fn advance_nonlinear_prescribed_with_temperature_contacts(
@@ -327,9 +335,10 @@ impl BackwardEuler<'_> {
         let mut work = 0usize;
         let mut backtracks = 0usize;
         let mut worst_linear_residual = 0.0_f64;
+        let mut at_resolution = false;
         loop {
             poll(cx, updates)?;
-            if ev.norm <= threshold_j {
+            if ev.norm <= threshold_j || at_resolution {
                 let residual_j = ev.norm;
                 let step = self.finish_step(
                     cx, problem, Some(applied.frozen_interfaces()), old, dt_s, config,
@@ -433,6 +442,17 @@ impl BackwardEuler<'_> {
                     }
                 }
                 if rejected == nonlinear.line_search.max_backtracks {
+                    // The line search evaluates its smallest trial last. When
+                    // that trial is the field to the bit, the Newton step moves
+                    // no free temperature: the field is at its floating-point
+                    // resolution along the Newton direction, where a target
+                    // below the residual's rounding floor cannot be met. That
+                    // field goes to the unchanged energy gate in finish_step.
+                    at_resolution = dofs.free().iter()
+                        .all(|&vertex| trial[vertex].to_bits() == temperature[vertex].to_bits());
+                    if at_resolution {
+                        break;
+                    }
                     return Err(ConductionError::LineSearchFailed {
                         iteration: updates, backtracks: rejected, smallest_step: alpha,
                     });
@@ -442,7 +462,9 @@ impl BackwardEuler<'_> {
                     .ok_or_else(|| invalid("nonlinear contact backtrack count overflow"))?;
                 alpha *= nonlinear.line_search.shrink;
             }
-            updates += 1;
+            if !at_resolution {
+                updates += 1;
+            }
         }
     }
 

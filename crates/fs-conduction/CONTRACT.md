@@ -1115,6 +1115,13 @@ Publication requires both the nonlinear solver's endpoint gate and a fresh
 complete contact endpoint audit against the caller's absolute joule residual and
 energy tolerances. The returned contact receipts therefore describe the exact
 published temperature field; no outer Picard replacement solve is hidden.
+A Newton run whose final line search is rejected skips the solver's numerical
+residual gate only when the smallest trial, which the line search evaluates
+last, equals the field bit for bit. The Newton step then moves no free
+temperature, and a numerical target below the residual's rounding floor cannot
+be met at that field. That field still meets the step's energy gate and the
+fresh contact audit above, and its report keeps `residual_j` above
+`threshold_j`. Every other stall refuses.
 Geometry, pressure, contact area and all nonthermal source coordinates remain
 fixed. This is backward Euler with constant prepared heat capacity; variable
 caloric storage and latent heat remain owned by the primary-enthalpy path.

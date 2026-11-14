@@ -174,3 +174,66 @@ fn g1_coupled_capacity_newton_matches_the_existing_physical_contact_endpoint() {
             coupled.applied_contacts.quadrature_states());
     });
 }
+
+#[test]
+fn g1_capacity_newton_stalled_at_field_resolution_is_judged_by_the_energy_and_contact_gates() {
+    // A Newton target far below the residual's rounding floor cannot be met.
+    // Newton reaches the floor, and its last line search is rejected with a
+    // smallest trial that moves no free temperature. That field passes the
+    // unchanged energy gate and the caller's fresh contact audit, and its
+    // report keeps the residual above the threshold. With either gate at the
+    // same unreachable target, the same run is refused by that gate.
+    context(&CancelGate::new_clock_free(),|cx| {
+        let mesh=mesh();
+        let bc=ThermalBoundaryBuilder::new(&mesh).adiabatic_remainder().finish().unwrap();
+        let card=card(1.);
+        let set=contacts(cx,&mesh,&bc,&card,false);
+        let capacities=[
+            VolumetricHeatCapacity::declared(10.).unwrap(),
+            VolumetricHeatCapacity::declared(20.).unwrap(),
+        ];
+        let engine=BackwardEuler::per_element(cx,&mesh,&capacities).unwrap();
+        let material=material(true);
+        let source=ScalarField::Nodal(SOURCE.to_vec());
+        let problem=ConductionProblem {mesh:&mesh,boundary:&bc,material:&material,
+            element_materials:None,source:&source};
+        let old=INITIAL.to_vec();
+        let before=old.clone();
+        let floor=NonlinearStepConfig {residual_rtol:1e-30,residual_atol_j:0.,max_iterations:64,
+            ..nonlinear()};
+
+        let stalled=engine.advance_nonlinear_prescribed_with_temperature_contacts(
+            cx,problem,&set,&old,0.5,config(),floor,1,
+        ).unwrap();
+        assert!(stalled.step.residual_j>stalled.step.threshold_j,
+            "{} J is below its {} J target",stalled.step.residual_j,stalled.step.threshold_j);
+        assert!(stalled.step.backtracks>=floor.line_search.max_backtracks);
+        assert!(stalled.step.step.energy_residual_j.abs()<=config().energy_tolerance_j);
+        let converged=engine.advance_nonlinear_prescribed_with_temperature_contacts(
+            cx,problem,&set,&old,0.5,config(),nonlinear(),1,
+        ).unwrap();
+        assert!(converged.step.residual_j<=converged.step.threshold_j);
+        for (&actual,&reference) in stalled.step.step.temperature.iter()
+            .zip(&converged.step.step.temperature)
+        {
+            near(actual,reference,1e-9);
+        }
+        let audited=set.advance_capacity_newton(
+            cx,&engine,problem,&old,0.5,config(),floor,coupling(),1,
+        ).unwrap();
+        assert_eq!(audited.conduction.temperature,stalled.step.step.temperature);
+        assert!(audited.physical.residual_norm_j<=coupling().residual_tolerance_j);
+
+        let mut exact=config();exact.energy_tolerance_j=1e-30;
+        let refused=engine.advance_nonlinear_prescribed_with_temperature_contacts(
+            cx,problem,&set,&old,0.5,exact,floor,1,
+        ).unwrap_err();
+        assert!(format!("{refused:?}").contains("transient energy residual"),"{refused:?}");
+        let mut unreachable=coupling();unreachable.residual_tolerance_j=1e-30;
+        let refused=set.advance_capacity_newton(
+            cx,&engine,problem,&old,0.5,config(),floor,unreachable,1,
+        ).unwrap_err();
+        assert!(format!("{refused:?}").contains("fails physical gates"),"{refused:?}");
+        assert_eq!(old,before);
+    });
+}
