@@ -13,6 +13,11 @@
 //! with one that is not an involution. Through its drive port, the audit
 //! admits a balance or an endpoint one subnormal off at a zero tolerance (the
 //! f64 underflow allowance) and still refuses a defect of 1e-300 J.
+//!
+//! Built in units changed by powers of two, each base dimension alone and all
+//! six together, the reference passes `check_unit_rescaling` to the bit. It
+//! is refused with its damping left in the old units, with a signal port, and
+//! with an exponent beyond the limit.
 
 use core::cell::Cell;
 use core::num::NonZeroUsize;
@@ -20,14 +25,15 @@ use core::num::NonZeroUsize;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cancelled, Cx, ExecMode, StreamKey};
 use fs_ports::component::conformance::{
-    Case, Failure, Observed, ReversalAllowance, check_component, check_port_tangent,
-    check_time_reversal,
+    Case, Failure, Observed, ReversalAllowance, UnitExponents, check_component, check_port_tangent,
+    check_time_reversal, check_unit_rescaling, unit_factor,
 };
 use fs_ports::component::{
     Carrier, Class, Component, ContractViolation, PortLayout, PortRole, PortSpec, PortTangent,
     Proposal, Receipt, StepAudit, audit_step,
 };
 use fs_ports::{PortKind, StableId};
+use fs_qty::Dims;
 
 fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let pool = ArenaPool::new(ArenaConfig::default());
@@ -741,4 +747,113 @@ fn a_reversal_that_is_not_an_involution_is_refused() {
     };
     let law = refused_at(&undamped(), &doubled);
     assert_eq!(law, "time reversal is an involution: R(R(x)) == x");
+}
+
+/// Each base dimension alone, then all six together, as base-2 exponents in
+/// the order `[m, kg, s, K, A, mol]`.
+const UNIT_CHANGES: [UnitExponents; 7] = [
+    [3, 0, 0, 0, 0, 0],
+    [0, -2, 0, 0, 0, 0],
+    [0, 0, 5, 0, 0, 0],
+    [0, 0, 0, 2, 0, 0],
+    [0, 0, 0, 0, -3, 0],
+    [0, 0, 0, 0, 0, 1],
+    [3, -2, 5, 2, -3, 1],
+];
+
+/// The reference in the units `exponents` name: its mass [kg], stiffness
+/// [kg s^-2] and damping [kg s^-1], each times the factor of its dimensions.
+fn reference_in_units(exponents: &UnitExponents) -> SpringMassDamper {
+    let factor = |dimensions: [i8; 6]| unit_factor(Dims(dimensions), exponents);
+    let mut component = SpringMassDamper::new(Fault::None);
+    component.mass_kg *= factor([0, 1, 0, 0, 0, 0]);
+    component.stiffness_n_m *= factor([0, 1, -2, 0, 0, 0]);
+    component.damping_n_s_m *= factor([0, 1, -1, 0, 0, 0]);
+    component
+}
+
+/// The oscillator's state in those units: position [m], velocity [m s^-1].
+fn oscillator_in_units(state: &Oscillator, exponents: &UnitExponents) -> Oscillator {
+    Oscillator {
+        position_m: state.position_m * unit_factor(Dims([1, 0, 0, 0, 0, 0]), exponents),
+        velocity_m_s: state.velocity_m_s * unit_factor(Dims([1, 0, -1, 0, 0, 0]), exponents),
+    }
+}
+
+#[test]
+fn the_reference_keeps_its_law_in_other_units_to_the_bit() {
+    let gate = CancelGate::new_clock_free();
+    for exponents in &UNIT_CHANGES {
+        let seen = with_cx(&gate, |cx| {
+            check_unit_rescaling(
+                &reference_in_units,
+                &case(),
+                &oscillator_in_units,
+                exponents,
+                cx,
+            )
+        })
+        .unwrap_or_else(|failure| panic!("units {exponents:?}: {failure}"));
+        assert!(matches!(seen, Observed::Stepped { .. }), "{seen:?}");
+    }
+}
+
+/// The law `check_unit_rescaling` refuses the component `build` makes at,
+/// in the units `exponents` name.
+fn rescaling_refused_at(
+    build: &dyn Fn(&UnitExponents) -> SpringMassDamper,
+    exponents: &UnitExponents,
+) -> &'static str {
+    let gate = CancelGate::new_clock_free();
+    let failure = with_cx(&gate, |cx| {
+        check_unit_rescaling(build, &case(), &oscillator_in_units, exponents, cx)
+    })
+    .expect_err("refused");
+    let Failure::Law { law, detail } = failure else {
+        panic!("expected a law failure, got {failure}");
+    };
+    eprintln!("refused: {law} ({detail})");
+    law
+}
+
+#[test]
+fn damping_left_in_the_old_units_is_refused_at_the_outputs() {
+    // Damping is kg/s: unscaled, it is 2^7 times too large in units where
+    // the kilogram is 2^-2 and the second 2^5 of the old ones.
+    let kept = |exponents: &UnitExponents| {
+        let mut component = reference_in_units(exponents);
+        component.damping_n_s_m = SpringMassDamper::new(Fault::None).damping_n_s_m;
+        component
+    };
+    let law = rescaling_refused_at(&kept, &UNIT_CHANGES[6]);
+    assert_eq!(
+        law,
+        "the rescaled outputs are the base outputs in the new units"
+    );
+    // The damping has no metres, so a change of the metre alone cannot see it.
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        check_unit_rescaling(&kept, &case(), &oscillator_in_units, &UNIT_CHANGES[0], cx)
+    })
+    .expect("damping has no length");
+}
+
+#[test]
+fn a_signal_port_or_an_exponent_beyond_the_limit_is_refused_before_a_step() {
+    let signalling = |exponents: &UnitExponents| {
+        let mut component = reference_in_units(exponents);
+        component.ports[1] =
+            PortSpec::signal_out(StableId::new("heat").expect("id"), NonZeroUsize::MIN);
+        component
+    };
+    let law = rescaling_refused_at(&signalling, &UNIT_CHANGES[6]);
+    assert_eq!(
+        law,
+        "unit rescaling is checked on power and heat ports only"
+    );
+    let law = rescaling_refused_at(&reference_in_units, &[9, 0, 0, 0, 0, 0]);
+    assert_eq!(
+        law,
+        "unit exponents are at most UNIT_EXPONENT_LIMIT in size"
+    );
 }

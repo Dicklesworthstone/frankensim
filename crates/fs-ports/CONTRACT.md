@@ -302,11 +302,55 @@ own for this check. G0 tests in `tests/component_reference.rs`:
 - a reversal that keeps the velocity fails the outputs law;
 - a reversal that is not an involution is refused first.
 
+`check_unit_rescaling` checks, at one point, that a component keeps its law
+in other units. The test supplies `build`, which makes the component in the
+units that base-2 exponents name (`UnitExponents`, one per SI base dimension
+`[m, kg, s, K, A, mol]`), each parameter times the factor of its dimensions
+(`unit_factor`), and `scale_state` for the state. The kit scales the step,
+and every input and output by the factor of its port's dimensions, taken
+from the port alone: a power port's from its kind, a heat port's kelvin and
+watts. Every factor is a power of two, so the laws hold to the bit, with no
+tolerance:
+- every exponent is at most `UNIT_EXPONENT_LIMIT` (8) in size, and every
+  number scaled or compared stays zero or normal;
+- every port is a power port without a field metric, or a heat port;
+- the rescaled component has the base ports, and both cases pass
+  `check_component`;
+- the rescaled step is taken or shortened as the base step is, and its
+  outputs, its end state and its receipt (stored change, dissipation,
+  numerical loss, energy tolerance, entropy generated) are the base ones in
+  the new units;
+- so are the start's stored energy and mass, `limit_dt_s` and
+  `next_event_s`.
+
+G0 tests in `tests/component_reference.rs`:
+- the reference passes in units changed in each base dimension alone and in
+  all six together;
+- with its damping left in the old units it is refused at the outputs, and
+  it passes a change of the metre alone, which damping does not see;
+- with a signal port, or with an exponent of 9, it is refused before a step.
+
+Power pairing, effort times flow in watts, belongs to the seven port kinds,
+not to a component: `PortSchema::try_new` refuses a pair whose product is
+not W. fs-couple/tests/couple.rs pins every kind's canonical pair through it
+(`port_schema_v2_scalar_seed_migration_goldens`,
+`extended_port_kinds_have_watt_pairings_and_kind_identity`).
+
 **No claim.** v0 has no entropy on stream ports and no multistage port
 values. The kernel cannot check that a component's `identity_words` name every parameter of its physics; only the component knows them. The kit
-does not yet check `StageResidual`, unit rescaling or temporal order.
+does not yet check `StageResidual` or temporal order.
 The audit's underflow allowance is absolute, in joules, so below 2^-968 J
 (about 4.0e-292 J) the audit is not covariant under a change of units.
+`check_unit_rescaling` is exact only while every non-polynomial function is
+applied to a dimensionless group and nothing overflows or goes subnormal. A
+function of a dimensional value (`exp(T / 300)`, `ln(p)`) breaks it just as
+a hidden constant does, which is a finding too. A step that the audit
+admits only within its underflow allowance can be refused in other units,
+and `check_unit_rescaling` then fails at the rescaled `check_component`.
+Which dimensions each parameter and each part of the state has, in `build`
+and `scale_state`, stays the test's claim. Stream, signal and field-metric
+ports are refused; the receipt's `residual` and `tolerance` are in the
+owner's units and are not compared.
 `check_time_reversal` sees a state only through the outputs, the stored
 energy and what the test's `observe` returns, so what none of them shows is
 not checked. Whether `R` is the physical reversal, and whether `observe` and

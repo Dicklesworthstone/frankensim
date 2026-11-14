@@ -16,20 +16,25 @@
 //! line, and that a zero compliance gives `propose`. For a component a test
 //! claims reversible, [`check_time_reversal`]: a step there and back, each
 //! audited and dissipating nothing, whose outputs flip with their parity and
-//! whose end returns to the start within bounds the test derives.
+//! whose end returns to the start within bounds the test derives. For a
+//! component a test builds in any units, [`check_unit_rescaling`]: the same
+//! step in units changed by powers of two, which must give the same numbers
+//! in the new units, to the bit.
 //!
 //! Not covered yet (bead `frankensim-rc-1109-root-3gc12.5.11`):
-//! [`StageResidual`](super::StageResidual) checks, unit rescaling, and the
-//! temporal order hook.
+//! [`StageResidual`](super::StageResidual) checks and the temporal order
+//! hook.
 
 use core::fmt;
 
 use fs_exec::{CancelGate, Cx};
+use fs_qty::{DIMENSION_COUNT, Dims, Energy, Mass, Power, Temperature, Time};
 
 use super::{
     Carrier, Component, ContractViolation, LoadLine, PortLayout, PortRole, PortSpec, PortTangent,
     Proposal, Receipt, StepAudit, audit_carried_step, audit_mass_step, audit_step,
 };
+use crate::Entropy;
 
 /// One operating point at which a component is checked.
 #[derive(Debug, Clone, Copy)]
@@ -917,4 +922,348 @@ where
         energy_gap_j,
         allowance: bounds,
     })
+}
+
+/// Base-2 exponents of a change of units, one per SI base dimension in the
+/// order of [`Dims`], `[m, kg, s, K, A, mol]`. In the new units a number of
+/// dimensions `d` is `2^(d . exponents)` times the old one: exponent `3` on
+/// metres measures a length in eighths of a metre.
+pub type UnitExponents = [i32; DIMENSION_COUNT];
+
+/// The largest exponent [`check_unit_rescaling`] takes, in size.
+pub const UNIT_EXPONENT_LIMIT: i32 = 8;
+
+/// `2^(d . exponents)`: the factor by which a number of dimensions `d`
+/// changes in the units `exponents` name. Exact while it is a normal `f64`;
+/// infinity or zero beyond that.
+#[must_use]
+pub fn unit_factor(dimensions: Dims, exponents: &UnitExponents) -> f64 {
+    let power: i64 = dimensions
+        .0
+        .iter()
+        .zip(exponents)
+        .map(|(dimension, exponent)| i64::from(*dimension) * i64::from(*exponent))
+        .sum();
+    match u64::try_from(power + 1023) {
+        // The biased exponent of a normal f64, over a zero fraction.
+        Ok(biased @ 1..=2046) => f64::from_bits(biased << 52),
+        _ if power > 0 => f64::INFINITY,
+        _ => 0.0,
+    }
+}
+
+const RANGE_LAW: &str = "the rescaled numbers stay in the normal range of f64";
+const STEP_LAW: &str = "the rescaled step is taken or shortened as the base step is";
+const START_LAW: &str =
+    "the rescaled start's stored energy, mass and step limits are the base ones in the new units";
+
+/// Zero or a normal `f64`: a number a power of two scales exactly.
+fn scalable(value: f64) -> bool {
+    value == 0.0 || value.is_normal()
+}
+
+/// Dimensions of every input and output coefficient, from the ports alone:
+/// a power port's from its kind, a heat port's kelvin and watts.
+fn coefficient_dimensions<E>(
+    ports: &[PortSpec],
+    layout: &PortLayout,
+) -> Result<(Vec<Dims>, Vec<Dims>), Failure<E>> {
+    let mut inputs = vec![Dims::NONE; layout.input_len()];
+    let mut outputs = vec![Dims::NONE; layout.output_len()];
+    for (index, port) in ports.iter().enumerate() {
+        let pair = match port.carrier() {
+            Carrier::Power(kind) if port.field_metric().is_none() => Some((
+                kind.canonical_effort_dimensions(),
+                kind.canonical_flow_dimensions(),
+            )),
+            Carrier::Heat => Some((Temperature::DIMS, Power::DIMS)),
+            _ => None,
+        };
+        let (input, output) = match (pair, port.role()) {
+            (Some((effort, flow)), PortRole::EffortIn) => (effort, flow),
+            (Some((effort, flow)), PortRole::FlowIn) => (flow, effort),
+            (_, role) => {
+                let metric = port
+                    .field_metric()
+                    .map_or("", |_| " through a field metric");
+                return Err(law(
+                    "unit rescaling is checked on power and heat ports only",
+                    format!(
+                        "port `{}` carries {:?} as {role:?}{metric}",
+                        port.id().as_str(),
+                        port.carrier(),
+                    ),
+                ));
+            }
+        };
+        inputs[layout.input_range(index)].fill(input);
+        outputs[layout.output_range(index)].fill(output);
+    }
+    Ok((inputs, outputs))
+}
+
+/// Each rescaled number against the base number times its factor, to the
+/// bit: `(name, rescaled, base, factor)`.
+fn in_new_units<E>(
+    law_text: &'static str,
+    numbers: impl IntoIterator<Item = (String, f64, f64, f64)>,
+) -> Result<(), Failure<E>> {
+    for (name, rescaled, base, factor) in numbers {
+        let expected = base * factor;
+        if !scalable(expected) {
+            return Err(law(
+                RANGE_LAW,
+                format!("{name}: {base:e} x {factor:e} = {expected:e}"),
+            ));
+        }
+        if rescaled.to_bits() != expected.to_bits() {
+            return Err(law(
+                law_text,
+                format!("{name}: {rescaled:e}, not {base:e} x {factor:e} = {expected:e}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The candidate and outputs of one more call: `check_component` has shown
+/// that `propose` is pure, so this is the step it checked.
+fn end_of_step<C>(
+    component: &C,
+    case: &Case<'_, C::State>,
+    outputs: usize,
+    cx: &Cx<'_>,
+) -> Result<LegEnd<C::State>, Failure<C::Error>>
+where
+    C: Component,
+{
+    let plain = |state: &mut C::State, out: &mut [f64]| {
+        component.propose(case.state, case.dt_s, case.inputs, state, out, cx)
+    };
+    let (_, candidate, outputs) = stepped(case.state, outputs, 0.0, &plain)?;
+    Ok((candidate, outputs))
+}
+
+/// Check, at one operating point, that a component keeps its law in other
+/// units.
+///
+/// `build` makes the component in the units `exponents` name, each parameter
+/// times the factor of its own dimensions ([`unit_factor`]); the base
+/// component is `build` of all-zero exponents. `scale_state` gives a state in
+/// those units. The kit scales the step by the factor of seconds and each
+/// input and output by the factor of its port's dimensions: a power port's
+/// from its kind, a heat port's kelvin and watts. Every factor is a power of
+/// two, so the change of units is exact in binary, and the laws hold to the
+/// bit, with no tolerance. In order:
+/// 1. Every exponent is at most [`UNIT_EXPONENT_LIMIT`] in size.
+/// 2. Every port is a power port without a field metric, or a heat port.
+/// 3. The rescaled component has the base component's ports.
+/// 4. The base case passes [`check_component`]; so does the rescaled case:
+///    the state and the stale slot through `scale_state`, the step and the
+///    inputs times their factors.
+/// 5. The rescaled step is taken where the base step is taken, and shortened
+///    where it is shortened, to the base step times the factor of seconds.
+/// 6. The rescaled outputs are the base outputs times their factors.
+/// 7. The rescaled step ends at `scale_state` of the base end.
+/// 8. The rescaled receipt's stored change, dissipation, numerical loss and
+///    energy tolerance are the base ones times the factor of joules, and its
+///    entropy generated the base one times the factor of J/K.
+/// 9. At the start, the stored energy and mass, `limit_dt_s` and
+///    `next_event_s` are the base ones times the factors of joules,
+///    kilograms and seconds.
+///
+/// Every number scaled or compared stays zero or normal, or the case is
+/// refused as out of range, before any law about the component.
+///
+/// A failure is a number in the component's arithmetic that does not carry
+/// units: a constant with dimensions (an absolute tolerance, a floor in
+/// metres or kelvin, a default time), a parameter `build` left in the old
+/// units, or a function other than a power applied to a dimensional value
+/// (`exp(T / 300)`, `ln(p)`). The receipt's `residual` and `tolerance` are
+/// in the owner's units and are not compared.
+///
+/// # Errors
+/// The first [`Failure`] found.
+#[allow(clippy::too_many_lines)]
+pub fn check_unit_rescaling<C>(
+    build: &dyn Fn(&UnitExponents) -> C,
+    case: &Case<'_, C::State>,
+    scale_state: &dyn Fn(&C::State, &UnitExponents) -> C::State,
+    exponents: &UnitExponents,
+    cx: &Cx<'_>,
+) -> Result<Observed, Failure<C::Error>>
+where
+    C: Component,
+    C::State: PartialEq + fmt::Debug,
+{
+    if exponents
+        .iter()
+        .any(|exponent| exponent.abs() > UNIT_EXPONENT_LIMIT)
+    {
+        return Err(law(
+            "unit exponents are at most UNIT_EXPONENT_LIMIT in size",
+            format!("{exponents:?}"),
+        ));
+    }
+    let base = build(&[0; DIMENSION_COUNT]);
+    let rescaled = build(exponents);
+    let ports = base.ports();
+    let layout = PortLayout::new(ports).map_err(Failure::Contract)?;
+    let (input_dimensions, output_dimensions) = coefficient_dimensions(ports, &layout)?;
+    if rescaled.ports() != ports {
+        return Err(law(
+            "the rescaled component has the base component's ports",
+            format!("base {ports:?}, rescaled {:?}", rescaled.ports()),
+        ));
+    }
+    let base_seen = check_component(&base, case, cx)?;
+
+    let factor = |dimensions: Dims| unit_factor(dimensions, exponents);
+    let (seconds, joules) = (factor(Time::DIMS), factor(Energy::DIMS));
+    let dt_s = case.dt_s * seconds;
+    let inputs: Vec<f64> = case
+        .inputs
+        .iter()
+        .zip(&input_dimensions)
+        .map(|(input, dimensions)| input * factor(*dimensions))
+        .collect();
+    if let Some(value) = inputs
+        .iter()
+        .chain([&dt_s])
+        .find(|value| !scalable(**value))
+    {
+        return Err(law(
+            RANGE_LAW,
+            format!("step {dt_s:e} s, inputs {inputs:?}: {value:e}"),
+        ));
+    }
+    let start = scale_state(case.state, exponents);
+    let stale = scale_state(case.stale, exponents);
+    let rescaled_case = Case {
+        state: &start,
+        stale: &stale,
+        dt_s,
+        inputs: &inputs,
+    };
+    let seen = check_component(&rescaled, &rescaled_case, cx)?;
+
+    match (&base_seen, &seen) {
+        (
+            Observed::Stepped {
+                receipt: before, ..
+            },
+            Observed::Stepped { receipt: after, .. },
+        ) => {
+            let (base_end, base_outputs) = end_of_step(&base, case, layout.output_len(), cx)?;
+            let (end, outputs) = end_of_step(&rescaled, &rescaled_case, layout.output_len(), cx)?;
+            in_new_units(
+                "the rescaled outputs are the base outputs in the new units",
+                (0..outputs.len()).map(|index| {
+                    let scale = factor(output_dimensions[index]);
+                    let name = format!("output {index}");
+                    (name, outputs[index], base_outputs[index], scale)
+                }),
+            )?;
+            let expected = scale_state(&base_end, exponents);
+            if end != expected {
+                return Err(law(
+                    "the rescaled step ends at the base end in the new units",
+                    format!("{end:?}, not {expected:?}"),
+                ));
+            }
+            let entropy = factor(Entropy::DIMS);
+            let receipt = [
+                (
+                    "stored_change_j",
+                    after.stored_change_j,
+                    before.stored_change_j,
+                    joules,
+                ),
+                (
+                    "dissipated_j",
+                    after.dissipated_j,
+                    before.dissipated_j,
+                    joules,
+                ),
+                (
+                    "numerical_loss_j",
+                    after.numerical_loss_j,
+                    before.numerical_loss_j,
+                    joules,
+                ),
+                (
+                    "energy_tolerance_j",
+                    after.energy_tolerance_j,
+                    before.energy_tolerance_j,
+                    joules,
+                ),
+                (
+                    "entropy_generated_j_per_k",
+                    after.entropy_generated_j_per_k,
+                    before.entropy_generated_j_per_k,
+                    entropy,
+                ),
+            ];
+            in_new_units(
+                "the rescaled receipt is the base receipt in the new units",
+                receipt.map(|(name, after, before, scale)| (name.to_owned(), after, before, scale)),
+            )?;
+        }
+        (Observed::Shortened { dt_s: before }, Observed::Shortened { dt_s: after }) => {
+            in_new_units(
+                STEP_LAW,
+                [("shortened step".to_owned(), *after, *before, seconds)],
+            )?;
+        }
+        _ => {
+            return Err(law(
+                STEP_LAW,
+                format!("base {base_seen:?}, rescaled {seen:?}"),
+            ));
+        }
+    }
+
+    let owner = Failure::Owner;
+    let mut numbers = vec![
+        (
+            "stored_energy_j".to_owned(),
+            rescaled.stored_energy_j(&start).map_err(owner)?,
+            base.stored_energy_j(case.state).map_err(owner)?,
+            joules,
+        ),
+        (
+            "limit_dt_s".to_owned(),
+            rescaled.limit_dt_s(&start, dt_s).map_err(owner)?,
+            base.limit_dt_s(case.state, case.dt_s).map_err(owner)?,
+            seconds,
+        ),
+    ];
+    let optional = [
+        (
+            "stored_mass_kg",
+            rescaled.stored_mass_kg(&start).map_err(owner)?,
+            base.stored_mass_kg(case.state).map_err(owner)?,
+            factor(Mass::DIMS),
+        ),
+        (
+            "next_event_s",
+            rescaled.next_event_s(&start),
+            base.next_event_s(case.state),
+            seconds,
+        ),
+    ];
+    for (name, after, before, scale) in optional {
+        match (after, before) {
+            (Some(after), Some(before)) => numbers.push((name.to_owned(), after, before, scale)),
+            (None, None) => {}
+            _ => {
+                return Err(law(
+                    START_LAW,
+                    format!("{name}: {after:?}, base {before:?}"),
+                ));
+            }
+        }
+    }
+    in_new_units(START_LAW, numbers)?;
+    Ok(seen)
 }
