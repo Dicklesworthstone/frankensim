@@ -26,6 +26,12 @@
 //! `v_b (1 - beta)/beta` is printed as a diagnosis, not gated.
 //!
 //! **Observables.** All come from the contact receipts.
+//!
+//! **Graph.** `g2` plays the same string, law and bow as a composition on the
+//! kernel (`bowed_stick_slip_fixture/graph.rs`: fs-nlmodal's `ModalStructure`,
+//! fs-tribo's `FrictionInterface` on the load line, the bow a boundary) and
+//! judges it by the module's verdict and figures over the same tail. Its
+//! observables come from the steps the kernel takes.
 
 use fs_couple::bowed_string::runtime::{BowContactReceipt, BowedStringState};
 use fs_couple::bowed_string::{
@@ -35,6 +41,9 @@ use fs_couple::modal_acoustic_time::ModalAcousticState;
 use fs_couple::stribeck_friction::{ContactBranch, StribeckFriction};
 use fs_math::det;
 use std::sync::OnceLock;
+
+#[path = "bowed_stick_slip_fixture/graph.rs"]
+mod graph;
 
 // String fixture values follow the cello D string of the Galluzzo bowing rig
 // (Euphonics 9.6.3 Table 2: 146.8 Hz, 111 N, 2.7 g/m). They are used here as
