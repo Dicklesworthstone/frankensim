@@ -101,6 +101,11 @@ fn body<'a, const N: usize>(
     linked: bool,
     winding_cooling_w_k: f64,
 ) -> DepositionSimulation<'a> {
+    // Ambient cooling acts on the exposed surface only: the winding's 6 m2
+    // less the 1 m2 the contact covers when the pair is linked
+    // (`DepositionSimulation::exposed_area_m2`). The coefficient is taken over
+    // that area so the winding loses `winding_cooling_w_k` per kelvin.
+    let winding_exposed_m2 = if linked { 5.0 } else { 6.0 };
     let mut events = (0..N)
         .map(|i| TimedEvent {
             time_s: 0.0,
@@ -120,7 +125,7 @@ fn body<'a, const N: usize>(
                 boundary: Boundary {
                     ambient_k: 300.0,
                     htc_w_m2_k: if i == 0 {
-                        winding_cooling_w_k / 6.0
+                        winding_cooling_w_k / winding_exposed_m2
                     } else {
                         0.0
                     },
