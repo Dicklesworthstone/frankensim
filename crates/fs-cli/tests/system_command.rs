@@ -3377,3 +3377,620 @@ fn a_scene_without_stream_measurements_never_reports_zero_mass_residual() {
     assert!(json.contains("\"has_streams\":false,\"mass\":null,\"carried_kg\":[]"));
     assert!(array_values(&json, "\"totals\"", "carried_residual_kg").is_empty());
 }
+
+// Original source laws used by these scenes are authored analytic fixtures,
+// not observations of a physical material. All execution uses the real CLI.
+fn system_material_pack(cp_slope: f64, semantic_k: bool, pressure_required: bool) -> Vec<u8> {
+    use fs_evidence::ValidityDomain;
+    use fs_matdb::{
+        ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedMaterialCardPack, NormalizedPack,
+        ObservationDataset, PropertyClaim, PropertyKey, PropertyValue, Provenance,
+        UncertaintyModel,
+    };
+    use fs_material::state_point::{SPECIFIC_HEAT_CAPACITY_DIMS, THERMAL_CONDUCTIVITY_DIMS};
+    use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+
+    let mut claims = ClaimSet::new();
+    let source = "authored affine thermal laws for generic System scenes; not measured";
+    let provenance = Provenance {
+        source: source.into(),
+        license: "CC0: authored synthetic test data".into(),
+        artifact: None,
+    };
+    for (name, dims, at_290, slope) in [
+        (
+            "specific_heat_capacity",
+            SPECIFIC_HEAT_CAPACITY_DIMS,
+            1000.0,
+            cp_slope,
+        ),
+        ("density", fs_qty::Density::DIMS, 1000.0, -0.5),
+        ("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS, 2.0, 0.01),
+    ] {
+        let key = if semantic_k && name == "thermal_conductivity" {
+            PropertyKey::with_quantity(
+                name,
+                fs_qty::QuantitySpec::semantic(SemanticType::new(
+                    QuantityKind::ThermalConductivity,
+                    ValueForm::Static,
+                )),
+            )
+        } else {
+            PropertyKey::new(name, dims)
+        };
+        let mut validity = ValidityDomain::unconstrained().with("T", 290.0, 400.0);
+        if pressure_required {
+            validity = validity.with("pressure", 101_325.0, 101_325.0);
+        }
+        claims
+            .insert_claim(PropertyClaim {
+                key,
+                value: PropertyValue::Curve {
+                    abscissa: "T".into(),
+                    abscissa_dims: fs_qty::Temperature::DIMS,
+                    knots: vec![(290.0, at_290), (400.0, at_290 + 110.0 * slope)],
+                    dims,
+                },
+                validity,
+                uncertainty: if name == "specific_heat_capacity" {
+                    UncertaintyModel::RelativeHalfWidth {
+                        fraction: 0.01,
+                        confidence: 0.95,
+                    }
+                } else {
+                    UncertaintyModel::Unstated
+                },
+                interpolation: InterpolationPolicy::LinearInside,
+                observations: Vec::new(),
+                provenance: provenance.clone(),
+            })
+            .unwrap();
+    }
+    // The pack retains an authored source artifact. Its claims deliberately
+    // have no observation link, so they cannot become observation-backed.
+    claims
+        .register_observation(ObservationDataset {
+            specimen: "synthetic affine material".into(),
+            method: "analytic test fixture, not an experiment".into(),
+            artifact: fs_blake3::hash_bytes(source.as_bytes()),
+            caveats: "not measured or experimentally qualified".into(),
+            provenance,
+        })
+        .unwrap();
+    let pack = NormalizedPack::new(
+        "generic-system-thermal-fixture",
+        "test-fixture-v1",
+        fs_blake3::hash_bytes(source.as_bytes()),
+        "CC0: authored synthetic test data",
+        claims,
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    NormalizedMaterialCardPack::new(
+        MaterialStateId {
+            chemistry: "synthetic affine material".into(),
+            phase: "solid".into(),
+            process: "authored for generic composition tests".into(),
+            revision: 0,
+        },
+        pack,
+    )
+    .unwrap()
+    .to_bytes()
+}
+
+fn system_material_declaration(pack: &str, conductivity: bool) -> String {
+    let conductivity = if conductivity {
+        r#", "conductivity_property":"thermal_conductivity""#
+    } else {
+        ""
+    };
+    format!(
+        r#"{{
+      "pack":"{pack}", "phase":"solid", "temperature_axis":"T",
+      "temperature_kind":"legacy", "state":[],
+      "temperature_min_k":290.0, "temperature_max_k":400.0,
+      "reference_specific_enthalpy_j_kg":0.0,
+      "heat_capacity_property":"specific_heat_capacity", "density_property":"density"{conductivity}
+    }}"#
+    )
+}
+
+fn source_body_scene(initial_h: f64, power_w: f64, duration_s: f64) -> String {
+    let material = system_material_declaration("material.fsmcdpk", true);
+    format!(
+        r#"{{
+      "schema":"frankensim.system.v0", "duration_s":{duration_s}, "step_s":0.25,
+      "materials":{{"metal":{material}}},
+      "elements":{{"body":{{"kind":"enthalpy_body", "material":"metal",
+        "mass_kg":2.0, "specific_enthalpy_j_kg":{initial_h}}}}},
+      "connections":[{{"prescribe":"body.heat", "heat_rate_w":{power_w}}}]
+    }}"#
+    )
+}
+
+fn source_layer_scene() -> String {
+    let material = system_material_declaration("material.fsmcdpk", true);
+    format!(
+        r#"{{
+      "schema":"frankensim.system.v0", "duration_s":2.0, "step_s":0.5,
+      "materials":{{"metal":{material}}},
+      "elements":{{"wall":{{"kind":"layer_conductor", "materials":["metal","metal"],
+        "geometry":{{"kind":"planar", "distances_m":[0.1,0.2], "area_m2":0.5}}}}}},
+      "connections":[{{"prescribe":"wall.a", "temperature_k":400.0}},
+                     {{"prescribe":"wall.b", "temperature_k":300.0}}]
+    }}"#
+    )
+}
+
+fn source_scene_file(name: &str, scene: &str, pack: &[u8]) -> PathBuf {
+    let path = scratch(name, scene);
+    std::fs::write(path.parent().unwrap().join("material.fsmcdpk"), pack).unwrap();
+    path
+}
+
+fn reported_material_hash(json: &str, field: &str) -> String {
+    let prefix = format!("\"{field}\":\"");
+    let hash = json
+        .split_once(&prefix)
+        .unwrap()
+        .1
+        .split_once('"')
+        .unwrap()
+        .0;
+    assert_eq!(hash.len(), 64, "{field}: {hash}");
+    assert!(hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    hash.into()
+}
+
+#[test]
+fn material_card_calorics_drive_live_enthalpy_temperature_and_density() {
+    let pack = system_material_pack(2.0, false, false);
+    let scene = source_body_scene(0.0, 2000.0, 10.0);
+    let path = source_scene_file("card_calorics.json", &scene, &pack);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    // G1: integrate Cp=1000+2(T-290), then solve h=1000x+x².
+    let h = 2000.0 * 10.0 / 2.0;
+    let x = 2.0 * h / (1000.0 + (1_000_000.0_f64 + 4.0 * h).sqrt());
+    let t = 290.0 + x;
+    assert!((value(&json, &element("body"), "specific_enthalpy_j_kg") - h).abs() < 1e-8);
+    assert!((value(&json, &element("body"), "temperature_k") - t).abs() < 1e-9);
+    assert!(
+        (value(&json, &element("body"), "bulk_density_kg_m3") - (1000.0 - 0.5 * x)).abs() < 1e-9
+    );
+    assert!((value(&json, &element("body"), "stored_change_j") - 20_000.0).abs() < 1e-8);
+    assert!(value(&json, "\"totals\"", "energy_residual_j").abs() < 1e-8);
+    // Cp(T)=420+2T, so this is the independent body entropy increase.
+    let entropy = 2.0 * (420.0 * (t / 290.0).ln() + 2.0 * x);
+    assert!((value(&json, "\"port\":\"body.heat\"", "entropy_in_j_per_k") - entropy).abs() < 1e-9);
+    assert!(json.contains("\"uncertainty_propagated\":false"));
+    assert!(json.contains("\"kind\":\"relative-half-width\""));
+    assert!(json.contains("\"kind\":\"unstated\""));
+    assert!(json.contains("\"observation_backed\":false"));
+    assert!(json.contains("\"source_receipts\":["));
+    let decoded = fs_matdb::NormalizedMaterialCardPack::from_bytes(&pack).unwrap();
+    assert_eq!(
+        reported_material_hash(&json, "pack_hash"),
+        decoded.content_hash().to_hex()
+    );
+    assert_eq!(
+        reported_material_hash(&json, "card_hash"),
+        decoded.card().content_hash().to_hex()
+    );
+}
+
+#[test]
+fn material_card_layers_preserve_the_original_affine_conductivity_integral() {
+    for semantic in [false, true] {
+        let pack = system_material_pack(2.0, semantic, false);
+        let mut scene = source_layer_scene();
+        if semantic {
+            scene = scene.replace("\"conductivity_property\":\"thermal_conductivity\"",
+                "\"conductivity_property\":\"thermal_conductivity\",\"conductivity_kind\":\"thermal-conductivity\"");
+        }
+        let path = source_scene_file("card_conduction.json", &scene, &pack);
+        let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+        assert_eq!(code, 0, "semantic {semantic}: {stderr}");
+        // G1: k(T)=0.01T-0.9; Q=A/L integral_300^400 k(T)dT.
+        let q = 0.5 / 0.3 * (0.005 * (400.0 * 400.0 - 300.0 * 300.0) - 0.9 * 100.0);
+        assert!((value(&json, &element("wall"), "heat_rate_w") - q).abs() < 1e-7);
+        assert!((value(&json, "\"port\":\"wall.a\"", "energy_in_j") - 2.0 * q).abs() < 1e-7);
+        assert!((value(&json, "\"port\":\"wall.b\"", "energy_in_j") + 2.0 * q).abs() < 1e-7);
+        let entropy = 2.0 * q * (1.0 / 300.0 - 1.0 / 400.0);
+        assert!((value(&json, "\"totals\"", "entropy_generated_j_per_k") - entropy).abs() < 1e-9);
+        assert!(value(&json, "\"totals\"", "energy_residual_j").abs() < 1e-9);
+    }
+}
+
+#[test]
+fn source_backed_closed_thermal_network_reaches_its_energy_determined_equilibrium() {
+    let material = system_material_declaration("material.fsmcdpk", true);
+    let scene = format!(
+        r#"{{
+      "schema":"frankensim.system.v0", "duration_s":500.0, "step_s":0.5, "sample_every_s":50.0,
+      "materials":{{"metal":{material}}},
+      "elements":{{
+        "hot":{{"kind":"enthalpy_body", "material":"metal", "mass_kg":1.0,
+          "specific_enthalpy_j_kg":63600.0}},
+        "cold":{{"kind":"enthalpy_body", "material":"metal", "mass_kg":2.0,
+          "specific_enthalpy_j_kg":10100.0}},
+        "wall":{{"kind":"layer_conductor", "materials":["metal","metal"],
+          "geometry":{{"kind":"planar", "distances_m":[0.01,0.02], "area_m2":0.5}}}}
+      }},
+      "connections":[{{"join":["hot.heat","wall.a"]}},{{"join":["cold.heat","wall.b"]}}]
+    }}"#
+    );
+    let path = source_scene_file(
+        "card_thermal_equilibrium.json",
+        &scene,
+        &system_material_pack(2.0, false, false),
+    );
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    let initial_energy = 63_600.0 + 2.0 * 10_100.0;
+    let h_eq = initial_energy / 3.0;
+    let equilibrium = 290.0 + 2.0 * h_eq / (1000.0 + (1_000_000.0_f64 + 4.0 * h_eq).sqrt());
+    for name in ["hot", "cold"] {
+        assert!((value(&json, &element(name), "temperature_k") - equilibrium).abs() < 1e-6);
+    }
+    let mut samples = 0;
+    for sample in json.split("{\"time_s\":").skip(1) {
+        samples += 1;
+        let energy = value(sample, "", "hot.specific_enthalpy_j_kg")
+            + 2.0 * value(sample, "", "cold.specific_enthalpy_j_kg");
+        assert!(
+            (energy - initial_energy).abs() < 1e-6,
+            "{energy} vs {initial_energy}"
+        );
+    }
+    assert_eq!(samples, 11);
+    let entropy_change = |t0: f64| 420.0 * (equilibrium / t0).ln() + 2.0 * (equilibrium - t0);
+    let entropy = entropy_change(350.0) + 2.0 * entropy_change(300.0);
+    assert!((value(&json, "\"totals\"", "entropy_generated_j_per_k") - entropy).abs() < 1e-7);
+    assert!(value(&json, "\"totals\"", "energy_residual_j").abs() < 1e-6);
+    assert_eq!(value(&json, &element("wall"), "stored_change_j"), 0.0);
+}
+
+#[test]
+fn material_identity_follows_pack_content_and_admitted_laws_not_filenames() {
+    let scene = source_body_scene(0.0, 2000.0, 10.0);
+    let bytes = system_material_pack(2.0, false, false);
+    let path = source_scene_file("card_identity.json", &scene, &bytes);
+    let (code, original, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    std::fs::write(path.parent().unwrap().join("renamed.fsmcdpk"), &bytes).unwrap();
+    let renamed = scratch(
+        "card_renamed.json",
+        &scene.replace("material.fsmcdpk", "renamed.fsmcdpk"),
+    );
+    let (code, renamed, stderr) = run_binary(&["--json", "system", renamed.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    for field in ["pack_hash", "pack_bytes_hash", "card_hash", "caloric_hash"] {
+        assert_eq!(
+            reported_material_hash(&original, field),
+            reported_material_hash(&renamed, field)
+        );
+    }
+    assert_eq!(
+        value(&original, &element("body"), "temperature_k"),
+        value(&renamed, &element("body"), "temperature_k")
+    );
+    // The same path now names a different physical law, not a cached source.
+    std::fs::write(
+        path.parent().unwrap().join("material.fsmcdpk"),
+        system_material_pack(4.0, false, false),
+    )
+    .unwrap();
+    let (code, changed, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    for field in ["pack_hash", "card_hash", "caloric_hash"] {
+        assert_ne!(
+            reported_material_hash(&original, field),
+            reported_material_hash(&changed, field)
+        );
+    }
+    assert!(
+        value(&changed, &element("body"), "temperature_k")
+            < value(&original, &element("body"), "temperature_k")
+    );
+}
+
+#[test]
+fn material_scene_admission_refuses_unknown_mixed_and_unsupported_sources_by_name() {
+    let body = source_body_scene(0.0, 2000.0, 10.0);
+    let layer = source_layer_scene();
+    let bytes = system_material_pack(2.0, false, false);
+    source_scene_file("card_refusal_setup.json", &body, &bytes);
+    let cases = [
+        ("unknown_body", body.replace("\"material\":\"metal\"", "\"material\":\"missing\""), "missing"),
+        ("unknown_layer", layer.replace("[\"metal\",\"metal\"]", "[\"metal\",\"missing\"]"), "missing"),
+        ("mixed_body", body.replace("\"material\":\"metal\"", "\"material\":\"metal\",\"phase\":\"solid\""), "body"),
+        ("mixed_layer", layer.replace("\"materials\":[\"metal\",\"metal\"]",
+            "\"materials\":[\"metal\",\"metal\"],\"conductivity_a\":[[290,1],[400,1]]"), "wall"),
+        ("missing_k", layer.replace(", \"conductivity_property\":\"thermal_conductivity\"", ""), "conductivity"),
+        ("unknown_cp", body.replace("\"heat_capacity_property\":\"specific_heat_capacity\"",
+            "\"heat_capacity_property\":\"missing_cp\""), "missing_cp"),
+        ("source_range", body.replace("\"temperature_max_k\":400.0", "\"temperature_max_k\":401.0"), "calorics"),
+        ("phase", body.replace("\"phase\":\"solid\"", "\"phase\":\"solid-liquid\""), "phase"),
+        ("temperature_kind", body.replace("\"temperature_kind\":\"legacy\"", "\"temperature_kind\":\"temperature-difference\""), "temperature_kind"),
+        ("conductivity_kind", layer.replace("\"conductivity_property\":\"thermal_conductivity\"",
+            "\"conductivity_property\":\"thermal_conductivity\",\"conductivity_kind\":\"pressure\""), "conductivity_kind"),
+        ("temperature_in_context", body.replace("\"state\":[]", "\"state\":[{\"name\":\"T\",\"value\":\"300 K\",\"kind\":\"legacy\"}]"), "state"),
+        ("initial_domain", source_body_scene(122_101.0, 0.0, 1.0), "OutsideEnthalpyDomain"),
+    ];
+    for (name, scene, expected) in cases {
+        let (code, stderr) = refused(&format!("card_{name}.json"), &scene);
+        assert_eq!(code, 3, "{name}: {stderr}");
+        assert!(stderr.contains(expected), "{name}: {stderr}");
+    }
+    std::fs::write(
+        scratch("card_pressure_setup.json", &body)
+            .parent()
+            .unwrap()
+            .join("material.fsmcdpk"),
+        system_material_pack(2.0, false, true),
+    )
+    .unwrap();
+    let (code, stderr) = refused("card_missing_pressure.json", &body);
+    assert_eq!(code, 3, "{stderr}");
+    assert!(
+        stderr.contains("materials.metal") && stderr.contains("NoClaimInDomain"),
+        "{stderr}"
+    );
+    let (code, _, stderr) = run_binary(&[
+        "--json",
+        "system",
+        source_scene_file(
+            "card_invalid_pack.json",
+            &body,
+            b"not a normalized material card pack",
+        )
+        .to_str()
+        .unwrap(),
+    ]);
+    assert_eq!(code, 3, "{stderr}");
+    assert!(stderr.contains("materials.metal.pack"), "{stderr}");
+}
+
+#[test]
+fn material_domain_exit_preserves_native_scene_state_and_original_source_laws() {
+    let bytes = system_material_pack(2.0, false, false);
+    let text = source_body_scene(122_099.0, 2000.0, 1.0);
+    let path = source_scene_file("card_runtime_domain.json", &text, &bytes);
+    let mut scene = fs_cli::SystemScene::from_text(&text, &path).unwrap();
+    let before = scene.render_json();
+    // Admitted components own their prepared laws: the runtime does not reread
+    // the external file, including on an unsuccessful trial.
+    std::fs::write(
+        path.parent().unwrap().join("material.fsmcdpk"),
+        b"changed after admission",
+    )
+    .unwrap();
+    scene_context(|cx, _| {
+        let error = scene.advance(0.25, cx).unwrap_err();
+        assert_eq!(error.exit_code, fs_cli::exit::REFUSED);
+        assert!(error.message.contains("OutsideEnthalpyDomain"), "{error}");
+        assert_eq!(scene.render_json(), before);
+        assert_eq!(scene.steps(), 0);
+        assert_eq!(scene.time_s(), 0.0);
+    });
+}
+
+#[test]
+fn coarse_prescribed_force_keeps_pulse_timing_in_fixed_and_adaptive_scenes() {
+    let base = r#"{
+  "schema": "frankensim.system.v0", "duration_s": 1.0, "step_s": 1.0,
+  "sample_every_s": 0.125,
+  "elements": {"body": {"kind": "mass", "mass_kg": 2.0}},
+  "connections": [{"prescribe": "body.p", "force_n": {
+    "table": [[0,0], [0.125,0], [0.25,4], [0.375,0], [1,0]]
+  }}]
+}"#;
+    for adaptive in [false, true] {
+        let scene = if adaptive {
+            base.replace(
+                "\"elements\"",
+                r#""adaptive": {"tolerances": {
+              "body.position_m": {"absolute": 1, "relative": 0},
+              "body.velocity_m_s": {"absolute": 1, "relative": 0}
+            }}, "elements""#,
+            )
+        } else {
+            base.to_owned()
+        };
+        let path = scratch(&format!("scheduled_force_{adaptive}.json"), &scene);
+        let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+        assert_eq!(code, 0, "{stderr}");
+        // The triangle has impulse 0.5 N s and time centroid 0.25 s.
+        // At t=1, v=I/m=0.25 and x=I*(1-centroid)/m=0.1875.
+        // Smearing its mean over the requested one-second step would give
+        // the right impulse and kinetic energy but the wrong x=0.125.
+        assert!((value(&json, &element("body"), "velocity_m_s") - 0.25).abs() < 1e-12);
+        assert!((value(&json, &element("body"), "position_m") - 0.1875).abs() < 1e-12);
+        assert!((value(&json, "\"totals\"", "stored_change_j") - 0.0625).abs() < 1e-12);
+        assert!((value(&json, "\"totals\"", "boundary_energy_in_j") - 0.0625).abs() < 1e-12);
+        assert!(value(&json, "\"totals\"", "energy_residual_j").abs() < 1e-12);
+        let samples: Vec<f64> = json
+            .split("{\"time_s\":")
+            .skip(1)
+            .map(|sample| sample.split_once(',').unwrap().0.parse().unwrap())
+            .collect();
+        for knot in [0.125, 0.25, 0.375, 1.0] {
+            assert!(samples.contains(&knot), "missing knot {knot}: {samples:?}");
+        }
+        if adaptive {
+            assert!(value(&json, "\"adaptive\"", "max_error_norm") <= 1.0);
+        } else {
+            assert_eq!(value(&json, "\"schema\"", "steps"), 4.0);
+        }
+    }
+}
+
+#[test]
+fn coarse_vector_boundary_uses_every_coordinate_knot_and_merges_signed_zero() {
+    let scene = r#"{
+  "schema": "frankensim.system.v0", "duration_s": 1.0, "step_s": 1.0,
+  "elements": {"body": {
+    "kind": "rigid_network", "gravity_m_s2": [0,0,0],
+    "bodies": [{"mass_kg": 2.0, "principal_inertia_kg_m2": [1,1,1], "position_m": [0,0,0]}],
+    "connectors": []
+  }},
+  "connections": [{"prescribe": "body.force0", "force_n": [
+    {"table": [[0,0], [0.125,0], [0.25,4], [0.375,0], [1,0]]},
+    {"table": [[-0.0,0], [0.5,0], [0.625,2], [0.75,0], [1,0]]},
+    {"table": [[0,0]]}
+  ]}]
+}"#;
+    let path = scratch("scheduled_vector_force.json", scene);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    // Independent impulse/first-moment integrals on two axes. The y pulse
+    // has impulse 0.25 N s and centroid 0.625 s. Its knots are absent from x.
+    for (field, expected) in [
+        ("body0.velocity_x_m_s", 0.25),
+        ("body0.position_x_m", 0.1875),
+        ("body0.velocity_y_m_s", 0.125),
+        ("body0.position_y_m", 0.046875),
+        ("body0.velocity_z_m_s", 0.0),
+        ("body0.position_z_m", 0.0),
+    ] {
+        let actual = value(&json, &element("body"), field);
+        assert!(
+            (actual - expected).abs() < 1e-11,
+            "{field}: {actual} vs {expected}"
+        );
+    }
+    assert_eq!(value(&json, "\"schema\"", "steps"), 7.0);
+    assert!((value(&json, "\"totals\"", "stored_change_j") - 0.078125).abs() < 1e-11);
+    assert!(value(&json, "\"totals\"", "energy_residual_j").abs() < 1e-11);
+}
+
+#[test]
+fn a_coarse_prescribed_transmission_ratio_matches_its_per_knot_rotations() {
+    let scene = std::fs::read_to_string(example("variable_transmission.json"))
+        .unwrap()
+        .replace("\"step_s\": 0.00390625", "\"step_s\": 2.0");
+    let path = scratch("scheduled_transmission.json", &scene);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    let (inertia, stiffness) = (0.02_f64, 400.0_f64);
+    let frequency = (stiffness / inertia).sqrt();
+    let (mut phase, mut angle, mut omega, mut extension) = (0.0_f64, 0.0, 1.0, 0.01);
+    let (mut effort, mut flow) = (0.0, 0.0);
+    // Integrate each affine ratio independently. Midpoint evolution of the
+    // coupled conservative state is a rotation in energy coordinates.
+    for (dt, ratio) in [(0.5, 0.01), (0.5, 0.0), (1.0, -0.01)] {
+        phase += 2.0 * (0.5 * ratio * frequency * dt).atan();
+        let next_w = phase.cos() + 0.01 * frequency * phase.sin();
+        let next_q = 0.01 * phase.cos() - phase.sin() / frequency;
+        angle += dt * 0.5 * (omega + next_w);
+        effort = ratio * stiffness * 0.5 * (extension + next_q);
+        flow = ratio * 0.5 * (omega + next_w);
+        (omega, extension) = (next_w, next_q);
+    }
+    for (name, field, expected) in [
+        ("rotor", "angle_rad", angle),
+        ("rotor", "angular_velocity_rad_s", omega),
+        ("spring", "extension_m", extension),
+        ("transmission", "ratio", -0.01),
+        ("transmission", "effort_a", effort),
+        ("transmission", "flow_b", flow),
+    ] {
+        let actual = value(&json, &element(name), field);
+        assert!(
+            (actual - expected).abs() < 1e-10,
+            "{name}.{field}: {actual} vs {expected}"
+        );
+    }
+    assert_eq!(value(&json, "\"schema\"", "steps"), 3.0);
+    let reached_w = value(&json, &element("rotor"), "angular_velocity_rad_s");
+    let reached_q = value(&json, &element("spring"), "extension_m");
+    let energy = 0.5 * (inertia * reached_w.powi(2) + stiffness * reached_q.powi(2));
+    assert!((energy - 0.03).abs() < 1e-12);
+    assert!(value(&json, "\"totals\"", "energy_residual_j").abs() < 1e-11);
+}
+
+#[test]
+fn coarse_prescribed_slider_spans_schedule_their_own_knots_and_match_a_source() {
+    let scene = std::fs::read_to_string(example("friction_belt.json")).unwrap();
+    let original = r#"{"table": [[0.0, 0.0], [0.25, 1.0], [0.5, 3.0], [1.5, 3.0]]}"#;
+    let span = r#"{"table": [[0,0], [0.125,0.25], [0.25,0.5], [0.5,0], [1,-0.5], [1.5,0]]}"#;
+    // The power boundary describes exactly the same motion but omits a
+    // collinear knot. Only the span can schedule t=0.125 in that scene.
+    let power = r#"{"table": [[0,0], [0.25,0.5], [0.5,0], [1,-0.5], [1.5,0]]}"#;
+    let source = scene
+        .replace(original, span)
+        .replace("\"step_s\": 0.005", "\"step_s\": 1.5")
+        .replace("\"sample_every_s\": 0.25", "\"sample_every_s\": 0.125");
+    let boundary = source
+        .replace(
+            &format!(
+                "    \"belt\": {{\"kind\": \"velocity_source\", \"velocity_m_s\": {span}}},\n"
+            ),
+            "",
+        )
+        .replace(
+            r#"{"join": ["belt.p", "friction.b"]}"#,
+            &format!(r#"{{"prescribe": "friction.b", "velocity_m_s": {power}}}"#),
+        )
+        .replace(
+            r#"{"signal": "belt.span", "to": ["friction.span_b"]}"#,
+            &format!(r#"{{"prescribe": "friction.span_b", "velocity_m_s": {span}}}"#),
+        );
+    // Every ramp needs at most m*|a| = 2*2 = 4 N, below the 10 N static
+    // limit. The block follows exactly, including reversal, without heat.
+    // Positions are independent trapezoidal integrals of the belt speed.
+    let expected = [
+        (0.0, 0.0, 0.0),
+        (0.125, 0.015625, 0.25),
+        (0.25, 0.0625, 0.5),
+        (0.5, 0.125, 0.0),
+        (1.0, 0.0, -0.5),
+        (1.5, -0.125, 0.0),
+    ];
+    let mut projections = Vec::new();
+    for (name, scene) in [("source.json", source), ("boundary.json", boundary)] {
+        let path = scratch(name, &scene);
+        let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+        assert_eq!(code, 0, "{name}: {stderr}");
+        assert_eq!(value(&json, "\"schema\"", "steps"), 5.0, "{name}");
+        let samples: Vec<&str> = json.split("{\"time_s\":").skip(1).collect();
+        assert_eq!(samples.len(), expected.len(), "{name}");
+        let mut projection = Vec::new();
+        for (sample, &(time, position, velocity)) in samples.iter().zip(&expected) {
+            let reached: f64 = sample.split_once(',').unwrap().0.parse().unwrap();
+            assert_eq!(reached, time, "{name}");
+            for (field, wanted) in [
+                ("block.position_m", position),
+                ("block.velocity_m_s", velocity),
+                ("friction.slip_m_s", 0.0),
+                ("friction.stuck", 1.0),
+                ("lining.temperature_k", 300.0),
+            ] {
+                let actual = value(sample, "\"values\"", field);
+                assert!(
+                    (actual - wanted).abs() < 1e-10,
+                    "{name} at {time}: {field} = {actual}, expected {wanted}"
+                );
+                projection.push(actual);
+            }
+        }
+        assert!(value(&json, &element("friction"), "dissipated_j").abs() < 1e-10);
+        for field in [
+            "stored_change_j",
+            "boundary_energy_in_j",
+            "energy_residual_j",
+        ] {
+            assert!(
+                value(&json, "\"totals\"", field).abs() < 1e-10,
+                "{name}: {field}"
+            );
+        }
+        projections.push(projection);
+    }
+    for (source, boundary) in projections[0].iter().zip(&projections[1]) {
+        assert!((source - boundary).abs() < 1e-10, "{source} vs {boundary}");
+    }
+}

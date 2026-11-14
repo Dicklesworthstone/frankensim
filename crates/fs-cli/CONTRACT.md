@@ -819,9 +819,8 @@ array selects `"a"` and/or `"b"` once each, adding `span_a`/`span_b`;
 wire the source's `span` to the matching input with `signal`. A span may
 instead be prescribed with `velocity_m_s`: that boundary evaluates the
 waveform at the step's endpoints, while the power-port boundary uses its
-negated mean. Direct boundaries publish no event schedule; a table-driven
-boundary needs steps aligned with its knots. Prefer `velocity_source`,
-whose waveform events let the kernel align the steps. Every accelerating
+negated mean. Both direct boundaries and `velocity_source` publish table
+knots to the kernel's event negotiation. Every accelerating
 prescribed end needs its span; an untold end is treated as held during
 the step. A span on an end that answers the slider's force is refused by
 the kernel. `adaptive` refuses a slider because it has no error account
@@ -873,9 +872,9 @@ transformer. Required `a` and `b` name its power domains (`translation`,
 `rotation` or `electrical`). Port `a` receives flow and returns effort; `b`
 receives effort and returns flow. The required scalar input `ratio` takes an
 ordinary signal connection or `{"prescribe": "name.ratio", "ratio": waveform}`.
-A prescribed waveform supplies its exact interval mean, held for the step;
-direct boundaries carry no event schedule, so the scene must resolve their
-changes. Positive, negative and zero ratios are admitted. Unknown element
+A prescribed waveform supplies its exact interval mean, held for the step,
+and schedules its table knots so the kernel resolves each change in slope.
+Positive, negative and zero ratios are admitted. Unknown element
 fields, invalid domain names and malformed waveforms refuse as named scene
 inputs; an unconnected ratio is refused by kernel admission.
 
@@ -1076,8 +1075,8 @@ Ports `a` and `b` receive temperatures and return opposite heat rates;
 `heat_rate_w` reports the last accepted rate from a to b. Layers and contact
 store no heat, and require no adaptive state account. The fixed-geometry,
 source-free quasisteady model has no internal layer storage, conductivity
-extrapolation, inferred phase-dependent transport or verified material-pack
-authority. Temperatures outside either original chart refuse during a step.
+extrapolation or inferred phase-dependent transport. Authored tables confer
+no material-pack authority. Temperatures outside either original chart refuse during a step.
 Binary tests independently check planar, cylindrical and spherical series
 resistance with finite contact resistance, an affine-k integral against a
 constant-k control, named refusals, and fixed/adaptive composition with thermal
@@ -1085,6 +1084,71 @@ storage. `examples/system/phase_change_conduction.json` uses a finite 2000 J/K
 body initially at 400 K to melt the authored store through two nonlinear
 layers. Its sampled enthalpy and liquid fraction track latent storage while
 the closed graph conserves the finite hot body's lost energy.
+
+An optional top-level `materials` object prepares named, source-backed thermal
+laws from existing `NormalizedMaterialCardPack` files. Each entry requires
+`pack`, explicit pure `phase` (`solid` or `liquid`), `temperature_axis`,
+`temperature_kind`, typed fixed `state`, `temperature_min_k`,
+`temperature_max_k`, `reference_specific_enthalpy_j_kg`,
+`heat_capacity_property` and `density_property`. Pack paths resolve relative
+to the scene's supplied source path. The temperature convention is `legacy`,
+`dimensional` or `absolute-temperature`, and must match the original source;
+fixed state uses the shared `{name, value, kind}` axis parser and must not
+repeat the temperature axis. Cp and density use the original caloric owner's
+dimensional property keys. Optional `selection` defaults to
+`single-claim-only`; `prefer-observation-backed` is also admitted.
+
+The existing `ResolvedHeatCapacityCurve::try_new_exact` owner integrates
+positive piecewise-affine Cp over the declared support and retains the
+original density law. Its enthalpy reference is at `temperature_min_k`.
+Explicit pure phase is an assumption supplied by the author, not a phase
+transition inferred from a card label. Existing static material admission
+rejects missing fixed context, hidden dynamic or frequency dependence,
+independently varying thermal coordinates, incompatible quantity semantics
+and source-domain exits. No extrapolation or frozen initial Cp is introduced.
+
+An `enthalpy_body` may set `material: "name"` in place of both `phase` and
+`enthalpy_curve`, retaining its required mass and initial specific enthalpy.
+Its original caloric inverse supplies live temperature and density as energy
+changes. A declaration may additionally select `conductivity_property`;
+`conductivity_kind` defaults to `dimensional` and may explicitly be
+`thermal-conductivity` for a semantic static source. Other conventions refuse.
+The existing `ResolvedConductionLayer` compiles the original supported k(T)
+curve. A `layer_conductor` may then set `materials: ["a", "b"]` in place of
+both authored conductivity charts. Each side requires prepared conductivity;
+geometry, contact resistance, local controls and the original Kirchhoff
+integral solver remain unchanged. Mixing authored and source-backed fields
+or naming an unknown material refuses before execution.
+
+Preparation admits at most 64 material declarations, 4 MiB per pack and
+64 MiB of total raw pack data. Pack decoding, source queries and receipt
+construction occur once before stepping; components own the admitted laws,
+so changing an external file cannot change an admitted native scene. The
+JSON report retains actual normalized pack, exact byte, card and caloric
+identities, original selected claims with provenance and uncertainty, and
+source-query receipt hashes, context, selected claim and policy. Typed query
+axes use the quantity owner's canonical byte descriptors. Filename spelling
+does not confer material identity. These are preparation receipts, not new
+queries at every trial; they do not create durable run or replay identity.
+Reported `uncertainty_propagated` is false: source uncertainty is retained,
+and no output uncertainty interval or experimental qualification is inferred.
+
+Prescribed table inputs now pass their event times to the same kernel driver
+as component-owned sources. Scalar inputs and slider endpoint spans use their
+table's knots; vector and stream inputs use the sorted, deduplicated union
+of all coordinates' knots. Both fixed and adaptive intervals end at the next
+event, preserving pulse timing and time-varying transmission changes under
+coarse requested steps. Constants, sines and one-knot tables have no events;
+smooth-input accuracy still depends on the selected step and tolerances.
+Regression scenes compare pulse impulse and first moments, vector-input
+timing and variable-ratio rotations against independent calculations.
+
+Real-binary regressions in `tests/system_command.rs` independently integrate
+affine Cp and k, check evolving density, heating entropy and closed-network
+energy/entropy equilibrium, and exercise dimensional and semantic conductivity
+sources. They check content identity across renamed files and changed laws,
+named source/context/domain refusals, and native rollback at source support.
+The fixtures identify their analytic laws as authored synthetic data.
 
 An optional `adaptive` object selects the kernel's checkpoint-based
 `step_adaptive` path. It declares `order` (default 1, range 1–32),

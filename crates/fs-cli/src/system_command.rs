@@ -7,6 +7,8 @@
 //! states, sampled states and the energy, entropy and stream-inventory ledger.
 //! Nothing here integrates anything: every number comes from the kernel and its elements.
 
+mod materials;
+
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::io::Read as _;
@@ -99,6 +101,7 @@ Scene schema: frankensim.system.v0. Top-level fields:
   solver            optional {relative_tolerance, absolute_tolerance, max_iterations}
   adaptive          optional {order = 1, min_step_s = 1e-12, max_attempts = 32,
                     tolerances: {element.state_field: {absolute, relative}, ...}}
+  materials         optional object: name -> thermal material-card declaration
   elements          object: name -> element
   connections       array of connections
 
@@ -112,6 +115,25 @@ The refined two-half-step state is retained; rejected trials leave no state
 or ledger entries. step_s remains the largest interval.
 The final externally capped interval may be shorter than min_step_s; an
 accuracy rejection still cannot reduce that final interval further.
+
+Thermal material declarations prepare original laws from normalized card packs:
+  pack               path to a .fsmcdpk file, relative to the scene
+  phase              solid | liquid (explicit pure phase)
+  temperature_axis   the source's temperature coordinate name
+  temperature_kind   legacy | dimensional | absolute-temperature
+  state              fixed source context: [{name, value, kind}, ...], or [];
+                     value is a unit-bearing string; omit the temperature axis
+  temperature_min_k, temperature_max_k  admitted source support
+  reference_specific_enthalpy_j_kg     enthalpy at temperature_min_k
+  heat_capacity_property, density_property  original dimensional property names
+  conductivity_property  optional original k(T) property name
+  conductivity_kind  dimensional (default) | thermal-conductivity
+  selection          single-claim-only (default) | prefer-observation-backed
+The temperature convention and fixed context must match the source. Preparation
+retains nominal Cp(T), density(T), and optional k(T); no initial-value freezing
+or extrapolation. Reports retain content identities, claims and source receipts;
+source uncertainty is retained but not propagated. At most 64 declarations,
+4 MiB per pack and 64 MiB total pack bytes. No phase transition is inferred.
 
 Elements (ports in brackets; SI units in every field name):
   mass           mass_kg, position_m = 0, velocity_m_s = 0            [p]
@@ -150,8 +172,11 @@ Elements (ports in brackets; SI units in every field name):
                  owner supplies sensible/latent storage and entropy-conjugate
                  heat-port temperature; endpoint probes report h, T, liquid
                  fraction and density. Initial h is required: T alone cannot
-                 locate a state on a latent plateau. No extrapolation, material
-                 pack provenance, phase kinetics or mechanical expansion.)
+                 locate a state on a latent plateau. No extrapolation, phase
+                 kinetics or mechanical expansion; authored charts confer no
+                 material-pack provenance.)
+                 Alternatively, material = \"name\" replaces phase and
+                 enthalpy_curve with the declared source calorics.
   conductance    conductance_w_k                                      [a, b]
   layer_conductor conductivity_a, conductivity_b                     [a, b]
                  (each 2 to 4096 [temperature_k, k_w_m_k] knots),
@@ -167,8 +192,11 @@ Elements (ports in brackets; SI units in every field name):
                  knots; the original layer owner integrates the charts and
                  solves the contact jump. Radii must straddle the contact.
                  Stateless source-free layers at fixed geometry; no internal
-                 layer storage, source extrapolation or material provenance.
+                 layer storage or source extrapolation; authored charts confer
+                 no material provenance.
                  heat_rate_w is positive from a to b.)
+                 Alternatively, materials = [\"a\", \"b\"] replaces both
+                 conductivity charts; both named sources must prepare k(T).
   heat_node      conductances_w_k (one per body), temperature_k (optional)
                                                 [source, body0, body1, ...]
                  (a plane of no heat capacity between bodies: join each
@@ -337,8 +365,9 @@ Connections, ports written element.port:
                           modulated_transformer's ratio signal
   On slider.span_a/span_b, prescribe velocity_m_s as the same waveform
   moving that end; its two endpoint values are supplied, not its step mean.
-  Direct boundaries publish no event schedule: align steps with table knots,
-  or use velocity_source to let the kernel land on those knots automatically.
+  Prescribed table knots are scheduled automatically, including vector and
+  stream inputs and slider endpoint spans. The kernel ends a step at the next
+  knot; smooth waveforms still need a suitable step size or adaptive tolerances.
 
 For a two-ended spring or damper, a is the end at mass A and b the end at
 mass B. A spring's extension is x_B - x_A less its unloaded length; a series
@@ -429,7 +458,8 @@ impl From<Refusal> for SystemSceneError {
 ///
 /// Construction consumes a bounded snapshot of the scene's UTF-8 contents;
 /// the scene file is never reopened. `source_path` is retained as the source
-/// label and base location for relative assets. This v0 runtime is not the
+/// label and base location for relative material packs, which are read once
+/// during admission. This v0 runtime is not the
 /// canonical assembly schema, a durable checkpoint or a browser binding.
 /// The host supplies the cancellation gate and arena through `Cx`; this
 /// facade adds no wall-clock or memory governor beyond the existing owners.
@@ -457,7 +487,7 @@ impl SystemScene {
             return Err(Refusal::Input(format!("scene: at most {MAX_SCENE_BYTES} bytes")).into());
         }
         Ok(Self {
-            device: load_text(text)?,
+            device: load_text(text, source_path.as_ref())?,
             source_path: source_path.as_ref().to_owned(),
         })
     }
@@ -848,11 +878,14 @@ struct Element {
     /// The gas of a gas volume, for reading pressure and temperature from
     /// what it holds.
     gas: Option<GasVolume>,
+    /// Named prepared sources actually selected by this component.
+    material_sources: Vec<String>,
 }
 
 struct Device {
     system: System,
     elements: Vec<Element>,
+    materials: materials::Materials,
     connections: usize,
     duration_s: f64,
     step_s: f64,
@@ -1067,11 +1100,35 @@ fn storage_knots(
         .ok_or_else(|| format!("{what}.{key}: every knot is {coordinates}"))
 }
 
-/// Lower authored calorics without approximating latent heat by a capacity.
+/// Lower original authored or source-resolved calorics without freezing Cp.
 fn enthalpy_body(
     definition: &J,
+    materials: &materials::Materials,
     what: &str,
 ) -> Result<(UniformEnthalpyBody, EquilibriumPhaseState), String> {
+    if definition.get("material").is_some() {
+        fields(
+            definition,
+            &["kind", "mass_kg", "specific_enthalpy_j_kg", "material"],
+            what,
+        )?;
+        let name = definition
+            .str_field("material")
+            .ok_or_else(|| format!("{what}.material: expected a material name"))?;
+        let source = materials
+            .get(name)
+            .ok_or_else(|| format!("{what}.material: unknown material {name:?}"))?;
+        let initial = source
+            .caloric
+            .state_at_specific_enthalpy(number(definition, "specific_enthalpy_j_kg", what)?)
+            .map_err(|error| format!("{what}.specific_enthalpy_j_kg: {error}"))?;
+        let body = UniformEnthalpyBody::new(
+            source.caloric.clone(),
+            positive(definition, "mass_kg", what)?,
+        )
+        .map_err(|error| format!("{what}: {error}"))?;
+        return Ok((body, initial));
+    }
     fields(
         definition,
         &[
@@ -1185,23 +1242,52 @@ fn conductivity_curve(definition: &J, key: &str, what: &str) -> Result<Conductiv
 }
 
 /// Preserve the physical geometry and original k(T) integrals at the ports.
-fn layer_conductor(definition: &J, what: &str) -> Result<LayerConductor, String> {
+fn layer_conductor(
+    definition: &J,
+    materials: &materials::Materials,
+    what: &str,
+) -> Result<LayerConductor, String> {
     fields(
         definition,
         &[
             "kind",
             "conductivity_a",
             "conductivity_b",
+            "materials",
             "geometry",
             "contact_resistance_m2_k_w",
             "local_solver",
         ],
         what,
     )?;
-    let curves = [
-        conductivity_curve(definition, "conductivity_a", what)?,
-        conductivity_curve(definition, "conductivity_b", what)?,
-    ];
+    let curves = if let Some(names) = definition.get("materials") {
+        if definition.get("conductivity_a").is_some() || definition.get("conductivity_b").is_some()
+        {
+            return Err(format!(
+                "{what}.materials: cannot combine material sources with authored conductivity tables"
+            ));
+        }
+        let Some([a, b]) = names.as_array() else {
+            return Err(format!("{what}.materials: expected two material names"));
+        };
+        let curve = |entry: &J, index| {
+            let name = entry
+                .as_str()
+                .ok_or_else(|| format!("{what}.materials[{index}]: expected a material name"))?;
+            let source = materials
+                .get(name)
+                .ok_or_else(|| format!("{what}.materials[{index}]: unknown material {name:?}"))?;
+            source.conductivity.clone().ok_or_else(|| {
+                format!("{what}.materials[{index}]: material {name:?} has no prepared conductivity")
+            })
+        };
+        [curve(a, 0)?, curve(b, 1)?]
+    } else {
+        [
+            conductivity_curve(definition, "conductivity_a", what)?,
+            conductivity_curve(definition, "conductivity_b", what)?,
+        ]
+    };
     let geometry_name = format!("{what}.geometry");
     let geometry = definition
         .get("geometry")
@@ -1948,7 +2034,12 @@ fn viscoelastic_network(
     })
 }
 
-fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<Element, Refusal> {
+fn element(
+    builder: &mut SystemBuilder,
+    name: &str,
+    definition: &J,
+    materials: &materials::Materials,
+) -> Result<Element, Refusal> {
     let what = format!("elements.{name}");
     let kind_name = definition
         .str_field("kind")
@@ -1962,6 +2053,7 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
     let mut bodies = Vec::new();
     let mut branches = Vec::new();
     let mut gas = None;
+    let mut material_sources = Vec::new();
     let (node, ports) = match kind {
         Kind::Inertance(domain) => {
             let names = domain.names();
@@ -2097,7 +2189,10 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
             add(builder, name, body, start)?
         }
         Kind::EnthalpyBody => {
-            let (body, state) = enthalpy_body(definition, &what)?;
+            let (body, state) = enthalpy_body(definition, materials, &what)?;
+            if let Some(name) = definition.str_field("material") {
+                material_sources.push(name.to_owned());
+            }
             temperature_k = Some(state.temperature_k());
             add(builder, name, body, state)?
         }
@@ -2107,7 +2202,13 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
                 Conductance::new(number(definition, "conductance_w_k", &what)?).map_err(invalid)?;
             add(builder, name, wall, ())?
         }
-        Kind::LayerConductor => add(builder, name, layer_conductor(definition, &what)?, ())?,
+        Kind::LayerConductor => {
+            let conductor = layer_conductor(definition, materials, &what)?;
+            if let Some(names) = definition.get("materials").and_then(J::as_array) {
+                material_sources.extend(names.iter().filter_map(J::as_str).map(str::to_owned));
+            }
+            add(builder, name, conductor, ())?
+        }
         Kind::HeatNode => {
             fields(definition, &["kind", "conductances_w_k", "temperature_k"], &what)?;
             let rows = definition
@@ -2162,6 +2263,7 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
         bodies,
         branches,
         gas,
+        material_sources,
     })
 }
 
@@ -2629,13 +2731,15 @@ fn prescribe(
             .get("velocity_m_s")
             .ok_or_else(|| format!("{what}: a slider span takes velocity_m_s"))?;
         let wave = waveform(wave, &format!("{what}.velocity_m_s"))?;
+        let events = wave.event_times_s().collect();
         return builder
-            .boundary(
+            .scheduled_boundary(
                 target.port,
                 Box::new(move |start, dt, values| {
                     values[0] = wave.value_at(start);
                     values[1] = wave.value_at(start + dt);
                 }),
+                events,
             )
             .map_err(|error| Refusal::Admission(format!("{what}: {error}")));
     }
@@ -2689,6 +2793,11 @@ fn prescribe(
     if quantity == "temperature_k" && !waves.iter().all(|wave| wave.lowest() > 0.0) {
         return Err(format!("{what}: temperature_k must stay positive").into());
     }
+    let mut events: Vec<f64> = waves.iter().flat_map(|wave| wave.event_times_s()).collect();
+    events.sort_by(f64::total_cmp);
+    // A vector/stream port uses the union of all coordinates' knots. Treat
+    // signed zeros as the same physical time as the builder's ordering does.
+    events.dedup_by(|a, b| (*a).partial_cmp(&*b) == Some(std::cmp::Ordering::Equal));
     // A series element end carried by a node receives minus the node's
     // flow. A node capacitor instead receives current into its own stored
     // charge, so its prescribed current keeps the component's positive sign.
@@ -2697,13 +2806,14 @@ fn prescribe(
             && !matches!(elements[target.element].kind, Kind::NodeCapacitor | Kind::NonlinearCapacitor);
     let sign = if prescribed_flow { -1.0 } else { 1.0 };
     builder
-        .boundary(
+        .scheduled_boundary(
             target.port,
             Box::new(move |t0, dt, values| {
                 for (value, wave) in values.iter_mut().zip(&waves) {
                     *value = sign * wave.mean(t0, dt);
                 }
             }),
+            events,
         )
         .map_err(|e| Refusal::Admission(format!("{what}: {e}")))?;
     Ok(())
@@ -2822,7 +2932,7 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
     })
 }
 
-fn load_text(text: &str) -> Result<Device, Refusal> {
+fn load_text(text: &str, source_path: &Path) -> Result<Device, Refusal> {
     let root = J::parse(text).map_err(|e| e.to_string())?;
     fields(
         &root,
@@ -2833,6 +2943,7 @@ fn load_text(text: &str) -> Result<Device, Refusal> {
             "sample_every_s",
             "solver",
             "adaptive",
+            "materials",
             "elements",
             "connections",
         ],
@@ -2863,9 +2974,10 @@ fn load_text(text: &str) -> Result<Device, Refusal> {
         return Err(format!("scene: from 1 to {MAX_ELEMENTS} elements").into());
     }
     let mut builder = SystemBuilder::new();
+    let materials = materials::load(&root, source_path)?;
     let mut elements = Vec::with_capacity(definitions.len());
     for (name, definition) in definitions {
-        elements.push(element(&mut builder, name, definition)?);
+        elements.push(element(&mut builder, name, definition, &materials)?);
     }
     let connections = root
         .get("connections")
@@ -2923,6 +3035,7 @@ fn load_text(text: &str) -> Result<Device, Refusal> {
     let mut device = Device {
         system,
         elements,
+        materials,
         connections: connections.len(),
         duration_s,
         step_s,
@@ -3010,6 +3123,24 @@ impl Device {
                  or control stability is inferred"
             ));
         }
+        if self
+            .elements
+            .iter()
+            .any(|element| !element.material_sources.is_empty())
+        {
+            let base = description
+                .replace("no material-card resolution, ", "source resolution is limited to declared pure-phase thermal laws; no ")
+                .replace("enthalpy bodies use authored bounded", "enthalpy bodies use authored or source-resolved bounded")
+                .replace("layer conductors integrate authored bounded", "layer conductors integrate authored or source-resolved bounded")
+                .replace("no material-pack provenance, phase kinetics", "authored charts carry no material-pack provenance; no phase kinetics")
+                .replace("no verified material-pack provenance, internal layer storage", "authored charts carry no verified material-pack provenance; no internal layer storage");
+            description = std::borrow::Cow::Owned(format!(
+                "{base}; source-backed thermal components retain original pack, card, \
+                 caloric and claim identities and use nominal Cp(T), density(T) and k(T) \
+                 on the declared fixed context; source uncertainties are retained but \
+                 not propagated, and source resolution does not imply experimental qualification"
+            ));
+        }
         description
     }
 
@@ -3028,11 +3159,18 @@ impl Device {
         }
         let remaining = (self.duration_s - self.system.time_s()).min(max_interval_s);
         let time_s = if let Some(adaptive) = &mut self.adaptive {
-            let proposed = adaptive.suggested_dt_s.min(self.step_s).min(remaining);
             let mut config = adaptive.config;
             // A caller-imposed horizon is not an accuracy retry. Its own
             // retries must still respect this smaller floor.
             config.min_step_s = config.min_step_s.min(remaining);
+            // A preceding short caller horizon may have produced a suggestion
+            // below the configured floor. Restore this call's effective floor
+            // before proposing another interval.
+            let proposed = adaptive
+                .suggested_dt_s
+                .max(config.min_step_s)
+                .min(self.step_s)
+                .min(remaining);
             let report = self
                 .system
                 .step_adaptive(
@@ -3412,6 +3550,30 @@ impl Device {
         if !self.samples.is_empty() {
             let _ = writeln!(out, "\n{} samples (use --json to read them)", self.samples.len());
         }
+        if !self.materials.is_empty() {
+            let _ = writeln!(
+                out,
+                "\nMaterial sources (nominal values; uncertainty not propagated):"
+            );
+            for (name, material) in &self.materials {
+                let _ = writeln!(
+                    out,
+                    "{name}: caloric {}, {} source queries",
+                    material.caloric.identity().to_hex(),
+                    material.receipts().count()
+                );
+            }
+            for element in &self.elements {
+                if !element.material_sources.is_empty() {
+                    let _ = writeln!(
+                        out,
+                        "{} <- {}",
+                        element.name,
+                        element.material_sources.join(", ")
+                    );
+                }
+            }
+        }
         let _ = writeln!(out, "\nNo claim: {}.", self.no_claim());
         out
     }
@@ -3542,6 +3704,36 @@ impl Device {
                 num(adaptive.last_error_norm),
                 num(adaptive.max_error_norm),
                 num(adaptive.suggested_dt_s)
+            );
+        }
+        if !self.materials.is_empty() {
+            let reports = self
+                .materials
+                .values()
+                .map(|source| source.report_json())
+                .collect::<Vec<_>>()
+                .join(",");
+            let bindings = self
+                .elements
+                .iter()
+                .filter(|element| !element.material_sources.is_empty())
+                .map(|element| {
+                    format!(
+                        "{}:[{}]",
+                        quote(&element.name),
+                        element
+                            .material_sources
+                            .iter()
+                            .map(|name| quote(name))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            let _ = write!(
+                out,
+                ",\"materials\":[{reports}],\"material_bindings\":{{{bindings}}}"
             );
         }
         let _ = writeln!(out, ",\"no_claim\":{}}}", quote(&self.no_claim()));
