@@ -196,12 +196,15 @@ fn check_airflow(mixed: bool, surfaces: &[bool]) {
         }
         assert!(stored < 0.0);
         // Competing reservoirs can reverse which named body is warmer. The
-        // two unit-square contact triangles each have area 0.5 m2; their live
-        // trace temperatures and resistance determine the physical heat sign.
+        // unit-square contact is meshed as four equal triangles of 0.25 m2
+        // (the receipt's interface area is 1 m2 over four face pairs); their
+        // live trace temperatures and resistance determine the heat sign.
         let final_row = trajectory.get("fine").unwrap().as_array().unwrap().last().unwrap();
-        let expected_contact_w: f64 = final_row.get("temperature_contact").unwrap()
-            .get("face_states").unwrap().as_array().unwrap().iter().map(|state| {
-                0.5 * (n(state, "side_a_temperature_k") - n(state, "side_b_temperature_k"))
+        let states = final_row.get("temperature_contact").unwrap()
+            .get("face_states").unwrap().as_array().unwrap();
+        assert_eq!(states.len(), 4);
+        let expected_contact_w: f64 = states.iter().map(|state| {
+                0.25 * (n(state, "side_a_temperature_k") - n(state, "side_b_temperature_k"))
                     / n(state, "resistance_m2_k_w")
             }).sum();
         assert!(expected_contact_w.abs() > 1e-8);
