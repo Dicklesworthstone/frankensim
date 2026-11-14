@@ -282,18 +282,26 @@ fn expired_pinned_claim_invalid_temperature_and_detachment_refuse_without_mutati
 
 #[test]
 fn semantic_face_temperature_is_owned_but_a_second_temperature_bound_is_not_frozen_silently() {
+    let face_temperature = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature,
+        ValueForm::Static,
+    ));
     let query = point()
-        .with_quantity(
-            "face_T",
-            QuantitySpec::semantic(SemanticType::new(
-                QuantityKind::AbsoluteTemperature,
-                ValueForm::Static,
-            )),
-            300.0,
-        )
+        .with_quantity("face_T", face_temperature, 300.0)
         .unwrap();
     for second_temperature_bound in [false, true] {
         let mut claims = strengths("face_T");
+        // The claims' face_T axis carries the quantity the query gives face_T:
+        // a query axis typed differently from its claim's axis is outside the
+        // claim's domain (AxisQuantityMismatch).
+        for claim in &mut claims {
+            claim.validity = ValidityDomain::unconstrained().with_quantity(
+                "face_T",
+                face_temperature,
+                280.0,
+                320.0,
+            );
+        }
         if second_temperature_bound {
             claims[0].validity = claims[0].validity.clone().with("T", 280.0, 320.0);
         }

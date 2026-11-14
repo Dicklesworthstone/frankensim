@@ -131,8 +131,12 @@ fn same_temperature_and_round_trip_preserve_full_loaded_memory_and_reverse_path(
             refresh(hot.source(), &fixture, room_temperatures()),
         )
         .unwrap();
-    assert_eq!(back.source(), &source);
-    assert_eq!(back.state(), previous); // Includes retained double-double low bits.
+    // The way back re-resolves the cards with pinned-claim receipts, so the
+    // identities differ from the original's single-claim-only ones; the
+    // source's values and the loaded memory must return exactly.
+    thermal::same_after_refresh(back.source(), &source);
+    // Includes retained double-double low bits.
+    thermal::same_after_refresh(&back.state(), &previous);
     assert_eq!(
         back.report().normal_parameter_work_j,
         -hot.report().normal_parameter_work_j
@@ -142,9 +146,9 @@ fn same_temperature_and_round_trip_preserve_full_loaded_memory_and_reverse_path(
         -hot.report().rolling_parameter_work_j
     );
     let expected = source.advance(&previous, -3.5 * c).unwrap();
-    assert_eq!(
-        back.source().advance(&back.state(), -3.5 * c).unwrap(),
-        expected
+    thermal::same_after_refresh(
+        &back.source().advance(&back.state(), -3.5 * c).unwrap(),
+        &expected,
     );
     assert!(expected.rolling().irreversible_loss_j > 0.0);
     assert_eq!(
@@ -152,9 +156,9 @@ fn same_temperature_and_round_trip_preserve_full_loaded_memory_and_reverse_path(
         Err(SourceJkrRollingError::StateMismatch)
     );
     let (returned, memory, report) = back.into_parts();
-    assert_eq!(returned, source);
-    assert_eq!(memory, previous);
-    assert_eq!(report.refreshed_model_identity, source.identity());
+    thermal::same_after_refresh(&returned, &source);
+    thermal::same_after_refresh(&memory, &previous);
+    assert_eq!(report.refreshed_model_identity, returned.identity());
 }
 
 #[test]

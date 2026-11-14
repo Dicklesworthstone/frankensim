@@ -37,10 +37,29 @@ fn finite_motion_after_impact_refreshes_pinned_sources_and_unsigned_path_through
         .unwrap();
     // The instantaneous stage still owns no travel, temperature evolution or
     // clock advancement. Only the admitted finite phase below records slip.
-    assert_eq!(
+    // Its coefficients are the claims sampled at the impact speed, which
+    // continue_coefficients carries in the checkpoint's law: the kinetic x
+    // curve reads 0.5 at 2 m/s (0.35 at the initial query's 0.5 m/s), and
+    // kinetic y reads 0.225 at the unchanged path of 0.25 m.
+    let (before, after) = (
+        initial.constitutive_state(),
         sampled.state.constitutive_state(),
-        initial.constitutive_state()
     );
+    assert_eq!(
+        after.slip_m().map(f64::to_bits),
+        before.slip_m().map(f64::to_bits)
+    );
+    assert_eq!(
+        after.principal_axis().map(f64::to_bits),
+        before.principal_axis().map(f64::to_bits)
+    );
+    assert_eq!(
+        after.contact_temperature_k(),
+        before.contact_temperature_k()
+    );
+    close(sampled.queried_speed_m_s, 2.0);
+    close(sampled.coefficients_mu[0], 0.5);
+    close(sampled.coefficients_mu[1], 0.225);
     close(
         sampled.state.friction_sources()[0].query().axes()["path"],
         0.25,
@@ -305,7 +324,25 @@ fn source_boundary_late_refusal_and_cancellation_preserve_the_accepted_checkpoin
 
 #[test]
 fn source_path_cannot_silently_lose_or_misrepresent_a_resolved_increment() {
-    let card = directional_card();
+    // directional_card()'s claims, with T typed as the absolute temperature
+    // point() gives T: a query axis typed differently from its claim's axis is
+    // outside the claim's domain (AxisQuantityMismatch).
+    let card = card(
+        directional_card()
+            .claims()
+            .claims_ordered()
+            .map(|(_, claim)| {
+                let mut claim = claim.clone();
+                claim.validity = ValidityDomain::unconstrained().with_quantity(
+                    "T",
+                    thermal_quantity(),
+                    280.0,
+                    320.0,
+                );
+                claim
+            })
+            .collect(),
+    );
     let principal = [[STATIC, KINETIC], [STATIC_Y, KINETIC_Y]].map(|names| {
         SourceThermalCoulomb::resolve_with_query_axes(
             bind_dry_interface_system_card(&card, InputAuthority::SyntheticFixture).unwrap(),

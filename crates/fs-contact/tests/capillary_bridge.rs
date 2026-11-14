@@ -32,6 +32,10 @@ mod axisymmetric_load_line;
 
 #[path = "capillary_bridge/squeeze.rs"]
 mod squeeze;
+
+// For its receipt-blind comparison of a refreshed source with the original.
+#[path = "adhesive_temperature/common.rs"]
+mod original;
 fn claim(name: &str, value: f64, dims: Dims) -> PropertyClaim {
     PropertyClaim {
         key: PropertyKey::new(name, dims),
@@ -235,7 +239,12 @@ fn g3_fixed_mass_refresh_expands_both_branches_without_creating_liquid() {
                     &gate,
                 )
                 .unwrap();
-            assert_eq!(unchanged.state(), state);
+            // A refresh at the same point re-resolves the cards with
+            // pinned-claim receipts, so the source identity in the state
+            // differs from the original's; gap, branch and every source value
+            // must not.
+            original::same_after_refresh(&unchanged.state(), &state);
+            original::same_after_refresh(unchanged.source(), &source);
             assert_eq!(unchanged.parameter_work_j(), 0.0);
             assert!(
                 source

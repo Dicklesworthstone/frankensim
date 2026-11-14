@@ -212,20 +212,23 @@ fn no_op_preserves_a_cached_fold_and_reversible_temperature_round_trip_returns_h
         .loading()
         .continue_at_temperature(warmed.state(), &back, &original, &gate)
         .unwrap();
-    assert_eq!(restored.state(), previous);
+    // The way back re-resolves the cards with pinned-claim receipts, so the
+    // identities differ from the original's single-claim-only ones; the
+    // history and every physical value must return exactly.
+    original::same_after_refresh(&restored.state(), &previous);
     close(
         restored.report().parameter_work_j,
         -warmed.report().parameter_work_j,
         2e-14,
     );
-    assert_eq!(
-        restored
+    original::same_after_refresh(
+        &restored
             .loading()
             .advance_to_load_factor(restored.state(), -0.3, &gate)
             .unwrap(),
-        loading
+        &loading
             .advance_to_load_factor(previous, -0.3, &gate)
-            .unwrap()
+            .unwrap(),
     );
 }
 

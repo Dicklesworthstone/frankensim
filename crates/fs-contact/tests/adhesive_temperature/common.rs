@@ -278,3 +278,53 @@ pub fn envelope() -> JkrEnvelope {
         minimum_tabor_parameter: 5.0,
     }
 }
+
+/// Asserts that `refreshed`, a source or state refreshed back to the original
+/// temperatures (or at them), is `original` but for the refresh's receipts.
+///
+/// fs-material's rule (src/liquid/density/tests.rs): "A refresh records
+/// pinned-claim selection; an independent resolution records SingleClaimOnly.
+/// Their physical tuples, not policy receipts, must agree exactly." So each
+/// pinned-claim policy in `refreshed` must stand where `original` records
+/// single-claim-only, and every content or provenance hash that covers those
+/// receipts (source, model and state identities) differs. Those hashes are the
+/// only parts not held equal. Claim identities, selections, values and every
+/// other field are compared, and Debug prints each f64 in its shortest
+/// round-trip form, so equal text means equal bits.
+pub fn same_after_refresh<T: core::fmt::Debug>(refreshed: &T, original: &T) {
+    let refreshed = format!("{refreshed:?}")
+        .replace("policy: \"pinned-claim\"", "policy: \"single-claim-only\"");
+    assert_eq!(
+        without_receipt_hashes(&refreshed),
+        without_receipt_hashes(&format!("{original:?}"))
+    );
+}
+
+/// Masks each provenance hash and each content hash except a claim's identity
+/// and a card's identity, which no receipt covers.
+fn without_receipt_hashes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        let tag = match (rest.find("ContentHash("), rest.find("ProvenanceHash(")) {
+            (Some(c), Some(p)) if p < c => "ProvenanceHash(",
+            (Some(_), _) => "ContentHash(",
+            (None, Some(_)) => "ProvenanceHash(",
+            (None, None) => break,
+        };
+        let start = rest.find(tag).unwrap();
+        let open = start + tag.len();
+        let close = open + rest[open..].find(')').unwrap();
+        out.push_str(&rest[..open]);
+        let kept =
+            rest[..start].ends_with("ClaimId(") || rest[..start].ends_with("card_identity: ");
+        if tag == "ContentHash(" && kept {
+            out.push_str(&rest[open..close]);
+        } else {
+            out.push_str("..");
+        }
+        rest = &rest[close..];
+    }
+    out.push_str(rest);
+    out
+}

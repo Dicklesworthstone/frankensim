@@ -246,21 +246,24 @@ fn g1_exact_no_op_round_trip_and_original_shear_twist_reductions() {
         .motion()
         .continue_at_temperature(warmed.state(), &back, &original, &gate)
         .unwrap();
-    assert_eq!(restored.state(), previous);
+    // The way back re-resolves the cards with pinned-claim receipts, so the
+    // identities differ from the original's single-claim-only ones; the
+    // chronology and every physical value must return exactly.
+    original::same_after_refresh(&restored.state(), &previous);
     close(
         warmed.report().parameter_work_j + restored.report().parameter_work_j,
         0.0,
         energy,
         5e-14,
     );
-    assert_eq!(
-        motion
-            .advance(previous, 0.02 * time, [0.0; 4], &gate)
-            .unwrap(),
-        restored
+    original::same_after_refresh(
+        &restored
             .motion()
             .advance(restored.state(), 0.02 * time, [0.0; 4], &gate)
-            .unwrap()
+            .unwrap(),
+        &motion
+            .advance(previous, 0.02 * time, [0.0; 4], &gate)
+            .unwrap(),
     );
     // Exact zero-twist reduction retains the original sheared contact energies.
     let shear_q = [q[0], q[1], q[2], 0.0];
