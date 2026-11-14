@@ -10,7 +10,9 @@
 //! may. Without its damper the reference is reversible in time: it passes
 //! `check_time_reversal` within bounds derived from its own arithmetic, and
 //! is refused with its damper, with a reversal that keeps the velocity, and
-//! with one that is not an involution.
+//! with one that is not an involution. Through its drive port, the audit
+//! admits a balance or an endpoint one subnormal off at a zero tolerance (the
+//! f64 underflow allowance) and still refuses a defect of 1e-300 J.
 
 use core::cell::Cell;
 use core::num::NonZeroUsize;
@@ -23,7 +25,7 @@ use fs_ports::component::conformance::{
 };
 use fs_ports::component::{
     Carrier, Class, Component, ContractViolation, PortLayout, PortRole, PortSpec, PortTangent,
-    Proposal, Receipt, audit_step,
+    Proposal, Receipt, StepAudit, audit_step,
 };
 use fs_ports::{PortKind, StableId};
 
@@ -474,6 +476,71 @@ fn an_audit_with_a_port_list_that_does_not_fit_the_layout_is_refused() {
             })
         );
     }
+}
+
+/// The audit of one step of `dt = 1 s` through the reference's drive port
+/// alone, held at 1 N while it moves at `velocity`, under a receipt that
+/// claims `stored_change` J and a zero tolerance, with stored energies 0 J
+/// before and `stored_new` J after.
+fn audit_at_a_zero_tolerance(
+    velocity: f64,
+    stored_change: f64,
+    stored_new: f64,
+) -> Result<StepAudit, ContractViolation> {
+    let component = SpringMassDamper::new(Fault::None);
+    let drive = &component.ports()[..1];
+    let layout = PortLayout::new(drive).expect("layout");
+    let receipt = Receipt::lossless(stored_change, 0.0);
+    audit_step(
+        drive,
+        &layout,
+        1.0,
+        &[1.0],
+        &[velocity],
+        &receipt,
+        0.0,
+        stored_new,
+    )
+}
+
+#[test]
+fn a_balance_or_an_endpoint_one_subnormal_off_is_admitted_at_a_zero_tolerance() {
+    // Below the normal range an f64 rounds by an absolute step, so the audit
+    // allows the f64 underflow allowance on top of the receipt's tolerance.
+    let subnormal = f64::from_bits(1);
+    // 2 subnormals in, 1 stored: the balance is one subnormal off.
+    let balance = audit_at_a_zero_tolerance(2.0 * subnormal, subnormal, subnormal)
+        .expect("one subnormal off the balance");
+    assert_eq!(balance.balance_defect_j.to_bits(), subnormal.to_bits());
+    assert_eq!(balance.endpoint_defect_j.to_bits(), 0.0_f64.to_bits());
+    // 2 in and 2 stored, but the endpoints measure 1: the endpoint is off.
+    let endpoint = audit_at_a_zero_tolerance(2.0 * subnormal, 2.0 * subnormal, subnormal)
+        .expect("one subnormal off the endpoints");
+    assert_eq!(endpoint.balance_defect_j.to_bits(), 0.0_f64.to_bits());
+    assert_eq!(endpoint.endpoint_defect_j.to_bits(), (-subnormal).to_bits());
+}
+
+#[test]
+fn a_defect_of_1e_300_j_at_a_zero_tolerance_is_still_refused() {
+    // The allowance is the smallest normal energy, 2.2e-308 J; a defect of
+    // 1e-300 J is far above it and is refused by the law it breaks.
+    assert_eq!(
+        audit_at_a_zero_tolerance(1.0e-300, 0.0, 0.0),
+        Err(ContractViolation::EnergyBalance {
+            port_energy_in_j: 1.0e-300,
+            stored_change_j: 0.0,
+            numerical_loss_j: 0.0,
+            tolerance_j: 0.0,
+        })
+    );
+    assert_eq!(
+        audit_at_a_zero_tolerance(1.0e-300, 1.0e-300, 0.0),
+        Err(ContractViolation::EndpointEnergy {
+            measured_change_j: 0.0,
+            stored_change_j: 1.0e-300,
+            tolerance_j: f64::MIN_POSITIVE,
+        })
+    );
 }
 
 #[test]

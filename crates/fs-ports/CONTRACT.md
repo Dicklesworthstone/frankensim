@@ -234,7 +234,15 @@ momentum or charge audit to the Component contract.
 `sum(port energy in) = stored_change_j + numerical_loss_j` within the receipt's
 `energy_tolerance_j`; the receipt's stored change against re-measured endpoint
 energies; dissipation and entropy production not negative; residual within the
-owner's tolerance. Physical dissipation stays in the component as stored
+owner's tolerance. Both energy checks allow `f64::MIN_POSITIVE` J on top of
+the receipt's tolerance: the f64 underflow allowance. Below the normal range
+an f64 rounds by an absolute step, one subnormal (5e-324 J), which no
+tolerance relative to the step's energies covers; a receipt claims only that
+relative roundoff. At or above 2^-968 J (about 4.0e-292 J) the sum
+absorbs the allowance, so no decision there changes. G0 tests in
+`tests/component_reference.rs`: a balance and an endpoint one subnormal off
+are admitted at a zero tolerance, and a defect of 1e-300 J at a zero
+tolerance is still refused, as `EnergyBalance` and as `EndpointEnergy`. Physical dissipation stays in the component as stored
 thermal energy or leaves through a heat port; it is never booked as numerical
 loss. The audit trusts `energy_tolerance_j`. The owner must make it cover the
 roundoff of `stored_energy_j` at both ends of the step, which scales with the
@@ -297,6 +305,8 @@ own for this check. G0 tests in `tests/component_reference.rs`:
 **No claim.** v0 has no entropy on stream ports and no multistage port
 values. The kernel cannot check that a component's `identity_words` name every parameter of its physics; only the component knows them. The kit
 does not yet check `StageResidual`, unit rescaling or temporal order.
+The audit's underflow allowance is absolute, in joules, so below 2^-968 J
+(about 4.0e-292 J) the audit is not covariant under a change of units.
 `check_time_reversal` sees a state only through the outputs, the stored
 energy and what the test's `observe` returns, so what none of them shows is
 not checked. Whether `R` is the physical reversal, and whether `observe` and

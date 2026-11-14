@@ -1429,7 +1429,8 @@ pub enum ContractViolation {
         stored_change_j: f64,
         /// Numerical loss from the receipt [J].
         numerical_loss_j: f64,
-        /// Tolerance the receipt claimed [J].
+        /// Tolerance the receipt claimed [J]; the audit also allowed
+        /// `f64::MIN_POSITIVE`, the f64 underflow allowance.
         tolerance_j: f64,
     },
     /// The receipt's stored change disagrees with the re-measured endpoints.
@@ -1859,7 +1860,9 @@ pub struct StepAudit {
 /// kernel calls it for every component, and so does the conformance kit, so
 /// components carry no audit code of their own. `stored_old_j` and
 /// `stored_new_j` are [`Component::stored_energy_j`] of the accepted and the
-/// candidate state.
+/// candidate state. Both energy checks allow `f64::MIN_POSITIVE` on top of
+/// the receipt's `energy_tolerance_j`, the f64 underflow allowance, so a
+/// receipt claims only the roundoff relative to its own energies.
 ///
 /// # Errors
 /// The first [`ContractViolation`] found, in this order: step, vector
@@ -1961,8 +1964,13 @@ pub fn audit_step(
             quantity: "port entropy",
         });
     }
+    // The f64 underflow allowance. Below the normal range an f64 rounds by an
+    // absolute step, one subnormal (5e-324 J), which no tolerance relative
+    // to the step's energies covers, so both checks allow `MIN_POSITIVE` on
+    // top of the owner's tolerance. A sum at or above 2^-968 J (about
+    // 4.0e-292 J) absorbs it, and no decision there changes.
     let balance_defect_j = energy - receipt.stored_change_j - receipt.numerical_loss_j;
-    if !(balance_defect_j.abs() <= receipt.energy_tolerance_j) {
+    if !(balance_defect_j.abs() <= receipt.energy_tolerance_j + f64::MIN_POSITIVE) {
         return Err(ContractViolation::EnergyBalance {
             port_energy_in_j: energy,
             stored_change_j: receipt.stored_change_j,
@@ -1973,8 +1981,9 @@ pub fn audit_step(
     // The endpoint difference cancels, so it is allowed the roundoff of the
     // two stored energies on top of the owner's tolerance.
     let measured_change_j = stored_new_j - stored_old_j;
-    let endpoint_tolerance_j =
-        receipt.energy_tolerance_j + 4.0 * f64::EPSILON * (stored_old_j.abs() + stored_new_j.abs());
+    let endpoint_tolerance_j = receipt.energy_tolerance_j
+        + 4.0 * f64::EPSILON * (stored_old_j.abs() + stored_new_j.abs())
+        + f64::MIN_POSITIVE;
     let endpoint_defect_j = measured_change_j - receipt.stored_change_j;
     if !(endpoint_defect_j.abs() <= endpoint_tolerance_j) {
         return Err(ContractViolation::EndpointEnergy {
