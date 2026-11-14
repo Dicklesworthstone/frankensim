@@ -200,6 +200,14 @@ fn cross(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
     opposite(orient2d(a, b, c), orient2d(a, b, d)) && opposite(orient2d(c, d, a), orient2d(c, d, b))
 }
 
+fn opposite_sign(sign: Sign) -> Sign {
+    match sign {
+        Sign::Positive => Sign::Negative,
+        Sign::Negative => Sign::Positive,
+        Sign::Zero => Sign::Zero,
+    }
+}
+
 fn boxes_disjoint(a: [[f64; 2]; 3], b: [[f64; 2]; 3]) -> bool {
     (0..2).any(|axis| {
         let amin = a
@@ -346,12 +354,36 @@ pub(crate) fn line_knots(
             if x < lower[varying] || x > upper_coordinate {
                 continue;
             }
-            if (x == lower[varying] && orient2d(a, b, lower) != Sign::Zero)
-                || (x == upper_coordinate && orient2d(a, b, upper) != Sign::Zero)
-            {
-                return Err(refusal(
-                    "surface line intersection collapses onto a distinct endpoint",
-                ));
+            let at_lower = x == lower[varying];
+            if at_lower || x == upper_coordinate {
+                let (endpoint, inward) = if at_lower {
+                    (lower, x.next_up())
+                } else {
+                    (upper, x.next_down())
+                };
+                let side = orient2d(a, b, endpoint);
+                if side != Sign::Zero {
+                    // The rounded cut fell on an endpoint that the edge's line does not
+                    // pass through. If the other endpoint lies on the same side, the edge
+                    // does not cross the line at all, and the cut is rounding alone.
+                    let other = orient2d(a, b, if at_lower { upper } else { lower });
+                    if other == side {
+                        continue;
+                    }
+                    // Otherwise the crossing is real. When it lies strictly between the
+                    // endpoint and its inward float neighbour, no representable point
+                    // separates them: every float query on the line sees the endpoint's
+                    // own cell, so the crossing is the endpoint. A crossing on or beyond
+                    // that neighbour is a distinct, representable cut, and it refuses.
+                    let mut neighbour = endpoint;
+                    neighbour[varying] = inward;
+                    if orient2d(a, b, neighbour) != opposite_sign(side) {
+                        return Err(refusal(
+                            "surface line intersection collapses onto a distinct endpoint",
+                        ));
+                    }
+                    continue;
+                }
             }
             cuts.insert((i, j), x);
         }

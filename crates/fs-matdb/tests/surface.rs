@@ -1131,3 +1131,75 @@ fn g3_surface_pack_retains_samples_cells_uncertainty_and_normalization_targets()
         assert!(NormalizedPack::from_bytes(&relabeled).is_err());
     }
 }
+
+fn diagonal_claim() -> PropertyClaim {
+    PropertyClaim {
+        key: PropertyKey::new("dynamic_viscosity", VISCOSITY),
+        value: PropertyValue::Surface2D {
+            axes: ["T".into(), "shear_rate".into()],
+            axis_dims: [TEMPERATURE, RATE],
+            samples: [[300.0, 0.0], [500.0, 0.0], [300.0, 2.0], [500.0, 2.0]]
+                .into_iter()
+                .map(|point| (point, diagonal_law(point[0], point[1])))
+                .collect(),
+            triangles: vec![[0, 1, 2], [1, 3, 2]],
+            dims: VISCOSITY,
+        },
+        validity: ValidityDomain::unconstrained()
+            .with_quantity("T", temperature(), 300.0, 500.0)
+            .with_quantity("shear_rate", QuantitySpec::dimensional(RATE), 0.0, 2.0),
+        ..claim()
+    }
+}
+
+fn diagonal_law(t: f64, rate: f64) -> f64 {
+    0.2 + 0.25 * rate + 0.001 * (t - 300.0)
+}
+
+// A consumer that finds a knot on one source line and then asks the crossing line
+// through it (fs-mbd-material's dry-brake and journal-rheology thermal paths) gets
+// a line that ends on a cell edge only to rounding: the knot is itself a rounded
+// crossing. Here each temperature line ends at the f64 where the diagonal
+// (500, 0)-(300, 2) crosses its rate. For the first rate the exact crossing lies
+// beyond that endpoint, so the line [300, x] does not meet the diagonal at all
+// and [x, 500] meets it within x's last ulp; for the second rate it is the other
+// way round. No f64 lies strictly between such a crossing and its endpoint, so
+// neither line has an interior knot. Each of the four lines used to be refused as
+// "surface line intersection collapses onto a distinct endpoint".
+#[test]
+fn g1_line_ending_on_a_rounded_crossing_of_a_cell_edge_has_no_phantom_knot() {
+    let mut claims = ClaimSet::new();
+    let id = claims.insert_claim(diagonal_claim()).unwrap();
+    let key = PropertyKey::new("dynamic_viscosity", VISCOSITY);
+    for (rate, crossing) in [
+        (1.9999859960937498, 300.001400390625),
+        (1.999844537599558, 300.0155462400442),
+    ] {
+        // The crossing as the line evaluator rounds it on the edge (500, 0)-(300, 2).
+        assert_eq!((300.0_f64 - 500.0).mul_add(rate / 2.0, 500.0), crossing);
+        for (lower, upper) in [(300.0, crossing), (crossing, 500.0)] {
+            let line = claims
+                .query_line_typed(
+                    &key,
+                    "T",
+                    &point(lower, rate),
+                    &point(upper, rate),
+                    ClaimSelection::Pinned(id),
+                )
+                .unwrap();
+            assert_eq!(
+                line.knots.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+                [lower, upper]
+            );
+            for (t, answer) in &line.knots {
+                assert_eq!(
+                    *answer,
+                    claims
+                        .query_pinned_typed(&key, &point(*t, rate), id)
+                        .unwrap()
+                );
+                assert_close(answer.evidence.value.value, diagonal_law(*t, rate));
+            }
+        }
+    }
+}
