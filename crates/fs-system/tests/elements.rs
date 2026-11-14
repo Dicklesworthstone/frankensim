@@ -7,17 +7,22 @@
 
 use std::f64::consts::PI;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
-use fs_ports::component::conformance::{Case, Observed, check_component, check_port_tangent};
-use fs_ports::component::{Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt};
+use fs_ports::component::conformance::{
+    Case, Failure, Observed, check_component, check_port_tangent,
+};
+use fs_ports::component::{
+    Class, Component, ContractViolation, PortRole, PortSpec, PortTangent, Proposal, Receipt,
+};
 use fs_ports::{PortKind, StableId};
 use fs_system::elements::{
     Conductance, Damper, ElementError, FlowSource, Force, GasContents, GasVolume, Gyrator,
     HeatCapacity, HeatNode, Heater, Mass, Motion, Restriction, SourceAccount, Spring, Waveform,
 };
+use fs_system::ledger::Sum;
 use fs_system::{
     AdmissionError, NodeId, RouteTemperature, SolveConfig, System, SystemBuilder, SystemError,
     heat_sink,
@@ -2202,10 +2207,17 @@ impl Vessels {
     /// Two vessels of air carrying two quantities, joined by a restriction,
     /// each heated at the step's midpoint value of `heat`.
     fn new(start: [GasContents; 2], conductance: f64, heat: fn(f64) -> [f64; 2]) -> Self {
+        Self::through(start, Restriction::new(conductance, 2).unwrap(), heat)
+    }
+
+    /// The same two vessels joined by `pipe`, which has a restriction's
+    /// stream ports `a` and `b`.
+    fn through<C>(start: [GasContents; 2], pipe: C, heat: fn(f64) -> [f64; 2]) -> Self
+    where
+        C: PortTangent<State = ()> + 'static,
+    {
         let mut builder = SystemBuilder::new();
-        let pipe = builder
-            .add_with_tangent("pipe", Restriction::new(conductance, 2).unwrap(), ())
-            .unwrap();
+        let pipe = builder.add_with_tangent("pipe", pipe, ()).unwrap();
         let mut nodes = Vec::new();
         for (side, (name, contents)) in ["a", "b"].into_iter().zip(start).enumerate() {
             let node = builder.add_with_tangent(name, air(2), contents).unwrap();
@@ -2253,6 +2265,47 @@ impl Vessels {
     /// Mass rate [kg/s] from `a` to `b` during the last step.
     fn rate(&self) -> f64 {
         self.system.last_output(self.system.port(self.pipe, "a").unwrap())[0]
+    }
+
+    /// What the pipe received at `a` and then at `b` in the last step.
+    fn pipe_inputs(&self) -> Vec<f64> {
+        let end = |name: &str| {
+            self.system
+                .last_input(self.system.port(self.pipe, name).unwrap())
+        };
+        [end("a"), end("b")].concat()
+    }
+
+    /// Everything the system shows after a step, as bits: the clock, both
+    /// vessels' contents, and what every port last received and returned.
+    fn shown(&self) -> Vec<u64> {
+        let mut values = vec![self.system.time_s()];
+        for side in 0..2 {
+            let held = self.contents(side);
+            values.extend([held.mass_kg, held.energy_j, held.volume_m3]);
+            values.extend(&held.carried_kg);
+        }
+        let ends = [
+            (self.pipe, "a"),
+            (self.pipe, "b"),
+            (self.nodes[0], "stream"),
+            (self.nodes[0], "heat"),
+            (self.nodes[1], "stream"),
+            (self.nodes[1], "heat"),
+        ];
+        for (node, name) in ends {
+            let port = self.system.port(node, name).unwrap();
+            values.extend(self.system.last_input(port));
+            values.extend(self.system.last_output(port));
+        }
+        values.iter().map(|value| value.to_bits()).collect()
+    }
+
+    /// The pipe's entropy account [J/K].
+    fn pipe_entropy(&self) -> Sum {
+        let ledger = self.system.ledger();
+        let account = ledger.nodes.iter().find(|account| account.name == "pipe");
+        account.unwrap().entropy_generated_j_per_k
     }
 }
 
@@ -2407,6 +2460,370 @@ fn a_flow_that_turns_round_carries_back_what_the_other_vessel_holds() {
     // and 1.5e-8.
     let ratio = errors[0] / errors[1];
     assert!(errors[1] < 3.0e-8 && (3.8..4.6).contains(&ratio), "{errors:?}");
+}
+
+/// The mandatory checks of the conformance kit at one point of a stateless
+/// element: its receipt and its outputs.
+fn stepped<C>(element: &C, dt_s: f64, inputs: &[f64]) -> (Receipt, Vec<f64>)
+where
+    C: Component<State = ()>,
+{
+    let case = Case {
+        state: &(),
+        stale: &(),
+        dt_s,
+        inputs,
+    };
+    with_cx(|cx| match check_component(element, &case, cx) {
+        Ok(Observed::Stepped {
+            receipt, outputs, ..
+        }) => (receipt, outputs),
+        other => panic!("no step at {inputs:?}: {other:?}"),
+    })
+}
+
+/// The entropy [J/K] made in a step of `dt_s` at mass rate `rate` [kg/s]
+/// through an adiabatic throttle, from air at `upstream` `[p, h]` to
+/// `downstream_pa` at the same `h`. Independent of the elements: for a
+/// perfect gas `s2 - s1 = c_p ln(T2 / T1) - R ln(p2 / p1)`, and equal
+/// enthalpies are equal temperatures.
+fn throttle_judge(dt_s: f64, rate: f64, upstream: [f64; 2], downstream_pa: f64) -> f64 {
+    let c_p = RATIO * AIR_J_KG_K / (RATIO - 1.0);
+    let (before_k, after_k) = (upstream[1] / c_p, upstream[1] / c_p);
+    let per_kg = c_p * (after_k / before_k).ln() - AIR_J_KG_K * (downstream_pa / upstream[0]).ln();
+    dt_s * rate.abs() * per_kg
+}
+
+/// How far the element's entropy may stand from [`throttle_judge`]. Both
+/// round. The judge's quotient `p2 / p1` is off by half an eps of itself,
+/// which moves its logarithm by half an eps. The element's relative change
+/// `(p2 - p1) / p1` rounds twice, about an eps of itself, which moves its
+/// `ln_1p` by eps `|x| / (1 + x)`: at most 9 eps for pressures within a
+/// factor of ten of each other. The logarithms and the products add a few
+/// eps of the result. 32 eps of `(want + dt |m_dot| R)` holds both.
+fn throttle_allowance(dt_s: f64, rate: f64, want: f64) -> f64 {
+    32.0 * f64::EPSILON * (want + dt_s * rate.abs() * AIR_J_KG_K)
+}
+
+fn bits(values: &[f64]) -> Vec<u64> {
+    values.iter().map(|value| value.to_bits()).collect()
+}
+
+#[test]
+fn a_restriction_for_a_gas_reports_the_entropy_of_an_adiabatic_throttle() {
+    let mut n = Numbers(20_261_114);
+    let conductance = 3.0e-8;
+    let reporting = Restriction::for_gas(conductance, &air(2)).unwrap();
+    let plain = Restriction::new(conductance, 2).unwrap();
+    let mut worst = 0.0_f64;
+    for case in 0..200 {
+        let dt = n.next(1.0e-5, 2.0e-4);
+        let mut side = || {
+            [
+                n.next(5.0e4, 5.0e5),
+                n.next(2.0e5, 9.0e5),
+                n.next(0.0, 1.0),
+                n.next(0.0, 1.0),
+            ]
+        };
+        let (a, mut b) = (side(), side());
+        // Every tenth case the drop is the smallest there is: one unit in
+        // the last place of the pressure.
+        if case % 10 == 0 {
+            b[0] = f64::from_bits(a[0].to_bits() - 1);
+        }
+        let both: Vec<f64> = a.iter().chain(&b).copied().collect();
+        // The kit refuses negative entropy. Away from the kink at zero flow
+        // the tangent is checked too.
+        let (receipt, out) = stepped(&reporting, dt, &both);
+        if (a[0] - b[0]).abs() > 1.0e3 {
+            conforms(&reporting, &(), &(), dt, &both);
+        }
+        // The port map is the plain restriction's, to the bit.
+        assert_eq!(bits(&out), bits(&stepped(&plain, dt, &both).1));
+        let generated = receipt.entropy_generated_j_per_k;
+        let rate = out[0];
+        let (up, down) = if rate >= 0.0 { (a, b) } else { (b, a) };
+        let want = throttle_judge(dt, rate, [up[0], up[1]], down[0]);
+        let allowed = throttle_allowance(dt, rate, want);
+        assert!(
+            generated > 0.0 && (generated - want).abs() <= allowed,
+            "case {case}: {generated:e} J/K against {want:e} within {allowed:e}"
+        );
+        worst = worst.max((generated - want).abs() / allowed);
+        // The other way round, the same entropy to the bit.
+        let mirrored: Vec<f64> = b.iter().chain(&a).copied().collect();
+        let back = stepped(&reporting, dt, &mirrored)
+            .0
+            .entropy_generated_j_per_k;
+        assert_eq!(back.to_bits(), generated.to_bits(), "case {case}");
+    }
+    eprintln!("a throttle's entropy: at most {worst:.4} of its allowance from the closed form");
+
+    // At equal pressures nothing crosses, whatever the two sides hold, and
+    // the entropy is zero, not a rounding of it.
+    let level = [2.0e5, 3.0e5, 0.2, 0.7, 2.0e5, 8.0e5, 0.9, 0.1];
+    let (receipt, out) = stepped(&reporting, 1.0e-3, &level);
+    assert!(out.iter().all(|value| *value == 0.0), "{out:?}");
+    assert_eq!(
+        receipt.entropy_generated_j_per_k.to_bits(),
+        0.0_f64.to_bits()
+    );
+
+    // While mass crosses, the gas's entropy needs a positive pressure on
+    // both sides; the plain restriction does not read it.
+    for (a_pa, b_pa) in [(1.0e5, 0.0), (1.0e5, -1.0e5), (-1.0e5, -2.0e5)] {
+        let both = [a_pa, 3.0e5, 0.2, 0.7, b_pa, 8.0e5, 0.9, 0.1];
+        let mut out = [0.0; 8];
+        with_cx(|cx| {
+            assert!(matches!(
+                reporting.propose(&(), 1.0e-3, &both, &mut (), &mut out, cx),
+                Err(ElementError::Parameter { .. })
+            ));
+            assert!(matches!(
+                plain.propose(&(), 1.0e-3, &both, &mut (), &mut out, cx),
+                Ok(Proposal::Step(_))
+            ));
+        });
+    }
+}
+
+#[test]
+fn reporting_the_throttle_entropy_moves_no_state_and_no_energy_account() {
+    // The vessels of the flow that turns round: out of `a` while it is
+    // heated and back once `b` is. One pair is joined by the plain
+    // restriction and one by the restriction that reports entropy; both
+    // run in this binary.
+    let start = || {
+        [
+            air(2).contents(2.0e5, 300.0, 0.01, &[0.3, 0.0]).unwrap(),
+            air(2).contents(2.0e5, 300.0, 0.03, &[0.0, 0.6]).unwrap(),
+        ]
+    };
+    let conductance = 2.0e-8;
+    let reporting = Restriction::for_gas(conductance, &air(2)).unwrap();
+    let mut off = Vessels::new(start(), conductance, alternate_heat);
+    let mut on = Vessels::through(start(), reporting.clone(), alternate_heat);
+    let dt = 3.0 / 600.0;
+    let mut reported = Sum::default();
+    let (mut forward, mut backward) = (0_u32, 0_u32);
+    let mut worst = 0.0_f64;
+    with_cx(|cx| {
+        for index in 0..600 {
+            let quiet = off.system.step(dt, cx).unwrap();
+            let loud = on.system.step(dt, cx).unwrap();
+            // The same iterations, shortenings and unresolved entries, and
+            // every state, clock and port value to the bit.
+            assert_eq!(format!("{quiet:?}"), format!("{loud:?}"), "step {index}");
+            assert_eq!(on.shown(), off.shown(), "step {index}");
+            // The entropy the pipe reports at what it received, against the
+            // closed form at the same pressures.
+            let inputs = on.pipe_inputs();
+            let generated = stepped(&reporting, dt, &inputs).0.entropy_generated_j_per_k;
+            reported.add(generated);
+            let rate = on.rate();
+            let (up, down) = if rate >= 0.0 { (0, 4) } else { (4, 0) };
+            let want = throttle_judge(dt, rate, [inputs[up], inputs[up + 1]], inputs[down]);
+            let allowed = throttle_allowance(dt, rate, want);
+            assert!(
+                (generated - want).abs() <= allowed,
+                "step {index}: {generated:e} J/K against {want:e} within {allowed:e}"
+            );
+            worst = worst.max((generated - want).abs() / allowed);
+            if rate > 0.0 {
+                forward += 1;
+                assert!(generated > 0.0, "step {index}");
+            } else if rate < 0.0 {
+                backward += 1;
+                assert!(generated > 0.0, "step {index}");
+            }
+        }
+    });
+    eprintln!(
+        "two vessels, {forward} steps one way and {backward} back: the pipe made {:.6e} J/K, \
+         at most {worst:.4} of its allowance from the closed form",
+        on.pipe_entropy().value()
+    );
+    assert!(forward > 150 && backward > 150, "{forward} {backward}");
+    // The ledgers differ only in the pipe's entropy account. (A sum's Debug
+    // prints each of its two numbers to the shortest text that reads back
+    // to the same bits, so equal text is equal bits, signs of zero too.)
+    let zero = format!("{:?}", Sum::default());
+    assert_eq!(format!("{:?}", off.pipe_entropy()), zero);
+    assert!(on.pipe_entropy().value() > 0.0);
+    let mut masked = on.system.ledger().clone();
+    for account in &mut masked.nodes {
+        if account.name == "pipe" {
+            account.entropy_generated_j_per_k = Sum::default();
+        }
+    }
+    assert_eq!(format!("{masked:?}"), format!("{:?}", off.system.ledger()));
+
+    // Equal volumes at equal pressures hold equal energies whatever their
+    // temperatures, so nothing crosses and the pipe reports exactly zero.
+    let level = || {
+        [
+            air(2).contents(2.0e5, 300.0, 0.02, &[0.3, 0.0]).unwrap(),
+            air(2).contents(2.0e5, 600.0, 0.02, &[0.0, 0.6]).unwrap(),
+        ]
+    };
+    let mut still = Vessels::through(level(), reporting, no_heat);
+    with_cx(|cx| {
+        for index in 0..50 {
+            still.system.step(0.05, cx).unwrap();
+            assert_eq!(still.rate().to_bits(), 0.0_f64.to_bits(), "step {index}");
+        }
+    });
+    assert_eq!(format!("{:?}", still.pipe_entropy()), zero);
+
+    // The ledger holds what the pipe reported at the inputs it was given,
+    // step by step, to the bit.
+    assert_eq!(
+        on.pipe_entropy().value().to_bits(),
+        reported.value().to_bits()
+    );
+}
+
+/// A restriction for air that, once `lying` is set, reports the entropy of
+/// its pressure drop with its sign turned.
+struct Destroying {
+    honest: Restriction,
+    lying: Arc<AtomicBool>,
+}
+
+impl Component for Destroying {
+    type State = ();
+    type Error = ElementError;
+
+    fn ports(&self) -> &[PortSpec] {
+        self.honest.ports()
+    }
+
+    fn class(&self) -> Class {
+        self.honest.class()
+    }
+
+    fn stored_energy_j(&self, (): &()) -> Result<f64, ElementError> {
+        self.honest.stored_energy_j(&())
+    }
+
+    fn stored_mass_kg(&self, (): &()) -> Result<Option<f64>, ElementError> {
+        self.honest.stored_mass_kg(&())
+    }
+
+    fn stored_carried_quantity(
+        &self,
+        (): &(),
+        carried: usize,
+    ) -> Result<Option<f64>, ElementError> {
+        self.honest.stored_carried_quantity(&(), carried)
+    }
+
+    fn propose(
+        &self,
+        (): &(),
+        dt_s: f64,
+        inputs: &[f64],
+        (): &mut (),
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<Proposal, ElementError> {
+        let mut proposal = self
+            .honest
+            .propose(&(), dt_s, inputs, &mut (), outputs, cx)?;
+        if let Proposal::Step(receipt) = &mut proposal
+            && self.lying.load(Ordering::Relaxed)
+        {
+            receipt.entropy_generated_j_per_k = -receipt.entropy_generated_j_per_k;
+        }
+        Ok(proposal)
+    }
+}
+
+impl PortTangent for Destroying {
+    fn jvp(
+        &self,
+        (): &(),
+        dt_s: f64,
+        inputs: &[f64],
+        d_inputs: &[f64],
+        d_outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        self.honest.jvp(&(), dt_s, inputs, d_inputs, d_outputs, cx)
+    }
+
+    fn vjp(
+        &self,
+        (): &(),
+        dt_s: f64,
+        inputs: &[f64],
+        bar_outputs: &[f64],
+        bar_inputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        self.honest
+            .vjp(&(), dt_s, inputs, bar_outputs, bar_inputs, cx)
+    }
+}
+
+#[test]
+fn a_restriction_that_reports_destroyed_entropy_is_refused_and_its_step_leaves_nothing() {
+    let lying = Arc::new(AtomicBool::new(true));
+    let pipe = Destroying {
+        honest: Restriction::for_gas(2.0e-8, &air(2)).unwrap(),
+        lying: Arc::clone(&lying),
+    };
+    // The kit refuses it wherever mass crosses.
+    let both = [5.0e5, 3.0e5, 0.2, 0.7, 1.0e5, 8.0e5, 0.9, 0.1];
+    let case = Case {
+        state: &(),
+        stale: &(),
+        dt_s: 1.0e-3,
+        inputs: &both,
+    };
+    with_cx(|cx| match check_component(&pipe, &case, cx) {
+        Err(Failure::Contract(ContractViolation::NegativeProduction { quantity, value })) => {
+            assert_eq!(quantity, "entropy_generated_j_per_k");
+            assert!(value < 0.0, "{value}");
+        }
+        other => panic!("not refused: {other:?}"),
+    });
+
+    // In a system it reports honestly for ten steps, then lies.
+    lying.store(false, Ordering::Relaxed);
+    let start = [
+        air(2).contents(5.0e5, 350.0, 0.01, &[0.2, 0.0]).unwrap(),
+        air(2).contents(1.0e5, 290.0, 0.03, &[0.0, 0.5]).unwrap(),
+    ];
+    let mut vessels = Vessels::through(start, pipe, no_heat);
+    step(&mut vessels.system, 0.02, 10);
+    let shown = vessels.shown();
+    let ledger = format!("{:?}", vessels.system.ledger());
+    assert!(vessels.pipe_entropy().value() > 0.0);
+    lying.store(true, Ordering::Relaxed);
+    let error = with_cx(|cx| vessels.system.step(0.02, cx)).expect_err("destroyed entropy");
+    match error {
+        SystemError::Contract {
+            node,
+            violation: ContractViolation::NegativeProduction { quantity, value },
+        } => {
+            assert_eq!(
+                (node.as_str(), quantity),
+                ("pipe", "entropy_generated_j_per_k")
+            );
+            assert!(value < 0.0, "{value}");
+        }
+        other => panic!("not refused as destroyed entropy: {other}"),
+    }
+    // Nothing of the refused step is published: states, clock, port values
+    // and every account are as they were, to the bit.
+    assert_eq!(vessels.shown(), shown);
+    assert_eq!(format!("{:?}", vessels.system.ledger()), ledger);
+    // Honest again, the step is taken.
+    lying.store(false, Ordering::Relaxed);
+    step(&mut vessels.system, 0.02, 1);
+    assert_eq!(vessels.system.ledger().steps, 11);
 }
 
 /// A line of equal vessels `[m, U, c]`, each joined to the next by the same

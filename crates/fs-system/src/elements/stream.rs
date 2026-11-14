@@ -6,7 +6,9 @@
 //! per unit mass). It also has a heat port and, if asked, a moving wall.
 //! [`Restriction`] is a transport element between two storages: the mass
 //! rate follows the pressure difference, and the enthalpy and carried
-//! quantities that go with it are those of the side the mass leaves.
+//! quantities that go with it are those of the side the mass leaves. Built
+//! for a gas ([`Restriction::for_gas`]), it reports the entropy its pressure
+//! drop makes, from that gas's own state function.
 //!
 //! The gas has constant heat capacities. A gas whose properties come from
 //! sources belongs to its physics owner (`fs_gas::component::GasCavity`).
@@ -57,7 +59,9 @@ pub struct GasContents {
 /// work of the mean of the old and new pressure, which is the pressure the
 /// ports return, so the first law holds for any step. The temperature and
 /// the fractions returned are the means of their old and new values.
-/// Entropy made by mixing a stream into the volume is not reported.
+/// Entropy made by mixing a stream into the volume is not reported, so the
+/// entropy a system of volumes shows generated is a lower bound of what it
+/// made.
 ///
 /// A step that would empty the volume, close it, take more energy than it
 /// holds or draw a carried quantity below nothing is shortened. So a small
@@ -242,6 +246,25 @@ impl GasVolume {
     #[must_use]
     pub fn heat_capacity_j_kg_k(&self) -> f64 {
         self.gas_constant_j_kg_k / (self.ratio - 1.0)
+    }
+
+    /// Specific entropy [J/(kg K)] of this gas at specific enthalpy `to_j_kg`
+    /// [J/kg] and pressure `to_pa` [Pa], less that at `from_j_kg` and
+    /// `from_pa`: `c_p ln(h_to / h_from) - R ln(p_to / p_from)`, since
+    /// `h = c_p T`. Each logarithm is taken as `ln_1p` of the relative
+    /// change, so equal values give exactly zero and each term has the sign
+    /// its change gives it, however small the change.
+    #[must_use]
+    pub fn specific_entropy_change_j_kg_k(
+        &self,
+        from_j_kg: f64,
+        from_pa: f64,
+        to_j_kg: f64,
+        to_pa: f64,
+    ) -> f64 {
+        let capacity = self.ratio * self.heat_capacity_j_kg_k();
+        capacity * ((to_j_kg - from_j_kg) / from_j_kg).ln_1p()
+            - self.gas_constant_j_kg_k * ((to_pa - from_pa) / from_pa).ln_1p()
     }
 
     fn has_wall(&self) -> bool {
@@ -521,13 +544,26 @@ impl PortTangent for GasVolume {
 /// of the side the mass leaves, so what one storage loses the other gains,
 /// and a flow that turns round passes through zero without a jump. It stores
 /// nothing. The port map has a kink at zero flow, where the side that
-/// supplies the carried values changes. Entropy made by the pressure drop
-/// appears in the receiving storage's state and is not reported here.
+/// supplies the carried values changes.
+///
+/// Built by [`Self::for_gas`], it reports the entropy the pressure drop
+/// makes. Nothing stores or exchanges heat on the way, so what crosses
+/// leaves the upstream side at that side's specific enthalpy and pressure
+/// and arrives at the downstream pressure with the same specific enthalpy.
+/// The entropy of a step is `dt |m_dot|` times the gas's
+/// [`GasVolume::specific_entropy_change_j_kg_k`] between those two states.
+/// It is exactly zero when nothing crosses and the same whichever way the
+/// mass goes. Built otherwise, it reports none, and that entropy appears
+/// only in the receiving storage's state. The entropy made as the stream
+/// mixes into the receiving [`GasVolume`] is not reported by either, so
+/// what the ledger shows generated is a lower bound.
 #[derive(Debug, Clone)]
 pub struct Restriction {
     conductance_kg_s_pa: f64,
     carried: usize,
     ports: [PortSpec; 2],
+    /// The gas whose state function gives the entropy of the pressure drop.
+    gas: Option<GasVolume>,
 }
 
 impl Restriction {
@@ -558,6 +594,18 @@ impl Restriction {
         Ok(restriction)
     }
 
+    /// A restriction between volumes of `gas` that reports the entropy its
+    /// pressure drop makes. Its ports are built from `gas`'s stream port as
+    /// by [`Self::for_stream`].
+    ///
+    /// # Errors
+    /// The refusals of [`Self::for_stream`].
+    pub fn for_gas(conductance_kg_s_pa: f64, gas: &GasVolume) -> Result<Self, ElementError> {
+        let mut restriction = Self::for_stream(conductance_kg_s_pa, &gas.ports[0])?;
+        restriction.gas = Some(gas.clone());
+        Ok(restriction)
+    }
+
     /// A restriction that passes `conductance_kg_s_pa` [kg/(s Pa)] between
     /// stream ports with `carried` quantities.
     ///
@@ -571,6 +619,7 @@ impl Restriction {
                 stream("a", PortRole::EffortIn, carried),
                 stream("b", PortRole::EffortIn, carried),
             ],
+            gas: None,
         })
     }
 
@@ -585,6 +634,36 @@ impl Restriction {
         let rate =
             self.conductance_kg_s_pa * (inputs[STREAM_PRESSURE] - inputs[n + STREAM_PRESSURE]);
         (rate, if rate >= 0.0 { 0 } else { n })
+    }
+
+    /// Entropy [J/K] the pressure drop makes in a step of `dt_s` at mass
+    /// rate `rate` leaving the side that starts at `upstream`.
+    ///
+    /// # Errors
+    /// A pressure or specific enthalpy that is not positive and finite on a
+    /// side the state function reads, while mass crosses.
+    fn throttled(
+        gas: &GasVolume,
+        dt_s: f64,
+        rate: f64,
+        upstream: usize,
+        downstream: usize,
+        inputs: &[f64],
+    ) -> Result<f64, ElementError> {
+        if rate == 0.0 {
+            return Ok(0.0);
+        }
+        let enthalpy = positive(
+            "specific_enthalpy_j_kg (upstream)",
+            inputs[upstream + STREAM_SPECIFIC_ENTHALPY],
+        )?;
+        let from_pa = positive("pressure_pa (upstream)", inputs[upstream + STREAM_PRESSURE])?;
+        let to_pa = positive(
+            "pressure_pa (downstream)",
+            inputs[downstream + STREAM_PRESSURE],
+        )?;
+        let gained = gas.specific_entropy_change_j_kg_k(enthalpy, from_pa, enthalpy, to_pa);
+        Ok(dt_s * rate.abs() * gained)
     }
 }
 
@@ -639,7 +718,12 @@ impl Component for Restriction {
             outputs[n + index] = -crossing;
         }
         let scale = dt_s * outputs[STREAM_ENTHALPY_RATE].abs();
-        Ok(Proposal::Step(Receipt::lossless(0.0, roundoff(scale))))
+        let mut receipt = Receipt::lossless(0.0, roundoff(scale));
+        if let Some(gas) = &self.gas {
+            receipt.entropy_generated_j_per_k =
+                Self::throttled(gas, dt_s, rate, upstream, n - upstream, inputs)?;
+        }
+        Ok(Proposal::Step(receipt))
     }
 }
 

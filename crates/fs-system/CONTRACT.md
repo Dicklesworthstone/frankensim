@@ -111,6 +111,9 @@ physics owners below fs-couple can be composed without it.
     `GasVolume::identified` binds its gas-constant and heat-capacity-ratio bits,
     its absolute-zero energy datum, and the caller's named carried masses;
     `Restriction::for_stream` retains a source port's exact basis on both ends.
+    `Restriction::for_gas` takes its ports from a `GasVolume`'s stream port the
+    same way and keeps the gas, whose state function gives the entropy the
+    restriction reports.
     Anonymous constructors remain available with their original caller
     obligations. Basis declarations authenticate no physical source law, and
     the ledger's ordinal `carried_residual` still requires corresponding
@@ -1695,6 +1698,36 @@ zero storage, so their mass balances are checked before publication.
   (1.2e-7 and 6.4e-8) is bounded by 5e-3 of the step squared and has no
   clean ratio: the step in which the supplier changes costs up to its length
   squared, depending on where in it the turn falls.
+- Throttle entropy. A `Restriction::for_gas` reports `dt |m_dot|` times its
+  gas's `GasVolume::specific_entropy_change_j_kg_k`, taken from the upstream
+  `(h, p)` to the downstream pressure at the same `h`. The test judges it by
+  the closed form `c_p ln(T2/T1) - R ln(p2/p1)`, computed in the test, with
+  an allowance of 32 eps of `(want + dt |m_dot| R)`. The allowance's
+  derivation is in the test.
+  - Over 200 generated points, every tenth a drop of one ulp, it is within
+    0.0401 of that allowance and positive at every point.
+  - Its port map equals `Restriction::new`'s to the bit. With `a` and `b`
+    swapped the entropy is the same to the bit.
+  - At equal pressures it is +0.
+  - While mass crosses, a pressure that is not positive on a side it reads
+    is refused. `new` and `for_stream` report no entropy.
+- Throttle entropy in the reversal run (600 steps of 5 ms, 293 one way and
+  307 back), the plain and the reporting restriction in one binary:
+  - The step reports, both vessels' contents, the clock and every port's
+    last input and output are the same to the bit at every step.
+  - The ledgers' Debug texts are equal once the pipe's entropy account is
+    masked. That account is 2.390423e-2 J/K.
+  - Each step's report is within 0.0113 of the allowance above.
+  - The account equals, to the bit, a compensated sum of the element's
+    reports at the inputs the system accepted.
+  - Two vessels level at equal pressure: nothing crosses, and the account
+    stays +0.
+- A restriction that reports its throttle entropy with the sign turned:
+  - The conformance kit refuses it (`NegativeProduction`).
+  - In a system, after ten honest steps, the step's audit refuses it
+    (`SystemError::Contract`, `NegativeProduction`, node `pipe`). That
+    comes before the second-law sum. States, clock, port values and ledger
+    are unchanged to the bit, and an honest step afterwards is taken.
 - Three vessels in a line at 4, 2.5 and 1 bar, the first holding a quantity:
   it reaches the third only through the second, which receives and gives in
   one step. Against RK4 the quantity's error is 1.6e-7 and 4.1e-8 at 100 and
@@ -2501,8 +2534,9 @@ solved together. Nothing in the module is deleted.
   complete measured coverage. Carried species or constituent inventories are
   audited only when the owner exposes their inventories, as described under
   "Carried stream inventory conservation" below. Entropy carried by streams
-  and made by mixing or throttling is
-  not accounted. Nothing checks that joined volumes hold the same gas. A
+  and made by mixing is not accounted. Entropy made by throttling is
+  reported only by a `Restriction::for_gas`; `new` and `for_stream` report
+  none. Nothing checks that joined volumes hold the same gas. A
   `GasVolume` shortens a step that passes more than about twice its mass
   through it, so a small volume between restrictions sets the step; a
   prescribed draw of a quantity a volume holds none of ends in step
@@ -2605,6 +2639,10 @@ solved together. Nothing in the module is deleted.
   refuses a step in which the entropy components say they generated, plus the
   entropy that appears or vanishes across connections, is negative. It does
   not check the entropy balance of each component.
+  Of the stream elements, only a `Restriction::for_gas` reports
+  generation: that of its throttling. A `GasVolume` does not report what
+  mixing a stream into it makes, and that is never negative. So the entropy
+  a stream system's ledger shows generated is a lower bound of what it made.
 - The audit trusts the tolerance a component claims for its own energy
   balance. A component that claims a wide tolerance passes the audit with a
   leak; the leak is visible in the ledger's `balance_defect_j` and
