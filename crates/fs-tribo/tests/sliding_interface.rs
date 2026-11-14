@@ -986,11 +986,13 @@ fn the_friction_interface_conforms_on_its_line_and_its_heat_is_the_work_of_its_e
         [2.5e-3, -1.0e-3, -1.0e-3, 1.0e-2],
         [0.0; 4],
     ];
+    let starts = [0.0, 0.3, -0.3, 1.0e-3];
+    let ends = [(0.0, 0.0), (0.01, 0.0), (0.3, 0.0), (0.0, 0.3), (-0.2, 0.2), (0.31, 0.02)];
     let (mut stepped, mut cut) = (0, 0);
-    for start in [0.0, 0.3, -0.3, 1.0e-3] {
+    for start in starts {
         let state = interface.start(300.0, start).expect("start");
         for line in lines {
-            for (a, b) in [(0.0, 0.0), (0.01, 0.0), (0.3, 0.0), (0.0, 0.3), (-0.2, 0.2), (0.31, 0.02)] {
+            for (a, b) in ends {
                 for kelvin in [300.0, 330.0] {
                     let case = Case {
                         state: &state,
@@ -1024,6 +1026,33 @@ fn the_friction_interface_conforms_on_its_line_and_its_heat_is_the_work_of_its_e
     }
     assert!(stepped > 100 && cut > 10, "{stepped} stepped, {cut} cut");
     println!("the friction interface on its line: {stepped} points stepped and audited, {cut} cut");
+
+    // The mandatory tier through the kit's own check, off any line, at the
+    // same starts, end flows and temperatures.
+    let (mut stepped, mut cut) = (0, 0);
+    for start in starts {
+        let state = interface.start(300.0, start).expect("start");
+        for (a, b) in ends {
+            for kelvin in [300.0, 330.0] {
+                let case = Case {
+                    state: &state,
+                    stale: &stale,
+                    dt_s: 0.01,
+                    inputs: &[a, b, kelvin],
+                };
+                match with_cx(|cx| check_component(&interface, &case, cx))
+                    .unwrap_or_else(|failure| panic!("{start} {a} {b} {kelvin}: {failure:?}"))
+                {
+                    Observed::Shortened { .. } => cut += 1,
+                    Observed::Stepped { .. } => stepped += 1,
+                }
+            }
+        }
+    }
+    assert!(stepped > 0, "the mandatory tier stepped nowhere: {cut} cut");
+    println!(
+        "the friction interface off any line: {stepped} points stepped and audited, {cut} cut"
+    );
 }
 
 /// A law with every verdict on record: the free slip rate it was asked at

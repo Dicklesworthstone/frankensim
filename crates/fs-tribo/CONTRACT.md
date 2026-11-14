@@ -3403,7 +3403,9 @@ the bracket, and under Coulomb in 52 calls that cost the law nothing, to
 that jumps by 0.3 m/s starts the step with that slip; with both ends given
 the force and the law's checkpoint are `SlidingInterface`'s, to the bit;
 the conformance check of the load-line tier passes at 120 points and
-answers `Shortened` at 72 more; a traction that falls with speed (the
+answers `Shortened` at 72 more, and off any line the check of the mandatory
+tier passes at all 48 of that sweep's starts, end flows and temperatures,
+each a step taken; a traction that falls with speed (the
 hyperbolic law) is solved on the line to the root a bisection in the test
 finds, to 1e-13 m/s; the refusals, by field, a root budget of two
 evaluations among them. Twenty-eight planted defects in a scratch copy
