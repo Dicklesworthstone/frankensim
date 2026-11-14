@@ -1,0 +1,28 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 2.0,
+  "step_s": 0.02,
+  "elements": {
+    "supply": {"kind": "pressure", "pressure_pa": 10000},
+    "pipe": {
+      "kind": "carreau_pipe",
+      "viscosity_zero_pa_s": 2.0,
+      "viscosity_infinite_pa_s": 0.01,
+      "time_constant_s": 0.5,
+      "power_index": 0.4,
+      "transition": 2.0,
+      "rate_support_per_s": [0, 100000],
+      "shift": {"arrhenius": {"activation_energy_j_mol": 30000, "reference_k": 300, "valid_k": [280, 360]}},
+      "shift_mode": "vertical",
+      "radius_m": 0.005,
+      "length_m": 1.0,
+      "maximum_wall_rate_per_s": 50000
+    },
+    "oil": {"kind": "heat_capacity", "capacity_j_k": 0.2, "temperature_k": 300.0}
+  },
+  "connections": [
+    {"common_effort": ["supply.p", "pipe.a"]},
+    {"prescribe": "pipe.b", "pressure_pa": 0},
+    {"join": ["oil.heat", "pipe.heat"]}
+  ]
+}

@@ -913,6 +913,37 @@ prescribed `current_a` is positive into its stored charge. Its reported
 readings are step means. The legacy `capacitor`, `resistor` and `join` retain
 their series-loop conventions.
 
+The same parallel forms exist for a liquid (`Domain::Hydraulic`, port kind
+`FluidPressureFlux`): `accumulator` (`capacitance_m3_pa`, optional `volume_m3`;
+reports `volume_m3` and the endpoint `pressure_pa = volume_m3 /
+capacitance_m3_pa`), `hydraulic_resistor` (`resistance_pa_s_m3`; reports
+`flow_m3_s` and `heat_w`), `flow_source` (`flow_m3_s`, positive into the
+source) and `pressure` (`pressure_pa`). They lower to the same kernel elements
+as the electrical forms; an electrical and a hydraulic scene of the same
+numbers report the same values bit for bit. `prescribe` takes `pressure_pa` on
+a hydraulic effort input and `flow_m3_s` on a hydraulic flow input. Gyrators,
+modulated transformers and resistance matrices do not take the hydraulic
+domain.
+
+`carreau_pipe` lowers to fs-material's `CarreauPipeComponent`: an authored
+Carreau-Yasuda curve (`viscosity_zero_pa_s`, `viscosity_infinite_pa_s`,
+`time_constant_s`, `power_index`, `transition`, `rate_support_per_s`), a
+required Arrhenius or WLF `shift` and `shift_mode` (`vertical` or
+`vertical-and-rate`), and `radius_m`, `length_m` and
+`maximum_wall_rate_per_s`. It is prepared at the shift's reference
+temperature with the owner's default controls. Ports `a` and `b` take
+pressures and return the flow `Q` into `a` and `-Q`; `heat` takes the
+liquid's temperature and returns minus the viscous power. It reports the last
+step's `flow_m3_s`, `heat_w` and the `temperature_k` read. Tested: Poiseuille
+flow for equal plateaus at a shifted temperature to 1e-9; a shear-thinning law
+against an independent Rabinowitsch-Mooney integral to 1e-7 in both shift
+modes; a self-heating example whose supply work, pipe heat and stored heat
+agree to 1e-9; refusals of a missing shift, an unknown mode, invalid curve,
+support and geometry, an unknown field, a wall rate over the ceiling and a
+temperature outside the band. Not covered: fluid storage or inertia in the
+pipe, entrance loss, transition or turbulence, a temperature that varies along
+or across the pipe, and any measured liquid.
+
 `modulated_transformer` lowers to the kernel's signal-modulated lossless
 transformer. Required `a` and `b` name its power domains (`translation`,
 `rotation` or `electrical`). Port `a` receives flow and returns effort; `b`

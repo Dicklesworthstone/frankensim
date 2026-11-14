@@ -52,6 +52,7 @@ save/resume commands work with `self_heating_damper.json` and
 | `dc_motor.json` | a DC motor across three domains: a 12 V supply, winding inductance and resistance in a current loop, a gyrator to a rotor with a viscous bearing, and both heats into one case | the monolithic midpoint rule for the two coupled equations, the supply's energy against stored energy plus heat |
 | `parallel_rlc.json` | a current source drives a capacitor, inductor and resistor in parallel; all Joule heat warms the case | independent coupled voltage/current equations, source work, electrical storage and heat |
 | `nonlinear_rlc.json` | the same topology with voltage-dependent capacitance and flux-dependent inductance, crossing both curves' knees | independent charge/flux differential equations, original constitutive energies and Joule heat |
+| `carreau_pipe.json` | a shear-thinning liquid (an illustrative Carreau-Yasuda law, no measured material) driven through a 5 mm pipe by 10 kPa; all of the viscous heat warms the liquid's 0.2 J/K, whose Arrhenius shift thins it, so the flow rises as it warms | the Rabinowitsch-Mooney integral of the same law at the temperature the pipe read, to 1e-7; supply work = pipe heat = the liquid's stored heat |
 | `geared_oscillator.json` | an ideal 2.5:1 transformer couples a mass to an anchored spring | reflected stiffness `ratio² × stiffness`, the midpoint oscillation phase and conserved energy |
 | `projected_suspension.json` | a real 3-D rigid body suspended by a scalar spring along an oblique direction through a rectangular power map | the projected oscillator, free transverse motion, signed/scaled transmissions and energy closure |
 | `anisotropic_damping.json` | a 3-D rigid body slowed by a full damping tensor; off-diagonal terms induce transverse motion and every lost joule heats the case | independently diagonalized decay modes, position, last-step forces and kinetic-to-thermal energy transfer |
@@ -291,6 +292,34 @@ Their reported `voltage_v` and `current_a` are endpoint constitutive values.
 The kernel uses integral mean efforts for work during a finite step, retaining
 energy when a step crosses knots. The original constant `capacitor`,
 `node_capacitor` and `inductor` scene forms keep their existing conventions.
+
+## Liquid circuits
+
+The parallel forms carry a liquid as well, with volume, flow and pressure in
+place of charge, current and voltage: an `accumulator`
+(`capacitance_m3_pa`, `volume_m3`) sets the pressure of a `common_effort`
+node, a `hydraulic_resistor` (`resistance_pa_s_m3`) passes
+`(p_a - p_b) / R` and sends its heat out of `heat`, a `flow_source`
+(`flow_m3_s`, positive into the source) supplies or draws flow, and a
+`pressure` source (`pressure_pa`) holds a node's pressure. A far end is
+held with `{"prescribe": port, "pressure_pa": 0}`. These are the same kernel
+elements as the electrical ones; a scene in either set of names gives the
+same numbers.
+
+`carreau_pipe.json` runs the fs-material laminar pipe of a Carreau-Yasuda
+liquid. Its viscosity at the shift's reference temperature is
+`mu_inf + (mu_0 - mu_inf) (1 + (time_constant_s rate)^a)^((n - 1) / a)`; the
+owner solves the stress over the radius for the flow, so the pipe is a
+nonlinear resistance between `a` and `b`. Its `heat` port reads the liquid's
+temperature and returns all of the viscous heat; the `shift` (Arrhenius or
+WLF, as for a network) multiplies the viscosity, and with
+`"shift_mode": "vertical-and-rate"` also the rate the curve is read at.
+Joined to a `heat_capacity`, the heat warms the liquid and the warmer liquid
+flows faster, solved within each step. The law in the example is
+illustrative, not a measured liquid. The pipe holds no liquid and has no
+inertia, entrance loss or turbulence; a wall rate above
+`maximum_wall_rate_per_s` or outside `rate_support_per_s`, or a temperature
+outside the shift's `valid_k`, refuses the step.
 
 ## Gas in volumes
 

@@ -1063,6 +1063,440 @@ fn a_prescribed_current_enters_the_node_capacitor() {
     assert!(value(&json, "\"totals\"", "energy_residual_j").abs() <= 1.0e-12);
 }
 
+/// One parallel node with storage, a resistor to ground and a supply, in
+/// electrical or hydraulic names: the same numbers in either.
+fn parallel_rc(hydraulic: bool) -> String {
+    let [
+        storage,
+        branch,
+        source,
+        capacity,
+        content,
+        resistance,
+        flow,
+        ground,
+    ] = if hydraulic {
+        [
+            "accumulator",
+            "hydraulic_resistor",
+            "flow_source",
+            "capacitance_m3_pa",
+            "volume_m3",
+            "resistance_pa_s_m3",
+            "flow_m3_s",
+            "pressure_pa",
+        ]
+    } else {
+        [
+            "node_capacitor",
+            "resistor_branch",
+            "current_source",
+            "capacitance_f",
+            "charge_c",
+            "resistance_ohm",
+            "current_a",
+            "voltage_v",
+        ]
+    };
+    format!(
+        r#"{{
+  "schema": "frankensim.system.v0", "duration_s": 2.0, "step_s": 0.001,
+  "elements": {{
+    "store": {{"kind": "{storage}", "{capacity}": 1e-9, "{content}": 2e-4}},
+    "drain": {{"kind": "{branch}", "{resistance}": 1e9}},
+    "supply": {{"kind": "{source}", "{flow}": -1e-4}},
+    "oil": {{"kind": "heat_capacity", "capacity_j_k": 50.0, "temperature_k": 300.0}}
+  }},
+  "connections": [
+    {{"common_effort": ["store.p", "drain.a", "supply.p"]}},
+    {{"prescribe": "drain.b", "{ground}": 0}},
+    {{"route": "drain.heat", "to": [["oil.heat", 1.0]]}}
+  ]
+}}"#
+    )
+}
+
+#[test]
+fn an_accumulator_drains_through_a_hydraulic_resistor_as_the_electrical_node_does() {
+    let hydraulic = scratch("hydraulic_rc.json", &parallel_rc(true));
+    let electrical = scratch("electrical_rc.json", &parallel_rc(false));
+    let (code, json, stderr) = run_binary(&["--json", "system", hydraulic.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    let (code, twin, stderr) = run_binary(&["--json", "system", electrical.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+
+    // C p' = J - p / R with J = 1e-4 m^3/s supplied, by the midpoint rule.
+    let (c, r, supplied, dt) = (1.0e-9_f64, 1.0e9_f64, 1.0e-4_f64, 0.001_f64);
+    let (mut pressure, mut work_j, mut heat_j) = (2.0e-4 / c, 0.0_f64, 0.0_f64);
+    for _ in 0..2_000 {
+        let half = 0.5 * dt;
+        let mean = (pressure + half / c * supplied) / (1.0 + half / (r * c));
+        pressure = 2.0 * mean - pressure;
+        work_j += dt * supplied * mean;
+        heat_j += dt * mean * mean / r;
+    }
+    let store = element("store");
+    let reached = value(&json, &store, "pressure_pa");
+    let volume = value(&json, &store, "volume_m3");
+    assert!(
+        (reached - pressure).abs() <= 1.0e-9 * pressure,
+        "{reached} vs {pressure}"
+    );
+    assert!(
+        (volume - c * pressure).abs() <= 1.0e-9 * c * pressure,
+        "{volume}"
+    );
+    let delivered = -value(&json, &element("supply"), "energy_in_j");
+    let dissipated = value(&json, &element("drain"), "dissipated_j");
+    let warmed = value(&json, &element("oil"), "stored_change_j");
+    assert!(
+        (delivered - work_j).abs() <= 1.0e-9 * work_j,
+        "{delivered} vs {work_j}"
+    );
+    assert!(
+        (dissipated - heat_j).abs() <= 1.0e-9 * heat_j,
+        "{dissipated} vs {heat_j}"
+    );
+    assert!(
+        (warmed - heat_j).abs() <= 1.0e-9 * heat_j,
+        "{warmed} vs {heat_j}"
+    );
+    let stored_change = (volume * volume - 2.0e-4 * 2.0e-4) / (2.0 * c);
+    assert!((delivered - stored_change - warmed).abs() <= 1.0e-9 * heat_j);
+    assert!(value(&json, "\"totals\"", "energy_residual_j").abs() <= 1.0e-9 * heat_j);
+
+    // The hydraulic names carry the electrical node's numbers, bit for bit.
+    for (anchor, hydraulic_key, electrical_key) in [
+        ("store", "volume_m3", "charge_c"),
+        ("store", "pressure_pa", "voltage_v"),
+        ("drain", "flow_m3_s", "current_a"),
+        ("drain", "heat_w", "heat_w"),
+        ("drain", "dissipated_j", "dissipated_j"),
+        ("supply", "energy_in_j", "energy_in_j"),
+        ("oil", "temperature_k", "temperature_k"),
+    ] {
+        let a = value(&json, &element(anchor), hydraulic_key);
+        let b = value(&twin, &element(anchor), electrical_key);
+        assert_eq!(
+            a.to_bits(),
+            b.to_bits(),
+            "{anchor}.{hydraulic_key} {a} vs {b}"
+        );
+    }
+
+    let scene = parallel_rc(true);
+    for (file, original, replacement, expected) in [
+        (
+            "accumulator_zero.json",
+            "\"capacitance_m3_pa\": 1e-9",
+            "\"capacitance_m3_pa\": 0",
+            "positive",
+        ),
+        (
+            "resistor_zero.json",
+            "\"resistance_pa_s_m3\": 1e9",
+            "\"resistance_pa_s_m3\": 0",
+            "positive",
+        ),
+        (
+            "accumulator_farads.json",
+            "\"capacitance_m3_pa\"",
+            "\"capacitance_f\"",
+            "capacitance_f",
+        ),
+        (
+            "ground_volts.json",
+            "\"pressure_pa\": 0",
+            "\"voltage_v\": 0",
+            "exactly one quantity, pressure_pa",
+        ),
+    ] {
+        let changed = scene.replace(original, replacement);
+        assert_ne!(changed, scene);
+        let (code, stderr) = refused(file, &changed);
+        assert_eq!(code, 3, "{stderr}");
+        assert!(stderr.contains(expected), "{stderr}");
+    }
+}
+
+const GAS_CONSTANT_J_MOL_K: f64 = 8.314_462_618_153_24;
+
+/// exp(E/R (1/T - 1/T_ref)): the Arrhenius factor on the viscosity.
+fn arrhenius(activation_j_mol: f64, reference_k: f64, temperature_k: f64) -> f64 {
+    (activation_j_mol / GAS_CONSTANT_J_MOL_K * (1.0 / temperature_k - 1.0 / reference_k)).exp()
+}
+
+/// Laminar flow of a Carreau-Yasuda liquid in a pipe by the
+/// Rabinowitsch-Mooney integral, Q = pi r^3 / s_w^3 int_0^s_w s^2 g(s) ds:
+/// the shear rate g at each stress s found by bisection on s = mu(g) g,
+/// Simpson's rule over the stress. Independent of the fs-material solver.
+fn carreau_flow(
+    law: [f64; 5],
+    factor: f64,
+    rate_too: bool,
+    radius_m: f64,
+    length_m: f64,
+    drop_pa: f64,
+) -> f64 {
+    let [mu0, mu_inf, time, n, a] = law;
+    let stress = |rate: f64| {
+        let reduced = if rate_too { factor * rate } else { rate };
+        factor
+            * (mu_inf + (mu0 - mu_inf) * (1.0 + (time * reduced).powf(a)).powf((n - 1.0) / a))
+            * rate
+    };
+    let rate_at = |target: f64| {
+        let mut high = 1.0;
+        while stress(high) < target {
+            high *= 2.0;
+        }
+        let mut low = 0.0;
+        for _ in 0..200 {
+            let middle = 0.5 * (low + high);
+            if stress(middle) < target {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        0.5 * (low + high)
+    };
+    let wall = drop_pa * radius_m / (2.0 * length_m);
+    let panels = 4_000_u32;
+    let h = wall / f64::from(panels);
+    let sum: f64 = (0..=panels)
+        .map(|i| {
+            let s = h * f64::from(i);
+            let weight = if i == 0 || i == panels {
+                1.0
+            } else if i % 2 == 1 {
+                4.0
+            } else {
+                2.0
+            };
+            weight * s * s * rate_at(s)
+        })
+        .sum();
+    std::f64::consts::PI * radius_m.powi(3) / wall.powi(3) * sum * h / 3.0
+}
+
+/// A `carreau_pipe` of radius 5 mm and length 1 m from a pressure supply to
+/// a drain held at 0 Pa; `oil` adds elements and `heat` connects its heat
+/// port. Arrhenius shift of 30 kJ/mol about 300 K.
+fn pipe_scene(
+    law: [f64; 5],
+    mode: &str,
+    drop_pa: f64,
+    ceiling: f64,
+    oil: &str,
+    heat: &str,
+) -> String {
+    let [mu0, mu_inf, time, n, a] = law;
+    format!(
+        r#"{{
+  "schema": "frankensim.system.v0", "duration_s": 0.1, "step_s": 0.05,
+  "elements": {{
+    "supply": {{"kind": "pressure", "pressure_pa": {drop_pa}}},
+    "pipe": {{"kind": "carreau_pipe",
+      "viscosity_zero_pa_s": {mu0}, "viscosity_infinite_pa_s": {mu_inf},
+      "time_constant_s": {time}, "power_index": {n}, "transition": {a},
+      "rate_support_per_s": [0, 100000],
+      "shift": {{"arrhenius": {{"activation_energy_j_mol": 30000, "reference_k": 300, "valid_k": [280, 360]}}}},
+      "shift_mode": "{mode}",
+      "radius_m": 0.005, "length_m": 1.0, "maximum_wall_rate_per_s": {ceiling}}}{oil}
+  }},
+  "connections": [
+    {{"common_effort": ["supply.p", "pipe.a"]}},
+    {{"prescribe": "pipe.b", "pressure_pa": 0}},
+    {heat}
+  ]
+}}"#
+    )
+}
+
+const AT_320_K: &str = r#"{"prescribe": "pipe.heat", "temperature_k": 320}"#;
+
+#[test]
+fn a_newtonian_carreau_pipe_at_a_shifted_temperature_passes_the_poiseuille_flow() {
+    let scene = pipe_scene(
+        [0.5, 0.5, 0.5, 0.4, 2.0],
+        "vertical",
+        1.0e4,
+        5.0e4,
+        "",
+        AT_320_K,
+    );
+    let path = scratch("poiseuille.json", &scene);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    // Equal plateaus: a constant viscosity 0.5 Pa s at 300 K, times a_T.
+    let viscosity = 0.5 * arrhenius(30_000.0, 300.0, 320.0);
+    let radius: f64 = 0.005;
+    let flow = std::f64::consts::PI * radius.powi(4) * 1.0e4 / (8.0 * viscosity * 1.0);
+    let pipe = element("pipe");
+    let reached = value(&json, &pipe, "flow_m3_s");
+    assert!(
+        (reached - flow).abs() <= 1.0e-9 * flow,
+        "{reached} vs Poiseuille {flow}"
+    );
+    assert!((value(&json, &pipe, "heat_w") - flow * 1.0e4).abs() <= 1.0e-9 * flow * 1.0e4);
+    assert!((value(&json, &pipe, "temperature_k") - 320.0).abs() <= 0.0);
+    // All the supply's work leaves as heat through the held heat port.
+    let delivered = -value(&json, &element("supply"), "energy_in_j");
+    let expected = 0.1 * flow * 1.0e4;
+    assert!(
+        (delivered - expected).abs() <= 1.0e-9 * expected,
+        "{delivered} vs {expected}"
+    );
+    let left = -value(&json, "\"port\":\"pipe.heat\"", "energy_in_j");
+    assert!(
+        (left - expected).abs() <= 1.0e-9 * expected,
+        "{left} vs {expected}"
+    );
+    assert!(value(&json, "\"totals\"", "energy_residual_j").abs() <= 1.0e-9 * expected);
+
+    // A ceiling below the wall rate (4 Q / pi r^3, about 106 1/s) refuses the step.
+    let ceiling = 4.0 * flow / (std::f64::consts::PI * radius.powi(3));
+    assert!(ceiling > 100.0 && ceiling < 110.0, "{ceiling}");
+    let low = pipe_scene(
+        [0.5, 0.5, 0.5, 0.4, 2.0],
+        "vertical",
+        1.0e4,
+        50.0,
+        "",
+        AT_320_K,
+    );
+    let (code, stderr) = refused("pipe_over_ceiling.json", &low);
+    assert_eq!(code, 4, "{stderr}");
+    assert!(stderr.contains("wall-rate ceiling"), "{stderr}");
+}
+
+#[test]
+fn a_shear_thinning_carreau_pipe_follows_the_rabinowitsch_mooney_flow_in_both_shift_modes() {
+    let law = [2.0, 0.01, 0.5, 0.4, 2.0];
+    let factor = arrhenius(30_000.0, 300.0, 320.0);
+    let mut flows = Vec::new();
+    for (mode, rate_too) in [("vertical", false), ("vertical-and-rate", true)] {
+        let scene = pipe_scene(law, mode, 1.0e4, 5.0e4, "", AT_320_K);
+        let path = scratch(&format!("thinning_{mode}.json"), &scene);
+        let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+        assert_eq!(code, 0, "{stderr}");
+        let expected = carreau_flow(law, factor, rate_too, 0.005, 1.0, 1.0e4);
+        let reached = value(&json, &element("pipe"), "flow_m3_s");
+        assert!(
+            (reached - expected).abs() <= 1.0e-7 * expected,
+            "{mode}: {reached} vs {expected}"
+        );
+        let heat = value(&json, &element("pipe"), "heat_w");
+        assert!(
+            (heat - reached * 1.0e4).abs() <= 1.0e-9 * heat,
+            "{mode}: {heat}"
+        );
+        flows.push(reached);
+    }
+    // The shift's rate factor (a_T < 1 at 320 K) moves the curve's knee,
+    // so the two modes differ by much more than the tolerance.
+    assert!(flows[0] > 1.5 * flows[1], "{flows:?}");
+
+    let scene = pipe_scene(law, "vertical", 1.0e4, 5.0e4, "", AT_320_K);
+    for (file, original, replacement, expected) in [
+        (
+            "pipe_no_shift.json",
+            "\"shift\": {\"arrhenius\": {\"activation_energy_j_mol\": 30000, \"reference_k\": 300, \"valid_k\": [280, 360]}},",
+            "",
+            "missing shift",
+        ),
+        (
+            "pipe_mode.json",
+            "\"shift_mode\": \"vertical\"",
+            "\"shift_mode\": \"both\"",
+            "shift_mode",
+        ),
+        (
+            "pipe_index.json",
+            "\"power_index\": 0.4",
+            "\"power_index\": 1.5",
+            "Carreau-Yasuda",
+        ),
+        (
+            "pipe_support.json",
+            "[0, 100000]",
+            "[1, 100000]",
+            "calibrated reference curve",
+        ),
+        (
+            "pipe_radius.json",
+            "\"radius_m\": 0.005",
+            "\"radius_m\": 0",
+            "radius_m",
+        ),
+        (
+            "pipe_field.json",
+            "\"length_m\": 1",
+            "\"diameter_m\": 0.01, \"length_m\": 1",
+            "diameter_m",
+        ),
+    ] {
+        let changed = scene.replace(original, replacement);
+        assert_ne!(changed, scene, "{file}");
+        let (code, stderr) = refused(file, &changed);
+        assert_eq!(code, 3, "{stderr}");
+        assert!(stderr.contains(expected), "{file}: {stderr}");
+    }
+    // Outside the shift's band the step refuses.
+    let hot = scene.replace("\"temperature_k\": 320", "\"temperature_k\": 370");
+    let (code, stderr) = refused("pipe_too_hot.json", &hot);
+    assert_eq!(code, 4, "{stderr}");
+}
+
+#[test]
+fn the_carreau_pipe_example_heats_its_oil_by_the_supply_work_and_thins_as_it_warms() {
+    let (code, json, stderr) = run_binary(&["--json", "system", &example("carreau_pipe.json")]);
+    assert_eq!(code, 0, "{stderr}");
+    let law = [2.0, 0.01, 0.5, 0.4, 2.0];
+    let pipe = element("pipe");
+    // The last step's flow is the pipe's law at the temperature it read.
+    let temperature = value(&json, &pipe, "temperature_k");
+    let factor = arrhenius(30_000.0, 300.0, temperature);
+    let expected = carreau_flow(law, factor, false, 0.005, 1.0, 1.0e4);
+    let reached = value(&json, &pipe, "flow_m3_s");
+    assert!(
+        (reached - expected).abs() <= 1.0e-7 * expected,
+        "{reached} vs {expected}"
+    );
+    // Warmer oil is thinner: the flow has risen above the 300 K flow.
+    let cold = carreau_flow(law, 1.0, false, 0.005, 1.0, 1.0e4);
+    assert!(
+        temperature > 300.5 && reached > 1.05 * cold,
+        "{temperature} K, {reached} vs {cold}"
+    );
+    // Every joule of the supply's work is the pipe's heat, held by the oil.
+    let delivered = -value(&json, &element("supply"), "energy_in_j");
+    let dissipated = value(&json, &pipe, "dissipated_j");
+    let warmed = value(&json, &element("oil"), "stored_change_j");
+    let oil_k = value(&json, &element("oil"), "temperature_k");
+    assert!(delivered > 0.1, "{delivered}");
+    assert!(
+        (dissipated - delivered).abs() <= 1.0e-9 * delivered,
+        "{dissipated} vs {delivered}"
+    );
+    assert!(
+        (warmed - delivered).abs() <= 1.0e-9 * delivered,
+        "{warmed} vs {delivered}"
+    );
+    assert!(
+        (0.2 * (oil_k - 300.0) - warmed).abs() <= 1.0e-9 * warmed,
+        "{oil_k}"
+    );
+    assert!(value(&json, "\"totals\"", "energy_residual_j").abs() <= 1.0e-9 * delivered);
+    assert!(value(&json, "\"totals\"", "entropy_generated_j_per_k") > 0.0);
+    assert!(json.contains("authored Carreau-Yasuda pipe laws"), "{json}");
+    assert!(
+        json.contains("no fluid inertia, compressibility, entrance loss"),
+        "{json}"
+    );
+}
+
 // Independent piecewise laws for nonlinear_rlc.json: the outer slope is
 // twice the inner slope, and energy integrates the physical conjugate value.
 fn nonlinear_effort(coordinate: f64, knee: f64, at_knee: f64) -> f64 {

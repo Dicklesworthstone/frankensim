@@ -8,6 +8,7 @@
 //! Nothing here integrates anything: every number comes from the kernel and its elements.
 
 mod adaptive_metric;
+mod hydraulic;
 mod materials;
 mod snapshot;
 
@@ -93,9 +94,10 @@ const ADAPTIVE_NO_CLAIM: &str = "step-doubling estimates control the declared st
 const HELP: &str = "Usage: frankensim [--json] system <scene.json> [--until <time_s>]
        [--checkpoint <new-file>] [--resume <file> --resume-root <hex>]
 
-Run a lumped mechanical, rotational, electrical, gas and thermal device described
-as data on the composition kernel, and report its final state, sampled states
-and the energy, entropy and measured stream-inventory ledger of the run.
+Run a lumped mechanical, rotational, electrical, hydraulic, gas and thermal
+device described as data on the composition kernel, and report its final state,
+sampled states and the energy, entropy and measured stream-inventory ledger of
+the run.
 
 --until stops at an absolute simulated time within the scene's duration; zero
 can save the admitted initial state. --checkpoint saves the accepted kernel
@@ -260,6 +262,30 @@ share that voltage (current is positive into each component):
   node_capacitor capacitance_f, charge_c = 0                          [p]
   resistor_branch resistance_ohm                                      [a, b, heat]
   current_source current_a (waveform; negative supplies the node)     [p]
+The same parallel forms carry a liquid, with volume, flow and pressure:
+  accumulator    capacitance_m3_pa, volume_m3 = 0                     [p]
+                 (volume_m3 is the volume taken in; pressure_pa = volume_m3 /
+                 capacitance_m3_pa)
+  hydraulic_resistor resistance_pa_s_m3                              [a, b, heat]
+  flow_source    flow_m3_s (waveform; negative supplies the node)     [p]
+  pressure       pressure_pa (waveform)                               [p]
+  carreau_pipe   viscosity_zero_pa_s, viscosity_infinite_pa_s,
+                 time_constant_s, power_index (0 < n <= 1), transition (a > 0),
+                 rate_support_per_s = [lowest, highest] (lowest 0: the core of
+                 the pipe is at rest), shift (as a network's, below; required),
+                 shift_mode = \"vertical\" | \"vertical-and-rate\",
+                 radius_m, length_m, maximum_wall_rate_per_s       [a, b, heat]
+                 (fully developed laminar flow of a liquid whose viscosity at
+                 the shift's reference temperature is mu_inf + (mu_0 - mu_inf)
+                 (1 + (time_constant_s rate)^a)^((n - 1)/a), solved over the
+                 radius by the fs-material owner. heat takes the liquid's one
+                 temperature, which multiplies the viscosity by the shift factor
+                 (and with vertical-and-rate the rate too), and returns all the
+                 viscous heat. Reports flow_m3_s from a to b, heat_w and the
+                 temperature_k read in the last step. A wall rate above
+                 maximum_wall_rate_per_s or outside the support, or a
+                 temperature outside valid_k, refuses the step. No inertia,
+                 compressibility, entrance loss or turbulence.)
 Source-owned reversible electrical curves, with both polarities and an
 interior (0,0) knot; both coordinates must increase strictly:
   nonlinear_capacitor charge_voltage_curve = [[charge_c, voltage_v], ...],
@@ -332,9 +358,11 @@ Connections, ports written element.port:
                           the elements at its temperature
   {\"common_effort\": [ports]}
                           one effort-setting port (node_capacitor,
-                          nonlinear_capacitor or voltage)
-                          and branches sharing its voltage (inductor,
-                          resistor_branch, current_source)
+                          nonlinear_capacitor, voltage, accumulator or
+                          pressure) and branches sharing its voltage or
+                          pressure (inductor, resistor_branch,
+                          current_source, hydraulic_resistor, flow_source,
+                          carreau_pipe)
   {\"transformer\": [effort_in_port, flow_in_port], \"ratio\": r}
                           lossless signed flow ratio r; effort returns with
                           the same factor; endpoints may be in different domains
@@ -371,8 +399,11 @@ Connections, ports written element.port:
                           current grounds a series element's far end); voltage_v
                           grounds a resistor_branch end; current_a into a
                           node_capacitor or nonlinear_capacitor increases its charge;
+                          pressure_pa holds a hydraulic_resistor or carreau_pipe
+                          end; flow_m3_s into an accumulator increases its volume;
                           temperature_k for a damper, resistor, conductance,
-                          heater or heat node body, heat_rate_w for a heat
+                          heater, heat node body or carreau_pipe heat port,
+                          heat_rate_w for a heat
                           capacity or a heat node's source; for a
                           network of rigid bodies, force_n or torque_n_m as
                           an array of three waveforms ([0, 0, 0] leaves a
@@ -865,6 +896,8 @@ enum Domain {
     Translation,
     Rotation,
     Electrical,
+    /// Pressure and volume flow of an incompressible liquid.
+    Hydraulic,
 }
 
 /// Field names of one domain, SI units in each.
@@ -885,6 +918,8 @@ struct Names {
 }
 
 impl Domain {
+    /// The domain named by a gyrator, transformer or resistance matrix. The
+    /// hydraulic domain is not offered there: no scene has run it there.
     fn parse(name: &str) -> Option<Self> {
         Some(match name {
             "translation" => Self::Translation,
@@ -899,13 +934,19 @@ impl Domain {
             Self::Translation => PortKind::MechanicalForceVelocity,
             Self::Rotation => PortKind::RotationalTorqueAngularVelocity,
             Self::Electrical => PortKind::ElectricalVoltageCurrent,
+            Self::Hydraulic => PortKind::FluidPressureFlux,
         }
     }
 
     fn of(kind: PortKind) -> Option<Self> {
-        [Self::Translation, Self::Rotation, Self::Electrical]
-            .into_iter()
-            .find(|domain| domain.port_kind() == kind)
+        [
+            Self::Translation,
+            Self::Rotation,
+            Self::Electrical,
+            Self::Hydraulic,
+        ]
+        .into_iter()
+        .find(|domain| domain.port_kind() == kind)
     }
 
     fn names(self) -> Names {
@@ -942,6 +983,18 @@ impl Domain {
                 resistance: "resistance_ohm",
                 effort: "voltage_v",
             },
+            // An accumulator is declared by its capacitance, the volume it
+            // takes in per pascal; it holds that volume times its pressure.
+            Self::Hydraulic => Names {
+                inertance: "inertance_pa_s2_m3",
+                displacement: "volume_m3",
+                flow: "flow_m3_s",
+                stiffness: "capacitance_m3_pa",
+                cubic: "",
+                extension: "volume_m3",
+                resistance: "resistance_pa_s_m3",
+                effort: "pressure_pa",
+            },
         }
     }
 }
@@ -963,12 +1016,16 @@ enum Kind {
     VelocitySource,
     /// Constant-coefficient dry friction on the kernel's load line.
     Slider,
-    /// Charge storage setting the voltage of a parallel electrical node.
-    NodeCapacitor,
-    /// Current from a voltage difference, with a heat port.
-    ResistorBranch,
-    /// A prescribed current, positive into the source.
-    CurrentSource,
+    /// Storage setting the effort of a parallel node: charge and voltage
+    /// (node capacitor), volume and pressure (accumulator).
+    NodeCapacitor(Domain),
+    /// Flow from an effort difference, with a heat port.
+    ResistorBranch(Domain),
+    /// A prescribed flow, positive into the source.
+    CurrentSource(Domain),
+    /// The fs-material laminar pipe of a Carreau-Yasuda liquid, whose
+    /// viscosity follows the temperature at its heat port.
+    CarreauPipe,
     /// Charge storage governed by a source-owned V(q) curve.
     NonlinearCapacitor,
     /// Flux storage governed by a source-owned I(flux) curve.
@@ -997,7 +1054,7 @@ enum Kind {
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 32] = [
+    const TABLE: [(&'static str, Self); 37] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
@@ -1013,9 +1070,17 @@ impl Kind {
         ("capacitor", Self::Compliance(Domain::Electrical)),
         ("resistor", Self::Resistance(Domain::Electrical)),
         ("voltage", Self::Source(Domain::Electrical)),
-        ("node_capacitor", Self::NodeCapacitor),
-        ("resistor_branch", Self::ResistorBranch),
-        ("current_source", Self::CurrentSource),
+        ("node_capacitor", Self::NodeCapacitor(Domain::Electrical)),
+        ("resistor_branch", Self::ResistorBranch(Domain::Electrical)),
+        ("current_source", Self::CurrentSource(Domain::Electrical)),
+        ("accumulator", Self::NodeCapacitor(Domain::Hydraulic)),
+        (
+            "hydraulic_resistor",
+            Self::ResistorBranch(Domain::Hydraulic),
+        ),
+        ("flow_source", Self::CurrentSource(Domain::Hydraulic)),
+        ("pressure", Self::Source(Domain::Hydraulic)),
+        ("carreau_pipe", Self::CarreauPipe),
         ("nonlinear_capacitor", Self::NonlinearCapacitor),
         ("nonlinear_inductor", Self::NonlinearInductor),
         ("gyrator", Self::Gyrator),
@@ -1055,8 +1120,9 @@ struct Element {
     /// Initial temperature of a heat capacity, used as the starting value of
     /// the temperature inputs joined to it.
     temperature_k: Option<f64>,
-    /// Convert a node capacitor's endpoint charge to its endpoint voltage.
-    capacitance_f: Option<f64>,
+    /// A node capacitor's capacitance [F] or an accumulator's [m³/Pa]: its
+    /// endpoint charge or volume over this is its endpoint voltage or pressure.
+    node_capacity: Option<f64>,
     /// Original laws for endpoint probes; prepared data are shared on clone.
     charge_voltage_curve: Option<CapacitorChargeCurve>,
     flux_current_curve: Option<InductorFluxCurve>,
@@ -2281,7 +2347,7 @@ fn element(
     let kind = Kind::parse(kind_name).ok_or_else(|| format!("{what}: unknown kind {kind_name:?}"))?;
     let invalid = |e: fs_system::elements::ElementError| Refusal::Input(format!("{what}: {e}"));
     let mut temperature_k = None;
-    let mut capacitance_f = None;
+    let mut node_capacity = None;
     let mut charge_voltage_curve = None;
     let mut flux_current_curve = None;
     let mut bodies = Vec::new();
@@ -2340,38 +2406,45 @@ fn element(
             add(builder, name, source, SourceAccount::default())?
         }
         Kind::Slider => slider(builder, name, definition, &what)?,
-        Kind::NodeCapacitor => {
-            fields(definition, &["kind", "capacitance_f", "charge_c"], &what)?;
-            let capacity = positive(definition, "capacitance_f", &what)?;
-            let charge = number_or(definition, "charge_c", 0.0, &what)?;
-            if !charge.is_finite() {
-                return Err(format!("{what}: charge_c must be finite").into());
+        Kind::NodeCapacitor(domain) => {
+            let names = domain.names();
+            fields(
+                definition,
+                &["kind", names.stiffness, names.extension],
+                &what,
+            )?;
+            let capacity = positive(definition, names.stiffness, &what)?;
+            let content = number_or(definition, names.extension, 0.0, &what)?;
+            if !content.is_finite() {
+                return Err(format!("{what}: {} must be finite", names.extension).into());
             }
-            let storage = Storage::in_domain(Domain::Electrical.port_kind(), capacity)
-                .map_err(invalid)?;
-            capacitance_f = Some(capacity);
-            add(builder, name, storage, charge)?
+            let storage = Storage::in_domain(domain.port_kind(), capacity).map_err(invalid)?;
+            node_capacity = Some(capacity);
+            add(builder, name, storage, content)?
         }
-        Kind::ResistorBranch => {
-            fields(definition, &["kind", "resistance_ohm"], &what)?;
-            let resistance = positive(definition, "resistance_ohm", &what)?;
-            let branch = Admittance::in_domain(
-                Domain::Electrical.port_kind(),
-                1.0 / resistance,
-            )
-            .map_err(invalid)?;
+        Kind::ResistorBranch(domain) => {
+            let names = domain.names();
+            fields(definition, &["kind", names.resistance], &what)?;
+            let resistance = positive(definition, names.resistance, &what)?;
+            let branch =
+                Admittance::in_domain(domain.port_kind(), 1.0 / resistance).map_err(invalid)?;
             add(builder, name, branch, ())?
         }
-        Kind::CurrentSource => {
-            fields(definition, &["kind", "current_a"], &what)?;
+        Kind::CurrentSource(domain) => {
+            let names = domain.names();
+            fields(definition, &["kind", names.flow], &what)?;
             let wave = definition
-                .get("current_a")
-                .ok_or_else(|| format!("{what}: missing current_a"))?;
+                .get(names.flow)
+                .ok_or_else(|| format!("{what}: missing {}", names.flow))?;
             let source = FlowSource::in_domain(
-                Domain::Electrical.port_kind(),
-                waveform(wave, &format!("{what}.current_a"))?,
+                domain.port_kind(),
+                waveform(wave, &format!("{what}.{}", names.flow))?,
             );
             add(builder, name, source, SourceAccount::default())?
+        }
+        Kind::CarreauPipe => {
+            let pipe = hydraulic::carreau_pipe(definition, &what)?;
+            add(builder, name, pipe, ())?
         }
         Kind::NonlinearCapacitor => {
             fields(definition, &["kind", "charge_voltage_curve", "charge_c"], &what)?;
@@ -2491,7 +2564,7 @@ fn element(
         node,
         ports,
         temperature_k,
-        capacitance_f,
+        node_capacity,
         charge_voltage_curve,
         flux_current_curve,
         bodies,
@@ -3035,9 +3108,13 @@ fn prescribe(
     // A series element end carried by a node receives minus the node's
     // flow. A node capacitor instead receives current into its own stored
     // charge, so its prescribed current keeps the component's positive sign.
-    let prescribed_flow =
-        matches!((target.carrier, target.role), (Carrier::Power(_), PortRole::FlowIn))
-            && !matches!(elements[target.element].kind, Kind::NodeCapacitor | Kind::NonlinearCapacitor);
+    let prescribed_flow = matches!(
+        (target.carrier, target.role),
+        (Carrier::Power(_), PortRole::FlowIn)
+    ) && !matches!(
+        elements[target.element].kind,
+        Kind::NodeCapacitor(_) | Kind::NonlinearCapacitor
+    );
     let sign = if prescribed_flow { -1.0 } else { 1.0 };
     builder
         .scheduled_boundary(
@@ -3106,15 +3183,20 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
                 (domain.names().displacement, Coordinate::Position),
                 (domain.names().flow, Coordinate::Velocity),
             ],
-            Kind::Compliance(domain) => vec![(domain.names().extension, Coordinate::Scalar)],
-            Kind::NodeCapacitor | Kind::NonlinearCapacitor => vec![("charge_c", Coordinate::Scalar)],
+            Kind::Compliance(domain) | Kind::NodeCapacitor(domain) => {
+                vec![(domain.names().extension, Coordinate::Scalar)]
+            }
+            Kind::NonlinearCapacitor => vec![("charge_c", Coordinate::Scalar)],
             Kind::NonlinearInductor => vec![("flux_wb", Coordinate::Scalar)],
             Kind::HeatCapacity => vec![("temperature_k", Coordinate::Scalar)],
             Kind::EnthalpyBody => vec![("specific_enthalpy_j_kg", Coordinate::Enthalpy)],
-            Kind::Source(_) | Kind::VelocitySource | Kind::CurrentSource | Kind::Heater => vec![("energy_in_j", Coordinate::SourceWork)],
+            Kind::Source(_) | Kind::VelocitySource | Kind::CurrentSource(_) | Kind::Heater => {
+                vec![("energy_in_j", Coordinate::SourceWork)]
+            }
             Kind::Resistance(_)
             | Kind::ResistanceMatrix
-            | Kind::ResistorBranch
+            | Kind::ResistorBranch(_)
+            | Kind::CarreauPipe
             | Kind::Gyrator
             | Kind::ModulatedTransformer
             | Kind::Conductance
@@ -3318,6 +3400,7 @@ fn load_text(text: &str, source_path: &Path) -> Result<Device, Refusal> {
 }
 
 impl Device {
+    #[allow(clippy::too_many_lines)] // one narrowing sentence per element kind that has one
     fn no_claim(&self) -> std::borrow::Cow<'static, str> {
         let base = if self.adaptive.is_some() {
             ADAPTIVE_NO_CLAIM
@@ -3386,6 +3469,22 @@ impl Device {
                 "{base}; transformer ratios are held over each step in declared SI conversion \
                  units; no crank/cam geometry, displacement constraint, ratio-actuator work \
                  or control stability is inferred"
+            ));
+        }
+        if self
+            .elements
+            .iter()
+            .any(|element| element.kind == Kind::CarreauPipe)
+        {
+            let base = description.replace(
+                "constant parameters or",
+                "constant parameters, authored Carreau-Yasuda pipe laws or",
+            );
+            description = std::borrow::Cow::Owned(format!(
+                "{base}; a carreau_pipe is the fs-material quasi-steady, fully developed \
+                 laminar pipe at one uniform temperature, with its authored temperature shift; \
+                 no fluid inertia, compressibility, entrance loss, transition or turbulence, \
+                 and no measured-material claim"
             ));
         }
         if self
@@ -3610,6 +3709,7 @@ impl Device {
         values
     }
 
+    #[allow(clippy::too_many_lines)] // one report row per element kind
     fn lumped_values(&self, element: &Element) -> Vec<(&'static str, f64)> {
         let system = &self.system;
         // Before the first step there is no last step: those values are null.
@@ -3630,11 +3730,18 @@ impl Device {
                 domain.names().extension,
                 system.state::<f64>(element.node).copied().unwrap_or(f64::NAN),
             )],
-            Kind::NodeCapacitor => {
-                let charge = system.state::<f64>(element.node).copied().unwrap_or(f64::NAN);
+            Kind::NodeCapacitor(domain) => {
+                let names = domain.names();
+                let content = system
+                    .state::<f64>(element.node)
+                    .copied()
+                    .unwrap_or(f64::NAN);
                 vec![
-                    ("charge_c", charge),
-                    ("voltage_v", charge / element.capacitance_f.unwrap_or(f64::NAN)),
+                    (names.extension, content),
+                    (
+                        names.effort,
+                        content / element.node_capacity.unwrap_or(f64::NAN),
+                    ),
                 ]
             }
             Kind::NonlinearCapacitor => {
@@ -3662,12 +3769,14 @@ impl Device {
                     ("bulk_density_kg_m3", state.map_or(f64::NAN, |s| s.bulk_density_kg_m3())),
                 ]
             }
-            Kind::Source(_) | Kind::VelocitySource | Kind::CurrentSource | Kind::Heater => vec![(
-                "energy_in_j",
-                system
-                    .state::<SourceAccount>(element.node)
-                    .map_or(f64::NAN, |account| account.energy_in_j),
-            )],
+            Kind::Source(_) | Kind::VelocitySource | Kind::CurrentSource(_) | Kind::Heater => {
+                vec![(
+                    "energy_in_j",
+                    system
+                        .state::<SourceAccount>(element.node)
+                        .map_or(f64::NAN, |account| account.energy_in_j),
+                )]
+            }
             Kind::Resistance(domain) => {
                 vec![(domain.names().effort, output("a")), ("heat_w", -output("heat"))]
             }
@@ -3680,8 +3789,24 @@ impl Device {
                     ("heat_w", -output("heat")),
                 ]
             }
-            Kind::ResistorBranch => {
-                vec![("current_a", output("a")), ("heat_w", -output("heat"))]
+            Kind::ResistorBranch(domain) => {
+                vec![
+                    (domain.names().flow, output("a")),
+                    ("heat_w", -output("heat")),
+                ]
+            }
+            // The last step's flow from a to b, its heat, and the
+            // temperature the liquid's viscosity was read at.
+            Kind::CarreauPipe => {
+                let temperature = match system.port(element.node, "heat") {
+                    Some(port) if system.steps() > 0 => system.last_input(port)[0],
+                    _ => f64::NAN,
+                };
+                vec![
+                    ("flow_m3_s", output("a")),
+                    ("heat_w", -output("heat")),
+                    ("temperature_k", temperature),
+                ]
             }
             Kind::Gyrator => vec![("effort_a", output("a")), ("effort_b", output("b"))],
             Kind::ModulatedTransformer => {
