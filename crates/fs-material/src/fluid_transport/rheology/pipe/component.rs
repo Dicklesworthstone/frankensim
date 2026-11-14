@@ -13,10 +13,14 @@
 use core::num::NonZeroUsize;
 
 use fs_exec::Cx;
+use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::component::{
     Class, Component, EndOfStep, PortRole, PortSpec, PortTangent, Proposal, Receipt,
 };
 use fs_ports::{PortKind, StableId};
+
+use crate::fluid_transport::rheology::ViscosityShiftMode;
+use crate::visco::temperature::TemperatureShiftModel;
 
 use super::{
     CarreauPipeControls, CarreauPipeProfile, LaminarCarreauPipe, MaterialError, state_error,
@@ -200,6 +204,56 @@ impl Component for CarreauPipeComponent {
 
     fn stored_energy_j(&self, _state: &()) -> Result<f64, MaterialError> {
         Ok(0.0)
+    }
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-material::fluid_transport::rheology::pipe::component::CarreauPipeComponent",
+        state_family: "stateless-thermal-carreau-pipe",
+        schema_grammar: "unit state on the original Carreau law, shift, geometry and controls",
+        codec_grammar: "zero u64 words",
+        codec_version: 1,
+    });
+
+    fn encode_state(&self, _state: &(), _words: &mut Vec<u64>) -> bool {
+        true
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<()> {
+        words.is_empty().then_some(())
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        let law = self.pipe.law();
+        words.extend(law.curve().parameters().map(f64::to_bits));
+        words.extend(law.curve().rate_support_per_s().map(f64::to_bits));
+        let shift = law.temperature_shift();
+        // The model's kind goes with its coefficients, so a WLF and an
+        // Arrhenius shift never share an identity.
+        match shift.model() {
+            TemperatureShiftModel::WilliamsLandelFerry { c1, c2_k } => {
+                words.extend([0, c1.to_bits(), c2_k.to_bits()]);
+            }
+            TemperatureShiftModel::Arrhenius {
+                activation_energy_j_mol,
+            } => words.extend([1, activation_energy_j_mol.to_bits()]),
+        }
+        words.push(shift.reference_temperature_k().to_bits());
+        words.extend(shift.validity_k().map(f64::to_bits));
+        words.push(match law.mode() {
+            ViscosityShiftMode::Vertical => 0,
+            ViscosityShiftMode::VerticalAndRate => 1,
+        });
+        // The temperature the pipe was prepared at is not bound: every
+        // proposal rebinds the law to the heat port's temperature.
+        words.extend([
+            self.pipe.radius_m().to_bits(),
+            self.pipe.length_m().to_bits(),
+            self.pipe.maximum_laminar_wall_rate_per_s().to_bits(),
+            self.controls.relative_constitutive_tolerance.to_bits(),
+            u64::from(self.controls.maximum_constitutive_iterations),
+            self.controls.relative_quadrature_tolerance.to_bits(),
+            u64::from(self.controls.maximum_quadrature_refinements),
+        ]);
     }
 
     fn end_of_step(&self, _port: usize) -> EndOfStep {

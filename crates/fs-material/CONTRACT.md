@@ -100,6 +100,13 @@ Success uses stack storage. The native stress inverse retains its hard work
 bound, quadrature polls cancellation at every sample, and any refusal leaves
 caller outputs unchanged. The error remains `MaterialError`.
 
+The native Component snapshot codec writes no state words. Its parameter
+identity binds the five Carreau-Yasuda parameters and the rate support, the
+shift model's kind and coefficients, its reference temperature and validity
+band, the shift mode, the radius, length and wall-rate ceiling, and all four
+local solve and quadrature controls. The temperature the pipe was prepared at
+is not bound: every trial rebinds the law to the heat port's temperature.
+
 `tests/carreau_pipe_component.rs` exercises Poiseuille limits, reversal and
 pressure-reference invariance; an independent analytic stress-inverse radial
 oracle for a nonlinear Carreau law; both thermal shift conventions and the
@@ -108,8 +115,10 @@ refusals; and two native pipes, a declared hydraulic compliance and a shared
 `UniformEnthalpyBody` on the actual `fs-system` kernel. The R-C-R fixture
 compares pressure, thermal storage, delivered work and viscous heat over
 60 steps against independent elimination of Poiseuille flow, midpoint
-compliance and logarithmic mean temperature. `fs-system` is a development
-dependency only; production composition uses `fs-ports`.
+compliance and logarithmic mean temperature. Two codec tests check the empty
+state and that a one-ulp change of each bound real parameter, or a change by
+one of each integer control, changes the identity. `fs-system` is a development dependency only; production
+composition uses `fs-ports`.
 
 This is fully developed, incompressible, quasisteady no-slip resistance at
 uniform temperature. It supplies no fluid inertia, entrance or turbulent

@@ -33,7 +33,8 @@ An element whose owner does not provide a native state codec refuses saving
 instead of omitting its state.
 This includes support for authored or material-card-backed `enthalpy_body`
 and `layer_conductor` laws; keep referenced material packs unchanged when
-resuming. `rigid_network` saves every body's exact pose and momenta;
+resuming. A `carreau_pipe` saves and resumes as well; its law is part of the
+scene. `rigid_network` saves every body's exact pose and momenta;
 `viscoelastic_network` also saves every Maxwell branch's full elastic memory.
 Their Arrhenius and WLF calibrations are bound in full, so self-heating
 feedback continues under the original temperature law. For example, the same

@@ -557,3 +557,164 @@ fn two_native_pipes_compliance_and_enthalpy_body_share_the_kernel_and_thermal_fe
         "source temperature must affect the actual network flow"
     );
 }
+
+fn thermal_law(
+    curve: [f64; 5],
+    support_top: f64,
+    model: TemperatureShiftModel,
+    reference_k: f64,
+    band_k: [f64; 2],
+    mode: ViscosityShiftMode,
+) -> ThermalCarreauYasuda {
+    let [zero, infinity, time, n, a] = curve;
+    ThermalCarreauYasuda::new(
+        CarreauYasuda::new(zero, infinity, time, n, a, [0.0, support_top]).unwrap(),
+        TemperatureShift::new(model, reference_k, band_k).unwrap(),
+        mode,
+    )
+}
+
+fn identity(pipe: &LaminarCarreauPipe, controls: CarreauPipeControls) -> Vec<u64> {
+    let mut words = Vec::new();
+    CarreauPipeComponent::new(*pipe, controls)
+        .unwrap()
+        .identity_words(&mut words);
+    words
+}
+
+#[test]
+fn pipe_codec_is_stateless_and_binds_the_law_and_its_temperature_shift() {
+    let component =
+        CarreauPipeComponent::new(pipe(ViscosityShiftMode::Vertical, false), controls()).unwrap();
+    assert!(CarreauPipeComponent::STATE_CHARTER.is_some());
+    let mut state = vec![17];
+    assert!(component.encode_state(&(), &mut state));
+    assert_eq!(state, [17]);
+    assert_eq!(component.decode_state(&[]), Some(()));
+    assert_eq!(component.decode_state(&[0]), None);
+
+    let curve = [12.0, 0.5, 0.6, 0.5, 1.0];
+    let arrhenius = TemperatureShiftModel::Arrhenius {
+        activation_energy_j_mol: 12_000.0,
+    };
+    let band = [280.0, 360.0];
+    let vertical = ViscosityShiftMode::Vertical;
+    let law = thermal_law(curve, 1e8, arrhenius, 300.0, band, vertical);
+    let build = |law, radius, length, ceiling| {
+        LaminarCarreauPipe::new(law, 300.0, radius, length, ceiling).unwrap()
+    };
+    let original = identity(&build(law, 0.01, 0.5, 1e6), controls());
+    assert_eq!(original, identity(&build(law, 0.01, 0.5, 1e6), controls()));
+    // Every proposal rebinds the law to the heat port's temperature, so the
+    // temperature a pipe was prepared at does not enter its identity.
+    let warm = LaminarCarreauPipe::new(law, 320.0, 0.01, 0.5, 1e6).unwrap();
+    assert_eq!(original, identity(&warm, controls()));
+
+    let mut laws = Vec::new();
+    for index in 0..5 {
+        let mut changed = curve;
+        changed[index] = changed[index].next_up();
+        laws.push(thermal_law(changed, 1e8, arrhenius, 300.0, band, vertical));
+    }
+    let wlf = |c1: f64, c2_k: f64| TemperatureShiftModel::WilliamsLandelFerry { c1, c2_k };
+    let hotter = TemperatureShiftModel::Arrhenius {
+        activation_energy_j_mol: 12_000.0_f64.next_up(),
+    };
+    laws.extend([
+        thermal_law(curve, 1e8_f64.next_up(), arrhenius, 300.0, band, vertical),
+        thermal_law(curve, 1e8, hotter, 300.0, band, vertical),
+        thermal_law(curve, 1e8, arrhenius, 300.0_f64.next_up(), band, vertical),
+        thermal_law(
+            curve,
+            1e8,
+            arrhenius,
+            300.0,
+            [280.0_f64.next_up(), 360.0],
+            vertical,
+        ),
+        thermal_law(
+            curve,
+            1e8,
+            arrhenius,
+            300.0,
+            [280.0, 360.0_f64.next_up()],
+            vertical,
+        ),
+        thermal_law(
+            curve,
+            1e8,
+            arrhenius,
+            300.0,
+            band,
+            ViscosityShiftMode::VerticalAndRate,
+        ),
+    ]);
+    let shifts = [
+        wlf(8.86, 101.6),
+        wlf(8.86_f64.next_up(), 101.6),
+        wlf(8.86, 101.6_f64.next_up()),
+    ];
+    let mut wlf_identities = Vec::new();
+    for model in shifts {
+        let changed = thermal_law(curve, 1e8, model, 300.0, band, vertical);
+        laws.push(changed);
+        wlf_identities.push(identity(&build(changed, 0.01, 0.5, 1e6), controls()));
+    }
+    assert_ne!(wlf_identities[0], wlf_identities[1]);
+    assert_ne!(wlf_identities[0], wlf_identities[2]);
+    for (index, changed) in laws.into_iter().enumerate() {
+        let changed = identity(&build(changed, 0.01, 0.5, 1e6), controls());
+        assert_ne!(original, changed, "law {index}");
+    }
+}
+
+#[test]
+fn pipe_codec_binds_the_geometry_and_the_solver_controls() {
+    let arrhenius = TemperatureShiftModel::Arrhenius {
+        activation_energy_j_mol: 12_000.0,
+    };
+    let curve = [12.0, 0.5, 0.6, 0.5, 1.0];
+    let vertical = ViscosityShiftMode::Vertical;
+    let law = thermal_law(curve, 1e8, arrhenius, 300.0, [280.0, 360.0], vertical);
+    let build = |radius, length, ceiling| {
+        LaminarCarreauPipe::new(law, 300.0, radius, length, ceiling).unwrap()
+    };
+    let original = identity(&build(0.01, 0.5, 1e6), controls());
+    for (index, pipe) in [
+        build(0.01_f64.next_up(), 0.5, 1e6),
+        build(0.01, 0.5_f64.next_up(), 1e6),
+        build(0.01, 0.5, 1e6_f64.next_up()),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_ne!(original, identity(&pipe, controls()), "geometry {index}");
+    }
+    for (index, changed) in [
+        CarreauPipeControls {
+            relative_constitutive_tolerance: 1e-13_f64.next_up(),
+            ..controls()
+        },
+        CarreauPipeControls {
+            maximum_constitutive_iterations: 95,
+            ..controls()
+        },
+        CarreauPipeControls {
+            relative_quadrature_tolerance: 1e-10_f64.next_up(),
+            ..controls()
+        },
+        CarreauPipeControls {
+            maximum_quadrature_refinements: 15,
+            ..controls()
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_ne!(
+            original,
+            identity(&build(0.01, 0.5, 1e6), changed),
+            "controls {index}"
+        );
+    }
+}

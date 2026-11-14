@@ -61,6 +61,7 @@ fn saved_fixed_adaptive_and_material_scenes_continue_with_identical_reports() {
         "adaptive_oscillator.json",
         "phase_change_store.json",
         "phase_change_conduction.json",
+        "carreau_pipe.json",
     ] {
         let text = std::fs::read_to_string(example(name)).unwrap();
         let scene = scratch(name, &text);

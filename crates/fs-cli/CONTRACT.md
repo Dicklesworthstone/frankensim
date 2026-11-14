@@ -833,7 +833,10 @@ The same path covers authored latent-heat storage and temperature-dependent
 layer conduction, and the material-card-backed body and conductor owners.
 Their native codecs retain the original caloric or conductivity laws. Reopening
 an unchanged scene against a changed material pack refuses the old checkpoint;
-the pack's filename alone never establishes source identity.
+the pack's filename alone never establishes source identity. The same path
+covers `examples/system/carreau_pipe.json`: `CarreauPipeComponent` stores no
+state words, and its identity binds the authored law, shift, geometry and
+solve controls.
 
 Rigid and viscoelastic network scenes use their native fs-mbd codecs: exact
 positions, quaternion components and both momenta for every body, together with
