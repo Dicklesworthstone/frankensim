@@ -475,9 +475,18 @@ fn live_contact_adaptive_radiation_keeps_vacuum_natural_and_air_heat_physical() 
             "air" => setup.boundaries[0].condition.clone(),
             _ => unreachable!(),
         };
+        // One fixed ambient, as in radiation.rs's fixture: the project refuses
+        // a natural-convection ambient or an air inlet outside the envelope's
+        // ambient range, and that ambient also sets the air density. Where the
+        // convection has its own ambient it is that one; otherwise the bath.
+        let ambient = match &setup.boundaries[0].condition {
+            B::NaturalConvection { ambient_temperature, .. } => ambient_temperature.value,
+            B::AirflowConvection { inlet_temperature, .. } => inlet_temperature.value,
+            _ => bath,
+        };
         let envelope = f.project.envelope.as_mut().unwrap();
-        envelope.ambient_lo.value = bath;
-        envelope.ambient_hi.value = bath;
+        envelope.ambient_lo.value = ambient;
+        envelope.ambient_hi.value = ambient;
         f.project.solver.as_mut().unwrap().fidelity = "adaptive".into();
         f.project.solver.as_mut().unwrap().tolerance_rel = 1e-8;
         f.project.budgets.as_mut().unwrap().accuracy_rel = 0.2;
