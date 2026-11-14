@@ -4,8 +4,8 @@
 //! heat port, stepped by the implicit midpoint rule. For a linear system that
 //! rule balances energy exactly: the work of the held force on the mean
 //! velocity equals the stored change plus the damper loss, and the loss
-//! leaves through the heat port. Four deliberately broken variants each fail
-//! the law they break. A fifth keeps a cache in a `Cell`, keyed by the bits of
+//! leaves through the heat port. Five deliberately broken variants each fail
+//! the law they break. A sixth keeps a cache in a `Cell`, keyed by the bits of
 //! what it is proposed from, that `propose` never shows; it passes, as a cache
 //! may. Without its damper the reference is reversible in time: it passes
 //! `check_time_reversal` within bounds derived from its own arithmetic, and
@@ -62,6 +62,8 @@ enum Fault {
     /// for anything a component carries between calls that reaches what a
     /// call returns, such as a warm start.
     CountsIntoOutput,
+    /// Never polls `cx`, so it takes a step asked under a cancelled context.
+    IgnoresCancellation,
     /// Not a fault: keeps, in a `Cell` through `&self`, the mean velocity of
     /// its last proposal under the bits of the accepted state, the step and
     /// the force, and returns it when all of them repeat. What it returns is
@@ -167,7 +169,9 @@ impl Component for SpringMassDamper {
         outputs: &mut [f64],
         cx: &Cx<'_>,
     ) -> Result<Proposal, Cancelled> {
-        cx.checkpoint()?;
+        if self.fault != Fault::IgnoresCancellation {
+            cx.checkpoint()?;
+        }
         let (force_n, temperature_k) = (inputs[0], inputs[1]);
         let stale_position = new.position_m;
         let mean = if self.fault == Fault::CachesItsLastMean {
@@ -427,6 +431,26 @@ fn cancellation_reaches_the_caller_as_the_owner_error() {
     let failure =
         with_cx(&gate, |cx| check_component(&component, &case(), cx)).expect_err("cancelled");
     assert!(matches!(failure, Failure::Owner(Cancelled)), "{failure}");
+}
+
+#[test]
+fn a_component_that_never_polls_cx_is_refused_at_the_cancellation_law() {
+    let gate = CancelGate::new_clock_free();
+    let component = SpringMassDamper::new(Fault::IgnoresCancellation);
+    let failure = with_cx(&gate, |cx| check_component(&component, &case(), cx))
+        .expect_err("a step taken under a cancelled context");
+    let Failure::Law { law, detail } = failure else {
+        panic!("expected a law failure, got {failure}");
+    };
+    eprintln!("{law} ({detail})");
+    assert_eq!(
+        law,
+        "propose polls cx: a step asked under a cancelled context is refused"
+    );
+    assert!(
+        detail.starts_with("a context cancelled before the call gave Step("),
+        "{detail}"
+    );
 }
 
 #[test]

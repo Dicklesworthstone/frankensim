@@ -4,9 +4,12 @@
 //! used to write for itself. A failure names the law that was broken.
 //!
 //! Covered here: port layout, step-limit bounds, purity of `propose`
-//! (including independence from the stale candidate slot), the step audit
-//! (first law, endpoint energy, non-negative dissipation and entropy
-//! production, residual), available mass inventories, `admit`, and for
+//! (including independence from the stale candidate slot), that `propose`
+//! refuses a step asked under a context cancelled before the call (any
+//! error: whether it is the owner's cancellation error is not checked, nor
+//! that `cx` is polled again later), the step audit (first law, endpoint
+//! energy, non-negative dissipation and entropy production, residual),
+//! available mass inventories, `admit`, and for
 //! [`PortTangent`] the JVP against
 //! central differences and the VJP against the JVP by the dot-product test.
 //! For [`LoadLine`]: the line's ports, purity, the audit at the flows on the
@@ -21,7 +24,7 @@
 
 use core::fmt;
 
-use fs_exec::Cx;
+use fs_exec::{CancelGate, Cx};
 
 use super::{
     Carrier, Component, ContractViolation, LoadLine, PortLayout, PortRole, PortSpec, PortTangent,
@@ -134,6 +137,28 @@ where
     }
 
     let before = case.state.clone();
+    // The contract has `propose` poll `cx` and return the owner's
+    // cancellation error. Asked under a context built from `cx` on a gate
+    // whose cancellation is requested before the call, it must refuse. Any
+    // error passes: each owner's cancellation error is its own.
+    let gate = CancelGate::new_clock_free();
+    gate.request();
+    let cancelled = Cx::new(&gate, cx.arena(), cx.stream_key(), cx.budget(), cx.mode());
+    let mut cancelled_state = case.stale.clone();
+    let mut cancelled_out = vec![f64::NAN; layout.output_len()];
+    if let Ok(proposal) = component.propose(
+        case.state,
+        case.dt_s,
+        case.inputs,
+        &mut cancelled_state,
+        &mut cancelled_out,
+        &cancelled,
+    ) {
+        return Err(law(
+            "propose polls cx: a step asked under a cancelled context is refused",
+            format!("a context cancelled before the call gave {proposal:?}"),
+        ));
+    }
     let mut first_state = case.state.clone();
     let mut second_state = case.stale.clone();
     let mut first_out = vec![0.0; layout.output_len()];
