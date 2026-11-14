@@ -64,6 +64,7 @@ use core::f64::consts::PI;
 use core::fmt;
 use core::num::NonZeroUsize;
 
+use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_exec::{Cancelled, Cx};
 use fs_ports::component::{
     Class, Component, ContractViolation, PortRole, PortSpec, PortTangent, Proposal, Receipt,
@@ -145,7 +146,9 @@ impl fmt::Display for ElementError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::StreamBasis(violation) => write!(f, "stream basis: {violation}"),
-            Self::Parameter { name, value } => write!(f, "parameter {name} = {value} is not admitted"),
+            Self::Parameter { name, value } => {
+                write!(f, "parameter {name} = {value} is not admitted")
+            }
             Self::Table { what } => write!(f, "waveform table: {what}"),
             Self::Temperature { kelvin } => {
                 write!(f, "temperature {kelvin} K is not positive and finite")
@@ -267,6 +270,32 @@ impl Waveform {
     /// Largest size of a waveform value, time or angular frequency.
     pub const LIMIT: f64 = 1.0e150;
 
+    /// Preserve the complete prescribed law in a source's problem identity.
+    /// The tag and table length keep distinct shapes and knot sequences apart.
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        match &self.0 {
+            Shape::Constant(value) => words.extend([0, value.to_bits()]),
+            Shape::Sine {
+                amplitude,
+                frequency_hz,
+                phase_rad,
+                offset,
+            } => words.extend([
+                1,
+                amplitude.to_bits(),
+                frequency_hz.to_bits(),
+                phase_rad.to_bits(),
+                offset.to_bits(),
+            ]),
+            Shape::Table(knots) => {
+                words.extend([2, knots.len() as u64]);
+                for &(time_s, value) in knots {
+                    words.extend([time_s.to_bits(), value.to_bits()]);
+                }
+            }
+        }
+    }
+
     /// A constant value.
     ///
     /// # Errors
@@ -309,7 +338,9 @@ impl Waveform {
     /// not strictly increase.
     pub fn table(knots: Vec<(f64, f64)>) -> Result<Self, ElementError> {
         if knots.is_empty() {
-            return Err(ElementError::Table { what: "it has no knots" });
+            return Err(ElementError::Table {
+                what: "it has no knots",
+            });
         }
         let admitted = |x: f64| x.is_finite() && x.abs() <= Self::LIMIT;
         if knots.iter().any(|(t, v)| !admitted(*t) || !admitted(*v)) {
@@ -342,7 +373,10 @@ impl Waveform {
                     offset - amplitude.abs()
                 }
             }
-            Shape::Table(knots) => knots.iter().map(|knot| knot.1).fold(f64::INFINITY, f64::min),
+            Shape::Table(knots) => knots
+                .iter()
+                .map(|knot| knot.1)
+                .fold(f64::INFINITY, f64::min),
         }
     }
 
@@ -476,7 +510,9 @@ fn table_integral(knots: &[(f64, f64)], start: f64, end: f64) -> f64 {
     let (first, last) = (knots[0].0, knots[knots.len() - 1].0);
     let mut total = piece(f64::NEG_INFINITY, first) + piece(last, f64::INFINITY);
     // Segments that can overlap [start, end].
-    let from = knots.partition_point(|knot| knot.0 <= start).saturating_sub(1);
+    let from = knots
+        .partition_point(|knot| knot.0 <= start)
+        .saturating_sub(1);
     for pair in knots[from..].windows(2) {
         if pair[0].0 >= end {
             break;
@@ -537,6 +573,43 @@ impl Mass {
 impl Component for Mass {
     type State = Motion;
     type Error = ElementError;
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-system::elements::Mass",
+        state_family: "motion",
+        schema_grammar: "position_m f64; velocity_m_s f64; both finite with finite kinetic energy",
+        codec_grammar: "two u64 words: the bits of position_m then velocity_m_s",
+        codec_version: 1,
+    });
+
+    fn encode_state(&self, state: &Motion, words: &mut Vec<u64>) -> bool {
+        if !(state.position_m.is_finite()
+            && state.velocity_m_s.is_finite()
+            && self.stored_energy_j(state).is_ok_and(f64::is_finite))
+        {
+            return false;
+        }
+        words.extend([state.position_m.to_bits(), state.velocity_m_s.to_bits()]);
+        true
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<Motion> {
+        let &[position, velocity] = words else {
+            return None;
+        };
+        let state = Motion {
+            position_m: f64::from_bits(position),
+            velocity_m_s: f64::from_bits(velocity),
+        };
+        (state.position_m.is_finite()
+            && state.velocity_m_s.is_finite()
+            && self.stored_energy_j(&state).is_ok_and(f64::is_finite))
+        .then_some(state)
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        words.push(self.mass_kg.to_bits());
+    }
 
     fn ports(&self) -> &[PortSpec] {
         &self.ports
@@ -647,6 +720,33 @@ impl Storage {
 impl Component for Storage {
     type State = f64;
     type Error = ElementError;
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-system::elements::Storage",
+        state_family: "integrated-flow",
+        schema_grammar: "integrated flow f64; finite with finite stored energy",
+        codec_grammar: "one u64 word: the bits of integrated flow",
+        codec_version: 1,
+    });
+
+    fn encode_state(&self, state: &f64, words: &mut Vec<u64>) -> bool {
+        if !(state.is_finite() && self.stored_energy_j(state).is_ok_and(f64::is_finite)) {
+            return false;
+        }
+        words.push(state.to_bits());
+        true
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<f64> {
+        let &[word] = words else { return None };
+        let state = f64::from_bits(word);
+        (state.is_finite() && self.stored_energy_j(&state).is_ok_and(f64::is_finite))
+            .then_some(state)
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        words.push(self.capacity.to_bits());
+    }
 
     fn ports(&self) -> &[PortSpec] {
         &self.ports
@@ -774,6 +874,33 @@ impl Component for Spring {
     type State = f64;
     type Error = ElementError;
 
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-system::elements::Spring",
+        state_family: "extension",
+        schema_grammar: "extension f64; finite with finite potential energy",
+        codec_grammar: "one u64 word: the bits of extension",
+        codec_version: 1,
+    });
+
+    fn encode_state(&self, state: &f64, words: &mut Vec<u64>) -> bool {
+        if !(state.is_finite() && self.stored_energy_j(state).is_ok_and(f64::is_finite)) {
+            return false;
+        }
+        words.push(state.to_bits());
+        true
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<f64> {
+        let &[word] = words else { return None };
+        let state = f64::from_bits(word);
+        (state.is_finite() && self.stored_energy_j(&state).is_ok_and(f64::is_finite))
+            .then_some(state)
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        words.extend([self.stiffness_n_m.to_bits(), self.cubic_n_m3.to_bits()]);
+    }
+
     fn ports(&self) -> &[PortSpec] {
         &self.ports
     }
@@ -811,10 +938,8 @@ impl Component for Spring {
         // together those two products are large and cancel, so their
         // rounding is set by the common travel, not by the stretch.
         let paired = dt_s * force_n.abs() * (inputs[0].abs() + inputs[1].abs());
-        let scale = self.potential_size(a)
-            + self.potential_size(b)
-            + stored_change_j.abs()
-            + paired;
+        let scale =
+            self.potential_size(a) + self.potential_size(b) + stored_change_j.abs() + paired;
         Ok(Proposal::Step(Receipt::lossless(
             stored_change_j,
             roundoff(scale),
@@ -893,6 +1018,26 @@ impl Component for Damper {
     type State = ();
     type Error = ElementError;
 
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-system::elements::Damper",
+        state_family: "stateless",
+        schema_grammar: "()",
+        codec_grammar: "no words",
+        codec_version: 1,
+    });
+
+    fn encode_state(&self, (): &(), _words: &mut Vec<u64>) -> bool {
+        true
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<()> {
+        words.is_empty().then_some(())
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        words.push(self.damping_n_s_m.to_bits());
+    }
+
     fn ports(&self) -> &[PortSpec] {
         &self.ports
     }
@@ -929,9 +1074,11 @@ impl Component for Damper {
             dissipated_j,
             numerical_loss_j: 0.0,
             entropy_generated_j_per_k: dissipated_j / kelvin,
-            energy_tolerance_j: roundoff(dt_s * (force_n * inputs[0]).abs()
-                + dt_s * (force_n * inputs[1]).abs()
-                + dissipated_j),
+            energy_tolerance_j: roundoff(
+                dt_s * (force_n * inputs[0]).abs()
+                    + dt_s * (force_n * inputs[1]).abs()
+                    + dissipated_j,
+            ),
             residual: 0.0,
             tolerance: 0.0,
         }))
@@ -1017,6 +1164,26 @@ impl Admittance {
 impl Component for Admittance {
     type State = ();
     type Error = ElementError;
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-system::elements::Admittance",
+        state_family: "stateless",
+        schema_grammar: "()",
+        codec_grammar: "no words",
+        codec_version: 1,
+    });
+
+    fn encode_state(&self, (): &(), _words: &mut Vec<u64>) -> bool {
+        true
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<()> {
+        words.is_empty().then_some(())
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        words.push(self.conductance.to_bits());
+    }
 
     fn ports(&self) -> &[PortSpec] {
         &self.ports
@@ -1134,6 +1301,35 @@ impl SourceAccount {
     }
 }
 
+/// A source clock is two words, not its rounded total: the compensation
+/// controls which side of a later waveform knot a resumed step reaches.
+pub(super) fn encode_source_account(state: &SourceAccount, words: &mut Vec<u64>) -> bool {
+    let clock = state.clock_s.to_words();
+    if !(clock.iter().all(|&word| f64::from_bits(word).is_finite())
+        && state.time_s().is_finite()
+        && state.energy_in_j.is_finite())
+    {
+        return false;
+    }
+    words.extend(clock);
+    words.push(state.energy_in_j.to_bits());
+    true
+}
+
+pub(super) fn decode_source_account(words: &[u64]) -> Option<SourceAccount> {
+    let &[sum, compensation, energy] = words else {
+        return None;
+    };
+    if !words.iter().all(|&word| f64::from_bits(word).is_finite()) {
+        return None;
+    }
+    let state = SourceAccount {
+        clock_s: Sum::from_words([sum, compensation]),
+        energy_in_j: f64::from_bits(energy),
+    };
+    state.time_s().is_finite().then_some(state)
+}
+
 /// The step mean of a prescribed value, refused if it is not finite.
 fn prescribed(wave: &Waveform, account: &SourceAccount, dt_s: f64) -> Result<f64, ElementError> {
     let value = wave.mean(account.time_s(), dt_s);
@@ -1185,6 +1381,27 @@ impl Force {
 impl Component for Force {
     type State = SourceAccount;
     type Error = ElementError;
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-system::elements::Force",
+        state_family: "source-account",
+        schema_grammar: "clock_s: finite running sum and compensation with finite total; \
+            energy_in_j finite f64",
+        codec_grammar: "three u64 words: Sum::to_words of clock_s, then the bits of energy_in_j",
+        codec_version: 1,
+    });
+
+    fn encode_state(&self, state: &SourceAccount, words: &mut Vec<u64>) -> bool {
+        encode_source_account(state, words)
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<SourceAccount> {
+        decode_source_account(words)
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        self.force_n.identity_words(words);
+    }
 
     fn ports(&self) -> &[PortSpec] {
         &self.ports
@@ -1296,8 +1513,10 @@ impl FlowSource {
     pub fn publishing(mut self) -> Self {
         if self.ports.len() == 1 {
             let id = StableId::new("span").expect("element port names are valid stable ids");
-            self.ports
-                .push(PortSpec::signal_out(id, NonZeroUsize::MIN.saturating_add(1)));
+            self.ports.push(PortSpec::signal_out(
+                id,
+                NonZeroUsize::MIN.saturating_add(1),
+            ));
         }
         self
     }
@@ -1306,6 +1525,27 @@ impl FlowSource {
 impl Component for FlowSource {
     type State = SourceAccount;
     type Error = ElementError;
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-system::elements::FlowSource",
+        state_family: "source-account",
+        schema_grammar: "clock_s: finite running sum and compensation with finite total; \
+            energy_in_j finite f64",
+        codec_grammar: "three u64 words: Sum::to_words of clock_s, then the bits of energy_in_j",
+        codec_version: 1,
+    });
+
+    fn encode_state(&self, state: &SourceAccount, words: &mut Vec<u64>) -> bool {
+        encode_source_account(state, words)
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<SourceAccount> {
+        decode_source_account(words)
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        self.flow.identity_words(words);
+    }
 
     fn ports(&self) -> &[PortSpec] {
         &self.ports
@@ -1428,6 +1668,34 @@ impl Component for HeatCapacity {
     type State = f64;
     type Error = ElementError;
 
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-system::elements::HeatCapacity",
+        state_family: "temperature",
+        schema_grammar: "temperature_k: positive finite f64 with finite thermal energy",
+        codec_grammar: "one u64 word: the bits of temperature_k",
+        codec_version: 1,
+    });
+
+    fn encode_state(&self, state: &f64, words: &mut Vec<u64>) -> bool {
+        if !(temperature(*state).is_ok() && self.stored_energy_j(state).is_ok_and(f64::is_finite)) {
+            return false;
+        }
+        words.push(state.to_bits());
+        true
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<f64> {
+        let &[word] = words else { return None };
+        let state = temperature(f64::from_bits(word)).ok()?;
+        self.stored_energy_j(&state)
+            .is_ok_and(f64::is_finite)
+            .then_some(state)
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        words.push(self.capacity_j_k.to_bits());
+    }
+
     fn ports(&self) -> &[PortSpec] {
         &self.ports
     }
@@ -1528,6 +1796,26 @@ impl Component for Conductance {
     type State = ();
     type Error = ElementError;
 
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-system::elements::Conductance",
+        state_family: "stateless",
+        schema_grammar: "()",
+        codec_grammar: "no words",
+        codec_version: 1,
+    });
+
+    fn encode_state(&self, (): &(), _words: &mut Vec<u64>) -> bool {
+        true
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<()> {
+        words.is_empty().then_some(())
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        words.push(self.conductance_w_k.to_bits());
+    }
+
     fn ports(&self) -> &[PortSpec] {
         &self.ports
     }
@@ -1558,10 +1846,7 @@ impl Component for Conductance {
             stored_change_j: 0.0,
             dissipated_j: 0.0,
             numerical_loss_j: 0.0,
-            entropy_generated_j_per_k: dt_s
-                * self.conductance_w_k
-                * (hot - cold)
-                * (hot - cold)
+            entropy_generated_j_per_k: dt_s * self.conductance_w_k * (hot - cold) * (hot - cold)
                 / (hot * cold),
             energy_tolerance_j: roundoff(dt_s * rate_w.abs()),
             residual: 0.0,
@@ -1628,6 +1913,27 @@ impl Heater {
 impl Component for Heater {
     type State = SourceAccount;
     type Error = ElementError;
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-system::elements::Heater",
+        state_family: "source-account",
+        schema_grammar: "clock_s: finite running sum and compensation with finite total; \
+            energy_in_j finite f64",
+        codec_grammar: "three u64 words: Sum::to_words of clock_s, then the bits of energy_in_j",
+        codec_version: 1,
+    });
+
+    fn encode_state(&self, state: &SourceAccount, words: &mut Vec<u64>) -> bool {
+        encode_source_account(state, words)
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<SourceAccount> {
+        decode_source_account(words)
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        self.power_w.identity_words(words);
+    }
 
     fn ports(&self) -> &[PortSpec] {
         &self.ports
@@ -1742,6 +2048,26 @@ impl Gyrator {
 impl Component for Gyrator {
     type State = ();
     type Error = ElementError;
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-system::elements::Gyrator",
+        state_family: "stateless",
+        schema_grammar: "()",
+        codec_grammar: "no words",
+        codec_version: 1,
+    });
+
+    fn encode_state(&self, (): &(), _words: &mut Vec<u64>) -> bool {
+        true
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<()> {
+        words.is_empty().then_some(())
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        words.push(self.ratio.to_bits());
+    }
 
     fn ports(&self) -> &[PortSpec] {
         &self.ports

@@ -22,10 +22,11 @@ use fs_exec::solver::snapshot_v2::{
     SnapshotProvenanceIdV2, SnapshotRngCounterIdV2, StateIdentityCharterV2,
 };
 use fs_exec::{Budget, CancelGate, Cx, DrainTracker, ExecMode, RunId, StreamKey};
+use fs_ports::PortKind;
 use fs_ports::component::{Class, Component, EndOfStep, PortSpec, PortTangent, Proposal, Receipt};
 use fs_system::elements::{
-    Damper, Force, GasContents, GasVolume, HeatCapacity, Mass, Motion, Restriction, SourceAccount,
-    Spring, Waveform,
+    Admittance, Conductance, Damper, FlowSource, Force, GasContents, GasVolume, Gyrator,
+    HeatCapacity, Heater, Mass, Motion, Restriction, SourceAccount, Spring, Storage, Waveform,
 };
 use fs_system::ledger::Sum;
 use fs_system::{NodeId, PortRef, RouteTemperature, System, SystemBuilder, SystemImage, heat_sink};
@@ -99,124 +100,16 @@ fn opened_here(
 }
 
 // ---------------------------------------------------------------------------
-// Codecs the test declares for kernel elements and its own members
+// Test members for missing-codec and owner-decoder refusal paths
 // ---------------------------------------------------------------------------
 
-/// A state the test writes as plain words.
-trait Words: Sized {
-    const CHARTER: StateIdentityCharterV2;
-    fn put(&self, words: &mut Vec<u64>);
-    fn get(words: &[u64]) -> Option<Self>;
-}
-
-impl Words for Motion {
-    const CHARTER: StateIdentityCharterV2 = StateIdentityCharterV2 {
-        owner: "fs-system::tests::snapshots",
-        state_family: "motion",
-        schema_grammar: "position_m f64; velocity_m_s f64",
-        codec_grammar: "two u64 words, the bits of position_m then velocity_m_s",
-        codec_version: 1,
-    };
-
-    fn put(&self, words: &mut Vec<u64>) {
-        words.extend([self.position_m.to_bits(), self.velocity_m_s.to_bits()]);
-    }
-
-    fn get(words: &[u64]) -> Option<Self> {
-        match words {
-            &[position, velocity] => Some(Self {
-                position_m: f64::from_bits(position),
-                velocity_m_s: f64::from_bits(velocity),
-            }),
-            _ => None,
-        }
-    }
-}
-
-impl Words for f64 {
-    const CHARTER: StateIdentityCharterV2 = StateIdentityCharterV2 {
-        owner: "fs-system::tests::snapshots",
-        state_family: "one-f64",
-        schema_grammar: "one f64",
-        codec_grammar: "one u64 word, its bits",
-        codec_version: 1,
-    };
-
-    fn put(&self, words: &mut Vec<u64>) {
-        words.push(self.to_bits());
-    }
-
-    fn get(words: &[u64]) -> Option<Self> {
-        match words {
-            &[bits] => Some(f64::from_bits(bits)),
-            _ => None,
-        }
-    }
-}
-
-impl Words for () {
-    const CHARTER: StateIdentityCharterV2 = StateIdentityCharterV2 {
-        owner: "fs-system::tests::snapshots",
-        state_family: "no-state",
-        schema_grammar: "()",
-        codec_grammar: "no words",
-        codec_version: 1,
-    };
-
-    fn put(&self, _words: &mut Vec<u64>) {}
-
-    fn get(words: &[u64]) -> Option<Self> {
-        words.is_empty().then_some(())
-    }
-}
-
-impl Words for SourceAccount {
-    const CHARTER: StateIdentityCharterV2 = StateIdentityCharterV2 {
-        owner: "fs-system::tests::snapshots",
-        state_family: "source-account",
-        schema_grammar: "clock_s: a compensated sum, its running value and compensation; \
-            energy_in_j f64",
-        codec_grammar: "three u64 words: Sum::to_words of clock_s, then the bits of energy_in_j",
-        codec_version: 1,
-    };
-
-    fn put(&self, words: &mut Vec<u64>) {
-        words.extend(self.clock_s.to_words());
-        words.push(self.energy_in_j.to_bits());
-    }
-
-    fn get(words: &[u64]) -> Option<Self> {
-        match words {
-            &[sum, compensation, energy] => Some(Self {
-                clock_s: Sum::from_words([sum, compensation]),
-                energy_in_j: f64::from_bits(energy),
-            }),
-            _ => None,
-        }
-    }
-}
-
-/// A kernel element with a codec for its state and the bits of its
-/// parameters as its identity; every call is the element's own.
-struct Coded<C> {
+/// Deliberately hide an element's codec so that NoCodec remains covered
+/// after the native elements all acquire their own codecs.
+struct Uncoded<C> {
     element: C,
-    identity: Vec<u64>,
 }
 
-impl<C> Coded<C> {
-    fn new(element: C, parameters: &[f64]) -> Self {
-        Self {
-            element,
-            identity: parameters.iter().map(|value| value.to_bits()).collect(),
-        }
-    }
-}
-
-impl<C> Component for Coded<C>
-where
-    C: Component,
-    C::State: Words,
-{
+impl<C: Component> Component for Uncoded<C> {
     type State = C::State;
     type Error = C::Error;
 
@@ -271,28 +164,9 @@ where
     fn admit(&self, old: &C::State, new: &C::State, receipt: &Receipt) -> Result<(), C::Error> {
         self.element.admit(old, new, receipt)
     }
-
-    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(<C::State as Words>::CHARTER);
-
-    fn encode_state(&self, state: &C::State, words: &mut Vec<u64>) -> bool {
-        state.put(words);
-        true
-    }
-
-    fn decode_state(&self, words: &[u64]) -> Option<C::State> {
-        <C::State as Words>::get(words)
-    }
-
-    fn identity_words(&self, words: &mut Vec<u64>) {
-        words.extend(&self.identity);
-    }
 }
 
-impl<C> PortTangent for Coded<C>
-where
-    C: PortTangent,
-    C::State: Words,
-{
+impl<C: PortTangent> PortTangent for Uncoded<C> {
     fn jvp(
         &self,
         old: &C::State,
@@ -519,7 +393,7 @@ impl Device {
         let mass = builder
             .add_with_tangent(
                 "mass",
-                Coded::new(Mass::new(0.8).unwrap(), &[0.8]),
+                Mass::new(0.8).unwrap(),
                 Motion {
                     position_m: 0.07,
                     velocity_m_s: 0.34,
@@ -529,34 +403,30 @@ impl Device {
         let spring = builder
             .add_with_tangent(
                 "spring",
-                Coded::new(
-                    Spring::new(variant.stiffness, 0.0).unwrap(),
-                    &[variant.stiffness, 0.0],
-                ),
+                Spring::new(variant.stiffness, 0.0).unwrap(),
                 -0.07,
             )
             .unwrap();
         let damper = builder
-            .add_with_tangent("damper", Coded::new(Damper::new(1.1).unwrap(), &[1.1]), ())
+            .add_with_tangent("damper", Damper::new(1.1).unwrap(), ())
             .unwrap();
         let source = builder
             .add_with_tangent(
                 "source",
-                Coded::new(
-                    Force::new(Waveform::sine(1.2, 1.7, 0.3, 0.2).unwrap()),
-                    &[1.2, 1.7, 0.3, 0.2],
-                ),
+                Force::new(Waveform::sine(1.2, 1.7, 0.3, 0.2).unwrap()),
                 SourceAccount::default(),
             )
             .unwrap();
         let body = if variant.coded_body {
+            builder.add_with_tangent("body", HeatCapacity::new(4.0).unwrap(), 300.0)
+        } else {
             builder.add_with_tangent(
                 "body",
-                Coded::new(HeatCapacity::new(4.0).unwrap(), &[4.0]),
+                Uncoded {
+                    element: HeatCapacity::new(4.0).unwrap(),
+                },
                 300.0,
             )
-        } else {
-            builder.add_with_tangent("body", HeatCapacity::new(4.0).unwrap(), 300.0)
         }
         .unwrap();
         let recorder = builder.add("recorder", Recorder, Vec::new()).unwrap();
@@ -1165,6 +1035,233 @@ fn the_gas_elements_are_of_their_parameters_to_the_ulp() {
         restriction.decode_state(&[1]).is_none(),
         "a word for no state"
     );
+}
+
+/// A small, fully connected boundary-driven system for identity/refusal
+/// checks. The mechanical process/replay tests above exercise the coupled path.
+fn isolated<C>(component: C, state: C::State) -> System
+where
+    C: Component + 'static,
+    C::State: 'static,
+{
+    let ports = component.ports().to_vec();
+    let mut builder = SystemBuilder::new();
+    let node = builder.add("element", component, state).unwrap();
+    for spec in &ports {
+        if spec.input_width() > 0 {
+            let port = builder.port(node, spec.id().as_str()).unwrap();
+            builder
+                .boundary(port, Box::new(|_, _, values| values.fill(0.0)))
+                .unwrap();
+        }
+    }
+    builder.seal().unwrap()
+}
+
+fn parameters_refuse<C>(original: C, changed: C, state: C::State)
+where
+    C: Component + 'static,
+    C::State: 'static,
+{
+    // Every core type also has an exact codec, including stateless elements.
+    let mut words = Vec::new();
+    assert!(original.encode_state(&state, &mut words));
+    let decoded = original.decode_state(&words).expect("native state codec");
+    let mut again = Vec::new();
+    assert!(original.encode_state(&decoded, &mut again));
+    assert_eq!(words, again, "all state bits survive");
+    let mut extra = words.clone();
+    extra.push(0);
+    assert!(
+        original.decode_state(&extra).is_none(),
+        "extra word refused"
+    );
+    if !words.is_empty() {
+        assert!(original.decode_state(&words[..words.len() - 1]).is_none());
+    }
+
+    let writer = isolated(original, state.clone());
+    let mut other = isolated(changed, state);
+    let sealed = writer
+        .snapshot(&context(&writer), limits(), || false)
+        .unwrap();
+    let opened = opened_here(&sealed);
+    assert_ne!(
+        writer.problem_id(),
+        other.problem_id(),
+        "changed physical parameters"
+    );
+    let before = format!("{:?}", other.ledger());
+    assert!(matches!(
+        other.resume(&opened),
+        Err(fs_system::CheckpointError::ForeignProblem)
+    ));
+    assert_eq!(format!("{:?}", other.ledger()), before);
+    assert_eq!(other.steps(), 0);
+}
+
+#[test]
+fn native_element_snapshots_bind_every_physical_parameter() {
+    let mechanical = PortKind::MechanicalForceVelocity;
+    let electrical = PortKind::ElectricalVoltageCurrent;
+    let up = 2.0_f64.next_up();
+    parameters_refuse(
+        Mass::new(2.0).unwrap(),
+        Mass::new(up).unwrap(),
+        Motion {
+            position_m: -0.0,
+            velocity_m_s: -0.3,
+        },
+    );
+    parameters_refuse(Storage::new(2.0).unwrap(), Storage::new(up).unwrap(), -0.0);
+    parameters_refuse(
+        Spring::new(2.0, 0.3).unwrap(),
+        Spring::new(up, 0.3).unwrap(),
+        -0.1,
+    );
+    parameters_refuse(
+        Spring::new(2.0, 0.3).unwrap(),
+        Spring::new(2.0, 0.3_f64.next_up()).unwrap(),
+        -0.1,
+    );
+    parameters_refuse(Damper::new(2.0).unwrap(), Damper::new(up).unwrap(), ());
+    parameters_refuse(
+        Admittance::new(2.0).unwrap(),
+        Admittance::new(up).unwrap(),
+        (),
+    );
+    parameters_refuse(
+        HeatCapacity::new(2.0).unwrap(),
+        HeatCapacity::new(up).unwrap(),
+        300.0,
+    );
+    parameters_refuse(
+        Conductance::new(2.0).unwrap(),
+        Conductance::new(up).unwrap(),
+        (),
+    );
+    parameters_refuse(
+        Gyrator::new(mechanical, electrical, 2.0).unwrap(),
+        Gyrator::new(mechanical, electrical, up).unwrap(),
+        (),
+    );
+
+    // Domains and optional signal ports belong to the graph identity too.
+    parameters_refuse(
+        Storage::new(2.0).unwrap(),
+        Storage::in_domain(electrical, 2.0).unwrap(),
+        0.2,
+    );
+    parameters_refuse(
+        HeatCapacity::new(2.0).unwrap(),
+        HeatCapacity::new(2.0).unwrap().publishing(),
+        300.0,
+    );
+
+    let wave = || Waveform::constant(2.0).unwrap();
+    let changed = || Waveform::constant(up).unwrap();
+    let mut account = SourceAccount::starting_at(1.0e16);
+    account.clock_s.add(1.0);
+    account.energy_in_j = -0.0;
+    assert_ne!(
+        account.clock_s.to_words()[1],
+        0,
+        "clock has low bits to preserve"
+    );
+    parameters_refuse(Force::new(wave()), Force::new(changed()), account);
+    parameters_refuse(FlowSource::new(wave()), FlowSource::new(changed()), account);
+    parameters_refuse(
+        Heater::new(wave()).unwrap(),
+        Heater::new(changed()).unwrap(),
+        account,
+    );
+}
+
+#[test]
+fn source_snapshot_identity_includes_waveform_shape_and_every_coefficient() {
+    let base = [0.8, 1.3, 0.2, 2.0];
+    let sine = |p: [f64; 4]| Waveform::sine(p[0], p[1], p[2], p[3]).unwrap();
+    for index in 0..4 {
+        let mut changed = base;
+        changed[index] = changed[index].next_up();
+        parameters_refuse(
+            Force::new(sine(base)),
+            Force::new(sine(changed)),
+            SourceAccount::default(),
+        );
+    }
+    let knots = [(0.0, 1.0), (0.2, 2.0), (0.4, 3.0)];
+    for index in 0..knots.len() {
+        for time in [false, true] {
+            let mut changed = knots;
+            let coefficient: &mut f64 = if time {
+                &mut changed[index].0
+            } else {
+                &mut changed[index].1
+            };
+            *coefficient = coefficient.next_up();
+            parameters_refuse(
+                Force::new(Waveform::table(knots.to_vec()).unwrap()),
+                Force::new(Waveform::table(changed.to_vec()).unwrap()),
+                SourceAccount::default(),
+            );
+        }
+    }
+    parameters_refuse(
+        Force::new(Waveform::constant(2.0).unwrap()),
+        Force::new(Waveform::table(vec![(0.0, 2.0)]).unwrap()),
+        SourceAccount::default(),
+    );
+}
+
+#[test]
+fn native_codecs_refuse_nonfinite_and_unphysical_states_without_appending_words() {
+    fn refused<C: Component>(element: &C, state: &C::State, bad_words: &[u64]) {
+        let mut words = vec![0x1234];
+        assert!(!element.encode_state(state, &mut words));
+        assert_eq!(words, [0x1234]);
+        assert!(element.decode_state(bad_words).is_none());
+    }
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MAX] {
+        let mass = Mass::new(2.0).unwrap();
+        let motion = Motion {
+            position_m: 0.0,
+            velocity_m_s: value,
+        };
+        refused(&mass, &motion, &[0.0_f64.to_bits(), value.to_bits()]);
+        refused(&Storage::new(2.0).unwrap(), &value, &[value.to_bits()]);
+        refused(&Spring::new(2.0, 0.3).unwrap(), &value, &[value.to_bits()]);
+        refused(&HeatCapacity::new(2.0).unwrap(), &value, &[value.to_bits()]);
+    }
+    let mass = Mass::new(2.0).unwrap();
+    let bad_position = Motion {
+        position_m: f64::NAN,
+        velocity_m_s: 0.0,
+    };
+    refused(&mass, &bad_position, &[f64::NAN.to_bits(), 0]);
+    for kelvin in [0.0_f64, -0.0, -1.0] {
+        refused(
+            &HeatCapacity::new(2.0).unwrap(),
+            &kelvin,
+            &[kelvin.to_bits()],
+        );
+    }
+    let source = Force::new(Waveform::constant(1.0).unwrap());
+    for index in 0..3 {
+        let mut words = [0_u64; 3];
+        words[index] = f64::NAN.to_bits();
+        let state = SourceAccount {
+            clock_s: Sum::from_words([words[0], words[1]]),
+            energy_in_j: f64::from_bits(words[2]),
+        };
+        refused(&source, &state, &words);
+    }
+    let words = [f64::MAX.to_bits(), f64::MAX.to_bits(), 0];
+    let overflowing = SourceAccount {
+        clock_s: Sum::from_words([words[0], words[1]]),
+        energy_in_j: 0.0,
+    };
+    refused(&source, &overflowing, &words);
 }
 
 #[test]

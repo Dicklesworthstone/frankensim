@@ -234,10 +234,25 @@ physics owners below fs-couple can be composed without it.
       check. Identity: gas constant, ratio, carried count.
     - `Restriction`: no words. Identity: conductance, carried count, and its
       gas's identity if it has one.
+    - `Mass`: two words, position and velocity; identity: inertance.
+    - `Storage`, `Spring`, `HeatCapacity`: one word, respectively integrated
+      flow, extension and temperature. Identities retain capacity, both spring
+      coefficients, or thermal capacity.
+    - `Force`, `FlowSource`, `Heater`: three words, both source-clock words
+      and signed energy received. Identity retains the waveform kind and every
+      exact constant, sine parameter or ordered table knot.
+    - `Damper`, `Admittance`, `Conductance`, `Gyrator`: no words. Identity
+      retains the original damping, conductance or conversion coefficient.
 
-    No other element has a codec, and a system holding one cannot be
-    sealed. `ledger::Sum::to_words` and `from_words` give a sum's two words
-    exactly, for the codec of a state that holds one.
+    Native codecs preserve floating-point bits, including signed zero and
+    source-clock compensation; they reject extra or missing words, nonfinite
+    state and unrepresentable stored energy. A heat capacity additionally
+    requires positive absolute temperature. A failed encoding appends nothing.
+    Power domains and optional signal ports remain in the graph identity, so
+    changing an element's domain or publishing layout also refuses resume.
+    Other components still require their own codecs before a containing system
+    can be sealed. `ledger::Sum::to_words` and `from_words` give a sum's two
+    words exactly, for the codec of a state that holds one.
 - `Ledger`: per component (port energy in, stored change, dissipation,
   numerical loss, entropy generated, accepted balance defect and its absolute
   sum), per connection (energy defect, entropy generated, and the absolute
@@ -1155,7 +1170,7 @@ and solver configuration; restore after failed or cancelled trials; and
 foreign-system refusal without mutation. Checkpoints are in memory and bind
 to one sealed system's allocation identity; they are not durable snapshots.
 
-`tests/snapshots.rs` (bead `.5.4`, item 4) seals two graphs and drops the
+`tests/snapshots.rs` (bead `.5.4`, item 4) seals two native graphs and drops the
 sealing system: the device of `tests/checkpoints.rs` at step 73 (a sine force
 whose account holds a clock, a moving support, damper heat routed to a body,
 a recorder whose words grow with the run, and a window), and the two vessels
@@ -1176,7 +1191,12 @@ context of another problem at sealing. Truncated bytes, and a byte flipped at
 the start, middle or end, never open. A gas constant one ulp lower or a
 conductance one ulp higher is another problem. The image charter derives its
 pinned ids: codec version 2, the state type of version 1, and a schema and
-codec other than version 1's.
+codec other than version 1's. Mechanical, thermal and source elements use their
+production codecs, without test-only serialization wrappers. Native codec
+regressions also change every core physical coefficient, every waveform
+parameter and knot, the power domain and optional signal layout; a resumed
+system refuses these changes without mutation. Invalid state and width tests
+exercise the same native codecs directly, including source-clock low bits.
 
 `tests/ledger_accounts.rs` (bead `.5.4`, item 5) drives members without ports
 whose receipts state planned stored changes, so each step's defect is known
@@ -2723,11 +2743,12 @@ solved together. Nothing in the module is deleted.
   rubbing surfaces on one body, a contact with friction) are refused; no
   multirate stepping; no
   monolithic solve through `StageResidual`; no embedded error estimator or
-  PI controller (step doubling and proportional control are available); of
-  the elements, only `GasVolume` and `Restriction` have a state codec, so
-  only systems of those and of components with their own codecs can be
-  snapshotted; no fork lineage, SoA buffers or double-double accounts
-  (bead `.5.4`); no adjoint. These are beads `.5.2` to `.5.10` of the epic.
+  PI controller (step doubling and proportional control are available).
+  Core lumped mechanical, electrical and thermal elements, their prescribed
+  sources, `GasVolume` and `Restriction` have native state codecs; additional
+  components need their own codecs before the whole system can be snapshotted.
+  No fork lineage or SoA buffers (bead `.5.4`); no adjoint. These are beads
+  `.5.2` to `.5.10` of the epic.
 - An entry of a differenced column, a line's or a block's, is resolved
   against the rounding of its output, `eps` of its size. An output that is a small sum
   of large terms (a modal structure's velocity at a port, a sum over its
