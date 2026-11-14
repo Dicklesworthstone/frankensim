@@ -48,7 +48,7 @@ use fs_tribo::{DryTangentialState, TangentialStep, TriboError};
 
 use super::*;
 
-fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
+pub(super) fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let pool = ArenaPool::new(ArenaConfig::default());
     pool.scope(|arena| {
         let key = StreamKey {
@@ -64,8 +64,8 @@ fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
 
 /// The fixture's caloric law with one side's constant conductivity, as the
 /// implicit conduction graph binds a material.
-struct Conducting {
-    w_m_k: f64,
+pub(super) struct Conducting {
+    pub(super) w_m_k: f64,
 }
 
 impl ConductivityLaw for Conducting {
@@ -124,9 +124,9 @@ fn sided(
 }
 
 /// The friction law at an interface temperature.
-type LawAt = fn(f64) -> Result<FrictionLaw, TriboError>;
+pub(super) type LawAt = fn(f64) -> Result<FrictionLaw, TriboError>;
 
-fn coulomb(mu: f64) -> Result<FrictionLaw, TriboError> {
+pub(super) fn coulomb(mu: f64) -> Result<FrictionLaw, TriboError> {
     Ok(FrictionLaw::Coulomb {
         static_mu: mu,
         kinetic_mu: mu,
@@ -138,11 +138,11 @@ fn mu_one(_: f64) -> Result<FrictionLaw, TriboError> {
 }
 
 /// The third case's declared law: `0.8 - 0.01 (T - 300 K)`.
-fn mu_falling(kelvin: f64) -> Result<FrictionLaw, TriboError> {
+pub(super) fn mu_falling(kelvin: f64) -> Result<FrictionLaw, TriboError> {
     coulomb(0.8 - 0.01 * (kelvin - 300.0))
 }
 
-fn mu_three_tenths(_: f64) -> Result<FrictionLaw, TriboError> {
+pub(super) fn mu_three_tenths(_: f64) -> Result<FrictionLaw, TriboError> {
     coulomb(0.3)
 }
 

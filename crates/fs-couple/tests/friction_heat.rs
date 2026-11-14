@@ -22,6 +22,11 @@ mod cohesive;
 #[path = "friction_heat/graph.rs"]
 mod graph;
 
+/// Two contacts that share a cell, declared as a graph and judged step by
+/// step by `friction_heat::network`.
+#[path = "friction_heat/network_graph.rs"]
+mod network_graph;
+
 #[cfg(feature = "experimental-solid-contact-heat")]
 #[path = "friction_heat/solid.rs"]
 mod solid;
