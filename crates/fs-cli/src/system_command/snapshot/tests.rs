@@ -212,3 +212,45 @@ fn excessive_sample_storage_is_refused_before_allocation() {
     assert!(sample_storage(&["coordinate".repeat(1024)], MAX_SAMPLES).is_err());
     assert!(sample_storage(&["x".into()], usize::MAX).is_err());
 }
+
+#[test]
+fn temperature_law_identity_binds_the_original_model_and_calibrated_support() {
+    use super::super::{DampingLaw, SceneShift, ShiftLaw, TemperatureShift, TemperatureShiftModel};
+
+    let arrhenius = |energy| TemperatureShiftModel::Arrhenius {
+        activation_energy_j_mol: energy,
+    };
+    let wlf = |c1, c2_k| TemperatureShiftModel::WilliamsLandelFerry { c1, c2_k };
+    let declarations = [
+        (arrhenius(10_000.0), 300.0, [280.0, 360.0]),
+        (arrhenius(20_000.0), 300.0, [280.0, 360.0]),
+        (arrhenius(10_000.0), 300.0, [281.0, 360.0]),
+        (arrhenius(10_000.0), 300.0, [280.0, 359.0]),
+        (wlf(4.0, 100.0), 300.0, [280.0, 360.0]),
+        (wlf(5.0, 100.0), 300.0, [280.0, 360.0]),
+        (wlf(4.0, 110.0), 300.0, [280.0, 360.0]),
+        (arrhenius(10_000.0), 301.0, [280.0, 360.0]),
+    ];
+    let mut identities = Vec::new();
+    for (model, reference, band) in declarations {
+        let law = SceneShift(TemperatureShift::new(model, reference, band).unwrap());
+        // Different laws coincide exactly at their reference. Their current
+        // evaluated value cannot establish their continuation identity.
+        assert_eq!(law.at(reference).unwrap().to_bits(), 1.0_f64.to_bits());
+        let identity = ShiftLaw::checkpoint_identity(&law).unwrap();
+        assert_eq!(DampingLaw::checkpoint_identity(&law), Some(identity));
+        assert!(!identities.contains(&identity));
+        let rebuilt = SceneShift(TemperatureShift::new(model, reference, band).unwrap());
+        assert_eq!(identity, rebuilt.identity());
+        identities.push(identity);
+    }
+
+    let original = include_str!("../../../../../examples/system/self_heating_damper.json");
+    let changed = original.replace("166289.2523630648", "166289.2523630649");
+    assert_ne!(original, changed);
+    assert_ne!(
+        scene(original).device.system.problem_id(),
+        scene(&changed).device.system.problem_id(),
+        "the native kernel identity must bind the law independently of the scene bytes"
+    );
+}

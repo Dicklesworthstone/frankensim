@@ -279,6 +279,36 @@ checked here: the energy tolerance is sized by the kinetic terms, which a
 reviewer's emulation found too small for a very thin body (inertia ratio
 1e6) whose principal frame is rotated against the body frame.
 
+## Durable native component state
+
+`RigidBody`, `ViscousNetwork` and `RelaxationNetwork` expose native Component
+state charters and exact binary64 codecs for the kernel's durable snapshots.
+Each body contributes its position, canonical quaternion, world linear
+momentum and body angular momentum. Quaternion restoration validates the
+original components without renormalizing them. A relaxation network also
+retains all six amplitude coordinates of every original branch, including
+preloaded and lossless memory; pose and stored energy alone cannot reconstruct
+that history. Invalid shape, nonfinite coordinates, noncanonical rotations or
+unrepresentable energy refuse before accepting any restored state. Encoding
+refusal leaves the caller's word buffer unchanged.
+
+Component identities bind the original mass properties and principal frames,
+gravity, ordered attachment geometry, complete retained damping forms and
+their numerical evaluation modes, original branch factors and relaxation
+times, source/solve limits, and ordered torque and actuator ports with their
+frames and offsets. This preserves the material basis of branch memory and
+the arithmetic path that continues the accepted state.
+
+`DampingLaw::checkpoint_identity` and `ShiftLaw::checkpoint_identity` let a
+temperature law's owner supply its stable original-law identity, including
+support and refusal behavior. Their default is `None`: existing custom laws
+still step, while durable save/restore refuses an unidentified callback.
+Callback addresses, debug strings and evaluations at the current temperature
+are not source identities. The CLI's material-owned Arrhenius and WLF adapters
+provide the full declaration identity. Codec regressions live in the existing
+viscous and relaxation network slice tests, with separate-process scene
+continuation in the CLI checkpoint tests.
+
 ## Affine friction stopping and reversal on finite bodies
 
 The original rate-driven Hertz adapter retains the law's `exact_invariant`

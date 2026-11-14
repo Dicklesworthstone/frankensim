@@ -69,6 +69,52 @@ fn saved_fixed_adaptive_and_material_scenes_continue_with_identical_reports() {
 }
 
 #[test]
+fn saved_mechanical_networks_preserve_motion_memory_and_routed_heat() {
+    for name in [
+        "damped_pair.json",
+        "projected_suspension.json",
+        "anisotropic_damping.json",
+        "viscoelastic_mount.json",
+        "self_heating_damper.json",
+    ] {
+        let text = std::fs::read_to_string(example(name)).unwrap();
+        let scene = scratch(name, &text);
+        checkpoint_continuation(&scene, &text);
+    }
+}
+
+#[test]
+fn saved_thermal_maxwell_memory_continues_under_both_original_calibrations() {
+    let mount = std::fs::read_to_string(example("viscoelastic_mount.json")).unwrap();
+    for (name, calibration) in [
+        (
+            "arrhenius_mount.json",
+            r#"{"arrhenius":{"activation_energy_j_mol":166289.2523630648,"reference_k":300,"valid_k":[280,360]}}"#,
+        ),
+        (
+            "wlf_mount.json",
+            r#"{"wlf":{"c1":4,"c2_k":100,"reference_k":300,"valid_k":[280,360]}}"#,
+        ),
+    ] {
+        // The branch is already preloaded, and its released heat changes the
+        // temperature law that acts on the same branch on subsequent steps.
+        let text = mount
+            .replace(
+                "\"connectors\": [",
+                &format!("\"shift\": {calibration}, \"connectors\": ["),
+            )
+            .replace(
+                "{\"route\": \"mount.heat0\"",
+                "{\"signal\": \"casing.temperature\", \"to\": [\"mount.temperature0\"]},\n    \
+                 {\"route\": \"mount.heat0\"",
+            );
+        assert!(text.contains("\"shift\"") && text.contains("mount.temperature0"));
+        let scene = scratch(name, &text);
+        checkpoint_continuation(&scene, &text);
+    }
+}
+
+#[test]
 fn material_card_checkpoints_resume_original_laws_and_refuse_changed_source_packs() {
     for (name, text) in [
         ("card_body.json", source_body_scene(0.0, 2000.0, 2.0)),

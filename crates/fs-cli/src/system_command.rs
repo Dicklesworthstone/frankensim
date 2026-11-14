@@ -1867,11 +1867,39 @@ impl SceneShift {
             .map(|state| state.factor())
             .map_err(|e| e.to_string())
     }
+
+    /// Bind the complete original calibration, including its refusal domain.
+    /// Sampling the law would lose identity at the reference temperature,
+    /// where every admitted calibration has the same exact factor of one.
+    fn identity(&self) -> [u8; 32] {
+        let mut identity =
+            fs_blake3::DomainHasher::new("org.frankensim.fs-cli.system-scene.temperature-shift.v1");
+        match self.0.model() {
+            TemperatureShiftModel::Arrhenius { activation_energy_j_mol } => {
+                identity.update(&[0]);
+                identity.update(&activation_energy_j_mol.to_bits().to_le_bytes());
+            }
+            TemperatureShiftModel::WilliamsLandelFerry { c1, c2_k } => {
+                identity.update(&[1]);
+                identity.update(&c1.to_bits().to_le_bytes());
+                identity.update(&c2_k.to_bits().to_le_bytes());
+            }
+        }
+        let [lowest, highest] = self.0.validity_k();
+        for value in [self.0.reference_temperature_k(), lowest, highest] {
+            identity.update(&value.to_bits().to_le_bytes());
+        }
+        *identity.finalize().as_bytes()
+    }
 }
 
 impl ShiftLaw for SceneShift {
     fn factor(&self, _connector: usize, temperature_k: f64) -> Result<f64, String> {
         self.at(temperature_k)
+    }
+
+    fn checkpoint_identity(&self) -> Option<[u8; 32]> {
+        Some(self.identity())
     }
 }
 
@@ -1885,6 +1913,10 @@ impl DampingLaw for SceneShift {
         reference
             .scaled(self.at(temperature_k)?)
             .map_err(|e| format!("{e:?}"))
+    }
+
+    fn checkpoint_identity(&self) -> Option<[u8; 32]> {
+        Some(self.identity())
     }
 }
 

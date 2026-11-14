@@ -833,9 +833,20 @@ The same path covers authored latent-heat storage and temperature-dependent
 layer conduction, and the material-card-backed body and conductor owners.
 Their native codecs retain the original caloric or conductivity laws. Reopening
 an unchanged scene against a changed material pack refuses the old checkpoint;
-the pack's filename alone never establishes source identity. Rigid and
-viscoelastic network owners still require their own native codecs before these
-scenes can be checkpointed.
+the pack's filename alone never establishes source identity.
+
+Rigid and viscoelastic network scenes use their native fs-mbd codecs: exact
+positions, quaternion components and both momenta for every body, together with
+all six memory amplitudes of every Maxwell or equilibrium branch. Restoring
+does not renormalize rotations or reconstruct memory from geometry. The
+scene's temperature adapter supplies a stable identity of the complete original
+Arrhenius or WLF declaration: model, coefficients, reference temperature and
+both calibration bounds, even when the current factor is exactly one.
+Checkpoint regressions cover damped pairs with split heat routes, projected
+and anisotropic motion, preloaded Maxwell memory, self-heating damping and
+self-heating Maxwell memory under both temperature models. They compare the
+complete report after separate-process resume to the original accepted-prefix
+continuation, including all sampled history and ledger accounts.
 
 `slider` lowers to `fs_system::elements::Slider` through the kernel's
 `add_on_line` tier, with positive constant `normal_n`, `static_coefficient`
