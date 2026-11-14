@@ -1,5 +1,5 @@
 //! Full dry/fluid impulse physics through the original global normal law.
-use fs_contact::multicontact::MultiImpactConfig;
+use fs_contact::multicontact::{MultiImpactConfig, MultiImpactDeterminacy};
 use fs_flyer::addedmass::Strip;
 use fs_flyer::addedmass::articulated::{LinkedStrip, assemble_articulated_strips};
 use fs_flyer::partitioned::MemoryState;
@@ -443,16 +443,49 @@ fn geometry_load_ownership_caps_and_cancellation_refuse_atomically() {
         )
         .is_err()
     );
+    // Two copies of one contact are a redundant pair, which the normal law
+    // resolves with explicit determinacy (fs-contact 01e95cd066): the velocity
+    // is the single contact's, and the split impulse is one law-satisfying
+    // representative whose total is the single contact's impulse.
+    let single = resolve(
+        &model,
+        &state,
+        &contacts[..1],
+        MultiImpactConfig::default(),
+        |map| assemble_articulated_strips(1.0, &[], map),
+        || false,
+    )
+    .unwrap();
+    let doubled = resolve(
+        &model,
+        &state,
+        &[contacts[0]; 2],
+        MultiImpactConfig::default(),
+        |map| assemble_articulated_strips(1.0, &[], map),
+        || false,
+    )
+    .unwrap();
     assert!(
-        resolve(
-            &model,
-            &state,
-            &[contacts[0]; 2],
-            MultiImpactConfig::default(),
-            |map| assemble_articulated_strips(1.0, &[], map),
-            || false
-        )
-        .is_err()
+        matches!(
+            &doubled.generalized.law.determinacy,
+            MultiImpactDeterminacy::UniqueVelocity(witness)
+                if witness.dimension == 2 && witness.rank == 1
+        ),
+        "{:?}",
+        doubled.generalized.law.determinacy
+    );
+    assert!(single.generalized.law.normal_impulses[0] > 0.0);
+    for (a, b) in doubled
+        .generalized
+        .velocity_after
+        .iter()
+        .zip(&single.generalized.velocity_after)
+    {
+        close(*a, *b);
+    }
+    close(
+        doubled.generalized.law.normal_impulses.iter().sum::<f64>(),
+        single.generalized.law.normal_impulses[0],
     );
     let mut inactive = contacts[0];
     inactive.other = ContactCounterpart::PrescribedPlane {
