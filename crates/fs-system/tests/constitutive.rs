@@ -2,7 +2,14 @@
 //! kernel connections. References below use independent piecewise physics.
 
 use fs_alloc::{ArenaConfig, ArenaPool};
-use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_blake3::identity::CanonicalLimits;
+use fs_exec::solver::SolverStateV2;
+use fs_exec::solver::snapshot_v2::{
+    ExpectedResumeContextV2, PausedSnapshotBoundaryV2, SealedSnapshotV2, SnapshotAlgorithmIdV2,
+    SnapshotBudgetStateIdV2, SnapshotDeterminismV2, SnapshotExecutionFingerprintIdV2,
+    SnapshotLimitsV2, SnapshotPauseRequestIdV2, SnapshotProvenanceIdV2, SnapshotRngCounterIdV2,
+};
+use fs_exec::{Budget, CancelGate, Cx, DrainTracker, ExecMode, RunId, StreamKey};
 use fs_ports::PortKind;
 use fs_ports::component::conformance::{
     Case, Failure, Observed, Reversal, ReversalAllowance, check_component, check_port_tangent,
@@ -14,43 +21,82 @@ use fs_system::constitutive::{
     NonlinearInductor,
 };
 use fs_system::elements::{Admittance, HeatCapacity};
-use fs_system::{System, SystemBuilder, SystemError};
+use fs_system::{CheckpointError, NodeId, System, SystemBuilder, SystemError, SystemImage};
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new_clock_free();
     let pool = ArenaPool::new(ArenaConfig::default());
     pool.scope(|arena| {
-        let key = StreamKey { seed: 41, kernel_id: 37, tile: 0, iteration: 0 };
-        f(&Cx::new(&gate, arena, key, Budget::INFINITE, ExecMode::Deterministic))
+        let key = StreamKey {
+            seed: 41,
+            kernel_id: 37,
+            tile: 0,
+            iteration: 0,
+        };
+        f(&Cx::new(
+            &gate,
+            arena,
+            key,
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        ))
     })
 }
 
 fn knots() -> Vec<(f64, f64)> {
-    vec![(-2.0, -6.0), (-1.0, -2.0), (0.0, 0.0), (1.0, 2.0), (2.0, 6.0)]
+    vec![
+        (-2.0, -6.0),
+        (-1.0, -2.0),
+        (0.0, 0.0),
+        (1.0, 2.0),
+        (2.0, 6.0),
+    ]
 }
 
 // Constitutive law for this fixture: differential storage is 1/2 up to
 // unit charge/flux and 1/4 outside. Integrating it gives this Hamiltonian.
 fn effort(x: f64) -> f64 {
-    if x.abs() <= 1.0 { 2.0 * x } else { 4.0 * x - 2.0 * x.signum() }
+    if x.abs() <= 1.0 {
+        2.0 * x
+    } else {
+        4.0 * x - 2.0 * x.signum()
+    }
 }
 
 fn energy(x: f64) -> f64 {
-    if x.abs() <= 1.0 { x * x } else { 2.0 * x * x - 2.0 * x.abs() + 1.0 }
+    if x.abs() <= 1.0 {
+        x * x
+    } else {
+        2.0 * x * x - 2.0 * x.abs() + 1.0
+    }
 }
 
 fn close(actual: f64, expected: f64, tolerance: f64) {
-    assert!((actual - expected).abs() <= tolerance, "{actual} vs {expected}, tolerance {tolerance}");
+    assert!(
+        (actual - expected).abs() <= tolerance,
+        "{actual} vs {expected}, tolerance {tolerance}"
+    );
 }
 
 fn conforms<C: PortTangent<State = f64>>(component: &C, old: f64, dt: f64, input: f64) {
     with_cx(|cx| {
-        let case = Case { state: &old, stale: &17.0, dt_s: dt, inputs: &[input] };
+        let case = Case {
+            state: &old,
+            stale: &17.0,
+            dt_s: dt,
+            inputs: &[input],
+        };
         let observed = check_component(component, &case, cx).unwrap();
-        let Observed::Stepped { outputs, .. } = observed else { panic!("unexpected shortening") };
+        let Observed::Stepped { outputs, .. } = observed else {
+            panic!("unexpected shortening")
+        };
         let next = old + dt * input;
         close(dt * input * outputs[0], energy(next) - energy(old), 2.0e-14);
-        close(component.stored_energy_j(&next).unwrap(), energy(next), 2.0e-14);
+        close(
+            component.stored_energy_j(&next).unwrap(),
+            energy(next),
+            2.0e-14,
+        );
         check_port_tangent(component, &case, 1.0e-6, 1.0e-9, cx).unwrap();
     });
 }
@@ -156,8 +202,16 @@ fn both_adapters_conform_across_knots_and_keep_the_original_endpoint_law() {
         conforms(&capacitor, old, dt, input);
         conforms(&inductor, old, dt, input);
         let next = old + dt * input;
-        close(capacitor.curve().voltage_v(next).unwrap(), effort(next), 1.0e-14);
-        close(inductor.curve().current_a(next).unwrap(), effort(next), 1.0e-14);
+        close(
+            capacitor.curve().voltage_v(next).unwrap(),
+            effort(next),
+            1.0e-14,
+        );
+        close(
+            inductor.curve().current_a(next).unwrap(),
+            effort(next),
+            1.0e-14,
+        );
         for reversal in [
             adapter_reverses(&capacitor, &knots(), old, dt, input, &charge),
             adapter_reverses(&inductor, &knots(), old, dt, input, &flux),
@@ -229,27 +283,65 @@ fn rc(dt: f64) -> (f64, f64) {
     // q(t)=1/2+(q0-1/2)e^(-2t), followed by e^(-(t-0.4)).
     let initial = 0.5 + 0.5 * 0.8_f64.exp();
     let mut builder = SystemBuilder::new();
-    let capacitor = builder.add_with_tangent(
-        "capacitor", NonlinearCapacitor::new(CapacitorChargeCurve::try_new(knots()).unwrap()), initial,
-    ).unwrap();
-    let resistor = builder.add_with_tangent(
-        "resistor", Admittance::in_domain(PortKind::ElectricalVoltageCurrent, 0.5).unwrap(), (),
-    ).unwrap();
-    let thermal = builder.add_with_tangent("body", HeatCapacity::new(10.0).unwrap(), 300.0).unwrap();
-    builder.common_effort(builder.port(capacitor, "p").unwrap(), &[builder.port(resistor, "a").unwrap()]).unwrap();
-    builder.boundary(builder.port(resistor, "b").unwrap(), Box::new(|_, _, values| values[0] = 0.0)).unwrap();
+    let capacitor = builder
+        .add_with_tangent(
+            "capacitor",
+            NonlinearCapacitor::new(CapacitorChargeCurve::try_new(knots()).unwrap()),
+            initial,
+        )
+        .unwrap();
+    let resistor = builder
+        .add_with_tangent(
+            "resistor",
+            Admittance::in_domain(PortKind::ElectricalVoltageCurrent, 0.5).unwrap(),
+            (),
+        )
+        .unwrap();
+    let thermal = builder
+        .add_with_tangent("body", HeatCapacity::new(10.0).unwrap(), 300.0)
+        .unwrap();
+    builder
+        .common_effort(
+            builder.port(capacitor, "p").unwrap(),
+            &[builder.port(resistor, "a").unwrap()],
+        )
+        .unwrap();
+    builder
+        .boundary(
+            builder.port(resistor, "b").unwrap(),
+            Box::new(|_, _, values| values[0] = 0.0),
+        )
+        .unwrap();
     let heat = builder.port(resistor, "heat").unwrap();
-    builder.bond(builder.port(thermal, "heat").unwrap(), heat).unwrap();
+    builder
+        .bond(builder.port(thermal, "heat").unwrap(), heat)
+        .unwrap();
     let mut system = builder.seal().unwrap();
     assert!(system.guess(heat, &[300.0]));
     with_cx(|cx| {
-        for _ in 0..(1.0 / dt).round() as usize { system.step(dt, cx).unwrap(); }
+        for _ in 0..(1.0 / dt).round() as usize {
+            system.step(dt, cx).unwrap();
+        }
     });
     let charge = *system.state::<f64>(capacitor).unwrap();
     let loss = energy(initial) - energy(charge);
-    close(system.ledger().nodes[resistor.index()].dissipated_j.value(), loss, 2.0e-11);
-    close(system.ledger().nodes[thermal.index()].stored_change_j.value(), loss, 2.0e-11);
-    close(10.0 * (system.state::<f64>(thermal).unwrap() - 300.0), loss, 1.0e-9);
+    close(
+        system.ledger().nodes[resistor.index()].dissipated_j.value(),
+        loss,
+        2.0e-11,
+    );
+    close(
+        system.ledger().nodes[thermal.index()]
+            .stored_change_j
+            .value(),
+        loss,
+        2.0e-11,
+    );
+    close(
+        10.0 * (system.state::<f64>(thermal).unwrap() - 300.0),
+        loss,
+        1.0e-9,
+    );
     close(system.ledger().energy_residual_j(), 0.0, 2.0e-11);
     (charge, (charge - (-0.6_f64).exp()).abs())
 }
@@ -267,25 +359,42 @@ fn nonlinear_lc_keeps_both_storage_laws_and_matches_the_differential_equations()
     let (mut q, mut flux) = (1.6, -0.4);
     let initial_energy = energy(q) + energy(flux);
     let mut builder = SystemBuilder::new();
-    let capacitor = builder.add_with_tangent(
-        "capacitor", NonlinearCapacitor::new(CapacitorChargeCurve::try_new(knots()).unwrap()), q,
-    ).unwrap();
-    let inductor = builder.add_with_tangent(
-        "inductor", NonlinearInductor::new(InductorFluxCurve::try_new(knots()).unwrap()), flux,
-    ).unwrap();
-    builder.bond(builder.port(capacitor, "p").unwrap(), builder.port(inductor, "p").unwrap()).unwrap();
+    let capacitor = builder
+        .add_with_tangent(
+            "capacitor",
+            NonlinearCapacitor::new(CapacitorChargeCurve::try_new(knots()).unwrap()),
+            q,
+        )
+        .unwrap();
+    let inductor = builder
+        .add_with_tangent(
+            "inductor",
+            NonlinearInductor::new(InductorFluxCurve::try_new(knots()).unwrap()),
+            flux,
+        )
+        .unwrap();
+    builder
+        .bond(
+            builder.port(capacitor, "p").unwrap(),
+            builder.port(inductor, "p").unwrap(),
+        )
+        .unwrap();
     let mut system = builder.seal().unwrap();
-    with_cx(|cx| { for _ in 0..1000 { system.step(0.002, cx).unwrap(); } });
+    with_cx(|cx| {
+        for _ in 0..1000 {
+            system.step(0.002, cx).unwrap();
+        }
+    });
     // Independent RK4 of dq/dt=-I(flux), d(flux)/dt=V(q), at 200x
     // finer resolution. No native curve or discrete-gradient call is used.
     let h = 1.0e-5;
     for _ in 0..200_000 {
         let a = [-effort(flux), effort(q)];
-        let b = [-effort(flux + 0.5*h*a[1]), effort(q + 0.5*h*a[0])];
-        let c = [-effort(flux + 0.5*h*b[1]), effort(q + 0.5*h*b[0])];
-        let d = [-effort(flux + h*c[1]), effort(q + h*c[0])];
-        q += h * (a[0] + 2.0*b[0] + 2.0*c[0] + d[0]) / 6.0;
-        flux += h * (a[1] + 2.0*b[1] + 2.0*c[1] + d[1]) / 6.0;
+        let b = [-effort(flux + 0.5 * h * a[1]), effort(q + 0.5 * h * a[0])];
+        let c = [-effort(flux + 0.5 * h * b[1]), effort(q + 0.5 * h * b[0])];
+        let d = [-effort(flux + h * c[1]), effort(q + h * c[0])];
+        q += h * (a[0] + 2.0 * b[0] + 2.0 * c[0] + d[0]) / 6.0;
+        flux += h * (a[1] + 2.0 * b[1] + 2.0 * c[1] + d[1]) / 6.0;
     }
     let got_q = *system.state::<f64>(capacitor).unwrap();
     let got_flux = *system.state::<f64>(inductor).unwrap();
@@ -297,10 +406,19 @@ fn nonlinear_lc_keeps_both_storage_laws_and_matches_the_differential_equations()
 
 fn limited_capacitor() -> (System, fs_system::NodeId) {
     let mut builder = SystemBuilder::new();
-    let node = builder.add_with_tangent(
-        "limited", NonlinearCapacitor::new(CapacitorChargeCurve::try_new(knots()).unwrap()), 0.0,
-    ).unwrap();
-    builder.boundary(builder.port(node, "p").unwrap(), Box::new(|_, _, values| values[0] = 10.0)).unwrap();
+    let node = builder
+        .add_with_tangent(
+            "limited",
+            NonlinearCapacitor::new(CapacitorChargeCurve::try_new(knots()).unwrap()),
+            0.0,
+        )
+        .unwrap();
+    builder
+        .boundary(
+            builder.port(node, "p").unwrap(),
+            Box::new(|_, _, values| values[0] = 10.0),
+        )
+        .unwrap();
     (builder.seal().unwrap(), node)
 }
 
@@ -308,9 +426,15 @@ fn limited_capacitor() -> (System, fs_system::NodeId) {
 fn source_support_and_cancellation_preserve_the_accepted_system() {
     let (mut system, node) = limited_capacitor();
     with_cx(|cx| {
-        assert!(matches!(system.step(1.0, cx), Err(SystemError::Component { .. })));
+        assert!(matches!(
+            system.step(1.0, cx),
+            Err(SystemError::Component { .. })
+        ));
         assert_eq!(system.time_s().to_bits(), 0.0_f64.to_bits());
-        assert_eq!(system.state::<f64>(node).unwrap().to_bits(), 0.0_f64.to_bits());
+        assert_eq!(
+            system.state::<f64>(node).unwrap().to_bits(),
+            0.0_f64.to_bits()
+        );
         close(system.ledger().energy_residual_j(), 0.0, 0.0);
         system.step(0.01, cx).unwrap();
         close(*system.state::<f64>(node).unwrap(), 0.1, 1.0e-16);
@@ -318,8 +442,217 @@ fn source_support_and_cancellation_preserve_the_accepted_system() {
         let element = NonlinearInductor::new(InductorFluxCurve::try_new(knots()).unwrap());
         let mut next = 7.0;
         let mut output = [8.0];
-        assert!(matches!(element.propose(&0.0, 0.01, &[1.0], &mut next, &mut output, cx), Err(ConstitutiveError::Cancelled)));
+        assert!(matches!(
+            element.propose(&0.0, 0.01, &[1.0], &mut next, &mut output, cx),
+            Err(ConstitutiveError::Cancelled)
+        ));
         close(next, 7.0, 0.0);
         close(output[0], 8.0, 0.0);
     });
+}
+
+fn assert_curve_codec<C: Component<State = f64>>(element: &C) {
+    assert!(C::STATE_CHARTER.is_some());
+    for state in [-2.0, -1.25, -1.0, -0.0, 0.0, 0.2, 1.0, 1.75, 2.0] {
+        let mut words = vec![0xfeed];
+        assert!(element.encode_state(&state, &mut words));
+        assert_eq!(words[0], 0xfeed, "the codec appends");
+        let decoded = element.decode_state(&words[1..]).unwrap();
+        assert_eq!(
+            decoded.to_bits(),
+            state.to_bits(),
+            "coordinate bits survive"
+        );
+        assert_eq!(
+            element.stored_energy_j(&decoded).unwrap().to_bits(),
+            element.stored_energy_j(&state).unwrap().to_bits(),
+            "the original constitutive energy survives"
+        );
+    }
+    for invalid in [
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        (-2.0_f64).next_down(),
+        2.0_f64.next_up(),
+        1.0e-200, // Inside the support, but its original stored energy underflows.
+    ] {
+        assert!(element.stored_energy_j(&invalid).is_err());
+        let mut words = vec![0xfeed];
+        assert!(!element.encode_state(&invalid, &mut words));
+        assert_eq!(words, [0xfeed], "refusal appends nothing");
+        assert!(element.decode_state(&[invalid.to_bits()]).is_none());
+    }
+    assert!(element.decode_state(&[]).is_none());
+    assert!(element.decode_state(&[0, 0]).is_none());
+}
+
+#[test]
+fn native_curve_codecs_keep_exact_coordinates_and_refuse_original_law_violations() {
+    let capacitor = NonlinearCapacitor::new(CapacitorChargeCurve::try_new(knots()).unwrap());
+    let inductor = NonlinearInductor::new(InductorFluxCurve::try_new(knots()).unwrap());
+    assert_curve_codec(&capacitor);
+    assert_curve_codec(&inductor);
+    assert_ne!(
+        NonlinearCapacitor::STATE_CHARTER.unwrap().state_family,
+        NonlinearInductor::STATE_CHARTER.unwrap().state_family,
+        "charge and flux remain different state families"
+    );
+}
+
+fn snapshot_limits() -> SnapshotLimitsV2 {
+    SnapshotLimitsV2::new(
+        1 << 22,
+        4096,
+        CanonicalLimits::new(16384, 4096, 32, 32, 64),
+        1 << 16,
+        1 << 22,
+        4096,
+    )
+}
+
+fn sealed(system: &System) -> SealedSnapshotV2 {
+    let gate = CancelGate::new_clock_free();
+    let tracker = DrainTracker::new(RunId(17), &gate);
+    let worker = tracker.register_worker().unwrap();
+    gate.request();
+    drop(worker);
+    let paused = PausedSnapshotBoundaryV2::from_drain_report(
+        tracker.finalize().unwrap(),
+        SnapshotPauseRequestIdV2::from_bytes([0x5a; 32]),
+        1,
+    );
+    let context = ExpectedResumeContextV2::for_paused_state::<SystemImage>(
+        SnapshotAlgorithmIdV2::from_bytes([0xa1; 32]),
+        1,
+        system.problem_id(),
+        SnapshotRngCounterIdV2::from_bytes([0; 32]),
+        SnapshotDeterminismV2::Deterministic,
+        SnapshotExecutionFingerprintIdV2::from_bytes([0xe1; 32]),
+        SnapshotBudgetStateIdV2::from_bytes([0xb1; 32]),
+        SnapshotProvenanceIdV2::from_bytes([0xc1; 32]),
+        paused,
+    );
+    system
+        .snapshot(&context, snapshot_limits(), || false)
+        .unwrap()
+}
+
+fn lc_system(capacitor: Vec<(f64, f64)>, inductor: Vec<(f64, f64)>) -> (System, [NodeId; 2]) {
+    let mut builder = SystemBuilder::new();
+    let capacitor = builder
+        .add_with_tangent(
+            "capacitor",
+            NonlinearCapacitor::new(CapacitorChargeCurve::try_new(capacitor).unwrap()),
+            1.6,
+        )
+        .unwrap();
+    let inductor = builder
+        .add_with_tangent(
+            "inductor",
+            NonlinearInductor::new(InductorFluxCurve::try_new(inductor).unwrap()),
+            -0.4,
+        )
+        .unwrap();
+    builder
+        .bond(
+            builder.port(capacitor, "p").unwrap(),
+            builder.port(inductor, "p").unwrap(),
+        )
+        .unwrap();
+    (builder.seal().unwrap(), [capacitor, inductor])
+}
+
+#[test]
+fn native_nonlinear_lc_resumes_both_original_laws_and_the_complete_ledger_bitwise() {
+    let (mut original, nodes) = lc_system(knots(), knots());
+    let dt = |index: usize| [0.002, 0.003, 0.005][index % 3];
+    with_cx(|cx| {
+        for index in 0..73 {
+            original.step(dt(index), cx).unwrap();
+        }
+    });
+    let image = sealed(&original);
+    let opened = SystemImage::unseal_v2_expected(
+        image.bytes(),
+        &image.expectation(),
+        snapshot_limits(),
+        || false,
+    )
+    .unwrap();
+    let (mut resumed, resumed_nodes) = lc_system(knots(), knots());
+    assert_eq!(nodes, resumed_nodes);
+    // Resume replaces a different accepted generation, not merely initial state.
+    with_cx(|cx| {
+        resumed.step(0.001, cx).unwrap();
+    });
+    resumed.resume(&opened).unwrap();
+    assert_eq!(sealed(&resumed).bytes(), image.bytes());
+    with_cx(|cx| {
+        for index in 73..400 {
+            original.step(dt(index), cx).unwrap();
+            resumed.step(dt(index), cx).unwrap();
+            for node in nodes {
+                assert_eq!(
+                    original.state::<f64>(node).unwrap().to_bits(),
+                    resumed.state::<f64>(node).unwrap().to_bits(),
+                    "original charge/flux trajectory at step {index}"
+                );
+            }
+        }
+    });
+    // Every state, wire, compensated clock and signed/absolute ledger word,
+    // not just the observable charge and flux, survives continuation.
+    assert_eq!(sealed(&original).bytes(), sealed(&resumed).bytes());
+}
+
+#[test]
+fn nonlinear_resume_refuses_every_changed_source_knot_before_publication() {
+    let (mut original, _) = lc_system(knots(), knots());
+    with_cx(|cx| {
+        original.step(0.01, cx).unwrap();
+    });
+    let image = sealed(&original);
+    let opened = SystemImage::unseal_v2_expected(
+        image.bytes(),
+        &image.expectation(),
+        snapshot_limits(),
+        || false,
+    )
+    .unwrap();
+    for member in 0..2 {
+        for index in 0..knots().len() {
+            for coordinate in [false, true] {
+                let mut changed = knots();
+                let value = if coordinate {
+                    &mut changed[index].0
+                } else {
+                    &mut changed[index].1
+                };
+                // The mandatory zero datum stays zero; its signed bits are
+                // still part of the authored table and must not disappear.
+                *value = if *value == 0.0 { -0.0 } else { value.next_up() };
+                let (a, b) = if member == 0 {
+                    (changed, knots())
+                } else {
+                    (knots(), changed)
+                };
+                let (mut foreign, _) = lc_system(a, b);
+                with_cx(|cx| {
+                    foreign.step(0.005, cx).unwrap();
+                });
+                let before = sealed(&foreign);
+                assert_ne!(original.problem_id(), foreign.problem_id());
+                assert!(matches!(
+                    foreign.resume(&opened),
+                    Err(CheckpointError::ForeignProblem)
+                ));
+                assert_eq!(
+                    before.bytes(),
+                    sealed(&foreign).bytes(),
+                    "no state or ledger changes"
+                );
+            }
+        }
+    }
 }

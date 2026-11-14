@@ -3,6 +3,7 @@
 use core::num::NonZeroUsize;
 
 use fs_exec::Cx;
+use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::component::{
     Class, Component, EndOfStep, PortRole, PortSpec, PortTangent, Proposal, Receipt,
 };
@@ -105,6 +106,22 @@ fn extent(name: &'static str, actual: usize, expected: usize) -> Result<(), Elem
 impl Component for ModulatedTransformer {
     type State = ();
     type Error = ElementError;
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-system::elements::ModulatedTransformer",
+        state_family: "no-state",
+        schema_grammar: "(): an ideal signal-modulated transformer stores nothing",
+        codec_grammar: "no words",
+        codec_version: 1,
+    });
+
+    fn encode_state(&self, (): &(), _words: &mut Vec<u64>) -> bool {
+        true
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<()> {
+        words.is_empty().then_some(())
+    }
 
     fn ports(&self) -> &[PortSpec] {
         &self.ports

@@ -2,6 +2,7 @@
 
 use core::{fmt, num::NonZeroUsize};
 
+use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_exec::{Cancelled, Cx};
 use fs_ports::component::{
     Class, Component, ContractViolation, PortRole, PortSpec, PortTangent, Proposal, Receipt,
@@ -164,6 +165,37 @@ fn finite(values: &[f64], quantity: &'static str) -> Result<(), DiracError> {
 impl Component for DiracJunction {
     type State = ();
     type Error = DiracError;
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-system::elements::DiracJunction",
+        state_family: "no-state",
+        schema_grammar: "(): an admitted lossless Dirac relation stores nothing",
+        codec_grammar: "no words",
+        codec_version: 1,
+    });
+
+    fn encode_state(&self, (): &(), _words: &mut Vec<u64>) -> bool {
+        true
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<()> {
+        words.is_empty().then_some(())
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        // Runtime ports omit the schema's frame, basis, clock and audit
+        // roles. Bind these too, using the system identity's same Debug
+        // convention, and retain every incidence coefficient as exact bits.
+        let metadata = format!("{:?} {:?}", self.schema.id(), self.schema.ports());
+        words.push(metadata.len() as u64);
+        for chunk in metadata.as_bytes().chunks(8) {
+            let mut bytes = [0; 8];
+            bytes[..chunk.len()].copy_from_slice(chunk);
+            words.push(u64::from_le_bytes(bytes));
+        }
+        words.push(self.ports.len() as u64);
+        words.extend(self.matrix().iter().map(|value| value.to_bits()));
+    }
 
     fn ports(&self) -> &[PortSpec] {
         &self.ports

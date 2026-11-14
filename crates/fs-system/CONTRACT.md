@@ -243,6 +243,21 @@ physics owners below fs-couple can be composed without it.
       exact constant, sine parameter or ordered table knot.
     - `Damper`, `Admittance`, `Conductance`, `Gyrator`: no words. Identity
       retains the original damping, conductance or conversion coefficient.
+    - `HeatNode`, `Resistance`, `DiracJunction`, `ModulatedTransformer`: no
+      words. Identities retain all conductances, the complete resistance or
+      incidence matrix, and the Dirac schema's coordinate and clock bindings.
+      Signal-modulated ratios belong to the restored inputs and outputs.
+    - `ControlledSource`: the same three-word source account, with power
+      domain and effort/flow role bound by the graph's port description.
+    - `Slider`: eight words retain slip, stick state, both prescribed-end
+      histories and their mirrored-span counters. Invalid option/boolean tags,
+      nonfinite values and impossible counters refuse. The accepted counter
+      that causes a subsequent span refusal survives restart unchanged.
+      Identity retains both friction force limits and prescribed-end layout.
+    - With `constitutive`, `NonlinearCapacitor` and `NonlinearInductor` each
+      store their one exact charge/flux coordinate. Decode reuses the original
+      source law's support and energy checks. Identity includes every knot of
+      the original curve, without resampling or fitting.
 
     Native codecs preserve floating-point bits, including signed zero and
     source-clock compensation; they reject extra or missing words, nonfinite
@@ -1197,6 +1212,15 @@ regressions also change every core physical coefficient, every waveform
 parameter and knot, the power domain and optional signal layout; a resumed
 system refuses these changes without mutation. Invalid state and width tests
 exercise the same native codecs directly, including source-clock low bits.
+
+The snapshot suite also resumes a belt-driven friction/heat graph after a
+velocity reversal, preserving all native states, source clocks, port values and
+ledger rows through later sticking and sliding. The slider's refusal-history
+counter is separately retained across its codec. General junction tests bind
+the original coordinate frame as well as incidence coefficients. With
+`constitutive`, the nonlinear LC tests resume the original charge and flux
+laws through varied step lengths with bitwise state and snapshot equality;
+changing any source knot refuses atomically.
 
 `tests/ledger_accounts.rs` (bead `.5.4`, item 5) drives members without ports
 whose receipts state planned stored changes, so each step's defect is known
@@ -2744,9 +2768,9 @@ solved together. Nothing in the module is deleted.
   multirate stepping; no
   monolithic solve through `StageResidual`; no embedded error estimator or
   PI controller (step doubling and proportional control are available).
-  Core lumped mechanical, electrical and thermal elements, their prescribed
-  sources, `GasVolume` and `Restriction` have native state codecs; additional
-  components need their own codecs before the whole system can be snapshotted.
+  All `elements` and the optional nonlinear electrical storage adapters have
+  native state codecs; additional physics-owner components need their own
+  codecs before the whole system can be snapshotted.
   No fork lineage or SoA buffers (bead `.5.4`); no adjoint. These are beads
   `.5.2` to `.5.10` of the epic.
 - An entry of a differenced column, a line's or a block's, is resolved

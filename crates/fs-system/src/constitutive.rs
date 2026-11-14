@@ -17,6 +17,7 @@
 use core::fmt;
 use core::num::NonZeroUsize;
 
+use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_exec::{Cancelled, Cx};
 use fs_phs::circuit::CircuitError;
 use fs_ports::component::{Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt};
@@ -121,12 +122,16 @@ pub struct NonlinearInductor {
 // Charge and flux have the same conservative update. The source-owner
 // methods supplied here keep their different units and conjugate outputs.
 macro_rules! storage_adapter {
-    ($name:ident, $curve:ty, $role:ident, $mean:ident, $derivative:ident) => {
+    ($name:ident, $curve:ty, $role:ident, $mean:ident, $derivative:ident,
+        $family:literal, $schema:literal) => {
         impl $name {
             /// Wrap an already admitted original curve without resampling it.
             #[must_use]
             pub fn new(curve: $curve) -> Self {
-                Self { curve, ports: port(PortRole::$role) }
+                Self {
+                    curve,
+                    ports: port(PortRole::$role),
+                }
             }
 
             /// The original curve, including endpoint values and source support.
@@ -173,6 +178,39 @@ macro_rules! storage_adapter {
 
             fn stored_energy_j(&self, state: &f64) -> Result<f64, ConstitutiveError> {
                 Ok(self.curve.stored_energy_j(*state)?)
+            }
+
+            const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+                owner: concat!("fs-system::constitutive::", stringify!($name)),
+                state_family: $family,
+                schema_grammar: $schema,
+                codec_grammar: "one u64 word: the f64 conserved coordinate bits",
+                codec_version: 1,
+            });
+
+            fn encode_state(&self, state: &f64, words: &mut Vec<u64>) -> bool {
+                if self.curve.stored_energy_j(*state).is_err() {
+                    return false;
+                }
+                words.push(state.to_bits());
+                true
+            }
+
+            fn decode_state(&self, words: &[u64]) -> Option<f64> {
+                let &[bits] = words else { return None };
+                let state = f64::from_bits(bits);
+                // The original owner admits the closed source support and
+                // representable stored energy. Resuming never extrapolates.
+                self.curve.stored_energy_j(state).ok()?;
+                Some(state)
+            }
+
+            fn identity_words(&self, words: &mut Vec<u64>) {
+                let knots = self.curve.knots();
+                words.push(knots.len() as u64);
+                for &(coordinate, effort) in knots {
+                    words.extend([coordinate.to_bits(), effort.to_bits()]);
+                }
             }
 
             fn propose(
@@ -239,12 +277,16 @@ storage_adapter!(
     CapacitorChargeCurve,
     FlowIn,
     discrete_voltage_v,
-    discrete_voltage_end_derivative
+    discrete_voltage_end_derivative,
+    "capacitor-charge",
+    "charge_c f64 in the original voltage/charge curve's closed source support"
 );
 storage_adapter!(
     NonlinearInductor,
     InductorFluxCurve,
     EffortIn,
     discrete_current_a,
-    discrete_current_end_derivative
+    discrete_current_end_derivative,
+    "inductor-flux-linkage",
+    "flux_wb f64 in the original current/flux curve's closed source support"
 );

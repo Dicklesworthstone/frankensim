@@ -34,6 +34,9 @@ use fs_system::{NodeId, PortRef, RouteTemperature, System, SystemBuilder, System
 /// The variable that makes a run of this binary the resumed child.
 const CHILD: &str = "FS_SYSTEM_SNAPSHOT_CHILD";
 
+#[path = "snapshots/element_codecs.rs"]
+mod element_codecs;
+
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let pool = ArenaPool::new(ArenaConfig::default());
     pool.scope(|arena| {

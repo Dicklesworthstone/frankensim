@@ -3,10 +3,14 @@
 use core::num::NonZeroUsize;
 
 use fs_exec::Cx;
+use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::component::{Class, Component, PortRole, PortSpec, PortTangent, Proposal};
 use fs_ports::{PortKind, StableId};
 
-use super::{ElementError, SourceAccount, finite, inputs_finite, port, positive, source_step};
+use super::{
+    ElementError, SourceAccount, decode_source_account, encode_source_account, finite,
+    inputs_finite, port, positive, source_step,
+};
 
 /// An ideal effort or flow source driven by a scalar signal.
 ///
@@ -85,6 +89,22 @@ fn width(name: &'static str, actual: usize, expected: usize) -> Result<(), Eleme
 impl Component for ControlledSource {
     type State = SourceAccount;
     type Error = ElementError;
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-system::elements::ControlledSource",
+        state_family: "source-account",
+        schema_grammar: "clock_s: Sum running value and compensation; energy_in_j f64",
+        codec_grammar: "three u64 words: Sum::to_words of clock_s, then energy_in_j bits",
+        codec_version: 1,
+    });
+
+    fn encode_state(&self, state: &SourceAccount, words: &mut Vec<u64>) -> bool {
+        encode_source_account(state, words)
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<SourceAccount> {
+        decode_source_account(words)
+    }
 
     fn ports(&self) -> &[PortSpec] {
         &self.ports

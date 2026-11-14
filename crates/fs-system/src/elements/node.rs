@@ -15,6 +15,7 @@
 //! `G_k (T_k - T_n)^2 / (T_k T_n)` of entropy per second.
 
 use fs_exec::Cx;
+use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::component::{Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt};
 
 use super::{ElementError, heat, inputs_finite, positive, roundoff, temperature};
@@ -78,6 +79,27 @@ impl HeatNode {
 impl Component for HeatNode {
     type State = ();
     type Error = ElementError;
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-system::elements::HeatNode",
+        state_family: "no-state",
+        schema_grammar: "(): a massless thermal node stores nothing",
+        codec_grammar: "no words",
+        codec_version: 1,
+    });
+
+    fn encode_state(&self, (): &(), _words: &mut Vec<u64>) -> bool {
+        true
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<()> {
+        words.is_empty().then_some(())
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        words.push(self.conductances_w_k.len() as u64);
+        words.extend(self.conductances_w_k.iter().map(|value| value.to_bits()));
+    }
 
     fn ports(&self) -> &[PortSpec] {
         &self.ports
@@ -169,8 +191,11 @@ impl PortTangent for HeatNode {
         }
         let w = weighted / self.total_w_k;
         bar_inputs[0] = w;
-        for (index, (&conductance, &bar)) in
-            self.conductances_w_k.iter().zip(&bar_outputs[1..]).enumerate()
+        for (index, (&conductance, &bar)) in self
+            .conductances_w_k
+            .iter()
+            .zip(&bar_outputs[1..])
+            .enumerate()
         {
             bar_inputs[1 + index] = conductance * (w + bar);
         }

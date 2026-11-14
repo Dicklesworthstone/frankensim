@@ -9,6 +9,7 @@
 use core::num::NonZeroUsize;
 
 use fs_exec::Cx;
+use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::component::{Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt};
 use fs_ports::{PortKind, StableId};
 
@@ -157,6 +158,29 @@ fn cholesky(m: &[f64], n: usize) -> Result<Vec<f64>, ElementError> {
 impl Component for Resistance {
     type State = ();
     type Error = ElementError;
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-system::elements::Resistance",
+        state_family: "no-state",
+        schema_grammar: "(): a memoryless resistance matrix stores nothing",
+        codec_grammar: "no words",
+        codec_version: 1,
+    });
+
+    fn encode_state(&self, (): &(), _words: &mut Vec<u64>) -> bool {
+        true
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<()> {
+        words.is_empty().then_some(())
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        // The factor is derived from this admitted matrix; the power domain
+        // and width are already part of the system's port description.
+        words.push(self.n as u64);
+        words.extend(self.matrix.iter().map(|value| value.to_bits()));
+    }
 
     fn ports(&self) -> &[PortSpec] {
         &self.ports

@@ -191,6 +191,7 @@
 use core::num::NonZeroUsize;
 
 use fs_exec::Cx;
+use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::component::{Class, Component, LoadLine, PortRole, PortSpec, Proposal, Receipt};
 use fs_ports::{PortKind, StableId};
 
@@ -491,6 +492,57 @@ impl Component for Slider {
     type State = Slip;
     type Error = ElementError;
 
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-system::elements::Slider",
+        state_family: "slip",
+        schema_grammar: "ended_m_s f64; stuck bool; per end: given_m_s Option<f64>, mirrored u8",
+        codec_grammar: "eight u64 words: ended_m_s bits, stuck 0|1; for a then b: given tag 0|1, \
+            zero if absent or given_m_s bits, mirrored count 0..2",
+        codec_version: 1,
+    });
+
+    fn encode_state(&self, state: &Slip, words: &mut Vec<u64>) -> bool {
+        if !self.valid_slip(state) {
+            return false;
+        }
+        words.extend([state.ended_m_s.to_bits(), u64::from(state.stuck)]);
+        for end in 0..2 {
+            match state.given_m_s[end] {
+                None => words.extend([0, 0]),
+                Some(value) => words.extend([1, value.to_bits()]),
+            }
+            words.push(u64::from(state.mirrored[end]));
+        }
+        true
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<Slip> {
+        if words.len() != 8 || words[1] > 1 {
+            return None;
+        }
+        let mut state = Slip {
+            ended_m_s: f64::from_bits(words[0]),
+            stuck: words[1] == 1,
+            given_m_s: [None; 2],
+            mirrored: [0; 2],
+        };
+        for end in 0..2 {
+            let at = 2 + 3 * end;
+            state.given_m_s[end] = match (words[at], words[at + 1]) {
+                (0, 0) => None,
+                (1, bits) => Some(f64::from_bits(bits)),
+                _ => return None,
+            };
+            state.mirrored[end] = u8::try_from(words[at + 2]).ok()?;
+        }
+        self.valid_slip(&state).then_some(state)
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        words.extend([self.hold_n.to_bits(), self.slide_n.to_bits()]);
+        words.extend(self.spans.map(|at| at.map_or(0, |index| index as u64 + 1)));
+    }
+
     fn ports(&self) -> &[PortSpec] {
         &self.ports
     }
@@ -513,6 +565,18 @@ impl Component for Slider {
         cx: &Cx<'_>,
     ) -> Result<Proposal, ElementError> {
         self.propose_on_line(old, dt_s, inputs, &[0.0; 4], new, outputs, cx)
+    }
+}
+
+impl Slider {
+    fn valid_slip(&self, state: &Slip) -> bool {
+        state.ended_m_s.is_finite()
+            && (0..2).all(|end| {
+                state.given_m_s[end].is_none_or(f64::is_finite)
+                    && state.mirrored[end] <= MIRRORED_STEPS
+                    && (state.mirrored[end] == 0
+                        || (self.spans[end].is_some() && state.given_m_s[end].is_some()))
+            })
     }
 }
 
