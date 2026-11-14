@@ -218,8 +218,12 @@ fn audit(receipt: &J, field: &J, cooling: Cooling, card: &str, claim: &str, mass
     close(n(energy, "stored_change_j"), stored, 1e-8);
     close(n(energy, "integrated_net_input_j"), fine_stored, 4e-6);
     let last = trajectory.get("fine").unwrap().as_array().unwrap().last().unwrap();
-    let contact_heat: f64 = last.get("temperature_contact").unwrap().get("face_states").unwrap()
-        .as_array().unwrap().iter().map(|face| 0.5 * (n(face, "side_a_temperature_k")
+    // The unit-square contact is meshed as four equal triangles of 0.25 m2
+    // (the receipt's interface area is 1 m2 over four face pairs).
+    let states = last.get("temperature_contact").unwrap().get("face_states").unwrap()
+        .as_array().unwrap();
+    assert_eq!(states.len(), 4);
+    let contact_heat: f64 = states.iter().map(|face| 0.25 * (n(face, "side_a_temperature_k")
             - n(face, "side_b_temperature_k")) / n(face, "resistance_m2_k_w")).sum();
     assert!(contact_heat.abs() > 1e-5);
     close(interface_heat(receipt), contact_heat, 1e-8);
