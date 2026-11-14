@@ -1966,23 +1966,28 @@ material, a surface card, a temperature or a slip history stays in `fs-tribo`.
 - Held under a push that changes: 4.9 N rising to 4.9196 N in 0.4 s,
   nothing rising by 2 N/s, and 4 N sin(2 pi 3.14 t). All 400 steps of each
   are taken (on ef1631e0d2: 1, 222 and 35, then refused by the junction's
-  audit for ever), with 768, 797 and 799 updates, two at most in a step.
-  At every step what the audit is told for the wire is between the
-  rounding of the published flow and 1.5 times it, read back; the flow
-  left at the slider's port and the mass's mean velocity are inside it
-  (0.49, 0.02 and 0.02 of it at most).
+  audit for ever), with no update in any step (ts2, a370fb3526,
+  2026-11-14; 768, 797 and 799 updates, two at most in a step, at
+  0e3df343f2). At every step what the audit is told for the wire is
+  between the rounding of the published flow and 1.5 times it, read back;
+  the flow left at the slider's port and the mass's mean velocity are
+  inside it (0.017, 0.020 and 0.020 of it at most; 0.49, 0.02 and 0.02 at
+  0e3df343f2).
 - Held under a slow push for as long as it lasts: 3 N rising to 3.3 N in
   20 s for 2000 steps, and 6 N + 2 N sin(2 pi 0.05 t) for 16000. On
   74529fda7f the first was refused after 1728 steps and the second after
   14939, each over the audit's allowance by less than a thousandth. The
-  flow and the mean velocity stay within 0.6 of what the audit is told
-  (0.50 at most: the half the solve takes the wire at).
+  flow and the mean velocity stay within 0.6 of what the audit is told:
+  the half the solve takes the wire at, and the rounding of forming the
+  residual. They reach 0.014 and 0.020 of it (ts2, a370fb3526; 0.50 at
+  0e3df343f2).
 - Held beside another mass (2 kg, joined to the held one, which is under
   the first of those pushes): at 0.2 m/s on a spring of 100 N/m, at
   0.2 m/s on a damper of 5 N s/m, at rest on the spring. 2000 steps each,
-  all taken, with the same per-step assertions (0.50 of what the audit is
-  told at most, in each). On 74529fda7f: refused at the second step, at
-  the first, and after 68.
+  all taken, with the same per-step assertions: 0.020, 0.024 and 0.017 of
+  what the audit is told at most, with 2000, 2001 and 0 updates (ts2,
+  a370fb3526; 0.50 in each at 0c0643548b). On 74529fda7f: refused at the
+  second step, at the first, and after 68.
 - A block riding a cart: the slider between two bodies that both answer.
   0.5 kg on 2 kg, the cart pushed with 5 N against a spring of 100 N/m to
   a wall. 6000 steps, all taken (on b47fe4f2a8: 248, then refused), stuck
