@@ -20,7 +20,7 @@ use fs_tribo::TriboError;
 use fs_tribo::sliding_patch::component::{HertzPatchInterface, HertzPatchLoad, HertzPatchState};
 use fs_tribo::sliding_patch::contact::{
     HertzWrenchConfig, HertzWrenchContact, HertzWrenchError, HertzWrenchInput, HertzWrenchMode,
-    HertzWrenchParameters, HertzWrenchPhase,
+    HertzWrenchParameters, HertzWrenchPhase, HertzWrenchStep,
 };
 use fs_tribo::sliding_patch::{HertzSlidingPatch, HertzSlidingPatchParameters, HertzSlidingWrench};
 
@@ -65,7 +65,6 @@ fn load() -> HertzPatchLoad {
         normal_n: NORMAL_N,
         radius_m: RADIUS_M,
         solve: solve(),
-        relative_skew_tolerance: 1e-6,
     }
 }
 
@@ -379,22 +378,20 @@ fn refusals_name_their_field_and_write_nothing() {
         refusal(&stops, [0.01, 0.0, 0.0], [0.01, 0.0, 0.0, 300.0], &unit),
         "hertz_patch_reversal"
     );
-    // An antisymmetric part beyond the tolerance; within it, the step is
-    // taken.
+    // A slide on a line with an antisymmetric part, a thousandth of the
+    // line's coefficient or of rounding size, is taken on the full line; a
+    // part the owner's repeat cannot settle is refused (the precessing line,
+    // below).
     let c = unit[0];
-    let mut skewed = unit;
-    skewed[1] = 1e-3 * c;
-    skewed[3] = -1e-3 * c;
-    assert_eq!(
-        refusal(&patch, [0.3, -0.4, 0.0], slide, &skewed),
-        "hertz_patch_line_skew"
-    );
-    skewed[1] = 1e-9 * c;
-    skewed[3] = -1e-9 * c;
     let state = patch.start([0.3, -0.4, 0.0]).unwrap();
-    let (_, receipt, _) = on_line(&patch, &state, slide, &skewed).unwrap();
-    assert!(receipt.dissipated_j > 0.0);
-    assert!(receipt.numerical_loss_j.abs() <= solve().energy_tolerance_j);
+    for size in [1e-3, 1e-12] {
+        let mut skewed = unit;
+        skewed[1] = size * c;
+        skewed[3] = -size * c;
+        let (_, receipt, _) = on_line(&patch, &state, slide, &skewed).unwrap();
+        assert!(receipt.dissipated_j > 0.0);
+        assert!(receipt.numerical_loss_j.abs() <= solve().energy_tolerance_j);
+    }
     // Inputs.
     assert_eq!(
         refusal(&patch, [0.3, -0.4, 0.0], [0.3, -0.4, 0.0, 0.0], &unit),
@@ -419,6 +416,168 @@ fn refusals_name_their_field_and_write_nothing() {
     );
 }
 
+/// The owner's step at the free motion `dt (released - K effort)` on the
+/// symmetric part of `line`, `K` its antisymmetric part: what the component
+/// hands the owner, written here from the line itself.
+fn owner_on(line: &[f64; 9], released: [f64; 3], effort: [f64; 3]) -> HertzWrenchStep {
+    let skew: [f64; 3] = from_fn(|i| {
+        (0..3)
+            .map(|j| 0.5 * (line[3 * i + j] - line[3 * j + i]) * effort[j])
+            .sum()
+    });
+    weakening(300.0)
+        .unwrap()
+        .advance_phase(
+            &HertzWrenchInput {
+                free_displacement_m: [
+                    DT_S * (released[0] - skew[0]),
+                    DT_S * (released[1] - skew[1]),
+                ],
+                free_spin_angle_rad: DT_S * (released[2] - skew[2]) / RADIUS_M,
+                scaled_compliance_m_per_n: from_fn(|i| {
+                    from_fn(|j| DT_S * 0.5 * (line[3 * i + j] + line[3 * j + i]))
+                }),
+            },
+            HertzWrenchPhase::Kinetic,
+            solve(),
+            || false,
+        )
+        .unwrap()
+}
+
+/// A line with a large antisymmetric slip block, as the gyroscopic coupling
+/// of a body spinning about the patch normal gives. A pure spin has no force,
+/// so the block does nothing to it: one owner step, the symmetric line's to
+/// the bit. A slide across it is taken on the full line: its motion is
+/// `dt (released - C effort)` with the whole `C`, its effort is the owner's
+/// fixed point there, and it costs more owner steps. A block so large that
+/// the owner's repeat does not contract is refused, and writes nothing.
+#[test]
+fn a_precessing_line_takes_a_spin_and_a_slide_on_the_full_line() {
+    let patch = HertzPatchInterface::new(weakening, load()).unwrap();
+    let symmetric = unit_line();
+    let c = symmetric[0];
+    let mut precessing = symmetric;
+    precessing[1] = 0.05 * c;
+    precessing[3] = -0.05 * c;
+    let spin = [0.0, 0.0, RADIUS_M * 20.0];
+    let state = patch.start(spin).unwrap();
+    let inputs = [spin[0], spin[1], spin[2], 300.0];
+    let (next, receipt, outputs) = on_line(&patch, &state, inputs, &precessing).unwrap();
+    let (plain_next, plain_receipt, plain_outputs) =
+        on_line(&patch, &state, inputs, &symmetric).unwrap();
+    assert_eq!(outputs[..2], [0.0; 2]);
+    assert!(outputs[2].abs() > 0.0 && receipt.dissipated_j > 0.0);
+    assert_eq!(outputs.map(f64::to_bits), plain_outputs.map(f64::to_bits));
+    assert_eq!(next, plain_next);
+    assert_eq!(receipt, plain_receipt);
+    assert_eq!(next.owner_steps(), 1);
+
+    // The slide is taken, after more than one owner step, and the block has
+    // turned its effort from the symmetric line's.
+    let released = [0.3, -0.4, 0.0];
+    let state = patch.start(released).unwrap();
+    let inputs = [released[0], released[1], released[2], 300.0];
+    let (next, receipt, outputs) = on_line(&patch, &state, inputs, &precessing).unwrap();
+    let (plain_next, _, plain_outputs) = on_line(&patch, &state, inputs, &symmetric).unwrap();
+    let effort = [outputs[0], outputs[1], outputs[2]];
+    println!(
+        "precessing slide: effort {effort:?} against the symmetric line's {:?}, owner steps {} against {}",
+        &plain_outputs[..3],
+        next.owner_steps(),
+        plain_next.owner_steps()
+    );
+    assert!(receipt.dissipated_j > 0.0 && receipt.residual <= receipt.tolerance);
+    assert_eq!(plain_next.owner_steps(), 1);
+    assert!(next.owner_steps() > 1);
+    assert_ne!(effort[..2], plain_outputs[..2]);
+    // Its motion over the step, the owner's (the step ends at twice it less
+    // the start), is the full line's at that effort, written from the whole
+    // `C` here.
+    for (i, (end, start)) in next.motion_m_s().into_iter().zip(released).enumerate() {
+        let owner_m = DT_S * 0.5 * (end + start);
+        let full_m = DT_S
+            * (start
+                - (0..3)
+                    .map(|j| precessing[3 * i + j] * effort[j])
+                    .sum::<f64>());
+        close(owner_m, full_m, solve().displacement_tolerance_m);
+    }
+    // One more owner step at that effort moves it by no more than the
+    // owner's own tolerances.
+    let again = owner_on(&precessing, released, effort);
+    close(-again.force_n[0], effort[0], solve().force_tolerance_n);
+    close(-again.force_n[1], effort[1], solve().force_tolerance_n);
+    close(
+        -again.spin_moment_nm,
+        RADIUS_M * effort[2],
+        solve().moment_tolerance_nm,
+    );
+
+    // A block twenty times the line's own coefficient: the owner's force
+    // turns across the free motion by more than the free motion, and the
+    // repeat's gain, the owner's force change per free motion across the
+    // slide times dt |K|, is above one. Refused; nothing written.
+    let mut spinning = symmetric;
+    spinning[1] = 20.0 * c;
+    spinning[3] = -20.0 * c;
+    let at = owner_on(&symmetric, released, [0.0; 3]);
+    let across = [0.8, 0.6, 0.0];
+    let nudge_m = 1e-9;
+    let nudged = owner_on(
+        &symmetric,
+        from_fn(|i| released[i] + across[i] * nudge_m / DT_S),
+        [0.0; 3],
+    );
+    let stiffness_n_m = (0..2)
+        .map(|i| (nudged.force_n[i] - at.force_n[i]) * across[i])
+        .sum::<f64>()
+        .abs()
+        / nudge_m;
+    let gain = stiffness_n_m * DT_S * 20.0 * c;
+    println!("non-contracting block: gain {gain} ({stiffness_n_m} N/m across the slide)");
+    assert!(gain > 1.0, "{gain}");
+    assert_eq!(
+        refusal(&patch, released, inputs, &spinning),
+        "hertz_patch_line_skew"
+    );
+}
+
+#[test]
+fn a_step_the_caller_cancels_is_refused_and_writes_nothing() {
+    let patch = HertzPatchInterface::new(weakening, load()).unwrap();
+    let state = patch.start([0.3, -0.4, 0.0]).unwrap();
+    let sentinel = patch.start([7.0; 3]).unwrap();
+    let (mut next, mut outputs) = (sentinel, [f64::NAN; 4]);
+    let gate = CancelGate::new_clock_free();
+    gate.request();
+    let pool = ArenaPool::new(ArenaConfig::default());
+    let result = pool.scope(|arena| {
+        let key = StreamKey {
+            seed: 1,
+            kernel_id: 2,
+            tile: 3,
+            iteration: 4,
+        };
+        let cx = Cx::new(&gate, arena, key, Budget::INFINITE, ExecMode::Deterministic);
+        patch.propose_on_line(
+            &state,
+            DT_S,
+            &[0.3, -0.4, 0.0, 300.0],
+            &unit_line(),
+            &mut next,
+            &mut outputs,
+            &cx,
+        )
+    });
+    assert_eq!(field(result), "hertz_patch_cancelled");
+    assert_eq!(next, sentinel, "a refusal writes no candidate");
+    assert!(
+        outputs.iter().all(|v| v.is_nan()),
+        "a refusal writes no output"
+    );
+}
+
 #[test]
 fn a_patch_is_admitted_with_a_load_and_budgets_the_owner_takes() {
     let with = |change: fn(&mut HertzPatchLoad)| {
@@ -428,14 +587,6 @@ fn a_patch_is_admitted_with_a_load_and_budgets_the_owner_takes() {
     };
     assert_eq!(with(|load| load.normal_n = -1.0), "normal_force");
     assert_eq!(with(|load| load.radius_m = 0.0), "contact_radius_m");
-    assert_eq!(
-        with(|load| load.relative_skew_tolerance = 1.0),
-        "relative_skew_tolerance"
-    );
-    assert_eq!(
-        with(|load| load.relative_skew_tolerance = f64::NAN),
-        "relative_skew_tolerance"
-    );
     assert_eq!(
         with(|load| load.solve.maximum_iterations = 0),
         "iteration_budget"

@@ -2,6 +2,8 @@
 
 #[path = "hertz/driven.rs"]
 mod driven;
+#[path = "hertz/graph.rs"]
+mod graph;
 #[path = "hertz/rate_dependent.rs"]
 mod rate_dependent;
 #[path = "hertz/trajectory.rs"]

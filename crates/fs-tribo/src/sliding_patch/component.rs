@@ -58,15 +58,28 @@
 //! The symmetric part. The owner's step is a convex projection and takes a
 //! symmetric response; it refuses an asymmetry above its
 //! `relative_matrix_tolerance`, at most `1e-8` of the largest entry. A kernel
-//! line from a neighbour without a declared tangent is differenced, and is
-//! known to about the square root of the rounding unit (`fs-system`,
-//! `system/line.rs`). The antisymmetric part does no work (`e . C e` is the
-//! symmetric part's). The owner is therefore handed `C_s`, and an
-//! antisymmetric part up to [`HertzPatchLoad::relative_skew_tolerance`] of
-//! the line's largest entry is taken as that rounding. The owner's motion is
-//! then `dt (released - C_s effort)`, which differs from the line's `dt mean`
-//! by `dt (C - C_s) effort`. A larger antisymmetric part is refused
-//! (`hertz_patch_line_skew`).
+//! line need not be symmetric. One differenced from a neighbour without a
+//! declared tangent carries rounding of about the square root of the rounding
+//! unit (`fs-system`, `system/line.rs`). A spinning body's line also carries
+//! its gyroscopic coupling: a torque across the spin axis precesses the body
+//! within the step, which is physics, not rounding. The antisymmetric part
+//! `K` does no work (`e . K e = 0`), but it moves: the line's motion over the
+//! step is `dt (released - C_s e - K e)`. The owner is handed `C_s` and never
+//! sees a non-symmetric response. The step is taken on the full line: the
+//! owner steps with the free motion `dt released`; where `dt K e` at its
+//! effort is not exactly zero, it steps again with `dt (released - K e)` at
+//! the effort `e` of its previous step, until its force and moment change by
+//! no more than its own `force_tolerance_n` and `moment_tolerance_nm`. The
+//! step then ends on the full line to the owner's tolerances. Not settled
+//! after the owner's `maximum_iterations` further steps, or a `dt K e` that
+//! is not finite, is refused (`hertz_patch_line_skew`) and writes nothing.
+//! A symmetric line takes the owner's one step, bit for bit, as does a line
+//! whose `K` the effort does not reach: a pure spin beside a spinning
+//! neighbour, whose gyroscopic coupling lies across the spin axis. A slide
+//! beside a strongly precessing neighbour costs more owner steps, each
+//! change about `dt |K| |dF/d free|` times the last; where that factor is
+//! not below one the steps do not settle and the step is refused.
+//! [`HertzPatchState::owner_steps`] counts them.
 //!
 //! Refused, besides what the source and the owner refuse:
 //!
@@ -86,8 +99,10 @@
 //! (`hertz_patch_effort_budget`, `hertz_patch_static_boundary`,
 //! `hertz_patch_unresolved`, `hertz_patch_cancelled`), and
 //! [`HertzWrenchContact::advance_phase`] at the same input gives their
-//! numbers. `cx` is not polled: the owner's work is bounded by its budgets,
-//! and `TriboError` has no cancellation value.
+//! numbers. The owner asks `cx` whether cancellation is requested
+//! ([`Cx::is_cancel_requested`]) before its solve; a step it cancels is
+//! refused as `hertz_patch_cancelled`, since `TriboError` has no
+//! cancellation value.
 //!
 //! Not covered:
 //!
@@ -125,18 +140,14 @@ pub struct HertzPatchLoad {
     pub radius_m: f64,
     /// The owner's numerical tolerances and effort budgets.
     pub solve: HertzWrenchConfig,
-    /// The largest antisymmetric part of the line, relative to its largest
-    /// entry, that is taken as the rounding of a differenced line and left
-    /// out of the owner's step; in `[0, 1)`. See the module's "The symmetric
-    /// part".
-    pub relative_skew_tolerance: f64,
 }
 
 /// State of a [`HertzPatchInterface`]: the relative motion the last step
-/// ended with.
+/// ended with, and how many owner steps it took.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HertzPatchState {
     motion_m_s: [f64; 3],
+    owner_steps: usize,
 }
 
 impl HertzPatchState {
@@ -145,6 +156,14 @@ impl HertzPatchState {
     #[must_use]
     pub const fn motion_m_s(&self) -> [f64; 3] {
         self.motion_m_s
+    }
+
+    /// How many steps of the owner the last step took: one on a symmetric
+    /// line, more where the line's antisymmetric part moves the step (the
+    /// module's "The symmetric part"); none before the first step.
+    #[must_use]
+    pub const fn owner_steps(&self) -> usize {
+        self.owner_steps
     }
 }
 
@@ -169,28 +188,19 @@ fn refused(field: &'static str) -> TriboError {
 }
 
 /// The owner's response over the step, `dt C_s`, from the line `C`: its
-/// symmetric part. An antisymmetric part beyond `relative` of the line's
-/// largest entry is refused. See the module's "The symmetric part".
-fn symmetric_part(
-    line: &[[f64; 3]; 3],
-    dt_s: f64,
-    relative: f64,
-) -> Result<[[f64; 3]; 3], TriboError> {
-    let largest = line
-        .as_flattened()
-        .iter()
-        .fold(0.0_f64, |seen, v| seen.max(v.abs()));
-    let skew = (0..3)
-        .flat_map(|i| (0..3).map(move |j| (i, j)))
-        .fold(0.0_f64, |seen, (i, j)| {
-            seen.max((0.5 * line[i][j] - 0.5 * line[j][i]).abs())
-        });
-    if skew > relative * largest {
-        return Err(refused("hertz_patch_line_skew"));
-    }
-    Ok(from_fn(|i| {
-        from_fn(|j| dt_s * (0.5 * line[i][j] + 0.5 * line[j][i]))
-    }))
+/// symmetric part. See the module's "The symmetric part".
+fn symmetric_part(line: &[[f64; 3]; 3], dt_s: f64) -> [[f64; 3]; 3] {
+    from_fn(|i| from_fn(|j| dt_s * (0.5 * line[i][j] + 0.5 * line[j][i])))
+}
+
+/// The motion the line's antisymmetric part `K` adds over the step at
+/// `effort`, `dt K effort` [m]. See the module's "The symmetric part".
+fn skew_motion_m(line: &[[f64; 3]; 3], dt_s: f64, effort: [f64; 3]) -> [f64; 3] {
+    from_fn(|i| {
+        dt_s * (0..3)
+            .map(|j| (0.5 * line[i][j] - 0.5 * line[j][i]) * effort[j])
+            .sum::<f64>()
+    })
 }
 
 /// The rounding of a step's energy balance: the port's work `dt effort .
@@ -273,15 +283,11 @@ where
     ///
     /// # Errors
     /// A normal load that is negative or not finite, a radius that is not
-    /// positive and finite, budgets the owner refuses, or a skew tolerance
-    /// outside `[0, 1)`.
+    /// positive and finite, or budgets the owner refuses.
     pub fn new(law_at: F, load: HertzPatchLoad) -> Result<Self, TriboError> {
         load.solve.validate().map_err(owner_refused)?;
         crate::nonnegative_finite(load.normal_n, "normal_force")?;
         crate::positive_finite(load.radius_m, "contact_radius_m")?;
-        if !(0.0..1.0).contains(&load.relative_skew_tolerance) {
-            return Err(refused("relative_skew_tolerance"));
-        }
         let name = |id: &str| StableId::new(id).map_err(|_| refused("port_identifier"));
         let ports = vec![
             PortSpec::power(
@@ -316,7 +322,76 @@ where
         if !motion_m_s.iter().all(|v| v.is_finite()) {
             return Err(refused("motion_m_s"));
         }
-        Ok(HertzPatchState { motion_m_s })
+        Ok(HertzPatchState {
+            motion_m_s,
+            owner_steps: 0,
+        })
+    }
+
+    /// The owner's step on the full line, its effort and how many owner steps
+    /// it took. The owner steps on `C_s` with the free motion `dt released`;
+    /// where `dt K e` at its effort is not zero, it steps again with
+    /// `dt (released - K e)` at the effort `e` of its previous step, until its
+    /// force and moment change by no more than its own `force_tolerance_n`
+    /// and `moment_tolerance_nm`. Refused when they have not settled after
+    /// the owner's `maximum_iterations` further steps. See the module's "The
+    /// symmetric part".
+    fn step_on_line(
+        &self,
+        law: &HertzWrenchContact,
+        released: [f64; 3],
+        line: &[[f64; 3]; 3],
+        dt_s: f64,
+        phase: HertzWrenchPhase,
+        cx: &Cx<'_>,
+    ) -> Result<(HertzWrenchStep, [f64; 3], usize), TriboError> {
+        let HertzPatchLoad {
+            radius_m, solve, ..
+        } = self.load;
+        let symmetric = symmetric_part(line, dt_s);
+        // The first step carries no effort: its free motion is the released
+        // flow's, as on a symmetric line.
+        let owner = |carried: Option<[f64; 3]>| {
+            let mut free = released.map(|flow| dt_s * flow);
+            if let Some(carried) = carried {
+                for (free, shift) in free.iter_mut().zip(skew_motion_m(line, dt_s, carried)) {
+                    *free -= shift;
+                }
+            }
+            let input = HertzWrenchInput {
+                free_displacement_m: [free[0], free[1]],
+                free_spin_angle_rad: free[2] / radius_m,
+                scaled_compliance_m_per_n: symmetric,
+            };
+            let step = law
+                .advance_phase(&input, phase, solve, || cx.is_cancel_requested())
+                .map_err(owner_refused)?;
+            let effort = [
+                -step.force_n[0],
+                -step.force_n[1],
+                -step.spin_moment_nm / radius_m,
+            ];
+            Ok::<_, TriboError>((step, effort))
+        };
+        let (mut step, mut effort) = owner(None)?;
+        let shift = skew_motion_m(line, dt_s, effort);
+        if shift.iter().all(|&m| m == 0.0) {
+            return Ok((step, effort, 1));
+        }
+        if !shift.iter().all(|m| m.is_finite()) {
+            return Err(refused("hertz_patch_line_skew"));
+        }
+        for repeat in 1..=solve.maximum_iterations {
+            let (next, next_effort) = owner(Some(effort))?;
+            let settled = (0..2)
+                .all(|i| (next.force_n[i] - step.force_n[i]).abs() <= solve.force_tolerance_n)
+                && (next.spin_moment_nm - step.spin_moment_nm).abs() <= solve.moment_tolerance_nm;
+            (step, effort) = (next, next_effort);
+            if settled {
+                return Ok((step, effort, 1 + repeat));
+            }
+        }
+        Err(refused("hertz_patch_line_skew"))
     }
 
     fn law_at_k(&self, interface_temperature_k: f64) -> Result<HertzWrenchContact, TriboError> {
@@ -382,7 +457,7 @@ where
         compliance: &[f64],
         new: &mut Self::State,
         outputs: &mut [f64],
-        _cx: &Cx<'_>,
+        cx: &Cx<'_>,
     ) -> Result<Proposal, TriboError> {
         let &[flow_x, flow_y, flow_spin, kelvin] = inputs else {
             return Err(refused("hertz_patch_inputs"));
@@ -405,29 +480,14 @@ where
         let HertzPatchLoad {
             radius_m, solve, ..
         } = self.load;
-        let input = HertzWrenchInput {
-            free_displacement_m: [dt_s * flow_x, dt_s * flow_y],
-            free_spin_angle_rad: dt_s * flow_spin / radius_m,
-            scaled_compliance_m_per_n: symmetric_part(
-                &line,
-                dt_s,
-                self.load.relative_skew_tolerance,
-            )?,
-        };
         // The module's `accepted_phase`: an actual nonzero rate is moving.
         let phase = if old.motion_m_s.iter().any(|&v| v != 0.0) {
             HertzWrenchPhase::Kinetic
         } else {
             HertzWrenchPhase::StaticAdmissible
         };
-        let step = law
-            .advance_phase(&input, phase, solve, || false)
-            .map_err(owner_refused)?;
-        let effort = [
-            -step.force_n[0],
-            -step.force_n[1],
-            -step.spin_moment_nm / radius_m,
-        ];
+        let (step, effort, owner_steps) =
+            self.step_on_line(&law, released, &line, dt_s, phase, cx)?;
         let start = old.motion_m_s;
         let (mean, end) = line_motion(released, &line, effort, &step, start, dt_s, radius_m)?;
         // The wrench acting on side a, and its power along the slip and the
@@ -449,7 +509,10 @@ where
         if !(work_j.is_finite() && loss_j.abs() <= tolerance_j) {
             return Err(refused("hertz_patch_work_balance"));
         }
-        *new = HertzPatchState { motion_m_s: end };
+        *new = HertzPatchState {
+            motion_m_s: end,
+            owner_steps,
+        };
         *effort_x = effort[0];
         *effort_y = effort[1];
         *effort_spin = effort[2];

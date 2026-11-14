@@ -3456,3 +3456,64 @@ the heat, falling as dt^2, all of it against the force), the heat is the
 work of the others, and a period is the closed form's to 3.6 dt^2 (-3.56
 dt^2 at 0.0937 m/s and -2.43 dt^2 at 0.137 m/s, at every step from 2e-3
 to 2.5e-4 s).
+
+## A Hertz patch between two bodies on the composition contract
+
+`fs_tribo::sliding_patch::component::HertzPatchInterface` (feature
+`component`) puts one circular patch of `HertzWrenchContact`, its joint
+slip and spin friction, behind the non-smooth tier of the composition
+contract (`LoadLine`; `add_on_line` in `fs-system`). The owner is asked with
+`advance_phase`, as fs-mbd's `PreparedRigidHertzPair` asks it, once a step on
+a line with no antisymmetric effect (more on one with, below), and is never
+changed.
+
+- Port `wrench` (power, width 3, receives flow) carries the relative motion
+  in the owner's radius-scaled coordinates, `[v_x, v_y, a w]` [m/s], and
+  returns `-[F_x, F_y, M / a]` [N], minus the wrench on side a. Which body
+  ports these come from is the system's map (for two rigid bodies, a
+  `power_map_members` lever). Port `heat` receives the interface
+  temperature [K] and returns minus the owner's dissipation rate [W].
+- `law_at(T)` gives the law at the interface temperature; the normal load
+  and the radius are the component's (`HertzPatchLoad`), and a law with
+  another load or radius, to the bit, is refused
+  (`hertz_patch_law_geometry`). No normal contact law is stepped.
+- A step hands the owner `dt released` and `dt C_s`, with `C_s` the
+  symmetric part of the line; the owner refuses an asymmetry above `1e-8`
+  of its largest entry. A kernel line need not be symmetric: a differenced
+  one carries rounding of about `sqrt(eps)`, and a spinning body's carries
+  its gyroscopic coupling, which is physics. The owner never sees a
+  non-symmetric response: it steps on `C_s` only. The antisymmetric part
+  `K` does no work but moves the line's motion by `dt K e`, so the step is
+  taken on the full line: where `dt K e` is not exactly zero, the owner
+  steps again with the free motion `dt (released - K e)` at its previous
+  effort, until its force and moment change by no more than its own
+  `force_tolerance_n` and `moment_tolerance_nm`; not settled within its
+  `maximum_iterations` further steps, the step is refused
+  (`hertz_patch_line_skew`). A symmetric line, and a pure spin beside a
+  spinning neighbour, take one owner step as before; a slide beside a
+  strongly precessing neighbour costs more (`HertzPatchState::owner_steps`).
+  The phase is `Kinetic` when the step starts moving and
+  `StaticAdmissible` at rest. The motion the step ends with is twice the
+  owner's mean less the start.
+- Heat is the owner's `dissipated_energy_j`. The port's work less the heat
+  is numerical loss, refused above the owner's energy tolerance plus the
+  work's rounding (`hertz_patch_work_balance`). Entropy: the heat over the
+  interface temperature. Stored energy: none.
+- Refused: a slip or spin that reverses inside the step
+  (`hertz_patch_reversal`; arrest is refused, not located), non-finite
+  inputs, a temperature that is not positive, and the owner's refusals by
+  field. The owner asks `cx` whether cancellation is requested before its
+  solve; a cancelled step is refused as `hertz_patch_cancelled`.
+
+Evidence: `crates/fs-tribo/tests/hertz_patch_interface.rs` (9 tests):
+prescribed motion equal to the native patch, a line step bitwise the
+owner's, the static set holding a pair at rest, a frictionless patch, the
+law asked at the interface temperature, the refusals, a precessing line
+(a pure spin in one owner step, bitwise as on the symmetric line; a slide
+whose motion is the full line's to the owner's displacement tolerance and
+whose effort is the owner's fixed point to its force tolerance; a block
+whose repeat does not contract, refused), a cancelled step, and admission.
+`crates/fs-couple/tests/articulated_friction_heat/hertz/graph.rs` declares
+fs-couple's `friction_heat::hertz` base cases from this component, two
+`RigidBody` components, the lever, a `HeatNode` face and a
+`ThermalTimeline`, and holds them to the module's step.
