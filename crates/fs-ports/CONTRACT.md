@@ -271,11 +271,33 @@ fails the energy balance, a mandatory tier that differs from the line tier at
 a zero matrix fails that law, a line on a heat port and a matrix of the wrong
 size are refused. The kit cannot check that the efforts satisfy the
 component's own relation; only the component can state it.
+`check_time_reversal` checks, at one point, a component that a test claims
+is reversible. The test supplies three things: the reversal `R`, a view of
+the state (`observe`) and the bounds. The laws are:
+- `R` is an involution;
+- every port is a power or heat port without a field metric;
+- the step from `x0` passes `check_component` and dissipates nothing, and so
+  does the step from `R(x1)` with the odd inputs negated;
+- the backward outputs are the forward ones times their parity;
+- `R(x2)` returns to `x0` as `observe` sees it, and in stored energy.
+
+Parity comes from the port roles, not from the test: effort and temperature
+are even, flow and heat rate odd. The bounds are derived in the test from the
+rounding of the component's own arithmetic; the kit holds no tolerance of its
+own for this check. G0 tests in `tests/component_reference.rs`:
+- the reference without its damper reverses;
+- with its damper it is refused at the step that dissipates;
+- a reversal that keeps the velocity fails the outputs law;
+- a reversal that is not an involution is refused first.
 
 **No claim.** v0 has no entropy on stream ports and no multistage port
 values. The kernel cannot check that a component's `identity_words` name every parameter of its physics; only the component knows them. The kit
-does not yet check `StageResidual`, unit rescaling, time reversal or temporal
-order. The kit proposes twice with equal arguments, so it sees a change made
+does not yet check `StageResidual`, unit rescaling or temporal order.
+`check_time_reversal` sees a state only through the outputs, the stored
+energy and what the test's `observe` returns, so what none of them shows is
+not checked. Whether `R` is the physical reversal, and whether `observe` and
+the bounds are complete, stays the test's claim. No `Component` declares
+itself reversible. The kit proposes twice with equal arguments, so it sees a change made
 through interior mutability only where that change alters what a call
 returns; it cannot prove that a cache is keyed by the accepted state, which
 stays the component's claim. A passing conformance check says a component

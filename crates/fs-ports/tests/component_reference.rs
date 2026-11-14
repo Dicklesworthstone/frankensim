@@ -7,7 +7,10 @@
 //! leaves through the heat port. Four deliberately broken variants each fail
 //! the law they break. A fifth keeps a cache in a `Cell`, keyed by the bits of
 //! what it is proposed from, that `propose` never shows; it passes, as a cache
-//! may.
+//! may. Without its damper the reference is reversible in time: it passes
+//! `check_time_reversal` within bounds derived from its own arithmetic, and
+//! is refused with its damper, with a reversal that keeps the velocity, and
+//! with one that is not an involution.
 
 use core::cell::Cell;
 use core::num::NonZeroUsize;
@@ -15,7 +18,8 @@ use core::num::NonZeroUsize;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cancelled, Cx, ExecMode, StreamKey};
 use fs_ports::component::conformance::{
-    Case, Failure, Observed, check_component, check_port_tangent,
+    Case, Failure, Observed, ReversalAllowance, check_component, check_port_tangent,
+    check_time_reversal,
 };
 use fs_ports::component::{
     Carrier, Class, Component, ContractViolation, PortLayout, PortRole, PortSpec, PortTangent,
@@ -505,4 +509,145 @@ fn a_stream_port_books_the_enthalpy_and_mass_that_cross_it_on_either_side() {
     same(heat.mass_in_kg(dt, &[5.0], &[300.0]), 0.0);
     assert!(storage.energy_in_j(dt, &crossing[..3], &contents).is_nan());
     assert!(transport.mass_in_kg(dt, &contents, &crossing[..3]).is_nan());
+}
+
+/// Unit roundoff of f64.
+const U: f64 = f64::EPSILON / 2.0;
+
+/// `n u / (1 - n u)`: a product of `n` factors `(1 + d)`, `|d| <= u`, lies
+/// within it of 1.
+fn gamma(n: u32) -> f64 {
+    let nu = f64::from(n) * U;
+    nu / (1.0 - nu)
+}
+
+/// The reference without its damper: lossless, and reversible in time.
+fn undamped() -> SpringMassDamper {
+    let mut component = SpringMassDamper::new(Fault::None);
+    component.damping_n_s_m = 0.0;
+    component
+}
+
+/// Time reversal of the oscillator: the position is even, the velocity odd.
+fn reversed(state: &Oscillator) -> Oscillator {
+    Oscillator {
+        position_m: state.position_m,
+        velocity_m_s: -state.velocity_m_s,
+    }
+}
+
+fn observed(state: &Oscillator) -> Vec<f64> {
+    vec![state.position_m, state.velocity_m_s]
+}
+
+/// Bounds for the undamped reference's round trip at `case()`, derived from
+/// the rounding of `mean_velocity` and `propose`, where every operation is
+/// exact times `(1 + d)`, `|d| <= u`. The step is `h = 0.5 dt / m`,
+/// `D = 1 + 0.5 dt h k` (computed within `gamma(3) D` of that), and the mean
+/// is `fl(N / D)` with `N = fl(v + fl(h fl(F - fl(k x))))`, which is within
+/// `gamma(4) (|v| + h |F| + h k |x|)` of its exact value.
+/// - Output: in exact arithmetic, the step from `(x1, -v1)` returns minus the
+///   forward mean, for any `h`. The rounded `x1` and `v1` are within
+///   `gamma(1)` of `x0 + dt mean` and `2 mean - v0`, relative to `dt |mean| +
+///   |x1|` and to `|v1|`. With the two numerators' and the two divisions'
+///   rounding, the backward mean `b` is within
+///   `gamma(8) (|mean| + |b| + (both numerators' sizes + h k dt |mean|) / D)`
+///   of minus the forward one.
+/// - The velocity of `R(x2)`, `-fl(2 b + v1)`, is within twice that of `v0`,
+///   plus `gamma(1) (|v1| + |v2|)`.
+/// - The position `fl(x1 + fl(dt b))` is within `dt` times it of `x0`, plus
+///   `gamma(1) (dt |mean| + |x|)` for each of the two position updates.
+/// - The heat output is `-((0 mean) mean)` both ways: zero, exactly.
+/// - The energy `((m / 2) v) v + ((k / 2) x) x` moves by each coordinate's
+///   gap times the sum of its two end values, plus `gamma(4)` of both ends'
+///   terms.
+fn reference_allowance(
+    component: &SpringMassDamper,
+) -> impl Fn(&Oscillator, &Oscillator, &Oscillator) -> ReversalAllowance + '_ {
+    move |start, forward_end, back_end| {
+        let (dt_s, force_n) = (1.0e-3, INPUTS[0]);
+        let (mass, stiffness) = (component.mass_kg, component.stiffness_n_m);
+        let half = 0.5 * dt_s / mass;
+        let denominator = 1.0 + 0.5 * dt_s * half * stiffness;
+        let mean = component.mean_velocity(start, dt_s, force_n).0.abs();
+        let mean_back = component
+            .mean_velocity(&reversed(forward_end), dt_s, force_n)
+            .0
+            .abs();
+        let [x0, x1, x2] = [start, forward_end, back_end].map(|s| s.position_m.abs());
+        let [v0, v1, v2] = [start, forward_end, back_end].map(|s| s.velocity_m_s.abs());
+        let sizes =
+            v0 + v1 + 2.0 * half * force_n.abs() + half * stiffness * (x0 + x1 + dt_s * mean);
+        let output = gamma(8) * (mean + mean_back + sizes / denominator);
+        let velocity = 2.0 * output + gamma(1) * (v1 + v2);
+        let position = dt_s * output + gamma(1) * (dt_s * (mean + mean_back) + x1 + x2);
+        let terms = 0.5 * mass * (v0 * v0 + v2 * v2) + 0.5 * stiffness * (x0 * x0 + x2 * x2);
+        ReversalAllowance {
+            outputs: vec![output, 0.0],
+            observed: vec![position, velocity],
+            energy_j: 0.5 * mass * velocity * (v0 + v2)
+                + 0.5 * stiffness * position * (x0 + x2)
+                + gamma(4) * terms,
+        }
+    }
+}
+
+#[test]
+fn the_undamped_reference_reverses_in_time() {
+    let gate = CancelGate::new_clock_free();
+    let component = undamped();
+    let allowance = reference_allowance(&component);
+    let reversal = with_cx(&gate, |cx| {
+        check_time_reversal(&component, &case(), &reversed, &observed, &allowance, cx)
+    })
+    .expect("the undamped reference reverses");
+    eprintln!("{reversal:?}");
+    // The heat port returns zero heat both ways.
+    assert_eq!(reversal.output_gaps[1].to_bits(), 0);
+}
+
+/// The law `check_time_reversal` refuses `component` at under `reverse`.
+fn refused_at(
+    component: &SpringMassDamper,
+    reverse: &dyn Fn(&Oscillator) -> Oscillator,
+) -> &'static str {
+    let gate = CancelGate::new_clock_free();
+    let allowance = reference_allowance(component);
+    let failure = with_cx(&gate, |cx| {
+        check_time_reversal(component, &case(), reverse, &observed, &allowance, cx)
+    })
+    .expect_err("refused");
+    let Failure::Law { law, detail } = failure else {
+        panic!("expected a law failure, got {failure}");
+    };
+    eprintln!("refused: {law} ({detail})");
+    law
+}
+
+#[test]
+fn the_damped_reference_is_refused_reversal_because_it_dissipates() {
+    let law = refused_at(&SpringMassDamper::new(Fault::None), &reversed);
+    assert_eq!(
+        law,
+        "a reversible step dissipates nothing and generates no entropy"
+    );
+}
+
+#[test]
+fn a_reversal_that_keeps_the_velocity_fails_the_outputs_law() {
+    let law = refused_at(&undamped(), &|state: &Oscillator| *state);
+    assert_eq!(
+        law,
+        "the backward outputs are the forward outputs times their parity"
+    );
+}
+
+#[test]
+fn a_reversal_that_is_not_an_involution_is_refused() {
+    let doubled = |state: &Oscillator| Oscillator {
+        position_m: state.position_m,
+        velocity_m_s: -2.0 * state.velocity_m_s,
+    };
+    let law = refused_at(&undamped(), &doubled);
+    assert_eq!(law, "time reversal is an involution: R(R(x)) == x");
 }

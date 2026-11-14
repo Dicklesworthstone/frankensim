@@ -10,11 +10,14 @@
 //! [`PortTangent`] the JVP against
 //! central differences and the VJP against the JVP by the dot-product test.
 //! For [`LoadLine`]: the line's ports, purity, the audit at the flows on the
-//! line, and that a zero compliance gives `propose`.
+//! line, and that a zero compliance gives `propose`. For a component a test
+//! claims reversible, [`check_time_reversal`]: a step there and back, each
+//! audited and dissipating nothing, whose outputs flip with their parity and
+//! whose end returns to the start within bounds the test derives.
 //!
 //! Not covered yet (bead `frankensim-rc-1109-root-3gc12.5.11`):
-//! [`StageResidual`](super::StageResidual) checks, unit rescaling, time
-//! reversal of lossless components, and the temporal order hook.
+//! [`StageResidual`](super::StageResidual) checks, unit rescaling, and the
+//! temporal order hook.
 
 use core::fmt;
 
@@ -634,4 +637,259 @@ where
         }
     }
     Ok(())
+}
+
+/// Absolute bounds for [`check_time_reversal`], one per compared number.
+///
+/// The test derives them from the rounding of the component's own
+/// arithmetic, evaluated at the states of the round trip; the kit holds no
+/// tolerance of its own.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReversalAllowance {
+    /// One bound per output, in port-layout order.
+    pub outputs: Vec<f64>,
+    /// One bound per number the test's `observe` returns.
+    pub observed: Vec<f64>,
+    /// Bound on the stored energy's change over the round trip [J].
+    pub energy_j: f64,
+}
+
+/// The test's bounds for [`check_time_reversal`]: from the start `x0`, the
+/// end `x1` of the forward step and the end `x2` of the backward step, in
+/// that order, the [`ReversalAllowance`] of that round trip. The lifetime
+/// lets the closure borrow, as a `&dyn Fn` written in place would.
+pub type ReversalBounds<'a, S> = dyn Fn(&S, &S, &S) -> ReversalAllowance + 'a;
+
+/// What a passing [`check_time_reversal`] measured, beside what it allowed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reversal {
+    /// Per output: the backward output less the forward one times the
+    /// output's parity, in magnitude.
+    pub output_gaps: Vec<f64>,
+    /// Per observed number: `R` of the backward end against the start.
+    pub observed_gaps: Vec<f64>,
+    /// Stored energy of `R` of the backward end against the start's [J].
+    pub energy_gap_j: f64,
+    /// The bounds the gaps were held to.
+    pub allowance: ReversalAllowance,
+}
+
+/// Parity under time reversal of every input and output coefficient: `1.0`
+/// for an even one, `-1.0` for an odd one. Effort and temperature are even,
+/// flow and heat rate odd; a port that is neither power nor heat, or that
+/// pairs a field through a metric, has no parity here.
+fn parities<E>(
+    ports: &[PortSpec],
+    layout: &PortLayout,
+) -> Result<(Vec<f64>, Vec<f64>), Failure<E>> {
+    let mut inputs = vec![1.0; layout.input_len()];
+    let mut outputs = vec![1.0; layout.output_len()];
+    for (index, port) in ports.iter().enumerate() {
+        let carried = matches!(port.carrier(), Carrier::Power(_) | Carrier::Heat)
+            && port.field_metric().is_none();
+        let (input, output) = match port.role() {
+            PortRole::EffortIn if carried => (1.0, -1.0),
+            PortRole::FlowIn if carried => (-1.0, 1.0),
+            role => {
+                let metric = port
+                    .field_metric()
+                    .map_or("", |_| " through a field metric");
+                return Err(law(
+                    "time reversal is checked on power and heat ports only",
+                    format!(
+                        "port `{}` carries {:?} as {role:?}{metric}",
+                        port.id().as_str(),
+                        port.carrier(),
+                    ),
+                ));
+            }
+        };
+        inputs[layout.input_range(index)].fill(input);
+        outputs[layout.output_range(index)].fill(output);
+    }
+    Ok((inputs, outputs))
+}
+
+/// Where a leg of the round trip ends, and the outputs of its step.
+type LegEnd<S> = (S, Vec<f64>);
+
+/// One leg of the round trip: the mandatory tier's check at `case`, a step
+/// taken that dissipates nothing, and the candidate and outputs of that step.
+fn reversible_leg<C>(
+    component: &C,
+    case: &Case<'_, C::State>,
+    leg: &str,
+    cx: &Cx<'_>,
+) -> Result<LegEnd<C::State>, Failure<C::Error>>
+where
+    C: Component,
+    C::State: PartialEq + fmt::Debug,
+{
+    let receipt = match check_component(component, case, cx)? {
+        Observed::Stepped { receipt, .. } => receipt,
+        Observed::Shortened { dt_s } => {
+            return Err(law(
+                "time reversal is checked where the component takes the step",
+                format!("the {leg} step asked to shorten to {dt_s} s"),
+            ));
+        }
+    };
+    if receipt.dissipated_j != 0.0 || receipt.entropy_generated_j_per_k != 0.0 {
+        return Err(law(
+            "a reversible step dissipates nothing and generates no entropy",
+            format!(
+                "the {leg} step dissipated {} J and generated {} J/K",
+                receipt.dissipated_j, receipt.entropy_generated_j_per_k
+            ),
+        ));
+    }
+    // check_component has shown that propose is pure, so this third call
+    // returns what it audited.
+    let layout = PortLayout::new(component.ports()).map_err(Failure::Contract)?;
+    let plain = |state: &mut C::State, outputs: &mut [f64]| {
+        component.propose(case.state, case.dt_s, case.inputs, state, outputs, cx)
+    };
+    let (_, candidate, outputs) = stepped(case.state, layout.output_len(), 0.0, &plain)?;
+    Ok((candidate, outputs))
+}
+
+/// Each gap against its bound, the counts first.
+fn within<E>(
+    law_text: &'static str,
+    what: &str,
+    gaps: &[f64],
+    bounds: &[f64],
+) -> Result<(), Failure<E>> {
+    if gaps.len() != bounds.len() {
+        return Err(law(
+            "the allowance gives one bound per compared number",
+            format!("{} {what} numbers, {} bounds", gaps.len(), bounds.len()),
+        ));
+    }
+    for (index, (gap, bound)) in gaps.iter().zip(bounds).enumerate() {
+        if !(gap <= bound) {
+            return Err(law(
+                law_text,
+                format!("{what} {index}: gap {gap:e}, allowed {bound:e}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Check time reversal at one operating point, for a component the test
+/// claims reversible.
+///
+/// `reverse` is the test's `R`: the state with its odd parts (velocities,
+/// momenta, fluxes) negated and its even parts kept. From the start `x0` the
+/// component steps to `x1` at the case's inputs `u`; from `R(x1)` it steps to
+/// `x2` at `P u`, the inputs with their odd coefficients negated. The parity
+/// `P` comes from the port roles, not from the test: effort and temperature
+/// are even, flow and heat rate odd, and a component with another kind of
+/// port is refused. The laws, in order:
+/// 1. `R` is an involution: `R(R(x0)) == x0`.
+/// 2. Every port is a power or a heat port without a field metric.
+/// 3. The forward step passes [`check_component`], is taken, and its receipt
+///    dissipates nothing and generates no entropy, exactly.
+/// 4. So does the backward step.
+/// 5. Each backward output is the forward one times its parity, within its
+///    bound.
+/// 6. `R(x2)` returns to `x0` as `observe` sees a state, within a bound per
+///    number, and holds `x0`'s stored energy, within `energy_j`.
+///
+/// `allowance` receives `x0`, `x1` and `x2` and returns absolute bounds the
+/// test derives from the rounding of the component's arithmetic.
+///
+/// # Errors
+/// The first [`Failure`] found.
+pub fn check_time_reversal<C>(
+    component: &C,
+    case: &Case<'_, C::State>,
+    reverse: &dyn Fn(&C::State) -> C::State,
+    observe: &dyn Fn(&C::State) -> Vec<f64>,
+    allowance: &ReversalBounds<'_, C::State>,
+    cx: &Cx<'_>,
+) -> Result<Reversal, Failure<C::Error>>
+where
+    C: Component,
+    C::State: PartialEq + fmt::Debug,
+{
+    let start = case.state;
+    let twice = reverse(&reverse(start));
+    if twice != *start {
+        return Err(law(
+            "time reversal is an involution: R(R(x)) == x",
+            format!("x {start:?}, R(R(x)) {twice:?}"),
+        ));
+    }
+    let ports = component.ports();
+    let layout = PortLayout::new(ports).map_err(Failure::Contract)?;
+    let (input_parity, output_parity) = parities(ports, &layout)?;
+
+    let (forward_end, forward_outputs) = reversible_leg(component, case, "forward", cx)?;
+    let back_start = reverse(&forward_end);
+    let back_inputs: Vec<f64> = case
+        .inputs
+        .iter()
+        .zip(&input_parity)
+        .map(|(input, parity)| parity * input)
+        .collect();
+    let back_case = Case {
+        state: &back_start,
+        stale: case.stale,
+        dt_s: case.dt_s,
+        inputs: &back_inputs,
+    };
+    let (back_end, back_outputs) = reversible_leg(component, &back_case, "backward", cx)?;
+    let bounds = allowance(start, &forward_end, &back_end);
+
+    let output_gaps: Vec<f64> = back_outputs
+        .iter()
+        .zip(&forward_outputs)
+        .zip(&output_parity)
+        .map(|((back, forward), parity)| (back - parity * forward).abs())
+        .collect();
+    within(
+        "the backward outputs are the forward outputs times their parity",
+        "output",
+        &output_gaps,
+        &bounds.outputs,
+    )?;
+
+    let returned = reverse(&back_end);
+    let (seen, expected) = (observe(&returned), observe(start));
+    if seen.len() != expected.len() {
+        return Err(law(
+            "observe gives as many numbers for every state",
+            format!("{} for R(x2), {} for x0", seen.len(), expected.len()),
+        ));
+    }
+    let observed_gaps: Vec<f64> = seen
+        .iter()
+        .zip(&expected)
+        .map(|(seen, expected)| (seen - expected).abs())
+        .collect();
+    within(
+        "R of the backward end returns to the start",
+        "observed",
+        &observed_gaps,
+        &bounds.observed,
+    )?;
+    let returned_j = component
+        .stored_energy_j(&returned)
+        .map_err(Failure::Owner)?;
+    let start_j = component.stored_energy_j(start).map_err(Failure::Owner)?;
+    let energy_gap_j = (returned_j - start_j).abs();
+    if !(energy_gap_j <= bounds.energy_j) {
+        return Err(law(
+            "R of the backward end holds the start's stored energy",
+            format!("gap {energy_gap_j:e} J, allowed {:e} J", bounds.energy_j),
+        ));
+    }
+    Ok(Reversal {
+        output_gaps,
+        observed_gaps,
+        energy_gap_j,
+        allowance: bounds,
+    })
 }
