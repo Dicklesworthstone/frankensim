@@ -423,8 +423,10 @@ impl TemperatureContacts<'_, '_> {
     /// cancellation abort. A rejected final line search retains its original
     /// source-domain refusal when one occurred.
     ///
-    /// Publication requires the original numerical convergence report AND the
-    /// unchanged absolute physical residual and heat-closure gates. The cached
+    /// Publication requires the original numerical convergence report, or a
+    /// final line search rejected with its smallest trial equal to the field
+    /// bit for bit (the field's resolution along the Newton direction), AND
+    /// the unchanged absolute physical residual and heat-closure gates. The cached
     /// physical evaluation must match the accepted field bit for bit; it is
     /// not a second PDE solve. Every refusal returns no field and mutates no
     /// caller input. Continuous source curves use the original primal tangent
@@ -490,10 +492,22 @@ impl TemperatureContacts<'_, '_> {
             {
                 return Err(error);
             }
-            return Err(invalid("<steady-contact-newton>", format!(
-                "coupled Newton refused after {} iterations: {:?}; physical residual {} W, target {} W",
-                report.iterations, report.diagnosis, report.residual_norm, config.residual_tolerance_w,
-            )));
+            // The line search evaluates its smallest trial last. When that
+            // trial is the accepted field to the bit, the Newton step no longer
+            // moves any free temperature: the field is at its floating-point
+            // resolution along the Newton direction, where a numerical target
+            // below the residual's rounding floor cannot be met. That field
+            // goes to the unchanged physical gates below; the published report
+            // keeps `converged == false` and its diagnosis.
+            let at_resolution = matches!(report.diagnosis, Some(NewtonStallDiagnosis::LineSearchRejected))
+                && adapter.physical.borrow().as_ref()
+                    .is_some_and(|physical| same_field(&physical.free_temperature, &state.x));
+            if !at_resolution {
+                return Err(invalid("<steady-contact-newton>", format!(
+                    "coupled Newton refused after {} iterations: {:?}; physical residual {} W, target {} W",
+                    report.iterations, report.diagnosis, report.residual_norm, config.residual_tolerance_w,
+                )));
+            }
         }
         poll(cx, report.iterations)?;
         let physical = adapter.physical.borrow_mut().take()

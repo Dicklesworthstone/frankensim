@@ -1043,6 +1043,12 @@ matches the accepted Newton state bit for bit, then checks the free-node watt
 residual and independent reservoir heat closure. The result retains actual
 contact receipts, Dirichlet/Robin heat and the unmodified Newton report. It
 performs no hidden final PDE solve and creates no frozen-solver report.
+A run that stops because its final line search is rejected reaches those
+gates only when the smallest trial, which the line search evaluates last,
+equals the accepted field bit for bit: the Newton step then moves no free
+temperature, and a numerical target below the residual's rounding floor
+cannot be met at that field. Its report keeps `converged == false` and
+`LineSearchRejected`. Every other stall refuses.
 
 The stiff slab regressions have the independent admitted root of 100 W and
 check the actual first Newton direction, source-domain damping, local residuals

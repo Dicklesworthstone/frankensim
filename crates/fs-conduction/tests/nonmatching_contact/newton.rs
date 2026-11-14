@@ -323,6 +323,57 @@ fn g1_coupled_newton_resolves_stiff_contact_feedback_on_both_trace_meshes() {
 }
 
 #[test]
+fn g1_newton_stalled_at_field_resolution_is_judged_by_the_physical_gates() {
+    // A numerical target far below the residual's rounding floor cannot be
+    // met. Newton reaches the floor, and its last line search is rejected with
+    // a smallest trial that moves no free temperature. That field passes the
+    // unchanged physical gates and is published with its stall diagnosis.
+    // With the physical gates at the same unreachable target, the same field
+    // is refused by those gates.
+    let floor = || {
+        let mut result = config();
+        result.newton.absolute_tolerance = 1e-30;
+        result.max_iterations = 64;
+        result.max_residual_evaluations = 4096;
+        result
+    };
+    with_cx(|cx| {
+        for matching in [true, false] {
+            let (mesh, split) = mesh(if matching { [1, 1, 1] } else { [1, 2, 3] }, 0.0);
+            let bc = boundary(&mesh);
+            let card = steep_card();
+            let set = contacts(cx, &mesh, &bc, &card, split, matching);
+            let material = ConductivityModel::isotropic_declared(10.0).unwrap();
+            let source = ScalarField::Uniform(0.0);
+            let problem = ConductionProblem {
+                mesh: &mesh, boundary: &bc, material: &material,
+                element_materials: None, source: &source,
+            };
+            let initial = field(&mesh, split, 110.0);
+
+            let stalled = set.solve_steady_newton(cx, problem, &initial, floor()).unwrap();
+            assert!(!stalled.newton.converged);
+            assert_eq!(
+                stalled.newton.diagnosis,
+                Some(fs_solver::NewtonStallDiagnosis::LineSearchRejected),
+            );
+            assert!(stalled.residual_norm_w <= floor().residual_tolerance_w);
+            assert!(stalled.energy.closure_w.abs() <= floor().energy_tolerance_w);
+            let converged = set.solve_steady_newton(cx, problem, &initial, config()).unwrap();
+            for (&a, &b) in stalled.temperature.iter().zip(&converged.temperature) {
+                near(a, b, 1e-9);
+            }
+
+            let mut unreachable = floor();
+            unreachable.residual_tolerance_w = 1e-30;
+            unreachable.energy_tolerance_w = 1e-30;
+            let refused = set.solve_steady_newton(cx, problem, &initial, unreachable).unwrap_err();
+            assert!(format!("{refused:?}").contains("fails physical gates"), "{refused:?}");
+        }
+    });
+}
+
+#[test]
 fn g1_newton_backtracks_source_domain_trials_without_losing_the_pinned_law() {
     with_cx(|cx| {
         for matching in [true, false] {
