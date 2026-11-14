@@ -370,6 +370,70 @@ fn every_element_conforms_across_a_sweep_of_states_and_inputs() {
 }
 
 #[test]
+fn a_mass_and_a_damper_at_subnormal_energies_are_admitted() {
+    // At speeds of 1e-175 to 1e-155 m/s the energies of a step lie below the
+    // normal range of f64, which rounds there by an absolute step of
+    // 5e-324 J. The receipts claim only the roundoff relative to their
+    // energies, and the audit's f64 underflow allowance admits the rest.
+    let mut n = Numbers(20_261_114);
+    let mass = Mass::new(0.75).unwrap();
+    let damper = Damper::new(2.5).unwrap();
+    let stale = Motion {
+        position_m: 9.0,
+        velocity_m_s: -9.0,
+    };
+    let (mut admitted, mut refused) = ([0_usize; 2], [0_usize; 2]);
+    let mut first = None;
+    for _ in 0..2000 {
+        let mut speed = |lo: f64, hi: f64| {
+            let sign = if n.next(0.0, 1.0) < 0.5 { -1.0 } else { 1.0 };
+            sign * 10.0_f64.powf(n.next(lo, hi))
+        };
+        let motion = Motion {
+            position_m: 0.05,
+            velocity_m_s: speed(-175.0, -155.0),
+        };
+        let force = [speed(-178.0, -153.0)];
+        let ends = [speed(-175.0, -155.0), speed(-175.0, -155.0), 300.0];
+        let mass_case = Case {
+            state: &motion,
+            stale: &stale,
+            dt_s: 1.0e-3,
+            inputs: &force,
+        };
+        let damper_case = Case {
+            state: &(),
+            stale: &(),
+            dt_s: 1.0e-3,
+            inputs: &ends,
+        };
+        let steps = [
+            with_cx(|cx| check_component(&mass, &mass_case, cx).map(|_| ())),
+            with_cx(|cx| check_component(&damper, &damper_case, cx).map(|_| ())),
+        ];
+        for (k, step) in steps.into_iter().enumerate() {
+            match step {
+                Ok(()) => admitted[k] += 1,
+                Err(failure) => {
+                    refused[k] += 1;
+                    let at = if k == 0 {
+                        format!("mass {motion:?}, {force:?}")
+                    } else {
+                        format!("damper {ends:?}")
+                    };
+                    first.get_or_insert(format!("{at}: {failure}"));
+                }
+            }
+        }
+    }
+    println!(
+        "subnormal energies, admitted / refused: mass {} / {}, damper {} / {}; first refused: {first:?}",
+        admitted[0], refused[0], admitted[1], refused[1]
+    );
+    assert_eq!((admitted, refused), ([2000, 2000], [0, 0]));
+}
+
+#[test]
 fn a_body_that_publishes_its_temperature_is_refused_at_the_port_law() {
     // The published temperature is a signal: it has no parity under time
     // reversal, so the check refuses the body before it steps.

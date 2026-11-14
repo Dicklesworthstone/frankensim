@@ -224,9 +224,12 @@ fn temperature(kelvin: f64) -> Result<f64, ElementError> {
     }
 }
 
-/// Roundoff allowance for an energy balance whose terms have size `scale`.
+/// Roundoff allowance for an energy balance whose terms have size `scale`:
+/// relative to that size only, so that it scales with the unit of energy.
+/// Below the normal range of f64 the rounding is absolute; fs-ports'
+/// `audit_step` adds that underflow allowance itself.
 fn roundoff(scale: f64) -> f64 {
-    64.0 * f64::EPSILON * scale + f64::MIN_POSITIVE
+    64.0 * f64::EPSILON * scale
 }
 
 /// A value prescribed as a function of time. Built only by its constructors,

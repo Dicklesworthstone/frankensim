@@ -1245,6 +1245,12 @@ Elements, `tests/elements.rs`:
     output nor the stored energy.
   - A heat capacity that publishes its temperature is refused before it
     steps: a signal port has no parity under time reversal;
+- subnormal energies: a mass and a damper at speeds of 1e-175 to 1e-155 m/s,
+  where the energies of a step lie below the normal range of f64, pass
+  `check_component` at 2,000 steps each, a count the test asserts. An
+  element's receipt claims only roundoff relative to the size of its terms
+  (`64 eps` times their sum); fs-ports' `audit_step` adds the f64 underflow
+  allowance;
 - refusals: non-finite or out-of-range parameters, empty or non-increasing
   tables, a heater whose power could turn negative, a temperature input that
   is not positive, a step that would cool a body below 0 K (`Shorten`);
