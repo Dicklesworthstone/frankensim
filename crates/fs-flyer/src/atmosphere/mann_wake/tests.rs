@@ -288,12 +288,20 @@ fn near_and_far_sources_share_the_same_bridge_and_replay() {
             leaf_capacity: 2,
         }),
     };
+    // At 2 substeps this shed moves a wake line 2.246e-2 m in one substep,
+    // beyond fs-vpm's core/edge resolution limit of 1.041e-2 m, which refuses
+    // it and asks for more substeps. The replay runs at a resolved count,
+    // the same for the original and the resumed wind.
+    let resolved = SelfInducedShed {
+        substeps: 8,
+        ..settings()
+    };
     let a = wind
         .shed_hybrid(
             &mut actual,
             &mut far,
             &[0.15, 0.2],
-            settings(),
+            resolved,
             WakeBoundary::default(),
             integration,
             budget(),
@@ -305,7 +313,7 @@ fn near_and_far_sources_share_the_same_bridge_and_replay() {
             &mut replay_near,
             &mut replay_far,
             &[0.15, 0.2],
-            settings(),
+            resolved,
             WakeBoundary::default(),
             integration,
             budget(),

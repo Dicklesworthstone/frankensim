@@ -192,6 +192,14 @@ fn wall_hybrid_affine_sampling_retains_exact_mean_and_checkpoint_replay() {
     assert!(report.affine_frames > 1);
     assert!(report.field_samples > report.affine_frames);
 
+    // At 2 substeps this shed moves a wake line 2.755e-2 m in one substep,
+    // beyond fs-vpm's core/edge resolution limit of 2.720e-2 m, which refuses
+    // it and asks for more substeps. The replay runs at a resolved count,
+    // the same for the original and the resumed wind.
+    let resolved = SelfInducedShed {
+        substeps: 8,
+        ..native
+    };
     let mut replay = MannWakeWind::resume(wind.checkpoint(), BYTES).unwrap();
     let mut replay_near = near.clone();
     let mut replay_far = far.clone();
@@ -200,7 +208,7 @@ fn wall_hybrid_affine_sampling_retains_exact_mean_and_checkpoint_replay() {
             &mut near,
             &mut far,
             &[0.15, 0.19],
-            native,
+            resolved,
             boundary,
             integration,
             sampling,
@@ -213,7 +221,7 @@ fn wall_hybrid_affine_sampling_retains_exact_mean_and_checkpoint_replay() {
             &mut replay_near,
             &mut replay_far,
             &[0.15, 0.19],
-            native,
+            resolved,
             boundary,
             integration,
             sampling,
