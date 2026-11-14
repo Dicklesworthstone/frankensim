@@ -1,0 +1,40 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 3000.0,
+  "step_s": 5.0,
+  "sample_every_s": 150.0,
+  "elements": {
+    "hot": {
+      "kind": "heat_capacity",
+      "capacity_j_k": 2000.0,
+      "temperature_k": 400.0
+    },
+    "store": {
+      "kind": "enthalpy_body",
+      "mass_kg": 1.0,
+      "specific_enthalpy_j_kg": 0.0,
+      "phase": "solid-liquid",
+      "enthalpy_curve": [
+        [0.0, 290.0, 0.0, 1000.0],
+        [20000.0, 300.0, 0.0, 990.0],
+        [220000.0, 300.0, 1.0, 900.0],
+        [240000.0, 310.0, 1.0, 890.0]
+      ]
+    },
+    "wall": {
+      "kind": "layer_conductor",
+      "conductivity_a": [[280.0, 1.0], [450.0, 2.7]],
+      "conductivity_b": [[280.0, 0.5], [450.0, 1.35]],
+      "geometry": {
+        "kind": "planar",
+        "distances_m": [0.01, 0.02],
+        "area_m2": 0.1
+      },
+      "contact_resistance_m2_k_w": 0.002
+    }
+  },
+  "connections": [
+    {"join": ["hot.heat", "wall.a"]},
+    {"join": ["store.heat", "wall.b"]}
+  ]
+}

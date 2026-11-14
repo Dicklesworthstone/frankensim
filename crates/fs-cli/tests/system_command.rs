@@ -193,6 +193,438 @@ fn the_heated_body_approaches_its_steady_temperature_by_the_discrete_factor() {
 }
 
 #[test]
+fn an_enthalpy_body_heats_through_latent_storage_without_an_apparent_capacity() {
+    let (code, json, stderr) =
+        run_binary(&["--json", "system", &example("phase_change_store.json")]);
+    assert_eq!(code, 0, "{stderr}");
+    // G1: h = Q t / m. The prescribed 200 kJ/kg latent interval consumes
+    // heat for twenty seconds while the temperature stays at 300 K.
+    for sample in json.split("{\"time_s\":").skip(1) {
+        let time: f64 = sample.split_once(',').unwrap().0.parse().unwrap();
+        let h = 10_000.0 * time;
+        let temperature = if h <= 20_000.0 {
+            290.0 + h / 2000.0
+        } else if h <= 220_000.0 {
+            300.0
+        } else {
+            300.0 + (h - 220_000.0) / 2000.0
+        };
+        let fraction = ((h - 20_000.0) / 200_000.0).clamp(0.0, 1.0);
+        assert!((value(sample, "", "store.specific_enthalpy_j_kg") - h).abs() < 1e-7);
+        assert!((value(sample, "", "store.temperature_k") - temperature).abs() < 1e-10);
+        assert!((value(sample, "", "store.liquid_mass_fraction") - fraction).abs() < 1e-12);
+    }
+    assert_eq!(json.matches("{\"time_s\":").count(), 13);
+    assert!((value(&json, &element("store"), "stored_change_j") - 240_000.0).abs() < 1e-7);
+    assert!((value(&json, &element("heater"), "energy_in_j") + 240_000.0).abs() < 1e-7);
+    assert!((value(&json, &element("store"), "bulk_density_kg_m3") - 890.0).abs() < 1e-10);
+    assert!(value(&json, "\"totals\"", "energy_residual_j").abs() < 1e-7);
+    assert!(json.contains("authored bounded sensible and latent storage"));
+    assert!(!json.contains("phase change or step-size error control"));
+}
+
+fn phase_boundary_scene(initial_h: f64, heat_w: f64) -> String {
+    format!(
+        r#"{{
+  "schema": "frankensim.system.v0", "duration_s": 24.0, "step_s": 0.25,
+  "sample_every_s": 2.0,
+  "elements": {{"store": {{
+    "kind": "enthalpy_body", "mass_kg": 1.0,
+    "specific_enthalpy_j_kg": {initial_h}, "phase": "solid-liquid",
+    "enthalpy_curve": [[0.0, 290.0, 0.0, 1000.0], [20000.0, 300.0, 0.0, 990.0],
+                       [220000.0, 300.0, 1.0, 900.0], [240000.0, 310.0, 1.0, 890.0]]
+  }}}},
+  "connections": [{{"prescribe": "store.heat", "heat_rate_w": {heat_w}}}]
+}}"#
+    )
+}
+
+#[test]
+fn an_enthalpy_body_freezes_on_the_same_chart_and_exports_its_entropy_change() {
+    let path = scratch(
+        "freezing_store.json",
+        &phase_boundary_scene(240_000.0, -10_000.0),
+    );
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(value(&json, &element("store"), "specific_enthalpy_j_kg").abs() < 1e-7);
+    assert!((value(&json, &element("store"), "temperature_k") - 290.0).abs() < 1e-10);
+    assert!(value(&json, &element("store"), "liquid_mass_fraction").abs() < 1e-12);
+    // G1/G3: cooling removes sensible entropy on both sides and L/T at
+    // coexistence; no second latent source or fitted capacity appears.
+    let entropy =
+        2000.0 * (300.0_f64 / 290.0).ln() + 200_000.0 / 300.0 + 2000.0 * (310.0_f64 / 300.0).ln();
+    let boundary = "\"port\":\"store.heat\"";
+    assert!((value(&json, boundary, "energy_in_j") + 240_000.0).abs() < 1e-7);
+    assert!((value(&json, boundary, "entropy_in_j_per_k") + entropy).abs() < 1e-8);
+    assert!(value(&json, "\"totals\"", "energy_residual_j").abs() < 1e-7);
+    let middle = json
+        .split("{\"time_s\":")
+        .skip(1)
+        .find(|sample| sample.split_once(',').unwrap().0.parse::<f64>().unwrap() == 12.0)
+        .unwrap();
+    let expected_density = (0.5_f64 / 990.0 + 0.5 / 900.0).recip();
+    assert!((value(middle, "", "store.bulk_density_kg_m3") - expected_density).abs() < 1e-9);
+}
+
+#[test]
+fn enthalpy_bodies_in_a_conductive_loop_reach_the_energy_determined_equilibrium() {
+    let scene = r#"{
+  "schema": "frankensim.system.v0", "duration_s": 200.0, "step_s": 0.5,
+  "elements": {
+    "hot": {"kind": "enthalpy_body", "mass_kg": 1.0, "specific_enthalpy_j_kg": 40000.0,
+      "phase": "solid", "enthalpy_curve": [[0.0, 290.0, 0.0, 1000.0], [80000.0, 370.0, 0.0, 1000.0]]},
+    "cold": {"kind": "enthalpy_body", "mass_kg": 2.0, "specific_enthalpy_j_kg": 0.0,
+      "phase": "liquid", "enthalpy_curve": [[0.0, 290.0, 1.0, 900.0], [80000.0, 370.0, 1.0, 900.0]]},
+    "contact": {"kind": "conductance", "conductance_w_k": 100.0}
+  },
+  "connections": [{"join": ["hot.heat", "contact.a"]}, {"join": ["cold.heat", "contact.b"]}]
+}"#;
+    let path = scratch("enthalpy_contact.json", scene);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    // Both authored charts have Cp=1000 J/(kg K). After thirty time
+    // constants, the endpoint is within 1e-6 K of the independent limit.
+    let equilibrium = (330.0 + 2.0 * 290.0) / 3.0;
+    for name in ["hot", "cold"] {
+        assert!((value(&json, &element(name), "temperature_k") - equilibrium).abs() < 1e-6);
+    }
+    let hot = value(&json, &element("hot"), "specific_enthalpy_j_kg");
+    let cold = value(&json, &element("cold"), "specific_enthalpy_j_kg");
+    assert!((hot + 2.0 * cold - 40_000.0).abs() < 1e-7);
+    let entropy = 1000.0 * (equilibrium / 330.0_f64).ln() + 2000.0 * (equilibrium / 290.0_f64).ln();
+    assert!((value(&json, "\"totals\"", "entropy_generated_j_per_k") - entropy).abs() < 1e-8);
+    assert!(value(&json, "\"totals\"", "energy_residual_j").abs() < 1e-7);
+}
+
+#[test]
+fn adaptive_enthalpy_storage_keeps_latent_energy_visible_and_refuses_derived_accounts() {
+    let scene = phase_boundary_scene(0.0, 10_000.0)
+        .replace("\"duration_s\": 24.0", "\"duration_s\": 12.0")
+        .replace(
+            "\"step_s\": 0.25",
+            r#""step_s": 2.0,
+  "adaptive": {"tolerances": {"store.specific_enthalpy_j_kg": {"absolute": 1e-6, "relative": 0}}}"#,
+        );
+    let path = scratch("adaptive_latent_store.json", &scene);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!((value(&json, &element("store"), "specific_enthalpy_j_kg") - 120_000.0).abs() < 1e-7);
+    assert!((value(&json, &element("store"), "temperature_k") - 300.0).abs() < 1e-10);
+    assert!((value(&json, &element("store"), "liquid_mass_fraction") - 0.5).abs() < 1e-12);
+    assert!(value(&json, "\"adaptive\"", "max_error_norm") <= 1.0);
+    for field in [
+        "temperature_k",
+        "liquid_mass_fraction",
+        "bulk_density_kg_m3",
+    ] {
+        let changed = scene.replace("store.specific_enthalpy_j_kg", &format!("store.{field}"));
+        let (code, stderr) = refused(&format!("adaptive_{field}.json"), &changed);
+        assert_eq!(code, 3, "{stderr}");
+        assert!(stderr.contains(&format!("store.{field}")), "{stderr}");
+    }
+}
+
+#[test]
+fn enthalpy_scenes_refuse_bad_charts_and_source_extrapolation_by_name() {
+    let scene = phase_boundary_scene(0.0, 10_000.0);
+    for (name, from, to, expected) in [
+        ("mass", "\"mass_kg\": 1.0", "\"mass_kg\": 0.0", "mass_kg"),
+        (
+            "phase",
+            "\"phase\": \"solid-liquid\"",
+            "\"phase\": \"gas\"",
+            "phase",
+        ),
+        (
+            "shape",
+            "[0.0, 290.0, 0.0, 1000.0]",
+            "[0.0, 290.0, 0.0]",
+            "enthalpy_curve[0]",
+        ),
+        (
+            "order",
+            "[20000.0, 300.0",
+            "[0.0, 300.0",
+            "strictly increasing",
+        ),
+        (
+            "temperature",
+            "[20000.0, 300.0",
+            "[20000.0, 280.0",
+            "temperature must be nondecreasing",
+        ),
+        (
+            "density",
+            "[0.0, 290.0, 0.0, 1000.0]",
+            "[0.0, 290.0, 0.0, 0.0]",
+            "positive temperature/density",
+        ),
+        (
+            "extra",
+            "\"mass_kg\": 1.0",
+            "\"mass_kg\": 1.0, \"temperature_k\": 290.0",
+            "unsupported field",
+        ),
+    ] {
+        assert!(scene.contains(from));
+        let (code, stderr) = refused(&format!("enthalpy_{name}.json"), &scene.replace(from, to));
+        assert_eq!(code, 3, "{name}: {stderr}");
+        assert!(stderr.contains(expected), "{name}: {stderr}");
+    }
+    let (code, stderr) = refused(
+        "enthalpy_initial_support.json",
+        &phase_boundary_scene(-1.0, 0.0),
+    );
+    assert_eq!(code, 3, "{stderr}");
+    assert!(stderr.contains("specific_enthalpy_j_kg") && stderr.contains("OutsideEnthalpyDomain"));
+    let (code, stderr) = refused(
+        "enthalpy_step_support.json",
+        &phase_boundary_scene(0.0, 10_001.0),
+    );
+    assert_eq!(code, 4, "{stderr}");
+    assert!(stderr.contains("OutsideEnthalpyDomain"), "{stderr}");
+}
+
+fn prescribed_layer_scene(geometry: &str, a: &str, b: &str, resistance: f64) -> String {
+    format!(
+        r#"{{
+  "schema": "frankensim.system.v0", "duration_s": 2.0, "step_s": 0.5,
+  "elements": {{"wall": {{
+    "kind": "layer_conductor", "conductivity_a": {a}, "conductivity_b": {b},
+    "geometry": {geometry}, "contact_resistance_m2_k_w": {resistance}
+  }}}},
+  "connections": [{{"prescribe": "wall.a", "temperature_k": 400.0}},
+                  {{"prescribe": "wall.b", "temperature_k": 300.0}}]
+}}"#
+    )
+}
+
+#[test]
+fn layer_conductors_retain_planar_radial_and_contact_series_resistances() {
+    let pi = std::f64::consts::PI;
+    let contact = 0.03;
+    // G1: independent Fourier integrals dr/(k A(r)), plus R''/A_contact.
+    let cases = [
+        (
+            "planar",
+            r#"{"kind":"planar","distances_m":[0.1,0.2],"area_m2":0.5}"#,
+            0.1 / (2.0 * 0.5) + 0.2 / (4.0 * 0.5) + contact / 0.5,
+        ),
+        (
+            "cylindrical",
+            r#"{"kind":"cylindrical","radii_m":[0.01,0.04],"contact_radius_m":0.02,"length_m":0.3}"#,
+            2.0_f64.ln() / (2.0 * pi * 0.3 * 2.0)
+                + 2.0_f64.ln() / (2.0 * pi * 0.3 * 4.0)
+                + contact / (2.0 * pi * 0.02 * 0.3),
+        ),
+        (
+            "spherical",
+            r#"{"kind":"spherical","radii_m":[0.01,0.04],"contact_radius_m":0.02}"#,
+            (100.0 - 50.0) / (4.0 * pi * 2.0)
+                + (50.0 - 25.0) / (4.0 * pi * 4.0)
+                + contact / (4.0 * pi * 0.02 * 0.02),
+        ),
+    ];
+    for (name, geometry, resistance) in cases {
+        let scene =
+            prescribed_layer_scene(geometry, "[[250,2],[450,2]]", "[[250,4],[450,4]]", contact);
+        let path = scratch(&format!("layer_{name}.json"), &scene);
+        let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+        assert_eq!(code, 0, "{name}: {stderr}");
+        let expected = 100.0 / resistance;
+        let actual = value(&json, &element("wall"), "heat_rate_w");
+        assert!(
+            (actual - expected).abs() < 1e-8 * expected,
+            "{name}: {actual} vs {expected}"
+        );
+        assert!((value(&json, "\"port\":\"wall.a\"", "energy_in_j") - 2.0 * expected).abs() < 1e-7);
+        assert!((value(&json, "\"port\":\"wall.b\"", "energy_in_j") + 2.0 * expected).abs() < 1e-7);
+        let entropy = 2.0 * expected * (1.0 / 300.0 - 1.0 / 400.0);
+        assert!((value(&json, "\"totals\"", "entropy_generated_j_per_k") - entropy).abs() < 1e-9);
+        assert!(value(&json, "\"totals\"", "energy_residual_j").abs() < 1e-9);
+    }
+}
+
+#[test]
+fn layer_conductors_integrate_affine_conductivity_instead_of_freezing_it() {
+    let geometry = r#"{"kind":"planar","distances_m":[0.1,0.2],"area_m2":0.5}"#;
+    let curve = "[[250,1.5],[450,3.5]]"; // k(T) = 0.01 T - 1.
+    let nonlinear = prescribed_layer_scene(geometry, curve, curve, 0.0).replace(
+        "\"contact_resistance_m2_k_w\": 0",
+        r#""contact_resistance_m2_k_w": 0,
+        "local_solver": {"max_iterations": 100, "absolute_heat_tolerance_w": 1e-10,
+                         "relative_heat_tolerance": 1e-12}"#,
+    );
+    let constant = prescribed_layer_scene(geometry, "[[250,2],[450,2]]", "[[250,2],[450,2]]", 0.0);
+    let mut powers = Vec::new();
+    for (name, scene) in [("affine", nonlinear), ("constant", constant)] {
+        let path = scratch(&format!("layer_{name}.json"), &scene);
+        let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+        assert_eq!(code, 0, "{name}: {stderr}");
+        powers.push(value(&json, &element("wall"), "heat_rate_w"));
+    }
+    // G1: A/(La+Lb) integral_300^400 (0.01 T - 1) dT.
+    let expected = 0.5 / 0.3 * (0.005 * (400.0 * 400.0 - 300.0 * 300.0) - 100.0);
+    assert!(
+        (powers[0] - expected).abs() < 1e-7,
+        "{} vs {expected}",
+        powers[0]
+    );
+    assert!((powers[1] - 0.5 / 0.3 * 2.0 * 100.0).abs() < 1e-7);
+    assert!(powers[0] > 1.2 * powers[1]);
+}
+
+#[test]
+fn layer_scenes_refuse_invalid_laws_geometry_and_local_budgets_by_name() {
+    let geometry = r#"{"kind":"planar","distances_m":[0.1,0.2],"area_m2":0.5}"#;
+    let scene = prescribed_layer_scene(geometry, "[[250,2],[450,2]]", "[[250,4],[450,4]]", 0.03);
+    for (name, from, to, expected) in [
+        ("short", "[[250,2],[450,2]]", "[[250,2]]", "conductivity_a"),
+        (
+            "shape",
+            "[[250,2],[450,2]]",
+            "[[250,2,3],[450,2]]",
+            "conductivity_a[0]",
+        ),
+        (
+            "order",
+            "[[250,2],[450,2]]",
+            "[[450,2],[250,2]]",
+            "conductivity_a",
+        ),
+        (
+            "zero_k",
+            "[[250,4],[450,4]]",
+            "[[250,0],[450,4]]",
+            "conductivity_b",
+        ),
+        (
+            "negative_t",
+            "[[250,4],[450,4]]",
+            "[[-250,4],[450,4]]",
+            "conductivity_b",
+        ),
+        ("distance", "[0.1,0.2]", "[0.0,0.2]", "geometry"),
+        ("pair", "[0.1,0.2]", "[0.1]", "geometry.distances_m"),
+        ("area", "\"area_m2\":0.5", "\"area_m2\":0", "area_m2"),
+        (
+            "kind",
+            "\"kind\":\"planar\"",
+            "\"kind\":\"cone\"",
+            "geometry.kind",
+        ),
+        (
+            "extra",
+            "\"area_m2\":0.5",
+            "\"area_m2\":0.5,\"radius_m\":0.1",
+            "unsupported field",
+        ),
+        (
+            "contact",
+            "\"contact_resistance_m2_k_w\": 0.03",
+            "\"contact_resistance_m2_k_w\": -1",
+            "contact_resistance_m2_k_w",
+        ),
+        (
+            "iterations",
+            "\"contact_resistance_m2_k_w\": 0.03",
+            "\"local_solver\":{\"max_iterations\":1001}",
+            "local_solver.max_iterations",
+        ),
+        (
+            "tolerance",
+            "\"contact_resistance_m2_k_w\": 0.03",
+            "\"local_solver\":{\"relative_heat_tolerance\":-1}",
+            "local_solver.relative_heat_tolerance",
+        ),
+    ] {
+        assert!(scene.contains(from));
+        let (code, stderr) = refused(
+            &format!("invalid_layer_{name}.json"),
+            &scene.replace(from, to),
+        );
+        assert_eq!(code, 3, "{name}: {stderr}");
+        assert!(
+            stderr.contains("wall") && stderr.contains(expected),
+            "{name}: {stderr}"
+        );
+    }
+    let radial = r#"{"kind":"spherical","radii_m":[0.03,0.04],"contact_radius_m":0.02}"#;
+    let (code, stderr) = refused("layer_radial_order.json", &scene.replace(geometry, radial));
+    assert_eq!(code, 3, "{stderr}");
+    assert!(
+        stderr.contains("wall.geometry") && stderr.contains("straddle"),
+        "{stderr}"
+    );
+    let (code, stderr) = refused(
+        "layer_support.json",
+        &scene.replace("\"temperature_k\": 400.0", "\"temperature_k\": 500.0"),
+    );
+    assert_eq!(code, 4, "{stderr}");
+    assert!(
+        stderr.contains("wall") && stderr.contains("MaterialDomain"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn nonlinear_layers_heat_a_finite_phase_change_store_and_close_every_sample_energy() {
+    let (code, json, stderr) =
+        run_binary(&["--json", "system", &example("phase_change_conduction.json")]);
+    assert_eq!(code, 0, "{stderr}");
+    let mut previous_h = -1.0;
+    let mut plateau_samples = 0;
+    for sample in json.split("{\"time_s\":").skip(1) {
+        let hot = value(sample, "", "hot.temperature_k");
+        let h = value(sample, "", "store.specific_enthalpy_j_kg");
+        let fraction = value(sample, "", "store.liquid_mass_fraction");
+        // G3: neither the quasisteady layers nor their contact store heat.
+        assert!((2000.0 * (hot - 400.0) + h).abs() < 1e-5);
+        assert!(h >= previous_h && fraction <= 0.9 + 1e-10);
+        if h > 20_000.0 {
+            plateau_samples += 1;
+            assert!((value(sample, "", "store.temperature_k") - 300.0).abs() < 1e-10);
+            assert!((fraction - (h - 20_000.0) / 200_000.0).abs() < 1e-12);
+        }
+        previous_h = h;
+    }
+    assert!(plateau_samples >= 10);
+    let fraction = value(&json, &element("store"), "liquid_mass_fraction");
+    assert!(fraction > 0.75 && fraction < 0.9, "{fraction}");
+    let hot_change = value(&json, &element("hot"), "stored_change_j");
+    let pcm_change = value(&json, &element("store"), "stored_change_j");
+    assert!((hot_change + pcm_change).abs() < 1e-5);
+    assert_eq!(value(&json, &element("wall"), "stored_change_j"), 0.0);
+    assert!(value(&json, &element("wall"), "heat_rate_w") > 0.0);
+    assert!(value(&json, "\"totals\"", "energy_residual_j").abs() < 1e-5);
+    assert!(value(&json, "\"totals\"", "entropy_generated_j_per_k") > 0.0);
+    assert!(json.contains("authored bounded k(T) charts"));
+    assert!(json.contains("no verified material-pack provenance"));
+}
+
+#[test]
+fn adaptive_phase_change_networks_do_not_require_an_account_for_stateless_layers() {
+    let scene = std::fs::read_to_string(example("phase_change_conduction.json"))
+        .unwrap()
+        .replace("\"duration_s\": 3000.0", "\"duration_s\": 300.0")
+        .replace(
+            "\"step_s\": 5.0",
+            r#""step_s": 5.0,
+  "adaptive": {"tolerances": {
+    "hot.temperature_k": {"absolute": 0.001, "relative": 1e-6},
+    "store.specific_enthalpy_j_kg": {"absolute": 1.0, "relative": 1e-6}
+  }}"#,
+        );
+    let path = scratch("adaptive_phase_change_layers.json", &scene);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(value(&json, "\"adaptive\"", "max_error_norm") <= 1.0);
+    assert!(value(&json, &element("store"), "liquid_mass_fraction") > 0.0);
+    assert!(value(&json, "\"totals\"", "energy_residual_j").abs() < 1e-5);
+}
+
+#[test]
 fn the_quarter_car_returns_the_road_work_as_motion_and_heat_split_seventy_thirty() {
     let (code, json, stderr) = run_binary(&["--json", "system", &example("quarter_car.json")]);
     assert_eq!(code, 0, "{stderr}");
@@ -545,6 +977,132 @@ fn the_transformer_scene_has_reflected_stiffness_with_either_signed_ratio() {
     let (code, stderr) = refused("gear_zero_ratio.json", &zero_ratio);
     assert_eq!(code, 4, "{stderr}");
     assert!(stderr.contains("ratio"), "{stderr}");
+}
+
+#[test]
+fn a_signal_modulated_transmission_matches_the_changing_ratio_rotation() {
+    let (code, json, stderr) =
+        run_binary(&["--json", "system", &example("variable_transmission.json")]);
+    assert_eq!(code, 0, "{stderr}");
+    let (inertia, stiffness, dt) = (0.02_f64, 400.0_f64, 1.0 / 256.0);
+    let (initial_w, initial_q) = (1.0, 0.01);
+    let (mut phase, mut angle, mut omega, mut extension) = (0.0_f64, 0.0_f64, initial_w, initial_q);
+    let (mut last_ratio, mut last_effort, mut last_flow) = (0.0, 0.0, 0.0);
+    for i in 0..512 {
+        // Independently integrate the authored affine ratio on each interval.
+        // The zero plateau disconnects the power exchange; the last ramp
+        // reverses it. In energy coordinates each interval is a rotation.
+        let midpoint = (f64::from(i) + 0.5) * dt;
+        let ratio = if midpoint < 0.5 {
+            0.02 * (1.0 - 2.0 * midpoint)
+        } else if midpoint < 1.0 {
+            0.0
+        } else {
+            -0.02 * (midpoint - 1.0)
+        };
+        phase += 2.0 * (0.5 * ratio * (stiffness / inertia).sqrt() * dt).atan();
+        let next_w =
+            initial_w * phase.cos() + initial_q * (stiffness / inertia).sqrt() * phase.sin();
+        let next_q =
+            initial_q * phase.cos() - initial_w * (inertia / stiffness).sqrt() * phase.sin();
+        angle += dt * 0.5 * (omega + next_w);
+        last_ratio = ratio;
+        last_effort = ratio * stiffness * 0.5 * (extension + next_q);
+        last_flow = ratio * 0.5 * (omega + next_w);
+        (omega, extension) = (next_w, next_q);
+    }
+    for (name, field, expected) in [
+        ("rotor", "angle_rad", angle),
+        ("rotor", "angular_velocity_rad_s", omega),
+        ("spring", "extension_m", extension),
+        ("transmission", "ratio", last_ratio),
+        ("transmission", "effort_a", last_effort),
+        ("transmission", "flow_b", last_flow),
+    ] {
+        let actual = value(&json, &element(name), field);
+        assert!(
+            (actual - expected).abs() <= 1.0e-10,
+            "{name}.{field}: {actual} vs {expected}"
+        );
+    }
+    let reached_w = value(&json, &element("rotor"), "angular_velocity_rad_s");
+    let reached_q = value(&json, &element("spring"), "extension_m");
+    let energy = 0.5 * (inertia * reached_w.powi(2) + stiffness * reached_q.powi(2));
+    assert!((energy - 0.03).abs() <= 1.0e-11);
+    assert!(value(&json, "\"totals\"", "energy_residual_j").abs() <= 1.0e-11);
+    assert_eq!(value(&json, &element("transmission"), "dissipated_j"), 0.0);
+    assert!(json.contains("no crank/cam geometry"), "{json}");
+}
+
+#[test]
+fn a_modulated_transformer_needs_no_adaptive_state_account() {
+    let scene = std::fs::read_to_string(example("variable_transmission.json"))
+        .unwrap()
+        .replace(
+            "{\"table\": [[0, 0.02], [0.5, 0], [1, 0], [2, -0.02]]}",
+            "0",
+        )
+        .replace(
+            "\"step_s\": 0.00390625",
+            r#""step_s": 0.125,
+  "adaptive": {"order": 2, "tolerances": {
+    "rotor.angle_rad": {"absolute": 1e-8, "relative": 0},
+    "rotor.angular_velocity_rad_s": {"absolute": 1e-8, "relative": 0},
+    "spring.extension_m": {"absolute": 1e-8, "relative": 0}
+  }}"#,
+        );
+    let path = scratch("adaptive_transmission.json", &scene);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!((value(&json, &element("rotor"), "angle_rad") - 2.0).abs() <= 1.0e-12);
+    assert!((value(&json, &element("spring"), "extension_m") - 0.01).abs() <= 1.0e-12);
+    assert_eq!(value(&json, &element("transmission"), "ratio"), 0.0);
+    assert!(value(&json, "\"adaptive\"", "max_error_norm") <= 1.0);
+}
+
+#[test]
+fn modulated_transformer_scenes_refuse_named_domains_fields_and_missing_ratios() {
+    let scene = std::fs::read_to_string(example("variable_transmission.json")).unwrap();
+    for (file, from, to, reason) in [
+        (
+            "transmission_domain.json",
+            "\"a\": \"rotation\"",
+            "\"a\": \"angle\"",
+            "elements.transmission: a",
+        ),
+        (
+            "transmission_field.json",
+            "\"b\": \"translation\"",
+            "\"b\": \"translation\", \"ratio\": 2",
+            "unsupported field \"ratio\"",
+        ),
+        (
+            "transmission_quantity.json",
+            "\"ratio\": {\"table\"",
+            "\"temperature_k\": {\"table\"",
+            "this port takes exactly one quantity, ratio",
+        ),
+        (
+            "transmission_waveform.json",
+            "{\"table\": [[0, 0.02], [0.5, 0], [1, 0], [2, -0.02]]}",
+            "\"fast\"",
+            "connections[3].ratio",
+        ),
+    ] {
+        let changed = scene.replace(from, to);
+        assert_ne!(changed, scene);
+        let (code, stderr) = refused(file, &changed);
+        assert_eq!(code, 3, "{stderr}");
+        assert!(stderr.contains(reason), "{stderr}");
+    }
+    let disconnected = scene.replace(
+        ",\n    {\"prescribe\": \"transmission.ratio\", \"ratio\": {\"table\": [[0, 0.02], [0.5, 0], [1, 0], [2, -0.02]]}}",
+        "",
+    );
+    assert_ne!(disconnected, scene);
+    let (code, stderr) = refused("transmission_unconnected_ratio.json", &disconnected);
+    assert_eq!(code, 4, "{stderr}");
+    assert!(stderr.contains("transmission.ratio"), "{stderr}");
 }
 
 #[test]

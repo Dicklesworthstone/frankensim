@@ -15,6 +15,14 @@ use std::path::Path;
 use std::rc::Rc;
 
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_material::phase::component::UniformEnthalpyBody;
+use fs_material::phase::{
+    EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState, SolidLiquidPhase,
+};
+use fs_material::thermal::conduction::component::LayerConductor;
+use fs_material::thermal::conduction::{
+    ConductivityCurve, LayerConductionConfig, LayerGeometry, MAX_CONDUCTIVITY_KNOTS,
+};
 use fs_material::visco::temperature::{TemperatureShift, TemperatureShiftModel};
 use fs_mbd::component::network::{DampingLaw, ViscousNetwork};
 use fs_mbd::component::relaxation::{DriveFrame, RelaxationNetwork, RelaxationState, ShiftLaw};
@@ -40,8 +48,8 @@ use fs_system::constitutive::{
 };
 use fs_system::elements::{
     Admittance, Conductance, Damper, FlowSource, Force, GasContents, GasVolume, Gyrator,
-    HeatCapacity, HeatNode, Heater, Mass, Motion, Resistance, Restriction, Slider, SliderEnd, Slip,
-    SourceAccount, Spring, Storage, Waveform,
+    HeatCapacity, HeatNode, Heater, Mass, ModulatedTransformer, Motion, Resistance, Restriction,
+    Slider, SliderEnd, Slip, SourceAccount, Spring, Storage, Waveform,
 };
 use fs_system::ledger::{Account, CarriedAccount, Ledger};
 use fs_system::{
@@ -73,6 +81,8 @@ const MAX_CARRIED: usize = 16;
 const MAX_NODE_BODIES: usize = 64;
 /// Coordinates in one dense, positive-definite resistance law.
 const MAX_RESISTANCE_COORDINATES: usize = 64;
+/// Authored caloric support retained by one uniform enthalpy body.
+const MAX_ENTHALPY_KNOTS: usize = 4096;
 const ADAPTIVE_NO_CLAIM: &str = "step-doubling estimates control the declared state coordinates and source-work increments under the selected order assumption; they are local numerical estimates, not global error bounds or physical validation; dissipated heat and interface balances retain the kernel's separate ledger audits; no material-card resolution, contact, friction or phase change";
 
 const HELP: &str = "Usage: frankensim [--json] system <scene.json>
@@ -128,7 +138,37 @@ Elements (ports in brackets; SI units in every field name):
   heat_capacity  capacity_j_k, temperature_k                          [heat]
                  (and a signal output, temperature: its temperature at the
                  start of the step; it may stay unconnected)
+  enthalpy_body  mass_kg, specific_enthalpy_j_kg,                     [heat]
+                 phase = \"solid\" | \"liquid\" | \"solid-liquid\",
+                 enthalpy_curve = [[h_j_kg, temperature_k,
+                   liquid_mass_fraction, bulk_density_kg_m3], ...]
+                 (2 to 4096 knots; h strictly increases. Solid-liquid charts
+                 start fully solid and end fully liquid; temperature and
+                 liquid fraction never decrease. Equal temperatures retain
+                 latent heat. Single-phase charts have strictly rising T
+                 and the declared phase at every knot. The original material
+                 owner supplies sensible/latent storage and entropy-conjugate
+                 heat-port temperature; endpoint probes report h, T, liquid
+                 fraction and density. Initial h is required: T alone cannot
+                 locate a state on a latent plateau. No extrapolation, material
+                 pack provenance, phase kinetics or mechanical expansion.)
   conductance    conductance_w_k                                      [a, b]
+  layer_conductor conductivity_a, conductivity_b                     [a, b]
+                 (each 2 to 4096 [temperature_k, k_w_m_k] knots),
+                 geometry = {kind: planar, distances_m: [a, b], area_m2}
+                   or {kind: cylindrical, radii_m: [a, b],
+                       contact_radius_m, length_m}
+                   or {kind: spherical, radii_m: [a, b], contact_radius_m},
+                 contact_resistance_m2_k_w = 0,
+                 local_solver = {max_iterations = 80,
+                   absolute_heat_tolerance_w = 1e-9,
+                   relative_heat_tolerance = 1e-12}
+                 (positive piecewise-linear k(T), increasing temperature
+                 knots; the original layer owner integrates the charts and
+                 solves the contact jump. Radii must straddle the contact.
+                 Stateless source-free layers at fixed geometry; no internal
+                 layer storage, source extrapolation or material provenance.
+                 heat_rate_w is positive from a to b.)
   heat_node      conductances_w_k (one per body), temperature_k (optional)
                                                 [source, body0, body1, ...]
                  (a plane of no heat capacity between bodies: join each
@@ -182,6 +222,14 @@ Between two domains, without loss (an ideal DC machine with a = electrical,
 b = rotation and ratio in N m/A: torque ratio * i on the rotor, back-EMF
 ratio * w against the loop):
   gyrator        ratio, a, b (translation | rotation | electrical)    [a, b]
+  modulated_transformer a, b (translation | rotation | electrical)    [a, b, ratio]
+                 a receives flow and b receives effort; the scalar ratio
+                 signal sets e_a = ratio * e_b, f_b = -ratio * f_a.
+                 Prescribe ratio as a waveform or connect a scalar signal.
+                 Signed and zero ratios are valid. Reports the last-step
+                 ratio, effort_a and flow_b in the declared domains' SI units.
+                 This is an ideal held-ratio power map, not crank/cam geometry
+                 or a displacement constraint; no ratio-actuator work is modeled.
 Rigid bodies in three dimensions joined by viscous connectors, stepped by the
 fs-mbd network owner. Vectors are [x, y, z] in world axes unless said
 otherwise; a body's principal axes are its own axes and its centre of mass
@@ -261,7 +309,8 @@ Connections, ports written element.port:
   {\"signal\": port, \"to\": [ports]}
                           copy a signal output (heat_capacity.temperature or
                           velocity_source.span) to matching signal inputs
-                          (a network's temperature<e> or slider.span_a/span_b);
+                          (a network's temperature<e>, slider.span_a/span_b,
+                          or modulated_transformer.ratio);
                           it carries no energy
   {\"prescribe\": port, <quantity>: waveform}
                           hold a port's input from outside: velocity_m_s for a
@@ -284,14 +333,15 @@ Connections, ports written element.port:
                           [kg/s], all into the volume; zeros close it); for a
                           restriction's end held from outside, contents
                           (pressure [Pa], specific enthalpy [J/kg], then each
-                          carried mass fraction)
+                          carried mass fraction); ratio for a
+                          modulated_transformer's ratio signal
   On slider.span_a/span_b, prescribe velocity_m_s as the same waveform
   moving that end; its two endpoint values are supplied, not its step mean.
   Direct boundaries publish no event schedule: align steps with table knots,
   or use velocity_source to let the kernel land on those knots automatically.
 
-Each element's port a is the end at mass A and b the end at mass B; the
-extension of a spring is x_B - x_A less its unloaded length; a series
+For a two-ended spring or damper, a is the end at mass A and b the end at
+mass B. A spring's extension is x_B - x_A less its unloaded length; a series
 capacitor's charge_c is the same difference, so one charged by a current
 entering at a reads negative. A node_capacitor instead stores entering charge. Every port must be connected. See examples/system/.
 ";
@@ -504,12 +554,18 @@ enum Kind {
     /// Flux storage governed by a source-owned I(flux) curve.
     NonlinearInductor,
     Gyrator,
+    /// A lossless power map whose scalar ratio comes from a signal.
+    ModulatedTransformer,
     /// Rigid bodies and viscous connectors, stepped by their fs-mbd owner.
     RigidNetwork,
     /// The same with Maxwell branches and actuators on the connectors.
     ViscoelasticNetwork,
     HeatCapacity,
+    /// Fixed material mass on an authored sensible/latent enthalpy chart.
+    EnthalpyBody,
     Conductance,
+    /// Original temperature-dependent layer integrals and contact jump.
+    LayerConductor,
     /// A thermal node of no capacity joined to bodies by conductances, with
     /// a heat source at the node: the plane a heat is generated on.
     HeatNode,
@@ -521,7 +577,7 @@ enum Kind {
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 29] = [
+    const TABLE: [(&'static str, Self); 32] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
@@ -543,10 +599,13 @@ impl Kind {
         ("nonlinear_capacitor", Self::NonlinearCapacitor),
         ("nonlinear_inductor", Self::NonlinearInductor),
         ("gyrator", Self::Gyrator),
+        ("modulated_transformer", Self::ModulatedTransformer),
         ("rigid_network", Self::RigidNetwork),
         ("viscoelastic_network", Self::ViscoelasticNetwork),
         ("heat_capacity", Self::HeatCapacity),
+        ("enthalpy_body", Self::EnthalpyBody),
         ("conductance", Self::Conductance),
+        ("layer_conductor", Self::LayerConductor),
         ("heat_node", Self::HeatNode),
         ("gas_volume", Self::GasVolume),
         ("restriction", Self::Restriction),
@@ -608,6 +667,7 @@ enum Coordinate {
     Position,
     Velocity,
     Scalar,
+    Enthalpy,
     SourceWork,
 }
 
@@ -625,6 +685,8 @@ impl ErrorAccount {
             Coordinate::Velocity => checkpoint.state::<Motion>(self.node)
                 .map_or(f64::NAN, |state| state.velocity_m_s),
             Coordinate::Scalar => checkpoint.state::<f64>(self.node).copied().unwrap_or(f64::NAN),
+            Coordinate::Enthalpy => checkpoint.state::<EquilibriumPhaseState>(self.node)
+                .map_or(f64::NAN, |state| state.specific_enthalpy_j_kg()),
             Coordinate::SourceWork => checkpoint.state::<SourceAccount>(self.node)
                 .map_or(f64::NAN, |state| state.energy_in_j),
         }
@@ -803,6 +865,258 @@ fn storage_knots(
         .ok_or_else(|| format!("{what}.{key}: every knot is {coordinates}"))
 }
 
+/// Lower authored calorics without approximating latent heat by a capacity.
+fn enthalpy_body(
+    definition: &J,
+    what: &str,
+) -> Result<(UniformEnthalpyBody, EquilibriumPhaseState), String> {
+    fields(
+        definition,
+        &[
+            "kind",
+            "mass_kg",
+            "specific_enthalpy_j_kg",
+            "phase",
+            "enthalpy_curve",
+        ],
+        what,
+    )?;
+    let phase = definition
+        .str_field("phase")
+        .ok_or_else(|| format!("{what}.phase: expected solid, liquid or solid-liquid"))?;
+    if !matches!(phase, "solid" | "liquid" | "solid-liquid") {
+        return Err(format!(
+            "{what}.phase: expected solid, liquid or solid-liquid"
+        ));
+    }
+    let rows = definition
+        .get("enthalpy_curve")
+        .and_then(J::as_array)
+        .filter(|rows| (2..=MAX_ENTHALPY_KNOTS).contains(&rows.len()))
+        .ok_or_else(|| format!("{what}.enthalpy_curve: expected 2..={MAX_ENTHALPY_KNOTS} knots"))?;
+    let mut knots = Vec::with_capacity(rows.len());
+    // This identifies the authored law, not a verified material card. Use
+    // physical values in a fixed order, independent of JSON whitespace.
+    let mut authored = phase.as_bytes().to_vec();
+    authored.push(0);
+    for (index, row) in rows.iter().enumerate() {
+        let Some([h, t, liquid, density]) = row.as_array() else {
+            return Err(format!(
+                "{what}.enthalpy_curve[{index}]: expected [h_j_kg, temperature_k, \
+                 liquid_mass_fraction, bulk_density_kg_m3]"
+            ));
+        };
+        let mut values = [0.0; 4];
+        for (slot, value) in values.iter_mut().zip([h, t, liquid, density]) {
+            *slot = value
+                .as_f64()
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| {
+                    format!("{what}.enthalpy_curve[{index}]: four finite numbers required")
+                })?;
+            // The sign of an authored zero is not a distinct material.
+            if *slot == 0.0 {
+                *slot = 0.0;
+            }
+            authored.extend_from_slice(&slot.to_le_bytes());
+        }
+        knots.push(EnthalpyPhaseKnot {
+            specific_enthalpy_j_kg: values[0],
+            temperature_k: values[1],
+            liquid_mass_fraction: values[2],
+            bulk_density_kg_m3: values[3],
+        });
+    }
+    let identity =
+        fs_blake3::hash_domain("frankensim.system.authored_enthalpy_curve.v0", &authored);
+    let curve = match phase {
+        "solid" => EquilibriumEnthalpyPhaseCurve::try_single_phase(
+            identity,
+            SolidLiquidPhase::Solid,
+            knots,
+        ),
+        "liquid" => EquilibriumEnthalpyPhaseCurve::try_single_phase(
+            identity,
+            SolidLiquidPhase::Liquid,
+            knots,
+        ),
+        _ => EquilibriumEnthalpyPhaseCurve::try_new(identity, knots),
+    }
+    .map_err(|error| format!("{what}.enthalpy_curve: {error}"))?;
+    let initial = curve
+        .state_at_specific_enthalpy(number(definition, "specific_enthalpy_j_kg", what)?)
+        .map_err(|error| format!("{what}.specific_enthalpy_j_kg: {error}"))?;
+    let body = UniformEnthalpyBody::new(curve, positive(definition, "mass_kg", what)?)
+        .map_err(|error| format!("{what}: {error}"))?;
+    Ok((body, initial))
+}
+
+fn conductivity_curve(definition: &J, key: &str, what: &str) -> Result<ConductivityCurve, String> {
+    let rows = definition
+        .get(key)
+        .and_then(J::as_array)
+        .filter(|rows| (2..=MAX_CONDUCTIVITY_KNOTS).contains(&rows.len()))
+        .ok_or_else(|| format!("{what}.{key}: expected 2..={MAX_CONDUCTIVITY_KNOTS} knots"))?;
+    let knots = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let values = match row.as_array() {
+                Some([temperature, conductivity]) => {
+                    temperature.as_f64().zip(conductivity.as_f64())
+                }
+                _ => None,
+            };
+            match values {
+                Some((temperature, conductivity))
+                    if temperature.is_finite() && conductivity.is_finite() =>
+                {
+                    Ok([temperature, conductivity])
+                }
+                _ => Err(format!(
+                    "{what}.{key}[{index}]: expected finite [temperature_k, k_w_m_k]"
+                )),
+            }
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    ConductivityCurve::new(knots).map_err(|error| format!("{what}.{key}: {error}"))
+}
+
+/// Preserve the physical geometry and original k(T) integrals at the ports.
+fn layer_conductor(definition: &J, what: &str) -> Result<LayerConductor, String> {
+    fields(
+        definition,
+        &[
+            "kind",
+            "conductivity_a",
+            "conductivity_b",
+            "geometry",
+            "contact_resistance_m2_k_w",
+            "local_solver",
+        ],
+        what,
+    )?;
+    let curves = [
+        conductivity_curve(definition, "conductivity_a", what)?,
+        conductivity_curve(definition, "conductivity_b", what)?,
+    ];
+    let geometry_name = format!("{what}.geometry");
+    let geometry = definition
+        .get("geometry")
+        .ok_or_else(|| format!("{geometry_name}: required"))?;
+    let pair = |key: &str| {
+        let values = match geometry.get(key).and_then(J::as_array) {
+            Some([a, b]) => a.as_f64().zip(b.as_f64()),
+            _ => None,
+        };
+        match values {
+            Some((a, b)) if a.is_finite() && b.is_finite() => Ok([a, b]),
+            _ => Err(format!(
+                "{geometry_name}.{key}: expected two finite numbers"
+            )),
+        }
+    };
+    let geometry = match geometry.str_field("kind") {
+        Some("planar") => {
+            fields(
+                geometry,
+                &["kind", "distances_m", "area_m2"],
+                &geometry_name,
+            )?;
+            LayerGeometry::planar(
+                pair("distances_m")?,
+                positive(geometry, "area_m2", &geometry_name)?,
+            )
+        }
+        Some("cylindrical") => {
+            fields(
+                geometry,
+                &["kind", "radii_m", "contact_radius_m", "length_m"],
+                &geometry_name,
+            )?;
+            LayerGeometry::cylindrical(
+                pair("radii_m")?,
+                positive(geometry, "contact_radius_m", &geometry_name)?,
+                positive(geometry, "length_m", &geometry_name)?,
+            )
+        }
+        Some("spherical") => {
+            fields(
+                geometry,
+                &["kind", "radii_m", "contact_radius_m"],
+                &geometry_name,
+            )?;
+            LayerGeometry::spherical(
+                pair("radii_m")?,
+                positive(geometry, "contact_radius_m", &geometry_name)?,
+            )
+        }
+        _ => {
+            return Err(format!(
+                "{geometry_name}.kind: expected planar, cylindrical or spherical"
+            ));
+        }
+    }
+    .map_err(|error| format!("{geometry_name}: {error}"))?;
+    let resistance = number_or(definition, "contact_resistance_m2_k_w", 0.0, what)?;
+    if !resistance.is_finite() || resistance < 0.0 {
+        return Err(format!(
+            "{what}.contact_resistance_m2_k_w: must be finite and not negative"
+        ));
+    }
+    let mut config = LayerConductionConfig {
+        max_iterations: 80,
+        absolute_heat_tolerance_w: 1e-9,
+        relative_heat_tolerance: 1e-12,
+    };
+    if let Some(local) = definition.get("local_solver") {
+        let local_name = format!("{what}.local_solver");
+        fields(
+            local,
+            &[
+                "max_iterations",
+                "absolute_heat_tolerance_w",
+                "relative_heat_tolerance",
+            ],
+            &local_name,
+        )?;
+        let iterations = number_or(local, "max_iterations", 80.0, &local_name)?;
+        if !(1.0..=1000.0).contains(&iterations) || iterations.fract() != 0.0 {
+            return Err(format!(
+                "{local_name}.max_iterations: must be a whole number from 1 to 1000"
+            ));
+        }
+        config.max_iterations = iterations as usize;
+        config.absolute_heat_tolerance_w = number_or(
+            local,
+            "absolute_heat_tolerance_w",
+            config.absolute_heat_tolerance_w,
+            &local_name,
+        )?;
+        config.relative_heat_tolerance = number_or(
+            local,
+            "relative_heat_tolerance",
+            config.relative_heat_tolerance,
+            &local_name,
+        )?;
+        for (key, value) in [
+            (
+                "absolute_heat_tolerance_w",
+                config.absolute_heat_tolerance_w,
+            ),
+            ("relative_heat_tolerance", config.relative_heat_tolerance),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(format!(
+                    "{local_name}.{key}: must be finite and not negative"
+                ));
+            }
+        }
+    }
+    LayerConductor::new(curves, geometry, resistance, config)
+        .map_err(|error| format!("{what}: {error}"))
+}
+
 /// A spring, torsion spring or capacitor. A capacitor is declared by its
 /// capacitance and has no cubic term.
 fn compliance(
@@ -909,6 +1223,28 @@ fn gyrator(
     let gyrator = Gyrator::new(a.port_kind(), b.port_kind(), number(definition, "ratio", what)?)
         .map_err(|e| Refusal::Input(format!("{what}: {e}")))?;
     add(builder, name, gyrator, ())
+}
+
+fn modulated_transformer(
+    builder: &mut SystemBuilder,
+    name: &str,
+    definition: &J,
+    what: &str,
+) -> Result<(NodeId, Vec<PortSpec>), Refusal> {
+    fields(definition, &["kind", "a", "b"], what)?;
+    let side = |key: &str| {
+        definition
+            .str_field(key)
+            .and_then(Domain::parse)
+            .ok_or_else(|| format!("{what}: {key} is one of translation, rotation, electrical"))
+    };
+    let (a, b) = (side("a")?, side("b")?);
+    add(
+        builder,
+        name,
+        ModulatedTransformer::new(a.port_kind(), b.port_kind()),
+        (),
+    )
 }
 
 /// Three finite numbers.
@@ -1536,6 +1872,7 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
             add(builder, name, NonlinearInductor::new(curve), flux)?
         }
         Kind::Gyrator => gyrator(builder, name, definition, &what)?,
+        Kind::ModulatedTransformer => modulated_transformer(builder, name, definition, &what)?,
         Kind::RigidNetwork | Kind::ViscoelasticNetwork => {
             let parts = if kind == Kind::RigidNetwork {
                 rigid_network(builder, name, definition, &what)?
@@ -1557,12 +1894,18 @@ fn element(builder: &mut SystemBuilder, name: &str, definition: &J) -> Result<El
                 .publishing();
             add(builder, name, body, start)?
         }
+        Kind::EnthalpyBody => {
+            let (body, state) = enthalpy_body(definition, &what)?;
+            temperature_k = Some(state.temperature_k());
+            add(builder, name, body, state)?
+        }
         Kind::Conductance => {
             fields(definition, &["kind", "conductance_w_k"], &what)?;
             let wall =
                 Conductance::new(number(definition, "conductance_w_k", &what)?).map_err(invalid)?;
             add(builder, name, wall, ())?
         }
+        Kind::LayerConductor => add(builder, name, layer_conductor(definition, &what)?, ())?,
         Kind::HeatNode => {
             fields(definition, &["kind", "conductances_w_k", "temperature_k"], &what)?;
             let rows = definition
@@ -2099,8 +2442,10 @@ fn prescribe(
         _ => None,
     };
     let quantity = match (target.carrier, target.role, domain) {
-        // Slider motion spans were handled above; remaining signal inputs
-        // are the temperatures a network's shift is read at.
+        (Carrier::Signal, PortRole::SignalIn, _)
+            if elements[target.element].kind == Kind::ModulatedTransformer => "ratio",
+        // Slider spans and transformer ratios were handled above; remaining
+        // signal inputs are the temperatures a network's shift is read at.
         (Carrier::Heat, PortRole::EffortIn, _) | (Carrier::Signal, PortRole::SignalIn, _) => {
             "temperature_k"
         }
@@ -2219,12 +2564,15 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             Kind::NodeCapacitor | Kind::NonlinearCapacitor => vec![("charge_c", Coordinate::Scalar)],
             Kind::NonlinearInductor => vec![("flux_wb", Coordinate::Scalar)],
             Kind::HeatCapacity => vec![("temperature_k", Coordinate::Scalar)],
+            Kind::EnthalpyBody => vec![("specific_enthalpy_j_kg", Coordinate::Enthalpy)],
             Kind::Source(_) | Kind::VelocitySource | Kind::CurrentSource | Kind::Heater => vec![("energy_in_j", Coordinate::SourceWork)],
             Kind::Resistance(_)
             | Kind::ResistanceMatrix
             | Kind::ResistorBranch
             | Kind::Gyrator
+            | Kind::ModulatedTransformer
             | Kind::Conductance
+            | Kind::LayerConductor
             | Kind::HeatNode
             | Kind::Restriction => Vec::new(),
             Kind::RigidNetwork | Kind::ViscoelasticNetwork | Kind::GasVolume | Kind::Slider => {
@@ -2398,6 +2746,7 @@ impl Device {
         } else {
             NO_CLAIM
         };
+        let mut description = std::borrow::Cow::Borrowed(base);
         if self
             .elements
             .iter()
@@ -2405,14 +2754,57 @@ impl Device {
         {
             // Keep existing scene reports unchanged; only a scene with a
             // slider replaces the former blanket friction exclusion.
-            let base = base.replace("contact, friction,", "geometric contact, impact,");
-            std::borrow::Cow::Owned(format!(
+            let base = description.replace("contact, friction,", "geometric contact, impact,");
+            description = std::borrow::Cow::Owned(format!(
                 "{base}; dry friction uses constant static/kinetic coefficients and normal force, \
                  with first-order switching steps and explicitly declared initial slip"
-            ))
-        } else {
-            std::borrow::Cow::Borrowed(base)
+            ));
         }
+        if self
+            .elements
+            .iter()
+            .any(|element| element.kind == Kind::EnthalpyBody)
+        {
+            let base = description
+                .replace(", phase change", "")
+                .replace(" or phase change", "");
+            description = std::borrow::Cow::Owned(format!(
+                "{base}; enthalpy bodies use authored bounded sensible and latent storage \
+                 with entropy-conjugate heat ports at fixed mass and negligible pressure-volume \
+                 work; no material-pack provenance, phase kinetics or mechanical expansion"
+            ));
+        }
+        if self
+            .elements
+            .iter()
+            .any(|element| element.kind == Kind::LayerConductor)
+        {
+            let base = description.replace(
+                "no material-card resolution, contact,",
+                "no material-card resolution, geometric contact,",
+            );
+            description = std::borrow::Cow::Owned(format!(
+                "{base}; layer conductors integrate authored bounded k(T) charts with fixed \
+                 planar or radial geometry and areal contact resistance; no verified \
+                 material-pack provenance, internal layer storage or source extrapolation"
+            ));
+        }
+        if self
+            .elements
+            .iter()
+            .any(|element| element.kind == Kind::ModulatedTransformer)
+        {
+            let base = description.replace(
+                "constant parameters or",
+                "constant parameters, signal-modulated lossless ratios or",
+            );
+            description = std::borrow::Cow::Owned(format!(
+                "{base}; transformer ratios are held over each step in declared SI conversion \
+                 units; no crank/cam geometry, displacement constraint, ratio-actuator work \
+                 or control stability is inferred"
+            ));
+        }
+        description
     }
 
     fn run(&mut self) -> Result<(), RunError> {
@@ -2652,6 +3044,15 @@ impl Device {
                 "temperature_k",
                 system.state::<f64>(element.node).copied().unwrap_or(f64::NAN),
             )],
+            Kind::EnthalpyBody => {
+                let state = system.state::<EquilibriumPhaseState>(element.node);
+                vec![
+                    ("specific_enthalpy_j_kg", state.map_or(f64::NAN, |s| s.specific_enthalpy_j_kg())),
+                    ("temperature_k", state.map_or(f64::NAN, |s| s.temperature_k())),
+                    ("liquid_mass_fraction", state.map_or(f64::NAN, |s| s.liquid_mass_fraction())),
+                    ("bulk_density_kg_m3", state.map_or(f64::NAN, |s| s.bulk_density_kg_m3())),
+                ]
+            }
             Kind::Source(_) | Kind::VelocitySource | Kind::CurrentSource | Kind::Heater => vec![(
                 "energy_in_j",
                 system
@@ -2674,7 +3075,14 @@ impl Device {
                 vec![("current_a", output("a")), ("heat_w", -output("heat"))]
             }
             Kind::Gyrator => vec![("effort_a", output("a")), ("effort_b", output("b"))],
-            Kind::Conductance => vec![("heat_rate_w", output("a"))],
+            Kind::ModulatedTransformer => {
+                let ratio = match system.port(element.node, "ratio") {
+                    Some(port) if system.steps() > 0 => system.last_input(port)[0],
+                    _ => f64::NAN,
+                };
+                vec![("ratio", ratio), ("effort_a", output("a")), ("flow_b", output("b"))]
+            }
+            Kind::Conductance | Kind::LayerConductor => vec![("heat_rate_w", output("a"))],
             // The temperature the node's balance gave it in the last step.
             Kind::HeatNode => vec![("temperature_k", output("source"))],
             // What crossed from `a` to `b` during the last step.

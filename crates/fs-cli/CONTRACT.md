@@ -831,6 +831,27 @@ prescribed `current_a` is positive into its stored charge. Its reported
 readings are step means. The legacy `capacitor`, `resistor` and `join` retain
 their series-loop conventions.
 
+`modulated_transformer` lowers to the kernel's signal-modulated lossless
+transformer. Required `a` and `b` name its power domains (`translation`,
+`rotation` or `electrical`). Port `a` receives flow and returns effort; `b`
+receives effort and returns flow. The required scalar input `ratio` takes an
+ordinary signal connection or `{"prescribe": "name.ratio", "ratio": waveform}`.
+A prescribed waveform supplies its exact interval mean, held for the step;
+direct boundaries carry no event schedule, so the scene must resolve their
+changes. Positive, negative and zero ratios are admitted. Unknown element
+fields, invalid domain names and malformed waveforms refuse as named scene
+inputs; an unconnected ratio is refused by kernel admission.
+
+Final reports and samples expose last-step `ratio`, `effort_a` and `flow_b`
+(null before the first step), with efforts and flows in the declared domains'
+SI units. The transformer has no dynamic state and requires no adaptive
+tolerance account. `examples/system/variable_transmission.json` runs an ideal
+rotary-to-translational transmission through positive, zero and negative
+ratios. The real-binary oracle checks the resulting motion, spring storage,
+port outputs and energy ledger against independent midpoint rotations.
+The ratio must carry the required SI conversion units. No crank/cam geometry,
+displacement constraint, ratio-actuator work or control stability is inferred.
+
 A `rigid_network` is the first scene element that is a physics owner behind
 the Component contract and not a lumped law: it lowers to
 `fs_mbd::component::network::ViscousNetwork` (rigid bodies in three
@@ -962,6 +983,71 @@ Prescribed current into a nonlinear capacitor increases its charge. The
 nonlinear RLC example and binary regressions check independently integrated
 charge/flux equations, source work, original storage and delivered Joule heat.
 Authored curves confer no material provenance, hysteresis or thermal law.
+
+`enthalpy_body` lowers to the existing
+`fs_material::phase::component::UniformEnthalpyBody` with its analytic port
+tangent. It takes positive `mass_kg`, initial `specific_enthalpy_j_kg`, an
+explicit `phase` (`solid`, `liquid` or `solid-liquid`), and `enthalpy_curve`
+with 2–4096 knots `[h_j_kg, temperature_k, liquid_mass_fraction,
+bulk_density_kg_m3]`. The material owner admits the complete monotone chart.
+Single-phase charts retain their declared phase and strictly increasing
+temperature; a solid-liquid chart starts solid, ends liquid, and preserves
+isothermal latent intervals. Initial enthalpy is required because temperature
+alone cannot locate a state on a latent plateau. Out-of-domain initial states
+refuse as named inputs; a step leaving chart support is a kernel refusal.
+
+The `heat` port receives signed heat rate and returns the original chart's
+entropy-conjugate finite-step temperature. Its ledger stores `m Δh`, including
+latent heat once, and records state rounding as numerical loss. Existing heat
+joins, routes, conductances and boundaries connect to this port. Endpoint
+reports and samples expose `specific_enthalpy_j_kg`, `temperature_k`,
+`liquid_mass_fraction` and `bulk_density_kg_m3`; they do not substitute the
+port's finite-step mean for endpoint temperature. Adaptive error control uses
+the enthalpy coordinate, so latent storage remains visible even at constant
+temperature; derived temperature, fraction and density tolerances refuse.
+
+`examples/system/phase_change_store.json` is an authored equilibrium storage
+example, not measured material data. Its law identity hashes the declared
+phase and knot values in fixed order; it confers no verified material-card or
+pack provenance. No phase kinetics, hysteresis, geometry change or mechanical
+expansion is inferred; mass is fixed and pressure-volume work negligible.
+G1/G3 real-binary tests in `tests/system_command.rs` check the heating/cooling
+energy path through the latent interval, finite-body conductive equilibrium
+and its entropy, adaptive storage accounting, and named input/domain refusals.
+
+`layer_conductor` lowers to the owned
+`fs_material::thermal::conduction::component::LayerConductor` and its analytic
+endpoint tangent. `conductivity_a` and `conductivity_b` each contain 2–4096
+`[temperature_k, k_w_m_k]` knots with strictly increasing positive temperature
+and positive finite conductivity. The original piecewise-linear conductivity
+integrals and contact-jump solve remain the material owner's; the CLI does not
+freeze an endpoint conductivity or replace the charts with a fitted constant.
+
+Its required `geometry` is one of `{kind: "planar", distances_m: [a,b],
+area_m2}`, `{kind: "cylindrical", radii_m: [a,b], contact_radius_m, length_m}`
+or `{kind: "spherical", radii_m: [a,b], contact_radius_m}`. Distances, radii,
+area and length must be positive; radial traces must straddle the contact
+radius. Each material retains its own temperature support. Optional
+`contact_resistance_m2_k_w` defaults to zero and must be finite and nonnegative.
+The optional `local_solver` defaults to `max_iterations: 80`,
+`absolute_heat_tolerance_w: 1e-9`, and `relative_heat_tolerance: 1e-12`.
+Iterations must be an integer in 1–1000 and heat tolerances finite and
+nonnegative. These controls bound local heat continuity, independently of the
+scene's interface solver and adaptive state-error controls.
+
+Ports `a` and `b` receive temperatures and return opposite heat rates;
+`heat_rate_w` reports the last accepted rate from a to b. Layers and contact
+store no heat, and require no adaptive state account. The fixed-geometry,
+source-free quasisteady model has no internal layer storage, conductivity
+extrapolation, inferred phase-dependent transport or verified material-pack
+authority. Temperatures outside either original chart refuse during a step.
+Binary tests independently check planar, cylindrical and spherical series
+resistance with finite contact resistance, an affine-k integral against a
+constant-k control, named refusals, and fixed/adaptive composition with thermal
+storage. `examples/system/phase_change_conduction.json` uses a finite 2000 J/K
+body initially at 400 K to melt the authored store through two nonlinear
+layers. Its sampled enthalpy and liquid fraction track latent storage while
+the closed graph conserves the finite hot body's lost energy.
 
 An optional `adaptive` object selects the kernel's checkpoint-based
 `step_adaptive` path. It declares `order` (default 1, range 1–32),

@@ -1,0 +1,17 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 2.0,
+  "step_s": 0.00390625,
+  "sample_every_s": 0.25,
+  "elements": {
+    "rotor": {"kind": "inertia", "inertia_kg_m2": 0.02, "angular_velocity_rad_s": 1.0},
+    "spring": {"kind": "spring", "stiffness_n_m": 400.0, "extension_m": 0.01},
+    "transmission": {"kind": "modulated_transformer", "a": "rotation", "b": "translation"}
+  },
+  "connections": [
+    {"join": ["rotor.p", "transmission.a"]},
+    {"join": ["transmission.b", "spring.a"]},
+    {"prescribe": "spring.b", "velocity_m_s": 0},
+    {"prescribe": "transmission.ratio", "ratio": {"table": [[0, 0.02], [0.5, 0], [1, 0], [2, -0.02]]}}
+  ]
+}
