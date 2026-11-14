@@ -17,6 +17,52 @@
 
 ## New sections (newest first)
 
+## Temperature-dependent layer conduction on the composition contract
+
+`thermal::conduction::component::LayerConductor`, behind the existing
+`component` feature, makes the original `TwoLayerConduction` available on
+two heat ports. It owns both conductivity curves and the admitted
+`LayerGeometry`, so it can be moved into `fs-system::SystemBuilder` without
+leaking material data or borrowing an application-owned chart. A proposal
+borrows those immutable curves only for the native layer solve. Original
+knots, temperature support, planar/cylindrical/spherical resistance metrics
+and area-specific contact resistance are retained. No conductivity is frozen
+at the start of a simulation, and no second flux or interface solver is added.
+
+Ports `a` and `b` receive their owners' temperatures [K] and return `Q`, `-Q`
+[W], positive into the conductor. The state is `()`. The native solve checks
+each material's own bulk-to-interface temperature span; a resistive contact
+can bridge disjoint spans, while an unsupported contact face is refused.
+The full `Smooth` JVP and VJP use the native analytic endpoint derivatives.
+The Jacobian is generally nonsymmetric when conductivity varies with
+temperature; the reverse action is its transpose, not the forward action.
+
+Energy storage, physical dissipation and numerical loss are zero. The
+component generates `dt Q (1/T_b - 1/T_a)` of entropy, computed without a
+subtraction of nearly equal reciprocal temperatures. Its receipt retains
+the native heat-continuity residual and tolerance; contact-jump acceptance
+remains in the native solve. No heat or entropy is fitted to an expected
+trajectory. Proposals and tangent actions poll cancellation, keep the
+original bounded scalar iteration, allocate no heap on success, and leave
+outputs unchanged on refusal. Errors remain `DepositionError`.
+
+`tests/thermal_conduction_component.rs` checks the mandatory conformance kit,
+constant-conductivity series/contact resistance and reversal, the independent
+Kirchhoff integral for affine conductivity, both tangent actions and their
+finite differences, disjoint supports, and input/domain/cancellation refusals.
+Two owned enthalpy bodies and this conductor run on the actual generic kernel
+against an independent scalar caloric/integrated-conductivity oracle; their
+energy, entropy and temperature feedback are checked. A source-domain exit
+must preserve accepted state, time, ledger and published port values.
+
+This remains source-free, quasisteady conduction in fixed geometry. It adds
+no transient layer storage, convection, internal heat generation, evolving
+phase distribution, contact-resistance temperature law, uncertainty model or
+experimental authority. Conductivity curves cloned from a resolved card keep
+their numbers and support; card provenance is retained by the preparing
+caller, not inferred by this adapter. The thermal owners choose which
+endpoint, midpoint or entropy-conjugate temperatures their heat ports return.
+
 ## Thermal Carreau pipes on the composition contract
 
 `fluid_transport::rheology::pipe::component::CarreauPipeComponent`, behind

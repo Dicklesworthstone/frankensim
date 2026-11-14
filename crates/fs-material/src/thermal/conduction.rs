@@ -32,3 +32,7 @@ pub mod network;
 pub mod phase;
 /// Source-qualified preparation on an original pure-phase caloric branch.
 pub mod source;
+
+/// Original layer conduction and its analytic tangent as a heat Component.
+#[cfg(feature = "component")]
+pub mod component;

@@ -38,7 +38,8 @@ fs-system = { path = "../fs-system" }
 # Explicit fitted polarization memory; no microscopic or measured-data claim.
 experimental-dielectric-hysteresis = []
 # Physics owners of this crate as Components of the composition contract
-# (fs-ports): `phase::component` and `fluid_transport::rheology::pipe::component`.
+# (fs-ports): `phase::component`, `fluid_transport::rheology::pipe::component`,
+# and `thermal::conduction::component`.
 # Off by default; the default build has no dependency on fs-ports or fs-exec.
 component = ["dep:fs-ports", "dep:fs-exec"]
 
