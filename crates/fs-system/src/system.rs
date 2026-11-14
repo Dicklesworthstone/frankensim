@@ -35,7 +35,7 @@ pub type BoundaryFn = Box<dyn Fn(f64, f64, &mut [f64])>;
 /// input and a residual and the inputs a block does not solve for.
 const ROUNDING_UNITS: f64 = 16.0;
 
-/// A differenced entry of a line's column is resolved when the change it is
+/// A differenced entry of a column is resolved when the change it is
 /// the quotient of is at least this share of its output, `2^-32`, some
 /// `2^20` units in the output's last place: the output's rounding then
 /// leaves the entry within about 1e-6 of itself. Numerical policy.
@@ -52,7 +52,7 @@ const AIMED: f64 = 67_108_864.0 * f64::EPSILON;
 /// what it had.
 const LOCAL: f64 = 8_192.0 * AIMED;
 
-/// The longest step a differenced column of a line is taken at, as a share
+/// The longest step a differenced column is taken at, as a share
 /// of the input's scale, or of one unit where that is less: `2^-10`.
 const WIDEST: f64 = 1.0 / 1_024.0;
 
@@ -63,8 +63,8 @@ const WIDEST: f64 = 1.0 / 1_024.0;
 /// left as the first step had it.
 const AGREED: f64 = 1.0 / 1_024.0;
 
-/// How many times a differenced column of a line is differenced again at a
-/// longer step, at most, besides the step on the other side.
+/// How many times a differenced column is differenced again at a longer
+/// step, at most, besides the step on the other side.
 const LONGER_STEPS: usize = 4;
 
 /// Whether a differenced entry whose output `current` changed by `change`
@@ -85,7 +85,7 @@ fn aimed(change: f64, current: f64) -> f64 {
     }
 }
 
-/// Where an entry of a line's differenced column stands while the column is
+/// Where an entry of a differenced column stands while the column is
 /// resolved (`System::resolve_column`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Entry {
@@ -493,13 +493,13 @@ pub struct StepReport {
     pub iterations: u32,
     /// Times the step was shortened before it was taken.
     pub shortenings: u32,
-    /// Entries of the load lines' differenced columns left unresolved
-    /// against the rounding of their outputs, over the trials of the step
-    /// (the contract, "Differenced columns of a line"). The step is taken
-    /// and its balance audited all the same: the count says that a line
-    /// component's relation was solved on a matrix some of whose entries
-    /// are a count of rounding units, the first step's difference, or
-    /// nothing. An output of a neighbour that does not answer an input at
+    /// Entries of differenced columns, a load line's or a block solve's,
+    /// left unresolved against the rounding of their outputs, over the
+    /// trials of the step (the contract, "Differenced columns"). The step is
+    /// taken and its balance audited all the same: the count says that a
+    /// line component's relation was solved, or an update made, on a matrix
+    /// some of whose entries are a count of rounding units, the first step's
+    /// difference, or nothing. An output that does not answer an input at
     /// all (a port of a two-port neighbour that the force at its other port
     /// does not move) is counted at every step, and its entry, nothing, is
     /// right. Above that, a caller that needs the line component's answer
@@ -2346,13 +2346,12 @@ pub struct System {
     connection_carried: Vec<Vec<f64>>,
     scratch_outputs: Vec<f64>,
     scratch_direction: Vec<f64>,
-    /// A line's differenced column as the first step left it, as its
-    /// entries are resolved, and where each stands.
+    /// A differenced column as the first step left it, as its entries are
+    /// resolved, and where each stands.
     scratch_first: Vec<f64>,
     scratch_kept: Vec<f64>,
     scratch_entries: Vec<Entry>,
-    /// Entries of the lines' differenced columns left unresolved in this
-    /// step.
+    /// Entries of differenced columns left unresolved in this step.
     unresolved: u32,
     time: Sum,
     steps: u64,
@@ -2617,17 +2616,21 @@ impl System {
 
     /// Column `local` of the port-map tangent of `node`, into
     /// `scratch_outputs`. `Ok(Some(dt))` asks to shorten. A differenced
-    /// column that `resolve`s is one of a load line's matrix, and is
-    /// resolved against the rounding of its outputs (`resolve_column`): the
-    /// line component's relation is solved on that matrix. The block
-    /// solve's columns are not: an update there is judged by its residual.
+    /// column is resolved against the rounding of its outputs
+    /// (`resolve_column`), a load line's and a block solve's alike: the
+    /// line component's relation is solved on the one, and an update is
+    /// made with the other. An update made with an entry the rounding took
+    /// moves the block by a fixed-point iteration in that entry's place,
+    /// which need not contract: two capacities near rest behind a
+    /// conductance, differenced, were refused at the iteration limit
+    /// (`tests/elements.rs`, the capacity near rest), as were three cells of
+    /// a timeline near rest with entries of 0 to 2 units.
     fn tangent_column(
         &mut self,
         node: usize,
         local: usize,
         dt_s: f64,
         group_scale: &[f64],
-        resolve: bool,
         cx: &Cx<'_>,
     ) -> Result<Option<f64>, SystemError> {
         let (inputs, outputs) = (self.node_inputs(node), self.node_outputs(node));
@@ -2667,8 +2670,8 @@ impl System {
         // overwrite: a component without a declared tangent is proposed
         // again, at the accepted inputs, before its block can be accepted.
         // The step is `sqrt(eps)` of the input's scale; where that moves an
-        // output of a line's column by less than its rounding, the column is
-        // differenced again at a longer step (`resolve_column`).
+        // output by less than its rounding, the column is differenced again
+        // at a longer step (`resolve_column`).
         //
         // A perturbed proposal that asks for a shorter step is not the
         // step's: the component took the step at the iterate itself, and
@@ -2705,10 +2708,8 @@ impl System {
                     }
                     // No step longer than `2^-10` of the input's scale, or
                     // of one unit where that is less.
-                    if resolve {
-                        let widest = scale.max(1.0) * WIDEST;
-                        self.resolve_column(node, index, side, widest, dt_s, cx)?;
-                    }
+                    let widest = scale.max(1.0) * WIDEST;
+                    self.resolve_column(node, index, side, widest, dt_s, cx)?;
                     return Ok(None);
                 }
             }
@@ -3361,7 +3362,7 @@ impl System {
                     {
                         self.scratch_outputs[..kept.len()].copy_from_slice(kept);
                     } else if let Some(shorter) =
-                        self.tangent_column(node, local, dt_s, group_scale, false, cx)?
+                        self.tangent_column(node, local, dt_s, group_scale, cx)?
                     {
                         return Ok(Err(shorter));
                     }

@@ -532,6 +532,82 @@ fn two_bodies_through_a_conductance_relax_by_the_discrete_factor_and_generate_th
     assert!((generated - exact).abs() <= 1.0e-6 * exact, "{generated} vs {exact}");
 }
 
+/// Two bodies of 0.02 J/K, at 300 K and `delta_k` above it, joined by a
+/// conductance of 1.98 W/K: one step of 10 ms from the start temperatures,
+/// the bodies added with their tangents (an affine block) or without them
+/// (differenced). The step's iterations and unresolved entries, or its
+/// refusal, and the two end temperatures.
+fn capacities_near_rest(
+    declared: bool,
+    delta_k: f64,
+) -> (Result<(u32, u32), SystemError>, f64, f64) {
+    let (c, g, dt) = (0.02, 1.98, 0.01);
+    let (t1, t2) = (300.0 + delta_k, 300.0);
+    let mut builder = SystemBuilder::new();
+    let mut add = |name: &str, kelvin: f64| {
+        let body = HeatCapacity::new(c).unwrap();
+        if declared {
+            builder.add_with_tangent(name, body, kelvin).unwrap()
+        } else {
+            builder.add(name, body, kelvin).unwrap()
+        }
+    };
+    let (hot, cold) = (add("hot", t1), add("cold", t2));
+    let wall = builder
+        .add_with_tangent("wall", Conductance::new(g).unwrap(), ())
+        .unwrap();
+    let port = |builder: &SystemBuilder, node, name| builder.port(node, name).unwrap();
+    let (a, b) = (port(&builder, wall, "a"), port(&builder, wall, "b"));
+    let (h, k) = (port(&builder, hot, "heat"), port(&builder, cold, "heat"));
+    builder.common_effort(h, &[a]).unwrap();
+    builder.common_effort(k, &[b]).unwrap();
+    let mut system = builder.seal().unwrap();
+    assert!(system.guess(a, &[t1]));
+    assert!(system.guess(b, &[t2]));
+    let taken =
+        with_cx(|cx| system.step(dt, cx)).map(|report| (report.iterations, report.unresolved));
+    (
+        taken,
+        *system.state::<f64>(hot).unwrap(),
+        *system.state::<f64>(cold).unwrap(),
+    )
+}
+
+#[test]
+fn a_capacity_near_rest_differenced_at_rounding_takes_the_affine_count() {
+    // Each body's column, its mean temperature against its heat input, is
+    // 0.5 dt / C = 0.25 K/W. A body added without its tangent is differenced
+    // at sqrt(eps) of the block's largest heat rate, G delta = 7.9e-9 W: a
+    // move of 1.2e-16 W, which changes its end temperature by 5.9e-17 K,
+    // about 1e-3 of the last place of 300 K. The entry the first difference
+    // leaves is nothing, and an update made with it is a fixed-point
+    // iteration of factor 0.5 G dt (1/C + 1/C) = 0.99, which in 25
+    // iterations does not close the first test: refused so, NotConverged,
+    // until a block's columns were resolved as a line's are (2026-11-14).
+    // Differenced again at a longer step, the column is the body's to the
+    // rounding of that step, and the block takes the step in the iterations
+    // of the same bodies declared, to the same temperatures, no entry left
+    // unresolved.
+    let delta_k = 4.0e-9;
+    let (affine, hot_a, cold_a) = capacities_near_rest(true, delta_k);
+    let (differenced, hot_d, cold_d) = capacities_near_rest(false, delta_k);
+    eprintln!(
+        "two capacities near rest, (iterations, unresolved): declared {affine:?}, differenced \
+         {differenced:?}; hot {hot_a} and {hot_d} K, cold {cold_a} and {cold_d} K"
+    );
+    let (affine, differenced) = (affine.unwrap(), differenced.unwrap());
+    assert_eq!(differenced.0, affine.0);
+    assert_eq!(differenced.1, 0);
+    // A last place of 300 K is 5.7e-14 K.
+    let ulps = |x: f64, y: f64| (x - y).abs() / 5.684_341_886_080_802e-14;
+    assert!(ulps(hot_d, hot_a) <= 1.0 && ulps(cold_d, cold_a) <= 1.0);
+    // The difference relaxed by the trapezoid's factor, (1 - 0.99) / (1 + 0.99).
+    let start = (300.0 + delta_k) - 300.0;
+    let factor = (1.0 - 0.99) / (1.0 + 0.99);
+    let relaxed = hot_d - cold_d;
+    assert!(ulps(relaxed, start * factor) <= 4.0, "{relaxed}");
+}
+
 #[test]
 fn a_heat_node_keeps_its_balance_and_refuses_what_leaves_it_no_temperature() {
     let conductances = [0.8, 2.5, 0.3];

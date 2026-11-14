@@ -245,9 +245,7 @@ impl System {
                 continue;
             }
             let local = index - self.input_start[node];
-            if let Some(shorter) =
-                self.tangent_column(node, local, dt_s, &work.group_scale, true, cx)?
-            {
+            if let Some(shorter) = self.tangent_column(node, local, dt_s, &work.group_scale, cx)? {
                 return Ok(Some(shorter));
             }
             // A declared tangent's column depends on the inputs, the

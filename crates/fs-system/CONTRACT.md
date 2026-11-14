@@ -456,7 +456,7 @@ relation allows there.
   declare their tangent, and the slope at the step's start for others that
   declare one. A neighbour that is differenced gives it to the accuracy of
   the difference, each entry resolved against the rounding of its output or
-  counted (below, "Differenced columns of a line"). (74529fda7f said `C` is
+  counted (below, "Differenced columns"). (74529fda7f said `C` is
   exact for every neighbour that is linear within the step. Found wrong by
   its review. Until 2026-11-12 an entry whose change the output's rounding
   took was handed as it came, a count of rounding units or nothing, a stated
@@ -553,16 +553,17 @@ relation allows there.
   a reversal) is first-order accurate, and what happens in it is its own
   law of a step.
 
-**Differenced columns of a line.** A component that declares no tangent is
+**Differenced columns.** A component that declares no tangent is
 differenced: one input moved by `sqrt(eps)` of its scale (its own size or
 the largest of its group in the block, one unit where both are nothing), the
 column the change of its outputs over the move. Where the input is small and
 an output is not (a mass that moves with little force on it, a spring at
 rest that holds a load), the move changes the output by less than its
-rounding, and the entry is a count of rounding units, or nothing. The
-columns that form a load line's matrix, the neighbours' at the step's start,
-are resolved against that rounding. The shares below are numerical policy of
-the differenced branch:
+rounding, and the entry is a count of rounding units, or nothing. Every
+differenced column is resolved against that rounding: those that form a load
+line's matrix, the neighbours' at the step's start, and those a block
+solve's updates are made with. The shares below are numerical policy of the
+differenced branch:
 
 - An entry is resolved when its change is at least `2^-32` of its output,
   `2^20` units in its last place: a change of `2^20` units puts the column's
@@ -600,13 +601,31 @@ the differenced branch:
   is right. The step is taken and audited all the same; a caller that needs
   the line component's answer to more than the step's balance declares the
   neighbour's tangent, which the line is handed as declared, to the bit.
-- The block solve's own columns are differenced once, as before: an update
-  there is judged by its residual. (Resolved as well, on a scratch kernel of
-  2026-11-12, they took the drawn graphs below from 695778 updates to 674215
-  on a Mac; before longer steps were kept off jumps they gave a sliding
-  slider's force, which does not answer its released flow, columns of 120.5
-  and 25.2 once a longer step carried it to sticking, and the drawn graphs
-  took 790554.)
+- The block solve's own columns are resolved the same way, since
+  2026-11-14. An entry off by about `1/N` of itself, after a change of `N`
+  units, leaves about `1/N` of the residual after an update; `2^20` units
+  close the first test's `2^-40` of a scale in the two updates an exact
+  block takes, where `2^10` would take four or five. Differenced once,
+  as they were before, an update made with an entry the rounding took is a
+  fixed-point iteration in that entry's place, which need not contract:
+  two capacities near rest behind a conductance (`tests/elements.rs`), and
+  three cells of a backward-Euler timeline near rest whose entries were 0 to
+  2 units (fs-couple `friction_heat`, two contacts sharing a cell, refused
+  at its step 19 at the iteration limit). Most columns differenced again are
+  ones with an output whose change is exactly nothing, which a longer step
+  cannot tell from a change that rounded away, at one proposal each.
+  Counted on ts2 with a probe build, 2026-11-14: the fs-system tests
+  differenced 1059209 block columns again in 1213654 block solves, at
+  1309118 more proposals and about the same run time; fs-couple's
+  `friction_heat` 5208 columns in 1682 solves (its tests 37 s to 61 s); the
+  Hertz graph 165 columns, its patch asked 31 and 51 times where it had been
+  asked 16 and 26. A component that declared its
+  structural zeros would spare those proposals; none does. (On a scratch
+  kernel of 2026-11-12, resolved block columns took the drawn graphs below
+  from 695778 updates to 674215 on a Mac; before longer steps were kept off
+  jumps they gave a sliding slider's force, which does not answer its
+  released flow, columns of 120.5 and 25.2 once a longer step carried it to
+  sticking, and the drawn graphs took 790554.)
 
 **Requests to shorten inside a loop.** A component of a looped block is
 proposed at every iterate of the block's solve, and, if it declares no
@@ -1348,8 +1367,9 @@ behind the contract), two linked cells with a law each.
   bit; the explicit rule and SDIRK2 refuse the option. Two cells with no
   link inside, the kernel's `Conductance` of 0.2 W/K between their ports,
   against the same cells joined by the owner's link and stepped by the
-  owner, 40 steps of 0.5 s: 5.7e-14 K apart (allowed 4.1e-10 K from the two
-  solves' tolerances); the same graph with the default mean-temperature
+  owner, 40 steps of 0.5 s: 1.1e-13 K apart (5.7e-14 K before a block's
+  differenced columns were resolved; allowed 4.1e-10 K from the two solves'
+  tolerances); the same graph with the default mean-temperature
   ports is 5.5e-2 K away, the trapezoidal rule across the wall.
 - A contact carried through the ports
   (`ConductionObserver::with_links_carried_outside`, fs-thermal): two cells
@@ -1357,7 +1377,8 @@ behind the contract), two linked cells with a law each.
   exposed face; the conduction graph names the contact as carried outside
   and the kernel's `Conductance` of 0.2 W/K joins the two end-temperature
   ports. Against the owner's backward-Euler solve with the contact's
-  conduction inside, 40 steps of 0.5 s: 5.7e-14 K apart (allowed 4.1e-10 K);
+  conduction inside, 40 steps of 0.5 s: 1.7e-13 K apart (5.7e-14 K before a
+  block's differenced columns were resolved; allowed 4.1e-10 K);
   16.758 J to the room in the owner's audit and in the kernel's sink, to
   1e-9 of it; the same cells not in contact, whose films act on the whole
   faces, end 0.19 K away, which is what losing the covered area would be.
@@ -1575,16 +1596,19 @@ component drives the law with the tests' input and history; the cells the
 module publishes are the handed increments added back and say nothing more.
 The six base cases:
 - one cell a side with unequal half cells, 10 W for 0.2 s: accepted, the
-  module's largest residual at the graph's endpoint 2.2e-13 J; the plane's
+  module's largest residual at the graph's endpoint 9.1e-14 J (2.2e-13 J
+  before a block's differenced columns were resolved, 2026-11-14); the plane's
   temperature and the cells' energies equal the tests' own LU solve in
   temperature coordinates to 1e-12; the share of the first body is the
   tests' closed form, on the module's report and on the graph's own wires;
   the ledger has 2 J dissipated by the interface, 2 J stored in the cells,
   and the interface's entropy is the heat over the plane's temperature;
-- no slip, the first cell 10 K warmer: accepted (6.8e-14 J), the exchange is
+- no slip, the first cell 10 K warmer: accepted (1.6e-13 J; 6.8e-14 J
+  before), the exchange is
   the tests' closed form and nothing is dissipated;
 - a coefficient `0.8 - 0.01 (T - 300 K)` with films to a 300 K room, 80
-  steps of 0.25 s: every step accepted (4.1e-12 J at worst); the plane is
+  steps of 0.25 s: every step accepted (4.3e-12 J at worst; 4.1e-12 J
+  before); the plane is
   2.8e-12 K at worst from the module's own run from its LU endpoints, and
   1.5e-12 K from the analytic steady temperature at the end; 153.562 J are
   in the room's sink, as the module's reports have them;
@@ -1597,11 +1621,12 @@ The six base cases:
 - one owner for the contact: the conduction binding refuses a contact both
   conducted and carried outside, and the implicit solve refuses one left
   unsaid;
-- 16, 32 and 64 cells a side, 512 steps: every step accepted (1.7e-13 J at
-  worst); beside each grid the module's own run from its tests' LU
-  endpoints, from which the graph's plane is 2.4e-12 K at worst at any step
-  (asserted to 1e-11 K) and each body's total heat 2.9e-14 J at worst
-  (asserted to 1e-12 J); the partition and plane-temperature errors against
+- 16, 32 and 64 cells a side, 512 steps: every step accepted (6.5e-14 J at
+  worst; 1.7e-13 J before); beside each grid the module's own run from its
+  tests' LU endpoints, from which the graph's plane is 8.0e-13 K at worst
+  at any step (2.4e-12 K before; asserted to 1e-11 K) and each body's total
+  heat 3.0e-14 J at worst (2.9e-14 J before; asserted to 1e-12 J); the
+  partition and plane-temperature errors against
   the half-space solution (5.20833182e-3 and 4.31961554e-3 at 16 cells,
   3.25520296e-4 and 1.38133321e-4 at 64) fall with the grid as the module's
   test requires.
@@ -1979,8 +2004,10 @@ material, a surface card, a temperature or a slip history stays in `fs-tribo`.
   with drawn velocities, the slider to the ground or between two of them,
   springs (a quarter of them differenced) and dampers between neighbours
   and to a wall, a push up to 14 N on one, steps of 3e-6 to 1e-2 s. No
-  step is refused; the slider slides at some step in 208 of them; 697264
-  updates in their 450000 steps on a Linux host (ts2 at 3075f215f3, with
+  step is refused; the slider slides at some step in 208 of them; 492653
+  updates in their 450000 steps on a Linux host (ts2, a block's differenced
+  columns resolved, 2026-11-14; 536349 at 70e5607b6a before it; 697264 at
+  3075f215f3, with
   turned recorded stuck; 697206 there before it; 695720 at 3a42d0c16d;
   695799 there before the
   columns of a line were resolved, 2026-11-12; 695778 on a Mac before, the
@@ -2013,9 +2040,22 @@ material, a surface card, a temperature or a slip history stays in `fs-tribo`.
   on a spring of 400 N/m that holds 2 N of a push rising through the 11.8 N
   the slider and the spring hold together. The spring's tangent declared or
   differenced, the mass breaks away in step 400 and the run goes on to 1000
-  steps; the two end 1e-17 m apart. (Until 2026-11-12 a stated limit: with
+  steps; the two end 2.7e-15 m apart (2.5e-15 m on ts2 at 70e5607b6a,
+  before a block's differenced columns were resolved; this entry said
+  1e-17 m). (Until 2026-11-12 a stated limit: with
   the spring differenced, step 400 was refused as not converged, the mass's
   force wire flipping by the static limit less the sliding force, 3.92 N.)
+- A block's differenced column (`tests/elements.rs`, the capacity near
+  rest): two bodies of 0.02 J/K joined by a conductance of 1.98 W/K, one
+  4e-9 K above the other at 300 K, one step of 10 ms. Added without their
+  tangents, the first difference moves each body's temperature by about
+  1e-3 of its last place, and the entry is nothing; an update made with it
+  is a fixed-point iteration of factor 0.99. Not resolved (70e5607b6a, ts2,
+  2026-11-14), the step was refused: `NotConverged` after 25 iterations,
+  the worst input `wall.a` at a residual of 1.6e-9. Resolved, the step
+  takes the one iteration of the same bodies with their tangents declared
+  (an affine block), no entry left unresolved, and ends at the same
+  temperatures (equal on ts2; the test asserts a last place).
 - Differenced columns of a line (`tests/load_line.rs`):
   - The 18 masses: a probe on a line beside a 2 kg mass added without its
     tangent, at 0, 1 and 100 m/s under 1 N, 1e-3 N, 1e-6 N, 1e-9 N, 1e-12 N
@@ -2476,8 +2516,8 @@ solved together. Nothing in the module is deleted.
   PI controller (step doubling and proportional control are available); no
   durable snapshot encoding, process restart or fork; no adjoint. These are beads `.5.2` to
   `.5.10` of the epic.
-- An entry of a differenced column of a line is resolved against the
-  rounding of its output, `eps` of its size. An output that is a small sum
+- An entry of a differenced column, a line's or a block's, is resolved
+  against the rounding of its output, `eps` of its size. An output that is a small sum
   of large terms (a modal structure's velocity at a port, a sum over its
   modes) rounds by the terms: its entries can be further off than 1e-6, and
   its two sides can differ by more than `2^-10` with no kink. On a bowed
