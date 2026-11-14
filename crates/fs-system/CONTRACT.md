@@ -2988,3 +2988,38 @@ coordinate/frame/clock declarations, but runtime `PortSpec` power ports do not
 enforce those labels: attached owners must already use the same coordinates.
 This scalar relation supplies no field metric, coordinate conversion, material
 law or hardware validity claim.
+
+## Signal-modulated lossless transformer
+
+`elements::ModulatedTransformer::new(kind_a, kind_b)` adds a scalar transformer
+whose ratio is a signal from a controller, geometry or constitutive owner.
+Port `a` receives flow and returns effort; `b` receives effort and returns
+flow. Inputs are `[f_a, e_b, r]`, outputs `[r e_b, -r f_a]`, with all flows
+positive into the transformer. The same held ratio multiplies both sides, so
+power cancels to arithmetic roundoff even as it changes sign or passes through
+zero. The ratio signal carries no energy. A constant nonzero ratio reproduces
+the existing fixed transformer between the attached owners. Domains may differ;
+the caller supplies the ratio in the required SI conversion units.
+
+The complete map is bilinear (`Class::Smooth`); its analytic JVP and VJP include
+the ratio column as well as both physical columns. The component stores no
+energy and dissipates none. Invalid extents, nonfinite inputs, nonpositive or
+nonfinite steps, and unrepresentable outputs or work refuse before publishing
+caller buffers. Proposals and tangent actions allocate nothing and poll
+cancellation before work and before publication. Work roundoff is bounded from
+the two exchange magnitudes before cancellation.
+
+`tests/modulated_transformer.rs` checks Component and tangent conformance,
+signed and zero ratios, agreement with the fixed transformer, a varying-ratio
+mass/capacitor graph against its independent midpoint rotation, and a ratio
+fed back from accepted storage state against an independently eliminated
+recurrence. Both graphs close their energy ledger. Malformed, overflowing and
+cancelled calls leave caller buffers unchanged.
+
+The ratio is held over each step; its source owns sampling and event resolution.
+No crank/cam geometry, displacement constraint, ratio-actuator work, physical
+material validity, or control stability is inferred. Two integral-causality
+inertias still need a constraint solve or lowering. Only a mean flow is returned
+at `b` (`EndOfStep::Untold`), so endpoint-dependent load lines are not admitted
+there. This component advances the variable-ratio part of bead `.5.3`; the
+other connection and kinematics work remains open.
