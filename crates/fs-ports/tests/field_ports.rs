@@ -281,3 +281,96 @@ fn an_inertial_field_obeys_traction_work_and_rejects_a_euclidean_account() {
         ));
     });
 }
+
+/// A small generator of the same numbers on every build (splitmix64), as
+/// fs-system's load-line tests draw theirs.
+struct Draw(u64);
+
+impl Draw {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn between(&mut self, low: f64, high: f64) -> f64 {
+        low + (high - low) * (self.next() >> 11) as f64 / 9_007_199_254_740_992.0
+    }
+
+    /// A number in `[-1, 1)` times a power of ten drawn in `[-3, 3)`.
+    fn spread(&mut self) -> f64 {
+        self.between(-1.0, 1.0) * 10.0_f64.powf(self.between(-3.0, 3.0))
+    }
+}
+
+#[test]
+fn a_field_port_pairs_drawn_vectors_by_its_metric() {
+    let mut draw = Draw(20_261_114);
+    let mut worst = 0.0_f64;
+    for case in 0..400 {
+        let n = 1 + (draw.next() % 6) as usize;
+        // A^T A + n I, scaled: positive definite, and symmetric to the bit,
+        // since a mirrored entry sums the same products in the same order.
+        let a: Vec<f64> = (0..n * n).map(|_| draw.between(-1.0, 1.0)).collect();
+        let scale = 10.0_f64.powf(draw.between(-6.0, 6.0));
+        let mut entries = vec![0.0; n * n];
+        for row in 0..n {
+            for column in 0..n {
+                let mut sum = if row == column { n as f64 } else { 0.0 };
+                for k in 0..n {
+                    sum += a[k * n + row] * a[k * n + column];
+                }
+                entries[row * n + column] = scale * sum;
+            }
+        }
+        let field_metric = DualityMetric::new(width(n), entries.clone()).expect("metric");
+        let effort: Vec<f64> = (0..n).map(|_| draw.spread()).collect();
+        let flow: Vec<f64> = (0..n).map(|_| draw.spread()).collect();
+        let dt = draw.between(1.0e-6, 0.1);
+        // Independent: every term e_i M_ij f_j in one running sum, columns
+        // outermost, the other way round from the port's row sums.
+        let (mut want, mut size) = (0.0_f64, 0.0_f64);
+        for column in 0..n {
+            for row in 0..n {
+                let term = effort[row] * entries[row * n + column] * flow[column];
+                want += term;
+                size += term.abs();
+            }
+        }
+        want *= dt;
+        size *= dt;
+        // With u = eps / 2 and S the sum of |e_i M_ij f_j|: the port's row
+        // sums, its products with e and its sum of them are off by at most
+        // (2n + 1) u S; the judge's n^2 terms of two products each by
+        // (n^2 + 2) u S; dt rounds each once more. That is (n^2 + 2n + 5) u S,
+        // and (n^2 + 2n + 4) eps S holds it about twice over.
+        let allowed = (n * n + 2 * n + 4) as f64 * f64::EPSILON * size;
+        let mut paired = Vec::new();
+        for role in [PortRole::EffortIn, PortRole::FlowIn] {
+            let field = PortSpec::field_power(
+                StableId::new("surface").expect("id"),
+                PortKind::MechanicalForceVelocity,
+                role,
+                field_metric.clone(),
+            )
+            .expect("field port");
+            let (input, output) = if role == PortRole::EffortIn {
+                (&effort, &flow)
+            } else {
+                (&flow, &effort)
+            };
+            let got = field.energy_in_j(dt, input, output);
+            assert!(
+                (got - want).abs() <= allowed,
+                "case {case}, width {n}: {got:e} J against {want:e} within {allowed:e}"
+            );
+            worst = worst.max((got - want).abs() / allowed);
+            paired.push(got.to_bits());
+        }
+        // Whichever side the port receives, the same bits.
+        assert_eq!(paired[0], paired[1], "case {case}");
+    }
+    eprintln!("drawn field pairings: at most {worst:.4} of the allowance from e^T M f");
+}
