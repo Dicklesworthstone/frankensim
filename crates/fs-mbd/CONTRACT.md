@@ -3579,7 +3579,9 @@ frame, topology, joint coordinates and base pose remain unchanged. Loaded mass,
 COM and full rotated centroidal inertia use a reduced-mass parallel-axis sum;
 a mass increment below representable resolution refuses. The original native
 articulated inverse-mass recursion solves all base and joint recoil from the
-combined incoming momenta. No dense generalized mass matrix is assembled.
+incoming momentum mismatch against the actual carried velocity, added to the
+state's own rates, so an exactly carried payload changes no velocity. No dense
+generalized mass matrix is assembled.
 
 Optional existing constant affine gear/lock rows react with the loaded inertia
 before final speed-limit admission. Their initial position and velocity must
@@ -8971,9 +8973,14 @@ model construction and one free-floating articulated-body momentum solve.
 Topology, link frames, joints, base pose and joint coordinates remain unchanged.
 There is no sequential capture dynamics or dense generalized mass assembly.
 
-Original per-link momentum and every incoming spin/orbital contribution use the
-existing compensated spatial sum in one translating inertial frame. The final
-loaded model supplies the coupled base and joint recoil. Existing ideal constant
+Every incoming-minus-actual-carried momentum mismatch uses the existing
+compensated spatial sum in one translating inertial frame, as the closed-mechanism
+capture does. The final loaded model supplies the coupled base and joint recoil
+from that mismatch, added to the original rates. An exactly carried payload
+changes no velocity: the finite inertia assembly defect stays in the inventory
+instead of becoming a rounded velocity jump counted as removed energy (before
+this, a payload co-moving with a 1e12 rad/s spin was refused for 2^-26 J of
+removed energy, the quadratic of one ulp of that spin). Existing ideal constant
 gear/lock rows reuse their original prepared response on that loaded inertia
 before final speed admission. A transient velocity from an isolated or partially
 loaded capture cannot reject an admissible simultaneous endpoint.

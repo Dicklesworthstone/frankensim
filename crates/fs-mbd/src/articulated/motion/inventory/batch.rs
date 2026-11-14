@@ -20,10 +20,8 @@ use crate::articulated::motion::spatial_loads::implicit::distance::{
 };
 use crate::articulated::motion::{FreeFloatingMotionState, SpatialSum};
 use crate::articulated::{
-    ArticulatedModel, BaseState, FreeFloatingBaseState, Link, forward_kinematics,
-    free_floating_impulse_delta, validate_twist,
+    ArticulatedModel, FreeFloatingBaseState, Link, free_floating_impulse_delta, validate_twist,
 };
-use fs_ga::{Twist, Vec3};
 use fs_math::dd::Dd;
 
 /// One independent arriving body and its link in the original target tree.
@@ -159,41 +157,41 @@ pub(super) fn capture_evaluated(
         &mut cancelled,
     )?;
     let boost = account_boost(model, &before_kin)?;
+    let mut sums: Vec<_> = (0..model.link_count())
+        .map(|_| SpatialSum::default())
+        .collect();
+    for (index, (input, attachment)) in inputs.iter().zip(&attachments).enumerate() {
+        if index % 64 == 0 {
+            poll(&mut cancelled)?;
+        }
+        let payload = input.payload;
+        let carried = payload_at_link(
+            &before_kin,
+            input.target_link,
+            attachment.link_from_payload,
+            payload.inertia,
+        )?;
+        // Resolve each weak mismatch before applying inertia. The same
+        // payload axes and boost subtraction preserve an exactly carried
+        // input as zero even when finite tangent defects are admitted.
+        let incoming = twist_in_frame(payload.twist_body, payload.world_from_body, boost)?;
+        let carried = twist_in_frame(carried.twist_body, payload.world_from_body, boost)?;
+        let mismatch = payload
+            .inertia
+            .momentum(incoming.minus(carried))?
+            .transform_by(&attachment.link_from_payload);
+        sums[input.target_link].add_world_wrench(mismatch.force, mismatch.torque, &[]);
+    }
+    let mut body_impulses = Vec::with_capacity(sums.len());
+    for (index, sum) in sums.into_iter().enumerate() {
+        if index % 64 == 0 {
+            poll(&mut cancelled)?;
+        }
+        body_impulses.push(sum.checked_wrench("simultaneous capture momentum mismatch")?);
+    }
     let (state_after, impulse, multipliers, reaction) = if let Some((loops, config)) =
         bilateral_rows
     {
-        let mut sums: Vec<_> = (0..model.link_count())
-            .map(|_| SpatialSum::default())
-            .collect();
-        for (index, (input, attachment)) in inputs.iter().zip(&attachments).enumerate() {
-            if index % 64 == 0 {
-                poll(&mut cancelled)?;
-            }
-            let payload = input.payload;
-            let carried = payload_at_link(
-                &before_kin,
-                input.target_link,
-                attachment.link_from_payload,
-                payload.inertia,
-            )?;
-            // Resolve each weak mismatch before applying inertia. The same
-            // payload axes and boost subtraction preserve an exactly carried
-            // input as zero even when finite tangent defects are admitted.
-            let incoming = twist_in_frame(payload.twist_body, payload.world_from_body, boost)?;
-            let carried = twist_in_frame(carried.twist_body, payload.world_from_body, boost)?;
-            let mismatch = payload
-                .inertia
-                .momentum(incoming.minus(carried))?
-                .transform_by(&attachment.link_from_payload);
-            sums[input.target_link].add_world_wrench(mismatch.force, mismatch.torque, &[]);
-        }
-        let mut body_impulses = Vec::with_capacity(sums.len());
-        for (index, sum) in sums.into_iter().enumerate() {
-            if index % 64 == 0 {
-                poll(&mut cancelled)?;
-            }
-            body_impulses.push(sum.checked_wrench("simultaneous capture momentum mismatch")?);
-        }
         poll(&mut cancelled)?;
         let reaction = joint::apply_impulses(
             &model_after,
@@ -223,73 +221,31 @@ pub(super) fn capture_evaluated(
         let multipliers = reaction.joint_multipliers.clone();
         (state_after, impulse, multipliers, Some(reaction))
     } else {
-        let boost_base = state
-            .base
-            .world_from_base
-            .rotation()
-            .inverse()
-            .rotate(boost)?;
-        let centered = forward_kinematics(
-            model,
-            BaseState::prescribed(
-                state.base.world_from_base,
-                state
-                    .base
-                    .twist_body
-                    .minus(Twist::new(Vec3::default(), boost_base)),
-                Twist::zero(),
-            ),
-            &state.joint_position,
-            &state.joint_velocity,
-        )?;
-        poll(&mut cancelled)?;
-        let mut sums = Vec::with_capacity(model.link_count());
-        for (index, link) in model.links().iter().enumerate() {
-            if index % 64 == 0 {
-                poll(&mut cancelled)?;
-            }
-            let body = link.inertia().momentum(centered.body_twist[index])?;
-            let mut sum = SpatialSum::default();
-            sum.add_world_wrench(body.force, body.torque, &[]);
-            sums.push(sum);
-        }
-        for (index, (input, attachment)) in inputs.iter().zip(&attachments).enumerate() {
-            if index % 64 == 0 {
-                poll(&mut cancelled)?;
-            }
-            let incoming = input
-                .payload
-                .inertia
-                .momentum(twist_in_frame(
-                    input.payload.twist_body,
-                    input.payload.world_from_body,
-                    boost,
-                )?)?
-                .transform_by(&attachment.link_from_payload);
-            sums[input.target_link].add_world_wrench(incoming.force, incoming.torque, &[]);
-        }
-        let mut body_momenta = Vec::with_capacity(sums.len());
-        for (index, sum) in sums.into_iter().enumerate() {
-            if index % 64 == 0 {
-                poll(&mut cancelled)?;
-            }
-            body_momenta.push(sum.checked_wrench("simultaneous capture link momentum")?);
-        }
-        poll(&mut cancelled)?;
+        // The loaded tree takes only the mismatch impulse, from the state's
+        // own velocity: an exactly carried payload changes no velocity, and the
+        // finite assembly defect stays in the inventory rather than becoming a
+        // rounded velocity jump that would be counted as exchanged energy.
         let solved = free_floating_impulse_delta(
             &model_after,
             &state.joint_position,
             &vec![0.0; model.dof_count()],
-            &body_momenta,
+            &body_impulses,
         )?;
         poll(&mut cancelled)?;
+        let mut joint_velocity = Vec::with_capacity(solved.joint.len());
+        for (index, (rate, delta)) in state.joint_velocity.iter().zip(&solved.joint).enumerate() {
+            if index % 64 == 0 {
+                poll(&mut cancelled)?;
+            }
+            joint_velocity.push(finite(rate + delta, "payload joint rate")?);
+        }
         let mut state_after = FreeFloatingMotionState {
             base: FreeFloatingBaseState::new(
                 state.base.world_from_base,
-                solved.base.plus(Twist::new(Vec3::default(), boost_base)),
+                state.base.twist_body.plus(solved.base),
             ),
             joint_position: state.joint_position.clone(),
-            joint_velocity: solved.joint,
+            joint_velocity,
         };
         let mut impulse = vec![0.0; 6 + model.dof_count()];
         let mut multipliers = Vec::new();
