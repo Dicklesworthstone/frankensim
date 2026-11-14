@@ -361,8 +361,10 @@ fn live_contact_adaptive_natural_air_and_mixed_goals_retain_complete_boundary_fe
             assert!(row.f64_field("estimated_change_k").unwrap() + 1e-12 >= measured.abs());
             assert!(row.f64_field("dual_residual").unwrap() <= 1e-9);
         }
+        // The receipt carries `natural_convection` only when a natural law
+        // runs; without one the key is absent, not null (fs-cli solve.rs).
         assert_eq!(
-            receipt.get("natural_convection").unwrap() != &J::Null,
+            receipt.get("natural_convection").is_some(),
             natural
         );
         assert_eq!(receipt.get("conjugate").unwrap() != &J::Null, air);
@@ -541,7 +543,7 @@ fn live_contact_adaptive_radiation_keeps_vacuum_natural_and_air_heat_physical() 
         let last = history.last().unwrap();
         assert!((maximum(&field) - number(last, "t_max_k")).abs() < 1e-9);
         assert_eq!(
-            receipt.get("natural_convection").unwrap() != &J::Null,
+            receipt.get("natural_convection").is_some(),
             mode == "natural"
         );
         assert_eq!(receipt.get("conjugate").unwrap() != &J::Null, mode == "air");
