@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_ports::component::conformance::{
-    Case, Failure, Observed, check_component, check_port_tangent,
+    Case, Failure, Observed, Reversal, ReversalAllowance, check_component, check_port_tangent,
+    check_time_reversal,
 };
 use fs_ports::component::{
     Class, Component, ContractViolation, PortRole, PortSpec, PortTangent, Proposal, Receipt,
@@ -90,6 +91,153 @@ where
     })
 }
 
+/// Unit roundoff of f64.
+const U: f64 = f64::EPSILON / 2.0;
+
+/// `n u / (1 - n u)`: a product of `n` factors `(1 + d)`, `|d| <= u`, lies
+/// within it of 1.
+fn gamma(n: u32) -> f64 {
+    let nu = f64::from(n) * U;
+    nu / (1.0 - nu)
+}
+
+/// The largest ratio of a reversal's gap to its allowance, per law, over a
+/// sweep, and how many reversals passed.
+#[derive(Default)]
+struct Reversals {
+    checked: usize,
+    outputs: f64,
+    observed: f64,
+    energy: f64,
+}
+
+impl Reversals {
+    fn record(&mut self, reversal: &Reversal) {
+        // A gap of zero is no part of its allowance, also of an allowance of zero.
+        let ratio = |gap: f64, bound: f64| if gap > 0.0 { gap / bound } else { 0.0 };
+        let worst = |gaps: &[f64], bounds: &[f64]| {
+            let mut largest = 0.0_f64;
+            for (gap, bound) in gaps.iter().zip(bounds) {
+                largest = largest.max(ratio(*gap, *bound));
+            }
+            largest
+        };
+        let allowance = &reversal.allowance;
+        let outputs = worst(&reversal.output_gaps, &allowance.outputs);
+        let observed = worst(&reversal.observed_gaps, &allowance.observed);
+        let energy = ratio(reversal.energy_gap_j, allowance.energy_j);
+        self.outputs = self.outputs.max(outputs);
+        self.observed = self.observed.max(observed);
+        self.energy = self.energy.max(energy);
+        self.checked += 1;
+    }
+}
+
+/// Time reversal of a mass: the position is even, the velocity odd.
+fn reversed_motion(state: &Motion) -> Motion {
+    Motion {
+        position_m: state.position_m,
+        velocity_m_s: -state.velocity_m_s,
+    }
+}
+
+/// A mass there and back under `reverse`, with bounds derived from the
+/// rounding of `Mass::propose` and `Mass::stored_energy_j` (every operation
+/// exact times `(1 + d)`, `|d| <= u`). With `a = fl(fl(dt F) / m)`, the same
+/// bits both ways, the forward step is `v1 = fl(v0 + a)`,
+/// `y = 0.5 fl(v0 + v1)` and `x1 = fl(x0 + fl(dt y))`; from `(x1, -v1)` the
+/// backward one gives `v2 = fl(a - v1) = -fl(v1 - a)`.
+/// - Velocity: `fl(fl(v0 + a) - a)` is within `gamma(2) (|v0| + |v1|)` of
+///   `v0`.
+/// - Output: `0.5 fl(v2 - v1)` is within the same of `-y`.
+/// - Position: within `gamma(3) dt (|v0| + |v1| + |v2|) + gamma(1) (|x1| + |x2|)`.
+/// - Energy `((m / 2) v) v`, two roundings: within
+///   `(m / 2) gamma(2) ((|v0| + |v1|) (|v0| + |v2|) + v0^2 + v2^2)`.
+fn mass_reverses(
+    mass: &Mass,
+    motion: &Motion,
+    stale: &Motion,
+    dt_s: f64,
+    force_n: f64,
+    reverse: &dyn Fn(&Motion) -> Motion,
+) -> Result<Reversal, Failure<ElementError>> {
+    let observe = |state: &Motion| vec![state.position_m, state.velocity_m_s];
+    let mass_kg = mass.mass_kg();
+    let allowance = |start: &Motion, forward_end: &Motion, back_end: &Motion| {
+        let [x1, x2] = [forward_end, back_end].map(|state| state.position_m.abs());
+        let [v0, v1, v2] = [start, forward_end, back_end].map(|state| state.velocity_m_s.abs());
+        let velocity = gamma(2) * (v0 + v1);
+        ReversalAllowance {
+            outputs: vec![velocity],
+            observed: vec![
+                gamma(3) * dt_s * (v0 + v1 + v2) + gamma(1) * (x1 + x2),
+                velocity,
+            ],
+            energy_j: 0.5 * mass_kg * gamma(2) * ((v0 + v1) * (v0 + v2) + v0 * v0 + v2 * v2),
+        }
+    };
+    let inputs = [force_n];
+    let case = Case {
+        state: motion,
+        stale,
+        dt_s,
+        inputs: &inputs,
+    };
+    with_cx(|cx| check_time_reversal(mass, &case, reverse, &observe, &allowance, cx))
+}
+
+/// A spring there and back. Its extension is even, so `R` is the identity.
+/// The increment `t = fl(dt fl(f_a - f_b))` flips exactly with the flows, so
+/// the backward step ends at `e2 = fl(fl(e0 + t) - t)`. With
+/// `M = max(|e0|, |e2|)`, and the rounding counted from `Spring::propose`:
+/// - Extension: within `gamma(2) (|e0| + |e1|)` of `e0`.
+/// - Force: `discrete_force` is bitwise symmetric in its two ends, so the
+///   gap is the extension's times the slope bound
+///   `k / 2 + |c| / 4 (e1^2 + 2 |e1| M + 3 M^2)`, plus `gamma(6)` of the
+///   sizes `|a + b| (k / 2 + |c| / 4 (a^2 + b^2))` of both evaluations.
+/// - Energy: the extension's gap times `k M + |c| M^3`, plus `gamma(5)` of
+///   `potential_size` at both ends.
+fn spring_reverses(
+    spring: &Spring,
+    stiffness: f64,
+    cubic: f64,
+    extension: f64,
+    dt_s: f64,
+    flows: [f64; 2],
+) -> Reversal {
+    let unchanged = |state: &f64| *state;
+    let observe = |state: &f64| vec![*state];
+    let allowance = |start: &f64, forward_end: &f64, back_end: &f64| {
+        let (e0, e1, e2) = (*start, *forward_end, *back_end);
+        let travel = gamma(2) * (e0.abs() + e1.abs());
+        let largest = e0.abs().max(e2.abs());
+        let slope = 0.5 * stiffness
+            + 0.25 * cubic.abs() * (e1 * e1 + 2.0 * e1.abs() * largest + 3.0 * largest * largest);
+        let size = |from: f64, to: f64| {
+            (from + to).abs() * (0.5 * stiffness + 0.25 * cubic.abs() * (from * from + to * to))
+        };
+        let potential = |end: f64| end * end * (0.5 * stiffness + 0.25 * cubic.abs() * end * end);
+        let force = slope * travel + gamma(6) * (size(e1, e2) + size(e1, e0));
+        ReversalAllowance {
+            outputs: vec![force, force],
+            observed: vec![travel],
+            energy_j: (stiffness * largest + cubic.abs() * largest.powi(3)) * travel
+                + gamma(5) * (potential(e0) + potential(e2)),
+        }
+    };
+    let stale = 0.5;
+    let case = Case {
+        state: &extension,
+        stale: &stale,
+        dt_s,
+        inputs: &flows,
+    };
+    with_cx(|cx| check_time_reversal(spring, &case, &unchanged, &observe, &allowance, cx))
+        .unwrap_or_else(|failure| {
+            panic!("spring reversal at {extension} m, {dt_s} s, {flows:?}: {failure}")
+        })
+}
+
 #[test]
 fn every_element_conforms_across_a_sweep_of_states_and_inputs() {
     let mut n = Numbers(20_261_110);
@@ -102,6 +250,7 @@ fn every_element_conforms_across_a_sweep_of_states_and_inputs() {
     let body = HeatCapacity::new(40.0).unwrap();
     let wall = Conductance::new(0.8).unwrap();
     let heater = Heater::new(Waveform::table(vec![(0.0, 0.0), (1.0, 12.0), (2.0, 4.0)]).unwrap()).unwrap();
+    let (mut mass_reversals, mut spring_reversals) = (Reversals::default(), Reversals::default());
     for _ in 0..200 {
         let dt = n.next(1.0e-5, 2.0e-2);
         let (f_a, f_b) = (n.next(-3.0, 3.0), n.next(-3.0, 3.0));
@@ -119,11 +268,16 @@ fn every_element_conforms_across_a_sweep_of_states_and_inputs() {
         // Independent: the mean velocity of a constant force over the step.
         let expected = motion.velocity_m_s + 0.5 * dt * force / 0.75;
         assert!((out[0] - expected).abs() <= 1.0e-14 * (1.0 + expected.abs()));
+        let reversal = mass_reverses(&mass, &motion, &stale, dt, force, &reversed_motion)
+            .unwrap_or_else(|failure| panic!("mass reversal at {motion:?}, {dt} s: {failure}"));
+        mass_reversals.record(&reversal);
 
         let extension = n.next(-0.02, 0.02);
-        for spring in [&linear, &hardening, &softening] {
+        for (spring, cubic) in [(&linear, 0.0), (&hardening, 2.0e6), (&softening, -1.0e5)] {
             let out = conforms(spring, &extension, &0.5, dt, &[f_a, f_b]);
             assert_eq!(out[0], -out[1], "a spring pulls both ends equally");
+            let reversal = spring_reverses(spring, 350.0, cubic, extension, dt, [f_a, f_b]);
+            spring_reversals.record(&reversal);
         }
         let out = conforms(&linear, &extension, &0.5, dt, &[f_a, f_b]);
         let mean_extension = extension + 0.5 * dt * (f_a - f_b);
@@ -150,6 +304,40 @@ fn every_element_conforms_across_a_sweep_of_states_and_inputs() {
         assert_eq!(out[0], -out[1], "a conductance stores nothing");
         assert_eq!(out[0], 0.8 * (t_a - t_b));
     }
+    // The lossless elements reversed in time at every point of the sweep.
+    for (name, reversals) in [("mass", &mass_reversals), ("springs", &spring_reversals)] {
+        println!(
+            "{name}: {} reversals; largest gap / allowance: outputs {:.3e}, observed {:.3e}, energy {:.3e}",
+            reversals.checked, reversals.outputs, reversals.observed, reversals.energy
+        );
+    }
+    assert_eq!(
+        (mass_reversals.checked, spring_reversals.checked),
+        (200, 600)
+    );
+}
+
+#[test]
+fn a_mass_reversal_that_also_negates_the_position_is_refused_only_through_observe() {
+    // The position reaches neither the mass's output nor its stored energy,
+    // so only the test's view of the state can see that it does not return.
+    let mass = Mass::new(0.75).unwrap();
+    let motion = Motion {
+        position_m: 0.05,
+        velocity_m_s: 1.5,
+    };
+    let both = |state: &Motion| Motion {
+        position_m: -state.position_m,
+        velocity_m_s: -state.velocity_m_s,
+    };
+    let failure = mass_reverses(&mass, &motion, &motion, 1.0e-3, 4.0, &both)
+        .expect_err("the position does not return");
+    let Failure::Law { law, detail } = failure else {
+        panic!("expected a law failure, got {failure}");
+    };
+    println!("refused: {law} ({detail})");
+    assert_eq!(law, "R of the backward end returns to the start");
+    assert!(detail.starts_with("observed 0:"), "the position: {detail}");
 }
 
 #[test]

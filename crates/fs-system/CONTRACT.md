@@ -1219,6 +1219,15 @@ Elements, `tests/elements.rs`:
   generated operating points (three spring laws), with outputs compared to
   independent formulas (mean velocity, linear spring force, damper heat equal
   to absorbed power, conductance antisymmetry);
+- time reversal: at each of those 200 points the mass and the three springs
+  pass `check_time_reversal`, 800 checks in all, a count the test asserts.
+  - For the mass, `R` negates the velocity. For the springs, `R` is the
+    identity on the extension.
+  - The bounds are derived in the test from the rounding of `Mass::propose`,
+    `Spring::propose` and their stored energies.
+  - A reversal that also negates the mass's position is refused, and only
+    through the test's view of the state: the position reaches neither the
+    output nor the stored energy;
 - refusals: non-finite or out-of-range parameters, empty or non-increasing
   tables, a heater whose power could turn negative, a temperature input that
   is not positive, a step that would cool a body below 0 K (`Shorten`);
