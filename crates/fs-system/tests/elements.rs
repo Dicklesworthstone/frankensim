@@ -22,7 +22,7 @@ use fs_system::elements::{
     Conductance, Damper, ElementError, FlowSource, Force, GasContents, GasVolume, Gyrator,
     HeatCapacity, HeatNode, Heater, Mass, Motion, Restriction, SourceAccount, Spring, Waveform,
 };
-use fs_system::ledger::Sum;
+use fs_system::ledger::Account;
 use fs_system::{
     AdmissionError, NodeId, RouteTemperature, SolveConfig, System, SystemBuilder, SystemError,
     heat_sink,
@@ -2302,7 +2302,7 @@ impl Vessels {
     }
 
     /// The pipe's entropy account [J/K].
-    fn pipe_entropy(&self) -> Sum {
+    fn pipe_entropy(&self) -> Account {
         let ledger = self.system.ledger();
         let account = ledger.nodes.iter().find(|account| account.name == "pipe");
         account.unwrap().entropy_generated_j_per_k
@@ -2605,7 +2605,7 @@ fn reporting_the_throttle_entropy_moves_no_state_and_no_energy_account() {
     let mut off = Vessels::new(start(), conductance, alternate_heat);
     let mut on = Vessels::through(start(), reporting.clone(), alternate_heat);
     let dt = 3.0 / 600.0;
-    let mut reported = Sum::default();
+    let mut reported = Account::default();
     let (mut forward, mut backward) = (0_u32, 0_u32);
     let mut worst = 0.0_f64;
     with_cx(|cx| {
@@ -2645,16 +2645,16 @@ fn reporting_the_throttle_entropy_moves_no_state_and_no_energy_account() {
         on.pipe_entropy().value()
     );
     assert!(forward > 150 && backward > 150, "{forward} {backward}");
-    // The ledgers differ only in the pipe's entropy account. (A sum's Debug
-    // prints each of its two numbers to the shortest text that reads back
-    // to the same bits, so equal text is equal bits, signs of zero too.)
-    let zero = format!("{:?}", Sum::default());
+    // The ledgers differ only in the pipe's entropy account. (An account's
+    // Debug prints each of its two numbers to the shortest text that reads
+    // back to the same bits, so equal text is equal bits, signs of zero too.)
+    let zero = format!("{:?}", Account::default());
     assert_eq!(format!("{:?}", off.pipe_entropy()), zero);
     assert!(on.pipe_entropy().value() > 0.0);
     let mut masked = on.system.ledger().clone();
     for account in &mut masked.nodes {
         if account.name == "pipe" {
-            account.entropy_generated_j_per_k = Sum::default();
+            account.entropy_generated_j_per_k = Account::default();
         }
     }
     assert_eq!(format!("{masked:?}"), format!("{:?}", off.system.ledger()));

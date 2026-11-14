@@ -1,10 +1,19 @@
 //! Window ledger: what crossed every port, connection and boundary.
 //!
 //! The driver fills it from the receipts and the wire values of each accepted
-//! step. Components write no accounting code. Sums are compensated so that a
-//! small term is not lost beside a large one over many steps.
+//! step. Components write no accounting code. Every account is kept in
+//! double-double ([`Account`]), so that a small term is not lost beside a
+//! large one over many steps, and the totals that combine accounts are taken
+//! in double-double too and rounded once: a residual far below the rounding
+//! of one large account survives. Beside each signed balance defect an
+//! account sums its absolute value per step, so that defects of opposite sign
+//! cannot cancel unseen. The clock and the window's duration are times, not
+//! accounts, and stay [`Sum`]s.
 
-/// A running sum with Neumaier compensation.
+use fs_math::dd::Dd;
+
+/// A running sum with Neumaier compensation: the system's clock, source
+/// clocks and the window's duration.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Sum {
     sum: f64,
@@ -54,6 +63,51 @@ impl Sum {
     }
 }
 
+/// One ledger account: the running total of one quantity over accepted
+/// steps, kept in double-double (fs-math's [`Dd`], normalized `hi + lo`).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Account(Dd);
+
+impl Account {
+    /// Add one term (double-double addition, relative error at most 2^-104).
+    pub fn add(&mut self, term: f64) {
+        self.0 = self.0 + Dd::from_f64(term);
+    }
+
+    /// The total, rounded once to the nearest `f64`.
+    #[must_use]
+    pub fn value(&self) -> f64 {
+        self.0.to_f64()
+    }
+
+    /// The total in double-double, for a sum across accounts that is rounded
+    /// once at its end.
+    #[must_use]
+    pub fn dd(&self) -> Dd {
+        self.0
+    }
+
+    fn push_words(&self, words: &mut Vec<u64>) {
+        words.extend([self.0.hi.to_bits(), self.0.lo.to_bits()]);
+    }
+
+    /// The account written as `hi` and `lo` bits; a pair that is not
+    /// normalized is no account the ledger holds and is refused.
+    fn read(words: &mut Words<'_>) -> Option<Self> {
+        let (hi, lo) = (f64::from_bits(words.u64()?), f64::from_bits(words.u64()?));
+        let normal = Dd::from_pair(hi, lo);
+        (normal.hi.to_bits() == hi.to_bits() && normal.lo.to_bits() == lo.to_bits())
+            .then_some(Self(normal))
+    }
+}
+
+/// The sum of `accounts` in double-double.
+fn total<'a>(accounts: impl IntoIterator<Item = &'a Account>) -> Dd {
+    accounts
+        .into_iter()
+        .fold(Dd::ZERO, |sum, account| sum + account.0)
+}
+
 /// Plain 64-bit words read from the front, as a snapshot holds them.
 pub(crate) struct Words<'a>(pub(crate) &'a [u64]);
 
@@ -79,9 +133,9 @@ impl Words<'_> {
         }
     }
 
-    fn sums(&mut self) -> Option<Vec<Sum>> {
+    fn accounts(&mut self) -> Option<Vec<Account>> {
         let count = self.count()?;
-        (0..count).map(|_| Sum::read(self)).collect()
+        (0..count).map(|_| Account::read(self)).collect()
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -89,10 +143,10 @@ impl Words<'_> {
     }
 }
 
-fn push_sums(sums: &[Sum], words: &mut Vec<u64>) {
-    words.push(sums.len() as u64);
-    for sum in sums {
-        sum.push_words(words);
+fn push_accounts(accounts: &[Account], words: &mut Vec<u64>) {
+    words.push(accounts.len() as u64);
+    for account in accounts {
+        account.push_words(words);
     }
 }
 
@@ -100,11 +154,13 @@ fn push_sums(sums: &[Sum], words: &mut Vec<u64>) {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct MassAccount {
     /// Net mass entering the component through stream ports [kg].
-    pub port_mass_in_kg: Sum,
+    pub port_mass_in_kg: Account,
     /// Change in independently measured stored mass [kg].
-    pub stored_change_kg: Sum,
+    pub stored_change_kg: Account,
     /// Sum of accepted port-transfer minus stored-change defects [kg].
-    pub balance_defect_kg: Sum,
+    pub balance_defect_kg: Account,
+    /// Sum over steps of the absolute value of each step's defect \[kg\].
+    pub absolute_defect_kg: Account,
     /// Accepted steps for which the component supplied both measurements.
     pub audited_steps: u64,
 }
@@ -113,11 +169,13 @@ pub struct MassAccount {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CarriedAccount {
     /// Net transported amount entering the owner, in the coordinate's unit.
-    pub port_in: Sum,
+    pub port_in: Account,
     /// Change in independently measured inventory.
-    pub stored_change: Sum,
+    pub stored_change: Account,
     /// Accepted transport-minus-inventory defects.
-    pub balance_defect: Sum,
+    pub balance_defect: Account,
+    /// Sum over steps of the absolute value of each step's defect.
+    pub absolute_defect: Account,
     /// Steps with both endpoint measurements.
     pub audited_steps: u64,
 }
@@ -136,49 +194,56 @@ pub struct NodeAccount {
     /// `None`. Ordinals are transport coordinates, not inferred species names.
     pub carried: Vec<Option<CarriedAccount>>,
     /// Net energy that entered through its ports [J].
-    pub port_energy_in_j: Sum,
+    pub port_energy_in_j: Account,
     /// Change of stored energy, from receipts [J].
-    pub stored_change_j: Sum,
+    pub stored_change_j: Account,
     /// Physical dissipation [J].
-    pub dissipated_j: Sum,
+    pub dissipated_j: Account,
     /// Numerical loss [J]; never added to dissipation.
-    pub numerical_loss_j: Sum,
+    pub numerical_loss_j: Account,
     /// Entropy generated inside the component [J/K].
-    pub entropy_generated_j_per_k: Sum,
+    pub entropy_generated_j_per_k: Account,
     /// Sum over steps of the first-law defect the audit accepted [J].
-    pub balance_defect_j: Sum,
+    pub balance_defect_j: Account,
+    /// Sum over steps of the absolute value of each step's accepted
+    /// first-law defect \[J\]: defects of opposite sign do not cancel in it.
+    pub absolute_defect_j: Account,
 }
 
 /// Accounts of one connection over the window.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ConnectionAccount {
     /// Uncancelled transport per carried coordinate, in its declared unit.
-    pub carried_defect: Vec<Sum>,
+    pub carried_defect: Vec<Account>,
     /// Net stream mass entering the connection's members [kg].
-    pub mass_defect_kg: Sum,
+    pub mass_defect_kg: Account,
     /// Sum of the energies that entered the members, plus heat sent to the
     /// connection's sink [J]. Zero for an exact connection; it is the
     /// interface residual of an iterative solve otherwise. Heat routes that
     /// share a receiver are summed in the row of the first of them, and the
     /// rows of the others stay zero.
-    pub energy_defect_j: Sum,
+    pub energy_defect_j: Account,
     /// Entropy generated in the connection [J/K].
-    pub entropy_generated_j_per_k: Sum,
+    pub entropy_generated_j_per_k: Account,
+    /// Sum over steps of the absolute value of each step's energy defect \[J\].
+    pub absolute_energy_defect_j: Account,
+    /// Sum over steps of the absolute value of each step's mass defect \[kg\].
+    pub absolute_mass_defect_kg: Account,
 }
 
 /// Accounts of one boundary over the window.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct BoundaryAccount {
     /// Signed transported amounts per carried coordinate.
-    pub carried_in: Vec<Sum>,
+    pub carried_in: Vec<Account>,
     /// The driven port, as `node.port`.
     pub port: String,
     /// Mass entering the system through this stream boundary [kg].
-    pub mass_in_kg: Sum,
+    pub mass_in_kg: Account,
     /// Energy that entered the system through it [J].
-    pub energy_in_j: Sum,
+    pub energy_in_j: Account,
     /// Entropy that entered the system through it [J/K].
-    pub entropy_in_j_per_k: Sum,
+    pub entropy_in_j_per_k: Account,
 }
 
 /// Accounts of one named heat sink outside the system.
@@ -187,7 +252,7 @@ pub struct SinkAccount {
     /// Sink name.
     pub name: String,
     /// Heat delivered to it [J].
-    pub heat_j: Sum,
+    pub heat_j: Account,
 }
 
 /// Energy, entropy and declared stream-mass accounts of accepted steps.
@@ -217,12 +282,13 @@ impl Ledger {
                 None => words.push(0),
                 Some(mass) => {
                     words.push(1);
-                    for sum in [
+                    for account in [
                         &mass.port_mass_in_kg,
                         &mass.stored_change_kg,
                         &mass.balance_defect_kg,
+                        &mass.absolute_defect_kg,
                     ] {
-                        sum.push_words(words);
+                        account.push_words(words);
                     }
                     words.push(mass.audited_steps);
                 }
@@ -233,48 +299,52 @@ impl Ledger {
                     None => words.push(0),
                     Some(account) => {
                         words.push(1);
-                        for sum in [
+                        for account in [
                             &account.port_in,
                             &account.stored_change,
                             &account.balance_defect,
+                            &account.absolute_defect,
                         ] {
-                            sum.push_words(words);
+                            account.push_words(words);
                         }
                         words.push(account.audited_steps);
                     }
                 }
             }
-            for sum in [
+            for account in [
                 &node.port_energy_in_j,
                 &node.stored_change_j,
                 &node.dissipated_j,
                 &node.numerical_loss_j,
                 &node.entropy_generated_j_per_k,
                 &node.balance_defect_j,
+                &node.absolute_defect_j,
             ] {
-                sum.push_words(words);
+                account.push_words(words);
             }
         }
         words.push(self.connections.len() as u64);
         for connection in &self.connections {
-            push_sums(&connection.carried_defect, words);
-            for sum in [
+            push_accounts(&connection.carried_defect, words);
+            for account in [
                 &connection.mass_defect_kg,
                 &connection.energy_defect_j,
                 &connection.entropy_generated_j_per_k,
+                &connection.absolute_energy_defect_j,
+                &connection.absolute_mass_defect_kg,
             ] {
-                sum.push_words(words);
+                account.push_words(words);
             }
         }
         words.push(self.boundaries.len() as u64);
         for boundary in &self.boundaries {
-            push_sums(&boundary.carried_in, words);
-            for sum in [
+            push_accounts(&boundary.carried_in, words);
+            for account in [
                 &boundary.mass_in_kg,
                 &boundary.energy_in_j,
                 &boundary.entropy_in_j_per_k,
             ] {
-                sum.push_words(words);
+                account.push_words(words);
             }
         }
         words.push(self.sinks.len() as u64);
@@ -297,9 +367,10 @@ impl Ledger {
         for shape in &self.nodes {
             let mass = if words.flag()? {
                 Some(MassAccount {
-                    port_mass_in_kg: Sum::read(words)?,
-                    stored_change_kg: Sum::read(words)?,
-                    balance_defect_kg: Sum::read(words)?,
+                    port_mass_in_kg: Account::read(words)?,
+                    stored_change_kg: Account::read(words)?,
+                    balance_defect_kg: Account::read(words)?,
+                    absolute_defect_kg: Account::read(words)?,
                     audited_steps: words.u64()?,
                 })
             } else {
@@ -310,9 +381,10 @@ impl Ledger {
                 .map(|_| {
                     if words.flag()? {
                         Some(Some(CarriedAccount {
-                            port_in: Sum::read(words)?,
-                            stored_change: Sum::read(words)?,
-                            balance_defect: Sum::read(words)?,
+                            port_in: Account::read(words)?,
+                            stored_change: Account::read(words)?,
+                            balance_defect: Account::read(words)?,
+                            absolute_defect: Account::read(words)?,
                             audited_steps: words.u64()?,
                         }))
                     } else {
@@ -325,12 +397,13 @@ impl Ledger {
                 has_streams: shape.has_streams,
                 mass,
                 carried,
-                port_energy_in_j: Sum::read(words)?,
-                stored_change_j: Sum::read(words)?,
-                dissipated_j: Sum::read(words)?,
-                numerical_loss_j: Sum::read(words)?,
-                entropy_generated_j_per_k: Sum::read(words)?,
-                balance_defect_j: Sum::read(words)?,
+                port_energy_in_j: Account::read(words)?,
+                stored_change_j: Account::read(words)?,
+                dissipated_j: Account::read(words)?,
+                numerical_loss_j: Account::read(words)?,
+                entropy_generated_j_per_k: Account::read(words)?,
+                balance_defect_j: Account::read(words)?,
+                absolute_defect_j: Account::read(words)?,
             });
         }
         if words.count()? != self.connections.len() {
@@ -339,10 +412,12 @@ impl Ledger {
         let mut connections = Vec::with_capacity(self.connections.len());
         for _ in &self.connections {
             connections.push(ConnectionAccount {
-                carried_defect: words.sums()?,
-                mass_defect_kg: Sum::read(words)?,
-                energy_defect_j: Sum::read(words)?,
-                entropy_generated_j_per_k: Sum::read(words)?,
+                carried_defect: words.accounts()?,
+                mass_defect_kg: Account::read(words)?,
+                energy_defect_j: Account::read(words)?,
+                entropy_generated_j_per_k: Account::read(words)?,
+                absolute_energy_defect_j: Account::read(words)?,
+                absolute_mass_defect_kg: Account::read(words)?,
             });
         }
         if words.count()? != self.boundaries.len() {
@@ -351,11 +426,11 @@ impl Ledger {
         let mut boundaries = Vec::with_capacity(self.boundaries.len());
         for shape in &self.boundaries {
             boundaries.push(BoundaryAccount {
-                carried_in: words.sums()?,
+                carried_in: words.accounts()?,
                 port: shape.port.clone(),
-                mass_in_kg: Sum::read(words)?,
-                energy_in_j: Sum::read(words)?,
-                entropy_in_j_per_k: Sum::read(words)?,
+                mass_in_kg: Account::read(words)?,
+                energy_in_j: Account::read(words)?,
+                entropy_in_j_per_k: Account::read(words)?,
             });
         }
         if words.count()? != self.sinks.len() {
@@ -365,7 +440,7 @@ impl Ledger {
         for shape in &self.sinks {
             sinks.push(SinkAccount {
                 name: shape.name.clone(),
-                heat_j: Sum::read(words)?,
+                heat_j: Account::read(words)?,
             });
         }
         let ledger = Self {
@@ -389,27 +464,27 @@ impl Ledger {
         if self.steps == 0 || !self.nodes.iter().any(|node| carried < node.carried.len()) {
             return None;
         }
-        let mut total = Sum::default();
+        let mut stored = Vec::new();
         for node in &self.nodes {
             if let Some(account) = node.carried.get(carried) {
                 let account = account.as_ref()?;
                 if account.audited_steps != self.steps {
                     return None;
                 }
-                total.add(account.stored_change.value());
+                stored.push(&account.stored_change);
             }
         }
-        for boundary in &self.boundaries {
-            if let Some(input) = boundary.carried_in.get(carried) {
-                total.add(-input.value());
-            }
-        }
-        for connection in &self.connections {
-            if let Some(defect) = connection.carried_defect.get(carried) {
-                total.add(-defect.value());
-            }
-        }
-        Some(total.value())
+        let entered = total(
+            self.boundaries
+                .iter()
+                .filter_map(|b| b.carried_in.get(carried)),
+        );
+        let defect = total(
+            self.connections
+                .iter()
+                .filter_map(|c| c.carried_defect.get(carried)),
+        );
+        Some((total(stored) - entered - defect).to_f64())
     }
 
     /// Stream-mass residual [kg]: measured storage change minus boundary
@@ -425,86 +500,89 @@ impl Ledger {
         if self.steps == 0 || !self.nodes.iter().any(|node| node.has_streams) {
             return None;
         }
-        let mut total = Sum::default();
+        let mut stored = Vec::new();
         for node in &self.nodes {
             if node.has_streams {
                 let account = node.mass.as_ref()?;
                 if account.audited_steps != self.steps {
                     return None;
                 }
-                total.add(account.stored_change_kg.value());
+                stored.push(&account.stored_change_kg);
             }
         }
-        for boundary in &self.boundaries {
-            total.add(-boundary.mass_in_kg.value());
-        }
-        for connection in &self.connections {
-            total.add(-connection.mass_defect_kg.value());
-        }
-        Some(total.value())
+        let entered = total(self.boundaries.iter().map(|b| &b.mass_in_kg));
+        let defect = total(self.connections.iter().map(|c| &c.mass_defect_kg));
+        Some((total(stored) - entered - defect).to_f64())
+    }
+
+    fn boundary_energy_in(&self) -> Dd {
+        total(self.boundaries.iter().map(|account| &account.energy_in_j))
+    }
+
+    fn stored_change(&self) -> Dd {
+        total(self.nodes.iter().map(|account| &account.stored_change_j))
+    }
+
+    fn sink_heat(&self) -> Dd {
+        total(self.sinks.iter().map(|account| &account.heat_j))
+    }
+
+    fn numerical_loss(&self) -> Dd {
+        total(self.nodes.iter().map(|account| &account.numerical_loss_j))
+    }
+
+    fn connection_defect(&self) -> Dd {
+        total(
+            self.connections
+                .iter()
+                .map(|account| &account.energy_defect_j),
+        )
     }
 
     /// Energy that entered the system through its boundaries [J].
     #[must_use]
     pub fn boundary_energy_in_j(&self) -> f64 {
-        let mut total = Sum::default();
-        for account in &self.boundaries {
-            total.add(account.energy_in_j.value());
-        }
-        total.value()
+        self.boundary_energy_in().to_f64()
     }
 
     /// Change of the energy stored in all components [J].
     #[must_use]
     pub fn stored_change_j(&self) -> f64 {
-        let mut total = Sum::default();
-        for account in &self.nodes {
-            total.add(account.stored_change_j.value());
-        }
-        total.value()
+        self.stored_change().to_f64()
     }
 
     /// Heat delivered to sinks outside the system [J].
     #[must_use]
     pub fn sink_heat_j(&self) -> f64 {
-        let mut total = Sum::default();
-        for account in &self.sinks {
-            total.add(account.heat_j.value());
-        }
-        total.value()
+        self.sink_heat().to_f64()
     }
 
     /// Numerical loss of all components [J].
     #[must_use]
     pub fn numerical_loss_j(&self) -> f64 {
-        let mut total = Sum::default();
-        for account in &self.nodes {
-            total.add(account.numerical_loss_j.value());
-        }
-        total.value()
+        self.numerical_loss().to_f64()
     }
 
     /// Interface residual energy of all connections [J].
     #[must_use]
     pub fn connection_defect_j(&self) -> f64 {
-        let mut total = Sum::default();
-        for account in &self.connections {
-            total.add(account.energy_defect_j.value());
-        }
-        total.value()
+        self.connection_defect().to_f64()
     }
 
     /// Entropy generated in components and connections [J/K].
     #[must_use]
     pub fn entropy_generated_j_per_k(&self) -> f64 {
-        let mut total = Sum::default();
-        for account in &self.nodes {
-            total.add(account.entropy_generated_j_per_k.value());
-        }
-        for account in &self.connections {
-            total.add(account.entropy_generated_j_per_k.value());
-        }
-        total.value()
+        let nodes = total(
+            self.nodes
+                .iter()
+                .map(|account| &account.entropy_generated_j_per_k),
+        );
+        let connections = total(
+            self.connections
+                .iter()
+                .map(|account| &account.entropy_generated_j_per_k),
+        );
+        (nodes + connections).to_f64()
     }
 
     /// First-law residual of the window [J]:
@@ -514,22 +592,39 @@ impl Ledger {
     /// It equals minus the sum of the per-step balance defects the component
     /// audits accepted (each defect is port energy in, minus stored change,
     /// minus numerical loss), so it is roundoff for exact components and it
-    /// shows a leak that a component hid behind a wide tolerance.
+    /// shows a leak that a component hid behind a wide tolerance. It is
+    /// taken in double-double from the accounts and rounded once, so a
+    /// residual far below the rounding of a large account is kept.
     #[must_use]
     pub fn energy_residual_j(&self) -> f64 {
-        let mut total = Sum::default();
-        total.add(self.stored_change_j());
-        total.add(self.numerical_loss_j());
-        total.add(self.sink_heat_j());
-        total.add(-self.boundary_energy_in_j());
-        total.add(-self.connection_defect_j());
-        total.value()
+        (self.stored_change() + self.numerical_loss() + self.sink_heat()
+            - self.boundary_energy_in()
+            - self.connection_defect())
+        .to_f64()
+    }
+
+    /// The largest absolute energy defect of any component or connection
+    /// \[J\]: the sum over steps of the absolute value of each step's accepted
+    /// defect, so defects of opposite sign that cancel in the signed accounts
+    /// show here. Zero before a step. It is a report; the kernel refuses no
+    /// step on it.
+    #[must_use]
+    pub fn largest_absolute_energy_defect_j(&self) -> f64 {
+        self.nodes
+            .iter()
+            .map(|account| account.absolute_defect_j.value())
+            .chain(
+                self.connections
+                    .iter()
+                    .map(|account| account.absolute_energy_defect_j.value()),
+            )
+            .fold(0.0, f64::max)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Sum;
+    use super::{Account, Sum, Words};
 
     #[test]
     fn a_small_term_survives_beside_large_ones() {
@@ -538,5 +633,25 @@ mod tests {
         sum.add(1.0);
         sum.add(-1.0e16);
         assert_eq!(sum.value().to_bits(), 1.0_f64.to_bits());
+        let mut account = Account::default();
+        account.add(1.0e16);
+        account.add(1.0);
+        account.add(-1.0e16);
+        assert_eq!(account.value().to_bits(), 1.0_f64.to_bits());
+    }
+
+    #[test]
+    fn an_account_reads_back_its_words_and_refuses_a_pair_it_cannot_hold() {
+        let mut account = Account::default();
+        account.add(1.0e6);
+        account.add(3.0e-11);
+        assert!(account.dd().lo != 0.0, "the trailing word is in use");
+        let mut words = Vec::new();
+        account.push_words(&mut words);
+        assert_eq!(Account::read(&mut Words(&words)), Some(account));
+        // hi + lo would round to another hi: not normalized.
+        let unnormal = [1.0_f64.to_bits(), 1.0_f64.to_bits()];
+        assert_eq!(Account::read(&mut Words(&unnormal)), None);
+        assert_eq!(Account::read(&mut Words(&words[..1])), None, "one word");
     }
 }

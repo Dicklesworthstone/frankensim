@@ -43,7 +43,7 @@ use fs_system::elements::{
     HeatCapacity, HeatNode, Heater, Mass, Motion, Resistance, Restriction, Slider, SliderEnd, Slip,
     SourceAccount, Spring, Storage, Waveform,
 };
-use fs_system::ledger::{CarriedAccount, Ledger, Sum};
+use fs_system::ledger::{Account, CarriedAccount, Ledger};
 use fs_system::{
     AdaptiveConfig, AdaptiveError, AdaptiveReport, Checkpoint, ErrorNorm, ErrorTolerance, NodeId,
     PortRef, RouteTemperature, SolveConfig, System, SystemBuilder, SystemError, heat_sink,
@@ -2968,7 +2968,7 @@ fn carried_accounts_json(accounts: &[Option<CarriedAccount>]) -> String {
     format!("[{entries}]")
 }
 
-fn sums_json(sums: &[Sum]) -> String {
+fn sums_json(sums: &[Account]) -> String {
     format!(
         "[{}]",
         sums.iter()

@@ -167,7 +167,7 @@ physics owners below fs-couple can be composed without it.
 - `System::checkpoint() -> Result<Checkpoint, CheckpointError>` captures
   accepted typed states, interface warm starts and outputs, the exact
   compensated clock, step count, complete ledger and solve configuration.
-  Mass accounts, coverage counts and the compensation in their sums are part
+  Mass accounts, coverage counts and both words of every account are part
   of that ledger and rewind with the other accepted accounts.
   `restore(&checkpoint)` atomically rewinds the originating sealed system;
   the same checkpoint may be reused. A checkpoint from another system is
@@ -189,6 +189,12 @@ physics owners below fs-couple can be composed without it.
     holds the accepted wire values, the compensated clock, the step count, the
     solve configuration and every number of the ledger. Names are not in it;
     they come from the resuming system.
+  - The image's charter is at codec version 2 (item 5): each ledger account is
+    written as the hi and lo words of its normalized double-double total, and
+    the absolute accounts sit beside the signed ones. A decode refuses a pair
+    that is not normalized. An image of codec version 1 (7a35133254, a sum and
+    its compensation per account) names the same state type and another
+    schema and codec, so fs-exec refuses to open it as a `SystemImage`.
   - The context names the problem. `System::problem_id()` hashes:
     - the `Debug` text of the description the system was sealed from: names,
       ports, classes and tiers, load lines, connections, driven ports and heat
@@ -230,14 +236,47 @@ physics owners below fs-couple can be composed without it.
     sealed. `ledger::Sum::to_words` and `from_words` give a sum's two words
     exactly, for the codec of a state that holds one.
 - `Ledger`: per component (port energy in, stored change, dissipation,
-  numerical loss, entropy generated, accepted balance defect), per connection
-  (energy defect, entropy generated), per boundary (energy and entropy in), per
-  heat sink (heat), all compensated sums; `energy_residual_j()` is the
-  first-law residual of the window.
+  numerical loss, entropy generated, accepted balance defect and its absolute
+  sum), per connection (energy defect, entropy generated, and the absolute
+  sums of its energy and mass defects), per boundary (energy and entropy in),
+  per heat sink (heat); `energy_residual_j()` is the first-law residual of the
+  window.
+  - Every account is a `ledger::Account`: a double-double total
+    (`fs_math::Dd`; `fs-math` is a normal `[dependencies]` entry of this
+    crate). `value()` is the total rounded to f64, `dd()` both words.
+  - The readers that combine accounts (`energy_residual_j`,
+    `boundary_energy_in_j`, `stored_change_j`, `sink_heat_j`,
+    `numerical_loss_j`, `connection_defect_j`, `entropy_generated_j_per_k`,
+    `mass_residual_kg`, `carried_residual`) add the accounts' double-doubles
+    and round once at the end. A residual far below the rounding of its
+    accounts survives: in `tests/ledger_accounts.rs` two accounts of 1e6 J
+    leave 2^-40 J, which the reader gives exactly and rounding each account
+    first gives as 0.
+  - The clock, the source clocks and `Ledger::duration_s` stay compensated
+    `ledger::Sum`s, and the step audit is unchanged: it combines one step's
+    port values, not accounts, and decides acceptance. No time, state or port
+    value moved with the change to double-double (item 5's line compare of
+    the kernel users).
+  - The absolute accounts (`NodeAccount::absolute_defect_j`,
+    `MassAccount::absolute_defect_kg`, `CarriedAccount::absolute_defect`,
+    `ConnectionAccount::absolute_energy_defect_j` and
+    `absolute_mass_defect_kg`) add the size of each accepted step's defect
+    where the signed account adds the defect, at publish only. A refused step
+    adds to neither. Defects of opposite sign cancel in the signed account and
+    not in the absolute one.
+  - `largest_absolute_energy_defect_j()` is the largest absolute energy
+    account of a component or connection. It is a report: `System` refuses
+    nothing on it or on any absolute account. The hand-coupled
+    `rigid_damping_heat` of fs-couple refuses on its own absolute sums against
+    `energy_tolerance_j` at the end of each `advance_with_source_driver` call
+    (`crates/fs-couple/src/legacy/rigid_damping_heat/mod.rs`, lines 554 and
+    715-728). Whether the kernel should refuse the same way is a question for
+    the owner.
   `NodeAccount::has_streams` records whether a node participates in stream
   transport, and `NodeAccount::mass: Option<MassAccount>` carries measured
-  inventory accounting. `MassAccount` has compensated `port_mass_in_kg`,
-  `stored_change_kg` and `balance_defect_kg` sums, plus `audited_steps`.
+  inventory accounting. `MassAccount` has `port_mass_in_kg`,
+  `stored_change_kg`, `balance_defect_kg` and `absolute_defect_kg` accounts,
+  plus `audited_steps`.
   `BoundaryAccount::mass_in_kg` records signed mass entering through a stream
   boundary, and `ConnectionAccount::mass_defect_kg` records the accepted
   uncancelled mass at a connection; non-stream rows contribute zero.
@@ -1106,23 +1145,37 @@ to one sealed system's allocation identity; they are not durable snapshots.
 sealing system: the device of `tests/checkpoints.rs` at step 73 (a sine force
 whose account holds a clock, a moving support, damper heat routed to a body,
 a recorder whose words grow with the run, and a window), and the two vessels
-of `tests/elements.rs` with their restriction at step 250. A child process
-of the same test binary receives only the envelope bytes (3,328 and 2,632
-bytes, measured on ts2 2026-11-14) and the subject id the sealer kept, on its
-stdin. The child first refuses a wrong subject and a flipped byte with
-nothing changed. It then shows, to the bit, what the uninterrupted run shows
-after the split and after each of the 184 and 350 later steps: time, step
-count, every state, the last values on each port, and the ledger. In one
-process, one snapshot resumes into two systems that then go on alone, and
-it rewinds the system that wrote it. These refusals each leave the system
-showing what it showed before: another graph, a spring stiffer by one ulp, a
-member under another charter, a member without a codec (which also cannot
-be sealed: `NoCodec`), a last member whose decode refuses another width
-(`Decode`, after the members before it decoded), and a context of another
-problem at sealing. Truncated bytes, and a byte flipped at the start, middle
-or end, never open. A gas constant one ulp lower or a
+of `tests/elements.rs` with their restriction at step 250. A child process of
+the same test binary receives only the envelope bytes (3,504 and 2,888 bytes
+with the ledger of codec version 2, measured on ts2 2026-11-14) and the
+subject id the sealer kept, on its stdin. The child first refuses a wrong
+subject and a flipped byte with nothing changed. It then shows, to the bit,
+what the uninterrupted run shows after the split and after each of the 184
+and 350 later steps: time, step count, every state, the last values on each
+port, and the ledger. In one process, one snapshot resumes into two systems
+that then go on alone, and it rewinds the system that wrote it. These
+refusals each leave the system showing what it showed before: another graph,
+a spring stiffer by one ulp, a member under another charter, a member without
+a codec (which also cannot be sealed: `NoCodec`), a last member whose decode
+refuses another width (`Decode`, after the members before it decoded), and a
+context of another problem at sealing. Truncated bytes, and a byte flipped at
+the start, middle or end, never open. A gas constant one ulp lower or a
 conductance one ulp higher is another problem. The image charter derives its
-pinned ids.
+pinned ids: codec version 2, the state type of version 1, and a schema and
+codec other than version 1's.
+
+`tests/ledger_accounts.rs` (bead `.5.4`, item 5) drives members without ports
+whose receipts state planned stored changes, so each step's defect is known
+exactly. Defects of +0.25 J and -0.25 J leave the signed account at zero and
+the absolute one at 0.5 J. A step refused in `admit` leaves the ledger's Debug
+text as it was. Over 200 changes spanning 97 bits, the signed and absolute
+accounts equal exact integer sums in units of 2^-70 J, and the residual is
+that sum rounded once. Two accounts of 1e6 J leave a residual of 2^-40 J,
+given exactly, where rounding each account first gives 0. On the turning flow
+of the two vessels, every absolute account (energy, mass and each carried
+coordinate per component; energy and mass per connection) equals a judge's
+sum of the size of each step's change of the signed account, within a
+derived double-double allowance, over 600 steps.
 
 G0, `tests/system_g0.rs`, on one-port elements defined in the test:
 
@@ -2751,7 +2804,7 @@ and connection `carried_defect` retain the transported amounts independently.
 `Ledger::carried_residual(i)` is available only after a step and complete
 measurement coverage of every owner carrying coordinate `i` over the window.
 Later measurements cannot fill an earlier unaudited step. Checkpoint restore
-rewinds these compensated sums and coverage counts with the other accounts.
+rewinds these accounts and coverage counts with the other accounts.
 All added per-port, per-owner and per-connection workspaces are sized at seal.
 `GasVolume` measures its `carried_kg`; `Restriction` declares zero storage.
 An attempted draw past a constituent's inventory shortens the step using that

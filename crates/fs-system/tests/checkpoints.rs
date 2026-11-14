@@ -188,7 +188,7 @@ fn device() -> (System, Device) {
 
 /// Observe through the ordinary System API, independently of checkpoint
 /// accessors. Float bits include signed zeros; ledger equality compares the
-/// private compensation of every Sum as well as its displayed value.
+/// trailing word of every account as well as its displayed value.
 #[derive(Debug, PartialEq)]
 struct Observed {
     time_bits: u64,

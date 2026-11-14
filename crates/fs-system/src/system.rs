@@ -15,7 +15,9 @@ use fs_ports::component::{
 };
 
 use crate::erased::{Node, OnLine, OwnerError, Plain, Tangent};
-use crate::ledger::{BoundaryAccount, ConnectionAccount, Ledger, NodeAccount, SinkAccount, Sum};
+use crate::ledger::{
+    Account, BoundaryAccount, ConnectionAccount, Ledger, NodeAccount, SinkAccount, Sum,
+};
 use crate::solve::Condensed;
 use crate::wiring::{
     AdmissionError, Block, Connection, Driver, HeatSink, MapMember, NodeId, PortRef,
@@ -1855,7 +1857,7 @@ impl SystemBuilder {
                 let carried = members.iter().map(|port| self.spec(*port).carried_quantities())
                     .max().unwrap_or(0);
                 ConnectionAccount {
-                    carried_defect: vec![Sum::default(); carried],
+                    carried_defect: vec![Account::default(); carried],
                     ..ConnectionAccount::default()
                 }
             }).collect(),
@@ -1864,7 +1866,7 @@ impl SystemBuilder {
                 .iter()
                 .map(|(port, _)| BoundaryAccount {
                     port: self.label(*port),
-                    carried_in: vec![Sum::default(); self.spec(*port).carried_quantities()],
+                    carried_in: vec![Account::default(); self.spec(*port).carried_quantities()],
                     ..BoundaryAccount::default()
                 })
                 .collect(),
@@ -3911,11 +3913,13 @@ impl System {
                 .entropy_generated_j_per_k
                 .add(receipt.entropy_generated_j_per_k);
             account.balance_defect_j.add(defects[node]);
+            account.absolute_defect_j.add(defects[node].abs());
             if let Some(audit) = &mass_audits[node] {
                 let mass = account.mass.get_or_insert_with(Default::default);
                 mass.port_mass_in_kg.add(audit.port_mass_in_kg);
                 mass.stored_change_kg.add(audit.stored_change_kg);
                 mass.balance_defect_kg.add(audit.balance_defect_kg);
+                mass.absolute_defect_kg.add(audit.balance_defect_kg.abs());
                 mass.audited_steps += 1;
             }
             for (account, audit) in account.carried.iter_mut().zip(&self.carried_audits[node]) {
@@ -3924,6 +3928,7 @@ impl System {
                     account.port_in.add(audit.port_in);
                     account.stored_change.add(audit.stored_change);
                     account.balance_defect.add(audit.balance_defect);
+                    account.absolute_defect.add(audit.balance_defect.abs());
                     account.audited_steps += 1;
                 }
             }
@@ -3934,6 +3939,8 @@ impl System {
             account.energy_defect_j.add(energy);
             account.entropy_generated_j_per_k.add(entropy);
             account.mass_defect_kg.add(mass);
+            account.absolute_energy_defect_j.add(energy.abs());
+            account.absolute_mass_defect_kg.add(mass.abs());
         }
         for (account, row) in self
             .ledger

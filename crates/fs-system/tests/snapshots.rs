@@ -1195,4 +1195,20 @@ fn the_image_charter_derives_its_pinned_identities() {
         hex(charter.state_codec_id().as_bytes())
     );
     assert!(snapshot_v2::verify_state_charter::<SystemImage>().is_ok());
+    // Codec version 1 (7a35133254) wrote each ledger account as a sum and
+    // its compensation. Its image names the same state type and another
+    // schema and codec, so a resume expecting this charter refuses it.
+    assert_eq!(charter.codec_version, 2);
+    assert_eq!(
+        hex(charter.state_type_id().as_bytes()),
+        "48da3c2f4172ca570c03fff02710ddf757ba2074a03c78d8265692ceb22c76f3"
+    );
+    assert_ne!(
+        hex(charter.state_schema_id().as_bytes()),
+        "c6babd96283371b55c6ebb51d1f09277f3bd70366818671fa3e5e69d522ab499"
+    );
+    assert_ne!(
+        hex(charter.state_codec_id().as_bytes()),
+        "d1db2647a701d3f951fa8e8af095a92d1404bdef940ad975ea277598a385d4e3"
+    );
 }

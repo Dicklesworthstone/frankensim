@@ -2979,6 +2979,7 @@ dependencies = [
  "fs-alloc",
  "fs-blake3",
  "fs-exec",
+ "fs-math",
  "fs-mbd",
  "fs-nlmodal",
  "fs-phs",
