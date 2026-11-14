@@ -17,8 +17,8 @@ use crate::erased::{Node, OnLine, OwnerError, Plain, Tangent};
 use crate::ledger::{BoundaryAccount, ConnectionAccount, Ledger, NodeAccount, SinkAccount, Sum};
 use crate::solve::Condensed;
 use crate::wiring::{
-    AdmissionError, Block, Connection, Driver, HeatSink, NodeId, PortRef, RouteTemperature,
-    blocks_in_dependency_order, tolerance_group,
+    AdmissionError, Block, Connection, Driver, HeatSink, MapMember, NodeId, PortRef,
+    RouteTemperature, blocks_in_dependency_order, tolerance_group,
 };
 
 mod line;
@@ -1018,6 +1018,8 @@ impl SystemBuilder {
     /// coefficients must supply the conversion in the ports' SI units.
     /// This does not infer a trace metric or a conservative heat map.
     ///
+    /// This is [`Self::power_map_members`] with one member.
+    ///
     /// # Errors
     /// Wrong roles or carriers, a matrix of the wrong size, a non-finite
     /// coefficient, an unrepresentable metric adjoint, or a port already
@@ -1028,27 +1030,67 @@ impl SystemBuilder {
         b: PortRef,
         map: Vec<f64>,
     ) -> Result<(), AdmissionError> {
-        self.need_power_map_roles(a, b)?;
-        let (rows, columns) = (self.spec(b).width(), self.spec(a).width());
-        if rows.checked_mul(columns) != Some(map.len()) {
-            return Err(AdmissionError::MapShape {
-                rows,
-                columns,
-                entries: map.len(),
-            });
+        self.power_map_members(vec![(a, map)], b)
+    }
+
+    /// Connect several effort-receiving power ports to one flow-receiving
+    /// port by one adjoint pair.
+    ///
+    /// Member `k` is `(a_k, P_k)`, with `P_k` row-major of `b.width()` rows
+    /// and `a_k.width()` columns. The kernel generates `f_b = -sum(P_k f_a_k)`
+    /// and `e_a_k = M_a_k^-1 P_k^T M_b e_b`, so the declared power pairings
+    /// cancel. It is the map `[P_1 ... P_n]` of the members' coefficients
+    /// taken together: a rigid lever from the force and torque ports of two
+    /// bodies onto one contact, for instance. With one member it is
+    /// [`Self::power_map`]. [`Self::common_effort_ratios`] is its scalar
+    /// case: a member with ratio `r` is `P = r I`.
+    ///
+    /// The map is constant from admission. A lever whose arms turn with its
+    /// bodies keeps the ratios of the pose it was admitted at.
+    ///
+    /// # Errors
+    /// No member ([`AdmissionError::Empty`]), and, member by member, what
+    /// [`Self::power_map`] refuses; the index of a non-finite coefficient
+    /// counts through the members' maps in order. A port named twice is
+    /// already connected. Refusal changes nothing.
+    pub fn power_map_members(
+        &mut self,
+        members: Vec<(PortRef, Vec<f64>)>,
+        b: PortRef,
+    ) -> Result<(), AdmissionError> {
+        if members.is_empty() {
+            return Err(AdmissionError::Empty);
         }
-        if let Some((index, &value)) = map.iter().enumerate().find(|(_, v)| !v.is_finite()) {
-            return Err(AdmissionError::MapCoefficient { index, value });
+        let mut before = 0;
+        for (a, map) in &members {
+            self.need_power_map_roles(*a, b)?;
+            let (rows, columns) = (self.spec(b).width(), self.spec(*a).width());
+            if rows.checked_mul(columns) != Some(map.len()) {
+                return Err(AdmissionError::MapShape {
+                    rows,
+                    columns,
+                    entries: map.len(),
+                });
+            }
+            if let Some((index, &value)) = map.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+                return Err(AdmissionError::MapCoefficient {
+                    index: before + index,
+                    value,
+                });
+            }
+            before += map.len();
         }
-        self.check_free(&[a, b])?;
-        let effort_map = self.field_effort_map(a, b, &map)?;
-        self.take(&[a, b]);
-        self.connections.push(Connection::PowerMap {
-            a,
-            b,
-            map,
-            effort_map,
-        });
+        let mut ports: Vec<PortRef> = members.iter().map(|(a, _)| *a).collect();
+        ports.push(b);
+        self.check_free(&ports)?;
+        let mut mapped = Vec::with_capacity(members.len());
+        for (a, map) in members {
+            let effort_map = self.field_effort_map(a, b, &map)?;
+            mapped.push(MapMember { a, map, effort_map });
+        }
+        self.take(&ports);
+        self.connections
+            .push(Connection::PowerMap { members: mapped, b });
         Ok(())
     }
 
@@ -1338,34 +1380,37 @@ impl SystemBuilder {
                             Driver::Linear(vec![(output_of(*a).start + offset, -*ratio)]);
                     }
                 }
-                Connection::PowerMap {
-                    a,
-                    b,
-                    map,
-                    effort_map,
-                } => {
-                    let columns = self.spec(*a).width();
+                Connection::PowerMap { members, b } => {
                     let rows = self.spec(*b).width();
-                    for (column, index) in input_of(*a).enumerate() {
-                        let terms = (0..rows)
-                            .filter_map(|row| {
-                                let coefficient = effort_map
-                                    .as_ref()
-                                    .map_or(map[row * columns + column], |adjoint| {
-                                        adjoint[column * rows + row]
-                                    });
-                                (coefficient != 0.0)
-                                    .then_some((output_of(*b).start + row, coefficient))
-                            })
-                            .collect();
-                        drivers[index] = Driver::Linear(terms);
+                    for MapMember { a, map, effort_map } in members {
+                        let columns = self.spec(*a).width();
+                        for (column, index) in input_of(*a).enumerate() {
+                            let terms = (0..rows)
+                                .filter_map(|row| {
+                                    let coefficient = effort_map
+                                        .as_ref()
+                                        .map_or(map[row * columns + column], |adjoint| {
+                                            adjoint[column * rows + row]
+                                        });
+                                    (coefficient != 0.0)
+                                        .then_some((output_of(*b).start + row, coefficient))
+                                })
+                                .collect();
+                            drivers[index] = Driver::Linear(terms);
+                        }
                     }
+                    // The members' terms follow one another in member order;
+                    // one member gives the plain map's terms, in its order.
                     for (row, index) in input_of(*b).enumerate() {
-                        let terms = (0..columns)
-                            .filter_map(|column| {
-                                let coefficient = map[row * columns + column];
-                                (coefficient != 0.0)
-                                    .then_some((output_of(*a).start + column, -coefficient))
+                        let terms = members
+                            .iter()
+                            .flat_map(|MapMember { a, map, .. }| {
+                                let columns = self.spec(*a).width();
+                                let start = output_of(*a).start;
+                                (0..columns).filter_map(move |column| {
+                                    let coefficient = map[row * columns + column];
+                                    (coefficient != 0.0).then_some((start + column, -coefficient))
+                                })
                             })
                             .collect();
                         drivers[index] = Driver::Linear(terms);

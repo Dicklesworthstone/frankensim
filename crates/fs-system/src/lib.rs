@@ -10,6 +10,7 @@
 //! SystemBuilder::add / add_with_tangent      components and initial states
 //!              ::bond / common_effort / common_flow / heat_route / signal
 //!              ::transformer / power_map    lossless power conversion
+//!              ::power_map_members           one map from several ports
 //!              ::common_flow_ratios / common_effort_ratios
 //!                                            a junction whose members each
 //!                                            sit behind their own ratio

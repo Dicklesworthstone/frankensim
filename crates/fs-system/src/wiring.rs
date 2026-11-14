@@ -322,16 +322,10 @@ pub(crate) enum Connection {
     /// `b` receives `-ratio * flow_a`; `a` receives `ratio * effort_b`.
     /// A signed scalar ratio acts independently on each coefficient.
     Transformer { a: PortRef, b: PortRef, ratio: f64 },
-    /// `b` receives `-P flow_a`; `a` receives the metric adjoint times
-    /// `effort_b`. `map` has `b.width()` rows and `a.width()` columns.
-    PowerMap {
-        a: PortRef,
-        b: PortRef,
-        map: Vec<f64>,
-        /// Row-major `M_a^-1 P^T M_b`, with `a.width()` rows. `None`
-        /// retains the original shared coefficients for ordinary ports.
-        effort_map: Option<Vec<f64>>,
-    },
+    /// `b` receives `-sum(P_k flow_a_k)` over the members; member `a_k`
+    /// receives the metric adjoint of its own `P_k` times `effort_b`. One
+    /// member is the plain power map.
+    PowerMap { members: Vec<MapMember>, b: PortRef },
     /// Heat leaving `source` is delivered to `sinks` by fraction; the rest
     /// goes to the declared sink outside the system.
     HeatRoute {
@@ -345,6 +339,17 @@ pub(crate) enum Connection {
     Signal { from: PortRef, to: PortRef },
 }
 
+/// One effort-receiving member `a` of a power map.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MapMember {
+    pub(crate) a: PortRef,
+    /// `P`, row-major, with `b.width()` rows and `a.width()` columns.
+    pub(crate) map: Vec<f64>,
+    /// Row-major `M_a^-1 P^T M_b`, with `a.width()` rows. `None` retains the
+    /// original shared coefficients for ordinary ports.
+    pub(crate) effort_map: Option<Vec<f64>>,
+}
+
 impl Connection {
     /// Every port that exchanges energy through this connection.
     pub(crate) fn energy_members(&self, out: &mut Vec<PortRef>) {
@@ -354,8 +359,12 @@ impl Connection {
                 out.push(*setter);
                 out.extend(members.iter().map(|(port, _)| *port));
             }
-            Self::Transformer { a, b, .. } | Self::PowerMap { a, b, .. } => {
+            Self::Transformer { a, b, .. } => {
                 out.push(*a);
+                out.push(*b);
+            }
+            Self::PowerMap { members, b } => {
+                out.extend(members.iter().map(|member| member.a));
                 out.push(*b);
             }
             Self::HeatRoute { source, sinks, .. } => {

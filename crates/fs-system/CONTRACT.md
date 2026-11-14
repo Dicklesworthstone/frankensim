@@ -67,6 +67,18 @@ physics owners below fs-couple can be composed without it.
     Unequal metrics require `power_map`. Interface power magnitudes and
     input-error energy allowances use the declared metric, and a non-finite
     interface energy allowance refuses the step.
+  - `power_map_members([(a_k, P_k)], b)`: several effort-receiving ports onto
+    one flow-receiving port as one connection. The kernel generates
+    `f_b = -sum(P_k f_a_k)` and, member by member, `e_a_k = M_a_k^-1 P_k^T
+    M_b e_b`: the map `[P_1 ... P_n]` of the members' coefficients taken
+    together, such as the lever from two bodies' force and torque ports onto
+    one contact. `power_map` is its one-member call, with the same drivers
+    term for term; `common_effort_ratios` is its scalar case, `P_k = r_k I`.
+    Each member is admitted as `power_map` admits its port, before any port
+    is claimed; no member is refused as `Empty`. Limit: the map is constant
+    from admission. A lever whose arms turn with its bodies keeps the ratios
+    of the pose it was admitted at, so a graph that moves its bodies through
+    a step takes their arms at the admitted pose.
   - `heat_route(source, sinks, remainder, temperature)`: heat leaving the
     source is delivered to the sinks by fraction; a remainder goes to a named
     `HeatSink` outside the system. `RouteTemperature::SinkEquivalent` gives the
@@ -953,6 +965,7 @@ that locates an event (a friction interface that cuts the step at a stop,
 
 `AdmissionError` for descriptions that cannot run, including
 `TransformerRatio`, `MapShape` and `MapCoefficient` for invalid power maps,
+`Empty` for a junction or a power map without members,
 and `LinePorts`, `TwoLines` and `LineEnd` for load lines.
 `SystemError` for a failed
 step: the component's own error unchanged (`Component`, with the phase), a
@@ -1129,6 +1142,23 @@ Power conversions, `tests/power_maps.rs`:
 - ratio junctions refuse no member, a zero or non-finite ratio, a wrong
   role, a heat or signal port, unequal widths and a member named twice,
   claiming nothing; the same ports then join and the system seals and steps.
+
+Power maps from several ports, `tests/power_map_members.rs`:
+- members `r_k I` on width-two banks (one ratio reversed) give the ratio
+  junction's states bit for bit after 800 steps;
+- a width-two and a width-one member onto three springs follow the midpoint
+  equations of their stacked map, solved by elimination in the test, for
+  1,000 steps with one Newton update per step: a full-rank stack, a rank-two
+  stack with an unconstrained inertial mode, and a member the map does not
+  reach, which keeps its motion exactly; energy conserved;
+- a field member, an ordinary member and a field common port: each member
+  takes its own metric adjoint, the trajectory follows the weighted midpoint
+  equations for 600 steps and the three ports' received power sums to zero;
+- no member, a wrong role (the common port named as a member included), a
+  map of the wrong shape, a non-finite coefficient (its index counted
+  through the members' maps) and a member named twice or already connected
+  are refused, claiming nothing; the ports then join and the system seals
+  and steps.
 
 Field conversions, `tests/field_maps.rs`:
 - nonmatching 2-to-3 field oscillators with distinct off-diagonal metrics,
