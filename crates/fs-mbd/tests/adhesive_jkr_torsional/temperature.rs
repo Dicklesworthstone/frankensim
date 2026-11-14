@@ -242,11 +242,11 @@ fn cooling_reverses_warming_parameter_work_without_an_impulse_or_clock_reset() {
         0.0,
         2.0 * thermal_controls(&source).energy_tolerance_j,
     );
-    assert_eq!(cold_source.identity(), source.identity());
-    assert_eq!(cold.state(), previous);
+    same_physical_source(&cold_source, &source);
+    same_values(cold.state(), previous);
     assert_eq!(cold.bodies(), &f.bodies);
     assert_eq!(cold.pair().mobility(), pair.mobility());
-    assert_eq!(cold.report().after, previous.motion_state().contact());
+    same_values(cold.report().after, previous.motion_state().contact());
 }
 
 #[test]
@@ -413,4 +413,76 @@ fn foreign_sources_native_staleness_and_cancellation_leave_temperature_retry_unc
     assert_eq!(retry.state(), baseline.state());
     assert_eq!(retry.report(), baseline.report());
     assert_eq!(pair.advance(previous, 0.002 * time, &gate).unwrap(), trial);
+}
+
+/// Back at the original temperatures, the cooled source was refreshed, so its
+/// receipts record pinned-claim selection where the original resolution
+/// recorded SingleClaimOnly, and its identity differs by that receipt alone
+/// (fs-material's rule: a refresh pins, an independent resolution does not).
+/// Every card, query, selected claim and value is the original's.
+fn same_physical_source(refreshed: &SourceJkrMixedMode, original: &SourceJkrMixedMode) {
+    let (a, b) = (
+        refreshed.normal_source().normal_state(),
+        original.normal_source().normal_state(),
+    );
+    for (x, y) in [
+        (
+            a.elastic().surface_a_state().resolved(),
+            b.elastic().surface_a_state().resolved(),
+        ),
+        (
+            a.elastic().surface_b_state().resolved(),
+            b.elastic().surface_b_state().resolved(),
+        ),
+    ] {
+        assert_eq!(x.card_identity(), y.card_identity());
+        assert_eq!(x.query(), y.query());
+        same_claims(x.properties(), y.properties());
+    }
+    let (x, y) = (a.interface_state(), b.interface_state());
+    assert_eq!(x.card_identity(), y.card_identity());
+    assert_eq!(x.query(), y.query());
+    same_claims(x.properties(), y.properties());
+    assert_eq!(
+        a.adhesion_energy_j_per_m2().to_bits(),
+        b.adhesion_energy_j_per_m2().to_bits()
+    );
+    assert_eq!(refreshed.envelope(), original.envelope());
+}
+
+fn same_claims(
+    refreshed: &[fs_material::state_point::ResolvedScalarProperty],
+    original: &[fs_material::state_point::ResolvedScalarProperty],
+) {
+    assert_eq!(refreshed.len(), original.len());
+    for (x, y) in refreshed.iter().zip(original) {
+        assert_eq!(x.answer().receipt.selected, y.answer().receipt.selected);
+        assert_eq!(x.value_si().to_bits(), y.value_si().to_bits());
+    }
+}
+
+/// The cooled state holds the original's values; its content hashes are
+/// derived from the refreshed source's identity, so they differ by the same
+/// receipt (see `same_physical_source`). Every field is compared except those
+/// hashes. Debug prints each f64 in its shortest round-trip form, so equal
+/// text means equal bits.
+fn same_values<T: core::fmt::Debug>(cooled: T, original: T) {
+    assert_eq!(
+        without_hashes(&format!("{cooled:?}")),
+        without_hashes(&format!("{original:?}"))
+    );
+}
+
+fn without_hashes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("ContentHash(") {
+        let open = start + "ContentHash(".len();
+        let close = open + rest[open..].find(')').unwrap();
+        out.push_str(&rest[..open]);
+        out.push_str("..)");
+        rest = &rest[close + 1..];
+    }
+    out.push_str(rest);
+    out
 }
