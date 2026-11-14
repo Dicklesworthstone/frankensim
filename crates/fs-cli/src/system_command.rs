@@ -10,6 +10,7 @@
 mod adaptive_metric;
 mod hydraulic;
 mod materials;
+mod phs;
 mod snapshot;
 
 use std::ffi::OsString;
@@ -307,6 +308,22 @@ ratio * w against the loop):
                  ratio, effort_a and flow_b in the declared domains' SI units.
                  This is an ideal held-ratio power map, not crank/cam geometry
                  or a displacement constraint; no ratio-actuator work is modeled.
+A linear port-Hamiltonian system written as matrices, stepped by the exact
+held-input owner of fs-system:
+  port_hamiltonian energy, structure, dissipation (each n x n, 1 <= n <= 64),
+                 input (n x m), ports = [{name, domain, role}, ...] (m of
+                 them), state = [0, ...] (n numbers)   [each port, heat]
+                 (dx/dt = (structure - dissipation) energy x + input u, with
+                 stored energy x' energy x / 2 in J. energy and dissipation
+                 are symmetric positive semidefinite, structure is skew. The
+                 domain is translation, rotation or electrical. An effort_in
+                 port receives an effort and returns the step mean of its row
+                 of input' energy x as a flow; a flow_in port receives a flow
+                 and returns an effort. heat is routed like a damper's and
+                 carries the work dissipation absorbs. Reports x0, x1, ...,
+                 each port's returned mean and heat_w; adaptive tolerances
+                 name <element>.x<i>. Exact for held inputs only; no
+                 checkpoint codec.)
 Rigid bodies in three dimensions joined by viscous connectors, stepped by the
 fs-mbd network owner. Vectors are [x, y, z] in world axes unless said
 otherwise; a body's principal axes are its own axes and its centre of mass
@@ -1033,6 +1050,9 @@ enum Kind {
     Gyrator,
     /// A lossless power map whose scalar ratio comes from a signal.
     ModulatedTransformer,
+    /// Authored linear port-Hamiltonian matrices, stepped exactly for held
+    /// inputs by the fs-system owner, with a heat port.
+    PortHamiltonian,
     /// Rigid bodies and viscous connectors, stepped by their fs-mbd owner.
     RigidNetwork,
     /// The same with Maxwell branches and actuators on the connectors.
@@ -1054,7 +1074,7 @@ enum Kind {
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 37] = [
+    const TABLE: [(&'static str, Self); 38] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
@@ -1085,6 +1105,7 @@ impl Kind {
         ("nonlinear_inductor", Self::NonlinearInductor),
         ("gyrator", Self::Gyrator),
         ("modulated_transformer", Self::ModulatedTransformer),
+        ("port_hamiltonian", Self::PortHamiltonian),
         ("rigid_network", Self::RigidNetwork),
         ("viscoelastic_network", Self::ViscoelasticNetwork),
         ("heat_capacity", Self::HeatCapacity),
@@ -1135,6 +1156,9 @@ struct Element {
     gas: Option<GasVolume>,
     /// Named prepared sources actually selected by this component.
     material_sources: Vec<String>,
+    /// The state coordinates of a port-Hamiltonian element, reported and
+    /// error-controlled as x0, x1, ...
+    coordinates: usize,
 }
 
 struct Device {
@@ -1160,6 +1184,8 @@ enum Coordinate {
     Enthalpy,
     SourceWork,
     Network(adaptive_metric::NetworkCoordinate),
+    /// One coordinate of a port-Hamiltonian element's state vector.
+    State(usize),
 }
 
 struct ErrorAccount {
@@ -1181,6 +1207,11 @@ impl ErrorAccount {
             Coordinate::SourceWork => checkpoint.state::<SourceAccount>(self.node)
                 .map_or(f64::NAN, |state| state.energy_in_j),
             Coordinate::Network(_) => f64::NAN,
+            Coordinate::State(index) => checkpoint
+                .state::<Vec<f64>>(self.node)
+                .and_then(|state| state.get(index))
+                .copied()
+                .unwrap_or(f64::NAN),
         }
     }
 }
@@ -2354,6 +2385,7 @@ fn element(
     let mut branches = Vec::new();
     let mut gas = None;
     let mut material_sources = Vec::new();
+    let mut coordinates = 0;
     let (node, ports) = match kind {
         Kind::Inertance(domain) => {
             let names = domain.names();
@@ -2474,6 +2506,11 @@ fn element(
         }
         Kind::Gyrator => gyrator(builder, name, definition, &what)?,
         Kind::ModulatedTransformer => modulated_transformer(builder, name, definition, &what)?,
+        Kind::PortHamiltonian => {
+            let (owner, state) = phs::port_hamiltonian(definition, &what)?;
+            coordinates = state.len();
+            add(builder, name, owner, state)?
+        }
         Kind::RigidNetwork | Kind::ViscoelasticNetwork => {
             let parts = if kind == Kind::RigidNetwork {
                 rigid_network(builder, name, definition, &what)?
@@ -2571,6 +2608,7 @@ fn element(
         branches,
         gas,
         material_sources,
+        coordinates,
     })
 }
 
@@ -3203,6 +3241,16 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             | Kind::LayerConductor
             | Kind::HeatNode
             | Kind::Restriction => Vec::new(),
+            Kind::PortHamiltonian => {
+                for index in 0..element.coordinates {
+                    expected.push((
+                        format!("{}.x{index}", element.name),
+                        element.node,
+                        Coordinate::State(index),
+                    ));
+                }
+                Vec::new()
+            }
             Kind::RigidNetwork | Kind::ViscoelasticNetwork => {
                 for (body, &properties) in element.bodies.iter().enumerate() {
                     for (field, quantity) in adaptive_metric::BodyQuantity::ACCOUNTS {
@@ -3490,6 +3538,22 @@ impl Device {
         if self
             .elements
             .iter()
+            .any(|element| element.kind == Kind::PortHamiltonian)
+        {
+            let base = description.replace(
+                "constant parameters or",
+                "constant parameters, authored linear port-Hamiltonian matrices or",
+            );
+            description = std::borrow::Cow::Owned(format!(
+                "{base}; a port_hamiltonian is stepped by the fs-system exact owner, whose map \
+                 is exact only for inputs held over each step: inputs from other elements are \
+                 the kernel's step means, so a coupled scene is not exact; quadratic storage \
+                 only, no nonlinear storage, switching or checkpoint codec"
+            ));
+        }
+        if self
+            .elements
+            .iter()
             .any(|element| !element.material_sources.is_empty())
         {
             let base = description
@@ -3602,6 +3666,9 @@ impl Device {
         if element.kind == Kind::ResistanceMatrix {
             return self.resistance_values(element);
         }
+        if element.kind == Kind::PortHamiltonian {
+            return self.phs_values(element);
+        }
         self.lumped_values(element)
             .into_iter()
             .map(|(key, value)| (key.to_owned(), value))
@@ -3706,6 +3773,44 @@ impl Device {
             .and_then(|values| values.first())
             .map_or(f64::NAN, |value| -value);
         values.push(("heat_w".to_owned(), heat_w));
+        values
+    }
+
+    /// A port-Hamiltonian element: every state coordinate, then for each
+    /// power port the mean of what it returned over the last step (a flow
+    /// for an effort_in port, an effort for a flow_in port), and the heat.
+    fn phs_values(&self, element: &Element) -> Vec<(String, f64)> {
+        let state = self.system.state::<Vec<f64>>(element.node);
+        let mut values: Vec<_> = (0..element.coordinates)
+            .map(|index| {
+                let coordinate = state.and_then(|state| state.get(index)).copied();
+                (format!("x{index}"), coordinate.unwrap_or(f64::NAN))
+            })
+            .collect();
+        let output = |name: &str| {
+            self.system
+                .port(element.node, name)
+                .filter(|_| self.system.steps() > 0)
+                .and_then(|port| self.system.last_output(port).first().copied())
+                .unwrap_or(f64::NAN)
+        };
+        for port in &element.ports {
+            let Carrier::Power(kind) = port.carrier() else {
+                continue;
+            };
+            let Some(domain) = Domain::of(kind) else {
+                continue;
+            };
+            let names = domain.names();
+            let returned = if port.role() == PortRole::EffortIn {
+                names.flow
+            } else {
+                names.effort
+            };
+            let name = port.id().as_str();
+            values.push((format!("{name}.{returned}"), output(name)));
+        }
+        values.push(("heat_w".to_owned(), -output("heat")));
         values
     }
 
@@ -3831,7 +3936,8 @@ impl Device {
             Kind::RigidNetwork
             | Kind::ViscoelasticNetwork
             | Kind::GasVolume
-            | Kind::ResistanceMatrix => Vec::new(),
+            | Kind::ResistanceMatrix
+            | Kind::PortHamiltonian => Vec::new(),
         }
     }
 

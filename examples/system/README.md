@@ -56,6 +56,7 @@ save/resume commands work with `self_heating_damper.json` and
 | `geared_oscillator.json` | an ideal 2.5:1 transformer couples a mass to an anchored spring | reflected stiffness `ratio² × stiffness`, the midpoint oscillation phase and conserved energy |
 | `projected_suspension.json` | a real 3-D rigid body suspended by a scalar spring along an oblique direction through a rectangular power map | the projected oscillator, free transverse motion, signed/scaled transmissions and energy closure |
 | `anisotropic_damping.json` | a 3-D rigid body slowed by a full damping tensor; off-diagonal terms induce transverse motion and every lost joule heats the case | independently diagonalized decay modes, position, last-step forces and kinetic-to-thermal energy transfer |
+| `port_hamiltonian_oscillator.json` | the driven oscillator written as port-Hamiltonian matrices and stepped by the exact held-input owner of fs-system; its damping work warms a case | the closed form of `m q'' + c q' + k q = F` to 1e-12 of scale after 500 steps (2e-16 measured), where the element-built oscillator is about 3e-6 m off; supplied work = stored energy + heat to 1e-12 J |
 | `rack_and_pinion.json` | one pinion inertia carrying a motor torque and a bearing directly, and a rack's spring, friction and load through the pinion radius: three members of one join, each behind its own ratio | the midpoint rule for the pinion's one equation with the reflected stiffness and friction; motor work, the load's received work and the heat |
 | `pneumatic_cylinder.json` | a 2 l tank of air at 6 bar feeds a cylinder through a valve; the piston pushes a spring and the outside pressure out by 104 mm; the tank cools to 281 K as it empties, the chamber warms to 325 K as it fills and gives heat to the barrel, which also takes the seal's friction | an independent RK4 integration of the cylinder's seven equations (4.9e-9 at 3 s, second order in mid-stroke), conservation of the gas, and the force balance at rest |
 | `damped_pair.json` | two rigid bodies in three dimensions closing at 2 m/s on a viscous connector, stepped by the fs-mbd network owner (`rigid_network`); a quarter of the connector's heat warms a shell, half an oil bath, the rest goes to the air | the closed form: each momentum decays as `exp(-0.7 t)`, the heat is `2 (1 - exp(-1.4 t))` J, split 25 / 50 / 25 |
@@ -429,3 +430,31 @@ effort; its `heat` port must be routed or prescribed. Last-step probes
 domains) and `heat_w` report the accepted mean response. The element stores
 no energy and needs no adaptive state tolerance. These are authored constant
 coefficients, with no material or temperature law inferred.
+
+## Port-Hamiltonian matrices
+
+`port_hamiltonian_oscillator.json` writes the driven oscillator as matrices
+over `x = [momentum, displacement]`: `energy` is `[[1/m, 0], [0, k]]`,
+`structure` `[[0, -1], [1, 0]]`, `dissipation` puts `c` on the momentum row,
+and `input` takes the force into the momentum. A held 2 N force drives it
+from rest, and the dissipated work warms a 10 J/K case.
+
+The element is the exact held-input owner of fs-system: for an input held
+over a step, the step is exact. After 500 steps of 1 ms its state agrees with
+the closed form of `m q'' + c q' + k q = F` to about 2e-16 (the test asserts
+1e-12 of scale), while the same oscillator built from `mass`, `spring` and
+`damper` (the midpoint rule) is about 3e-6 m off. The supplied work, the stored energy and the case's heat
+close to 1e-12 J. Inputs that come from other elements are the kernel's step
+means, so a coupled scene is not exact.
+
+`energy`, `structure` and `dissipation` are n by n with n from 1 to 64:
+`energy` and `dissipation` symmetric positive semidefinite, `structure` skew.
+`input` has one column per port. Each port names a `domain` (`translation`,
+`rotation` or `electrical`) and a `role`: an `effort_in` port takes an effort
+and returns the step mean of its output as a flow; a `flow_in` port takes a
+flow and returns an effort. A one-state `flow_in` element with `energy`
+`[[k]]` and zero `structure` and `dissipation` follows a `spring` under the
+same end motion. Reports give `x0`, `x1`, ..., each port's returned mean
+(`p.velocity_m_s` here) and `heat_w`; adaptive runs name `oscillator.x0`,
+`oscillator.x1`, ... as state tolerances. The storage is quadratic only, and
+the element has no checkpoint codec.

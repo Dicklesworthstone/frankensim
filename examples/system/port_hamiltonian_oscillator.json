@@ -1,0 +1,22 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 0.5,
+  "step_s": 1.0e-3,
+  "elements": {
+    "oscillator": {
+      "kind": "port_hamiltonian",
+      "energy": [[4.0, 0.0], [0.0, 400.0]],
+      "structure": [[0.0, -1.0], [1.0, 0.0]],
+      "dissipation": [[1.5, 0.0], [0.0, 0.0]],
+      "input": [[1.0], [0.0]],
+      "ports": [{"name": "p", "domain": "translation", "role": "effort_in"}],
+      "state": [0.0, 0.0]
+    },
+    "shaker": {"kind": "force", "force_n": 2.0},
+    "case": {"kind": "heat_capacity", "capacity_j_k": 10.0, "temperature_k": 300.0}
+  },
+  "connections": [
+    {"join": ["oscillator.p", "shaker.p"]},
+    {"route": "oscillator.heat", "to": [["case.heat", 1.0]]}
+  ]
+}

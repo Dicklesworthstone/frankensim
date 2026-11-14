@@ -3015,6 +3015,11 @@ boundaries; a storage callback and each documented indivisible dense/heat block
 remain non-preemptible. The adapter retains the original dense limits; it
 neither supplies a sparse path nor admits nonlinear storage by approximation.
 
+`phs_exact` re-exports the fs-phs types its constructor takes,
+`PortHamiltonian`, `QuadraticStorage` and `LinearSplitBudget`, so a caller
+such as fs-cli's `port_hamiltonian` scene element assembles the owner without
+a direct fs-phs dependency. The re-exports change no behaviour.
+
 `tests/phs_exact.rs` covers bitwise agreement with the original exact owner,
 Component and tangent conformance including transpose duality, independent
 driven scalar exponentials and heat/heat-derivative integrals, variable-duration

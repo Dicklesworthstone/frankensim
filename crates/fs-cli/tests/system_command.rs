@@ -2155,6 +2155,339 @@ fn resistance_matrix_scenes_refuse_invalid_laws_and_unconnected_heat() {
     assert!(stderr.contains("damping.heat"), "{stderr}");
 }
 
+/// The closed form of `m q'' + c q' + k q = F` from rest, returned as
+/// `[momentum, displacement]`, for port_hamiltonian_oscillator.json:
+/// m = 0.25 kg, k = 400 N/m, c = 1.5 N s/m and F = 2 N.
+fn held_force_oscillator(time_s: f64) -> [f64; 2] {
+    let (mass, stiffness, damping, force) = (0.25_f64, 400.0_f64, 1.5_f64, 2.0_f64);
+    let decay = damping / (2.0 * mass);
+    let frequency = (stiffness / mass - decay * decay).sqrt();
+    let envelope = (-decay * time_s).exp();
+    let (sine, cosine) = (frequency * time_s).sin_cos();
+    [
+        force / frequency * envelope * sine,
+        force / stiffness * (1.0 - envelope * (cosine + decay / frequency * sine)),
+    ]
+}
+
+/// The work the held 2 N force has done, less the energy still stored.
+fn held_force_heat([momentum, displacement]: [f64; 2]) -> f64 {
+    2.0 * displacement - (2.0 * momentum * momentum + 200.0 * displacement * displacement)
+}
+
+#[test]
+fn a_port_hamiltonian_oscillator_steps_a_held_force_exactly_and_heats_its_case_by_the_lost_work() {
+    let (code, json, stderr) = run_binary(&[
+        "--json",
+        "system",
+        &example("port_hamiltonian_oscillator.json"),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
+    let (end, dt) = (0.5, 1.0e-3);
+    let (momentum_scale, displacement_scale) = (0.05, 0.005);
+    let exact = held_force_oscillator(end);
+    let [momentum, displacement] = exact;
+    let reported = |name: &str, key: &str| value(&json, &element(name), key);
+    // The owner's map is exact for a held input: 500 steps agree with the
+    // closed form to rounding (about 2e-16 on aarch64). The midpoint rule
+    // is about 3e-6 m off (below).
+    let x0 = reported("oscillator", "x0");
+    let x1 = reported("oscillator", "x1");
+    assert!(
+        (x0 - momentum).abs() <= 1.0e-12 * momentum_scale,
+        "{x0} vs {momentum}"
+    );
+    assert!(
+        (x1 - displacement).abs() <= 1.0e-12 * displacement_scale,
+        "{x1} vs {displacement}"
+    );
+
+    // A source's account is the energy that entered it: minus its work.
+    let supplied = 2.0 * displacement;
+    let heat = held_force_heat(exact);
+    assert!(heat > 0.0);
+    for (name, key, expected) in [
+        ("shaker", "energy_in_j", -supplied),
+        ("oscillator", "stored_change_j", supplied - heat),
+        ("oscillator", "dissipated_j", heat),
+        ("case", "stored_change_j", heat),
+    ] {
+        let actual = reported(name, key);
+        assert!(
+            (actual - expected).abs() <= 1.0e-12,
+            "{name}.{key}: {actual} vs {expected}"
+        );
+    }
+    let temperature = reported("case", "temperature_k");
+    assert!((temperature - 300.0 - heat / 10.0).abs() <= 1.0e-11);
+    assert!(value(&json, "\"totals\"", "energy_residual_j").abs() <= 1.0e-12);
+
+    // Last-step means: the flow the port returned and the heat it sent.
+    let before = held_force_oscillator(end - dt);
+    let velocity = (displacement - before[1]) / dt;
+    let heat_w = (heat - held_force_heat(before)) / dt;
+    let mean = reported("oscillator", "p.velocity_m_s");
+    assert!(
+        (mean - velocity).abs() <= 1.0e-8 * velocity.abs(),
+        "{mean} vs {velocity}"
+    );
+    let rate = reported("oscillator", "heat_w");
+    assert!(
+        (rate - heat_w).abs() <= 1.0e-6 * heat_w,
+        "{rate} vs {heat_w}"
+    );
+
+    // The same law built from kernel elements takes the midpoint step: the
+    // same motion, but not exact at this step.
+    let elements = r#"{
+  "schema": "frankensim.system.v0", "duration_s": 0.5, "step_s": 1.0e-3,
+  "elements": {
+    "block": {"kind": "mass", "mass_kg": 0.25},
+    "spring": {"kind": "spring", "stiffness_n_m": 400.0},
+    "damper": {"kind": "damper", "damping_n_s_m": 1.5},
+    "shaker": {"kind": "force", "force_n": 2.0},
+    "case": {"kind": "heat_capacity", "capacity_j_k": 10.0, "temperature_k": 300.0}
+  },
+  "connections": [
+    {"join": ["block.p", "spring.a", "damper.a", "shaker.p"]},
+    {"prescribe": "spring.b", "velocity_m_s": 0},
+    {"prescribe": "damper.b", "velocity_m_s": 0},
+    {"route": "damper.heat", "to": [["case.heat", 1.0]]}
+  ]
+}"#;
+    let path = scratch("element_oscillator.json", elements);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    let midpoint = value(&json, &element("block"), "position_m");
+    let error = (midpoint - displacement).abs();
+    assert!(
+        error > 1.0e-6 * displacement_scale && error < 0.1 * displacement_scale,
+        "{midpoint} vs {displacement}"
+    );
+}
+
+#[test]
+fn port_hamiltonian_states_are_adaptive_error_accounts_by_index() {
+    let scene = std::fs::read_to_string(example("port_hamiltonian_oscillator.json")).unwrap();
+    let adaptive = r#""step_s": 1.0e-3,
+  "adaptive": {"order": 2, "tolerances": {
+    "oscillator.x0": {"absolute": 1e-9, "relative": 0},
+    "oscillator.x1": {"absolute": 1e-10, "relative": 0},
+    "shaker.energy_in_j": {"absolute": 1e-10, "relative": 0},
+    "case.temperature_k": {"absolute": 1e-9, "relative": 0}
+  }},"#;
+    let changed = scene.replace("\"step_s\": 1.0e-3,", adaptive);
+    assert_ne!(changed, scene);
+    let path = scratch("phs_adaptive.json", &changed);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    let [momentum, displacement] = held_force_oscillator(0.5);
+    let x0 = value(&json, &element("oscillator"), "x0");
+    let x1 = value(&json, &element("oscillator"), "x1");
+    assert!((x0 - momentum).abs() <= 1.0e-9 * 0.05, "{x0} vs {momentum}");
+    assert!(
+        (x1 - displacement).abs() <= 1.0e-9 * 0.005,
+        "{x1} vs {displacement}"
+    );
+
+    // Every state coordinate needs its own tolerance, under its index.
+    let missing = changed.replace(
+        "    \"oscillator.x1\": {\"absolute\": 1e-10, \"relative\": 0},\n",
+        "",
+    );
+    assert_ne!(missing, changed);
+    let (code, stderr) = refused("phs_adaptive_missing.json", &missing);
+    assert_eq!(code, 3, "{stderr}");
+    assert!(
+        stderr.contains("adaptive.tolerances.oscillator.x1: missing explicit tolerance"),
+        "{stderr}"
+    );
+    let (code, stderr) = refused(
+        "phs_adaptive_unknown.json",
+        &changed.replace("oscillator.x1", "oscillator.x2"),
+    );
+    assert_eq!(code, 3, "{stderr}");
+    assert!(
+        stderr.contains("adaptive.tolerances.oscillator.x2: not a dynamic state coordinate"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn a_flow_in_port_hamiltonian_spring_follows_the_spring_element_under_the_same_end_motion() {
+    let scene = r#"{
+  "schema": "frankensim.system.v0", "duration_s": 0.25, "step_s": 0.05,
+  "elements": {
+    "matrix_spring": {"kind": "port_hamiltonian",
+      "energy": [[400.0]], "structure": [[0.0]], "dissipation": [[0.0]],
+      "input": [[1.0]], "state": [0.001],
+      "ports": [{"name": "a", "domain": "translation", "role": "flow_in"}]},
+    "spring": {"kind": "spring", "stiffness_n_m": 400.0, "extension_m": 0.001},
+    "case": {"kind": "heat_capacity", "capacity_j_k": 10.0, "temperature_k": 300.0}
+  },
+  "connections": [
+    {"prescribe": "matrix_spring.a", "velocity_m_s": 0.2},
+    {"prescribe": "spring.a", "velocity_m_s": 0.2},
+    {"prescribe": "spring.b", "velocity_m_s": 0},
+    {"route": "matrix_spring.heat", "to": [["case.heat", 1.0]]}
+  ]
+}"#;
+    let path = scratch("phs_spring.json", scene);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    let extension = value(&json, &element("spring"), "extension_m");
+    let coordinate = value(&json, &element("matrix_spring"), "x0");
+    // 0.2 m/s held on one end for 0.25 s moves the extension by 0.05 m.
+    assert!(
+        ((extension - 0.001).abs() - 0.05).abs() <= 1.0e-12,
+        "{extension}"
+    );
+    assert!(
+        (coordinate - extension).abs() <= 1.0e-12,
+        "{coordinate} vs {extension}"
+    );
+    let stored = 200.0 * (extension * extension - 0.001 * 0.001);
+    for name in ["spring", "matrix_spring"] {
+        let change = value(&json, &element(name), "stored_change_j");
+        assert!(
+            (change - stored).abs() <= 1.0e-12,
+            "{name}: {change} vs {stored}"
+        );
+    }
+    // The returned effort is the step mean of k x over the last step.
+    let force = value(&json, &element("matrix_spring"), "a.force_n");
+    let mean = 400.0 * (extension + 0.5 * (0.001 - extension) / 5.0);
+    assert!((force - mean).abs() <= 1.0e-9, "{force} vs {mean}");
+    assert!(value(&json, &element("matrix_spring"), "dissipated_j").abs() <= 1.0e-15);
+}
+
+/// Each case replaces `from` in port_hamiltonian_oscillator.json by `to`;
+/// the scene must then refuse as an input, naming `reason`.
+fn port_hamiltonian_refusals(cases: &[(&str, &str, &str, &str)]) {
+    let scene = std::fs::read_to_string(example("port_hamiltonian_oscillator.json")).unwrap();
+    for &(name, from, to, reason) in cases {
+        assert!(scene.contains(from), "{name}");
+        let (code, stderr) = refused(&format!("phs_{name}.json"), &scene.replace(from, to));
+        assert_eq!(code, 3, "{name}: {stderr}");
+        assert!(stderr.contains(reason), "{name}: {stderr}");
+    }
+}
+
+#[test]
+fn port_hamiltonian_scenes_refuse_invalid_matrices_by_name() {
+    port_hamiltonian_refusals(&[
+        (
+            "skew",
+            "[[0.0, -1.0], [1.0, 0.0]]",
+            "[[0.0, -1.0], [2.0, 0.0]]",
+            "elements.oscillator: J violates its symmetry class",
+        ),
+        (
+            "negative_dissipation",
+            "[[1.5, 0.0], [0.0, 0.0]]",
+            "[[-1.5, 0.0], [0.0, 0.0]]",
+            "elements.oscillator: R is not positive semidefinite",
+        ),
+        (
+            "asymmetric_dissipation",
+            "[[1.5, 0.0], [0.0, 0.0]]",
+            "[[1.5, 0.5], [0.0, 0.0]]",
+            "elements.oscillator: R violates its symmetry class",
+        ),
+        (
+            "indefinite_energy",
+            "[[4.0, 0.0], [0.0, 400.0]]",
+            "[[4.0, 0.0], [0.0, -400.0]]",
+            "elements.oscillator.energy: Q is not positive semidefinite",
+        ),
+        (
+            "asymmetric_energy",
+            "[[4.0, 0.0], [0.0, 400.0]]",
+            "[[4.0, 1.0], [0.0, 400.0]]",
+            "elements.oscillator.energy: Q violates its symmetry class",
+        ),
+        (
+            "structure_rows",
+            "[[0.0, -1.0], [1.0, 0.0]]",
+            "[[0.0, -1.0]]",
+            "elements.oscillator.structure: matrix row count must be 2",
+        ),
+        (
+            "input_columns",
+            "[[1.0], [0.0]]",
+            "[[1.0, 0.0], [0.0, 0.0]]",
+            "elements.oscillator.input: matrix[0] column count must be 1",
+        ),
+        (
+            "text",
+            "[[1.5, 0.0], [0.0, 0.0]]",
+            "[[1.5, 0.0], [0.0, \"none\"]]",
+            "elements.oscillator.dissipation: matrix[1][1] must be a finite number",
+        ),
+        (
+            "nonfinite",
+            "[[1.5, 0.0], [0.0, 0.0]]",
+            "[[1.5, 0.0], [0.0, 1e999]]",
+            "not finite",
+        ),
+    ]);
+    let scene = std::fs::read_to_string(example("port_hamiltonian_oscillator.json")).unwrap();
+    let oversized = format!("[{}]", vec!["[1]"; 65].join(","));
+    let (code, stderr) = refused(
+        "phs_oversized.json",
+        &scene.replace("[[4.0, 0.0], [0.0, 400.0]]", &oversized),
+    );
+    assert_eq!(code, 3, "{stderr}");
+    assert!(
+        stderr.contains("elements.oscillator.energy: Q must have 1 to 64 square rows"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn port_hamiltonian_scenes_refuse_invalid_ports_state_and_fields_by_name() {
+    let port = "[{\"name\": \"p\", \"domain\": \"translation\", \"role\": \"effort_in\"}]";
+    port_hamiltonian_refusals(&[
+        (
+            "role",
+            "\"effort_in\"",
+            "\"effort\"",
+            "elements.oscillator.ports[0]: role is",
+        ),
+        (
+            "domain",
+            "\"translation\"",
+            "\"hydraulic\"",
+            "elements.oscillator.ports[0]: domain is one of",
+        ),
+        (
+            "reserved_heat",
+            "{\"name\": \"p\"",
+            "{\"name\": \"heat\"",
+            "heat is reserved",
+        ),
+        (
+            "state_length",
+            "\"state\": [0.0, 0.0]",
+            "\"state\": [0.0]",
+            "elements.oscillator.state: 2 finite numbers",
+        ),
+        (
+            "no_ports",
+            port,
+            "[]",
+            "elements.oscillator.ports: name 1 to 64 power ports",
+        ),
+        (
+            "unknown_field",
+            "\"dissipation\":",
+            "\"damping\":",
+            "unsupported field",
+        ),
+    ]);
+}
+
 #[test]
 fn library_and_binary_give_the_same_bytes_and_text_mode_reports_the_ledger() {
     let scene = example("quarter_car.json");

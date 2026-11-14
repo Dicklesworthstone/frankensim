@@ -965,6 +965,33 @@ port outputs and energy ledger against independent midpoint rotations.
 The ratio must carry the required SI conversion units. No crank/cam geometry,
 displacement constraint, ratio-actuator work or control stability is inferred.
 
+`port_hamiltonian` lowers to fs-system's `ExactPortHamiltonianComponent`
+(feature `phs`), built from authored `energy` Q, `structure` J,
+`dissipation` R and `input` G: `dx/dt = (J - R) Q x + G u`, stored energy
+`x' Q x / 2`, port outputs `G' Q x`. n is 1 to 64, Q and R are symmetric
+positive semidefinite, J is skew, and the fs-phs admission refuses each
+violation by name. Each of the 1 to 64 `ports` is a scalar power port with a
+`domain` (`translation`, `rotation` or `electrical`) and a `role`
+(`effort_in` or `flow_in`), in the column order of G. `heat` is reserved for
+the owner's outlet, which takes a temperature and returns minus the
+dissipated power. `state` is optional (zeros). The owner steps held inputs
+exactly; reports give `x0`, `x1`, ..., each port's last-step mean output and
+`heat_w`, and adaptive runs require a tolerance for every `<name>.x<i>`.
+fs-system re-exports `PortHamiltonian`, `QuadraticStorage` and
+`LinearSplitBudget` from `phs_exact`, so fs-cli needs no direct fs-phs
+dependency. Tested: `port_hamiltonian_oscillator.json` against the closed
+form of the held-force oscillator to 1e-12 of scale after 500 steps, the
+element-built oscillator about 3e-6 m off at the same step, source work,
+stored energy, dissipated work and case heat to 1e-12 J, last-step mean
+velocity and heat rate; adaptive runs with x0/x1 accounts, a missing and an
+unknown account; a `flow_in` one-state element against the `spring` element
+under the same prescribed end; refusals of a non-skew J, an indefinite or
+asymmetric R and Q, wrong matrix shapes, text and non-finite entries, an
+unknown role or domain, a port named `heat`, a wrong state length, no ports,
+an unknown field and 65 states. Not covered: nonlinear storage, switching or
+contact, exactness when inputs come from other elements (they are the
+kernel's step means), checkpoints (no state codec), and the hydraulic domain.
+
 A `rigid_network` is the first scene element that is a physics owner behind
 the Component contract and not a lumped law: it lowers to
 `fs_mbd::component::network::ViscousNetwork` (rigid bodies in three

@@ -4,16 +4,22 @@
 //! supplies the state, mean ports and independently integrated physical heat.
 //! A bounded cache reuses two durations, such as adaptive coarse/half trials.
 //! The complete map is smooth, including its quadratic heat outlet.
+//!
+//! The source types this owner is built from are re-exported, so a caller
+//! can assemble one without depending on `fs-phs` itself.
 
 use core::cell::RefCell;
 
 use fs_exec::Cx;
-use fs_phs::linear_exact::{ExactZohWorkspace, LinearSplitBudget, PreparedExactZoh};
-use fs_phs::{PortHamiltonian, PreparedStepError, arithmetic_rounding_floor};
+use fs_phs::linear_exact::{ExactZohWorkspace, PreparedExactZoh};
+use fs_phs::{PreparedStepError, arithmetic_rounding_floor};
 use fs_ports::StableId;
 use fs_ports::component::{
     Carrier, Class, Component, PortLayout, PortRole, PortSpec, PortTangent, Proposal, Receipt,
 };
+
+pub use fs_phs::linear_exact::LinearSplitBudget;
+pub use fs_phs::{PortHamiltonian, QuadraticStorage};
 
 use crate::phs::PhsComponentError;
 
