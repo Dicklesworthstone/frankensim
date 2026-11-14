@@ -8,6 +8,8 @@ use fs_system::elements::Waveform;
 
 #[path = "system_command/checkpoints.rs"]
 mod checkpoints;
+#[path = "system_command/adaptive_networks.rs"]
+mod adaptive_networks;
 
 fn example(name: &str) -> String {
     format!(
@@ -2141,14 +2143,14 @@ fn rigid_network_scenes_that_cannot_run_are_refused_with_the_reason() {
         assert_eq!(code, 3);
         assert!(stderr.contains(said), "{stderr}");
     }
-    // Error-controlled stepping has no account for the bodies.
+    // Every native body account needs an explicit accuracy tolerance.
     let adaptive = ROTOR.replace(
         "\"elements\"",
         "\"adaptive\": {\"tolerances\": {}},\n  \"elements\"",
     );
     let (code, stderr) = refused("adaptive.json", &adaptive);
     assert_eq!(code, 3);
-    assert!(stderr.contains("rotor is a rigid_network"), "{stderr}");
+    assert!(stderr.contains("rotor.body0.position_m: missing explicit tolerance"), "{stderr}");
 }
 
 /// Two 2 kg bodies on one axial connector with viscous damping `C`, one

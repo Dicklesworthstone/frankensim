@@ -960,10 +960,11 @@ owner's own splitting, which differs from the continuous integral by 1.3e-4 m
 at that step); a falling body spun by a prescribed torque against `v = -g t`,
 `z = z0 - g t^2 / 2`, `omega = tau t / I` and the torque's work; refusals. No
 claim: a body's principal axes are its own axes and its centre of mass its
-origin; damping is constant and diagonal; no Maxwell branches, actuators or
-temperature-dependent damping in a `rigid_network`; `adaptive` refuses a
-scene that holds a network of rigid bodies. Scalar loads use an explicit
-`power_map` to connect to the three-component force ports.
+origin; the reference damping is diagonal. Maxwell branches and connector
+actuators use `viscoelastic_network`. Both network kinds admit the native
+adaptive state accounts below, including temperature-dependent kinetics.
+Scalar loads use an explicit `power_map` to connect to the three-component
+force ports.
 
 A `viscoelastic_network` takes the same fields and lowers to
 `fs_mbd::component::relaxation::RelaxationNetwork` (the fs-mbd relaxation
@@ -1206,7 +1207,29 @@ Unknown, omitted, duplicate, derived-voltage/current or stateless accounts
 refuse at scene admission. Mass/inertia/linear-inductor coordinates are both
 controlled; nonlinear storage uses its actual charge/flux coordinate.
 
-The metric compares accepted coarse/refined checkpoints, scaling each state
+Rigid and viscoelastic networks require four vector/rotation accounts per body:
+`element.body<i>.position_m`, `velocity_m_s`, `angular_velocity_rad_s` and
+`orientation_rad`. Positions and linear velocities are in world axes, and
+angular velocities in the body's own axes, evaluated through its original
+mass properties. Each viscoelastic branch additionally requires
+`element.connector<i>.branch<j>.amplitude_sqrt_j`, covering all six signed
+amplitudes in the original material basis, including currently unloaded rows.
+A derived branch energy cannot substitute for its memory: opposite amplitudes
+store equal energy and produce different forces.
+
+Vector accounts use the Euclidean norm of the coarse/refined difference, with
+the larger initial/refined vector length as the relative scale. Rotation uses
+the shortest SO(3) angle between coarse and refined quaternions, with the
+initial-to-refined angular displacement over this interval as the relative
+scale. Quaternion sign changes and the choice of world orientation do not
+alter this metric. Only temporary metric copies are normalized; accepted
+native state bits stay untouched. Scaled deterministic norms and a chord-based
+angle retain small differences without subtracting near-one dot products.
+Invalid or unrepresentable metric inputs refuse the trial through the kernel.
+The kernel's `ErrorNorm::include_error` combines these physical distances with
+the existing scalar accounts, preserving its invalid-data poisoning behavior.
+
+The scalar metric compares accepted coarse/refined checkpoints, scaling each
 difference by `absolute + relative * max(|initial|, |refined|)`. Source accounts
 use trial work increments relative to the initial checkpoint. The kernel owns
 the Richardson divisor, same-end-time checks, retries, cancellation and full
@@ -1228,6 +1251,13 @@ energy/entropy audits remain in force.
 The analytic loaded-oscillator example tests phase improvement with tighter
 tolerances, source-work closure, attempt exhaustion with rollback, named
 tolerance refusals and an externally capped final interval below the floor.
+`adaptive_suspension.json` and `adaptive_viscoelastic_mount.json` add complete
+native body and memory controls. Their regressions compare projected rigid
+motion to an independent oscillator and Maxwell evolution to an independent
+two-mode solution, check complete-account admission and atomic trial rollback,
+and resume both adaptive scenes through separate CLI processes with identical
+continued reports. These estimates do not extend adaptive support to the
+slider or gas-volume state families.
 
 A `transformer: [effort_in_port, flow_in_port]` connection with finite nonzero
 signed `ratio` lowers directly to the kernel's power-preserving transformer.

@@ -44,6 +44,8 @@ save/resume commands work with `self_heating_damper.json` and
 |---|---|---|
 | `driven_oscillator.json` | a mass on a spring and damper, driven by a sine force; the damper heats a housing that loses heat to a fixed ambient | the monolithic midpoint rule for the same oscillator |
 | `adaptive_oscillator.json` | a loaded oscillator chooses shorter intervals to meet explicit coordinate and source-work tolerances | the analytic oscillation phase, tolerance refinement and work from the accepted displacement |
+| `adaptive_suspension.json` | a three-dimensional rigid carriage coupled to a projected spring, with explicit tolerances for its motion and rotation | the analytic projected oscillator and free transverse motion, with improved phase at tighter tolerances |
+| `adaptive_viscoelastic_mount.json` | a preloaded Maxwell mount with adaptive control of both rigid bodies and all six memory amplitudes | the independent two-mode motion and memory solution, routed heat, and durable continuation |
 | `heated_body.json` | a 30 W heater in a body that loses heat through a wall to 293.15 K | the closed-form discrete approach to 308.15 K |
 | `heated_plane.json` | 30 W generated on a plane of no heat capacity (`heat_node`) between a 50 J/K pad at 400 K and a 120 J/K disc at 300 K, joined to the plane by 2 and 6 W/K: no fraction is given, the heat divides by where the two temperatures put the plane | the midpoint rule for the two bodies and the plane's balance, solved independently each step: both temperatures and the plane's to 1e-9, every joule in the two bodies; the same device with the heat rate prescribed on the plane |
 | `friction_belt.json` | a block follows a slowly accelerating belt by static friction, breaks away when the acceleration exceeds the static limit, and catches it again as the lining warms | independent constant-acceleration segments: 3 m/s final speed, 2.875 m travel, 3 J of frictional heat and 12 J supplied by the belt |
@@ -102,9 +104,9 @@ takes the world force on body `i` and `torque<i>` (for the bodies named in
 `torque_ports`) the torque in that body's axes, each prescribed with an array
 of three waveforms; `heat<e>` is routed like a damper's heat. The report
 gives every body's position, velocity, orientation and angular velocity and
-every connector's mean heat rate over the last step. Error-controlled
-stepping does not cover a `rigid_network`; a scene with one runs at a fixed
-`step_s`.
+every connector's mean heat rate over the last step. Both network types can
+use error-controlled stepping with the complete native accounts described
+below; `adaptive_suspension.json` demonstrates a rigid carriage and spring.
 
 `viscoelastic_mount.json` uses the second fs-mbd owner,
 `fs_mbd::component::relaxation::RelaxationNetwork`, through a
@@ -206,10 +208,33 @@ probes and stateless last-step means cannot substitute for those coordinates.
 Absolute tolerances are positive in the named field's SI units; relative
 tolerances are finite and nonnegative.
 
+For a `rigid_network` or `viscoelastic_network`, declare these accounts for
+every body, prefixed by its element name:
+
+| Account | Error controlled | Absolute unit |
+|---|---|---|
+| `body<i>.position_m` | difference of the complete world-position vectors | m |
+| `body<i>.velocity_m_s` | difference of the complete world-velocity vectors | m/s |
+| `body<i>.angular_velocity_rad_s` | difference of body-frame angular-velocity vectors | rad/s |
+| `body<i>.orientation_rad` | shortest rotation between coarse and refined orientations | rad |
+| `connector<i>.branch<j>.amplitude_sqrt_j` | difference of all six signed amplitudes of each viscoelastic branch | square root of J |
+
+For example, the mount's first branch needs
+`mount.connector0.branch0.amplitude_sqrt_j`. Its energy alone is insufficient:
+opposite memory amplitudes have the same energy and different force responses.
+All bodies and all branches need their accounts, even if some coordinates
+start at zero. `adaptive_viscoelastic_mount.json` provides a complete example.
+Vector errors use vector lengths for relative scaling. Rotation uses angular
+motion during the trial interval, so its tolerance does not depend on the
+world frame or a quaternion's sign. State quaternions are never renormalized by
+the error controller. Temperature feedback still requires the order of the
+complete coupled method; the start-of-step feedback examples use order 1.
+
 The driver compares a full step with two half steps and retains the audited
 two-half-step solution when its normalized estimate is at most one. Each
-coordinate uses `absolute + relative * max(|initial|, |refined|)` as its
-scale; the maximum coarse/refined difference is divided by `2^order - 1`.
+scalar coordinate uses `absolute + relative * max(|initial|, |refined|)` as
+its scale; vector and rotation accounts use the scales above. The maximum
+normalized coarse/refined difference is divided by `2^order - 1`.
 The default order is 1; choose order 2 only for a smooth second-order model,
 as in this oscillator. Estimates remain conditional at curve knees and
 discontinuous inputs; a lower order assumption does not establish an error

@@ -7,6 +7,7 @@
 //! states, sampled states and the energy, entropy and stream-inventory ledger.
 //! Nothing here integrates anything: every number comes from the kernel and its elements.
 
+mod adaptive_metric;
 mod materials;
 mod snapshot;
 
@@ -125,6 +126,13 @@ coordinate and source energy_in_j account. Absolute tolerances are positive
 in that field's SI units; relative tolerances are nonnegative. Source-work
 tolerances apply to each trial interval's energy increment. Derived endpoint
 voltage/current and stateless last-step means are not independent accounts.
+Every network body needs body<i>.position_m, body<i>.velocity_m_s,
+body<i>.angular_velocity_rad_s and body<i>.orientation_rad under its element
+name. These control complete vector differences and rotation angle, not
+individual quaternion coefficients. Each viscoelastic branch also needs
+connector<i>.branch<j>.amplitude_sqrt_j for its complete signed memory vector.
+Vector relative scales use initial/refined lengths; orientation uses angular
+motion during the interval. All body and branch accounts are mandatory.
 The default order is 1; choose order 2 only for a smooth second-order model.
 The refined two-half-step state is retained; rejected trials leave no state
 or ledger entries. step_s remains the largest interval.
@@ -1085,6 +1093,7 @@ enum Coordinate {
     Scalar,
     Enthalpy,
     SourceWork,
+    Network(adaptive_metric::NetworkCoordinate),
 }
 
 struct ErrorAccount {
@@ -1105,6 +1114,7 @@ impl ErrorAccount {
                 .map_or(f64::NAN, |state| state.specific_enthalpy_j_kg()),
             Coordinate::SourceWork => checkpoint.state::<SourceAccount>(self.node)
                 .map_or(f64::NAN, |state| state.energy_in_j),
+            Coordinate::Network(_) => f64::NAN,
         }
     }
 }
@@ -1123,6 +1133,17 @@ impl AdaptiveSettings {
     fn metric(&self, initial: &Checkpoint, coarse: &Checkpoint, refined: &Checkpoint) -> f64 {
         let mut norm = ErrorNorm::new();
         for account in &self.accounts {
+            if let Coordinate::Network(coordinate) = account.coordinate {
+                coordinate.include(
+                    &mut norm,
+                    account.node,
+                    initial,
+                    coarse,
+                    refined,
+                    account.tolerance,
+                );
+                continue;
+            }
             let (start, full, half) = (account.read(initial), account.read(coarse), account.read(refined));
             if matches!(account.coordinate, Coordinate::SourceWork) {
                 // Work is controlled over this interval, so a large cumulative
@@ -3100,7 +3121,38 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             | Kind::LayerConductor
             | Kind::HeatNode
             | Kind::Restriction => Vec::new(),
-            Kind::RigidNetwork | Kind::ViscoelasticNetwork | Kind::GasVolume | Kind::Slider => {
+            Kind::RigidNetwork | Kind::ViscoelasticNetwork => {
+                for (body, &properties) in element.bodies.iter().enumerate() {
+                    for (field, quantity) in adaptive_metric::BodyQuantity::ACCOUNTS {
+                        expected.push((
+                            format!("{}.body{body}.{field}", element.name),
+                            element.node,
+                            Coordinate::Network(adaptive_metric::NetworkCoordinate::Body {
+                                body,
+                                properties,
+                                quantity,
+                            }),
+                        ));
+                    }
+                }
+                for (connector, &count) in element.branches.iter().enumerate() {
+                    for branch in 0..count {
+                        expected.push((
+                            format!(
+                                "{}.connector{connector}.branch{branch}.amplitude_sqrt_j",
+                                element.name
+                            ),
+                            element.node,
+                            Coordinate::Network(adaptive_metric::NetworkCoordinate::Branch {
+                                connector,
+                                branch,
+                            }),
+                        ));
+                    }
+                }
+                Vec::new()
+            }
+            Kind::GasVolume | Kind::Slider => {
                 return Err(format!(
                     "adaptive: {} is a {}, whose state has no error account here; \
                      run it with a fixed step_s",

@@ -76,6 +76,8 @@ fn saved_mechanical_networks_preserve_motion_memory_and_routed_heat() {
         "anisotropic_damping.json",
         "viscoelastic_mount.json",
         "self_heating_damper.json",
+        "adaptive_suspension.json",
+        "adaptive_viscoelastic_mount.json",
     ] {
         let text = std::fs::read_to_string(example(name)).unwrap();
         let scene = scratch(name, &text);

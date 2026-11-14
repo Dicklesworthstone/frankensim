@@ -1,0 +1,33 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 1.0,
+  "step_s": 0.25,
+  "sample_every_s": 0.1,
+  "adaptive": {
+    "order": 2,
+    "min_step_s": 1e-12,
+    "max_attempts": 32,
+    "tolerances": {
+      "carriage.body0.position_m": {"absolute": 1e-5, "relative": 0},
+      "carriage.body0.velocity_m_s": {"absolute": 1e-5, "relative": 0},
+      "carriage.body0.angular_velocity_rad_s": {"absolute": 1e-5, "relative": 0},
+      "carriage.body0.orientation_rad": {"absolute": 1e-5, "relative": 0},
+      "spring.extension_m": {"absolute": 1e-5, "relative": 0}
+    }
+  },
+  "elements": {
+    "carriage": {
+      "kind": "rigid_network",
+      "bodies": [
+        {"mass_kg": 2.0, "principal_inertia_kg_m2": [2.0, 3.0, 4.0],
+         "position_m": [0.2, -0.1, 0.4], "velocity_m_s": [0.3, 0.2, -0.15]}
+      ],
+      "connectors": []
+    },
+    "spring": {"kind": "spring", "stiffness_n_m": 18.0, "extension_m": -0.2}
+  },
+  "connections": [
+    {"power_map": ["carriage.force0", "spring.a"], "matrix": [[0.6, -0.8, 0.0]]},
+    {"prescribe": "spring.b", "velocity_m_s": 0}
+  ]
+}
