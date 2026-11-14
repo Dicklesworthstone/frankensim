@@ -62,10 +62,14 @@ fn interface(
                 dims: Dims::NONE,
             }
         };
+        // Each validity axis carries the quantity that context() gives it: a query
+        // axis typed differently from its claim's axis is outside the claim's domain.
+        let kelvin = QuantitySpec::dimensional(Temperature::DIMS);
+        let pascal = QuantitySpec::dimensional(Pressure::DIMS);
         let validity = ValidityDomain::unconstrained()
-            .with("TA", 300.0, upper)
-            .with("TB", 300.0, 500.0)
-            .with("pressure", 0.0, 1e6);
+            .with_quantity("TA", kelvin, 300.0, upper)
+            .with_quantity("TB", kelvin, 300.0, 500.0)
+            .with_quantity("pressure", pascal, 0.0, 1e6);
         let validity = if rate_surface {
             validity.with_quantity("speed", QuantitySpec::dimensional(Velocity::DIMS), 0.0, 2.0)
         } else {
