@@ -736,3 +736,70 @@ fn ga_008_lie_group_facades_and_duality() {
         "256 fixed rounds: principal exp/log, SO(3) Jacobian inverse, adjoint/coadjoint duality",
     );
 }
+
+#[test]
+fn ga_009_se3_unit_check_takes_its_translation_part_relative_to_the_translation() {
+    // M M~ - 1 of an exactly built T(t) R holds rounding in its ideal (e0)
+    // components in proportion to |t|. Far from the origin that alone crossed
+    // the absolute tolerance, and Se3 refused a rigid motion.
+    let axes = [
+        Vec3::new(0.6, 0.0, 0.8),
+        Vec3::new(0.0, 0.0, 1.0),
+        Vec3::new(-0.48, 0.6, 0.64),
+    ];
+    let direction = Vec3::new(0.3, -0.4, 0.866);
+    let mut absolute_check_refused = 0;
+    for axis in axes {
+        for angle in [0.05, 0.4, 1.3, 2.9] {
+            for magnitude in [1.0e6, 1.0e8, 1.0e10] {
+                let translation = direction.scale(magnitude / direction.norm());
+                let motor = Motor::from_parts(Quat::from_axis_angle(axis, angle), translation);
+                if motor.unit_defect() > fs_ga::lie::UNIT_TOLERANCE {
+                    absolute_check_refused += 1;
+                }
+                let pose = Se3::try_from_motor(motor).unwrap_or_else(|error| {
+                    panic!("exactly built motor, |t| = {magnitude:e}, angle {angle}: {error:?}")
+                });
+                let recovered = pose.translation();
+                assert!(
+                    (recovered - translation).norm() <= 1.0e-12 * magnitude,
+                    "translation {recovered:?} for {translation:?}"
+                );
+            }
+        }
+    }
+    println!(
+        "{{\"suite\":\"fs-ga/conformance\",\"metric\":\"far_se3_motors\",\
+         \"cases\":36,\"absolute_check_refused\":{absolute_check_refused}}}"
+    );
+    assert!(absolute_check_refused > 0);
+
+    let rotation = Quat::from_axis_angle(axes[0], 0.4);
+    let far = Motor::from_parts(rotation, direction.scale(1.0e10 / direction.norm()));
+    // A skewed translation part: the pseudoscalar coordinate moved by 1e-9 of
+    // the translation.
+    let mut skewed = far;
+    skewed.0.0[Pga::PSEUDO] += 10.0;
+    assert!(matches!(
+        Se3::try_from_motor(skewed),
+        Err(fs_ga::GaError::NotUnit { .. })
+    ));
+    // The rotor part stays absolute however far the pose: 1e-11 off unit.
+    assert!(matches!(
+        Se3::try_from_motor(Motor(far.0.scale(1.0 + 1.0e-11))),
+        Err(fs_ga::GaError::NotUnit { .. })
+    ));
+    // Within one length unit the check is absolute: a 1e-11 skew is refused.
+    let near = Motor::from_parts(rotation, direction.scale(0.5 / direction.norm()));
+    assert!(Se3::try_from_motor(near).is_ok());
+    let mut near_skewed = near;
+    near_skewed.0.0[Pga::PSEUDO] += 1.0e-11;
+    assert!(matches!(
+        Se3::try_from_motor(near_skewed),
+        Err(fs_ga::GaError::NotUnit { .. })
+    ));
+    verdict(
+        "ga-009",
+        "36 exactly built SE(3) motors 1e6..1e10 from the origin admitted; skews and off-unit rotors refused",
+    );
+}

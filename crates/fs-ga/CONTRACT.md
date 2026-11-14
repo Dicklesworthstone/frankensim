@@ -89,7 +89,11 @@ supplied coordinates, matrix coefficients, underflow or overflow.
    residue; a 20 000-product chain renormalized every 64 steps stays
    below 1e−11 drift (ledgered by the conformance run).
 7. **Validated Lie façades**: constructors reject non-finite, degenerate,
-   wrong-grade, and non-unit inputs; they never silently normalize. The
+   wrong-grade, and non-unit inputs; they never silently normalize. An
+   SE(3) motor's unit check holds the rotor part of `M M̃ − 1` to the
+   tolerance absolutely and its ideal (length) part relative to the
+   translation beyond one length unit, where an exactly built motor's
+   rounding grows with it. The
    quaternion/motor double cover is canonicalized without rescaling, using a
    deterministic lexicographic tie-break at exactly π.
    Vector rotations, rotation matrices, and motor translation extraction
@@ -167,6 +171,9 @@ actually drives the original revolute-body position, velocity and work.
 - **ga-007** versor drift statistics under the renormalization policy.
 - **ga-008** 256 fixed-seed principal SE(3) exp/log cases, SO(3)
   Jacobian/inverse identities, and adjoint/coadjoint dual-pairing invariance.
+- **ga-009** exactly built SE(3) motors 1e6 to 1e10 from the origin are
+  admitted and carry their translation; a skewed ideal part far away, an
+  off-unit rotor, and a skew within one length unit are refused.
 
 `lie` unit tests additionally cover zero/tiny/general/near-π SO(3) and SE(3)
 round trips, finite-difference checks of left-trivialized SO(3)/SE(3)

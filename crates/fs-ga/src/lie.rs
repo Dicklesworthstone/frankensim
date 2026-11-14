@@ -26,6 +26,13 @@ use fs_math::det;
 /// normalization.
 pub const UNIT_TOLERANCE: f64 = 4.0e-12;
 
+// The blade bit of the ideal basis vector `e0`: a motor coordinate whose blade
+// holds it carries a length.
+const IDEAL_BLADE_BIT: usize = 1;
+// Up to this translation, in the caller's length unit, the ideal components of
+// an SE(3) unit defect are compared as they are, like the Euclidean ones.
+const ABSOLUTE_TRANSLATION_SCALE: f64 = 1.0;
+
 const FORBIDDEN_COMPONENT_TOLERANCE: f64 = 0.0;
 const PURE_ROTATION_TRANSLATION_TOLERANCE: f64 = 0.0;
 const DEGENERATE_NORM_SQUARED: f64 = f64::MIN_POSITIVE;
@@ -661,6 +668,12 @@ impl Se3 {
 
     /// Validate and canonicalize an existing PGA motor without rescaling it.
     ///
+    /// The unit check takes `M M̃ − 1` component by component. Its rotor part
+    /// is held to [`UNIT_TOLERANCE`] absolutely. Its ideal part, a length, is
+    /// held to it absolutely up to one length unit of translation and relative
+    /// to the translation beyond, where an exactly built motor's rounding
+    /// grows with it.
+    ///
     /// # Errors
     /// Refuses non-finite, non-even, degenerate, or non-unit input.
     pub fn try_from_motor(motor: Motor) -> Result<Self, GaError> {
@@ -687,7 +700,7 @@ impl Se3 {
                 norm_squared,
             });
         }
-        let defect = motor.unit_defect();
+        let defect = se3_unit_defect(&motor);
         if !defect.is_finite() {
             return Err(GaError::NonFinite {
                 context: "SE(3) motor unit defect",
@@ -1103,6 +1116,39 @@ fn canonical_quat(quat: Quat) -> Quat {
 
 fn positive_zero(value: f64) -> f64 {
     if value == 0.0 { 0.0 } else { value }
+}
+
+// The unit defect of an SE(3) motor: `M M̃ − 1`, each component in its own
+// units. The Euclidean components are dimensionless and count as they are. The
+// ideal ones (their blade holds `e0`) carry a length, and an exactly built
+// `T(t) R` rounds them in proportion to its translation: near 1e-9 at
+// |t| = 1e8, from the products alone, against a tolerance of 4e-12. Past one
+// length unit they count relative to the motor's translation scale (twice its
+// largest ideal coordinate), so a rigid motion far from the origin is not
+// refused for its rounding. Up to one unit, the defect is `unit_defect`'s, bit
+// for bit.
+fn se3_unit_defect(motor: &Motor) -> f64 {
+    let mut translation = 0.0_f64;
+    for (blade, coordinate) in motor.0.0.iter().enumerate() {
+        if blade & IDEAL_BLADE_BIT != 0 {
+            translation = translation.max(2.0 * coordinate.abs());
+        }
+    }
+    let scale = translation.max(ABSOLUTE_TRANSLATION_SCALE);
+    let residual = motor.0.gp(&motor.0.reverse()).sub(&Pga::scalar(1.0));
+    let mut defect = 0.0_f64;
+    for (blade, value) in residual.0.iter().enumerate() {
+        let measured = if blade & IDEAL_BLADE_BIT == 0 {
+            value.abs()
+        } else {
+            value.abs() / scale
+        };
+        if measured.is_nan() {
+            return f64::NAN;
+        }
+        defect = defect.max(measured);
+    }
+    defect
 }
 
 fn canonical_quat_needs_flip(quat: Quat) -> bool {

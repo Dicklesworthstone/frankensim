@@ -169,7 +169,7 @@ mod tests {
     }
 
     #[test]
-    fn distant_rotation_keeps_the_original_geometry_refusal() {
+    fn distant_rotation_keeps_its_origin_and_turn() {
         let origin = Vec3::new(0.0, 0.0, 1_125_899_906_842_624.0);
         let frame = UniformRotationFrame::new(
             Se3::from_parts(So3::identity(), origin).unwrap(),
@@ -177,13 +177,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame.pose_at_elapsed(0.0).unwrap().translation(), origin);
-        // The stationary source pose is representable, but its large dual
-        // motor coordinates cannot admit this rotated sample. No normalization
-        // or origin movement is introduced to make the boundary appear valid.
-        assert!(matches!(
-            frame.pose_at_elapsed(0.1),
-            Err(UniformRotationError::Geometry(_))
-        ));
+        // 2^50 m out, the rotated sample's ideal motor coordinates round in
+        // proportion to the translation, whose own ulp is 0.25 m. fs-ga's SE(3)
+        // unit check takes them relative to the translation, so this rigid
+        // motion is admitted. No normalization or origin movement is
+        // introduced: the sample keeps its origin (to 4 ulps) and its 0.3 rad
+        // turn about the axis.
+        let pose = frame.pose_at_elapsed(0.1).unwrap();
+        close(pose.translation(), origin, 1.0);
+        close(
+            pose.rotation().rotate(Vec3::new(1.0, 0.0, 0.0)).unwrap(),
+            Vec3::new(0.3_f64.cos(), 0.3_f64.sin(), 0.0),
+            1e-15,
+        );
     }
 
     #[test]

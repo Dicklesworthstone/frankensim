@@ -61,7 +61,9 @@ pub enum GaError {
     NotUnit {
         /// Which representation was invalid.
         context: &'static str,
-        /// Observed absolute unit defect.
+        /// Observed unit defect: absolute, except an SE(3) motor's ideal
+        /// (translation) components beyond one length unit, which are taken
+        /// relative to the translation.
         defect: f64,
         /// Largest accepted defect.
         tolerance: f64,
