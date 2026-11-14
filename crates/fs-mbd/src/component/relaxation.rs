@@ -85,6 +85,7 @@ use core::num::NonZeroUsize;
 use std::rc::Rc;
 
 use fs_exec::Cx;
+use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::component::{
     Class, Component, ContractViolation, PortRole, PortSpec, Proposal, Receipt,
 };
@@ -104,6 +105,10 @@ use crate::{
 };
 
 pub use super::network::DampingLaw;
+use super::snapshot::{
+    BODY_WORDS, decode_bodies, encode_bodies, push_matrix, push_properties, push_source_controls,
+    push_torques, push_vec3,
+};
 
 /// How a connector's kinetics follow temperature: one factor per connector,
 /// `a_T = tau(T) / tau_ref`, by which its Kelvin viscosity and every
@@ -122,6 +127,13 @@ pub trait ShiftLaw: core::fmt::Debug {
     /// # Errors
     /// The law's reason, when it has no factor at that temperature.
     fn factor(&self, connector: usize, temperature_k: f64) -> Result<f64, String>;
+
+    /// Stable identity of the complete law, including its parameters and
+    /// admitted temperature support. An opaque law remains usable for steps
+    /// but refuses durable snapshots until its owner supplies this identity.
+    fn checkpoint_identity(&self) -> Option<[u8; 32]> {
+        None
+    }
 }
 
 /// What the `temperature<e>` signals set.
@@ -352,6 +364,14 @@ pub struct RelaxationNetwork {
 }
 
 impl RelaxationNetwork {
+    fn checkpoint_law_identity(&self) -> Option<[u8; 32]> {
+        match &self.thermal {
+            Thermal::Fixed => Some([0; 32]),
+            Thermal::Damping(law) => law.checkpoint_identity(),
+            Thermal::Kinetics(law) => law.checkpoint_identity(),
+        }
+    }
+
     /// A network of `properties.len()` bodies and `links.len()` connectors
     /// under uniform `gravity`, stepped with the owner's `controls`.
     ///
@@ -802,6 +822,128 @@ impl Component for RelaxationNetwork {
 
     fn stored_energy_j(&self, state: &RelaxationState) -> Result<f64, RelaxationNetworkRefusal> {
         Ok(self.energy(state)?.0)
+    }
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-mbd::component::relaxation::RelaxationNetwork",
+        state_family: "rigid-body-bank-and-spatial-relaxation-memory",
+        schema_grammar: "ordered rigid bodies and complete six-coordinate amplitude of every original branch",
+        codec_grammar: "f64 bits: 13 words per body (position xyz, quaternion wxyz, linear momentum xyz, angular momentum xyz), then six words per branch in connector/branch order; counts bound by component identity",
+        codec_version: 1,
+    });
+
+    fn encode_state(&self, state: &RelaxationState, words: &mut Vec<u64>) -> bool {
+        if self.checkpoint_law_identity().is_none()
+            || !self
+                .energy(state)
+                .is_ok_and(|(energy, terms)| energy.is_finite() && terms.is_finite())
+        {
+            return false;
+        }
+        // Shape, finite amplitudes and total energy are checked before the
+        // first append. Body encoding also validates the complete bank first.
+        if !encode_bodies(&state.bodies, words) {
+            return false;
+        }
+        for amplitude in state.memory.iter().flatten() {
+            words.extend(amplitude.map(f64::to_bits));
+        }
+        true
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<RelaxationState> {
+        self.checkpoint_law_identity()?;
+        let body_words = BODY_WORDS.checked_mul(self.properties.len())?;
+        let total_words = self.links.iter().try_fold(body_words, |count, link| {
+            count.checked_add(link.branches.len().checked_mul(6)?)
+        })?;
+        if words.len() != total_words {
+            return None;
+        }
+        let bodies = decode_bodies(&words[..body_words], self.properties.len())?;
+        let mut amplitudes = words[body_words..].chunks_exact(6);
+        let mut memory = Vec::with_capacity(self.links.len());
+        for link in &self.links {
+            let mut branches = Vec::with_capacity(link.branches.len());
+            for _ in &link.branches {
+                let values = amplitudes.next()?;
+                branches.push(core::array::from_fn(|axis| f64::from_bits(values[axis])));
+            }
+            memory.push(branches);
+        }
+        let state = RelaxationState { bodies, memory };
+        let (energy, terms) = self.energy(&state).ok()?;
+        (energy.is_finite() && terms.is_finite()).then_some(state)
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        push_properties(&self.properties, words);
+        push_vec3(self.gravity.acceleration_world(), words);
+        words.push(self.links.len() as u64);
+        for link in &self.links {
+            words.extend(link.viscous.bodies.map(|body| body as u64));
+            for arm in link.viscous.arms_body_m {
+                push_vec3(arm, words);
+            }
+            push_matrix(&link.viscous.damping, words);
+            words.push(link.branches.len() as u64);
+            for branch in &link.branches {
+                // The original factor defines the memory basis; its square
+                // alone cannot identify a history that is safe to resume.
+                words.extend(
+                    branch
+                        .gram_rows()
+                        .iter()
+                        .flatten()
+                        .map(|value| value.to_bits()),
+                );
+                if let Some(time) = branch.relaxation_time_s() {
+                    words.extend([1, time.to_bits()]);
+                } else {
+                    words.push(0);
+                }
+            }
+        }
+        push_source_controls(self.controls.source, words);
+        let limits = self.controls.limits;
+        words.extend([
+            limits.source.maximum_bodies as u64,
+            limits.source.maximum_connectors as u64,
+            limits.source.maximum_live_bytes as u64,
+            limits.source.maximum_preparation_terms,
+            limits.maximum_branches as u64,
+            self.drives.len() as u64,
+        ]);
+        for drive in &self.drives {
+            words.extend([
+                drive.connector as u64,
+                match drive.frame {
+                    DriveFrame::MaterialFirst => 0,
+                    DriveFrame::World => 1,
+                },
+                drive.input as u64,
+                drive.output as u64,
+            ]);
+        }
+        words.extend([
+            self.temperature_input as u64,
+            match self.thermal {
+                Thermal::Fixed => 0,
+                Thermal::Damping(_) => 1,
+                Thermal::Kinetics(_) => 2,
+            },
+        ]);
+        if let Some(identity) = self.checkpoint_law_identity() {
+            words.push(1);
+            for bytes in identity.chunks_exact(8) {
+                words.push(u64::from_le_bytes(
+                    bytes.try_into().expect("eight identity bytes"),
+                ));
+            }
+        } else {
+            words.push(0);
+        }
+        push_torques(&self.torques, words);
     }
 
     fn propose(

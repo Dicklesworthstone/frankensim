@@ -1799,6 +1799,14 @@ impl ShiftLaw for Arrhenius {
         }
         Ok((self.activations_k[connector] * (1.0 / temperature_k - 1.0 / 300.0)).exp())
     }
+
+    fn checkpoint_identity(&self) -> Option<[u8; 32]> {
+        let mut bytes = Vec::new();
+        for value in [280.0, 400.0, 300.0].iter().chain(&self.activations_k) {
+            bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+        }
+        Some(*fs_blake3::hash_domain("org.frankensim.tests.arrhenius-shift.v1", &bytes).as_bytes())
+    }
 }
 
 /// A shift law that gives the same factor whatever it is asked.
@@ -2523,4 +2531,276 @@ fn body_torques_sit_with_an_actuator_and_signals_on_the_relaxation_network() {
         network(gravity).torqued(1).expect("torque port").torqued(1).unwrap_err(),
         RelaxationNetworkBuildError::Torque { body: 1 }
     );
+}
+
+#[test]
+fn relaxation_codec_keeps_full_signed_memory_and_refuses_bad_state_atomically() {
+    let component = network(Gravity::ZERO);
+    let mut state = RelaxationState {
+        bodies: turned(),
+        memory: preloaded(),
+    };
+    state.memory[0][0] = [0.3, -0.0, 0.02, -0.03, 0.04, -0.05];
+    assert!(RelaxationNetwork::STATE_CHARTER.is_some());
+    let mut words = vec![17];
+    assert!(component.encode_state(&state, &mut words));
+    assert_eq!(words.len(), 1 + 3 * 13 + 3 * 6);
+    assert_eq!(words[0], 17);
+    let payload = &words[1..];
+    let decoded = component
+        .decode_state(payload)
+        .expect("complete native state");
+    assert_eq!(decoded, state);
+    let mut again = Vec::new();
+    assert!(component.encode_state(&decoded, &mut again));
+    assert_eq!(
+        again, payload,
+        "all quaternion and signed memory bits survive"
+    );
+    assert!(
+        component
+            .decode_state(&payload[..payload.len() - 1])
+            .is_none()
+    );
+    assert!(component.decode_state(&words).is_none());
+    for index in [0, 3, 7, 10, 39, 40, 44, 56] {
+        let mut malformed = payload.to_vec();
+        malformed[index] = f64::NAN.to_bits();
+        assert!(component.decode_state(&malformed).is_none(), "word {index}");
+    }
+    let mut unnormalized = payload.to_vec();
+    unnormalized[3] = 2.0_f64.to_bits();
+    assert!(component.decode_state(&unnormalized).is_none());
+    let mut overflow = payload.to_vec();
+    overflow[39] = f64::MAX.to_bits();
+    assert!(component.decode_state(&overflow).is_none());
+
+    let refuses = |invalid: &RelaxationState| {
+        let mut kept = vec![17];
+        assert!(!component.encode_state(invalid, &mut kept));
+        assert_eq!(kept, [17]);
+    };
+    let mut invalid = state.clone();
+    invalid.bodies.pop();
+    refuses(&invalid);
+    invalid = state.clone();
+    invalid.memory.pop();
+    refuses(&invalid);
+    invalid = state.clone();
+    invalid.memory[0].push([0.0; 6]);
+    refuses(&invalid);
+    for value in [f64::NAN, f64::INFINITY, f64::MAX] {
+        invalid = state.clone();
+        invalid.memory[1][0][5] = value;
+        refuses(&invalid);
+    }
+    for opaque in [
+        component.clone().shifted(Rc::new(Constant(1.0))).unwrap(),
+        component
+            .temperature_dependent(Rc::new(Stiffening {
+                betas_per_k: BETAS.to_vec(),
+            }))
+            .unwrap(),
+    ] {
+        let mut kept = vec![17];
+        assert!(!opaque.encode_state(&state, &mut kept));
+        assert_eq!(kept, [17]);
+        assert!(opaque.decode_state(payload).is_none());
+    }
+}
+
+#[test]
+fn relaxation_identity_binds_original_factors_branches_controls_and_port_laws() {
+    let identity = |component: &RelaxationNetwork| {
+        let mut words = Vec::new();
+        component.identity_words(&mut words);
+        words
+    };
+    let original = identity(&network(Gravity::ZERO));
+    let mut variants = Vec::new();
+    let mut changed = links();
+    let mut rows = *changed[0].branches[0].gram_rows();
+    rows[0] = rows[0].map(|value| -value);
+    changed[0].branches[0] = SpatialRelaxationBranch::from_gram_rows(rows, 0.2).unwrap();
+    variants.push(changed); // Same stiffness, different original memory basis.
+    let mut changed = links();
+    changed[0].branches[0] = branch([1.3, 0.0, 0.0, 0.0, 0.0, 0.0], 0.3);
+    variants.push(changed);
+    let mut changed = links();
+    changed[0].branches[0] =
+        SpatialRelaxationBranch::from_equilibrium_gram_rows(*changed[0].branches[0].gram_rows())
+            .unwrap();
+    variants.push(changed);
+    let mut changed = links();
+    changed[0].branches.swap(0, 1);
+    variants.push(changed);
+    let mut changed = links();
+    changed[1].viscous.arms_body_m[1].x = 0.1;
+    variants.push(changed);
+    for links in variants {
+        let other = RelaxationNetwork::new(properties(), links, Gravity::ZERO, controls()).unwrap();
+        assert_ne!(original, identity(&other));
+    }
+    for changed in [
+        RelaxationNetworkMotionControls {
+            limits: RelaxationNetworkLimits {
+                maximum_branches: 9,
+                ..controls().limits
+            },
+            ..controls()
+        },
+        RelaxationNetworkMotionControls {
+            source: ViscousConnectorControls {
+                linear_speed_tolerance_m_s: 4e-10,
+                ..source()
+            },
+            ..controls()
+        },
+    ] {
+        let other = RelaxationNetwork::new(properties(), links(), Gravity::ZERO, changed).unwrap();
+        assert_ne!(original, identity(&other));
+    }
+    assert_ne!(
+        original,
+        identity(&network(Gravity::new(Vec3::new(0.0, 0.0, -9.8)).unwrap()))
+    );
+    let a = network(Gravity::ZERO)
+        .driven(0, DriveFrame::World)
+        .unwrap()
+        .driven(1, DriveFrame::MaterialFirst)
+        .unwrap();
+    let b = network(Gravity::ZERO)
+        .driven(1, DriveFrame::MaterialFirst)
+        .unwrap()
+        .driven(0, DriveFrame::World)
+        .unwrap();
+    let c = network(Gravity::ZERO)
+        .driven(0, DriveFrame::MaterialFirst)
+        .unwrap()
+        .driven(1, DriveFrame::MaterialFirst)
+        .unwrap();
+    assert_ne!(identity(&a), identity(&b));
+    assert_ne!(identity(&a), identity(&c));
+    assert_ne!(
+        identity(&a.clone().torqued(0).unwrap().torqued(1).unwrap()),
+        identity(&a.torqued(1).unwrap().torqued(0).unwrap()),
+    );
+}
+
+#[test]
+fn relaxation_snapshot_resumes_memory_motion_and_ledger_and_refuses_a_changed_shift_law() {
+    use fs_blake3::identity::{CanonicalLimits, StrongIdentity};
+    use fs_exec::solver::SolverStateV2;
+    use fs_exec::solver::snapshot_v2::{
+        ExpectedResumeContextV2, PausedSnapshotBoundaryV2, SnapshotAlgorithmIdV2,
+        SnapshotBudgetStateIdV2, SnapshotDeterminismV2, SnapshotExecutionFingerprintIdV2,
+        SnapshotLimitsV2, SnapshotPauseRequestIdV2, SnapshotProvenanceIdV2, SnapshotRngCounterIdV2,
+    };
+    use fs_exec::{DrainTracker, RunId};
+    use fs_system::{CheckpointError, System, SystemImage};
+
+    let build = |activation| {
+        let component = driven_network(Gravity::ZERO)
+            .torqued(1)
+            .unwrap()
+            .shifted(Rc::new(Arrhenius {
+                activations_k: vec![activation, 1200.0],
+            }))
+            .unwrap();
+        let names: Vec<String> = component
+            .ports()
+            .iter()
+            .map(|port| port.id().as_str().to_owned())
+            .collect();
+        let mut builder = SystemBuilder::new();
+        let node = builder
+            .add(
+                "network",
+                component,
+                RelaxationState {
+                    bodies: turned(),
+                    memory: preloaded(),
+                },
+            )
+            .unwrap();
+        for name in names {
+            let value = if name.starts_with("heat") {
+                300.0
+            } else if name.starts_with("temperature") {
+                330.0
+            } else {
+                0.0
+            };
+            builder
+                .boundary(
+                    builder.port(node, &name).unwrap(),
+                    Box::new(move |_, _, outputs: &mut [f64]| outputs.fill(value)),
+                )
+                .unwrap();
+        }
+        (builder.seal().unwrap(), node)
+    };
+    let limits = SnapshotLimitsV2::new(
+        1 << 22,
+        4096,
+        CanonicalLimits::new(16_384, 4096, 32, 32, 64),
+        1 << 16,
+        1 << 22,
+        4096,
+    );
+    let snapshot = |system: &System| {
+        let gate = CancelGate::new_clock_free();
+        let tracker = DrainTracker::new(RunId(17), &gate);
+        let worker = tracker.register_worker().unwrap();
+        gate.request();
+        drop(worker);
+        let paused = PausedSnapshotBoundaryV2::from_drain_report(
+            tracker.finalize().unwrap(),
+            SnapshotPauseRequestIdV2::from_bytes([0x51; 32]),
+            1,
+        );
+        let context = ExpectedResumeContextV2::for_paused_state::<SystemImage>(
+            SnapshotAlgorithmIdV2::from_bytes([0x52; 32]),
+            1,
+            system.problem_id(),
+            SnapshotRngCounterIdV2::from_bytes([0; 32]),
+            SnapshotDeterminismV2::Deterministic,
+            SnapshotExecutionFingerprintIdV2::from_bytes([0x53; 32]),
+            SnapshotBudgetStateIdV2::from_bytes([0x54; 32]),
+            SnapshotProvenanceIdV2::from_bytes([0x55; 32]),
+            paused,
+        );
+        system.snapshot(&context, limits, || false).unwrap()
+    };
+    let (mut source, node) = build(2000.0);
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        for _ in 0..3 {
+            source.step(0.005, cx).unwrap();
+        }
+        let sealed = snapshot(&source);
+        let opened =
+            SystemImage::unseal_v2_expected(sealed.bytes(), &sealed.expectation(), limits, || {
+                false
+            })
+            .unwrap();
+        let (mut resumed, resumed_node) = build(2000.0);
+        resumed.resume(&opened).unwrap();
+        assert_eq!(snapshot(&resumed).bytes(), sealed.bytes());
+        assert_eq!(
+            source.state::<RelaxationState>(node),
+            resumed.state::<RelaxationState>(resumed_node)
+        );
+        for _ in 0..4 {
+            source.step(0.005, cx).unwrap();
+            resumed.step(0.005, cx).unwrap();
+        }
+        assert_eq!(snapshot(&source).bytes(), snapshot(&resumed).bytes());
+        let (mut foreign, _) = build(2001.0);
+        let before = snapshot(&foreign);
+        assert!(matches!(
+            foreign.resume(&opened),
+            Err(CheckpointError::ForeignProblem)
+        ));
+        assert_eq!(snapshot(&foreign).bytes(), before.bytes());
+    });
 }
