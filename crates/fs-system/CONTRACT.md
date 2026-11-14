@@ -339,6 +339,22 @@ relation allows there.
   the line's ports answer a unit of that effort, with every other unknown of
   the block eliminated. `C` is minus that. It is frozen for the step: where a
   neighbour is not linear, it is the neighbour's slope at the step's start.
+- What finding the line evaluated is not evaluated again in the solve's first
+  pass. A component other than the line component that declares its tangent,
+  and whose inputs are bit for bit those finding the line proposed it at, is
+  not proposed again in the first pass: its candidate, outputs and receipt
+  are already those of that proposal. The first assembly takes its columns
+  from finding the line. Between the two only the line component's inputs
+  are written (the released flows, then `release`), the step length is the
+  same, and an accepted state changes only when a step is published; a
+  proposal is pure (`fs_ports`: equal arguments give bitwise-equal results)
+  and a tangent depends on the inputs, the accepted state and the step only.
+  A differenced component is proposed again: differencing writes its
+  candidate. After the first update every component is proposed and every
+  column taken as before. A mass held by a slider is proposed once in a step
+  taken at its first check (before: twice) and differentiated once where
+  that check assembles (before: twice); the slider is still asked in every
+  pass (`load_line.rs`, bead `.12.5`).
 - During the solve the line's flow inputs hold the released flows, and the
   drivers of those inputs carry the extra terms `C * own effort`, set anew in
   every step. The residual of a line input is therefore still the residual of

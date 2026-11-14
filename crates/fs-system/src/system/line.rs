@@ -200,13 +200,20 @@ impl System {
         line.write_drivers(&mut self.drivers);
         let held = self.node_outputs(line.node);
         self.outputs[held.clone()].copy_from_slice(&self.accepted_outputs[held]);
-        for &node in nodes {
+        // What is evaluated here and still holds at the solve's first pass
+        // is kept for it (`Found`): the inputs each component with a
+        // declared tangent was proposed at, and the columns its tangent
+        // gives below.
+        work.found.clear();
+        for (position, &node) in nodes.iter().enumerate() {
             if node == line.node {
                 continue;
             }
             if let Some(shorter) = self.propose(node, dt_s, cx)? {
                 return Ok(Some(shorter));
             }
+            let inputs = self.node_inputs(node);
+            work.found.keep_inputs(position, &self.inputs[inputs]);
         }
         work.group_scale.fill(0.0);
         for &index in unknowns {
@@ -243,6 +250,10 @@ impl System {
             {
                 return Ok(Some(shorter));
             }
+            // A declared tangent's column depends on the inputs, the
+            // accepted state and the step only.
+            let values = &self.scratch_outputs[..self.node_outputs(node).len()];
+            work.found.keep_column(column, values);
             let reading = &work.readers[work.column_readers[column].clone()];
             for (&(_, offset, slope), &slot) in
                 reading.iter().zip(&work.slots[work.slot_start[column]..])

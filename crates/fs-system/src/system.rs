@@ -1683,7 +1683,8 @@ impl SystemBuilder {
         }
         let block_work = blocks
             .iter()
-            .map(|block| {
+            .zip(&lines)
+            .map(|(block, line)| {
                 // A part without a declared tangent is differenced, and a
                 // difference quotient is rounded at the point it is taken
                 // at: its slopes are not the same numbers from one step to
@@ -1693,7 +1694,14 @@ impl SystemBuilder {
                 let affine = block.nodes.iter().all(|&node| {
                     self.nodes[node].class() == Class::ExactLinear && self.nodes[node].has_tangent()
                 });
-                BlockWork::plan(block, &drivers, &input_owner, &output_start, affine)
+                let mut work =
+                    BlockWork::plan(block, &drivers, &input_owner, &output_start, affine);
+                if line.is_some() {
+                    let declares = |node: usize| self.nodes[node].has_tangent();
+                    work.found =
+                        Found::plan(block, &input_owner, &input_start, &output_start, &declares);
+                }
+                work
             })
             .collect();
 
@@ -1990,6 +1998,9 @@ struct BlockWork {
     /// line: the rounding of the largest wire of its kind in the block.
     /// Zero for every other wire.
     kind_rounding: Vec<f64>,
+    /// What finding the block's load line evaluated, kept for the solve's
+    /// first pass. Empty for a block without a load line.
+    found: Found,
 }
 
 impl BlockWork {
@@ -2101,6 +2112,124 @@ impl BlockWork {
             carried: vec![0.0; m],
             scale: vec![0.0; m],
             kind_rounding: vec![0.0; m],
+            found: Found::default(),
+        }
+    }
+}
+
+/// What finding a block's load line evaluated and still holds at the solve's
+/// first pass (`solve_lent`): per component of the block that declares its
+/// tangent, the inputs finding the line proposed it at, and per unknown the
+/// column that tangent gave. Sized at seal, never in a step.
+#[derive(Default)]
+struct Found {
+    /// Per position in the block's components: whether it declares its
+    /// tangent (only such a component is kept), and whether it was kept.
+    declares: Vec<bool>,
+    proposed: Vec<bool>,
+    /// Where each position's inputs start in `inputs`.
+    input_start: Vec<usize>,
+    inputs: Vec<f64>,
+    /// Per unknown: the position of its owner in the block's components,
+    /// whether its column was kept, and where it starts in `columns`.
+    owner_position: Vec<usize>,
+    column: Vec<bool>,
+    column_start: Vec<usize>,
+    columns: Vec<f64>,
+    /// Per position, in the first pass of a step: kept at bit for bit the
+    /// inputs it holds now, so its proposal and its columns are those.
+    repeated: Vec<bool>,
+}
+
+impl Found {
+    /// Room for every component's inputs and every unknown's column (its
+    /// owner's outputs) of `block`; `declares` says whether a component
+    /// declares its tangent.
+    fn plan(
+        block: &Block,
+        input_owner: &[usize],
+        input_start: &[usize],
+        output_start: &[usize],
+        declares: &dyn Fn(usize) -> bool,
+    ) -> Self {
+        let (mut starts, mut inputs) = (Vec::new(), 0_usize);
+        for &node in &block.nodes {
+            starts.push(inputs);
+            inputs += input_start[node + 1] - input_start[node];
+        }
+        let (mut owner_position, mut column_start, mut columns) = (Vec::new(), Vec::new(), 0_usize);
+        for &index in &block.unknowns {
+            let owner = input_owner[index];
+            owner_position.push(
+                block
+                    .nodes
+                    .binary_search(&owner)
+                    .expect("an unknown belongs to a component of its block"),
+            );
+            column_start.push(columns);
+            columns += output_start[owner + 1] - output_start[owner];
+        }
+        let (components, unknowns) = (block.nodes.len(), block.unknowns.len());
+        Self {
+            declares: block.nodes.iter().map(|&node| declares(node)).collect(),
+            proposed: vec![false; components],
+            input_start: starts,
+            inputs: vec![0.0; inputs],
+            owner_position,
+            column: vec![false; unknowns],
+            column_start,
+            columns: vec![0.0; columns],
+            repeated: vec![false; components],
+        }
+    }
+
+    /// Forget what an earlier finding of the line kept.
+    fn clear(&mut self) {
+        self.proposed.fill(false);
+        self.column.fill(false);
+    }
+
+    /// Keep `inputs`, at which the component at `position` was just
+    /// proposed, if it declares its tangent.
+    fn keep_inputs(&mut self, position: usize, inputs: &[f64]) {
+        if self.declares[position] {
+            let start = self.input_start[position];
+            self.inputs[start..start + inputs.len()].copy_from_slice(inputs);
+            self.proposed[position] = true;
+        }
+    }
+
+    /// Keep `values`, the column of unknown `column` its owner's tangent
+    /// gave, if the owner declares its tangent (a differenced column is not
+    /// kept: differencing writes the owner's candidate).
+    fn keep_column(&mut self, column: usize, values: &[f64]) {
+        if self.declares[self.owner_position[column]] {
+            let start = self.column_start[column];
+            self.columns[start..start + values.len()].copy_from_slice(values);
+            self.column[column] = true;
+        }
+    }
+
+    /// Whether the component at `position` was kept at bit for bit `inputs`;
+    /// recorded in `repeated` for the first assembly.
+    fn repeats(&mut self, position: usize, inputs: &[f64]) -> bool {
+        let start = self.input_start[position];
+        self.repeated[position] = self.proposed[position]
+            && inputs
+                .iter()
+                .zip(&self.inputs[start..start + inputs.len()])
+                .all(|(now, then)| now.to_bits() == then.to_bits());
+        self.repeated[position]
+    }
+
+    /// The kept column of unknown `column`, `width` long, if its owner
+    /// repeats in this first pass.
+    fn column_of(&self, column: usize, width: usize) -> Option<&[f64]> {
+        if self.repeated[self.owner_position[column]] && self.column[column] {
+            let start = self.column_start[column];
+            Some(&self.columns[start..start + width])
+        } else {
+            None
         }
     }
 }
@@ -2919,8 +3048,13 @@ impl System {
             carried,
             scale,
             kind_rounding,
+            found,
         } = work;
         let affine = *affine;
+        // Until the first update: the inputs of every component other than
+        // the line component are those finding the line proposed it at,
+        // unless shown otherwise below (`Found::repeats`).
+        let mut first_pass = true;
         // Whether this step has already used the factors an affine block
         // kept from an earlier one.
         let mut kept_used = false;
@@ -2944,7 +3078,23 @@ impl System {
         let mut iterations = 0_u32;
         loop {
             cx.checkpoint().map_err(|_| SystemError::Cancelled)?;
-            for &node in nodes {
+            for (position, &node) in nodes.iter().enumerate() {
+                // In the first pass, a component that finding the line
+                // proposed, at bit for bit the inputs it holds now, is not
+                // proposed again: its accepted state and the step are the
+                // same (states change only when a step is published), and a
+                // proposal is pure (fs-ports: equal arguments give
+                // bitwise-equal results), so its candidate, outputs and
+                // receipt are already this proposal's. Only a component
+                // that declares its tangent: differencing a component
+                // overwrites its candidate. The line component's inputs
+                // were moved by `release`; it was not proposed there.
+                if first_pass
+                    && !found.proposed.is_empty()
+                    && found.repeats(position, &self.inputs[self.node_inputs(node)])
+                {
+                    continue;
+                }
                 if let Some(shorter) = self.propose(node, dt_s, cx)? {
                     return Ok(Err(shorter));
                 }
@@ -3158,7 +3308,14 @@ impl System {
                 for (column, &index) in unknowns.iter().enumerate() {
                     let node = self.input_owner[index];
                     let local = index - self.input_start[node];
-                    if let Some(shorter) =
+                    // The first assembly takes a repeated component's
+                    // column from finding the line, at the same inputs.
+                    if first_pass
+                        && !found.proposed.is_empty()
+                        && let Some(kept) = found.column_of(column, self.node_outputs(node).len())
+                    {
+                        self.scratch_outputs[..kept.len()].copy_from_slice(kept);
+                    } else if let Some(shorter) =
                         self.tangent_column(node, local, dt_s, group_scale, false, cx)?
                     {
                         return Ok(Err(shorter));
@@ -3238,6 +3395,7 @@ impl System {
                 }
             }
             iterations += 1;
+            first_pass = false;
             for value in residual.iter_mut() {
                 *value = -*value;
             }

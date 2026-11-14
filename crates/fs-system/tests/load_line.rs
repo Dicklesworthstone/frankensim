@@ -6303,3 +6303,300 @@ fn a_neighbour_that_declares_its_tangent_is_handed_to_the_bit_beside_a_differenc
     );
     assert_eq!((unresolved, none), (0, 0));
 }
+
+/// A component, with how many times the kernel asked it to propose (on its
+/// line too) and for a tangent.
+struct Counted<C> {
+    inner: C,
+    proposals: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    tangents: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl<C> Counted<C> {
+    fn new(inner: C) -> Self {
+        Self {
+            inner,
+            proposals: std::sync::Arc::default(),
+            tangents: std::sync::Arc::default(),
+        }
+    }
+
+    fn counts(&self) -> (CountOf, CountOf) {
+        (
+            std::sync::Arc::clone(&self.proposals),
+            std::sync::Arc::clone(&self.tangents),
+        )
+    }
+}
+
+type CountOf = std::sync::Arc<std::sync::atomic::AtomicUsize>;
+
+fn read(count: &CountOf) -> usize {
+    count.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn tick(count: &CountOf) {
+    count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+impl Component for Counted<Mass> {
+    type State = Motion;
+    type Error = ElementError;
+
+    fn ports(&self) -> &[PortSpec] {
+        self.inner.ports()
+    }
+
+    fn class(&self) -> Class {
+        self.inner.class()
+    }
+
+    fn stored_energy_j(&self, state: &Motion) -> Result<f64, ElementError> {
+        self.inner.stored_energy_j(state)
+    }
+
+    fn propose(
+        &self,
+        old: &Motion,
+        dt_s: f64,
+        inputs: &[f64],
+        new: &mut Motion,
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<Proposal, ElementError> {
+        tick(&self.proposals);
+        self.inner.propose(old, dt_s, inputs, new, outputs, cx)
+    }
+}
+
+impl fs_ports::component::PortTangent for Counted<Mass> {
+    fn jvp(
+        &self,
+        old: &Motion,
+        dt_s: f64,
+        inputs: &[f64],
+        d_inputs: &[f64],
+        d_outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        tick(&self.tangents);
+        fs_ports::component::PortTangent::jvp(
+            &self.inner,
+            old,
+            dt_s,
+            inputs,
+            d_inputs,
+            d_outputs,
+            cx,
+        )
+    }
+
+    fn vjp(
+        &self,
+        old: &Motion,
+        dt_s: f64,
+        inputs: &[f64],
+        bar_outputs: &[f64],
+        bar_inputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        fs_ports::component::PortTangent::vjp(
+            &self.inner,
+            old,
+            dt_s,
+            inputs,
+            bar_outputs,
+            bar_inputs,
+            cx,
+        )
+    }
+}
+
+impl Component for Counted<Slider> {
+    type State = Slip;
+    type Error = ElementError;
+
+    fn ports(&self) -> &[PortSpec] {
+        self.inner.ports()
+    }
+
+    fn class(&self) -> Class {
+        self.inner.class()
+    }
+
+    fn stored_energy_j(&self, slip: &Slip) -> Result<f64, ElementError> {
+        self.inner.stored_energy_j(slip)
+    }
+
+    fn propose(
+        &self,
+        old: &Slip,
+        dt_s: f64,
+        inputs: &[f64],
+        new: &mut Slip,
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<Proposal, ElementError> {
+        tick(&self.proposals);
+        self.inner.propose(old, dt_s, inputs, new, outputs, cx)
+    }
+}
+
+impl LoadLine for Counted<Slider> {
+    fn line_ports(&self) -> &[usize] {
+        self.inner.line_ports()
+    }
+
+    fn propose_on_line(
+        &self,
+        old: &Slip,
+        dt_s: f64,
+        inputs: &[f64],
+        compliance: &[f64],
+        new: &mut Slip,
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<Proposal, ElementError> {
+        tick(&self.proposals);
+        self.inner
+            .propose_on_line(old, dt_s, inputs, compliance, new, outputs, cx)
+    }
+}
+
+#[test]
+fn a_held_mass_is_not_proposed_or_differentiated_again_where_finding_the_line_already_did() {
+    // The mass of `pushed_by`, held by the slider under 4 N sin(2 pi 3.14 t),
+    // a push that changes from step to step. Finding the line proposes the
+    // mass and takes its tangent at the step's starting inputs, and only the
+    // slider's inputs are written between it and the solve's first pass
+    // (the released flows, then `release`). So the first pass takes the
+    // mass's proposal from finding the line, and the first assembly its
+    // column: a step proposes the mass `1 + n` times, where it updates `n`
+    // times (before: `2 + n`), and takes its tangent once for finding the
+    // line and once for every assembly after the first (before: once for
+    // every assembly too).
+    //
+    // `release` puts the slider's inputs at what the mass and the push give
+    // at its held force, and both are affine, so a held step here is taken
+    // at its first check, with no update: at an exact fixed point with no
+    // slopes, or with the slopes of one assembly made to judge it. Measured
+    // before the change, per step (updates, mass proposals, mass tangents,
+    // slider asks): (0, 2, 1, 1) and (0, 2, 2, 3). (A held step of the
+    // bowed string takes one update: there the string was proposed 3 times
+    // and differentiated twice, bead `.12.5`, C.)
+    //
+    // The slider is the component whose inputs did change there, and it is
+    // asked in every pass, the first included, once more for its one unknown
+    // column in every assembly (a forward difference), and once more at the
+    // accepted inputs where an assembly is followed by no update
+    // (differencing wrote its candidate): 1 or 3 asks with no update, `1 +
+    // 2 n` with `n`, before and after. Skipped in the first pass, it would
+    // be asked 0 or 2 times.
+    let dt = 1.0e-3_f64;
+    let mass = Counted::new(Mass::new(MASS_KG).unwrap());
+    let rubbing = Counted::new(slider());
+    let ((mass_proposals, mass_tangents), (slider_asks, _)) = (mass.counts(), rubbing.counts());
+    let mut builder = SystemBuilder::new();
+    let mass = builder
+        .add_with_tangent(
+            "mass",
+            mass,
+            Motion {
+                position_m: 0.0,
+                velocity_m_s: 0.0,
+            },
+        )
+        .unwrap();
+    let rubbing = builder
+        .add_on_line("slider", rubbing, Slip::stuck())
+        .unwrap();
+    let push = Waveform::sine(4.0, 2.0 * PI * 0.5, 0.0, 0.0).unwrap();
+    let pusher = builder
+        .add_with_tangent("push", Force::new(push), SourceAccount::default())
+        .unwrap();
+    builder
+        .common_flow(
+            port(&builder, mass, "p"),
+            &[port(&builder, rubbing, "a"), port(&builder, pusher, "p")],
+        )
+        .unwrap();
+    builder
+        .boundary(
+            port(&builder, rubbing, "b"),
+            Box::new(|_, _, values| values[0] = 0.0),
+        )
+        .unwrap();
+    builder
+        .boundary(
+            port(&builder, rubbing, "heat"),
+            Box::new(|_, _, values| values[0] = 300.0),
+        )
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    // Per step: updates, then the mass's proposals and tangents and the
+    // slider's asks.
+    let mut rows = Vec::new();
+    with_cx(|cx| {
+        for step in 0..200 {
+            let before = (
+                read(&mass_proposals),
+                read(&mass_tangents),
+                read(&slider_asks),
+            );
+            let report = system
+                .step(dt, cx)
+                .unwrap_or_else(|error| panic!("step {step}: {error}"));
+            assert!(
+                system.state::<Slip>(rubbing).unwrap().is_stuck(),
+                "step {step}"
+            );
+            rows.push((
+                report.iterations as usize,
+                read(&mass_proposals) - before.0,
+                read(&mass_tangents) - before.1,
+                read(&slider_asks) - before.2,
+            ));
+        }
+    });
+    // How many steps of each kind.
+    let mut kinds: Vec<((usize, usize, usize, usize), usize)> = Vec::new();
+    for &row in &rows {
+        match kinds.iter_mut().find(|(kind, _)| *kind == row) {
+            Some((_, count)) => *count += 1,
+            None => kinds.push((row, 1)),
+        }
+    }
+    kinds.sort_unstable();
+    eprintln!(
+        "held 200 steps under 4 N sin(2 pi 3.14 t); steps by (updates, mass proposals, mass \
+         tangents, slider asks): {kinds:?}"
+    );
+    let mut assembled = 0;
+    for (step, &(n, proposals, tangents, asks)) in rows.iter().enumerate() {
+        // The slider first: what it is asked says how many assemblies the
+        // step made, and is the same before and after.
+        let expected = match (n, asks) {
+            // An exact fixed point at the first check: no assembly.
+            (0, 1) => (1, 1),
+            // One assembly to judge the first check, taken with no update.
+            (0, 3) => {
+                assembled += 1;
+                (1, 1)
+            }
+            // `n` updates, one assembly before each.
+            _ if n >= 1 && asks == 1 + 2 * n => {
+                assembled += 1;
+                (1 + n, n)
+            }
+            _ => panic!("step {step}: {n} updates, the slider asked {asks} times"),
+        };
+        assert_eq!(
+            (proposals, tangents),
+            expected,
+            "step {step}: {n} updates and {asks} asks of the slider; the mass proposed \
+             {proposals} times and differentiated {tangents} times"
+        );
+    }
+    assert!(assembled >= 1, "no step of 200 assembled");
+    assert_eq!(system.steps(), 200);
+}
