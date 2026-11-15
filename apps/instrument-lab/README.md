@@ -13,7 +13,10 @@ Two tracks, always labelled:
   `fs-vkplate` drum-kit solver itself on a coarser grid, one Worker per piece) and
   `engine-piano` (a lean kernel that steps the grand piano's own equations for the sounding
   keys only, validated against the reference `Instrument`). `engine-drum` is the earlier modal
-  drum (FE heads, eigen-solver, prepared linear impact engine), no longer on the page.
+  drum (FE heads, eigen-solver, prepared linear impact engine), no longer on the page. A
+  native build with the cargo feature `kernel` and `"mechanics":"kernel"` steps the same
+  description as a graph on the composition kernel (fs-couple's `ImpactGraph` on fs-system;
+  no contact loss), held to the prepared engine's pressure by `engine-drum/tests/kernel_engine.rs`.
 
 ## Layout
 

@@ -12,6 +12,7 @@
 //! | Circular film mesh, DKT bending + membrane prestress pencil | `fs-plate` `TensionedDisk` |
 //! | Eigenmodes inside the declared window | `fs-modal` `slice_window` |
 //! | Exact-ZOH modal bodies + sealed-air spring + tip contact | `fs-couple` `LinearImpactSystem` |
+//! | The same description as a graph on the composition kernel (`DrumParams::mechanics`, cargo feature `kernel`) | `fs-couple` `ImpactGraph` on `fs-system` |
 //! | Hertz (optionally Hunt-Crossley) contact potential | `fs-dcontact` `Obstacle` |
 //! | Pressure at the microphones, anti-aliased to 48 kHz | `fs-couple` `BaffledPressure` + `Decimator` |
 //!
@@ -26,7 +27,7 @@ pub mod params;
 pub use engine::{BenchReport, Ledger, Snapshot, StrikeOutcome, Voice};
 pub use instrument::Instrument;
 pub use live::LiveDrumCore;
-pub use params::{Atmosphere, DrumParams, Refusal};
+pub use params::{Atmosphere, DrumParams, Mechanics, Refusal};
 
 /// Which fused multiply-add executes FrankenSim's `f64::mul_add` chains in
 /// this build. Results are bit-identical on every path; only speed differs.

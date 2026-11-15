@@ -36,6 +36,9 @@ pub mod gas_film;
 pub mod relaxation;
 /// Passive multiport acoustic reaction in the same nonlinear time equation.
 pub mod radiation;
+/// The same linear description as a declared graph on the composition kernel.
+#[cfg(feature = "kernel")]
+pub mod graph;
 /// Prepared modal/contact image for explicitly linear bodies.
 pub mod linear;
 /// Original nonlinear string/contact storage with exact coupled linear propagation.

@@ -70,6 +70,7 @@ fs-solid = { path = "../fs-solid" }
 fs-solver = { path = "../fs-solver" }
 fs-sparse = { path = "../fs-sparse" }
 fs-spectral = { path = "../fs-spectral" }
+fs-system = { path = "../fs-system", optional = true }
 fs-thermal = { path = "../fs-thermal" }
 fs-thermochem = { path = "../fs-thermochem" }
 fs-time = { path = "../fs-time" }
@@ -146,6 +147,10 @@ experimental-shock-loading = ["dep:fs-gas"]
 experimental-compressible = ["experimental-shock-loading", "dep:fs-flux", "fs-flux/experimental-compressible"]
 # The lip on the shared nonlinear Euler bore (fs-duct's image of fs-gas).
 nonlinear-brass = ["dep:fs-gas", "fs-duct/nonlinear-euler"]
+# The prepared linear impact description as a declared graph on the composition
+# kernel (render::plate::impact::graph): exact owners, modal structures and the
+# contact interface, stepped by fs-system.
+kernel = ["dep:fs-system", "fs-system/phs", "fs-dcontact/component"]
 
 [[example]]
 name = "rod_motion"
@@ -643,6 +648,10 @@ path = "tests/legacy/tribothermal.rs"
 [[test]]
 name = "visco_membrane_thermal"
 path = "tests/legacy/visco_membrane_thermal.rs"
+
+[[test]]
+name = "impact_graph"
+required-features = ["kernel"]
 
 [[example]]
 name = "atmospheric_rocket"

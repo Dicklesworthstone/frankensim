@@ -41,6 +41,13 @@ getrandom = { version = "0.4", features = ["wasm_js"] }
 # Second browser build (engine_fma.*): bit-identical results, hardware FMA when
 # the host proves it fuses. Needs a browser with WebAssembly relaxed-simd.
 hardware-fma = ["dep:fs-live-fma"]
+# Native only: the voice's mechanics as a declared graph on the composition
+# kernel (`"mechanics":"kernel"`); the default and browser builds keep the module.
+kernel = ["fs-couple/kernel"]
+
+[[test]]
+name = "kernel_engine"
+required-features = ["kernel"]
 
 [profile.release]
 opt-level = 3

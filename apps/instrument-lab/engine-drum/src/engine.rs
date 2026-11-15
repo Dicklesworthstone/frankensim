@@ -17,11 +17,25 @@
 //! - **Recompilation.** Launch and catch recompile the linear image with the
 //!   accepted head states carried over bit-for-bit. The sealed-air spring and
 //!   the elastic contact have no hidden history, so nothing is reset.
+//!
+//! **The kernel mechanics** (`DrumParams::mechanics = Kernel`, cargo feature
+//! `kernel`). The same description ([`describe`]) is declared on fs-system's
+//! composition kernel by fs-couple's `ImpactGraph` ([`compile_graph`]): the
+//! stick a modal structure, both heads and the sealed air one exact
+//! port-Hamiltonian owner, the tip fs-dcontact's contact interface on the
+//! kernel's load line, the heat to a sink at the atmosphere's temperature.
+//! The voice steps it, reads its state and its ledger, and rebuilds it on
+//! launch and catch from the accepted head states, as above. The
+//! microphones are one-way observers of the modal velocities under either
+//! owner: neither couples radiation back into the heads. The kernel's
+//! contact has no heat port, so these mechanics refuse a contact loss.
 
 use crate::instrument::{HERTZ_ALPHA, Instrument, LAUNCH_GAP_M};
-use crate::params::{OUTPUT_RATE_HZ, Refusal};
+use crate::params::{Mechanics, OUTPUT_RATE_HZ, Refusal};
 use fs_couple::modal_acoustic_time::{ModalAcousticState, ModalAcousticTimeBudget};
 use fs_couple::pcm_wav::baffled::{BaffledPressure, RayleighMedium, SurfaceSample};
+#[cfg(feature = "kernel")]
+use fs_couple::render::plate::impact::graph::ImpactGraph;
 use fs_couple::render::plate::impact::linear::{LinearImpactConfig, LinearImpactSystem, VolumeConnection};
 use fs_couple::render::plate::impact::{BodyPotential, ImpactBody, VolumeSpring};
 use fs_couple::render::schedule::force::coupled::ModalCouplingConfig;
@@ -176,7 +190,21 @@ fn mechanics_refusal(error: impl core::fmt::Display) -> Refusal {
     Refusal::new("mechanics_refused", error.to_string())
 }
 
-/// Compile the instrument into fs-couple's prepared linear impact image.
+/// The instrument as the linear impact description both mechanics owners
+/// take: its bodies, the stick's contact (if the stick is present), the
+/// sealed air's volume spring, and the coordinate count.
+pub struct Description {
+    /// `[stick?, batter, resonant]`.
+    pub bodies: Vec<ImpactBody>,
+    /// The tip's Hertz obstacle, when the stick is present.
+    pub contacts: Vec<Obstacle>,
+    /// The sealed air between the heads.
+    pub volumes: Vec<VolumeConnection>,
+    /// Mechanical coordinates over all bodies.
+    pub total: usize,
+}
+
+/// Describe the instrument with the given head and stick states.
 ///
 /// Coordinate order matches the reference: `[stick?, batter modes, resonant
 /// modes]`. `head_states` carries the batter then resonant coordinates.
@@ -185,14 +213,13 @@ fn mechanics_refusal(error: impl core::fmt::Display) -> Refusal {
 /// so closure = tip displacement - membrane displacement, both positive down.
 ///
 /// # Errors
-/// Any refusal of the modal, coupling or contact owners.
-pub fn compile_system(
+/// A state or row that does not match the retained modes; the contact
+/// owner's refusal.
+pub fn describe(
     inst: &Instrument,
-    rate_hz: u32,
     head_states: &[ModalAcousticState],
     stick: Option<(ModalAcousticState, &[f64])>,
-    gate: &CancelGate,
-) -> Result<LinearImpactSystem, Refusal> {
+) -> Result<Description, Refusal> {
     let n0 = inst.heads[0].mode_count();
     let n1 = inst.heads[1].mode_count();
     if head_states.len() != n0 + n1 {
@@ -243,15 +270,155 @@ pub fn compile_system(
         areas,
     };
     let reference_area_m2 = core::f64::consts::PI * inst.params.radius_m * inst.params.radius_m;
-    LinearImpactSystem::new_with_dampers(
+    Ok(Description {
         bodies,
         contacts,
-        vec![VolumeConnection { spring: volume, reference_area_m2 }],
+        volumes: vec![VolumeConnection { spring: volume, reference_area_m2 }],
+        total,
+    })
+}
+
+/// Compile the instrument into fs-couple's prepared linear impact image
+/// ([`describe`] for the arguments).
+///
+/// # Errors
+/// Any refusal of the modal, coupling or contact owners.
+pub fn compile_system(
+    inst: &Instrument,
+    rate_hz: u32,
+    head_states: &[ModalAcousticState],
+    stick: Option<(ModalAcousticState, &[f64])>,
+    gate: &CancelGate,
+) -> Result<LinearImpactSystem, Refusal> {
+    let d = describe(inst, head_states, stick)?;
+    LinearImpactSystem::new_with_dampers(
+        d.bodies,
+        d.contacts,
+        d.volumes,
         Vec::new(),
-        mechanics_config(rate_hz, total),
+        mechanics_config(rate_hz, d.total),
         gate,
     )
     .map_err(mechanics_refusal)
+}
+
+/// Declare the same description on the composition kernel: fs-couple's
+/// `ImpactGraph`, the heat to a sink at the atmosphere's temperature
+/// ([`describe`] for the arguments).
+///
+/// # Errors
+/// Any refusal of the graph's parts or the kernel, a contact loss among
+/// them.
+#[cfg(feature = "kernel")]
+pub fn compile_graph(
+    inst: &Instrument,
+    rate_hz: u32,
+    head_states: &[ModalAcousticState],
+    stick: Option<(ModalAcousticState, &[f64])>,
+    gate: &CancelGate,
+) -> Result<ImpactGraph, Refusal> {
+    let d = describe(inst, head_states, stick)?;
+    ImpactGraph::new(
+        d.bodies,
+        d.contacts,
+        d.volumes,
+        mechanics_config(rate_hz, d.total),
+        inst.params.atmosphere.state().temperature,
+        gate,
+    )
+    .map_err(mechanics_refusal)
+}
+
+/// What one mechanical step did to the ledger [J].
+struct StepEnergy {
+    stored_j: f64,
+    dissipated_j: f64,
+    supplied_j: f64,
+    residual_j: f64,
+}
+
+/// The owner that steps a voice's mechanics (`DrumParams::mechanics`).
+// One owner per voice, moved only when a launch or catch rebuilds it, so the
+// module's larger image stays inline rather than behind a box on every step.
+#[allow(clippy::large_enum_variant)]
+enum Owner {
+    Module(LinearImpactSystem),
+    #[cfg(feature = "kernel")]
+    Kernel(ImpactGraph),
+}
+
+impl Owner {
+    fn compile(
+        inst: &Instrument,
+        rate_hz: u32,
+        head_states: &[ModalAcousticState],
+        stick: Option<(ModalAcousticState, &[f64])>,
+        gate: &CancelGate,
+    ) -> Result<Self, Refusal> {
+        match inst.params.mechanics {
+            Mechanics::Module => {
+                compile_system(inst, rate_hz, head_states, stick, gate).map(Self::Module)
+            }
+            #[cfg(feature = "kernel")]
+            Mechanics::Kernel => {
+                compile_graph(inst, rate_hz, head_states, stick, gate).map(Self::Kernel)
+            }
+            #[cfg(not(feature = "kernel"))]
+            Mechanics::Kernel => Err(crate::params::kernel_unavailable()),
+        }
+    }
+
+    /// Accepted interleaved q/v in the description's coordinate order.
+    fn state(&self) -> &[f64] {
+        match self {
+            Self::Module(system) => system.state(),
+            #[cfg(feature = "kernel")]
+            Self::Kernel(graph) => graph.state(),
+        }
+    }
+
+    fn mode_count(&self) -> usize {
+        match self {
+            Self::Module(system) => system.mode_count(),
+            #[cfg(feature = "kernel")]
+            Self::Kernel(graph) => graph.mode_count(),
+        }
+    }
+
+    /// Energy stored now: the last step's, or the build's before a step.
+    fn stored_energy_j(&self) -> f64 {
+        match self {
+            Self::Module(system) => system.frame().stored_energy_j,
+            #[cfg(feature = "kernel")]
+            Self::Kernel(graph) => graph.frame().stored_energy_j,
+        }
+    }
+
+    /// One step; `force` is the module's external generalized force (always
+    /// zero here; the kernel's graph declares none).
+    fn step(&mut self, force: &[f64], gate: &CancelGate) -> Result<StepEnergy, Refusal> {
+        match self {
+            Self::Module(system) => {
+                let f = system.step(force, gate).map_err(mechanics_refusal)?;
+                Ok(StepEnergy {
+                    stored_j: f.stored_energy_j,
+                    dissipated_j: f.dissipated_energy_j,
+                    supplied_j: f.supplied_work_j,
+                    residual_j: f.balance_residual_j,
+                })
+            }
+            #[cfg(feature = "kernel")]
+            Self::Kernel(graph) => {
+                let f = graph.step(gate).map_err(mechanics_refusal)?;
+                Ok(StepEnergy {
+                    stored_j: f.stored_energy_j,
+                    dissipated_j: f.dissipated_energy_j,
+                    supplied_j: 0.0,
+                    residual_j: f.balance_residual_j,
+                })
+            }
+        }
+    }
 }
 
 fn microphone(inst: &Instrument, head: usize, rate_hz: u32) -> Result<BaffledPressure, Refusal> {
@@ -292,7 +459,7 @@ pub struct Voice {
     rate_hz: u32,
     n0: usize,
     n1: usize,
-    system: LinearImpactSystem,
+    system: Owner,
     stick: Option<Stick>,
     pending: Option<Strike>,
     last_xy_m: [f64; 2],
@@ -331,7 +498,7 @@ impl Voice {
         let n1 = inst.heads[1].mode_count();
         let gate = CancelGate::new_clock_free();
         let rest = vec![ModalAcousticState::default(); n0 + n1];
-        let system = compile_system(inst, rate_hz, &rest, None, &gate)?;
+        let system = Owner::compile(inst, rate_hz, &rest, None, &gate)?;
         let mics = [microphone(inst, 0, rate_hz)?, microphone(inst, 1, rate_hz)?];
         Ok(Self {
             substeps,
@@ -448,13 +615,13 @@ impl Voice {
         }
         let velocity = self.system.state()[1];
         let heads = self.head_states();
-        let system = compile_system(inst, self.rate_hz, &heads, None, &self.gate)?;
+        let system = Owner::compile(inst, self.rate_hz, &heads, None, &self.gate)?;
         // Mass-normalized coordinate: kinetic energy is v^2 / 2 exactly.
         self.ledger.recovered_j += 0.5 * velocity * velocity;
         self.system = system;
         self.stick = None;
         self.force = vec![0.0; self.system.mode_count()];
-        self.ledger.stored_j = self.system.frame().stored_energy_j;
+        self.ledger.stored_j = self.system.stored_energy_j();
         Ok(())
     }
 
@@ -469,14 +636,14 @@ impl Voice {
             displacement_m_sqrt_kg: (membrane - LAUNCH_GAP_M) * self.sqrt_mass,
             velocity_m_sqrt_kg_per_s: strike.speed_m_s * self.sqrt_mass,
         };
-        let system = compile_system(inst, self.rate_hz, &heads, Some((tip, &strike.row)), &self.gate)?;
+        let system = Owner::compile(inst, self.rate_hz, &heads, Some((tip, &strike.row)), &self.gate)?;
         self.ledger.supplied_j += 0.5 * tip.velocity_m_sqrt_kg_per_s * tip.velocity_m_sqrt_kg_per_s;
         self.system = system;
         self.force = vec![0.0; self.system.mode_count()];
         self.last_xy_m = strike.position_m;
         self.stick = Some(Stick { position_m: strike.position_m, row: strike.row });
         self.strikes += 1;
-        self.ledger.stored_j = self.system.frame().stored_energy_j;
+        self.ledger.stored_j = self.system.stored_energy_j();
         Ok(())
     }
 
@@ -496,16 +663,17 @@ impl Voice {
         } else if let Some(strike) = self.pending.take() {
             self.launch(inst, strike)?;
         }
-        let frame = self.system.step(&self.force, &self.gate).map_err(mechanics_refusal)?;
+        let step = self.system.step(&self.force, &self.gate)?;
         self.steps += 1;
         if self.stick.is_some() {
             self.steps_with_stick += 1;
         }
-        self.ledger.stored_j = frame.stored_energy_j;
-        self.ledger.dissipated_j += frame.dissipated_energy_j;
+        self.ledger.stored_j = step.stored_j;
+        self.ledger.dissipated_j += step.dissipated_j;
         // No external generalized force is ever applied; kept for closure.
-        self.ledger.supplied_j += frame.supplied_work_j;
-        self.ledger.max_step_residual_j = self.ledger.max_step_residual_j.max(frame.balance_residual_j.abs());
+        self.ledger.supplied_j += step.supplied_j;
+        self.ledger.max_step_residual_j =
+            self.ledger.max_step_residual_j.max(step.residual_j.abs());
         Ok(())
     }
 

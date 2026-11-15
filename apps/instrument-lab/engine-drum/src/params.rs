@@ -111,6 +111,38 @@ pub struct HeadParams {
     pub tension_variation: TensionVariation,
 }
 
+/// The owner that steps the mechanics. Both take the same description (the
+/// bodies, the stick's contact and the sealed air: engine.rs `describe`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mechanics {
+    /// fs-couple's prepared linear impact image, `LinearImpactSystem`.
+    #[default]
+    Module,
+    /// The same description declared on fs-system's composition kernel
+    /// (fs-couple's `ImpactGraph`). Needs the cargo feature `kernel`; its
+    /// contact has no heat port, so it admits no contact loss.
+    Kernel,
+}
+
+impl Mechanics {
+    /// The JSON name: `module` or `kernel`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Module => "module",
+            Self::Kernel => "kernel",
+        }
+    }
+}
+
+/// The refusal of the kernel mechanics in a build without them.
+pub(crate) fn kernel_unavailable() -> Refusal {
+    Refusal::new(
+        "kernel_unavailable",
+        "this build has no kernel mechanics: build fs-live-drum with the cargo feature kernel",
+    )
+}
+
 /// Complete declared instrument, numerics and observation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DrumParams {
@@ -150,6 +182,8 @@ pub struct DrumParams {
     pub contact_loss_s_m: f64,
     /// Separation at which the departing stick is caught by the player [m].
     pub catch_gap_m: f64,
+    /// The mechanics owner (numerics only: a change reuses the eigen-solve).
+    pub mechanics: Mechanics,
 }
 
 /// Hard ceiling on retained head coordinates (both heads together): the
@@ -190,6 +224,7 @@ impl Default for DrumParams {
             full_scale_pa: 400.0,
             contact_loss_s_m: 0.0,
             catch_gap_m: 0.005,
+            mechanics: Mechanics::Module,
         }
     }
 }
@@ -301,6 +336,13 @@ impl DrumParams {
                 "full_scale_pa" => self.full_scale_pa = scalar(k, value)?,
                 "contact_loss_s_m" => self.contact_loss_s_m = scalar(k, value)?,
                 "catch_gap_m" => self.catch_gap_m = scalar(k, value)?,
+                "mechanics" => {
+                    self.mechanics = match value {
+                        Value::Text(name) if name == "module" => Mechanics::Module,
+                        Value::Text(name) if name == "kernel" => Mechanics::Kernel,
+                        _ => return Err(bad("mechanics must be \"module\" or \"kernel\"")),
+                    };
+                }
                 _ => {
                     return Err(Refusal::new(
                         "unknown_parameter",
@@ -369,6 +411,17 @@ impl DrumParams {
         }
         if !self.catch_gap_m.is_finite() || !(0.0005..=0.05).contains(&self.catch_gap_m) {
             return Err(bad("catch_gap_m must lie in 0.0005..=0.05 m"));
+        }
+        if self.mechanics == Mechanics::Kernel {
+            if !cfg!(feature = "kernel") {
+                return Err(kernel_unavailable());
+            }
+            if self.contact_loss_s_m != 0.0 {
+                return Err(Refusal::new(
+                    "kernel_refused",
+                    "the kernel mechanics' contact (fs-dcontact ContactInterface) has no heat port, so it admits no Hunt-Crossley loss: contact_loss_s_m must be 0",
+                ));
+            }
         }
         Ok(())
     }
@@ -451,7 +504,7 @@ impl DrumParams {
                 "\"band_low_hz\":{},\"band_high_hz\":{},\"substeps\":{},",
                 "\"gas\":{},",
                 "\"mic_batter_m\":{},\"mic_resonant_m\":{},\"full_scale_pa\":{},",
-                "\"contact_loss_s_m\":{},\"catch_gap_m\":{}}}"
+                "\"contact_loss_s_m\":{},\"catch_gap_m\":{},\"mechanics\":{}}}"
             ),
             n(self.radius_m), n(self.depth_m),
             n(self.batter.thickness_m), n(self.resonant.thickness_m),
@@ -464,7 +517,7 @@ impl DrumParams {
             n(self.band_low_hz), n(self.band_high_hz), self.substeps,
             json::string(self.atmosphere.declaration()),
             json::numbers(&self.mic_batter_m), json::numbers(&self.mic_resonant_m), n(self.full_scale_pa),
-            n(self.contact_loss_s_m), n(self.catch_gap_m),
+            n(self.contact_loss_s_m), n(self.catch_gap_m), json::string(self.mechanics.name()),
         )
     }
 }
@@ -586,6 +639,31 @@ mod tests {
         }
         let p = d.overlay_json("{\"substeps\":1,\"band_high_hz\":22000}").unwrap();
         assert_eq!(p.validate().unwrap_err().code, "nyquist_guard");
+    }
+
+    #[test]
+    fn kernel_mechanics_need_the_feature_and_no_contact_loss() {
+        let d = DrumParams::default();
+        let kernel = d.overlay_json("{\"mechanics\":\"kernel\"}").unwrap();
+        assert_eq!(kernel.mechanics, Mechanics::Kernel);
+        assert!(kernel.same_structure(&d));
+        assert_eq!(d.overlay_json(&kernel.to_json()).unwrap(), kernel);
+        let lossy = kernel.overlay_json("{\"contact_loss_s_m\":0.1}").unwrap();
+        if cfg!(feature = "kernel") {
+            kernel.validate().unwrap();
+            assert_eq!(lossy.validate().unwrap_err().code, "kernel_refused");
+        } else {
+            assert_eq!(kernel.validate().unwrap_err().code, "kernel_unavailable");
+            assert_eq!(lossy.validate().unwrap_err().code, "kernel_unavailable");
+        }
+        assert_eq!(
+            d.overlay_json("{\"mechanics\":\"fast\"}").unwrap_err().code,
+            "bad_parameter"
+        );
+        assert_eq!(
+            d.overlay_json("{\"mechanics\":1}").unwrap_err().code,
+            "bad_parameter"
+        );
     }
 
     #[test]

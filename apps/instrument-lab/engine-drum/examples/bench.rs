@@ -3,6 +3,8 @@
 //!   bench info   [params_json]                      frequencies, build time
 //!   bench trace  <steps> <speed> <x> <y>            500 kHz CSV in the reference's columns
 //!   bench rt     [params_json]                      real-time factor per substeps
+//!                                                   ({"mechanics":"kernel"} times the kernel image;
+//!                                                   build with --features kernel)
 //!   bench conv   [params_json]                      pressure deviation per substeps vs 16
 //!   bench rearm  [params_json]                      launch/catch recompile cost
 //!   bench wav    <out.f32> <seconds> [params_json]  raw float32 mono of the batter microphone
@@ -10,9 +12,11 @@
 //! Wall-clock timing lives ONLY here (std::time is not available in the wasm path).
 use fs_couple::modal_acoustic_time::ModalAcousticState;
 use fs_exec::CancelGate;
+#[cfg(feature = "kernel")]
+use fs_live_drum::engine::compile_graph;
 use fs_live_drum::engine::{Voice, compile_system};
 use fs_live_drum::instrument::{Instrument, LAUNCH_GAP_M};
-use fs_live_drum::{DrumParams, LiveDrumCore};
+use fs_live_drum::{DrumParams, LiveDrumCore, Mechanics};
 use std::io::Write;
 use std::time::Instant;
 
@@ -88,7 +92,7 @@ fn trace(args: &[String]) -> Result<(), Error> {
 fn rt(arg: Option<&String>) -> Result<(), Error> {
     let p = params(arg)?;
     let inst = Instrument::build(p)?;
-    println!("modes: batter={} resonant={}", inst.heads[0].mode_count(), inst.heads[1].mode_count());
+    println!("mechanics={} modes: batter={} resonant={}", inst.params.mechanics.name(), inst.heads[0].mode_count(), inst.heads[1].mode_count());
     println!("substeps,scenario,audio_s,wall_s,realtime_factor,steps_per_s,ns_per_step,stick_step_fraction,contact_step_fraction,peak_pa,balance_residual_j");
     for substeps in [16, 8, 4, 2, 1] {
         if inst.params.band_high_hz / (48_000.0 * substeps as f64) >= 0.45 { continue; }
@@ -159,18 +163,33 @@ fn rearm(arg: Option<&String>) -> Result<(), Error> {
     let root = inst.stick.effective_mass_kg.sqrt();
     let tip = ModalAcousticState { displacement_m_sqrt_kg: -LAUNCH_GAP_M * root, velocity_m_sqrt_kg_per_s: 2.0 * root };
     let rate = inst.params.mechanical_rate_hz();
+    // The recompile the voice's mechanics run at a launch (with the stick) or a catch.
+    let recompile = |stick: Option<(ModalAcousticState, &[f64])>| -> Result<(), Error> {
+        match inst.params.mechanics {
+            Mechanics::Module => {
+                std::hint::black_box(compile_system(&inst, rate, &rest, stick, &gate)?);
+            }
+            #[cfg(feature = "kernel")]
+            Mechanics::Kernel => {
+                std::hint::black_box(compile_graph(&inst, rate, &rest, stick, &gate)?);
+            }
+            #[cfg(not(feature = "kernel"))]
+            Mechanics::Kernel => return Err("kernel mechanics need --features kernel".into()),
+        }
+        Ok(())
+    };
     let n = 2000;
     let start = Instant::now();
-    for _ in 0..n { std::hint::black_box(compile_system(&inst, rate, &rest, Some((tip, &row)), &gate)?); }
+    for _ in 0..n { recompile(Some((tip, &row)))?; }
     let with = start.elapsed().as_secs_f64() / f64::from(n);
     let start = Instant::now();
-    for _ in 0..n { std::hint::black_box(compile_system(&inst, rate, &rest, None, &gate)?); }
+    for _ in 0..n { recompile(None)?; }
     let without = start.elapsed().as_secs_f64() / f64::from(n);
     let start = Instant::now();
     for _ in 0..n { std::hint::black_box(inst.batter_shapes_at([0.06, 0.01])?); }
     let shapes = start.elapsed().as_secs_f64() / f64::from(n);
-    println!("modes={} launch_recompile_us={:.2} catch_recompile_us={:.2} strike_row_us={:.2}",
-        n0 + n1, with * 1e6, without * 1e6, shapes * 1e6);
+    println!("mechanics={} modes={} launch_recompile_us={:.2} catch_recompile_us={:.2} strike_row_us={:.2}",
+        inst.params.mechanics.name(), n0 + n1, with * 1e6, without * 1e6, shapes * 1e6);
     Ok(())
 }
 
@@ -179,9 +198,10 @@ fn wav(args: &[String]) -> Result<(), Error> {
     let seconds: f64 = args.get(1).ok_or("seconds")?.parse()?;
     let p = params(args.get(2))?;
     let frames = (seconds * 48_000.0) as usize;
+    let full_scale_pa = p.full_scale_pa;
     let (a, _, ledger) = render(p, frames, &[(0, [0.06, 0.01], 2.0)])?;
     let mut file = std::fs::File::create(path)?;
-    for v in &a { file.write_all(&((v / p.full_scale_pa) as f32).to_le_bytes())?; }
+    for v in &a { file.write_all(&((v / full_scale_pa) as f32).to_le_bytes())?; }
     eprintln!("wrote {frames} float32 frames; peak_pa={:.4}; ledger={ledger:?}", a.iter().fold(0.0_f64, |m, v| m.max(v.abs())));
     Ok(())
 }

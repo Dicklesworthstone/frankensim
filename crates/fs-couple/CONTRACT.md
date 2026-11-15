@@ -17,6 +17,27 @@
 
 ## New sections (newest first)
 
+### The linear impact description on the composition kernel (`render::plate::impact::graph`, feature `kernel`)
+
+`ImpactGraph::new` takes the inputs `LinearImpactSystem::new` takes (bodies, contacts, volumes, config) and a sink temperature, declares them as a graph on fs-system
+and seals it. A body that no volume touches is an fs-nlmodal `ModalStructure`. Each set of bodies that volumes join is one fs-system `ExactPortHamiltonianComponent`, with
+storage `diag(omega^2) + sum k c c^T` over its interleaved `(q, p)` (`k = K A^2 / V`, `c` the signed modal areas over `A`, the module's volume spring) and each mode's rate on
+its momentum. The one contact point is an fs-dcontact `ContactInterface` on the load line between the two parts its row touches; each part takes it through its port
+`contact`, weighted by minus the row at end `a` and plus the row at end `b`, and every part publishes its ends. Each part's heat goes to a sink at the given temperature.
+`step` reads its frame from the kernel's ledger: stored energy is the build's plus the ledger's stored change, dissipation the sinks' heat over the step, the residual the
+step's change of the uncorrected first-law residual. `state` holds the interleaved coordinates in the description's order, so a caller rebuilds (a catch, a launch) from it
+as it does from the module's.
+
+Refused by name: a nonlinear body; more than one contact point (distributed or several contacts); a contact row that does not join exactly two parts; a contact with
+internal loss (`ContactInterface` has no heat port); a sink temperature that is not positive; a step the kernel shortens. Not declared: dampers, external generalized
+forces, the module's energy ceiling. Feature `kernel` (`dep:fs-system`, `fs-system/phs`, `fs-dcontact/component`) is off by default; a build without it compiles none of this.
+
+Evidence (`tests/impact_graph.rs`, required-features `kernel`): the second graph of `tests/drum_strike_graph.rs` (a stick strikes a two-mode head joined by its air to a
+second two-mode head), here declared from the module's own inputs. First touch at sample 11, 4 strikes; every coordinate within -270.84 dB of its full scale of the module's
+run (the hand-built graph's figure); stored energy within 8.3e-17 J of the module's (start 1.28e-2 J), summed residual -4.3e-18 J, heat equal to the module's to ten digits;
+after a catch, both rebuilt from their own head states, within -270.01 dB; no allocation in a warm step; the refusals above. Used by engine-drum's `"mechanics":"kernel"`.
+Not covered: radiation, several contacts, dampers, speed (engine-drum's bench).
+
 ### The nonlinear bore with its own gas (`bore_gas` beside `mouth_load`)
 
 A card may now give the nonlinear bore (`bore nonlinear`) a gas of its own inside and a different room outside (MB 24783). `bore_gas`, the gas the bore, cup and lip hold,

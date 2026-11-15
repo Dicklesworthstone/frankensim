@@ -52,6 +52,11 @@ export interface DrumParams {
   contact_loss_s_m: number;
   /** Separation at which the departing stick is caught [m]. */
   catch_gap_m: number;
+  /** Mechanics owner: 'module' (the prepared linear impact engine) or 'kernel' (the same
+   *  description on the composition kernel; native builds with the cargo feature `kernel`
+   *  only, so the browser build refuses it with `kernel_unavailable`; it also refuses a
+   *  nonzero `contact_loss_s_m` with `kernel_refused`). Numerics only: the eigen-solve is reused. */
+  mechanics: 'module' | 'kernel';
 }
 
 /** Write-only convenience accepted by `configure`: sets both heads' damping ratio. */
