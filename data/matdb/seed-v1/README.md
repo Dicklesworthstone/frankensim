@@ -3348,6 +3348,52 @@ Grease-joint references:
 - <https://ntrs.nasa.gov/citations/20260008001>
 - <https://ntrs.nasa.gov/api/citations/20260008001/downloads/ThermalControlProtection_38_TFAWS_Paper.pdf>
 
+## 6061-T6 bare-joint vacuum contact resistance tranche (Atkins 1964)
+
+These are the first seed packs whose `area-specific-thermal-contact-resistance` changes
+with contact pressure. They are also the first that a `dry-contact` joint binding resolves:
+their validity axes are `normal_pressure` and `T`, the two axes that binding queries.
+
+Each ordered card is one bare joint between two lathe-cut faces of 6061-T6 aluminum
+cylinders (5.08 cm diameter), tested in vacuum:
+
+| Pack | Faces (Table I samples) | RMS roughness | p [kPa] | R'' at the pressure ends [m^2 K/W] | T [K] |
+|---|---|---|---|---|---|
+| `atkins-1964-al6061t6-lathe-0p30um-vacuum-interface/` | 13 and 14 | 0.30 um | 70..7696 | `6.4267e-4`..`3.0946e-5` | 289.35..305.85 |
+| `atkins-1964-al6061t6-lathe-1p4um-vacuum-interface/` | 15 and 16 | 1.4 um | 131..7873 | `5.0025e-4`..`3.4829e-5` | 305.45..322.95 |
+
+- **Source.** Table II of the Atkins NAS 8-5207 report, pages 7-60 of the proceedings of the
+  1964 NASA Conference on Thermal Joint Conductance (NASA-TM-X-56300). The apparatus is a
+  bell-jar vacuum at 10^-4 mm Hg or better. Load comes from a bellows and is read on a
+  strain-gage load washer. Four thermocouples per cylinder are extrapolated to the interface.
+- **Curve.** The six knots of each card are the rising-load runs (23-28 and 61-66). Each knot is
+  1/h_c to five significant figures, which gives back the printed h_c. The unloading runs that
+  follow (29-31 and 67-69) are not in the curves.
+- **Validity.**
+  - `normal_pressure` spans the rising-load runs. `T` spans their interface temperatures T1
+    and T2.
+  - Between knots the resistance is linear in pressure. That choice is the packs', not the
+    source's: the source fits h = A + B P^c in two pressure regimes, and that law is not encoded.
+  - A scene's pressure band and temperature range must lie inside both axes, or the binding
+    refuses.
+- **Uncertainty.** Unstated. The source holds heater heat leak to 0.5 %, checks the heat-flow
+  measurement against an ARMCO-iron conductivity within 2 % and gives a nominal +/-0.3 C
+  thermocouple tolerance, but it states no uncertainty for h_c.
+- **What the cards do not cover.**
+  - Gas conduction. A joint in air conducts more at the same pressure.
+  - Unloading and repeated load cycles. The source's unloading runs do not retrace its loading rows.
+  - Other roughness, flatness, alloys, tempers or temperatures.
+  - The source's SI vacuum figure, 1.33 x 10^-1 N/m2, does not equal its 10^-4 mm Hg
+    (1.33 x 10^-2 Pa). The cards use the mm Hg statement.
+
+NTRS records the proceedings as Public Use Permitted, with no third-party material. The
+packs carry attributed factual rows only.
+
+Bare-joint references:
+
+- <https://ntrs.nasa.gov/citations/19660028516>
+- <https://ntrs.nasa.gov/api/citations/19660028516/downloads/19660028516.pdf>
+
 To compile the sources into canonical runtime packs:
 
 ```bash
@@ -3486,6 +3532,10 @@ cargo run -p xtask -- matdb-pack \
 cargo run -p xtask -- matdb-pack \
   --manifest data/matdb/seed-v1/chang-2026-ss304-braycote601ef-vacuum-interface/manifest.tsv \
   --out /path/to/chang-2026-ss304-braycote601ef-vacuum-interface.fsintpk
+
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/atkins-1964-al6061t6-lathe-0p30um-vacuum-interface/manifest.tsv \
+  --out /path/to/atkins-1964-al6061t6-lathe-0p30um-vacuum-interface.fsintpk
 ```
 
 ## No-claim boundary

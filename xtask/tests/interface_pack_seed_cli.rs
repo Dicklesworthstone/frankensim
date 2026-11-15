@@ -8,7 +8,8 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fs_matdb::{
-    NormalizedInterfacePack, PropertyValue, QueryPoint, SelectionPolicy, UncertaintyModel,
+    InterpolationPolicy, MatDbError, MaterialAnswer, NormalizedInterfacePack, PropertyValue,
+    QueryPoint, SelectionPolicy, UncertaintyModel,
 };
 use fs_qty::Dims;
 
@@ -67,6 +68,47 @@ const CHANG_2026_SS304_GREASE_JOINTS: [GreaseJoint; 4] = [
         resistance: 4.310e-4,
         kelvin: (299.95, 313.15),
         thickness_m: 50.5e-6,
+    },
+];
+/// One rising-load branch of a bare 6061-T6 joint in vacuum, Atkins (NASA-TM-X-56300, 1964).
+struct AtkinsJoint {
+    pack_id: &'static str,
+    texture_frames: (&'static str, &'static str),
+    /// Source Table II rows: apparent pressure [kN/m^2] and printed h_c [W/(m^2 C)].
+    printed: [(u32, u32); 6],
+    /// Span of the interface temperatures T1 and T2 over those rows [K].
+    kelvin: (f64, f64),
+    /// Resistance at 1 MPa, linear between the two bracketing rows [m^2 K/W].
+    at_one_megapascal: f64,
+}
+const ATKINS_1964_AL6061T6_VACUUM_JOINTS: [AtkinsJoint; 2] = [
+    AtkinsJoint {
+        pack_id: "atkins-1964-al6061t6-lathe-0p30um-vacuum-interface",
+        texture_frames: ("atkins-1964-sample-13-face", "atkins-1964-sample-14-face"),
+        printed: [
+            (70, 1556),
+            (313, 3164),
+            (1123, 4408),
+            (2191, 5419),
+            (5208, 15773),
+            (7696, 32314),
+        ],
+        kelvin: (289.35, 305.85),
+        at_one_megapascal: 2.404_051_851_851_851_8e-4,
+    },
+    AtkinsJoint {
+        pack_id: "atkins-1964-al6061t6-lathe-1p4um-vacuum-interface",
+        texture_frames: ("atkins-1964-sample-15-face", "atkins-1964-sample-16-face"),
+        printed: [
+            (131, 1999),
+            (219, 3431),
+            (1095, 5282),
+            (2193, 8071),
+            (5465, 17244),
+            (7873, 28712),
+        ],
+        kelvin: (305.45, 322.95),
+        at_one_megapascal: 2.003_968_264_840_182_5e-4,
     },
 ];
 /// The resistance property the conduction solve and its `tim` joint binding resolve.
@@ -1026,6 +1068,135 @@ fn g3_cli_compiles_committed_chang_2026_ss304_grease_joints() {
             assert!(
                 at(kelvin, thickness).is_err(),
                 "{pack_id}: resolved outside the tested joint at {kelvin} K, {thickness:?} m"
+            );
+        }
+        assert!(decisions.contains("\"reason_code\":\"interface_context_admitted\""));
+    }
+}
+
+/// The query a `dry-contact` joint binding forms (fs-project `interface_state::query_point`):
+/// axis `T` and, when given, `normal_pressure`.
+fn dry_contact_resistance(
+    pack: &NormalizedInterfacePack,
+    kelvin: f64,
+    pascal: Option<f64>,
+) -> Result<MaterialAnswer, MatDbError> {
+    let point = QueryPoint::new().with("T", kelvin).expect("finite T");
+    let point = match pascal {
+        Some(pascal) => point
+            .with("normal_pressure", pascal)
+            .expect("finite pressure"),
+        None => point,
+    };
+    pack.card().claims().query(
+        CONTACT_RESISTANCE_PROPERTY,
+        &point,
+        SelectionPolicy::SingleClaimOnly,
+    )
+}
+
+/// Each bare-joint pack holds one resistance curve over normal pressure whose knots are the
+/// source's rising-load rows (1/h_c to five significant figures, which gives back the printed
+/// h_c), and the query a dry-contact binding forms (axes `T` and `normal_pressure`, fs-project
+/// `interface_state::query_point`) resolves it inside the tested pressures and temperatures and
+/// refuses it outside them.
+#[test]
+fn g3_cli_compiles_committed_atkins_1964_al6061t6_vacuum_joints() {
+    for &AtkinsJoint {
+        pack_id,
+        texture_frames,
+        printed,
+        kelvin: (low_k, high_k),
+        at_one_megapascal,
+    } in &ATKINS_1964_AL6061T6_VACUUM_JOINTS
+    {
+        let (pack, decisions) =
+            compile_twice(&format!("data/matdb/seed-v1/{pack_id}/manifest.tsv"));
+
+        assert_eq!(pack.pack_id(), pack_id);
+        for surface in [pack.card().surface_a(), pack.card().surface_b()] {
+            assert_eq!(surface.material.chemistry, "6061-T6 aluminum alloy");
+        }
+        assert_eq!(
+            (
+                pack.card().surface_a().texture_frame.as_str(),
+                pack.card().surface_b().texture_frame.as_str()
+            ),
+            texture_frames
+        );
+        assert_eq!(pack.card().medium(), "dry-contact");
+        assert_eq!(pack.card().third_body(), None);
+        assert_eq!(pack.card().environment(), "vacuum-1e-4-mmHg-or-better");
+        assert_eq!(
+            pack.card().history(),
+            "ascending-load-branch-of-one-recorded-load-cycle"
+        );
+        assert_eq!(pack.claims_pack().claims().claim_count(), 1);
+
+        let claims = pack.card().claims_for(CONTACT_RESISTANCE_PROPERTY);
+        assert_eq!(claims.len(), 1, "{pack_id}: one resistance claim");
+        let claim = claims[0].1;
+        let PropertyValue::Curve {
+            abscissa,
+            abscissa_dims,
+            knots,
+            dims,
+        } = &claim.value
+        else {
+            panic!("{pack_id}: the resistance is not a curve");
+        };
+        assert_eq!(abscissa, "normal_pressure");
+        assert_eq!(*abscissa_dims, Dims([-1, 1, -2, 0, 0, 0]), "{pack_id}: Pa");
+        assert_eq!(*dims, Dims([0, -1, 3, 1, 0, 0]), "{pack_id}: m^2 K/W");
+        assert_eq!(knots.len(), printed.len());
+        for (&(pascal, resistance), (kilopascal, conductance)) in knots.iter().zip(printed) {
+            assert_eq!(pascal.to_bits(), (f64::from(kilopascal) * 1000.0).to_bits());
+            let five_figures: f64 = format!("{:.4e}", 1.0 / f64::from(conductance))
+                .parse()
+                .expect("formatted resistance parses");
+            assert_eq!(resistance.to_bits(), five_figures.to_bits(), "{pack_id}");
+            assert_eq!(
+                (1.0 / resistance).round().to_bits(),
+                f64::from(conductance).to_bits(),
+                "{pack_id}: the knot does not give back the printed h_c"
+            );
+        }
+        assert_eq!(claim.interpolation, InterpolationPolicy::LinearInside);
+        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+        let (first_pa, last_pa) = (knots[0].0, knots[knots.len() - 1].0);
+        assert_eq!(
+            claim.validity.bound("normal_pressure"),
+            Some((first_pa, last_pa))
+        );
+        assert_eq!(claim.validity.bound("T"), Some((low_k, high_k)));
+        assert_eq!(claim.validity.bounds().len(), 2);
+
+        let at = |kelvin: f64, pascal: Option<f64>| dry_contact_resistance(&pack, kelvin, pascal);
+        let mid_k = 0.5 * (low_k + high_k);
+        for &(pascal, resistance) in knots {
+            let answer = at(mid_k, Some(pascal))
+                .unwrap_or_else(|error| panic!("{pack_id} at {pascal} Pa: {error:?}"));
+            assert_eq!(answer.evidence.value.value.to_bits(), resistance.to_bits());
+        }
+        for kelvin in [low_k, high_k] {
+            let answer = at(kelvin, Some(1.0e6))
+                .unwrap_or_else(|error| panic!("{pack_id} at 1 MPa, {kelvin} K: {error:?}"));
+            let value = answer.evidence.value.value;
+            assert!(
+                (value - at_one_megapascal).abs() <= 1e-12 * at_one_megapascal,
+                "{pack_id}: {value} at 1 MPa"
+            );
+        }
+        for (kelvin, pascal) in [
+            (mid_k, Some(first_pa - 1.0)),
+            (mid_k, Some(last_pa + 1.0)),
+            (low_k - 1.0, Some(1.0e6)),
+            (high_k + 1.0, Some(1.0e6)),
+            (mid_k, None),
+        ] {
+            assert!(
+                at(kelvin, pascal).is_err(),
+                "{pack_id}: resolved outside the tested joint at {kelvin} K, {pascal:?} Pa"
             );
         }
         assert!(decisions.contains("\"reason_code\":\"interface_context_admitted\""));
