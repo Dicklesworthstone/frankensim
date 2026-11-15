@@ -6,7 +6,10 @@
 //!                      Official out-of-process quarantined adapter binaries live OUTSIDE this
 //!                      graph per ruling ADPT-2026-07 (fs-govern::adapter_policy); the ruling
 //!                      legalizes a distribution channel, never a dependency edge.
-//! - `check-contracts`— every workspace `fs-*` crate ships a CONTRACT.md with required sections.
+//! - `check-contracts`— every workspace `fs-*` crate ships a CONTRACT.md with required sections;
+//!   its index links exactly the `contracts/part-NN.md` files present, and no contract file is
+//!   cut below 80% of its size at `--contract-base <rev>` (default `HEAD~1`) unless the text
+//!   moved to another of the crate's contract files (bead rc-1109 .2.1, `contract_layout.rs`).
 //! - `check-unsafe`   — unsafe code only in registered capsules (<300 lines, SAFETY.md).
 //! - `check-powi`     — no build-mode-dependent `f64::powi` in deterministic paths (bead 4xnt).
 //! - `check-libm`     — cross-ISA-claiming crates route transcendentals via fs_math::det (bead lyms).
@@ -58,6 +61,7 @@ pub mod constellation_admission;
 mod constellation_assessment;
 mod constellation_cleanliness;
 mod constellation_drift;
+mod contract_layout;
 mod critical_path;
 mod depgraph;
 mod enumeration;
@@ -8599,7 +8603,21 @@ fn main() -> ExitCode {
     let (violations, checks): (Vec<Violation>, Vec<&str>) = match cmd.as_str() {
         "check-layers" => (check_layers(&manifests), vec!["layers"]),
         "check-deps" => (check_deps(&manifests), vec!["dependency-policy"]),
-        "check-contracts" => (check_contracts(&manifests), vec!["contracts"]),
+        "check-contracts" => {
+            let mut v = check_contracts(&manifests);
+            let (layout, notes) =
+                contract_layout::check(&root, &manifests, &contract_layout::base_from_args());
+            v.extend(layout);
+            policy_notes = notes;
+            (
+                v,
+                vec![
+                    "contracts",
+                    contract_layout::PARTS_CHECK,
+                    contract_layout::SHRINK_CHECK,
+                ],
+            )
+        }
         "check-unsafe" => (check_unsafe(&root), vec!["unsafe-capsules"]),
         "check-powi" => (check_powi(&root), vec!["powi-determinism"]),
         "check-libm" => (check_libm(&root), vec!["libm-determinism"]),
@@ -8774,12 +8792,18 @@ fn main() -> ExitCode {
             let suite_report = suite_receipt::check(&root);
             v.extend(suite_report.0);
             policy_notes.extend(suite_report.1);
+            let contract_report =
+                contract_layout::check(&root, &manifests, &contract_layout::base_from_args());
+            v.extend(contract_report.0);
+            policy_notes.extend(contract_report.1);
             (
                 v,
                 vec![
                     "layers",
                     "dependency-policy",
                     "contracts",
+                    contract_layout::PARTS_CHECK,
+                    contract_layout::SHRINK_CHECK,
                     "unsafe-capsules",
                     "powi-determinism",
                     "semantic-identities",
