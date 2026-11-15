@@ -152,6 +152,30 @@ fn tetrahedra() -> ConductionMesh {
     )
     .unwrap()
 }
+/// `tetrahedra()` plus a third tetrahedron C (vertices 8..11) whose face
+/// 8, 9, 10 coincides with A's face 0, 1, 3 on the plane y = 0. The mesh has
+/// two joints: A|B on z = 0 (A's 0, 1, 2 against B's 4, 5, 6) and A|C on
+/// y = 0. Vertices 2 and 4..6 take part in A|B only.
+fn three_tetrahedra() -> ConductionMesh {
+    ConductionMesh::new(
+        TetComplex::from_tets(12, vec![[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11]]),
+        vec![
+            [0., 0., 0.],
+            [1., 0., 0.],
+            [0., 1., 0.],
+            [0., 0., -1.],
+            [0., 0., 0.],
+            [1., 0., 0.],
+            [0., 1., 0.],
+            [0., 0., 1.],
+            [0., 0., 0.],
+            [1., 0., 0.],
+            [0., 0., -1.],
+            [0., -1., 0.],
+        ],
+    )
+    .unwrap()
+}
 fn slabs(right: [usize; 3]) -> (ConductionMesh, usize) {
     let (left, mut positions) = box_grid([1, 1, 1], [1.0; 3]);
     let split = positions.len();
@@ -914,67 +938,94 @@ fn original_source_cell_tangent_allows_melting_to_begin_at_zero_fraction() {
 #[test]
 fn strict_local_h_actions_refuse_caloric_corners_for_temperature_only_and_fixed_contacts() {
     with_cx(|cx| {
+        let cards = [common::bulk("cold"), common::bulk("hot")];
+        let curves = [chart(&cards[0], 400.), chart(&cards[1], 500.)];
+        let card = source(&cards, 1., false, false, 1.);
+        let point = point();
+        let law = |pairs| {
+            TemperatureContact::new_two_sided(
+                "joint",
+                pairs,
+                &card,
+                &point,
+                ["aT", "bT"],
+                SelectionPolicy::SingleClaimOnly,
+            )
+            .unwrap()
+        };
+        // In both cases the corner state puts the checked contact's vertices
+        // on a kink of the caloric curve (h = 0) and must be refused; the
+        // interior state keeps every contact vertex strictly inside its
+        // plateau, leaves nonparticipating apexes on a kink, and is admitted
+        // with a zero response to a uniform h change.
+        let check = |mesh: &ConductionMesh,
+                     boundary: &ThermalBoundary,
+                     contacts: &TemperatureContacts<'_, '_>,
+                     corner: &[f64],
+                     interior: &[f64]| {
+            let engine = engine(cx, mesh, &curves, 4);
+            assert!(
+                contacts
+                    .linearize_enthalpy(cx, boundary, &engine, corner, 10000)
+                    .is_err()
+            );
+            let linear = contacts
+                .linearize_enthalpy(cx, boundary, &engine, interior, 10000)
+                .unwrap();
+            let uniform = vec![1.; mesh.vertex_count()];
+            let response = linear.apply_enthalpy(cx, &uniform).unwrap();
+            assert_eq!(response, vec![0.; uniform.len()]);
+        };
+
+        // Temperature only: the one joint of two tetrahedra is a temperature law.
         let mesh = tetrahedra();
         let boundary = ThermalBoundaryBuilder::new(&mesh)
             .adiabatic_remainder()
             .finish()
             .unwrap();
-        let cards = [common::bulk("cold"), common::bulk("hot")];
-        let curves = [chart(&cards[0], 400.), chart(&cards[1], 500.)];
-        let engine = engine(cx, &mesh, &curves, 4);
-        let card = source(&cards, 1., false, false, 1.);
-        let point = point();
-        for variable in [false, true] {
-            let pairs = ThermalInterfaces::coincident_face_pairs(&mesh).unwrap();
-            let (fixed, changing) = if variable {
-                (
-                    vec![],
-                    vec![
-                        TemperatureContact::new_two_sided(
-                            "joint",
-                            pairs,
-                            &card,
-                            &point,
-                            ["aT", "bT"],
-                            SelectionPolicy::SingleClaimOnly,
-                        )
-                        .unwrap(),
-                    ],
-                )
-            } else {
-                (
-                    vec![
-                        InterfaceSurface::new(
-                            "joint",
-                            pairs,
-                            InterfaceResistance::from_card(
-                                "joint",
-                                &card,
-                                &point,
-                                SelectionPolicy::SingleClaimOnly,
-                            )
-                            .unwrap(),
-                        )
-                        .unwrap(),
-                    ],
-                    vec![],
-                )
-            };
-            let contacts =
-                TemperatureContacts::new(cx, &mesh, &boundary, fixed, changing, 10000).unwrap();
-            let corner = [0., 0., 0., 25., 60., 60., 60., 60.];
-            assert!(
-                contacts
-                    .linearize_enthalpy(cx, &boundary, &engine, &corner, 10000)
-                    .is_err()
-            );
-            // Nonparticipating apex corners do not invalidate the local contact
-            // response: every contact trace lies strictly inside its plateau.
-            let interior = [25., 25., 25., 0., 60., 60., 60., 0.];
-            let linear = contacts
-                .linearize_enthalpy(cx, &boundary, &engine, &interior, 10000)
+        let pairs = ThermalInterfaces::coincident_face_pairs(&mesh).unwrap();
+        let contacts =
+            TemperatureContacts::new(cx, &mesh, &boundary, vec![], vec![law(pairs)], 10000)
                 .unwrap();
-            assert_eq!(linear.apply_enthalpy(cx, &[1.; 8]).unwrap(), vec![0.; 8]);
-        }
+        check(
+            &mesh,
+            &boundary,
+            &contacts,
+            &[0., 0., 0., 25., 60., 60., 60., 60.],
+            &[25., 25., 25., 0., 60., 60., 60., 0.],
+        );
+
+        // Fixed: a contact set needs at least one temperature law (refused
+        // without one since 4448f86f41), so the fixed joint A|B shares the
+        // mesh with a temperature law on A|C. The corner is put only on B's
+        // vertices 4..6, which belong to the fixed joint alone, so the
+        // refusal is the fixed member's own check.
+        let mesh = three_tetrahedra();
+        let boundary = ThermalBoundaryBuilder::new(&mesh)
+            .adiabatic_remainder()
+            .finish()
+            .unwrap();
+        let on_z0 = |pair: &InterfaceFacePair| {
+            let face = &mesh.boundary()[pair.side_a];
+            face.centroid[2].abs() < 1e-12
+        };
+        let (fixed, changing): (Vec<_>, Vec<_>) = ThermalInterfaces::coincident_face_pairs(&mesh)
+            .unwrap()
+            .into_iter()
+            .partition(on_z0);
+        assert_eq!((fixed.len(), changing.len()), (1, 1));
+        let policy = SelectionPolicy::SingleClaimOnly;
+        let resistance = InterfaceResistance::from_card("fixed", &card, &point, policy).unwrap();
+        let fixed = vec![InterfaceSurface::new("fixed", fixed, resistance).unwrap()];
+        let changing = vec![law(changing)];
+        let contacts =
+            TemperatureContacts::new(cx, &mesh, &boundary, fixed, changing, 10000).unwrap();
+        check(
+            &mesh,
+            &boundary,
+            &contacts,
+            &[25., 25., 25., 25., 0., 0., 0., 60., 60., 60., 60., 60.],
+            &[25., 25., 25., 25., 60., 60., 60., 0., 60., 60., 60., 0.],
+        );
     });
 }
