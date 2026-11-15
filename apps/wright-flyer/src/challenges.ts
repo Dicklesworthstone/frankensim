@@ -22,19 +22,20 @@ export const CHALLENGE_PRESETS: readonly ChallengePreset[] = [
   {
     id: "assisted-first-flight",
     title: "ASSISTED FIRST FLIGHT",
-    description: "Fly the first Dec-17 ensemble with the bounded 30% canard assist.",
+    description: "Fly flight 1's gust seed with the bounded 30% canard assist.",
     selection: { mode: "human", site: "kdh", assist: true, flight: 1 },
   },
   {
     id: "authentic-fourth-flight",
     title: "AUTHENTIC FOURTH FLIGHT",
-    description: "Raw human controls in the fourth-flight wind ensemble; no outcome is promised.",
+    description:
+      "Raw human controls on flight 4's gust seed; the 11 m/s headwind is the same for every flight. No outcome is promised.",
     selection: { mode: "human", site: "kdh", assist: false, flight: 4 },
   },
   {
     id: "modeled-fourth-flight",
     title: "MODELED PILOT · FLIGHT 4",
-    description: "Watch the registered modeled-pilot member in the fourth-flight ensemble.",
+    description: "Watch the registered modeled-pilot member on flight 4's gust seed.",
     selection: { mode: "historical", site: "kdh", assist: false, flight: 4 },
   },
   {

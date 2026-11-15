@@ -2,6 +2,7 @@
 // Scope: capability probe + honest banner, renderer seam, fixed-cadence FPS
 // meter. The sim/field workers (E5.*) and real scenes (E2.*) land later.
 
+import { AUDIO_DISCLAIMER_LABEL } from "./audio.ts";
 import { describeCapabilities, probeCapabilities } from "./capability";
 import { CHALLENGE_PRESETS, challengeQuery } from "./challenges.ts";
 import { createFlyerSceneRenderer } from "./flyerScene.ts";
@@ -154,7 +155,7 @@ function buildMenu(container: HTMLElement): void {
   card.appendChild(go);
   const keys = document.createElement("pre");
   keys.id = "wf-menu-keys";
-  keys.textContent = KEY_LINES.join("\n");
+  keys.textContent = [...KEY_LINES, `Sound: ${AUDIO_DISCLAIMER_LABEL}`].join("\n");
   card.appendChild(keys);
   const demo = document.createElement("a");
   demo.id = "wf-demo-link";

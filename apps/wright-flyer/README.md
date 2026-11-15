@@ -75,12 +75,13 @@ The menu's "1903 PILOT MODEL" and "FIXED CONTROLS" modes, and stage 1 of the gui
   (`crates/fs-flyer/tests/simloop_battery.rs`) pins this.
 - The menu and the journey caption say so (`src/menu.ts`, `src/journey.ts`).
 
-## Page text the engine on `main` does not support
+## Labels on the page
 
-- **Ground effect.** A lesson says that "the 1903 flights flew IN ground effect" (`src/lessons.ts`), but the
-  flight has none.
-- **The audio disclaimer.** `AUDIO_DISCLAIMER_LABEL` (`src/audio.ts`) is defined and tested, but the page never shows it.
-- **The landing score.** Its comment calls its sink-rate bands (1.2 and 2.5 m/s) "physics-derived"
-  (`src/landingScore.ts`); they cite no source.
-- **The wind ensemble.** The "fourth-flight wind ensemble" challenges (`src/challenges.ts`) change only the seed.
-  The headwind stays at 11 m/s.
+- **Ground effect.** The ground-effect lesson (`src/lessons.ts`) teaches the certified ground-image model. Its
+  first step also says that this page's flight is solved in free air.
+- **Sound.** The menu's key card shows `AUDIO_DISCLAIMER_LABEL` (`src/audio.ts`): synthesized sound design, not
+  an acoustic simulation.
+- **Landing score.** `src/landingScore.ts` grades the sink rate against declared bands, 1.2 and 2.5 m/s, for
+  which no source is cited. The sink rate is sin θ·u − cos θ·w from the final frame.
+- **Gust seeds.** The flight 1 and flight 4 challenges (`src/challenges.ts`) change only the gust seed. The
+  headwind is 11 m/s for every flight.

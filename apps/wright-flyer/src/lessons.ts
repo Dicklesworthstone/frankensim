@@ -118,6 +118,7 @@ export function curatedLessons(): Lesson[] {
     "ground effect raises lift at fixed alpha near the certified flat (V-06a receipt)",
     "the image system is a boundary device, not physical vorticity",
     "the 1903 flights flew IN ground effect for their whole length",
+    "this page's flight is solved in free air: its vortex lattice has no ground images",
   ];
   const anhedralClaims = [
     "the 1903 anhedral was intentional: it damps the upset a gust starts (historical flag)",
@@ -134,7 +135,11 @@ export function curatedLessons(): Lesson[] {
       title: "Ground effect at Kill Devil Hills",
       declaredClaims: groundClaims,
       steps: [
-        { title: "Free-air baseline", overlays: ["glyphs", "force-overlay"], voicedClaims: [] },
+        {
+          title: "Free-air baseline",
+          overlays: ["glyphs", "force-overlay"],
+          voicedClaims: [groundClaims[3] ?? ""],
+        },
         {
           title: "Descend toward the certified flat",
           overlays: ["ground-images", "force-overlay"],
