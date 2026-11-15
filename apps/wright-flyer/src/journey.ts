@@ -4,7 +4,9 @@
 // honest caption that stage owes the player — no third config path,
 // no outcome promises in any copy (plan Round-2 rule).
 //
-//   Stage 1 — watch a MODELED pilot fly the historical hypothesis.
+//   Stage 1 — watch a MODELED pilot attempt the historical hypothesis
+//             (on the current model it ends at the rail; fs-flyer
+//             simloop_battery pins RailEndWithoutLift for seed 1903).
 //   Stage 2 — take the controls with the bounded Training Assist.
 //   Stage 3 — authentic controls: raw mechanical instability.
 //   Stage 4 — open the existing "Why it porpoises" instrument.
@@ -27,7 +29,7 @@ export const JOURNEY_STAGES: readonly JourneyStage[] = [
     index: 1,
     url: "?sim=1&mode=historical&journey=1",
     caption:
-      "GUIDED JOURNEY 1/4 — WATCH A MODELED PILOT: a computed hypothesis of December 17, drawn wind included. Not footage.",
+      "GUIDED JOURNEY 1/4 — WATCH A MODELED PILOT: a computed hypothesis of December 17, drawn wind included. On the current model this run reaches the end of the rail without lift. Not footage.",
     prompt: "Now fly it yourself with training assist.",
   },
   {

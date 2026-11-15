@@ -68,15 +68,16 @@ The classes match the other demos:
 - **Sideslip and banked translation.**
 - **Skid contact on landing.**
 
+## The December 17 runs end on the rail
+
+The menu's "1903 PILOT MODEL" and "FIXED CONTROLS" modes, and stage 1 of the guided journey, run seed 1903.
+- With fixed controls, or with pilot member 2 or 3, that scenario ends `RailEndWithoutLift` at tick 978.
+- The test `original_dec17_reference_reports_the_corrected_rail_shortfall`
+  (`crates/fs-flyer/tests/simloop_battery.rs`) pins this.
+- The menu and the journey caption say so (`src/menu.ts`, `src/journey.ts`).
+
 ## Page text the engine on `main` does not support
 
-- **The December 17 runs do not leave the rail.**
-  - The menu offers "RECORDED CONTROLS: Watch the fixed-controls reconstruction of the December 17 run" and
-    "1903 PILOT MODEL" (`src/menu.ts`).
-  - Both use seed 1903. With fixed controls, or with pilot member 2 or 3, that scenario ends
-    `RailEndWithoutLift` at tick 978.
-  - The test `original_dec17_reference_reports_the_corrected_rail_shortfall` pins this
-    (`crates/fs-flyer/tests/simloop_battery.rs`).
 - **Ground effect.** A lesson says that "the 1903 flights flew IN ground effect" (`src/lessons.ts`), but the
   flight has none.
 - **The evidence badges.** Their header says they are "built VERBATIM from real receipt payloads"

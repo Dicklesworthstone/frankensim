@@ -106,12 +106,14 @@ export const MODE_CARDS: readonly {
   {
     mode: "historical",
     title: "1903 PILOT MODEL",
-    blurb: "Ride along with the calibrated historical-pilot family (member 3).",
+    blurb:
+      "Ride along with historical-pilot member 3. Its gains were registered before the current model; on December 17's rail this run ends without lift.",
   },
   {
     mode: "fixed",
-    title: "RECORDED CONTROLS",
-    blurb: "Watch the fixed-controls reconstruction of the December 17 run.",
+    title: "FIXED CONTROLS",
+    blurb:
+      "Fixed controls on the December 17 scenario. On the current model the run reaches the end of the rail without lift.",
   },
 ];
 

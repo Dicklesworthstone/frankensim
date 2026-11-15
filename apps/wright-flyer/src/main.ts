@@ -47,7 +47,7 @@ function buildMenu(container: HTMLElement): void {
   card.id = "wf-menu-card";
   card.innerHTML =
     `<div id="wf-menu-title">FIRST FLIGHT</div>` +
-    `<div id="wf-menu-sub">Wright Flyer · December 17, 1903 · a FrankenSim reconstruction</div>`;
+    `<div id="wf-menu-sub">Wright Flyer · December 17, 1903 · a FrankenSim model, not footage</div>`;
   const modeRow = document.createElement("div");
   modeRow.className = "wf-menu-row";
   const modeButtons = new Map<string, HTMLButtonElement>();
