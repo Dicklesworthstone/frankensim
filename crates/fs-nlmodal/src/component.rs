@@ -135,6 +135,17 @@ pub enum ModalStructureRefusal {
         /// The value refused [rad/s, or rad^2/s^2 for a loaded square].
         value: f64,
     },
+    /// A solved pencil's mode whose square is positive but not above the floor the solve can tell
+    /// from zero (its residual, or the dense solve's resolution): the stiffness does not hold
+    /// every coordinate.
+    Unresolved {
+        /// Index of the mode, in the ascending order.
+        mode: usize,
+        /// Its square [rad^2/s^2].
+        square: f64,
+        /// The floor it did not clear [rad^2/s^2].
+        floor: f64,
+    },
     /// A matrix does not hold one entry per pair of modes.
     MatrixShape {
         /// Entries expected.
@@ -200,6 +211,15 @@ impl core::fmt::Display for ModalStructureRefusal {
             Self::Frequency { mode, value } => write!(
                 f,
                 "mode {mode} has the frequency value {value}, which is not positive and finite"
+            ),
+            Self::Unresolved {
+                mode,
+                square,
+                floor,
+            } => write!(
+                f,
+                "mode {mode} has the squared frequency {square}, not above {floor}, what the \
+                 solve tells from zero: the stiffness does not hold every coordinate"
             ),
             Self::MatrixShape { expected, found } => write!(
                 f,

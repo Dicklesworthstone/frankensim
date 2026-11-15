@@ -12,6 +12,8 @@ mod checkpoints;
 mod adaptive_networks;
 #[path = "system_command/timeline.rs"]
 mod timeline;
+#[path = "system_command/modal_network.rs"]
+mod modal_network;
 
 fn example(name: &str) -> String {
     format!(

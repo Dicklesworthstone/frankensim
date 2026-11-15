@@ -210,13 +210,25 @@ Elements (ports in brackets; SI units in every field name):
                  kernel wires their end inputs a.end and b.end. Reports
                  slip_m_s, stuck, force_n on a and heat_w; requires fixed
                  step_s.)
-  modal_structure sample_rate_hz, modes, attachments  [<attachments>, heat]
+  modal_structure sample_rate_hz, modes | network, attachments
+                                                     [<attachments>, heat]
                  (fs-nlmodal's linear structure in mass-normalized damped
                  modes. modes: [{frequency_hz, damping_ratio,
                  displacement = 0, velocity = 0}], in modal coordinates.
                  attachments: {<id>: {domain, weights}}: a power port per
                  attachment, one row of weights per port row, one weight per
                  mode (mode shapes at the point, 1/sqrt(kg) for a force).
+                 Or network: {stiffness, mass, rayleigh = [0, 0]}: a
+                 lumped network's symmetric K and positive definite M over
+                 its 1 to 256 degrees of freedom (N/m and kg for
+                 translation), whose modes fs-nlmodal solves; rayleigh
+                 [a, b] damps it by C = a M + b K, so mode j has the ratio
+                 (a + b w_j^2) / (2 w_j). Each attachment row then weights
+                 the degrees of freedom (one weight per degree of freedom),
+                 and start = {displacement, velocity}, one entry per degree
+                 of freedom (default at rest), is carried to the modes. A K
+                 that does not hold every degree of freedom (a free body)
+                 is refused.
                  sample_rate_hz is the owner's clock: modes must lie below
                  0.9 of its Nyquist frequency; steps of any length are exact
                  for the effort held over them. Each attachment also tells
@@ -3609,7 +3621,9 @@ impl Device {
             description = std::borrow::Cow::Owned(format!(
                 "{description}; modal structures step fs-nlmodal's damped modes exactly under \
                  the effort held over each step, from authored frequencies, damping ratios and \
-                 mode-shape weights; no mode solve from geometry or material cards"
+                 mode-shape weights, or from the modes fs-nlmodal solves from an authored \
+                 stiffness and mass under Rayleigh damping; no mode solve from geometry or \
+                 material cards"
             ));
         }
         if self

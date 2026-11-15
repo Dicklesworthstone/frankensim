@@ -122,6 +122,21 @@ beside such a neighbour that does not read it. The string's modes,
 damping and mode-shape weights are authored; nothing is solved from its
 geometry.
 
+A `modal_structure` can instead give a lumped `network`: a stiffness
+and a mass over its degrees of freedom, and optional Rayleigh damping
+`[a, b]`. fs-nlmodal solves its modes, and the attachments and the
+`start` are written per degree of freedom:
+
+```json
+"chain": {"kind": "modal_structure", "sample_rate_hz": 1000,
+          "network": {"stiffness": [[600.0, -200.0], [-200.0, 200.0]],
+                      "mass": [[1.0, 0.0], [0.0, 0.5]],
+                      "rayleigh": [0.5, 0.001]},
+          "start": {"displacement": [0.0, 0.01]},
+          "attachments": {"tip": {"domain": "translation",
+                                  "weights": [[0.0, 1.0]]}}}
+```
+
 ## Rigid bodies from a physics owner
 
 `damped_pair.json` is the first scene whose element is not a lumped law of

@@ -28,8 +28,16 @@
 //! [`LoadedModalBasis::held_loss_factors`] gives the factor for each loaded mode, to be stated with
 //! a render, not corrected.
 //!
+//! The same basis solves any symmetric pencil `(K, M)` directly ([`LoadedModalBasis::from_pencil`]):
+//! a lumped network's stiffness and mass over its physical degrees of freedom, whose modes no one
+//! wrote down. The "unloaded coordinates" of every method are then those degrees of freedom: an
+//! attachment is a row of them, [`LoadedModalBasis::loaded`] carries a start written in them to the
+//! modes (`y = Phi^T M x`), and Rayleigh damping `C = a M + b K`, which the basis diagonalizes
+//! exactly, runs as each mode's own viscous ratio ([`LoadedModalBasis::rayleigh_structure`]).
+//!
 //! No claim: `M_a` and `C` are constants, so a frequency-dependent loading enters at the frequency
-//! the caller sampled it at; the basis is dense, `O(n^3)` to build.
+//! the caller sampled it at; the basis is dense, `O(n^3)` to build; a damping that the basis does
+//! not diagonalize (not of Rayleigh form) has no damped structure here, only the modal port.
 
 use fs_modal::eigh_gen_dense;
 use fs_ports::{PortKind, StableId};
@@ -48,6 +56,8 @@ pub struct LoadedModalBasis {
     residuals: Vec<f64>,
     /// `Phi`, row-major: entry `k * n + j` is unloaded coordinate `k` of loaded mode `j`.
     basis: Vec<f64>,
+    /// The pencil's mass, `M + M_a` (or `M`), row-major `n x n`.
+    mass: Vec<f64>,
 }
 
 impl LoadedModalBasis {
@@ -85,8 +95,69 @@ impl LoadedModalBasis {
             stiffness[k * n + k] = w * w;
             mass[k * n + k] += 1.0;
         }
+        Self::solve(n, &stiffness, mass)
+    }
+
+    /// Solve the pencil `(K, M)` of `n` coordinates as it is given: a symmetric stiffness `K` and
+    /// a symmetric positive definite mass `M`, row-major `n x n`, such as the physical degrees of
+    /// freedom of a lumped spring-mass network. The unloaded coordinates of every method are then
+    /// those coordinates: `Phi^T M Phi = I`, `Phi^T K Phi = diag(w^2)`, `x = Phi y`.
+    ///
+    /// # Errors
+    /// [`ModalStructureRefusal::NoModes`] for `n = 0`; [`ModalStructureRefusal::LoadedSize`] for
+    /// more coordinates than fs-la's dense symmetric eigensolver admits, before the matrices are
+    /// read; [`ModalStructureRefusal::MatrixShape`], [`ModalStructureRefusal::NonFiniteEntry`] and
+    /// [`ModalStructureRefusal::Asymmetric`] for a stiffness, then a mass, that is not a finite
+    /// symmetric `n x n` matrix; [`ModalStructureRefusal::LoadedMass`] when `M` is not positive
+    /// definite; [`ModalStructureRefusal::Frequency`] (the square, in the ascending order) for a
+    /// mode whose `w^2` came back not positive and finite, and
+    /// [`ModalStructureRefusal::Unresolved`] for one whose positive `w^2` is not above both
+    /// fs-modal's residual and `64 n eps` times the largest square, the dense solve's absolute
+    /// resolution: a stiffness that does not hold every coordinate, such as a free body, whose
+    /// zero mode comes back at rounding size with either sign.
+    pub fn from_pencil(
+        stiffness: &[f64],
+        mass: &[f64],
+        n: usize,
+    ) -> Result<Self, ModalStructureRefusal> {
+        if n == 0 {
+            return Err(ModalStructureRefusal::NoModes);
+        }
+        fs_la::eigen::admit_jacobi_eigh(n).map_err(ModalStructureRefusal::LoadedSize)?;
+        symmetric(stiffness, n)?;
+        symmetric(mass, n)?;
+        let basis = Self::solve(n, stiffness, mass.to_vec())?;
+        // Ascending: the last square is the largest. An admitted n is far below 2^32.
+        let largest = basis
+            .angular_frequencies_rad_s
+            .last()
+            .map_or(0.0, |&w| w * w);
+        let resolution =
+            64.0 * u32::try_from(n).map_or(f64::MAX, f64::from) * f64::EPSILON * largest;
+        for (mode, (&w, &residual)) in basis
+            .angular_frequencies_rad_s
+            .iter()
+            .zip(&basis.residuals)
+            .enumerate()
+        {
+            // Both finite: `solve` admitted every square, and fs-modal's residual is a finite norm.
+            let floor = residual.max(resolution);
+            if w * w <= floor {
+                return Err(ModalStructureRefusal::Unresolved {
+                    mode,
+                    square: w * w,
+                    floor,
+                });
+            }
+        }
+        Ok(basis)
+    }
+
+    /// The pencil `(stiffness, mass)`, both finite, symmetric and `n x n`, by fs-modal's dense
+    /// solve; every square must come back positive and finite.
+    fn solve(n: usize, stiffness: &[f64], mass: Vec<f64>) -> Result<Self, ModalStructureRefusal> {
         let pairs =
-            eigh_gen_dense(&stiffness, &mass, n).map_err(ModalStructureRefusal::LoadedMass)?;
+            eigh_gen_dense(stiffness, &mass, n).map_err(ModalStructureRefusal::LoadedMass)?;
         let mut basis = vec![0.0; n * n];
         for (j, pair) in pairs.iter().enumerate() {
             if !(pair.lambda > 0.0 && pair.lambda.is_finite()) {
@@ -104,6 +175,7 @@ impl LoadedModalBasis {
             angular_frequencies_rad_s: pairs.iter().map(|pair| pair.lambda.sqrt()).collect(),
             residuals: pairs.iter().map(|pair| pair.residual).collect(),
             basis,
+            mass,
         })
     }
 
@@ -231,6 +303,25 @@ impl LoadedModalBasis {
             .collect()
     }
 
+    /// The loaded coordinates `y = Phi^T M x` of the unloaded coordinates `unloaded`, `M` being the
+    /// pencil's mass (`M + M_a`, or the mass given to [`Self::from_pencil`]): the inverse of
+    /// [`Self::unloaded`], since `Phi^T M Phi = I`. A start written in the unloaded coordinates
+    /// (displacements or velocities) is carried to the modes by it.
+    ///
+    /// # Panics
+    /// If `unloaded` does not hold one entry per mode (programmer error).
+    #[must_use]
+    pub fn loaded(&self, unloaded: &[f64]) -> Vec<f64> {
+        let n = self.n;
+        assert_eq!(unloaded.len(), n, "one unloaded coordinate per mode");
+        let weighted: Vec<f64> = (0..n)
+            .map(|k| (0..n).map(|l| self.mass[k * n + l] * unloaded[l]).sum())
+            .collect();
+        (0..n)
+            .map(|j| (0..n).map(|k| self.basis[k * n + j] * weighted[k]).sum())
+            .collect()
+    }
+
     /// For each loaded mode, `sinc^2(w'_j dt_s / 2)`: the held scheme's decay rate of the energy
     /// envelope over the continuous rate, to first order in the loss, at the step `dt_s`. Every
     /// factor is NaN for a step that is not positive and finite.
@@ -285,6 +376,43 @@ impl LoadedModalBasis {
             .angular_frequencies_rad_s
             .iter()
             .map(|&w| (w, 0.0))
+            .collect();
+        ModalStructure::from_modes(sample_rate_hz, &modes, budget, all)
+    }
+
+    /// The modes as one damped [`ModalStructure`] under Rayleigh damping `C = a M + b K` in the
+    /// unloaded coordinates (`a` = `mass_proportional_per_s`, `b` = `stiffness_proportional_s`).
+    /// The basis diagonalizes it exactly, `Phi^T C Phi = diag(a + b w_j^2)`, so mode `j` runs at
+    /// its own viscous damping ratio `(a + b w_j^2) / (2 w_j)`. Its ports are `attachments`, each
+    /// written in the unloaded coordinates and carried to the modes, then `heat`; there is no
+    /// modal port.
+    ///
+    /// # Errors
+    /// The refusals of [`Self::loaded_attachment`] (with each attachment's index in
+    /// `attachments`), and every refusal of [`ModalStructure::from_modes`]: the owner refuses a
+    /// ratio that is negative or not finite, so `a` and `b` are admitted exactly when every mode's
+    /// ratio is.
+    pub fn rayleigh_structure(
+        &self,
+        sample_rate_hz: u32,
+        budget: ModalAcousticTimeBudget,
+        mass_proportional_per_s: f64,
+        stiffness_proportional_s: f64,
+        attachments: Vec<ModalAttachment>,
+    ) -> Result<ModalStructure, ModalStructureRefusal> {
+        let mut all = Vec::with_capacity(attachments.len());
+        for (index, attachment) in attachments.into_iter().enumerate() {
+            all.push(self.carried(index, attachment)?);
+        }
+        let modes: Vec<(f64, f64)> = self
+            .angular_frequencies_rad_s
+            .iter()
+            .map(|&w| {
+                (
+                    w,
+                    stiffness_proportional_s.mul_add(w * w, mass_proportional_per_s) / (2.0 * w),
+                )
+            })
             .collect();
         ModalStructure::from_modes(sample_rate_hz, &modes, budget, all)
     }

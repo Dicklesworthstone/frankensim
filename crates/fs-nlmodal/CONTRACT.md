@@ -484,7 +484,8 @@ because an observer is a probe of its own.
   same pieces.
 - `ModalStructureRefusal`: the owner's error unchanged, an observer transfer, weights of the
   wrong count or not finite, a refused identifier or port list, a state of the wrong length, a
-  temperature that is not positive and finite, cancellation.
+  temperature that is not positive and finite, cancellation; for `loaded`, also a solved mode
+  whose square is not above what the solve tells from zero (`Unresolved`).
 
 ### `loaded`: the joint loaded modal basis
 
@@ -499,13 +500,31 @@ solve (`eigh_gen_dense`: Cholesky reduction, then Jacobi) and refuses
 - the basis `Phi`, with `Phi^T (M + M_a) Phi = I` and
   `Phi^T K Phi = diag(w'^2)`; the unloaded coordinates are `x = Phi y`.
 
+`LoadedModalBasis::from_pencil(K, M, n)` solves any symmetric pencil as it is
+given, such as a lumped spring-mass network's stiffness and mass over its
+physical degrees of freedom, whose modes no one wrote down. The unloaded
+coordinates of every method below are then those degrees of freedom: an
+attachment is a row of them, and the start is carried by `loaded`. Beyond the
+refusals of `new`, it refuses a mode whose positive square is not above both
+fs-modal's residual and `64 n eps` times the largest square
+(`Unresolved`). That is the dense solve's absolute resolution: a free body's
+zero mode comes back at rounding size, with either sign, and is refused
+either way.
+
 Methods:
 - `congruent(A)` is `Phi^T A Phi` for a symmetric `A`, symmetric bit for bit.
   The loss `C` is one such matrix: each mode's own loss on the diagonal, the
   radiation resistance between modes off it.
 - `loaded_attachment` carries an attachment written in the unloaded
   coordinates to the loaded ones (`s' = s Phi`) and keeps each row's flow;
-  `unloaded(y)` is `Phi y`.
+  `unloaded(y)` is `Phi y`, and `loaded(x)` is its inverse `Phi^T M x`, with
+  `M` the pencil's mass.
+- `rayleigh_structure(rate, budget, a, b, attachments)` builds the modes as
+  one damped `ModalStructure` under Rayleigh damping `C = a M + b K`. The basis
+  diagonalizes that exactly, `Phi^T C Phi = diag(a + b w_j^2)`, so mode `j`
+  runs at its own viscous ratio `(a + b w_j^2) / (2 w_j)`. Its ports are the
+  carried attachments, then `heat`; there is no modal port. The owner refuses
+  a ratio that is negative or not finite.
 - `structure(rate, budget, modal, kind, attachments)` builds the loaded modes
   as one undamped `ModalStructure`. Its ports are the modal port first (width
   `n`, identity weights), then the carried attachments, then `heat`.
@@ -534,7 +553,14 @@ Refusals, all on `ModalStructureRefusal`:
   given, a weight that overflows when carried included) and of `from_modes`.
 
 No claim: `M_a` and `C` are constants, so a frequency-dependent loading enters
-at the frequency it was sampled at. The basis is dense, `O(n^3)`.
+at the frequency it was sampled at. The basis is dense, `O(n^3)`. A damping
+that the basis does not diagonalize (not of Rayleigh form) has no damped
+structure here, only the undamped one with the modal port. Tests in
+`tests/loaded_basis.rs`: the chain wall - 400 N/m - 1 kg - 200 N/m - 0.5 kg,
+whose pencil has `w^2` = 200 and 800 and shapes `(1, 2) / sqrt(3)` and
+`(1, -1) sqrt(2 / 3)`, solved by hand, with a start carried both ways; its
+Rayleigh structure's ratios and ports; the refusals of a pencil, a free body's
+included.
 
 ## Invariants
 

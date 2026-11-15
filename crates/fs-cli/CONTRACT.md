@@ -941,10 +941,36 @@ a step of length `s` moves the mode `2 V tan(w s / 2) / w`, not `V s`; the
 test follows that step by step (2.2e-7 m past the continuous ride after
 0.17 s of 1 ms steps, falling as the step squared), and the held force's
 work on the gap is the interface's numerical loss (-3.4e-7 J of the bow's
-0.037 J). Eight refusals, all exit 3. No
-claim: modes, damping and weights are authored, not
-solved from geometry or resolved from material cards; the structure is
-linear (no quartic term) and its observer transfers are not used.
+0.037 J). Eight refusals, all exit 3.
+
+In place of `modes`, a `modal_structure` may give a `network`: a lumped
+network's symmetric `stiffness` and positive definite `mass` over its 1 to
+256 degrees of freedom, and optional Rayleigh damping `rayleigh: [a, b]`,
+`C = a M + b K`. fs-nlmodal's `LoadedModalBasis::from_pencil` solves the
+pencil (fs-modal's dense solve), and `rayleigh_structure` runs each mode at
+its own ratio `(a + b w^2) / (2 w)`, which is exact because the basis
+diagonalizes Rayleigh damping. An attachment's rows then weight the degrees
+of freedom, and `start: {displacement, velocity}`, one entry per degree of
+freedom, is carried to the modes (`Phi^T M x`). fs-cli parses and nothing
+more. Tests in `tests/system_command/modal_network.rs` use the chain
+wall - 400 N/m - 1 kg - 200 N/m - 0.5 kg, whose modes (`w^2` = 200 and 800)
+are solved by hand:
+- released from a 0.01 m stretch at the tip, the tip's and root's velocities
+  match the modal superposition to 1e-11 m/s, and the modes hold the
+  stretch's 0.01 J;
+- under Rayleigh damping, the tip matches each mode's damped closed form, and
+  what the modes lost is the case's heat;
+- under a held 1 N tip force from rest, the tip matches the exact response,
+  while the same chain built from the kernel's mass and spring elements
+  differs at second order in the step;
+- ten refusals, all exit 3, including a free body (the stiffness does not
+  hold every degree of freedom) and a `start` given beside `modes`.
+
+No claim: modes, damping and weights are authored, or solved from an authored
+stiffness and mass with Rayleigh damping; nothing is solved from geometry or
+resolved from material cards; the structure is linear (no quartic term) and
+its observer transfers are not used; the report gives modal coordinates and
+the attachments' flows, not each degree of freedom's position.
 
 `thermal_timeline` lowers to `fs_thermal::component::ThermalTimeline` over
 an `fs_thermal::enthalpy::DepositionSimulation`, stepped by the owner's

@@ -470,3 +470,160 @@ fn the_basis_refuses_what_it_cannot_represent() {
         ModalStructureRefusal::NonFiniteWeight { attachment: 1 }
     );
 }
+
+/// The chain wall - 400 N/m - 1 kg - 200 N/m - 0.5 kg as a pencil over its two positions.
+const CHAIN_K: [f64; 4] = [600.0, -200.0, -200.0, 200.0];
+const CHAIN_M: [f64; 4] = [1.0, 0.0, 0.0, 0.5];
+
+#[test]
+fn a_spring_mass_chain_s_pencil_gives_its_hand_solved_modes_and_carries_a_start_both_ways() {
+    // det(K - l M) = 0.5 l^2 - 500 l + 80000: l = 200 and 800. (K - l M) phi = 0 gives
+    // phi_2 = (600 - l) / 200 phi_1, so (1, 2) and (1, -1); normalized in M, (1, 2) / sqrt(3) and
+    // (1, -1) sqrt(2 / 3).
+    let basis = LoadedModalBasis::from_pencil(&CHAIN_K, &CHAIN_M, 2).expect("definite");
+    let w = basis.angular_frequencies_rad_s();
+    for (found, square) in w.iter().zip([200.0_f64, 800.0]) {
+        assert!(
+            (found - square.sqrt()).abs() <= 8.0 * EPS * square.sqrt(),
+            "{found} against {}",
+            square.sqrt()
+        );
+    }
+    for (j, &residual) in basis.residuals().iter().enumerate() {
+        assert!(residual <= 1.0e-12 * 800.0, "mode {j}: residual {residual}");
+    }
+    let phi = basis.basis();
+    let exact = [
+        [1.0 / 3.0_f64.sqrt(), (2.0_f64 / 3.0).sqrt()],
+        [2.0 / 3.0_f64.sqrt(), -(2.0_f64 / 3.0).sqrt()],
+    ];
+    for j in 0..2 {
+        // A mode's sign is the solver's: compare up to it.
+        let sign = phi[j].signum();
+        for k in 0..2 {
+            assert!(
+                (sign * phi[k * 2 + j] - exact[k][j]).abs() <= 16.0 * EPS,
+                "Phi[{k}][{j}] = {} against {}",
+                phi[k * 2 + j],
+                exact[k][j]
+            );
+        }
+    }
+    // A start of 0.01 m at the 0.5 kg mass: y = Phi^T M x, and Phi y returns it.
+    let x0 = [0.0, 0.01];
+    let y0 = basis.loaded(&x0);
+    let back = basis.unloaded(&y0);
+    for k in 0..2 {
+        assert!(
+            (back[k] - x0[k]).abs() <= 16.0 * EPS * 0.01,
+            "{back:?} against {x0:?}"
+        );
+    }
+    // Mode by mode, the tip's share of that start is 0.02 / 3 and 0.01 / 3.
+    for (j, share) in [0.02 / 3.0, 0.01 / 3.0].into_iter().enumerate() {
+        let found = phi[2 + j] * y0[j];
+        assert!(
+            (found - share).abs() <= 16.0 * EPS * 0.01,
+            "mode {j}: {found} against {share}"
+        );
+    }
+}
+
+#[test]
+fn rayleigh_damping_runs_each_mode_of_the_chain_at_its_own_ratio_behind_its_attachments() {
+    let basis = LoadedModalBasis::from_pencil(&CHAIN_K, &CHAIN_M, 2).expect("definite");
+    let tip = ModalAttachment {
+        id: StableId::new("tip").expect("id"),
+        kind: PortKind::MechanicalForceVelocity,
+        width: NonZeroUsize::MIN,
+        weights: vec![0.0, 1.0],
+    };
+    let (a, b) = (0.5, 1.0e-3);
+    let structure = basis
+        .rayleigh_structure(
+            1_000,
+            ModalAcousticTimeBudget::audible_reference(),
+            a,
+            b,
+            vec![tip.clone()],
+        )
+        .expect("structure");
+    let ports = structure.ports();
+    assert_eq!(ports.len(), 2, "the attachment and heat: no modal port");
+    assert_eq!((ports[0].id().as_str(), ports[0].width()), ("tip", 1));
+    assert_eq!(ports[1].id().as_str(), "heat");
+    for (mode, &w) in structure
+        .model()
+        .modes()
+        .iter()
+        .zip(basis.angular_frequencies_rad_s())
+    {
+        assert_eq!(mode.angular_frequency_rad_s, w);
+        assert_eq!(mode.damping_ratio, b.mul_add(w * w, a) / (2.0 * w));
+    }
+    // The tip's row carried to the modes is the tip's entry of each mode shape.
+    let carried = basis.loaded_attachment(tip).expect("carried").weights;
+    assert_eq!(carried, vec![basis.basis()[2], basis.basis()[3]]);
+    // A ratio below zero is the owner's refusal.
+    assert!(matches!(
+        basis.rayleigh_structure(
+            1_000,
+            ModalAcousticTimeBudget::audible_reference(),
+            -100.0,
+            0.0,
+            Vec::new()
+        ),
+        Err(ModalStructureRefusal::Owner(_))
+    ));
+}
+
+#[test]
+fn a_pencil_is_refused_when_it_is_not_a_held_definite_network() {
+    let refused =
+        |k: &[f64], m: &[f64], n: usize| LoadedModalBasis::from_pencil(k, m, n).unwrap_err();
+    assert_eq!(refused(&[], &[], 0), ModalStructureRefusal::NoModes);
+    assert_eq!(
+        refused(&[1.0; 3], &CHAIN_M, 2),
+        ModalStructureRefusal::MatrixShape {
+            expected: 4,
+            found: 3
+        }
+    );
+    assert_eq!(
+        refused(&CHAIN_K, &[1.0, 0.1, 0.2, 0.5], 2),
+        ModalStructureRefusal::Asymmetric { row: 1, column: 0 }
+    );
+    assert!(matches!(
+        refused(&CHAIN_K, &[1.0, 0.0, 0.0, -0.5], 2),
+        ModalStructureRefusal::LoadedMass(_)
+    ));
+    // A stiffness with a negative mode (-1 and 3) is refused at its square.
+    match refused(&[1.0, 2.0, 2.0, 1.0], &[1.0, 0.0, 0.0, 1.0], 2) {
+        ModalStructureRefusal::Frequency { mode: 0, value } => {
+            assert!((value + 1.0).abs() < 1.0e-12, "{value}");
+        }
+        other => panic!("{other:?}"),
+    }
+    // Two free bodies joined by a spring: the zero mode comes back at rounding size, of either
+    // sign, and is refused either way.
+    match refused(&[100.0, -100.0, -100.0, 100.0], &[1.0, 0.0, 0.0, 1.0], 2) {
+        ModalStructureRefusal::Frequency { mode: 0, value } => {
+            assert!(value.abs() < 1.0e-10, "{value}");
+        }
+        ModalStructureRefusal::Unresolved {
+            mode: 0,
+            square,
+            floor,
+        } => {
+            assert!(
+                square > 0.0 && square <= floor && floor < 1.0e-10,
+                "{square} {floor}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(
+        refused(&[], &[], 4_096),
+        ModalStructureRefusal::LoadedSize(_)
+    ));
+}
