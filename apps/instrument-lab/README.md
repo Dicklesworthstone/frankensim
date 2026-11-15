@@ -18,6 +18,28 @@ Two tracks, always labelled:
   description as a graph on the composition kernel (fs-couple's `ImpactGraph` on fs-system;
   no contact loss), held to the prepared engine's pressure by `engine-drum/tests/kernel_engine.rs`.
 
+## Where each part's behaviour comes from
+
+The classes match the other demos:
+- **core solve**: a FrankenSim crate advances the part.
+- **in-app model**: this app's own equations advance it, calling the crates listed for leaf values
+  and maps.
+- **scripted**: a fixed gain, constant or performer input sets it.
+
+| Part | Origin | Where | FrankenSim crates |
+|---|---|---|---|
+| Offline percussion clips | core solve | `crates/fs-couple/examples/percussion` | fs-couple (`render::plate::impact`), fs-plate, fs-material |
+| Offline kit renders (five drums, hi-hats, crash, ride, splash) | core solve. The drums are built from sourced material cards by default. `--preset-heads` gives the recording-fitted heads | `crates/fs-vkplate`, `kit` example | fs-vkplate |
+| Offline grand piano | core solve: a composition of FrankenSim owners. Its geometry is derived from sources and approximate, not a measured specimen | `crates/fs-couple/examples/grand_piano` | fs-couple and the owners it calls |
+| Native wind, resolved-flow, string, lip, voice and mesh-plate renders | core solve | fs-couple binaries `music_render`, `material_strings`, `finite_gas_string` | fs-couple |
+| Live kit | core solve on a grid 2.5 to 8 times coarser than the offline renders. Without imported material packs, the drums are the recording-fitted presets of 96ccf8f1b, and the engine reports "head loss: FITTED" for them. The presets fix the head tensions, the strike point, the stick loss (0.05 s/m) and the kick's felt crown and pillow; the snare wires are plain fitted strings | `engine-kit/src/lib.rs`, wrapping `fs_vkplate::live` | fs-vkplate |
+| Live piano | in-app model: a reduced re-implementation of the grand piano's equations. Only the sounding keys' strings move, unless the silent bank is enabled. Partials are capped per key. There is one mechanical step per sample, where the reference default is four, and the dampers are a K-point pad | `engine-piano/src/kernel.rs` | fs-couple (exact zero-order-hold modal maps, baffled radiation, air path), fs-material (`WoolFelt`, gas), fs-modal, fs-nlmodal, fs-matdb |
+| Modal drum (`engine-drum`, not on the page) | core solve: fs-couple's prepared linear impact engine on finite-element heads; the native `kernel` feature steps it as a graph on the composition kernel | `engine-drum/src/engine.rs`, `instrument.rs` | fs-couple, fs-plate, fs-modal, fs-dcontact, fs-la, fs-exec |
+| GPU kit renders | the fs-vkplate step ported to CUDA; the CPU solver stays the reference. The equations changed after the last CPU/GPU comparison (see its README) | `render-gpu/src/kernel.cu` | fs-vkplate (`Instrument::image`) |
+| Piece levels and the Strandbar mix | scripted. Each live piece has one gain, matched on the 5x grid to the Salamander overheads' loudness. Strandbar's three parts are balanced against the recording's band energies | `public/live/kit/levels.js`, `engine_levels.json`, `tools/strandbar.py` | — |
+| Hi-hat pedal, MIDI articulations, player-piano arrangement | scripted performer input. The pedal is 0 to 80 N with a 120 ms ramp. The General MIDI interpretation is not a measured foot trajectory | `src/player/`, `src/midi/` | — |
+| Grades | measured against recordings, beside a real-vs-real ruler | `tools/kitgrade.py`, `tools/verisim.py` | — |
+
 ## Layout
 
 | Path | What |

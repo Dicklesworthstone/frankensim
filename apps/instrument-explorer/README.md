@@ -13,6 +13,17 @@ to use without restriction), CC0, CC BY, CC BY-SA, YouTube Creative Commons and 
 49 YouTube clips under the standard licence (all rights reserved) were used only to grade. They are
 listed with their source link but never published.
 
+## Where the sound comes from
+
+| Part | Origin | Where |
+|---|---|---|
+| Each note of a planned phrase | core solve: its own `music_render` job (fs-couple) on the committed instrument description | `tools/phrases/phrases.py` |
+| Trumpet phrases | core solve: one render. The mouth pressure and lip pre-stress change during it, so the note transitions happen inside the simulation | `tools/phrases/phrasekit.py` (`native`) |
+| Piano and kit phrases | the instrument lab's continuous renders; see its README | [`apps/instrument-lab`](../instrument-lab/README.md) |
+| Joins between notes rendered separately (detaché, tongued, cut, legato) | scripted: the renders are placed at their note times with 30 to 80 ms fades or crossfades. A detaché note is a string shortened rigidly, with no finger on it | `tools/phrases/phrasekit.py` (`HOW`) |
+| Phrase level | scripted: each phrase is scaled to a -1 dBFS peak | `tools/phrases/phrasekit.py` |
+| Measured pitch, spectrograms, grades, badges | measured on the rendered audio and on the recordings | `tools/phrases/pitchlib.py`, `tools/build.py` |
+
 ## Running it
 
 ```sh

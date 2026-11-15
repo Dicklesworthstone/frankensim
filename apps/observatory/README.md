@@ -4,6 +4,15 @@ A local browser workspace for physical results. The native experiment adapter ru
 `fs-couple`'s existing `heated_section_sound` executable; there is no JavaScript
 physics surrogate. JSON/CSV visualization also works without a Rust toolchain.
 
+## Where each part comes from
+
+| Part | Origin | Where |
+|---|---|---|
+| Layer temperatures and stresses, the receiver pressure | core solve: fs-couple's `heated_section_sound` example, run as one native child process | `server.mjs` (runs it), `protocol.mjs` (parses its output) |
+| Imported mesh fields | data from `fs-viz`'s VTU writer, displayed as written | `import-vtu.mjs`, `MESH_FIELDS.md` |
+| Cutaway, traces, spectrum, listening | display and signal analysis only. The cutaway's cross-section is exaggerated and each layer shows one uniform value | `app.mjs`, `visuals.mjs` |
+| Test fixtures | test doubles, not physics evidence | `tests/` |
+
 ## Start locally
 
 Requires Node.js 22 or newer. No npm install, bundler, CDN, account or cloud service.
