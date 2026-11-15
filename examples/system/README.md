@@ -58,6 +58,7 @@ save/resume commands work with `self_heating_damper.json` and
 | `two_slabs_trace.json` | the same two slabs joined face to face by a `trace_contact`: each facing end is a trace (one temperature and one heat load for every vertex of the face) and the heat crosses at fs-conduction's interface points through 8e-4 m^2 K/W, which is declared in the scene and not measured (the 0.5 W/K wall over the 20 x 20 mm face) | the energy across the contact and the least and greatest temperature of each slab and each contact face against fs-conduction's own matching contact on one mesh, within 1e-9 J and 1e-9 K on 4 and 8 cells |
 | `two_slabs_mapped.json` | the same with the second slab meshed 3 x 3 across against 2 x 2, so the two faces do not match: `mapped` gives the budgets of fs-conduction's common refinement of the two faces; the 8e-4 m^2 K/W is again declared, not measured | the same quantities against fs-conduction's own non-matching contact on one mesh, within 1e-9 J and 1e-9 K on 4 and 8 cells |
 | `two_blocks_atkins.json` | two 30 x 20 x 20 mm blocks at 305 K and 290 K joined by a `trace_contact` whose resistance is read from a measured card: the bare 6061-T6 joint of Atkins (NASA, 1964; lathe-cut faces of 0.30 um RMS, in vacuum) at 313 kPa and 297.5 K, from the pack in `atkins1964/`. The blocks' conductivity (167 W/m K) and volumetric heat capacity (2.4192e6 J/m^3 K) are declared in the scene, not measured and not from a card, and nothing checks that the blocks are the card's two surfaces | the reported resistance against the table the source prints, at 313 kPa, at 1123 kPa and midway between 70 kPa and 313 kPa, within 1e-12; and the run against the same scene with the printed 3.1606e-4 m^2 K/W typed in, within 1e-9 J and 1e-9 K |
+| `steel316_heated_bar.json` | a 40 x 20 x 20 mm bar of generic 316 stainless steel at 290 K, 20 W into one end for 60 s. Its conductivity is not typed: the bar names the scene material `steel316`, the NASA/TP-2010-216435 card in `steel316/`, whose k(T) rises from 12.99 W/m K at 273 K through 13.46 at 300 K to 15.14 at 400 K, and the bar steps by fs-conduction's Newton solve. The volumetric heat capacity is declared, the table's density times its specific heat at 300 K (3.7232e6 J/m^3 K), not the card's curve | the field's least and greatest temperature after each of 30 steps against fs-conduction stepping the same box with the source's printed table, equal to the bit; the 1200 J put in is stored, and the hot end passes the 300 K knot without leaving the table; 2000 W, which would carry the end past 400 K, is refused at the first step |
 | `struck_mode.json` | a 10 g stick at 2 m/s strikes one undamped 200 Hz mode (`modal_structure`, seen as 50 g at the strike) through a Hertz contact (`contact_interface`, fs-dcontact's power law `K x^1.5` reading the end of the mode's flow): the stick bounces back and the mode rings | the stick's, the mode's and the contact's energies against the stick's 0.02 J, to the settled reactions' defect per contact |
 | `dc_motor.json` | a DC motor across three domains: a 12 V supply, winding inductance and resistance in a current loop, a gyrator to a rotor with a viscous bearing, and both heats into one case | the monolithic midpoint rule for the two coupled equations, the supply's energy against stored energy plus heat |
 | `parallel_rlc.json` | a current source drives a capacitor, inductor and resistor in parallel; all Joule heat warms the case | independent coupled voltage/current equations, source work, electrical storage and heat |
@@ -234,6 +235,26 @@ gives the pack, card, claim and receipt hashes, the state and the
 resistance. The pack in `atkins1964/` was compiled from the seed card by
 `cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/atkins-1964-al6061t6-lathe-0p30um-vacuum-interface/manifest.tsv --out al6061t6-lathe-0p30um-vacuum.fsintpk`
 (6753 bytes; two builds were byte-identical).
+
+A `conduction_body` takes its conductivity from a card through the scene's
+`materials` section: `material` names a material whose declaration has a
+`conductivity_property`, in place of `conductivity_w_m_k`
+(`steel316_heated_bar.json`). The body takes that material's k(T) curve
+over the declared span, `temperature_min_k` to `temperature_max_k`, and the
+start temperature must lie on it. A curve that varies steps on
+fs-conduction's Newton path, `ConductionBody::temperature_dependent`, under
+`newton` (`max_iterations`, `residual_rtol`, `residual_atol_j`; by default
+the owner's 32, 1e-10 and 1e-10 J). A step that would carry any point off
+the curve is refused, and the scene does not move. Only the conductivity
+comes from the card: `volumetric_heat_capacity_j_m3_k` stays a declared
+constant, because the owner stepping the body holds its heat capacity
+fixed. Such a body has mean ports only, and the report binds it to its
+material under `material_bindings`. The NASA card names its properties and
+state coordinates as the seed manifest maps them (`thermal-conductivity`,
+`source-generic-316-identity`, ...). The pack in `steel316/` was compiled
+from the seed card by
+`cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/stainless-316-nasa-tp216435/manifest.tsv --material-state "Type 316 stainless steel, generic" solid "unspecified product form and heat treatment" 0 --out stainless-316-nasa.fsmcdpk`
+(15569 bytes; two builds were byte-identical).
 
 `viscoelastic_mount.json` uses the second fs-mbd owner,
 `fs_mbd::component::relaxation::RelaxationNetwork`, through a

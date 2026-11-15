@@ -366,9 +366,9 @@ Elements (ports in brackets; SI units in every field name):
                  temperature_k and specific_enthalpy_j_kg, and with an
                  environment port environment_heat_w. Fixed step_s only; no
                  checkpoint codec.)
-  conduction_body box_m [Lx, Ly, Lz], cells [nx, ny, nz], conductivity_w_m_k,
-                 volumetric_heat_capacity_j_m3_k, temperature_k, ports,
-                 traces, solve                          [one per port face]
+  conduction_body box_m [Lx, Ly, Lz], cells [nx, ny, nz], conductivity_w_m_k
+                 (or material, newton), volumetric_heat_capacity_j_m3_k,
+                 temperature_k, ports, traces, solve    [one per port face]
                  (fs-conduction's backward-Euler finite-element body on the
                  box [0, Lx] x [0, Ly] x [0, Lz], nx x ny x nz cells of six
                  tetrahedra, at most 64 a side and 4096 in all, starting at
@@ -382,6 +382,14 @@ Elements (ports in brackets; SI units in every field name):
                  are insulated. solve gives energy_tolerance_j (the owner's
                  energy gate on each step, required) and the Krylov
                  tolerance 1e-12, max_iterations 20000 and restart 60.
+                 In place of conductivity_w_m_k, material names a scene
+                 material with a conductivity_property: the body takes the
+                 k(T) curve its card gives over the material's declared
+                 span, which must hold temperature_k, and has ports only.
+                 A k that varies steps by the owner's Newton solve; newton
+                 gives max_iterations 32, residual_rtol 1e-10 and
+                 residual_atol_j 1e-10. A step that would leave the span is
+                 refused. The heat capacity stays the declared constant.
                  Reports each port's <face>.temperature_k, each trace's
                  <face>.min_temperature_k and <face>.max_temperature_k, and
                  the field's min_temperature_k and max_temperature_k. Fixed
@@ -2914,9 +2922,10 @@ fn element(
             (parts.node, parts.ports)
         }
         Kind::ConductionBody => {
-            let (node, ports, start_k) =
-                conduction::body(builder, name, definition, prepared, &what)?;
+            let (node, ports, start_k, material) =
+                conduction::body(builder, name, definition, materials, prepared, &what)?;
             temperature_k = Some(start_k);
+            material_sources.extend(material);
             (node, ports)
         }
         Kind::TraceContact => {
@@ -3799,7 +3808,7 @@ fn load_text(text: &str, source_path: &Path) -> Result<Device, Refusal> {
     let mut builder = SystemBuilder::new();
     let materials = materials::load(&root, source_path)?;
     // A trace contact is computed from two bodies, so those are built first.
-    let mut prepared = conduction::prepare(definitions, source_path)?;
+    let mut prepared = conduction::prepare(definitions, &materials, source_path)?;
     let mut elements = Vec::with_capacity(definitions.len());
     for (name, definition) in definitions {
         elements.push(element(
@@ -4003,14 +4012,30 @@ impl Device {
             } else {
                 "mesh, radiation or contact trace"
             };
+            // A body that names a material takes the material's k(T), and
+            // only that: its heat capacity stays the scene's constant.
+            let (conductivity, dependent) = if self.elements.iter().any(|element| {
+                element.kind == Kind::ConductionBody && !element.material_sources.is_empty()
+            }) {
+                (
+                    "one declared conductivity or a scene material's k(T) curve, stepped by \
+                     fs-conduction's Newton endpoint and refused off the curve's span, and one \
+                     declared",
+                    "temperature-dependent heat capacity (a body takes only a material's k(T)), ",
+                )
+            } else {
+                (
+                    "one declared conductivity and",
+                    "temperature-dependent conductivity, ",
+                )
+            };
             description = std::borrow::Cow::Owned(format!(
                 "{description}; conduction bodies step fs-conduction's backward-Euler \
-                 finite-element field on an authored box with one declared conductivity and \
-                 volumetric heat capacity, each port a whole box face taking a uniform flux and \
-                 returning the face's area-mean end temperature, the other faces insulated; the \
-                 entropy generated inside a body is reported as zero, so the entropy totals are \
-                 a lower bound; no internal source, temperature-dependent conductivity, imported \
-                 {without}"
+                 finite-element field on an authored box with {conductivity} volumetric heat \
+                 capacity, each port a whole box face taking a uniform flux and returning the \
+                 face's area-mean end temperature, the other faces insulated; the entropy \
+                 generated inside a body is reported as zero, so the entropy totals are a lower \
+                 bound; no internal source, {dependent}imported {without}"
             ));
             if contacts {
                 // A card's value is measured, but it is read once.
@@ -4150,6 +4175,7 @@ impl Device {
             .any(|element| !element.material_sources.is_empty())
         {
             let base = description
+                .replace("no material-card resolution except a trace contact's interface card, ", "source resolution is limited to declared pure-phase thermal laws and trace contacts' interface cards; no ")
                 .replace("no material-card resolution, ", "source resolution is limited to declared pure-phase thermal laws; no ")
                 .replace("enthalpy bodies use authored bounded", "enthalpy bodies use authored or source-resolved bounded")
                 .replace("layer conductors integrate authored bounded", "layer conductors integrate authored or source-resolved bounded")

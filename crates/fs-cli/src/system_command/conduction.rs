@@ -4,13 +4,21 @@
 //!
 //! The scene authors a box `[0, Lx] x [0, Ly] x [0, Lz]` meshed as an
 //! `nx x ny x nz` Kuhn grid (fs-conduction's `fixtures::box_grid`, six
-//! tetrahedra a cell), one declared conductivity and volumetric heat
+//! tetrahedra a cell), one conductivity, one declared volumetric heat
 //! capacity, the start temperature, and the box faces that are heat ports.
 //! The faces not named are insulated. A face under `ports` receives the heat
 //! rate into the body and returns its area-mean end temperature; a face under
 //! `traces` receives one heat load for every vertex of the face and returns
 //! the end temperature at each. The owner's own backward Euler steps the
 //! field. Nothing here conducts, stores or integrates heat.
+//!
+//! The conductivity is a number the scene declares, or the k(T) curve of a
+//! material from the scene's `materials` section ([`conductivity`]): the
+//! curve the material's card gives over its declared temperature span. A
+//! body whose conductivity varies over that span steps on the owner's Newton
+//! path (`ConductionBody::temperature_dependent`) under the scene's `newton`
+//! policy, by default the owner's. Its heat capacity stays the scene's
+//! constant, as the owner it wraps requires.
 //!
 //! A `trace_contact` names two traces of two bodies, where the second body's
 //! origin lies in the first's frame, and one area-specific resistance: a
@@ -36,12 +44,12 @@ use fs_conduction::component::{ConductionBody, PatchPort};
 use fs_conduction::fixtures::{box_grid, on_box_face};
 use fs_conduction::interface::NonmatchingOptions;
 use fs_conduction::transient::VolumetricHeatCapacity;
-use fs_conduction::transient::backward_euler::{BackwardEuler, StepConfig};
+use fs_conduction::transient::backward_euler::{BackwardEuler, NonlinearStepConfig, StepConfig};
 use fs_conduction::{
     AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS as RESISTANCE_DIMS,
     AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY as RESISTANCE_PROPERTY, ConductionMesh,
-    ConductionProblem, ConductivityModel, InterfaceResistance, LinearConfig, ScalarField,
-    ThermalBc, ThermalBoundaryBuilder,
+    ConductionProblem, ConductivityModel, ConductivityTable, InterfaceResistance, LinearConfig,
+    ScalarField, ThermalBc, ThermalBoundaryBuilder,
 };
 use fs_evidence::ValidityDomain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -57,7 +65,7 @@ use fs_system::{NodeId, System, SystemBuilder};
 use crate::cards::{MAX_CARD_PACK_BYTES, MAX_CARD_PACK_SOURCE_BYTES};
 use crate::material_state_input::state_point;
 
-use super::materials::read_pack;
+use super::materials::{Materials, read_pack};
 use super::{Element, J, Refusal, add, fields, num, number, number_or, positive, quote};
 
 /// The kernel holds the nodal temperature field [K] in vertex order.
@@ -80,6 +88,8 @@ const MAX_CELLS: usize = 4096;
 /// Bounds of the owner's Krylov budget a scene may give.
 const MAX_ITERATIONS: f64 = 100_000.0;
 const MAX_RESTART: f64 = 1000.0;
+/// The largest Newton update budget of one step a scene may give.
+const MAX_NEWTON_UPDATES: f64 = 1000.0;
 /// The largest budget of the common refinement a scene may give: its pair
 /// tests and its retained triangles.
 const MAX_REFINEMENT_BUDGET: f64 = 1.0e9;
@@ -192,6 +202,119 @@ fn config(definition: &J, what: &str) -> Result<StepConfig, String> {
     })
 }
 
+/// The owner's Newton policy for a conductivity that depends on
+/// temperature: its update budget and its two residual gates, each by
+/// default the owner's own. The owner refuses a policy it cannot run.
+fn newton(definition: &J, what: &str) -> Result<NonlinearStepConfig, String> {
+    let default = NonlinearStepConfig::default();
+    let Some(policy) = definition.get("newton") else {
+        return Ok(default);
+    };
+    let inner = format!("{what}.newton");
+    fields(
+        policy,
+        &["max_iterations", "residual_rtol", "residual_atol_j"],
+        &inner,
+    )?;
+    Ok(NonlinearStepConfig {
+        max_iterations: whole(
+            policy,
+            "max_iterations",
+            default.max_iterations,
+            MAX_NEWTON_UPDATES,
+            &inner,
+        )?,
+        residual_rtol: number_or(policy, "residual_rtol", default.residual_rtol, &inner)?,
+        residual_atol_j: number_or(policy, "residual_atol_j", default.residual_atol_j, &inner)?,
+        ..default
+    })
+}
+
+/// A body's conductivity, the scene material it came from, and the owner's
+/// Newton policy when it varies with temperature.
+struct Conductivity {
+    model: ConductivityModel,
+    material: Option<String>,
+    nonlinear: Option<NonlinearStepConfig>,
+}
+
+/// The scene's `conductivity_w_m_k`, or the k(T) curve of the scene
+/// material named by `material`, whose span must hold the start
+/// temperature.
+fn conductivity(
+    definition: &J,
+    materials: &Materials,
+    temperature_k: f64,
+    what: &str,
+) -> Result<Conductivity, String> {
+    let Some(name) = definition.get("material") else {
+        if definition.get("newton").is_some() {
+            return Err(format!(
+                "{what}: newton is the policy of a material's temperature-dependent \
+                 conductivity; a body with conductivity_w_m_k takes none"
+            ));
+        }
+        let model =
+            ConductivityModel::isotropic_declared(number(definition, "conductivity_w_m_k", what)?)
+                .map_err(|error| format!("{what}: {error}"))?;
+        return Ok(Conductivity {
+            model,
+            material: None,
+            nonlinear: None,
+        });
+    };
+    if definition.get("conductivity_w_m_k").is_some() {
+        return Err(format!(
+            "{what}: the conductivity is conductivity_w_m_k or a material's, not both"
+        ));
+    }
+    if definition.get("traces").is_some() {
+        return Err(format!(
+            "{what}: a body with a material's conductivity has mean ports only; a trace of \
+             one is not compared with the owner yet"
+        ));
+    }
+    let name = name
+        .as_str()
+        .ok_or_else(|| format!("{what}.material: expected a material name"))?;
+    let curve = materials
+        .get(name)
+        .ok_or_else(|| format!("{what}.material: unknown material {name:?}"))?
+        .conductivity
+        .as_ref()
+        .ok_or_else(|| {
+            format!(
+                "{what}.material: material {name:?} has no conductivity (its declaration names \
+                 no conductivity_property)"
+            )
+        })?;
+    let [lower_k, upper_k] = curve.temperature_range_k();
+    if !(lower_k..=upper_k).contains(&temperature_k) {
+        return Err(format!(
+            "{what}: temperature_k {temperature_k} K lies outside material {name:?}'s \
+             conductivity, {lower_k} K to {upper_k} K"
+        ));
+    }
+    let knots = curve.knots().iter().map(|&[t_k, k_w_m_k]| (t_k, k_w_m_k));
+    let table = ConductivityTable::declared_curve(knots.collect())
+        .map_err(|error| format!("{what}.material: {error}"))?;
+    let nonlinear = if table.is_temperature_dependent() {
+        Some(newton(definition, what)?)
+    } else if definition.get("newton").is_some() {
+        return Err(format!(
+            "{what}: material {name:?}'s conductivity does not vary over its span, so the body \
+             steps on the owner's linear path and takes no newton"
+        ));
+    } else {
+        None
+    };
+    Ok(Conductivity {
+        model: ConductivityModel::isotropic(table),
+        material: Some(name.to_owned()),
+        nonlinear,
+    })
+}
+
 /// The faces named under `key`, each once: name, axis and far end. A body
 /// with no `key` has none.
 fn faces(
@@ -268,12 +391,14 @@ struct Body {
     component: ConductionBody<'static>,
     start: State,
     temperature_k: f64,
+    /// The scene material whose conductivity the body takes, if any.
+    material: Option<String>,
     /// The body's ports in port order: the face and whether it is a trace.
     faces: Vec<(&'static str, bool)>,
 }
 
 /// The owner's body on its box mesh, at a uniform start temperature.
-fn build(definition: &J, what: &str) -> Result<Body, Refusal> {
+fn build(definition: &J, materials: &Materials, what: &str) -> Result<Body, Refusal> {
     fields(
         definition,
         &[
@@ -281,6 +406,8 @@ fn build(definition: &J, what: &str) -> Result<Body, Refusal> {
             "box_m",
             "cells",
             "conductivity_w_m_k",
+            "material",
+            "newton",
             "volumetric_heat_capacity_j_m3_k",
             "temperature_k",
             "ports",
@@ -294,9 +421,11 @@ fn build(definition: &J, what: &str) -> Result<Body, Refusal> {
     let ports = ports(definition, what)?;
     let config = config(definition, what)?;
     let temperature_k = positive(definition, "temperature_k", what)?;
-    let conductivity =
-        ConductivityModel::isotropic_declared(number(definition, "conductivity_w_m_k", what)?)
-            .map_err(|error| format!("{what}: {error}"))?;
+    let Conductivity {
+        model: conductivity,
+        material,
+        nonlinear,
+    } = conductivity(definition, materials, temperature_k, what)?;
     let capacity = VolumetricHeatCapacity::declared(number(
         definition,
         "volumetric_heat_capacity_j_m3_k",
@@ -346,12 +475,18 @@ fn build(definition: &J, what: &str) -> Result<Body, Refusal> {
             }
         })
         .collect();
-    let component = ConductionBody::new(solver, problem, &patches, config)
-        .map_err(|error| format!("{what}: {error}"))?;
+    let component = match nonlinear {
+        None => ConductionBody::new(solver, problem, &patches, config),
+        Some(policy) => {
+            ConductionBody::temperature_dependent(solver, problem, &patches, config, policy)
+        }
+    }
+    .map_err(|error| format!("{what}: {error}"))?;
     Ok(Body {
         component,
         start: vec![temperature_k; mesh.vertex_count()],
         temperature_k,
+        material,
         faces: ports
             .iter()
             .map(|&(face, _, _, trace)| (face, trace))
@@ -463,6 +598,7 @@ pub(super) struct Prepared {
 /// `bodies`, built now if no earlier contact named it, and the face's port.
 fn end(
     definitions: &[(String, J)],
+    materials: &Materials,
     bodies: &mut Vec<(String, Body)>,
     text: &str,
     what: &str,
@@ -483,7 +619,7 @@ fn end(
     let body = if let Some(body) = bodies.iter().position(|(known, _)| known == name) {
         body
     } else {
-        let built = build(definition, &format!("elements.{name}"))?;
+        let built = build(definition, materials, &format!("elements.{name}"))?;
         bodies.push((name.to_owned(), built));
         bodies.len() - 1
     };
@@ -643,6 +779,7 @@ fn refinement(definition: &J, what: &str) -> Result<Option<NonmatchingOptions>, 
 /// traces as the kernel's element.
 fn contact(
     definitions: &[(String, J)],
+    materials: &Materials,
     bodies: &mut Vec<(String, Body)>,
     name: &str,
     definition: &J,
@@ -685,8 +822,8 @@ fn contact(
     let between = [between[0].to_owned(), between[1].to_owned()];
     let offset_m = vector(definition, "offset_m", &what)?;
     let options = refinement(definition, &what)?;
-    let (body_a, port_a) = end(definitions, bodies, &between[0], &what)?;
-    let (body_b, port_b) = end(definitions, bodies, &between[1], &what)?;
+    let (body_a, port_a) = end(definitions, materials, bodies, &between[0], &what)?;
+    let (body_b, port_b) = end(definitions, materials, bodies, &between[1], &what)?;
     if body_a == body_b {
         return Err(format!(
             "{what}: between names two traces of one body; a contact joins two bodies"
@@ -748,12 +885,22 @@ fn contact(
 
 /// Every `trace_contact` of the scene with the bodies it names. A scene
 /// with no contact prepares nothing.
-pub(super) fn prepare(definitions: &[(String, J)], scene: &Path) -> Result<Prepared, Refusal> {
+pub(super) fn prepare(
+    definitions: &[(String, J)],
+    materials: &Materials,
+    scene: &Path,
+) -> Result<Prepared, Refusal> {
     let mut prepared = Prepared::default();
     for (name, definition) in definitions {
         if definition.str_field("kind") == Some("trace_contact") {
-            let (wall, declared) =
-                contact(definitions, &mut prepared.bodies, name, definition, scene)?;
+            let (wall, declared) = contact(
+                definitions,
+                materials,
+                &mut prepared.bodies,
+                name,
+                definition,
+                scene,
+            )?;
             prepared.contacts.push((name.clone(), wall, declared));
         }
     }
@@ -761,20 +908,22 @@ pub(super) fn prepare(definitions: &[(String, J)], scene: &Path) -> Result<Prepa
 }
 
 /// A `conduction_body` element: the owner's body on its box mesh, at a
-/// uniform start temperature, which it also returns.
+/// uniform start temperature, which it also returns with the scene material
+/// whose conductivity it takes, if any.
 pub(super) fn body(
     builder: &mut SystemBuilder,
     name: &str,
     definition: &J,
+    materials: &Materials,
     prepared: &mut Prepared,
     what: &str,
-) -> Result<(NodeId, Vec<PortSpec>, f64), Refusal> {
+) -> Result<(NodeId, Vec<PortSpec>, f64, Option<String>), Refusal> {
     let body = match prepared.bodies.iter().position(|(known, _)| known == name) {
         Some(built) => prepared.bodies.swap_remove(built).1,
-        None => build(definition, what)?,
+        None => build(definition, materials, what)?,
     };
     let (node, specs) = add(builder, name, body.component, body.start)?;
-    Ok((node, specs, body.temperature_k))
+    Ok((node, specs, body.temperature_k, body.material))
 }
 
 /// A `trace_contact` element, prepared with its bodies.

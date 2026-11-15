@@ -25,6 +25,21 @@
 //! [`CLAIMED_GAP_K`]; the pair's stored energy and the ledger closed to 1e-9
 //! of what the pair holds. Then the examples through the binary and the
 //! refusals.
+//!
+//! A body whose conductivity is a material's: examples/system/
+//! steel316_heated_bar.json, a 40 x 20 x 20 mm bar of the NASA/TP-2010-216435
+//! 316 stainless card from 290 K, 20 W into one end for 60 s. The reference
+//! is fs-conduction's backward Euler on the same box with the source's
+//! printed k(T) table, stepped by its Newton endpoint ([`owner_bar`]). The
+//! claims, declared before the first run: the compiled pack holds the
+//! printed table; the field's least and greatest temperature equal the
+//! owner's bit for bit after each of the 30 steps; the 1200 J put in is
+//! stored and the ledger closes, each to 1e-9 of the bar's start energy; the
+//! hot end passes the table's 300 K knot and stays below its 400 K end. A
+//! step that would carry the bar past 400 K is refused and changes nothing.
+//! Then the example through the binary with its report's no-claim sentence,
+//! that sentence for a scene that also has a card-backed contact, and the
+//! refusals.
 
 use std::f64::consts::{FRAC_PI_2, PI};
 
@@ -33,18 +48,18 @@ use fs_cli::SystemScene;
 use fs_conduction::fixtures::{box_grid, on_box_face};
 use fs_conduction::interface::{NonmatchingOptions, NonmatchingSurface};
 use fs_conduction::transient::VolumetricHeatCapacity;
-use fs_conduction::transient::backward_euler::{BackwardEuler, StepConfig};
+use fs_conduction::transient::backward_euler::{BackwardEuler, NonlinearStepConfig, StepConfig};
 use fs_conduction::{
     AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS, AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY, BoundaryFace,
-    ConductionMesh, ConductionProblem, ConductivityModel, InterfaceFacePair, InterfaceResistance,
-    InterfaceSurface, LinearConfig, ScalarField, ThermalBoundary, ThermalBoundaryBuilder,
-    ThermalInterfaces,
+    ConductionMesh, ConductionProblem, ConductivityModel, ConductivityTable, InterfaceFacePair,
+    InterfaceResistance, InterfaceSurface, LinearConfig, ScalarField, ThermalBc, ThermalBoundary,
+    ThermalBoundaryBuilder, ThermalInterfaces,
 };
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimSet, InterfaceSystemCard, InterpolationPolicy, MaterialStateId, NormalizedInterfacePack,
-    PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint, SelectionPolicy,
-    SurfaceSpec, SystemContext, UncertaintyModel,
+    NormalizedMaterialCardPack, PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint,
+    SelectionPolicy, SurfaceSpec, SystemContext, UncertaintyModel,
 };
 use fs_rep_mesh::TetComplex;
 
@@ -1099,4 +1114,314 @@ fn a_scene_with_a_contact_or_a_card_does_not_say_it_has_none() {
         }
         eprintln!("{name}: {clause}");
     }
+}
+
+/// The stainless example, its pack and the seed source the pack is compiled
+/// from.
+const STEEL_EXAMPLE: &str = "steel316_heated_bar.json";
+const STEEL_PACK: &str = "steel316/stainless-316-nasa.fsmcdpk";
+const STEEL_SOURCE: &str = "data/matdb/seed-v1/stainless-316-nasa-tp216435/properties.tsv";
+/// The example's heat rate into x_min [W], its step [s] and its steps, and
+/// its declared volumetric heat capacity [J/(m^3 K)]: the table's density
+/// at 300 K, 7960.74 kg/m^3, times its specific heat there, 467.69 J/(kg K),
+/// as the scene writes it.
+const STEEL_POWER_W: f64 = 20.0;
+const STEEL_STEP_S: f64 = 2.0;
+const STEEL_STEPS: u64 = 30;
+const STEEL_RHO_C_J_M3_K: f64 = 3_723_158.490_6;
+const STEEL_START_K: f64 = 290.0;
+
+/// The conductivity table the seed source prints, from its `curve` row:
+/// [K, W/(m K)].
+fn printed_conductivity() -> Vec<(f64, f64)> {
+    let path = format!("{}/../../{STEEL_SOURCE}", env!("CARGO_MANIFEST_DIR"));
+    let text = std::fs::read_to_string(path).unwrap();
+    let row = text
+        .lines()
+        .find(|line| line.starts_with("curve\tthermal-conductivity-273-400k\t"))
+        .expect("the source has the conductivity curve");
+    let fields: Vec<&str> = row.split('\t').collect();
+    assert_eq!(fields[3], "thermal_conductivity");
+    assert_eq!(
+        (fields[4], fields[5], fields[6], fields[8]),
+        ("temperature", "K", "W/m/K", "linear")
+    );
+    fields[7]
+        .split(',')
+        .map(|knot| {
+            let (kelvin, conductivity) = knot.split_once(':').unwrap();
+            (kelvin.parse().unwrap(), conductivity.parse().unwrap())
+        })
+        .collect()
+}
+
+/// The reference: fs-conduction's backward Euler on the example's box with
+/// `printed` as its conductivity, stepped by its Newton endpoint under the
+/// owner's default policy, with the scene's step and budgets and the heat
+/// rate as a uniform flux over x_min, whose area is the faces' summed in
+/// boundary order, as a port sums them. The field's least and greatest
+/// temperature after each step.
+fn owner_bar(cx: &fs_exec::Cx<'_>, printed: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
+    let (complex, positions) = box_grid([8, 2, 2], [0.04, 0.02, 0.02]);
+    let mesh = ConductionMesh::new(complex, positions).unwrap();
+    let heated = |face: &BoundaryFace| on_box_face(face.centroid[0], 0.0);
+    let area_m2: f64 = mesh
+        .boundary()
+        .iter()
+        .filter(|face| heated(face))
+        .map(|face| face.area)
+        .sum();
+    let flux = ThermalBc::neumann(-STEEL_POWER_W / area_m2).unwrap();
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region("x_min", heated, flux)
+        .unwrap()
+        .adiabatic_remainder()
+        .finish()
+        .unwrap();
+    let capacity = VolumetricHeatCapacity::declared(STEEL_RHO_C_J_M3_K).unwrap();
+    let solver = BackwardEuler::uniform(cx, &mesh, capacity).unwrap();
+    let material =
+        ConductivityModel::isotropic(ConductivityTable::declared_curve(printed).unwrap());
+    let source = ScalarField::Uniform(0.0);
+    let problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &material,
+        element_materials: None,
+        source: &source,
+    };
+    let config = StepConfig {
+        linear: LinearConfig {
+            tolerance: 1.0e-13,
+            max_iterations: 4000,
+            restart: 20,
+        },
+        energy_tolerance_j: 1.0e-8,
+    };
+    let mut field = vec![STEEL_START_K; mesh.vertex_count()];
+    let mut spans = Vec::new();
+    for _ in 0..STEEL_STEPS {
+        let policy = NonlinearStepConfig::default();
+        let solved = solver
+            .advance_nonlinear(cx, problem, None, &field, STEEL_STEP_S, config, policy)
+            .unwrap();
+        field = solved.step.temperature;
+        spans.push(span(field.iter().copied()));
+    }
+    spans
+}
+
+#[test]
+fn a_body_of_a_card_material_is_the_owner_stepping_the_printed_conductivity_by_newton() {
+    let printed = printed_conductivity();
+    let pack = NormalizedMaterialCardPack::from_bytes(&std::fs::read(example(STEEL_PACK)).unwrap())
+        .unwrap();
+    let claims = pack.card().claims().claims_for("thermal-conductivity");
+    assert_eq!(claims.len(), 1);
+    let PropertyValue::Curve {
+        knots: compiled, ..
+    } = &claims[0].1.value
+    else {
+        panic!("the conductivity is not a curve");
+    };
+    assert_eq!(compiled, &printed, "the pack is not the source's table");
+    let text = std::fs::read_to_string(example(STEEL_EXAMPLE)).unwrap();
+    // The bar's energy at the start, rho c V T, and the heat put in.
+    let start_j = STEEL_RHO_C_J_M3_K * 0.04 * 0.02 * 0.02 * STEEL_START_K;
+    let put_in_j = STEEL_POWER_W * 60.0;
+    scene_context(|cx, _| {
+        let owner = owner_bar(cx, printed);
+        let mut scene = SystemScene::from_text(&text, example(STEEL_EXAMPLE)).unwrap();
+        let mut index = 0;
+        while scene.advance(f64::MAX, cx).unwrap() {
+            let low = probe(&scene, "bar.min_temperature_k");
+            let high = probe(&scene, "bar.max_temperature_k");
+            assert!(
+                low.to_bits() == owner[index].0.to_bits()
+                    && high.to_bits() == owner[index].1.to_bits(),
+                "step {index}: the scene's {low} .. {high} K against the owner's {:?} K",
+                owner[index]
+            );
+            index += 1;
+        }
+        let ledger = scene.ledger();
+        let (stored, residual) = (ledger.stored_change_j(), ledger.energy_residual_j());
+        let (low, high) = owner[owner.len() - 1];
+        eprintln!(
+            "{} steps; bar {low} .. {high} K, x_min {} K; stored change {stored} J of {put_in_j} J in, ledger residual {residual:e} J",
+            scene.steps(),
+            probe(&scene, "bar.x_min.temperature_k"),
+        );
+        assert_eq!(scene.steps(), STEEL_STEPS);
+        assert_eq!(index, owner.len());
+        assert!(
+            (stored - put_in_j).abs() <= 1e-9 * start_j,
+            "stored {stored} J"
+        );
+        assert!(
+            residual.abs() <= 1e-9 * start_j,
+            "ledger residual {residual:e} J"
+        );
+        // The run crosses the table's interior knot and stays on the table.
+        assert!(300.0 < high && high < 400.0, "{high} K");
+    });
+}
+
+#[test]
+fn the_material_body_example_runs_through_the_binary_and_reports_its_source() {
+    let path = example(STEEL_EXAMPLE);
+    let (code, json, stderr) = run_binary(&["--json", "system", &path]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(value(&json, &element("bar"), "x_min.temperature_k") > STEEL_START_K);
+    for member in [
+        "\"material_bindings\":{\"bar\":[\"steel316\"]}",
+        "\"has_conductivity\":true",
+        "\"property\":\"thermal-conductivity\"",
+    ] {
+        assert!(json.contains(member), "{member} not in {json}");
+    }
+    let (code, text, stderr) = run_binary(&["system", &path]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(text.contains("bar <- steel316"), "{text}");
+    for said in [
+        "source resolution is limited to declared pure-phase thermal laws; no contact, friction,",
+        "with one declared conductivity or a scene material's k(T) curve, stepped by \
+         fs-conduction's Newton endpoint and refused off the curve's span, and one declared \
+         volumetric heat capacity",
+        "no internal source, temperature-dependent heat capacity (a body takes only a \
+         material's k(T)), imported mesh, radiation or contact trace",
+    ] {
+        assert!(text.contains(said), "{said} not in {text}");
+    }
+    assert!(
+        !text.contains("no material-card resolution")
+            && !text.contains("temperature-dependent conductivity"),
+        "{text}"
+    );
+}
+
+/// The card example with the stainless bar, its material and its heater
+/// beside the two blocks: a card-backed contact and a material body.
+fn blocks_beside_a_bar() -> String {
+    let blocks = std::fs::read_to_string(example("two_blocks_atkins.json")).unwrap();
+    let bar = std::fs::read_to_string(example(STEEL_EXAMPLE)).unwrap();
+    let part = |from: &str, to: &str| {
+        let start = bar.find(from).expect("the part begins");
+        let end = start + bar[start..].find(to).expect("the part ends");
+        &bar[start..end]
+    };
+    let materials = part("  \"materials\": {", "  \"elements\"");
+    let element = part("    \"bar\": {", "\n  },\n  \"connections\"");
+    let heater = part("    {\"prescribe\"", "\n  ]");
+    let elements = format!("{materials}  \"elements\": {{\n{element},\n");
+    let connections = format!("  \"connections\": [\n{heater},\n");
+    blocks
+        .replacen("  \"elements\": {\n", &elements, 1)
+        .replacen("  \"connections\": [\n", &connections, 1)
+}
+
+#[test]
+fn a_scene_with_a_material_body_and_a_card_backed_contact_names_both_sources() {
+    let text = blocks_beside_a_bar();
+    let scene = SystemScene::from_text(&text, example("two_blocks_atkins.json")).unwrap();
+    let report = scene.render_text();
+    assert!(
+        report.contains(
+            "source resolution is limited to declared pure-phase thermal laws and trace \
+             contacts' interface cards; no mechanical contact, friction,"
+        ) && !report.contains("no material-card resolution"),
+        "{report}"
+    );
+}
+
+#[test]
+fn material_body_scenes_refuse_mixed_sources_off_span_starts_traces_and_bad_policies_by_name() {
+    let base = std::fs::read_to_string(example(STEEL_EXAMPLE)).unwrap();
+    let material = "\"material\": \"steel316\",";
+    let newton = |policy: &str| format!("{material} \"newton\": {policy},");
+    let cases = [
+        (
+            "both",
+            material,
+            "\"material\": \"steel316\", \"conductivity_w_m_k\": 15.0,".to_owned(),
+            "the conductivity is conductivity_w_m_k or a material's, not both",
+        ),
+        (
+            "unknown",
+            material,
+            "\"material\": \"steel317\",".to_owned(),
+            "unknown material \"steel317\"",
+        ),
+        (
+            "no conductivity",
+            ",\n      \"conductivity_property\": \"thermal-conductivity\",\n      \"conductivity_kind\": \"thermal-conductivity\"",
+            String::new(),
+            "has no conductivity",
+        ),
+        (
+            "cold",
+            "\"temperature_k\": 290.0,",
+            "\"temperature_k\": 250.0,".to_owned(),
+            "temperature_k 250 K lies outside material \"steel316\"'s conductivity, 273 K to 400 K",
+        ),
+        (
+            "trace",
+            "\"ports\": [\"x_min\"]",
+            "\"traces\": [\"x_min\"]".to_owned(),
+            "a body with a material's conductivity has mean ports only",
+        ),
+        (
+            "newton field",
+            material,
+            newton("{\"damping\": 0.5}"),
+            "unsupported field \"damping\"",
+        ),
+        (
+            "newton budget",
+            material,
+            newton("{\"max_iterations\": 0}"),
+            "max_iterations is a whole number from 1 to 1000",
+        ),
+        (
+            "newton rtol",
+            material,
+            newton("{\"residual_rtol\": 2.0}"),
+            "positive Newton budget, rtol in (0,1)",
+        ),
+    ];
+    for (case, from, to, reason) in cases {
+        assert!(base.contains(from), "{case}: test fixture changed");
+        let text = base.replacen(from, &to, 1);
+        let Err(error) = SystemScene::from_text(&text, example(STEEL_EXAMPLE)) else {
+            panic!("{case}: admitted");
+        };
+        eprintln!("{case}: exit {}: {}", error.exit_code, error.message);
+        assert!(error.message.contains(reason), "{case}: {}", error.message);
+    }
+    // A declared conductivity takes no Newton policy.
+    let slabs = two_slabs(4);
+    let declared = "\"temperature_k\": 400.0,";
+    assert!(slabs.contains(declared));
+    let (code, stderr) = refused(
+        "newton declared",
+        &slabs.replacen(declared, "\"temperature_k\": 400.0, \"newton\": {},", 1),
+    );
+    assert_eq!(code, 3, "{stderr}");
+    assert!(
+        stderr.contains("a body with conductivity_w_m_k takes none"),
+        "{stderr}"
+    );
+    // 2000 W carries the heated end past the table's 400 K in the first
+    // step: the owner refuses the step and the scene does not move.
+    let hot = base.replacen("\"heat_rate_w\": 20.0", "\"heat_rate_w\": 2000.0", 1);
+    let mut scene = SystemScene::from_text(&hot, example(STEEL_EXAMPLE)).unwrap();
+    let before = scene.render_json();
+    scene_context(|cx, _| {
+        let error = scene.advance(f64::MAX, cx).unwrap_err();
+        eprintln!("2000 W: exit {}: {}", error.exit_code, error.message);
+        assert_eq!(error.exit_code, fs_cli::exit::REFUSED);
+        assert!(error.message.contains("LineSearchFailed"), "{error}");
+        assert_eq!(scene.render_json(), before);
+        assert_eq!(scene.steps(), 0);
+    });
 }

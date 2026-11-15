@@ -1118,8 +1118,9 @@ Tests in `tests/system_command/conduction.rs`:
 
 No claim: the entropy generated inside a body is reported as zero, so the
 scene's entropy totals are a lower bound; one material, no internal source,
-no temperature-dependent conductivity, no mesh but the box grid, a uniform
-flux over each whole face under `ports`, and no radiation.
+no temperature-dependent conductivity but a scene material's (below), no
+mesh but the box grid, a uniform flux over each whole face under `ports`,
+and no radiation.
 
 A `conduction_body` may also name faces under `traces`. A trace is the
 owner's `PatchPort::Trace`: a field heat port with one integrated heat load
@@ -1229,8 +1230,8 @@ per-face map. A declared one is not measured and depends on nothing. A
 card's is read once at the declared state: it follows neither the faces'
 temperatures nor any pressure field, the card's uncertainty is not
 propagated, and nothing checks that the two bodies are the card's two
-surfaces, since a conduction body has declared properties and no material
-card. The contact generates
+surfaces, since the bodies of a contact have declared properties (a body
+with a material's conductivity has no traces). The contact generates
 entropy where the heat crosses and the ledger books the nodal sum at its
 ports; no order is claimed for the gap between the two. The reference is
 compared in the energy crossed and in eight least and greatest
@@ -1252,6 +1253,59 @@ sentence, in the text and the JSON report, of `two_slabs.json` and
 `struck_mode.json`, and the trace example with the struck mode's elements
 beside its slabs. `adaptive` refuses a contact interface and a conduction
 body, so its own sentence meets neither.
+
+A `conduction_body` may take its conductivity from a card in place of
+`conductivity_w_m_k`: `material` names a material of the scene's
+`materials` section whose declaration has a `conductivity_property`. The
+body takes the `ConductivityCurve` that section prepared, the card's k(T)
+over the material's declared span, as `ConductivityTable::declared_curve`
+on the same knots. The start temperature must lie in the span. A curve
+that varies puts the body behind its ports with
+`ConductionBody::temperature_dependent`, so every step is the owner's
+`advance_nonlinear` under `newton`: `max_iterations` (1 to 1000, default
+32), `residual_rtol` and `residual_atol_j` (defaults 1e-10 and 1e-10 J),
+which the owner validates. A step that leaves the curve is the owner's
+refusal, and the scene does not move. A flat curve steps on the linear path
+and refuses `newton`, as a declared conductivity does. The heat capacity
+stays `volumetric_heat_capacity_j_m3_k`, a declared constant: the owner
+holds it fixed, and the card's Cp(T) and density are not used. Such a body
+has mean ports only. Its element records the material, so the report's
+`material_bindings` and the text "<element> <- <material>" line name it, and
+the no-claim sentence says the body takes only k(T) and lists
+temperature-dependent heat capacity as absent.
+
+Tests in `tests/system_command/conduction.rs`, on
+`examples/system/steel316_heated_bar.json`: a 40 x 20 x 20 mm bar of the
+NASA/TP-2010-216435 316 stainless card (pack `examples/system/steel316/`,
+compiled from `data/matdb/seed-v1/stainless-316-nasa-tp216435`; k = 12.99,
+13.46 and 15.14 W/m K at 273, 300 and 400 K) from 290 K, 20 W into `x_min`
+for 60 s in steps of 2 s. Claims declared before the first run:
+- The compiled card's conductivity claim is the table the source's
+  `properties.tsv` prints. The scene's field's least and greatest
+  temperature equal, bit for bit after each of the 30 steps,
+  fs-conduction's `advance_nonlinear` on the same box with that printed
+  table, the owner's default Newton policy and the heat rate as a uniform
+  flux over x_min. The 1200 J put in is stored and the ledger closes, each
+  within 1e-9 of the bar's start energy. The hot end passes the 300 K knot
+  and stays below 400 K.
+- The example through the binary: exit 0, the binding, the conductivity's
+  source receipt, and the no-claim sentence; a scene with the bar beside
+  the card example's blocks says its source resolution covers the pure-phase
+  thermal laws and the trace contact's interface card.
+- Refusals, by name: `material` beside `conductivity_w_m_k`; an unknown
+  material; a material without a conductivity; a start at 250 K, below the
+  curve; a trace on such a body; an unknown `newton` field, a budget of 0
+  and a relative tolerance of 2 (the owner's refusal); `newton` on a
+  declared conductivity (exit 3). 2000 W, which would carry the end past
+  400 K in the first step, is refused at that step (`LineSearchFailed`,
+  exit 4) and the scene's report is unchanged.
+
+No claim for a body with a material's conductivity: only k(T) comes from
+the card, at the material's fixed declared context and with its nominal
+values (the card's uncertainty is not propagated); the heat capacity is a
+declared constant, here the table's 300 K values; the card is generic 316
+with no product form or heat treatment; no trace, contact or radiation
+with such a body is tested.
 
 `thermal_timeline` lowers to `fs_thermal::component::ThermalTimeline` over
 an `fs_thermal::enthalpy::DepositionSimulation`, stepped by the owner's
