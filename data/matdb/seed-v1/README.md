@@ -3304,6 +3304,50 @@ Coolant-wetting references:
 - <https://doi.org/10.1080/08916152.2026.2615768>
 - <https://creativecommons.org/licenses/by-nc-nd/4.0/>
 
+## SS304 grease-joint thermal resistance tranche (Chang and Hernandez 2026)
+
+These are the first seed packs that carry `area-specific-thermal-contact-resistance`,
+the property the conduction solve resolves for a declared joint. Before them, the only
+such card in the repository was the `examples/contact-pair` fixture.
+
+Each of the four ordered cards is one installed joint between two Type 304
+stainless-steel coupon faces:
+
+| Pack | Grease (applied bondline) | Environment | R'' [m^2 K/W] | T [K] |
+|---|---|---|---|---|
+| `chang-2026-ss304-braycote601ef-vacuum-interface/` | Braycote 601EF (128 um) | vacuum | `6.624e-4` | 320.65..334.45 |
+| `chang-2026-ss304-braycote601ef-ambient-interface/` | Braycote 601EF (128 um) | chamber air | `6.930e-4` | 302.05..315.65 |
+| `chang-2026-ss304-krytox-lvp-vacuum-interface/` | Krytox LVP (50.5 um) | vacuum | `4.196e-4` | 319.15..331.85 |
+| `chang-2026-ss304-krytox-lvp-ambient-interface/` | Krytox LVP (50.5 um) | chamber air | `4.310e-4` | 299.95..313.15 |
+
+- **Source.** The joint means printed under Table 2 of the TFAWS 2026 paper (NTRS 20260008001).
+  They come from NASA Marshall's TAIMV stack: four 3.175 mm SS304 coupons with three internal
+  grease joints, under the fixture-weight preload of nominal 3.10..3.60 kPa. The surfaces are
+  1.60 um RMS and were cleaned with acetone, then isopropyl alcohol. Cases B..D are used.
+- **Validity.**
+  - `T` spans that pack's Table 2 case mean temperatures.
+  - `thickness` is the point the reduction uses (the applied bondline).
+  - Those are the two axes a `tim` joint binding queries, so a scene must declare that
+    bondline exactly.
+- **Uncertainty.** The source states a 6.15..6.75 % combined standard relative uncertainty.
+  The packs take the upper end, `0.0675`, as one standard deviation (confidence `0.68`).
+  That reading is these packs', not the source's: the budget is not a traceable interval, and
+  repeatability and reassembly are not in it.
+- **What the cards do not cover.**
+  - Pressure is not a query axis. A query at another preload resolves, but lies outside the source.
+  - Braycote is the fixture model's calibration configuration. Krytox is its transfer case.
+  - The Krytox pair is read in the order of the Braycote sentence before it: vacuum, then ambient.
+  - The values are installed-joint totals. They are not intrinsic grease conductivities, dry
+    contacts, or values for other surfaces, preloads or bondlines.
+
+NTRS records the paper as Public Use Permitted, with no third-party material. The
+packs carry attributed factual rows only.
+
+Grease-joint references:
+
+- <https://ntrs.nasa.gov/citations/20260008001>
+- <https://ntrs.nasa.gov/api/citations/20260008001/downloads/ThermalControlProtection_38_TFAWS_Paper.pdf>
+
 To compile the sources into canonical runtime packs:
 
 ```bash
@@ -3438,6 +3482,10 @@ cargo run -p xtask -- matdb-pack \
 cargo run -p xtask -- matdb-pack \
   --manifest data/matdb/seed-v1/yilmaz-2026-a2017-seiken-llc-ra3-wetting/manifest.tsv \
   --out /path/to/yilmaz-2026-a2017-seiken-llc-ra3-wetting.fsintpk
+
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/chang-2026-ss304-braycote601ef-vacuum-interface/manifest.tsv \
+  --out /path/to/chang-2026-ss304-braycote601ef-vacuum-interface.fsintpk
 ```
 
 ## No-claim boundary

@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fs_matdb::{NormalizedInterfacePack, PropertyValue, UncertaintyModel};
+use fs_matdb::{
+    NormalizedInterfacePack, PropertyValue, QueryPoint, SelectionPolicy, UncertaintyModel,
+};
 use fs_qty::Dims;
 
 const INTERFACE_COMPILER_ID: &str = "frankensim-matdb-interface-pack-compiler-v1";
@@ -26,6 +28,49 @@ const A2017_LLC_RA005_MANIFEST: &str =
     "data/matdb/seed-v1/yilmaz-2026-a2017-seiken-llc-ra005-wetting/manifest.tsv";
 const A2017_LLC_RA3_MANIFEST: &str =
     "data/matdb/seed-v1/yilmaz-2026-a2017-seiken-llc-ra3-wetting/manifest.tsv";
+/// One installed grease joint of Chang and Hernandez (TFAWS 2026, NTRS 20260008001).
+struct GreaseJoint {
+    pack_id: &'static str,
+    grease: &'static str,
+    /// Mean joint resistance [m^2 K/W].
+    resistance: f64,
+    /// Span of the case mean temperatures [K].
+    kelvin: (f64, f64),
+    /// Applied bondline thickness [m].
+    thickness_m: f64,
+}
+const CHANG_2026_SS304_GREASE_JOINTS: [GreaseJoint; 4] = [
+    GreaseJoint {
+        pack_id: "chang-2026-ss304-braycote601ef-vacuum-interface",
+        grease: "Braycote 601EF",
+        resistance: 6.624e-4,
+        kelvin: (320.65, 334.45),
+        thickness_m: 128e-6,
+    },
+    GreaseJoint {
+        pack_id: "chang-2026-ss304-braycote601ef-ambient-interface",
+        grease: "Braycote 601EF",
+        resistance: 6.930e-4,
+        kelvin: (302.05, 315.65),
+        thickness_m: 128e-6,
+    },
+    GreaseJoint {
+        pack_id: "chang-2026-ss304-krytox-lvp-vacuum-interface",
+        grease: "Krytox LVP",
+        resistance: 4.196e-4,
+        kelvin: (319.15, 331.85),
+        thickness_m: 50.5e-6,
+    },
+    GreaseJoint {
+        pack_id: "chang-2026-ss304-krytox-lvp-ambient-interface",
+        grease: "Krytox LVP",
+        resistance: 4.310e-4,
+        kelvin: (299.95, 313.15),
+        thickness_m: 50.5e-6,
+    },
+];
+/// The resistance property the conduction solve and its `tim` joint binding resolve.
+const CONTACT_RESISTANCE_PROPERTY: &str = "area-specific-thermal-contact-resistance";
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
 fn workspace_path(relative: &str) -> PathBuf {
@@ -888,6 +933,99 @@ fn g3_cli_compiles_committed_a2017_seiken_llc_air_wetting_interfaces() {
             assert!(
                 pack.card().claims_for(refused_property).is_empty(),
                 "wetting source crossed the {refused_property} no-claim boundary"
+            );
+        }
+        assert!(decisions.contains("\"reason_code\":\"interface_context_admitted\""));
+    }
+}
+
+/// Each joint pack holds one resistance claim with the printed mean, the stated uncertainty and
+/// the tested temperatures and bondline, and the query a `tim` joint binding forms (axes `T` and
+/// `thickness`, fs-project `interface_state::query_point`) resolves it there and refuses it
+/// elsewhere.
+#[test]
+fn g3_cli_compiles_committed_chang_2026_ss304_grease_joints() {
+    for &GreaseJoint {
+        pack_id,
+        grease,
+        resistance,
+        kelvin: (low_k, high_k),
+        thickness_m,
+    } in &CHANG_2026_SS304_GREASE_JOINTS
+    {
+        let (pack, decisions) =
+            compile_twice(&format!("data/matdb/seed-v1/{pack_id}/manifest.tsv"));
+
+        assert_eq!(pack.pack_id(), pack_id);
+        for surface in [pack.card().surface_a(), pack.card().surface_b()] {
+            assert_eq!(
+                surface.material.chemistry,
+                "Type 304 stainless steel (SS304)"
+            );
+        }
+        assert_ne!(
+            pack.card().surface_a().texture_frame,
+            pack.card().surface_b().texture_frame,
+            "{pack_id}: the two coupon faces collapsed"
+        );
+        assert_eq!(pack.card().medium(), "grease-filled-contact");
+        assert!(
+            pack.card()
+                .third_body()
+                .is_some_and(|body| body.starts_with(grease)),
+            "{pack_id}: third body is not {grease}"
+        );
+        assert_eq!(pack.claims_pack().claims().claim_count(), 1);
+
+        let claims = pack.card().claims_for(CONTACT_RESISTANCE_PROPERTY);
+        assert_eq!(claims.len(), 1, "{pack_id}: one resistance claim");
+        let claim = claims[0].1;
+        let PropertyValue::Scalar { value, dims } = &claim.value else {
+            panic!("{pack_id}: the resistance is not a scalar");
+        };
+        assert_eq!(value.to_bits(), resistance.to_bits(), "{pack_id}");
+        assert_eq!(*dims, Dims([0, -1, 3, 1, 0, 0]), "{pack_id}: m^2 K/W");
+        assert_eq!(
+            claim.uncertainty,
+            UncertaintyModel::RelativeHalfWidth {
+                fraction: 0.0675,
+                confidence: 0.68
+            },
+            "{pack_id}"
+        );
+        assert_eq!(claim.validity.bound("T"), Some((low_k, high_k)));
+        assert_eq!(
+            claim.validity.bound("thickness"),
+            Some((thickness_m, thickness_m))
+        );
+        assert_eq!(claim.validity.bounds().len(), 2);
+
+        let at = |kelvin: f64, thickness: Option<f64>| {
+            let point = QueryPoint::new().with("T", kelvin).expect("finite T");
+            let point = match thickness {
+                Some(metres) => point.with("thickness", metres).expect("finite thickness"),
+                None => point,
+            };
+            pack.card().claims().query(
+                CONTACT_RESISTANCE_PROPERTY,
+                &point,
+                SelectionPolicy::SingleClaimOnly,
+            )
+        };
+        for kelvin in [low_k, 0.5 * (low_k + high_k), high_k] {
+            let answer = at(kelvin, Some(thickness_m))
+                .unwrap_or_else(|error| panic!("{pack_id} at {kelvin} K: {error:?}"));
+            assert_eq!(answer.evidence.value.value.to_bits(), resistance.to_bits());
+        }
+        for (kelvin, thickness) in [
+            (low_k - 1.0, Some(thickness_m)),
+            (high_k + 1.0, Some(thickness_m)),
+            (low_k, Some(2.0 * thickness_m)),
+            (low_k, None),
+        ] {
+            assert!(
+                at(kelvin, thickness).is_err(),
+                "{pack_id}: resolved outside the tested joint at {kelvin} K, {thickness:?} m"
             );
         }
         assert!(decisions.contains("\"reason_code\":\"interface_context_admitted\""));
