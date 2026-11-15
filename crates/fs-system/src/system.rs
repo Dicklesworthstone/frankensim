@@ -3431,6 +3431,12 @@ impl System {
                         && let Some(kept) = found.column_of(column, self.node_outputs(node).len())
                     {
                         self.scratch_outputs[..kept.len()].copy_from_slice(kept);
+                    } else if self.given_on_line(block, index) {
+                        // A flow of the line that no effort of its component
+                        // moves: its column is held at zero, and nothing is
+                        // asked at a perturbation of it (`given_on_line`).
+                        let width = self.node_outputs(node).len();
+                        self.scratch_outputs[..width].fill(0.0);
                     } else if let Some(shorter) =
                         self.tangent_column(node, local, dt_s, group_scale, cx)?
                     {

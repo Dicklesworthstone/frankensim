@@ -778,6 +778,21 @@ that locates an event (a friction interface that cuts the step at a stop,
   that ended at a stop a second time, 5e-10 s short of it; the step ended
   with a slip of 1.3e-8 m/s where it should have ended at rest, and the
   step after it was refused, `StepUnderflow`.)
+- A flow of the line, or the end of one, that no effort of the line
+  component moves (its row of the line's matrix is zero: a side that a
+  velocity source in the block moves) is not differenced. Its column is
+  held at zero and no proposal is made at a perturbation of it; the
+  component reads it as a given end. A perturbation of it is a jump of that
+  end that nothing in the block makes, and a component that locates the
+  stop of the slip a jump starts asks on both sides for the step that ends
+  there: `fs-tribo`'s friction interface stuck to a belt moved by a
+  velocity source had every step cut to `2^-27` s, the stop of the
+  kernel's own `2^-26` m/s, and crawled (bead `.5.8.1`). Where a line has
+  such a flow the arithmetic is not what it was before (2026-11-14): the
+  factors hold a zero where the difference was, and the rounding estimated
+  for the rows that read the component lacks that column's part.
+  `tests/load_line.rs`: a slider beside such a side is asked as for one
+  differenced column, beside a free mass as for two.
 - The component on a load line is first asked at the released flows of the
   step. A block's solve starts from the flows the last step ended with, and
   before the first step from none; for the line's component those are not

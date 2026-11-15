@@ -6603,3 +6603,130 @@ fn a_held_mass_is_not_proposed_or_differentiated_again_where_finding_the_line_al
     assert!(assembled >= 1, "no step of 200 assembled");
     assert_eq!(system.steps(), 200);
 }
+
+/// A stuck slider between the mass of `pushed_by`, pushed by 4 N sin(pi t),
+/// and a side `b` bonded to a velocity source at 1 m/s (`moved`) or to a
+/// free mass of 3 kg (not `moved`), both masses moving with the side; the
+/// slider's heat to a boundary at 300 K. 200 steps of 1 ms; per step, the
+/// updates and the slider's asks. Every step is taken whole and held.
+fn asks_beside(moved: bool) -> Vec<(usize, usize)> {
+    let dt = 1.0e-3_f64;
+    let speed = if moved { 1.0 } else { 0.0 };
+    let rubbing = Counted::new(slider());
+    let (asks, _) = rubbing.counts();
+    let mut builder = SystemBuilder::new();
+    let mass = builder
+        .add_with_tangent(
+            "mass",
+            Mass::new(MASS_KG).unwrap(),
+            Motion {
+                position_m: 0.0,
+                velocity_m_s: speed,
+            },
+        )
+        .unwrap();
+    let rubbing = builder
+        .add_on_line("slider", rubbing, Slip::stuck())
+        .unwrap();
+    let push = Waveform::sine(4.0, PI, 0.0, 0.0).unwrap();
+    let pusher = builder
+        .add_with_tangent("push", Force::new(push), SourceAccount::default())
+        .unwrap();
+    builder
+        .common_flow(
+            port(&builder, mass, "p"),
+            &[port(&builder, rubbing, "a"), port(&builder, pusher, "p")],
+        )
+        .unwrap();
+    let side = if moved {
+        builder
+            .add_with_tangent(
+                "side",
+                FlowSource::new(Waveform::constant(speed).unwrap()),
+                SourceAccount::default(),
+            )
+            .unwrap()
+    } else {
+        builder
+            .add_with_tangent(
+                "side",
+                Mass::new(3.0).unwrap(),
+                Motion {
+                    position_m: 0.0,
+                    velocity_m_s: 0.0,
+                },
+            )
+            .unwrap()
+    };
+    builder
+        .bond(port(&builder, rubbing, "b"), port(&builder, side, "p"))
+        .unwrap();
+    builder
+        .boundary(
+            port(&builder, rubbing, "heat"),
+            Box::new(|_, _, values| values[0] = 300.0),
+        )
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    let mut rows = Vec::new();
+    with_cx(|cx| {
+        for step in 0..200 {
+            let before = read(&asks);
+            let report = system
+                .step(dt, cx)
+                .unwrap_or_else(|error| panic!("step {step}: {error}"));
+            assert_eq!(
+                (report.dt_s, report.shortenings),
+                (dt, 0),
+                "step {step} was cut"
+            );
+            assert!(
+                system.state::<Slip>(rubbing).unwrap().is_stuck(),
+                "step {step}"
+            );
+            rows.push((report.iterations as usize, read(&asks) - before));
+        }
+    });
+    rows
+}
+
+#[test]
+fn a_flow_of_the_line_no_effort_moves_is_not_differenced() {
+    // Bead `.5.8.1`. A side moved by a velocity source gives the slider's
+    // `b` what the source gives, whatever the slider's force: its row of
+    // the line's matrix is zero, and the slider reads it as a given end. The
+    // kernel does not difference that column. A component that locates the
+    // stop of a slip read a perturbation of it as a jump of the side, asked
+    // on both sides for the step that ends at the stop, and had every step
+    // cut to that (`fs-tribo`'s friction interface, `2^-27` s for `2^-26`
+    // m/s). So the slider is asked as for one differenced column, `a`:
+    // once, or three times when an assembly judges the first check, or `1 +
+    // 2 n` with `n` updates, as where a boundary gives `b`
+    // (`a_held_mass_is_not_proposed_or_differentiated_again_where_finding_the_line_already_did`).
+    //
+    // A side that the slider's force does move (a free mass) is still
+    // differenced: two columns, so once or four times with no update and
+    // `1 + 3 n` with `n`.
+    for (moved, columns) in [(true, 1), (false, 2)] {
+        let rows = asks_beside(moved);
+        let mut assembled = 0;
+        for (step, &(n, asks)) in rows.iter().enumerate() {
+            let expected = if n == 0 && asks == 1 {
+                // An exact fixed point at the first check: no assembly.
+                1
+            } else if n == 0 {
+                assembled += 1;
+                2 + columns
+            } else {
+                assembled += 1;
+                1 + (1 + columns) * n
+            };
+            assert_eq!(
+                asks, expected,
+                "side moved by a source: {moved}; step {step}: {n} updates"
+            );
+        }
+        eprintln!("side moved by a source: {moved}; steps that assembled: {assembled} of 200");
+        assert!(assembled >= 1, "no step of 200 assembled");
+    }
+}

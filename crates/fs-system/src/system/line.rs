@@ -424,6 +424,36 @@ impl System {
         Some((crossing, ROUNDING_UNITS * f64::EPSILON * terms))
     }
 
+    /// Whether input `index` is a flow of `block`'s load line, or the end of
+    /// one, that no effort of the line component moves: its row of the
+    /// line's matrix is zero. The block then gives it whatever the component
+    /// does (a velocity source's flow), and the component reads it as a
+    /// given end.
+    ///
+    /// Its column is not differenced. A perturbation of it is a jump of a
+    /// given end that nothing in the block makes, and a component that
+    /// locates the stop of the slip a jump starts asks, on both sides of
+    /// the iterate, for the step that ends there: a stuck friction interface
+    /// beside a velocity source had every step cut to the `2^-27` s the
+    /// kernel's own perturbation of `2^-26` m/s took to stop (bead
+    /// `.5.8.1`).
+    pub(super) fn given_on_line(&self, block: usize, index: usize) -> bool {
+        let Some(line) = self.lines[block].as_ref() else {
+            return false;
+        };
+        let width = line.places.len();
+        let row = if let Some(flow) = line.places.iter().position(|place| place.0 == index) {
+            flow
+        } else if let Some(end) = line.ends.iter().position(|end| end.0 == index) {
+            width + end
+        } else {
+            return false;
+        };
+        line.compliance[row * width..(row + 1) * width]
+            .iter()
+            .all(|&value| value == 0.0)
+    }
+
     /// Replace the released flows of `block`'s line by the flows on the
     /// line at the efforts just accepted: the ports, the audit and the
     /// ledger see what crossed. The rounding of these flows is already in
