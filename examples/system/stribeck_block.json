@@ -1,0 +1,20 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 3,
+  "step_s": 0.01,
+  "elements": {
+    "block": {"kind": "mass", "mass_kg": 2.0, "velocity_m_s": 3.0},
+    "friction": {
+      "kind": "friction_interface",
+      "normal_n": 20.0,
+      "law": {"stribeck": {"static_mu": 0.5, "kinetic_mu": 0.2, "characteristic_speed_m_s": 0.5, "viscous_per_speed_s_m": 0.05}},
+      "slip_m_s": 3.0
+    },
+    "lining": {"kind": "heat_capacity", "capacity_j_k": 50.0, "temperature_k": 300.0}
+  },
+  "connections": [
+    {"join": ["block.p", "friction.a"]},
+    {"prescribe": "friction.b", "velocity_m_s": 0.0},
+    {"join": ["lining.heat", "friction.heat"]}
+  ]
+}

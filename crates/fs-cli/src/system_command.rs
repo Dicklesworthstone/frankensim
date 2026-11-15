@@ -8,6 +8,7 @@
 //! Nothing here integrates anything: every number comes from the kernel and its elements.
 
 mod adaptive_metric;
+mod friction;
 mod hydraulic;
 mod materials;
 mod phs;
@@ -183,6 +184,26 @@ Elements (ports in brackets; SI units in every field name):
                  span_b. Tell every accelerating prescribed end its span.
                  Reports slip_m_s, stuck (1 or 0), force_n on a, and heat_w;
                  requires fixed step_s and the kernel's load-line solve.)
+  friction_interface normal_n, law, slip_m_s = 0, solve = {}         [a, b, heat]
+                 (an fs-tribo dry-friction law between a and b. law is
+                 \"rosin_woodhouse_galluzzo_2025_eq13\" (the measured rosin
+                 fit fs-tribo cites) or one object key with its coefficients:
+                   coulomb {static_mu, kinetic_mu}
+                   velocity_dependent {static_mu, mu_zero, slope_per_speed_s_m}
+                   stribeck {static_mu, kinetic_mu, characteristic_speed_m_s,
+                     viscous_per_speed_s_m = 0}
+                   hyperbolic {static_mu, kinetic_mu, characteristic_speed_m_s}
+                   shifted_power {static_mu, kinetic_mu,
+                     characteristic_speed_m_s, exponent}
+                 slip_m_s as for slider. solve holds budgets, defaults:
+                 max_iterations 64, force_absolute_tolerance_n 1e-12,
+                 force_relative_tolerance 1e-12, maximum_force_n 1000 static
+                 capacities (at least 1 N), impulse_tolerance_n_s 1e-10,
+                 work_tolerance_j 1e-12. A moving surface is a prescribed
+                 end or a velocity_source joined to one. A prescribed end
+                 is held over each step: no span input, so an accelerating
+                 one advances in jumps. Reports slip_m_s, stuck, force_n on
+                 a and heat_w; requires fixed step_s.)
   heat_capacity  capacity_j_k, temperature_k                          [heat]
                  (and a signal output, temperature: its temperature at the
                  start of the step; it may stay unconnected)
@@ -1033,6 +1054,8 @@ enum Kind {
     VelocitySource,
     /// Constant-coefficient dry friction on the kernel's load line.
     Slider,
+    /// A dry-friction law of `fs-tribo` on the kernel's load line.
+    FrictionInterface,
     /// Storage setting the effort of a parallel node: charge and voltage
     /// (node capacitor), volume and pressure (accumulator).
     NodeCapacitor(Domain),
@@ -1074,7 +1097,7 @@ enum Kind {
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 38] = [
+    const TABLE: [(&'static str, Self); 39] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
@@ -1082,6 +1105,7 @@ impl Kind {
         ("force", Self::Source(Domain::Translation)),
         ("velocity_source", Self::VelocitySource),
         ("slider", Self::Slider),
+        ("friction_interface", Self::FrictionInterface),
         ("inertia", Self::Inertance(Domain::Rotation)),
         ("torsion_spring", Self::Compliance(Domain::Rotation)),
         ("rotary_damper", Self::Resistance(Domain::Rotation)),
@@ -2438,6 +2462,7 @@ fn element(
             add(builder, name, source, SourceAccount::default())?
         }
         Kind::Slider => slider(builder, name, definition, &what)?,
+        Kind::FrictionInterface => friction::interface(builder, name, definition, &what)?,
         Kind::NodeCapacitor(domain) => {
             let names = domain.names();
             fields(
@@ -3282,7 +3307,7 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
                 }
                 Vec::new()
             }
-            Kind::GasVolume | Kind::Slider => {
+            Kind::GasVolume | Kind::Slider | Kind::FrictionInterface => {
                 return Err(format!(
                     "adaptive: {} is a {}, whose state has no error account here; \
                      run it with a fixed step_s",
@@ -3473,6 +3498,20 @@ impl Device {
             description = std::borrow::Cow::Owned(format!(
                 "{base}; dry friction uses constant static/kinetic coefficients and normal force, \
                  with first-order switching steps and explicitly declared initial slip"
+            ));
+        }
+        if self
+            .elements
+            .iter()
+            .any(|element| element.kind == Kind::FrictionInterface)
+        {
+            let base = description.replace("contact, friction,", "geometric contact, impact,");
+            description = std::borrow::Cow::Owned(format!(
+                "{base}; friction interfaces step an fs-tribo dry law (authored coefficients or \
+                 the cited rosin fit, independent of temperature) under a constant normal force, \
+                 with every dissipated joule sent to their heat port; a prescribed end is held \
+                 over each step, so an accelerating one advances in jumps; no contact geometry, \
+                 normal dynamics, wear or third body"
             ));
         }
         if self
@@ -3893,6 +3932,11 @@ impl Device {
                     ("force_n", output("a")),
                     ("heat_w", -output("heat")),
                 ]
+            }
+            Kind::FrictionInterface => {
+                let mut values = friction::values(system.state::<friction::State>(element.node));
+                values.extend([("force_n", output("a")), ("heat_w", -output("heat"))]);
+                values
             }
             Kind::ResistorBranch(domain) => {
                 vec![

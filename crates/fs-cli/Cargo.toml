@@ -54,6 +54,7 @@ fs-solver = { path = "../fs-solver" }
 fs-system = { path = "../fs-system", features = ["constitutive", "phs"] }
 fs-topols = { path = "../fs-topols" }
 fs-topopt = { path = "../fs-topopt", features = ["cutfem-marquee"], optional = true }
+fs-tribo = { path = "../fs-tribo", features = ["component"] }
 fs-uq = { path = "../fs-uq" }
 fs-viz = { path = "../fs-viz" }
 fs-voi = { path = "../fs-voi" }

@@ -4014,6 +4014,323 @@ fn slider_scenes_refuse_invalid_laws_missing_spans_and_unsupported_error_control
     }
 }
 
+/// A 2 kg block thrown at `velocity` along a still surface, through a
+/// friction interface of `law` under 20 N whose heat goes to a 50 J/K
+/// lining at 300 K.
+fn thrown_block(law: &str, velocity: f64, step_s: f64, duration_s: f64) -> String {
+    format!(
+        r#"{{
+  "schema": "frankensim.system.v0", "duration_s": {duration_s}, "step_s": {step_s},
+  "elements": {{
+    "block": {{"kind": "mass", "mass_kg": 2.0, "velocity_m_s": {velocity}}},
+    "friction": {{"kind": "friction_interface", "normal_n": 20.0, "law": {law},
+                 "slip_m_s": {velocity}}},
+    "lining": {{"kind": "heat_capacity", "capacity_j_k": 50.0, "temperature_k": 300.0}}
+  }},
+  "connections": [
+    {{"join": ["block.p", "friction.a"]}},
+    {{"prescribe": "friction.b", "velocity_m_s": 0.0}},
+    {{"join": ["lining.heat", "friction.heat"]}}
+  ]
+}}"#
+    )
+}
+
+#[test]
+fn a_coulomb_friction_interface_arrests_a_thrown_block_in_either_direction() {
+    // G1: fs-tribo's Coulomb rung, kinetic coefficient 0.2 under 20 N,
+    // decelerates the 2 kg block at 2 m/s2: from 3 m/s it stops at 1.5 s
+    // after 2.25 m, and its 9 J of kinetic energy are the lining's heat.
+    for sign in [-1.0, 1.0] {
+        let law = r#"{"coulomb": {"static_mu": 0.5, "kinetic_mu": 0.2}}"#;
+        let path = scratch(
+            if sign > 0.0 {
+                "forward.json"
+            } else {
+                "backward.json"
+            },
+            &thrown_block(law, sign * 3.0, 0.005, 2.0),
+        );
+        let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+        assert_eq!(code, 0, "{stderr}");
+        assert!(stderr.is_empty(), "{stderr}");
+        for (owner, field, expected, tolerance) in [
+            ("block", "position_m", sign * 2.25, 1.0e-8),
+            ("block", "velocity_m_s", 0.0, 1.0e-10),
+            ("friction", "slip_m_s", 0.0, 1.0e-10),
+            ("friction", "stuck", 1.0, 0.0),
+            ("friction", "dissipated_j", 9.0, 1.0e-9),
+            ("lining", "temperature_k", 300.18, 1.0e-9),
+        ] {
+            let found = value(&json, &element(owner), field);
+            assert!(
+                (found - expected).abs() <= tolerance,
+                "{sign} {owner}.{field}: {found} vs {expected}"
+            );
+        }
+        assert!(
+            value(&json, "\"totals\"", "energy_residual_j").abs() < 1.0e-9,
+            "{json}"
+        );
+        assert!(
+            json.contains("friction interfaces step an fs-tribo dry law"),
+            "{json}"
+        );
+    }
+}
+
+#[test]
+fn a_belt_at_constant_speed_drags_a_block_until_its_friction_interface_catches_it() {
+    // G1: the block starts at rest on a belt already moving at 1 m/s, a
+    // slip of -1 m/s in the movers' sign. Kinetic friction, 0.2 x 20 N,
+    // accelerates the 2 kg block at 2 m/s2: it is caught at 0.5 s after
+    // 0.25 m while the belt moved 0.5 m, and static friction (10 N
+    // available, none needed) carries it on. At 1 s: 0.75 m and 1 m/s,
+    // 4 N x 0.25 m = 1 J of heat, 1 J of kinetic energy, 2 J from the belt.
+    // The belt is the interface's prescribed end, and then a velocity
+    // source joined to the end, in 200 whole steps each. (Bead `.5.8.1`:
+    // the kernel differenced the source's flow, and every step of the stuck
+    // interface was cut to the stop of the kernel's own perturbation.)
+    let scene = r#"{
+  "schema": "frankensim.system.v0", "duration_s": 1.0, "step_s": 0.005,
+  "elements": {
+    "block": {"kind": "mass", "mass_kg": 2.0},
+    "friction": {"kind": "friction_interface", "normal_n": 20.0,
+                 "law": {"coulomb": {"static_mu": 0.5, "kinetic_mu": 0.2}}, "slip_m_s": -1.0},
+    "lining": {"kind": "heat_capacity", "capacity_j_k": 50.0, "temperature_k": 300.0}
+  },
+  "connections": [
+    {"join": ["block.p", "friction.a"]},
+    {"prescribe": "friction.b", "velocity_m_s": 1.0},
+    {"join": ["lining.heat", "friction.heat"]}
+  ]
+}"#;
+    let prescribed = r#"{"prescribe": "friction.b", "velocity_m_s": 1.0}"#;
+    let mass = r#""block": {"kind": "mass", "mass_kg": 2.0},"#;
+    assert!(scene.contains(prescribed) && scene.contains(mass));
+    let driven = scene
+        .replace(prescribed, r#"{"join": ["belt.p", "friction.b"]}"#)
+        .replace(
+            mass,
+            &format!(r#"{mass} "belt": {{"kind": "velocity_source", "velocity_m_s": 1.0}},"#),
+        );
+    for (name, scene) in [
+        ("belt.json", scene.to_owned()),
+        ("driven_belt.json", driven),
+    ] {
+        let path = scratch(name, &scene);
+        let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+        assert_eq!(code, 0, "{name}: {stderr}");
+        for (owner, field, expected, tolerance) in [
+            ("block", "position_m", 0.75, 1.0e-8),
+            ("block", "velocity_m_s", 1.0, 1.0e-9),
+            ("friction", "slip_m_s", 0.0, 1.0e-9),
+            ("friction", "stuck", 1.0, 0.0),
+            ("friction", "dissipated_j", 1.0, 1.0e-8),
+            ("lining", "temperature_k", 300.02, 1.0e-9),
+        ] {
+            let found = value(&json, &element(owner), field);
+            assert!(
+                (found - expected).abs() <= tolerance,
+                "{name}: {owner}.{field}: {found} vs {expected}"
+            );
+        }
+        let steps = value(&json, "\"schema\"", "steps");
+        let shortenings = value(&json, "\"schema\"", "shortenings");
+        assert!(
+            (steps - 200.0).abs() <= 0.0 && shortenings.abs() <= 0.0,
+            "{name}: {steps} steps, {shortenings} shortenings"
+        );
+        // What crossed the prescribed end, or what the source gave.
+        let belt = if name == "belt.json" {
+            value(&json, "\"port\":\"friction.b\"", "energy_in_j")
+        } else {
+            -value(&json, &element("belt"), "energy_in_j")
+        };
+        assert!((belt - 2.0).abs() <= 4.0e-8, "{name}: belt {belt}");
+        assert!(
+            value(&json, "\"totals\"", "energy_residual_j").abs() < 1.0e-9,
+            "{name}: {json}"
+        );
+    }
+}
+
+/// `(m / N) * integral from 0 to v0 of v / mu(v) dv`: where a block of mass
+/// `m` thrown at `v0` stops under `mu(v) N`, by composite Simpson's rule.
+fn stopping_distance(mu: impl Fn(f64) -> f64, mass_kg: f64, normal_n: f64, v0: f64) -> f64 {
+    let intervals = 20_000;
+    let h = v0 / f64::from(intervals);
+    let integrand = |v: f64| v / mu(v);
+    let mut sum = integrand(0.0) + integrand(v0);
+    for i in 1..intervals {
+        let weight = if i % 2 == 1 { 4.0 } else { 2.0 };
+        sum += weight * integrand(f64::from(i) * h);
+    }
+    mass_kg / normal_n * sum * h / 3.0
+}
+
+#[test]
+fn velocity_weakening_friction_interfaces_stop_a_thrown_block_where_the_law_s_integral_says() {
+    // G1/G3: a block of mass m thrown at v0 under mu(v) N stops after
+    // (m / N) * integral of v / mu(v) dv from 0 to v0, all of its kinetic
+    // energy heat. The interface asks its law at the step's mean slip, so
+    // the kernel's stop converges at second order: halving the step
+    // divides the error by about four. The Stribeck block is the example
+    // scene; under 20 N both laws decelerate the block at 2 m/s2 or more,
+    // so a duration of v0 seconds is well past the stop.
+    let example_scene = std::fs::read_to_string(example("stribeck_block.json")).unwrap();
+    let stribeck = |v: f64| 0.2 + 0.3 * (-(v / 0.5) * (v / 0.5)).exp() + 0.05 * v;
+    stops_at_second_order("stribeck", &example_scene, stribeck, 3.0, ["0.01", "0.005"]);
+    let rosin_scene = thrown_block(r#""rosin_woodhouse_galluzzo_2025_eq13""#, 0.3, 1.0e-3, 0.3);
+    let rosin = |v: f64| 0.2 * (v + 0.011).powf(-0.4);
+    stops_at_second_order("rosin", &rosin_scene, rosin, 0.3, ["0.001", "0.0005"]);
+}
+
+/// Runs a thrown-block `scene` written at the `coarse` step and at the
+/// `fine` one, and asserts the block stops, all of its kinetic energy heat,
+/// within 1e-3 of the law's distance, the error divided by 3 to 5.
+fn stops_at_second_order(
+    name: &str,
+    scene: &str,
+    mu: impl Fn(f64) -> f64,
+    v0: f64,
+    [coarse, fine]: [&str; 2],
+) {
+    let reference = stopping_distance(mu, 2.0, 20.0, v0);
+    let coarse_step = format!("\"step_s\": {coarse}");
+    assert!(scene.contains(&coarse_step), "{name}: test fixture changed");
+    let mut errors = Vec::new();
+    for (index, step_s) in [coarse, fine].into_iter().enumerate() {
+        let path = scratch(
+            &format!("{name}{index}.json"),
+            &scene.replace(&coarse_step, &format!("\"step_s\": {step_s}")),
+        );
+        let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+        assert_eq!(code, 0, "{name} {step_s}: {stderr}");
+        for (owner, field, expected, tolerance) in [
+            ("friction", "stuck", 1.0, 0.0),
+            ("block", "velocity_m_s", 0.0, 1.0e-9),
+            ("friction", "dissipated_j", v0 * v0, 1.0e-9 * v0 * v0),
+        ] {
+            let found = value(&json, &element(owner), field);
+            assert!(
+                (found - expected).abs() <= tolerance,
+                "{name} {step_s}: {owner}.{field} {found} vs {expected}"
+            );
+        }
+        assert!(
+            value(&json, "\"totals\"", "energy_residual_j").abs() < 1.0e-9,
+            "{json}"
+        );
+        let position = value(&json, &element("block"), "position_m");
+        eprintln!("{name}: step {step_s} s, stops at {position} m, reference {reference} m");
+        errors.push((position - reference).abs());
+    }
+    let ratio = errors[0] / errors[1];
+    assert!(
+        (3.0..5.0).contains(&ratio) && errors[1] < 1.0e-3 * reference,
+        "{name}: errors {errors:?}, ratio {ratio}"
+    );
+}
+
+#[test]
+fn friction_interface_scenes_refuse_invalid_laws_budgets_spans_and_error_control() {
+    let scene = thrown_block(
+        r#"{"coulomb": {"static_mu": 0.5, "kinetic_mu": 0.2}}"#,
+        3.0,
+        0.005,
+        2.0,
+    );
+    let coulomb = r#""law": {"coulomb": {"static_mu": 0.5, "kinetic_mu": 0.2}}"#;
+    let no_iterations = format!(r#"{coulomb}, "solve": {{"max_iterations": 0}}"#);
+    let no_impulse = format!(r#"{coulomb}, "solve": {{"impulse_tolerance_n_s": 0.0}}"#);
+    // Every one is an input refusal, exit 3.
+    for (name, from, to, reason) in [
+        (
+            "rung.json",
+            coulomb,
+            r#""law": {"lubricated": {"static_mu": 0.5}}"#,
+            "unknown law \"lubricated\"",
+        ),
+        (
+            "named.json",
+            coulomb,
+            r#""law": "rosin""#,
+            "the named law is",
+        ),
+        (
+            "two.json",
+            coulomb,
+            r#""law": {"coulomb": {"static_mu": 0.5, "kinetic_mu": 0.2}, "hyperbolic": {}}"#,
+            "an object with one key",
+        ),
+        (
+            "kinetic.json",
+            coulomb,
+            r#""law": {"coulomb": {"static_mu": 0.2, "kinetic_mu": 0.5}}"#,
+            "kinetic_mu > static_mu",
+        ),
+        (
+            "coefficient.json",
+            coulomb,
+            r#""law": {"coulomb": {"static_mu": 0.5, "kinetic_mu": 0.2, "rolling_mu": 0.1}}"#,
+            "unsupported field \"rolling_mu\"",
+        ),
+        (
+            "speed.json",
+            coulomb,
+            r#""law": {"hyperbolic": {"static_mu": 0.5, "kinetic_mu": 0.2, "characteristic_speed_m_s": 0.0}}"#,
+            "characteristic_speed",
+        ),
+        (
+            "missing.json",
+            coulomb,
+            r#""damping": 1.0"#,
+            "unsupported field \"damping\"",
+        ),
+        (
+            "iterations.json",
+            coulomb,
+            no_iterations.as_str(),
+            "max_iterations is a whole number from 1 to 128",
+        ),
+        (
+            "budget.json",
+            coulomb,
+            no_impulse.as_str(),
+            "impulse_tolerance_n_s",
+        ),
+        (
+            "normal.json",
+            "\"normal_n\": 20.0",
+            "\"normal_n\": -20.0",
+            "normal_force",
+        ),
+        (
+            "span.json",
+            "{\"prescribe\": \"friction.b\", \"velocity_m_s\": 0.0}",
+            "{\"prescribe\": \"friction.b\", \"velocity_m_s\": 0.0},\n    \
+             {\"prescribe\": \"friction.span_b\", \"velocity_m_s\": 0.0}",
+            "a friction_interface has ports a, b, heat",
+        ),
+        (
+            "adaptive.json",
+            "\"duration_s\": 2",
+            "\"adaptive\": {\"tolerances\": {}}, \"duration_s\": 2",
+            "friction is a friction_interface",
+        ),
+    ] {
+        assert!(scene.contains(from), "{name}: test fixture changed");
+        let (code, stderr) = refused(name, &scene.replace(from, to));
+        assert_eq!(code, 3, "{name}: {stderr}");
+        assert!(stderr.contains(reason), "{name}: {stderr}");
+    }
+    let missing = scene.replace(&format!("{coulomb},"), "");
+    let (code, stderr) = refused("missing_law.json", &missing);
+    assert_eq!(code, 3, "{stderr}");
+    assert!(stderr.contains("missing law"), "{stderr}");
+}
+
 fn array_values(json: &str, anchor: &str, key: &str) -> Vec<f64> {
     let tail = &json[json.find(anchor).unwrap()..];
     let field = format!("\"{key}\":[");

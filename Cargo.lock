@@ -1217,6 +1217,7 @@ dependencies = [
  "fs-system",
  "fs-topols",
  "fs-topopt",
+ "fs-tribo",
  "fs-uq",
  "fs-viz",
  "fs-voi",

@@ -884,6 +884,37 @@ coefficients and normal force are authored constants, not resolved cards;
 no geometric contact, impact or material-dependent tribology is claimed.
 Switching steps retain the kernel's first-order limitation.
 
+`friction_interface` lowers to `fs_tribo`'s `FrictionInterface` on the
+kernel's `add_on_line` tier, with ports `a`, `b` (power) and `heat`. Its
+`law` is the named rosin fit `"rosin_woodhouse_galluzzo_2025_eq13"` or an
+object with one key naming a rung of `fs_tribo::FrictionLaw` and holding
+its coefficients: `coulomb`, `velocity_dependent`, `stribeck`, `hyperbolic`
+or `shifted_power`; the law's own `validate` refuses inconsistent
+coefficients. `normal_n` is a constant normal force, `slip_m_s` the
+initial slip in the slider's sign, and `solve` overrides the budgets of the
+law's root search and of the interface's impulse and work closure. Every
+rung offered is independent of temperature. The component owns stick,
+slip at the law's traction for the step's mean slip, the arrest (the step
+the stop falls in is shortened to end at it) and break-away; the lowering
+evaluates no friction. A moving surface is a prescribed end or a
+`velocity_source` joined to one; either is held over each step (the
+interface has no span input), so an accelerating end advances in jumps. Reports expose `slip_m_s`, `stuck`,
+the force on `a` and last-step `heat_w`. `adaptive` refuses it, as it
+refuses a slider. Tests in `tests/system_command.rs`: a Coulomb block
+thrown at ±3 m/s stopping at the closed-form distance with 9 J in its
+lining; a belt at constant speed, as the interface's prescribed end and
+as a `velocity_source` joined to it, dragging a block until the
+interface catches it in 200 whole steps, the belt's work equal to motion
+plus heat;
+Stribeck and rosin blocks stopping where Simpson's rule
+on the law's (m/N)∫v/μ(v) dv puts them, with the error falling by the
+predeclared factor when the step halves and the heat equal to the initial
+kinetic energy; and twelve input refusals plus a missing law, all exit 3.
+`examples/system/stribeck_block.json` is the file-driven Stribeck slice.
+No claim: coefficients are authored or the one cited fit, not resolved
+from material cards; no temperature dependence, contact geometry, normal
+dynamics, wear or third body.
+
 `frankensim [--json] system <scene.json>` reads a `frankensim.system.v0` scene
 (at most 1 MiB, 2,000 elements, 1e7 planned steps and twice that many
 kernel steps if the kernel shortens them, 1e5 samples; unknown fields
@@ -1432,7 +1463,8 @@ monolithic midpoint rule through the binary, the heated body against its discret
 closed form, the quarter car's road work against motion plus heat and its
 70/30 heat split, library and binary byte-identical, eight refusals). No
 claim beyond the kernel's: lumped elements with constant parameters or authored
-nonlinear electrical storage curves and constant-coefficient dry friction;
+nonlinear electrical storage curves and dry friction with authored
+coefficients or the one cited rosin fit;
 no material-card resolution, geometric contact, impact or phase change;
 fixed mode has no step-size error control, while
 adaptive mode has the scoped numerical estimate described above. The experimental

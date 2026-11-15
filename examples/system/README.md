@@ -50,6 +50,7 @@ save/resume commands work with `self_heating_damper.json` and
 | `heated_body.json` | a 30 W heater in a body that loses heat through a wall to 293.15 K | the closed-form discrete approach to 308.15 K |
 | `heated_plane.json` | 30 W generated on a plane of no heat capacity (`heat_node`) between a 50 J/K pad at 400 K and a 120 J/K disc at 300 K, joined to the plane by 2 and 6 W/K: no fraction is given, the heat divides by where the two temperatures put the plane | the midpoint rule for the two bodies and the plane's balance, solved independently each step: both temperatures and the plane's to 1e-9, every joule in the two bodies; the same device with the heat rate prescribed on the plane |
 | `friction_belt.json` | a block follows a slowly accelerating belt by static friction, breaks away when the acceleration exceeds the static limit, and catches it again as the lining warms | independent constant-acceleration segments: 3 m/s final speed, 2.875 m travel, 3 J of frictional heat and 12 J supplied by the belt |
+| `stribeck_block.json` | a 2 kg block thrown at 3 m/s on a Stribeck lining (`friction_interface`, a dry law of fs-tribo): the coefficient is 0.35 at 3 m/s and grows toward 0.5 as the block slows; all 9 J become the lining's heat | the stopping distance from Simpson's rule on the law's own integral, the error falling about fourfold when the step halves; heat equal to the initial kinetic energy |
 | `dc_motor.json` | a DC motor across three domains: a 12 V supply, winding inductance and resistance in a current loop, a gyrator to a rotor with a viscous bearing, and both heats into one case | the monolithic midpoint rule for the two coupled equations, the supply's energy against stored energy plus heat |
 | `parallel_rlc.json` | a current source drives a capacitor, inductor and resistor in parallel; all Joule heat warms the case | independent coupled voltage/current equations, source work, electrical storage and heat |
 | `nonlinear_rlc.json` | the same topology with voltage-dependent capacitance and flux-dependent inductance, crossing both curves' knees | independent charge/flux differential equations, original constitutive energies and Joule heat |
@@ -95,6 +96,20 @@ not cover sliders; use a fixed `step_s`. Coefficients and normal force
 are constant authored inputs. This is ideal dry friction without contact
 geometry, impact or material-card claims, and switching steps are first
 order.
+
+`stribeck_block.json` uses `friction_interface` instead, which steps a dry
+law of fs-tribo: `coulomb`, `velocity_dependent`, `stribeck`, `hyperbolic`,
+`shifted_power`, or the measured rosin fit by its name,
+`"rosin_woodhouse_galluzzo_2025_eq13"`. Its ports and `slip_m_s` read as
+the slider's. The law's coefficient here is 0.2, plus 0.3 decaying as a
+Gaussian of the speed over 0.5 m/s, plus 0.05 per m/s. The block stops where
+`(m / N) ∫ v / μ(v) dv` from 0 to 3 m/s puts it: each sliding step takes
+the law's traction at the step's mean slip, and the step the stop falls in
+is shortened to end at it. A moving surface under a `friction_interface`,
+such as a belt, is a prescribed end (`{"prescribe": "friction.b",
+"velocity_m_s": 1.0}`) or a `velocity_source` joined to the end. A
+`friction_interface` has no span; either end is held over each step, so
+give an accelerating end short steps. Fixed `step_s` only.
 
 ## Rigid bodies from a physics owner
 
