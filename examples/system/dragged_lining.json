@@ -1,0 +1,19 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 60.0,
+  "step_s": 0.5,
+  "sample_every_s": 5.0,
+  "elements": {
+    "lining": {"kind": "sliding_interface", "normal_n": 40.0,
+               "law": {"stribeck": {"static_mu": 0.5, "kinetic_mu": 0.2,
+                                    "characteristic_speed_m_s": 0.5,
+                                    "viscous_per_speed_s_m": 0.05}},
+               "slip_rate_m_s": [0.3, 0.4]},
+    "pad": {"kind": "heat_capacity", "capacity_j_k": 20.0, "temperature_k": 293.15},
+    "wall": {"kind": "conductance", "conductance_w_k": 0.5}
+  },
+  "connections": [
+    {"join": ["pad.heat", "lining.heat", "wall.a"]},
+    {"prescribe": "wall.b", "temperature_k": 293.15}
+  ]
+}

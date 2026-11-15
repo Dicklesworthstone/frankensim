@@ -915,6 +915,37 @@ No claim: coefficients are authored or the one cited fit, not resolved
 from material cards; no temperature dependence, contact geometry, normal
 dynamics, wear or third body.
 
+`sliding_interface` lowers to `fs_tribo`'s `SlidingInterface`, added as a
+smooth Component whose map the kernel differences (it offers no tangent).
+It takes the same `law` and `normal_n` as `friction_interface`. It is
+driven at `slip_rate_m_s`, a constant rate [x, y] along the interface's two
+tangent axes, at zero compliance, with no mechanical port. Its port `heat`
+receives the interface temperature and returns the heat rate, and it joins
+a heat capacity or heat node as a heater does. A signal output `traction`
+gives the traction entering the interface on both axes. The work the
+prescribed motion does is the interface's own account, as a prescribed
+force's is: its stored change is the law's reversible storage less that
+work, and the law's closure residual is its numerical loss. `solve` takes
+the budgets of `friction_interface` except the impulse tolerance. Reports
+expose `work_j`, `traction_x_n`, `traction_y_n` and last-step `heat_w`.
+`adaptive` refuses it, and it has no state codec, so `--checkpoint`
+refuses it by name.
+
+Tests in `tests/system_command.rs`:
+- A Coulomb interface at [0.2, 0] m/s and the cited rosin fit at
+  [0, -0.05] m/s under 10 N, each heating a 2 J/K body. Traction is
+  mu(|v|) N along the slip, and the body ends at T0 + mu N |v| t / C.
+  The work equals the body's heat, and the stored total is 0.
+- `examples/system/dragged_lining.json`, a Stribeck lining dragged at
+  0.5 m/s under 40 N. Its heat warms a pad that loses heat through a wall.
+  The pad follows the midpoint rule's closed recursion to 1e-10 K, and the
+  pad's heat plus the wall's is the work.
+- Seven input refusals, all exit 3.
+
+No claim: the slip and normal force are constant and authored; there is no
+contact geometry, normal dynamics, wear or third body, and the interface
+moves nothing.
+
 `modal_structure` lowers to `fs_nlmodal::component::ModalStructure`, added
 with its tangent. The scene authors `modes`, each a `frequency_hz`, a
 viscous `damping_ratio` and an optional start (`displacement`, `velocity`)

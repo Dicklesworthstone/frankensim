@@ -1,22 +1,30 @@
 //! `friction_interface`: a dry-friction law of `fs-tribo` between two scene
-//! ends, on the kernel's load line.
+//! ends, on the kernel's load line; `sliding_interface`: the same laws under
+//! a slip rate the scene prescribes.
 //!
 //! The law is one rung of [`FrictionLaw`]: Coulomb, linear in speed,
 //! Stribeck, hyperbolic or shifted-power weakening, authored in the scene,
-//! or the measured rosin fit `fs-tribo` cites by name. The component is
-//! [`FrictionInterface`], which owns the stick, slip, arrest and break-away
-//! rows, the stop location and the heat; nothing here evaluates friction or
+//! or the measured rosin fit `fs-tribo` cites by name. Between two ends the
+//! component is [`FrictionInterface`], which owns the stick, slip, arrest and
+//! break-away rows, the stop location and the heat. Under a prescribed slip
+//! it is [`SlidingInterface`], which owns the traction, the dissipation and
+//! the work the prescribed motion does. Nothing here evaluates friction or
 //! integrates anything.
 
 use fs_ports::component::{Component, PortSpec};
 use fs_system::{NodeId, SystemBuilder};
-use fs_tribo::tangential::component::{FrictionInterface, FrictionState, InterfaceLoad};
+use fs_tribo::tangential::component::{
+    FrictionInterface, FrictionState, InterfaceLoad, PrescribedSlip, SlidingInterface, SlidingState,
+};
 use fs_tribo::{DryTangentialState, FrictionLaw, TangentialSolveConfig};
 
 use super::{J, Refusal, fields, number, number_or};
 
 /// What the kernel holds for a friction interface.
 pub(super) type State = FrictionState<DryTangentialState>;
+
+/// What the kernel holds for a sliding interface.
+pub(super) type Sliding = SlidingState<DryTangentialState>;
 
 /// The measured rosin fit, named as `fs-tribo` names it.
 const ROSIN: &str = "rosin_woodhouse_galluzzo_2025_eq13";
@@ -133,28 +141,31 @@ fn law(value: &J, what: &str) -> Result<FrictionLaw, String> {
 }
 
 /// The budgets of the law's root search and of the interface, each with
-/// its default when the scene leaves it out.
+/// its default when the scene leaves it out. `impulse` admits the impulse
+/// tolerance, which only an interface between two ends uses.
 fn load(
     definition: &J,
     normal_n: f64,
     law: &FrictionLaw,
+    impulse: bool,
     what: &str,
 ) -> Result<InterfaceLoad, String> {
     let inner = format!("{what}.solve");
     let solve = definition.get("solve").unwrap_or(&J::Null);
     if !matches!(solve, J::Null) {
-        fields(
-            solve,
-            &[
-                "max_iterations",
-                "maximum_force_n",
-                "force_absolute_tolerance_n",
-                "force_relative_tolerance",
-                "impulse_tolerance_n_s",
-                "work_tolerance_j",
-            ],
-            &inner,
-        )?;
+        let all = [
+            "max_iterations",
+            "maximum_force_n",
+            "force_absolute_tolerance_n",
+            "force_relative_tolerance",
+            "impulse_tolerance_n_s",
+            "work_tolerance_j",
+        ];
+        let allowed: Vec<&str> = all
+            .into_iter()
+            .filter(|field| impulse || *field != "impulse_tolerance_n_s")
+            .collect();
+        fields(solve, &allowed, &inner)?;
     }
     let static_capacity_n = law
         .static_coefficient()
@@ -244,7 +255,7 @@ pub(super) fn interface(
             .ok_or_else(|| format!("{what}: missing law"))?,
         &format!("{what}.law"),
     )?;
-    let load = load(definition, normal_n, &law, what)?;
+    let load = load(definition, normal_n, &law, true, what)?;
     let slip = number_or(definition, "slip_m_s", 0.0, what)?;
     if !slip.is_finite() {
         return Err(format!("{what}.slip_m_s must be finite").into());
@@ -268,6 +279,65 @@ pub(super) fn interface(
         .add_on_line(name, component, state)
         .map_err(|error| Refusal::Admission(error.to_string()))?;
     Ok((node, ports))
+}
+
+/// A `sliding_interface` element: the law driven at the slip rate the scene
+/// gives along the interface's two tangent axes, under a constant normal
+/// force, with its heat on `heat` and its traction on the signal `traction`.
+pub(super) fn sliding(
+    builder: &mut SystemBuilder,
+    name: &str,
+    definition: &J,
+    what: &str,
+) -> Result<(NodeId, Vec<PortSpec>), Refusal> {
+    fields(
+        definition,
+        &["kind", "normal_n", "law", "slip_rate_m_s", "solve"],
+        what,
+    )?;
+    let normal_n = number(definition, "normal_n", what)?;
+    let law = law(
+        definition
+            .get("law")
+            .ok_or_else(|| format!("{what}: missing law"))?,
+        &format!("{what}.law"),
+    )?;
+    let load = load(definition, normal_n, &law, false, what)?;
+    let slip_rate_m_s = definition
+        .get("slip_rate_m_s")
+        .and_then(J::as_array)
+        .and_then(|rows| match rows {
+            [x, y] => Some([x.as_f64()?, y.as_f64()?]),
+            _ => None,
+        })
+        .filter(|rate| rate.iter().all(|value| value.is_finite()))
+        .ok_or_else(|| {
+            format!("{what}.slip_rate_m_s is two finite numbers [m/s], one per tangent axis")
+        })?;
+    let component = SlidingInterface::new(
+        move |_kelvin: f64| Ok(law.clone()),
+        PrescribedSlip {
+            normal_n,
+            slip_rate_m_s,
+            nominal_pressure_pa: None,
+            solve: load.solve,
+            work_tolerance_j: load.work_tolerance_j,
+        },
+    )
+    .map_err(|error| format!("{what}: {error}"))?;
+    let state = component
+        .start(START_K)
+        .map_err(|error| format!("{what}: {error}"))?;
+    let ports = component.ports().to_vec();
+    let node = builder
+        .add(name, component, state)
+        .map_err(|error| Refusal::Admission(error.to_string()))?;
+    Ok((node, ports))
+}
+
+/// The work the prescribed motion has done on a sliding interface so far.
+pub(super) fn sliding_values(state: Option<&Sliding>) -> Vec<(&'static str, f64)> {
+    vec![("work_j", state.map_or(f64::NAN, Sliding::work_j))]
 }
 
 /// The interface's slip in the movers' sign, and whether it is stuck.

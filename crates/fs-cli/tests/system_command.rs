@@ -4780,6 +4780,11 @@ fn a_gas_cavity_heated_at_fixed_volume_ends_where_the_nasa9_energy_integral_puts
         json.contains("a gas_cavity holds a closed, uniform, frozen ideal-gas mixture"),
         "{json}"
     );
+    // The narrowed base sentence: a scene with a gas cavity resolves packs.
+    assert!(
+        json.contains("no material-card resolution besides gas cavities' packs, "),
+        "{json}"
+    );
 }
 
 #[test]
@@ -4960,6 +4965,184 @@ fn gas_cavity_scenes_refuse_bad_records_packs_and_controls_and_gas_outside_the_c
         let (code, stderr) = refused(name, &scene);
         assert_eq!(code, 4, "{name}: {stderr}");
         assert!(stderr.contains("refused in Propose"), "{name}: {stderr}");
+        assert!(stderr.contains(reason), "{name}: {stderr}");
+    }
+}
+
+/// A sliding interface under 10 N at the slip rate `slip` [m/s] with `law`,
+/// its heat into a 2 J/K body at 300 K, for 1 s in steps of 0.01 s.
+fn rubbed_body(law: &str, slip: &str) -> String {
+    format!(
+        r#"{{
+  "schema": "frankensim.system.v0", "duration_s": 1.0, "step_s": 0.01,
+  "elements": {{
+    "rub": {{"kind": "sliding_interface", "normal_n": 10.0, "law": {law},
+            "slip_rate_m_s": {slip}}},
+    "body": {{"kind": "heat_capacity", "capacity_j_k": 2.0, "temperature_k": 300.0}}
+  }},
+  "connections": [{{"join": ["body.heat", "rub.heat"]}}]
+}}"#
+    )
+}
+
+#[test]
+fn sliding_interfaces_turn_the_work_of_a_prescribed_slip_into_the_heat_a_body_keeps() {
+    // G1/G3: at a constant slip v under N, the law's traction is mu(|v|) N
+    // along the slip, and each step dissipates mu N |v| dt, all of it into
+    // the body: T1 = T0 + mu N |v| t / C, and the interface's work is the
+    // body's heat. Coulomb slides at its kinetic coefficient; the cited
+    // rosin fit, at 0.05 m/s along -y, at 0.2 (v + 0.011)^-0.4.
+    for (name, law, slip, rate, mu) in [
+        (
+            "coulomb.json",
+            r#"{"coulomb": {"static_mu": 0.4, "kinetic_mu": 0.3}}"#,
+            "[0.2, 0.0]",
+            [0.2, 0.0],
+            0.3,
+        ),
+        (
+            "rosin.json",
+            r#""rosin_woodhouse_galluzzo_2025_eq13""#,
+            "[0.0, -0.05]",
+            [0.0, -0.05],
+            0.2 * (0.05_f64 + 0.011).powf(-0.4),
+        ),
+    ] {
+        let path = scratch(name, &rubbed_body(law, slip));
+        let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+        assert_eq!(code, 0, "{name}: {stderr}");
+        let speed = f64::hypot(rate[0], rate[1]);
+        let power = mu * 10.0 * speed;
+        let rub = element("rub");
+        for (field, expected) in [
+            ("work_j", power),
+            ("heat_w", power),
+            ("traction_x_n", mu * 10.0 * rate[0] / speed),
+            ("traction_y_n", mu * 10.0 * rate[1] / speed),
+        ] {
+            let found = value(&json, &rub, field);
+            assert!(
+                (found - expected).abs() <= 1.0e-12,
+                "{name}: rub.{field}: {found} vs {expected}"
+            );
+        }
+        let kelvin = value(&json, &element("body"), "temperature_k");
+        let expected = 300.0 + power / 2.0;
+        assert!(
+            (kelvin - expected).abs() <= 1.0e-10,
+            "{name}: body {kelvin} vs {expected}"
+        );
+        assert!(
+            value(&json, "\"totals\"", "energy_residual_j").abs() < 1.0e-12,
+            "{name}: {json}"
+        );
+        assert!(
+            value(&json, "\"totals\"", "stored_change_j").abs() < 1.0e-12,
+            "{name}: {json}"
+        );
+    }
+}
+
+#[test]
+fn a_dragged_lining_heats_its_pad_as_the_stribeck_law_and_the_midpoint_rule_say() {
+    // examples/system/dragged_lining.json: a Stribeck lining, with the
+    // coefficients of the friction_interface tests, dragged at [0.3, 0.4]
+    // m/s (0.5 m/s) under 40 N. G1: every step dissipates P = mu(0.5) N 0.5,
+    // and the traction is mu N along the slip. The heat warms a 20 J/K pad
+    // that loses heat through 0.5 W/K to 293.15 K. The midpoint rule shrinks
+    // T - T* by (1 - g) / (1 + g) a step, with g = G dt / (2 C) and
+    // T* = Ta + P / G. G3: the pad's heat plus the wall's is the work.
+    let (code, json, stderr) = run_binary(&["--json", "system", &example("dragged_lining.json")]);
+    assert_eq!(code, 0, "{stderr}");
+    let (normal, speed, capacity, conductance, ambient, dt): (f64, f64, f64, f64, f64, f64) =
+        (40.0, 0.5, 20.0, 0.5, 293.15, 0.5);
+    let mu = 0.2 + 0.3 * (-(speed / 0.5) * (speed / 0.5)).exp() + 0.05 * speed;
+    let power = mu * normal * speed;
+    let g = conductance * dt / (2.0 * capacity);
+    let settled = ambient + power / conductance;
+    let pad = settled + (ambient - settled) * ((1.0 - g) / (1.0 + g)).powi(120);
+    let lining = element("lining");
+    for (field, expected, tolerance) in [
+        ("work_j", power * 60.0, 1.0e-10),
+        ("heat_w", power, 1.0e-12),
+        ("traction_x_n", mu * normal * 0.6, 1.0e-12),
+        ("traction_y_n", mu * normal * 0.8, 1.0e-12),
+    ] {
+        let found = value(&json, &lining, field);
+        assert!(
+            (found - expected).abs() <= tolerance,
+            "lining.{field}: {found} vs {expected}"
+        );
+    }
+    let kelvin = value(&json, &element("pad"), "temperature_k");
+    assert!((kelvin - pad).abs() <= 1.0e-10, "pad {kelvin} vs {pad}");
+    assert!(
+        value(&json, "\"totals\"", "energy_residual_j").abs() < 1.0e-10,
+        "{json}"
+    );
+    // The wall's heat left through its held end: the work the pad did not keep.
+    let kept = capacity * (kelvin - ambient);
+    let left = -value(&json, "\"totals\"", "boundary_energy_in_j");
+    assert!(
+        (kept + left - power * 60.0).abs() < 1.0e-9,
+        "{kept} + {left} vs {}",
+        power * 60.0
+    );
+}
+
+#[test]
+fn sliding_interface_scenes_refuse_bad_slips_fields_laws_loads_and_error_control() {
+    let base = rubbed_body(
+        r#"{"coulomb": {"static_mu": 0.4, "kinetic_mu": 0.3}}"#,
+        "[0.2, 0.0]",
+    );
+    for (name, from, to, reason) in [
+        (
+            "rate.json",
+            "\"slip_rate_m_s\": [0.2, 0.0]",
+            "\"slip_rate_m_s\": 0.2",
+            "slip_rate_m_s is two finite numbers",
+        ),
+        (
+            "axes.json",
+            "\"slip_rate_m_s\": [0.2, 0.0]",
+            "\"slip_rate_m_s\": [0.2, 0.0, 0.0]",
+            "slip_rate_m_s is two finite numbers",
+        ),
+        (
+            "field.json",
+            "\"normal_n\": 10.0",
+            "\"normal_n\": 10.0, \"slip_m_s\": 0.0",
+            "unsupported field \"slip_m_s\"",
+        ),
+        (
+            "impulse.json",
+            "\"normal_n\": 10.0",
+            "\"normal_n\": 10.0, \"solve\": {\"impulse_tolerance_n_s\": 1e-10}",
+            "unsupported field \"impulse_tolerance_n_s\"",
+        ),
+        (
+            "law.json",
+            r#"{"coulomb": {"static_mu": 0.4, "kinetic_mu": 0.3}}"#,
+            "\"rosin\"",
+            "the named law is",
+        ),
+        (
+            "normal.json",
+            "\"normal_n\": 10.0",
+            "\"normal_n\": -1.0",
+            "invalid or non-finite physical input: normal_force",
+        ),
+        (
+            "adaptive.json",
+            "\"duration_s\": 1.0",
+            "\"adaptive\": {\"tolerances\": {}}, \"duration_s\": 1.0",
+            "rub is a sliding_interface",
+        ),
+    ] {
+        assert!(base.contains(from), "{name}: test fixture changed");
+        let (code, stderr) = refused(name, &base.replace(from, to));
+        assert_eq!(code, 3, "{name}: {stderr}");
         assert!(stderr.contains(reason), "{name}: {stderr}");
     }
 }

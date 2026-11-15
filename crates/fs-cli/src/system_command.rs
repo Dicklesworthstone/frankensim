@@ -211,6 +211,16 @@ Elements (ports in brackets; SI units in every field name):
                  kernel wires their end inputs a.end and b.end. Reports
                  slip_m_s, stuck, force_n on a and heat_w; requires fixed
                  step_s.)
+  sliding_interface normal_n, law, slip_rate_m_s, solve = {} [heat, traction]
+                 (the same laws driven at a prescribed slip rate
+                 [x, y] m/s along the interface's two tangent axes, under
+                 the constant normal_n; a traction signal output [x, y] N.
+                 solve as for friction_interface, less
+                 impulse_tolerance_n_s. Join heat to a heat capacity or heat
+                 node, as a heater's. The prescribed motion's work is the
+                 interface's own account, as a prescribed force's is.
+                 Reports work_j, traction_x_n, traction_y_n and heat_w;
+                 requires fixed step_s.)
   modal_structure sample_rate_hz, modes | network, attachments
                                                      [<attachments>, heat]
                  (fs-nlmodal's linear structure in mass-normalized damped
@@ -1136,6 +1146,9 @@ enum Kind {
     Slider,
     /// A dry-friction law of `fs-tribo` on the kernel's load line.
     FrictionInterface,
+    /// The same laws under a prescribed slip rate, `fs-tribo`'s sliding
+    /// interface, with its heat on a heat port.
+    SlidingInterface,
     /// A linear structure in damped modes, `fs-nlmodal`'s, acted on through
     /// its attachments.
     ModalStructure,
@@ -1186,7 +1199,7 @@ enum Kind {
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 42] = [
+    const TABLE: [(&'static str, Self); 43] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
@@ -1195,6 +1208,7 @@ impl Kind {
         ("velocity_source", Self::VelocitySource),
         ("slider", Self::Slider),
         ("friction_interface", Self::FrictionInterface),
+        ("sliding_interface", Self::SlidingInterface),
         ("modal_structure", Self::ModalStructure),
         ("inertia", Self::Inertance(Domain::Rotation)),
         ("torsion_spring", Self::Compliance(Domain::Rotation)),
@@ -2569,6 +2583,7 @@ fn element(
         }
         Kind::Slider => slider(builder, name, definition, &what)?,
         Kind::FrictionInterface => friction::interface(builder, name, definition, &what)?,
+        Kind::SlidingInterface => friction::sliding(builder, name, definition, &what)?,
         Kind::ModalStructure => modal::structure(builder, name, definition, &what)?,
         Kind::NodeCapacitor(domain) => {
             let names = domain.names();
@@ -3436,6 +3451,7 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             Kind::GasVolume
             | Kind::Slider
             | Kind::FrictionInterface
+            | Kind::SlidingInterface
             | Kind::ModalStructure
             | Kind::ThermalTimeline
             | Kind::GasCavity => {
@@ -3649,6 +3665,19 @@ impl Device {
                  with every dissipated joule sent to their heat port; a prescribed end is held \
                  over each step, so an accelerating one advances in jumps; no contact geometry, \
                  normal dynamics, wear or third body"
+            ));
+        }
+        if self
+            .elements
+            .iter()
+            .any(|element| element.kind == Kind::SlidingInterface)
+        {
+            let base = description.replace("contact, friction,", "geometric contact, impact,");
+            description = std::borrow::Cow::Owned(format!(
+                "{base}; sliding interfaces step the same fs-tribo dry laws at a constant \
+                 prescribed slip rate and normal force, with every dissipated joule sent to their \
+                 heat port and the prescribed motion's work kept as the interface's own account; \
+                 no contact geometry, normal dynamics, wear or third body"
             ));
         }
         if self
@@ -4141,6 +4170,21 @@ impl Device {
             Kind::FrictionInterface => {
                 let mut values = friction::values(system.state::<friction::State>(element.node));
                 values.extend([("force_n", output("a")), ("heat_w", -output("heat"))]);
+                values
+            }
+            // The last step's traction entering the interface, both axes.
+            Kind::SlidingInterface => {
+                let traction = match system.port(element.node, "traction") {
+                    Some(port) if system.steps() > 0 => system.last_output(port),
+                    _ => &[f64::NAN, f64::NAN][..],
+                };
+                let mut values =
+                    friction::sliding_values(system.state::<friction::Sliding>(element.node));
+                values.extend([
+                    ("traction_x_n", traction[0]),
+                    ("traction_y_n", traction[1]),
+                    ("heat_w", -output("heat")),
+                ]);
                 values
             }
             Kind::ResistorBranch(domain) => {

@@ -51,6 +51,7 @@ save/resume commands work with `self_heating_damper.json` and
 | `heated_plane.json` | 30 W generated on a plane of no heat capacity (`heat_node`) between a 50 J/K pad at 400 K and a 120 J/K disc at 300 K, joined to the plane by 2 and 6 W/K: no fraction is given, the heat divides by where the two temperatures put the plane | the midpoint rule for the two bodies and the plane's balance, solved independently each step: both temperatures and the plane's to 1e-9, every joule in the two bodies; the same device with the heat rate prescribed on the plane |
 | `friction_belt.json` | a block follows a slowly accelerating belt by static friction, breaks away when the acceleration exceeds the static limit, and catches it again as the lining warms | independent constant-acceleration segments: 3 m/s final speed, 2.875 m travel, 3 J of frictional heat and 12 J supplied by the belt |
 | `stribeck_block.json` | a 2 kg block thrown at 3 m/s on a Stribeck lining (`friction_interface`, a dry law of fs-tribo): the coefficient is 0.35 at 3 m/s and grows toward 0.5 as the block slows; all 9 J become the lining's heat | the stopping distance from Simpson's rule on the law's own integral, the error falling about fourfold when the step halves; heat equal to the initial kinetic energy |
+| `dragged_lining.json` | a Stribeck lining (`sliding_interface`) dragged at a prescribed 0.5 m/s under 40 N; its heat warms a 20 J/K pad that loses heat through a wall to 293.15 K | the law's traction mu(0.5) N along the slip and its work; the pad against the midpoint rule's closed recursion to 1e-10 K; the pad's heat plus the wall's equal to the work |
 | `bowed_mode.json` | one undamped 2 Hz mode of a string (`modal_structure`) rubbed by a bow (the interface's prescribed end) at 0.1 m/s through Coulomb friction (`friction_interface` reading the end of the string's flow): kinetic friction pushes the mode until it catches the bow, then it rides stuck | the closed forms: the catch at `sin w t1 = V w / Fk` and the heat of the slide; stuck, the position as the held effort gives it, `2 V tan(w s / 2) / w` per step of length `s` (2.2e-7 m past the continuous ride at 0.2 s, the held force's work on that gap booked as the interface's numerical loss); a 0.5 m/s bow, never caught, against the sliding solution |
 | `dc_motor.json` | a DC motor across three domains: a 12 V supply, winding inductance and resistance in a current loop, a gyrator to a rotor with a viscous bearing, and both heats into one case | the monolithic midpoint rule for the two coupled equations, the supply's energy against stored energy plus heat |
 | `parallel_rlc.json` | a current source drives a capacitor, inductor and resistor in parallel; all Joule heat warms the case | independent coupled voltage/current equations, source work, electrical storage and heat |
@@ -137,6 +138,14 @@ and a mass over its degrees of freedom, and optional Rayleigh damping
           "attachments": {"tip": {"domain": "translation",
                                   "weights": [[0.0, 1.0]]}}}
 ```
+
+`dragged_lining.json` uses `sliding_interface`: the same laws, with the
+motion prescribed instead of solved. A lining is dragged at a constant
+`slip_rate_m_s` of [0.3, 0.4] m/s under 40 N, and nothing in the scene
+moves. The interface turns that motion's work into heat on its `heat`
+port, joined to the pad as a heater would be, and reports the traction
+from its signal output `traction`. The work is the interface's own
+account, so the ledger closes with the pad's heat and the wall's.
 
 ## Rigid bodies from a physics owner
 
