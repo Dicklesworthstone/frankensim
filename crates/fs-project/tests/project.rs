@@ -3187,9 +3187,55 @@ fn g0_phase_conductivity_refuses_invalid_multipliers_sources_and_wire_laws() {
         let malformed = valid.replacen(before, after, 1);
         assert_ne!(valid, malformed);
         assert!(parse_sexpr(&malformed).is_err());
-        let findings = parse_sexpr_lenient(&malformed).unwrap().findings();
-        assert!(!findings.is_empty(), "{malformed}");
+        match parse_sexpr_lenient(&malformed) {
+            Ok(decoded) => assert!(!decoded.findings().is_empty(), "{malformed}"),
+            // A malformed number has no canonical form; the typed printer
+            // refusal propagates and names that field's own finding first.
+            Err(error) => {
+                assert!(
+                    matches!(error.code, "fsim-quantity" | "fsim-syntax"),
+                    "{error:?}"
+                );
+                assert!(
+                    error.detail.starts_with("`phase-conductivity."),
+                    "{error:?}"
+                );
+            }
+        }
     }
+}
+
+#[test]
+fn a_quantity_without_units_is_refused_by_its_field_not_as_a_non_finite_atom() {
+    let valid = print_sexpr(&reference_project()).unwrap();
+    let unitless = valid.replacen(":watts 35.0kg·m^2·s^-3", ":watts 35.0", 1);
+    assert_ne!(valid, unitless);
+    for refused in [parse_sexpr(&unitless), parse_sexpr_lenient(&unitless)] {
+        let error = refused.expect_err("a unitless power has no canonical form");
+        assert!(
+            matches!(error.code, "fsim-quantity" | "fsim-syntax"),
+            "{error:?}"
+        );
+        assert!(
+            error
+                .detail
+                .starts_with("`dissipation.watts` expected a quantity literal"),
+            "{error:?}"
+        );
+        assert!(error.hint.contains("dimensioned quantity"), "{error:?}");
+    }
+    // A repeated key is a finding, never a silent first-wins choice.
+    let repeated = valid.replacen(":duty 1.0", ":duty 1.0 :duty 0.5", 1);
+    assert_ne!(valid, repeated);
+    let decoded = parse_sexpr_lenient(&repeated).unwrap();
+    assert!(
+        decoded
+            .recognition
+            .iter()
+            .any(|row| row.what.contains("declares `:duty` more than once")),
+        "{:?}",
+        decoded.recognition
+    );
 }
 
 #[test]

@@ -1511,6 +1511,26 @@ fn section_name(node: &Node) -> Option<(&str, &[Node])> {
     None
 }
 
+/// A malformed number decodes to a NaN placeholder beside its recognition
+/// finding, and the canonical printer refuses NaN. The printer's typed code
+/// still propagates; the detail and hint lead with that finding, not with
+/// "not finite" about a value the document never held.
+fn unprintable(error: ProjectError, recognition: &[Violation]) -> ProjectError {
+    let Some(first) = recognition.first() else {
+        return error;
+    };
+    ProjectError {
+        code: error.code,
+        detail: format!(
+            "{} ({} recognition finding(s); the document has no canonical form until they are fixed; the printer reported: {})",
+            first.what,
+            recognition.len(),
+            error.detail
+        ),
+        hint: first.fix.clone(),
+    }
+}
+
 /// Recognize the envelope AST into a project, collecting recognition-level
 /// violations rather than refusing at the first problem.
 pub fn recognize(node: &Node) -> Result<DecodedProject, ProjectError> {
@@ -1595,7 +1615,7 @@ pub fn recognize(node: &Node) -> Result<DecodedProject, ProjectError> {
         }
     }
 
-    let canonical = print_sexpr(&spec)?;
+    let canonical = print_sexpr(&spec).map_err(|error| unprintable(error, &recognition))?;
     Ok(DecodedProject {
         spec,
         recognition,
@@ -1638,10 +1658,19 @@ fn read_pairs<'a>(
             });
             break;
         };
-        if known.contains(&key) {
-            pairs.push((key, value));
-        } else {
+        if !known.contains(&key) {
             unknown_field(recognition, context, key);
+        } else if pairs.iter().any(|(seen, _)| *seen == key) {
+            // `field` reads the first occurrence; a second one must not be
+            // dropped without a finding (the lenient path would otherwise
+            // canonicalize `:k a :k b` to `:k a` silently).
+            recognition.push(Violation {
+                code: "project-malformed-clause",
+                what: format!("`{context}` declares `:{key}` more than once"),
+                fix: format!("declare `:{key}` once; no occurrence is chosen over another"),
+            });
+        } else {
+            pairs.push((key, value));
         }
     }
     pairs
