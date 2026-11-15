@@ -1,0 +1,279 @@
+//! The nonlinear enthalpy body on the composition contract.
+//!
+//! [`EnthalpyBody`] puts one [`EnthalpyBackwardEuler`] owner, with its
+//! reference nodal masses, its caloric chart `T(h)` and its problem's
+//! conductivity, behind the heat ports of a
+//! [`ConductionBody`](super::ConductionBody): each named boundary patch is a
+//! mean port or a trace port ([`PatchPort`]), and its heat reaches the owner
+//! through the same Neumann rows. Prepared by
+//! `MaterialEnthalpyTransport::prepare_uniform`, the chart integrates the
+//! card's Cp(T), the masses hold the card's reference density, and the
+//! conductivity is the card's k(T): every coefficient of the body comes from
+//! one material card.
+//!
+//! The state is the nodal specific enthalpy [J/kg]; the ports return the END
+//! temperature `T(h)`, a mean port its patch's area mean. The stored energy
+//! is the owner's inventory `Σ m_v h_v`. The step is the owner's unchanged
+//! `advance`. The tangent is the owner's `linearize_step` of that same
+//! endpoint, whose public adjoint is a transpose solve: the body forms the
+//! port Jacobian one row for each port entry, by one transpose solve each,
+//! and applies that one matrix and its transpose, so the two products are
+//! exact transposes.
+//!
+//! No claim: the entropy generated inside the body is reported as zero, a
+//! lower bound. The owner's refusals stand: a step whose endpoint leaves the
+//! chart, or whose Newton solve misses its policy, refuses the step. Robin,
+//! Dirichlet and contact rows, volumetric sources and temperature-dependent
+//! sheet conduction are refused, as for a conduction body. Latent storage
+//! in the chart is the owner's, and is not tested through ports. No contact
+//! between the traces of two enthalpy bodies is built here. The state has no
+//! snapshot codec.
+
+use fs_exec::Cx;
+use fs_ports::component::{Class, Component, PortSpec, PortTangent, Proposal, Receipt};
+
+use super::{
+    Patch, PatchPort, admit_boundary, admit_ports, boundary_for, check_width, heat_in_j,
+    input_bars, port_readings, reading_weights,
+};
+use crate::transient::enthalpy::adjoint::EnthalpyAdjointError;
+use crate::transient::enthalpy::{EnthalpyBackwardEuler, EnthalpyStepConfig};
+use crate::{ConductionError, ConductionProblem, LinearConfig};
+
+/// The enthalpy owner behind heat ports on named boundary patches.
+///
+/// Port `i` has the id of region `ports[i]`, as for a
+/// [`ConductionBody`](super::ConductionBody): a mean port's input is the heat
+/// rate into the body [W] and its output the patch's area-mean end
+/// temperature [K]; a trace port's inputs are the heat loads into the body at
+/// the patch's vertices [W] and its outputs their end temperatures [K]. The
+/// state is the nodal specific enthalpy [J/kg] in vertex order.
+#[derive(Debug)]
+pub struct EnthalpyBody<'m, 'c> {
+    solver: EnthalpyBackwardEuler<'m, 'c>,
+    problem: ConductionProblem<'m>,
+    config: EnthalpyStepConfig,
+    /// The transpose solve of every row of the port Jacobian.
+    adjoint: LinearConfig,
+    ports: Vec<PortSpec>,
+    patches: Vec<Patch>,
+    /// Entries of all ports together, in the inputs and in the outputs.
+    width: usize,
+    /// The owner's reference nodal masses [kg]: the stored energy of a field
+    /// `h` is `Σ_v m_v h_v`.
+    masses: Vec<f64>,
+}
+
+impl<'m, 'c> EnthalpyBody<'m, 'c> {
+    /// Put `solver` and `problem` behind heat ports on the regions `ports`.
+    ///
+    /// The boundary and source must be those a conduction body admits: every
+    /// region a uniform zero-flux Neumann row, no temperature-dependent sheet
+    /// conduction, a zero uniform source. `config` is the owner's step policy,
+    /// used for every step and tangent; `adjoint` the policy of each transpose
+    /// solve of the tangent.
+    ///
+    /// # Errors
+    /// [`ConductionError::Config`] naming the refused port, region or source;
+    /// a solver prepared on another mesh.
+    pub fn new(
+        solver: EnthalpyBackwardEuler<'m, 'c>,
+        problem: ConductionProblem<'m>,
+        ports: &[PatchPort<'_>],
+        config: EnthalpyStepConfig,
+        adjoint: LinearConfig,
+    ) -> Result<Self, ConductionError> {
+        if !std::ptr::eq(solver.mesh(), problem.mesh) {
+            return Err(super::invalid(
+                "the solver and the problem must use the same mesh".into(),
+            ));
+        }
+        admit_boundary(&problem)?;
+        let (ports, patches, width) = admit_ports(&problem, ports)?;
+        let masses = solver.reference_nodal_masses_kg().to_vec();
+        Ok(Self {
+            solver,
+            problem,
+            config,
+            adjoint,
+            ports,
+            patches,
+            width,
+            masses,
+        })
+    }
+
+    /// Area [m²] of port `port`'s patch.
+    #[must_use]
+    pub fn patch_area_m2(&self, port: usize) -> f64 {
+        self.patches[port].area_m2
+    }
+
+    /// The mesh vertices of trace port `port`, in the order of its inputs and
+    /// outputs; `None` for a mean port.
+    #[must_use]
+    pub fn trace_vertices(&self, port: usize) -> Option<&[usize]> {
+        self.patches[port]
+            .trace
+            .as_ref()
+            .map(|trace| trace.vertices.as_slice())
+    }
+
+    /// The row-major port Jacobian `d outputs / d inputs` [K/W] of the
+    /// owner's endpoint from `old` under `inputs`: row `i` by one transpose
+    /// solve seeded with output `i`'s reading weights.
+    fn port_jacobian(
+        &self,
+        old: &[f64],
+        dt_s: f64,
+        inputs: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<f64>, EnthalpyAdjointError> {
+        self.check_width("inputs", inputs.len())?;
+        let boundary = boundary_for(&self.patches, &self.problem, inputs)?;
+        let problem = ConductionProblem {
+            boundary: &boundary,
+            ..self.problem
+        };
+        let step = self
+            .solver
+            .linearize_step(cx, problem, None, old, dt_s, self.config)?;
+        let mut rows = vec![0.0; self.width * self.width];
+        let mut unit = vec![0.0; self.width];
+        let mut weights = vec![0.0; self.masses.len()];
+        for (i, row) in rows.chunks_exact_mut(self.width).enumerate() {
+            unit.fill(0.0);
+            unit[i] = 1.0;
+            weights.fill(0.0);
+            reading_weights(&self.patches, &unit, &mut weights);
+            let seed = step.temperature_pullback(cx, &weights)?;
+            let gradient = step.pullback(cx, &seed, self.adjoint)?;
+            let nodal = step.nodal_load_pullback(cx, &gradient.adjoint)?;
+            input_bars(&self.patches, &nodal, row);
+        }
+        Ok(rows)
+    }
+
+    fn check_width(&self, vector: &str, length: usize) -> Result<(), ConductionError> {
+        check_width(self.width, self.ports.len(), vector, length)
+    }
+}
+
+impl Component for EnthalpyBody<'_, '_> {
+    type State = Vec<f64>;
+    type Error = EnthalpyAdjointError;
+
+    fn ports(&self) -> &[PortSpec] {
+        &self.ports
+    }
+
+    /// Nonlinear in the port inputs through `T(h)` and k(T), and smooth
+    /// between the chart's knots.
+    fn class(&self) -> Class {
+        Class::Smooth
+    }
+
+    fn stored_energy_j(&self, state: &Vec<f64>) -> Result<f64, EnthalpyAdjointError> {
+        if state.len() != self.masses.len() {
+            return Err(ConductionError::FieldLength {
+                field: "body specific enthalpy",
+                expected: self.masses.len(),
+                found: state.len(),
+            }
+            .into());
+        }
+        let energy: f64 = self.masses.iter().zip(state).map(|(m, h)| m * h).sum();
+        if energy.is_finite() {
+            Ok(energy)
+        } else {
+            Err(ConductionError::NonFinite {
+                field: "body stored energy",
+                bits: energy.to_bits(),
+            }
+            .into())
+        }
+    }
+
+    fn propose(
+        &self,
+        old: &Vec<f64>,
+        dt_s: f64,
+        inputs: &[f64],
+        new: &mut Vec<f64>,
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<Proposal, EnthalpyAdjointError> {
+        self.check_width("inputs", inputs.len())?;
+        self.check_width("outputs", outputs.len())?;
+        let boundary = boundary_for(&self.patches, &self.problem, inputs)?;
+        let problem = ConductionProblem {
+            boundary: &boundary,
+            ..self.problem
+        };
+        let step = self
+            .solver
+            .advance(cx, problem, None, old, dt_s, self.config)?;
+        port_readings(&self.patches, &step.temperature, outputs);
+        let heat_j = heat_in_j(&self.patches, dt_s, inputs);
+        let stored_old_j = self.stored_energy_j(old)?;
+        let stored_new_j = self.stored_energy_j(&step.specific_enthalpy_j_kg)?;
+        // Each stored energy is a sum of `n` positive terms, and the owner's
+        // change one of `n` terms no larger: `(n + 16) eps` of both ends
+        // covers the rounding of all three, as for a conduction body.
+        let units = (self.masses.len() + 16) as f64 * f64::EPSILON;
+        let receipt = Receipt {
+            stored_change_j: step.stored_energy_change_j,
+            dissipated_j: 0.0,
+            numerical_loss_j: heat_j - step.stored_energy_change_j,
+            entropy_generated_j_per_k: 0.0,
+            energy_tolerance_j: units * (stored_old_j.abs() + stored_new_j.abs() + heat_j.abs()),
+            residual: step.newton.residual_norm,
+            tolerance: self.config.newton.absolute_tolerance,
+        };
+        new.clear();
+        new.extend_from_slice(&step.specific_enthalpy_j_kg);
+        Ok(Proposal::Step(receipt))
+    }
+}
+
+impl PortTangent for EnthalpyBody<'_, '_> {
+    fn jvp(
+        &self,
+        old: &Vec<f64>,
+        dt_s: f64,
+        inputs: &[f64],
+        d_inputs: &[f64],
+        d_outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), EnthalpyAdjointError> {
+        self.check_width("tangent inputs", d_inputs.len())?;
+        self.check_width("tangent outputs", d_outputs.len())?;
+        let rows = self.port_jacobian(old, dt_s, inputs, cx)?;
+        for (output, row) in d_outputs.iter_mut().zip(rows.chunks_exact(self.width)) {
+            *output = row.iter().zip(d_inputs).map(|(j, d)| j * d).sum();
+        }
+        Ok(())
+    }
+
+    fn vjp(
+        &self,
+        old: &Vec<f64>,
+        dt_s: f64,
+        inputs: &[f64],
+        bar_outputs: &[f64],
+        bar_inputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), EnthalpyAdjointError> {
+        self.check_width("adjoint outputs", bar_outputs.len())?;
+        self.check_width("adjoint inputs", bar_inputs.len())?;
+        let rows = self.port_jacobian(old, dt_s, inputs, cx)?;
+        for (j, bar) in bar_inputs.iter_mut().enumerate() {
+            *bar = rows
+                .chunks_exact(self.width)
+                .zip(bar_outputs)
+                .map(|(row, b)| row[j] * b)
+                .sum();
+        }
+        Ok(())
+    }
+}

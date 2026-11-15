@@ -604,6 +604,12 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
         &self.masses
     }
 
+    /// The exact transport mesh the reference masses were prepared on.
+    #[must_use]
+    pub const fn mesh(&self) -> &'m ConductionMesh {
+        self.mesh
+    }
+
     /// Immutable constitutive chart retained by this spatial storage model.
     #[must_use]
     pub const fn phase_curve(&self) -> &EquilibriumEnthalpyPhaseCurve {

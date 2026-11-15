@@ -31,6 +31,10 @@
 //! `linearize_step` of that endpoint. Heat capacity stays independent of
 //! temperature, as in the owner.
 //!
+//! [`EnthalpyBody`] puts the nonlinear enthalpy owner, whose capacity,
+//! reference mass and conductivity can all come from one material card,
+//! behind the same ports ([`enthalpy`]).
+//!
 //! No claim: the entropy generated inside the body (conduction between nodes
 //! at different temperatures) is reported as zero, a lower bound. Robin,
 //! Dirichlet and contact traces, volumetric sources and temperature-dependent
@@ -53,6 +57,9 @@ use crate::transient::backward_euler::{
     BackwardEuler, NonlinearStepConfig, StepConfig, StepLinearization,
 };
 use crate::{ConductionError, ConductionProblem, ScalarField, ThermalBc, ThermalBoundary};
+
+pub mod enthalpy;
+pub use enthalpy::EnthalpyBody;
 
 /// How one named boundary patch of a [`ConductionBody`] meets the kernel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,25 +260,7 @@ impl<'m> ConductionBody<'m> {
                 "the solver and the problem must use the same mesh".into(),
             ));
         }
-        let boundary = problem.boundary;
-        for (name, condition) in boundary.region_names().iter().zip(boundary.conditions()) {
-            if !insulated(condition) {
-                return Err(invalid(format!(
-                    "region {name} is a {} row that is not a uniform zero flux; heat through it would cross no port",
-                    condition.tag()
-                )));
-            }
-        }
-        if boundary.has_temperature_dependent_surface_conduction() {
-            return Err(invalid(
-                "temperature-dependent sheet conduction is not wrapped".into(),
-            ));
-        }
-        if !matches!(problem.source, ScalarField::Uniform(s) if *s == 0.0) {
-            return Err(invalid(
-                "a volumetric source would add heat through no port".into(),
-            ));
-        }
+        admit_boundary(&problem)?;
         let dependent = match problem.element_materials {
             Some(materials) => (0..problem.mesh.element_count()).try_fold(false, |any, e| {
                 Ok::<_, ConductionError>(any || materials.model_for(e)?.is_temperature_dependent())
@@ -295,25 +284,7 @@ impl<'m> ConductionBody<'m> {
             }
             _ => {}
         }
-        let mut specs = Vec::with_capacity(ports.len());
-        let mut patches = Vec::with_capacity(ports.len());
-        let mut width = 0;
-        for (index, &port) in ports.iter().enumerate() {
-            let name = port.region();
-            if ports[..index]
-                .iter()
-                .any(|earlier| earlier.region() == name)
-            {
-                return Err(invalid(format!("port {name} is named twice")));
-            }
-            let (spec, patch) = patch_of(&problem, port, width)?;
-            width += patch.width();
-            specs.push(spec);
-            patches.push(patch);
-        }
-        if specs.is_empty() {
-            return Err(invalid("a body needs at least one port".into()));
-        }
+        let (specs, patches, width) = admit_ports(&problem, ports)?;
         let ones = vec![1.0; problem.mesh.vertex_count()];
         let mut weights = vec![0.0; ones.len()];
         solver.capacitance().spmv(&ones, &mut weights);
@@ -538,25 +509,7 @@ impl<'m> ConductionBody<'m> {
     /// mean port's heat rate as a uniform flux, a trace port's loads as the
     /// nodal flux whose consistent loads they are.
     fn boundary_for(&self, inputs: &[f64]) -> Result<ThermalBoundary, ConductionError> {
-        let mut uniform = Vec::with_capacity(self.patches.len());
-        let mut nodal = Vec::new();
-        for patch in &self.patches {
-            match &patch.trace {
-                None => uniform.push((patch.region, -inputs[patch.offset] / patch.area_m2)),
-                Some(trace) => {
-                    let loads = &inputs[patch.offset..patch.offset + trace.vertices.len()];
-                    let mut field = vec![0.0; self.weights.len()];
-                    for (&vertex, flux) in trace.vertices.iter().zip(trace.outward_flux(loads)) {
-                        field[vertex] = flux;
-                    }
-                    nodal.push((patch.region, field));
-                }
-            }
-        }
-        self.problem
-            .boundary
-            .with_uniform_neumann_additions(&uniform)?
-            .with_nodal_neumann_replacements(nodal)
+        boundary_for(&self.patches, &self.problem, inputs)
     }
 
     /// The owner's tangent at `old` under the held port inputs.
@@ -588,60 +541,225 @@ impl<'m> ConductionBody<'m> {
     /// What every port returns of a nodal field, into `outputs`: a mean
     /// port its patch's area mean, a trace port the values at its points.
     fn port_readings(&self, field: &[f64], outputs: &mut [f64]) {
-        for patch in &self.patches {
-            match &patch.trace {
-                None => {
-                    let mut sum = 0.0;
-                    for &(vertices, area) in &patch.faces {
-                        for vertex in vertices {
-                            sum += (area / patch.area_m2 / 3.0) * field[vertex];
-                        }
-                    }
-                    outputs[patch.offset] = sum;
-                }
-                Some(trace) => {
-                    for (output, &vertex) in outputs[patch.offset..].iter_mut().zip(&trace.vertices)
-                    {
-                        *output = field[vertex];
-                    }
-                }
-            }
-        }
+        port_readings(&self.patches, field, outputs);
     }
 
     /// The nodal loads [W] of the port inputs `inputs`: a mean port's heat
     /// rate spread uniformly over its patch, `A_f / 3` of each face's flux on
     /// each of its vertices, and a trace port's loads on their own vertices.
     fn nodal_loads(&self, inputs: &[f64], loads: &mut [f64]) {
-        for patch in &self.patches {
-            match &patch.trace {
-                None => {
-                    let q = inputs[patch.offset];
-                    for &(vertices, area) in &patch.faces {
-                        for vertex in vertices {
-                            loads[vertex] += (area / 3.0) * (q / patch.area_m2);
-                        }
+        nodal_loads(&self.patches, inputs, loads);
+    }
+
+    fn check_width(&self, vector: &str, length: usize) -> Result<(), ConductionError> {
+        check_width(self.width, self.ports.len(), vector, length)
+    }
+}
+
+/// The checks every body behind heat ports makes of its boundary and source:
+/// every region a uniform zero-flux Neumann row (a port's heat replaces that
+/// zero; heat through any other region would cross no port), no
+/// temperature-dependent sheet conduction, no volumetric source.
+fn admit_boundary(problem: &ConductionProblem<'_>) -> Result<(), ConductionError> {
+    let boundary = problem.boundary;
+    for (name, condition) in boundary.region_names().iter().zip(boundary.conditions()) {
+        if !insulated(condition) {
+            return Err(invalid(format!(
+                "region {name} is a {} row that is not a uniform zero flux; heat through it would cross no port",
+                condition.tag()
+            )));
+        }
+    }
+    if boundary.has_temperature_dependent_surface_conduction() {
+        return Err(invalid(
+            "temperature-dependent sheet conduction is not wrapped".into(),
+        ));
+    }
+    if !matches!(problem.source, ScalarField::Uniform(s) if *s == 0.0) {
+        return Err(invalid(
+            "a volumetric source would add heat through no port".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The ports `ports` declare on `problem`'s boundary, their patches and
+/// their entries in all; each region once, and at least one.
+fn admit_ports(
+    problem: &ConductionProblem<'_>,
+    ports: &[PatchPort<'_>],
+) -> Result<(Vec<PortSpec>, Vec<Patch>, usize), ConductionError> {
+    let mut specs = Vec::with_capacity(ports.len());
+    let mut patches = Vec::with_capacity(ports.len());
+    let mut width = 0;
+    for (index, &port) in ports.iter().enumerate() {
+        let name = port.region();
+        if ports[..index]
+            .iter()
+            .any(|earlier| earlier.region() == name)
+        {
+            return Err(invalid(format!("port {name} is named twice")));
+        }
+        let (spec, patch) = patch_of(problem, port, width)?;
+        width += patch.width();
+        specs.push(spec);
+        patches.push(patch);
+    }
+    if specs.is_empty() {
+        return Err(invalid("a body needs at least one port".into()));
+    }
+    Ok((specs, patches, width))
+}
+
+/// `problem`'s boundary with each port's heat in `inputs` applied on its
+/// patch: a mean port's heat rate as a uniform flux, a trace port's loads as
+/// the nodal flux whose consistent loads they are.
+fn boundary_for(
+    patches: &[Patch],
+    problem: &ConductionProblem<'_>,
+    inputs: &[f64],
+) -> Result<ThermalBoundary, ConductionError> {
+    let mut uniform = Vec::with_capacity(patches.len());
+    let mut nodal = Vec::new();
+    for patch in patches {
+        match &patch.trace {
+            None => uniform.push((patch.region, -inputs[patch.offset] / patch.area_m2)),
+            Some(trace) => {
+                let loads = &inputs[patch.offset..patch.offset + trace.vertices.len()];
+                let mut field = vec![0.0; problem.mesh.vertex_count()];
+                for (&vertex, flux) in trace.vertices.iter().zip(trace.outward_flux(loads)) {
+                    field[vertex] = flux;
+                }
+                nodal.push((patch.region, field));
+            }
+        }
+    }
+    problem
+        .boundary
+        .with_uniform_neumann_additions(&uniform)?
+        .with_nodal_neumann_replacements(nodal)
+}
+
+/// What every port returns of a nodal field, into `outputs`: a mean port its
+/// patch's area mean, a trace port the values at its points.
+fn port_readings(patches: &[Patch], field: &[f64], outputs: &mut [f64]) {
+    for patch in patches {
+        match &patch.trace {
+            None => {
+                let mut sum = 0.0;
+                for &(vertices, area) in &patch.faces {
+                    for vertex in vertices {
+                        sum += (area / patch.area_m2 / 3.0) * field[vertex];
                     }
                 }
-                Some(trace) => {
-                    for (&vertex, &load) in trace.vertices.iter().zip(&inputs[patch.offset..]) {
-                        loads[vertex] += load;
-                    }
+                outputs[patch.offset] = sum;
+            }
+            Some(trace) => {
+                for (output, &vertex) in outputs[patch.offset..].iter_mut().zip(&trace.vertices) {
+                    *output = field[vertex];
                 }
             }
         }
     }
+}
 
-    fn check_width(&self, vector: &str, length: usize) -> Result<(), ConductionError> {
-        if length == self.width {
-            Ok(())
-        } else {
-            Err(invalid(format!(
-                "{vector} have {length} entries for the {} of {} ports",
-                self.width,
-                self.ports.len()
-            )))
+/// The nodal loads [W] of the port inputs `inputs`, added into `loads`.
+fn nodal_loads(patches: &[Patch], inputs: &[f64], loads: &mut [f64]) {
+    for patch in patches {
+        match &patch.trace {
+            None => {
+                let q = inputs[patch.offset];
+                for &(vertices, area) in &patch.faces {
+                    for vertex in vertices {
+                        loads[vertex] += (area / 3.0) * (q / patch.area_m2);
+                    }
+                }
+            }
+            Some(trace) => {
+                for (&vertex, &load) in trace.vertices.iter().zip(&inputs[patch.offset..]) {
+                    loads[vertex] += load;
+                }
+            }
         }
+    }
+}
+
+/// The transpose of [`port_readings`]: the nodal weights, added into
+/// `weights`, whose sum against a field is `bar_outputs` against its
+/// readings. A mean port's are `A_f / (3 A_p)` on its vertices, a trace
+/// port's one on each of its points.
+fn reading_weights(patches: &[Patch], bar_outputs: &[f64], weights: &mut [f64]) {
+    for patch in patches {
+        match &patch.trace {
+            None => {
+                let bar = bar_outputs[patch.offset];
+                for &(vertices, area) in &patch.faces {
+                    for vertex in vertices {
+                        weights[vertex] += (area / patch.area_m2 / 3.0) * bar;
+                    }
+                }
+            }
+            Some(trace) => {
+                for (&vertex, &bar) in trace.vertices.iter().zip(&bar_outputs[patch.offset..]) {
+                    weights[vertex] += bar;
+                }
+            }
+        }
+    }
+}
+
+/// The transpose of [`nodal_loads`]: each port input's derivative, into
+/// `bar_inputs`, from the derivatives `nodal_bar` with respect to the nodal
+/// loads.
+fn input_bars(patches: &[Patch], nodal_bar: &[f64], bar_inputs: &mut [f64]) {
+    for patch in patches {
+        match &patch.trace {
+            None => {
+                let mut sum = 0.0;
+                for &(vertices, area) in &patch.faces {
+                    for vertex in vertices {
+                        sum += (area / 3.0) * (nodal_bar[vertex] / patch.area_m2);
+                    }
+                }
+                bar_inputs[patch.offset] = sum;
+            }
+            Some(trace) => {
+                for (bar, &vertex) in bar_inputs[patch.offset..].iter_mut().zip(&trace.vertices) {
+                    *bar = nodal_bar[vertex];
+                }
+            }
+        }
+    }
+}
+
+/// The heat the port inputs put in over `dt_s` [J], summed as the kernel
+/// sums the port energies: a trace port's loads first, then the ports.
+fn heat_in_j(patches: &[Patch], dt_s: f64, inputs: &[f64]) -> f64 {
+    let mut heat_j = 0.0;
+    for patch in patches {
+        heat_j += match &patch.trace {
+            None => dt_s * inputs[patch.offset],
+            Some(trace) => {
+                let loads = &inputs[patch.offset..patch.offset + trace.vertices.len()];
+                dt_s * loads.iter().sum::<f64>()
+            }
+        };
+    }
+    heat_j
+}
+
+fn check_width(
+    width: usize,
+    ports: usize,
+    vector: &str,
+    length: usize,
+) -> Result<(), ConductionError> {
+    if length == width {
+        Ok(())
+    } else {
+        Err(invalid(format!(
+            "{vector} have {length} entries for the {width} of {ports} ports"
+        )))
     }
 }
 
@@ -837,18 +955,7 @@ impl Component for ConductionBody<'_> {
             }
         };
         self.port_readings(&step.temperature, outputs);
-        // The heat in, summed as the kernel sums the port energies: a trace
-        // port's loads first, then the ports.
-        let mut heat_j = 0.0;
-        for patch in &self.patches {
-            heat_j += match &patch.trace {
-                None => dt_s * inputs[patch.offset],
-                Some(trace) => {
-                    let loads = &inputs[patch.offset..patch.offset + trace.vertices.len()];
-                    dt_s * loads.iter().sum::<f64>()
-                }
-            };
-        }
+        let heat_j = heat_in_j(&self.patches, dt_s, inputs);
         let stored_old_j = self.stored_energy_j(old)?;
         let stored_new_j = self.stored_energy_j(&step.temperature)?;
         // Each stored energy is a sum of `n` positive terms, and the owner's
@@ -908,43 +1015,9 @@ impl PortTangent for ConductionBody<'_> {
         // up to its patch's area, weights `A_f / (3 A_p)` on its vertices,
         // a trace port's exactly, one on each of its points.
         let mut weights = vec![0.0; self.weights.len()];
-        for patch in &self.patches {
-            match &patch.trace {
-                None => {
-                    let bar = bar_outputs[patch.offset];
-                    for &(vertices, area) in &patch.faces {
-                        for vertex in vertices {
-                            weights[vertex] += (area / patch.area_m2 / 3.0) * bar;
-                        }
-                    }
-                }
-                Some(trace) => {
-                    for (&vertex, &bar) in trace.vertices.iter().zip(&bar_outputs[patch.offset..]) {
-                        weights[vertex] += bar;
-                    }
-                }
-            }
-        }
+        reading_weights(&self.patches, bar_outputs, &mut weights);
         let gradient = step.pullback(cx, &weights, &[], &[])?;
-        for patch in &self.patches {
-            match &patch.trace {
-                None => {
-                    let mut sum = 0.0;
-                    for &(vertices, area) in &patch.faces {
-                        for vertex in vertices {
-                            sum += (area / 3.0) * (gradient.nodal_load[vertex] / patch.area_m2);
-                        }
-                    }
-                    bar_inputs[patch.offset] = sum;
-                }
-                Some(trace) => {
-                    for (bar, &vertex) in bar_inputs[patch.offset..].iter_mut().zip(&trace.vertices)
-                    {
-                        *bar = gradient.nodal_load[vertex];
-                    }
-                }
-            }
-        }
+        input_bars(&self.patches, &gradient.nodal_load, bar_inputs);
         Ok(())
     }
 }

@@ -6391,11 +6391,14 @@ check with its transpose; and it refuses a mean port and traces a slab
 apart ("contact vertices leave the declared plane tolerance").
 
 Not covered: the entropy generated inside the body is reported as zero, a
-lower bound. There is no snapshot codec. Contact inside one body, radiation,
-heat capacity that depends on temperature (the enthalpy owner) and adaptive
-owners are refused or not wrapped; a temperature-dependent conductivity is
-carried only by `temperature_dependent`, and no test puts a k(T) body into a
-contact or behind a trace port. A contact between
+lower bound. There is no snapshot codec. Contact inside one body, radiation
+and adaptive owners are refused or not wrapped; heat capacity that depends on
+temperature is the enthalpy body's (below), not this one's. A
+temperature-dependent conductivity is carried only by
+`temperature_dependent`, and no test in this crate puts a k(T) body into a
+contact or behind a trace port; fs-cli's scene tests
+(`two_bodies_of_a_card_material_*`) do, against the owner's contact on one
+mesh. A contact between
 two bodies takes one resistance for the whole patch, with no per-face map
 and no temperature dependence. A field heat port names no trace, so nothing
 checks that a `TraceContact` is bonded to the two ports it was built for.
@@ -6405,3 +6408,76 @@ bodies is slow in a debug build, because every Newton column of a body is a
 linearization and a Krylov solve of its own: `tests/conduction_pair.rs` took
 354 s single-threaded on 2026-11-15 (142 s before path (e) and the mapped
 contact were added).
+
+## The card's enthalpy body behind heat ports
+
+`component::EnthalpyBody` (feature `component`) puts one
+`EnthalpyBackwardEuler` owner behind the heat ports of a `ConductionBody`.
+Each named region is a `PatchPort::Mean` or `PatchPort::Trace` port, and its
+heat reaches the owner through the same Neumann rows: a mean port's input is
+the heat rate into the body and its output the patch's area mean of the END
+temperature; a trace port's inputs are the heat loads at the patch's
+vertices and its outputs their END temperatures. The two bodies share the
+admission of the boundary and ports, the patch loads, the readings and their
+weights, one set of functions in `component.rs`, so the conduction body's
+arithmetic is unchanged.
+
+Prepared by `MaterialEnthalpyTransport::prepare_uniform` and given the
+transport's `conductivity()` as the problem's material, every coefficient of
+the body comes from one card. The caloric chart `T(h)` integrates the card's
+Cp(T), the reference nodal masses hold the card's density at its reference
+state, and the conductivity is the card's k(T), stepped by the owner's own
+Newton solve.
+
+The state is the nodal specific enthalpy [J/kg] in vertex order; the stored
+energy is the owner's inventory `Σ m_v h_v`. A step is the owner's unchanged
+`advance` with no interfaces. The receipt books the owner's
+`stored_energy_change_j`, the heat it did not store as numerical loss, and
+the Newton residual norm against the policy's absolute tolerance.
+
+The tangent is the owner's `linearize_step` of the same endpoint, whose
+public derivative is a transpose solve. The body forms the port Jacobian one
+row per port entry: that output's reading weights through
+`temperature_pullback`, one `pullback` under the body's `adjoint` linear
+policy, and `nodal_load_pullback` back to the port loads. The JVP applies
+those rows and the VJP their transpose, so the two are transposes of one
+matrix to rounding. Each tangent call costs one primal solve and one
+transpose solve per port entry. The class is `Smooth`.
+
+Construction refuses what a conduction body refuses on its boundary and
+ports: a region that is not a uniform zero-flux Neumann row, sheet
+conduction that depends on temperature, a nonzero volumetric source, an
+unknown or repeated port name, no port, and a solver prepared on another
+mesh. The owner's refusals stand: an endpoint that leaves the chart, or a
+Newton solve that misses its policy, refuses the step and publishes nothing.
+
+Tests in `tests/enthalpy_component.rs` (`--features component`) use a
+synthetic card: density 8000 kg/m³; Cp linear from 450 J/kg/K at 250 K to
+550 J/kg/K at 450 K; k from 12 to 18 W/m/K. Its chart is known in closed
+form, `T(h) = 250 + 2 (sqrt(202500 + h) - 450)` above 0 J/kg at 250 K. The
+Newton policy is 1e-10 J and 1e-12 relative, the energy gate 1e-8 J. Claims,
+declared before the first run:
+- The body passes the conformance kit at four steps. Its numerical loss is
+  within the 1e-8 J gate plus rounding of the heat in, and its port tangent
+  matches the difference quotient within 1e-6 relative, above the patch
+  rounding plus 1e-9 K for where Newton stops. Its mean ports read the
+  closed-form `T(h)` of the state it returns, area-averaged, within 1e-9 K.
+- Given the consistent loads of a uniform flux, a trace port steps the body
+  as the mean port does: the end fields' temperatures agree within 1e-9 K,
+  and each trace output is its vertex's end `T(h)`. Under loads that are not
+  a uniform flux, the traced body passes the kit and the tangent check.
+- A heater through the kernel steps the body bit for bit as the owner's
+  `advance` steps itself under the flux `-P/A`, over eight steps. The 80 J
+  put in are stored to eight energy gates, the window's energy residual
+  closes within 1e-9 of the stored energy, and the heater generates entropy.
+- Refusals by name: Dirichlet and Robin regions, a volumetric source, an
+  unknown, repeated or missing port, and a solver on another mesh. A step is
+  refused for a field of the wrong length, a heat that is not a number, and
+  1e5 W for one second, which would carry the block past the chart's 450 K
+  end.
+
+Not covered: the entropy generated inside the body is reported as zero, a
+lower bound. There is no snapshot codec. A latent plateau is the owner's and
+is not tested through ports, and the test card is synthetic. No contact
+between the traces of two enthalpy bodies is built, and no fs-cli scene
+builds this body yet.
