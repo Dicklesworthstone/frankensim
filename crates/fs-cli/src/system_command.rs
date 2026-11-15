@@ -387,7 +387,8 @@ Elements (ports in brackets; SI units in every field name):
                  the field's min_temperature_k and max_temperature_k. Fixed
                  step_s only; no checkpoint codec.)
   trace_contact  between [\"body.face\", \"body.face\"], offset_m [x, y, z],
-                 resistance_m2_k_w, source, mapped                    [a, b]
+                 resistance_m2_k_w, source (or pack, state, selection),
+                 mapped                                               [a, b]
                  (fs-conduction's contact between two traces of two
                  conduction bodies, carried by the kernel's conductance
                  over interface points: heat crosses at each point of the
@@ -396,14 +397,20 @@ Elements (ports in brackets; SI units in every field name):
                  owner refuses traces that do not lie in one plane.
                  resistance_m2_k_w is one declared area-specific resistance
                  for the whole patch and source says where it comes from;
-                 both are reported. Without mapped the two faces must have
-                 the same points and triangles. mapped gives the budgets of
-                 the owner's common refinement for faces that do not match:
-                 plane_tolerance_m, coverage_relative_tolerance,
-                 max_pair_tests, max_overlap_triangles, all four. Join a to
-                 the first trace and b to the second; any other join of
-                 them is refused. Reports heat_rate_w from a to b,
-                 conductance_w_k, resistance_m2_k_w and interface_points.)
+                 both are reported. In their place pack names a compiled
+                 interface pack beside the scene and state the point its
+                 card is read at, once, as for a solid; selection is
+                 single-claim-only unless given. The report then carries
+                 the pack, card, claim and receipt identities. A contact
+                 has one of the two sources. Without mapped the two faces
+                 must have the same points and triangles. mapped gives the
+                 budgets of the owner's common refinement for faces that
+                 do not match: plane_tolerance_m,
+                 coverage_relative_tolerance, max_pair_tests,
+                 max_overlap_triangles, all four. Join a to the first trace
+                 and b to the second; any other join of them is refused.
+                 Reports heat_rate_w from a to b, conductance_w_k,
+                 resistance_m2_k_w and interface_points.)
   heater         power_w (waveform, never negative)                   [heat]
 Gas in volumes joined by restrictions (a perfect gas with constant heat
 capacities; all joined volumes must hold the same gas):
@@ -3792,7 +3799,7 @@ fn load_text(text: &str, source_path: &Path) -> Result<Device, Refusal> {
     let mut builder = SystemBuilder::new();
     let materials = materials::load(&root, source_path)?;
     // A trace contact is computed from two bodies, so those are built first.
-    let mut prepared = conduction::prepare(definitions)?;
+    let mut prepared = conduction::prepare(definitions, source_path)?;
     let mut elements = Vec::with_capacity(definitions.len());
     for (name, definition) in definitions {
         elements.push(element(
@@ -4001,12 +4008,27 @@ impl Device {
                  {without}"
             ));
             if contacts {
+                // A card's value is measured, but it is read once.
+                let carded = self.elements.iter().any(|element| {
+                    element
+                        .contact
+                        .as_ref()
+                        .is_some_and(conduction::Declared::is_card_backed)
+                });
+                let resistance = if carded {
+                    "a number declared in the scene or an interface card's value read once at \
+                     the declared state: it follows neither the faces' temperatures nor any \
+                     pressure field, the card's uncertainty is not propagated, and nothing \
+                     checks that the two bodies are the card's two surfaces"
+                } else {
+                    "declared in the scene and not measured, with no dependence on temperature \
+                     or pressure"
+                };
                 description = std::borrow::Cow::Owned(format!(
                     "{description}; a trace carries one heat load and one end temperature for \
                      every vertex of its face, and a trace contact carries heat between two \
                      traces at fs-conduction's interface points through one area-specific \
-                     resistance for the whole patch, declared in the scene and not measured, \
-                     with no dependence on temperature or pressure; a contact generates entropy \
+                     resistance for the whole patch, {resistance}; a contact generates entropy \
                      where the heat crosses, the ledger books the nodal sum at its ports, and \
                      no order is claimed for the gap between the two"
                 ));
@@ -4758,29 +4780,7 @@ impl Device {
             }
         }
         out.push_str(&solid::text_report(&self.elements));
-        if self
-            .elements
-            .iter()
-            .any(|element| element.contact.is_some())
-        {
-            let _ = writeln!(
-                out,
-                "\nContact resistances (declared in the scene, not measured):"
-            );
-            for element in &self.elements {
-                if let Some(declared) = &element.contact {
-                    let _ = writeln!(
-                        out,
-                        "{}: {:e} m^2 K/W between {} and {} <- {}",
-                        element.name,
-                        declared.resistance_m2_k_w,
-                        declared.between[0],
-                        declared.between[1],
-                        declared.source
-                    );
-                }
-            }
-        }
+        out.push_str(&conduction::text_report(&self.elements));
         let _ = writeln!(out, "\nNo claim: {}.", self.no_claim());
         out
     }
@@ -4832,17 +4832,11 @@ impl Device {
                 mass,
                 carried_accounts_json(&account.carried)
             );
-            // A trace contact's resistance is the scene's declaration: the
-            // report repeats it with its source beside the contact's rows.
+            // A trace contact's resistance is the scene's declaration or a
+            // card's value: the report repeats it, with its source or with
+            // the card's identities, beside the contact's rows.
             if let Some(declared) = &element.contact {
-                let _ = write!(
-                    out,
-                    ",\"declared\":{{\"between\":[{},{}],\"resistance_m2_k_w\":{},\"source\":{}}}",
-                    quote(&declared.between[0]),
-                    quote(&declared.between[1]),
-                    num(declared.resistance_m2_k_w),
-                    quote(&declared.source)
-                );
+                out.push_str(&declared.json_member());
             }
             out.push('}');
         }

@@ -1187,9 +1187,50 @@ Tests in `tests/system_command/conduction.rs`:
   budget of 0 and a missing one; a negative resistance; a missing
   `source`; an unsupported field.
 
-No claim for a trace contact: one resistance for the whole patch, declared
-and not measured, with no dependence on temperature or pressure and no
-per-face map; no interface card or pack is read. The contact generates
+A `trace_contact` may take its resistance from an interface card in place
+of `resistance_m2_k_w` and `source`: `pack`, the path of a compiled
+interface pack relative to the scene, `state`, the point the card is read
+at, and optionally `selection` (`single-claim-only` unless given). They are
+read as a solid's are: `read_pack` with the same byte budget,
+`NormalizedInterfacePack::from_bytes`, `state_point`, then
+`InterfaceResistance::from_card`, and from there the lowering is the one
+above. A contact has exactly one of the two sources; both, or neither, is
+refused. Every refusal about the card (a state outside its validity, a
+missing axis, no claim or several) is matdb's own through the owner. The
+card is read once, before the first step. The JSON report's `card` member
+replaces `declared`: `between`, the resolved `resistance_m2_k_w`,
+`pack_id`, `pack_hash`, `pack_bytes_hash`, `card_hash`,
+`resistance_receipt_hash`, `selected_claim` and `state`. The text report
+lists the contact under "Contact resistances from interface cards".
+
+Tests in `tests/system_command/conduction.rs`, on
+`examples/system/two_blocks_atkins.json` (two blocks with declared
+aluminium-like properties through the Atkins 1964 bare 6061-T6 joint,
+whose pack `examples/system/atkins1964/` holds, compiled from
+`data/matdb/seed-v1/atkins-1964-al6061t6-lathe-0p30um-vacuum-interface`):
+- The compiled card has one resistance claim, interpolated `LinearInside`,
+  whose knots are the table the source's `interface.tsv` prints. Claims
+  declared before the first run: at 313 kPa and at 1123 kPa the reported
+  resistance is the printed one, and midway between 70 kPa and 313 kPa it
+  is the mean of the two printed ones, each within 1e-12 relative; the
+  reported conductance is the face area over it within 1e-12.
+- The card-backed run against the same scene with the printed 3.1606e-4
+  m^2 K/W typed in: the energy crossed within 1e-9 J and the eight least
+  and greatest temperatures within 1e-9 K.
+- The example through the binary: exit 0, the `card` member and the text
+  line, and no `declared` member.
+- Eight refusals, all exit 3: both sources; neither; 50 kPa, below the
+  card's 70 kPa; 350 K, above its 305.85 K; no pressure in the state; a
+  pack file that is absent; a material pack where an interface pack is
+  needed; an unknown selection.
+
+No claim for a trace contact: one resistance for the whole patch with no
+per-face map. A declared one is not measured and depends on nothing. A
+card's is read once at the declared state: it follows neither the faces'
+temperatures nor any pressure field, the card's uncertainty is not
+propagated, and nothing checks that the two bodies are the card's two
+surfaces, since a conduction body has declared properties and no material
+card. The contact generates
 entropy where the heat crosses and the ledger books the nodal sum at its
 ports; no order is claimed for the gap between the two. The reference is
 compared in the energy crossed and in eight least and greatest

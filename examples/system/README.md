@@ -57,6 +57,7 @@ save/resume commands work with `self_heating_damper.json` and
 | `two_slabs.json` | two 30 mm steel-like slabs at 400 K and 300 K (`conduction_body`, fs-conduction's backward-Euler finite-element body on a 4 x 2 x 2 box grid) exchange heat through a 0.5 W/K wall at their facing ends | the energy across the wall against the one-dimensional plane-wall series, at second order on 4 and 8 cells |
 | `two_slabs_trace.json` | the same two slabs joined face to face by a `trace_contact`: each facing end is a trace (one temperature and one heat load for every vertex of the face) and the heat crosses at fs-conduction's interface points through 8e-4 m^2 K/W, which is declared in the scene and not measured (the 0.5 W/K wall over the 20 x 20 mm face) | the energy across the contact and the least and greatest temperature of each slab and each contact face against fs-conduction's own matching contact on one mesh, within 1e-9 J and 1e-9 K on 4 and 8 cells |
 | `two_slabs_mapped.json` | the same with the second slab meshed 3 x 3 across against 2 x 2, so the two faces do not match: `mapped` gives the budgets of fs-conduction's common refinement of the two faces; the 8e-4 m^2 K/W is again declared, not measured | the same quantities against fs-conduction's own non-matching contact on one mesh, within 1e-9 J and 1e-9 K on 4 and 8 cells |
+| `two_blocks_atkins.json` | two 30 x 20 x 20 mm blocks at 305 K and 290 K joined by a `trace_contact` whose resistance is read from a measured card: the bare 6061-T6 joint of Atkins (NASA, 1964; lathe-cut faces of 0.30 um RMS, in vacuum) at 313 kPa and 297.5 K, from the pack in `atkins1964/`. The blocks' conductivity (167 W/m K) and volumetric heat capacity (2.4192e6 J/m^3 K) are declared in the scene, not measured and not from a card, and nothing checks that the blocks are the card's two surfaces | the reported resistance against the table the source prints, at 313 kPa, at 1123 kPa and midway between 70 kPa and 313 kPa, within 1e-12; and the run against the same scene with the printed 3.1606e-4 m^2 K/W typed in, within 1e-9 J and 1e-9 K |
 | `struck_mode.json` | a 10 g stick at 2 m/s strikes one undamped 200 Hz mode (`modal_structure`, seen as 50 g at the strike) through a Hertz contact (`contact_interface`, fs-dcontact's power law `K x^1.5` reading the end of the mode's flow): the stick bounces back and the mode rings | the stick's, the mode's and the contact's energies against the stick's 0.02 J, to the settled reactions' defect per contact |
 | `dc_motor.json` | a DC motor across three domains: a 12 V supply, winding inductance and resistance in a current loop, a gyrator to a rotor with a viscous bearing, and both heats into one case | the monolithic midpoint rule for the two coupled equations, the supply's energy against stored energy plus heat |
 | `parallel_rlc.json` | a current source drives a capacitor, inductor and resistor in parallel; all Joule heat warms the case | independent coupled voltage/current equations, source work, electrical storage and heat |
@@ -221,6 +222,18 @@ hashes. The seed manifest maps the certificate's coefficient to
 reads. The pack in `glass1826b/` was compiled from the seed card by
 `cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/glass-soda-lime-srm-1826b-nist/manifest.tsv --material-state "Soda-lime silica glass SRM 1826b" solid "NIST SRM 1826b certified specimen" 0 --out glass-srm-1826b.fsmcdpk`
 (4080 bytes; two builds were byte-identical).
+
+A `trace_contact` takes its resistance from a card in the same way:
+`pack`, a compiled interface pack beside the scene, and `state`, the point
+the card is read at, in place of `resistance_m2_k_w` and `source`
+(`two_blocks_atkins.json`). The card is read once: the resistance does not
+follow the faces' temperatures. The Atkins card's two axes,
+`normal_pressure` and `T`, are plain coordinates in pascal and kelvin, so
+the state gives them with the kind `legacy`. The report's `card` member
+gives the pack, card, claim and receipt hashes, the state and the
+resistance. The pack in `atkins1964/` was compiled from the seed card by
+`cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/atkins-1964-al6061t6-lathe-0p30um-vacuum-interface/manifest.tsv --out al6061t6-lathe-0p30um-vacuum.fsintpk`
+(6753 bytes; two builds were byte-identical).
 
 `viscoelastic_mount.json` uses the second fs-mbd owner,
 `fs_mbd::component::relaxation::RelaxationNetwork`, through a

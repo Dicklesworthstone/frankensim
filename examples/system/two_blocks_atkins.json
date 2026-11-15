@@ -1,0 +1,41 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 1.28,
+  "step_s": 0.04,
+  "elements": {
+    "a": {
+      "kind": "conduction_body",
+      "box_m": [0.03, 0.02, 0.02],
+      "cells": [4, 2, 2],
+      "conductivity_w_m_k": 167.0,
+      "volumetric_heat_capacity_j_m3_k": 2419200.0,
+      "temperature_k": 305.0,
+      "traces": ["x_max"],
+      "solve": {"energy_tolerance_j": 1e-8, "tolerance": 1e-13, "max_iterations": 4000, "restart": 20}
+    },
+    "b": {
+      "kind": "conduction_body",
+      "box_m": [0.03, 0.02, 0.02],
+      "cells": [4, 2, 2],
+      "conductivity_w_m_k": 167.0,
+      "volumetric_heat_capacity_j_m3_k": 2419200.0,
+      "temperature_k": 290.0,
+      "traces": ["x_min"],
+      "solve": {"energy_tolerance_j": 1e-8, "tolerance": 1e-13, "max_iterations": 4000, "restart": 20}
+    },
+    "wall": {
+      "kind": "trace_contact",
+      "between": ["a.x_max", "b.x_min"],
+      "offset_m": [0.03, 0.0, 0.0],
+      "pack": "atkins1964/al6061t6-lathe-0p30um-vacuum.fsintpk",
+      "state": [
+        {"name": "normal_pressure", "value": "313 kPa", "kind": "legacy"},
+        {"name": "T", "value": "297.5 K", "kind": "legacy"}
+      ]
+    }
+  },
+  "connections": [
+    {"join": ["a.x_max", "wall.a"]},
+    {"join": ["wall.b", "b.x_min"]}
+  ]
+}

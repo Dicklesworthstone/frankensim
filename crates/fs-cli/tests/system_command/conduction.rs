@@ -42,9 +42,9 @@ use fs_conduction::{
 };
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
-    ClaimSet, InterfaceSystemCard, InterpolationPolicy, MaterialStateId, PropertyClaim,
-    PropertyKey, PropertyValue, Provenance, QueryPoint, SelectionPolicy, SurfaceSpec,
-    SystemContext, UncertaintyModel,
+    ClaimSet, InterfaceSystemCard, InterpolationPolicy, MaterialStateId, NormalizedInterfacePack,
+    PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint, SelectionPolicy,
+    SurfaceSpec, SystemContext, UncertaintyModel,
 };
 use fs_rep_mesh::TetComplex;
 
@@ -764,4 +764,266 @@ fn trace_contact_scenes_refuse_bad_resistances_sources_and_fields_by_name() {
         ),
     ];
     refuse_each("two_slabs_trace.json", cases);
+}
+
+/// The source the pack of examples/system/two_blocks_atkins.json was
+/// compiled from, and the pack beside the example.
+const ATKINS_SOURCE: &str =
+    "data/matdb/seed-v1/atkins-1964-al6061t6-lathe-0p30um-vacuum-interface/interface.tsv";
+const ATKINS_PACK: &str = "atkins1964/al6061t6-lathe-0p30um-vacuum.fsintpk";
+/// The card example's source of resistance, as its file writes it.
+const CARD_FIELDS: &str = "\"pack\": \"atkins1964/al6061t6-lathe-0p30um-vacuum.fsintpk\",\n      \"state\": [\n        {\"name\": \"normal_pressure\", \"value\": \"313 kPa\", \"kind\": \"legacy\"},\n        {\"name\": \"T\", \"value\": \"297.5 K\", \"kind\": \"legacy\"}\n      ]";
+/// How far a card-backed contact may lie from the printed table.
+const CLAIMED_CARD_GAP: f64 = 1.0e-12;
+
+/// The table the seed source prints, from its `curve` row: the joint's
+/// resistance [m^2 K/W] at each tabulated pressure [Pa].
+fn printed_knots() -> Vec<(f64, f64)> {
+    let path = format!("{}/../../{ATKINS_SOURCE}", env!("CARGO_MANIFEST_DIR"));
+    let text = std::fs::read_to_string(path).unwrap();
+    let row = text
+        .lines()
+        .find(|line| line.starts_with("curve\tcontact-resistance\t"))
+        .expect("the source has the resistance curve");
+    let fields: Vec<&str> = row.split('\t').collect();
+    assert_eq!(
+        (fields[4], fields[5], fields[6], fields[8]),
+        ("normal_pressure", "Pa", "m^2*K/W", "linear")
+    );
+    fields[7]
+        .split(',')
+        .map(|knot| {
+            let (pascal, resistance) = knot.split_once(':').unwrap();
+            (pascal.parse().unwrap(), resistance.parse().unwrap())
+        })
+        .collect()
+}
+
+/// The card example with its changes made, in order.
+fn card_scene(case: &str, changes: &[(&str, &str)]) -> String {
+    let mut text = std::fs::read_to_string(example("two_blocks_atkins.json")).unwrap();
+    for (from, to) in changes {
+        assert!(text.contains(from), "{case}: test fixture changed");
+        text = text.replacen(from, to, 1);
+    }
+    text
+}
+
+/// A scene beside the card example, run to its end: the energy that crossed
+/// its contact and the temperatures a trace scene is compared in.
+fn crossed(cx: &fs_exec::Cx<'_>, text: &str) -> Crossed {
+    let mut scene = SystemScene::from_text(text, example("two_blocks_atkins.json")).unwrap();
+    let mut energy_j = 0.0;
+    let mut time_s = scene.time_s();
+    while scene.advance(f64::MAX, cx).unwrap() {
+        let now_s = scene.time_s();
+        energy_j += probe(&scene, "wall.heat_rate_w") * (now_s - time_s);
+        time_s = now_s;
+    }
+    let pair = |low: &str, high: &str| (probe(&scene, low), probe(&scene, high));
+    Crossed {
+        energy_j,
+        spans_k: [
+            pair("a.min_temperature_k", "a.max_temperature_k"),
+            pair("b.min_temperature_k", "b.max_temperature_k"),
+            pair("a.x_max.min_temperature_k", "a.x_max.max_temperature_k"),
+            pair("b.x_min.min_temperature_k", "b.x_min.max_temperature_k"),
+        ],
+    }
+}
+
+#[test]
+fn a_card_backed_contact_reports_the_printed_resistance_at_and_between_the_tabulated_pressures() {
+    let knots = printed_knots();
+    // The compiled card holds the printed table and interpolates it linearly.
+    let pack =
+        NormalizedInterfacePack::from_bytes(&std::fs::read(example(ATKINS_PACK)).unwrap()).unwrap();
+    let claims = pack
+        .card()
+        .claims_for(AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY);
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].1.interpolation, InterpolationPolicy::LinearInside);
+    let PropertyValue::Curve {
+        knots: compiled, ..
+    } = &claims[0].1.value
+    else {
+        panic!("the resistance is not a curve");
+    };
+    assert_eq!(compiled, &knots, "the pack is not the source's table");
+    // Two tabulated pressures, and the pressure midway between the first two.
+    let between = (
+        0.5 * (knots[0].0 + knots[1].0),
+        0.5 * (knots[0].1 + knots[1].1),
+    );
+    for (pascal, printed) in [knots[1], knots[2], between] {
+        let text = card_scene("pressure", &[("\"313 kPa\"", &format!("\"{pascal} Pa\""))]);
+        let scene = SystemScene::from_text(&text, example("two_blocks_atkins.json")).unwrap();
+        let (resistance, conductance) = (
+            probe(&scene, "wall.resistance_m2_k_w"),
+            probe(&scene, "wall.conductance_w_k"),
+        );
+        eprintln!(
+            "{pascal} Pa: card {resistance:e} m^2 K/W, printed {printed:e}; {conductance} W/K, A / R'' {}",
+            CROSS_M * CROSS_M / printed
+        );
+        assert!(
+            (resistance / printed - 1.0).abs() <= CLAIMED_CARD_GAP,
+            "{pascal} Pa: {resistance:e} against the printed {printed:e}"
+        );
+        assert!(
+            (conductance * printed / (CROSS_M * CROSS_M) - 1.0).abs() <= CLAIMED_CARD_GAP,
+            "{pascal} Pa: {conductance} W/K"
+        );
+    }
+}
+
+#[test]
+fn a_card_backed_contact_is_the_declared_contact_at_the_printed_resistance() {
+    let printed = printed_knots()[1];
+    assert_eq!(printed.0.to_bits(), 313_000.0_f64.to_bits());
+    let declared = card_scene(
+        "declared",
+        &[(
+            CARD_FIELDS,
+            &format!(
+                "\"resistance_m2_k_w\": {:e},\n      \"source\": \"the card's printed value at 313 kPa\"",
+                printed.1
+            ),
+        )],
+    );
+    scene_context(|cx, _| {
+        let card = crossed(cx, &card_scene("card", &[]));
+        let typed = crossed(cx, &declared);
+        let gap_j = card.energy_j - typed.energy_j;
+        let gap_k = card
+            .spans_k
+            .iter()
+            .zip(&typed.spans_k)
+            .map(|(card, typed)| (card.0 - typed.0).abs().max((card.1 - typed.1).abs()))
+            .fold(0.0, f64::max);
+        eprintln!(
+            "card {:.15e} J, declared {:.15e} J; card - declared {gap_j:e} J; largest span difference {gap_k:e} K; faces a {:?} K, b {:?} K",
+            card.energy_j, typed.energy_j, card.spans_k[2], card.spans_k[3]
+        );
+        assert!(card.energy_j > 0.0, "nothing crossed: {} J", card.energy_j);
+        assert!(gap_j.abs() <= CLAIMED_GAP_J, "{gap_j:e} J apart");
+        assert!(gap_k <= CLAIMED_GAP_K, "{gap_k:e} K apart");
+    });
+}
+
+#[test]
+fn the_card_example_runs_through_the_binary_and_reports_its_card() {
+    let path = example("two_blocks_atkins.json");
+    let (code, json, stderr) = run_binary(&["--json", "system", &path]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(value(&json, &element("wall"), "heat_rate_w") > 0.0);
+    for member in [
+        "\"card\":{\"between\":[\"a.x_max\",\"b.x_min\"],\"resistance_m2_k_w\":0.00031606,\"pack_id\":\"atkins-1964-al6061t6-lathe-0p30um-vacuum-interface\",\"pack_hash\":\"",
+        "\"resistance_receipt_hash\":\"",
+        "\"selected_claim\":\"",
+        "\"state\":{\"T\":297.5,\"normal_pressure\":313000.0}}",
+    ] {
+        assert!(json.contains(member), "{member} not in {json}");
+    }
+    assert!(!json.contains("\"declared\":"), "{json}");
+    let (code, text, stderr) = run_binary(&["system", &path]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        text.contains("Contact resistances from interface cards")
+            && text.contains(
+                "wall: 3.1606e-4 m^2 K/W between a.x_max and b.x_min <- atkins-1964-al6061t6-lathe-0p30um-vacuum-interface"
+            )
+            && text.contains("an interface card's value read once at the declared state")
+            && !text.contains("declared in the scene, not measured"),
+        "{text}"
+    );
+}
+
+/// A refusal case of the card example: its name, the pack whose bytes stand
+/// beside the scene, the changes in order, and what the refusal says.
+type CardRefused<'a> = (&'a str, &'a str, Vec<(&'a str, &'a str)>, &'a str);
+
+/// A changed copy of the card example, written beside a copy of `pack`
+/// under the name the example gives its pack, and refused: the exit code
+/// and the diagnostic.
+fn card_refused(case: &str, pack: &str, changes: &[(&str, &str)]) -> (i32, String) {
+    let path = scratch(case, &card_scene(case, changes));
+    let beside = path.parent().unwrap().join("atkins1964");
+    std::fs::create_dir_all(&beside).unwrap();
+    std::fs::copy(
+        example(pack),
+        beside.join("al6061t6-lathe-0p30um-vacuum.fsintpk"),
+    )
+    .unwrap();
+    let (code, stdout, stderr) = run_binary(&["system", path.to_str().unwrap()]);
+    assert!(stdout.is_empty(), "{stdout}");
+    (code, stderr)
+}
+
+#[test]
+fn card_backed_contact_scenes_refuse_two_sources_states_off_the_card_and_other_packs_by_name() {
+    let source = "\"pack\": \"atkins1964/al6061t6-lathe-0p30um-vacuum.fsintpk\",";
+    let pressure =
+        "        {\"name\": \"normal_pressure\", \"value\": \"313 kPa\", \"kind\": \"legacy\"},\n";
+    let one_of_two = "from a card (pack with state): one of the two, and not both";
+    // matdb's own refusal of a state off the card, through the owner.
+    let outside = "extrapolation refused: the query point is outside the validity of every one";
+    let no_source = format!(",\n      {CARD_FIELDS}");
+    let cases: Vec<CardRefused<'_>> = vec![
+        (
+            "both",
+            ATKINS_PACK,
+            vec![(
+                source,
+                "\"resistance_m2_k_w\": 0.0008, \"source\": \"typed\", \"pack\": \"atkins1964/al6061t6-lathe-0p30um-vacuum.fsintpk\",",
+            )],
+            one_of_two,
+        ),
+        ("neither", ATKINS_PACK, vec![(&no_source, "")], one_of_two),
+        (
+            "low pressure",
+            ATKINS_PACK,
+            vec![("\"313 kPa\"", "\"50 kPa\"")],
+            outside,
+        ),
+        (
+            "hot",
+            ATKINS_PACK,
+            vec![("\"297.5 K\"", "\"350 K\"")],
+            outside,
+        ),
+        (
+            "no pressure",
+            ATKINS_PACK,
+            vec![(pressure, "")],
+            "fs-matdb refused \"area-specific-thermal-contact-resistance\"",
+        ),
+        (
+            "absent",
+            ATKINS_PACK,
+            vec![("vacuum.fsintpk\",", "absent.fsintpk\",")],
+            "elements.wall.pack:",
+        ),
+        (
+            "material pack",
+            "steel1018/steel-1018.fsmcdpk",
+            vec![],
+            "elements.wall.pack:",
+        ),
+        (
+            "selection",
+            ATKINS_PACK,
+            vec![(
+                "\"state\": [",
+                "\"selection\": \"best\",\n      \"state\": [",
+            )],
+            "elements.wall.selection:",
+        ),
+    ];
+    for (case, pack, changes, reason) in cases {
+        let (code, stderr) = card_refused(case, pack, &changes);
+        eprintln!("{case}: exit {code}: {}", stderr.trim_end());
+        assert_eq!(code, 3, "{case}: {stderr}");
+        assert!(stderr.contains(reason), "{case}: {stderr}");
+    }
 }

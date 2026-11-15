@@ -13,19 +13,25 @@
 //! field. Nothing here conducts, stores or integrates heat.
 //!
 //! A `trace_contact` names two traces of two bodies, where the second body's
-//! origin lies in the first's frame, and one declared area-specific
-//! resistance with its source. The owner computes the interface points
-//! (`ConductionBody::matching_contact`, or `mapped_contact` when the scene
-//! gives the refinement's budgets under `mapped`) and the kernel's element
-//! carries the heat. The contact is computed from both bodies, so the bodies
-//! a contact names are built before the kernel takes any element
-//! ([`prepare`]); every other body is built where the scene lists it.
+//! origin lies in the first's frame, and one area-specific resistance: a
+//! number the scene declares with its source, or an interface card of a
+//! compiled pack read once at a declared state ([`card`]). The owner computes
+//! the interface points (`ConductionBody::matching_contact`, or
+//! `mapped_contact` when the scene gives the refinement's budgets under
+//! `mapped`) and the kernel's element carries the heat. The contact is
+//! computed from both bodies, so the bodies a contact names are built before
+//! the kernel takes any element ([`prepare`]); every other body is built
+//! where the scene lists it.
 //!
 //! The kernel keeps component states as `'static` values and the body
 //! borrows its mesh, boundary and material, so they are leaked: they live
 //! as long as the process that runs the scene.
 
+use std::fmt::Write as _;
+use std::path::Path;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
+use fs_blake3::hash_bytes;
 use fs_conduction::component::{ConductionBody, PatchPort};
 use fs_conduction::fixtures::{box_grid, on_box_face};
 use fs_conduction::interface::NonmatchingOptions;
@@ -40,15 +46,19 @@ use fs_conduction::{
 use fs_evidence::ValidityDomain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_matdb::{
-    ClaimSet, InterfaceSystemCard, InterpolationPolicy, MaterialStateId, PropertyClaim,
-    PropertyKey, PropertyValue, Provenance, QueryPoint, SelectionPolicy, SurfaceSpec,
-    SystemContext, UncertaintyModel,
+    ClaimSet, InterfaceSystemCard, InterpolationPolicy, MaterialStateId, NormalizedInterfacePack,
+    PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint, SelectionPolicy,
+    SurfaceSpec, SystemContext, UncertaintyModel,
 };
 use fs_ports::component::PortSpec;
 use fs_system::elements::{ConductanceMatrix, InterfacePoint};
 use fs_system::{NodeId, System, SystemBuilder};
 
-use super::{J, Refusal, add, fields, number, number_or, positive};
+use crate::cards::{MAX_CARD_PACK_BYTES, MAX_CARD_PACK_SOURCE_BYTES};
+use crate::material_state_input::state_point;
+
+use super::materials::read_pack;
+use super::{Element, J, Refusal, add, fields, num, number, number_or, positive, quote};
 
 /// The kernel holds the nodal temperature field [K] in vertex order.
 pub(super) type State = Vec<f64>;
@@ -349,6 +359,17 @@ fn build(definition: &J, what: &str) -> Result<Body, Refusal> {
     })
 }
 
+/// Where a contact's resistance comes from.
+#[derive(Debug, Clone)]
+enum Origin {
+    /// The scene's own number, with the scene's sentence on its source.
+    Declared(String),
+    /// An interface card read once at a declared state: the pack's name and
+    /// the members of the report's `card` object that identify the pack, the
+    /// card, the claim, the receipt and the state.
+    Card { pack_id: String, report: String },
+}
+
 /// What a scene declared for a contact and what the owner made of it: kept
 /// for the wiring check and the report.
 #[derive(Debug, Clone)]
@@ -356,12 +377,78 @@ pub(super) struct Declared {
     /// The two traces, `element.face`, that the contact was computed for:
     /// its port `a` meets the first and its port `b` the second.
     pub(super) between: [String; 2],
-    pub(super) resistance_m2_k_w: f64,
-    /// Where the scene says the resistance comes from.
-    pub(super) source: String,
+    /// The scene's number, or the value its card gave at the declared state.
+    resistance_m2_k_w: f64,
+    origin: Origin,
     /// The sum of the interface points' conductances [W/K].
     conductance_w_k: f64,
     points: usize,
+}
+
+impl Declared {
+    /// Whether the resistance is a card's value, not the scene's own number.
+    pub(super) fn is_card_backed(&self) -> bool {
+        matches!(self.origin, Origin::Card { .. })
+    }
+
+    /// The contact's member of its element in the JSON report, with its
+    /// leading comma: `declared` for the scene's own number and its source,
+    /// `card` for a card's value with the identities of what it was read
+    /// from.
+    pub(super) fn json_member(&self) -> String {
+        let head = format!(
+            "\"between\":[{},{}],\"resistance_m2_k_w\":{}",
+            quote(&self.between[0]),
+            quote(&self.between[1]),
+            num(self.resistance_m2_k_w)
+        );
+        match &self.origin {
+            Origin::Declared(source) => {
+                format!(",\"declared\":{{{head},\"source\":{}}}", quote(source))
+            }
+            Origin::Card { report, .. } => format!(",\"card\":{{{head},{report}}}"),
+        }
+    }
+}
+
+/// The text report's lines for the scene's contacts: the resistances the
+/// scene declares, then those read from cards. Empty when a scene has none.
+pub(super) fn text_report(elements: &[Element]) -> String {
+    let mut out = String::new();
+    let contacts = || {
+        elements
+            .iter()
+            .filter_map(|element| Some((&element.name, element.contact.as_ref()?)))
+    };
+    for (carded, heading) in [
+        (
+            false,
+            "\nContact resistances (declared in the scene, not measured):",
+        ),
+        (
+            true,
+            "\nContact resistances from interface cards (each read once at its declared state; \
+             --json gives the receipts):",
+        ),
+    ] {
+        let mut first = true;
+        for (name, contact) in contacts() {
+            let from = match &contact.origin {
+                Origin::Declared(source) if !carded => source,
+                Origin::Card { pack_id, .. } if carded => pack_id,
+                _ => continue,
+            };
+            if std::mem::take(&mut first) {
+                let _ = writeln!(out, "{heading}");
+            }
+            let _ = writeln!(
+                out,
+                "{name}: {:e} m^2 K/W between {} and {} <- {from}",
+                contact.resistance_m2_k_w, contact.between[0], contact.between[1]
+            );
+        }
+    }
+    out
 }
 
 /// The bodies that a scene's contacts name and those contacts, built before
@@ -413,13 +500,18 @@ fn end(
 
 /// The declared resistance as the owner's interface resistance, through a
 /// card that says the value is the caller's declaration.
-fn resistance(name: &str, declared: &Declared) -> Result<InterfaceResistance, String> {
+fn resistance(
+    name: &str,
+    between: &[String; 2],
+    resistance_m2_k_w: f64,
+    source: &str,
+) -> Result<InterfaceResistance, String> {
     let mut claims = ClaimSet::new();
     claims
         .insert_claim(PropertyClaim {
             key: PropertyKey::new(RESISTANCE_PROPERTY, RESISTANCE_DIMS),
             value: PropertyValue::Scalar {
-                value: declared.resistance_m2_k_w,
+                value: resistance_m2_k_w,
                 dims: RESISTANCE_DIMS,
             },
             validity: ValidityDomain::unconstrained(),
@@ -427,10 +519,7 @@ fn resistance(name: &str, declared: &Declared) -> Result<InterfaceResistance, St
             interpolation: InterpolationPolicy::ConstantWithinValidity,
             observations: Vec::new(),
             provenance: Provenance {
-                source: format!(
-                    "caller-declared system-scene contact {name}: {}",
-                    declared.source
-                ),
+                source: format!("caller-declared system-scene contact {name}: {source}"),
                 license: "unspecified".into(),
                 artifact: None,
             },
@@ -446,8 +535,8 @@ fn resistance(name: &str, declared: &Declared) -> Result<InterfaceResistance, St
         texture_frame: "caller-unspecified".into(),
     };
     let card = InterfaceSystemCard::assemble(
-        side(&declared.between[0]),
-        side(&declared.between[1]),
+        side(&between[0]),
+        side(&between[1]),
         SystemContext {
             medium: "caller-unspecified".into(),
             third_body: None,
@@ -465,6 +554,60 @@ fn resistance(name: &str, declared: &Declared) -> Result<InterfaceResistance, St
         SelectionPolicy::SingleClaimOnly,
     )
     .map_err(|error| error.to_string())
+}
+
+/// A contact's resistance from an interface card: the compiled pack at
+/// `pack`, a path relative to the scene, read once at the scene's `state`
+/// under `selection` (one claim only, unless the scene names another
+/// policy). The owner resolves the card, so every refusal about its claims
+/// and their validity is matdb's own. With the resistance, where it came
+/// from for the report.
+fn card(
+    scene: &Path,
+    name: &str,
+    definition: &J,
+    what: &str,
+) -> Result<(InterfaceResistance, Origin), String> {
+    let path = definition
+        .str_field("pack")
+        .filter(|path| !path.trim().is_empty() && path.len() <= MAX_CARD_PACK_SOURCE_BYTES)
+        .ok_or_else(|| format!("{what}.pack: an interface pack path is required"))?;
+    let path = scene.parent().unwrap_or(Path::new(".")).join(path);
+    let bytes = read_pack(&path, MAX_CARD_PACK_BYTES, &format!("{what}.pack"))?;
+    let pack = NormalizedInterfacePack::from_bytes(&bytes)
+        .map_err(|error| format!("{what}.pack: {error}"))?;
+    let point = state_point(definition).map_err(|error| format!("{what}.state: {error}"))?;
+    let policy = match definition.get("selection") {
+        None => SelectionPolicy::SingleClaimOnly,
+        Some(tag) => tag
+            .as_str()
+            .map(SelectionPolicy::from_tag)
+            .ok_or_else(|| format!("{what}.selection: expected a policy name"))?
+            .map_err(|error| format!("{what}.selection: {error}"))?,
+    };
+    let resistance = InterfaceResistance::from_card(name, pack.card(), &point, policy)
+        .map_err(|error| format!("{what}: {error}"))?;
+    let receipt = resistance.receipt();
+    let state = point
+        .axes()
+        .iter()
+        .map(|(axis, value)| format!("{}:{}", quote(axis), num(*value)))
+        .collect::<Vec<_>>()
+        .join(",");
+    let report = format!(
+        "\"pack_id\":{},\"pack_hash\":{},\"pack_bytes_hash\":{},\"card_hash\":{},\"resistance_receipt_hash\":{},\"selected_claim\":{},\"state\":{{{state}}}",
+        quote(pack.pack_id()),
+        quote(&pack.content_hash().to_hex()),
+        quote(&hash_bytes(&bytes).to_hex()),
+        quote(&resistance.card_identity().to_hex()),
+        quote(&receipt.content_hash().to_hex()),
+        quote(&receipt.selected.0.to_hex()),
+    );
+    let origin = Origin::Card {
+        pack_id: pack.pack_id().to_owned(),
+        report,
+    };
+    Ok((resistance, origin))
 }
 
 /// The budgets of the owner's common refinement, all four as the scene
@@ -503,6 +646,7 @@ fn contact(
     bodies: &mut Vec<(String, Body)>,
     name: &str,
     definition: &J,
+    scene: &Path,
 ) -> Result<(ConductanceMatrix, Declared), Refusal> {
     let what = format!("elements.{name}");
     fields(
@@ -513,10 +657,23 @@ fn contact(
             "offset_m",
             "resistance_m2_k_w",
             "source",
+            "pack",
+            "state",
+            "selection",
             "mapped",
         ],
         &what,
     )?;
+    // One source of the resistance: the scene's number, or a card.
+    let given = |keys: &[&str]| keys.iter().any(|key| definition.get(key).is_some());
+    let carded = given(&["pack", "state", "selection"]);
+    if carded == given(&["resistance_m2_k_w", "source"]) {
+        return Err(format!(
+            "{what}: a contact takes its resistance from resistance_m2_k_w with its source, or \
+             from a card (pack with state): one of the two, and not both"
+        )
+        .into());
+    }
     let between = match definition.get("between").and_then(J::as_array) {
         Some([a, b]) => a.as_str().zip(b.as_str()),
         _ => None,
@@ -525,28 +682,38 @@ fn contact(
     .ok_or_else(|| {
         format!("{what}: between is [\"element.face\", \"element.face\"], two traces")
     })?;
+    let between = [between[0].to_owned(), between[1].to_owned()];
     let offset_m = vector(definition, "offset_m", &what)?;
-    let source = definition
-        .str_field("source")
-        .filter(|source| !source.trim().is_empty())
-        .ok_or_else(|| format!("{what}: source says where resistance_m2_k_w comes from"))?;
     let options = refinement(definition, &what)?;
-    let (body_a, port_a) = end(definitions, bodies, between[0], &what)?;
-    let (body_b, port_b) = end(definitions, bodies, between[1], &what)?;
+    let (body_a, port_a) = end(definitions, bodies, &between[0], &what)?;
+    let (body_b, port_b) = end(definitions, bodies, &between[1], &what)?;
     if body_a == body_b {
         return Err(format!(
             "{what}: between names two traces of one body; a contact joins two bodies"
         )
         .into());
     }
+    let (resistance, resistance_m2_k_w, origin) = if carded {
+        let (resistance, origin) = card(scene, name, definition, &what)?;
+        let value = resistance.value_m2_k_per_w();
+        (resistance, value, origin)
+    } else {
+        let source = definition
+            .str_field("source")
+            .filter(|source| !source.trim().is_empty())
+            .ok_or_else(|| format!("{what}: source says where resistance_m2_k_w comes from"))?;
+        let value = positive(definition, "resistance_m2_k_w", &what)?;
+        let resistance = resistance(name, &between, value, source)
+            .map_err(|error| format!("{what}: {error}"))?;
+        (resistance, value, Origin::Declared(source.to_owned()))
+    };
     let mut declared = Declared {
-        between: [between[0].to_owned(), between[1].to_owned()],
-        resistance_m2_k_w: positive(definition, "resistance_m2_k_w", &what)?,
-        source: source.to_owned(),
+        between,
+        resistance_m2_k_w,
+        origin,
         conductance_w_k: 0.0,
         points: 0,
     };
-    let resistance = resistance(name, &declared).map_err(|error| format!("{what}: {error}"))?;
     let (a, b) = (&bodies[body_a].1.component, &bodies[body_b].1.component);
     let joint = match options {
         // The scene names its own remedy: the owner knows nothing of scenes.
@@ -581,11 +748,12 @@ fn contact(
 
 /// Every `trace_contact` of the scene with the bodies it names. A scene
 /// with no contact prepares nothing.
-pub(super) fn prepare(definitions: &[(String, J)]) -> Result<Prepared, Refusal> {
+pub(super) fn prepare(definitions: &[(String, J)], scene: &Path) -> Result<Prepared, Refusal> {
     let mut prepared = Prepared::default();
     for (name, definition) in definitions {
         if definition.str_field("kind") == Some("trace_contact") {
-            let (wall, declared) = contact(definitions, &mut prepared.bodies, name, definition)?;
+            let (wall, declared) =
+                contact(definitions, &mut prepared.bodies, name, definition, scene)?;
             prepared.contacts.push((name.clone(), wall, declared));
         }
     }
