@@ -41,6 +41,7 @@ fs-material = { path = "../fs-material", features = ["component"] }
 fs-math = { path = "../fs-math" }
 fs-mbd = { path = "../fs-mbd" }
 fs-mesh = { path = "../fs-mesh" }
+fs-nlmodal = { path = "../fs-nlmodal" }
 fs-opt = { path = "../fs-opt" }
 fs-package = { path = "../fs-package" }
 fs-ports = { path = "../fs-ports" }

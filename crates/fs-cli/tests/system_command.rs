@@ -4331,6 +4331,287 @@ fn friction_interface_scenes_refuse_invalid_laws_budgets_spans_and_error_control
     assert!(stderr.contains("missing law"), "{stderr}");
 }
 
+/// One 5 Hz mode with 2 % damping, seen at its tip through the weight
+/// `1 / sqrt(2 kg)`, so that the tip moves as a 2 kg mass on a spring and a
+/// damper. A constant 1 N pushes the tip from rest for 1 s; the modal heat
+/// warms a 10 J/K case.
+const MODAL_TIP: &str = r#"{
+  "schema": "frankensim.system.v0", "duration_s": 1.0, "step_s": 0.001,
+  "elements": {
+    "rod": {"kind": "modal_structure", "sample_rate_hz": 1000,
+            "modes": [{"frequency_hz": 5.0, "damping_ratio": 0.02}],
+            "attachments": {"tip": {"domain": "translation",
+                                    "weights": [[0.7071067811865476]]}}},
+    "push": {"kind": "force", "force_n": 1.0},
+    "case": {"kind": "heat_capacity", "capacity_j_k": 10.0, "temperature_k": 300.0}
+  },
+  "connections": [
+    {"join": ["rod.tip", "push.p"]},
+    {"join": ["case.heat", "rod.heat"]}
+  ]
+}"#;
+
+#[test]
+fn a_modal_structure_pushed_by_a_constant_force_follows_the_exact_damped_step_response() {
+    // G1: the owner steps each mode exactly under the effort held over the
+    // step, and a constant force is held exactly. The mode q obeys
+    // q'' + 2 zeta w q' + w^2 q = s F with q(0) = q'(0) = 0, so
+    // q = s F / w^2 (1 - e^(-zeta w t) (cos wd t + zeta w / wd sin wd t)) and
+    // q' = s F / wd e^(-zeta w t) sin wd t. The force's work is F s q, of
+    // which the modal energy (q'^2 + w^2 q^2) / 2 is stored and the rest is
+    // the case's heat.
+    let path = scratch("modal_tip.json", MODAL_TIP);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    let (s, force, t) = (0.5_f64.sqrt(), 1.0, 1.0);
+    let (w, zeta) = (core::f64::consts::TAU * 5.0, 0.02_f64);
+    let wd = w * (1.0 - zeta * zeta).sqrt();
+    let decay = (-zeta * w * t).exp();
+    let q = s * force / (w * w) * (1.0 - decay * ((wd * t).cos() + zeta * w / wd * (wd * t).sin()));
+    let v = s * force / wd * decay * (wd * t).sin();
+    let work = force * s * q;
+    let heat = work - 0.5 * (v * v + w * w * q * q);
+    for (owner, field, expected, tolerance) in [
+        ("rod", "mode0.displacement", q, 1.0e-12),
+        ("rod", "mode0.velocity", v, 1.0e-11),
+        ("rod", "tip.velocity_m_s", s * v, 1.0e-11),
+        ("push", "energy_in_j", -work, 1.0e-12),
+        ("rod", "dissipated_j", heat, 1.0e-12),
+        // 1000 additions to a 300 K accumulator, each rounded to its ulp.
+        ("case", "temperature_k", 300.0 + heat / 10.0, 1.0e-10),
+    ] {
+        let found = value(&json, &element(owner), field);
+        assert!(
+            (found - expected).abs() <= tolerance,
+            "{owner}.{field}: {found} vs {expected}"
+        );
+    }
+    assert!(
+        value(&json, "\"totals\"", "energy_residual_j").abs() < 1.0e-9,
+        "{json}"
+    );
+    assert!(
+        json.contains("modal structures step fs-nlmodal's damped modes"),
+        "{json}"
+    );
+}
+
+#[test]
+fn three_struck_modes_ring_down_as_their_closed_forms_and_heat_the_case() {
+    // G1: three modes of a bar set ringing by a strike (initial modal
+    // velocities), with nothing acting on the bar after it: each rings down
+    // as q = v0 / wd e^(-zeta w t) sin wd t, and the energy the modes lose
+    // is the case's heat. The strike point's flow is the weighted sum of
+    // the modes' velocities.
+    // (frequency [Hz], initial modal velocity [m sqrt(kg)/s], damping ratio)
+    let modes = [
+        (331.125_927_8, 0.4, 1.0e-3_f64),
+        (1_324.505_956, -0.2, 2.0e-3),
+        (2_972.946_707, 0.1, 5.0e-3),
+    ];
+    let weights = [2.1, -1.4, 0.9];
+    let rows: Vec<String> = modes
+        .iter()
+        .map(|(hz, v0, zeta)| {
+            format!(r#"{{"frequency_hz": {hz}, "damping_ratio": {zeta}, "velocity": {v0}}}"#)
+        })
+        .collect();
+    let scene = format!(
+        r#"{{
+  "schema": "frankensim.system.v0", "duration_s": 0.05, "step_s": 2.5e-5,
+  "elements": {{
+    "bar": {{"kind": "modal_structure", "sample_rate_hz": 40000,
+            "modes": [{}],
+            "attachments": {{"strike": {{"domain": "translation",
+                                        "weights": [[2.1, -1.4, 0.9]]}}}}}},
+    "case": {{"kind": "heat_capacity", "capacity_j_k": 0.01, "temperature_k": 300.0}}
+  }},
+  "connections": [
+    {{"prescribe": "bar.strike", "force_n": 0}},
+    {{"join": ["case.heat", "bar.heat"]}}
+  ]
+}}"#,
+        rows.join(", ")
+    );
+    let path = scratch("struck_bar.json", &scene);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    let t = 0.05;
+    let (mut start_j, mut end_j, mut strike) = (0.0, 0.0, 0.0);
+    for (index, &(hz, v0, zeta)) in modes.iter().enumerate() {
+        let w = core::f64::consts::TAU * hz;
+        let wd = w * (1.0 - zeta * zeta).sqrt();
+        let decay = (-zeta * w * t).exp();
+        let q = v0 / wd * decay * (wd * t).sin();
+        let v = v0 * decay * ((wd * t).cos() - zeta * w / wd * (wd * t).sin());
+        for (field, expected) in [("displacement", q), ("velocity", v)] {
+            let found = value(&json, &element("bar"), &format!("mode{index}.{field}"));
+            assert!(
+                (found - expected).abs() <= 1.0e-9 * v0.abs(),
+                "mode{index}.{field}: {found} vs {expected}"
+            );
+        }
+        start_j += 0.5 * v0 * v0;
+        end_j += 0.5 * (v * v + w * w * q * q);
+        strike += weights[index] * v;
+    }
+    let heat = start_j - end_j;
+    let found = value(&json, &element("bar"), "strike.velocity_m_s");
+    assert!(
+        (found - strike).abs() <= 1.0e-9,
+        "strike: {found} vs {strike}"
+    );
+    let found = value(&json, &element("case"), "temperature_k");
+    assert!(
+        (found - 300.0 - heat / 0.01).abs() <= 1.0e-9 * heat / 0.01,
+        "case: {found} vs heat {heat}"
+    );
+    assert!(
+        value(&json, "\"totals\"", "energy_residual_j").abs() < 1.0e-9,
+        "{json}"
+    );
+}
+
+#[test]
+fn a_bowed_mode_slides_under_a_fast_bow_and_catches_a_slow_one_as_the_closed_forms_say() {
+    // G1: one undamped 2 Hz mode of unit modal mass (weight 1), so that its
+    // contact moves as 1 kg on a spring of k = w^2, rubbed by a bow at speed
+    // V through Coulomb friction under 10 N (static 5 N, kinetic 3 N), the
+    // interface reading the end of the string's flow. From rest, kinetic
+    // friction pushes the mode: x = Fk / k (1 - cos w t), v = Fk / w sin w t.
+    // A bow faster than Fk / w (0.239 m/s) is never caught: at 0.5 m/s the
+    // mode slides for the whole 0.9 s and the heat is Fk (V t - x). A bow at
+    // 0.1 m/s is caught when v = V, at sin w t1 = V w / Fk (the step the
+    // catch falls in ends at it); the contact then rides with the bow while
+    // the spring needs less than the static 5 N (until x = 5 N / k, at
+    // 0.33 s), with the heat of the slide before the catch. Stuck, the
+    // interface's effort is held over each step and the contact's flow is
+    // the bow's at both ends of it, so over a step of length s the mode
+    // moves 2 V tan(w s / 2) / w, not V s, under F = k x + V w tan(w s / 2):
+    // a held force where the riding one grows along the step. The stuck
+    // steps are whole from the catch, the last cut at the end; at 0.2 s
+    // the mode is 2.2e-7 m past x(t1) + V (0.2 - t1), a gap that falls as
+    // the step squared. The held force's work on that gap,
+    // -sum F (moved - V s), is the interface's numerical loss. In both
+    // runs the bow, the interface's prescribed end, gives the heat, the
+    // mode's energy (v^2 + k x^2) / 2 and that loss.
+    let scene = std::fs::read_to_string(example("bowed_mode.json")).unwrap();
+    let w = core::f64::consts::TAU * 2.0;
+    let (k, fk, dt) = (w * w, 3.0, 0.001);
+    for (name, speed, t) in [("slow", 0.1, 0.2), ("fast", 0.5, 0.9)] {
+        let mut text = scene.clone();
+        for (from, to) in [
+            (
+                "\"velocity_m_s\": 0.1",
+                format!("\"velocity_m_s\": {speed}"),
+            ),
+            ("\"slip_m_s\": -0.1", format!("\"slip_m_s\": {}", -speed)),
+            ("\"duration_s\": 0.2", format!("\"duration_s\": {t}")),
+        ] {
+            assert!(text.contains(from), "{name}: test fixture changed");
+            text = text.replace(from, &to);
+        }
+        let path = scratch(&format!("bowed_{name}.json"), &text);
+        let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+        assert_eq!(code, 0, "{name}: {stderr}");
+        let (x, v, heat, stuck, loss) = if speed < fk / w {
+            let t1 = (speed * w / fk).asin() / w;
+            let x1 = fk / k * (1.0 - (w * t1).cos());
+            let (mut x, mut at, mut loss) = (x1, t1, 0.0);
+            while at < t {
+                let s = (t - at).min(dt);
+                let tan = (w * s / 2.0).tan();
+                let moved = 2.0 * speed * tan / w;
+                loss -= (k * x + speed * w * tan) * (moved - speed * s);
+                x += moved;
+                at += s;
+            }
+            (x, speed, fk * (speed * t1 - x1), 1.0, loss)
+        } else {
+            let x = fk / k * (1.0 - (w * t).cos());
+            (x, fk / w * (w * t).sin(), fk * (speed * t - x), 0.0, 0.0)
+        };
+        let given = heat + 0.5 * (v * v + k * x * x) + loss;
+        for (owner, field, expected, tolerance) in [
+            ("string", "mode0.displacement", x, 1.0e-9),
+            ("string", "contact.velocity_m_s", v, 1.0e-9),
+            ("string", "dissipated_j", 0.0, 0.0),
+            ("rubbing", "stuck", stuck, 0.0),
+            ("rubbing", "dissipated_j", heat, 1.0e-9),
+            ("rubbing", "numerical_loss_j", loss, 1.0e-12),
+        ] {
+            let found = value(&json, &element(owner), field);
+            assert!(
+                (found - expected).abs() <= tolerance,
+                "{name} {owner}.{field}: {found} vs {expected}"
+            );
+        }
+        let bow = value(&json, "\"port\":\"rubbing.b\"", "energy_in_j");
+        assert!(
+            (bow - given).abs() <= 1.0e-9,
+            "{name} bow: {bow} vs {given}"
+        );
+        assert!(
+            value(&json, "\"totals\"", "energy_residual_j").abs() < 1.0e-9,
+            "{json}"
+        );
+    }
+}
+
+#[test]
+fn modal_structure_scenes_refuse_bad_clocks_modes_weights_and_error_control() {
+    for (name, from, to, reason) in [
+        (
+            "rate.json",
+            "\"sample_rate_hz\": 1000",
+            "\"sample_rate_hz\": 999.5",
+            "sample_rate_hz is a whole number of hertz",
+        ),
+        (
+            "empty.json",
+            "[{\"frequency_hz\": 5.0, \"damping_ratio\": 0.02}]",
+            "[]",
+            "modes is a nonempty array",
+        ),
+        (
+            "field.json",
+            "\"damping_ratio\": 0.02}",
+            "\"damping_ratio\": 0.02, \"mass_kg\": 2.0}",
+            "unsupported field \"mass_kg\"",
+        ),
+        (
+            "weights.json",
+            "[[0.7071067811865476]]",
+            "[[0.7071067811865476, 0.5]]",
+            "one weight per mode, 1 here",
+        ),
+        (
+            "domain.json",
+            "\"domain\": \"translation\"",
+            "\"domain\": \"thermal\"",
+            "domain is one of translation, rotation, electrical",
+        ),
+        (
+            "nyquist.json",
+            "\"frequency_hz\": 5.0",
+            "\"frequency_hz\": 460.0",
+            "FS-COUPLE-MODAL-TIME-NYQUIST",
+        ),
+        ("heat.json", "{\"tip\": {", "{\"heat\": {", "port refused"),
+        (
+            "adaptive.json",
+            "\"duration_s\": 1.0",
+            "\"adaptive\": {\"tolerances\": {}}, \"duration_s\": 1.0",
+            "rod is a modal_structure",
+        ),
+    ] {
+        assert!(MODAL_TIP.contains(from), "{name}: test fixture changed");
+        let (code, stderr) = refused(name, &MODAL_TIP.replace(from, to));
+        assert_eq!(code, 3, "{name}: {stderr}");
+        assert!(stderr.contains(reason), "{name}: {stderr}");
+    }
+}
+
 fn array_values(json: &str, anchor: &str, key: &str) -> Vec<f64> {
     let tail = &json[json.find(anchor).unwrap()..];
     let field = format!("\"{key}\":[");

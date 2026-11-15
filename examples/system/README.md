@@ -51,6 +51,7 @@ save/resume commands work with `self_heating_damper.json` and
 | `heated_plane.json` | 30 W generated on a plane of no heat capacity (`heat_node`) between a 50 J/K pad at 400 K and a 120 J/K disc at 300 K, joined to the plane by 2 and 6 W/K: no fraction is given, the heat divides by where the two temperatures put the plane | the midpoint rule for the two bodies and the plane's balance, solved independently each step: both temperatures and the plane's to 1e-9, every joule in the two bodies; the same device with the heat rate prescribed on the plane |
 | `friction_belt.json` | a block follows a slowly accelerating belt by static friction, breaks away when the acceleration exceeds the static limit, and catches it again as the lining warms | independent constant-acceleration segments: 3 m/s final speed, 2.875 m travel, 3 J of frictional heat and 12 J supplied by the belt |
 | `stribeck_block.json` | a 2 kg block thrown at 3 m/s on a Stribeck lining (`friction_interface`, a dry law of fs-tribo): the coefficient is 0.35 at 3 m/s and grows toward 0.5 as the block slows; all 9 J become the lining's heat | the stopping distance from Simpson's rule on the law's own integral, the error falling about fourfold when the step halves; heat equal to the initial kinetic energy |
+| `bowed_mode.json` | one undamped 2 Hz mode of a string (`modal_structure`) rubbed by a bow (the interface's prescribed end) at 0.1 m/s through Coulomb friction (`friction_interface` reading the end of the string's flow): kinetic friction pushes the mode until it catches the bow, then it rides stuck | the closed forms: the catch at `sin w t1 = V w / Fk` and the heat of the slide; stuck, the position as the held effort gives it, `2 V tan(w s / 2) / w` per step of length `s` (2.2e-7 m past the continuous ride at 0.2 s, the held force's work on that gap booked as the interface's numerical loss); a 0.5 m/s bow, never caught, against the sliding solution |
 | `dc_motor.json` | a DC motor across three domains: a 12 V supply, winding inductance and resistance in a current loop, a gyrator to a rotor with a viscous bearing, and both heats into one case | the monolithic midpoint rule for the two coupled equations, the supply's energy against stored energy plus heat |
 | `parallel_rlc.json` | a current source drives a capacitor, inductor and resistor in parallel; all Joule heat warms the case | independent coupled voltage/current equations, source work, electrical storage and heat |
 | `nonlinear_rlc.json` | the same topology with voltage-dependent capacitance and flux-dependent inductance, crossing both curves' knees | independent charge/flux differential equations, original constitutive energies and Joule heat |
@@ -110,6 +111,15 @@ such as a belt, is a prescribed end (`{"prescribe": "friction.b",
 "velocity_m_s": 1.0}`) or a `velocity_source` joined to the end. A
 `friction_interface` has no span; either end is held over each step, so
 give an accelerating end short steps. Fixed `step_s` only.
+
+`bowed_mode.json` rubs a `modal_structure` with one. A modal structure
+steps its modes exactly under the effort held over a step, so the end of
+its flow does not follow the midpoint relation; each attachment tells that
+end, and the interface reads it on the side it names in `reads_ends`
+(`["a"]` here). The kernel wires the end input and refuses an interface
+beside such a neighbour that does not read it. The string's modes,
+damping and mode-shape weights are authored; nothing is solved from its
+geometry.
 
 ## Rigid bodies from a physics owner
 

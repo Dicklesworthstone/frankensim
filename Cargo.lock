@@ -1204,6 +1204,7 @@ dependencies = [
  "fs-math",
  "fs-mbd",
  "fs-mesh",
+ "fs-nlmodal",
  "fs-opt",
  "fs-package",
  "fs-ports",

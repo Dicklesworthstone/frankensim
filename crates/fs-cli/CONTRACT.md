@@ -915,6 +915,37 @@ No claim: coefficients are authored or the one cited fit, not resolved
 from material cards; no temperature dependence, contact geometry, normal
 dynamics, wear or third body.
 
+`modal_structure` lowers to `fs_nlmodal::component::ModalStructure`, added
+with its tangent. The scene authors `modes`, each a `frequency_hz`, a
+viscous `damping_ratio` and an optional start (`displacement`, `velocity`)
+in mass-normalized modal coordinates, and `attachments`, each a `domain`
+and rows of mode-shape `weights`, one weight per mode, giving one power port
+of that many rows. `sample_rate_hz` is the owner's clock: the owner admits
+only modes below 0.9 of its Nyquist frequency, and steps of any length are
+exact for the effort held over them. The structure always tells the end of
+each attachment's flow, `<id>.end`. The safety ceilings are the owner's
+audible reference budget. Reports expose every mode's displacement and
+velocity, each attachment row's flow at the end of the last step, and
+last-step `heat_w`. `adaptive` refuses it. Tests in
+`tests/system_command.rs`: one 5 Hz mode seen at its tip as 2 kg, pushed
+by a constant 1 N, against the closed-form damped step response, with the
+force's work equal to the modal energy plus the owner's heat; three struck
+bar modes ringing down as their closed forms, the strike point's flow equal
+to the weighted modal velocities and the lost energy in the case; one
+undamped mode bowed through a `friction_interface` that reads the end of
+its flow (`reads_ends`), against the closed forms for a bow too fast to be
+caught and for a slow one caught at `sin w t1 = V w / Fk`
+(`examples/system/bowed_mode.json`). Stuck, the interface's effort is held
+over each step and the contact's flow is the bow's at both ends of it, so
+a step of length `s` moves the mode `2 V tan(w s / 2) / w`, not `V s`; the
+test follows that step by step (2.2e-7 m past the continuous ride after
+0.17 s of 1 ms steps, falling as the step squared), and the held force's
+work on the gap is the interface's numerical loss (-3.4e-7 J of the bow's
+0.037 J). Eight refusals, all exit 3. No
+claim: modes, damping and weights are authored, not
+solved from geometry or resolved from material cards; the structure is
+linear (no quartic term) and its observer transfers are not used.
+
 `frankensim [--json] system <scene.json>` reads a `frankensim.system.v0` scene
 (at most 1 MiB, 2,000 elements, 1e7 planned steps and twice that many
 kernel steps if the kernel shortens them, 1e5 samples; unknown fields
@@ -1463,8 +1494,8 @@ monolithic midpoint rule through the binary, the heated body against its discret
 closed form, the quarter car's road work against motion plus heat and its
 70/30 heat split, library and binary byte-identical, eight refusals). No
 claim beyond the kernel's: lumped elements with constant parameters or authored
-nonlinear electrical storage curves and dry friction with authored
-coefficients or the one cited rosin fit;
+nonlinear electrical storage curves, authored linear modal structures and
+dry friction with authored coefficients or the one cited rosin fit;
 no material-card resolution, geometric contact, impact or phase change;
 fixed mode has no step-size error control, while
 adaptive mode has the scoped numerical estimate described above. The experimental

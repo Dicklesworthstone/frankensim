@@ -11,6 +11,7 @@ mod adaptive_metric;
 mod friction;
 mod hydraulic;
 mod materials;
+mod modal;
 mod phs;
 mod snapshot;
 
@@ -202,8 +203,25 @@ Elements (ports in brackets; SI units in every field name):
                  work_tolerance_j 1e-12. A moving surface is a prescribed
                  end or a velocity_source joined to one. A prescribed end
                  is held over each step: no span input, so an accelerating
-                 one advances in jumps. Reports slip_m_s, stuck, force_n on
-                 a and heat_w; requires fixed step_s.)
+                 one advances in jumps. reads_ends = [] names
+                 the ends, \"a\" or \"b\", joined to a neighbour that tells
+                 the end of its flow (a modal_structure attachment); the
+                 kernel wires their end inputs a.end and b.end. Reports
+                 slip_m_s, stuck, force_n on a and heat_w; requires fixed
+                 step_s.)
+  modal_structure sample_rate_hz, modes, attachments  [<attachments>, heat]
+                 (fs-nlmodal's linear structure in mass-normalized damped
+                 modes. modes: [{frequency_hz, damping_ratio,
+                 displacement = 0, velocity = 0}], in modal coordinates.
+                 attachments: {<id>: {domain, weights}}: a power port per
+                 attachment, one row of weights per port row, one weight per
+                 mode (mode shapes at the point, 1/sqrt(kg) for a force).
+                 sample_rate_hz is the owner's clock: modes must lie below
+                 0.9 of its Nyquist frequency; steps of any length are exact
+                 for the effort held over them. Each attachment also tells
+                 the end of its flow, <id>.end. Reports every mode's
+                 displacement and velocity, each attachment's flow at the
+                 end of the last step, and heat_w; requires fixed step_s.)
   heat_capacity  capacity_j_k, temperature_k                          [heat]
                  (and a signal output, temperature: its temperature at the
                  start of the step; it may stay unconnected)
@@ -1056,6 +1074,9 @@ enum Kind {
     Slider,
     /// A dry-friction law of `fs-tribo` on the kernel's load line.
     FrictionInterface,
+    /// A linear structure in damped modes, `fs-nlmodal`'s, acted on through
+    /// its attachments.
+    ModalStructure,
     /// Storage setting the effort of a parallel node: charge and voltage
     /// (node capacitor), volume and pressure (accumulator).
     NodeCapacitor(Domain),
@@ -1097,7 +1118,7 @@ enum Kind {
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 39] = [
+    const TABLE: [(&'static str, Self); 40] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
@@ -1106,6 +1127,7 @@ impl Kind {
         ("velocity_source", Self::VelocitySource),
         ("slider", Self::Slider),
         ("friction_interface", Self::FrictionInterface),
+        ("modal_structure", Self::ModalStructure),
         ("inertia", Self::Inertance(Domain::Rotation)),
         ("torsion_spring", Self::Compliance(Domain::Rotation)),
         ("rotary_damper", Self::Resistance(Domain::Rotation)),
@@ -2463,6 +2485,7 @@ fn element(
         }
         Kind::Slider => slider(builder, name, definition, &what)?,
         Kind::FrictionInterface => friction::interface(builder, name, definition, &what)?,
+        Kind::ModalStructure => modal::structure(builder, name, definition, &what)?,
         Kind::NodeCapacitor(domain) => {
             let names = domain.names();
             fields(
@@ -3307,7 +3330,7 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
                 }
                 Vec::new()
             }
-            Kind::GasVolume | Kind::Slider | Kind::FrictionInterface => {
+            Kind::GasVolume | Kind::Slider | Kind::FrictionInterface | Kind::ModalStructure => {
                 return Err(format!(
                     "adaptive: {} is a {}, whose state has no error account here; \
                      run it with a fixed step_s",
@@ -3517,6 +3540,17 @@ impl Device {
         if self
             .elements
             .iter()
+            .any(|element| element.kind == Kind::ModalStructure)
+        {
+            description = std::borrow::Cow::Owned(format!(
+                "{description}; modal structures step fs-nlmodal's damped modes exactly under \
+                 the effort held over each step, from authored frequencies, damping ratios and \
+                 mode-shape weights; no mode solve from geometry or material cards"
+            ));
+        }
+        if self
+            .elements
+            .iter()
             .any(|element| element.kind == Kind::EnthalpyBody)
         {
             let base = description
@@ -3701,6 +3735,9 @@ impl Device {
         }
         if element.kind == Kind::GasVolume {
             return self.gas_values(element);
+        }
+        if element.kind == Kind::ModalStructure {
+            return modal::values(&self.system, element.node, &element.ports);
         }
         if element.kind == Kind::ResistanceMatrix {
             return self.resistance_values(element);
@@ -3981,7 +4018,8 @@ impl Device {
             | Kind::ViscoelasticNetwork
             | Kind::GasVolume
             | Kind::ResistanceMatrix
-            | Kind::PortHamiltonian => Vec::new(),
+            | Kind::PortHamiltonian
+            | Kind::ModalStructure => Vec::new(),
         }
     }
 

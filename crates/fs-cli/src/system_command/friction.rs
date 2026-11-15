@@ -200,6 +200,29 @@ fn load(
     })
 }
 
+/// The ends, `a` and `b`, whose neighbours tell the end of their flow, such
+/// as a modal structure's attachment: each named at most once.
+fn reads_ends(definition: &J, what: &str) -> Result<[bool; 2], String> {
+    let mut ends = [false; 2];
+    let Some(value) = definition.get("reads_ends") else {
+        return Ok(ends);
+    };
+    let names = value
+        .as_array()
+        .ok_or_else(|| format!("{what}.reads_ends is an array of \"a\" and \"b\""))?;
+    for name in names {
+        let index = match name.as_str() {
+            Some("a") => 0,
+            Some("b") => 1,
+            _ => return Err(format!("{what}.reads_ends names \"a\" or \"b\"")),
+        };
+        if core::mem::replace(&mut ends[index], true) {
+            return Err(format!("{what}.reads_ends names each end once"));
+        }
+    }
+    Ok(ends)
+}
+
 /// A `friction_interface` element: the interface on the kernel's load line,
 /// starting at the slip the scene declares in the movers' sign.
 pub(super) fn interface(
@@ -210,9 +233,10 @@ pub(super) fn interface(
 ) -> Result<(NodeId, Vec<PortSpec>), Refusal> {
     fields(
         definition,
-        &["kind", "normal_n", "law", "slip_m_s", "solve"],
+        &["kind", "normal_n", "law", "slip_m_s", "solve", "reads_ends"],
         what,
     )?;
+    let ends = reads_ends(definition, what)?;
     let normal_n = number(definition, "normal_n", what)?;
     let law = law(
         definition
@@ -225,8 +249,15 @@ pub(super) fn interface(
     if !slip.is_finite() {
         return Err(format!("{what}.slip_m_s must be finite").into());
     }
-    let component = FrictionInterface::new(move |_kelvin: f64| Ok(law.clone()), load)
+    let mut component = FrictionInterface::new(move |_kelvin: f64| Ok(law.clone()), load)
         .map_err(|error| format!("{what}: {error}"))?;
+    // The kernel wires each end input read here, `a.end` or `b.end`, to the
+    // end its neighbours tell.
+    if ends.contains(&true) {
+        component = component
+            .reading_ends(ends)
+            .map_err(|error| format!("{what}: {error}"))?;
+    }
     // Scene velocities use the mover's sign. Each end receives minus its
     // mover's flow, so the owner's slip has the opposite sign.
     let state = component

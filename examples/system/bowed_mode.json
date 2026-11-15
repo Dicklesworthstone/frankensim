@@ -1,0 +1,26 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 0.2,
+  "step_s": 0.001,
+  "elements": {
+    "string": {
+      "kind": "modal_structure",
+      "sample_rate_hz": 1000,
+      "modes": [{"frequency_hz": 2.0, "damping_ratio": 0.0}],
+      "attachments": {"contact": {"domain": "translation", "weights": [[1.0]]}}
+    },
+    "rubbing": {
+      "kind": "friction_interface",
+      "normal_n": 10.0,
+      "law": {"coulomb": {"static_mu": 0.5, "kinetic_mu": 0.3}},
+      "slip_m_s": -0.1,
+      "reads_ends": ["a"]
+    },
+    "case": {"kind": "heat_capacity", "capacity_j_k": 1.0, "temperature_k": 300.0}
+  },
+  "connections": [
+    {"join": ["string.contact", "rubbing.a"]},
+    {"prescribe": "rubbing.b", "velocity_m_s": 0.1},
+    {"join": ["case.heat", "string.heat", "rubbing.heat"]}
+  ]
+}
