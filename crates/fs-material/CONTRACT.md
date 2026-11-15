@@ -17,6 +17,23 @@
 
 ## New sections (newest first)
 
+## A thermal path along a named absolute-temperature axis
+
+`state_point::thermal_path_axis(point)` names the coordinate a thermal path
+runs along. That is the legacy untyped `T` when the point has one. Otherwise
+it is the point's one coordinate declared a static absolute temperature,
+whatever its name; the seed cards name theirs `temperature`. It is `None`
+when the point has neither, or has more than one such coordinate.
+`integrate_isotropic_thermal_expansion` and the orthotropic path use it both
+to read the two temperatures and as the abscissa of the expansion curve.
+A point that has `T` behaves exactly as before. On a named axis, a current
+point that retypes the coordinate as anything but an absolute temperature is
+refused, as is a change of any other coordinate. Before this, the path looked
+only for `T`, so it refused every card whose temperature axis has another
+name. Among the seed manifests, 463 name it `temperature` and 16 name it `T`.
+fs-mbd-material's tests/thermal.rs checks the named axis against `T`, bit for
+bit, together with the refusals.
+
 ## Temperature-dependent layer conduction on the composition contract
 
 `thermal::conduction::component::LayerConductor`, behind the existing

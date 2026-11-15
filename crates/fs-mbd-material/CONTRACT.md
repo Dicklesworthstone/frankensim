@@ -30,6 +30,16 @@ bound. Density at a changed state must be paired with the intended geometry:
 compiling a new specimen is not a mass-conserving thermal-expansion update, a
 live state transfer, or an implicit source of energy/momentum.
 
+`thermal::expand_body` is that update. Its path runs along
+`fs_material::state_point::thermal_path_axis`: the legacy `T`, or else the
+state's one static absolute-temperature coordinate under any name; the seed
+cards call theirs `temperature`. tests/thermal.rs checks that a card whose
+axis is named that way expands with the same strain bits and inertia as the
+same card on `T`, with the mass bits kept. It also checks the refusals: a
+point with two absolute-temperature coordinates, a dimensionally typed
+`temperature`, a current point that retypes it, and a changed other
+coordinate. `fs-cli system` reaches it through a solid's `temperature_k`.
+
 Compilation has a 4096-region hard cap and a caller-selected lower cap. Missing,
 ambiguous, wrong-unit, nonpositive or unsupported density refuses. Cancellation
 is checked before work, between fixed-size region operations, and before

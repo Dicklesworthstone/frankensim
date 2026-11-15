@@ -3,15 +3,16 @@ mod common;
 use common::{close, density_card, point};
 use fs_evidence::ValidityDomain;
 use fs_ga::{Mat3, Se3, Vec3, Wrench};
-use fs_matdb::{InterpolationPolicy, MaterialCard, PropertyClaim, PropertyKey, PropertyValue,
-    Provenance, UncertaintyModel};
+use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim,
+    PropertyKey, PropertyValue, Provenance, QueryPoint, UncertaintyModel};
 use fs_material::state_point::{INVERSE_TEMPERATURE_DIMS, IntegratedIsotropicThermalExpansion,
     LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY, MaterialPropertySelection,
-    integrate_isotropic_thermal_expansion};
+    MaterialStatePointError, integrate_isotropic_thermal_expansion, thermal_path_axis};
 use fs_mbd::articulated::{ArticulatedModel, BaseState, JointModel, Link, SpatialInertia, forward_dynamics};
 use fs_mbd_material::{MaterialInertiaError, RegionBinding, ResolvedBody, VolumeMoments, resolve_body};
 use fs_mbd_material::thermal::{ThermalExpansionBinding, expand_body};
-use fs_qty::Temperature;
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+use fs_qty::{Density, Dims, QuantitySpec, Temperature};
 
 fn thermal_card(name: &str, alpha: f64) -> MaterialCard {
     let density = density_card(name, 6.0, 2.0);
@@ -187,6 +188,161 @@ fn composite_expansion_reuses_parallel_axis_owner_and_is_binding_order_independe
     assert_eq!(expanded.inertia().mass(),reference.inertia().mass());
     matrix_close(expanded.inertia().inertia_com(),reference.inertia().inertia_com(),1.03_f64.powi(2));
     assert!(expand_body(&reference,&[a,a],||false).is_err());
+}
+
+fn absolute_temperature() -> QuantitySpec {
+    QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature,
+        ValueForm::Static,
+    ))
+}
+
+/// The seed cards' convention: the temperature axis is named `temperature`
+/// and typed a static absolute temperature, not the legacy `T`. The same
+/// density and expansion curves as `thermal_card`.
+fn named_axis_card(name: &str, alpha: f64) -> MaterialCard {
+    let curve = |key: &str, dims: Dims, knots: Vec<(f64, f64)>| PropertyClaim {
+        key: PropertyKey::new(key, dims),
+        value: PropertyValue::Curve {
+            abscissa: "temperature".into(),
+            abscissa_dims: Temperature::DIMS,
+            knots,
+            dims,
+        },
+        validity: ValidityDomain::unconstrained().with_quantity(
+            "temperature",
+            absolute_temperature(),
+            200.0,
+            400.0,
+        ),
+        uncertainty: UncertaintyModel::Unstated,
+        interpolation: InterpolationPolicy::LinearInside,
+        observations: vec![],
+        provenance: Provenance {
+            source: format!("synthetic {key} source {name}"),
+            license: "CC0-1.0".into(),
+            artifact: None,
+        },
+    };
+    let mut claims = ClaimSet::new();
+    claims
+        .insert_claim(curve(
+            "density",
+            Density::DIMS,
+            vec![(200.0, 6.0), (400.0, 2.0)],
+        ))
+        .unwrap();
+    claims
+        .insert_claim(curve(
+            LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+            INVERSE_TEMPERATURE_DIMS,
+            vec![(200.0, alpha), (300.0, 2.0 * alpha), (400.0, 4.0 * alpha)],
+        ))
+        .unwrap();
+    let id = MaterialStateId {
+        chemistry: name.into(),
+        phase: "solid".into(),
+        process: "synthetic fixture".into(),
+        revision: 0,
+    };
+    MaterialCard::assemble(id, claims, vec![]).unwrap()
+}
+
+fn at(kelvin: f64) -> QueryPoint {
+    QueryPoint::new()
+        .with_quantity("temperature", absolute_temperature(), kelvin)
+        .unwrap()
+}
+
+#[test]
+fn a_temperature_axis_named_as_the_seed_cards_name_it_expands_like_the_legacy_t() {
+    let single = MaterialPropertySelection::SingleClaimOnly;
+    let legacy = thermal_card("axis", 1e-4);
+    let named = named_axis_card("axis", 1e-4);
+    assert_eq!(thermal_path_axis(&point(300.0)), Some("T"));
+    assert_eq!(thermal_path_axis(&at(300.0)), Some("temperature"));
+    let reference = resolve_body(
+        &[RegionBinding {
+            key: "body",
+            geometry: VolumeMoments::cuboid(Vec3::new(1.0, 2.0, 3.0)).unwrap(),
+            material: &named,
+            point: &at(300.0),
+            selection: single.clone(),
+        }],
+        1,
+        || false,
+    )
+    .unwrap();
+    let receipt =
+        integrate_isotropic_thermal_expansion(&named, &at(300.0), &at(400.0), single.clone())
+            .unwrap();
+    let legacy_receipt = path(&legacy, 300.0, 400.0);
+    assert_eq!(
+        receipt.free_linear_strain().to_bits(),
+        legacy_receipt.free_linear_strain().to_bits()
+    );
+    let expanded = expand_body(&reference, &[binding(&receipt)], || false).unwrap();
+    let legacy_reference = body(&legacy);
+    let legacy_expanded =
+        expand_body(&legacy_reference, &[binding(&legacy_receipt)], || false).unwrap();
+    assert_eq!(expanded.inertia(), legacy_expanded.inertia());
+    assert_eq!(
+        expanded.inertia().mass().to_bits(),
+        reference.inertia().mass().to_bits()
+    );
+    // No path: two absolute-temperature axes, or a `temperature` axis typed
+    // only by its dimensions; and a path may change nothing but temperature.
+    let changed = |result| {
+        matches!(
+            result,
+            Err(MaterialStatePointError::InvalidDerived {
+                quantity: "non-temperature path coordinate changed"
+            })
+        )
+    };
+    let two = at(300.0)
+        .with_quantity("ambient", absolute_temperature(), 300.0)
+        .unwrap();
+    assert_eq!(thermal_path_axis(&two), None);
+    let two_hot = two.clone().with("temperature", 400.0).unwrap();
+    assert!(changed(integrate_isotropic_thermal_expansion(
+        &named,
+        &two,
+        &two_hot,
+        single.clone()
+    )));
+    let dimensional = |kelvin| {
+        QueryPoint::new()
+            .with_quantity(
+                "temperature",
+                QuantitySpec::dimensional(Temperature::DIMS),
+                kelvin,
+            )
+            .unwrap()
+    };
+    assert_eq!(thermal_path_axis(&dimensional(300.0)), None);
+    assert!(changed(integrate_isotropic_thermal_expansion(
+        &named,
+        &dimensional(300.0),
+        &dimensional(400.0),
+        single.clone()
+    )));
+    assert!(matches!(
+        integrate_isotropic_thermal_expansion(
+            &named,
+            &at(300.0),
+            &dimensional(400.0),
+            single.clone()
+        ),
+        Err(MaterialStatePointError::InvalidDerived {
+            quantity: "thermal path coordinate must be an absolute temperature"
+        })
+    ));
+    let pressed = at(300.0).with("pressure", 1.0e5).unwrap();
+    let moved = at(400.0).with("pressure", 2.0e5).unwrap();
+    assert!(changed(integrate_isotropic_thermal_expansion(
+        &named, &pressed, &moved, single
+    )));
 }
 
 #[test]

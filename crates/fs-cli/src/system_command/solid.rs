@@ -4,15 +4,25 @@
 //! density that the card gives at the declared state. They are compiled by
 //! the same owner (fs-mbd-material `resolve_body`) that keeps the density's
 //! usage receipt. Nothing typed in the scene is a mass or an inertia.
+//!
+//! A solid with a `temperature_k` is that body freely expanded from the
+//! state's temperature: fs-material integrates the card's linear expansion
+//! coefficient along the path, and fs-mbd-material `expand_body` scales the
+//! shape about the body origin while keeping its mass.
 
 use std::fmt::Write as _;
 use std::path::Path;
 
 use fs_blake3::hash_bytes;
 use fs_ga::Vec3;
-use fs_matdb::{NormalizedMaterialCardPack, SelectionPolicy};
-use fs_material::state_point::{DENSITY_PROPERTY, MaterialPropertySelection};
-use fs_mbd_material::{RegionBinding, VolumeMoments, resolve_body};
+use fs_matdb::{MaterialCard, NormalizedMaterialCardPack, QueryPoint, SelectionPolicy};
+use fs_material::state_point::{
+    DENSITY_PROPERTY, MaterialPropertySelection, integrate_isotropic_thermal_expansion,
+    thermal_path_axis,
+};
+use fs_mbd::articulated::SpatialInertia;
+use fs_mbd_material::thermal::{ThermalExpansionBinding, expand_body};
+use fs_mbd_material::{RegionBinding, ResolvedBody, VolumeMoments, resolve_body};
 
 use crate::cards::{MAX_CARD_PACK_BYTES, MAX_CARD_PACK_SOURCE_BYTES};
 use crate::material_state_input::state_point;
@@ -29,7 +39,9 @@ pub(super) struct Solid {
     /// About the body's own axes, which are the shape's principal axes.
     pub principal_inertia_kg_m2: [f64; 3],
     /// The members of a JSON object: shape, card and receipt identities,
-    /// density, volume, mass and principal inertia.
+    /// density, volume, mass and principal inertia, and for a body expanded
+    /// to a `temperature_k` its temperatures, strain, expanded volume and
+    /// expansion receipt.
     pub report: String,
 }
 
@@ -66,6 +78,60 @@ fn shape_geometry(row: &J, shape: &str, what: &str) -> Result<VolumeMoments, Str
     .map_err(|error| format!("{what}: {error}"))
 }
 
+/// The report member that opens what an expanded solid's report adds.
+const EXPANDED: &str = ",\"temperature_k\":";
+
+/// Whether a solid's report is that of a body expanded to a `temperature_k`.
+pub(super) fn expanded(report: &str) -> bool {
+    report.contains(EXPANDED)
+}
+
+/// A solid at `temperature_k`: the body freely expanded from the state's
+/// temperature about its origin, and the members its report gains. `None`
+/// when the solid gives no temperature.
+fn expansion(
+    row: &J,
+    body: &ResolvedBody,
+    card: &MaterialCard,
+    point: &QueryPoint,
+    selection: MaterialPropertySelection,
+    what: &str,
+) -> Result<Option<(SpatialInertia, String)>, String> {
+    if row.get("temperature_k").is_none() {
+        return Ok(None);
+    }
+    let kelvin = positive(row, "temperature_k", what)?;
+    let axis = thermal_path_axis(point).ok_or_else(|| {
+        format!("{what}.temperature_k: the state has no absolute-temperature axis to expand along")
+    })?;
+    let hot = point
+        .clone()
+        .with(axis, kelvin)
+        .map_err(|error| format!("{what}.temperature_k: {error}"))?;
+    let path = integrate_isotropic_thermal_expansion(card, point, &hot, selection)
+        .map_err(|error| format!("{what}.temperature_k: {error}"))?;
+    let expanded = expand_body(
+        body,
+        &[ThermalExpansionBinding {
+            key: "solid",
+            expansion: &path,
+            fixed_point_m: Vec3::new(0.0, 0.0, 0.0),
+        }],
+        || false,
+    )
+    .map_err(|error| format!("{what}.temperature_k: {error}"))?;
+    let members = format!(
+        "{EXPANDED}{},\"reference_temperature_k\":{},\"free_linear_strain\":{},\"expanded_volume_m3\":{},\"expansion_hash\":{},\"expansion_claim\":{}",
+        num(kelvin),
+        num(point.axes()[axis]),
+        num(path.free_linear_strain()),
+        num(expanded.regions()[0].geometry().volume_m3()),
+        quote(&path.identity().to_hex()),
+        quote(&path.selected_claim().0.to_hex()),
+    );
+    Ok(Some((expanded.inertia(), members)))
+}
+
 /// Compile the body of `row.solid`. Pack paths are relative to the scene.
 pub(super) fn solid(row: &J, scene: &Path, what: &str) -> Result<Solid, String> {
     fields(
@@ -74,6 +140,7 @@ pub(super) fn solid(row: &J, scene: &Path, what: &str) -> Result<Solid, String> 
             "pack",
             "state",
             "selection",
+            "temperature_k",
             "shape",
             "radius_m",
             "inner_radius_m",
@@ -118,13 +185,16 @@ pub(super) fn solid(row: &J, scene: &Path, what: &str) -> Result<Solid, String> 
             geometry,
             material: pack.card(),
             point: &point,
-            selection,
+            selection: selection.clone(),
         }],
         1,
         || false,
     )
     .map_err(|error| format!("{what}: {error}"))?;
-    let inertia = body.inertia();
+    let hot = expansion(row, &body, pack.card(), &point, selection, what)?;
+    let inertia = hot
+        .as_ref()
+        .map_or_else(|| body.inertia(), |(inertia, _)| *inertia);
     let tensor = inertia.inertia_com().m;
     // Every shape here is centred on the body origin with its principal axes
     // along the body's axes; anything else is not this body.
@@ -141,7 +211,7 @@ pub(super) fn solid(row: &J, scene: &Path, what: &str) -> Result<Solid, String> 
         .ok_or_else(|| format!("{what}: the card resolved no density"))?;
     let receipt = &density.answer().receipt;
     let principal = [tensor[0], tensor[4], tensor[8]];
-    let report = format!(
+    let mut report = format!(
         "\"shape\":{},\"pack_hash\":{},\"pack_bytes_hash\":{},\"card_hash\":{},\"card_state\":{},\"density_kg_m3\":{},\"density_receipt_hash\":{},\"selected_claim\":{},\"volume_m3\":{},\"mass_kg\":{},\"principal_inertia_kg_m2\":[{},{},{}]",
         quote(shape),
         quote(&pack.content_hash().to_hex()),
@@ -157,6 +227,9 @@ pub(super) fn solid(row: &J, scene: &Path, what: &str) -> Result<Solid, String> 
         num(principal[1]),
         num(principal[2]),
     );
+    if let Some((_, members)) = &hot {
+        report.push_str(members);
+    }
     Ok(Solid {
         mass_kg: inertia.mass(),
         principal_inertia_kg_m2: principal,

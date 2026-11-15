@@ -542,6 +542,10 @@ is its origin:
   (semiaxes_m, three) or \"cylinder\" (radius_m, length_m along z,
   inner_radius_m = 0 for a tube). Its mass and principal inertia are the
   shape's volume moments times the density the card gives at that state.
+  With temperature_k, the body is freely expanded about its origin from the
+  state's temperature to that one by the card's linear expansion
+  coefficient; its mass is kept. The state then needs a T or exactly one
+  absolute-temperature coordinate, and everything else in it stays fixed.
   viscoelastic_network  the same fields, stepped by the fs-mbd relaxation
                  owner (which solves bodies and branches as one dense system
                  and refuses one too large for it at the first step); a
@@ -4160,13 +4164,32 @@ impl Device {
                     "limited to declared pure-phase thermal laws",
                     "limited to declared pure-phase thermal laws, solid bodies' densities",
                 );
-            description = std::borrow::Cow::Owned(format!(
-                "{base}; a solid body's mass and principal inertia are the closed-form volume \
-                 moments of its declared shape, centred on its origin along its axes, times the \
-                 nominal density its card gives at the declared state: a uniform, rigid body of \
-                 those dimensions, with no thermal expansion, tolerance or density field, and \
-                 the density's uncertainty not propagated"
-            ));
+            let expanded = self
+                .elements
+                .iter()
+                .flat_map(|element| &element.solids)
+                .any(|(_, report)| solid::expanded(report));
+            description = std::borrow::Cow::Owned(if expanded {
+                format!(
+                    "{base}; a solid body's mass and principal inertia are the closed-form \
+                     volume moments of its declared shape, centred on its origin along its axes, \
+                     times the nominal density its card gives at the declared state: a uniform, \
+                     rigid body of those dimensions. A solid given a temperature_k is that body \
+                     freely and uniformly expanded about its origin by its card's linear \
+                     expansion coefficient integrated from the state's temperature, its mass \
+                     kept: no thermal stress, gradient or constraint, no tolerance or density \
+                     field, and neither the density's nor the coefficient's uncertainty \
+                     propagated"
+                )
+            } else {
+                format!(
+                    "{base}; a solid body's mass and principal inertia are the closed-form \
+                     volume moments of its declared shape, centred on its origin along its axes, \
+                     times the nominal density its card gives at the declared state: a uniform, \
+                     rigid body of those dimensions, with no thermal expansion, tolerance or \
+                     density field, and the density's uncertainty not propagated"
+                )
+            });
         }
         description
     }

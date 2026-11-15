@@ -1782,7 +1782,9 @@ impl IntegratedIsotropicThermalExpansion {
 ///
 /// Scalar claims use `alpha * delta_T`; piecewise-linear temperature paths,
 /// including fixed-context slices through two-coordinate source surfaces, are
-/// integrated segment by segment without quadrature error. Every other
+/// integrated segment by segment without quadrature error. The path runs
+/// along [`thermal_path_axis`]: `T`, or the points' one static
+/// absolute-temperature axis. Every other
 /// coordinate and its quantity descriptor must be identical at both endpoints.
 /// The canonical source owner checks the complete path, including every crossed
 /// cell and any unsupported gap. Both endpoints and the path stay pinned to the
@@ -1853,10 +1855,11 @@ fn integrate_selected_thermal_expansion(
             .ok_or(MaterialStatePointError::InvalidDerived {
                 quantity: "selected thermal-expansion claim",
             })?;
+    let axis = thermal_path_axis(reference_point).unwrap_or("T");
     let path = pinned_temperature_line(
         card,
         &claim.key,
-        "T",
+        axis,
         reference_point,
         current_point,
         selected_claim,
@@ -1867,7 +1870,7 @@ fn integrate_selected_thermal_expansion(
         }
         fs_matdb::PropertyValue::Curve {
             abscissa, knots, ..
-        } if abscissa == "T" => {
+        } if abscissa == axis => {
             integrate_piecewise_linear(knots, reference_temperature_k, current_temperature_k)?
         }
         fs_matdb::PropertyValue::Curve { .. } | fs_matdb::PropertyValue::Surface2D { .. } => {
@@ -1880,6 +1883,30 @@ fn integrate_selected_thermal_expansion(
         });
     }
     Ok(free_linear_strain)
+}
+
+/// The coordinate a thermal path runs along: the legacy untyped `T` when the
+/// point has it, or else the point's one axis declared a static absolute
+/// temperature, whatever its name (the seed cards name theirs `temperature`).
+/// `None` when the point has neither, or more than one such axis.
+#[must_use]
+pub fn thermal_path_axis(point: &QueryPoint) -> Option<&str> {
+    if point.axes().contains_key("T") {
+        return Some("T");
+    }
+    let absolute = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature,
+        ValueForm::Static,
+    ));
+    let mut typed = point
+        .axis_quantities()
+        .iter()
+        .filter(|(axis, quantity)| **quantity == absolute && point.axes().contains_key(*axis))
+        .map(|(axis, _)| axis.as_str());
+    match (typed.next(), typed.next()) {
+        (Some(axis), None) => Some(axis),
+        _ => None,
+    }
 }
 
 fn matching_temperature_path(
@@ -1895,11 +1922,15 @@ fn matching_temperature_path(
         QuantityKind::AbsoluteTemperature,
         ValueForm::Static,
     ));
+    // A point without `T` and without one absolute-temperature axis keeps the
+    // legacy name, and is refused below exactly as before.
+    let path_axis = thermal_path_axis(reference).unwrap_or("T");
     if [reference, current].iter().any(|point| {
-        point.axis_quantities().get("T").is_some_and(|quantity| {
+        let quantity = point.axis_quantities().get(path_axis);
+        quantity.is_some_and(|quantity| {
             *quantity != QuantitySpec::dimensional(fs_qty::Temperature::DIMS)
                 && *quantity != absolute
-        })
+        }) || (path_axis != "T" && quantity != Some(&absolute))
     }) {
         return Err(MaterialStatePointError::InvalidDerived {
             quantity: "thermal path coordinate must be an absolute temperature",
@@ -1911,24 +1942,21 @@ fn matching_temperature_path(
                 quantity: "thermal path coordinate set",
             });
         };
-        if axis != "T" && reference_value.to_bits() != current_value.to_bits() {
+        if axis != path_axis && reference_value.to_bits() != current_value.to_bits() {
             return Err(MaterialStatePointError::InvalidDerived {
                 quantity: "non-temperature path coordinate changed",
             });
         }
     }
-    let reference_temperature_k =
-        reference
-            .axes()
-            .get("T")
-            .copied()
-            .ok_or(MaterialStatePointError::InvalidDerived {
-                quantity: "reference temperature coordinate",
-            })?;
+    let reference_temperature_k = reference.axes().get(path_axis).copied().ok_or(
+        MaterialStatePointError::InvalidDerived {
+            quantity: "reference temperature coordinate",
+        },
+    )?;
     let current_temperature_k =
         current
             .axes()
-            .get("T")
+            .get(path_axis)
             .copied()
             .ok_or(MaterialStatePointError::InvalidDerived {
                 quantity: "current temperature coordinate",

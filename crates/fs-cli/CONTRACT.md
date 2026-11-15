@@ -1415,6 +1415,37 @@ No claim: the density is uniform; the dimensions are those at the declared
 state, so there is no thermal expansion; there are no tolerances; the
 density's uncertainty is not propagated.
 
+A solid may also give `temperature_k`. The body is then the declared one
+freely expanded to that temperature. The path's coordinate is the state's
+`T`, or its one `absolute-temperature` coordinate, and only that coordinate
+changes. `fs_material::state_point::integrate_isotropic_thermal_expansion`
+integrates the card's linear expansion coefficient from the declared
+temperature. `fs_mbd_material::thermal::expand_body` scales the shape about
+the body origin by `1 + strain` and keeps the mass. The `solids` report adds
+`temperature_k`, `reference_temperature_k`, `free_linear_strain`,
+`expanded_volume_m3`, `expansion_hash` and `expansion_claim`. `volume_m3`
+and `density_kg_m3` stay those of the declared state.
+
+G2, in the same test file, uses `examples/system/glass_flywheel_hot.json`. It
+is the same disc in soda-lime silica glass: the NIST SRM 1826b card, compiled
+into `examples/system/glass1826b/`, declared at 293.15 K and taken to
+373.15 K.
+- The density is the certificate's 2548.668 kg/m^3.
+- The strain is 9.6e-6 /K times 80 K, to 1e-12.
+- The mass bits equal those of the same disc without a temperature.
+- The inertia is that disc's times (1 + strain)^2, and the volume its times
+  (1 + strain)^3, to 1e-14.
+- The spin follows the expanded axial inertia.
+- Three scenes are refused: a temperature on the steel card, whose state has
+  no absolute-temperature coordinate; a negative temperature; a state that
+  claims a known coefficient range the card does not have.
+
+The no-claim line of such a run says the expansion is free and uniform: no
+thermal stress, gradient or constraint, and neither the density's nor the
+coefficient's uncertainty propagated. The glass card's coefficient carries
+the certificate's own warning that no temperature range was stated, so the
+scene declares `source-temperature-range-known = 0`.
+
 A `viscoelastic_network` takes the same fields and lowers to
 `fs_mbd::component::relaxation::RelaxationNetwork` (the fs-mbd relaxation
 owner). A connector may add `branches`, each with `stiffness_n_m` and

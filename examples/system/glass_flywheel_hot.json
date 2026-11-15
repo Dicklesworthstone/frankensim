@@ -1,0 +1,34 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 1.0,
+  "step_s": 0.125,
+  "sample_every_s": 0.125,
+  "elements": {
+    "flywheel": {
+      "kind": "rigid_network",
+      "bodies": [
+        {
+          "solid": {
+            "pack": "glass1826b/glass-srm-1826b.fsmcdpk",
+            "state": [
+              {"name": "temperature", "value": "293.15 K", "kind": "absolute-temperature"},
+              {"name": "source-microhomogeneity-evaluated", "value": "0", "kind": "dimensional"},
+              {"name": "source-temperature-range-known", "value": "0", "kind": "dimensional"}
+            ],
+            "temperature_k": 373.15,
+            "shape": "cylinder",
+            "radius_m": 0.1,
+            "length_m": 0.02
+          },
+          "position_m": [0, 0, 0]
+        }
+      ],
+      "connectors": [],
+      "torque_ports": [0]
+    }
+  },
+  "connections": [
+    {"prescribe": "flywheel.force0", "force_n": [0, 0, 0]},
+    {"prescribe": "flywheel.torque0", "torque_n_m": [0, 0, 1.0]}
+  ]
+}

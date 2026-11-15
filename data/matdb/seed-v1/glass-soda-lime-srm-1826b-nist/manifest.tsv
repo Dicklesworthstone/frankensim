@@ -5,7 +5,7 @@ citation	NIST SRM 1826b Certificate (December 1, 2006), Soda-Lime Silica Glass d
 license	NIST-Public-Information-Attribution-Requested
 source	primary	properties.tsv	material-tsv-v1
 property	density	density	dimensional
-property	linear_thermal_expansion_coefficient	linear-thermal-expansion-coefficient	dimensional
+property	linear_thermal_expansion_coefficient	linear_thermal_expansion_coefficient	dimensional
 axis	temperature	temperature	absolute-temperature
 axis	source_temperature_range_known	source-temperature-range-known	dimensional
 axis	source_microhomogeneity_evaluated	source-microhomogeneity-evaluated	dimensional

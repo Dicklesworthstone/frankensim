@@ -73,6 +73,7 @@ save/resume commands work with `self_heating_damper.json` and
 | `damped_pair_lining.json` | the damped pair with all of its connector heat routed into the first of three steel cells of 5 J/K (`thermal_timeline`, the fs-thermal enthalpy timeline), joined in a row by 1 W/K: the heat enters the first cell and spreads along the lining | the closed form: the lining stores the pair's heat `2 (1 - exp(-1.4 t))` J to 1e-9 J, the cells warmest first |
 | `viscoelastic_mount.json` | two rigid bodies at rest on a mount with viscous damping and one Maxwell branch stretched by 0.5 m (`viscoelastic_network`, the fs-mbd relaxation owner): the stored 0.21 J sets the bodies moving and heats the casing | the pair's own two equations integrated independently: relative speed, branch energy and heat |
 | `steel_flywheel.json` | a steel disc 200 mm across and 20 mm thick whose mass and inertia are not typed: it is a `solid`, a cylinder of the AISI 1018 supplier-guide card in `steel1018/` (7861 kg/m³), so it weighs 4.94 kg with 0.0247 kg m² about its axis; 1 N m spins it up from rest for 1 s | the card's printed 0.284 lb/in³; the cylinder's mass and inertia at that density; `omega = tau t / I`, 40.5 rad/s, and the torque's 20.2 J of work, all of it stored; the same body as a tube, a cuboid, a sphere and an ellipsoid against their closed forms (tests/system_command/solids.rs) |
+| `glass_flywheel_hot.json` | the same disc in soda-lime silica glass (the NIST SRM 1826b card in `glass1826b/`, 2548.668 kg/m³ at 293.15 K), 1.60 kg, given `temperature_k` 373.15: the disc freely expanded by the card's 9.6e-6 /K over the 80 K rise, so its inertia about the axis grows by 0.154 % to 0.00802 kg m² while its mass stays put; 1 N m for 1 s spins it to 124.7 rad/s | the certificate's density; the strain 7.68e-4; mass bits equal to the cold disc's; the inertia scaled by (1 + strain)^2 and the volume by (1 + strain)^3; the spin of the expanded disc; refusals for a temperature on a state with no temperature coordinate, a negative temperature and a coefficient off its card (tests/system_command/solids.rs) |
 | `self_heating_damper.json` | the damped pair with all of its heat in 1 J/K of damper fluid, whose temperature thins the damper by an Arrhenius shift: the damping falls to 0.81 of its value as the fluid warms by 0.93 K | the exact recursion of the scheme (damping held over each step at the temperature the step began with) to 1e-11, and first-order convergence to the coupled differential equations |
 | `quarter_car.json` | a car body and wheel on a suspension spring and shock absorber, a tyre spring driven over a 30 mm bump; 70 % of the shock's heat warms it, the rest goes to the air | the ledger: road work = mechanical energy + heat, and the 70/30 split |
 
@@ -208,6 +209,18 @@ volume, the mass and the inertia. The pack in `steel1018/` was compiled from
 the seed card by
 `cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/steel-1018-onlinemetals-reference/manifest.tsv --material-state "AISI 1018 carbon steel, UNS G10180" solid "cold-finished bar" 0 --out steel-1018.fsmcdpk`
 (27115 bytes; two builds were byte-identical).
+
+A solid may add `temperature_k`, as `glass_flywheel_hot.json` does. The body
+is then freely expanded from the state's temperature to that one, by the
+card's linear expansion coefficient integrated along the way, and keeps its
+mass. The state needs a `T` or exactly one `absolute-temperature`
+coordinate, and nothing else in it changes. The report's `solids` adds the
+two temperatures, the strain, the expanded volume and the expansion's receipt
+hashes. The seed manifest maps the certificate's coefficient to
+`linear_thermal_expansion_coefficient`, the name fs-material's expansion path
+reads. The pack in `glass1826b/` was compiled from the seed card by
+`cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/glass-soda-lime-srm-1826b-nist/manifest.tsv --material-state "Soda-lime silica glass SRM 1826b" solid "NIST SRM 1826b certified specimen" 0 --out glass-srm-1826b.fsmcdpk`
+(4080 bytes; two builds were byte-identical).
 
 `viscoelastic_mount.json` uses the second fs-mbd owner,
 `fs_mbd::component::relaxation::RelaxationNetwork`, through a

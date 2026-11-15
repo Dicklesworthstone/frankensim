@@ -11,6 +11,16 @@
 //! work `tau^2 t^2 / (2 I)`, all of it stored. The same body as a tube, a
 //! cuboid, a sphere and an ellipsoid gives each shape's closed form. Then the
 //! refusals, among them a typed density or mass beside a solid.
+//!
+//! examples/system/glass_flywheel_hot.json is the same disc in soda-lime
+//! silica glass, the NIST SRM 1826b card compiled into
+//! examples/system/glass1826b/, declared at the card's 293.15 K and given a
+//! `temperature_k` of 373.15 K. The claims, declared before the first run:
+//! the density is the certificate's 2548.668 kg/m^3 at 293.15 K; the free
+//! linear strain is the card's constant 9.6e-6 /K times the 80 K rise; the
+//! mass is bit for bit that of the same disc without a temperature, its
+//! principal inertia that disc's times (1 + strain)^2 and its volume times
+//! (1 + strain)^3; the spin is `tau t / I` of the expanded disc.
 
 use std::f64::consts::PI;
 
@@ -119,6 +129,131 @@ fn a_steel_flywheel_takes_its_mass_and_inertia_from_its_card_and_its_shape() {
         .parse()
         .unwrap();
     assert!(relative(said, mass) <= 1.0e-12, "{line}");
+}
+
+/// The glass example changed by `edit`, written beside its card pack.
+fn glass(name: &str, edit: impl Fn(&str) -> String) -> PathBuf {
+    let scene = std::fs::read_to_string(example("glass_flywheel_hot.json")).unwrap();
+    let changed = edit(&scene);
+    assert_ne!(changed, scene, "{name}");
+    let path = scratch(name, &changed);
+    let pack = path.parent().unwrap().join("glass1826b");
+    std::fs::create_dir_all(&pack).unwrap();
+    std::fs::copy(
+        example("glass1826b/glass-srm-1826b.fsmcdpk"),
+        pack.join("glass-srm-1826b.fsmcdpk"),
+    )
+    .unwrap();
+    path
+}
+
+const HOT: &str = "\"temperature_k\": 373.15,";
+
+#[test]
+fn a_glass_flywheel_given_a_temperature_is_its_cold_disc_freely_expanded_with_its_mass_kept() {
+    let (code, json, stderr) =
+        run_binary(&["--json", "system", &example("glass_flywheel_hot.json")]);
+    assert_eq!(code, 0, "{stderr}");
+    let cold = glass("glass_cold.json", |scene| scene.replace(HOT, ""));
+    let (code, cold, stderr) = run_binary(&["--json", "system", cold.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    let rho = value(&json, "\"solids\"", "density_kg_m3");
+    assert!(relative(rho, 2548.668) <= 1.0e-15, "{rho}");
+    for (key, kelvin) in [
+        ("temperature_k", 373.15_f64),
+        ("reference_temperature_k", 293.15),
+    ] {
+        assert_eq!(value(&json, "\"solids\"", key).to_bits(), kelvin.to_bits());
+    }
+    let strain = value(&json, "\"solids\"", "free_linear_strain");
+    let want = 9.6e-6 * (373.15 - 293.15);
+    assert!(relative(strain, want) <= 1.0e-12, "{strain} {want}");
+    let stretch = 1.0 + strain;
+    // Mass is kept bit for bit; the shape's moments scale as s^2, s^3.
+    let mass = value(&json, "\"solids\"", "mass_kg");
+    assert_eq!(
+        mass.to_bits(),
+        value(&cold, "\"solids\"", "mass_kg").to_bits()
+    );
+    let volume = PI * 0.1 * 0.1 * 0.02;
+    assert!(relative(mass, rho * volume) <= 1.0e-15, "{mass}");
+    assert_eq!(
+        value(&json, "\"solids\"", "volume_m3").to_bits(),
+        value(&cold, "\"solids\"", "volume_m3").to_bits()
+    );
+    let expanded = value(&json, "\"solids\"", "expanded_volume_m3");
+    assert!(
+        relative(expanded, volume * stretch.powi(3)) <= 1.0e-14,
+        "{expanded}"
+    );
+    let hot = triple_after(&json, "\"solids\"", "principal_inertia_kg_m2");
+    let reference = triple_after(&cold, "\"solids\"", "principal_inertia_kg_m2");
+    for (got, was) in hot.into_iter().zip(reference) {
+        assert!(
+            relative(got, was * stretch * stretch) <= 1.0e-14,
+            "{got} {was}"
+        );
+        assert!(got > was);
+    }
+    for key in ["expansion_hash", "expansion_claim", "density_receipt_hash"] {
+        assert_eq!(reported_material_hash(&json, key).len(), 64);
+    }
+    assert!(!cold.contains("\"expansion_hash\""));
+    // Spun by 1 N m for 1 s: the expanded disc's axial inertia sets the spin.
+    let spin = value(
+        &json,
+        &element("flywheel"),
+        "body0.angular_velocity_z_rad_s",
+    );
+    assert!(relative(spin, 1.0 / hot[2]) <= 1.0e-13, "{spin}");
+    assert!(json.contains("freely and uniformly expanded"), "{json}");
+    assert!(cold.contains("with no thermal expansion"), "{cold}");
+}
+
+#[test]
+fn a_solid_temperature_refuses_a_state_without_a_temperature_and_a_coefficient_off_its_card() {
+    let steel = std::fs::read_to_string(example("steel_flywheel.json")).unwrap();
+    let changed = steel.replace("\"shape\"", "\"temperature_k\": 373.15, \"shape\"");
+    assert_ne!(changed, steel);
+    let path = scratch("steel_hot.json", &changed);
+    let pack = path.parent().unwrap().join("steel1018");
+    std::fs::create_dir_all(&pack).unwrap();
+    std::fs::copy(
+        example("steel1018/steel-1018.fsmcdpk"),
+        pack.join("steel-1018.fsmcdpk"),
+    )
+    .unwrap();
+    let mut cases = vec![(
+        "steel_hot.json",
+        path,
+        "solid.temperature_k: the state has no absolute-temperature axis to expand along",
+    )];
+    for (name, from, to, said) in [
+        (
+            "glass_negative.json",
+            HOT,
+            "\"temperature_k\": -373.15,",
+            "solid: temperature_k must be positive and finite",
+        ),
+        (
+            "glass_range_known.json",
+            "{\"name\": \"source-temperature-range-known\", \"value\": \"0\"",
+            "{\"name\": \"source-temperature-range-known\", \"value\": \"1\"",
+            "solid.temperature_k: ",
+        ),
+    ] {
+        cases.push((name, glass(name, |scene| scene.replace(from, to)), said));
+    }
+    for (name, path, said) in cases {
+        let (code, stdout, stderr) = run_binary(&["system", path.to_str().unwrap()]);
+        assert!(stdout.is_empty(), "{name}: {stdout}");
+        assert_eq!(code, 3, "{name}: {stderr}");
+        assert!(
+            stderr.contains("elements.flywheel.bodies[0]"),
+            "{name}: {stderr}"
+        );
+        assert!(stderr.contains(said), "{name}: {stderr}");
+    }
 }
 
 #[test]
