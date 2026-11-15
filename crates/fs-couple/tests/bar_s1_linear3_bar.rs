@@ -1868,7 +1868,9 @@ fn bar_s1_material_strike_radiated_render_replays_and_time_axis_is_live() {
     let started = Instant::now();
     let ladder = undercut();
     let transfer = *radiation().pressures.last().unwrap();
-    let mut last = None;
+    // Typed here: inferred from its use below, it overflows the trait search
+    // on macOS, where objc2's `Retained` also implements `IntoIterator`.
+    let mut last: Option<(f64, Vec<f64>)> = None;
     let mut differences = Vec::new();
     for substeps in SUBSTEPS {
         let (signal, contact) = render(ladder, transfer, substeps, 0.0);
