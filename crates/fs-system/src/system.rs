@@ -747,6 +747,19 @@ impl SystemBuilder {
         }
     }
 
+    /// A heat route moves one heat rate at one temperature.
+    fn need_scalar_heat(&self, port: PortRef) -> Result<(), AdmissionError> {
+        let width = self.spec(port).width();
+        if width == 1 {
+            Ok(())
+        } else {
+            Err(AdmissionError::HeatRouteWidth {
+                port: self.label(port),
+                width,
+            })
+        }
+    }
+
     fn need_match(&self, a: PortRef, b: PortRef) -> Result<(), AdmissionError> {
         let (left, right) = (self.spec(a), self.spec(b));
         if left.carrier() == right.carrier() && left.width() == right.width() {
@@ -1206,6 +1219,7 @@ impl SystemBuilder {
             });
         }
         self.need_role(source, PortRole::EffortIn, heat_source)?;
+        self.need_scalar_heat(source)?;
         let mut sum = 0.0;
         for &(sink, fraction) in sinks {
             if self.spec(sink).carrier() != Carrier::Heat {
@@ -1215,6 +1229,7 @@ impl SystemBuilder {
                 });
             }
             self.need_role(sink, PortRole::FlowIn, heat_sink)?;
+            self.need_scalar_heat(sink)?;
             if !(fraction > 0.0 && fraction <= 1.0) {
                 return Err(AdmissionError::Fractions { sum: fraction });
             }
@@ -3812,6 +3827,15 @@ impl System {
                         &self.inputs[self.input_range(*port)],
                         &self.outputs[self.output_range(*port)],
                     )
+                } else if spec.carrier() == Carrier::Heat && spec.width() > 1 {
+                    // A trace's loads may cancel in their sum, so its
+                    // rounding scales with the sum of their sizes.
+                    let loads = if spec.role() == PortRole::EffortIn {
+                        &self.outputs[self.output_range(*port)]
+                    } else {
+                        &self.inputs[self.input_range(*port)]
+                    };
+                    dt_s * loads.iter().map(|load| load.abs()).sum::<f64>()
                 } else {
                     self.port_energy[global].abs()
                 };

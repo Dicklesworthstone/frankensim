@@ -148,6 +148,15 @@ pub enum AdmissionError {
         /// The setter port, as `node.port`.
         port: String,
     },
+    /// A heat route names a field heat port. A route moves one heat rate
+    /// at one temperature; a trace of several points meets another through
+    /// a coupling element instead.
+    HeatRouteWidth {
+        /// The field port, as `node.port`.
+        port: String,
+        /// Its number of points.
+        width: usize,
+    },
     /// A common-flow junction of stream ports with more than one member. A
     /// stream's rates are what crosses, so several storages cannot each
     /// receive the whole of one flow. Streams meet at a storage.
@@ -210,6 +219,15 @@ pub enum AdmissionError {
     },
 }
 
+/// What [`AdmissionError::HeatRouteWidth`] says.
+fn heat_route_width(f: &mut fmt::Formatter<'_>, port: &str, width: usize) -> fmt::Result {
+    write!(
+        f,
+        "heat port `{port}` has {width} points and cannot join a heat route, which moves one \
+         heat rate: join the trace through a coupling element"
+    )
+}
+
 impl fmt::Display for AdmissionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -262,6 +280,7 @@ impl fmt::Display for AdmissionError {
                 "heat port `{port}` cannot set a common flow for several members: heat ports \
                  share a temperature (common effort) or use a heat route"
             ),
+            Self::HeatRouteWidth { port, width } => heat_route_width(f, port, *width),
             Self::StreamCommonFlow { port } => write!(
                 f,
                 "stream port `{port}` cannot set a common flow for several members: streams \

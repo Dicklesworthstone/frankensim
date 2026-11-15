@@ -104,6 +104,15 @@ physics owners below fs-couple can be composed without it.
     is a tolerance group of its own in the interface solve, because its
     coefficients are different quantities. Stream connections are audited
     separately for mass cancellation as well as enthalpy balance.
+  - Field heat ports (`PortSpec::heat_field`, crates/fs-ports/CONTRACT.md)
+    join through `bond` or `common_effort` to ports of the same width, point
+    by point, each in its owner's order. A heat route refuses one
+    (`HeatRouteWidth`, the port and its width named): a route moves one heat
+    rate at one temperature. In a connection's energy audit a field heat
+    port counts `dt sum |Q_i|` toward the magnitude the tolerance is
+    relative to, not `|dt sum Q_i|`: a trace's loads may cancel in their
+    sum. The solve's slack and its entropy share are taken per point, as for
+    every input. Two traces meet through a `ConductanceMatrix`.
     Identified stream ports additionally require the same medium/source laws,
     enthalpy reference, and ordered quantity identities and dimensions. A
     mismatch (including an unidentified peer) refuses as `StreamBasis` before
@@ -246,6 +255,8 @@ physics owners below fs-couple can be composed without it.
     - `HeatNode`, `Resistance`, `DiracJunction`, `ModulatedTransformer`: no
       words. Identities retain all conductances, the complete resistance or
       incidence matrix, and the Dirac schema's coordinate and clock bindings.
+    - `ConductanceMatrix`: no words. Identity retains the number of jumps and
+      every entry of the jumps and of the conductances.
       Signal-modulated ratios belong to the restored inputs and outputs.
     - `ControlledSource`: the same three-word source account, with power
       domain and effort/flow role bound by the graph's port description.
@@ -435,6 +446,34 @@ physics owners below fs-couple can be composed without it.
     factor `(1 - r dt / 2m) / (1 + r dt / 2m)` per step while the heat it books
     equals the kinetic energy lost and warms the body on its heat port. The
     kernel test has one row.
+  - `ConductanceMatrix::new(width_a, width_b, jump, weights)` is the linear
+    conductance between two heat traces, the many-point `Conductance`: field
+    heat ports `a` and `b` receive the temperatures at their points and
+    return the heat loads `K T` [W] into the element, with `K = D^T W D`.
+    `D` (`jump`, row-major, `q` rows over the `width_a + width_b` points,
+    `a`'s first) states the temperature jumps across the interface: each row
+    must sum to zero within `4 n eps` of the sum of its sizes, so a uniform
+    temperature moves no heat. `W` (`weights`, `q x q`, W/K) is the
+    conductance over those jumps, exactly symmetric and positive definite
+    (the constructor refuses `Asymmetric` or `NotPositiveDefinite`, by the
+    Cholesky factorization `Resistance` uses). `K` is therefore positive
+    semidefinite with every jump-free field in its null space, and the loads
+    sum to zero within the `(n + q + 2)` roundoff units of `dt sum_r |y_r|
+    sum_j |D_rj|` the receipt claims. It stores nothing and books no
+    dissipation. Its entropy is `-dt (D u)^T W (D T)` with `u = 1 / T`, the
+    sum of `Q_i / T_i` over both ports. Exact-linear; JVP and VJP are `K`
+    itself. `matrix()` returns the assembled `K`. A matching contact between
+    two P1 traces is `D = [I, -P]` and `W` the patch's face mass over the
+    contact resistance (`fs_conduction::component::ConductionBody::
+    matching_contact`). `tests/conductance_matrix.rs` checks conformance and
+    tangents over 200 drawn cases of three jumps over three and two points,
+    each load against `K T` by hand and the loads' sum against 32 roundoff
+    units; the one-point case against `Conductance` (loads to 4 roundoff
+    units, entropy within the rounding of `1 / T_a - 1 / T_b`); the
+    refusals; a heat route from a trace refused by name; and two traces of
+    two lumps each, stepped 50 times through the kernel, against the
+    monolithic backward-Euler solve of all four within 1e-11 relative, with
+    the ledger closed and entropy generated.
   `tests/parallel_elements.rs` checks component conformance and tangents,
   time reversal of the storage element at each of its 400 points in the four
   domains (`R` the identity on the state, bounds derived from the rounding of
@@ -1131,6 +1170,7 @@ that locates an event (a friction interface that cuts the step at a stop,
 `AdmissionError` for descriptions that cannot run, including
 `TransformerRatio`, `MapShape` and `MapCoefficient` for invalid power maps,
 `Empty` for a junction or a power map without members,
+`HeatRouteWidth` for a heat route that names a field heat port,
 and `LinePorts`, `TwoLines` and `LineEnd` for load lines.
 `SystemError` for a failed
 step: the component's own error unchanged (`Component`, with the phase), a
@@ -2882,6 +2922,19 @@ solved together. Nothing in the module is deleted.
   `energy_residual_j`, not refused.
 - `common_flow` on heat ports is admitted for one member only (a bond). Heat
   shared between several bodies goes through `common_effort` or `heat_route`.
+- The entropy of a `ConductanceMatrix` is the nodal sum of `Q_i / T_i`, and
+  it is not positive for every jump matrix, conductance and temperature. The
+  kernel refuses a step in which it is negative (`NegativeProduction`), so
+  such a contact stops rather than passes. For a matching contact it is
+  `dt sum_rs j_r W_rs j_s / (T_a T_b)_r` over the jumps `j`: no term is
+  negative when the jumps have one sign and `W` has no negative entry.
+  `tests/conductance_matrix.rs` pins both sides: two joined points at
+  1200 K and 300 K with opposed jumps destroy entropy and the step is
+  refused, and 2,000 drawn smooth fields between 300 K and 400 K, the jump
+  free to change sign across the patch, all generate some.
+- A field heat port names no trace. Nothing checks that two joined field
+  heat ports list the same points in the same order, or that a
+  `ConductanceMatrix` was built for the two traces it is bonded to.
 - Momentum and charge outside carried stream coordinates are not in the ledger
   yet (bead `.5.6`). Coordinate accounting alone supplies no chemical identity,
   reaction balance or mechanical momentum theorem.

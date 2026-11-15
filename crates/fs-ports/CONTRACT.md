@@ -82,6 +82,11 @@ None.
   work on an inertial surface.
 - `tests/mass_ports.rs` for optional inventory closure, stream signs, an
   energy-balanced mass leak, cancellation and unrepresentable input refusals.
+- `tests/heat_ports.rs` for the sign and size of a heat port's entropy and
+  its refusal at a temperature that is not above zero; and for the field heat
+  port: with one point it equals the scalar port, with three its energy and
+  entropy are the sums over its points to the bit (400 drawn cases in each
+  role), and one bad temperature or a vector of another width gives NaN.
 - The fs-couple and fs-feec batteries named under "Purpose and layer".
 
 ## No-claim boundaries
@@ -169,6 +174,16 @@ temperature [K] and heat rate [W] and books `dt * flow`, with entropy
 `dt * flow / temperature`; `Carrier::Signal` books nothing. The kernel computes
 port energy from the wire values (`PortSpec::energy_in_j`), so both ends of a
 lossless connection book the same number.
+
+`PortSpec::heat_field(id, role, width)` declares a heat port over a trace of
+`width` points: one temperature [K] and one heat load [W] into the owner per
+point. The loads are already integrated against the trace's basis, so the port
+books `dt * sum Q_i` with no metric, and the entropy `dt * sum Q_i / T_i`, each
+load at its own point's temperature (the nodal rule). With one point it is
+`PortSpec::heat`, the same value, and the scalar entropy expression is its own
+code path. The port carries no identity of its trace: two field heat ports
+joined point by point must list their points in the same order, which only
+their owners know.
 
 `PortSpec::field_power` declares a field power port whose effort and flow
 vectors have the same width and whose energy is `dt * e^T M f`.

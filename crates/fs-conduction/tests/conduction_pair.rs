@@ -12,21 +12,25 @@
 //! pair on the kernel with matching cross grids, (b) the pair with
 //! non-matching cross grids, and (c) the owner's own matching-P1 contact on
 //! one mesh at the same steps. Every path is reported before any is
-//! asserted. Run with
+//! asserted.
+//!
+//! A fourth path, (d), joins the two bodies trace to trace through the
+//! owner's own contact as a `ConductanceMatrix`: it is path (c)'s problem,
+//! and its claims are stated at its test. Run with
 //! `cargo test -p fs-conduction --features component --test conduction_pair -- --nocapture`.
 #![cfg(feature = "component")]
 
 use std::f64::consts::{FRAC_PI_2, PI};
 
 use fs_alloc::{ArenaConfig, ArenaPool};
-use fs_conduction::component::ConductionBody;
+use fs_conduction::component::{ConductionBody, PatchPort};
 use fs_conduction::fixtures::{box_grid, on_box_face};
 use fs_conduction::transient::VolumetricHeatCapacity;
 use fs_conduction::transient::backward_euler::{BackwardEuler, StepConfig};
 use fs_conduction::{
     AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS, AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
-    ConductionMesh, ConductionProblem, ConductivityModel, InterfaceFacePair, InterfaceResistance,
-    InterfaceSurface, LinearConfig, ScalarField, ThermalBc, ThermalBoundary,
+    ConductionError, ConductionMesh, ConductionProblem, ConductivityModel, InterfaceFacePair,
+    InterfaceResistance, InterfaceSurface, LinearConfig, ScalarField, ThermalBc, ThermalBoundary,
     ThermalBoundaryBuilder, ThermalInterfaces,
 };
 use fs_evidence::ValidityDomain;
@@ -40,7 +44,7 @@ use fs_mms::{RefinementLadder, fit_order};
 use fs_ports::component::Component;
 use fs_rep_mesh::TetComplex;
 use fs_system::SystemBuilder;
-use fs_system::elements::Conductance;
+use fs_system::elements::{Conductance, ConductanceMatrix};
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new_clock_free();
@@ -77,6 +81,10 @@ const FOURIER: f64 = 0.1;
 const RUNGS: [usize; 4] = [2, 4, 8, 16];
 /// The least order between the last two rungs that meets the claim.
 const CLAIMED_ORDER: f64 = 1.8;
+/// Path (d) against path (c): the most the crossed energy may differ, and
+/// the most any vertex's end temperature may.
+const CLAIMED_GAP_J: f64 = 1.0e-9;
+const CLAIMED_GAP_K: f64 = 1.0e-9;
 
 fn config() -> StepConfig {
     StepConfig {
@@ -208,7 +216,7 @@ fn slab_body(
     cx: &Cx<'_>,
     cells: usize,
     cross: usize,
-    port: &str,
+    port: PatchPort<'_>,
     port_x: f64,
 ) -> (ConductionBody<'static>, &'static ConductionMesh) {
     let (complex, positions) = box_grid([cells, cross, cross], [LENGTH_M, CROSS_M, CROSS_M]);
@@ -216,7 +224,7 @@ fn slab_body(
     let boundary = leak(
         ThermalBoundaryBuilder::new(mesh)
             .region(
-                port,
+                port.region(),
                 |face| on_box_face(face.centroid[0], port_x),
                 ThermalBc::adiabatic(),
             )
@@ -267,18 +275,19 @@ fn cross_spread_k(positions: &[[f64; 3]], field: &[f64]) -> f64 {
         .fold(0.0, f64::max)
 }
 
-/// What one path reports: the energy that crossed by `t*`, and the end
-/// field's largest spread across a plane x = const.
+/// What one path reports: the energy that crossed by `t*`, the end field's
+/// largest spread across a plane x = const, and the end fields of A and B.
 struct Crossed {
     energy_j: f64,
     spread_k: f64,
+    end: [Vec<f64>; 2],
 }
 
 /// The pair on the kernel: A's `right` end bonded to B's `left` end through
 /// the card's conductance. Checks the pair's energy and the ledger close.
 fn kernel_pair_crossed(cx: &Cx<'_>, cells: usize, cross_a: usize, cross_b: usize) -> Crossed {
-    let (a, mesh_a) = slab_body(cx, cells, cross_a, "right", LENGTH_M);
-    let (b, mesh_b) = slab_body(cx, cells, cross_b, "left", 0.0);
+    let (a, mesh_a) = slab_body(cx, cells, cross_a, PatchPort::Mean("right"), LENGTH_M);
+    let (b, mesh_b) = slab_body(cx, cells, cross_b, PatchPort::Mean("left"), 0.0);
     let wall_w_k = 1.0
         / contact()
             .term_for_area("slab-contact", a.patch_area_m2(0))
@@ -315,8 +324,8 @@ fn kernel_pair_crossed(cx: &Cx<'_>, cells: usize, cross_a: usize, cross_b: usize
         system.step(dt_s, cx).unwrap();
     }
     // The same bodies again, unconnected, read the end fields' energies.
-    let (probe_a, _) = slab_body(cx, cells, cross_a, "right", LENGTH_M);
-    let (probe_b, _) = slab_body(cx, cells, cross_b, "left", 0.0);
+    let (probe_a, _) = slab_body(cx, cells, cross_a, PatchPort::Mean("right"), LENGTH_M);
+    let (probe_b, _) = slab_body(cx, cells, cross_b, PatchPort::Mean("left"), 0.0);
     let (end_a, end_b) = (
         system.state::<Vec<f64>>(node_a).unwrap(),
         system.state::<Vec<f64>>(node_b).unwrap(),
@@ -333,6 +342,96 @@ fn kernel_pair_crossed(cx: &Cx<'_>, cells: usize, cross_a: usize, cross_b: usize
         energy_j: start_a_j - end_a_j,
         spread_k: cross_spread_k(mesh_a.positions(), end_a)
             .max(cross_spread_k(mesh_b.positions(), end_b)),
+        end: [end_a.clone(), end_b.clone()],
+    }
+}
+
+/// What the trace pair reports besides its crossing: the energy A's own
+/// store lost, the least entropy the contact generated in one step, and
+/// the kernel's refusal if it refused a step.
+struct TracePair {
+    crossed: Crossed,
+    lost_by_a_j: f64,
+    least_generated_j_k: f64,
+    refused: Option<String>,
+}
+
+/// The pair on the kernel, trace to trace: A's `right` end and B's `left`
+/// end are field heat ports, joined through the owner's matching contact
+/// from the same card as a `ConductanceMatrix`. The crossing is the heat the
+/// kernel booked out of A's port, step by step, as path (c) books its own.
+fn trace_pair_crossed(cx: &Cx<'_>, cells: usize, cross: usize) -> TracePair {
+    let (a, mesh_a) = slab_body(cx, cells, cross, PatchPort::Trace("right"), LENGTH_M);
+    let (b, mesh_b) = slab_body(cx, cells, cross, PatchPort::Trace("left"), 0.0);
+    let joint = a
+        .matching_contact(0, &b, 0, [LENGTH_M, 0.0, 0.0], &contact())
+        .unwrap();
+    let (points_a, points_b) = (joint.width_a, joint.width_b);
+    let wall = ConductanceMatrix::new(points_a, points_b, joint.jump, joint.weights).unwrap();
+    let (start_a, start_b) = (
+        vec![HOT_K; mesh_a.vertex_count()],
+        vec![COLD_K; mesh_b.vertex_count()],
+    );
+    let start_a_j = a.stored_energy_j(&start_a).unwrap();
+    let start_j = start_a_j + b.stored_energy_j(&start_b).unwrap();
+    let mut builder = SystemBuilder::new();
+    let node_a = builder.add_with_tangent("a", a, start_a).unwrap();
+    let node_b = builder.add_with_tangent("b", b, start_b).unwrap();
+    let wall = builder.add_with_tangent("wall", wall, ()).unwrap();
+    let (wall_a, wall_b) = (
+        builder.port(wall, "a").unwrap(),
+        builder.port(wall, "b").unwrap(),
+    );
+    builder
+        .bond(builder.port(node_a, "right").unwrap(), wall_a)
+        .unwrap();
+    builder
+        .bond(wall_b, builder.port(node_b, "left").unwrap())
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    assert!(system.guess(wall_a, &vec![HOT_K; points_a]));
+    assert!(system.guess(wall_b, &vec![COLD_K; points_b]));
+    let steps = 2 * cells * cells;
+    let dt_s = end_time_s() / steps as f64;
+    let (mut least_generated_j_k, mut refused) = (f64::INFINITY, None);
+    let mut generated_j_k = 0.0;
+    for step in 0..steps {
+        if let Err(error) = system.step(dt_s, cx) {
+            refused = Some(format!("step {step}: {error:?}"));
+            break;
+        }
+        let account = &system.ledger().nodes[2];
+        assert_eq!(account.name, "wall");
+        let total = account.entropy_generated_j_per_k.value();
+        least_generated_j_k = least_generated_j_k.min(total - generated_j_k);
+        generated_j_k = total;
+    }
+    let (probe_a, _) = slab_body(cx, cells, cross, PatchPort::Trace("right"), LENGTH_M);
+    let (probe_b, _) = slab_body(cx, cells, cross, PatchPort::Trace("left"), 0.0);
+    let (end_a, end_b) = (
+        system.state::<Vec<f64>>(node_a).unwrap(),
+        system.state::<Vec<f64>>(node_b).unwrap(),
+    );
+    let end_a_j = probe_a.stored_energy_j(end_a).unwrap();
+    let end_j = end_a_j + probe_b.stored_energy_j(end_b).unwrap();
+    assert!(
+        (end_j - start_j).abs() <= 1.0e-9 * start_j,
+        "the pair lost {} J",
+        start_j - end_j
+    );
+    assert!(system.ledger().energy_residual_j().abs() <= 1.0e-9 * start_j);
+    let account = &system.ledger().nodes[0];
+    assert_eq!(account.name, "a");
+    TracePair {
+        crossed: Crossed {
+            energy_j: -account.port_energy_in_j.value(),
+            spread_k: cross_spread_k(mesh_a.positions(), end_a)
+                .max(cross_spread_k(mesh_b.positions(), end_b)),
+            end: [end_a.clone(), end_b.clone()],
+        },
+        lost_by_a_j: start_a_j - end_a_j,
+        least_generated_j_k,
+        refused,
     }
 }
 
@@ -405,6 +504,7 @@ fn owner_contact_crossed(cx: &Cx<'_>, cells: usize, cross: usize) -> Crossed {
     Crossed {
         energy_j: crossed_j,
         spread_k: cross_spread_k(positions_a, field_a).max(cross_spread_k(positions_b, field_b)),
+        end: [field_a.to_vec(), field_b.to_vec()],
     }
 }
 
@@ -460,5 +560,108 @@ fn two_bodies_through_a_card_contact_converge_at_second_order_with_the_owner_con
             }
         }
         assert!(missed.is_empty(), "below order {CLAIMED_ORDER}: {missed:?}");
+    });
+}
+
+/// Trace to trace through the owner's contact, the pair is the owner's own
+/// contact problem on one mesh: the same unknowns under the same equations,
+/// solved in another order.
+///
+/// The claims, declared before the first run: on every rung the energy that
+/// crossed agrees with path (c)'s within [`CLAIMED_GAP_J`], every vertex's
+/// end temperature agrees with (c)'s within [`CLAIMED_GAP_K`], and the kernel
+/// refuses no step, its entropy check included. No order is claimed: the gap
+/// is the two solves' tolerances on every rung. Through the patch means,
+/// path (a), the crossing differed from (c)'s by 4.6e-2 J on the coarsest
+/// rung and 2.9e-5 J on the finest. Every rung is reported before any is
+/// asserted.
+#[test]
+fn two_bodies_trace_to_trace_through_the_card_are_the_owner_contact_on_one_mesh() {
+    with_cx(|cx| {
+        let mut missed = Vec::new();
+        for &cells in &RUNGS {
+            let pair = trace_pair_crossed(cx, cells, 2);
+            let owner = owner_contact_crossed(cx, cells, 2);
+            let gap_j = pair.crossed.energy_j - owner.energy_j;
+            let mut gap_k = 0.0_f64;
+            for (traced, owned) in pair.crossed.end.iter().zip(&owner.end) {
+                for (t, o) in traced.iter().zip(owned) {
+                    gap_k = gap_k.max((t - o).abs());
+                }
+            }
+            eprintln!(
+                "n {cells}: crossed (d) {:.15e} (c) {:.15e} J; (d) - (c) {gap_j:e} J; A's store lost {:.15e} J; largest vertex difference {gap_k:e} K; cross-plane spread (d) {:e} (c) {:e} K; least entropy the contact generated in a step {:e} J/K; refused: {:?}",
+                pair.crossed.energy_j,
+                owner.energy_j,
+                pair.lost_by_a_j,
+                pair.crossed.spread_k,
+                owner.spread_k,
+                pair.least_generated_j_k,
+                pair.refused
+            );
+            if pair.refused.is_some()
+                || !(gap_j.abs() <= CLAIMED_GAP_J)
+                || !(gap_k <= CLAIMED_GAP_K)
+            {
+                missed.push(format!(
+                    "n {cells}: {gap_j:e} J, {gap_k:e} K, {:?}",
+                    pair.refused
+                ));
+            }
+        }
+        assert!(missed.is_empty(), "path (d) against path (c): {missed:?}");
+    });
+}
+
+#[test]
+fn a_matching_contact_is_the_patch_conductance_and_other_traces_are_refused() {
+    with_cx(|cx| {
+        let shift = [LENGTH_M, 0.0, 0.0];
+        let (a, _) = slab_body(cx, 2, 2, PatchPort::Trace("right"), LENGTH_M);
+        let (b, _) = slab_body(cx, 2, 2, PatchPort::Trace("left"), 0.0);
+        let joint = a.matching_contact(0, &b, 0, shift, &contact()).unwrap();
+        assert_eq!((joint.width_a, joint.width_b), (9, 9));
+        // Every jump is one point of A against one point of B.
+        for row in joint.jump.as_chunks::<18>().0 {
+            assert_eq!(row[..9].iter().sum::<f64>().to_bits(), 1.0_f64.to_bits());
+            assert_eq!(row[9..].iter().sum::<f64>().to_bits(), (-1.0_f64).to_bits());
+            assert_eq!(row.iter().filter(|entry| entry.abs() > 0.0).count(), 2);
+        }
+        // The conductances are symmetric and sum to the patch's A / R''.
+        for row in 0..9 {
+            for column in 0..row {
+                let (lower, upper) = (
+                    joint.weights[row * 9 + column],
+                    joint.weights[column * 9 + row],
+                );
+                assert_eq!(lower.to_bits(), upper.to_bits());
+            }
+        }
+        let (total, patch) = (
+            joint.weights.iter().sum::<f64>(),
+            CROSS_M * CROSS_M / CONTACT_M2_K_W,
+        );
+        assert!(
+            (total - patch).abs() <= 64.0 * f64::EPSILON * patch,
+            "{total} W/K"
+        );
+        let refused = |other: &ConductionBody<'_>, offset_m: [f64; 3], what: &str| match a
+            .matching_contact(0, other, 0, offset_m, &contact())
+        {
+            Err(ConductionError::Config { what: why, .. }) => {
+                assert!(why.contains(what), "{why:?} does not say {what:?}");
+            }
+            other => panic!("{what}: {other:?}"),
+        };
+        let (mean, _) = slab_body(cx, 2, 2, PatchPort::Mean("left"), 0.0);
+        refused(&mean, shift, "two trace ports");
+        // B left where its own mesh has it: its trace is a slab's length away.
+        refused(&b, [0.0; 3], "no point of the second trace");
+        // A finer cross grid shares the corners only.
+        let (fine, _) = slab_body(cx, 2, 3, PatchPort::Trace("left"), 0.0);
+        refused(&fine, shift, "do not match");
+        // B's own right end coincides with A's, facing the same way.
+        let (overlapping, _) = slab_body(cx, 2, 2, PatchPort::Trace("right"), LENGTH_M);
+        refused(&overlapping, [0.0; 3], "do not face each other");
     });
 }

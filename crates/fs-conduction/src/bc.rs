@@ -497,6 +497,38 @@ impl ThermalBoundary {
         Ok(out)
     }
 
+    /// Replace uniform zero-flux rows by nodal outward-flux rows, one
+    /// mesh-length field per named region. A trace port of the body on the
+    /// composition contract hands the owner its P1 flux this way. Only a row
+    /// that carries no heat is replaced, and each at most once.
+    #[cfg(feature = "component")]
+    pub(crate) fn with_nodal_neumann_replacements(
+        mut self,
+        rows: Vec<(usize, Vec<f64>)>,
+    ) -> Result<ThermalBoundary, ConductionError> {
+        let mut seen = std::collections::BTreeSet::new();
+        for (region, flux) in rows {
+            let insulated = matches!(
+                self.conditions.get(region),
+                Some(ThermalBc::Neumann { outward_flux: ScalarField::Uniform(flux) }) if *flux == 0.0
+            );
+            if !insulated || !seen.insert(region) {
+                return Err(ConductionError::Config {
+                    parameter: "nodal neumann replacement",
+                    what: format!(
+                        "region {} is not a unique uniform zero-flux row",
+                        self.names.get(region).map_or("<unknown>", String::as_str)
+                    ),
+                });
+            }
+            let vertex_count = flux.len();
+            self.conditions[region] = ThermalBc::Neumann {
+                outward_flux: ScalarField::nodal("trace outward flux", vertex_count, flux)?,
+            };
+        }
+        Ok(self)
+    }
+
     /// Clone this partition and replace selected faces from its explicit
     /// adiabatic remainder with uniform outward-flux rows.  Radiation uses
     /// this as one frozen outer-fixed-point iterate. Existing physical rows

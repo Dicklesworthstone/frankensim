@@ -1,6 +1,7 @@
 //! G0: a heat port carries entropy `dt q / T` into its owner, with the sign
 //! of the heat `q` it carries at temperature `T`; power and stream ports
-//! carry none on the wire.
+//! carry none on the wire. A field heat port sums its points, and with one
+//! point it is the heat port.
 
 use core::num::NonZeroUsize;
 
@@ -139,4 +140,67 @@ fn a_heat_port_carries_entropy_with_the_sign_of_its_heat() {
             .to_bits(),
         0.0_f64.to_bits()
     );
+}
+
+#[test]
+fn a_field_heat_port_sums_its_points_and_with_one_point_is_the_heat_port() {
+    let id = || StableId::new("trace").expect("id");
+    let three = NonZeroUsize::new(3).expect("three");
+    let mut draw = Draw(20_261_115);
+    for role in [PortRole::EffortIn, PortRole::FlowIn] {
+        // One point is the scalar port itself, so every scalar path is unchanged.
+        let scalar = PortSpec::heat(id(), role).expect("heat port");
+        assert_eq!(
+            PortSpec::heat_field(id(), role, NonZeroUsize::MIN).expect("one point"),
+            scalar
+        );
+        let port = PortSpec::heat_field(id(), role, three).expect("field heat port");
+        assert_eq!((port.width(), port.field_metric()), (3, None));
+        let sides = |kelvin: [f64; 3], watts: [f64; 3]| {
+            if role == PortRole::EffortIn {
+                (kelvin, watts)
+            } else {
+                (watts, kelvin)
+            }
+        };
+        for case in 0..400 {
+            let kelvin = [(); 3].map(|()| draw.between(1.0, 3000.0));
+            let watts = [(); 3].map(|()| draw.between(-1.0e3, 1.0e3));
+            let dt = draw.between(1.0e-6, 1.0);
+            let (input, output) = sides(kelvin, watts);
+            // The loads are already integrated: their sum is the heat, with no metric.
+            let energy = port.energy_in_j(dt, &input, &output);
+            assert_eq!(
+                energy.to_bits(),
+                (dt * (0.0 + watts[0] + watts[1] + watts[2])).to_bits(),
+                "{role:?} case {case}"
+            );
+            // Each point brings its own load's entropy at its own temperature.
+            let entropy = port.entropy_in_j_per_k(dt, &input, &output);
+            let mut by_point = 0.0;
+            for point in 0..3 {
+                by_point += scalar.entropy_in_j_per_k(
+                    dt,
+                    &sides(kelvin, watts).0[point..=point],
+                    &sides(kelvin, watts).1[point..=point],
+                );
+            }
+            assert_eq!(
+                entropy.to_bits(),
+                by_point.to_bits(),
+                "{role:?} case {case}"
+            );
+        }
+        // One point at a temperature that is not above zero makes the whole sum NaN, and so
+        // does a vector that is not the port's width.
+        for kelvin in [0.0, -300.0, f64::NAN] {
+            let (input, output) = sides([300.0, kelvin, 400.0], [5.0, 5.0, 5.0]);
+            assert!(port.entropy_in_j_per_k(0.01, &input, &output).is_nan());
+        }
+        let (input, output) = sides([300.0; 3], [5.0; 3]);
+        assert!(port.entropy_in_j_per_k(0.01, &input[..2], &output).is_nan());
+        assert!(port.entropy_in_j_per_k(0.01, &input, &output[..2]).is_nan());
+    }
+    // A signal role is refused, as for the scalar port.
+    assert!(PortSpec::heat_field(id(), PortRole::SignalIn, three).is_err());
 }

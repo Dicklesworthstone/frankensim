@@ -12,7 +12,7 @@
 #![allow(clippy::float_cmp)]
 
 use fs_alloc::{ArenaConfig, ArenaPool};
-use fs_conduction::component::ConductionBody;
+use fs_conduction::component::{ConductionBody, PatchPort};
 use fs_conduction::fixtures::{box_grid, on_box_face};
 use fs_conduction::transient::VolumetricHeatCapacity;
 use fs_conduction::transient::backward_euler::{BackwardEuler, StepConfig};
@@ -142,7 +142,8 @@ fn try_body(
     parts: Parts,
     ports: &[&str],
 ) -> Result<ConductionBody<'static>, ConductionError> {
-    ConductionBody::new(solver(cx, parts.mesh), problem(parts), ports, config())
+    let ports: Vec<PatchPort<'_>> = ports.iter().map(|&name| PatchPort::Mean(name)).collect();
+    ConductionBody::new(solver(cx, parts.mesh), problem(parts), &ports, config())
 }
 
 fn body(cx: &Cx<'_>, parts: Parts, ports: &[&str]) -> ConductionBody<'static> {
@@ -246,6 +247,82 @@ fn the_body_conforms_and_its_tangent_is_the_derivative_of_its_step() {
             stored.abs() <= 1.0e-9 * body.stored_energy_j(&old).unwrap(),
             "{stored} J"
         );
+    });
+}
+
+/// A trace port hands the body one load per vertex of its patch. Given the
+/// consistent loads of a uniform flux, `A_f / 3` of each face's share on each
+/// of its vertices, it is the mean port's step: the claim, declared before
+/// the first run, is that the two end fields agree within 1e-9 K.
+#[test]
+fn a_trace_port_conforms_and_steps_the_body_as_the_mean_port_under_a_uniform_flux() {
+    with_cx(|cx| {
+        let parts = parts();
+        let ports = [PatchPort::Trace("left"), PatchPort::Mean("right")];
+        let traced =
+            ConductionBody::new(solver(cx, parts.mesh), problem(parts), &ports, config()).unwrap();
+        let vertices = traced.trace_vertices(0).unwrap().to_vec();
+        assert!(traced.trace_vertices(1).is_none());
+        // The left end of the 3 x 2 x 2 grid: nine vertices, in ascending order, all at x = 0.
+        assert_eq!(vertices.len(), 9);
+        assert!(vertices.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(
+            vertices
+                .iter()
+                .all(|&v| parts.mesh.positions()[v][0] == 0.0)
+        );
+        let old = initial(parts);
+        let stale = vec![1000.0; old.len()];
+        // The consistent loads of one watt spread uniformly over the left end.
+        let area_m2 = traced.patch_area_m2(0);
+        let mut uniform = [0.0; 9];
+        for face in parts.mesh.boundary() {
+            if on_box_face(face.centroid[0], 0.0) {
+                for vertex in face.vertices {
+                    let point = vertices.binary_search(&(vertex as usize)).unwrap();
+                    uniform[point] += face.area / 3.0 / area_m2;
+                }
+            }
+        }
+        assert!((uniform.iter().sum::<f64>() - 1.0).abs() <= 8.0 * f64::EPSILON);
+        let meaned = body(cx, parts, &["left", "right"]);
+        for (dt_s, left_w, right_w) in [(0.5, 12.0, -3.0), (4.0, -40.0, 25.0)] {
+            let mut inputs: Vec<f64> = uniform.iter().map(|share| share * left_w).collect();
+            inputs.push(right_w);
+            let (end, readings) = step(&traced, &old, dt_s, &inputs, cx);
+            let (expected, means) = step(&meaned, &old, dt_s, &[left_w, right_w], cx);
+            let gap_k = largest_gap(&end, &expected);
+            eprintln!("{dt_s} s, {left_w} W: trace against mean port, largest gap {gap_k:e} K");
+            assert!(gap_k <= 1.0e-9, "{dt_s} s: {gap_k} K");
+            // A trace port returns the end temperature at each of its points.
+            for (reading, &vertex) in readings.iter().zip(&vertices) {
+                assert_eq!(reading.to_bits(), end[vertex].to_bits());
+            }
+            assert!((readings[9] - means[1]).abs() <= 1.0e-9);
+            // Loads that are not a uniform flux: the kit's laws and the tangent.
+            for (point, load) in inputs[..9].iter_mut().enumerate() {
+                *load += 0.3 * left_w * (point as f64 - 4.0) / 9.0;
+            }
+            let case = Case {
+                state: &old,
+                stale: &stale,
+                dt_s,
+                inputs: &inputs,
+            };
+            let observed = check_component(&traced, &case, cx)
+                .unwrap_or_else(|failure| panic!("{dt_s} s: {failure}"));
+            let Observed::Stepped { receipt, audit, .. } = observed else {
+                panic!("{dt_s} s: the body asked for a shorter step");
+            };
+            let heat_j = dt_s * inputs.iter().sum::<f64>();
+            assert!(receipt.numerical_loss_j.abs() <= 1.0e-9 * (1.0 + heat_j.abs()));
+            assert!((audit.port_energy_in_j - heat_j).abs() <= 1.0e-12 * (1.0 + heat_j.abs()));
+            let difference_step_w =
+                inputs.iter().fold(1.0_f64, |m, q| m.max(q.abs())) * f64::EPSILON.cbrt();
+            let floor_k_w = 8.0 * f64::EPSILON * 400.0 / difference_step_w;
+            check_port_tangent(&traced, &case, 1.0e-6, floor_k_w, cx)
+                .unwrap_or_else(|failure| panic!("tangent at {dt_s} s: {failure}"));
+        }
     });
 }
 
@@ -556,7 +633,7 @@ fn the_body_refuses_what_it_cannot_carry_through_its_ports() {
         refused(parts, &[], "at least one port");
         // A solver prepared on another mesh of the same shape.
         let other = solver(cx, mesh());
-        match ConductionBody::new(other, problem(parts), &["left"], config()) {
+        match ConductionBody::new(other, problem(parts), &[PatchPort::Mean("left")], config()) {
             Err(ConductionError::Config { what, .. }) => {
                 assert!(what.contains("same mesh"), "{what}");
             }

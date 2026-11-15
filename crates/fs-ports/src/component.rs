@@ -61,7 +61,9 @@ pub enum Carrier {
     /// Heat. Effort is absolute temperature [K]; flow is heat rate [W] into
     /// the owner. Power into the owner is the flow itself, and entropy flow is
     /// flow divided by effort. This is the wire form of the thermal port kind:
-    /// owners report heat and temperature, the kernel derives entropy.
+    /// owners report heat and temperature, the kernel derives entropy. A field
+    /// heat port ([`PortSpec::heat_field`]) carries one temperature and one
+    /// integrated heat load per trace point, summed point by point.
     Heat,
     /// A one-way signal. It carries no power and no conserved quantity.
     Signal,
@@ -483,6 +485,26 @@ impl PortSpec {
         })
     }
 
+    /// A field heat port on a trace of `width` points: one temperature [K]
+    /// and one heat load [W] into the owner per point.
+    ///
+    /// The loads are already integrated against the trace's basis, so their
+    /// sum is the heat and the port's energy is `dt * sum Q_i` with no
+    /// metric. The entropy that enters is `dt * sum Q_i / T_i`, the nodal
+    /// rule. A width of one is the scalar [`Self::heat`] port.
+    ///
+    /// # Errors
+    /// [`ContractViolation::PortRole`] if `role` is a signal role.
+    pub fn heat_field(
+        id: StableId,
+        role: PortRole,
+        width: NonZeroUsize,
+    ) -> Result<Self, ContractViolation> {
+        let mut port = Self::heat(id, role)?;
+        port.width = width;
+        Ok(port)
+    }
+
     /// A stream port that carries `carried` quantities besides mass and
     /// enthalpy (see [`Carrier::Stream`]). A storage has `PortRole::FlowIn`,
     /// a transport element `PortRole::EffortIn`.
@@ -712,11 +734,15 @@ impl PortSpec {
     /// Entropy [J/K] that entered the owner through this port during a step.
     ///
     /// Only heat ports carry entropy on the wire; every other carrier returns
-    /// zero. A non-positive temperature yields NaN.
+    /// zero. A non-positive temperature yields NaN. A field heat port sums
+    /// `dt Q_i / T_i` over its points.
     #[must_use]
     pub fn entropy_in_j_per_k(&self, dt_s: f64, input: &[f64], output: &[f64]) -> f64 {
         if self.carrier != Carrier::Heat {
             return 0.0;
+        }
+        if self.width.get() > 1 {
+            return self.field_entropy_in_j_per_k(dt_s, input, output);
         }
         let (temperature, flow) = match self.role {
             PortRole::EffortIn => (input, output),
@@ -727,6 +753,28 @@ impl PortSpec {
             (Some(&t), Some(&q)) if t > 0.0 => dt_s * q / t,
             _ => f64::NAN,
         }
+    }
+
+    /// `dt sum Q_i / T_i` over a field heat port's points; NaN for a
+    /// non-positive temperature or a vector of the wrong width.
+    fn field_entropy_in_j_per_k(&self, dt_s: f64, input: &[f64], output: &[f64]) -> f64 {
+        let (temperature, flow) = match self.role {
+            PortRole::EffortIn => (input, output),
+            PortRole::FlowIn => (output, input),
+            PortRole::SignalIn | PortRole::SignalOut => return 0.0,
+        };
+        let width = self.width.get();
+        if temperature.len() != width || flow.len() != width {
+            return f64::NAN;
+        }
+        let mut sum = 0.0;
+        for (&t, &q) in temperature.iter().zip(flow) {
+            if !(t > 0.0) {
+                return f64::NAN;
+            }
+            sum += dt_s * q / t;
+        }
+        sum
     }
 }
 

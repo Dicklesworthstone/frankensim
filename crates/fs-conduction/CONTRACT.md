@@ -6223,19 +6223,44 @@ runtime regressions were not executed in this session.
 `component::ConductionBody` (feature `component`, off by default) puts one
 `BackwardEuler` owner, with its mesh, conductivity and boundary partition,
 behind the fs-ports Component contract. Each boundary region named as a port is
-one scalar heat port (`PortSpec::heat`, `FlowIn`). Its input is the heat rate
-`Q` [W] into the body, applied on the region's faces as the uniform outward
-flux `-Q/A` through the owner's own Neumann rows. Its output is the region's
-area mean of the END temperature of the step, the conjugate of a uniform flux
-(`∫ T q dA = Q T̄`) and backward Euler's own reading of it. The state is the
-nodal temperature field; the stored energy is `1ᵀ C T` with the owner's
-prepared capacitance.
+one heat port (`FlowIn`), of the kind its `PatchPort` states.
+
+`PatchPort::Mean(region)` is a scalar heat port (`PortSpec::heat`). Its input
+is the heat rate `Q` [W] into the body, applied on the region's faces as the
+uniform outward flux `-Q/A` through the owner's own Neumann rows. Its output is
+the region's area mean of the END temperature of the step, the conjugate of a
+uniform flux (`∫ T q dA = Q T̄`) and backward Euler's own reading of it.
+
+`PatchPort::Trace(region)` is a field heat port (`PortSpec::heat_field`) over
+the region's vertices in ascending mesh order (`trace_vertices`). Its inputs
+are the heat loads `Q_i` [W] into the body at those vertices, each already
+integrated against its vertex's P1 function; its outputs are their END
+temperatures. The loads reach the owner as the nodal outward flux `q` with
+`M q = -Q`, `M` the patch's consistent face mass `A_f (1 + δ_ab) / 12`
+(factored once by Cholesky), so the owner's own Neumann rows put `Q_i` back on
+vertex `i`. What that solve rounds away is in the receipt's numerical loss.
+
+`ConductionBody::matching_contact(port, other, other_port, offset_m,
+resistance)` states the owner's matching-P1 contact between two trace ports
+as a `TraceContact`: the jumps `D = [I, -P]` and the conductances `W = M / R''`
+that fs-system's `ConductanceMatrix` couples two field heat ports with. `P`
+pairs each point of side A with the point of side B at the same coordinates,
+bit for bit, after `offset_m` is added to B's. `W` takes its entries from
+`interface::matching::face_conductance`, the function `ThermalInterfaces::
+assemble_into` now takes its own from, on A's face areas. It refuses a mean
+port, traces that do not share every point and every face, and matched faces
+whose normals do not oppose (the owner's own band).
+
+The state is the nodal temperature field; the stored energy is `1ᵀ C T` with
+the owner's prepared capacitance.
 
 A step is the owner's unchanged `advance`. The receipt books the owner's
 `stored_energy_change_j`, and the heat it did not store (what the owner's
 checked closure allows) as numerical loss. The tangent is the owner's
 `linearize_step` with no Robin port: `apply` on the patches' nodal loads for
-the JVP, `pullback` with the patch-mean weights for the VJP. The class is
+the JVP, `pullback` with the patch-mean weights for the VJP; a trace port's
+loads and readings are the nodal loads and the nodal values themselves. The
+class is
 `Smooth`: the port map is affine with slopes that depend on the step alone, but
 only to the Krylov tolerance.
 
@@ -6255,7 +6280,13 @@ resistance claim resolved by `InterfaceResistance::from_card`, its receipt
 replayed against the card, and turned into one series term over the patch
 area, whose origin carries the card identity and that receipt. The step is
 `Q = G (T_L - a) / (1 + G (dt / (2 C_L) + r))`. The pair closes its energy and
-both bodies reach the temperature that shares it.
+both bodies reach the temperature that shares it. A body with a trace port on
+one end and a mean port on the other passes the kit and the tangent check at
+two operating points under loads that are not a uniform flux; given the
+consistent loads of a uniform flux, `A_f / 3` of each face's share on each of
+its vertices, it steps as the mean port does (claimed within 1e-9 K; the two
+end fields are equal to the bit at both points), and it returns the end
+temperature at each of its nine vertices.
 
 `tests/conduction_pair.rs` (`--features component`) joins two such bodies:
 equal 30 mm slabs at 400 K and 300 K with insulated outer ends, through a
@@ -6271,9 +6302,30 @@ matching-P1 contact (`ThermalInterfaces` on one mesh with coincident traces) at
 the same steps. Each pair run closes its energy and ledger to 1e-9 of the
 stored energy.
 
+A fourth path joins the two bodies trace to trace, on matching 2 x 2 cross
+grids, through `matching_contact` from the same card as a `ConductanceMatrix`.
+That is the owner's contact problem on one mesh, the same unknowns under the
+same equations, so no order is claimed. The claims, declared in the test: on
+every rung the energy that crossed (the heat the kernel booked out of A's
+port) agrees with the owner's within 1e-9 J, every vertex's end temperature
+within 1e-9 K, and the kernel refuses no step. Measured on the four rungs
+(Mac, debug): 8.0e-13, 1.1e-13, 2.3e-13 and 1.7e-13 J, and 1.1e-12, 2.3e-13,
+1.1e-13 and 4.5e-13 K; through the patch means the crossing differed from the
+owner's by 4.6e-2 J on the coarsest rung and 2.9e-5 J on the finest. The least
+entropy the contact generated in one step was 1.2e-2, 2.6e-3, 6.6e-4 and
+1.6e-4 J/K: side A is hotter than side B at every point throughout, so no term
+of the nodal sum can be negative. The matching contact's jumps are one point
+of A against one of B, its conductances are symmetric to the bit and sum to
+the patch's `A / R''`, and it refuses a mean port, a misplaced trace, a finer
+cross grid and a trace that faces the same way.
+
 Not covered: the entropy generated inside the body is reported as zero, a
-lower bound. There is no snapshot codec. Nonuniform patch flux, contact,
-radiation, nonlinear and adaptive owners are refused or not wrapped. Two bodies
-meet through scalar patch means: a pointwise P1 trace, a mapped field transfer
-between non-matching traces and its adjoint test need a field heat carrier
-(bead .5.2).
+lower bound. There is no snapshot codec. Contact inside one body, radiation,
+nonlinear and adaptive owners are refused or not wrapped. Two traces meet only
+where they match point for point and face for face: the mapped transfer
+between traces that do not match, and its adjoint test, are not built (bead
+.5.2). A field heat port names no
+trace, so nothing checks that a `TraceContact` is bonded to the two ports it
+was built for. The matching contact takes one resistance for the whole patch,
+with no per-face map, and no test builds traces that share their points but
+not their faces.

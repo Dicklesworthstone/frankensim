@@ -40,7 +40,8 @@
 //! returns its temperature and receives the heat rate into it; an element
 //! that sits at a temperature (damper, conductance, heater) receives the
 //! temperature and returns the heat rate into itself, which is negative when
-//! heat leaves it.
+//! heat leaves it. A [`ConductanceMatrix`] does the same at every point of
+//! two field heat ports, the traces of two bodies on an interface.
 //!
 //! Stream ports carry material. A [`GasVolume`] is a storage: it returns
 //! what it holds is like (pressure, specific enthalpy, the mass fraction of
@@ -75,6 +76,8 @@ use crate::ledger::Sum;
 
 mod node;
 pub use node::HeatNode;
+mod conductance_matrix;
+pub use conductance_matrix::ConductanceMatrix;
 mod controlled_source;
 pub use controlled_source::ControlledSource;
 mod dirac;

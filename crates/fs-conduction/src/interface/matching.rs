@@ -1649,12 +1649,7 @@ impl ThermalInterfaces {
                     for b in 0..3 {
                         let vb = face.side_a_vertices[b];
                         let wb = face.side_b_vertices[b];
-                        let mass = if a == b {
-                            face.area_m2 / 6.0
-                        } else {
-                            face.area_m2 / 12.0
-                        };
-                        let value = conductance_density * mass;
+                        let value = face_conductance(conductance_density, face.area_m2, a, b);
                         coo.push(va, vb, value);
                         coo.push(wa, wb, value);
                         coo.push(va, wb, -value);
@@ -1666,6 +1661,22 @@ impl ThermalInterfaces {
         }
         Ok(())
     }
+}
+
+/// One entry of a contact face's conductance block, W/K: the consistent P1
+/// face mass `A (1 + δ_ab) / 12` between the face's local vertices `a` and
+/// `b`, times the conductance density `1 / R''`.
+///
+/// [`ThermalInterfaces::assemble_into`] takes its entries from here, and so
+/// does the contact between the traces of two bodies on the composition
+/// contract, so the two cannot differ.
+pub(crate) fn face_conductance(conductance_density: f64, area_m2: f64, a: usize, b: usize) -> f64 {
+    let mass = if a == b {
+        area_m2 / 6.0
+    } else {
+        area_m2 / 12.0
+    };
+    conductance_density * mass
 }
 
 /// Integrated heat transfer across one named interface.

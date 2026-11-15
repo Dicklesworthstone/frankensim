@@ -15,7 +15,7 @@
 //! as long as the process that runs the scene.
 
 use fs_alloc::{ArenaConfig, ArenaPool};
-use fs_conduction::component::ConductionBody;
+use fs_conduction::component::{ConductionBody, PatchPort};
 use fs_conduction::fixtures::{box_grid, on_box_face};
 use fs_conduction::transient::VolumetricHeatCapacity;
 use fs_conduction::transient::backward_euler::{BackwardEuler, StepConfig};
@@ -245,8 +245,12 @@ pub(super) fn body(
         element_materials: None,
         source: Box::leak(Box::new(ScalarField::Uniform(0.0))),
     };
-    let names: Vec<&str> = ports.iter().map(|&(port, _, _)| port).collect();
-    let component = ConductionBody::new(solver, problem, &names, config)
+    // Every face of a scene's box is a mean port: one heat rate in, its area-mean temperature out.
+    let patches: Vec<PatchPort<'_>> = ports
+        .iter()
+        .map(|&(port, _, _)| PatchPort::Mean(port))
+        .collect();
+    let component = ConductionBody::new(solver, problem, &patches, config)
         .map_err(|error| format!("{what}: {error}"))?;
     let (node, specs) = add(
         builder,
