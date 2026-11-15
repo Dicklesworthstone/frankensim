@@ -14,6 +14,7 @@ mod materials;
 mod modal;
 mod phs;
 mod snapshot;
+mod timeline;
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
@@ -270,6 +271,35 @@ Elements (ports in brackets; SI units in every field name):
                  the bodies' temperatures put the node; no fraction is
                  given. temperature_k is not a state: with a heater on
                  source it is where the solve for the node starts.)
+  thermal_timeline laws, cells, links = [], events = [], ports = [],
+                 environment = false, publish = [], max_step_s,
+                 energy_tolerance_j = 1e-9
+                         [cell<id> per port, environment, temperature<id>]
+                 (enthalpy cells stepped by the fs-thermal timeline owner's
+                 explicit rule. laws names 1 to 64 charts, each {phase,
+                 enthalpy_curve} as for enthalpy_body or {material: \"name\"}.
+                 A cell is {id, law, mass_kg, specific_enthalpy_j_kg,
+                 volume_m3, surface_area_m2, start_m, end_m, boundary}; a
+                 boundary is {ambient_k, htc_w_m2_k = 0, source_w = 0,
+                 reservoir = {area_m2, conductance_w_k, temperature_k}},
+                 and a cell without one is insulated. A link is {a, b,
+                 conductance_w_k, area_m2, id = its index}, made at the
+                 start; area_m2 > 0 is the surface it covers on each cell,
+                 which no film then reaches. Events are {time_s, contact: link with its id},
+                 {time_s, separation: link id} or {time_s, boundary: {cell,
+                 ...}}, in time order; every cell is born at the start.
+                 ports lists the cells with a heat port cell<id>: it takes
+                 the heat rate into the cell and returns the cell's mean
+                 temperature over the step. environment, required when a
+                 boundary exchanges heat, returns the mean rate heat entered
+                 through the boundaries; prescribe its temperature, which
+                 the owner does not read. publish lists the cells with a
+                 signal output temperature<id>: the temperature at the start
+                 of the step. Steps are cut to max_step_s, to the owner's
+                 stability bound and to event times. Reports each cell's
+                 temperature_k and specific_enthalpy_j_kg, and with an
+                 environment port environment_heat_w. Fixed step_s only; no
+                 checkpoint codec.)
   heater         power_w (waveform, never negative)                   [heat]
 Gas in volumes joined by restrictions (a perfect gas with constant heat
 capacities; all joined volumes must hold the same gas):
@@ -1110,6 +1140,9 @@ enum Kind {
     /// A thermal node of no capacity joined to bodies by conductances, with
     /// a heat source at the node: the plane a heat is generated on.
     HeatNode,
+    /// Enthalpy cells, their links and boundaries, stepped by the fs-thermal
+    /// timeline owner.
+    ThermalTimeline,
     /// A well-mixed volume of perfect gas: the node streams meet at.
     GasVolume,
     /// A linear flow restriction between two gas volumes.
@@ -1118,7 +1151,7 @@ enum Kind {
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 40] = [
+    const TABLE: [(&'static str, Self); 41] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
@@ -1159,6 +1192,7 @@ impl Kind {
         ("conductance", Self::Conductance),
         ("layer_conductor", Self::LayerConductor),
         ("heat_node", Self::HeatNode),
+        ("thermal_timeline", Self::ThermalTimeline),
         ("gas_volume", Self::GasVolume),
         ("restriction", Self::Restriction),
         ("heater", Self::Heater),
@@ -1187,6 +1221,10 @@ struct Element {
     /// Initial temperature of a heat capacity, used as the starting value of
     /// the temperature inputs joined to it.
     temperature_k: Option<f64>,
+    /// The same for single ports of an element whose ports start at
+    /// different temperatures (a thermal timeline's cells); a port named here
+    /// takes this value in place of `temperature_k`.
+    port_temperatures_k: Vec<(String, f64)>,
     /// A node capacitor's capacitance [F] or an accumulator's [m³/Pa]: its
     /// endpoint charge or volume over this is its endpoint voltage or pressure.
     node_capacity: Option<f64>,
@@ -1485,6 +1523,20 @@ fn enthalpy_body(
         ],
         what,
     )?;
+    let curve = authored_enthalpy_curve(definition, what)?;
+    let initial = curve
+        .state_at_specific_enthalpy(number(definition, "specific_enthalpy_j_kg", what)?)
+        .map_err(|error| format!("{what}.specific_enthalpy_j_kg: {error}"))?;
+    let body = UniformEnthalpyBody::new(curve, positive(definition, "mass_kg", what)?)
+        .map_err(|error| format!("{what}: {error}"))?;
+    Ok((body, initial))
+}
+
+/// An authored sensible and latent chart: `phase` and `enthalpy_curve`.
+fn authored_enthalpy_curve(
+    definition: &J,
+    what: &str,
+) -> Result<EquilibriumEnthalpyPhaseCurve, String> {
     let phase = definition
         .str_field("phase")
         .ok_or_else(|| format!("{what}.phase: expected solid, liquid or solid-liquid"))?;
@@ -1533,7 +1585,7 @@ fn enthalpy_body(
     }
     let identity =
         fs_blake3::hash_domain("frankensim.system.authored_enthalpy_curve.v0", &authored);
-    let curve = match phase {
+    match phase {
         "solid" => EquilibriumEnthalpyPhaseCurve::try_single_phase(
             identity,
             SolidLiquidPhase::Solid,
@@ -1546,13 +1598,7 @@ fn enthalpy_body(
         ),
         _ => EquilibriumEnthalpyPhaseCurve::try_new(identity, knots),
     }
-    .map_err(|error| format!("{what}.enthalpy_curve: {error}"))?;
-    let initial = curve
-        .state_at_specific_enthalpy(number(definition, "specific_enthalpy_j_kg", what)?)
-        .map_err(|error| format!("{what}.specific_enthalpy_j_kg: {error}"))?;
-    let body = UniformEnthalpyBody::new(curve, positive(definition, "mass_kg", what)?)
-        .map_err(|error| format!("{what}: {error}"))?;
-    Ok((body, initial))
+    .map_err(|error| format!("{what}.enthalpy_curve: {error}"))
 }
 
 fn conductivity_curve(definition: &J, key: &str, what: &str) -> Result<ConductivityCurve, String> {
@@ -2424,6 +2470,7 @@ fn element(
     let kind = Kind::parse(kind_name).ok_or_else(|| format!("{what}: unknown kind {kind_name:?}"))?;
     let invalid = |e: fs_system::elements::ElementError| Refusal::Input(format!("{what}: {e}"));
     let mut temperature_k = None;
+    let mut port_temperatures_k = Vec::new();
     let mut node_capacity = None;
     let mut charge_voltage_curve = None;
     let mut flux_current_curve = None;
@@ -2627,6 +2674,12 @@ fn element(
             }
             add(builder, name, HeatNode::new(&conductances).map_err(invalid)?, ())?
         }
+        Kind::ThermalTimeline => {
+            let parts = timeline::timeline(builder, name, definition, materials, &what)?;
+            port_temperatures_k = parts.port_temperatures_k;
+            material_sources = parts.material_sources;
+            (parts.node, parts.ports)
+        }
         Kind::GasVolume => {
             let (volume, contents) = gas_volume(definition, &what)?;
             temperature_k = Some(volume.temperature_k(&contents));
@@ -2649,6 +2702,7 @@ fn element(
         node,
         ports,
         temperature_k,
+        port_temperatures_k,
         node_capacity,
         charge_voltage_curve,
         flux_current_curve,
@@ -2804,6 +2858,8 @@ struct Resolved {
     role: PortRole,
     /// Coefficients the port carries each way.
     width: usize,
+    /// The temperature the port starts at, if its element states one.
+    temperature_k: Option<f64>,
 }
 
 fn resolve(
@@ -2834,6 +2890,12 @@ fn resolve(
                 elements[element].kind.name()
             )
         })?;
+    let temperature_k = elements[element]
+        .port_temperatures_k
+        .iter()
+        .find(|(id, _)| id == port)
+        .map(|&(_, kelvin)| kelvin)
+        .or(elements[element].temperature_k);
     let port = builder
         .port(elements[element].node, port)
         .map_err(|e| Refusal::Admission(e.to_string()))?;
@@ -2843,6 +2905,7 @@ fn resolve(
         carrier: spec.carrier(),
         role: spec.role(),
         width: spec.width(),
+        temperature_k,
     })
 }
 
@@ -2873,7 +2936,6 @@ type Guesses = Vec<(PortRef, f64)>;
 
 fn join(
     builder: &mut SystemBuilder,
-    elements: &[Element],
     ports: &[(Resolved, Option<f64>)],
     guesses: &mut Guesses,
     common_effort: bool,
@@ -2953,9 +3015,7 @@ fn join(
         builder.common_effort(ports[setter].port, &members)
     };
     result.map_err(|e| Refusal::Admission(format!("{what}: {e}")))?;
-    if let (Carrier::Heat, Some(kelvin)) =
-        (ports[setter].carrier, elements[ports[setter].element].temperature_k)
-    {
+    if let (Carrier::Heat, Some(kelvin)) = (ports[setter].carrier, ports[setter].temperature_k) {
         guesses.extend(members.iter().map(|&member| (member, kelvin)));
     }
     Ok(())
@@ -3020,7 +3080,7 @@ fn route(
             };
             let fraction = fraction.ok_or_else(|| format!("{what}: to is an array of [port, fraction]"))?;
             let sink = resolve(builder, elements, &port)?;
-            if let Some(kelvin) = elements[sink.element].temperature_k {
+            if let Some(kelvin) = sink.temperature_k {
                 weights.push((fraction, kelvin));
             }
             sinks.push((sink.port, fraction));
@@ -3097,7 +3157,7 @@ fn signal(
             .map_err(|e| Refusal::Admission(format!("{what}: {e}")))?;
         // The kernel solves a signal with the rest of its block and starts
         // from the publisher's temperature.
-        if let Some(kelvin) = elements[source.element].temperature_k {
+        if let Some(kelvin) = source.temperature_k {
             guesses.push((target.port, kelvin));
         }
     }
@@ -3330,7 +3390,11 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
                 }
                 Vec::new()
             }
-            Kind::GasVolume | Kind::Slider | Kind::FrictionInterface | Kind::ModalStructure => {
+            Kind::GasVolume
+            | Kind::Slider
+            | Kind::FrictionInterface
+            | Kind::ModalStructure
+            | Kind::ThermalTimeline => {
                 return Err(format!(
                     "adaptive: {} is a {}, whose state has no error account here; \
                      run it with a fixed step_s",
@@ -3445,7 +3509,7 @@ fn load_text(text: &str, source_path: &Path) -> Result<Device, Refusal> {
                     Ok((resolve(&builder, &elements, &text)?, ratio))
                 })
                 .collect::<Result<Vec<_>, Refusal>>()?;
-            join(&mut builder, &elements, &ports, &mut guesses, common_effort, &what)?;
+            join(&mut builder, &ports, &mut guesses, common_effort, &what)?;
         } else if connection.get("transformer").is_some() {
             transformer(&mut builder, &elements, connection, &what)?;
         } else if connection.get("power_map").is_some() {
@@ -3560,6 +3624,23 @@ impl Device {
                 "{base}; enthalpy bodies use authored bounded sensible and latent storage \
                  with entropy-conjugate heat ports at fixed mass and negligible pressure-volume \
                  work; no material-pack provenance, phase kinetics or mechanical expansion"
+            ));
+        }
+        if self
+            .elements
+            .iter()
+            .any(|element| element.kind == Kind::ThermalTimeline)
+        {
+            let base = description
+                .replace(", phase change", "")
+                .replace(" or phase change", "");
+            description = std::borrow::Cow::Owned(format!(
+                "{base}; thermal timelines are stepped by the fs-thermal owner's explicit rule \
+                 under its own stability bound, through authored link conductances, films, \
+                 reservoirs and sources, on charts that confer no material-pack provenance unless \
+                 a declared source supplies them; the entropy generated inside a timeline is \
+                 reported as zero, so the entropy totals are a lower bound; every cell is born at \
+                 the start; no implicit conduction, radiation, contact geometry or expansion"
             ));
         }
         if self
@@ -3744,6 +3825,15 @@ impl Device {
         }
         if element.kind == Kind::PortHamiltonian {
             return self.phs_values(element);
+        }
+        if element.kind == Kind::ThermalTimeline {
+            let system = &self.system;
+            let environment = match system.port(element.node, "environment") {
+                Some(port) if system.steps() > 0 => Some(system.last_output(port)[0]),
+                Some(_) => Some(f64::NAN),
+                None => None,
+            };
+            return timeline::values(system.state::<timeline::State>(element.node), environment);
         }
         self.lumped_values(element)
             .into_iter()
@@ -4019,7 +4109,8 @@ impl Device {
             | Kind::GasVolume
             | Kind::ResistanceMatrix
             | Kind::PortHamiltonian
-            | Kind::ModalStructure => Vec::new(),
+            | Kind::ModalStructure
+            | Kind::ThermalTimeline => Vec::new(),
         }
     }
 

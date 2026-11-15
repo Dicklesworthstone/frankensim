@@ -63,6 +63,7 @@ save/resume commands work with `self_heating_damper.json` and
 | `rack_and_pinion.json` | one pinion inertia carrying a motor torque and a bearing directly, and a rack's spring, friction and load through the pinion radius: three members of one join, each behind its own ratio | the midpoint rule for the pinion's one equation with the reflected stiffness and friction; motor work, the load's received work and the heat |
 | `pneumatic_cylinder.json` | a 2 l tank of air at 6 bar feeds a cylinder through a valve; the piston pushes a spring and the outside pressure out by 104 mm; the tank cools to 281 K as it empties, the chamber warms to 325 K as it fills and gives heat to the barrel, which also takes the seal's friction | an independent RK4 integration of the cylinder's seven equations (4.9e-9 at 3 s, second order in mid-stroke), conservation of the gas, and the force balance at rest |
 | `damped_pair.json` | two rigid bodies in three dimensions closing at 2 m/s on a viscous connector, stepped by the fs-mbd network owner (`rigid_network`); a quarter of the connector's heat warms a shell, half an oil bath, the rest goes to the air | the closed form: each momentum decays as `exp(-0.7 t)`, the heat is `2 (1 - exp(-1.4 t))` J, split 25 / 50 / 25 |
+| `damped_pair_lining.json` | the damped pair with all of its connector heat routed into the first of three steel cells of 5 J/K (`thermal_timeline`, the fs-thermal enthalpy timeline), joined in a row by 1 W/K: the heat enters the first cell and spreads along the lining | the closed form: the lining stores the pair's heat `2 (1 - exp(-1.4 t))` J to 1e-9 J, the cells warmest first |
 | `viscoelastic_mount.json` | two rigid bodies at rest on a mount with viscous damping and one Maxwell branch stretched by 0.5 m (`viscoelastic_network`, the fs-mbd relaxation owner): the stored 0.21 J sets the bodies moving and heats the casing | the pair's own two equations integrated independently: relative speed, branch energy and heat |
 | `self_heating_damper.json` | the damped pair with all of its heat in 1 J/K of damper fluid, whose temperature thins the damper by an Arrhenius shift: the damping falls to 0.81 of its value as the fluid warms by 0.93 K | the exact recursion of the scheme (damping held over each step at the temperature the step began with) to 1e-11, and first-order convergence to the coupled differential equations |
 | `quarter_car.json` | a car body and wheel on a suspension spring and shock absorber, a tyre spring driven over a 30 mm bump; 70 % of the shock's heat warms it, the rest goes to the air | the ledger: road work = mechanical energy + heat, and the 70/30 split |
@@ -149,6 +150,18 @@ geometry. The report adds each branch's stored energy,
 and couple it holds on the connector's second attachment, three waveforms
 each, in the first body's axes or in world axes, and the work it does is
 that boundary's account in the ledger.
+
+`damped_pair_lining.json` gives the pair's heat to a second physics owner:
+a `thermal_timeline` lowers to `fs_thermal::component::ThermalTimeline`,
+the enthalpy timeline of fs-thermal, whose cells, links and boundaries are
+stepped by that owner's explicit rule. Each cell named in `ports` has a heat
+port `cell<id>`, joined or routed to like a heat capacity's `heat`. A
+boundary that exchanges heat (a film, a reservoir or a source) needs the
+port `environment`, whose temperature is prescribed and not read; its
+ledger row is the heat that crossed the boundaries. `events` make and break
+links and replace boundaries at later times; every cell is born at the
+start. Fixed `step_s` only; the kernel also cuts steps to the owner's
+stability bound and to event times. No checkpoint codec.
 
 ## Heat generated between bodies
 

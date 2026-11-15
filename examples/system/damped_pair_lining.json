@@ -1,0 +1,49 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 4.0,
+  "step_s": 0.125,
+  "sample_every_s": 0.5,
+  "elements": {
+    "pair": {
+      "kind": "rigid_network",
+      "bodies": [
+        {"mass_kg": 2.0, "principal_inertia_kg_m2": [2.0, 3.0, 4.0],
+         "position_m": [0.0, 0.0, 0.0], "velocity_m_s": [1.0, 0.0, 0.0]},
+        {"mass_kg": 2.0, "principal_inertia_kg_m2": [2.0, 3.0, 4.0],
+         "position_m": [1.0, 0.0, 0.0], "velocity_m_s": [-1.0, 0.0, 0.0]}
+      ],
+      "connectors": [
+        {"bodies": [0, 1], "damping_n_s_m": [0.7, 0.0, 0.0]}
+      ]
+    },
+    "lining": {
+      "kind": "thermal_timeline",
+      "max_step_s": 0.125,
+      "laws": {
+        "steel": {"phase": "solid",
+                  "enthalpy_curve": [[0.0, 250.0, 0.0, 7850.0], [100000.0, 450.0, 0.0, 7850.0]]}
+      },
+      "cells": [
+        {"id": 0, "law": "steel", "mass_kg": 0.01, "specific_enthalpy_j_kg": 25000.0,
+         "volume_m3": 1.2739e-6, "surface_area_m2": 4.0e-4,
+         "start_m": [0.0, 0.0, 0.0], "end_m": [0.01, 0.0, 0.0]},
+        {"id": 1, "law": "steel", "mass_kg": 0.01, "specific_enthalpy_j_kg": 25000.0,
+         "volume_m3": 1.2739e-6, "surface_area_m2": 4.0e-4,
+         "start_m": [0.01, 0.0, 0.0], "end_m": [0.02, 0.0, 0.0]},
+        {"id": 2, "law": "steel", "mass_kg": 0.01, "specific_enthalpy_j_kg": 25000.0,
+         "volume_m3": 1.2739e-6, "surface_area_m2": 4.0e-4,
+         "start_m": [0.02, 0.0, 0.0], "end_m": [0.03, 0.0, 0.0]}
+      ],
+      "links": [
+        {"a": 0, "b": 1, "conductance_w_k": 1.0, "area_m2": 1.0e-4},
+        {"a": 1, "b": 2, "conductance_w_k": 1.0, "area_m2": 1.0e-4}
+      ],
+      "ports": [0]
+    }
+  },
+  "connections": [
+    {"prescribe": "pair.force0", "force_n": [0, 0, 0]},
+    {"prescribe": "pair.force1", "force_n": [0, 0, 0]},
+    {"route": "pair.heat0", "to": [["lining.cell0", 1.0]]}
+  ]
+}

@@ -10,6 +10,8 @@ use fs_system::elements::Waveform;
 mod checkpoints;
 #[path = "system_command/adaptive_networks.rs"]
 mod adaptive_networks;
+#[path = "system_command/timeline.rs"]
+mod timeline;
 
 fn example(name: &str) -> String {
     format!(

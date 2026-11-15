@@ -1216,6 +1216,7 @@ dependencies = [
  "fs-session",
  "fs-solver",
  "fs-system",
+ "fs-thermal",
  "fs-topols",
  "fs-topopt",
  "fs-tribo",

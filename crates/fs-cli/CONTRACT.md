@@ -946,6 +946,46 @@ claim: modes, damping and weights are authored, not
 solved from geometry or resolved from material cards; the structure is
 linear (no quartic term) and its observer transfers are not used.
 
+`thermal_timeline` lowers to `fs_thermal::component::ThermalTimeline` over
+an `fs_thermal::enthalpy::DepositionSimulation`, stepped by the owner's
+explicit rule; nothing in fs-cli conducts, stores or integrates heat. The
+scene names `laws` (1 to 64 charts, each an authored `{phase,
+enthalpy_curve}` as for `enthalpy_body` or a declared source
+`{material}`), `cells` born at the start (`id`, `law`, `mass_kg`,
+`specific_enthalpy_j_kg`, `volume_m3`, `surface_area_m2`, centreline
+`start_m` and `end_m`, and an optional `boundary` of ambient film,
+reservoir and source; a cell without one is insulated), `links` made at the
+start (`a`, `b`, `conductance_w_k` and a positive `area_m2`, the surface
+the link covers on each cell), and later `events`: a contact with its id, a
+separation, or a cell's boundary replaced. `ports` gives a cell a heat port
+`cell<id>`, which takes the heat rate into the cell and returns its mean
+temperature over the step; `environment` carries the heat of every
+boundary and is required when one exchanges heat (the owner refuses the
+start otherwise); `publish` adds the signal output `temperature<id>`, the
+start-of-step temperature. `max_step_s` bounds the owner's step, and the
+kernel's steps are also cut to the owner's stability bound and to event
+times; `energy_tolerance_j` (default 1e-9 J) is the owner's conservation
+gate on each step. The kernel keeps `'static` states and the timeline
+borrows its laws, so the laws are leaked for the life of the process.
+Reports: each cell's `temperature_k` and `specific_enthalpy_j_kg`, and with
+an environment port `environment_heat_w`. Adaptive stepping refuses it
+(exit 3) and `--checkpoint` refuses it (no state codec, exit 4, no file).
+Tests in `tests/system_command/timeline.rs`: two cells joined inside the
+timeline with a 50 W heater on one port, against the owner's explicit
+recursion to 1e-9 K and the continuous solution to 0.01 K, every heater
+joule stored; one cell cooling through a film, against the recursion and its
+exponential, with the boundary heat on the prescribed environment port and
+the same cell refused without that port; a contact made at 2 s and broken
+at 6 s and a film switched on at 8 s, against the recursion at every
+sample; the fs-mbd damped pair (`examples/system/damped_pair_lining.json`)
+routing its connector heat into a three-cell steel lining, whose stored
+change is the pair's closed-form heat `2 (1 - exp(-1.4 t))` J to 1e-9 J;
+nine input refusals and the checkpoint refusal. No claim: authored charts
+confer no material-pack provenance; the entropy generated inside a timeline
+is reported as zero, so the scene's entropy totals are a lower bound; every
+cell is born at the start; the owner's implicit conduction graphs, radiation,
+contact geometry and expansion are not offered.
+
 `frankensim [--json] system <scene.json>` reads a `frankensim.system.v0` scene
 (at most 1 MiB, 2,000 elements, 1e7 planned steps and twice that many
 kernel steps if the kernel shortens them, 1e5 samples; unknown fields
@@ -1494,7 +1534,8 @@ monolithic midpoint rule through the binary, the heated body against its discret
 closed form, the quarter car's road work against motion plus heat and its
 70/30 heat split, library and binary byte-identical, eight refusals). No
 claim beyond the kernel's: lumped elements with constant parameters or authored
-nonlinear electrical storage curves, authored linear modal structures and
+nonlinear electrical storage curves, authored linear modal structures,
+fs-thermal enthalpy cells stepped by their owner's explicit rule and
 dry friction with authored coefficients or the one cited rosin fit;
 no material-card resolution, geometric contact, impact or phase change;
 fixed mode has no step-size error control, while
