@@ -1,0 +1,38 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 21.6,
+  "step_s": 0.675,
+  "elements": {
+    "a": {
+      "kind": "conduction_body",
+      "box_m": [0.03, 0.02, 0.02],
+      "cells": [4, 2, 2],
+      "conductivity_w_m_k": 15.0,
+      "volumetric_heat_capacity_j_m3_k": 3600000.0,
+      "temperature_k": 400.0,
+      "traces": ["x_max"],
+      "solve": {"energy_tolerance_j": 1e-8, "tolerance": 1e-13, "max_iterations": 4000, "restart": 20}
+    },
+    "b": {
+      "kind": "conduction_body",
+      "box_m": [0.03, 0.02, 0.02],
+      "cells": [4, 2, 2],
+      "conductivity_w_m_k": 15.0,
+      "volumetric_heat_capacity_j_m3_k": 3600000.0,
+      "temperature_k": 300.0,
+      "traces": ["x_min"],
+      "solve": {"energy_tolerance_j": 1e-8, "tolerance": 1e-13, "max_iterations": 4000, "restart": 20}
+    },
+    "wall": {
+      "kind": "trace_contact",
+      "between": ["a.x_max", "b.x_min"],
+      "offset_m": [0.03, 0.0, 0.0],
+      "resistance_m2_k_w": 0.0008,
+      "source": "declared for this example, not measured: the 0.5 W/K wall of two_slabs.json over its 20 x 20 mm face"
+    }
+  },
+  "connections": [
+    {"join": ["a.x_max", "wall.a"]},
+    {"join": ["wall.b", "b.x_min"]}
+  ]
+}

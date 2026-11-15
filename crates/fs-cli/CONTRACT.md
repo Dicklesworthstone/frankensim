@@ -1119,7 +1119,83 @@ Tests in `tests/system_command/conduction.rs`:
 No claim: the entropy generated inside a body is reported as zero, so the
 scene's entropy totals are a lower bound; one material, no internal source,
 no temperature-dependent conductivity, no mesh but the box grid, a uniform
-flux over each whole face, and no radiation or contact trace.
+flux over each whole face under `ports`, and no radiation.
+
+A `conduction_body` may also name faces under `traces`. A trace is the
+owner's `PatchPort::Trace`: a field heat port with one integrated heat load
+in and one end temperature out for every vertex of the face. A face is
+under `ports` or under `traces`, never both, and a body needs at least one
+of either. Reports expose each trace's `<face>.min_temperature_k` and
+`<face>.max_temperature_k`.
+
+`trace_contact` joins two traces of two conduction bodies. It lowers to
+`ConductionBody::matching_contact`, or to `mapped_contact` when the scene
+gives `mapped`, and then to `fs_system::elements::ConductanceMatrix`; the
+lowering computes no heat. The scene authors `between` = [`body.face`,
+`body.face`], two traces of two different bodies; `offset_m`, the second
+body's origin in the first's frame; `resistance_m2_k_w`, one positive
+area-specific resistance for the whole patch; and `source`, a nonempty
+sentence saying where that number comes from. The resistance is the
+caller's declaration: it reaches the owner through a card assembled in
+place whose provenance reads "caller-declared system-scene contact", as
+the cooling network's declared contacts do, and no material or interface
+pack is read. `mapped` gives all four budgets of the owner's common
+refinement, none with a default here: `plane_tolerance_m`,
+`coverage_relative_tolerance`, `max_pair_tests` and `max_overlap_triangles`
+(whole numbers from 1 to 1e9). Without `mapped` the two faces must have the
+same points and triangles. Every geometric refusal is the owner's own; to
+the matching contact's the scene adds that `mapped` joins faces that do
+not match.
+
+The bodies a contact names are built before the kernel takes any element,
+because the contact is computed from both; every other element is built
+where the scene lists it, so a scene with no contact is lowered as before.
+The element has ports `a` and `b`. A `join` of `a` must be with the first
+trace of `between` alone and a `join` of `b` with the second: any other
+join of them is refused, since another trace, even of the same width, has
+other points. A node's start temperature seeds every point of a trace it
+is joined to. Reports expose `heat_rate_w` (from `a` to `b` over the last
+step), `conductance_w_k` (the sum over the interface points),
+`resistance_m2_k_w` and `interface_points`; the JSON report repeats the
+declaration in the element's `declared` member (`between`,
+`resistance_m2_k_w`, `source`) and the text report lists it under "Contact
+resistances (declared in the scene, not measured)".
+
+Tests in `tests/system_command/conduction.rs`:
+- `examples/system/two_slabs_trace.json` (equal 2 x 2 cross grids, the
+  matching contact) and `examples/system/two_slabs_mapped.json` (2 x 2
+  against 3 x 3, the common refinement), the two slabs of `two_slabs.json`
+  through 8e-4 m^2 K/W, on 4 and 8 cells along each slab with the step
+  t* / (2 n^2). The reference is fs-conduction's own contact between the
+  slabs on one mesh, built in the test as fs-conduction
+  tests/conduction_pair.rs builds it. Claims declared before the first
+  run: the energy that crossed the contact, summed from its rate, within
+  1e-9 J; the least and greatest temperature of each slab and of each
+  contact face within 1e-9 K; the pair's stored change and the ledger
+  residual within 1e-9 of the pair's energy. First run, scene minus owner
+  for n = 4 and 8: matching -2.274e-13 J and -3.411e-13 J with the largest
+  temperature difference 2.274e-13 K and 5.684e-14 K; mapped +3.411e-13 J
+  and +5.684e-13 J with 2.842e-13 K and 5.684e-14 K.
+- Both examples through the binary: exit 0, a positive rate, 24 and 144
+  interface points whose conductances sum to 0.5 W/K within 1e-12, the
+  declared resistance and its source in both reports.
+- Fifteen refusals, all exit 3: a face under both `ports` and `traces`;
+  `between` naming a mean port, an element that does not exist, one body
+  twice, an element that is not a conduction body, or one end only; `b`
+  joined to another trace of its body; traces a slab apart with and
+  without `mapped`; faces that do not match without `mapped`; a refinement
+  budget of 0 and a missing one; a negative resistance; a missing
+  `source`; an unsupported field.
+
+No claim for a trace contact: one resistance for the whole patch, declared
+and not measured, with no dependence on temperature or pressure and no
+per-face map; no interface card or pack is read. The contact generates
+entropy where the heat crosses and the ledger books the nodal sum at its
+ports; no order is claimed for the gap between the two. The reference is
+compared in the energy crossed and in eight least and greatest
+temperatures a rung, not vertex by vertex: a scene reports no field. A
+conduction body has no state codec and `adaptive` refuses it, so a scene
+with a trace contact has neither.
 
 `thermal_timeline` lowers to `fs_thermal::component::ThermalTimeline` over
 an `fs_thermal::enthalpy::DepositionSimulation`, stepped by the owner's

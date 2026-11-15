@@ -338,7 +338,7 @@ impl<'m> ConductionBody<'m> {
             let point = self.problem.mesh.positions()[vertex];
             let index = places.get(&key(point)).copied().ok_or_else(|| {
                 invalid(format!(
-                    "the traces do not match: no point of the second trace lies at {point:?}; the mapped transfer between traces that do not match is not built"
+                    "the traces do not match: no point of the second trace lies at {point:?}; `mapped_contact` joins traces that do not match"
                 ))
             })?;
             partner.push(index);
