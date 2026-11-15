@@ -6249,7 +6249,11 @@ prepared on another mesh.
 kit and the port tangent at five operating points. A Heater through fs-system
 steps the body bit for bit as the owner with the prescribed flux `-P/A`. A
 HeatCapacity lump joined through a Conductance follows, at every one of 1500
-kernel steps, the step condensed from the owner's own responses,
+kernel steps, the step condensed from the owner's own responses. The
+conductance is `1 / (R'' / A)`: an ordered interface card's area-specific
+resistance claim resolved by `InterfaceResistance::from_card`, its receipt
+replayed against the card, and turned into one series term over the patch
+area, whose origin carries the card identity and that receipt. The step is
 `Q = G (T_L - a) / (1 + G (dt / (2 C_L) + r))`. The pair closes its energy and
 both bodies reach the temperature that shares it.
 

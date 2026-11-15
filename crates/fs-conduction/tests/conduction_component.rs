@@ -3,9 +3,9 @@
 //! `fs_conduction::component::ConductionBody` puts the backward-Euler owner
 //! behind heat ports on named boundary patches. Here it passes the
 //! conformance kit, a heater through the kernel steps it exactly as the
-//! owner steps itself, and a lump joined to it through a conductance meets
-//! the step condensed from the owner's own responses and reaches the two
-//! bodies' shared equilibrium. Run with
+//! owner steps itself, and a lump joined to it through a conductance resolved
+//! from a contact interface card meets the step condensed from the owner's
+//! own responses and reaches the two bodies' shared equilibrium. Run with
 //! `cargo test -p fs-conduction --features component --test conduction_component`.
 #![cfg(feature = "component")]
 // Exact float comparisons here assert bitwise agreement with the owner.
@@ -17,10 +17,18 @@ use fs_conduction::fixtures::{box_grid, on_box_face};
 use fs_conduction::transient::VolumetricHeatCapacity;
 use fs_conduction::transient::backward_euler::{BackwardEuler, StepConfig};
 use fs_conduction::{
+    AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS, AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
     ConductionError, ConductionMesh, ConductionProblem, ConductivityModel, ConductivityTable,
-    LinearConfig, ScalarField, ThermalBc, ThermalBoundary, ThermalBoundaryBuilder,
+    InterfaceResistance, LinearConfig, ResistanceOrigin, ScalarField, ThermalBc, ThermalBoundary,
+    ThermalBoundaryBuilder,
 };
+use fs_evidence::ValidityDomain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_matdb::{
+    ClaimSet, InterfaceSystemCard, InterpolationPolicy, MaterialStateId, PropertyClaim,
+    PropertyKey, PropertyValue, Provenance, QueryPoint, SelectionPolicy, SurfaceSpec,
+    SystemContext, UncertaintyModel,
+};
 use fs_ports::component::conformance::{Case, Observed, check_component, check_port_tangent};
 use fs_ports::component::{Component, Proposal};
 use fs_system::SystemBuilder;
@@ -313,11 +321,88 @@ fn a_heater_through_the_kernel_steps_the_body_as_the_owner_does() {
     });
 }
 
+/// The declared contact between the lump and the body's left patch: one
+/// area-specific resistance claim on an ordered interface card.
+const CONTACT_M2_K_W: f64 = 8.0e-4;
+
+fn contact_card() -> InterfaceSystemCard {
+    let surface = |chemistry: &str, texture_frame: &str| SurfaceSpec {
+        material: MaterialStateId {
+            chemistry: chemistry.to_string(),
+            phase: "solid".to_string(),
+            process: "as-fixtured".to_string(),
+            revision: 0,
+        },
+        texture_frame: texture_frame.to_string(),
+    };
+    let mut claims = ClaimSet::new();
+    claims
+        .insert_claim(PropertyClaim {
+            key: PropertyKey::new(
+                AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
+                AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
+            ),
+            value: PropertyValue::Scalar {
+                value: CONTACT_M2_K_W,
+                dims: AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
+            },
+            validity: ValidityDomain::unconstrained(),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: Vec::new(),
+            provenance: Provenance {
+                source: "conduction_component lump-to-body declared contact fixture".to_string(),
+                license: "internal-test-use".to_string(),
+                artifact: None,
+            },
+        })
+        .unwrap();
+    InterfaceSystemCard::assemble(
+        surface("lump", "interface-normal-plus-x"),
+        surface("body", "interface-normal-minus-x"),
+        SystemContext {
+            medium: "dry".to_string(),
+            third_body: Some("declared-contact-layer".to_string()),
+            environment: "vacuum".to_string(),
+            history: "unaged".to_string(),
+        },
+        claims,
+        Vec::new(),
+    )
+    .unwrap()
+}
+
+/// The wall's conductance from the card: the resolved claim, its receipt
+/// replayed against the card, one series term `R'' / A` over the patch whose
+/// origin cites the card and that receipt.
+fn card_wall_w_k(area_m2: f64) -> f64 {
+    let card = contact_card();
+    let contact = InterfaceResistance::from_card(
+        "lump-body",
+        &card,
+        &QueryPoint::new(),
+        SelectionPolicy::SingleClaimOnly,
+    )
+    .unwrap();
+    card.claims().verify_receipt(contact.receipt()).unwrap();
+    assert_eq!(contact.value_m2_k_per_w(), CONTACT_M2_K_W);
+    let term = contact.term_for_area("lump-body", area_m2).unwrap();
+    let ResistanceOrigin::InterfaceCard {
+        card_identity,
+        receipt,
+    } = term.origin()
+    else {
+        panic!("the term cites {:?}, not the card", term.origin());
+    };
+    assert_eq!(*card_identity, card.content_hash());
+    assert_eq!(receipt, contact.receipt());
+    1.0 / term.value_k_per_w()
+}
+
 #[test]
-fn a_lump_through_a_conductance_meets_the_condensed_step_and_the_shared_equilibrium() {
+fn a_lump_through_a_card_contact_meets_the_condensed_step_and_the_shared_equilibrium() {
     const LUMP_J_K: f64 = 20.0;
     const LUMP_START_K: f64 = 420.0;
-    const WALL_W_K: f64 = 0.5;
     const DT_S: f64 = 2.0;
     const REFERENCE_W: f64 = 10.0;
     // 3000 s: some fifty times the slowest joint mode (about 60 s).
@@ -326,6 +411,9 @@ fn a_lump_through_a_conductance_meets_the_condensed_step_and_the_shared_equilibr
         let parts = parts();
         // The owner's own responses, read through an unconnected copy.
         let probe = body(cx, parts, &["left"]);
+        // 8e-4 m^2 K/W over the 20 x 20 mm patch: 0.5 W/K.
+        let wall_w_k = card_wall_w_k(probe.patch_area_m2(0));
+        assert!((wall_w_k - 0.5).abs() <= 1.0e-12, "{wall_w_k} W/K");
         let mut builder = SystemBuilder::new();
         let node = builder
             .add_with_tangent("body", body(cx, parts, &["left"]), initial(parts))
@@ -334,7 +422,7 @@ fn a_lump_through_a_conductance_meets_the_condensed_step_and_the_shared_equilibr
             .add_with_tangent("lump", HeatCapacity::new(LUMP_J_K).unwrap(), LUMP_START_K)
             .unwrap();
         let wall = builder
-            .add_with_tangent("wall", Conductance::new(WALL_W_K).unwrap(), ())
+            .add_with_tangent("wall", Conductance::new(wall_w_k).unwrap(), ())
             .unwrap();
         let (a, b) = (
             builder.port(wall, "a").unwrap(),
@@ -367,8 +455,8 @@ fn a_lump_through_a_conductance_meets_the_condensed_step_and_the_shared_equilibr
             let (_, at_zero) = step(&probe, &field, DT_S, &[0.0], cx);
             let (_, at_reference) = step(&probe, &field, DT_S, &[REFERENCE_W], cx);
             let slope_k_w = (at_reference[0] - at_zero[0]) / REFERENCE_W;
-            let heat_w = WALL_W_K * (lump_k - at_zero[0])
-                / (1.0 + WALL_W_K * (0.5 * DT_S / LUMP_J_K + slope_k_w));
+            let heat_w = wall_w_k * (lump_k - at_zero[0])
+                / (1.0 + wall_w_k * (0.5 * DT_S / LUMP_J_K + slope_k_w));
             let (expected, _) = step(&probe, &field, DT_S, &[heat_w], cx);
 
             system.step(DT_S, cx).unwrap();
