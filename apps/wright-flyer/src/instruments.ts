@@ -5,9 +5,13 @@
 // lazy-imports the module and renders its most useful live readout as a tile
 // in the right-side stack, updated from the onFrame sample callback. Each
 // adapter is fault-isolated: a broken module shows "unavailable", never throws.
+//
+// Evidence law (bead wf-root-guzez.15): a tile whose inputs are made up in
+// the page says so on its first line (ILLUSTRATION) and carries no evidence.
+// The evidence tiles (badges, scorecard, applicability) need real receipts;
+// no receipt source is connected to this page, so they show NO_RECEIPT_SOURCE
+// and build no badge, digest, verdict or receipt link.
 
-import type { ApplicabilityDomain, Intersection } from "./applicability.ts";
-import type { EvidenceBadge, ReceiptRow } from "./evidenceBadges.ts";
 import type { FieldArrays } from "./fieldViz.ts";
 import type { StripLoadsState } from "./forceOverlay.ts";
 import type { YawDecomposition } from "./lateralView.ts";
@@ -65,6 +69,19 @@ interface AdapterDef {
   readonly key: string;
   readonly label: string;
   load(content: HTMLElement): Promise<LoadedAdapter>;
+}
+
+/** First line of every tile whose values are made up in the page. */
+export const ILLUSTRATION =
+  "ILLUSTRATION: made up in the page from the live state, not engine output; carries no evidence";
+
+/** The whole content of an evidence tile while no receipt source is connected. */
+export const NO_RECEIPT_SOURCE =
+  "unavailable: no receipt source is connected to this page, so no badge, digest or verdict is shown";
+
+function noReceiptSource(content: HTMLElement): Promise<LoadedAdapter> {
+  setLines(content, [NO_RECEIPT_SOURCE]);
+  return Promise.resolve({ update: () => setLines(content, [NO_RECEIPT_SOURCE]) });
 }
 
 // --------------------------------------------------------------- adapters
@@ -149,6 +166,8 @@ const ADAPTERS: readonly AdapterDef[] = [
           const alive = cp.tracers.filter((t) => t.alive).length;
           const streak = svc.streakline(releasePoint);
           setLines(content, [
+            ILLUSTRATION,
+            "tracers ride a uniform wind equal to the aircraft's own air velocity",
             `tick ${cp.tick} · advanced ${
               advanced.ok ? String(advanced.value) : advanced.refusal.code
             }`,
@@ -248,7 +267,10 @@ const ADAPTERS: readonly AdapterDef[] = [
             { re: -0.45, im: 1.1, family: "rigid", attributionShift: 0 },
             { re: -2.8, im: 0, family: "actuator", attributionShift: 0.3 },
           ]);
-          const lines: string[] = [];
+          const lines: string[] = [
+            ILLUSTRATION,
+            "poles fixed at -0.45 ± 1.1i and -2.8, not engine eigenvalues",
+          ];
           if (proj.ok) {
             lines.push(`rigid share ${(proj.value.rigidShare * 100).toFixed(1)}%`);
             lines.push(`beyond-4-state ${(proj.value.beyondFourStateContent * 100).toFixed(1)}%`);
@@ -321,6 +343,8 @@ const ADAPTERS: readonly AdapterDef[] = [
           }
           const legend = fv.legendConfig("velocity", field);
           setLines(content, [
+            ILLUSTRATION,
+            "field = the aircraft's air velocity with a 2% shear, not the engine's field service",
             glyphs.ok
               ? `glyphs ${glyphs.value.count} / ${n} pts`
               : `glyphs refused: ${glyphs.refusal.code}`,
@@ -381,70 +405,12 @@ const ADAPTERS: readonly AdapterDef[] = [
   {
     key: "badges",
     label: "Evidence badges",
-    async load(content) {
-      const eb = await import("./evidenceBadges.ts");
-      const rows: ReceiptRow[] = [
-        {
-          caseId: "V-08b1",
-          verdict: "pass",
-          receiptDigest: "a".repeat(64),
-          comparisonClass: "closed-form",
-        },
-        { caseId: "H-07", verdict: "reported-only", comparisonClass: "log-diff" },
-        { caseId: "X-99", verdict: "unknown-verdict", comparisonClass: "none" },
-      ];
-      const built = eb.buildEvidenceBadges(rows);
-      const render = (): void => {
-        if (!built.ok) {
-          setLines(content, [`refused: ${built.refusal.code}`]);
-          return;
-        }
-        setLines(content, [
-          ...built.value.map((b) => `${b.caseId}: ${b.state} (${b.verdict})`),
-          `badges ${built.value.length} · digest-required law enforced`,
-        ]);
-      };
-      render();
-      return { update: () => render() };
-    },
+    load: noReceiptSource,
   },
   {
     key: "scorecard",
     label: "Scorecard",
-    async load(content) {
-      const sb = await import("./scorecardBridge.ts");
-      const rows = [
-        {
-          datasetId: "wf-glide",
-          metric: "glide-ratio",
-          receiptDigest: "b".repeat(64),
-          contextName: "u",
-          contextLo: 8,
-          contextHi: 14,
-        },
-        {
-          datasetId: "wf-climb",
-          metric: "climb-rate",
-          contextName: "h",
-          contextLo: 2,
-          contextHi: 12,
-        },
-      ];
-      return {
-        update(sample) {
-          if (!sample) return;
-          const bridged = sb.bridgeScorecard(rows, { u: sample.uMps, h: sample.hM });
-          if (!bridged.ok) {
-            setLines(content, [`refused: ${bridged.refusal.code}`]);
-            return;
-          }
-          setLines(content, [
-            ...bridged.value.map((r) => r.sentence),
-            `rows ${bridged.value.length} @ u=${num(sample.uMps)} m/s h=${num(sample.hM)} m`,
-          ]);
-        },
-      };
-    },
+    load: noReceiptSource,
   },
   {
     key: "sweeps",
@@ -484,6 +450,8 @@ const ADAPTERS: readonly AdapterDef[] = [
           const last = eng.records[eng.records.length - 1];
           const csvRows = sw.exportCsv(eng, points).split("\n").length - 1;
           setLines(content, [
+            ILLUSTRATION,
+            "each sweep point is u / h, a placeholder, not a flight",
             `progress ${prog.completed}/${prog.total}`,
             last === undefined
               ? "no units yet"
@@ -522,6 +490,8 @@ const ADAPTERS: readonly AdapterDef[] = [
           const verdict = lv.adverseYawVerdict(windowRows);
           const spiral = lv.spiralIndicator(0.05 * sample.omegaRadS);
           const lines = [
+            ILLUSTRATION,
+            "yaw terms use fixed page coefficients; the spiral sign follows propeller speed",
             verdict.ok
               ? `adverse yaw: ${verdict.value.adverse ? "YES" : "no"} (mean sign product ${num(
                   verdict.value.meanSignProduct,
@@ -551,68 +521,7 @@ const ADAPTERS: readonly AdapterDef[] = [
   {
     key: "applicability",
     label: "Applicability",
-    async load(content) {
-      const ap = await import("./applicability.ts");
-      const eb = await import("./evidenceBadges.ts");
-      const domains: ApplicabilityDomain[] = [
-        {
-          subsystem: "wing",
-          axes: [
-            { name: "u", lo: 6, hi: 16 },
-            { name: "h", lo: 1, hi: 20 },
-          ],
-        },
-        {
-          subsystem: "canard",
-          axes: [
-            { name: "u", lo: 8, hi: 15 },
-            { name: "h", lo: 0, hi: 25 },
-          ],
-        },
-      ];
-      let inter: Intersection | null = null;
-      const interResult = ap.intersectDomains(domains);
-      if (interResult.ok) inter = interResult.value;
-      const badgeRows = eb.buildEvidenceBadges([
-        {
-          caseId: "V-08b1",
-          verdict: "pass",
-          receiptDigest: "a".repeat(64),
-          comparisonClass: "closed-form",
-        },
-      ]);
-      const badge: EvidenceBadge | null =
-        badgeRows.ok && badgeRows.value.length > 0 ? (badgeRows.value[0] ?? null) : null;
-      return {
-        update(sample) {
-          if (!sample) return;
-          if (inter === null) {
-            setLines(content, [
-              `intersection refused: ${interResult.ok ? "?" : interResult.refusal.code}`,
-            ]);
-            return;
-          }
-          const st = ap.standingAt(inter, { u: sample.uMps, h: sample.hM });
-          if (!st.ok) {
-            setLines(content, [`standing refused: ${st.refusal.code}`]);
-            return;
-          }
-          if (badge === null) {
-            setLines(content, ["badge unavailable (no evidenced badge could be built)"]);
-            return;
-          }
-          const composed = ap.composeBadge(badge, st.value, ["wing", "canard"]);
-          setLines(content, [
-            st.value.inside
-              ? "operating point INSIDE the intersected domain"
-              : `OUTSIDE: ${st.value.axis} ${st.value.bound} bound (limited by ${st.value.limitedBy})`,
-            `badge: ${composed.color} / ${composed.icon}`,
-            composed.sentence,
-            `receipt link: ${composed.receiptLink ?? "none (no digest)"}`,
-          ]);
-        },
-      };
-    },
+    load: noReceiptSource,
   },
 ];
 

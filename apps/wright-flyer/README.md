@@ -55,9 +55,8 @@ The classes match the other demos:
 | Canard mechanism | core: one degree of freedom. The aerodynamic hinge moment is set to 0 | `fs-flyer` `canardmech.rs`, `simloop.rs` | fs-flyer |
 | Player controls | in-app mapping of keys to lever force (±220 N) and warp (±0.148 rad), with slew limits | `src/input.ts`, `src/sim/humanControls.ts` | — |
 | Flight audio | display only: a two-oscillator engine tone driven by propeller speed and airspeed | `src/audio.ts` | — |
-| Field glyph tile | scripted: a field made up in the page from the aircraft's velocity, a 2 % shear and a marked singularity. fs-flyer's field service is not called | `src/instruments.ts` | — |
-| Eigenmode tile | scripted: fixed poles at −0.45 ± 1.1i and −2.8 | `src/instruments.ts` | — |
-| Evidence badges and applicability | scripted: built from placeholder receipt digests (`"a".repeat(64)`, `"b".repeat(64)`) | `src/instruments.ts`, `src/evidenceBadges.ts` | — |
+| Field instruments: force overlay, tracers, porpoising, eigenmodes, field glyphs, sweeps, lateral view | scripted. Each tile is made up in the page from the live state, and its first line says so ("ILLUSTRATION" or "APPROX"). Examples: the eigen poles are fixed at −0.45 ± 1.1i and −2.8, and the glyph field is the aircraft's velocity with a 2 % shear. fs-flyer's field service is not called | `src/instruments.ts` | — |
+| Evidence badges, scorecard, applicability | unavailable. No receipt source is connected to the page, so these tiles build no badge, digest or verdict | `src/instruments.ts` (`NO_RECEIPT_SOURCE`) | — |
 | Landing score, missions, lessons | scripted thresholds and text. The mission outcomes come from the engine | `src/landingScore.ts`, `src/missions/`, `src/lessons.ts` | — |
 
 ## Not modelled
@@ -80,8 +79,6 @@ The menu's "1903 PILOT MODEL" and "FIXED CONTROLS" modes, and stage 1 of the gui
 
 - **Ground effect.** A lesson says that "the 1903 flights flew IN ground effect" (`src/lessons.ts`), but the
   flight has none.
-- **The evidence badges.** Their header says they are "built VERBATIM from real receipt payloads"
-  (`src/evidenceBadges.ts`), but the page passes placeholder digests.
 - **The audio disclaimer.** `AUDIO_DISCLAIMER_LABEL` (`src/audio.ts`) is defined and tested, but the page never shows it.
 - **The landing score.** Its comment calls its sink-rate bands (1.2 and 2.5 m/s) "physics-derived"
   (`src/landingScore.ts`); they cite no source.
