@@ -385,7 +385,8 @@ Elements (ports in brackets; SI units in every field name):
                  In place of conductivity_w_m_k, material names a scene
                  material with a conductivity_property: the body takes the
                  k(T) curve its card gives over the material's declared
-                 span, which must hold temperature_k, and has ports only.
+                 span, which must hold temperature_k; its ports and traces
+                 are any body's.
                  A k that varies steps by the owner's Newton solve; newton
                  gives max_iterations 32, residual_rtol 1e-10 and
                  residual_atol_j 1e-10. A step that would leave the span is

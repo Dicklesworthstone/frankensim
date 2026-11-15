@@ -40,6 +40,20 @@
 //! Then the example through the binary with its report's no-claim sentence,
 //! that sentence for a scene that also has a card-backed contact, and the
 //! refusals.
+//!
+//! Two bodies of that material trace to trace: examples/system/
+//! steel316_blocks_trace.json, the trace examples' slabs and contact with
+//! the card's k(T) and the bar's heat capacity, from 390 K and 290 K, and
+//! the same with slab b 3 x 3 across and the contact mapped. The reference
+//! is [`owner_contact`] with the printed table, stepped by the owner's Newton
+//! endpoint with the contact on one mesh. The claims, declared before the
+//! first run, on 4 and 8 cells along each slab: the energy crossed within
+//! [`CLAIMED_STEEL_GAP_J`] and the eight least and greatest temperatures
+//! within [`CLAIMED_STEEL_GAP_K`] of the owner's, and the pair's stored
+//! energy and the ledger closed to 1e-9 of what the pair holds. The first
+//! run started slab b at 300 K, a knot of the table, and the scene refused
+//! its first step (the owner has no tangent where a whole element sits on a
+//! knot); that start is now a refusal test.
 
 use std::f64::consts::{FRAC_PI_2, PI};
 
@@ -432,11 +446,38 @@ fn owner_interfaces(
     ThermalInterfaces::with_nonmatching(cx, mesh, boundary, Vec::new(), vec![surface]).unwrap()
 }
 
+/// The two slabs' bulk: one conductivity, the owner's Newton policy when it
+/// varies with temperature, one volumetric heat capacity, and the slabs'
+/// start temperatures.
+struct Bulk {
+    conductivity: ConductivityModel,
+    newton: Option<NonlinearStepConfig>,
+    rho_c_j_m3_k: f64,
+    start_k: [f64; 2],
+}
+
+/// The slab examples' bulk: 15 W/m K and 3.6e6 J/m^3 K, from 400 K and 300 K.
+fn declared_bulk() -> Bulk {
+    Bulk {
+        conductivity: ConductivityModel::isotropic_declared(15.0).unwrap(),
+        newton: None,
+        rho_c_j_m3_k: RHO_C_J_M3_K,
+        start_k: [HOT_K, COLD_K],
+    }
+}
+
 /// The reference: fs-conduction's own contact between the two slabs on one
 /// mesh, stepped by its backward Euler with the scene's step and solve
-/// budgets, as fs-conduction tests/conduction_pair.rs builds it. Equal cross
-/// grids take the matching contact, others the non-matching one.
-fn owner_contact(cx: &fs_exec::Cx<'_>, cells: u32, cross_a: usize, cross_b: usize) -> Crossed {
+/// budgets, as fs-conduction tests/conduction_pair.rs builds it, and by its
+/// Newton endpoint (`advance_nonlinear`) when the bulk's conductivity varies.
+/// Equal cross grids take the matching contact, others the non-matching one.
+fn owner_contact(
+    cx: &fs_exec::Cx<'_>,
+    bulk: &Bulk,
+    cells: u32,
+    cross_a: usize,
+    cross_b: usize,
+) -> Crossed {
     let extent = [LENGTH_M, CROSS_M, CROSS_M];
     let along = usize::try_from(cells).unwrap();
     let (slab_a, mut positions) = box_grid([along, cross_a, cross_a], extent);
@@ -456,15 +497,14 @@ fn owner_contact(cx: &fs_exec::Cx<'_>, cells: u32, cross_a: usize, cross_b: usiz
     let solver = BackwardEuler::uniform(
         cx,
         &mesh,
-        VolumetricHeatCapacity::declared(RHO_C_J_M3_K).unwrap(),
+        VolumetricHeatCapacity::declared(bulk.rho_c_j_m3_k).unwrap(),
     )
     .unwrap();
-    let material = ConductivityModel::isotropic_declared(15.0).unwrap();
     let source = ScalarField::Uniform(0.0);
     let problem = ConductionProblem {
         mesh: &mesh,
         boundary: &boundary,
-        material: &material,
+        material: &bulk.conductivity,
         element_materials: None,
         source: &source,
     };
@@ -477,15 +517,19 @@ fn owner_contact(cx: &fs_exec::Cx<'_>, cells: u32, cross_a: usize, cross_b: usiz
         energy_tolerance_j: 1.0e-8,
     };
     let mut field: Vec<f64> = (0..mesh.vertex_count())
-        .map(|v| if v < per_slab { HOT_K } else { COLD_K })
+        .map(|v| bulk.start_k[usize::from(v >= per_slab)])
         .collect();
     let steps = 2 * cells * cells;
     let dt_s = 21.6 / f64::from(steps);
     let mut energy_j = 0.0;
     for _ in 0..steps {
-        let step = solver
-            .advance(cx, problem, Some(&interfaces), &field, dt_s, config)
-            .unwrap();
+        let step = match bulk.newton {
+            None => solver.advance(cx, problem, Some(&interfaces), &field, dt_s, config),
+            Some(policy) => solver
+                .advance_nonlinear(cx, problem, Some(&interfaces), &field, dt_s, config, policy)
+                .map(|solution| solution.step),
+        }
+        .unwrap();
         assert_eq!(step.contact_fluxes.len(), 1);
         energy_j += dt_s * step.contact_fluxes[0].heat_rate_a_to_b_w;
         field = step.temperature;
@@ -517,13 +561,30 @@ fn trace_scene(name: &str, cells: u32) -> String {
 /// The trace example `name`, whose slab b has `cross_b` cells across, on 4
 /// and 8 cells along each slab against the owner's contact on one mesh.
 fn against_the_owner(name: &str, cross_b: usize) {
+    let text = |cells| trace_scene(name, cells);
+    let claimed = [CLAIMED_GAP_J, CLAIMED_GAP_K];
+    against(name, &text, &declared_bulk(), cross_b, claimed);
+}
+
+/// The scene `text(cells)`, read as the example `name`, against the owner's
+/// contact on one mesh with `bulk` and slab b `cross_b` cells across, on 4
+/// and 8 cells along each slab: the energy crossed within `claimed[0]` J,
+/// the eight least and greatest temperatures within `claimed[1]` K.
+fn against(
+    name: &str,
+    text: &dyn Fn(u32) -> String,
+    bulk: &Bulk,
+    cross_b: usize,
+    claimed: [f64; 2],
+) {
     // The pair's stored energy, rho c V (T_a + T_b).
-    let held_j = RHO_C_J_M3_K * LENGTH_M * CROSS_M * CROSS_M * (HOT_K + COLD_K);
+    let held_j =
+        bulk.rho_c_j_m3_k * LENGTH_M * CROSS_M * CROSS_M * (bulk.start_k[0] + bulk.start_k[1]);
     for cells in [4_u32, 8] {
-        let text = trace_scene(name, cells);
+        let text = text(cells);
         scene_context(|cx, _| {
-            let owner = owner_contact(cx, cells, 2, cross_b);
-            let mut scene = SystemScene::from_text(&text, name).unwrap();
+            let owner = owner_contact(cx, bulk, cells, 2, cross_b);
+            let mut scene = SystemScene::from_text(&text, example(name)).unwrap();
             let mut crossed_j = 0.0;
             let mut time_s = scene.time_s();
             while scene.advance(f64::MAX, cx).unwrap() {
@@ -557,11 +618,11 @@ fn against_the_owner(name: &str, cross_b: usize) {
             );
             assert_eq!(scene.steps(), u64::from(2 * cells * cells));
             assert!(
-                gap_j.abs() <= CLAIMED_GAP_J,
+                gap_j.abs() <= claimed[0],
                 "n {cells}: the scene is {gap_j:e} J from the owner's contact"
             );
             assert!(
-                gap_k <= CLAIMED_GAP_K,
+                gap_k <= claimed[1],
                 "n {cells}: the scene is {gap_k:e} K from the owner's contact"
             );
             assert!(
@@ -591,6 +652,7 @@ fn the_trace_examples_run_through_the_binary_and_report_the_declared_resistance(
     for (name, points) in [
         ("two_slabs_trace.json", 24.0),
         ("two_slabs_mapped.json", 144.0),
+        ("steel316_blocks_trace.json", 24.0),
     ] {
         let path = example(name);
         let (code, json, stderr) = run_binary(&["--json", "system", &path]);
@@ -1335,7 +1397,7 @@ fn a_scene_with_a_material_body_and_a_card_backed_contact_names_both_sources() {
 }
 
 #[test]
-fn material_body_scenes_refuse_mixed_sources_off_span_starts_traces_and_bad_policies_by_name() {
+fn material_body_scenes_refuse_mixed_sources_off_span_starts_and_bad_policies_by_name() {
     let base = std::fs::read_to_string(example(STEEL_EXAMPLE)).unwrap();
     let material = "\"material\": \"steel316\",";
     let newton = |policy: &str| format!("{material} \"newton\": {policy},");
@@ -1363,12 +1425,6 @@ fn material_body_scenes_refuse_mixed_sources_off_span_starts_traces_and_bad_poli
             "\"temperature_k\": 290.0,",
             "\"temperature_k\": 250.0,".to_owned(),
             "temperature_k 250 K lies outside material \"steel316\"'s conductivity, 273 K to 400 K",
-        ),
-        (
-            "trace",
-            "\"ports\": [\"x_min\"]",
-            "\"traces\": [\"x_min\"]".to_owned(),
-            "a body with a material's conductivity has mean ports only",
         ),
         (
             "newton field",
@@ -1421,6 +1477,88 @@ fn material_body_scenes_refuse_mixed_sources_off_span_starts_traces_and_bad_poli
         eprintln!("2000 W: exit {}: {}", error.exit_code, error.message);
         assert_eq!(error.exit_code, fs_cli::exit::REFUSED);
         assert!(error.message.contains("LineSearchFailed"), "{error}");
+        assert_eq!(scene.render_json(), before);
+        assert_eq!(scene.steps(), 0);
+    });
+}
+
+/// Two 316 stainless slabs trace to trace: the trace examples' slabs and
+/// contact with the card's k(T), from 390 K and 290 K.
+const STEEL_TRACE: &str = "steel316_blocks_trace.json";
+/// Both sides stop each Newton solve at 1e-10 J plus 1e-10 of the step's
+/// first residual, so they agree to that resolution, not to rounding: the
+/// claims on the energy crossed [J] and on the eight temperatures [K].
+const CLAIMED_STEEL_GAP_J: f64 = 1.0e-6;
+const CLAIMED_STEEL_GAP_K: f64 = 1.0e-6;
+
+/// The stainless slabs' bulk: the source's printed k(T) table under the
+/// owner's default Newton policy, the bar's declared heat capacity.
+fn steel_bulk() -> Bulk {
+    let table = ConductivityTable::declared_curve(printed_conductivity()).unwrap();
+    Bulk {
+        conductivity: ConductivityModel::isotropic(table),
+        newton: Some(NonlinearStepConfig::default()),
+        rho_c_j_m3_k: STEEL_RHO_C_J_M3_K,
+        start_k: [390.0, 290.0],
+    }
+}
+
+/// The stainless trace example with slab b 3 x 3 across and the contact
+/// mapped with the budgets of two_slabs_mapped.json.
+fn steel_mapped(cells: u32) -> String {
+    let text = trace_scene(STEEL_TRACE, cells);
+    let b = format!("\"cells\": [{cells}, 2, 2]");
+    let at = text.rfind(&b).expect("slab b's cells");
+    let wall = "\"resistance_m2_k_w\": 0.0008,";
+    assert!(text.contains(wall));
+    let mapped = "\n      \"mapped\": {\"plane_tolerance_m\": 1e-12, \"coverage_relative_tolerance\": \
+                  1e-10, \"max_pair_tests\": 100000, \"max_overlap_triangles\": 10000},";
+    let (before, after) = (&text[..at], &text[at + b.len()..]);
+    let text = format!("{before}\"cells\": [{cells}, 3, 3]{after}");
+    text.replacen(wall, &format!("{wall}{mapped}"), 1)
+}
+
+#[test]
+fn two_bodies_of_a_card_material_trace_to_trace_are_the_owner_newton_contact_on_one_mesh() {
+    let text = |cells| trace_scene(STEEL_TRACE, cells);
+    let claimed = [CLAIMED_STEEL_GAP_J, CLAIMED_STEEL_GAP_K];
+    against(STEEL_TRACE, &text, &steel_bulk(), 2, claimed);
+}
+
+#[test]
+fn two_bodies_of_a_card_material_on_grids_that_do_not_match_are_the_owner_newton_contact() {
+    let claimed = [CLAIMED_STEEL_GAP_J, CLAIMED_STEEL_GAP_K];
+    against(STEEL_TRACE, &steel_mapped, &steel_bulk(), 3, claimed);
+}
+
+/// Slab b from 300 K, a knot of the printed table. The step the kernel
+/// solves through the contact asks the body for its tangent, and the owner
+/// refuses a tangent where all four vertices of an element sit on a knot,
+/// where k(T) has no two-sided slope: the first step is refused and the
+/// scene does not move. The owner alone steps the same field
+/// (`owner_contact`).
+#[test]
+fn a_card_material_slab_started_on_a_knot_of_its_table_is_refused_in_a_contact() {
+    let text = trace_scene(STEEL_TRACE, 4);
+    let start = "\"temperature_k\": 290.0,";
+    assert_eq!(text.matches(start).count(), 1);
+    let on_knot = text.replacen(start, "\"temperature_k\": 300.0,", 1);
+    let mut scene = SystemScene::from_text(&on_knot, example(STEEL_TRACE)).unwrap();
+    let before = scene.render_json();
+    scene_context(|cx, _| {
+        let bulk = Bulk {
+            start_k: [390.0, 300.0],
+            ..steel_bulk()
+        };
+        let owner = owner_contact(cx, &bulk, 4, 2, 2);
+        assert!(owner.energy_j > 0.0);
+        let error = scene.advance(f64::MAX, cx).unwrap_err();
+        eprintln!("300 K: exit {}: {}", error.exit_code, error.message);
+        assert_eq!(error.exit_code, fs_cli::exit::REFUSED);
+        assert!(
+            error.message.contains("no unique two-sided derivative"),
+            "{error}"
+        );
         assert_eq!(scene.render_json(), before);
         assert_eq!(scene.steps(), 0);
     });

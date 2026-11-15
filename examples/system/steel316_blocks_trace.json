@@ -1,0 +1,60 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 21.6,
+  "step_s": 0.675,
+  "materials": {
+    "steel316": {
+      "pack": "steel316/stainless-316-nasa.fsmcdpk",
+      "phase": "solid",
+      "temperature_axis": "temperature",
+      "temperature_kind": "absolute-temperature",
+      "state": [
+        {"name": "source-generic-316-identity", "value": "1", "kind": "dimensional"},
+        {"name": "source-uns-designation-known", "value": "0", "kind": "dimensional"},
+        {"name": "source-heat-treatment-known", "value": "0", "kind": "dimensional"},
+        {"name": "source-product-form-known", "value": "0", "kind": "dimensional"},
+        {"name": "source-pressure-known", "value": "0", "kind": "dimensional"}
+      ],
+      "temperature_min_k": 273.0,
+      "temperature_max_k": 400.0,
+      "reference_specific_enthalpy_j_kg": 0.0,
+      "heat_capacity_property": "specific-heat-capacity",
+      "density_property": "density",
+      "conductivity_property": "thermal-conductivity",
+      "conductivity_kind": "thermal-conductivity"
+    }
+  },
+  "elements": {
+    "a": {
+      "kind": "conduction_body",
+      "box_m": [0.03, 0.02, 0.02],
+      "cells": [4, 2, 2],
+      "material": "steel316",
+      "volumetric_heat_capacity_j_m3_k": 3723158.4906,
+      "temperature_k": 390.0,
+      "traces": ["x_max"],
+      "solve": {"energy_tolerance_j": 1e-8, "tolerance": 1e-13, "max_iterations": 4000, "restart": 20}
+    },
+    "b": {
+      "kind": "conduction_body",
+      "box_m": [0.03, 0.02, 0.02],
+      "cells": [4, 2, 2],
+      "material": "steel316",
+      "volumetric_heat_capacity_j_m3_k": 3723158.4906,
+      "temperature_k": 290.0,
+      "traces": ["x_min"],
+      "solve": {"energy_tolerance_j": 1e-8, "tolerance": 1e-13, "max_iterations": 4000, "restart": 20}
+    },
+    "wall": {
+      "kind": "trace_contact",
+      "between": ["a.x_max", "b.x_min"],
+      "offset_m": [0.03, 0.0, 0.0],
+      "resistance_m2_k_w": 0.0008,
+      "source": "declared for this example, not measured: the 0.5 W/K wall of two_slabs.json over its 20 x 20 mm face"
+    }
+  },
+  "connections": [
+    {"join": ["a.x_max", "wall.a"]},
+    {"join": ["wall.b", "b.x_min"]}
+  ]
+}

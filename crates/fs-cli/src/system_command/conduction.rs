@@ -268,12 +268,6 @@ fn conductivity(
             "{what}: the conductivity is conductivity_w_m_k or a material's, not both"
         ));
     }
-    if definition.get("traces").is_some() {
-        return Err(format!(
-            "{what}: a body with a material's conductivity has mean ports only; a trace of \
-             one is not compared with the owner yet"
-        ));
-    }
     let name = name
         .as_str()
         .ok_or_else(|| format!("{what}.material: expected a material name"))?;

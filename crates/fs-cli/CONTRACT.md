@@ -1230,8 +1230,8 @@ per-face map. A declared one is not measured and depends on nothing. A
 card's is read once at the declared state: it follows neither the faces'
 temperatures nor any pressure field, the card's uncertainty is not
 propagated, and nothing checks that the two bodies are the card's two
-surfaces, since the bodies of a contact have declared properties (a body
-with a material's conductivity has no traces). The contact generates
+surfaces (a body's material, when it names one, is not compared with the
+card's). The contact generates
 entropy where the heat crosses and the ledger books the nodal sum at its
 ports; no order is claimed for the gap between the two. The reference is
 compared in the energy crossed and in eight least and greatest
@@ -1268,10 +1268,12 @@ which the owner validates. A step that leaves the curve is the owner's
 refusal, and the scene does not move. A flat curve steps on the linear path
 and refuses `newton`, as a declared conductivity does. The heat capacity
 stays `volumetric_heat_capacity_j_m3_k`, a declared constant: the owner
-holds it fixed, and the card's Cp(T) and density are not used. Such a body
-has mean ports only. Its element records the material, so the report's
-`material_bindings` and the text "<element> <- <material>" line name it, and
-the no-claim sentence says the body takes only k(T) and lists
+holds it fixed, and the card's Cp(T) and density are not used. Its ports
+and traces are any body's, so a `trace_contact` joins its traces as it
+joins those of a body with a declared conductivity. Its element records
+the material, so the report's `material_bindings` and the text
+"<element> <- <material>" line name it, and the no-claim sentence says
+the body takes only k(T) and lists
 temperature-dependent heat capacity as absent.
 
 Tests in `tests/system_command/conduction.rs`, on
@@ -1294,7 +1296,7 @@ for 60 s in steps of 2 s. Claims declared before the first run:
   thermal laws and the trace contact's interface card.
 - Refusals, by name: `material` beside `conductivity_w_m_k`; an unknown
   material; a material without a conductivity; a start at 250 K, below the
-  curve; a trace on such a body; an unknown `newton` field, a budget of 0
+  curve; an unknown `newton` field, a budget of 0
   and a relative tolerance of 2 (the owner's refusal); `newton` on a
   declared conductivity (exit 3). 2000 W, which would carry the end past
   400 K in the first step, is refused at that step (`LineSearchFailed`,
@@ -1304,8 +1306,38 @@ No claim for a body with a material's conductivity: only k(T) comes from
 the card, at the material's fixed declared context and with its nominal
 values (the card's uncertainty is not propagated); the heat capacity is a
 declared constant, here the table's 300 K values; the card is generic 316
-with no product form or heat treatment; no trace, contact or radiation
-with such a body is tested.
+with no product form or heat treatment; no card-backed contact and no
+radiation with such a body is tested.
+
+Two bodies of that material trace to trace, on
+`examples/system/steel316_blocks_trace.json`: the slabs and declared
+8e-4 m^2 K/W contact of `two_slabs_trace.json`, each slab of the card's
+k(T) with the bar's declared heat capacity, from 390 K and 290 K for
+21.6 s. The reference is fs-conduction's own contact between the slabs on
+one mesh with the source's printed table, stepped by `advance_nonlinear`
+with the contact under the owner's default Newton policy and the scene's
+step and budgets; and the same with slab b 3 x 3 across and the contact
+mapped, against the owner's non-matching contact. Claims declared before
+the first run, on 4 and 8 cells along each slab: the energy that crossed
+the contact within 1e-6 J and the least and greatest temperature of each
+slab and of each contact face within 1e-6 K of the owner's, since both
+sides stop each Newton solve at 1e-10 J plus 1e-10 of the step's first
+residual; the pair's stored energy and the ledger closed to 1e-9 of what
+the pair holds. The example through the binary reports the declared
+resistance, its 24 interface points and their 0.5 W/K.
+
+The first run started slab b at 300 K, a knot of the printed table, and
+the scene refused its first step: the step the kernel solves through the
+contact asks the body for its tangent, and the owner refuses a tangent
+where all four vertices of an element sit on a knot (k(T) has no two-sided
+slope there); it refused slab b's. The owner alone steps that field. The example now starts slab b at 290 K, and
+`a_card_material_slab_started_on_a_knot_of_its_table_is_refused_in_a_contact`
+keeps the 300 K start: refused at the first step (exit 4, "no unique
+two-sided derivative"), the report unchanged. Not covered: a body with a
+material's conductivity whose element sits wholly on a knot, or on an end
+of the curve, in a scene whose kernel solves a loop through it. A scene
+that solves no loop through the body (the heated bar's plan has no block
+solved by interface iteration) asks it for no tangent.
 
 `thermal_timeline` lowers to `fs_thermal::component::ThermalTimeline` over
 an `fs_thermal::enthalpy::DepositionSimulation`, stepped by the owner's
