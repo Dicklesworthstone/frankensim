@@ -16,6 +16,8 @@ mod timeline;
 mod modal_network;
 #[path = "system_command/contact.rs"]
 mod contact;
+#[path = "system_command/conduction.rs"]
+mod conduction;
 
 fn example(name: &str) -> String {
     format!(

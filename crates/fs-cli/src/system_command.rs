@@ -8,6 +8,7 @@
 //! Nothing here integrates anything: every number comes from the kernel and its elements.
 
 mod adaptive_metric;
+mod conduction;
 mod contact;
 mod friction;
 mod gas;
@@ -364,6 +365,21 @@ Elements (ports in brackets; SI units in every field name):
                  temperature_k and specific_enthalpy_j_kg, and with an
                  environment port environment_heat_w. Fixed step_s only; no
                  checkpoint codec.)
+  conduction_body box_m [Lx, Ly, Lz], cells [nx, ny, nz], conductivity_w_m_k,
+                 volumetric_heat_capacity_j_m3_k, temperature_k, ports,
+                 solve                                  [one per port face]
+                 (fs-conduction's backward-Euler finite-element body on the
+                 box [0, Lx] x [0, Ly] x [0, Lz], nx x ny x nz cells of six
+                 tetrahedra, at most 64 a side and 4096 in all, starting at
+                 a uniform temperature_k. ports names box faces, x_min,
+                 x_max, y_min, y_max, z_min, z_max: each takes the heat rate
+                 into the body and returns its face's area-mean end
+                 temperature; the faces not named are insulated. solve
+                 gives energy_tolerance_j (the owner's energy gate on each
+                 step, required) and the Krylov tolerance 1e-12,
+                 max_iterations 20000 and restart 60. Reports each port's
+                 <face>.temperature_k and the field's min_temperature_k and
+                 max_temperature_k. Fixed step_s only; no checkpoint codec.)
   heater         power_w (waveform, never negative)                   [heat]
 Gas in volumes joined by restrictions (a perfect gas with constant heat
 capacities; all joined volumes must hold the same gas):
@@ -1242,6 +1258,9 @@ enum Kind {
     /// Enthalpy cells, their links and boundaries, stepped by the fs-thermal
     /// timeline owner.
     ThermalTimeline,
+    /// A box meshed in tetrahedra, `fs-conduction`'s backward-Euler
+    /// finite-element body, with heat ports on its named faces.
+    ConductionBody,
     /// A well-mixed volume of perfect gas: the node streams meet at.
     GasVolume,
     /// A linear flow restriction between two gas volumes.
@@ -1253,7 +1272,7 @@ enum Kind {
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 45] = [
+    const TABLE: [(&'static str, Self); 46] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
@@ -1298,6 +1317,7 @@ impl Kind {
         ("layer_conductor", Self::LayerConductor),
         ("heat_node", Self::HeatNode),
         ("thermal_timeline", Self::ThermalTimeline),
+        ("conduction_body", Self::ConductionBody),
         ("gas_volume", Self::GasVolume),
         ("restriction", Self::Restriction),
         ("heater", Self::Heater),
@@ -2798,6 +2818,11 @@ fn element(
             material_sources = parts.material_sources;
             (parts.node, parts.ports)
         }
+        Kind::ConductionBody => {
+            let (node, ports, start_k) = conduction::body(builder, name, definition, &what)?;
+            temperature_k = Some(start_k);
+            (node, ports)
+        }
         Kind::GasVolume => {
             let (volume, contents) = gas_volume(definition, &what)?;
             temperature_k = Some(volume.temperature_k(&contents));
@@ -3551,6 +3576,7 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             | Kind::ModalStructure
             | Kind::ContactInterface
             | Kind::ThermalTimeline
+            | Kind::ConductionBody
             | Kind::GasCavity => {
                 return Err(format!(
                     "adaptive: {} is a {}, whose state has no error account here; \
@@ -3821,6 +3847,21 @@ impl Device {
         if self
             .elements
             .iter()
+            .any(|element| element.kind == Kind::ConductionBody)
+        {
+            description = std::borrow::Cow::Owned(format!(
+                "{description}; conduction bodies step fs-conduction's backward-Euler \
+                 finite-element field on an authored box with one declared conductivity and \
+                 volumetric heat capacity, each port a whole box face taking a uniform flux and \
+                 returning the face's area-mean end temperature, the other faces insulated; the \
+                 entropy generated inside a body is reported as zero, so the entropy totals are \
+                 a lower bound; no internal source, temperature-dependent conductivity, imported \
+                 mesh, radiation or contact trace"
+            ));
+        }
+        if self
+            .elements
+            .iter()
             .any(|element| element.kind == Kind::EnthalpyBody)
         {
             let base = description
@@ -4051,6 +4092,9 @@ impl Device {
         }
         if element.kind == Kind::ModalStructure {
             return modal::values(&self.system, element.node, &element.ports);
+        }
+        if element.kind == Kind::ConductionBody {
+            return conduction::values(&self.system, element.node, &element.ports);
         }
         if element.kind == Kind::ResistanceMatrix {
             return self.resistance_values(element);
@@ -4377,6 +4421,7 @@ impl Device {
             | Kind::PortHamiltonian
             | Kind::ModalStructure
             | Kind::ThermalTimeline
+            | Kind::ConductionBody
             | Kind::GasCavity => Vec::new(),
         }
     }

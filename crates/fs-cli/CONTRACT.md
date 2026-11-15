@@ -1081,6 +1081,46 @@ No claim: one contact point on one closure, authored law and stiffness (no
 contact geometry or material card), no contact loss, and no event at touch:
 a step that enters or leaves contact is not shortened.
 
+`conduction_body` lowers to `fs_conduction::component::ConductionBody`, the
+owner's backward-Euler finite-element body, with one heat port per named box
+face. The scene authors the box `box_m` = [Lx, Ly, Lz] meshed by
+`fs_conduction::fixtures::box_grid` as `cells` = [nx, ny, nz] cells of six
+tetrahedra (1 to 64 a side, at most 4096 in all), one declared
+`conductivity_w_m_k` and `volumetric_heat_capacity_j_m3_k`, the uniform
+start `temperature_k`, and `ports`, distinct faces among `x_min`, `x_max`,
+`y_min`, `y_max`, `z_min` and `z_max`; the faces not named are insulated.
+`solve` gives the owner's per-step `energy_tolerance_j` (required) and
+optionally its Krylov `tolerance` (in (0, 1), default 1e-12),
+`max_iterations` (1 to 100000, default 20000) and `restart` (1 to 1000,
+default 60). Each port takes the heat rate into the body as a uniform flux
+over its face and returns the face's area-mean end temperature; the owner
+steps the field and the lowering evaluates no conduction. The mesh, boundary
+and material live as long as the process. Reports expose each port's
+`<face>.temperature_k` (the last step's) and the field's
+`min_temperature_k` and `max_temperature_k`. `adaptive` refuses it, and it
+has no state codec.
+
+Tests in `tests/system_command/conduction.rs`:
+- `examples/system/two_slabs.json`, fs-conduction tests/conduction_pair.rs's
+  case from a scene: two 30 x 20 x 20 mm slabs at 400 K and 300 K (k = 15,
+  rho c = 3.6e6) through a 0.5 W/K wall (Bi = 5) to t* = 0.1 L^2 / alpha, on
+  4 and 8 cells along each slab with the step t* / (2 n^2). The energy that
+  crossed the wall, summed from its rate, converges to the plane-wall series
+  at order at least 1.8; the pair's stored change and the ledger residual
+  stay within 1e-9 of the pair's energy; the wall's last rate is its
+  conductance times the faces' reported temperatures to 1e-9.
+- The example through the binary: both faces between 300 K and 400 K, the
+  hot one above, a positive wall rate, and the no-claim sentence.
+- Twelve refusals, all exit 3: an unknown face, a face named twice, no
+  ports, a fractional cell count, 8192 cells, a two-number box, a negative
+  heat capacity, a missing `solve`, a missing `energy_tolerance_j`, a
+  tolerance of 1.5, a restart of 0 and an unsupported field.
+
+No claim: the entropy generated inside a body is reported as zero, so the
+scene's entropy totals are a lower bound; one material, no internal source,
+no temperature-dependent conductivity, no mesh but the box grid, a uniform
+flux over each whole face, and no radiation or contact trace.
+
 `thermal_timeline` lowers to `fs_thermal::component::ThermalTimeline` over
 an `fs_thermal::enthalpy::DepositionSimulation`, stepped by the owner's
 explicit rule; nothing in fs-cli conducts, stores or integrates heat. The
