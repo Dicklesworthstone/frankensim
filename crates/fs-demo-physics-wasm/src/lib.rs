@@ -16,7 +16,14 @@
 //!
 //! - **Typed-refusal JSON envelope.** Fallible entries return
 //!   `{"ok": ...}` or `{"refusal": {"code","message","ranked_repairs"}}`.
-//!   Nothing is silently clamped and nothing traps across the boundary.
+//!   Nothing traps across the boundary. Non-finite inputs, a non-positive
+//!   aspect ratio or span, unknown ids and non-finite results refuse. Other
+//!   inputs are not range-checked, and the models keep the site's floors
+//!   without refusing ("Model floors" in CONTRACT.md): the compressibility
+//!   factor 1 - M^2 is at least 0.05, Oswald efficiency at least 0.72, C_D
+//!   at least 1e-4 in L/D, sag at least 2 m in the cable tension, cable area
+//!   at least 0.005 m^2, the truck position is clamped to the span, and the
+//!   flutter mass ratio is at least 0.
 //! - **Determinism.** Pure functions of their scalar inputs: no wall-clock,
 //!   no entropy. Same inputs ⇒ identical output strings, native AND wasm.
 //!

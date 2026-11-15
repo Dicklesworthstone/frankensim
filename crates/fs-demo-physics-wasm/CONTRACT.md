@@ -21,8 +21,10 @@ fallback model; inputs are validated before an envelope is produced.
 
 ## Error model
 
-Non-finite or out-of-domain inputs, and non-finite calculated results, return
-the listed typed refusal envelope; inputs are never silently clamped.
+Non-finite inputs, the out-of-domain inputs under "Refusal codes", and
+non-finite calculated results return the listed typed refusal envelope.
+Other inputs are not range-checked: the models bound some quantities without
+refusing (see "Model floors").
 
 ## Determinism class
 
@@ -100,7 +102,17 @@ flutter estimate, mass rollup, quadratic constraint penalties.
 `family-id-out-of-range` (0..=4) · `topology-id-out-of-range` (0..=4) ·
 `material-id-out-of-range` (0..=3) · `non-finite-result`
 
-Nothing is silently clamped; no traps cross the boundary.
+No traps cross the boundary.
+
+## Model floors
+
+The evaluators keep the site's model floors, and none of them refuses:
+- wing: the compressibility factor 1 − M² is floored at 0.05, so the lift
+  slope stays finite from about Mach 0.975 up; Oswald efficiency is floored
+  at 0.72; C_D is floored at 1e-4 in the L/D ratio;
+- bridge: sag is floored at 2 m in the cable tension (the deflection uses
+  the sag as given); cable area is floored at 0.005 m²; the truck position
+  is clamped to the span; the flutter mass ratio is floored at 0.
 
 ## Determinism
 
