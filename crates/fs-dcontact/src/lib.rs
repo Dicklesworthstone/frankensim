@@ -77,6 +77,18 @@ pub enum DContactError {
         /// Original input field named by the owner.
         field: &'static str,
     },
+    /// A step's contact reaction was not settled inside the caller's
+    /// budgets: no evaluated reaction met its tolerance before the
+    /// iterations ran out or the bisection ran out of representable
+    /// midpoints, or the reaction or penetration passed its ceiling.
+    Reaction {
+        /// What ran out or was passed.
+        what: &'static str,
+        /// The last residual [N], or the value past its ceiling.
+        value: f64,
+        /// The tolerance [N] or the ceiling it was held to.
+        limit: f64,
+    },
 }
 
 impl core::fmt::Display for DContactError {
@@ -85,6 +97,12 @@ impl core::fmt::Display for DContactError {
             DContactError::Shape { what } => write!(f, "shape mismatch: {what}"),
             DContactError::Parameter { what } => write!(f, "bad parameter: {what}"),
             DContactError::Constitutive { owner, field } => write!(f, "{owner} refused {field}"),
+            DContactError::Reaction { what, value, limit } => {
+                write!(
+                    f,
+                    "contact reaction refused: {what} ({value} against {limit})"
+                )
+            }
         }
     }
 }
@@ -647,3 +665,8 @@ pub fn string_collocation(
 mod opening;
 /// Stable scalar discrete gradient of the admitted contact potential.
 pub use opening::{AffineContactResponse, AffineContactStep, OpeningContactStep};
+
+/// A normal contact between two bodies on the composition contract of
+/// fs-ports (feature `component`).
+#[cfg(feature = "component")]
+pub mod component;

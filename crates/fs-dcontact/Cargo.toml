@@ -11,13 +11,28 @@ authors.workspace = true
 layer = "L3"
 
 [dependencies]
+fs-exec = { path = "../fs-exec", optional = true }
 fs-math = { path = "../fs-math" }
 fs-matdb = { path = "../fs-matdb" }
 fs-phs = { path = "../fs-phs" }
+fs-ports = { path = "../fs-ports", optional = true }
 
 [dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
 # The jawari wiring test reproduces its own fixture card (BR-03).
 fs-matdb = { path = "../fs-matdb", features = ["fixture-packs"] }
+fs-system = { path = "../fs-system" }
+
+[features]
+# `component`: a normal contact between two bodies (`ContactInterface`) on
+# the composition contract of fs-ports, stepped on the load line its
+# neighbours present. Off by default, so the crate's ordinary build takes no
+# kernel-facing dependency.
+component = ["dep:fs-ports", "dep:fs-exec"]
+
+[[test]]
+name = "component"
+required-features = ["component"]
 
 [lints]
 workspace = true

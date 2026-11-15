@@ -189,7 +189,10 @@ Deterministic: fixed collocation, fs-phs stepping, no RNG or time.
 
 Synchronous; cost is the implicit step (fs-phs Newton with contact
 scan per gradient evaluation). No `Cx` integration
-(workspace `frankensim-ccmn`).
+(workspace `frankensim-ccmn`). The one exception is `ContactInterface`
+(feature `component`): its reaction search polls the kernel's `Cx` once per
+trial reaction, and a cancelled search refuses as
+`DContactError::Reaction { what: "cancelled", .. }`.
 
 ## Unsafe boundary
 
@@ -197,7 +200,40 @@ scan per gradient evaluation). No `Cx` integration
 
 ## Feature flags
 
-None.
+`component` (off by default): `component::ContactInterface`, a normal
+contact between two bodies as a Component of the composition kernel. It adds
+the optional dependencies `fs-ports` and `fs-exec`; nothing else in the crate
+changes with it.
+
+## Contact interface on the kernel's load line (feature `component`)
+
+- `ContactInterface::new(obstacle, ContactSolve)` admits one one-point
+  `Obstacle` on the unit opening map `[-1]` (the map fs-couple's modal impact
+  owner admits) with a non-empty provenance, and refuses an obstacle with a
+  Hunt–Crossley loss: the loss is heat, and the interface has no heat port.
+  Its two ports `a` and `b` are mechanical force–velocity power ports
+  (`FlowIn`, width 1). Its state `ContactState` is the closure `x` [m] (end
+  `a` towards end `b`) and the last reaction.
+- A step moves the closure by `dt` times the ends' mean closure rate. The
+  reaction is the `OpeningContactStep` secant of the potential between the
+  start and end closures, so a lossless contact stores what the ends give
+  it: `stored_change` is the potential's change and `numerical_loss` is the
+  port work minus it, with `dissipated` zero.
+- On the load line the end closure is `x0 + dt (released_a - released_b) -
+  S R` with `S = dt (c_aa - c_ab - c_ba + c_bb)`. The reaction is found by
+  the bracket bisection of fs-couple's `bracket_reaction`, with the same
+  unfused closure arithmetic and the same acceptance tolerance
+  `force_absolute_tolerance_n + force_relative_tolerance max(|R|, |law|)`.
+  With zero compliance the step is `propose`'s, to the bit.
+- `ContactSolve` carries the fields and admission of fs-couple's
+  `ModalContactConfig`: `max_iterations` in `1..=128`, positive finite force
+  and penetration ceilings and tolerances, relative tolerance below one. The
+  search refuses by name when the bracket passes `maximum_force_n`, when the
+  iterations run out and when the bisection runs out of representable
+  midpoints. A step that ends above `maximum_penetration_m` refuses.
+- `reading_ends([a, b])` adds signal inputs `a.end` and `b.end` for
+  neighbours that tell the end of their flow; the law uses only the mean
+  closure rate, so the end flows are checked finite and not otherwise used.
 
 ## Conformance tests
 
@@ -245,6 +281,21 @@ depths); iteration budget sweep + typed stall; collocation refinement
 jawari vs clean termination (band-energy JSON); bitwise determinism;
 typed parameter refusals.
 
+`tests/component.rs` (6, `required-features = ["component"]`): a mass on a
+Hertz wall in an fs-system graph, against the closed forms
+`p_max = ((alpha+1) m v^2 / (2K))^(1/(alpha+1))` and
+`t_c = 2 I p_max / v` (`I` computed by quadrature in the test), at 400 and
+800 steps per contact time. The exit speed is within the energy the
+search's force tolerance can leave over the penetration; the peak lies
+between the closed form and one sampling interval's depth below it; the
+contact time is within `4/n^2` relative (a cap about four times the
+measured coefficient, not a derived bound), and the observed order is in
+`[1.8, 2.2]`. A linear law settles where its closed-form reaction on a
+load line puts it; the kernel's conformance kit passes apart, entering and
+inside the contact; end inputs join told neighbours and leave the step
+unchanged; refusals by name (shape, loss, budgets, both ceilings, iteration
+exhaustion, lengths, NaN, zero `dt`).
+
 ## No-claim boundaries
 
 - NORMAL contact only: tangential friction (bowing) is its own future
@@ -272,6 +323,11 @@ typed parameter refusals.
   receipted card is proven PROVENANCE-ONLY (bitwise-identical
   2000-step trajectory, `contact_pack_migration_is_provenance_only`).
 - Obstacles are static (no moving frets/bridges) in v1.
+- `ContactInterface` (feature `component`) is lossless and one-point: it
+  refuses a Hunt–Crossley loss until it has a heat port, does not reach
+  distributed obstacles, does not shorten a step to the instant of touch,
+  and has no checkpoint codec. Its tests do not compare it with fs-couple's
+  modal impact owner; that comparison belongs to the drum's kernel graph.
 
 ## Shared unilateral power-potential remainder
 
