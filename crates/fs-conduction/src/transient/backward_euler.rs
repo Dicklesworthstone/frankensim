@@ -224,6 +224,10 @@ impl<'m> BackwardEuler<'m> {
     // Theta and duty-cycle owners share this prepared P1 storage and source admission.
     pub(crate) fn capacitance(&self) -> &Csr { &self.capacity }
 
+    // The mesh this storage was assembled on; the heat-port body checks it.
+    #[cfg(feature = "component")]
+    pub(crate) const fn mesh(&self) -> &'m ConductionMesh { self.mesh }
+
     /// Retained volume and surface density/Cp source bundles.
     /// Empty when all storage is explicitly declared.
     #[must_use]

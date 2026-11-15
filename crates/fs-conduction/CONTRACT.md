@@ -6217,3 +6217,43 @@ vector chain rules, and all-component physical finite differences plus transpose
 identities through nonlinear contact steady and backward-Euler solves. Pinned
 Rust syntax parsing and scoped diff checks passed; Cargo typechecking and these
 runtime regressions were not executed in this session.
+
+## The backward-Euler body behind heat ports
+
+`component::ConductionBody` (feature `component`, off by default) puts one
+`BackwardEuler` owner, with its mesh, conductivity and boundary partition,
+behind the fs-ports Component contract. Each boundary region named as a port is
+one scalar heat port (`PortSpec::heat`, `FlowIn`). Its input is the heat rate
+`Q` [W] into the body, applied on the region's faces as the uniform outward
+flux `-Q/A` through the owner's own Neumann rows. Its output is the region's
+area mean of the END temperature of the step, the conjugate of a uniform flux
+(`∫ T q dA = Q T̄`) and backward Euler's own reading of it. The state is the
+nodal temperature field; the stored energy is `1ᵀ C T` with the owner's
+prepared capacitance.
+
+A step is the owner's unchanged `advance`. The receipt books the owner's
+`stored_energy_change_j`, and the heat it did not store (what the owner's
+checked closure allows) as numerical loss. The tangent is the owner's
+`linearize_step` with no Robin port: `apply` on the patches' nodal loads for
+the JVP, `pullback` with the patch-mean weights for the VJP. The class is
+`Smooth`: the port map is affine with slopes that depend on the step alone, but
+only to the Krylov tolerance.
+
+Construction refuses by name: a region that is not a uniform zero-flux Neumann
+row (Dirichlet, Robin, a nonzero or nodal flux, since heat through it would
+cross no port), a nonzero volumetric source, temperature-dependent conductivity
+or sheet conduction, an unknown or repeated port name, no port, and a solver
+prepared on another mesh.
+
+`tests/conduction_component.rs` (`--features component`) checks the conformance
+kit and the port tangent at five operating points. A Heater through fs-system
+steps the body bit for bit as the owner with the prescribed flux `-P/A`. A
+HeatCapacity lump joined through a Conductance follows, at every one of 1500
+kernel steps, the step condensed from the owner's own responses,
+`Q = G (T_L - a) / (1 + G (dt / (2 C_L) + r))`. The pair closes its energy and
+both bodies reach the temperature that shares it.
+
+Not covered: the entropy generated inside the body is reported as zero, a
+lower bound. There is no snapshot codec. Nonuniform patch flux, contact,
+radiation, nonlinear and adaptive owners are refused or not wrapped. Coupling
+two finite-element bodies through ports is a later increment of bead .6.5.

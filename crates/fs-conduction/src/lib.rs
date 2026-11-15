@@ -55,6 +55,9 @@
 pub mod adjoint;
 pub mod assemble;
 pub mod bc;
+/// The transient finite-element body as a heat-port Component.
+#[cfg(feature = "component")]
+pub mod component;
 /// Duty cycles: a declared power-versus-time schedule driving the transient
 /// march, with a windowed energy audit.
 pub mod duty;

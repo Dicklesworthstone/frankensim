@@ -13,6 +13,9 @@ layer = "L3"
 [features]
 # Nominal linear, exact-polyhedral-domain continuum mean bounds stay opt-in.
 thermal-verification = ["dep:fs-verify"]
+# The transient finite-element body as a Component of the composition
+# contract (fs-ports): `component`. Off by default.
+component = ["dep:fs-ports"]
 
 [dependencies]
 fs-adjoint = { path = "../fs-adjoint" }
@@ -23,6 +26,7 @@ fs-fft = { path = "../fs-fft" }
 fs-math = { path = "../fs-math" }
 fs-material = { path = "../fs-material" }
 fs-matdb = { path = "../fs-matdb" }
+fs-ports = { path = "../fs-ports", optional = true }
 fs-qty = { path = "../fs-qty" }
 fs-rand = { path = "../fs-rand" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
@@ -40,6 +44,8 @@ fs-evidence = { path = "../fs-evidence" }
 fs-io = { path = "../fs-io" }
 fs-mesh = { path = "../fs-mesh" }
 fs-mms = { path = "../fs-mms" }
+# The body joined to the kernel's heat elements in tests/conduction_component.rs.
+fs-system = { path = "../fs-system" }
 fs-vvreg = { path = "../fs-vvreg" }
 
 [lints]
