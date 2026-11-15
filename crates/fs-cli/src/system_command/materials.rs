@@ -72,23 +72,25 @@ fn text<'a>(definition: &'a J, key: &str, what: &str) -> Result<&'a str, String>
         .ok_or_else(|| format!("{what}.{key}: a nonempty string is required"))
 }
 
-fn read_pack(path: &Path, limit: u64, what: &str) -> Result<Vec<u8>, String> {
+/// Read one pack file of at most `limit` bytes; `field` names the scene field
+/// that gave its path. Gas cavities read their source packs through this too.
+pub(super) fn read_pack(path: &Path, limit: u64, field: &str) -> Result<Vec<u8>, String> {
     let file = std::fs::File::open(path)
-        .map_err(|error| format!("{what}.pack: {}: {error}", path.display()))?;
+        .map_err(|error| format!("{field}: {}: {error}", path.display()))?;
     let metadata = file
         .metadata()
-        .map_err(|error| format!("{what}.pack: {error}"))?;
+        .map_err(|error| format!("{field}: {error}"))?;
     if !metadata.is_file() || metadata.len() > limit {
         return Err(format!(
-            "{what}.pack: expected a regular file of at most {limit} bytes"
+            "{field}: expected a regular file of at most {limit} bytes"
         ));
     }
     let mut bytes = Vec::new();
     file.take(limit + 1)
         .read_to_end(&mut bytes)
-        .map_err(|error| format!("{what}.pack: {error}"))?;
+        .map_err(|error| format!("{field}: {error}"))?;
     if bytes.len() as u64 > limit {
-        return Err(format!("{what}.pack: input grew beyond its byte limit"));
+        return Err(format!("{field}: input grew beyond its byte limit"));
     }
     Ok(bytes)
 }
@@ -146,7 +148,7 @@ pub(super) fn load(root: &J, scene_path: &Path) -> Result<Materials, String> {
         let bytes = read_pack(
             &pack_path,
             MAX_CARD_PACK_BYTES.min(MAX_TOTAL_PACK_BYTES - total_bytes),
-            &what,
+            &format!("{what}.pack"),
         )?;
         total_bytes += bytes.len() as u64;
         let pack = NormalizedMaterialCardPack::from_bytes(&bytes)

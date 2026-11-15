@@ -4616,6 +4616,354 @@ fn modal_structure_scenes_refuse_bad_clocks_modes_weights_and_error_control() {
     }
 }
 
+/// The seed N2 packs, compiled by `xtask matdb-pack` from data/matdb/seed-v1:
+/// species, McBride, Zehe and Gordon (2002) NASA-9, Lemmon and Jacobsen
+/// (2004) dilute transport.
+fn n2_sources() -> String {
+    let pack = |name: &str| example(&format!("n2/{name}"));
+    format!(
+        r#"[{{"species": "{}", "nasa9": "{}", "transport": "{}"}}]"#,
+        pack("species.pack"),
+        pack("nasa9.pack"),
+        pack("transport.fsmcdpk")
+    )
+}
+
+fn seed(path: &str) -> String {
+    std::fs::read_to_string(format!(
+        "{}/../../data/matdb/seed-v1/{path}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+}
+
+/// N2's 200 to 1000 K coefficients a0..a8, read from the seed source the
+/// packs were compiled from, not from the packs.
+fn n2_nasa9_low() -> [f64; 9] {
+    let mut a = [f64::NAN; 9];
+    for line in seed("nitrogen-nasa9-mcbride2002/nasa9.tsv").lines() {
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() == 6 && fields[0] == "coefficient" && fields[2] == "low" {
+            a[fields[3][1..].parse::<usize>().unwrap()] = fields[4].parse().unwrap();
+        }
+    }
+    assert!(a.iter().all(|c| c.is_finite()), "{a:?}");
+    a
+}
+
+/// N2's specific gas constant [J/(kg K)], from the seed species source.
+fn n2_gas_constant() -> f64 {
+    let species = seed("nitrogen/species.tsv");
+    let row: Vec<&str> = species
+        .lines()
+        .find(|line| line.starts_with("species\t"))
+        .unwrap()
+        .split('\t')
+        .collect();
+    assert_eq!(row[3], "g/mol");
+    GAS_CONSTANT_J_MOL_K / (row[2].parse::<f64>().unwrap() * 1.0e-3)
+}
+
+/// The NASA-9 molar internal energy over R, u/R = h/R - T [K], less the
+/// formation constant a7 (it cancels from every difference).
+fn n2_energy(a: &[f64; 9], t: f64) -> f64 {
+    -a[0] / t
+        + a[1] * t.ln()
+        + a[2] * t
+        + a[3] * t.powi(2) / 2.0
+        + a[4] * t.powi(3) / 3.0
+        + a[5] * t.powi(4) / 4.0
+        + a[6] * t.powi(5) / 5.0
+        - t
+}
+
+/// The NASA-9 standard molar entropy over R, less its constant a8.
+fn n2_entropy(a: &[f64; 9], t: f64) -> f64 {
+    -a[0] / (2.0 * t * t) - a[1] / t
+        + a[2] * t.ln()
+        + a[3] * t
+        + a[4] * t.powi(2) / 2.0
+        + a[5] * t.powi(3) / 3.0
+        + a[6] * t.powi(4) / 4.0
+}
+
+/// The NASA-9 cp/R.
+fn n2_heat_capacity(a: &[f64; 9], t: f64) -> f64 {
+    a[0] / (t * t)
+        + a[1] / t
+        + a[2]
+        + a[3] * t
+        + a[4] * t.powi(2)
+        + a[5] * t.powi(3)
+        + a[6] * t.powi(4)
+}
+
+/// The root of an increasing `f` between `lo` and `hi`, to the last bit.
+fn bisect(mut lo: f64, mut hi: f64, f: impl Fn(f64) -> f64) -> f64 {
+    assert!(f(lo) < 0.0 && f(hi) > 0.0);
+    for _ in 0..200 {
+        let mid = 0.5 * (lo + hi);
+        if mid <= lo || mid >= hi {
+            break;
+        }
+        if f(mid) < 0.0 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+/// 1 L of N2 at 250 K and 80 kPa, held at its volume and heated at 40 W
+/// for 1 s.
+fn heated_n2() -> String {
+    format!(
+        r#"{{
+  "schema": "frankensim.system.v0", "duration_s": 1.0, "step_s": 0.01,
+  "elements": {{
+    "cavity": {{"kind": "gas_cavity", "gas": "thermochemical 250 80000 mole 1 N2 1",
+               "sources": {}, "volume_m3": 1.0e-3,
+               "temperature_min_k": 200, "temperature_max_k": 900}}
+  }},
+  "connections": [
+    {{"prescribe": "cavity.p", "flow_m3_s": 0}},
+    {{"prescribe": "cavity.heat", "heat_rate_w": 40}}
+  ]
+}}"#,
+        n2_sources()
+    )
+}
+
+#[test]
+fn a_gas_cavity_heated_at_fixed_volume_ends_where_the_nasa9_energy_integral_puts_it() {
+    // G1: at fixed volume the heat is all internal energy, so the cavity
+    // ends at the temperature where the McBride (2002) enthalpy integral
+    // gives u(T1) - u(T0) = Q / m, at the pressure m R T1 / V. The oracle
+    // reads the seed coefficients and molar mass the packs were compiled
+    // from and integrates nothing; the owner's caloric solve stops within
+    // 1e-7 J/kg a step, about 1e-8 K over the 100 steps.
+    let path = scratch("heated.json", &heated_n2());
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    let (a, r) = (n2_nasa9_low(), n2_gas_constant());
+    let (t0, p0, volume, heat) = (250.0, 80_000.0, 1.0e-3, 40.0);
+    let mass = p0 * volume / (r * t0);
+    let target = n2_energy(&a, t0) + heat / (mass * r);
+    let t1 = bisect(t0, 400.0, |t| n2_energy(&a, t) - target);
+    for (field, expected, tolerance) in [
+        ("temperature_k", t1, 1.0e-7),
+        ("pressure_pa", mass * r * t1 / volume, 1.0e-4),
+        ("mass_kg", mass, 1.0e-15),
+        ("volume_m3", volume, 0.0),
+    ] {
+        let found = value(&json, &element("cavity"), field);
+        assert!(
+            (found - expected).abs() <= tolerance,
+            "cavity.{field}: {found} vs {expected}"
+        );
+    }
+    let boundary = "\"port\":\"cavity.heat\"";
+    assert!(
+        (value(&json, boundary, "energy_in_j") - heat).abs() < 1.0e-9,
+        "{json}"
+    );
+    assert!(
+        (value(&json, "\"totals\"", "stored_change_j") - heat).abs() < 1.0e-6,
+        "{json}"
+    );
+    assert!(
+        value(&json, "\"totals\"", "energy_residual_j").abs() < 1.0e-6,
+        "{json}"
+    );
+    assert!(
+        json.contains("a gas_cavity holds a closed, uniform, frozen ideal-gas mixture"),
+        "{json}"
+    );
+}
+
+#[test]
+fn an_insulated_gas_cavity_expanded_by_a_prescribed_flow_keeps_to_the_nasa9_isentrope() {
+    // G1: the owner's discrete-gradient step changes the entropy only by
+    // the heat over its mean temperature, so an insulated cavity keeps its
+    // entropy at every step, however long: it ends on the McBride (2002)
+    // isentrope s0(T1)/R - s0(T0)/R - ln(T1/T0) + ln(V1/V0) = 0, and the
+    // work its port took out is its internal energy lost. A negative
+    // compression flow enlarges the cavity; 100 kPa falls to 82 kPa, inside
+    // the transport card's window.
+    let scene = format!(
+        r#"{{
+  "schema": "frankensim.system.v0", "duration_s": 1.0, "step_s": 0.01,
+  "elements": {{
+    "cavity": {{"kind": "gas_cavity", "gas": "thermochemical 300 100000 mole 1 N2 1",
+               "sources": {}, "volume_m3": 1.0e-3, "insulated": true,
+               "temperature_min_k": 200, "temperature_max_k": 900}}
+  }},
+  "connections": [{{"prescribe": "cavity.p", "flow_m3_s": -1.5e-4}}]
+}}"#,
+        n2_sources()
+    );
+    let path = scratch("expanded.json", &scene);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    let (a, r) = (n2_nasa9_low(), n2_gas_constant());
+    let (t0, p0, v0, v1) = (300.0, 100_000.0, 1.0e-3, 1.15e-3);
+    let mass = p0 * v0 / (r * t0);
+    let start = n2_entropy(&a, t0) - (v1 / v0).ln();
+    let t1 = bisect(250.0, t0, |t| n2_entropy(&a, t) - (t / t0).ln() - start);
+    let work = mass * r * (n2_energy(&a, t1) - n2_energy(&a, t0));
+    for (field, expected, tolerance) in [
+        ("temperature_k", t1, 1.0e-7),
+        ("pressure_pa", mass * r * t1 / v1, 1.0e-4),
+        ("volume_m3", v1, 1.0e-15),
+    ] {
+        let found = value(&json, &element("cavity"), field);
+        assert!(
+            (found - expected).abs() <= tolerance,
+            "cavity.{field}: {found} vs {expected}"
+        );
+    }
+    let boundary = "\"port\":\"cavity.p\"";
+    assert!(
+        (value(&json, boundary, "energy_in_j") - work).abs() < 1.0e-6,
+        "{json}"
+    );
+    assert!(
+        value(&json, "\"totals\"", "energy_residual_j").abs() < 1.0e-6,
+        "{json}"
+    );
+}
+
+#[test]
+fn a_piston_on_an_n2_gas_spring_rings_at_the_adiabatic_frequency_and_keeps_its_energy() {
+    // examples/system/n2_gas_spring.json: a 1 kg piston of 10 cm2 on 0.1 L
+    // of insulated N2 at 90 kPa and 300 K, held there by 90 N pressing the
+    // way that shrinks it, set moving at 5 cm/s. G3: no energy is lost, so the ledger closes and the
+    // piston's energy plus the gas's equals the outside force's work.
+    // G1: small, it rings at w^2 = gamma p A^2 / (m V), gamma = cp/cv of
+    // the McBride (2002) N2 at 300 K. Its swing a = v A / (w V), 1.4 % of
+    // the volume, lengthens the period by (gamma + 1)(2 gamma - 1) a^2 / 48
+    // (Landau and Lifshitz, Mechanics, section 28, for p V^gamma held),
+    // 1.8e-5, and the midpoint step by (w dt)^2 / 12, 1.0e-6. The terms left
+    // out are near a^4, about 4e-8; the probe run agreed to 1.6e-8.
+    let (code, json, stderr) = run_binary(&["--json", "system", &example("n2_gas_spring.json")]);
+    assert_eq!(code, 0, "{stderr}");
+    let a = n2_nasa9_low();
+    let cp = n2_heat_capacity(&a, 300.0);
+    let gamma = cp / (cp - 1.0);
+    let (mass, area, p0, v0, speed, dt) = (1.0, 1.0e-3, 90_000.0, 1.0e-4, 0.05, 1.0e-4);
+    let w = (gamma * p0 * area * area / (mass * v0)).sqrt();
+    let swing = speed * area / (w * v0);
+    let period = core::f64::consts::TAU / w
+        * (1.0
+            + (gamma + 1.0) * (2.0 * gamma - 1.0) * swing * swing / 48.0
+            + (w * dt).powi(2) / 12.0);
+    let mut crossings = Vec::new();
+    let mut previous: Option<(f64, f64)> = None;
+    for sample in json.split("{\"time_s\":").skip(1) {
+        let t: f64 = sample.split_once(',').unwrap().0.parse().unwrap();
+        let v = value(sample, "", "piston.velocity_m_s");
+        if let Some((t_old, v_old)) = previous
+            && v_old > 0.0
+            && v <= 0.0
+        {
+            crossings.push(t_old + (t - t_old) * v_old / (v_old - v));
+        }
+        previous = Some((t, v));
+    }
+    assert!(crossings.len() >= 5, "{crossings:?}");
+    let measured = (crossings[crossings.len() - 1] - crossings[0]) / (crossings.len() - 1) as f64;
+    assert!(
+        (measured / period - 1.0).abs() < 1.0e-6,
+        "period {measured} vs {period}"
+    );
+    assert!(
+        value(&json, "\"totals\"", "energy_residual_j").abs() < 1.0e-6,
+        "{json}"
+    );
+    let stored = value(&json, "\"totals\"", "stored_change_j");
+    let given = value(&json, "\"totals\"", "boundary_energy_in_j");
+    assert!((stored - given).abs() < 1.0e-6, "{stored} vs {given}");
+}
+
+#[test]
+fn gas_cavity_scenes_refuse_bad_records_packs_and_controls_and_gas_outside_the_cards() {
+    let base = heated_n2();
+    for (name, from, to, reason) in [
+        (
+            "record.json",
+            "thermochemical 250 80000",
+            "mixture 250 80000",
+            "require a thermochemical record",
+        ),
+        (
+            "pack.json",
+            "species.pack",
+            "absent.pack",
+            "sources[0].species",
+        ),
+        (
+            "insulated.json",
+            "\"volume_m3\": 1.0e-3",
+            "\"volume_m3\": 1.0e-3, \"insulated\": 1",
+            "insulated is true or false",
+        ),
+        (
+            "iterations.json",
+            "\"volume_m3\": 1.0e-3",
+            "\"volume_m3\": 1.0e-3, \"max_iterations\": 0",
+            "max_iterations is a whole number from 1 to 128",
+        ),
+        (
+            "field.json",
+            "\"volume_m3\": 1.0e-3",
+            "\"volume_m3\": 1.0e-3, \"wall\": true",
+            "unsupported field \"wall\"",
+        ),
+        // 150 kPa is outside the Lemmon (2004) transport card's 75 to
+        // 101.325 kPa, which the parcel resolves though it uses no transport.
+        (
+            "window.json",
+            "thermochemical 250 80000",
+            "thermochemical 250 150000",
+            "NoClaimInDomain",
+        ),
+        (
+            "adaptive.json",
+            "\"duration_s\": 1.0",
+            "\"adaptive\": {\"tolerances\": {}}, \"duration_s\": 1.0",
+            "cavity is a gas_cavity",
+        ),
+    ] {
+        assert!(base.contains(from), "{name}: test fixture changed");
+        let (code, stderr) = refused(name, &base.replace(from, to));
+        assert_eq!(code, 3, "{name}: {stderr}");
+        assert!(stderr.contains(reason), "{name}: {stderr}");
+    }
+    // In the run: compressing the gas past 101.325 kPa leaves the transport
+    // card, and a caloric bracket reaching 1000 K spans both McBride charts;
+    // the step that would do either is refused.
+    for (name, scene, reason) in [
+        (
+            "squeezed.json",
+            base.replace("thermochemical 250 80000", "thermochemical 250 100000")
+                .replace("\"flow_m3_s\": 0", "\"flow_m3_s\": 1.0e-4"),
+            "NoClaimInDomain",
+        ),
+        (
+            "bracket.json",
+            base.replace("\"temperature_max_k\": 900", "\"temperature_max_k\": 1000"),
+            "within one NASA-9 region",
+        ),
+    ] {
+        assert!(scene != base, "{name}: test fixture changed");
+        let (code, stderr) = refused(name, &scene);
+        assert_eq!(code, 4, "{name}: {stderr}");
+        assert!(stderr.contains("refused in Propose"), "{name}: {stderr}");
+        assert!(stderr.contains(reason), "{name}: {stderr}");
+    }
+}
+
 fn array_values(json: &str, anchor: &str, key: &str) -> Vec<f64> {
     let tail = &json[json.find(anchor).unwrap()..];
     let field = format!("\"{key}\":[");

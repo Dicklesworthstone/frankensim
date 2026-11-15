@@ -62,6 +62,7 @@ save/resume commands work with `self_heating_damper.json` and
 | `port_hamiltonian_oscillator.json` | the driven oscillator written as port-Hamiltonian matrices and stepped by the exact held-input owner of fs-system; its damping work warms a case | the closed form of `m q'' + c q' + k q = F` to 1e-12 of scale after 500 steps (2e-16 measured), where the element-built oscillator is about 3e-6 m off; supplied work = stored energy + heat to 1e-12 J |
 | `rack_and_pinion.json` | one pinion inertia carrying a motor torque and a bearing directly, and a rack's spring, friction and load through the pinion radius: three members of one join, each behind its own ratio | the midpoint rule for the pinion's one equation with the reflected stiffness and friction; motor work, the load's received work and the heat |
 | `pneumatic_cylinder.json` | a 2 l tank of air at 6 bar feeds a cylinder through a valve; the piston pushes a spring and the outside pressure out by 104 mm; the tank cools to 281 K as it empties, the chamber warms to 325 K as it fills and gives heat to the barrel, which also takes the seal's friction | an independent RK4 integration of the cylinder's seven equations (4.9e-9 at 3 s, second order in mid-stroke), conservation of the gas, and the force balance at rest |
+| `n2_gas_spring.json` | a 1 kg piston rings on 0.1 L of insulated N2 (`gas_cavity`, the gas of the seed McBride NASA-9 and species packs in `n2/`) held at 90 kPa by 90 N | the adiabatic period from the NASA-9 γ at 300 K with its amplitude and step corrections, to 1e-6; the ledger closes |
 | `damped_pair.json` | two rigid bodies in three dimensions closing at 2 m/s on a viscous connector, stepped by the fs-mbd network owner (`rigid_network`); a quarter of the connector's heat warms a shell, half an oil bath, the rest goes to the air | the closed form: each momentum decays as `exp(-0.7 t)`, the heat is `2 (1 - exp(-1.4 t))` J, split 25 / 50 / 25 |
 | `damped_pair_lining.json` | the damped pair with all of its connector heat routed into the first of three steel cells of 5 J/K (`thermal_timeline`, the fs-thermal enthalpy timeline), joined in a row by 1 W/K: the heat enters the first cell and spreads along the lining | the closed form: the lining stores the pair's heat `2 (1 - exp(-1.4 t))` J to 1e-9 J, the cells warmest first |
 | `viscoelastic_mount.json` | two rigid bodies at rest on a mount with viscous damping and one Maxwell branch stretched by 0.5 m (`viscoelastic_network`, the fs-mbd relaxation owner): the stored 0.21 J sets the bodies moving and heats the casing | the pair's own two equations integrated independently: relative speed, branch energy and heat |
@@ -417,6 +418,20 @@ fractions...]}` holds a restriction's far end at a supply's state.
 All joined volumes must hold the same gas; this is not checked. The gas has
 constant heat capacities. A very small volume between restrictions forces
 small steps: no more than about twice its mass can pass through it in one.
+
+`n2_gas_spring.json` uses a `gas_cavity` instead: 0.1 L of N2 at 300 K and
+90 kPa whose heat capacities, pressure and the states it may reach come
+from cited sources. These are the seed species, McBride (2002) NASA-9 and
+Lemmon (2004) transport cards, compiled by `xtask matdb-pack` into the packs
+in `n2/`. The cavity is insulated, and 90 N on a 1 kg piston of 10 cm²
+holds it at rest; the piston starts at 5 cm/s and rings at the adiabatic
+frequency, with γ from the NASA-9 heat capacity at 300 K. A mass moving the
+positive way enlarges the cavity, and a prescribed `flow_m3_s` on `p` is the
+compression flow (positive shrinks it). The cavity is closed and frozen
+(no reactions, condensation or leakage). Every step resolves the packs at
+its end state, so a run that leaves a card's validity (the transport card's
+75 to 101.325 kPa here) is refused at that step. The caloric bracket must
+stay inside one NASA-9 chart (below 1000 K for N2).
 
 ## Ideal transformers
 

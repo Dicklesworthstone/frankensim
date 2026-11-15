@@ -1191,6 +1191,7 @@ dependencies = [
  "fs-euler-disc-e2e",
  "fs-evidence",
  "fs-exec",
+ "fs-gas",
  "fs-geom",
  "fs-io",
  "fs-ir",

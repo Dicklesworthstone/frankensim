@@ -9,6 +9,7 @@
 
 mod adaptive_metric;
 mod friction;
+mod gas;
 mod hydraulic;
 mod materials;
 mod modal;
@@ -328,6 +329,24 @@ capacities; all joined volumes must hold the same gas):
   With wall = true, p is the pressure on a moving wall: join it to a mass
   as {\"port\": volume.p, \"ratio\": area_m2}, positive for a wall whose
   motion in the mass's positive direction enlarges the volume.
+A closed gas of cited thermochemistry (fs-gas: frozen composition, ideal
+gas, the calorics of its NASA-9 packs):
+  gas_cavity     gas (a record \"thermochemical T_K p_Pa mole|mass N
+                 species fraction ...\"), sources = [{species, nasa9,
+                 transport}, ...] (canonical pack paths relative to the
+                 scene, one triple per species), volume_m3,
+                 temperature_min_k, temperature_max_k (the bracket of the
+                 owner's caloric solve), energy_tolerance_j_kg = 1e-7,
+                 max_iterations = 128, insulated = false
+                                                 [p, heat unless insulated]
+  p receives the compression flow [m3/s], positive when the cavity
+  shrinks, and returns the step's work pressure [Pa]: prescribe flow_m3_s
+  on it, or join it to a mass as {\"port\": cavity.p, \"ratio\": area_m2},
+  positive for a piston whose motion in the mass's positive direction
+  enlarges the cavity. heat is a heat capacity's. Each step
+  resolves the packs at its end state, transport claims included, so the
+  gas stays inside every claim's validity (the seed-v1 transport cards
+  hold from 75 to 101.325 kPa).
 The same four laws about a shaft, with angle, angular velocity and torque:
   inertia        inertia_kg_m2, angle_rad = 0, angular_velocity_rad_s = 0  [p]
   torsion_spring stiffness_n_m_rad, cubic_n_m_rad3 = 0, twist_rad = 0  [a, b]
@@ -499,6 +518,7 @@ Connections, ports written element.port:
                           node_capacitor or nonlinear_capacitor increases its charge;
                           pressure_pa holds a hydraulic_resistor or carreau_pipe
                           end; flow_m3_s into an accumulator increases its volume;
+                          flow_m3_s on a gas_cavity's p compresses it;
                           temperature_k for a damper, resistor, conductance,
                           heater, heat node body or carreau_pipe heat port,
                           heat_rate_w for a heat
@@ -1160,10 +1180,13 @@ enum Kind {
     /// A linear flow restriction between two gas volumes.
     Restriction,
     Heater,
+    /// A closed, uniform gas of NASA-9 thermochemistry from cited packs,
+    /// `fs-gas`'s cavity, with a pressure-work port and a heat port.
+    GasCavity,
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 41] = [
+    const TABLE: [(&'static str, Self); 42] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
@@ -1208,6 +1231,7 @@ impl Kind {
         ("gas_volume", Self::GasVolume),
         ("restriction", Self::Restriction),
         ("heater", Self::Heater),
+        ("gas_cavity", Self::GasCavity),
     ];
 
     fn parse(name: &str) -> Option<Self> {
@@ -2474,6 +2498,7 @@ fn element(
     name: &str,
     definition: &J,
     materials: &materials::Materials,
+    scene: &Path,
 ) -> Result<Element, Refusal> {
     let what = format!("elements.{name}");
     let kind_name = definition
@@ -2706,6 +2731,11 @@ fn element(
                 .ok_or_else(|| format!("{what}: missing power_w"))?;
             let heater = Heater::new(waveform(wave, &format!("{what}.power_w"))?).map_err(invalid)?;
             add(builder, name, heater, SourceAccount::default())?
+        }
+        Kind::GasCavity => {
+            let (added, start_k) = gas::cavity(builder, name, definition, scene, &what)?;
+            temperature_k = Some(start_k);
+            added
         }
     };
     Ok(Element {
@@ -3265,13 +3295,14 @@ fn prescribe(
     events.dedup_by(|a, b| (*a).partial_cmp(&*b) == Some(std::cmp::Ordering::Equal));
     // A series element end carried by a node receives minus the node's
     // flow. A node capacitor instead receives current into its own stored
-    // charge, so its prescribed current keeps the component's positive sign.
+    // charge, so its prescribed current keeps the component's positive sign,
+    // and a gas cavity keeps its compression flow's.
     let prescribed_flow = matches!(
         (target.carrier, target.role),
         (Carrier::Power(_), PortRole::FlowIn)
     ) && !matches!(
         elements[target.element].kind,
-        Kind::NodeCapacitor(_) | Kind::NonlinearCapacitor
+        Kind::NodeCapacitor(_) | Kind::NonlinearCapacitor | Kind::GasCavity
     );
     let sign = if prescribed_flow { -1.0 } else { 1.0 };
     builder
@@ -3406,7 +3437,8 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             | Kind::Slider
             | Kind::FrictionInterface
             | Kind::ModalStructure
-            | Kind::ThermalTimeline => {
+            | Kind::ThermalTimeline
+            | Kind::GasCavity => {
                 return Err(format!(
                     "adaptive: {} is a {}, whose state has no error account here; \
                      run it with a fixed step_s",
@@ -3496,7 +3528,13 @@ fn load_text(text: &str, source_path: &Path) -> Result<Device, Refusal> {
     let materials = materials::load(&root, source_path)?;
     let mut elements = Vec::with_capacity(definitions.len());
     for (name, definition) in definitions {
-        elements.push(element(&mut builder, name, definition, &materials)?);
+        elements.push(element(
+            &mut builder,
+            name,
+            definition,
+            &materials,
+            source_path,
+        )?);
     }
     let connections = root
         .get("connections")
@@ -3737,6 +3775,29 @@ impl Device {
                  not propagated, and source resolution does not imply experimental qualification"
             ));
         }
+        if self
+            .elements
+            .iter()
+            .any(|element| element.kind == Kind::GasCavity)
+        {
+            let base = description
+                .replace(
+                    "no material-card resolution, ",
+                    "no material-card resolution besides gas cavities' packs, ",
+                )
+                .replace(
+                    "limited to declared pure-phase thermal laws; no ",
+                    "limited to declared pure-phase thermal laws and gas cavities' packs; no ",
+                );
+            description = std::borrow::Cow::Owned(format!(
+                "{base}; a gas_cavity holds a closed, uniform, frozen ideal-gas mixture whose \
+                 calorics and pressure are its NASA-9 and species packs', stepped by the fs-gas \
+                 discrete-gradient heat and work solve; its transport packs are resolved at \
+                 every step end and bound the admitted states though no transport is used; no \
+                 reactions, condensation, real-gas equation of state, internal waves, leakage \
+                 or wall heat capacity"
+            ));
+        }
         description
     }
 
@@ -3830,6 +3891,9 @@ impl Device {
         }
         if element.kind == Kind::GasVolume {
             return self.gas_values(element);
+        }
+        if element.kind == Kind::GasCavity {
+            return gas::values(&self.system, element.node);
         }
         if element.kind == Kind::ModalStructure {
             return modal::values(&self.system, element.node, &element.ports);
@@ -4124,7 +4188,8 @@ impl Device {
             | Kind::ResistanceMatrix
             | Kind::PortHamiltonian
             | Kind::ModalStructure
-            | Kind::ThermalTimeline => Vec::new(),
+            | Kind::ThermalTimeline
+            | Kind::GasCavity => Vec::new(),
         }
     }
 

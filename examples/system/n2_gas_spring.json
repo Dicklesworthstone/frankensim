@@ -1,0 +1,18 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 1.5,
+  "step_s": 1.0e-4,
+  "sample_every_s": 1.0e-3,
+  "elements": {
+    "spring": {"kind": "gas_cavity", "gas": "thermochemical 300 90000 mole 1 N2 1",
+               "sources": [{"species": "n2/species.pack", "nasa9": "n2/nasa9.pack",
+                            "transport": "n2/transport.fsmcdpk"}],
+               "volume_m3": 1.0e-4, "insulated": true,
+               "temperature_min_k": 200, "temperature_max_k": 900},
+    "piston": {"kind": "mass", "mass_kg": 1.0, "velocity_m_s": 0.05},
+    "outside": {"kind": "force", "force_n": -90.0}
+  },
+  "connections": [
+    {"join": ["piston.p", {"port": "spring.p", "ratio": 1.0e-3}, "outside.p"]}
+  ]
+}

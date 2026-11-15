@@ -1526,7 +1526,49 @@ a prescribed stream (355.5 K from a 300 K line, the closed form to 1e-10)
 and from a supply held at 2 bar through a restriction (2 bar to 1e-9 and
 350 K), and checks fourteen refusals. Limits: one gas for all joined
 volumes, unchecked; constant heat capacities; no source-backed gas, which
-is the fs-gas cavity and is not reachable from a scene.
+is the closed `gas_cavity` below.
+
+`gas_cavity` lowers to `fs_gas::component::GasCavity`: a closed, uniform,
+frozen ideal-gas mixture whose calorics and pressure come from canonical
+species, NASA-9 and transport packs (`xtask matdb-pack`). The scene gives the
+`gas` record (`thermochemical T_K p_Pa mole|mass N species fraction ...`),
+one `sources` triple of pack paths per species (relative to the scene),
+`volume_m3`, the caloric bracket `temperature_min_k` and `temperature_max_k`,
+and optionally `energy_tolerance_j_kg` (1e-7), `max_iterations` (1 to 128)
+and `insulated`. Port `p` receives the compression flow [m3/s], positive when
+the cavity shrinks, and returns the step's work pressure. `prescribe` takes
+`flow_m3_s` with that sign, like an accumulator's. As a `join` member
+`{"port": "cavity.p", "ratio": area_m2}`, a mass moving the positive way
+enlarges the cavity, as with a `gas_volume` wall. Port `heat` (absent when
+insulated) is a heat capacity's. The owner's discrete-gradient step changes
+the entropy only by the heat over its mean temperature. Every step resolves
+the packs at its end state, including the transport claims, which no
+equation uses. A state outside any card's validity (the seed-v1 N2
+transport card holds 75 to 101.325 kPa and 200 to 1000 K) is refused at
+admission (exit 3) or by the step that would reach it (exit 4). So is a
+bracket that spans two NASA-9 charts (N2's split at 1000 K). Reports give
+temperature, pressure, density, volume, mass and specific internal energy.
+`adaptive` refuses it.
+
+Tests in `tests/system_command.rs`, all on the seed N2 packs committed in
+`examples/system/n2/`:
+- 1 L of N2 heated at fixed volume ends at the temperature the McBride
+  (2002) energy integral gives for the heat (to 1e-7 K), with the heat
+  boundary's 40 J stored.
+- An insulated litre enlarged by 15 % ends on the NASA-9 isentrope (to
+  1e-7 K), and its port's work equals the internal energy it lost.
+- `examples/system/n2_gas_spring.json`, a 1 kg piston ringing on 0.1 L of N2,
+  matches the adiabatic period. The prediction uses the McBride γ at 300 K,
+  the second-order amplitude correction (γ + 1)(2γ − 1)a²/48 for p V^γ held,
+  and the midpoint step's (w dt)²/12, and agrees to 1e-6. Its ledger closes.
+- Seven admission refusals (record, missing pack, insulated, iterations,
+  unknown field, a start outside the transport card, adaptive) and two run
+  refusals (compression past 101.325 kPa, a bracket reaching 1000 K).
+
+No claim: the gas is frozen and ideal, with no reactions, condensation,
+real-gas equation of state, internal waves, leakage or wall heat capacity.
+Transport is resolved, not used. The packs are the seed-v1 cards, so a
+scene's states must stay inside their validity.
 
 Stream reports expose the kernel's independently measured inventory accounts.
 Each element ledger adds `has_streams`, optional `mass`, and an ordinal
