@@ -1238,6 +1238,21 @@ temperatures a rung, not vertex by vertex: a scene reports no field. A
 conduction body has no state codec and `adaptive` refuses it, so a scene
 with a trace contact has neither.
 
+Every report's no-claim sentence lists what the scene has none of: "no
+material-card resolution, contact, friction, phase change or step-size
+error control". The list follows the scene. A `contact_interface` takes
+"contact" off it, and "impact" where a friction element had put that
+there. A `trace_contact` makes the entry "mechanical contact", unless a
+contact interface has taken contact off; a card-backed one makes the first
+entry "no material-card resolution except a trace contact's interface
+card". A scene with neither kind prints the sentence as before.
+`a_scene_with_a_contact_or_a_card_does_not_say_it_has_none` reads the
+sentence, in the text and the JSON report, of `two_slabs.json` and
+`heated_body.json` (unchanged), the three trace examples,
+`struck_mode.json`, and the trace example with the struck mode's elements
+beside its slabs. `adaptive` refuses a contact interface and a conduction
+body, so its own sentence meets neither.
+
 `thermal_timeline` lowers to `fs_thermal::component::ThermalTimeline` over
 an `fs_thermal::enthalpy::DepositionSimulation`, stepped by the owner's
 explicit rule; nothing in fs-cli conducts, stores or integrates heat. The

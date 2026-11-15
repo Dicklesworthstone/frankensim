@@ -3975,8 +3975,13 @@ impl Device {
             .iter()
             .any(|element| element.kind == Kind::ContactInterface)
         {
+            // The scene has a contact, and a strike through it is an impact:
+            // neither stays in the list of what the scene has none of.
+            let base = description
+                .replace("contact, friction,", "friction,")
+                .replace("geometric contact, impact,", "geometric contact,");
             description = std::borrow::Cow::Owned(format!(
-                "{description}; contact interfaces step fs-dcontact's one-point normal power law \
+                "{base}; contact interfaces step fs-dcontact's one-point normal power law \
                  with an authored stiffness, exponent and gap, its reaction the secant of the \
                  law's potential over each step's move, settled on the load line by bracketed \
                  bisection within the scene's budgets; no contact loss, no events at touch, no \
@@ -4024,8 +4029,20 @@ impl Device {
                     "declared in the scene and not measured, with no dependence on temperature \
                      or pressure"
                 };
+                // A trace contact is a thermal contact, so the list of what
+                // the scene has none of names the mechanical one (unless a
+                // contact interface took contact off the list); a card
+                // behind the contact is a card resolution.
+                let mut base =
+                    description.replace("contact, friction,", "mechanical contact, friction,");
+                if carded {
+                    base = base.replace(
+                        "no material-card resolution,",
+                        "no material-card resolution except a trace contact's interface card,",
+                    );
+                }
                 description = std::borrow::Cow::Owned(format!(
-                    "{description}; a trace carries one heat load and one end temperature for \
+                    "{base}; a trace carries one heat load and one end temperature for \
                      every vertex of its face, and a trace contact carries heat between two \
                      traces at fs-conduction's interface points through one area-specific \
                      resistance for the whole patch, {resistance}; a contact generates entropy \

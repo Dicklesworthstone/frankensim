@@ -1027,3 +1027,76 @@ fn card_backed_contact_scenes_refuse_two_sources_states_off_the_card_and_other_p
         assert!(stderr.contains(reason), "{case}: {stderr}");
     }
 }
+
+/// The trace example with the stick, tip, head and case of struck_mode.json
+/// beside its slabs: a scene with a thermal and a mechanical contact.
+fn slabs_beside_a_strike() -> String {
+    let slabs = std::fs::read_to_string(example("two_slabs_trace.json")).unwrap();
+    let strike = std::fs::read_to_string(example("struck_mode.json")).unwrap();
+    let part = |from: &str, to: &str| {
+        let start = strike.find(from).expect("the part begins") + from.len();
+        let end = start + strike[start..].find(to).expect("the part ends");
+        &strike[start..end]
+    };
+    let elements = part("\"elements\": {\n", "\n  },\n  \"connections\"");
+    let connections = part("\"connections\": [\n", "\n  ]\n}");
+    let both = slabs
+        .replacen(
+            "\"elements\": {\n",
+            &format!("\"elements\": {{\n{elements},\n"),
+            1,
+        )
+        .replacen(
+            "\"connections\": [\n",
+            &format!("\"connections\": [\n{connections},\n"),
+            1,
+        );
+    assert!(both.contains("\"contact_interface\"") && both.contains("\"trace_contact\""));
+    both
+}
+
+#[test]
+fn a_scene_with_a_contact_or_a_card_does_not_say_it_has_none() {
+    // What follows "no material-card resolution" in the list of what a scene
+    // has none of, up to "phase change".
+    let plain = ", contact, friction,";
+    let mechanical = ", mechanical contact, friction,";
+    let carded = " except a trace contact's interface card, mechanical contact, friction,";
+    let struck = ", friction,";
+    let read = |name: &str| std::fs::read_to_string(example(name)).unwrap();
+    for (name, text, listed) in [
+        ("two_slabs.json", read("two_slabs.json"), plain),
+        ("heated_body.json", read("heated_body.json"), plain),
+        (
+            "two_slabs_trace.json",
+            read("two_slabs_trace.json"),
+            mechanical,
+        ),
+        (
+            "two_slabs_mapped.json",
+            read("two_slabs_mapped.json"),
+            mechanical,
+        ),
+        (
+            "two_blocks_atkins.json",
+            read("two_blocks_atkins.json"),
+            carded,
+        ),
+        ("struck_mode.json", read("struck_mode.json"), struck),
+        ("two_slabs_trace.json", slabs_beside_a_strike(), struck),
+    ] {
+        let scene = SystemScene::from_text(&text, example(name)).unwrap();
+        let clause = format!(
+            "; no material-card resolution{listed} phase change or step-size error control;"
+        );
+        for report in [scene.render_text(), scene.render_json()] {
+            let said: Vec<String> = report
+                .match_indices("no material-card resolution")
+                .map(|(at, _)| report[at..].chars().take(120).collect())
+                .collect();
+            assert!(report.contains(&clause), "{name}: {said:?}");
+            assert_eq!(said.len(), 1, "{name}: {said:?}");
+        }
+        eprintln!("{name}: {clause}");
+    }
+}
