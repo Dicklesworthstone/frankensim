@@ -124,14 +124,14 @@ impl Resistance {
 }
 
 /// `n` when `len` is `n * n` with `n >= 1`.
-pub(super) fn square_side(len: usize) -> Option<usize> {
+fn square_side(len: usize) -> Option<usize> {
     let n = len.isqrt();
     (n >= 1 && n * n == len).then_some(n)
 }
 
 /// The lower Cholesky factor of the symmetric `m`, or the first pivot that is not positive and
 /// finite (a sum of finite entries can still overflow).
-pub(super) fn cholesky(m: &[f64], n: usize) -> Result<Vec<f64>, ElementError> {
+fn cholesky(m: &[f64], n: usize) -> Result<Vec<f64>, ElementError> {
     let mut l = vec![0.0; n * n];
     for i in 0..n {
         for j in 0..=i {

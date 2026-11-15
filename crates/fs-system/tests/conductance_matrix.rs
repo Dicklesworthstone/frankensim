@@ -1,22 +1,18 @@
 //! fs-system's conductance between two heat traces, `elements::ConductanceMatrix`, and the field
 //! heat ports it joins: conformance and tangents over a sweep, its heat and its transpose, the
-//! one-point case against `Conductance`, the entropy it generates for smooth fields and the
-//! refusal where it would destroy some, its refusals, and two traces of lumps stepped through
-//! the kernel against the monolithic backward-Euler solve.
-//! Run with `cargo test -p fs-system --test conductance_matrix`.
+//! one-point case against `Conductance` to the bit, the entropy it generates at every drawn
+//! field and at two fields whose nodal sum is negative, its refusals, and two traces of lumps
+//! stepped through the kernel against the monolithic backward-Euler solve.
+//! Run with `cargo test -p fs-system --test conductance_matrix -- --nocapture`.
 
 use core::num::NonZeroUsize;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cancelled, Cx, ExecMode, StreamKey};
 use fs_ports::StableId;
-use fs_ports::component::conformance::{
-    Case, Failure, Observed, check_component, check_port_tangent,
-};
-use fs_ports::component::{
-    Class, Component, ContractViolation, PortRole, PortSpec, PortTangent, Proposal, Receipt,
-};
-use fs_system::elements::{Conductance, ConductanceMatrix, ElementError};
+use fs_ports::component::conformance::{Case, Observed, check_component, check_port_tangent};
+use fs_ports::component::{Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt};
+use fs_system::elements::{Conductance, ConductanceMatrix, InterfacePoint};
 use fs_system::{AdmissionError, HeatSink, RouteTemperature, SystemBuilder};
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
@@ -48,6 +44,20 @@ impl Numbers {
     }
 }
 
+/// An interface point from each side's `(point, weight)` pairs.
+fn point(a: &[(usize, f64)], b: &[(usize, f64)], conductance_w_k: f64) -> InterfacePoint {
+    let side = |pairs: &[(usize, f64)]| {
+        let mut slots = [(pairs[0].0, 0.0); 3];
+        slots[..pairs.len()].copy_from_slice(pairs);
+        slots
+    };
+    InterfacePoint {
+        a: side(a),
+        b: side(b),
+        conductance_w_k,
+    }
+}
+
 /// One step of `element` at the temperatures `kelvin` through the conformance kit: its loads and
 /// its receipt.
 fn stepped(element: &ConductanceMatrix, dt_s: f64, kelvin: &[f64]) -> (Vec<f64>, Receipt) {
@@ -69,61 +79,63 @@ fn stepped(element: &ConductanceMatrix, dt_s: f64, kelvin: &[f64]) -> (Vec<f64>,
     })
 }
 
+/// What the kernel's nodal rule makes of a step: minus the entropy `dt sum Q_i / T_i` that
+/// entered the element through its two ports.
+fn nodal_generation(element: &ConductanceMatrix, dt_s: f64, kelvin: &[f64], loads: &[f64]) -> f64 {
+    let split = element.widths()[0];
+    let ports = element.ports();
+    -(ports[0].entropy_in_j_per_k(dt_s, &kelvin[..split], &loads[..split])
+        + ports[1].entropy_in_j_per_k(dt_s, &kelvin[split..], &loads[split..]))
+}
+
 /// A matching contact on the unit square cut into two triangles along its diagonal 0-2, points
-/// 0 to 3 counter-clockwise: `D = [I, -I]` and `W` the consistent P1 face mass
-/// `A (1 + delta) / 12` of the two faces times `conductance_w_m2_k`.
+/// 0 to 3 counter-clockwise: the degree-two quadrature of each triangle, three interface points
+/// with the weights 2/3, 1/6, 1/6, each a third of the triangle's area times `conductance_w_m2_k`.
 fn square_contact(conductance_w_m2_k: f64) -> ConductanceMatrix {
-    let mut weights = vec![0.0; 16];
+    let mut points = Vec::new();
     for face in [[0, 1, 2], [0, 2, 3]] {
-        for &row in &face {
-            for &column in &face {
-                let mass = if row == column { 0.5 / 6.0 } else { 0.5 / 12.0 };
-                weights[row * 4 + column] += conductance_w_m2_k * mass;
-            }
+        for q in 0..3 {
+            let weights = [0, 1, 2].map(|i| (face[i], if i == q { 2.0 / 3.0 } else { 1.0 / 6.0 }));
+            points.push(point(&weights, &weights, conductance_w_m2_k * 0.5 / 3.0));
         }
     }
-    let mut jump = vec![0.0; 4 * 8];
-    for point in 0..4 {
-        jump[point * 8 + point] = 1.0;
-        jump[point * 8 + 4 + point] = -1.0;
-    }
-    ConductanceMatrix::new(4, 4, jump, weights).unwrap()
+    ConductanceMatrix::new(4, 4, points).unwrap()
 }
 
 #[test]
 fn the_matrix_conforms_keeps_its_heat_and_is_its_own_transpose() {
-    // Three jumps over three points of a and two of b; every row sums to zero.
-    let jump = vec![
-        1.0, 0.0, 0.0, -1.0, 0.0, //
-        0.0, 1.0, 0.0, -0.5, -0.5, //
-        0.0, 0.0, 1.0, 0.0, -1.0,
-    ];
-    let weights = vec![4.0, 1.0, 0.0, 1.0, 3.0, 0.5, 0.0, 0.5, 2.0];
-    let element = ConductanceMatrix::new(3, 2, jump, weights).unwrap();
-    assert_eq!((element.widths(), element.rows()), ([3, 2], 3));
+    // Three points of a and two of b meet at four interface points.
+    let element = ConductanceMatrix::new(
+        3,
+        2,
+        vec![
+            point(&[(0, 1.0)], &[(0, 1.0)], 4.0),
+            point(&[(1, 1.0)], &[(0, 0.5), (1, 0.5)], 3.0),
+            point(&[(2, 0.25), (1, 0.75)], &[(1, 1.0)], 2.0),
+            point(&[(0, 0.2), (1, 0.3), (2, 0.5)], &[(0, 0.6), (1, 0.4)], 1.5),
+        ],
+    )
+    .unwrap();
+    assert_eq!((element.widths(), element.points().len()), ([3, 2], 4));
     let matrix = element.matrix();
     let mut numbers = Numbers(20_261_115);
     for case in 0..200 {
-        // Side a hotter than side b at every point: each jump is positive, each jump of 1 / T
-        // negative, and no entry of W is, so no term of the entropy sum can be negative.
-        let mut kelvin: Vec<f64> = (0..3).map(|_| numbers.next(500.0, 900.0)).collect();
-        kelvin.extend((0..2).map(|_| numbers.next(250.0, 400.0)));
+        // Any temperatures: neither side is the hotter one.
+        let kelvin: Vec<f64> = (0..5).map(|_| numbers.next(250.0, 900.0)).collect();
         let dt_s = numbers.next(1.0e-4, 10.0);
         let (loads, receipt) = stepped(&element, dt_s, &kelvin);
-        // The loads are K T, entry by entry, and their sum is no heat at all.
-        let size: f64 = loads.iter().map(|load| load.abs()).sum();
+        // The loads are K T, entry by entry: either side is a sum of at most a dozen products
+        // of the size of K's entries times the temperatures.
         for (row, load) in loads.iter().enumerate() {
             let by_hand: f64 = (0..5).map(|j| matrix[row * 5 + j] * kelvin[j]).sum();
+            let size: f64 = (0..5)
+                .map(|j| (matrix[row * 5 + j] * kelvin[j]).abs())
+                .sum();
             assert!(
-                (load - by_hand).abs() <= 64.0 * f64::EPSILON * 5.0 * 900.0 * 10.0,
+                (load - by_hand).abs() <= 32.0 * f64::EPSILON * size,
                 "case {case} row {row}: {load} against {by_hand}"
             );
         }
-        assert!(
-            loads.iter().sum::<f64>().abs() <= 32.0 * f64::EPSILON * size,
-            "case {case}: net {} W of {size} W",
-            loads.iter().sum::<f64>()
-        );
         assert!(receipt.entropy_generated_j_per_k >= 0.0, "case {case}");
         assert_eq!(receipt.stored_change_j.to_bits(), 0.0_f64.to_bits());
     }
@@ -133,13 +145,15 @@ fn the_matrix_conforms_keeps_its_heat_and_is_its_own_transpose() {
             let (upper, lower) = (matrix[column * 5 + row], matrix[row * 5 + column]);
             assert!((upper - lower).abs() <= 8.0 * f64::EPSILON * upper.abs().max(1.0));
         }
-        assert!(matrix[row * 5..row * 5 + 5].iter().sum::<f64>().abs() <= 32.0 * f64::EPSILON);
+        let entries = &matrix[row * 5..row * 5 + 5];
+        let size: f64 = entries.iter().map(|entry| entry.abs()).sum();
+        assert!(entries.iter().sum::<f64>().abs() <= 32.0 * f64::EPSILON * size);
     }
 }
 
 #[test]
-fn one_point_on_each_side_is_the_conductance() {
-    let matrix = ConductanceMatrix::new(1, 1, vec![1.0, -1.0], vec![2.5]).unwrap();
+fn one_point_on_each_side_is_the_conductance_to_the_bit() {
+    let matrix = ConductanceMatrix::new(1, 1, vec![point(&[(0, 1.0)], &[(0, 1.0)], 2.5)]).unwrap();
     let scalar = Conductance::new(2.5).unwrap();
     let mut numbers = Numbers(11);
     for _ in 0..100 {
@@ -160,100 +174,123 @@ fn one_point_on_each_side_is_the_conductance() {
         else {
             panic!("the conductance did not step at {kelvin:?}");
         };
-        let heat = 2.5 * (kelvin[0] - kelvin[1]);
         for (load, expected) in loads.iter().zip(&outputs) {
-            assert!((load - expected).abs() <= 4.0 * f64::EPSILON * heat.abs());
+            assert_eq!(load.to_bits(), expected.to_bits(), "{kelvin:?}");
         }
-        // The matrix differences 1 / T_a and 1 / T_b, each rounded at half an eps of itself, so
-        // its sum errs by eps T / |T_a - T_b| of the conductance's closed form, and a few eps.
-        let generated = scalar_receipt.entropy_generated_j_per_k;
-        let hottest = kelvin[0].max(kelvin[1]);
-        let allowed = 8.0 * f64::EPSILON * (1.0 + hottest / (kelvin[0] - kelvin[1]).abs());
-        assert!(
-            (receipt.entropy_generated_j_per_k - generated).abs() <= allowed * generated,
-            "{} against {generated} J/K",
-            receipt.entropy_generated_j_per_k
+        assert_eq!(
+            receipt.entropy_generated_j_per_k.to_bits(),
+            scalar_receipt.entropy_generated_j_per_k.to_bits(),
+            "{kelvin:?}"
         );
     }
 }
 
-/// Smooth, here: on each side a temperature linear over the square, its corner values between
-/// 300 K and 400 K, plus up to half a kelvin at every point. The two sides are drawn apart, so
-/// the jump may change sign across the patch.
+/// Heat crosses at every interface point from the hotter interpolated temperature to the
+/// colder, so the element generates entropy at any field. The kernel's nodal sum over the same
+/// loads does not: it is printed beside it.
 #[test]
-fn a_contact_generates_entropy_for_smooth_fields_and_is_refused_where_it_would_destroy_it() {
+fn a_contact_generates_entropy_at_any_field_where_the_nodal_sum_does_not() {
     let contact = square_contact(1250.0);
     let mut numbers = Numbers(20_261_115);
-    let mut smallest = f64::INFINITY;
+    let (mut smallest, mut negative, mut lowest) = (f64::INFINITY, 0, 0.0_f64);
     for case in 0..2000 {
-        let mut kelvin = Vec::with_capacity(8);
-        for _side in 0..2 {
-            let (origin, along_x, along_y) = (
-                numbers.next(300.0, 350.0),
-                numbers.next(0.0, 25.0),
-                numbers.next(0.0, 25.0),
-            );
-            for (x, y) in [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)] {
-                kelvin.push(origin + along_x * x + along_y * y + numbers.next(-0.5, 0.5));
-            }
-        }
+        // Nothing smooth about it: every point of either side at its own temperature.
+        let kelvin: Vec<f64> = (0..8).map(|_| numbers.next(250.0, 1500.0)).collect();
         let (loads, receipt) = stepped(&contact, 0.25, &kelvin);
-        // Against the entropy the same loads would carry at 350 K.
-        let scale = 0.25 * loads.iter().map(|load| load.abs()).sum::<f64>() / 350.0;
-        assert!(receipt.entropy_generated_j_per_k >= 0.0, "case {case}");
-        smallest = smallest.min(receipt.entropy_generated_j_per_k / scale);
+        let generated = receipt.entropy_generated_j_per_k;
+        assert!(
+            generated > 0.0,
+            "case {case}: {generated} J/K at {kelvin:?}"
+        );
+        let nodal = nodal_generation(&contact, 0.25, &kelvin, &loads);
+        negative += usize::from(nodal < 0.0);
+        lowest = lowest.min(nodal / generated);
+        smallest = smallest.min(generated);
     }
     eprintln!(
-        "smallest entropy generated over 2000 smooth fields: {smallest:e} of dt sum |Q| / 350 K"
+        "2000 drawn fields: least entropy generated {smallest:e} J/K; the nodal sum is negative in {negative} of them, at worst {lowest:e} of the generation"
     );
-    // Not smooth: neighbours at 1200 K and 300 K whose jumps oppose, 4 K against -1 K. The
-    // consistent mass joins them, the nodal rule divides each load by its own temperature, and
-    // with 1 / (T_a T_b) sixteen times apart between the two points the sum is negative.
+    // Two fields the nodal sum calls a destruction of entropy, both taken.
+    // A line of two points a side under Simpson's rule (ends 1, middle 4): neighbours at 1200 K
+    // and 300 K whose jumps oppose, 4 K against -1 K.
     let line = ConductanceMatrix::new(
         2,
         2,
-        vec![1.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, -1.0],
-        vec![2.0, 1.0, 1.0, 2.0],
+        vec![
+            point(&[(0, 1.0)], &[(0, 1.0)], 1.0),
+            point(&[(0, 0.5), (1, 0.5)], &[(0, 0.5), (1, 0.5)], 4.0),
+            point(&[(1, 1.0)], &[(1, 1.0)], 1.0),
+        ],
     )
     .unwrap();
-    let kelvin = [1202.0, 299.5, 1198.0, 300.5];
-    let case = Case {
-        state: &(),
-        stale: &(),
-        dt_s: 1.0,
-        inputs: &kelvin,
-    };
-    match with_cx(|cx| check_component(&line, &case, cx)) {
-        Err(Failure::Contract(ContractViolation::NegativeProduction { .. })) => {}
-        other => panic!("entropy destroyed at {kelvin:?} was not refused: {other:?}"),
+    // One point of a fed in equal parts by two points of b: 314.5 K from 300 K and 330 K.
+    let averaged =
+        ConductanceMatrix::new(1, 2, vec![point(&[(0, 1.0)], &[(0, 0.5), (1, 0.5)], 1.0)]).unwrap();
+    for (name, element, kelvin) in [
+        (
+            "opposed jumps at 1200 K beside 300 K",
+            &line,
+            vec![1202.0, 299.5, 1198.0, 300.5],
+        ),
+        (
+            "314.5 K from 300 K and 330 K",
+            &averaged,
+            vec![314.5, 300.0, 330.0],
+        ),
+    ] {
+        let (loads, receipt) = stepped(element, 1.0, &kelvin);
+        let nodal = nodal_generation(element, 1.0, &kelvin, &loads);
+        eprintln!(
+            "{name}: generated {:e} J/K, nodal sum {nodal:e} J/K",
+            receipt.entropy_generated_j_per_k
+        );
+        assert!(
+            receipt.entropy_generated_j_per_k > 0.0 && nodal < 0.0,
+            "{name}"
+        );
     }
 }
 
 #[test]
-fn the_matrix_refuses_what_is_not_a_conductance_between_two_traces() {
-    let refused = |a: usize, b: usize, jump: &[f64], weights: &[f64], what: &str| {
-        match ConductanceMatrix::new(a, b, jump.to_vec(), weights.to_vec()) {
+fn the_matrix_refuses_what_is_not_an_interface_between_two_traces() {
+    let refused =
+        |a: usize, b: usize, points: Vec<InterfacePoint>, what: &str| match ConductanceMatrix::new(
+            a, b, points,
+        ) {
             Err(error) => assert!(format!("{error:?}").contains(what), "{error:?} for {what}"),
             Ok(_) => panic!("{what}: accepted"),
-        }
-    };
-    refused(0, 1, &[1.0], &[1.0], "port width");
-    refused(1, 1, &[1.0, -1.0], &[1.0, 0.0], "weights entries");
-    refused(1, 1, &[1.0, -1.0, 0.0], &[1.0], "jump entries");
-    refused(1, 1, &[1.0, f64::NAN], &[1.0], "jump entry");
-    refused(1, 1, &[1.0, -1.0], &[f64::INFINITY], "weights entry");
-    // A row that does not sum to zero would make heat of a uniform temperature.
-    refused(1, 1, &[1.0, -0.999], &[1.0], "jump row sum");
-    let two = [1.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, -1.0];
-    assert!(matches!(
-        ConductanceMatrix::new(2, 2, two.to_vec(), vec![2.0, 1.0, 1.5, 2.0]),
-        Err(ElementError::Asymmetric { row: 1, column: 0 })
-    ));
-    assert!(matches!(
-        ConductanceMatrix::new(2, 2, two.to_vec(), vec![1.0, 2.0, 2.0, 1.0]),
-        Err(ElementError::NotPositiveDefinite { .. })
-    ));
-    refused(1, 1, &[1.0, -1.0], &[-1.0], "NotPositiveDefinite");
+        };
+    let pair = |conductance_w_k: f64| point(&[(0, 1.0)], &[(0, 1.0)], conductance_w_k);
+    refused(0, 1, vec![pair(1.0)], "port width");
+    refused(1, 1, Vec::new(), "interface points");
+    refused(
+        1,
+        1,
+        vec![point(&[(1, 1.0)], &[(0, 1.0)], 1.0)],
+        "weight's point",
+    );
+    refused(
+        1,
+        2,
+        vec![point(&[(0, 1.0)], &[(0, 1.5), (1, -0.5)], 1.0)],
+        "not negative",
+    );
+    refused(
+        1,
+        1,
+        vec![point(&[(0, f64::NAN)], &[(0, 1.0)], 1.0)],
+        "not negative",
+    );
+    // Weights that do not sum to one would make heat of a uniform temperature.
+    refused(
+        1,
+        2,
+        vec![point(&[(0, 1.0)], &[(0, 0.5), (1, 0.4)], 1.0)],
+        "weights' sum",
+    );
+    for conductance_w_k in [0.0, -1.0, f64::INFINITY] {
+        refused(1, 1, vec![pair(conductance_w_k)], "interface conductance");
+    }
 }
 
 /// Lumps of heat capacity behind one field heat port: point `i` receives the heat load into
@@ -382,9 +419,18 @@ fn solve(mut a: Vec<f64>, mut b: Vec<f64>) -> Vec<f64> {
 #[test]
 fn two_traces_of_lumps_through_a_matrix_step_as_the_monolithic_backward_euler() {
     let capacity = [40.0, 55.0, 70.0, 25.0];
-    let weights = vec![0.8, 0.3, 0.3, 0.5];
-    let jump = vec![1.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, -1.0];
-    let wall = ConductanceMatrix::new(2, 2, jump, weights).unwrap();
+    // Each pair of lumps through its own point, and both pairs through one between them:
+    // the block of a is [[0.8, 0.3], [0.3, 0.5]] W/K.
+    let wall = ConductanceMatrix::new(
+        2,
+        2,
+        vec![
+            point(&[(0, 1.0)], &[(0, 1.0)], 0.5),
+            point(&[(1, 1.0)], &[(1, 1.0)], 0.2),
+            point(&[(0, 0.5), (1, 0.5)], &[(0, 0.5), (1, 0.5)], 1.2),
+        ],
+    )
+    .unwrap();
     let conductance = wall.matrix();
     let mut kelvin = vec![420.0, 380.0, 300.0, 330.0];
     let dt_s = 2.0;

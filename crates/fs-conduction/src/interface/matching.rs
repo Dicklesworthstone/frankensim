@@ -1667,10 +1667,8 @@ impl ThermalInterfaces {
 /// face mass `A (1 + δ_ab) / 12` between the face's local vertices `a` and
 /// `b`, times the conductance density `1 / R''`.
 ///
-/// [`ThermalInterfaces::assemble_into`] takes its entries from here, and so
-/// does the contact between the traces of two bodies on the composition
-/// contract, so the two cannot differ.
-pub(crate) fn face_conductance(conductance_density: f64, area_m2: f64, a: usize, b: usize) -> f64 {
+/// [`ThermalInterfaces::assemble_into`] takes its entries from here.
+fn face_conductance(conductance_density: f64, area_m2: f64, a: usize, b: usize) -> f64 {
     let mass = if a == b {
         area_m2 / 6.0
     } else {

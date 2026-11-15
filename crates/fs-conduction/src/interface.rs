@@ -14,8 +14,6 @@ pub mod lumped_pair;
 mod sensitivity;
 pub use sensitivity::ContactResistanceGradient;
 
-#[cfg(feature = "component")]
-pub(crate) use matching::face_conductance;
 pub use matching::{
     AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS, AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
     InterfaceFacePair, InterfaceFlux, InterfaceResistance, InterfaceSurface,

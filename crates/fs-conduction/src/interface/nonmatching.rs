@@ -31,6 +31,19 @@ pub struct NonmatchingOptions {
     pub max_overlap_triangles: usize,
 }
 
+impl NonmatchingOptions {
+    /// Finite tolerances in their admitted ranges and budgets that are not zero.
+    fn admitted(&self) -> bool {
+        self.plane_tolerance_m.is_finite()
+            && self.plane_tolerance_m >= 0.0
+            && self.coverage_relative_tolerance.is_finite()
+            && self.coverage_relative_tolerance > 0.0
+            && self.coverage_relative_tolerance <= 1e-6
+            && self.max_pair_tests != 0
+            && self.max_overlap_triangles != 0
+    }
+}
+
 /// Explicit resistive planar interface. Face slots belong to the
 /// supplied conduction mesh; A and B remain independent nodal traces.
 #[derive(Debug, Clone, PartialEq)]
@@ -80,10 +93,7 @@ impl NonmatchingSurface {
             || side_a.iter().any(|i| side_b.binary_search(i).is_ok()) {
             return Err(error(&name, "each boundary face must have exactly one side/owner"));
         }
-        if !(options.plane_tolerance_m.is_finite() && options.plane_tolerance_m >= 0.0
-            && options.coverage_relative_tolerance.is_finite()
-            && options.coverage_relative_tolerance > 0.0 && options.coverage_relative_tolerance <= 1e-6)
-            || options.max_pair_tests == 0 || options.max_overlap_triangles == 0 {
+        if !options.admitted() {
             return Err(error(&name, "invalid explicit nonmatching geometry or work policy"));
         }
         let density = 1.0 / resistance.value_m2_k_per_w();
@@ -205,23 +215,79 @@ impl Bound {
         surface: &NonmatchingSurface, exact: &BTreeSet<(usize,usize)>) -> Result<Self, ConductionError> {
         let name = &surface.name;
         poll(cx,0)?;
-        let count = surface.side_a.len().checked_add(surface.side_b.len())
-            .ok_or_else(|| error(name,"contact face count overflow"))?;
-        let tests = count.checked_mul(count.saturating_sub(1)).map(|n| n/2)
-            .ok_or_else(|| error(name,"contact pair budget overflow"))?;
-        if tests > surface.options.max_pair_tests {
-            return Err(error(name,"nonmatching pair-test budget exhausted before geometry work"));
-        }
+        Self::admit_pair_budget(
+            name,
+            surface.side_a.len(),
+            surface.side_b.len(),
+            &surface.options,
+        )?;
         let a = surface.side_a.iter().map(|&s| Face::read(mesh,boundary,s,name)).collect::<Result<Vec<_>,_>>()?;
         let b = surface.side_b.iter().map(|&s| Face::read(mesh,boundary,s,name)).collect::<Result<Vec<_>,_>>()?;
         let av: BTreeSet<_> = a.iter().flat_map(|f| f.vertices).collect();
         if b.iter().flat_map(|f| f.vertices).any(|v| av.contains(&v)) {
             return Err(error(name,"contact sides must own distinct temperature nodes"));
         }
+        let stencils = Self::refine(
+            cx,
+            name,
+            &a,
+            &b,
+            &surface.options,
+            &|index| surface.resistances.at(index).value_m2_k_per_w(),
+            &|key| exact.contains(&key),
+        )?;
+        Ok(Self {
+            name: name.clone(),
+            matching_only: false,
+            resistances: surface.resistances.clone(),
+            faces: a.into_iter().chain(b).collect::<Vec<_>>().into(),
+            stencils: stencils.into(),
+            quadrature_resistances: None,
+        })
+    }
+
+    /// The pair tests two sides of `a` and `b` faces need, refused before any geometry work
+    /// when they exceed the budget.
+    fn admit_pair_budget(
+        name: &str,
+        a: usize,
+        b: usize,
+        options: &NonmatchingOptions,
+    ) -> Result<(), ConductionError> {
+        let count = a
+            .checked_add(b)
+            .ok_or_else(|| error(name, "contact face count overflow"))?;
+        let tests = count
+            .checked_mul(count.saturating_sub(1))
+            .map(|n| n / 2)
+            .ok_or_else(|| error(name, "contact pair budget overflow"))?;
+        if tests > options.max_pair_tests {
+            return Err(error(
+                name,
+                "nonmatching pair-test budget exhausted before geometry work",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The common refinement of two coplanar lists of faces: one stencil per overlap triangle,
+    /// after the plane, orientation, same-side overlap and coverage checks. The faces need not
+    /// share a mesh: a slot only names a face, and a vertex only an entry of its side's trace.
+    /// `resistance_at` gives the resistance of an A face by its index, `delegated` says whether
+    /// a pair of slots is an exact matching pair.
+    fn refine(
+        cx: &Cx<'_>,
+        name: &str,
+        a: &[Face],
+        b: &[Face],
+        options: &NonmatchingOptions,
+        resistance_at: &dyn Fn(usize) -> f64,
+        delegated: &dyn Fn((usize, usize)) -> bool,
+    ) -> Result<Vec<Stencil>, ConductionError> {
         // Keep the projection and clipping arithmetic independent of which
         // physical trace is called A. Nonlinear laws must sample the same
         // quadrature points when their ordered source coordinates are reversed.
-        let reference = a.iter().chain(&b).min_by_key(|face| face.slot)
+        let reference = a.iter().chain(b).min_by_key(|face| face.slot)
             .expect("nonempty admitted contact sides");
         let origin = reference.points[0];
         let normal = reference.normal;
@@ -229,10 +295,10 @@ impl Bound {
         let axis = (0..3).max_by(|&i,&j| normal[i].abs().total_cmp(&normal[j].abs())).unwrap_or(0);
         let u = (axis+1)%3; let v = (axis+2)%3;
         let mut scale = 0.0_f64;
-        for face in a.iter().chain(&b) { for point in face.points { for d in 0..3 {
+        for face in a.iter().chain(b) { for point in face.points { for d in 0..3 {
             scale = scale.max(finite(point[d]-origin[d],name)?.abs());
         } } }
-        if !scale.is_finite() || scale <= 0.0 || surface.options.plane_tolerance_m/scale > 1e-6 {
+        if !scale.is_finite() || scale <= 0.0 || options.plane_tolerance_m/scale > 1e-6 {
             return Err(error(name,"invalid planar span or plane tolerance larger than 1e-6 of the span"));
         }
         let area_scale = finite(scale*scale/normal[axis].abs(),name)?;
@@ -247,7 +313,7 @@ impl Bound {
             for (i,p) in face.points.iter().enumerate() {
                 let delta = [p[0]-origin[0],p[1]-origin[1],p[2]-origin[2]];
                 let distance = finite(delta.iter().zip(normal).map(|(x,y)|x*y).sum(),name)?;
-                if distance.abs() > surface.options.plane_tolerance_m {
+                if distance.abs() > options.plane_tolerance_m {
                     return Err(error(name,"contact vertices leave the declared plane tolerance"));
                 }
                 points[i] = [delta[u]/scale,delta[v]/scale];
@@ -259,7 +325,7 @@ impl Bound {
         };
         let ta = a.iter().map(|f|project(f,side_a_sign)).collect::<Result<Vec<_>,_>>()?;
         let tb = b.iter().map(|f|project(f,-side_a_sign)).collect::<Result<Vec<_>,_>>()?;
-        let tolerance = surface.options.coverage_relative_tolerance;
+        let tolerance = options.coverage_relative_tolerance;
         let mut at = 0;
         for side in [&ta,&tb] { for i in 0..side.len() { for j in i+1..side.len() {
             poll(cx,at)?; at+=1;
@@ -278,7 +344,7 @@ impl Bound {
                 let points = [polygon[0],polygon[i],polygon[i+1]];
                 let area = finite(0.5*cross(points[0],points[1],points[2])*area_scale,name)?;
                 if area <= 0.0 { continue; }
-                if stencils.len() >= surface.options.max_overlap_triangles {
+                if stencils.len() >= options.max_overlap_triangles {
                     return Err(error(name,"nonmatching overlap-triangle budget exhausted"));
                 }
                 for slot in [left.slot,right.slot] {
@@ -296,26 +362,24 @@ impl Bound {
                     for k in 0..3 { row[k]=l[k]; row[k+3]=-r[k]; }
                 }
                 let weight_m2 = finite(area/3.0,name)?;
-                let weighted_conductance = finite(weight_m2/surface.resistances.at(resistance_index).value_m2_k_per_w(),name)?;
+                let weighted_conductance = finite(weight_m2/resistance_at(resistance_index),name)?;
                 if weight_m2 <= 0.0 || weighted_conductance <= 0.0 {
                     return Err(error(name,"contact quadrature weight or conductance underflow"));
                 }
                 let key = (left.slot.min(right.slot),left.slot.max(right.slot));
                 stencils.push(Stencil { pair:super::InterfaceFacePair { side_a:left.slot, side_b:right.slot },
                     vertices:[left.ids[0],left.ids[1],left.ids[2],right.ids[0],right.ids[1],right.ids[2]],
-                    resistance_index, basis, weight_m2, delegated:exact.contains(&key) });
+                    resistance_index, basis, weight_m2, delegated:delegated(key) });
             }
         } }
-        for face in a.iter().chain(&b) {
+        for face in a.iter().chain(b) {
             let area = coverage.get(&face.slot).copied().unwrap_or(0.0);
             if (area-face.area).abs() > tolerance*face.area {
                 return Err(error(name,format!("contact face {} is not completely and singly covered: overlap {area}, face {} m2",face.slot,face.area)));
             }
         }
         poll(cx,at)?;
-        Ok(Self { name:name.clone(), matching_only:false, resistances:surface.resistances.clone(),
-            faces:a.into_iter().chain(b).collect::<Vec<_>>().into(), stencils:stencils.into(),
-            quadrature_resistances:None })
+        Ok(stencils)
     }
 
     pub(super) fn validate_for(&self, mesh: &ConductionMesh, boundary: &ThermalBoundary) -> Result<(),ConductionError> {
@@ -474,6 +538,75 @@ impl Bound {
         }
         Ok(())
     }
+}
+
+/// The barycentric weights of a triangle's three degree-two quadrature points: point `q` has
+/// 2/3 at vertex `q` and 1/6 at the other two. Each point carries a third of the area.
+pub(crate) fn degree_two_weights(q: usize) -> [f64; 3] {
+    [0, 1, 2].map(|i| if i == q { 2.0 / 3.0 } else { 1.0 / 6.0 })
+}
+
+/// One face of a trace handed to [`trace_overlaps`]: its three vertices as its side numbers
+/// them, their positions, its unit normal out of its body and its area.
+#[cfg(feature = "component")]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TraceFace {
+    pub(crate) vertices: [usize; 3],
+    pub(crate) points: [[f64; 3]; 3],
+    pub(crate) normal: [f64; 3],
+    pub(crate) area: f64,
+}
+
+/// A degree-two quadrature point of the common refinement of two traces: side A's three
+/// vertices with their P1 weights there, side B's, and the point's weight [m²].
+#[cfg(feature = "component")]
+pub(crate) type OverlapPoint = ([(usize, f64); 3], [(usize, f64); 3], f64);
+
+/// The quadrature points of the common refinement of two traces that need not share a mesh,
+/// by the routine that binds a [`NonmatchingSurface`] on one mesh and under the same checks
+/// and budgets.
+#[cfg(feature = "component")]
+pub(crate) fn trace_overlaps(
+    cx: &Cx<'_>,
+    name: &str,
+    a: &[TraceFace],
+    b: &[TraceFace],
+    options: &NonmatchingOptions,
+) -> Result<Vec<OverlapPoint>, ConductionError> {
+    if a.is_empty() || b.is_empty() || !options.admitted() {
+        return Err(error(
+            name,
+            "both traces must have faces under a valid explicit geometry and work policy",
+        ));
+    }
+    poll(cx, 0)?;
+    Bound::admit_pair_budget(name, a.len(), b.len(), options)?;
+    // A slot only names a face: side A's come first, side B's after them.
+    let faces = |side: &[TraceFace], first: usize| -> Vec<Face> {
+        side.iter()
+            .enumerate()
+            .map(|(index, face)| Face {
+                slot: first + index,
+                vertices: face.vertices,
+                points: face.points,
+                normal: face.normal,
+                area: face.area,
+            })
+            .collect()
+    };
+    let (faces_a, faces_b) = (faces(a, 0), faces(b, a.len()));
+    let stencils = Bound::refine(cx, name, &faces_a, &faces_b, options, &|_| 1.0, &|_| false)?;
+    let mut points = Vec::with_capacity(3 * stencils.len());
+    for stencil in &stencils {
+        for row in &stencil.basis {
+            points.push((
+                [0, 1, 2].map(|k| (stencil.vertices[k], row[k])),
+                [0, 1, 2].map(|k| (stencil.vertices[k + 3], -row[k + 3])),
+                stencil.weight_m2,
+            ));
+        }
+    }
+    Ok(points)
 }
 
 struct Triangle {points:[[f64;2];3],ids:[usize;3],slot:usize,area:f64}

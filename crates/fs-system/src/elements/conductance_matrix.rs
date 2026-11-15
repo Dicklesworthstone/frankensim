@@ -1,16 +1,18 @@
 //! A linear conductance between two heat traces. Ports `a` and `b` are field heat ports: they
-//! receive the temperatures at `n_a` and `n_b` points and return the heat load `Q = K T` [W] into
-//! the element at each point, with `K = D^T W D`.
+//! receive the temperatures at `n_a` and `n_b` points and return the heat load [W] into the
+//! element at each point.
 //!
-//! `D` has `q` rows over the `n_a + n_b` points, `a`'s first: row `r` is a temperature jump across
-//! the interface, a combination of the points whose weights sum to zero, so a uniform temperature
-//! makes no jump and the loads sum to zero. `W` is the interface's conductance over those jumps
-//! [W/K], symmetric positive definite. A contact between two matching P1 traces is
-//! `D = [I, -P]` with `P` pairing each of `a`'s points with `b`'s point at the same place, and `W`
-//! the face mass matrix of the patch times `1 / R''`.
+//! The interface is a list of points ([`InterfacePoint`]). At each one the temperature of either
+//! trace is interpolated from up to three of its points, with weights that are not negative and
+//! sum to one, and the heat `G (T_a - T_b)` crosses there from `a` to `b` through the point's
+//! conductance `G` [W/K]. Each side's share of that heat goes back to its points by the same
+//! weights. The loads are therefore `K T` with `K = D^T W D`: one row of `D` per interface point,
+//! `a`'s weights and minus `b`'s, and `W` the diagonal of the conductances.
 //!
-//! It is the many-point [`super::Conductance`]: one point on each side and `D = [1, -1]`,
-//! `W = [G]` give `G (T_a - T_b)` entering at `a` and leaving at `b`.
+//! A contact between two P1 traces is the quadrature of `(T_a - T_b) (v_a - v_b) / R''` over
+//! their common refinement: one interface point per quadrature point, its weights the two
+//! traces' basis values there, its conductance the quadrature weight over `R''`. With one point
+//! on each side and one interface point it is [`super::Conductance`].
 
 use core::num::NonZeroUsize;
 
@@ -19,54 +21,55 @@ use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::StableId;
 use fs_ports::component::{Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt};
 
-use super::resistance::{cholesky, square_side};
-use super::{ElementError, roundoff, temperature};
+use super::{ElementError, temperature};
 
-/// A conductance `K = D^T W D` between the field heat ports `a` and `b`.
+/// One point of the interface between two traces.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InterfacePoint {
+    /// Up to three points of trace `a` and the weights that interpolate its temperature here.
+    /// A slot that is not used has the weight zero.
+    pub a: [(usize, f64); 3],
+    /// The same for trace `b`.
+    pub b: [(usize, f64); 3],
+    /// The conductance of the interface at this point [W/K].
+    pub conductance_w_k: f64,
+}
+
+/// The most a side's weights at one interface point may differ from one in their sum.
+const UNIT_SUM: f64 = 8.0 * f64::EPSILON;
+
+/// A conductance between the field heat ports `a` and `b` through a list of interface points.
 ///
 /// It stores nothing and books no dissipation: what enters at the hot points leaves at the cold
-/// ones. It generates `-dt (D u)^T W (D T)` of entropy per step, with `u = 1 / T` at each point,
-/// the sum of `Q_i / T_i` the kernel takes over both ports.
+/// ones. At every interface point heat crosses from the hotter interpolated temperature to the
+/// colder, so the entropy it generates, `dt sum_q G_q (T_a - T_b)_q^2 / (T_a T_b)_q`, is never
+/// negative.
 ///
-/// No claim: that sum is not positive for every `D`, `W` and temperature, and the kernel
-/// refuses a step in which it is negative. For a matching contact (`D = [I, -P]`) it is
-/// `dt sum_rs j_r W_rs j_s / (T_a T_b)_r` over the jumps `j`: no term is negative when the jumps
-/// have one sign and `W` has no negative entry. Joined points with opposed jumps at very
-/// different temperatures can make it negative.
+/// The kernel books the entropy through a field heat port point by point, `dt sum Q_i / T_i`.
+/// That nodal sum over both ports is not minus what the element generates: the two differ by the
+/// difference between a trace's temperature at an interface point and at the points it is
+/// interpolated from. The element's own entropy balance closes only to that difference.
 #[derive(Debug, Clone)]
 pub struct ConductanceMatrix {
     widths: [usize; 2],
-    rows: usize,
-    /// `D`, row-major, `rows` rows of `n_a + n_b` entries.
-    jump: Vec<f64>,
-    /// `W`, row-major.
-    weights: Vec<f64>,
-    /// `sum_j |D_rj|` of each row.
-    row_size: Vec<f64>,
+    points: Vec<InterfacePoint>,
+    /// The most interface points that load one point of a trace.
+    depth: usize,
     ports: [PortSpec; 2],
 }
 
 impl ConductanceMatrix {
     /// A conductance between a trace of `width_a` points at port `a` and one of `width_b` points
-    /// at port `b`, through the row-major jumps `jump` (`q x (width_a + width_b)`) and the
-    /// row-major conductance `weights` (`q x q`) [W/K].
+    /// at port `b`, through `points`.
     ///
     /// # Errors
-    /// [`ElementError::Parameter`] when a width is zero, the weights are not the square of a
-    /// positive `q`, the jumps are not `q` rows of `width_a + width_b`, an entry is not finite, or
-    /// a jump row's sum is not zero within `4 n eps` of the sum of its sizes;
-    /// [`ElementError::Asymmetric`] when a weight and its mirror differ (a signed zero equals its
-    /// mirror); [`ElementError::NotPositiveDefinite`] when the Cholesky factorization of the
-    /// weights meets a pivot that is not positive and finite.
-    #[expect(
-        clippy::float_cmp,
-        reason = "symmetry is tested exactly: an entry must equal its mirror, not lie near it"
-    )]
+    /// [`ElementError::Parameter`] when a width is zero, there is no interface point, a weight's
+    /// point is outside its trace, a weight is negative or not finite, a side's weights do not
+    /// sum to one within eight roundoff units, or a conductance is not positive and finite.
     pub fn new(
         width_a: usize,
         width_b: usize,
-        jump: Vec<f64>,
-        weights: Vec<f64>,
+        points: Vec<InterfacePoint>,
     ) -> Result<Self, ElementError> {
         let ports = [("a", width_a), ("b", width_b)].map(|(name, width)| {
             NonZeroUsize::new(width).map(|width| {
@@ -80,56 +83,52 @@ impl ConductanceMatrix {
                 value: width_a.min(width_b) as f64,
             });
         };
-        let rows = square_side(weights.len()).ok_or(ElementError::Parameter {
-            name: "weights entries (q x q, q >= 1)",
-            value: weights.len() as f64,
-        })?;
-        let n = width_a + width_b;
-        if jump.len() != rows * n {
+        if points.is_empty() {
             return Err(ElementError::Parameter {
-                name: "jump entries (q x (n_a + n_b))",
-                value: jump.len() as f64,
+                name: "interface points (at least 1)",
+                value: 0.0,
             });
         }
-        if let Some(&value) = jump.iter().find(|value| !value.is_finite()) {
-            return Err(ElementError::Parameter {
-                name: "jump entry",
-                value,
-            });
-        }
-        if let Some(&value) = weights.iter().find(|value| !value.is_finite()) {
-            return Err(ElementError::Parameter {
-                name: "weights entry",
-                value,
-            });
-        }
-        let mut row_size = Vec::with_capacity(rows);
-        for row in jump.chunks_exact(n) {
-            let (sum, size) = row.iter().fold((0.0_f64, 0.0_f64), |(sum, size), d| {
-                (sum + d, size + d.abs())
-            });
-            if !(sum.abs() <= 4.0 * n as f64 * f64::EPSILON * size) {
-                return Err(ElementError::Parameter {
-                    name: "jump row sum (zero within 4 n eps of its size)",
-                    value: sum,
-                });
-            }
-            row_size.push(size);
-        }
-        for row in 0..rows {
-            for column in 0..row {
-                if weights[row * rows + column] != weights[column * rows + row] {
-                    return Err(ElementError::Asymmetric { row, column });
+        let mut loaded = vec![0_usize; width_a + width_b];
+        for point in &points {
+            for (side, width, offset) in [(&point.a, width_a, 0), (&point.b, width_b, width_a)] {
+                let mut sum = 0.0;
+                for &(index, weight) in side {
+                    if index >= width {
+                        return Err(ElementError::Parameter {
+                            name: "interface weight's point (inside its trace)",
+                            value: index as f64,
+                        });
+                    }
+                    if !(weight.is_finite() && weight >= 0.0) {
+                        return Err(ElementError::Parameter {
+                            name: "interface weight (not negative)",
+                            value: weight,
+                        });
+                    }
+                    if weight > 0.0 {
+                        loaded[offset + index] += 1;
+                    }
+                    sum += weight;
+                }
+                if !((sum - 1.0).abs() <= UNIT_SUM) {
+                    return Err(ElementError::Parameter {
+                        name: "interface weights' sum (one within 8 eps)",
+                        value: sum,
+                    });
                 }
             }
+            if !(point.conductance_w_k.is_finite() && point.conductance_w_k > 0.0) {
+                return Err(ElementError::Parameter {
+                    name: "interface conductance [W/K]",
+                    value: point.conductance_w_k,
+                });
+            }
         }
-        cholesky(&weights, rows)?;
         Ok(Self {
             widths: [width_a, width_b],
-            rows,
-            jump,
-            weights,
-            row_size,
+            depth: loaded.into_iter().max().unwrap_or(0),
+            points,
             ports: [port_a, port_b],
         })
     }
@@ -140,13 +139,13 @@ impl ConductanceMatrix {
         self.widths
     }
 
-    /// The number of jumps `q`.
+    /// The interface points.
     #[must_use]
-    pub fn rows(&self) -> usize {
-        self.rows
+    pub fn points(&self) -> &[InterfacePoint] {
+        &self.points
     }
 
-    /// `K = D^T W D`, row-major over the `n_a + n_b` points, `a`'s first.
+    /// `K`, row-major over the `n_a + n_b` points, `a`'s first. Dense: for tests and small traces.
     #[must_use]
     pub fn matrix(&self) -> Vec<f64> {
         let n = self.widths[0] + self.widths[1];
@@ -164,39 +163,36 @@ impl ConductanceMatrix {
         matrix
     }
 
-    /// `D x`, one jump per row.
-    fn jumps(&self, values: &[f64]) -> Vec<f64> {
-        let n = self.widths[0] + self.widths[1];
-        self.jump
-            .chunks_exact(n)
-            .map(|row| row.iter().zip(values).map(|(d, x)| d * x).sum())
-            .collect()
-    }
-
-    /// `W D x`, the conductance over the jumps of `values`.
-    fn weighed(&self, values: &[f64]) -> Vec<f64> {
-        let jumps = self.jumps(values);
-        self.weights
-            .chunks_exact(self.rows)
-            .map(|row| row.iter().zip(&jumps).map(|(w, j)| w * j).sum())
-            .collect()
-    }
-
-    /// `D^T y` into `out`.
-    fn spread(&self, loads: &[f64], out: &mut [f64]) {
-        let n = self.widths[0] + self.widths[1];
-        out[..n].fill(0.0);
-        for (row, &load) in self.jump.chunks_exact(n).zip(loads) {
-            for (value, d) in out[..n].iter_mut().zip(row) {
-                *value = d.mul_add(load, *value);
+    /// The values `values` take at interface point `point` on trace `a` and on trace `b`.
+    fn at(&self, point: &InterfacePoint, values: &[f64]) -> (f64, f64) {
+        let mut sides = [0.0_f64; 2];
+        for (side, weights, offset) in [(0, &point.a, 0), (1, &point.b, self.widths[0])] {
+            for &(index, weight) in weights {
+                sides[side] = weight.mul_add(values[offset + index], sides[side]);
             }
+        }
+        (sides[0], sides[1])
+    }
+
+    /// The heat rate `rate` that crosses at `point` from `a` to `b`, added to the loads `out`.
+    fn spread(&self, point: &InterfacePoint, rate: f64, out: &mut [f64]) {
+        for &(index, weight) in &point.a {
+            out[index] = weight.mul_add(rate, out[index]);
+        }
+        for &(index, weight) in &point.b {
+            let load = &mut out[self.widths[0] + index];
+            *load = (-weight).mul_add(rate, *load);
         }
     }
 
     /// `K x` into `out`.
     fn apply(&self, values: &[f64], out: &mut [f64]) {
-        let loads = self.weighed(values);
-        self.spread(&loads, out);
+        let n = self.widths[0] + self.widths[1];
+        out[..n].fill(0.0);
+        for point in &self.points {
+            let (a, b) = self.at(point, values);
+            self.spread(point, point.conductance_w_k * (a - b), out);
+        }
     }
 }
 
@@ -221,10 +217,15 @@ impl Component for ConductanceMatrix {
     }
 
     fn identity_words(&self, words: &mut Vec<u64>) {
-        // The widths are part of the system's port description; the number of jumps is not.
-        words.push(self.rows as u64);
-        words.extend(self.jump.iter().map(|value| value.to_bits()));
-        words.extend(self.weights.iter().map(|value| value.to_bits()));
+        // The widths are part of the system's port description; the interface points are not.
+        words.push(self.points.len() as u64);
+        for point in &self.points {
+            for &(index, weight) in point.a.iter().chain(&point.b) {
+                words.push(index as u64);
+                words.push(weight.to_bits());
+            }
+            words.push(point.conductance_w_k.to_bits());
+        }
     }
 
     fn ports(&self) -> &[PortSpec] {
@@ -253,34 +254,29 @@ impl Component for ConductanceMatrix {
         for &kelvin in &inputs[..n] {
             temperature(kelvin)?;
         }
-        let loads = self.weighed(&inputs[..n]);
-        self.spread(&loads, outputs);
-        // The entropy into the element, dt sum Q_i / T_i, is minus what it generates. Summed
-        // point by point it cancels between the two sides; `(D u)^T (W D T)` is the same sum
-        // over the jumps, whose terms in a matching contact are each `1 / T_a - 1 / T_b` times
-        // the conductance over `T_a - T_b`, and so of one sign.
-        let inverse: Vec<f64> = inputs[..n].iter().map(|kelvin| 1.0 / kelvin).collect();
-        let inverse_jumps = self.jumps(&inverse);
-        let generated = -dt_s
-            * inverse_jumps
-                .iter()
-                .zip(&loads)
-                .map(|(u, y)| u * y)
-                .sum::<f64>();
-        // The loads sum to zero because each row of D does: the sum of `D^T y` errs by a few
-        // `n eps` of `sum_r |y_r| sum_j |D_rj|`, and the row sums add at most `4 n eps` of the
-        // same (Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed., sec. 3.1).
-        let scale: f64 = loads
-            .iter()
-            .zip(&self.row_size)
-            .map(|(y, size)| y.abs() * size)
-            .sum();
+        outputs[..n].fill(0.0);
+        let (mut generated, mut crossing) = (0.0_f64, 0.0_f64);
+        for point in &self.points {
+            // Both are weighted means of temperatures above zero, by weights that are not
+            // negative and sum to one: above zero themselves.
+            let (hot, cold) = self.at(point, inputs);
+            let rate_w = point.conductance_w_k * (hot - cold);
+            self.spread(point, rate_w, outputs);
+            generated += dt_s * point.conductance_w_k * (hot - cold) * (hot - cold) / (hot * cold);
+            crossing += rate_w.abs();
+        }
+        // The loads sum to `sum_q rate_q (s_a - s_b)_q`, with `s` the sums of a point's weights,
+        // each within 8 eps of one. A load is a sum of at most `depth` products and a port's
+        // energy a sum of its `n` loads, each sum within its length in roundoff units of the
+        // sizes summed (Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed., sec.
+        // 3.1); the two products with dt round once each.
+        let units = (2 * self.depth + n + 18) as f64 * f64::EPSILON;
         Ok(Proposal::Step(Receipt {
             stored_change_j: 0.0,
             dissipated_j: 0.0,
             numerical_loss_j: 0.0,
             entropy_generated_j_per_k: generated,
-            energy_tolerance_j: roundoff((n + self.rows + 2) as f64 * dt_s * scale),
+            energy_tolerance_j: units * dt_s * crossing,
             residual: 0.0,
             tolerance: 0.0,
         }))
@@ -311,7 +307,7 @@ impl PortTangent for ConductanceMatrix {
         bar_inputs: &mut [f64],
         _cx: &Cx<'_>,
     ) -> Result<(), ElementError> {
-        // K = D^T W D with W symmetric, so K^T bar is K bar.
+        // K = D^T W D with W diagonal, so K^T bar is K bar.
         let n = self.widths[0] + self.widths[1];
         self.apply(&bar_outputs[..n], bar_inputs);
         Ok(())

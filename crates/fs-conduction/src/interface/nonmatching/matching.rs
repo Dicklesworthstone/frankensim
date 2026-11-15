@@ -56,8 +56,9 @@ impl Bound {
             let vb = order.map(|i| b.vertices[mapping[i]]);
             let mut basis = [[0.0; 6]; 3];
             for (q, row) in basis.iter_mut().enumerate() {
+                let weights = super::degree_two_weights(q);
                 for i in 0..3 {
-                    row[i] = if i == q { 2.0 / 3.0 } else { 1.0 / 6.0 };
+                    row[i] = weights[i];
                     row[i + 3] = -row[i];
                 }
             }

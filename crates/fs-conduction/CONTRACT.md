@@ -6240,16 +6240,37 @@ temperatures. The loads reach the owner as the nodal outward flux `q` with
 (factored once by Cholesky), so the owner's own Neumann rows put `Q_i` back on
 vertex `i`. What that solve rounds away is in the receipt's numerical loss.
 
+Two trace ports meet through a `TraceContact`: the quadrature points of the
+owner's contact between them, `(T_a - T_b) (v_a - v_b) / R''` integrated by
+the degree-two rule over the traces' common refinement. Each `ContactPoint`
+has up to three points of either trace with their P1 weights there and a
+conductance, its quadrature weight over `R''`: what fs-system's
+`ConductanceMatrix` takes as its interface points.
+
 `ConductionBody::matching_contact(port, other, other_port, offset_m,
-resistance)` states the owner's matching-P1 contact between two trace ports
-as a `TraceContact`: the jumps `D = [I, -P]` and the conductances `W = M / R''`
-that fs-system's `ConductanceMatrix` couples two field heat ports with. `P`
-pairs each point of side A with the point of side B at the same coordinates,
-bit for bit, after `offset_m` is added to B's. `W` takes its entries from
-`interface::matching::face_conductance`, the function `ThermalInterfaces::
-assemble_into` now takes its own from, on A's face areas. It refuses a mean
-port, traces that do not share every point and every face, and matched faces
-whose normals do not oppose (the owner's own band).
+resistance)` is the contact of traces that match. Each point of side A must
+have the coordinates of exactly one point of side B, bit for bit, after
+`offset_m` is added to B's, and every face of A must be a face of B. Each
+face is then its own overlap triangle, with three points by the rule the
+owner uses for exact pairs (`interface::nonmatching::degree_two_weights`,
+which `matching_quadrature` now takes its rows from) and a third of A's
+face area each. The degree-two rule integrates a product of two P1
+functions exactly, so the assembled matrix is the owner's matching-P1
+assembly to rounding. It refuses a mean port, traces that do not share
+every point and every face, and matched faces whose normals do not oppose
+(the owner's own band).
+
+`ConductionBody::mapped_contact(cx, port, other, other_port, offset_m,
+resistance, options)` is the contact of traces that need not match, under
+`NonmatchingOptions`. The common refinement is the owner's: the core of
+`interface::nonmatching::Bound::build` is now `Bound::refine`, over two lists
+of faces that need not share a mesh, which `build` calls with its one mesh's
+two sides and `trace_overlaps` with the two bodies' traces, the same
+operations in the same order. Its refusals are the owner's: traces that
+leave one plane or do not face each other, facets of one side that overlap,
+a face that is not covered once, an overlap whose basis values leave
+`[0, 1]` beyond the tolerance, and a pair-test or overlap budget that is
+exceeded.
 
 The state is the nodal temperature field; the stored energy is `1ᵀ C T` with
 the owner's prepared capacitance.
@@ -6302,30 +6323,52 @@ matching-P1 contact (`ThermalInterfaces` on one mesh with coincident traces) at
 the same steps. Each pair run closes its energy and ledger to 1e-9 of the
 stored energy.
 
-A fourth path joins the two bodies trace to trace, on matching 2 x 2 cross
-grids, through `matching_contact` from the same card as a `ConductanceMatrix`.
-That is the owner's contact problem on one mesh, the same unknowns under the
-same equations, so no order is claimed. The claims, declared in the test: on
-every rung the energy that crossed (the heat the kernel booked out of A's
-port) agrees with the owner's within 1e-9 J, every vertex's end temperature
-within 1e-9 K, and the kernel refuses no step. Measured on the four rungs
-(Mac, debug): 8.0e-13, 1.1e-13, 2.3e-13 and 1.7e-13 J, and 1.1e-12, 2.3e-13,
-1.1e-13 and 4.5e-13 K; through the patch means the crossing differed from the
-owner's by 4.6e-2 J on the coarsest rung and 2.9e-5 J on the finest. The least
-entropy the contact generated in one step was 1.2e-2, 2.6e-3, 6.6e-4 and
-1.6e-4 J/K: side A is hotter than side B at every point throughout, so no term
-of the nodal sum can be negative. The matching contact's jumps are one point
-of A against one of B, its conductances are symmetric to the bit and sum to
-the patch's `A / R''`, and it refuses a mean port, a misplaced trace, a finer
-cross grid and a trace that faces the same way.
+Two more paths join the two bodies trace to trace through a `TraceContact`
+from the same card as a `ConductanceMatrix`: (d) on matching 2 x 2 cross
+grids through `matching_contact`, against the owner's matching-P1 contact on
+one mesh, and (e) on 2 x 2 against 3 x 3 cross grids through
+`mapped_contact`, against the owner's non-matching contact on one mesh
+(`ThermalInterfaces::with_nonmatching`). Either is the owner's own problem,
+the same unknowns under the same equations, so no order is claimed. The
+claims, declared in the tests: on every rung the energy that crossed (the
+heat the kernel booked out of A's port) agrees with the owner's within
+1e-9 J, every vertex's end temperature within 1e-9 K, and the kernel refuses
+no step. Measured on the four rungs (Mac, debug), (d): 8.0e-13, 2.3e-13,
+2.3e-13 and 1.1e-13 J, and 1.1e-12, 2.3e-13, 1.1e-13 and 4.5e-13 K; (e):
+5.7e-13, 2.8e-13, 3.4e-13 and 2.8e-13 J, and 5.7e-13, 3.4e-13, 1.7e-13 and
+2.8e-13 K. Through the patch means, path (a), the crossing differed from the
+owner's by 4.6e-2 J on the coarsest rung and 2.9e-5 J on the finest.
+
+The contact generates entropy where the heat crosses, and the kernel books
+the ports' entropy by the nodal rule; the tests print both on every rung,
+with no claim on their difference. Generated: 0.243, 0.202, 0.188 and
+0.184 J/K on path (d) and 0.245, 0.202, 0.188 and 0.184 J/K on path (e). The
+nodal sum over the contact's two ports is off that by +3.2e-5, +1.9e-5,
++7.7e-6 and +2.3e-6 J/K on (d), and by -2.7e-5, -1.3e-5, -3.1e-6 and
+-6.4e-7 J/K on (e).
+
+The matching contact's matrix, assembled by the element from its 24
+quadrature points, equals the owner's matching-P1 assembly written out by
+hand (`A / (6 R'')` and `A / (12 R'')` on every face) entry by entry within
+40 roundoff units of the entry, the bound derived in the test from the
+number of terms on either side; the largest relative difference is 1.7e-16
+over the 324 entries. It refuses a mean port, a misplaced trace, a finer
+cross grid and a trace that faces the same way. The mapped contact of the
+2 x 2 and 3 x 3 traces has 144 quadrature points whose conductances sum to
+the patch's `A / R''` within 1e-9; its matrix is symmetric with rows that sum
+to zero, each within 64 roundoff units; it passes the kit and the tangent
+check with its transpose; and it refuses a mean port and traces a slab
+apart ("contact vertices leave the declared plane tolerance").
 
 Not covered: the entropy generated inside the body is reported as zero, a
 lower bound. There is no snapshot codec. Contact inside one body, radiation,
-nonlinear and adaptive owners are refused or not wrapped. Two traces meet only
-where they match point for point and face for face: the mapped transfer
-between traces that do not match, and its adjoint test, are not built (bead
-.5.2). A field heat port names no
-trace, so nothing checks that a `TraceContact` is bonded to the two ports it
-was built for. The matching contact takes one resistance for the whole patch,
-with no per-face map, and no test builds traces that share their points but
-not their faces.
+nonlinear and adaptive owners are refused or not wrapped. A contact between
+two bodies takes one resistance for the whole patch, with no per-face map
+and no temperature dependence. A field heat port names no trace, so nothing
+checks that a `TraceContact` is bonded to the two ports it was built for.
+No test builds traces that share their points but not their faces, or
+traces that are coplanar but cover each other only in part. A pair of
+bodies is slow in a debug build, because every Newton column of a body is a
+linearization and a Krylov solve of its own: `tests/conduction_pair.rs` took
+354 s single-threaded on 2026-11-15 (142 s before path (e) and the mapped
+contact were added).

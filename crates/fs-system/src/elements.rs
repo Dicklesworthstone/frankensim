@@ -77,7 +77,7 @@ use crate::ledger::Sum;
 mod node;
 pub use node::HeatNode;
 mod conductance_matrix;
-pub use conductance_matrix::ConductanceMatrix;
+pub use conductance_matrix::{ConductanceMatrix, InterfacePoint};
 mod controlled_source;
 pub use controlled_source::ControlledSource;
 mod dirac;

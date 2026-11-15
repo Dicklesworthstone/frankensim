@@ -16,9 +16,12 @@
 //! that vertex's P1 function, and returns the END temperature at each. The
 //! loads reach the owner as the nodal outward flux `q` with `M q = -Q`, `M`
 //! the patch's consistent face mass, so the owner's own Neumann rows put
-//! `Q_i` on vertex `i` again. Two bodies whose traces match meet through
-//! [`ConductionBody::matching_contact`], which states the owner's
-//! matching-P1 contact between them as jumps and conductances.
+//! `Q_i` on vertex `i` again. Two bodies meet through
+//! [`ConductionBody::matching_contact`] where their traces match and through
+//! [`ConductionBody::mapped_contact`] where they do not: either states the
+//! owner's contact between them as the quadrature points of the traces'
+//! common refinement, each with its weights on both traces and its
+//! conductance.
 //!
 //! The step is the owner's unchanged `advance`; the tangent is the owner's
 //! `linearize_step` with no Robin port, driven by the same nodal loads.
@@ -27,8 +30,8 @@
 //! at different temperatures) is reported as zero, a lower bound. Robin,
 //! Dirichlet and contact traces, volumetric sources, temperature-dependent
 //! conductivity and sheet conduction are refused, not wrapped. Traces that
-//! do not match point for point and face for face are refused: the mapped
-//! transfer between them is not built. The state has no snapshot codec.
+//! are not coplanar, or do not cover each other, are refused. The state has
+//! no snapshot codec.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
@@ -37,7 +40,10 @@ use fs_exec::Cx;
 use fs_ports::StableId;
 use fs_ports::component::{Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt};
 
-use crate::interface::{InterfaceResistance, face_conductance};
+use crate::interface::InterfaceResistance;
+use crate::interface::nonmatching::{
+    NonmatchingOptions, TraceFace, degree_two_weights, trace_overlaps,
+};
 use crate::transient::backward_euler::{BackwardEuler, StepConfig, StepLinearization};
 use crate::{ConductionError, ConductionProblem, ScalarField, ThermalBc, ThermalBoundary};
 
@@ -123,26 +129,34 @@ impl Patch {
     }
 }
 
-/// The owner's matching-P1 contact between two trace ports, stated as the
-/// jumps and conductances a `ConductanceMatrix` of fs-system couples two
-/// field heat ports with: the loads into the element are
-/// `[Q_a; Q_b] = D^T W D [T_a; T_b]`.
+/// One quadrature point of a contact between two traces: where it lies on
+/// either trace, as up to three points of the trace and their P1 weights
+/// there, and its conductance, its quadrature weight over `R''`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContactPoint {
+    /// Points of side A's trace and their weights at this point.
+    pub a: [(usize, f64); 3],
+    /// Points of side B's trace and their weights at this point.
+    pub b: [(usize, f64); 3],
+    /// The conductance of the contact at this point [W/K].
+    pub conductance_w_k: f64,
+}
+
+/// The owner's contact between two trace ports, stated as the interface
+/// points a `ConductanceMatrix` of fs-system couples two field heat ports
+/// through: the degree-two quadrature of `(T_a - T_b) (v_a - v_b) / R''` over
+/// the traces' common refinement.
 ///
-/// Built by [`ConductionBody::matching_contact`].
+/// Built by [`ConductionBody::matching_contact`] and
+/// [`ConductionBody::mapped_contact`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraceContact {
     /// Points of side A's trace.
     pub width_a: usize,
     /// Points of side B's trace.
     pub width_b: usize,
-    /// `D`, row-major, `width_a` rows over the `width_a + width_b` points,
-    /// A's first: row `r` is `T_a[r] - T_b[p]`, with `p` the point of B at
-    /// the place of A's point `r`.
-    pub jump: Vec<f64>,
-    /// `W` [W/K], row-major `width_a x width_a`: the patch's consistent P1
-    /// face mass over the contact resistance, the entries of the owner's
-    /// own contact assembly.
-    pub weights: Vec<f64>,
+    /// Three quadrature points for every triangle of the common refinement.
+    pub points: Vec<ContactPoint>,
 }
 
 /// A backward-Euler finite-element body whose ports are named boundary patches.
@@ -281,10 +295,11 @@ impl<'m> ConductionBody<'m> {
     /// its mesh position plus `offset_m`. The traces match when every point
     /// of A has the coordinates of exactly one point of B, bit for bit, and
     /// every face of A's patch is a face of B's with the opposite normal, as
-    /// the owner's contact requires of its face pairs. The conductances are the
-    /// entries the owner's own contact assembly puts on those faces, with
-    /// A's face areas: bonded to the two ports through a `ConductanceMatrix`,
-    /// they make the pair the owner's contact problem on one mesh.
+    /// the owner's contact requires of its face pairs. Each face is its own
+    /// overlap triangle: three quadrature points by the owner's rule for
+    /// exact pairs, each a third of A's face area over the resistance. Bonded
+    /// to the two ports through a `ConductanceMatrix`, they make the pair
+    /// the owner's contact problem on one mesh.
     ///
     /// # Errors
     /// [`ConductionError::Config`] when a port is a mean port, the traces do
@@ -368,26 +383,96 @@ impl<'m> ConductionBody<'m> {
             )));
         }
         let conductance_density = 1.0 / resistance.value_m2_k_per_w();
-        let mut weights = vec![0.0; n_a * n_a];
+        let mut points = Vec::with_capacity(3 * a.faces.len());
         for (face, &(_, area)) in a.faces.iter().zip(&self.patches[port].faces) {
-            for (local_a, &point_a) in face.iter().enumerate() {
-                for (local_b, &point_b) in face.iter().enumerate() {
-                    weights[point_a * n_a + point_b] +=
-                        face_conductance(conductance_density, area, local_a, local_b);
-                }
+            for q in 0..3 {
+                let weights = degree_two_weights(q);
+                points.push(ContactPoint {
+                    a: [0, 1, 2].map(|i| (face[i], weights[i])),
+                    b: [0, 1, 2].map(|i| (partner[face[i]], weights[i])),
+                    conductance_w_k: conductance_density * (area / 3.0),
+                });
             }
-        }
-        let mut jump = vec![0.0; n_a * (n_a + n_b)];
-        for (row, &point_b) in partner.iter().enumerate() {
-            jump[row * (n_a + n_b) + row] = 1.0;
-            jump[row * (n_a + n_b) + n_a + point_b] = -1.0;
         }
         Ok(TraceContact {
             width_a: n_a,
             width_b: n_b,
-            jump,
-            weights,
+            points,
         })
+    }
+
+    /// The owner's contact between trace port `port` of this body (side A)
+    /// and trace port `other_port` of `other` (side B) where the traces need
+    /// not match: the quadrature points of their common refinement, through
+    /// the contact resistance `resistance`.
+    ///
+    /// `offset_m` places `other` in this body's frame, as for
+    /// [`Self::matching_contact`]. The refinement is the owner's own, the
+    /// routine that binds a `NonmatchingSurface` on one mesh, under
+    /// `options` and with its refusals: traces that leave one plane, do not
+    /// face each other, overlap themselves or do not cover each other, and
+    /// a budget that is exceeded.
+    ///
+    /// # Errors
+    /// [`ConductionError::Config`] when a port is a mean port;
+    /// [`ConductionError::Interface`] for the owner's refusals;
+    /// [`ConductionError::Cancelled`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn mapped_contact(
+        &self,
+        cx: &Cx<'_>,
+        port: usize,
+        other: &ConductionBody<'_>,
+        other_port: usize,
+        offset_m: [f64; 3],
+        resistance: &InterfaceResistance,
+        options: NonmatchingOptions,
+    ) -> Result<TraceContact, ConductionError> {
+        let (Some(a), Some(b)) = (
+            self.patches[port].trace.as_ref(),
+            other.patches[other_port].trace.as_ref(),
+        ) else {
+            return Err(invalid(
+                "a mapped contact joins two trace ports; a mean port has one temperature".into(),
+            ));
+        };
+        let faces_a = self.trace_faces(port, a, [0.0; 3]);
+        let faces_b = other.trace_faces(other_port, b, offset_m);
+        let conductance_density = 1.0 / resistance.value_m2_k_per_w();
+        let points = trace_overlaps(cx, "trace contact", &faces_a, &faces_b, &options)?
+            .into_iter()
+            .map(|(a, b, weight_m2)| ContactPoint {
+                a,
+                b,
+                conductance_w_k: conductance_density * weight_m2,
+            })
+            .collect();
+        Ok(TraceContact {
+            width_a: a.vertices.len(),
+            width_b: b.vertices.len(),
+            points,
+        })
+    }
+
+    /// The faces of trace port `port` over the trace's own points, placed
+    /// `offset_m` from where the mesh has them.
+    fn trace_faces(&self, port: usize, trace: &Trace, offset_m: [f64; 3]) -> Vec<TraceFace> {
+        let positions = self.problem.mesh.positions();
+        trace
+            .faces
+            .iter()
+            .zip(&trace.normals)
+            .zip(&self.patches[port].faces)
+            .map(|((&vertices, &normal), &(mesh_vertices, area))| TraceFace {
+                vertices,
+                points: mesh_vertices.map(|vertex| {
+                    let [x, y, z] = positions[vertex];
+                    [x + offset_m[0], y + offset_m[1], z + offset_m[2]]
+                }),
+                normal,
+                area,
+            })
+            .collect()
     }
 
     /// The owner's boundary with each port's heat applied on its patch: a
