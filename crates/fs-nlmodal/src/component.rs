@@ -47,9 +47,11 @@
 //!
 //! No claim: the narrow-band observer transfers of the owner are not used (an observer is a probe of
 //! its own), so a model carrying one is refused; the heat row is quadratic in the efforts, so the
-//! class is [`Class::Smooth`]; one propose clones the owner's model and allocates its workspace and
-//! the force bank, and one tangent call allocates the gains and takes each damped mode's step once
-//! more; the owner's statements (exact for a held force, the Nyquist
+//! class is [`Class::Smooth`]; a propose and a tangent call share one scratch: a copy of the
+//! owner's model (each propose overwrites its states with the step's start), its workspace, and the
+//! force and gain banks, all made with the structure, so a step allocates nothing here (a call made
+//! while another holds the scratch, which a system does not do, takes fresh ones); one tangent call
+//! takes each damped mode's step once more; the owner's statements (exact for a held force, the Nyquist
 //! admission of its nominal clock, its budgets) are unchanged by the wrapping. The port flows are
 //! endpoint differences `q1 - q0`, while the owner books its work on the increment it added (which
 //! it keeps because a subtraction of endpoints can erase a small work); the owner does not publish
@@ -58,6 +60,7 @@
 //! drifting under a constant force), that tolerance is wide against the step's work, and a wrapper
 //! leak below it would show in the ledger's accepted-defect account, not in the audit.
 
+use core::cell::RefCell;
 use core::num::NonZeroUsize;
 
 use fs_exec::Cx;
@@ -258,14 +261,38 @@ pub struct ModalStructure {
     widths: Vec<NonZeroUsize>,
     /// Whether each attachment's end flow is returned on a signal output after `heat`.
     tells_ends: bool,
+    /// The buffers one call works in. Nothing in them outlives the call.
+    scratch: RefCell<Scratch>,
 }
 
-/// The step's gains in each mode's held force, at one iterate.
-struct Gains {
+/// The buffers of one propose or tangent call, made once with the structure.
+#[derive(Debug, Clone)]
+struct Scratch {
+    /// A copy of the owner's model; each propose overwrites its states with the step's start.
+    model: ModalAcousticTimeModel,
+    workspace: ModalAcousticWorkspace,
+    /// Per mode: the held generalized force of the iterate.
+    force: Vec<f64>,
+    /// Per mode: the force of a tangent's direction, or the adjoint of the force in `vjp`.
+    d_force: Vec<f64>,
     /// Per mode: the displacement and velocity a unit held force adds to the step.
     unit: Vec<ModalAcousticState>,
     /// Per mode: the derivative of the step's heat in its held force [J sqrt(kg)/N].
     heat: Vec<f64>,
+}
+
+impl Scratch {
+    fn new(model: &ModalAcousticTimeModel) -> Self {
+        let modes = model.modes().len();
+        Self {
+            model: model.clone(),
+            workspace: ModalAcousticWorkspace::new(model),
+            force: vec![0.0; modes],
+            d_force: vec![0.0; modes],
+            unit: vec![ModalAcousticState::default(); modes],
+            heat: vec![0.0; modes],
+        }
+    }
 }
 
 impl ModalStructure {
@@ -319,6 +346,7 @@ impl ModalStructure {
         let heat = StableId::new("heat").map_err(ModalStructureRefusal::Identifier)?;
         ports.push(PortSpec::heat(heat, PortRole::EffortIn).map_err(ModalStructureRefusal::Port)?);
         fs_ports::component::PortLayout::new(&ports).map_err(ModalStructureRefusal::Port)?;
+        let scratch = RefCell::new(Scratch::new(&model));
         Ok(Self {
             model,
             weights,
@@ -326,6 +354,7 @@ impl ModalStructure {
             ports,
             widths,
             tells_ends: false,
+            scratch,
         })
     }
 
@@ -409,27 +438,36 @@ impl ModalStructure {
         }
     }
 
+    /// Run `call` in the structure's scratch, or in fresh buffers while another call holds it.
+    fn with_scratch<R>(&self, call: impl FnOnce(&mut Scratch) -> R) -> R {
+        match self.scratch.try_borrow_mut() {
+            Ok(mut scratch) => call(&mut scratch),
+            Err(_) => call(&mut Scratch::new(&self.model)),
+        }
+    }
+
     /// Each mode's generalized force under the rows' efforts: `f_k = sum_r s_rk e_r`.
-    fn forces(&self, efforts: &[f64]) -> Vec<f64> {
+    fn forces_into(&self, efforts: &[f64], force: &mut [f64]) {
         let modes = self.modes();
-        let mut force = vec![0.0_f64; modes];
+        force.fill(0.0);
         for (row, &effort) in efforts[..self.rows].iter().enumerate() {
             let weights = &self.weights[row * modes..(row + 1) * modes];
             for (f, &w) in force.iter_mut().zip(weights) {
                 *f += w * effort;
             }
         }
-        force
     }
 
-    /// The step's gains at the iterate `inputs` from `old` over `dt_s`.
+    /// The step's gains at the iterate `inputs` from `old` over `dt_s`, into the scratch's `unit`
+    /// and `heat` (and the iterate's forces into its `force`).
     fn gains(
         &self,
+        scratch: &mut Scratch,
         old: &[ModalAcousticState],
         dt_s: f64,
         inputs: &[f64],
         cx: &Cx<'_>,
-    ) -> Result<Gains, ModalStructureRefusal> {
+    ) -> Result<(), ModalStructureRefusal> {
         cx.checkpoint()
             .map_err(|_| ModalStructureRefusal::Cancelled)?;
         self.check_states(old)?;
@@ -438,10 +476,12 @@ impl ModalStructure {
             return Err(ModalStructureRefusal::Temperature { kelvin });
         }
         let modes = self.modes();
-        let mut unit = vec![ModalAcousticState::default(); modes];
-        self.model.unit_force_response_into(dt_s, &mut unit)?;
-        let force = self.forces(inputs);
-        let mut heat = vec![0.0_f64; modes];
+        let Scratch {
+            force, unit, heat, ..
+        } = scratch;
+        self.model.unit_force_response_into(dt_s, unit)?;
+        self.forces_into(inputs, force);
+        heat.fill(0.0);
         for k in 0..modes {
             if self.model.damping_rate_per_s(k) == 0.0 {
                 continue;
@@ -461,7 +501,7 @@ impl ModalStructure {
             let moved = q1 - old[k].displacement_m_sqrt_kg;
             heat[k] = moved + force[k] * gq - v1 * gv - omega * omega * q1 * gq;
         }
-        Ok(Gains { unit, heat })
+        Ok(())
     }
 }
 
@@ -510,17 +550,30 @@ impl Component for ModalStructure {
         if !(kelvin.is_finite() && kelvin > 0.0) {
             return Err(ModalStructureRefusal::Temperature { kelvin });
         }
-        let force = self.forces(inputs);
-
-        let mut model = self.model.clone();
-        model.restore_states(old)?;
-        let mut workspace = ModalAcousticWorkspace::new(&model);
-        let frame = model.step_duration_into(&force, dt_s, &mut workspace)?;
-        // The owner's heat allowance is not part of the tolerance below: the same `D` enters the
-        // audit through the heat port and through the numerical loss, so its error cancels.
-        let (work_j, heat_j) = (frame.input_work_j, frame.viscous_dissipation_j);
-        new.clear();
-        new.extend_from_slice(model.states());
+        // The owner's step from `old` under the held forces, and the endpoints' share of the
+        // tolerance below, `sum_k |f_k| (|q0_k| + |q1_k|)`.
+        let (work_j, heat_j, endpoints_j) = self.with_scratch(|scratch| {
+            let Scratch {
+                model,
+                workspace,
+                force,
+                ..
+            } = scratch;
+            self.forces_into(inputs, force);
+            model.restore_states(old)?;
+            let frame = model.step_duration_into(force, dt_s, workspace)?;
+            // The owner's heat allowance is not part of the tolerance below: the same `D` enters
+            // the audit through the heat port and through the numerical loss, so its error cancels.
+            let (work_j, heat_j) = (frame.input_work_j, frame.viscous_dissipation_j);
+            new.clear();
+            new.extend_from_slice(model.states());
+            let mut endpoints_j = 0.0_f64;
+            for k in 0..modes {
+                endpoints_j += force[k].abs()
+                    * (old[k].displacement_m_sqrt_kg.abs() + new[k].displacement_m_sqrt_kg.abs());
+            }
+            Ok::<_, ModalStructureRefusal>((work_j, heat_j, endpoints_j))
+        })?;
 
         // What the owner's tolerance has to cover, term by term:
         // - the kernel's f64 port products against the owner's work. The owner books
@@ -554,11 +607,6 @@ impl Component for ModalStructure {
                 outputs[rows + 1 + row] = end;
             }
         }
-        let mut endpoints_j = 0.0_f64;
-        for k in 0..modes {
-            endpoints_j += force[k].abs()
-                * (old[k].displacement_m_sqrt_kg.abs() + new[k].displacement_m_sqrt_kg.abs());
-        }
         let before_j = self.model.energy_j(old)?;
         let after_j = self.model.energy_j(new)?;
         let stored_change_j = after_j - before_j;
@@ -589,27 +637,35 @@ impl PortTangent for ModalStructure {
         d_outputs: &mut [f64],
         cx: &Cx<'_>,
     ) -> Result<(), ModalStructureRefusal> {
-        let gains = self.gains(old, dt_s, inputs, cx)?;
-        let (modes, rows) = (self.modes(), self.rows);
-        let d_force = self.forces(d_inputs);
-        let mut heat = 0.0_f64;
-        for (slope, d) in gains.heat.iter().zip(&d_force) {
-            heat += slope * d;
-        }
-        for row in 0..rows {
-            let weights = &self.weights[row * modes..(row + 1) * modes];
-            let (mut mean, mut end) = (0.0_f64, 0.0_f64);
-            for ((w, unit), d) in weights.iter().zip(&gains.unit).zip(&d_force) {
-                mean += w * (unit.displacement_m_sqrt_kg * d);
-                end += w * (unit.velocity_m_sqrt_kg_per_s * d);
+        self.with_scratch(|scratch| {
+            self.gains(scratch, old, dt_s, inputs, cx)?;
+            let (modes, rows) = (self.modes(), self.rows);
+            let Scratch {
+                d_force,
+                unit: gains_unit,
+                heat: gains_heat,
+                ..
+            } = scratch;
+            self.forces_into(d_inputs, d_force);
+            let mut heat = 0.0_f64;
+            for (slope, d) in gains_heat.iter().zip(d_force.iter()) {
+                heat += slope * d;
             }
-            d_outputs[row] = mean / dt_s;
-            if self.tells_ends {
-                d_outputs[rows + 1 + row] = end;
+            for row in 0..rows {
+                let weights = &self.weights[row * modes..(row + 1) * modes];
+                let (mut mean, mut end) = (0.0_f64, 0.0_f64);
+                for ((w, unit), d) in weights.iter().zip(gains_unit.iter()).zip(d_force.iter()) {
+                    mean += w * (unit.displacement_m_sqrt_kg * d);
+                    end += w * (unit.velocity_m_sqrt_kg_per_s * d);
+                }
+                d_outputs[row] = mean / dt_s;
+                if self.tells_ends {
+                    d_outputs[rows + 1 + row] = end;
+                }
             }
-        }
-        d_outputs[rows] = -heat / dt_s;
-        Ok(())
+            d_outputs[rows] = -heat / dt_s;
+            Ok(())
+        })
     }
 
     fn vjp(
@@ -621,31 +677,38 @@ impl PortTangent for ModalStructure {
         bar_inputs: &mut [f64],
         cx: &Cx<'_>,
     ) -> Result<(), ModalStructureRefusal> {
-        let gains = self.gains(old, dt_s, inputs, cx)?;
-        let (modes, rows) = (self.modes(), self.rows);
-        let mut bar_force = vec![0.0_f64; modes];
-        for (k, bar) in bar_force.iter_mut().enumerate() {
-            let (mut mean, mut end) = (0.0_f64, 0.0_f64);
-            for row in 0..rows {
-                let weight = self.weights[row * modes + k];
-                mean += weight * bar_outputs[row];
-                if self.tells_ends {
-                    end += weight * bar_outputs[rows + 1 + row];
+        self.with_scratch(|scratch| {
+            self.gains(scratch, old, dt_s, inputs, cx)?;
+            let (modes, rows) = (self.modes(), self.rows);
+            let Scratch {
+                d_force: bar_force,
+                unit,
+                heat,
+                ..
+            } = scratch;
+            for (k, bar) in bar_force.iter_mut().enumerate() {
+                let (mut mean, mut end) = (0.0_f64, 0.0_f64);
+                for row in 0..rows {
+                    let weight = self.weights[row * modes + k];
+                    mean += weight * bar_outputs[row];
+                    if self.tells_ends {
+                        end += weight * bar_outputs[rows + 1 + row];
+                    }
                 }
+                *bar = unit[k].displacement_m_sqrt_kg * mean / dt_s
+                    - heat[k] * bar_outputs[rows] / dt_s
+                    + unit[k].velocity_m_sqrt_kg_per_s * end;
             }
-            *bar = gains.unit[k].displacement_m_sqrt_kg * mean / dt_s
-                - gains.heat[k] * bar_outputs[rows] / dt_s
-                + gains.unit[k].velocity_m_sqrt_kg_per_s * end;
-        }
-        for (row, bar_input) in bar_inputs[..rows].iter_mut().enumerate() {
-            let weights = &self.weights[row * modes..(row + 1) * modes];
-            let mut sum = 0.0_f64;
-            for (w, b) in weights.iter().zip(&bar_force) {
-                sum += w * b;
+            for (row, bar_input) in bar_inputs[..rows].iter_mut().enumerate() {
+                let weights = &self.weights[row * modes..(row + 1) * modes];
+                let mut sum = 0.0_f64;
+                for (w, b) in weights.iter().zip(bar_force.iter()) {
+                    sum += w * b;
+                }
+                *bar_input = sum;
             }
-            *bar_input = sum;
-        }
-        bar_inputs[rows] = 0.0;
-        Ok(())
+            bar_inputs[rows] = 0.0;
+            Ok(())
+        })
     }
 }

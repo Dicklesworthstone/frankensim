@@ -20,12 +20,20 @@
 //! reactions may differ by up to the two tolerances. The bound is bead
 //! .6.4's: each coordinate within -120 dB of its full scale over the run.
 //!
+//! **Allocations.** A counting allocator, per thread so that the other test
+//! running beside it is not counted, shows that no step of the graph after
+//! the first allocates, in contact or out of it. The first step is not
+//! counted (it allocated 8 times in run i439). `LinearImpactSystem` itself
+//! allocates on every step (6 times in run i439) and is not gated here.
+//!
 //! **Not covered.** Not the live drum: its finite-element heads, its air
 //! cavity (the volume springs between the heads) and its radiation are not
-//! in this graph, and the tip law is a synthetic one. No timing, no
-//! allocation count, and no claim about the planner's plan.
+//! in this graph, and the tip law is a synthetic one. No timing and no claim
+//! about the planner's plan.
 
 use core::num::NonZeroUsize;
+use std::alloc::{GlobalAlloc, Layout, System as SystemAllocator};
+use std::cell::Cell;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_couple::render::plate::impact::linear::{LinearImpactConfig, LinearImpactSystem};
@@ -43,6 +51,64 @@ use fs_nlmodal::component::{
 };
 use fs_ports::{PortKind, StableId};
 use fs_system::{NodeId, RouteTemperature, System, SystemBuilder, heat_sink};
+
+struct Counting;
+
+// Tests run side by side, so each thread counts its own allocations.
+thread_local! {
+    static TRACKING: Cell<bool> = const { Cell::new(false) };
+    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+}
+
+fn count() {
+    // A thread that is being torn down has no cell to read: it is not
+    // counting.
+    if TRACKING.try_with(Cell::get).unwrap_or(false) {
+        let _ = ALLOCATIONS.try_with(|count| count.set(count.get() + 1));
+    }
+}
+
+/// How many times `f` allocated on this thread.
+fn allocations_of(f: impl FnOnce()) -> usize {
+    ALLOCATIONS.with(|count| count.set(0));
+    TRACKING.with(|tracking| tracking.set(true));
+    f();
+    TRACKING.with(|tracking| tracking.set(false));
+    ALLOCATIONS.with(Cell::get)
+}
+
+// SAFETY: this test-only allocator delegates every operation to the system
+// allocator unchanged. The only addition is bookkeeping in two thread-local
+// cells with constant initialisers, which neither allocates nor touches the
+// memory being delegated.
+#[allow(unsafe_code)]
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        count();
+        // SAFETY: the caller's valid layout is forwarded.
+        unsafe { SystemAllocator.alloc(layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        count();
+        // SAFETY: the caller's valid layout is forwarded.
+        unsafe { SystemAllocator.alloc_zeroed(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: pointer and layout came from the delegated allocator.
+        unsafe { SystemAllocator.dealloc(ptr, layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        count();
+        // SAFETY: the caller's pointer, layout and size are forwarded.
+        unsafe { SystemAllocator.realloc(ptr, layout, new_size) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: Counting = Counting;
 
 /// The air's temperature, of both heat sinks [K].
 const AIR_K: f64 = 293.15;
@@ -414,4 +480,31 @@ fn a_stick_strike_on_the_kernel_follows_the_prepared_impact_image() {
             "coordinate {k}: {value} dB re full scale"
         );
     }
+}
+
+/// Bead .6.4: a step of the graph allocates nothing once the first step has
+/// been taken, in contact or out of it.
+#[test]
+fn a_warm_step_of_the_strike_graph_allocates_nothing() {
+    let dt = 1.0 / f64::from(RATE_HZ);
+    let Graph {
+        mut system,
+        contact,
+        ..
+    } = graph();
+    let mut touching = 0_usize;
+    with_cx(|cx| {
+        // Not counted: the first step (8 allocations in run i439).
+        system.step(dt, cx).unwrap();
+        for n in 1..SAMPLES {
+            let allocations = allocations_of(|| {
+                system.step(dt, cx).unwrap();
+            });
+            assert_eq!(allocations, 0, "step {n} allocated {allocations} times");
+            if system.state::<ContactState>(contact).unwrap().reaction_n > 0.0 {
+                touching += 1;
+            }
+        }
+    });
+    assert!(touching > 0, "the stick never touched the head");
 }

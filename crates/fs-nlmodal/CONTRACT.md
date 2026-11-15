@@ -765,8 +765,14 @@ Its composition-kernel slice is `crates/fs-system/tests/loaded_modal_slice.rs`
 
 ## No-claim boundaries
 
-- `ModalStructure` clones the owner's model and allocates its workspace in every proposal,
-  allocates its gains and takes each damped mode's step once more in every tangent call, and
+- `ModalStructure` proposes and takes tangents in one scratch made with the structure: a copy
+  of the owner's model, whose states each proposal overwrites with the step's start, its
+  workspace, and the force and gain banks. A call made while another holds the scratch, which
+  a system does not do, works in fresh buffers. So a step allocates nothing in it. This is
+  counted, with the kernel and a contact, by fs-couple's `tests/drum_strike_graph.rs`: no step
+  of that graph after the first allocates. The outputs are unchanged by the scratch: over
+  that test's 480 steps every sample's bits hashed the same with it as with the earlier clone
+  per call (run i439). Every tangent call takes each damped mode's step once more. It
   claims nothing the owner's step does not: exact for a held
   force, modes admitted below the Nyquist guard of the model's nominal clock, the owner's
   budgets. It adds no observer, radiation or contact law.
