@@ -192,7 +192,9 @@ fn independently_meshed_plate_pair_matches_dense_mass_response_and_continues_bot
     let positive_rows: Vec<_> = points.map(coarse_row).into_iter().collect();
     let negative_rows = fine_rows();
     for restitution in [0.0, 0.4, 1.0] {
-        let mut reference = None;
+        // Typed here: inferred from its use below, it overflows the trait
+        // search on macOS, where objc2's `Retained` also implements `IntoIterator`.
+        let mut reference: Option<(Vec<f64>, Vec<f64>)> = None;
         for scene in 0..2 {
             let shift = if scene == 0 { [0.0, 0.0] } else { [3.5, -2.25] };
             let order = if scene == 0 { [0, 1, 2] } else { [2, 0, 1] };
@@ -392,7 +394,8 @@ fn original_support_cross_inertia_and_redundant_contacts_preserve_total_motion()
     modified.push(1, 3, 0.01);
     modified.push(3, 1, 0.01);
     let other_full = modified.assemble();
-    let mut reference = None;
+    // Typed here for the same reason as the restitution test's reference.
+    let mut reference: Option<(Vec<f64>, Vec<f64>, f64)> = None;
     for duplicate in [false, true] {
         let points = if duplicate {
             vec![[1.2, -0.7], [1.2, -0.7], [2.2, -0.7]]
