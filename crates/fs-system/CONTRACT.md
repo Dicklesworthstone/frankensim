@@ -3023,6 +3023,22 @@ the same complete native trial and source-support admission as proposals;
 derivatives cannot succeed outside the original physical map's support.
 There are no finite-difference derivatives or substitute integration formulas.
 
+The end of a step. The step is exact for a held input, not the midpoint rule,
+so the default `Component::end_of_step` promise (the midpoint relation) is not
+this owner's: its ports answer `EndOfStep::Untold`, and a system does not join
+one to a load line. `publishing_ends()` adds one signal output per power port
+after `heat`, `<id>.end`, of width one, carrying that port's output at the end
+state of the same native step, `y1 = G^T grad H(x1)`; the port then answers
+`EndOfStep::Told` with it, and a load line that reads ends (fs-dcontact's
+contact, fs-tribo's friction) may be joined to it. An end whose name repeats a
+declared port (`a.end` beside `a`) is refused. Publishing changes neither the
+step, nor the mean ports, nor the heat, bit for bit. The tangent's end rows are
+`d y1 / d u` in the input direction at the call's fixed start state, not
+derivatives in the start state: the step is affine in its held inputs and the
+output is linear in the state, so column `j` is the end output of a step of
+the same duration from rest under a unit input on port `j`, and each tangent
+call takes those `m` extra native steps. The temperature's column is zero.
+
 Caller state, outputs and derivative buffers publish only after complete
 admission and the final cancellation check. Reentrant workspace use refuses.
 Native controlled preparation and evaluation retain their bounded polling
@@ -3041,6 +3057,16 @@ driven scalar exponentials and heat/heat-derivative integrals, variable-duration
 thermal composition, exact-bit cache identity and bounded eviction, atomic
 source/cancellation refusals, adaptive discard/restore/retry, native structural
 and metadata refusals, and shifted-Hamiltonian endpoint evaluation allowances.
+It also covers the published ends: their names and `Untold`/`Told` answers,
+their equality with `G^T grad H(x1)` with the step and the means unchanged,
+tangent conformance with the end rows, a scalar end and its input derivative
+against the closed exponential, the name-collision refusal, and the refusal
+of an exact owner beside fs-system's slider, which assumes the midpoint
+relation: untold for that, told because the slider takes no end input.
+fs-couple's `tests/drum_strike_graph.rs` joins a published end to fs-dcontact's
+contact on the load line: two drum heads and the air between them as one exact
+owner, struck by a stick, against fs-couple's prepared linear impact image with
+its volume spring, each coordinate within -120 dB of its full scale.
 These numerical checks do not establish physical validity of an authored model;
 the other numerical adapters and sparse work in bead `.5.12` remain open.
 

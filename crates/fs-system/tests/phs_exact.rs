@@ -11,9 +11,9 @@ use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_phs::linear_exact::{LinearSplitBudget, PreparedExactZoh, QuadraticPart};
 use fs_phs::{PortHamiltonian, PreparedStepError, QuadraticStorage, Storage};
 use fs_ports::component::conformance::{Case, Observed, check_component, check_port_tangent};
-use fs_ports::component::{Class, Component, PortRole, PortSpec, PortTangent, Proposal};
+use fs_ports::component::{Class, Component, EndOfStep, PortRole, PortSpec, PortTangent, Proposal};
 use fs_ports::{PortKind, StableId};
-use fs_system::elements::HeatCapacity;
+use fs_system::elements::{HeatCapacity, Slider, Slip};
 use fs_system::phs::PhsComponentError;
 use fs_system::phs_exact::ExactPortHamiltonianComponent;
 use fs_system::{AdaptiveConfig, AdaptiveError, NodeId, System, SystemBuilder};
@@ -660,4 +660,208 @@ fn source_endpoint_evaluation_allowance_does_not_replace_native_physical_balance
             assert_eq!(output, [23.0, 29.0]);
         }
     });
+}
+
+#[test]
+fn published_ends_are_the_outputs_of_the_end_state_and_their_tangent_rows_conform() {
+    let ports = || {
+        vec![
+            power("force", PortRole::EffortIn),
+            power("motion", PortRole::FlowIn),
+        ]
+    };
+    let plain = ExactPortHamiltonianComponent::new(coupled_owner(), ports(), budget()).unwrap();
+    // Exact for a held input: the midpoint relation's default promise is
+    // not this owner's, so an unpublished end is untold.
+    assert_eq!(plain.end_of_step(0), EndOfStep::Untold);
+    assert_eq!(plain.end_of_step(1), EndOfStep::Untold);
+    let component = ExactPortHamiltonianComponent::new(coupled_owner(), ports(), budget())
+        .unwrap()
+        .publishing_ends()
+        .unwrap()
+        .publishing_ends()
+        .unwrap();
+    let names: Vec<_> = component
+        .ports()
+        .iter()
+        .map(|port| port.id().as_str())
+        .collect();
+    assert_eq!(
+        names,
+        ["force", "motion", "heat", "force.end", "motion.end"]
+    );
+    assert_eq!(component.end_of_step(0), EndOfStep::Told(3));
+    assert_eq!(component.end_of_step(1), EndOfStep::Told(4));
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        for (old, dt, input) in [
+            (vec![0.4, -0.7], 0.1, [0.3, -0.2, 310.0]),
+            (vec![-0.3, 0.2], 0.025, [-0.7, 0.6, 290.0]),
+        ] {
+            let stale = vec![31.0, -11.0];
+            let case = Case {
+                state: &old,
+                stale: &stale,
+                dt_s: dt,
+                inputs: &input,
+            };
+            let Observed::Stepped { outputs, .. } = check_component(&component, &case, cx).unwrap()
+            else {
+                panic!("exact proposal unexpectedly shortened");
+            };
+            // The end rows are differenced against the proposals and their
+            // transpose against the JVP, as the mean and heat rows are.
+            check_port_tangent(&component, &case, 2.0e-8, 2.0e-10, cx).unwrap();
+            let (mut next, mut plain_next, mut plain_outputs) = (Vec::new(), Vec::new(), [0.0; 3]);
+            let mut actual = [f64::NAN; 5];
+            component
+                .propose(&old, dt, &input, &mut next, &mut actual, cx)
+                .unwrap();
+            plain
+                .propose(&old, dt, &input, &mut plain_next, &mut plain_outputs, cx)
+                .unwrap();
+            assert_eq!(bits(&actual), bits(&outputs));
+            // Publishing the ends changes neither the step nor the means.
+            assert_eq!(bits(&next), bits(&plain_next));
+            assert_eq!(bits(&actual[..3]), bits(&plain_outputs));
+            assert_eq!(bits(&actual[3..]), bits(&component.system().output(&next)));
+        }
+    });
+    // An end named like a declared port is refused, not renamed.
+    let colliding = ExactPortHamiltonianComponent::new(
+        coupled_owner(),
+        vec![
+            power("a", PortRole::EffortIn),
+            power("a.end", PortRole::FlowIn),
+        ],
+        budget(),
+    )
+    .unwrap()
+    .publishing_ends();
+    assert!(matches!(colliding, Err(PhsComponentError::Port(_))));
+}
+
+/// For x' = -6x + u and y = 3x, the end output is three times the closed
+/// end state, and its derivative in u is 3 (1 - exp(-6 dt)) / 6.
+#[test]
+fn a_published_end_is_the_closed_form_end_output() {
+    let component = ExactPortHamiltonianComponent::new(
+        scalar_owner(),
+        vec![power("p", PortRole::EffortIn)],
+        budget(),
+    )
+    .unwrap()
+    .publishing_ends()
+    .unwrap();
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        for (initial, input, dt) in [(0.8, 0.9, 0.05), (-0.4, 2.5, 0.3)] {
+            let (end_state, _, _) = scalar_oracle(initial, input, dt);
+            let (mut next, mut outputs) = (Vec::new(), [f64::NAN; 3]);
+            component
+                .propose(
+                    &vec![initial],
+                    dt,
+                    &[input, 300.0],
+                    &mut next,
+                    &mut outputs,
+                    cx,
+                )
+                .unwrap();
+            close(outputs[2], 3.0 * end_state, 4.0e-15);
+            let mut pushed = [f64::NAN; 3];
+            component
+                .jvp(
+                    &vec![initial],
+                    dt,
+                    &[input, 300.0],
+                    &[1.0, 0.0],
+                    &mut pushed,
+                    cx,
+                )
+                .unwrap();
+            close(pushed[2], 0.5 * (1.0 - (-6.0 * dt).exp()), 4.0e-15);
+            // The temperature does not enter the end.
+            component
+                .jvp(
+                    &vec![initial],
+                    dt,
+                    &[input, 300.0],
+                    &[0.0, 1.0],
+                    &mut pushed,
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(pushed[2], 0.0);
+        }
+    });
+}
+
+/// A body that is the exact owner of its momentum (`H = p^2 / 2m`, `y = p/m`),
+/// sliding at 1.5 m/s on fs-system's dry-friction slider whose other side is
+/// held at rest, both heat ports on one body at 300 K, sealed: the admission
+/// refusal, or none.
+fn sealed_on_a_slider(published: bool) -> Option<String> {
+    let mut builder = SystemBuilder::new();
+    let owner = PortHamiltonian::new(
+        1,
+        1,
+        vec![0.0],
+        vec![0.0],
+        vec![1.0],
+        Box::new(QuadraticStorage::new(vec![0.5], 1).unwrap()),
+    )
+    .unwrap();
+    let mut component =
+        ExactPortHamiltonianComponent::new(owner, vec![power("p", PortRole::EffortIn)], budget())
+            .unwrap();
+    if published {
+        component = component.publishing_ends().unwrap();
+    }
+    let moving = builder
+        .add_with_tangent("moving", component, vec![3.0])
+        .unwrap();
+    let rubbing = builder
+        .add_on_line(
+            "slider",
+            Slider::new(19.6, 0.5, 0.3).unwrap(),
+            Slip::sliding(-1.5),
+        )
+        .unwrap();
+    let body = builder
+        .add_with_tangent("body", HeatCapacity::new(40.0).unwrap(), 300.0)
+        .unwrap();
+    builder
+        .common_flow(
+            builder.port(moving, "p").unwrap(),
+            &[builder.port(rubbing, "a").unwrap()],
+        )
+        .unwrap();
+    builder
+        .boundary(
+            builder.port(rubbing, "b").unwrap(),
+            Box::new(|_, _, values| values[0] = 0.0),
+        )
+        .unwrap();
+    builder
+        .common_effort(
+            builder.port(body, "heat").unwrap(),
+            &[
+                builder.port(rubbing, "heat").unwrap(),
+                builder.port(moving, "heat").unwrap(),
+            ],
+        )
+        .unwrap();
+    builder.seal().err().map(|error| error.to_string())
+}
+
+/// fs-system's slider takes the flows it is given to end their steps by the
+/// midpoint relation, which an exact owner's do not. Untold, the owner is
+/// refused beside it for that; told, it is refused because the slider takes
+/// no end input. A load line that reads ends (fs-dcontact's contact, fs-tribo's
+/// friction) is joined to the published ends: fs-couple's drum graph runs one.
+#[test]
+fn an_exact_owner_is_not_joined_to_a_load_line_that_assumes_the_midpoint_relation() {
+    let untold = sealed_on_a_slider(false).expect("an untold end is refused");
+    assert!(untold.contains("does not tell its end"), "{untold}");
+    let told = sealed_on_a_slider(true).expect("a told end beside a midpoint slider is refused");
+    assert!(told.contains("the port takes no end input"), "{told}");
 }
