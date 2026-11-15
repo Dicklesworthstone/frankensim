@@ -114,10 +114,14 @@ impl Coo {
     #[must_use]
     pub fn assemble(&self) -> Csr {
         let nnz_staged = self.vals.len();
-        // Sort triplet INDICES by (row, col); the sort is stable, so equal
-        // keys keep insertion order — the canonical accumulation order.
-        let mut order: Vec<usize> = (0..nnz_staged).collect();
-        order.sort_by_key(|&i| (self.rows[i], self.cols[i]));
+        // Order triplet INDICES by (row, col) with two stable counting passes
+        // (least-significant key first: column, then row). Each pass is
+        // stable, so equal keys keep insertion order — the canonical
+        // accumulation order — and the permutation equals a stable comparison
+        // sort by (row, col), at O(staged + rows + cols) cost instead of
+        // O(staged log staged). `push` guarantees every key is in range.
+        let by_col = stable_counting_order((0..nnz_staged).collect(), &self.cols, self.ncols);
+        let order = stable_counting_order(by_col, &self.rows, self.nrows);
 
         let mut row_ptr = vec![0usize; self.nrows + 1];
         let mut col_idx = Vec::new();
@@ -146,6 +150,26 @@ impl Coo {
             vals,
         }
     }
+}
+
+/// Stable counting sort of the triplet indices in `input` by `keys[i]`,
+/// every key below `buckets`: indices with equal keys keep their order in
+/// `input`.
+fn stable_counting_order(input: Vec<usize>, keys: &[usize], buckets: usize) -> Vec<usize> {
+    let mut next = vec![0usize; buckets + 1];
+    for &i in &input {
+        next[keys[i] + 1] += 1;
+    }
+    for k in 0..buckets {
+        next[k + 1] += next[k];
+    }
+    let mut out = vec![0usize; input.len()];
+    for i in input {
+        let slot = &mut next[keys[i]];
+        out[*slot] = i;
+        *slot += 1;
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -478,6 +502,69 @@ mod tests {
         assert_eq!(a.get(1, 2).to_bits(), 1.5f64.to_bits());
         let (cols, _) = a.row(0);
         assert_eq!(cols, &[0, 1], "columns must come out sorted");
+    }
+
+    #[test]
+    fn counting_assembly_equals_the_stable_comparison_sort_bitwise() {
+        // The reference is the comparison-sort assembly the counting passes
+        // replaced: stable sort of indices by (row, col), then duplicates
+        // summed in insertion order. Values include signed zeros and
+        // magnitudes whose sum depends on order, so any reordering of a
+        // duplicate chain shows up in the bits.
+        fn reference(coo: &Coo) -> (Vec<usize>, Vec<usize>, Vec<u64>) {
+            let n = coo.staged();
+            let mut order: Vec<usize> = (0..n).collect();
+            order.sort_by_key(|&i| (coo.rows[i], coo.cols[i]));
+            let mut row_ptr = vec![0usize; coo.nrows + 1];
+            let (mut cols, mut bits) = (Vec::new(), Vec::new());
+            let mut i = 0;
+            while i < n {
+                let (r, c) = (coo.rows[order[i]], coo.cols[order[i]]);
+                let mut acc = coo.vals[order[i]];
+                i += 1;
+                while i < n && coo.rows[order[i]] == r && coo.cols[order[i]] == c {
+                    acc += coo.vals[order[i]];
+                    i += 1;
+                }
+                row_ptr[r + 1] += 1;
+                cols.push(c);
+                bits.push(acc.to_bits());
+            }
+            for r in 0..coo.nrows {
+                row_ptr[r + 1] += row_ptr[r];
+            }
+            (row_ptr, cols, bits)
+        }
+        let mut seed = 0xC0DE_u64;
+        for (nr, nc, staged) in [
+            (1usize, 1usize, 9usize),
+            (5, 3, 200),
+            (37, 61, 900),
+            (64, 8, 2000),
+        ] {
+            let mut coo = Coo::new(nr, nc);
+            for k in 0..staged {
+                let r = ((lcg(&mut seed) + 0.5) * nr as f64) as usize % nr;
+                let c = ((lcg(&mut seed) + 0.5) * nc as f64) as usize % nc;
+                let v = match k % 5 {
+                    0 => -0.0,
+                    1 => 1e16 * lcg(&mut seed),
+                    _ => lcg(&mut seed),
+                };
+                coo.push(r, c, v);
+            }
+            let (row_ptr, cols, bits) = reference(&coo);
+            let a = coo.assemble();
+            assert_eq!(a.row_ptr, row_ptr, "{nr}x{nc}: row pointers");
+            assert_eq!(a.col_idx, cols, "{nr}x{nc}: column indices");
+            let got: Vec<u64> = a.vals.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(got, bits, "{nr}x{nc}: accumulated values");
+        }
+        let empty = Coo::new(3, 4).assemble();
+        assert_eq!(
+            (empty.nnz(), empty.row_ptr.as_slice()),
+            (0, &[0usize; 4][..])
+        );
     }
 
     #[test]
