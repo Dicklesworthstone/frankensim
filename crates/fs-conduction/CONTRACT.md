@@ -6257,7 +6257,23 @@ area, whose origin carries the card identity and that receipt. The step is
 `Q = G (T_L - a) / (1 + G (dt / (2 C_L) + r))`. The pair closes its energy and
 both bodies reach the temperature that shares it.
 
+`tests/conduction_pair.rs` (`--features component`) joins two such bodies:
+equal 30 mm slabs at 400 K and 300 K with insulated outer ends, through a
+Conductance from an interface card (R'' = 8e-4 m^2 K/W, Bi = 5 for the
+antisymmetric half-problem). The energy that has crossed the contact by
+`t* = 0.1 L^2 / alpha` is compared with the one-dimensional closed form, the
+plane wall's series `sum C_n sin(b_n) / b_n exp(-b_n^2 Fo)` with
+`b_n tan b_n = Bi`, on four rungs of 2 to 16 cells along x with the step
+`t* / (2 n^2)`. The claim, declared in the test, is order 2, at least 1.8
+between the last two rungs, on three paths: the pair on matching cross grids,
+the pair on non-matching cross grids (2 x 2 against 3 x 3), and the owner's own
+matching-P1 contact (`ThermalInterfaces` on one mesh with coincident traces) at
+the same steps. Each pair run closes its energy and ledger to 1e-9 of the
+stored energy.
+
 Not covered: the entropy generated inside the body is reported as zero, a
 lower bound. There is no snapshot codec. Nonuniform patch flux, contact,
-radiation, nonlinear and adaptive owners are refused or not wrapped. Coupling
-two finite-element bodies through ports is a later increment of bead .6.5.
+radiation, nonlinear and adaptive owners are refused or not wrapped. Two bodies
+meet through scalar patch means: a pointwise P1 trace, a mapped field transfer
+between non-matching traces and its adjoint test need a field heat carrier
+(bead .5.2).
