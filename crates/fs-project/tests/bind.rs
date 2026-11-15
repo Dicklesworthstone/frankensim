@@ -559,6 +559,27 @@ fn envelope_outside_the_card_domain_refuses_at_validate() {
 }
 
 #[test]
+fn a_joint_state_outside_the_card_is_named_in_the_refusal() {
+    let (mut library, board, spreader, _) = reference_library();
+    // The card's temperatures cover the binding range; its bondline
+    // (50-80 um) does not cover the declared 100 +/- 10 um.
+    let mut claim = resistance_claim(2.0e-5, 200.0, 450.0, "tim datasheet, thin bondline");
+    claim.validity = claim.validity.with("thickness", 50e-6, 80e-6);
+    let thin = library.insert_interface(interface_card(vec![claim]));
+    let spec = reference_spec(&board, &spreader, &thin);
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+
+    assert!(!resolution.admissible());
+    let found = assert_code(
+        &resolution,
+        "project-binding-domain-uncovered",
+        "interface `tim`",
+        "joint state the card covers",
+    );
+    assert!(found.what.contains(" K, thickness = "), "{}", found.what);
+}
+
+#[test]
 fn an_admitted_range_narrower_than_the_envelope_refuses() {
     let (library, board, spreader, tim) = reference_library();
     let mut spec = reference_spec(&board, &spreader, &tim);

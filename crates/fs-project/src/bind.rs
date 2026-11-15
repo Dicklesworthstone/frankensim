@@ -1054,7 +1054,7 @@ fn query_range(
         Err(error) => {
             let finding = match error {
                 PropertySupportError::Evaluation { point, error } => {
-                    query_violation(target, property, axis, point.axes()[axis], &error)
+                    query_violation(target, property, axis, &point, &error)
                 }
                 PropertySupportError::ClaimChanges {
                     point,
@@ -1104,15 +1104,31 @@ fn query_range(
 /// Map a matdb refusal to a project violation with a product-level fix.
 /// The refusal text itself travels in `what`, so the user sees matdb's
 /// own diagnosis plus what to do about it in the project file.
+/// Every coordinate of the refused point is named: on an interface the
+/// uncovered one can be the declared joint state (pressure, thickness, gap,
+/// torque, in the coherent SI of `interface_state`) while the temperature
+/// lies inside the card's validity.
 fn query_violation(
     target: &BindingTarget,
     property: &RequiredProperty,
     axis: &str,
-    at: f64,
+    point: &QueryPoint,
     error: &MatDbError,
 ) -> Violation {
+    let at = point
+        .axes()
+        .iter()
+        .map(|(name, value)| {
+            if name == axis {
+                format!("{name} = {value} K")
+            } else {
+                format!("{name} = {value}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     let context = format!(
-        "{}: `{}` at {axis} = {at} K: {error}",
+        "{}: `{}` at {at}: {error}",
         target.describe(),
         property.property
     );
@@ -1128,7 +1144,7 @@ fn query_violation(
         MatDbError::NoClaimInDomain { .. } | MatDbError::OutsideKnotSpan { .. } => violation(
             "project-binding-domain-uncovered",
             context,
-            "the card's validity does not cover the admitted range: narrow the binding's admitted range only if the envelope allows it, or bind a card qualified for these temperatures — the resolver never extrapolates",
+            "the card's validity does not cover the named point: narrow the binding's admitted range only if the envelope allows it, declare a joint state the card covers only if the design has it, or bind a card qualified at this point — the resolver never extrapolates",
         ),
         MatDbError::AmbiguousSelection { candidates, .. } => violation(
             "project-binding-claims-conflict",
