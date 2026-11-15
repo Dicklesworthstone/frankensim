@@ -5147,6 +5147,302 @@ fn sliding_interface_scenes_refuse_bad_slips_fields_laws_loads_and_error_control
     }
 }
 
+/// A 2 kg puck (principal inertias 0.01, 0.01, 0.02 kg m2) on a Hertz patch
+/// of 1 cm under 10 N, static 0.4 and kinetic 0.3, at its centre of mass,
+/// with the velocity `velocity` [m/s] and the spin `spin` [rad/s] and the
+/// patch's starting motion `motion`; the patch's heat into a 2 J/K table at
+/// 300 K, for `duration` s in steps of 0.01 s. The map gives the patch the
+/// puck's velocity along x and y and the radius times its spin about z.
+fn patched_puck(velocity: &str, spin: &str, motion: &str, duration: f64) -> String {
+    format!(
+        r#"{{
+  "schema": "frankensim.system.v0", "duration_s": {duration}, "step_s": 0.01,
+  "elements": {{
+    "puck": {{"kind": "rigid_network", "torque_ports": [0], "connectors": [],
+             "bodies": [{{"mass_kg": 2.0, "principal_inertia_kg_m2": [0.01, 0.01, 0.02],
+                         "position_m": [0.0, 0.0, 0.0], "velocity_m_s": {velocity},
+                         "angular_velocity_rad_s": {spin}}}]}},
+    "patch": {{"kind": "hertz_patch", "normal_n": 10.0, "radius_m": 0.01,
+              "static_mu": 0.4, "kinetic_mu": 0.3, "motion_m_s": {motion}}},
+    "table": {{"kind": "heat_capacity", "capacity_j_k": 2.0, "temperature_k": 300.0}}
+  }},
+  "connections": [
+    {{"power_map": [[{{"port": "puck.force0",
+                     "matrix": [[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 0.0]]}},
+                    {{"port": "puck.torque0",
+                     "matrix": [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, -0.01]]}}],
+                   "patch.wrench"]}},
+    {{"join": ["table.heat", "patch.heat"]}}
+  ]
+}}"#
+    )
+}
+
+#[test]
+fn a_hertz_patch_slows_a_sliding_puck_by_coulomb_and_a_spinning_one_by_the_hertz_spin_moment() {
+    // G1: a pure slide on a patch of uniform kinetic coefficient is resisted
+    // by mu N against the slip, so the 2 kg puck slows at 1.5 m/s2 from
+    // 1 m/s: after 0.5 s it moves at 0.25 m/s and has gone 0.3125 m. A pure
+    // spin is resisted by the moment of mu p over the Hertz pressure p =
+    // 3 N / (2 pi a2) sqrt(1 - r2 / a2), mu N a 3 pi / 16, so from 20 rad/s
+    // it slows at M / I. The midpoint rule is exact for a constant wrench.
+    // G3: every joule the puck loses warms the table: T = T0 + mu N x / C,
+    // or T0 + M theta / C.
+    let (mu, normal, radius, mass, inertia, capacity, time): (f64, f64, f64, f64, f64, f64, f64) =
+        (0.3, 10.0, 0.01, 2.0, 0.02, 2.0, 0.5);
+    let path = scratch(
+        "slide.json",
+        &patched_puck(
+            "[1.0, 0.0, 0.0]",
+            "[0.0, 0.0, 0.0]",
+            "[1.0, 0.0, 0.0]",
+            time,
+        ),
+    );
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "slide: {stderr}");
+    let slowing = mu * normal / mass;
+    let distance = time - 0.5 * slowing * time * time;
+    let (patch, puck) = (element("patch"), element("puck"));
+    for (anchor, field, expected) in [
+        (&patch, "force_x_n", -mu * normal),
+        (&patch, "force_y_n", 0.0),
+        (&patch, "spin_moment_nm", 0.0),
+        (&patch, "slip_x_m_s", 1.0 - slowing * time),
+        (&patch, "owner_steps", 1.0),
+        (&puck, "body0.velocity_x_m_s", 1.0 - slowing * time),
+        (&puck, "body0.position_x_m", distance),
+        (
+            &element("table"),
+            "temperature_k",
+            300.0 + mu * normal * distance / capacity,
+        ),
+    ] {
+        let found = value(&json, anchor, field);
+        assert!(
+            (found - expected).abs() <= 1.0e-9,
+            "slide: {anchor} {field}: {found} vs {expected}"
+        );
+    }
+    assert!(
+        value(&json, "\"totals\"", "energy_residual_j").abs() < 1.0e-10,
+        "slide: {json}"
+    );
+    let path = scratch(
+        "spin.json",
+        &patched_puck(
+            "[0.0, 0.0, 0.0]",
+            "[0.0, 0.0, 20.0]",
+            "[0.0, 0.0, 0.2]",
+            time,
+        ),
+    );
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "spin: {stderr}");
+    let moment = mu * normal * radius * 3.0 * std::f64::consts::PI / 16.0;
+    let angle = 20.0 * time - 0.5 * moment / inertia * time * time;
+    for (anchor, field, expected) in [
+        (&patch, "spin_moment_nm", -moment),
+        (&patch, "force_x_n", 0.0),
+        (&patch, "force_y_n", 0.0),
+        (
+            &patch,
+            "spin_speed_m_s",
+            radius * (20.0 - moment / inertia * time),
+        ),
+        (
+            &puck,
+            "body0.angular_velocity_z_rad_s",
+            20.0 - moment / inertia * time,
+        ),
+        (&puck, "body0.velocity_x_m_s", 0.0),
+        (
+            &element("table"),
+            "temperature_k",
+            300.0 + moment * angle / capacity,
+        ),
+    ] {
+        let found = value(&json, anchor, field);
+        assert!(
+            (found - expected).abs() <= 1.0e-9,
+            "spin: {anchor} {field}: {found} vs {expected}"
+        );
+    }
+    assert!(
+        value(&json, "\"totals\"", "energy_residual_j").abs() < 1.0e-10,
+        "spin: {json}"
+    );
+}
+
+/// The wrench on side a of local Coulomb friction mu over the Hertz
+/// pressure of a patch of radius a under N, at the slip `slip` [m/s] and the
+/// spin `spin` [rad/s]: the slip at the point rho is slip + spin z x rho.
+/// Midpoint quadrature on a polar grid.
+fn hertz_patch_wrench(mu: f64, normal: f64, radius: f64, slip: [f64; 2], spin: f64) -> [f64; 3] {
+    let (rings, spokes) = (400, 800);
+    let mut wrench = [0.0; 3];
+    for ring in 0..rings {
+        let r = (f64::from(ring) + 0.5) * radius / f64::from(rings);
+        let pressure = 3.0 * normal / (2.0 * std::f64::consts::PI * radius * radius)
+            * (1.0 - (r / radius) * (r / radius)).sqrt();
+        let area = r * (radius / f64::from(rings)) * (std::f64::consts::TAU / f64::from(spokes));
+        for spoke in 0..spokes {
+            let angle = (f64::from(spoke) + 0.5) * std::f64::consts::TAU / f64::from(spokes);
+            let (x, y) = (r * angle.cos(), r * angle.sin());
+            let (sx, sy) = (slip[0] - spin * y, slip[1] + spin * x);
+            let speed = sx.hypot(sy);
+            let (fx, fy) = (
+                -mu * pressure * area * sx / speed,
+                -mu * pressure * area * sy / speed,
+            );
+            wrench[0] += fx;
+            wrench[1] += fy;
+            wrench[2] += x * fy - y * fx;
+        }
+    }
+    wrench
+}
+
+#[test]
+fn a_spun_puck_feels_the_wrench_local_coulomb_friction_over_the_hertz_pressure_gives() {
+    // examples/system/spun_puck.json: a 0.5 kg puck sliding at 2 m/s and
+    // spinning at 100 rad/s on a 1 cm patch under 5 N, so the patch's two
+    // motions are alike (a w = 1 m/s). G1: the owner's kinetic wrench is
+    // local Coulomb friction mu p against the local slip, integrated over
+    // the Hertz pressure; at the last step's mean motion, the mean of its
+    // two end samples, a 400 x 800 polar quadrature of that integral gives
+    // the force and moment to 1e-3. The joint motion lowers both below their
+    // pure-slide and pure-spin values. G3: the puck's lost kinetic energy is
+    // the ice's heat.
+    let (code, json, stderr) = run_binary(&["--json", "system", &example("spun_puck.json")]);
+    assert_eq!(code, 0, "{stderr}");
+    let samples: Vec<&str> = json.split("{\"time_s\":").skip(1).collect();
+    // A sample at the start and one after each of the 60 steps.
+    assert_eq!(samples.len(), 61, "{json}");
+    let motion = |sample: &str| {
+        ["slip_x_m_s", "slip_y_m_s", "spin_speed_m_s"]
+            .map(|field| value(sample, "\"values\"", &format!("patch.{field}")))
+    };
+    let (end, start) = (motion(samples[60]), motion(samples[59]));
+    let mean: [f64; 3] = std::array::from_fn(|i| 0.5 * (end[i] + start[i]));
+    let (mu, normal, radius): (f64, f64, f64) = (0.3, 5.0, 0.01);
+    let expected = hertz_patch_wrench(mu, normal, radius, [mean[0], mean[1]], mean[2] / radius);
+    let patch = element("patch");
+    let found =
+        ["force_x_n", "force_y_n", "spin_moment_nm"].map(|field| value(&json, &patch, field));
+    let force_scale = mu * normal;
+    let moment_scale = mu * normal * radius * 3.0 * std::f64::consts::PI / 16.0;
+    for (index, scale) in [(0, force_scale), (1, force_scale), (2, moment_scale)] {
+        assert!(
+            (found[index] - expected[index]).abs() <= 1.0e-3 * scale,
+            "wrench {index}: {found:?} vs {expected:?} at {mean:?}"
+        );
+    }
+    assert!(found[0] < 0.0 && found[2] < 0.0, "{found:?}");
+    assert!(found[0].hypot(found[1]) < 0.99 * force_scale, "{found:?}");
+    assert!(-found[2] < 0.99 * moment_scale, "{found:?}");
+    let puck = element("puck");
+    let speed = |axis: &str| value(&json, &puck, &format!("body0.velocity_{axis}_m_s"));
+    let spin = |axis: &str| {
+        value(
+            &json,
+            &puck,
+            &format!("body0.angular_velocity_{axis}_rad_s"),
+        )
+    };
+    let before = 0.5 * 0.5 * 4.0 + 0.5 * 0.00025 * 100.0 * 100.0;
+    let after = 0.5 * 0.5 * (speed("x").powi(2) + speed("y").powi(2) + speed("z").powi(2))
+        + 0.5
+            * (0.00015 * spin("x").powi(2)
+                + 0.00015 * spin("y").powi(2)
+                + 0.00025 * spin("z").powi(2));
+    let heat = 1.0 * (value(&json, &element("ice"), "temperature_k") - 268.15);
+    assert!(
+        (before - after - heat).abs() < 1.0e-9,
+        "lost {} vs heat {heat}",
+        before - after
+    );
+    assert!(
+        value(&json, "\"totals\"", "energy_residual_j").abs() < 1.0e-10,
+        "{json}"
+    );
+}
+
+#[test]
+fn hertz_patch_scenes_refuse_bad_patches_maps_and_budgets_and_a_reversing_slip() {
+    let base = patched_puck("[1.0, 0.0, 0.0]", "[0.0, 0.0, 0.0]", "[1.0, 0.0, 0.0]", 0.5);
+    for (name, from, to, reason) in [
+        (
+            "order.json",
+            "\"static_mu\": 0.4",
+            "\"static_mu\": 0.2",
+            "static_mu_below_kinetic_mu",
+        ),
+        (
+            "radius.json",
+            "\"radius_m\": 0.01",
+            "\"radius_m\": 0.0",
+            "invalid or non-finite physical input: contact_radius_m",
+        ),
+        (
+            "normal.json",
+            "\"normal_n\": 10.0",
+            "\"normal_n\": -1.0",
+            "invalid or non-finite physical input: normal_force_n",
+        ),
+        (
+            "motion.json",
+            "\"motion_m_s\": [1.0, 0.0, 0.0]",
+            "\"motion_m_s\": [1.0, 0.0]",
+            "motion_m_s is three finite numbers",
+        ),
+        (
+            "budget.json",
+            "\"motion_m_s\": [1.0, 0.0, 0.0]",
+            "\"motion_m_s\": [1.0, 0.0, 0.0], \"solve\": {\"maximum_iterations\": 0}",
+            "maximum_iterations is a whole number from 1 to 4096",
+        ),
+        (
+            "field.json",
+            "\"motion_m_s\": [1.0, 0.0, 0.0]",
+            "\"motion_m_s\": [1.0, 0.0, 0.0], \"solve\": {\"tolerance\": 1.0}",
+            "unsupported field \"tolerance\"",
+        ),
+        (
+            "shape.json",
+            "[[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, -0.01]]",
+            "[[0.0, 0.0, -0.01]]",
+            "power_map[0][1]: matrix row count must be 3",
+        ),
+        (
+            "matrix.json",
+            "\"patch.wrench\"]}",
+            "\"patch.wrench\"], \"matrix\": [[1.0]]}",
+            "a power_map of members has a matrix per member",
+        ),
+        (
+            "adaptive.json",
+            "\"duration_s\": 0.5",
+            "\"adaptive\": {\"tolerances\": {}}, \"duration_s\": 0.5",
+            "patch is a hertz_patch",
+        ),
+    ] {
+        assert!(base.contains(from), "{name}: test fixture changed");
+        let (code, stderr) = refused(name, &base.replace(from, to));
+        assert_eq!(code, 3, "{name}: {stderr}");
+        assert!(stderr.contains(reason), "{name}: {stderr}");
+    }
+    // The puck would stop at 2/3 s: the step in which the slip reverses is
+    // refused, not shortened.
+    let (code, stderr) = refused(
+        "arrest.json",
+        &patched_puck("[1.0, 0.0, 0.0]", "[0.0, 0.0, 0.0]", "[1.0, 0.0, 0.0]", 1.0),
+    );
+    assert_eq!(code, 4, "arrest: {stderr}");
+    assert!(stderr.contains("refused in Propose"), "arrest: {stderr}");
+    assert!(stderr.contains("hertz_patch_reversal"), "arrest: {stderr}");
+}
+
 fn array_values(json: &str, anchor: &str, key: &str) -> Vec<f64> {
     let tail = &json[json.find(anchor).unwrap()..];
     let field = format!("\"{key}\":[");

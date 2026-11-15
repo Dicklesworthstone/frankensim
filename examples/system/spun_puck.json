@@ -1,0 +1,43 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 0.3,
+  "step_s": 0.005,
+  "sample_every_s": 0.005,
+  "elements": {
+    "puck": {
+      "kind": "rigid_network",
+      "bodies": [
+        {
+          "mass_kg": 0.5,
+          "principal_inertia_kg_m2": [0.00015, 0.00015, 0.00025],
+          "position_m": [0.0, 0.0, 0.0],
+          "velocity_m_s": [2.0, 0.0, 0.0],
+          "angular_velocity_rad_s": [0.0, 0.0, 100.0]
+        }
+      ],
+      "connectors": [],
+      "torque_ports": [0]
+    },
+    "patch": {
+      "kind": "hertz_patch",
+      "normal_n": 5.0,
+      "radius_m": 0.01,
+      "static_mu": 0.4,
+      "kinetic_mu": 0.3,
+      "motion_m_s": [2.0, 0.0, 1.0]
+    },
+    "ice": {"kind": "heat_capacity", "capacity_j_k": 1.0, "temperature_k": 268.15}
+  },
+  "connections": [
+    {
+      "power_map": [
+        [
+          {"port": "puck.force0", "matrix": [[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 0.0]]},
+          {"port": "puck.torque0", "matrix": [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, -0.01]]}
+        ],
+        "patch.wrench"
+      ]
+    },
+    {"join": ["ice.heat", "patch.heat"]}
+  ]
+}

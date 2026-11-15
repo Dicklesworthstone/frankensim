@@ -946,6 +946,49 @@ No claim: the slip and normal force are constant and authored; there is no
 contact geometry, normal dynamics, wear or third body, and the interface
 moves nothing.
 
+`hertz_patch` lowers to `fs_tribo`'s `HertzPatchInterface` on the kernel's
+`add_on_line` tier, with a constant `HertzWrenchContact`: `normal_n`,
+`radius_m`, `static_mu` and `kinetic_mu`, which the owner admits (static
+at least kinetic). Its power port `wrench`, width 3, receives the motion of
+side a against side b, `[v_x, v_y, radius_m w]` along the patch's two
+tangent axes and about its normal, and returns minus the wrench on side a,
+`[F_x, F_y, M / radius_m]`; its port `heat` joins a heat capacity or heat
+node as a heater's does. The wrench is connected by a `power_map` of
+members, `[[{port, matrix}, ...], flow_in_port]`: several effort-in ports
+(a body's `force<i>` and `torque<i>`) onto the one flow-in port through
+the kernel's `power_map_members`, the port receiving minus the sum of the
+maps and each member the adjoint of its own. The maps are constant, fixed
+at admission: the contact arm and axes are those of the start pose.
+`motion_m_s` is the motion that map gives at the start, and a nonzero one
+starts in the owner's kinetic phase; the lowering does not check it
+against the bodies. `solve` takes the owner's tolerances, iteration counts
+and effort ceilings (defaults in HELP). The owner steps on the line's
+symmetric part and the component on the full line; a step in which the
+slip or the spin would reverse is refused (`hertz_patch_reversal`), not
+shortened. Reports expose the motion the last step ended with
+(`slip_x_m_s`, `slip_y_m_s`, `spin_speed_m_s`), `owner_steps`, the wrench
+on side a (`force_x_n`, `force_y_n`, `spin_moment_nm`) and last-step
+`heat_w`. `adaptive` refuses it, and it has no state codec.
+
+Tests in `tests/system_command.rs`:
+- A 2 kg puck on a 1 cm patch under 10 N, sliding from 1 m/s without
+  spin, and spinning from 20 rad/s without sliding, its heat into a 2 J/K
+  table. The slide is resisted by mu N and the spin by mu N a 3 pi / 16,
+  so after 0.5 s the puck's speed, distance, spin and the table's
+  temperature are the closed forms to 1e-9, in one owner step a step.
+- `examples/system/spun_puck.json`, a puck sliding at 2 m/s and spinning at
+  100 rad/s on a 1 cm patch. At the last step's mean motion, the force and
+  moment equal a polar quadrature of local Coulomb friction over the Hertz
+  pressure to 1e-3 of mu N and of mu N a 3 pi / 16, both below those
+  values, and the puck's lost kinetic energy is the ice's heat to 1e-9 J.
+- Nine admission refusals, all exit 3, and a puck that would stop inside
+  the run, refused in Propose (exit 4, `hertz_patch_reversal`).
+
+No claim: the normal load, radius and coefficients are constant and
+authored; there is no normal contact law, rolling, partial slip, elastic
+shear memory, wear or third body; the maps keep the start pose's arms; an
+arrest or reversal is refused, not located.
+
 `modal_structure` lowers to `fs_nlmodal::component::ModalStructure`, added
 with its tangent. The scene authors `modes`, each a `frequency_hz`, a
 viscous `damping_ratio` and an optional start (`displacement`, `velocity`)
@@ -1498,6 +1541,13 @@ unmapped directions free. The projected-suspension scene and binary tests
 check the three-dimensional owner against an independent oscillator solution,
 free transverse motion, signed/scaled maps, energy closure and refusals.
 A constant map does not infer geometry or follow a rotating attachment.
+`power_map: [[{"port": effort_in_port, "matrix": ...}, ...], flow_in_port]`
+maps several effort-in ports onto one flow-in port, each member through
+its own matrix (no `matrix` beside the members). It lowers to
+`SystemBuilder::power_map_members`: the flow-in port receives
+`-sum_k P_k f_k` and each member `P_k^T e_b`. The `hertz_patch` tests use
+it from a body's `force0` and `torque0`; a member's shape and a matrix
+beside the members are refused.
 
 A `resistance_matrix` element takes `domain` (`translation`, `rotation` or
 `electrical`) and a finite square `matrix` of 1 to 64 coordinates, in SI

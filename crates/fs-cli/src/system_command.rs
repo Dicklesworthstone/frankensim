@@ -221,6 +221,31 @@ Elements (ports in brackets; SI units in every field name):
                  interface's own account, as a prescribed force's is.
                  Reports work_j, traction_x_n, traction_y_n and heat_w;
                  requires fixed step_s.)
+  hertz_patch    normal_n, radius_m, static_mu, kinetic_mu,
+                 motion_m_s = [0, 0, 0], solve = {}         [wrench, heat]
+                 (fs-tribo's joint slip and spin friction of one circular
+                 Hertz patch under a constant normal load and radius, on
+                 the load line. wrench (width 3) receives the motion of
+                 side a against side b, [v_x, v_y, radius_m w] m/s along
+                 the patch's two tangent axes and about its normal, and
+                 returns minus the wrench on side a, [F_x, F_y, M /
+                 radius_m] N; connect it with a power_map of members from
+                 the bodies' force and torque ports: rows t1, t2 and 0 for
+                 a force port, r x t1, r x t2 and radius_m n for a torque
+                 port with contact arm r, all negated for side a.
+                 motion_m_s is the motion that map gives at the start; a
+                 nonzero one starts sliding. solve holds the owner's
+                 budgets, defaults: maximum_static_iterations 96,
+                 maximum_iterations 256, maximum_evaluations 512,
+                 force_tolerance_n 2e-9, moment_tolerance_nm 2e-10,
+                 displacement_tolerance_m 2e-13, energy_tolerance_j 2e-11,
+                 relative_matrix_tolerance 1e-13, maximum_force_n 1000
+                 static capacities (at least 1 N), maximum_spin_moment_nm
+                 that times radius_m (at least 1 N m). A step in which the
+                 slip or the spin would reverse is refused. Join heat as a
+                 heater's. Reports slip_x_m_s, slip_y_m_s, spin_speed_m_s,
+                 owner_steps, force_x_n, force_y_n, spin_moment_nm and
+                 heat_w; requires fixed step_s.)
   modal_structure sample_rate_hz, modes | network, attachments
                                                      [<attachments>, heat]
                  (fs-nlmodal's linear structure in mass-normalized damped
@@ -502,6 +527,13 @@ Connections, ports written element.port:
                           and a scalar spring: matrix = [[nx, ny, nz]].
                           Entries carry the SI conversion and orientation;
                           heat, stream and signal ports are not power maps.
+  {\"power_map\": [[{\"port\": effort_in_port, \"matrix\": [[...], ...]},
+                  ...], flow_in_port]}
+                          several effort-in ports onto one flow-in port, each
+                          with its own map P_k: the flow-in port receives
+                          -sum P_k f_k, and each member the adjoint of its
+                          own map (a hertz_patch's wrench from a body's
+                          force and torque ports)
   A member of a join or common_effort may be written
   {\"port\": element.port, \"ratio\": r}: it then sits behind its own
   transformer of ratio r, so one node carries several loads at different
@@ -1149,6 +1181,9 @@ enum Kind {
     /// The same laws under a prescribed slip rate, `fs-tribo`'s sliding
     /// interface, with its heat on a heat port.
     SlidingInterface,
+    /// The joint slip and spin friction of one circular Hertz patch,
+    /// `fs-tribo`'s, on the kernel's load line, with its heat on a heat port.
+    HertzPatch,
     /// A linear structure in damped modes, `fs-nlmodal`'s, acted on through
     /// its attachments.
     ModalStructure,
@@ -1199,7 +1234,7 @@ enum Kind {
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 43] = [
+    const TABLE: [(&'static str, Self); 44] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
@@ -1209,6 +1244,7 @@ impl Kind {
         ("slider", Self::Slider),
         ("friction_interface", Self::FrictionInterface),
         ("sliding_interface", Self::SlidingInterface),
+        ("hertz_patch", Self::HertzPatch),
         ("modal_structure", Self::ModalStructure),
         ("inertia", Self::Inertance(Domain::Rotation)),
         ("torsion_spring", Self::Compliance(Domain::Rotation)),
@@ -1293,6 +1329,9 @@ struct Element {
     /// The state coordinates of a port-Hamiltonian element, reported and
     /// error-controlled as x0, x1, ...
     coordinates: usize,
+    /// A Hertz patch's radius [m], which scales its port's third coefficient:
+    /// its moment is the radius times that coefficient's effort.
+    radius_m: Option<f64>,
 }
 
 struct Device {
@@ -2530,6 +2569,7 @@ fn element(
     let mut gas = None;
     let mut material_sources = Vec::new();
     let mut coordinates = 0;
+    let mut radius_m = None;
     let (node, ports) = match kind {
         Kind::Inertance(domain) => {
             let names = domain.names();
@@ -2584,6 +2624,11 @@ fn element(
         Kind::Slider => slider(builder, name, definition, &what)?,
         Kind::FrictionInterface => friction::interface(builder, name, definition, &what)?,
         Kind::SlidingInterface => friction::sliding(builder, name, definition, &what)?,
+        Kind::HertzPatch => {
+            let (node, ports, radius) = friction::hertz_patch(builder, name, definition, &what)?;
+            radius_m = Some(radius);
+            (node, ports)
+        }
         Kind::ModalStructure => modal::structure(builder, name, definition, &what)?,
         Kind::NodeCapacitor(domain) => {
             let names = domain.names();
@@ -2768,6 +2813,7 @@ fn element(
         gas,
         material_sources,
         coordinates,
+        radius_m,
     })
 }
 
@@ -3104,8 +3150,36 @@ fn power_map(
 ) -> Result<(), Refusal> {
     fields(connection, &["power_map", "matrix"], what)?;
     let Some([a, b]) = connection.get("power_map").and_then(J::as_array) else {
-        return Err(format!("{what}: power_map is [effort_in_port, flow_in_port]").into());
+        return Err(format!(
+            "{what}: power_map is [effort_in_port, flow_in_port], or [[members], flow_in_port]"
+        )
+        .into());
     };
+    // Several effort-in ports onto one flow-in port: each member has its own
+    // matrix, and the flow-in port receives minus the sum of their maps.
+    if let Some(members) = a.as_array() {
+        if connection.get("matrix").is_some() {
+            return Err(format!(
+                "{what}: a power_map of members has a matrix per member, not one for the map"
+            )
+            .into());
+        }
+        let b = resolve(builder, elements, &port_text(b, what)?)?;
+        let mut maps = Vec::with_capacity(members.len());
+        for (index, member) in members.iter().enumerate() {
+            let inner = format!("{what}.power_map[0][{index}]");
+            fields(member, &["port", "matrix"], &inner)?;
+            let port = member
+                .get("port")
+                .ok_or_else(|| format!("{inner}: missing port"))?;
+            let a = resolve(builder, elements, &port_text(port, &inner)?)?;
+            let map = coefficient_matrix(member.get("matrix"), b.width, a.width, &inner)?;
+            maps.push((a.port, map));
+        }
+        return builder
+            .power_map_members(maps, b.port)
+            .map_err(|error| Refusal::Admission(format!("{what}: {error}")));
+    }
     let a = resolve(builder, elements, &port_text(a, what)?)?;
     let b = resolve(builder, elements, &port_text(b, what)?)?;
     let map = coefficient_matrix(connection.get("matrix"), b.width, a.width, what)?;
@@ -3452,6 +3526,7 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             | Kind::Slider
             | Kind::FrictionInterface
             | Kind::SlidingInterface
+            | Kind::HertzPatch
             | Kind::ModalStructure
             | Kind::ThermalTimeline
             | Kind::GasCavity => {
@@ -3678,6 +3753,21 @@ impl Device {
                  prescribed slip rate and normal force, with every dissipated joule sent to their \
                  heat port and the prescribed motion's work kept as the interface's own account; \
                  no contact geometry, normal dynamics, wear or third body"
+            ));
+        }
+        if self
+            .elements
+            .iter()
+            .any(|element| element.kind == Kind::HertzPatch)
+        {
+            let base = description.replace("contact, friction,", "geometric contact, impact,");
+            description = std::borrow::Cow::Owned(format!(
+                "{base}; Hertz patches step fs-tribo's joint slip and spin friction of one \
+                 circular patch with constant static and kinetic coefficients, normal load and \
+                 radius, through constant maps of their bodies' ports fixed at admission, with \
+                 every dissipated joule sent to their heat port; a step in which the slip or the \
+                 spin would reverse is refused, not shortened; no normal contact law, rolling, \
+                 partial slip, wear or third body"
             ));
         }
         if self
@@ -4183,6 +4273,24 @@ impl Device {
                 values.extend([
                     ("traction_x_n", traction[0]),
                     ("traction_y_n", traction[1]),
+                    ("heat_w", -output("heat")),
+                ]);
+                values
+            }
+            // The wrench the last step's patch acted with on side a: its port
+            // returns minus it, the third coefficient over the radius.
+            Kind::HertzPatch => {
+                let wrench = match system.port(element.node, "wrench") {
+                    Some(port) if system.steps() > 0 => system.last_output(port),
+                    _ => &[f64::NAN; 3][..],
+                };
+                let radius_m = element.radius_m.unwrap_or(f64::NAN);
+                let mut values =
+                    friction::hertz_values(system.state::<friction::Patch>(element.node));
+                values.extend([
+                    ("force_x_n", -wrench[0]),
+                    ("force_y_n", -wrench[1]),
+                    ("spin_moment_nm", -wrench[2] * radius_m),
                     ("heat_w", -output("heat")),
                 ]);
                 values
