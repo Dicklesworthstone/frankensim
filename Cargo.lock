@@ -1188,6 +1188,7 @@ dependencies = [
  "fs-convection",
  "fs-couple",
  "fs-cutfem",
+ "fs-dcontact",
  "fs-euler-disc-e2e",
  "fs-evidence",
  "fs-exec",

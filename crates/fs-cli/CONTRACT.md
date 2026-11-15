@@ -1046,6 +1046,41 @@ resolved from material cards; the structure is linear (no quartic term) and
 its observer transfers are not used; the report gives modal coordinates and
 the attachments' flows, not each degree of freedom's position.
 
+`contact_interface` lowers to `fs_dcontact::component::ContactInterface` on
+the kernel's `add_on_line` tier, with power ports `a` and `b`. The scene
+authors one power law `R = stiffness [x - gap_m]_+^exponent` on the closure
+`x`, the displacement of end `a` towards end `b` (`x' = v_a - v_b`, so a
+mass joined at `a` closes it moving the negative way), and its start
+`closure_m`; fs-dcontact admits it as a one-point `Obstacle` (exponent at
+least 1, stiffness non-negative). `solve` gives the reaction search's
+ceilings `maximum_force_n` and `maximum_penetration_m` (required) and
+optionally `max_iterations` (1 to 128, default 100) and the residual
+tolerances (default 1e-9 N and 1e-12). The owner steps the reaction as the
+secant of the law's potential over the step's move and settles it on the
+load line by bisection; the lowering evaluates no law. Beside a neighbour
+that tells the end of its flow, such as a `modal_structure`, the end named
+in `reads_ends` reads it. Reports expose `closure_m` and the last step's
+`reaction_n`. `adaptive` refuses it, and it has no state codec.
+
+Tests in `tests/system_command/contact.rs`:
+- A 10 g mass at 2 m/s onto a Hertz wall (`K = 4/3 E* sqrt(R)`, E* = 0.8
+  GPa, R = 3 mm, as in fs-dcontact's component tests), 400 steps over the
+  closed-form contact time: it leaves at the speed it came with, to the
+  settled reactions' defect, and its deepest closure lies within the
+  half-step sampling bound below the closed-form depth, never above it.
+- `examples/system/struck_mode.json`, a 10 g stick at 2 m/s striking one
+  undamped 200 Hz mode seen as 50 g through that contact, which reads the
+  mode's end: the stick comes back, and the stick's, the mode's and the
+  contact's energies hold the stick's 0.02 J to the defect per contact plus
+  8 ulps a step; the ledger residual within the same bound.
+- Eight refusals, all exit 3: a sub-linear exponent, a negative stiffness,
+  a missing `solve`, a missing ceiling, 200 iterations, a relative
+  tolerance of 1.5, an unknown end and an unsupported field.
+
+No claim: one contact point on one closure, authored law and stiffness (no
+contact geometry or material card), no contact loss, and no event at touch:
+a step that enters or leaves contact is not shortened.
+
 `thermal_timeline` lowers to `fs_thermal::component::ThermalTimeline` over
 an `fs_thermal::enthalpy::DepositionSimulation`, stepped by the owner's
 explicit rule; nothing in fs-cli conducts, stores or integrates heat. The

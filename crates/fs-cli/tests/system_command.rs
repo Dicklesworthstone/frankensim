@@ -14,6 +14,8 @@ mod adaptive_networks;
 mod timeline;
 #[path = "system_command/modal_network.rs"]
 mod modal_network;
+#[path = "system_command/contact.rs"]
+mod contact;
 
 fn example(name: &str) -> String {
     format!(

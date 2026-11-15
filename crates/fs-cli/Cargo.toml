@@ -25,6 +25,7 @@ fs-conduction = { path = "../fs-conduction" }
 fs-convection = { path = "../fs-convection" }
 fs-couple = { path = "../fs-couple" }
 fs-cutfem = { path = "../fs-cutfem", optional = true }
+fs-dcontact = { path = "../fs-dcontact", features = ["component"] }
 fs-euler-disc-e2e = { path = "../fs-euler-disc-e2e", default-features = false }
 fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }

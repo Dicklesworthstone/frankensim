@@ -223,7 +223,7 @@ fn load(
 
 /// The ends, `a` and `b`, whose neighbours tell the end of their flow, such
 /// as a modal structure's attachment: each named at most once.
-fn reads_ends(definition: &J, what: &str) -> Result<[bool; 2], String> {
+pub(super) fn reads_ends(definition: &J, what: &str) -> Result<[bool; 2], String> {
     let mut ends = [false; 2];
     let Some(value) = definition.get("reads_ends") else {
         return Ok(ends);

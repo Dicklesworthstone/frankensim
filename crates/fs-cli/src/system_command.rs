@@ -8,6 +8,7 @@
 //! Nothing here integrates anything: every number comes from the kernel and its elements.
 
 mod adaptive_metric;
+mod contact;
 mod friction;
 mod gas;
 mod hydraulic;
@@ -271,6 +272,21 @@ Elements (ports in brackets; SI units in every field name):
                  the end of its flow, <id>.end. Reports every mode's
                  displacement and velocity, each attachment's flow at the
                  end of the last step, and heat_w; requires fixed step_s.)
+  contact_interface stiffness, exponent, gap_m = 0, closure_m = 0, solve,
+                 reads_ends = []                                     [a, b]
+                 (fs-dcontact's one-point normal contact on the load line:
+                 the reaction R = stiffness [x - gap_m]_+^exponent pushes a
+                 and b apart, where the closure x is the displacement of a
+                 towards b (x' = flow at a less flow at b) and starts at
+                 closure_m. exponent >= 1 (1.5 is Hertz); stiffness in
+                 N/m^exponent. Each step's reaction is the secant of the
+                 law's potential over the step's move, so a lossless
+                 contact gives back the work it takes. solve holds the
+                 search budgets: maximum_force_n and maximum_penetration_m
+                 (required ceilings), max_iterations 100 (1 to 128),
+                 force_absolute_tolerance_n 1e-9, force_relative_tolerance
+                 1e-12. reads_ends as for friction_interface. Reports
+                 closure_m and reaction_n; requires fixed step_s.)
   heat_capacity  capacity_j_k, temperature_k                          [heat]
                  (and a signal output, temperature: its temperature at the
                  start of the step; it may stay unconnected)
@@ -1187,6 +1203,9 @@ enum Kind {
     /// A linear structure in damped modes, `fs-nlmodal`'s, acted on through
     /// its attachments.
     ModalStructure,
+    /// A one-point normal power-law contact between two ends,
+    /// `fs-dcontact`'s, on the kernel's load line.
+    ContactInterface,
     /// Storage setting the effort of a parallel node: charge and voltage
     /// (node capacitor), volume and pressure (accumulator).
     NodeCapacitor(Domain),
@@ -1234,7 +1253,7 @@ enum Kind {
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 44] = [
+    const TABLE: [(&'static str, Self); 45] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
@@ -1246,6 +1265,7 @@ impl Kind {
         ("sliding_interface", Self::SlidingInterface),
         ("hertz_patch", Self::HertzPatch),
         ("modal_structure", Self::ModalStructure),
+        ("contact_interface", Self::ContactInterface),
         ("inertia", Self::Inertance(Domain::Rotation)),
         ("torsion_spring", Self::Compliance(Domain::Rotation)),
         ("rotary_damper", Self::Resistance(Domain::Rotation)),
@@ -2630,6 +2650,7 @@ fn element(
             (node, ports)
         }
         Kind::ModalStructure => modal::structure(builder, name, definition, &what)?,
+        Kind::ContactInterface => contact::interface(builder, name, definition, &what)?,
         Kind::NodeCapacitor(domain) => {
             let names = domain.names();
             fields(
@@ -3528,6 +3549,7 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             | Kind::SlidingInterface
             | Kind::HertzPatch
             | Kind::ModalStructure
+            | Kind::ContactInterface
             | Kind::ThermalTimeline
             | Kind::GasCavity => {
                 return Err(format!(
@@ -3781,6 +3803,19 @@ impl Device {
                  mode-shape weights, or from the modes fs-nlmodal solves from an authored \
                  stiffness and mass under Rayleigh damping; no mode solve from geometry or \
                  material cards"
+            ));
+        }
+        if self
+            .elements
+            .iter()
+            .any(|element| element.kind == Kind::ContactInterface)
+        {
+            description = std::borrow::Cow::Owned(format!(
+                "{description}; contact interfaces step fs-dcontact's one-point normal power law \
+                 with an authored stiffness, exponent and gap, its reaction the secant of the \
+                 law's potential over each step's move, settled on the load line by bracketed \
+                 bisection within the scene's budgets; no contact loss, no events at touch, no \
+                 contact geometry"
             ));
         }
         if self
@@ -4277,6 +4312,7 @@ impl Device {
                 ]);
                 values
             }
+            Kind::ContactInterface => contact::values(system.state::<contact::State>(element.node)),
             // The wrench the last step's patch acted with on side a: its port
             // returns minus it, the third coefficient over the radius.
             Kind::HertzPatch => {

@@ -1,0 +1,29 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 0.002,
+  "step_s": 0.000001,
+  "sample_every_s": 0.0001,
+  "elements": {
+    "stick": {"kind": "mass", "mass_kg": 0.01, "velocity_m_s": -2.0},
+    "tip": {
+      "kind": "contact_interface",
+      "stiffness": 58423739.46721772,
+      "exponent": 1.5,
+      "closure_m": -0.00001,
+      "reads_ends": ["b"],
+      "solve": {"maximum_force_n": 1000000.0, "maximum_penetration_m": 0.01}
+    },
+    "head": {
+      "kind": "modal_structure",
+      "sample_rate_hz": 48000,
+      "modes": [{"frequency_hz": 200.0, "damping_ratio": 0.0}],
+      "attachments": {"strike": {"domain": "translation", "weights": [[4.47213595499958]]}}
+    },
+    "case": {"kind": "heat_capacity", "capacity_j_k": 1.0, "temperature_k": 300.0}
+  },
+  "connections": [
+    {"join": ["stick.p", "tip.a"]},
+    {"join": ["head.strike", "tip.b"]},
+    {"join": ["case.heat", "head.heat"]}
+  ]
+}
