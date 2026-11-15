@@ -12,9 +12,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use fs_blake3::hash_bytes;
+use fs_conduction::transient::enthalpy::material::{
+    ExactMaterialEnthalpySource, MaterialEnthalpyTransport,
+};
 use fs_matdb::{
-    ClaimSelection, NormalizedMaterialCardPack, PropertyKey, PropertyLineSlice,
-    PropertyUsageReceipt, QueryPoint, SelectionPolicy, UncertaintyModel,
+    ClaimSelection, MatDbError, MaterialCard, NormalizedMaterialCardPack, PropertyKey,
+    PropertyLineSlice, PropertyUsageReceipt, QueryPoint, SelectionPolicy, UncertaintyModel,
 };
 use fs_material::phase::{
     EquilibriumEnthalpyPhaseCurve, HeatCapacitySourceQuery, ResolvedHeatCapacityCurve,
@@ -47,9 +50,89 @@ pub(super) struct PreparedMaterial {
     pub conductivity: Option<ConductivityCurve>,
     conductivity_source: Option<Arc<PropertyLineSlice>>,
     report: String,
+    source: CardSource,
+}
+
+/// The card and the selection the laws were prepared from: its property
+/// keys, the declared context and span, the phase and the enthalpy datum.
+struct CardSource {
+    card: MaterialCard,
+    heat_capacity: PropertyKey,
+    density: PropertyKey,
+    conductivity: Option<PropertyKey>,
+    axis: String,
+    /// The declared context without the temperature, and the temperature's
+    /// declared quantity, if any.
+    context: QueryPoint,
+    temperature_kind: Option<QuantitySpec>,
+    lower: QueryPoint,
+    upper: QueryPoint,
+    selection: SelectionPolicy,
+    phase: SolidLiquidPhase,
+    lower_specific_enthalpy_j_kg: f64,
+}
+
+/// The declared context with its temperature axis at `temperature_k`, with
+/// the declared quantity if there is one.
+fn at_temperature(
+    context: &QueryPoint,
+    axis: &str,
+    kind: Option<QuantitySpec>,
+    temperature_k: f64,
+) -> Result<QueryPoint, MatDbError> {
+    match kind {
+        Some(q) => context.clone().with_quantity(axis, q, temperature_k),
+        None => context.clone().with(axis, temperature_k),
+    }
 }
 
 impl PreparedMaterial {
+    /// fs-conduction's paired storage and transport of this material,
+    /// prepared by the owner from the same card, keys, context and span:
+    /// the chart integrated from the card's Cp(T) and density, the card's
+    /// k(T) as isotropic conduction, and the density read once at
+    /// `reference_k` with the context unchanged, which fixes the masses.
+    ///
+    /// # Errors
+    /// A material whose declaration names no conductivity, and every
+    /// refusal of the owner's (a reference temperature off the span among
+    /// them), as text.
+    pub fn enthalpy_transport(
+        &self,
+        reference_k: f64,
+    ) -> Result<MaterialEnthalpyTransport, String> {
+        let source = &self.source;
+        let conductivity = source
+            .conductivity
+            .as_ref()
+            .ok_or("the declaration names no conductivity_property")?;
+        let reference = at_temperature(
+            &source.context,
+            &source.axis,
+            source.temperature_kind,
+            reference_k,
+        )
+        .map_err(|error| error.to_string())?;
+        MaterialEnthalpyTransport::from_isotropic_card_exact(
+            &source.card,
+            ExactMaterialEnthalpySource {
+                caloric: HeatCapacitySourceQuery {
+                    heat_capacity: &source.heat_capacity,
+                    density: &source.density,
+                    temperature_axis: &source.axis,
+                    lower: &source.lower,
+                    upper: &source.upper,
+                    selection: source.selection,
+                },
+                conductivity,
+                reference: &reference,
+                phase: source.phase,
+                lower_specific_enthalpy_j_kg: source.lower_specific_enthalpy_j_kg,
+            },
+        )
+        .map_err(|error| error.to_string())
+    }
+
     /// The actual queries performed while preparing the original source laws.
     /// These are not queries at each runtime trial, which uses the compiled laws.
     pub fn receipts(&self) -> impl Iterator<Item = &PropertyUsageReceipt> {
@@ -160,6 +243,41 @@ pub(super) fn load(root: &J, scene_path: &Path) -> Result<Materials, String> {
     Ok(materials)
 }
 
+/// The declaration's `conductivity_property` under its `conductivity_kind`
+/// (dimensional unless named), or none when it names no conductivity.
+fn conductivity_key(declaration: &J, what: &str) -> Result<Option<PropertyKey>, String> {
+    if declaration.get("conductivity_property").is_none() {
+        if declaration.get("conductivity_kind").is_some() {
+            return Err(format!(
+                "{what}.conductivity_kind: requires conductivity_property"
+            ));
+        }
+        return Ok(None);
+    }
+    let kind = if declaration.get("conductivity_kind").is_some() {
+        text(declaration, "conductivity_kind", what)?
+    } else {
+        "dimensional"
+    };
+    let conductivity_quantity = quantity(kind, THERMAL_CONDUCTIVITY_DIMS)
+        .map_err(|error| format!("{what}.conductivity_kind: {error}"))?;
+    let static_conductivity = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::ThermalConductivity,
+        ValueForm::Static,
+    ));
+    let Some(conductivity_quantity) = conductivity_quantity.filter(|q| {
+        *q == QuantitySpec::dimensional(THERMAL_CONDUCTIVITY_DIMS) || *q == static_conductivity
+    }) else {
+        return Err(format!(
+            "{what}.conductivity_kind: expected dimensional or thermal-conductivity"
+        ));
+    };
+    Ok(Some(PropertyKey::with_quantity(
+        text(declaration, "conductivity_property", what)?,
+        conductivity_quantity,
+    )))
+}
+
 fn prepare(
     declaration: &J,
     pack: &NormalizedMaterialCardPack,
@@ -205,11 +323,8 @@ fn prepare(
         ));
     }
     let point = |temperature| -> Result<QueryPoint, String> {
-        match temperature_kind {
-            Some(q) => context.clone().with_quantity(axis, q, temperature),
-            None => context.clone().with(axis, temperature),
-        }
-        .map_err(|error| format!("{what}.state: {error}"))
+        at_temperature(&context, axis, temperature_kind, temperature)
+            .map_err(|error| format!("{what}.state: {error}"))
     };
     let lower = point(lower_k)?;
     let upper = point(upper_k)?;
@@ -280,57 +395,45 @@ fn prepare(
             .admit_static(property)
             .map_err(|error| format!("{what}.calorics: {error}"))?;
     }
-    let (conductivity, conductivity_source) = if declaration.get("conductivity_property").is_some()
-    {
-        let kind = if declaration.get("conductivity_kind").is_some() {
-            text(declaration, "conductivity_kind", what)?
-        } else {
-            "dimensional"
-        };
-        let conductivity_quantity = quantity(kind, THERMAL_CONDUCTIVITY_DIMS)
-            .map_err(|error| format!("{what}.conductivity_kind: {error}"))?;
-        let static_conductivity = QuantitySpec::semantic(SemanticType::new(
-            QuantityKind::ThermalConductivity,
-            ValueForm::Static,
-        ));
-        let Some(conductivity_quantity) = conductivity_quantity.filter(|q| {
-            *q == QuantitySpec::dimensional(THERMAL_CONDUCTIVITY_DIMS) || *q == static_conductivity
-        }) else {
-            return Err(format!(
-                "{what}.conductivity_kind: expected dimensional or thermal-conductivity"
-            ));
-        };
-        let key = PropertyKey::with_quantity(
-            text(declaration, "conductivity_property", what)?,
-            conductivity_quantity,
-        );
-        let layer = ResolvedConductionLayer::new(
-            resolved.curve(),
-            material_point,
-            &key,
-            ClaimSelection::Policy(selection),
-            phase,
-            [lower_k, upper_k],
-            || Ok(()),
-        )
-        .map_err(|error| format!("{what}.conductivity_property: {error}"))?;
-        (
-            Some(layer.conductivity_curve().clone()),
-            Some(Arc::clone(layer.source_line())),
-        )
-    } else {
-        if declaration.get("conductivity_kind").is_some() {
-            return Err(format!(
-                "{what}.conductivity_kind: requires conductivity_property"
-            ));
+    let conductivity_key = conductivity_key(declaration, what)?;
+    let (conductivity, conductivity_source) = match &conductivity_key {
+        Some(key) => {
+            let layer = ResolvedConductionLayer::new(
+                resolved.curve(),
+                material_point,
+                key,
+                ClaimSelection::Policy(selection),
+                phase,
+                [lower_k, upper_k],
+                || Ok(()),
+            )
+            .map_err(|error| format!("{what}.conductivity_property: {error}"))?;
+            (
+                Some(layer.conductivity_curve().clone()),
+                Some(Arc::clone(layer.source_line())),
+            )
         }
-        (None, None)
+        None => (None, None),
     };
     Ok(PreparedMaterial {
         caloric: resolved.curve().clone(),
         conductivity,
         conductivity_source,
         report: String::new(),
+        source: CardSource {
+            card: pack.card().clone(),
+            heat_capacity,
+            density,
+            conductivity: conductivity_key,
+            axis: axis.to_owned(),
+            context,
+            temperature_kind,
+            lower,
+            upper,
+            selection,
+            phase,
+            lower_specific_enthalpy_j_kg: reference_h,
+        },
     })
 }
 

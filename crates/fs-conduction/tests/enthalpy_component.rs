@@ -560,6 +560,74 @@ fn a_heater_through_the_kernel_steps_an_enthalpy_body_as_the_owner_does() {
     });
 }
 
+/// A Newton policy whose absolute floor, 1e-30 J, is far below its relative
+/// target, 1e-10 of the step's first residual: the owner stops on the
+/// relative one.
+fn relative_config() -> EnthalpyStepConfig {
+    let mut config = config();
+    config.newton.absolute_tolerance = 1.0e-30;
+    config.newton.relative_tolerance = 1.0e-10;
+    config
+}
+
+/// The receipt's tolerance is the target the owner stopped at. The first
+/// scene of a card's heat capacity (fs-cli, 1e-10 relative and 1e-10 J)
+/// found the receipt carrying the absolute tolerance alone: the kernel
+/// refused a step the owner had accepted at 3.1e-10 J.
+#[test]
+fn an_enthalpy_body_whose_newton_stops_on_its_relative_tolerance_steps_through_the_kernel() {
+    const POWER_W: f64 = 20.0;
+    const DT_S: f64 = 0.5;
+    with_cx(|cx| {
+        let parts = parts();
+        let make = || {
+            EnthalpyBody::new(
+                solver(cx, parts),
+                problem(parts),
+                &[PatchPort::Mean("left")],
+                relative_config(),
+                adjoint(),
+            )
+            .unwrap()
+        };
+        let mut new = Vec::new();
+        let mut out = [0.0];
+        let Proposal::Step(receipt) = make()
+            .propose(&initial(parts), DT_S, &[POWER_W], &mut new, &mut out, cx)
+            .unwrap()
+        else {
+            panic!("the body did not step");
+        };
+        eprintln!(
+            "relative Newton target: residual {:e} J at tolerance {:e} J",
+            receipt.residual, receipt.tolerance
+        );
+        assert!(receipt.tolerance > 1.0e-30, "{receipt:?}");
+        assert!(receipt.residual <= receipt.tolerance, "{receipt:?}");
+        let mut builder = SystemBuilder::new();
+        let node = builder
+            .add_with_tangent("body", make(), initial(parts))
+            .unwrap();
+        let heater = builder
+            .add_with_tangent(
+                "heater",
+                Heater::new(Waveform::constant(POWER_W).unwrap()).unwrap(),
+                SourceAccount::default(),
+            )
+            .unwrap();
+        let heat = builder.port(heater, "heat").unwrap();
+        builder
+            .bond(builder.port(node, "left").unwrap(), heat)
+            .unwrap();
+        let mut system = builder.seal().unwrap();
+        assert!(system.guess(heat, &[310.0]));
+        for _ in 0..8 {
+            system.step(DT_S, cx).unwrap();
+        }
+        assert_eq!(system.steps(), 8);
+    });
+}
+
 #[test]
 fn an_enthalpy_body_refuses_what_it_cannot_carry_and_a_step_off_its_chart() {
     with_cx(|cx| {

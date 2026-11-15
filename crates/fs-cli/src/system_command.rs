@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 
 use std::rc::Rc;
 
+use fs_conduction::transient::enthalpy::material::MaterialEnthalpyTransport;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::phase::component::UniformEnthalpyBody;
 use fs_material::phase::{
@@ -367,8 +368,9 @@ Elements (ports in brackets; SI units in every field name):
                  environment port environment_heat_w. Fixed step_s only; no
                  checkpoint codec.)
   conduction_body box_m [Lx, Ly, Lz], cells [nx, ny, nz], conductivity_w_m_k
-                 (or material, newton), volumetric_heat_capacity_j_m3_k,
-                 temperature_k, ports, traces, solve    [one per port face]
+                 (or material, newton), volumetric_heat_capacity_j_m3_k
+                 (or reference_temperature_k), temperature_k, ports,
+                 traces, solve                          [one per port face]
                  (fs-conduction's backward-Euler finite-element body on the
                  box [0, Lx] x [0, Ly] x [0, Lz], nx x ny x nz cells of six
                  tetrahedra, at most 64 a side and 4096 in all, starting at
@@ -390,11 +392,21 @@ Elements (ports in brackets; SI units in every field name):
                  A k that varies steps by the owner's Newton solve; newton
                  gives max_iterations 32, residual_rtol 1e-10 and
                  residual_atol_j 1e-10. A step that would leave the span is
-                 refused. The heat capacity stays the declared constant.
-                 Reports each port's <face>.temperature_k, each trace's
-                 <face>.min_temperature_k and <face>.max_temperature_k, and
-                 the field's min_temperature_k and max_temperature_k. Fixed
-                 step_s only; no checkpoint codec.)
+                 refused. The heat capacity stays the declared constant,
+                 unless the body omits volumetric_heat_capacity_j_m3_k: then
+                 its heat capacity and density are the material card's too.
+                 fs-conduction's enthalpy owner stores specific enthalpy on
+                 the chart of the card's Cp(T) over the span, with each
+                 node's mass the card's density at reference_temperature_k
+                 (required) times its volume, fixed; every step is the
+                 owner's Newton solve under newton, the tangent's solves
+                 take solve's Krylov policy, and a trace_contact refuses
+                 the body. Reports each port's <face>.temperature_k, each
+                 trace's <face>.min_temperature_k and
+                 <face>.max_temperature_k, the field's min_temperature_k and
+                 max_temperature_k, and for a body of the card's heat
+                 capacity reference_density_kg_m3. Fixed step_s only; no
+                 checkpoint codec.)
   trace_contact  between [\"body.face\", \"body.face\"], offset_m [x, y, z],
                  resistance_m2_k_w, source (or pack, state, selection),
                  mapped                                               [a, b]
@@ -1433,6 +1445,9 @@ struct Element {
     /// What the scene declared for a trace contact: the two traces it was
     /// computed for and its resistance with its source.
     contact: Option<conduction::Declared>,
+    /// A conduction body whose state is specific enthalpy: the paired
+    /// material whose chart reads it as temperature.
+    enthalpy: Option<&'static MaterialEnthalpyTransport>,
 }
 
 struct Device {
@@ -2713,6 +2728,7 @@ fn element(
     let mut coordinates = 0;
     let mut radius_m = None;
     let mut contact = None;
+    let mut enthalpy = None;
     let (node, ports) = match kind {
         Kind::Inertance(domain) => {
             let names = domain.names();
@@ -2923,11 +2939,11 @@ fn element(
             (parts.node, parts.ports)
         }
         Kind::ConductionBody => {
-            let (node, ports, start_k, material) =
-                conduction::body(builder, name, definition, materials, prepared, &what)?;
-            temperature_k = Some(start_k);
-            material_sources.extend(material);
-            (node, ports)
+            let added = conduction::body(builder, name, definition, materials, prepared, &what)?;
+            temperature_k = Some(added.temperature_k);
+            material_sources.extend(added.material);
+            enthalpy = added.enthalpy;
+            (added.node, added.ports)
         }
         Kind::TraceContact => {
             let (node, ports, declared) = conduction::wall(builder, name, prepared, &what)?;
@@ -2973,6 +2989,7 @@ fn element(
         coordinates,
         radius_m,
         contact,
+        enthalpy,
     })
 }
 
@@ -4013,16 +4030,36 @@ impl Device {
             } else {
                 "mesh, radiation or contact trace"
             };
-            // A body that names a material takes the material's k(T), and
-            // only that: its heat capacity stays the scene's constant.
-            let (conductivity, dependent) = if self.elements.iter().any(|element| {
+            // A body that names a material takes the material's k(T); one
+            // that declares no heat capacity takes the card's Cp(T) and
+            // density too, and otherwise the heat capacity stays the scene's
+            // constant.
+            let material_body = self.elements.iter().any(|element| {
                 element.kind == Kind::ConductionBody && !element.material_sources.is_empty()
-            }) {
+            });
+            let card_capacity = self
+                .elements
+                .iter()
+                .any(|element| element.enthalpy.is_some());
+            let capacity = if card_capacity {
+                "volumetric heat capacity or a material card's Cp(T) and density, whose specific \
+                 enthalpy fs-conduction's enthalpy owner stores on the card's chart, with masses \
+                 fixed by the card's density at the body's reference temperature and no thermal \
+                 expansion"
+            } else {
+                "volumetric heat capacity"
+            };
+            let (conductivity, dependent) = if material_body {
                 (
                     "one declared conductivity or a scene material's k(T) curve, stepped by \
                      fs-conduction's Newton endpoint and refused off the curve's span, and one \
                      declared",
-                    "temperature-dependent heat capacity (a body takes only a material's k(T)), ",
+                    if card_capacity {
+                        ""
+                    } else {
+                        "temperature-dependent heat capacity (a body takes only a material's \
+                         k(T)), "
+                    },
                 )
             } else {
                 (
@@ -4032,11 +4069,11 @@ impl Device {
             };
             description = std::borrow::Cow::Owned(format!(
                 "{description}; conduction bodies step fs-conduction's backward-Euler \
-                 finite-element field on an authored box with {conductivity} volumetric heat \
-                 capacity, each port a whole box face taking a uniform flux and returning the \
-                 face's area-mean end temperature, the other faces insulated; the entropy \
-                 generated inside a body is reported as zero, so the entropy totals are a lower \
-                 bound; no internal source, {dependent}imported {without}"
+                 finite-element field on an authored box with {conductivity} {capacity}, each \
+                 port a whole box face taking a uniform flux and returning the face's area-mean \
+                 end temperature, the other faces insulated; the entropy generated inside a body \
+                 is reported as zero, so the entropy totals are a lower bound; no internal \
+                 source, {dependent}imported {without}"
             ));
             if contacts {
                 // A card's value is measured, but it is read once.
@@ -4358,7 +4395,12 @@ impl Device {
             return modal::values(&self.system, element.node, &element.ports);
         }
         if element.kind == Kind::ConductionBody {
-            return conduction::values(&self.system, element.node, &element.ports);
+            return conduction::values(
+                &self.system,
+                element.node,
+                &element.ports,
+                element.enthalpy,
+            );
         }
         if let Some(declared) = &element.contact {
             return conduction::wall_values(&self.system, element.node, declared);

@@ -221,6 +221,15 @@ impl Component for EnthalpyBody<'_, '_> {
         // change one of `n` terms no larger: `(n + 16) eps` of both ends
         // covers the rounding of all three, as for a conduction body.
         let units = (self.masses.len() + 16) as f64 * f64::EPSILON;
+        // The owner accepts its endpoint when the Newton residual is at most
+        // the larger of the absolute tolerance and the relative tolerance
+        // times the step's first residual: that target is the receipt's.
+        let first = step
+            .newton
+            .history
+            .first()
+            .map_or(step.newton.residual_norm, |attempt| attempt.residual_before);
+        let newton = self.config.newton;
         let receipt = Receipt {
             stored_change_j: step.stored_energy_change_j,
             dissipated_j: 0.0,
@@ -228,7 +237,9 @@ impl Component for EnthalpyBody<'_, '_> {
             entropy_generated_j_per_k: 0.0,
             energy_tolerance_j: units * (stored_old_j.abs() + stored_new_j.abs() + heat_j.abs()),
             residual: step.newton.residual_norm,
-            tolerance: self.config.newton.absolute_tolerance,
+            tolerance: newton
+                .absolute_tolerance
+                .max(newton.relative_tolerance * first),
         };
         new.clear();
         new.extend_from_slice(&step.specific_enthalpy_j_kg);

@@ -1,0 +1,42 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 60.0,
+  "step_s": 2.0,
+  "materials": {
+    "steel316": {
+      "pack": "steel316/stainless-316-nasa.fsmcdpk",
+      "phase": "solid",
+      "temperature_axis": "temperature",
+      "temperature_kind": "absolute-temperature",
+      "state": [
+        {"name": "source-generic-316-identity", "value": "1", "kind": "dimensional"},
+        {"name": "source-uns-designation-known", "value": "0", "kind": "dimensional"},
+        {"name": "source-heat-treatment-known", "value": "0", "kind": "dimensional"},
+        {"name": "source-product-form-known", "value": "0", "kind": "dimensional"},
+        {"name": "source-pressure-known", "value": "0", "kind": "dimensional"}
+      ],
+      "temperature_min_k": 273.0,
+      "temperature_max_k": 400.0,
+      "reference_specific_enthalpy_j_kg": 0.0,
+      "heat_capacity_property": "specific-heat-capacity",
+      "density_property": "density",
+      "conductivity_property": "thermal-conductivity",
+      "conductivity_kind": "thermal-conductivity"
+    }
+  },
+  "elements": {
+    "bar": {
+      "kind": "conduction_body",
+      "box_m": [0.04, 0.02, 0.02],
+      "cells": [8, 2, 2],
+      "material": "steel316",
+      "reference_temperature_k": 290.0,
+      "temperature_k": 290.0,
+      "ports": ["x_min"],
+      "solve": {"energy_tolerance_j": 1e-8, "tolerance": 1e-13, "max_iterations": 4000, "restart": 20}
+    }
+  },
+  "connections": [
+    {"prescribe": "bar.x_min", "heat_rate_w": 20.0}
+  ]
+}

@@ -54,6 +54,20 @@
 //! run started slab b at 300 K, a knot of the table, and the scene refused
 //! its first step (the owner has no tangent where a whole element sits on a
 //! knot); that start is now a refusal test.
+//!
+//! A body whose heat capacity and density are the card's too:
+//! examples/system/steel316_enthalpy_bar.json, the heated bar with no
+//! declared heat capacity and its mass fixed at 290 K. The reference is
+//! fs-conduction's paired material prepared from the same pack's card with
+//! the scene's keys, context and span, and its enthalpy owner on the same
+//! box stepped by `advance` ([`owner_enthalpy_bar`]). The claims, declared
+//! before the first run: the compiled pack holds the printed Cp and density
+//! tables; the field's least and greatest temperature equal the owner's bit
+//! for bit after each of the 30 steps; the reported density is the owner's
+//! and the printed table's at 290 K to 1e-12; the 1200 J put in is stored
+//! and the ledger closes, each within 1e-6 J; the hot end passes the 300 K
+//! knot and stays below 400 K. Then the example through the binary and the
+//! refusals.
 
 use std::f64::consts::{FRAC_PI_2, PI};
 
@@ -63,6 +77,10 @@ use fs_conduction::fixtures::{box_grid, on_box_face};
 use fs_conduction::interface::{NonmatchingOptions, NonmatchingSurface};
 use fs_conduction::transient::VolumetricHeatCapacity;
 use fs_conduction::transient::backward_euler::{BackwardEuler, NonlinearStepConfig, StepConfig};
+use fs_conduction::transient::enthalpy::material::{
+    ExactMaterialEnthalpySource, MaterialEnthalpyTransport,
+};
+use fs_conduction::transient::enthalpy::{EnthalpyBudget, EnthalpyStepConfig};
 use fs_conduction::{
     AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS, AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY, BoundaryFace,
     ConductionMesh, ConductionProblem, ConductivityModel, ConductivityTable, InterfaceFacePair,
@@ -71,11 +89,16 @@ use fs_conduction::{
 };
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
-    ClaimSet, InterfaceSystemCard, InterpolationPolicy, MaterialStateId, NormalizedInterfacePack,
-    NormalizedMaterialCardPack, PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint,
-    SelectionPolicy, SurfaceSpec, SystemContext, UncertaintyModel,
+    ClaimSet, InterfaceSystemCard, InterpolationPolicy, MaterialCard, MaterialStateId,
+    NormalizedInterfacePack, NormalizedMaterialCardPack, PropertyClaim, PropertyKey, PropertyValue,
+    Provenance, QueryPoint, SelectionPolicy, SurfaceSpec, SystemContext, UncertaintyModel,
 };
+use fs_material::phase::{HeatCapacitySourceQuery, SolidLiquidPhase};
+use fs_material::state_point::SPECIFIC_HEAT_CAPACITY_DIMS;
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+use fs_qty::{Density, Dims, QuantitySpec};
 use fs_rep_mesh::TetComplex;
+use fs_solver::NewtonKrylovConfig;
 
 const LENGTH_M: f64 = 0.03;
 const CROSS_M: f64 = 0.02;
@@ -1559,6 +1582,347 @@ fn a_card_material_slab_started_on_a_knot_of_its_table_is_refused_in_a_contact()
             error.message.contains("no unique two-sided derivative"),
             "{error}"
         );
+        assert_eq!(scene.render_json(), before);
+        assert_eq!(scene.steps(), 0);
+    });
+}
+
+/// The stainless bar with its heat capacity and density from the card as
+/// well as its conductivity.
+const STEEL_ENTHALPY_EXAMPLE: &str = "steel316_enthalpy_bar.json";
+/// The temperature at which the example's box holds the bar's mass [K].
+const STEEL_REFERENCE_K: f64 = 290.0;
+/// The two energy claims [J]: the owner's 1e-8 J gate on each of the 30
+/// steps, with room for rounding.
+const CLAIMED_ENTHALPY_GAP_J: f64 = 1.0e-6;
+
+/// The table of the seed source's `curve` row `id`: [K, value].
+fn printed_curve(id: &str) -> Vec<(f64, f64)> {
+    let path = format!("{}/../../{STEEL_SOURCE}", env!("CARGO_MANIFEST_DIR"));
+    let text = std::fs::read_to_string(path).unwrap();
+    let head = format!("curve\t{id}\t");
+    let row = text
+        .lines()
+        .find(|line| line.starts_with(&head))
+        .unwrap_or_else(|| panic!("the source has no curve {id}"));
+    let fields: Vec<&str> = row.split('\t').collect();
+    assert_eq!(
+        (fields[4], fields[5], fields[8]),
+        ("temperature", "K", "linear")
+    );
+    fields[7]
+        .split(',')
+        .map(|knot| {
+            let (kelvin, value) = knot.split_once(':').unwrap();
+            (kelvin.parse().unwrap(), value.parse().unwrap())
+        })
+        .collect()
+}
+
+/// The point the example's materials section reads the card at: its five
+/// source flags, each a dimensionless number, and the absolute temperature.
+fn steel_point(temperature_k: f64) -> QueryPoint {
+    let flag = QuantitySpec::dimensional(Dims([0; 6]));
+    let mut point = QueryPoint::new();
+    for (name, value) in [
+        ("source-generic-316-identity", 1.0),
+        ("source-uns-designation-known", 0.0),
+        ("source-heat-treatment-known", 0.0),
+        ("source-product-form-known", 0.0),
+        ("source-pressure-known", 0.0),
+    ] {
+        point = point.with_quantity(name, flag, value).unwrap();
+    }
+    let absolute = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature,
+        ValueForm::Static,
+    ));
+    point
+        .with_quantity("temperature", absolute, temperature_k)
+        .unwrap()
+}
+
+/// What the reference reports of the enthalpy bar.
+struct EnthalpyBar {
+    /// The least and greatest nodal temperature after each step [K].
+    spans: Vec<(f64, f64)>,
+    /// The density the masses were fixed by [kg/m^3].
+    density_kg_m3: f64,
+}
+
+/// The reference: fs-conduction's paired material prepared from `card`
+/// with the example's keys, context and span (273 K to 400 K, 0 J/kg at
+/// 273 K) and the density read at 290 K, its enthalpy owner on the
+/// example's box, and the heat rate as a uniform flux over x_min, stepped
+/// by `advance` from the chart's enthalpy of 290 K under the Newton policy
+/// the scene's defaults give (32 updates, 1e-10 relative, 1e-10 J) and the
+/// scene's 1e-8 J gate.
+fn owner_enthalpy_bar(cx: &fs_exec::Cx<'_>, card: &MaterialCard) -> EnthalpyBar {
+    let heat_capacity = PropertyKey::new("specific-heat-capacity", SPECIFIC_HEAT_CAPACITY_DIMS);
+    let density = PropertyKey::new("density", Density::DIMS);
+    let conductivity = PropertyKey::with_quantity(
+        "thermal-conductivity",
+        QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::ThermalConductivity,
+            ValueForm::Static,
+        )),
+    );
+    let (lower, upper) = (steel_point(273.0), steel_point(400.0));
+    let reference = steel_point(STEEL_REFERENCE_K);
+    let transport = MaterialEnthalpyTransport::from_isotropic_card_exact(
+        card,
+        ExactMaterialEnthalpySource {
+            caloric: HeatCapacitySourceQuery {
+                heat_capacity: &heat_capacity,
+                density: &density,
+                temperature_axis: "temperature",
+                lower: &lower,
+                upper: &upper,
+                selection: SelectionPolicy::SingleClaimOnly,
+            },
+            conductivity: &conductivity,
+            reference: &reference,
+            phase: SolidLiquidPhase::Solid,
+            lower_specific_enthalpy_j_kg: 0.0,
+        },
+    )
+    .unwrap();
+    let (complex, positions) = box_grid([8, 2, 2], [0.04, 0.02, 0.02]);
+    let mesh = ConductionMesh::new(complex, positions).unwrap();
+    let heated = |face: &BoundaryFace| on_box_face(face.centroid[0], 0.0);
+    let area_m2: f64 = mesh
+        .boundary()
+        .iter()
+        .filter(|face| heated(face))
+        .map(|face| face.area)
+        .sum();
+    let flux = ThermalBc::neumann(-STEEL_POWER_W / area_m2).unwrap();
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region("x_min", heated, flux)
+        .unwrap()
+        .adiabatic_remainder()
+        .finish()
+        .unwrap();
+    let budget = EnthalpyBudget {
+        max_vertices: mesh.vertex_count(),
+        max_elements: mesh.element_count(),
+    };
+    let solver = transport.prepare_uniform(cx, &mesh, budget).unwrap();
+    let source = ScalarField::Uniform(0.0);
+    let problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: transport.conductivity(),
+        element_materials: None,
+        source: &source,
+    };
+    let config = EnthalpyStepConfig {
+        newton: NewtonKrylovConfig {
+            absolute_tolerance: 1.0e-10,
+            relative_tolerance: 1.0e-10,
+            ..NewtonKrylovConfig::default()
+        },
+        max_newton_iterations: 32,
+        energy_tolerance_j: 1.0e-8,
+    };
+    let start = transport
+        .caloric()
+        .state_at_temperature(STEEL_START_K)
+        .unwrap()
+        .specific_enthalpy_j_kg();
+    let mut field = vec![start; mesh.vertex_count()];
+    let mut spans = Vec::new();
+    for _ in 0..STEEL_STEPS {
+        let step = solver
+            .advance(cx, problem, None, &field, STEEL_STEP_S, config)
+            .unwrap();
+        spans.push(span(step.temperature.iter().copied()));
+        field = step.specific_enthalpy_j_kg;
+    }
+    EnthalpyBar {
+        spans,
+        density_kg_m3: transport.reference_density_kg_m3(),
+    }
+}
+
+/// The printed table's value at `t` by linear interpolation.
+fn interpolate(table: &[(f64, f64)], t: f64) -> f64 {
+    let i = table.iter().position(|&(k, _)| k >= t).unwrap().max(1);
+    let ((t0, v0), (t1, v1)) = (table[i - 1], table[i]);
+    v0 + (t - t0) / (t1 - t0) * (v1 - v0)
+}
+
+#[test]
+fn a_body_of_a_card_heat_capacity_is_the_owner_enthalpy_field_on_the_same_card() {
+    let pack = NormalizedMaterialCardPack::from_bytes(&std::fs::read(example(STEEL_PACK)).unwrap())
+        .unwrap();
+    for (property, id) in [
+        ("specific-heat-capacity", "specific-heat-capacity-273-400k"),
+        ("density", "density-273-400k"),
+    ] {
+        let claims = pack.card().claims().claims_for(property);
+        assert_eq!(claims.len(), 1, "{property}");
+        let PropertyValue::Curve {
+            knots: compiled, ..
+        } = &claims[0].1.value
+        else {
+            panic!("{property} is not a curve");
+        };
+        assert_eq!(compiled, &printed_curve(id), "the pack's {property}");
+    }
+    let text = std::fs::read_to_string(example(STEEL_ENTHALPY_EXAMPLE)).unwrap();
+    let put_in_j = STEEL_POWER_W * 60.0;
+    scene_context(|cx, _| {
+        let owner = owner_enthalpy_bar(cx, pack.card());
+        let mut scene = SystemScene::from_text(&text, example(STEEL_ENTHALPY_EXAMPLE)).unwrap();
+        let mut index = 0;
+        while scene.advance(f64::MAX, cx).unwrap() {
+            let low = probe(&scene, "bar.min_temperature_k");
+            let high = probe(&scene, "bar.max_temperature_k");
+            assert!(
+                low.to_bits() == owner.spans[index].0.to_bits()
+                    && high.to_bits() == owner.spans[index].1.to_bits(),
+                "step {index}: the scene's {low} .. {high} K against the owner's {:?} K",
+                owner.spans[index]
+            );
+            index += 1;
+        }
+        let density = probe(&scene, "bar.reference_density_kg_m3");
+        let printed = interpolate(&printed_curve("density-273-400k"), STEEL_REFERENCE_K);
+        let ledger = scene.ledger();
+        let (stored, residual) = (ledger.stored_change_j(), ledger.energy_residual_j());
+        let (low, high) = owner.spans[owner.spans.len() - 1];
+        eprintln!(
+            "{} steps; bar {low} .. {high} K, x_min {} K; density {density} kg/m^3 (printed table at 290 K {printed}); stored change {stored} J of {put_in_j} J in, ledger residual {residual:e} J",
+            scene.steps(),
+            probe(&scene, "bar.x_min.temperature_k"),
+        );
+        assert_eq!(scene.steps(), STEEL_STEPS);
+        assert_eq!(index, owner.spans.len());
+        assert_eq!(density.to_bits(), owner.density_kg_m3.to_bits());
+        assert!(
+            (density - printed).abs() <= 1e-12 * printed,
+            "{density} against {printed}"
+        );
+        assert!(
+            (stored - put_in_j).abs() <= CLAIMED_ENTHALPY_GAP_J,
+            "stored {stored} J"
+        );
+        assert!(
+            residual.abs() <= CLAIMED_ENTHALPY_GAP_J,
+            "ledger residual {residual:e} J"
+        );
+        // The run crosses the chart's interior knot and stays on the chart.
+        assert!(300.0 < high && high < 400.0, "{high} K");
+    });
+}
+
+#[test]
+fn the_card_heat_capacity_example_runs_through_the_binary_and_says_what_the_card_gives() {
+    let path = example(STEEL_ENTHALPY_EXAMPLE);
+    let (code, json, stderr) = run_binary(&["--json", "system", &path]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(value(&json, &element("bar"), "x_min.temperature_k") > STEEL_START_K);
+    assert!(value(&json, &element("bar"), "reference_density_kg_m3") > 7960.0);
+    assert!(
+        json.contains("\"material_bindings\":{\"bar\":[\"steel316\"]}"),
+        "{json}"
+    );
+    let (code, text, stderr) = run_binary(&["system", &path]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(text.contains("bar <- steel316"), "{text}");
+    for said in [
+        "and one declared volumetric heat capacity or a material card's Cp(T) and density, \
+         whose specific enthalpy fs-conduction's enthalpy owner stores on the card's chart, \
+         with masses fixed by the card's density at the body's reference temperature and no \
+         thermal expansion, each port",
+        "no internal source, imported mesh, radiation or contact trace",
+    ] {
+        assert!(text.contains(said), "{said} not in {text}");
+    }
+    assert!(
+        !text.contains("temperature-dependent heat capacity"),
+        "{text}"
+    );
+}
+
+#[test]
+fn card_heat_capacity_scenes_refuse_missing_references_off_chart_states_and_contacts_by_name() {
+    let base = std::fs::read_to_string(example(STEEL_ENTHALPY_EXAMPLE)).unwrap();
+    let reference = "\"reference_temperature_k\": 290.0,";
+    let cases = [
+        (
+            "no reference",
+            reference,
+            String::new(),
+            "needs reference_temperature_k, the temperature at which box_m holds its mass",
+        ),
+        (
+            "declared too",
+            reference,
+            format!("{reference} \"volumetric_heat_capacity_j_m3_k\": 3723158.4906,"),
+            "a body with volumetric_heat_capacity_j_m3_k takes none",
+        ),
+        (
+            "reference off the span",
+            reference,
+            "\"reference_temperature_k\": 250.0,".to_owned(),
+            "reference temperature must be supported",
+        ),
+        (
+            "start off the chart",
+            "\"temperature_k\": 290.0,",
+            "\"temperature_k\": 250.0,".to_owned(),
+            "temperature_k 250 K:",
+        ),
+        (
+            "no conductivity",
+            ",\n      \"conductivity_property\": \"thermal-conductivity\",\n      \"conductivity_kind\": \"thermal-conductivity\"",
+            String::new(),
+            "the declaration names no conductivity_property",
+        ),
+        (
+            "both",
+            "\"material\": \"steel316\",",
+            "\"material\": \"steel316\", \"conductivity_w_m_k\": 15.0,".to_owned(),
+            "the conductivity is conductivity_w_m_k or a material's, not both",
+        ),
+    ];
+    for (case, from, to, reason) in cases {
+        assert!(base.contains(from), "{case}: test fixture changed");
+        let text = base.replacen(from, &to, 1);
+        let Err(error) = SystemScene::from_text(&text, example(STEEL_ENTHALPY_EXAMPLE)) else {
+            panic!("{case}: admitted");
+        };
+        eprintln!("{case}: exit {}: {}", error.exit_code, error.message);
+        assert!(error.message.contains(reason), "{case}: {}", error.message);
+    }
+    // A trace contact joins bodies of declared heat capacity: slab a of the
+    // stainless trace example with its heat capacity from the card.
+    let slabs = trace_scene(STEEL_TRACE, 4);
+    let declared = "\"volumetric_heat_capacity_j_m3_k\": 3723158.4906,";
+    assert_eq!(slabs.matches(declared).count(), 2);
+    let text = slabs.replacen(declared, reference, 1);
+    let Err(error) = SystemScene::from_text(&text, example(STEEL_TRACE)) else {
+        panic!("contact: admitted");
+    };
+    eprintln!("contact: exit {}: {}", error.exit_code, error.message);
+    assert!(
+        error
+            .message
+            .contains("fs-conduction's contacts join bodies with volumetric_heat_capacity_j_m3_k"),
+        "{}",
+        error.message
+    );
+    // 2000 W carries the heated end off the chart in the first step: the
+    // owner refuses the step and the scene does not move.
+    let hot = base.replacen("\"heat_rate_w\": 20.0", "\"heat_rate_w\": 2000.0", 1);
+    let mut scene = SystemScene::from_text(&hot, example(STEEL_ENTHALPY_EXAMPLE)).unwrap();
+    let before = scene.render_json();
+    scene_context(|cx, _| {
+        let error = scene.advance(f64::MAX, cx).unwrap_err();
+        eprintln!("2000 W: exit {}: {}", error.exit_code, error.message);
+        assert_eq!(error.exit_code, fs_cli::exit::REFUSED);
         assert_eq!(scene.render_json(), before);
         assert_eq!(scene.steps(), 0);
     });

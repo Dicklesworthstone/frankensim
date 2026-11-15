@@ -6433,7 +6433,13 @@ The state is the nodal specific enthalpy [J/kg] in vertex order; the stored
 energy is the owner's inventory `Σ m_v h_v`. A step is the owner's unchanged
 `advance` with no interfaces. The receipt books the owner's
 `stored_energy_change_j`, the heat it did not store as numerical loss, and
-the Newton residual norm against the policy's absolute tolerance.
+the Newton residual norm against the target the owner stopped at: the
+larger of the policy's absolute tolerance and its relative tolerance times
+the step's first residual (the first entry of the Newton history). As
+landed in 3479271f59 the receipt carried the absolute tolerance alone, and
+the kernel refused a step the owner had accepted on its relative tolerance
+(the first fs-cli scene of a card's heat capacity, at 3.1e-10 J against
+1e-10 J).
 
 The tangent is the owner's `linearize_step` of the same endpoint, whose
 public derivative is a transpose solve. The body forms the port Jacobian one
@@ -6470,6 +6476,10 @@ declared before the first run:
   `advance` steps itself under the flux `-P/A`, over eight steps. The 80 J
   put in are stored to eight energy gates, the window's energy residual
   closes within 1e-9 of the stored energy, and the heater generates entropy.
+- Under a policy whose absolute floor, 1e-30 J, is far below its relative
+  target, 1e-10 of the first residual, a step's receipt carries that
+  target, above 1e-30 J and at least the residual, and a heater through
+  the kernel steps the body eight times.
 - Refusals by name: Dirichlet and Robin regions, a volumetric source, an
   unknown, repeated or missing port, and a solver on another mesh. A step is
   refused for a field of the wrong length, a heat that is not a number, and
@@ -6479,5 +6489,6 @@ declared before the first run:
 Not covered: the entropy generated inside the body is reported as zero, a
 lower bound. There is no snapshot codec. A latent plateau is the owner's and
 is not tested through ports, and the test card is synthetic. No contact
-between the traces of two enthalpy bodies is built, and no fs-cli scene
-builds this body yet.
+between the traces of two enthalpy bodies is built. fs-cli's scene builds
+this body for a `conduction_body` that names a material and declares no
+heat capacity (fs-cli's contract).

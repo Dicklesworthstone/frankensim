@@ -1268,7 +1268,8 @@ which the owner validates. A step that leaves the curve is the owner's
 refusal, and the scene does not move. A flat curve steps on the linear path
 and refuses `newton`, as a declared conductivity does. The heat capacity
 stays `volumetric_heat_capacity_j_m3_k`, a declared constant: the owner
-holds it fixed, and the card's Cp(T) and density are not used. Its ports
+holds it fixed, and the card's Cp(T) and density are not used (a body that
+omits it takes them, below). Its ports
 and traces are any body's, so a `trace_contact` joins its traces as it
 joins those of a body with a declared conductivity. Its element records
 the material, so the report's `material_bindings` and the text
@@ -1338,6 +1339,71 @@ material's conductivity whose element sits wholly on a knot, or on an end
 of the curve, in a scene whose kernel solves a loop through it. A scene
 that solves no loop through the body (the heated bar's plan has no block
 solved by interface iteration) asks it for no tangent.
+
+A `conduction_body` that names a `material` and omits
+`volumetric_heat_capacity_j_m3_k` takes its heat capacity and density from
+the card as well, and lowers to `fs_conduction::component::EnthalpyBody`.
+The materials section keeps the card it read with its keys, context, span,
+phase and enthalpy datum, and fs-conduction prepares the paired material
+from them (`MaterialEnthalpyTransport::from_isotropic_card_exact`): the
+chart integrated from the card's Cp(T) and density over the span, the
+card's k(T) as isotropic conduction, and the density read once at the
+body's `reference_temperature_k`, which fixes each node's mass for the run.
+`reference_temperature_k` is required for such a body and refused beside a
+declared heat capacity; the owner refuses one off the span. The material
+needs a `conductivity_property`. `prepare_uniform` puts the owner on the
+box with the mesh's own counts as its budget. The state is the nodal
+specific enthalpy, starting at the chart's enthalpy of `temperature_k`
+(`ResolvedHeatCapacityCurve::state_at_temperature`, refused off the
+chart). Every step is the owner's `advance` under `newton`'s update budget
+and residual gates (by default 32, 1e-10 relative and 1e-10 J), the rest of
+fs-solver's default Newton-Krylov policy, and `solve`'s energy gate; `solve`'s
+Krylov `tolerance`, `max_iterations` and `restart` are the policy of the
+tangent's transpose solves. A `trace_contact` that names such a body is
+refused: fs-conduction's contacts join bodies of declared heat capacity.
+Reports read the field's least and greatest temperature through the card's
+chart (`temperature_at_specific_enthalpy`, the owner's own reading of its
+state) and add `reference_density_kg_m3`. The no-claim sentence then names
+the card's Cp(T) and density beside the declared heat capacity, and no
+longer lists temperature-dependent heat capacity as absent.
+
+Tests in `tests/system_command/conduction.rs`, on
+`examples/system/steel316_enthalpy_bar.json`: the heated bar with no
+declared heat capacity, its mass fixed at 290 K. The reference is
+fs-conduction's paired material prepared from the same pack's card with the
+scene's keys, context and span, and its enthalpy owner on the same box
+stepped by `advance` under the heat rate as a uniform flux over x_min.
+Claims declared before the first run:
+- The compiled card's Cp and density claims are the tables the source's
+  `properties.tsv` prints. The field's least and greatest temperature equal
+  the owner's bit for bit after each of the 30 steps. The reported density
+  is the owner's to the bit and the printed table's at 290 K to 1e-12. The
+  1200 J put in is stored and the ledger closes, each within 1e-6 J. The hot
+  end passes the 300 K knot and stays below 400 K. Run (t502): after the
+  30th step the bar spans 293.2467457212074 .. 351.2864304162582 K and
+  x_min reads 349.7569225926739 K; the density is 7965.1696296296295
+  kg/m^3, the printed table's at 290 K; 1199.9999999964618 J of the 1200 J
+  is stored, and the ledger residual is 0 J.
+- The example through the binary: exit 0, the binding, the density, and
+  the no-claim sentence.
+- Refusals, all exit 3, by name: no `reference_temperature_k`; one beside a
+  declared heat capacity; 250 K, below the span (the owner's refusal); a
+  start at 250 K, off the chart; a material without a conductivity;
+  `conductivity_w_m_k` beside `material`; a `trace_contact` naming such a
+  body. 2000 W, which would carry the end off the chart, is refused at the
+  first step (exit 4) and the scene's report is unchanged.
+
+The first run of these tests (t501) refused the bar's fifth step: the
+body's receipt carried the Newton policy's absolute tolerance, 1e-10 J,
+while the owner had stopped at its relative target, 3.1e-10 J. fs-conduction's
+`EnthalpyBody` now books the target the owner stopped at (its contract).
+
+No claim for a body of the card's heat capacity: the card's nominal values
+only (its uncertainty is not propagated); each node's mass is fixed at the
+reference density, the box keeps its declared size, and nothing expands;
+the reference density's receipt is not in the report; no contact and no
+radiation with such a body; a scene that solves a loop through it is not
+tested.
 
 `thermal_timeline` lowers to `fs_thermal::component::ThermalTimeline` over
 an `fs_thermal::enthalpy::DepositionSimulation`, stepped by the owner's

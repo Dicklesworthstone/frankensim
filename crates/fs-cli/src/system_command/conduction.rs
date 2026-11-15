@@ -20,6 +20,16 @@
 //! policy, by default the owner's. Its heat capacity stays the scene's
 //! constant, as the owner it wraps requires.
 //!
+//! A body that names a material and declares no heat capacity takes its
+//! heat capacity and density from the material's card as well
+//! ([`card_material`]): fs-conduction prepares its paired material from the
+//! card (`MaterialEnthalpyTransport::from_isotropic_card_exact`), the chart
+//! of the card's Cp(T) and density, its k(T), and the density read once at
+//! the body's `reference_temperature_k`, which fixes the nodal masses. The
+//! body is then the enthalpy owner behind the same ports
+//! ([`EnthalpyBody`]): its state is the nodal specific enthalpy, and the
+//! report reads temperatures through the card's chart as the owner does.
+//!
 //! A `trace_contact` names two traces of two bodies, where the second body's
 //! origin lies in the first's frame, and one area-specific resistance: a
 //! number the scene declares with its source, or an interface card of a
@@ -40,16 +50,18 @@ use std::path::Path;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::hash_bytes;
-use fs_conduction::component::{ConductionBody, PatchPort};
+use fs_conduction::component::{ConductionBody, EnthalpyBody, PatchPort};
 use fs_conduction::fixtures::{box_grid, on_box_face};
 use fs_conduction::interface::NonmatchingOptions;
 use fs_conduction::transient::VolumetricHeatCapacity;
 use fs_conduction::transient::backward_euler::{BackwardEuler, NonlinearStepConfig, StepConfig};
+use fs_conduction::transient::enthalpy::material::MaterialEnthalpyTransport;
+use fs_conduction::transient::enthalpy::{EnthalpyBudget, EnthalpyStepConfig};
 use fs_conduction::{
     AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS as RESISTANCE_DIMS,
     AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY as RESISTANCE_PROPERTY, ConductionMesh,
     ConductionProblem, ConductivityModel, ConductivityTable, InterfaceResistance, LinearConfig,
-    ScalarField, ThermalBc, ThermalBoundaryBuilder,
+    ScalarField, ThermalBc, ThermalBoundary, ThermalBoundaryBuilder,
 };
 use fs_evidence::ValidityDomain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -59,6 +71,7 @@ use fs_matdb::{
     SurfaceSpec, SystemContext, UncertaintyModel,
 };
 use fs_ports::component::PortSpec;
+use fs_solver::NewtonKrylovConfig;
 use fs_system::elements::{ConductanceMatrix, InterfacePoint};
 use fs_system::{NodeId, System, SystemBuilder};
 
@@ -68,7 +81,9 @@ use crate::material_state_input::state_point;
 use super::materials::{Materials, read_pack};
 use super::{Element, J, Refusal, add, fields, num, number, number_or, positive, quote};
 
-/// The kernel holds the nodal temperature field [K] in vertex order.
+/// The kernel holds the nodal field in vertex order: the temperature [K],
+/// or the specific enthalpy [J/kg] of a body whose heat capacity is its
+/// material card's.
 pub(super) type State = Vec<f64>;
 
 /// The box faces a port may name: the axis and whether the face is at the
@@ -380,15 +395,221 @@ fn with_cx<R>(run: impl FnOnce(&Cx<'_>) -> R) -> R {
     })
 }
 
+/// The owner behind a body's ports, boxed until the kernel takes it.
+enum Owner {
+    /// A declared volumetric heat capacity: the backward-Euler owner, whose
+    /// state is the nodal temperature.
+    Capacity(Box<ConductionBody<'static>>),
+    /// The material card's heat capacity and density: the enthalpy owner,
+    /// whose state is the nodal specific enthalpy, and the paired material
+    /// whose chart reads it as temperature.
+    Enthalpy(
+        Box<EnthalpyBody<'static, 'static>>,
+        &'static MaterialEnthalpyTransport,
+    ),
+}
+
+impl Body {
+    /// The body's backward-Euler owner, which fs-conduction's contacts join;
+    /// `what` names the contact refused one of a card's heat capacity.
+    fn capacity(&self, what: &str) -> Result<&ConductionBody<'static>, String> {
+        match &self.owner {
+            Owner::Capacity(body) => Ok(body),
+            Owner::Enthalpy(..) => Err(format!(
+                "{what}: between names a body whose heat capacity is its material card's, and \
+                 fs-conduction's contacts join bodies with volumetric_heat_capacity_j_m3_k"
+            )),
+        }
+    }
+}
+
 /// A body before the kernel takes it.
 struct Body {
-    component: ConductionBody<'static>,
+    owner: Owner,
     start: State,
     temperature_k: f64,
     /// The scene material whose conductivity the body takes, if any.
     material: Option<String>,
     /// The body's ports in port order: the face and whether it is a trace.
     faces: Vec<(&'static str, bool)>,
+}
+
+/// A body's material: a conductivity with a declared heat capacity, or the
+/// whole of a material card's.
+enum Source {
+    Declared(Conductivity, VolumetricHeatCapacity),
+    Card(CardMaterial),
+}
+
+/// A body whose heat capacity, density and conductivity are a material
+/// card's: the paired material, the start state on its chart, the owner's
+/// step policy and the scene material's name.
+struct CardMaterial {
+    transport: &'static MaterialEnthalpyTransport,
+    start_j_kg: f64,
+    step: EnthalpyStepConfig,
+    material: String,
+}
+
+/// The paired material of the scene material `material` names, prepared by
+/// fs-conduction from its card with the density read at the body's
+/// `reference_temperature_k`; the start temperature's specific enthalpy on
+/// its chart; and the owner's Newton policy: `newton`'s update budget and
+/// residual gates (as for a k(T) body, by default fs-conduction's), the
+/// rest of the Newton-Krylov policy fs-solver's default, and `config`'s
+/// energy gate.
+fn card_material(
+    definition: &J,
+    materials: &Materials,
+    temperature_k: f64,
+    config: StepConfig,
+    what: &str,
+) -> Result<CardMaterial, String> {
+    if definition.get("conductivity_w_m_k").is_some() {
+        return Err(format!(
+            "{what}: the conductivity is conductivity_w_m_k or a material's, not both"
+        ));
+    }
+    let name = definition
+        .str_field("material")
+        .ok_or_else(|| format!("{what}.material: expected a material name"))?;
+    let material = materials
+        .get(name)
+        .ok_or_else(|| format!("{what}.material: unknown material {name:?}"))?;
+    if definition.get("reference_temperature_k").is_none() {
+        return Err(format!(
+            "{what}: a body that declares no volumetric_heat_capacity_j_m3_k takes its heat \
+             capacity and density from material {name:?}'s card, and needs \
+             reference_temperature_k, the temperature at which box_m holds its mass"
+        ));
+    }
+    let reference_k = positive(definition, "reference_temperature_k", what)?;
+    let transport: &'static MaterialEnthalpyTransport =
+        Box::leak(Box::new(material.enthalpy_transport(reference_k).map_err(
+            |error| format!("{what}.material: material {name:?}: {error}"),
+        )?));
+    let start_j_kg = transport
+        .caloric()
+        .state_at_temperature(temperature_k)
+        .map_err(|error| format!("{what}: temperature_k {temperature_k} K: {error}"))?
+        .specific_enthalpy_j_kg();
+    let policy = newton(definition, what)?;
+    let step = EnthalpyStepConfig {
+        newton: NewtonKrylovConfig {
+            absolute_tolerance: policy.residual_atol_j,
+            relative_tolerance: policy.residual_rtol,
+            ..NewtonKrylovConfig::default()
+        },
+        max_newton_iterations: policy.max_iterations,
+        energy_tolerance_j: config.energy_tolerance_j,
+    };
+    Ok(CardMaterial {
+        transport,
+        start_j_kg,
+        step,
+        material: name.to_owned(),
+    })
+}
+
+/// A body's material: a material card's whole when the body names a material
+/// and declares no heat capacity, else a conductivity with the declared heat
+/// capacity.
+fn source(
+    definition: &J,
+    materials: &Materials,
+    temperature_k: f64,
+    config: StepConfig,
+    what: &str,
+) -> Result<Source, String> {
+    if definition.get("material").is_some()
+        && definition.get("volumetric_heat_capacity_j_m3_k").is_none()
+    {
+        return card_material(definition, materials, temperature_k, config, what).map(Source::Card);
+    }
+    if definition.get("reference_temperature_k").is_some() {
+        return Err(format!(
+            "{what}: reference_temperature_k fixes the mass of a body whose heat capacity is its \
+             material card's; a body with volumetric_heat_capacity_j_m3_k takes none"
+        ));
+    }
+    let conductivity = conductivity(definition, materials, temperature_k, what)?;
+    let capacity = VolumetricHeatCapacity::declared(number(
+        definition,
+        "volumetric_heat_capacity_j_m3_k",
+        what,
+    )?)
+    .map_err(|error| format!("{what}: {error}"))?;
+    Ok(Source::Declared(conductivity, capacity))
+}
+
+/// The owner `source` makes on `mesh` and `boundary` behind the ports
+/// `patches`, its start state at `temperature_k`, and the scene material it
+/// names.
+fn owner(
+    source: Source,
+    mesh: &'static ConductionMesh,
+    boundary: &'static ThermalBoundary,
+    patches: &[PatchPort<'_>],
+    temperature_k: f64,
+    config: StepConfig,
+    what: &str,
+) -> Result<(Owner, State, Option<String>), String> {
+    let source_field = Box::leak(Box::new(ScalarField::Uniform(0.0)));
+    match source {
+        Source::Declared(
+            Conductivity {
+                model,
+                material,
+                nonlinear,
+            },
+            capacity,
+        ) => {
+            // The owner prepares its capacitance once.
+            let solver = with_cx(|cx| BackwardEuler::uniform(cx, mesh, capacity))
+                .map_err(|error| format!("{what}: {error}"))?;
+            let problem = ConductionProblem {
+                mesh,
+                boundary,
+                material: Box::leak(Box::new(model)),
+                element_materials: None,
+                source: source_field,
+            };
+            let component = match nonlinear {
+                None => ConductionBody::new(solver, problem, patches, config),
+                Some(policy) => {
+                    ConductionBody::temperature_dependent(solver, problem, patches, config, policy)
+                }
+            }
+            .map_err(|error| format!("{what}: {error}"))?;
+            let start = vec![temperature_k; mesh.vertex_count()];
+            Ok((Owner::Capacity(Box::new(component)), start, material))
+        }
+        Source::Card(card) => {
+            // The owner prepares its reference masses and storage once.
+            let budget = EnthalpyBudget {
+                max_vertices: mesh.vertex_count(),
+                max_elements: mesh.element_count(),
+            };
+            let solver = with_cx(|cx| card.transport.prepare_uniform(cx, mesh, budget))
+                .map_err(|error| format!("{what}: {error}"))?;
+            let problem = ConductionProblem {
+                mesh,
+                boundary,
+                material: card.transport.conductivity(),
+                element_materials: None,
+                source: source_field,
+            };
+            // The tangent's transpose solves take `solve`'s Krylov policy.
+            let component = EnthalpyBody::new(solver, problem, patches, card.step, config.linear)
+                .map_err(|error| format!("{what}: {error}"))?;
+            let start = vec![card.start_j_kg; mesh.vertex_count()];
+            Ok((
+                Owner::Enthalpy(Box::new(component), card.transport),
+                start,
+                Some(card.material),
+            ))
+        }
+    }
 }
 
 /// The owner's body on its box mesh, at a uniform start temperature.
@@ -403,6 +624,7 @@ fn build(definition: &J, materials: &Materials, what: &str) -> Result<Body, Refu
             "material",
             "newton",
             "volumetric_heat_capacity_j_m3_k",
+            "reference_temperature_k",
             "temperature_k",
             "ports",
             "traces",
@@ -415,17 +637,7 @@ fn build(definition: &J, materials: &Materials, what: &str) -> Result<Body, Refu
     let ports = ports(definition, what)?;
     let config = config(definition, what)?;
     let temperature_k = positive(definition, "temperature_k", what)?;
-    let Conductivity {
-        model: conductivity,
-        material,
-        nonlinear,
-    } = conductivity(definition, materials, temperature_k, what)?;
-    let capacity = VolumetricHeatCapacity::declared(number(
-        definition,
-        "volumetric_heat_capacity_j_m3_k",
-        what,
-    )?)
-    .map_err(|error| format!("{what}: {error}"))?;
+    let source = source(definition, materials, temperature_k, config, what)?;
     let (complex, positions) = box_grid(cells, extent);
     let mesh: &'static ConductionMesh = Box::leak(Box::new(
         ConductionMesh::new(complex, positions).map_err(|error| format!("{what}: {error}"))?,
@@ -447,16 +659,6 @@ fn build(definition: &J, materials: &Materials, what: &str) -> Result<Body, Refu
             .finish()
             .map_err(|error| format!("{what}: {error}"))?,
     ));
-    // The owner prepares its capacitance once.
-    let solver = with_cx(|cx| BackwardEuler::uniform(cx, mesh, capacity))
-        .map_err(|error| format!("{what}: {error}"))?;
-    let problem = ConductionProblem {
-        mesh,
-        boundary,
-        material: Box::leak(Box::new(conductivity)),
-        element_materials: None,
-        source: Box::leak(Box::new(ScalarField::Uniform(0.0))),
-    };
     // A face under `ports` is a mean port: one heat rate in, its area-mean
     // temperature out. A face under `traces` carries a value a vertex.
     let patches: Vec<PatchPort<'_>> = ports
@@ -469,16 +671,18 @@ fn build(definition: &J, materials: &Materials, what: &str) -> Result<Body, Refu
             }
         })
         .collect();
-    let component = match nonlinear {
-        None => ConductionBody::new(solver, problem, &patches, config),
-        Some(policy) => {
-            ConductionBody::temperature_dependent(solver, problem, &patches, config, policy)
-        }
-    }
-    .map_err(|error| format!("{what}: {error}"))?;
+    let (owner, start, material) = owner(
+        source,
+        mesh,
+        boundary,
+        &patches,
+        temperature_k,
+        config,
+        what,
+    )?;
     Ok(Body {
-        component,
-        start: vec![temperature_k; mesh.vertex_count()],
+        owner,
+        start,
         temperature_k,
         material,
         faces: ports
@@ -845,7 +1049,10 @@ fn contact(
         conductance_w_k: 0.0,
         points: 0,
     };
-    let (a, b) = (&bodies[body_a].1.component, &bodies[body_b].1.component);
+    let (a, b) = (
+        bodies[body_a].1.capacity(&what)?,
+        bodies[body_b].1.capacity(&what)?,
+    );
     let joint = match options {
         // The scene names its own remedy: the owner knows nothing of scenes.
         None => a
@@ -901,9 +1108,20 @@ pub(super) fn prepare(
     Ok(prepared)
 }
 
+/// The parts of a `conduction_body` the scene keeps: its node and ports, its
+/// start temperature, the scene material whose conductivity it takes, if
+/// any, and the paired material whose chart reads its state, if that state
+/// is specific enthalpy.
+pub(super) struct Added {
+    pub(super) node: NodeId,
+    pub(super) ports: Vec<PortSpec>,
+    pub(super) temperature_k: f64,
+    pub(super) material: Option<String>,
+    pub(super) enthalpy: Option<&'static MaterialEnthalpyTransport>,
+}
+
 /// A `conduction_body` element: the owner's body on its box mesh, at a
-/// uniform start temperature, which it also returns with the scene material
-/// whose conductivity it takes, if any.
+/// uniform start temperature.
 pub(super) fn body(
     builder: &mut SystemBuilder,
     name: &str,
@@ -911,13 +1129,24 @@ pub(super) fn body(
     materials: &Materials,
     prepared: &mut Prepared,
     what: &str,
-) -> Result<(NodeId, Vec<PortSpec>, f64, Option<String>), Refusal> {
+) -> Result<Added, Refusal> {
     let body = match prepared.bodies.iter().position(|(known, _)| known == name) {
         Some(built) => prepared.bodies.swap_remove(built).1,
         None => build(definition, materials, what)?,
     };
-    let (node, specs) = add(builder, name, body.component, body.start)?;
-    Ok((node, specs, body.temperature_k, body.material))
+    let ((node, ports), enthalpy) = match body.owner {
+        Owner::Capacity(component) => (add(builder, name, *component, body.start)?, None),
+        Owner::Enthalpy(component, transport) => {
+            (add(builder, name, *component, body.start)?, Some(transport))
+        }
+    };
+    Ok(Added {
+        node,
+        ports,
+        temperature_k: body.temperature_k,
+        material: body.material,
+        enthalpy,
+    })
 }
 
 /// A `trace_contact` element, prepared with its bodies.
@@ -939,9 +1168,16 @@ pub(super) fn wall(
 
 /// Each mean port's area-mean temperature and each trace's least and
 /// greatest temperature at the end of the last step, and the field's least
-/// and greatest nodal temperatures.
-pub(super) fn values(system: &System, node: NodeId, ports: &[PortSpec]) -> Vec<(String, f64)> {
-    let mut values = Vec::with_capacity(ports.len() + 2);
+/// and greatest nodal temperatures. A body whose state is specific enthalpy
+/// (`enthalpy`) reads each node's temperature through the card's chart, as
+/// the owner reads it, and adds its frozen reference density.
+pub(super) fn values(
+    system: &System,
+    node: NodeId,
+    ports: &[PortSpec],
+    enthalpy: Option<&MaterialEnthalpyTransport>,
+) -> Vec<(String, f64)> {
+    let mut values = Vec::with_capacity(ports.len() + 3);
     for port in ports {
         let id = port.id().as_str();
         let returned = system
@@ -958,9 +1194,26 @@ pub(super) fn values(system: &System, node: NodeId, ports: &[PortSpec]) -> Vec<(
         }
     }
     let field = system.state::<State>(node);
-    let (low, high) = field.map_or((f64::NAN, f64::NAN), |field| span(field));
+    let (low, high) = match (field, enthalpy) {
+        (None, _) => (f64::NAN, f64::NAN),
+        (Some(field), None) => span(field),
+        (Some(field), Some(transport)) => {
+            let chart = transport.caloric().curve();
+            field
+                .iter()
+                .map(|&h| chart.temperature_at_specific_enthalpy(h))
+                .collect::<Result<Vec<f64>, _>>()
+                .map_or((f64::NAN, f64::NAN), |temperatures| span(&temperatures))
+        }
+    };
     values.push(("min_temperature_k".to_owned(), low));
     values.push(("max_temperature_k".to_owned(), high));
+    if let Some(transport) = enthalpy {
+        values.push((
+            "reference_density_kg_m3".to_owned(),
+            transport.reference_density_kg_m3(),
+        ));
+    }
     values
 }
 
