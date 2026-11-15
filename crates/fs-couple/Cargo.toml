@@ -99,6 +99,9 @@ fs-gas = { path = "../fs-gas", features = ["component"] }
 # The sliding interface on the composition contract, for the comparison of a
 # declared graph with the friction-heat module.
 fs-tribo = { path = "../fs-tribo", features = ["component"] }
+# The normal contact on the composition contract, for the comparison of a
+# declared drum strike with the prepared linear impact image.
+fs-dcontact = { path = "../fs-dcontact", features = ["component"] }
 [lints]
 workspace = true
 
