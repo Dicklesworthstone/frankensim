@@ -24,12 +24,17 @@
 //! conductance.
 //!
 //! The step is the owner's unchanged `advance`; the tangent is the owner's
-//! `linearize_step` with no Robin port, driven by the same nodal loads.
+//! `linearize_step` with no Robin port, driven by the same nodal loads. A
+//! conductivity that depends on temperature is put behind the same ports by
+//! [`ConductionBody::temperature_dependent`] with the owner's Newton policy:
+//! the step is then the owner's `advance_nonlinear` and the tangent
+//! `linearize_step` of that endpoint. Heat capacity stays independent of
+//! temperature, as in the owner.
 //!
 //! No claim: the entropy generated inside the body (conduction between nodes
 //! at different temperatures) is reported as zero, a lower bound. Robin,
-//! Dirichlet and contact traces, volumetric sources, temperature-dependent
-//! conductivity and sheet conduction are refused, not wrapped. Traces that
+//! Dirichlet and contact traces, volumetric sources and temperature-dependent
+//! sheet conduction are refused, not wrapped. Traces that
 //! are not coplanar, or do not cover each other, are refused. The state has
 //! no snapshot codec.
 
@@ -44,7 +49,9 @@ use crate::interface::InterfaceResistance;
 use crate::interface::nonmatching::{
     NonmatchingOptions, TraceFace, degree_two_weights, trace_overlaps,
 };
-use crate::transient::backward_euler::{BackwardEuler, StepConfig, StepLinearization};
+use crate::transient::backward_euler::{
+    BackwardEuler, NonlinearStepConfig, StepConfig, StepLinearization,
+};
 use crate::{ConductionError, ConductionProblem, ScalarField, ThermalBc, ThermalBoundary};
 
 /// How one named boundary patch of a [`ConductionBody`] meets the kernel.
@@ -175,6 +182,10 @@ pub struct ConductionBody<'m> {
     solver: BackwardEuler<'m>,
     problem: ConductionProblem<'m>,
     config: StepConfig,
+    /// The owner's Newton policy, present exactly when the conductivity
+    /// depends on temperature: every step and tangent is then the owner's
+    /// `advance_nonlinear`.
+    nonlinear: Option<NonlinearStepConfig>,
     ports: Vec<PortSpec>,
     patches: Vec<Patch>,
     /// Entries of all ports together, in the inputs and in the outputs.
@@ -190,8 +201,9 @@ impl<'m> ConductionBody<'m> {
     /// row: a port's region because the port's heat replaces that zero, any
     /// other because heat through it would cross no port. The source must be
     /// `ScalarField::Uniform(0.0)` and the conductivity independent of
-    /// temperature. `config` is the owner's step configuration, used for
-    /// every step and tangent.
+    /// temperature (a conductivity that depends on it is put behind ports by
+    /// [`Self::temperature_dependent`]). `config` is the owner's step
+    /// configuration, used for every step and tangent.
     ///
     /// # Errors
     /// [`ConductionError::Config`] naming the refused port, region, source or
@@ -201,6 +213,40 @@ impl<'m> ConductionBody<'m> {
         problem: ConductionProblem<'m>,
         ports: &[PatchPort<'_>],
         config: StepConfig,
+    ) -> Result<Self, ConductionError> {
+        Self::admit(solver, problem, ports, config, None)
+    }
+
+    /// Put a body whose conductivity depends on temperature behind heat
+    /// ports, as [`Self::new`] puts one whose conductivity does not. Every
+    /// step is the owner's `advance_nonlinear` under `nonlinear`, its Newton
+    /// policy, and every tangent the owner's `linearize_step` of that same
+    /// endpoint. The owner's refusals stand: an endpoint that leaves the
+    /// conductivity's temperature span, or a Newton solve that does not meet
+    /// the policy, refuses the step; a tangent at a vertex on a knot of the
+    /// table refuses the tangent.
+    ///
+    /// # Errors
+    /// Those of [`Self::new`]; a conductivity that does not depend on
+    /// temperature (it steps on the owner's linear path, through
+    /// [`Self::new`]); a policy the owner refuses.
+    pub fn temperature_dependent(
+        solver: BackwardEuler<'m>,
+        problem: ConductionProblem<'m>,
+        ports: &[PatchPort<'_>],
+        config: StepConfig,
+        nonlinear: NonlinearStepConfig,
+    ) -> Result<Self, ConductionError> {
+        nonlinear.validate()?;
+        Self::admit(solver, problem, ports, config, Some(nonlinear))
+    }
+
+    fn admit(
+        solver: BackwardEuler<'m>,
+        problem: ConductionProblem<'m>,
+        ports: &[PatchPort<'_>],
+        config: StepConfig,
+        nonlinear: Option<NonlinearStepConfig>,
     ) -> Result<Self, ConductionError> {
         if !std::ptr::eq(solver.mesh(), problem.mesh) {
             return Err(invalid(
@@ -226,16 +272,28 @@ impl<'m> ConductionBody<'m> {
                 "a volumetric source would add heat through no port".into(),
             ));
         }
-        let nonlinear = match problem.element_materials {
+        let dependent = match problem.element_materials {
             Some(materials) => (0..problem.mesh.element_count()).try_fold(false, |any, e| {
                 Ok::<_, ConductionError>(any || materials.model_for(e)?.is_temperature_dependent())
             })?,
             None => problem.material.is_temperature_dependent(),
         };
-        if nonlinear {
-            return Err(invalid(
-                "temperature-dependent conductivity is not wrapped".into(),
-            ));
+        match (dependent, nonlinear.is_some()) {
+            (true, false) => {
+                return Err(invalid(
+                    "a temperature-dependent conductivity steps on the owner's Newton path: \
+                     ConductionBody::temperature_dependent with its policy"
+                        .into(),
+                ));
+            }
+            (false, true) => {
+                return Err(invalid(
+                    "a conductivity independent of temperature steps on the owner's linear path: \
+                     ConductionBody::new"
+                        .into(),
+                ));
+            }
+            _ => {}
         }
         let mut specs = Vec::with_capacity(ports.len());
         let mut patches = Vec::with_capacity(ports.len());
@@ -263,6 +321,7 @@ impl<'m> ConductionBody<'m> {
             solver,
             problem,
             config,
+            nonlinear,
             ports: specs,
             patches,
             width,
@@ -514,8 +573,16 @@ impl<'m> ConductionBody<'m> {
             boundary: &boundary,
             ..self.problem
         };
-        self.solver
-            .linearize_step(cx, problem, None, old, dt_s, self.config, None, &[])
+        self.solver.linearize_step(
+            cx,
+            problem,
+            None,
+            old,
+            dt_s,
+            self.config,
+            self.nonlinear,
+            &[],
+        )
     }
 
     /// What every port returns of a nodal field, into `outputs`: a mean
@@ -759,9 +826,16 @@ impl Component for ConductionBody<'_> {
             boundary: &boundary,
             ..self.problem
         };
-        let step = self
-            .solver
-            .advance(cx, problem, None, old, dt_s, self.config)?;
+        let step = match self.nonlinear {
+            None => self
+                .solver
+                .advance(cx, problem, None, old, dt_s, self.config)?,
+            Some(policy) => {
+                self.solver
+                    .advance_nonlinear(cx, problem, None, old, dt_s, self.config, policy)?
+                    .step
+            }
+        };
         self.port_readings(&step.temperature, outputs);
         // The heat in, summed as the kernel sums the port energies: a trace
         // port's loads first, then the ports.

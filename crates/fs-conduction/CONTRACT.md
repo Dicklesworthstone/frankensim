@@ -6240,6 +6240,36 @@ temperatures. The loads reach the owner as the nodal outward flux `q` with
 (factored once by Cholesky), so the owner's own Neumann rows put `Q_i` back on
 vertex `i`. What that solve rounds away is in the receipt's numerical loss.
 
+`ConductionBody::new` takes a conductivity independent of temperature and
+steps it by the owner's `advance`. `ConductionBody::temperature_dependent`
+takes one that depends on temperature, with the owner's
+`NonlinearStepConfig` (validated on entry). It steps by the owner's
+`advance_nonlinear` under that policy and differentiates by the owner's
+`linearize_step` of the same endpoint. Each constructor refuses the other's
+conductivity and names the other. The owner's refusals stand: an endpoint
+outside the conductivity's temperature span, or a Newton solve that misses
+the policy, refuses the step. Heat capacity stays independent of
+temperature, as in the owner.
+
+Tests in `tests/conduction_component.rs`, on a conductivity linear from 10
+W/m/K at 250 K to 20 W/m/K at 450 K, with a Newton policy of 1e-12 relative
+and 1e-12 J:
+- The k(T) body passes the conformance kit at four steps. Its numerical loss
+  is within 1e-9 of the heat in, and its port tangent matches the difference
+  quotient within 1e-6 relative, above the patch rounding plus 1e-9 K
+  allowed for where Newton stops. These kit cases run with the Krylov
+  tolerance at 1e-15. A k(T) step's Jacobian is not symmetric, so the
+  tangent's forward and adjoint solves agree only as far as each converges.
+  The kit's transpose law allows rounding only, and at 1e-13 the first run
+  broke it at 4 s by 5e-13 relative. A caller's VJP is the transpose of its
+  JVP to its own solve tolerance, not to rounding.
+- A heater through the kernel steps the body bit for bit as the owner's
+  `advance_nonlinear` steps itself, over eight steps, with the window's
+  energy residual within 1e-9 of the stored energy.
+- Refusals: `new` with the k(T) conductivity, `temperature_dependent` with a
+  constant one, a policy with no Newton budget, and a step from 440 K that
+  would cross 450 K.
+
 Two trace ports meet through a `TraceContact`: the quadrature points of the
 owner's contact between them, `(T_a - T_b) (v_a - v_b) / R''` integrated by
 the degree-two rule over the traces' common refinement. Each `ContactPoint`
@@ -6362,7 +6392,10 @@ apart ("contact vertices leave the declared plane tolerance").
 
 Not covered: the entropy generated inside the body is reported as zero, a
 lower bound. There is no snapshot codec. Contact inside one body, radiation,
-nonlinear and adaptive owners are refused or not wrapped. A contact between
+heat capacity that depends on temperature (the enthalpy owner) and adaptive
+owners are refused or not wrapped; a temperature-dependent conductivity is
+carried only by `temperature_dependent`, and no test puts a k(T) body into a
+contact or behind a trace port. A contact between
 two bodies takes one resistance for the whole patch, with no per-face map
 and no temperature dependence. A field heat port names no trace, so nothing
 checks that a `TraceContact` is bonded to the two ports it was built for.

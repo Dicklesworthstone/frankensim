@@ -5,7 +5,9 @@
 //! conformance kit, a heater through the kernel steps it exactly as the
 //! owner steps itself, and a lump joined to it through a conductance resolved
 //! from a contact interface card meets the step condensed from the owner's
-//! own responses and reaches the two bodies' shared equilibrium. Run with
+//! own responses and reaches the two bodies' shared equilibrium. A body whose
+//! conductivity depends on temperature passes the same kit and heater on the
+//! owner's Newton endpoint. Run with
 //! `cargo test -p fs-conduction --features component --test conduction_component`.
 #![cfg(feature = "component")]
 // Exact float comparisons here assert bitwise agreement with the owner.
@@ -15,7 +17,7 @@ use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_conduction::component::{ConductionBody, PatchPort};
 use fs_conduction::fixtures::{box_grid, on_box_face};
 use fs_conduction::transient::VolumetricHeatCapacity;
-use fs_conduction::transient::backward_euler::{BackwardEuler, StepConfig};
+use fs_conduction::transient::backward_euler::{BackwardEuler, NonlinearStepConfig, StepConfig};
 use fs_conduction::{
     AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS, AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
     ConductionError, ConductionMesh, ConductionProblem, ConductivityModel, ConductivityTable,
@@ -651,5 +653,220 @@ fn the_body_refuses_what_it_cannot_carry_through_its_ports() {
             body.propose(&initial(parts), 1.0, &[f64::NAN], &mut new, &mut out, cx)
                 .is_err()
         );
+    });
+}
+
+/// A conductivity linear in temperature, 10 W/m/K at 250 K to 20 W/m/K at
+/// 450 K, with no knot in between: the tangent sees no kink.
+fn dependent_parts() -> Parts {
+    let curve = ConductivityTable::declared_curve(vec![(250.0, 10.0), (450.0, 20.0)]).unwrap();
+    Parts {
+        material: leak(ConductivityModel::isotropic(curve)),
+        ..parts()
+    }
+}
+
+/// The owner's Newton policy, tighter than its default so that where Newton
+/// stops lies far below what the kit's difference quotient can see.
+fn newton() -> NonlinearStepConfig {
+    NonlinearStepConfig {
+        residual_rtol: 1.0e-12,
+        residual_atol_j: 1.0e-12,
+        ..NonlinearStepConfig::default()
+    }
+}
+
+fn try_dependent(
+    cx: &Cx<'_>,
+    parts: Parts,
+    ports: &[&str],
+    config: StepConfig,
+    policy: NonlinearStepConfig,
+) -> Result<ConductionBody<'static>, ConductionError> {
+    let ports: Vec<PatchPort<'_>> = ports.iter().map(|&name| PatchPort::Mean(name)).collect();
+    ConductionBody::temperature_dependent(
+        solver(cx, parts.mesh),
+        problem(parts),
+        &ports,
+        config,
+        policy,
+    )
+}
+
+/// The owner's step configuration with its Krylov solves taken to 1e-15.
+/// A k(T) body's step Jacobian is not symmetric, so the tangent's forward
+/// and adjoint solves agree only as far as each converges, not to rounding
+/// as for a constant conductivity, where both apply one symmetric
+/// polynomial of the same matrix. The kit's transpose law allows rounding
+/// only: at 1e-13 the first run broke it at 4 s by 5e-13 relative.
+fn converged() -> StepConfig {
+    let mut config = config();
+    config.linear.tolerance = 1.0e-15;
+    config
+}
+
+/// Claims, declared before the first run: the k(T) body passes the
+/// conformance kit, and its port tangent is the difference quotient of its
+/// step within 1e-6 relative, above a floor of the patch rounding plus
+/// 1e-9 K for where Newton stops. The kit runs on `converged`.
+#[test]
+fn a_temperature_dependent_body_conforms_and_its_tangent_differentiates_its_newton_step() {
+    with_cx(|cx| {
+        let parts = dependent_parts();
+        let body = try_dependent(cx, parts, &["left", "right"], converged(), newton()).unwrap();
+        let old = initial(parts);
+        let stale = vec![1000.0; old.len()];
+        for (dt_s, heat_w) in [
+            (0.5, [12.0, -3.0]),
+            (2.0, [0.0, 0.0]),
+            (10.0, [-40.0, 25.0]),
+            (4.0, [30.0, -30.0]),
+        ] {
+            let case = Case {
+                state: &old,
+                stale: &stale,
+                dt_s,
+                inputs: &heat_w,
+            };
+            let observed = check_component(&body, &case, cx)
+                .unwrap_or_else(|failure| panic!("{dt_s} s, {heat_w:?} W: {failure}"));
+            let Observed::Stepped { receipt, audit, .. } = observed else {
+                panic!("{dt_s} s, {heat_w:?} W: the body asked for a shorter step");
+            };
+            let heat_j = dt_s * (heat_w[0] + heat_w[1]);
+            assert!(
+                receipt.numerical_loss_j.abs() <= 1.0e-9 * (1.0 + heat_j.abs()),
+                "{dt_s} s, {heat_w:?} W: {receipt:?}"
+            );
+            assert!((audit.port_energy_in_j - heat_j).abs() <= 1.0e-12 * (1.0 + heat_j.abs()));
+            let difference_step_w =
+                heat_w.iter().fold(1.0_f64, |m, q| m.max(q.abs())) * f64::EPSILON.cbrt();
+            let floor_k_w = (8.0 * f64::EPSILON * 400.0 + 1.0e-9) / difference_step_w;
+            check_port_tangent(&body, &case, 1.0e-6, floor_k_w, cx)
+                .unwrap_or_else(|failure| panic!("tangent at {dt_s} s, {heat_w:?} W: {failure}"));
+        }
+    });
+}
+
+/// Claim, declared before the first run: a heater through the kernel steps
+/// the k(T) body bit for bit as the owner's `advance_nonlinear` steps
+/// itself, and the window closes.
+#[test]
+fn a_heater_through_the_kernel_steps_a_temperature_dependent_body_as_the_owner_by_newton() {
+    const POWER_W: f64 = 20.0;
+    const DT_S: f64 = 0.5;
+    with_cx(|cx| {
+        let parts = dependent_parts();
+        let body = try_dependent(cx, parts, &["left"], config(), newton()).unwrap();
+        let mut builder = SystemBuilder::new();
+        let node = builder
+            .add_with_tangent(
+                "body",
+                try_dependent(cx, parts, &["left"], config(), newton()).unwrap(),
+                initial(parts),
+            )
+            .unwrap();
+        let heater = builder
+            .add_with_tangent(
+                "heater",
+                Heater::new(Waveform::constant(POWER_W).unwrap()).unwrap(),
+                SourceAccount::default(),
+            )
+            .unwrap();
+        let heat = builder.port(heater, "heat").unwrap();
+        builder
+            .bond(builder.port(node, "left").unwrap(), heat)
+            .unwrap();
+        let mut system = builder.seal().unwrap();
+        assert!(system.guess(heat, &[300.0]));
+        let area_m2 = body.patch_area_m2(0);
+        let heated = Parts {
+            boundary: boundary(
+                parts.mesh,
+                ThermalBc::neumann(-POWER_W / area_m2).unwrap(),
+                ThermalBc::adiabatic(),
+            ),
+            ..parts
+        };
+        let owner = solver(cx, parts.mesh);
+        let mut field = initial(parts);
+        let start_j = body.stored_energy_j(&field).unwrap();
+        let mut newton_steps = 0;
+        for index in 0..8 {
+            system.step(DT_S, cx).unwrap();
+            let solved = owner
+                .advance_nonlinear(cx, problem(heated), None, &field, DT_S, config(), newton())
+                .unwrap();
+            newton_steps += solved.nonlinear_iterations;
+            field = solved.step.temperature;
+            let kernel = system.state::<Vec<f64>>(node).unwrap();
+            assert!(
+                kernel
+                    .iter()
+                    .zip(&field)
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
+                "step {index}: the kernel's body differs from the owner by {} K",
+                largest_gap(kernel, &field)
+            );
+        }
+        let stored_j = body.stored_energy_j(&field).unwrap() - start_j;
+        eprintln!(
+            "k(T) body, 8 steps of {DT_S} s at {POWER_W} W: {newton_steps} Newton updates, stored {stored_j} J"
+        );
+        assert!(newton_steps >= 8, "Newton did no work: {newton_steps}");
+        assert!(
+            (stored_j - 8.0 * DT_S * POWER_W).abs() <= 1.0e-9 * start_j,
+            "{stored_j} J"
+        );
+        let ledger = system.ledger();
+        assert!(
+            ledger.energy_residual_j().abs() <= 1.0e-9 * start_j,
+            "{}",
+            ledger.energy_residual_j()
+        );
+    });
+}
+
+#[test]
+fn a_body_is_put_behind_ports_on_the_path_its_conductivity_needs() {
+    with_cx(|cx| {
+        let says =
+            |result: Result<ConductionBody<'static>, ConductionError>, what: &str| match result {
+                Err(error) => {
+                    let why = error.to_string();
+                    assert!(why.contains(what), "{why:?} does not say {what:?}");
+                }
+                Ok(_) => panic!("{what}: accepted"),
+            };
+        says(
+            try_body(cx, dependent_parts(), &["left"]),
+            "ConductionBody::temperature_dependent",
+        );
+        says(
+            try_dependent(cx, parts(), &["left"], config(), newton()),
+            "ConductionBody::new",
+        );
+        says(
+            try_dependent(
+                cx,
+                dependent_parts(),
+                &["left"],
+                config(),
+                NonlinearStepConfig {
+                    max_iterations: 0,
+                    ..newton()
+                },
+            ),
+            "positive Newton budget",
+        );
+        // An endpoint beyond the curve's 450 K is the owner's refusal.
+        let body = try_dependent(cx, dependent_parts(), &["left"], config(), newton()).unwrap();
+        let old = vec![440.0; dependent_parts().mesh.vertex_count()];
+        let mut new = Vec::new();
+        let mut out = [0.0];
+        let refused = body.propose(&old, 10.0, &[2000.0], &mut new, &mut out, cx);
+        eprintln!("440 K and 2000 W for 10 s: {refused:?}");
+        assert!(refused.is_err());
+        assert!(new.is_empty());
     });
 }
