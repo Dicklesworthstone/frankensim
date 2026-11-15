@@ -2298,7 +2298,7 @@ fn frankenscript_refuses_before_any_stage_runs() {
             "frankenscript-not-executable",
         ),
         ("(seed 0x7)", "(seed 0x8)", "frankenscript-explicit-seed"),
-        (":hash \"eb3c", ":hash \"ab3c", "frankenscript-project-hash"),
+        (":hash \"063b", ":hash \"163b", "frankenscript-project-hash"),
         (
             ":ops (cooling.*)",
             ":ops (thermal.*)",
