@@ -89,6 +89,84 @@ fn tetrahedral_geometry_matches_independent_simplex_integrals() {
     assert!(VolumeMoments::tetrahedron([vertices[0];4]).is_err());
 }
 
+/// Volume, Ixx and Izz of the prism of straight tetrahedra on the n-gon
+/// inscribed in a cylinder of radius `big_r` and length `l`, each as its
+/// relative shortfall from the cylinder's closed form.
+fn inscribed_prism_shortfall(n: u32, big_r: f64, l: f64) -> [f64; 3] {
+    let at = |k: u32, z: f64| {
+        let angle = 2.0 * core::f64::consts::PI * f64::from(k) / f64::from(n);
+        Vec3::new(big_r * angle.cos(), big_r * angle.sin(), z)
+    };
+    let (h, mut volume, mut inertia) = (l / 2.0, 0.0, [0.0; 9]);
+    for k in 0..n {
+        let [a, b, c] = [Vec3::new(0.0, 0.0, -h), at(k, -h), at(k + 1, -h)];
+        let [d, e, f] = [Vec3::new(0.0, 0.0, h), at(k, h), at(k + 1, h)];
+        for tet in [[a, b, c, d], [b, c, d, e], [c, d, e, f]] {
+            let part = VolumeMoments::tetrahedron(tet).unwrap();
+            let (v, g) = (part.volume_m3(), part.centroid_m());
+            // Parallel axis to the cylinder's centre, which is the prism's.
+            let (xy, xz, yz) = (-g.x * g.y, -g.x * g.z, -g.y * g.z);
+            let [xx, yy, zz] = [g.x * g.x, g.y * g.y, g.z * g.z];
+            let shift = [yy + zz, xy, xz, xy, xx + zz, yz, xz, yz, xx + yy];
+            volume += v;
+            for ((sum, own), moved) in inertia.iter_mut().zip(part.inertia_m5().m).zip(shift) {
+                *sum += own + v * moved;
+            }
+        }
+    }
+    let exact = VolumeMoments::cylinder(big_r, l).unwrap();
+    let moments = exact.inertia_m5().m;
+    let exact = [exact.volume_m3(), moments[0], moments[8]];
+    let mesh = [volume, inertia[0], inertia[8]];
+    core::array::from_fn(|i| (exact[i] - mesh[i]) / exact[i])
+}
+
+#[test]
+fn cylinder_moments_match_the_closed_form_the_tube_difference_and_a_converging_mesh() {
+    let (r, big_r, l) = (0.3, 0.5, 0.7);
+    let solid = VolumeMoments::cylinder(big_r, l).unwrap();
+    let v = core::f64::consts::PI * big_r * big_r * l;
+    close(solid.volume_m3(), v);
+    assert_eq!(solid.centroid_m(), Vec3::new(0.0, 0.0, 0.0));
+    let moments = solid.inertia_m5().m;
+    close(moments[8], v * big_r * big_r / 2.0);
+    for i in [0, 4] {
+        close(moments[i], v * (3.0 * big_r * big_r + l * l) / 12.0);
+    }
+    for i in [1, 2, 3, 5, 6, 7] {
+        assert!(moments[i].abs() <= 0.0);
+    }
+    // A tube is the outer cylinder less the inner one; both are centred
+    // there, so their volumes and centroidal moments subtract.
+    let tube = VolumeMoments::hollow_cylinder(r, big_r, l).unwrap();
+    let core = VolumeMoments::cylinder(r, l).unwrap();
+    close(tube.volume_m3(), solid.volume_m3() - core.volume_m3());
+    let pairs = moments.into_iter().zip(core.inertia_m5().m);
+    for (got, (outer, inner)) in tube.inertia_m5().m.into_iter().zip(pairs) {
+        close(got, outer - inner);
+    }
+    let same = VolumeMoments::hollow_cylinder(0.0, big_r, l).unwrap();
+    assert_eq!(same, solid);
+    // The inscribed prism of straight tetrahedra falls short of the
+    // cylinder at second order in 1/n, in each of the three quantities.
+    let coarse = inscribed_prism_shortfall(32, big_r, l);
+    let fine = inscribed_prism_shortfall(64, big_r, l);
+    for (c, f) in coarse.into_iter().zip(fine) {
+        let order = (c / f).log2();
+        assert!(c > 0.0 && f > 0.0 && (order - 2.0).abs() < 0.02, "{c} {f}");
+    }
+    for (inner, outer, length) in [
+        (0.5, 0.5, 1.0),
+        (-0.1, 0.5, 1.0),
+        (0.0, 0.0, 1.0),
+        (0.0, 0.5, 0.0),
+        (f64::NAN, 0.5, 1.0),
+        (0.0, f64::INFINITY, 1.0),
+    ] {
+        assert!(VolumeMoments::hollow_cylinder(inner, outer, length).is_err());
+    }
+}
+
 #[test]
 fn placement_rotates_inertia_without_an_extra_centroidal_parallel_axis_term() {
     let geometry = VolumeMoments::cuboid(Vec3::new(1.0, 2.0, 3.0)).unwrap();

@@ -16,6 +16,12 @@ by the same downstream inertia owner used for momentum and kinetic energy.
 analytic cuboid and straight-tetrahedron constructors. SE(3) placement uses
 `fs-ga`; tensors remain centroidal after placement. Lengths are metres, volume
 is m3, volume inertia is m5, density is kg/m3 and mass inertia is kg m2.
+`cylinder` and `hollow_cylinder` are centred on the body origin with their axis
+along body z. tests/body.rs checks them against the closed form, checks that a
+tube equals the outer cylinder less the inner one, and checks that the
+inscribed n-gon prism of straight tetrahedra falls short of all three
+quantities at second order in 1/n (n = 32, 64). The quantities are the volume,
+the transverse moment and the axial moment.
 
 The caller supplies a non-overlapping rigid partition. Numeric admission does
 not establish geometry coverage, mesh accuracy, rigidity or measured material

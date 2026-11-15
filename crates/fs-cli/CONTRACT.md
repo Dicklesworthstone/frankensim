@@ -1304,6 +1304,41 @@ adaptive state accounts below, including temperature-dependent kinetics.
 Scalar loads use an explicit `power_map` to connect to the three-component
 force ports.
 
+A body of either network may give `solid` in place of `mass_kg` and
+`principal_inertia_kg_m2`; either of those beside it is refused. A solid has:
+- `pack`: a material card pack, relative to the scene;
+- `state`: the card's coordinates as `{name, value, kind}`;
+- an optional `selection`;
+- a `shape`, centred on the body's origin along its axes: `sphere`
+  (`radius_m`), `cuboid` (`sides_m`), `ellipsoid` (`semiaxes_m`) or `cylinder`
+  (`radius_m`, `length_m` along z, and `inner_radius_m`, default 0, for a tube).
+
+`system_command/solid.rs` hands the shape's `fs_mbd_material::VolumeMoments`
+and the card to `fs_mbd_material::resolve_body`. That function resolves the
+density at the declared state and compiles the mass and the principal
+inertia. A typed density is an unsupported field. The JSON report adds
+`solids`: for each such body, its shape, its pack, card and density-receipt
+hashes, the selected claim, the density, the volume, the mass and the
+principal inertia. The text report prints each such body's mass and
+principal inertia.
+
+G1, in `crates/fs-cli/tests/system_command/solids.rs`, uses
+`examples/system/steel_flywheel.json`: a disc made from the AISI 1018
+supplier-guide card (compiled from `data/matdb/seed-v1` into
+`examples/system/steel1018/`), spun up from rest by 1 N m.
+- The density is the card's printed 0.284 lb/in^3, to 1e-12.
+- The mass and inertia are the cylinder's at that density, to 1e-15.
+- `omega = tau t / I` and the torque's work hold to 1e-13.
+- The same body as a tube, a cuboid, a sphere and an ellipsoid matches each
+  closed form to 1e-12.
+- Ten scenes are refused: a typed mass, inertia or density; an unknown shape;
+  another shape's dimension; an inner radius not below the outer; a missing
+  dimension; a missing pack; a state off the card; an unknown coordinate kind.
+
+No claim: the density is uniform; the dimensions are those at the declared
+state, so there is no thermal expansion; there are no tolerances; the
+density's uncertainty is not propagated.
+
 A `viscoelastic_network` takes the same fields and lowers to
 `fs_mbd::component::relaxation::RelaxationNetwork` (the fs-mbd relaxation
 owner). A connector may add `branches`, each with `stiffness_n_m` and

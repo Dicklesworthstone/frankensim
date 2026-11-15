@@ -85,6 +85,34 @@ impl VolumeMoments {
         ] })
     }
 
+    /// Centered solid circular cylinder with its axis along body z [m].
+    pub fn cylinder(radius_m: f64, length_m: f64) -> Result<Self, MaterialInertiaError> {
+        Self::hollow_cylinder(0.0, radius_m, length_m)
+    }
+
+    /// Centered circular tube with its axis along body z: the region between
+    /// radii `inner_radius_m` (zero gives the solid cylinder) and
+    /// `outer_radius_m`, over the full `length_m` [m]. V = pi (R² - r²) L,
+    /// axial moment V (R² + r²) / 2, transverse moments V (3 (R² + r²) + L²) / 12.
+    pub fn hollow_cylinder(
+        inner_radius_m: f64,
+        outer_radius_m: f64,
+        length_m: f64,
+    ) -> Result<Self, MaterialInertiaError> {
+        let [r, big_r, l] = [inner_radius_m, outer_radius_m, length_m];
+        if !(positive(big_r) && positive(l) && r.is_finite() && r >= 0.0 && r < big_r) {
+            return Err(MaterialInertiaError::Invalid(
+                "cylinder needs finite positive outer radius and length and 0 <= inner < outer",
+            ));
+        }
+        let squares = big_r * big_r + r * r;
+        let volume = core::f64::consts::PI * (big_r - r) * (big_r + r) * l;
+        let transverse = (volume / 12.0) * (3.0 * squares + l * l);
+        let axial = (volume / 2.0) * squares;
+        let tensor = [transverse, 0.0, 0.0, 0.0, transverse, 0.0, 0.0, 0.0, axial];
+        Self::new(volume, Vec3::new(0.0, 0.0, 0.0), Mat3 { m: tensor })
+    }
+
     /// Exact polynomial volume moments of a nondegenerate straight tetrahedron.
     /// Vertex order does not choose mass sign. Vertices are in metres in the
     /// destination body frame. A tetrahedral partition may assign different

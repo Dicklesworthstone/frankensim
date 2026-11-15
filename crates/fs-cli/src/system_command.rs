@@ -17,6 +17,7 @@ mod materials;
 mod modal;
 mod phs;
 mod snapshot;
+mod solid;
 mod timeline;
 
 use std::ffi::OsString;
@@ -510,6 +511,14 @@ is its origin:
   At most 64 bodies and 256 connectors. force<i> takes the world force on the
   centre of mass and torque<i> the torque in the body's axes; prescribe both
   with three waveforms. heat<e> is routed like a damper's heat.
+  A body may give solid = {pack (a material card pack, relative to the
+  scene), state = [{name, value, kind}, ...] (the card's coordinates),
+  selection = \"single-claim-only\", shape} in place of mass_kg and
+  principal_inertia_kg_m2. The shape is centred on the body's origin along
+  its axes: \"sphere\" (radius_m), \"cuboid\" (sides_m, three), \"ellipsoid\"
+  (semiaxes_m, three) or \"cylinder\" (radius_m, length_m along z,
+  inner_radius_m = 0 for a tube). Its mass and principal inertia are the
+  shape's volume moments times the density the card gives at that state.
   viscoelastic_network  the same fields, stepped by the fs-mbd relaxation
                  owner (which solves bodies and branches as one dense system
                  and refuses one too large for it at the first step); a
@@ -1366,6 +1375,8 @@ struct Element {
     gas: Option<GasVolume>,
     /// Named prepared sources actually selected by this component.
     material_sources: Vec<String>,
+    /// Each network body declared as a solid: its index and report object.
+    solids: Vec<(usize, String)>,
     /// The state coordinates of a port-Hamiltonian element, reported and
     /// error-controlled as x0, x1, ...
     coordinates: usize,
@@ -2092,13 +2103,19 @@ fn index_below(value: &J, count: usize) -> Option<usize> {
         .map(|v| v as usize)
 }
 
-/// One body of a rigid network: its mass properties and its starting state.
-fn network_body(row: &J, what: &str) -> Result<(MassProperties, RigidBodyState), Refusal> {
+/// One body of a rigid network: its mass properties, its starting state and,
+/// for a body declared as a `solid`, the report of what its mass came from.
+fn network_body(
+    row: &J,
+    scene: &Path,
+    what: &str,
+) -> Result<(MassProperties, RigidBodyState, Option<String>), Refusal> {
     fields(
         row,
         &[
             "mass_kg",
             "principal_inertia_kg_m2",
+            "solid",
             "position_m",
             "orientation",
             "velocity_m_s",
@@ -2107,12 +2124,29 @@ fn network_body(row: &J, what: &str) -> Result<(MassProperties, RigidBodyState),
         what,
     )?;
     let refused = |e: fs_mbd::DynamicsError| Refusal::Input(format!("{what}: {e}"));
-    let properties = MassProperties::new(
-        positive(row, "mass_kg", what)?,
-        Vec3::ZERO,
-        vec3(triple(row, "principal_inertia_kg_m2", None, what)?),
-    )
-    .map_err(refused)?;
+    let (mass_kg, principal, report) = match row.get("solid") {
+        Some(_) if row.get("mass_kg").is_some() || row.get("principal_inertia_kg_m2").is_some() => {
+            return Err(format!(
+                "{what}: a solid's mass and inertia come from its shape and card; \
+                 mass_kg and principal_inertia_kg_m2 are not given with it"
+            )
+            .into());
+        }
+        Some(declared) => {
+            let body = solid::solid(declared, scene, &format!("{what}.solid"))?;
+            (
+                body.mass_kg,
+                body.principal_inertia_kg_m2,
+                Some(body.report),
+            )
+        }
+        None => (
+            positive(row, "mass_kg", what)?,
+            triple(row, "principal_inertia_kg_m2", None, what)?,
+            None,
+        ),
+    };
+    let properties = MassProperties::new(mass_kg, Vec3::ZERO, vec3(principal)).map_err(refused)?;
     let orientation = match row.get("orientation") {
         None => UnitQuaternion::IDENTITY,
         Some(field) => {
@@ -2139,7 +2173,7 @@ fn network_body(row: &J, what: &str) -> Result<(MassProperties, RigidBodyState),
         )?))
         .map_err(refused)?;
     let state = RigidBodyState::new(pose, momentum, spin).map_err(refused)?;
-    Ok((properties, state))
+    Ok((properties, state, report))
 }
 
 /// One viscous connector of a network of `bodies` bodies. `extra` names the
@@ -2303,9 +2337,15 @@ struct NetworkBase<'a> {
     source: ViscousConnectorControls,
     torques: Vec<usize>,
     shift: Option<TemperatureShift>,
+    /// Each body declared as a solid: its index and report object.
+    solids: Vec<(usize, String)>,
 }
 
-fn network_base<'a>(definition: &'a J, what: &str) -> Result<NetworkBase<'a>, Refusal> {
+fn network_base<'a>(
+    definition: &'a J,
+    scene: &Path,
+    what: &str,
+) -> Result<NetworkBase<'a>, Refusal> {
     fields(
         definition,
         &[
@@ -2329,10 +2369,14 @@ fn network_base<'a>(definition: &'a J, what: &str) -> Result<NetworkBase<'a>, Re
         .ok_or_else(|| format!("{what}: bodies is an array of 1 to {MAX_NETWORK_BODIES} bodies"))?;
     let mut properties = Vec::with_capacity(rows.len());
     let mut states = Vec::with_capacity(rows.len());
+    let mut solids = Vec::new();
     for (index, row) in rows.iter().enumerate() {
-        let (body, state) = network_body(row, &format!("{what}.bodies[{index}]"))?;
+        let (body, state, solid) = network_body(row, scene, &format!("{what}.bodies[{index}]"))?;
         properties.push(body);
         states.push(state);
+        if let Some(report) = solid {
+            solids.push((index, format!("{{\"body\":{index},{report}}}")));
+        }
     }
     let connectors = definition
         .get("connectors")
@@ -2375,6 +2419,7 @@ fn network_base<'a>(definition: &'a J, what: &str) -> Result<NetworkBase<'a>, Re
         source,
         torques,
         shift,
+        solids,
     })
 }
 
@@ -2385,6 +2430,7 @@ struct NetworkParts {
     ports: Vec<PortSpec>,
     bodies: Vec<MassProperties>,
     branches: Vec<usize>,
+    solids: Vec<(usize, String)>,
 }
 
 /// A `rigid_network`: rigid bodies joined by viscous connectors, lowered to
@@ -2393,9 +2439,10 @@ fn rigid_network(
     builder: &mut SystemBuilder,
     name: &str,
     definition: &J,
+    scene: &Path,
     what: &str,
 ) -> Result<NetworkParts, Refusal> {
-    let base = network_base(definition, what)?;
+    let base = network_base(definition, scene, what)?;
     let links = base
         .connectors
         .iter()
@@ -2443,6 +2490,7 @@ fn rigid_network(
         ports,
         bodies: base.properties,
         branches,
+        solids: base.solids,
     })
 }
 
@@ -2520,9 +2568,10 @@ fn viscoelastic_network(
     builder: &mut SystemBuilder,
     name: &str,
     definition: &J,
+    scene: &Path,
     what: &str,
 ) -> Result<NetworkParts, Refusal> {
-    let base = network_base(definition, what)?;
+    let base = network_base(definition, scene, what)?;
     let mut links = Vec::with_capacity(base.connectors.len());
     let mut memory = Vec::with_capacity(base.connectors.len());
     let mut drives = Vec::new();
@@ -2583,6 +2632,7 @@ fn viscoelastic_network(
         ports,
         bodies: base.properties,
         branches,
+        solids: base.solids,
     })
 }
 
@@ -2608,6 +2658,7 @@ fn element(
     let mut branches = Vec::new();
     let mut gas = None;
     let mut material_sources = Vec::new();
+    let mut solids = Vec::new();
     let mut coordinates = 0;
     let mut radius_m = None;
     let (node, ports) = match kind {
@@ -2746,12 +2797,13 @@ fn element(
         }
         Kind::RigidNetwork | Kind::ViscoelasticNetwork => {
             let parts = if kind == Kind::RigidNetwork {
-                rigid_network(builder, name, definition, &what)?
+                rigid_network(builder, name, definition, scene, &what)?
             } else {
-                viscoelastic_network(builder, name, definition, &what)?
+                viscoelastic_network(builder, name, definition, scene, &what)?
             };
             bodies = parts.bodies;
             branches = parts.branches;
+            solids = parts.solids;
             (parts.node, parts.ports)
         }
         Kind::HeatCapacity => {
@@ -2858,6 +2910,7 @@ fn element(
         branches,
         gas,
         material_sources,
+        solids,
         coordinates,
         radius_m,
     })
@@ -3993,6 +4046,32 @@ impl Device {
                  or wall heat capacity"
             ));
         }
+        if self
+            .elements
+            .iter()
+            .any(|element| !element.solids.is_empty())
+        {
+            let base = description
+                .replace(
+                    "no material-card resolution besides ",
+                    "no material-card resolution besides solid bodies' densities and ",
+                )
+                .replace(
+                    "no material-card resolution, ",
+                    "no material-card resolution besides solid bodies' densities, ",
+                )
+                .replace(
+                    "limited to declared pure-phase thermal laws",
+                    "limited to declared pure-phase thermal laws, solid bodies' densities",
+                );
+            description = std::borrow::Cow::Owned(format!(
+                "{base}; a solid body's mass and principal inertia are the closed-form volume \
+                 moments of its declared shape, centred on its origin along its axes, times the \
+                 nominal density its card gives at the declared state: a uniform, rigid body of \
+                 those dimensions, with no thermal expansion, tolerance or density field, and \
+                 the density's uncertainty not propagated"
+            ));
+        }
         description
     }
 
@@ -4555,6 +4634,7 @@ impl Device {
                 }
             }
         }
+        out.push_str(&solid::text_report(&self.elements));
         let _ = writeln!(out, "\nNo claim: {}.", self.no_claim());
         out
     }
@@ -4717,6 +4797,7 @@ impl Device {
                 ",\"materials\":[{reports}],\"material_bindings\":{{{bindings}}}"
             );
         }
+        out.push_str(&solid::json_report(&self.elements));
         if let Some((destination, root)) = checkpoint {
             let _ = write!(
                 out,

@@ -29,6 +29,7 @@ fs-dcontact = { path = "../fs-dcontact", features = ["component"] }
 fs-euler-disc-e2e = { path = "../fs-euler-disc-e2e", default-features = false }
 fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }
+fs-ga = { path = "../fs-ga" }
 fs-gas = { path = "../fs-gas", features = ["component"] }
 fs-geom = { path = "../fs-geom" }
 fs-io = { path = "../fs-io" }
@@ -42,6 +43,7 @@ fs-matdb-store = { path = "../fs-matdb-store" }
 fs-material = { path = "../fs-material", features = ["component"] }
 fs-math = { path = "../fs-math" }
 fs-mbd = { path = "../fs-mbd" }
+fs-mbd-material = { path = "../fs-mbd-material" }
 fs-mesh = { path = "../fs-mesh" }
 fs-nlmodal = { path = "../fs-nlmodal" }
 fs-opt = { path = "../fs-opt" }

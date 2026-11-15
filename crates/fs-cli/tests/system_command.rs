@@ -18,6 +18,8 @@ mod modal_network;
 mod contact;
 #[path = "system_command/conduction.rs"]
 mod conduction;
+#[path = "system_command/solids.rs"]
+mod solids;
 
 fn example(name: &str) -> String {
     format!(

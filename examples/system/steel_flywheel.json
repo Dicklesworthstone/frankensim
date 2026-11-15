@@ -1,0 +1,35 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 1.0,
+  "step_s": 0.125,
+  "sample_every_s": 0.125,
+  "elements": {
+    "flywheel": {
+      "kind": "rigid_network",
+      "bodies": [
+        {
+          "solid": {
+            "pack": "steel1018/steel-1018.fsmcdpk",
+            "state": [
+              {"name": "engineering-reference-model", "value": "1", "kind": "dimensional"},
+              {"name": "source-specimens-matched", "value": "0", "kind": "dimensional"},
+              {"name": "source-test-temperature-known", "value": "0", "kind": "dimensional"},
+              {"name": "source-test-method-known", "value": "0", "kind": "dimensional"},
+              {"name": "source-cold-finished", "value": "1", "kind": "dimensional"}
+            ],
+            "shape": "cylinder",
+            "radius_m": 0.1,
+            "length_m": 0.02
+          },
+          "position_m": [0, 0, 0]
+        }
+      ],
+      "connectors": [],
+      "torque_ports": [0]
+    }
+  },
+  "connections": [
+    {"prescribe": "flywheel.force0", "force_n": [0, 0, 0]},
+    {"prescribe": "flywheel.torque0", "torque_n_m": [0, 0, 1.0]}
+  ]
+}
