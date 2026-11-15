@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	atkins-1964-ofhc-copper-lathe-0p20um-vacuum-interface
+redistribution	permitted	NTRS 19660028516 (NASA-TM-X-56300) records the copyright determination GOV_PUBLIC_USE_PERMITTED and marks it as containing no third-party material; factual rows with attribution only, no table or figure reproduced
+citation	Atkins, Results of Contract NAS 8-5207 Thermal Contact Conductance in a Vacuum and Related Parameter Study, pages 7-60 of Proceedings of Conference on Thermal Joint Conductance, NASA Headquarters, Washington DC, February 19 1964, NASA-TM-X-56300, NTRS 19660028516
+license	NTRS 19660028516 copyright determination GOV_PUBLIC_USE_PERMITTED; containsThirdPartyMaterial false
+source	primary	interface.tsv	interface-tsv-v1

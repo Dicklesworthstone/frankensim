@@ -3348,40 +3348,59 @@ Grease-joint references:
 - <https://ntrs.nasa.gov/citations/20260008001>
 - <https://ntrs.nasa.gov/api/citations/20260008001/downloads/ThermalControlProtection_38_TFAWS_Paper.pdf>
 
-## 6061-T6 bare-joint vacuum contact resistance tranche (Atkins 1964)
+## Bare metal joints in vacuum: contact resistance against pressure (Atkins 1964)
 
 These are the first seed packs whose `area-specific-thermal-contact-resistance` changes
 with contact pressure. They are also the first that a `dry-contact` joint binding resolves:
 their validity axes are `normal_pressure` and `T`, the two axes that binding queries.
 
-Each ordered card is one bare joint between two lathe-cut faces of 6061-T6 aluminum
-cylinders (5.08 cm diameter), tested in vacuum:
+Each ordered card is one bare joint between two faces of the same metal, on cylinders
+5.08 cm in diameter, tested in vacuum:
 
-| Pack | Faces (Table I samples) | RMS roughness | p [kPa] | R'' at the pressure ends [m^2 K/W] | T [K] |
+| Pack | Metal, finish | Faces (Table I samples) | p [kPa] | R'' at the pressure ends [m^2 K/W] | T [K] |
 |---|---|---|---|---|---|
-| `atkins-1964-al6061t6-lathe-0p30um-vacuum-interface/` | 13 and 14 | 0.30 um | 70..7696 | `6.4267e-4`..`3.0946e-5` | 289.35..305.85 |
-| `atkins-1964-al6061t6-lathe-1p4um-vacuum-interface/` | 15 and 16 | 1.4 um | 131..7873 | `5.0025e-4`..`3.4829e-5` | 305.45..322.95 |
+| `atkins-1964-al6061t6-lathe-0p30um-vacuum-interface/` | 6061-T6, lathe-cut 0.30 um RMS | 13 and 14 | 70..7696 | `6.4267e-4`..`3.0946e-5` | 289.35..305.85 |
+| `atkins-1964-al6061t6-lathe-1p4um-vacuum-interface/` | 6061-T6, lathe-cut 1.4 um RMS | 15 and 16 | 131..7873 | `5.0025e-4`..`3.4829e-5` | 305.45..322.95 |
+| `atkins-1964-ofhc-copper-lathe-0p20um-vacuum-interface/` | OFHC copper, lathe-cut 0.20 um RMS | 25 and 26 | 65..7696 | `1.4908e-4`..`7.0567e-5` | 317.25..325.55 |
+| `atkins-1964-ss304-ground-1p2um-vacuum-interface/` | SS304, ground 1.3 and 1.1 um RMS | 3 and 4 | 66..7696 | `4.7619e-3`..`4.7214e-4` | 292.45..302.45 |
+| `atkins-1964-az31b-lathe-0p30um-vacuum-interface/` | AZ31B, lathe-cut 0.30 um RMS | 7 and 8 | 65..7785 | `9.3197e-4`..`3.6429e-5` | 303.25..317.45 |
+| `atkins-1964-az31b-lathe-1p4um-vacuum-interface/` | AZ31B, lathe-cut 1.4 um RMS | 9 and 10 | 110..7696 | `2.5853e-4`..`2.59094e-5` | 301.45..316.85 |
 
 - **Source.** Table II of the Atkins NAS 8-5207 report, pages 7-60 of the proceedings of the
   1964 NASA Conference on Thermal Joint Conductance (NASA-TM-X-56300). The apparatus is a
   bell-jar vacuum at 10^-4 mm Hg or better. Load comes from a bellows and is read on a
   strain-gage load washer. Four thermocouples per cylinder are extrapolated to the interface.
-- **Curve.** The six knots of each card are the rising-load runs (23-28 and 61-66). Each knot is
-  1/h_c to five significant figures, which gives back the printed h_c. The unloading runs that
-  follow (29-31 and 67-69) are not in the curves.
+- **Reading.** The digits come from a 300 dpi render of the scanned tables. They agree with the
+  source's own psi and BTU/(hr ft2 F) columns within one unit. The PDF text layer misreads
+  several of them and is not used.
+- **Curve.** The six knots of each card are that pair's rising-load runs (Table II runs 23-28,
+  61-66, 41-46, 1-6, 51-56 and 32-37, in table order). Each knot is 1/h_c to the fewest
+  significant figures, five or more, that give back the printed h_c. Only 38596 W/(m2 C) needs
+  six. The unloading runs that follow each branch are not in the curves.
 - **Validity.**
   - `normal_pressure` spans the rising-load runs. `T` spans their interface temperatures T1
     and T2.
   - Between knots the resistance is linear in pressure. That choice is the packs', not the
-    source's: the source fits h = A + B P^c in two pressure regimes, and that law is not encoded.
+    source's: the source plots conductance against pressure on log-log axes with two slope
+    regimes, and no law is encoded.
   - A scene's pressure band and temperature range must lie inside both axes, or the binding
     refuses.
 - **Uncertainty.** Unstated. The source holds heater heat leak to 0.5 %, checks the heat-flow
   measurement against an ARMCO-iron conductivity within 2 % and gives a nominal +/-0.3 C
   thermocouple tolerance, but it states no uncertainty for h_c.
+- **Per pair.**
+  - 6061-T6: the source finds no significant difference between its two finishes.
+  - Copper: the source reports no hysteresis, and a curve that is not linear at low pressure.
+  - SS304: this is the pair the source calls 1.2 micrometer RMS. Its flatness deviation was
+    about 1.5 um at best and 3.8 um at worst, depending on how the faces matched. The finer pair
+    (samples 1 and 2) is not packed: its top-load runs 16-18 print no interface temperatures.
+  - AZ31B: oxide films and tarnish were visible two months after machining, and the fine pair
+    conducted less than the coarse pair. Table II labels samples 7 and 8 AZ-31; Table I gives
+    AZ-31B.
 - **What the cards do not cover.**
   - Gas conduction. A joint in air conducts more at the same pressure.
-  - Unloading and repeated load cycles. The source's unloading runs do not retrace its loading rows.
+  - Unloading and repeated load cycles. The curves hold the rising-load runs only, whether or
+    not the source saw hysteresis for that pair.
   - Other roughness, flatness, alloys, tempers or temperatures.
   - The source's SI vacuum figure, 1.33 x 10^-1 N/m2, does not equal its 10^-4 mm Hg
     (1.33 x 10^-2 Pa). The cards use the mm Hg statement.

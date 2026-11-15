@@ -70,9 +70,11 @@ const CHANG_2026_SS304_GREASE_JOINTS: [GreaseJoint; 4] = [
         thickness_m: 50.5e-6,
     },
 ];
-/// One rising-load branch of a bare 6061-T6 joint in vacuum, Atkins (NASA-TM-X-56300, 1964).
+/// One rising-load branch of a bare metal joint in vacuum, Atkins (NASA-TM-X-56300, 1964).
 struct AtkinsJoint {
     pack_id: &'static str,
+    /// The material both faces name.
+    chemistry: &'static str,
     texture_frames: (&'static str, &'static str),
     /// Source Table II rows: apparent pressure [kN/m^2] and printed h_c [W/(m^2 C)].
     printed: [(u32, u32); 6],
@@ -81,9 +83,10 @@ struct AtkinsJoint {
     /// Resistance at 1 MPa, linear between the two bracketing rows [m^2 K/W].
     at_one_megapascal: f64,
 }
-const ATKINS_1964_AL6061T6_VACUUM_JOINTS: [AtkinsJoint; 2] = [
+const ATKINS_1964_BARE_VACUUM_JOINTS: [AtkinsJoint; 6] = [
     AtkinsJoint {
         pack_id: "atkins-1964-al6061t6-lathe-0p30um-vacuum-interface",
+        chemistry: "6061-T6 aluminum alloy",
         texture_frames: ("atkins-1964-sample-13-face", "atkins-1964-sample-14-face"),
         printed: [
             (70, 1556),
@@ -98,6 +101,7 @@ const ATKINS_1964_AL6061T6_VACUUM_JOINTS: [AtkinsJoint; 2] = [
     },
     AtkinsJoint {
         pack_id: "atkins-1964-al6061t6-lathe-1p4um-vacuum-interface",
+        chemistry: "6061-T6 aluminum alloy",
         texture_frames: ("atkins-1964-sample-15-face", "atkins-1964-sample-16-face"),
         printed: [
             (131, 1999),
@@ -109,6 +113,66 @@ const ATKINS_1964_AL6061T6_VACUUM_JOINTS: [AtkinsJoint; 2] = [
         ],
         kelvin: (305.45, 322.95),
         at_one_megapascal: 2.003_968_264_840_182_5e-4,
+    },
+    AtkinsJoint {
+        pack_id: "atkins-1964-ofhc-copper-lathe-0p20um-vacuum-interface",
+        chemistry: "OFHC copper (oxygen-free high-conductivity, electrical grade)",
+        texture_frames: ("atkins-1964-sample-25-face", "atkins-1964-sample-26-face"),
+        printed: [
+            (65, 6708),
+            (220, 7448),
+            (1095, 9270),
+            (2280, 10099),
+            (5560, 12507),
+            (7696, 14171),
+        ],
+        kelvin: (317.25, 325.55),
+        at_one_megapascal: 1.107_352e-4,
+    },
+    AtkinsJoint {
+        pack_id: "atkins-1964-ss304-ground-1p2um-vacuum-interface",
+        chemistry: "Type 304 stainless steel (SS304)",
+        texture_frames: ("atkins-1964-sample-3-face", "atkins-1964-sample-4-face"),
+        printed: [
+            (66, 210),
+            (220, 284),
+            (1164, 471),
+            (2225, 698),
+            (5973, 1704),
+            (7696, 2118),
+        ],
+        kelvin: (292.45, 302.45),
+        at_one_megapascal: 2.365_972_881_355_932_3e-3,
+    },
+    AtkinsJoint {
+        pack_id: "atkins-1964-az31b-lathe-0p30um-vacuum-interface",
+        chemistry: "AZ31B magnesium alloy",
+        texture_frames: ("atkins-1964-sample-7-face", "atkins-1964-sample-8-face"),
+        printed: [
+            (65, 1073),
+            (219, 1988),
+            (1096, 4066),
+            (2116, 7304),
+            (5461, 15069),
+            (7785, 27451),
+        ],
+        kelvin: (303.25, 317.45),
+        at_one_megapascal: 2.740_810_262_257_696e-4,
+    },
+    AtkinsJoint {
+        pack_id: "atkins-1964-az31b-lathe-1p4um-vacuum-interface",
+        chemistry: "AZ31B magnesium alloy",
+        texture_frames: ("atkins-1964-sample-9-face", "atkins-1964-sample-10-face"),
+        printed: [
+            (110, 3868),
+            (220, 5061),
+            (1195, 10979),
+            (2280, 20607),
+            (5133, 34171),
+            (7696, 38596),
+        ],
+        kelvin: (301.45, 316.85),
+        at_one_megapascal: 1.123_844e-4,
     },
 ];
 /// The resistance property the conduction solve and its `tim` joint binding resolve.
@@ -1096,26 +1160,27 @@ fn dry_contact_resistance(
 }
 
 /// Each bare-joint pack holds one resistance curve over normal pressure whose knots are the
-/// source's rising-load rows (1/h_c to five significant figures, which gives back the printed
-/// h_c), and the query a dry-contact binding forms (axes `T` and `normal_pressure`, fs-project
-/// `interface_state::query_point`) resolves it inside the tested pressures and temperatures and
-/// refuses it outside them.
+/// source's rising-load rows (1/h_c to the fewest significant figures, five or more, that give
+/// back the printed h_c), and the query a dry-contact binding forms (axes `T` and
+/// `normal_pressure`, fs-project `interface_state::query_point`) resolves it inside the tested
+/// pressures and temperatures and refuses it outside them.
 #[test]
-fn g3_cli_compiles_committed_atkins_1964_al6061t6_vacuum_joints() {
+fn g3_cli_compiles_committed_atkins_1964_bare_vacuum_joints() {
     for &AtkinsJoint {
         pack_id,
+        chemistry,
         texture_frames,
         printed,
         kelvin: (low_k, high_k),
         at_one_megapascal,
-    } in &ATKINS_1964_AL6061T6_VACUUM_JOINTS
+    } in &ATKINS_1964_BARE_VACUUM_JOINTS
     {
         let (pack, decisions) =
             compile_twice(&format!("data/matdb/seed-v1/{pack_id}/manifest.tsv"));
 
         assert_eq!(pack.pack_id(), pack_id);
         for surface in [pack.card().surface_a(), pack.card().surface_b()] {
-            assert_eq!(surface.material.chemistry, "6061-T6 aluminum alloy");
+            assert_eq!(surface.material.chemistry, chemistry);
         }
         assert_eq!(
             (
@@ -1151,15 +1216,12 @@ fn g3_cli_compiles_committed_atkins_1964_al6061t6_vacuum_joints() {
         assert_eq!(knots.len(), printed.len());
         for (&(pascal, resistance), (kilopascal, conductance)) in knots.iter().zip(printed) {
             assert_eq!(pascal.to_bits(), (f64::from(kilopascal) * 1000.0).to_bits());
-            let five_figures: f64 = format!("{:.4e}", 1.0 / f64::from(conductance))
-                .parse()
-                .expect("formatted resistance parses");
-            assert_eq!(resistance.to_bits(), five_figures.to_bits(), "{pack_id}");
-            assert_eq!(
-                (1.0 / resistance).round().to_bits(),
-                f64::from(conductance).to_bits(),
-                "{pack_id}: the knot does not give back the printed h_c"
-            );
+            let (conductance, inverse) = (f64::from(conductance), 1.0 / f64::from(conductance));
+            let fewest_figures = (4..17)
+                .filter_map(|digits| format!("{inverse:.digits$e}").parse::<f64>().ok())
+                .find(|value| (1.0 / value).round().to_bits() == conductance.to_bits())
+                .expect("some precision gives back the printed h_c");
+            assert_eq!(resistance.to_bits(), fewest_figures.to_bits(), "{pack_id}");
         }
         assert_eq!(claim.interpolation, InterpolationPolicy::LinearInside);
         assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
