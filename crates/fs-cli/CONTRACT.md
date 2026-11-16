@@ -900,7 +900,10 @@ evaluates no friction. A moving surface is a prescribed end or a
 `velocity_source` joined to one; either is held over each step (the
 interface has no span input), so an accelerating end advances in jumps. Reports expose `slip_m_s`, `stuck`,
 the force on `a` and last-step `heat_w`. `adaptive` refuses it, as it
-refuses a slider. Tests in `tests/system_command.rs`: a Coulomb block
+refuses a slider. Its state has fs-tribo's codec, bound to its law's rung
+and coefficients, its normal force, its budgets and the ends it reads, so
+`--checkpoint` saves it (tests under `hertz_patch`, below). Tests in
+`tests/system_command.rs`: a Coulomb block
 thrown at ±3 m/s stopping at the closed-form distance with 9 J in its
 lining; a belt at constant speed, as the interface's prescribed end and
 as a `velocity_source` joined to it, dragging a block until the
@@ -928,8 +931,9 @@ force's is: its stored change is the law's reversible storage less that
 work, and the law's closure residual is its numerical loss. `solve` takes
 the budgets of `friction_interface` except the impulse tolerance. Reports
 expose `work_j`, `traction_x_n`, `traction_y_n` and last-step `heat_w`.
-`adaptive` refuses it, and it has no state codec, so `--checkpoint`
-refuses it by name.
+`adaptive` refuses it. Its state has fs-tribo's codec, bound to its law,
+its normal force, its slip rate and its budgets, so `--checkpoint` saves
+it (tests under `hertz_patch`, below).
 
 Tests in `tests/system_command.rs`:
 - A Coulomb interface at [0.2, 0] m/s and the cited rosin fit at
@@ -968,7 +972,32 @@ slip or the spin would reverse is refused (`hertz_patch_reversal`), not
 shortened. Reports expose the motion the last step ended with
 (`slip_x_m_s`, `slip_y_m_s`, `spin_speed_m_s`), `owner_steps`, the wrench
 on side a (`force_x_n`, `force_y_n`, `spin_moment_nm`) and last-step
-`heat_w`. `adaptive` refuses it, and it has no state codec.
+`heat_w`. `adaptive` refuses it. Its state has fs-tribo's codec, bound to
+its four parameters and the owner's budgets, so `--checkpoint` saves it.
+
+Checkpoints of the three friction kinds (`friction_interface`,
+`sliding_interface`, `hertz_patch`). fs-tribo's interfaces are built over
+a closure that returns the law at a temperature, and have a codec only
+when their caller names that closure. The lowering names it with the law's
+own identity: the rung's model id and coefficients, or the patch's four
+parameters. That is all the closure's result depends on here, because no
+law offered depends on temperature or on a card. Tests in
+`tests/system_command/checkpoints.rs` (claims written before the first
+run): each of `dragged_lining.json`, `spun_puck.json` and
+`stribeck_block.json`, saved at 0.125 s and resumed by another process,
+reports byte for byte what one process reports that pauses at 0.125 s and
+goes on. The pause is itself a step boundary, so this is not the report of
+a run with no pause. Their checkpoints are refused by the same scene with
+another coefficient, another normal force, another slip rate
+(`dragged_lining.json`) or another solve budget (nine changed scenes; that
+rungs at the same coefficients differ is fs-tribo's test, not one here).
+`bowed_mode.json`, a
+friction interface beside a `modal_structure`, is still refused a
+checkpoint by the structure's name: `modal_structure` has no state codec.
+Not tested: `struck_mode.json`, whose `contact_interface` and
+`modal_structure` both have none. Not covered: a save at the scene's own
+next step boundary, after which a resumed run would be the run with no
+pause.
 
 Tests in `tests/system_command.rs`:
 - A 2 kg puck on a 1 cm patch under 10 N, sliding from 1 m/s without
@@ -1106,8 +1135,12 @@ with conduction bodies is saved by `--checkpoint` and resumed. Tests in
 `steel316_heated_bar.json`, `steel316_blocks_trace.json`,
 `steel316_enthalpy_bar.json`, `two_blocks_atkins.json` and
 `two_blocks_atkins_following.json`, saved at 0.125 s and resumed by
-another process, reports what its uninterrupted run reports, byte for
-byte; the checkpoint of `two_slabs_trace.json` is refused by that scene
+another process, reports byte for byte what one process reports that
+pauses at 0.125 s and goes on (the pause is itself a step boundary, so
+this is not the report of a run with no pause; this sentence first called
+it the uninterrupted run's, which was wrong: `two_slabs.json` takes 32
+steps with no pause and 33 saved and resumed, and 23 report values
+differ); the checkpoint of `two_slabs_trace.json` is refused by that scene
 with another conductivity, grid, heat capacity, Krylov tolerance or
 contact resistance, and the read-once Atkins example's by the example that
 follows its card.

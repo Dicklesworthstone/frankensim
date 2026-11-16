@@ -115,12 +115,28 @@
 //!   none.
 //!
 //! Class `NonSmooth`.
+//!
+//! # Snapshots
+//!
+//! The patch has the state codec of `fs_ports`' `Component` once the caller
+//! names the source `law_at` ([`HertzPatchInterface::identified_by`]). A
+//! source is a closure, and nothing can be read from one, so the caller's
+//! words must cover everything its result depends on: for a source that
+//! returns one contact at every temperature, that contact's four
+//! parameters; for coefficients that change with temperature, words for the
+//! mapping too (the card and its table). Without words `encode_state` writes
+//! nothing and `decode_state` refuses, so a kernel neither writes the
+//! patch's system to a snapshot nor resumes it. The identity is those
+//! words, counted, then every field of the load and of its budgets. The
+//! state is the three motions, which must be finite, and the count of owner
+//! steps.
 
 use core::array::from_fn;
 use core::fmt;
 use core::num::NonZeroUsize;
 
 use fs_exec::Cx;
+use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::component::{Class, Component, LoadLine, PortRole, PortSpec, Proposal, Receipt};
 use fs_ports::{PortKind, StableId};
 
@@ -173,6 +189,8 @@ pub struct HertzPatchInterface<F> {
     law_at: F,
     load: HertzPatchLoad,
     ports: Vec<PortSpec>,
+    /// The caller's words for `law_at`; none: no state codec.
+    identity: Vec<u64>,
 }
 
 impl<F> fmt::Debug for HertzPatchInterface<F> {
@@ -303,7 +321,18 @@ where
             law_at,
             load,
             ports,
+            identity: Vec::new(),
         })
+    }
+
+    /// The patch with `words` naming its source `law_at`, which is what
+    /// gives it a state codec: see the module's "Snapshots" for what the
+    /// words must cover. They replace any given before; with none in
+    /// `words`, as with none given, the patch has no codec.
+    #[must_use]
+    pub fn identified_by(mut self, words: Vec<u64>) -> Self {
+        self.identity = words;
+        self
     }
 
     /// The patch this interface is held to.
@@ -438,6 +467,86 @@ where
         cx: &Cx<'_>,
     ) -> Result<Proposal, TriboError> {
         self.propose_on_line(old, dt_s, inputs, &[0.0; 9], new, outputs, cx)
+    }
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-tribo::sliding_patch::component::HertzPatchInterface",
+        state_family: "hertz-patch-state",
+        schema_grammar: "motion_m_s [f64; 3] [m/s]: v_x, v_y and the radius times the spin; \
+            owner_steps usize",
+        codec_grammar: "four u64 words: the bits of the three motions, then owner_steps",
+        codec_version: 1,
+    });
+
+    /// Refuses, writing nothing, for a patch whose source is not named and
+    /// for a motion that is not finite.
+    fn encode_state(&self, state: &Self::State, words: &mut Vec<u64>) -> bool {
+        if self.identity.is_empty() || !state.motion_m_s.iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        words.extend(state.motion_m_s.map(f64::to_bits));
+        words.push(state.owner_steps as u64);
+        true
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<Self::State> {
+        let &[x, y, spin, owner_steps] = words else {
+            return None;
+        };
+        let motion_m_s = [x, y, spin].map(f64::from_bits);
+        if self.identity.is_empty() || !motion_m_s.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        Some(HertzPatchState {
+            motion_m_s,
+            owner_steps: usize::try_from(owner_steps).ok()?,
+        })
+    }
+
+    /// The count of the caller's words for the source and the words, so
+    /// that they do not run into what follows; then the normal load, the
+    /// radius and every budget of the owner's solve.
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        let HertzPatchLoad {
+            normal_n,
+            radius_m,
+            solve:
+                HertzWrenchConfig {
+                    maximum_static_iterations,
+                    maximum_iterations,
+                    maximum_evaluations,
+                    force_tolerance_n,
+                    moment_tolerance_nm,
+                    displacement_tolerance_m,
+                    energy_tolerance_j,
+                    relative_matrix_tolerance,
+                    maximum_force_n,
+                    maximum_spin_moment_nm,
+                },
+        } = self.load;
+        words.push(self.identity.len() as u64);
+        words.extend(&self.identity);
+        words.extend([normal_n, radius_m].map(f64::to_bits));
+        words.extend(
+            [
+                maximum_static_iterations,
+                maximum_iterations,
+                maximum_evaluations,
+            ]
+            .map(|count| count as u64),
+        );
+        words.extend(
+            [
+                force_tolerance_n,
+                moment_tolerance_nm,
+                displacement_tolerance_m,
+                energy_tolerance_j,
+                relative_matrix_tolerance,
+                maximum_force_n,
+                maximum_spin_moment_nm,
+            ]
+            .map(f64::to_bits),
+        );
     }
 }
 

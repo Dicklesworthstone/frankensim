@@ -285,12 +285,15 @@ fn conduction_scene(name: &str, pack: Option<&str>) -> (std::path::PathBuf, Stri
 }
 
 /// Claims, declared before the first run: every conduction example, saved
-/// at 0.125 s and resumed by another process, reports what its uninterrupted
-/// run reports, byte for byte. The bodies are fs-conduction's with a
-/// declared conductivity, with a card's k(T) on the Newton path, and with a
-/// card's heat capacity (the enthalpy owner); the contacts are a lumped
-/// conductance, trace contacts on matching and mapped faces, a card-backed
-/// one and one that follows its card.
+/// at 0.125 s and resumed by another process, reports byte for byte what
+/// one process reports that pauses at 0.125 s and goes on
+/// (`checkpoint_continuation`'s reference; the pause is itself a step
+/// boundary, so this is not the report of a run with no pause, and was
+/// wrongly called the uninterrupted run's here). The bodies are
+/// fs-conduction's with a declared conductivity, with a card's k(T) on the
+/// Newton path, and with a card's heat capacity (the enthalpy owner); the
+/// contacts are a lumped conductance, trace contacts on matching and mapped
+/// faces, a card-backed one and one that follows its card.
 #[test]
 fn saved_conduction_scenes_continue_with_identical_reports() {
     for (name, pack) in [
@@ -372,4 +375,86 @@ fn conduction_checkpoints_refuse_a_scene_whose_body_or_contact_changed() {
     let following = std::fs::read_to_string(example("two_blocks_atkins_following.json")).unwrap();
     std::fs::write(&scene, following).unwrap();
     resume_is_refused("a contact that follows its card", &scene, &root);
+}
+
+/// Claims, declared before the first run: each friction example, saved at
+/// 0.125 s and resumed by another process, reports byte for byte what one
+/// process reports that pauses at 0.125 s and goes on. They are a sliding
+/// interface under a prescribed slip, a Hertz patch under a spinning puck
+/// and a friction interface that brings a block to rest.
+#[test]
+fn saved_friction_scenes_continue_with_identical_reports() {
+    for name in [
+        "dragged_lining.json",
+        "spun_puck.json",
+        "stribeck_block.json",
+    ] {
+        let text = std::fs::read_to_string(example(name)).unwrap();
+        let scene = scratch(name, &text);
+        checkpoint_continuation(&scene, &text);
+    }
+}
+
+/// The friction examples changed one passage at a time: the scene, the
+/// passage and what replaces it.
+const CHANGED_FRICTION_SCENES: &str = r#"
+dragged_lining.json | "kinetic_mu": 0.2 | "kinetic_mu": 0.25
+dragged_lining.json | "normal_n": 40.0 | "normal_n": 41.0
+dragged_lining.json | [0.3, 0.4] | [0.3, 0.5]
+dragged_lining.json | "normal_n": 40.0, | "normal_n": 40.0, "solve": {"work_tolerance_j": 2e-12},
+stribeck_block.json | "static_mu": 0.5 | "static_mu": 0.55
+stribeck_block.json | "normal_n": 20.0 | "normal_n": 21.0
+stribeck_block.json | "normal_n": 20.0, | "normal_n": 20.0, "solve": {"max_iterations": 65},
+spun_puck.json | "kinetic_mu": 0.3 | "kinetic_mu": 0.31
+spun_puck.json | "kinetic_mu": 0.3, | "kinetic_mu": 0.3, "solve": {"maximum_evaluations": 513},
+"#;
+
+/// Claims, declared before the first run: the checkpoint of a friction
+/// example is refused by the same scene with another coefficient of its
+/// law, another normal force, another prescribed slip rate or another
+/// solve budget ([`CHANGED_FRICTION_SCENES`]).
+#[test]
+fn friction_checkpoints_refuse_a_scene_whose_law_load_or_budget_changed() {
+    let mut saved: Option<(&str, std::path::PathBuf, String, String)> = None;
+    for line in CHANGED_FRICTION_SCENES
+        .lines()
+        .filter(|line| !line.is_empty())
+    {
+        let [name, from, to] = line.split(" | ").collect::<Vec<_>>()[..] else {
+            panic!("{line}: three parts");
+        };
+        if saved.as_ref().is_none_or(|saved| saved.0 != name) {
+            let text = std::fs::read_to_string(example(name)).unwrap();
+            let scene = scratch(name, &text);
+            let root = checkpoint_continuation(&scene, &text);
+            saved = Some((name, scene, text, root));
+        }
+        let (_, scene, text, root) = saved.as_ref().unwrap();
+        assert!(text.contains(from), "{line}: test fixture changed");
+        std::fs::write(scene, text.replacen(from, to, 1)).unwrap();
+        resume_is_refused(line, scene, root);
+    }
+}
+
+/// Claims, declared before the first run: a scene with a friction interface
+/// beside a modal structure, which has no state codec, is still refused a
+/// checkpoint, by the structure's name, and no file is written.
+#[test]
+fn a_friction_scene_beside_a_member_with_no_codec_is_still_refused_by_that_members_name() {
+    let text = std::fs::read_to_string(example("bowed_mode.json")).unwrap();
+    let scene = scratch("bowed_mode.json", &text);
+    let checkpoint = scene.with_extension("fssnap");
+    let (code, stdout, stderr) = run_binary(&[
+        "--json",
+        "system",
+        scene.to_str().unwrap(),
+        "--until",
+        "0.125",
+        "--checkpoint",
+        checkpoint.to_str().unwrap(),
+    ]);
+    eprintln!("bowed_mode: exit {code}: {}", stderr.trim_end());
+    assert_eq!(code, 4, "{stdout}{stderr}");
+    assert!(stderr.contains("`string` has no state codec"), "{stderr}");
+    assert!(!checkpoint.exists());
 }

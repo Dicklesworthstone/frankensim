@@ -13,6 +13,12 @@
 //! [`HertzPatchInterface`] with a constant [`HertzWrenchContact`]: static and
 //! kinetic coefficients under a constant normal load and radius. Nothing
 //! here evaluates friction or integrates anything.
+//!
+//! Each of the three is given the words that name its law
+//! (`identified_by`), which is what lets `--checkpoint` save its state. No
+//! law offered here depends on temperature or on a card, so the law's own
+//! identity (its rung and coefficients, or the patch's four parameters) is
+//! the whole of what the component's source returns.
 
 use fs_ports::component::{Component, PortSpec};
 use fs_system::{NodeId, SystemBuilder};
@@ -23,7 +29,7 @@ use fs_tribo::sliding_patch::contact::{
 use fs_tribo::tangential::component::{
     FrictionInterface, FrictionState, InterfaceLoad, PrescribedSlip, SlidingInterface, SlidingState,
 };
-use fs_tribo::{DryTangentialState, FrictionLaw, TangentialSolveConfig};
+use fs_tribo::{DryTangentialState, FrictionLaw, TangentialLaw, TangentialSolveConfig};
 
 use super::{J, Refusal, fields, number, number_or};
 
@@ -244,6 +250,16 @@ pub(super) fn reads_ends(definition: &J, what: &str) -> Result<[bool; 2], String
     Ok(ends)
 }
 
+/// The words that name `law` to a snapshot: its own identity. None, and so
+/// no state codec, for a law that cannot name itself.
+fn named(law: &FrictionLaw) -> Vec<u64> {
+    let mut words = Vec::new();
+    if !law.identity_words(&mut words) {
+        words.clear();
+    }
+    words
+}
+
 /// A `friction_interface` element: the interface on the kernel's load line,
 /// starting at the slip the scene declares in the movers' sign.
 pub(super) fn interface(
@@ -270,8 +286,10 @@ pub(super) fn interface(
     if !slip.is_finite() {
         return Err(format!("{what}.slip_m_s must be finite").into());
     }
+    let identity = named(&law);
     let mut component = FrictionInterface::new(move |_kelvin: f64| Ok(law.clone()), load)
-        .map_err(|error| format!("{what}: {error}"))?;
+        .map_err(|error| format!("{what}: {error}"))?
+        .identified_by(identity);
     // The kernel wires each end input read here, `a.end` or `b.end`, to the
     // end its neighbours tell.
     if ends.contains(&true) {
@@ -324,6 +342,7 @@ pub(super) fn sliding(
         .ok_or_else(|| {
             format!("{what}.slip_rate_m_s is two finite numbers [m/s], one per tangent axis")
         })?;
+    let identity = named(&law);
     let component = SlidingInterface::new(
         move |_kelvin: f64| Ok(law.clone()),
         PrescribedSlip {
@@ -334,7 +353,8 @@ pub(super) fn sliding(
             work_tolerance_j: load.work_tolerance_j,
         },
     )
-    .map_err(|error| format!("{what}: {error}"))?;
+    .map_err(|error| format!("{what}: {error}"))?
+    .identified_by(identity);
     let state = component
         .start(START_K)
         .map_err(|error| format!("{what}: {error}"))?;
@@ -457,15 +477,24 @@ pub(super) fn hertz_patch(
                 )
             })?,
     };
+    // The contact is its four parameters, at every temperature.
+    let HertzWrenchParameters {
+        normal_force_n,
+        contact_radius_m,
+        static_mu,
+        kinetic_mu,
+    } = parameters;
+    let identity = [normal_force_n, contact_radius_m, static_mu, kinetic_mu].map(f64::to_bits);
     let component = HertzPatchInterface::new(
         move |_kelvin: f64| Ok(contact),
         HertzPatchLoad {
-            normal_n: parameters.normal_force_n,
-            radius_m: parameters.contact_radius_m,
+            normal_n: normal_force_n,
+            radius_m: contact_radius_m,
             solve,
         },
     )
-    .map_err(|error| format!("{what}: {error}"))?;
+    .map_err(|error| format!("{what}: {error}"))?
+    .identified_by(identity.to_vec());
     let state = component
         .start(motion_m_s)
         .map_err(|error| format!("{what}: {error}"))?;

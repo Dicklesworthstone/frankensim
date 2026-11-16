@@ -291,12 +291,38 @@
 //!   (`friction_interface_stop_against_the_slip`); a step that lets go from
 //!   rest with a heat below minus the work tolerance
 //!   (`friction_interface_let_go_heat`).
+//!
+//! # Snapshots
+//!
+//! Both interfaces have the state codec of `fs_ports`' `Component` under two
+//! conditions. Where either fails, `encode_state` writes nothing and
+//! `decode_state` refuses, so a kernel neither writes the interface's system
+//! to a snapshot nor resumes it.
+//!
+//! - The law writes its own state ([`TangentialLaw::encode_state`],
+//!   [`TangentialLaw::decode_state`]); the interface writes only its own
+//!   numbers before it. A law with no codec leaves the interface with none.
+//! - The caller names the source `law_at` (`identified_by`). A source is a
+//!   closure, and nothing can be read from one, so the caller's words must
+//!   cover everything its result depends on: for a source that returns one
+//!   law at every temperature, that law's
+//!   [`TangentialLaw::identity_words`]; for a law that changes with
+//!   temperature, words for the mapping too (the card and its table).
+//!   Without words the interface has no codec.
+//!
+//! The identity is those words, counted, then every field of the drive or
+//! the load and of its solve budgets and, between two bodies, which ends
+//! read an end input. A state is read back only if its numbers are ones a
+//! step leaves (finite; a last step's length positive). That its stored
+//! energy is the law's own is not checked there: the first step refuses a
+//! state whose energy the law values otherwise, as it does for any state.
 
 use core::fmt;
 use core::marker::PhantomData;
 use core::num::NonZeroUsize;
 
 use fs_exec::Cx;
+use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::component::{Class, Component, LoadLine, PortRole, PortSpec, Proposal, Receipt};
 use fs_ports::{PortKind, StableId};
 
@@ -341,6 +367,11 @@ impl<S> SlidingState<S> {
     pub const fn work_j(&self) -> f64 {
         self.work_j
     }
+
+    /// Whether both energies are finite, as in every state a step leaves.
+    fn is_held(&self) -> bool {
+        self.reversible_j.is_finite() && self.work_j.is_finite()
+    }
 }
 
 /// A sliding interface whose slip rate and normal load are prescribed, with
@@ -349,6 +380,8 @@ pub struct SlidingInterface<L, F> {
     law_at: F,
     drive: PrescribedSlip,
     ports: [PortSpec; 2],
+    /// The caller's words for `law_at`; none: no state codec.
+    identity: Vec<u64>,
     law: PhantomData<fn() -> L>,
 }
 
@@ -370,6 +403,45 @@ fn finite(value: f64, field: &'static str) -> Result<f64, TriboError> {
     } else {
         Err(refused(field))
     }
+}
+
+/// An optional number as two words: a tag (0 absent, 1 present), then its
+/// bits (zero if absent).
+fn optional_words(value: Option<f64>, words: &mut Vec<u64>) {
+    match value {
+        None => words.extend([0, 0]),
+        Some(value) => words.extend([1, value.to_bits()]),
+    }
+}
+
+/// The optional number [`optional_words`] wrote as `tag` and `bits`. `Err`
+/// refuses them: a tag that is neither, or an absent number with bits.
+fn optional_from(tag: u64, bits: u64) -> Result<Option<f64>, ()> {
+    match (tag, bits) {
+        (0, 0) => Ok(None),
+        (1, bits) => Ok(Some(f64::from_bits(bits))),
+        _ => Err(()),
+    }
+}
+
+/// The caller's words for a source and the budgets of its law's solve, as
+/// both interfaces' identities start: the count of the caller's words and
+/// the words, so that they do not run into what follows, then every budget.
+fn source_words(identity: &[u64], solve: TangentialSolveConfig, words: &mut Vec<u64>) {
+    let TangentialSolveConfig {
+        max_iterations,
+        maximum_force_n,
+        force_absolute_tolerance_n,
+        force_relative_tolerance,
+    } = solve;
+    words.push(identity.len() as u64);
+    words.extend(identity);
+    words.extend([
+        max_iterations as u64,
+        maximum_force_n.to_bits(),
+        force_absolute_tolerance_n.to_bits(),
+        force_relative_tolerance.to_bits(),
+    ]);
 }
 
 /// One evaluated step: the candidate state, the heat rate into the
@@ -410,8 +482,19 @@ where
                     NonZeroUsize::new(2).ok_or(refused("traction_port"))?,
                 ),
             ],
+            identity: Vec::new(),
             law: PhantomData,
         })
+    }
+
+    /// The interface with `words` naming its source `law_at`, which is what
+    /// gives it a state codec: see the module's "Snapshots" for what the
+    /// words must cover. They replace any given before; with none in
+    /// `words`, as with none given, the interface has no codec.
+    #[must_use]
+    pub fn identified_by(mut self, words: Vec<u64>) -> Self {
+        self.identity = words;
+        self
     }
 
     /// The load and motion this interface is held to.
@@ -573,6 +656,62 @@ where
         traction_n.copy_from_slice(&traction);
         Ok(Proposal::Step(receipt))
     }
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-tribo::tangential::component::SlidingInterface",
+        state_family: "sliding-interface-state",
+        schema_grammar: "reversible_j f64 [J]; work_j f64 [J]; the law's own state",
+        codec_grammar: "reversible_j bits, work_j bits, then the words of the law's own codec",
+        codec_version: 1,
+    });
+
+    /// Refuses, writing nothing, for an interface whose source is not named
+    /// or whose law has no state codec, and for a state no step leaves.
+    fn encode_state(&self, state: &Self::State, words: &mut Vec<u64>) -> bool {
+        let mut tangential = Vec::new();
+        if self.identity.is_empty()
+            || !state.is_held()
+            || !L::encode_state(&state.tangential, &mut tangential)
+        {
+            return false;
+        }
+        words.extend([state.reversible_j.to_bits(), state.work_j.to_bits()]);
+        words.append(&mut tangential);
+        true
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<Self::State> {
+        if self.identity.is_empty() {
+            return None;
+        }
+        let &[reversible_j, work_j, ref tangential @ ..] = words else {
+            return None;
+        };
+        let state = SlidingState {
+            tangential: L::decode_state(tangential)?,
+            reversible_j: f64::from_bits(reversible_j),
+            work_j: f64::from_bits(work_j),
+        };
+        state.is_held().then_some(state)
+    }
+
+    /// The caller's words for the source and the solve budgets
+    /// ([`source_words`]), then the rest of the drive: the normal load, the
+    /// two slip rates, the nominal pressure and the work tolerance.
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        let PrescribedSlip {
+            normal_n,
+            slip_rate_m_s,
+            nominal_pressure_pa,
+            solve,
+            work_tolerance_j,
+        } = self.drive;
+        source_words(&self.identity, solve, words);
+        words.push(normal_n.to_bits());
+        words.extend(slip_rate_m_s.map(f64::to_bits));
+        optional_words(nominal_pressure_pa, words);
+        words.push(work_tolerance_j.to_bits());
+    }
 }
 
 /// The load a [`FrictionInterface`] is pressed with, and the law's budgets.
@@ -642,6 +781,18 @@ impl<S> FrictionState<S> {
         self.resting
     }
 
+    /// Whether these are numbers a step leaves: a finite energy, slip and
+    /// given flows, and no last load or a finite one over a step of
+    /// positive finite length.
+    fn is_held(&self) -> bool {
+        self.reversible_j.is_finite()
+            && self.slip_m_s.is_finite()
+            && self.load.is_none_or(|(load_n, step_s)| {
+                load_n.is_finite() && step_s.is_finite() && step_s > 0.0
+            })
+            && self.given_m_s.iter().flatten().all(|flow| flow.is_finite())
+    }
+
     /// The flow each given end is given in this step, and by how much it
     /// has jumped since the last one.
     ///
@@ -673,6 +824,8 @@ pub struct FrictionInterface<L, F> {
     ports: Vec<PortSpec>,
     /// Per end (`a`, `b`): the port of its end input, if it reads one.
     ends: [Option<usize>; 2],
+    /// The caller's words for `law_at`; none: no state codec.
+    identity: Vec<u64>,
     law: PhantomData<fn() -> L>,
 }
 
@@ -758,8 +911,19 @@ where
                     .map_err(|_| refused("heat_port"))?,
             ],
             ends: [None; 2],
+            identity: Vec::new(),
             law: PhantomData,
         })
+    }
+
+    /// The interface with `words` naming its source `law_at`, which is what
+    /// gives it a state codec: see the module's "Snapshots" for what the
+    /// words must cover. They replace any given before; with none in
+    /// `words`, as with none given, the interface has no codec.
+    #[must_use]
+    pub fn identified_by(mut self, words: Vec<u64>) -> Self {
+        self.identity = words;
+        self
     }
 
     /// The interface reading, at each end marked in `ends` (`a`, `b`), the
@@ -1463,6 +1627,105 @@ where
         let zero = [0.0; 8];
         let compliance = &zero[..2 * (2 + self.told())];
         self.propose_on_line(old, dt_s, inputs, compliance, new, outputs, cx)
+    }
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-tribo::tangential::component::FrictionInterface",
+        state_family: "friction-interface-state",
+        schema_grammar: "reversible_j f64 [J]; slip_m_s f64 [m/s]; resting bool; load \
+            Option<(f64 [N], f64 [s])>; per end: given_m_s Option<f64> [m/s]; the law's own state",
+        codec_grammar: "ten u64 words: reversible_j bits, slip_m_s bits, resting 0|1; load tag \
+            0|1, then two zeros if absent or the bits of the load and of the step length; for a \
+            then b: given tag 0|1, zero if absent or given_m_s bits; then the words of the law's \
+            own codec",
+        codec_version: 1,
+    });
+
+    /// Refuses, writing nothing, for an interface whose source is not named
+    /// or whose law has no state codec, and for a state no step leaves.
+    fn encode_state(&self, state: &Self::State, words: &mut Vec<u64>) -> bool {
+        let mut tangential = Vec::new();
+        if self.identity.is_empty()
+            || !state.is_held()
+            || !L::encode_state(&state.tangential, &mut tangential)
+        {
+            return false;
+        }
+        words.extend([
+            state.reversible_j.to_bits(),
+            state.slip_m_s.to_bits(),
+            u64::from(state.resting),
+        ]);
+        match state.load {
+            None => words.extend([0, 0, 0]),
+            Some((load_n, step_s)) => words.extend([1, load_n.to_bits(), step_s.to_bits()]),
+        }
+        for given in state.given_m_s {
+            optional_words(given, words);
+        }
+        words.append(&mut tangential);
+        true
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<Self::State> {
+        if self.identity.is_empty() {
+            return None;
+        }
+        let &[
+            reversible_j,
+            slip_m_s,
+            resting,
+            load_tag,
+            load_n,
+            step_s,
+            tag_a,
+            given_a,
+            tag_b,
+            given_b,
+            ref tangential @ ..,
+        ] = words
+        else {
+            return None;
+        };
+        let load = match (load_tag, load_n, step_s) {
+            (0, 0, 0) => None,
+            (1, load, step) => Some((f64::from_bits(load), f64::from_bits(step))),
+            _ => return None,
+        };
+        if resting > 1 {
+            return None;
+        }
+        let state = FrictionState {
+            tangential: L::decode_state(tangential)?,
+            reversible_j: f64::from_bits(reversible_j),
+            slip_m_s: f64::from_bits(slip_m_s),
+            resting: resting == 1,
+            load,
+            given_m_s: [
+                optional_from(tag_a, given_a).ok()?,
+                optional_from(tag_b, given_b).ok()?,
+            ],
+        };
+        state.is_held().then_some(state)
+    }
+
+    /// The caller's words for the source and the solve budgets
+    /// ([`source_words`]), then the rest of the load: the normal load, the
+    /// nominal pressure and the two tolerances; then, per end, zero or one
+    /// more than the port of its end input.
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        let InterfaceLoad {
+            normal_n,
+            nominal_pressure_pa,
+            solve,
+            impulse_tolerance_n_s,
+            work_tolerance_j,
+        } = self.load;
+        source_words(&self.identity, solve, words);
+        words.push(normal_n.to_bits());
+        optional_words(nominal_pressure_pa, words);
+        words.extend([impulse_tolerance_n_s, work_tolerance_j].map(f64::to_bits));
+        words.extend(self.ends.map(|at| at.map_or(0, |port| port as u64 + 1)));
     }
 }
 

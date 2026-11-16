@@ -2247,3 +2247,324 @@ fn the_told_interface_conforms_on_its_line_and_books_the_work_of_its_ends() {
     assert!(stepped > 40 && cut >= 6, "{stepped} stepped, {cut} cut");
     println!("the told interface on its line: {stepped} points stepped and audited, {cut} cut");
 }
+
+// Snapshots: the state codecs and the identities.
+
+/// The words `component`'s codec writes for `state`, or none where it
+/// refuses. A refusal must write nothing.
+fn written<C: Component>(component: &C, state: &C::State) -> Option<Vec<u64>> {
+    let mut words = Vec::new();
+    let wrote = component.encode_state(state, &mut words);
+    assert!(wrote || words.is_empty(), "a refusal wrote {words:?}");
+    wrote.then_some(words)
+}
+
+fn identity(component: &impl Component) -> Vec<u64> {
+    let mut words = Vec::new();
+    component.identity_words(&mut words);
+    words
+}
+
+/// The words that name `law`.
+fn named(law: &FrictionLaw) -> Vec<u64> {
+    let mut words = Vec::new();
+    assert!(law.identity_words(&mut words));
+    words
+}
+
+/// `read` refuses `words` a word short, a word over, and with each word of
+/// `spoiled` put in its place.
+fn refuses_each<S>(words: &[u64], spoiled: &[(usize, u64)], read: impl Fn(&[u64]) -> Option<S>) {
+    for &(at, word) in spoiled {
+        let mut other = words.to_vec();
+        other[at] = word;
+        assert!(read(&other).is_none(), "word {at} as {word:#x} was read");
+    }
+    assert!(read(&words[..words.len() - 1]).is_none(), "a word short");
+    assert!(read(&[words, &[0]].concat()).is_none(), "a word over");
+}
+
+fn all_differ(identities: &[Vec<u64>]) {
+    for (at, later) in identities.iter().enumerate() {
+        for earlier in &identities[..at] {
+            assert_ne!(later, earlier, "identity {at} is an earlier one");
+        }
+    }
+}
+
+/// Claims, declared before the first run. A sliding interface whose source
+/// is named writes its state as the two energies and the law's four words,
+/// and reads the same state back: the start state, with no thermal
+/// boundary, and a state after a step, with slip, work and a boundary of
+/// 320 K. It refuses a word short, a word over, an energy or a slip that is
+/// not finite, a boundary tag that is neither, an absent boundary with bits
+/// and a boundary that is zero or negative.
+#[test]
+fn a_named_sliding_interface_reads_back_the_state_it_wrote_and_refuses_other_words() {
+    let interface = SlidingInterface::new(dry, drive([1.0, 0.0]))
+        .unwrap()
+        .identified_by(named(&dry(300.0).unwrap()));
+    let start = interface.start(300.0).unwrap();
+    let (stepped, _, _) = propose(&interface, &start, 0.2, &[320.0]).unwrap();
+    assert!(stepped.work_j() > 0.0);
+    assert_eq!(stepped.tangential().contact_temperature_k(), Some(320.0));
+    let nan = f64::NAN.to_bits();
+    let endless = f64::INFINITY.to_bits();
+    let below = (-1.0_f64).to_bits();
+    for (state, spoiled) in [
+        (&start, &[(0, nan), (5, 1)][..]),
+        (
+            &stepped,
+            &[
+                (0, nan),
+                (1, endless),
+                (2, nan),
+                (3, endless),
+                (4, 2),
+                (4, 0),
+                (5, 0),
+                (5, below),
+            ],
+        ),
+    ] {
+        let words = written(&interface, state).expect("codec");
+        assert_eq!(words.len(), 6);
+        assert_eq!(interface.decode_state(&words).as_ref(), Some(state));
+        refuses_each(&words, spoiled, |words| interface.decode_state(words));
+    }
+}
+
+/// Claims, declared before the first run. A friction interface whose source
+/// is named writes ten words and the law's four, and reads the same state
+/// back: the start state at rest, and a pair held on a body, which has a
+/// last load over a step of 0.01 s, end `b` given at no flow and a boundary
+/// of 300 K. It refuses a word short, a word over, an energy, a slip, a
+/// load or a given flow that is not finite, a rest word above one, a load,
+/// flow or boundary tag that is neither, an absent load or flow with bits,
+/// and a last step of no length or a negative one.
+#[test]
+fn a_named_friction_interface_reads_back_the_state_it_wrote_and_refuses_other_words() {
+    let interface = rubbing(dry).identified_by(named(&dry(300.0).unwrap()));
+    let start = interface.start(300.0, 0.0).unwrap();
+    let Answer::Took { state: held, .. } = on_a_body(&interface, &start, 0.01, 1.0, 2.0) else {
+        panic!("a push of 2 N is held without a cut");
+    };
+    assert!(held.at_rest() && held != start);
+    let nan = f64::NAN.to_bits();
+    let endless = f64::INFINITY.to_bits();
+    let below = (-0.01_f64).to_bits();
+    for (state, spoiled) in [
+        (
+            &start,
+            &[(0, nan), (2, 2), (4, 1), (5, 1), (7, 1), (9, 1), (13, 1)][..],
+        ),
+        (
+            &held,
+            &[
+                (0, nan),
+                (1, endless),
+                (2, 2),
+                (3, 2),
+                (3, 0),
+                (4, nan),
+                (5, 0),
+                (5, below),
+                (5, nan),
+                (6, 2),
+                (7, 1),
+                (8, 2),
+                (9, nan),
+                (10, nan),
+                (12, 2),
+            ],
+        ),
+    ] {
+        let words = written(&interface, state).expect("codec");
+        assert_eq!(words.len(), 14);
+        assert_eq!(interface.decode_state(&words).as_ref(), Some(state));
+        refuses_each(&words, spoiled, |words| interface.decode_state(words));
+    }
+    // The held state is the one the refusals above assume: a last load and
+    // end `b` given.
+    let words = written(&interface, &held).expect("codec");
+    assert_eq!([words[3], words[6], words[8]], [1, 0, 1]);
+}
+
+/// Claims, declared before the first run. An interface whose source is not
+/// named, or is named with no words, writes nothing and reads nothing, and
+/// so does a named interface over a law with no state codec (the spring).
+#[test]
+fn an_interface_with_no_words_for_its_source_or_over_a_law_with_no_codec_has_no_codec() {
+    let words = named(&dry(300.0).unwrap());
+    let sliding = || SlidingInterface::new(dry, drive([1.0, 0.0])).unwrap();
+    let state = sliding().start(300.0).unwrap();
+    let wrote = written(&sliding().identified_by(words.clone()), &state).expect("codec");
+    for unnamed in [
+        sliding(),
+        sliding().identified_by(Vec::new()),
+        sliding()
+            .identified_by(words.clone())
+            .identified_by(Vec::new()),
+    ] {
+        assert!(written(&unnamed, &state).is_none());
+        assert!(unnamed.decode_state(&wrote).is_none());
+    }
+    let state = rubbing(dry).start(300.0, 0.0).unwrap();
+    let wrote = written(&rubbing(dry).identified_by(words.clone()), &state).expect("codec");
+    for unnamed in [rubbing(dry), rubbing(dry).identified_by(Vec::new())] {
+        assert!(written(&unnamed, &state).is_none());
+        assert!(unnamed.decode_state(&wrote).is_none());
+    }
+
+    let sprung = SlidingInterface::new(|_: f64| Ok(spring(2.0)), drive([1.0, 0.0]))
+        .unwrap()
+        .identified_by(words.clone());
+    assert!(written(&sprung, &sprung.start(300.0).unwrap()).is_none());
+    let sprung_pair = FrictionInterface::new(|_: f64| Ok(spring(2.0)), pressed())
+        .unwrap()
+        .identified_by(words);
+    assert!(written(&sprung_pair, &sprung_pair.start(300.0, 0.0).unwrap()).is_none());
+    for count in 0..16 {
+        assert!(sprung.decode_state(&vec![0; count]).is_none());
+        assert!(sprung_pair.decode_state(&vec![0; count]).is_none());
+    }
+}
+
+/// Claims, declared before the first run. The identity of an interface is
+/// the same for one built again. It is another for no words from the
+/// caller, for other words, for each field of the drive or the load, for
+/// each budget of its solve and, between two bodies, for each choice of
+/// ends that read an end input.
+#[test]
+fn the_identity_follows_the_callers_words_the_drive_the_load_and_the_ends() {
+    let words = named(&dry(300.0).unwrap());
+    let sliding_as = |change: fn(&mut PrescribedSlip), words: &[u64]| {
+        let mut held_to = drive([1.0, 0.5]);
+        change(&mut held_to);
+        let interface = SlidingInterface::new(dry, held_to).unwrap();
+        identity(&interface.identified_by(words.to_vec()))
+    };
+    let unchanged = sliding_as(|_| (), &words);
+    assert_eq!(unchanged, sliding_as(|_| (), &words));
+    let mut identities = vec![
+        unchanged,
+        sliding_as(|_| (), &[]),
+        sliding_as(|_| (), &words[1..]),
+    ];
+    let changes: [fn(&mut PrescribedSlip); 10] = [
+        |held_to| held_to.normal_n = 11.0,
+        |held_to| held_to.slip_rate_m_s[0] = 2.0,
+        |held_to| held_to.slip_rate_m_s[1] = 2.0,
+        |held_to| held_to.nominal_pressure_pa = None,
+        |held_to| held_to.nominal_pressure_pa = Some(11.0),
+        |held_to| held_to.solve.max_iterations = 65,
+        |held_to| held_to.solve.maximum_force_n = 101.0,
+        |held_to| held_to.solve.force_absolute_tolerance_n = 2e-12,
+        |held_to| held_to.solve.force_relative_tolerance = 2e-12,
+        |held_to| held_to.work_tolerance_j = 2e-12,
+    ];
+    identities.extend(changes.map(|change| sliding_as(change, &words)));
+    all_differ(&identities);
+
+    let rubbing_as = |change: fn(&mut InterfaceLoad), ends: [bool; 2], words: &[u64]| {
+        let mut load = pressed();
+        change(&mut load);
+        let mut interface = FrictionInterface::new(dry, load).unwrap();
+        if ends != [false; 2] {
+            interface = interface.reading_ends(ends).unwrap();
+        }
+        identity(&interface.identified_by(words.to_vec()))
+    };
+    let unchanged = rubbing_as(|_| (), [false; 2], &words);
+    assert_eq!(unchanged, rubbing_as(|_| (), [false; 2], &words));
+    let mut identities = vec![
+        unchanged,
+        rubbing_as(|_| (), [false; 2], &[]),
+        rubbing_as(|_| (), [false; 2], &words[1..]),
+        rubbing_as(|_| (), [true, false], &words),
+        rubbing_as(|_| (), [false, true], &words),
+        rubbing_as(|_| (), [true; 2], &words),
+    ];
+    let changes: [fn(&mut InterfaceLoad); 8] = [
+        |load| load.normal_n = 11.0,
+        |load| load.nominal_pressure_pa = None,
+        |load| load.solve.max_iterations = 65,
+        |load| load.solve.maximum_force_n = 101.0,
+        |load| load.solve.force_absolute_tolerance_n = 2e-12,
+        |load| load.solve.force_relative_tolerance = 2e-12,
+        |load| load.impulse_tolerance_n_s = 2e-10,
+        |load| load.work_tolerance_j = 2e-12,
+    ];
+    identities.extend(changes.map(|change| rubbing_as(change, [false; 2], &words)));
+    all_differ(&identities);
+}
+
+/// A rung of the dry ladder, by its place in the enum, with the first of
+/// `c` as its coefficients in the order the rung declares them.
+fn rung(kind: usize, c: [f64; 4]) -> FrictionLaw {
+    let [static_mu, kinetic_mu, characteristic_speed, last] = c;
+    match kind {
+        0 => FrictionLaw::Coulomb {
+            static_mu,
+            kinetic_mu,
+        },
+        1 => FrictionLaw::VelocityDependent {
+            static_mu,
+            mu_zero: kinetic_mu,
+            slope_per_speed: characteristic_speed,
+        },
+        2 => FrictionLaw::Stribeck {
+            static_mu,
+            kinetic_mu,
+            characteristic_speed,
+            viscous_per_speed: last,
+        },
+        3 => FrictionLaw::Hyperbolic {
+            static_mu,
+            kinetic_mu,
+            characteristic_speed,
+        },
+        _ => FrictionLaw::ShiftedPower {
+            static_mu,
+            kinetic_mu,
+            characteristic_speed,
+            exponent: last,
+        },
+    }
+}
+
+/// Claims, declared before the first run. A text is written as its length
+/// and its bytes, eight to a word. Each rung of the dry ladder names
+/// itself: its words are its model id as text and then one word for each
+/// of its coefficients, and they are the same for a copy. The five rungs at
+/// the same numbers, and each rung with any one of its coefficients
+/// changed, 21 laws, all have different words.
+#[test]
+fn a_friction_law_names_its_rung_and_every_coefficient() {
+    let mut text = Vec::new();
+    fs_tribo::tangential::text_words("abcdefghi", &mut text);
+    assert_eq!(text, [9, u64::from_le_bytes(*b"abcdefgh"), u64::from(b'i')]);
+
+    let numbers = [0.5, 0.3, 0.2, 0.1];
+    let mut identities = Vec::new();
+    for (kind, coefficients) in [2, 3, 4, 3, 4].into_iter().enumerate() {
+        let law = rung(kind, numbers);
+        let words = named(&law);
+        assert_eq!(words, named(&law.clone()));
+        let mut model = Vec::new();
+        fs_tribo::tangential::text_words(law.model_id(), &mut model);
+        assert!(words.starts_with(&model), "{words:?} lacks the model id");
+        assert_eq!(
+            words[model.len()..],
+            numbers.map(f64::to_bits)[..coefficients]
+        );
+        identities.push(words);
+        for at in 0..coefficients {
+            let mut other = numbers;
+            other[at] += 0.01;
+            identities.push(named(&rung(kind, other)));
+        }
+    }
+    assert_eq!(identities.len(), 21);
+    all_differ(&identities);
+}

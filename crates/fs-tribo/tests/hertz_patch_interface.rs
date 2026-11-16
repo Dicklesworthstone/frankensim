@@ -600,3 +600,106 @@ fn a_patch_is_admitted_with_a_load_and_budgets_the_owner_takes() {
         "motion_m_s"
     );
 }
+
+// Snapshots: the state codec and the identity.
+
+/// One contact at every temperature: static 0.5, kinetic 0.3.
+fn constant(_: f64) -> Result<HertzWrenchContact, TriboError> {
+    hertz(0.5, 0.3, RADIUS_M)
+}
+
+/// The four parameters of [`constant`]'s contact: the words that name it.
+fn named() -> Vec<u64> {
+    [NORMAL_N, RADIUS_M, 0.5, 0.3].map(f64::to_bits).to_vec()
+}
+
+/// Claims, declared before the first run. A patch whose source is named
+/// writes its state as four words, the three motions and the count of owner
+/// steps, and reads the same state back: a start state, and the state after
+/// a sliding step on a line. It refuses a word short, a word over and a
+/// motion that is not finite. A patch whose source is not named, or is
+/// named with no words, writes nothing and reads nothing.
+#[test]
+fn a_named_patch_reads_back_the_state_it_wrote_and_an_unnamed_one_has_no_codec() {
+    let patch = HertzPatchInterface::new(constant, load())
+        .unwrap()
+        .identified_by(named());
+    let line = unit_line();
+    let start = patch.start([1e-3, 0.0, 0.0]).unwrap();
+    let inputs = [line[0] * 0.4 * NORMAL_N, 0.0, 0.0, 300.0];
+    let (slid, _, _) = on_line(&patch, &start, inputs, &line).unwrap();
+    assert!(slid != start && slid.owner_steps() > 0);
+    for state in [start, slid] {
+        let mut words = Vec::new();
+        assert!(patch.encode_state(&state, &mut words));
+        assert_eq!(words.len(), 4);
+        assert_eq!(patch.decode_state(&words), Some(state));
+        for at in 0..3 {
+            for bits in [f64::NAN.to_bits(), f64::NEG_INFINITY.to_bits()] {
+                let mut other = words.clone();
+                other[at] = bits;
+                assert!(patch.decode_state(&other).is_none(), "motion {at}");
+            }
+        }
+        assert!(patch.decode_state(&words[..3]).is_none(), "a word short");
+        assert!(
+            patch.decode_state(&[&words[..], &[0]].concat()).is_none(),
+            "a word over"
+        );
+        for unnamed in [
+            HertzPatchInterface::new(constant, load()).unwrap(),
+            HertzPatchInterface::new(constant, load())
+                .unwrap()
+                .identified_by(Vec::new()),
+        ] {
+            let mut none = Vec::new();
+            assert!(!unnamed.encode_state(&state, &mut none) && none.is_empty());
+            assert!(unnamed.decode_state(&words).is_none());
+        }
+    }
+}
+
+/// Claims, declared before the first run. The identity of a patch is the
+/// same for one built again. It is another for no words from the caller,
+/// for other words, for another normal load, another radius, and each of
+/// the ten budgets of the owner's solve.
+#[test]
+fn the_identity_of_a_patch_follows_the_callers_words_and_every_field_of_its_load() {
+    let identity_as = |change: fn(&mut HertzPatchLoad), words: Vec<u64>| {
+        let mut held_to = load();
+        change(&mut held_to);
+        let patch = HertzPatchInterface::new(constant, held_to)
+            .unwrap()
+            .identified_by(words);
+        let mut identity = Vec::new();
+        patch.identity_words(&mut identity);
+        identity
+    };
+    let unchanged = identity_as(|_| (), named());
+    assert_eq!(unchanged, identity_as(|_| (), named()));
+    let mut identities = vec![
+        unchanged,
+        identity_as(|_| (), Vec::new()),
+        identity_as(|_| (), named()[1..].to_vec()),
+    ];
+    let changes: [fn(&mut HertzPatchLoad); 12] = [
+        |load| load.normal_n = 21.0,
+        |load| load.radius_m = 0.03,
+        |load| load.solve.maximum_static_iterations = 97,
+        |load| load.solve.maximum_iterations = 257,
+        |load| load.solve.maximum_evaluations = 513,
+        |load| load.solve.force_tolerance_n = 3e-9,
+        |load| load.solve.moment_tolerance_nm = 3e-10,
+        |load| load.solve.displacement_tolerance_m = 3e-13,
+        |load| load.solve.energy_tolerance_j = 3e-11,
+        |load| load.solve.relative_matrix_tolerance = 2e-13,
+        |load| load.solve.maximum_force_n = 101.0,
+        |load| load.solve.maximum_spin_moment_nm = 11.0,
+    ];
+    identities.extend(changes.map(|change| identity_as(change, named())));
+    for (at, later) in identities.iter().enumerate() {
+        for earlier in &identities[..at] {
+            assert_ne!(later, earlier, "identity {at} is an earlier one");
+        }
+    }
+}

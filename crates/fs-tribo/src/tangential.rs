@@ -129,6 +129,46 @@ pub trait TangentialLaw {
         s: &Self::State,
         x: &TangentialStepInput,
     ) -> Result<TangentialStep<Self::State>, TriboError>;
+    /// Appends `s` to `words` as plain 64-bit words, an `f64` as its bits,
+    /// and returns true; or appends nothing and returns false, the default,
+    /// where this law's state has no codec. The state is the law's to write:
+    /// a component over a law with no codec has none either.
+    fn encode_state(_s: &Self::State, _words: &mut Vec<u64>) -> bool
+    where
+        Self: Sized,
+    {
+        false
+    }
+    /// The state [`Self::encode_state`] wrote as exactly `words`, or `None`
+    /// to refuse them: a count this law does not write, or values its
+    /// states never hold. The default refuses everything.
+    #[must_use]
+    fn decode_state(_words: &[u64]) -> Option<Self::State>
+    where
+        Self: Sized,
+    {
+        None
+    }
+    /// Appends to `words` the bits of everything that fixes this law, and
+    /// returns true: first its [`Self::model_id`] ([`text_words`]), so that
+    /// no two kinds of law write the same words, then its parameters and
+    /// the identity of any card or table it was built from. Or appends
+    /// nothing and returns false, the default, where the law cannot name
+    /// itself.
+    fn identity_words(&self, _words: &mut Vec<u64>) -> bool {
+        false
+    }
+}
+
+/// Appends `text` to `words`: its length in bytes, then its bytes, eight to
+/// a word with the first byte lowest and the last word filled with zeros.
+pub fn text_words(text: &str, words: &mut Vec<u64>) {
+    words.push(text.len() as u64);
+    for bytes in text.as_bytes().chunks(8) {
+        let mut word = [0_u8; 8];
+        word[..bytes.len()].copy_from_slice(bytes);
+        words.push(u64::from_le_bytes(word));
+    }
 }
 
 /// Dry-law checkpoint. No thermal evolution or third-body layer is inferred.
@@ -148,6 +188,50 @@ impl DryTangentialState {
     #[must_use]
     pub const fn contact_temperature_k(&self) -> Option<f64> {
         self.contact_temperature_k
+    }
+
+    /// Whether this is a state a dry law leaves: a finite slip, and no
+    /// thermal boundary or a positive finite one.
+    fn is_held(&self) -> bool {
+        self.slip_m.iter().all(|slip| slip.is_finite())
+            && self
+                .contact_temperature_k
+                .is_none_or(|kelvin| kelvin.is_finite() && kelvin > 0.0)
+    }
+
+    /// Appends the state as four words and returns true: the bits of the
+    /// slip along the two axes, then the thermal boundary as a tag (0
+    /// absent, 1 present) and its bits (zero if absent). A state no dry law
+    /// leaves is not written.
+    pub(crate) fn encode(&self, words: &mut Vec<u64>) -> bool {
+        if !self.is_held() {
+            return false;
+        }
+        words.extend(self.slip_m.map(f64::to_bits));
+        match self.contact_temperature_k {
+            None => words.extend([0, 0]),
+            Some(kelvin) => words.extend([1, kelvin.to_bits()]),
+        }
+        true
+    }
+
+    /// The state [`Self::encode`] wrote as exactly `words`, or `None`:
+    /// another count, a tag that is neither, an absent boundary with bits,
+    /// or a state no dry law leaves.
+    pub(crate) fn decode(words: &[u64]) -> Option<Self> {
+        let &[slip_x, slip_y, tag, kelvin] = words else {
+            return None;
+        };
+        let contact_temperature_k = match (tag, kelvin) {
+            (0, 0) => None,
+            (1, bits) => Some(f64::from_bits(bits)),
+            _ => return None,
+        };
+        let state = Self {
+            slip_m: [f64::from_bits(slip_x), f64::from_bits(slip_y)],
+            contact_temperature_k,
+        };
+        state.is_held().then_some(state)
     }
 }
 
@@ -248,6 +332,59 @@ impl TangentialLaw for FrictionLaw {
                 self.direct_sliding_traction_n(x.normal_n, distance, compliance, dt)
             },
         )
+    }
+
+    fn encode_state(s: &Self::State, words: &mut Vec<u64>) -> bool {
+        s.encode(words)
+    }
+
+    fn decode_state(words: &[u64]) -> Option<Self::State> {
+        DryTangentialState::decode(words)
+    }
+
+    /// The rung's model id, which no two rungs share, then the bits of its
+    /// coefficients in the order they are declared. No rung is built from a
+    /// card or a table: the coefficients are all of the law.
+    fn identity_words(&self, words: &mut Vec<u64>) -> bool {
+        text_words(self.model_id(), words);
+        match *self {
+            Self::Coulomb {
+                static_mu,
+                kinetic_mu,
+            } => words.extend([static_mu, kinetic_mu].map(f64::to_bits)),
+            Self::VelocityDependent {
+                static_mu,
+                mu_zero,
+                slope_per_speed,
+            } => words.extend([static_mu, mu_zero, slope_per_speed].map(f64::to_bits)),
+            Self::Stribeck {
+                static_mu,
+                kinetic_mu,
+                characteristic_speed,
+                viscous_per_speed,
+            } => words.extend(
+                [
+                    static_mu,
+                    kinetic_mu,
+                    characteristic_speed,
+                    viscous_per_speed,
+                ]
+                .map(f64::to_bits),
+            ),
+            Self::Hyperbolic {
+                static_mu,
+                kinetic_mu,
+                characteristic_speed,
+            } => words.extend([static_mu, kinetic_mu, characteristic_speed].map(f64::to_bits)),
+            Self::ShiftedPower {
+                static_mu,
+                kinetic_mu,
+                characteristic_speed,
+                exponent,
+            } => words
+                .extend([static_mu, kinetic_mu, characteristic_speed, exponent].map(f64::to_bits)),
+        }
+        true
     }
 }
 

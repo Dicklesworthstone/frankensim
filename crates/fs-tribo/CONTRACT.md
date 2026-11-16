@@ -3526,3 +3526,84 @@ whose repeat does not contract, refused), a cancelled step, and admission.
 fs-couple's `friction_heat::hertz` base cases from this component, two
 `RigidBody` components, the lever, a `HeatNode` face and a
 `ThermalTimeline`, and holds them to the module's step.
+
+## Snapshots of the three interfaces
+
+`SlidingInterface`, `FrictionInterface` and `HertzPatchInterface` have the
+state codec of fs-ports' `Component` (`STATE_CHARTER`, `encode_state`,
+`decode_state`, `identity_words`) under two conditions. Where either fails,
+`encode_state` writes nothing and `decode_state` refuses, so a kernel
+neither writes the interface's system to a durable snapshot nor resumes it.
+
+- The law writes its own state. `TangentialLaw` has three provided items,
+  each "no codec" unless a law implements it: `encode_state(state, words)`
+  and `decode_state(words)`, which take no law (a component over a closure
+  has none when it reads), and `identity_words(&self, words)`. An interface
+  writes only its own numbers before the law's words and never writes a
+  law's state for it. `FrictionLaw` implements all three. Its state
+  (`DryTangentialState`) is four words: the slip along the two axes, then
+  the thermal boundary as a tag and its bits. Its identity is its
+  `model_id` as text (`tangential::text_words`: the length, then the bytes
+  eight to a word), so that no other kind of law writes the same words,
+  then every coefficient of its rung. No rung of `FrictionLaw` is built
+  from a card or a table, so the coefficients are all of it. Every other
+  law keeps the default and has no codec. Two of them share
+  `FrictionLaw`'s state type: `AdhesiveTangentialContact`, and
+  `DryInterfaceSystemCard`, which is built from a card, so its identity
+  must bind that card's identity after its model id and coefficients
+  before it has a codec. The Hertz patch's state is its own.
+- The caller names the source (`identified_by(words)` on each interface;
+  empty words count as none). The interfaces are built over a closure
+  `law_at(T)`, and nothing can be read from a closure, so the caller's
+  words must cover everything the closure's result depends on. For a
+  closure that returns one law at every temperature, the law's own
+  identity words are enough. A closure whose law changes with temperature
+  must supply words for that mapping (the card and its table). Without
+  them the codec refuses.
+
+The identity of an interface is the caller's words, counted, then every
+field of what it is held to. Each is written out by a pattern with no
+rest, so a new field does not compile until it is bound.
+`SlidingInterface`: the drive (normal load, both slip rates, nominal
+pressure, work tolerance) and the four solve budgets. `FrictionInterface`:
+the load (normal load, nominal pressure, impulse and work tolerances), the
+four solve budgets and which ends read an end input. `HertzPatchInterface`:
+the normal load, the radius and the owner's ten budgets. Ports are in the
+system's own description.
+
+States. A sliding state is its two energies and the law's words. A
+friction state is ten words (energy, slip, rest, the last step's load and
+length, each end's given flow) and the law's words. A patch state is its
+three motions and its count of owner steps. A state is read back only with
+numbers a step leaves: finite ones, a last step of positive length, tags
+that are 0 or 1, and no bits behind an absent value. That a state's stored
+energy is the law's own is not checked on reading: the first step refuses
+a state the law values otherwise, as it does for any state.
+
+Tests (claims written before the first run). `tests/sliding_interface.rs`:
+- a named sliding interface and a named friction interface each read back
+  the start state and a state after a step, and refuse a word short, a
+  word over and words spoiled one at a time (10 cases for the sliding
+  states, 22 for the friction states);
+- an interface with no words, with empty words, or over a law with no
+  codec (the tests' spring) writes nothing and reads nothing;
+- the identity is equal for a rebuild, and different for no words, other
+  words, each of 10 changes of the drive and its budgets, each of 8 changes
+  of the load and its budgets, and each of three choices of ends;
+- 21 dry laws (five rungs at the same numbers, and each with one
+  coefficient changed) all have different words, which start with the
+  model id as text.
+
+`tests/hertz_patch_interface.rs`: a named patch reads back a start state
+and a state after a sliding step, and refuses a word short, a word over
+and a motion that is not finite; an unnamed one writes and reads nothing;
+its identity is equal for a rebuild and different for no words, other
+words and each of 12 changes of the load and its budgets. Through
+`frankensim system`, fs-cli's `tests/system_command/checkpoints.rs` saves
+and resumes one scene of each interface.
+
+Not tested: a snapshot through a kernel in this crate's own tests (fs-cli's
+go through fs-system); a source whose law changes with temperature, named
+with words for the mapping; a friction state whose last load is not
+finite (it is not written). Not covered: a codec for any law but
+`FrictionLaw`.
