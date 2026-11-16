@@ -1,0 +1,35 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 90.0,
+  "step_s": 0.5,
+  "materials": {
+    "s2oil": {
+      "pack": "shell_s2/shell-heat-transfer-oil-s2-2011.fsmcdpk",
+      "phase": "liquid",
+      "temperature_axis": "temperature",
+      "temperature_kind": "absolute-temperature",
+      "state": [
+        {"name": "source-formulation-shell-s2-2011", "value": "1", "kind": "dimensional"},
+        {"name": "phase-liquid", "value": "1", "kind": "dimensional"},
+        {"name": "source-pressure-known", "value": "0", "kind": "dimensional"},
+        {"name": "aged-oil", "value": "0", "kind": "dimensional"}
+      ],
+      "temperature_min_k": 313.15,
+      "temperature_max_k": 473.15,
+      "reference_specific_enthalpy_j_kg": 0.0,
+      "heat_capacity_property": "specific_heat_capacity",
+      "density_property": "density",
+      "kinematic_viscosity_property": "kinematic_viscosity"
+    }
+  },
+  "elements": {
+    "line": {"kind": "hydraulic_resistor", "material": "s2oil", "radius_m": 5.0e-4, "length_m": 1.0},
+    "oil": {"kind": "enthalpy_body", "material": "s2oil", "mass_kg": 0.1, "specific_enthalpy_j_kg": 0.0},
+    "heater": {"kind": "heater", "power_w": 200.0}
+  },
+  "connections": [
+    {"prescribe": "line.a", "pressure_pa": 1.0e5},
+    {"prescribe": "line.b", "pressure_pa": 0},
+    {"join": ["oil.heat", "heater.heat", "line.heat"]}
+  ]
+}

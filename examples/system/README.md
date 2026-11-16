@@ -62,6 +62,7 @@ save/resume commands work with `self_heating_damper.json` and
 | `steel316_blocks_trace.json` | the slabs and declared 8e-4 m^2 K/W contact of `two_slabs_trace.json`, each slab of the same `steel316` card's k(T) with the bar's declared heat capacity, from 390 K and 290 K: both bodies step by fs-conduction's Newton solve and meet trace to trace | the energy across the contact and the least and greatest temperature of each slab and each contact face against fs-conduction's own contact on one mesh stepped by its Newton endpoint with the printed table, within 1e-6 J and 1e-6 K on 4 and 8 cells, and the same with slab b 3 x 3 across through the mapped contact; slab b from 300 K, a knot of the table, is refused at the first step |
 | `steel316_enthalpy_bar.json` | the bar of `steel316_heated_bar.json` with no declared heat capacity: its heat capacity, density and conductivity are all the `steel316` card's. fs-conduction's enthalpy owner stores specific enthalpy on the chart of the card's Cp(T) (456.39 J/kg K at 273 K, 467.69 at 300 K, 502.87 at 400 K), and each node's mass is fixed by the card's density at 290 K, `reference_temperature_k` | the field's least and greatest temperature after each of 30 steps against fs-conduction's enthalpy owner prepared from the same card on the same box, equal to the bit; the reported density is the printed table's at 290 K; the 1200 J put in is stored; 2000 W is refused at the first step |
 | `nickel_wire_heater.json` | a 1 m Nickel 200 wire of 2e-7 m^2 cross-section (`resistor_branch`) on a fixed 1 V for 60 s, its Joule heat into an `enthalpy_body` of the wire's own mass (the card's 8890 kg/m^3 times its volume). Its resistance is not typed: the wire names the scene material `nickel200`, the Special Metals SMC-061 card in `nickel200/`, whose resistivity rises from 9.6e-8 ohm m at 293.15 K through 1.30e-7 at 373.15 K to 1.85e-7 at 473.15 K, and fs-material's Ohmic node reads it again at the temperature the wire's heat port receives | the body's temperature after each of 120 steps against a hand backward step of the printed table at the logarithmic mean the body's port publishes, within 1e-8 K; the run crosses the 373.15 K knot; the reported resistance is the printed table's at the reported temperature; the same wire as a series `resistor` in a current loop turns the inductance's lost energy into the body's gain; 40 V is refused at the first step |
+| `shell_s2_oil_line.json` | a 1 m line of 0.5 mm radius (`hydraulic_resistor`) on a fixed 1e5 Pa for 90 s, carrying Shell Heat Transfer Oil S2 while a 200 W `heater` warms an `enthalpy_body` of 0.1 kg of the same oil, the well-mixed inventory of a recirculating loop; the line's viscous heat goes into it too. Its resistance is not typed: the line names the scene material `s2oil`, Shell's May 2011 data sheet in `shell_s2/`, whose kinematic viscosity falls from 2.5e-5 m^2/s at 313.15 K through 4.7e-6 at 373.15 K to 1.1e-6 at 473.15 K, times its density there, and fs-material's laminar pipe reads it again at the temperature the line's heat port receives | the flow after each of 180 steps against `pi r^4 dp / (8 rho nu L)` from the printed tables at the reported temperature, within 1e-12 relative; the flow rises at every step and the run crosses the 373.15 K knot; the oil's stored change is the heater's work plus the line's heat; the last step's Reynolds number, by hand, is below 500; a 2 MW heater is refused at the first step |
 | `struck_mode.json` | a 10 g stick at 2 m/s strikes one undamped 200 Hz mode (`modal_structure`, seen as 50 g at the strike) through a Hertz contact (`contact_interface`, fs-dcontact's power law `K x^1.5` reading the end of the mode's flow): the stick bounces back and the mode rings | the stick's, the mode's and the contact's energies against the stick's 0.02 J, to the settled reactions' defect per contact |
 | `dc_motor.json` | a DC motor across three domains: a 12 V supply, winding inductance and resistance in a current loop, a gyrator to a rotor with a viscous bearing, and both heats into one case | the monolithic midpoint rule for the two coupled equations, the supply's energy against stored energy plus heat |
 | `parallel_rlc.json` | a current source drives a capacitor, inductor and resistor in parallel; all Joule heat warms the case | independent coupled voltage/current equations, source work, electrical storage and heat |
@@ -280,6 +281,24 @@ geometry: no thermal expansion, skin effect or contact resistance. The pack
 in `nickel200/` was compiled from the seed card by
 `cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/nickel-200-annealed-special-metals-2006/manifest.tsv --material-state "Nickel 200, UNS N02200" solid "annealed" 0 --out nickel-200-annealed.fsmcdpk`
 (31277 bytes; two builds were byte-identical).
+
+A `hydraulic_resistor` takes its resistance from a card too: `material`
+names a liquid whose declaration has a `dynamic_viscosity_property`, or a
+`kinematic_viscosity_property` (the viscosity is then that times the
+declaration's `density_property`), with `radius_m` and `length_m` in place
+of `resistance_pa_s_m3` (`shell_s2_oil_line.json`). The claims are resolved
+once at `temperature_min_k` and the declared state, and fs-material's
+laminar pipe, `MaterialLaminarPipe` behind `LaminarPipeComponent`, resolves
+them again at the temperature the heat port receives in every trial: the
+flow is `pi r^4 dp / (8 mu L)` with the card's viscosity there, and all of
+the viscous heat leaves through `heat`. A temperature outside the declared
+span is refused, never extrapolated. The report adds the temperature the
+heat port received in the last step and the viscosity there, and lists the
+viscosity's receipts with the material's. Laminar flow is assumed, not
+checked: no Reynolds number, entrance length or wall slip. The pack in
+`shell_s2/` was compiled from the seed card by
+`cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/shell-heat-transfer-oil-s2-2011/manifest.tsv --material-state "Shell Heat Transfer Oil S2" liquid "May 2011 typical mineral heat-transfer oil; aged oil excluded" 0 --out shell-heat-transfer-oil-s2-2011.fsmcdpk`
+(16604 bytes; two builds were byte-identical).
 
 `viscoelastic_mount.json` uses the second fs-mbd owner,
 `fs_mbd::component::relaxation::RelaxationNetwork`, through a

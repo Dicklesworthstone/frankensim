@@ -17,6 +17,77 @@
 
 ## New sections (newest first)
 
+## A card's Newtonian liquid in a laminar pipe
+
+`fluid_transport::laminar_pipe::MaterialLaminarPipe` is the Hagen-Poiseuille
+resistance of fully developed laminar flow in a circular pipe of fixed radius
+`r` and length `L`, `Q = G (p_a - p_b)` with `G = pi r^4 / (8 mu L)`, whose
+dynamic viscosity `mu` is a material card's at the temperature it is asked
+at. It is prepared from a `ResolvedMaterialStatePoint` holding either a
+dynamic viscosity alone, or a kinematic viscosity and a density (then
+`mu = rho nu`; `ViscosityBasis` says which). Any other property, a dynamic
+viscosity with a density and a kinematic one without are refused, all as
+`MaterialStatePointError::InvalidDerived` (no new error type).
+
+Preparation takes the temperature axis and a declared range that must hold
+the original point's positive, absolute temperature. Every other coordinate
+must be a fixed external condition of the claims, with a dimensionless
+provenance flag bounded to one value held at its query value, as the Ohmic
+node and the thermal owner hold it. Each claim's pinned line over the range
+is read once, its values checked against the original admissibility, and the
+card is resolved at every knot of every line, so a range that leaves a claim,
+or a viscosity that is not positive inside it, refuses at preparation and
+not in a later step.
+
+`viscosity_and_slope(T)` resolves the SAME pinned claims through the card
+again at `T` (`ResolvedMaterialStatePoint::at_query_point`) and returns `mu`
+with `d mu/dT`. The slope is the pinned line's on the segment `T` lies in:
+the right segment at an interior knot, the left one at the last knot, as the
+Ohmic node takes its resistance slope. With a kinematic claim it is
+`rho' nu + rho nu'`, each on its own line's segment. `conductance_and_slope`
+returns `G` and `-G mu'/mu`. A temperature outside the range, or one the card
+refuses, is refused, never extrapolated.
+
+`LaminarPipeComponent`, behind the existing `component` feature, puts the
+pipe behind the ports of the Carreau pipe: two `FluidPressureFlux` `EffortIn`
+ports `a` and `b` and one heat port. It returns `Q`, `-Q` and `-G dp^2`: all
+of the viscous power leaves through the heat port. Each proposal resolves the
+card again at the heat port's temperature. The class is `Smooth` within a
+segment of the card's lines. The JVP and VJP act with the full 3 x 3
+Jacobian, including the temperature column `-Q mu'/mu`, `Q mu'/mu`,
+`Q dp mu'/mu`. The receipt books `dt P` dissipated and `dt P / T` entropy,
+with the kernel's `64 eps` energy tolerance. The component's error is the
+pipe's `MaterialStatePointError`. Values that are not finite, a timestep that
+is not positive, a wrong slot count and cancellation are refused before any
+output is written, each as `InvalidDerived` naming what was refused. The
+identity binds the card's content hash, each selected property's receipt
+hash, the temperature axis, the reference temperature, the range, the
+geometry and the basis. The codec writes no state words.
+
+`tests/laminar_pipe_component.rs` checks, on manufactured tables (no
+measured liquid claimed):
+- a dynamic-viscosity card and a kinematic one with its density on other
+  knots, against hand values within 1e-12: outputs, conductance, slope, and
+  the temperature and pressure columns of the tangent, at knots of either
+  line too; the conformance kit with the tangent check inside segments;
+- a pipe on a fixed 6e4 Pa drop through the kernel into a 1 J/K enthalpy
+  body, against a hand backward step bisected at the logarithmic mean the
+  body's port publishes, within 2e-9 K over 60 steps across the knot (the
+  body ends at 360.02 K and the flow has risen 2.07 times), with the boundary
+  work, viscous heat and stored energy within 1e-9 J;
+- the preparation refusals, a viscosity that reaches zero at a knot inside
+  the range among them;
+- the proposal refusals, and a kernel step the card cannot close (3e5 Pa for
+  5 s), refused with the pipe named and the body kept bit for bit;
+- the identity.
+
+This is a quasisteady, incompressible resistance with one temperature for
+the whole liquid. It adds no fluid storage, inertia, entrance length,
+transition to turbulence (laminar flow is the caller's assumption; no
+Reynolds number is checked), wall slip, pressure dependence of the
+viscosity, thermal expansion of the pipe, heat carried by the flow, or
+propagated viscosity uncertainty.
+
 ## A card's Ohmic conductor behind resistor ports
 
 `conductor::component::OhmicResistor`, behind the existing `component`

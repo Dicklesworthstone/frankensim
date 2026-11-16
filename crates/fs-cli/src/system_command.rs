@@ -32,6 +32,7 @@ use fs_conduction::transient::enthalpy::material::MaterialEnthalpyTransport;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::conductor::component::{OhmicResistor, Terminals};
 use fs_material::conductor::graph::MaterialOhmicNode;
+use fs_material::fluid_transport::laminar_pipe::{LaminarPipeComponent, MaterialLaminarPipe};
 use fs_material::phase::component::UniformEnthalpyBody;
 use fs_material::phase::{
     EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState, SolidLiquidPhase,
@@ -1463,6 +1464,9 @@ struct Element {
     /// A card-backed resistor's node, for reporting its resistance at the
     /// temperature its heat port read.
     ohmic: Option<MaterialOhmicNode>,
+    /// A card-backed pipe, for reporting its viscosity at the temperature
+    /// its heat port read.
+    laminar: Option<MaterialLaminarPipe>,
 }
 
 struct Device {
@@ -2745,6 +2749,7 @@ fn element(
     let mut contact = None;
     let mut enthalpy = None;
     let mut ohmic = None;
+    let mut laminar = None;
     let (node, ports) = match kind {
         Kind::Inertance(domain) => {
             let names = domain.names();
@@ -2835,6 +2840,12 @@ fn element(
             ohmic = Some(resistor.node().clone());
             material_sources.push(material);
             add(builder, name, resistor, ())?
+        }
+        Kind::ResistorBranch(Domain::Hydraulic) if definition.get("material").is_some() => {
+            let (pipe, material) = laminar_pipe(definition, materials, &what)?;
+            laminar = Some(pipe.pipe().clone());
+            material_sources.push(material);
+            add(builder, name, pipe, ())?
         }
         Kind::ResistorBranch(domain) => {
             let names = domain.names();
@@ -3021,6 +3032,7 @@ fn element(
         contact,
         enthalpy,
         ohmic,
+        laminar,
     })
 }
 
@@ -3052,6 +3064,53 @@ fn ohmic_resistor(
     let resistor =
         OhmicResistor::new(node, terminals).map_err(|error| format!("{what}.material: {error}"))?;
     Ok((resistor, name.to_owned()))
+}
+
+/// A hydraulic resistor that is a laminar circular pipe of a scene
+/// material's liquid, whose viscosity fs-material's pipe reads again at the
+/// temperature its heat port receives, and the material's name.
+fn laminar_pipe(
+    definition: &J,
+    materials: &materials::Materials,
+    what: &str,
+) -> Result<(LaminarPipeComponent, String), Refusal> {
+    fields(
+        definition,
+        &["kind", "material", "radius_m", "length_m"],
+        what,
+    )?;
+    let name = definition
+        .str_field("material")
+        .ok_or_else(|| format!("{what}.material: expected a material name"))?;
+    let material = materials
+        .get(name)
+        .ok_or_else(|| format!("{what}.material: unknown material {name:?}"))?;
+    let radius_m = positive(definition, "radius_m", what)?;
+    let length_m = positive(definition, "length_m", what)?;
+    let pipe = material
+        .laminar_pipe(radius_m, length_m)
+        .map_err(|error| format!("{what}.material: {error}"))?;
+    Ok((LaminarPipeComponent::new(pipe), name.to_owned()))
+}
+
+/// A card-backed pipe's temperature, as its heat port read it in the last
+/// step, and the card's viscosity there. A hydraulic resistor of constant
+/// resistance has neither, and its report is unchanged.
+fn laminar_values(system: &System, element: &Element) -> Vec<(&'static str, f64)> {
+    let Some(pipe) = &element.laminar else {
+        return Vec::new();
+    };
+    let temperature = match system.port(element.node, "heat") {
+        Some(port) if system.steps() > 0 => system.last_input(port)[0],
+        _ => f64::NAN,
+    };
+    let viscosity = pipe
+        .viscosity_and_slope(temperature)
+        .map_or(f64::NAN, |(viscosity, _)| viscosity);
+    vec![
+        ("temperature_k", temperature),
+        ("viscosity_pa_s", viscosity),
+    ]
 }
 
 /// A card-backed resistor's temperature, as its heat port read it in the
@@ -4403,6 +4462,40 @@ impl Device {
                  storage of its own, and the resistivity's uncertainty not propagated"
             ));
         }
+        if self
+            .elements
+            .iter()
+            .any(|element| element.laminar.is_some())
+        {
+            // After the resistors' sentence, for the same reason. A
+            // card-backed pipe names a material too.
+            let base = description.replacen(
+                "constant parameters",
+                "constant parameters, card-backed pipes",
+                1,
+            );
+            let base = if base.contains("pure-phase thermal laws; no ") {
+                base.replace(
+                    "pure-phase thermal laws; no ",
+                    "pure-phase thermal laws and pipes' viscosity; no ",
+                )
+            } else {
+                base.replace(
+                    "pure-phase thermal laws",
+                    "pure-phase thermal laws, pipes' viscosity",
+                )
+            };
+            description = std::borrow::Cow::Owned(format!(
+                "{base}; a card-backed pipe is fs-material's laminar circular pipe of fixed \
+                 radius and length, its conductance pi r^4 / (8 mu L) with the card's nominal \
+                 viscosity at the temperature its heat port receives and refused off the \
+                 declared span: fully developed, incompressible Hagen-Poiseuille flow, laminar \
+                 by assumption with no Reynolds number checked, all of its viscous heat at that \
+                 one temperature, no entrance length, wall slip, pressure-dependent viscosity, \
+                 heat storage or heat carried by the flow, and the viscosity's uncertainty not \
+                 propagated"
+            ));
+        }
         description
     }
 
@@ -4804,6 +4897,7 @@ impl Device {
                     ("heat_w", -output("heat")),
                 ];
                 values.extend(ohmic_values(system, element));
+                values.extend(laminar_values(system, element));
                 values
             }
             // The last step's flow from a to b, its heat, and the

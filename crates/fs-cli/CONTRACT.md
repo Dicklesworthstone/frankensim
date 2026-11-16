@@ -1928,6 +1928,82 @@ conduction only, and one temperature for the whole conductor. The wire and
 its lumped body are adiabatic: no convection, radiation or conduction to a
 support.
 
+A declaration may also select a liquid's viscosity: a
+`dynamic_viscosity_property` in Pa s, or a `kinematic_viscosity_property`
+in m^2/s, whose value times the declaration's `density_property` is then
+the viscosity; naming both refuses. The claims are resolved once with
+`resolve_material_state_point` at `temperature_min_k` and the declared
+context, under the declaration's selection, and their receipts join the
+material's. A `hydraulic_resistor` may then name the material with
+`radius_m` and `length_m` in place of `resistance_pa_s_m3`. It lowers to
+`fs_material::fluid_transport::laminar_pipe::LaminarPipeComponent` over the
+`MaterialLaminarPipe` of that resolution, bound to the declared span and the
+element's geometry. Its hydraulic ports are `EffortIn`, the constant
+branch's roles, so the connections are unchanged, and it has a heat port.
+Each trial resolves the same pinned claims through the card at the
+temperature `heat` receives: the flow is `pi r^4 dp / (8 mu L)`, and all of
+the viscous heat leaves through `heat`. A temperature off the span refuses
+the step. The element is bound to its material under `material_bindings`.
+Its report adds `temperature_k`, the temperature `heat` received in the last
+step, and `viscosity_pa_s`, the card's viscosity there. The reports of
+constant-resistance elements are unchanged.
+
+The no-claim sentence of a scene with such a pipe names card-backed pipes
+beside constant parameters and the pipes' viscosity among the declared
+source laws, and ends with the pipe's limits: fully developed,
+incompressible Hagen-Poiseuille flow, laminar by assumption with no Reynolds
+number checked, all of its heat at one temperature, and no entrance length,
+wall slip, pressure-dependent viscosity, heat storage, heat carried by the
+flow or propagated viscosity uncertainty. It is rewritten after the
+resistors' sentence.
+
+Tests in `tests/system_command/laminar_pipe.rs`, on
+`examples/system/shell_s2_oil_line.json`: a 1 m line of 0.5 mm radius on a
+fixed 1e5 Pa for 90 s, carrying Shell Heat Transfer Oil S2 while a 200 W
+heater warms an `enthalpy_body` of 0.1 kg of the same card, the well-mixed
+inventory of a recirculating loop, into which the line's heat goes too. The
+pack in `examples/system/shell_s2/` is the seed card
+`shell-heat-transfer-oil-s2-2011`, compiled by `xtask matdb-pack` (16604
+bytes, two builds byte-identical). Claims declared before the first run:
+- The pack's kinematic-viscosity and density curves are the printed tables
+  of the seed `properties.tsv`, knot for knot.
+- After each of the 180 steps the reported flow is
+  `pi r^4 dp / (8 rho nu L)`, with `rho` and `nu` the printed tables' linear
+  interpolation at the reported temperature, within 1e-12 relative; the
+  reported viscosity is `rho nu` there and the heat is the flow times the
+  drop, both within 1e-12. The reported temperature lies between the oil's
+  at the step's two ends, the flow rises at every step, and the run crosses
+  the 373.15 K knot inside the span.
+- The heater's work is 18000 J within 1e-9 J, the oil's gain is that work
+  plus the line's heat within 1e-6 J, and the ledger residual is within
+  1e-6 J. The last step's Reynolds number, by hand, is below 500.
+- The example through the binary: exit 0, both bindings, the viscosity and
+  density receipts, and the no-claim sentence.
+- Refusals, by name: `resistance_pa_s_m3` beside `material`; a material
+  without a viscosity; one with both; a dynamic viscosity the card does not
+  have (the card's `UnknownProperty`); an unknown material; a radius of
+  zero. A 2 MW heater, which would carry the oil off the span in the first
+  step, is refused at that step (exit 4) with the line named, and the
+  scene's report is unchanged.
+
+Two corrections, both to the test, came from the first two runs; every
+per-step claim passed in both. A source's `energy_in_j` is the energy into
+it, so the heater's work is its negative (-18000 J was reported). And
+fs-system's heater books that account as stored energy, so the ledger's
+total stored change is the oil's gain less the heater's work: the line's
+heat. The oil's gain is now its mass times its specific enthalpy from the
+material's datum, and the ledger's total is checked against the line's heat.
+With those, after 180 steps the oil is at 398.49 K, and the line read
+398.26 K, 3.016e-3 Pa s and 8.137e-7 m^3/s, about seven times the flow at
+313.15 K (1.155e-7 m^3/s by hand), at a Reynolds number of 273. The line's heat is 3.5726 J against
+the heater's 18000 J, and the ledger residual is 0.
+
+No claim for a card-backed pipe beyond the pipe's: nominal values from four
+knots joined linearly as the card states them (Shell's printed table falls
+by more than a factor of five in kinematic viscosity between 313.15 K and
+373.15 K, so the interpolant is coarse there), fixed geometry, and one
+temperature for the whole liquid. The oil and its line are adiabatic.
+
 Preparation admits at most 64 material declarations, 4 MiB per pack and
 64 MiB of total raw pack data. Pack decoding, source queries and receipt
 construction occur once before stepping; components own the admitted laws,

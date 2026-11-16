@@ -12,6 +12,8 @@ use crate::gas_mixture::ResolvedGasMixtureState;
 use crate::liquid::ResolvedLiquidState;
 use crate::moist_air::ResolvedMoistAirState;
 
+/// A card's Newtonian liquid in a laminar circular pipe, and its Component.
+pub mod laminar_pipe;
 mod mixed;
 /// Calibrated SI shear thinning with explicit WLF/Arrhenius temperature shifts.
 pub mod rheology;

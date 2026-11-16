@@ -1,11 +1,13 @@
-//! Material-card preparation for the existing generic thermal components and
-//! card-backed resistors.
+//! Material-card preparation for the existing generic thermal components,
+//! card-backed resistors and card-backed laminar pipes.
 //!
 //! This cold boundary resolves original source support once. Thermal trials
-//! use the material owners' analytical caloric and conductivity laws, and a
-//! resistor's trials read the resistivity source line its Ohmic node retains;
-//! they do not query a database, reconstruct source receipts, or freeze Cp, k
-//! or the resistivity at the initial temperature.
+//! use the material owners' analytical caloric and conductivity laws, a
+//! resistor's trials read the resistivity source line its Ohmic node retains,
+//! and a pipe's trials resolve its pinned viscosity claims again at the
+//! temperature asked; they do not query a database by name, reconstruct source
+//! receipts, or freeze Cp, k, the resistivity or the viscosity at the initial
+//! temperature.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -25,13 +27,16 @@ use fs_material::conductor::graph::MaterialOhmicNode;
 use fs_material::conductor::{
     ElectricalPropertyBasis, ResolvedConductorState, resolve_conductor_state_with_property,
 };
+use fs_material::fluid_transport::laminar_pipe::MaterialLaminarPipe;
+use fs_material::liquid::{DYNAMIC_VISCOSITY_DIMS, KINEMATIC_VISCOSITY_DIMS};
 use fs_material::phase::{
     EquilibriumEnthalpyPhaseCurve, HeatCapacitySourceQuery, ResolvedHeatCapacityCurve,
     SolidLiquidPhase,
 };
 use fs_material::state_point::{
-    MaterialPropertySelection, SPECIFIC_HEAT_CAPACITY_DIMS, ScalarAdmissibility,
-    ScalarPropertyRequirement, THERMAL_CONDUCTIVITY_DIMS, resolve_material_state_point,
+    MaterialPropertySelection, ResolvedMaterialStatePoint, SPECIFIC_HEAT_CAPACITY_DIMS,
+    ScalarAdmissibility, ScalarPropertyRequirement, THERMAL_CONDUCTIVITY_DIMS,
+    resolve_material_state_point,
 };
 use fs_material::thermal::conduction::ConductivityCurve;
 use fs_material::thermal::conduction::source::ResolvedConductionLayer;
@@ -69,6 +74,9 @@ struct CardSource {
     /// The card's resistivity resolved at the span's lower end with the
     /// context unchanged, if the declaration names one.
     resistivity: Option<ResolvedConductorState>,
+    /// The card's viscosity resolved there too, if the declaration names one:
+    /// a dynamic viscosity alone, or a kinematic one with the declared density.
+    viscosity: Option<ResolvedMaterialStatePoint>,
     axis: String,
     /// The declared context without the temperature, and the temperature's
     /// declared quantity, if any.
@@ -170,6 +178,36 @@ impl PreparedMaterial {
         .map_err(|error| error.to_string())
     }
 
+    /// fs-material's laminar pipe of this material's viscosity over the
+    /// declared span, of `radius_m` and `length_m`: the card's viscosity, read
+    /// again at each temperature asked, with every other coordinate at the
+    /// declared context.
+    ///
+    /// # Errors
+    /// A material whose declaration names no viscosity, and every refusal of
+    /// the pipe's (a geometry that is not positive and finite among them), as
+    /// text.
+    pub fn laminar_pipe(
+        &self,
+        radius_m: f64,
+        length_m: f64,
+    ) -> Result<MaterialLaminarPipe, String> {
+        let source = &self.source;
+        let original = source.viscosity.clone().ok_or(
+            "the material's declaration names no dynamic_viscosity_property or \
+             kinematic_viscosity_property",
+        )?;
+        MaterialLaminarPipe::new(
+            Arc::new(source.card.clone()),
+            original,
+            &source.axis,
+            source.span_k,
+            radius_m,
+            length_m,
+        )
+        .map_err(|error| error.to_string())
+    }
+
     /// The actual queries performed while preparing the original source laws.
     /// These are not queries at each runtime trial, which uses the compiled laws.
     pub fn receipts(&self) -> impl Iterator<Item = &PropertyUsageReceipt> {
@@ -186,6 +224,13 @@ impl PreparedMaterial {
                     .resistivity
                     .iter()
                     .map(|state| &state.source_property().answer().receipt),
+            )
+            .chain(
+                self.source
+                    .viscosity
+                    .iter()
+                    .flat_map(ResolvedMaterialStatePoint::properties)
+                    .map(|property| &property.answer().receipt),
             )
     }
 
@@ -261,6 +306,8 @@ pub(super) fn load(root: &J, scene_path: &Path) -> Result<Materials, String> {
                 "conductivity_property",
                 "conductivity_kind",
                 "resistivity_property",
+                "dynamic_viscosity_property",
+                "kinematic_viscosity_property",
                 "selection",
             ],
             &what,
@@ -323,6 +370,50 @@ fn conductivity_key(declaration: &J, what: &str) -> Result<Option<PropertyKey>, 
         text(declaration, "conductivity_property", what)?,
         conductivity_quantity,
     )))
+}
+
+/// The card's viscosity at `lower` under `selection`, if the declaration
+/// names one: a `dynamic_viscosity_property` alone, or a
+/// `kinematic_viscosity_property` with the declared `density`, each strictly
+/// positive. Naming both refuses.
+fn viscosity_state(
+    declaration: &J,
+    card: &MaterialCard,
+    lower: &QueryPoint,
+    density: &PropertyKey,
+    selection: &MaterialPropertySelection,
+    what: &str,
+) -> Result<Option<ResolvedMaterialStatePoint>, String> {
+    let (field, dims) = match (
+        declaration.get("dynamic_viscosity_property").is_some(),
+        declaration.get("kinematic_viscosity_property").is_some(),
+    ) {
+        (false, false) => return Ok(None),
+        (true, true) => {
+            return Err(format!(
+                "{what}: a dynamic_viscosity_property or a kinematic_viscosity_property, \
+                 not both"
+            ));
+        }
+        (true, false) => ("dynamic_viscosity_property", DYNAMIC_VISCOSITY_DIMS),
+        (false, true) => ("kinematic_viscosity_property", KINEMATIC_VISCOSITY_DIMS),
+    };
+    let key = PropertyKey::new(text(declaration, field, what)?, dims);
+    let keys = if dims == KINEMATIC_VISCOSITY_DIMS {
+        vec![key, density.clone()]
+    } else {
+        vec![key]
+    };
+    let requirements = keys
+        .iter()
+        .map(|key| {
+            ScalarPropertyRequirement::try_with_key(key, ScalarAdmissibility::StrictlyPositive)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("{what}.{field}: {error}"))?;
+    resolve_material_state_point(card, lower, &requirements, selection.clone())
+        .map(Some)
+        .map_err(|error| format!("{what}.{field}: {error}"))
 }
 
 fn prepare(
@@ -463,6 +554,17 @@ fn prepare(
         }
         None => (None, None),
     };
+    // A viscosity is resolved where the calorics were, at the span's lower
+    // end; a pipe binds its geometry and resolves the same claims across the
+    // span.
+    let viscosity = viscosity_state(
+        declaration,
+        pack.card(),
+        &lower,
+        &density,
+        &material_selection,
+        what,
+    )?;
     // A resistivity is resolved where the calorics were, at the span's lower
     // end; a resistor's node binds its geometry and reads the same source
     // line across the span.
@@ -496,6 +598,7 @@ fn prepare(
             density,
             conductivity: conductivity_key,
             resistivity,
+            viscosity,
             axis: axis.to_owned(),
             context,
             temperature_kind,
