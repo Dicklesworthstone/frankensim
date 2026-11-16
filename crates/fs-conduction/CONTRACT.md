@@ -6302,6 +6302,34 @@ a face that is not covered once, an overlap whose basis values leave
 `[0, 1]` beyond the tolerance, and a pair-test or overlap budget that is
 exceeded.
 
+A `TraceContact` also lists `facing`, the pairs of trace points that face
+each other: every point of a matching contact with its partner, none of a
+mapped one.
+
+`component::TraceResistanceLaw` is a card's resistance at the temperatures
+of the two traces. `bind(name, card, point, coordinates, selection)` selects
+one claim at the reference point and pins it, as the owner's
+`TemperatureContact` does, under the owner's `TemperatureContactCoordinates`
+(one axis that follows the mean of the two traces, or two that follow side
+A and side B). The contact is built at `reference_resistance()`, and
+`factor(T_a, T_b)` is `R''_ref / R''(T_a, T_b)` with its two partial
+derivatives: the factor fs-system's `ConductanceMatrix::following` takes on
+every point's conductance, so the element is the owner's pointwise
+temperature contact between two bodies. Every other coordinate of the
+reference point stays as declared. A state the pinned claim has no answer
+for is refused with fs-matdb's reason, the text the owner's contact prints;
+nothing is clamped or extrapolated. The slope of a linear curve is the one
+the owner's Newton tangent takes (`linearize_temperature_for_newton`): the
+right segment's at an interior knot, the inward segment's at either end.
+Both take it from one function, `newton_segment_slope`, which is that
+tangent's segment choice moved out unchanged. An element that follows the
+law is guarded at the contact's `facing` pairs
+(`ConductanceMatrix::guarded_at`), as the owner's pointwise contact asks its
+source at the paired corners of every face. `identity_words` gives four
+words: a hash of the card, the pinned claim, the coordinates and the
+reference point. fs-conduction does not depend on fs-system, so the law has
+the hook's two methods and the caller wraps it (four lines in the test).
+
 The state is the nodal temperature field; the stored energy is `1ᵀ C T` with
 the owner's prepared capacitance.
 
@@ -6390,6 +6418,38 @@ to zero, each within 64 roundoff units; it passes the kit and the tangent
 check with its transpose; and it refuses a mean port and traces a slab
 apart ("contact vertices leave the declared plane tolerance").
 
+`tests/trace_resistance_law.rs` (`--features component`) joins two slabs
+through a `TraceContact` that follows a `TraceResistanceLaw`, against the
+owner's temperature contact on one mesh stepped by
+`advance_capacity_newton`. The card is authored for the test and is no
+material's: `R''` falls linearly from 1.4e-3 m^2 K/W at 280 K through 8e-4
+at 345 K to 5e-4 at 430 K over the mean of the two trace temperatures, with
+no answer outside that span. Slab A starts between 380 K and 410 K across
+its face and slab B, with half the heat capacity, at 300 K, so the contact's
+means lie on both sides of the knot. The claims, declared in the tests:
+after each of 12 steps every vertex of both slabs is within 1e-7 K of the
+owner's, on matching cross grids against its pointwise contact
+(`new_pointwise`) and on 2 x 2 against 3 x 3 against its non-matching
+contact (`new_nonmatching`); the energy the kernel booked out of slab A's
+port is within 1e-7 J of what slab A's stored energy lost in the owner's
+run; the kernel refuses no step; and the law moves some vertex by at least
+0.1 K from the same contact at its constant reference resistance, so a law
+the element ignored could not pass. Measured (Mac, debug): on matching
+grids the largest vertex difference over all steps is 7.4e-13 K and the
+crossed energy differs by 3.2e-12 J of 415.1 J; on 2 x 2 against 3 x 3,
+2.7e-11 K and 1.4e-11 J of 415.3 J. The law moves a vertex by up to 6.6 K
+and 6.5 K, and the constant contact crosses 369.8 J and 370.1 J. A start
+state with one trace corner at 600 K, whose mean with slab B's 300 K is
+outside the card while every quadrature point's is inside, is refused by
+the owner and by the kernel
+with the same text, the kernel keeping both fields to the bit; without the
+guard rows the kernel takes the step. The law's factor and slopes are
+checked against the knots by hand inside a segment, at the interior knot and
+at both ends, and against central differences; a curve over side A's
+temperature alone has no slope by side B's; a curve over the pressure with
+the temperatures only in its validity, the shape of the committed pressure
+cards, gives the factor one inside the span and no answer outside it.
+
 Not covered: the entropy generated inside the body is reported as zero, a
 lower bound. There is no snapshot codec. Contact inside one body, radiation
 and adaptive owners are refused or not wrapped; heat capacity that depends on
@@ -6399,8 +6459,14 @@ temperature-dependent conductivity is carried only by
 contact or behind a trace port; fs-cli's scene tests
 (`two_bodies_of_a_card_material_*`) do, against the owner's contact on one
 mesh. A contact between
-two bodies takes one resistance for the whole patch, with no per-face map
-and no temperature dependence. A field heat port names no trace, so nothing
+two bodies takes one resistance for the whole patch, with no per-face map.
+`TraceResistanceLaw` carries a constant scalar or a linear curve only: a
+surface over a temperature coordinate, and any other interpolation, is
+refused when the law is bound, and no material state (a liquid fraction)
+enters its query. Its cards in the tests are authored; no committed card's
+resistance varies with temperature. The law asks the card again in every
+proposal and in every application of the element's tangent, with no cache,
+and no time is claimed for it. A field heat port names no trace, so nothing
 checks that a `TraceContact` is bonded to the two ports it was built for.
 No test builds traces that share their points but not their faces, or
 traces that are coplanar but cover each other only in part. A pair of

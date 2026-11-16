@@ -21,7 +21,9 @@
 //! [`ConductionBody::mapped_contact`] where they do not: either states the
 //! owner's contact between them as the quadrature points of the traces'
 //! common refinement, each with its weights on both traces and its
-//! conductance.
+//! conductance. Where the card's resistance follows the temperatures of the
+//! two traces, [`TraceResistanceLaw`] is the factor on those conductances
+//! ([`resistance_law`]).
 //!
 //! The step is the owner's unchanged `advance`; the tangent is the owner's
 //! `linearize_step` with no Robin port, driven by the same nodal loads. A
@@ -60,6 +62,8 @@ use crate::{ConductionError, ConductionProblem, ScalarField, ThermalBc, ThermalB
 
 pub mod enthalpy;
 pub use enthalpy::EnthalpyBody;
+pub mod resistance_law;
+pub use resistance_law::TraceResistanceLaw;
 
 /// How one named boundary patch of a [`ConductionBody`] meets the kernel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,6 +175,15 @@ pub struct TraceContact {
     pub width_b: usize,
     /// Three quadrature points for every triangle of the common refinement.
     pub points: Vec<ContactPoint>,
+    /// The pairs `[a, b]` of trace points that face each other: every point
+    /// of a matching contact with its partner, and none of a mapped one.
+    ///
+    /// A contact whose resistance follows the trace temperatures
+    /// ([`TraceResistanceLaw`]) is guarded at these pairs, as the owner's
+    /// pointwise contact asks its source at the paired corners of every
+    /// face: a corner the card has no answer for is refused even where every
+    /// quadrature point lies inside the card.
+    pub facing: Vec<[usize; 2]>,
 }
 
 /// A backward-Euler finite-element body whose ports are named boundary patches.
@@ -428,6 +441,11 @@ impl<'m> ConductionBody<'m> {
             width_a: n_a,
             width_b: n_b,
             points,
+            facing: partner
+                .iter()
+                .enumerate()
+                .map(|(point, &other)| [point, other])
+                .collect(),
         })
     }
 
@@ -481,6 +499,8 @@ impl<'m> ConductionBody<'m> {
             width_a: a.vertices.len(),
             width_b: b.vertices.len(),
             points,
+            // The owner guards the paired corners of exact pairs only.
+            facing: Vec::new(),
         })
     }
 

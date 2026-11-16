@@ -107,6 +107,32 @@ enum DerivativePolicy {
     PrimalSemismooth,
 }
 
+/// The slope a Newton tangent takes of a continuous piecewise-linear source
+/// curve at `value`: the right segment's at an interior knot, the inward
+/// segment's at either tabulated end, and a refusal outside the knots.
+///
+/// The contact tangent of [`TemperatureContacts::linearize_temperature_for_newton`]
+/// and the law a kernel contact follows (`component::TraceResistanceLaw`)
+/// both take the slope here, so the two cannot choose different segments.
+pub(crate) fn newton_segment_slope(
+    name: &str,
+    knots: &[(f64, f64)],
+    value: f64,
+) -> Result<f64, ConductionError> {
+    if knots.len() < 2 || value < knots[0].0 || value > knots[knots.len() - 1].0 {
+        return Err(invalid(
+            name,
+            "contact coordinate is outside the selected curve segments",
+        ));
+    }
+    let upper = knots
+        .partition_point(|knot| knot.0 <= value)
+        .min(knots.len() - 1);
+    let a = knots[upper - 1];
+    let b = knots[upper];
+    finite((b.1 - a.1) / (b.0 - a.0))
+}
+
 impl TemperatureContact<'_> {
     // Ordered partial coordinates are T_A, T_B, f_A, f_B. Mean T, when
     // explicitly present, contributes half to each independent thermal trace.
@@ -187,12 +213,7 @@ impl TemperatureContact<'_> {
                 let value = *point.axes().get(*axis)
                     .ok_or_else(|| invalid(self.name(), "contact curve derivative lost its source coordinate"))?;
                 if primal {
-                    if knots.len() < 2 || value < knots[0].0 || value > knots[knots.len()-1].0 {
-                        return Err(invalid(self.name(), "contact coordinate is outside the selected curve segments"));
-                    }
-                    let upper = knots.partition_point(|knot| knot.0 <= value).min(knots.len()-1);
-                    let a = knots[upper-1]; let b = knots[upper];
-                    let slope = finite((b.1-a.1)/(b.0-a.0))?;
+                    let slope = newton_segment_slope(self.name(), knots, value)?;
                     return Ok(self.axis_weights(axis).map(|weight| weight*slope));
                 }
                 let mut slope = None;
