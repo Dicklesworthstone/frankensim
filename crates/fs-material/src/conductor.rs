@@ -13,6 +13,9 @@ pub mod spatial;
 pub mod response;
 /// Source-bound electrothermal law nodes for the shared constitutive graph.
 pub mod graph;
+/// The graph's Ohmic node behind the composition contract's resistor ports.
+#[cfg(feature = "component")]
+pub mod component;
 
 use core::fmt;
 

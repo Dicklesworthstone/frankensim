@@ -126,6 +126,10 @@ impl ScalarConductorResponse {
     /// Admit a context refresh with unchanged original source roles and pins.
     /// Temperature/phase owners still own their physical histories and must
     /// account for them. This check never reinterprets a field as temperature.
+    /// A dimensionless provenance or applicability flag that only bounds the
+    /// source's validity, to one value, is held at its query value, as the
+    /// thermal owner holds it; every other unowned coordinate must be a typed
+    /// fixed external condition.
     pub fn admit(&self, conductor: &ResolvedConductorState) -> Result<(), ConductorError> {
         let original = self.original.material();
         let material = conductor.material();
@@ -177,7 +181,7 @@ impl ScalarConductorResponse {
         }
         if !conductor
             .source_property()
-            .has_only_owned_coordinates_and_fixed_external_conditions(&owned)
+            .owned_coordinate_support(&owned, true)
         {
             return Err(invalid(
                 "conductor law has an unowned response or applicability coordinate",

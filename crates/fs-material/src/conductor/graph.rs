@@ -191,7 +191,7 @@ impl MaterialOhmicNode {
                 .map_err(|_| invalid("Ohmic upper source coordinate is invalid"))?;
             let mut source_line = None;
             for property in material.properties() {
-                if !property.has_only_fixed_external_conditions(Some(temperature_axis), false) {
+                if !property.fixed_external_support(Some(temperature_axis), false, true) {
                     return Err(invalid(
                         "Ohmic graph requires one thermal owner and fixed external source conditions",
                     ));
@@ -524,6 +524,30 @@ impl MaterialOhmicNode {
         self.free_expansion
             .as_ref()
             .map(|(source, axis)| (source, *axis))
+    }
+
+    /// Resolve the native conductor at an absolute temperature together with
+    /// its resistance slope `dR/dT` [ohm/K]: the source segment, geometry and
+    /// normalization of the graph tangent, so the right interval at an
+    /// interior source knot and the left one at the last knot. A node bound to
+    /// a liquid mass fraction refuses, because its resistance also moves with
+    /// that coordinate.
+    ///
+    /// # Errors
+    /// A temperature outside the admitted interval, a source the node cannot
+    /// answer there, or a slope that is not representable.
+    pub fn resolve_and_slope(
+        &self,
+        temperature_k: f64,
+    ) -> Result<(ResolvedConductor, f64), ConductorError> {
+        if self.phase.is_some() {
+            return Err(invalid(
+                "a resistance slope in temperature alone requires a temperature-only source",
+            ));
+        }
+        let (conductor, geometry_slope) = self.resolve_with_geometry_slope(temperature_k)?;
+        let slope = self.resistance_temperature_slope(&conductor, temperature_k, geometry_slope)?;
+        Ok((conductor, slope))
     }
 
     /// Resolve a native conductor and all original receipts at an absolute

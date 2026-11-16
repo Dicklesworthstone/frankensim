@@ -61,6 +61,7 @@ save/resume commands work with `self_heating_damper.json` and
 | `steel316_heated_bar.json` | a 40 x 20 x 20 mm bar of generic 316 stainless steel at 290 K, 20 W into one end for 60 s. Its conductivity is not typed: the bar names the scene material `steel316`, the NASA/TP-2010-216435 card in `steel316/`, whose k(T) rises from 12.99 W/m K at 273 K through 13.46 at 300 K to 15.14 at 400 K, and the bar steps by fs-conduction's Newton solve. The volumetric heat capacity is declared, the table's density times its specific heat at 300 K (3.7232e6 J/m^3 K), not the card's curve | the field's least and greatest temperature after each of 30 steps against fs-conduction stepping the same box with the source's printed table, equal to the bit; the 1200 J put in is stored, and the hot end passes the 300 K knot without leaving the table; 2000 W, which would carry the end past 400 K, is refused at the first step |
 | `steel316_blocks_trace.json` | the slabs and declared 8e-4 m^2 K/W contact of `two_slabs_trace.json`, each slab of the same `steel316` card's k(T) with the bar's declared heat capacity, from 390 K and 290 K: both bodies step by fs-conduction's Newton solve and meet trace to trace | the energy across the contact and the least and greatest temperature of each slab and each contact face against fs-conduction's own contact on one mesh stepped by its Newton endpoint with the printed table, within 1e-6 J and 1e-6 K on 4 and 8 cells, and the same with slab b 3 x 3 across through the mapped contact; slab b from 300 K, a knot of the table, is refused at the first step |
 | `steel316_enthalpy_bar.json` | the bar of `steel316_heated_bar.json` with no declared heat capacity: its heat capacity, density and conductivity are all the `steel316` card's. fs-conduction's enthalpy owner stores specific enthalpy on the chart of the card's Cp(T) (456.39 J/kg K at 273 K, 467.69 at 300 K, 502.87 at 400 K), and each node's mass is fixed by the card's density at 290 K, `reference_temperature_k` | the field's least and greatest temperature after each of 30 steps against fs-conduction's enthalpy owner prepared from the same card on the same box, equal to the bit; the reported density is the printed table's at 290 K; the 1200 J put in is stored; 2000 W is refused at the first step |
+| `nickel_wire_heater.json` | a 1 m Nickel 200 wire of 2e-7 m^2 cross-section (`resistor_branch`) on a fixed 1 V for 60 s, its Joule heat into an `enthalpy_body` of the wire's own mass (the card's 8890 kg/m^3 times its volume). Its resistance is not typed: the wire names the scene material `nickel200`, the Special Metals SMC-061 card in `nickel200/`, whose resistivity rises from 9.6e-8 ohm m at 293.15 K through 1.30e-7 at 373.15 K to 1.85e-7 at 473.15 K, and fs-material's Ohmic node reads it again at the temperature the wire's heat port receives | the body's temperature after each of 120 steps against a hand backward step of the printed table at the logarithmic mean the body's port publishes, within 1e-8 K; the run crosses the 373.15 K knot; the reported resistance is the printed table's at the reported temperature; the same wire as a series `resistor` in a current loop turns the inductance's lost energy into the body's gain; 40 V is refused at the first step |
 | `struck_mode.json` | a 10 g stick at 2 m/s strikes one undamped 200 Hz mode (`modal_structure`, seen as 50 g at the strike) through a Hertz contact (`contact_interface`, fs-dcontact's power law `K x^1.5` reading the end of the mode's flow): the stick bounces back and the mode rings | the stick's, the mode's and the contact's energies against the stick's 0.02 J, to the settled reactions' defect per contact |
 | `dc_motor.json` | a DC motor across three domains: a 12 V supply, winding inductance and resistance in a current loop, a gyrator to a rotor with a viscous bearing, and both heats into one case | the monolithic midpoint rule for the two coupled equations, the supply's energy against stored energy plus heat |
 | `parallel_rlc.json` | a current source drives a capacitor, inductor and resistor in parallel; all Joule heat warms the case | independent coupled voltage/current equations, source work, electrical storage and heat |
@@ -263,6 +264,22 @@ state coordinates as the seed manifest maps them (`thermal-conductivity`,
 from the seed card by
 `cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/stainless-316-nasa-tp216435/manifest.tsv --material-state "Type 316 stainless steel, generic" solid "unspecified product form and heat treatment" 0 --out stainless-316-nasa.fsmcdpk`
 (15569 bytes; two builds were byte-identical).
+
+An electrical `resistor` or `resistor_branch` takes its resistance from a
+card the same way: `material` names a material whose declaration has a
+`resistivity_property`, with `length_m` and `area_m2` in place of
+`resistance_ohm` (`nickel_wire_heater.json`). The resistivity is resolved
+once at `temperature_min_k` and the declared state, and fs-material's Ohmic
+node, `MaterialOhmicNode` behind `OhmicResistor`, reads the card's
+`rho(T) L / A` again at the temperature the heat port receives in every
+trial, so the wire's resistance follows whatever heats it. A temperature
+outside the declared span is refused, never extrapolated. The report adds
+the temperature the heat port received in the last step and the resistance
+there, and lists the resistivity's receipt with the material's. Fixed
+geometry: no thermal expansion, skin effect or contact resistance. The pack
+in `nickel200/` was compiled from the seed card by
+`cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/nickel-200-annealed-special-metals-2006/manifest.tsv --material-state "Nickel 200, UNS N02200" solid "annealed" 0 --out nickel-200-annealed.fsmcdpk`
+(31277 bytes; two builds were byte-identical).
 
 `viscoelastic_mount.json` uses the second fs-mbd owner,
 `fs_mbd::component::relaxation::RelaxationNetwork`, through a

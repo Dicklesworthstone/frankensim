@@ -1,9 +1,11 @@
-//! Material-card preparation for the existing generic thermal components.
+//! Material-card preparation for the existing generic thermal components and
+//! card-backed resistors.
 //!
 //! This cold boundary resolves original source support once. Thermal trials
-//! use the material owners' analytical caloric and conductivity laws; they do
-//! not query a database, reconstruct source receipts, or freeze Cp or k at the
-//! initial temperature.
+//! use the material owners' analytical caloric and conductivity laws, and a
+//! resistor's trials read the resistivity source line its Ohmic node retains;
+//! they do not query a database, reconstruct source receipts, or freeze Cp, k
+//! or the resistivity at the initial temperature.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -18,6 +20,10 @@ use fs_conduction::transient::enthalpy::material::{
 use fs_matdb::{
     ClaimSelection, MatDbError, MaterialCard, NormalizedMaterialCardPack, PropertyKey,
     PropertyLineSlice, PropertyUsageReceipt, QueryPoint, SelectionPolicy, UncertaintyModel,
+};
+use fs_material::conductor::graph::MaterialOhmicNode;
+use fs_material::conductor::{
+    ElectricalPropertyBasis, ResolvedConductorState, resolve_conductor_state_with_property,
 };
 use fs_material::phase::{
     EquilibriumEnthalpyPhaseCurve, HeatCapacitySourceQuery, ResolvedHeatCapacityCurve,
@@ -60,6 +66,9 @@ struct CardSource {
     heat_capacity: PropertyKey,
     density: PropertyKey,
     conductivity: Option<PropertyKey>,
+    /// The card's resistivity resolved at the span's lower end with the
+    /// context unchanged, if the declaration names one.
+    resistivity: Option<ResolvedConductorState>,
     axis: String,
     /// The declared context without the temperature, and the temperature's
     /// declared quantity, if any.
@@ -67,6 +76,8 @@ struct CardSource {
     temperature_kind: Option<QuantitySpec>,
     lower: QueryPoint,
     upper: QueryPoint,
+    /// The declared temperature span [K].
+    span_k: [f64; 2],
     selection: SelectionPolicy,
     phase: SolidLiquidPhase,
     lower_specific_enthalpy_j_kg: f64,
@@ -133,14 +144,49 @@ impl PreparedMaterial {
         .map_err(|error| error.to_string())
     }
 
+    /// fs-material's Ohmic node of this material's resistivity over the
+    /// declared span, for a uniform conductor of `length_m` and `area_m2`:
+    /// the card's `rho(T) L / A`, read again at each temperature asked, with
+    /// every other coordinate at the declared context.
+    ///
+    /// # Errors
+    /// A material whose declaration names no resistivity, and every refusal
+    /// of the node's (a geometry that is not positive and finite among them),
+    /// as text.
+    pub fn ohmic_node(&self, length_m: f64, area_m2: f64) -> Result<MaterialOhmicNode, String> {
+        let source = &self.source;
+        let original = source
+            .resistivity
+            .clone()
+            .ok_or("the material's declaration names no resistivity_property")?;
+        MaterialOhmicNode::try_new(
+            &source.card,
+            original,
+            &source.axis,
+            source.span_k,
+            length_m,
+            area_m2,
+        )
+        .map_err(|error| error.to_string())
+    }
+
     /// The actual queries performed while preparing the original source laws.
     /// These are not queries at each runtime trial, which uses the compiled laws.
     pub fn receipts(&self) -> impl Iterator<Item = &PropertyUsageReceipt> {
-        self.caloric.source_receipts().iter().chain(
-            self.conductivity_source
-                .iter()
-                .flat_map(|line| line.knots.iter().map(|(_, answer)| &answer.receipt)),
-        )
+        self.caloric
+            .source_receipts()
+            .iter()
+            .chain(
+                self.conductivity_source
+                    .iter()
+                    .flat_map(|line| line.knots.iter().map(|(_, answer)| &answer.receipt)),
+            )
+            .chain(
+                self.source
+                    .resistivity
+                    .iter()
+                    .map(|state| &state.source_property().answer().receipt),
+            )
     }
 
     pub fn report_json(&self) -> &str {
@@ -214,6 +260,7 @@ pub(super) fn load(root: &J, scene_path: &Path) -> Result<Materials, String> {
                 "density_property",
                 "conductivity_property",
                 "conductivity_kind",
+                "resistivity_property",
                 "selection",
             ],
             &what,
@@ -378,16 +425,17 @@ fn prepare(
         })
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("{what}.calorics: {error}"))?;
+    let material_selection = match selection {
+        SelectionPolicy::SingleClaimOnly => MaterialPropertySelection::SingleClaimOnly,
+        SelectionPolicy::PreferObservationBacked => {
+            MaterialPropertySelection::PreferObservationBacked
+        }
+    };
     let properties = resolve_material_state_point(
         pack.card(),
         &lower,
         &requirements,
-        match selection {
-            SelectionPolicy::SingleClaimOnly => MaterialPropertySelection::SingleClaimOnly,
-            SelectionPolicy::PreferObservationBacked => {
-                MaterialPropertySelection::PreferObservationBacked
-            }
-        },
+        material_selection.clone(),
     )
     .map_err(|error| format!("{what}.calorics: {error}"))?;
     for property in properties.properties() {
@@ -415,6 +463,28 @@ fn prepare(
         }
         None => (None, None),
     };
+    // A resistivity is resolved where the calorics were, at the span's lower
+    // end; a resistor's node binds its geometry and reads the same source
+    // line across the span.
+    let resistivity = if declaration.get("resistivity_property").is_some() {
+        let basis = ElectricalPropertyBasis::Resistivity;
+        let key = PropertyKey::new(
+            text(declaration, "resistivity_property", what)?,
+            basis.dimensions(),
+        );
+        Some(
+            resolve_conductor_state_with_property(
+                pack.card(),
+                &lower,
+                material_selection,
+                basis,
+                &key,
+            )
+            .map_err(|error| format!("{what}.resistivity_property: {error}"))?,
+        )
+    } else {
+        None
+    };
     Ok(PreparedMaterial {
         caloric: resolved.curve().clone(),
         conductivity,
@@ -425,11 +495,13 @@ fn prepare(
             heat_capacity,
             density,
             conductivity: conductivity_key,
+            resistivity,
             axis: axis.to_owned(),
             context,
             temperature_kind,
             lower,
             upper,
+            span_k: [lower_k, upper_k],
             selection,
             phase,
             lower_specific_enthalpy_j_kg: reference_h,

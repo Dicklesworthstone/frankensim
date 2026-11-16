@@ -481,6 +481,44 @@ impl ResolvedScalarProperty {
         temperature_axis: Option<&str>,
         allow_frequency_applicability: bool,
     ) -> bool {
+        self.fixed_external_support(temperature_axis, allow_frequency_applicability, false)
+    }
+
+    /// Whether `axis` is a provenance or applicability flag that the source
+    /// holds rather than a physical coordinate: the selected claim's validity
+    /// bounds it to one value, the claim's value does not depend on it, the
+    /// validity declares it exactly dimensionless (an untyped bound has no
+    /// known dimension) and the query gives it a finite value, which fs-matdb
+    /// already checked against the bound. `engineering_reference_model = 1`
+    /// on a seed card is one; a dimensionless range, such as a phase fraction
+    /// over [0, 1], is not. The thermal owner
+    /// (`ThermalMaterialPoint::admit_static`) holds such a flag the same way.
+    fn is_held_flag(&self, axis: &str) -> bool {
+        let receipt = &self.answer.receipt;
+        let validity = &self.answer.evidence.model.validity;
+        !self.source_axes.iter().any(|(source, _)| source == axis)
+            && validity
+                .bound(axis)
+                .is_some_and(|(low, high)| high - low == 0.0)
+            && validity.axis_quantities().get(axis)
+                == Some(&QuantitySpec::dimensional(Dims([0; 6])))
+            && receipt
+                .query_point
+                .iter()
+                .find(|(name, _)| name == axis)
+                .is_some_and(|(_, value)| value.is_finite())
+    }
+
+    /// [`Self::has_only_fixed_external_conditions`], and with `held_flags`
+    /// also admitting every validity coordinate that [`Self::is_held_flag`]
+    /// names. The crate's conductor response and Ohmic node ask for that;
+    /// every other caller keeps the strict rule.
+    pub(crate) fn fixed_external_support(
+        &self,
+        temperature_axis: Option<&str>,
+        allow_frequency_applicability: bool,
+        held_flags: bool,
+    ) -> bool {
         if self.source_axes.is_empty()
             && self.answer.receipt.decision != fs_matdb::EvaluationDecision::ConstantWithinValidity
         {
@@ -535,7 +573,7 @@ impl ResolvedScalarProperty {
             .bounds()
             .keys()
             .all(|axis| {
-                if supported(axis, None) {
+                if supported(axis, None) || held_flags && self.is_held_flag(axis) {
                     return true;
                 }
                 let quantity = receipt.axis_quantities.get(axis).copied();
@@ -625,6 +663,17 @@ impl ResolvedScalarProperty {
         &self,
         owned: &[(&str, QuantitySpec)],
     ) -> bool {
+        self.owned_coordinate_support(owned, false)
+    }
+
+    /// [`Self::has_only_owned_coordinates_and_fixed_external_conditions`], and
+    /// with `held_flags` also admitting every validity coordinate that
+    /// [`Self::is_held_flag`] names.
+    pub(crate) fn owned_coordinate_support(
+        &self,
+        owned: &[(&str, QuantitySpec)],
+        held_flags: bool,
+    ) -> bool {
         if self.source_axes.is_empty()
             && self.answer.receipt.decision != fs_matdb::EvaluationDecision::ConstantWithinValidity
         {
@@ -667,7 +716,7 @@ impl ResolvedScalarProperty {
                 .validity
                 .bounds()
                 .keys()
-                .all(|axis| supported(axis, None))
+                .all(|axis| supported(axis, None) || held_flags && self.is_held_flag(axis))
     }
 
     /// Whether this source supplies a constant coefficient when temperature is

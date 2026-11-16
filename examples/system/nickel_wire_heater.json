@@ -1,0 +1,35 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 60.0,
+  "step_s": 0.5,
+  "materials": {
+    "nickel200": {
+      "pack": "nickel200/nickel-200-annealed.fsmcdpk",
+      "phase": "solid",
+      "temperature_axis": "temperature",
+      "temperature_kind": "absolute-temperature",
+      "state": [
+        {"name": "engineering-reference-model", "value": "1", "kind": "dimensional"},
+        {"name": "source-specimens-matched", "value": "0", "kind": "dimensional"},
+        {"name": "annealed-material", "value": "1", "kind": "dimensional"},
+        {"name": "source-constant-temperature-known", "value": "0", "kind": "dimensional"},
+        {"name": "source-constant-heat-treatment-known", "value": "0", "kind": "dimensional"}
+      ],
+      "temperature_min_k": 293.15,
+      "temperature_max_k": 473.15,
+      "reference_specific_enthalpy_j_kg": 0.0,
+      "heat_capacity_property": "specific-heat-capacity",
+      "density_property": "density",
+      "resistivity_property": "electrical-resistivity"
+    }
+  },
+  "elements": {
+    "wire": {"kind": "resistor_branch", "material": "nickel200", "length_m": 1.0, "area_m2": 2.0e-7},
+    "body": {"kind": "enthalpy_body", "material": "nickel200", "mass_kg": 1.778e-3, "specific_enthalpy_j_kg": 0.0}
+  },
+  "connections": [
+    {"prescribe": "wire.a", "voltage_v": 1.0},
+    {"prescribe": "wire.b", "voltage_v": 0},
+    {"join": ["body.heat", "wire.heat"]}
+  ]
+}

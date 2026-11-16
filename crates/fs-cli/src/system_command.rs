@@ -30,6 +30,8 @@ use std::rc::Rc;
 
 use fs_conduction::transient::enthalpy::material::MaterialEnthalpyTransport;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_material::conductor::component::{OhmicResistor, Terminals};
+use fs_material::conductor::graph::MaterialOhmicNode;
 use fs_material::phase::component::UniformEnthalpyBody;
 use fs_material::phase::{
     EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState, SolidLiquidPhase,
@@ -162,10 +164,12 @@ Thermal material declarations prepare original laws from normalized card packs:
   heat_capacity_property, density_property  original dimensional property names
   conductivity_property  optional original k(T) property name
   conductivity_kind  dimensional (default) | thermal-conductivity
+  resistivity_property  optional original electrical resistivity property name
+                     (ohm m), for card-backed resistors
   selection          single-claim-only (default) | prefer-observation-backed
 The temperature convention and fixed context must match the source. Preparation
-retains nominal Cp(T), density(T), and optional k(T); no initial-value freezing
-or extrapolation. Reports retain content identities, claims and source receipts;
+retains nominal Cp(T), density(T), and optional k(T) and resistivity(T); no
+initial-value freezing or extrapolation. Reports retain content identities, claims and source receipts;
 source uncertainty is retained but not propagated. At most 64 declarations,
 4 MiB per pack and 64 MiB total pack bytes. No phase transition is inferred.
 
@@ -475,13 +479,21 @@ and in a current loop, with charge, current and voltage (an inductor is the
 loop's node; a capacitor and a resistor sit in series in it):
   inductor       inductance_h, charge_c = 0, current_a = 0            [p]
   capacitor      capacitance_f, charge_c = 0                          [a, b]
-  resistor       resistance_ohm                                       [a, b, heat]
+  resistor       resistance_ohm, or material, length_m, area_m2       [a, b, heat]
   voltage        voltage_v (waveform)                                 [p]
 For a parallel circuit, the capacitor sets the node voltage and the branches
 share that voltage (current is positive into each component):
   node_capacitor capacitance_f, charge_c = 0                          [p]
-  resistor_branch resistance_ohm                                      [a, b, heat]
+  resistor_branch resistance_ohm, or material, length_m, area_m2      [a, b, heat]
   current_source current_a (waveform; negative supplies the node)     [p]
+A resistor or resistor_branch that names a scene material whose declaration
+names a resistivity_property is that material's uniform conductor of length
+length_m and cross-section area_m2: in every trial fs-material's Ohmic node
+reads the card's rho(T) length_m / area_m2 at the temperature heat receives,
+and all of the Joule heat leaves through heat. A temperature outside the
+material's declared span refuses the step. Its report adds temperature_k, the
+temperature heat received in the last step, and resistance_ohm there. Fixed
+geometry: no thermal expansion, skin effect or contact resistance.
 The same parallel forms carry a liquid, with volume, flow and pressure:
   accumulator    capacitance_m3_pa, volume_m3 = 0                     [p]
                  (volume_m3 is the volume taken in; pressure_pa = volume_m3 /
@@ -1448,6 +1460,9 @@ struct Element {
     /// A conduction body whose state is specific enthalpy: the paired
     /// material whose chart reads it as temperature.
     enthalpy: Option<&'static MaterialEnthalpyTransport>,
+    /// A card-backed resistor's node, for reporting its resistance at the
+    /// temperature its heat port read.
+    ohmic: Option<MaterialOhmicNode>,
 }
 
 struct Device {
@@ -2729,6 +2744,7 @@ fn element(
     let mut radius_m = None;
     let mut contact = None;
     let mut enthalpy = None;
+    let mut ohmic = None;
     let (node, ports) = match kind {
         Kind::Inertance(domain) => {
             let names = domain.names();
@@ -2750,6 +2766,13 @@ fn element(
             add(builder, name, node, state)?
         }
         Kind::Compliance(domain) => compliance(builder, name, definition, domain, &what)?,
+        Kind::Resistance(Domain::Electrical) if definition.get("material").is_some() => {
+            let (resistor, material) =
+                ohmic_resistor(definition, materials, Terminals::Current, &what)?;
+            ohmic = Some(resistor.node().clone());
+            material_sources.push(material);
+            add(builder, name, resistor, ())?
+        }
         Kind::Resistance(domain) => {
             let names = domain.names();
             fields(definition, &["kind", names.resistance], &what)?;
@@ -2805,6 +2828,13 @@ fn element(
             let storage = Storage::in_domain(domain.port_kind(), capacity).map_err(invalid)?;
             node_capacity = Some(capacity);
             add(builder, name, storage, content)?
+        }
+        Kind::ResistorBranch(Domain::Electrical) if definition.get("material").is_some() => {
+            let (resistor, material) =
+                ohmic_resistor(definition, materials, Terminals::Voltage, &what)?;
+            ohmic = Some(resistor.node().clone());
+            material_sources.push(material);
+            add(builder, name, resistor, ())?
         }
         Kind::ResistorBranch(domain) => {
             let names = domain.names();
@@ -2990,7 +3020,58 @@ fn element(
         radius_m,
         contact,
         enthalpy,
+        ohmic,
     })
+}
+
+/// A resistor whose resistance is a scene material's `rho(T) L / A`, which
+/// fs-material's Ohmic node reads again at the temperature its heat port
+/// receives, and the material's name.
+fn ohmic_resistor(
+    definition: &J,
+    materials: &materials::Materials,
+    terminals: Terminals,
+    what: &str,
+) -> Result<(OhmicResistor, String), Refusal> {
+    fields(
+        definition,
+        &["kind", "material", "length_m", "area_m2"],
+        what,
+    )?;
+    let name = definition
+        .str_field("material")
+        .ok_or_else(|| format!("{what}.material: expected a material name"))?;
+    let material = materials
+        .get(name)
+        .ok_or_else(|| format!("{what}.material: unknown material {name:?}"))?;
+    let length_m = positive(definition, "length_m", what)?;
+    let area_m2 = positive(definition, "area_m2", what)?;
+    let node = material
+        .ohmic_node(length_m, area_m2)
+        .map_err(|error| format!("{what}.material: {error}"))?;
+    let resistor =
+        OhmicResistor::new(node, terminals).map_err(|error| format!("{what}.material: {error}"))?;
+    Ok((resistor, name.to_owned()))
+}
+
+/// A card-backed resistor's temperature, as its heat port read it in the
+/// last step, and the card's resistance there. A resistor of constant
+/// resistance has neither, and its report is unchanged.
+fn ohmic_values(system: &System, element: &Element) -> Vec<(&'static str, f64)> {
+    let Some(node) = &element.ohmic else {
+        return Vec::new();
+    };
+    let temperature = match system.port(element.node, "heat") {
+        Some(port) if system.steps() > 0 => system.last_input(port)[0],
+        _ => f64::NAN,
+    };
+    let resistance = node
+        .resolve_at_temperature_k(temperature)
+        .map_or(f64::NAN, |conductor| conductor.resistance_ohm());
+    vec![
+        ("temperature_k", temperature),
+        ("resistance_ohm", resistance),
+    ]
 }
 
 fn slider(
@@ -4294,6 +4375,34 @@ impl Device {
                 )
             });
         }
+        if self.elements.iter().any(|element| element.ohmic.is_some()) {
+            // Last, so that every list the earlier sentences rewrote is
+            // there to extend. A card-backed resistor names a material, so
+            // the source-resolution sentence above is present.
+            let base = description.replacen(
+                "constant parameters",
+                "constant parameters, card-backed resistances",
+                1,
+            );
+            let base = if base.contains("pure-phase thermal laws; no ") {
+                base.replace(
+                    "pure-phase thermal laws; no ",
+                    "pure-phase thermal laws and resistors' resistivity; no ",
+                )
+            } else {
+                base.replace(
+                    "pure-phase thermal laws",
+                    "pure-phase thermal laws, resistors' resistivity",
+                )
+            };
+            description = std::borrow::Cow::Owned(format!(
+                "{base}; a card-backed resistor is fs-material's Ohmic node of fixed length and \
+                 cross-section, its resistance the card's nominal rho(T) L / A at the \
+                 temperature its heat port receives and refused off the declared span: DC \
+                 conduction with no thermal expansion, skin effect, contact resistance or heat \
+                 storage of its own, and the resistivity's uncertainty not propagated"
+            ));
+        }
         description
     }
 
@@ -4634,7 +4743,12 @@ impl Device {
                 )]
             }
             Kind::Resistance(domain) => {
-                vec![(domain.names().effort, output("a")), ("heat_w", -output("heat"))]
+                let mut values = vec![
+                    (domain.names().effort, output("a")),
+                    ("heat_w", -output("heat")),
+                ];
+                values.extend(ohmic_values(system, element));
+                values
             }
             Kind::Slider => {
                 let state = system.state::<Slip>(element.node);
@@ -4685,10 +4799,12 @@ impl Device {
                 values
             }
             Kind::ResistorBranch(domain) => {
-                vec![
+                let mut values = vec![
                     (domain.names().flow, output("a")),
                     ("heat_w", -output("heat")),
-                ]
+                ];
+                values.extend(ohmic_values(system, element));
+                values
             }
             // The last step's flow from a to b, its heat, and the
             // temperature the liquid's viscosity was read at.

@@ -20,6 +20,8 @@ mod contact;
 mod conduction;
 #[path = "system_command/solids.rs"]
 mod solids;
+#[path = "system_command/ohmic.rs"]
+mod ohmic;
 
 fn example(name: &str) -> String {
     format!(

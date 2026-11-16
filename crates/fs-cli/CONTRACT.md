@@ -1855,6 +1855,79 @@ geometry, contact resistance, local controls and the original Kirchhoff
 integral solver remain unchanged. Mixing authored and source-backed fields
 or naming an unknown material refuses before execution.
 
+A declaration may also select `resistivity_property`, an original
+electrical resistivity in ohm m. It is resolved once with
+`resolve_conductor_state_with_property` at `temperature_min_k` and the
+declared context, under the declaration's selection, and its receipt joins
+the material's receipts in the report. An electrical `resistor` or
+`resistor_branch` may then name the material with `length_m` and `area_m2`
+in place of `resistance_ohm`. It lowers to
+`fs_material::conductor::component::OhmicResistor` over the
+`MaterialOhmicNode` of that resolution, bound to the declared span and the
+element's geometry: `Terminals::Current` for a `resistor` in a loop,
+`Terminals::Voltage` for a `resistor_branch`. Its ports and their roles are
+the constant forms', so the connections are unchanged. Each trial reads the
+card's `rho(T) L / A` at the temperature `heat` receives, from the source
+line the node retains; no database is queried during stepping. A
+temperature off the span refuses the step. The element is bound to its
+material under `material_bindings`. Its report adds `temperature_k`, the
+temperature `heat` received in the last step, and `resistance_ohm`, the
+node's resistance there. The reports of constant-resistance elements are
+unchanged.
+
+The no-claim sentence of a scene with such a resistor names card-backed
+resistances beside constant parameters and the resistors' resistivity
+among the declared source laws. It ends with the resistor's limits: fixed
+length and cross-section, nominal values, refused off the span, and no
+thermal expansion, skin effect, contact resistance, heat storage of its own
+or propagated resistivity uncertainty. The sentence is rewritten last, so
+that every list the earlier rewrites built is there to extend.
+
+Tests in `tests/system_command/ohmic.rs`, on
+`examples/system/nickel_wire_heater.json`: a 1 m Nickel 200 wire of 2e-7
+m^2 on 1 V for 60 s, heating an `enthalpy_body` of the same card and the
+wire's own mass (1.778e-3 kg). The pack in `examples/system/nickel200/` is
+the seed card `nickel-200-annealed-special-metals-2006`, compiled by
+`xtask matdb-pack` (31277 bytes, two builds byte-identical). Claims declared
+before the first run:
+- The pack's resistivity curve is the printed table of the seed
+  `properties.tsv`, knot for knot.
+- After each of the 120 steps the body is within 1e-8 K of a hand backward
+  step: the end temperature bisected so that `m c (T1 - T0) = dt V^2 / R`,
+  with `R` the printed table's linear interpolation times `L / A`, at the
+  logarithmic mean the body's port publishes. The run crosses the 373.15 K
+  knot. The reported resistance is the printed table's at the reported
+  temperature within 1e-12 relative, and the current is the voltage over
+  it. The stored change is `m c (T - T0)` within 1e-7 J, and the ledger
+  residual is within 1e-9 J.
+- The same wire as a series `resistor` in a current loop with a 0.5 H
+  inductance from 4 A: the inductance's lost energy is the body's gain
+  within 1e-9 J, and the current decays below 1 A.
+- The example through the binary: exit 0, both bindings, the resistivity
+  receipt, and the no-claim sentence.
+- Refusals, by name: `resistance_ohm` beside `material`; a material without
+  a resistivity; an unknown material; an area of zero; a span past the
+  card's resistivity (the node's refusal). 40 V, which would carry the wire
+  off the span in the first step, is refused at that step (exit 4), and the
+  scene's report is unchanged.
+
+The first run refused every one of these scenes at admission: fs-material's
+conductor counted the card's provenance flags (`engineering-reference-model
+= 1` and the like) as unowned coordinates. fs-material now holds a
+validity-only flag that is declared dimensionless and bounded to one value
+(its contract, "A card's Ohmic conductor behind resistor ports"). With that,
+after 120 steps the body is at 413.94 K, and the wire reads 413.54 K (the
+logarithmic mean), 0.7611 ohm and 1.314 A. The stored change is 97.94 J
+and the ledger residual 1.8e-15 J. In the loop, 4 A falls to 0.568 A in 40
+steps, and the inductance's 3.9193 J is the body's gain within 2.3e-13 J. The
+span refusal is the card's own: it has no resistivity claim at 1500 K.
+
+No claim for a card-backed resistor beyond the node's: nominal values with
+the card's uncertainty retained but not propagated, fixed geometry, DC
+conduction only, and one temperature for the whole conductor. The wire and
+its lumped body are adiabatic: no convection, radiation or conduction to a
+support.
+
 Preparation admits at most 64 material declarations, 4 MiB per pack and
 64 MiB of total raw pack data. Pack decoding, source queries and receipt
 construction occur once before stepping; components own the admitted laws,

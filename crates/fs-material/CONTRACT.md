@@ -17,6 +17,91 @@
 
 ## New sections (newest first)
 
+## A card's Ohmic conductor behind resistor ports
+
+`conductor::component::OhmicResistor`, behind the existing `component`
+feature, puts a `MaterialOhmicNode` behind two electrical terminals (`a`, `b`)
+and one heat port. In every proposal the node resolves the card's
+`R(T) = rho(T) L / A` again at the temperature the heat port receives, so a
+connected thermal owner moves the resistance with no pairing-specific loop.
+All of the Joule heat `I^2 R` leaves through the heat port, as `-P`. The
+state is `()`.
+
+`Terminals::Current` receives the terminal currents (`FlowIn`, the form of a
+resistor in a current loop): the current through the conductor is
+`i_a - i_b`, and `a` and `b` return `V = I R` and `-V`. `Terminals::Voltage`
+receives the terminal voltages (`EffortIn`, a branch between two nodes): the
+current is the node's `current_a_for_drive(Voltage(v_a - v_b))`, and `a` and
+`b` return it and its negative. The port kinds and roles are those of the
+kernel's constant-resistance `Damper` and `Admittance` in the electrical
+domain, so a scene can use either.
+
+The class is `Smooth` within a segment of the card's table. The JVP and VJP
+act with the full Jacobian, including the temperature column `dR/dT` from
+`MaterialOhmicNode::resolve_and_slope`. That new public method (no new
+`*_with_*` name: the enumeration ratchet counts them) returns the resolved
+conductor with `dR/dT` at one temperature, refuses a
+node bound to a liquid mass fraction, and at an interior knot takes the
+right segment's slope (the last knot takes the left one's), as the node's
+own graph tangent does. The receipt books `dt P` dissipated and `dt P / T`
+entropy, with the kernel's `64 eps` energy tolerance. The component's error
+is the node's own `ConductorError` (no new error type). A temperature outside
+the node's admitted interval is the node's refusal, unchanged, never an
+extrapolation. Values that are not finite, a timestep that is not positive,
+a wrong slot count and cancellation are refused before any output is
+written, each as `ConductorError::InvalidInput` naming what was refused. A
+node with a liquid mass fraction axis is refused at construction: the heat
+port carries a temperature only. The identity binds
+the card and receipt content hashes, the temperature axis, the reference
+temperature and interval, the geometry, any free expansion, and the terminal
+form. The codec writes no state words.
+
+`tests/ohmic_component.rs` checks, on a manufactured three-knot table (no
+measured material claimed):
+- both forms against hand values within 1e-12, and the current form against
+  the node's graph evaluation bit for bit;
+- the hand temperature column at the interior knot, and the conformance kit
+  with the tangent check inside segments;
+- a heater on 1 V through the kernel into a 1 J/K enthalpy body, against a
+  hand backward step bisected at the logarithmic mean the body's port
+  publishes, within 2e-9 K over 60 steps across the knot, with the boundary
+  work, Joule heat and stored energy within 1e-9 J;
+- a current loop whose inductance's lost energy is the body's gain within
+  1e-9 J;
+- the refusals, and a kernel step the card cannot close (10 V for 5 s),
+  refused with the wire named and the body kept bit for bit;
+- the identity.
+
+The first draft of that kernel refusal drove 3 V, which the rising
+resistance closes near 370 K; the kernel took it, and the test was
+corrected.
+
+**Provenance flags are held.** Before this section, a conductor refused
+every seed card that has a resistivity, because each one bounds its
+resistivity's validity with provenance flags (`engineering_reference_model =
+1`, `source_specimens_matched = 0`, `annealed_material = 1` on Nickel 200),
+and `ScalarConductorResponse::admit` and the Ohmic node's own check counted
+those flags as unowned coordinates. Both now hold a validity coordinate
+that the claim's value does not depend on, that the validity declares
+exactly dimensionless and bounds to one value, at the finite value the query
+gives it (fs-matdb has already checked it against the bound). The thermal
+owner (`ThermalMaterialPoint::admit_static`) already held such flags the same
+way. An untyped bound has no known dimension and still refuses; so does a
+dimensionless range, such as a phase fraction over [0, 1], and every value
+axis that is not owned or a typed fixed external condition. The rule is
+`ResolvedScalarProperty::is_held_flag`, private to the crate, and the
+crate-private variants `fixed_external_support` and
+`owned_coordinate_support` take it as a switch; the public predicates and
+every other caller keep the strict rule, and so does the phase-fraction
+path. The added test in `tests/ohmic_component.rs` holds a dimensionless flag
+with the unflagged card's values to the bit, and refuses an untyped flag and
+a dimensionless range.
+
+This is memoryless DC conduction of fixed geometry, at nominal values. It
+adds no inductance, capacitance, skin effect, contact resistance, heat
+storage of its own, or propagated resistivity uncertainty. The node's other
+limits are unchanged.
+
 ## A thermal path along a named absolute-temperature axis
 
 `state_point::thermal_path_axis(point)` names the coordinate a thermal path
