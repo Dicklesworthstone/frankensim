@@ -256,7 +256,9 @@ physics owners below fs-couple can be composed without it.
       words. Identities retain all conductances, the complete resistance or
       incidence matrix, and the Dirac schema's coordinate and clock bindings.
     - `ConductanceMatrix`: no words. Identity retains the number of interface
-      points and, of each, both sides' points and weights and its conductance.
+      points and, of each, both sides' points and weights and its conductance,
+      and then, if it follows a law, the law's words, the number of guard
+      rows and each row's points and weights.
       Signal-modulated ratios belong to the restored inputs and outputs.
     - `ControlledSource`: the same three-word source account, with power
       domain and effort/flow role bound by the graph's port description.
@@ -485,6 +487,59 @@ physics owners below fs-couple can be composed without it.
     times through the kernel, against the monolithic backward-Euler solve
     of all four within 1e-11 relative, with the ledger closed and entropy
     generated.
+  - `ConductanceMatrix::following(law)` makes the same element's
+    conductances follow the temperatures: every interface point's
+    conductance is its constant `G` times `law.factor(T_a, T_b)` at the two
+    temperatures interpolated there, asked in every proposal. It is the
+    one element, not a second one: without a law nothing changes, to the
+    bit, and a law that answers one with no slope gives the constant
+    element's loads and receipt to the bit. `ConductanceLaw` is the hook:
+    `factor(kelvin_a, kelvin_b)` returns a positive finite factor with its
+    two partial derivatives [1/K], or a reason it has no answer;
+    `identity_words` joins the element's identity after its interface
+    points. At a knot of a piecewise law the partials are the inward
+    segment's, the convention of fs-conduction's
+    `linearize_temperature_for_newton`. Under a law the element is
+    `Class::Smooth`. Its JVP applies, at each interface point, the block
+    `G [f + (T_a - T_b) f_a, -f + (T_a - T_b) f_b]` on the two interpolated
+    differentials, and its VJP that block's transpose along the same
+    weights: assembled point by point, nothing iterative, not symmetric,
+    and exact transposes of each other. A law with no answer, or a factor
+    or partial that is not finite or a factor that is not positive, refuses
+    the proposal with `ElementError::Law { reason }`; the element never
+    clamps a temperature or extrapolates a law, and the kernel leaves the
+    state where it was. The law is asked at the interface points: a trace
+    point outside the law that reaches every interface point through a
+    mean inside it is answered, unless a guard row reads it.
+    `guarded_at(rows)` adds guard rows to an element that follows a law. A
+    `GuardRow` is the two interpolation rows of an interface point with no
+    conductance: the law is asked there too, in every proposal and before
+    the interface points, and a refusal there is the same
+    `ElementError::Law`. No heat crosses at a guard row, it is no part of
+    the tangent, and inside the law a guarded element steps as the
+    unguarded one to the bit. Rows on an element with no law, and a row
+    whose weights are not an interface point's, are refused at
+    construction. Which rows a contact needs is its builder's to say (for
+    matching traces, each pair of trace points that face each other). The
+    entropy rule and the receipt's tolerance are the constant element's,
+    with the scaled conductance, which is positive.
+    `tests/conductance_matrix.rs` checks, with a law
+    authored for the tests (`1 + a (T_a / 300)^2 + b T_b / 300` inside a
+    temperature window, no material's): conformance and the tangent over
+    200 drawn cases, each load against the law by hand, and
+    `<J d, bar> = <d, J^T bar>` within 64 roundoff units; the factor one
+    against the constant element to the bit over 100 draws, and the law's
+    and the guard rows' words in the identity; the refusals, through
+    `propose` and through the kernel with the lumps' temperatures kept to
+    the bit; a lump above the law that the one interface point averages
+    away, stepped without guard rows and refused through the kernel with
+    them, the lumps kept to the bit, and ten steps inside the law equal to
+    the bit with and without rows; and two traces of two lumps each,
+    stepped 50 times through the kernel, against a backward-Euler Newton
+    solve of all four written out by hand, within 1e-9 relative. No claim:
+    no law is supplied here (a card-backed one is fs-conduction's), no
+    guard rows are chosen here, and a law that follows anything but the
+    two temperatures at a point is not this hook.
   `tests/parallel_elements.rs` checks component conformance and tangents,
   time reversal of the storage element at each of its 400 points in the four
   domains (`R` the identity on the state, bounds derived from the rounding of

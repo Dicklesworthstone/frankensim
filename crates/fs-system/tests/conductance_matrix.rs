@@ -6,14 +6,17 @@
 //! Run with `cargo test -p fs-system --test conductance_matrix -- --nocapture`.
 
 use core::num::NonZeroUsize;
+use std::sync::Arc;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cancelled, Cx, ExecMode, StreamKey};
 use fs_ports::StableId;
 use fs_ports::component::conformance::{Case, Observed, check_component, check_port_tangent};
 use fs_ports::component::{Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt};
-use fs_system::elements::{Conductance, ConductanceMatrix, InterfacePoint};
-use fs_system::{AdmissionError, HeatSink, RouteTemperature, SystemBuilder};
+use fs_system::elements::{
+    Conductance, ConductanceLaw, ConductanceMatrix, ElementError, GuardRow, InterfacePoint,
+};
+use fs_system::{AdmissionError, HeatSink, NodeId, RouteTemperature, System, SystemBuilder};
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new_clock_free();
@@ -485,6 +488,528 @@ fn two_traces_of_lumps_through_a_matrix_step_as_the_monolithic_backward_euler() 
             }
         }
     });
+    let ledger = system.ledger();
+    let stored: f64 = capacity.iter().sum::<f64>() * 400.0;
+    assert!(ledger.energy_residual_j().abs() <= 1.0e-12 * stored);
+    let generated = ledger.nodes[2].entropy_generated_j_per_k.value();
+    assert!(generated > 0.0 && ledger.entropy_generated_j_per_k() >= generated * (1.0 - 1.0e-9));
+}
+
+/// A law authored for these tests, not a material's: the factor
+/// `1 + a (T_a / 300)^2 + b T_b / 300` while both temperatures lie between `floor_k` and
+/// `ceiling_k`, and no answer outside.
+#[derive(Debug, Clone, Copy)]
+struct Authored {
+    a: f64,
+    b: f64,
+    floor_k: f64,
+    ceiling_k: f64,
+}
+
+impl ConductanceLaw for Authored {
+    fn factor(&self, kelvin_a: f64, kelvin_b: f64) -> Result<(f64, [f64; 2]), String> {
+        let inside = |kelvin: f64| (self.floor_k..=self.ceiling_k).contains(&kelvin);
+        if !(inside(kelvin_a) && inside(kelvin_b)) {
+            return Err(format!(
+                "{kelvin_a} K and {kelvin_b} K are not both between {} K and {} K",
+                self.floor_k, self.ceiling_k
+            ));
+        }
+        let (x, y) = (kelvin_a / 300.0, kelvin_b / 300.0);
+        Ok((
+            1.0 + self.a * x * x + self.b * y,
+            [2.0 * self.a * x / 300.0, self.b / 300.0],
+        ))
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        words.extend([self.a, self.b, self.floor_k, self.ceiling_k].map(f64::to_bits));
+    }
+}
+
+/// The law of the sweeps below: its factor lies between 0.6 and 4.6 from 250 K to 900 K.
+const SWEPT: Authored = Authored {
+    a: 0.4,
+    b: -0.2,
+    floor_k: 200.0,
+    ceiling_k: 1000.0,
+};
+
+/// The element of the first test: three points of a and two of b at four interface points.
+fn four_points() -> ConductanceMatrix {
+    ConductanceMatrix::new(
+        3,
+        2,
+        vec![
+            point(&[(0, 1.0)], &[(0, 1.0)], 4.0),
+            point(&[(1, 1.0)], &[(0, 0.5), (1, 0.5)], 3.0),
+            point(&[(2, 0.25), (1, 0.75)], &[(1, 1.0)], 2.0),
+            point(&[(0, 0.2), (1, 0.3), (2, 0.5)], &[(0, 0.6), (1, 0.4)], 1.5),
+        ],
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_law_driven_matrix_conforms_and_its_tangent_and_adjoint_are_transposes() {
+    let constant = four_points();
+    let element = four_points().following(Arc::new(SWEPT));
+    assert_eq!(
+        (constant.class(), element.class()),
+        (Class::ExactLinear, Class::Smooth)
+    );
+    let mut numbers = Numbers(20_261_116);
+    let mut worst = 0.0_f64;
+    for case in 0..200 {
+        let kelvin: Vec<f64> = (0..5).map(|_| numbers.next(250.0, 900.0)).collect();
+        let dt_s = numbers.next(1.0e-4, 10.0);
+        // The kit: the receipt's balance, and the tangent against differences.
+        let (loads, receipt) = stepped(&element, dt_s, &kelvin);
+        // The loads by hand: every point's own conductance times the law's factor at the two
+        // temperatures interpolated there, spread by the same weights.
+        let mut by_hand = [0.0_f64; 5];
+        let mut size = [0.0_f64; 5];
+        for point in element.points() {
+            let at = |side: &[(usize, f64); 3], offset: usize| -> f64 {
+                side.iter().map(|&(i, w)| w * kelvin[offset + i]).sum()
+            };
+            let (t_a, t_b) = (at(&point.a, 0), at(&point.b, 3));
+            let rate = point.conductance_w_k * SWEPT.factor(t_a, t_b).unwrap().0 * (t_a - t_b);
+            for &(i, w) in &point.a {
+                by_hand[i] += w * rate;
+                size[i] += (w * rate).abs();
+            }
+            for &(i, w) in &point.b {
+                by_hand[3 + i] -= w * rate;
+                size[3 + i] += (w * rate).abs();
+            }
+        }
+        for row in 0..5 {
+            assert!(
+                (loads[row] - by_hand[row]).abs() <= 32.0 * f64::EPSILON * size[row],
+                "case {case} row {row}: {} against {}",
+                loads[row],
+                by_hand[row]
+            );
+        }
+        assert!(receipt.entropy_generated_j_per_k >= 0.0, "case {case}");
+        // <J d, bar> = <d, J^T bar> for drawn d and bar: the adjoint is the tangent's transpose.
+        let d: Vec<f64> = (0..5).map(|_| numbers.next(-1.0, 1.0)).collect();
+        let bar: Vec<f64> = (0..5).map(|_| numbers.next(-1.0, 1.0)).collect();
+        let (mut forward, mut backward) = (vec![0.0; 5], vec![0.0; 5]);
+        with_cx(|cx| {
+            element
+                .jvp(&(), dt_s, &kelvin, &d, &mut forward, cx)
+                .unwrap();
+            element
+                .vjp(&(), dt_s, &kelvin, &bar, &mut backward, cx)
+                .unwrap();
+        });
+        let dot = |x: &[f64], y: &[f64]| -> f64 { x.iter().zip(y).map(|(x, y)| x * y).sum() };
+        let scale: f64 = forward
+            .iter()
+            .zip(&bar)
+            .map(|(x, y)| (x * y).abs())
+            .sum::<f64>()
+            + backward
+                .iter()
+                .zip(&d)
+                .map(|(x, y)| (x * y).abs())
+                .sum::<f64>();
+        let gap = (dot(&forward, &bar) - dot(&d, &backward)).abs() / scale;
+        worst = worst.max(gap);
+        assert!(
+            gap <= 64.0 * f64::EPSILON,
+            "case {case}: transpose gap {gap:e}"
+        );
+    }
+    eprintln!("largest relative gap between <J d, bar> and <d, J^T bar> over 200 cases: {worst:e}");
+}
+
+#[test]
+fn a_law_of_one_is_the_constant_matrix_to_the_bit_and_a_law_is_in_the_identity() {
+    /// The factor one with no slope.
+    #[derive(Debug)]
+    struct One;
+    impl ConductanceLaw for One {
+        fn factor(&self, _: f64, _: f64) -> Result<(f64, [f64; 2]), String> {
+            Ok((1.0, [0.0, 0.0]))
+        }
+        fn identity_words(&self, words: &mut Vec<u64>) {
+            words.push(1);
+        }
+    }
+    let constant = four_points();
+    let unit = four_points().following(Arc::new(One));
+    let mut numbers = Numbers(20_261_117);
+    for case in 0..100 {
+        let kelvin: Vec<f64> = (0..5).map(|_| numbers.next(250.0, 900.0)).collect();
+        let dt_s = numbers.next(1.0e-4, 10.0);
+        let (plain, plain_receipt) = stepped(&constant, dt_s, &kelvin);
+        let (scaled, scaled_receipt) = stepped(&unit, dt_s, &kelvin);
+        assert_eq!(bits(&plain), bits(&scaled), "case {case}");
+        assert_eq!(
+            bits(&[
+                plain_receipt.entropy_generated_j_per_k,
+                plain_receipt.energy_tolerance_j
+            ]),
+            bits(&[
+                scaled_receipt.entropy_generated_j_per_k,
+                scaled_receipt.energy_tolerance_j
+            ]),
+            "case {case}"
+        );
+    }
+    // A constant element's identity is its interface points alone; a law's words follow them.
+    let words = |element: &ConductanceMatrix| {
+        let mut words = Vec::new();
+        element.identity_words(&mut words);
+        words
+    };
+    let (plain, one, swept) = (
+        words(&constant),
+        words(&unit),
+        words(&four_points().following(Arc::new(SWEPT))),
+    );
+    // After the law's words comes the number of guard rows, here none.
+    assert_eq!(plain.len(), 1 + 4 * 13);
+    assert_eq!(
+        (&one[..plain.len()], &one[plain.len()..]),
+        (&plain[..], &[1, 0][..])
+    );
+    assert_eq!(&swept[..plain.len()], &plain[..]);
+    assert_eq!(swept.len(), plain.len() + 5);
+    assert_ne!(one, swept);
+    // A guard row's twelve words follow that number, and two rows differ.
+    let guarded = |row: GuardRow| {
+        let element = four_points().following(Arc::new(SWEPT));
+        words(&element.guarded_at(vec![row]).unwrap())
+    };
+    let (first, second) = (guarded(facing(0, 1)), guarded(facing(2, 1)));
+    let law_end = swept.len() - 1;
+    assert_eq!(
+        (&first[..law_end], first[law_end], first.len()),
+        (&swept[..law_end], 1, swept.len() + 12)
+    );
+    assert_ne!(first, second);
+}
+
+#[test]
+fn a_law_with_no_answer_refuses_the_step_and_nothing_is_clamped() {
+    let narrow = Authored {
+        ceiling_k: 400.0,
+        ..SWEPT
+    };
+    let element = four_points().following(Arc::new(narrow));
+    let propose = |element: &ConductanceMatrix, kelvin: &[f64]| {
+        let mut loads = vec![0.0; 5];
+        with_cx(|cx| element.propose(&(), 1.0, kelvin, &mut (), &mut loads, cx))
+    };
+    // The law is asked at the interface points, at the temperatures interpolated there. A trace
+    // point above the ceiling that reaches every interface point through a mean below it is
+    // answered; the first interface point reads trace point 0 alone, and there the law has none.
+    assert!(propose(&element, &[300.0, 320.0, 340.0, 360.0, 380.0]).is_ok());
+    assert!(propose(&element, &[300.0, 320.0, 450.0, 360.0, 380.0]).is_ok());
+    match propose(&element, &[450.0, 320.0, 340.0, 360.0, 380.0]) {
+        Err(ElementError::Law { reason }) => {
+            assert!(
+                reason.contains("are not both between 200 K and 400 K"),
+                "{reason}"
+            );
+        }
+        other => panic!("a state outside the law: {other:?}"),
+    }
+    // A law that answers with a factor that is not positive is refused by the element.
+    let negative = Authored { a: -4.0, ..SWEPT };
+    match propose(
+        &four_points().following(Arc::new(negative)),
+        &[600.0, 600.0, 600.0, 300.0, 300.0],
+    ) {
+        Err(ElementError::Law { reason }) => {
+            assert!(reason.contains("is not positive and finite"), "{reason}");
+        }
+        other => panic!("a factor below zero: {other:?}"),
+    }
+    // Through the kernel: the step is refused and the lumps keep their temperatures.
+    let start = [450.0, 380.0, 300.0, 330.0];
+    let wall = ConductanceMatrix::new(
+        2,
+        2,
+        vec![
+            point(&[(0, 1.0)], &[(0, 1.0)], 0.5),
+            point(&[(1, 1.0)], &[(1, 1.0)], 0.2),
+        ],
+    )
+    .unwrap()
+    .following(Arc::new(narrow));
+    let (mut system, lumps) = lumps_through(wall, &start);
+    let refusal = with_cx(|cx| system.step(2.0, cx)).expect_err("450 K is above the law");
+    let said = format!("{refusal:?}");
+    eprintln!("the kernel's refusal: {said}");
+    assert!(
+        said.contains("are not both between 200 K and 400 K"),
+        "{said}"
+    );
+    assert_eq!(bits(&lump_kelvin(&system, lumps)), bits(&start));
+}
+
+/// Two traces of two lumps each, at `start` [K], bonded through `wall`: the sealed system and
+/// its two lump nodes.
+fn lumps_through(wall: ConductanceMatrix, start: &[f64; 4]) -> (System, [NodeId; 2]) {
+    let mut builder = SystemBuilder::new();
+    let a = builder
+        .add_with_tangent("a", Lumps::new(&[40.0, 55.0]), start[..2].to_vec())
+        .unwrap();
+    let b = builder
+        .add_with_tangent("b", Lumps::new(&[70.0, 25.0]), start[2..].to_vec())
+        .unwrap();
+    let wall = builder.add_with_tangent("wall", wall, ()).unwrap();
+    let (wall_a, wall_b) = (
+        builder.port(wall, "a").unwrap(),
+        builder.port(wall, "b").unwrap(),
+    );
+    builder
+        .bond(builder.port(a, "heat").unwrap(), wall_a)
+        .unwrap();
+    builder
+        .bond(wall_b, builder.port(b, "heat").unwrap())
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    assert!(system.guess(wall_a, &start[..2]));
+    assert!(system.guess(wall_b, &start[2..]));
+    (system, [a, b])
+}
+
+/// The four lumps' temperatures [K], trace a's first.
+fn lump_kelvin(system: &System, lumps: [NodeId; 2]) -> Vec<f64> {
+    lumps
+        .iter()
+        .flat_map(|&node| system.state::<Vec<f64>>(node).unwrap().clone())
+        .collect()
+}
+
+fn bits(values: &[f64]) -> Vec<u64> {
+    values.iter().map(|value| value.to_bits()).collect()
+}
+
+/// A guard row with the weight one on point `a` of trace a and point `b` of trace b.
+fn facing(a: usize, b: usize) -> GuardRow {
+    GuardRow {
+        a: [(a, 1.0), (a, 0.0), (a, 0.0)],
+        b: [(b, 1.0), (b, 0.0), (b, 0.0)],
+    }
+}
+
+#[test]
+fn a_guard_row_refuses_a_trace_point_that_the_interface_points_average_away() {
+    let narrow = Authored {
+        ceiling_k: 400.0,
+        ..SWEPT
+    };
+    // The one interface point reads the mean of each trace's two lumps. Lump 0 of a is above
+    // the law's ceiling and the mean of a, 390 K, is below it.
+    let start = [450.0, 330.0, 300.0, 330.0];
+    let wall = || {
+        let mean = [(0, 0.5), (1, 0.5)];
+        ConductanceMatrix::new(2, 2, vec![point(&mean, &mean, 0.5)])
+            .unwrap()
+            .following(Arc::new(narrow))
+    };
+    // Without guard rows the law is asked at the mean alone, and the step is taken.
+    let (mut unguarded, lumps) = lumps_through(wall(), &start);
+    with_cx(|cx| unguarded.step(2.0, cx)).expect("the mean is inside the law");
+    assert_ne!(bits(&lump_kelvin(&unguarded, lumps)), bits(&start));
+    // Guarded at the two pairs of lumps that face each other, the same state is refused
+    // through the kernel with the law's own reason, and the lumps keep their temperatures.
+    let guarded = wall().guarded_at(vec![facing(0, 0), facing(1, 1)]).unwrap();
+    let (mut system, lumps) = lumps_through(guarded, &start);
+    let refusal = with_cx(|cx| system.step(2.0, cx)).expect_err("lump 0 of a is above the law");
+    let said = format!("{refusal:?}");
+    eprintln!("the kernel's refusal at a guard row: {said}");
+    assert!(
+        said.contains("450 K and 300 K are not both between 200 K and 400 K"),
+        "{said}"
+    );
+    assert_eq!(bits(&lump_kelvin(&system, lumps)), bits(&start));
+    // Inside the law at every lump, the guarded wall steps as the unguarded one, to the bit:
+    // a guard row moves no heat.
+    let inside = [390.0, 330.0, 300.0, 330.0];
+    let (mut plain, plain_lumps) = lumps_through(wall(), &inside);
+    let guarded = wall().guarded_at(vec![facing(0, 0), facing(1, 1)]).unwrap();
+    let (mut watched, watched_lumps) = lumps_through(guarded, &inside);
+    with_cx(|cx| {
+        for _ in 0..10 {
+            plain.step(2.0, cx).unwrap();
+            watched.step(2.0, cx).unwrap();
+        }
+    });
+    assert_eq!(
+        bits(&lump_kelvin(&plain, plain_lumps)),
+        bits(&lump_kelvin(&watched, watched_lumps))
+    );
+    // Rows guard a law: without one they are refused, and a row's weights are an interface
+    // point's.
+    let lawless = ConductanceMatrix::new(2, 2, vec![point(&[(0, 1.0)], &[(0, 1.0)], 0.5)]).unwrap();
+    for (case, built, name) in [
+        (
+            "no law",
+            lawless.guarded_at(vec![facing(0, 0)]),
+            "guard rows",
+        ),
+        (
+            "outside",
+            wall().guarded_at(vec![facing(2, 0)]),
+            "weight's point",
+        ),
+        (
+            "sum",
+            wall().guarded_at(vec![GuardRow {
+                a: [(0, 0.5), (1, 0.4), (1, 0.0)],
+                ..facing(0, 0)
+            }]),
+            "weights' sum",
+        ),
+    ] {
+        match built {
+            Err(ElementError::Parameter { name: refused, .. }) => {
+                assert!(refused.contains(name), "{case}: {refused}");
+            }
+            other => panic!("{case}: {other:?}"),
+        }
+    }
+}
+
+/// The loads [W] into the wall of the kernel tests under `law`, written out point by point:
+/// each pair of lumps through its own point, and the two pairs' means through one between them.
+fn wall_loads(kelvin: &[f64], law: &Authored) -> [f64; 4] {
+    let rate = |conductance_w_k: f64, t_a: f64, t_b: f64| {
+        conductance_w_k * law.factor(t_a, t_b).expect("inside the law").0 * (t_a - t_b)
+    };
+    let own = [
+        rate(0.5, kelvin[0], kelvin[2]),
+        rate(0.2, kelvin[1], kelvin[3]),
+    ];
+    let shared = rate(
+        1.2,
+        0.5 * (kelvin[0] + kelvin[1]),
+        0.5 * (kelvin[2] + kelvin[3]),
+    );
+    [
+        own[0] + 0.5 * shared,
+        own[1] + 0.5 * shared,
+        -own[0] - 0.5 * shared,
+        -own[1] - 0.5 * shared,
+    ]
+}
+
+/// One backward-Euler step of the four lumps through that wall, all at once:
+/// `C (T' - T) / dt + L(T') = 0` by Newton, its Jacobian by central differences of the loads
+/// written out in `wall_loads`. Nothing of the element's own tangent is used.
+fn backward_euler_newton(capacity: &[f64; 4], old: &[f64], dt_s: f64, law: &Authored) -> Vec<f64> {
+    let residual = |new: &[f64]| -> Vec<f64> {
+        let loads = wall_loads(new, law);
+        (0..4)
+            .map(|i| capacity[i] * (new[i] - old[i]) / dt_s + loads[i])
+            .collect()
+    };
+    let mut new = old.to_vec();
+    for _ in 0..50 {
+        let now = residual(&new);
+        let mut jacobian = vec![0.0; 16];
+        for column in 0..4 {
+            let mut shifted = new.clone();
+            shifted[column] += 1.0e-4;
+            let up = residual(&shifted);
+            shifted[column] -= 2.0e-4;
+            let down = residual(&shifted);
+            for row in 0..4 {
+                jacobian[row * 4 + column] = (up[row] - down[row]) / 2.0e-4;
+            }
+        }
+        let update = solve(jacobian, now);
+        for (value, change) in new.iter_mut().zip(&update) {
+            *value -= change;
+        }
+        if update.iter().all(|change| change.abs() <= 1.0e-12) {
+            return new;
+        }
+    }
+    panic!("the monolithic Newton solve did not converge");
+}
+
+#[test]
+fn two_traces_of_lumps_through_a_law_driven_matrix_step_as_the_backward_euler_newton_solve() {
+    // Declared before the first run: the kernel's lumps within 1e-9 of the monolithic ones,
+    // relative, at every step.
+    const CLAIMED: f64 = 1.0e-9;
+    let capacity = [40.0, 55.0, 70.0, 25.0];
+    let points = vec![
+        point(&[(0, 1.0)], &[(0, 1.0)], 0.5),
+        point(&[(1, 1.0)], &[(1, 1.0)], 0.2),
+        point(&[(0, 0.5), (1, 0.5)], &[(0, 0.5), (1, 0.5)], 1.2),
+    ];
+    let wall = ConductanceMatrix::new(2, 2, points)
+        .unwrap()
+        .following(Arc::new(SWEPT));
+    let mut kelvin = vec![420.0, 380.0, 300.0, 330.0];
+    let dt_s = 2.0;
+    let mut builder = SystemBuilder::new();
+    let a = builder
+        .add_with_tangent("a", Lumps::new(&capacity[..2]), kelvin[..2].to_vec())
+        .unwrap();
+    let b = builder
+        .add_with_tangent("b", Lumps::new(&capacity[2..]), kelvin[2..].to_vec())
+        .unwrap();
+    let wall = builder.add_with_tangent("wall", wall, ()).unwrap();
+    let (wall_a, wall_b) = (
+        builder.port(wall, "a").unwrap(),
+        builder.port(wall, "b").unwrap(),
+    );
+    builder
+        .bond(builder.port(a, "heat").unwrap(), wall_a)
+        .unwrap();
+    builder
+        .bond(wall_b, builder.port(b, "heat").unwrap())
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    assert!(system.guess(wall_a, &kelvin[..2]));
+    assert!(system.guess(wall_b, &kelvin[2..]));
+    // The same four lumps with the wall's constant conductances, for what the law changes.
+    let mut unscaled = kelvin.clone();
+    let constant = Authored {
+        a: 0.0,
+        b: 0.0,
+        ..SWEPT
+    };
+    let monolithic = |old: &[f64], law: &Authored| backward_euler_newton(&capacity, old, dt_s, law);
+    let mut worst = 0.0_f64;
+    with_cx(|cx| {
+        for step in 0..50 {
+            system.step(dt_s, cx).unwrap();
+            kelvin = monolithic(&kelvin, &SWEPT);
+            unscaled = monolithic(&unscaled, &constant);
+            let state_a = system.state::<Vec<f64>>(a).unwrap();
+            let state_b = system.state::<Vec<f64>>(b).unwrap();
+            for (kernel, reference) in state_a.iter().chain(state_b).zip(&kelvin) {
+                let gap = (kernel - reference).abs() / reference;
+                worst = worst.max(gap);
+                assert!(
+                    gap <= CLAIMED,
+                    "step {step}: {kernel} against {reference} K"
+                );
+            }
+        }
+    });
+    // The law is felt: the same lumps through the constant wall end elsewhere.
+    let moved = kelvin
+        .iter()
+        .zip(&unscaled)
+        .map(|(with, without)| (with - without).abs())
+        .fold(0.0, f64::max);
+    eprintln!(
+        "law-driven wall against the monolithic Newton solve over 50 steps: largest relative difference {worst:e}; the law moves a lump by up to {moved} K from the constant wall's"
+    );
+    assert!(moved > 0.1, "the law changed the lumps by {moved} K only");
     let ledger = system.ledger();
     let stored: f64 = capacity.iter().sum::<f64>() * 400.0;
     assert!(ledger.energy_residual_j().abs() <= 1.0e-12 * stored);

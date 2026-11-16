@@ -77,7 +77,7 @@ use crate::ledger::Sum;
 mod node;
 pub use node::HeatNode;
 mod conductance_matrix;
-pub use conductance_matrix::{ConductanceMatrix, InterfacePoint};
+pub use conductance_matrix::{ConductanceLaw, ConductanceMatrix, GuardRow, InterfacePoint};
 mod controlled_source;
 pub use controlled_source::ControlledSource;
 mod dirac;
@@ -141,6 +141,13 @@ pub enum ElementError {
         /// What is wrong with it.
         what: &'static str,
     },
+    /// A law an element follows has no answer at the state it was asked for, for example a
+    /// temperature outside the validity of the card behind it. The step is refused; the state
+    /// is not clamped and the law is not extrapolated.
+    Law {
+        /// The law's own reason.
+        reason: String,
+    },
     /// Cancellation was requested.
     Cancelled,
 }
@@ -165,6 +172,7 @@ impl fmt::Display for ElementError {
                 "matrix is not positive definite: Cholesky pivot {pivot} is {value}"
             ),
             Self::Span { end, what } => write!(f, "the span given for end `{end}`: {what}"),
+            Self::Law { reason } => write!(f, "the law the element follows refused: {reason}"),
             Self::Cancelled => write!(f, "cancelled"),
         }
     }
