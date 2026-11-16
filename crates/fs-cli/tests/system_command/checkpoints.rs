@@ -465,6 +465,26 @@ fn a_saved_struck_mode_continues_alike_and_refuses_a_scene_whose_contact_changed
     each_changed_scene_is_refused_at(CHANGED_CONTACT_SCENES, 0.001);
 }
 
+/// The port-Hamiltonian oscillator changed one matrix entry at a time: its
+/// energy, its structure, its dissipation and its input.
+const CHANGED_PORT_HAMILTONIAN_SCENES: &str = r"
+port_hamiltonian_oscillator.json | [[4.0, 0.0], [0.0, 400.0]] | [[4.0, 0.0], [0.0, 410.0]]
+port_hamiltonian_oscillator.json | [[0.0, -1.0], [1.0, 0.0]] | [[0.0, -2.0], [2.0, 0.0]]
+port_hamiltonian_oscillator.json | [[1.5, 0.0], [0.0, 0.0]] | [[1.6, 0.0], [0.0, 0.0]]
+port_hamiltonian_oscillator.json | [[1.0], [0.0]] | [[1.1], [0.0]]
+";
+
+/// Claims, declared before the first run: the port-Hamiltonian oscillator,
+/// saved at 0.125 s and resumed by another process, reports byte for byte
+/// what one process reports that pauses at 0.125 s and goes on. Its
+/// checkpoint is refused by the same scene with another entry of its
+/// energy, its structure, its dissipation or its input matrix
+/// ([`CHANGED_PORT_HAMILTONIAN_SCENES`]).
+#[test]
+fn a_saved_port_hamiltonian_oscillator_continues_alike_and_refuses_changed_matrices() {
+    each_changed_scene_is_refused(CHANGED_PORT_HAMILTONIAN_SCENES);
+}
+
 /// Each line of `changes` (a scene, a passage and what replaces it) is a
 /// scene that its example's checkpoint, saved at 0.125 s, refuses.
 fn each_changed_scene_is_refused(changes: &str) {
@@ -495,12 +515,12 @@ fn each_changed_scene_is_refused_at(changes: &str, until_s: f64) {
 
 /// Claims, declared before the first run: a scene with a member that has no
 /// state codec is still refused a checkpoint, by that member's name, and no
-/// file is written. The scene is the port-Hamiltonian oscillator, whose
-/// `oscillator` has none.
+/// file is written. The scene is a damped pair with a thermal timeline for
+/// a lining, the one kind left with none.
 #[test]
 fn a_scene_with_a_member_with_no_codec_is_still_refused_by_that_members_name() {
-    let text = std::fs::read_to_string(example("port_hamiltonian_oscillator.json")).unwrap();
-    let scene = scratch("port_hamiltonian_oscillator.json", &text);
+    let text = std::fs::read_to_string(example("damped_pair_lining.json")).unwrap();
+    let scene = scratch("damped_pair_lining.json", &text);
     let checkpoint = scene.with_extension("fssnap");
     let (code, stdout, stderr) = run_binary(&[
         "--json",
@@ -511,11 +531,8 @@ fn a_scene_with_a_member_with_no_codec_is_still_refused_by_that_members_name() {
         "--checkpoint",
         checkpoint.to_str().unwrap(),
     ]);
-    eprintln!("oscillator: exit {code}: {}", stderr.trim_end());
+    eprintln!("lining: exit {code}: {}", stderr.trim_end());
     assert_eq!(code, 4, "{stdout}{stderr}");
-    assert!(
-        stderr.contains("`oscillator` has no state codec"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("`lining` has no state codec"), "{stderr}");
     assert!(!checkpoint.exists());
 }

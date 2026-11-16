@@ -20,6 +20,7 @@ use core::cell::RefCell;
 use core::num::NonZeroUsize;
 
 use fs_exec::Cx;
+use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_phs::linear_exact::{ExactZohWorkspace, PreparedExactZoh};
 use fs_phs::{PreparedStepError, arithmetic_rounding_floor};
 use fs_ports::StableId;
@@ -219,6 +220,12 @@ impl ExactPortHamiltonianComponent {
     #[must_use]
     pub fn system(&self) -> &PortHamiltonian {
         &self.system
+    }
+
+    /// Whether the system can name itself, which is what gives this owner a
+    /// state codec: its storage must ([`fs_phs::Storage::identity_words`]).
+    fn named(&self) -> bool {
+        self.system.identity_words(&mut Vec::new())
     }
 
     fn energy(&self, state: &[f64]) -> Result<f64, PhsComponentError> {
@@ -565,6 +572,66 @@ impl Component for ExactPortHamiltonianComponent {
             outputs[m + 1..].copy_from_slice(&scratch.end);
         }
         Ok(Proposal::Step(receipt))
+    }
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-system::phs_exact::ExactPortHamiltonianComponent",
+        state_family: "port-hamiltonian-state",
+        schema_grammar: "the owner's state coordinates, f64, in its own order",
+        codec_grammar: "the coordinate count, then each coordinate's bits",
+        codec_version: 1,
+    });
+
+    /// Refuses, writing nothing, for a system whose storage cannot name
+    /// itself, and for a state this owner does not hold: another count, a
+    /// coordinate that is not finite, or an energy that is not finite.
+    fn encode_state(&self, state: &Vec<f64>, words: &mut Vec<u64>) -> bool {
+        if !self.named() || self.energy(state).is_err() {
+            return false;
+        }
+        words.push(state.len() as u64);
+        words.extend(state.iter().map(|coordinate| coordinate.to_bits()));
+        true
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<Vec<f64>> {
+        let (&count, coordinates) = words.split_first()?;
+        if !self.named() || count != coordinates.len() as u64 {
+            return None;
+        }
+        let state: Vec<f64> = coordinates
+            .iter()
+            .map(|&bits| f64::from_bits(bits))
+            .collect();
+        self.energy(&state).is_ok().then_some(state)
+    }
+
+    /// The system's own identity ([`PortHamiltonian::identity_words`]: its
+    /// dimensions, `J`, `R`, `G`, its storage's words and its resistance
+    /// witness), then the two limits of the split budget and whether ends
+    /// are told. Nothing is appended for a system whose storage cannot name
+    /// itself; such a component has no state codec. The ports are in a
+    /// system's own description, and the scratch holds a handle on the same
+    /// storage, prepared steps and buffers, nothing that is not derived.
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        let Self {
+            system,
+            ports: _,
+            budget,
+            tells_ends,
+            scratch: _,
+        } = self;
+        let LinearSplitBudget {
+            max_modes,
+            max_omega_dt,
+        } = *budget;
+        if system.identity_words(words) {
+            words.extend([
+                max_modes as u64,
+                max_omega_dt.to_bits(),
+                u64::from(*tells_ends),
+            ]);
+        }
     }
 }
 

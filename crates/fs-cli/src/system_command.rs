@@ -562,8 +562,8 @@ held-input owner of fs-system:
                  and returns an effort. heat is routed like a damper's and
                  carries the work dissipation absorbs. Reports x0, x1, ...,
                  each port's returned mean and heat_w; adaptive tolerances
-                 name <element>.x<i>. Exact for held inputs only; no
-                 checkpoint codec.)
+                 name <element>.x<i>. Exact for held inputs only. Its state
+                 is saved by --checkpoint and resumed.)
 Rigid bodies in three dimensions joined by viscous connectors, stepped by the
 fs-mbd network owner. Vectors are [x, y, z] in world axes unless said
 otherwise; a body's principal axes are its own axes and its centre of mass
@@ -4361,7 +4361,7 @@ impl Device {
                 "{base}; a port_hamiltonian is stepped by the fs-system exact owner, whose map \
                  is exact only for inputs held over each step: inputs from other elements are \
                  the kernel's step means, so a coupled scene is not exact; quadratic storage \
-                 only, no nonlinear storage, switching or checkpoint codec"
+                 only, no nonlinear storage or switching"
             ));
         }
         if self

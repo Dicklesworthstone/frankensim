@@ -3147,6 +3147,41 @@ the same complete native trial and source-support admission as proposals;
 derivatives cannot succeed outside the original physical map's support.
 There are no finite-difference derivatives or substitute integration formulas.
 
+Snapshots. The owner has the state codec of fs-ports' `Component` when its
+system can name itself. The state is the coordinate count and each
+coordinate's bits. It is written, and read back, only as a state the owner
+holds: the system's count, finite coordinates and a finite energy. The
+identity is the system's own (`PortHamiltonian::identity_words` of fs-phs:
+its dimensions, `J`, `R`, `G`, its storage's words and its resistance
+witness), then the two limits of the split budget and whether ends are told.
+The ports are in a system's own description, and the scratch (a handle on
+the same storage, at most two prepared durations, buffers) holds nothing
+that is not derived. A system whose storage cannot name itself has no
+identity, and the owner then has no codec: `encode_state` writes nothing,
+`decode_state` refuses and `identity_words` appends nothing. Today that is
+every storage but fs-phs's `QuadraticStorage`. An exact quadratic part is
+not enough: the tests' shifted quadratic has one, and its energy and its
+evaluation error bound, both of which this owner reads, are its own. The
+owner shares its system's storage when it is built, so a plain quadratic
+storage is named through fs-phs's shared handle. Three tests in
+`tests/phs_exact.rs` (claims written before the first run; on that run all
+three failed, because the handle did not yet forward the storage's words):
+- the state is read back; no words, a word short, a word over, another count
+  and a coordinate that is not finite are refused and not written; an owner
+  on the shifted quadratic writes nothing, reads nothing and has no identity
+  words;
+- the identity is equal for a rebuild and for an owner whose scratch two
+  proposals at other durations have used, and a used owner and a fresh one
+  read the same words and step to the same bits; the identity differs for
+  another entry of the system, each of the two limits of the budget, and
+  ends that are told;
+- through `System::snapshot`: a system whose owner is on a plain quadratic
+  storage is written to a snapshot, and the same system with another `Q` is
+  another problem with other words; a system whose owner is on the shifted
+  quadratic is refused with `NoCodec { node: "owner" }`.
+Not tested here: a resume of such a snapshot (fs-cli's scene tests save and
+resume through the binary).
+
 The end of a step. The step is exact for a held input, not the midpoint rule,
 so the default `Component::end_of_step` promise (the midpoint relation) is not
 this owner's: its ports answer `EndOfStep::Untold`, and a system does not join

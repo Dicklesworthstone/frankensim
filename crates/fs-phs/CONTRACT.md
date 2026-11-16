@@ -4594,3 +4594,52 @@ coupled storage and off-diagonal resistance; exact zero-duration/loss limits;
 all exposed cancellation boundaries and atomic refusal/reuse; and cancellation
 requested inside original storage callbacks. Compilation and native execution
 remain separate validation requirements.
+
+## Identity words of a storage and of a system
+
+`Storage::identity_words(&self, words) -> bool` is a provided method, false by
+default. A storage appends the bits of everything it is and returns true only
+if two storages with the same words return the same value from every method
+of the trait. The words start with one that names the kind of storage, so
+that no two kinds write the same words. `QuadraticStorage` implements it: its
+kind, its size and every entry of `Q` (its sparsity pattern follows from
+`Q`). The shared handle that `PortHamiltonian::share_storage` puts in a
+storage's place forwards it: its own kind, then the shared storage's words,
+or nothing and false. A handle has a kind of its own because it is not the
+storage in every method (it leaves `coordinate_scale` at the default), and it
+must forward the method because fs-system's exact owner shares its system's
+storage when it is built: before the handle did, no owner's system could
+name itself, which the first run of the owner's tests showed. Every other
+storage of this crate keeps the default: the six others of `lib.rs`
+(`SeparableStorage`, `SumStorage`, `RelaxationStorage`,
+`DifferentialStorage`, `ReducedStorage`, `DuffingStorage`), the two that
+`linear_exact` puts around a borrowed storage (`MatchedStorage`,
+`Remainder`), `harmonic`'s `LocalQuadratic` and the eight circuit storages.
+So does a storage defined elsewhere until its author says otherwise. Of
+these, the sum, the relaxation, the differential and the reduced storage and
+the two of `linear_exact` hold another storage and do not forward the
+method, so a system on one of them has no words. A wrapper that forwards its
+methods to another storage has no identity until it forwards this one too.
+An exact quadratic part does not make a storage nameable: it may still shift
+its energy by a constant or declare its own evaluation error bound.
+
+`PortHamiltonian::identity_words(&self, words) -> bool` appends the two
+dimensions, every entry of `J`, `R` and `G`, the storage's words, and the
+resistance witness as a tag and then its matrix and its root, each run of
+entries behind its count. It returns false, appending nothing, for a storage
+that returns false: words for part of a system would name two systems alike.
+The system, the quadratic storage and the witness are each written out by a
+pattern with no rest, so a new field does not compile until it is bound or
+named as left out. A caller uses the words to tell one system from another;
+fs-system's exact owner does, for the identity of a durable snapshot.
+
+Two unit tests in `lib.rs`, module `system_identity`. The first (claims
+written before the first run): the words are equal for a system built again
+and different for another entry of `J`, of `R`, of `G` or of `Q`, a second
+port, another state count and a resistance witness; a Duffing oscillator,
+with a cubic term and with none, returns false and writes nothing, and so
+does a shared handle on it. The second (claims written after the first run
+had shown the gap above): a system that shares its storage, and the copy it
+shares it with, have the same words; they are not the bare system's; and
+they follow `Q`. The three items are additions: no other line of `lib.rs`
+or of `prepared/port_load.rs` changed with them.

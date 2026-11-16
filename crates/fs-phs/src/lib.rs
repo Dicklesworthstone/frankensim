@@ -219,6 +219,21 @@ pub trait Storage {
     fn midpoint_energy_remainder(&self, _a: &[f64], _b: &[f64], _midpoint: &[f64]) -> Option<f64> {
         None
     }
+
+    /// Appends to `words` the bits of everything this storage is, and returns
+    /// true: enough that two storages with the same words return the same
+    /// value from every method of this trait. Returns false, appending
+    /// nothing, where the storage cannot say that; that is the default. A
+    /// caller that tells one system from another by such words (a snapshot's
+    /// identity) then has none for a system on this storage. An exact
+    /// quadratic part is not enough to return true: a storage may still add
+    /// a constant to its energy or declare its own evaluation error bound.
+    /// The words start with one that names the kind of storage, so that no
+    /// two kinds write the same words. A wrapper that forwards its methods
+    /// to another storage must forward this one too, or it has no identity.
+    fn identity_words(&self, _words: &mut Vec<u64>) -> bool {
+        false
+    }
 }
 
 /// Quadratic storage `H = x^T Q x / 2` with `Q` symmetric PSD
@@ -329,6 +344,26 @@ impl Storage for QuadraticStorage {
 
     fn quadratic_part(&self) -> Option<linear_exact::QuadraticPart> {
         Some(linear_exact::QuadraticPart { matrix: self.q.clone(), exact: true })
+    }
+
+    /// A word for this kind of storage, the size, then every entry of `Q`.
+    /// Every method of this storage reads only the last two and the sparsity
+    /// pattern, and it keeps the trait's defaults for the rest (no
+    /// evaluation error bound, no discrete gradient rule, no coordinate
+    /// scale).
+    fn identity_words(&self, words: &mut Vec<u64>) -> bool {
+        let Self {
+            n,
+            q,
+            // Derived from `q`: where row `i`'s non-zero columns start.
+            starts: _,
+            // Derived from `q`: the non-zero columns of `Q` and `Q^T`, by
+            // `admitted`, the one place a storage is built.
+            cols: _,
+        } = self;
+        words.extend([u64::from_le_bytes(*b"quadrati"), *n as u64]);
+        words.extend(q.iter().map(|entry| entry.to_bits()));
+        true
     }
 
     fn hamiltonian(&self, x: &[f64]) -> f64 {
@@ -1346,6 +1381,49 @@ impl PortHamiltonian {
     #[must_use]
     pub fn resistance_witness(&self) -> Option<&ResistanceWitness> {
         self.resistance_witness.as_ref()
+    }
+
+    /// Appends to `words` the bits of everything this system is, for a caller
+    /// that must tell one system from another (a snapshot's identity), and
+    /// returns true: the two dimensions; every entry of `J`, `R` and `G`; the
+    /// storage's own words ([`Storage::identity_words`]); and the resistance
+    /// witness, as a tag and then its matrix and its root.
+    ///
+    /// Returns false, appending nothing, for a storage that cannot name
+    /// itself: words for part of a system would name two systems alike. The
+    /// fields are written out by a pattern with no rest.
+    pub fn identity_words(&self, words: &mut Vec<u64>) -> bool {
+        let Self {
+            n,
+            m,
+            j,
+            r,
+            g,
+            storage,
+            resistance_witness,
+        } = self;
+        let mut stored = Vec::new();
+        if !storage.identity_words(&mut stored) {
+            return false;
+        }
+        words.extend([*n as u64, *m as u64]);
+        for matrix in [j, r, g] {
+            words.push(matrix.len() as u64);
+            words.extend(matrix.iter().map(|entry| entry.to_bits()));
+        }
+        words.push(stored.len() as u64);
+        words.append(&mut stored);
+        match resistance_witness {
+            None => words.push(0),
+            Some(ResistanceWitness { matrix, root }) => {
+                words.push(1);
+                for part in [matrix, root] {
+                    words.push(part.len() as u64);
+                    words.extend(part.iter().map(|entry| entry.to_bits()));
+                }
+            }
+        }
+        true
     }
 
     /// Effort `∇H(x)` — the co-state used by `y = Gᵀ ∇H`.
@@ -6298,6 +6376,97 @@ mod quadratic_storage_pattern {
 /// `refused: {what}`, and claim nothing about definiteness. Planted negatives: a
 /// negative-definite `R` and a negative source-resistor term still report `NotPsd`; a
 /// non-finite source-resistor coefficient does not.
+#[cfg(test)]
+mod system_identity {
+    use super::{PortHamiltonian, QuadraticStorage, ResistanceWitness, duffing_oscillator};
+
+    const J: [f64; 4] = [0.0, 1.0, -1.0, 0.0];
+    const R: [f64; 4] = [0.4, 0.1, 0.1, 0.5];
+    const G: [f64; 2] = [1.0, -0.3];
+    const Q: [f64; 4] = [2.0, 0.3, 0.3, 3.0];
+
+    /// Two states, as many ports as `g` has columns, on a quadratic storage.
+    fn system(j: [f64; 4], r: [f64; 4], g: &[f64], q: [f64; 4]) -> PortHamiltonian {
+        let storage = QuadraticStorage::new(q.to_vec(), 2).unwrap();
+        PortHamiltonian::new(
+            2,
+            g.len() / 2,
+            j.to_vec(),
+            r.to_vec(),
+            g.to_vec(),
+            Box::new(storage),
+        )
+        .unwrap()
+    }
+
+    fn scalar() -> PortHamiltonian {
+        let storage = QuadraticStorage::new(vec![3.0], 1).unwrap();
+        PortHamiltonian::new(1, 1, vec![0.0], vec![2.0], vec![1.0], Box::new(storage)).unwrap()
+    }
+
+    fn words(system: &PortHamiltonian) -> Vec<u64> {
+        let mut words = Vec::new();
+        assert!(system.identity_words(&mut words));
+        words
+    }
+
+    /// Claims, declared before the first run. A system on a
+    /// `QuadraticStorage` names itself: its words are the same for one built
+    /// again, and differ for another entry of `J`, of `R`, of `G` or of `Q`,
+    /// a second port, another state count, and a resistance witness. A system
+    /// on a storage that does not name itself (a Duffing oscillator, with a
+    /// cubic term and with none) returns false and writes nothing.
+    #[test]
+    fn a_system_names_itself_only_on_a_storage_that_names_itself() {
+        let unchanged = words(&system(J, R, &G, Q));
+        assert_eq!(unchanged, words(&system(J, R, &G, Q)));
+        let witness =
+            ResistanceWitness::try_from_source_rows(1, vec![2.0], vec![2.0_f64.sqrt()]).unwrap();
+        let identities = [
+            unchanged,
+            words(&system([0.0, 2.0, -2.0, 0.0], R, &G, Q)),
+            words(&system(J, [0.4, 0.1, 0.1, 0.6], &G, Q)),
+            words(&system(J, R, &[1.0, -0.4], Q)),
+            words(&system(J, R, &[1.0, 0.2, -0.3, 0.7], Q)),
+            words(&system(J, R, &G, [2.0, 0.3, 0.3, 3.5])),
+            words(&scalar()),
+            words(&scalar().with_resistance_witness(witness).unwrap()),
+        ];
+        for (at, later) in identities.iter().enumerate() {
+            for earlier in &identities[..at] {
+                assert_ne!(later, earlier, "identity {at} is an earlier one");
+            }
+        }
+        for cubic in [5.0, 0.0] {
+            let mut none = Vec::new();
+            let mut unnamed = duffing_oscillator(1.0, 2.0, cubic, 0.3).unwrap();
+            assert!(!unnamed.identity_words(&mut none) && none.is_empty());
+            let handle = unnamed.share_storage();
+            assert!(!handle.identity_words(&mut none) && none.is_empty());
+            assert!(!unnamed.identity_words(&mut none) && none.is_empty());
+        }
+    }
+
+    /// Claims, declared after the first run of the package had shown the
+    /// gap: fs-system's exact owner shares its system's storage, and a
+    /// shared handle that did not forward the new method left that system
+    /// unnamed. A system that shares its storage, and the copy it shares it
+    /// with, have the same words; they are not the bare system's, since a
+    /// handle is another kind of storage; and they follow `Q`.
+    #[test]
+    fn a_shared_storage_handle_is_named_by_the_storage_it_shares() {
+        let mut original = system(J, R, &G, Q);
+        let bare = words(&original);
+        let copy = original.share_storage();
+        let shared = words(&original);
+        assert_eq!(shared, words(&copy));
+        assert_ne!(shared, bare);
+        let mut other = system(J, R, &G, [2.0, 0.3, 0.3, 3.5]);
+        let _copy = other.share_storage();
+        assert_ne!(shared, words(&other));
+    }
+}
+
 #[cfg(test)]
 mod refusal_labels {
     use super::{

@@ -689,5 +689,5 @@ flow and returns an effort. A one-state `flow_in` element with `energy`
 `[[k]]` and zero `structure` and `dissipation` follows a `spring` under the
 same end motion. Reports give `x0`, `x1`, ..., each port's returned mean
 (`p.velocity_m_s` here) and `heat_w`; adaptive runs name `oscillator.x0`,
-`oscillator.x1`, ... as state tolerances. The storage is quadratic only, and
-the element has no checkpoint codec.
+`oscillator.x1`, ... as state tolerances. The storage is quadratic only. The
+element's state is saved by `--checkpoint` and resumed.

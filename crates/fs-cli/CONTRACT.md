@@ -996,7 +996,8 @@ friction interface beside a `modal_structure`, is saved and resumed the
 same way now that the structure has a codec (under `modal_structure`,
 below). A scene with a member that has no codec is still refused a
 checkpoint, with exit 4 and no file, by that member's name:
-`port_hamiltonian_oscillator.json` by its `oscillator`. Not
+`damped_pair_lining.json` by its `lining`, a `thermal_timeline`, the one
+kind left with none. Not
 covered: a save at the scene's own
 next step boundary, after which a resumed run would be the run with no
 pause.
@@ -1694,9 +1695,18 @@ unknown account; a `flow_in` one-state element against the `spring` element
 under the same prescribed end; refusals of a non-skew J, an indefinite or
 asymmetric R and Q, wrong matrix shapes, text and non-finite entries, an
 unknown role or domain, a port named `heat`, a wrong state length, no ports,
-an unknown field and 65 states. Not covered: nonlinear storage, switching or
+an unknown field and 65 states. Its state has fs-system's codec, the
+coordinates bound to the four matrices, the split budget and the ends it
+tells, so `--checkpoint` saves it; the lowering builds a plain quadratic
+storage, which is the storage that names itself. Tests in
+`tests/system_command/checkpoints.rs` (claims written before the first
+run): `port_hamiltonian_oscillator.json`, saved at 0.125 s and resumed by
+another process, reports byte for byte what one process reports that pauses
+at 0.125 s and goes on; its checkpoint is refused by the same scene with
+another entry of its energy, its structure, its dissipation or its input
+matrix. Not covered: nonlinear storage, switching or
 contact, exactness when inputs come from other elements (they are the
-kernel's step means), checkpoints (no state codec), and the hydraulic domain.
+kernel's step means), and the hydraulic domain.
 
 A `rigid_network` is the first scene element that is a physics owner behind
 the Component contract and not a lumped law: it lowers to

@@ -865,3 +865,238 @@ fn an_exact_owner_is_not_joined_to_a_load_line_that_assumes_the_midpoint_relatio
     let told = sealed_on_a_slider(true).expect("a told end beside a midpoint slider is refused");
     assert!(told.contains("the port takes no end input"), "{told}");
 }
+
+// Snapshots: the state codec and the identity (plan 35517, design 35519).
+
+fn coupled_component(
+    owner: PortHamiltonian,
+    limits: LinearSplitBudget,
+) -> ExactPortHamiltonianComponent {
+    let ports = vec![
+        power("force", PortRole::EffortIn),
+        power("motion", PortRole::FlowIn),
+    ];
+    ExactPortHamiltonianComponent::new(owner, ports, limits).unwrap()
+}
+
+fn identity(component: &ExactPortHamiltonianComponent) -> Vec<u64> {
+    let mut words = Vec::new();
+    component.identity_words(&mut words);
+    words
+}
+
+/// Claims, declared before the first run. The owner writes its state as the
+/// coordinate count and each coordinate's bits, and reads the same state
+/// back. It refuses no words, a word short, a word over, another count and
+/// a coordinate that is not finite, and writes no such state. An owner on a
+/// storage that does not name itself has no codec: the shifted quadratic,
+/// which the owner admits and whose energy and error bound are its own,
+/// writes nothing, reads nothing and has no identity words.
+#[test]
+fn the_state_codec_reads_what_it_wrote_and_an_owner_on_an_unnamed_storage_has_none() {
+    let component = coupled_component(coupled_owner(), budget());
+    let state = vec![0.8, -0.3];
+    let mut words = Vec::new();
+    assert!(component.encode_state(&state, &mut words));
+    assert_eq!(words, [2, 0.8_f64.to_bits(), (-0.3_f64).to_bits()]);
+    assert_eq!(component.decode_state(&words), Some(state));
+    assert!(component.decode_state(&[]).is_none());
+    assert!(component.decode_state(&words[..2]).is_none());
+    assert!(
+        component
+            .decode_state(&[&words[..], &[0]].concat())
+            .is_none()
+    );
+    assert!(component.decode_state(&[3, words[1], words[2]]).is_none());
+    for unheld in [f64::NAN, f64::INFINITY] {
+        let read = component.decode_state(&[2, words[1], unheld.to_bits()]);
+        assert!(read.is_none(), "{unheld} was read");
+        let mut none = Vec::new();
+        assert!(!component.encode_state(&vec![0.8, unheld], &mut none) && none.is_empty());
+    }
+    let mut none = Vec::new();
+    assert!(!component.encode_state(&vec![0.8], &mut none) && none.is_empty());
+
+    for allowance in [None, Some(8.0 * f64::EPSILON)] {
+        let shifted = shifted_component(allowance);
+        assert!(!shifted.encode_state(&vec![1.0], &mut none) && none.is_empty());
+        assert!(shifted.decode_state(&[1, 1.0_f64.to_bits()]).is_none());
+        assert!(identity(&shifted).is_empty());
+    }
+}
+
+/// One proposal's candidate and outputs, as bits.
+fn stepped(
+    component: &ExactPortHamiltonianComponent,
+    old: &[f64],
+    dt_s: f64,
+    inputs: [f64; 3],
+) -> Vec<u64> {
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        let (mut next, mut outputs) = (vec![17.0; 2], [23.0; 3]);
+        component
+            .propose(&old.to_vec(), dt_s, &inputs, &mut next, &mut outputs, cx)
+            .unwrap();
+        bits(&next).into_iter().chain(bits(&outputs)).collect()
+    })
+}
+
+/// Claims, declared before the first run. The identity is the same for an
+/// owner built again and for one whose scratch two proposals at other
+/// durations have used, and a used owner and a fresh one read the same
+/// words and step to the same bits. The identity differs for another entry
+/// of the system, each of the two limits of the split budget, and ends that
+/// are told.
+#[test]
+fn the_identity_follows_the_system_and_the_budget_and_not_the_scratch() {
+    let fresh = coupled_component(coupled_owner(), budget());
+    let used = coupled_component(coupled_owner(), budget());
+    let _ = stepped(&used, &[-0.3, 0.2], 0.025, [-0.7, 0.6, 290.0]);
+    let _ = stepped(&used, &[0.9, 0.1], 0.05, [0.1, 0.2, 305.0]);
+    assert_eq!(identity(&fresh), identity(&used));
+    let mut words = Vec::new();
+    assert!(fresh.encode_state(&vec![0.4, -0.7], &mut words));
+    let inputs = [0.3, -0.2, 310.0];
+    let reference = stepped(&fresh, &fresh.decode_state(&words).unwrap(), 0.1, inputs);
+    let again = stepped(&used, &used.decode_state(&words).unwrap(), 0.1, inputs);
+    assert_eq!(again, reference);
+
+    let other_system = PortHamiltonian::new(
+        2,
+        2,
+        vec![0.0, 1.0, -1.0, 0.0],
+        vec![0.4, 0.1, 0.1, 0.6],
+        vec![1.0, 0.2, -0.3, 0.7],
+        Box::new(QuadraticStorage::new(vec![2.0, 0.3, 0.3, 3.0], 2).unwrap()),
+    )
+    .unwrap();
+    let fewer_modes = LinearSplitBudget {
+        max_modes: 32,
+        ..budget()
+    };
+    let narrower_band = LinearSplitBudget {
+        max_omega_dt: 0.5,
+        ..budget()
+    };
+    let told = coupled_component(coupled_owner(), budget())
+        .publishing_ends()
+        .unwrap();
+    let identities = [
+        identity(&fresh),
+        identity(&coupled_component(other_system, budget())),
+        identity(&coupled_component(coupled_owner(), fewer_modes)),
+        identity(&coupled_component(coupled_owner(), narrower_band)),
+        identity(&told),
+    ];
+    assert!(!identities[0].is_empty());
+    for (at, later) in identities.iter().enumerate() {
+        for earlier in &identities[..at] {
+            assert_ne!(later, earlier, "identity {at} is an earlier one");
+        }
+    }
+}
+
+// A snapshot through the kernel. The three helpers are those of
+// tests/snapshots.rs.
+use fs_blake3::identity::CanonicalLimits;
+use fs_exec::solver::snapshot_v2::{
+    ExpectedResumeContextV2, PausedSnapshotBoundaryV2, SnapshotAlgorithmIdV2,
+    SnapshotBudgetStateIdV2, SnapshotDeterminismV2, SnapshotExecutionFingerprintIdV2,
+    SnapshotLimitsV2, SnapshotPauseRequestIdV2, SnapshotProvenanceIdV2, SnapshotRngCounterIdV2,
+};
+use fs_exec::{DrainTracker, RunId};
+use fs_system::SystemImage;
+
+fn limits() -> SnapshotLimitsV2 {
+    SnapshotLimitsV2::new(
+        1 << 22,
+        4_096,
+        CanonicalLimits::new(16_384, 4_096, 32, 32, 64),
+        1 << 16,
+        1 << 22,
+        4_096,
+    )
+}
+
+fn paused() -> PausedSnapshotBoundaryV2 {
+    let gate = CancelGate::new_clock_free();
+    let tracker = DrainTracker::new(RunId(17), &gate);
+    let worker = tracker.register_worker().expect("worker registers");
+    gate.request();
+    drop(worker);
+    let report = tracker.finalize().expect("run drained");
+    PausedSnapshotBoundaryV2::from_drain_report(
+        report,
+        SnapshotPauseRequestIdV2::from_bytes([0x5A; 32]),
+        1,
+    )
+}
+
+fn context(system: &System) -> ExpectedResumeContextV2 {
+    ExpectedResumeContextV2::for_paused_state::<SystemImage>(
+        SnapshotAlgorithmIdV2::from_bytes([0xA1; 32]),
+        1,
+        system.problem_id(),
+        SnapshotRngCounterIdV2::from_bytes([0; 32]),
+        SnapshotDeterminismV2::Deterministic,
+        SnapshotExecutionFingerprintIdV2::from_bytes([0xE1; 32]),
+        SnapshotBudgetStateIdV2::from_bytes([0xB1; 32]),
+        SnapshotProvenanceIdV2::from_bytes([0xC1; 32]),
+        paused(),
+    )
+}
+
+/// The device of [`heated_device`] around `component`, a one-port owner, at
+/// `state`.
+fn device_of(component: ExactPortHamiltonianComponent, state: Vec<f64>) -> System {
+    let mut builder = SystemBuilder::new();
+    let owner = builder.add_with_tangent("owner", component, state).unwrap();
+    let body = builder
+        .add_with_tangent("body", HeatCapacity::new(10.0).unwrap(), 300.0)
+        .unwrap();
+    builder
+        .boundary(
+            builder.port(owner, "p").unwrap(),
+            Box::new(|_, _, values| values[0] = 0.9),
+        )
+        .unwrap();
+    let heat = builder.port(owner, "heat").unwrap();
+    builder
+        .bond(builder.port(body, "heat").unwrap(), heat)
+        .unwrap();
+    builder.seal().unwrap()
+}
+
+/// A one-port owner on a plain quadratic storage `[[q]]`.
+fn scalar_component(q: f64) -> ExactPortHamiltonianComponent {
+    let storage = QuadraticStorage::new(vec![q], 1).unwrap();
+    let owner =
+        PortHamiltonian::new(1, 1, vec![0.0], vec![2.0], vec![1.0], Box::new(storage)).unwrap();
+    ExactPortHamiltonianComponent::new(owner, vec![power("p", PortRole::EffortIn)], budget())
+        .unwrap()
+}
+
+/// Claims, declared before the first run (the second condition of 35520). A
+/// system whose owner is on a plain quadratic storage is written to a
+/// snapshot, and the same system on a storage with another `Q` is another
+/// problem and has other identity words. A system whose owner is on the
+/// shifted quadratic, which the owner admits, is refused a snapshot by the
+/// owner's name.
+#[test]
+fn a_snapshot_is_refused_by_the_name_of_an_owner_whose_storage_cannot_name_itself() {
+    let plain = device_of(scalar_component(3.0), vec![0.8]);
+    assert!(plain.snapshot(&context(&plain), limits(), || false).is_ok());
+    let other = device_of(scalar_component(3.5), vec![0.8]);
+    assert_ne!(plain.problem_id(), other.problem_id());
+    assert_ne!(
+        identity(&scalar_component(3.0)),
+        identity(&scalar_component(3.5))
+    );
+
+    // Admitted by the owner (`shifted_component` builds it), and unnamed.
+    let shifted = device_of(shifted_component(None), vec![1.0]);
+    let error = shifted
+        .snapshot(&context(&shifted), limits(), || false)
+        .expect_err("an owner with no codec");
+    assert_eq!(format!("{error:?}"), r#"NoCodec { node: "owner" }"#);
+}

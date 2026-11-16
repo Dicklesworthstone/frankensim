@@ -25,6 +25,20 @@ impl Storage for SharedStorage {
     fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
         self.0.midpoint_energy_remainder(a, b, mid)
     }
+    // A handle on a storage that names itself: a word for this kind, then
+    // the shared storage's own words. The kind is written because the handle
+    // is not the storage in every method: it leaves `coordinate_scale` at
+    // the default. A handle on a storage that cannot name itself cannot.
+    fn identity_words(&self, words: &mut Vec<u64>) -> bool {
+        let kept = words.len();
+        words.push(u64::from_le_bytes(*b"shared\0\0"));
+        if self.0.identity_words(words) {
+            true
+        } else {
+            words.truncate(kept);
+            false
+        }
+    }
 }
 
 impl PortHamiltonian {
