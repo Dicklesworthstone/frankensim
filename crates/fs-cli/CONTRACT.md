@@ -1015,11 +1015,18 @@ friction interface beside a `modal_structure`, is saved and resumed the
 same way now that the structure has a codec (under `modal_structure`,
 below). A scene with a member that has no codec is still refused a
 checkpoint, with exit 4 and no file, by that member's name:
-`damped_pair_lining.json` by its `lining`, a `thermal_timeline`, the one
-kind left with none. Not
-covered: a save at the scene's own
-next step boundary, after which a resumed run would be the run with no
-pause.
+`n2_gas_spring.json` by its `spring`, a `gas_cavity`. (This paragraph said
+since 348d828a3b that `thermal_timeline` was the one kind left with none.
+That was wrong: no run of every example stood behind it.) Every other example
+is saved and resumed by a test of `tests/system_command/checkpoints.rs`: 27 by
+`checkpoint_continuation`, at a pause that cuts a step, and the rest by
+`every_other_example_saved_at_a_whole_step_and_resumed_reports_what_its_plain_run_reports`.
+That test reads the directory, runs each scene not named in its list with
+`--until T --whole-steps --checkpoint` (T is 0.125 s, or half the duration
+of a scene shorter than 0.25 s) and resumes it in another process to the
+bytes of the binary's report with no pause; it saved 15 scenes when it was
+written, and a scene added to the directory is saved by it. Whether a scene
+kind that no example uses has a codec is not shown by these tests.
 
 Tests in `tests/system_command.rs`:
 - A 2 kg puck on a 1 cm patch under 10 N, sliding from 1 m/s without
@@ -1590,7 +1597,14 @@ gate on each step. The kernel keeps `'static` states and the timeline
 borrows its laws, so the laws are leaked for the life of the process.
 Reports: each cell's `temperature_k` and `specific_enthalpy_j_kg`, and with
 an environment port `environment_heat_w`. Adaptive stepping refuses it
-(exit 3) and `--checkpoint` refuses it (no state codec, exit 4, no file).
+(exit 3). Its state has fs-thermal's codec: the timeline keeps the simulation
+it steps, and a law is named by its caloric identity, so `--checkpoint` saves
+it. `tests/system_command/checkpoints.rs` saves `damped_pair_lining.json` at
+0.125 s and resumes it to the report of a run that pauses there, and its
+checkpoint is refused by the scene with another law chart, link conductance,
+cell geometry or step limit; `timeline.rs` saves the contact-and-film scene
+at 4 s with `--whole-steps`, where the link an event made is active, and
+resumes it to the plain run's report.
 Tests in `tests/system_command/timeline.rs`: two cells joined inside the
 timeline with a 50 W heater on one port, against the owner's explicit
 recursion to 1e-9 K and the continuous solution to 0.01 K, every heater
@@ -1601,7 +1615,7 @@ at 6 s and a film switched on at 8 s, against the recursion at every
 sample; the fs-mbd damped pair (`examples/system/damped_pair_lining.json`)
 routing its connector heat into a three-cell steel lining, whose stored
 change is the pair's closed-form heat `2 (1 - exp(-1.4 t))` J to 1e-9 J;
-nine input refusals and the checkpoint refusal. No claim: authored charts
+nine input refusals. No claim: authored charts
 confer no material-pack provenance; the entropy generated inside a timeline
 is reported as zero, so the scene's entropy totals are a lower bound; every
 cell is born at the start; the owner's implicit conduction graphs, radiation,

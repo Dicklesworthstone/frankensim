@@ -155,7 +155,7 @@ pub(super) fn timeline(
         .map_err(|error| format!("{what}: {error}"))?;
     let ports = component.ports().to_vec();
     let node = builder
-        .add(name, component, state)
+        .add(name, component.restoring(&simulation), state)
         .map_err(|error| Refusal::Admission(error.to_string()))?;
     Ok(Parts {
         node,

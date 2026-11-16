@@ -122,6 +122,11 @@
 //! (step-doubling) and staged variants are not wrapped; the owner's own
 //! accuracy statements are unchanged by the wrapping.
 //!
+//! A timeline built with [`ThermalTimeline::restoring`] has a state codec for
+//! the kernel's durable snapshots; see that method for what names it and what
+//! a restored state must be. A timeline built without it, and an implicit
+//! one, has none.
+//!
 //! [`EnergyAudit`]: crate::enthalpy::EnergyAudit
 
 use core::fmt;
@@ -132,6 +137,7 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 use fs_exec::Cx;
+use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_la::tridiagonal::TridiagonalError;
 use fs_ports::StableId;
 use fs_ports::component::{
@@ -543,6 +549,9 @@ pub struct ThermalTimeline<'a> {
     end_temperatures: bool,
     ports: Vec<PortSpec>,
     laws: PhantomData<&'a ()>,
+    /// Set by [`Self::restoring`]: a simulation on the timeline whose states
+    /// this one saves and resumes.
+    restores: Option<TimelineState<'a>>,
 }
 
 impl<'a> ThermalTimeline<'a> {
@@ -582,6 +591,7 @@ impl<'a> ThermalTimeline<'a> {
             end_temperatures: false,
             ports,
             laws: PhantomData,
+            restores: None,
         })
     }
 
@@ -673,6 +683,58 @@ impl<'a> ThermalTimeline<'a> {
         Ok(self)
     }
 
+    /// Also keep the timeline `simulation` is on (its schedule, its laws,
+    /// their slope bounds and its budget), so that a state on that timeline
+    /// can be saved in a durable snapshot and resumed. Give the simulation
+    /// given to [`Self::start`], or any state the owner derived from it.
+    ///
+    /// The snapshot then names this timeline by its ports, its published
+    /// cells, its step configuration and the kept timeline's own words
+    /// ([`DepositionSimulation::identity_words`]), where a law is named by
+    /// its caloric identity. A saved state is the owner's time, schedule
+    /// cursor, cells and links ([`DepositionSimulation::state_words`]); none
+    /// of them is taken from the kept simulation when a state is restored.
+    ///
+    /// Without this, with an implicit driver, or with a law that has no
+    /// caloric identity, the timeline has no state codec, and a system that
+    /// holds it refuses a snapshot by its name.
+    #[must_use]
+    pub fn restoring(mut self, simulation: &DepositionSimulation<'a>) -> Self {
+        self.restores = Some(TimelineState {
+            simulation: simulation.clone(),
+        });
+        self
+    }
+
+    /// The timeline whose states have a codec: the one [`Self::restoring`]
+    /// kept, for the explicit driver, when every law on it names itself.
+    fn kept(&self) -> Option<&DepositionSimulation<'a>> {
+        let (Driver::Explicit, Some(kept)) = (&self.driver, &self.restores) else {
+            return None;
+        };
+        kept.simulation
+            .identity_words(&mut Vec::new())
+            .then_some(&kept.simulation)
+    }
+
+    /// What a simulation must be for this timeline to carry it: every cell
+    /// with a port or a published temperature active and, without an
+    /// `environment` port, no boundary that exchanges heat.
+    fn carries(&self, simulation: &DepositionSimulation<'a>) -> Result<(), TimelineRefusal> {
+        if let Some(cell) = self
+            .cells
+            .iter()
+            .chain(&self.published)
+            .find(|cell| !simulation.cells().contains_key(cell))
+        {
+            return Err(TimelineRefusal::InactiveCell { cell: cell.0 });
+        }
+        if let (false, Some(cell)) = (self.environment, exchanging_cell(simulation)) {
+            return Err(TimelineRefusal::Boundary { cell });
+        }
+        Ok(())
+    }
+
     /// The state to hand to the kernel: `simulation` with the events
     /// scheduled at its current time applied (the births a run starts
     /// with).
@@ -702,17 +764,7 @@ impl<'a> ThermalTimeline<'a> {
                 simulation.clone()
             }
         };
-        if let Some(cell) = self
-            .cells
-            .iter()
-            .chain(&self.published)
-            .find(|cell| !started.cells().contains_key(cell))
-        {
-            return Err(TimelineRefusal::InactiveCell { cell: cell.0 });
-        }
-        if let (false, Some(cell)) = (self.environment, exchanging_cell(&started)) {
-            return Err(TimelineRefusal::Boundary { cell });
-        }
+        self.carries(&started)?;
         Ok(TimelineState {
             simulation: started,
         })
@@ -1011,5 +1063,77 @@ impl<'a> Component for ThermalTimeline<'a> {
             residual: solve.0,
             tolerance: solve.1,
         }))
+    }
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-thermal::component::ThermalTimeline",
+        state_family: "enthalpy-timeline-state",
+        schema_grammar: "the owner's time, schedule cursor, active cells and links",
+        codec_grammar: "DepositionSimulation::state_words: the time's bits, the cursor, \
+                        the cell count and 21 words a cell, the link count and 7 words a link",
+        codec_version: 1,
+    });
+
+    /// Refuses, writing nothing, for a timeline with no codec (see
+    /// [`ThermalTimeline::restoring`]) and for a state that is not on the
+    /// timeline it keeps.
+    fn encode_state(&self, state: &TimelineState<'a>, words: &mut Vec<u64>) -> bool {
+        let Some(kept) = self.kept() else {
+            return false;
+        };
+        if !kept.shares_timeline(&state.simulation) {
+            return false;
+        }
+        state.simulation.state_words(words);
+        true
+    }
+
+    /// The state on the kept timeline that the words stand for, when the
+    /// owner admits it ([`DepositionSimulation::restored`]) and it is a
+    /// state of this timeline: no event due at or before its time, and what
+    /// [`ThermalTimeline::start`] asks of its cells and boundaries.
+    fn decode_state(&self, words: &[u64]) -> Option<TimelineState<'a>> {
+        let simulation = self.kept()?.restored(words)?;
+        let due = simulation
+            .next_event_time_s()
+            .is_some_and(|event_s| event_s <= simulation.time_s());
+        (!due && self.carries(&simulation).is_ok()).then_some(TimelineState { simulation })
+    }
+
+    /// Nothing at all for a timeline with no codec.
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        let Self {
+            cells,
+            environment,
+            published,
+            config,
+            driver,
+            end_temperatures,
+            // Derived from `cells`, `environment` and `published`.
+            ports: _,
+            // No data.
+            laws: _,
+            restores,
+        } = self;
+        let StepConfig {
+            max_dt_s,
+            energy_tolerance_j,
+        } = config;
+        // An implicit driver holds a conduction graph that cannot name
+        // itself, so only the explicit rule has words.
+        let (Driver::Explicit, Some(kept)) = (driver, restores) else {
+            return;
+        };
+        let start = words.len();
+        words.push(u64::from_le_bytes(*b"explicit"));
+        words.push(cells.len() as u64);
+        words.extend(cells.iter().map(|cell| cell.0));
+        words.push(published.len() as u64);
+        words.extend(published.iter().map(|cell| cell.0));
+        words.extend([u64::from(*environment), u64::from(*end_temperatures)]);
+        words.extend([max_dt_s.to_bits(), energy_tolerance_j.to_bits()]);
+        if !kept.simulation.identity_words(words) {
+            words.truncate(start);
+        }
     }
 }

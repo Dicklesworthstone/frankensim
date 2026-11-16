@@ -226,6 +226,54 @@ the step limit reads the bound without a trial step (a trial step would
 return the same bound). fs-thermal depends on fs-ports and fs-exec for this
 module only.
 
+Snapshots. A timeline built with `ThermalTimeline::restoring(&simulation)`
+has the state codec of fs-ports' `Component`, for the explicit rule only. It
+keeps the simulation it steps, because the schedule, the laws and the budget
+are in the owner's state and not in the wrapper. The owner writes its own
+words, in `enthalpy.rs`:
+- `DepositionSimulation::identity_words` names a timeline: its budget, each
+  law, and every scheduled event with every field. A law is named by its
+  `ThermalLaw::caloric_identity()`, with its storage basis and the slope bound
+  admitted when the timeline was built. A timeline with a law that returns
+  `None` has no words and no codec. The codec relies on the law author's
+  caloric identity covering the five methods the explicit timeline calls
+  (`temperature_k`, `validate_cell`, `maximum_temperature_slope`,
+  `storage_basis`, `caloric_identity`), as the trait's doc defines it; it
+  does not check that. For fs-material's `EquilibriumEnthalpyPhaseCurve`, the
+  law fs-cli uses, it holds: the identity hashes the card identity and every
+  knot and is hashed again when the density law and the per-interval heat
+  capacities are set, which is all `temperature_k` and the slope bound read;
+  `validate_cell` keeps the default; `source_receipts` is not in the identity
+  and none of the five reads it.
+- `state_words` writes where a simulation stands: its time, its schedule
+  cursor, every cell with every field, and every link with every field and
+  the pair of areas it covers, which the state's equality does not see.
+- `restored` takes only the schedule, the laws, the slope bounds and the
+  budget from the kept simulation. It admits each saved cell as a birth and
+  each saved link as a contact through the owner's own admission, so no state
+  part comes from the kept simulation and there is no second copy of the
+  rules. A cell is therefore checked by its law's `validate_cell` at its
+  saved enthalpy, which the explicit rule does only at birth. Last it writes
+  the state it built again and refuses unless that gives back every word it
+  was given, so nothing admission does beyond inserting passes unseen.
+- `shares_timeline` is how `encode_state` refuses a state of another
+  timeline: the same shared schedule, laws and slope bounds, an equal budget.
+
+`DepositionSimulation` (in both writers), `DepositedCell`, `CellGeometry`,
+`Boundary`, `Reservoir`, `ThermalLink` and `DepositionBudget` are each written
+out by a pattern with no rest. The wrapper's `decode_state` also refuses a
+state with an event due at or before its time (a simulation before its start
+is a state the owner holds and not one the kernel does) and a state `start`
+would refuse. Its identity adds its ports, published cells and step
+configuration. No codec, and a snapshot refused by the node's name: a
+timeline built without `restoring`, an implicit one (its conduction graph
+borrows laws of six other traits that have no name), and one on a law with no
+caloric identity. The owner's methods and the wrapper's codec are tested in
+`crates/fs-system/tests/thermal_timeline_slice.rs`; the five tests are listed
+in `crates/fs-system/CONTRACT.md`. Not tested: a law whose `validate_cell`
+refuses an enthalpy the explicit rule reaches, which would refuse its own
+saved state.
+
 ## Shared immutable inputs across thermal candidates
 
 Every clone of the original `DepositionSimulation` shares its immutable

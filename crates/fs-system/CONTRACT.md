@@ -1666,6 +1666,25 @@ behind the contract), two linked cells with a law each.
   owner network marched alone bit for bit, the cells equal the owner
   timeline fed the same heat by hand to 1e-11 K, and every joule is in the
   cells or the sink to 1e-11.
+- Durable snapshots (`ThermalTimeline::restoring`), five tests on a test law
+  with a caloric identity. The owner's identity words are equal for a
+  timeline built again and differ for another law name, storage basis, slope
+  bound or budget limit, another field of a born cell or of a link, and
+  another time or kind of a later event; an unnamed law gives none. Its state
+  words are read back on a simulation still before its start, uneven covered
+  areas included; a state past a separation and a boundary change is read
+  back and goes on to the bits of the run never saved, also on a kept
+  simulation that still holds the link; fourteen kinds of words are refused.
+  The component writes and reads a state on the timeline it keeps, with an
+  identity that follows its ports, published cells, step limit, environment
+  port and timeline; it does not write a state of another timeline, and does
+  not read one with an event due, without a port cell, or with an exchanging
+  boundary and no environment port; with no kept timeline, on an unnamed law
+  and with an implicit driver it has no codec. Through `System::snapshot` and
+  `resume`, a system sealed past a separation is resumed by a second one
+  that held the start's link: it then holds the two cells and no link, and
+  both go on to the same bits; a timeline that keeps none is refused with
+  `NoCodec { node: "cells" }`.
 - The implicit driver (`ThermalTimeline::implicit`), backward Euler and
   SDIRK2: a quarter-second step conforms and equals the owner's own solve
   with the rates held (one interval, cells to 1e-11 K), backward Euler also

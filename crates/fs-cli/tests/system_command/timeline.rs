@@ -248,6 +248,19 @@ fn a_contact_made_and_broken_and_a_film_switched_on_take_effect_at_their_times()
         value(&json, "\"totals\"", "energy_residual_j").abs() < 1.0e-9,
         "{json}"
     );
+    // Saved at 4 s, where the link the event made is active and its
+    // separation and the film are still ahead, and resumed by another
+    // process, the run reports what the run with no pause reports.
+    let (scene, checkpoint) = (path.to_str().unwrap(), path.with_extension("fssnap"));
+    let checkpoint = checkpoint.to_str().unwrap();
+    let save = ["--until", "4", "--whole-steps", "--checkpoint", checkpoint];
+    let (code, prefix, stderr) = run_binary(&[&["--json", "system", scene], &save[..]].concat());
+    assert_eq!(code, 0, "{stderr}");
+    let root = prefix.split_once("\"resume_root\":\"").unwrap().1;
+    let resume = ["--resume", checkpoint, "--resume-root", &root[..64]];
+    let (code, resumed, stderr) = run_binary(&[&["--json", "system", scene], &resume[..]].concat());
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(resumed, json);
 }
 
 #[test]
@@ -285,7 +298,7 @@ fn the_damped_pair_heats_a_lining_of_enthalpy_cells_with_its_closed_form_heat() 
 }
 
 #[test]
-fn thermal_timelines_refuse_bad_declarations_adaptive_steps_and_checkpoints_by_name() {
+fn thermal_timelines_refuse_bad_declarations_and_adaptive_steps_by_name() {
     let scene = heated_pair();
     let first = cell(0, 1.0, 300.0, "");
     let cells = format!("{}, {}", first, cell(1, 2.0, 290.0, ""));
@@ -353,18 +366,4 @@ fn thermal_timelines_refuse_bad_declarations_adaptive_steps_and_checkpoints_by_n
         assert_eq!(code, 3, "{name}: {stderr}");
         assert!(stderr.contains(reason), "{name}: {stderr}");
     }
-    // The owner has no state codec: a checkpoint is refused, with no file.
-    let path = scratch("checkpointed.json", &scene);
-    let checkpoint = path.with_extension("fssnap");
-    let (code, stdout, stderr) = run_binary(&[
-        "system",
-        path.to_str().unwrap(),
-        "--until",
-        "1.0",
-        "--checkpoint",
-        checkpoint.to_str().unwrap(),
-    ]);
-    assert_eq!(code, 4, "{stdout}{stderr}");
-    assert!(stderr.contains("bar"), "{stderr}");
-    assert!(!checkpoint.exists());
 }

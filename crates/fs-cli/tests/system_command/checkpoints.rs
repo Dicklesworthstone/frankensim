@@ -611,26 +611,122 @@ fn each_changed_scene_is_refused_at(changes: &str, until_s: f64) {
     }
 }
 
+/// The damped pair's lining changed one passage at a time: its law's chart,
+/// a link's conductance, a cell's geometry and its step limit.
+const CHANGED_TIMELINE_SCENES: &str = r#"
+damped_pair_lining.json | [100000.0, 450.0, 0.0, 7850.0] | [100000.0, 460.0, 0.0, 7850.0]
+damped_pair_lining.json | {"a": 1, "b": 2, "conductance_w_k": 1.0 | {"a": 1, "b": 2, "conductance_w_k": 1.5
+damped_pair_lining.json | "end_m": [0.03, 0.0, 0.0] | "end_m": [0.035, 0.0, 0.0]
+damped_pair_lining.json | "max_step_s": 0.125 | "max_step_s": 0.1
+"#;
+
+/// Claims, declared before the first run: the damped pair with a thermal
+/// timeline for a lining, saved at 0.125 s and resumed by another process,
+/// reports byte for byte what one process reports that pauses at 0.125 s and
+/// goes on, and its checkpoint is refused by the same scene with another
+/// law chart, link conductance, cell geometry or step limit of the lining.
+#[test]
+fn a_saved_thermal_timeline_continues_alike_and_refuses_a_changed_lining() {
+    each_changed_scene_is_refused(CHANGED_TIMELINE_SCENES);
+}
+
 /// Claims, declared before the first run: a scene with a member that has no
 /// state codec is still refused a checkpoint, by that member's name, and no
-/// file is written. The scene is a damped pair with a thermal timeline for
-/// a lining, the one kind left with none.
+/// file is written. The scene is a piston on a `gas_cavity`, a kind with
+/// none; it runs in place, beside the packs it reads.
 #[test]
 fn a_scene_with_a_member_with_no_codec_is_still_refused_by_that_members_name() {
-    let text = std::fs::read_to_string(example("damped_pair_lining.json")).unwrap();
-    let scene = scratch("damped_pair_lining.json", &text);
-    let checkpoint = scene.with_extension("fssnap");
+    let checkpoint = scratch("n2_gas_spring.json", "").with_extension("fssnap");
     let (code, stdout, stderr) = run_binary(&[
         "--json",
         "system",
-        scene.to_str().unwrap(),
+        &example("n2_gas_spring.json"),
         "--until",
         "0.125",
         "--checkpoint",
         checkpoint.to_str().unwrap(),
     ]);
-    eprintln!("lining: exit {code}: {}", stderr.trim_end());
+    eprintln!("spring: exit {code}: {}", stderr.trim_end());
     assert_eq!(code, 4, "{stdout}{stderr}");
-    assert!(stderr.contains("`lining` has no state codec"), "{stderr}");
+    assert!(stderr.contains("`spring` has no state codec"), "{stderr}");
     assert!(!checkpoint.exists());
+}
+
+/// The examples the tests above save and resume by `checkpoint_continuation`
+/// (27 scenes), and the one the test above shows refused.
+const SAVED_ABOVE_OR_REFUSED: &str = "adaptive_oscillator adaptive_suspension \
+    adaptive_viscoelastic_mount anisotropic_damping bowed_mode carreau_pipe damped_pair \
+    damped_pair_lining dragged_lining phase_change_conduction phase_change_store \
+    port_hamiltonian_oscillator projected_suspension self_heating_damper spun_puck \
+    steel316_blocks_trace steel316_enthalpy_bar steel316_heated_bar stribeck_block struck_mode \
+    two_blocks_atkins two_blocks_atkins_following two_slabs two_slabs_mapped two_slabs_trace \
+    variable_transmission viscoelastic_mount n2_gas_spring";
+
+/// Claims, declared before the first run: every other scene of
+/// `examples/system`, run in place with `--until T --whole-steps
+/// --checkpoint`, stops at or after T, and resumed by another process
+/// reports byte for byte what the binary reports for the scene with no
+/// pause. T is 0.125 s, or half the duration of a scene shorter than 0.25 s.
+/// So every example is saved and resumed by a test here but the one refused;
+/// a scene added to the directory is saved here unless it is named above.
+#[test]
+fn every_other_example_saved_at_a_whole_step_and_resumed_reports_what_its_plain_run_reports() {
+    let mut scenes: Vec<_> = std::fs::read_dir(example(""))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|kind| kind == "json"))
+        .collect();
+    scenes.sort();
+    let saves = scratch("saves", "");
+    let named: Vec<&str> = SAVED_ABOVE_OR_REFUSED.split_whitespace().collect();
+    let mut saved = 0;
+    for scene in &scenes {
+        let name = scene.file_stem().unwrap().to_str().unwrap();
+        if named.contains(&name) {
+            continue;
+        }
+        let scene_path = scene.to_str().unwrap();
+        let text = std::fs::read_to_string(scene).unwrap();
+        let (_, duration) = text.split_once("\"duration_s\":").expect("a duration");
+        let duration = duration.trim_start();
+        let digits = duration.find(|c: char| c == ',' || c.is_whitespace());
+        let duration_s: f64 = duration[..digits.unwrap()].parse().unwrap();
+        let pause_s = if duration_s < 0.25 {
+            0.5 * duration_s
+        } else {
+            0.125
+        };
+        let checkpoint = saves.with_file_name(name).with_extension("fssnap");
+        let checkpoint_path = checkpoint.to_str().unwrap();
+        let (code, plain, stderr) = run_binary(&["--json", "system", scene_path]);
+        assert_eq!(code, 0, "{name}: {stderr}");
+        let (code, prefix, stderr) = run_binary(&[
+            "--json",
+            "system",
+            scene_path,
+            "--until",
+            &pause_s.to_string(),
+            "--whole-steps",
+            "--checkpoint",
+            checkpoint_path,
+        ]);
+        assert_eq!(code, 0, "{name}: {stderr}");
+        let stopped_s = value(&prefix, "\"schema\"", "time_s");
+        eprintln!("{name}: paused at {pause_s} s, stopped at {stopped_s} s");
+        assert!(stopped_s >= pause_s, "{name}: {stopped_s}");
+        let root = saved_root(&prefix);
+        let (code, resumed, stderr) = run_binary(&[
+            "--json",
+            "system",
+            scene_path,
+            "--resume",
+            checkpoint_path,
+            "--resume-root",
+            &root,
+        ]);
+        assert_eq!(code, 0, "{name}: {stderr}");
+        assert_eq!(resumed, plain, "{name}");
+        saved += 1;
+    }
+    assert!(saved >= 15, "{saved} scenes saved here");
 }

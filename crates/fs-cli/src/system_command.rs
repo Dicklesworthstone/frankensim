@@ -377,8 +377,8 @@ Elements (ports in brackets; SI units in every field name):
                  of the step. Steps are cut to max_step_s, to the owner's
                  stability bound and to event times. Reports each cell's
                  temperature_k and specific_enthalpy_j_kg, and with an
-                 environment port environment_heat_w. Fixed step_s only; no
-                 checkpoint codec.)
+                 environment port environment_heat_w. Fixed step_s only. Its
+                 state is saved by --checkpoint and resumed.)
   conduction_body box_m [Lx, Ly, Lz], cells [nx, ny, nz], conductivity_w_m_k
                  (or material, newton), volumetric_heat_capacity_j_m3_k
                  (or reference_temperature_k), temperature_k, ports,

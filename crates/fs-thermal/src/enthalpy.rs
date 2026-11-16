@@ -925,6 +925,309 @@ impl<'a> DepositionSimulation<'a> {
     }
 }
 
+/// Words one cell, one link, and one link with the pair of areas it covers
+/// take in [`DepositionSimulation::state_words`].
+const CELL_WORDS: usize = 21;
+const LINK_WORDS: usize = 5;
+const PATCH_WORDS: usize = LINK_WORDS + 2;
+
+/// A boundary as seven words: the reservoir behind a tag, zeros where there
+/// is none.
+fn boundary_words(boundary: &Boundary, words: &mut Vec<u64>) {
+    let Boundary {
+        ambient_k,
+        htc_w_m2_k,
+        reservoir,
+        source_w,
+    } = boundary;
+    words.extend([ambient_k.to_bits(), htc_w_m2_k.to_bits()]);
+    match reservoir {
+        None => words.extend([0; 4]),
+        Some(Reservoir {
+            area_m2,
+            conductance_w_k,
+            temperature_k,
+        }) => words.extend([
+            1,
+            area_m2.to_bits(),
+            conductance_w_k.to_bits(),
+            temperature_k.to_bits(),
+        ]),
+    }
+    words.push(source_w.to_bits());
+}
+
+/// Every field of a cell, as [`CELL_WORDS`] words.
+fn cell_words(cell: &DepositedCell, words: &mut Vec<u64>) {
+    let DepositedCell {
+        id,
+        segment_id,
+        body_id,
+        material_id,
+        mass_kg,
+        specific_h_j_kg,
+        geometry,
+        boundary,
+    } = cell;
+    let CellGeometry {
+        start_m,
+        end_m,
+        volume_m3,
+        surface_area_m2,
+    } = geometry;
+    words.extend([id.0, *segment_id, *body_id, material_id.0]);
+    words.extend([mass_kg.to_bits(), specific_h_j_kg.to_bits()]);
+    words.extend(start_m.iter().chain(end_m).map(|x| x.to_bits()));
+    words.extend([volume_m3.to_bits(), surface_area_m2.to_bits()]);
+    boundary_words(boundary, words);
+}
+
+/// Every field of a link, as [`LINK_WORDS`] words.
+fn link_words(link: &ThermalLink, words: &mut Vec<u64>) {
+    let ThermalLink {
+        id,
+        a,
+        b,
+        area_m2,
+        conductance_w_k,
+    } = link;
+    words.extend([*id, a.0, b.0]);
+    words.extend([area_m2.to_bits(), conductance_w_k.to_bits()]);
+}
+
+/// The cell [`cell_words`] wrote, or `None` for words it never writes.
+fn cell_from(words: &[u64; CELL_WORDS]) -> Option<DepositedCell> {
+    let real = |index: usize| f64::from_bits(words[index]);
+    let reservoir = match words[16..20] {
+        [0, 0, 0, 0] => None,
+        [1, ..] => Some(Reservoir {
+            area_m2: real(17),
+            conductance_w_k: real(18),
+            temperature_k: real(19),
+        }),
+        _ => return None,
+    };
+    Some(DepositedCell {
+        id: CellId(words[0]),
+        segment_id: words[1],
+        body_id: words[2],
+        material_id: MaterialId(words[3]),
+        mass_kg: real(4),
+        specific_h_j_kg: real(5),
+        geometry: CellGeometry {
+            start_m: [real(6), real(7), real(8)],
+            end_m: [real(9), real(10), real(11)],
+            volume_m3: real(12),
+            surface_area_m2: real(13),
+        },
+        boundary: Boundary {
+            ambient_k: real(14),
+            htc_w_m2_k: real(15),
+            reservoir,
+            source_w: real(20),
+        },
+    })
+}
+
+impl DepositionSimulation<'_> {
+    /// Append the words that name the timeline this simulation is on: its
+    /// budget, each law by its [`ThermalLaw::caloric_identity`] with its
+    /// storage basis and its admitted slope bound, and every scheduled event
+    /// with every field. Returns false, appending nothing, when a law has no
+    /// caloric identity: words for part of a timeline would name two alike.
+    ///
+    /// The name of a law is its author's: two laws with one caloric identity
+    /// are taken to give one temperature at every energy and to admit the
+    /// same cells. Where the simulation stands on the timeline (its time,
+    /// cells and links) is not part of the name; `state_words` writes that.
+    #[must_use]
+    pub fn identity_words(&self, words: &mut Vec<u64>) -> bool {
+        let Self {
+            // State, written by `state_words`.
+            time_s: _,
+            cursor: _,
+            cells: _,
+            links: _,
+            covered_areas: _,
+            schedule,
+            materials,
+            material_temperature_slopes,
+            budget,
+        } = self;
+        let DepositionBudget {
+            max_cells,
+            max_links,
+            max_events,
+            max_substeps,
+        } = budget;
+        let kept = words.len();
+        words.push(u64::from_le_bytes(*b"timeline"));
+        words.extend([max_cells, max_links, max_events, max_substeps].map(|limit| *limit as u64));
+        words.push(materials.len() as u64);
+        for (id, law) in materials.iter() {
+            let Some(name) = law.caloric_identity() else {
+                words.truncate(kept);
+                return false;
+            };
+            let basis = match law.storage_basis() {
+                ThermalStorageBasis::Enthalpy => 0,
+                ThermalStorageBasis::InternalEnergy => 1,
+                ThermalStorageBasis::DeclaredSensibleStorage => 2,
+            };
+            words.extend([id.0, basis]);
+            let (chunks, _) = name.as_chunks::<8>();
+            words.extend(chunks.iter().map(|chunk| u64::from_le_bytes(*chunk)));
+            words.push(material_temperature_slopes[id].to_bits());
+        }
+        words.push(schedule.len() as u64);
+        for TimedEvent { time_s, event } in schedule.iter() {
+            words.push(time_s.to_bits());
+            match event {
+                Event::Birth(cell) => {
+                    words.push(0);
+                    cell_words(cell, words);
+                }
+                Event::Contact(link) => {
+                    words.push(1);
+                    link_words(link, words);
+                }
+                Event::Separation(id) => words.extend([2, *id]),
+                Event::Boundary(cell, boundary) => {
+                    words.extend([3, cell.0]);
+                    boundary_words(boundary, words);
+                }
+            }
+        }
+        true
+    }
+
+    /// Whether `other` is on this simulation's timeline: the same schedule,
+    /// laws and slope bounds (the shared values themselves, as every state
+    /// the owner derives from a simulation keeps them) under an equal budget.
+    #[must_use]
+    pub fn shares_timeline(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.schedule, &other.schedule)
+            && Rc::ptr_eq(&self.materials, &other.materials)
+            && Rc::ptr_eq(
+                &self.material_temperature_slopes,
+                &other.material_temperature_slopes,
+            )
+            && self.budget == other.budget
+    }
+
+    /// Append where this simulation stands on its timeline: its time, its
+    /// schedule cursor, every active cell with every field, and every link
+    /// with every field and the area it covers on each side.
+    pub fn state_words(&self, words: &mut Vec<u64>) {
+        let Self {
+            time_s,
+            cursor,
+            cells,
+            links,
+            // Read through `contact_areas`, the owner's own reader: the pair
+            // stored for a link, or the link's area on both sides.
+            covered_areas: _,
+            // The timeline, named by `identity_words`.
+            schedule: _,
+            materials: _,
+            material_temperature_slopes: _,
+            budget: _,
+        } = self;
+        words.extend([time_s.to_bits(), *cursor as u64, cells.len() as u64]);
+        for cell in cells.values() {
+            cell_words(cell, words);
+        }
+        words.push(links.len() as u64);
+        for link in links.values() {
+            link_words(link, words);
+            words.extend(self.contact_areas(link).map(f64::to_bits));
+        }
+    }
+
+    /// The simulation on this one's timeline that stands where
+    /// [`Self::state_words`] wrote `words`, or `None`.
+    ///
+    /// Only the schedule, the laws, the slope bounds and the budget come
+    /// from `self`; the time, the cursor, the cells, the links and their
+    /// covered areas all come from `words`. Each cell is admitted as a birth
+    /// is and each link as a contact is, by the owner's own admission, so
+    /// what that refuses is refused here: an unknown material, a cell its
+    /// law's `validate_cell` or temperature refuses, a link to a missing
+    /// cell, more than the budget, contacts beyond a cell's surface. Also
+    /// refused: words too few or too many, a time that is not a time, and a
+    /// cursor past the schedule or past an event later than the time.
+    ///
+    /// Admission is the owner's code and may do more than insert. So the
+    /// state built is written again at the end, and it is returned only if
+    /// that gives `words` back, every one: a cell or a link out of the order
+    /// the owner keeps them in, a covered pair the owner would not store,
+    /// and anything admission changed are all refused there.
+    #[must_use]
+    pub fn restored(&self, words: &[u64]) -> Option<Self> {
+        let (&[time, cursor, cell_count], rest) = words.split_first_chunk()?;
+        let time_s = f64::from_bits(time);
+        let cursor = usize::try_from(cursor).ok()?;
+        let behind = self.schedule.get(..cursor)?;
+        if !nonnegative(time_s) || behind.last().is_some_and(|event| event.time_s > time_s) {
+            return None;
+        }
+        let cell_count = usize::try_from(cell_count).ok()?;
+        let (cells, rest) = rest.split_at_checked(cell_count.checked_mul(CELL_WORDS)?)?;
+        let (&link_count, links) = rest.split_first()?;
+        let link_count = usize::try_from(link_count).ok()?;
+        let (links, []) = links.as_chunks::<PATCH_WORDS>() else {
+            return None;
+        };
+        if links.len() != link_count {
+            return None;
+        }
+        let mut next = Self {
+            time_s,
+            cursor,
+            schedule: Rc::clone(&self.schedule),
+            materials: Rc::clone(&self.materials),
+            material_temperature_slopes: Rc::clone(&self.material_temperature_slopes),
+            cells: BTreeMap::new(),
+            links: BTreeMap::new(),
+            covered_areas: BTreeMap::new(),
+            budget: self.budget,
+        };
+        // The admissions below book incoming mass and energy; a restored
+        // state receives none, so this audit is dropped.
+        let mut audit = EnergyAudit {
+            incoming_mass_kg: 0.0,
+            incoming_energy_j: 0.0,
+            external_heat_j: 0.0,
+            stored_energy_change_j: 0.0,
+            residual_j: 0.0,
+            substeps: 0,
+            events: 0,
+        };
+        for chunk in cells.as_chunks::<CELL_WORDS>().0 {
+            let cell = cell_from(chunk)?;
+            next.apply(Event::Birth(cell), &mut audit).ok()?;
+        }
+        for &[id, a, b, area, conductance, on_a, on_b] in links {
+            let link = ThermalLink {
+                id,
+                a: CellId(a),
+                b: CellId(b),
+                area_m2: f64::from_bits(area),
+                conductance_w_k: f64::from_bits(conductance),
+            };
+            let covered_area_m2 = [on_a, on_b].map(f64::from_bits);
+            next.insert_contact_patch(ContactPatch {
+                link,
+                covered_area_m2,
+            })
+            .ok()?;
+        }
+        let mut rebuilt = Vec::with_capacity(words.len());
+        next.state_words(&mut rebuilt);
+        (rebuilt == words).then_some(next)
+    }
+}
+
 struct HeatRates {
     temperatures: BTreeMap<CellId, f64>,
     // Compensation survives observer sources and conservative transfers;

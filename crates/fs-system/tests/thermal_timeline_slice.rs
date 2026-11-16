@@ -2248,3 +2248,480 @@ fn every_joule_is_in_the_cells_or_the_sink(ledger: &Ledger, heat_0: f64, heat_1:
     assert!((account("network").dissipated_j.value() - total).abs() <= 1.0e-11 * total);
     assert!(ledger.energy_residual_j().abs() <= 1.0e-11 * total);
 }
+
+// Durable snapshots of the timeline (bead rc-1109 .5.4). The three kernel
+// helpers are those of tests/snapshots.rs.
+use fs_blake3::identity::CanonicalLimits;
+use fs_exec::solver::SolverStateV2;
+use fs_exec::solver::snapshot_v2::{
+    ExpectedResumeContextV2, PausedSnapshotBoundaryV2, SnapshotAlgorithmIdV2,
+    SnapshotBudgetStateIdV2, SnapshotDeterminismV2, SnapshotExecutionFingerprintIdV2,
+    SnapshotLimitsV2, SnapshotPauseRequestIdV2, SnapshotProvenanceIdV2, SnapshotRngCounterIdV2,
+};
+use fs_exec::{DrainTracker, RunId};
+use fs_system::SystemImage;
+use fs_thermal::enthalpy::{ContactPatch, ContactPatchUpdate, ThermalStorageBasis};
+
+fn limits() -> SnapshotLimitsV2 {
+    SnapshotLimitsV2::new(
+        1 << 22,
+        4_096,
+        CanonicalLimits::new(16_384, 4_096, 32, 32, 64),
+        1 << 16,
+        1 << 22,
+        4_096,
+    )
+}
+
+fn paused() -> PausedSnapshotBoundaryV2 {
+    let gate = CancelGate::new_clock_free();
+    let tracker = DrainTracker::new(RunId(17), &gate);
+    let worker = tracker.register_worker().expect("worker registers");
+    gate.request();
+    drop(worker);
+    let report = tracker.finalize().expect("run drained");
+    PausedSnapshotBoundaryV2::from_drain_report(
+        report,
+        SnapshotPauseRequestIdV2::from_bytes([0x5A; 32]),
+        1,
+    )
+}
+
+fn context(system: &System) -> ExpectedResumeContextV2 {
+    ExpectedResumeContextV2::for_paused_state::<SystemImage>(
+        SnapshotAlgorithmIdV2::from_bytes([0xA1; 32]),
+        1,
+        system.problem_id(),
+        SnapshotRngCounterIdV2::from_bytes([0; 32]),
+        SnapshotDeterminismV2::Deterministic,
+        SnapshotExecutionFingerprintIdV2::from_bytes([0xE1; 32]),
+        SnapshotBudgetStateIdV2::from_bytes([0xB1; 32]),
+        SnapshotProvenanceIdV2::from_bytes([0xC1; 32]),
+        paused(),
+    )
+}
+
+/// `Sensible`'s temperature with no datum, under a name, a storage basis and
+/// a slope bound of its own. `Sensible` has no caloric identity.
+struct Named {
+    name: Option<u8>,
+    basis: ThermalStorageBasis,
+    slope: f64,
+}
+
+impl ThermalLaw for Named {
+    fn storage_basis(&self) -> ThermalStorageBasis {
+        self.basis
+    }
+
+    fn caloric_identity(&self) -> Option<[u8; 32]> {
+        self.name.map(|byte| [byte; 32])
+    }
+
+    fn temperature_k(&self, specific_h_j_kg: f64) -> Result<f64, DepositionError> {
+        Ok(300.0 + specific_h_j_kg / CP)
+    }
+
+    fn maximum_temperature_slope(&self) -> f64 {
+        self.slope
+    }
+}
+
+/// The first law's name, basis and slope bound, and the budget's links.
+type Kept = (Option<u8>, ThermalStorageBasis, f64, usize);
+const KEPT: Kept = (Some(1), ThermalStorageBasis::Enthalpy, 1.0 / CP, 8);
+
+/// The timeline of `scene` before its start, on two named laws: its two
+/// cells born at 0 s and joined by link 7, then the scene's later events.
+fn named_timeline(scene: &Scene, first: Kept) -> DepositionSimulation<'static> {
+    let (name, basis, slope, max_links) = first;
+    let second = Named {
+        name: Some(2),
+        basis: ThermalStorageBasis::Enthalpy,
+        slope: 1.0 / CP,
+    };
+    let [law, other] = [Named { name, basis, slope }, second].map(|law| &*Box::leak(Box::new(law)));
+    let at = |event| TimedEvent { time_s: 0.0, event };
+    let mut schedule = vec![
+        at(Event::Birth(scene.cell(A, 0, 310.0, scene.boundaries[0]))),
+        at(Event::Birth(scene.cell(B, 1, 295.0, scene.boundaries[1]))),
+        at(Event::Contact(ThermalLink {
+            id: 7,
+            a: A,
+            b: B,
+            area_m2: LINK_AREA_M2,
+            conductance_w_k: scene.link_w_k,
+        })),
+    ];
+    schedule.extend(scene.extra.iter().cloned());
+    let budget = DepositionBudget {
+        max_cells: 8,
+        max_links,
+        max_events: 16,
+        max_substeps: 100_000,
+    };
+    let laws = [
+        (MaterialId(0), law as &dyn ThermalLaw),
+        (MaterialId(1), other as &dyn ThermalLaw),
+    ];
+    DepositionSimulation::new(schedule, &laws, budget).expect("timeline")
+}
+
+fn separation(time_s: f64) -> TimedEvent {
+    TimedEvent {
+        time_s,
+        event: Event::Separation(7),
+    }
+}
+
+fn state_words(simulation: &DepositionSimulation<'_>) -> Vec<u64> {
+    let mut words = Vec::new();
+    simulation.state_words(&mut words);
+    words
+}
+
+/// Claims, declared before the first run: the owner's identity words are
+/// equal for a timeline built again, and different for another law name,
+/// storage basis, slope bound or budget limit, another field of a born cell
+/// or of a link, and another time or kind of a later event. A timeline with
+/// a law that has no caloric identity has no words and writes none.
+#[test]
+fn the_owners_identity_words_name_its_laws_its_budget_and_every_event() {
+    let timeline = |change: usize| {
+        let mut scene = Scene {
+            extra: vec![separation(2.0)],
+            ..Scene::default()
+        };
+        let mut first = KEPT;
+        match change {
+            0 | 1 => {}
+            2 => first.0 = Some(3),
+            3 => first.1 = ThermalStorageBasis::InternalEnergy,
+            4 => first.2 = 2.0 / CP,
+            5 => first.3 = 9,
+            6 => scene.boundaries[0].source_w = 0.5,
+            7 => scene.link_w_k = 0.25,
+            8 => scene.extra[0].time_s = 2.5,
+            9 => scene.extra[0].event = Event::Boundary(A, insulated()),
+            _ => first.0 = None,
+        }
+        named_timeline(&scene, first)
+    };
+    let mut seen: Vec<Vec<u64>> = Vec::new();
+    for change in 1..10 {
+        let mut words = Vec::new();
+        assert!(
+            timeline(change).identity_words(&mut words),
+            "change {change}"
+        );
+        assert!(
+            !seen.contains(&words),
+            "change {change} names an earlier timeline"
+        );
+        seen.push(words);
+    }
+    let mut again = Vec::new();
+    assert!(timeline(0).identity_words(&mut again));
+    assert_eq!(again, seen[0]);
+    let mut none = vec![7];
+    assert!(!timeline(10).identity_words(&mut none));
+    assert_eq!(none, [7]);
+}
+
+/// Claims, declared before the first run. The owner's state words, read back
+/// on a simulation that is still before its start (no cell, no link), give
+/// the state that wrote them: its time, cells, links and the areas a contact
+/// covers on each side, which the state's equality does not see; two states
+/// that differ only in those areas have different words. A state past a
+/// separation and a boundary change is read back without the link and with
+/// the new boundary, and goes on to the bits of the run that was never
+/// saved. Words the owner never writes, and words another timeline's budget
+/// does not admit, are refused.
+#[test]
+fn the_owners_state_words_are_read_back_on_its_timeline_and_no_others_are() {
+    let heated = Boundary {
+        source_w: 0.25,
+        ..insulated()
+    };
+    let scene = Scene {
+        extra: vec![separation(2.0), boundary_event(3.0, B, heated)],
+        ..Scene::default()
+    };
+    let kept = named_timeline(&scene, KEPT);
+    let to = |from: &DepositionSimulation<'static>, time_s: f64| {
+        from.advance_to(time_s, config(0.5), || Ok(()))
+            .expect("advance")
+            .0
+    };
+    let started = to(&kept, 0.0);
+    let even = started.contact_patch(7).expect("link");
+    let uneven = ContactPatch {
+        covered_area_m2: [2.0e-3, 1.5e-3],
+        ..even
+    };
+    let update = ContactPatchUpdate {
+        id: 7,
+        expected: Some(even),
+        replacement: Some(uneven),
+    };
+    let covered = started
+        .replace_contact_patches(&[update], || Ok(()))
+        .expect("patch");
+    let aged = to(&covered, 1.0);
+    let words = state_words(&aged);
+    assert_ne!(words, state_words(&to(&started, 1.0)), "the covered areas");
+
+    let read = kept.restored(&words).expect("read back");
+    assert!(read.shares_timeline(&kept));
+    assert!(!read.shares_timeline(&named_timeline(&scene, KEPT)));
+    assert_eq!(state_words(&read), words);
+    assert_eq!(
+        (read.time_s(), read.cells(), read.links()),
+        (1.0, aged.cells(), aged.links())
+    );
+    assert_eq!(
+        (read.contact_patch(7), read.next_event_time_s()),
+        (Some(uneven), Some(2.0))
+    );
+    // A simulation before its start is a state the owner holds.
+    assert!(kept.restored(&state_words(&kept)).is_some());
+
+    let later = to(&aged, 3.5);
+    let resumed = kept.restored(&state_words(&later)).expect("resumed");
+    assert_eq!((resumed.cells().len(), resumed.links().len()), (2, 0));
+    assert_eq!(resumed.cells()[&B].boundary, heated);
+    assert_eq!(resumed.next_event_time_s(), None);
+    // Read back on a simulation that still holds the link: nothing of it is kept.
+    let on_started = started
+        .restored(&state_words(&later))
+        .expect("on a started one");
+    assert_eq!(state_words(&on_started), state_words(&later));
+    assert_eq!(
+        state_words(&to(&resumed, 5.0)),
+        state_words(&to(&later, 5.0))
+    );
+
+    // Two cells of 21 words after three, then one link of seven after its count.
+    assert_eq!(words.len(), 53);
+    let refused = |what: &str, change: &dyn Fn(&mut Vec<u64>)| {
+        let mut changed = words.clone();
+        change(&mut changed);
+        assert!(kept.restored(&changed).is_none(), "{what}");
+    };
+    let (nan, zero, one) = (f64::NAN.to_bits(), 0.0_f64.to_bits(), 1.0_f64.to_bits());
+    refused("a word short", &|words| words.truncate(52));
+    refused("a word over", &|words| words.push(0));
+    refused("a time that is not one", &|words| words[0] = nan);
+    refused("a cursor past the schedule", &|words| words[1] = 6);
+    refused("a cursor past a later event", &|words| words[1] = 4);
+    refused("a count of other cells", &|words| words[2] = 1);
+    refused("an unknown material", &|words| words[6] = 9);
+    refused("a cell with no mass", &|words| words[7] = zero);
+    refused("a reservoir tag never written", &|words| words[19] = 2);
+    refused("cells out of order", &|words| {
+        let (first, second) = words[3..45].split_at_mut(21);
+        first.swap_with_slice(second);
+    });
+    refused("a link to a missing cell", &|words| words[47] = 99);
+    refused("a covered area of nothing", &|words| words[51] = zero);
+    refused("contacts beyond a surface", &|words| words[51] = one);
+    let no_links = named_timeline(&scene, (KEPT.0, KEPT.1, KEPT.2, 0));
+    assert!(no_links.restored(&words).is_none(), "a link over budget");
+}
+
+/// A timeline with a heat port on each of `cells`, stepped at most 0.05 s.
+fn ported(cells: Vec<CellId>) -> ThermalTimeline<'static> {
+    ThermalTimeline::new(cells, false, config(0.05)).expect("component")
+}
+
+/// The timeline on a port of cell A that keeps `kept`, and the state one
+/// heated step after its start.
+fn stepped(
+    kept: &DepositionSimulation<'static>,
+) -> (ThermalTimeline<'static>, TimelineState<'static>) {
+    let timeline = ported(vec![A]).restoring(kept);
+    let start = timeline.start(kept).expect("start");
+    let gate = CancelGate::new_clock_free();
+    let (next, ..) = propose(&timeline, &start, 0.05, &[3.0], &gate).expect("step");
+    (timeline, next)
+}
+
+/// What `component` writes for `state`; a refusal writes nothing.
+fn encoded(
+    component: &ThermalTimeline<'static>,
+    state: &TimelineState<'static>,
+) -> Option<Vec<u64>> {
+    let mut words = vec![9];
+    let wrote = component.encode_state(state, &mut words);
+    assert!(wrote || words == [9], "a refusal writes nothing");
+    wrote.then(|| words.split_off(1))
+}
+
+fn identity(component: &ThermalTimeline<'static>) -> Vec<u64> {
+    let mut words = Vec::new();
+    component.identity_words(&mut words);
+    words
+}
+
+/// Claims, declared before the first run. A timeline that keeps a named
+/// timeline writes a state on it and reads it back. Its identity is equal
+/// wherever the kept simulation stands, and different for other ports,
+/// published cells, step limit, environment port and kept timeline. A state
+/// on another timeline is not written. A state with an event due at its
+/// time, without one of the port cells, or with a boundary that exchanges
+/// heat and no environment port, is not read.
+#[test]
+fn the_timeline_writes_and_reads_a_state_on_the_named_timeline_it_keeps() {
+    let scene = Scene {
+        extra: vec![separation(0.2)],
+        ..Scene::default()
+    };
+    let kept = named_timeline(&scene, KEPT);
+    let (timeline, next) = stepped(&kept);
+    let words = encoded(&timeline, &next).expect("a codec");
+    assert_eq!(words, state_words(next.simulation()));
+    let read = timeline.decode_state(&words).expect("read back");
+    assert!(read == next && encoded(&timeline, &read).as_ref() == Some(&words));
+
+    let base = identity(&timeline);
+    assert!(!base.is_empty());
+    let moved = ported(vec![A]).restoring(next.simulation());
+    assert_eq!(identity(&moved), base);
+    let other = Scene {
+        link_w_k: 0.25,
+        extra: vec![separation(0.2)],
+        ..Scene::default()
+    };
+    let other = named_timeline(&other, KEPT);
+    let limited = ThermalTimeline::new(vec![A], false, config(0.04)).expect("component");
+    let open = ThermalTimeline::new(vec![A], true, config(0.05)).expect("component");
+    let published = ported(vec![A]).publishing(vec![B]).expect("published");
+    for (what, changed) in [
+        ("another port", ported(vec![B]).restoring(&kept)),
+        ("a second port", ported(vec![A, B]).restoring(&kept)),
+        ("a step limit", limited.restoring(&kept)),
+        ("an environment port", open.clone().restoring(&kept)),
+        ("another timeline", ported(vec![A]).restoring(&other)),
+        ("a published cell", published.restoring(&kept)),
+    ] {
+        let named = identity(&changed);
+        assert!(!named.is_empty() && named != base, "{what}");
+    }
+
+    // A state on another timeline, built alike, is not this timeline's.
+    let alike = named_timeline(&scene, KEPT);
+    let foreign = ported(vec![A]).start(&alike).expect("start");
+    assert_eq!(encoded(&timeline, &foreign), None);
+    // The same state at the time of the separation still ahead of it: due.
+    let mut due = words.clone();
+    due[0] = 0.2_f64.to_bits();
+    assert!(timeline.decode_state(&due).is_none());
+    let elsewhere = ported(vec![CellId(30)]).restoring(&kept);
+    assert!(elsewhere.decode_state(&words).is_none());
+    let mut exchanging = Scene::default();
+    exchanging.boundaries[0].source_w = 0.25;
+    let warm = named_timeline(&exchanging, KEPT);
+    let (born, _) = warm.advance_to(0.0, config(0.05), || Ok(())).expect("born");
+    let warm_words = state_words(&born);
+    let closed = ported(vec![A]).restoring(&warm);
+    assert!(closed.decode_state(&warm_words).is_none());
+    assert!(open.restoring(&warm).decode_state(&warm_words).is_some());
+}
+
+/// Claims, declared before the first run: a timeline that keeps no
+/// timeline, one that keeps a timeline with a law that has no name, and an
+/// implicit one that keeps a named timeline have no identity words, write
+/// no state and read none.
+#[test]
+fn a_timeline_that_keeps_none_or_an_unnamed_law_or_is_implicit_has_no_codec() {
+    let scene = Scene::default();
+    let kept = named_timeline(&scene, KEPT);
+    let (timeline, next) = stepped(&kept);
+    let words = encoded(&timeline, &next).expect("a codec");
+    let unnamed = named_timeline(&scene, (None, KEPT.1, KEPT.2, KEPT.3));
+    let (active, laws) = scene.active();
+    let graph = scene.graph(&active, laws);
+    let scheme = ImplicitScheme::BackwardEuler;
+    let implicit = ThermalTimeline::implicit(vec![A, B], graph, implicit_controls(0.5), scheme);
+    for (what, none) in [
+        ("no kept timeline", ported(vec![A])),
+        ("a law with no name", ported(vec![A]).restoring(&unnamed)),
+        (
+            "an implicit driver",
+            implicit.expect("implicit").restoring(&kept),
+        ),
+    ] {
+        assert!(identity(&none).is_empty(), "{what}");
+        assert_eq!(encoded(&none, &next), None, "{what}");
+        assert!(none.decode_state(&words).is_none(), "{what}");
+    }
+}
+
+/// Claims, declared before the first run (condition (a) of 35536). The kept
+/// simulation is the one before its start, with no cell and no link. A
+/// system stepped past the separation is sealed; a second system, built
+/// alike and still holding the start's two cells and one link, resumes it
+/// and then holds the two cells and no link, and both go on to the same
+/// bits. The same system on a timeline that keeps none is refused a
+/// snapshot by its node's name.
+#[test]
+fn a_snapshot_past_a_separation_resumes_without_the_link_and_goes_on_alike() {
+    let gate = CancelGate::new_clock_free();
+    let scene = Scene {
+        extra: vec![separation(0.2)],
+        ..Scene::default()
+    };
+    let kept = named_timeline(&scene, KEPT);
+    let build = |restoring: bool| {
+        let component = ThermalTimeline::new(vec![A, B], true, config(0.05)).expect("component");
+        let component = if restoring {
+            component.restoring(&kept)
+        } else {
+            component
+        };
+        let start = component.start(&kept).expect("start");
+        heated_alone(component, start, [2.0, -1.0])
+    };
+    let (mut first, cells) = build(true);
+    let held = |system: &System| {
+        let state = system
+            .state::<TimelineState<'static>>(cells)
+            .expect("state");
+        let simulation = state.simulation();
+        (
+            simulation.cells().len(),
+            simulation.links().len(),
+            state_words(simulation),
+        )
+    };
+    let steps = |system: &mut System, count: usize| {
+        with_cx(&gate, |cx| {
+            for _ in 0..count {
+                system.step(0.05, cx).expect("step");
+            }
+        });
+    };
+    steps(&mut first, 6);
+    let sealed = first
+        .snapshot(&context(&first), limits(), || false)
+        .expect("sealed");
+    let opened =
+        SystemImage::unseal_v2_expected(sealed.bytes(), &sealed.expectation(), limits(), || false)
+            .expect("opened");
+    let (mut second, _) = build(true);
+    assert_eq!(held(&second).1, 1, "the start's link");
+    second.resume(&opened).expect("resumed");
+    let resumed = held(&second);
+    assert_eq!((resumed.0, resumed.1), (2, 0));
+    assert_eq!(resumed, held(&first));
+    steps(&mut first, 4);
+    steps(&mut second, 4);
+    assert_eq!(held(&second), held(&first));
+    assert_eq!(second.time_s().to_bits(), first.time_s().to_bits());
+
+    let (unnamed, _) = build(false);
+    let error = unnamed
+        .snapshot(&context(&unnamed), limits(), || false)
+        .expect_err("a timeline with no codec");
+    assert_eq!(format!("{error:?}"), r#"NoCodec { node: "cells" }"#);
+}
