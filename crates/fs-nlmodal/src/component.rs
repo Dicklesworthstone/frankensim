@@ -64,6 +64,7 @@ use core::cell::RefCell;
 use core::num::NonZeroUsize;
 
 use fs_exec::Cx;
+use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_modal::time::{ModalAcousticTimeError, ModalAcousticWorkspace};
 use fs_ports::component::{
     Class, Component, ContractViolation, EndOfStep, PortRole, PortSpec, PortTangent, Proposal,
@@ -427,6 +428,13 @@ impl ModalStructure {
         &self.model
     }
 
+    /// Whether the owner restores `states`: their count is the modes', and
+    /// every value is finite and within the budget. Asked of a copy of the
+    /// model, so nothing this structure holds changes.
+    fn restores(&self, states: &[ModalAcousticState]) -> bool {
+        self.model.clone().restore_states(states).is_ok()
+    }
+
     fn check_states(&self, states: &[ModalAcousticState]) -> Result<(), ModalStructureRefusal> {
         if states.len() == self.modes() {
             Ok(())
@@ -624,6 +632,69 @@ impl Component for ModalStructure {
             residual: 0.0,
             tolerance: 0.0,
         }))
+    }
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-nlmodal::component::ModalStructure",
+        state_family: "modal-coordinates",
+        schema_grammar: "per mode: displacement_m_sqrt_kg f64, velocity_m_sqrt_kg_per_s f64",
+        codec_grammar: "the mode count, then per mode the bits of the displacement and of the \
+            velocity",
+        codec_version: 1,
+    });
+
+    /// Refuses, writing nothing, for a state the owner does not restore:
+    /// another count, a value that is not finite, one beyond the budget.
+    fn encode_state(&self, state: &Vec<ModalAcousticState>, words: &mut Vec<u64>) -> bool {
+        if !self.restores(state) {
+            return false;
+        }
+        words.push(state.len() as u64);
+        for mode in state {
+            words.extend([
+                mode.displacement_m_sqrt_kg.to_bits(),
+                mode.velocity_m_sqrt_kg_per_s.to_bits(),
+            ]);
+        }
+        true
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<Vec<ModalAcousticState>> {
+        let (&count, coordinates) = words.split_first()?;
+        let (pairs, rest) = coordinates.as_chunks::<2>();
+        if count != self.modes() as u64 || pairs.len() != self.modes() || !rest.is_empty() {
+            return None;
+        }
+        let state: Vec<_> = pairs
+            .iter()
+            .map(|&[displacement, velocity]| ModalAcousticState {
+                displacement_m_sqrt_kg: f64::from_bits(displacement),
+                velocity_m_sqrt_kg_per_s: f64::from_bits(velocity),
+            })
+            .collect();
+        self.restores(&state).then_some(state)
+    }
+
+    /// The owner's own identity ([`ModalAcousticTimeModel::identity_words`]:
+    /// its clock, its budget, every mode and its damping rates), then the
+    /// attachments: the row count, whether ends are told, every width and
+    /// every weight. The ports are in a system's own description, and the
+    /// scratch holds nothing that outlives a call.
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        let Self {
+            model,
+            weights,
+            rows,
+            ports: _,
+            widths,
+            tells_ends,
+            scratch: _,
+        } = self;
+        model.identity_words(words);
+        words.extend([*rows as u64, u64::from(*tells_ends), widths.len() as u64]);
+        words.extend(widths.iter().map(|width| width.get() as u64));
+        words.push(weights.len() as u64);
+        words.extend(weights.iter().map(|weight| weight.to_bits()));
     }
 }
 

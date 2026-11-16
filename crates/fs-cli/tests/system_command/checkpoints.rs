@@ -380,14 +380,16 @@ fn conduction_checkpoints_refuse_a_scene_whose_body_or_contact_changed() {
 /// Claims, declared before the first run: each friction example, saved at
 /// 0.125 s and resumed by another process, reports byte for byte what one
 /// process reports that pauses at 0.125 s and goes on. They are a sliding
-/// interface under a prescribed slip, a Hertz patch under a spinning puck
-/// and a friction interface that brings a block to rest.
+/// interface under a prescribed slip, a Hertz patch under a spinning puck,
+/// a friction interface that brings a block to rest, and a friction
+/// interface that bows a modal string.
 #[test]
 fn saved_friction_scenes_continue_with_identical_reports() {
     for name in [
         "dragged_lining.json",
         "spun_puck.json",
         "stribeck_block.json",
+        "bowed_mode.json",
     ] {
         let text = std::fs::read_to_string(example(name)).unwrap();
         let scene = scratch(name, &text);
@@ -409,17 +411,36 @@ spun_puck.json | "kinetic_mu": 0.3 | "kinetic_mu": 0.31
 spun_puck.json | "kinetic_mu": 0.3, | "kinetic_mu": 0.3, "solve": {"maximum_evaluations": 513},
 "#;
 
+/// The bowed string changed one passage of its modal structure at a time.
+const CHANGED_MODAL_SCENES: &str = r#"
+bowed_mode.json | "frequency_hz": 2.0 | "frequency_hz": 2.5
+bowed_mode.json | "damping_ratio": 0.0 | "damping_ratio": 0.01
+bowed_mode.json | "weights": [[1.0]] | "weights": [[1.1]]
+"#;
+
 /// Claims, declared before the first run: the checkpoint of a friction
 /// example is refused by the same scene with another coefficient of its
 /// law, another normal force, another prescribed slip rate or another
 /// solve budget ([`CHANGED_FRICTION_SCENES`]).
 #[test]
 fn friction_checkpoints_refuse_a_scene_whose_law_load_or_budget_changed() {
+    each_changed_scene_is_refused(CHANGED_FRICTION_SCENES);
+}
+
+/// Claims, declared before the first run: the bowed string's checkpoint is
+/// refused by the same scene with another frequency or damping of its mode
+/// or another weight of its attachment ([`CHANGED_MODAL_SCENES`]).
+#[test]
+fn a_modal_checkpoint_refuses_a_scene_whose_mode_or_attachment_changed() {
+    each_changed_scene_is_refused(CHANGED_MODAL_SCENES);
+}
+
+/// Each line of `changes` (a scene, a passage and what replaces it) is a
+/// scene that its example's checkpoint refuses. An example is saved once,
+/// by [`checkpoint_continuation`], when its first line is reached.
+fn each_changed_scene_is_refused(changes: &str) {
     let mut saved: Option<(&str, std::path::PathBuf, String, String)> = None;
-    for line in CHANGED_FRICTION_SCENES
-        .lines()
-        .filter(|line| !line.is_empty())
-    {
+    for line in changes.lines().filter(|line| !line.is_empty()) {
         let [name, from, to] = line.split(" | ").collect::<Vec<_>>()[..] else {
             panic!("{line}: three parts");
         };
@@ -436,25 +457,26 @@ fn friction_checkpoints_refuse_a_scene_whose_law_load_or_budget_changed() {
     }
 }
 
-/// Claims, declared before the first run: a scene with a friction interface
-/// beside a modal structure, which has no state codec, is still refused a
-/// checkpoint, by the structure's name, and no file is written.
+/// Claims, declared before the first run: a scene with a member that has no
+/// state codec is still refused a checkpoint, by that member's name, and no
+/// file is written. The scene is the struck mode: its modal structure has
+/// a codec and its contact, `tip`, has none.
 #[test]
-fn a_friction_scene_beside_a_member_with_no_codec_is_still_refused_by_that_members_name() {
-    let text = std::fs::read_to_string(example("bowed_mode.json")).unwrap();
-    let scene = scratch("bowed_mode.json", &text);
+fn a_scene_with_a_member_with_no_codec_is_still_refused_by_that_members_name() {
+    let text = std::fs::read_to_string(example("struck_mode.json")).unwrap();
+    let scene = scratch("struck_mode.json", &text);
     let checkpoint = scene.with_extension("fssnap");
     let (code, stdout, stderr) = run_binary(&[
         "--json",
         "system",
         scene.to_str().unwrap(),
         "--until",
-        "0.125",
+        "0.001",
         "--checkpoint",
         checkpoint.to_str().unwrap(),
     ]);
-    eprintln!("bowed_mode: exit {code}: {}", stderr.trim_end());
+    eprintln!("struck_mode: exit {code}: {}", stderr.trim_end());
     assert_eq!(code, 4, "{stdout}{stderr}");
-    assert!(stderr.contains("`string` has no state codec"), "{stderr}");
+    assert!(stderr.contains("`tip` has no state codec"), "{stderr}");
     assert!(!checkpoint.exists());
 }

@@ -660,6 +660,75 @@ impl ModalAcousticTimeModel {
         &self.modes
     }
 
+    /// Appends to `words` the bits of everything that fixes how this model
+    /// steps, for a caller that must tell one model from another (a
+    /// snapshot's identity): the sample period, every limit of the budget,
+    /// every field of every mode, and the kernel's damping rates with
+    /// whether they were given as rates. A model built from rates keeps
+    /// only a diagnostic ratio in its modes and steps by other arithmetic,
+    /// so equal modes do not make equal models.
+    ///
+    /// The states the model holds are not written: they are a state, not
+    /// the model. The kernel's prepared coefficients and its lazy tables
+    /// follow from what is written.
+    pub fn identity_words(&self, words: &mut Vec<u64>) {
+        let Self {
+            sample_period_s,
+            modes,
+            states: _,
+            budget,
+            transition_kernel,
+        } = self;
+        let ModalAcousticTimeBudget {
+            nyquist_guard_fraction,
+            maximum_abs_displacement_m_sqrt_kg,
+            maximum_abs_velocity_m_sqrt_kg_per_s,
+            maximum_total_energy_j,
+            maximum_abs_pressure_pa,
+        } = *budget;
+        let ExactZohKernel {
+            sample_period_s: _,
+            full_duration_bits: _,
+            half_duration_bits: _,
+            damping_rates_per_s,
+            explicit_rates,
+            full: _,
+            half: _,
+            linear: _,
+            linear_sensitivities: _,
+        } = transition_kernel.as_ref();
+        words.push(sample_period_s.to_bits());
+        words.extend(
+            [
+                nyquist_guard_fraction,
+                maximum_abs_displacement_m_sqrt_kg,
+                maximum_abs_velocity_m_sqrt_kg_per_s,
+                maximum_total_energy_j,
+                maximum_abs_pressure_pa,
+            ]
+            .map(f64::to_bits),
+        );
+        words.push(modes.len() as u64);
+        for mode in modes {
+            let ModalAcousticMode {
+                angular_frequency_rad_s,
+                damping_ratio,
+                pressure_per_modal_velocity,
+            } = *mode;
+            words.extend(
+                [
+                    angular_frequency_rad_s,
+                    damping_ratio,
+                    pressure_per_modal_velocity.re,
+                    pressure_per_modal_velocity.im,
+                ]
+                .map(f64::to_bits),
+            );
+        }
+        words.extend([u64::from(*explicit_rates), damping_rates_per_s.len() as u64]);
+        words.extend(damping_rates_per_s.iter().map(|rate| rate.to_bits()));
+    }
+
     /// Prepare dissipative mobility changes in the SAME admitted coordinates.
     /// Frequency, observer transfers, states, clock and budgets are retained.
     /// The original ZOH kernel is rebuilt; no motion or stored energy changes.
@@ -2104,6 +2173,96 @@ mod tests {
             maximum_total_energy_j: 1.0e12,
             maximum_abs_pressure_pa: 1.0e12,
             ..ModalAcousticTimeBudget::audible_reference()
+        }
+    }
+
+    /// Claims, declared before the first run. A model's identity words are
+    /// the same for a model built again and for one whose held states were
+    /// restored to other values. They differ for another sample rate,
+    /// another mode count, each field of a mode, each limit of the budget,
+    /// the same modes and the same rates given as rates instead of ratios,
+    /// and other rates.
+    #[test]
+    fn identity_words_follow_what_fixes_the_steps_and_not_the_held_states() {
+        let identity = |model: &ModalAcousticTimeModel| {
+            let mut words = Vec::new();
+            model.identity_words(&mut words);
+            words
+        };
+        let built = |rate_hz: u32, modes: Vec<ModalAcousticMode>, limits| {
+            ModalAcousticTimeModel::try_new(rate_hz, modes, limits).unwrap()
+        };
+        // 512 rad/s at a ratio of 1/4: its rate, 256 /s, and the ratio that
+        // rate gives back are both exact.
+        let mode = ModalAcousticMode {
+            angular_frequency_rad_s: 512.0,
+            damping_ratio: 0.25,
+            pressure_per_modal_velocity: C64::ZERO,
+        };
+        let reference = built(1_000, vec![mode], budget());
+        let words = identity(&reference);
+        assert_eq!(words, identity(&built(1_000, vec![mode], budget())));
+        let mut moved = reference.clone();
+        moved
+            .restore_states(&[ModalAcousticState {
+                displacement_m_sqrt_kg: 0.5,
+                velocity_m_sqrt_kg_per_s: -2.0,
+            }])
+            .unwrap();
+        assert_ne!(moved.states(), reference.states());
+        assert_eq!(words, identity(&moved));
+
+        let mut others = vec![
+            identity(&built(2_000, vec![mode], budget())),
+            identity(&built(1_000, vec![mode, mode], budget())),
+        ];
+        let mode_changes: [fn(&mut ModalAcousticMode); 4] = [
+            |other| other.angular_frequency_rad_s = 513.0,
+            |other| other.damping_ratio = 0.26,
+            |other| other.pressure_per_modal_velocity.re = 1.0,
+            |other| other.pressure_per_modal_velocity.im = 1.0,
+        ];
+        for change in mode_changes {
+            let mut other = mode;
+            change(&mut other);
+            others.push(identity(&built(1_000, vec![other], budget())));
+        }
+        let budget_changes: [fn(&mut ModalAcousticTimeBudget); 5] = [
+            |limits| limits.nyquist_guard_fraction = 0.8,
+            |limits| limits.maximum_abs_displacement_m_sqrt_kg = 101.0,
+            |limits| limits.maximum_abs_velocity_m_sqrt_kg_per_s = 100_001.0,
+            |limits| limits.maximum_total_energy_j = 2.0e12,
+            |limits| limits.maximum_abs_pressure_pa = 2.0e12,
+        ];
+        for change in budget_changes {
+            let mut limits = budget();
+            change(&mut limits);
+            others.push(identity(&built(1_000, vec![mode], limits)));
+        }
+        // The same modes and the same rates, given as rates.
+        let from_rates = ModalAcousticTimeModel::try_new_with_damping_rates(
+            1_000,
+            vec![mode],
+            reference.damping_rates_per_s(),
+            budget(),
+        )
+        .unwrap();
+        assert_eq!(from_rates.modes(), reference.modes());
+        assert_eq!(
+            from_rates.damping_rate_per_s(0).to_bits(),
+            256.0_f64.to_bits()
+        );
+        assert_eq!(
+            reference.damping_rate_per_s(0).to_bits(),
+            256.0_f64.to_bits()
+        );
+        others.push(identity(&from_rates));
+        others.push(identity(&from_rates.with_damping_rates(&[300.0]).unwrap()));
+        others.push(words);
+        for (at, later) in others.iter().enumerate() {
+            for earlier in &others[..at] {
+                assert_ne!(later, earlier, "identity {at} is an earlier one");
+            }
         }
     }
 

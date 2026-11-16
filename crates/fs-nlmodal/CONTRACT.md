@@ -733,6 +733,31 @@ half sample and an off-clock step, it also checks:
 - the end outputs as `sum_k s_rk v1_k` of the candidate to the bit, the other outputs and the
   candidate unchanged by telling them, `Told` and `Untold` as above, and an end's name that
   repeats a port refused.
+
+Snapshots. `ModalStructure` has the state codec of fs-ports' `Component`, so a system with one
+can be written to a durable snapshot and resumed. The state is the mode count and, per mode,
+the bits of the displacement and of the velocity. `decode_state` refuses another count and
+whatever the owner's `restore_states` refuses (a value that is not finite, one beyond the
+budget), asked of a copy of the model; `encode_state` writes none of those states. The identity
+is the owner's own (`ModalAcousticTimeModel::identity_words` of fs-modal: the clock, the budget,
+every mode, and the damping rates with whether they were given as rates), then the row count,
+whether ends are told, every attachment's width and every weight. Every field of the structure
+is bound, derived or left out by name: `ports` are in a system's own description, and `scratch`
+holds buffers and a copy of the model that every call overwrites. The states the model held
+when the structure was built are no part of it either: every proposal restores the scratch
+model from the state it is given. Three tests in `tests/modal_structure.rs` (claims first):
+- the words read back to the same state at rest and moving; no words, a word short, a word
+  over, another count, a value that is not finite and one beyond the budget are refused, and no
+  state the owner does not restore is written;
+- three structures of one identity, one on a model at rest, one on that model with other
+  states restored and one whose scratch a proposal and a tangent from another state have used,
+  read the same words and step to the same bits in the candidate, the outputs and a column of
+  the tangent;
+- the identity is equal for a rebuild and different for another clock, another mode frequency,
+  another budget, another damping rate on equal modes (a free coordinate's diagnostic ratio is
+  the same at any rate), another weight, an attachment fewer, the same rows and weights in one
+  attachment of width two instead of two of width one, and ends that are not told.
+Not tested here: a snapshot through a kernel (fs-cli's scene tests go through fs-system).
 The composition-kernel slice of `ModalStructure` is
 `crates/fs-system/tests/modal_structure_slice.rs` (`--features modal-slices`); see the
 fs-system contract.

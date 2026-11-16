@@ -992,10 +992,11 @@ another coefficient, another normal force, another slip rate
 (`dragged_lining.json`) or another solve budget (nine changed scenes; that
 rungs at the same coefficients differ is fs-tribo's test, not one here).
 `bowed_mode.json`, a
-friction interface beside a `modal_structure`, is still refused a
-checkpoint by the structure's name: `modal_structure` has no state codec.
-Not tested: `struck_mode.json`, whose `contact_interface` and
-`modal_structure` both have none. Not covered: a save at the scene's own
+friction interface beside a `modal_structure`, is saved and resumed the
+same way now that the structure has a codec (under `modal_structure`,
+below). `struck_mode.json` is still refused a checkpoint, with exit 4 and
+no file, by the name of its `contact_interface`, which has none. Not
+covered: a save at the scene's own
 next step boundary, after which a resumed run would be the run with no
 pause.
 
@@ -1029,7 +1030,15 @@ exact for the effort held over them. The structure always tells the end of
 each attachment's flow, `<id>.end`. The safety ceilings are the owner's
 audible reference budget. Reports expose every mode's displacement and
 velocity, each attachment row's flow at the end of the last step, and
-last-step `heat_w`. `adaptive` refuses it. Tests in
+last-step `heat_w`. `adaptive` refuses it. Its state has fs-nlmodal's
+codec, the modal coordinates bound to the owner's clock, budget, modes and
+damping rates and to the attachments' widths and weights, so
+`--checkpoint` saves it. Tests in `tests/system_command/checkpoints.rs`
+(claims written before the first run): `bowed_mode.json`, saved at 0.125 s
+and resumed by another process, reports byte for byte what one process
+reports that pauses at 0.125 s and goes on; its checkpoint is refused by
+the same scene with another frequency or damping of its mode or another
+weight of its attachment. Tests in
 `tests/system_command.rs`: one 5 Hz mode seen at its tip as 2 kg, pushed
 by a constant 1 N, against the closed-form damped step response, with the
 force's work equal to the modal energy plus the owner's heat; three struck

@@ -1006,6 +1006,25 @@ reconstruct rates from those diagnostics. The bank's arbitrary-duration
 `advance_exact_zoh_duration_step` previews its real admitted law; passing a
 diagnostic mode to the standalone ratio-based step does not copy that law.
 
+`ModalAcousticTimeModel::identity_words` appends the bits of everything that
+fixes how a model steps, for a caller that must tell one model from another
+(the composition kernel's snapshot identity, through fs-nlmodal's
+`ModalStructure`): the sample period, the five limits of the budget, the mode
+count and the three fields of every mode, whether the damping was given as
+rates, and every rate. The last two are needed because a model built from
+rates keeps only a diagnostic ratio in its modes and integrates its damping
+by other arithmetic, so equal modes do not make equal models. It does not
+write the states the model holds, which are a state and not the model, nor
+the kernel's prepared coefficients and lazy tables, which follow from what
+is written. The model, its budget, a mode and the kernel are each written
+out by a pattern with no rest, so a new field does not compile until it is
+bound or named as left out. Unit test in `time.rs` (claims first): the words
+are equal for a model built again and for one with other states restored;
+they differ for another clock, another mode count, each field of a mode,
+each limit of the budget, the same modes and the same rates given as rates
+instead of ratios, and other rates. The function is an addition: no other
+line of `time.rs` changed with it.
+
 `with_damping_rates` replaces complete rates without changing state, energy,
 frequencies, observer transfers, clock or budgets. Changed rates receive a new
 shared mechanics kernel and invalidate all preparation bound to the old one;

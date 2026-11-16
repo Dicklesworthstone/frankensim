@@ -365,3 +365,201 @@ fn a_structure_tells_the_end_of_its_flows_only_when_asked_and_then_to_the_bit() 
         Err(ModalStructureRefusal::Port(_))
     ));
 }
+
+// Snapshots: the state codec and the identity (bead rc-1109 .5.4, plan 35507).
+
+fn identity(structure: &ModalStructure) -> Vec<u64> {
+    let mut words = Vec::new();
+    structure.identity_words(&mut words);
+    words
+}
+
+/// The efforts on the two rows and the temperature: one proposal's inputs.
+const INPUTS: [f64; 3] = [EFFORTS[0], EFFORTS[1], KELVIN];
+
+/// Claims, declared before the first run. A structure writes its state as the mode count and two
+/// words a mode, and reads the same state back, at rest and moving. It refuses no words, a word
+/// short, a word over, another count, a value that is not finite and a value beyond the owner's
+/// budget (a displacement of 2 where 1 is the limit, a velocity of 200 000 where 100 000 is), and
+/// it writes no state the owner does not restore.
+#[test]
+fn the_state_codec_reads_what_it_wrote_and_refuses_what_the_owner_does_not_restore() {
+    let structure = two_rows(three_modes());
+    for state in [structure.at_rest(), moving()] {
+        let mut words = Vec::new();
+        assert!(structure.encode_state(&state, &mut words));
+        assert_eq!(words.len(), 7);
+        assert_eq!(structure.decode_state(&words), Some(state));
+    }
+    let mut words = Vec::new();
+    assert!(structure.encode_state(&moving(), &mut words));
+    let spoiled = |at: usize, word: u64| {
+        let mut other = words.clone();
+        other[at] = word;
+        structure.decode_state(&other)
+    };
+    assert!(spoiled(0, 2).is_none(), "another count");
+    for at in 1..7 {
+        for value in [f64::NAN, f64::INFINITY] {
+            assert!(spoiled(at, value.to_bits()).is_none(), "word {at}");
+        }
+    }
+    assert!(spoiled(1, 2.0_f64.to_bits()).is_none(), "a displacement");
+    assert!(spoiled(2, 2.0e5_f64.to_bits()).is_none(), "a velocity");
+    assert!(structure.decode_state(&[]).is_none());
+    assert!(structure.decode_state(&words[..6]).is_none());
+    assert!(
+        structure
+            .decode_state(&[&words[..], &[0]].concat())
+            .is_none()
+    );
+
+    let mut beyond = moving();
+    beyond[0].displacement_m_sqrt_kg = 2.0;
+    let mut unbounded = moving();
+    unbounded[1].velocity_m_sqrt_kg_per_s = f64::NAN;
+    for state in [beyond, unbounded, moving()[..2].to_vec()] {
+        let mut none = Vec::new();
+        assert!(!structure.encode_state(&state, &mut none) && none.is_empty());
+    }
+}
+
+/// One proposal and one column of the tangent from a state.
+type Stepped = ((Vec<f64>, Vec<ModalAcousticState>), Vec<f64>);
+
+fn stepped(structure: &ModalStructure, state: &[ModalAcousticState]) -> Stepped {
+    let dt_s = durations()[0];
+    (
+        proposed(structure, state, dt_s, &INPUTS),
+        jvp(structure, state, dt_s, &INPUTS, &unit(1)),
+    )
+}
+
+fn bits(stepped: &Stepped) -> Vec<u64> {
+    let ((outputs, states), tangent) = stepped;
+    let coordinates = states
+        .iter()
+        .flat_map(|mode| [mode.displacement_m_sqrt_kg, mode.velocity_m_sqrt_kg_per_s]);
+    outputs
+        .iter()
+        .chain(tangent)
+        .copied()
+        .chain(coordinates)
+        .map(f64::to_bits)
+        .collect()
+}
+
+/// Claims, declared before the first run (the first condition of 35508). The states a model
+/// holds when a structure is built on it are no part of the structure, and nor is what its
+/// scratch last held. Three structures of one identity read the same words and then step to the
+/// same bits, in the candidate, the outputs and a column of the tangent: one on a model at rest,
+/// one on that model with other states restored, and one whose scratch a proposal and a tangent
+/// from another state, at other efforts and another duration, have used.
+#[test]
+fn a_decoded_state_steps_alike_whatever_the_model_held_and_the_scratch_last_did() {
+    let mut held = three_modes();
+    held.restore_states(&moving()).expect("restored");
+    assert_ne!(held.states(), three_modes().states());
+    let (fresh, on_held, used) = (
+        two_rows(three_modes()),
+        two_rows(held),
+        two_rows(three_modes()),
+    );
+    assert_eq!(identity(&fresh), identity(&on_held));
+    assert_eq!(identity(&fresh), identity(&used));
+    let elsewhere: Vec<_> = moving()
+        .iter()
+        .map(|mode| ModalAcousticState {
+            displacement_m_sqrt_kg: 3.0 * mode.displacement_m_sqrt_kg,
+            velocity_m_sqrt_kg_per_s: -2.0 * mode.velocity_m_sqrt_kg_per_s,
+        })
+        .collect();
+    let other_inputs = [1.5, 0.2, 310.0];
+    let _ = proposed(&used, &elsewhere, durations()[2], &other_inputs);
+    let _ = jvp(&used, &elsewhere, durations()[1], &other_inputs, &unit(0));
+
+    let mut words = Vec::new();
+    assert!(fresh.encode_state(&moving(), &mut words));
+    let reference = stepped(&fresh, &fresh.decode_state(&words).expect("its own words"));
+    assert_ne!(reference.0.1, moving(), "the step moves the state");
+    for structure in [&on_held, &used] {
+        let state = structure.decode_state(&words).expect("the same words");
+        assert_eq!(bits(&stepped(structure, &state)), bits(&reference));
+    }
+}
+
+/// The three modes of [`three_modes`] at another clock, another first frequency, another rate of
+/// the free coordinate or another budget.
+fn model_of(
+    rate_hz: u32,
+    first_hz: f64,
+    free_rate_per_s: f64,
+    budget: ModalAcousticTimeBudget,
+) -> ModalAcousticTimeModel {
+    let tau = core::f64::consts::TAU;
+    ModalAcousticTimeModel::try_new_with_damping_rates(
+        rate_hz,
+        vec![modal(tau * first_hz), modal(tau * 700.0), modal(0.0)],
+        &[2.0 * 0.02 * tau * 200.0, 0.0, free_rate_per_s],
+        budget,
+    )
+    .expect("model")
+}
+
+/// Claims, declared before the first run. A structure's identity is the same for one built
+/// again. It differs for another clock, another mode frequency, another budget, and for another
+/// damping rate on the same modes (the second condition of 35508: a free coordinate's diagnostic
+/// ratio is the same at any rate, so the two models' modes are equal); for another weight, an
+/// attachment fewer, the same rows and weights in one attachment of width two instead of two of
+/// width one, and for ends that are not told.
+#[test]
+fn the_identity_follows_the_model_its_rates_and_the_attachments() {
+    let reference = ModalAcousticTimeBudget::audible_reference();
+    let rows = || vec![row("bridge", BRIDGE), row("finger", FINGER)];
+    let told = |model: ModalAcousticTimeModel, attachments: Vec<ModalAttachment>| {
+        let structure = ModalStructure::new(model, attachments).expect("structure");
+        identity(&structure.publishing_ends().expect("ends"))
+    };
+    let unchanged = identity(&two_rows(three_modes()));
+    assert_eq!(
+        unchanged,
+        told(model_of(RATE_HZ, 200.0, 3.0, reference), rows())
+    );
+
+    let other_rate = model_of(RATE_HZ, 200.0, 4.0, reference);
+    assert_eq!(other_rate.modes(), three_modes().modes());
+    assert_ne!(
+        other_rate.damping_rate_per_s(2),
+        three_modes().damping_rate_per_s(2)
+    );
+    let wider = ModalAcousticTimeBudget {
+        maximum_total_energy_j: 2.0e9,
+        ..reference
+    };
+    let pair = ModalAttachment {
+        id: StableId::new("pair").expect("id"),
+        kind: PortKind::MechanicalForceVelocity,
+        width: NonZeroUsize::new(2).expect("two"),
+        weights: [BRIDGE, FINGER].concat(),
+    };
+    let untold = ModalStructure::new(three_modes(), rows()).expect("structure");
+    let identities = [
+        unchanged,
+        told(other_rate, rows()),
+        told(model_of(96_000, 200.0, 3.0, reference), rows()),
+        told(model_of(RATE_HZ, 201.0, 3.0, reference), rows()),
+        told(model_of(RATE_HZ, 200.0, 3.0, wider), rows()),
+        told(
+            three_modes(),
+            vec![row("bridge", [0.9, -0.4, 0.31]), row("finger", FINGER)],
+        ),
+        told(three_modes(), vec![row("bridge", BRIDGE)]),
+        told(three_modes(), vec![pair]),
+        identity(&untold),
+    ];
+    for (at, later) in identities.iter().enumerate() {
+        for earlier in &identities[..at] {
+            assert_ne!(later, earlier, "identity {at} is an earlier one");
+        }
+    }
+}
