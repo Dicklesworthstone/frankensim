@@ -207,6 +207,34 @@ changes with it.
 
 ## Contact interface on the kernel's load line (feature `component`)
 
+- Snapshots. `ContactInterface` has the state codec of fs-ports'
+  `Component`, so a system with one can be written to a durable snapshot
+  and resumed. The state is two words, the closure and the reaction. It is
+  written, and read back, only as a state the interface holds: both values
+  finite and the potential at the closure finite. The identity is the
+  obstacle's own, then every budget of the solve, then which ends read an
+  end input; the ports are in a system's own description.
+  `Obstacle::identity_words` (in `lib.rs`, with or without the feature) is
+  that obstacle identity: the point count; the count and the bits of the
+  collocation rows, the gaps and the quadrature weights; the stiffness, the
+  exponent and the internal loss; and the provenance as its length in bytes
+  and its bytes, eight to a word, so that it cannot run into what follows.
+  The provenance is a label and no part of the force law, and it is bound
+  because a changed source is a changed declaration. The obstacle, the
+  interface and the solve are each written out by a pattern with no rest,
+  so a new field does not compile until it is bound. Three tests in
+  `tests/component.rs` (claims written before the first run): the state is
+  read back apart and in contact, and no words, one word, three words, a
+  closure that is not finite or whose potential is not, and a reaction that
+  is not finite are refused and not written; an obstacle's words are equal
+  for a rebuild and different for another collocation row, a second point,
+  a second mode, another gap, weight, stiffness or exponent, an internal
+  loss, another provenance and a provenance that continues the first; the
+  interface's words are equal for a rebuild and different for another
+  obstacle, each of the five budgets and each of three choices of ends.
+  Not tested here: a snapshot through a kernel (fs-cli's scene tests go
+  through fs-system).
+
 - `ContactInterface::new(obstacle, ContactSolve)` admits one one-point
   `Obstacle` on the unit opening map `[-1]` (the map fs-couple's modal impact
   owner admits) with a non-empty provenance, and refuses an obstacle with a
@@ -325,9 +353,9 @@ exhaustion, lengths, NaN, zero `dt`).
 - Obstacles are static (no moving frets/bridges) in v1.
 - `ContactInterface` (feature `component`) is lossless and one-point: it
   refuses a Hunt–Crossley loss until it has a heat port, does not reach
-  distributed obstacles, does not shorten a step to the instant of touch,
-  and has no checkpoint codec. Its tests do not compare it with fs-couple's
-  modal impact owner; that comparison belongs to the drum's kernel graph.
+  distributed obstacles, and does not shorten a step to the instant of
+  touch. Its tests do not compare it with fs-couple's modal impact owner;
+  that comparison belongs to the drum's kernel graph.
 
 ## Shared unilateral power-potential remainder
 

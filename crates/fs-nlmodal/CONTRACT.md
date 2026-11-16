@@ -716,10 +716,11 @@ coupling + RK4 cross-check; plate cascade casebook (JSON lines with
 modal energies, leaked fractions, tensor size); typed refusals.
 
 `tests/modal_structure.rs` refuses a model that carries an observer transfer and admits the
-same model without it (an integration test: the crate's lib test target does not compile at
-origin, where `fd_probe` imports `fd_coupling`, removed in ca7b47dbf8). On a damped mode, an
-undamped one and a damped free coordinate under two rows of unequal weights, at the full and
-half sample and an off-clock step, it also checks:
+same model without it (an integration test. This sentence said that the crate's lib test target
+did not compile at origin, where `fd_probe` imported `fd_coupling`, removed in ca7b47dbf8; that
+had gone out of date: on 30b937c7fe the lib test target compiles and its 46 tests pass). On a
+damped mode, an undamped one and a damped free coordinate under two rows of unequal weights, at
+the full and half sample and an off-clock step, it also checks:
 - each mean and end column of the tangent against the difference of two proposals 1 N apart
   (exact for an affine row), within 1e-12 of the size the endpoints round at; every proposal
   compared is a step the structure took, its candidates under 1e-5 of the displacement budget,

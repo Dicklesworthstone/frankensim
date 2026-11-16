@@ -307,6 +307,40 @@ impl Obstacle {
         &self.provenance
     }
 
+    /// Appends to `words` the bits of everything this obstacle is, for a
+    /// caller that must tell one obstacle from another (a snapshot's
+    /// identity): the point count; the count and the bits of the
+    /// collocation rows, of the gaps and of the quadrature weights; the
+    /// stiffness, the exponent and the internal loss; and the provenance as
+    /// its length in bytes and then its bytes, eight to a word with the
+    /// last word filled with zeros, so that it cannot run into what a
+    /// caller writes next. The fields are written out by a pattern with no
+    /// rest: a new one does not compile until it is bound.
+    pub fn identity_words(&self, words: &mut Vec<u64>) {
+        let Self {
+            collocation,
+            n_points,
+            gaps,
+            weights,
+            stiffness,
+            alpha,
+            internal_loss,
+            provenance,
+        } = self;
+        words.push(*n_points as u64);
+        for values in [collocation, gaps, weights] {
+            words.push(values.len() as u64);
+            words.extend(values.iter().map(|value| value.to_bits()));
+        }
+        words.extend([stiffness, alpha, internal_loss].map(|value| value.to_bits()));
+        words.push(provenance.len() as u64);
+        for bytes in provenance.as_bytes().chunks(8) {
+            let mut word = [0_u8; 8];
+            word[..bytes.len()].copy_from_slice(bytes);
+            words.push(u64::from_le_bytes(word));
+        }
+    }
+
     /// Penetration `p_i = (Phi q)_i - c_i`, clamped one-sided, for the
     /// interleaved `[q, p]` state.
     fn penetrations(&self, n_modes: usize, x: &[f64]) -> Vec<f64> {

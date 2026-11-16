@@ -555,3 +555,161 @@ fn contact_interface_steps_refuse_what_they_cannot_settle_by_name() {
         ));
     });
 }
+
+// ---- Snapshots: the state codec and the identities ------------------------
+
+/// Claims, declared before the first run. The interface writes its state
+/// as two words, the closure and the reaction, and reads the same state
+/// back, apart and inside the contact. It refuses no words, one word and
+/// three words; a closure that is not finite, or so deep that its potential
+/// is not; and a reaction that is not finite. It writes none of those
+/// states either.
+#[test]
+fn the_state_codec_reads_what_it_wrote_and_refuses_what_the_interface_does_not_hold() {
+    let interface = contact(HERTZ_K, 1.5, 0.0);
+    let inside = ContactState {
+        closure_m: 2.0e-4,
+        reaction_n: 37.5,
+    };
+    for state in [ContactState::at(-APPROACH_M), inside] {
+        let mut words = Vec::new();
+        assert!(interface.encode_state(&state, &mut words));
+        assert_eq!(
+            words,
+            [state.closure_m.to_bits(), state.reaction_n.to_bits()]
+        );
+        assert_eq!(interface.decode_state(&words), Some(state));
+    }
+    let words = [inside.closure_m.to_bits(), inside.reaction_n.to_bits()];
+    assert!(interface.decode_state(&[]).is_none());
+    assert!(interface.decode_state(&words[..1]).is_none());
+    assert!(interface.decode_state(&[words[0], words[1], 0]).is_none());
+    // A closure of 1e200 m is finite; its potential, in the power 2.5, is not.
+    let unheld = [
+        (f64::NAN, inside.reaction_n),
+        (f64::INFINITY, inside.reaction_n),
+        (1.0e200, inside.reaction_n),
+        (inside.closure_m, f64::NAN),
+        (inside.closure_m, f64::NEG_INFINITY),
+    ];
+    for (closure_m, reaction_n) in unheld {
+        let state = ContactState {
+            closure_m,
+            reaction_n,
+        };
+        let read = interface.decode_state(&[closure_m.to_bits(), reaction_n.to_bits()]);
+        assert!(read.is_none(), "{state:?} was read");
+        let mut none = Vec::new();
+        assert!(!interface.encode_state(&state, &mut none) && none.is_empty());
+    }
+}
+
+fn all_differ(identities: &[Vec<u64>]) {
+    for (at, later) in identities.iter().enumerate() {
+        for earlier in &identities[..at] {
+            assert_ne!(later, earlier, "identity {at} is an earlier one");
+        }
+    }
+}
+
+/// Claims, declared before the first run. An obstacle's identity words are
+/// the same for one built again. They differ for another collocation row,
+/// a second point, a second mode, another gap, another weight, another
+/// stiffness, another exponent, an internal loss, another provenance, and
+/// a provenance that only continues the first.
+#[test]
+fn an_obstacle_names_every_one_of_its_fields() {
+    let named = |obstacle: Obstacle| {
+        let mut words = Vec::new();
+        obstacle.identity_words(&mut words);
+        words
+    };
+    let one = |row: f64, gap: f64, weight: f64, stiffness: f64, alpha: f64, source: &str| {
+        Obstacle::new(
+            vec![row],
+            1,
+            1,
+            vec![gap],
+            vec![weight],
+            stiffness,
+            alpha,
+            source.into(),
+        )
+        .unwrap()
+    };
+    let source = "a wall";
+    let unchanged = named(one(-1.0, 0.0, 1.0, HERTZ_K, 1.5, source));
+    assert_eq!(unchanged, named(one(-1.0, 0.0, 1.0, HERTZ_K, 1.5, source)));
+    let points = |n_points: usize, n_modes: usize| {
+        let rows = vec![-1.0; n_points * n_modes];
+        let ones = vec![1.0; n_points];
+        let gaps = vec![0.0; n_points];
+        Obstacle::new(
+            rows,
+            n_points,
+            n_modes,
+            gaps,
+            ones,
+            HERTZ_K,
+            1.5,
+            source.into(),
+        )
+        .unwrap()
+    };
+    assert_eq!(unchanged, named(points(1, 1)));
+    all_differ(&[
+        unchanged,
+        named(one(-0.5, 0.0, 1.0, HERTZ_K, 1.5, source)),
+        named(points(2, 1)),
+        named(points(1, 2)),
+        named(one(-1.0, 1.0e-6, 1.0, HERTZ_K, 1.5, source)),
+        named(one(-1.0, 0.0, 2.0, HERTZ_K, 1.5, source)),
+        named(one(-1.0, 0.0, 1.0, 2.0 * HERTZ_K, 1.5, source)),
+        named(one(-1.0, 0.0, 1.0, HERTZ_K, 2.0, source)),
+        named(
+            one(-1.0, 0.0, 1.0, HERTZ_K, 1.5, source)
+                .with_internal_loss(0.1)
+                .unwrap(),
+        ),
+        // As long as "a wall", so only its bytes tell it apart.
+        named(one(-1.0, 0.0, 1.0, HERTZ_K, 1.5, "a well")),
+        named(one(-1.0, 0.0, 1.0, HERTZ_K, 1.5, "a wall of oak")),
+    ]);
+}
+
+/// Claims, declared before the first run. The interface's identity is the
+/// same for one built again. It differs for another obstacle, each budget
+/// of the solve, and each choice of ends that read an end input.
+#[test]
+fn the_interface_identity_follows_its_obstacle_its_budgets_and_its_ends() {
+    let named = |obstacle: Obstacle, change: fn(&mut ContactSolve), ends: [bool; 2]| {
+        let mut budgets = solve();
+        change(&mut budgets);
+        let mut interface = ContactInterface::new(obstacle, budgets).unwrap();
+        if ends != [false; 2] {
+            interface = interface.reading_ends(ends).unwrap();
+        }
+        let mut words = Vec::new();
+        interface.identity_words(&mut words);
+        words
+    };
+    let wall = || law(HERTZ_K, 1.5, 0.0);
+    let unchanged = named(wall(), |_| (), [false; 2]);
+    assert_eq!(unchanged, named(wall(), |_| (), [false; 2]));
+    let mut identities = vec![
+        unchanged,
+        named(law(2.0 * HERTZ_K, 1.5, 0.0), |_| (), [false; 2]),
+        named(wall(), |_| (), [true, false]),
+        named(wall(), |_| (), [false, true]),
+        named(wall(), |_| (), [true; 2]),
+    ];
+    let changes: [fn(&mut ContactSolve); 5] = [
+        |budgets| budgets.max_iterations = 101,
+        |budgets| budgets.maximum_force_n = 2.0e6,
+        |budgets| budgets.maximum_penetration_m = 0.02,
+        |budgets| budgets.force_absolute_tolerance_n = 2.0e-9,
+        |budgets| budgets.force_relative_tolerance = 2.0e-12,
+    ];
+    identities.extend(changes.map(|change| named(wall(), change, [false; 2])));
+    all_differ(&identities);
+}

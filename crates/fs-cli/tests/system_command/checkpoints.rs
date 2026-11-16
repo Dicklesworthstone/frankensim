@@ -14,6 +14,13 @@ fn saved_root(report: &str) -> String {
 }
 
 fn checkpoint_continuation(scene: &std::path::Path, text: &str) -> String {
+    checkpoint_continuation_at(scene, text, 0.125)
+}
+
+/// The scene saved at `until_s` and resumed by another process reports byte
+/// for byte what one process reports that pauses at `until_s` and goes on.
+/// Returns the saved root.
+fn checkpoint_continuation_at(scene: &std::path::Path, text: &str, until_s: f64) -> String {
     let checkpoint = scene.with_extension("fssnap");
     let scene_path = scene.to_str().unwrap();
     let checkpoint_path = checkpoint.to_str().unwrap();
@@ -22,13 +29,17 @@ fn checkpoint_continuation(scene: &std::path::Path, text: &str) -> String {
         "system",
         scene_path,
         "--until",
-        "0.125",
+        &until_s.to_string(),
         "--checkpoint",
         checkpoint_path,
     ]);
     assert_eq!(code, 0, "{}: {stderr}", scene.display());
     assert!(stderr.is_empty(), "{stderr}");
-    assert_eq!(value(&prefix, "\"schema\"", "time_s"), 0.125);
+    // The scene pauses at the time asked, to the bit.
+    assert_eq!(
+        value(&prefix, "\"schema\"", "time_s").to_bits(),
+        until_s.to_bits()
+    );
     let root = saved_root(&prefix);
     assert!(!std::fs::read(&checkpoint).unwrap().is_empty());
 
@@ -45,8 +56,8 @@ fn checkpoint_continuation(scene: &std::path::Path, text: &str) -> String {
     assert!(stderr.is_empty(), "{stderr}");
     let mut reference = fs_cli::SystemScene::from_text(text, scene).unwrap();
     scene_context(|cx, _| {
-        while reference.time_s() < 0.125 {
-            reference.advance(0.125 - reference.time_s(), cx).unwrap();
+        while reference.time_s() < until_s {
+            reference.advance(until_s - reference.time_s(), cx).unwrap();
         }
         reference.run(cx).unwrap();
     });
@@ -435,10 +446,35 @@ fn a_modal_checkpoint_refuses_a_scene_whose_mode_or_attachment_changed() {
     each_changed_scene_is_refused(CHANGED_MODAL_SCENES);
 }
 
+/// The struck mode changed one passage of its contact at a time.
+const CHANGED_CONTACT_SCENES: &str = r#"
+struck_mode.json | "exponent": 1.5 | "exponent": 1.6
+struck_mode.json | "stiffness": 58423739.46721772 | "stiffness": 58423740.0
+struck_mode.json | "exponent": 1.5, | "exponent": 1.5, "gap_m": 1e-07,
+struck_mode.json | "maximum_penetration_m": 0.01 | "maximum_penetration_m": 0.02
+"#;
+
+/// Claims, declared before the first run: the struck mode, a stick on a
+/// contact against a modal head, lasts 0.002 s. Saved at 0.001 s and
+/// resumed by another process, it reports byte for byte what one process
+/// reports that pauses at 0.001 s and goes on. Its checkpoint is refused by
+/// the same scene with another exponent, stiffness, gap or penetration
+/// budget of its contact ([`CHANGED_CONTACT_SCENES`]).
+#[test]
+fn a_saved_struck_mode_continues_alike_and_refuses_a_scene_whose_contact_changed() {
+    each_changed_scene_is_refused_at(CHANGED_CONTACT_SCENES, 0.001);
+}
+
 /// Each line of `changes` (a scene, a passage and what replaces it) is a
-/// scene that its example's checkpoint refuses. An example is saved once,
-/// by [`checkpoint_continuation`], when its first line is reached.
+/// scene that its example's checkpoint, saved at 0.125 s, refuses.
 fn each_changed_scene_is_refused(changes: &str) {
+    each_changed_scene_is_refused_at(changes, 0.125);
+}
+
+/// As [`each_changed_scene_is_refused`], with the examples saved at
+/// `until_s`. An example is saved once, by [`checkpoint_continuation_at`],
+/// when its first line is reached.
+fn each_changed_scene_is_refused_at(changes: &str, until_s: f64) {
     let mut saved: Option<(&str, std::path::PathBuf, String, String)> = None;
     for line in changes.lines().filter(|line| !line.is_empty()) {
         let [name, from, to] = line.split(" | ").collect::<Vec<_>>()[..] else {
@@ -447,7 +483,7 @@ fn each_changed_scene_is_refused(changes: &str) {
         if saved.as_ref().is_none_or(|saved| saved.0 != name) {
             let text = std::fs::read_to_string(example(name)).unwrap();
             let scene = scratch(name, &text);
-            let root = checkpoint_continuation(&scene, &text);
+            let root = checkpoint_continuation_at(&scene, &text, until_s);
             saved = Some((name, scene, text, root));
         }
         let (_, scene, text, root) = saved.as_ref().unwrap();
@@ -459,24 +495,27 @@ fn each_changed_scene_is_refused(changes: &str) {
 
 /// Claims, declared before the first run: a scene with a member that has no
 /// state codec is still refused a checkpoint, by that member's name, and no
-/// file is written. The scene is the struck mode: its modal structure has
-/// a codec and its contact, `tip`, has none.
+/// file is written. The scene is the port-Hamiltonian oscillator, whose
+/// `oscillator` has none.
 #[test]
 fn a_scene_with_a_member_with_no_codec_is_still_refused_by_that_members_name() {
-    let text = std::fs::read_to_string(example("struck_mode.json")).unwrap();
-    let scene = scratch("struck_mode.json", &text);
+    let text = std::fs::read_to_string(example("port_hamiltonian_oscillator.json")).unwrap();
+    let scene = scratch("port_hamiltonian_oscillator.json", &text);
     let checkpoint = scene.with_extension("fssnap");
     let (code, stdout, stderr) = run_binary(&[
         "--json",
         "system",
         scene.to_str().unwrap(),
         "--until",
-        "0.001",
+        "0.125",
         "--checkpoint",
         checkpoint.to_str().unwrap(),
     ]);
-    eprintln!("struck_mode: exit {code}: {}", stderr.trim_end());
+    eprintln!("oscillator: exit {code}: {}", stderr.trim_end());
     assert_eq!(code, 4, "{stdout}{stderr}");
-    assert!(stderr.contains("`tip` has no state codec"), "{stderr}");
+    assert!(
+        stderr.contains("`oscillator` has no state codec"),
+        "{stderr}"
+    );
     assert!(!checkpoint.exists());
 }

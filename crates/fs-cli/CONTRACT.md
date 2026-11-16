@@ -994,8 +994,9 @@ rungs at the same coefficients differ is fs-tribo's test, not one here).
 `bowed_mode.json`, a
 friction interface beside a `modal_structure`, is saved and resumed the
 same way now that the structure has a codec (under `modal_structure`,
-below). `struck_mode.json` is still refused a checkpoint, with exit 4 and
-no file, by the name of its `contact_interface`, which has none. Not
+below). A scene with a member that has no codec is still refused a
+checkpoint, with exit 4 and no file, by that member's name:
+`port_hamiltonian_oscillator.json` by its `oscillator`. Not
 covered: a save at the scene's own
 next step boundary, after which a resumed run would be the run with no
 pause.
@@ -1098,7 +1099,16 @@ secant of the law's potential over the step's move and settles it on the
 load line by bisection; the lowering evaluates no law. Beside a neighbour
 that tells the end of its flow, such as a `modal_structure`, the end named
 in `reads_ends` reads it. Reports expose `closure_m` and the last step's
-`reaction_n`. `adaptive` refuses it, and it has no state codec.
+`reaction_n`. `adaptive` refuses it. Its state has fs-dcontact's codec,
+the closure and the reaction bound to the obstacle (stiffness, exponent,
+gap, weight and its provenance, which names the scene element), the solve
+budgets and the ends it reads, so `--checkpoint` saves it. Tests in
+`tests/system_command/checkpoints.rs` (claims written before the first
+run): `struck_mode.json`, which lasts 0.002 s, saved at 0.001 s and
+resumed by another process, reports byte for byte what one process reports
+that pauses at 0.001 s and goes on; its checkpoint is refused by the same
+scene with another exponent, stiffness, gap or penetration budget of its
+contact.
 
 Tests in `tests/system_command/contact.rs`:
 - A 10 g mass at 2 m/s onto a Hertz wall (`K = 4/3 E* sqrt(R)`, E* = 0.8

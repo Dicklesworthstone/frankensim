@@ -51,11 +51,20 @@
 //! - No events: a step that enters or leaves contact is not shortened to the
 //!   instant of touch. The secant spans the whole move, as the modal impact
 //!   owner's does.
-//! - No checkpoint codec.
+//!
+//! # Snapshots
+//!
+//! The interface has the state codec of `fs_ports`' `Component`. Its state
+//! is two words, the closure and the reaction, read back only if both are
+//! finite and the potential at the closure is. Its identity is the
+//! obstacle's own ([`Obstacle::identity_words`]: every field, the
+//! provenance among them), every budget of the solve, and which ends read
+//! an end input.
 
 use core::num::NonZeroUsize;
 
 use fs_exec::Cx;
+use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_math::det;
 use fs_ports::component::{Class, Component, LoadLine, PortRole, PortSpec, Proposal, Receipt};
 use fs_ports::{PortKind, StableId};
@@ -277,6 +286,13 @@ impl ContactInterface {
         self.law.weights()[0] * self.law.stiffness() * det::pow(penetration, beta) / beta
     }
 
+    /// Whether this is a state the interface holds: a finite reaction, and
+    /// a closure that is finite with a finite potential, which is what its
+    /// stored energy requires.
+    fn holds(&self, state: &ContactState) -> bool {
+        state.reaction_n.is_finite() && self.stored_energy_j(state).is_ok()
+    }
+
     /// The law's reaction for a move of the closure from `x0` to `x1` [N]:
     /// the secant, which is the conservative reaction (no loss is admitted).
     fn law_force(step: &OpeningContactStep, x1: f64) -> Result<f64, DContactError> {
@@ -395,6 +411,67 @@ impl Component for ContactInterface {
         let zero = [0.0; 8];
         let compliance = &zero[..2 * (2 + self.told())];
         self.propose_on_line(old, dt_s, inputs, compliance, new, outputs, cx)
+    }
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-dcontact::component::ContactInterface",
+        state_family: "contact-closure",
+        schema_grammar: "closure_m f64 [m]; reaction_n f64 [N]",
+        codec_grammar: "two u64 words: closure_m bits, reaction_n bits",
+        codec_version: 1,
+    });
+
+    /// Refuses, writing nothing, for a state this interface does not hold:
+    /// a closure or a reaction that is not finite, or a closure whose
+    /// potential is not.
+    fn encode_state(&self, state: &ContactState, words: &mut Vec<u64>) -> bool {
+        if !self.holds(state) {
+            return false;
+        }
+        words.extend([state.closure_m.to_bits(), state.reaction_n.to_bits()]);
+        true
+    }
+
+    fn decode_state(&self, words: &[u64]) -> Option<ContactState> {
+        let &[closure_m, reaction_n] = words else {
+            return None;
+        };
+        let state = ContactState {
+            closure_m: f64::from_bits(closure_m),
+            reaction_n: f64::from_bits(reaction_n),
+        };
+        self.holds(&state).then_some(state)
+    }
+
+    /// The obstacle's own identity ([`Obstacle::identity_words`]), then
+    /// every budget of the solve, then, per end, zero or one more than the
+    /// port of its end input. The ports are in a system's own description.
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        let Self {
+            law,
+            solve,
+            ports: _,
+            ends,
+        } = self;
+        let ContactSolve {
+            max_iterations,
+            maximum_force_n,
+            maximum_penetration_m,
+            force_absolute_tolerance_n,
+            force_relative_tolerance,
+        } = *solve;
+        law.identity_words(words);
+        words.push(max_iterations as u64);
+        words.extend(
+            [
+                maximum_force_n,
+                maximum_penetration_m,
+                force_absolute_tolerance_n,
+                force_relative_tolerance,
+            ]
+            .map(f64::to_bits),
+        );
+        words.extend(ends.map(|at| at.map_or(0, |port| port as u64 + 1)));
     }
 }
 
