@@ -410,8 +410,8 @@ Elements (ports in brackets; SI units in every field name):
                  trace's <face>.min_temperature_k and
                  <face>.max_temperature_k, the field's min_temperature_k and
                  max_temperature_k, and for a body of the card's heat
-                 capacity reference_density_kg_m3. Fixed step_s only; no
-                 checkpoint codec.)
+                 capacity reference_density_kg_m3. Fixed step_s only. Its
+                 field is saved by --checkpoint and resumed.)
   trace_contact  between [\"body.face\", \"body.face\"], offset_m [x, y, z],
                  resistance_m2_k_w, source (or pack, state, selection,
                  follows), mapped                                     [a, b]

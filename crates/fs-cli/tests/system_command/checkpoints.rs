@@ -266,3 +266,110 @@ fn resume_requires_an_independent_root_and_valid_pause_horizon() {
     assert!(stdout.is_empty());
     assert!(stderr.contains("system-until"), "{stderr}");
 }
+
+/// The packs the conduction examples read, relative to the scene.
+const STEEL_316_PACK: &str = "steel316/stainless-316-nasa.fsmcdpk";
+const ATKINS_JOINT_PACK: &str = "atkins1964/al6061t6-lathe-0p30um-vacuum.fsintpk";
+
+/// A conduction example copied into the test's scratch directory with the
+/// pack it reads, if any: its path and its text.
+fn conduction_scene(name: &str, pack: Option<&str>) -> (std::path::PathBuf, String) {
+    let text = std::fs::read_to_string(example(name)).unwrap();
+    let scene = scratch(name, &text);
+    if let Some(pack) = pack {
+        let beside = scene.parent().unwrap().join(pack);
+        std::fs::create_dir_all(beside.parent().unwrap()).unwrap();
+        std::fs::copy(example(pack), beside).unwrap();
+    }
+    (scene, text)
+}
+
+/// Claims, declared before the first run: every conduction example, saved
+/// at 0.125 s and resumed by another process, reports what its uninterrupted
+/// run reports, byte for byte. The bodies are fs-conduction's with a
+/// declared conductivity, with a card's k(T) on the Newton path, and with a
+/// card's heat capacity (the enthalpy owner); the contacts are a lumped
+/// conductance, trace contacts on matching and mapped faces, a card-backed
+/// one and one that follows its card.
+#[test]
+fn saved_conduction_scenes_continue_with_identical_reports() {
+    for (name, pack) in [
+        ("two_slabs.json", None),
+        ("two_slabs_trace.json", None),
+        ("two_slabs_mapped.json", None),
+        ("steel316_heated_bar.json", Some(STEEL_316_PACK)),
+        ("steel316_blocks_trace.json", Some(STEEL_316_PACK)),
+        ("steel316_enthalpy_bar.json", Some(STEEL_316_PACK)),
+        ("two_blocks_atkins.json", Some(ATKINS_JOINT_PACK)),
+        ("two_blocks_atkins_following.json", Some(ATKINS_JOINT_PACK)),
+    ] {
+        let (scene, text) = conduction_scene(name, pack);
+        checkpoint_continuation(&scene, &text);
+    }
+}
+
+/// The scene at `scene` refuses the checkpoint beside it: no report, and
+/// the checkpoint diagnostic.
+fn resume_is_refused(case: &str, scene: &std::path::Path, root: &str) {
+    let checkpoint = scene.with_extension("fssnap");
+    let (code, stdout, stderr) = run_binary(&[
+        "--json",
+        "system",
+        scene.to_str().unwrap(),
+        "--resume",
+        checkpoint.to_str().unwrap(),
+        "--resume-root",
+        root,
+    ]);
+    eprintln!("{case}: exit {code}: {}", stderr.trim_end());
+    assert_ne!(code, 0, "{case}");
+    assert!(stdout.is_empty(), "{case}: {stdout}");
+    assert!(stderr.contains("system-checkpoint"), "{case}: {stderr}");
+}
+
+/// Claims, declared before the first run: a conduction scene's checkpoint
+/// is refused by the same scene with another conductivity, another grid,
+/// another heat capacity, another Krylov tolerance of one body or another
+/// contact resistance, and the read-once Atkins example's checkpoint is
+/// refused by the example that follows its card.
+#[test]
+fn conduction_checkpoints_refuse_a_scene_whose_body_or_contact_changed() {
+    let (scene, text) = conduction_scene("two_slabs_trace.json", None);
+    let root = checkpoint_continuation(&scene, &text);
+    for (case, from, to) in [
+        (
+            "another conductivity",
+            "\"conductivity_w_m_k\": 15.0",
+            "\"conductivity_w_m_k\": 15.5",
+        ),
+        (
+            "another grid",
+            "\"cells\": [4, 2, 2]",
+            "\"cells\": [5, 2, 2]",
+        ),
+        (
+            "another heat capacity",
+            "\"volumetric_heat_capacity_j_m3_k\": 3600000.0",
+            "\"volumetric_heat_capacity_j_m3_k\": 3700000.0",
+        ),
+        (
+            "another Krylov tolerance",
+            "\"tolerance\": 1e-13",
+            "\"tolerance\": 1e-12",
+        ),
+        (
+            "another contact resistance",
+            "\"resistance_m2_k_w\": 0.0008",
+            "\"resistance_m2_k_w\": 0.0009",
+        ),
+    ] {
+        assert!(text.contains(from), "{case}: test fixture changed");
+        std::fs::write(&scene, text.replacen(from, to, 1)).unwrap();
+        resume_is_refused(case, &scene, &root);
+    }
+    let (scene, text) = conduction_scene("two_blocks_atkins.json", Some(ATKINS_JOINT_PACK));
+    let root = checkpoint_continuation(&scene, &text);
+    let following = std::fs::read_to_string(example("two_blocks_atkins_following.json")).unwrap();
+    std::fs::write(&scene, following).unwrap();
+    resume_is_refused("a contact that follows its card", &scene, &root);
+}

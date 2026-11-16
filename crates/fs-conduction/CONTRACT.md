@@ -6450,8 +6450,48 @@ temperature alone has no slope by side B's; a curve over the pressure with
 the temperatures only in its validity, the shape of the committed pressure
 cards, gives the factor one inside the span and no answer outside it.
 
+The body has a snapshot codec (fs-ports' `STATE_CHARTER`, `encode_state`,
+`decode_state`, `identity_words`), so a system with one can be written to
+a durable snapshot and resumed. The state is written as the vertex count
+and every nodal temperature's bits; words with another count, or a
+temperature that is not positive and finite, are refused. The identity is
+one hash, as four words, of what fixes the body's steps: every vertex
+position and every element's vertices; every element's conductivity; the
+solver's capacitance matrix, every entry (its row sums alone would not
+tell two storages apart); each port's region, faces and kind; the step
+configuration; and the Newton policy of a temperature-dependent body. A
+body with a part that hash cannot bind has no codec, so a system with one
+is not written or resumed: a boundary with sheet conduction (the body
+admits a sheet that does not depend on temperature), and a solver whose
+storage is more than its matrix (a bulk matrix retained under a coating,
+or a material-sourced capacity, whose temperature span refuses a step
+outside it). A conductivity sampled from a material card is
+bound by its property, the temperatures it was sampled at and every
+sample's receipt, which names the claim, the query and the card's sources;
+a declared one has no card and is bound by its knots; a constant tensor by
+its entries and its receipts. The step policies are bound as their `Debug`
+text, as the kernel binds a system's description: a toolchain that prints
+one differently refuses older snapshots and never makes two policies one.
+The body steps itself, so a resume under another tolerance could not give
+the uninterrupted run's state and is refused. Two tests in
+`tests/conduction_component.rs` (claims written before the first run): the
+words read back to the same bits, another count, a word short, a word
+over, and NaN, infinity, zero and a negative temperature are refused, and
+a body with a conducting sheet on a boundary face, and one on a solver
+with a coating, write no words and read none; the
+identity is equal for a body built twice and different, from it and from
+each other, for another conductivity, mesh, heat capacity, port set, a
+trace in place of a mean port, another Krylov tolerance, a k(T) body and
+that body under another Newton policy; two systems that differ in the
+body's conductivity alone are different problems (`System::problem_id`).
+
 Not covered: the entropy generated inside the body is reported as zero, a
-lower bound. There is no snapshot codec. Contact inside one body, radiation
+lower bound. No test in this crate writes a durable snapshot: fs-cli's
+`tests/system_command/checkpoints.rs` saves and resumes scenes of these
+bodies. Of the solvers that are not plain, the coated one's refusal is
+tested and the material-sourced one's is not, and no test builds two
+storages with equal row sums and other entries. Contact inside one body,
+radiation
 and adaptive owners are refused or not wrapped; heat capacity that depends on
 temperature is the enthalpy body's (below), not this one's. A
 temperature-dependent conductivity is carried only by
@@ -6552,8 +6592,28 @@ declared before the first run:
   1e5 W for one second, which would carry the block past the chart's 450 K
   end.
 
+The enthalpy body has the same codec for its nodal specific enthalpy
+(finite values; whether one lies on the chart is the owner's to refuse at
+the next step). Its identity binds the mesh, the conductivity and the
+ports as a conduction body's does, the reference nodal masses, the
+owner's caloric chart by the card it came from and the chart's own
+identity, which holds its receipts, the step policy and the policy of the
+tangent's transpose solves. A solver with more than its mesh, masses and
+one chart (nodal charts, surface storage, a phase multiplier on the
+conductivity, sourced transport) offers no identity of those parts, so a
+body on one refuses to be written or read, as does a body whose boundary
+carries sheet conduction. Test in
+`tests/enthalpy_component.rs`: the words read back to the same bits, zero
+included; another count, a word short, NaN and infinity are refused; the
+identity is equal for a body built twice and different for a chart that
+starts at another specific enthalpy, another port set, another step policy
+and another transpose policy; a body on a solver with a phase multiplier
+writes no words and reads none.
+
 Not covered: the entropy generated inside the body is reported as zero, a
-lower bound. There is no snapshot codec. A latent plateau is the owner's and
+lower bound. A body on a solver that is not plain has no snapshot; of
+those, only the phase multiplier's refusal is tested.
+A latent plateau is the owner's and
 is not tested through ports, and the test card is synthetic. No contact
 between the traces of two enthalpy bodies is built. fs-cli's scene builds
 this body for a `conduction_body` that names a material and declares no

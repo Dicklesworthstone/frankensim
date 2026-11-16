@@ -11,7 +11,9 @@
 //! body passes the conformance kit, its ports read the closed-form `T(h)` of
 //! its own state, a trace port steps it as a mean port does under a uniform
 //! flux, a heater through the kernel steps it exactly as the owner steps
-//! itself, and it refuses what it cannot carry. Run with
+//! itself, and it refuses what it cannot carry. Its state codec reads what
+//! it wrote, and its identity follows the chart, the ports and the step
+//! policies. Run with
 //! `cargo test -p fs-conduction --features component --test enthalpy_component`.
 #![cfg(feature = "component")]
 // Exact float comparisons here assert bitwise agreement with the owner.
@@ -20,6 +22,7 @@
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_conduction::component::{EnthalpyBody, PatchPort};
 use fs_conduction::fixtures::{box_grid, on_box_face};
+use fs_conduction::material::LiquidMassFractionConductivity;
 use fs_conduction::transient::enthalpy::material::{
     ExactMaterialEnthalpySource, MaterialEnthalpyTransport,
 };
@@ -136,6 +139,11 @@ fn card() -> MaterialCard {
 /// The card's storage and transport: Cp integrated from 0 J/kg at 250 K,
 /// density frozen at 300 K, the scalar k(T) as isotropic conduction.
 fn transport() -> &'static MaterialEnthalpyTransport {
+    transport_from(0.0)
+}
+
+/// The same with the chart's specific enthalpy at 250 K given.
+fn transport_from(lower_specific_enthalpy_j_kg: f64) -> &'static MaterialEnthalpyTransport {
     let card = card();
     leak(
         MaterialEnthalpyTransport::from_isotropic_card_exact(
@@ -152,7 +160,7 @@ fn transport() -> &'static MaterialEnthalpyTransport {
                 conductivity: &PropertyKey::new("k", K_DIMS),
                 reference: &point(300.0),
                 phase: SolidLiquidPhase::Solid,
-                lower_specific_enthalpy_j_kg: 0.0,
+                lower_specific_enthalpy_j_kg,
             },
         )
         .unwrap(),
@@ -704,5 +712,111 @@ fn an_enthalpy_body_refuses_what_it_cannot_carry_and_a_step_off_its_chart() {
         eprintln!("1e5 W for 1 s: {off_chart:?}");
         assert!(off_chart.is_err());
         assert!(new.is_empty());
+    });
+}
+
+/// Claims, declared before the first run. An enthalpy body writes its state
+/// as the vertex count and every specific enthalpy's bits and reads the
+/// same bits back, zero included. It refuses its words with another count,
+/// a word short, and a value that is NaN or infinite. Its identity is four
+/// words, equal for two bodies built the same way and different, from that
+/// and from each other, for a chart that starts at another specific
+/// enthalpy, another port set, another step policy and another policy of
+/// the tangent's transpose solves. A body on a solver with more than its
+/// mesh, masses and one chart, here a phase multiplier on the conductivity,
+/// writes no words and reads none.
+#[test]
+fn an_enthalpy_body_reads_the_state_it_wrote_and_its_identity_follows_its_chart_and_policies() {
+    with_cx(|cx| {
+        let parts = parts();
+        let ends = [PatchPort::Mean("left"), PatchPort::Mean("right")];
+        let build = |parts: Parts, ports: &[PatchPort<'_>], config, adjoint| {
+            EnthalpyBody::new(solver(cx, parts), problem(parts), ports, config, adjoint).unwrap()
+        };
+        let identity = |body: &EnthalpyBody<'_, '_>| {
+            let mut words = Vec::new();
+            body.identity_words(&mut words);
+            words
+        };
+        let first = build(parts, &ends, config(), adjoint());
+        assert!(<EnthalpyBody<'static, 'static> as Component>::STATE_CHARTER.is_some());
+
+        let mut field = initial(parts);
+        field[0] = 0.0;
+        let mut words = Vec::new();
+        assert!(first.encode_state(&field, &mut words));
+        assert_eq!(
+            (words.len(), words[0]),
+            (field.len() + 1, field.len() as u64)
+        );
+        let read = first.decode_state(&words).expect("the body's own words");
+        assert_eq!(read.len(), field.len());
+        assert!(
+            read.iter()
+                .zip(&field)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+        );
+        let refused = |change: &dyn Fn(&mut Vec<u64>)| {
+            let mut changed = words.clone();
+            change(&mut changed);
+            first.decode_state(&changed).is_none()
+        };
+        assert!(refused(&|words| words[0] -= 1), "another count");
+        assert!(
+            refused(&|words| words.truncate(words.len() - 1)),
+            "a word short"
+        );
+        for value in [f64::NAN, f64::NEG_INFINITY] {
+            assert!(refused(&|words| words[2] = value.to_bits()), "{value} J/kg");
+        }
+
+        let shifted = Parts {
+            transport: transport_from(1.0),
+            ..parts
+        };
+        let looser = LinearConfig {
+            tolerance: 1.0e-12,
+            ..adjoint()
+        };
+        let identities = [
+            ("the first body", identity(&first)),
+            (
+                "another chart",
+                identity(&build(shifted, &ends, config(), adjoint())),
+            ),
+            (
+                "another port set",
+                identity(&build(parts, &ends[..1], config(), adjoint())),
+            ),
+            (
+                "another step policy",
+                identity(&build(parts, &ends, relative_config(), adjoint())),
+            ),
+            (
+                "another transpose policy",
+                identity(&build(parts, &ends, config(), looser)),
+            ),
+        ];
+        assert_eq!(
+            identity(&build(parts, &ends, config(), adjoint())),
+            identities[0].1
+        );
+        for (index, (name, words)) in identities.iter().enumerate() {
+            assert_eq!(words.len(), 4, "{name}");
+            for (other, earlier) in &identities[..index] {
+                assert_ne!(words, earlier, "{name} has the identity of {other}");
+            }
+        }
+
+        // A phase multiplier on the conductivity is in no identity, so a
+        // body on a solver with one writes nothing and reads nothing.
+        let law = LiquidMassFractionConductivity::declared(1.0, 0.5).unwrap();
+        let phased = solver(cx, parts)
+            .with_phase_conductivity(cx, vec![law; parts.mesh.element_count()])
+            .unwrap();
+        let phased = EnthalpyBody::new(phased, problem(parts), &ends, config(), adjoint()).unwrap();
+        let mut none = Vec::new();
+        assert!(!phased.encode_state(&field, &mut none) && none.is_empty());
+        assert!(phased.decode_state(&words).is_none());
     });
 }

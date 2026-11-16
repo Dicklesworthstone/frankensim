@@ -1411,6 +1411,93 @@ impl ElementMaterials {
     }
 }
 
+/// What a conductivity is, bound into the identity of a durable snapshot.
+///
+/// A table sampled from a card is bound by its property, the temperatures
+/// it was sampled over and every sample's receipt, which names the selected
+/// claim, the query and the card's sources; its sampled values follow from
+/// those. A declared table has no card, so its knots are bound themselves.
+/// Only a body on the composition contract has such an identity.
+#[cfg(feature = "component")]
+fn bind_receipts(hasher: &mut fs_blake3::DomainHasher, receipts: &[PropertyUsageReceipt]) {
+    hasher.update(&(receipts.len() as u64).to_le_bytes());
+    for receipt in receipts {
+        hasher.update(receipt.content_hash().as_bytes());
+    }
+}
+
+#[cfg(feature = "component")]
+impl ConductivityTable {
+    /// Bind this table to `hasher` (see [`bind_receipts`]).
+    pub(crate) fn bind_identity(&self, hasher: &mut fs_blake3::DomainHasher) {
+        hasher.update(&(self.knots.len() as u64).to_le_bytes());
+        if self.receipts.is_empty() {
+            hasher.update(&[0]);
+            for &(kelvin, conductivity) in &self.knots {
+                hasher.update(&kelvin.to_bits().to_le_bytes());
+                hasher.update(&conductivity.to_bits().to_le_bytes());
+            }
+        } else {
+            hasher.update(&[1]);
+            hasher.update(&(self.property.len() as u64).to_le_bytes());
+            hasher.update(self.property.as_bytes());
+            for &(kelvin, _) in &self.knots {
+                hasher.update(&kelvin.to_bits().to_le_bytes());
+            }
+            bind_receipts(hasher, &self.receipts);
+        }
+    }
+}
+
+#[cfg(feature = "component")]
+impl ConductivityModel {
+    /// Bind this model to `hasher`: its kind, a constant tensor's entries
+    /// and receipts, a principal frame's axes, and each table
+    /// ([`ConductivityTable::bind_identity`]).
+    pub(crate) fn bind_identity(&self, hasher: &mut fs_blake3::DomainHasher) {
+        let matrix = |hasher: &mut fs_blake3::DomainHasher, entries: &[[f64; 3]; 3]| {
+            for value in entries.iter().flatten() {
+                hasher.update(&value.to_bits().to_le_bytes());
+            }
+        };
+        match &self.kind {
+            ConductivityKind::ConstantTensor { tensor, receipts } => {
+                hasher.update(&[0]);
+                matrix(hasher, tensor);
+                bind_receipts(hasher, receipts);
+            }
+            ConductivityKind::Isotropic(table) => {
+                hasher.update(&[1]);
+                table.bind_identity(hasher);
+            }
+            ConductivityKind::Orthotropic { axes, tables } => {
+                hasher.update(&[2]);
+                matrix(hasher, axes);
+                for table in tables.as_ref() {
+                    table.bind_identity(hasher);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "component")]
+impl ElementMaterials {
+    /// Bind the assignment to `hasher`: every element's id in order, then
+    /// every model of the table under its id.
+    pub(crate) fn bind_identity(&self, hasher: &mut fs_blake3::DomainHasher) {
+        hasher.update(&(self.of_element.len() as u64).to_le_bytes());
+        for id in &self.of_element {
+            hasher.update(&id.0.to_le_bytes());
+        }
+        hasher.update(&(self.table.models.len() as u64).to_le_bytes());
+        for (id, model) in &self.table.models {
+            hasher.update(&id.0.to_le_bytes());
+            model.bind_identity(hasher);
+        }
+    }
+}
+
 #[cfg(test)]
 mod global_constant_tests {
     use super::*;

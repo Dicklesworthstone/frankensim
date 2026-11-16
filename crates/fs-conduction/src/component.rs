@@ -41,13 +41,22 @@
 //! at different temperatures) is reported as zero, a lower bound. Robin,
 //! Dirichlet and contact traces, volumetric sources and temperature-dependent
 //! sheet conduction are refused, not wrapped. Traces that
-//! are not coplanar, or do not cover each other, are refused. The state has
-//! no snapshot codec.
+//! are not coplanar, or do not cover each other, are refused.
+//!
+//! Both bodies have a snapshot codec: the state is written as the vertex
+//! count and every nodal value's bits, and the identity a snapshot is bound
+//! to is one hash of the mesh, every element's conductivity, the solver's
+//! storage, the ports and the step policies. A conductivity sampled from a
+//! material card is bound by its receipts, a declared one by its knots. A
+//! body with a part the identity cannot bind has no codec: a boundary with
+//! sheet conduction, or a solver whose storage is more than its matrix.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 
+use fs_blake3::DomainHasher;
 use fs_exec::Cx;
+use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::StableId;
 use fs_ports::component::{Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt};
 
@@ -574,6 +583,12 @@ impl<'m> ConductionBody<'m> {
     fn check_width(&self, vector: &str, length: usize) -> Result<(), ConductionError> {
         check_width(self.width, self.ports.len(), vector, length)
     }
+
+    /// Whether the identity binds all of this body: its storage is the
+    /// capacitance matrix alone and its boundary carries no sheet.
+    fn has_codec(&self) -> bool {
+        self.solver.is_plain() && unsheeted(&self.problem)
+    }
 }
 
 /// The checks every body behind heat ports makes of its boundary and source:
@@ -915,9 +930,160 @@ fn invalid(what: String) -> ConductionError {
     }
 }
 
+/// A nodal field as the words of a durable snapshot: the vertex count, then
+/// every value's bits in vertex order.
+fn encode_field(field: &[f64], words: &mut Vec<u64>) {
+    words.push(field.len() as u64);
+    words.extend(field.iter().map(|value| value.to_bits()));
+}
+
+/// The nodal field [`encode_field`] wrote for a mesh of `vertices` vertices.
+/// Refused: another count, a value that is not finite, a value `admitted`
+/// refuses.
+fn decode_field(words: &[u64], vertices: usize, admitted: fn(f64) -> bool) -> Option<Vec<f64>> {
+    let (&count, values) = words.split_first()?;
+    if count != vertices as u64 || values.len() != vertices {
+        return None;
+    }
+    let field: Vec<f64> = values.iter().map(|&bits| f64::from_bits(bits)).collect();
+    field
+        .iter()
+        .all(|&value| value.is_finite() && admitted(value))
+        .then_some(field)
+}
+
+/// Bind to `hasher` what a body's problem and ports fix of its physics, for
+/// the identity of a durable snapshot: the mesh (every vertex position and
+/// every element's vertices), every element's conductivity, and each port's
+/// region, faces and kind. The regions' conditions and the source are not
+/// bound: a body admits only insulated regions and a zero source. Sheet
+/// conduction on the boundary is not bound either, and a body with any has
+/// no codec ([`unsheeted`]).
+fn bind_problem(hasher: &mut DomainHasher, problem: &ConductionProblem<'_>, patches: &[Patch]) {
+    let count = |hasher: &mut DomainHasher, n: usize| hasher.update(&(n as u64).to_le_bytes());
+    let mesh = problem.mesh;
+    count(hasher, mesh.vertex_count());
+    for coordinate in mesh.positions().iter().flatten() {
+        hasher.update(&coordinate.to_bits().to_le_bytes());
+    }
+    let tets = &mesh.complex().tets;
+    count(hasher, tets.len());
+    for vertex in tets.iter().flatten() {
+        hasher.update(&vertex.to_le_bytes());
+    }
+    problem.material.bind_identity(hasher);
+    match problem.element_materials {
+        None => hasher.update(&[0]),
+        Some(materials) => {
+            hasher.update(&[1]);
+            materials.bind_identity(hasher);
+        }
+    }
+    count(hasher, patches.len());
+    for patch in patches {
+        count(hasher, patch.region);
+        count(hasher, patch.faces.len());
+        for &vertex in patch.faces.iter().flat_map(|(vertices, _)| vertices) {
+            count(hasher, vertex);
+        }
+        hasher.update(&[u8::from(patch.trace.is_some())]);
+    }
+}
+
+/// Whether `problem`'s boundary carries no sheet conduction. A body admits a
+/// sheet that does not depend on temperature, and no identity binds one.
+fn unsheeted(problem: &ConductionProblem<'_>) -> bool {
+    problem.boundary.surface_heat_conduction().is_empty()
+}
+
+/// Bind the solver's capacitance matrix to `hasher`: every row's columns
+/// and entries. Its row sums alone would not tell two storages apart.
+fn bind_capacitance(hasher: &mut DomainHasher, solver: &BackwardEuler<'_>) {
+    let capacity = solver.capacitance();
+    hasher.update(&(capacity.nrows() as u64).to_le_bytes());
+    for row in 0..capacity.nrows() {
+        let (columns, entries) = capacity.row(row);
+        hasher.update(&(columns.len() as u64).to_le_bytes());
+        for (&column, entry) in columns.iter().zip(entries) {
+            hasher.update(&(column as u64).to_le_bytes());
+            hasher.update(&entry.to_bits().to_le_bytes());
+        }
+    }
+}
+
+/// Bind numbers a body holds to `hasher`: their count, then their bits.
+fn bind_values(hasher: &mut DomainHasher, values: &[f64]) {
+    hasher.update(&(values.len() as u64).to_le_bytes());
+    for value in values {
+        hasher.update(&value.to_bits().to_le_bytes());
+    }
+}
+
+/// Bind a step policy to `hasher` as its `Debug` text. A derived `Debug`
+/// prints every field, each number as the shortest text that reads back to
+/// the same bits, so a policy that gains a field is bound with no edit
+/// here.
+fn bind_policy(hasher: &mut DomainHasher, policy: &dyn core::fmt::Debug) {
+    let text = format!("{policy:?}");
+    hasher.update(&(text.len() as u64).to_le_bytes());
+    hasher.update(text.as_bytes());
+}
+
+/// The identity a body appends: its hash as four words.
+fn identity_of(hasher: &DomainHasher, words: &mut Vec<u64>) {
+    let hash = hasher.finalize();
+    for word in hash.as_bytes().as_chunks::<8>().0 {
+        words.push(u64::from_le_bytes(*word));
+    }
+}
+
 impl Component for ConductionBody<'_> {
     type State = Vec<f64>;
     type Error = ConductionError;
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-conduction::component::ConductionBody",
+        state_family: "nodal-temperature-field",
+        schema_grammar: "the temperature [K] at every vertex of the body's mesh, in vertex order",
+        codec_grammar: "the vertex count, then each temperature as the bits of an f64",
+        codec_version: 1,
+    });
+
+    /// Refuses, writing nothing, for a body with a part its identity cannot
+    /// bind: a boundary with sheet conduction, or a solver whose storage is
+    /// more than its capacitance matrix.
+    fn encode_state(&self, state: &Vec<f64>, words: &mut Vec<u64>) -> bool {
+        if !self.has_codec() {
+            return false;
+        }
+        encode_field(state, words);
+        true
+    }
+
+    /// Refuses a count that is not the mesh's, a temperature that is not
+    /// positive and finite, and everything for a body `encode_state`
+    /// refuses.
+    fn decode_state(&self, words: &[u64]) -> Option<Vec<f64>> {
+        if !self.has_codec() {
+            return None;
+        }
+        decode_field(words, self.weights.len(), |kelvin| kelvin > 0.0)
+    }
+
+    /// One hash, as four words, of what fixes the body's steps: the mesh,
+    /// every element's conductivity and the ports ([`bind_problem`]), the
+    /// solver's capacitance matrix, the step configuration and the Newton
+    /// policy of a body whose conductivity depends on temperature. The body
+    /// steps itself, so a resume under another tolerance could not give the
+    /// uninterrupted run's state.
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        let mut hasher = DomainHasher::new("fs-conduction/conduction-body/v1");
+        bind_problem(&mut hasher, &self.problem, &self.patches);
+        bind_capacitance(&mut hasher, &self.solver);
+        bind_policy(&mut hasher, &self.config);
+        bind_policy(&mut hasher, &self.nonlinear);
+        identity_of(&hasher, words);
+    }
 
     fn ports(&self) -> &[PortSpec] {
         &self.ports

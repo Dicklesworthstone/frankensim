@@ -616,6 +616,20 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
         self.curve
     }
 
+    /// Whether the mesh, the reference masses and the one chart fix this
+    /// solver: it has no nodal charts, no surface storage, no phase
+    /// multiplier on the conductivity and no sourced transport. Only such a
+    /// solver can be bound into the identity of a durable snapshot
+    /// (`component::EnthalpyBody`): the other parts offer no identity.
+    #[cfg(feature = "component")]
+    pub(crate) fn is_plain(&self) -> bool {
+        self.nodal_curves.is_none()
+            && self.surface_capacity.is_none()
+            && self.phase_conductivity.is_none()
+            && self.sourced_melting.is_none()
+            && self.sourced_phase.is_none()
+    }
+
     // Callers have already admitted the nodal shape. Keep constitutive lookup
     // common to residuals, Newton tangents, phase reporting and adjoint guards.
     fn curve_for_vertex(&self, vertex: usize) -> &EquilibriumEnthalpyPhaseCurve {

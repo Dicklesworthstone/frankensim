@@ -26,15 +26,26 @@
 //! Dirichlet and contact rows, volumetric sources and temperature-dependent
 //! sheet conduction are refused, as for a conduction body. Latent storage
 //! in the chart is the owner's, and is not tested through ports. No contact
-//! between the traces of two enthalpy bodies is built here. The state has no
-//! snapshot codec.
+//! between the traces of two enthalpy bodies is built here.
+//!
+//! The state has a snapshot codec, as a conduction body's has. Its identity
+//! binds the owner's caloric chart by the card it came from and the chart's
+//! own identity, which holds its receipts. A solver with more than its
+//! mesh, masses and one chart (nodal charts, surface storage, a phase
+//! multiplier on the conductivity from `with_phase_conductivity`, sourced
+//! transport) offers no identity of those parts, so a body on one refuses
+//! to be written or read, as does a body whose boundary carries sheet
+//! conduction.
 
+use fs_blake3::DomainHasher;
 use fs_exec::Cx;
+use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::component::{Class, Component, PortSpec, PortTangent, Proposal, Receipt};
 
 use super::{
-    Patch, PatchPort, admit_boundary, admit_ports, boundary_for, check_width, heat_in_j,
-    input_bars, port_readings, reading_weights,
+    Patch, PatchPort, admit_boundary, admit_ports, bind_policy, bind_problem, bind_values,
+    boundary_for, check_width, decode_field, encode_field, heat_in_j, identity_of, input_bars,
+    port_readings, reading_weights, unsheeted,
 };
 use crate::transient::enthalpy::adjoint::EnthalpyAdjointError;
 use crate::transient::enthalpy::{EnthalpyBackwardEuler, EnthalpyStepConfig};
@@ -157,11 +168,64 @@ impl<'m, 'c> EnthalpyBody<'m, 'c> {
     fn check_width(&self, vector: &str, length: usize) -> Result<(), ConductionError> {
         check_width(self.width, self.ports.len(), vector, length)
     }
+
+    /// Whether the identity binds all of this body: the solver is fixed by
+    /// its mesh, masses and one chart, and the boundary carries no sheet.
+    fn has_codec(&self) -> bool {
+        self.solver.is_plain() && unsheeted(&self.problem)
+    }
 }
 
 impl Component for EnthalpyBody<'_, '_> {
     type State = Vec<f64>;
     type Error = EnthalpyAdjointError;
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-conduction::component::EnthalpyBody",
+        state_family: "nodal-specific-enthalpy-field",
+        schema_grammar: "the specific enthalpy [J/kg] at every vertex of the body's mesh, in vertex order",
+        codec_grammar: "the vertex count, then each specific enthalpy as the bits of an f64",
+        codec_version: 1,
+    });
+
+    /// Refuses, writing nothing, for a solver with more than its mesh,
+    /// masses and one chart, and for a boundary with sheet conduction: the
+    /// identity cannot bind them.
+    fn encode_state(&self, state: &Vec<f64>, words: &mut Vec<u64>) -> bool {
+        if !self.has_codec() {
+            return false;
+        }
+        encode_field(state, words);
+        true
+    }
+
+    /// Refuses a count that is not the mesh's, a specific enthalpy that is
+    /// not finite, and everything for a body `encode_state` refuses.
+    /// Whether a value lies on the chart is the owner's to refuse at the
+    /// next step.
+    fn decode_state(&self, words: &[u64]) -> Option<Vec<f64>> {
+        if !self.has_codec() {
+            return None;
+        }
+        decode_field(words, self.masses.len(), |_| true)
+    }
+
+    /// One hash, as four words, of what fixes the body's steps: the mesh,
+    /// every element's conductivity and the ports, the reference nodal
+    /// masses, the owner's caloric chart (the card it came from and the
+    /// chart's own identity, which holds its receipts), the step policy and
+    /// the policy of the tangent's transpose solves.
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        let mut hasher = DomainHasher::new("fs-conduction/enthalpy-body/v1");
+        bind_problem(&mut hasher, &self.problem, &self.patches);
+        bind_values(&mut hasher, &self.masses);
+        let chart = self.solver.phase_curve();
+        hasher.update(chart.material_card_identity().as_bytes());
+        hasher.update(chart.identity().as_bytes());
+        bind_policy(&mut hasher, &self.config);
+        bind_policy(&mut hasher, &self.adjoint);
+        identity_of(&hasher, words);
+    }
 
     fn ports(&self) -> &[PortSpec] {
         &self.ports

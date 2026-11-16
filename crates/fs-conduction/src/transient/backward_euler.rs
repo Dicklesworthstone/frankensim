@@ -228,6 +228,17 @@ impl<'m> BackwardEuler<'m> {
     #[cfg(feature = "component")]
     pub(crate) const fn mesh(&self) -> &'m ConductionMesh { self.mesh }
 
+    // Whether the capacitance matrix is all of this storage: no bulk matrix
+    // is retained under a coating and no capacity came from a material
+    // source, whose temperature spans refuse a step outside them. Only then
+    // can the heat-port body bind the storage into a snapshot's identity.
+    #[cfg(feature = "component")]
+    pub(crate) fn is_plain(&self) -> bool {
+        self.volume_capacity.is_none()
+            && self.material_capacities.is_empty()
+            && self.capacity_temperature_spans.is_none()
+    }
+
     /// Retained volume and surface density/Cp source bundles.
     /// Empty when all storage is explicitly declared.
     #[must_use]

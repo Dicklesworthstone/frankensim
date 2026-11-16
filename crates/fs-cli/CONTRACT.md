@@ -1097,8 +1097,20 @@ over its face and returns the face's area-mean end temperature; the owner
 steps the field and the lowering evaluates no conduction. The mesh, boundary
 and material live as long as the process. Reports expose each port's
 `<face>.temperature_k` (the last step's) and the field's
-`min_temperature_k` and `max_temperature_k`. `adaptive` refuses it, and it
-has no state codec.
+`min_temperature_k` and `max_temperature_k`. `adaptive` refuses it. Its
+state has fs-conduction's codec, the nodal field bound to the mesh, the
+conductivity, the heat capacity, the ports and the step policy, so a scene
+with conduction bodies is saved by `--checkpoint` and resumed. Tests in
+`tests/system_command/checkpoints.rs`: each of `two_slabs.json`,
+`two_slabs_trace.json`, `two_slabs_mapped.json`,
+`steel316_heated_bar.json`, `steel316_blocks_trace.json`,
+`steel316_enthalpy_bar.json`, `two_blocks_atkins.json` and
+`two_blocks_atkins_following.json`, saved at 0.125 s and resumed by
+another process, reports what its uninterrupted run reports, byte for
+byte; the checkpoint of `two_slabs_trace.json` is refused by that scene
+with another conductivity, grid, heat capacity, Krylov tolerance or
+contact resistance, and the read-once Atkins example's by the example that
+follows its card.
 
 Tests in `tests/system_command/conduction.rs`:
 - `examples/system/two_slabs.json`, fs-conduction tests/conduction_pair.rs's
@@ -1313,9 +1325,9 @@ the tests. The contact generates
 entropy where the heat crosses and the ledger books the nodal sum at its
 ports; no order is claimed for the gap between the two. The reference is
 compared in the energy crossed and in eight least and greatest
-temperatures a rung, not vertex by vertex: a scene reports no field. A
-conduction body has no state codec and `adaptive` refuses it, so a scene
-with a trace contact has neither.
+temperatures a rung, not vertex by vertex: a scene reports no field.
+`adaptive` refuses a conduction body, so a scene with a trace contact has
+no adaptive stepping.
 
 Every report's no-claim sentence lists what the scene has none of: "no
 material-card resolution, contact, friction, phase change or step-size

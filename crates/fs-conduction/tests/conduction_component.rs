@@ -7,7 +7,9 @@
 //! from a contact interface card meets the step condensed from the owner's
 //! own responses and reaches the two bodies' shared equilibrium. A body whose
 //! conductivity depends on temperature passes the same kit and heater on the
-//! owner's Newton endpoint. Run with
+//! owner's Newton endpoint. The state codec reads what it wrote, and the
+//! identity a durable snapshot is bound to follows what fixes the body's
+//! steps. Run with
 //! `cargo test -p fs-conduction --features component --test conduction_component`.
 #![cfg(feature = "component")]
 // Exact float comparisons here assert bitwise agreement with the owner.
@@ -17,12 +19,14 @@ use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_conduction::component::{ConductionBody, PatchPort};
 use fs_conduction::fixtures::{box_grid, on_box_face};
 use fs_conduction::transient::VolumetricHeatCapacity;
-use fs_conduction::transient::backward_euler::{BackwardEuler, NonlinearStepConfig, StepConfig};
+use fs_conduction::transient::backward_euler::{
+    ArealHeatCapacity, BackwardEuler, NonlinearStepConfig, StepConfig, SurfaceHeatCapacity,
+};
 use fs_conduction::{
     AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS, AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
     ConductionError, ConductionMesh, ConductionProblem, ConductivityModel, ConductivityTable,
-    InterfaceResistance, LinearConfig, ResistanceOrigin, ScalarField, ThermalBc, ThermalBoundary,
-    ThermalBoundaryBuilder,
+    InterfaceResistance, LinearConfig, ResistanceOrigin, ScalarField, SurfaceHeatConduction,
+    ThermalBc, ThermalBoundary, ThermalBoundaryBuilder,
 };
 use fs_evidence::ValidityDomain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -868,5 +872,198 @@ fn a_body_is_put_behind_ports_on_the_path_its_conductivity_needs() {
         eprintln!("440 K and 2000 W for 10 s: {refused:?}");
         assert!(refused.is_err());
         assert!(new.is_empty());
+    });
+}
+
+/// The words a component appends as its identity.
+fn identity(component: &impl Component) -> Vec<u64> {
+    let mut words = Vec::new();
+    component.identity_words(&mut words);
+    words
+}
+
+/// A body of `parts` with the volumetric heat capacity `rho_c` on `ports`,
+/// stepped under `config`.
+fn body_of(
+    cx: &Cx<'_>,
+    parts: Parts,
+    rho_c: f64,
+    ports: &[PatchPort<'_>],
+    config: StepConfig,
+) -> ConductionBody<'static> {
+    let capacity = VolumetricHeatCapacity::declared(rho_c).unwrap();
+    let solver = BackwardEuler::uniform(cx, parts.mesh, capacity).unwrap();
+    ConductionBody::new(solver, problem(parts), ports, config).unwrap()
+}
+
+/// Claims, declared before the first run. A body writes its state as the
+/// vertex count and every temperature's bits and reads the same bits back.
+/// It refuses its words with another count, a word short, a word over, and
+/// a temperature that is NaN, infinite, zero or negative. A body whose
+/// boundary carries a conducting sheet, or whose solver keeps a coating's
+/// storage beside its bulk matrix, has a part no identity binds: it writes
+/// no words and reads none.
+#[test]
+fn the_state_codec_reads_what_it_wrote_and_refuses_other_words() {
+    with_cx(|cx| {
+        let parts = parts();
+        let ends = [PatchPort::Mean("left"), PatchPort::Mean("right")];
+        let first = body_of(cx, parts, RHO_C_J_M3_K, &ends, config());
+        assert!(<ConductionBody<'static> as Component>::STATE_CHARTER.is_some());
+
+        let field = initial(parts);
+        let mut words = Vec::new();
+        assert!(first.encode_state(&field, &mut words));
+        assert_eq!(words.len(), field.len() + 1);
+        assert_eq!(words[0], field.len() as u64);
+        let read = first.decode_state(&words).expect("the body's own words");
+        assert_eq!(read.len(), field.len());
+        assert!(
+            read.iter()
+                .zip(&field)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+        );
+        let refused = |change: &dyn Fn(&mut Vec<u64>)| {
+            let mut changed = words.clone();
+            change(&mut changed);
+            first.decode_state(&changed).is_none()
+        };
+        assert!(refused(&|words| words[0] += 1), "another count");
+        assert!(
+            refused(&|words| words.truncate(words.len() - 1)),
+            "a word short"
+        );
+        assert!(
+            refused(&|words| words.push(300.0_f64.to_bits())),
+            "a word over"
+        );
+        for value in [f64::NAN, f64::INFINITY, 0.0, -300.0] {
+            assert!(refused(&|words| words[1] = value.to_bits()), "{value} K");
+        }
+        assert!(first.decode_state(&[]).is_none(), "no words");
+
+        // A sheet of 5e-3 W/K (5 W/m K, 1 mm thick) on one boundary face:
+        // the body admits it, since it does not depend on temperature.
+        let sheet = SurfaceHeatConduction::uniform(0, 5.0e-3).unwrap();
+        let coated = parts
+            .boundary
+            .clone()
+            .with_surface_heat_conduction(cx, parts.mesh, &[sheet])
+            .unwrap();
+        let coated = Parts {
+            boundary: leak(coated),
+            ..parts
+        };
+        let coated = body_of(cx, coated, RHO_C_J_M3_K, &ends, config());
+        let mut none = Vec::new();
+        assert!(!coated.encode_state(&field, &mut none) && none.is_empty());
+        assert!(coated.decode_state(&words).is_none());
+
+        // A coating of 2 J/m^2 K on one boundary face: the solver then
+        // retains its bulk matrix beside the combined one.
+        let film = SurfaceHeatCapacity::uniform(0, ArealHeatCapacity::declared(2.0).unwrap());
+        let capacity = VolumetricHeatCapacity::declared(RHO_C_J_M3_K).unwrap();
+        let filmed = BackwardEuler::uniform(cx, parts.mesh, capacity)
+            .unwrap()
+            .with_surface_heat_capacity(cx, &[film])
+            .unwrap();
+        let filmed = ConductionBody::new(filmed, problem(parts), &ends, config()).unwrap();
+        assert!(!filmed.encode_state(&field, &mut none) && none.is_empty());
+        assert!(filmed.decode_state(&words).is_none());
+    });
+}
+
+/// Claims, declared before the first run. A body's identity is four words,
+/// equal for two bodies built the same way and different, from that and
+/// from each other, for another conductivity, another mesh, another heat
+/// capacity, another port set, a trace in place of a mean port, another
+/// Krylov tolerance, a conductivity that depends on temperature, and that
+/// body under another Newton policy. Two systems that differ in the body's
+/// conductivity alone are different problems.
+#[test]
+fn the_identity_follows_what_fixes_the_steps_and_reaches_the_kernel() {
+    with_cx(|cx| {
+        let parts = parts();
+        let ends = [PatchPort::Mean("left"), PatchPort::Mean("right")];
+        let build = |parts, rho_c, ports: &[PatchPort<'_>], config| {
+            identity(&body_of(cx, parts, rho_c, ports, config))
+        };
+        let longer = {
+            let (complex, positions) = box_grid([4, 2, 2], [LENGTH_M, 0.02, 0.02]);
+            let mesh = leak(ConductionMesh::new(complex, positions).unwrap());
+            Parts {
+                mesh,
+                boundary: boundary(mesh, ThermalBc::adiabatic(), ThermalBc::adiabatic()),
+                ..parts
+            }
+        };
+        let other_k = Parts {
+            material: leak(ConductivityModel::isotropic_declared(16.0).unwrap()),
+            ..parts
+        };
+        let traced = [PatchPort::Trace("left"), PatchPort::Mean("right")];
+        let dependent = |policy| {
+            let ports = ["left", "right"];
+            identity(&try_dependent(cx, dependent_parts(), &ports, config(), policy).unwrap())
+        };
+        let identities = [
+            (
+                "the first body",
+                build(parts, RHO_C_J_M3_K, &ends, config()),
+            ),
+            (
+                "another conductivity",
+                build(other_k, RHO_C_J_M3_K, &ends, config()),
+            ),
+            ("another mesh", build(longer, RHO_C_J_M3_K, &ends, config())),
+            (
+                "another heat capacity",
+                build(parts, 2.0 * RHO_C_J_M3_K, &ends, config()),
+            ),
+            (
+                "another port set",
+                build(parts, RHO_C_J_M3_K, &ends[..1], config()),
+            ),
+            (
+                "a trace port",
+                build(parts, RHO_C_J_M3_K, &traced, config()),
+            ),
+            (
+                "another Krylov tolerance",
+                build(parts, RHO_C_J_M3_K, &ends, converged()),
+            ),
+            ("a k(T) body", dependent(NonlinearStepConfig::default())),
+            ("another Newton policy", dependent(newton())),
+        ];
+        assert_eq!(build(parts, RHO_C_J_M3_K, &ends, config()), identities[0].1);
+        for (index, (name, words)) in identities.iter().enumerate() {
+            assert_eq!(words.len(), 4, "{name}");
+            for (other, earlier) in &identities[..index] {
+                assert_ne!(words, earlier, "{name} has the identity of {other}");
+            }
+        }
+
+        // The identity reaches the kernel: the same graph around a body of
+        // another conductivity is another problem.
+        let problem_of = |parts: Parts| {
+            let mut builder = SystemBuilder::new();
+            let node = builder
+                .add_with_tangent("body", body(cx, parts, &["left"]), initial(parts))
+                .unwrap();
+            let heater = builder
+                .add_with_tangent(
+                    "heater",
+                    Heater::new(Waveform::constant(20.0).unwrap()).unwrap(),
+                    SourceAccount::default(),
+                )
+                .unwrap();
+            let heat = builder.port(heater, "heat").unwrap();
+            builder
+                .bond(builder.port(node, "left").unwrap(), heat)
+                .unwrap();
+            builder.seal().unwrap().problem_id()
+        };
+        assert_eq!(problem_of(parts), problem_of(parts));
+        assert_ne!(problem_of(parts), problem_of(other_k));
     });
 }
