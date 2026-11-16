@@ -36,7 +36,12 @@
 //! compiled pack read once at a declared state ([`card`]). The owner computes
 //! the interface points (`ConductionBody::matching_contact`, or
 //! `mapped_contact` when the scene gives the refinement's budgets under
-//! `mapped`) and the kernel's element carries the heat. The contact is
+//! `mapped`) and the kernel's element carries the heat. A card-backed
+//! contact that names the card coordinates its traces' temperatures take
+//! (`follows`) is the owner's [`TraceResistanceLaw`] on the element's hook:
+//! the card is asked at every interface point of every step, and at every
+//! pair of facing trace points, and a state it has no answer for refuses
+//! the step. The contact is
 //! computed from both bodies, so the bodies a contact names are built before
 //! the kernel takes any element ([`prepare`]); every other body is built
 //! where the scene lists it.
@@ -47,12 +52,16 @@
 
 use std::fmt::Write as _;
 use std::path::Path;
+use std::sync::Arc;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::hash_bytes;
-use fs_conduction::component::{ConductionBody, EnthalpyBody, PatchPort};
+use fs_conduction::component::{
+    ConductionBody, EnthalpyBody, PatchPort, TraceContact, TraceResistanceLaw,
+};
 use fs_conduction::fixtures::{box_grid, on_box_face};
 use fs_conduction::interface::NonmatchingOptions;
+use fs_conduction::interface::temperature::TemperatureContactCoordinates;
 use fs_conduction::transient::VolumetricHeatCapacity;
 use fs_conduction::transient::backward_euler::{BackwardEuler, NonlinearStepConfig, StepConfig};
 use fs_conduction::transient::enthalpy::material::MaterialEnthalpyTransport;
@@ -72,7 +81,9 @@ use fs_matdb::{
 };
 use fs_ports::component::PortSpec;
 use fs_solver::NewtonKrylovConfig;
-use fs_system::elements::{ConductanceMatrix, InterfacePoint};
+use fs_system::elements::{
+    ConductanceLaw, ConductanceMatrix, ElementError, GuardRow, InterfacePoint,
+};
 use fs_system::{NodeId, System, SystemBuilder};
 
 use crate::cards::{MAX_CARD_PACK_BYTES, MAX_CARD_PACK_SOURCE_BYTES};
@@ -697,9 +708,10 @@ fn build(definition: &J, materials: &Materials, what: &str) -> Result<Body, Refu
 enum Origin {
     /// The scene's own number, with the scene's sentence on its source.
     Declared(String),
-    /// An interface card read once at a declared state: the pack's name and
-    /// the members of the report's `card` object that identify the pack, the
-    /// card, the claim, the receipt and the state.
+    /// An interface card read at a declared state: the pack's name and the
+    /// members of the report's `card` object that identify the pack, the
+    /// card, the claim, the receipt and the state, and say which coordinates
+    /// follow the traces if the contact follows its card.
     Card { pack_id: String, report: String },
 }
 
@@ -716,12 +728,81 @@ pub(super) struct Declared {
     /// The sum of the interface points' conductances [W/K].
     conductance_w_k: f64,
     points: usize,
+    /// The law of a contact that follows its card, if it does.
+    following: Option<Following>,
+}
+
+/// A card's resistance law as the kernel element's hook: the owner's refusal
+/// is the element's reason.
+#[derive(Debug)]
+struct CardLaw(TraceResistanceLaw);
+
+impl ConductanceLaw for CardLaw {
+    fn factor(&self, kelvin_a: f64, kelvin_b: f64) -> Result<(f64, [f64; 2]), String> {
+        self.0
+            .factor(kelvin_a, kelvin_b)
+            .map_err(|error| error.to_string())
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        self.0.identity_words(words);
+    }
+}
+
+/// What a contact that follows its card keeps for the report: the law and
+/// the element's interface points.
+#[derive(Debug, Clone)]
+struct Following {
+    law: TraceResistanceLaw,
+    points: Vec<InterfacePoint>,
+}
+
+/// The names of the card coordinates that take the trace temperatures, the
+/// first trace's first.
+fn axes(coordinates: &TemperatureContactCoordinates) -> Vec<String> {
+    match coordinates {
+        TemperatureContactCoordinates::Mean(axis) => vec![axis.clone()],
+        TemperatureContactCoordinates::TwoSided(axes) => axes.to_vec(),
+    }
+}
+
+impl Following {
+    /// The least and the greatest resistance [m^2 K/W] the card gives over
+    /// the interface points at the trace temperatures `a` and `b`, or NaN
+    /// where it gives none.
+    fn span(&self, a: &[f64], b: &[f64]) -> (f64, f64) {
+        let at = |side: &[(usize, f64); 3], trace: &[f64]| {
+            side.iter()
+                .map(|&(point, weight)| weight * trace.get(point).copied().unwrap_or(f64::NAN))
+                .sum::<f64>()
+        };
+        let reference = self.law.reference_resistance().value_m2_k_per_w();
+        let resistances: Vec<f64> = self
+            .points
+            .iter()
+            .map(|point| {
+                self.law
+                    .factor(at(&point.a, a), at(&point.b, b))
+                    .map_or(f64::NAN, |(factor, _)| reference / factor)
+            })
+            .collect();
+        if resistances.iter().any(|value| value.is_nan()) {
+            (f64::NAN, f64::NAN)
+        } else {
+            span(&resistances)
+        }
+    }
 }
 
 impl Declared {
     /// Whether the resistance is a card's value, not the scene's own number.
     pub(super) fn is_card_backed(&self) -> bool {
         matches!(self.origin, Origin::Card { .. })
+    }
+
+    /// Whether the contact follows its card at the traces' temperatures.
+    pub(super) fn follows_its_card(&self) -> bool {
+        self.following.is_some()
     }
 
     /// The contact's member of its element in the JSON report, with its
@@ -753,30 +834,39 @@ pub(super) fn text_report(elements: &[Element]) -> String {
             .iter()
             .filter_map(|element| Some((&element.name, element.contact.as_ref()?)))
     };
-    for (carded, heading) in [
-        (
-            false,
-            "\nContact resistances (declared in the scene, not measured):",
-        ),
-        (
-            true,
-            "\nContact resistances from interface cards (each read once at its declared state; \
-             --json gives the receipts):",
-        ),
-    ] {
+    for (group, heading) in [
+        "\nContact resistances (declared in the scene, not measured):",
+        "\nContact resistances from interface cards (each read once at its declared state; \
+         --json gives the receipts):",
+        "\nContact resistances that follow an interface card at the temperatures of the two \
+         traces (each shown at its declared state; --json gives the receipts):",
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let mut first = true;
         for (name, contact) in contacts() {
-            let from = match &contact.origin {
-                Origin::Declared(source) if !carded => source,
-                Origin::Card { pack_id, .. } if carded => pack_id,
-                _ => continue,
+            let (from, own) = match (&contact.origin, &contact.following) {
+                (Origin::Declared(source), _) => (source, 0),
+                (Origin::Card { pack_id, .. }, None) => (pack_id, 1),
+                (Origin::Card { pack_id, .. }, Some(_)) => (pack_id, 2),
             };
+            if own != group {
+                continue;
+            }
             if std::mem::take(&mut first) {
                 let _ = writeln!(out, "{heading}");
             }
+            let following = match &contact.following {
+                Some(following) => {
+                    let axes = axes(following.law.coordinates());
+                    format!(", following {}", axes.join(" and "))
+                }
+                None => String::new(),
+            };
             let _ = writeln!(
                 out,
-                "{name}: {:e} m^2 K/W between {} and {} <- {from}",
+                "{name}: {:e} m^2 K/W between {} and {} <- {from}{following}",
                 contact.resistance_m2_k_w, contact.between[0], contact.between[1]
             );
         }
@@ -890,18 +980,47 @@ fn resistance(
     .map_err(|error| error.to_string())
 }
 
+/// The card coordinates that take the temperatures of a contact's two
+/// traces, when the scene names them under `follows`: one name for a
+/// coordinate that takes their mean at each interface point, two for one
+/// that takes side a's and one that takes side b's, in the order of
+/// `between`.
+fn follows(definition: &J, what: &str) -> Result<Option<TemperatureContactCoordinates>, String> {
+    let Some(value) = definition.get("follows") else {
+        return Ok(None);
+    };
+    let two = match value.as_array() {
+        Some([a, b]) => a.as_str().zip(b.as_str()),
+        _ => None,
+    };
+    match (value.as_str(), two) {
+        (Some(axis), _) => Ok(Some(TemperatureContactCoordinates::Mean(axis.to_owned()))),
+        (None, Some((a, b))) => Ok(Some(TemperatureContactCoordinates::TwoSided([
+            a.to_owned(),
+            b.to_owned(),
+        ]))),
+        (None, None) => Err(format!(
+            "{what}.follows: the name of the card coordinate that takes the mean of the two \
+             traces' temperatures, or two names, the coordinate that takes the first trace's \
+             and the one that takes the second's"
+        )),
+    }
+}
+
 /// A contact's resistance from an interface card: the compiled pack at
-/// `pack`, a path relative to the scene, read once at the scene's `state`
-/// under `selection` (one claim only, unless the scene names another
-/// policy). The owner resolves the card, so every refusal about its claims
-/// and their validity is matdb's own. With the resistance, where it came
-/// from for the report.
+/// `pack`, a path relative to the scene, read at the scene's `state` under
+/// `selection` (one claim only, unless the scene names another policy). The
+/// owner resolves the card, so every refusal about its claims and their
+/// validity is matdb's own. With the resistance, where it came from for the
+/// report, and the owner's law bound at that state when the scene says
+/// which coordinates follow the traces: the state is then the law's
+/// reference point and the resistance its value there.
 fn card(
     scene: &Path,
     name: &str,
     definition: &J,
     what: &str,
-) -> Result<(InterfaceResistance, Origin), String> {
+) -> Result<(InterfaceResistance, Origin, Option<TraceResistanceLaw>), String> {
     let path = definition
         .str_field("pack")
         .filter(|path| !path.trim().is_empty() && path.len() <= MAX_CARD_PACK_SOURCE_BYTES)
@@ -919,8 +1038,22 @@ fn card(
             .ok_or_else(|| format!("{what}.selection: expected a policy name"))?
             .map_err(|error| format!("{what}.selection: {error}"))?,
     };
-    let resistance = InterfaceResistance::from_card(name, pack.card(), &point, policy)
-        .map_err(|error| format!("{what}: {error}"))?;
+    let coordinates = follows(definition, what)?;
+    let mut followed = String::new();
+    let (resistance, law) = match coordinates {
+        None => (
+            InterfaceResistance::from_card(name, pack.card(), &point, policy)
+                .map_err(|error| format!("{what}: {error}"))?,
+            None,
+        ),
+        Some(coordinates) => {
+            let names: Vec<String> = axes(&coordinates).iter().map(|axis| quote(axis)).collect();
+            followed = format!(",\"follows\":[{}]", names.join(","));
+            let law = TraceResistanceLaw::bind(name, pack.card(), &point, coordinates, policy)
+                .map_err(|error| format!("{what}: {error}"))?;
+            (law.reference_resistance().clone(), Some(law))
+        }
+    };
     let receipt = resistance.receipt();
     let state = point
         .axes()
@@ -929,7 +1062,7 @@ fn card(
         .collect::<Vec<_>>()
         .join(",");
     let report = format!(
-        "\"pack_id\":{},\"pack_hash\":{},\"pack_bytes_hash\":{},\"card_hash\":{},\"resistance_receipt_hash\":{},\"selected_claim\":{},\"state\":{{{state}}}",
+        "\"pack_id\":{},\"pack_hash\":{},\"pack_bytes_hash\":{},\"card_hash\":{},\"resistance_receipt_hash\":{},\"selected_claim\":{},\"state\":{{{state}}}{followed}",
         quote(pack.pack_id()),
         quote(&pack.content_hash().to_hex()),
         quote(&hash_bytes(&bytes).to_hex()),
@@ -941,7 +1074,7 @@ fn card(
         pack_id: pack.pack_id().to_owned(),
         report,
     };
-    Ok((resistance, origin))
+    Ok((resistance, origin, law))
 }
 
 /// The budgets of the owner's common refinement, all four as the scene
@@ -995,13 +1128,14 @@ fn contact(
             "pack",
             "state",
             "selection",
+            "follows",
             "mapped",
         ],
         &what,
     )?;
     // One source of the resistance: the scene's number, or a card.
     let given = |keys: &[&str]| keys.iter().any(|key| definition.get(key).is_some());
-    let carded = given(&["pack", "state", "selection"]);
+    let carded = given(&["pack", "state", "selection", "follows"]);
     if carded == given(&["resistance_m2_k_w", "source"]) {
         return Err(format!(
             "{what}: a contact takes its resistance from resistance_m2_k_w with its source, or \
@@ -1028,10 +1162,10 @@ fn contact(
         )
         .into());
     }
-    let (resistance, resistance_m2_k_w, origin) = if carded {
-        let (resistance, origin) = card(scene, name, definition, &what)?;
+    let (resistance, resistance_m2_k_w, origin, law) = if carded {
+        let (resistance, origin, law) = card(scene, name, definition, &what)?;
         let value = resistance.value_m2_k_per_w();
-        (resistance, value, origin)
+        (resistance, value, origin, law)
     } else {
         let source = definition
             .str_field("source")
@@ -1040,7 +1174,7 @@ fn contact(
         let value = positive(definition, "resistance_m2_k_w", &what)?;
         let resistance = resistance(name, &between, value, source)
             .map_err(|error| format!("{what}: {error}"))?;
-        (resistance, value, Origin::Declared(source.to_owned()))
+        (resistance, value, Origin::Declared(source.to_owned()), None)
     };
     let mut declared = Declared {
         between,
@@ -1048,6 +1182,7 @@ fn contact(
         origin,
         conductance_w_k: 0.0,
         points: 0,
+        following: None,
     };
     let (a, b) = (
         bodies[body_a].1.capacity(&what)?,
@@ -1070,7 +1205,22 @@ fn contact(
     }?;
     declared.points = joint.points.len();
     declared.conductance_w_k = joint.points.iter().map(|point| point.conductance_w_k).sum();
-    let points = joint
+    let (wall, following) =
+        kernel_element(&joint, law).map_err(|error| format!("{what}: {error}"))?;
+    declared.following = following;
+    Ok((wall, declared))
+}
+
+/// The kernel's element for the owner's contact `joint`: its interface
+/// points, and, for a contact that follows its card, `law` on the element's
+/// hook. The card is then asked at the interface points and, as the
+/// owner's pointwise contact asks it, at every pair of trace points that
+/// face each other: a mapped contact has none.
+fn kernel_element(
+    joint: &TraceContact,
+    law: Option<TraceResistanceLaw>,
+) -> Result<(ConductanceMatrix, Option<Following>), ElementError> {
+    let points: Vec<InterfacePoint> = joint
         .points
         .iter()
         .map(|point| InterfacePoint {
@@ -1079,9 +1229,23 @@ fn contact(
             conductance_w_k: point.conductance_w_k,
         })
         .collect();
-    let wall = ConductanceMatrix::new(joint.width_a, joint.width_b, points)
-        .map_err(|error| format!("{what}: {error}"))?;
-    Ok((wall, declared))
+    let Some(law) = law else {
+        let wall = ConductanceMatrix::new(joint.width_a, joint.width_b, points)?;
+        return Ok((wall, None));
+    };
+    let alone = |point: usize| [(point, 1.0), (point, 0.0), (point, 0.0)];
+    let rows = joint
+        .facing
+        .iter()
+        .map(|&[a, b]| GuardRow {
+            a: alone(a),
+            b: alone(b),
+        })
+        .collect();
+    let wall = ConductanceMatrix::new(joint.width_a, joint.width_b, points.clone())?
+        .following(Arc::new(CardLaw(law.clone())))
+        .guarded_at(rows)?;
+    Ok((wall, Some(Following { law, points })))
 }
 
 /// Every `trace_contact` of the scene with the bodies it names. A scene
@@ -1228,7 +1392,11 @@ fn span(values: &[f64]) -> (f64, f64) {
 
 /// A contact's heat rate from its side `a` to its side `b` over the last
 /// step, the sum of its interface points' conductances, the resistance the
-/// scene declared and the number of interface points.
+/// scene declared and the number of interface points. A contact that
+/// follows its card adds the least and the greatest resistance the card
+/// gave over the interface points at the temperatures the last step ended
+/// with; the conductance and the resistance before them are the card's at
+/// the declared state.
 pub(super) fn wall_values(
     system: &System,
     node: NodeId,
@@ -1241,10 +1409,24 @@ pub(super) fn wall_values(
     // A count of interface points, far below 2^53.
     #[allow(clippy::cast_precision_loss)]
     let points = declared.points as f64;
-    vec![
+    let mut values = vec![
         ("heat_rate_w".to_owned(), rate),
         ("conductance_w_k".to_owned(), declared.conductance_w_k),
         ("resistance_m2_k_w".to_owned(), declared.resistance_m2_k_w),
         ("interface_points".to_owned(), points),
-    ]
+    ];
+    if let Some(following) = &declared.following {
+        let received = |id: &str| {
+            system
+                .port(node, id)
+                .filter(|_| system.steps() > 0)
+                .map(|port| system.last_input(port))
+        };
+        let (low, high) = received("a")
+            .zip(received("b"))
+            .map_or((f64::NAN, f64::NAN), |(a, b)| following.span(a, b));
+        values.push(("min_resistance_m2_k_w".to_owned(), low));
+        values.push(("max_resistance_m2_k_w".to_owned(), high));
+    }
+    values
 }

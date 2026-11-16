@@ -58,6 +58,7 @@ save/resume commands work with `self_heating_damper.json` and
 | `two_slabs_trace.json` | the same two slabs joined face to face by a `trace_contact`: each facing end is a trace (one temperature and one heat load for every vertex of the face) and the heat crosses at fs-conduction's interface points through 8e-4 m^2 K/W, which is declared in the scene and not measured (the 0.5 W/K wall over the 20 x 20 mm face) | the energy across the contact and the least and greatest temperature of each slab and each contact face against fs-conduction's own matching contact on one mesh, within 1e-9 J and 1e-9 K on 4 and 8 cells |
 | `two_slabs_mapped.json` | the same with the second slab meshed 3 x 3 across against 2 x 2, so the two faces do not match: `mapped` gives the budgets of fs-conduction's common refinement of the two faces; the 8e-4 m^2 K/W is again declared, not measured | the same quantities against fs-conduction's own non-matching contact on one mesh, within 1e-9 J and 1e-9 K on 4 and 8 cells |
 | `two_blocks_atkins.json` | two 30 x 20 x 20 mm blocks at 305 K and 290 K joined by a `trace_contact` whose resistance is read from a measured card: the bare 6061-T6 joint of Atkins (NASA, 1964; lathe-cut faces of 0.30 um RMS, in vacuum) at 313 kPa and 297.5 K, from the pack in `atkins1964/`. The blocks' conductivity (167 W/m K) and volumetric heat capacity (2.4192e6 J/m^3 K) are declared in the scene, not measured and not from a card, and nothing checks that the blocks are the card's two surfaces | the reported resistance against the table the source prints, at 313 kPa, at 1123 kPa and midway between 70 kPa and 313 kPa, within 1e-12; and the run against the same scene with the printed 3.1606e-4 m^2 K/W typed in, within 1e-9 J and 1e-9 K |
+| `two_blocks_atkins_following.json` | the blocks of `two_blocks_atkins.json` with a contact that follows its card: the card's `T` takes the mean of the two traces' temperatures and the card is asked at every interface point in every step. That card's resistance does not vary with temperature inside its span (289.35 K to 305.85 K), so no resistance moves; following adds the refusal of a state off the card | the run against `two_blocks_atkins.json`, within 1e-9 J and 1e-9 K; the two reported resistances against the declared one, within 1e-12; and block a from 330 K (faces' mean 310 K) refused at its first step with matdb's reason |
 | `steel316_heated_bar.json` | a 40 x 20 x 20 mm bar of generic 316 stainless steel at 290 K, 20 W into one end for 60 s. Its conductivity is not typed: the bar names the scene material `steel316`, the NASA/TP-2010-216435 card in `steel316/`, whose k(T) rises from 12.99 W/m K at 273 K through 13.46 at 300 K to 15.14 at 400 K, and the bar steps by fs-conduction's Newton solve. The volumetric heat capacity is declared, the table's density times its specific heat at 300 K (3.7232e6 J/m^3 K), not the card's curve | the field's least and greatest temperature after each of 30 steps against fs-conduction stepping the same box with the source's printed table, equal to the bit; the 1200 J put in is stored, and the hot end passes the 300 K knot without leaving the table; 2000 W, which would carry the end past 400 K, is refused at the first step |
 | `steel316_blocks_trace.json` | the slabs and declared 8e-4 m^2 K/W contact of `two_slabs_trace.json`, each slab of the same `steel316` card's k(T) with the bar's declared heat capacity, from 390 K and 290 K: both bodies step by fs-conduction's Newton solve and meet trace to trace | the energy across the contact and the least and greatest temperature of each slab and each contact face against fs-conduction's own contact on one mesh stepped by its Newton endpoint with the printed table, within 1e-6 J and 1e-6 K on 4 and 8 cells, and the same with slab b 3 x 3 across through the mapped contact; slab b from 300 K, a knot of the table, is refused at the first step |
 | `steel316_enthalpy_bar.json` | the bar of `steel316_heated_bar.json` with no declared heat capacity: its heat capacity, density and conductivity are all the `steel316` card's. fs-conduction's enthalpy owner stores specific enthalpy on the chart of the card's Cp(T) (456.39 J/kg K at 273 K, 467.69 at 300 K, 502.87 at 400 K), and each node's mass is fixed by the card's density at 290 K, `reference_temperature_k` | the field's least and greatest temperature after each of 30 steps against fs-conduction's enthalpy owner prepared from the same card on the same box, equal to the bit; the reported density is the printed table's at 290 K; the 1200 J put in is stored; 2000 W is refused at the first step |
@@ -232,13 +233,29 @@ A `trace_contact` takes its resistance from a card in the same way:
 `pack`, a compiled interface pack beside the scene, and `state`, the point
 the card is read at, in place of `resistance_m2_k_w` and `source`
 (`two_blocks_atkins.json`). The card is read once: the resistance does not
-follow the faces' temperatures. The Atkins card's two axes,
+follow the faces' temperatures unless the contact says so (below). The
+Atkins card's two axes,
 `normal_pressure` and `T`, are plain coordinates in pascal and kelvin, so
 the state gives them with the kind `legacy`. The report's `card` member
 gives the pack, card, claim and receipt hashes, the state and the
 resistance. The pack in `atkins1964/` was compiled from the seed card by
 `cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/atkins-1964-al6061t6-lathe-0p30um-vacuum-interface/manifest.tsv --out al6061t6-lathe-0p30um-vacuum.fsintpk`
 (6753 bytes; two builds were byte-identical).
+
+`two_blocks_atkins_following.json` is that scene with `"follows": "T"` on
+the contact: the card's coordinate `T` takes the mean of the two traces'
+temperatures at each interface point, and the card is asked there, and at
+every pair of facing trace points, in every step, with `state` as the
+reference point the contact is built at. The Atkins claim is a curve over
+`normal_pressure` alone; `T` is only in its validity, 289.35 K to
+305.85 K. So no resistance moves in this scene and its numbers are the
+read-once example's. What following adds here is the check: a step in
+which the card is asked outside that span is refused with matdb's reason,
+where the read-once contact goes on with the declared value. The report
+adds `min_resistance_m2_k_w` and `max_resistance_m2_k_w` over the
+interface points at the last step's end. No committed card's contact
+resistance varies with temperature; the moving resistance in the tests is
+a card authored for them, and it is named as authored there.
 
 A `conduction_body` takes its conductivity from a card through the scene's
 `materials` section: `material` names a material whose declaration has a

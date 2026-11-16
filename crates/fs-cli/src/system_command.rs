@@ -413,8 +413,8 @@ Elements (ports in brackets; SI units in every field name):
                  capacity reference_density_kg_m3. Fixed step_s only; no
                  checkpoint codec.)
   trace_contact  between [\"body.face\", \"body.face\"], offset_m [x, y, z],
-                 resistance_m2_k_w, source (or pack, state, selection),
-                 mapped                                               [a, b]
+                 resistance_m2_k_w, source (or pack, state, selection,
+                 follows), mapped                                     [a, b]
                  (fs-conduction's contact between two traces of two
                  conduction bodies, carried by the kernel's conductance
                  over interface points: heat crosses at each point of the
@@ -427,16 +427,24 @@ Elements (ports in brackets; SI units in every field name):
                  interface pack beside the scene and state the point its
                  card is read at, once, as for a solid; selection is
                  single-claim-only unless given. The report then carries
-                 the pack, card, claim and receipt identities. A contact
-                 has one of the two sources. Without mapped the two faces
-                 must have the same points and triangles. mapped gives the
-                 budgets of the owner's common refinement for faces that
-                 do not match: plane_tolerance_m,
+                 the pack, card, claim and receipt identities. follows
+                 names the card coordinate that takes the mean of the two
+                 traces' temperatures, or two coordinates, the first
+                 trace's and the second's: the card is then asked at every
+                 interface point of every step with state as its reference
+                 point, and a state it has no answer for refuses the step.
+                 A contact has one of the two sources. Without mapped the
+                 two faces must have the same points and triangles. mapped
+                 gives the budgets of the owner's common refinement for
+                 faces that do not match: plane_tolerance_m,
                  coverage_relative_tolerance, max_pair_tests,
                  max_overlap_triangles, all four. Join a to the first trace
                  and b to the second; any other join of them is refused.
                  Reports heat_rate_w from a to b, conductance_w_k,
-                 resistance_m2_k_w and interface_points.)
+                 resistance_m2_k_w and interface_points, and for a contact
+                 that follows its card min_resistance_m2_k_w and
+                 max_resistance_m2_k_w over the interface points at the
+                 last step's end.)
   heater         power_w (waveform, never negative)                   [heat]
 Gas in volumes joined by restrictions (a perfect gas with constant heat
 capacities; all joined volumes must hold the same gas):
@@ -4216,14 +4224,23 @@ impl Device {
                  source, {dependent}imported {without}"
             ));
             if contacts {
-                // A card's value is measured, but it is read once.
-                let carded = self.elements.iter().any(|element| {
-                    element
-                        .contact
-                        .as_ref()
-                        .is_some_and(conduction::Declared::is_card_backed)
-                });
-                let resistance = if carded {
+                // A card's value is measured, but it is read once unless
+                // the contact follows its card.
+                let any = |asked: fn(&conduction::Declared) -> bool| {
+                    self.elements
+                        .iter()
+                        .any(|element| element.contact.as_ref().is_some_and(asked))
+                };
+                let carded = any(conduction::Declared::is_card_backed);
+                let resistance = if any(conduction::Declared::follows_its_card) {
+                    "a number declared in the scene or an interface card's value: read once at \
+                     the declared state, or, for a contact that names the card coordinates its \
+                     two traces' temperatures take, asked at every interface point of every \
+                     step at those temperatures, with the step refused where the card has no \
+                     answer; it follows no pressure field, the card's uncertainty is not \
+                     propagated, and nothing checks that the two bodies are the card's two \
+                     surfaces"
+                } else if carded {
                     "a number declared in the scene or an interface card's value read once at \
                      the declared state: it follows neither the faces' temperatures nor any \
                      pressure field, the card's uncertainty is not propagated, and nothing \

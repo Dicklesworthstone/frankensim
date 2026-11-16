@@ -1225,13 +1225,91 @@ whose pack `examples/system/atkins1964/` holds, compiled from
   pack file that is absent; a material pack where an interface pack is
   needed; an unknown selection.
 
+A card-backed `trace_contact` follows its card when it names, under
+`follows`, the card coordinates that take the temperatures of its two
+traces: one name for a coordinate that takes their mean at each interface
+point (the owner's `TemperatureContactCoordinates::Mean`), or two names,
+the first trace's and the second's (`TwoSided`), in the order of
+`between`. The scene binds fs-conduction's `TraceResistanceLaw` to the
+card with `state` as its reference point and the same `selection`, builds
+the contact at the law's reference resistance as above, and gives the law
+to the kernel's element (`ConductanceMatrix::following`), with a guard row
+at every pair of trace points that face each other (`guarded_at` over the
+owner's `TraceContact.facing`: every point of a matching contact, none of
+a mapped one). The card is then asked at every interface point in every
+proposal of every step, at the temperatures the traces have there; the
+claim selected at `state` stays pinned and every other coordinate stays as
+declared. A state the card has no answer for refuses the step (exit 4),
+with matdb's reason inside the kernel's `component ... refused in Propose`
+text, and the scene does not move. Refused before any step, exit 3:
+`follows` beside a declared number; a form that is neither a name nor two
+names; coordinates the owner cannot follow (its reference check: distinct
+names, each with a positive absolute temperature in `state`; a plain
+coordinate must be named `T`); and a claim the law does not carry (a
+surface over a temperature coordinate). The JSON report's `card` member
+ends with `follows`, the names; the element's values gain
+`min_resistance_m2_k_w` and `max_resistance_m2_k_w`, the least and the
+greatest resistance the card gives over the interface points at the
+temperatures the last step ended with, while `resistance_m2_k_w` and
+`conductance_w_k` stay the card's at the declared state. The text report
+lists the contact under "Contact resistances that follow an interface
+card". Without `follows` a contact is read once as before, and its
+element and report are unchanged.
+
+Tests in `tests/system_command/conduction.rs`:
+- A card authored for the test and named as authored, not measured: the
+  resistance 1.4e-3 m^2 K/W at a mean of 280 K, 8e-4 at 345 K and 5e-4 at
+  430 K, linear between and with no answer outside, compiled in the test
+  into a pack beside the scene. The trace examples' slabs, a from 380 K
+  and b, with half the heat capacity, from 300 K, 12 steps of 1.8 s, the
+  card declared at 320 K and followed. The reference is fs-conduction's
+  own temperature contact from the same card on one mesh
+  (`TemperatureContact::new_pointwise`, and `new_nonmatching` with slab b
+  3 x 3 across and the contact mapped), stepped by
+  `advance_capacity_newton`. Claims declared before the first run: the
+  energy crossed within 1e-7 J of what slab a lost there and the eight
+  least and greatest temperatures within 1e-7 K; the same scene with the
+  card read once at least 0.1 K away; the declared resistance the card's
+  at 320 K by hand to 1e-12, and the least and greatest over the points
+  inside the bracket the two faces' reported temperatures give by hand.
+  Measured, matching then mapped: 4.0e-11 J of 341.47 J and 1.2e-11 K;
+  3.4e-11 J of 341.65 J and 1.7e-13 K. Read once, the scenes cross
+  309.38 J and 309.52 J and lie 2.86 K and 2.87 K away. The declared
+  resistance is 1.0308e-3 m^2 K/W; over the points it runs from 7.959e-4
+  to 8.064e-4 (by hand between 7.948e-4 and 8.091e-4) and from 7.959e-4 to
+  8.062e-4 (between 7.952e-4 and 8.078e-4).
+- `examples/system/two_blocks_atkins_following.json`, the Atkins example
+  plus `follows`: the energy crossed within 1e-9 J and the eight
+  temperatures within 1e-9 K of the read-once example, and both reported
+  resistances the declared one to 1e-12, since that card's resistance does
+  not vary with temperature inside its span (measured: both cross
+  19.38780491768713 J, the differences are 0 J and 0 K, and the three
+  resistances are 3.1606e-4 m^2 K/W). With block a from 330 K the faces'
+  mean is 310 K, above the card's 305.85 K: the first
+  step is refused, exit 4, with matdb's text, and the scene's report is
+  unchanged. The example through the binary: `follows` in the `card`
+  member, the two values, the text heading and the no-claim sentence.
+- Seven refusals, all exit 3: `follows` a number; one name in a list; the
+  same name twice; a coordinate the state lacks; the pressure coordinate;
+  `follows` beside a declared number; a surface over two temperatures.
+
 No claim for a trace contact: one resistance for the whole patch with no
 per-face map. A declared one is not measured and depends on nothing. A
 card's is read once at the declared state: it follows neither the faces'
 temperatures nor any pressure field, the card's uncertainty is not
 propagated, and nothing checks that the two bodies are the card's two
 surfaces (a body's material, when it names one, is not compared with the
-card's). The contact generates
+card's). A contact that follows its card follows the traces' temperatures
+alone, through a constant scalar or a linear curve; a surface over a
+temperature coordinate is refused. No scene steps the two-name form: the
+owner's reference check (`admit_reference`) admits a plain coordinate only
+when it is named `T`, so two sides need a card whose coordinates carry a
+temperature quantity, and no test authors one; what is tested of that form
+is that it is parsed and that the owner refuses one name given twice. The
+card is asked again in every proposal with no cache, and no time is
+claimed for it. No committed card's contact resistance varies with
+temperature, so the only moving resistance shown is the authored one of
+the tests. The contact generates
 entropy where the heat crosses and the ledger books the nodal sum at its
 ports; no order is claimed for the gap between the two. The reference is
 compared in the energy crossed and in eight least and greatest

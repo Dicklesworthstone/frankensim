@@ -68,12 +68,29 @@
 //! and the ledger closes, each within 1e-6 J; the hot end passes the 300 K
 //! knot and stays below 400 K. Then the example through the binary and the
 //! refusals.
+//!
+//! A contact that follows its card: the trace examples' slabs, a from 380 K
+//! and b, with half the heat capacity, from 300 K, through a card authored
+//! for the test (not measured) whose resistance falls with the mean of the
+//! two traces' temperatures, read from a pack the test writes beside the
+//! scene. The reference is fs-conduction's own temperature contact from the
+//! same card on one mesh ([`owner_law_contact`]), stepped by its Newton
+//! endpoint. The claims, declared before the first run, are on
+//! [`a_contact_that_follows_its_card_from_a_scene_is_the_owner_temperature_contact`].
+//! Then examples/system/two_blocks_atkins_following.json, the Atkins example
+//! with `follows`: that card's resistance does not vary with temperature
+//! inside its span, so the example is the read-once one in every number and
+//! differs in what it refuses, a state off the card at any step. Then the
+//! refusals.
 
 use std::f64::consts::{FRAC_PI_2, PI};
 
 use super::*;
 use fs_cli::SystemScene;
 use fs_conduction::fixtures::{box_grid, on_box_face};
+use fs_conduction::interface::temperature::{
+    ContactIterationConfig, TemperatureContact, TemperatureContactCoordinates, TemperatureContacts,
+};
 use fs_conduction::interface::{NonmatchingOptions, NonmatchingSurface};
 use fs_conduction::transient::VolumetricHeatCapacity;
 use fs_conduction::transient::backward_euler::{BackwardEuler, NonlinearStepConfig, StepConfig};
@@ -90,8 +107,9 @@ use fs_conduction::{
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimSet, InterfaceSystemCard, InterpolationPolicy, MaterialCard, MaterialStateId,
-    NormalizedInterfacePack, NormalizedMaterialCardPack, PropertyClaim, PropertyKey, PropertyValue,
-    Provenance, QueryPoint, SelectionPolicy, SurfaceSpec, SystemContext, UncertaintyModel,
+    NormalizedInterfacePack, NormalizedMaterialCardPack, NormalizedPack, ObservationDataset,
+    PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint, SelectionPolicy,
+    SurfaceSpec, SystemContext, UncertaintyModel,
 };
 use fs_material::phase::{HeatCapacitySourceQuery, SolidLiquidPhase};
 use fs_material::state_point::SPECIFIC_HEAT_CAPACITY_DIMS;
@@ -1182,6 +1200,11 @@ fn a_scene_with_a_contact_or_a_card_does_not_say_it_has_none() {
             read("two_blocks_atkins.json"),
             carded,
         ),
+        (
+            "two_blocks_atkins_following.json",
+            read("two_blocks_atkins_following.json"),
+            carded,
+        ),
         ("struck_mode.json", read("struck_mode.json"), struck),
         ("two_slabs_trace.json", slabs_beside_a_strike(), struck),
     ] {
@@ -1926,4 +1949,608 @@ fn card_heat_capacity_scenes_refuse_missing_references_off_chart_states_and_cont
         assert_eq!(scene.render_json(), before);
         assert_eq!(scene.steps(), 0);
     });
+}
+
+/// The card of the following-contact tests, authored for them and not
+/// measured: its resistance [m^2 K/W] at three means of the two traces'
+/// temperatures [K], linear between them and with no answer outside.
+const AUTHORED_KNOTS: [(f64, f64); 3] = [(280.0, 1.4e-3), (345.0, 8.0e-4), (430.0, 5.0e-4)];
+/// The state the authored scenes declare for the card [K].
+const AUTHORED_REFERENCE_K: f64 = 320.0;
+/// The authored scenes' slabs: a from 380 K with the trace examples' heat
+/// capacity, b from 300 K with half of it, so that the interface's means
+/// pass the card's middle knot; 12 steps of 1.8 s.
+const LAW_START_K: [f64; 2] = [380.0, 300.0];
+const LAW_RHO_C_J_M3_K: [f64; 2] = [3.6e6, 1.8e6];
+const LAW_STEP_S: f64 = 1.8;
+const LAW_STEPS: u32 = 12;
+/// How far a scene whose contact follows its card may lie from the owner's
+/// temperature contact on one mesh.
+const CLAIMED_LAW_GAP_J: f64 = 1.0e-7;
+const CLAIMED_LAW_GAP_K: f64 = 1.0e-7;
+/// The least the following must move one of the eight reported temperatures
+/// from the same scene with its card read once.
+const CLAIMED_LAW_MOVE_K: f64 = 0.1;
+/// The example whose contact follows the Atkins card.
+const FOLLOWING_EXAMPLE: &str = "two_blocks_atkins_following.json";
+
+/// One resistance claim as a compiled interface pack, authored for these
+/// tests: a scene reads its bytes, the owner's contact takes its card.
+fn authored_pack(
+    id: &str,
+    value: PropertyValue,
+    validity: ValidityDomain,
+) -> NormalizedInterfacePack {
+    let source = fs_blake3::hash_bytes(id.as_bytes());
+    let provenance = || Provenance {
+        source: format!(
+            "authored for the system-scene following-contact tests ({id}), not measured"
+        ),
+        license: "internal-test-use".to_string(),
+        artifact: Some(source),
+    };
+    let mut claims = ClaimSet::new();
+    let observation = claims
+        .register_observation(ObservationDataset {
+            specimen: id.to_string(),
+            method: "authored numbers, no instrument".to_string(),
+            artifact: source,
+            caveats: "not measurements".to_string(),
+            provenance: provenance(),
+        })
+        .unwrap();
+    claims
+        .insert_claim(PropertyClaim {
+            key: PropertyKey::new(
+                AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
+                AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
+            ),
+            value,
+            validity,
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::LinearInside,
+            observations: vec![observation],
+            provenance: provenance(),
+        })
+        .unwrap();
+    let claims = NormalizedPack::new(
+        id,
+        "authored-in-test",
+        source,
+        "internal-test-use",
+        claims,
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    let side = |chemistry: &str| SurfaceSpec {
+        material: MaterialStateId {
+            chemistry: chemistry.to_string(),
+            phase: "solid".to_string(),
+            process: "as-fixtured".to_string(),
+            revision: 0,
+        },
+        texture_frame: "interface-normal-x".to_string(),
+    };
+    let context = SystemContext {
+        medium: "dry".to_string(),
+        third_body: None,
+        environment: "unspecified".to_string(),
+        history: "unaged".to_string(),
+    };
+    NormalizedInterfacePack::new(side("slab-a"), side("slab-b"), context, claims).unwrap()
+}
+
+/// The authored card: [`AUTHORED_KNOTS`] over the plain coordinate `T`.
+fn authored_curve() -> NormalizedInterfacePack {
+    authored_pack(
+        "authored-resistance-over-mean-temperature",
+        PropertyValue::Curve {
+            abscissa: "T".to_string(),
+            abscissa_dims: fs_conduction::TEMPERATURE_DIMS,
+            knots: AUTHORED_KNOTS.to_vec(),
+            dims: AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
+        },
+        ValidityDomain::unconstrained().with("T", AUTHORED_KNOTS[0].0, AUTHORED_KNOTS[2].0),
+    )
+}
+
+/// [`AUTHORED_KNOTS`] by hand at `kelvin`.
+fn authored_resistance(kelvin: f64) -> f64 {
+    let segment = usize::from(kelvin > AUTHORED_KNOTS[1].0);
+    let ((t0, r0), (t1, r1)) = (AUTHORED_KNOTS[segment], AUTHORED_KNOTS[segment + 1]);
+    r0 + (r1 - r0) * (kelvin - t0) / (t1 - t0)
+}
+
+/// The trace example `name` as the authored scene: the slabs of
+/// [`LAW_START_K`] and [`LAW_RHO_C_J_M3_K`], [`LAW_STEPS`] steps, and the
+/// contact from the authored pack at [`AUTHORED_REFERENCE_K`], following its
+/// `T` or (`follows` false) read once. Written with the pack beside it;
+/// its path.
+fn authored_scene(case: &str, name: &str, follows: bool) -> std::path::PathBuf {
+    let mut text = std::fs::read_to_string(example(name)).unwrap();
+    let follows = if follows {
+        ",\n      \"follows\": \"T\""
+    } else {
+        ""
+    };
+    let card = format!(
+        "\"pack\": \"authored/curve.fsintpk\",\n      \"state\": [{{\"name\": \"T\", \"value\": \"{AUTHORED_REFERENCE_K} K\", \"kind\": \"legacy\"}}]{follows}"
+    );
+    for (from, to) in [
+        ("\"temperature_k\": 400.0,", "\"temperature_k\": 380.0,"),
+        (
+            "\"volumetric_heat_capacity_j_m3_k\": 3600000.0,\n      \"temperature_k\": 300.0,",
+            "\"volumetric_heat_capacity_j_m3_k\": 1800000.0,\n      \"temperature_k\": 300.0,",
+        ),
+        ("\"step_s\": 0.675,", "\"step_s\": 1.8,"),
+        (
+            "\"resistance_m2_k_w\": 0.0008,\n      \"source\": \"declared for this example, not measured: the 0.5 W/K wall of two_slabs.json over its 20 x 20 mm face\"",
+            card.as_str(),
+        ),
+    ] {
+        assert_eq!(
+            text.matches(from).count(),
+            1,
+            "{case}: test fixture changed"
+        );
+        text = text.replacen(from, to, 1);
+    }
+    let path = scratch(case, &text);
+    let beside = path.parent().unwrap().join("authored");
+    std::fs::create_dir_all(&beside).unwrap();
+    std::fs::write(beside.join("curve.fsintpk"), authored_curve().to_bytes()).unwrap();
+    path
+}
+
+/// A scene file run to its end: what a trace scene is compared in.
+fn crossed_at(cx: &fs_exec::Cx<'_>, path: &std::path::Path) -> (Crossed, SystemScene) {
+    let text = std::fs::read_to_string(path).unwrap();
+    let mut scene = SystemScene::from_text(&text, path).unwrap();
+    let mut energy_j = 0.0;
+    let mut time_s = scene.time_s();
+    while scene.advance(f64::MAX, cx).unwrap() {
+        let now_s = scene.time_s();
+        energy_j += probe(&scene, "wall.heat_rate_w") * (now_s - time_s);
+        time_s = now_s;
+    }
+    let pair = |low: &str, high: &str| (probe(&scene, low), probe(&scene, high));
+    let spans_k = [
+        pair("a.min_temperature_k", "a.max_temperature_k"),
+        pair("b.min_temperature_k", "b.max_temperature_k"),
+        pair("a.x_max.min_temperature_k", "a.x_max.max_temperature_k"),
+        pair("b.x_min.min_temperature_k", "b.x_min.max_temperature_k"),
+    ];
+    (Crossed { energy_j, spans_k }, scene)
+}
+
+/// The largest difference between two runs' eight reported temperatures [K].
+fn span_gap_k(one: &Crossed, other: &Crossed) -> f64 {
+    one.spans_k
+        .iter()
+        .zip(&other.spans_k)
+        .map(|(one, other)| (one.0 - other.0).abs().max((one.1 - other.1).abs()))
+        .fold(0.0, f64::max)
+}
+
+/// Both authored slabs in one mesh with unshared faces at x = L, slab a
+/// first: the mesh, its elements' vertices, and how many vertices and
+/// elements are slab a's.
+fn law_mesh(cross_b: usize) -> (ConductionMesh, Vec<[u32; 4]>, [usize; 2]) {
+    let extent = [LENGTH_M, CROSS_M, CROSS_M];
+    let (slab_a, mut positions) = box_grid([4, 2, 2], extent);
+    let (slab_b, positions_b) = box_grid([4, cross_b, cross_b], extent);
+    let of_a = [positions.len(), slab_a.tets.len()];
+    let offset = u32::try_from(positions.len()).unwrap();
+    let mut tets = slab_a.tets;
+    tets.extend(slab_b.tets.iter().map(|tet| tet.map(|v| v + offset)));
+    positions.extend(positions_b.iter().map(|&[x, y, z]| [x + LENGTH_M, y, z]));
+    let complex = TetComplex::from_tets(positions.len(), tets.clone());
+    (ConductionMesh::new(complex, positions).unwrap(), tets, of_a)
+}
+
+/// The owner's temperature contact from `card` on that mesh, at the scene's
+/// reference point and over the mean of the two traces: its pointwise
+/// contact on equal cross grids, its non-matching one, with the mapped
+/// example's budgets, on others.
+fn owner_law<'c>(
+    mesh: &ConductionMesh,
+    card: &'c InterfaceSystemCard,
+    cross_b: usize,
+) -> TemperatureContact<'c> {
+    let point = QueryPoint::new().with("T", AUTHORED_REFERENCE_K).unwrap();
+    let mean = TemperatureContactCoordinates::Mean("T".to_string());
+    let policy = SelectionPolicy::SingleClaimOnly;
+    if cross_b == 2 {
+        let pairs = ThermalInterfaces::coincident_face_pairs(mesh).unwrap();
+        let pairs = pairs.into_iter().map(|pair| {
+            if mesh.boundary()[pair.side_a].outward_normal[0] > 0.0 {
+                pair
+            } else {
+                InterfaceFacePair {
+                    side_a: pair.side_b,
+                    side_b: pair.side_a,
+                }
+            }
+        });
+        return TemperatureContact::new_pointwise(
+            "wall",
+            pairs.collect(),
+            card,
+            &point,
+            mean,
+            policy,
+        )
+        .unwrap();
+    }
+    // The faces on the contact plane: a's look along +x, b's along -x.
+    let side = |sign: f64| -> Vec<usize> {
+        let on_plane = |face: &BoundaryFace| {
+            on_box_face(face.centroid[0], LENGTH_M) && sign * face.outward_normal[0] > 0.0
+        };
+        let faces = mesh.boundary().iter().enumerate();
+        faces
+            .filter(|(_, face)| on_plane(face))
+            .map(|(slot, _)| slot)
+            .collect()
+    };
+    let options = NonmatchingOptions {
+        plane_tolerance_m: 1.0e-12,
+        coverage_relative_tolerance: 1.0e-10,
+        max_pair_tests: 100_000,
+        max_overlap_triangles: 10_000,
+    };
+    let (a, b) = (side(1.0), side(-1.0));
+    TemperatureContact::new_nonmatching("wall", a, b, card, &point, mean, policy, options).unwrap()
+}
+
+/// The reference of the authored scenes: both slabs in one mesh and the
+/// owner's temperature contact from the authored card, stepped by the
+/// owner's `advance_capacity_newton` with the scenes' step and budgets. The
+/// energy is what slab a's field lost, `rho c` times the integral of its P1
+/// temperature.
+fn owner_law_contact(cx: &fs_exec::Cx<'_>, cross_b: usize) -> Crossed {
+    let (mesh, tets, [per_slab, elements_a]) = law_mesh(cross_b);
+    let held_by_a = |field: &[f64]| -> f64 {
+        let integral: f64 = (0..elements_a)
+            .map(|e| {
+                let mean = tets[e].iter().map(|&v| field[v as usize]).sum::<f64>() / 4.0;
+                mesh.element_volume(e) * mean
+            })
+            .sum();
+        LAW_RHO_C_J_M3_K[0] * integral
+    };
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .adiabatic_remainder()
+        .finish()
+        .unwrap();
+    let pack = authored_curve();
+    let faces = 10_000;
+    let set = TemperatureContacts::with_nonmatching(
+        cx,
+        &mesh,
+        &boundary,
+        Vec::new(),
+        Vec::new(),
+        vec![owner_law(&mesh, pack.card(), cross_b)],
+        faces,
+        3 * faces,
+    )
+    .unwrap();
+    let capacities: Vec<VolumetricHeatCapacity> = (0..mesh.element_count())
+        .map(|element| {
+            VolumetricHeatCapacity::declared(LAW_RHO_C_J_M3_K[usize::from(element >= elements_a)])
+                .unwrap()
+        })
+        .collect();
+    let engine = BackwardEuler::per_element(cx, &mesh, &capacities).unwrap();
+    let material = ConductivityModel::isotropic_declared(15.0).unwrap();
+    let source = ScalarField::Uniform(0.0);
+    let problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &material,
+        element_materials: None,
+        source: &source,
+    };
+    let config = StepConfig {
+        linear: LinearConfig {
+            tolerance: 1.0e-13,
+            max_iterations: 4000,
+            restart: 20,
+        },
+        energy_tolerance_j: 1.0e-8,
+    };
+    let newton = NonlinearStepConfig {
+        residual_rtol: 1.0e-12,
+        residual_atol_j: 1.0e-11,
+        ..Default::default()
+    };
+    let coupling = ContactIterationConfig {
+        max_iterations: 64,
+        relaxation: 0.5,
+        residual_tolerance_j: 1.0e-8,
+    };
+    let mut field: Vec<f64> = (0..mesh.vertex_count())
+        .map(|v| LAW_START_K[usize::from(v >= per_slab)])
+        .collect();
+    let start_j = held_by_a(&field);
+    for _ in 0..LAW_STEPS {
+        let step = set
+            .advance_capacity_newton(
+                cx, &engine, problem, &field, LAW_STEP_S, config, newton, coupling, faces,
+            )
+            .unwrap();
+        field = step.conduction.temperature;
+    }
+    let on_plane = |v: &usize| on_box_face(mesh.positions()[*v][0], LENGTH_M);
+    Crossed {
+        energy_j: start_j - held_by_a(&field),
+        spans_k: [
+            span(field[..per_slab].iter().copied()),
+            span(field[per_slab..].iter().copied()),
+            span((0..per_slab).filter(on_plane).map(|v| field[v])),
+            span((per_slab..field.len()).filter(on_plane).map(|v| field[v])),
+        ],
+    }
+}
+
+/// The authored scene made from the trace example `name`, whose slab b has
+/// `cross_b` cells across, against the owner's temperature contact, against
+/// itself with the card read once, and its reported resistances by hand.
+fn following_against_the_owner(name: &str, cross_b: usize) {
+    scene_context(|cx, _| {
+        let owner = owner_law_contact(cx, cross_b);
+        let (scene, ran) = crossed_at(cx, &authored_scene("following.json", name, true));
+        let (once, _) = crossed_at(cx, &authored_scene("once.json", name, false));
+        let gap_j = scene.energy_j - owner.energy_j;
+        let gap_k = span_gap_k(&scene, &owner);
+        let moved_k = span_gap_k(&scene, &once);
+        let reported = |key: &str| probe(&ran, &format!("wall.{key}"));
+        let (declared, low, high) = (
+            reported("resistance_m2_k_w"),
+            reported("min_resistance_m2_k_w"),
+            reported("max_resistance_m2_k_w"),
+        );
+        // The card falls with the mean, and every interface point's mean
+        // lies between the means of the two faces' least and of their
+        // greatest temperatures.
+        let (face_a, face_b) = (scene.spans_k[2], scene.spans_k[3]);
+        let bracket = (
+            authored_resistance(0.5 * (face_a.1 + face_b.1)),
+            authored_resistance(0.5 * (face_a.0 + face_b.0)),
+        );
+        eprintln!(
+            "{name} following its card: {} steps; crossed {:.15e} owner {:.15e} J, scene - owner {gap_j:e} J; largest span difference {gap_k:e} K; read once crossed {:.15e} J and lies {moved_k:e} K away; resistance declared {declared:e}, over the points {low:e} to {high:e}, by hand between {:e} and {:e} m^2 K/W; faces a {face_a:?} K, b {face_b:?} K",
+            ran.steps(),
+            scene.energy_j,
+            owner.energy_j,
+            once.energy_j,
+            bracket.0,
+            bracket.1,
+        );
+        assert_eq!(ran.steps(), u64::from(LAW_STEPS));
+        assert!(
+            gap_j.abs() <= CLAIMED_LAW_GAP_J,
+            "{gap_j:e} J from the owner"
+        );
+        assert!(gap_k <= CLAIMED_LAW_GAP_K, "{gap_k:e} K from the owner");
+        assert!(
+            moved_k >= CLAIMED_LAW_MOVE_K,
+            "the card moved {moved_k:e} K"
+        );
+        let by_hand = authored_resistance(AUTHORED_REFERENCE_K);
+        assert!((declared / by_hand - 1.0).abs() <= 1e-12, "{declared:e}");
+        let slack = 1e-12 * by_hand;
+        assert!(
+            bracket.0 - slack <= low && low <= high && high <= bracket.1 + slack,
+            "{low:e} to {high:e} outside {bracket:?}"
+        );
+        assert!(
+            high < declared,
+            "the contact stayed at its declared {declared:e}"
+        );
+    });
+}
+
+/// Claims, declared before the first run: over 12 steps the scene whose
+/// contact follows the authored card crosses the energy slab a loses in the
+/// owner's pointwise temperature contact on one mesh within
+/// [`CLAIMED_LAW_GAP_J`] and reports its eight temperatures within
+/// [`CLAIMED_LAW_GAP_K`]; the same scene with the card read once lies at
+/// least [`CLAIMED_LAW_MOVE_K`] away; the declared resistance is the card's
+/// at 320 K by hand, and the least and greatest over the interface points
+/// lie inside the bracket the two faces' reported temperatures give by hand.
+#[test]
+fn a_contact_that_follows_its_card_from_a_scene_is_the_owner_temperature_contact() {
+    following_against_the_owner("two_slabs_trace.json", 2);
+}
+
+/// The same claims on cross grids that do not match, against the owner's
+/// non-matching temperature contact.
+#[test]
+fn a_mapped_contact_that_follows_its_card_is_the_owner_nonmatching_temperature_contact() {
+    following_against_the_owner("two_slabs_mapped.json", 3);
+}
+
+/// Claims, declared before the first run. The Atkins card's resistance does
+/// not vary with `T` inside its span, so the example whose contact follows
+/// it crosses the read-once example's energy within [`CLAIMED_GAP_J`] and
+/// reports its temperatures within [`CLAIMED_GAP_K`], and its least and
+/// greatest resistance are the declared one within 1e-12. Its reports say
+/// that it follows. With block a from 330 K the two faces' mean is 310 K,
+/// above the card's 305.85 K: the first step is refused with matdb's text
+/// and the scene does not move.
+#[test]
+fn the_following_example_is_the_read_once_example_and_refuses_a_state_off_its_card() {
+    let path = example(FOLLOWING_EXAMPLE);
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        text.replacen(",\n      \"follows\": \"T\"", "", 1),
+        std::fs::read_to_string(example("two_blocks_atkins.json")).unwrap(),
+        "the example is the read-once example plus follows"
+    );
+    scene_context(|cx, _| {
+        let (following, ran) = crossed_at(cx, std::path::Path::new(&path));
+        let once = crossed(cx, &card_scene("read once", &[]));
+        let (gap_j, gap_k) = (
+            following.energy_j - once.energy_j,
+            span_gap_k(&following, &once),
+        );
+        let reported = |key: &str| probe(&ran, &format!("wall.{key}"));
+        let (declared, low, high) = (
+            reported("resistance_m2_k_w"),
+            reported("min_resistance_m2_k_w"),
+            reported("max_resistance_m2_k_w"),
+        );
+        eprintln!(
+            "following {:.15e} J, read once {:.15e} J; following - read once {gap_j:e} J; largest span difference {gap_k:e} K; resistance declared {declared:e}, over the points {low:e} to {high:e} m^2 K/W",
+            following.energy_j, once.energy_j
+        );
+        assert!(following.energy_j > 0.0);
+        assert!(gap_j.abs() <= CLAIMED_GAP_J, "{gap_j:e} J apart");
+        assert!(gap_k <= CLAIMED_GAP_K, "{gap_k:e} K apart");
+        for value in [low, high] {
+            assert!((value / declared - 1.0).abs() <= 1e-12, "{value:e}");
+        }
+        let hot = text.replacen("\"temperature_k\": 305.0,", "\"temperature_k\": 330.0,", 1);
+        assert_ne!(hot, text, "test fixture changed");
+        let mut scene = SystemScene::from_text(&hot, &path).unwrap();
+        let before = scene.render_json();
+        let error = scene.advance(f64::MAX, cx).unwrap_err();
+        eprintln!("330 K: exit {}: {}", error.exit_code, error.message);
+        assert_eq!(error.exit_code, fs_cli::exit::REFUSED);
+        assert!(
+            error
+                .message
+                .starts_with("step 1 at t = 0 s: component `wall` refused in Propose")
+                && error.message.contains(
+                    "extrapolation refused: the query point is outside the validity of every one"
+                ),
+            "{}",
+            error.message
+        );
+        assert_eq!((scene.steps(), scene.render_json()), (0, before));
+    });
+    let (code, json, stderr) = run_binary(&["--json", "system", &path]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        json.contains("\"state\":{\"T\":297.5,\"normal_pressure\":313000.0},\"follows\":[\"T\"]}")
+            && json.contains("\"min_resistance_m2_k_w\":")
+            && json.contains("asked at every interface point of every step"),
+        "{json}"
+    );
+    let (code, report, stderr) = run_binary(&["system", &path]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        report.contains("Contact resistances that follow an interface card")
+            && report.contains(
+                "wall: 3.1606e-4 m^2 K/W between a.x_max and b.x_min <- atkins-1964-al6061t6-lathe-0p30um-vacuum-interface, following T"
+            )
+            && !report.contains("each read once at its declared state"),
+        "{report}"
+    );
+}
+
+/// A following contact that cannot be bound is refused before any step,
+/// each case with exit code 3: by the scene for the form of `follows` and
+/// for a declared number beside it, by the owner for coordinates it cannot
+/// follow, and by the law for a surface over the two temperatures.
+#[test]
+fn following_contact_scenes_refuse_bad_forms_coordinates_and_surfaces_by_name() {
+    let follows = "\"follows\": \"T\"";
+    let coordinate =
+        "each contact temperature coordinate needs a positive absolute-temperature value";
+    for (case, to, reason) in [
+        ("number", "\"follows\": 3", "elements.wall.follows:"),
+        (
+            "one name in a list",
+            "\"follows\": [\"T\"]",
+            "elements.wall.follows:",
+        ),
+        (
+            "the same name twice",
+            "\"follows\": [\"T\", \"T\"]",
+            "contact temperature coordinates must be nonblank and distinct",
+        ),
+        (
+            "no such coordinate",
+            "\"follows\": \"interface_T\"",
+            coordinate,
+        ),
+        ("a pressure", "\"follows\": \"normal_pressure\"", coordinate),
+    ] {
+        let text = std::fs::read_to_string(example(FOLLOWING_EXAMPLE)).unwrap();
+        assert!(text.contains(follows), "{case}: test fixture changed");
+        let path = scratch(case, &text.replacen(follows, to, 1));
+        let beside = path.parent().unwrap().join("atkins1964");
+        std::fs::create_dir_all(&beside).unwrap();
+        std::fs::copy(
+            example(ATKINS_PACK),
+            beside.join("al6061t6-lathe-0p30um-vacuum.fsintpk"),
+        )
+        .unwrap();
+        let (code, stdout, stderr) = run_binary(&["system", path.to_str().unwrap()]);
+        eprintln!("{case}: exit {code}: {}", stderr.trim_end());
+        assert!(stdout.is_empty(), "{case}: {stdout}");
+        assert_eq!(code, 3, "{case}: {stderr}");
+        assert!(stderr.contains(reason), "{case}: {stderr}");
+    }
+    // A declared number has no card to follow.
+    let declared = std::fs::read_to_string(example("two_slabs_trace.json")).unwrap();
+    let both = declared.replacen(
+        "\"resistance_m2_k_w\": 0.0008,",
+        "\"resistance_m2_k_w\": 0.0008, \"follows\": \"T\",",
+        1,
+    );
+    assert_ne!(both, declared, "test fixture changed");
+    let (code, stderr) = refused("a declared number", &both);
+    eprintln!("a declared number: exit {code}: {}", stderr.trim_end());
+    assert_eq!(code, 3, "{stderr}");
+    assert!(stderr.contains("one of the two, and not both"), "{stderr}");
+    // A surface over the two traces' temperatures: the law is not built.
+    let corners = [
+        [280.0, 280.0],
+        [430.0, 280.0],
+        [280.0, 430.0],
+        [430.0, 430.0],
+    ];
+    let surface = authored_pack(
+        "authored-resistance-over-two-temperatures",
+        PropertyValue::Surface2D {
+            axes: ["T".to_string(), "T_b".to_string()],
+            axis_dims: [fs_conduction::TEMPERATURE_DIMS; 2],
+            samples: corners
+                .into_iter()
+                .map(|at| (at, 1.0e-3 - 1.0e-6 * (at[0] - 280.0)))
+                .collect(),
+            triangles: vec![[0, 1, 2], [1, 3, 2]],
+            dims: AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
+        },
+        ValidityDomain::unconstrained()
+            .with("T", 280.0, 430.0)
+            .with("T_b", 280.0, 430.0),
+    );
+    let path = authored_scene("surface.json", "two_slabs_trace.json", true);
+    let text = std::fs::read_to_string(&path).unwrap().replacen(
+        "\"kind\": \"legacy\"}]",
+        "\"kind\": \"legacy\"}, {\"name\": \"T_b\", \"value\": \"320 K\", \"kind\": \"legacy\"}]",
+        1,
+    );
+    std::fs::write(&path, text).unwrap();
+    std::fs::write(
+        path.parent().unwrap().join("authored/curve.fsintpk"),
+        surface.to_bytes(),
+    )
+    .unwrap();
+    let (code, stdout, stderr) = run_binary(&["system", path.to_str().unwrap()]);
+    eprintln!("a surface: exit {code}: {}", stderr.trim_end());
+    assert!(stdout.is_empty(), "{stdout}");
+    assert_eq!(code, 3, "{stderr}");
+    assert!(
+        stderr.contains(
+            "a surface over a temperature coordinate, and any other interpolation, is not built"
+        ),
+        "{stderr}"
+    );
 }
