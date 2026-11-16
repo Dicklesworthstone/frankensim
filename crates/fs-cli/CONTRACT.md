@@ -826,6 +826,25 @@ Missing roots, changed scene/boundary contents, changed executables, corruption,
 and horizons before the saved time or beyond the declared duration refuse.
 A pause inside a proposed numerical interval adds a step boundary; continuation
 matches the same accepted prefix and subsequent stepping schedule.
+`--until` alone still cuts the step it falls in, so a run saved there and
+resumed reports what a run that pauses there reports, and only with
+`--whole-steps` does it report what a run with no pause reports. With that
+flag (a usage error, exit 2, without `--until` or given twice) every interval
+has the ceiling a run with no pause gives it, the scene's horizon: no step is
+cut, the run stops at the end of the first accepted step that ends at or after
+`--until`, the report's `time_s` is that time and the checkpoint is taken
+there. A scene whose step is longer than `--until` stops at its first step
+boundary. The claim is tested on four scenes and made for no other
+(`a_scene_saved_at_a_whole_step_and_resumed_reports_what_a_run_with_no_pause_reports`):
+`two_slabs.json` (a fixed step that does not divide the pause time),
+`adaptive_oscillator.json`, `stribeck_block.json` (an owner that shortens
+steps) and `bowed_mode.json`, each run with `--until 0.125 --whole-steps
+--checkpoint`, stop at or after 0.125 s and less than one `step_s` past it,
+`two_slabs.json` at 0.675 s after one step; a resume asked to stop at 0 s is
+refused by that stop time; and each, resumed by another process, reports byte
+for byte what the binary reports for the scene with no pause. Not tested: a
+second `--whole-steps` save taken from a resumed run, and a pause time at
+which a scene has already finished.
 `tests/system_command/checkpoints.rs` exercises fixed and adaptive saves and
 resumes through separate real CLI processes, full-report parity, foreign roots,
 corruption, changed prescribed boundaries and preservation of existing files.

@@ -103,8 +103,9 @@ const MAX_RESISTANCE_COORDINATES: usize = 64;
 const MAX_ENTHALPY_KNOTS: usize = 4096;
 const ADAPTIVE_NO_CLAIM: &str = "step-doubling estimates control the declared state coordinates and source-work increments under the selected order assumption; they are local numerical estimates, not global error bounds or physical validation; dissipated heat and interface balances retain the kernel's separate ledger audits; no material-card resolution, contact, friction or phase change";
 
-const HELP: &str = "Usage: frankensim [--json] system <scene.json> [--until <time_s>]
-       [--checkpoint <new-file>] [--resume <file> --resume-root <hex>]
+const HELP: &str = "Usage: frankensim [--json] system <scene.json>
+       [--until <time_s> [--whole-steps]] [--checkpoint <new-file>]
+       [--resume <file> --resume-root <hex>]
 
 Run a lumped mechanical, rotational, electrical, hydraulic, gas and thermal
 device described as data on the composition kernel, and report its final state,
@@ -118,6 +119,12 @@ its resume_root. Existing files are never overwritten. To continue in another
 process, supply --resume together with that independently retained 64-digit
 hex root. The scene contents and executable must match the saved run. A scene
 whose components lack native state codecs refuses checkpoint creation.
+
+--until cuts the step it falls in, and that cut is a step boundary a run with
+no pause does not have. With --whole-steps, which needs --until, no step is
+cut: the run stops at the end of the first step that ends at or after that
+time, and reports the time it stopped at. A run saved there and resumed takes
+the steps a run with no pause takes.
 
 For example:
   frankensim --json system scene.json --until 0.5 --checkpoint prefix.fssnap
@@ -761,8 +768,15 @@ pub fn run(args: &[OsString], json: bool) -> CommandOutput {
             iteration: 0,
         };
         let cx = Cx::new(&gate, arena, key, Budget::INFINITE, ExecMode::Deterministic);
+        // With --whole-steps every interval has the ceiling a run with no
+        // pause gives it, the scene's horizon, so no step is cut at `until_s`.
+        let ceiling_s = if options.whole_steps {
+            scene.duration_s()
+        } else {
+            until_s
+        };
         while !scene.is_finished() && scene.time_s() < until_s {
-            scene.advance(until_s - scene.time_s(), &cx)?;
+            scene.advance(ceiling_s - scene.time_s(), &cx)?;
         }
         Ok::<(), SystemSceneError>(())
     });
@@ -805,6 +819,7 @@ pub fn run(args: &[OsString], json: bool) -> CommandOutput {
 struct SceneOptions<'a> {
     scene: &'a Path,
     until_s: Option<f64>,
+    whole_steps: bool,
     checkpoint: Option<&'a Path>,
     resume: Option<&'a Path>,
     resume_root: Option<[u8; 32]>,
@@ -821,15 +836,27 @@ impl<'a> SceneOptions<'a> {
         let mut options = Self {
             scene: Path::new(scene),
             until_s: None,
+            whole_steps: false,
             checkpoint: None,
             resume: None,
             resume_root: None,
         };
-        let mut rest = args[1..].chunks_exact(2);
-        for pair in &mut rest {
-            match pair[0].to_str() {
+        let mut rest = args[1..].iter();
+        while let Some(name) = rest.next() {
+            // The one option with no value.
+            if name.to_str() == Some("--whole-steps") {
+                if options.whole_steps {
+                    return Err(format!("--whole-steps is given twice\n{HELP}"));
+                }
+                options.whole_steps = true;
+                continue;
+            }
+            let Some(value) = rest.next() else {
+                return Err(format!("every system option requires a value\n{HELP}"));
+            };
+            match name.to_str() {
                 Some("--until") if options.until_s.is_none() => {
-                    let value = pair[1]
+                    let value = value
                         .to_str()
                         .and_then(|value| value.parse::<f64>().ok())
                         .filter(|value| value.is_finite() && *value >= 0.0)
@@ -837,14 +864,14 @@ impl<'a> SceneOptions<'a> {
                     options.until_s = Some(value);
                 }
                 Some("--checkpoint") if options.checkpoint.is_none() => {
-                    options.checkpoint = Some(Path::new(&pair[1]));
+                    options.checkpoint = Some(Path::new(value));
                 }
                 Some("--resume") if options.resume.is_none() => {
-                    options.resume = Some(Path::new(&pair[1]));
+                    options.resume = Some(Path::new(value));
                 }
                 Some("--resume-root") if options.resume_root.is_none() => {
                     options.resume_root = Some(
-                        pair[1]
+                        value
                             .to_str()
                             .and_then(fs_blake3::ContentHash::from_hex)
                             .ok_or("--resume-root must contain exactly 64 hexadecimal digits")?
@@ -853,17 +880,16 @@ impl<'a> SceneOptions<'a> {
                 }
                 _ => {
                     return Err(format!(
-                        "unknown or repeated system option {:?}\n{HELP}",
-                        pair[0]
+                        "unknown or repeated system option {name:?}\n{HELP}"
                     ));
                 }
             }
         }
-        if !rest.remainder().is_empty() {
-            return Err(format!("every system option requires a value\n{HELP}"));
-        }
         if options.resume.is_some() != options.resume_root.is_some() {
             return Err("--resume and --resume-root must be supplied together".into());
+        }
+        if options.whole_steps && options.until_s.is_none() {
+            return Err("--whole-steps requires --until".into());
         }
         Ok(options)
     }

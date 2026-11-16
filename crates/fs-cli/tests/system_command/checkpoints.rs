@@ -278,6 +278,104 @@ fn resume_requires_an_independent_root_and_valid_pause_horizon() {
     assert!(stderr.contains("system-until"), "{stderr}");
 }
 
+/// The scenes of the whole-step claim, each with its `step_s`: a fixed step
+/// that does not divide 0.125 s, an adaptive scene, a friction scene whose
+/// owner shortens steps, and the bowed string.
+const WHOLE_STEP_SCENES: [(&str, f64); 4] = [
+    ("two_slabs.json", 0.675),
+    ("adaptive_oscillator.json", 0.5),
+    ("stribeck_block.json", 0.01),
+    ("bowed_mode.json", 0.001),
+];
+
+/// Claims, declared before the first run: each of the four scenes, run with
+/// `--until 0.125 --whole-steps --checkpoint`, stops at a time at or after
+/// 0.125 s and less than one `step_s` past it, which its report gives;
+/// `two_slabs.json` stops at 0.675 s, the end of its first step. The
+/// checkpoint's time is that stop time: a resume asked to stop at 0 s is
+/// refused by it. Resumed by another process, each scene reports byte for
+/// byte what the binary reports for the scene with no pause.
+#[test]
+fn a_scene_saved_at_a_whole_step_and_resumed_reports_what_a_run_with_no_pause_reports() {
+    for (name, step_s) in WHOLE_STEP_SCENES {
+        let text = std::fs::read_to_string(example(name)).unwrap();
+        assert!(text.contains(&format!("\"step_s\": {step_s}")), "{name}");
+        let scene = scratch(name, &text);
+        let scene_path = scene.to_str().unwrap();
+        let checkpoint = scene.with_extension("fssnap");
+        let checkpoint_path = checkpoint.to_str().unwrap();
+        let (code, plain, stderr) = run_binary(&["--json", "system", scene_path]);
+        assert_eq!(code, 0, "{name}: {stderr}");
+        let (code, prefix, stderr) = run_binary(&[
+            "--json",
+            "system",
+            scene_path,
+            "--until",
+            "0.125",
+            "--whole-steps",
+            "--checkpoint",
+            checkpoint_path,
+        ]);
+        assert_eq!(code, 0, "{name}: {stderr}");
+        let stopped_s = value(&prefix, "\"schema\"", "time_s");
+        let steps = value(&prefix, "\"schema\"", "steps");
+        eprintln!("{name}: stopped at {stopped_s} s after {steps} steps");
+        assert!(
+            (0.125..0.125 + step_s).contains(&stopped_s),
+            "{name}: {stopped_s}"
+        );
+        if name == "two_slabs.json" {
+            assert_eq!(
+                (stopped_s.to_bits(), steps.to_bits()),
+                (step_s.to_bits(), 1.0_f64.to_bits())
+            );
+        }
+        let root = saved_root(&prefix);
+        let resume = [
+            "--json",
+            "system",
+            scene_path,
+            "--resume",
+            checkpoint_path,
+            "--resume-root",
+            &root,
+        ];
+        let (code, stdout, stderr) = run_binary(&[&resume[..], &["--until", "0"]].concat());
+        assert_eq!(code, i32::from(fs_cli::exit::INPUT), "{name}: {stderr}");
+        assert!(stdout.is_empty(), "{name}: {stdout}");
+        assert!(
+            stderr.contains(&format!("accepted time {stopped_s} s")),
+            "{name}: {stderr}"
+        );
+        let (code, resumed, stderr) = run_binary(&resume);
+        assert_eq!(code, 0, "{name}: {stderr}");
+        assert_eq!(resumed, plain, "{name}");
+    }
+}
+
+/// `--whole-steps` with no `--until`, or given twice, is a usage error with
+/// no report.
+#[test]
+fn whole_steps_is_refused_without_until_and_when_repeated() {
+    let path = example("adaptive_oscillator.json");
+    let alone = "--whole-steps requires --until";
+    let twice = "--whole-steps is given twice";
+    for (options, said) in [
+        ("--whole-steps", alone),
+        ("--whole-steps --checkpoint never.fssnap", alone),
+        ("--until 1 --whole-steps --whole-steps", twice),
+    ] {
+        let args: Vec<&str> = ["system", &path]
+            .into_iter()
+            .chain(options.split(' '))
+            .collect();
+        let (code, stdout, stderr) = run_binary(&args);
+        assert_eq!(code, i32::from(fs_cli::exit::USAGE), "{args:?}: {stderr}");
+        assert!(stdout.is_empty(), "{args:?}: {stdout}");
+        assert!(stderr.contains(said), "{args:?}: {stderr}");
+    }
+}
+
 /// The packs the conduction examples read, relative to the scene.
 const STEEL_316_PACK: &str = "steel316/stainless-316-nasa.fsmcdpk";
 const ATKINS_JOINT_PACK: &str = "atkins1964/al6061t6-lathe-0p30um-vacuum.fsintpk";

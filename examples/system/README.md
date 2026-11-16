@@ -28,6 +28,10 @@ zero saves the admitted initial state. A resumed run can stop and save another
 prefix by adding a later `--until` and a new `--checkpoint` destination. Existing
 files are never overwritten. Stopping inside a proposed step adds a numerical
 step boundary; resuming preserves the accepted state and its continuation.
+`--until` alone still cuts that step, so a saved and resumed run reports what a
+run that pauses there reports. Only with `--whole-steps` added, which stops at
+the end of the first step that ends at or after `--until`, does it report what
+a run with no pause reports.
 Checkpoint files and restored sample histories are each bounded to 64 MiB.
 An element whose owner does not provide a native state codec refuses saving
 instead of omitting its state.
