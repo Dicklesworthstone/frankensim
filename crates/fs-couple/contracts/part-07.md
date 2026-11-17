@@ -5136,8 +5136,8 @@ their tolerances. It used to refuse as `LadderUnconverged` with a peak shift
 of NaN, which hid the gate that failed. None of the six cards rendered for
 bead rbkr4 is refused at the new ceiling (the trumpet B-flat-4 tract with
 the airway converges on that rung), and no test exercises this refusal:
-fs-couple's lib test crate does not build within 14 GiB (14.8 GB at one job,
-2026-11-17).
+fs-couple's lib test crate does not build within 14 GiB (stopped at 14.11 GiB
+with one job, 2026-11-17).
 
 The reed and lip performance cards realize a player's tract on
 `upstream_airway::airway_ladder()`: the default tolerances under the

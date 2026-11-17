@@ -56,7 +56,9 @@
 //! `torso/proto.py`) agrees with twice these margins within 1e-11 of the microphone's pressure and 5e-10 of `dZ` from
 //! 50 Hz to 10 kHz; [`tests`] checks it here. Radial functions are carried as ratios (as the head's series), so
 //! nothing overflows at small `k`; plain IEEE operations only, so every build rounds the same way, and each frequency is
-//! solved alone, so the result does not depend on how many threads share the bins.
+//! solved alone, so the result does not depend on how many threads share the bins. The bins run on up to 8 threads
+//! (`MAX_WORKERS`), and on one inside a worker of another pool ([`serial_bins`]): RULE 1.1 caps a run at 8 cores
+//! (bead a1bav).
 
 use super::Cx;
 use fs_math::det;
@@ -71,6 +73,22 @@ const NODE_MARGIN: usize = 15;
 pub const TORSO_MAX_ORDER: usize = 400;
 /// Most worker threads for the bins (each bin is solved alone, so the count changes no result).
 const MAX_WORKERS: usize = 8;
+
+std::thread_local! {
+    /// The most workers [`par_map`] may use from this thread: [`MAX_WORKERS`] on a caller's own thread, 1 inside a worker
+    /// of a pool ([`serial_bins`]), so a pool inside a pool computes on no more threads than the outer one.
+    static BIN_WORKERS: core::cell::Cell<usize> = const { core::cell::Cell::new(MAX_WORKERS) };
+}
+
+/// `f` on this thread with [`par_map`] on one worker: a pool's worker (a moving tract's shape build, `par_map`'s own)
+/// runs its work through this, so a nested `par_map` computes on one thread at a time. The result is the same, as
+/// `par_map`'s is for any worker count (bead a1bav).
+pub(crate) fn serial_bins<R>(f: impl FnOnce() -> R) -> R {
+    let outer = BIN_WORKERS.with(|w| w.replace(1));
+    let result = f();
+    BIN_WORKERS.with(|w| w.set(outer));
+    result
+}
 
 /// A torso sphere under the head (module doc): its radius and the neck gap between the two surfaces [m].
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -609,13 +627,15 @@ fn solve(a: &mut [Cx], b: &mut [Cx], n: usize) -> Result<(), String> {
 }
 
 /// `f(0..n)` on up to [`MAX_WORKERS`] threads, each on one contiguous block; every value is computed alone, so the result
-/// is the same for any thread count. The first refusal in bin order is returned.
+/// is the same for any thread count. The first refusal in bin order is returned. Inside a pool's worker
+/// ([`serial_bins`]) one worker takes every bin, and each worker runs its block through [`serial_bins`].
 pub(super) fn par_map<T, F>(n: usize, f: F) -> Result<Vec<T>, String>
 where
     T: Copy + Send + Default,
     F: Fn(usize) -> Result<T, String> + Sync,
 {
-    let workers = std::thread::available_parallelism().map_or(1, |p| p.get()).clamp(1, MAX_WORKERS);
+    let budget = BIN_WORKERS.with(core::cell::Cell::get);
+    let workers = std::thread::available_parallelism().map_or(1, |p| p.get()).clamp(1, MAX_WORKERS).min(budget);
     let chunk = n.div_ceil(workers).max(1);
     let mut out = vec![T::default(); n];
     let results: Vec<Result<(), String>> = std::thread::scope(|scope| {
@@ -625,10 +645,12 @@ where
             .map(|(c, slot)| {
                 let f = &f;
                 scope.spawn(move || -> Result<(), String> {
-                    for (i, o) in slot.iter_mut().enumerate() {
-                        *o = f(c * chunk + i)?;
-                    }
-                    Ok(())
+                    serial_bins(|| {
+                        for (i, o) in slot.iter_mut().enumerate() {
+                            *o = f(c * chunk + i)?;
+                        }
+                        Ok(())
+                    })
                 })
             })
             .collect();

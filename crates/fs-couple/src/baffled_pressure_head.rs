@@ -107,6 +107,7 @@ use fs_math::det;
 /// The snowman's torso under the head (module doc, "The torso").
 #[path = "baffled_pressure_head_torso.rs"]
 mod torso;
+pub(crate) use torso::serial_bins;
 pub use torso::{TORSO_MAX_ORDER, TorsoSphere};
 
 /// Largest series order admitted; a geometry that needs more is refused, never truncated.

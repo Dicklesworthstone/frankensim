@@ -348,6 +348,11 @@
 //! (it does not step at closure) and the upper section's rest gap. All are for one fold, so `fold_mapping bilateral`
 //! halves the body with the cover. A `fold_shape` is refused on it. Tension and its gestures scale the body's spring
 //! with the cover's.
+//!
+//! Setup threads. A moving tract's further shapes build on up to 8 threads (`MAX_SHAPE_WORKERS`), and the head and torso
+//! tables on up to 8 ([`crate::pcm_wav::baffled::head`]); inside a shape's worker those tables run on that one thread
+//! (`pcm_wav::baffled::head::serial_bins`), so a render's setup never computes on more than 8 threads at once.
+//! RULE 1.1 caps a run at 8 cores (bead a1bav). Neither count changes a result.
 
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::driving_point::LineLadder;
@@ -408,8 +413,9 @@ const MAX_MOVE_STEPS: u64 = 256;
 /// A moving tract's whole menu of shapes, the card's own included.
 const MAX_TRACT_SHAPES: usize = 512;
 /// Threads that build a moving tract's further shapes at once. Each shape is built alone by the same serial code, so the
-/// lines do not depend on the count (`build_shapes`).
-const MAX_SHAPE_WORKERS: usize = 16;
+/// lines do not depend on the count (`build_shapes`). Each worker runs the head and torso bins on its own thread, so the
+/// setup computes on at most this many threads: RULE 1.1 caps a run at 8 cores (bead a1bav).
+const MAX_SHAPE_WORKERS: usize = 8;
 const MAX_SCHEDULE_POINTS: usize = 4096;
 const MAX_SECONDS: u64 = 120;
 const MAX_BLOCK: usize = 65_536;
@@ -2308,7 +2314,8 @@ struct FricativeShapeLines {
 /// `build(0..n)` on up to `workers` scoped threads, each on one contiguous block of shapes, in the manner of the snowman's
 /// `par_map` (`baffled_pressure_head_torso`): every shape is built alone by the same serial code and kept at its index, so
 /// the result is the same for any worker count. The first refusal in shape order is returned; a block stops at its own
-/// first refusal.
+/// first refusal. Each worker builds with the head and torso bins on its own thread
+/// ([`crate::pcm_wav::baffled::head::serial_bins`]), so the build computes on at most `workers` threads.
 fn build_shapes<F>(n: usize, workers: usize, build: F) -> Result<Vec<ShapeLines>, String>
 where
     F: Fn(usize) -> Result<ShapeLines, String> + Sync,
@@ -2320,7 +2327,7 @@ where
             let build = &build;
             scope.spawn(move || {
                 for (i, slot) in slots.iter_mut().enumerate() {
-                    let lines = build(c * chunk + i);
+                    let lines = crate::pcm_wav::baffled::head::serial_bins(|| build(c * chunk + i));
                     let refused = lines.is_err();
                     *slot = Some(lines);
                     if refused {
