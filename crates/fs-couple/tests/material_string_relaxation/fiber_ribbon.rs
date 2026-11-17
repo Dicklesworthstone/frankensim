@@ -2,6 +2,7 @@
 use super::*;
 use fs_couple::bowed_string::runtime::reciprocal::bank::nonlinear::longitudinal::LongitudinalStringResolution;
 use fs_couple::fiber_ribbon::{FiberRibbonGeometry, FiberRibbonResolution, TensionedFiberRibbon};
+use fs_couple::render::schedule::force::coupled::PreparedModalBudget;
 use fs_couple::render::schedule::force::coupled::contact::friction::{
     multiple::MultiFrictionConfig, nonlinear::NonlinearModalConfig,
 };
@@ -36,6 +37,32 @@ fn elastic_fibers(gate: &CancelGate) -> TensionedFiberRibbon {
         gate,
     )
     .unwrap()
+}
+
+// A prepared bank sums its losses and its storage by rows. A ribbon's cells are added by the friction owner,
+// which builds a new network for them: that network keeps the order.
+#[test]
+fn a_prepared_bank_keeps_its_sums_by_rows_when_a_fiber_ribbon_rebuilds_its_network() {
+    with_cx(|cx, gate| {
+        let budget = PreparedModalBudget {
+            max_modes: 64,
+            max_dense_bytes: 67_108_864,
+            max_multiply_terms: 200_000_000_000,
+        };
+        let original = bank(cx, gate, 40e9, 0.004, 200_000.0, 2, 1)
+            .with_prepared_linear_propagation(budget, gate)
+            .unwrap();
+        assert!(original.system().sums_by_rows());
+        let joint = MultiFrictionConfig {
+            max_ports: 1,
+            max_sweeps: 128,
+            max_setup_terms: 1_048_576,
+        };
+        let admitted = original
+            .with_tensioned_fiber_ribbon(elastic_fibers(gate), 0.4, joint, gate)
+            .unwrap();
+        assert!(admitted.system().sums_by_rows());
+    });
 }
 
 #[test]

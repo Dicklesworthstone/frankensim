@@ -181,6 +181,8 @@ fn gas_mass_enters_projection_and_axial_extension_retains_bending_history() {
             axial_modes:vec![1],maximum_slope:0.2,maximum_strain:0.01}],NonlinearModalConfig {
             max_iterations:64,maximum_generalized_force:1e5,
             force_absolute_tolerance:1e-11,force_relative_tolerance:1e-10},gate).unwrap();
+        // This bank has no prepared operator and never chose sums by rows: its rebuilt network has not either.
+        assert!(!axial.system().sums_by_rows());
         assert_eq!(axial.system().material_memory(),memory);
         assert_eq!(axial.source().string_bending_relaxation().unwrap().channels().len(),4);
         assert!(axial.system().material_relaxation_branches().iter()

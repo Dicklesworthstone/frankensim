@@ -10,6 +10,20 @@ fn selection(modes: &[usize]) -> LongitudinalStringResolution {
     }
 }
 
+// A prepared bank sums its losses and its storage by rows. Axial modes are added by the friction owner,
+// which builds a new network for them: that network keeps the order.
+#[test]
+fn a_prepared_bank_keeps_its_sums_by_rows_when_axial_modes_rebuild_its_network() {
+    with_cx(|cx, gate| {
+        let original = physical_bank(cx, gate, 200e9, gas(), 2);
+        assert!(original.system().sums_by_rows());
+        let bank = original
+            .with_longitudinal_waves(vec![selection(&[1, 2]); 2], nonlinear_config(), gate)
+            .unwrap();
+        assert!(bank.system().sums_by_rows());
+    });
+}
+
 #[test]
 fn longitudinal_extension_preserves_original_components_and_excites_real_axial_inertia() {
     with_cx(|cx, gate| {

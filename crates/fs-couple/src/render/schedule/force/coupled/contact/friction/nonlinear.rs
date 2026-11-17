@@ -504,6 +504,12 @@ impl FrictionModalSystem {
         }));
         let network = CoupledModalSystem::new_with_columns_preparation(models, columns,
             &constant_loss, self.network.config, self.network.preparation(), gate)?;
+        // The network this one replaces had chosen its order of sums; the rebinds below carry it on.
+        let network = if self.network.sums_by_rows() {
+            network.with_sums_by_rows()?
+        } else {
+            network
+        };
         let network = if self.network.relaxation_branches.is_empty() { network } else {
             let mut branches = self.network.relaxation_branches.clone();
             for branch in &mut branches { branch.projection.resize(2 * count, 0.0); }

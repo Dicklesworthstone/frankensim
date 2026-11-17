@@ -58,16 +58,28 @@ The opt-in is refused after the first sample, without the prepared operator, and
 triangle. The system holds the order. `preparation::prepare` applies it to every operator prepared for the system afterwards (a changed link law, changed relaxation times, a
 radiation load, more material arms) and holds each new operator's Gramians to their transposes again. `sums_by_rows()` reports it.
 
-The bowed-string bank opts in whenever its operator is prepared: in `assemble_sources`, where every bank constructor and rebuild builds its network, and in
-`ReciprocalStringBank::with_prepared_linear_propagation`. `material_strings` prints `loss_order=upper-rows` for such a bank. No other owner opts in, and their losses keep
-the chain's bits.
+The bowed-string bank opts in whenever its operator is prepared: in `assemble_sources`, the one function of the bank's code that constructs a network, and in
+`ReciprocalStringBank::with_prepared_linear_propagation`. Two builders add components through the friction owner instead, and it constructs the new network itself
+(`FrictionModalSystem::with_internal_components_and_connections`): `with_longitudinal_waves_selected`, which the three other `with_longitudinal_waves` builders and the
+`longitudinal-waves` row of `material_strings` reach, and `with_tensioned_fiber_ribbon`, which its `bow_fibers` row reaches. That network takes the order of the one it
+replaces: by rows when that one summed by rows, the chain when it did not. `material_strings` prints `loss_order=upper-rows` for a bank that sums by rows. No other owner
+opts in, and their losses keep the chain's bits.
+
+A system with nonlinear potentials bound to it (a bank's longitudinal waves bind them through `with_mapped_nonlinear_potentials`) solves each sample by trials, and there
+one more comparison reads the losses. `NonlinearFrictionState::iterate` accepts a trial when its force residual is within tolerance and its energy balance is within
+`energy_absolute_tolerance_j + energy_relative_tolerance * scale`; the balance holds the staged frame's losses. A trial over that tolerance is iterated again, and a step
+whose trials run out with the force residual within its tolerance is refused as an energy imbalance. So the order of the losses could change a state only at a sample whose
+balance stands within the two orders' difference of that tolerance.
 
 Evidence. `tests/upper_row_forms.rs` compiles the kernel's file a second time (the file names nothing of its crate). At sides 1, 7, 8, 9, 16, 17 and 100, on mixed-sign
 Gramians, it holds the kernel to a plain loop of the same order bit for bit and to the chain within 1e-13, and holds `bitwise_symmetric` to one unit in the last place of one
 lower entry, to 0.0 against -0.0 and to a wrong side. `tests/coupled_coefficient_update.rs`: two prepared systems that differ only in the order hold the same states,
 pressure and stored energy bit for bit over 400 samples, through a changed link law at sample 200; their connection losses agree within 1e-13 and have other bits before and
 after the change; the refusals. `tests/measured_string_bank.rs` and `tests/material_string_bank/shell/coating.rs` assert the order on a bank prepared after its construction
-and on one constructed prepared. The viola Db4 and viola E3 control cards render the same wav as before, and the same log lines but for the added `loss_order=upper-rows`.
+and on one constructed prepared. `tests/material_string_nonlinear/bank/longitudinal.rs` and `tests/material_string_relaxation/fiber_ribbon.rs` assert it on a prepared bank
+before and after its axial modes, and a fiber ribbon's cells, are added; `tests/material_string_relaxation.rs` asserts that a bank without the prepared operator has not
+chosen it after its axial modes are added. The viola Db4 and viola E3 control cards render the same wav as before, and the same log lines but for the added `loss_order=upper-rows`.
+The violin D4 card with longitudinal waves, stopped 900 s into its render, has written the same frames as it did with the chain, and its log has both order lines.
 
 Not tested: the refusal of an asymmetric Gramian through a system (no public call builds one); the component and material channels of a system (the fixture has neither
 loss); sides from 1024, where the default order may run each Gramian on its own thread. Not covered: the two transition products of a step, which are most of what is
