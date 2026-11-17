@@ -143,7 +143,7 @@ fn prepared_with_substrate(
     )
     .unwrap();
     // A bank constructed with a prepared operator sums its losses by upper rows.
-    assert!(bank.system().sums_losses_by_upper_rows());
+    assert!(bank.system().sums_by_rows());
     if coated {
         bank.with_material_shell_coating_relaxation(None, gate)
             .unwrap()

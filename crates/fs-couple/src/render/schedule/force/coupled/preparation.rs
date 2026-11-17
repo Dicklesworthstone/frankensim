@@ -56,7 +56,7 @@ pub(super) fn prepare(
     branches: &[fs_phs::RelaxationBranch],
     radiation: Option<&radiation::Binding>,
     config: ModalCouplingConfig,
-    upper_row_losses: bool,
+    sums_by_rows: bool,
     gate: &CancelGate,
 ) -> Result<PreparedOperator, ModalCouplingError> {
     poll(Some(gate))?;
@@ -104,13 +104,13 @@ pub(super) fn prepare(
         }
         ModalPreparation::Ordinary => None,
     };
-    // A system that sums its losses by upper rows keeps that order in every operator prepared for it, and each one's
-    // Gramians are held to their transposes again.
-    if upper_row_losses {
+    // A system that sums by rows keeps that order in every operator prepared for it, and each one's loss Gramians
+    // are held to their transposes again.
+    if sums_by_rows {
         exact
             .as_mut()
-            .ok_or_else(|| invalid("losses by upper rows need a time-domain operator"))?
-            .sum_losses_by_upper_rows()?;
+            .ok_or_else(|| invalid("sums by rows need a time-domain operator"))?
+            .sum_by_rows()?;
     }
     Ok(PreparedOperator {
         exact,

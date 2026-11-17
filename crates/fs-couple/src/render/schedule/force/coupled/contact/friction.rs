@@ -444,19 +444,19 @@ impl FrictionModalSystem {
 
     pub const fn is_harmonic_only(&self) -> bool { self.network.is_harmonic_only() }
 
-    /// The network's loss sweep by rows over the upper triangle (`CoupledModalSystem::with_upper_row_losses`).
+    /// The network's loss sweep and storage by rows (`CoupledModalSystem::with_sums_by_rows`).
     ///
     /// # Errors
     /// The network's refusals.
-    pub fn with_upper_row_losses(mut self) -> Result<Self, ModalFrictionError> {
-        self.network = self.network.with_upper_row_losses()?;
+    pub fn with_sums_by_rows(mut self) -> Result<Self, ModalFrictionError> {
+        self.network = self.network.with_sums_by_rows()?;
         Ok(self)
     }
 
-    /// Whether the network's loss sweep runs by rows over the upper triangle.
+    /// Whether the network's loss sweep and storage run by rows.
     #[must_use]
-    pub const fn sums_losses_by_upper_rows(&self) -> bool {
-        self.network.sums_losses_by_upper_rows()
+    pub const fn sums_by_rows(&self) -> bool {
+        self.network.sums_by_rows()
     }
 
     /// Accepted components, with their existing basis, budgets and state.

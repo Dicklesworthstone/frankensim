@@ -80,13 +80,14 @@ impl ExactNetwork {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// The prepared operator's loss sweep by rows over the upper triangle (`PreparedNetwork::sum_losses_by_upper_rows`).
-    /// Refused by an operator that is not the prepared one: the island blocks have no loss Gramians.
-    pub(super) fn sum_losses_by_upper_rows(&mut self) -> Result<(), ModalCouplingError> {
+    /// The prepared operator's loss sweep by rows over the upper triangle and its storage by rows
+    /// (`PreparedNetwork::sum_by_rows`). Refused by an operator that is not the prepared one: the island blocks have
+    /// no loss Gramians.
+    pub(super) fn sum_by_rows(&mut self) -> Result<(), ModalCouplingError> {
         self.prepared
             .as_mut()
-            .ok_or_else(|| invalid("losses by upper rows need the prepared operator"))?
-            .sum_losses_by_upper_rows()
+            .ok_or_else(|| invalid("sums by rows need the prepared operator"))?
+            .sum_by_rows()
     }
 
     /// Reuse the original coupled-basis constant-loss preparation without
@@ -387,6 +388,12 @@ impl ExactNetwork {
     /// The damping column of a constant-loss link on the prepared owner; None where the dashpot acts along its own column.
     pub(super) fn damping_column(&self, link: usize) -> Option<&[f64]> {
         self.prepared.as_ref().and_then(|prepared| prepared.damping_column(link))
+    }
+
+    /// The norm the prepared owner holds for the column a link's dashpot acts along; None for any other owner.
+    pub(super) fn dashpot_norm(&self, link: usize) -> Option<f64> {
+        let prepared = self.prepared.as_ref();
+        prepared.and_then(|prepared| prepared.dashpot_norm(link))
     }
 
     pub(super) fn deferred_connection_work(&self, x: &[f64], u: &[f64], endpoint: &[f64], connection_loss: f64)
@@ -1020,6 +1027,15 @@ pub(super) fn stage(
 #[derive(Clone, Copy)]
 enum PressureForcing { Held, Varying }
 
+/// The norm of the column a link's dashpot acts along, for the bound on the link's force. It is a constant of the
+/// link and the operator: the prepared operator holds it for each of its links, and for any other owner it is
+/// computed here by the same expression (`prepared::column_norm`).
+fn dashpot_norm(exact: Option<&ExactNetwork>, link: usize, dashpot: &[f64]) -> f64 {
+    exact
+        .and_then(|exact| exact.dashpot_norm(link))
+        .unwrap_or_else(|| prepared::column_norm(dashpot))
+}
+
 struct PropagatedCandidate {
     endpoint: Vec<f64>, start: Vec<f64>, input: Vec<f64>, losses: [f64; 4],
     initial_bound_energy: f64, external_work: Option<f64>,
@@ -1130,7 +1146,7 @@ fn stage_candidate(network: &mut CoupledModalSystem, external: &[f64], candidate
         }
         let force_bound = finite(
             (det::sqrt(link.stiffness_n_m)
-                + link.damping_n_s_m * det::sqrt(dashpot.iter().map(|b| b * b).sum()))
+                + link.damping_n_s_m * dashpot_norm(network.exact.as_ref(), index, dashpot))
                 * root_twice_energy
                 + link.stiffness_n_m * link.rest_extension_m.abs(),
         )?;

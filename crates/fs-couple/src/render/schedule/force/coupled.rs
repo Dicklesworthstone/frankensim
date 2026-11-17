@@ -261,9 +261,9 @@ pub struct CoupledModalSystem {
     pressure: equilibrium::pressure::EquilibriumPressure,
     prepared_budget: Option<PreparedModalBudget>,
     harmonic_only: bool,
-    /// Whether every operator prepared for this system sums its loss sweep by rows over the upper triangle
-    /// ([`Self::with_upper_row_losses`]).
-    upper_row_losses: bool,
+    /// Whether every operator prepared for this system sums its loss sweep and its storage by rows
+    /// ([`Self::with_sums_by_rows`]).
+    sums_by_rows: bool,
     harmonic_damping_columns: Vec<Option<Vec<f64>>>,
     relaxation_branches: Vec<fs_phs::RelaxationBranch>,
     material_memory: Vec<f64>,
@@ -499,7 +499,7 @@ impl CoupledModalSystem {
             models, candidates, exact: operator.exact, pressure: operator.pressure,
             prepared_budget: preparation.prepared_budget(),
             harmonic_only: preparation.is_harmonic_only(),
-            upper_row_losses: false,
+            sums_by_rows: false,
             harmonic_damping_columns: operator.harmonic_damping_columns,
             offsets, connections, columns,
             relaxation_branches: Vec::new(), material_memory: Vec::new(),
@@ -536,7 +536,7 @@ impl CoupledModalSystem {
         let operator = preparation::prepare(
             &self.models, &self.columns, &self.connections, self.mode_count(),
             self.dt, ModalPreparation::Prepared(budget), &self.relaxation_branches,
-            self.radiation.as_ref(), self.config, self.upper_row_losses, gate,
+            self.radiation.as_ref(), self.config, self.sums_by_rows, gate,
         )?;
         self.exact = operator.exact;
         self.pressure = operator.pressure;
@@ -566,7 +566,7 @@ impl CoupledModalSystem {
         anchor_constant_loss(&mut self.connections, constant_loss)?;
         let operator = preparation::prepare(&self.models, &self.columns, &self.connections,
             self.mode_count(), self.dt, self.preparation(), &self.relaxation_branches,
-            self.radiation.as_ref(), self.config, self.upper_row_losses, gate)?;
+            self.radiation.as_ref(), self.config, self.sums_by_rows, gate)?;
         self.exact = operator.exact;
         self.pressure = operator.pressure;
         self.harmonic_damping_columns = operator.harmonic_damping_columns;
@@ -598,29 +598,32 @@ impl CoupledModalSystem {
     #[must_use]
     pub const fn is_harmonic_only(&self) -> bool { self.harmonic_only }
 
-    /// Sum the prepared operator's loss sweep by rows over the upper triangle of each loss Gramian, in place of one
-    /// chain over the square (`exact::prepared::upper_rows`): half the terms, in an order that is a function of the
-    /// side alone. A step's three losses then differ from the chain's in their last bits; its states do not read
-    /// them. Every operator prepared for this system afterwards keeps the order.
+    /// Sum the prepared operator's two dense sums of a step by rows, each in place of one chain over a square
+    /// (`exact::prepared::upper_rows`). The loss sweep takes each loss Gramian by rows over its upper triangle:
+    /// half the terms, in an order that is a function of the side alone. The operator's storage takes the
+    /// stiffness by rows over the whole square. A step's three losses and that storage then differ from the
+    /// chain's in their last bits. The states do not read them: the losses go to the ledger, and the storage is
+    /// only held against a tolerance and a limit, each of which refuses. Every operator prepared for this system
+    /// afterwards keeps the order.
     ///
     /// # Errors
     /// A started system, one without the prepared operator, or a loss Gramian that differs from its transpose.
-    pub fn with_upper_row_losses(mut self) -> Result<Self, ModalCouplingError> {
+    pub fn with_sums_by_rows(mut self) -> Result<Self, ModalCouplingError> {
         let cold = self.frame.sample == 0 && self.prepared_budget.is_some() && !self.harmonic_only;
         let Some(exact) = self.exact.as_mut().filter(|_| cold) else {
             return Err(invalid(
-                "losses by upper rows need the prepared operator before its first sample",
+                "sums by rows need the prepared operator before its first sample",
             ));
         };
-        exact.sum_losses_by_upper_rows()?;
-        self.upper_row_losses = true;
+        exact.sum_by_rows()?;
+        self.sums_by_rows = true;
         Ok(self)
     }
 
-    /// Whether the loss sweep runs by rows over the upper triangle ([`Self::with_upper_row_losses`]).
+    /// Whether the loss sweep and the operator's storage run by rows ([`Self::with_sums_by_rows`]).
     #[must_use]
-    pub const fn sums_losses_by_upper_rows(&self) -> bool {
-        self.upper_row_losses
+    pub const fn sums_by_rows(&self) -> bool {
+        self.sums_by_rows
     }
 
     fn require_time_domain(&self) -> Result<(), ModalCouplingError> {
@@ -651,6 +654,24 @@ impl CoupledModalSystem {
     #[must_use]
     pub fn connection_column(&self, connection: usize) -> Option<&[f64]> {
         self.columns.get(connection).map(Vec::as_slice)
+    }
+    /// The column a connection's dashpot acts along in a step: the damping column of a constant-loss connection
+    /// on the prepared operator, and the connection's own column otherwise, as for every connection of a system
+    /// without the prepared operator. None beyond the last connection.
+    #[must_use]
+    pub fn connection_dashpot_column(&self, connection: usize) -> Option<&[f64]> {
+        let exact = self.exact.as_ref();
+        let damping = exact.and_then(|exact| exact.damping_column(connection));
+        damping.or_else(|| self.connection_column(connection))
+    }
+    /// The norm of [`Self::connection_dashpot_column`] that the prepared operator holds for the bound on the
+    /// connection's force. It is computed once when an operator is prepared, where a step computed it for every
+    /// connection at every sample. None without the prepared operator (a step of such a system still computes
+    /// the norm itself) and beyond the last connection.
+    #[must_use]
+    pub fn connection_dashpot_norm(&self, connection: usize) -> Option<f64> {
+        let exact = self.exact.as_ref();
+        exact.and_then(|exact| exact.dashpot_norm(connection))
     }
     /// Read-only endpoint for the native stage/admit/publish composition boundary.
     pub(crate) fn staged_components(&self) -> &[ModalAcousticTimeModel] { &self.candidates }

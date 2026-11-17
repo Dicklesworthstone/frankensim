@@ -972,14 +972,15 @@ fn two_way_load_receipt(ready:&Ready)->Result<Vec<LoadReceipt>> {
     }
     Ok(receipts)
 }
-/// The log lines of the bank's prepared operator: its budget, and the order of its loss sweep when that is not the
-/// chain.
+/// The log lines of the bank's prepared operator: its budget, and the orders of its loss sweep and of its storage
+/// when they are not the chain.
 fn prepared_operator_lines(bank: &MultiBowStringBank) {
     if let Some(budget) = bank.source().bank().prepared_linear_budget() {
         eprintln!("prepared_linear={budget:?}");
     }
-    if bank.system().sums_losses_by_upper_rows() {
+    if bank.system().sums_by_rows() {
         eprintln!("loss_order=upper-rows");
+        eprintln!("energy_order=rows");
     }
 }
 fn run(raw:&[std::ffi::OsString])->Result<()> {

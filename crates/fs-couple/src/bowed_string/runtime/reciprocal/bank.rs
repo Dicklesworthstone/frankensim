@@ -393,7 +393,7 @@ impl ReciprocalStringBank {
         mut self, budget: PreparedModalBudget, gate: &CancelGate,
     ) -> Result<Self, ReciprocalStringError> {
         self.system = self.system.with_prepared_linear_propagation(budget, gate)
-            .and_then(FrictionModalSystem::with_upper_row_losses)
+            .and_then(FrictionModalSystem::with_sums_by_rows)
             .map_err(ReciprocalStringError::Friction)?;
         self.source.prepared_linear = ModalPreparation::Prepared(budget);
         poll(gate)?;
@@ -732,7 +732,7 @@ fn assemble_sources(
     } else {
         CoupledModalSystem::new_with_preparation(components, links, constant_loss,
             options.network, prepared.into(), gate)
-    }.and_then(upper_row_losses).map_err(ReciprocalStringError::Network)?;
+    }.and_then(sums_by_rows).map_err(ReciprocalStringError::Network)?;
     let bow_card = &cards[options.bow.string];
     let bow_shape = match sources {
         Some(members) => members[options.bow.string].source.surface_shape(bow_card, options.bow.station_fraction)?,
@@ -743,11 +743,11 @@ fn assemble_sources(
     FrictionModalSystem::new(network, port, options.friction, gate).map_err(ReciprocalStringError::Friction)
 }
 
-/// A bank's prepared operator sums its loss sweep by rows over the upper triangle, and a network without one is left
-/// as it is. The render's log names the order.
-fn upper_row_losses(network: CoupledModalSystem) -> Result<CoupledModalSystem, ModalCouplingError> {
+/// A bank's prepared operator sums its loss sweep and its storage by rows, and a network without one is left as it
+/// is. The render's log names both orders.
+fn sums_by_rows(network: CoupledModalSystem) -> Result<CoupledModalSystem, ModalCouplingError> {
     if matches!(network.preparation(), ModalPreparation::Prepared(_)) {
-        network.with_upper_row_losses()
+        network.with_sums_by_rows()
     } else {
         Ok(network)
     }

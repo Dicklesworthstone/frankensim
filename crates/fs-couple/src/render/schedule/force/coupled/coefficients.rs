@@ -261,7 +261,7 @@ impl CoupledModalSystem {
         let radiation = refreshed_radiation.as_ref().or(self.radiation.as_ref());
         let operator = preparation::prepare(&self.models, &self.columns, &connections,
             self.mode_count(), self.dt, self.preparation(), &self.relaxation_branches,
-            radiation, self.config, self.upper_row_losses, gate)?;
+            radiation, self.config, self.sums_by_rows, gate)?;
         // A changed stiffness can also change a different constant-loss port's
         // projected damping column. Admit ALL actual new reactions.
         for (index, law) in connections.iter().enumerate() {

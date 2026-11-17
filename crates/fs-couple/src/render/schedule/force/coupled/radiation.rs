@@ -110,7 +110,7 @@ impl CoupledModalSystem {
         }
         let operator = preparation::prepare(&self.models, &self.columns, &self.connections,
             self.mode_count(), self.dt, self.preparation(), &self.relaxation_branches,
-            Some(&binding), self.config, self.upper_row_losses, gate)?;
+            Some(&binding), self.config, self.sums_by_rows, gate)?;
         poll(Some(gate))?;
         self.radiation_state = vec![0.0; 2*model.poles.len()];
         self.candidate_radiation_state = self.radiation_state.clone();

@@ -7,11 +7,11 @@ use fs_couple::modal_acoustic_time::{
 };
 use fs_couple::render::plate::impact::radiation::{Model, Pole};
 use fs_couple::render::schedule::force::coupled::{
-    CoupledModalSystem, ModalColumnConnection, ModalCouplingConfig, ModalCouplingError,
-    PreparedModalBudget, coefficients::ConnectionCoefficients,
+    ConstantLossConnection, CoupledModalSystem, ModalColumnConnection, ModalCouplingConfig,
+    ModalCouplingError, PreparedModalBudget, coefficients::ConnectionCoefficients,
 };
 use fs_exec::CancelGate;
-use fs_math::c64::C64;
+use fs_math::{c64::C64, det};
 use fs_phs::RelaxationBranch;
 use fs_ports::PortedModule;
 
@@ -453,16 +453,17 @@ fn coefficient_work_frequency_reaction_and_cancellation_refusals_are_atomic() {
     }
 }
 
-// The two orders of the loss sweep on one prepared network, through a changed law that prepares a new operator.
-// The states and the stored energy never read a loss, so both systems hold the same bits at every sample.
+// The two orders of the loss sweep and of the operator's storage on one prepared network, through a changed law
+// that prepares a new operator. The states and the stored energy never read a loss, and the operator's storage is
+// only held against a tolerance and a limit, so both systems hold the same bits at every sample.
 #[test]
 fn losses_by_upper_rows_move_no_state_keep_their_order_and_agree_with_the_chain() {
     let gate = CancelGate::new_clock_free();
     let mut chain = fixture(true, config(10.0, 100.0));
     let mut rows = fixture(true, config(10.0, 100.0))
-        .with_upper_row_losses()
+        .with_sums_by_rows()
         .unwrap();
-    assert!(rows.sums_losses_by_upper_rows() && !chain.sums_losses_by_upper_rows());
+    assert!(rows.sums_by_rows() && !chain.sums_by_rows());
     // Samples whose connection loss has other bits in the two orders, before and after the changed law.
     let mut other_bits = [0_usize; 2];
     for sample in 0..400 {
@@ -470,7 +471,7 @@ fn losses_by_upper_rows_move_no_state_keep_their_order_and_agree_with_the_chain(
             let next = laws([350.0, 90.0, 80.0], [0.004, 0.003, -0.002]);
             chain.set_connection_coefficients(&next, &gate).unwrap();
             rows.set_connection_coefficients(&next, &gate).unwrap();
-            assert!(rows.sums_losses_by_upper_rows() && !chain.sums_losses_by_upper_rows());
+            assert!(rows.sums_by_rows() && !chain.sums_by_rows());
         }
         let a = chain.step(&FORCE).unwrap().clone();
         let b = rows.step(&FORCE).unwrap().clone();
@@ -499,10 +500,58 @@ fn losses_by_upper_rows_move_no_state_keep_their_order_and_agree_with_the_chain(
 fn losses_by_upper_rows_are_refused_without_the_prepared_operator_and_after_the_first_sample() {
     assert!(
         fixture(false, config(10.0, 100.0))
-            .with_upper_row_losses()
+            .with_sums_by_rows()
             .is_err()
     );
     let mut started = fixture(true, config(10.0, 100.0));
     started.step(&FORCE).unwrap();
-    assert!(started.with_upper_row_losses().is_err());
+    assert!(started.with_sums_by_rows().is_err());
+}
+
+// The norm of the column each link's dashpot acts along, as the prepared operator holds it for the bound on the
+// link's force, against the expression a step evaluated before: bit for bit, on every link, before and after a
+// changed law prepares a new operator. Link 2 is bound at a constant loss factor, so its dashpot acts along a
+// damping column that every link's stiffness shapes.
+#[test]
+fn an_operator_holds_the_dashpot_norm_a_step_computed_before_and_after_a_changed_law() {
+    let gate = CancelGate::new_clock_free();
+    let anchor = ConstantLossConnection {
+        connection: 2,
+        reference_omega_rad_s: 40.0,
+    };
+    let mut system = fixture(true, config(10.0, 100.0))
+        .with_constant_loss_connections(&[anchor], &gate)
+        .unwrap();
+    let norms = |system: &CoupledModalSystem| -> [u64; 3] {
+        std::array::from_fn(|link| {
+            let dashpot = system.connection_dashpot_column(link).unwrap();
+            let held = system.connection_dashpot_norm(link).unwrap().to_bits();
+            let computed = det::sqrt(dashpot.iter().map(|b| b * b).sum());
+            assert_eq!(held, computed.to_bits(), "link {link}");
+            held
+        })
+    };
+    assert_ne!(
+        system.connection_dashpot_column(2),
+        system.connection_column(2)
+    );
+    assert_eq!(
+        system.connection_dashpot_column(0),
+        system.connection_column(0)
+    );
+    let before = norms(&system);
+    system.step(&FORCE).unwrap();
+    let next = laws([350.0, 90.0, 80.0], [0.004, 0.003, -0.002]);
+    system.set_connection_coefficients(&next, &gate).unwrap();
+    let after = norms(&system);
+    assert_ne!(after[2], before[2], "the damping column kept its norm");
+    assert_eq!(after[..2], before[..2]);
+    system.step(&FORCE).unwrap();
+    // Without the prepared operator nothing is held, and a step computes the norm.
+    let ordinary = fixture(false, config(10.0, 100.0));
+    assert!(ordinary.connection_dashpot_norm(0).is_none());
+    assert_eq!(
+        ordinary.connection_dashpot_column(2),
+        ordinary.connection_column(2)
+    );
 }

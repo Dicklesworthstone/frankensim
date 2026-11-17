@@ -138,9 +138,13 @@ pub(super) struct PreparedNetwork {
     ledger: Arc<LedgerData>,
     sweep: Mutex<Option<LossSweep>>,
     sweeps: AtomicU64,
-    /// Whether the sweep sums each Gramian by rows over its upper triangle (`upper_rows`) and not in one chain over the
-    /// square. Set by `sum_losses_by_upper_rows`, which first holds every Gramian of the sweep to its transpose.
-    upper_row_losses: bool,
+    /// Whether the sweep sums each Gramian by rows over its upper triangle and the storage sums the stiffness by rows
+    /// (`upper_rows`), each in place of one chain over the square. Set by `sum_by_rows`, which first holds every
+    /// Gramian of the sweep to its transpose.
+    sums_by_rows: bool,
+    /// For every link, the norm of the column its dashpot acts along ([`column_norm`]): the damping column of a
+    /// constant-loss link, the link's own column otherwise. The bound on a link's force reads it at every step.
+    dashpot_norms: Vec<f64>,
     /// The last states whose storage `hamiltonian` evaluated and their values (see [`EnergyMemo`]).
     energies: Mutex<EnergyMemo>,
     energy_evaluations: AtomicU64,
@@ -448,8 +452,8 @@ impl PreparedNetwork {
             integral, gramians: OnceLock::new(), evaluations: AtomicU64::new(0),
         });
         let result = Self { count, dt, weights, stiffness, rest_force, transition, component_loss, connection_total,
-            material_couplings, material_loss, ledger,
-            sweep: Mutex::new(None), sweeps: AtomicU64::new(0), upper_row_losses: false,
+            material_couplings, material_loss, dashpot_norms: ledger.dashpot_norms(), ledger,
+            sweep: Mutex::new(None), sweeps: AtomicU64::new(0), sums_by_rows: false,
             energies: Mutex::new(EnergyMemo::default()), energy_evaluations: AtomicU64::new(0), air };
         result.validate_energy_identity(gate)?;
         poll(Some(gate))?;
@@ -479,14 +483,21 @@ impl PreparedNetwork {
         energy
     }
 
-    /// The storage of one state, evaluated from its entries.
+    /// The storage of one state, evaluated from its entries: the mechanics in one chain over the square of the
+    /// stiffness, or by rows for an operator that sums by rows (`upper_rows::row_storage`), then every arm in order.
+    /// The two orders differ in their last bits. The storage is only compared: by `advance`'s residual, which refuses,
+    /// and by the stage's bound on each link's force, which refuses.
     fn hamiltonian_direct(&self, x: &[f64]) -> f64 {
         let n = self.count;
         let mut energy = 0.0;
-        for i in 0..n {
-            energy += 0.5 * x[2 * i + 1].powi(2);
-            for j in 0..n {
-                energy += 0.5 * x[2 * i] * self.stiffness[i * n + j] * x[2 * j];
+        if self.sums_by_rows {
+            energy = upper_rows::row_storage(&self.stiffness, &x[..2 * n]);
+        } else {
+            for i in 0..n {
+                energy += 0.5 * x[2 * i + 1].powi(2);
+                for j in 0..n {
+                    energy += 0.5 * x[2 * i] * self.stiffness[i * n + j] * x[2 * j];
+                }
             }
         }
         for (arm, row) in self.material_couplings.iter().enumerate() {
@@ -641,7 +652,7 @@ impl PreparedNetwork {
     /// each link's own form is evaluated only when its ledger is requested.
     fn compute_sweep(&self, z: &[f64]) -> Result<LossSweep, ModalCouplingError> {
         self.sweeps.fetch_add(1, Ordering::Relaxed);
-        if self.upper_row_losses {
+        if self.sums_by_rows {
             return self.upper_row_sweep(z);
         }
         let threads = step_threads(fs_la::eigen_complex::declared_workers(), z.len());
@@ -668,8 +679,10 @@ impl PreparedNetwork {
     /// From now on the sweep sums each loss Gramian by rows over its upper triangle: half the terms of the square, in an
     /// order that is a function of the side alone. That order never reads the lower triangle, so the request is refused
     /// unless every Gramian of the sweep equals its transpose bit for bit, as `gramian` leaves it. The values differ
-    /// from the chain's in their last bits. The per-link ledger and the air's forms keep their chain.
-    pub(super) fn sum_losses_by_upper_rows(&mut self) -> Result<(), ModalCouplingError> {
+    /// from the chain's in their last bits. The per-link ledger and the air's forms keep their chain. The storage
+    /// (`hamiltonian`) sums the stiffness by rows from now on as well: over the whole square, since
+    /// `mechanical_stiffness` does not leave it equal to its transpose bit for bit.
+    pub(super) fn sum_by_rows(&mut self) -> Result<(), ModalCouplingError> {
         let side = 3 * self.count + self.material_couplings.len();
         let symmetric = |gramian: &Option<Vec<f64>>| {
             gramian
@@ -684,7 +697,9 @@ impl PreparedNetwork {
                 "a prepared loss Gramian differs from its transpose",
             ));
         }
-        self.upper_row_losses = true;
+        self.sums_by_rows = true;
+        // A storage kept from before this request is the chain's: the next request for that state evaluates it by rows.
+        self.energies = Mutex::new(EnergyMemo::default());
         Ok(())
     }
 
@@ -709,6 +724,11 @@ impl PreparedNetwork {
     /// The damping column of a constant-loss link (`g(K) b`), or None where the link's dashpot acts along its own column.
     pub(super) fn damping_column(&self, link: usize) -> Option<&[f64]> {
         self.ledger.damping_columns.get(link).and_then(Option::as_deref)
+    }
+
+    /// The norm of the column a link's dashpot acts along, computed when this operator was prepared.
+    pub(super) fn dashpot_norm(&self, link: usize) -> Option<f64> {
+        self.dashpot_norms.get(link).copied()
     }
 
     #[cfg(test)]
@@ -829,6 +849,13 @@ impl PreparedNetwork {
 }
 
 impl LedgerData {
+    /// [`column_norm`] of the column each link's dashpot acts along, in link order.
+    fn dashpot_norms(&self) -> Vec<f64> {
+        let dashpots = self.columns.iter().zip(&self.damping_columns);
+        let columns = dashpots.map(|(own, damping)| damping.as_ref().unwrap_or(own));
+        columns.map(|column| column_norm(column)).collect()
+    }
+
     /// Each link's own loss Gramian (None without damping), computed by the first caller and shared after: one Van Loan
     /// integral per dissipative link, the cost the construction no longer pays. A deferred observation has no gate of its
     /// own and runs the admitted work to completion.
@@ -990,6 +1017,11 @@ pub(super) fn constant_loss_columns(
         result.push(Some(damping_column));
     }
     Ok(result)
+}
+
+/// The Euclidean norm of a link's column, as the bound on the link's force takes it: the squares summed in mode order.
+pub(super) fn column_norm(column: &[f64]) -> f64 {
+    det::sqrt(column.iter().map(|b| b * b).sum())
 }
 
 /// One link's own resistance: its dashpot c b b^T in the velocity block.

@@ -17,10 +17,38 @@
 
 ## New sections (newest first)
 
-### The prepared operator's loss sweep by rows over the upper triangle (`CoupledModalSystem::with_upper_row_losses`)
+### The prepared operator's storage by rows, and the dashpot norms it holds (`CoupledModalSystem::with_sums_by_rows`)
+
+`with_upper_row_losses` and `sums_losses_by_upper_rows` are now `with_sums_by_rows` and `sums_by_rows`: one opt-in sets two orders. The first is the loss sweep's, described
+in the section below. The second is the order of the operator's storage (`PreparedNetwork::hamiltonian`). By default that is one chain over each mode's kinetic term and
+its `n` terms `0.5 q_i K_ij q_j`. By rows, `s_i` is the sum of `K_ij q_j` over every column in column order, eight rows advance together, and the rows are added in row
+order as `0.5 v_i v_i + 0.5 q_i s_i` (`upper_rows::row_storage`); the material arms follow as before. The whole square is read. `mechanical_stiffness` adds a link as
+`k * c_i * c_j`, which is `(k c_i) c_j` at (i, j) and `(k c_j) c_i` at (j, i), so the stiffness need not equal its transpose bit for bit and no half of it is relied on.
+
+The storage differs from the chain's in its last bits. It is only compared, in two places that refuse. `advance` holds `(after - before) + dissipated - supplied` to 1e-11
+of the largest of its terms. `exact::stage` hands the start state's storage to the bound on each link's force, which is held to `maximum_abs_connection_force_n`. No state,
+path, sub-step count or scale reads it. `material_strings` prints `energy_order=rows` after `loss_order=upper-rows`.
+
+The dashpot norm is not an opt-in and changes no bit. That bound takes the norm of the column a link's dashpot acts along: the damping column of a constant-loss link, the
+link's own column otherwise. A step computed it for every link at every sample. The prepared operator computes it once for every link when it is prepared
+(`prepared::column_norm`, the step's expression) and the bound reads it there; an owner without the prepared operator computes it in the step as before.
+`connection_dashpot_column` and `connection_dashpot_norm` return the column and the held norm (`None` without the prepared operator). Only the test calls them.
+
+Evidence. `tests/upper_row_forms.rs` holds `row_storage` to a plain loop of its order bit for bit and to the chain within 1e-13, at sides 1, 7, 8, 9, 16, 17 and 100, on
+stiffnesses built as `mechanical_stiffness` builds them; from side 7 each differs from its transpose. `tests/coupled_coefficient_update.rs`: the two-orders test of the
+section below runs both orders; on a fixture with one constant-loss link the held norm of every link has the bits of `det::sqrt` of its column's squares before and after
+a changed law, and the constant-loss link's norm moves with the law. The viola Db4 and viola E3 control cards render the same wav, and the same log lines but for the added
+`energy_order=rows`. A scratch build that ran both orders on those renders found the largest residual at 0.35 % and 0.37 % of its tolerance by rows (1.4 % with the chain's
+storage) and the largest force bound at 0.90 % and 1.40 % of its limit in either order.
+
+Not tested: which order the storage ran in through a system. No public value reads the storage; the oracle holds the kernel, and the opt-in is the flag whose loss half
+the two-orders test observes. In the scratch build 437,162 of viola Db4's 438,751 evaluations of the storage, and 437,087 of viola E3's 438,751, had other bits in the two
+orders. Not covered: the two transition products of a step.
+
+### The prepared operator's loss sweep by rows over the upper triangle (`CoupledModalSystem::with_sums_by_rows`)
 
 A step of a prepared operator evaluates three loss quadratics `z^T W z`: component, summed connection and material. By default each is one chain of additions over the whole
-square in row-major order. `CoupledModalSystem::with_upper_row_losses` changes the order for that system. Every loss Gramian is exactly symmetric, so row `i` contributes
+square in row-major order. `CoupledModalSystem::with_sums_by_rows` changes the order for that system. Every loss Gramian is exactly symmetric, so row `i` contributes
 `z_i (W_ii z_i + 2 s_i)`, where `s_i` is the sum of `W_ij z_j` over the columns `j > i` in column order; eight rows advance together and the rows are added in row order
 (`exact/prepared/upper_rows.rs`). That is half the terms and no single chain. The order is a function of the side alone, takes no thread count and runs on one thread. The
 three losses differ from the chain's in their last bits. A step's states, its observer pressure and its stored energies do not read them and keep their bits. The per-link
@@ -28,7 +56,7 @@ port ledger and the air poles' forms keep the chain.
 
 The opt-in is refused after the first sample, without the prepared operator, and when a loss Gramian differs from its transpose in any bit: the order never reads the lower
 triangle. The system holds the order. `preparation::prepare` applies it to every operator prepared for the system afterwards (a changed link law, changed relaxation times, a
-radiation load, more material arms) and holds each new operator's Gramians to their transposes again. `sums_losses_by_upper_rows()` reports it.
+radiation load, more material arms) and holds each new operator's Gramians to their transposes again. `sums_by_rows()` reports it.
 
 The bowed-string bank opts in whenever its operator is prepared: in `assemble_sources`, where every bank constructor and rebuild builds its network, and in
 `ReciprocalStringBank::with_prepared_linear_propagation`. `material_strings` prints `loss_order=upper-rows` for such a bank. No other owner opts in, and their losses keep
@@ -42,8 +70,8 @@ after the change; the refusals. `tests/measured_string_bank.rs` and `tests/mater
 and on one constructed prepared. The viola Db4 and viola E3 control cards render the same wav as before, and the same log lines but for the added `loss_order=upper-rows`.
 
 Not tested: the refusal of an asymmetric Gramian through a system (no public call builds one); the component and material channels of a system (the fixture has neither
-loss); sides from 1024, where the default order may run each Gramian on its own thread. Not covered: the two transition products of a step and the prepared Hamiltonian,
-which are most of what is left of a string render's step.
+loss); sides from 1024, where the default order may run each Gramian on its own thread. Not covered: the two transition products of a step, which are most of what is
+left of a string render's step. The prepared Hamiltonian is the section above.
 
 ### One evaluation of a coupled network's total energy for each accepted state (`CoupledModalSystem::total_energy_j`)
 

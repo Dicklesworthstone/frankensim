@@ -218,7 +218,7 @@ impl CoupledModalSystem {
         all_memory.extend(memory);
         let operator = preparation::prepare(&self.models, &self.columns, &self.connections,
             self.mode_count(), self.dt, self.preparation(), &all_branches,
-            self.radiation.as_ref(), self.config, self.upper_row_losses, gate)?;
+            self.radiation.as_ref(), self.config, self.sums_by_rows, gate)?;
         poll(Some(gate))?;
         self.exact = operator.exact;
         self.pressure = operator.pressure;

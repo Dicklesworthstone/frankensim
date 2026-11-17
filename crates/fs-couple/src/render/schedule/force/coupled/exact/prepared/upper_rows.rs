@@ -9,8 +9,11 @@
 //! The lower triangle is never read, so the form is `z^T W z` only for a `W` that equals its transpose:
 //! [`bitwise_symmetric`] is the check a caller makes once before it relies on this order.
 //!
-//! This file names nothing of its crate. `tests/upper_row_forms.rs` compiles it a second time and holds it to a plain
-//! loop of the same order, bit for bit.
+//! [`row_storage`] is the other sum this module orders by rows: the storage of unit-mass oscillators under a stiffness
+//! that need not equal its transpose, so it reads the whole square.
+//!
+//! This file names nothing of its crate. `tests/upper_row_forms.rs` compiles it a second time and holds each sum to a
+//! plain loop of the same order, bit for bit.
 
 /// Rows that advance together.
 const BLOCK: usize = 8;
@@ -62,4 +65,35 @@ pub(super) fn upper_row_form(matrix: &[f64], z: &[f64]) -> (f64, f64) {
         first = last;
     }
     (sum, magnitude)
+}
+
+/// The storage `sum_i (v_i^2 + q_i s_i) / 2` of the state `modes = [q_0, v_0, q_1, v_1, ..]` under the row-major
+/// `stiffness`, where `s_i` is the sum of `K_ij q_j` over every column in column order. Eight consecutive rows advance
+/// together, each with its own sum, and the rows left after the last whole block run one at a time. The rows are then
+/// added in row order, each as `0.5 v_i v_i + 0.5 q_i s_i`. Every entry of the square is read once.
+pub(super) fn row_storage(stiffness: &[f64], modes: &[f64]) -> f64 {
+    let positions: Vec<f64> = modes.iter().step_by(2).copied().collect();
+    let side = positions.len().max(1);
+    let mut sums = Vec::with_capacity(positions.len());
+    let mut blocks = stiffness.chunks_exact(BLOCK * side);
+    for block in blocks.by_ref() {
+        let rows: [&[f64]; BLOCK] = core::array::from_fn(|k| &block[k * side..(k + 1) * side]);
+        let mut partial = [0.0_f64; BLOCK];
+        for (j, right) in positions.iter().enumerate() {
+            for (sum, row) in partial.iter_mut().zip(&rows) {
+                *sum += row[j] * right;
+            }
+        }
+        sums.extend(partial);
+    }
+    for row in blocks.remainder().chunks_exact(side) {
+        let terms = row.iter().zip(&positions);
+        sums.push(terms.fold(0.0, |sum, (value, right)| sum + value * right));
+    }
+    let velocities = modes.iter().skip(1).step_by(2);
+    let mut energy = 0.0;
+    for ((position, sum), velocity) in positions.iter().zip(&sums).zip(velocities) {
+        energy += 0.5 * velocity * velocity + 0.5 * position * sum;
+    }
+    energy
 }

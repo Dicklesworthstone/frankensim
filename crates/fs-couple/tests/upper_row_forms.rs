@@ -1,4 +1,5 @@
-//! The prepared operator's loss order by rows over the upper triangle, held to a plain loop of the same order.
+//! The prepared operator's two orders by rows (the loss forms over the upper triangle, the storage over the whole
+//! square), each held to a plain loop of the same order.
 //!
 //! fs-couple's lib test crate does not build under the memory guard, so this target compiles the kernel's own
 //! source file a second time. That file names nothing of its crate.
@@ -6,7 +7,7 @@
 #[path = "../src/render/schedule/force/coupled/exact/prepared/upper_rows.rs"]
 mod upper_rows;
 
-use upper_rows::{bitwise_symmetric, upper_row_form};
+use upper_rows::{bitwise_symmetric, row_storage, upper_row_form};
 
 /// Sides around the blocks of eight rows, and one near a hundred.
 const SIDES: [usize; 7] = [1, 7, 8, 9, 16, 17, 100];
@@ -122,4 +123,73 @@ fn a_matrix_is_symmetric_only_if_every_pair_has_the_same_bits() {
     }
     // Zero and its negative are two bit patterns.
     assert!(!bitwise_symmetric(&[1.0, 0.0, -0.0, 1.0], 2));
+}
+
+/// A stiffness as `mechanical_stiffness` leaves it: a positive diagonal, then three links added entry by entry as
+/// `k * c[i] * c[j]`. That product is `(k c_i) c_j` at (i, j) and `(k c_j) c_i` at (j, i).
+fn stiffness(side: usize, seed: u64) -> Vec<f64> {
+    let mut k = vec![0.0; side * side];
+    for (i, d) in mixed(side, seed).iter().enumerate() {
+        k[i * side + i] = 2.0 + d;
+    }
+    for (link, column) in mixed(3 * side, seed + 300).chunks_exact(side).enumerate() {
+        for i in 0..side {
+            for j in 0..side {
+                k[i * side + j] += (0.3 + link as f64) * column[i] * column[j];
+            }
+        }
+    }
+    k
+}
+
+/// The same order as the kernel's, one row at a time: row i sums every column from left to right, and the rows are
+/// added in row order.
+fn plain_storage(k: &[f64], modes: &[f64]) -> f64 {
+    let side = modes.len() / 2;
+    let mut energy = 0.0;
+    for i in 0..side {
+        let mut sum = 0.0;
+        for j in 0..side {
+            sum += k[i * side + j] * modes[2 * j];
+        }
+        energy += 0.5 * modes[2 * i + 1] * modes[2 * i + 1] + 0.5 * modes[2 * i] * sum;
+    }
+    energy
+}
+
+/// Today's order: each mode's kinetic term and then its row of the square, in one chain.
+fn chain_storage(k: &[f64], modes: &[f64]) -> f64 {
+    let side = modes.len() / 2;
+    let mut energy = 0.0;
+    for i in 0..side {
+        energy += 0.5 * modes[2 * i + 1].powi(2);
+        for j in 0..side {
+            energy += 0.5 * modes[2 * i] * k[i * side + j] * modes[2 * j];
+        }
+    }
+    energy
+}
+
+#[test]
+fn the_row_storage_has_the_bits_of_a_plain_loop_of_its_order_and_agrees_with_the_chain() {
+    for (seed, side) in (1..).zip(SIDES) {
+        let (k, modes) = (stiffness(side, seed), mixed(2 * side, seed + 200));
+        // The kernel reads the whole square, so it is held on a square that differs from its transpose.
+        assert!(
+            !bitwise_symmetric(&k, side) || side == 1,
+            "side {side}: the stiffness equals its transpose"
+        );
+        let rows = row_storage(&k, &modes);
+        assert_eq!(
+            rows.to_bits(),
+            plain_storage(&k, &modes).to_bits(),
+            "side {side}"
+        );
+        let chain = chain_storage(&k, &modes);
+        assert!(
+            chain > 0.0 && (rows - chain).abs() <= 1e-13 * chain,
+            "side {side}: {rows:e} vs {chain:e}"
+        );
+    }
+    assert_eq!(row_storage(&[], &[]).to_bits(), 0.0_f64.to_bits());
 }
