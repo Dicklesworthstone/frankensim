@@ -1356,7 +1356,12 @@ original arithmetic, and uncoupled observations use the existing equilibrium-awa
 modal owner. Unobserved stiffness islands are excluded from the static solve;
 their free motion and applied forces remain part of the physical propagation.
 A required elastic/free island with unresolved static support refuses observation
-preparation through the existing support-rank admission.
+preparation through the existing support-rank admission. Two residual checks of
+that preparation scale a sum by the magnitudes of its terms, not by the sum: the
+free-coordinate force balance after the Schur completion, and each spring's force
+in the adjoint check. A free coordinate whose springs carry no static load has a
+force that cancels to roundoff, and a scale taken from that force alone gave the
+ratio 1 at any accuracy (bead frankensim-08rzj).
 
 The pressure map is installed with the original prepared operator and rebuilt
 with coefficient, material and radiation changes. A refused replacement preserves
@@ -1370,7 +1375,9 @@ does not establish broadband radiation accuracy.
 The `pressure_observation` module in `tests/modal_coupling.rs` contains independent
 two-mode analytic amplitude, static-silence, signed load/release, parameter-update,
 pressure-limit, mechanical-invariance and free-island regressions for ordinary
-and prepared propagation.
+and prepared propagation. The commit that added them did not run them; the
+free-island test refused at preparation from its first compiling commit
+(9ea0abd368) until the two scales above.
 
 ## Incident sound drives original material shells in relaxing gas
 

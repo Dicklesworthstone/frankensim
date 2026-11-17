@@ -162,24 +162,24 @@ impl FreeResponse {
     pub(super) fn check_and_insert(&self, external: &[f64], solution: &[f64], free_q: &[f64],
         q: &mut [f64], tolerance: f64, roundoff: Option<&[f64]>, gate: &CancelGate) -> Result<(), ModalCouplingError>
     {
+        // The completed connection RHS r0 + C_f^T q_f can round to zero
+        // although both terms are nonzero: a supported free coordinate whose
+        // springs carry no static load, or rest-length equilibration along a
+        // declared gauge. Preserve that reconstruction scale instead of
+        // normalizing the resulting force roundoff by itself. A = I + C_e^T
+        // D_e C_e has ||A^-1||_2 <= 1; sqrt(links)*max(column term sums)
+        // bounds its propagated Euclidean magnitude without a second inverse
+        // solve.
         let mut size = solution.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
-        if !self.nullspace.is_empty() {
-            // Rest-length equilibration may cancel the whole connection RHS:
-            // r0 + C_f^T q_f is rounded zero although both terms are nonzero.
-            // Preserve that reconstruction scale instead of normalizing the
-            // resulting force roundoff by itself. A = I + C_e^T D_e C_e has
-            // ||A^-1||_2 <= 1; sqrt(links)*max(column term sums) bounds its
-            // propagated Euclidean magnitude without a second inverse solve.
-            let mut terms = vec![0.0; solution.len()];
-            for (row, &value) in self.rows.iter().zip(free_q) {
-                poll(Some(gate))?;
-                for (sum, &entry) in terms.iter_mut().zip(row) {
-                    *sum = finite(*sum + finite(entry*value)?.abs())?;
-                }
+        let mut terms = vec![0.0; solution.len()];
+        for (row, &value) in self.rows.iter().zip(free_q) {
+            poll(Some(gate))?;
+            for (sum, &entry) in terms.iter_mut().zip(row) {
+                *sum = finite(*sum + finite(entry*value)?.abs())?;
             }
-            let maximum = terms.iter().copied().fold(0.0_f64, f64::max);
-            size = finite(size + finite(maximum*(solution.len() as f64).sqrt())?)?;
         }
+        let maximum = terms.iter().copied().fold(0.0_f64, f64::max);
+        size = finite(size + finite(maximum*(solution.len() as f64).sqrt())?)?;
         for (i, &index) in self.indices.iter().enumerate() {
             poll(Some(gate))?;
             let applied = dot(&self.rows[i], solution)?;

@@ -361,15 +361,23 @@ fn check_adjoint(
     }
     for (column, law) in system.columns.iter().zip(system.connections) {
         poll(Some(gate))?;
+        // A spring between coordinates that move together carries a strain
+        // that cancels to the row's own rounding, so its force is scaled by
+        // the terms that cancel, never by itself: on a free coordinate it is
+        // the only term, and the ratio would be 1 whatever the row's accuracy.
         let mut strain = Dd::ZERO;
+        let mut strain_scale = 0.0_f64;
         for (&z, &b) in row.iter().zip(column) {
             strain = strain + Dd::from_f64(z) * Dd::from_f64(b);
+            strain_scale = finite(strain_scale + finite(z * b)?.abs())?;
         }
         let force = strain * Dd::from_f64(law.stiffness_n_m);
+        let force_scale = finite(strain_scale * law.stiffness_n_m)?;
         for (i, &b) in column.iter().enumerate() {
             let value = force * Dd::from_f64(b);
+            finite_dd(value)?;
             applied[i] = applied[i] + value;
-            scales[i] = finite(scales[i] + finite_dd(value)?.abs())?;
+            scales[i] = finite(scales[i] + finite(force_scale * b.abs())?)?;
         }
     }
     let mut relative = 0.0_f64;
