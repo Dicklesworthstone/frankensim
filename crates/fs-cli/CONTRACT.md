@@ -1030,8 +1030,16 @@ stood behind the sentence.) An element whose owner has no codec is still
 refused by its name, with exit 4 and no file. No example has one now, so no
 test here shows it: the kernel's refusal by a node's name is tested in
 fs-system (a thermal timeline and a port-Hamiltonian owner with no codec).
-Not shown by any test here: the four kinds of the 47 that no example uses,
-`accumulator`, `capacitor`, `flow_source` and `torsion_spring`.
+Each of the 47 kind names is the kind of an element of some example:
+`hydraulic_accumulator.json`, `rlc_loop.json` and `torsion_pendulum.json` use
+the four that had none (`accumulator` and `flow_source`, `capacitor`,
+`torsion_spring`). A unit test of `src/system_command.rs`,
+`every_kind_is_the_kind_of_an_element_of_some_example_scene`, reads the
+directory and fails, naming the kinds, when a name of the table is the kind
+of no element. So each kind is saved and resumed by a test here, in the form
+its example gives it. Not shown: a form no example uses, and the two modes
+this command does not lower, a streaming gas cavity and an implicit thermal
+timeline, which have no codec.
 
 Tests in `tests/system_command.rs`:
 - A 2 kg puck on a 1 cm patch under 10 N, sliding from 1 m/s without
@@ -1665,7 +1673,8 @@ capacitance_m3_pa`), `hydraulic_resistor` (`resistance_pa_s_m3`; reports
 `flow_m3_s` and `heat_w`), `flow_source` (`flow_m3_s`, positive into the
 source) and `pressure` (`pressure_pa`). They lower to the same kernel elements
 as the electrical forms; an electrical and a hydraulic scene of the same
-numbers report the same values bit for bit. `prescribe` takes `pressure_pa` on
+numbers report the same values bit for bit (the test's hydraulic scene is
+`examples/system/hydraulic_accumulator.json`). `prescribe` takes `pressure_pa` on
 a hydraulic effort input and `flow_m3_s` on a hydraulic flow input. Gyrators,
 modulated transformers and resistance matrices do not take the hydraulic
 domain.
@@ -2445,7 +2454,8 @@ temperatures. Examples and their checks: `examples/system/README.md`; tests:
 `tests/system_command.rs` (the DC motor scene, electrical, rotational and
 thermal, against the monolithic midpoint rule for its two coupled equations,
 with a cross-domain join refused by name; an RLC loop ringing down and a
-torsion pendulum under a constant torque against the same midpoint reference
+torsion pendulum under a constant torque (the examples `rlc_loop.json` and
+`torsion_pendulum.json`) against the same midpoint reference
 in their own units; a spring end pulled at +1 m/s moving its mass the way it
 is written; the driven oscillator against the
 monolithic midpoint rule through the binary, the heated body against its discrete

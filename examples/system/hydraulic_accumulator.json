@@ -1,0 +1,14 @@
+{
+  "schema": "frankensim.system.v0", "duration_s": 2.0, "step_s": 0.001,
+  "elements": {
+    "store": {"kind": "accumulator", "capacitance_m3_pa": 1e-9, "volume_m3": 2e-4},
+    "drain": {"kind": "hydraulic_resistor", "resistance_pa_s_m3": 1e9},
+    "supply": {"kind": "flow_source", "flow_m3_s": -1e-4},
+    "oil": {"kind": "heat_capacity", "capacity_j_k": 50.0, "temperature_k": 300.0}
+  },
+  "connections": [
+    {"common_effort": ["store.p", "drain.a", "supply.p"]},
+    {"prescribe": "drain.b", "pressure_pa": 0},
+    {"route": "drain.heat", "to": [["oil.heat", 1.0]]}
+  ]
+}

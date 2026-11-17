@@ -1,0 +1,12 @@
+{
+  "schema": "frankensim.system.v0", "duration_s": 0.5, "step_s": 1.0e-4,
+  "elements": {
+    "wheel": {"kind": "inertia", "inertia_kg_m2": 0.002},
+    "wire": {"kind": "torsion_spring", "stiffness_n_m_rad": 5},
+    "motor": {"kind": "torque", "torque_n_m": 0.4}
+  },
+  "connections": [
+    {"join": ["wheel.p", "wire.a", "motor.p"]},
+    {"prescribe": "wire.b", "angular_velocity_rad_s": 0}
+  ]
+}

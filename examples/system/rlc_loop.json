@@ -1,0 +1,15 @@
+{
+  "schema": "frankensim.system.v0", "duration_s": 0.02, "step_s": 1.0e-5,
+  "elements": {
+    "coil": {"kind": "inductor", "inductance_h": 0.01},
+    "cap": {"kind": "capacitor", "capacitance_f": 0.0001, "charge_c": 0.001},
+    "load": {"kind": "resistor", "resistance_ohm": 2},
+    "air": {"kind": "heat_capacity", "capacity_j_k": 1.0, "temperature_k": 300.0}
+  },
+  "connections": [
+    {"join": ["coil.p", "cap.a", "load.a"]},
+    {"prescribe": "cap.b", "current_a": 0},
+    {"prescribe": "load.b", "current_a": 0},
+    {"route": "load.heat", "to": [["air.heat", 1.0]]}
+  ]
+}

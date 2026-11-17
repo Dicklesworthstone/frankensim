@@ -5495,3 +5495,42 @@ fn refusal(exit_code: u8, code: &str, message: &str, json: bool) -> CommandOutpu
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{J, Kind};
+
+    /// Claims, declared before the first run: every kind name this command
+    /// lowers is the `kind` of an element of some scene in `examples/system`.
+    /// The checkpoint tests save and resume every scene there, so a kind
+    /// with an example is a kind whose save and resume a test shows. A kind
+    /// added to the table fails here, by name, until a scene uses it.
+    #[test]
+    fn every_kind_is_the_kind_of_an_element_of_some_example_scene() {
+        let directory = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/system");
+        let mut used = std::collections::BTreeSet::new();
+        let mut scenes = 0;
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|kind| kind != "json") {
+                continue;
+            }
+            let root = J::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let elements = root.get("elements").and_then(J::as_object);
+            for (_, definition) in elements.expect("a scene's elements") {
+                used.insert(definition.str_field("kind").unwrap().to_owned());
+            }
+            scenes += 1;
+        }
+        let unused: Vec<&str> = Kind::TABLE
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|name| !used.contains(*name))
+            .collect();
+        assert!(
+            unused.is_empty(),
+            "no element of the {scenes} scenes in examples/system has kind {unused:?}: \
+             add a scene that uses each, so that a test saves and resumes it"
+        );
+    }
+}

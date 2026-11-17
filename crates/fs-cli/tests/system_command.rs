@@ -1132,9 +1132,12 @@ fn parallel_rc(hydraulic: bool) -> String {
 
 #[test]
 fn an_accumulator_drains_through_a_hydraulic_resistor_as_the_electrical_node_does() {
-    let hydraulic = scratch("hydraulic_rc.json", &parallel_rc(true));
+    // The hydraulic scene is the example, run where it lies.
+    let hydraulic = example("hydraulic_accumulator.json");
+    let committed = std::fs::read_to_string(&hydraulic).unwrap();
+    assert_eq!(committed.trim_end(), parallel_rc(true));
     let electrical = scratch("electrical_rc.json", &parallel_rc(false));
-    let (code, json, stderr) = run_binary(&["--json", "system", hydraulic.to_str().unwrap()]);
+    let (code, json, stderr) = run_binary(&["--json", "system", &hydraulic]);
     assert_eq!(code, 0, "{stderr}");
     let (code, twin, stderr) = run_binary(&["--json", "system", electrical.to_str().unwrap()]);
     assert_eq!(code, 0, "{stderr}");
@@ -2569,27 +2572,10 @@ fn loop_reference(
 
 #[test]
 fn an_rlc_loop_and_a_driven_torsion_pendulum_follow_the_same_law_in_their_own_units() {
-    // A charged capacitor rings down through an inductor and a resistor.
+    // A charged capacitor rings down through an inductor and a resistor:
+    // `examples/system/rlc_loop.json`, which holds these four values.
     let (henry, farad, ohm, coulomb) = (10.0e-3_f64, 100.0e-6_f64, 2.0_f64, 1.0e-3_f64);
-    let scene = format!(
-        r#"{{
-  "schema": "frankensim.system.v0", "duration_s": 0.02, "step_s": 1.0e-5,
-  "elements": {{
-    "coil": {{"kind": "inductor", "inductance_h": {henry}}},
-    "cap": {{"kind": "capacitor", "capacitance_f": {farad}, "charge_c": {coulomb}}},
-    "load": {{"kind": "resistor", "resistance_ohm": {ohm}}},
-    "air": {{"kind": "heat_capacity", "capacity_j_k": 1.0, "temperature_k": 300.0}}
-  }},
-  "connections": [
-    {{"join": ["coil.p", "cap.a", "load.a"]}},
-    {{"prescribe": "cap.b", "current_a": 0}},
-    {{"prescribe": "load.b", "current_a": 0}},
-    {{"route": "load.heat", "to": [["air.heat", 1.0]]}}
-  ]
-}}"#
-    );
-    let path = scratch("rlc.json", &scene);
-    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    let (code, json, stderr) = run_binary(&["--json", "system", &example("rlc_loop.json")]);
     assert_eq!(code, 0, "{stderr}");
     let (current, charge) = loop_reference((henry, 1.0 / farad, ohm, 0.0), coulomb, 1.0e-5, 2_000);
     let peak = coulomb / (henry * farad).sqrt();
@@ -2604,24 +2590,10 @@ fn an_rlc_loop_and_a_driven_torsion_pendulum_follow_the_same_law_in_their_own_un
     assert!(warmed > 0.5 * start, "most of the charge's energy is heat by now");
     assert!((start - now - warmed).abs() <= 1.0e-10 * start, "{start} - {now} vs {warmed}");
 
-    // A shaft on a torsion spring, turned by a constant torque.
+    // A shaft on a torsion spring, turned by a constant torque:
+    // `examples/system/torsion_pendulum.json`, which holds these three values.
     let (inertia, kappa, torque) = (2.0e-3_f64, 5.0_f64, 0.4_f64);
-    let scene = format!(
-        r#"{{
-  "schema": "frankensim.system.v0", "duration_s": 0.5, "step_s": 1.0e-4,
-  "elements": {{
-    "wheel": {{"kind": "inertia", "inertia_kg_m2": {inertia}}},
-    "wire": {{"kind": "torsion_spring", "stiffness_n_m_rad": {kappa}}},
-    "motor": {{"kind": "torque", "torque_n_m": {torque}}}
-  }},
-  "connections": [
-    {{"join": ["wheel.p", "wire.a", "motor.p"]}},
-    {{"prescribe": "wire.b", "angular_velocity_rad_s": 0}}
-  ]
-}}"#
-    );
-    let path = scratch("pendulum.json", &scene);
-    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    let (code, json, stderr) = run_binary(&["--json", "system", &example("torsion_pendulum.json")]);
     assert_eq!(code, 0, "{stderr}");
     let (speed, twist) = loop_reference((inertia, kappa, 0.0, torque), 0.0, 1.0e-4, 5_000);
     let swing = torque / kappa;
