@@ -2243,6 +2243,24 @@ Unknown, omitted, duplicate, derived-voltage/current or stateless accounts
 refuse at scene admission. Mass/inertia/linear-inductor coordinates are both
 controlled; nonlinear storage uses its actual charge/flux coordinate.
 
+A `gas_volume` gives `mass_kg`, `energy_j`, `volume_m3` and one
+`carried<i>_kg` for each carried quantity: the fields of what it holds. (The
+report's `carried<i>` are fractions and are not accounts.) A `gas_cavity`
+gives `volume_m3` and `temperature_k`; its pressure follows from those two.
+
+Eight kinds have no error account. A scene with one is refused under
+`adaptive` by the element's name, and the refusal gives the reason:
+- `slider`, `friction_interface`, `hertz_patch`, `contact_interface`: the
+  force jumps where the element sticks, slips or strikes. An estimate by
+  step doubling falls only as the step there, whatever the declared order,
+  so these need the event located (bead rc-1109 .5.8), not an account.
+- `sliding_interface`: its law's state is an associated type of fs-tribo's
+  `TangentialLaw` and is not given as numbers.
+- `thermal_timeline`: its cells are born and joined at events, so a full
+  step and two half steps compare only past the same events.
+- `conduction_body`, `modal_structure`: an account over the whole state,
+  with one tolerance for the element, is not written yet.
+
 Rigid and viscoelastic networks require four vector/rotation accounts per body:
 `element.body<i>.position_m`, `velocity_m_s`, `angular_velocity_rad_s` and
 `orientation_rad`. Positions and linear velocities are in world axes, and
@@ -2365,8 +2383,8 @@ waveform each for mass rate, enthalpy rate and every carried rate, into the
 volume) and `contents` on a restriction's end held from outside (pressure,
 specific enthalpy, carried fractions). A report gives a volume's pressure,
 temperature, mass, volume and `carried<i>` fractions, and a restriction's
-mass and enthalpy rates over the last step. Adaptive stepping refuses a scene
-with a gas volume. Scene: `examples/system/pneumatic_cylinder.json`, a tank
+mass and enthalpy rates over the last step. Under `adaptive` what a volume
+holds are error accounts (above). Scene: `examples/system/pneumatic_cylinder.json`, a tank
 feeding a cylinder through a valve, with a piston, a spring load, the outside
 pressure, a seal and a barrel that takes the seal's heat and exchanges heat
 with the chamber's gas. `tests/system_command.rs` compares it with an
@@ -2378,7 +2396,15 @@ position, the outside received 1 bar times the swept volume and the gas
 holds the spring and the outside pressure. A second test fills a vessel from
 a prescribed stream (355.5 K from a 300 K line, the closed form to 1e-10)
 and from a supply held at 2 bar through a restriction (2 bar to 1e-9 and
-350 K), and checks fourteen refusals. Limits: one gas for all joined
+350 K), and checks fourteen refusals. A third runs the cylinder over 0.5 s
+with one carried quantity under `adaptive`, every tolerance but the two
+volumes' too loose to bind. With one of a volume's four accounts tight alone
+(1e-9 of the size of what it measures, against a tenth) the run takes more
+accepted steps than with all four loose and rejects a trial: 3342, 4294,
+4004 and 3342 steps for mass, energy, volume and carried mass against 200,
+when this was written. With all four tight it ends 1.7e-8 from a run at a
+fixed step of 20 µs, against 2.4e-6 with all loose. A scene without the
+chamber's carried mass is refused by that account's name. Limits: one gas for all joined
 volumes, unchecked; constant heat capacities; no source-backed gas, which
 is the closed `gas_cavity` below.
 
@@ -2402,7 +2428,8 @@ transport card holds 75 to 101.325 kPa and 200 to 1000 K) is refused at
 admission (exit 3) or by the step that would reach it (exit 4). So is a
 bracket that spans two NASA-9 charts (N2's split at 1000 K). Reports give
 temperature, pressure, density, volume, mass and specific internal energy.
-`adaptive` refuses it. Its state has fs-gas's codec, three words (volume,
+Under `adaptive` its volume and temperature are error accounts (above). Its
+state has fs-gas's codec, three words (volume,
 temperature, pressure) on a reference bound whole, so `--checkpoint` saves it:
 `tests/system_command/checkpoints.rs` saves `n2_gas_spring.json` at 0.125 s
 and resumes it in another process to the report of a run that pauses there,
@@ -2420,9 +2447,17 @@ Tests in `tests/system_command.rs`, all on the seed N2 packs committed in
   matches the adiabatic period. The prediction uses the McBride γ at 300 K,
   the second-order amplitude correction (γ + 1)(2γ − 1)a²/48 for p V^γ held,
   and the midpoint step's (w dt)²/12, and agrees to 1e-6. Its ledger closes.
+- Under `adaptive`, that device over 0.15 s with every tolerance but the
+  cavity's two too loose to bind: its volume tight alone, and its
+  temperature tight alone (1e-8 of size against a hundredth), each take
+  more accepted steps than both loose and reject a trial (296 and 220 steps
+  against 60, when this was written); both tight end 1.4e-6 from a run at a
+  fixed step of 25 µs, against 2.8e-5. A scene without the temperature's
+  tolerance is refused by that account's name.
 - Seven admission refusals (record, missing pack, insulated, iterations,
-  unknown field, a start outside the transport card, adaptive) and two run
-  refusals (compression past 101.325 kPa, a bracket reaching 1000 K).
+  unknown field, a start outside the transport card, `adaptive` with no
+  tolerance for the cavity's volume) and two run refusals (compression past
+  101.325 kPa, a bracket reaching 1000 K).
 
 No claim: the gas is frozen and ideal, with no reactions, condensation,
 real-gas equation of state, internal waves, leakage or wall heat capacity.

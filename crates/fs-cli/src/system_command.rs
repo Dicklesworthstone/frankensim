@@ -30,6 +30,7 @@ use std::rc::Rc;
 
 use fs_conduction::transient::enthalpy::material::MaterialEnthalpyTransport;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_gas::component::ClosedGasParcel;
 use fs_material::conductor::component::{OhmicResistor, Terminals};
 use fs_material::conductor::graph::MaterialOhmicNode;
 use fs_material::fluid_transport::laminar_pipe::{LaminarPipeComponent, MaterialLaminarPipe};
@@ -147,6 +148,8 @@ coordinate and source energy_in_j account. Absolute tolerances are positive
 in that field's SI units; relative tolerances are nonnegative. Source-work
 tolerances apply to each trial interval's energy increment. Derived endpoint
 voltage/current and stateless last-step means are not independent accounts.
+A gas_volume needs mass_kg, energy_j, volume_m3 and carried<i>_kg for each
+carried quantity; a gas_cavity needs volume_m3 and temperature_k.
 Every network body needs body<i>.position_m, body<i>.velocity_m_s,
 body<i>.angular_velocity_rad_s and body<i>.orientation_rad under its element
 name. These control complete vector differences and rotation angle, not
@@ -1528,6 +1531,21 @@ enum Coordinate {
     Network(adaptive_metric::NetworkCoordinate),
     /// One coordinate of a port-Hamiltonian element's state vector.
     State(usize),
+    /// What a gas volume holds.
+    Held(Held),
+    /// A gas cavity's volume, and the temperature of its gas.
+    CavityVolume,
+    CavityTemperature,
+}
+
+/// A coordinate of what a gas volume holds: its mass, its internal energy,
+/// its volume, or the mass of one carried quantity.
+#[derive(Clone, Copy)]
+enum Held {
+    Mass,
+    Energy,
+    Volume,
+    Carried(usize),
 }
 
 struct ErrorAccount {
@@ -1554,8 +1572,65 @@ impl ErrorAccount {
                 .and_then(|state| state.get(index))
                 .copied()
                 .unwrap_or(f64::NAN),
+            Coordinate::Held(held) => checkpoint
+                .state::<GasContents>(self.node)
+                .and_then(|gas| match held {
+                    Held::Mass => Some(gas.mass_kg),
+                    Held::Energy => Some(gas.energy_j),
+                    Held::Volume => Some(gas.volume_m3),
+                    Held::Carried(index) => gas.carried_kg.get(index).copied(),
+                })
+                .unwrap_or(f64::NAN),
+            Coordinate::CavityVolume => checkpoint
+                .state::<ClosedGasParcel>(self.node)
+                .map_or(f64::NAN, ClosedGasParcel::volume_m3),
+            Coordinate::CavityTemperature => checkpoint
+                .state::<ClosedGasParcel>(self.node)
+                .map_or(f64::NAN, |gas| gas.state().state().temperature),
         }
     }
+}
+
+/// A gas volume's error accounts: its mass, its internal energy and its
+/// volume, and the mass of each quantity its stream carries.
+fn gas_volume_accounts(element: &Element) -> Vec<(String, NodeId, Coordinate)> {
+    let carried: usize = element.ports.iter().map(PortSpec::carried_quantities).sum();
+    let held = [
+        ("mass_kg".to_owned(), Held::Mass),
+        ("energy_j".to_owned(), Held::Energy),
+        ("volume_m3".to_owned(), Held::Volume),
+    ];
+    let carried = (0..carried).map(|index| (format!("carried{index}_kg"), Held::Carried(index)));
+    held.into_iter()
+        .chain(carried)
+        .map(|(field, held)| {
+            let name = format!("{}.{field}", element.name);
+            (name, element.node, Coordinate::Held(held))
+        })
+        .collect()
+}
+
+/// The refusal of an element whose kind has no error account, with the
+/// reason for its kind.
+fn no_error_account(element: &Element) -> String {
+    let why = match element.kind {
+        Kind::SlidingInterface => "its law's state is not given as numbers",
+        Kind::ThermalTimeline => "its cells are born and joined at events",
+        Kind::ConductionBody | Kind::ModalStructure => {
+            "an account over its whole state is not written yet"
+        }
+        // A slider, a friction interface, a Hertz patch, a contact interface.
+        _ => {
+            "its force jumps where it sticks, slips or strikes, and an estimate by step \
+             doubling does not fall with the step there"
+        }
+    };
+    format!(
+        "adaptive: {} is a {}, whose state has no error account here ({why}); \
+         run it with a fixed step_s",
+        element.name,
+        element.kind.name()
+    )
 }
 
 struct AdaptiveSettings {
@@ -3902,23 +3977,22 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
                 }
                 Vec::new()
             }
-            Kind::GasVolume
-            | Kind::Slider
+            Kind::GasVolume => {
+                expected.extend(gas_volume_accounts(element));
+                Vec::new()
+            }
+            Kind::GasCavity => vec![
+                ("volume_m3", Coordinate::CavityVolume),
+                ("temperature_k", Coordinate::CavityTemperature),
+            ],
+            Kind::Slider
             | Kind::FrictionInterface
             | Kind::SlidingInterface
             | Kind::HertzPatch
             | Kind::ModalStructure
             | Kind::ContactInterface
             | Kind::ThermalTimeline
-            | Kind::ConductionBody
-            | Kind::GasCavity => {
-                return Err(format!(
-                    "adaptive: {} is a {}, whose state has no error account here; \
-                     run it with a fixed step_s",
-                    element.name,
-                    element.kind.name()
-                ));
-            }
+            | Kind::ConductionBody => return Err(no_error_account(element)),
         };
         for (field, coordinate) in coordinates {
             expected.push((format!("{}.{field}", element.name), element.node, coordinate));

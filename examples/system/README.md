@@ -441,6 +441,16 @@ probes and stateless last-step means cannot substitute for those coordinates.
 Absolute tolerances are positive in the named field's SI units; relative
 tolerances are finite and nonnegative.
 
+A `gas_volume` needs `mass_kg`, `energy_j` and `volume_m3`, and
+`carried<i>_kg` for each quantity its gas carries. A `gas_cavity` needs
+`volume_m3` and `temperature_k`.
+
+Eight kinds have no error account, and a scene with one is refused under
+`adaptive` with the reason: a `slider`, a `friction_interface`, a
+`hertz_patch` and a `contact_interface`, whose force jumps where they stick,
+slip or strike; a `sliding_interface`; a `thermal_timeline`; and, for now, a
+`conduction_body` and a `modal_structure`. Run those with a fixed `step_s`.
+
 For a `rigid_network` or `viscoelastic_network`, declare these accounts for
 every body, prefixed by its element name:
 

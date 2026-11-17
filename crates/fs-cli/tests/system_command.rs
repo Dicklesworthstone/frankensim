@@ -3560,15 +3560,172 @@ fn gas_held_from_outside_fills_a_vessel_and_a_supply_sets_its_pressure() {
     let cylinder = std::fs::read_to_string(example("pneumatic_cylinder.json")).unwrap();
     check("cylinder_direct.json", &cylinder, "[\"tank.stream\", \"valve.a\"]", "[\"tank.stream\", \"chamber.stream\"]", 3, "this one has 2");
     check("cylinder_open.json", &cylinder, "    {\"join\": [\"chamber.stream\", \"valve.b\"]},\n", "", 4, "valve.b");
-    // A gas volume has no error account for adaptive stepping.
+    // What a gas volume holds are error accounts of adaptive stepping, and
+    // each needs its tolerance.
     check(
         "vessel_adaptive.json",
         FILLED_VESSEL,
         "\"step_s\": 0.01,",
         "\"step_s\": 0.01, \"adaptive\": {\"order\": 2, \"min_step_s\": 1e-9, \"max_attempts\": 8, \"tolerances\": {}},",
         3,
-        "whose state has no error account here",
+        "adaptive.tolerances.vessel.mass_kg: missing explicit tolerance",
     );
+}
+
+/// The step entries of a scene under error control: a greatest step, and an
+/// `adaptive` object of order 2 with an absolute tolerance for each account.
+fn error_controlled(max_step_s: f64, tolerances: &[(&str, f64)]) -> String {
+    let accounts: Vec<String> = tolerances
+        .iter()
+        .map(|(name, absolute)| format!(r#""{name}": {{"absolute": {absolute:e}, "relative": 0}}"#))
+        .collect();
+    format!(
+        r#""step_s": {max_step_s:e}, "adaptive": {{"order": 2, "min_step_s": 1e-9, "max_attempts": 40, "tolerances": {{{}}}}},"#,
+        accounts.join(", ")
+    )
+}
+
+/// An error-controlled run that reaches its end: its report, its accepted
+/// steps and the comparisons its driver rejected. The driver counts every
+/// comparison of a full step with two half steps that it attempts, and an
+/// accepted one leaves its two half steps as accepted steps.
+fn controlled_run(name: &str, scene: &str) -> (String, f64, f64) {
+    let path = scratch(name, scene);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{name}: {stderr}");
+    assert!(
+        value(&json, "\"adaptive\"", "max_error_norm") <= 1.0,
+        "{name}"
+    );
+    let steps = value(&json, "\"schema\"", "steps");
+    let attempts = value(&json, "\"adaptive\"", "attempts");
+    (json, steps, attempts - 0.5 * steps)
+}
+
+/// The pneumatic cylinder over 0.5 s with one carried quantity, which the
+/// tank holds alone and the valve takes to the chamber; `steps` are its step
+/// entries.
+fn carrying_cylinder(steps: &str) -> String {
+    let mut scene = std::fs::read_to_string(example("pneumatic_cylinder.json")).unwrap();
+    for (from, to) in [
+        ("\"duration_s\": 3.0", "\"duration_s\": 0.5"),
+        ("\"step_s\": 2.0e-4,", steps),
+        (
+            "\"temperature_k\": 293.15},",
+            "\"temperature_k\": 293.15, \"carried\": [1.0]},",
+        ),
+        (
+            "\"conductance_kg_s_pa\": 1.0e-8}",
+            "\"conductance_kg_s_pa\": 1.0e-8, \"carried\": 1}",
+        ),
+        (
+            "\"temperature_k\": 293.15, \"wall\": true}",
+            "\"temperature_k\": 293.15, \"wall\": true, \"carried\": [0.0]}",
+        ),
+    ] {
+        assert_eq!(scene.matches(from).count(), 1, "{from}");
+        scene = scene.replace(from, to);
+    }
+    scene
+}
+
+/// Claims, declared before the first run: with `adaptive`, what a gas volume
+/// holds are error accounts: its mass, its energy, its volume and each
+/// carried mass. On the pneumatic cylinder over 0.5 s, with every other
+/// tolerance too loose to bind, tightening one of those four alone on the
+/// two volumes takes more accepted steps and rejects a comparison, and
+/// tightening all four ends closer to a run at a fixed small step. A scene
+/// without the chamber's carried mass is refused by that account's name.
+#[test]
+fn what_a_gas_volume_holds_are_adaptive_error_accounts() {
+    // The size of what each account of a volume measures.
+    let sizes = [
+        [("tank.mass_kg", 1.4e-2), ("chamber.mass_kg", 4.8e-5)],
+        [("tank.energy_j", 3.0e3), ("chamber.energy_j", 10.0)],
+        [("tank.volume_m3", 2.0e-3), ("chamber.volume_m3", 4.0e-5)],
+        [
+            ("tank.carried0_kg", 1.4e-2),
+            ("chamber.carried0_kg", 4.8e-5),
+        ],
+    ];
+    // Tolerances of 1e-9 of the size for the accounts `tight` picks and of a
+    // tenth of it for the other gas accounts; the rest never bind.
+    let accounts = |tight: &dyn Fn(usize) -> bool| {
+        let mut all = vec![
+            ("piston.position_m", 1.0e3),
+            ("piston.velocity_m_s", 1.0e3),
+            ("outside.energy_in_j", 1.0e3),
+            ("load.extension_m", 1.0e3),
+            ("barrel.temperature_k", 1.0e3),
+        ];
+        for (index, pair) in sizes.iter().enumerate() {
+            let part = if tight(index) { 1.0e-9 } else { 1.0e-1 };
+            all.extend(pair.iter().map(|(name, size)| (*name, part * size)));
+        }
+        all
+    };
+    let run = |name: &str, tight: &dyn Fn(usize) -> bool| {
+        controlled_run(
+            name,
+            &carrying_cylinder(&error_controlled(5.0e-3, &accounts(tight))),
+        )
+    };
+    let (loose, loose_steps, _) = run("cylinder_loose.json", &|_| false);
+    for (index, pair) in sizes.iter().enumerate() {
+        let name = format!("cylinder_tight_{index}.json");
+        let (_, steps, rejected) = run(&name, &|account| account == index);
+        eprintln!(
+            "cylinder: {} alone, {steps} steps and {rejected} rejected, loose {loose_steps}",
+            pair[1].0
+        );
+        assert!(
+            steps > loose_steps,
+            "{}: {steps} vs {loose_steps}",
+            pair[1].0
+        );
+        assert!(rejected >= 1.0, "{}: no comparison rejected", pair[1].0);
+    }
+    let (tight, _, _) = run("cylinder_tight.json", &|_| true);
+
+    let ends = |json: &str| {
+        [
+            ("tank", "mass_kg"),
+            ("tank", "pressure_pa"),
+            ("chamber", "mass_kg"),
+            ("chamber", "pressure_pa"),
+        ]
+        .map(|(name, field)| value(json, &element(name), field))
+    };
+    let path = scratch(
+        "cylinder_fixed.json",
+        &carrying_cylinder("\"step_s\": 2.0e-5,"),
+    );
+    let (code, fixed, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    let reference = ends(&fixed);
+    let distance = |json: &str| {
+        let parts = ends(json).into_iter().zip(reference);
+        parts
+            .map(|(end, fixed)| (end / fixed - 1.0).abs())
+            .fold(0.0, f64::max)
+    };
+    let (far, near) = (distance(&loose), distance(&tight));
+    eprintln!("cylinder: from the fixed run, loose {far:e}, tight {near:e}");
+    assert!(near < 0.1 * far, "tight {near}, loose {far}");
+
+    let partial = accounts(&|_| true);
+    let without: Vec<_> = partial
+        .iter()
+        .copied()
+        .filter(|(name, _)| *name != "chamber.carried0_kg")
+        .collect();
+    let (code, stderr) = refused(
+        "cylinder_partial.json",
+        &carrying_cylinder(&error_controlled(5.0e-3, &without)),
+    );
+    assert_eq!(code, 3, "{stderr}");
+    let missing = "adaptive.tolerances.chamber.carried0_kg: missing explicit tolerance";
+    assert!(stderr.contains(missing), "{stderr}");
 }
 
 /// One step of the midpoint rule for two bodies on a plane of no heat
@@ -4873,6 +5030,100 @@ fn a_piston_on_an_n2_gas_spring_rings_at_the_adiabatic_frequency_and_keeps_its_e
     assert!((stored - given).abs() < 1.0e-6, "{stored} vs {given}");
 }
 
+/// Claims, declared before the first run: with `adaptive`, a gas cavity's
+/// volume and the temperature of its gas are error accounts. On the N2 gas
+/// spring over 0.15 s, with every other tolerance too loose to bind,
+/// tightening either of the two alone takes more accepted steps and rejects
+/// a comparison, and tightening both ends closer to a run at a fixed small
+/// step.
+/// A scene without the temperature's tolerance is refused by that account's
+/// name.
+#[test]
+fn a_gas_cavitys_volume_and_temperature_are_adaptive_error_accounts() {
+    // The device of examples/system/n2_gas_spring.json.
+    let spring = |steps: &str| {
+        format!(
+            r#"{{
+  "schema": "frankensim.system.v0", "duration_s": 0.15, {steps}
+  "elements": {{
+    "spring": {{"kind": "gas_cavity", "gas": "thermochemical 300 90000 mole 1 N2 1",
+               "sources": {sources}, "volume_m3": 1.0e-4, "insulated": true,
+               "temperature_min_k": 200, "temperature_max_k": 900}},
+    "piston": {{"kind": "mass", "mass_kg": 1.0, "velocity_m_s": 0.05}},
+    "outside": {{"kind": "force", "force_n": -90.0}}
+  }},
+  "connections": [
+    {{"join": ["piston.p", {{"port": "spring.p", "ratio": 1.0e-3}}, "outside.p"]}}
+  ]
+}}"#,
+            sources = n2_sources()
+        )
+    };
+    // The cavity's two accounts with the size of what each measures. A tight
+    // one has 1e-8 of that for its tolerance and a loose one a hundredth.
+    let sizes = [
+        ("spring.volume_m3", 1.0e-4),
+        ("spring.temperature_k", 300.0),
+    ];
+    let accounts = |tight: &dyn Fn(usize) -> bool| {
+        let mut all = vec![
+            ("piston.position_m", 1.0e3),
+            ("piston.velocity_m_s", 1.0e3),
+            ("outside.energy_in_j", 1.0e3),
+        ];
+        for (index, (name, size)) in sizes.iter().enumerate() {
+            let part = if tight(index) { 1.0e-8 } else { 1.0e-2 };
+            all.push((*name, part * size));
+        }
+        all
+    };
+    let run = |name: &str, tight: &dyn Fn(usize) -> bool| {
+        controlled_run(name, &spring(&error_controlled(5.0e-3, &accounts(tight))))
+    };
+    let (loose, loose_steps, _) = run("gas_spring_loose.json", &|_| false);
+    for (index, (account, _)) in sizes.iter().enumerate() {
+        let name = format!("gas_spring_tight_{index}.json");
+        let (_, steps, rejected) = run(&name, &|which| which == index);
+        eprintln!(
+            "gas spring: {account} alone, {steps} steps and {rejected} rejected, loose {loose_steps}"
+        );
+        assert!(steps > loose_steps, "{account}: {steps} vs {loose_steps}");
+        assert!(rejected >= 1.0, "{account}: no comparison rejected");
+    }
+    let (tight, _, _) = run("gas_spring_tight.json", &|_| true);
+
+    let ends = |json: &str| {
+        ["volume_m3", "temperature_k"].map(|field| value(json, &element("spring"), field))
+    };
+    let path = scratch("gas_spring_fixed.json", &spring("\"step_s\": 2.5e-5,"));
+    let (code, fixed, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    let reference = ends(&fixed);
+    let distance = |json: &str| {
+        let parts = ends(json).into_iter().zip(reference);
+        parts
+            .map(|(end, fixed)| (end / fixed - 1.0).abs())
+            .fold(0.0, f64::max)
+    };
+    let (far, near) = (distance(&loose), distance(&tight));
+    eprintln!("gas spring: from the fixed run, loose {far:e}, tight {near:e}");
+    assert!(near < 0.1 * far, "tight {near}, loose {far}");
+
+    let partial = accounts(&|_| true);
+    let without: Vec<_> = partial
+        .iter()
+        .copied()
+        .filter(|(name, _)| !name.ends_with("_k"))
+        .collect();
+    let (code, stderr) = refused(
+        "gas_spring_partial.json",
+        &spring(&error_controlled(5.0e-3, &without)),
+    );
+    assert_eq!(code, 3, "{stderr}");
+    let missing = "adaptive.tolerances.spring.temperature_k: missing explicit tolerance";
+    assert!(stderr.contains(missing), "{stderr}");
+}
+
 #[test]
 fn gas_cavity_scenes_refuse_bad_records_packs_and_controls_and_gas_outside_the_cards() {
     let base = heated_n2();
@@ -4919,7 +5170,7 @@ fn gas_cavity_scenes_refuse_bad_records_packs_and_controls_and_gas_outside_the_c
             "adaptive.json",
             "\"duration_s\": 1.0",
             "\"adaptive\": {\"tolerances\": {}}, \"duration_s\": 1.0",
-            "cavity is a gas_cavity",
+            "adaptive.tolerances.cavity.volume_m3: missing explicit tolerance",
         ),
     ] {
         assert!(base.contains(from), "{name}: test fixture changed");
