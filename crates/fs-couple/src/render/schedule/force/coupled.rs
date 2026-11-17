@@ -640,7 +640,48 @@ impl CoupledModalSystem {
         (self.frame.sample != 0).then_some(&self.frame)
     }
     /// Current oscillator, connection and material storage, including initial history.
+    ///
+    /// A step asks for this more than once on one accepted state (its owner, `exact::stage` and the candidate's
+    /// gates), so the time-domain operator keeps the last evaluation (`exact::AcceptedEnergy`). A request whose
+    /// [`Self::energy_words`] have the bits of that evaluation's is served its value, which is the value
+    /// [`Self::total_energy_direct`] returns for them. A refusal is never kept.
     pub fn total_energy_j(&self) -> Result<f64, ModalCouplingError> {
+        let Some(exact) = &self.exact else {
+            return self.total_energy_direct();
+        };
+        if let Some(energy) = exact.served_energy(self.energy_words()) {
+            return Ok(energy);
+        }
+        let energy = self.total_energy_direct()?;
+        exact.keep_energy(self.energy_words(), energy);
+        Ok(energy)
+    }
+
+    /// The accepted state as [`Self::total_energy_direct`] reads it: each mode's displacement and velocity, then the
+    /// material memory, then the radiation state. Everything else that evaluation reads (the modes' frequencies,
+    /// the link columns and laws, the relaxation branches, the radiation model) is an input of the operator's
+    /// preparation and is replaced only together with the operator, which is why the operator holds the memo.
+    fn energy_words(&self) -> impl Iterator<Item = f64> + '_ {
+        self.models
+            .iter()
+            .flat_map(ModalAcousticTimeModel::states)
+            .flat_map(|state| [state.displacement_m_sqrt_kg, state.velocity_m_sqrt_kg_per_s])
+            .chain(self.material_memory.iter().copied())
+            .chain(self.radiation_state.iter().copied())
+    }
+
+    /// How many times [`Self::total_energy_j`] evaluated the energy from the state since the present time-domain
+    /// operator was prepared. A request served from the evaluation kept does not count. Zero without an operator.
+    /// It exists so that a test can observe the memo: nothing physical and no receipt may read it.
+    #[must_use]
+    pub fn total_energy_evaluations(&self) -> u64 {
+        self.exact
+            .as_ref()
+            .map_or(0, exact::ExactNetwork::accepted_energy_evaluations)
+    }
+
+    /// [`Self::total_energy_j`] evaluated from the accepted state.
+    fn total_energy_direct(&self) -> Result<f64, ModalCouplingError> {
         let mut energy = component_energy(&self.models)?;
         for (column, link) in self.columns.iter().zip(&self.connections) {
             let x = extension(&self.models, column, link.rest_extension_m)?;

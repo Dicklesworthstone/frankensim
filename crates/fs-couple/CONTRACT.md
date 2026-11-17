@@ -17,6 +17,32 @@
 
 ## New sections (newest first)
 
+### One evaluation of a coupled network's total energy for each accepted state (`CoupledModalSystem::total_energy_j`)
+
+A step asks `CoupledModalSystem::total_energy_j` for the energy of its accepted state more than once: `exact::stage` asks, the candidate's gates ask, and a friction or contact
+owner asks before it stages. The time-domain operator (`exact::ExactNetwork`) now keeps the last evaluation with the words it read from the state: each mode's displacement and
+velocity, then the material memory, then the radiation state. A request whose words have the same bits is served the kept value. That value is the one the evaluation returns
+for those words, so no reported number changes. One state is kept. A refusal is not kept. A system with no time-domain operator evaluates every request.
+`CoupledModalSystem::total_energy_evaluations()` counts the evaluations since the operator was prepared, served requests excluded. It exists to observe the memo; nothing
+physical and no receipt reads it.
+
+The constants the evaluation reads are not in the key: the modes' frequencies, the link columns and laws, the relaxation branches and the radiation model. They are the inputs
+of `preparation::prepare`, and the memo is a field of the operator prepared from them. Every place that replaces one of them installs, in the same function, the operator
+prepared from the new ones (grep of the non-test files under `render/schedule/force/coupled` at 372d94a611): `new_with_columns_inner`, `with_prepared_linear_propagation`,
+`with_constant_loss_connections`, `with_radiation_load`, `with_additional_material_relaxation`, `install_connection_coefficients`, and `exchange` of
+`coefficients/rates.rs`, which swaps the models, the branches and the operator together. The link columns are written by the constructor only, and fs-modal's
+`ModalAcousticTimeModel` has no method that changes a mode. A new place that changed one of these without installing its operator would be served the energy of the constants
+before.
+
+Evidence. `tests/modal_multi_tangential.rs`: over 60 steps of the two-contact owner, which asks once before the network's stage asks twice, the network evaluates its energy
+once for each accepted state. `tests/modal_material_composition.rs`: an arm with a zero projection relaxes while the one mode stays at rest, so its memory is the only state
+word that moves; the energy asked after each of 8 steps is the one before times `exp(-2 dt / tau)`. Existing tests guard the rest: `tests/coupled_coefficient_update.rs` asserts
+the energy change across a changed link law on an unchanged state, and `tests/coupled_impulse.rs` moves velocities alone. A memo that never serves makes the first test
+count 180 evaluations for its 60 steps, three a step. The viola Db4 control card (432000 samples at 144 kHz) renders the same wav and the same log lines as before.
+
+Not tested: the radiation state moving alone (a cold attach starts it at zero, and it then moves only with a mode); the system with no time-domain operator. Not covered: the
+other energy evaluations of a step (`PreparedNetwork::hamiltonian` has its own memo) and the loss sweep, about half of that card's time for a step.
+
 ### The linear impact description on the composition kernel (`render::plate::impact::graph`, feature `kernel`)
 
 `ImpactGraph::new` takes the inputs `LinearImpactSystem::new` takes (bodies, contacts, volumes, config) and a sink temperature, declares them as a graph on fs-system

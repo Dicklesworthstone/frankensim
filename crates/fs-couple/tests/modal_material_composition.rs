@@ -117,3 +117,40 @@ fn composition_admits_the_total_not_each_material_in_isolation() {
     assert!(first.with_additional_material_relaxation(
         vec![arm(vec![1.0,0.0],1e4,0.01)],Some(vec![]),&gate).is_err());
 }
+
+// An arm that touches no mode relaxes while the one mode stays at rest, so the arm's memory is the only word of the
+// accepted state that moves. The total energy of each state is then the energy of that memory, not of the one before.
+#[test]
+fn an_arm_that_relaxes_alone_moves_the_total_energy_of_a_system_at_rest() {
+    let gate = CancelGate::new_clock_free();
+    let (memory, tau) = (0.05_f64, 0.001_f64);
+    let mut system = one(config(), 0.0)
+        .with_material_relaxation(
+            vec![arm(vec![0.0, 0.0], 1e4, tau)],
+            Some(vec![memory]),
+            &gate,
+        )
+        .unwrap();
+    let rest = ModalAcousticState {
+        displacement_m_sqrt_kg: 0.0,
+        velocity_m_sqrt_kg_per_s: 0.0,
+    };
+    let mut energy = system.total_energy_j().unwrap();
+    assert!(
+        (energy - 0.5 * memory * memory).abs() <= 1e-18,
+        "{energy:e}"
+    );
+    let decay = (-2.0 / (48_000.0 * tau)).exp();
+    for _ in 0..8 {
+        let frame = system.step(&[0.0]).unwrap().clone();
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        assert_eq!(system.components()[0].states(), &[rest]);
+        let after = system.total_energy_j().unwrap();
+        assert!(
+            (after - energy * decay).abs() <= 1e-12 * energy,
+            "{after:e} after {energy:e}"
+        );
+        assert!((energy - after - frame.material_dissipation_j).abs() <= 1e-15);
+        energy = after;
+    }
+}

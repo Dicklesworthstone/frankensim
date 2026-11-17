@@ -560,3 +560,35 @@ fn two_contact_elastic_frequency_converges_to_the_independent_continuum_solution
         "{errors:?}"
     );
 }
+
+// The owner asks for its network's total energy before it stages, and the network's own stage asks twice more on the
+// same accepted state. The network evaluates the energy once for each accepted state and serves the other requests.
+#[test]
+fn a_step_evaluates_the_networks_total_energy_once_for_each_accepted_state() {
+    let mut owner = layered(true, 0.04);
+    let first = owner.network().total_energy_j().unwrap();
+    let start = owner.network().total_energy_evaluations();
+    let steps = 60;
+    for k in 0..steps {
+        let speed = if k < 30 { [0.12, 0.0] } else { [0.0, 0.1] };
+        let frame = owner
+            .step(
+                &[0.001, -0.002, 0.003, -0.001, 0.002, 0.0],
+                &[drive(speed), drive(rotate(speed, 0.8))],
+            )
+            .unwrap();
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+    }
+    // The first step's state was evaluated above, and each later step's is the state the step before it published.
+    assert_eq!(
+        owner.network().total_energy_evaluations() - start,
+        steps - 1
+    );
+    let last = owner.network().total_energy_j().unwrap();
+    assert_eq!(
+        owner.network().total_energy_j().unwrap().to_bits(),
+        last.to_bits()
+    );
+    assert_eq!(owner.network().total_energy_evaluations() - start, steps);
+    assert_ne!(last.to_bits(), first.to_bits());
+}

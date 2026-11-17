@@ -25,6 +25,20 @@ pub(super) struct ExactNetwork {
     count: usize,
     memory_count: usize,
     radiation_count: usize,
+    /// The last evaluation of the owning system's total energy (see [`AcceptedEnergy`]).
+    accepted_energy: AcceptedEnergy,
+}
+
+/// The last accepted state whose total energy `CoupledModalSystem::total_energy_j` evaluated, by the exact bits of the
+/// words it read from the state, and the value. It is held by the operator and not by the system: the constants of
+/// that evaluation are the inputs this operator was prepared from, and a system that replaces one of them installs
+/// the operator prepared from the new ones, whose memo is empty. One state is enough: a step asks on its accepted
+/// state only, and publishing the step moves that state.
+#[derive(Default)]
+struct AcceptedEnergy {
+    /// The words of the state last evaluated and its energy, which is `None` before the first evaluation.
+    kept: std::sync::Mutex<(Vec<u64>, Option<f64>)>,
+    evaluations: std::sync::atomic::AtomicU64,
 }
 
 // Diagonal component dynamics and held inputs cannot connect distinct K/C
@@ -37,6 +51,35 @@ pub(super) struct ExactNetwork {
 // inter-mode coupling. An arm's internal strain belongs to exactly one island.
 // This changes no retained coordinate, physical limit or dense-block capacity.
 impl ExactNetwork {
+    /// The total energy kept for the state with these words, when the last evaluation read the same bits.
+    pub(super) fn served_energy(&self, words: impl Iterator<Item = f64>) -> Option<f64> {
+        let kept = self.accepted_energy.kept.lock().ok()?;
+        let energy = kept.1?;
+        words
+            .map(f64::to_bits)
+            .eq(kept.0.iter().copied())
+            .then_some(energy)
+    }
+
+    /// Keep one evaluation of the total energy with the words it read, in place of the one kept before.
+    pub(super) fn keep_energy(&self, words: impl Iterator<Item = f64>, energy: f64) {
+        self.accepted_energy
+            .evaluations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut kept) = self.accepted_energy.kept.lock() {
+            kept.0.clear();
+            kept.0.extend(words.map(f64::to_bits));
+            kept.1 = Some(energy);
+        }
+    }
+
+    /// How many evaluations of the total energy this operator has kept.
+    pub(super) fn accepted_energy_evaluations(&self) -> u64 {
+        self.accepted_energy
+            .evaluations
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Reuse the original coupled-basis constant-loss preparation without
     /// allocating transition matrices, resistance integrals or time state.
     pub(super) fn harmonic_damping_columns(
@@ -75,7 +118,8 @@ impl ExactNetwork {
             models, columns, links, count, dt, budget, branches, radiation, gate,
         )?;
         let radiation_count = prepared.air_state_len();
-        Ok(Self { blocks: Vec::new(), prepared: Some(prepared), count, memory_count: branches.len(), radiation_count })
+        Ok(Self { blocks: Vec::new(), prepared: Some(prepared), count, memory_count: branches.len(), radiation_count,
+            accepted_energy: AcceptedEnergy::default() })
     }
 
     pub(super) fn new(
@@ -221,7 +265,7 @@ impl ExactNetwork {
             blocks.push((indices, block));
         }
         Ok(Self { blocks, prepared: None, count, memory_count: branches.len(),
-            radiation_count: radiation.map_or(0, |r| 2*r.model.poles.len()) })
+            radiation_count: radiation.map_or(0, |r| 2*r.model.poles.len()), accepted_energy: AcceptedEnergy::default() })
     }
 
     fn local_state(&self, indices: &[usize], block: &ExactBlock, x: &[f64]) -> Vec<f64> {
