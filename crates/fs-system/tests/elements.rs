@@ -332,6 +332,17 @@ where
     UNIT_CHANGES.len()
 }
 
+/// Claims, declared before the first run: a spring says that its slopes
+/// depend on the step alone only when it has no cubic term. The tangent
+/// tier of the kit then holds it to that, to the bit, in the sweep below.
+#[test]
+fn a_spring_declares_exact_linear_only_without_its_cubic_term() {
+    let class = |cubic_n_m3| Spring::new(350.0, cubic_n_m3).unwrap().class();
+    assert_eq!(class(0.0), Class::ExactLinear);
+    assert_eq!(class(2.0e6), Class::Smooth);
+    assert_eq!(class(-1.0e5), Class::Smooth);
+}
+
 #[test]
 fn every_element_conforms_across_a_sweep_of_states_and_inputs() {
     let mut n = Numbers(20_261_110);

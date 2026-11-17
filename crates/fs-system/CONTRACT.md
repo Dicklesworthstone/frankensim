@@ -1212,7 +1212,21 @@ that locates an event (a friction interface that cuts the step at a stop,
   `src/elements/node.rs`, nine have tangents that take neither the state
   nor the inputs, and the spring, which is `ExactLinear` only with a zero
   cubic coefficient, reads them in a term multiplied by that coefficient.
-  Nothing checks it for a component from elsewhere. The
+  That was read from the source, and it says nothing of the three elements
+  of the class added since: `DiracJunction`, `ControlledSource`, and
+  `ConductanceMatrix` without a law. The conformance kit now holds a
+  component to the claim: fs-ports' `check_port_tangent` asks
+  `check_exact_linear` of every component of the class, which takes the JVP
+  along each unit input direction at the case and at the case's stale state
+  with other inputs, and refuses a slope that differs in any bit. This
+  crate's tests ask it of all thirteen elements of the class, at 5,486
+  pairs of points in each feature set when this was written (counted with a
+  kit made to print the type it is asked of). A mass and a heat capacity
+  whose slopes were scaled by `1 + eps x` of a state `x`, and a conductance
+  whose slope was scaled so by an input, each fail `tests/elements.rs` at
+  that law. The law compares two points at a time and is no proof; it asks
+  nothing of a component with no declared tangent, or of one whose tests
+  do not run the tangent tier. The
   kept factors solve to the bit of the elimination they replace (unit test
   in `src/solve.rs`, against an elimination that carries the right-hand side
   along), and a line of masses and springs stepped with them equals, bit

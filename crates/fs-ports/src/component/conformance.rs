@@ -11,7 +11,10 @@
 //! energy, non-negative dissipation and entropy production, residual),
 //! available mass inventories, `admit`, and for
 //! [`PortTangent`] the JVP against
-//! central differences and the VJP against the JVP by the dot-product test.
+//! central differences and the VJP against the JVP by the dot-product test,
+//! and for a component that declares [`Class::ExactLinear`]
+//! ([`check_exact_linear`]) that its slopes are the same bits at another
+//! state and at other inputs.
 //! For [`LoadLine`]: the line's ports, purity, the audit at the flows on the
 //! line, and that a zero compliance gives `propose`. For a component a test
 //! claims reversible, [`check_time_reversal`]: a step there and back, each
@@ -31,8 +34,8 @@ use fs_exec::{CancelGate, Cx};
 use fs_qty::{DIMENSION_COUNT, Dims, Energy, Mass, Power, Temperature, Time};
 
 use super::{
-    Carrier, Component, ContractViolation, LoadLine, PortLayout, PortRole, PortSpec, PortTangent,
-    Proposal, Receipt, StepAudit, audit_carried_step, audit_mass_step, audit_step,
+    Carrier, Class, Component, ContractViolation, LoadLine, PortLayout, PortRole, PortSpec,
+    PortTangent, Proposal, Receipt, StepAudit, audit_carried_step, audit_mass_step, audit_step,
 };
 use crate::Entropy;
 
@@ -664,6 +667,97 @@ where
                 "vjp is the transpose of jvp",
                 format!("<bar, J d> = {left}, <J^T bar, d> = {right}"),
             ));
+        }
+    }
+    if component.class() == Class::ExactLinear {
+        // The class is a claim about every state and every input. It is
+        // held here to the two this case can name without the test's help:
+        // its own point, and its other valid state at inputs moved off it.
+        let moved: Vec<f64> = case.inputs.iter().map(|x| 1.5 * x + 0.25).collect();
+        let other = Case {
+            state: case.stale,
+            stale: case.state,
+            dt_s: case.dt_s,
+            inputs: &moved,
+        };
+        check_exact_linear(component, case, &other, cx)?;
+    }
+    Ok(())
+}
+
+/// Check the claim of [`Class::ExactLinear`] between two operating points.
+///
+/// A component of that class says that the slopes of its port map depend on
+/// the step length alone. A solver may then keep what it derived from them
+/// at one step and use it at a later step of the same length, and a run
+/// that kept it must take the steps of a run that derived it again. So the
+/// slopes must be the same numbers at any two states and any two inputs, to
+/// the bit, a zero's sign included. The JVP along every unit input
+/// direction is taken at `case` and at `other`, which share `dt_s`, and
+/// compared bit for bit. The caller chooses two points that differ;
+/// [`check_port_tangent`] asks this of every component of the class, at its
+/// case and at the case's stale state with other inputs.
+///
+/// # Errors
+/// The first [`Failure`] found: a component of another class, two steps, an
+/// input vector of the wrong length, or a slope that differs, named by its
+/// output and its input with both values and their bits.
+pub fn check_exact_linear<C>(
+    component: &C,
+    case: &Case<'_, C::State>,
+    other: &Case<'_, C::State>,
+    cx: &Cx<'_>,
+) -> Result<(), Failure<C::Error>>
+where
+    C: PortTangent,
+{
+    let class = component.class();
+    if class != Class::ExactLinear {
+        return Err(law(
+            "the exact-linear law is asked of a component of that class",
+            format!("the component declares {class:?}"),
+        ));
+    }
+    if case.dt_s.to_bits() != other.dt_s.to_bits() {
+        return Err(law(
+            "the two points of the exact-linear law share a step",
+            format!("{} s and {} s", case.dt_s, other.dt_s),
+        ));
+    }
+    let layout = PortLayout::new(component.ports()).map_err(Failure::Contract)?;
+    let (n_in, n_out) = (layout.input_len(), layout.output_len());
+    for point in [case, other] {
+        if point.inputs.len() != n_in {
+            return Err(Failure::Contract(ContractViolation::VectorLength {
+                vector: "inputs",
+                expected: n_in,
+                actual: point.inputs.len(),
+            }));
+        }
+    }
+    let mut unit = vec![0.0; n_in];
+    let (mut here, mut there) = (vec![0.0; n_out], vec![0.0; n_out]);
+    for input in 0..n_in {
+        unit[input] = 1.0;
+        component
+            .jvp(case.state, case.dt_s, case.inputs, &unit, &mut here, cx)
+            .map_err(Failure::Owner)?;
+        component
+            .jvp(other.state, other.dt_s, other.inputs, &unit, &mut there, cx)
+            .map_err(Failure::Owner)?;
+        unit[input] = 0.0;
+        for (output, (a, b)) in here.iter().zip(&there).enumerate() {
+            if a.to_bits() != b.to_bits() {
+                return Err(law(
+                    "the slopes of an exact-linear component depend on the step alone",
+                    format!(
+                        "d output {output} / d input {input} is {a:e} ({:#018x}) at the first \
+                         point and {b:e} ({:#018x}) at the second",
+                        a.to_bits(),
+                        b.to_bits()
+                    ),
+                ));
+            }
         }
     }
     Ok(())

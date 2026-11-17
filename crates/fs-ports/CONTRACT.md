@@ -286,7 +286,24 @@ that moves an output by units in its last place, a wrong VJP sign, and a
 a `Cell` under the bits of the accepted state, the step and the force, which
 `propose` never shows, passes and observes what the reference observes;
 cancellation returns the owner's error; an audit given a port list longer or
-shorter than its layout is refused. `check_load_line` checks the
+shorter than its layout is refused. `check_exact_linear` holds a component
+that declares `Class::ExactLinear` to that claim between two operating points
+of one step. A solver may keep, at one step, what it derived from the slopes
+at an earlier step of the same length, and a run that kept it must take the
+steps of a run that derived it again; so along every unit input direction the
+JVP at the two points must be the same bits, a zero's sign included. It
+refuses a component of another class and two points at different steps.
+`check_port_tangent` asks it of every component of the class, at its case and
+at the case's stale state with each input `x` moved to `1.5 x + 0.25`. G0
+tests in `tests/component_reference.rs`: the reference declares `ExactLinear`
+only without its damper, whose heat is quadratic in the mean velocity, and
+there has the same slopes at two states and two forces; a damped variant that
+declares the class is refused by the slope of its heat with respect to the
+force when only its state differs, when only the force differs, and by the
+tangent tier; an undamped variant whose zero heat slope carries the sign of
+the mean velocity is refused by a zero and a minus zero. The law compares two
+points and is no proof of the claim at others, and it asks nothing of a
+component with no declared tangent. `check_load_line` checks the
 load-line tier at one point: the line's ports, the size of the matrix, purity
 (including the stale candidate slot), the step audit at the flows on the line,
 `admit`, and that a zero matrix gives `propose` to the bit. G0 tests in

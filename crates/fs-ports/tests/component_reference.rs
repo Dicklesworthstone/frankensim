@@ -7,7 +7,13 @@
 //! leaves through the heat port. Five deliberately broken variants each fail
 //! the law they break. A sixth keeps a cache in a `Cell`, keyed by the bits of
 //! what it is proposed from, that `propose` never shows; it passes, as a cache
-//! may. Without its damper the reference is reversible in time: it passes
+//! may. The reference declares `ExactLinear` only without its damper, whose
+//! heat is quadratic in the velocity; there its slopes are the same bits at
+//! two states and two forces (`check_exact_linear`), and a seventh variant,
+//! which keeps the damper and declares that class, is refused by its heat
+//! slope; an eighth, undamped, whose zero heat slope carries the sign of the
+//! velocity, is refused by that sign. Without its damper the reference is
+//! reversible in time: it passes
 //! `check_time_reversal` within bounds derived from its own arithmetic, and
 //! is refused with its damper, with a reversal that keeps the velocity, and
 //! with one that is not an involution. Through its drive port, the audit
@@ -25,8 +31,8 @@ use core::num::NonZeroUsize;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cancelled, Cx, ExecMode, StreamKey};
 use fs_ports::component::conformance::{
-    Case, Failure, Observed, ReversalAllowance, UnitExponents, check_component, check_port_tangent,
-    check_time_reversal, check_unit_rescaling, unit_factor,
+    Case, Failure, Observed, ReversalAllowance, UnitExponents, check_component, check_exact_linear,
+    check_port_tangent, check_time_reversal, check_unit_rescaling, unit_factor,
 };
 use fs_ports::component::{
     Carrier, Class, Component, ContractViolation, PortLayout, PortRole, PortSpec, PortTangent,
@@ -77,6 +83,13 @@ enum Fault {
     /// the force, and returns it when all of them repeat. What it returns is
     /// what it would have computed, so `propose` never shows the cache.
     CachesItsLastMean,
+    /// Keeps its damper and still declares [`Class::ExactLinear`]. The heat
+    /// it returns is quadratic in the mean velocity, so that output's slope
+    /// moves with the state and with the force.
+    ClaimsExactLinear,
+    /// Forms the heat slope as a product with its damping even when that is
+    /// zero, so the zero it returns has the sign of the mean velocity.
+    SignedZeroHeatSlope,
 }
 
 /// The bits a cached mean velocity is keyed by: the accepted state's
@@ -149,6 +162,18 @@ impl SpringMassDamper {
             / denominator;
         (mean, half / denominator)
     }
+
+    /// The slope of the heat output with respect to the force, from the
+    /// mean velocity and its slope. With no damper it is one zero whatever
+    /// the sign of the mean velocity; a product with the zero coefficient
+    /// would carry that sign.
+    fn heat_slope(&self, mean: f64, slope: f64) -> f64 {
+        if self.damping_n_s_m == 0.0 && self.fault != Fault::SignedZeroHeatSlope {
+            0.0
+        } else {
+            -2.0 * self.damping_n_s_m * mean * slope
+        }
+    }
 }
 
 impl Component for SpringMassDamper {
@@ -160,7 +185,15 @@ impl Component for SpringMassDamper {
     }
 
     fn class(&self) -> Class {
-        Class::ExactLinear
+        // The heat returned is the damping times the square of the mean
+        // velocity. With a damper its slope moves with the state and the
+        // force, so only the undamped oscillator's slopes depend on the
+        // step alone.
+        if self.damping_n_s_m == 0.0 || self.fault == Fault::ClaimsExactLinear {
+            Class::ExactLinear
+        } else {
+            Class::Smooth
+        }
     }
 
     fn stored_energy_j(&self, state: &Oscillator) -> Result<f64, Cancelled> {
@@ -239,7 +272,7 @@ impl PortTangent for SpringMassDamper {
         cx.checkpoint()?;
         let (mean, slope) = self.mean_velocity(old, dt_s, inputs[0]);
         d_outputs[0] = slope * d_inputs[0];
-        d_outputs[1] = -2.0 * self.damping_n_s_m * mean * slope * d_inputs[0];
+        d_outputs[1] = self.heat_slope(mean, slope) * d_inputs[0];
         Ok(())
     }
 
@@ -259,8 +292,8 @@ impl PortTangent for SpringMassDamper {
         } else {
             1.0
         };
-        bar_inputs[0] = sign
-            * (slope * bar_outputs[0] - 2.0 * self.damping_n_s_m * mean * slope * bar_outputs[1]);
+        bar_inputs[0] =
+            sign * (slope * bar_outputs[0] + self.heat_slope(mean, slope) * bar_outputs[1]);
         bar_inputs[1] = 0.0;
         Ok(())
     }
@@ -429,6 +462,123 @@ fn a_wrong_vjp_sign_fails_the_transpose_test() {
         panic!("expected a law failure, got {failure}");
     };
     assert_eq!(law, "vjp is the transpose of jvp");
+}
+
+/// A second state, whose mean velocity has the other sign, and a second
+/// pair of inputs.
+const ELSEWHERE: Oscillator = Oscillator {
+    position_m: -4.0e-3,
+    velocity_m_s: 0.9,
+};
+const OTHER_INPUTS: [f64; 2] = [-3.5, 310.0];
+
+/// [`case`] at `state` and `inputs`.
+fn case_at(state: &'static Oscillator, inputs: &'static [f64; 2]) -> Case<'static, Oscillator> {
+    Case {
+        state,
+        inputs,
+        ..case()
+    }
+}
+
+/// Claims, declared before the first run: the reference without its damper
+/// declares `ExactLinear`, and has the same slopes, to the bit, at two
+/// states and two forces; the tangent tier, which asks that law of the
+/// class, passes it too. With its damper the reference declares `Smooth`,
+/// and the law is refused it by its class. Two points at different steps
+/// are refused.
+#[test]
+fn the_undamped_reference_keeps_its_slopes_and_the_damped_one_does_not_claim_to() {
+    let gate = CancelGate::new_clock_free();
+    let honest = undamped();
+    assert_eq!(honest.class(), Class::ExactLinear);
+    let other = case_at(&ELSEWHERE, &OTHER_INPUTS);
+    with_cx(&gate, |cx| {
+        check_exact_linear(&honest, &case(), &other, cx).expect("the same slopes");
+        check_port_tangent(&honest, &case(), 1.0e-7, 1.0e-12, cx).expect("the tangent tier");
+    });
+    let refused_as = |component: &SpringMassDamper, other: &Case<'_, Oscillator>| {
+        let refused = with_cx(&gate, |cx| {
+            check_exact_linear(component, &case(), other, cx)
+        });
+        let Err(Failure::Law { law, .. }) = refused else {
+            panic!("expected a law failure, got {refused:?}");
+        };
+        law
+    };
+    let damped = SpringMassDamper::new(Fault::None);
+    assert_eq!(damped.class(), Class::Smooth);
+    assert_eq!(
+        refused_as(&damped, &other),
+        "the exact-linear law is asked of a component of that class"
+    );
+    let longer = Case {
+        dt_s: 2.0e-3,
+        ..other
+    };
+    assert_eq!(
+        refused_as(&honest, &longer),
+        "the two points of the exact-linear law share a step"
+    );
+}
+
+/// Claims, declared before the first run: a damped oscillator that declares
+/// `ExactLinear` is refused by the slope of its heat with respect to the
+/// force: when only its state differs, when only the force differs, and by
+/// the tangent tier at one case.
+#[test]
+fn a_damped_oscillator_that_claims_exact_linear_is_refused_by_its_heat_slope() {
+    let gate = CancelGate::new_clock_free();
+    let claims = SpringMassDamper::new(Fault::ClaimsExactLinear);
+    assert_eq!(claims.class(), Class::ExactLinear);
+    let broken = "the slopes of an exact-linear component depend on the step alone";
+    for (what, other) in [
+        ("another state", case_at(&ELSEWHERE, &INPUTS)),
+        ("another force", case_at(&START, &OTHER_INPUTS)),
+    ] {
+        let refused = with_cx(&gate, |cx| check_exact_linear(&claims, &case(), &other, cx));
+        let Err(Failure::Law { law, detail }) = refused else {
+            panic!("{what}: expected a law failure, got {refused:?}");
+        };
+        assert_eq!(law, broken, "{what}");
+        assert!(
+            detail.starts_with("d output 1 / d input 0 is "),
+            "{what}: {detail}"
+        );
+    }
+    let refused = with_cx(&gate, |cx| {
+        check_port_tangent(&claims, &case(), 1.0e-7, 1.0e-12, cx)
+    });
+    let Err(Failure::Law { law, .. }) = refused else {
+        panic!("expected a law failure, got {refused:?}");
+    };
+    assert_eq!(law, broken);
+}
+
+/// Claims, declared before the first run: the law compares bits, so an
+/// undamped oscillator whose zero heat slope carries the sign of its mean
+/// velocity is refused between a state where that velocity is negative and
+/// one where it is positive, by a zero and a minus zero.
+#[test]
+fn a_zero_slope_that_carries_the_sign_of_the_state_is_refused() {
+    let gate = CancelGate::new_clock_free();
+    let mut signed = undamped();
+    signed.fault = Fault::SignedZeroHeatSlope;
+    assert_eq!(signed.class(), Class::ExactLinear);
+    let other = case_at(&ELSEWHERE, &INPUTS);
+    let refused = with_cx(&gate, |cx| check_exact_linear(&signed, &case(), &other, cx));
+    let Err(Failure::Law { law, detail }) = refused else {
+        panic!("expected a law failure, got {refused:?}");
+    };
+    assert_eq!(
+        law,
+        "the slopes of an exact-linear component depend on the step alone"
+    );
+    assert_eq!(
+        detail,
+        "d output 1 / d input 0 is 0e0 (0x0000000000000000) at the first point and -0e0 \
+         (0x8000000000000000) at the second"
+    );
 }
 
 #[test]
