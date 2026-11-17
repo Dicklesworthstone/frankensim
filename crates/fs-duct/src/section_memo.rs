@@ -11,6 +11,12 @@
 //!
 //! The store belongs to one thread and lives as long as its scope (a shape build), so concurrent builds keep separate
 //! stores and the memory is returned when each build ends.
+//!
+//! One scope keeps at most [`MAX_KEPT_PAIRS`] pairs. Past that it still serves every pair it holds, and computes each
+//! other pair without keeping it, so the cap changes which pairs are served, never a pair's bits. The cap is above the
+//! bound 36913a71c8's message read from the code for its /ʃa/ card: 91 sections x (65,536 ladder bins + 2,060 formant
+//! bins). The nasal lines' ladder, which may climb to 1,048,576 taps since 69feadd1e3, has no such bound: voice C3-a's
+//! store held 1.9 GB in one table at 166 s before the cap (bead frankensim-section-memo-nasal-growth-ubwcc).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -26,11 +32,18 @@ struct GasPairs {
     pairs: HashMap<[u64; 2], SectionPair>,
 }
 
-#[derive(Default)]
+/// Pairs one scope keeps, at most: 7 x 2^20 = 7,340,032, above the /ʃa/ card's bound of 91 x (65,536 + 2,060) =
+/// 6,151,236 pairs (see the module's documentation).
+const MAX_KEPT_PAIRS: usize = 7 << 20;
+
 struct Store {
     gases: Vec<GasPairs>,
     served: u64,
     computed: u64,
+    /// Pairs kept, over every gas.
+    kept: usize,
+    /// Pairs this scope keeps, at most.
+    cap: usize,
 }
 
 thread_local! {
@@ -40,13 +53,27 @@ thread_local! {
 /// Runs `build` with every viscothermal section pair it evaluates on this thread kept, and served again by the exact
 /// bits of its inputs. The store is dropped when `build` returns or unwinds. Inside an open scope this runs `build` in
 /// that scope.
+///
+/// The scope keeps at most 7 x 2^20 = 7,340,032 pairs; past that it computes a pair without keeping it, which changes
+/// no pair's bits (see the module's documentation).
 pub fn section_memo<T>(build: impl FnOnce() -> T) -> T {
+    section_memo_keeping(MAX_KEPT_PAIRS, build)
+}
+
+/// [`section_memo`] with a scope that keeps at most `cap` pairs. A nested call uses the open scope and its cap.
+fn section_memo_keeping<T>(cap: usize, build: impl FnOnce() -> T) -> T {
     let opened = STORE.with(|store| {
         let mut store = store.borrow_mut();
         if store.is_some() {
             false
         } else {
-            *store = Some(Store::default());
+            *store = Some(Store {
+                gases: Vec::new(),
+                served: 0,
+                computed: 0,
+                kept: 0,
+                cap,
+            });
             true
         }
     });
@@ -72,8 +99,8 @@ pub fn section_memo_counts() -> Option<(u64, u64)> {
 }
 
 /// The pair at `inputs` = `[radius, omega, density, sound_speed, dynamic_viscosity, gamma, prandtl]`: served from the
-/// open scope's store when the same seven bit patterns were computed before, else `compute()` (kept when it succeeds).
-/// Outside a scope, `compute()` alone.
+/// open scope's store when the same seven bit patterns were computed and kept before, else `compute()` (kept when it
+/// succeeds and the scope keeps fewer pairs than its cap). Outside a scope, `compute()` alone.
 pub(crate) fn served_or_computed<E>(
     inputs: [f64; 7],
     compute: impl FnOnce() -> Result<SectionPair, E>,
@@ -98,14 +125,18 @@ pub(crate) fn served_or_computed<E>(
             STORE.with(|store| {
                 if let Some(s) = store.borrow_mut().as_mut() {
                     s.computed += 1;
-                    let at = match s.gases.iter().position(|g| g.gas == gas) {
-                        Some(at) => at,
-                        None => {
-                            s.gases.push(GasPairs { gas, pairs: HashMap::new() });
-                            s.gases.len() - 1
+                    if s.kept < s.cap {
+                        let at = match s.gases.iter().position(|g| g.gas == gas) {
+                            Some(at) => at,
+                            None => {
+                                s.gases.push(GasPairs { gas, pairs: HashMap::new() });
+                                s.gases.len() - 1
+                            }
+                        };
+                        if s.gases[at].pairs.insert(key, pair).is_none() {
+                            s.kept += 1;
                         }
-                    };
-                    s.gases[at].pairs.insert(key, pair);
+                    }
                 }
             });
             Ok(pair)
@@ -228,5 +259,103 @@ mod tests {
             assert_eq!(first, outside);
             assert_eq!(second, outside);
         });
+    }
+
+    /// A scope at its cap still serves what it kept and computes the rest without keeping it: five distinct pairs under a
+    /// cap of three are computed five times on the first pass; on the second the three kept ones are served and the
+    /// other two computed again. Every pair has the bits of a fresh evaluation outside any scope.
+    #[test]
+    fn a_scope_at_its_cap_serves_what_it_kept_and_computes_the_rest_bit_for_bit() {
+        let gas = air();
+        let points: Vec<[f64; 7]> = [
+            (0.004, 4.6),
+            (0.004, 2.0e4),
+            (0.0123, 9.42e3),
+            (0.0007, 1.5e5),
+            (0.009, 777.0),
+        ]
+        .iter()
+        .map(|&(r, w)| inputs(&gas, r, w))
+        .collect();
+        let fresh: Vec<[u64; 5]> = points.iter().map(|&x| bits(pair_at_outside(x))).collect();
+        section_memo_keeping(3, || {
+            let first: Vec<[u64; 5]> = points.iter().map(|&x| bits(pair_at(x))).collect();
+            assert_eq!(
+                section_memo_counts(),
+                Some((0, 5)),
+                "the first pass computes every pair"
+            );
+            let second: Vec<[u64; 5]> = points.iter().map(|&x| bits(pair_at(x))).collect();
+            assert_eq!(
+                section_memo_counts(),
+                Some((3, 7)),
+                "three kept pairs served, two computed again"
+            );
+            let nested = section_memo(|| bits(pair_at(points[4])));
+            assert_eq!(
+                section_memo_counts(),
+                Some((3, 8)),
+                "a nested scope uses the open scope and its cap"
+            );
+            assert_eq!(first, fresh);
+            assert_eq!(second, fresh);
+            assert_eq!(nested, fresh[4]);
+        });
+        assert_eq!(
+            section_memo_counts(),
+            None,
+            "the store is dropped with its scope"
+        );
+    }
+
+    /// The transfer-matrix response of the duct above, inside scopes that keep 0, 1, 7 and 15 of its 16 distinct pairs,
+    /// has the bits of the response outside any scope, on both passes.
+    #[test]
+    fn a_tmm_response_inside_a_capped_scope_equals_the_one_outside_bit_for_bit() {
+        let gas = air();
+        let radii = [0.008, 0.0035, 0.011, 0.0035, 0.009];
+        let duct = Duct {
+            segments: radii
+                .iter()
+                .map(|&radius| Segment::Cylinder {
+                    radius,
+                    length: 0.031,
+                })
+                .collect(),
+        };
+        let response = |omega: f64| {
+            let r = input_impedance_wall(
+                &duct,
+                &gas,
+                omega,
+                LossModel::Bessel,
+                Termination::FlangedOpen,
+                None,
+            )
+            .expect("TMM response");
+            [
+                r.impedance.re,
+                r.impedance.im,
+                r.u_mouth_over_u_in.re,
+                r.u_mouth_over_u_in.im,
+            ]
+            .map(f64::to_bits)
+        };
+        let omegas = [37.7, 1.9e3, 2.2e4, 1.4e5];
+        let outside: Vec<[u64; 4]> = omegas.iter().map(|&w| response(w)).collect();
+        for cap in [0, 1, 7, 15] {
+            section_memo_keeping(cap, || {
+                let first: Vec<[u64; 4]> = omegas.iter().map(|&w| response(w)).collect();
+                let second: Vec<[u64; 4]> = omegas.iter().map(|&w| response(w)).collect();
+                let (served, computed) = section_memo_counts().expect("scope");
+                assert!(
+                    computed > 16,
+                    "cap {cap}: a pair past the cap is computed again ({computed})"
+                );
+                assert_eq!(cap == 0, served == 0, "cap {cap}: served {served}");
+                assert_eq!(first, outside, "cap {cap}, first pass");
+                assert_eq!(second, outside, "cap {cap}, second pass");
+            });
+        }
     }
 }
