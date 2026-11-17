@@ -164,8 +164,8 @@
 //! for what it is): the rows are the reed side's, word for word. The tract is a Thevenin source in series with the aperture; with
 //! `mouth` the airway's DC resistance comes out at DC only through a one-pole of time constant `tau_s` on the flow (a numerical
 //! regulation constant with no default, not a measurement) and the voice refuses a tract whose mouth-pressure load is active on
-//! any bin; with `lung` the card's pressure is the source at the far end. The airway takes the bore gas and its own default
-//! convergence ladder. Linear loop only: refused with `bore nonlinear` and `jet_noise`; the `constriction_noise` joins the tract as a series source. The rows may stand in
+//! any bin; with `lung` the card's pressure is the source at the far end. The airway takes the bore gas and the default
+//! convergence ladder under the airway's own ceiling of 131,072 taps (`upstream_airway::airway_ladder`). Linear loop only: refused with `bore nonlinear` and `jet_noise`; the `constriction_noise` joins the tract as a series source. The rows may stand in
 //! any order; `player_tract_section` rows keep their file order. A file without the rows is bit-identical to one written before.
 //!
 //! A `bessel` record is a Bessel horn `r(s) = b (u - s)^(-flare)` through the
@@ -1518,7 +1518,7 @@ impl LipDescription {
         };
         let voice = match &self.player_tract {
             Some((chain, pressure)) => voice
-                .with_player_tract(chain, *pressure, bore_state, &LineLadder::default())
+                .with_player_tract(chain, *pressure, bore_state, &crate::upstream_airway::airway_ladder())
                 .map_err(|e| format!("player_tract refused: {e}"))?,
             None => voice,
         };

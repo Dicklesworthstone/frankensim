@@ -99,7 +99,8 @@
 //! end and the reed sees the whole airway. With `mouth`, the airway's DC resistance comes out at DC only, through a one-pole
 //! of time constant `TAU_S` on the flow into the tract; `TAU_S` has no default, being a numerical regulation constant and not
 //! a measurement. The steady mouth pressure is then the card's, and the voice refuses a tract whose mouth-pressure load is
-//! active on any bin. The airway takes the voice's inlet gas and its own default convergence ladder, not `line_ladder`'s.
+//! active on any bin. The airway takes the voice's inlet gas and the default convergence ladder under the airway's own
+//! ceiling of 131,072 taps (`upstream_airway::airway_ladder`), not `line_ladder`'s.
 //! A card without the rows is unchanged to the bit.
 //! Legacy `listener_m` selects bore pressure plus the compact-jet proxy.
 //! `baffled_outlet` selects Rayleigh observation of the admitted openings.
@@ -1422,7 +1423,7 @@ impl ReedPerformance {
         }
         if let Some((chain, pressure)) = &player_tract {
             voice
-                .set_player_tract(chain, *pressure, rate, &crate::driving_point::LineLadder::default())
+                .set_player_tract(chain, *pressure, rate, &crate::upstream_airway::airway_ladder())
                 .map_err(ReedPerformanceError::Model)?;
         }
         // The outlet builds use `samples` only to bound the round-trip delay,

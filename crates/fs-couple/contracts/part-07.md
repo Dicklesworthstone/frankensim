@@ -5129,6 +5129,30 @@ frequency law. Four focused G0/G1/G3/G4/G5 groups cover loaded ABCD and closed
 limits, compliant reflection phase and FIR DC bins, reciprocal-coordinate
 realtime agreement, extreme scales, invalid inputs and callback cancellation.
 
+The source-transfer ladder gates on the tail energy and on the tap change
+between rungs, and a ladder that reaches its ceiling refuses as
+`DrivingPointError::TransferLadderUnconverged` with both measured figures and
+their tolerances. It used to refuse as `LadderUnconverged` with a peak shift
+of NaN, which hid the gate that failed. None of the six cards rendered for
+bead rbkr4 is refused at the new ceiling (the trumpet B-flat-4 tract with
+the airway converges on that rung), and no test exercises this refusal:
+fs-couple's lib test crate does not build within 14 GiB (14.8 GB at one job,
+2026-11-17).
+
+The reed and lip performance cards realize a player's tract on
+`upstream_airway::airway_ladder()`: the default tolerances under the
+airway's own ceiling of 131,072 taps (`MAX_AIRWAY_TAPS`), not the 65,536 of
+`LineLadder::default()`. The ceiling enters a ladder only at its first rung,
+at the passivity gain's room for a next rung, and at the last rung, so a
+tract that realized before realizes on the same rungs; only a tract refused
+at 65,536 taps can change. Measured on the trumpet B-flat-4 tract over
+Weibel's 24 generations (bead rbkr4), the tap change falls four times per
+doubling: 1.80e-4, 4.50e-5 and 1.13e-5 at 16,384, 32,768 and 65,536 taps,
+against 1e-5, with a tail energy of 1.4e-18. So that card was refused at
+65,536 taps, and it renders at 131,072. Four cards that rendered before (the
+trumpet B-flat-4 tract alone; tuba B2 and trombone B-flat-2 with the
+airway; clarinet C5 with the airway) render byte for byte as before.
+
 ## Driven spatial damping with finite caloric feedback
 
 `rigid_damping_heat::driven` connects the original simultaneous driven-pair

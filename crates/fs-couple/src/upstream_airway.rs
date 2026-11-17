@@ -138,6 +138,18 @@ pub const WEIBEL_SAAB_2021_TABLE_1_B_MM: [(f64, f64); 24] = [
 /// Largest DFT length the airway ladders accept, the characteristic line's own ceiling.
 const MAX_AIRWAY_TAPS: usize = 131_072;
 
+/// The default ladder's tolerances with the airway's own ceiling, [`MAX_AIRWAY_TAPS`]: the ladder the reed and lip
+/// performance cards give a player's tract. The ceiling enters a ladder only at its first rung (capped at half of it),
+/// at the passivity gain's room for a next rung, and at the last rung, so a tract that realizes under
+/// [`LineLadder::default`] realizes here on the same rungs, bit for bit; only a tract refused at 65,536 taps can
+/// change. The trumpet B-flat-4 tract over Weibel's airway needs the 131,072-tap rung (bead rbkr4).
+pub(crate) fn airway_ladder() -> LineLadder {
+    LineLadder {
+        max_taps: MAX_AIRWAY_TAPS,
+        ..LineLadder::default()
+    }
+}
+
 /// One generation of an airway: `count` identical cylinders in parallel.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AirwaySection {
@@ -848,13 +860,13 @@ fn realize_source_transfer(
             return Ok((ir, rungs));
         }
         if n_fft >= max_taps {
-            return Err(DrivingPointError::LadderUnconverged {
+            // The transfer ladder gates on the tap change, not on peaks: the refusal names both of its gates.
+            return Err(DrivingPointError::TransferLadderUnconverged {
                 max_taps,
                 tail_energy,
                 tail_tol: ladder.tail_tol,
-                // The transfer ladder gates on the tap change, not on peaks.
-                peak_shift_cents: f64::NAN,
-                peak_tol_cents: ladder.peak_tol_cents,
+                tap_change,
+                tap_tol,
             });
         }
         previous = ir[..half].to_vec();
