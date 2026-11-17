@@ -1,5 +1,39 @@
 # CONTRACT: fs-thermochem
 
+## Identity words of a species model and of a frozen mixture
+
+`Nasa9StandardStateModelV1::identity_words` and
+`FrozenIdealGasMixtureModelV1::identity_words` append the `u64` words that
+name a model, for a caller that must tell one model from another across
+processes. fs-material's gas model does, for the identity of a durable
+snapshot. Two models with the same words evaluate alike. Every struct is
+written out by a pattern with no rest, so a new field does not compile until
+it is bound or named as left out.
+
+- A species model: its species, its molar mass, its convention (phase,
+  equation of state, reference pressure, elemental reference), each region,
+  and its caloric reference if it has one (anchor temperature, anchor region,
+  both correction bounds, and each region's card hash with its two offsets).
+- A region by `card_identity` alone, the content hash of the card it was built
+  from. Its temperature range, its nine coefficients and its reference
+  pressure are read from that card by `Nasa9RegionV1::from_card`, the one
+  place a region is built, so the hash covers them.
+- A mixture: a kind word, every species model in canonical order, and the
+  declared and the mole composition, each with its basis and every fraction.
+  A composition is fs-qty's and is read through `basis` and `fractions`, which
+  return its two fields; a field added to it there would not be noticed here.
+
+`byte_words` writes a byte string (a text, a hash, a canonical encoding) as
+its length and then its bytes, eight to a word.
+
+Unit test in `mixture.rs`,
+`identity_words_name_every_species_model_and_both_compositions`: the words
+are equal for a mixture built again, and different for another species, molar
+mass, region card, reference pressure, elemental reference, fraction and
+declared basis, and for a species model with a caloric reference and with
+another one. Not tested: a model with two regions, and a phase or an equation
+of state other than the one each enum has.
+
 ## Channel-resolved fusion-neutron emission
 
 `fusion::neutrons::FusionNeutronEmissionV1` retains the actual integrated

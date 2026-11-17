@@ -630,31 +630,37 @@ fn a_saved_thermal_timeline_continues_alike_and_refuses_a_changed_lining() {
     each_changed_scene_is_refused(CHANGED_TIMELINE_SCENES);
 }
 
-/// Claims, declared before the first run: a scene with a member that has no
-/// state codec is still refused a checkpoint, by that member's name, and no
-/// file is written. The scene is a piston on a `gas_cavity`, a kind with
-/// none; it runs in place, beside the packs it reads.
+/// The packs the gas spring reads, relative to the scene.
+const N2_PACKS: [&str; 3] = ["n2/species.pack", "n2/nasa9.pack", "n2/transport.fsmcdpk"];
+
+/// The gas spring changed one passage at a time: its gas's temperature, its
+/// volume and the lower end of its temperature bracket.
+const CHANGED_GAS_SCENES: &str = r#"
+n2_gas_spring.json | thermochemical 300 90000 | thermochemical 310 90000
+n2_gas_spring.json | "volume_m3": 1.0e-4 | "volume_m3": 1.1e-4
+n2_gas_spring.json | "temperature_min_k": 200 | "temperature_min_k": 210
+"#;
+
+/// Claims, declared before the first run: the piston on a `gas_cavity`,
+/// saved at 0.125 s and resumed by another process, reports byte for byte
+/// what one process reports that pauses at 0.125 s and goes on, and its
+/// checkpoint is refused by the same scene with another gas temperature,
+/// volume or temperature bracket. The scene reads its packs beside itself,
+/// so they are put beside the scratch copy first.
 #[test]
-fn a_scene_with_a_member_with_no_codec_is_still_refused_by_that_members_name() {
-    let checkpoint = scratch("n2_gas_spring.json", "").with_extension("fssnap");
-    let (code, stdout, stderr) = run_binary(&[
-        "--json",
-        "system",
-        &example("n2_gas_spring.json"),
-        "--until",
-        "0.125",
-        "--checkpoint",
-        checkpoint.to_str().unwrap(),
-    ]);
-    eprintln!("spring: exit {code}: {}", stderr.trim_end());
-    assert_eq!(code, 4, "{stdout}{stderr}");
-    assert!(stderr.contains("`spring` has no state codec"), "{stderr}");
-    assert!(!checkpoint.exists());
+fn a_saved_gas_cavity_continues_alike_and_refuses_a_changed_gas() {
+    let scene = scratch("n2_gas_spring.json", "");
+    for pack in N2_PACKS {
+        let beside = scene.parent().unwrap().join(pack);
+        std::fs::create_dir_all(beside.parent().unwrap()).unwrap();
+        std::fs::copy(example(pack), beside).unwrap();
+    }
+    each_changed_scene_is_refused(CHANGED_GAS_SCENES);
 }
 
 /// The examples the tests above save and resume by `checkpoint_continuation`
-/// (27 scenes), and the one the test above shows refused.
-const SAVED_ABOVE_OR_REFUSED: &str = "adaptive_oscillator adaptive_suspension \
+/// (28 scenes).
+const SAVED_ABOVE: &str = "adaptive_oscillator adaptive_suspension \
     adaptive_viscoelastic_mount anisotropic_damping bowed_mode carreau_pipe damped_pair \
     damped_pair_lining dragged_lining phase_change_conduction phase_change_store \
     port_hamiltonian_oscillator projected_suspension self_heating_damper spun_puck \
@@ -667,8 +673,8 @@ const SAVED_ABOVE_OR_REFUSED: &str = "adaptive_oscillator adaptive_suspension \
 /// --checkpoint`, stops at or after T, and resumed by another process
 /// reports byte for byte what the binary reports for the scene with no
 /// pause. T is 0.125 s, or half the duration of a scene shorter than 0.25 s.
-/// So every example is saved and resumed by a test here but the one refused;
-/// a scene added to the directory is saved here unless it is named above.
+/// So every example is saved and resumed by a test here; a scene added to
+/// the directory is saved here unless it is named above.
 #[test]
 fn every_other_example_saved_at_a_whole_step_and_resumed_reports_what_its_plain_run_reports() {
     let mut scenes: Vec<_> = std::fs::read_dir(example(""))
@@ -678,7 +684,7 @@ fn every_other_example_saved_at_a_whole_step_and_resumed_reports_what_its_plain_
         .collect();
     scenes.sort();
     let saves = scratch("saves", "");
-    let named: Vec<&str> = SAVED_ABOVE_OR_REFUSED.split_whitespace().collect();
+    let named: Vec<&str> = SAVED_ABOVE.split_whitespace().collect();
     let mut saved = 0;
     for scene in &scenes {
         let name = scene.file_stem().unwrap().to_str().unwrap();

@@ -10319,3 +10319,40 @@ Not done: a stream law from the owner (the restriction here is the kernel's
 linear element; the native nozzle is not a Component); the comparison with
 `GasPiston::step_with_nozzle`, which uses the midpoint wall step this
 Component does not have; a tangent for the streaming cavity.
+
+**Snapshots.** A closed cavity, with or without its heat port, has the state
+codec of fs-ports' `Component`. Its state is three words: the parcel's volume,
+temperature and pressure (`ClosedGasParcel::state_words`, fs-material).
+`encode_state` writes them for a parcel on the reference's model, mass and
+other point axes, and writes nothing for any other parcel (the owner's own
+check of an energy increment from the reference). `decode_state` takes the
+reference itself if the words are its own, as a step with no heat and no
+motion keeps its parcel to the bit, and otherwise rebuilds the parcel from
+the reference at that volume and temperature
+(`ClosedGasParcel::at_volume_temperature`), which computes the pressure as a
+step does. It writes the parcel again and returns it only if all three words
+come back, so a pressure that is not the owner's for the other two is
+refused, and only if the cavity can measure its energy from the reference.
+The cavity's identity is a kind word, the
+reference parcel whole (fs-material's words: the gas model, the point, the
+mass, the volume), the four limits of its solve and whether it is insulated;
+`ports` follows from the last and from `stream`. Because the reference is
+bound whole, a cavity built on another initial volume or temperature refuses
+a snapshot of this one: the stored energy is measured from the reference. A
+streaming cavity has no codec, no identity words, and is refused a snapshot
+by its node's name: its inventory changes, so its model and mass are state.
+
+Tests in `tests/component.rs`: a parcel two steps from the reference is
+written as its three words by the two-port and by the insulated cavity, and
+read back equal in every field; the parcel read back and the one never saved
+step to the same parcel and port values; the reference's own words are read
+back as the reference; two or four words, twice the pressure, the next
+pressure on the number line and no volume are not read; a parcel of another
+model and one
+of another mass are not written; the identity is equal for a cavity built
+again and differs for each limit of the solve, an insulating wall, another
+gas and a reference at another volume and temperature; a streaming cavity
+has no identity words, writes nothing and reads nothing. The kernel's own
+save and resume of a piston on a cavity is fs-cli's test on
+`examples/system/n2_gas_spring.json`, through the binary; fs-gas's tests
+cannot seal a snapshot, since fs-blake3 is not among its test dependencies.

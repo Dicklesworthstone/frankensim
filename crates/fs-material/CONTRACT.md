@@ -17,6 +17,48 @@
 
 ## New sections (newest first)
 
+## Identity and state words of a thermochemical gas parcel
+
+For the durable snapshots of fs-gas's cavity, the gas model and its closed
+parcel write their own words (`thermochemical_gas.rs` and
+`thermochemical_gas/energy.rs`, forwarded by `ClosedGasParcel`), each struct
+by a pattern with no rest.
+
+- `ThermochemicalGasModel::identity_words`: the mixture (fs-thermochem's
+  words), each species' transport card by its `content_hash()` with its
+  selection policy (a pinned plan by each property name and claim hash), the
+  water component, and every pack receipt with its four fields.
+- `IsochoricGasParcel::identity_words` names a parcel as a reference: the
+  model, every axis of its point with its value and its quantity, its mass and
+  its volume. The resolved state is not written: `model.evaluate(point)` is
+  the one place it comes from. The point is fs-matdb's and is read through
+  `axes` and `axis_quantities`, which return its two maps.
+- `state_words` writes where a closed parcel stands on its reference: its
+  volume, its temperature and its pressure, three words. In a closed parcel
+  the model, the mass and the other axes never change, and
+  `stored_energy_change_to` refuses a state where they differ.
+- `at_volume_temperature(V, T)` is the parcel that stands there. The model,
+  the mass, the specific gas constant and the other axes are the reference's;
+  the volume and the temperature are the caller's. The pressure is not given:
+  it is `(mass / V) r T`, the expression and the order in which
+  `discrete_gradient_heat_volume` builds a step's endpoint, and the resolved
+  state is evaluated at that point. Nothing is solved. As in that step, a
+  resolved density that is not `mass / V` to 64 eps is refused. A caller that
+  holds three words writes the rebuilt parcel again and compares, as fs-gas
+  does: a pressure that is not the one this computes is then refused.
+
+Tested in `crates/fs-gas/tests/component.rs`, where the parcel builders are.
+The identity words are equal for a parcel built again and differ for another
+NASA-9 coefficient, formation datum, transport card, selection policy, water
+component and state. A parcel two steps from its reference is rebuilt from
+its volume and its temperature equal in every field, its pressure among
+them. No volume, a temperature that is not one, and a temperature and a
+pressure the sources do not cover are refused. Not tested: two models that
+differ only in a pack receipt (a model assembled from cards has none), a
+pinned selection, a point with other axes than the builders' one, and the
+density refusal: the pressure is computed from that density, so no volume
+and temperature given here reach it.
+
 ## A card's Newtonian liquid in a laminar pipe
 
 `fluid_transport::laminar_pipe::MaterialLaminarPipe` is the Hagen-Poiseuille

@@ -34,9 +34,9 @@ the end of the first step that ends at or after `--until`, does it report what
 a run with no pause reports.
 Checkpoint files and restored sample histories are each bounded to 64 MiB.
 An element whose owner does not provide a native state codec refuses saving
-instead of omitting its state. Of the scenes in this directory that is
-`n2_gas_spring.json` alone, by its `gas_cavity`; every other one saves and
-resumes, `damped_pair_lining.json` with its `thermal_timeline` included.
+instead of omitting its state. Every scene in this directory saves and
+resumes, `damped_pair_lining.json` with its `thermal_timeline` and
+`n2_gas_spring.json` with its `gas_cavity` included.
 This includes support for authored or material-card-backed `enthalpy_body`
 and `layer_conductor` laws; keep referenced material packs unchanged when
 resuming. A `carreau_pipe` saves and resumes as well; its law is part of the

@@ -65,6 +65,34 @@ impl ClosedGasParcel {
     /// Preserve an already resolved parcel without resampling or losing sources.
     #[must_use]
     pub fn from_isochoric(parcel: IsochoricGasParcel) -> Self { Self { parcel } }
+
+    /// [`IsochoricGasParcel::identity_words`] of the parcel inside.
+    pub fn identity_words(&self, words: &mut Vec<u64>) {
+        let Self { parcel } = self;
+        parcel.identity_words(words);
+    }
+
+    /// [`IsochoricGasParcel::state_words`] of the parcel inside.
+    pub fn state_words(&self, words: &mut Vec<u64>) {
+        let Self { parcel } = self;
+        parcel.state_words(words);
+    }
+
+    /// [`IsochoricGasParcel::at_volume_temperature`] of the parcel inside:
+    /// this parcel's model, mass and other axes at the caller's volume and
+    /// temperature, with the pressure a step computes for them.
+    ///
+    /// # Errors
+    /// As that constructor.
+    pub fn at_volume_temperature(
+        &self,
+        volume_m3: f64,
+        temperature_k: f64,
+    ) -> Result<Self, GasEnergyError> {
+        self.parcel
+            .at_volume_temperature(volume_m3, temperature_k)
+            .map(Self::from_isochoric)
+    }
     /// Freeze the current geometry without re-evaluating any material property.
     #[must_use]
     pub fn into_isochoric(self) -> IsochoricGasParcel { self.parcel }

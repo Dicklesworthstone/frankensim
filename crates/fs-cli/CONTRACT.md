@@ -1013,20 +1013,25 @@ rungs at the same coefficients differ is fs-tribo's test, not one here).
 `bowed_mode.json`, a
 friction interface beside a `modal_structure`, is saved and resumed the
 same way now that the structure has a codec (under `modal_structure`,
-below). A scene with a member that has no codec is still refused a
-checkpoint, with exit 4 and no file, by that member's name:
-`n2_gas_spring.json` by its `spring`, a `gas_cavity`. (This paragraph said
-since 348d828a3b that `thermal_timeline` was the one kind left with none.
-That was wrong: no run of every example stood behind it.) Every other example
-is saved and resumed by a test of `tests/system_command/checkpoints.rs`: 27 by
-`checkpoint_continuation`, at a pause that cuts a step, and the rest by
+below). Every example scene is saved and resumed by a test of
+`tests/system_command/checkpoints.rs`: 28 by `checkpoint_continuation`, at a
+pause that cuts a step, and the rest by
 `every_other_example_saved_at_a_whole_step_and_resumed_reports_what_its_plain_run_reports`.
 That test reads the directory, runs each scene not named in its list with
 `--until T --whole-steps --checkpoint` (T is 0.125 s, or half the duration
 of a scene shorter than 0.25 s) and resumes it in another process to the
 bytes of the binary's report with no pause; it saved 15 scenes when it was
-written, and a scene added to the directory is saved by it. Whether a scene
-kind that no example uses has a codec is not shown by these tests.
+written, and a scene added to the directory is saved by it. No example is
+refused a checkpoint: a whole-step save of each of the 43, run with the dev
+binary when `gas_cavity` got its codec, wrote 43 files. (This paragraph said
+since 348d828a3b that `thermal_timeline` was the one kind left with none.
+That was wrong: `gas_cavity` had none either, and no run of every example
+stood behind the sentence.) An element whose owner has no codec is still
+refused by its name, with exit 4 and no file. No example has one now, so no
+test here shows it: the kernel's refusal by a node's name is tested in
+fs-system (a thermal timeline and a port-Hamiltonian owner with no codec).
+Not shown by any test here: the four kinds of the 47 that no example uses,
+`accumulator`, `capacitor`, `flow_source` and `torsion_spring`.
 
 Tests in `tests/system_command.rs`:
 - A 2 kg puck on a 1 cm patch under 10 N, sliding from 1 m/s without
@@ -2388,7 +2393,12 @@ transport card holds 75 to 101.325 kPa and 200 to 1000 K) is refused at
 admission (exit 3) or by the step that would reach it (exit 4). So is a
 bracket that spans two NASA-9 charts (N2's split at 1000 K). Reports give
 temperature, pressure, density, volume, mass and specific internal energy.
-`adaptive` refuses it.
+`adaptive` refuses it. Its state has fs-gas's codec, three words (volume,
+temperature, pressure) on a reference bound whole, so `--checkpoint` saves it:
+`tests/system_command/checkpoints.rs` saves `n2_gas_spring.json` at 0.125 s
+and resumes it in another process to the report of a run that pauses there,
+and its checkpoint is refused by the scene with another gas temperature,
+volume or temperature bracket.
 
 Tests in `tests/system_command.rs`, all on the seed N2 packs committed in
 `examples/system/n2/`:

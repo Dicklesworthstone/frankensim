@@ -475,6 +475,36 @@ impl FrozenIdealGasMixtureModelV1 {
         &self.mole_composition
     }
 
+    /// Append the words that name this mixture: every species model in its
+    /// canonical order ([`Nasa9StandardStateModelV1::identity_words`]) and
+    /// both compositions, each with its basis and every fraction. Two
+    /// mixtures with the same words evaluate alike at every temperature and
+    /// pressure.
+    ///
+    /// A composition is fs-qty's; it is read through `basis` and `fractions`,
+    /// which return its two fields.
+    pub fn identity_words(&self, words: &mut Vec<u64>) {
+        let Self {
+            components,
+            declared_composition,
+            mole_composition,
+        } = self;
+        words.push(u64::from_le_bytes(*b"nasa9mix"));
+        words.push(components.len() as u64);
+        for component in components {
+            component.identity_words(words);
+        }
+        for composition in [declared_composition, mole_composition] {
+            words.push(match composition.basis() {
+                CompositionBasis::MassFraction => 0,
+                CompositionBasis::MoleFraction => 1,
+                CompositionBasis::VolumeFraction => 2,
+            });
+            words.push(composition.fractions().len() as u64);
+            words.extend(composition.fractions().iter().map(|x| x.to_bits()));
+        }
+    }
+
     /// Evaluate frozen-mixture properties without constructing source receipts.
     ///
     /// Successful calls allocate nothing and use exactly the full evaluator's
@@ -1110,6 +1140,61 @@ mod tests {
             (actual - expected).abs() <= 128.0 * f64::EPSILON * scale,
             "actual {actual:?} differs from expected {expected:?}",
         );
+    }
+
+    /// Claims, declared before the first run: a mixture's identity words are
+    /// equal for a mixture built again, and different for another species,
+    /// molar mass, region card, reference pressure, elemental reference,
+    /// fraction and declared basis, and for a species model with a caloric
+    /// reference and with another one.
+    #[test]
+    fn identity_words_name_every_species_model_and_both_compositions() {
+        let words = |change: usize| {
+            let (mut species, mut molar_mass, mut cp_over_r) = ("N2", 0.028, 3.5);
+            let (mut pressure, mut elemental) = (REFERENCE_PRESSURE, "elements-a");
+            let (mut basis, mut fractions) = (CompositionBasis::MoleFraction, vec![0.25, 0.75]);
+            match change {
+                2 => species = "CO",
+                3 => molar_mass = 0.029,
+                4 => cp_over_r = 3.6,
+                5 => pressure = 2.0 * REFERENCE_PRESSURE,
+                6 => elemental = "elements-b",
+                7 => fractions = vec![0.5, 0.5],
+                8 => basis = CompositionBasis::MassFraction,
+                _ => {}
+            }
+            let mut first =
+                standard_state_model(species, molar_mass, cp_over_r, pressure, elemental);
+            if change >= 9 {
+                let anchor = Temperature::new(if change == 9 { 300.0 } else { 400.0 });
+                let (energy, entropy) = (
+                    crate::MolarEnergyQuantityV1::new(1.0),
+                    MolarThermalQuantityV1::new(1.0),
+                );
+                first = first
+                    .with_caloric_continuity(anchor, energy, entropy)
+                    .expect("caloric reference");
+            }
+            let second = standard_state_model("O2", 0.032, 3.5, pressure, elemental);
+            let mixture = FrozenIdealGasMixtureModelV1::new(
+                vec![first, second],
+                composition(basis, fractions),
+            )
+            .expect("mixture");
+            let mut words = Vec::new();
+            mixture.identity_words(&mut words);
+            words
+        };
+        let mut seen: Vec<Vec<u64>> = Vec::new();
+        for change in 1..=10 {
+            let named = words(change);
+            assert!(
+                !seen.contains(&named),
+                "change {change} names an earlier mixture"
+            );
+            seen.push(named);
+        }
+        assert_eq!(words(0), seen[0]);
     }
 
     #[test]

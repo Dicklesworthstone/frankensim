@@ -138,6 +138,60 @@ impl ThermochemicalGasModel {
         &self.source_packs
     }
 
+    /// Append the words that name this medium: the mixture
+    /// ([`FrozenIdealGasMixtureModelV1::identity_words`]), each species'
+    /// transport card by its content hash with its selection policy, the
+    /// water component, and every pack receipt with its four fields. Two
+    /// models with the same words evaluate alike at every point.
+    pub fn identity_words(&self, words: &mut Vec<u64>) {
+        use fs_thermochem::byte_words;
+        let Self {
+            thermodynamics,
+            transport,
+            water_component,
+            source_packs,
+        } = self;
+        thermodynamics.identity_words(words);
+        words.push(transport.len() as u64);
+        for assigned in transport {
+            let SpeciesTransportMaterial {
+                species,
+                material,
+                selection,
+            } = assigned;
+            byte_words(species.as_str().as_bytes(), words);
+            byte_words(material.content_hash().as_bytes(), words);
+            match selection {
+                MaterialPropertySelection::SingleClaimOnly => words.push(0),
+                MaterialPropertySelection::PreferObservationBacked => words.push(1),
+                MaterialPropertySelection::PinnedByProperty(pins) => {
+                    words.extend([2, pins.len() as u64]);
+                    for (property, fs_matdb::ClaimId(claim)) in pins {
+                        byte_words(property.as_bytes(), words);
+                        byte_words(claim.as_bytes(), words);
+                    }
+                }
+            }
+        }
+        match water_component {
+            None => words.push(0),
+            Some(index) => words.extend([1, *index as u64]),
+        }
+        words.push(source_packs.len() as u64);
+        for receipt in source_packs {
+            let packs::ThermochemicalPackReceipt {
+                species,
+                species_pack,
+                nasa9_pack,
+                transport_pack,
+            } = receipt;
+            byte_words(species.as_str().as_bytes(), words);
+            for pack in [species_pack, nasa9_pack, transport_pack] {
+                byte_words(pack.as_bytes(), words);
+            }
+        }
+    }
+
     /// Explicitly identified water species, if any; never inferred from a name
     /// or molar mass. A zero-fraction composition replacement omits its label.
     #[must_use]

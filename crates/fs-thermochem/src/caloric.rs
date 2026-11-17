@@ -212,6 +212,33 @@ impl Nasa9CaloricReferenceV1 {
     pub fn regions(&self) -> &[Nasa9CaloricRegionCorrectionV1] {
         &self.regions
     }
+
+    /// Append this reference to identity words: every field, and each
+    /// region's source card hash with its two offsets.
+    pub(crate) fn identity_words(&self, words: &mut Vec<u64>) {
+        let Self {
+            anchor_temperature_bits,
+            anchor_region,
+            maximum_enthalpy_correction_bits,
+            maximum_entropy_correction_bits,
+            regions,
+        } = self;
+        words.extend([*anchor_temperature_bits, *anchor_region as u64]);
+        words.extend([
+            *maximum_enthalpy_correction_bits,
+            *maximum_entropy_correction_bits,
+        ]);
+        words.push(regions.len() as u64);
+        for region in regions {
+            let Nasa9CaloricRegionCorrectionV1 {
+                card_identity,
+                enthalpy_offset_bits,
+                entropy_offset_bits,
+            } = region;
+            crate::byte_words(card_identity, words);
+            words.extend([*enthalpy_offset_bits, *entropy_offset_bits]);
+        }
+    }
 }
 
 fn refused(region: usize, reason: &'static str) -> ThermochemErrorV1 {

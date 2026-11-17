@@ -285,6 +285,40 @@ impl StandardStateConventionV1 {
     pub const fn elemental_reference(&self) -> &ElementalReferenceIdV1 {
         &self.elemental_reference
     }
+
+    /// Append this convention to identity words: every field.
+    pub(crate) fn identity_words(&self, words: &mut Vec<u64>) {
+        let Self {
+            phase,
+            eos,
+            reference_pressure,
+            elemental_reference,
+        } = self;
+        let ElementalReferenceIdV1(elemental) = elemental_reference;
+        words.push(match phase {
+            StandardStatePhaseV1::Gas => 0,
+        });
+        words.push(match eos {
+            ReferenceEquationOfStateV1::IdealGas => 0,
+        });
+        words.push(reference_pressure.value().to_bits());
+        byte_words(elemental.as_bytes(), words);
+    }
+}
+
+/// Append `bytes` to identity words: their count, then the bytes themselves,
+/// eight to a word in little-endian order, the last word padded with zeros.
+/// A text, a content hash and a canonical encoding are all written this way,
+/// so two byte strings never give the same words.
+pub fn byte_words(bytes: &[u8], words: &mut Vec<u64>) {
+    words.push(bytes.len() as u64);
+    let (whole, rest) = bytes.as_chunks::<8>();
+    words.extend(whole.iter().map(|chunk| u64::from_le_bytes(*chunk)));
+    if !rest.is_empty() {
+        let mut last = [0; 8];
+        last[..rest.len()].copy_from_slice(rest);
+        words.push(u64::from_le_bytes(last));
+    }
 }
 
 /// NASA-9 property named by a non-finite evaluation refusal.
@@ -674,6 +708,23 @@ impl Nasa9RegionV1 {
     pub const fn card(&self) -> &ConstitutiveModelCard {
         &self.card
     }
+
+    /// Append this region to identity words: the content hash of the card it
+    /// was built from, which names everything else it holds.
+    pub(crate) fn identity_words(&self, words: &mut Vec<u64>) {
+        let Self {
+            // Each read from `card` by `from_card`, the one place a region is
+            // built, so the card's content hash covers all four.
+            temperature_min: _,
+            temperature_max: _,
+            coefficients: _,
+            reference_pressure: _,
+            card_identity,
+            // What `card_identity` is the content hash of.
+            card: _,
+        } = self;
+        byte_words(card_identity, words);
+    }
 }
 
 const NASA9_COEFFICIENT_NAMES: [&str; 9] = ["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8"];
@@ -797,6 +848,34 @@ impl Nasa9StandardStateModelV1 {
     #[must_use]
     pub fn regions(&self) -> &[Nasa9RegionV1] {
         &self.regions
+    }
+
+    /// Append the words that name this species model: its species, its molar
+    /// mass, every field of its convention, each region by the content hash
+    /// of its source card, and its caloric reference if it has one. Two
+    /// models with the same words evaluate alike.
+    pub fn identity_words(&self, words: &mut Vec<u64>) {
+        let Self {
+            species,
+            molar_mass,
+            convention,
+            regions,
+            caloric_reference,
+        } = self;
+        byte_words(species.as_str().as_bytes(), words);
+        words.push(molar_mass.value().to_bits());
+        convention.identity_words(words);
+        words.push(regions.len() as u64);
+        for region in regions {
+            region.identity_words(words);
+        }
+        match caloric_reference {
+            None => words.push(0),
+            Some(reference) => {
+                words.push(1);
+                reference.identity_words(words);
+            }
+        }
     }
 
     /// Evaluate the same source-bound molar properties without allocating a receipt.

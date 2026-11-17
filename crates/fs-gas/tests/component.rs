@@ -65,6 +65,19 @@ fn provenance() -> Provenance {
 /// One authored species: Cp/R=3.5+slope*T. Formation datum is independently
 /// variable; it contributes no work, heat capacity or pressure change.
 fn parcel(slope: f64, formation_j_mol: f64) -> ClosedGasParcel {
+    let selection = MaterialPropertySelection::SingleClaimOnly;
+    parcel_of(slope, formation_j_mol, 2.0e-5, selection, false)
+}
+
+/// [`parcel`] with a viscosity [Pa s] and a selection policy for its
+/// transport card and, if `water`, its one species named the water component.
+fn parcel_of(
+    slope: f64,
+    formation_j_mol: f64,
+    viscosity_pa_s: f64,
+    selection: MaterialPropertySelection,
+    water: bool,
+) -> ClosedGasParcel {
     let id = SpeciesId::new("fixture-gas").unwrap();
     let mut coefficients = [0.0; 9];
     coefficients[2] = 3.5;
@@ -97,7 +110,7 @@ fn parcel(slope: f64, formation_j_mol: f64) -> ClosedGasParcel {
     ).unwrap();
     let mut claims = ClaimSet::new();
     for (name, dims, value) in [
-        ("dynamic_viscosity", DynViscosity::DIMS, 2.0e-5),
+        ("dynamic_viscosity", DynViscosity::DIMS, viscosity_pa_s),
         ("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS, 0.03),
     ] {
         claims.insert_claim(PropertyClaim {
@@ -113,7 +126,7 @@ fn parcel(slope: f64, formation_j_mol: f64) -> ClosedGasParcel {
         }).unwrap();
     }
     let transport = SpeciesTransportMaterial {
-        species: id,
+        species: id.clone(),
         material: MaterialCard::assemble(
             MaterialStateId {
                 chemistry: "fixture-gas".into(), phase: "gas".into(),
@@ -122,7 +135,7 @@ fn parcel(slope: f64, formation_j_mol: f64) -> ClosedGasParcel {
             claims,
             vec![],
         ).unwrap(),
-        selection: MaterialPropertySelection::SingleClaimOnly,
+        selection,
     };
     let model = ThermochemicalGasModel::new(
         FrozenIdealGasMixtureModelV1::new(
@@ -130,7 +143,7 @@ fn parcel(slope: f64, formation_j_mol: f64) -> ClosedGasParcel {
             Composition::new(CompositionBasis::MoleFraction, vec![1.0]).unwrap(),
         ).unwrap(),
         vec![transport],
-        None,
+        water.then_some(&id),
     ).unwrap();
     let point = QueryPoint::new()
         .with_quantity("temperature", quantity(QuantityKind::AbsoluteTemperature), T0).unwrap()
@@ -1290,4 +1303,202 @@ fn the_same_source_cards_with_another_caloric_datum_do_not_connect() {
         connect_streams(raw, corrected),
         Err(AdmissionError::StreamBasis { .. })
     ));
+}
+
+// Durable snapshots of the cavity (bead rc-1109 .5.4): the parcel's words
+// (fs-material), and the cavity's codec on them.
+
+fn identity_of(parcel: &ClosedGasParcel) -> Vec<u64> {
+    let mut words = Vec::new();
+    parcel.identity_words(&mut words);
+    words
+}
+
+fn state_of(parcel: &ClosedGasParcel) -> Vec<u64> {
+    let mut words = Vec::new();
+    parcel.state_words(&mut words);
+    words
+}
+
+/// What `cavity` writes for `state`; a refusal writes nothing.
+fn encoded(cavity: &GasCavity, state: &ClosedGasParcel) -> Option<Vec<u64>> {
+    let mut words = vec![9];
+    let wrote = cavity.encode_state(state, &mut words);
+    assert!(wrote || words == [9], "a refusal writes nothing");
+    wrote.then(|| words.split_off(1))
+}
+
+fn cavity_identity(cavity: &GasCavity) -> Vec<u64> {
+    let mut words = Vec::new();
+    cavity.identity_words(&mut words);
+    words
+}
+
+/// The parcel two steps from `reference` on its two-port cavity: compressed
+/// and heated, then let out and cooled a little.
+fn stepped(reference: &ClosedGasParcel, cx: &Cx<'_>) -> ClosedGasParcel {
+    let cavity = GasCavity::new(reference.clone(), controls()).unwrap();
+    let (first, _) = step(&cavity, reference, 1.0e-3, [0.03, 40.0], cx);
+    step(&cavity, &first, 1.0e-3, [-0.01, -15.0], cx).0
+}
+
+/// Claims, declared before the first run: a parcel's identity words are
+/// equal for a parcel built again, and different for another NASA-9
+/// coefficient, formation datum, transport card, selection policy and water
+/// component, for the same parcel at another volume, temperature and
+/// pressure, and for the same parcel heated at its volume.
+#[test]
+fn a_parcels_identity_words_name_its_model_its_point_its_mass_and_its_volume() {
+    use MaterialPropertySelection::{PreferObservationBacked, SingleClaimOnly};
+    let base = parcel(0.0, 0.0);
+    let (moved, heated) = with_cx(&CancelGate::new_clock_free(), |cx| {
+        let cavity = GasCavity::new(base.clone(), controls()).unwrap();
+        let (heated, _) = step(&cavity, &base, 1.0e-3, [0.0, 40.0], cx);
+        (stepped(&base, cx), heated)
+    });
+    let mut seen = vec![identity_of(&base)];
+    for (what, other) in [
+        ("a NASA-9 coefficient", parcel(1.0e-4, 0.0)),
+        ("a formation datum", parcel(0.0, 1.0e5)),
+        (
+            "a transport card",
+            parcel_of(0.0, 0.0, 3.0e-5, SingleClaimOnly, false),
+        ),
+        (
+            "a selection policy",
+            parcel_of(0.0, 0.0, 2.0e-5, PreferObservationBacked, false),
+        ),
+        (
+            "a water component",
+            parcel_of(0.0, 0.0, 2.0e-5, SingleClaimOnly, true),
+        ),
+        ("another state", moved),
+        ("a parcel heated at its volume", heated),
+    ] {
+        let named = identity_of(&other);
+        assert!(!seen.contains(&named), "{what} names an earlier parcel");
+        seen.push(named);
+    }
+    assert_eq!(identity_of(&parcel(0.0, 0.0)), seen[0]);
+}
+
+/// Claims, declared before the first run: a stepped parcel's state is three
+/// words, and the reference at that volume and temperature is the stepped
+/// parcel, equal in every field, its pressure among them. A volume or a
+/// temperature that is not one, and ones the sources do not cover, are
+/// refused.
+#[test]
+fn a_stepped_parcel_is_its_reference_at_its_volume_and_temperature() {
+    let reference = parcel(1.0e-4, 3.0e4);
+    let moved = with_cx(&CancelGate::new_clock_free(), |cx| stepped(&reference, cx));
+    let words = state_of(&moved);
+    assert_eq!(words.len(), 3);
+    let [volume, temperature, pressure] = [words[0], words[1], words[2]].map(f64::from_bits);
+    assert!(volume != V0 && temperature != T0 && pressure != P0);
+    let rebuilt = reference
+        .at_volume_temperature(volume, temperature)
+        .expect("the stepped state");
+    assert!(rebuilt == moved, "every field of the parcel");
+    for (what, [volume, temperature]) in [
+        ("no volume", [0.0, temperature]),
+        ("a temperature that is not one", [volume, f64::NAN]),
+        ("a temperature off the sources", [volume, 3000.0]),
+        ("a pressure off the sources", [1.0e-3 * volume, temperature]),
+    ] {
+        let refused = reference.at_volume_temperature(volume, temperature);
+        assert!(refused.is_err(), "{what}");
+    }
+}
+
+/// Claims, declared before the first run: the cavity writes a stepped parcel
+/// as its three state words, with or without its heat port, and reads back
+/// the parcel, equal in every field, which then steps to the same parcel and
+/// port values as the one never saved. The reference's own words are read
+/// back as the reference. Other counts of words, a pressure of another mass,
+/// a pressure one step of the number line away and no volume are not read;
+/// a parcel of another model and one of another mass are not written.
+#[test]
+fn the_cavity_writes_three_words_and_reads_back_the_parcel_that_goes_on_alike() {
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        let reference = parcel(1.0e-4, 0.0);
+        let cavity = GasCavity::new(reference.clone(), controls()).unwrap();
+        let moved = stepped(&reference, cx);
+        let words = encoded(&cavity, &moved).expect("a codec");
+        assert_eq!(words, state_of(&moved));
+        let insulated = cavity.clone().insulated().unwrap();
+        assert_eq!(encoded(&insulated, &moved).as_ref(), Some(&words));
+        let read = cavity.decode_state(&words).expect("read back");
+        assert!(read == moved && insulated.decode_state(&words) == Some(read.clone()));
+        let (next, outputs) = step(&cavity, &moved, 1.0e-3, [0.02, 10.0], cx);
+        let (again, same) = step(&cavity, &read, 1.0e-3, [0.02, 10.0], cx);
+        assert!(again == next && same.map(f64::to_bits) == outputs.map(f64::to_bits));
+
+        let own = cavity.decode_state(&state_of(&reference));
+        assert_eq!(own, Some(reference.clone()));
+        let [volume, temperature, pressure] = [words[0], words[1], words[2]];
+        let twice = (2.0 * f64::from_bits(pressure)).to_bits();
+        for (what, given) in [
+            ("two words", vec![volume, temperature]),
+            ("four words", vec![volume, temperature, pressure, 0]),
+            ("twice the pressure", vec![volume, temperature, twice]),
+            ("the next pressure", vec![volume, temperature, pressure + 1]),
+            ("no volume", vec![0, temperature, pressure]),
+        ] {
+            assert!(cavity.decode_state(&given).is_none(), "{what}");
+        }
+        let (model, point) = (reference.model().clone(), reference.point().clone());
+        let double = ClosedGasParcel::new(model, point, 2.0 * V0).unwrap();
+        assert_eq!(encoded(&cavity, &parcel(2.0e-4, 0.0)), None);
+        assert_eq!(encoded(&cavity, &double), None);
+    });
+}
+
+/// Claims, declared before the first run: the cavity's identity is equal for
+/// a cavity built again, and different for each limit of its solve, an
+/// insulating wall, another gas and a reference at another volume and
+/// temperature. A streaming cavity has no identity words, writes no state
+/// and reads none.
+#[test]
+fn the_cavitys_identity_follows_its_reference_its_solve_and_its_wall() {
+    let reference = parcel(1.0e-4, 0.0);
+    let moved = with_cx(&CancelGate::new_clock_free(), |cx| stepped(&reference, cx));
+    let cavity = GasCavity::new(reference.clone(), controls()).unwrap();
+    let base = cavity_identity(&cavity);
+    assert!(!base.is_empty());
+    let again = GasCavity::new(parcel(1.0e-4, 0.0), controls()).unwrap();
+    assert_eq!(cavity_identity(&again), base);
+    let limited = |change: usize| {
+        let mut solve = controls();
+        match change {
+            0 => solve.minimum_temperature_k = 210.0,
+            1 => solve.maximum_temperature_k = 1700.0,
+            2 => solve.energy_tolerance_j_kg = 2.0e-7,
+            _ => solve.maximum_iterations = 100,
+        }
+        GasCavity::new(reference.clone(), solve).unwrap()
+    };
+    let mut seen = vec![base];
+    for (what, other) in [
+        ("a lower bracket", limited(0)),
+        ("an upper bracket", limited(1)),
+        ("a tolerance", limited(2)),
+        ("an iteration limit", limited(3)),
+        ("an insulating wall", cavity.clone().insulated().unwrap()),
+        (
+            "another gas",
+            GasCavity::new(parcel(2.0e-4, 0.0), controls()).unwrap(),
+        ),
+        (
+            "a reference elsewhere",
+            GasCavity::new(moved.clone(), controls()).unwrap(),
+        ),
+    ] {
+        let named = cavity_identity(&other);
+        assert!(!named.is_empty() && !seen.contains(&named), "{what}");
+        seen.push(named);
+    }
+    let streaming = cavity.streaming(1.0e-15).unwrap();
+    assert!(cavity_identity(&streaming).is_empty());
+    assert_eq!(encoded(&streaming, &moved), None);
+    assert!(streaming.decode_state(&state_of(&moved)).is_none());
 }

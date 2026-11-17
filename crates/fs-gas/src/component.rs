@@ -35,6 +35,7 @@ use core::num::NonZeroUsize;
 use std::fmt::Write;
 
 use fs_exec::Cx;
+use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_material::thermochemical_gas::energy::parcel::discrete_gradient::GasDiscreteGradientCandidate;
 use fs_material::thermochemical_gas::energy::parcel::transfer::species::boundary::{
     GasSpeciesBoundarySolve, GasSpeciesBoundaryStep, SpeciesBoundaryTransfer,
@@ -731,6 +732,84 @@ impl Component for GasCavity {
             *mean = theta;
         }
         Ok(Proposal::Step(receipt))
+    }
+
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
+        owner: "fs-gas::component::GasCavity",
+        state_family: "closed-gas-parcel-state",
+        schema_grammar: "a closed parcel's volume, temperature and pressure on the cavity's reference",
+        codec_grammar: "three words: the bits of the volume, the temperature and the pressure",
+        codec_version: 1,
+    });
+
+    /// Refuses, writing nothing, for a streaming cavity, whose inventory is
+    /// part of its state, and for a parcel that is not on the reference's
+    /// model, mass and other point axes (the owner's own check of an energy
+    /// increment from the reference).
+    fn encode_state(&self, state: &ClosedGasParcel, words: &mut Vec<u64>) -> bool {
+        let on_reference = self.reference.stored_energy_change_to(state, || false);
+        if self.stream.is_some() || on_reference.is_err() {
+            return false;
+        }
+        state.state_words(words);
+        true
+    }
+
+    /// The parcel the three words stand for: the reference itself if they
+    /// are its own (a step with no heat and no motion keeps its parcel to
+    /// the bit), and otherwise the reference at that volume and temperature
+    /// ([`ClosedGasParcel::at_volume_temperature`]), which computes the
+    /// pressure as a step does. Either is returned only if writing it again
+    /// gives all three words back, so a pressure that is not the one the
+    /// owner computes for the other two is refused, and only if the cavity
+    /// can measure its energy from the reference.
+    fn decode_state(&self, words: &[u64]) -> Option<ClosedGasParcel> {
+        let &[volume, temperature, _] = words else {
+            return None;
+        };
+        if self.stream.is_some() {
+            return None;
+        }
+        let mut rebuilt = Vec::with_capacity(words.len());
+        self.reference.state_words(&mut rebuilt);
+        let state = if rebuilt == words {
+            self.reference.clone()
+        } else {
+            let [volume_m3, temperature_k] = [volume, temperature].map(f64::from_bits);
+            self.reference
+                .at_volume_temperature(volume_m3, temperature_k)
+                .ok()?
+        };
+        rebuilt.clear();
+        state.state_words(&mut rebuilt);
+        let held = self.reference.stored_energy_change_to(&state, || false);
+        (rebuilt == words && held.is_ok()).then_some(state)
+    }
+
+    /// Nothing at all for a streaming cavity, which has no codec.
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        let Self {
+            reference,
+            controls,
+            // Derived from `insulated` and `stream`.
+            ports: _,
+            stream,
+            insulated,
+        } = self;
+        let GasEnergySolve {
+            minimum_temperature_k,
+            maximum_temperature_k,
+            energy_tolerance_j_kg,
+            maximum_iterations,
+        } = controls;
+        if stream.is_some() {
+            return;
+        }
+        words.push(u64::from_le_bytes(*b"gascavty"));
+        reference.identity_words(words);
+        words.extend([minimum_temperature_k, maximum_temperature_k].map(|x| x.to_bits()));
+        words.push(energy_tolerance_j_kg.to_bits());
+        words.extend([*maximum_iterations as u64, u64::from(*insulated)]);
     }
 }
 

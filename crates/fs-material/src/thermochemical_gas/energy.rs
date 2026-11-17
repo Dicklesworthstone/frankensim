@@ -300,6 +300,95 @@ impl IsochoricGasParcel {
     #[must_use]
     pub const fn point(&self) -> &QueryPoint { &self.point }
 
+    /// Append the words that name this parcel as a reference: its model
+    /// ([`ThermochemicalGasModel::identity_words`]), every axis of its point
+    /// with its value and its quantity, its mass and its volume.
+    ///
+    /// The point is fs-matdb's; it is read through `axes` and
+    /// `axis_quantities`, which return its two maps.
+    pub fn identity_words(&self, words: &mut Vec<u64>) {
+        use fs_thermochem::byte_words;
+        let Self {
+            model,
+            point,
+            // `model.evaluate(point)`, the one place a resolved state comes from.
+            state: _,
+            mass_kg,
+            volume_m3,
+        } = self;
+        model.identity_words(words);
+        words.push(point.axes().len() as u64);
+        for (axis, value) in point.axes() {
+            byte_words(axis.as_bytes(), words);
+            words.push(value.to_bits());
+        }
+        words.push(point.axis_quantities().len() as u64);
+        for (axis, quantity) in point.axis_quantities() {
+            byte_words(axis.as_bytes(), words);
+            byte_words(&quantity.canonical_bytes(), words);
+        }
+        words.extend([mass_kg.to_bits(), volume_m3.to_bits()]);
+    }
+
+    /// Append where a closed parcel stands on its reference: its volume, its
+    /// temperature and its pressure, three words.
+    pub fn state_words(&self, words: &mut Vec<u64>) {
+        let Self {
+            // The reference's, in every state of a closed parcel.
+            model: _,
+            mass_kg: _,
+            // The reference's point at the state's temperature and pressure.
+            point: _,
+            state,
+            volume_m3,
+        } = self;
+        let resolved = state.state();
+        words.extend([volume_m3, &resolved.temperature, &resolved.pressure].map(|x| x.to_bits()));
+    }
+
+    /// The parcel that stands at `volume_m3` and `temperature_k` on this
+    /// one, as an accepted heat-and-volume step leaves it.
+    ///
+    /// From this parcel: the model, the mass, the specific gas constant and
+    /// every axis of the point but temperature and pressure. From the
+    /// caller: the volume and the temperature. The pressure is not given: it
+    /// is `(mass / volume) r T`, the expression and the order of
+    /// `discrete_gradient_heat_volume`, and the resolved state is evaluated
+    /// at that point. Nothing is solved. As in that step, a resolved density
+    /// that is not the conserved one to 64 eps is refused.
+    ///
+    /// # Errors
+    /// A volume or temperature that is not positive and finite, a pressure
+    /// that is not, the model's refusal of the point, or that density.
+    pub fn at_volume_temperature(
+        &self,
+        volume_m3: f64,
+        temperature_k: f64,
+    ) -> Result<Self, GasEnergyError> {
+        let density = self.mass_kg / volume_m3;
+        let pressure_pa = density * self.state.state().specific_gas_constant * temperature_k;
+        let given = [volume_m3, temperature_k, density, pressure_pa];
+        if !given.into_iter().all(positive) {
+            return Err(GasEnergyError::Invalid(
+                "positive finite volume, temperature and pressure required",
+            ));
+        }
+        let point = updated_point(&self.point, temperature_k, pressure_pa)?;
+        let state = self.model.evaluate(&point)?;
+        if !((state.state().density / density - 1.0).abs() <= 64.0 * f64::EPSILON) {
+            return Err(GasEnergyError::Invalid(
+                "the resolved gas state did not retain the conserved density",
+            ));
+        }
+        Ok(Self {
+            model: self.model.clone(),
+            point,
+            state,
+            mass_kg: self.mass_kg,
+            volume_m3,
+        })
+    }
+
     /// Add signed heat atomically. Outside-domain states, insufficient work,
     /// unrepresentable balances and cancellation leave the parcel unchanged.
     /// The caller can bind cancellation to its existing runtime context.
