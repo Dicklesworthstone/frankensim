@@ -280,3 +280,53 @@ fn native_checkpoint_dispatch_keeps_vector_direction_memory_sign_and_missing_acc
             .is_none()
     );
 }
+
+#[test]
+fn a_field_account_takes_the_largest_change_of_a_vertex_over_the_largest_value() {
+    let (error, scale) = field_error(
+        &[300.0, 310.0, 290.0],
+        &[301.0, 312.5, 290.0],
+        &[300.5, 311.0, 289.0],
+    )
+    .unwrap();
+    // Vertex 1 moved most, by 1.5; the scale is the refined 311, above the start's 310.
+    assert_eq!((error, scale), (1.5, 311.0));
+    // A change of sign is a change, and the start can be the larger value.
+    assert_eq!(field_error(&[-5.0], &[-2.0], &[2.0]), Some((4.0, 5.0)));
+    // Fields of other lengths, an empty field and a value that is not finite.
+    assert_eq!(field_error(&[1.0, 2.0], &[1.0], &[1.0, 2.0]), None);
+    assert_eq!(field_error(&[], &[], &[]), None);
+    assert_eq!(field_error(&[1.0], &[f64::NAN], &[1.0]), None);
+    assert_eq!(field_error(&[1.0], &[1.0], &[f64::INFINITY]), None);
+}
+
+#[test]
+fn a_modal_account_is_the_energy_norm_of_the_difference_over_the_larger_energy() {
+    let state = |q: f64, v: f64| ModalAcousticState {
+        displacement_m_sqrt_kg: q,
+        velocity_m_sqrt_kg_per_s: v,
+    };
+    let omegas = [3.0, 4.0];
+    let rest = [state(0.0, 0.0), state(0.0, 0.0)];
+    let refined = [state(0.25, 1.0), state(0.0, 2.0)];
+    // The first mode differs by a displacement alone: w |dq| / sqrt(2).
+    let moved = [state(0.5, 1.0), state(0.0, 2.0)];
+    let (error, scale) = modal_error(&omegas, &rest, &moved, &refined).unwrap();
+    close(error, 3.0 * 0.25 / 2.0_f64.sqrt(), 1.0e-15);
+    // The refined state holds (1 + (3 * 0.25)^2 + 4) / 2 J; the start holds none.
+    close(scale, (0.5 * (1.0 + 0.5625 + 4.0_f64)).sqrt(), 1.0e-15);
+    // The second mode differs by a velocity alone: |dv| / sqrt(2).
+    let faster = [state(0.25, 1.0), state(0.0, 2.5)];
+    let (error, _) = modal_error(&omegas, &rest, &faster, &refined).unwrap();
+    close(error, 0.5 / 2.0_f64.sqrt(), 1.0e-15);
+    // The start's energy is the scale when it is the larger.
+    let (_, scale) = modal_error(&omegas, &refined, &rest, &rest).unwrap();
+    close(scale, (0.5 * (1.0 + 0.5625 + 4.0_f64)).sqrt(), 1.0e-15);
+
+    // A state that is not a number, in the error and in the scale's start.
+    let bad = [state(f64::NAN, 0.0), state(0.0, 0.0)];
+    assert_eq!(modal_error(&omegas, &rest, &bad, &refined), None);
+    assert_eq!(modal_error(&omegas, &bad, &moved, &refined), None);
+    assert_eq!(modal_error(&omegas, &rest, &moved[..1], &refined), None);
+    assert_eq!(modal_error(&[], &[], &[], &[]), None);
+}

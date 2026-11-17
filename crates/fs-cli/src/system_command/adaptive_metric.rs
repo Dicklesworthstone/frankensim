@@ -1,8 +1,9 @@
 //! Complete native network state accounts for the generic step-doubling driver.
 
-use fs_math::det::{atan2, hypot};
+use fs_math::det::{atan2, hypot, sqrt};
 use fs_mbd::component::relaxation::RelaxationState;
 use fs_mbd::{MassProperties, RigidBodyState};
+use fs_nlmodal::component::ModalAcousticState;
 use fs_system::{Checkpoint, ErrorNorm, ErrorTolerance, NodeId};
 
 #[derive(Clone, Copy)]
@@ -45,6 +46,16 @@ pub(super) enum NetworkCoordinate {
         connector: usize,
         branch: usize,
     },
+    /// The whole field of a conduction body: its vertex temperatures [K], or the
+    /// vertex specific enthalpies [J/kg] of an enthalpy body. One account: the
+    /// largest change of a vertex.
+    Field,
+    /// The whole state of a modal structure in its energy norm [sqrt(J)].
+    /// `omegas` are the modes' angular frequencies [rad/s], leaked once when
+    /// the scene is built.
+    Modes {
+        omegas: &'static [f64],
+    },
 }
 
 impl NetworkCoordinate {
@@ -63,12 +74,12 @@ impl NetworkCoordinate {
         norm.include_error(error, scale, tolerance);
     }
 
-    fn estimate(
+    fn estimate<'a>(
         self,
         node: NodeId,
-        initial: &Checkpoint,
-        coarse: &Checkpoint,
-        refined: &Checkpoint,
+        initial: &'a Checkpoint,
+        coarse: &'a Checkpoint,
+        refined: &'a Checkpoint,
     ) -> Option<(f64, f64)> {
         match self {
             Self::Body {
@@ -113,6 +124,15 @@ impl NetworkCoordinate {
                 // even unloaded rows. Equal branch energy is not equal state.
                 Some(vector_error(read(initial)?, read(coarse)?, read(refined)?))
             }
+            Self::Field => {
+                let read = |checkpoint: &'a Checkpoint| checkpoint.state::<Vec<f64>>(node);
+                field_error(read(initial)?, read(coarse)?, read(refined)?)
+            }
+            Self::Modes { omegas } => {
+                let read =
+                    |checkpoint: &'a Checkpoint| checkpoint.state::<Vec<ModalAcousticState>>(node);
+                modal_error(omegas, read(initial)?, read(coarse)?, read(refined)?)
+            }
         }
     }
 }
@@ -127,6 +147,62 @@ fn read_body(checkpoint: &Checkpoint, node: NodeId, body: usize) -> Option<&Rigi
                 .map(|state| state.bodies.as_slice())
         })?
         .get(body)
+}
+
+/// A field's error and scale: the largest `|coarse_i - refined_i|` over the
+/// vertices, and the largest of `|initial_i|` and `|refined_i|`. None for
+/// fields of different lengths, an empty field or a value that is not finite.
+fn field_error(initial: &[f64], coarse: &[f64], refined: &[f64]) -> Option<(f64, f64)> {
+    let sized = !initial.is_empty() && [coarse.len(), refined.len()] == [initial.len(); 2];
+    let finite = |field: &[f64]| field.iter().all(|x| x.is_finite());
+    if !(sized && finite(initial) && finite(coarse) && finite(refined)) {
+        return None;
+    }
+    let changes = coarse.iter().zip(refined).map(|(c, r)| (c - r).abs());
+    let ends = initial.iter().zip(refined);
+    let sizes = ends.map(|(i, r)| i.abs().max(r.abs()));
+    let (error, scale) = (changes.fold(0.0, f64::max), sizes.fold(0.0, f64::max));
+    error.is_finite().then_some((error, scale))
+}
+
+/// The energy norm `sqrt(sum_k (v_k^2 + (w_k q_k)^2) / 2)` [sqrt(J)] of
+/// mass-normalized modal states, or of `states - less`. Not finite where the
+/// sum is not.
+fn energy_norm(
+    omegas: &[f64],
+    states: &[ModalAcousticState],
+    less: Option<&[ModalAcousticState]>,
+) -> f64 {
+    let mut twice = 0.0;
+    for (k, (omega, state)) in omegas.iter().zip(states).enumerate() {
+        let (mut q, mut v) = (state.displacement_m_sqrt_kg, state.velocity_m_sqrt_kg_per_s);
+        if let Some(other) = less {
+            q -= other[k].displacement_m_sqrt_kg;
+            v -= other[k].velocity_m_sqrt_kg_per_s;
+        }
+        twice += v * v + (omega * q) * (omega * q);
+    }
+    sqrt(0.5 * twice)
+}
+
+/// A modal structure's error and scale in its energy norm: the norm of
+/// `coarse - refined`, and the larger norm of `initial` and `refined`. None for
+/// states that are not one per mode, or not finite.
+fn modal_error(
+    omegas: &[f64],
+    initial: &[ModalAcousticState],
+    coarse: &[ModalAcousticState],
+    refined: &[ModalAcousticState],
+) -> Option<(f64, f64)> {
+    let modes = omegas.len();
+    if modes == 0 || [initial.len(), coarse.len(), refined.len()] != [modes; 3] {
+        return None;
+    }
+    let error = energy_norm(omegas, coarse, Some(refined));
+    let start = energy_norm(omegas, initial, None);
+    let end = energy_norm(omegas, refined, None);
+    // `f64::max` would hide a norm that is not a number: each is held finite first.
+    (error.is_finite() && start.is_finite() && end.is_finite()).then_some((error, start.max(end)))
 }
 
 fn vector_error<const N: usize>(

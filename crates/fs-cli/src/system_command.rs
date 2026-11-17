@@ -1498,6 +1498,9 @@ struct Element {
     /// A conduction body whose state is specific enthalpy: the paired
     /// material whose chart reads it as temperature.
     enthalpy: Option<&'static MaterialEnthalpyTransport>,
+    /// A modal structure's angular frequencies [rad/s], one per mode, for the
+    /// energy norm of its error account.
+    modal: Option<&'static [f64]>,
     /// A card-backed resistor's node, for reporting its resistance at the
     /// temperature its heat port read.
     ohmic: Option<MaterialOhmicNode>,
@@ -1616,9 +1619,6 @@ fn no_error_account(element: &Element) -> String {
     let why = match element.kind {
         Kind::SlidingInterface => "its law's state is not given as numbers",
         Kind::ThermalTimeline => "its cells are born and joined at events",
-        Kind::ConductionBody | Kind::ModalStructure => {
-            "an account over its whole state is not written yet"
-        }
         // A slider, a friction interface, a Hertz patch, a contact interface.
         _ => {
             "its force jumps where it sticks, slips or strikes, and an estimate by step \
@@ -1631,6 +1631,53 @@ fn no_error_account(element: &Element) -> String {
         element.name,
         element.kind.name()
     )
+}
+
+/// The one error account over the whole state of a conduction body or of a
+/// modal structure, with its name: the body's field, in kelvin or in the
+/// specific enthalpy an enthalpy body holds, or the structure's energy norm.
+fn whole_state_account(element: &Element) -> (&'static str, Coordinate) {
+    let (name, account) = match (element.modal, element.enthalpy) {
+        (Some(omegas), _) => (
+            "energy_norm_sqrt_j",
+            adaptive_metric::NetworkCoordinate::Modes { omegas },
+        ),
+        (None, Some(_)) => (
+            "specific_enthalpy_j_kg",
+            adaptive_metric::NetworkCoordinate::Field,
+        ),
+        (None, None) => ("temperature_k", adaptive_metric::NetworkCoordinate::Field),
+    };
+    (name, Coordinate::Network(account))
+}
+
+/// The order of a kind's own step, for the kinds a scene's declared
+/// `adaptive.order` is held to, each measured by halving a fixed step. A
+/// conduction body steps by backward Euler. A modal structure is exact for a
+/// held effort and holds one that varies within a step, which leaves the
+/// coupled step at order two. A gas volume steps by the trapezoidal rule, and
+/// a gas cavity measures order two. None: the order is the scene's to establish.
+fn step_order(kind: Kind) -> Option<u32> {
+    match kind {
+        Kind::ConductionBody => Some(1),
+        Kind::ModalStructure | Kind::GasVolume | Kind::GasCavity => Some(2),
+        _ => None,
+    }
+}
+
+/// The step-doubling driver trusts the declared order when it grows the step,
+/// so a scene may not declare an order above that of a kind it accounts.
+fn declared_order_fits(order: f64, elements: &[Element]) -> Result<(), String> {
+    for element in elements {
+        if let Some(own) = step_order(element.kind).filter(|own| order > f64::from(*own)) {
+            return Err(format!(
+                "adaptive.order: {} is a {}, whose step is of order {own}; the scene declares order {order}",
+                element.name,
+                element.kind.name()
+            ));
+        }
+    }
+    Ok(())
 }
 
 struct AdaptiveSettings {
@@ -2857,6 +2904,7 @@ fn element(
     let mut radius_m = None;
     let mut contact = None;
     let mut enthalpy = None;
+    let mut modal = None;
     let mut ohmic = None;
     let mut laminar = None;
     let (node, ports) = match kind {
@@ -2925,7 +2973,7 @@ fn element(
             radius_m = Some(radius);
             (node, ports)
         }
-        Kind::ModalStructure => modal::structure(builder, name, definition, &what)?,
+        Kind::ModalStructure => modal::structure(builder, name, definition, &what, &mut modal)?,
         Kind::ContactInterface => contact::interface(builder, name, definition, &what)?,
         Kind::NodeCapacitor(domain) => {
             let names = domain.names();
@@ -3140,6 +3188,7 @@ fn element(
         radius_m,
         contact,
         enthalpy,
+        modal,
         ohmic,
         laminar,
     })
@@ -3985,19 +4034,19 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
                 ("volume_m3", Coordinate::CavityVolume),
                 ("temperature_k", Coordinate::CavityTemperature),
             ],
+            Kind::ConductionBody | Kind::ModalStructure => vec![whole_state_account(element)],
             Kind::Slider
             | Kind::FrictionInterface
             | Kind::SlidingInterface
             | Kind::HertzPatch
-            | Kind::ModalStructure
             | Kind::ContactInterface
-            | Kind::ThermalTimeline
-            | Kind::ConductionBody => return Err(no_error_account(element)),
+            | Kind::ThermalTimeline => return Err(no_error_account(element)),
         };
         for (field, coordinate) in coordinates {
             expected.push((format!("{}.{field}", element.name), element.node, coordinate));
         }
     }
+    declared_order_fits(order, elements)?;
     if expected.is_empty() {
         return Err("adaptive stepping needs at least one dynamic state or source-work account".into());
     }
@@ -4352,9 +4401,10 @@ impl Device {
                 // A trace contact is a thermal contact, so the list of what
                 // the scene has none of names the mechanical one (unless a
                 // contact interface took contact off the list); a card
-                // behind the contact is a card resolution.
+                // behind the contact is a card resolution. No comma after
+                // "friction": the adaptive sentence goes on "or phase change".
                 let mut base =
-                    description.replace("contact, friction,", "mechanical contact, friction,");
+                    description.replace("contact, friction", "mechanical contact, friction");
                 if carded {
                     base = base.replace(
                         "no material-card resolution,",

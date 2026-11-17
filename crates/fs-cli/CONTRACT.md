@@ -1071,7 +1071,8 @@ exact for the effort held over them. The structure always tells the end of
 each attachment's flow, `<id>.end`. The safety ceilings are the owner's
 audible reference budget. Reports expose every mode's displacement and
 velocity, each attachment row's flow at the end of the last step, and
-last-step `heat_w`. `adaptive` refuses it. Its state has fs-nlmodal's
+last-step `heat_w`. Under `adaptive` its whole state is one error account,
+`energy_norm_sqrt_j`. Its state has fs-nlmodal's
 codec, the modal coordinates bound to the owner's clock, budget, modes and
 damping rates and to the attachments' widths and weights, so
 `--checkpoint` saves it. Tests in `tests/system_command/checkpoints.rs`
@@ -1185,7 +1186,9 @@ over its face and returns the face's area-mean end temperature; the owner
 steps the field and the lowering evaluates no conduction. The mesh, boundary
 and material live as long as the process. Reports expose each port's
 `<face>.temperature_k` (the last step's) and the field's
-`min_temperature_k` and `max_temperature_k`. `adaptive` refuses it. Its
+`min_temperature_k` and `max_temperature_k`. Under `adaptive` its whole
+field is one error account, `temperature_k`, or `specific_enthalpy_j_kg`
+for a body whose state is specific enthalpy. Its
 state has fs-conduction's codec, the nodal field bound to the mesh, the
 conductivity, the heat capacity, the ports and the step policy, so a scene
 with conduction bodies is saved by `--checkpoint` and resumed. Tests in
@@ -1418,8 +1421,8 @@ entropy where the heat crosses and the ledger books the nodal sum at its
 ports; no order is claimed for the gap between the two. The reference is
 compared in the energy crossed and in eight least and greatest
 temperatures a rung, not vertex by vertex: a scene reports no field.
-`adaptive` refuses a conduction body, so a scene with a trace contact has
-no adaptive stepping.
+Under `adaptive` each body of a trace scene has its own account, and the
+contact, which holds no state, needs none.
 
 Every report's no-claim sentence lists what the scene has none of: "no
 material-card resolution, contact, friction, phase change or step-size
@@ -1433,8 +1436,10 @@ card". A scene with neither kind prints the sentence as before.
 sentence, in the text and the JSON report, of `two_slabs.json` and
 `heated_body.json` (unchanged), the three trace examples,
 `struck_mode.json`, and the trace example with the struck mode's elements
-beside its slabs. `adaptive` refuses a contact interface and a conduction
-body, so its own sentence meets neither.
+beside its slabs. The `adaptive` sentence lists "contact, friction or phase
+change"; a trace contact makes that "mechanical contact" there too, and the
+same test reads the whole sentence of the trace example under `adaptive`.
+`adaptive` refuses a contact interface, so its sentence meets none.
 
 A `conduction_body` may take its conductivity from a card in place of
 `conductivity_w_m_k`: `material` names a material of the scene's
@@ -2248,7 +2253,37 @@ A `gas_volume` gives `mass_kg`, `energy_j`, `volume_m3` and one
 report's `carried<i>` are fractions and are not accounts.) A `gas_cavity`
 gives `volume_m3` and `temperature_k`; its pressure follows from those two.
 
-Eight kinds have no error account. A scene with one is refused under
+A `conduction_body` gives one account for its whole field: `temperature_k`,
+or `specific_enthalpy_j_kg` for a body whose state is specific enthalpy. Its
+error is the largest change of a vertex between the full step and the two
+half steps; its scale is the largest magnitude of a vertex of the start and
+of the refined end. A `modal_structure` gives one account,
+`energy_norm_sqrt_j`. Its error is `sqrt(sum_k (dv_k^2 + (w_k dq_k)^2) / 2)`
+of the difference of the two ends; its scale is the larger of that norm of
+the start and of the refined end. The `w_k` are read from the structure's
+model when the scene is built, into one slice leaked once for each structure.
+
+The driver trusts the declared `order` when it grows the step, so a scene
+that declares an order above that of a kind it accounts is refused, with
+the element's name, its kind, the kind's order and the declared one:
+- `conduction_body`: 1. It steps by backward Euler.
+- `modal_structure`: 2. Its step is exact for a held force, and a force that
+  varies within a step is held, which leaves the coupled step at order 2.
+- `gas_volume`: 2, the trapezoidal rule. `gas_cavity`: 2, as measured.
+
+No other kind is held to an order. The four were measured with a debug
+build of 1afbe6e1e8 (md5 d8958a0070e9adae894d437b78a55166): five fixed
+steps, each half the one before, each end state compared with a run at a
+much smaller step. The error fell by these factors at each halving:
+- two modes driven by a 150 Hz sine force through one attachment: 4.07, 4.02,
+  4.01, 4.01; the same two modes pushed by a mass on a spring: 3.75, 3.94,
+  3.99, 4.01;
+- `steel316_heated_bar.json`: 2.37, 2.26, 2.17, 2.14; the enthalpy bar: 2.01,
+  2.02, 2.03, 2.07;
+- `pneumatic_cylinder.json`: 5.68, 4.34, 4.08, 4.03; `n2_gas_spring.json`:
+  4.00, 4.00, 4.00, 4.01.
+
+Six kinds have no error account. A scene with one is refused under
 `adaptive` by the element's name, and the refusal gives the reason:
 - `slider`, `friction_interface`, `hertz_patch`, `contact_interface`: the
   force jumps where the element sticks, slips or strikes. An estimate by
@@ -2258,8 +2293,6 @@ Eight kinds have no error account. A scene with one is refused under
   `TangentialLaw` and is not given as numbers.
 - `thermal_timeline`: its cells are born and joined at events, so a full
   step and two half steps compare only past the same events.
-- `conduction_body`, `modal_structure`: an account over the whole state,
-  with one tolerance for the element, is not written yet.
 
 Rigid and viscoelastic networks require four vector/rotation accounts per body:
 `element.body<i>.position_m`, `velocity_m_s`, `angular_velocity_rad_s` and

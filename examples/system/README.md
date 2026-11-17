@@ -443,13 +443,22 @@ tolerances are finite and nonnegative.
 
 A `gas_volume` needs `mass_kg`, `energy_j` and `volume_m3`, and
 `carried<i>_kg` for each quantity its gas carries. A `gas_cavity` needs
-`volume_m3` and `temperature_k`.
+`volume_m3` and `temperature_k`. A `conduction_body` needs one account for
+its whole field: `temperature_k`, or `specific_enthalpy_j_kg` if its state
+is specific enthalpy. A `modal_structure` needs one, `energy_norm_sqrt_j`.
 
-Eight kinds have no error account, and a scene with one is refused under
+The declared `order` may not exceed 1 in a scene with a `conduction_body`,
+nor 2 in a scene with a `modal_structure`, a `gas_volume` or a `gas_cavity`.
+Those are the orders of their own steps, and a scene that declares more is
+refused with the element's name. So `two_slabs_trace.json` can run under
+`adaptive` at order 1 with a tolerance for `a.temperature_k` and for
+`b.temperature_k`, and at order 2 it is refused by body `a`.
+
+Six kinds have no error account, and a scene with one is refused under
 `adaptive` with the reason: a `slider`, a `friction_interface`, a
 `hertz_patch` and a `contact_interface`, whose force jumps where they stick,
-slip or strike; a `sliding_interface`; a `thermal_timeline`; and, for now, a
-`conduction_body` and a `modal_structure`. Run those with a fixed `step_s`.
+slip or strike; a `sliding_interface`; and a `thermal_timeline`. Run those
+with a fixed `step_s`.
 
 For a `rigid_network` or `viscoelastic_network`, declare these accounts for
 every body, prefixed by its element name:

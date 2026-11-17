@@ -1222,6 +1222,29 @@ fn a_scene_with_a_contact_or_a_card_does_not_say_it_has_none() {
         }
         eprintln!("{name}: {clause}");
     }
+
+    // The trace example under error control, at a body's order 1: the adaptive
+    // sentence with the mechanical contact named, then the fixed-step tail.
+    let (name, step) = ("two_slabs_trace.json", "\"step_s\": 0.675,");
+    let sentence = |text: &str| {
+        let scene = SystemScene::from_text(text, example(name)).unwrap();
+        let json = scene.render_json();
+        let from = json.find("\"no_claim\":\"").unwrap() + 12;
+        json[from..].trim_end().trim_end_matches("\"}").to_owned()
+    };
+    let fixed = sentence(&read(name));
+    let tolerances = [("a.temperature_k", 1.0), ("b.temperature_k", 1.0)];
+    let controlled = error_controlled(2.7, &tolerances).replace("\"order\": 2", "\"order\": 1");
+    assert!(read(name).contains(step), "the example changed");
+    let said = sentence(&read(name).replacen(step, &controlled, 1));
+    let head = "step-doubling estimates control the declared state coordinates and source-work \
+                increments under the selected order assumption; they are local numerical \
+                estimates, not global error bounds or physical validation; dissipated heat and \
+                interface balances retain the kernel's separate ledger audits; no material-card \
+                resolution, mechanical contact, friction or phase change";
+    let bodies = fixed.find("; conduction bodies step").unwrap();
+    assert_eq!(said, format!("{head}{}", &fixed[bodies..]));
+    assert_eq!(said.matches("no material-card resolution").count(), 1);
 }
 
 /// The stainless example, its pack and the seed source the pack is compiled
@@ -2553,4 +2576,98 @@ fn following_contact_scenes_refuse_bad_forms_coordinates_and_surfaces_by_name() 
         ),
         "{stderr}"
     );
+}
+
+/// A steel bar example heated at one end for 16 s, with `steps` in place of
+/// its step entry.
+fn heated_bar(example_name: &str, steps: &str) -> String {
+    let text = std::fs::read_to_string(example(example_name)).unwrap();
+    let (duration, step) = ("\"duration_s\": 60.0", "\"step_s\": 2.0,");
+    let found = text.contains(duration) && text.contains(step);
+    assert!(found, "the example changed");
+    text.replacen(duration, "\"duration_s\": 16.0", 1)
+        .replacen(step, steps, 1)
+}
+
+/// A heated bar run to its end: its report, its accepted steps and the
+/// comparisons its driver rejected, which are none at a fixed step.
+fn run_bar(example_name: &str, steps: &str) -> (String, f64, f64) {
+    let text = heated_bar(example_name, steps);
+    let mut scene = SystemScene::from_text(&text, example(example_name)).unwrap();
+    scene_context(|cx, _| while scene.advance(f64::MAX, cx).unwrap() {});
+    let json = scene.render_json();
+    let accepted = value(&json, "\"schema\"", "steps");
+    let attempts = if json.contains("\"adaptive\"") {
+        value(&json, "\"adaptive\"", "attempts")
+    } else {
+        0.5 * accepted
+    };
+    (json, accepted, attempts - 0.5 * accepted)
+}
+
+/// Claims, declared before the first run: with `adaptive`, a conduction
+/// body's whole field is one error account, `temperature_k`, or
+/// `specific_enthalpy_j_kg` for a body whose state is specific enthalpy. On
+/// each steel bar heated for 16 s, tightening that account takes more accepted
+/// steps, rejects a comparison and ends closer to a run at a fixed small step.
+/// A scene without the account is refused by its name. A body steps by
+/// backward Euler, so a scene that declares an order above one is refused by
+/// the body's name.
+#[test]
+fn a_conduction_bodys_field_is_one_adaptive_error_account() {
+    for (example_name, account, loose, tight) in [
+        (STEEL_EXAMPLE, "bar.temperature_k", 1.0e3, 1.0e-3),
+        (
+            STEEL_ENTHALPY_EXAMPLE,
+            "bar.specific_enthalpy_j_kg",
+            1.0e6,
+            1.0,
+        ),
+    ] {
+        // The helper declares order 2; a body's scene declares 1.
+        let first_order = |tolerances: &[(&str, f64)]| {
+            error_controlled(4.0, tolerances).replace("\"order\": 2", "\"order\": 1")
+        };
+        let (far_json, loose_steps, _) = run_bar(example_name, &first_order(&[(account, loose)]));
+        let (near_json, steps, rejected) = run_bar(example_name, &first_order(&[(account, tight)]));
+        eprintln!("{account}: tight {steps} steps and {rejected} rejected, loose {loose_steps}");
+        assert!(steps > loose_steps, "{account}: {steps} vs {loose_steps}");
+        assert!(rejected >= 1.0, "{account}: no comparison rejected");
+
+        let (fixed, _, _) = run_bar(example_name, "\"step_s\": 0.03125,");
+        let ends = |json: &str| {
+            [
+                "x_min.temperature_k",
+                "min_temperature_k",
+                "max_temperature_k",
+            ]
+            .map(|field| value(json, &element("bar"), field))
+        };
+        let reference = ends(&fixed);
+        let distance = |json: &str| {
+            let parts = ends(json).into_iter().zip(reference);
+            parts
+                .map(|(end, fixed)| (end - fixed).abs())
+                .fold(0.0, f64::max)
+        };
+        let (far, near) = (distance(&far_json), distance(&near_json));
+        eprintln!("{account}: from the fixed run, loose {far:e} K, tight {near:e} K");
+        assert!(near < 0.1 * far, "{account}: tight {near}, loose {far}");
+
+        let refusal = |steps: &str| {
+            let text = heated_bar(example_name, steps);
+            let Err(error) = SystemScene::from_text(&text, example(example_name)) else {
+                panic!("{account}: not refused");
+            };
+            assert_eq!(error.exit_code, fs_cli::exit::INPUT, "{}", error.message);
+            error.message
+        };
+        let missing = refusal(&first_order(&[]));
+        let named = format!("adaptive.tolerances.{account}: missing explicit tolerance");
+        assert!(missing.contains(&named), "{missing}");
+        let second = refusal(&error_controlled(4.0, &[(account, tight)]));
+        let order = "adaptive.order: bar is a conduction_body, whose step is of order 1; \
+                     the scene declares order 2";
+        assert!(second.contains(order), "{second}");
+    }
 }

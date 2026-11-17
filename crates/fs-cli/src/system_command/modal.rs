@@ -32,12 +32,16 @@ pub(super) type State = Vec<ModalAcousticState>;
 const MAX_DEGREES: usize = 256;
 
 /// A `modal_structure` element: the owner's model admitted at the scene's
-/// clock, its attachments, and the start of every mode.
+/// clock, its attachments, and the start of every mode. `omegas` receives the
+/// modes' angular frequencies [rad/s] as the owner's model holds them, for the
+/// structure's error account: one slice, leaked once for each structure a scene
+/// builds.
 pub(super) fn structure(
     builder: &mut SystemBuilder,
     name: &str,
     definition: &J,
     what: &str,
+    omegas: &mut Option<&'static [f64]>,
 ) -> Result<(NodeId, Vec<PortSpec>), Refusal> {
     fields(
         definition,
@@ -75,6 +79,9 @@ pub(super) fn structure(
     let structure = structure
         .publishing_ends()
         .map_err(|error| format!("{what}: {error}"))?;
+    let modes = structure.model().modes().iter();
+    let frequencies: Vec<f64> = modes.map(|mode| mode.angular_frequency_rad_s).collect();
+    *omegas = Some(Box::leak(frequencies.into_boxed_slice()));
     add(builder, name, structure, start)
 }
 

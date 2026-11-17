@@ -3726,6 +3726,109 @@ fn what_a_gas_volume_holds_are_adaptive_error_accounts() {
     assert_eq!(code, 3, "{stderr}");
     let missing = "adaptive.tolerances.chamber.carried0_kg: missing explicit tolerance";
     assert!(stderr.contains(missing), "{stderr}");
+
+    // A gas volume steps by the trapezoidal rule: an order above two is refused.
+    let third = error_controlled(5.0e-3, &partial).replace("\"order\": 2", "\"order\": 3");
+    let (code, stderr) = refused("cylinder_order.json", &carrying_cylinder(&third));
+    assert_eq!(code, 3, "{stderr}");
+    let order = "adaptive.order: tank is a gas_volume, whose step is of order 2; \
+                 the scene declares order 3";
+    assert!(stderr.contains(order), "{stderr}");
+}
+
+/// Two modes of a bar, at 200 Hz and 510 Hz, driven at 150 Hz by a force
+/// through one attachment over 0.02 s; `steps` are its step entries. The force
+/// varies within a step, so the structure's step, which is exact for a held
+/// force, is not exact here.
+fn driven_bar(steps: &str) -> String {
+    format!(
+        r#"{{
+  "schema": "frankensim.system.v0",
+  "duration_s": 0.02,
+  {steps}
+  "elements": {{
+    "bar": {{"kind": "modal_structure", "sample_rate_hz": 48000,
+      "modes": [{{"frequency_hz": 200.0, "damping_ratio": 0.01}},
+                {{"frequency_hz": 510.0, "damping_ratio": 0.01}}],
+      "attachments": {{"drive": {{"domain": "translation", "weights": [[1.0, 0.7]]}}}}}},
+    "shaker": {{"kind": "force",
+      "force_n": {{"sine": {{"amplitude": 1.0, "frequency_hz": 150.0}}}}}},
+    "case": {{"kind": "heat_capacity", "capacity_j_k": 1.0, "temperature_k": 300.0}}
+  }},
+  "connections": [
+    {{"join": ["shaker.p", "bar.drive"]}},
+    {{"join": ["case.heat", "bar.heat"]}}
+  ]
+}}"#
+    )
+}
+
+/// Claims, declared before the first run: with `adaptive`, a modal
+/// structure's whole state is one error account, `energy_norm_sqrt_j`. On the
+/// driven bar, with every other tolerance too loose to bind, tightening it
+/// takes more accepted steps, rejects a comparison and ends closer to a run at
+/// a fixed small step. A scene without it is refused by its name, and a scene
+/// that declares an order above the structure's two is refused by the
+/// structure's name.
+#[test]
+fn a_modal_structures_state_is_one_adaptive_error_account_in_its_energy_norm() {
+    let accounts = |bar: f64| {
+        [
+            ("bar.energy_norm_sqrt_j", bar),
+            ("shaker.energy_in_j", 1.0e3),
+            ("case.temperature_k", 1.0e3),
+        ]
+    };
+    let run = |name: &str, bar: f64| {
+        controlled_run(
+            name,
+            &driven_bar(&error_controlled(4.0e-4, &accounts(bar))),
+        )
+    };
+    let (loose, loose_steps, _) = run("bar_loose.json", 1.0e3);
+    let (tight, steps, rejected) = run("bar_tight.json", 2.0e-9);
+    eprintln!("bar: tight {steps} steps and {rejected} rejected, loose {loose_steps}");
+    assert!(steps > loose_steps, "{steps} vs {loose_steps}");
+    assert!(rejected >= 1.0, "no comparison rejected");
+
+    let ends = |json: &str| {
+        [
+            "mode0.displacement",
+            "mode0.velocity",
+            "mode1.displacement",
+            "mode1.velocity",
+        ]
+        .map(|field| value(json, &element("bar"), field))
+    };
+    let path = scratch("bar_fixed.json", &driven_bar("\"step_s\": 2.5e-6,"));
+    let (code, fixed, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    let reference = ends(&fixed);
+    let distance = |json: &str| {
+        let parts = ends(json).into_iter().zip(reference);
+        parts
+            .map(|(end, fixed)| (end / fixed - 1.0).abs())
+            .fold(0.0, f64::max)
+    };
+    let (far, near) = (distance(&loose), distance(&tight));
+    eprintln!("bar: from the fixed run, loose {far:e}, tight {near:e}");
+    assert!(near < 0.1 * far, "tight {near}, loose {far}");
+
+    let (code, stderr) = refused(
+        "bar_partial.json",
+        &driven_bar(&error_controlled(4.0e-4, &accounts(1.0)[1..])),
+    );
+    assert_eq!(code, 3, "{stderr}");
+    let missing = "adaptive.tolerances.bar.energy_norm_sqrt_j: missing explicit tolerance";
+    assert!(stderr.contains(missing), "{stderr}");
+
+    // Exact for a held force, and a force that varies is held: order two.
+    let third = error_controlled(4.0e-4, &accounts(1.0)).replace("\"order\": 2", "\"order\": 3");
+    let (code, stderr) = refused("bar_order.json", &driven_bar(&third));
+    assert_eq!(code, 3, "{stderr}");
+    let order = "adaptive.order: bar is a modal_structure, whose step is of order 2; \
+                 the scene declares order 3";
+    assert!(stderr.contains(order), "{stderr}");
 }
 
 /// One step of the midpoint rule for two bodies on a plane of no heat
@@ -4744,8 +4847,10 @@ fn modal_structure_scenes_refuse_bad_clocks_modes_weights_and_error_control() {
         (
             "adaptive.json",
             "\"duration_s\": 1.0",
-            "\"adaptive\": {\"tolerances\": {}}, \"duration_s\": 1.0",
-            "rod is a modal_structure",
+            "\"adaptive\": {\"tolerances\": {\
+             \"push.energy_in_j\": {\"absolute\": 1, \"relative\": 0}, \
+             \"case.temperature_k\": {\"absolute\": 1, \"relative\": 0}}}, \"duration_s\": 1.0",
+            "adaptive.tolerances.rod.energy_norm_sqrt_j: missing explicit tolerance",
         ),
     ] {
         assert!(MODAL_TIP.contains(from), "{name}: test fixture changed");
@@ -5122,6 +5227,14 @@ fn a_gas_cavitys_volume_and_temperature_are_adaptive_error_accounts() {
     assert_eq!(code, 3, "{stderr}");
     let missing = "adaptive.tolerances.spring.temperature_k: missing explicit tolerance";
     assert!(stderr.contains(missing), "{stderr}");
+
+    // A gas cavity's step measures order two: an order above it is refused.
+    let third = error_controlled(5.0e-3, &partial).replace("\"order\": 2", "\"order\": 3");
+    let (code, stderr) = refused("gas_spring_order.json", &spring(&third));
+    assert_eq!(code, 3, "{stderr}");
+    let order = "adaptive.order: spring is a gas_cavity, whose step is of order 2; \
+                 the scene declares order 3";
+    assert!(stderr.contains(order), "{stderr}");
 }
 
 #[test]
