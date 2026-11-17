@@ -459,6 +459,12 @@ impl FrictionModalSystem {
         self.network.sums_by_rows()
     }
 
+    /// The rows the network's prepared product computes (`CoupledModalSystem::prepared_product_rows`).
+    #[must_use]
+    pub fn prepared_product_rows(&self) -> Option<usize> {
+        self.network.prepared_product_rows()
+    }
+
     /// Accepted components, with their existing basis, budgets and state.
     #[must_use]
     pub fn components(&self) -> &[ModalAcousticTimeModel] { self.network.components() }

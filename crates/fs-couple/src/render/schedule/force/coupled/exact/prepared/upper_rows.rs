@@ -12,6 +12,9 @@
 //! [`row_storage`] is the other sum this module orders by rows: the storage of unit-mass oscillators under a stiffness
 //! that need not equal its transpose, so it reads the whole square.
 //!
+//! [`identity_rows`] is a check of another kind: whether the last rows of a square are the identity's, so that a
+//! product by that square need not compute them.
+//!
 //! This file names nothing of its crate. `tests/upper_row_forms.rs` compiles it a second time and holds each sum to a
 //! plain loop of the same order, bit for bit.
 
@@ -23,6 +26,16 @@ pub(super) fn bitwise_symmetric(matrix: &[f64], side: usize) -> bool {
     matrix.len() == side * side
         && (0..side).all(|i| {
             (i + 1..side).all(|j| matrix[i * side + j].to_bits() == matrix[j * side + i].to_bits())
+        })
+}
+
+/// Whether the rows `from..side` of the row-major square `matrix` of side `side` are the identity's bit for bit: 1.0
+/// on the row's own column and +0.0 on every other. No row before `from` is read.
+pub(super) fn identity_rows(matrix: &[f64], side: usize, from: usize) -> bool {
+    matrix.len() == side * side
+        && (from..side).all(|i| {
+            let row = &matrix[i * side..(i + 1) * side];
+            (0..side).all(|j| row[j].to_bits() == if i == j { 1.0_f64 } else { 0.0 }.to_bits())
         })
 }
 

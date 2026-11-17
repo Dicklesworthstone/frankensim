@@ -7,7 +7,7 @@
 #[path = "../src/render/schedule/force/coupled/exact/prepared/upper_rows.rs"]
 mod upper_rows;
 
-use upper_rows::{bitwise_symmetric, row_storage, upper_row_form};
+use upper_rows::{bitwise_symmetric, identity_rows, row_storage, upper_row_form};
 
 /// Sides around the blocks of eight rows, and one near a hundred.
 const SIDES: [usize; 7] = [1, 7, 8, 9, 16, 17, 100];
@@ -123,6 +123,34 @@ fn a_matrix_is_symmetric_only_if_every_pair_has_the_same_bits() {
     }
     // Zero and its negative are two bit patterns.
     assert!(!bitwise_symmetric(&[1.0, 0.0, -0.0, 1.0], 2));
+}
+
+#[test]
+fn rows_are_the_identitys_only_if_every_entry_has_its_bits() {
+    for (seed, side) in (1..).zip(SIDES) {
+        for from in [0, side / 2, side - 1] {
+            // Mixed rows, then the identity's rows from `from` on.
+            let mut square = mixed(side * side, seed);
+            for (at, entry) in square.iter_mut().enumerate().skip(from * side) {
+                *entry = f64::from(u8::from(at / side == at % side));
+            }
+            assert!(identity_rows(&square, side, from), "{side} {from}");
+            assert!(!identity_rows(&square, side + 1, from), "{side}");
+            // In the last row: the one moved by a unit in its last place, then, off the diagonal, a zero made the
+            // smallest positive number and the negative zero.
+            let last = (side - 1) * side;
+            let one = (last + side - 1, f64::from_bits(1.0_f64.to_bits() + 1));
+            let wrong = [one, (last, f64::from_bits(1)), (last, -0.0)];
+            for (at, value) in wrong.into_iter().take(if side > 1 { 3 } else { 1 }) {
+                let mut moved = square.clone();
+                moved[at] = value;
+                assert!(!identity_rows(&moved, side, from), "{side} {from} {at}");
+            }
+        }
+    }
+    // A row before `from` is not read, and from `side` on there is no row to hold.
+    assert!(identity_rows(&[f64::NAN, 2.0, 0.0, 1.0], 2, 1));
+    assert!(identity_rows(&[f64::NAN; 4], 2, 2));
 }
 
 /// A stiffness as `mechanical_stiffness` leaves it: a positive diagonal, then three links added entry by entry as

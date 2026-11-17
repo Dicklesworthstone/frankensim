@@ -602,9 +602,10 @@ impl CoupledModalSystem {
     /// (`exact::prepared::upper_rows`). The loss sweep takes each loss Gramian by rows over its upper triangle:
     /// half the terms, in an order that is a function of the side alone. The operator's storage takes the
     /// stiffness by rows over the whole square. A step's three losses and that storage then differ from the
-    /// chain's in their last bits. The states do not read them: the losses go to the ledger, and the storage is
-    /// only held against a tolerance and a limit, each of which refuses. Every operator prepared for this system
-    /// afterwards keeps the order.
+    /// chain's in their last bits. The states of a linear step do not read them: the losses go to the ledger, and
+    /// the storage is only held against a tolerance and a limit, each of which refuses. The trials of a system
+    /// with nonlinear potentials compare the losses before they accept a state. Every operator prepared for this
+    /// system afterwards keeps the order.
     ///
     /// # Errors
     /// A started system, one without the prepared operator, or a loss Gramian that differs from its transpose.
@@ -672,6 +673,14 @@ impl CoupledModalSystem {
     pub fn connection_dashpot_norm(&self, connection: usize) -> Option<f64> {
         let exact = self.exact.as_ref();
         exact.and_then(|exact| exact.dashpot_norm(connection))
+    }
+    /// How many leading rows of its transition the prepared operator's product computes at a step: the state's
+    /// `2 n + arms` when the held force's rows are the identity's bit for bit, every row (`3 n + arms`) otherwise.
+    /// None without the prepared operator. Only tests call it.
+    #[must_use]
+    pub fn prepared_product_rows(&self) -> Option<usize> {
+        let exact = self.exact.as_ref();
+        exact.and_then(exact::ExactNetwork::product_rows)
     }
     /// Read-only endpoint for the native stage/admit/publish composition boundary.
     pub(crate) fn staged_components(&self) -> &[ModalAcousticTimeModel] { &self.candidates }

@@ -452,6 +452,11 @@ impl MultiFrictionModalSystem {
     pub const fn sums_by_rows(&self) -> bool {
         self.core.sums_by_rows()
     }
+    /// The rows the shared network's prepared product computes.
+    #[must_use]
+    pub fn prepared_product_rows(&self) -> Option<usize> {
+        self.core.prepared_product_rows()
+    }
     /// Original shared mechanical period [s].
     #[must_use] pub fn sample_period_s(&self) -> f64 { self.core.sample_period_s() }
     /// Preserved original accepted sample clock.

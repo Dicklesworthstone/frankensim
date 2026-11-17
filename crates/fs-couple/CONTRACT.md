@@ -17,6 +17,27 @@
 
 ## New sections (newest first)
 
+### The prepared operator's product stops before the held force's rows (`CoupledModalSystem::prepared_product_rows`)
+
+A prepared operator multiplies its transition by `z = [D q, v, memory | u]` (`exact/prepared.rs`). The transition's side is `3 n + arms`: the state's `2 n + arms` rows,
+then one row for each entry of the held force `u`. The generator's rows of the held force are zero, so those rows of the transition are the identity's and their product is
+`u` again. No caller reads it: `propagate` reads the first `2 n + arms` entries of the product, `response` each mode's displacement entry, and `velocity_response` each
+mode's displacement and velocity entries. When an operator is prepared, `upper_rows::identity_rows` holds the last `n` rows to the identity's bit for bit: 1.0 on the
+row's own column and +0.0 on every other. If they are, the product computes the state's rows only (two thirds of the terms when there are no arms). If one bit differs, it
+computes every row as before. Each entry of the product is its own row's sum in column order, on any number of threads, so the entries that are read keep their bits.
+A row that is left out could refuse only a `z` that is not finite. `state_vector` refuses such an `x` or `u` before any product, and every row that is kept would refuse
+such a `z` too (a zero entry times an infinity is not a number).
+
+Evidence. `tests/upper_row_forms.rs` holds `identity_rows` at sides 1, 7, 8, 9, 16, 17 and 100, with the held rows starting at the first row, at the middle and at the
+last: true on the identity's rows under mixed rows; false with the one moved by a unit in its last place, with a zero made the smallest positive number, with the negative
+zero, and at a wrong side; a row before the first held row is not read. `prepared_product_rows()` reports the count on the system and on the two friction owners; only
+tests call it. `tests/coupled_coefficient_update.rs`: a prepared system of two modes computes 4 of its 6 rows before and after a changed link law, and 5 of 7 with one
+material arm; without the prepared operator it is `None`. `tests/measured_string_bank.rs`: a prepared bank computes two rows a mode and one a material arm.
+The viola Db4 control card renders the same wav and the same log as before.
+
+Not tested: that the product does stop (no value shows it; the render times do); the fall back to every row through a system (no public call builds a transition whose
+held rows are not the identity's; a build with one such entry planted computed 6 of 6 rows and passed every other test of its target).
+
 ### The prepared operator's storage by rows, and the dashpot norms it holds (`CoupledModalSystem::with_sums_by_rows`)
 
 `with_upper_row_losses` and `sums_losses_by_upper_rows` are now `with_sums_by_rows` and `sums_by_rows`: one opt-in sets two orders. The first is the loss sweep's, described
@@ -51,8 +72,9 @@ A step of a prepared operator evaluates three loss quadratics `z^T W z`: compone
 square in row-major order. `CoupledModalSystem::with_sums_by_rows` changes the order for that system. Every loss Gramian is exactly symmetric, so row `i` contributes
 `z_i (W_ii z_i + 2 s_i)`, where `s_i` is the sum of `W_ij z_j` over the columns `j > i` in column order; eight rows advance together and the rows are added in row order
 (`exact/prepared/upper_rows.rs`). That is half the terms and no single chain. The order is a function of the side alone, takes no thread count and runs on one thread. The
-three losses differ from the chain's in their last bits. A step's states, its observer pressure and its stored energies do not read them and keep their bits. The per-link
-port ledger and the air poles' forms keep the chain.
+three losses differ from the chain's in their last bits. In a step of the linear operator, and under the friction owners, whose balances only refuse, the states, the
+observer pressure and the stored energies do not read them and keep their bits. The trials of a system with nonlinear potentials are the exception: the paragraph on them
+is below. The per-link port ledger and the air poles' forms keep the chain.
 
 The opt-in is refused after the first sample, without the prepared operator, and when a loss Gramian differs from its transpose in any bit: the order never reads the lower
 triangle. The system holds the order. `preparation::prepare` applies it to every operator prepared for the system afterwards (a changed link law, changed relaxation times, a

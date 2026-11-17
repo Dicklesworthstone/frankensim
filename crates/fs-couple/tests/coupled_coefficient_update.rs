@@ -555,3 +555,29 @@ fn an_operator_holds_the_dashpot_norm_a_step_computed_before_and_after_a_changed
         ordinary.connection_column(2)
     );
 }
+
+#[test]
+fn a_prepared_product_stops_before_the_held_forces_rows_before_and_after_a_changed_law() {
+    let gate = CancelGate::new_clock_free();
+    // Two modes: the state's four rows of a transition of side six.
+    let mut system = fixture(true, config(10.0, 100.0));
+    assert_eq!(system.prepared_product_rows(), Some(4));
+    system.step(&FORCE).unwrap();
+    let next = laws([350.0, 90.0, 80.0], [0.004, 0.003, -0.002]);
+    system.set_connection_coefficients(&next, &gate).unwrap();
+    assert_eq!(system.prepared_product_rows(), Some(4));
+    system.step(&FORCE).unwrap();
+    // One material arm is one more row of the state: five of seven.
+    let arm = RelaxationBranch {
+        projection: vec![1.0, 0.0, -0.5, 0.0],
+        stiffness: 9.0,
+        relaxation_time_s: 0.03,
+    };
+    let memory = fixture(true, config(10.0, 100.0))
+        .with_material_relaxation(vec![arm], Some(vec![0.02]), &gate)
+        .unwrap();
+    assert_eq!(memory.prepared_product_rows(), Some(5));
+    // Without the prepared operator there is no product.
+    let ordinary = fixture(false, config(10.0, 100.0));
+    assert!(ordinary.prepared_product_rows().is_none());
+}

@@ -128,6 +128,9 @@ pub(super) struct PreparedNetwork {
     stiffness: Vec<f64>,
     rest_force: Vec<f64>,
     transition: Vec<f64>,
+    /// The leading rows of the transition that a product computes: the state's `2 n + arms` when the held force's
+    /// rows, which no caller reads, are the identity's bit for bit (`upper_rows::identity_rows`); else every row.
+    product_rows: usize,
     component_loss: Option<Vec<f64>>,
     /// Each row c defines the original arm storage (c.q - memory)^2 / 2.
     material_couplings: Vec<Vec<f64>>,
@@ -442,6 +445,8 @@ impl PreparedNetwork {
             None => None,
         };
         let transition = levels.last().unwrap().clone();
+        let identity = upper_rows::identity_rows(&transition, d, state_count);
+        let product_rows = if identity { state_count } else { d };
         let air = radiation.map(|binding| air::PreparedAir::new(binding, count, branches.len(), dt, &weights, &transition, gate))
             .transpose()?;
         let integral = connection_resistance.map(|_| LinkIntegral { generator, levels, h, budget: exp_budget });
@@ -451,7 +456,7 @@ impl PreparedNetwork {
             dampings: links.iter().map(|l| l.damping_n_s_m).collect(), damping_columns,
             integral, gramians: OnceLock::new(), evaluations: AtomicU64::new(0),
         });
-        let result = Self { count, dt, weights, stiffness, rest_force, transition, component_loss, connection_total,
+        let result = Self { count, dt, weights, stiffness, rest_force, transition, product_rows, component_loss, connection_total,
             material_couplings, material_loss, dashpot_norms: ledger.dashpot_norms(), ledger,
             sweep: Mutex::new(None), sweeps: AtomicU64::new(0), sums_by_rows: false,
             energies: Mutex::new(EnergyMemo::default()), energy_evaluations: AtomicU64::new(0), air };
@@ -544,7 +549,7 @@ impl PreparedNetwork {
                 Some(force)
             }
         };
-        let end = apply(&self.transition, &z)?;
+        let end = self.product(&z)?;
         let mut endpoint = vec![0.0; 2 * self.count + memory.len()];
         let mut y = vec![0.0; self.count];
         let mut supplied = 0.0;
@@ -626,7 +631,7 @@ impl PreparedNetwork {
     /// air, at rest.
     pub(super) fn response(&self, column: &[f64], dt: f64) -> Result<Vec<f64>, ModalCouplingError> {
         let z = self.state_input(&vec![0.0; 2 * self.count + self.material_couplings.len()], column, dt)?;
-        let end = apply(&self.transition, &z)?;
+        let end = self.product(&z)?;
         let mut response = (0..self.count).map(|i| finite(end[2 * i] / self.weights[i])).collect::<Result<Vec<_>, _>>()?;
         if let Some(air) = &self.air {
             air.load_response(&mut response)?;
@@ -638,7 +643,7 @@ impl PreparedNetwork {
     /// ports' own end displacements drive in `response`, acting through the transition's velocity rows.
     pub(super) fn velocity_response(&self, column: &[f64], dt: f64) -> Result<Vec<f64>, ModalCouplingError> {
         let z = self.state_input(&vec![0.0; 2 * self.count + self.material_couplings.len()], column, dt)?;
-        let end = apply(&self.transition, &z)?;
+        let end = self.product(&z)?;
         let mut response = (0..self.count).map(|i| finite(end[2 * i + 1])).collect::<Result<Vec<_>, _>>()?;
         if let Some(air) = &self.air {
             let displacement = (0..self.count).map(|i| finite(end[2 * i] / self.weights[i])).collect::<Result<Vec<_>, _>>()?;
@@ -729,6 +734,16 @@ impl PreparedNetwork {
     /// The norm of the column a link's dashpot acts along, computed when this operator was prepared.
     pub(super) fn dashpot_norm(&self, link: usize) -> Option<f64> {
         self.dashpot_norms.get(link).copied()
+    }
+
+    /// The transition's product with `z` over `product_rows` rows: each entry is its own row's sum.
+    fn product(&self, z: &[f64]) -> Result<Vec<f64>, ModalCouplingError> {
+        apply(&self.transition[..self.product_rows * z.len()], z)
+    }
+
+    /// How many leading rows of the transition a step's product computes.
+    pub(super) fn product_rows(&self) -> usize {
+        self.product_rows
     }
 
     #[cfg(test)]

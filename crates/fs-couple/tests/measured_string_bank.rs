@@ -233,6 +233,10 @@ fn measured_dispersion_and_actual_radius_reach_sampled_and_causal_gas_paths() {
             );
             // A bank prepared after its construction sums its losses by upper rows.
             assert!(bank.system().sums_by_rows());
+            // Its product stops before the held force's rows: two rows a mode and one a material arm.
+            let system = bank.system();
+            let state_rows = 2 * system.mode_count() + system.material_relaxation_branches().len();
+            assert_eq!(system.prepared_product_rows(), Some(state_rows));
         }
         let ratio = ((dry.lin_density_kg_m + added) / (dry.lin_density_kg_m + 4.0 * added)).sqrt();
         assert!(

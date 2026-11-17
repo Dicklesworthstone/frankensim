@@ -396,6 +396,12 @@ impl ExactNetwork {
         prepared.and_then(|prepared| prepared.dashpot_norm(link))
     }
 
+    /// How many rows of its transition the prepared owner's product computes; None for any other owner.
+    pub(super) fn product_rows(&self) -> Option<usize> {
+        let owner = self.prepared.as_ref();
+        owner.map(prepared::PreparedNetwork::product_rows)
+    }
+
     pub(super) fn deferred_connection_work(&self, x: &[f64], u: &[f64], endpoint: &[f64], connection_loss: f64)
         -> Option<std::sync::Arc<dyn crate::port_adoption::DeferredTransfers>>
     {
