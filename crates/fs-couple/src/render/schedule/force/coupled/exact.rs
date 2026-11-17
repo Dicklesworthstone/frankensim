@@ -80,6 +80,15 @@ impl ExactNetwork {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// The prepared operator's loss sweep by rows over the upper triangle (`PreparedNetwork::sum_losses_by_upper_rows`).
+    /// Refused by an operator that is not the prepared one: the island blocks have no loss Gramians.
+    pub(super) fn sum_losses_by_upper_rows(&mut self) -> Result<(), ModalCouplingError> {
+        self.prepared
+            .as_mut()
+            .ok_or_else(|| invalid("losses by upper rows need the prepared operator"))?
+            .sum_losses_by_upper_rows()
+    }
+
     /// Reuse the original coupled-basis constant-loss preparation without
     /// allocating transition matrices, resistance integrals or time state.
     pub(super) fn harmonic_damping_columns(

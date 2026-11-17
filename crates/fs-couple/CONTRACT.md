@@ -17,6 +17,34 @@
 
 ## New sections (newest first)
 
+### The prepared operator's loss sweep by rows over the upper triangle (`CoupledModalSystem::with_upper_row_losses`)
+
+A step of a prepared operator evaluates three loss quadratics `z^T W z`: component, summed connection and material. By default each is one chain of additions over the whole
+square in row-major order. `CoupledModalSystem::with_upper_row_losses` changes the order for that system. Every loss Gramian is exactly symmetric, so row `i` contributes
+`z_i (W_ii z_i + 2 s_i)`, where `s_i` is the sum of `W_ij z_j` over the columns `j > i` in column order; eight rows advance together and the rows are added in row order
+(`exact/prepared/upper_rows.rs`). That is half the terms and no single chain. The order is a function of the side alone, takes no thread count and runs on one thread. The
+three losses differ from the chain's in their last bits. A step's states, its observer pressure and its stored energies do not read them and keep their bits. The per-link
+port ledger and the air poles' forms keep the chain.
+
+The opt-in is refused after the first sample, without the prepared operator, and when a loss Gramian differs from its transpose in any bit: the order never reads the lower
+triangle. The system holds the order. `preparation::prepare` applies it to every operator prepared for the system afterwards (a changed link law, changed relaxation times, a
+radiation load, more material arms) and holds each new operator's Gramians to their transposes again. `sums_losses_by_upper_rows()` reports it.
+
+The bowed-string bank opts in whenever its operator is prepared: in `assemble_sources`, where every bank constructor and rebuild builds its network, and in
+`ReciprocalStringBank::with_prepared_linear_propagation`. `material_strings` prints `loss_order=upper-rows` for such a bank. No other owner opts in, and their losses keep
+the chain's bits.
+
+Evidence. `tests/upper_row_forms.rs` compiles the kernel's file a second time (the file names nothing of its crate). At sides 1, 7, 8, 9, 16, 17 and 100, on mixed-sign
+Gramians, it holds the kernel to a plain loop of the same order bit for bit and to the chain within 1e-13, and holds `bitwise_symmetric` to one unit in the last place of one
+lower entry, to 0.0 against -0.0 and to a wrong side. `tests/coupled_coefficient_update.rs`: two prepared systems that differ only in the order hold the same states,
+pressure and stored energy bit for bit over 400 samples, through a changed link law at sample 200; their connection losses agree within 1e-13 and have other bits before and
+after the change; the refusals. `tests/measured_string_bank.rs` and `tests/material_string_bank/shell/coating.rs` assert the order on a bank prepared after its construction
+and on one constructed prepared. The viola Db4 and viola E3 control cards render the same wav as before, and the same log lines but for the added `loss_order=upper-rows`.
+
+Not tested: the refusal of an asymmetric Gramian through a system (no public call builds one); the component and material channels of a system (the fixture has neither
+loss); sides from 1024, where the default order may run each Gramian on its own thread. Not covered: the two transition products of a step and the prepared Hamiltonian,
+which are most of what is left of a string render's step.
+
 ### One evaluation of a coupled network's total energy for each accepted state (`CoupledModalSystem::total_energy_j`)
 
 A step asks `CoupledModalSystem::total_energy_j` for the energy of its accepted state more than once: `exact::stage` asks, the candidate's gates ask, and a friction or contact

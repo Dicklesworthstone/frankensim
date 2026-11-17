@@ -56,6 +56,7 @@ pub(super) fn prepare(
     branches: &[fs_phs::RelaxationBranch],
     radiation: Option<&radiation::Binding>,
     config: ModalCouplingConfig,
+    upper_row_losses: bool,
     gate: &CancelGate,
 ) -> Result<PreparedOperator, ModalCouplingError> {
     poll(Some(gate))?;
@@ -66,7 +67,7 @@ pub(super) fn prepare(
             models, columns, links, config, choice.prepared_budget(), gate,
         )?
     };
-    let exact = match choice {
+    let mut exact = match choice {
         ModalPreparation::HarmonicOnly(budget) => {
             admit_harmonic(
                 budget,
@@ -103,6 +104,14 @@ pub(super) fn prepare(
         }
         ModalPreparation::Ordinary => None,
     };
+    // A system that sums its losses by upper rows keeps that order in every operator prepared for it, and each one's
+    // Gramians are held to their transposes again.
+    if upper_row_losses {
+        exact
+            .as_mut()
+            .ok_or_else(|| invalid("losses by upper rows need a time-domain operator"))?
+            .sum_losses_by_upper_rows()?;
+    }
     Ok(PreparedOperator {
         exact,
         harmonic_damping_columns: Vec::new(),

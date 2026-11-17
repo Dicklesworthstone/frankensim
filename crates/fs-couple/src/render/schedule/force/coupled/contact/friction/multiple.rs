@@ -447,6 +447,11 @@ impl MultiFrictionModalSystem {
     #[must_use] pub fn mode_count(&self) -> usize { self.core.mode_count() }
     /// The shared linear network's admitted stiffness bound [rad/s]; contacts are not in it.
     #[must_use] pub fn linear_frequency_upper_bound_rad_s(&self) -> f64 { self.core.linear_frequency_upper_bound_rad_s() }
+    /// Whether the shared network's loss sweep runs by rows over the upper triangle.
+    #[must_use]
+    pub const fn sums_losses_by_upper_rows(&self) -> bool {
+        self.core.sums_losses_by_upper_rows()
+    }
     /// Original shared mechanical period [s].
     #[must_use] pub fn sample_period_s(&self) -> f64 { self.core.sample_period_s() }
     /// Preserved original accepted sample clock.

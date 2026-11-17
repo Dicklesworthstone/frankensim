@@ -452,3 +452,57 @@ fn coefficient_work_frequency_reaction_and_cancellation_refusals_are_atomic() {
         }
     }
 }
+
+// The two orders of the loss sweep on one prepared network, through a changed law that prepares a new operator.
+// The states and the stored energy never read a loss, so both systems hold the same bits at every sample.
+#[test]
+fn losses_by_upper_rows_move_no_state_keep_their_order_and_agree_with_the_chain() {
+    let gate = CancelGate::new_clock_free();
+    let mut chain = fixture(true, config(10.0, 100.0));
+    let mut rows = fixture(true, config(10.0, 100.0))
+        .with_upper_row_losses()
+        .unwrap();
+    assert!(rows.sums_losses_by_upper_rows() && !chain.sums_losses_by_upper_rows());
+    // Samples whose connection loss has other bits in the two orders, before and after the changed law.
+    let mut other_bits = [0_usize; 2];
+    for sample in 0..400 {
+        if sample == 200 {
+            let next = laws([350.0, 90.0, 80.0], [0.004, 0.003, -0.002]);
+            chain.set_connection_coefficients(&next, &gate).unwrap();
+            rows.set_connection_coefficients(&next, &gate).unwrap();
+            assert!(rows.sums_losses_by_upper_rows() && !chain.sums_losses_by_upper_rows());
+        }
+        let a = chain.step(&FORCE).unwrap().clone();
+        let b = rows.step(&FORCE).unwrap().clone();
+        assert_eq!(
+            state(&rows).map(f64::to_bits),
+            state(&chain).map(f64::to_bits),
+            "sample {sample}"
+        );
+        assert_eq!(
+            b.observer_pressure_pa.to_bits(),
+            a.observer_pressure_pa.to_bits()
+        );
+        assert_eq!(b.total_energy_j().to_bits(), a.total_energy_j().to_bits());
+        assert!(b.energy_residual_j.abs() <= b.energy_tolerance_j);
+        let (x, y) = (a.connection_dissipation_j, b.connection_dissipation_j);
+        assert!(x > 0.0 && (x - y).abs() <= 1e-13 * x, "{x:e} vs {y:e}");
+        other_bits[sample / 200] += usize::from(x.to_bits() != y.to_bits());
+    }
+    assert!(
+        other_bits.iter().all(|&count| count > 0),
+        "the order was not applied: {other_bits:?}"
+    );
+}
+
+#[test]
+fn losses_by_upper_rows_are_refused_without_the_prepared_operator_and_after_the_first_sample() {
+    assert!(
+        fixture(false, config(10.0, 100.0))
+            .with_upper_row_losses()
+            .is_err()
+    );
+    let mut started = fixture(true, config(10.0, 100.0));
+    started.step(&FORCE).unwrap();
+    assert!(started.with_upper_row_losses().is_err());
+}

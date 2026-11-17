@@ -231,6 +231,8 @@ fn measured_dispersion_and_actual_radius_reach_sampled_and_causal_gas_paths() {
                 bank.system().components()[0].modes()[0],
                 bank.system().components()[0].modes()[1]
             );
+            // A bank prepared after its construction sums its losses by upper rows.
+            assert!(bank.system().sums_losses_by_upper_rows());
         }
         let ratio = ((dry.lin_density_kg_m + added) / (dry.lin_density_kg_m + 4.0 * added)).sqrt();
         assert!(

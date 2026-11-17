@@ -444,6 +444,21 @@ impl FrictionModalSystem {
 
     pub const fn is_harmonic_only(&self) -> bool { self.network.is_harmonic_only() }
 
+    /// The network's loss sweep by rows over the upper triangle (`CoupledModalSystem::with_upper_row_losses`).
+    ///
+    /// # Errors
+    /// The network's refusals.
+    pub fn with_upper_row_losses(mut self) -> Result<Self, ModalFrictionError> {
+        self.network = self.network.with_upper_row_losses()?;
+        Ok(self)
+    }
+
+    /// Whether the network's loss sweep runs by rows over the upper triangle.
+    #[must_use]
+    pub const fn sums_losses_by_upper_rows(&self) -> bool {
+        self.network.sums_losses_by_upper_rows()
+    }
+
     /// Accepted components, with their existing basis, budgets and state.
     #[must_use]
     pub fn components(&self) -> &[ModalAcousticTimeModel] { self.network.components() }

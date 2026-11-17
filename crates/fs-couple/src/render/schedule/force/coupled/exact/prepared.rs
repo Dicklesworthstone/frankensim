@@ -138,6 +138,9 @@ pub(super) struct PreparedNetwork {
     ledger: Arc<LedgerData>,
     sweep: Mutex<Option<LossSweep>>,
     sweeps: AtomicU64,
+    /// Whether the sweep sums each Gramian by rows over its upper triangle (`upper_rows`) and not in one chain over the
+    /// square. Set by `sum_losses_by_upper_rows`, which first holds every Gramian of the sweep to its transpose.
+    upper_row_losses: bool,
     /// The last states whose storage `hamiltonian` evaluated and their values (see [`EnergyMemo`]).
     energies: Mutex<EnergyMemo>,
     energy_evaluations: AtomicU64,
@@ -446,7 +449,7 @@ impl PreparedNetwork {
         });
         let result = Self { count, dt, weights, stiffness, rest_force, transition, component_loss, connection_total,
             material_couplings, material_loss, ledger,
-            sweep: Mutex::new(None), sweeps: AtomicU64::new(0),
+            sweep: Mutex::new(None), sweeps: AtomicU64::new(0), upper_row_losses: false,
             energies: Mutex::new(EnergyMemo::default()), energy_evaluations: AtomicU64::new(0), air };
         result.validate_energy_identity(gate)?;
         poll(Some(gate))?;
@@ -638,10 +641,51 @@ impl PreparedNetwork {
     /// each link's own form is evaluated only when its ledger is requested.
     fn compute_sweep(&self, z: &[f64]) -> Result<LossSweep, ModalCouplingError> {
         self.sweeps.fetch_add(1, Ordering::Relaxed);
+        if self.upper_row_losses {
+            return self.upper_row_sweep(z);
+        }
         let threads = step_threads(fs_la::eigen_complex::declared_workers(), z.len());
         let (component, connection, material) = loss_quadratics(
             self.component_loss.as_deref(), self.connection_total.as_deref(), self.material_loss.as_deref(), z, threads)?;
         Ok(LossSweep { z: z.to_vec(), component, connection, material })
+    }
+
+    /// The sweep with each Gramian summed by rows over its upper triangle (`upper_rows`), on one thread. The refusals
+    /// are read in the serial order: component, connection, material.
+    fn upper_row_sweep(&self, z: &[f64]) -> Result<LossSweep, ModalCouplingError> {
+        let form = |gramian: &Option<Vec<f64>>| {
+            gramian.as_deref().map_or(Ok(0.0), |gramian| {
+                let (sum, magnitude) = upper_rows::upper_row_form(gramian, z);
+                checked_loss(sum, magnitude)
+            })
+        };
+        let component = form(&self.component_loss)?;
+        let connection = form(&self.connection_total)?;
+        let material = form(&self.material_loss)?;
+        Ok(LossSweep { z: z.to_vec(), component, connection, material })
+    }
+
+    /// From now on the sweep sums each loss Gramian by rows over its upper triangle: half the terms of the square, in an
+    /// order that is a function of the side alone. That order never reads the lower triangle, so the request is refused
+    /// unless every Gramian of the sweep equals its transpose bit for bit, as `gramian` leaves it. The values differ
+    /// from the chain's in their last bits. The per-link ledger and the air's forms keep their chain.
+    pub(super) fn sum_losses_by_upper_rows(&mut self) -> Result<(), ModalCouplingError> {
+        let side = 3 * self.count + self.material_couplings.len();
+        let symmetric = |gramian: &Option<Vec<f64>>| {
+            gramian
+                .as_deref()
+                .is_none_or(|gramian| upper_rows::bitwise_symmetric(gramian, side))
+        };
+        if !symmetric(&self.component_loss)
+            || !symmetric(&self.connection_total)
+            || !symmetric(&self.material_loss)
+        {
+            return Err(invalid(
+                "a prepared loss Gramian differs from its transpose",
+            ));
+        }
+        self.upper_row_losses = true;
+        Ok(())
     }
 
     /// Run `read` on the sweep for exactly this vector (bitwise), evaluating the Gramians only when it is a new vector.
@@ -1221,6 +1265,7 @@ fn checked_loss(sum: f64, magnitude: f64) -> Result<f64, ModalCouplingError> {
 }
 
 pub(super) mod air;
+mod upper_rows;
 
 #[cfg(test)]
 mod tests;

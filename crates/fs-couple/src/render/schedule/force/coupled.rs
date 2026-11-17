@@ -261,6 +261,9 @@ pub struct CoupledModalSystem {
     pressure: equilibrium::pressure::EquilibriumPressure,
     prepared_budget: Option<PreparedModalBudget>,
     harmonic_only: bool,
+    /// Whether every operator prepared for this system sums its loss sweep by rows over the upper triangle
+    /// ([`Self::with_upper_row_losses`]).
+    upper_row_losses: bool,
     harmonic_damping_columns: Vec<Option<Vec<f64>>>,
     relaxation_branches: Vec<fs_phs::RelaxationBranch>,
     material_memory: Vec<f64>,
@@ -462,7 +465,7 @@ impl CoupledModalSystem {
         // A refusal names both figures: the bound the network asked for and the guard it was held to.
         limit("stiffness bound, rad/s (Nyquist guard)", linear_frequency_upper_bound_rad_s, guard)?;
         let operator = preparation::prepare(&models, &columns, &connections,
-            count, dt, preparation, &[], None, config, gate)?;
+            count, dt, preparation, &[], None, config, false, gate)?;
         let candidates = models.clone();
         let frame = CoupledModalFrame {
             sample: 0, observer_pressure_pa: 0.0, modal_energy_j: 0.0, connection_energy_j: 0.0,
@@ -496,6 +499,7 @@ impl CoupledModalSystem {
             models, candidates, exact: operator.exact, pressure: operator.pressure,
             prepared_budget: preparation.prepared_budget(),
             harmonic_only: preparation.is_harmonic_only(),
+            upper_row_losses: false,
             harmonic_damping_columns: operator.harmonic_damping_columns,
             offsets, connections, columns,
             relaxation_branches: Vec::new(), material_memory: Vec::new(),
@@ -532,7 +536,7 @@ impl CoupledModalSystem {
         let operator = preparation::prepare(
             &self.models, &self.columns, &self.connections, self.mode_count(),
             self.dt, ModalPreparation::Prepared(budget), &self.relaxation_branches,
-            self.radiation.as_ref(), self.config, gate,
+            self.radiation.as_ref(), self.config, self.upper_row_losses, gate,
         )?;
         self.exact = operator.exact;
         self.pressure = operator.pressure;
@@ -562,7 +566,7 @@ impl CoupledModalSystem {
         anchor_constant_loss(&mut self.connections, constant_loss)?;
         let operator = preparation::prepare(&self.models, &self.columns, &self.connections,
             self.mode_count(), self.dt, self.preparation(), &self.relaxation_branches,
-            self.radiation.as_ref(), self.config, gate)?;
+            self.radiation.as_ref(), self.config, self.upper_row_losses, gate)?;
         self.exact = operator.exact;
         self.pressure = operator.pressure;
         self.harmonic_damping_columns = operator.harmonic_damping_columns;
@@ -593,6 +597,31 @@ impl CoupledModalSystem {
 
     #[must_use]
     pub const fn is_harmonic_only(&self) -> bool { self.harmonic_only }
+
+    /// Sum the prepared operator's loss sweep by rows over the upper triangle of each loss Gramian, in place of one
+    /// chain over the square (`exact::prepared::upper_rows`): half the terms, in an order that is a function of the
+    /// side alone. A step's three losses then differ from the chain's in their last bits; its states do not read
+    /// them. Every operator prepared for this system afterwards keeps the order.
+    ///
+    /// # Errors
+    /// A started system, one without the prepared operator, or a loss Gramian that differs from its transpose.
+    pub fn with_upper_row_losses(mut self) -> Result<Self, ModalCouplingError> {
+        let cold = self.frame.sample == 0 && self.prepared_budget.is_some() && !self.harmonic_only;
+        let Some(exact) = self.exact.as_mut().filter(|_| cold) else {
+            return Err(invalid(
+                "losses by upper rows need the prepared operator before its first sample",
+            ));
+        };
+        exact.sum_losses_by_upper_rows()?;
+        self.upper_row_losses = true;
+        Ok(self)
+    }
+
+    /// Whether the loss sweep runs by rows over the upper triangle ([`Self::with_upper_row_losses`]).
+    #[must_use]
+    pub const fn sums_losses_by_upper_rows(&self) -> bool {
+        self.upper_row_losses
+    }
 
     fn require_time_domain(&self) -> Result<(), ModalCouplingError> {
         if self.harmonic_only {

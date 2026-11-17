@@ -972,6 +972,16 @@ fn two_way_load_receipt(ready:&Ready)->Result<Vec<LoadReceipt>> {
     }
     Ok(receipts)
 }
+/// The log lines of the bank's prepared operator: its budget, and the order of its loss sweep when that is not the
+/// chain.
+fn prepared_operator_lines(bank: &MultiBowStringBank) {
+    if let Some(budget) = bank.source().bank().prepared_linear_budget() {
+        eprintln!("prepared_linear={budget:?}");
+    }
+    if bank.system().sums_losses_by_upper_rows() {
+        eprintln!("loss_order=upper-rows");
+    }
+}
 fn run(raw:&[std::ffi::OsString])->Result<()> {
     if raw.get(1).is_some_and(|a| a=="assemble-shell") { return assemble_shell(&raw[2..]); }
     let (args, gas_options)=thermochemical::Options::extract_os(raw)?;
@@ -1277,9 +1287,7 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     for joint in &ready.spec.translational_bridges {
         eprintln!("translational_bridge={joint:?}; body_map=original_shell_global_displacement");
     }
-    if let Some(budget)=ready.performance.bank().source().bank().prepared_linear_budget() {
-        eprintln!("prepared_linear={budget:?}");
-    }
+    prepared_operator_lines(ready.performance.bank());
     if ready.spec.residual_flexibility {
         let bank=ready.performance.bank();
         for (index,(member,card)) in bank.source().bank().strings().iter().zip(bank.cards()).enumerate() {
