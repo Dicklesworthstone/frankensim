@@ -581,3 +581,27 @@ fn a_prepared_product_stops_before_the_held_forces_rows_before_and_after_a_chang
     let ordinary = fixture(false, config(10.0, 100.0));
     assert!(ordinary.prepared_product_rows().is_none());
 }
+
+#[test]
+fn a_changed_law_between_two_products_on_one_state_starts_from_no_kept_sums() {
+    let gate = CancelGate::new_clock_free();
+    // The key is the scaled state, and a mode's scale is the root of its own stiffness. These laws keep both own
+    // stiffnesses (80 + 40 = 90 + 30, 140 + 40 = 150 + 30) and change the coupling: the same key, another operator.
+    let next = laws([90.0, 150.0, 30.0], [0.001, -0.002, 0.004]);
+    // `primed` multiplies at its first state under the original laws: a step whose force passes a limit is refused
+    // after its product and leaves the state as it was.
+    let mut primed = fixture(true, config(10.0, 100.0));
+    let first = state(&primed);
+    assert!(primed.step(&[1e6, -1e6]).is_err());
+    assert_eq!(state(&primed).map(f64::to_bits), first.map(f64::to_bits));
+    primed.set_connection_coefficients(&next, &gate).unwrap();
+    // `fresh` never multiplied under the original laws.
+    let mut fresh = fixture(true, config(10.0, 100.0));
+    fresh.set_connection_coefficients(&next, &gate).unwrap();
+    for sample in 0..3 {
+        primed.step(&FORCE).unwrap();
+        fresh.step(&FORCE).unwrap();
+        let (a, b) = (state(&primed), state(&fresh));
+        assert_eq!(a.map(f64::to_bits), b.map(f64::to_bits), "{sample}");
+    }
+}

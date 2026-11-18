@@ -15,6 +15,10 @@
 //! [`identity_rows`] is a check of another kind: whether the last rows of a square are the identity's, so that a
 //! product by that square need not compute them.
 //!
+//! [`product_from`] is a product of whole rows by `[state | force]` that keeps each row's sum over the state's columns
+//! ([`StateSums`]): the next product on the same state adds only the force's columns, the same additions in the same
+//! order as one left-to-right sum.
+//!
 //! This file names nothing of its crate. `tests/upper_row_forms.rs` compiles it a second time and holds each sum to a
 //! plain loop of the same order, bit for bit.
 
@@ -109,4 +113,68 @@ pub(super) fn row_storage(stiffness: &[f64], modes: &[f64]) -> f64 {
         energy += 0.5 * velocity * velocity + 0.5 * position * sum;
     }
     energy
+}
+
+/// Each row's sum over the columns of a state, in column order from 0.0, with the bits of the state's entries.
+pub(super) struct StateSums {
+    key: Vec<u64>,
+    sums: Vec<f64>,
+}
+
+/// The product of the whole rows `matrix` (row-major, each of length `z.len()`) by `z`, whose first `state` entries are a
+/// state and whose others are a held force. Each entry is its row's sum of `row[j] * z[j]` in column order from 0.0.
+/// The sums over the state's columns are kept in `slot`: a call whose state has the kept bits in every entry continues
+/// from them, and any other call computes and keeps its own. Either way a row adds the terms of one left-to-right sum
+/// in that sum's order, so each entry has its bits.
+pub(super) fn product_from(
+    slot: &mut Option<StateSums>,
+    matrix: &[f64],
+    z: &[f64],
+    state: usize,
+) -> Vec<f64> {
+    let (head, tail) = z.split_at(state);
+    let rows = matrix.len() / z.len().max(1);
+    let held = |kept: &StateSums| {
+        let same = |(bits, entry): (&u64, &f64)| *bits == entry.to_bits();
+        kept.sums.len() == rows && kept.key.len() == state && kept.key.iter().zip(head).all(same)
+    };
+    let kept = match slot.take().filter(held) {
+        Some(kept) => kept,
+        None => StateSums {
+            key: head.iter().map(|entry| entry.to_bits()).collect(),
+            sums: row_sums(matrix, z.len(), 0, head, &vec![0.0; rows]),
+        },
+    };
+    let product = row_sums(matrix, z.len(), state, tail, &kept.sums);
+    *slot = Some(kept);
+    product
+}
+
+/// For each whole row of `matrix` (rows of length `side`): its entry of `start` plus `row[first + j] * values[j]` in
+/// column order. Eight rows advance together, each with its own sum; the rows after the last whole block run alone.
+fn row_sums(matrix: &[f64], side: usize, first: usize, values: &[f64], start: &[f64]) -> Vec<f64> {
+    let mut sums = start.to_vec();
+    let columns = first..first + values.len();
+    let mut blocks = matrix.chunks_exact(BLOCK * side);
+    let mut done = 0;
+    for block in blocks.by_ref() {
+        let rows: [&[f64]; BLOCK] = core::array::from_fn(|k| &block[k * side..][columns.clone()]);
+        let together = &mut sums[done..done + BLOCK];
+        for (j, value) in values.iter().enumerate() {
+            for (sum, row) in together.iter_mut().zip(&rows) {
+                *sum += row[j] * value;
+            }
+        }
+        done += BLOCK;
+    }
+    for (sum, row) in sums[done..]
+        .iter_mut()
+        .zip(blocks.remainder().chunks_exact(side))
+    {
+        *sum = row[columns.clone()]
+            .iter()
+            .zip(values)
+            .fold(*sum, |s, (a, b)| s + a * b);
+    }
+    sums
 }

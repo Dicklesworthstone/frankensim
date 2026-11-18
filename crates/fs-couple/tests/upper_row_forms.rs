@@ -7,7 +7,7 @@
 #[path = "../src/render/schedule/force/coupled/exact/prepared/upper_rows.rs"]
 mod upper_rows;
 
-use upper_rows::{bitwise_symmetric, identity_rows, row_storage, upper_row_form};
+use upper_rows::{bitwise_symmetric, identity_rows, product_from, row_storage, upper_row_form};
 
 /// Sides around the blocks of eight rows, and one near a hundred.
 const SIDES: [usize; 7] = [1, 7, 8, 9, 16, 17, 100];
@@ -220,4 +220,46 @@ fn the_row_storage_has_the_bits_of_a_plain_loop_of_its_order_and_agrees_with_the
         );
     }
     assert_eq!(row_storage(&[], &[]).to_bits(), 0.0_f64.to_bits());
+}
+
+/// One left-to-right sum for each whole row, from 0.0: the bits a product must have.
+fn plain_product(matrix: &[f64], z: &[f64]) -> Vec<u64> {
+    let row_sum = |row: &[f64]| row.iter().zip(z).fold(0.0, |s, (a, b)| s + a * b);
+    matrix
+        .chunks_exact(z.len())
+        .map(|row| row_sum(row).to_bits())
+        .collect()
+}
+
+#[test]
+fn a_product_continued_from_a_states_kept_sums_has_the_bits_of_a_plain_product() {
+    let bits = |product: Vec<f64>| product.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+    for (seed, side) in (1..).zip(SIDES) {
+        // All the rows of a square, then its first two thirds (66 rows at side 100: not whole blocks of eight).
+        for rows in [side, (2 * side).div_ceil(3)] {
+            let matrix = mixed(rows * side, seed);
+            // No state, a third of the columns, all but the last, all of them.
+            for state in [0, side / 3, side - 1, side] {
+                let x = mixed(state, seed + 10);
+                let z = |x: &[f64], k: u64| [x, &mixed(side - state, seed + 20 + k)].concat();
+                let mut slot = None;
+                // The first product computes the state's sums; the next two continue from them under other forces.
+                for k in 0..3 {
+                    let z = z(&x, k);
+                    let product = bits(product_from(&mut slot, &matrix, &z, state));
+                    let plain = plain_product(&matrix, &z);
+                    assert_eq!(product, plain, "{side} {rows} {state} {k}");
+                }
+                // A state that differs in the last bit of one entry, the first and then the last, is another state.
+                for at in [0, state.saturating_sub(1)].into_iter().take(state.min(2)) {
+                    let mut y = x.clone();
+                    y[at] = f64::from_bits(y[at].to_bits() ^ 1);
+                    let z = z(&y, 0);
+                    let product = bits(product_from(&mut slot, &matrix, &z, state));
+                    let plain = plain_product(&matrix, &z);
+                    assert_eq!(product, plain, "{side} {rows} {state} at {at}");
+                }
+            }
+        }
+    }
 }

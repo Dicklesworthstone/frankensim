@@ -17,6 +17,30 @@
 
 ## New sections (newest first)
 
+### A prepared product continues from the sums kept for its state (`upper_rows::product_from`)
+
+The products of one sample share their state and differ in the held force: `z = [D q, v, memory | u]`, the state's `2 n + arms` entries first. A row's sum runs over the
+columns in order, so its terms over the state's columns are the same for each of those products. The operator keeps them: for the last state it multiplied by, each
+computed row's sum over the state's columns, with the bits of the state's entries (`upper_rows::StateSums`). A product whose state has the kept bits in every entry starts
+each row from its kept sum and adds the held force's `n` columns. Any other product computes the state's sums first and keeps them. Either way a row adds the terms of one
+left-to-right sum in that sum's order, so each entry keeps its bits, and a row that leaves the finite range is refused as before.
+
+The sums belong to one operator and live in it. Every preparation (a changed link law, changed relaxation times, a radiation load, more material arms) builds a new
+operator, which starts with none. The key alone would not tell two operators apart: it is the scaled state, and a changed law that keeps each mode's own stiffness keeps
+the scale `D`.
+
+The slot is behind a mutex, as the energy memo is, and a product holds it from the comparison to the last row. Two threads that multiplied by one operator would wait for
+one another, and each would get the plain product's bits whichever state's sums it found. The kept sums are used on one thread: a product that `apply` splits over
+threads (a side from 1024 with more than one declared worker) is computed by `apply` as before and keeps nothing.
+
+Evidence. `tests/upper_row_forms.rs` holds `product_from` to one plain left-to-right sum a row, bit for bit, at sides 1, 7, 8, 9, 16, 17 and 100: on all the rows of a
+square and on its first two thirds; with no state, a third of the columns, all but the last and all of them; under three forces on one state; then on a state that
+differs in the last bit of its first entry and on one that differs in the last bit of its last. `tests/coupled_coefficient_update.rs`: a refused step multiplies at a
+state, the law changes to one with the same own stiffnesses and another coupling, and the next three steps have the bits of a system that never multiplied under the
+first law. The viola Db4 control card, and the violin D4 card with longitudinal waves over the first 900 s of its render, write the same frames as before.
+
+Not tested: a product on more than one thread beside kept sums (no test target has a side of 1024).
+
 ### The prepared operator's product stops before the held force's rows (`CoupledModalSystem::prepared_product_rows`)
 
 A prepared operator multiplies its transition by `z = [D q, v, memory | u]` (`exact/prepared.rs`). The transition's side is `3 n + arms`: the state's `2 n + arms` rows,

@@ -151,6 +151,9 @@ pub(super) struct PreparedNetwork {
     /// The last states whose storage `hamiltonian` evaluated and their values (see [`EnergyMemo`]).
     energies: Mutex<EnergyMemo>,
     energy_evaluations: AtomicU64,
+    /// Each row's sum of the last product over its state's columns (`upper_rows::StateSums`): the next product on
+    /// the same state continues from them. An operator starts with none, so no sum outlives its transition.
+    state_sums: Mutex<Option<upper_rows::StateSums>>,
     /// Two-way exterior air beside the transition (`air`); None for the mechanics alone.
     air: Option<air::PreparedAir>,
 }
@@ -459,7 +462,7 @@ impl PreparedNetwork {
         let result = Self { count, dt, weights, stiffness, rest_force, transition, product_rows, component_loss, connection_total,
             material_couplings, material_loss, dashpot_norms: ledger.dashpot_norms(), ledger,
             sweep: Mutex::new(None), sweeps: AtomicU64::new(0), sums_by_rows: false,
-            energies: Mutex::new(EnergyMemo::default()), energy_evaluations: AtomicU64::new(0), air };
+            energies: Mutex::new(EnergyMemo::default()), energy_evaluations: AtomicU64::new(0), state_sums: Mutex::new(None), air };
         result.validate_energy_identity(gate)?;
         poll(Some(gate))?;
         Ok(result)
@@ -736,9 +739,18 @@ impl PreparedNetwork {
         self.dashpot_norms.get(link).copied()
     }
 
-    /// The transition's product with `z` over `product_rows` rows: each entry is its own row's sum.
+    /// The transition's product with `z` over `product_rows` rows: each entry is its own row's sum. On one thread
+    /// the sums over the state's columns are kept, and a product on the same state adds the held force's columns
+    /// to them (`upper_rows::product_from`): the same additions in the same order.
     fn product(&self, z: &[f64]) -> Result<Vec<f64>, ModalCouplingError> {
-        apply(&self.transition[..self.product_rows * z.len()], z)
+        let rows = &self.transition[..self.product_rows * z.len()];
+        match self.state_sums.lock() {
+            Ok(mut slot) if apply_threads(rows, z.len()) <= 1 => {
+                let product = upper_rows::product_from(&mut slot, rows, z, z.len() - self.count);
+                product.into_iter().map(finite).collect()
+            }
+            _ => apply(rows, z),
+        }
     }
 
     /// How many leading rows of the transition a step's product computes.
@@ -1211,11 +1223,14 @@ fn joined<T>(handle: std::thread::ScopedJoinHandle<'_, T>) -> T {
     handle.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
+/// Threads `apply` gives the product of `matrix`, whose rows have `n` entries.
+fn apply_threads(matrix: &[f64], n: usize) -> usize {
+    step_threads(fs_la::eigen_complex::declared_workers(), n)
+        .min((matrix.len() / n.max(1)).div_ceil(APPLY_MIN_ROWS_PER_THREAD))
+}
+
 fn apply(matrix: &[f64], z: &[f64]) -> Result<Vec<f64>, ModalCouplingError> {
-    let n = z.len();
-    let threads = step_threads(fs_la::eigen_complex::declared_workers(), n)
-        .min((matrix.len() / n.max(1)).div_ceil(APPLY_MIN_ROWS_PER_THREAD));
-    apply_on(matrix, z, threads)
+    apply_on(matrix, z, apply_threads(matrix, z.len()))
 }
 
 /// `apply` on `threads` threads (the calling thread among them): whole eight-row blocks per thread, so each thread's blocks
