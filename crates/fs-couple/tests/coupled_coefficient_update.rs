@@ -8,7 +8,8 @@ use fs_couple::modal_acoustic_time::{
 use fs_couple::render::plate::impact::radiation::{Model, Pole};
 use fs_couple::render::schedule::force::coupled::{
     ConstantLossConnection, CoupledModalSystem, ModalColumnConnection, ModalCouplingConfig,
-    ModalCouplingError, PreparedModalBudget, coefficients::ConnectionCoefficients,
+    ModalCouplingError, ModalPreparation, PreparedModalBudget,
+    coefficients::ConnectionCoefficients,
 };
 use fs_exec::CancelGate;
 use fs_math::{c64::C64, det};
@@ -603,5 +604,73 @@ fn a_changed_law_between_two_products_on_one_state_starts_from_no_kept_sums() {
         fresh.step(&FORCE).unwrap();
         let (a, b) = (state(&primed), state(&fresh));
         assert_eq!(a.map(f64::to_bits), b.map(f64::to_bits), "{sample}");
+    }
+}
+
+#[test]
+fn a_system_built_structure_first_then_prepared_is_the_system_constructed_prepared() {
+    let gate = CancelGate::new_clock_free();
+    let allow = |max_modes, max_dense_bytes, max_multiply_terms| PreparedModalBudget {
+        max_modes,
+        max_dense_bytes,
+        max_multiply_terms,
+    };
+    let (bytes, work) = (8 * 1024 * 1024, 1_000_000_000);
+    let room = allow(2, bytes, work);
+    // Two oscillators whose pressure has a quadrature part, joined by this file's links with their rest extensions:
+    // the pressure about the held equilibrium is prepared together with the operator.
+    let build = |choice: ModalPreparation| {
+        let mode = |omega: f64| ModalAcousticMode {
+            angular_frequency_rad_s: omega,
+            damping_ratio: 0.01,
+            pressure_per_modal_velocity: C64::new(0.4, 0.3),
+        };
+        let budget = ModalAcousticTimeBudget::audible_reference();
+        let model = ModalAcousticTimeModel::try_new(RATE, vec![mode(30.0), mode(45.0)], budget);
+        let columns = [[1.0, 0.0], [0.0, 1.0], [1.0, -1.0]];
+        let links = original().into_iter().zip(columns);
+        let links = links.map(|(law, column)| ModalColumnConnection {
+            column: column.to_vec(),
+            stiffness_n_m: law.stiffness_n_m,
+            damping_n_s_m: law.damping_n_s_m,
+            rest_extension_m: law.rest_extension_m,
+        });
+        let (models, links, limits) = (vec![model.unwrap()], links.collect(), config(10.0, 100.0));
+        let system = CoupledModalSystem::new_with_columns_preparation;
+        system(models, links, &[], limits, choice, &gate)
+    };
+    // A budget the prepared construction refuses is refused by the same words: one byte, too few bytes for the
+    // operator, one term of work, one mode.
+    let refusal = |choice: ModalPreparation| format!("{:?}", build(choice).err());
+    let small = [
+        allow(2, 1, work),
+        allow(2, 4096, work),
+        allow(2, bytes, 1),
+        allow(1, bytes, work),
+    ];
+    let refusals = small.map(|small| refusal(ModalPreparation::StructureFirst(small)));
+    let prepared_refusals = small.map(|small| refusal(ModalPreparation::Prepared(small)));
+    assert_eq!(refusals, prepared_refusals);
+    let refused = refusals.iter().all(|refused| refused.starts_with("Some("));
+    let operator = refusals[1].contains("prepared-linear max_dense_bytes");
+    assert!(refused && operator, "{refusals:?}");
+    let mut prepared = build(ModalPreparation::Prepared(room)).unwrap();
+    // A system that is not harmonic-only is refused: one constructed prepared, and one the call has prepared.
+    let again = build(ModalPreparation::Prepared(room)).unwrap();
+    assert!(again.with_time_propagation(&gate).is_err());
+    let twice = build(ModalPreparation::StructureFirst(room)).unwrap();
+    let twice = twice.with_time_propagation(&gate).unwrap();
+    assert!(twice.with_time_propagation(&gate).is_err());
+    let mut first = build(ModalPreparation::StructureFirst(room)).unwrap();
+    assert!(first.is_harmonic_only() && first.prepared_product_rows().is_none());
+    assert_eq!(first.preparation(), ModalPreparation::StructureFirst(room));
+    first = first.with_time_propagation(&gate).unwrap();
+    assert_eq!(first.preparation(), ModalPreparation::Prepared(room));
+    let rows = first.prepared_product_rows();
+    assert_eq!(rows, prepared.prepared_product_rows());
+    for sample in 0..64 {
+        let frame = first.step(&FORCE).unwrap().clone();
+        assert_eq!(&frame, prepared.step(&FORCE).unwrap(), "{sample}");
+        assert!(frame.observer_pressure_pa.abs() > 0.0, "{sample}");
     }
 }

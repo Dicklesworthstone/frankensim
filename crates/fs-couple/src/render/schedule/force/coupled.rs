@@ -261,6 +261,9 @@ pub struct CoupledModalSystem {
     pressure: equilibrium::pressure::EquilibriumPressure,
     prepared_budget: Option<PreparedModalBudget>,
     harmonic_only: bool,
+    /// Whether the harmonic-only system was built with [`ModalPreparation::StructureFirst`], so that its rebuilds
+    /// are admitted as it was.
+    structure_first: bool,
     /// Whether every operator prepared for this system sums its loss sweep and its storage by rows
     /// ([`Self::with_sums_by_rows`]).
     sums_by_rows: bool,
@@ -499,6 +502,7 @@ impl CoupledModalSystem {
             models, candidates, exact: operator.exact, pressure: operator.pressure,
             prepared_budget: preparation.prepared_budget(),
             harmonic_only: preparation.is_harmonic_only(),
+            structure_first: matches!(preparation, ModalPreparation::StructureFirst(_)),
             sums_by_rows: false,
             harmonic_damping_columns: operator.harmonic_damping_columns,
             offsets, connections, columns,
@@ -546,6 +550,23 @@ impl CoupledModalSystem {
         Ok(self)
     }
 
+    /// Give a cold harmonic-only system its time propagator, from the budget it holds: the cold budget binding
+    /// above, on the system's present structure. The operator and the pressure preparation are the ones a system
+    /// constructed prepared with that structure has, so an owner can build its structure first and prepare once.
+    ///
+    /// # Errors
+    /// A started system, one that is not harmonic-only, and the preparation's own refusals.
+    pub fn with_time_propagation(mut self, gate: &CancelGate) -> Result<Self, ModalCouplingError> {
+        let cold = self.harmonic_only && self.samples_rendered() == 0;
+        let Some(budget) = self.prepared_budget.take().filter(|_| cold) else {
+            return Err(invalid(
+                "time propagation is given once, to a cold harmonic-only system",
+            ));
+        };
+        (self.harmonic_only, self.structure_first) = (false, false);
+        self.with_prepared_linear_propagation(budget, gate)
+    }
+
     /// Bind constant-loss dashpots ([`ConstantLossConnection`]) to this prepared operator before its first sample, and
     /// prepare it again. Nothing else changes: the same connections, springs, initial states and port ledgers.
     ///
@@ -589,6 +610,9 @@ impl CoupledModalSystem {
     #[must_use]
     pub fn preparation(&self) -> ModalPreparation {
         match (self.harmonic_only, self.prepared_budget) {
+            (true, Some(budget)) if self.structure_first => {
+                ModalPreparation::StructureFirst(budget)
+            }
             (true, Some(budget)) => ModalPreparation::HarmonicOnly(budget),
             (_, Some(budget)) => ModalPreparation::Prepared(budget),
             (_, None) => ModalPreparation::Ordinary,

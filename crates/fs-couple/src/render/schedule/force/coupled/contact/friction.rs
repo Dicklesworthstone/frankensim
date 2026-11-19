@@ -315,6 +315,22 @@ impl FrictionModalSystem {
         Ok(self)
     }
 
+    /// Give a cold harmonic-only owner its time propagator from the budget it holds
+    /// ([`CoupledModalSystem::with_time_propagation`]) and compute its endpoint held-force line, which a
+    /// harmonic-only owner leaves at zero. The friction law, material interface, pressure weights, nonlinear
+    /// potentials and initial states are unchanged.
+    ///
+    /// # Errors
+    /// The network's refusals, and a held-force line that is not positive.
+    pub fn with_time_propagation(mut self, gate: &CancelGate) -> Result<Self, ModalFrictionError> {
+        self.network = self.network.with_time_propagation(gate)?;
+        self.validate_material_history_band()?;
+        (self.compliance, self.displacement_compliance) =
+            construction_compliance(&self.network, &self.column, gate)?;
+        poll(Some(gate))?;
+        Ok(self)
+    }
+
     /// Bind constant-loss dashpots to the prepared coupled owner before playback
     /// ([`CoupledModalSystem::with_constant_loss_connections`]) and refresh its
     /// endpoint held-force line. The friction law, material interface,

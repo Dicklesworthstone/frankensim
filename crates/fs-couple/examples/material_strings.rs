@@ -294,6 +294,21 @@ struct Ready { spec: input::Spec, catalog: Catalog, performance: MultiBowPerform
     // The thermal rosin row and its law on this bank's step; bound by the writer.
     rosin: Option<(rosin_thermal::Resolved, fs_tribo::rosin_thermal::SmithWoodhouseParams)>,
     rosin_receipt: Option<fs_couple::render::schedule::force::coupled::contact::friction::multiple::rosin_thermal::RosinThermalPorts> }
+/// The choice a bank is constructed with for a purpose. A bank that plays from a prepared operator is built without
+/// it, as structure only and admitted as prepared, through every rebuild, and `with_time_propagation` prepares it
+/// once (`Spec::compile_bank_with_profiles`). A structure-only bank holds at most `MAX_HARMONIC_UNKNOWNS` modes, fewer
+/// than a prepared operator admits: a budget that allows more is constructed prepared, as every other purpose
+/// constructs with itself.
+fn construction(purpose: ModalPreparation) -> ModalPreparation {
+    use fs_couple::render::schedule::force::coupled::harmonic::MAX_HARMONIC_UNKNOWNS;
+    match purpose {
+        ModalPreparation::Prepared(budget) if budget.max_modes <= MAX_HARMONIC_UNKNOWNS => {
+            ModalPreparation::StructureFirst(budget)
+        }
+        other => other,
+    }
+}
+
 /// The complete physical bank before gesture scheduling and microphone setup.
 /// Both analysis and playback pass through this one source-binding sequence.
 struct ReadyBank { spec: input::Spec, catalog: Catalog, bank: MultiBowStringBank,
@@ -514,9 +529,11 @@ impl input::Spec {
         }
         self.friction.validate_surfaces(&self, &catalog)?;
         let rosin=self.friction.rosin().map(|row|row.resolve(&self,&mut catalog,&mut loader)).transpose()?;
+        // A playback's bank is built structure-first and prepared once, below.
+        let built = construction(preparation);
         let bank=if let Some(body_profile)=&profile {
             body_profile.compile_with_preparation(&self,sources,&mut catalog,&mut loader,
-                settings.clone(),preparation,cx,gate)?
+                settings.clone(),built,cx,gate)?
         } else {
             if self.body.modes > input::MAX_PLATE_BODY_MODES {
                 return Err(format!("flat plate bodies admit 1..={} retained body modes",
@@ -542,9 +559,9 @@ impl input::Spec {
             };
             match self.cavity.clone() {
                 Some(cavity)=>ReciprocalStringBank::from_material_plate_with_cavity_prepared(cx,sources,self.gas,body,cavity,
-                    preparation,self.bow_law(0)?.clone(),settings.clone(),gate)?,
+                    built,self.bow_law(0)?.clone(),settings.clone(),gate)?,
                 None=>ReciprocalStringBank::from_material_plate_prepared(cx,sources,self.gas,body,
-                    preparation,self.bow_law(0)?.clone(),settings.clone(),gate)?,
+                    built,self.bow_law(0)?.clone(),settings.clone(),gate)?,
             }
         };
         // Every body route selects preparation during construction, before
@@ -604,6 +621,13 @@ impl input::Spec {
         };
         let bank = match &self.longitudinal_memory {
             Some(memory) if !memory.finite_strain => memory.bind(bank, &self, gate)?,
+            _ => bank,
+        };
+        // Structure first, the operator once. A playback's bank was constructed without its time propagator
+        // (`construction`) and every rebuild above kept it so. Radiation and the bows below need the operator.
+        let structure_only = bank.system().is_harmonic_only();
+        let bank = match preparation {
+            ModalPreparation::Prepared(_) if structure_only => bank.with_time_propagation(gate)?,
             _ => bank,
         };
         // The original body basis survives fluid, torsion and material-history

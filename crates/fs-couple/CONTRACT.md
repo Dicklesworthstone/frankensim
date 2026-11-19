@@ -17,6 +17,51 @@
 
 ## New sections (newest first)
 
+### A bank built without its operator and prepared once (`ModalPreparation::StructureFirst`, `ReciprocalStringBank::with_time_propagation`)
+
+A prepared bank computes a whole operator at its construction and again at every rebuild (the series exponential, a dense product for each doubling, the same again for
+the finer check, and two products a level for each loss Gramian, all of side `3 n + arms`), and the friction owner takes its held-force line from that operator at once. A
+card with residual flexibility builds two operators and a card that adds axial modes three, and only the last is ever stepped.
+
+`ModalPreparation::StructureFirst(budget)` builds the complete bank as `HarmonicOnly` does, without a time propagator, and admits it as `Prepared` does. Every
+construction and rebuild runs what a prepared construction runs before it computes its operator, in its order: the held-load pressure preparation, its reserve, and the
+operator's mode, byte and work admission (`PreparedModalBudget::admit_structure`, which `PreparedNetwork::new` runs before it allocates). The harmonic admission follows.
+Its byte and work figures are the smaller ones (about 12 n² entries against at least 1152 n², about 9 n³ terms against at least 27 n³ times 272); its one stricter limit
+is 1024 modes and air poles together. A system keeps the choice it was built with, so its own rebuilds are admitted the same way.
+
+`with_time_propagation` is the step from there to playback: a cold harmonic-only owner gains its propagator from the budget it holds.
+- `CoupledModalSystem::with_time_propagation` hands the budget to the cold budget binding (`with_prepared_linear_propagation`), which prepares one operator and its
+  pressure preparation from the system's present structure by `preparation::prepare`, the function that prepares a system constructed prepared.
+- `FrictionModalSystem::with_time_propagation` then computes the held-force line, which a harmonic-only owner leaves at zero.
+- `ReciprocalStringBank::with_time_propagation` then opts in to sums by rows and records the bank as prepared.
+
+Each refuses a started owner and one that is not harmonic-only, so a second call is refused.
+
+`material_strings` builds a playback's bank this way when the card's `prepared-linear` budget allows at most `MAX_HARMONIC_UNKNOWNS` (1024) modes, the capacity of a
+harmonic-only construction. A larger budget is constructed prepared, as before. The call comes after the builders that only rebuild structure (residual flexibility, bridge
+interfaces, body connections, cylinder gas loading, geometric stretching, longitudinal waves, material memory) and before computed radiation and the multi-bow conversion,
+which treat a prepared bank and a harmonic-only one differently (`bank/radiation/rayleigh.rs`, `bank/radiation/bem.rs`, `contact/friction/multiple.rs`). The builders
+before it read components and their states, memory, the port, pressure weights, the interface and the frequency bound, which is structure. None reads a response, a
+compliance or the held-force line.
+
+What changes for a refused card. A budget that cannot hold the bank's operator is refused where it was and with the words it had: by the constructor or by the rebuild
+that first passes it, for its mode count, its bytes, its work or the pressure preparation's share. What moves is a refusal of the operator's own computation (a memory
+arm that is not a passive Maxwell arm, a transition or a loss integral that fails its check, the energy identity, a held-force line that is not positive, a storage that
+cannot be summed by rows): the call reports it, with the same words, where the constructor or a rebuild did. A builder that runs in between and refuses is heard first.
+
+Evidence. `tests/material_string_nonlinear/bank/longitudinal.rs`: for five builders (none, cylinder gas loading, residual flexibility, geometric stretching, longitudinal
+waves) a bank constructed structure-first, taken through the builder and then given the call sums by rows, records the choice, computes the same product rows and has,
+over 48 bowed samples, the frames and the states of the bank constructed prepared and taken through the same builder; a second call is refused.
+`tests/coupled_coefficient_update.rs`: two oscillators whose pressure has a quadrature part, joined by links with rest extensions. Built structure-first with a budget of
+one byte, of too few bytes for the operator, of one term of work or of one mode, the system is refused with the words of the prepared construction. Built with room and
+given the call, it has the 64 frames of the system constructed prepared, the pressure about its held equilibrium among them; a system constructed prepared, or already
+given the call, is refused. The viola Db4 control card renders the same wav and the same log, every line. That card with a work budget of 1,000,000 prints the refusal
+it printed (`Network(Budget { .. })`).
+
+Not tested by a test of its own: the bridge-interface, body-connection, memory and cavity builders on a structure-first bank. The example's own tests reach the call with
+some of them: its test files for torsion, bending and axial memory and for body relaxation set a `prepared-linear` budget of 64 modes. A budget above 1024 modes is
+constructed prepared and runs no line of this section.
+
 ### A prepared product continues from the sums kept for its state (`upper_rows::product_from`)
 
 The products of one sample share their state and differ in the held force: `z = [D q, v, memory | u]`, the state's `2 n + arms` entries first. A row's sum runs over the

@@ -239,7 +239,7 @@ impl CertifiedPlateViscosity {
             ));
         }
         match preparation {
-            ModalPreparation::HarmonicOnly(_) => {
+            ModalPreparation::HarmonicOnly(_) | ModalPreparation::StructureFirst(_) => {
                 return Err(invalid("certified damping time realization needs time preparation"));
             }
             ModalPreparation::Prepared(budget) => {

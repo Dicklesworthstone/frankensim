@@ -13,6 +13,12 @@ pub enum ModalPreparation {
     /// compliance is constructed. The declared budget bounds mode count,
     /// coefficient setup and dense harmonic workspace. Time stepping refuses.
     HarmonicOnly(PreparedModalBudget),
+    /// The complete bank of [`Self::HarmonicOnly`], admitted as [`Self::Prepared`] admits it. Every construction
+    /// and rebuild runs what a prepared construction runs before it computes its operator (the held-load pressure
+    /// preparation, its reserve, and the operator's mode, byte and work admission) and refuses as it
+    /// does. No time exponential is computed: a cold system built so gains it once, from
+    /// `CoupledModalSystem::with_time_propagation`.
+    StructureFirst(PreparedModalBudget),
 }
 
 impl From<Option<PreparedModalBudget>> for ModalPreparation {
@@ -26,13 +32,15 @@ impl ModalPreparation {
     pub const fn prepared_budget(self) -> Option<PreparedModalBudget> {
         match self {
             Self::Ordinary => None,
-            Self::Prepared(budget) | Self::HarmonicOnly(budget) => Some(budget),
+            Self::Prepared(budget) | Self::HarmonicOnly(budget) | Self::StructureFirst(budget) => {
+                Some(budget)
+            }
         }
     }
 
     #[must_use]
     pub const fn is_harmonic_only(self) -> bool {
-        matches!(self, Self::HarmonicOnly(_))
+        matches!(self, Self::HarmonicOnly(_) | Self::StructureFirst(_))
     }
 }
 
@@ -60,6 +68,13 @@ pub(super) fn prepare(
     gate: &CancelGate,
 ) -> Result<PreparedOperator, ModalCouplingError> {
     poll(Some(gate))?;
+    if let ModalPreparation::StructureFirst(budget) = choice {
+        // A prepared construction's refusals before its operator is computed, in its order.
+        let held = equilibrium::pressure::EquilibriumPressure::prepare;
+        let held = held(models, columns, links, config, Some(budget), gate)?;
+        let operator = held.reserve(budget)?;
+        operator.admit_structure(models, links, count, branches.len(), radiation)?;
+    }
     let pressure = if choice.is_harmonic_only() {
         equilibrium::pressure::EquilibriumPressure::default()
     } else {
@@ -68,7 +83,7 @@ pub(super) fn prepare(
         )?
     };
     let mut exact = match choice {
-        ModalPreparation::HarmonicOnly(budget) => {
+        ModalPreparation::HarmonicOnly(budget) | ModalPreparation::StructureFirst(budget) => {
             admit_harmonic(
                 budget,
                 count,

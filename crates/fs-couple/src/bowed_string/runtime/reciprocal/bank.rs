@@ -400,6 +400,32 @@ impl ReciprocalStringBank {
         Ok(self)
     }
 
+    /// Prepare, once, a bank that was constructed with `ModalPreparation::StructureFirst`: its structure went
+    /// through every material, gas and connection rebuild without a time propagator, and this call computes the
+    /// one operator of the final structure, from the budget the bank holds. The bank is then the bank that the
+    /// same constructor and builders give when constructed prepared: the same operator, held-force line and
+    /// sums by rows. Call it before computed radiation or more bows are attached.
+    ///
+    /// # Errors
+    /// A started bank, one that is not harmonic-only, and the preparation's own refusals.
+    pub fn with_time_propagation(
+        mut self,
+        gate: &CancelGate,
+    ) -> Result<Self, ReciprocalStringError> {
+        // A refusal of the preparation reads as it does from a bank constructed prepared.
+        let prepared = self.system.with_time_propagation(gate);
+        self.system = match prepared.and_then(FrictionModalSystem::with_sums_by_rows) {
+            Ok(system) => system,
+            Err(ModalFrictionError::Network(e)) => return Err(ReciprocalStringError::Network(e)),
+            Err(other) => return Err(ReciprocalStringError::Friction(other)),
+        };
+        if let Some(budget) = self.source.prepared_linear.prepared_budget() {
+            self.source.prepared_linear = ModalPreparation::Prepared(budget);
+        }
+        poll(gate)?;
+        Ok(self)
+    }
+
     /// Put the omitted bending modes' static compliance in series with every
     /// string's bridge, and later with its stops (`residual`; pexfp.299).
     ///

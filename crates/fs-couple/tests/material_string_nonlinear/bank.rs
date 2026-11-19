@@ -14,7 +14,9 @@ use fs_couple::render::schedule::force::coupled::contact::friction::{
     FrictionDrive, ModalFrictionConfig,
 };
 use fs_couple::render::schedule::force::coupled::render::friction::FrictionGestureConfig;
-use fs_couple::render::schedule::force::coupled::{ModalCouplingConfig, PreparedModalBudget};
+use fs_couple::render::schedule::force::coupled::{
+    ModalCouplingConfig, ModalPreparation, PreparedModalBudget,
+};
 use fs_couple::thin_plate::{
     PlateMaterialModel, PlateThicknessConstraint, with_uniform_plate_material_state,
 };
@@ -63,6 +65,18 @@ fn bank_without_causal_gas(
     young: f64,
     medium: GasState,
     strings: usize,
+) -> ReciprocalStringBank {
+    bank_constructed(cx, gate, young, medium, strings, None)
+}
+/// The bank of these tests. Without a choice it is constructed ordinary and prepared afterwards, as every other
+/// test here has it. A choice (`ModalPreparation::Prepared` or `::HarmonicOnly`) constructs it with that.
+fn bank_constructed(
+    cx: &Cx<'_>,
+    gate: &CancelGate,
+    young: f64,
+    medium: GasState,
+    strings: usize,
+    construction: Option<fn(PreparedModalBudget) -> ModalPreparation>,
 ) -> ReciprocalStringBank {
     let sources = (0..strings)
         .map(|_| {
@@ -142,26 +156,25 @@ fn bank_without_causal_gas(
             sticking_tolerance_m: 1e-12,
         },
     };
-    ReciprocalStringBank::from_material_plate(
-        cx,
-        sources,
-        medium,
-        body,
-        FrictionLaw::Coulomb {
-            static_mu: 0.8,
-            kinetic_mu: 0.4,
-        },
-        options,
-        gate,
-    )
-    .unwrap()
-    .with_prepared_linear_propagation(
-        PreparedModalBudget {
-            max_modes: 64,
-            max_dense_bytes: 67_108_864,
-            max_multiply_terms: 200_000_000_000,
-        },
-        gate,
+    let budget = PreparedModalBudget {
+        max_modes: 64,
+        max_dense_bytes: 67_108_864,
+        max_multiply_terms: 200_000_000_000,
+    };
+    let law = FrictionLaw::Coulomb {
+        static_mu: 0.8,
+        kinetic_mu: 0.4,
+    };
+    let Some(choice) = construction else {
+        let bank = ReciprocalStringBank::from_material_plate(
+            cx, sources, medium, body, law, options, gate,
+        );
+        let bank = bank.unwrap().with_prepared_linear_propagation(budget, gate);
+        return bank.unwrap();
+    };
+    let choice = choice(budget);
+    ReciprocalStringBank::from_material_plate_prepared(
+        cx, sources, medium, body, choice, law, options, gate,
     )
     .unwrap()
 }

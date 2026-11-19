@@ -206,6 +206,29 @@ const MATRIX_TOL: f64 = 1e-11;
 const MAX_SCALES: usize = 48;
 
 impl PreparedModalBudget {
+    /// What a prepared operator of this structure admits before it allocates anything: this budget's mode, byte
+    /// and work limits for the structure's loss integrals, memory arms and air bank. Arithmetic only.
+    /// `PreparedNetwork::new` runs it first, and a structure-first construction runs it without the operator.
+    pub(in super::super) fn admit_structure(
+        self,
+        models: &[ModalAcousticTimeModel],
+        links: &[ConnectionLaw],
+        count: usize,
+        arms: usize,
+        radiation: Option<&radiation::Binding>,
+    ) -> Result<DenseExponentialBudget, ModalCouplingError> {
+        let air_extent = radiation.map(|binding| (binding.model.ports, binding.model.poles.len()));
+        let lossy = |m: &ModalAcousticTimeModel| m.damping_rates_per_s().iter().any(|&r| r != 0.0);
+        let has_component_loss = models.iter().any(lossy);
+        // One integral for the component loss, one for the summed connection loss, and one per dissipative link that an
+        // observed port ledger computes: all are admitted here, before anything is allocated.
+        let dissipative = links.iter().filter(|c| c.damping_n_s_m != 0.0).count();
+        let anchored = links.iter().filter(|c| c.constant_loss_reference_omega_rad_s.is_some()).count();
+        let losses = usize::from(has_component_loss) + usize::from(dissipative > 0) + dissipative
+            + usize::from(arms != 0);
+        self.admit_with_memory(count, arms, losses, links.len(), anchored, air_extent)
+    }
+
     /// Validate fixed capacity fields without allocating or choosing a backend.
     pub fn validate(self) -> Result<(), ModalCouplingError> {
         if self.max_modes == 0 || self.max_modes > MAX_PREPARED_MODAL_MODES
@@ -216,6 +239,7 @@ impl PreparedModalBudget {
     }
 
     /// `air` is (ports, poles) of a two-way air bank, admitted with its own entries and setup work.
+    #[cfg(test)]
     fn admit(self, count: usize, losses: usize, links: usize, anchored: usize, air: Option<(usize, usize)>)
         -> Result<DenseExponentialBudget, ModalCouplingError>
     {
@@ -314,20 +338,9 @@ impl PreparedNetwork {
             || models.iter().map(|m| m.modes().len()).sum::<usize>() != count {
             return Err(invalid("prepared complete mechanical layout/clock"));
         }
-        let air_extent = radiation.map(|binding| (binding.model.ports, binding.model.poles.len()));
+        let exp_budget = budget.admit_structure(models, links, count, branches.len(), radiation)?;
         let has_component_loss = models.iter().flat_map(|m| m.damping_rates_per_s())
             .any(|&rate| rate != 0.0);
-        // One integral for the component loss, one for the summed connection loss, and one per dissipative link that an
-        // observed port ledger computes: all are admitted here, before anything is allocated.
-        let dissipative = links.iter().filter(|c| c.damping_n_s_m != 0.0).count();
-        let anchored = links.iter().filter(|c| c.constant_loss_reference_omega_rad_s.is_some()).count();
-        let losses = usize::from(has_component_loss) + usize::from(dissipative > 0) + dissipative
-            + usize::from(!branches.is_empty());
-        let exp_budget = if branches.is_empty() {
-            budget.admit(count, losses, links.len(), anchored, air_extent)?
-        } else {
-            budget.admit_with_memory(count, branches.len(), losses, links.len(), anchored, air_extent)?
-        };
         let state_count = 2 * count + branches.len();
         let d = state_count + count;
         let mut material_couplings = Vec::with_capacity(branches.len());

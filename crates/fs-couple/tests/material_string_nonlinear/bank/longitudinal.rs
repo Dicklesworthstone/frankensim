@@ -24,6 +24,63 @@ fn a_prepared_bank_keeps_its_sums_by_rows_when_axial_modes_rebuild_its_network()
     });
 }
 
+// Structure first, the operator once: a bank constructed structure-first, taken through a builder and then prepared,
+// is the bank that the same builder gives when it is constructed prepared.
+#[test]
+fn a_bank_built_structure_first_and_prepared_once_is_the_bank_constructed_prepared() {
+    type Build = fn(ReciprocalStringBank, &CancelGate) -> ReciprocalStringBank;
+    let builders: [(&str, Build); 5] = [
+        ("no builder", |bank, _| bank),
+        ("gas", |bank, gate| {
+            bank.with_cylinder_gas_loading(resolution(), gate).unwrap()
+        }),
+        ("residual", |bank, gate| {
+            bank.with_residual_flexibility(gate).unwrap()
+        }),
+        ("stretching", |bank, gate| {
+            bank.with_geometric_stretching(0.2, nonlinear_config(), gate)
+                .unwrap()
+        }),
+        ("axial modes", |bank, gate| {
+            let waves = vec![selection(&[1, 2]); 2];
+            bank.with_longitudinal_waves(waves, nonlinear_config(), gate)
+                .unwrap()
+        }),
+    ];
+    with_cx(|cx, gate| {
+        let constructed = |choice| bank_constructed(cx, gate, 200e9, gas(), 2, Some(choice));
+        for (name, build) in builders {
+            let mut prepared = build(constructed(ModalPreparation::Prepared), gate);
+            let structure = build(constructed(ModalPreparation::StructureFirst), gate);
+            assert!(structure.system().is_harmonic_only(), "{name}");
+            let mut first = structure.with_time_propagation(gate).unwrap();
+            let (a, b) = (first.system(), prepared.system());
+            assert!(a.sums_by_rows() && b.sums_by_rows(), "{name}");
+            let recorded = first.source().preparation();
+            assert_eq!(recorded, prepared.source().preparation(), "{name}");
+            let rows = a.prepared_product_rows();
+            let same = rows.is_some() && rows == b.prepared_product_rows();
+            assert!(same, "{name}");
+            // The held-force line enters every bowed sample: the frames and the states have the same bits.
+            let zero = vec![0.0; a.mode_count()];
+            for sample in 0..48 {
+                let a = *first.step_under_gate(&zero, active(), gate).unwrap();
+                let b = *prepared.step_under_gate(&zero, active(), gate).unwrap();
+                assert_eq!(a, b, "{name} {sample}");
+            }
+            let states = |bank: &ReciprocalStringBank| {
+                let all = bank.system().components().iter();
+                all.flat_map(|c| c.states().to_vec()).collect::<Vec<_>>()
+            };
+            assert_eq!(states(&first), states(&prepared), "{name}");
+        }
+        // A prepared bank is not harmonic-only: the call is refused a second time.
+        let once = constructed(ModalPreparation::StructureFirst);
+        let once = once.with_time_propagation(gate).unwrap();
+        assert!(once.with_time_propagation(gate).is_err());
+    });
+}
+
 #[test]
 fn longitudinal_extension_preserves_original_components_and_excites_real_axial_inertia() {
     with_cx(|cx, gate| {
