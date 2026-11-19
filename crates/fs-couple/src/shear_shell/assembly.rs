@@ -12,6 +12,7 @@ use super::{
     AcousticRealizeError, ResolvedShearShell, ShellProjectionBudget, invalid, owner, poll,
     shell_mode_budget_admits,
 };
+use crate::bowed_string::runtime::reciprocal::bank::radiation::bem::SkinLoadStore;
 use crate::plate_viscosity::ModalPlateViscosity;
 use crate::render::schedule::force::coupled::{ModalAttachment, ModalConnection};
 use crate::thin_plate::CompactBody;
@@ -29,6 +30,9 @@ use fs_plate::shell::{
     modes_shell,
 };
 use std::borrow::Cow;
+
+mod store;
+pub use store::MAX_SHELL_MODES_ENTRY_BYTES;
 
 /// One independently oriented material midsurface, before ties are eliminated.
 #[derive(Clone, Debug)]
@@ -119,9 +123,14 @@ pub struct MaterialShellAssemblyImage {
     tie_receipt: TieReceipt,
     coating_relaxation: Option<super::coating::relaxation::ShellCoatingRelaxation>,
     substrate_relaxation: Option<super::constant_loss::relaxation::ShellSubstrateRelaxation>,
+    kept_modes: Option<(fs_blake3::ContentHash, bool)>,
 }
 
 impl MaterialShellAssemblyImage {
+    /// With a store: the key its modal solve is kept under, and whether the solve was read from there.
+    pub const fn kept_modes(&self) -> Option<(fs_blake3::ContentHash, bool)> {
+        self.kept_modes
+    }
     /// Exact original geometry, material records, fluid roles and tie inputs.
     pub const fn source(&self) -> &MaterialShellAssembly {
         &self.source
@@ -260,7 +269,7 @@ impl MaterialShellAssembly {
         force_ports: &[ShellAssemblyForcePort],
         gate: &CancelGate,
     ) -> Result<MaterialShellAssemblyImage, AcousticRealizeError> {
-        self.reduce_with_modal_damping(options, force_ports, None, gate)
+        self.reduce_with_modal_damping(options, force_ports, None, None, gate)
     }
 
     /// [`Self::reduce`] with an optional printed modal damping law
@@ -273,13 +282,20 @@ impl MaterialShellAssembly {
     /// refuses beside hereditary coating or substrate memory, which carry their
     /// own loss, and on a mode whose own loss is not positive.
     ///
+    /// With a `store`, the tied pencil's modal solve is read from the store when it keeps one under the solve's key
+    /// (both matrices, the window and the solver's options; [`MaterialShellAssemblyImage::kept_modes`]), with every bit
+    /// the solve gives, and is kept there otherwise. The key cannot see a change to the eigensolver, so a store holds
+    /// the solves of one build.
+    ///
     /// # Errors
-    /// Those of [`Self::reduce`], and the law's refusals above.
+    /// Those of [`Self::reduce`], the law's refusals above, the store's own failures and a kept solve that is damaged,
+    /// incomplete or another solve's.
     pub fn reduce_with_modal_damping(
         &self,
         options: &ShellAssemblyReductionOptions,
         force_ports: &[ShellAssemblyForcePort],
         law: Option<&super::constant_loss::ModalDampingLaw>,
+        store: Option<&dyn SkinLoadStore>,
         gate: &CancelGate,
     ) -> Result<MaterialShellAssemblyImage, AcousticRealizeError> {
         poll(gate)?;
@@ -470,8 +486,23 @@ impl MaterialShellAssembly {
             ..Default::default()
         };
         poll(gate)?;
-        let report =
-            modes_shell(&tied.model, options.eigenvalue_window, &spectral).map_err(owner)?;
+        let window = options.eigenvalue_window;
+        let key = store.map(|s| (s, store::key(&tied.model, window, &spectral)));
+        let kept = match &key {
+            Some((s, key)) => store::load(*s, key, tied.model.k.nrows())?,
+            None => None,
+        };
+        let loaded = kept.is_some();
+        // A miss solves the window and keeps it, every mode before the head.
+        let report = if let Some(report) = kept {
+            report
+        } else {
+            let report = modes_shell(&tied.model, window, &spectral).map_err(owner)?;
+            if let Some((s, key)) = &key {
+                store::keep(*s, key, &report)?;
+            }
+            report
+        };
         poll(gate)?;
         if report.modes.len() < n {
             // The count is only known after the whole window is solved: name it, so the next request can ask for it.
@@ -643,6 +674,7 @@ impl MaterialShellAssembly {
             tie_receipt: tied.receipt,
             coating_relaxation,
             substrate_relaxation,
+            kept_modes: key.map(|(_, key)| (key, loaded)),
         })
     }
 

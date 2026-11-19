@@ -99,7 +99,7 @@ impl ReciprocalStringBank {
         body: SharedMaterialShellAssemblyBody, cavity: Option<MaterialBodyCavity>,
         law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
     ) -> Result<Self, ReciprocalStringError> {
-        Self::from_material_shell_assembly_prepared(cx, sources, gas, body, cavity, None, law, options, gate)
+        Self::from_material_shell_assembly_prepared(cx, sources, gas, body, cavity, None, None, law, options, gate)
     }
 
     /// `from_material_shell_assembly` with explicit ordinary, prepared or
@@ -108,15 +108,18 @@ impl ReciprocalStringBank {
     /// physical bindings but have no time propagator and refuse playback.
     /// An assembled body whose modes, cavity, string planes and gas memory exceed the ordinary dense block (42 modal
     /// coordinates) is refused by its own constructor, so the record has to be present at construction. The budget is
-    /// kept in the bank's source for every later rebuild and must not be bound again.
+    /// kept in the bank's source for every later rebuild and must not be bound again. With a `store`, the body's modal
+    /// solve is read from it or kept in it ([`MaterialShellAssembly::reduce_with_modal_damping`]); no rebuild solves the
+    /// body again.
     ///
     /// # Errors
-    /// Those of `from_material_shell_assembly`, plus a prepared budget the complete network does not fit.
+    /// Those of `from_material_shell_assembly`, plus a prepared budget the complete network does not fit, the store's
+    /// own failures and a kept solve that is damaged, incomplete or another solve's.
     #[allow(clippy::too_many_arguments)]
     pub fn from_material_shell_assembly_prepared(
         cx: &Cx<'_>, sources: Vec<MaterialStringSource>, gas: GasState,
         body: SharedMaterialShellAssemblyBody, cavity: Option<MaterialBodyCavity>,
-        prepared: impl Into<ModalPreparation>,
+        prepared: impl Into<ModalPreparation>, store: Option<&dyn super::radiation::bem::SkinLoadStore>,
         law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
     ) -> Result<Self, ReciprocalStringError> {
         poll(gate)?;
@@ -147,7 +150,7 @@ impl ReciprocalStringBank {
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
         let projected = body.specimen.reduce_with_modal_damping(&body.reduction, &body.force_ports,
-            body.modal_damping.as_ref(), gate).map_err(ReciprocalStringError::Material)?;
+            body.modal_damping.as_ref(), store, gate).map_err(ReciprocalStringError::Material)?;
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
         let mut image = reduce_radiating_body(projected.radiators(), &gas,

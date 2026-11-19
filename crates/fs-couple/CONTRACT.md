@@ -17,6 +17,34 @@
 
 ## New sections (newest first)
 
+### An assembled body's modal solve kept between renders (`MaterialShellAssembly::reduce_with_modal_damping`'s `store`)
+
+`reduce_with_modal_damping` and `ReciprocalStringBank::from_material_shell_assembly_prepared` take an optional store, the `SkinLoadStore` that skin loads use;
+`reduce` and `from_material_shell_assembly` pass none. With a store, the tied pencil's solve is keyed by blake3 over its own inputs: both matrices (their dimensions,
+each row's columns and the bits of its values), the window, and the `SliceOptions` by their `Debug` text, which names every field and writes each finite `f64` so
+that it reads back to the same bits. A key the store holds is read back; any other is solved and kept. Each mode of the window (its place, λ, residual, interval and
+every coordinate's bits) is kept under a key made from the solve's key and its place, and then the report's own numbers under the solve's key, so that this head
+exists only once every mode it counts was kept. A keep encodes, and a load decodes, one mode's entry at a time beside the report. Every entry carries the solve's key
+and ends in a hash of every preceding byte. An entry that is damaged, short, missing or another solve's, or whose length is not the pencil's order, refuses (`kept
+shell modes are damaged, incomplete or another solve's`), and nothing is solved behind it. The rest of the reduction reads the same modes, so a kept solve gives
+every bit of the image a solve gives. Only the bank's constructor reduces its body, so no rebuild solves again. `MaterialShellAssemblyImage::kept_modes` gives the
+key and whether the solve was read. The key cannot see a change to the eigensolver, so a store holds the solves of one build; the example names each file with the
+executable's hash.
+
+The example's `--skin-load-store DIR` now applies after the card is parsed. It keeps `.shell-modes` entries for a v4 body, and skin loads only for a performance
+with `body-radiation skin`; with neither it refuses. A render, a body response and a loaded response print `shell_modes_store_entry`, `shell_modes_loaded` and
+`skin_load_store_keeps` (`shell-modes` alone without a skin load).
+
+Evidence. `tests/material_string_bank/shell/assembly.rs` reduces a one-part body without a store, into an empty store and from it: `kept_modes` is `None`, then
+`(key, false)`, then `(key, true)`; the modes, force ports, damping and intervals are the same bits all three times, the read adds no entry, another window has
+another key, and a flipped head byte, a mode cut to 8 bytes, a removed mode and another solve's head under the key each refuse. Two control cards, each rendered
+by one binary beside its own store-free render at the same time, give the same wav bytes and the same log but for the store's line: viola D♭4 (261 modes of
+57,876 coordinates, 120,881,039 bytes) keeps its solve in 436.39 s against 432.48 s and reads it in 295.05 s against 400.91 s; double bass A1 at 3 workers (1,104
+modes of 55,098 coordinates, 486,776,978 bytes) keeps it in 1230.13 s against 1219.92 s and reads it in 483.72 s against 1119.75 s, at 2.43 GiB of peak memory
+against 3.36 GiB.
+
+Not tested: a store that fails to write, and a render stopped while it keeps a solve, whose short mode file is never replaced, so a later read of it refuses.
+
 ### The prepared step reads its rows from copies by blocks of eight (`upper_rows::UpperBlocks`, `upper_rows::RowBlocks`)
 
 The loss sweep by rows and the product on one thread advance eight consecutive rows together, each with its own sum. In a row-major square the eight entries of one

@@ -3372,9 +3372,9 @@ A `body-radiation skin` load's sweep and fit are the other expensive part
 its report states depend only on the loading declaration, whose identity is the
 report's `loading_identity`: the basis identity, every skin triangle and trace,
 the frequency grid, the gas, the matrix allowance and the angular level. Notes
-on one body and skin share it. `--skin-load-store DIR` (with `--body-profile`,
-and only for a performance with `body-radiation skin`) keeps them in an existing
-directory, in one file per loading identity. The key is found before any
+on one body and skin share it. `--skin-load-store DIR` (with `--body-profile`)
+keeps them in an existing directory, in one file per loading identity, for a
+performance with `body-radiation skin`. The key is found before any
 boundary work.
 - The entry holds the reciprocal diagnostics, the reciprocity and fit errors,
   and every pole's frequency, damping and couplings as exact f64 bits, and a
@@ -3388,6 +3388,18 @@ boundary work.
   `--observer-store`: a rebuilt binary computes afresh.
 - The command prints the entry's path and `skin_load_loaded`.
 - `--self-contained` refuses it, as it refuses `--observer-store`.
+
+The same directory keeps an assembled (v4) body's modal solve, with or without
+a skin: the complete window of the tied pencil. Its key is the solve's own
+inputs: both matrices, the window and the solver's options. A solve is kept as one `.shell-modes` file for each mode
+and one for the report's numbers, written last, so a render holds one mode's
+file beside the modes at a time. A loaded solve renders the computed one bit
+for bit, and a damaged, short, missing or foreign file refuses; so does a mode
+file cut short by a render stopped while it kept them, since no file is ever
+replaced: remove that solve's files to compute it again. The command
+prints `shell_modes_store_entry`, `shell_modes_loaded` and
+`skin_load_store_keeps`: `shell-modes` alone when the performance computes no
+skin load.
 
 ## Material profile and physical limits
 

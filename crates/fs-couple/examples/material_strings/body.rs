@@ -44,6 +44,7 @@ pub struct Profile {
     skin: Option<skin::Spec>,
     observer_store: Option<skin::SetupDir>,
     skin_load_store: Option<skin::SetupDir>,
+    shell_modes_store: Option<skin::SetupDir>,
 }
 #[derive(Clone, Debug)]
 enum BodyModel {
@@ -91,7 +92,8 @@ impl Profile {
         poll(gate)?;
         match &self.model {
             BodyModel::Shell(shell) => Ok(ProjectedShellBody::Shell(shell.project(spec, catalog, loader, gate)?)),
-            BodyModel::Assembly(assembly) => Ok(ProjectedShellBody::Assembly(assembly.project(spec, catalog, loader, gate)?)),
+            BodyModel::Assembly(assembly) => Ok(ProjectedShellBody::Assembly(assembly.project(spec, catalog, loader,
+                self.shell_modes_store(), gate)?)),
             BodyModel::Plate(_) => Err("body-response requires a curved shell or assembled shell body".into()),
         }
     }
@@ -118,7 +120,7 @@ impl Profile {
             return Err("an acoustic skin requires a curved shell or assembled shell body profile".into());
         }
         Ok(Self { bytes: bytes.to_vec(), model, interior, skin, observer_store: None,
-            skin_load_store: None })
+            skin_load_store: None, shell_modes_store: None })
     }
     pub fn has_acoustic_skin(&self) -> bool { self.skin.is_some() }
     pub fn has_spatial_cavity(&self) -> bool { self.interior.is_some() }
@@ -141,16 +143,34 @@ impl Profile {
     pub fn observer_store_entry(&self, key: &fs_blake3::ContentHash) -> Option<std::path::PathBuf> {
         self.observer_store.as_ref().map(|store| store.entry(key))
     }
-    /// Keep the computed two-way skin loads in the existing directory `dir` (`--skin-load-store`).
-    pub fn keep_skin_loads(&mut self, dir: &std::path::Path) -> Result<()> {
-        if self.skin.is_none() {
-            return Err("--skin-load-store requires a body profile that declares its closed acoustic skin".into());
+    /// Keep an assembled body's modal solve and `spec`'s computed two-way skin loads in the existing directory `dir`
+    /// (`--skin-load-store`); a performance without a computed skin load keeps only the modal solve.
+    pub fn keep_skin_loads(&mut self, dir: &std::path::Path, spec: &input::Spec) -> Result<()> {
+        let assembled = matches!(self.model, BodyModel::Assembly(_));
+        let skin_loads = matches!(spec.body_radiation, Some(input::BodyRadiation::Skin(_)));
+        if !assembled && !skin_loads {
+            return Err("--skin-load-store keeps an assembled (v4) body's modal solve or body-radiation skin loads, and this performance has neither".into());
         }
-        self.skin_load_store = Some(skin::SetupDir::open(dir, skin::SKIN_LOADS)?);
+        let store = skin::SetupDir::open(dir, skin::SKIN_LOADS)?;
+        self.shell_modes_store = assembled.then(|| store.clone().keeping(skin::SHELL_MODES));
+        self.skin_load_store = skin_loads.then_some(store);
         Ok(())
     }
     pub fn skin_load_store(&self) -> Option<&dyn SkinLoadStore> {
         self.skin_load_store.as_ref().map(|store| store as &dyn SkinLoadStore)
+    }
+    pub fn shell_modes_store(&self) -> Option<&dyn SkinLoadStore> {
+        self.shell_modes_store.as_ref().map(|store| store as &dyn SkinLoadStore)
+    }
+    /// The log line of an assembled body's modal solve with `--skin-load-store`: its entry, whether it was read from
+    /// there, and the kinds the store keeps for this performance.
+    pub fn kept_modes_line(&self, image: Option<&fs_couple::shear_shell::assembly::MaterialShellAssemblyImage>)
+        -> Option<String> {
+        let (key, loaded) = image?.kept_modes()?;
+        let entry = self.shell_modes_store.as_ref()?.entry(&key);
+        let kinds = if self.skin_load_store.is_some() { "shell-modes,skin-load" } else { "shell-modes" };
+        Some(format!("shell_modes_store_entry={}; shell_modes_loaded={loaded}; skin_load_store_keeps={kinds}",
+            entry.display()))
     }
     /// Where the skin load under `key`, its loading identity, is kept, with `--skin-load-store`.
     pub fn skin_load_entry(&self, key: &fs_blake3::ContentHash) -> Option<std::path::PathBuf> {
@@ -185,9 +205,6 @@ impl Profile {
         }
         if self.observer_store.is_some() && spec.one_way_observer.is_none() {
             return Err("--observer-store keeps one_way_observer setups, and this performance has none".into());
-        }
-        if self.skin_load_store.is_some() && !matches!(spec.body_radiation, Some(input::BodyRadiation::Skin(_))) {
-            return Err("--skin-load-store keeps body-radiation skin loads, and this performance has none".into());
         }
         spec.network_dimensions_with_body_modes(true, self.additional_body_connections(),
             self.additional_body_modes())?;
@@ -271,7 +288,7 @@ impl Profile {
             BodyModel::Shell(shell) => shell.compile_with_preparation(spec, sources, catalog, loader,
                 settings, preparation, cx, gate),
             BodyModel::Assembly(assembly) => assembly.compile_with_preparation(spec, sources, catalog,
-                loader, settings, preparation, cx, gate),
+                loader, settings, preparation, self.shell_modes_store(), cx, gate),
         }?;
         // Original string/body material histories are the fixed prefix of the
         // shared memory owner. Cavity thermal diffusion appends to that prefix

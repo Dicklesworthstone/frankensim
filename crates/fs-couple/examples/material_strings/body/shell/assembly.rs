@@ -351,13 +351,15 @@ impl Spec {
         gate: &CancelGate,
     ) -> Result<ReciprocalStringBank> {
         self.compile_with_preparation(spec, sources, catalog, loader, settings,
-            spec.prepared_linear.into(), cx, gate)
+            spec.prepared_linear.into(), None, cx, gate)
     }
 
+    /// With `store`, the body's modal solve is read from it or kept in it (`--skin-load-store`).
     pub(crate) fn compile_with_preparation(
         &self, spec: &input::Spec, sources: Vec<MaterialStringSource>,
         catalog: &mut Catalog, loader: &mut impl FnMut(&str) -> Result<MaterialPack>,
-        settings: StringBankOptions, preparation: ModalPreparation, cx: &Cx<'_>, gate: &CancelGate,
+        settings: StringBankOptions, preparation: ModalPreparation,
+        store: Option<&dyn SkinLoadStore>, cx: &Cx<'_>, gate: &CancelGate,
     ) -> Result<ReciprocalStringBank> {
         let body = self.resolve_body(spec, catalog, loader, gate)?;
         let bank = ReciprocalStringBank::from_material_shell_assembly_prepared(
@@ -367,6 +369,7 @@ impl Spec {
             body,
             spec.cavity.clone(),
             preparation,
+            store,
             spec.bow_law(0)?.clone(),
             settings,
             gate,
@@ -379,12 +382,12 @@ impl Spec {
 
     /// Project the original assembled body independently of playback preparation.
     pub(crate) fn project(&self, spec: &input::Spec, catalog: &mut Catalog,
-        loader: &mut impl FnMut(&str) -> Result<MaterialPack>, gate: &CancelGate)
-        -> Result<MaterialShellAssemblyImage>
+        loader: &mut impl FnMut(&str) -> Result<MaterialPack>, store: Option<&dyn SkinLoadStore>,
+        gate: &CancelGate) -> Result<MaterialShellAssemblyImage>
     {
         let body = self.resolve_body(spec, catalog, loader, gate)?;
         let image = body.specimen.reduce_with_modal_damping(&body.reduction, &body.force_ports,
-            body.modal_damping.as_ref(), gate)?;
+            body.modal_damping.as_ref(), store, gate)?;
         self.glue.require_modes(image.eigenvalue_intervals(), gate)?;
         Ok(image)
     }

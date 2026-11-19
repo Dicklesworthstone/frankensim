@@ -869,16 +869,15 @@ fn load_store(name: &str) -> std::path::PathBuf {
 
 fn kept_load(text: &str, dir: &std::path::Path, cx: &Cx<'_>, gate: &CancelGate) -> Result<Ready> {
     let mut body = profile(&own_skin());
-    body.keep_skin_loads(dir)?;
-    input::Spec::parse(text.as_bytes())
-        .unwrap()
-        .compile_with_body(cx, gate, Some(body), |name| {
-            Ok(if name == "closed-shell.fsmatpk" {
-                shell_pack(name)
-            } else {
-                pack(name, 7800.0, 200_000.0, None)
-            })
+    let spec = input::Spec::parse(text.as_bytes()).unwrap();
+    body.keep_skin_loads(dir, &spec)?;
+    spec.compile_with_body(cx, gate, Some(body), |name| {
+        Ok(if name == "closed-shell.fsmatpk" {
+            shell_pack(name)
+        } else {
+            pack(name, 7800.0, 200_000.0, None)
         })
+    })
 }
 
 fn load_report(ready: &Ready) -> LoadReport {

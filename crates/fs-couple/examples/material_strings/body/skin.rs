@@ -39,13 +39,19 @@ pub(super) const SKIN_LOADS: Kept = Kept {
     suffix: "skin-load",
     maximum_bytes: MAX_SKIN_LOAD_BYTES,
 };
+/// `--skin-load-store`: an assembled body's modal solve, under its solve key.
+pub(super) const SHELL_MODES: Kept = Kept {
+    option: "--skin-load-store",
+    suffix: "shell-modes",
+    maximum_bytes: fs_couple::shear_shell::assembly::MAX_SHELL_MODES_ENTRY_BYTES,
+};
 
 /// `--observer-store DIR` or `--skin-load-store DIR`: this executable's
-/// one-way observer setups or two-way skin loads, kept in an existing
-/// directory. Each entry's name holds its key and the start of the
-/// executable's own hash, because the key cannot see a solver change that
-/// keeps its hash domains, so a rebuilt binary bakes afresh. An entry is
-/// written once and never replaced.
+/// one-way observer setups, or two-way skin loads and assembled bodies' modal
+/// solves, kept in an existing directory. Each entry's name holds its key and
+/// the start of the executable's own hash, because the key cannot see a solver
+/// change that keeps its hash domains, so a rebuilt binary bakes afresh. An
+/// entry is written once and never replaced.
 #[derive(Clone, Debug)]
 pub(super) struct SetupDir {
     dir: PathBuf,
@@ -72,6 +78,11 @@ impl SetupDir {
             build: build.to_hex()[..32].into(),
             kept,
         }
+    }
+
+    /// The same directory and build, keeping `kept`.
+    pub(super) fn keeping(self, kept: Kept) -> Self {
+        Self { kept, ..self }
     }
 
     pub(super) fn entry(&self, key: &ContentHash) -> PathBuf {

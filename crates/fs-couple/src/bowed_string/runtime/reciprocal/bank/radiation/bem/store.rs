@@ -26,8 +26,8 @@ const ENTRY_DOMAIN: &str = "fs-couple:skin-exterior-load-entry:v1";
 pub const MAX_SKIN_LOAD_BYTES: usize =
     MAGIC.len() + 32 + 8 * 8 + 8 * 5 + 8 + 8 + MAX_POLES * (8 + 8 + 8 * MAX_PORTS) + 32;
 
-/// Where computed skin loads are kept between renders. The load verifies
-/// every byte a store returns.
+/// Where computed skin loads, and assembled shells' modal solves, are kept
+/// between renders. The reader verifies every byte a store returns.
 pub trait SkinLoadStore {
     /// The entry kept under `key`, if any.
     ///

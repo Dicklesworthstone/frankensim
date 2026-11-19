@@ -1064,9 +1064,6 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     if let Some(dir)=store_dir {
         profile.as_mut().ok_or("--observer-store requires --body-profile")?.keep_observer_setups(dir)?;
     }
-    if let Some(dir)=load_store_dir {
-        profile.as_mut().ok_or("--skin-load-store requires --body-profile")?.keep_skin_loads(dir)?;
-    }
     let mut stop_profile=stop_path.map(|p|stops::Profile::parse(&sources.read_option(p,stops::MAX_BYTES)?)).transpose()?;
     let gas_sources=if sources.is_restricted() {
         gas_options.load_with(|p|sources.read_option(p,input::MAX_PACK_BYTES).map_err(|e|e.to_string()))?
@@ -1076,6 +1073,9 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     let mut spec=input::Spec::parse_with_gas_sources(
         &read_bounded(path,input::MAX_INPUT_BYTES)?,gas_registry.as_ref())?;
     if let Some(geometry)=geometry { geometry.bind(&mut spec)?; }
+    if let Some(dir)=load_store_dir {
+        profile.as_mut().ok_or("--skin-load-store requires --body-profile")?.keep_skin_loads(dir,&spec)?;
+    }
     if spec.friction.rosin().is_some() && (thermal_profile.is_some() || force_path.is_some()) {
         return Err("rosin-thermal-sw2000 owns the bow contact's heat and renders through the plain or traced writer; run it without --contact-thermal or --bridge-force".into());
     }
@@ -1107,6 +1107,7 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
             eprintln!("body_source={path:?}; pack={:?}; hash={}; artifact={}",source.pack.pack_id(),
                 source.pack.content_hash(),source.pack.source_artifact());
         }
+        if let Some(line)=profile.as_ref().and_then(|body|body.kept_modes_line(projected.assembly())) { eprintln!("{line}"); }
         return response_options.as_ref().expect("response-only option checked")
             .write(projected.shell(),projected.assembly(),&gate);
     }
@@ -1154,6 +1155,8 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
                 source.pack.content_hash(),source.pack.source_artifact());
         }
         eprintln!("loaded_response_preparation=harmonic_only; time_propagator=absent; state_clock=unadvanced");
+        let image=bound.bank.source().bank().material_shell_assembly_image();
+        if let Some(line)=bound.body_profile.as_ref().and_then(|body|body.kept_modes_line(image)) { eprintln!("{line}"); }
         return response_options.as_ref().expect("loaded response-only option checked")
             .write_loaded_for_spec(&bound.bank,&bound.spec,bound.body_profile.as_ref(),work,&gate);
     }
@@ -1252,6 +1255,8 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
             eprintln!("skin_load_store_entry={}; skin_load_loaded={}",entry.display(),report.loaded_from_store);
         }
     }
+    let image=ready.performance.bank().source().bank().material_shell_assembly_image();
+    if let Some(line)=ready.body_profile.as_ref().and_then(|body|body.kept_modes_line(image)) { eprintln!("{line}"); }
     for receipt in two_way_load_receipt(&ready)? {
         eprintln!("two_way_load_port={}; coordinate={}; f_Hz={}; radiation_zeta={}; added_mass_shift={}{}",
             receipt.port,receipt.coordinate,receipt.omega_rad_s/core::f64::consts::TAU,

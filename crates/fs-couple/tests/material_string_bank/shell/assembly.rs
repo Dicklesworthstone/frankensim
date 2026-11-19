@@ -1,6 +1,7 @@
 //! Original mortar, material and reciprocal owners on a synthetic two-part body.
 //! These are numerical composition checks, not instrument qualification.
 use super::*;
+use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::bem::SkinLoadStore;
 use fs_couple::bowed_string::runtime::reciprocal::bank::shell::SharedMaterialShellAssemblyBody;
 use fs_couple::shear_shell::assembly::{
     MaterialShellAssembly, MaterialShellAssemblyImage, MaterialShellComponent,
@@ -668,7 +669,7 @@ fn a_modal_damping_law_sets_every_retained_mode_and_no_law_changes_nothing() {
         let plain = original.specimen.reduce(&original.reduction, &original.force_ports, gate).unwrap();
         let reduce = |law: Option<ModalDampingLaw>| {
             original.specimen
-                .reduce_with_modal_damping(&original.reduction, &original.force_ports, law.as_ref(), gate)
+                .reduce_with_modal_damping(&original.reduction, &original.force_ports, law.as_ref(), None, gate)
                 .unwrap()
         };
         assert_eq!(reduce(None).damping().matrix_per_s(), plain.damping().matrix_per_s());
@@ -695,6 +696,70 @@ fn a_modal_damping_law_sets_every_retained_mode_and_no_law_changes_nothing() {
         assert_ne!(m, plain.damping().matrix_per_s());
         assert_eq!(one.physical_modes(), plain.physical_modes());
         assert_eq!(one.eigenvalue_intervals(), plain.eigenvalue_intervals());
+    });
+}
+
+type Entries = std::collections::BTreeMap<fs_blake3::ContentHash, Vec<u8>>;
+/// A map of kept entries, as a store directory holds them.
+#[derive(Default)]
+struct Kept(std::cell::RefCell<Entries>);
+impl SkinLoadStore for Kept {
+    fn load(&self, key: &fs_blake3::ContentHash) -> Result<Option<Vec<u8>>, String> {
+        Ok(self.0.borrow().get(key).cloned())
+    }
+    fn keep(&self, key: &fs_blake3::ContentHash, entry: &[u8]) -> Result<(), String> {
+        self.0.borrow_mut().entry(*key).or_insert_with(|| entry.to_vec());
+        Ok(())
+    }
+}
+
+// A kept modal solve gives every bit the solve gives, and an entry that is damaged, short, missing or another solve's
+// refuses.
+#[test]
+fn a_kept_modal_solve_gives_the_solves_bits_and_a_damaged_one_refuses() {
+    with_cx(|_, gate| {
+        let body = single_part_body(gate);
+        let reduce = |reduction: &ShellAssemblyReductionOptions, store: Option<&dyn SkinLoadStore>| {
+            body.specimen.reduce_with_modal_damping(reduction, &body.force_ports, None, store, gate)
+        };
+        let bits = |image: &MaterialShellAssemblyImage| {
+            let modes = image.physical_modes().iter().flatten().flatten();
+            let rows = image.force_ports().iter().flatten().chain(image.damping().matrix_per_s());
+            let intervals = image.eigenvalue_intervals().iter().flat_map(|&(a, b)| [a, b]);
+            modes.chain(rows).copied().chain(intervals).map(f64::to_bits).collect::<Vec<u64>>()
+        };
+        let plain = reduce(&body.reduction, None).unwrap();
+        assert_eq!(plain.kept_modes(), None);
+        let store = Kept::default();
+        let solved = reduce(&body.reduction, Some(&store)).unwrap();
+        let (key, loaded) = solved.kept_modes().unwrap();
+        let entries = store.0.borrow().len();
+        assert!(!loaded && entries > body.reduction.n_modes, "{entries} entries");
+        let read = reduce(&body.reduction, Some(&store)).unwrap();
+        assert_eq!(read.kept_modes(), Some((key, true)));
+        assert_eq!(bits(&solved), bits(&plain));
+        assert_eq!(bits(&read), bits(&plain));
+        assert_eq!(store.0.borrow().len(), entries);
+        // Another window is another solve, under another key.
+        let mut other = body.reduction.clone();
+        other.eigenvalue_window.0 = 1.0;
+        let another = Kept::default();
+        let other_key = reduce(&other, Some(&another)).unwrap().kept_modes().unwrap().0;
+        assert_ne!(other_key, key);
+        let foreign = another.0.borrow()[&other_key].clone();
+        let mode = *store.0.borrow().keys().find(|k| **k != key).unwrap();
+        let changes: [&dyn Fn(&mut Entries); 4] = [
+            &|m| m.get_mut(&key).unwrap()[40] ^= 1,
+            &|m| m.get_mut(&mode).unwrap().truncate(8),
+            &|m| drop(m.remove(&mode)),
+            &|m| drop(m.insert(key, foreign.clone())),
+        ];
+        for change in changes {
+            let damaged = Kept(store.0.clone());
+            change(&mut damaged.0.borrow_mut());
+            let refusal = reduce(&body.reduction, Some(&damaged)).err().unwrap().to_string();
+            assert!(refusal.contains("kept shell modes are damaged, incomplete or another solve's"), "{refusal}");
+        }
     });
 }
 
