@@ -3361,6 +3361,9 @@ length share one entry.
 - A loaded setup renders the computed one bit for bit.
 - A damaged, truncated or foreign entry refuses. Nothing is recomputed behind
   it, and an existing entry is never replaced.
+- An entry is written and synced as its name plus `.PID-N.tmp`, then
+  hard-linked to its name (the file system must support hard links): a stopped
+  render leaves only that temporary, which no read opens and which may be removed.
 - The key cannot see a change to the boundary solver or the bake that keeps
   their hash domains, so each file name also carries the hash of the executable
   that wrote it: a rebuilt binary bakes afresh.
@@ -3384,8 +3387,9 @@ boundary work.
   against the kept load as against a computed one.
 - A damaged, truncated or foreign entry refuses. Nothing is recomputed behind
   it, and an existing entry is never replaced.
-- Each file name also carries the hash of the executable that wrote it, as in
-  `--observer-store`: a rebuilt binary computes afresh.
+- Each entry is written through a temporary name, and each file name carries
+  the hash of the executable that wrote it, as in `--observer-store`: a rebuilt
+  binary computes afresh.
 - The command prints the entry's path and `skin_load_loaded`.
 - `--self-contained` refuses it, as it refuses `--observer-store`.
 
@@ -3394,9 +3398,9 @@ a skin: the complete window of the tied pencil. Its key is the solve's own
 inputs: both matrices, the window and the solver's options. A solve is kept as one `.shell-modes` file for each mode
 and one for the report's numbers, written last, so a render holds one mode's
 file beside the modes at a time. A loaded solve renders the computed one bit
-for bit, and a damaged, short, missing or foreign file refuses; so does a mode
-file cut short by a render stopped while it kept them, since no file is ever
-replaced: remove that solve's files to compute it again. The command
+for bit, and a damaged, short, missing or foreign file refuses. A render stopped
+while it keeps a solve leaves complete mode files and no file of the report's
+numbers, so the next one solves again and adds the files still missing. The command
 prints `shell_modes_store_entry`, `shell_modes_loaded` and
 `skin_load_store_keeps`: `shell-modes` alone when the performance computes no
 skin load.

@@ -12,9 +12,10 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::o
 use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::bem::{
     MAX_SKIN_LOAD_BYTES, SkinLoadStore,
 };
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{ErrorKind, Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAX_VERTICES: usize = fs_bem::helmholtz::MAX_DENSE_PANELS;
 const MAX_ANCHORS: usize = 8;
@@ -106,20 +107,28 @@ impl SetupDir {
         }
     }
 
+    /// Writes and syncs `entry` under a temporary name of its own beside it (the entry's name and `.PID-N.tmp`),
+    /// then hard-links it to the entry's name, which an existing entry keeps: a write stopped part way leaves only
+    /// the temporary, which no read opens. A file system without hard links refuses every entry.
     fn write(&self, key: &ContentHash, entry: &[u8]) -> std::result::Result<(), String> {
+        static WRITES: AtomicU64 = AtomicU64::new(0);
         let path = self.entry(key);
-        let written = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .and_then(|mut file| {
-                file.write_all(entry)?;
-                file.sync_all()
-            });
-        match written {
+        let mut temporary = path.clone().into_os_string();
+        let n = WRITES.fetch_add(1, Ordering::Relaxed);
+        temporary.push(format!(".{}-{n}.tmp", std::process::id()));
+        let temporary = PathBuf::from(temporary);
+        let written = File::create(&temporary).and_then(|mut file| {
+            file.write_all(entry)?;
+            file.sync_all()
+        });
+        let linked = written.and_then(|()| match std::fs::hard_link(&temporary, &path) {
             Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(()),
-            other => other.map_err(|e| format!("{}: {e}", path.display())),
-        }
+            linked => linked,
+        });
+        let removed = std::fs::remove_file(&temporary);
+        linked
+            .and(removed)
+            .map_err(|e| format!("{}: {e}", path.display()))
     }
 }
 

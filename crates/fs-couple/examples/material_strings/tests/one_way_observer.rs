@@ -1059,3 +1059,32 @@ fn a_truncated_kept_skin_load_refuses_and_is_never_half_read() {
         std::fs::remove_dir(&dir).unwrap();
     });
 }
+
+// A stopped write's cut-short temporary (here pid 1's, never this process's) is never read, a write leaves no
+// temporary of its own, and an entry once kept is never replaced.
+#[test]
+fn a_stopped_write_leaves_only_a_temporary_no_read_opens_and_a_kept_entry_is_never_replaced() {
+    let dir = load_store("fs-skin-loads-temporary");
+    let mut body = profile(&own_skin());
+    let spec = input::Spec::parse(at48(source(SKIN_LOAD)).as_bytes()).unwrap();
+    body.keep_skin_loads(&dir, &spec).unwrap();
+    let store = body.skin_load_store().unwrap();
+    let key = fs_blake3::hash_domain("fs-couple:test-entry:v1", b"one entry");
+    let entry = body.skin_load_entry(&key).unwrap();
+    let stopped = std::path::PathBuf::from(format!("{}.1-0.tmp", entry.display()));
+    std::fs::write(&stopped, b"cut sho").unwrap();
+    assert_eq!(store.load(&key).unwrap(), None);
+    store.keep(&key, b"the kept entry").unwrap();
+    store.keep(&key, b"another entry").unwrap();
+    assert_eq!(store.load(&key).unwrap().unwrap(), b"the kept entry");
+    let mut left: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    left.sort();
+    assert_eq!(left, [entry, stopped]);
+    for path in left {
+        std::fs::remove_file(path).unwrap();
+    }
+    std::fs::remove_dir(&dir).unwrap();
+}

@@ -43,7 +43,7 @@ by one binary beside its own store-free render at the same time, give the same w
 modes of 55,098 coordinates, 486,776,978 bytes) keeps it in 1230.13 s against 1219.92 s and reads it in 483.72 s against 1119.75 s, at 2.43 GiB of peak memory
 against 3.36 GiB.
 
-Not tested: a store that fails to write, and a render stopped while it keeps a solve, whose short mode file is never replaced, so a later read of it refuses.
+Not tested: a store that fails to write, and a render stopped while it keeps a solve. Such a stop leaves the solve without its head, so the next render solves again; the example's store hard-links each entry from a synced temporary, so a stop leaves no short file under an entry's name.
 
 ### The prepared step reads its rows from copies by blocks of eight (`upper_rows::UpperBlocks`, `upper_rows::RowBlocks`)
 
