@@ -154,6 +154,9 @@ pub(super) struct PreparedNetwork {
     /// Each row's sum of the last product over its state's columns (`upper_rows::StateSums`): the next product on
     /// the same state continues from them. An operator starts with none, so no sum outlives its transition.
     state_sums: Mutex<Option<upper_rows::StateSums>>,
+    /// For the component, connection and material Gramians: the sums of the last sweep's rows over its state's
+    /// columns (`upper_rows::StateForms`), which the next sweep on the same state continues. None in a new operator.
+    state_forms: Mutex<[Option<upper_rows::StateForms>; 3]>,
     /// Two-way exterior air beside the transition (`air`); None for the mechanics alone.
     air: Option<air::PreparedAir>,
 }
@@ -475,7 +478,7 @@ impl PreparedNetwork {
         let result = Self { count, dt, weights, stiffness, rest_force, transition, product_rows, component_loss, connection_total,
             material_couplings, material_loss, dashpot_norms: ledger.dashpot_norms(), ledger,
             sweep: Mutex::new(None), sweeps: AtomicU64::new(0), sums_by_rows: false,
-            energies: Mutex::new(EnergyMemo::default()), energy_evaluations: AtomicU64::new(0), state_sums: Mutex::new(None), air };
+            energies: Mutex::new(EnergyMemo::default()), energy_evaluations: AtomicU64::new(0), state_sums: Mutex::new(None), state_forms: Mutex::new([None, None, None]), air };
         result.validate_energy_identity(gate)?;
         poll(Some(gate))?;
         Ok(result)
@@ -683,17 +686,23 @@ impl PreparedNetwork {
     }
 
     /// The sweep with each Gramian summed by rows over its upper triangle (`upper_rows`), on one thread. The refusals
-    /// are read in the serial order: component, connection, material.
+    /// are read in the serial order: component, connection, material. Each Gramian keeps its rows' sums over the
+    /// state's columns, and a sweep on the same state continues them over the held force's
+    /// (`upper_rows::upper_row_form_from`): the same additions in the same order. A poisoned lock sums every row whole.
     fn upper_row_sweep(&self, z: &[f64]) -> Result<LossSweep, ModalCouplingError> {
-        let form = |gramian: &Option<Vec<f64>>| {
+        let (mut kept, state) = (self.state_forms.lock().ok(), z.len() - self.count);
+        let mut form = |which: usize, gramian: &Option<Vec<f64>>| {
             gramian.as_deref().map_or(Ok(0.0), |gramian| {
-                let (sum, magnitude) = upper_rows::upper_row_form(gramian, z);
+                let whole = || upper_rows::upper_row_form(gramian, z);
+                let (sum, magnitude) = kept.as_deref_mut().map_or_else(whole, |slots| {
+                    upper_rows::upper_row_form_from(&mut slots[which], gramian, z, state)
+                });
                 checked_loss(sum, magnitude)
             })
         };
-        let component = form(&self.component_loss)?;
-        let connection = form(&self.connection_total)?;
-        let material = form(&self.material_loss)?;
+        let component = form(0, &self.component_loss)?;
+        let connection = form(1, &self.connection_total)?;
+        let material = form(2, &self.material_loss)?;
         Ok(LossSweep { z: z.to_vec(), component, connection, material })
     }
 

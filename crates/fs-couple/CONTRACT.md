@@ -17,6 +17,31 @@
 
 ## New sections (newest first)
 
+### A loss sweep continues from the sums kept for its state (`upper_rows::upper_row_form_from`)
+
+The sweeps of one sample share their state and differ in the held force, as its products do: a card with longitudinal waves computes about three a sample, one for each
+nonlinear trial. A row of a loss form sums its columns right of the diagonal from left to right, and `z = [D q, v, memory | u]` has the state's `2 n + arms` entries
+first. For each Gramian of the sweep by rows (component, connection, material) the operator keeps, for the last state it swept, every row's sum and magnitude over the
+state's columns, with the bits of the state's entries (`upper_rows::StateForms`). A sweep whose state has the kept bits in every entry continues each row over the held
+force's `n` columns; any other sweep computes the state's sums first and keeps them. With no arms a continued form adds 2.5 n² terms where the whole form adds 4.5 n².
+
+The kernel is one pass over a range of columns (`rows_extended`): it adds to each row its terms for the columns of the range right of its diagonal, in the form's order
+(the columns inside the row's block of eight, then the columns a whole block shares). Two passes over adjoining ranges add what one pass over their union adds, in its
+order. `upper_row_form` is the pass over all the columns, and the continued form is the pass over the state's columns, kept, and then the pass over the force's. So a row
+adds the same terms in the same order either way, the rows are added in row order as before, and each form keeps its bits.
+
+The sums belong to one operator and live in it, as a product's kept sums do: every preparation builds a new operator, which starts with none, and a changed law that
+keeps the scale `D` keeps the key. The slots are behind one mutex, held for the three forms of a sweep; a poisoned lock sums every row whole. The chain's sweep, which a
+system that does not sum by rows computes, keeps nothing and is as it was.
+
+Evidence. `tests/upper_row_forms.rs` holds the continued form to the plain loop of the form's order, bit for bit, at sides 1, 7, 8, 9, 16, 17 and 100, with a state of
+0, 7, 8, 9, two thirds of the side, all but one and all of the entries: under three forces on one state, then on states that differ in the first entry or in the last,
+by its last bit and by a half (one bit of one term can vanish in a row's sum, and a key that ignored the entry would then go unseen). The whole form is held to the same
+loop by the test it had. `tests/coupled_coefficient_update.rs`: a refused step sweeps at a state, the law changes to one with the same own stiffnesses and another
+coupling, and the next three steps have the frames of a system that never swept under the first law.
+
+Not tested: a material Gramian's kept sums in a system test (the system test has no memory arm, and the kernel's test sums no particular Gramian).
+
 ### A bank built without its operator and prepared once (`ModalPreparation::StructureFirst`, `ReciprocalStringBank::with_time_propagation`)
 
 A prepared bank computes a whole operator at its construction and again at every rebuild (the series exponential, a dense product for each doubling, the same again for
@@ -26,8 +51,9 @@ card with residual flexibility builds two operators and a card that adds axial m
 `ModalPreparation::StructureFirst(budget)` builds the complete bank as `HarmonicOnly` does, without a time propagator, and admits it as `Prepared` does. Every
 construction and rebuild runs what a prepared construction runs before it computes its operator, in its order: the held-load pressure preparation, its reserve, and the
 operator's mode, byte and work admission (`PreparedModalBudget::admit_structure`, which `PreparedNetwork::new` runs before it allocates). The harmonic admission follows.
-Its byte and work figures are the smaller ones (about 12 n² entries against at least 1152 n², about 9 n³ terms against at least 27 n³ times 272); its one stricter limit
-is 1024 modes and air poles together. A system keeps the choice it was built with, so its own rebuilds are admitted the same way.
+Without an air bank its figures are the smaller ones (about 12 n² entries against at least 1152 n², 9 n³ terms against at least 27 n³ times 272); its one stricter limit
+is 1024 modes. Air poles count toward that limit and enter its workspace squared, 8 (n + poles)² entries, where a prepared air bank's grow linearly: beside more than
+about 11 n poles its bytes can refuse first. `material_strings` binds no air bank before the call. A system keeps its choice, so its rebuilds are admitted the same way.
 
 `with_time_propagation` is the step from there to playback: a cold harmonic-only owner gains its propagator from the budget it holds.
 - `CoupledModalSystem::with_time_propagation` hands the budget to the cold budget binding (`with_prepared_linear_propagation`), which prepares one operator and its

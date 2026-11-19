@@ -317,7 +317,7 @@ struct ReadyBank { spec: input::Spec, catalog: Catalog, bank: MultiBowStringBank
     bow_station_program: Option<BowStationProgram>, rosin: Option<rosin_thermal::Resolved> }
 impl ReadyBank {
     fn into_performance(self, gate: &CancelGate) -> Result<Ready> {
-        if matches!(self.bank.source().bank().preparation(), ModalPreparation::HarmonicOnly(_)) {
+        if self.bank.source().bank().preparation().is_harmonic_only() {
             return Err("a harmonic-only bank cannot be scheduled for playback".into());
         }
         self.spec.schedule_bank(self.bank, self.catalog, self.body_profile,

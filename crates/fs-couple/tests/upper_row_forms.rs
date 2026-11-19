@@ -7,7 +7,10 @@
 #[path = "../src/render/schedule/force/coupled/exact/prepared/upper_rows.rs"]
 mod upper_rows;
 
-use upper_rows::{bitwise_symmetric, identity_rows, product_from, row_storage, upper_row_form};
+use upper_rows::{
+    bitwise_symmetric, identity_rows, product_from, row_storage, upper_row_form,
+    upper_row_form_from,
+};
 
 /// Sides around the blocks of eight rows, and one near a hundred.
 const SIDES: [usize; 7] = [1, 7, 8, 9, 16, 17, 100];
@@ -258,6 +261,38 @@ fn a_product_continued_from_a_states_kept_sums_has_the_bits_of_a_plain_product()
                     let product = bits(product_from(&mut slot, &matrix, &z, state));
                     let plain = plain_product(&matrix, &z);
                     assert_eq!(product, plain, "{side} {rows} {state} at {at}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_form_continued_from_a_states_kept_sums_has_the_bits_of_a_plain_loop() {
+    let bits = |(sum, magnitude): (f64, f64)| (sum.to_bits(), magnitude.to_bits());
+    for (seed, side) in (1..).zip(SIDES) {
+        let w = gramian(side, seed);
+        // No state; lengths below, at and above a block of eight; two thirds of the side; all but the last; all.
+        for state in [0, 7, 8, 9, 2 * side / 3, side - 1, side] {
+            let state = state.min(side);
+            let x = mixed(state, seed + 10);
+            let z = |x: &[f64], k: u64| [x, &mixed(side - state, seed + 20 + k)].concat();
+            let mut slot = None;
+            // The first form computes the state's sums; the next two continue them under other forces.
+            for k in 0..3 {
+                let z = z(&x, k);
+                let form = bits(upper_row_form_from(&mut slot, &w, &z, state));
+                assert_eq!(form, bits(plain(&w, &z)), "{side} {state} {k}");
+            }
+            // A state that differs in one entry, the first and then the last, is another state: by its last bit, and
+            // by a half, which moves every row's kept sum (one bit of one term can vanish in a sum of many).
+            for at in [0, state.saturating_sub(1)].into_iter().take(state.min(2)) {
+                for other in [f64::from_bits(x[at].to_bits() ^ 1), x[at] + 0.5] {
+                    let mut y = x.clone();
+                    y[at] = other;
+                    let z = z(&y, 0);
+                    let form = bits(upper_row_form_from(&mut slot, &w, &z, state));
+                    assert_eq!(form, bits(plain(&w, &z)), "{side} {state} at {at}");
                 }
             }
         }

@@ -69,7 +69,7 @@ fn bank_without_causal_gas(
     bank_constructed(cx, gate, young, medium, strings, None)
 }
 /// The bank of these tests. Without a choice it is constructed ordinary and prepared afterwards, as every other
-/// test here has it. A choice (`ModalPreparation::Prepared` or `::HarmonicOnly`) constructs it with that.
+/// test here has it. A choice (`ModalPreparation::Prepared` or `::StructureFirst`) constructs it with that.
 fn bank_constructed(
     cx: &Cx<'_>,
     gate: &CancelGate,

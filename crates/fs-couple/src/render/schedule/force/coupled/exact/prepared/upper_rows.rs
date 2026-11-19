@@ -19,6 +19,9 @@
 //! ([`StateSums`]): the next product on the same state adds only the force's columns, the same additions in the same
 //! order as one left-to-right sum.
 //!
+//! [`upper_row_form_from`] is the form of `[state | force]` that keeps the same kind of sums ([`StateForms`]): a row
+//! takes the state's columns first, so the next form on the same state continues every row over the force's columns.
+//!
 //! This file names nothing of its crate. `tests/upper_row_forms.rs` compiles it a second time and holds each sum to a
 //! plain loop of the same order, bit for bit.
 
@@ -46,42 +49,89 @@ pub(super) fn identity_rows(matrix: &[f64], side: usize, from: usize) -> bool {
 /// The sum and the magnitude of `z^T W z` for the row-major symmetric `matrix` of side `z.len()`, in the order of the
 /// module's description.
 pub(super) fn upper_row_form(matrix: &[f64], z: &[f64]) -> (f64, f64) {
+    upper_row_form_from(&mut None, matrix, z, 0)
+}
+
+/// Each row's sum (`.1`) and magnitude (`.2`) over a state's columns right of its diagonal, with the bits of the
+/// state's entries (`.0`).
+pub(super) struct StateForms(Vec<u64>, Vec<f64>, Vec<f64>);
+
+/// [`upper_row_form`] of `matrix` and `z`, whose first `state` entries are a state and whose others are a held force.
+/// A row's columns run from left to right, so its sum over the state's columns comes first: those sums are kept in
+/// `slot`, a call whose state has the kept bits in every entry continues them over the force's columns, and any other
+/// call computes and keeps its own. Either way a row adds its terms in the order of the module's description, and
+/// the rows are added in row order.
+pub(super) fn upper_row_form_from(
+    slot: &mut Option<StateForms>,
+    matrix: &[f64],
+    z: &[f64],
+    state: usize,
+) -> (f64, f64) {
     let side = z.len();
+    let held = |kept: &StateForms| {
+        let same = |(bits, entry): (&u64, &f64)| *bits == entry.to_bits();
+        kept.1.len() == side && kept.0.len() == state && kept.0.iter().zip(z).all(same)
+    };
+    let kept = slot.take().filter(held).unwrap_or_else(|| {
+        let key = z[..state].iter().map(|entry| entry.to_bits()).collect();
+        let (mut sums, mut sizes) = (vec![0.0; side], vec![0.0; side]);
+        rows_extended(matrix, z, 0..state, &mut sums, &mut sizes);
+        StateForms(key, sums, sizes)
+    });
+    let (mut sums, mut sizes) = (kept.1.clone(), kept.2.clone());
+    rows_extended(matrix, z, state..side, &mut sums, &mut sizes);
+    *slot = Some(kept);
     let (mut sum, mut magnitude) = (0.0, 0.0);
-    let mut first = 0;
-    while first < side {
+    for (i, (partial, size)) in sums.iter().zip(&sizes).enumerate() {
+        let diagonal = matrix[i * side + i] * z[i];
+        sum += z[i] * (diagonal + 2.0 * partial);
+        magnitude += z[i].abs() * (diagonal.abs() + 2.0 * size);
+    }
+    (sum, magnitude)
+}
+
+/// Add to each row's sum and magnitude its terms `W_ij z_j` for the columns of `columns` right of its diagonal, in
+/// the order of the module's description: the columns inside its block of eight, then the columns every row of a
+/// whole block shares. Two calls on adjoining ranges add what one call on their union adds, in its order.
+fn rows_extended(
+    matrix: &[f64],
+    z: &[f64],
+    columns: core::ops::Range<usize>,
+    sums: &mut [f64],
+    sizes: &mut [f64],
+) {
+    let side = z.len();
+    for first in (0..side).step_by(BLOCK) {
         let last = (first + BLOCK).min(side);
-        let (mut sums, mut sizes) = ([0.0_f64; BLOCK], [0.0_f64; BLOCK]);
-        // The columns inside the block: row i takes i + 1 .. last.
+        let (mut partial, mut size) = ([0.0_f64; BLOCK], [0.0_f64; BLOCK]);
+        partial[..last - first].copy_from_slice(&sums[first..last]);
+        size[..last - first].copy_from_slice(&sizes[first..last]);
         for (k, i) in (first..last).enumerate() {
-            let row = &matrix[i * side + i + 1..i * side + last];
-            for (value, right) in row.iter().zip(&z[i + 1..last]) {
+            let from = (i + 1).max(columns.start);
+            let inside = from..last.min(columns.end).max(from);
+            let row = &matrix[i * side..][inside.clone()];
+            for (value, right) in row.iter().zip(&z[inside]) {
                 let term = value * right;
-                sums[k] += term;
-                sizes[k] += term.abs();
+                partial[k] += term;
+                size[k] += term.abs();
             }
         }
-        // The columns every row of a whole block shares.
+        let from = last.max(columns.start);
+        let shared = from..columns.end.max(from);
         if last - first == BLOCK {
-            let rows: [&[f64]; BLOCK] = core::array::from_fn(|k| {
-                &matrix[(first + k) * side + last..(first + k + 1) * side]
-            });
-            for (j, right) in z[last..].iter().enumerate() {
-                for ((partial, size), row) in sums.iter_mut().zip(&mut sizes).zip(&rows) {
+            let row = |k: usize| &matrix[(first + k) * side..][shared.clone()];
+            let rows: [&[f64]; BLOCK] = core::array::from_fn(row);
+            for (j, right) in z[shared.clone()].iter().enumerate() {
+                for ((sum, magnitude), row) in partial.iter_mut().zip(&mut size).zip(&rows) {
                     let term = row[j] * right;
-                    *partial += term;
-                    *size += term.abs();
+                    *sum += term;
+                    *magnitude += term.abs();
                 }
             }
         }
-        for (k, i) in (first..last).enumerate() {
-            let diagonal = matrix[i * side + i] * z[i];
-            sum += z[i] * (diagonal + 2.0 * sums[k]);
-            magnitude += z[i].abs() * (diagonal.abs() + 2.0 * sizes[k]);
-        }
-        first = last;
+        sums[first..last].copy_from_slice(&partial[..last - first]);
+        sizes[first..last].copy_from_slice(&size[..last - first]);
     }
-    (sum, magnitude)
 }
 
 /// The storage `sum_i (v_i^2 + q_i s_i) / 2` of the state `modes = [q_0, v_0, q_1, v_1, ..]` under the row-major

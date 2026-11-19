@@ -608,6 +608,30 @@ fn a_changed_law_between_two_products_on_one_state_starts_from_no_kept_sums() {
 }
 
 #[test]
+fn a_changed_law_between_two_sweeps_on_one_state_starts_from_no_kept_sums() {
+    let gate = CancelGate::new_clock_free();
+    // As for the products above: these laws keep the scale of the state, so the key of a sweep's kept sums is the
+    // same under both, and only a new operator's empty slots keep the first law's sums out of the second law's sweep.
+    let next = laws([90.0, 150.0, 30.0], [0.001, -0.002, 0.004]);
+    let by_rows = || {
+        let system = fixture(true, config(10.0, 100.0));
+        system.with_sums_by_rows().unwrap()
+    };
+    // `primed` sweeps at its first state under the original laws: a step computes its losses before it is refused.
+    let mut primed = by_rows();
+    assert!(primed.step(&[1e6, -1e6]).is_err());
+    primed.set_connection_coefficients(&next, &gate).unwrap();
+    // `fresh` never swept under the original laws.
+    let mut fresh = by_rows();
+    fresh.set_connection_coefficients(&next, &gate).unwrap();
+    for sample in 0..3 {
+        let frame = primed.step(&FORCE).unwrap().clone();
+        assert_eq!(&frame, fresh.step(&FORCE).unwrap(), "{sample}");
+        assert!(frame.connection_dissipation_j > 0.0, "{sample}");
+    }
+}
+
+#[test]
 fn a_system_built_structure_first_then_prepared_is_the_system_constructed_prepared() {
     let gate = CancelGate::new_clock_free();
     let allow = |max_modes, max_dense_bytes, max_multiply_terms| PreparedModalBudget {
