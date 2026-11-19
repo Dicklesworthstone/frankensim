@@ -1,5 +1,6 @@
 //! The prepared operator's two orders by rows (the loss forms over the upper triangle, the storage over the whole
-//! square), each held to a plain loop of the same order.
+//! square), each held to a plain loop of the same order. The forms and the products read copies by blocks of eight
+//! rows (`UpperBlocks`, `RowBlocks`); the plain loops read the row-major square.
 //!
 //! fs-couple's lib test crate does not build under the memory guard, so this target compiles the kernel's own
 //! source file a second time. That file names nothing of its crate.
@@ -8,8 +9,8 @@
 mod upper_rows;
 
 use upper_rows::{
-    bitwise_symmetric, identity_rows, product_from, row_storage, upper_row_form,
-    upper_row_form_from,
+    RowBlocks, UpperBlocks, bitwise_symmetric, identity_rows, product_from, row_storage,
+    upper_row_form, upper_row_form_from,
 };
 
 /// Sides around the blocks of eight rows, and one near a hundred.
@@ -82,7 +83,7 @@ fn the_upper_row_form_has_the_bits_of_a_plain_loop_of_its_order_and_agrees_with_
             w.iter().any(|v| *v < 0.0) || side == 1,
             "side {side}: no negative entry"
         );
-        let (sum, magnitude) = upper_row_form(&w, &z);
+        let (sum, magnitude) = upper_row_form(&UpperBlocks::new(&w, side), &z);
         let (plain_sum, plain_magnitude) = plain(&w, &z);
         assert_eq!(sum.to_bits(), plain_sum.to_bits(), "side {side}: sum");
         assert_eq!(
@@ -119,9 +120,10 @@ fn a_matrix_is_symmetric_only_if_every_pair_has_the_same_bits() {
             let at = (side - 1) * side;
             moved[at] = f64::from_bits(moved[at].to_bits() + 1);
             assert!(!bitwise_symmetric(&moved, side), "side {side}: one ulp");
-            // The upper-row form does not read the lower triangle, which is why the check comes first.
+            // The upper-row form's copy does not read the lower triangle, which is why the check comes first.
             let z = mixed(side, seed + 100);
-            assert_eq!(upper_row_form(&moved, &z), upper_row_form(&w, &z));
+            let form = |w: &[f64]| upper_row_form(&UpperBlocks::new(w, side), &z);
+            assert_eq!(form(&moved), form(&w));
         }
     }
     // Zero and its negative are two bit patterns.
@@ -238,9 +240,10 @@ fn plain_product(matrix: &[f64], z: &[f64]) -> Vec<u64> {
 fn a_product_continued_from_a_states_kept_sums_has_the_bits_of_a_plain_product() {
     let bits = |product: Vec<f64>| product.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
     for (seed, side) in (1..).zip(SIDES) {
-        // All the rows of a square, then its first two thirds (66 rows at side 100: not whole blocks of eight).
+        // All the rows of a square, then its first two thirds (67 rows at side 100: not whole blocks of eight).
         for rows in [side, (2 * side).div_ceil(3)] {
             let matrix = mixed(rows * side, seed);
+            let blocks = RowBlocks::new(&matrix, side);
             // No state, a third of the columns, all but the last, all of them.
             for state in [0, side / 3, side - 1, side] {
                 let x = mixed(state, seed + 10);
@@ -249,7 +252,7 @@ fn a_product_continued_from_a_states_kept_sums_has_the_bits_of_a_plain_product()
                 // The first product computes the state's sums; the next two continue from them under other forces.
                 for k in 0..3 {
                     let z = z(&x, k);
-                    let product = bits(product_from(&mut slot, &matrix, &z, state));
+                    let product = bits(product_from(&mut slot, &blocks, &z, state));
                     let plain = plain_product(&matrix, &z);
                     assert_eq!(product, plain, "{side} {rows} {state} {k}");
                 }
@@ -258,7 +261,7 @@ fn a_product_continued_from_a_states_kept_sums_has_the_bits_of_a_plain_product()
                     let mut y = x.clone();
                     y[at] = f64::from_bits(y[at].to_bits() ^ 1);
                     let z = z(&y, 0);
-                    let product = bits(product_from(&mut slot, &matrix, &z, state));
+                    let product = bits(product_from(&mut slot, &blocks, &z, state));
                     let plain = plain_product(&matrix, &z);
                     assert_eq!(product, plain, "{side} {rows} {state} at {at}");
                 }
@@ -272,6 +275,7 @@ fn a_form_continued_from_a_states_kept_sums_has_the_bits_of_a_plain_loop() {
     let bits = |(sum, magnitude): (f64, f64)| (sum.to_bits(), magnitude.to_bits());
     for (seed, side) in (1..).zip(SIDES) {
         let w = gramian(side, seed);
+        let upper = UpperBlocks::new(&w, side);
         // No state; lengths below, at and above a block of eight; two thirds of the side; all but the last; all.
         for state in [0, 7, 8, 9, 2 * side / 3, side - 1, side] {
             let state = state.min(side);
@@ -281,7 +285,7 @@ fn a_form_continued_from_a_states_kept_sums_has_the_bits_of_a_plain_loop() {
             // The first form computes the state's sums; the next two continue them under other forces.
             for k in 0..3 {
                 let z = z(&x, k);
-                let form = bits(upper_row_form_from(&mut slot, &w, &z, state));
+                let form = bits(upper_row_form_from(&mut slot, &upper, &z, state));
                 assert_eq!(form, bits(plain(&w, &z)), "{side} {state} {k}");
             }
             // A state that differs in one entry, the first and then the last, is another state: by its last bit, and
@@ -291,7 +295,7 @@ fn a_form_continued_from_a_states_kept_sums_has_the_bits_of_a_plain_loop() {
                     let mut y = x.clone();
                     y[at] = other;
                     let z = z(&y, 0);
-                    let form = bits(upper_row_form_from(&mut slot, &w, &z, state));
+                    let form = bits(upper_row_form_from(&mut slot, &upper, &z, state));
                     assert_eq!(form, bits(plain(&w, &z)), "{side} {state} at {at}");
                 }
             }

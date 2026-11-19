@@ -46,6 +46,13 @@ fn config(energy: f64, force: f64) -> ModalCouplingConfig {
     }
 }
 fn fixture(prepared: bool, config: ModalCouplingConfig) -> CoupledModalSystem {
+    built(prepared, config, &original())
+}
+fn built(
+    prepared: bool,
+    config: ModalCouplingConfig,
+    law: &[ConnectionCoefficients; 3],
+) -> CoupledModalSystem {
     let mut model = ModalAcousticTimeModel::try_new_with_free_coordinates(
         RATE,
         vec![
@@ -66,7 +73,7 @@ fn fixture(prepared: bool, config: ModalCouplingConfig) -> CoupledModalSystem {
         }))
         .unwrap();
     let columns = [[1.0, 0.0], [0.0, 1.0], [1.0, -1.0]];
-    let links = original()
+    let links = law
         .iter()
         .zip(columns)
         .map(|(law, column)| ModalColumnConnection {
@@ -628,6 +635,26 @@ fn a_changed_law_between_two_sweeps_on_one_state_starts_from_no_kept_sums() {
         let frame = primed.step(&FORCE).unwrap().clone();
         assert_eq!(&frame, fresh.step(&FORCE).unwrap(), "{sample}");
         assert!(frame.connection_dissipation_j > 0.0, "{sample}");
+    }
+}
+
+#[test]
+fn a_changed_law_steps_as_a_system_built_with_that_law_from_the_start() {
+    let gate = CancelGate::new_clock_free();
+    let next = laws([90.0, 150.0, 30.0], [0.001, -0.002, 0.004]);
+    let by_rows = |system: CoupledModalSystem| system.with_sums_by_rows().unwrap();
+    // `changed` sweeps and multiplies under the original laws, then takes the next ones: its operator's copies by
+    // blocks of eight must be the next laws' from then on. `from_start` was constructed with the next laws.
+    let mut changed = by_rows(fixture(true, config(10.0, 100.0)));
+    assert!(changed.step(&[1e6, -1e6]).is_err());
+    changed.set_connection_coefficients(&next, &gate).unwrap();
+    let mut from_start = by_rows(built(true, config(10.0, 100.0), &next));
+    for sample in 0..3 {
+        let frame = changed.step(&FORCE).unwrap().clone();
+        assert_eq!(&frame, from_start.step(&FORCE).unwrap(), "{sample}");
+        assert!(frame.connection_dissipation_j > 0.0, "{sample}");
+        let (a, b) = (state(&changed), state(&from_start));
+        assert_eq!(a.map(f64::to_bits), b.map(f64::to_bits), "{sample}");
     }
 }
 

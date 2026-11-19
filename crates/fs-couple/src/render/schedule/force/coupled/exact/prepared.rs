@@ -131,6 +131,9 @@ pub(super) struct PreparedNetwork {
     /// The leading rows of the transition that a product computes: the state's `2 n + arms` when the held force's
     /// rows, which no caller reads, are the identity's bit for bit (`upper_rows::identity_rows`); else every row.
     product_rows: usize,
+    /// Those rows by blocks of eight (`upper_rows::RowBlocks`), which a product on one thread reads: a copy made by the
+    /// first such product. The operator never changes its transition.
+    transition_blocks: OnceLock<upper_rows::RowBlocks>,
     component_loss: Option<Vec<f64>>,
     /// Each row c defines the original arm storage (c.q - memory)^2 / 2.
     material_couplings: Vec<Vec<f64>>,
@@ -145,6 +148,10 @@ pub(super) struct PreparedNetwork {
     /// (`upper_rows`), each in place of one chain over the square. Set by `sum_by_rows`, which first holds every
     /// Gramian of the sweep to its transpose.
     sums_by_rows: bool,
+    /// The upper triangles of the component, connection and material Gramians by blocks of eight
+    /// (`upper_rows::UpperBlocks`), which the sweep by rows reads: copies made by `sum_by_rows`. None before it, and
+    /// for a Gramian the operator does not have. The operator never changes its Gramians.
+    upper_blocks: [Option<upper_rows::UpperBlocks>; 3],
     /// For every link, the norm of the column its dashpot acts along ([`column_norm`]): the damping column of a
     /// constant-loss link, the link's own column otherwise. The bound on a link's force reads it at every step.
     dashpot_norms: Vec<f64>,
@@ -478,6 +485,7 @@ impl PreparedNetwork {
         let result = Self { count, dt, weights, stiffness, rest_force, transition, product_rows, component_loss, connection_total,
             material_couplings, material_loss, dashpot_norms: ledger.dashpot_norms(), ledger,
             sweep: Mutex::new(None), sweeps: AtomicU64::new(0), sums_by_rows: false,
+            transition_blocks: OnceLock::new(), upper_blocks: [None, None, None],
             energies: Mutex::new(EnergyMemo::default()), energy_evaluations: AtomicU64::new(0), state_sums: Mutex::new(None), state_forms: Mutex::new([None, None, None]), air };
         result.validate_energy_identity(gate)?;
         poll(Some(gate))?;
@@ -685,17 +693,20 @@ impl PreparedNetwork {
         Ok(LossSweep { z: z.to_vec(), component, connection, material })
     }
 
-    /// The sweep with each Gramian summed by rows over its upper triangle (`upper_rows`), on one thread. The refusals
-    /// are read in the serial order: component, connection, material. Each Gramian keeps its rows' sums over the
-    /// state's columns, and a sweep on the same state continues them over the held force's
-    /// (`upper_rows::upper_row_form_from`): the same additions in the same order. A poisoned lock sums every row whole.
+    /// The sweep with each Gramian summed by rows over its upper triangle (`upper_rows`), on one thread, from its copy
+    /// in `upper_blocks`. The refusals are read in the serial order: component, connection, material. Each Gramian
+    /// keeps its rows' sums over the state's columns, and a sweep on the same state continues them over the held
+    /// force's (`upper_rows::upper_row_form_from`): the same additions in the same order. A poisoned lock sums every
+    /// row whole.
     fn upper_row_sweep(&self, z: &[f64]) -> Result<LossSweep, ModalCouplingError> {
         let (mut kept, state) = (self.state_forms.lock().ok(), z.len() - self.count);
         let mut form = |which: usize, gramian: &Option<Vec<f64>>| {
-            gramian.as_deref().map_or(Ok(0.0), |gramian| {
-                let whole = || upper_rows::upper_row_form(gramian, z);
+            gramian.as_ref().map_or(Ok(0.0), |_| {
+                let copy = self.upper_blocks[which].as_ref();
+                let upper = copy.ok_or_else(|| invalid("a loss Gramian has no copy by blocks"))?;
+                let whole = || upper_rows::upper_row_form(upper, z);
                 let (sum, magnitude) = kept.as_deref_mut().map_or_else(whole, |slots| {
-                    upper_rows::upper_row_form_from(&mut slots[which], gramian, z, state)
+                    upper_rows::upper_row_form_from(&mut slots[which], upper, z, state)
                 });
                 checked_loss(sum, magnitude)
             })
@@ -711,7 +722,9 @@ impl PreparedNetwork {
     /// unless every Gramian of the sweep equals its transpose bit for bit, as `gramian` leaves it. The values differ
     /// from the chain's in their last bits. The per-link ledger and the air's forms keep their chain. The storage
     /// (`hamiltonian`) sums the stiffness by rows from now on as well: over the whole square, since
-    /// `mechanical_stiffness` does not leave it equal to its transpose bit for bit.
+    /// `mechanical_stiffness` does not leave it equal to its transpose bit for bit. The sweep reads each Gramian from a
+    /// copy of its upper triangle by blocks of eight rows (`upper_rows::UpperBlocks`), made here: about half the
+    /// Gramian's bytes.
     pub(super) fn sum_by_rows(&mut self) -> Result<(), ModalCouplingError> {
         let side = 3 * self.count + self.material_couplings.len();
         let symmetric = |gramian: &Option<Vec<f64>>| {
@@ -727,6 +740,10 @@ impl PreparedNetwork {
                 "a prepared loss Gramian differs from its transpose",
             ));
         }
+        let copy = |gramian: &[f64]| upper_rows::UpperBlocks::new(gramian, side);
+        let (component, connection) = (&self.component_loss, &self.connection_total);
+        self.upper_blocks = [component, connection, &self.material_loss]
+            .map(|gramian| gramian.as_deref().map(copy));
         self.sums_by_rows = true;
         // A storage kept from before this request is the chain's: the next request for that state evaluates it by rows.
         self.energies = Mutex::new(EnergyMemo::default());
@@ -762,13 +779,16 @@ impl PreparedNetwork {
     }
 
     /// The transition's product with `z` over `product_rows` rows: each entry is its own row's sum. On one thread
-    /// the sums over the state's columns are kept, and a product on the same state adds the held force's columns
-    /// to them (`upper_rows::product_from`): the same additions in the same order.
+    /// the rows are read from their copy by blocks of eight (`transition_blocks`, made by the first such product), the
+    /// sums over the state's columns are kept, and a product on the same state adds the held force's columns to them
+    /// (`upper_rows::product_from`): the same additions in the same order.
     fn product(&self, z: &[f64]) -> Result<Vec<f64>, ModalCouplingError> {
         let rows = &self.transition[..self.product_rows * z.len()];
         match self.state_sums.lock() {
             Ok(mut slot) if apply_threads(rows, z.len()) <= 1 => {
-                let product = upper_rows::product_from(&mut slot, rows, z, z.len() - self.count);
+                let copy = || upper_rows::RowBlocks::new(rows, z.len());
+                let blocks = self.transition_blocks.get_or_init(copy);
+                let product = upper_rows::product_from(&mut slot, blocks, z, z.len() - self.count);
                 product.into_iter().map(finite).collect()
             }
             _ => apply(rows, z),

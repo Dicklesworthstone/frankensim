@@ -17,6 +17,43 @@
 
 ## New sections (newest first)
 
+### The prepared step reads its rows from copies by blocks of eight (`upper_rows::UpperBlocks`, `upper_rows::RowBlocks`)
+
+The loss sweep by rows and the product on one thread advance eight consecutive rows together, each with its own sum. In a row-major square the eight entries of one
+column lie a row apart, so each column took eight scalar loads. Each kernel now reads a copy in which they lie together. `UpperBlocks` holds a Gramian's upper triangle by
+blocks of eight rows: the block's own square of eight rows and columns, row by row, with +0.0 below its diagonal and past the side; then, for a whole block, each column
+right of it as eight entries. `RowBlocks` holds the transition's computed rows the same way over every column, and the rows after the last whole block as they are. A row
+starts from the same value and adds the same terms in the same order as before, so every sum keeps its bits: the copies change where an entry is read, not what is added.
+
+`sum_by_rows` makes the Gramians' copies once it has held them to their transposes. The first product on one thread makes the transition's (a `OnceLock`); a product that
+`apply` splits over threads reads the row-major rows as before, and an operator whose products all run there never makes it. The row-major arrays stay: `apply` reads the
+transition, the chain's sweep reads the Gramians, and the energy identity's check reads both when the operator is prepared; once an operator sums by rows, its sweep only
+asks whether each Gramian exists. A Gramian's copy is about half its bytes: 64 entries a block, and eight a column right of each whole block, which is `s² / 2 + 4 s`
+entries at a side `s` of whole blocks; the transition's is `product_rows` rows of the side. The admission (`admit_with_memory`) is unchanged: it counts `losses + 128`
+squares of the side, and the copies add at most about two and a half (half of each of three Gramians and a transition of every row). A scratch build printed each copy's
+bytes: the viola Db4 control card (338 modes, side 1014) holds two Gramian copies of 4,146,424 bytes and the transition's of 5,483,712; the violin D4 card with longitudinal
+waves and the violin A4 control card (586 modes, side 1758) 12,420,448 twice and 16,483,008. The guitar F5 control card (379 modes, side 1137, 8 workers), the cello D3
+control card (795 modes, side 2385, 7 workers) and the double-bass E1 control card (641 modes, side 1923, 7 workers) run their products on threads and hold no transition
+copy: 5,209,080, 22,832,088 and 14,855,560 bytes twice. That is about 1.67 squares of the side on the first three cards and about 1.0 on the last three.
+
+No path writes the arrays a copy holds once the copy exists. Their fields are private to `exact/prepared.rs`, where the one method of `PreparedNetwork` that takes
+`&mut self` is `sum_by_rows`, which writes `upper_blocks`, `sums_by_rows` and the energy memo. Every other change builds a new operator, which makes its own copies and
+starts with no kept sums, and replaces the old one whole. A changed link law, changed relaxation times or more material arms, a radiation load and a constant-loss binding
+go through `preparation::prepare` (`coefficients.rs:342`, `relaxation.rs:223`, `radiation.rs:118`, `coupled.rs:591`), which calls `sum_by_rows` on the new operator when
+the system sums by rows (`preparation.rs:124-129`). A prepared budget is bound through `prepare` too (`coupled.rs:540-545`), and `with_time_propagation` binds it after a
+`StructureFirst` build (`coupled.rs:567`); the bank then asks for sums by rows (`bowed_string/runtime/reciprocal/bank.rs:396` and `:417`). The friction owner's network for
+added components is a new system (`coupled/contact/friction/nonlinear.rs:505-506`) that takes the order of the one it replaces (`:508-509`).
+
+Evidence. `tests/upper_row_forms.rs` gives the kernels the copies and holds them to the plain loops over the row-major square, bit for bit, at sides 1, 7, 8, 9, 16, 17 and
+100 (whole blocks, a partial one, and 67 rows of side 100); a square whose lower triangle is moved has a copy with the same form. `tests/coupled_coefficient_update.rs`: a
+system that sweeps and multiplies under one law and then takes another has, for the next three samples, the frames and the state bits of a system constructed with the
+second law. Rendered beside 2819b9ab89's binary at the same time, each with the same frames and the same log: the viola Db4 control card takes 450.54 s against 533.46 s,
+its wav byte-equal to the reference; the violin D4 card with longitudinal waves steps in 4.956 ms a frame against 6.296 ms over 600 s (the 67,712 frames both wrote), and
+the violin A4 control card in 5.722 ms against 7.364 ms (52,864 frames).
+
+Not tested: a material Gramian's copy against a reference in a system test; an operator whose declared workers change between its products, so that its copy is made
+after products on threads.
+
 ### A loss sweep continues from the sums kept for its state (`upper_rows::upper_row_form_from`)
 
 The sweeps of one sample share their state and differ in the held force, as its products do: a card with longitudinal waves computes about three a sample, one for each
