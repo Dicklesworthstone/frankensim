@@ -29,9 +29,11 @@
 //! events (MagentaBadger 6227). When several states tie for nearest, the
 //! previous partition is solved on this step's line. The ports whose own state
 //! has ceased to exist there are the ones that change, and every other port
-//! keeps its state. A step the walk resolves never reaches this. A step with no
-//! consistent partition, or with a tie that event order does not break, keeps
-//! the walk's refusal unchanged.
+//! keeps its state. That state can be farther than the tied ones: when two
+//! ports' states cease on one step, each state that changes one of them is
+//! nearer than the one that changes both. A step the walk resolves never
+//! reaches this. A step with no consistent partition, or with a tie that event
+//! order does not break, keeps the walk's refusal unchanged.
 //!
 //! Inside bound nonlinear storage, a step is staged once per reaction trial.
 //! Only when those trials exhaust their budget is the step solved again with
@@ -781,9 +783,12 @@ pub(super) fn solve_active_set_with_hysteresis(
 /// residual on the actual slip within 1e-12, then [`consistent_at`]. Returns the
 /// consistent partition that differs from `previous` in the fewest ports. When
 /// two or more tie for nearest, event order decides ([`ceased_ports`],
-/// [`event_order_choice`]). It returns `None` when no partition is consistent,
-/// or when event order does not leave exactly one of the tied partitions. It
-/// never returns a partition that failed either test.
+/// [`event_order_choice`]) among every consistent partition: it takes the one
+/// that changes exactly the ports whose previous state has ceased. That one is
+/// among the tied partitions when as many ports ceased as they change, and
+/// farther when more ports ceased. It returns `None` when no partition is
+/// consistent, or when event order does not leave exactly one. It never returns
+/// a partition that failed either test.
 ///
 /// The selection is the hysteresis rule of McIntyre, Schumacher & Woodhouse
 /// (1983, "On the oscillations of musical instruments", J. Acoust. Soc. Am.
@@ -795,8 +800,15 @@ pub(super) fn solve_active_set_with_hysteresis(
 /// the previous step's is that rule. On a line of several ports it holds for
 /// each port: a port keeps its state while that state exists. So among states
 /// tied for nearest, the ports that change are exactly those whose previous
-/// state has ceased to exist on this step's line. The selection is physics, so
-/// a tie that event order cannot break refuses instead of picking one.
+/// state has ceased to exist on this step's line. When two ports' states cease
+/// on one step, each state that changes only one of them is nearer than the one
+/// that changes both, and the rule takes the one that changes both. The
+/// selection is physics, so a tie that event order cannot break refuses instead
+/// of picking one.
+///
+/// No claim on the order within a step. Two ports whose states cease on one
+/// step both change; which cone is crossed first inside the step is not solved
+/// for.
 ///
 /// Each partition is solved from one start, so a second root on the same
 /// partition is not looked for.
@@ -814,8 +826,7 @@ pub(super) fn nearest_consistent_partition(
     }
     let branches = [Branch::Stuck, Branch::SlidePos, Branch::SlideNeg];
     let count = (0..p).fold(1usize, |n, _| n * 3);
-    let mut best: Option<usize> = None;
-    let mut nearest: Vec<(Vec<f64>, Vec<Branch>)> = Vec::new();
+    let mut consistent: Vec<(usize, Vec<f64>, Vec<Branch>)> = Vec::new();
     for code in 0..count {
         let mut rest = code;
         let cells: Vec<Branch> = (0..p)
@@ -838,29 +849,34 @@ pub(super) fn nearest_consistent_partition(
         }
         let distance = cells.iter().zip(previous).zip(normal)
             .filter(|((c, b), n)| **n != 0.0 && c != b).count();
-        if best.is_none_or(|d| distance < d) {
-            best = Some(distance);
-            nearest.clear();
-        }
-        if best == Some(distance) {
-            nearest.push((t, cells));
-        }
+        consistent.push((distance, t, cells));
     }
-    let chosen = match nearest.len() {
-        0 => return Ok(None),
-        1 => 0,
-        _ => {
-            let Some(ceased) = ceased_ports(a, f, normal, law, dt, previous)? else {
-                return Ok(None);
-            };
-            let tied: Vec<&[Branch]> = nearest.iter().map(|(_, cells)| cells.as_slice()).collect();
-            let Some(k) = event_order_choice(&tied, previous, normal, &ceased) else {
-                return Ok(None);
-            };
-            k
-        }
+    let Some(best) = consistent.iter().map(|(d, ..)| *d).min() else {
+        return Ok(None);
     };
-    let (t, cells) = nearest.swap_remove(chosen);
+    let nearest: Vec<usize> = (0..consistent.len())
+        .filter(|&k| consistent[k].0 == best)
+        .collect();
+    let chosen = if let &[k] = nearest.as_slice() {
+        k
+    } else {
+        let Some(ceased) = ceased_ports(a, f, normal, law, dt, previous)? else {
+            return Ok(None);
+        };
+        // A state that changes exactly the ceased ports is as many ports from `previous`
+        // as there are ceased ports. So where event order over the tied states leaves
+        // one, it leaves the same one here; a farther state is taken only when more
+        // ports ceased than the nearest states change.
+        let all: Vec<&[Branch]> = consistent
+            .iter()
+            .map(|(_, _, cells)| cells.as_slice())
+            .collect();
+        let Some(k) = event_order_choice(&all, previous, normal, &ceased) else {
+            return Ok(None);
+        };
+        k
+    };
+    let (_, t, cells) = consistent.swap_remove(chosen);
     Ok(Some((t, cells.iter().zip(normal)
         .map(|(&b, &n)| if n == 0.0 { ModalFrictionRegime::Released } else { regime_of(b) }).collect())))
 }
@@ -929,7 +945,7 @@ fn ceased_ports(
     Ok(Some(ceased))
 }
 
-/// Event order among partitions tied for nearest: the index of the one candidate
+/// Event order among consistent partitions: the index of the one candidate
 /// whose changed loaded ports are exactly the `ceased` ones, so every port whose
 /// state still exists keeps it. `None` when no candidate does, or when more than
 /// one does: two states that change the same ports to different branches. A
@@ -2001,6 +2017,144 @@ mod tests {
             }
             Resolution::Exhausted { pivots, last_set, worst } => panic!(
                 "event order must break the tie: {pivots} pivots, last set {last_set}, worst {worst:?}"
+            ),
+        }
+    }
+
+    // The E5 control step the render refused on e6fa4eaf6d after 298,496 samples
+    // (eq. 13 law, the control card; inputs captured 11-20 by a scratch trace of
+    // the last resort, bead frankensim-zo0ou). The previous step was SS+. On this
+    // line SS+ is past the cones of ports 0 and 1 both, so both stuck states have
+    // ceased. The speed solve finds three consistent states: +S+ and S-+, one port
+    // each from SS+, and +-+, two. The two nearest tie and neither changes both
+    // ceased ports. Event order over every consistent state leaves +-+.
+    const E5_CTL_LINE: [f64; 9] = [
+        5.173353353533489e-6,
+        2.980844399106328e-6,
+        3.075100141810389e-6,
+        2.980844399106328e-6,
+        5.099097496958211e-6,
+        2.7182535325841388e-6,
+        3.075100141810389e-6,
+        2.718253532584139e-6,
+        5.262788391258186e-6,
+    ];
+    const E5_CTL_FREE_SLIP: [f64; 3] = [
+        2.8027004670268526e-7,
+        -1.4223735862359969e-8,
+        3.667741473744672e-7,
+    ];
+    // The +-+ root of a multi-start Newton from a 9^3 grid of traction starts,
+    // independent of the speed solve; that search finds no other consistent state
+    // than these three.
+    const E5_CTL_PLUS_MINUS_PLUS: [f64; 3] = [
+        0.06337360897450957,
+        -0.06364094416588573,
+        0.045340338355345525,
+    ];
+
+    #[test]
+    fn the_eq13_control_step_where_two_stuck_states_cease_takes_the_state_that_changes_both() {
+        use Branch::{SlideNeg, SlidePos, Stuck};
+        let law = FrictionLaw::rosin_woodhouse_galluzzo_2025_eq13();
+        let laws = [&law, &law, &law];
+        let (a, f, n) = (&E5_CTL_LINE, &E5_CTL_FREE_SLIP, &E5_NORMAL);
+        let seed = [
+            ModalFrictionRegime::Sticking,
+            ModalFrictionRegime::Sticking,
+            ModalFrictionRegime::Sliding,
+        ];
+        let previous = [Stuck, Stuck, SlidePos];
+        let plus_s_plus = [SlidePos, Stuck, SlidePos];
+        let s_minus_plus = [Stuck, SlideNeg, SlidePos];
+        let plus_minus_plus = [SlidePos, SlideNeg, SlidePos];
+
+        // Before: the walk refuses with the render's own payload.
+        match solve_active_set(a, f, n, &laws, E5_DT, &seed, 28).unwrap() {
+            Resolution::Exhausted {
+                pivots,
+                last_set,
+                worst,
+            } => assert_eq!(
+                (
+                    pivots,
+                    last_set.as_str(),
+                    worst.port,
+                    worst.condition,
+                    worst.size
+                ),
+                (
+                    5,
+                    "S-+",
+                    0,
+                    "slide-pos-wrong-direction-or-nondissipative",
+                    1.0
+                )
+            ),
+            Resolution::Solved(t, _) => {
+                panic!("the walk is the captured refusal, got tractions {t:?}")
+            }
+        }
+        let found = consistent_by_speed(a, f, n, &laws, E5_DT);
+        assert_eq!(
+            found.iter().map(|(c, _)| c.clone()).collect::<Vec<_>>(),
+            vec![
+                plus_s_plus.to_vec(),
+                s_minus_plus.to_vec(),
+                plus_minus_plus.to_vec()
+            ],
+            "the speed solve finds the three consistent states"
+        );
+
+        // The event: on this line SS+ is past the cones of ports 0 and 1 both.
+        let cap = law.static_coefficient().unwrap() * n[0];
+        let held =
+            solve_partition_by_speed(a, f, n, &laws, E5_DT, &previous, 100).expect("SS+ resolves");
+        for (i, h) in held.iter().enumerate().take(2) {
+            assert!(
+                h.abs() > cap && h.abs() < cap * (1.0 + 1e-2),
+                "port {i}: {h} against cap {cap}"
+            );
+        }
+        let ceased = ceased_ports(a, f, n, &laws, E5_DT, &previous).unwrap();
+        assert_eq!(ceased, Some(vec![true, true, false]));
+        let ceased = ceased.unwrap();
+        // Event order over the two nearest alone leaves none: each changes one ceased port.
+        let tied: [&[Branch]; 2] = [&plus_s_plus, &s_minus_plus];
+        assert_eq!(event_order_choice(&tied, &previous, n, &ceased), None);
+
+        // After: the rescue lands +-+, and it passes the unchanged gate and KKT test.
+        match solve_active_set_with_hysteresis(a, f, n, &laws, E5_DT, &seed, &previous, 28).unwrap()
+        {
+            Resolution::Solved(t, regimes) => {
+                assert_eq!(regimes, [ModalFrictionRegime::Sliding; 3]);
+                assert!(is_consistent(a, f, n, &laws, E5_DT, &plus_minus_plus, &t).unwrap());
+                let slip = slips(a, f, &t);
+                for (i, (&cell, &s)) in plus_minus_plus.iter().zip(&slip).enumerate() {
+                    let kt = kinetic_traction(&law, n[i], branch_sign(cell), s, E5_DT).unwrap();
+                    assert!(
+                        (t[i] - kt).abs() <= 1e-12,
+                        "port {i}: traction {} against kinetic {kt}",
+                        t[i]
+                    );
+                }
+                for (i, (&got, &want)) in t.iter().zip(&E5_CTL_PLUS_MINUS_PLUS).enumerate() {
+                    assert!(
+                        (got - want).abs() <= 1e-12,
+                        "port {i}: {got} against the multi-start root {want}"
+                    );
+                }
+                assert!(
+                    slip[0] > 0.0 && slip[1] < 0.0,
+                    "ports 0 and 1 break away: slips {slip:?}"
+                );
+            }
+            Resolution::Exhausted {
+                pivots,
+                last_set,
+                worst,
+            } => panic!(
+                "event order must take +-+: {pivots} pivots, last set {last_set}, worst {worst:?}"
             ),
         }
     }
