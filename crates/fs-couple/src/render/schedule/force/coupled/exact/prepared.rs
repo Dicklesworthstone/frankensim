@@ -532,9 +532,13 @@ impl PreparedNetwork {
                 }
             }
         }
+        // Each arm's mismatch is the chain -z + c_0 q_0 + c_1 q_1 + .. (`relaxation::arms`); 1.0 * c is c.
+        let mut arms = Vec::with_capacity(self.material_couplings.len());
         for (arm, row) in self.material_couplings.iter().enumerate() {
-            let mismatch = row.iter().enumerate().fold(-x[2 * n + arm],
-                |sum, (i, c)| sum + c * x[2 * i]);
+            arms.push((-x[2 * n + arm], 1.0, &row[..]));
+        }
+        let q: Vec<_> = x[..2 * n].iter().step_by(2).copied().collect();
+        for mismatch in super::super::relaxation::arms::arm_chains::<1>(&arms, &q) {
             energy += 0.5 * mismatch * mismatch;
         }
         energy

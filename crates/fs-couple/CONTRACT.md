@@ -17,6 +17,27 @@
 
 ## New sections (newest first)
 
+### The Maxwell arms' chains advance eight arms together (`relaxation::arms`)
+
+The stage of the material arms (`stage_material_state`) and the prepared operator's storage of a state (`hamiltonian_direct`) each summed one arm's chain over the
+modes, then the next arm's. `arm_chains` advances each whole block of eight arms' chains together, its rows and scales held in arrays of eight, each chain from its own
+start in mode order; the arms after the last whole eight are each a fold of their own. So each chain has the bits of its own fold, and one arm's additions do not wait
+on another's. The prepared storage's mismatch is the chain `-z + c_0 q_0 + ..` (scale 1.0, and `1.0 * c` is `c`); a strain is the chain `sqrt(k) b_0 q_0 + ..` from
++0.0 over the projection's displacement entries. The arms' storage (`stored_energy`) keeps its loop: it reads the same projections, and at viola D4's size eight chains
+at a time were no faster there.
+
+The stage summed every entry of a projection, velocities included, and checked every partial sum. It now adds the displacement entries only and checks no term. The
+admission keeps only projections whose velocity entries are +0 or -0, and the stage's modal energy has refused any velocity that is not finite before the arms are
+staged, so each velocity term was +0 or -0, and a chain from +0.0 is never -0: adding it changed no bit. A chain that leaves the finite range never returns to it, so
+the mismatch is then not finite either, and its check refuses the same arm, with the forces of the arms before it staged and none of its own. The storage, each
+mismatch and each force are checked as before.
+
+Evidence. `tests/material_arms.rs` holds `arm_chains` to each arm's fold, bit for bit, for 0 to 17 arms of rows shorter and longer than the modes reach, at strides 1
+and 2; and the stage to HEAD's loop on 19 arms of 9 modes: the same storage and forces for velocities of every finite size and for displacements all +0 and -0, and
+the same refusal and forces for an arm in the first, second or last block whose strain overflows, turns NaN or is kept as +inf, or whose fourth force overflows. Viola
+D4 (side 5433, 3627 arms) at `--workers 7` steps at 11.819 ms a frame against 13.263 ms on ff90289e26 (1500 s each, one after the other), its first 113408 frames
+byte-equal; the viola Db4 control card renders the same wav (md5).
+
 ### A loss sweep's three forms share the step's threads (`upper_rows::upper_row_forms_from`)
 
 The sweep by rows computed its forms (component, connection, material) one after another on one thread. `upper_row_forms_from` takes them together and shares their

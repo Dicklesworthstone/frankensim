@@ -4,6 +4,8 @@ use super::*;
 use fs_math::det;
 use fs_phs::RelaxationBranch;
 
+pub(super) mod arms;
+
 /// Accepted Maxwell-arm storage and instantaneous irreversible power.
 /// Equilibrium stiffness belongs to the mechanical model and is excluded.
 /// Power is evaluated at one endpoint; it is not a time-integrated heat account.
@@ -311,18 +313,14 @@ impl CoupledModalSystem {
             return Err(invalid("complete material endpoint dimension"));
         }
         self.candidate_material_memory.copy_from_slice(&endpoint[base..end]);
-        let mut energy = 0.0;
-        for (branch, &z) in self.relaxation_branches.iter().zip(&self.candidate_material_memory) {
-            let root = det::sqrt(branch.stiffness);
-            let strain = branch.projection.iter().zip(&endpoint[..base])
-                .try_fold(0.0, |sum, (b, x)| finite(sum + root * b * x))?;
-            let mismatch = finite(strain - z)?;
-            energy = finite(energy + 0.5 * mismatch * mismatch)?;
-            for (force, &b) in self.forces.iter_mut().zip(branch.projection.iter().step_by(2)) {
-                *force = finite(*force - root * b * mismatch)?;
-            }
+        // The admission keeps only projections whose velocity entries are +-0, and the stage's modal energy has
+        // refused any velocity that is not finite: `staged_arms` needs both.
+        let mut arms = Vec::with_capacity(self.relaxation_branches.len());
+        for branch in &self.relaxation_branches {
+            arms.push((det::sqrt(branch.stiffness), &branch.projection[..]));
         }
-        Ok(energy)
+        let memory = &self.candidate_material_memory;
+        arms::staged_arms(&arms, memory, &endpoint[..base], &mut self.forces, finite)
     }
 }
 
