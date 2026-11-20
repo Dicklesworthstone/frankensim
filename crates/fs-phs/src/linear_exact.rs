@@ -2119,7 +2119,7 @@ mod tests {
     #[test]
     fn blocked_product_equals_the_textbook_loop_bit_for_bit() {
         // Sign-mixed entries over forty binades, with exact zeros of both
-        // signs; sizes below, at and between multiples of the four-row block.
+        // signs; sizes below, at and past the kernel's eight-column tile.
         let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
         let mut entries = |count: usize| -> Vec<f64> {
             (0..count).map(|i| {

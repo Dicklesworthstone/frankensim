@@ -1125,9 +1125,9 @@ fn matrix_agrees(a: &[f64], b: &[f64], n: usize, what: &'static str) -> Result<(
 
 fn product(a: &[f64], b: &[f64], n: usize, gate: &CancelGate) -> Result<Vec<f64>, ModalCouplingError> {
     let mut result = vec![0.0; n * n];
-    // fs-phs's kernel: every entry is the k = 0, 1, ... sum of the textbook i-k-j loop, bit for bit, with four rows sharing
-    // each row of b while it is in cache. It runs on the workers the render declares (one by default, the same bits for every
-    // count) and polls the gate once before each four-row block, on the thread that runs the block.
+    // fs-phs's kernel: every entry is the k = 0, 1, ... sum of the textbook i-k-j loop, bit for bit, carried in registers by
+    // tiles of four rows and eight columns. It runs on the workers the render declares (one by default, the same bits for
+    // every count) and polls the gate once before each sixteen-row block of each pass, on the thread that runs the block.
     if !fs_phs::linear_exact::accumulate_polled(&mut result, a, b, n, &|| gate.is_requested()) {
         return Err(ModalCouplingError::Cancelled);
     }

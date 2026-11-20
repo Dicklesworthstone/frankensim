@@ -28,26 +28,34 @@ const PARALLEL_MIN_N: usize = 128;
 /// Most threads one product uses: the bound the render's `--workers` option already holds (1 to 256).
 const MAX_PRODUCT_WORKERS: usize = 256;
 
+/// Rows and columns of `out` one tile holds in registers while it adds a pass's products.
+const TILE_ROWS: usize = 4;
+const TILE_COLUMNS: usize = 8;
+/// Rows of `out` a thread takes at a time, polling before each; the block's tiles share each packed panel of `b`.
+const BLOCK_ROWS: usize = 16;
+/// Values of k a pass adds, from those rows of `b` packed eight columns to a panel; a block's rows of `a` stay cached.
+const PASS_DEPTH: usize = 256;
+
 /// Threads one `n` x `n` product uses: one unless `n` reaches [`PARALLEL_MIN_N`] and more than one worker is declared,
-/// and never more than [`MAX_PRODUCT_WORKERS`] or the number of four-row blocks.
+/// and never more than [`MAX_PRODUCT_WORKERS`] or the number of [`BLOCK_ROWS`]-row blocks.
 fn product_threads(declared: usize, n: usize) -> usize {
-    if n < PARALLEL_MIN_N { 1 } else { declared.clamp(1, MAX_PRODUCT_WORKERS).min(n.div_ceil(4)) }
+    if n < PARALLEL_MIN_N { 1 } else { declared.clamp(1, MAX_PRODUCT_WORKERS).min(n.div_ceil(BLOCK_ROWS)) }
 }
 
-// Preserve the existing i-k-j addition order, sharing each row of b between
-// four output rows. Both the ordinary exponential and integral use this kernel.
-// On the workers that `fs_la::eigen_complex::with_lu_workers` declares (one by default) the four-row blocks are shared
-// between threads. A block reads its own rows of `a` and all of `b` and writes only its own rows of `out`, and every
-// entry keeps its own ascending-k sum of unfused products, so the result is bit-identical for every worker count.
+// Every entry of `out` is its own k = 0, 1, ... sum of unfused products `out[i][j] += a[i][k] * b[k][j]`, the textbook
+// i-k-j loop's sum bit for bit (a NaN's payload aside), in an order fixed by the entry alone: a tile holds the sum in
+// registers through a pass and the next pass reloads it. The ordinary exponential and integral both use this kernel.
+// Its threads (see `accumulate_polled`) write only their own rows of `out`: the same bits for every worker count.
 pub(crate) fn accumulate(out: &mut [f64], a: &[f64], b: &[f64], n: usize) {
     accumulate_polled(out, a, b, n, &|| false);
 }
 
 /// `out += a * b` for row-major `n` x `n` matrices by the kernel of [`accumulate`], polling `cancelled` once before each
-/// four-row block of `out`, on the thread that runs the block, and running the blocks on the workers that
-/// `fs_la::eigen_complex::with_lu_workers` declares (one by default, and one below side length 128). Returns `true` when every
-/// block ran, and then `out` holds the same bits for every worker count. Returns `false` as soon as a poll answers `true`: `out` is
-/// then partial and the caller must discard it. A request is seen by every thread within one block of work.
+/// [`BLOCK_ROWS`]-row block of `out` in each pass of [`PASS_DEPTH`] values of k, on the thread that runs the block, and
+/// running the blocks on the workers `fs_la::eigen_complex::with_lu_workers` declares (one by default, and one below
+/// side length 128). Its one buffer holds `PASS_DEPTH.min(n)` rows of `b`, each padded to a multiple of eight values.
+/// Returns `true` when every block ran (then `out` has the same bits for every worker count), and `false` as soon as a
+/// poll answers `true`: `out` is then partial and the caller must discard it. Every thread sees a request within a block.
 pub fn accumulate_polled(
     out: &mut [f64], a: &[f64], b: &[f64], n: usize, cancelled: &(impl Fn() -> bool + Sync),
 ) -> bool {
@@ -56,38 +64,95 @@ pub fn accumulate_polled(
     }
     let stopped = AtomicBool::new(false);
     let threads = product_threads(fs_la::eigen_complex::declared_workers(), n);
-    if threads == 1 {
-        return accumulate_blocks(out, a, b, n, cancelled, &stopped);
-    }
-    // Whole four-row blocks per thread: each thread's blocks are exactly the serial blocks.
-    let per_thread = n.div_ceil(4).div_ceil(threads) * 4 * n;
-    std::thread::scope(|scope| {
-        let stopped = &stopped;
-        for (a_part, out_part) in a.chunks(per_thread).zip(out.chunks_mut(per_thread)) {
-            scope.spawn(move || accumulate_blocks(out_part, a_part, b, n, cancelled, stopped));
+    // Whole blocks per thread: each thread's blocks are exactly the serial blocks.
+    let per_thread = n.div_ceil(BLOCK_ROWS).div_ceil(threads) * BLOCK_ROWS * n;
+    let width = n.div_ceil(TILE_COLUMNS) * TILE_COLUMNS;
+    let mut packed = vec![0.0; PASS_DEPTH.min(n) * width];
+    for first in (0..n).step_by(PASS_DEPTH) {
+        let depth = PASS_DEPTH.min(n - first);
+        let panel_len = depth * TILE_COLUMNS;
+        let panels = packed[..depth * width].chunks_exact_mut(panel_len);
+        for (column, panel) in (0..n).step_by(TILE_COLUMNS).zip(panels) {
+            let used = TILE_COLUMNS.min(n - column);
+            for (k, row) in (first..).zip(panel.as_chunks_mut::<TILE_COLUMNS>().0) {
+                row[..used].copy_from_slice(&b[k * n + column..][..used]);
+                row[used..].fill(0.0);
+            }
         }
-    });
-    !stopped.load(Ordering::Relaxed)
-}
-
-fn accumulate_blocks(
-    out: &mut [f64], a: &[f64], b: &[f64], n: usize, cancelled: &(impl Fn() -> bool + Sync), stopped: &AtomicBool,
-) -> bool {
-    for (a_rows, out_rows) in a.chunks(4 * n).zip(out.chunks_mut(4 * n)) {
-        if stopped.load(Ordering::Relaxed) || cancelled() {
-            stopped.store(true, Ordering::Relaxed);
+        let pass = Pass {
+            panels: &packed[..depth * width],
+            n,
+            first,
+            depth,
+            stopped: &stopped,
+        };
+        if threads == 1 {
+            pass.add(out, a, cancelled);
+        } else {
+            std::thread::scope(|scope| {
+                let pass = &pass;
+                for (a_part, out_part) in a.chunks(per_thread).zip(out.chunks_mut(per_thread)) {
+                    scope.spawn(move || pass.add(out_part, a_part, cancelled));
+                }
+            });
+        }
+        if stopped.load(Ordering::Relaxed) {
             return false;
         }
-        for (k, b_row) in b.chunks_exact(n).enumerate() {
-            for (a_row, out_row) in a_rows.chunks_exact(n).zip(out_rows.chunks_exact_mut(n)) {
-                let scale = a_row[k];
-                for (value, &right) in out_row.iter_mut().zip(b_row) {
-                    *value += scale * right;
+    }
+    true
+}
+
+/// One pass: rows `first..first + depth` of `b` in `panels`, eight columns a panel, k-major; padded sums are never stored.
+struct Pass<'a> {
+    panels: &'a [f64],
+    n: usize,
+    first: usize,
+    depth: usize,
+    stopped: &'a AtomicBool,
+}
+
+impl Pass<'_> {
+    /// Adds the pass to `out` block by block; stops, setting `stopped`, at a poll that answers `true` or once it is set.
+    fn add(&self, out: &mut [f64], a: &[f64], cancelled: &(impl Fn() -> bool + Sync)) {
+        let (block_len, tile_len) = (BLOCK_ROWS * self.n, TILE_ROWS * self.n);
+        let panel_len = self.depth * TILE_COLUMNS;
+        for (a_block, out_block) in a.chunks(block_len).zip(out.chunks_mut(block_len)) {
+            if self.stopped.load(Ordering::Relaxed) || cancelled() {
+                self.stopped.store(true, Ordering::Relaxed);
+                return;
+            }
+            for (index, panel) in self.panels.chunks_exact(panel_len).enumerate() {
+                let tiles = a_block.chunks(tile_len).zip(out_block.chunks_mut(tile_len));
+                for (a_tile, out_tile) in tiles {
+                    self.tile(out_tile, a_tile, panel, index * TILE_COLUMNS);
                 }
             }
         }
     }
-    true
+
+    /// Adds the pass to the tile of `out` at `column`; a short tile rereads its last row of `a` and stores only its rows.
+    fn tile(&self, out: &mut [f64], a: &[f64], panel: &[f64], column: usize) {
+        let n = self.n;
+        let (rows, used) = (out.len() / n, TILE_COLUMNS.min(n - column));
+        let row = |r: usize| &a[r.min(rows - 1) * n + self.first..][..self.depth];
+        let xs = row(0).iter().zip(row(1)).zip(row(2)).zip(row(3));
+        let mut sums = [[0.0_f64; TILE_COLUMNS]; TILE_ROWS];
+        for (r, sum) in sums.iter_mut().enumerate().take(rows) {
+            sum[..used].copy_from_slice(&out[r * n + column..][..used]);
+        }
+        for (b, (((&x0, &x1), &x2), &x3)) in panel.as_chunks::<TILE_COLUMNS>().0.iter().zip(xs) {
+            for c in 0..TILE_COLUMNS {
+                sums[0][c] += x0 * b[c];
+                sums[1][c] += x1 * b[c];
+                sums[2][c] += x2 * b[c];
+                sums[3][c] += x3 * b[c];
+            }
+        }
+        for (r, sum) in sums.iter().enumerate().take(rows) {
+            out[r * n + column..][..used].copy_from_slice(&sum[..used]);
+        }
+    }
 }
 
 pub(crate) struct FlowIntegral {
@@ -484,7 +549,7 @@ mod tests {
     }
 
     /// Gauntlet G0/G5: the thread count follows the declaration (one when undeclared), the side-length floor and the number of
-    /// four-row blocks, and never exceeds the bound of the render's `--workers` option.
+    /// sixteen-row blocks, and never exceeds the bound of the render's `--workers` option.
     #[test]
     fn product_threads_follow_the_declaration_the_floor_and_the_block_count() {
         assert_eq!(fs_la::eigen_complex::declared_workers(), 1);
@@ -494,15 +559,38 @@ mod tests {
         assert_eq!(product_threads(0, 5433), 1);
         assert_eq!(product_threads(8, PARALLEL_MIN_N - 1), 1);
         assert_eq!(product_threads(8, PARALLEL_MIN_N), 8);
-        assert_eq!(product_threads(1000, 129), 33);
+        assert_eq!(product_threads(1000, 129), 9);
         assert_eq!(product_threads(1000, 5433), MAX_PRODUCT_WORKERS);
     }
 
+    /// Gauntlet G5: each entry is the textbook i-k-j loop's sum bit for bit, added into a nonzero start, at sides around a
+    /// tile (8), a block (16) and a pass (256), once with an infinity in `a` (its NaN sums with padding are never stored).
+    #[test]
+    fn products_add_the_textbook_loop_into_out_bit_for_bit_across_tile_block_and_pass_edges() {
+        for n in [1, 7, 8, 9, 15, 16, 17, 255, 256, 257, 300] {
+            let (mut a, b, start) = (filled(n * n, 31), filled(n * n, 32), filled(n * n, 33));
+            if n == 9 {
+                a[3] = f64::INFINITY;
+            }
+            let mut expected = start.clone();
+            for i in 0..n {
+                for k in 0..n {
+                    for j in 0..n {
+                        expected[i * n + j] += a[i * n + k] * b[k * n + j];
+                    }
+                }
+            }
+            let mut out = start.clone();
+            accumulate(&mut out, &a, &b, n);
+            assert_eq!(bits(&out), bits(&expected), "n {n}");
+        }
+    }
+
     /// Gauntlet G5: a product on any declared worker count equals the serial one bit for bit, on sizes that are and are not
-    /// multiples of four (the last block is short) and from a nonzero start (the kernel adds into `out`).
+    /// multiples of the tile and block, over one and two passes, from a nonzero start (the kernel adds into `out`).
     #[test]
     fn threaded_products_equal_the_serial_product_bit_for_bit() {
-        for n in [PARALLEL_MIN_N, PARALLEL_MIN_N + 1, PARALLEL_MIN_N + 2, PARALLEL_MIN_N + 3, 150, 203] {
+        for n in [PARALLEL_MIN_N, PARALLEL_MIN_N + 1, PARALLEL_MIN_N + 2, PARALLEL_MIN_N + 3, 150, 203, PASS_DEPTH + 1] {
             let (a, b, start) = (filled(n * n, 1), filled(n * n, 2), filled(n * n, 3));
             let mut serial = start.clone();
             accumulate(&mut serial, &a, &b, n);
@@ -545,14 +633,14 @@ mod tests {
         }
     }
 
-    /// Gauntlet G5: the polled kernel polls once before each four-row block (counted, serial and threaded), returns the plain
-    /// kernel's bits when no poll answers, and stops within one poll per thread when one does.
+    /// Gauntlet G5: the polled kernel polls once before each sixteen-row block of each pass (counted, serial and threaded),
+    /// returns the plain kernel's bits when no poll answers, and stops within one poll per thread when one does.
     #[test]
     fn polled_accumulate_polls_once_per_block_stops_on_a_request_and_equals_the_plain_kernel() {
         use core::sync::atomic::{AtomicUsize, Ordering};
         assert!(accumulate_polled(&mut [], &[], &[], 0, &|| true));
-        let n = PARALLEL_MIN_N + 3;
-        let blocks = n.div_ceil(4);
+        let n = PASS_DEPTH + 3;
+        let blocks = n.div_ceil(BLOCK_ROWS) * n.div_ceil(PASS_DEPTH);
         let (a, b) = (filled(n * n, 21), filled(n * n, 22));
         let mut plain = vec![0.0; n * n];
         accumulate(&mut plain, &a, &b, n);

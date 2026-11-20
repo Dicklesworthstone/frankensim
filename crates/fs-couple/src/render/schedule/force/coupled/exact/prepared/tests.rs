@@ -429,7 +429,7 @@ fn entries(count: usize, seed: &mut u64) -> Vec<f64> {
 fn the_blocked_product_and_interleaved_apply_equal_the_textbook_loops_bit_for_bit() {
     let gate = CancelGate::new_clock_free();
     let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
-    // Sizes below, at and between multiples of the four-row block, and one the size of a small network.
+    // Sizes below, at and past fs-phs's eight-column tile, and one the size of a small network.
     for n in [1, 2, 3, 4, 5, 7, 8, 9, 13, 64, 99] {
         let (a, b, z) = (entries(n * n, &mut seed), entries(n * n, &mut seed), entries(n, &mut seed));
         let mut textbook = vec![0.0; n * n];

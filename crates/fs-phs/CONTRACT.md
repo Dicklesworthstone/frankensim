@@ -1625,16 +1625,18 @@ no truncation, hot-path timing or physical-validity guarantee. Its regression
 source checks larger explicit admission, unchanged default refusal and exact
 byte/work boundaries. Native execution is pending.
 
-The dense product kernel of these exponentials (`linear_exact::gramian::accumulate`) runs its four-row blocks of the output
-on the workers that a scoped `fs_la::eigen_complex::with_lu_workers` declares, one by default, for side lengths from 128 and
-at most 256 threads. A block reads its own rows of the left factor and all of the right one and writes only its own rows, and
-every entry keeps its own ascending-k sum of unfused products, so every product, exponential and integral is bit-identical
-for every worker count. The declaration is a scheduling budget: it changes wall time only.
+The dense product kernel of these exponentials (`linear_exact::gramian::accumulate`) adds every entry of the output as its
+own k = 0, 1, ... sum of unfused products, the textbook i-k-j loop's sum bit for bit (a NaN's payload aside), held in
+registers by tiles of four rows and eight columns through passes of 256 values of k. Each pass's sixteen-row blocks run on
+the workers that a scoped `fs_la::eigen_complex::with_lu_workers` declares, one by default, for side lengths from 128 and
+at most 256 threads. A block writes only its own rows, so every product, exponential and integral is bit-identical for
+every worker count. The declaration is a scheduling budget: it changes wall time only. A call also holds min(256, n) rows
+of the right factor at a time, each padded to a multiple of eight values, which the dense byte admission does not count.
 
-`linear_exact::accumulate_polled(out, a, b, n, cancelled)` is that kernel with a cancellation poll once before each four-row
-block, on the thread that runs the block. It returns `true` when every block ran and `false` as soon as a poll answers `true`;
-`out` is then partial and the caller discards it. fs-couple's prepared exact network calls it for its own dense products, so
-one threaded kernel serves both.
+`linear_exact::accumulate_polled(out, a, b, n, cancelled)` is that kernel with a cancellation poll once before each
+sixteen-row block of each pass, on the thread that runs the block. It returns `true` when every block ran and `false` as
+soon as a poll answers `true`; `out` is then partial and the caller discards it. fs-couple's prepared exact network calls
+it for its own dense products, so one threaded kernel serves both.
 
 **Stated accuracy.** This holds for `exponential`, `exponential_with_budget` and
 the block upper-triangular variant, under the standard rounding model with no
