@@ -131,8 +131,8 @@ pub(super) struct PreparedNetwork {
     /// The leading rows of the transition that a product computes: the state's `2 n + arms` when the held force's
     /// rows, which no caller reads, are the identity's bit for bit (`upper_rows::identity_rows`); else every row.
     product_rows: usize,
-    /// Those rows by blocks of eight (`upper_rows::RowBlocks`), which a product on one thread reads: a copy made by the
-    /// first such product. The operator never changes its transition.
+    /// Those rows by blocks of eight (`upper_rows::RowBlocks`), which every product reads: a copy made by the first
+    /// product. The operator never changes its transition.
     transition_blocks: OnceLock<upper_rows::RowBlocks>,
     component_loss: Option<Vec<f64>>,
     /// Each row c defines the original arm storage (c.q - memory)^2 / 2.
@@ -794,20 +794,21 @@ impl PreparedNetwork {
         self.dashpot_norms.get(link).copied()
     }
 
-    /// The transition's product with `z` over `product_rows` rows: each entry is its own row's sum. On one thread
-    /// the rows are read from their copy by blocks of eight (`transition_blocks`, made by the first such product), the
+    /// The transition's product with `z` over `product_rows` rows: each entry is its own row's sum. The rows are read
+    /// from their copy by blocks of eight (`transition_blocks`, made by the first product), on `apply`'s thread count; the
     /// sums over the state's columns are kept, and a product on the same state adds the held force's columns to them
-    /// (`upper_rows::product_from`): the same additions in the same order.
+    /// (`upper_rows::product_from`): the same additions in the same order, for every thread count.
     fn product(&self, z: &[f64]) -> Result<Vec<f64>, ModalCouplingError> {
         let rows = &self.transition[..self.product_rows * z.len()];
         match self.state_sums.lock() {
-            Ok(mut slot) if apply_threads(rows, z.len()) <= 1 => {
+            Ok(mut slot) => {
                 let copy = || upper_rows::RowBlocks::new(rows, z.len());
                 let blocks = self.transition_blocks.get_or_init(copy);
-                let product = upper_rows::product_from(&mut slot, blocks, z, z.len() - self.count);
+                let (state, threads) = (z.len() - self.count, apply_threads(rows, z.len()));
+                let product = upper_rows::product_from(&mut slot, blocks, z, state, threads);
                 product.into_iter().map(finite).collect()
             }
-            _ => apply(rows, z),
+            Err(_) => apply(rows, z),
         }
     }
 

@@ -240,6 +240,11 @@ fn plain_product(matrix: &[f64], z: &[f64]) -> Vec<u64> {
 #[test]
 fn a_product_continued_from_a_states_kept_sums_has_the_bits_of_a_plain_product() {
     let bits = |product: Vec<f64>| product.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+    // Each product takes the next of 1, 2, 3 and 7 threads, so two products in a row run on two counts.
+    let mut counts = [1, 2, 3, 7].into_iter().cycle();
+    let mut next_product = |slot: &mut _, blocks: &_, z: &[f64], state| {
+        product_from(slot, blocks, z, state, counts.next().unwrap_or(1))
+    };
     for (seed, side) in (1..).zip(SIDES) {
         // All the rows of a square, then its first two thirds (67 rows at side 100: not whole blocks of eight).
         for rows in [side, (2 * side).div_ceil(3)] {
@@ -253,7 +258,7 @@ fn a_product_continued_from_a_states_kept_sums_has_the_bits_of_a_plain_product()
                 // The first product computes the state's sums; the next two continue from them under other forces.
                 for k in 0..3 {
                     let z = z(&x, k);
-                    let product = bits(product_from(&mut slot, &blocks, &z, state));
+                    let product = bits(next_product(&mut slot, &blocks, &z, state));
                     let plain = plain_product(&matrix, &z);
                     assert_eq!(product, plain, "{side} {rows} {state} {k}");
                 }
@@ -262,7 +267,7 @@ fn a_product_continued_from_a_states_kept_sums_has_the_bits_of_a_plain_product()
                     let mut y = x.clone();
                     y[at] = f64::from_bits(y[at].to_bits() ^ 1);
                     let z = z(&y, 0);
-                    let product = bits(product_from(&mut slot, &blocks, &z, state));
+                    let product = bits(next_product(&mut slot, &blocks, &z, state));
                     let plain = plain_product(&matrix, &z);
                     assert_eq!(product, plain, "{side} {rows} {state} at {at}");
                 }

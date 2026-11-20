@@ -21,7 +21,8 @@
 //! [`product_from`] is a product of whole rows by `[state | force]` that keeps each row's sum over the state's columns
 //! ([`StateSums`]): the next product on the same state adds only the force's columns, the same additions in the same
 //! order as one left-to-right sum. It reads the rows from [`RowBlocks`], a copy by blocks of eight rows in which a
-//! column's eight entries that a block's rows share lie together, as in [`UpperBlocks`].
+//! column's eight entries that a block's rows share lie together, as in [`UpperBlocks`], and shares the blocks out to
+//! threads. The sums are kept a row, so a product on another thread count reads the same ones.
 //!
 //! [`upper_row_form_from`] is the form of `[state | force]` that keeps the same kind of sums ([`StateForms`]): a row
 //! takes the state's columns first, so the next form on the same state continues every row over the force's columns.
@@ -333,15 +334,19 @@ pub(super) struct StateSums {
 }
 
 /// The product of the whole rows that `blocks` holds (each of length `z.len()`) by `z`, whose first `state` entries are
-/// a state and whose others are a held force. Each entry is its row's sum of `row[j] * z[j]` in column order from 0.0.
-/// The sums over the state's columns are kept in `slot`: a call whose state has the kept bits in every entry continues
-/// from them, and any other call computes and keeps its own. Either way a row adds the terms of one left-to-right sum
-/// in that sum's order, so each entry has its bits.
+/// a state and whose others are a held force, on `threads` threads (the calling thread among them). Each entry is its
+/// row's sum of `row[j] * z[j]` in column order from 0.0. The sums over the state's columns are kept in `slot`, one a
+/// row: a call whose state has the kept bits in every entry continues from them, and any other call computes and keeps
+/// every row's. Each thread takes a contiguous range of whole blocks of eight rows (the last range also the rows after
+/// the last whole block) and reads and writes only its own rows' sums, so the split may change from one call to the
+/// next. Either way a row adds the terms of one left-to-right sum in that sum's order, so each entry has its bits for
+/// every thread count.
 pub(super) fn product_from(
     slot: &mut Option<StateSums>,
     blocks: &RowBlocks,
     z: &[f64],
     state: usize,
+    threads: usize,
 ) -> Vec<f64> {
     let (head, tail) = z.split_at(state);
     let mut kept = slot.take().unwrap_or_default();
@@ -354,21 +359,39 @@ pub(super) fn product_from(
         kept.key.extend(head.iter().map(|v| v.to_bits()));
         kept.sums.clear();
         kept.sums.resize(blocks.rows, 0.0);
-        row_sums(blocks, 0, head, &mut kept.sums);
     }
-    let mut product = kept.sums.clone();
-    row_sums(blocks, state, tail, &mut product);
+    let mut product = vec![0.0; blocks.rows];
+    let run = |start: usize, sums: &mut [f64], product: &mut [f64]| {
+        if !held {
+            row_sums(blocks, start, 0, head, sums);
+        }
+        product.copy_from_slice(sums);
+        row_sums(blocks, start, state, tail, product);
+    };
+    let per = (blocks.rows.div_ceil(BLOCK).div_ceil(threads.max(1)) * BLOCK).max(1);
+    let rows = kept.sums.chunks_mut(per).zip(product.chunks_mut(per));
+    let mut parts = (0..).step_by(per).zip(rows);
+    let first = parts.next();
+    // The scope joins every thread it started before it returns, and panics if one of them did. One thread starts none.
+    std::thread::scope(|scope| {
+        for (start, (sums, product)) in parts {
+            scope.spawn(move || run(start, sums, product));
+        }
+        if let Some((start, (sums, product))) = first {
+            run(start, sums, product);
+        }
+    });
     *slot = Some(kept);
     product
 }
 
-/// Add to each row's entry of `sums` its `row[first + j] * values[j]` in column order. Eight rows advance together,
-/// each with its own sum; the rows after the last whole block run alone.
-fn row_sums(blocks: &RowBlocks, first: usize, values: &[f64], sums: &mut [f64]) {
+/// Add to each entry of `sums`, the rows from `start` (a multiple of eight) on, its row's `row[first + j] * values[j]` in
+/// column order. Eight rows advance together, each with its own sum; the rows after the last whole block run alone.
+fn row_sums(blocks: &RowBlocks, start: usize, first: usize, values: &[f64], sums: &mut [f64]) {
     let side = blocks.side;
     let columns = first * BLOCK..(first + values.len()) * BLOCK;
     let (together, alone) = sums.as_chunks_mut::<BLOCK>();
-    let whole = blocks.entries.chunks_exact(BLOCK * side.max(1));
+    let whole = blocks.entries[start * side..].chunks_exact(BLOCK * side.max(1));
     for (block, sums) in whole.zip(together) {
         let mut partial = *sums;
         let cells = block[columns.clone()].as_chunks::<BLOCK>().0;

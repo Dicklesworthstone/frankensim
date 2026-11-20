@@ -99,22 +99,23 @@ Not tested: a store that fails to write, and a render stopped while it keeps a s
 
 ### The prepared step reads its rows from copies by blocks of eight (`upper_rows::UpperBlocks`, `upper_rows::RowBlocks`)
 
-The loss sweep by rows and the product on one thread advance eight consecutive rows together, each with its own sum. In a row-major square the eight entries of one
+The loss sweep by rows and the prepared product advance eight consecutive rows together, each with its own sum. In a row-major square the eight entries of one
 column lie a row apart, so each column took eight scalar loads. Each kernel now reads a copy in which they lie together. `UpperBlocks` holds a Gramian's upper triangle by
 blocks of eight rows: the block's own square of eight rows and columns, row by row, with +0.0 below its diagonal and past the side; then, for a whole block, each column
 right of it as eight entries. `RowBlocks` holds the transition's computed rows the same way over every column, and the rows after the last whole block as they are. A row
 starts from the same value and adds the same terms in the same order as before, so every sum keeps its bits: the copies change where an entry is read, not what is added.
 
-`sum_by_rows` makes the Gramians' copies once it has held them to their transposes. The first product on one thread makes the transition's (a `OnceLock`); a product that
-`apply` splits over threads reads the row-major rows as before, and an operator whose products all run there never makes it. The row-major arrays stay: `apply` reads the
-transition, the chain's sweep reads the Gramians, and the energy identity's check reads both when the operator is prepared; once an operator sums by rows, its sweep only
-asks whether each Gramian exists. A Gramian's copy is about half its bytes: 64 entries a block, and eight a column right of each whole block, which is `s² / 2 + 4 s`
+`sum_by_rows` makes the Gramians' copies once it has held them to their transposes. The first product makes the transition's (a `OnceLock`), on one thread or more. The
+row-major arrays stay: `apply` reads the transition under a poisoned lock, the chain's sweep reads the Gramians, and the energy identity's check reads both when the
+operator is prepared; once an operator sums by rows, its sweep only asks whether each Gramian exists. A Gramian's copy is about half its bytes: 64 entries a block,
+and eight a column right of each whole block, which is `s² / 2 + 4 s`
 entries at a side `s` of whole blocks; the transition's is `product_rows` rows of the side. The admission (`admit_with_memory`) is unchanged: it counts `losses + 128`
 squares of the side, and the copies add at most about two and a half (half of each of three Gramians and a transition of every row). A scratch build printed each copy's
 bytes: the viola Db4 control card (338 modes, side 1014) holds two Gramian copies of 4,146,424 bytes and the transition's of 5,483,712; the violin D4 card with longitudinal
 waves and the violin A4 control card (586 modes, side 1758) 12,420,448 twice and 16,483,008. The guitar F5 control card (379 modes, side 1137, 8 workers), the cello D3
-control card (795 modes, side 2385, 7 workers) and the double-bass E1 control card (641 modes, side 1923, 7 workers) run their products on threads and hold no transition
-copy: 5,209,080, 22,832,088 and 14,855,560 bytes twice. That is about 1.67 squares of the side on the first three cards and about 1.0 on the last three.
+control card (795 modes, side 2385, 7 workers) and the double-bass E1 control card (641 modes, side 1923, 7 workers) run their products on threads, and held no transition
+copy while a product on threads kept no sums: 5,209,080, 22,832,088 and 14,855,560 bytes twice. That is about 1.67 squares of the side on the first three cards and was
+about 1.0 on the last three, which now also make the transition's copy of `product_rows` rows of the side.
 
 No path writes the arrays a copy holds once the copy exists. Their fields are private to `exact/prepared.rs`, where the one method of `PreparedNetwork` that takes
 `&mut self` is `sum_by_rows`, which writes `upper_blocks`, `sums_by_rows` and the energy memo. Every other change builds a new operator, which makes its own copies and
@@ -218,16 +219,24 @@ operator, which starts with none. The key alone would not tell two operators apa
 the scale `D`.
 
 The slot is behind a mutex, as the energy memo is, and a product holds it from the comparison to the last row. Two threads that multiplied by one operator would wait for
-one another, and each would get the plain product's bits whichever state's sums it found. The kept sums are used on one thread: a product that `apply` splits over
-threads (a side from 1024 with more than one declared worker) is computed by `apply` as before and keeps nothing.
+one another, and each would get the plain product's bits whichever state's sums it found. A product takes `apply`'s thread count (more than one from a side of 1024
+with more than one declared worker) and cuts its rows as `apply` does: contiguous runs of whole blocks of eight, the last run also the rows after the last whole block,
+one a thread, the calling thread's first. Each run reads and writes only its own rows' sums. The sums are one a row under one key, so no run's kept range can belong to
+another split: either the key is the product's state and every run continues from its rows' sums, or every run computes its rows' sums over the state's columns and
+the product keeps the new key. A product on another thread count than the last therefore reads the same sums. Under a poisoned lock `apply` computes the product as
+before and keeps nothing. No product polls the cancel gate, on any thread count.
 
 Evidence. `tests/upper_row_forms.rs` holds `product_from` to one plain left-to-right sum a row, bit for bit, at sides 1, 7, 8, 9, 16, 17 and 100: on all the rows of a
 square and on its first two thirds; with no state, a third of the columns, all but the last and all of them; under three forces on one state; then on a state that
-differs in the last bit of its first entry and on one that differs in the last bit of its last. `tests/coupled_coefficient_update.rs`: a refused step multiplies at a
-state, the law changes to one with the same own stiffnesses and another coupling, and the next three steps have the bits of a system that never multiplied under the
-first law. The viola Db4 control card, and the violin D4 card with longitudinal waves over the first 900 s of its render, write the same frames as before.
+differs in the last bit of its first entry and on one that differs in the last bit of its last. The products take 1, 2, 3 and 7 threads in turn, so each runs on another
+count than the one before it, on the same state or not, and the splits include runs of whole blocks, runs that end in the rows after the last block, and a run of those
+rows alone. `tests/coupled_coefficient_update.rs`: a refused step multiplies at a state, the law changes to one with the same own stiffnesses and another coupling, and
+the next three steps have the bits of a system that never multiplied under the first law. The viola Db4 control card, and the violin D4 card with longitudinal waves
+over the first 900 s of its render, write the same frames as before. Viola D4 (side 5433), whose products run on seven threads at `--workers 7`, renders its first
+115456 frames byte-equal to cd9470f858's and steps at 11.036 ms a frame, against 11.819 ms for cd9470f858's binary in that commit's own run at a like load (1500 s
+each); the viola Db4 control card, whose products run on one thread, renders the same wav again (md5).
 
-Not tested: a product on more than one thread beside kept sums (no test target has a side of 1024).
+Not tested: a system's product on more than one thread (no test target has a side of 1024).
 
 ### The prepared operator's product stops before the held force's rows (`CoupledModalSystem::prepared_product_rows`)
 
