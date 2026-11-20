@@ -1252,7 +1252,7 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     if let Some(report)=&ready.body_radiation { eprintln!("computed_body_radiation={report}"); }
     if let Some(BodyRadiationReport::ShellBem(report))=&ready.body_radiation {
         if let Some(entry)=ready.body_profile.as_ref().and_then(|body|body.skin_load_entry(&report.loading_identity)) {
-            eprintln!("skin_load_store_entry={}; skin_load_loaded={}",entry.display(),report.loaded_from_store);
+            eprintln!("skin_load_store_entry={}; skin_load_loaded={}; skin_frequencies_loaded={}",entry.display(),report.loaded_from_store,report.frequencies_loaded);
         }
     }
     let image=ready.performance.bank().source().bank().material_shell_assembly_image();

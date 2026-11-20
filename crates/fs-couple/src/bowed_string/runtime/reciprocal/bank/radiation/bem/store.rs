@@ -12,10 +12,15 @@
 //!
 //! The key cannot see a change to the boundary solver or the fit that keeps
 //! their hash domains, so a store holds the loads of one build.
+//!
+//! A store may also keep each frequency's solve of a load's sweep
+//! ([`SkinLoadStore::frequencies`], in fs-bem's own entries), so that a bake
+//! stopped part way resumes from the frequencies it solved and keeps this
+//! entry byte for byte as one run would.
 
 use super::ShellBemError;
 use crate::render::plate::impact::radiation::{MAX_POLES, MAX_PORTS, Model, Pole};
-use fs_bem::modal_loading::ReciprocalLoadingDiagnostics;
+use fs_bem::modal_loading::{ReciprocalLoadingDiagnostics, SweepFrequencyStore};
 use fs_blake3::ContentHash;
 
 const MAGIC: &[u8] = b"frankensim-skin-exterior-load-v1\n";
@@ -39,6 +44,10 @@ pub trait SkinLoadStore {
     /// # Errors
     /// The store's own write failure.
     fn keep(&self, key: &ContentHash, entry: &[u8]) -> Result<(), String>;
+    /// Where this store keeps each frequency's solve of a skin load's sweep. None, the default, keeps none.
+    fn frequencies(&self) -> Option<&dyn SweepFrequencyStore> {
+        None
+    }
 }
 
 /// The computed numbers of one load's report, beside its model.

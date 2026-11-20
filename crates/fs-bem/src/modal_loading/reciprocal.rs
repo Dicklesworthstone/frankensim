@@ -22,6 +22,73 @@ pub struct ReciprocalLoadingDiagnostics {
 pub struct ReciprocalLoadingBake {
     pub loading: ModalLoadingBake,
     pub diagnostics: ReciprocalLoadingDiagnostics,
+    /// Frequencies read from the caller's [`SweepFrequencyStore`] in place of their solve.
+    pub kept_frequencies: usize,
+}
+
+/// Where a sweep keeps each frequency's solve, so that a sweep stopped part way resumes from the frequencies
+/// it solved. A store returns the bytes it was given under a key, and the sweep checks every byte. The
+/// workers load and keep, so a store is shared between threads.
+pub trait SweepFrequencyStore: Sync {
+    /// The entry kept under `key`, if any.
+    ///
+    /// # Errors
+    /// The store's own read failure.
+    fn load(&self, key: &ContentHash) -> Result<Option<Vec<u8>>, String>;
+    /// Keep a new entry under `key`. An entry already kept there stays as it is.
+    ///
+    /// # Errors
+    /// The store's own write failure.
+    fn keep(&self, key: &ContentHash, entry: &[u8]) -> Result<(), String>;
+}
+
+const FREQUENCY_MAGIC: &[u8] = b"frankensim-reciprocal-frequency-v1\n";
+const FREQUENCY_ENTRY_DOMAIN: &str = "fs-bem:reciprocal-frequency-entry:v1";
+/// One frequency's entry on `ports` ports: the magic, the sweep's identity, the index and the port count
+/// (u64), each port's three checks, the row-major impedance (f64 bits, all little-endian) and a hash of
+/// every preceding byte.
+const fn frequency_entry_bytes(ports:usize) -> usize {FREQUENCY_MAGIC.len()+32+16+24*ports+16*ports*ports+32}
+/// Largest frequency entry a sweep keeps or reads: one of [`helmholtz::MAX_RADIATION_FIELDS_PER_BATCH`] ports.
+pub const MAX_SWEEP_FREQUENCY_BYTES: usize = frequency_entry_bytes(helmholtz::MAX_RADIATION_FIELDS_PER_BATCH);
+
+/// The key of frequency `index`'s entry in the sweep whose declaration is `identity`
+/// ([`reciprocal_loading_declaration`]). The identity binds every frequency, so the index names one.
+#[must_use]
+pub fn sweep_frequency_key(identity:&ContentHash,index:usize) -> ContentHash {
+    let mut hash = DomainHasher::new("fs-bem:reciprocal-frequency-key:v1");
+    hash.update(identity.as_bytes());
+    hash.update(&(index as u64).to_le_bytes());
+    hash.finalize()
+}
+
+fn frequency_entry(identity:&ContentHash,index:usize,checks:&[[f64;3]],impedance:&[C64]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(frequency_entry_bytes(checks.len()));
+    out.extend_from_slice(FREQUENCY_MAGIC);
+    out.extend_from_slice(identity.as_bytes());
+    for n in [index as u64,checks.len() as u64] {out.extend_from_slice(&n.to_le_bytes());}
+    for x in checks.iter().flatten().copied().chain(impedance.iter().flat_map(|z|[z.re,z.im])) {
+        out.extend_from_slice(&x.to_bits().to_le_bytes());
+    }
+    let seal = fs_blake3::hash_domain(FREQUENCY_ENTRY_DOMAIN,&out);
+    out.extend_from_slice(seal.as_bytes());
+    out
+}
+
+/// The checks and impedance of frequency `index` of the sweep `identity` on `ports` ports, kept in `entry`;
+/// None unless every byte decodes: the length, the hash, the magic, the identity, the index and the count.
+fn kept_frequency(entry:&[u8],identity:&ContentHash,index:usize,ports:usize) -> Option<(Vec<[f64;3]>,Vec<C64>)> {
+    if entry.len() != frequency_entry_bytes(ports) {return None;}
+    let (body,seal) = entry.split_at(entry.len()-32);
+    let (magic,rest) = body.split_at(FREQUENCY_MAGIC.len());
+    let (kept_identity,rest) = rest.split_at(32);
+    if fs_blake3::hash_domain(FREQUENCY_ENTRY_DOMAIN,body).as_bytes()[..] != *seal || magic != FREQUENCY_MAGIC
+        || kept_identity != identity.as_bytes() {return None;}
+    let mut words = rest.as_chunks::<8>().0.iter().map(|w|u64::from_le_bytes(*w));
+    if words.next()? != index as u64 || words.next()? != ports as u64 {return None;}
+    let mut reals = words.map(f64::from_bits);
+    let checks = (0..ports).map(|_|Some([reals.next()?,reals.next()?,reals.next()?])).collect::<Option<Vec<_>>>()?;
+    let impedance = (0..ports*ports).map(|_|Some(C64::new(reals.next()?,reals.next()?))).collect::<Option<_>>()?;
+    Some((checks,impedance))
 }
 
 /// Compute every original signed body/aperture velocity column with one
@@ -39,11 +106,16 @@ pub struct ReciprocalLoadingBake {
 /// for every count. Each frequency in flight holds its own dense operator and
 /// factor, about 32 n^2 bytes for n [`ReciprocalLoadingDiagnostics::unknowns`].
 /// The caller's cancellation is then polled about every 20 ms while they run.
+///
+/// With `kept`, each frequency's solve is kept under its [`sweep_frequency_key`] once solved, and read in
+/// place of solving it again, so a stopped sweep resumes. Every check and refusal runs on the kept bits as
+/// on a fresh solve's, so the result and the refusal are the one-run sweep's. An entry that does not
+/// decode completely refuses, and nothing is solved behind it.
 #[allow(clippy::too_many_arguments)]
 pub fn modal_radiation_loading_reciprocal(
     surface: &SpherePanels, shapes: &[Vec<f64>], omegas: &[f64], medium: Medium,
     budget: Budget, provenance: ContentHash, maximum_matrix_entries: usize,
-    mut cancelled: impl FnMut() -> bool,
+    kept: Option<&dyn SweepFrequencyStore>, mut cancelled: impl FnMut() -> bool,
 ) -> Result<ReciprocalLoadingBake, ModalLoadingError> {
     poll(&mut cancelled)?;
     let modes = shapes.len();
@@ -80,26 +152,40 @@ pub fn modal_radiation_loading_reciprocal(
         maximum_backward_residual:0.0,maximum_flux_balance:0.0,
     };
     let mut rows = reserved(omegas.len())?;
-    // One frequency's whole work: its solutions' checks, in order, and its row.
-    let frequency = |omega:f64,cancelled:&mut dyn FnMut()->bool|
+    let read = std::sync::atomic::AtomicUsize::new(0);
+    // One frequency's whole work: its solve or the one kept for it, its solutions' checks, in order, and its row.
+    let frequency = |index:usize,omega:f64,cancelled:&mut dyn FnMut()->bool|
         -> Result<(Vec<[f64;3]>,ModalLoadingRow),ModalLoadingError> {
-        let source = owner.solve_velocity_ports(omega/medium.sound_speed,medium,&refs,cancelled)?;
-        let checks = source.solutions().iter().map(|solution|
-            [solution.panels_per_wavelength,solution.backward_residual,solution.flux_balance]).collect();
+        let key = kept.map(|store|(store,sweep_frequency_key(&declaration_hash,index)));
+        let entry = match key {Some((store,key)) => store.load(&key).map_err(ModalLoadingError::Store)?, None => None};
+        let (checks,impedance) = if let Some(entry) = entry {
+            read.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+            kept_frequency(&entry,&declaration_hash,index,modes).ok_or(ModalLoadingError::Invalid(
+                "a kept sweep frequency is damaged, incomplete or another sweep's"))?
+        } else {
+            let source = owner.solve_velocity_ports(omega/medium.sound_speed,medium,&refs,cancelled)?;
+            let checks:Vec<_> = source.solutions().iter().map(|solution|
+                [solution.panels_per_wavelength,solution.backward_residual,solution.flux_balance]).collect();
+            if let Some((store,key)) = key {
+                store.keep(&key,&frequency_entry(&declaration_hash,index,&checks,source.impedance()))
+                    .map_err(ModalLoadingError::Store)?;
+            }
+            (checks,source.impedance().to_vec())
+        };
         // The dense solve's own unknown count scales the direct-row reciprocity
         // bound and passivity floor.
-        Ok((checks,assess(omega,source.impedance().to_vec(),modes,None,owner.unknowns())?))
+        Ok((checks,assess(omega,impedance,modes,None,owner.unknowns())?))
     };
     let workers = helmholtz::dense_workers().min(omegas.len());
     let mut solved = if workers > 1 {
         on_workers(omegas,workers,&mut cancelled,&frequency)?
     } else { Vec::new() }.into_iter();
-    for &omega in omegas {
+    for (index,&omega) in omegas.iter().enumerate() {
         let (checks,row) = if workers > 1 {
             solved.next().expect("every frequency up to the first failure has its outcome")?
         } else {
             poll(&mut cancelled)?;
-            frequency(omega,&mut cancelled)?
+            frequency(index,omega,&mut cancelled)?
         };
         for [panels_per_wavelength,backward_residual,flux_balance] in checks {
             diagnostics.minimum_panels_per_wavelength = diagnostics.minimum_panels_per_wavelength
@@ -113,6 +199,7 @@ pub fn modal_radiation_loading_reciprocal(
     poll(&mut cancelled)?;
     Ok(ReciprocalLoadingBake {
         loading:ModalLoadingBake {modes,declaration_hash,rows},diagnostics,
+        kept_frequencies:read.load(std::sync::atomic::Ordering::Relaxed),
     })
 }
 
@@ -147,7 +234,7 @@ pub fn reciprocal_loading_declaration(
 /// factorization. This thread polls the caller's cancellation while it waits;
 /// a cancellation stops every frequency and returns `Cancelled`.
 fn on_workers<T:Send>(omegas:&[f64],workers:usize,cancelled:&mut impl FnMut()->bool,
-    solve:&(impl Fn(f64,&mut dyn FnMut()->bool)->Result<T,ModalLoadingError>+Sync))
+    solve:&(impl Fn(usize,f64,&mut dyn FnMut()->bool)->Result<T,ModalLoadingError>+Sync))
     ->Result<Vec<Result<T,ModalLoadingError>>,ModalLoadingError> {
     use std::sync::atomic::{AtomicBool,AtomicUsize,Ordering::Relaxed};
     use std::sync::mpsc::{RecvTimeoutError,channel};
@@ -167,7 +254,7 @@ fn on_workers<T:Send>(omegas:&[f64],workers:usize,cancelled:&mut impl FnMut()->b
                     let index=next.fetch_add(1,Relaxed);
                     if index>=omegas.len() || index>first_failure.load(Relaxed) {break mine;}
                     let outcome=helmholtz::with_dense_workers(inner,||
-                        solve(omegas[index],&mut || stop.load(Relaxed) || index>first_failure.load(Relaxed)));
+                        solve(index,omegas[index],&mut || stop.load(Relaxed) || index>first_failure.load(Relaxed)));
                     if outcome.is_err() {first_failure.fetch_min(index,Relaxed);}
                     mine.push((index,outcome));
                 }
@@ -209,7 +296,7 @@ mod tests {
         let omega = [300.0,900.0];
         let medium = Medium::air();
         let bake = modal_radiation_loading_reciprocal(&surface,&shapes,&omega,medium,budget,
-            fs_blake3::hash_domain("reciprocal-loading-test",b"independent original faces"),8,||false).unwrap();
+            fs_blake3::hash_domain("reciprocal-loading-test",b"independent original faces"),8,None,||false).unwrap();
         let owner = Prepared::new(&surface,omega[1]/medium.sound_speed,budget,||false).unwrap();
         let refs: Vec<_> = shapes.iter().map(Vec::as_slice).collect();
         for (index,row) in bake.loading.rows().iter().enumerate() {
@@ -233,7 +320,7 @@ mod tests {
         let omega = [200.0,350.0,500.0,650.0,800.0];
         let medium = Medium::air();
         let bake = |cancelled:&mut dyn FnMut()->bool| modal_radiation_loading_reciprocal(&surface,&shapes,
-            &omega,medium,budget,fs_blake3::hash_domain("reciprocal-loading-test",b"declared workers"),45,cancelled);
+            &omega,medium,budget,fs_blake3::hash_domain("reciprocal-loading-test",b"declared workers"),45,None,cancelled);
         let bits = |bake:&ReciprocalLoadingBake| (bake.loading.declaration_hash.as_bytes().to_vec(),
             bake.loading.rows().iter().map(|row|row.impedance().iter()
                 .map(|z|(z.re.to_bits(),z.im.to_bits())).collect::<Vec<_>>()).collect::<Vec<_>>(),
@@ -252,5 +339,67 @@ mod tests {
         assert!(matches!(cancelled,Err(ModalLoadingError::Helmholtz(HelmholtzError::Cancelled))));
         assert_eq!(calls,2+preamble);
         assert_eq!(bits(&helmholtz::with_dense_workers(3,|| bake(&mut ||false)).unwrap()),serial);
+    }
+
+    // A sweep stopped part way keeps each frequency it solved; the next one on the same store reads them, solves
+    // only the rest and gives the one-run sweep's bits on any worker count. A damaged or misplaced entry refuses,
+    // and so does the store's own failure.
+    #[test]
+    fn a_stopped_sweep_resumes_from_its_kept_frequencies_with_the_same_bits() {
+        use std::sync::{Mutex,atomic::{AtomicUsize,Ordering::Relaxed}};
+        /// Kept entries by key, the keeps asked for, and whether every keep fails.
+        struct Kept(Mutex<std::collections::BTreeMap<ContentHash,Vec<u8>>>,AtomicUsize,bool);
+        impl SweepFrequencyStore for Kept {
+            fn load(&self,key:&ContentHash) -> Result<Option<Vec<u8>>,String> {
+                Ok(self.0.lock().unwrap().get(key).cloned())
+            }
+            fn keep(&self,key:&ContentHash,entry:&[u8]) -> Result<(),String> {
+                if self.2 {return Err("the store is full".into());}
+                self.1.fetch_add(1,Relaxed);
+                self.0.lock().unwrap().entry(*key).or_insert_with(||entry.to_vec());
+                Ok(())
+            }
+        }
+        let surface = SpherePanels::icosphere(0.1,0).unwrap();
+        let mut shapes = vec![vec![0.0;20];3];
+        shapes[0][0] = 1.0; shapes[1][7] = -0.7; shapes[2][12] = 0.4;
+        let budget = Budget {maximum_unknowns:64,maximum_cache_bytes:1_000_000,
+            maximum_work:100_000_000,angular_refinement:1};
+        let omega = [200.0,350.0,500.0,650.0,800.0];
+        let bake = |kept:Option<&dyn SweepFrequencyStore>,cancelled:&mut dyn FnMut()->bool|
+            modal_radiation_loading_reciprocal(&surface,&shapes,&omega,Medium::air(),budget,
+                fs_blake3::hash_domain("reciprocal-loading-test",b"kept frequencies"),45,kept,cancelled);
+        let bits = |bake:&ReciprocalLoadingBake| (bake.loading.declaration_hash,
+            bake.loading.rows().iter().flat_map(|row|row.impedance().iter().flat_map(|z|[z.re,z.im]))
+                .chain([bake.diagnostics.minimum_panels_per_wavelength,bake.diagnostics.maximum_backward_residual,
+                    bake.diagnostics.maximum_flux_balance]).map(f64::to_bits).collect::<Vec<_>>());
+        let one_run = bake(None,&mut ||false).unwrap();
+        let key = |index| sweep_frequency_key(&one_run.loading.declaration_hash,index);
+        // Stopped before the third frequency, on one worker: the first two are kept, and nothing else.
+        let store = Kept(Mutex::default(),AtomicUsize::new(0),false);
+        let stopped = bake(Some(&store),&mut ||store.1.load(Relaxed) == 2);
+        assert!(matches!(stopped,Err(ModalLoadingError::Helmholtz(HelmholtzError::Cancelled))),"{stopped:?}");
+        let mut first = vec![key(0),key(1)];
+        first.sort();
+        assert_eq!(store.0.lock().unwrap().keys().copied().collect::<Vec<_>>(),first);
+        // Resumed on three workers: the one-run bits, the two kept read, the other three solved and kept.
+        let resumed = helmholtz::with_dense_workers(3,|| bake(Some(&store),&mut ||false)).unwrap();
+        assert_eq!(bits(&resumed),bits(&one_run));
+        assert_eq!((resumed.kept_frequencies,store.1.load(Relaxed),store.0.lock().unwrap().len()),(2,5,5));
+        // Every frequency kept: nothing is solved.
+        let read = bake(Some(&store),&mut ||false).unwrap();
+        assert_eq!((bits(&read),read.kept_frequencies,store.1.load(Relaxed)),(bits(&one_run),5,5));
+        // An entry with a byte changed, cut short, or another frequency's entry under its key refuses.
+        let entry = store.0.lock().unwrap()[&key(3)].clone();
+        let mut changed = entry.clone();
+        changed[40] ^= 1;
+        let another = store.0.lock().unwrap()[&key(2)].clone();
+        for planted in [changed,entry[..entry.len()-1].to_vec(),another] {
+            store.0.lock().unwrap().insert(key(3),planted);
+            assert_eq!(bake(Some(&store),&mut ||false).unwrap_err(),
+                ModalLoadingError::Invalid("a kept sweep frequency is damaged, incomplete or another sweep's"));
+        }
+        let full = Kept(Mutex::default(),AtomicUsize::new(0),true);
+        assert_eq!(bake(Some(&full),&mut ||false).unwrap_err(),ModalLoadingError::Store("the store is full".into()));
     }
 }

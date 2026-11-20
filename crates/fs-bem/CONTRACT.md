@@ -2582,6 +2582,17 @@ unknowns, retained cache, original source/projection work, angular refinement,
 backward residual and flux balance describe the actual bounded discrete owner.
 No collocation output is symmetrized and no failed admission is repaired.
 
+With a `SweepFrequencyStore`, each frequency's solve (each port's three checks
+and the impedance, as f64 bits) is kept under `sweep_frequency_key` (the
+declaration identity and the index) once solved, and read in place of solving
+it again, so a stopped sweep resumes. The admissions and diagnostics run on the
+kept bits as on a fresh solve's: a resumed sweep gives the one-run sweep's rows,
+diagnostics and refusal. A frequency whose row refuses stays kept, since
+`assess` is a function of the kept bits, and refuses again at once. An entry
+that does not decode completely refuses, and nothing is solved behind it; a
+store's own failure is `ModalLoadingError::Store`. The key cannot see a change
+to the solver, so a store holds one build's solves.
+
 `observation_transfers::ReciprocalBemObservation` observes the same retained
 P1 pressure and P0 auxiliary density through the original adaptive near-field
 receiver, including pressure gradients from that field's particle velocity.

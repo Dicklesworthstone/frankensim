@@ -144,6 +144,9 @@ pub struct ShellBemReport {
     /// The model and the computed numbers above came from a [`SkinLoadStore`]
     /// entry under `loading_identity`, not from a sweep and fit in this run.
     pub loaded_from_store: bool,
+    /// Frequencies of this run's sweep read from the store's kept solves
+    /// ([`SkinLoadStore::frequencies`]) and not solved again; zero without a sweep.
+    pub frequencies_loaded: usize,
 }
 
 #[derive(Debug)]
@@ -353,7 +356,7 @@ impl ReciprocalStringBank {
             _ => None,
         };
         let loaded_from_store=kept.is_some();
-        let (model,numbers,loading_identity)=if let (Some(entry),Some(key))=(kept,key) {
+        let (model,numbers,loading_identity,frequencies_loaded)=if let (Some(entry),Some(key))=(kept,key) {
             let (model,numbers)=store::decode(&entry,&key,fields.len(),angular_refinement)?;
             // The key does not bind this run's work allowance; the kept owner's
             // own extents meet it as the computing owner's would have.
@@ -363,13 +366,14 @@ impl ReciprocalStringBank {
             {
                 return Err(ShellBemError::Invalid("a kept skin load exceeds this run's reciprocal work allowance"));
             }
-            (model,numbers,key)
+            (model,numbers,key,0)
         } else {
             let source=modal_radiation_loading_reciprocal(surface,fields,&omega,medium,
-                budget,basis_identity,entries,
+                budget,basis_identity,entries,store.and_then(|store| store.frequencies()),
                 ||gate.is_requested()).map_err(|error|match error {
                     ModalLoadingError::Helmholtz(HelmholtzError::Cancelled)=>ShellBemError::Cancelled,
                     ModalLoadingError::Helmholtz(error)=>ShellBemError::Solve(error),
+                    ModalLoadingError::Store(error)=>ShellBemError::Store(error),
                     other=>ShellBemError::Loading(other),
                 })?;
             let loading=&source.loading;
@@ -406,7 +410,7 @@ impl ReciprocalStringBank {
                 resistance_peak_error: fitted.resistance_peak_error,
                 resistance_rms_error: fitted.resistance_rms_error,
             };
-            (fitted.model,numbers,loading.declaration_hash())
+            (fitted.model,numbers,loading.declaration_hash(),source.kept_frequencies)
         };
         poll(gate)?;
         if model.poles.len() > options.maximum_poles {
@@ -440,6 +444,7 @@ impl ReciprocalStringBank {
             skin_identity: None,
             one_way_body_modes: 0,
             loaded_from_store,
+            frequencies_loaded,
         };
         Ok((model, report))
     }

@@ -3390,7 +3390,15 @@ boundary work.
 - Each entry is written through a temporary name, and each file name carries
   the hash of the executable that wrote it, as in `--observer-store`: a rebuilt
   binary computes afresh.
-- The command prints the entry's path and `skin_load_loaded`.
+- Each frequency's boundary solve of the sweep is kept as well, as one
+  `.skin-frequency` file under the loading identity and the frequency's index,
+  as soon as it is solved. A bake stopped part way (by `timeout`, say) leaves
+  those files whole and no `.skin-load` entry. The next bake with the same
+  binary reads them, solves only the rest, and keeps the `.skin-load` entry one
+  run would keep, byte for byte. A damaged frequency file refuses like an entry.
+- The command prints the entry's path, `skin_load_loaded`, and
+  `skin_frequencies_loaded`, the frequencies read from their files;
+  `skin_load_store_keeps` names `skin-frequency` beside `skin-load`.
 - `--self-contained` refuses it, as it refuses `--observer-store`.
 
 The same directory keeps an assembled (v4) body's modal solve, with or without

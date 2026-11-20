@@ -21,8 +21,8 @@ use std::time::Instant;
 mod pair_mean;
 pub use pair_mean::{BandChange, PairMeanLaw, PairMeanLoading};
 mod reciprocal;
-pub use reciprocal::{ReciprocalLoadingBake, ReciprocalLoadingDiagnostics,
-    modal_radiation_loading_reciprocal, reciprocal_loading_declaration};
+pub use reciprocal::{MAX_SWEEP_FREQUENCY_BYTES, ReciprocalLoadingBake, ReciprocalLoadingDiagnostics,
+    SweepFrequencyStore, modal_radiation_loading_reciprocal, reciprocal_loading_declaration, sweep_frequency_key};
 
 /// Physical boundary and complete outward normal-velocity traces. A structure
 /// must supply a work-consistent transfer; this module does not interpolate it.
@@ -67,6 +67,8 @@ pub enum ModalLoadingError {
     SolverRoute { panels: usize, route: &'static str },
     /// The routed iterative owner refused a row or did not converge a field.
     Iterative(String),
+    /// The caller's [`SweepFrequencyStore`] failed to read or keep a frequency's solve.
+    Store(String),
     /// Original data fail reciprocity, measured relative to the Frobenius norm.
     NonReciprocal {
         omega: f64,
@@ -112,6 +114,7 @@ impl core::fmt::Display for ModalLoadingError {
             Self::Invalid(s) => write!(f, "modal radiation loading: {s}"),
             Self::SolverRoute { panels, route } => write!(f, "{panels} panels require {route}"),
             Self::Iterative(e) => write!(f, "routed modal loading: {e}"),
+            Self::Store(e) => write!(f, "kept sweep frequencies: {e}"),
             Self::NonReciprocal {
                 omega,
                 relative_defect,

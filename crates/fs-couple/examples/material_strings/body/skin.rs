@@ -9,6 +9,7 @@ use fs_blake3::ContentHash;
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::observation::one_way::{
     MAX_ONE_WAY_SETUP_BYTES, OneWaySetupStore, ShellAcousticSkin, SkinAnchor, SkinAperture,
 };
+use fs_bem::modal_loading::{MAX_SWEEP_FREQUENCY_BYTES, SweepFrequencyStore};
 use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::bem::{
     MAX_SKIN_LOAD_BYTES, SkinLoadStore,
 };
@@ -40,6 +41,13 @@ pub(super) const SKIN_LOADS: Kept = Kept {
     suffix: "skin-load",
     maximum_bytes: MAX_SKIN_LOAD_BYTES,
 };
+/// `--skin-load-store`: each frequency's solve of a two-way skin load's sweep, under its frequency key, so that a bake
+/// stopped part way resumes from the frequencies it solved.
+pub(super) const SKIN_FREQUENCIES: Kept = Kept {
+    option: "--skin-load-store",
+    suffix: "skin-frequency",
+    maximum_bytes: MAX_SWEEP_FREQUENCY_BYTES,
+};
 /// `--skin-load-store`: an assembled body's modal solve, under its solve key.
 pub(super) const SHELL_MODES: Kept = Kept {
     option: "--skin-load-store",
@@ -48,8 +56,8 @@ pub(super) const SHELL_MODES: Kept = Kept {
 };
 
 /// `--observer-store DIR` or `--skin-load-store DIR`: this executable's
-/// one-way observer setups, or two-way skin loads and assembled bodies' modal
-/// solves, kept in an existing directory. Each entry's name holds its key and
+/// one-way observer setups, or two-way skin loads, their sweeps' frequencies
+/// and assembled bodies' modal solves, kept in an existing directory. Each entry's name holds its key and
 /// the start of the executable's own hash, because the key cannot see a solver
 /// change that keeps its hash domains, so a rebuilt binary bakes afresh. An
 /// entry is written once and never replaced.
@@ -149,6 +157,21 @@ impl SkinLoadStore for SetupDir {
 
     fn keep(&self, key: &ContentHash, entry: &[u8]) -> std::result::Result<(), String> {
         self.write(key, entry)
+    }
+
+    fn frequencies(&self) -> Option<&dyn SweepFrequencyStore> {
+        Some(self)
+    }
+}
+
+/// A skin load's frequencies, in the same directory and build, as [`SKIN_FREQUENCIES`].
+impl SweepFrequencyStore for SetupDir {
+    fn load(&self, key: &ContentHash) -> std::result::Result<Option<Vec<u8>>, String> {
+        self.clone().keeping(SKIN_FREQUENCIES).read(key)
+    }
+
+    fn keep(&self, key: &ContentHash, entry: &[u8]) -> std::result::Result<(), String> {
+        self.clone().keeping(SKIN_FREQUENCIES).write(key, entry)
     }
 }
 

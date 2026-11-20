@@ -896,6 +896,35 @@ fn load_entry(ready: &Ready) -> std::path::PathBuf {
         .unwrap()
 }
 
+/// Where each frequency's solve of the skin load that `ready` computed is kept, in frequency order.
+fn frequency_entries(ready: &Ready) -> Vec<std::path::PathBuf> {
+    let report = load_report(ready);
+    let body = ready.body_profile.as_ref().unwrap();
+    (0..report.options.frequency_samples)
+        .map(|index| {
+            let key = fs_bem::modal_loading::sweep_frequency_key(&report.loading_identity, index);
+            body.skin_frequency_entry(&key).unwrap()
+        })
+        .collect()
+}
+
+/// Removes the frequency entries of the skin load that `ready` computed, each by its name.
+fn remove_frequencies(ready: &Ready) {
+    for path in frequency_entries(ready) {
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+/// The paths `dir` holds, sorted.
+fn listed(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut paths: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    paths.sort();
+    paths
+}
+
 fn model_bits(ready: &Ready) -> Vec<(u64, u64, Vec<u64>)> {
     let bank = ready.performance.bank().source().bank();
     bank.body_radiation()
@@ -952,13 +981,13 @@ fn a_kept_skin_load_renders_the_computed_one_bit_for_bit() {
         assert_eq!(bits[1], bits[0]);
         assert_eq!(bits[2], bits[0], "the kept model is the computed one");
         let entry = load_entry(&computed);
+        let mut kept = frequency_entries(&computed);
+        kept.push(entry.clone());
+        kept.sort();
         assert_eq!(
-            std::fs::read_dir(&dir)
-                .unwrap()
-                .map(|e| e.unwrap().path())
-                .collect::<Vec<_>>(),
-            [entry.clone()],
-            "one load, one entry, under its loading identity"
+            listed(&dir),
+            kept,
+            "one load, one entry under its loading identity and one for each frequency"
         );
         let expected = rendered(&mut plain);
         assert!(expected.iter().any(|&p| f64::from_bits(p).abs() > 1e-14));
@@ -973,6 +1002,7 @@ fn a_kept_skin_load_renders_the_computed_one_bit_for_bit() {
             "a warm-store render is the cold one bit for bit"
         );
         std::fs::remove_file(&entry).unwrap();
+        remove_frequencies(&computed);
         std::fs::remove_dir(&dir).unwrap();
     });
 }
@@ -1036,6 +1066,8 @@ fn another_build_or_load_misses_and_rebuilds_and_a_foreign_entry_is_never_used()
         for path in [&entry, &other_build, &other_entry] {
             std::fs::remove_file(path).unwrap();
         }
+        remove_frequencies(&first);
+        remove_frequencies(&second);
         std::fs::remove_dir(&dir).unwrap();
     });
 }
@@ -1045,7 +1077,8 @@ fn a_truncated_kept_skin_load_refuses_and_is_never_half_read() {
     let dir = load_store("fs-skin-loads-truncated");
     scoped(|cx, gate| {
         let text = at48(source(SKIN_LOAD));
-        let entry = load_entry(&kept_load(&text, &dir, cx, gate).unwrap());
+        let computed = kept_load(&text, &dir, cx, gate).unwrap();
+        let entry = load_entry(&computed);
         let whole = std::fs::read(&entry).unwrap();
         for cut in [whole.len() - 1, whole.len() - 32, whole.len() / 2, 0] {
             std::fs::write(&entry, &whole[..cut]).unwrap();
@@ -1056,7 +1089,60 @@ fn a_truncated_kept_skin_load_refuses_and_is_never_half_read() {
         std::fs::write(&entry, &whole).unwrap();
         assert!(load_report(&kept_load(&text, &dir, cx, gate).unwrap()).loaded_from_store);
         std::fs::remove_file(&entry).unwrap();
+        remove_frequencies(&computed);
         std::fs::remove_dir(&dir).unwrap();
+    });
+}
+
+// A bake stopped part way leaves whole entries for the frequencies it solved and no load's entry: here every other
+// frequency of a one-run bake. The next bake reads them, solves the rest, keeps the one-run bake's load and frequency
+// entries byte for byte, and renders its samples.
+#[test]
+fn a_bake_resumed_from_kept_frequencies_keeps_the_one_run_entry_byte_for_byte() {
+    let (whole, stopped) = (
+        load_store("fs-skin-loads-whole"),
+        load_store("fs-skin-loads-stopped"),
+    );
+    scoped(|cx, gate| {
+        let text = at48(source(SKIN_LOAD));
+        let mut one_run = kept_load(&text, &whole, cx, gate).unwrap();
+        let frequencies = frequency_entries(&one_run);
+        let mut kept = frequencies.clone();
+        kept.push(load_entry(&one_run));
+        kept.sort();
+        assert_eq!(
+            listed(&whole),
+            kept,
+            "one entry for each frequency beside the load's"
+        );
+        let moved = |path: &std::path::Path| stopped.join(path.file_name().unwrap());
+        for path in frequencies.iter().step_by(2) {
+            std::fs::copy(path, moved(path)).unwrap();
+        }
+        let mut resumed = kept_load(&text, &stopped, cx, gate).unwrap();
+        let report = load_report(&resumed);
+        assert_eq!(
+            (report.loaded_from_store, report.frequencies_loaded),
+            (false, frequencies.len().div_ceil(2)),
+            "the kept frequencies are read and only the rest are solved"
+        );
+        let moved_kept: Vec<_> = kept.iter().map(|p| moved(p)).collect();
+        assert_eq!(listed(&stopped), moved_kept);
+        for path in &kept {
+            let same = std::fs::read(moved(path)).unwrap() == std::fs::read(path).unwrap();
+            assert!(same, "{} differs from the one-run bake's", path.display());
+        }
+        assert_eq!(
+            rendered(&mut resumed),
+            rendered(&mut one_run),
+            "a resumed bake renders the one-run bake's samples"
+        );
+        for ready in [&one_run, &resumed] {
+            std::fs::remove_file(load_entry(ready)).unwrap();
+            remove_frequencies(ready);
+        }
+        std::fs::remove_dir(&whole).unwrap();
+        std::fs::remove_dir(&stopped).unwrap();
     });
 }
 

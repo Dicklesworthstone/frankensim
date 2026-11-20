@@ -17,6 +17,19 @@
 
 ## New sections (newest first)
 
+### A skin load's sweep kept frequency by frequency (`SkinLoadStore::frequencies`)
+
+`SkinLoadStore` gains a provided method, `frequencies`, which is None by default. A store that returns a `fs_bem::modal_loading::SweepFrequencyStore` there
+receives each frequency's boundary solve of a skin load's sweep under `sweep_frequency_key`, the loading identity and the frequency's index, as soon as that
+frequency is solved. The next sweep on the same store reads a kept frequency in place of solving it. A bake stopped part way, at a run's time limit for example,
+therefore resumes from the frequencies it solved. The reciprocity and passivity admissions, the diagnostics, the fit and every gate run on the kept bits as on a
+fresh solve's. The `.skin-load` entry a resumed bake keeps is therefore the one-run bake's, byte for byte: each of its fields is a function of the owner, which is
+prepared again; a fold of the kept checks in frequency order; or a function of the kept impedance rows. A frequency whose row refuses stays kept, since `assess`
+is a function of the kept bits, so a resumed bake refuses at once. A frequency entry that does not decode completely refuses, and nothing is solved behind it.
+`ShellBemReport::frequencies_loaded` counts the frequencies read. The whole-grid entry is still found first, so a kept load reads no frequency. The example's
+`SetupDir` keeps them as `.skin-frequency` files in the `--skin-load-store` directory, through the same synced temporary and hard link as every entry. It prints
+`skin_frequencies_loaded`, and `skin_load_store_keeps` names `skin-frequency` beside `skin-load`.
+
 ### An assembled body's modal solve kept between renders (`MaterialShellAssembly::reduce_with_modal_damping`'s `store`)
 
 `reduce_with_modal_damping` and `ReciprocalStringBank::from_material_shell_assembly_prepared` take an optional store, the `SkinLoadStore` that skin loads use;

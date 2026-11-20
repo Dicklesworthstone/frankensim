@@ -143,8 +143,9 @@ impl Profile {
     pub fn observer_store_entry(&self, key: &fs_blake3::ContentHash) -> Option<std::path::PathBuf> {
         self.observer_store.as_ref().map(|store| store.entry(key))
     }
-    /// Keep an assembled body's modal solve and `spec`'s computed two-way skin loads in the existing directory `dir`
-    /// (`--skin-load-store`); a performance without a computed skin load keeps only the modal solve.
+    /// Keep an assembled body's modal solve and `spec`'s computed two-way skin loads, with each frequency of their
+    /// sweeps, in the existing directory `dir` (`--skin-load-store`); a performance without a computed skin load keeps
+    /// only the modal solve.
     pub fn keep_skin_loads(&mut self, dir: &std::path::Path, spec: &input::Spec) -> Result<()> {
         let assembled = matches!(self.model, BodyModel::Assembly(_));
         let skin_loads = matches!(spec.body_radiation, Some(input::BodyRadiation::Skin(_)));
@@ -168,13 +169,19 @@ impl Profile {
         -> Option<String> {
         let (key, loaded) = image?.kept_modes()?;
         let entry = self.shell_modes_store.as_ref()?.entry(&key);
-        let kinds = if self.skin_load_store.is_some() { "shell-modes,skin-load" } else { "shell-modes" };
+        let kinds = if self.skin_load_store.is_some() { "shell-modes,skin-load,skin-frequency" } else { "shell-modes" };
         Some(format!("shell_modes_store_entry={}; shell_modes_loaded={loaded}; skin_load_store_keeps={kinds}",
             entry.display()))
     }
     /// Where the skin load under `key`, its loading identity, is kept, with `--skin-load-store`.
     pub fn skin_load_entry(&self, key: &fs_blake3::ContentHash) -> Option<std::path::PathBuf> {
         self.skin_load_store.as_ref().map(|store| store.entry(key))
+    }
+    /// Where the solve of a skin load's frequency under `key` (`fs_bem::modal_loading::sweep_frequency_key`) is kept,
+    /// with `--skin-load-store`. Only the tests read it.
+    #[cfg(test)]
+    pub fn skin_frequency_entry(&self, key: &fs_blake3::ContentHash) -> Option<std::path::PathBuf> {
+        self.skin_load_store.as_ref().map(|store| store.clone().keeping(skin::SKIN_FREQUENCIES).entry(key))
     }
     pub fn preflight(&self, spec: &input::Spec) -> Result<()> {
         spec.validate_cavity_gas()?;
