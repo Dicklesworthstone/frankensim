@@ -196,6 +196,12 @@ pub(super) trait NonlinearTrial {
     fn hold_partition(&mut self) -> Vec<bool> { Vec::new() }
     /// Releases the held partition, so later stages rescue as before.
     fn release_partition(&mut self) {}
+    /// Last pass only: with `rest` true, later stages run the joint sweep until a
+    /// sweep changes no traction, until called with `false`. Returns whether the
+    /// trial has a joint sweep; one without (a single port) returns `false`.
+    fn rest_sweeps(&mut self, _rest: bool) -> bool {
+        false
+    }
 }
 pub(super) struct NonlinearTrialWork {
     pub observer_pressure_pa: f64,
@@ -650,8 +656,21 @@ impl NonlinearFrictionState {
     // restarts its walk at all-stuck on every trial. So in this pass the
     // rescue first tries the partition the previous trial resolved, kept while
     // it holds a consistent state. A port may change branch once, and partition
-    // once, in this pass; a second change, or any failure, returns the first
-    // pass's refusal. A step the first pass accepts is never solved again.
+    // once, in this pass; a second change, or any failure, ends it. A step the
+    // first pass accepts is never solved again.
+    //
+    // The trials can also cycle with no branch change at all. The joint sweep
+    // starts from zero tractions and stops at its first passing sweep, so its
+    // answer is a step function of the held forces. Two held reactions that are
+    // closer than the sweep's own tolerance can stop at different sweeps and give
+    // each other back. In violin B5's refused step every port stays stuck, the
+    // sweep alternates between 16 and 22 sweeps, and the reaction alternates
+    // between two values 1.57e-10 apart, against a tolerance of 5.05e-11. Only
+    // when the held pass also fails is the step solved once more, from the same
+    // accepted state and memory, with the sweep run to rest. It is accepted by
+    // the same unchanged tolerances. Any failure there returns the first pass's
+    // refusal. The disclosed trial count names the pass that was accepted: up to
+    // the budget the first, up to twice it the held one, past that this one.
     pub(super) fn stage_trial<T: NonlinearTrial>(
         &mut self,
         trial: &mut T,
@@ -674,6 +693,16 @@ impl NonlinearFrictionState {
             accepted.diagnostics.nonlinear_iterations = self.config.max_iterations
                 .saturating_add(accepted.diagnostics.nonlinear_iterations);
             return Ok(accepted);
+        }
+        if trial.rest_sweeps(true) {
+            let rested = self.iterate(trial, external, gate, false);
+            trial.rest_sweeps(false);
+            if let Ok(Ok(mut accepted)) = rested {
+                let both = self.config.max_iterations.saturating_mul(2);
+                accepted.diagnostics.nonlinear_iterations =
+                    both.saturating_add(accepted.diagnostics.nonlinear_iterations);
+                return Ok(accepted);
+            }
         }
         poll(gate)?;
         Err(ModalCouplingError::SolveResidual { relative: ratio, tolerance: 1.0 }.into())

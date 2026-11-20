@@ -15,10 +15,10 @@
 //! the two and never settles; the step must instead slide, with energy closed.
 use super::*;
 
-const MU_S: f64 = 1.2147108804996467;
+pub(super) const MU_S: f64 = 1.2147108804996467;
 const BOW_M_S: f64 = 0.1;
 
-struct StretchQuartic(f64);
+pub(super) struct StretchQuartic(pub(super) f64);
 impl Storage for StretchQuartic {
     fn hamiltonian(&self, q: &[f64]) -> f64 { 0.25 * self.0 * q[0].powi(4) }
     fn gradient(&self, q: &[f64], out: &mut [f64]) { out[0] = self.0 * q[0].powi(3); }

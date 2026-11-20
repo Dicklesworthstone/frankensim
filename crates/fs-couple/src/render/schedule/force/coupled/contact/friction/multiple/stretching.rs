@@ -81,6 +81,10 @@ impl NonlinearTrial for MultipleTrial<'_> {
         moved
     }
     fn release_partition(&mut self) { self.inner.held_partition = None; }
+    fn rest_sweeps(&mut self, rest: bool) -> bool {
+        self.inner.sweep_to_rest = rest;
+        true
+    }
 }
 impl MultiFrictionModalSystem {
     pub(super) fn stage_with_nonlinear(&mut self, external: &[f64],

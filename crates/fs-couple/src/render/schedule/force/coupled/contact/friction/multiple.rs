@@ -272,6 +272,9 @@ pub struct MultiFrictionModalSystem {
     port_endpoint_missed: bool,
     port_headroom: bool,
     port_resolves: usize,
+    // Set only during the reaction iteration's last pass (`stage_trial`): the sweep
+    // then runs past its first passing sweep until a sweep changes no traction.
+    sweep_to_rest: bool,
     // Test only: slip offsets [m] added to the next staged ports' constitutive slip
     // (one per port checked, popped from the back), to plant an endpoint miss.
     #[cfg(test)]
@@ -389,6 +392,7 @@ impl MultiFrictionModalSystem {
             shear_layers: vec![None; p], mindlin_contacts: vec![None; p],
             active_set_budget: 4 * p + 16, obstacle_resolves: 0,
             port_endpoint_missed: false, port_headroom: false, port_resolves: 0,
+            sweep_to_rest: false,
             #[cfg(test)] staging_slip_nudges: Vec::new(),
             stick_work: vec![StickConstraintWork::default(); p], stuck_runs: vec![0; p] })
     }
@@ -1047,6 +1051,13 @@ impl MultiFrictionModalSystem {
     // the sticking bound, and the stepped state's slip can pass that bound by
     // round-off (MagentaBadger 4967: 1.3e-19 m past 1e-12 m). Its re-solve holds the
     // per-port slip test at half the bound.
+    //
+    // Because the sweep starts from zero tractions and stops at its first passing
+    // sweep, its answer is a step function of the held forces: forces 1e-10 apart
+    // can stop at different sweeps. The reaction iteration's last pass alone
+    // (`stage_trial`) sets `sweep_to_rest`. The sweep then goes on past its first
+    // passing sweep until a sweep changes no traction, or to its budget, so the
+    // staged state is the sweep's own fixed point to rounding, with the same tests.
     fn stage_multiple(&mut self, external: &[f64], drives: &[FrictionDrive],
         obstacle_offsets: Option<&[f64]>, gate: Option<&CancelGate>)
         -> Result<MultiFrictionFrame, ModalFrictionError>
@@ -1108,7 +1119,15 @@ impl MultiFrictionModalSystem {
         for r in &mut self.port_roots { *r = None; }
         let mut sweeps = 0;
         let mut rescues = 0usize;
+        let mut before_sweep = if self.sweep_to_rest {
+            self.tractions.clone()
+        } else {
+            Vec::new()
+        };
         for sweep in 1..=self.config.max_sweeps {
+            if self.sweep_to_rest {
+                before_sweep.copy_from_slice(&self.tractions);
+            }
             if let Some(obstacles) = &mut self.obstacles {
                 obstacles.sweep(&self.tractions, self.core.network.dt, gate)?;
             }
@@ -1130,6 +1149,14 @@ impl MultiFrictionModalSystem {
                 .map(ModalFrictionError::Network);
             let port_failure = self.first_port_failure(drives, gate)?;
             if failure.is_none() { failure = port_failure; }
+            // At rest only once a passing sweep changes no traction.
+            if failure.is_none()
+                && self.sweep_to_rest
+                && sweep < self.config.max_sweeps
+                && self.tractions != before_sweep
+            {
+                continue;
+            }
             match failure {
                 None => { sweeps = sweep; break; },
                 Some(cause) if sweep == self.config.max_sweeps => {

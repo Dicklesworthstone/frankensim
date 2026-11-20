@@ -18,6 +18,9 @@ mod history;
 #[path = "nonlinear/cone_edge.rs"]
 mod cone_edge;
 
+#[path = "nonlinear/rest.rs"]
+mod rest;
+
 struct Quartic(f64);
 impl Storage for Quartic {
     fn hamiltonian(&self, q: &[f64]) -> f64 { 0.25 * self.0 * (q[0]*q[0] + q[1]*q[1]).powi(2) }
