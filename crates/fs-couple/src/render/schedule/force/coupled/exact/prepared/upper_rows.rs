@@ -25,6 +25,8 @@
 //!
 //! [`upper_row_form_from`] is the form of `[state | force]` that keeps the same kind of sums ([`StateForms`]): a row
 //! takes the state's columns first, so the next form on the same state continues every row over the force's columns.
+//! [`upper_row_forms_from`] computes several such forms of one `[state | force]` with their rows shared out to threads
+//! by blocks of eight. Which thread computes a row changes no addition, so the bits take no thread count.
 //!
 //! This file names nothing of its crate. `tests/upper_row_forms.rs` compiles it a second time and holds each sum to a
 //! plain loop of the same order over the row-major square, bit for bit.
@@ -86,8 +88,8 @@ impl UpperBlocks {
     }
 }
 
-/// The sum and the magnitude of `z^T W z` for the symmetric square of side `z.len()` that `upper` holds, in the order
-/// of the module's description.
+/// The sum and the magnitude of `z^T W z`, `W` the symmetric square `upper` holds, in the module's order.
+#[allow(dead_code, reason = "only tests/upper_row_forms.rs calls this one")]
 pub(super) fn upper_row_form(upper: &UpperBlocks, z: &[f64]) -> (f64, f64) {
     upper_row_form_from(&mut None, upper, z, 0)
 }
@@ -104,60 +106,138 @@ pub(super) struct StateForms {
 /// [`upper_row_form`] of `upper` and `z`, whose first `state` entries are a state and whose others are a held force.
 /// A row's columns run from left to right, so its sum over the state's columns comes first: those sums are kept in
 /// `slot`, a call whose state has the kept bits in every entry continues them over the force's columns, and any other
-/// call computes and keeps its own. Either way a row adds its terms in the order of the module's description, and
-/// the rows are added in row order.
+/// call computes and keeps its own. Either way a row adds its terms in the module's order, and rows add in row order.
+#[allow(dead_code, reason = "only tests/upper_row_forms.rs calls this one")]
 pub(super) fn upper_row_form_from(
     slot: &mut Option<StateForms>,
     upper: &UpperBlocks,
     z: &[f64],
     state: usize,
 ) -> (f64, f64) {
-    let side = z.len();
-    let mut kept = slot.take().unwrap_or_default();
-    let same = |(bits, entry): (&u64, &f64)| *bits == entry.to_bits();
-    let held =
-        kept.rows[0].len() == side && kept.key.len() == state && kept.key.iter().zip(z).all(same);
-    for row in &mut kept.rows {
-        row.resize(side, 0.0);
-    }
-    let [sums, sizes, rows, row_sizes] = kept.rows.each_mut();
-    if !held {
-        kept.key.clear();
-        kept.key.extend(z[..state].iter().map(|v| v.to_bits()));
-        sums.fill(0.0);
-        sizes.fill(0.0);
-        rows_extended(upper, z, 0..state, sums, sizes);
-    }
-    rows.copy_from_slice(sums);
-    row_sizes.copy_from_slice(sizes);
-    rows_extended(upper, z, state..side, rows, row_sizes);
-    let (mut sum, mut magnitude) = (0.0, 0.0);
-    for (i, (partial, size)) in rows.iter().zip(row_sizes.iter()).enumerate() {
-        let diagonal = upper.diagonal(i) * z[i];
-        sum += z[i] * (diagonal + 2.0 * partial);
-        magnitude += z[i].abs() * (diagonal.abs() + 2.0 * size);
-    }
-    *slot = Some(kept);
-    (sum, magnitude)
+    upper_row_forms_from(&mut [(upper, slot)], z, state, 1)[0]
 }
 
-/// Add to each row's sum and magnitude its terms `W_ij z_j` for the columns of `columns` right of its diagonal, in
-/// the order of the module's description: the columns inside its block of eight, then the columns every row of a
-/// whole block shares. Two calls on adjoining ranges add what one call on their union adds, in its order.
+/// [`upper_row_form_from`] of each `(upper, slot)` of `forms`, with the same `z` and `state`, on `threads` threads (the
+/// calling thread among them). Each thread takes a contiguous range of whole blocks of eight rows, cut where the upper
+/// triangle's entries before it reach an equal share, and runs every form over its rows. A row adds its terms in the
+/// order of the module's description whichever thread runs it, and the calling thread adds the rows in row order, so
+/// each form has the bits of [`upper_row_form_from`] for every thread count. One set of threads serves every form.
+pub(super) fn upper_row_forms_from(
+    forms: &mut [(&UpperBlocks, &mut Option<StateForms>)],
+    z: &[f64],
+    state: usize,
+    threads: usize,
+) -> Vec<(f64, f64)> {
+    let side = z.len();
+    let mut kept: Vec<_> = forms
+        .iter_mut()
+        .map(|(_, slot)| slot.take().unwrap_or_default())
+        .collect();
+    let held: Vec<_> = kept.iter_mut().map(|kept| kept.ready(z, state)).collect();
+    let (starts, total) = forms.first().map_or((&[][..], 0), |(upper, _)| {
+        (&upper.starts[..], upper.entries.len())
+    });
+    let threads = threads.clamp(1, starts.len().max(1));
+    let cuts: Vec<_> = (0..=threads)
+        .map(|t| starts.partition_point(|s| s * threads < total * t))
+        .collect();
+    let mut work: Vec<Vec<_>> = (0..threads).map(|_| Vec::new()).collect();
+    for (((upper, _), kept), held) in forms.iter().zip(&mut kept).zip(&held) {
+        let mut rest = kept.rows.each_mut().map(|row| &mut row[..]);
+        for (part, cut) in work.iter_mut().zip(cuts.windows(2)) {
+            let rows = (cut[1] * BLOCK).min(side) - (cut[0] * BLOCK).min(side);
+            let mine = rest.each_mut().map(|row| {
+                let (mine, others) = core::mem::take(row).split_at_mut(rows);
+                *row = others;
+                mine
+            });
+            part.push((*upper, *held, mine));
+        }
+    }
+    let run = |part: Vec<(&UpperBlocks, bool, [&mut [f64]; 4])>, blocks: Range<usize>| {
+        for (upper, held, [sums, sizes, rows, row_sizes]) in part {
+            if !held {
+                rows_extended(upper, z, 0..state, blocks.clone(), sums, sizes);
+            }
+            rows.copy_from_slice(sums);
+            row_sizes.copy_from_slice(sizes);
+            rows_extended(upper, z, state..side, blocks.clone(), rows, row_sizes);
+        }
+    };
+    // The scope joins every thread it started before it returns, and panics if one of them did.
+    let mut parts = work
+        .into_iter()
+        .zip(cuts.windows(2).map(|cut| cut[0]..cut[1]));
+    let (mine, blocks) = parts.next().unwrap_or_default();
+    if threads > 1 {
+        std::thread::scope(|scope| {
+            for (part, blocks) in parts {
+                scope.spawn(move || run(part, blocks));
+            }
+            run(mine, blocks);
+        });
+    } else {
+        drop(parts);
+        run(mine, blocks);
+    }
+    let mut values = Vec::with_capacity(forms.len());
+    for ((upper, slot), kept) in forms.iter_mut().zip(kept) {
+        let (mut sum, mut magnitude) = (0.0, 0.0);
+        for (i, (partial, size)) in kept.rows[2].iter().zip(&kept.rows[3]).enumerate() {
+            let diagonal = upper.diagonal(i) * z[i];
+            sum += z[i] * (diagonal + 2.0 * partial);
+            magnitude += z[i].abs() * (diagonal.abs() + 2.0 * size);
+        }
+        **slot = Some(kept);
+        values.push((sum, magnitude));
+    }
+    values
+}
+
+impl StateForms {
+    /// Make the four vectors of rows `z.len()` long, and say whether the kept sums are over `state` entries with the
+    /// bits of `z`'s; when they are not, they become `z`'s, set to +0.0 and still to be computed.
+    fn ready(&mut self, z: &[f64], state: usize) -> bool {
+        let same = |(bits, entry): (&u64, &f64)| *bits == entry.to_bits();
+        let held = self.rows[0].len() == z.len()
+            && self.key.len() == state
+            && self.key.iter().zip(z).all(same);
+        for row in &mut self.rows {
+            row.resize(z.len(), 0.0);
+        }
+        if !held {
+            self.key.clear();
+            self.key.extend(z[..state].iter().map(|v| v.to_bits()));
+            self.rows[0].fill(0.0);
+            self.rows[1].fill(0.0);
+        }
+        held
+    }
+}
+
+/// Add to the sum and magnitude of each row of the blocks `blocks` its terms `W_ij z_j` for the columns of `columns`
+/// right of its diagonal, in the order of the module's description: the columns inside its block of eight, then the
+/// columns every row of a whole block shares. `sums` and `sizes` hold those rows only, from the first block's first
+/// row. Two calls on adjoining ranges of columns add what one call on their union adds, in its order.
 fn rows_extended(
     upper: &UpperBlocks,
     z: &[f64],
     columns: Range<usize>,
+    blocks: Range<usize>,
     sums: &mut [f64],
     sizes: &mut [f64],
 ) {
     let side = z.len();
-    for (start, first) in upper.starts.iter().zip((0..side).step_by(BLOCK)) {
+    let offset = blocks.start * BLOCK;
+    for (start, first) in upper.starts[blocks]
+        .iter()
+        .zip((offset..side).step_by(BLOCK))
+    {
         let last = (first + BLOCK).min(side);
         let (square, shared) = upper.entries[*start..].split_at(BLOCK * BLOCK);
         let (mut partial, mut size) = ([0.0_f64; BLOCK], [0.0_f64; BLOCK]);
-        partial[..last - first].copy_from_slice(&sums[first..last]);
-        size[..last - first].copy_from_slice(&sizes[first..last]);
+        partial[..last - first].copy_from_slice(&sums[first - offset..last - offset]);
+        size[..last - first].copy_from_slice(&sizes[first - offset..last - offset]);
         for (k, i) in (first..last).enumerate() {
             let inside = (i + 1).max(columns.start)..last.min(columns.end);
             if inside.is_empty() {
@@ -181,8 +261,8 @@ fn rows_extended(
                 }
             }
         }
-        sums[first..last].copy_from_slice(&partial[..last - first]);
-        sizes[first..last].copy_from_slice(&size[..last - first]);
+        sums[first - offset..last - offset].copy_from_slice(&partial[..last - first]);
+        sizes[first - offset..last - offset].copy_from_slice(&size[..last - first]);
     }
 }
 

@@ -1,6 +1,7 @@
 //! The prepared operator's two orders by rows (the loss forms over the upper triangle, the storage over the whole
 //! square), each held to a plain loop of the same order. The forms and the products read copies by blocks of eight
-//! rows (`UpperBlocks`, `RowBlocks`); the plain loops read the row-major square.
+//! rows (`UpperBlocks`, `RowBlocks`); the plain loops read the row-major square. The forms are held to it on one
+//! thread and with their rows shared out to several.
 //!
 //! fs-couple's lib test crate does not build under the memory guard, so this target compiles the kernel's own
 //! source file a second time. That file names nothing of its crate.
@@ -9,8 +10,8 @@
 mod upper_rows;
 
 use upper_rows::{
-    RowBlocks, UpperBlocks, bitwise_symmetric, identity_rows, product_from, row_storage,
-    upper_row_form, upper_row_form_from,
+    RowBlocks, StateForms, UpperBlocks, bitwise_symmetric, identity_rows, product_from,
+    row_storage, upper_row_form, upper_row_form_from, upper_row_forms_from,
 };
 
 /// Sides around the blocks of eight rows, and one near a hundred.
@@ -297,6 +298,31 @@ fn a_form_continued_from_a_states_kept_sums_has_the_bits_of_a_plain_loop() {
                     let z = z(&y, 0);
                     let form = bits(upper_row_form_from(&mut slot, &upper, &z, state));
                     assert_eq!(form, bits(plain(&w, &z)), "{side} {state} at {at}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn forms_shared_out_to_threads_have_the_bits_of_a_plain_loop() {
+    let bits = |(sum, magnitude): (f64, f64)| (sum.to_bits(), magnitude.to_bits());
+    // Sides of one block, of a whole and a short block (a split inside the last block), and of many blocks.
+    for (seed, side) in (1..).zip([1, 7, 9, 61, 100]) {
+        let w: Vec<_> = (0..3).map(|k| gramian(side, 10 * seed + k)).collect();
+        let upper: Vec<_> = w.iter().map(|w| UpperBlocks::new(w, side)).collect();
+        for state in [0, side / 2, side] {
+            let x = mixed(state, seed + 30);
+            for threads in [1, 2, 3, 7] {
+                let mut slots: Vec<Option<StateForms>> = (0..3).map(|_| None).collect();
+                // The first sweep computes the state's sums; the second continues them under another force.
+                for k in 0..2 {
+                    let z = [&x[..], &mixed(side - state, seed + 40 + k)].concat();
+                    let mut forms: Vec<_> = upper.iter().zip(&mut slots).collect();
+                    let forms = upper_row_forms_from(&mut forms, &z, state, threads);
+                    let plain: Vec<_> = w.iter().map(|w| bits(plain(w, &z))).collect();
+                    let forms: Vec<_> = forms.into_iter().map(bits).collect();
+                    assert_eq!(forms, plain, "{side} {state} {threads} threads, sweep {k}");
                 }
             }
         }

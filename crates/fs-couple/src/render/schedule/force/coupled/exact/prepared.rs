@@ -693,27 +693,39 @@ impl PreparedNetwork {
         Ok(LossSweep { z: z.to_vec(), component, connection, material })
     }
 
-    /// The sweep with each Gramian summed by rows over its upper triangle (`upper_rows`), on one thread, from its copy
-    /// in `upper_blocks`. The refusals are read in the serial order: component, connection, material. Each Gramian
+    /// The sweep with each Gramian summed by rows over its upper triangle (`upper_rows`), from its copy in
+    /// `upper_blocks`, the forms' rows shared out to `step_threads` threads (`upper_rows::upper_row_forms_from`): the
+    /// same additions in the same order for every thread count. A Gramian without its copy refuses before any form is
+    /// computed; the forms' refusals are then read in the serial order: component, connection, material. Each Gramian
     /// keeps its rows' sums over the state's columns, and a sweep on the same state continues them over the held
-    /// force's (`upper_rows::upper_row_form_from`): the same additions in the same order. A poisoned lock sums every
-    /// row whole.
+    /// force's: the same additions in the same order. Under a poisoned lock the sums are kept for this sweep only.
     fn upper_row_sweep(&self, z: &[f64]) -> Result<LossSweep, ModalCouplingError> {
         let (mut kept, state) = (self.state_forms.lock().ok(), z.len() - self.count);
-        let mut form = |which: usize, gramian: &Option<Vec<f64>>| {
-            gramian.as_ref().map_or(Ok(0.0), |_| {
-                let copy = self.upper_blocks[which].as_ref();
-                let upper = copy.ok_or_else(|| invalid("a loss Gramian has no copy by blocks"))?;
-                let whole = || upper_rows::upper_row_form(upper, z);
-                let (sum, magnitude) = kept.as_deref_mut().map_or_else(whole, |slots| {
-                    upper_rows::upper_row_form_from(&mut slots[which], upper, z, state)
-                });
-                checked_loss(sum, magnitude)
-            })
+        let mut unkept = [None, None, None];
+        let slots = kept.as_deref_mut().unwrap_or(&mut unkept);
+        let gramians = [
+            &self.component_loss,
+            &self.connection_total,
+            &self.material_loss,
+        ];
+        let mut forms = Vec::with_capacity(3);
+        for ((gramian, copy), slot) in gramians.into_iter().zip(&self.upper_blocks).zip(slots) {
+            if gramian.is_some() {
+                let no_copy = || invalid("a loss Gramian has no copy by blocks");
+                forms.push((copy.as_ref().ok_or_else(no_copy)?, slot));
+            }
+        }
+        let threads = step_threads(fs_la::eigen_complex::declared_workers(), z.len());
+        let sums = upper_rows::upper_row_forms_from(&mut forms, z, state, threads);
+        let mut values = sums.into_iter().map(|(s, m)| checked_loss(s, m));
+        let no_form = || Err(invalid("a loss Gramian has no form"));
+        let mut form = |gramian: &Option<Vec<f64>>| match gramian {
+            None => Ok(0.0),
+            Some(_) => values.next().unwrap_or_else(no_form),
         };
-        let component = form(0, &self.component_loss)?;
-        let connection = form(1, &self.connection_total)?;
-        let material = form(2, &self.material_loss)?;
+        let component = form(&self.component_loss)?;
+        let connection = form(&self.connection_total)?;
+        let material = form(&self.material_loss)?;
         Ok(LossSweep { z: z.to_vec(), component, connection, material })
     }
 

@@ -17,6 +17,24 @@
 
 ## New sections (newest first)
 
+### A loss sweep's three forms share the step's threads (`upper_rows::upper_row_forms_from`)
+
+The sweep by rows computed its forms (component, connection, material) one after another on one thread. `upper_row_forms_from` takes them together and shares their
+rows out to the step's threads (`step_threads`: one below a side of 1024, otherwise the declared workers up to 256), the calling thread among them, in one
+`std::thread::scope` a sweep. Each thread takes a run of whole blocks of eight rows, cut where the upper triangle's entries before it reach an equal share, and runs every
+form over its rows: the state's columns into the kept sums when the state's key is not held, then the force's columns. A row adds the same terms in the same order
+whichever thread runs it, and the calling thread adds the rows in row order, so each form keeps its bits for every thread count. One thread opens no scope.
+
+A Gramian without its copy by blocks now refuses before any form is computed; the copies are made with the Gramians, so only an operator built wrong meets that. The
+forms' refusals are read in the serial order as before. Under a poisoned lock the sums are kept for that sweep only, which adds what a whole row's pass adds.
+
+Evidence. `tests/upper_row_forms.rs` holds the three forms on 1, 2, 3 and 7 threads to the plain loop of the form's order, bit for bit, at sides 1, 7, 9, 61 and 100 and
+states of none, half and all of the entries, for a sweep that computes the state's sums and one that continues them under another force. Viola D4 (side 5433) at
+`--workers 7` steps at 12.031 ms a frame against 17.175 ms on 8fa3491d19 (1500 s each, one after the other), its first 87552 frames byte-equal; the viola Db4 control
+card renders the same wav (md5), and the violin A4 control card, rendered beside 8fa3491d19's, the same first 178944 frames.
+
+Not tested: a thread that panics (the scope joins the others and then panics).
+
 ### A skin load's sweep kept frequency by frequency (`SkinLoadStore::frequencies`)
 
 `SkinLoadStore` gains a provided method, `frequencies`, which is None by default. A store that returns a `fs_bem::modal_loading::SweepFrequencyStore` there
