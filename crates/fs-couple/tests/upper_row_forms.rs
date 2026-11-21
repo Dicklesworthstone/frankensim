@@ -10,8 +10,8 @@
 mod upper_rows;
 
 use upper_rows::{
-    RowBlocks, StateForms, UpperBlocks, bitwise_symmetric, identity_rows, product_from,
-    row_storage, upper_row_form, upper_row_form_from, upper_row_forms_from,
+    RowBlocks, StateForms, UpperBlocks, bitwise_symmetric, identity_rows, product_from, row_from,
+    row_storage, state_sums, upper_row_form, upper_row_form_from, upper_row_forms_from,
 };
 
 /// Sides around the blocks of eight rows, and one near a hundred.
@@ -270,6 +270,60 @@ fn a_product_continued_from_a_states_kept_sums_has_the_bits_of_a_plain_product()
                     let product = bits(next_product(&mut slot, &blocks, &z, state));
                     let plain = plain_product(&matrix, &z);
                     assert_eq!(product, plain, "{side} {rows} {state} at {at}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_row_continued_from_a_states_kept_sums_has_the_bits_of_a_plain_product() {
+    // A state's sums are kept on the next of 1, 2, 3 and 7 threads, by `state_sums` or by the product; a call on a
+    // state that is held starts none.
+    let mut counts = [1, 2, 3, 7].into_iter().cycle();
+    for (seed, side) in (1..).zip(SIDES) {
+        // All the rows of a square, then its first two thirds (67 rows at side 100: not whole blocks of eight).
+        for rows in [side, (2 * side).div_ceil(3)] {
+            let matrix = mixed(rows * side, seed);
+            let blocks = RowBlocks::new(&matrix, side);
+            let check = |sums: &[f64], z: &[f64], state, plain: &[u64], case: &str| {
+                for (index, row) in matrix.chunks_exact(side).enumerate() {
+                    let continued = row_from(sums, index, row, z, state).to_bits();
+                    assert_eq!(continued, plain[index], "{case} row {index}");
+                }
+            };
+            // No state, a third of the columns, all but the last, all of them.
+            for state in [0, side / 3, side - 1, side] {
+                let x = mixed(state, seed + 10);
+                let force = |k: u64| mixed(side - state, seed + 20 + k);
+                let mut slot = None;
+                // The first z keeps the state's sums; the next two continue from them under other forces, and so does
+                // a product on the same state.
+                for k in 0..3 {
+                    let z = [&x[..], &force(k)].concat();
+                    let case = format!("{side} {rows} {state} {k}");
+                    let plain = plain_product(&matrix, &z);
+                    let threads = counts.next().unwrap_or(1);
+                    let sums = state_sums(&mut slot, &blocks, &x, threads).to_vec();
+                    check(&sums, &z, state, &plain, &case);
+                    let product = product_from(&mut slot, &blocks, &z, state, 1);
+                    let bits: Vec<_> = product.iter().map(|v| v.to_bits()).collect();
+                    assert_eq!(bits, plain, "{case} product");
+                }
+                // A state that differs in the last bit of one entry, the first and then the last, is another state:
+                // the product keeps its sums, and `state_sums` reads them.
+                for at in [0, state.saturating_sub(1)].into_iter().take(state.min(2)) {
+                    let mut y = x.clone();
+                    y[at] = f64::from_bits(y[at].to_bits() ^ 1);
+                    let z = [&y[..], &force(0)].concat();
+                    let case = format!("{side} {rows} {state} at {at}");
+                    let plain = plain_product(&matrix, &z);
+                    let threads = counts.next().unwrap_or(1);
+                    let product = product_from(&mut slot, &blocks, &z, state, threads);
+                    let bits: Vec<_> = product.iter().map(|v| v.to_bits()).collect();
+                    assert_eq!(bits, plain, "{case} product");
+                    let sums = state_sums(&mut slot, &blocks, &y, 1).to_vec();
+                    check(&sums, &z, state, &plain, &case);
                 }
             }
         }

@@ -17,6 +17,41 @@
 
 ## New sections (newest first)
 
+### The air's port sums continue the sums the product keeps for its state (`upper_rows::state_sums`, `upper_rows::row_from`)
+
+With two-way air (`air::PreparedAir`) a step summed each source mode's transition row `2 mode` over the whole `z`, `3 n + arms` terms a port, on the calling thread:
+in each `propagate` (`predict_free`'s and `advance`'s), on the held input before the air force, and once more in `advance`, on the final `z`. `z = [D q, v, memory | u]`
+puts the state's `2 n + arms` columns first and the held force after them, and the air force changes only `u`, so each of these `z` has the product's state columns
+as its prefix. A port's row sum is the product's own left-to-right sum over that row, so it is the row's sum over the state's columns continued over the `n` columns
+of the held force.
+
+`propagate` now takes every product row's sum over its state's columns from `state_sums`: the kept ones when the operator holds that state's (the slot of the
+`upper_rows::product_from` section below), else computed and kept, on the product's threads with the product's split, the work the product on that state would
+do moments later. `row_from` continues a port's row from its row's kept sum over the held force's columns in column order, and the product continues from the same
+sums. `advance` takes each port's increment from the propagated end state, `endpoint[2 mode] - x[2 mode]`: the product's entry on the final `z`, divided by the mode's
+weight, less the start displacement, which is what `port_increments` computed on that `z`, each value checked when `propagate` formed it. So every increment has its
+bits, and no refusal moves: the checks `advance` no longer makes could refuse only values `propagate` had already passed. Under a poisoned lock the port rows are
+summed whole as before; `losses`, which only tests call, sums them whole as before. `force_rounding` is unchanged: it computes its drives from the increments
+`advance` passes it, the ones the air steps with, and carries nothing from one call to the next, so no drive it reads can belong to another step's increments.
+
+On more than one product thread, a `propagate` on a state the operator does not hold now starts the product's threads twice, once to keep the state's sums and once
+for the product's held-force columns; on one thread it starts none.
+
+Evidence. `a_row_continued_from_a_states_kept_sums_has_the_bits_of_a_plain_product` (tests/upper_row_forms.rs) holds `row_from` on `state_sums` to one plain
+left-to-right sum a row, bit for bit, in the sides, rows and states of the `product_from` test: under three forces on one state whose sums `state_sums` kept, with the
+product that continues from them; then on states that differ in the last bit of one entry, whose sums the product kept and `state_sums` reads. The sums are kept on
+1, 2, 3 and 7 threads in turn. Each of six changes fails it: the continuation from 0.0; the held force's columns skipped; the kept key's bits not compared; the rows
+after the last whole block not kept; the other threads reading the first run's rows; the other threads never run. `coupled_damping_update` (its prepared
+radiation history, within 2e-10 of a reference integration) and `coupled_impulse` step prepared systems with air through both paths. Two more changes fail
+`coupled_damping_update`, whose prepared step with air in `intrinsic_refresh_preserves_warm_maxwell_and_radiation_history` is then refused as "prepared air exchange
+residual": `advance` taking each port's increment from its end velocity, and a port's row continued from the next row's kept sum.
+Viola D4 at `--workers 7`, a card without air, on this package's binary against 745573d861's (md5 465807fd): the first 72064 frames, all that this package's render
+wrote, are byte-equal; the viola Db4 control renders md5 fa81fa11cac8cb645d68d729ddd7b502 on both (BrightOsprey's P6A, 2026-11-21). The two D4 renders ran one after
+the other, so they give no timing.
+
+Not tested: a system's port sums on more than one thread (no test target has a side of 1024); a render with two-way air (a material-strings card has it only
+with a skin load, which each binary bakes again, about 52 min).
+
 ### The stage's strains and loads and the prepared storage's chains share the step's threads (`relaxation::arms::arm_chains_on`)
 
 At viola D4's size (side 5433, 3627 arms, `--workers 7`) the stage of the material arms (`stage_material_state`) and the prepared operator's storage

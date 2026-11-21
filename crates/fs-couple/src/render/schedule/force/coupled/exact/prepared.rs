@@ -575,7 +575,7 @@ impl PreparedNetwork {
         let air_force = match &self.air {
             None => None,
             Some(air) => {
-                let force = air.exchange_force(&air.port_increments(&z, &x, &self.weights)?, &air.free_increments(radiation)?)?;
+                let force = air.exchange_force(&self.port_increments(air, &z, &x)?, &air.free_increments(radiation)?)?;
                 for (&mode, f) in air.sources().iter().zip(&force) {
                     u[mode] = finite(u[mode] + f)?;
                 }
@@ -632,7 +632,9 @@ impl PreparedNetwork {
                 solver_certificate: None,
             }, x, u));
         };
-        let dq_ports = air.port_increments(&z, &x, &self.weights)?;
+        // Each port's increment is its end displacement less its start one, which `propagate` formed from the product on
+        // z and checked: the bits `port_increments` gives on that z, whose checks could refuse only what was passed there.
+        let dq_ports = air.sources().iter().map(|&mode| finite(endpoint[2 * mode] - x[2 * mode])).collect::<Result<Vec<_>, _>>()?;
         let step = air.advance(radiation, &dq_ports)?;
         // The held force the air's own step implies must be the one the mechanics were held at, and the work each side
         // received must cancel. Both forces are formed from increments, end less start, so each port's defect is held
@@ -815,6 +817,23 @@ impl PreparedNetwork {
         }
     }
 
+    /// The air's port increments on `z` (`air::PreparedAir::port_increments`), each port's row continued from its sum over
+    /// the state's columns, which are kept (`upper_rows::state_sums`) for the product on the same state to continue too;
+    /// under a poisoned lock, each row summed whole.
+    fn port_increments(&self, air: &air::PreparedAir, z: &[f64], x: &[f64]) -> Result<Vec<f64>, ModalCouplingError> {
+        let rows = &self.transition[..self.product_rows * z.len()];
+        match self.state_sums.lock() {
+            Ok(mut slot) => {
+                let copy = || upper_rows::RowBlocks::new(rows, z.len());
+                let blocks = self.transition_blocks.get_or_init(copy);
+                let (state, threads) = (z.len() - self.count, apply_threads(rows, z.len()));
+                let sums = upper_rows::state_sums(&mut slot, blocks, &z[..state], threads);
+                air.port_increments(z, x, &self.weights, Some((sums, state)))
+            }
+            Err(_) => air.port_increments(z, x, &self.weights, None),
+        }
+    }
+
     /// How many leading rows of the transition a step's product computes.
     pub(super) fn product_rows(&self) -> usize {
         self.product_rows
@@ -842,7 +861,7 @@ impl PreparedNetwork {
         // the air with.
         let radiated = match &self.air {
             None => 0.0,
-            Some(air) => air.loss(&x[state_count..], &air.port_increments(&z, mechanical, &self.weights)?)?,
+            Some(air) => air.loss(&x[state_count..], &air.port_increments(&z, mechanical, &self.weights, None)?)?,
         };
         let sum = finite(component + connection + material + radiated)?;
         if !total.is_finite() || (sum - total).abs() > MATRIX_TOL * sum.abs().max(total.abs()).max(f64::MIN_POSITIVE) {

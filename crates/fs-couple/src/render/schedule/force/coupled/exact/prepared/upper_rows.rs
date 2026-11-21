@@ -22,7 +22,9 @@
 //! ([`StateSums`]): the next product on the same state adds only the force's columns, the same additions in the same
 //! order as one left-to-right sum. It reads the rows from [`RowBlocks`], a copy by blocks of eight rows in which a
 //! column's eight entries that a block's rows share lie together, as in [`UpperBlocks`], and shares the blocks out to
-//! threads. The sums are kept a row, so a product on another thread count reads the same ones.
+//! threads. The sums are kept a row, so a product on another thread count reads the same ones. [`state_sums`] gives a
+//! caller the kept sums of a state before its product, computing and keeping them first if need be, and [`row_from`]
+//! continues one row from them: the same sum as that row's entry of the product.
 //!
 //! [`upper_row_form_from`] is the form of `[state | force]` that keeps the same kind of sums ([`StateForms`]): a row
 //! takes the state's columns first, so the next form on the same state continues every row over the force's columns.
@@ -333,6 +335,24 @@ pub(super) struct StateSums {
     sums: Vec<f64>,
 }
 
+impl StateSums {
+    /// Whether these are the sums of `rows` rows over a state with the bits of `head` in every entry. If not, they
+    /// become that state's: every sum +0.0 and still to be computed.
+    fn hold(&mut self, rows: usize, head: &[f64]) -> bool {
+        let same = |(bits, entry): (&u64, &f64)| *bits == entry.to_bits();
+        let held = self.sums.len() == rows
+            && self.key.len() == head.len()
+            && self.key.iter().zip(head).all(same);
+        if !held {
+            self.key.clear();
+            self.key.extend(head.iter().map(|v| v.to_bits()));
+            self.sums.clear();
+            self.sums.resize(rows, 0.0);
+        }
+        held
+    }
+}
+
 /// The product of the whole rows that `blocks` holds (each of length `z.len()`) by `z`, whose first `state` entries are
 /// a state and whose others are a held force, on `threads` threads (the calling thread among them). Each entry is its
 /// row's sum of `row[j] * z[j]` in column order from 0.0. The sums over the state's columns are kept in `slot`, one a
@@ -350,16 +370,7 @@ pub(super) fn product_from(
 ) -> Vec<f64> {
     let (head, tail) = z.split_at(state);
     let mut kept = slot.take().unwrap_or_default();
-    let same = |(bits, entry): (&u64, &f64)| *bits == entry.to_bits();
-    let held = kept.sums.len() == blocks.rows
-        && kept.key.len() == state
-        && kept.key.iter().zip(head).all(same);
-    if !held {
-        kept.key.clear();
-        kept.key.extend(head.iter().map(|v| v.to_bits()));
-        kept.sums.clear();
-        kept.sums.resize(blocks.rows, 0.0);
-    }
+    let held = kept.hold(blocks.rows, head);
     let mut product = vec![0.0; blocks.rows];
     let run = |start: usize, sums: &mut [f64], product: &mut [f64]| {
         if !held {
@@ -383,6 +394,40 @@ pub(super) fn product_from(
     });
     *slot = Some(kept);
     product
+}
+
+/// Every row's sum over the columns of the state `head`, in column order from 0.0: the kept ones when `slot` holds
+/// that state's, else computed on `threads` threads, which share the rows as [`product_from`] does, and kept, so a
+/// product on the same state continues from them. Each sum has the same bits either way and for every thread count.
+pub(super) fn state_sums<'a>(
+    slot: &'a mut Option<StateSums>,
+    blocks: &RowBlocks,
+    head: &[f64],
+    threads: usize,
+) -> &'a [f64] {
+    let mut kept = slot.take().unwrap_or_default();
+    if !kept.hold(blocks.rows, head) {
+        let per = (blocks.rows.div_ceil(BLOCK).div_ceil(threads.max(1)) * BLOCK).max(1);
+        let mut parts = (0..).step_by(per).zip(kept.sums.chunks_mut(per));
+        let first = parts.next();
+        // The scope joins every thread it started before it returns, and panics if one of them did. One thread starts none.
+        std::thread::scope(|scope| {
+            for (start, sums) in parts {
+                scope.spawn(move || row_sums(blocks, start, 0, head, sums));
+            }
+            if let Some((start, sums)) = first {
+                row_sums(blocks, start, 0, head, sums);
+            }
+        });
+    }
+    &slot.insert(kept).sums
+}
+
+/// Row `index`'s sum of `row[j] * z[j]` over every column in order from 0.0, where `row` is that row of the matrix
+/// whose sums over the first `state` columns `sums` holds ([`state_sums`]): its kept sum continued over the others.
+pub(super) fn row_from(sums: &[f64], index: usize, row: &[f64], z: &[f64], state: usize) -> f64 {
+    let terms = row[state..].iter().zip(&z[state..]);
+    terms.fold(sums[index], |s, (a, b)| s + a * b)
 }
 
 /// Add to each entry of `sums`, the rows from `start` (a multiple of eight) on, its row's `row[first + j] * values[j]` in

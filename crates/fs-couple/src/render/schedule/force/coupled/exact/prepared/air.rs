@@ -181,11 +181,19 @@ impl PreparedAir {
     }
 
     /// Each source mode's end-displacement increment for the mechanical state vector z. Every row's sum is formed in the
-    /// transition product's own order, so these are the bits of the endpoint the same z propagates to.
-    pub(super) fn port_increments(&self, z: &[f64], x: &[f64], weights: &[f64]) -> Result<Vec<f64>, ModalCouplingError> {
+    /// transition product's own order, so these are the bits of the endpoint the same z propagates to. `held`, when
+    /// given, is each product row's sum over the first `state` entries of z (`upper_rows::state_sums`): a port's row
+    /// sum then continues from its own row's over the rest (`upper_rows::row_from`), the same sum.
+    pub(super) fn port_increments(&self, z: &[f64], x: &[f64], weights: &[f64], held: Option<(&[f64], usize)>)
+        -> Result<Vec<f64>, ModalCouplingError>
+    {
         let d = z.len();
         self.sources.iter().zip(self.port_rows.chunks_exact(d)).map(|(&mode, row)| {
-            let end = finite(row.iter().zip(z).fold(0.0, |s, (a, b)| s + a * b))?;
+            let sum = match held {
+                Some((sums, state)) => super::upper_rows::row_from(sums, 2 * mode, row, z, state),
+                None => row.iter().zip(z).fold(0.0, |s, (a, b)| s + a * b),
+            };
+            let end = finite(sum)?;
             finite(finite(end / weights[mode])? - x[2 * mode])
         }).collect()
     }
