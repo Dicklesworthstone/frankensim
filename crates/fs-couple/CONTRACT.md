@@ -17,6 +17,26 @@
 
 ## New sections (newest first)
 
+### The arms' storage of a staged state is summed once (`CoupledModalSystem::material_energy_j`)
+
+The total energy of an accepted state (`total_energy_direct`, once per accepted state through the operator's memo) summed every arm's strain over the modes again
+(`stored_energy`), though the stage that produced the state had just summed the same chains. `stage_material_state` now keeps the storage it returns with the state
+words it read: each mode's displacement, then each arm's memory, written only once `staged_arms` has returned Ok. `material_energy_j` serves it to a state whose words
+have those bits, and otherwise sums as before. The two sums are the same arithmetic since `relaxation::arms`: each strain `sqrt(k) b_0 q_0 + ..` from +0.0 in mode
+order, its mismatch `strain - z`, then `m^2 / 2` from +0.0 in arm order, with the same `det::sqrt`; a stage that returned Ok had every chain finite at its end, so
+every partial sum `stored_energy` checks was finite too. A served storage therefore has the bits of the computed one, and the same refusals. `publish_staged`
+publishes the stage's words: the candidates are restored from the endpoint (`restore_states` keeps the states it checks) and the candidate memory was copied from it.
+
+The kept storage is a function of the kept words and of each arm's stiffness and projection only. The relaxation times' exchange (`coefficients/rates.rs`) swaps the
+arms but changes only their relaxation times, so it leaves the kept storage right. The arm update (`relaxation.rs`) is the one writer of stiffness and projection; it
+lengthens the memory, so no kept words can match afterwards, and it drops the kept storage as well. The equilibrium initializations publish a state without the stage,
+with new displacements, and so are summed. Not covered: no public path reaches a state whose displacements equal the kept ones while its memory differs, so no test
+can tell the key's memory words or the arm update's drop from their absence.
+
+Evidence. `the_storage_a_stage_kept_is_served_only_to_a_state_with_its_bits` (tests/coupled_coefficient_update.rs) holds the storage to a plain fold, bit for bit,
+after each of four steps, and after a step refused at the total energy once its arms were staged, which keeps the storage of a state that is never published.
+Viola D4 at `--workers 7` on this package's binary against cd9470f858's (md5 a7b940e5): the first 108288 frames, the base's whole wav, are byte-equal; the viola Db4 control renders md5 fa81fa11cac8cb645d68d729ddd7b502 on both (BrightOsprey's P4A, 2026-11-21). The two D4 renders ran at different loads, so they give no timing.
+
 ### The Maxwell arms' chains advance eight arms together (`relaxation::arms`)
 
 The stage of the material arms (`stage_material_state`) and the prepared operator's storage of a state (`hamiltonian_direct`) each summed one arm's chain over the

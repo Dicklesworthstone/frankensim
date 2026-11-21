@@ -271,6 +271,10 @@ pub struct CoupledModalSystem {
     relaxation_branches: Vec<fs_phs::RelaxationBranch>,
     material_memory: Vec<f64>,
     candidate_material_memory: Vec<f64>,
+    /// The arms' storage that the last `stage_material_state` returned, and the state words it read: each mode's
+    /// displacement, then each arm's memory. [`Self::material_energy_j`] serves it to a state with those bits.
+    kept_material_storage: Option<f64>,
+    kept_material_words: Vec<f64>,
     plane_stress_material_points: Vec<ModalPlaneStressPoint>,
     radiation: Option<radiation::Binding>,
     radiation_state: Vec<f64>,
@@ -508,6 +512,8 @@ impl CoupledModalSystem {
             offsets, connections, columns,
             relaxation_branches: Vec::new(), material_memory: Vec::new(),
             candidate_material_memory: Vec::new(),
+            kept_material_storage: None,
+            kept_material_words: Vec::new(),
             plane_stress_material_points: Vec::new(),
             radiation: None, radiation_state: Vec::new(), candidate_radiation_state: Vec::new(),
             config, dt, linear_frequency_upper_bound_rad_s,

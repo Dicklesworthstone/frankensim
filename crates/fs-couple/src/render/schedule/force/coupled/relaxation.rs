@@ -226,6 +226,8 @@ impl CoupledModalSystem {
         self.pressure = operator.pressure;
         self.harmonic_damping_columns = operator.harmonic_damping_columns;
         self.relaxation_branches = all_branches;
+        // New arms lengthen the memory, so a kept storage's words could not match it; it is dropped all the same.
+        self.kept_material_storage = None;
         self.candidate_material_memory = all_memory.clone();
         self.material_memory = all_memory;
         self.linear_frequency_upper_bound_rad_s = bound;
@@ -244,7 +246,21 @@ impl CoupledModalSystem {
     pub fn material_memory(&self) -> &[f64] { &self.material_memory }
 
     /// Current Maxwell storage, independent of modal and bridge storage [J].
+    ///
+    /// A state whose displacements and memory have the bits of the last state `stage_material_state` staged is served
+    /// the storage that stage returned: it added the same terms in the same order as `stored_energy`. That storage
+    /// reads each arm's stiffness and projection, never its relaxation time, so the relaxation times' exchange
+    /// (`coefficients/rates.rs`) leaves it right; the arm update, the one writer of stiffness and projection, drops it.
     pub fn material_energy_j(&self) -> Result<f64, ModalCouplingError> {
+        if let Some(energy) = self.kept_material_storage {
+            let modes = self.models.iter().flat_map(ModalAcousticTimeModel::states);
+            let displacements = modes.map(|state| state.displacement_m_sqrt_kg);
+            let words = displacements.chain(self.material_memory.iter().copied());
+            let kept = self.kept_material_words.iter().map(|w| w.to_bits());
+            if words.map(f64::to_bits).eq(kept) {
+                return Ok(energy);
+            }
+        }
         stored_energy(&self.relaxation_branches, &self.models, &self.material_memory)
     }
 
@@ -320,7 +336,14 @@ impl CoupledModalSystem {
             arms.push((det::sqrt(branch.stiffness), &branch.projection[..]));
         }
         let memory = &self.candidate_material_memory;
-        arms::staged_arms(&arms, memory, &endpoint[..base], &mut self.forces, finite)
+        let energy = arms::staged_arms(&arms, memory, &endpoint[..base], &mut self.forces, finite)?;
+        // Each strain is `stored_energy`'s chain over these displacements from +0.0, so the storage has its bits.
+        let words = &mut self.kept_material_words;
+        words.clear();
+        words.extend(endpoint[..base].iter().step_by(2));
+        words.extend(&self.candidate_material_memory);
+        self.kept_material_storage = Some(energy);
+        Ok(energy)
     }
 }
 

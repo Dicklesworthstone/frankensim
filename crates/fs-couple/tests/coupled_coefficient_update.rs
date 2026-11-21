@@ -725,3 +725,63 @@ fn a_system_built_structure_first_then_prepared_is_the_system_constructed_prepar
         assert!(frame.observer_pressure_pa.abs() > 0.0, "{sample}");
     }
 }
+
+/// The arms' storage summed as `stored_energy` sums it: each strain from +0.0 in mode order over the modes'
+/// displacements, its mismatch with the arm's memory, then `m^2 / 2` from +0.0 in arm order.
+fn plain_material_storage(system: &CoupledModalSystem, arms: &[&RelaxationBranch]) -> f64 {
+    let modes = system
+        .components()
+        .iter()
+        .flat_map(ModalAcousticTimeModel::states);
+    let q: Vec<_> = modes.map(|state| state.displacement_m_sqrt_kg).collect();
+    arms.iter()
+        .zip(system.material_memory())
+        .fold(0.0, |sum, (arm, z)| {
+            let root = det::sqrt(arm.stiffness);
+            let terms = arm.projection.iter().step_by(2).zip(&q);
+            let mismatch = terms.fold(0.0, |strain, (b, x)| strain + root * b * x) - z;
+            sum + 0.5 * mismatch * mismatch
+        })
+}
+
+#[test]
+fn the_storage_a_stage_kept_is_served_only_to_a_state_with_its_bits() {
+    let gate = CancelGate::new_clock_free();
+    let first = RelaxationBranch {
+        projection: vec![1.0, 0.0, -0.5, 0.0],
+        stiffness: 9.0,
+        relaxation_time_s: 0.03,
+    };
+    // About 0.11 J at the start: under the 0.2 J limit, which a step under 300 N passes after the arms are staged.
+    let mut system = fixture(true, config(0.2, 1e6))
+        .with_material_relaxation(vec![first.clone()], Some(vec![0.02]), &gate)
+        .unwrap();
+    // Each published state is the one its stage kept a storage for: the same bits as the plain sum.
+    for sample in 0..4 {
+        system.step(&FORCE).unwrap();
+        let storage = system.material_energy_j().unwrap();
+        let plain = plain_material_storage(&system, &[&first]);
+        assert_eq!(storage.to_bits(), plain.to_bits(), "{sample}");
+        assert!(storage > 0.0, "{sample}");
+    }
+    // A step refused at the total energy, after its arms were staged, keeps the storage of a state never published;
+    // the accepted state is still given its own.
+    let accepted = state(&system);
+    let refused = system.step(&[300.0, -300.0]).unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            ModalCouplingError::Budget {
+                what: "total energy",
+                ..
+            }
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(state(&system).map(f64::to_bits), accepted.map(f64::to_bits));
+    let plain = plain_material_storage(&system, &[&first]);
+    assert_eq!(
+        system.material_energy_j().unwrap().to_bits(),
+        plain.to_bits()
+    );
+}
