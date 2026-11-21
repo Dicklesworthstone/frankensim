@@ -3288,6 +3288,32 @@ Sampling, event scheduling, control policy, gains, limits, delay, source
 impedance and finite supply physics belong to the caller or their own
 Components. This ideal source makes no control stability or hardware claim.
 
+## Reusable signal feedback
+
+`elements::AffineSignal::new(n, m, matrix, bias)` is the stateless authored
+map `y = bias + matrix * input`, with scalar signal ports `input0` through
+`input{n-1}` and one `m`-wide `output`. Both dimensions are positive, matrix
+and bias extents are exact, and every coefficient is finite. It is
+`ExactLinear`, with analytic JVP `A` and VJP `A^T`, zero physical energy and
+dissipation, and no per-step allocation. Its native stateless codec binds
+dimensions and every coefficient/bias bit into the problem identity.
+Arithmetic or shape errors and cancellation refuse; the kernel publishes
+none of a failed coupled trial.
+
+`Mass::publishing()` adds accepted, left-end `position` and `velocity`
+signals without changing motion, power outputs or receipts. Their port-input
+derivatives are zero at fixed accepted state. The same observations apply to
+the inertance's chosen domain: position/velocity, angle/angular velocity,
+or passed charge/current. Repeated publication requests add no duplicate ports.
+
+`tests/affine_signal.rs` checks rectangular maps and transpose actions,
+unchanged Mass stepping, independent PD feedback dynamics and source work,
+rejected/cancelled steps and bitwise checkpoint replay. The existing durable
+snapshot tests reject changed gains, bias or published-port shape. Gains and
+signal units are authored; this map infers no saturation, delay, sample period,
+dynamic controller state or stability. The `feedback_control` example builds
+a complete body/controller/actuator graph from these production components.
+
 ## Executable general Dirac junctions
 
 `elements::DiracJunction::new(schema)` executes the admitted scalar

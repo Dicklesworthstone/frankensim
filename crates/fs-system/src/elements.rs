@@ -74,6 +74,8 @@ use fs_ports::{PortKind, StableId};
 
 use crate::ledger::Sum;
 
+mod affine_signal;
+pub use affine_signal::AffineSignal;
 mod node;
 pub use node::HeatNode;
 mod conductance_matrix;
@@ -546,10 +548,15 @@ pub struct Motion {
 
 /// A point mass on a line. Port `p` receives the net force [N] and returns
 /// the mean velocity of the step [m/s].
+///
+/// [`Mass::publishing`] adds zero-power `position` and `velocity` signals
+/// from the accepted state at the start of the step. A controller reading
+/// them therefore uses held, left-end feedback, not the candidate state or
+/// the power port's mean velocity.
 #[derive(Debug, Clone)]
 pub struct Mass {
     mass_kg: f64,
-    ports: [PortSpec; 1],
+    ports: Vec<PortSpec>,
 }
 
 impl Mass {
@@ -570,8 +577,29 @@ impl Mass {
     pub fn in_domain(kind: PortKind, inertance: f64) -> Result<Self, ElementError> {
         Ok(Self {
             mass_kg: positive("mass_kg", inertance)?,
-            ports: [port("p", Some(kind), PortRole::EffortIn)],
+            ports: vec![port("p", Some(kind), PortRole::EffortIn)],
         })
+    }
+
+    /// Publish the accepted displacement and flow as scalar signal outputs
+    /// `position` and `velocity`, after the existing power port `p`.
+    ///
+    /// The values use the same SI coordinates as [`Motion`]: position and
+    /// velocity for translation, angle and angular velocity for rotation,
+    /// or passed charge and current in an electrical loop. Feedback based
+    /// on these observations is held over each step; this adds no sampling
+    /// policy or control-stability guarantee. Asking twice adds them once.
+    #[must_use]
+    pub fn publishing(mut self) -> Self {
+        if self.ports.len() == 1 {
+            for name in ["position", "velocity"] {
+                self.ports.push(PortSpec::signal_out(
+                    StableId::new(name).expect("static mass signal name"),
+                    NonZeroUsize::MIN,
+                ));
+            }
+        }
+        self
     }
 
     /// Mass [kg].
@@ -653,6 +681,10 @@ impl Component for Mass {
             velocity_m_s: velocity,
         };
         outputs[0] = mean;
+        if self.ports.len() > 1 {
+            outputs[1] = old.position_m;
+            outputs[2] = old.velocity_m_s;
+        }
         let stored_change_j = self.mass_kg * mean * (velocity - old.velocity_m_s);
         let scale =
             self.stored_energy_j(old)? + self.stored_energy_j(new)? + (dt_s * force_n * mean).abs();
@@ -674,6 +706,11 @@ impl PortTangent for Mass {
         _cx: &Cx<'_>,
     ) -> Result<(), ElementError> {
         d_outputs[0] = 0.5 * dt_s / self.mass_kg * d_inputs[0];
+        if self.ports.len() > 1 {
+            // Port derivatives hold the accepted state fixed.
+            d_outputs[1] = 0.0;
+            d_outputs[2] = 0.0;
+        }
         Ok(())
     }
 

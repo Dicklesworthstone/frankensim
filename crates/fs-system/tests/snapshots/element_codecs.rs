@@ -4,8 +4,8 @@ use super::*;
 use fs_ports::component::LoadLine;
 use fs_ports::{CoordinateBinding, JunctionLaw, JunctionSchema, PortOrientation, PortTimestamp};
 use fs_system::elements::{
-    ControlledSource, DiracJunction, HeatNode, ModulatedTransformer, Resistance, Slider, SliderEnd,
-    Slip,
+    AffineSignal, ControlledSource, DiracJunction, HeatNode, ModulatedTransformer, Resistance,
+    Slider, SliderEnd, Slip,
 };
 
 fn junction(coupling: f64, frame: &str) -> DiracJunction {
@@ -87,6 +87,35 @@ fn native_interface_codecs_bind_laws_domains_and_declared_coordinates() {
         Slider::new(10.0, 0.5, 0.3).unwrap().told(SliderEnd::B),
         Slip::stuck(),
     );
+}
+
+#[test]
+fn signal_feedback_codecs_bind_every_gain_bias_and_published_observation() {
+    let make = |matrix, bias| AffineSignal::new(2, 1, matrix, bias).unwrap();
+    parameters_refuse(
+        make(vec![3.0, -2.0], vec![0.25]),
+        make(vec![3.0, (-2.0_f64).next_up()], vec![0.25]),
+        (),
+    );
+    parameters_refuse(
+        make(vec![3.0, -2.0], vec![0.25]),
+        make(vec![3.0, -2.0], vec![0.25_f64.next_up()]),
+        (),
+    );
+    parameters_refuse(
+        Mass::new(2.0).unwrap(),
+        Mass::new(2.0).unwrap().publishing(),
+        Motion {
+            position_m: -0.0,
+            velocity_m_s: -0.25,
+        },
+    );
+    let map = make(vec![3.0, -2.0], vec![0.25]);
+    let mut words = vec![11];
+    assert!(map.encode_state(&(), &mut words));
+    assert_eq!(words, [11]);
+    assert_eq!(map.decode_state(&[]), Some(()));
+    assert_eq!(map.decode_state(&[0]), None);
 }
 
 #[test]
