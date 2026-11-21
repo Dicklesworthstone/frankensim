@@ -1,6 +1,6 @@
 //! The Maxwell arms' chains (`relaxation/arms.rs`), each held to the plain loop of its order bit for bit, and the stage
 //! held to the loop it replaced, which added and checked every term: the same storage, the same forces and the same
-//! refusals.
+//! refusals. Both on 1, 2, 3 and 7 threads.
 //!
 //! fs-couple's lib test crate does not build under the memory guard, so this target compiles the kernel's own source
 //! file a second time. That file names nothing of its crate.
@@ -8,7 +8,7 @@
 #[path = "../src/render/schedule/force/coupled/relaxation/arms.rs"]
 mod arms;
 
-use arms::{arm_chains, staged_arms};
+use arms::{arm_chains, arm_chains_on, staged_arms};
 
 /// `len` values spread over (-1, 1) with mixed exponents and signs, the same for the same seed.
 fn mixed(len: usize, seed: u64) -> Vec<f64> {
@@ -26,7 +26,9 @@ fn mixed(len: usize, seed: u64) -> Vec<f64> {
 #[test]
 fn each_arms_chain_has_the_bits_of_its_own_fold_for_any_stride_and_length() {
     let bits = |v: &[f64]| v.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
-    for (seed, count) in (1..).zip([0, 1, 7, 8, 9, 17]) {
+    // 40 arms are five blocks: runs of 3 and 2 blocks on 2 threads, of 2, 2 and 1 on 3, of one each on 7. 9 and
+    // 17 arms end in a run of their last arm alone.
+    for (seed, count) in (1..).zip([0, 1, 7, 8, 9, 17, 40]) {
         for modes in [0, 1, 5, 64] {
             let q = mixed(modes, seed + 50);
             // Rows shorter than, as long as and longer than `q` reaches at each stride, so the arms of a block stop apart.
@@ -40,10 +42,15 @@ fn each_arms_chain_has_the_bits_of_its_own_fold_for_any_stride_and_length() {
                 .enumerate()
                 .map(|(a, row)| (starts[a], scales[a], &row[..]))
                 .collect();
-            for (stride, chains) in [
+            let alone = [
                 (1, arm_chains::<1>(&arms, &q)),
                 (2, arm_chains::<2>(&arms, &q)),
-            ] {
+            ];
+            let shared = [1, 2, 3, 7].into_iter().flat_map(|threads| {
+                let one = arm_chains_on::<1>(&arms, &q, threads);
+                [(1, one), (2, arm_chains_on::<2>(&arms, &q, threads))]
+            });
+            for (stride, chains) in alone.into_iter().chain(shared) {
                 let fold = |(start, scale, row): &(f64, f64, &[f64])| {
                     let terms = row.iter().step_by(stride).zip(&q);
                     terms.fold(*start, |sum, (b, x)| sum + scale * b * x)
@@ -122,19 +129,24 @@ fn the_stage_has_the_bits_and_the_refusals_of_the_loop_that_checks_and_adds_ever
             let (mut rows, mut memory) = (rows.clone(), memory.clone());
             change(&mut rows[arm], &mut memory[arm]);
             let arms: Vec<_> = roots.iter().zip(&rows).map(|(r, p)| (*r, &p[..])).collect();
-            let (mut new, mut old) = (forces.clone(), forces.clone());
-            let staged = staged_arms(&arms, &memory, x, &mut new, finite);
+            let mut old = forces.clone();
             let plain = plain_stage(&arms, &memory, x, &mut old);
             let outcome = |stage: Result<f64, ()>| stage.map(f64::to_bits);
-            let at = format!("case {case}, arm {arm}");
-            assert_eq!(
-                (outcome(staged), bits(&new)),
-                (outcome(plain), bits(&old)),
-                "{at}"
-            );
-            // The loop accepts the first case and refuses the others, after the arms before it staged their forces.
-            assert_eq!(plain.is_ok(), case == 0, "{at}");
-            assert!(case == 0 || new != forces, "{at}");
+            // 19 arms make runs of 16 and 3 arms, or of 8, 8 and 3; 9 forces make runs of 5 and 4, of
+            // three 3s, or of four 2s and a 1.
+            for threads in [1, 2, 3, 7] {
+                let mut new = forces.clone();
+                let staged = staged_arms(&arms, &memory, x, &mut new, threads, finite);
+                let at = format!("case {case}, arm {arm}, {threads} threads");
+                assert_eq!(
+                    (outcome(staged), bits(&new)),
+                    (outcome(plain), bits(&old)),
+                    "{at}"
+                );
+                // The loop accepts the first case and refuses the others, after the arms before it staged their forces.
+                assert_eq!(plain.is_ok(), case == 0, "{at}");
+                assert!(case == 0 || new != forces, "{at}");
+            }
         }
     }
 }

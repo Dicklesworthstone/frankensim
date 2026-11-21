@@ -17,6 +17,32 @@
 
 ## New sections (newest first)
 
+### The stage's strains and loads and the prepared storage's chains share the step's threads (`relaxation::arms::arm_chains_on`)
+
+At viola D4's size (side 5433, 3627 arms, `--workers 7`) the stage of the material arms (`stage_material_state`) and the prepared operator's storage
+(`hamiltonian_direct`) ran their chains on one thread while the step's products ran on seven. `arm_chains_on` shares the arms out to `threads` threads, the calling
+thread among them, by contiguous runs of whole blocks of eight, the last run also the arms after the last whole block, and returns the chains in arm order. Each chain
+is computed by one thread exactly as `arm_chains` computes it, so it has its own fold's bits on every thread count. The threads are the step's (`step_threads` of the
+declared workers and the side), at most one per 256 arms, so a side under 1024 or a stage of 256 arms or fewer runs on one thread as before.
+
+`staged_arms` takes the strains from `arm_chains_on`, and the mismatches and the storage follow on the calling thread in arm order up to the first that refuses, as
+before. The forces of the arms before it are then shared out by contiguous runs of force entries, each entry taking every arm's load in arm order: the loop's
+subtractions in the loop's order, with no check while they run. A force that leaves the finite range never returns to it, so each run checks its entries once, at the
+end. If one is not finite, the forces are put back and staged again on the calling thread in the loop's order with every force checked, which refuses where the loop
+refused with the same forces staged. `hamiltonian_direct` takes its mismatches from `arm_chains_on` and adds their squares in arm order on the calling thread. Neither
+polls the cancel gate, on any thread count; a thread that panics panics again on the calling thread.
+
+Evidence. `tests/material_arms.rs` holds `arm_chains_on` on 1, 2, 3 and 7 threads to each arm's fold, bit for bit, for 0, 1, 7, 8, 9, 17 and 40 arms at strides
+1 and 2: runs of whole blocks, runs that end in the arms after the last block, and a run of the last arm alone. It holds the stage on 1, 2, 3 and 7 threads to the
+loop it replaced (the test's `plain_stage`) on 19 arms of 9 modes in every case of the `relaxation::arms` section below: the same storage, forces and refusals.
+Each of seven changes fails it: the other threads' chains dropped; every run of forces reading the first run's entries; no second staging after a force that is
+not finite; the refusal dropped; the forces never checked; the other runs of forces never run; the other runs' flags ignored.
+Viola D4 at `--workers 7` on this package's binary against 8b5c194869's (md5 f395d944): the first 107776 frames, all that the base's render wrote, are byte-equal;
+the viola Db4 control renders md5 fa81fa11cac8cb645d68d729ddd7b502 on both (BrightOsprey's P5A and P6A, 2026-11-21). The two D4 renders ran one after the other,
+so they give no timing.
+
+Not tested: a system's stage or storage on more than one thread (no test target has a side of 1024).
+
 ### The arms' storage of a staged state is summed once (`CoupledModalSystem::material_energy_j`)
 
 The total energy of an accepted state (`total_energy_direct`, once per accepted state through the operator's memo) summed every arm's strain over the modes again

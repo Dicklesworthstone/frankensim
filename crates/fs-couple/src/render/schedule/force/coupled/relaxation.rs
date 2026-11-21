@@ -336,7 +336,11 @@ impl CoupledModalSystem {
             arms.push((det::sqrt(branch.stiffness), &branch.projection[..]));
         }
         let memory = &self.candidate_material_memory;
-        let energy = arms::staged_arms(&arms, memory, &endpoint[..base], &mut self.forces, finite)?;
+        let workers = fs_la::eigen_complex::declared_workers();
+        let threads = exact::prepared::step_threads(workers, endpoint.len())
+            .min(arms.len().div_ceil(exact::prepared::MIN_ARMS_PER_THREAD));
+        let (forces, state) = (&mut self.forces, &endpoint[..base]);
+        let energy = arms::staged_arms(&arms, memory, state, forces, threads, finite)?;
         // Each strain is `stored_energy`'s chain over these displacements from +0.0, so the storage has its bits.
         let words = &mut self.kept_material_words;
         words.clear();

@@ -532,13 +532,16 @@ impl PreparedNetwork {
                 }
             }
         }
-        // Each arm's mismatch is the chain -z + c_0 q_0 + c_1 q_1 + .. (`relaxation::arms`); 1.0 * c is c.
+        // Each arm's mismatch is the chain -z + c_0 q_0 + c_1 q_1 + .. (`relaxation::arms`); 1.0 * c is c. The
+        // chains are shared out to the step's threads by blocks of arms, and their squares added in arm order here.
         let mut arms = Vec::with_capacity(self.material_couplings.len());
         for (arm, row) in self.material_couplings.iter().enumerate() {
             arms.push((-x[2 * n + arm], 1.0, &row[..]));
         }
         let q: Vec<_> = x[..2 * n].iter().step_by(2).copied().collect();
-        for mismatch in super::super::relaxation::arms::arm_chains::<1>(&arms, &q) {
+        let threads = step_threads(fs_la::eigen_complex::declared_workers(), x.len())
+            .min(arms.len().div_ceil(MIN_ARMS_PER_THREAD));
+        for mismatch in super::super::relaxation::arms::arm_chains_on::<1>(&arms, &q, threads) {
             energy += 0.5 * mismatch * mismatch;
         }
         energy
@@ -1233,10 +1236,13 @@ const STEP_PARALLEL_MIN_SIDE: usize = 1024;
 const MAX_STEP_WORKERS: usize = 256;
 /// Fewest matrix rows one thread of `apply` is given.
 const APPLY_MIN_ROWS_PER_THREAD: usize = 256;
+/// Fewest Maxwell arms one thread of a step's arm chains is given: the stage's strains and loads, the storage's
+/// mismatches.
+pub(in super::super) const MIN_ARMS_PER_THREAD: usize = 256;
 
 /// Threads a step's dense products of side `side` use: one unless `side` reaches [`STEP_PARALLEL_MIN_SIDE`] and more than
 /// one worker is declared, and never more than [`MAX_STEP_WORKERS`].
-fn step_threads(declared: usize, side: usize) -> usize {
+pub(in super::super) fn step_threads(declared: usize, side: usize) -> usize {
     if side < STEP_PARALLEL_MIN_SIDE { 1 } else { declared.clamp(1, MAX_STEP_WORKERS) }
 }
 
