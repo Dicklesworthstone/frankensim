@@ -1,7 +1,8 @@
 //! The prepared operator's two orders by rows (the loss forms over the upper triangle, the storage over the whole
 //! square), each held to a plain loop of the same order. The forms and the products read copies by blocks of eight
 //! rows (`UpperBlocks`, `RowBlocks`); the plain loops read the row-major square. The forms are held to it on one
-//! thread and with their rows shared out to several.
+//! thread and with their rows shared out to several. The held-force defect is held to the fold that always computes
+//! its bounds.
 //!
 //! fs-couple's lib test crate does not build under the memory guard, so this target compiles the kernel's own
 //! source file a second time. That file names nothing of its crate.
@@ -9,9 +10,12 @@
 #[path = "../src/render/schedule/force/coupled/exact/prepared/upper_rows.rs"]
 mod upper_rows;
 
+use std::cell::Cell;
+
 use upper_rows::{
-    RowBlocks, StateForms, UpperBlocks, bitwise_symmetric, identity_rows, product_from, row_from,
-    row_storage, state_sums, upper_row_form, upper_row_form_from, upper_row_forms_from,
+    RowBlocks, StateForms, UpperBlocks, bitwise_symmetric, held_force_defect, identity_rows,
+    product_from, row_from, row_storage, state_sums, upper_row_form, upper_row_form_from,
+    upper_row_forms_from,
 };
 
 /// Sides around the blocks of eight rows, and one near a hundred.
@@ -157,6 +161,80 @@ fn rows_are_the_identitys_only_if_every_entry_has_its_bits() {
     // A row before `from` is not read, and from `side` on there is no row to hold.
     assert!(identity_rows(&[f64::NAN, 2.0, 0.0, 1.0], 2, 1));
     assert!(identity_rows(&[f64::NAN; 4], 2, 2));
+}
+
+/// The defect of two forces past their bounds with the bounds always computed, the fold the prepared owner made
+/// before `held_force_defect`.
+fn bounded_defect(a: &[f64], b: &[f64], bounds: &[f64]) -> f64 {
+    a.iter()
+        .zip(b)
+        .zip(bounds)
+        .fold(0.0_f64, |m, ((x, y), r)| m.max((x - y).abs() - r))
+}
+
+#[test]
+fn a_held_force_defect_computes_its_bounds_only_past_the_tolerance_and_refuses_as_with_them() {
+    // Up to nine forces from 1e-300 to 1e12, the second equal, a few units in the last place off, or 1e-6 off; bounds
+    // of zero or up to twice each difference.
+    let scales = [1e-300, 1e-17, 1.0, 1e12].into_iter().cycle();
+    for ((seed, n), scale) in (0..600_u64).zip((1..=9).cycle()).zip(scales) {
+        let a: Vec<f64> = mixed(n, seed).iter().map(|x| x * scale).collect();
+        let b: Vec<f64> = a
+            .iter()
+            .zip(mixed(n, seed + 1000))
+            .map(|(&x, u)| match seed % 3 {
+                0 => x,
+                1 => x + 4.0 * u * x.abs() * f64::EPSILON,
+                _ => x * (1.0 + 1e-6 * u),
+            })
+            .collect();
+        let bounds: Vec<f64> = a
+            .iter()
+            .zip(&b)
+            .zip(mixed(n, seed + 2000))
+            .map(|((x, y), u)| {
+                if seed % 5 == 0 {
+                    0.0
+                } else {
+                    (x - y).abs() * 2.0 * u.abs()
+                }
+            })
+            .collect();
+        let plain = a
+            .iter()
+            .zip(&b)
+            .fold(0.0_f64, |m, (x, y)| m.max((x - y).abs()));
+        let below = if plain > 0.0 {
+            f64::from_bits(plain.to_bits() - 1)
+        } else {
+            0.0
+        };
+        for tolerance in [0.0, below, plain, 0.5 * plain, 2.0 * plain] {
+            let ran = Cell::new(false);
+            let defect = held_force_defect::<()>(&a, &b, tolerance, || {
+                ran.set(true);
+                Ok(bounds.clone())
+            })
+            .unwrap();
+            let full = bounded_defect(&a, &b, &bounds);
+            let at = format!("seed {seed} tolerance {tolerance:e} plain {plain:e}");
+            assert_eq!(defect > tolerance, full > tolerance, "{at}");
+            assert_eq!(ran.get(), plain > tolerance, "{at}");
+            let expected = if plain > tolerance { full } else { plain };
+            assert_eq!(defect.to_bits(), expected.to_bits(), "{at}");
+        }
+    }
+    // An error of the bounds is met only past the tolerance: within it the plain defect stands.
+    let (a, b) = ([1.0, 2.0], [1.0, 2.0 + 1e-12]);
+    let plain = (2.0 + 1e-12) - 2.0;
+    assert_eq!(
+        held_force_defect(&a, &b, 1e-9, || Err::<Vec<f64>, _>("overflow")),
+        Ok(plain)
+    );
+    assert_eq!(
+        held_force_defect(&a, &b, 1e-13, || Err::<Vec<f64>, _>("overflow")),
+        Err("overflow")
+    );
 }
 
 /// A stiffness as `mechanical_stiffness` leaves it: a positive diagonal, then three links added entry by entry as

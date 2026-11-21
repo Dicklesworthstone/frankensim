@@ -17,6 +17,44 @@
 
 ## New sections (newest first)
 
+### The held air force's rounding bound is computed only past the tolerance (`upper_rows::held_force_defect`); `losses` continues the kept state sums
+
+With two-way air, `advance` holds each step's two port forces, the one the mechanics were held at and the one the air's own step implies, to
+`max(0, max_i(|a_i - b_i| - r_i)) <= 1e-9 force_scale`, `r_i` being each port's rounding bound on the difference (`air::PreparedAir::force_rounding`, eedf0d9e6c).
+Each `r_i` is `2 gamma` times a sum of absolute values, so at least zero, and the rounded `|a_i - b_i| - r_i` is at most `|a_i - b_i|`: when the plain defect
+`max(0, max_i |a_i - b_i|)` is within the tolerance, the bounded one is too. `advance` now computes the bounds only when the plain defect exceeds the tolerance, and then
+holds the bounded defect, the same fold as before. On 302bf89e06's binary at all--violin-B6's size (52 ports, 1360 poles) `force_rounding` was under 433 of the
+main thread's 5282 samples (8.2 %; MagentaBadger's zo7/samp-all-B6-p6.txt, 2026-11-21): a sum over each port's row of z and one over every pole's coupling row.
+
+This changes which steps are refused in one case. `force_rounding`'s layout checks are the ones `air::PreparedAir::advance` has made on the same step before it, and
+its drives are `advance`'s, so the only refusals of its own are the overflows of its sums of absolute values. A step whose forces agree within the tolerance without
+the bound is now admitted without computing it, so a step whose bound would overflow is no longer refused for that; it is still held to the exchange's energy closure,
+as every step is. Every other step is refused or admitted as before.
+
+`losses`, which `exact::stage` calls after every step, summed each port's row whole over z (`air::PreparedAir::port_increments` without kept sums). It now takes the
+increments as `propagate` does (`port_increments`): each row continued from its kept sum over the state's columns, whose bits are the whole sum's (`upper_rows::row_from`,
+the section below). Its z is `advance`'s last, the start state under the held input, and `exact::stage` forms no product between `advance` and `losses`, so the sums
+are the ones the step's product kept; on another state they are computed and kept first. No value changes.
+
+Evidence. `a_held_force_defect_computes_its_bounds_only_past_the_tolerance_and_refuses_as_with_them` (tests/upper_row_forms.rs) holds `held_force_defect` to the fold
+that always computes the bounds, in 600 cases of 1 to 9 forces from 1e-300 to 1e12 (the second equal, a few units in the last place off, or 1e-6 off; bounds zero or up
+to twice each difference), each at the tolerances 0, the plain defect less one unit in its last place, the plain defect, half and twice it: the same refusal in every
+case, the bounds computed exactly when the plain defect exceeds the tolerance, and then the bounded defect's bits. It also holds the change above: an error of the
+bounds is returned past the tolerance and not met within it. `a_mode_resting_on_a_preload_steps_under_the_air_from_its_first_increments`, eedf0d9e6c's test in
+exact/prepared/air_tests.rs (the lib test crate, which does not build under the memory guard), now runs in `coupled_damping_update` too: on some of its steps the
+forces differ past the tolerance without their bounds, so those steps compute them, and all 480 steps are admitted with their energy closed. Four changes fail these
+tests: the skip inverted and the bounds always computed fail the first (bounds computed for a plain defect within the tolerance), and the inverted skip also has a
+step of the preload test refused as "prepared air exchange residual"; all bounds zero has a step of the preload test refused the same way; and `losses` taking the
+increments of a z without the held force fails two tests of `coupled_damping_update`, `intrinsic_refresh_preserves_warm_maxwell_and_radiation_history` and the
+preload test, each with a step refused as "prepared independent loss channels disagree with total". `upper_row_forms`, `coupled_damping_update`,
+`coupled_coefficient_update`, `coupled_impulse`, `modal_material_composition` and `measured_string_bank` pass at one test thread (47 tests). Clippy on the lib and
+test crates: the package's four files keep their warnings, place for place. Viola D4 at `--workers 7`, a card without air, on this package's binary against
+302bf89e06's (md5 948ea2d8): the first 72064 frames, all that the earlier render wrote, are byte-equal; this package's render computed its shell modes, the
+earlier one read them from a store (BrightOsprey's P7C and P6A, 2026-11-21). The two renders ran at different times, so they give no timing. The viola Db4
+control renders md5 fa81fa11cac8cb645d68d729ddd7b502 on both binaries (P7C).
+
+Not tested: a step whose bound overflows while its forces agree (no test target builds one).
+
 ### The air's port sums continue the sums the product keeps for its state (`upper_rows::state_sums`, `upper_rows::row_from`)
 
 With two-way air (`air::PreparedAir`) a step summed each source mode's transition row `2 mode` over the whole `z`, `3 n + arms` terms a port, on the calling thread:
@@ -31,8 +69,9 @@ do moments later. `row_from` continues a port's row from its row's kept sum over
 sums. `advance` takes each port's increment from the propagated end state, `endpoint[2 mode] - x[2 mode]`: the product's entry on the final `z`, divided by the mode's
 weight, less the start displacement, which is what `port_increments` computed on that `z`, each value checked when `propagate` formed it. So every increment has its
 bits, and no refusal moves: the checks `advance` no longer makes could refuse only values `propagate` had already passed. Under a poisoned lock the port rows are
-summed whole as before; `losses`, which only tests call, sums them whole as before. `force_rounding` is unchanged: it computes its drives from the increments
-`advance` passes it, the ones the air steps with, and carries nothing from one call to the next, so no drive it reads can belong to another step's increments.
+summed whole as before; `losses`, which `exact::stage` calls after every step, still summed them whole (the section above continues them). `force_rounding` is
+unchanged: it computes its drives from the increments `advance` passes it, the ones the air steps with, and carries nothing from one call to the next, so no drive it
+reads can belong to another step's increments.
 
 On more than one product thread, a `propagate` on a state the operator does not hold now starts the product's threads twice, once to keep the state's sums and once
 for the product's held-force columns; on one thread it starts none.

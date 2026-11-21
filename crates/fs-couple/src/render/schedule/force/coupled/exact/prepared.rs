@@ -638,14 +638,15 @@ impl PreparedNetwork {
         let step = air.advance(radiation, &dq_ports)?;
         // The held force the air's own step implies must be the one the mechanics were held at, and the work each side
         // received must cancel. Both forces are formed from increments, end less start, so each port's defect is held
-        // beyond the rounding bound of those differences (see `force_rounding`).
+        // beyond the rounding bound of those differences (see `force_rounding`). The bound only lowers a defect, so
+        // it is computed only for forces that differ past the tolerance without it (`upper_rows::held_force_defect`).
         let exchange = air_force.iter().zip(&dq_ports).try_fold(0.0, |s, (f, dq)| finite(s + f * dq))?;
         let force_scale = air_force.iter().chain(&step.force).fold(0.0_f64, |m, f| m.max(f.abs())).max(f64::MIN_POSITIVE);
-        let rounding = air.force_rounding(&z, &x, &self.weights, radiation, &dq_ports)?;
-        let force_defect = air_force.iter().zip(&step.force).zip(&rounding)
-            .fold(0.0_f64, |m, ((a, b), r)| m.max((a - b).abs() - r));
+        let tolerance = 1e-9 * force_scale;
+        let force_defect = upper_rows::held_force_defect(&air_force, &step.force, tolerance,
+            || air.force_rounding(&z, &x, &self.weights, radiation, &dq_ports))?;
         let energy_scale = scale.max(exchange.abs()).max(step.work.abs()).max(step.loss);
-        if force_defect > 1e-9 * force_scale || (exchange + step.work).abs() > MATRIX_TOL * energy_scale {
+        if force_defect > tolerance || (exchange + step.work).abs() > MATRIX_TOL * energy_scale {
             return Err(invalid("prepared air exchange residual"));
         }
         let mut record_x = endpoint;
@@ -858,10 +859,12 @@ impl PreparedNetwork {
         let z = self.state_input(mechanical, u, dt)?;
         let (component, connection, material) = self.loss_sums(&z)?;
         // The radiated loss of the same step: the transition's own port rows on the same z give the bits `advance` drove
-        // the air with.
+        // the air with. After `advance` the sums its product kept are this z's state's, and each row continues from
+        // them (`port_increments`); on another state they are computed and kept first. Either way a row has the bits
+        // of its whole sum.
         let radiated = match &self.air {
             None => 0.0,
-            Some(air) => air.loss(&x[state_count..], &air.port_increments(&z, mechanical, &self.weights, None)?)?,
+            Some(air) => air.loss(&x[state_count..], &self.port_increments(air, &z, mechanical)?)?,
         };
         let sum = finite(component + connection + material + radiated)?;
         if !total.is_finite() || (sum - total).abs() > MATRIX_TOL * sum.abs().max(total.abs()).max(f64::MIN_POSITIVE) {

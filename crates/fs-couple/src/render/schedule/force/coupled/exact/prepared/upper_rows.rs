@@ -16,7 +16,8 @@
 //! that need not equal its transpose, so it reads the whole square.
 //!
 //! [`identity_rows`] is a check of another kind: whether the last rows of a square are the identity's, so that a
-//! product by that square need not compute them.
+//! product by that square need not compute them. [`held_force_defect`] is another: how far two forces differ past
+//! their rounding bounds, with the bounds computed only when the forces differ past the tolerance without them.
 //!
 //! [`product_from`] is a product of whole rows by `[state | force]` that keeps each row's sum over the state's columns
 //! ([`StateSums`]): the next product on the same state adds only the force's columns, the same additions in the same
@@ -55,6 +56,32 @@ pub(super) fn identity_rows(matrix: &[f64], side: usize, from: usize) -> bool {
             let row = &matrix[i * side..(i + 1) * side];
             (0..side).all(|j| row[j].to_bits() == if i == j { 1.0_f64 } else { 0.0 }.to_bits())
         })
+}
+
+/// How far the forces `a` and `b` differ past each entry's rounding bound: `max(0, max_i(|a_i - b_i| - r_i))`, a caller
+/// refusing them when that exceeds `tolerance`. `bounds` gives the `r`, each at least zero, and runs only when the plain
+/// defect `max(0, max_i |a_i - b_i|)` exceeds `tolerance`; otherwise the plain defect is returned. For `r >= 0` the
+/// rounded `|a_i - b_i| - r_i` is at most `|a_i - b_i|`, so a plain defect within the tolerance leaves the bounded one
+/// within it too: the caller refuses the same forces as if `bounds` always ran, except that an error `bounds` would
+/// return is met only past the tolerance.
+pub(super) fn held_force_defect<E>(
+    a: &[f64],
+    b: &[f64],
+    tolerance: f64,
+    bounds: impl FnOnce() -> Result<Vec<f64>, E>,
+) -> Result<f64, E> {
+    let plain = a
+        .iter()
+        .zip(b)
+        .fold(0.0_f64, |m, (x, y)| m.max((x - y).abs()));
+    if plain <= tolerance {
+        return Ok(plain);
+    }
+    let bounds = bounds()?;
+    Ok(a.iter()
+        .zip(b)
+        .zip(&bounds)
+        .fold(0.0_f64, |m, ((x, y), r)| m.max((x - y).abs() - r)))
 }
 
 /// The upper triangle of a row-major square, by blocks of eight rows. Each block holds its own square of eight rows

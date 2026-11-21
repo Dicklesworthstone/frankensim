@@ -847,3 +847,83 @@ fn invalid_cancelled_and_reaction_limited_updates_preserve_clean_retry() {
         }
     }
 }
+
+// A mode resting on its link's preload, released 1e-12 of its static deflection off rest, as a body mode rests on the
+// strings' preload: its first increments are a few units in the last place of the deflection, so the two held port
+// forces agree only to the rounding of those differences, not to 1e-9 of the force. Every step is admitted and closes
+// its energy, and the mode stays at its rest. This is exact/prepared/air_tests.rs's test, which is in the lib test
+// crate that does not build under the memory guard; this target builds and runs it.
+#[test]
+fn a_mode_resting_on_a_preload_steps_under_the_air_from_its_first_increments() {
+    let gate = CancelGate::new_clock_free();
+    let (omega, stiffness, extension) = (3000.0_f64, 2e6, 1e-3);
+    let rest = stiffness * extension / (omega * omega + stiffness);
+    let mut model = ModalAcousticTimeModel::try_new(
+        48_000,
+        vec![ModalAcousticMode {
+            angular_frequency_rad_s: omega,
+            damping_ratio: 0.005,
+            pressure_per_modal_velocity: C64::ZERO,
+        }],
+        ModalAcousticTimeBudget::audible_reference(),
+    )
+    .unwrap();
+    model
+        .restore_states(&[ModalAcousticState {
+            displacement_m_sqrt_kg: rest * (1.0 + 1e-12),
+            velocity_m_sqrt_kg_per_s: 0.0,
+        }])
+        .unwrap();
+    let links = vec![ModalColumnConnection {
+        column: vec![1.0],
+        stiffness_n_m: stiffness,
+        damping_n_s_m: 15.0,
+        rest_extension_m: extension,
+    }];
+    let config = ModalCouplingConfig {
+        max_modes: 8,
+        max_connections: 4,
+        max_setup_terms: 1_000_000,
+        nyquist_guard_fraction: 0.9,
+        maximum_total_energy_j: 100.0,
+        maximum_abs_pressure_pa: 1e6,
+        maximum_abs_connection_force_n: 1e8,
+        solve_relative_tolerance: 1e-11,
+        energy_absolute_tolerance_j: 1e-12,
+        energy_relative_tolerance: 1e-10,
+    };
+    let budget = PreparedModalBudget {
+        max_modes: 1,
+        max_dense_bytes: 128 * 1024 * 1024,
+        max_multiply_terms: 100_000_000_000,
+    };
+    let air = Model {
+        ports: 1,
+        poles: vec![Pole {
+            omega: 3500.0,
+            zeta: 0.2,
+            coupling: vec![400.0],
+        }],
+    };
+    let mut system =
+        CoupledModalSystem::new_with_columns_prepared(vec![model], links, config, budget, &gate)
+            .unwrap()
+            .with_radiation_load(&air, &[0], 1, &gate)
+            .unwrap();
+    let mut energy = system.total_energy_j().unwrap();
+    for tick in 0..480 {
+        let frame = system.step(&[0.0]).unwrap().clone();
+        let residual =
+            frame.total_energy_j() + frame.total_dissipation_j() - frame.external_work_j - energy;
+        assert!(
+            residual.abs() <= 1e-11 * energy.max(frame.total_energy_j()),
+            "tick {tick}: residual {residual:e}"
+        );
+        energy = frame.total_energy_j();
+    }
+    let q = state(&system).0;
+    assert!(
+        (q / rest - 1.0).abs() < 1e-11,
+        "{q:e} left the rest {rest:e}"
+    );
+}
