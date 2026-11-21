@@ -48,9 +48,12 @@ residual": `advance` taking each port's increment from its end velocity, and a p
 Viola D4 at `--workers 7`, a card without air, on this package's binary against 745573d861's (md5 465807fd): the first 72064 frames, all that this package's render
 wrote, are byte-equal; the viola Db4 control renders md5 fa81fa11cac8cb645d68d729ddd7b502 on both (BrightOsprey's P6A, 2026-11-21). The two D4 renders ran one after
 the other, so they give no timing.
+A render with two-way air (a material-strings card has it with `body-radiation bem` or `skin`; `rayleigh` refuses a prepared bank): `bakeK--thermo--violin-B6`,
+whose log lists its `two_way_load_port` rows, renders all 4800 frames byte-equal, md5 1d24eaf7b2cd783140918d51d48194df, on this package's binary (md5 948ea2d8)
+and on 8f5dba030d's (md5 d0fa4ad5), so across every commit from 8f5dba030d to 302bf89e06. The run on this package's binary read its skin load from a store; the
+one on 8f5dba030d's computed it (MagentaBadger's chains 87 and 95, 2026-11-20 and 2026-11-21).
 
-Not tested: a system's port sums on more than one thread (no test target has a side of 1024); a render with two-way air (a material-strings card has it only
-with a skin load, which each binary bakes again, about 52 min).
+Not tested: a system's port sums on more than one thread (no test target has a side of 1024).
 
 ### The stage's strains and loads and the prepared storage's chains share the step's threads (`relaxation::arms::arm_chains_on`)
 
