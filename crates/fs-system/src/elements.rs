@@ -53,13 +53,16 @@
 //!
 //! # Integration
 //!
-//! Every element is the trapezoidal (implicit midpoint) rule on its own state
+//! Physical storage elements use the trapezoidal (implicit midpoint) rule on their state
 //! under the step-mean port values the kernel holds: a mass returns the mean
 //! of its old and new velocity, a heat capacity the mean of its old and new
 //! temperature, a spring the discrete gradient of its potential. Joined in a
 //! loop, the kernel solves the interface equations, so the composed device
 //! is integrated by the same rule as one monolithic system: second order,
 //! A-stable, and energy-exact for the lossless parts.
+//! Signal controllers have their own explicitly authored timing: published
+//! observations use accepted states and sampled controllers hold commands
+//! between events. Those feedback discretizations need not be second order.
 
 use core::f64::consts::PI;
 use core::fmt;
@@ -88,6 +91,10 @@ mod modulated_transformer;
 pub use modulated_transformer::ModulatedTransformer;
 mod resistance;
 pub use resistance::Resistance;
+mod sampled_controller;
+pub use sampled_controller::{ControllerState, SampledController};
+mod signal_source;
+pub use signal_source::{SignalClock, SignalSource};
 mod slider;
 pub use slider::{Slider, SliderEnd, SliderRow, Slip};
 mod stream;

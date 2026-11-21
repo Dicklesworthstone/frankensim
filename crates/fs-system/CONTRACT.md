@@ -3324,6 +3324,43 @@ signal units are authored; this map infers no saturation, delay, sample period,
 dynamic controller state or stability. The `feedback_control` example builds
 a complete body/controller/actuator graph from these production components.
 
+## Sampled control and replayable references
+
+`SampledController` implements the authored discrete state-space law
+`x_next = A*x + B*u`, `y = C*x + D*u`. It samples at time zero and at integer
+multiples of its positive period. The output uses the pre-update memory, then
+is held through physical substeps until the next sample. Scalar `input0`,
+`input1`, etc. and a vector `output` use the same wiring as `AffineSignal`;
+zero memory coordinates admit a sampled gain. Matrices are row-major and their
+exact finite extents are checked at construction. State, held output, sample
+count and the compensated clock are accepted together and are restored on
+rejection or checkpoint replay. No state update is committed by a trial alone.
+
+Sample boundaries constrain the kernel's event schedule. Indexed sample times
+avoid repeatedly adding the period; loss of representable time resolution is
+an explicit refusal. The input tangent is `D` when sampling and zero while
+holding, with the matching transpose; the component is `Smooth`, so the
+kernel does not cache a state-independent `ExactLinear` tangent across phases.
+It stores no physical energy: actuator work belongs to `ControlledSource` and
+the connected plant. Scratch is allocated at construction, separate from the
+native replay state and problem identity.
+
+`SignalSource` produces a nonempty vector of authored `Waveform` point values
+at the accepted start time, independent of proposed step duration. This makes
+a sampled controller's reference independent of physical subcycling. Table
+knots are declared events; sine references leave temporal resolution to the
+authored schedule. Its compensated `SignalClock` has a native codec, and every
+waveform is bound into the problem identity. These are zero-power signals;
+gains, units, filtering, saturation and stability remain authored choices.
+
+`tests/sampled_controller.rs` compares controller recurrence, sample-and-hold
+behavior and physical capacitor work against independent calculations, checks
+analytic transpose actions, and exercises refusal, cancellation and replay.
+`tests/signal_source.rs` checks point sampling, table event clipping, codec
+identity and refusal without publication. `feedback_control --sampled-pi`
+composes a replayable reference, a 50 ms PI controller, a measured inertance
+and a controlled actuator while stepping the physical system at most 10 ms.
+
 ## Executable general Dirac junctions
 
 `elements::DiracJunction::new(schema)` executes the admitted scalar
