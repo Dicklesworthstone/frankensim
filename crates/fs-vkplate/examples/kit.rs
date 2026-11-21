@@ -424,6 +424,13 @@ fn main() {
         eprintln!("refused: leapfrog would be unstable");
         std::process::exit(1);
     }
+    // FS_KIT_WORKERS runs the heads' radiation-load passes on that many threads, at most 8 (the same bits for every
+    // count: each value is computed by one thread); unset, the stepping thread alone
+    let workers: usize = std::env::var("FS_KIT_WORKERS").ok().and_then(|s| s.parse().ok()).unwrap_or(1).clamp(1, 8);
+    if workers > 1 {
+        let shared = p.instrument.share_head_load_workers(workers);
+        eprintln!("head radiation loads on {workers} threads: {shared} loads");
+    }
     let t0 = Instant::now();
     let out = kit::render(&mut p, dur, |f| eprint!("\r{:5.1} %", 100.0 * f));
     eprintln!();

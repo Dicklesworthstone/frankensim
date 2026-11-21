@@ -571,6 +571,10 @@ pub struct ModalAirLoad {
     pub(crate) ga: Vec<f64>,
     /// The last step's projections, read by the next step in place of summing them again.
     kept: KeptProjections,
+    /// Scratch for `load_rhs`: each shape's `za + zb`, the weights of the right-hand side's shape sum.
+    zs: Vec<f64>,
+    /// Shared worker threads for the shape passes, with the shapes laid out for them (`share_workers`).
+    pub(crate) par: Option<Parallel>,
     /// One line per retained mode, then the summary and stated scope.
     pub receipt: Vec<String>,
     /// Largest first-order share of the dropped in-family coupling, relative
@@ -593,6 +597,58 @@ struct KeptProjections {
 
 fn same_bits(a: &[f64], b: &[f64]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
+}
+
+/// A pool shared by the load's shape passes, and the shapes laid out for it: `rows`, shape by shape (each shape's
+/// `nodes` values), and `columns`, node by node (each node's value in every shape, in shape order).
+#[derive(Clone, Debug)]
+pub(crate) struct Parallel {
+    pool: std::sync::Arc<crate::pool::Pool>,
+    rows: std::sync::Arc<[f64]>,
+    columns: std::sync::Arc<[f64]>,
+    nodes: usize,
+}
+
+/// `out[r] = crate::dot(&cols[r], x)` for each shape `r`; on the shared workers when there are any (each shape's dot
+/// on one thread, so the same bits).
+pub(crate) fn project(cols: &[Vec<f64>], par: Option<&Parallel>, x: &[f64], out: &mut [f64]) {
+    match par {
+        Some(p) => p.pool.run(&p.rows, p.nodes, x, crate::pool::Kind::Dot, out),
+        None => {
+            for (o, col) in out.iter_mut().zip(cols) {
+                *o = crate::dot(col, x);
+            }
+        }
+    }
+}
+
+/// `out[r]` for each shape `r` is the `.sum()` of `cols[r][i] * x[i]` in ascending node, eight shapes at a time
+/// (`ordered_sums`); on the shared workers when there are any.
+pub(crate) fn project_in_order(cols: &[Vec<f64>], par: Option<&Parallel>, x: &[f64], out: &mut [f64]) {
+    match par {
+        Some(p) => {
+            let empty = crate::ordered_sums::empty_sum();
+            p.pool.run(&p.rows, p.nodes, x, crate::pool::Kind::Ordered(empty), out);
+        }
+        None => crate::ordered_sums::sums_of_products(|r| cols[r].as_slice(), x, out),
+    }
+}
+
+/// `out[i] = init + x[0] cols[0][i] + x[1] cols[1][i] + ...` for each node `i`, the terms added in ascending shape.
+/// One thread runs the shapes over every node; the shared workers, when there are any, take whole nodes from the
+/// node-by-node layout and add the same terms in the same order, so the same bits.
+pub(crate) fn spread(cols: &[Vec<f64>], par: Option<&Parallel>, init: f64, x: &[f64], out: &mut [f64]) {
+    match par {
+        Some(p) => p.pool.run(&p.columns, cols.len(), x, crate::pool::Kind::Ordered(init), out),
+        None => {
+            out.fill(init);
+            for (c, col) in x.iter().zip(cols) {
+                for (o, u) in out.iter_mut().zip(col) {
+                    *o += c * u;
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1428,6 +1484,8 @@ impl ModalAirLoad {
             zb: vec![0.0; n],
             ga: Vec::with_capacity(nodes),
             kept: KeptProjections::default(),
+            zs: Vec::new(),
+            par: None,
             receipt,
             dropped_loss_share: loss_share,
             dropped_mass_share: mass_share,
@@ -1436,6 +1494,23 @@ impl ModalAirLoad {
 
     pub fn shapes(&self) -> usize {
         self.cols.len()
+    }
+
+    /// Run this load's shape passes on `pool`. The shapes are copied twice for it (shape by shape and node by node),
+    /// about two more copies of `cols` in memory. Refused (returns `false`, the passes stay on the stepping thread)
+    /// when the shapes do not all have one length, which every built load has.
+    pub(crate) fn share_workers(&mut self, pool: &std::sync::Arc<crate::pool::Pool>) -> bool {
+        let nodes = self.cols.first().map_or(0, Vec::len);
+        if self.cols.is_empty() || self.cols.iter().any(|c| c.len() != nodes) || self.rhs.len() != nodes
+            || self.corr.len() != nodes {
+            return false;
+        }
+        let shapes = self.cols.len();
+        let rows: Vec<f64> = self.cols.iter().flatten().copied().collect();
+        let columns: Vec<f64> = (0..nodes).flat_map(|i| self.cols.iter().map(move |c| c[i])).collect();
+        debug_assert_eq!(columns.len(), shapes * nodes);
+        self.par = Some(Parallel { pool: std::sync::Arc::clone(pool), rows: rows.into(), columns: columns.into(), nodes });
+        true
     }
 
     /// `out = M v` for a modal-space matrix stored row-major: each row's `.sum()` in ascending column, eight
@@ -1458,15 +1533,24 @@ impl ModalAirLoad {
             prepared.sav_schur = None;
         }
         let n = self.cols.len();
+        let par = self.par.as_ref();
         let kept = &mut self.kept;
         let wp_kept = kept.p_w.len() == n && same_bits(wp, &kept.w);
         let w_kept = kept.p_wn.len() == n && same_bits(w, &kept.wn);
+        // U' wp: the last call's U' w, or summed; then U' w: the last radiated's U' wn, or summed
+        if wp_kept {
+            self.p_wp[..n].copy_from_slice(&kept.p_w[..n]);
+        } else {
+            project(&self.cols, par, wp, &mut self.p_wp[..n]);
+        }
         kept.p_w.resize(n, 0.0);
+        if w_kept {
+            kept.p_w.copy_from_slice(&kept.p_wn[..n]);
+        } else {
+            project(&self.cols, par, w, &mut kept.p_w);
+        }
         for r in 0..n {
-            let pwp = if wp_kept { kept.p_w[r] } else { crate::dot(&self.cols[r], wp) };
-            let pw = if w_kept { kept.p_wn[r] } else { crate::dot(&self.cols[r], w) };
-            kept.p_w[r] = pw;
-            self.p_wp[r] = pwp;
+            let (pw, pwp) = (kept.p_w[r], self.p_wp[r]);
             self.y[r] = (2.0 * pw - pwp) / (k * k);
             self.b[r] = pwp / (2.0 * k);
         }
@@ -1474,13 +1558,9 @@ impl ModalAirLoad {
         kept.w.extend_from_slice(w);
         ModalAirLoad::apply(&self.mass, &self.y[..n], &mut self.za);
         ModalAirLoad::apply(&self.damping, &self.b[..n], &mut self.zb);
-        self.rhs.fill(0.0);
-        for r in 0..n {
-            let z = self.za[r] + self.zb[r];
-            for (out, u) in self.rhs.iter_mut().zip(&self.cols[r]) {
-                *out += z * u;
-            }
-        }
+        self.zs.clear();
+        self.zs.extend(self.za.iter().zip(&self.zb).map(|(a, b)| a + b));
+        spread(&self.cols, par, 0.0, &self.zs, &mut self.rhs);
     }
 
     /// Energy the modal damping removes over one step at centred velocity
@@ -1489,10 +1569,9 @@ impl ModalAirLoad {
         let n = self.cols.len();
         let kept = &mut self.kept;
         kept.p_wn.resize(n, 0.0);
+        project(&self.cols, self.par.as_ref(), wn, &mut kept.p_wn);
         for r in 0..n {
-            let pwn = crate::dot(&self.cols[r], wn);
-            kept.p_wn[r] = pwn;
-            self.y[r] = pwn - self.p_wp[r];
+            self.y[r] = kept.p_wn[r] - self.p_wp[r];
         }
         kept.wn.clear();
         kept.wn.extend_from_slice(wn);
@@ -1607,6 +1686,8 @@ pub(crate) mod centered_tests {
             zb: vec![0.0; n],
             ga: Vec::with_capacity(nodes),
             kept: KeptProjections::default(),
+            zs: Vec::new(),
+            par: None,
             receipt: vec![],
             dropped_loss_share: 0.0,
             dropped_mass_share: 0.0,
@@ -1975,6 +2056,69 @@ pub(crate) mod centered_tests {
             summed.kept = KeptProjections::default();
             assert_eq!(kept.radiated(&wn, k).to_bits(), summed.radiated(&wn, k).to_bits(), "heat at step {step}");
             (wp, w) = (w, wn);
+        }
+    }
+
+    #[test]
+    fn shared_workers_keep_every_bit() {
+        // 19 shapes on 53 nodes: blocks of eight with remainders in both layouts, without and with the volume column
+        let (shapes, nodes) = (19, 53);
+        let entry = |r: usize, i: usize| ((r * 37 + i * 101 + r * i * 7) % 113) as f64 / 113.0 - 0.45;
+        let cols: Vec<Vec<f64>> = (0..shapes)
+            .map(|r| (0..nodes).map(|i| entry(r, i) * if i == r { 3.0 } else { 1.0 }).collect())
+            .collect();
+        let air: Vec<f64> = (0..shapes).map(|r| 0.1 + 0.02 * r as f64).collect();
+        let resistance: Vec<f64> = (0..shapes).map(|r| 5.0 + r as f64).collect();
+        let k = 1.0 / 96_000.0;
+        let cf: Vec<[f64; 4]> =
+            (0..nodes).map(|i| [k * k / (1e-3 * (1.0 + 0.01 * i as f64)), 0.0, 0.0, 0.0]).collect();
+        let ia: Vec<f64> = cf.iter().map(|a| a[0]).collect();
+        let g: Vec<f64> = (0..nodes).map(|i| entry(i, 3) * 1e3).collect();
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        let threads = [2, 3, 5];
+        for (volume, h2, mu) in [(None, 1.0, 0.0), (Some((0.7, 40.0)), 0.7, 40.0)] {
+            let mut serial = manufactured_load(cols.clone(), air.clone(), resistance.clone());
+            serial.prepare(k, &ia, volume).unwrap();
+            let pools: Vec<_> = threads.iter().map(|&t| crate::pool::Pool::new(t).expect("workers start")).collect();
+            let mut shared: Vec<ModalAirLoad> = pools
+                .iter()
+                .map(|pool| {
+                    let mut load = serial.clone();
+                    assert!(load.share_workers(pool));
+                    load
+                })
+                .collect();
+            let mut wp = vec![0.0; nodes];
+            let mut w: Vec<f64> = (0..nodes).map(|i| 1e-6 * entry(i, 5)).collect();
+            for step in 0..6 {
+                if step == 3 {
+                    w[7] += 1e-9; // not the last wn: U' w summed again
+                }
+                serial.load_rhs(&w, &wp, k);
+                let start: Vec<f64> = (0..nodes).map(|i| 2.0 * w[i] - wp[i] + serial.rhs[i] * cf[i][0]).collect();
+                let mut wn = start.clone();
+                crate::solve_body_response(&cf, &g, true, h2, mu, Some(&mut serial), &mut wn, k);
+                let b = serial.b.clone();
+                // a second response in the same step, as a contact iteration makes: b is kept, y and corr are not
+                let mut again: Vec<f64> = start.iter().map(|v| 0.5 * v).collect();
+                crate::solve_body_response(&cf, &g, true, h2, mu, Some(&mut serial), &mut again, k);
+                let heat = serial.radiated(&wn, k);
+                for (load, t) in shared.iter_mut().zip(threads) {
+                    let at = format!("step {step}, {t} threads, volume {volume:?}");
+                    load.load_rhs(&w, &wp, k);
+                    assert_eq!(bits(&load.rhs), bits(&serial.rhs), "rhs, {at}");
+                    assert_eq!(bits(&load.p_wp), bits(&serial.p_wp), "U' wp, {at}");
+                    let mut theirs = start.clone();
+                    crate::solve_body_response(&cf, &g, true, h2, mu, Some(&mut *load), &mut theirs, k);
+                    assert_eq!(bits(&theirs), bits(&wn), "response, {at}");
+                    assert_eq!(bits(&load.b), bits(&b), "b, {at}");
+                    let mut theirs: Vec<f64> = start.iter().map(|v| 0.5 * v).collect();
+                    crate::solve_body_response(&cf, &g, true, h2, mu, Some(&mut *load), &mut theirs, k);
+                    assert_eq!(bits(&theirs), bits(&again), "second response, {at}");
+                    assert_eq!(load.radiated(&wn, k).to_bits(), heat.to_bits(), "heat, {at}");
+                }
+                (wp, w) = (w, wn);
+            }
         }
     }
 }

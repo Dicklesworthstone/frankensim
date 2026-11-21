@@ -825,6 +825,11 @@ root rather than 1e-13. A head radiation load's SAV column sums and modal-space 
 sums at a time, each adding its terms in the order it would alone (`src/ordered_sums.rs`). A step reads
 `U' w` and `U' wp` from the projections the previous step made of the same vectors, after a check that
 their bits are equal. Neither changes a bit of the result.
+With `FS_KIT_WORKERS=N` (2 to 8; the kit example, unset 1) the head loads' shape passes (the projections,
+the SAV column sums and the two nodal shape sums) share N threads from one pool for the instrument
+(`src/pool.rs`, `Instrument::share_head_load_workers`). Each value is computed by one thread with the serial
+kernel, the nodal sums from a node-by-node copy of the shapes, so a render has the same bits for every N.
+The workers spin between passes and hold their cores while the instrument lives.
 
 ## Hi-hat
 

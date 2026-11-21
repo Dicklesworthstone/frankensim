@@ -56,6 +56,8 @@ pub use reference_inertia::PlateReferenceDensity;
 pub mod radiation;
 /// Row sums in `Iterator::sum`'s order, eight rows at a time (the radiation load's column and modal products).
 mod ordered_sums;
+/// Worker threads that share one pass over a matrix's rows, each row on one thread (the head loads' shape passes).
+mod pool;
 
 /// Full reciprocal narrowband resistance between work-conjugate body ports.
 pub mod mutual_radiation;
@@ -2327,15 +2329,12 @@ fn solve_body_response(
             load.y[0] = uy;
             if sav && !cached_sav { load.b[0] = gzu; }
         }
-        for (r, col) in load.cols.iter().enumerate() {
-            load.y[off + r] = dot(col, response);
-        }
+        radiation::project(&load.cols, load.par.as_ref(), response, &mut load.y[off..size]);
         if sav && !cached_sav {
             // b_r = sum_i u_ri (g_i D^-1_i), each column's `.sum()` in ascending node, eight columns at a time
             load.ga.clear();
             load.ga.extend(g.iter().zip(cf).map(|(g, a)| g * a[0]));
-            let cols = &load.cols;
-            ordered_sums::sums_of_products(|r| cols[r].as_slice(), &load.ga, &mut load.b[off..size]);
+            radiation::project_in_order(&load.cols, load.par.as_ref(), &load.ga, &mut load.b[off..size]);
         }
         radiation::cholesky_solve(&prepared.chol, size, &mut load.y[..size]);
         let cg = if sav {
@@ -2355,13 +2354,8 @@ fn solve_body_response(
             }
             cg
         } else { 0.0 };
-        load.corr.fill(if off == 1 { h2 * load.y[0] } else { 0.0 });
-        for (r, col) in load.cols.iter().enumerate() {
-            let c = load.y[off + r];
-            for (out, u) in load.corr.iter_mut().zip(col) {
-                *out += c * u;
-            }
-        }
+        let start = if off == 1 { h2 * load.y[0] } else { 0.0 };
+        radiation::spread(&load.cols, load.par.as_ref(), start, &load.y[off..size], &mut load.corr);
         for i in 0..n {
             let zg = if sav { g[i] * cf[i][0] } else { 0.0 };
             response[i] -= zg * cg + load.corr[i] * cf[i][0];
@@ -4350,6 +4344,26 @@ impl Instrument {
             // rest is at most kappa, counted above.
         }
         gas_rate2
+    }
+
+    /// Run every head radiation load's shape passes on `workers` threads, the stepping thread among them, from one
+    /// pool for the instrument. Each value is still computed by one thread with the kernel the serial pass uses, so
+    /// a render has the same bits for every worker count. The workers spin between passes, so they hold their cores
+    /// while the instrument lives. Returns the number of loads that share the pool: none when `workers` is below
+    /// two, when no body has a head load, or when the workers cannot be started.
+    pub fn share_head_load_workers(&mut self, workers: usize) -> usize {
+        if workers < 2 || !self.bodies.iter().any(|b| b.head_radiation.is_some()) {
+            return 0;
+        }
+        let Some(pool) = pool::Pool::new(workers) else { return 0 };
+        debug_assert_eq!(pool.threads(), workers);
+        let mut shared = 0;
+        for body in &mut self.bodies {
+            if let Some(load) = body.head_radiation.as_deref_mut() {
+                shared += usize::from(load.share_workers(&pool));
+            }
+        }
+        shared
     }
 
     /// (k^2 lambda_K + 2 k lambda_C) / 4 including rest curvature and explicit
