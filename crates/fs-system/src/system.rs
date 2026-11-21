@@ -2758,25 +2758,32 @@ impl System {
         // output by less than its rounding, the column is differenced again
         // at a longer step (`resolve_column`).
         //
-        // A perturbed proposal that asks for a shorter step is not the
-        // step's: the component took the step at the iterate itself, and
-        // the perturbation, the kernel's own, has carried one input over
-        // the edge of an event (a slip that passes zero just beyond where
-        // this step ends at rest). The column is then differenced on the
-        // other side of the iterate, where the component still takes the
-        // step. Only if it asks on both sides is the step shortened, to
-        // the shorter of the two.
+        // A perturbed proposal that asks for a shorter step or refuses is
+        // not the step's: the component took the step at the iterate
+        // itself, and the kernel's move can cross an event or leave a
+        // material law's support. Try the other side before rejecting a
+        // valid step. If neither side steps, preserve the first owner's
+        // error, or shorten to the smaller request when both ask to shorten.
+        // Cancellation is never a recoverable probe refusal.
         let index = inputs.start + local;
         let base = self.inputs[index];
         let scale = base.abs().max(group_scale[self.input_group[index]]);
         let step = f64::EPSILON.sqrt() * if scale > 0.0 { scale } else { 1.0 };
         let mut asked: Option<f64> = None;
+        let mut first_refusal: Option<OwnerError> = None;
         for side in [step, -step] {
             self.inputs[index] = base + side;
             let proposal = self.propose_perturbed(node, dt_s, cx);
             self.inputs[index] = base;
             match proposal {
-                Err(error) => return Err(self.refused(node, error, cx)),
+                Err(error) => {
+                    if cx.is_cancel_requested() {
+                        return Err(SystemError::Cancelled);
+                    }
+                    if first_refusal.is_none() {
+                        first_refusal = Some(error);
+                    }
+                }
                 Ok(Proposal::Shorten { dt_s: shorter }) => {
                     let shorter = self.shorter(node, dt_s, shorter)?;
                     asked = match (asked, shorter) {
@@ -2799,7 +2806,10 @@ impl System {
                 }
             }
         }
-        Ok(asked)
+        match first_refusal {
+            Some(error) => Err(self.refused(node, error, cx)),
+            None => Ok(asked),
+        }
     }
 
     /// Propose `node` at the current inputs into `scratch_outputs`, on its

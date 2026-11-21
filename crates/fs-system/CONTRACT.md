@@ -801,6 +801,12 @@ line's matrix, the neighbours' at the step's start, and those a block
 solve's updates are made with. The shares below are numerical policy of the
 differenced branch:
 
+- If the initial forward probe is refused, the kernel tries the same-sized
+  backward probe: a material law can admit an inward step from the edge of
+  its support without admitting the kernel's outward perturbation. Cancellation
+  is returned immediately. If neither side steps, the first typed owner error
+  is retained when present; when both request shortening, the shorter request
+  is retained. A refusal at the actual iterate still rejects the trial.
 - An entry is resolved when its change is at least `2^-32` of its output,
   `2^20` units in its last place: a change of `2^20` units puts the column's
   rounding under about 1e-6 of the entry. An entry whose output is nothing
@@ -1383,6 +1389,10 @@ G0, `tests/system_g0.rs`, on one-port elements defined in the test:
   looped block, spends no iteration and equals a hand-staggered run bitwise;
 - a cubic spring with its tangent hidden converges by differencing and
   conserves energy;
+- a conductance at its material law's temperature limit steps inward with
+  its tangent hidden, against the declared tangent and an independent cooling
+  recurrence; two refused probes preserve the owner's first error, and
+  cancellation during a probe publishes nothing;
 - a refusal in `admit` by the last component publishes nothing, returns the
   owner's error unchanged, and a retry equals a first attempt bitwise;
 - cancellation requested during a step publishes nothing;

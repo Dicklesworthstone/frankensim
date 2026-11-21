@@ -11,11 +11,15 @@
 use core::num::NonZeroUsize;
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cancelled, Cx, ExecMode, StreamKey};
 use fs_ports::component::{Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt};
 use fs_ports::{PortKind, StableId};
+use fs_system::elements::{
+    ConductanceLaw, ConductanceMatrix, ElementError, HeatCapacity, InterfacePoint,
+};
 use fs_system::{
     AdmissionError, NodeId, Phase, RouteTemperature, SolveConfig, System, SystemBuilder,
     SystemError, heat_sink,
@@ -812,6 +816,156 @@ fn a_nonlinear_spring_without_a_tangent_converges_and_conserves_energy() {
     // The cubic term matters at this amplitude: a linear spring would reach
     // more than twice as far.
     assert!(turning < 0.5 * (2.0 * start_j / STIFFNESS).sqrt());
+}
+
+/// A material law valid only on a closed temperature interval. Its endpoint
+/// derivative is the inward derivative, as for a tabulated material card.
+#[derive(Debug)]
+struct BoundedConductance {
+    lower_k: f64,
+    upper_k: f64,
+    cancel_on_refusal: Option<Arc<CancelGate>>,
+}
+
+impl ConductanceLaw for BoundedConductance {
+    fn factor(&self, kelvin_a: f64, _kelvin_b: f64) -> Result<(f64, [f64; 2]), String> {
+        let refusal = if kelvin_a > self.upper_k {
+            Some("temperature above card support")
+        } else if kelvin_a < self.lower_k {
+            Some("temperature below card support")
+        } else {
+            None
+        };
+        if let Some(reason) = refusal {
+            if let Some(gate) = &self.cancel_on_refusal {
+                gate.request();
+            }
+            return Err(reason.into());
+        }
+        Ok((1.0, [0.0; 2]))
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        words.extend([self.lower_k.to_bits(), self.upper_k.to_bits()]);
+    }
+}
+
+fn bounded_cooling(law: BoundedConductance, tangent: bool) -> (System, NodeId) {
+    let mut builder = SystemBuilder::new();
+    let body = builder
+        .add_with_tangent("body", HeatCapacity::new(2.0).unwrap(), 400.0)
+        .unwrap();
+    let link = ConductanceMatrix::new(
+        1,
+        1,
+        vec![InterfacePoint {
+            a: [(0, 1.0), (0, 0.0), (0, 0.0)],
+            b: [(0, 1.0), (0, 0.0), (0, 0.0)],
+            conductance_w_k: 3.0,
+        }],
+    )
+    .unwrap()
+    .following(Arc::new(law));
+    let link = if tangent {
+        builder.add_with_tangent("contact", link, ())
+    } else {
+        builder.add("contact", link, ())
+    }
+    .unwrap();
+    let hot = builder.port(link, "a").unwrap();
+    builder
+        .bond(builder.port(body, "heat").unwrap(), hot)
+        .unwrap();
+    builder
+        .boundary(
+            builder.port(link, "b").unwrap(),
+            Box::new(|_, _, t| t[0] = 300.0),
+        )
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    assert!(system.guess(hot, &[400.0]));
+    (system, body)
+}
+
+#[test]
+fn a_differenced_material_law_steps_inward_from_its_support_boundary() {
+    let gate = CancelGate::new_clock_free();
+    let law = || BoundedConductance {
+        lower_k: 300.0,
+        upper_k: 400.0,
+        cancel_on_refusal: None,
+    };
+    let (mut system, body) = bounded_cooling(law(), false);
+    let (mut analytic, reference_body) = bounded_cooling(law(), true);
+    let mut reference_k = 400.0;
+    with_cx(&gate, |cx| {
+        for _ in 0..16 {
+            let report = system.step(0.1, cx).expect("inward material step");
+            analytic.step(0.1, cx).expect("declared tangent");
+            // C dT/dt = -G (T - 300): independent implicit-midpoint recurrence.
+            reference_k = 300.0 + (reference_k - 300.0) * (1.0 - 0.075) / (1.0 + 0.075);
+            let actual_k = *system.state::<f64>(body).unwrap();
+            assert!(
+                (actual_k - reference_k).abs() < 2.0e-10,
+                "{actual_k} vs {reference_k}"
+            );
+            assert!((actual_k - analytic.state::<f64>(reference_body).unwrap()).abs() < 2.0e-10);
+            assert_eq!(report.shortenings, 0);
+        }
+    });
+    assert!(system.ledger().energy_residual_j().abs() < 1.0e-9);
+}
+
+#[test]
+fn unavailable_difference_sides_preserve_the_first_owner_error_and_accepted_state() {
+    let gate = CancelGate::new_clock_free();
+    // First: the iterate is valid but neither difference side is. Second:
+    // the iterate itself is outside support and must still fail directly.
+    for (lower_k, upper_k) in [(400.0, 400.0), (300.0, 399.0)] {
+        let (mut system, body) = bounded_cooling(
+            BoundedConductance {
+                lower_k,
+                upper_k,
+                cancel_on_refusal: None,
+            },
+            false,
+        );
+        let ledger = system.ledger().clone();
+        let error = with_cx(&gate, |cx| system.step(0.1, cx)).expect_err("no supported tangent");
+        let SystemError::Component { node, phase, error } = error else {
+            panic!("expected the material owner's refusal");
+        };
+        assert_eq!((node.as_str(), phase), ("contact", Phase::Propose));
+        assert_eq!(
+            error.downcast_ref::<ElementError>(),
+            Some(&ElementError::Law {
+                reason: "temperature above card support".into()
+            }),
+        );
+        assert_eq!(*system.state::<f64>(body).unwrap(), 400.0);
+        assert_eq!((system.steps(), system.time_s()), (0, 0.0));
+        assert_eq!(system.ledger(), &ledger);
+    }
+}
+
+#[test]
+fn cancellation_during_a_refused_difference_probe_is_not_recovered() {
+    let gate = Arc::new(CancelGate::new_clock_free());
+    let (mut system, body) = bounded_cooling(
+        BoundedConductance {
+            lower_k: 300.0,
+            upper_k: 400.0,
+            cancel_on_refusal: Some(Arc::clone(&gate)),
+        },
+        false,
+    );
+    let error = with_cx(&gate, |cx| system.step(0.1, cx)).expect_err("cancelled during probe");
+    assert!(matches!(error, SystemError::Cancelled), "{error}");
+    assert_eq!(*system.state::<f64>(body).unwrap(), 400.0);
+    assert_eq!(
+        (system.steps(), system.time_s(), system.ledger().steps),
+        (0, 0.0, 0)
+    );
 }
 
 /// Refuses in `admit` while the shared flag is set.
